@@ -170,11 +170,45 @@ class TestAutoModelForCausalLMWithValueHeadForward:
         assert isinstance(loss, torch.Tensor)
         assert values.shape == (2, 5)
 
-    def test_raises_when_hidden_states_missing(self):
+    def test_values_read_the_output_head_input_without_hidden_states(self):
+        # Arrange
+        torch.manual_seed(0)
         model = DummyPretrainedModel(return_hidden_states=False)
         wrapped = AutoModelForCausalLMWithValueHead(model)
         input_ids = torch.randint(0, model.config.vocab_size, (2, 4))
-        with pytest.raises(RuntimeError, match="did not return hidden_states"):
+
+        # Act
+        _, _, values = wrapped(input_ids=input_ids)
+
+        # Assert
+        hidden = torch.relu(model.proj(model.embed(input_ids)))
+        assert torch.equal(values, wrapped.v_head(hidden).squeeze(-1))
+
+    def test_raises_when_the_output_head_is_not_called(self):
+        # Arrange
+        model = DummyPretrainedModel()
+        model.forward = lambda input_ids=None, **_kwargs: CausalLMOutputWithPast(
+            logits=torch.zeros(*input_ids.shape, model.config.vocab_size)
+        )
+        wrapped = AutoModelForCausalLMWithValueHead(model)
+        input_ids = torch.randint(0, model.config.vocab_size, (2, 4))
+
+        # Act / Assert
+        with pytest.raises(RuntimeError, match="called 0 times"):
+            wrapped(input_ids=input_ids)
+
+    def test_raises_when_the_base_model_has_no_output_head(self):
+        # Arrange
+        model = DummyPretrainedModel()
+        wrapped = AutoModelForCausalLMWithValueHead(model)
+        del model.lm_head
+        input_ids = torch.randint(0, model.config.vocab_size, (2, 4))
+
+        # Act / Assert
+        with pytest.raises(
+            AttributeError,
+            match="Cannot find lm_head \\(or embed_out\\) in DummyPretrainedModel",
+        ):
             wrapped(input_ids=input_ids)
 
     def test_casts_hidden_state_dtype_to_value_head_dtype(self):

@@ -39,7 +39,6 @@ from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
     VLLMConfig,
     get_experiences_samples,
-    stack_and_pad_experiences,
 )
 from agilerl.utils.llm_utils import (
     LLM_RL_COMMON_METRIC_NAMES,
@@ -47,14 +46,10 @@ from agilerl.utils.llm_utils import (
     VLLM_IS_METRIC_NAMES,
     BitsAndBytesConfig,
     attention_mask_from_padded_ids,
-    build_completion_mask,
     clipped_is_surrogate,
-    hf_completion_lengths,
-    hf_turn_generation_config,
     masked_mean,
     normalize_prompt_batch,
     pool_by_turns,
-    prepare_prompt_hf_generate,
     resolve_batch_advantage_granularity,
     validate_importance_sampling_level,
 )
@@ -406,43 +401,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         with self.select_adapter("actor"):
             self.actor.eval()
             if not self.colocated:
-                actor_device = self.shard_runtime.actor_compute_device(
-                    self.actor, torch.device(self.device)
-                )
-                with torch.no_grad(), self._amp_ctx():
-                    token_ids_list = []
-                    completion_masks = []
-
-                    for start in range(
-                        0,
-                        len(prompts),
-                        self.hf_generate_chunk_size,
-                    ):
-                        chunk = prompts[start : start + self.hf_generate_chunk_size]
-                        for prompt in chunk:
-                            hf_inputs = prepare_prompt_hf_generate(prompt, actor_device)
-                            input_ids = hf_inputs["input_ids"]
-                            prompt_len = int(input_ids.shape[-1])
-                            token_ids = self.actor.generate(
-                                **hf_inputs,
-                                generation_config=hf_turn_generation_config(
-                                    self.generation_config,
-                                    max_model_len=self.max_model_len,
-                                    prompt_length=prompt_len,
-                                    max_output_tokens=self.max_output_tokens,
-                                ),
-                            )
-                            token_ids_list.append(token_ids)
-                            completion_masks.append(
-                                build_completion_mask(
-                                    token_ids,
-                                    prompt_len,
-                                    self.pad_token_id,
-                                    completion_len=hf_completion_lengths(
-                                        token_ids, prompt_len, self.pad_token_id
-                                    ),
-                                )
-                            )
+                token_ids_list, completion_masks = self._generate_with_hf(prompts)
             else:
                 self._prepare_vllm_for_generation()
                 (
@@ -516,30 +475,12 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         self._prepare_vllm_for_training()
 
         with self.trainer_offload_context():
-            token_ids, action_masks, rewards = stack_and_pad_experiences(
-                *experiences,
-                padding_values=[self.pad_token_id, False, None],
+            token_ids, action_masks, turn_ids, rewards_2d = self._stack_rollout_batch(
+                experiences, turn_ids
             )
-            token_ids = token_ids.to(self.device)
-            action_masks = action_masks.to(self.device)
             action_mask_bool = action_masks.bool()
             num_samples = token_ids.shape[0]
-
-            if turn_ids is None:
-                turn_ids = torch.where(
-                    action_mask_bool,
-                    torch.zeros_like(action_masks, dtype=torch.long),
-                    torch.full_like(action_masks, -1, dtype=torch.long),
-                )
-                rewards_2d = rewards.flatten().to(self.device).float().unsqueeze(-1)
-            else:
-                turn_ids = turn_ids.to(self.device)
-                rewards_2d = rewards.to(self.device).float()
-                if rewards_2d.dim() == 1:
-                    rewards_2d = rewards_2d.unsqueeze(-1)
             policy_granularity = self._resolve_advantage_granularity(turn_ids)
-
-            del rewards
 
             batch_size = (
                 min(num_samples, self.micro_batch_size_per_gpu)

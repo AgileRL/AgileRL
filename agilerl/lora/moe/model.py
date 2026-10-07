@@ -153,6 +153,25 @@ def upgrade_moe_param_wrappers(model: nn.Module) -> int:
     return upgraded
 
 
+def materializes_expert_lora(model: nn.Module) -> bool:
+    """Whether any packed-experts LoRA stays on PEFT's delta-materializing forward.
+
+    :param model: PEFT model after :func:`upgrade_moe_param_wrappers`.
+    :type model: nn.Module
+    :return: ``True`` when an outermost ``ParamWrapper`` was not upgraded.
+    :rtype: bool
+    """
+    wrapped_bases = {
+        id(module.base_layer)
+        for module in model.modules()
+        if isinstance(module, ParamWrapper)
+    }
+    return any(
+        type(module) is ParamWrapper and id(module) not in wrapped_bases
+        for module in model.modules()
+    )
+
+
 def _checkpoints_activations(module: nn.Module) -> bool:
     """Whether ``module`` reruns its forward during backward."""
     return isinstance(module, CheckpointWrapper) or (

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -403,7 +403,8 @@ class TestPPOGetActionActorDevice:
         captured: list = []
 
         # Act
-        with _patch_hf_generate_path("agilerl.algorithms.ppo_llm", captured):
+        agent._generate_with_hf = MethodType(LLMAlgorithm._generate_with_hf, agent)
+        with _patch_hf_generate_path("agilerl.algorithms.core.base", captured):
             PPO.get_action(agent, _dummy_prompts(), training=False)
 
         # Assert
@@ -419,7 +420,8 @@ class TestREINFORCEGetActionActorDevice:
         captured: list = []
 
         # Act
-        with _patch_hf_generate_path("agilerl.algorithms.reinforce_llm", captured):
+        agent._generate_with_hf = MethodType(LLMAlgorithm._generate_with_hf, agent)
+        with _patch_hf_generate_path("agilerl.algorithms.core.base", captured):
             REINFORCE.get_action(agent, _dummy_prompts(), training=False)
 
         # Assert

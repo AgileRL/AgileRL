@@ -65,6 +65,15 @@ from agilerl.algorithms.core.registry import (
 )
 from agilerl.architectures import install_family_patches
 from agilerl.architectures.nemotron_h import register_nemotron_h_liger
+from agilerl.arena.memory import (
+    DeviceSpec,
+    ModelArch,
+    ModelSpec,
+    PhaseBreakdown,
+    TrainingSettings,
+    estimate_training,
+)
+from agilerl.arena.memory.specs import Algorithm, WeightDtype
 from agilerl.arena.models.profiling import ProfilingConfig
 from agilerl.components.llm_rollout_data import EpisodeSegments
 from agilerl.distributed import (
@@ -88,6 +97,7 @@ from agilerl.distributed import (
     resolve_device,
     set_seed,
 )
+from agilerl.distributed.runtime import OptimizerStep
 from agilerl.llm_envs import RolloutHarness
 from agilerl.metrics import AgentMetrics, MultiAgentMetrics
 from agilerl.modules import EvolvableModule, ModuleDict
@@ -114,6 +124,7 @@ from agilerl.typing import (
     GymSpaceType,
     InfosDict,
     LLMObsType,
+    LLMRolloutExperiences,
     LrNameType,
     MaybeActionMask,
     ModuleType,
@@ -159,11 +170,11 @@ from agilerl.utils.evolvable_networks import (
 )
 from agilerl.utils.learn_profiler import LearnProfiler
 from agilerl.utils.llm_packing import (
+    PackedBatch,
     mixers_without_boundary_reset,
     pack_padded_batch,
     unpack_hidden_states,
     unpack_logprobs,
-    unpack_values,
 )
 from agilerl.utils.mutation_utils import target_activations
 from agilerl.utils.phase_timer import PhaseTimer
@@ -171,7 +182,7 @@ from agilerl.utils.torch_utils import release_device_memory
 
 if TYPE_CHECKING:
     from torch.optim.lr_scheduler import SequentialLR
-    from transformers import BitsAndBytesConfig, PreTrainedModel
+    from transformers import BitsAndBytesConfig, GenerationConfig, PreTrainedModel
 
 # Make imports visible to typechecker and import when required
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
@@ -198,6 +209,7 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     )
     from agilerl.lora.moe import (
         install_packed_expert_grouped_gemm,
+        materializes_expert_lora,
         set_routed_experts_recompute,
         upgrade_moe_param_wrappers,
     )
@@ -218,6 +230,8 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
         generation_tokens_for_turn,
         get_lora_params,
         get_model_name_or_path,
+        hf_completion_lengths,
+        hf_turn_generation_config,
         is_rollout_prompt,
         language_model_attn_implementation,
         log_cuda_memory_snapshot,
@@ -225,6 +239,7 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
         move_params_to_gpu,
         needs_cross_rank_seq_padding,
         offload_colocated_trainer_from_gpu,
+        prepare_prompt_hf_generate,
         save_lora_adapters,
         save_peft_adapter_for_vllm_rollout,
     )
@@ -2878,6 +2893,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     max_model_len: int
     max_output_tokens: int | None
     min_output_tokens: int | None
+    hf_generate_chunk_size: int
+    generation_config: GenerationConfig
 
     def __init__(
         self,
@@ -4860,6 +4877,57 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         del output
         return hidden, value
 
+    def _gradient_forward_inputs(
+        self,
+        batch_ids: torch.Tensor,
+        pixel_values: torch.Tensor | None = None,
+        copies: int = 1,
+    ) -> tuple[dict[str, Any], PackedBatch | None]:
+        """Model kwargs of a gradient forward, packed on a varlen / block-sparse backend.
+
+        :param batch_ids: ``(B, T)`` right-padded token ids on ``self.device``.
+        :type batch_ids: torch.Tensor
+        :param pixel_values: Vision rows of the batch for a VL forward, or ``None``.
+        :type pixel_values: torch.Tensor | None
+        :param copies: Times the batch is stacked along rows, one per routed adapter.
+        :type copies: int
+        :return: ``(model_kwargs, packed)``; ``packed`` is ``None`` for a padded forward.
+        :rtype: tuple[dict[str, Any], PackedBatch | None]
+        """
+        attention_mask = attention_mask_from_padded_ids(
+            batch_ids, self.pad_token_id
+        ).long()
+        packing_mode = self._packing_mode()
+        packed = None
+        model_kwargs: dict[str, Any]
+        # FlashAttention-2 isolates packed documents only on a single row.
+        if packing_mode == "blockmask" or (packing_mode is not None and copies == 1):
+            packed = pack_padded_batch(batch_ids, attention_mask)
+            # Per-sequence position_ids (no mask): transformers detects the
+            # packed format and keeps sequences attention-isolated per layer.
+            model_kwargs = {
+                "input_ids": packed.input_ids.repeat(copies, 1),
+                "position_ids": packed.position_ids.repeat(copies, 1),
+                "use_cache": False,
+            }
+        else:
+            attention_mask = attention_mask.repeat(copies, 1)
+            model_kwargs = {
+                "input_ids": batch_ids.repeat(copies, 1),
+                "attention_mask": attention_mask,
+                "use_cache": False,
+            }
+            if self.calc_position_embeddings:
+                model_kwargs["position_ids"] = self._position_ids_from_mask(
+                    attention_mask
+                )
+        if pixel_values is not None:
+            rows = batch_ids.shape[0]
+            model_kwargs["pixel_values"] = self._repeat_pixel_values_for_fused_rows(
+                pixel_values, copies * rows, rows
+            )
+        return model_kwargs, packed
+
     def _actor_hidden_states(
         self,
         batch_ids: torch.Tensor,
@@ -4878,31 +4946,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :return: ``(B, T, H)`` actor hidden states.
         :rtype: torch.Tensor
         """
-        attention_mask = attention_mask_from_padded_ids(
-            batch_ids, self.pad_token_id
-        ).long()
-        packed = None
-        if self._packing_mode() is not None:
-            packed = pack_padded_batch(batch_ids, attention_mask)
-            # Per-sequence position_ids (no mask): transformers detects the
-            # packed format and keeps sequences attention-isolated per layer.
-            model_kwargs: dict[str, Any] = {
-                "input_ids": packed.input_ids,
-                "position_ids": packed.position_ids,
-                "use_cache": False,
-            }
-        else:
-            model_kwargs = {
-                "input_ids": batch_ids,
-                "attention_mask": attention_mask,
-                "use_cache": False,
-            }
-            if self.calc_position_embeddings:
-                model_kwargs["position_ids"] = self._position_ids_from_mask(
-                    attention_mask
-                )
-        if pixel_values is not None:
-            model_kwargs["pixel_values"] = pixel_values
+        model_kwargs, packed = self._gradient_forward_inputs(batch_ids, pixel_values)
         with (
             self._patch_lm_head_to_identity(),
             self.select_adapter("actor"),
@@ -5209,18 +5253,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     def _fused_forward(
         self,
         ids: torch.Tensor,
-        batch_size: int,
         attention_mask: torch.Tensor | None = None,
         pixel_values: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Actor log-probs, and optionally critic values, in one forward.
-
-        When ``use_value_head`` is set, the input is doubled (actor slice then
-        critic slice) and routed so the base model runs once. Otherwise only
-        the actor slice is run.
-
-        The doubled batch (value-head path) is always processed in one
-        ``model.forward`` call to preserve gradient-checkpoint correctness.
+    ) -> torch.Tensor:
+        """Gradient-bearing actor log-probs, every row routed to the actor adapter.
 
         .. note::
 
@@ -5235,107 +5271,63 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
         :param ids: Token IDs ``(B, seq_len)``.
         :type ids: torch.Tensor
-        :param batch_size: Unused (kept for API symmetry).
-        :type batch_size: int
         :param attention_mask: Optional attention mask matching *ids*.
         :type attention_mask: torch.Tensor | None, optional
-        :return: ``(actor_log_probs, critic_values)`` with shapes ``(B, seq_len-1)``;
-            *critic_values* is ``None`` when no value head is used.
-        :rtype: tuple[torch.Tensor, torch.Tensor | None]
+        :param pixel_values: Vision rows of *ids*, or ``None`` for text.
+        :type pixel_values: torch.Tensor | None
+        :return: Actor log-probs ``(B, seq_len - 1)``.
+        :rtype: torch.Tensor
         """
-        B = ids.shape[0]
         if attention_mask is None:
             attention_mask = attention_mask_from_padded_ids(ids, self.pad_token_id)
 
         # Packed path for the gradient forward only; no-grad passes stay padded.
-        packing_mode = self._packing_mode() if torch.is_grad_enabled() else None
-        # FlashAttention-2 isolates packed documents only on a single row, and
-        # the value head adds a second (critic) row.
-        if packing_mode == "blockmask" or (
-            packing_mode == "varlen" and not self.use_value_head
-        ):
+        if torch.is_grad_enabled() and self._packing_mode() is not None:
             return self._fused_packed_forward(ids, attention_mask, pixel_values)
 
-        if self.use_value_head:
-            fused_ids = ids.repeat(2, 1)
-            fused_mask = attention_mask.repeat(2, 1)
-            routing = ["actor"] * B + ["critic"] * B
-            fused_pixel_values = self._repeat_pixel_values_for_fused_rows(
-                pixel_values,
-                fused_ids.shape[0],
-                B,
-            )
-        else:
-            fused_ids = ids
-            fused_mask = attention_mask
-            routing = ["actor"] * B
-            fused_pixel_values = pixel_values
-
-        log_probs, values = self._fused_model_pass(
-            fused_ids,
-            fused_mask,
-            routing,
-            pixel_values=fused_pixel_values,
+        log_probs, _ = self._fused_model_pass(
+            ids,
+            attention_mask,
+            ["actor"] * ids.shape[0],
+            pixel_values=pixel_values,
         )
-        if self.use_value_head:
-            assert values is not None  # value-head models return values
-            return log_probs[:B], values[B:]
-        return log_probs, None
+        return log_probs
 
     def _fused_packed_forward(
         self,
         ids: torch.Tensor,
         attention_mask: torch.Tensor,
         pixel_values: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    ) -> torch.Tensor:
         """Padding-free packed variant of the gradient :meth:`_fused_forward`.
 
-        Actor and critic see identical token ids, so the ``(B, T)`` batch is
-        packed **once** into a single padding-free row, then that row is
-        repeated per active adapter (``actor`` [+ ``critic``]) to form an
-        ``(n_adapters, N)`` batch. Per-row fused LoRA routing applies the actor
-        adapter to row 0 and the critic adapter to the last row; both rows carry
-        the same per-segment ``position_ids`` (``attention_mask=None``), so
-        transformers builds a block-diagonal varlen / blockmask forward — no
-        cross-sequence attention, sliding windows preserved (see
-        :meth:`_packing_mode`). A **single** ``model.forward`` keeps
-        gradient-checkpoint recomputation consistent with one persistent routing
-        (the routing is *not* cleared here — see the :meth:`_fused_forward`
-        note).
+        The ``(B, T)`` batch is packed into one padding-free row with
+        per-segment ``position_ids`` (``attention_mask=None``), so transformers
+        builds a block-diagonal varlen / blockmask forward — no cross-sequence
+        attention, sliding windows preserved (see :meth:`_packing_mode`). The
+        actor routing is *not* cleared here — see the :meth:`_fused_forward`
+        note.
 
         :param ids: Token IDs ``(B, seq_len)``.
         :type ids: torch.Tensor
         :param attention_mask: Mask matching *ids* (non-zero marks real tokens).
         :type attention_mask: torch.Tensor
-        :return: ``(actor_log_probs, critic_values)`` each ``(B, seq_len - 1)``;
-            *critic_values* is ``None`` when no value head is used.
-        :rtype: tuple[torch.Tensor, torch.Tensor | None]
+        :param pixel_values: Vision rows of *ids*, or ``None`` for text.
+        :type pixel_values: torch.Tensor | None
+        :return: Actor log-probs ``(B, seq_len - 1)``.
+        :rtype: torch.Tensor
         """
         packed = pack_padded_batch(ids, attention_mask)
-
-        adapters = ["actor"] + (["critic"] if self.use_value_head else [])
-        n_adapters = len(adapters)
-        fused_ids = packed.input_ids.repeat(n_adapters, 1)  # (n_adapters, N)
-        fused_position_ids = packed.position_ids.repeat(n_adapters, 1)
-        set_fused_adapter_routing(self.actor, adapters)
+        set_fused_adapter_routing(self.actor, ["actor"])
 
         fused_fn, head_w, head_b = self._fused_logprob_fn_and_head()
         forward_kwargs: dict[str, Any] = {
-            "input_ids": fused_ids,
-            "position_ids": fused_position_ids,
+            "input_ids": packed.input_ids,
+            "position_ids": packed.position_ids,
             "use_cache": False,
         }
         if pixel_values is not None:
-            if n_adapters == 1:
-                forward_kwargs["pixel_values"] = pixel_values
-            else:
-                forward_kwargs["pixel_values"] = (
-                    self._repeat_pixel_values_for_fused_rows(
-                        pixel_values,
-                        n_adapters * ids.shape[0],
-                        ids.shape[0],
-                    )
-                )
+            forward_kwargs["pixel_values"] = pixel_values
         with (
             self._patch_lm_head_to_identity(),
             self._amp_ctx(),
@@ -5343,20 +5335,13 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         ):
             # FSDP2 all-gather hooks run on ``Module.__call__``.
             output = self.actor(**forward_kwargs)
+        hidden = output[0] if isinstance(output, tuple) else output.logits
 
-        if isinstance(output, tuple):
-            hidden = output[0]
-            value = output[2] if len(output) > 2 else None
-        else:
-            hidden = output.logits
-            value = None
-
-        # Actor log-probs from row 0 (actor adapter): the fused matmul
-        # consumes the (1, N, H) hidden + (1, N-1) next-token targets exactly as
-        # the padded path does; unpack scatters back to the (B, T-1) frame and
-        # drops the cross-segment boundary prediction.
+        # The fused matmul consumes the (1, N, H) hidden + (1, N-1) next-token
+        # targets exactly as the padded path does; unpack scatters back to the
+        # (B, T-1) frame and drops the cross-segment boundary prediction.
         packed_lp = fused_fn(
-            hidden[:1][:, :-1],
+            hidden[:, :-1],
             head_w,
             head_b,
             packed.input_ids[:, 1:],
@@ -5364,16 +5349,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             cast_to_fp32=self.cast_logprobs_to_fp32,
             chunk_rows=self.chunk_rows,
         )
-        log_probs = unpack_logprobs(packed_lp, packed)
-
-        values = None
-        if self.use_value_head and value is not None:
-            # Critic values from the last row (critic adapter): per-token scalars
-            # mapped back to the (B, T-1) frame (no boundary drop, see
-            # unpack_values). Pad positions are zero and masked downstream.
-            values = unpack_values(value[-1], packed)
-
-        return log_probs, values
+        return unpack_logprobs(packed_lp, packed)
 
     def _fused_forward_no_grad(
         self,
@@ -5724,7 +5700,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
     def _backward_pass(
         self, loss: torch.Tensor, accumulation_steps: int | None = None
-    ) -> tuple[float | None, float | None]:
+    ) -> OptimizerStep | None:
         """Perform a backward pass, accumulating gradients over micro-batches.
 
         Each call corresponds to one micro-batch. Gradients are accumulated
@@ -5741,9 +5717,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :param accumulation_steps: Micro-batches per optimizer step for this
             call; ``None`` uses :attr:`gradient_accumulation_steps`.
         :type accumulation_steps: int | None
-        :return: Pre- and post-clip global gradient norms, or ``(None, None)``
-            on micro-batches that only accumulate.
-        :rtype: tuple[float | None, float | None]
+        :return: Gradient norms of the optimizer step, or ``None`` on
+            micro-batches that only accumulate.
+        :rtype: OptimizerStep | None
         """
         with self._amp_ctx():
             step = self.shard_runtime.backward(
@@ -5758,11 +5734,129 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 self.max_grad_norm,
                 lr_scheduler=self.lr_scheduler,
             )
-        if step is None:
-            return None, None
-        if step.lr is not None:
+        if step is not None and step.lr is not None:
             self.lr = step.lr
-        return step.grad_norm_pre, step.grad_norm_post
+        return step
+
+    def _stack_rollout_batch(
+        self, experiences: LLMRolloutExperiences, turn_ids: torch.Tensor | None
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Pad and stack rollout experiences onto this agent's device.
+
+        :param experiences: ``(token_ids, action_masks, rewards)``; ``rewards``
+            is flat per trajectory or ``[batch, max_turns]`` per turn.
+        :type experiences: LLMRolloutExperiences
+        :param turn_ids: ``[batch, seq_len - 1]`` turn indices, or ``None`` to
+            put every action token in turn ``0``.
+        :type turn_ids: torch.Tensor | None
+        :return: ``(token_ids, action_masks, turn_ids, rewards)`` with
+            ``rewards`` as float ``[batch, max_turns]``.
+        :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+        """
+        token_ids, action_masks, rewards = stack_and_pad_experiences(
+            *experiences,
+            padding_values=[self.pad_token_id, False, None],
+        )
+        token_ids = token_ids.to(self.device)
+        action_masks = action_masks.to(self.device)
+        if turn_ids is None:
+            turn_ids = torch.where(
+                action_masks.bool(),
+                torch.zeros_like(action_masks, dtype=torch.long),
+                torch.full_like(action_masks, -1, dtype=torch.long),
+            )
+            rewards = rewards.flatten()
+        rewards = rewards.to(self.device).float()
+        if rewards.dim() == 1:
+            rewards = rewards.unsqueeze(-1)
+        return token_ids, action_masks, turn_ids.to(self.device), rewards
+
+    def _estimate_training(
+        self, algorithm: Algorithm, beta: float, *, fuse_actor_critic_pass: bool
+    ) -> PhaseBreakdown:
+        """Estimate this run's training peak on its CUDA device.
+
+        The budget is the device's total memory, less a colocated vLLM
+        engine's share when it stays resident during learn.
+
+        :param algorithm: Estimator algorithm family.
+        :type algorithm: Algorithm
+        :param beta: KL coefficient of the update.
+        :type beta: float
+        :param fuse_actor_critic_pass: Estimate PPO's fused actor and critic pass.
+        :type fuse_actor_critic_pass: bool
+        :return: Training-phase memory breakdown against the budget.
+        :rtype: PhaseBreakdown
+        """
+        weight_dtypes: dict[torch.dtype, WeightDtype] = {
+            torch.float32: "fp32",
+            torch.bfloat16: "bf16",
+            torch.float16: "fp16",
+        }
+        target_modules = self.lora_config.target_modules
+        attention_only = (
+            bool(target_modules)
+            and not isinstance(target_modules, str)
+            and set(target_modules) <= {"q_proj", "k_proj", "v_proj", "o_proj"}
+        )
+        settings = TrainingSettings(
+            algorithm=algorithm,
+            trajectories_per_update=self.batch_size,
+            max_model_len=self.max_model_len,
+            micro_batch_size=self.micro_batch_size_per_gpu,
+            lora_rank=self.lora_config.r,
+            lora_target_scope="attention-only" if attention_only else "all-linear",
+            lora_dropout=self.lora_config.lora_dropout,
+            lora_packed_target_matrices=len(
+                set(self.lora_config.target_parameters or ())
+            ),
+            packed_moe_dispatch=(
+                "materialized" if materializes_expert_lora(self.actor) else "contracted"
+            ),
+            beta=beta,
+            use_separate_reference_adapter=self.use_separate_reference_adapter,
+            weight_dtype=weight_dtypes[self._get_lm_head().weight.dtype],
+            gradient_checkpointing=self.gradient_checkpointing,
+            activation_offload=self.activation_offload,
+            chunk_rows=self.chunk_rows,
+            n_training_gpus=self.shard_runtime.data_parallel_world(get_world_size()),
+            fsdp=self.fsdp_config,
+            fuse_actor_critic_pass=fuse_actor_critic_pass,
+        )
+        return estimate_training(
+            ModelSpec(
+                model_id=self.pretrained_model_name_or_path,
+                arch=ModelArch.from_hf_config(self.actor.config.to_dict()),
+            ),
+            self._training_device_spec(),
+            settings,
+        )
+
+    def _training_device_spec(self) -> DeviceSpec:
+        """Memory budget of this run's CUDA device during learn.
+
+        :return: Device spec, less a resident colocated vLLM engine's share.
+        :rtype: DeviceSpec
+        """
+        properties = torch.cuda.get_device_properties(torch.device(self.device))
+        device_spec = DeviceSpec(
+            total_bytes=properties.total_memory,
+            name=properties.name,
+            compute_capability=(properties.major, properties.minor),
+        )
+        # Without sleep mode a colocated engine keeps its memory share during learn.
+        if (
+            not self.colocated
+            or self.vllm_config is None
+            or self.vllm_config.sleep_mode
+        ):
+            return device_spec
+        engine_bytes = int(
+            properties.total_memory * self.vllm_config.gpu_memory_utilization
+        )
+        return device_spec.model_copy(
+            update={"available_bytes": device_spec.usable_bytes - engine_bytes}
+        )
 
     def _start_learn_phases(self) -> PhaseTimer:
         """Open the timing window of one ``learn`` on this agent's device.
@@ -5986,26 +6080,16 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         gradient-sync step expects to reduce, those params silently stop
         training - the optimizer sees zero gradients.
 
+        Walks the live parameters on every call: FSDP2 materialization
+        replaces the parameter objects after the first call.
+
         :param selected_adapters: LoRA adapter names whose params should be trainable.
         :type selected_adapters: list[str]
         """
-        key = tuple(sorted(selected_adapters))
-        cache = getattr(self, "_trainable_params_cache", None)
-        if cache is not None and cache[0] == key:
-            for param in cache[1]:
-                param.requires_grad_(True)
-            return
-
         model = self.actor.module if hasattr(self.actor, "module") else self.actor
-        params: list[torch.nn.Parameter] = []
         for name, param in model.named_parameters():
-            for adapter in selected_adapters:
-                if adapter in name and "lora" in name:
-                    params.append(param)
-                    break
-        for param in params:
-            param.requires_grad_(True)
-        self._trainable_params_cache = (key, params)
+            if "lora" in name and any(adapter in name for adapter in selected_adapters):
+                param.requires_grad_(True)
 
     def _ensure_vllm_lora_staging_dir(self) -> Path:
         """Resolve (once) the dir the rollout LoRA adapter is exported to.
@@ -6143,6 +6227,51 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
         self.llm.reset_prefix_cache()
         self._vllm_moved = True
+
+    def _generate_with_hf(
+        self, prompts: Sequence[RolloutPrompt]
+    ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+        """Generate one completion per prompt with HuggingFace ``generate``.
+
+        Runs under the caller's adapter and eval mode, in chunks of
+        ``hf_generate_chunk_size`` prompts.
+
+        :param prompts: Prompt mappings for this rank.
+        :type prompts: Sequence[RolloutPrompt]
+        :return: Per-prompt completion token tensors and matching action masks.
+        :rtype: tuple[list[torch.Tensor], list[torch.Tensor]]
+        """
+        actor_device = self.shard_runtime.actor_compute_device(
+            self.actor, torch.device(self.device)
+        )
+        token_ids_list = []
+        completion_masks = []
+        with torch.no_grad(), self._amp_ctx():
+            for start in range(0, len(prompts), self.hf_generate_chunk_size):
+                for prompt in prompts[start : start + self.hf_generate_chunk_size]:
+                    hf_inputs = prepare_prompt_hf_generate(prompt, actor_device)
+                    prompt_len = int(hf_inputs["input_ids"].shape[-1])
+                    token_ids = self.actor.generate(
+                        **hf_inputs,
+                        generation_config=hf_turn_generation_config(
+                            self.generation_config,
+                            max_model_len=self.max_model_len,
+                            prompt_length=prompt_len,
+                            max_output_tokens=self.max_output_tokens,
+                        ),
+                    )
+                    token_ids_list.append(token_ids)
+                    completion_masks.append(
+                        build_completion_mask(
+                            token_ids,
+                            prompt_len,
+                            self.pad_token_id,
+                            completion_len=hf_completion_lengths(
+                                token_ids, prompt_len, self.pad_token_id
+                            ),
+                        )
+                    )
+        return token_ids_list, completion_masks
 
     def _generate_with_vllm_colocate(
         self,

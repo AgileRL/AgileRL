@@ -97,10 +97,12 @@ class TestPPOLearnEpisodeSegments:
         [None, episode_sampling_logps(PAD_TOKEN_ID)],
         ids=["no_sampling_logps", "sampling_logps"],
     )
+    @pytest.mark.parametrize("fuse", [False, True], ids=["split", "fused"])
     def test_one_micro_batch_matches_the_unsegmented_gradient(
         self,
         monkeypatch: pytest.MonkeyPatch,
         sampling_logps: list[torch.Tensor | None] | None,
+        fuse: bool,
     ) -> None:
         # Arrange: every row fits one micro-batch, so returns, advantages and the
         # token-mean losses cover the same action tokens either way.
@@ -108,6 +110,7 @@ class TestPPOLearnEpisodeSegments:
             "batch_size": 8,
             "micro_batch_size_per_gpu": 8,
             "mini_batch_size": 8,
+            "fuse_actor_critic_pass": fuse,
         }
         unsegmented = _make_ppo(**overrides)
         segmented = _make_ppo(**overrides)
@@ -131,12 +134,17 @@ class TestPPOLearnEpisodeSegments:
                 segmented_grads[0][name], grad, rtol=1e-5, atol=1e-7
             ), name
 
+    @pytest.mark.parametrize("fuse", [False, True], ids=["split", "fused"])
     def test_filler_micro_batches_leave_the_gradient_unchanged(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, fuse: bool
     ) -> None:
         # Arrange: one optimizer step of 1-row micro-batches over 6 real rows,
         # once alone and once padded to 8 rows by a simulated second rank.
-        overrides = {"micro_batch_size_per_gpu": 1, "mini_batch_size": 4}
+        overrides = {
+            "micro_batch_size_per_gpu": 1,
+            "mini_batch_size": 4,
+            "fuse_actor_critic_pass": fuse,
+        }
         alone = _make_ppo(**overrides)
         padded = _make_ppo(**overrides)
         alone_grads = record_step_gradients(alone, monkeypatch)
@@ -159,12 +167,15 @@ class TestPPOLearnEpisodeSegments:
         for key in ("loss", "pg_loss", "vf_loss", "kl", "entropy"):
             assert math.isfinite(padded_metrics[key]), key
 
+    @pytest.mark.parametrize("fuse", [False, True], ids=["split", "fused"])
     def test_liger_metrics_leave_out_filler_micro_batches(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, fuse: bool
     ) -> None:
         # Arrange: the Liger kernel reports each micro-batch's action tokens as
         # its KL; 6 real 1-row micro-batches pad to 8 for a simulated second rank.
-        agent = _make_ppo(micro_batch_size_per_gpu=1, mini_batch_size=4)
+        agent = _make_ppo(
+            micro_batch_size_per_gpu=1, mini_batch_size=4, fuse_actor_critic_pass=fuse
+        )
         use_fake_liger_policy_loss(agent, monkeypatch, "agilerl.algorithms.ppo_llm")
         pad_to_eight_rows(monkeypatch)
 

@@ -1621,7 +1621,7 @@ class TestGRPOLearnRewardsShape:
                     torch.tensor(0.0),
                 ),
             ),
-            patch.object(grpo, "_backward_pass", return_value=(None, None)),
+            patch.object(grpo, "_backward_pass", return_value=None),
         ):
             grpo.learn((completion_ids, action_masks, rewards))
 
@@ -3413,7 +3413,7 @@ class TestGRPOLearn:
                     torch.tensor(0.0),
                 ),
             ) as mock_grpo_loss,
-            patch.object(grpo, "_backward_pass", return_value=(None, None)),
+            patch.object(grpo, "_backward_pass", return_value=None),
         ):
             metrics = grpo.learn((completion_ids, action_masks, rewards))
         processed_advantages = mock_grpo_loss.call_args.args[5]
@@ -3455,7 +3455,7 @@ class TestGRPOLearn:
                     torch.tensor(0.0),
                 ),
             ),
-            patch.object(grpo, "_backward_pass", return_value=(None, None)),
+            patch.object(grpo, "_backward_pass", return_value=None),
         ):
             grpo.learn((completion_ids, action_masks, rewards))
         # Two of the four samples survive the filter, each with 9 action tokens.
@@ -3495,7 +3495,7 @@ class TestGRPOLearn:
                     torch.tensor(0.0),
                 ),
             ) as mock_loss,
-            patch.object(grpo, "_backward_pass", return_value=(None, None)),
+            patch.object(grpo, "_backward_pass", return_value=None),
             patch.object(grpo, "_record_window_action_tokens", side_effect=record_spy),
         ):
             grpo.learn((completion_ids, action_masks, rewards))
@@ -3532,7 +3532,7 @@ class TestGRPOLearn:
                     torch.tensor(0.0),
                 ),
             ),
-            patch.object(grpo, "_backward_pass", return_value=(None, None)),
+            patch.object(grpo, "_backward_pass", return_value=None),
             pytest.warns(UserWarning, match="whole optimizer steps"),
         ):
             grpo.learn((completion_ids, action_masks, rewards))
@@ -3607,9 +3607,7 @@ class TestGRPOLearn:
                 return_value=torch.zeros(4, 1, dtype=torch.float32),
             ),
             patch.object(grpo, "_loss", side_effect=spy_loss) as mock_loss,
-            patch.object(
-                grpo, "_backward_pass", return_value=(None, None)
-            ) as mock_backward,
+            patch.object(grpo, "_backward_pass", return_value=None) as mock_backward,
         ):
             warnings.filterwarnings(
                 "error", message="All samples were filtered by advantage threshold"
@@ -3636,11 +3634,8 @@ class TestGRPOLearn:
         ]
         backward_counts = []
 
-        def _backward(
-            loss: torch.Tensor, _accumulation_steps: int | None
-        ) -> tuple[None, None]:
+        def _backward(loss: torch.Tensor, _accumulation_steps: int | None) -> None:
             loss.backward()
-            return None, None
 
         for rank, rewards in zip(
             ranks,
@@ -5581,7 +5576,7 @@ class TestGRPOVLLMSamplingCorrection:
             patch.object(
                 grpo, "_fused_forward_no_grad", side_effect=fake_fused_forward
             ),
-            patch.object(grpo, "_backward_pass", return_value=(None, None)),
+            patch.object(grpo, "_backward_pass", return_value=None),
             patch.object(
                 grpo,
                 "_liger_loss",
@@ -5651,7 +5646,7 @@ class TestGRPOVLLMSamplingCorrection:
                 grpo, "_fused_forward_no_grad", side_effect=fake_fused_forward
             ),
             patch.object(grpo, "_get_logprobs", side_effect=fake_get_logprobs),
-            patch.object(grpo, "_backward_pass", return_value=(None, None)),
+            patch.object(grpo, "_backward_pass", return_value=None),
             patch.object(grpo, "_liger_loss") as mock_liger_loss,
             pytest.warns(
                 UserWarning,
@@ -5953,7 +5948,7 @@ class TestGRPOTurnAdvantageLearnPath:
                 grpo, "_fused_forward_no_grad", side_effect=fake_fused_forward
             ),
             patch.object(grpo, "_get_logprobs", side_effect=fake_get_logprobs),
-            patch.object(grpo, "_backward_pass", return_value=(None, None)),
+            patch.object(grpo, "_backward_pass", return_value=None),
         )
 
     def test_learn_turn_ids_batch_mismatch_raises(self):

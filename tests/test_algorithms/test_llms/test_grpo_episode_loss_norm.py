@@ -136,7 +136,6 @@ def _probe_policy_weights(
     def accumulate(loss, accumulation_steps=None):
         steps = accumulation_steps or agent.gradient_accumulation_steps
         (loss / steps).backward()
-        return None, None
 
     split_rows = agent._segment_rows
 

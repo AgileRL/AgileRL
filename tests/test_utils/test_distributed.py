@@ -12,6 +12,7 @@ sharded and which config policies were requested, not call counts.
 from __future__ import annotations
 
 import copy
+import math
 import os
 import subprocess
 import sys
@@ -197,11 +198,18 @@ class TestClipParamGroups:
         reference_norm = clip_grad_norm_([reference], max_norm=1.0)
 
         # Act
-        pre, post = clip_param_groups(groups, 1.0, clip_param_group_grad_norm_)
+        norms, clip_coef = clip_param_groups(groups, 1.0, clip_param_group_grad_norm_)
 
         # Assert
-        assert pre == pytest.approx(reference_norm.item(), rel=1e-6)
-        assert post == pytest.approx(1.0, rel=1e-5)
+        assert norms == pytest.approx(
+            (
+                torch.linalg.vector_norm(first_grad).item(),
+                torch.linalg.vector_norm(second_grad).item(),
+            ),
+            rel=1e-6,
+        )
+        assert math.hypot(*norms) == pytest.approx(reference_norm.item(), rel=1e-6)
+        assert math.hypot(*norms) * clip_coef == pytest.approx(1.0, rel=1e-5)
         # rtol covers the float64 vs float32 clip coefficient
         assert torch.allclose(
             torch.cat([first.grad, second.grad]), reference.grad, rtol=1e-6, atol=0
@@ -212,11 +220,11 @@ class TestClipParamGroups:
         groups, first, second = self.two_groups(torch.full((2,), 0.1), torch.zeros(2))
 
         # Act
-        pre, post = clip_param_groups(groups, 1.0, clip_param_group_grad_norm_)
+        norms, clip_coef = clip_param_groups(groups, 1.0, clip_param_group_grad_norm_)
 
         # Assert
-        assert pre == pytest.approx(0.02**0.5)
-        assert post == pytest.approx(0.02**0.5)
+        assert norms == pytest.approx((0.02**0.5, 0.0))
+        assert clip_coef == 1.0
         assert torch.equal(first.grad, torch.full((2,), 0.1))
         assert torch.equal(second.grad, torch.zeros(2))
 
@@ -225,11 +233,11 @@ class TestClipParamGroups:
         groups, first, second = self.two_groups(torch.full((2,), 10.0), torch.ones(2))
 
         # Act
-        pre, post = clip_param_groups(groups, None, clip_param_group_grad_norm_)
+        norms, clip_coef = clip_param_groups(groups, None, clip_param_group_grad_norm_)
 
         # Assert
-        assert pre == pytest.approx(202**0.5)
-        assert post == pytest.approx(202**0.5)
+        assert norms == pytest.approx((200**0.5, 2**0.5))
+        assert clip_coef == 1.0
         assert torch.equal(first.grad, torch.full((2,), 10.0))
         assert torch.equal(second.grad, torch.ones(2))
 
@@ -240,13 +248,39 @@ class TestClipParamGroups:
         )
 
         # Act
-        pre, post = clip_param_groups(groups, 1.0, clip_param_group_grad_norm_)
+        norms, clip_coef = clip_param_groups(groups, 1.0, clip_param_group_grad_norm_)
+
+        # Assert
+        assert np.isnan(norms[0])
+        assert np.isnan(clip_coef)
+        assert torch.isnan(first.grad).all()
+        assert torch.isnan(second.grad).all()
+
+
+class TestOptimizerStepGradNormProperties:
+    def test_totals_span_every_group_and_share_the_clip_coefficient(self):
+        # Arrange
+        step = OptimizerStep(group_grad_norms=(3.0, 4.0), clip_coef=0.2, lr=None)
+
+        # Act
+        pre, post = step.grad_norm_pre, step.grad_norm_post
+
+        # Assert
+        assert pre == pytest.approx(5.0)
+        assert post == pytest.approx(1.0)
+
+    def test_nan_group_norm_makes_both_totals_nan(self):
+        # Arrange
+        step = OptimizerStep(
+            group_grad_norms=(float("nan"), 1.0), clip_coef=float("nan"), lr=None
+        )
+
+        # Act
+        pre, post = step.grad_norm_pre, step.grad_norm_post
 
         # Assert
         assert np.isnan(pre)
         assert np.isnan(post)
-        assert torch.isnan(first.grad).all()
-        assert torch.isnan(second.grad).all()
 
 
 class _FakeDTensor:
@@ -1649,8 +1683,8 @@ class TestDPRuntimeBackward:
         assert torch.equal(weight_mid_window, torch.zeros(1, 2))
         assert torch.allclose(model.weight, torch.full((1, 2), -0.1))
         assert second == OptimizerStep(
-            grad_norm_pre=pytest.approx(2**0.5),
-            grad_norm_post=pytest.approx(2**0.5),
+            group_grad_norms=(pytest.approx(2**0.5),),
+            clip_coef=1.0,
             lr=pytest.approx(0.05),
         )
         assert model.weight.grad is None
@@ -1768,11 +1802,9 @@ class TestFSDPRuntimeBackward:
         )
 
         assert torch.linalg.vector_norm(param.grad).item() == pytest.approx(1.0)
-        assert step == OptimizerStep(
-            grad_norm_pre=pytest.approx(200**0.5),
-            grad_norm_post=pytest.approx(1.0),
-            lr=0.5,
-        )
+        assert step.group_grad_norms == pytest.approx((200**0.5,))
+        assert step.grad_norm_post == pytest.approx(1.0)
+        assert step.lr == 0.5
         scheduler.step.assert_called_once_with()
         optimizer.step.assert_called_once_with()
         optimizer.zero_grad.assert_called_once_with()

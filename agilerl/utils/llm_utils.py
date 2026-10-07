@@ -171,6 +171,10 @@ PPO_METRIC_NAMES = (
     "vf_loss",  # clipped value loss
     "kl",  # update-averaged K3 vs reference
     "clipfrac",  # binding-clip fraction
+    "grad_norm_pre",  # actor LoRA grad norm before clipping
+    "grad_norm_post",  # actor LoRA grad norm after clipping
+    "critic_grad_norm_pre",  # critic LoRA + value head grad norm before clipping
+    "critic_grad_norm_post",  # critic LoRA + value head grad norm after clipping
 )
 
 # REINFORCE-only per-learn diagnostics.

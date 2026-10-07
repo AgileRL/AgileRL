@@ -105,11 +105,18 @@ class TestPPOFusedForwardNoGradVision:
 class TestPPOLearnVision:
     @pytest.mark.parametrize("segmented", [True, False], ids=["segments", "episodes"])
     @pytest.mark.parametrize("liger", [False, True], ids=["standard", "liger"])
+    @pytest.mark.parametrize("fuse", [False, True], ids=["split", "fused"])
     def test_every_forward_gets_the_vision_rows_of_its_rows(
-        self, monkeypatch: pytest.MonkeyPatch, segmented: bool, liger: bool
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        segmented: bool,
+        liger: bool,
+        fuse: bool,
     ) -> None:
         # Arrange
-        agent = make_vision_ppo(importance_sampling_level="token")
+        agent = make_vision_ppo(
+            importance_sampling_level="token", fuse_actor_critic_pass=fuse
+        )
         if liger:
             use_fake_liger_policy_loss(agent, monkeypatch, "agilerl.algorithms.ppo_llm")
         model = vision_model(agent)
@@ -171,13 +178,14 @@ class TestPPOLearnVision:
         assert metrics["entropy"] != pytest.approx(other_metrics["entropy"])
         assert metrics["vf_loss"] != pytest.approx(other_metrics["vf_loss"])
 
+    @pytest.mark.parametrize("fuse", [False, True], ids=["split", "fused"])
     def test_vision_filler_rows_train_with_one_vision_row(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, fuse: bool
     ) -> None:
         # Arrange: 1-row micro-batches over 6 real rows, padded to 8 by a
         # simulated second rank. A filler row is the first segment's one
         # placeholder with that segment's vision row 0.
-        agent = make_vision_ppo(micro_batch_size_per_gpu=1)
+        agent = make_vision_ppo(micro_batch_size_per_gpu=1, fuse_actor_critic_pass=fuse)
         model = vision_model(agent)
         pad_to_eight_rows(monkeypatch)
         filler_tokens = (IMAGE_TOKEN_ID,)

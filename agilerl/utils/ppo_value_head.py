@@ -167,25 +167,47 @@ class AutoModelForCausalLMWithValueHead(nn.Module):
             for k, v in kwargs.items()
             if k not in {"return_dict", "output_hidden_states"}
         }
-        base_out = self.pretrained_model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            return_dict=True,
-            output_hidden_states=True,
-            **inner_kw,
+        # The output head's input is the last hidden state; capturing it keeps
+        # the base model from holding every layer's hidden states.
+        head_inputs: list[torch.Tensor] = []
+        hook = self._output_head().register_forward_pre_hook(
+            lambda _module, args: head_inputs.append(args[0])
         )
+        try:
+            base_out = self.pretrained_model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                return_dict=True,
+                output_hidden_states=False,
+                **inner_kw,
+            )
+        finally:
+            hook.remove()
         lm_logits = base_out.logits
         loss = getattr(base_out, "loss", None)
-        if base_out.hidden_states is None:
-            msg = "Base model did not return hidden_states (output_hidden_states must be True)."
+        if len(head_inputs) != 1:
+            msg = (
+                "Base model must call its output head exactly once per forward; "
+                f"it was called {len(head_inputs)} times."
+            )
             raise RuntimeError(msg)
-        last_hidden_state = base_out.hidden_states[-1]
+        last_hidden_state = head_inputs[0]
         head_dtype = self.v_head.summary.weight.dtype
         if last_hidden_state.dtype != head_dtype:
             last_hidden_state = last_hidden_state.to(head_dtype)
         value = self.v_head(last_hidden_state).squeeze(-1)
 
         return (lm_logits, loss, value)
+
+    def _output_head(self) -> nn.Module:
+        """The outermost ``lm_head`` / ``embed_out`` the base model calls on its last hidden state."""
+        for module in self.pretrained_model.modules():
+            for attr in ("lm_head", "embed_out"):
+                head = getattr(module, attr, None)
+                if isinstance(head, nn.Module):
+                    return head
+        msg = f"Cannot find lm_head (or embed_out) in {type(self.pretrained_model).__name__}."
+        raise AttributeError(msg)
 
     def generate(self, *args: Any, **kwargs: Any) -> torch.Tensor | GenerateOutput:
         # ``generate`` is provided by GenerationMixin but resolves through

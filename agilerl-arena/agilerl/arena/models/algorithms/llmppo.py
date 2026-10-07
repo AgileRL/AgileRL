@@ -88,3 +88,10 @@ class LLMPPOSpec(RolloutLLMSpec):
             "engine generates, trading a copy for headroom."
         ),
     )
+    fuse_actor_critic_pass: bool | None = Field(
+        default=None,
+        description=(
+            "Run the actor and critic in one forward/backward per micro-batch. "
+            "None fuses when the fused pass's memory estimate fits the GPU."
+        ),
+    )
