@@ -10,6 +10,7 @@ of the summed loss.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import os
@@ -36,6 +37,7 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from agilerl.algorithms.ppo_llm import PPO as LLMPPO
 from agilerl.arena.memory import estimate_training
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.distributed.fsdp import FSDPConfig
 from agilerl.lora.fused import (
     ROUTING_STATE,
@@ -1089,6 +1091,18 @@ def patch_cuda_device(
     )
 
 
+def save_checkpoint_config(
+    agent: LLMPPO, path: Path, config: dict[str, Any] | None = None
+) -> None:
+    """Write ``config`` (default: the actor's) as the checkpoint's ``config.json``."""
+    path.mkdir(parents=True, exist_ok=True)
+    if config is None:
+        agent.actor.config.save_pretrained(path)
+    else:
+        (path / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    agent.pretrained_model_name_or_path = str(path)
+
+
 class TestPPOFuseActorCriticPass:
     def test_none_fuses_off_cuda(self) -> None:
         # Arrange
@@ -1119,6 +1133,7 @@ class TestPPOFuseActorCriticPass:
         self,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
+        tmp_path: Path,
         total_gib: int,
         fuse: bool,
         verb: str,
@@ -1126,6 +1141,7 @@ class TestPPOFuseActorCriticPass:
     ) -> None:
         # Arrange: the tiny model's fused estimate is about 1.7 GiB.
         agent = make_ppo()
+        save_checkpoint_config(agent, tmp_path)
         patch_cuda_device(agent, monkeypatch, total_gib * 2**30)
 
         # Act
@@ -1146,6 +1162,7 @@ class TestPPOFuseActorCriticPass:
         self,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
+        tmp_path: Path,
         sleep_mode: bool,
         fuse: bool,
         budget: str,
@@ -1153,6 +1170,7 @@ class TestPPOFuseActorCriticPass:
         # Arrange: 4 GiB fits the ~1.7 GiB fused estimate unless vLLM keeps
         # 90% of it: 0.95 * 4 - 0.9 * 4 = 0.2 GiB.
         agent = make_ppo()
+        save_checkpoint_config(agent, tmp_path)
         patch_cuda_device(agent, monkeypatch, 4 * 2**30)
         monkeypatch.setattr(agent, "colocated", True)
         monkeypatch.setattr(
@@ -1170,10 +1188,11 @@ class TestPPOFuseActorCriticPass:
         assert f"budget {budget} GiB" in caplog.text
 
     def test_none_on_cuda_estimates_the_gradient_micro_batch(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         # Arrange
         agent = make_ppo(batch_size=6, mini_batch_size=6, micro_batch_size_per_gpu=3)
+        save_checkpoint_config(agent, tmp_path)
         patch_cuda_device(agent, monkeypatch, 80 * 2**30)
         estimated = []
 
@@ -1193,6 +1212,35 @@ class TestPPOFuseActorCriticPass:
         assert [s.micro_batch_size for s in estimated] == [3]
         assert estimated[0].grad_forward_rows == 6
 
+    def test_none_on_cuda_reads_the_checkpoint_config_json(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # Arrange: transformers' NemotronHConfig.to_dict drops num_hidden_layers
+        # and renames the layer types; the checkpoint's config.json keeps both.
+        agent = make_ppo()
+        nemotron = SUPPORTED_MODEL_INFO["nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"]
+        save_checkpoint_config(agent, tmp_path, nemotron.config)
+        patch_cuda_device(agent, monkeypatch, 80 * 2**30)
+        archs = []
+
+        def record_estimate(model, device, settings):
+            archs.append(model.arch)
+            return estimate_training(model, device, settings)
+
+        monkeypatch.setattr(
+            "agilerl.algorithms.core.base.estimate_training", record_estimate
+        )
+
+        # Act
+        agent._resolve_fuse_actor_critic_pass()
+
+        # Assert
+        (arch,) = archs
+        assert arch.n_layers == 42
+        assert arch.attention_layers == 4
+        assert arch.n_mamba_layers == 21
+        assert arch.is_moe is False
+
     def test_clone_keeps_the_requested_mode(self) -> None:
         agent = make_ppo()
 
@@ -1206,12 +1254,14 @@ class TestPPOFuseActorCriticPass:
     ) -> None:
         # Arrange: saved by a CPU agent that fused; loaded on a 1 GiB GPU.
         saved = make_ppo()
-        saved.save_checkpoint(str(tmp_path))
+        save_checkpoint_config(saved, tmp_path / "model")
+        saved.save_checkpoint(str(tmp_path / "checkpoint"))
         loaded = make_ppo()
+        save_checkpoint_config(loaded, tmp_path / "model")
         patch_cuda_device(loaded, monkeypatch, 2**30)
 
         # Act
-        loaded.load_checkpoint(str(tmp_path))
+        loaded.load_checkpoint(str(tmp_path / "checkpoint"))
 
         # Assert
         assert saved._fuses_actor_critic_pass is True

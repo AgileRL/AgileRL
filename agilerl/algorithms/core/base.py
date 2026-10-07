@@ -192,6 +192,7 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
         get_peft_model,
         prepare_model_for_kbit_training,
     )
+    from transformers import PretrainedConfig
 
     from agilerl.algorithms.core.llm_ops.frozen_vision import (
         install_frozen_vision_no_grad,
@@ -5823,10 +5824,15 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             fsdp=self.fsdp_config,
             fuse_actor_critic_pass=fuse_actor_critic_pass,
         )
+        # The checkpoint's config.json: transformers' to_dict renames and drops
+        # keys the estimator reads (Nemotron-H's num_hidden_layers, layer types).
+        model_config = PretrainedConfig.get_config_dict(
+            self.pretrained_model_name_or_path
+        )[0]
         return estimate_training(
             ModelSpec(
                 model_id=self.pretrained_model_name_or_path,
-                arch=ModelArch.from_hf_config(self.actor.config.to_dict()),
+                arch=ModelArch.from_hf_config(model_config),
             ),
             self._training_device_spec(),
             settings,
