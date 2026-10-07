@@ -21,7 +21,7 @@ from torch.distributed.checkpoint.state_dict import (
 from torch.distributed.fsdp import FSDPModule
 from torch.distributed.tensor import DTensor, distribute_tensor
 from torch.nn.utils import clip_grad_norm_
-from torch.optim.lr_scheduler import SequentialLR
+from torch.optim.lr_scheduler import LambdaLR
 
 from agilerl.distributed.expert_parallel import (
     ParallelMesh,
@@ -58,7 +58,7 @@ class PrepareResult:
 
     actor: nn.Module
     optimizer: OptimizerWrapper
-    lr_scheduler: SequentialLR | None
+    lr_scheduler: LambdaLR | None
 
 
 @runtime_checkable
@@ -239,16 +239,15 @@ def clip_param_group_grad_norm_(
 
 @dataclass(frozen=True)
 class OptimizerStep:
-    """Gradient norms and learning rate from one optimizer step.
+    """Gradient norms from one optimizer step.
 
-    Every grad is scaled by ``clip_coef``, so a group's post-clip norm is its
-    pre-clip norm times ``clip_coef``.
+    A group's post-clip norm is its pre-clip norm times its clip coefficient.
     """
 
     # Pre-clip L2 norm of each optimizer param group, in group order.
     group_grad_norms: tuple[float, ...]
-    clip_coef: float
-    lr: float | None
+    # Coefficient each param group's grads were scaled by, in group order.
+    clip_coefs: tuple[float, ...]
 
     @property
     def grad_norm_pre(self) -> float:
@@ -258,58 +257,74 @@ class OptimizerStep:
     @property
     def grad_norm_post(self) -> float:
         """Post-clip L2 norm over every param group."""
-        return self.grad_norm_pre * self.clip_coef
+        return (
+            sum(
+                (norm * coef) ** 2
+                for norm, coef in zip(
+                    self.group_grad_norms, self.clip_coefs, strict=True
+                )
+            )
+            ** 0.5
+        )
 
 
 def clip_param_groups(
     param_groups: list[dict[str, Any]],
     max_grad_norm: float | None,
     clip_fn: Callable[[list[nn.Parameter], float], torch.Tensor],
-) -> tuple[tuple[float, ...], float]:
-    """Clip every group by one coefficient from the L2 norm over all groups.
+    clip_groups: tuple[frozenset[str], ...] | None = None,
+) -> tuple[tuple[float, ...], tuple[float, ...]]:
+    """Clip each set of groups by one coefficient from the L2 norm over that set.
 
-    Matches ``torch.nn.utils.clip_grad_norm_`` over the union of all grads.
-    Groups may sit on different DTensor meshes, so each is measured on its own.
+    With ``clip_groups=None`` every group forms one set, matching
+    ``torch.nn.utils.clip_grad_norm_`` over the union of all grads. Groups
+    may sit on different DTensor meshes, so each is measured on its own.
 
     :param param_groups: Optimizer param groups.
     :type param_groups: list[dict[str, Any]]
-    :param max_grad_norm: Clip threshold for the total norm, or ``None`` to
+    :param max_grad_norm: Clip threshold for each set's norm, or ``None`` to
         only measure.
     :type max_grad_norm: float | None
     :param clip_fn: Clips one group in place and returns its pre-clip norm;
         called with ``max_norm=inf`` so it only measures.
     :type clip_fn: Callable[[list[nn.Parameter], float], torch.Tensor]
-    :return: Pre-clip L2 norm of each group, and the coefficient every grad
-        was scaled by.
-    :rtype: tuple[tuple[float, ...], float]
+    :param clip_groups: Sets of ``group["group"]`` names clipped by their own
+        norm. Every param group must fall in exactly one set.
+    :type clip_groups: tuple[frozenset[str], ...] | None
+    :return: Pre-clip L2 norm of each group, and the coefficient each group's
+        grads were scaled by.
+    :rtype: tuple[tuple[float, ...], tuple[float, ...]]
     """
     group_norms = tuple(
         float(_scalar_grad_norm(clip_fn(group["params"], float("inf"))))
         for group in param_groups
     )
     if max_grad_norm is None:
-        return group_norms, 1.0
-    total = sum(norm * norm for norm in group_norms) ** 0.5
-    # min(nan, 1.0) is nan, so a non-finite total reaches the grads as in torch.
-    clip_coef = min(max_grad_norm / (total + 1e-6), 1.0)
-    for group in param_groups:
-        for param in group["params"]:
-            if param.grad is not None:
-                param.grad.mul_(clip_coef)
-    return group_norms, clip_coef
-
-
-def _step_result(
-    group_grad_norms: tuple[float, ...],
-    clip_coef: float,
-    lr_scheduler: SequentialLR | None,
-) -> OptimizerStep:
-    if lr_scheduler is None:
-        return OptimizerStep(group_grad_norms, clip_coef, lr=None)
-    lr_scheduler.step()
-    return OptimizerStep(
-        group_grad_norms, clip_coef, lr=float(lr_scheduler.get_last_lr()[0])
-    )
+        return group_norms, (1.0,) * len(param_groups)
+    if clip_groups is None:
+        clip_sets = [list(range(len(param_groups)))]
+    else:
+        clip_sets = [
+            [i for i, group in enumerate(param_groups) if group["group"] in names]
+            for names in clip_groups
+        ]
+        if sorted(i for indices in clip_sets for i in indices) != list(
+            range(len(param_groups))
+        ):
+            names = [group["group"] for group in param_groups]
+            msg = f"clip_groups {clip_groups} must hold each of {names} exactly once"
+            raise ValueError(msg)
+    clip_coefs = [1.0] * len(param_groups)
+    for indices in clip_sets:
+        total = sum(group_norms[i] ** 2 for i in indices) ** 0.5
+        # min(nan, 1.0) is nan, so a non-finite total reaches the grads as in torch.
+        clip_coef = min(max_grad_norm / (total + 1e-6), 1.0)
+        for i in indices:
+            clip_coefs[i] = clip_coef
+            for param in param_groups[i]["params"]:
+                if param.grad is not None:
+                    param.grad.mul_(clip_coef)
+    return group_norms, tuple(clip_coefs)
 
 
 class BaseRuntime(ABC):
@@ -523,7 +538,7 @@ class BaseRuntime(ABC):
         gradient_accumulation_steps: int,
         actor: nn.Module,
         max_grad_norm: float | None = None,
-        lr_scheduler: SequentialLR | None = None,
+        clip_groups: tuple[frozenset[str], ...] | None = None,
     ) -> OptimizerStep | None:
         """Backward one micro-batch; step on the accumulation boundary.
 
@@ -537,9 +552,10 @@ class BaseRuntime(ABC):
         :type actor: nn.Module
         :param max_grad_norm: Clip threshold, or ``None`` to skip clipping.
         :type max_grad_norm: float | None
-        :param lr_scheduler: Scheduler to step on the boundary.
-        :type lr_scheduler: SequentialLR | None
-        :return: Norms and new learning rate on a step boundary, else ``None``.
+        :param clip_groups: Param group name sets clipped by their own norm;
+            ``None`` clips every group by the global norm.
+        :type clip_groups: tuple[frozenset[str], ...] | None
+        :return: Norms on a step boundary, else ``None``.
         :rtype: OptimizerStep | None
         """
 
@@ -591,7 +607,7 @@ class DPRuntime(BaseRuntime):
         return PrepareResult(
             actor=placed,
             optimizer=optimizer,
-            lr_scheduler=make_llm_scheduler(optimizer, cosine_lr_schedule_config, lr),
+            lr_scheduler=make_llm_scheduler(optimizer, cosine_lr_schedule_config),
         )
 
     def export_model_state(self, model: nn.Module) -> dict[str, Any]:
@@ -669,7 +685,7 @@ class DPRuntime(BaseRuntime):
         gradient_accumulation_steps: int,
         actor: nn.Module,
         max_grad_norm: float | None = None,
-        lr_scheduler: SequentialLR | None = None,
+        clip_groups: tuple[frozenset[str], ...] | None = None,
     ) -> OptimizerStep | None:
         """Average LoRA grads across ranks when unsharded."""
         is_step_boundary = self._count_micro_batch(gradient_accumulation_steps)
@@ -683,13 +699,13 @@ class DPRuntime(BaseRuntime):
         inner = optimizer._single_optimizer()
         sync_grads([param for group in inner.param_groups for param in group["params"]])
         self.phase_timer.mark("grad_sync")
-        group_grad_norms, clip_coef = clip_param_groups(
-            inner.param_groups, max_grad_norm, clip_grad_norm_
+        group_grad_norms, clip_coefs = clip_param_groups(
+            inner.param_groups, max_grad_norm, clip_grad_norm_, clip_groups
         )
         optimizer.step()
         optimizer.zero_grad()
         self.phase_timer.mark("optim")
-        return _step_result(group_grad_norms, clip_coef, lr_scheduler)
+        return OptimizerStep(group_grad_norms, clip_coefs)
 
 
 class FSDPRuntime(BaseRuntime):
@@ -776,7 +792,7 @@ class FSDPRuntime(BaseRuntime):
         return PrepareResult(
             actor=wrapped,
             optimizer=optimizer,
-            lr_scheduler=make_llm_scheduler(optimizer, cosine_lr_schedule_config, lr),
+            lr_scheduler=make_llm_scheduler(optimizer, cosine_lr_schedule_config),
         )
 
     @raise_on_any_rank()
@@ -833,6 +849,11 @@ class FSDPRuntime(BaseRuntime):
             for name, param in actor.named_parameters()
         }
         saved_state = optimizer_state.get("state", {})
+        saved_params = {
+            fqn
+            for group in optimizer_state.get("param_groups", [])
+            for fqn in group["params"]
+        }
 
         inner_optimizer.state.clear()
         with torch.no_grad():
@@ -846,6 +867,10 @@ class FSDPRuntime(BaseRuntime):
                         msg = "Trainable optimizer parameter is not a named parameter on the actor"
                         raise RuntimeError(msg)
                     if fqn not in saved_state:
+                        # A saved param with no state never stepped; AdamW
+                        # creates its state on the first step.
+                        if fqn in saved_params:
+                            continue
                         msg = f"Optimizer resume is missing state for trainable parameter {fqn!r}"
                         raise RuntimeError(msg)
                     inner_optimizer.state[param] = _place_param_optimizer_state(
@@ -898,7 +923,7 @@ class FSDPRuntime(BaseRuntime):
         )
 
         device = str(next(actor.parameters()).device)
-        load_lora_adapters(actor, checkpoint_dir, adapter_name, device=device)
+        load_lora_adapters(peft_model, checkpoint_dir, adapter_name, device=device)
 
     def actor_compute_device(
         self, actor: nn.Module, fallback: torch.device
@@ -912,7 +937,7 @@ class FSDPRuntime(BaseRuntime):
         gradient_accumulation_steps: int,
         actor: nn.Module,
         max_grad_norm: float | None = None,
-        lr_scheduler: SequentialLR | None = None,
+        clip_groups: tuple[frozenset[str], ...] | None = None,
     ) -> OptimizerStep | None:
         """Accumulate, clip, and step.
 
@@ -943,10 +968,13 @@ class FSDPRuntime(BaseRuntime):
                 params, getattr(torch, self.config.reduce_dtype)
             )
         self.phase_timer.mark("grad_sync")
-        group_grad_norms, clip_coef = clip_param_groups(
-            inner.param_groups, max_grad_norm, clip_param_group_grad_norm_
+        group_grad_norms, clip_coefs = clip_param_groups(
+            inner.param_groups,
+            max_grad_norm,
+            clip_param_group_grad_norm_,
+            clip_groups,
         )
         optimizer.step()
         optimizer.zero_grad()
         self.phase_timer.mark("optim")
-        return _step_result(group_grad_norms, clip_coef, lr_scheduler)
+        return OptimizerStep(group_grad_norms, clip_coefs)

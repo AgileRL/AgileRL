@@ -1,7 +1,7 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Build LLM algorithms from the spec, converting LoRA and vLLM sections at construction."""
+"""Build LLM algorithms from the spec, converting LoRA, vLLM and LR schedule sections at construction."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from agilerl.arena.models.algorithms import (
     LLMAlgorithmSpec,
     RolloutLLMSpec,
 )
+from agilerl.arena.models.networks import CosineLRScheduleConfig as CosineLRScheduleSpec
 from agilerl.arena.models.networks import LoraConfigDict, default_colocated_vllm_config
 from agilerl.builders.base import (
     AlgorithmBuilder,
@@ -26,7 +27,7 @@ from agilerl.builders.base import (
     spec_kwargs,
 )
 from agilerl.distributed import get_world_size, is_distributed
-from agilerl.utils.algo_utils import VLLMConfig
+from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig
 from agilerl.utils.llm_utils import (
     apply_pad_token_id,
     build_bnb_quantization_config,
@@ -56,6 +57,27 @@ class LLMBuilder(AlgorithmBuilder):
             )
             raise TypeError(msg)
         return resolved
+
+    @staticmethod
+    def _resolve_vllm_kwargs(kwargs: dict[str, Any], colocated: bool) -> None:
+        """Set a colocated run's ``VLLMConfig``, or drop the vLLM kwargs of any other run.
+
+        :param kwargs: Constructor kwargs, edited in place.
+        :type kwargs: dict[str, Any]
+        :param colocated: Whether vLLM runs in the trainer process.
+        :type colocated: bool
+        """
+        if not colocated:
+            kwargs.pop("max_model_len", None)
+            kwargs.pop("vllm_config", None)
+            return
+        if kwargs.get("vllm_config") is None:
+            kwargs["vllm_config"] = default_colocated_vllm_config()
+        vllm_cfg = kwargs["vllm_config"]
+        if isinstance(vllm_cfg, BaseModel):
+            vllm_cfg = vllm_cfg.model_dump(exclude_none=True)
+        if isinstance(vllm_cfg, dict):
+            kwargs["vllm_config"] = VLLMConfig(**vllm_cfg)
 
     @classmethod
     def build(
@@ -102,23 +124,17 @@ class LLMBuilder(AlgorithmBuilder):
         kwargs = spec_kwargs(spec, hp_config=runtime.hp_config)
         kwargs.pop("pretrained_model_name_or_path", None)
 
-        colocated_vllm = (
-            isinstance(spec, RolloutLLMSpec) and rollout_mode == "colocated"
+        cls._resolve_vllm_kwargs(
+            kwargs,
+            colocated=isinstance(spec, RolloutLLMSpec) and rollout_mode == "colocated",
         )
-        if colocated_vllm:
-            if kwargs.get("vllm_config") is None:
-                kwargs["vllm_config"] = default_colocated_vllm_config()
-            vllm_cfg = kwargs["vllm_config"]
-            if isinstance(vllm_cfg, BaseModel):
-                vllm_cfg = vllm_cfg.model_dump(exclude_none=True)
-            if isinstance(vllm_cfg, dict):
-                kwargs["vllm_config"] = VLLMConfig(**vllm_cfg)
-        else:
-            kwargs.pop("max_model_len", None)
-            kwargs.pop("vllm_config", None)
 
         if kwargs.get("lora_config") is not None:
             kwargs["lora_config"] = peft_lora_config(kwargs["lora_config"])
+        if kwargs.get("cosine_lr_schedule_config") is not None:
+            kwargs["cosine_lr_schedule_config"] = cosine_lr_schedule_config(
+                kwargs["cosine_lr_schedule_config"]
+            )
 
         # Resolve trainer-side bitsandbytes quantization (a preset name or a
         # BitsAndBytesConfig kwargs dict) to the quantization_config the
@@ -226,3 +242,14 @@ def peft_lora_config(lora: LoraConfigDict | dict[str, Any] | LoraConfig) -> Lora
     peft_lora = LoraConfigDict.model_validate(lora).model_dump()
     peft_lora["r"] = peft_lora.pop("lora_r")
     return PeftLoraConfig(**peft_lora)
+
+
+def cosine_lr_schedule_config(schedule: CosineLRScheduleSpec) -> CosineLRScheduleConfig:
+    """Convert the manifest's LR schedule section to the config the algorithm takes.
+
+    :param schedule: The manifest's ``cosine_lr_schedule_config`` section.
+    :type schedule: CosineLRScheduleSpec
+    :returns: The algorithm's warmup-cosine schedule config.
+    :rtype: CosineLRScheduleConfig
+    """
+    return CosineLRScheduleConfig(**schedule.model_dump())

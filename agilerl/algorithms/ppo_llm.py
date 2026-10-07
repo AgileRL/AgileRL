@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 import warnings
 from collections.abc import Sequence
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
@@ -63,6 +64,7 @@ from agilerl.utils.llm_utils import (
     pool_by_turns,
     resolve_batch_advantage_granularity,
     validate_importance_sampling_level,
+    value_fit,
 )
 from agilerl.utils.segment_rows import filler_stand_in
 from agilerl.utils.vision_rows import VisionRows
@@ -106,12 +108,18 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
     :type gamma: float, optional
     :param gae_lambda: GAE lambda used for turn-level advantage estimation.
     :type gae_lambda: float, optional
+    :param critic_warmup_steps: First learn steps that update only the critic, on
+        Monte Carlo returns (GAE ``lambda = 1``), leaving the policy fixed.
+        ``critic_warmup_steps_done`` counts them and is checkpointed.
+    :type critic_warmup_steps: int, optional
     :param lr_actor: Actor learning rate.
     :type lr_actor: float, optional
     :param lr_critic: Critic/value-head learning rate. If ``None``, ``lr_actor`` is used.
     :type lr_critic: float | None, optional
     :param max_grad_norm: Gradient clipping norm.
     :type max_grad_norm: float, optional
+    :param share_grad_clip: Clip actor and critic grads by their combined norm.
+    :type share_grad_clip: bool, optional
     :param update_epochs: Number of PPO epochs per update.
     :type update_epochs: int, optional
     :param temperature: Sampling temperature for generation.
@@ -146,7 +154,8 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
     :type hf_generate_chunk_size: int | None, optional
     :param lora_config: LoRA configuration.
     :type lora_config: LoraConfig | None, optional
-    :param cosine_lr_schedule_config: Cosine LR scheduler configuration.
+    :param cosine_lr_schedule_config: Warmup-cosine schedule stepped once per
+        ``learn`` call; the actor's starts after ``critic_warmup_steps``.
     :type cosine_lr_schedule_config: CosineLRScheduleConfig | None, optional
     :param fsdp_config: FSDP2 sharding settings for distributed runs, defaults to None
     :type fsdp_config: FSDPConfig | None, optional
@@ -289,9 +298,11 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         clip_coef: float = 0.2,
         gamma: float = 1.0,
         gae_lambda: float = 0.95,
+        critic_warmup_steps: int = 0,
         lr_actor: float = 5e-7,
         lr_critic: float | None = 5e-5,
         max_grad_norm: float = 1.0,
+        share_grad_clip: bool = False,
         update_epochs: int = 1,
         temperature: float = 1.0,
         repetition_penalty: float = 1.0,
@@ -341,6 +352,10 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
     ) -> None:
 
         resolved_device = resolve_device(device)
+        if cosine_lr_schedule_config is not None:
+            cosine_lr_schedule_config = replace(
+                cosine_lr_schedule_config, actor_start_step=critic_warmup_steps
+            )
         super().__init__(
             index=index,
             batch_size=batch_size,
@@ -396,6 +411,9 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         self.lr_actor = lr_actor
         self.lr_critic = lr_critic if lr_critic is not None else lr_actor
         self.update_epochs = update_epochs
+        self.critic_warmup_steps = critic_warmup_steps
+        self.critic_warmup_steps_done = 0
+        self.share_grad_clip = share_grad_clip
         self.temperature = temperature
         self.repetition_penalty = repetition_penalty
         self.top_p = top_p
@@ -491,7 +509,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         pixel_image_counts: Sequence[int] | None = None,
         image_token_id: int | None = None,
     ) -> dict[str, float]:
-        """Update actor and critic adapters using configured PPO granularity.
+        """Update actor and critic adapters; a critic warmup step updates only the critic.
 
         :param experiences: ``(token_ids, action_masks, rewards)``. For
             single-turn, ``rewards`` is a flat tensor of scalars; for multi-turn,
@@ -526,12 +544,15 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             ``episode_segments``, to cut the filler rows down to one image.
         :type image_token_id: int | None
         :return: Mean training metrics across PPO minibatch updates, actor and
-            critic gradient norms averaged over optimizer steps, plus row
-            padding stats and ``learn_phase_<phase>_s`` wall seconds.
+            critic gradient norms averaged over optimizer steps, the pre-update
+            value fit, ``critic_warmup``, row padding stats and
+            ``learn_phase_<phase>_s`` wall seconds.
         :rtype: dict[str, float]
         """
         phase_timer = self._start_learn_phases()
         self._prepare_vllm_for_training()
+        critic_warmup = self.critic_warmup_steps_done < self.critic_warmup_steps
+        passes = 1 if self._fuses_actor_critic_pass or critic_warmup else 2
         with self.trainer_offload_context():
             token_ids, action_masks, turn_ids, rewards_2d = self._stack_rollout_batch(
                 experiences, turn_ids
@@ -540,20 +561,11 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             num_samples = token_ids.shape[0]
             ppo_granularity = self._resolve_advantage_granularity(turn_ids)
 
-            batch_size = (
-                min(num_samples, self.micro_batch_size_per_gpu)
-                if hasattr(self, "micro_batch_size_per_gpu")
-                else num_samples
-            )
+            batch_size = min(num_samples, self.micro_batch_size_per_gpu)
             updates = 0
-            learn_metrics = {
-                "loss": 0.0,
-                "pg_loss": 0.0,
-                "vf_loss": 0.0,
-                "kl": 0.0,
-                "entropy": 0.0,
-                "clipfrac": 0.0,
-            }
+            learn_metrics = dict.fromkeys(
+                ("loss", "pg_loss", "vf_loss", "kl", "entropy", "clipfrac"), 0.0
+            )
             grad_norm_totals = {
                 "grad_norm_pre": 0.0,
                 "grad_norm_post": 0.0,
@@ -606,17 +618,25 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             reference_log_probs = torch.masked_fill(
                 reference_log_probs, ~action_mask_bool, 1.0
             )
+            # Warmup fits the critic to Monte Carlo returns of the fixed policy.
+            gae_lambda = 1.0 if critic_warmup else self.gae_lambda
             if ppo_granularity == "token":
                 returns, advantages = self._compute_gae_returns_token(
-                    token_rewards,
-                    old_values,
-                    action_masks,
+                    token_rewards, old_values, action_masks, gae_lambda
                 )
             else:
                 returns, advantages = self._compute_gae_returns(
-                    token_rewards, old_values, action_masks, turn_ids
+                    token_rewards, old_values, action_masks, turn_ids, gae_lambda
                 )
             del token_rewards
+            # Pre-update values against the value targets, on the GAE axis.
+            explained_variance, value_return_corr = value_fit(
+                old_values,
+                returns,
+                action_mask_bool,
+                turn_ids if ppo_granularity == "turn" else None,
+                self.turn_value_reduction,
+            )
 
             # The reweight applies only to the policy surrogate.
             sampling_log_probs, is_metrics = (
@@ -642,11 +662,9 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             batch_idxs = np.arange(num_samples)
             filler_rows = row_episodes < 0
             padding_stats = self._row_padding_stats(token_ids, row_episodes, batch_idxs)
-            vision_rows = (
-                VisionRows(pixel_values, pixel_image_counts)
-                if pixel_values is not None
-                else None
-            )
+            vision_rows = None
+            if pixel_values is not None:
+                vision_rows = VisionRows(pixel_values, pixel_image_counts)
             phase_timer.mark("prepare")
 
             self.actor.train()
@@ -755,7 +773,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                         batch_turn_ids,
                         ppo_granularity,
                     )
-                    if self._fuses_actor_critic_pass:
+                    if self._fuses_actor_critic_pass and not critic_warmup:
                         actor_hidden, values = self._actor_critic_hidden_states(
                             batch_ids, batch_pixel_values
                         )
@@ -778,12 +796,16 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                         phase_timer.mark("forward")
                         steps = [
                             self._backward_ppo_pass(
-                                total_loss * loss_scale, accumulation_steps
+                                total_loss * loss_scale, accumulation_steps, passes
                             )
                         ]
                         unset_fused_adapter_routing(self.actor)
                     else:
-                        if use_liger:
+                        policy_step = None
+                        if critic_warmup:
+                            policy_loss = torch.zeros(())
+                            metrics = dict.fromkeys(learn_metrics, 0.0)
+                        elif use_liger:
                             policy_loss, metrics = self._ppo_policy_loss_liger(
                                 batch_ids, *policy_inputs, batch_pixel_values
                             )
@@ -794,12 +816,13 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                                 ),
                                 *policy_inputs,
                             )
-                        self._raise_if_loss_not_finite_on_any_rank(policy_loss)
-                        phase_timer.mark("forward")
-                        policy_step = self._backward_ppo_pass(
-                            policy_loss * loss_scale, accumulation_steps
-                        )
-                        unset_fused_adapter_routing(self.actor)
+                        if not critic_warmup:
+                            self._raise_if_loss_not_finite_on_any_rank(policy_loss)
+                            phase_timer.mark("forward")
+                            policy_step = self._backward_ppo_pass(
+                                policy_loss * loss_scale, accumulation_steps, passes
+                            )
+                            unset_fused_adapter_routing(self.actor)
 
                         vf_loss = self._ppo_value_loss(
                             self._critic_values(batch_ids, batch_pixel_values),
@@ -808,7 +831,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                         self._raise_if_loss_not_finite_on_any_rank(vf_loss)
                         phase_timer.mark("forward")
                         value_step = self._backward_ppo_pass(
-                            vf_loss * loss_scale, accumulation_steps
+                            vf_loss * loss_scale, accumulation_steps, passes
                         )
                         unset_fused_adapter_routing(self.actor)
                         steps = [policy_step, value_step]
@@ -828,6 +851,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                     learn_metrics["vf_loss"] += vf_loss_value
                     learn_metrics["loss"] += policy_loss.item() + vf_loss_value
                     updates += 1
+        self.critic_warmup_steps_done += int(critic_warmup)
         averaged = {
             metric: value / max(updates, 1) for metric, value in learn_metrics.items()
         }
@@ -836,33 +860,24 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             if grad_updates > 0
             else {}
         )
-        result = dict(averaged)
-        result.update(grad_norms)
-        # Sampling-mismatch metrics are computed once over the full batch, so
-        # they bypass the per-update averaging above.
-        result.update(is_metrics)
-        result.update(padding_stats)
-        phase_seconds = self._learn_phase_seconds()
-        result.update(phase_seconds)
+        self._step_lr_scheduler()
+        # Sampling-mismatch metrics and the value fit are computed once over the
+        # full batch, so they bypass the per-update averaging above.
+        result = {
+            **averaged,
+            **grad_norms,
+            **is_metrics,
+            "explained_variance": explained_variance,
+            "value_return_corr": value_return_corr,
+            "critic_warmup": float(critic_warmup),
+            **padding_stats,
+            **self._learn_phase_seconds(),
+        }
 
         # Wire averaged metrics into the metrics tracker.
         token_ids_list = experiences[0]
         completion_length = np.mean([c.shape[-1] for c in token_ids_list])
-        agg = aggregate_metrics_dict(
-            {
-                "loss": averaged["loss"],
-                "pg_loss": averaged["pg_loss"],
-                "vf_loss": averaged["vf_loss"],
-                "kl": averaged["kl"],
-                "entropy": averaged["entropy"],
-                "clipfrac": averaged["clipfrac"],
-                "completion_length": completion_length,
-                **grad_norms,
-                **is_metrics,
-                **padding_stats,
-                **phase_seconds,
-            },
-        )
+        agg = aggregate_metrics_dict({**result, "completion_length": completion_length})
         agg["completion_length"] = int(agg["completion_length"])
         for key, value in agg.items():
             self.metrics.log(key, value)
@@ -883,18 +898,10 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         assert batch_size >= 1, "Batch size must be greater than or equal to one."
         assert isinstance(lr, float), "Actor learning rate must be a float."
         assert lr > 0, "Actor learning rate must be greater than zero."
-        assert isinstance(clip_coef, (float, int)), (
-            "Clipping coefficient must be a float."
-        )
-        assert clip_coef >= 0, (
-            "Clipping coefficient must be greater than or equal to zero."
-        )
-        assert isinstance(update_epochs, int), (
-            "Policy update epochs must be an integer."
-        )
-        assert update_epochs >= 1, (
-            "Policy update epochs must be greater than or equal to one."
-        )
+        assert isinstance(clip_coef, (float, int)), "Clip coefficient must be a float."
+        assert clip_coef >= 0, "Clipping coefficient must be non-negative."
+        assert isinstance(update_epochs, int), "Update epochs must be an integer."
+        assert update_epochs >= 1, "Update epochs must be at least one."
         if clone and actor_network is not None:
             assert isinstance(
                 actor_network,
@@ -911,19 +918,13 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         gae_lambda: float,
     ) -> None:
         """Validate and store the GAE advantage options."""
-        valid_action_granularities = {"turn", "token", "auto"}
-        if advantage_granularity not in valid_action_granularities:
-            msg = (
-                "advantage_granularity must be one of "
-                f"{sorted(valid_action_granularities)}."
-            )
+        granularities = ["auto", "token", "turn"]
+        if advantage_granularity not in granularities:
+            msg = f"advantage_granularity must be one of {granularities}."
             raise ValueError(msg)
-        valid_turn_value_reductions = {"mean", "final_value"}
-        if turn_value_reduction not in valid_turn_value_reductions:
-            msg = (
-                "turn_value_reduction must be one of "
-                f"{sorted(valid_turn_value_reductions)}."
-            )
+        reductions = ["final_value", "mean"]
+        if turn_value_reduction not in reductions:
+            msg = f"turn_value_reduction must be one of {reductions}."
             raise ValueError(msg)
         if not isinstance(whiten_advantages, bool):
             msg = "whiten_advantages must be a boolean."
@@ -1009,10 +1010,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         :rtype: str
         """
         return resolve_batch_advantage_granularity(
-            self.advantage_granularity,
-            turn_ids,
-            single_turn="token",
-            multi_turn="turn",
+            self.advantage_granularity, turn_ids, single_turn="token", multi_turn="turn"
         )
 
     def _resolve_is_level(self, ppo_granularity: str) -> str:
@@ -1037,6 +1035,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         values: torch.Tensor,
         action_mask: torch.Tensor,
         turn_ids: torch.Tensor,
+        gae_lambda: float,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute turn-level GAE and broadcast advantages to all action tokens.
 
@@ -1052,6 +1051,8 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         :type action_mask: torch.Tensor
         :param turn_ids: Turn index per token ``[batch, seq_len]``; ``-1`` for padding.
         :type turn_ids: torch.Tensor
+        :param gae_lambda: GAE lambda; ``1.0`` gives Monte Carlo returns.
+        :type gae_lambda: float
         :return: Tuple of ``(token_returns, token_advantages)``, each ``[batch, seq_len]``.
         :rtype: tuple[torch.Tensor, torch.Tensor]
         """
@@ -1059,10 +1060,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         num_turns = int(turn_ids.max().item()) + 1
 
         turn_values = pool_by_turns(
-            values,
-            turn_ids,
-            num_turns,
-            reduction=self.turn_value_reduction,
+            values, turn_ids, num_turns, reduction=self.turn_value_reduction
         )
         turn_rewards = pool_by_turns(rewards, turn_ids, num_turns)
 
@@ -1084,7 +1082,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                 turn_rewards[:, t] + self.gamma * next_turn_value - turn_values[:, t]
             )
             has_turn = (per_sample_num_turns > t).float()
-            last_gae = (delta + self.gamma * self.gae_lambda * last_gae) * has_turn
+            last_gae = (delta + self.gamma * gae_lambda * last_gae) * has_turn
             turn_advantages[:, t] = last_gae
 
         del turn_rewards
@@ -1111,6 +1109,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         rewards: torch.Tensor,
         values: torch.Tensor,
         action_mask: torch.Tensor,
+        gae_lambda: float,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute token-level GAE and returns.
 
@@ -1120,6 +1119,8 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         :type values: torch.Tensor
         :param action_mask: Bool mask of valid action positions ``[batch, seq_len]``.
         :type action_mask: torch.Tensor
+        :param gae_lambda: GAE lambda; ``1.0`` gives Monte Carlo returns.
+        :type gae_lambda: float
         :return: Tuple of ``(token_returns, token_advantages)``, each ``[batch, seq_len]``.
         :rtype: tuple[torch.Tensor, torch.Tensor]
         """
@@ -1137,7 +1138,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                 next_mask = mask[:, t + 1]
 
             delta = rewards[:, t] + self.gamma * next_value * next_mask - values[:, t]
-            last_gae = delta + self.gamma * self.gae_lambda * last_gae * next_mask
+            last_gae = delta + self.gamma * gae_lambda * last_gae * next_mask
             token_advantages[:, t] = last_gae * mask[:, t]
 
         token_returns = (token_advantages + values) * mask
@@ -1146,30 +1147,31 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         return token_returns, token_advantages * mask
 
     def _backward_ppo_pass(
-        self, loss: torch.Tensor, accumulation_steps: int | None
+        self, loss: torch.Tensor, accumulation_steps: int | None, passes: int
     ) -> OptimizerStep | None:
         """Backward one pass of a micro-batch.
 
-        The split mode backs two passes per micro-batch, so its accumulation
-        window counts twice as many backward calls and each loss doubles to
-        keep the micro-batch's weight.
+        With two passes per micro-batch, the accumulation window counts twice
+        as many backward calls and each loss doubles to keep the micro-batch's
+        weight. Actor and critic clip apart unless :attr:`share_grad_clip`.
 
         :param loss: Scaled loss of one pass.
         :type loss: torch.Tensor
         :param accumulation_steps: Micro-batches per optimizer step; ``None``
             uses :attr:`gradient_accumulation_steps`.
         :type accumulation_steps: int | None
+        :param passes: Backward passes per micro-batch.
+        :type passes: int
         :return: Gradient norms of the optimizer step, or ``None`` when the
             pass only accumulates.
         :rtype: OptimizerStep | None
         """
-        passes = 1 if self._fuses_actor_critic_pass else 2
-        steps = (
-            self.gradient_accumulation_steps
-            if accumulation_steps is None
-            else accumulation_steps
+        steps = accumulation_steps or self.gradient_accumulation_steps
+        roles = () if self.share_grad_clip else ("actor", "critic")
+        clip_groups = tuple(
+            frozenset({role, f"{role}{REPLICATED_GROUP_SUFFIX}"}) for role in roles
         )
-        return self._backward_pass(passes * loss, passes * steps)
+        return self._backward_pass(passes * loss, passes * steps, clip_groups or None)
 
     def _restore_checkpoint_attributes(
         self,
@@ -1177,7 +1179,9 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         restore_config: bool,
         restore_hyperparameters: bool,
     ) -> None:
-        """Restore attributes, then re-resolve the fused pass on this device.
+        """Restore attributes and the warmup count, then re-resolve the fused pass.
+
+        The warmup count is training state, restored even without ``restore_config``.
 
         :param checkpoint: Loaded attribute payload.
         :type checkpoint: dict[str, Any]
@@ -1189,6 +1193,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         super()._restore_checkpoint_attributes(
             checkpoint, restore_config, restore_hyperparameters
         )
+        self.critic_warmup_steps_done = checkpoint.get("critic_warmup_steps_done", 0)
         self._fuses_actor_critic_pass = self._resolve_fuse_actor_critic_pass()
 
     def _resolve_fuse_actor_critic_pass(self) -> bool:
@@ -1279,26 +1284,23 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
     def _actor_critic_grad_norms(self, step: OptimizerStep) -> dict[str, float]:
         """Split one optimizer step's gradient norms by actor and critic param groups.
 
-        Actor and critic grads share the optimizer step, so one clip
-        coefficient scales both.
-
         :param step: Optimizer step returned by :meth:`_backward_ppo_pass`.
         :type step: OptimizerStep
-        :return: Pre- and post-clip L2 norms of the actor LoRA and of the
-            critic LoRA plus value head.
+        :return: Pre- and post-clip norms of actor LoRA and critic LoRA + value head.
         :rtype: dict[str, float]
         """
-        squares = {"actor": 0.0, "critic": 0.0}
+        pre, post = {"actor": 0.0, "critic": 0.0}, {"actor": 0.0, "critic": 0.0}
         param_groups = self.optimizer._single_optimizer().param_groups
-        for group, norm in zip(param_groups, step.group_grad_norms, strict=True):
-            squares[group["group"].removesuffix(REPLICATED_GROUP_SUFFIX)] += norm**2
-        actor_norm = squares["actor"] ** 0.5
-        critic_norm = squares["critic"] ** 0.5
+        rows = zip(param_groups, step.group_grad_norms, step.clip_coefs, strict=True)
+        for group, norm, coef in rows:
+            role = group["group"].removesuffix(REPLICATED_GROUP_SUFFIX)
+            pre[role] += norm**2
+            post[role] += (norm * coef) ** 2
         return {
-            "grad_norm_pre": actor_norm,
-            "grad_norm_post": actor_norm * step.clip_coef,
-            "critic_grad_norm_pre": critic_norm,
-            "critic_grad_norm_post": critic_norm * step.clip_coef,
+            "grad_norm_pre": pre["actor"] ** 0.5,
+            "grad_norm_post": post["actor"] ** 0.5,
+            "critic_grad_norm_pre": pre["critic"] ** 0.5,
+            "critic_grad_norm_post": post["critic"] ** 0.5,
         }
 
     def _critic_values(

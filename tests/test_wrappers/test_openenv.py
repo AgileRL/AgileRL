@@ -42,6 +42,7 @@ from agilerl.llm_envs.env_sources import (
 )
 from agilerl.llm_envs.observation import (
     encode_image_training_inputs,
+    observation_goal_images,
     observation_text_and_image,
     process_observation,
 )
@@ -340,6 +341,34 @@ class TestObservationTextAndImageBase64Screenshot:
 
         with pytest.raises(UnidentifiedImageError, match="cannot identify image file"):
             observation_text_and_image({"screenshot": encoded})
+
+
+class TestObservationGoalImages:
+    def test_decodes_each_base64_image_in_order(self) -> None:
+        # Arrange
+        encoded = []
+        for level in (40, 90):
+            buffer = io.BytesIO()
+            Image.new("RGBA", (2, 1), (level, level, level, 255)).save(
+                buffer, format="PNG"
+            )
+            encoded.append(base64.b64encode(buffer.getvalue()).decode("ascii"))
+
+        # Act
+        images = observation_goal_images({"goal": "Find it.", "goal_images": encoded})
+
+        # Assert
+        assert [image.mode for image in images] == ["RGB", "RGB"]
+        assert [image.getpixel((0, 0)) for image in images] == [
+            (40, 40, 40),
+            (90, 90, 90),
+        ]
+
+    @pytest.mark.parametrize(
+        "obs", ["page text", {"goal": "Find it."}, {"goal_images": None}]
+    )
+    def test_observation_without_goal_images_has_none(self, obs: object) -> None:
+        assert observation_goal_images(obs) == []
 
 
 def test_vl_observation_string_is_text_only() -> None:
@@ -2150,6 +2179,7 @@ def test_custom_processor_renders_an_in_process_observation() -> None:
         True,
         False,
         {},
+        None,
     )
     harness.close()
 

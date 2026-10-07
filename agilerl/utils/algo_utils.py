@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import inspect
+import math
 import os
 import shutil
 import warnings
@@ -10,7 +11,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
-from functools import singledispatch
+from functools import partial, singledispatch
 from numbers import Number
 from typing import (
     TYPE_CHECKING,
@@ -34,7 +35,7 @@ from torch import nn
 from torch._dynamo import OptimizedModule
 from torch.distributed.fsdp import FSDPModule
 from torch.optim import Optimizer
-from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+from torch.optim.lr_scheduler import LambdaLR
 from typing_extensions import TypeVarTuple, Unpack
 
 from agilerl import HAS_LLM_DEPENDENCIES
@@ -2042,10 +2043,68 @@ def is_vectorized_experiences(*experiences: NumpyObsType | TorchObsType) -> bool
 
 @dataclass
 class CosineLRScheduleConfig:
-    """Data class to configure a cosine LR scheduler."""
+    """Linear warmup to each param group's peak lr, then cosine decay to a floor.
 
-    num_epochs: int
-    warmup_proportion: float
+    One step is one ``learn`` call, however many optimizer steps it takes.
+
+    :param num_steps: Learn steps from the first warmup step to the floor.
+    :type num_steps: int
+    :param warmup_proportion: Fraction of ``num_steps`` spent ramping up to the peak.
+    :type warmup_proportion: float
+    :param min_lr_ratio: Floor as a fraction of the peak, held after ``num_steps``.
+    :type min_lr_ratio: float
+    :param actor_start_step: Learn steps the actor param groups hold at zero
+        before their own warmup and cosine run over the steps left to
+        ``num_steps``. Other groups (the PPO critic) start at step 0.
+    :type actor_start_step: int
+    """
+
+    num_steps: int
+    warmup_proportion: float = 0.0
+    min_lr_ratio: float = 0.1
+    actor_start_step: int = 0
+
+    def __post_init__(self) -> None:
+        if self.num_steps < 1:
+            msg = f"num_steps must be at least 1, got {self.num_steps}"
+            raise ValueError(msg)
+        if not 0.0 <= self.warmup_proportion < 1.0:
+            msg = f"warmup_proportion must be in [0, 1), got {self.warmup_proportion}"
+            raise ValueError(msg)
+        if not 0.0 <= self.min_lr_ratio <= 1.0:
+            msg = f"min_lr_ratio must be in [0, 1], got {self.min_lr_ratio}"
+            raise ValueError(msg)
+        if not 0 <= self.actor_start_step < self.num_steps:
+            msg = (
+                f"actor_start_step ({self.actor_start_step}) must be in "
+                f"[0, num_steps={self.num_steps})"
+            )
+            raise ValueError(msg)
+
+    def lr_multiplier(self, step: int, start_step: int) -> float:
+        """Fraction of the peak lr that learn step ``step`` (0-indexed) trains with.
+
+        :param step: Learn steps already taken.
+        :type step: int
+        :param start_step: Learn steps held at zero before this group's schedule
+            runs over the steps left to ``num_steps``: ``0`` for the PPO critic,
+            ``actor_start_step`` for actor groups.
+        :type start_step: int
+        :return: ``0`` before ``start_step``, then ``(k + 1) / warmup_steps`` during
+            warmup and a half cosine from ``1`` to ``min_lr_ratio`` at ``num_steps``,
+            where ``k = step - start_step``.
+        :rtype: float
+        """
+        if step < start_step:
+            return 0.0
+        step -= start_step
+        num_steps = self.num_steps - start_step
+        warmup_steps = int(num_steps * self.warmup_proportion)
+        if step < warmup_steps:
+            return (step + 1) / warmup_steps
+        progress = min((step - warmup_steps) / (num_steps - warmup_steps), 1.0)
+        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return self.min_lr_ratio + (1.0 - self.min_lr_ratio) * cosine
 
 
 @dataclass
@@ -2210,46 +2269,34 @@ class VLLMConfig:
 def create_warmup_cosine_scheduler(
     optimizer: torch.optim.Optimizer,
     config: CosineLRScheduleConfig,
-    min_lr: float,
-    max_lr: float,
-) -> SequentialLR:
-    """Create cosine annealing lr scheduler with warm-up.
+    start_step: int = 0,
+) -> LambdaLR:
+    """Schedule every param group from its current lr as the peak.
 
-    :param optimizer: Optimizer
+    Step the returned scheduler once per learn step. Groups named ``critic*``
+    start the schedule at step 0; every other group starts at
+    :attr:`CosineLRScheduleConfig.actor_start_step`.
+
+    :param optimizer: Optimizer whose param group lrs are the peaks.
     :type optimizer: torch.optim.Optimizer
-    :param config: LR scheduler config
+    :param config: Warmup-cosine schedule.
     :type config: CosineLRScheduleConfig
-    :param min_lr: Minimum learning rate
-    :type min_lr: float
-    :param max_lr: Maximum learning rate
-    :type max_lr: float
-    :return: Return sequential learning rate scheduler
-    :rtype: SequentialLR
+    :param start_step: Learn steps already taken; group lrs are set for this step.
+    :type start_step: int
+    :return: Scheduler positioned at ``start_step``.
+    :rtype: LambdaLR
     """
-    num_epochs = config.num_epochs
-    warmup_proportion = config.warmup_proportion
-    warmup_epochs = int(num_epochs * warmup_proportion)
-    remaining_epochs = num_epochs - warmup_epochs
+    lr_lambdas: list[Callable[[int], float]] = []
     for param_group in optimizer.param_groups:
-        param_group["lr"] = max_lr
-    warmup_scheduler = LinearLR(
-        optimizer,
-        start_factor=min_lr / max_lr,  # Start factor to get from min_lr to max_lr
-        end_factor=1.0,  # End with the full max_lr
-        total_iters=warmup_epochs,
-    )
-    # Decay scheduler: Cosine decay from max_lr to min_lr
-    # Double T_max to ensure we only use the first half of the cosine curve (strictly decreasing)
-    cosine_scheduler = CosineAnnealingLR(
-        optimizer,
-        T_max=remaining_epochs * 2,  # Doubled to ensure strictly decreasing LR
-        eta_min=min_lr,
-    )
-    return SequentialLR(
-        optimizer,
-        schedulers=[warmup_scheduler, cosine_scheduler],
-        milestones=[warmup_epochs],
-    )
+        param_group["initial_lr"] = param_group["lr"]
+        is_critic = param_group.get("group", "").startswith("critic")
+        lr_lambdas.append(
+            partial(
+                config.lr_multiplier,
+                start_step=0 if is_critic else config.actor_start_step,
+            )
+        )
+    return LambdaLR(optimizer, lr_lambdas, last_epoch=start_step - 1)
 
 
 def remove_nested_files(files: list[str]) -> None:

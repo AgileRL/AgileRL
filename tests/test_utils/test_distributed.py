@@ -17,13 +17,14 @@ import os
 import subprocess
 import sys
 from types import SimpleNamespace
-from typing import ClassVar
+from typing import Any, ClassVar
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 import torch
 import torch.distributed as dist
+from peft import LoraConfig, get_peft_model
 from torch import nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     CheckpointWrapper,
@@ -84,6 +85,17 @@ from agilerl.distributed.runtime import (
     clip_param_groups,
 )
 from agilerl.utils.algo_utils import CosineLRScheduleConfig
+from agilerl.utils.llm_utils import save_lora_adapters
+from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
+from tests.test_algorithms.test_llms.llm_helpers import (
+    DummyConfig,
+    DummyMLPPreTrainedModel,
+)
+from tests.test_utils.test_expert_parallel import (
+    _init_gloo,
+    _spawn_ranks,
+    requires_gloo,
+)
 
 cuda_required = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="requires CUDA for state round-trip"
@@ -178,6 +190,9 @@ class TestClipParamGroupGradNorm:
         assert float(out) == 3.0
 
 
+ACTOR_CRITIC_CLIP_GROUPS = (frozenset({"actor"}), frozenset({"critic"}))
+
+
 class TestClipParamGroups:
     @staticmethod
     def two_groups(first_grad: torch.Tensor, second_grad: torch.Tensor):
@@ -185,7 +200,11 @@ class TestClipParamGroups:
         first.grad = first_grad.clone()
         second = nn.Parameter(torch.zeros_like(second_grad))
         second.grad = second_grad.clone()
-        return [{"params": [first]}, {"params": [second]}], first, second
+        groups = [
+            {"params": [first], "group": "actor"},
+            {"params": [second], "group": "critic"},
+        ]
+        return groups, first, second
 
     def test_one_coefficient_matches_torch_over_all_grads(self):
         # Arrange
@@ -198,7 +217,7 @@ class TestClipParamGroups:
         reference_norm = clip_grad_norm_([reference], max_norm=1.0)
 
         # Act
-        norms, clip_coef = clip_param_groups(groups, 1.0, clip_param_group_grad_norm_)
+        norms, clip_coefs = clip_param_groups(groups, 1.0, clip_param_group_grad_norm_)
 
         # Assert
         assert norms == pytest.approx(
@@ -209,7 +228,8 @@ class TestClipParamGroups:
             rel=1e-6,
         )
         assert math.hypot(*norms) == pytest.approx(reference_norm.item(), rel=1e-6)
-        assert math.hypot(*norms) * clip_coef == pytest.approx(1.0, rel=1e-5)
+        assert clip_coefs[0] == clip_coefs[1]
+        assert math.hypot(*norms) * clip_coefs[0] == pytest.approx(1.0, rel=1e-5)
         # rtol covers the float64 vs float32 clip coefficient
         assert torch.allclose(
             torch.cat([first.grad, second.grad]), reference.grad, rtol=1e-6, atol=0
@@ -220,11 +240,11 @@ class TestClipParamGroups:
         groups, first, second = self.two_groups(torch.full((2,), 0.1), torch.zeros(2))
 
         # Act
-        norms, clip_coef = clip_param_groups(groups, 1.0, clip_param_group_grad_norm_)
+        norms, clip_coefs = clip_param_groups(groups, 1.0, clip_param_group_grad_norm_)
 
         # Assert
         assert norms == pytest.approx((0.02**0.5, 0.0))
-        assert clip_coef == 1.0
+        assert clip_coefs == (1.0, 1.0)
         assert torch.equal(first.grad, torch.full((2,), 0.1))
         assert torch.equal(second.grad, torch.zeros(2))
 
@@ -233,11 +253,13 @@ class TestClipParamGroups:
         groups, first, second = self.two_groups(torch.full((2,), 10.0), torch.ones(2))
 
         # Act
-        norms, clip_coef = clip_param_groups(groups, None, clip_param_group_grad_norm_)
+        norms, clip_coefs = clip_param_groups(
+            groups, None, clip_param_group_grad_norm_, ACTOR_CRITIC_CLIP_GROUPS
+        )
 
         # Assert
         assert norms == pytest.approx((200**0.5, 2**0.5))
-        assert clip_coef == 1.0
+        assert clip_coefs == (1.0, 1.0)
         assert torch.equal(first.grad, torch.full((2,), 10.0))
         assert torch.equal(second.grad, torch.ones(2))
 
@@ -248,19 +270,92 @@ class TestClipParamGroups:
         )
 
         # Act
-        norms, clip_coef = clip_param_groups(groups, 1.0, clip_param_group_grad_norm_)
+        norms, clip_coefs = clip_param_groups(groups, 1.0, clip_param_group_grad_norm_)
 
         # Assert
         assert np.isnan(norms[0])
-        assert np.isnan(clip_coef)
+        assert np.isnan(clip_coefs).all()
         assert torch.isnan(first.grad).all()
         assert torch.isnan(second.grad).all()
 
+    def test_clip_groups_leave_a_set_below_threshold_unchanged(self):
+        # Arrange: actor norm 0.5, critic norm 50.
+        groups, actor, critic = self.two_groups(
+            torch.tensor([0.3, 0.4]), torch.tensor([30.0, 40.0])
+        )
+
+        # Act
+        norms, clip_coefs = clip_param_groups(
+            groups, 1.0, clip_param_group_grad_norm_, ACTOR_CRITIC_CLIP_GROUPS
+        )
+
+        # Assert
+        assert norms == pytest.approx((0.5, 50.0), rel=1e-6)
+        assert clip_coefs == pytest.approx((1.0, 1.0 / 50.0), rel=1e-6)
+        assert torch.equal(actor.grad, torch.tensor([0.3, 0.4]))
+        # rtol covers the 1e-6 epsilon in the clip coefficient
+        assert torch.allclose(critic.grad, torch.tensor([0.6, 0.8]), rtol=1e-6, atol=0)
+
+    def test_clip_groups_scale_each_set_above_threshold_to_max_norm(self):
+        # Arrange: actor norm 5, critic norm 50.
+        groups, actor, critic = self.two_groups(
+            torch.tensor([3.0, 4.0]), torch.tensor([30.0, 40.0])
+        )
+
+        # Act
+        _, clip_coefs = clip_param_groups(
+            groups, 1.0, clip_param_group_grad_norm_, ACTOR_CRITIC_CLIP_GROUPS
+        )
+
+        # Assert
+        assert clip_coefs == pytest.approx((1.0 / 5.0, 1.0 / 50.0), rel=1e-6)
+        # rtol covers the 1e-6 epsilon in the clip coefficient
+        assert torch.allclose(actor.grad, torch.tensor([0.6, 0.8]), rtol=1e-6, atol=0)
+        assert torch.allclose(critic.grad, torch.tensor([0.6, 0.8]), rtol=1e-6, atol=0)
+
+    def test_default_scales_every_group_by_the_global_norm(self):
+        # Arrange: actor norm 0.5, critic norm 50.
+        groups, actor, critic = self.two_groups(
+            torch.tensor([0.3, 0.4]), torch.tensor([30.0, 40.0])
+        )
+        coef = 1.0 / math.hypot(0.5, 50.0)
+
+        # Act
+        _, clip_coefs = clip_param_groups(groups, 1.0, clip_param_group_grad_norm_)
+
+        # Assert
+        assert clip_coefs == pytest.approx((coef, coef), rel=1e-6)
+        # rtol covers the 1e-6 epsilon in the clip coefficient
+        assert torch.allclose(
+            actor.grad, torch.tensor([0.3, 0.4]) * coef, rtol=1e-6, atol=0
+        )
+        assert torch.allclose(
+            critic.grad, torch.tensor([30.0, 40.0]) * coef, rtol=1e-6, atol=0
+        )
+
+    @pytest.mark.parametrize(
+        "clip_groups",
+        [
+            (frozenset({"actor"}),),
+            (frozenset({"actor", "critic"}), frozenset({"critic"})),
+        ],
+        ids=["missing", "repeated"],
+    )
+    def test_clip_groups_must_hold_each_group_once(self, clip_groups):
+        # Arrange
+        groups, actor, critic = self.two_groups(torch.ones(2), torch.ones(2))
+
+        # Act / Assert
+        with pytest.raises(ValueError, match="exactly once"):
+            clip_param_groups(groups, 1.0, clip_param_group_grad_norm_, clip_groups)
+        assert torch.equal(actor.grad, torch.ones(2))
+        assert torch.equal(critic.grad, torch.ones(2))
+
 
 class TestOptimizerStepGradNormProperties:
-    def test_totals_span_every_group_and_share_the_clip_coefficient(self):
+    def test_totals_span_every_group_with_a_shared_clip_coefficient(self):
         # Arrange
-        step = OptimizerStep(group_grad_norms=(3.0, 4.0), clip_coef=0.2, lr=None)
+        step = OptimizerStep(group_grad_norms=(3.0, 4.0), clip_coefs=(0.2, 0.2))
 
         # Act
         pre, post = step.grad_norm_pre, step.grad_norm_post
@@ -269,10 +364,22 @@ class TestOptimizerStepGradNormProperties:
         assert pre == pytest.approx(5.0)
         assert post == pytest.approx(1.0)
 
+    def test_post_applies_each_group_coefficient(self):
+        # Arrange
+        step = OptimizerStep(group_grad_norms=(0.5, 50.0), clip_coefs=(1.0, 0.02))
+
+        # Act
+        pre, post = step.grad_norm_pre, step.grad_norm_post
+
+        # Assert
+        assert pre == pytest.approx(math.hypot(0.5, 50.0))
+        assert post == pytest.approx(math.hypot(0.5, 1.0))
+
     def test_nan_group_norm_makes_both_totals_nan(self):
         # Arrange
         step = OptimizerStep(
-            group_grad_norms=(float("nan"), 1.0), clip_coef=float("nan"), lr=None
+            group_grad_norms=(float("nan"), 1.0),
+            clip_coefs=(float("nan"), float("nan")),
         )
 
         # Act
@@ -777,58 +884,97 @@ class TestSyncGrads:
         # Assert
         mock_all_reduce.assert_not_called()
 
-    def test_raises_when_any_rank_is_missing_a_grad(self):
-        # Arrange
-        param = nn.Parameter(torch.ones(2))
-        param.grad = torch.ones(2)
-        missing = nn.Parameter(torch.ones(2))
+    @requires_gloo
+    def test_averages_grads_and_skips_params_with_no_grad_on_every_rank(self):
+        _spawn_ranks(_sync_grads_skips_unused_worker)
 
-        with (
-            patch("agilerl.distributed.process.is_distributed", return_value=True),
-            patch("agilerl.distributed.process.dist.get_world_size", return_value=2),
-            patch("agilerl.distributed.process.get_rank", return_value=3),
-            patch(
-                "agilerl.distributed.process.allreduce_minmax_int",
-                return_value=(1, 1),
-            ),
-            patch("agilerl.distributed.process.dist.all_reduce") as mock_all_reduce,
-            pytest.raises(RuntimeError, match="1 params have no grad on rank 3"),
-        ):
-            # Act
-            sync_grads([param, missing])
+    @requires_gloo
+    def test_leaves_every_grad_none_when_no_rank_has_one(self):
+        _spawn_ranks(_sync_grads_all_unused_worker)
+
+    @requires_gloo
+    def test_raises_on_every_rank_when_ranks_disagree_on_a_grad(self):
+        _spawn_ranks(_sync_grads_mismatch_worker)
+
+
+def _sync_grads_skips_unused_worker(
+    rank: int, world_size: int, port: int, result_queue: Any
+) -> None:
+    try:
+        _init_gloo(rank, world_size, port)
+        # Arrange — ranks hold grads 1 and 3
+        first = nn.Parameter(torch.zeros(2))
+        first.grad = torch.full((2,), 2.0 * rank + 1)
+        unused = nn.Parameter(torch.zeros(4))
+        second = nn.Parameter(torch.zeros(3))
+        second.grad = torch.full((3,), 2.0 * rank + 1)
+        optimizer = torch.optim.AdamW([first, unused, second], lr=0.1)
+
+        # Act
+        sync_grads([first, unused, second])
+        optimizer.step()
 
         # Assert
-        mock_all_reduce.assert_not_called()
-        assert missing.grad is None
+        assert torch.equal(first.grad, torch.full((2,), 2.0))
+        assert torch.equal(second.grad, torch.full((3,), 2.0))
+        assert unused.grad is None
+        assert torch.equal(unused.detach(), torch.zeros(4))
+        assert unused not in optimizer.state
+        result_queue.put((rank, "ok", None))
+    except Exception as exc:
+        result_queue.put((rank, "err", repr(exc)))
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()
 
-    def test_coalesces_and_averages_grads_across_world_size(self):
+
+def _sync_grads_all_unused_worker(
+    rank: int, world_size: int, port: int, result_queue: Any
+) -> None:
+    try:
+        _init_gloo(rank, world_size, port)
         # Arrange
-        p1 = nn.Parameter(torch.ones(2))
-        p1.grad = torch.full((2,), 4.0)
-        p2 = nn.Parameter(torch.ones(3))
-        p2.grad = torch.full((3,), 6.0)
+        params = [nn.Parameter(torch.zeros(2)), nn.Parameter(torch.zeros(3))]
 
-        with (
-            patch("agilerl.distributed.process.is_distributed", return_value=True),
-            patch("agilerl.distributed.process.dist.get_world_size", return_value=2),
-            patch(
-                "agilerl.distributed.process.allreduce_minmax_int",
-                return_value=(0, 0),
-            ),
-            patch(
-                "agilerl.distributed.process.dist.all_reduce",
-                autospec=True,
-            ) as mock_all_reduce,
+        # Act
+        sync_grads(params)
+
+        # Assert
+        assert all(param.grad is None for param in params)
+        result_queue.put((rank, "ok", None))
+    except Exception as exc:
+        result_queue.put((rank, "err", repr(exc)))
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+
+def _sync_grads_mismatch_worker(
+    rank: int, world_size: int, port: int, result_queue: Any
+) -> None:
+    try:
+        _init_gloo(rank, world_size, port)
+        # Arrange — only rank 0 has a grad for ``partial``
+        shared = nn.Parameter(torch.zeros(2))
+        shared.grad = torch.full((2,), float(rank + 1))
+        partial = nn.Parameter(torch.zeros(2))
+        if rank == 0:
+            partial.grad = torch.ones(2)
+
+        # Act
+        with pytest.raises(
+            RuntimeError, match="1 params have a grad on some ranks but not others"
         ):
-            mock_all_reduce.side_effect = lambda tensor, op=None, group=None: None
+            sync_grads([shared, partial])
 
-            # Act
-            sync_grads([p1, p2])
-
-        # Assert — identity SUM, then divide by world size 2
-        mock_all_reduce.assert_called_once()
-        assert torch.equal(p1.grad, torch.full((2,), 2.0))
-        assert torch.equal(p2.grad, torch.full((3,), 3.0))
+        # Assert
+        assert torch.equal(shared.grad, torch.full((2,), float(rank + 1)))
+        result_queue.put((rank, "ok", None))
+    except Exception as exc:
+        result_queue.put((rank, "err", repr(exc)))
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()
 
 
 class TestMaterializeDtensors:
@@ -1470,18 +1616,51 @@ class TestCopyAdapterTensors:
         assert torch.equal(actor.block.tgt.lora_A.data, torch.ones(2, 2))
 
 
-class TestImportAdapterTensors:
-    def test_loads_adapters_onto_actor_device(self):
-        actor = nn.Linear(2, 2)
+class TestFSDPRuntimeImportAdapterTensors:
+    @pytest.mark.parametrize("use_value_head", [False, True])
+    def test_loads_saved_actor_and_critic_adapters(self, tmp_path, use_value_head):
+        # Arrange
+        torch.manual_seed(0)
+        lora_config = LoraConfig(
+            r=2, lora_alpha=4, target_modules=["linear_1"], lora_dropout=0.0
+        )
+        peft_model = get_peft_model(
+            DummyMLPPreTrainedModel(DummyConfig(vocab_size=8, hidden_size=32)),
+            lora_config,
+            adapter_name="actor",
+        )
+        peft_model.add_adapter("critic", lora_config)
+        actor = (
+            AutoModelForCausalLMWithValueHead(peft_model)
+            if use_value_head
+            else peft_model
+        )
+        lora_params = {
+            name: param for name, param in actor.named_parameters() if "lora_" in name
+        }
+        with torch.no_grad():
+            for param in lora_params.values():
+                param.normal_()
+        saved = {name: param.detach().clone() for name, param in lora_params.items()}
+        save_lora_adapters(
+            actor, tmp_path, ["actor", "critic"], use_value_head=use_value_head
+        )
+        with torch.no_grad():
+            for param in lora_params.values():
+                param.zero_()
 
-        with patch(
-            "agilerl.utils.llm_utils.load_lora_adapters",
-        ) as mock_load:
+        # Act
+        for adapter in ("actor", "critic"):
             FSDPRuntime(FSDPConfig()).import_adapter_tensors(
-                actor, nn.Linear(2, 2), "/ckpt", "adapter"
+                actor, peft_model, str(tmp_path), adapter
             )
 
-        mock_load.assert_called_once_with(actor, "/ckpt", "adapter", device="cpu")
+        # Assert
+        assert {".actor.", ".critic."} == {
+            role for role in (".actor.", ".critic.") for name in saved if role in name
+        }
+        for name, param in lora_params.items():
+            assert torch.equal(param, saved[name]), name
 
 
 class TestFSDPPrepareActorOffload:
@@ -1611,12 +1790,12 @@ class TestDenseWrap:
 
     def test_builds_cosine_scheduler_when_configured(self):
         actor = _LoraActor()
-        config = CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.1)
+        config = CosineLRScheduleConfig(num_steps=10, warmup_proportion=0.5)
 
-        result = _prepare_dp_actor(actor, cosine_lr_schedule_config=config)
+        result = _prepare_dp_actor(actor, cosine_lr_schedule_config=config, lr=1e-4)
 
         assert result.lr_scheduler is not None
-        assert result.lr_scheduler.get_last_lr()[0] == pytest.approx(1e-8)
+        assert result.lr_scheduler.get_last_lr() == pytest.approx([2e-5])
 
     def test_rejects_actor_to_that_returns_non_module(self):
         actor = nn.Linear(2, 2)
@@ -1656,12 +1835,11 @@ class TestIsSharded:
 
 
 class TestDPRuntimeBackward:
-    def test_steps_and_returns_lr_on_accumulation_boundary(self):
+    def test_steps_on_accumulation_boundary(self):
         # Arrange
         model = nn.Linear(2, 1, bias=False)
         nn.init.zeros_(model.weight)
         inner = torch.optim.SGD(model.parameters(), lr=0.1)
-        scheduler = torch.optim.lr_scheduler.StepLR(inner, step_size=1, gamma=0.5)
         optimizer = MagicMock()
         optimizer._single_optimizer.return_value = inner
         optimizer.step.side_effect = inner.step
@@ -1670,13 +1848,9 @@ class TestDPRuntimeBackward:
         x = torch.ones(1, 2)
 
         # Act
-        first = runtime.backward(
-            model(x).sum(), optimizer, 2, model, lr_scheduler=scheduler
-        )
+        first = runtime.backward(model(x).sum(), optimizer, 2, model)
         weight_mid_window = model.weight.detach().clone()
-        second = runtime.backward(
-            model(x).sum(), optimizer, 2, model, lr_scheduler=scheduler
-        )
+        second = runtime.backward(model(x).sum(), optimizer, 2, model)
 
         # Assert — two half-scaled grads of 1.0 sum to 1.0; SGD lr 0.1
         assert first is None
@@ -1684,8 +1858,7 @@ class TestDPRuntimeBackward:
         assert torch.allclose(model.weight, torch.full((1, 2), -0.1))
         assert second == OptimizerStep(
             group_grad_norms=(pytest.approx(2**0.5),),
-            clip_coef=1.0,
-            lr=pytest.approx(0.05),
+            clip_coefs=(1.0,),
         )
         assert model.weight.grad is None
 
@@ -1781,15 +1954,13 @@ class TestFSDPRuntimeBackward:
         with pytest.raises(TypeError, match="FSDP2-sharded actor"):
             runtime.backward(MagicMock(), MagicMock(), 1, actor=nn.Linear(2, 2))
 
-    def test_clips_and_steps_scheduler_at_boundary(self):
+    def test_clips_and_steps_at_boundary(self):
         param = nn.Parameter(torch.ones(2))
         param.grad = torch.ones(2) * 10
         inner = MagicMock()
         inner.param_groups = [{"params": [param]}]
         optimizer = MagicMock()
         optimizer._single_optimizer.return_value = inner
-        scheduler = MagicMock()
-        scheduler.get_last_lr.return_value = [0.5]
         runtime = FSDPRuntime(FSDPConfig(defer_grad_sync=False))
 
         step = runtime.backward(
@@ -1798,16 +1969,44 @@ class TestFSDPRuntimeBackward:
             1,
             actor=MagicMock(),
             max_grad_norm=1.0,
-            lr_scheduler=scheduler,
         )
 
         assert torch.linalg.vector_norm(param.grad).item() == pytest.approx(1.0)
         assert step.group_grad_norms == pytest.approx((200**0.5,))
         assert step.grad_norm_post == pytest.approx(1.0)
-        assert step.lr == 0.5
-        scheduler.step.assert_called_once_with()
         optimizer.step.assert_called_once_with()
         optimizer.zero_grad.assert_called_once_with()
+
+    def test_clip_groups_clip_each_set_by_its_own_norm(self):
+        # Arrange: actor norm 0.5, critic norm 50.
+        actor = nn.Parameter(torch.zeros(2))
+        actor.grad = torch.tensor([0.3, 0.4])
+        critic = nn.Parameter(torch.zeros(2))
+        critic.grad = torch.tensor([30.0, 40.0])
+        inner = MagicMock()
+        inner.param_groups = [
+            {"params": [actor], "group": "actor"},
+            {"params": [critic], "group": "critic"},
+        ]
+        optimizer = MagicMock()
+        optimizer._single_optimizer.return_value = inner
+        runtime = FSDPRuntime(FSDPConfig(defer_grad_sync=False))
+
+        # Act
+        step = runtime.backward(
+            MagicMock(),
+            optimizer,
+            1,
+            actor=MagicMock(),
+            max_grad_norm=1.0,
+            clip_groups=ACTOR_CRITIC_CLIP_GROUPS,
+        )
+
+        # Assert
+        assert step.clip_coefs == pytest.approx((1.0, 1.0 / 50.0), rel=1e-6)
+        assert torch.equal(actor.grad, torch.tensor([0.3, 0.4]))
+        # rtol covers the 1e-6 epsilon in the clip coefficient
+        assert torch.allclose(critic.grad, torch.tensor([0.6, 0.8]), rtol=1e-6, atol=0)
 
 
 class TestDeferGradSync:

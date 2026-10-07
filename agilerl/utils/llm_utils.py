@@ -31,7 +31,7 @@ import torch
 from torch import nn
 from torch.distributed.tensor import DTensor, distribute_tensor
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import SequentialLR
+from torch.optim.lr_scheduler import LambdaLR
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.architectures import (
@@ -175,6 +175,9 @@ PPO_METRIC_NAMES = (
     "grad_norm_post",  # actor LoRA grad norm after clipping
     "critic_grad_norm_pre",  # critic LoRA + value head grad norm before clipping
     "critic_grad_norm_post",  # critic LoRA + value head grad norm after clipping
+    "explained_variance",  # value targets explained by the pre-update values
+    "value_return_corr",  # Pearson correlation of pre-update values and value targets
+    "critic_warmup",  # 1 on a critic-only warmup step, else 0
 )
 
 # REINFORCE-only per-learn diagnostics.
@@ -1691,29 +1694,25 @@ def make_llm_optimizer(
 def make_llm_scheduler(
     optimizer: OptimizerWrapper,
     cosine_lr_schedule_config: CosineLRScheduleConfig | None,
-    lr: float,
-) -> SequentialLR | None:
-    """Build a warmup-cosine scheduler, or ``None`` when no config is set.
+    start_step: int = 0,
+) -> LambdaLR | None:
+    """Build a warmup-cosine scheduler on the current group lrs, or ``None`` without a config.
 
-    :param optimizer: LLM optimizer whose inner AdamW the scheduler steps.
+    :param optimizer: LLM optimizer whose inner AdamW the scheduler steps; its
+        group lrs are the actor and critic peaks.
     :type optimizer: OptimizerWrapper
     :param cosine_lr_schedule_config: Scheduler config; ``None`` skips creation.
     :type cosine_lr_schedule_config: CosineLRScheduleConfig | None
-    :param lr: Peak learning rate after warmup.
-    :type lr: float
+    :param start_step: Learn steps the schedule has already taken.
+    :type start_step: int
     :return: Warmup-cosine scheduler, or ``None``.
-    :rtype: SequentialLR | None
+    :rtype: LambdaLR | None
     """
     if cosine_lr_schedule_config is None:
         return None
     inner = optimizer._single_optimizer()
     adam = inner.optimizer if isinstance(inner, CPUOffloadOptimizer) else inner
-    return create_warmup_cosine_scheduler(
-        adam,
-        cosine_lr_schedule_config,
-        1e-8,
-        lr,
-    )
+    return create_warmup_cosine_scheduler(adam, cosine_lr_schedule_config, start_step)
 
 
 def fill_outside_mask(
@@ -1778,6 +1777,48 @@ def masked_var(
         bessel_correction = mask_sum / (mask_sum - 1)
         variance = variance * bessel_correction
     return variance
+
+
+def value_fit(
+    values: torch.Tensor,
+    returns: torch.Tensor,
+    mask: torch.Tensor,
+    turn_ids: torch.Tensor | None = None,
+    turn_reduction: str = "mean",
+) -> tuple[float, float]:
+    """Explained variance of ``returns`` by ``values`` and their Pearson correlation.
+
+    Each is ``0.0`` where it is undefined: constant returns, or constant values
+    for the correlation.
+
+    :param values: ``[batch, seq_len]`` value predictions.
+    :type values: torch.Tensor
+    :param returns: ``[batch, seq_len]`` value targets.
+    :type returns: torch.Tensor
+    :param mask: ``[batch, seq_len]`` mask selecting which tokens count.
+    :type mask: torch.Tensor
+    :param turn_ids: Turn index per token, ``-1`` for non-action. When given,
+        values and returns are compared per turn instead of per token.
+    :type turn_ids: torch.Tensor | None
+    :param turn_reduction: :func:`pool_by_turns` reduction for the values.
+    :type turn_reduction: str
+    :return: ``(explained_variance, correlation)``.
+    :rtype: tuple[float, float]
+    """
+    if turn_ids is not None:
+        num_turns = int(turn_ids.max().item()) + 1
+        values = pool_by_turns(values, turn_ids, num_turns, reduction=turn_reduction)
+        returns = pool_by_turns(returns, turn_ids, num_turns)
+        turns = torch.arange(num_turns, device=turn_ids.device)
+        mask = (turn_ids.unsqueeze(-1) == turns).any(dim=1)
+    mask = mask.bool()
+    values, returns = values[mask].double(), returns[mask].double()
+    returns_var = returns.var(unbiased=False)
+    if not returns_var > 0:
+        return 0.0, 0.0
+    explained = 1.0 - (returns - values).var(unbiased=False) / returns_var
+    correlation = torch.corrcoef(torch.stack((values, returns)))[0, 1]
+    return float(explained), float(correlation.nan_to_num(0.0))
 
 
 def masked_whiten(

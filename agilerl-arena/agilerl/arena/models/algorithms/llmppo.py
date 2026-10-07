@@ -37,7 +37,16 @@ class LLMPPOSpec(RolloutLLMSpec):
     max_grad_norm: float = Field(
         default=1.0,
         ge=0.0,
-        description="Gradients are clipped to this global norm before each step.",
+        description=(
+            "Actor and critic gradients are each clipped to this norm before each step."
+        ),
+    )
+    share_grad_clip: bool = Field(
+        default=False,
+        description=(
+            "Clip actor and critic gradients by one coefficient from their "
+            "combined norm."
+        ),
     )
     lr_actor: float = Field(
         default=5e-7,
@@ -59,6 +68,15 @@ class LLMPPOSpec(RolloutLLMSpec):
         ge=0.0,
         le=1.0,
         description=GAE_LAMBDA,
+    )
+    critic_warmup_steps: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Learn steps at the start of training that train only the critic, on "
+            "Monte Carlo returns of the fixed initial policy, before PPO updates "
+            "the policy. Resuming from a checkpoint continues the count."
+        ),
     )
     turn_level_clip: bool = Field(
         default=True,

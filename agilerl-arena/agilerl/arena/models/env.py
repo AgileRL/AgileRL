@@ -185,6 +185,35 @@ class EnvServiceSpec(BaseModel):
         return self
 
 
+def check_restart_keep_turns(
+    restart_keep_turns: int,
+    segment_prompt_tokens: int | None,
+    segment_max_images: int | None,
+) -> None:
+    """Reject kept turns without a restart limit, or with no room for the next turn's image.
+
+    :param restart_keep_turns: Turns a restarted context repeats word for word.
+    :param segment_prompt_tokens: Token count that restarts the context.
+    :param segment_max_images: Image count that restarts the context.
+    """
+    if not restart_keep_turns:
+        return
+    if segment_prompt_tokens is None and segment_max_images is None:
+        msg = (
+            "restart_keep_turns applies at a context restart; set "
+            "segment_prompt_tokens or segment_max_images."
+        )
+        raise ValueError(msg)
+    if segment_max_images is not None and restart_keep_turns >= segment_max_images:
+        msg = (
+            f"restart_keep_turns ({restart_keep_turns}) must be below "
+            f"segment_max_images ({segment_max_images}): a restarted prompt "
+            "keeps at most segment_max_images - 1 images so the next turn's "
+            "image fits."
+        )
+        raise ValueError(msg)
+
+
 def check_env_pod_fields(
     *,
     env_image: str | None,
@@ -568,6 +597,24 @@ class LLMEnvSpec(EnvSpecBase):
             "segment."
         ),
     )
+    restart_keep_turns: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Turns a restarted context repeats word for word (the model's "
+            "tokens and the observation after each), oldest dropped to leave "
+            "room for one more turn under segment_prompt_tokens. Must be below "
+            "segment_max_images. 0 keeps only the list of past actions."
+        ),
+    )
+    action_error_field: str = Field(
+        default="",
+        description=(
+            "Observation field holding the error text of the action just "
+            "taken. A restarted context lists it after that action. Empty "
+            "lists the actions alone."
+        ),
+    )
     strict_chat_template_boundary: bool | None = Field(
         default=None,
         description=(
@@ -891,6 +938,15 @@ class LLMEnvSpec(EnvSpecBase):
                 "rubric_file_path is not supported for env-backed rollout environments."
             )
             raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _check_restart_keep_turns(self) -> Self:
+        check_restart_keep_turns(
+            restart_keep_turns=self.restart_keep_turns,
+            segment_prompt_tokens=self.segment_prompt_tokens,
+            segment_max_images=self.segment_max_images,
+        )
         return self
 
     @model_validator(mode="after")

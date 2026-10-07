@@ -467,7 +467,7 @@ class TestCreatePopulation:
             "MAX_OUTPUT_TOKENS": 12,
             "USE_VLLM": True,
             "GRADIENT_CHECKPOINTING": False,
-            "COSINE_lR_SCHEDULER": {"num_epochs": 10, "warmup_proportion": 0.1},
+            "COSINE_lR_SCHEDULER": {"num_steps": 10, "warmup_proportion": 0.1},
         }
         actor = MagicMock(name="actor_network")
         actor.state_dict.return_value = {"w": torch.tensor([1.0])}
@@ -525,7 +525,7 @@ class TestCreatePopulation:
             "MAX_MODEL_LEN": 80,
             "USE_VLLM": False,
             "GRADIENT_CHECKPOINTING": False,
-            "COSINE_lR_SCHEDULER": {"num_epochs": 8, "warmup_proportion": 0.2},
+            "COSINE_lR_SCHEDULER": {"num_steps": 8, "warmup_proportion": 0.2},
         }
         actor = MagicMock(name="actor_network")
         actor.state_dict.return_value = {"w": torch.tensor([2.0])}

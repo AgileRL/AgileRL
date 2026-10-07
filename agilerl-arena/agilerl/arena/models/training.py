@@ -196,6 +196,25 @@ class LLMRolloutBufferSpec(BaseModel):
             "training on them only costs compute. No effect when group_size is 1."
         ),
     )
+    group_replay_max_age: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Policy versions (weight syncs) a stored completion stays eligible "
+            "for group replay; 0 turns group replay off. Group replay keeps "
+            "each task's most recent completion for each episode return seen "
+            "(up to 4 returns per task). When every completion in a new group "
+            "for that task gets the same return, swap one of them for the "
+            "stored completion with the highest other return, so the group "
+            "still has a reward difference to learn from: a group that all "
+            "failed gets a past success, one that all succeeded gets a past "
+            "failure. The replayed completion keeps the token log-probabilities "
+            "it was sampled with, and the algorithm's ratio clipping bounds its "
+            "update. Needs GRPO-family group RL with group_size >= 2, async "
+            "rollout and a dataset-backed task list. The store is in memory "
+            "only and refills from new rollouts after a resume."
+        ),
+    )
 
     @model_serializer(mode="wrap")
     def _dump_kind_tag(

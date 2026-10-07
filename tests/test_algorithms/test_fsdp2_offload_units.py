@@ -603,7 +603,7 @@ class TestLoadGatheredOptimizerStateDict:
                     "exp_avg_sq": torch.randn(2, 4),
                 }
             },
-            "param_groups": [{"lr": 0.001}],
+            "param_groups": [{"lr": 0.001, "params": ["layer.lora_A.actor.weight"]}],
         }
 
         actor = agent.actor

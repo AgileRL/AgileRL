@@ -27,6 +27,8 @@ __all__ = [
     "QUESTION_AFTER_CONTEXT",
     "ImageProcessorCall",
     "encode_image_training_inputs",
+    "goal_images_text",
+    "observation_goal_images",
     "observation_role",
     "observation_text_and_image",
     "process_observation",
@@ -99,6 +101,30 @@ def observation_text_and_image(obs: object) -> tuple[str, object | None]:
         text = _prompt_text_for_screenshot_obs(obs)
         return _image_turn_text(text), _screenshot_to_pil_rgb(obs["screenshot"])
     return process_observation(obs), None
+
+
+def observation_goal_images(obs: object) -> list[Image.Image]:
+    """Decode the task images an observation carries under ``goal_images``.
+
+    Each entry is base64 image bytes or a pixel list, as ``screenshot`` is.
+
+    :param obs: The raw observation payload.
+    :return: The goal images as RGB, in order; empty when there are none.
+    :rtype: list[Image.Image]
+    """
+    images = obs.get("goal_images") if is_str_keyed_dict(obs) else None
+    if not isinstance(images, list):
+        return []
+    return [_screenshot_to_pil_rgb(image) for image in images]
+
+
+def goal_images_text(count: int) -> str:
+    """One placeholder line per goal image, appended after a turn's text.
+
+    :param count: Number of goal images.
+    :rtype: str
+    """
+    return f"\n{IMAGE_PLACEHOLDER}" * count
 
 
 def _image_turn_text(text: str) -> str:

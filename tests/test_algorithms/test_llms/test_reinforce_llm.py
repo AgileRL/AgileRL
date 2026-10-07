@@ -293,7 +293,7 @@ def generate_reinforce(
         "cosine_lr_schedule_config": (
             None
             if dist_mode is not None
-            else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
+            else CosineLRScheduleConfig(num_steps=10, warmup_proportion=0.05)
         ),
         "vllm_config": vllm_config,
         "max_output_tokens": max_tokens,

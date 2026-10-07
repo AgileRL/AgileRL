@@ -16,7 +16,7 @@ from agilerl.llm_envs.task_assigner import TASK_OUTCOME_DECAY, TaskAssigner
 def feed(assigner: TaskAssigner, row: int, *, informative: bool, times: int) -> None:
     """Record ``times`` identical outcomes for ``row``."""
     for _ in range(times):
-        assigner.record_outcome(row, informative=informative)
+        assigner.record_outcome(row, informative=informative, success=None)
 
 
 class TestTaskAssignerAdaptiveSampling:
@@ -101,7 +101,56 @@ class TestTaskAssignerAdaptiveSampling:
         assigner = TaskAssigner(10, seed=0, rank=0, world_size=2, adaptive=True)
 
         with pytest.raises(ValueError, match=r"row 5 is outside this shard \[0, 5\)"):
-            assigner.record_outcome(5, informative=True)
+            assigner.record_outcome(5, informative=True, success=None)
+
+
+class TestTaskAssignerRecordOutcome:
+    def test_counts_each_group_success_class_per_row(self) -> None:
+        # Arrange
+        assigner = TaskAssigner(3, seed=0)
+        outcomes = [
+            (0, False, "tied_failure"),
+            (0, False, "tied_failure"),
+            (0, True, "mixed"),
+            (2, False, "tied_success"),
+            (2, True, None),
+        ]
+
+        # Act
+        for row, informative, success in outcomes:
+            assigner.record_outcome(row, informative=informative, success=success)
+
+        # Assert
+        counts = [
+            (row.tied_failure, row.mixed, row.tied_success)
+            for row in assigner.row_stats()
+        ]
+        assert counts == [(2, 1, 0), (0, 0, 0), (0, 0, 1)]
+
+    def test_success_counts_do_not_decay(self) -> None:
+        # Arrange
+        assigner = TaskAssigner(1, seed=0, adaptive=True)
+
+        # Act
+        for _ in range(40):
+            assigner.record_outcome(0, informative=False, success="tied_failure")
+
+        # Assert
+        [stats] = assigner.row_stats()
+        assert stats.tied_failure == 40
+        assert stats.observed < 40
+
+    def test_counts_are_kept_per_shard_row(self) -> None:
+        # Arrange
+        assigner = TaskAssigner(10, seed=0, rank=1, world_size=2)
+
+        # Act
+        assigner.record_outcome(7, informative=True, success="mixed")
+
+        # Assert
+        stats = {row.row: row for row in assigner.row_stats()}
+        assert stats[7].mixed == 1
+        assert sum(row.mixed for row in stats.values()) == 1
 
 
 class TestTaskAssignerEpochCycle:
@@ -126,7 +175,7 @@ class TestTaskAssignerStateDict:
     def test_lists_only_rows_that_finished_a_group(self) -> None:
         # Arrange
         assigner = TaskAssigner(4, seed=0, adaptive=True)
-        assigner.record_outcome(1, informative=True)
+        assigner.record_outcome(1, informative=True, success=None)
         feed(assigner, 3, informative=False, times=2)
 
         # Act
@@ -134,17 +183,45 @@ class TestTaskAssignerStateDict:
 
         # Assert
         assert state == [
-            {"row": 1, "informative": 1.0, "observed": 1.0},
-            {"row": 3, "informative": 0.0, "observed": TASK_OUTCOME_DECAY + 1.0},
+            {
+                "row": 1,
+                "informative": 1.0,
+                "observed": 1.0,
+                "tied_failure": 0,
+                "mixed": 0,
+                "tied_success": 0,
+            },
+            {
+                "row": 3,
+                "informative": 0.0,
+                "observed": TASK_OUTCOME_DECAY + 1.0,
+                "tied_failure": 0,
+                "mixed": 0,
+                "tied_success": 0,
+            },
         ]
+
+    def test_lists_each_rows_success_counts(self) -> None:
+        # Arrange
+        assigner = TaskAssigner(2, seed=0, adaptive=True)
+        for success in ("tied_failure", "tied_failure", "mixed", "tied_success"):
+            assigner.record_outcome(1, informative=success == "mixed", success=success)
+
+        # Act
+        [state] = assigner.state_dict()
+
+        # Assert
+        assert (state["tied_failure"], state["mixed"], state["tied_success"]) == (
+            2,
+            1,
+            1,
+        )
 
     def test_uses_global_row_indices_on_a_later_shard(self) -> None:
         assigner = TaskAssigner(10, seed=0, rank=1, world_size=2, adaptive=True)
-        assigner.record_outcome(7, informative=True)
+        assigner.record_outcome(7, informative=True, success=None)
 
-        assert assigner.state_dict() == [
-            {"row": 7, "informative": 1.0, "observed": 1.0}
-        ]
+        assert [outcome["row"] for outcome in assigner.state_dict()] == [7]
 
     def test_is_empty_before_any_outcome(self) -> None:
         assert TaskAssigner(3, seed=0, adaptive=True).state_dict() == []
@@ -165,6 +242,41 @@ class TestTaskAssignerLoadStateDict:
 
         # Assert
         assert restored.row_stats() == saved.row_stats()
+
+    def test_json_round_trip_restores_every_row_success_count(self) -> None:
+        # Arrange
+        saved = TaskAssigner(3, seed=0, adaptive=True)
+        saved.record_outcome(0, informative=False, success="tied_failure")
+        saved.record_outcome(2, informative=True, success="mixed")
+        saved.record_outcome(2, informative=False, success="tied_success")
+        restored = TaskAssigner(3, seed=0, adaptive=True)
+        restored.record_outcome(1, informative=False, success="tied_failure")
+
+        # Act
+        restored.load_state_dict(json.loads(json.dumps(saved.state_dict())))
+
+        # Assert
+        assert [
+            (row.tied_failure, row.mixed, row.tied_success)
+            for row in restored.row_stats()
+        ] == [(1, 0, 0), (0, 0, 0), (0, 1, 1)]
+
+    def test_a_state_without_success_counts_loads_them_as_zero(self) -> None:
+        # Arrange
+        assigner = TaskAssigner(2, seed=0, adaptive=True)
+        assigner.record_outcome(1, informative=False, success="tied_failure")
+
+        # Act
+        assigner.load_state_dict([{"row": 1, "informative": 1.0, "observed": 2.0}])
+
+        # Assert
+        [_unseen, row] = assigner.row_stats()
+        assert (row.observed, row.tied_failure, row.mixed, row.tied_success) == (
+            2.0,
+            0,
+            0,
+            0,
+        )
 
     def test_restored_counts_steer_the_draws_like_the_original(self) -> None:
         # Arrange
@@ -196,9 +308,7 @@ class TestTaskAssignerLoadStateDict:
         assert stats[6].informative == 0.5
         assert stats[6].observed == 4.0
         assert stats[6].weight == pytest.approx(1.5 / 6.0)
-        assert assigner.state_dict() == [
-            {"row": 6, "informative": 0.5, "observed": 4.0}
-        ]
+        assert [outcome["row"] for outcome in assigner.state_dict()] == [6]
 
     def test_resets_rows_missing_from_the_state_to_unseen(self) -> None:
         # Arrange

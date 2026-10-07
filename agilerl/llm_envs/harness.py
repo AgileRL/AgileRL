@@ -9,12 +9,14 @@ import ast
 import re
 import uuid
 import warnings
+from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
+from PIL import Image, ImageOps
 
 from agilerl.components.llm_rollout_data import (
     EpisodeSegments,
@@ -25,14 +27,16 @@ from agilerl.llm_envs.observation import (
     DEFAULT_OBSERVATION_ROLE,
     ESCAPED_IMAGE_PLACEHOLDER,
     IMAGE_PLACEHOLDER,
-    IMAGE_USER_CONTENT_PREFIX,
     QUESTION_AFTER_CONTEXT,
     ImageProcessorCall,
     encode_image_training_inputs,
+    goal_images_text,
+    observation_goal_images,
     observation_role,
     observation_text_and_image,
     process_observation,
 )
+from agilerl.llm_envs.restart_prompt import KeptTurn, RestartPromptMixin
 from agilerl.protocols import EnvClientProtocol, TextEnvProtocol
 from agilerl.utils.algo_utils import is_str_keyed_dict
 from agilerl.utils.env_utils import construct_entrypoint_env
@@ -54,10 +58,13 @@ def env_action_text(gen_text: str) -> str:
     A template that prefills an open ``<think>`` yields ``reasoning</think>action``
     with no opening tag. A reasoning block that never closes passes through whole.
     """
+    return _quote_unparsed_call(_action_span(gen_text))
+
+
+def _action_span(gen_text: str) -> str:
+    """The unquoted action: what follows the first ``</think>``, else the whole text."""
     _reasoning, closed, action = gen_text.partition("</think>")
-    if not closed:
-        return _quote_unparsed_call(gen_text)
-    return _quote_unparsed_call(action.strip())
+    return action.strip() if closed else gen_text
 
 
 def _quote_unparsed_call(text: str) -> str:
@@ -72,7 +79,8 @@ def _quote_unparsed_call(text: str) -> str:
         return text
     try:
         tree = ast.parse(raw)
-    except SyntaxError:
+    # Deeply nested text overflows the parser's stack or the AST builder's recursion.
+    except (SyntaxError, MemoryError, RecursionError):
         tree = None
     if (
         tree is not None
@@ -81,11 +89,7 @@ def _quote_unparsed_call(text: str) -> str:
         and isinstance(tree.body[0].value, ast.Call)
     ):
         return raw
-    payload = rest
-    while payload and payload[0] in ":{( ":
-        payload = payload[1:]
-    while payload and payload[-1] in ")} ":
-        payload = payload[:-1]
+    payload = rest.lstrip(":{( ").rstrip(")} ")
     if len(payload) >= 2 and payload[0] == payload[-1] and payload[0] in "'\"":
         payload = payload[1:-1]
     if not payload:
@@ -100,6 +104,15 @@ if TYPE_CHECKING:
     from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 
+def _image_list(image: object | None) -> list[object]:
+    """A prompt's images as a list: ``image`` itself when it is one, else ``[image]``."""
+    if image is None:
+        return []
+    if isinstance(image, list):
+        return list(image)
+    return [image]
+
+
 def _coerced_system_prompt(value: object) -> str | None:
     """Non-empty system prompt text, or ``None``."""
     if isinstance(value, str) and value:
@@ -107,7 +120,7 @@ def _coerced_system_prompt(value: object) -> str | None:
     return None
 
 
-class RolloutHarness:
+class RolloutHarness(RestartPromptMixin):
     """Token-level rollout env: tokenisation + turn loop over a text env client.
 
     Assembles the multi-turn transcript and the provenance mask (only policy-generated
@@ -136,6 +149,8 @@ class RolloutHarness:
         eval_tasks: Sequence[Mapping[str, Any]] | None = None,
         segment_prompt_tokens: int | None = None,
         segment_max_images: int | None = None,
+        restart_keep_turns: int = 0,
+        action_error_field: str = "",
     ) -> None:
         """Drive a text env at the token level over ``env_client`` (a URL or a client object).
 
@@ -176,14 +191,31 @@ class RolloutHarness:
         :param eval_tasks: Held-out per-row reset kwargs for eval mode on a URL-backed client.
         :param segment_prompt_tokens: Restart the episode's context when the next
             prompt would exceed this many tokens. The restarted prompt holds the
-            system prompt, the actions taken so far and the latest observation;
+            system prompt, the actions taken so far, the kept turns
+            (``restart_keep_turns``) and the latest observation;
             :meth:`get_episode_data` returns every segment. When that prompt is
             over the model budget the context continues unrestarted while it
             fits. ``None`` never restarts.
         :param segment_max_images: Restart the episode's context when the next
             prompt would carry more than this many images (match the engine's
-            ``limit_mm_per_prompt``). A restarted prompt carries one image.
-            ``None`` puts no image limit on a segment.
+            ``limit_mm_per_prompt``). A restarted prompt carries one image, plus
+            kept turns' images up to ``segment_max_images - 1`` in all.
+            ``None`` puts no image limit on a segment. The reset observation's
+            ``goal_images`` follow the first prompt's text, repeat in every
+            restarted prompt, and count toward the limit. They are letterboxed
+            to that observation's image size (the first goal image's size when
+            it has none).
+        :param restart_keep_turns: Turns a restarted prompt repeats word for word
+            between the action list and the latest observation: each one's
+            sampled tokens and the observation after them. The oldest are dropped
+            until the prompt plus one more turn as long as the latest fits
+            ``segment_prompt_tokens`` and the model budget, so the next turn
+            does not restart again. Kept turns are prompt context in the new
+            segment, so they do not train again. ``0`` keeps only the action
+            list.
+        :param action_error_field: Observation field holding the error text of
+            the action just taken; a non-blank value follows that action in the
+            restarted prompt's action list. ``""`` lists actions alone.
         :ivar full_ids: Running token sequence of the current segment (prompt +
             generations + feedback).
         :ivar turn_boundaries: ``(start, end, turn_idx)`` spans of policy-generated
@@ -208,6 +240,14 @@ class RolloutHarness:
             )
             raise ValueError(msg)
         self._segment_max_images = segment_max_images
+        if restart_keep_turns < 0:
+            msg = f"restart_keep_turns must be >= 0, got {restart_keep_turns}."
+            raise ValueError(msg)
+        self._restart_keep_turns = restart_keep_turns
+        self._action_error_field = action_error_field
+        self._kept_turns: deque[KeptTurn] = deque(maxlen=restart_keep_turns)
+        # This turn's sampled ids, held until its observation arrives.
+        self._gen_ids = torch.empty(0, dtype=torch.long)
         # Finished segments of the episode: ids through the last generation,
         # segment-relative turn boundaries, and the segment's pixel rows.
         self._segments: list[
@@ -273,6 +313,8 @@ class RolloutHarness:
         # Image episodes: the last turn's sampled sequence, as the engine returned it.
         self._sampled_ids: torch.Tensor | None = None
         self._episode_images: list[object] = []
+        # The reset observation's goal images, repeated in every segment.
+        self._goal_images: list[Image.Image] = []
         self._last_full_prompt_token_len: int | None = None
         # Cached chat-template frame around a feedback turn, per observation role
         # (rendered once each): a tool result and a user message get different frames.
@@ -659,6 +701,22 @@ class RolloutHarness:
             dtype=torch.long,
         )
 
+    def _text_feedback_ids(
+        self, feedback_text: str, role: str, last_token_id: int
+    ) -> torch.Tensor:
+        """Feedback ids that extend a text transcript ending in ``last_token_id``."""
+        feedback_ids = self._tokenize_feedback(feedback_text, role)
+        # The transcript keeps the sampled end-of-turn token (it is trained),
+        # so drop the boundary frame's duplicate terminator when both are
+        # present; a turn truncated at max_tokens still gets the frame's one.
+        if (
+            feedback_ids.shape[1] > 1
+            and last_token_id == int(feedback_ids[0, 0])
+            and last_token_id in self._special_ids()
+        ):
+            feedback_ids = feedback_ids[:, 1:]
+        return feedback_ids
+
     def _special_ids(self) -> frozenset[int]:
         """The tokenizer's special-token id set (cached; empty when undeclared)."""
         if self._special_ids_cache is None:
@@ -833,7 +891,35 @@ class RolloutHarness:
             obs_text = self._render_observation(payload) or self._instruction
         elif not obs_text:
             obs_text = self._instruction
+        self._goal_images = observation_goal_images(payload)
+        if self._goal_images:
+            # Every image of an episode stacks into one pixel_values tensor, so
+            # goal images take the observation image's size, letterboxed.
+            reference = next(iter(_image_list(image)), self._goal_images[0])
+            size = (
+                reference.size
+                if isinstance(reference, Image.Image)
+                else self._goal_images[0].size
+            )
+            self._goal_images = [ImageOps.pad(goal, size) for goal in self._goal_images]
+            obs_text, image = self._with_goal_images(obs_text, image)
         return obs_text, image, info
+
+    def _with_goal_images(
+        self, obs_text: str, image: object | None
+    ) -> tuple[str, list[object]]:
+        """A turn's text and images with the goal images after its own.
+
+        :param obs_text: The turn's rendered text; it leads with a placeholder
+            when ``image`` is set.
+        :param image: The turn's own image, or ``None``.
+        :return: The text ending in one placeholder per goal image, and the
+            turn's images in placeholder order.
+        """
+        if image is None:
+            obs_text = obs_text.replace(IMAGE_PLACEHOLDER, ESCAPED_IMAGE_PLACEHOLDER)
+        text = obs_text + goal_images_text(len(self._goal_images))
+        return text, [*_image_list(image), *self._goal_images]
 
     def _reset_apply(
         self,
@@ -847,7 +933,17 @@ class RolloutHarness:
         self._multimodal_turn = None
         self._episode_pixel_values = None
         self._episode_image_calls = []
-        self._episode_images = [image] if image is not None else []
+        self._episode_images = _image_list(image)
+        if (
+            self._segment_max_images is not None
+            and len(self._episode_images) > self._segment_max_images
+        ):
+            msg = (
+                f"The first prompt carries {len(self._episode_images)} images "
+                f"({len(self._goal_images)} goal images), more than "
+                f"segment_max_images={self._segment_max_images}."
+            )
+            raise ValueError(msg)
         if image is not None:
             processor = self._require_vision_processor()
             prompt_str = self._chat_prompt_string(obs_text)
@@ -881,6 +977,8 @@ class RolloutHarness:
         self.sampling_logps = []
         self._segments = []
         self._action_history = []
+        self._kept_turns.clear()
+        self._gen_ids = torch.empty(0, dtype=torch.long)
 
         max_pt = self._prompt_budget()
         if self._multimodal_turn is not None:
@@ -942,6 +1040,7 @@ class RolloutHarness:
             self.turn_boundaries.append(
                 (int(processor_ids.shape[1]), gen_end, self._turn_idx)
             )
+            self._gen_ids = gen_ids
             self._record_action(gen_text)
             return gen_text
         full_ids = self.full_ids
@@ -957,6 +1056,7 @@ class RolloutHarness:
         self.full_ids = torch.cat([full_ids, gen_ids.unsqueeze(0)], dim=1)
         gen_end = self.full_ids.shape[1]
         self.turn_boundaries.append((prompt_len, gen_end, self._turn_idx))
+        self._gen_ids = gen_ids
         self._record_action(gen_text)
         return gen_text
 
@@ -983,22 +1083,35 @@ class RolloutHarness:
         """Add this turn's env action to the restart history, capped in length."""
         if self._segment_prompt_tokens is None and self._segment_max_images is None:
             return
-        action = env_action_text(gen_text)
-        if len(action) > ACTION_HISTORY_MAX_CHARS:
+        raw = _action_span(gen_text)
+        action = _quote_unparsed_call(raw[:ACTION_HISTORY_MAX_CHARS])
+        if (
+            len(raw) > ACTION_HISTORY_MAX_CHARS
+            or len(action) > ACTION_HISTORY_MAX_CHARS
+        ):
             action = action[:ACTION_HISTORY_MAX_CHARS] + "…"
         self._action_history.append(action)
 
+    def _action_error_text(self, payload: object) -> str | None:
+        """The non-blank ``action_error_field`` text of a step's observation, or ``None``."""
+        if not self._action_error_field or not is_str_keyed_dict(payload):
+            return None
+        error = payload.get(self._action_error_field)
+        return error if isinstance(error, str) and error.strip() else None
+
     def _step_env(
         self, gen_text: str
-    ) -> tuple[str, str, object | None, float, bool, bool, dict[str, Any]]:
+    ) -> tuple[str, str, object | None, float, bool, bool, dict[str, Any], str | None]:
         """Round-trip the env backend and render its observation — the parallelizable phase.
 
         Carries the observation's chat role alongside its text so :meth:`_step_apply`
-        frames a tool result as a tool turn rather than as something the user said.
+        frames a tool result as a tool turn rather than as something the user said,
+        and the action's error text from ``action_error_field``, or ``None``.
         """
         payload, reward, terminated, truncated, info = self._env_client.step(
             env_action_text(gen_text)
         )
+        action_error = self._action_error_text(payload)
         if is_str_keyed_dict(payload) and (
             payload.get("image") is not None or payload.get("screenshot") is not None
         ):
@@ -1014,16 +1127,30 @@ class RolloutHarness:
             terminated,
             truncated,
             info,
+            action_error,
         )
 
     def _step_apply(
         self,
-        env_result: tuple[str, str, object | None, float, bool, bool, dict[str, Any]],
+        env_result: tuple[
+            str, str, object | None, float, bool, bool, dict[str, Any], str | None
+        ],
     ) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
         """Apply the env round-trip result: rewards, truncation, feedback tokens."""
-        next_obs, next_role, next_image, reward, terminated, truncated, info = (
-            env_result
-        )
+        (
+            next_obs,
+            next_role,
+            next_image,
+            reward,
+            terminated,
+            truncated,
+            info,
+            action_error,
+        ) = env_result
+        if action_error is not None and self._action_history:
+            error_max_chars = 200
+            error = " ".join(action_error.split())[:error_max_chars]
+            self._action_history[-1] += f" -> error: {error}"
         self.turn_rewards.append(float(reward))
         for name, value in (info.get("rubric_scores") or {}).items():
             self.rubric_score_sums[name] = self.rubric_score_sums.get(
@@ -1041,6 +1168,16 @@ class RolloutHarness:
                 msg = "reset() must run before step()"
                 raise RuntimeError(msg)
             feedback_text = next_obs
+            if self._restart_keep_turns:
+                self._kept_turns.append(
+                    KeptTurn(
+                        gen_ids=self._gen_ids,
+                        last_token_id=int(full_ids[0, -1]),
+                        obs_text=feedback_text,
+                        role=next_role,
+                        image=next_image,
+                    )
+                )
             if next_image is not None:
                 processor = self._require_vision_processor()
                 if self._transcript is None:
@@ -1129,18 +1266,9 @@ class RolloutHarness:
             else:
                 self._transcript = None
                 self._sampled_ids = None
-                feedback_ids = self._tokenize_feedback(feedback_text, next_role).to(
-                    full_ids.device
-                )
-                # The transcript keeps the sampled end-of-turn token (it is trained),
-                # so drop the boundary frame's duplicate terminator when both are
-                # present; a turn truncated at max_tokens still gets the frame's one.
-                if (
-                    feedback_ids.shape[1] > 1
-                    and int(full_ids[0, -1]) == int(feedback_ids[0, 0])
-                    and int(feedback_ids[0, 0]) in self._special_ids()
-                ):
-                    feedback_ids = feedback_ids[:, 1:]
+                feedback_ids = self._text_feedback_ids(
+                    feedback_text, next_role, int(full_ids[0, -1])
+                ).to(full_ids.device)
                 self.full_ids = torch.cat([full_ids, feedback_ids], dim=1)
 
                 prompt_len = int(self.full_ids.shape[1])
@@ -1178,36 +1306,17 @@ class RolloutHarness:
         :param image: That observation's image, or ``None``.
         :return: ``False``, with no state changed, when the new prompt is over budget.
         """
-        body = obs_text.removeprefix(IMAGE_USER_CONTENT_PREFIX)
         # A spelled placeholder in an action would be expanded as another image.
         actions = "\n".join(
             f"{index}. {action.replace(IMAGE_PLACEHOLDER, ESCAPED_IMAGE_PLACEHOLDER)}"
             for index, action in enumerate(self._action_history, start=1)
         )
-        restart_text = (
-            f"{obs_text[: len(obs_text) - len(body)]}"
-            f"Previous actions:\n{actions}\n\n{body}"
-        )
-        multimodal_turn: dict[str, Any] | None = None
-        pixel_values: torch.Tensor | None = None
-        if image is None:
-            prompt_ids = self._tokenize_initial_prompt(restart_text)
-        else:
-            prompt_str = self._chat_prompt_string(restart_text)
-            prompt_ids, pixel_values = encode_image_training_inputs(
-                text=prompt_str,
-                image=image,
-                processor=self._require_vision_processor(),
-            )
-            multimodal_turn = {
-                "prompt": prompt_str,
-                "image": image,
-                "prompt_token_len": int(prompt_ids.shape[-1]),
-                "input_ids": prompt_ids,
-                "prompt_token_ids": self._engine_ids(prompt_str),
-            }
-        max_pt = self._prompt_budget()
-        if max_pt is not None and int(prompt_ids.shape[-1]) > max_pt:
+        restart = self._kept_turns_prompt(actions, image)
+        if restart is None and self._goal_images:
+            obs_text, image = self._with_goal_images(obs_text, image)
+        if restart is None:
+            restart = self._action_list_prompt(actions, obs_text, image)
+        if restart is None:
             return False
 
         self._segments.append(
@@ -1216,16 +1325,11 @@ class RolloutHarness:
         self.turn_boundaries = []
         self._transcript = None
         self._sampled_ids = None
-        self._episode_images = [image] if image is not None else []
-        self._episode_pixel_values = pixel_values
-        if multimodal_turn is not None:
-            self._episode_image_calls.append(
-                ImageProcessorCall.from_inputs(
-                    text=multimodal_turn["prompt"], image=image
-                )
-            )
-        self._multimodal_turn = multimodal_turn
-        self.full_ids = prompt_ids if multimodal_turn is None else None
+        self._episode_images = restart.images
+        self._episode_pixel_values = restart.pixel_values
+        self._episode_image_calls.extend(restart.image_calls)
+        self._multimodal_turn = restart.multimodal_turn
+        self.full_ids = restart.prompt_ids if restart.multimodal_turn is None else None
         return True
 
     def step(

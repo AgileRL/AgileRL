@@ -23,7 +23,7 @@ pytest.importorskip("vllm", reason="LLM tests require vllm.")
 import vllm
 from peft import LoraConfig, PeftModel, get_peft_model
 from torch import nn
-from torch.optim.lr_scheduler import SequentialLR
+from torch.optim.lr_scheduler import LambdaLR
 from transformers.configuration_utils import PretrainedConfig
 from transformers.generation.configuration_utils import GenerationConfig
 from transformers.generation.utils import GenerationMixin
@@ -355,7 +355,7 @@ def generate_grpo(
         "cosine_lr_schedule_config": (
             None
             if dist_mode is not None
-            else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
+            else CosineLRScheduleConfig(num_steps=10, warmup_proportion=0.05)
         ),
         "use_separate_reference_adapter": use_separate_reference_adapter,
         "vllm_config": vllm_config,
@@ -809,7 +809,7 @@ class TestGRPOInit:
                 cosine_lr_schedule_config=(
                     None
                     if dist_mode is not None
-                    else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
+                    else CosineLRScheduleConfig(num_steps=10, warmup_proportion=0.05)
                 ),
                 vllm_config=VLLMConfig(
                     gpu_memory_utilization=0.05,
@@ -868,7 +868,7 @@ class TestGRPOInit:
                 cosine_lr_schedule_config=(
                     None
                     if dist_mode is not None
-                    else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
+                    else CosineLRScheduleConfig(num_steps=10, warmup_proportion=0.05)
                 ),
                 vllm_config=VLLMConfig(
                     gpu_memory_utilization=0.05,
@@ -917,7 +917,7 @@ class TestGRPOInit:
                 cosine_lr_schedule_config=(
                     None
                     if dist_mode is not None
-                    else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
+                    else CosineLRScheduleConfig(num_steps=10, warmup_proportion=0.05)
                 ),
                 vllm_config=VLLMConfig(
                     gpu_memory_utilization=0.05,
@@ -955,7 +955,7 @@ class TestGRPOInit:
                 device="cuda" if torch.cuda.is_available() else "cpu",
                 group_size=group_size,
                 cosine_lr_schedule_config=CosineLRScheduleConfig(
-                    num_epochs=10,
+                    num_steps=10,
                     warmup_proportion=0.05,
                 ),
                 use_separate_reference_adapter=use_separate_reference_adapter,
@@ -1007,7 +1007,7 @@ class TestGRPOInit:
                 device="cuda" if torch.cuda.is_available() else "cpu",
                 group_size=group_size,
                 cosine_lr_schedule_config=CosineLRScheduleConfig(
-                    num_epochs=10,
+                    num_steps=10,
                     warmup_proportion=0.05,
                 ),
                 use_separate_reference_adapter=use_separate_reference_adapter,
@@ -1052,7 +1052,7 @@ class TestGRPOInit:
                 device="cuda" if torch.cuda.is_available() else "cpu",
                 group_size=group_size,
                 cosine_lr_schedule_config=CosineLRScheduleConfig(
-                    num_epochs=10,
+                    num_steps=10,
                     warmup_proportion=0.05,
                 ),
                 use_separate_reference_adapter=use_separate_reference_adapter,
@@ -1217,7 +1217,7 @@ class TestGRPOInit:
                 group_size=group_size,
                 mini_batch_size=3,
                 cosine_lr_schedule_config=CosineLRScheduleConfig(
-                    num_epochs=10,
+                    num_steps=10,
                     warmup_proportion=0.05,
                 ),
                 use_separate_reference_adapter=use_separate_reference_adapter,
@@ -1288,7 +1288,7 @@ class TestGRPOInit:
         assert isinstance(grpo.generation_config, GenerationConfig)
         assert isinstance(grpo.actor, PeftModel)
         assert isinstance(grpo.optimizer, OptimizerWrapper)
-        assert isinstance(grpo.lr_scheduler, SequentialLR), grpo.lr_scheduler
+        assert isinstance(grpo.lr_scheduler, LambdaLR), grpo.lr_scheduler
         grpo.clean_up()
 
     def test_init_grpo_fsdp_config_without_distributed_raises(self):
@@ -1360,7 +1360,7 @@ class TestGRPOInit:
                 group_size=group_size,
                 lora_config=lora_config,
                 cosine_lr_schedule_config=CosineLRScheduleConfig(
-                    num_epochs=10,
+                    num_steps=10,
                     warmup_proportion=0.05,
                 ),
                 batch_size=batch_size,
@@ -1401,7 +1401,7 @@ class TestGRPOInit:
                 cosine_lr_schedule_config=(
                     None
                     if dist_mode is not None
-                    else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
+                    else CosineLRScheduleConfig(num_steps=10, warmup_proportion=0.05)
                 ),
             )
 
@@ -1437,7 +1437,7 @@ class TestGRPOInit:
                 cosine_lr_schedule_config=(
                     None
                     if dist_mode is not None
-                    else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
+                    else CosineLRScheduleConfig(num_steps=10, warmup_proportion=0.05)
                 ),
             )
         assert not [
@@ -3574,6 +3574,52 @@ class TestGRPOLearn:
         assert metrics["completion_length"] == pytest.approx(10.0)
         grpo.clean_up()
 
+    def test_learn_steps_lr_schedule_once_per_call(self):
+        # Arrange
+        grpo = _make_cpu_grpo_for_branch_tests(
+            wrap=True,
+            lr=1e-4,
+            cosine_lr_schedule_config=CosineLRScheduleConfig(num_steps=4),
+        )
+        grpo.micro_batch_size_per_gpu = 1
+        grpo.gradient_accumulation_steps = 2
+        completion_ids, action_masks = _build_branch_experiences(batch_size=4)
+        rewards = torch.tensor([1.0, 0.0, -1.0, 2.0], dtype=torch.float32)
+
+        # Act
+        grpo.learn((completion_ids, action_masks, rewards))
+        grpo.learn((completion_ids, action_masks, rewards))
+
+        # Assert: two optimizer steps per learn, one schedule step.
+        assert grpo.lr_scheduler.last_epoch == 2
+        assert [g["lr"] for g in grpo.optimizer.optimizer.param_groups] == (
+            pytest.approx([5.5e-5])
+        )
+        grpo.clean_up()
+
+    def test_learn_steps_lr_schedule_when_all_samples_are_filtered(self):
+        grpo = _make_cpu_grpo_for_branch_tests(
+            wrap=True,
+            filter_zero_adv=True,
+            adv_filter_eps=0.5,
+            cosine_lr_schedule_config=CosineLRScheduleConfig(num_steps=4),
+        )
+        completion_ids, action_masks = _build_branch_experiences(batch_size=4)
+        rewards = torch.tensor([1.0, 0.0, -1.0, 2.0], dtype=torch.float32)
+
+        with (
+            pytest.warns(UserWarning, match="All samples were filtered"),
+            patch.object(
+                grpo,
+                "_calculate_advantage",
+                return_value=torch.zeros(4, 1, dtype=torch.float32),
+            ),
+        ):
+            grpo.learn((completion_ids, action_masks, rewards))
+
+        assert grpo.lr_scheduler.last_epoch == 1
+        grpo.clean_up()
+
     def test_learn_multiprocess_all_filtered_masks_advantages_and_updates(self):
         grpo = _make_cpu_grpo_for_branch_tests(
             group_size=2,
@@ -4275,7 +4321,7 @@ class TestGRPOSaveLoadCheckpoint:
                 cosine_lr_schedule_config=(
                     None
                     if dist_mode is not None
-                    else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
+                    else CosineLRScheduleConfig(num_steps=10, warmup_proportion=0.05)
                 ),
                 use_separate_reference_adapter=use_separate_reference_adapter,
                 # Match the saved agent's setting so the constructor doesn't
@@ -5102,7 +5148,7 @@ class TestGRPOUpdateLr:
         )
         opt = grpo.optimizer.optimizer
         grpo.lr_scheduler = LLMAlgorithm.update_lr(
-            opt,
+            grpo.optimizer,
             0.5,
             scheduler_config=None,
         )
@@ -5113,7 +5159,7 @@ class TestGRPOUpdateLr:
         # A fresh warmup scheduler is returned whenever a schedule config is
         # set; it owns the lr from then on.
         scheduler = LLMAlgorithm.update_lr(
-            opt,
+            grpo.optimizer,
             0.5,
             grpo.cosine_lr_schedule_config,
         )
@@ -5253,7 +5299,7 @@ class TestGRPOSetReferencePolicy:
             cosine_lr_schedule_config=(
                 None
                 if dist_mode is not None
-                else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
+                else CosineLRScheduleConfig(num_steps=10, warmup_proportion=0.05)
             ),
             use_separate_reference_adapter=True,
         )

@@ -114,15 +114,37 @@ class TestEnvResponse:
             episode_id="ep-1",
             observation={"input_ids": [1, 2]},
             reward=0.5,
-            done=True,
+            terminated=False,
+            truncated=True,
             info={"seed": 7},
         )
 
         assert response.episode_id == "ep-1"
         assert response.observation == {"input_ids": [1, 2]}
         assert response.reward == 0.5
-        assert response.done is True
+        assert response.terminated is False
+        assert response.truncated is True
         assert response.info == {"seed": 7}
+
+
+class TestEnvResponseDoneProperty:
+    @pytest.mark.parametrize(
+        ("terminated", "truncated", "done"),
+        [(False, False, False), (True, False, True), (False, True, True)],
+    )
+    def test_done_is_terminated_or_truncated(
+        self, terminated: bool, truncated: bool, done: bool
+    ) -> None:
+        response = EnvResponse(
+            episode_id="ep-1",
+            observation={},
+            reward=0.0,
+            terminated=terminated,
+            truncated=truncated,
+            info={},
+        )
+
+        assert response.done is done
 
 
 class TestAsyncBatchCollectorReset:
@@ -187,12 +209,31 @@ class TestAsyncBatchCollectorStep:
         assert response.episode_id == "ep-2"
         assert response.observation == {"text": "next-ep-2"}
         assert response.reward == 1.5
-        assert response.done is True
+        assert response.terminated is True
+        assert response.truncated is False
         assert response.info == {"source": "step"}
         assert len(inner.step_calls) == 1
         called_id, called_ids = inner.step_calls[0]
         assert called_id == "ep-2"
         assert torch.equal(called_ids, token_ids)
+
+    def test_truncated_step_is_truncated_but_not_terminated(self) -> None:
+        # Arrange
+        inner = StubCollector()
+        inner.step_episode = lambda *_args, **_kwargs: ({}, 0.0, False, True, {})
+        collector = AsyncBatchCollector(inner)
+
+        # Act
+        try:
+            response = asyncio.run(
+                collector.step("ep-2", token_ids=torch.tensor([[1]]))
+            )
+        finally:
+            collector.close()
+
+        # Assert
+        assert response.truncated is True
+        assert response.terminated is False
 
     def test_step_rejects_completion_ids_keyword(self) -> None:
         collector = AsyncBatchCollector(StubCollector())
@@ -330,7 +371,7 @@ def _harness_factory(client: FakeEnvClient, **kwargs: Any) -> Any:
 
 
 class TestAsyncBatchCollectorResetOverflow:
-    def test_reset_marks_done_on_turn_zero_overflow(self) -> None:
+    def test_reset_marks_truncated_on_turn_zero_overflow(self) -> None:
         client = _OverflowClient()
         inner = RolloutCollector(
             env_factory=_harness_factory(client, max_turns=2, max_model_len=20),
@@ -344,7 +385,8 @@ class TestAsyncBatchCollectorResetOverflow:
         finally:
             collector.close()
 
-        assert response.done is True
+        assert response.truncated is True
+        assert response.terminated is False
         assert response.observation == {}
         assert client.step_calls == 0
 
@@ -418,8 +460,8 @@ class TestAsyncBatchCollectorRecordGroupOutcome:
         # Act
         try:
             asyncio.run(collector.assign_group_task(0))
-            collector.record_group_outcome(2, informative=True)
-            collector.record_group_outcome(6, informative=False)
+            collector.record_group_outcome(2, informative=True, success="mixed")
+            collector.record_group_outcome(6, informative=False, success=None)
             stats = collector.task_row_stats()
         finally:
             collector.close()
@@ -430,6 +472,7 @@ class TestAsyncBatchCollectorRecordGroupOutcome:
         assert weights[2] == pytest.approx(2 / 3)
         assert weights[6] == pytest.approx(1 / 3)
         assert weights[0] == 0.5
+        assert {row.row: row.mixed for row in stats if row.mixed} == {2: 1}
 
 
 class TestAsyncBatchCollectorLoadTaskSamplerState:
@@ -450,8 +493,8 @@ class TestAsyncBatchCollectorLoadTaskSamplerState:
         restored = make_collector()
         try:
             asyncio.run(saved.assign_group_task(0))
-            saved.record_group_outcome(2, informative=True)
-            saved.record_group_outcome(6, informative=False)
+            saved.record_group_outcome(2, informative=True, success="mixed")
+            saved.record_group_outcome(6, informative=False, success="tied_failure")
 
             # Act
             restored.load_task_sampler_state(saved.task_sampler_state())
@@ -459,8 +502,22 @@ class TestAsyncBatchCollectorLoadTaskSamplerState:
             # Assert
             assert restored.task_row_stats() == saved.task_row_stats()
             assert restored.task_sampler_state() == [
-                {"row": 2, "informative": 1.0, "observed": 1.0},
-                {"row": 6, "informative": 0.0, "observed": 1.0},
+                {
+                    "row": 2,
+                    "informative": 1.0,
+                    "observed": 1.0,
+                    "tied_failure": 0,
+                    "mixed": 1,
+                    "tied_success": 0,
+                },
+                {
+                    "row": 6,
+                    "informative": 0.0,
+                    "observed": 1.0,
+                    "tied_failure": 1,
+                    "mixed": 0,
+                    "tied_success": 0,
+                },
             ]
         finally:
             saved.close()

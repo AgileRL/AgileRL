@@ -17,7 +17,12 @@ import torch
 from agilerl.components.llm_rollout_data import EpisodeSegments
 from agilerl.distributed.process import get_rank, get_world_size
 from agilerl.llm_envs.harness import RolloutHarness
-from agilerl.llm_envs.task_assigner import TaskAssigner, TaskRowOutcome, TaskRowStats
+from agilerl.llm_envs.task_assigner import (
+    GroupSuccess,
+    TaskAssigner,
+    TaskRowOutcome,
+    TaskRowStats,
+)
 from agilerl.utils.llm_utils import is_rollout_prompt
 
 __all__ = ["RolloutCollector"]
@@ -535,17 +540,26 @@ class RolloutCollector:
         with self._slot_lock:
             return self._require_task_assigner().next_task(self._base_seed, group_seed)
 
-    def record_group_outcome(self, row_index: int, informative: bool) -> None:
+    def record_group_outcome(
+        self,
+        row_index: int,
+        informative: bool,
+        success: GroupSuccess | None,
+    ) -> None:
         """Feed one finished group's outcome on ``row_index`` back to the task assigner (thread-safe).
 
         :param row_index: Dataset row the group ran on, from :meth:`assign_group_task`.
         :param informative: Whether the group's rewards differed across members.
+        :param success: How many members reached the success threshold; ``None``
+            when the env has no threshold.
         """
         with self._slot_lock:
             if self._task_assigner is None:
                 msg = "a finished group implies assign_group_task built the assigner"
                 raise RuntimeError(msg)
-            self._task_assigner.record_outcome(row_index, informative=informative)
+            self._task_assigner.record_outcome(
+                row_index, informative=informative, success=success
+            )
 
     def task_row_stats(self) -> list[TaskRowStats]:
         """Per-row outcomes and sampling weights of this rank's shard; empty before the first reset."""

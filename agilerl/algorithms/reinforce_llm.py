@@ -138,7 +138,8 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
     :type offload_trainer_during_rollout: bool
     :param lora_config: LoRA adapter configuration.
     :type lora_config: LoraConfig | None
-    :param cosine_lr_schedule_config: Cosine LR schedule configuration.
+    :param cosine_lr_schedule_config: Warmup-cosine schedule stepped once per
+        ``learn`` call, peaking at ``lr``.
     :type cosine_lr_schedule_config: CosineLRScheduleConfig | None
     :param fsdp_config: FSDP2 sharding settings for distributed runs, defaults to None
     :type fsdp_config: FSDPConfig | None, optional
@@ -755,6 +756,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         # they bypass the per-update averaging above.
         result.update(is_metrics)
         result.update(padding_stats)
+        self._step_lr_scheduler()
         phase_seconds = self._learn_phase_seconds()
         result.update(phase_seconds)
 

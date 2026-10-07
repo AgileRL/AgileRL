@@ -1648,15 +1648,63 @@ class TestInitLlmOptimizerMeshGroups:
         reference_norm = clip_grad_norm_([reference], max_norm=1.0)
 
         # Act
-        norms, clip_coef = clip_param_groups(
+        norms, clip_coefs = clip_param_groups(
             opt.param_groups, 1.0, clip_param_group_grad_norm_
         )
 
         # Assert
         assert math.hypot(*norms) == pytest.approx(reference_norm.item(), rel=1e-6)
-        assert math.hypot(*norms) * clip_coef == pytest.approx(1.0, rel=1e-5)
+        assert len(set(clip_coefs)) == 1
+        assert math.hypot(*norms) * clip_coefs[0] == pytest.approx(1.0, rel=1e-5)
         # rtol covers the float64 vs float32 clip coefficient
         assert torch.allclose(net.full_grads(), reference.grad, rtol=1e-6, atol=0)
+
+    def test_clip_groups_clip_each_role_across_meshes_by_its_own_norm(
+        self, gloo_process_group
+    ):
+        # Arrange: actor and critic each span a mesh group and a plain group.
+        net = MixedMeshLoraNet()
+        net.critic_lora_ep = nn.Parameter(
+            distribute_tensor(
+                torch.zeros(2, 3), net.actor_lora_ep.device_mesh, [Shard(0)]
+            )
+        )
+        net.critic_lora_plain = nn.Parameter(torch.zeros(5))
+        opt = init_llm_optimizer(net, torch.optim.Adam, 0.1, {}, lr_critic=0.2)
+        full = net.set_grads(scale=10.0)
+        actor_size = 4 * 3 + 2 * 3 + 5
+        references = []
+        for grads in (full[:actor_size], full[actor_size:]):
+            reference = nn.Parameter(torch.zeros_like(grads))
+            reference.grad = grads.clone()
+            clip_grad_norm_([reference], max_norm=1.0)
+            references.append(reference.grad)
+        clip_groups = (
+            frozenset({"actor", "actor_replicated"}),
+            frozenset({"critic", "critic_replicated"}),
+        )
+
+        # Act
+        _, clip_coefs = clip_param_groups(
+            opt.param_groups, 1.0, clip_param_group_grad_norm_, clip_groups
+        )
+
+        # Assert
+        coefs_by_role: dict[str, set[float]] = {"actor": set(), "critic": set()}
+        for group, coef in zip(opt.param_groups, clip_coefs, strict=True):
+            coefs_by_role[group["group"].split("_")[0]].add(coef)
+        assert len(coefs_by_role["actor"]) == len(coefs_by_role["critic"]) == 1
+        assert coefs_by_role["actor"] != coefs_by_role["critic"]
+        clipped = net.full_grads()
+        # rtol covers the float64 vs float32 clip coefficient
+        assert torch.allclose(clipped[:actor_size], references[0], rtol=1e-6, atol=0)
+        assert torch.allclose(clipped[actor_size:], references[1], rtol=1e-6, atol=0)
+        assert torch.linalg.vector_norm(clipped[:actor_size]).item() == pytest.approx(
+            1.0, rel=1e-5
+        )
+        assert torch.linalg.vector_norm(clipped[actor_size:]).item() == pytest.approx(
+            1.0, rel=1e-5
+        )
 
     def test_no_clip_leaves_grads_unchanged(self, gloo_process_group):
         # Arrange
@@ -1665,14 +1713,14 @@ class TestInitLlmOptimizerMeshGroups:
         full = net.set_grads(scale=1e-3)
 
         # Act
-        norms, clip_coef = clip_param_groups(
+        norms, clip_coefs = clip_param_groups(
             opt.param_groups, 1.0, clip_param_group_grad_norm_
         )
 
         # Assert
         expected = torch.linalg.vector_norm(full).item()
         assert math.hypot(*norms) == pytest.approx(expected, rel=1e-6)
-        assert clip_coef == 1.0
+        assert clip_coefs == (1.0,) * len(opt.param_groups)
         assert torch.equal(net.full_grads(), full)
 
     def test_update_lr_reaches_every_mesh_group(self, gloo_process_group):

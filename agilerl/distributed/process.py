@@ -283,9 +283,8 @@ def sync_grads(params: Sequence[nn.Parameter]) -> None:
     """Average gradients across data-parallel ranks.
 
     One coalesced all-reduce of every ``.grad`` in ``params`` (SUM, then
-    divide by world size so Gloo works). If any rank is missing a grad,
-    every rank raises so NCCL cannot hang on mismatched flatten sizes.
-    No-op on a single device.
+    divide by world size so Gloo works). See :func:`all_reduce_grads` for
+    params without a grad. No-op on a single device.
 
     :param params: Optimizer parameters whose ``.grad`` should be averaged.
     """
@@ -303,24 +302,41 @@ def all_reduce_grads(
 ) -> None:
     """SUM-all-reduce every ``.grad`` in one flat buffer, then divide by ``divisor``.
 
-    ``DTensor`` grads reduce their local shard. If any rank is missing a
-    grad, every rank raises so NCCL cannot hang on mismatched flatten sizes.
+    ``DTensor`` grads reduce their local shard. A param with no grad on every
+    rank of ``group`` is skipped and keeps ``grad=None``. If ranks disagree on
+    which params have a grad, every rank raises so NCCL cannot hang on
+    mismatched flatten sizes.
 
     :param params: Parameters whose ``.grad`` to reduce.
     :param divisor: Value each summed grad is divided by.
     :param group: Process group to reduce over; ``None`` is the world.
     :param reduce_dtype: Dtype of the reduce buffer; ``None`` keeps the grad dtype.
     """
+    ranks_with_grad = torch.tensor(
+        [param.grad is not None for param in params],
+        dtype=torch.long,
+        device=resolve_device(),
+    )
+    dist.all_reduce(ranks_with_grad, op=dist.ReduceOp.SUM, group=group)
+    group_size = dist.get_world_size(group)
+    mismatched = int(
+        ((ranks_with_grad > 0) & (ranks_with_grad < group_size)).sum().item()
+    )
+    if mismatched:
+        missing = sum(param.grad is None for param in params)
+        msg = (
+            f"sync_grads: {mismatched} params have a grad on some ranks but not "
+            f"others; {missing} params have no grad on rank {get_rank()}"
+        )
+        raise RuntimeError(msg)
+
     grads = [
         param.grad.to_local() if isinstance(param.grad, DTensor) else param.grad
         for param in params
         if param.grad is not None
     ]
-    missing = len(params) - len(grads)
-    if any_rank(missing > 0):
-        msg = f"sync_grads: {missing} params have no grad on rank {get_rank()}"
-        raise RuntimeError(msg)
-
+    if not grads:
+        return
     flat = torch._utils._flatten_dense_tensors(grads)
     if reduce_dtype is not None:
         flat = flat.to(reduce_dtype)
