@@ -918,8 +918,11 @@ def test_expert_lora_vllm_key_map_and_filter():
         f"{gate_up_key}.lora_A.weight": torch.zeros(2, 2),
         "other.lora_A.weight": torch.zeros(2, 2),
     }
-    filtered = filter_peft_state_dict_for_vllm_lora(state, None, expert_key_map=key_map)
-    assert list(filtered) == ["experts.base_layer.lora_A.weight"]
+    filtered = filter_peft_state_dict_for_vllm_lora(state, expert_key_map=key_map)
+    assert sorted(filtered) == [
+        "experts.base_layer.lora_A.weight",
+        "other.lora_A.weight",
+    ]
 
     _, ungated_block = _ungated_pair()
     key_map = expert_lora_vllm_key_map(ungated_block)

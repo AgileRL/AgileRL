@@ -14,10 +14,6 @@ from agilerl.architectures.catalog import (
     family_runtime,
     pretrained_model_type,
 )
-from agilerl.architectures.gemma4 import gemma4_language_tower_hf_override
-from agilerl.architectures.nemotron_h.language_tower import (
-    omni_language_tower_hf_override,
-)
 from agilerl.architectures.nemotron_h.mamba import install_mamba_patches
 from agilerl.architectures.nemotron_h.tensor_parallel import (
     NEMOTRON_H_TENSOR_PARALLEL_PLAN,
@@ -67,45 +63,24 @@ class TestFamilyRuntimeConfigs:
             "gemma4",
             "gemma4_text",
             "gpt_oss",
-            "qwen3_5",
-            "qwen3_5_text",
-            "qwen3_5_moe",
-            "qwen3_5_moe_text",
         }
 
-    def test_nemotron_h_omni_keeps_nemotron_h_runtime_and_adds_language_tower(
-        self,
-    ) -> None:
+    def test_nemotron_h_omni_adds_vllm_architecture_and_tower_lora(self) -> None:
         base = FAMILY_RUNTIME_CONFIGS["nemotron_h"]
         omni = FAMILY_RUNTIME_CONFIGS["nemotron_h_omni"]
-        assert omni.vllm == base.vllm
+
+        assert omni.vllm.model_dump(exclude_none=True) == {
+            **NEMOTRON_VLLM_KWARGS,
+            "hf_overrides": {"architectures": ["NemotronH_Super_Omni_Reasoning_V3"]},
+        }
+        assert base.vllm.hf_overrides is None
         assert omni.patch.install is install_mamba_patches
-        assert omni.language_tower.hf_overrides is omni_language_tower_hf_override
-        assert omni.language_tower.model_class_overrides == {
-            "NemotronHOmniLanguageForCausalLM": (
-                "agilerl.architectures.nemotron_h.omni_language:"
-                "NemotronHOmniLanguageForCausalLM"
-            ),
-        }
-        assert base.language_tower.hf_overrides is None
-        assert base.language_tower.model_class_overrides is None
-        assert omni.multimodal_towers_kept_hf_override == {
-            "architectures": ["NemotronH_Super_Omni_Reasoning_V3"],
-        }
         assert omni.enable_tower_connector_lora is True
         assert base.enable_tower_connector_lora is False
 
-    def test_gemma4_adds_language_tower_without_tower_lora(self) -> None:
-        gemma4 = FAMILY_RUNTIME_CONFIGS["gemma4"]
-        gemma3 = FAMILY_RUNTIME_CONFIGS["gemma3"]
-        assert gemma4.trainer == gemma3.trainer
-        assert gemma4.language_tower.hf_overrides is gemma4_language_tower_hf_override
-        assert gemma4.language_tower.model_class_overrides is None
-        assert gemma4.enable_tower_connector_lora is False
-        assert gemma3.language_tower.hf_overrides is None
-        assert FAMILY_RUNTIME_CONFIGS["gemma4_text"].language_tower.hf_overrides is (
-            gemma4_language_tower_hf_override
-        )
+    @pytest.mark.parametrize("model_type", ["gemma4", "gemma4_text"])
+    def test_gemma4_shares_gemma3_runtime(self, model_type: str) -> None:
+        assert FAMILY_RUNTIME_CONFIGS[model_type] is FAMILY_RUNTIME_CONFIGS["gemma3"]
 
     def test_nemotron_h_lookup(self) -> None:
         config = FAMILY_RUNTIME_CONFIGS["nemotron_h"]
@@ -135,12 +110,6 @@ class TestFamilyRuntimeConfigs:
         assert (
             FAMILY_RUNTIME_CONFIGS["gpt_oss"].trainer.model_dump(exclude_none=True)
             == FLEX_TRAINER_KWARGS
-        )
-
-    def test_qwen3_5_lookup(self) -> None:
-        assert (
-            FAMILY_RUNTIME_CONFIGS["qwen3_5"].language_tower.lora_key_prefix
-            == "model.language_model.model."
         )
 
     def test_catalog_excludes_gemma_and_gemma2(self) -> None:
@@ -294,7 +263,6 @@ class TestPretrainedModelType:
 class TestRuntimeConfigsForbidExtra:
     def test_unknown_fields_are_rejected(self) -> None:
         from agilerl.architectures.runtime import (
-            LanguageTowerRuntimeConfig,
             MambaPatchConfig,
             ModelRuntimeConfig,
             PatchRuntimeConfig,
@@ -307,7 +275,6 @@ class TestRuntimeConfigsForbidExtra:
             (TrainerRuntimeConfig, {}),
             (MambaPatchConfig, {"mixer": "agilerl.architectures.nemotron_h.mamba"}),
             (PatchRuntimeConfig, {}),
-            (LanguageTowerRuntimeConfig, {}),
             (ModelRuntimeConfig, {}),
         )
         for cls, payload in cases:

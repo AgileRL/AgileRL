@@ -1,13 +1,14 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Map a multimodal checkpoint onto the language tower vLLM serves."""
+"""Serve a multimodal checkpoint in vLLM with some or all of its towers skipped."""
 
 from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
 
 from agilerl.architectures.runtime import ModelRuntimeConfig
+from agilerl.arena.models.networks import VllmModality
 
 
 @runtime_checkable
@@ -37,52 +38,33 @@ def nested_language_config(config: object) -> object:
     return config
 
 
-def apply_language_tower_engine_kwargs(
+def apply_multimodal_engine_kwargs(
     kwargs: dict[str, Any],
-    strip_multimodal_towers: bool | list[str],
+    strip_multimodal_towers: bool | list[VllmModality],
     runtime: ModelRuntimeConfig,
 ) -> None:
-    """Set ``hf_overrides`` and family class mapping when serving a language tower.
+    """Skip stripped towers in vLLM and enable LoRA on the towers it still loads.
+
+    vLLM leaves a tower unbuilt and unloaded when every modality it serves has a
+    zero ``limit_mm_per_prompt``. The model class and its module names do not
+    change, so LoRA keys map the same way whether towers are stripped or kept.
 
     :param kwargs: vLLM engine kwargs mutated in place.
     :type kwargs: dict[str, Any]
-    :param strip_multimodal_towers: ``True`` serves the language tower only. A
-        list still loads the multimodal engine; named towers are freed later.
-    :type strip_multimodal_towers: bool | list[str]
-    :param runtime: Family runtime whose language-tower mapping, if any, is applied.
+    :param strip_multimodal_towers: ``True`` serves the language model only; a
+        list names the modalities (``image``, ``video``, ``audio``) to drop.
+    :type strip_multimodal_towers: bool | list[VllmModality]
+    :param runtime: Family runtime; only families whose vLLM towers support LoRA
+        enable it.
     :type runtime: ModelRuntimeConfig
     """
     if strip_multimodal_towers is True:
-        tower = runtime.language_tower
-        if tower.hf_overrides is not None:
-            kwargs["hf_overrides"] = tower.hf_overrides
-        else:
-            kwargs["hf_overrides"] = nested_language_config
-        if tower.model_class_overrides:
-            kwargs["model_class_overrides"] = {
-                **kwargs.get("model_class_overrides", {}),
-                **tower.model_class_overrides,
-            }
+        kwargs["language_model_only"] = True
         return
-
-    kept_override = runtime.multimodal_towers_kept_hf_override
-    if kept_override is not None:
-        kwargs["hf_overrides"] = kept_override
-
-
-def apply_tower_connector_lora_engine_kwargs(
-    kwargs: dict[str, Any],
-    strip_multimodal_towers: bool | list[str],
-    runtime: ModelRuntimeConfig,
-) -> None:
-    """Enable vLLM LoRA on multimodal towers and connectors when the engine loads them.
-
-    :param kwargs: vLLM engine kwargs mutated in place.
-    :type kwargs: dict[str, Any]
-    :param strip_multimodal_towers: ``True`` serves the language tower only.
-    :type strip_multimodal_towers: bool | list[str]
-    :param runtime: Family runtime; only families whose vLLM towers support LoRA enable it.
-    :type runtime: ModelRuntimeConfig
-    """
-    if strip_multimodal_towers is not True and runtime.enable_tower_connector_lora:
+    if strip_multimodal_towers:
+        kwargs["limit_mm_per_prompt"] = {
+            **kwargs.get("limit_mm_per_prompt", {}),
+            **dict.fromkeys(strip_multimodal_towers, 0),
+        }
+    if runtime.enable_tower_connector_lora:
         kwargs["enable_tower_connector_lora"] = True

@@ -35,15 +35,13 @@ from torch.optim.lr_scheduler import SequentialLR
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.architectures import (
-    FAMILY_RUNTIME_CONFIGS,
     family_runtime,
     install_family_patches,
     pretrained_model_type,
 )
 from agilerl.architectures.flex_attention import patch_flex_attention_kernel_options
 from agilerl.architectures.vllm_language import (
-    apply_language_tower_engine_kwargs,
-    apply_tower_connector_lora_engine_kwargs,
+    apply_multimodal_engine_kwargs,
     nested_language_config,
 )
 from agilerl.distributed.fsdp import CPUOffloadOptimizer, canonical_fsdp_param_fqn
@@ -2785,12 +2783,7 @@ def build_vllm_llm_init_kwargs(
     if runtime is not None:
         if runtime.trainer.trust_remote_code is not None:
             kwargs.setdefault("trust_remote_code", runtime.trainer.trust_remote_code)
-        apply_tower_connector_lora_engine_kwargs(
-            kwargs,
-            strip_multimodal_towers=vllm_config.strip_multimodal_towers,
-            runtime=runtime,
-        )
-        apply_language_tower_engine_kwargs(
+        apply_multimodal_engine_kwargs(
             kwargs,
             strip_multimodal_towers=vllm_config.strip_multimodal_towers,
             runtime=runtime,
@@ -2841,70 +2834,22 @@ def peft_lora_state_dict_key_to_module_key(key: str) -> str:
     return key
 
 
-def _vllm_lora_key_prefix(model_type: str | None) -> str | None:
-    """Catalog vLLM language-layer prefix for ``model_type``, or None."""
-    if not isinstance(model_type, str):
-        return None
-    runtime = FAMILY_RUNTIME_CONFIGS.get(model_type)
-    if runtime is None:
-        return None
-    return runtime.language_tower.lora_key_prefix
+def remap_peft_lora_key_for_vllm(key: str) -> str:
+    """Drop trainer-only module structure from a PEFT LoRA key.
 
-
-def remap_peft_lora_key_for_vllm(
-    key: str,
-    *,
-    strip_multimodal_towers: bool | list[str] = False,
-    model_type: str | None = None,
-) -> str:
-    """Normalize PEFT LoRA keys (ClippableLinear, Nemotron Super VL vision/language/projector) for vLLM.
+    Removes the ClippableLinear ``.linear`` and PEFT ``.base_layer`` segments
+    that the Hugging Face checkpoint does not have. Hugging Face to vLLM module
+    renames are the serving model's ``hf_to_vllm_mapper``, applied by vLLM.
 
     :param key: PEFT state-dict key.
     :type key: str
-    :param strip_multimodal_towers: ``True`` remaps language keys onto the
-        language-tower module (``model.``). Any other value keeps the nested
-        VL prefix (``language_model.model.``).
-    :type strip_multimodal_towers: bool | list[str]
-    :param model_type: Hugging Face ``model_type``; families declaring a
-        ``language_tower.lora_key_prefix`` gain vLLM's language-layer nesting
-        when towers are kept.
-    :type model_type: str | None
-    :return: Key vLLM's LoRA loader expects.
+    :return: Key in the checkpoint's module naming.
     :rtype: str
     """
     key = key.replace(".linear.lora_A.", ".lora_A.").replace(
         ".linear.lora_B.", ".lora_B."
     )
-    key = key.replace(".base_layer.", ".")
-    vllm_prefix = _vllm_lora_key_prefix(model_type)
-    if (
-        vllm_prefix is not None
-        and strip_multimodal_towers is not True
-        and f"{vllm_prefix}layers." not in key
-    ):
-        if "model.language_model.layers." in key:
-            key = key.replace("model.language_model.layers.", f"{vllm_prefix}layers.")
-        elif "model.layers." in key:
-            key = key.replace("model.layers.", f"{vllm_prefix}layers.")
-    if "language_model.backbone." in key:
-        language_prefix = (
-            "model." if strip_multimodal_towers is True else "language_model.model."
-        )
-        key = key.replace("language_model.backbone.", language_prefix)
-    if "vision_model.encoder.layer." in key:
-        key = key.replace(
-            "vision_model.encoder.layer.", "vision_model.model.encoder.layers."
-        )
-    if "vision_model.model.encoder.layers." in key:
-        key = key.replace(".attention.attention.query", ".attn.query")
-        key = key.replace(".attention.attention.key", ".attn.key")
-        key = key.replace(".attention.attention.value", ".attn.value")
-        key = key.replace(".attention.output.dense", ".attn.proj")
-    if "vision_projector.mlp1.linear1" in key:
-        key = key.replace("vision_projector.mlp1.linear1", "mlp1.1")
-    if "vision_projector.mlp1.linear2" in key:
-        key = key.replace("vision_projector.mlp1.linear2", "mlp1.3")
-    return key
+    return key.replace(".base_layer.", ".")
 
 
 def expert_lora_vllm_key_map(peft_model: nn.Module) -> dict[str, str]:
@@ -2952,31 +2897,29 @@ def expert_lora_vllm_key_map(peft_model: nn.Module) -> dict[str, str]:
 
 
 def filter_peft_state_dict_for_vllm_lora(
-    state_dict: dict[str, torch.Tensor],
-    target_modules: str | list[str] | None,
-    expert_key_map: dict[str, str] | None = None,
-    strip_multimodal_towers: bool | list[str] = False,
-    model_type: str | None = None,
+    state_dict: Mapping[str, torch.Tensor],
+    expert_key_map: Mapping[str, str] | None = None,
 ) -> dict[str, torch.Tensor]:
-    """Keep LoRA tensors whose modules match the trainer ``target_modules`` spec or expert map."""
+    """Keep the LoRA tensors of a PEFT state dict, keyed for vLLM's LoRA loader.
+
+    :param state_dict: PEFT state dict of one adapter.
+    :type state_dict: Mapping[str, torch.Tensor]
+    :param expert_key_map: Packed-expert key map from
+        :func:`expert_lora_vllm_key_map`.
+    :type expert_key_map: Mapping[str, str] | None
+    :return: LoRA tensors, the same tensor objects as ``state_dict``.
+    :rtype: dict[str, torch.Tensor]
+    """
     filtered: dict[str, torch.Tensor] = {}
     for key, tensor in state_dict.items():
         module_key = peft_lora_state_dict_key_to_module_key(key)
+        if module_key == key:
+            continue
         if expert_key_map is not None and module_key in expert_key_map:
             suffix = key.removeprefix(module_key)
             filtered[f"{expert_key_map[module_key]}{suffix}"] = tensor
             continue
-        if target_modules is None or not peft_target_key_matches(
-            module_key, target_modules
-        ):
-            continue
-        filtered[
-            remap_peft_lora_key_for_vllm(
-                key,
-                strip_multimodal_towers=strip_multimodal_towers,
-                model_type=model_type,
-            )
-        ] = tensor
+        filtered[remap_peft_lora_key_for_vllm(key)] = tensor
     return filtered
 
 
@@ -3047,22 +2990,67 @@ def _json_safe_value(obj: object) -> JSONValue:
     return str(obj)
 
 
+def vllm_lora_state_dict(
+    peft_model: PeftModel,
+    adapter_name: str,
+    gathered_state: Mapping[str, torch.Tensor] | None = None,
+) -> dict[str, torch.Tensor]:
+    """Return an adapter's LoRA tensors keyed the way vLLM's LoRA loader parses them.
+
+    :param peft_model: PEFT model holding the adapter.
+    :type peft_model: PeftModel
+    :param adapter_name: Adapter to export.
+    :type adapter_name: str
+    :param gathered_state: Dense tensors keyed by ``named_parameters`` name, from
+        an all-rank gather. Under FSDP2 the state-dict hooks return sharded
+        DTensors even for gathered params, so the dense values are swapped in.
+    :type gathered_state: Mapping[str, torch.Tensor] | None
+    :return: LoRA tensors keyed for vLLM.
+    :rtype: dict[str, torch.Tensor]
+    :raises ValueError: If the adapter has no LoRA tensors, or a trainable LoRA
+        tensor is missing from the export.
+    """
+    if not HAS_LLM_DEPENDENCIES:
+        msg = "vllm_lora_state_dict requires peft and transformers."
+        raise ImportError(msg)
+
+    # Keyed like named_modules(): PEFT >= 0.21 selects adapter keys from module
+    # names, which keep the wrapper segments that state_dict() drops.
+    live_state: dict[str, torch.Tensor] = dict(peft_model.named_parameters())
+    if gathered_state is not None:
+        live_state.update(gathered_state)
+    raw = {
+        canonical_fsdp_param_fqn(key): tensor
+        for key, tensor in get_peft_model_state_dict(
+            peft_model, state_dict=live_state, adapter_name=adapter_name
+        ).items()
+    }
+    target_parameters = getattr(
+        peft_model.peft_config[adapter_name], "target_parameters", None
+    )
+    state = filter_peft_state_dict_for_vllm_lora(
+        raw,
+        expert_key_map=(
+            expert_lora_vllm_key_map(peft_model) if target_parameters else None
+        ),
+    )
+    if not state:
+        msg = (
+            f"Adapter {adapter_name!r} has no LoRA tensors to export "
+            f"({len(raw)} state-dict tensors)"
+        )
+        raise ValueError(msg)
+    check_vllm_lora_export_complete(peft_model, adapter_name, live_state, state)
+    return state
+
+
 def save_peft_adapter_for_vllm_rollout(
     peft_model: PeftModel,
     staging_dir: Path | str,
     adapter_name: str,
-    target_modules: str | list[str] | None,
-    expert_key_map: dict[str, str] | None = None,
-    strip_multimodal_towers: bool | list[str] = False,
+    gathered_state: Mapping[str, torch.Tensor] | None = None,
 ) -> Path:
-    """Export a PEFT adapter checkpoint that vLLM can load for colocated rollout.
-
-    Keeps only tensors that match the same ``target_modules`` spec used for PEFT
-    training (from :func:`adapt_lora_config_for_model`) or the packed-experts
-    ``expert_key_map`` (from :func:`expert_lora_vllm_key_map`). Rewrites
-    ClippableLinear ``.linear`` suffixes in keys for vLLM. ``staging_dir`` must
-    be process-private (AgileRL stages per-rank when distributed): every caller
-    writes the adapter files.
+    """Write an adapter checkpoint that vLLM loads with ``LoRARequest``.
 
     :param peft_model: PEFT model holding the adapter.
     :type peft_model: PeftModel
@@ -3070,54 +3058,13 @@ def save_peft_adapter_for_vllm_rollout(
     :type staging_dir: Path | str
     :param adapter_name: Adapter to export.
     :type adapter_name: str
-    :param target_modules: PEFT ``target_modules`` spec used in training.
-    :type target_modules: str | list[str] | None
-    :param expert_key_map: Packed-expert key map from
-        :func:`expert_lora_vllm_key_map`.
-    :type expert_key_map: dict[str, str] | None
+    :param gathered_state: Dense LoRA tensors keyed by ``named_parameters`` name.
+    :type gathered_state: Mapping[str, torch.Tensor] | None
     :return: Directory containing the exported adapter.
     :rtype: Path
     """
-    if not HAS_LLM_DEPENDENCIES:
-        msg = "save_peft_adapter_for_vllm_rollout requires peft and transformers."
-        raise ImportError(msg)
-
     adapter_path = Path(staging_dir) / adapter_name
-    # Keyed like named_modules(): PEFT >= 0.21 selects adapter keys from module
-    # names, which keep the wrapper segments that state_dict() drops.
-    live_state = dict(peft_model.named_parameters())
-    state = {
-        canonical_fsdp_param_fqn(key): tensor
-        for key, tensor in get_peft_model_state_dict(
-            peft_model, state_dict=live_state, adapter_name=adapter_name
-        ).items()
-    }
-    n_before = len(state)
-    model_type = getattr(getattr(peft_model, "config", None), "model_type", None)
-    state = filter_peft_state_dict_for_vllm_lora(
-        state,
-        target_modules,
-        expert_key_map=expert_key_map,
-        strip_multimodal_towers=strip_multimodal_towers,
-        model_type=model_type if isinstance(model_type, str) else None,
-    )
-    if not state:
-        msg = (
-            f"No LoRA tensors left for vLLM export after filtering with "
-            f"target_modules={target_modules!r} (had {n_before} tensors). "
-            "Ensure adapt_lora_config_for_model ran with the intended "
-            "LORA_TARGET_SCOPE before training."
-        )
-        raise ValueError(msg)
-    check_vllm_lora_export_complete(peft_model, adapter_name, live_state, state)
-    if n_before != len(state):
-        logger.info(
-            "vLLM LoRA export: kept %d / %d tensors (target_modules=%r)",
-            len(state),
-            n_before,
-            target_modules,
-        )
-
+    state = vllm_lora_state_dict(peft_model, adapter_name, gathered_state)
     adapter_path.mkdir(parents=True, exist_ok=True)
     # FSDP2 keeps adapter params as sharded ``DTensor``s; ``gather_params``
     # may not install dense locals on the module for every param, so
@@ -3132,7 +3079,7 @@ def save_peft_adapter_for_vllm_rollout(
     cfg_dict: dict[str, JSONValue] = {
         str(key): _json_safe_value(value) for key, value in peft_cfg.to_dict().items()
     }
-    cfg_dict["target_modules"] = _json_safe_value(target_modules or [])
+    cfg_dict["target_modules"] = cfg_dict.get("target_modules") or []
 
     (adapter_path / "adapter_config.json").write_text(
         json.dumps(cfg_dict, indent=2),

@@ -18,6 +18,7 @@ from typing import (
     Protocol,
     TypeGuard,
     TypeVar,
+    get_args,
     overload,
     runtime_checkable,
 )
@@ -38,6 +39,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from typing_extensions import TypeVarTuple, Unpack
 
 from agilerl import HAS_LLM_DEPENDENCIES
+from agilerl.arena.models.networks import VllmModality
 from agilerl.modules.base import EvolvableModule, ModuleDict
 from agilerl.modules.custom_components import NoisyLinear
 from agilerl.protocols import (
@@ -2135,13 +2137,11 @@ class VLLMConfig:
         on the tiny test fixture; production deployments running a single
         vLLM should leave it unset.  Defaults to None.
     :type kv_cache_memory_bytes: int | None, optional
-    :param strip_multimodal_towers: Free the GPU memory held by a multimodal
-        base's unused towers after engine init (text-only RL). ``True`` strips
-        the standard HF attribute names (``vision_tower``, ``audio_tower``,
-        ``multi_modal_projector``, ``embed_vision``, ``embed_audio``); a list
-        of attribute names strips those instead, for models that mount
-        unwanted modalities elsewhere. Defaults to ``False``.
-    :type strip_multimodal_towers: bool | list[str], optional
+    :param strip_multimodal_towers: Skip building and loading a multimodal
+        base's towers in vLLM. ``True`` serves the language model only; a list
+        names the modalities to drop (``image``, ``video``, ``audio``).
+        Defaults to ``False``.
+    :type strip_multimodal_towers: bool | list[VllmModality], optional
     :param lora_staging_dir: Root directory where the trained LoRA adapter is
         exported for vLLM to (re)load each sync. Staging is always
         process-private: in distributed runs each rank stages under a
@@ -2167,7 +2167,7 @@ class VLLMConfig:
     kv_cache_dtype: str | None = None
     max_lora_rank: int = 16
     max_loras: int = 1
-    strip_multimodal_towers: bool | list[str] = False
+    strip_multimodal_towers: bool | list[VllmModality] = False
     stop_sequences: list[str] | None = None
     presence_penalty: float = 0.0
     frequency_penalty: float = 0.0
@@ -2183,6 +2183,14 @@ class VLLMConfig:
                 f"{self.sleep_mode_level}."
             )
             raise ValueError(msg)
+        if isinstance(self.strip_multimodal_towers, list):
+            unknown = set(self.strip_multimodal_towers) - set(get_args(VllmModality))
+            if unknown:
+                msg = (
+                    f"strip_multimodal_towers names unknown modalities "
+                    f"{sorted(unknown)}; use {list(get_args(VllmModality))}"
+                )
+                raise ValueError(msg)
 
         # sleep_mode toggles the native vLLM sleep/wake cycle (base backed up to
         # host RAM, KV freed) between rollout and training for a single colocated

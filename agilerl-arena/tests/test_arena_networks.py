@@ -16,6 +16,7 @@ from agilerl.arena.models.networks import (
     MultiInputSpec,
     QNetworkSpec,
     SimbaSpec,
+    VLLMConfig,
     min_max_validator,
 )
 
@@ -169,6 +170,17 @@ class TestLoraConfigDict:
         config = LoraConfigDict(target_modules={"q_proj", "v_proj"})
         dumped = config.model_dump(mode="json")
         assert dumped["target_modules"] == ["q_proj", "v_proj"]
+
+
+class TestVLLMConfigStripMultimodalTowersField:
+    def test_accepts_modality_names(self) -> None:
+        config = VLLMConfig(strip_multimodal_towers=["video", "audio"])
+
+        assert config.strip_multimodal_towers == ["video", "audio"]
+
+    def test_rejects_tower_attribute_names(self) -> None:
+        with pytest.raises(ValueError, match="strip_multimodal_towers"):
+            VLLMConfig(strip_multimodal_towers=["audio_tower"])
 
 
 class TestRainbowDQNSpec:

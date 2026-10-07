@@ -199,7 +199,6 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from agilerl.algorithms.core.llm_ops.vllm_colocate import (
         patch_vllm_3d_moe_lora_flag,
         patch_vllm_lora_keep_resident,
-        patch_vllm_strip_multimodal_towers,
     )
     from agilerl.lora.fused import (
         get_cached_lora_layers,
@@ -224,7 +223,6 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
         build_vllm_rollout_lora_request,
         calculate_k3_kl,
         create_model_from_name_or_path,
-        expert_lora_vllm_key_map,
         fill_outside_mask,
         format_colocated_vllm_oom_hint,
         generation_tokens_for_turn,
@@ -6141,32 +6139,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
         staging_dir = self._ensure_vllm_lora_staging_dir()
         with gather_params(peft_ref, get_lora_params(peft_ref)):
-            if self.lora_config is None:
-                msg = "lora_config is required for vLLM LoRA adapter export."
-                raise ValueError(msg)
-            if self.vllm_config is None:
-                msg = "vllm_config is required for vLLM LoRA adapter export."
-                raise ValueError(msg)
-            target_modules = self.lora_config.target_modules
-            target_parameters = getattr(self.lora_config, "target_parameters", None)
-            if not isinstance(target_parameters, (list, tuple)):
-                target_parameters = None
-            if target_modules is None and not target_parameters:
-                msg = (
-                    "lora_config.target_modules or target_parameters is required "
-                    "for vLLM LoRA adapter export."
-                )
-                raise ValueError(msg)
-            expert_key_map = (
-                expert_lora_vllm_key_map(peft_ref) if target_parameters else None
-            )
             adapter_path = save_peft_adapter_for_vllm_rollout(
                 peft_ref,
                 staging_dir,
                 self._vllm_rollout_adapter,
-                target_modules=target_modules,
-                expert_key_map=expert_key_map,
-                strip_multimodal_towers=self.vllm_config.strip_multimodal_towers,
             )
         barrier()
         if not adapter_path.is_dir():
@@ -7034,25 +7010,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 "(works around vLLM zeroing the rollout adapter slot).",
                 stacklevel=2,
             )
-
-        strip_towers = self.vllm_config.strip_multimodal_towers
-        if strip_towers:
-            # Free unused vision/audio towers on multimodal bases (text-only RL
-            # never runs them); see ``patch_vllm_strip_multimodal_towers``.
-            freed = patch_vllm_strip_multimodal_towers(
-                self.llm,
-                tower_attrs=strip_towers if isinstance(strip_towers, list) else None,
-            )
-            if is_main_process() and freed:
-                total_params = sum(freed.values())
-                detail = ", ".join(
-                    f"{path}={count / 1e6:.1f}M" for path, count in freed.items()
-                )
-                warnings.warn(
-                    f"colocated init: stripped multimodal towers "
-                    f"({total_params / 1e6:.1f}M params freed: {detail}).",
-                    stacklevel=2,
-                )
 
         if self.vllm_config.sleep_mode:
             # Native sleep: back the base up to CPU and free the KV cache, so

@@ -2704,3 +2704,12 @@ class TestVLLMConfig:
     def test_invalid_sleep_mode_level_raises(self, level):
         with pytest.raises(ValueError, match="sleep_mode_level must be either 1 or 2"):
             VLLMConfig(sleep_mode_level=level)
+
+    def test_strip_multimodal_towers_accepts_modality_names(self):
+        config = VLLMConfig(strip_multimodal_towers=["image", "audio"])
+
+        assert config.strip_multimodal_towers == ["image", "audio"]
+
+    def test_strip_multimodal_towers_rejects_tower_attribute_names(self):
+        with pytest.raises(ValueError, match=r"unknown modalities \['vision_tower'\]"):
+            VLLMConfig(strip_multimodal_towers=["vision_tower", "audio"])

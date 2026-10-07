@@ -2113,22 +2113,6 @@ class TestInitializeActorsCompiler:
         assert agent.actor is actor
 
 
-class TestMoveLoraToVllm:
-    def test_rejects_missing_lora_targets(self, tmp_path):
-        agent = _make_llm_agent()
-        agent.actor = MagicMock()
-        agent._vllm_rollout_adapter = "actor"
-        agent._vllm_lora_staging_dir = tmp_path
-        agent.vllm_config = SimpleNamespace(lora_staging_dir=None)
-        agent.lora_config = SimpleNamespace(target_modules=None)
-
-        with (
-            patch("agilerl.algorithms.core.base.get_lora_params", return_value=[]),
-            pytest.raises(ValueError, match="target_modules or target_parameters"),
-        ):
-            agent._move_lora_to_vllm()
-
-
 class TestConfigureBatchSizePerProcess:
     def test_batch_default_accumulates_the_rank_batch(self):
         agent = _make_llm_agent()
@@ -4125,14 +4109,7 @@ class TestLLMGenerateWithVllmColocate:
                 agent._generate_with_vllm_colocate([], 1, 0.9)
 
 
-def _fake_save_peft_adapter_for_vllm_rollout(
-    peft_model,
-    staging_dir,
-    adapter_name,
-    target_modules,
-    expert_key_map=None,
-    strip_multimodal_towers=False,
-):
+def _fake_save_peft_adapter_for_vllm_rollout(peft_model, staging_dir, adapter_name):
     from pathlib import Path
 
     adapter_dir = Path(staging_dir) / adapter_name
@@ -7039,22 +7016,6 @@ class TestLLMGetLogprobsPacked:
 class TestLLMMoveLoraToVllmErrors:
     """Error paths of the adapter-only colocated vLLM LoRA sync."""
 
-    def test_raises_when_lora_config_missing(self):
-        agent = _make_llm_agent()
-        peft_ref = MagicMock()
-        peft_ref.parameters.return_value = [torch.tensor([1.0])]
-        peft_ref.named_parameters.return_value = []
-        peft_ref.set_adapter = MagicMock()
-        _setup_agent_for_vllm_lora_sync(agent, peft_ref)
-        agent.lora_config = None
-
-        with (
-            patch("agilerl.algorithms.core.base.is_main_process", return_value=True),
-            patch("agilerl.algorithms.core.base.barrier"),
-            pytest.raises(ValueError, match="lora_config is required"),
-        ):
-            agent._move_lora_to_vllm()
-
     def test_raises_when_adapter_export_missing(self, tmp_path):
         agent = _make_llm_agent()
         peft_ref = MagicMock()
@@ -7073,16 +7034,6 @@ class TestLLMMoveLoraToVllmErrors:
             ),
             pytest.raises(FileNotFoundError, match="PEFT adapter export"),
         ):
-            agent._move_lora_to_vllm()
-
-    def test_raises_when_vllm_config_missing(self):
-        agent = _make_llm_agent()
-        peft_ref = MagicMock()
-        peft_ref.parameters.return_value = [torch.tensor([1.0])]
-        _setup_agent_for_vllm_lora_sync(agent, peft_ref)
-        agent.vllm_config = None
-
-        with pytest.raises(ValueError, match="vllm_config is required"):
             agent._move_lora_to_vllm()
 
     def test_non_main_rank_exports_and_loads_adapter(self, tmp_path):

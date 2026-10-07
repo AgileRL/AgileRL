@@ -9,13 +9,8 @@ from collections.abc import Mapping
 
 from transformers.configuration_utils import PretrainedConfig
 
-from agilerl.architectures.gemma4 import gemma4_language_tower_hf_override
-from agilerl.architectures.nemotron_h.language_tower import (
-    omni_language_tower_hf_override,
-)
 from agilerl.architectures.nemotron_h.mamba import install_mamba_patches
 from agilerl.architectures.runtime import (
-    LanguageTowerRuntimeConfig,
     MambaPatchConfig,
     ModelRuntimeConfig,
     PatchRuntimeConfig,
@@ -55,18 +50,14 @@ NEMOTRON_H_OMNI_RUNTIME_CONFIG = NEMOTRON_H_RUNTIME_CONFIG.model_copy(
             attn_implementation="flash_attention_2",
             trust_remote_code=True,
         ),
-        "language_tower": LanguageTowerRuntimeConfig(
-            hf_overrides=omni_language_tower_hf_override,
-            model_class_overrides={
-                "NemotronHOmniLanguageForCausalLM": (
-                    "agilerl.architectures.nemotron_h.omni_language:"
-                    "NemotronHOmniLanguageForCausalLM"
-                ),
+        # The checkpoint's NemotronH_Omni_Reasoning_V3 is not a vLLM architecture.
+        "vllm": NEMOTRON_H_RUNTIME_CONFIG.vllm.model_copy(
+            update={
+                "hf_overrides": {
+                    "architectures": ["NemotronH_Super_Omni_Reasoning_V3"],
+                },
             },
         ),
-        "multimodal_towers_kept_hf_override": {
-            "architectures": ["NemotronH_Super_Omni_Reasoning_V3"],
-        },
         "enable_tower_connector_lora": True,
     },
 )
@@ -75,24 +66,8 @@ GEMMA_SWA_RUNTIME_CONFIG = ModelRuntimeConfig(
     trainer=TrainerRuntimeConfig(attn_implementation="flex_attention"),
 )
 
-GEMMA4_RUNTIME_CONFIG = GEMMA_SWA_RUNTIME_CONFIG.model_copy(
-    update={
-        "language_tower": LanguageTowerRuntimeConfig(
-            hf_overrides=gemma4_language_tower_hf_override,
-        ),
-    },
-)
-
 GPT_OSS_RUNTIME_CONFIG = ModelRuntimeConfig(
     trainer=TrainerRuntimeConfig(attn_implementation="flex_attention"),
-)
-
-# vLLM nests Qwen3.5 language layers under language_model.model; the
-# trainer-side keys need the same prefix to bind engine LoRA adapters.
-QWEN3_5_RUNTIME_CONFIG = ModelRuntimeConfig(
-    language_tower=LanguageTowerRuntimeConfig(
-        lora_key_prefix="model.language_model.model.",
-    ),
 )
 
 FAMILY_RUNTIME_CONFIGS: Mapping[str, ModelRuntimeConfig] = {
@@ -100,13 +75,9 @@ FAMILY_RUNTIME_CONFIGS: Mapping[str, ModelRuntimeConfig] = {
     "nemotron_h_omni": NEMOTRON_H_OMNI_RUNTIME_CONFIG,
     "gemma3": GEMMA_SWA_RUNTIME_CONFIG,
     "gemma3_text": GEMMA_SWA_RUNTIME_CONFIG,
-    "gemma4": GEMMA4_RUNTIME_CONFIG,
-    "gemma4_text": GEMMA4_RUNTIME_CONFIG,
+    "gemma4": GEMMA_SWA_RUNTIME_CONFIG,
+    "gemma4_text": GEMMA_SWA_RUNTIME_CONFIG,
     "gpt_oss": GPT_OSS_RUNTIME_CONFIG,
-    "qwen3_5": QWEN3_5_RUNTIME_CONFIG,
-    "qwen3_5_text": QWEN3_5_RUNTIME_CONFIG,
-    "qwen3_5_moe": QWEN3_5_RUNTIME_CONFIG,
-    "qwen3_5_moe_text": QWEN3_5_RUNTIME_CONFIG,
 }
 
 

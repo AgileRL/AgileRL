@@ -36,6 +36,8 @@ MlpActivation = Literal[
     "Identity",
 ]
 
+VllmModality = Literal["image", "video", "audio"]
+
 
 def min_max_validator(min_field: str, max_field: str) -> Callable[[T], T]:
     """Validate that a field is less than or equal to another field.
@@ -737,11 +739,12 @@ class VLLMConfig(BaseModel):
     max_loras: int = Field(
         default=1, ge=1, description="LoRA adapters the engine keeps loaded at once."
     )
-    strip_multimodal_towers: bool | list[str] = Field(
+    strip_multimodal_towers: bool | list[VllmModality] = Field(
         default=False,
         description=(
-            "Drop the vision or audio towers from the generation copy when the "
-            "run is text-only, freeing their memory. May name specific towers."
+            "Skip loading the vision or audio towers in the generation copy, "
+            "freeing their memory. True skips every tower; a list names the "
+            "modalities to drop (image, video, audio)."
         ),
     )
     stop_sequences: list[str] | None = Field(
