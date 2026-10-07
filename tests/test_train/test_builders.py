@@ -26,6 +26,9 @@ from agilerl.arena.models.algorithms import (
     SingleAgentAlgorithmSpec,
 )
 from agilerl.arena.models.networks import (
+    CosineLRScheduleConfig as CosineLRScheduleSpec,
+)
+from agilerl.arena.models.networks import (
     LoraConfigDict,
     MlpSpec,
     QNetworkSpec,
@@ -40,6 +43,7 @@ from agilerl.builders import (
     select_builder,
 )
 from agilerl.builders import llm as llm_builder
+from agilerl.utils.algo_utils import CosineLRScheduleConfig
 
 requires_llm = pytest.mark.skipif(
     not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed"
@@ -176,6 +180,19 @@ class TestPeftLoraConfig:
         peft_lora = LoraConfig(r=4, lora_alpha=8, target_modules=["q_proj"])
 
         assert llm_builder.peft_lora_config(peft_lora) is peft_lora
+
+
+class TestCosineLrScheduleConfig:
+    def test_manifest_schedule_becomes_the_framework_config(self):
+        spec = CosineLRScheduleSpec(
+            num_steps=200, warmup_proportion=0.05, min_lr_ratio=0.2
+        )
+
+        config = llm_builder.cosine_lr_schedule_config(spec)
+
+        assert config == CosineLRScheduleConfig(
+            num_steps=200, warmup_proportion=0.05, min_lr_ratio=0.2
+        )
 
 
 def test_peft_lora_config_needs_the_llm_extras(monkeypatch):

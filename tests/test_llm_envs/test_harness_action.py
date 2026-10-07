@@ -66,6 +66,11 @@ class TestEnvActionText:
     def test_keeps_a_parsed_call(self) -> None:
         assert env_action_text("fill('55', 'red')") == "fill('55', 'red')"
 
+    def test_quotes_a_call_too_nested_to_parse(self) -> None:
+        payload = "-" * 1_000_000 + "1"
+
+        assert env_action_text(f"fill({payload})") == f"fill('{payload}')"
+
 
 class TestTrailingInstruction:
     def test_leaves_the_question_after_the_instruction(self) -> None:

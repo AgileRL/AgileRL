@@ -918,11 +918,16 @@ class TestPPOFusedLearnMatchesSplitLearn:
         [DummyHiddenStatesModel, CheckpointedHiddenStatesModel],
         ids=["eager", "checkpointed"],
     )
+    # Unclipped norms are about 5.3 (actor) and 7.8 (critic).
+    @pytest.mark.parametrize(
+        "max_grad_norm", [1.0, 6.0], ids=["both_clipped", "critic_clipped"]
+    )
     def test_metrics_gradients_and_weights_match(
         self,
         monkeypatch: pytest.MonkeyPatch,
         liger: bool,
         model_cls: type[DummyHiddenStatesModel],
+        max_grad_norm: float,
     ) -> None:
         # Arrange: same seed, so both agents start from the same weights.
         agents = {
@@ -931,6 +936,7 @@ class TestPPOFusedLearnMatchesSplitLearn:
                 batch_size=4,
                 mini_batch_size=4,
                 micro_batch_size_per_gpu=2,
+                max_grad_norm=max_grad_norm,
                 fuse_actor_critic_pass=fuse,
             )
             for fuse in (True, False)
@@ -1071,10 +1077,66 @@ class TestPPOLearnGradNorms:
         assert clipped_metrics["critic_grad_norm_post"] == pytest.approx(
             clipped_steps[0]["critic"], rel=1e-5
         )
-        # One clip coefficient over actor and critic grads together.
-        assert math.hypot(
-            clipped_metrics["grad_norm_post"], clipped_metrics["critic_grad_norm_post"]
-        ) == pytest.approx(1e-3, rel=1e-4)
+        # Actor and critic are each clipped to the threshold.
+        assert clipped_metrics["grad_norm_post"] == pytest.approx(1e-3, rel=1e-4)
+        assert clipped_metrics["critic_grad_norm_post"] == pytest.approx(1e-3, rel=1e-4)
+
+    @FUSE_MODES
+    def test_clipping_the_critic_leaves_a_smaller_actor_norm_unscaled(
+        self, monkeypatch: pytest.MonkeyPatch, fuse: bool
+    ) -> None:
+        # Arrange: unclipped norms are about 5.3 (actor) and 7.8 (critic).
+        agent = make_ppo(
+            batch_size=4,
+            mini_batch_size=4,
+            micro_batch_size_per_gpu=2,
+            max_grad_norm=6.0,
+            fuse_actor_critic_pass=fuse,
+        )
+        steps = record_step_role_grad_norms(agent, monkeypatch)
+
+        # Act
+        metrics = learn_rows(agent)
+
+        # Assert
+        assert metrics["grad_norm_pre"] < 6.0 < metrics["critic_grad_norm_pre"]
+        assert metrics["grad_norm_post"] == metrics["grad_norm_pre"]
+        assert metrics["critic_grad_norm_post"] == pytest.approx(6.0, rel=1e-5)
+        # fp32 sums of the same grads in a different order.
+        assert steps[0]["actor"] == pytest.approx(metrics["grad_norm_pre"], rel=1e-5)
+        assert steps[0]["critic"] == pytest.approx(6.0, rel=1e-5)
+
+    @FUSE_MODES
+    def test_share_grad_clip_scales_both_by_the_combined_norm(
+        self, monkeypatch: pytest.MonkeyPatch, fuse: bool
+    ) -> None:
+        # Arrange: unclipped norms are about 5.3 (actor) and 7.8 (critic).
+        agent = make_ppo(
+            batch_size=4,
+            mini_batch_size=4,
+            micro_batch_size_per_gpu=2,
+            max_grad_norm=6.0,
+            share_grad_clip=True,
+            fuse_actor_critic_pass=fuse,
+        )
+        steps = record_step_role_grad_norms(agent, monkeypatch)
+
+        # Act
+        metrics = learn_rows(agent)
+
+        # Assert
+        actor_pre = metrics["grad_norm_pre"]
+        critic_pre = metrics["critic_grad_norm_pre"]
+        coef = 6.0 / math.hypot(actor_pre, critic_pre)
+        assert actor_pre < 6.0 < critic_pre
+        assert metrics["grad_norm_post"] == pytest.approx(actor_pre * coef, rel=1e-5)
+        assert metrics["critic_grad_norm_post"] == pytest.approx(
+            critic_pre * coef, rel=1e-5
+        )
+        # fp32 sums of the same grads in a different order.
+        assert math.hypot(steps[0]["actor"], steps[0]["critic"]) == pytest.approx(
+            6.0, rel=1e-5
+        )
 
 
 def patch_cuda_device(

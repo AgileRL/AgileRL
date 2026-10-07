@@ -103,6 +103,7 @@ class _Stub:
         self.liger_calls = 0
         self.standard_calls = 0
         self.old_logprobs_source = "trainer"
+        self.lr_scheduler = None
         self.no_grad_forwards: list[tuple[int, bool, bool]] = []
         self.shard_runtime = SimpleNamespace(
             timed=lambda _name, **_fields: nullcontext(),
@@ -123,6 +124,7 @@ class _Stub:
     _row_padding_stats = LLMAlgorithm._row_padding_stats
     _segment_rows = LLMAlgorithm._segment_rows
     _start_learn_phases = LLMAlgorithm._start_learn_phases
+    _step_lr_scheduler = LLMAlgorithm._step_lr_scheduler
     _log_importance_weights = GRPO._log_importance_weights
     _loss = GRPO._loss
     _objective_loss = GRPO._objective_loss

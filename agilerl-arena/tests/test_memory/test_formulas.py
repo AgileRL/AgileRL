@@ -180,6 +180,30 @@ class TestModelArchFromHfConfig:
         assert not dense.is_hybrid_ssm
         assert dense.attention_layers == dense.n_layers
 
+    def test_nemotron_vl_reads_llm_config_with_depth_from_layer_types(self):
+        # Arrange
+        block_types = {"M": "mamba", "*": "attention", "-": "mlp"}
+        text = {k: v for k, v in NEMOTRON_H.items() if k != "num_hidden_layers"}
+        text["layers_block_type"] = [
+            block_types[c] for c in NEMOTRON_H["hybrid_override_pattern"]
+        ]
+        vl_config = {"llm_config": text, "vision_config": {"hidden_size": 1280}}
+
+        # Act
+        arch = ModelArch.from_hf_config(vl_config)
+
+        # Assert
+        assert arch.n_layers == 56
+        assert (arch.attention_layers, arch.n_mamba_layers) == (4, 27)
+        assert arch.hidden_size == 4480
+
+    def test_config_without_depth_is_rejected(self):
+        text = {k: v for k, v in NEMOTRON_H.items() if k != "num_hidden_layers"}
+        del text["hybrid_override_pattern"]
+
+        with pytest.raises(KeyError, match="num_hidden_layers"):
+            ModelArch.from_hf_config({"llm_config": text})
+
     def test_attention_only_layer_types_override_mamba_keys(self):
         # Granite 4.0 Micro: a granitemoehybrid config with mamba_* keys whose
         # layer_types list only attention layers.

@@ -96,7 +96,11 @@ MIN_OUTPUT_TOKENS = (
     "soon as it emits an end-of-sequence token."
 )
 COSINE_LR = (
-    "Cosine learning-rate schedule with warmup. Unset holds the learning rate constant."
+    "Learning-rate schedule stepped once per training step: linear warmup to each "
+    "learning rate (actor and critic alike), then cosine decay to min_lr_ratio of it. "
+    "The PPO actor's schedule starts after critic_warmup_steps. On the cluster, "
+    "unset or null warms up over 5% of training.max_steps and decays to 10%. "
+    "For a constant learning rate, set warmup_proportion 0 and min_lr_ratio 1.0."
 )
 VLLM_CONFIG = "vLLM engine settings for generation."
 IS_CORRECTION = (

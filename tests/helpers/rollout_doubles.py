@@ -234,6 +234,7 @@ def bare_rollout_env() -> RolloutHarness:
     w.sampling_logps = []  # read by get_episode_data
     w._segments = []  # read by get_episode_data
     w._segment_prompt_tokens = None  # __init__ default, read by the feedback path
+    w._restart_keep_turns = 0  # __init__ default, read by the feedback path
     # per-role boundary-frame cache; __init__ default, read by the feedback tokenize path
     w._boundary_parts = {}
     w._system_prompt = None  # __init__ default, read by the initial-prompt path

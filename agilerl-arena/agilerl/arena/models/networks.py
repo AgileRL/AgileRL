@@ -644,14 +644,21 @@ class CosineLRScheduleConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    num_epochs: int = Field(
-        default=100, ge=1, description="Epochs the cosine cycle is spread over."
+    num_steps: int = Field(
+        ge=1,
+        description="Training steps (learn calls) from the start of warmup to the floor.",
     )
     warmup_proportion: float = Field(
         default=0.0,
         ge=0.0,
+        lt=1.0,
+        description="Fraction of num_steps spent ramping the learning rate up to its peak.",
+    )
+    min_lr_ratio: float = Field(
+        default=0.1,
+        ge=0.0,
         le=1.0,
-        description="Fraction of the cycle spent warming the learning rate up before it decays.",
+        description="Floor as a fraction of the peak learning rate, held after num_steps.",
     )
 
 

@@ -1333,14 +1333,14 @@ class TestFeedbackTerminatorDedupe:
     def test_sampled_terminator_is_not_doubled(self) -> None:
         w = self._env(_TerminatorTokenizer())
         w.full_ids = torch.tensor([[65, 66, 7]], dtype=torch.long)  # ends with EOS
-        w._step_apply(("fb", "user", None, 0.5, False, False, {}))
+        w._step_apply(("fb", "user", None, 0.5, False, False, {}, None))
         # One terminator total: the sampled one; the frame's duplicate is dropped.
         assert w.full_ids[0].tolist().count(7) == 1
 
     def test_truncated_turn_still_gets_the_frame_terminator(self) -> None:
         w = self._env(_TerminatorTokenizer())
         w.full_ids = torch.tensor([[65, 66, 67]], dtype=torch.long)  # no EOS sampled
-        w._step_apply(("fb", "user", None, 0.5, False, False, {}))
+        w._step_apply(("fb", "user", None, 0.5, False, False, {}, None))
         assert w.full_ids[0].tolist().count(7) == 1
 
     def test_non_special_equal_token_is_kept(self) -> None:
@@ -1348,7 +1348,7 @@ class TestFeedbackTerminatorDedupe:
         tokenizer.all_special_ids = []
         w = self._env(tokenizer)
         w.full_ids = torch.tensor([[65, 66, 7]], dtype=torch.long)
-        w._step_apply(("fb", "user", None, 0.5, False, False, {}))
+        w._step_apply(("fb", "user", None, 0.5, False, False, {}, None))
         # id 7 is ordinary content here; nothing may be silently dropped.
         assert w.full_ids[0].tolist().count(7) == 2
 
@@ -2013,4 +2013,4 @@ class TestRolloutEnvPhaseGuards:
         w.full_ids = None  # no reset() ran, so there is no transcript to append to
 
         with pytest.raises(RuntimeError, match="reset\\(\\) must run before step"):
-            w._step_apply(("fb", "user", None, 0.5, False, False, {}))
+            w._step_apply(("fb", "user", None, 0.5, False, False, {}, None))

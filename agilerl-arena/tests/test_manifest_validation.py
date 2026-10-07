@@ -589,6 +589,82 @@ class TestCrossSectionConsistency:
             TrainingManifest.model_validate(broken)
 
 
+def group_replay_manifest(**replay_buffer: object) -> dict:
+    """An async GRPO manifest with group replay on the LLM buffer."""
+    doc = manifest(
+        GRPO,
+        training={"rollout_mode": "async", "rollout_engines_per_agent": 1},
+    )
+    doc["replay_buffer"] = {"kind": "llm", "group_replay_max_age": 10, **replay_buffer}
+    return doc
+
+
+class TestGroupReplay:
+    def test_async_grpo_accepts_group_replay_without_max_reward(self) -> None:
+        validated = TrainingManifest.model_validate(
+            group_replay_manifest(group_replay_max_age=4)
+        )
+
+        assert isinstance(validated.replay_buffer, LLMRolloutBufferSpec)
+        assert validated.replay_buffer.group_replay_max_age == 4
+        assert validated.to_payload()["replay_buffer"]["group_replay_max_age"] == 4
+
+    def test_group_replay_is_off_by_default(self) -> None:
+        spec = LLMRolloutBufferSpec()
+
+        assert spec.group_replay_max_age == 0
+
+    def test_negative_max_age_is_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="group_replay_max_age"):
+            TrainingManifest.model_validate(
+                group_replay_manifest(group_replay_max_age=-1)
+            )
+
+    def test_cispo_accepts_group_replay(self) -> None:
+        doc = group_replay_manifest()
+        doc["algorithm"]["name"] = "CISPO"
+
+        replay_buffer = TrainingManifest.model_validate(doc).replay_buffer
+        assert isinstance(replay_buffer, LLMRolloutBufferSpec)
+        assert replay_buffer.group_replay_max_age == 10
+
+    def test_llmppo_is_rejected(self) -> None:
+        # LLMPPO samples one completion per prompt, so every group ties and
+        # every completion would be replaced by a replay.
+        doc = group_replay_manifest()
+        doc["algorithm"] = {"name": "LLMPPO", "batch_size": 2}
+
+        with pytest.raises(ValidationError, match="GRPO-family algorithm"):
+            TrainingManifest.model_validate(doc)
+
+    def test_zero_max_age_is_off_and_skips_the_checks(self) -> None:
+        doc = group_replay_manifest(group_replay_max_age=0)
+        doc["algorithm"] = {"name": "LLMPPO", "batch_size": 2}
+
+        validated = TrainingManifest.model_validate(doc)
+
+        assert isinstance(validated.replay_buffer, LLMRolloutBufferSpec)
+        assert validated.replay_buffer.group_replay_max_age == 0
+
+    def test_group_size_one_is_rejected(self) -> None:
+        doc = group_replay_manifest()
+        doc["algorithm"]["group_size"] = 1
+
+        with pytest.raises(ValidationError, match="group_size >= 2"):
+            TrainingManifest.model_validate(doc)
+
+    def test_accepts_group_replay_without_rollout_mode(self) -> None:
+        # The ray trainer drops training.rollout_mode before validating.
+        doc = group_replay_manifest()
+        del doc["training"]["rollout_mode"]
+        del doc["training"]["rollout_engines_per_agent"]
+
+        replay_buffer = TrainingManifest.model_validate(doc).replay_buffer
+
+        assert isinstance(replay_buffer, LLMRolloutBufferSpec)
+        assert replay_buffer.group_replay_max_age == 10
+
+
 class TestEpochDrivenTraining:
     """A run may state its schedule in epochs; the trainer converts to steps."""
 

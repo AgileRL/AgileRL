@@ -278,7 +278,7 @@ def generate_ppo(
             None
             if dist_mode is not None
             else (
-                CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
+                CosineLRScheduleConfig(num_steps=10, warmup_proportion=0.05)
                 if use_scheduler
                 else None
             )
@@ -749,7 +749,7 @@ class TestPPOComputeGaeReturns:
         values = torch.tensor([[0.0, 0.0]])
         rewards = torch.tensor([[1.0, 2.0]])
         returns, advantages = stub._compute_gae_returns(
-            rewards, values, action_mask, turn_ids
+            rewards, values, action_mask, turn_ids, stub.gae_lambda
         )
         raw_adv = torch.tensor([[3.0, 2.0]])
         exp_adv = masked_whiten(raw_adv, action_mask) * action_mask
@@ -767,7 +767,7 @@ class TestPPOComputeGaeReturns:
         values = torch.zeros(1, 3)
         rewards = torch.tensor([[1.0, 2.0, 0.0]])
         _returns, advantages = stub._compute_gae_returns(
-            rewards, values, action_mask, turn_ids
+            rewards, values, action_mask, turn_ids, stub.gae_lambda
         )
         assert advantages[0, 2].item() == 0.0
 
@@ -785,6 +785,7 @@ class TestPPOComputeGaeReturns:
             values,
             action_mask,
             turn_ids,
+            stub.gae_lambda,
         )
 
         expected_advantages = torch.tensor(
@@ -802,7 +803,7 @@ class TestPPOComputeGaeReturns:
         rewards = torch.tensor([[1.0, 2.0]])
 
         returns, advantages = stub._compute_gae_returns(
-            rewards, values, action_mask, turn_ids
+            rewards, values, action_mask, turn_ids, stub.gae_lambda
         )
 
         expected_advantages = torch.tensor([[3.0, 2.0]])
@@ -818,7 +819,7 @@ class TestPPOComputeGaeReturnsToken:
         values = torch.tensor([[0.1, 0.2, 0.0, 0.0]])
         rewards = torch.tensor([[1.0, 0.5, 0.0, 0.0]])
         returns, advantages = stub._compute_gae_returns_token(
-            rewards, values, action_mask
+            rewards, values, action_mask, stub.gae_lambda
         )
         assert returns.shape == values.shape
         assert advantages.shape == values.shape
@@ -1060,6 +1061,57 @@ class TestPPOLearn:
         masks = [torch.ones(1, seq_len - 1, dtype=torch.bool) for _ in range(2)]
         rewards = torch.tensor([[1.0], [-1.0]], dtype=torch.float32)
         ppo.learn((completions, masks, rewards))
+
+    def test_learn_steps_lr_schedule_once_per_call_with_own_critic_peak(self):
+        # Arrange
+        lora = LoraConfig(
+            r=4,
+            lora_alpha=16,
+            target_modules=["lin"],
+            task_type="CAUSAL_LM",
+            lora_dropout=0.05,
+            modules_to_save=["summary"],
+        )
+        ppo = LLMPPO(
+            actor_network=create_module(10, 8, 100, "cpu"),
+            pad_token_id=99,
+            pad_token="<pad>",
+            lora_config=lora,
+            batch_size=2,
+            micro_batch_size_per_gpu=2,
+            max_output_tokens=8,
+            max_model_len=32,
+            wrap=True,
+            gradient_checkpointing=False,
+            lr_actor=1e-4,
+            lr_critic=1e-3,
+            update_epochs=2,
+            device="cpu",
+            seed=0,
+            cosine_lr_schedule_config=CosineLRScheduleConfig(num_steps=4),
+        )
+        seq_len = 18
+        completions = [torch.randint(0, 100, (1, seq_len)) for _ in range(2)]
+        masks = [torch.ones(1, seq_len - 1, dtype=torch.bool) for _ in range(2)]
+        rewards = torch.tensor([[1.0], [-1.0]], dtype=torch.float32)
+
+        def lrs_by_group():
+            return {g["group"]: g["lr"] for g in ppo.optimizer.optimizer.param_groups}
+
+        # Act
+        at_start = lrs_by_group()
+        ppo.learn((completions, masks, rewards))
+        after_one = lrs_by_group()
+        ppo.learn((completions, masks, rewards))
+        after_two = lrs_by_group()
+
+        # Assert: two optimizer steps per learn, one schedule step.
+        assert at_start == pytest.approx({"actor": 1e-4, "critic": 1e-3})
+        assert after_one == pytest.approx(
+            {"actor": 8.682e-5, "critic": 8.682e-4}, rel=1e-4
+        )
+        assert after_two == pytest.approx({"actor": 5.5e-5, "critic": 5.5e-4})
+        assert ppo.lr_scheduler.last_epoch == 2
 
     def test_llmppo_learn_loss_falls_on_fixed_batch(self):
         """Repeated steps on one fixed batch must lower the loss (learning)."""

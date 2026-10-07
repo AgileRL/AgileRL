@@ -251,7 +251,8 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
     :type hf_generate_chunk_size: int | None, optional
     :param lora_config: Config for LoRA, defaults to None
     :type lora_config: LoraConfig, optional
-    :param cosine_lr_schedule_config: Config for cosine lr scheduling, defaults to None
+    :param cosine_lr_schedule_config: Warmup-cosine schedule stepped once per
+        ``learn`` call, peaking at ``lr``, defaults to None
     :type cosine_lr_schedule_config: CosineLRScheduleConfig, optional
     :param offload_trainer_during_rollout: For colocated vLLM, offload the trainer's
         own base to CPU during rollout (and bring it back for the training step)
@@ -843,6 +844,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                 }
                 result.update(adv_stats)
                 result.update(padding_stats)
+                self._step_lr_scheduler()
                 result.update(self._learn_phase_seconds())
                 token_ids_list = experiences[0]
                 result["completion_length"] = float(
@@ -1024,6 +1026,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         result.update(padding_stats)
         result.update(update_stats)
         result["old_logprobs_trainer_rows"] = float((~rollout_rows).sum())
+        self._step_lr_scheduler()
         result.update(self._learn_phase_seconds())
         if grad_updates > 0:
             result["grad_norm_pre"] = grad_norm_pre_total / grad_updates

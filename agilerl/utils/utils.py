@@ -1739,20 +1739,9 @@ def consolidate_mutations(population: list[LLMAlgorithm]) -> None:
         agent.mut = mut
         setattr(agent, mut, mut_value)
 
-        if mut in ("lr", "critic_lr"):
+        if mut in ("lr", "lr_critic"):
             assert agent.optimizer is not None, "Optimizer is not initialized"
-            opt = agent.optimizer
-            lr = (
-                (agent.lr, agent.lr_critic)
-                if getattr(agent, "lr_critic", None) is not None
-                else agent.lr
-            )
-            update_lr_kw: dict[str, Any] = {
-                "optimizer": opt,
-                "lr": lr,
-                "scheduler_config": agent.cosine_lr_schedule_config,
-            }
-            agent.lr_scheduler = LLMAlgorithm.update_lr(**update_lr_kw)
+            agent.apply_lr()
 
 
 def data_parallel_topology(processes_per_replica: int = 1) -> tuple[int, int]:

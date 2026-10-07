@@ -79,6 +79,7 @@ from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
 from agilerl.algorithms.core.registry import (
     HyperparameterConfig,
     NetworkGroup,
+    OptimizerConfig,
     RLParameter,
 )
 from agilerl.algorithms.grpo import GRPO
@@ -87,8 +88,13 @@ from agilerl.distributed import FSDPConfig
 from agilerl.distributed.expert_parallel import build_parallel_mesh
 from agilerl.distributed.runtime import DPRuntime, FSDPRuntime
 from agilerl.modules import EvolvableMLP
-from agilerl.utils.algo_utils import VLLMConfig
+from agilerl.utils.algo_utils import (
+    CosineLRScheduleConfig,
+    VLLMConfig,
+    create_warmup_cosine_scheduler,
+)
 from agilerl.utils.learn_profiler import LearnProfiler
+from agilerl.utils.llm_utils import make_llm_optimizer
 from agilerl.utils.mutation_utils import target_activations
 from agilerl.wrappers.agent import RSNorm
 from tests.helper_functions import capture_grama_snapshot
@@ -2232,20 +2238,38 @@ class TestLLMDistributedValidation:
         assert "NCCL_CUMEM_ENABLE" not in os.environ
 
 
+class LoraActorCritic(nn.Module):
+    """Actor and critic LoRA params, enough for ``make_llm_optimizer``."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.actor_lora_A = nn.Parameter(torch.ones(2, 2))
+        self.critic_lora_A = nn.Parameter(torch.ones(2, 2))
+
+
+def lrs_by_group(optimizer: OptimizerWrapper) -> dict[str, float]:
+    return {g["group"]: g["lr"] for g in optimizer.optimizer.param_groups}
+
+
+def schedule_config() -> CosineLRScheduleConfig:
+    """Peak multiplier 0.5 at step 0, 1.0 at step 1, 0.55 at step 6, 0.1 from step 10."""
+    return CosineLRScheduleConfig(num_steps=10, warmup_proportion=0.2, min_lr_ratio=0.1)
+
+
 class TestLLMUpdateLr:
-    def test_update_lr_with_scheduler_config_builds_scheduler(self):
-        opt = torch.optim.Adam([torch.tensor([1.0], requires_grad=True)], lr=1e-3)
-        sched_config = MagicMock()
-        sched_config.warmup_steps = 10
-        sched_config.total_steps = 100
-        with patch(
-            "agilerl.algorithms.core.base.create_warmup_cosine_scheduler"
-        ) as mock_sched:
-            mock_sched.return_value = MagicMock()
-            scheduler = LLMAlgorithm.update_lr(opt, 5e-4, scheduler_config=sched_config)
+    def test_update_lr_rebuilds_schedule_at_step_with_new_peaks(self):
+        # Arrange
+        opt = make_llm_optimizer(LoraActorCritic(), lr=1e-4, lr_critic=1e-3)
+
+        # Act
+        scheduler = LLMAlgorithm.update_lr(
+            opt, (2e-4, 2e-3), scheduler_config=schedule_config(), schedule_step=6
+        )
+
+        # Assert
         assert scheduler is not None
-        mock_sched.assert_called_once()
-        assert opt.param_groups[0]["lr"] == 5e-4
+        assert scheduler.last_epoch == 6
+        assert lrs_by_group(opt) == pytest.approx({"actor": 1.1e-4, "critic": 1.1e-3})
 
     def test_update_lr_without_scheduler_config_returns_none(self):
         opt = torch.optim.Adam([torch.tensor([1.0], requires_grad=True)], lr=1e-3)
@@ -2332,6 +2356,100 @@ class TestLLMWrapModels:
             LLMAlgorithm.wrap_models(agent)
 
 
+class TestLLMAlgorithmApplyLr:
+    def test_new_peak_rescales_at_current_step(self):
+        # Arrange
+        agent = _make_llm_agent(cosine_lr_schedule_config=schedule_config())
+        agent.optimizer = make_llm_optimizer(LoraActorCritic(), lr=1e-4, lr_critic=None)
+        agent.apply_lr()
+        for _ in range(6):
+            agent.lr_scheduler.step()
+
+        # Act
+        agent.lr = 2e-4
+        agent.apply_lr()
+
+        # Assert
+        assert agent.lr_schedule_step == 6
+        assert agent.current_lr == pytest.approx(1.1e-4)
+        assert lrs_by_group(agent.optimizer) == pytest.approx({"actor": 1.1e-4})
+
+    def test_critic_follows_its_own_peak(self):
+        # Arrange
+        agent = _make_llm_agent(cosine_lr_schedule_config=schedule_config())
+        agent.lr_critic = 1e-3
+        agent.optimizer = make_llm_optimizer(LoraActorCritic(), lr=1e-4, lr_critic=1e-3)
+
+        # Act
+        agent.apply_lr()
+        at_start = lrs_by_group(agent.optimizer)
+        for _ in range(6):
+            agent.lr_scheduler.step()
+        at_mid = lrs_by_group(agent.optimizer)
+
+        # Assert
+        assert at_start == pytest.approx({"actor": 5e-5, "critic": 5e-4})
+        assert at_mid == pytest.approx({"actor": 5.5e-5, "critic": 5.5e-4})
+        assert agent.current_lr == pytest.approx(5.5e-5)
+
+    def test_without_schedule_holds_peak(self):
+        agent = _make_llm_agent()
+        agent.optimizer = make_llm_optimizer(LoraActorCritic(), lr=1e-3, lr_critic=None)
+
+        agent.apply_lr()
+
+        assert agent.lr_scheduler is None
+        assert agent.lr_schedule_step == 0
+        assert agent.current_lr == 1e-4
+        assert lrs_by_group(agent.optimizer) == {"actor": 1e-4}
+
+
+class TestLLMAlgorithmCurrentLrCriticProperty:
+    def test_matches_the_critic_group_through_the_schedule(self):
+        # Arrange
+        agent = _make_llm_agent(cosine_lr_schedule_config=schedule_config())
+        agent.lr_critic = 1e-3
+        agent.optimizer = make_llm_optimizer(LoraActorCritic(), lr=1e-4, lr_critic=1e-3)
+
+        # Act
+        agent.apply_lr()
+        at_warmup = agent.current_lr_critic
+        for _ in range(6):
+            agent.lr_scheduler.step()
+        at_mid = agent.current_lr_critic
+
+        # Assert: warmup step 0 is half the peak, step 6 is 0.55 of it.
+        assert at_warmup == pytest.approx(5e-4)
+        assert at_mid == pytest.approx(5.5e-4)
+        assert at_mid == pytest.approx(lrs_by_group(agent.optimizer)["critic"])
+
+    def test_starts_before_the_actor_start_step(self):
+        agent = _make_llm_agent(
+            cosine_lr_schedule_config=CosineLRScheduleConfig(
+                num_steps=12, warmup_proportion=0.2, actor_start_step=2
+            )
+        )
+        agent.lr_critic = 1e-3
+        agent.optimizer = make_llm_optimizer(LoraActorCritic(), lr=1e-4, lr_critic=1e-3)
+
+        agent.apply_lr()
+
+        assert agent.current_lr == 0.0
+        assert agent.current_lr_critic == pytest.approx(5e-4)
+
+    def test_without_schedule_is_the_critic_peak(self):
+        agent = _make_llm_agent()
+        agent.lr_critic = 1e-3
+
+        assert agent.current_lr_critic == 1e-3
+
+    def test_without_a_critic_rate_is_the_actor_peak(self):
+        agent = _make_llm_agent()
+
+        assert agent.lr_critic is None
+        assert agent.current_lr_critic == 1e-4
+
+
 class TestLLMCleanUp:
     def test_clean_up_synchronises_processes(self):
         agent = _make_llm_agent()
@@ -2364,15 +2482,19 @@ class TestLLMBackwardPass:
         agent.optimizer.step.assert_called_once()
         agent.optimizer.zero_grad.assert_called_once()
 
-    def test_backward_pass_with_lr_scheduler(self):
+    def test_backward_pass_leaves_lr_schedule_unstepped(self):
         agent = _make_llm_agent()
         agent.max_grad_norm = 1.0
-        agent.lr_scheduler = MagicMock()
-        agent.lr_scheduler.get_last_lr.return_value = [5e-5]
-        loss = MagicMock()
-        LLMAlgorithm._backward_pass(agent, loss)
-        agent.lr_scheduler.step.assert_called_once()
-        assert agent.lr == 5e-5
+        param = nn.Parameter(torch.zeros(1))
+        agent.lr_scheduler = create_warmup_cosine_scheduler(
+            torch.optim.SGD([param], lr=1e-4), schedule_config()
+        )
+
+        LLMAlgorithm._backward_pass(agent, MagicMock())
+        LLMAlgorithm._backward_pass(agent, MagicMock())
+
+        assert agent.lr_scheduler.last_epoch == 0
+        assert agent.lr == 1e-4
 
     def test_backward_pass_holds_amp_ctx_through_backward(self):
         agent = _make_llm_agent()
@@ -4563,6 +4685,64 @@ class TestLLMBackwardPassGradNorms:
 
         assert step is None
 
+    @staticmethod
+    def _actor_critic_agent_and_loss():
+        """Agent with actor grads of norm 0.5 and critic grads of norm 50."""
+        agent = _make_llm_agent()
+        agent.max_grad_norm = 1.0
+        agent.gradient_accumulation_steps = 1
+        agent.lr_scheduler = None
+        actor = nn.Parameter(torch.zeros(2))
+        critic = nn.Parameter(torch.zeros(2))
+        agent.optimizer = MagicMock()
+        agent.optimizer._single_optimizer.return_value = torch.optim.SGD(
+            [
+                {"params": [actor], "group": "actor"},
+                {"params": [critic], "group": "critic"},
+            ],
+            lr=0.0,
+        )
+        agent.shard_runtime = DPRuntime()
+        loss = (actor * torch.tensor([0.3, 0.4])).sum() + (
+            critic * torch.tensor([30.0, 40.0])
+        ).sum()
+        return agent, loss, actor, critic
+
+    def test_default_clips_every_group_by_the_global_norm(self):
+        # Arrange
+        agent, loss, actor, critic = self._actor_critic_agent_and_loss()
+        coef = 1.0 / (0.5**2 + 50.0**2) ** 0.5
+
+        # Act
+        step = LLMAlgorithm._backward_pass(agent, loss)
+
+        # Assert
+        assert step.clip_coefs == pytest.approx((coef, coef), rel=1e-6)
+        assert step.grad_norm_post == pytest.approx(1.0, rel=1e-5)
+        # rtol covers the 1e-6 epsilon in the clip coefficient
+        assert torch.allclose(
+            actor.grad, torch.tensor([0.3, 0.4]) * coef, rtol=1e-6, atol=0
+        )
+        assert torch.allclose(
+            critic.grad, torch.tensor([30.0, 40.0]) * coef, rtol=1e-6, atol=0
+        )
+
+    def test_clip_groups_clip_each_set_by_its_own_norm(self):
+        # Arrange
+        agent, loss, actor, critic = self._actor_critic_agent_and_loss()
+
+        # Act
+        step = LLMAlgorithm._backward_pass(
+            agent, loss, clip_groups=(frozenset({"actor"}), frozenset({"critic"}))
+        )
+
+        # Assert
+        assert step.clip_coefs == pytest.approx((1.0, 1.0 / 50.0), rel=1e-6)
+        assert step.grad_norm_post == pytest.approx((0.5**2 + 1.0) ** 0.5, rel=1e-5)
+        assert torch.equal(actor.grad, torch.tensor([0.3, 0.4]))
+        # rtol covers the 1e-6 epsilon in the clip coefficient
+        assert torch.allclose(critic.grad, torch.tensor([0.6, 0.8]), rtol=1e-6, atol=0)
+
 
 class _DummyRLWithTensor(DummyRLAlgorithm):
     """Dummy algorithm with a tensor init parameter for testing `load` classmethod."""
@@ -5674,12 +5854,14 @@ class TestLLMReinitOptFromConfig:
     wrapper's own optimizer (no engine-optimizer fallback).
     """
 
-    def test_reinit_opt_from_config_llm(self):
-        agent = _make_llm_agent()
-        agent.cosine_lr_schedule_config = None
-
-        from agilerl.algorithms.core.registry import OptimizerConfig
-
+    def test_reinit_opt_from_config_llm_keeps_schedule_position(self):
+        # Arrange
+        agent = _make_llm_agent(cosine_lr_schedule_config=schedule_config())
+        agent.optimizer = make_llm_optimizer(LoraActorCritic(), lr=1e-4, lr_critic=None)
+        agent.apply_lr()
+        for _ in range(6):
+            agent.lr_scheduler.step()
+        agent.lr = 2e-4
         config = OptimizerConfig(
             name="optimizer",
             lr="lr",
@@ -5688,13 +5870,12 @@ class TestLLMReinitOptFromConfig:
             optimizer_kwargs={},
         )
 
-        with patch.object(LLMAlgorithm, "update_lr", return_value=None) as mock_update:
-            EvolvableAlgorithm._reinit_opt_from_config(agent, config)
-        mock_update.assert_called_once()
-        args, kwargs = mock_update.call_args
-        passed_opt = args[0] if args else kwargs.get("optimizer")
-        assert passed_opt is agent.optimizer.optimizer
-        assert agent.lr_scheduler is None
+        # Act
+        EvolvableAlgorithm._reinit_opt_from_config(agent, config)
+
+        # Assert
+        assert agent.lr_scheduler.last_epoch == 6
+        assert lrs_by_group(agent.optimizer) == pytest.approx({"actor": 1.1e-4})
 
     def test_reinit_opt_from_config_llm_with_split_lr_config(self):
         agent = _make_llm_agent()

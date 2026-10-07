@@ -933,6 +933,89 @@ class TestLLMEnvSpecSegmentMaxImages:
             )
 
 
+class TestLLMEnvSpecRestartKeepTurns:
+    def test_accepts_a_turn_count(self) -> None:
+        spec = LLMEnvSpec(
+            env_type="rollout",
+            env_url="http://env",
+            max_turns=10,
+            segment_max_images=4,
+            restart_keep_turns=2,
+        )
+
+        assert spec.restart_keep_turns == 2
+
+    def test_accepts_a_token_limit_alone(self) -> None:
+        spec = LLMEnvSpec(
+            env_type="rollout",
+            env_url="http://env",
+            max_turns=10,
+            segment_prompt_tokens=24000,
+            restart_keep_turns=2,
+        )
+
+        assert spec.restart_keep_turns == 2
+
+    def test_rejects_kept_turns_without_a_restart_limit(self) -> None:
+        with pytest.raises(
+            ValidationError,
+            match="restart_keep_turns applies at a context restart; set "
+            "segment_prompt_tokens or segment_max_images",
+        ):
+            LLMEnvSpec(
+                env_type="rollout",
+                env_url="http://env",
+                max_turns=10,
+                restart_keep_turns=2,
+            )
+
+    @pytest.mark.parametrize("keep", [4, 5])
+    def test_rejects_as_many_kept_turns_as_segment_images(self, keep: int) -> None:
+        with pytest.raises(
+            ValidationError,
+            match=rf"restart_keep_turns \({keep}\) must be below "
+            r"segment_max_images \(4\)",
+        ):
+            LLMEnvSpec(
+                env_type="rollout",
+                env_url="http://env",
+                max_turns=10,
+                segment_max_images=4,
+                restart_keep_turns=keep,
+            )
+
+    def test_defaults_to_zero(self) -> None:
+        spec = LLMEnvSpec(env_type="rollout", env_url="http://env", max_turns=10)
+
+        assert spec.restart_keep_turns == 0
+
+    def test_rejects_a_negative_count(self) -> None:
+        with pytest.raises(ValidationError, match="restart_keep_turns"):
+            LLMEnvSpec(
+                env_type="rollout",
+                env_url="http://env",
+                max_turns=10,
+                restart_keep_turns=-1,
+            )
+
+
+class TestLLMEnvSpecActionErrorField:
+    def test_accepts_a_field_name(self) -> None:
+        spec = LLMEnvSpec(
+            env_type="rollout",
+            env_url="http://env",
+            max_turns=10,
+            action_error_field="error",
+        )
+
+        assert spec.action_error_field == "error"
+
+    def test_defaults_to_empty(self) -> None:
+        spec = LLMEnvSpec(env_type="rollout", env_url="http://env", max_turns=10)
+
+        assert spec.action_error_field == ""
+
+
 class TestManifestHelpers:
     def test_tag_environment_passes_non_dict_through(self) -> None:
         from agilerl.arena.models.manifest import TrainingManifest

@@ -61,11 +61,11 @@ def _lora_config_dict():
 
 
 def _schedule_config():
-    return CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.1)
+    return CosineLRScheduleConfig(num_steps=10, warmup_proportion=0.1)
 
 
 def _schedule_config_dict():
-    return {"num_epochs": 10, "warmup_proportion": 0.1}
+    return {"num_steps": 10, "warmup_proportion": 0.1}
 
 
 def _stub_tokenizer():
@@ -249,6 +249,15 @@ class TestLLMSpecResumeVsLoad:
         )
         assert agent.lr_scheduler.last_epoch == 5
         assert agent.lr == 5e-5
+        # num_steps 10, one warmup step: multiplier 0.6282 at step 5, 0.4719 at 6.
+        groups = agent.optimizer.optimizer.param_groups
+        assert [g["lr"] for g in groups] == pytest.approx(
+            [3.1407e-5] * len(groups), rel=1e-4
+        )
+        agent.lr_scheduler.step()
+        assert [g["lr"] for g in groups] == pytest.approx(
+            [2.3593e-5] * len(groups), rel=1e-4
+        )
 
     def test_resume_warns_when_the_spec_disagrees(self, grpo_checkpoint):
         with pytest.warns(UserWarning, match="restored hyperparameters that differ"):

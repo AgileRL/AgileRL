@@ -244,8 +244,12 @@ def _decoder_fields(text_cfg: dict[str, Any]) -> dict[str, Any]:
         text_cfg.get("mlp_hidden_act") or text_cfg.get("hidden_act") or ""
     ).lower()
     gated = act not in {"relu", "relu2", "relu_squared", "squared_relu"}
+    n_layers = text_cfg.get("num_hidden_layers") or len(_layer_type_list(text_cfg))
+    if not n_layers:
+        msg = "Model config has neither num_hidden_layers nor a per-layer type list"
+        raise KeyError(msg)
     return {
-        "n_layers": int(text_cfg["num_hidden_layers"]),
+        "n_layers": int(n_layers),
         "hidden_size": hidden,
         "intermediate_size": int(text_cfg["intermediate_size"]),
         "n_heads": n_heads,
@@ -482,10 +486,10 @@ class ModelArch(BaseModel):
     def from_hf_config(cls, config: dict[str, Any]) -> Self:
         """Build a :class:`ModelArch` from a raw HF ``config.json`` dict.
 
-        Unwraps a nested ``text_config``. Tower params come from
+        Unwraps a nested ``text_config`` or ``llm_config``. Tower params come from
         :func:`multimodal_tower_params`.
         """
-        text_cfg = config.get("text_config", config)
+        text_cfg = config.get("text_config") or config.get("llm_config") or config
         decoder = _decoder_fields(text_cfg)
         moe = _moe_fields(text_cfg)
         layout = _layout_fields(

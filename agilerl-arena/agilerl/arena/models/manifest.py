@@ -25,6 +25,7 @@ from pydantic import (
 from typing_extensions import Self
 
 from agilerl.arena.models.algorithms.base import AlgoSpec, LLMAlgorithmSpec
+from agilerl.arena.models.algorithms.grpo import GRPOSpec
 from agilerl.arena.models.algorithms.ppo import PPOSpec
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
 from agilerl.arena.models.env import EnvSpec
@@ -493,6 +494,25 @@ class TrainingManifest(BaseModel):
                 else None
             )
             msg = f"Async rollout requires an LLMRolloutBufferSpec, got {got}"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _check_group_replay(self) -> Self:
+        """Group replay swaps a member of a group whose returns tie, so it needs groups."""
+        if not (
+            isinstance(self.replay_buffer, LLMRolloutBufferSpec)
+            and self.replay_buffer.group_replay_max_age > 0
+        ):
+            return self
+        # A single-completion group always ties, so every completion would be replaced.
+        if not (
+            isinstance(self.algorithm, GRPOSpec) and self.algorithm.group_size >= 2
+        ):
+            msg = (
+                "replay_buffer.group_replay_max_age > 0 requires a GRPO-family "
+                f"algorithm with group_size >= 2, got {self.algorithm.name}"
+            )
             raise ValueError(msg)
         return self
 

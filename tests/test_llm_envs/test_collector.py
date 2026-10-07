@@ -504,7 +504,9 @@ class TestRolloutCollectorAssignGroupTask:
                     collector.finalize_episode(episode_id)
             for row in range(8):
                 for _ in range(20):
-                    collector.record_group_outcome(row, informative=row == 5)
+                    collector.record_group_outcome(
+                        row, informative=row == 5, success=None
+                    )
 
             # Act
             rows = Counter(
@@ -569,7 +571,7 @@ class TestRolloutCollectorRecordGroupOutcome:
                 RuntimeError,
                 match="a finished group implies assign_group_task built the assigner",
             ):
-                collector.record_group_outcome(0, informative=True)
+                collector.record_group_outcome(0, informative=True, success=None)
         finally:
             collector.close()
 
@@ -582,11 +584,18 @@ class TestRolloutCollectorTaskSamplerState:
             collector.assign_group_task(0)
 
             # Act
-            collector.record_group_outcome(5, informative=True)
+            collector.record_group_outcome(5, informative=True, success=None)
 
             # Assert
             assert collector.task_sampler_state() == [
-                {"row": 5, "informative": 1.0, "observed": 1.0}
+                {
+                    "row": 5,
+                    "informative": 1.0,
+                    "observed": 1.0,
+                    "tied_failure": 0,
+                    "mixed": 0,
+                    "tied_success": 0,
+                }
             ]
         finally:
             collector.close()
@@ -599,8 +608,22 @@ class TestRolloutCollectorLoadTaskSamplerState:
     def test_restores_counts_before_the_first_reset(self) -> None:
         # Arrange
         state = [
-            {"row": 2, "informative": 0.0, "observed": 6.0},
-            {"row": 5, "informative": 6.0, "observed": 6.0},
+            {
+                "row": 2,
+                "informative": 0.0,
+                "observed": 6.0,
+                "tied_failure": 6,
+                "mixed": 0,
+                "tied_success": 0,
+            },
+            {
+                "row": 5,
+                "informative": 6.0,
+                "observed": 6.0,
+                "tied_failure": 0,
+                "mixed": 6,
+                "tied_success": 0,
+            },
         ]
         collector = _adaptive_row_collector()
         try:

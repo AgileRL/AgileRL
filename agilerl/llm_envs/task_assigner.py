@@ -6,16 +6,25 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TypedDict
+from typing import Literal, TypedDict
 
 import torch
+from typing_extensions import NotRequired
 
-__all__ = ["TaskAssigner", "TaskRowOutcome", "TaskRowStats"]
+__all__ = ["GroupSuccess", "TaskAssigner", "TaskRowOutcome", "TaskRowStats"]
 
 # A row's outcome counts halve after this many newer outcomes of that row.
 TASK_OUTCOME_HALF_LIFE = 8
 # Decayed counts stay below 1 / (1 - decay) ~= 12, so a row's weight stays above ~0.07.
 TASK_OUTCOME_DECAY = 0.5 ** (1 / TASK_OUTCOME_HALF_LIFE)
+
+# Whether a group's members all reached the success threshold, none did, or some did.
+GroupSuccess = Literal["tied_failure", "mixed", "tied_success"]
+GROUP_SUCCESS_KINDS: tuple[GroupSuccess, ...] = (
+    "tied_failure",
+    "mixed",
+    "tied_success",
+)
 
 
 @dataclass(frozen=True)
@@ -26,25 +35,39 @@ class TaskRowStats:
     :param informative: Decayed count of groups whose rewards differed.
     :param observed: Decayed count of finished groups.
     :param weight: ``(informative + 1) / (observed + 2)``; ``0.5`` for an unseen row.
+    :param tied_failure: Groups where no member reached the success threshold.
+    :param mixed: Groups where some members reached the success threshold.
+    :param tied_success: Groups where every member reached the success threshold.
     """
 
     row: int
     informative: float
     observed: float
     weight: float
+    tied_failure: int
+    mixed: int
+    tied_success: int
 
 
 class TaskRowOutcome(TypedDict):
-    """Decayed group outcomes of one dataset row, in the JSON-able form a checkpoint stores.
+    """Group outcomes of one dataset row, in the JSON-able form a checkpoint stores.
+
+    The success counts may be absent; they load as zero.
 
     :param row: Dataset row index.
     :param informative: Decayed count of groups whose rewards differed.
     :param observed: Decayed count of finished groups.
+    :param tied_failure: Groups where no member reached the success threshold.
+    :param mixed: Groups where some members reached the success threshold.
+    :param tied_success: Groups where every member reached the success threshold.
     """
 
     row: int
     informative: float
     observed: float
+    tied_failure: NotRequired[int]
+    mixed: NotRequired[int]
+    tied_success: NotRequired[int]
 
 
 def _mix_seed(value: int) -> int:
@@ -114,6 +137,10 @@ class TaskAssigner:
         self._draws = 0
         self._informative = torch.zeros(self._shard_size, dtype=torch.float64)
         self._observed = torch.zeros(self._shard_size, dtype=torch.float64)
+        # Undecayed group counts per row, one column per GROUP_SUCCESS_KINDS entry.
+        self._success_counts = torch.zeros(
+            (self._shard_size, len(GROUP_SUCCESS_KINDS)), dtype=torch.long
+        )
 
     def _row_weights(self) -> torch.Tensor:
         """Smoothed informative rate of each shard row, in shard order."""
@@ -140,11 +167,18 @@ class TaskAssigner:
         self._pos += 1
         return row
 
-    def record_outcome(self, row: int, informative: bool) -> None:
-        """Fold one finished group's outcome on ``row`` into that row's decayed counts.
+    def record_outcome(
+        self,
+        row: int,
+        informative: bool,
+        success: GroupSuccess | None,
+    ) -> None:
+        """Fold one finished group's outcome on ``row`` into that row's counts.
 
         :param row: Dataset row the group ran on; must be in this rank's shard.
         :param informative: Whether the group's rewards differed across members.
+        :param success: How many members reached the success threshold; ``None``
+            when the env has no threshold.
         :raises ValueError: If ``row`` is outside this rank's shard.
         """
         index = int(row) - self._shard_start
@@ -158,27 +192,37 @@ class TaskAssigner:
         self._informative[index] += float(informative)
         self._observed[index] *= TASK_OUTCOME_DECAY
         self._observed[index] += 1.0
+        if success is not None:
+            self._success_counts[index, GROUP_SUCCESS_KINDS.index(success)] += 1
 
     def row_stats(self) -> list[TaskRowStats]:
-        """Decayed outcomes and sampling weight of every row in this rank's shard."""
+        """Outcomes and sampling weight of every row in this rank's shard."""
         weights = self._row_weights().tolist()
+        counts = self._success_counts.tolist()
         return [
             TaskRowStats(
                 row=self._shard_start + index,
                 informative=float(self._informative[index]),
                 observed=float(self._observed[index]),
                 weight=float(weights[index]),
+                tied_failure=counts[index][0],
+                mixed=counts[index][1],
+                tied_success=counts[index][2],
             )
             for index in range(self._shard_size)
         ]
 
     def state_dict(self) -> list[TaskRowOutcome]:
-        """Decayed outcome counts of every row in this rank's shard that has finished a group."""
+        """Outcome counts of every row in this rank's shard that has finished a group."""
+        counts = self._success_counts.tolist()
         return [
             TaskRowOutcome(
                 row=self._shard_start + index,
                 informative=float(self._informative[index]),
                 observed=float(self._observed[index]),
+                tied_failure=counts[index][0],
+                mixed=counts[index][1],
+                tied_success=counts[index][2],
             )
             for index in torch.nonzero(self._observed).flatten().tolist()
         ]
@@ -193,11 +237,15 @@ class TaskAssigner:
         """
         self._informative.zero_()
         self._observed.zero_()
+        self._success_counts.zero_()
         for outcome in state:
             index = int(outcome["row"]) - self._shard_start
             if 0 <= index < self._shard_size:
                 self._informative[index] = float(outcome["informative"])
                 self._observed[index] = float(outcome["observed"])
+                self._success_counts[index] = torch.tensor(
+                    [outcome.get(kind, 0) for kind in GROUP_SUCCESS_KINDS]
+                )
 
     def next_task(
         self,

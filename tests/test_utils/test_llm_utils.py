@@ -54,6 +54,7 @@ from agilerl.distributed import fsdp as dmod
 from agilerl.distributed import gather_params
 from agilerl.llm_envs import DatasetEnv
 from agilerl.utils import llm_utils as llm_utils_module
+from agilerl.utils.algo_utils import CosineLRScheduleConfig
 from agilerl.utils.llm_utils import (
     adapt_lora_config_for_model,
     apply_pad_token_id,
@@ -117,6 +118,7 @@ from agilerl.utils.llm_utils import (
     save_peft_adapter_for_vllm_rollout,
     set_sub_model_attn_implementation,
     validate_importance_sampling_level,
+    value_fit,
 )
 from tests import TINY_LLM_FIXTURE_PATH
 
@@ -1131,6 +1133,46 @@ class TestBaselineFreeTurnCells:
         assert torch.equal(sparse, turn_mask)
 
 
+class TestValueFit:
+    def test_exact_values_explain_all_variance(self) -> None:
+        returns = torch.tensor([[1.0, 2.0, 4.0, 0.0]])
+        values = torch.tensor([[1.0, 2.0, 4.0, 9.0]])
+        mask = torch.tensor([[1.0, 1.0, 1.0, 0.0]])
+
+        explained, correlation = value_fit(values, returns, mask)
+
+        assert explained == pytest.approx(1.0)
+        assert correlation == pytest.approx(1.0)
+
+    def test_anti_correlated_values(self) -> None:
+        returns = torch.tensor([[1.0, 2.0, 4.0]])
+        mask = torch.ones(1, 3)
+
+        explained, correlation = value_fit(-returns, returns, mask)
+
+        # Residual variance is var(2 * returns) = 4 * var(returns).
+        assert explained == pytest.approx(-3.0)
+        assert correlation == pytest.approx(-1.0)
+
+    def test_constant_returns_report_zero(self) -> None:
+        returns = torch.full((2, 3), 0.5)
+        values = torch.randn(2, 3)
+        mask = torch.ones(2, 3)
+
+        assert value_fit(values, returns, mask) == (0.0, 0.0)
+
+    def test_turn_ids_compare_pooled_turn_values(self) -> None:
+        values = torch.tensor([[1.0, 3.0, 5.0, 5.0, 7.0]])
+        returns = torch.tensor([[2.0, 2.0, 5.0, 5.0, 0.0]])
+        mask = torch.tensor([[1.0, 1.0, 1.0, 1.0, 0.0]])
+        turn_ids = torch.tensor([[0, 0, 1, 1, -1]])
+
+        explained, correlation = value_fit(values, returns, mask, turn_ids, "mean")
+
+        assert explained == pytest.approx(1.0)
+        assert correlation == pytest.approx(1.0)
+
+
 class TestPoolByTurnsBadReduction:
     """``pool_by_turns`` should raise a clear ValueError for unknown reductions."""
 
@@ -1360,23 +1402,50 @@ class TestMakeLlmScheduler:
 
         opt = make_llm_optimizer(Actor(), lr=1e-4, lr_critic=None)
 
-        assert make_llm_scheduler(opt, None, 1e-4) is None
+        assert make_llm_scheduler(opt, None) is None
 
-    def test_builds_warmup_cosine_scheduler(self):
-        from agilerl.utils.algo_utils import CosineLRScheduleConfig
+    def test_actor_and_critic_follow_their_own_peaks(self):
+        # Arrange
+        class Actor(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.actor_lora_A = nn.Parameter(torch.ones(2, 2))
+                self.critic_lora_A = nn.Parameter(torch.ones(2, 2))
 
+        opt = make_llm_optimizer(Actor(), lr=1e-4, lr_critic=1e-3)
+        config = CosineLRScheduleConfig(
+            num_steps=10, warmup_proportion=0.2, min_lr_ratio=0.1
+        )
+
+        # Act
+        scheduler = make_llm_scheduler(opt, config)
+        lrs_by_step = []
+        for _ in range(11):
+            lrs_by_step.append(
+                {g["group"]: g["lr"] for g in opt.optimizer.param_groups}
+            )
+            scheduler.step()
+
+        # Assert
+        for step, expected in [(0, 0.5), (1, 1.0), (6, 0.55), (10, 0.1)]:
+            assert lrs_by_step[step]["actor"] == pytest.approx(1e-4 * expected)
+            assert lrs_by_step[step]["critic"] == pytest.approx(1e-3 * expected)
+
+    def test_start_step_places_schedule_mid_run(self):
         class Actor(nn.Module):
             def __init__(self):
                 super().__init__()
                 self.actor_lora_A = nn.Parameter(torch.ones(2, 2))
 
         opt = make_llm_optimizer(Actor(), lr=1e-4, lr_critic=None)
-        config = CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.1)
+        config = CosineLRScheduleConfig(
+            num_steps=10, warmup_proportion=0.2, min_lr_ratio=0.1
+        )
 
-        scheduler = make_llm_scheduler(opt, config, 1e-4)
+        scheduler = make_llm_scheduler(opt, config, start_step=6)
 
         assert scheduler is not None
-        assert scheduler.get_last_lr()[0] == pytest.approx(1e-8)
+        assert scheduler.get_last_lr() == pytest.approx([5.5e-5])
 
 
 class TestGetModelNameOrPathBaseModelBranches:

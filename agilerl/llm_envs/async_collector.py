@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 from agilerl.components.llm_rollout_data import EpisodeSegments
 from agilerl.llm_envs.env_response import EnvResponse
-from agilerl.llm_envs.task_assigner import TaskRowOutcome, TaskRowStats
+from agilerl.llm_envs.task_assigner import GroupSuccess, TaskRowOutcome, TaskRowStats
 from agilerl.utils.llm_utils import is_rollout_prompt
 
 T = TypeVar("T")
@@ -55,9 +55,16 @@ class AsyncBatchCollector:
         """Whether groups draw their row by recent informative-group rate."""
         return self._collector.adaptive_task_sampling
 
-    def record_group_outcome(self, row_index: int, informative: bool) -> None:
+    def record_group_outcome(
+        self,
+        row_index: int,
+        informative: bool,
+        success: GroupSuccess | None,
+    ) -> None:
         """Feed one finished group's outcome on ``row_index`` back to the task assigner."""
-        self._collector.record_group_outcome(row_index, informative=informative)
+        self._collector.record_group_outcome(
+            row_index, informative=informative, success=success
+        )
 
     def task_row_stats(self) -> list[TaskRowStats]:
         """Per-row outcomes and sampling weights of the collector's shard."""
@@ -78,7 +85,7 @@ class AsyncBatchCollector:
         *,
         task: tuple[int | None, int | None] | None = None,
     ) -> EnvResponse:
-        """Acquire a slot and reset one episode; ``done`` when there is no policy prompt."""
+        """Acquire a slot and reset one episode; ``truncated`` when there is no policy prompt."""
         prompt, info = await self._offload(
             self._collector.reset_episode,
             episode_id,
@@ -102,14 +109,15 @@ class AsyncBatchCollector:
         prompt: dict[str, Any],
         info: dict[str, Any],
     ) -> EnvResponse:
-        """Wrap a reset's ``(prompt, info)``; ``done`` when there is no policy prompt."""
+        """Wrap a reset's ``(prompt, info)``; ``truncated`` when there is no policy prompt."""
         # Empty / non-prompt observations (turn-0 overflow) must not be generated from.
-        done = not (isinstance(prompt, Mapping) and is_rollout_prompt(prompt))
+        truncated = not (isinstance(prompt, Mapping) and is_rollout_prompt(prompt))
         return EnvResponse(
             episode_id=episode_id,
             observation=prompt,
             reward=0.0,
-            done=done,
+            terminated=False,
+            truncated=truncated,
             info=info if isinstance(info, dict) else {},
         )
 
@@ -135,7 +143,8 @@ class AsyncBatchCollector:
             episode_id=episode_id,
             observation=prompt,
             reward=float(reward),
-            done=bool(terminated or truncated),
+            terminated=bool(terminated),
+            truncated=bool(truncated),
             info=info if isinstance(info, dict) else {},
         )
 

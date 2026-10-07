@@ -16,7 +16,6 @@ import pytest
 import torch
 from gymnasium import spaces
 from torch import nn
-from torch.optim.lr_scheduler import SequentialLR
 
 import agilerl.utils.algo_utils as algo_utils
 from agilerl import HAS_LLM_DEPENDENCIES
@@ -1732,17 +1731,136 @@ class TestStackAndPadExperiences:
             )
 
 
-def test_create_warmup_cosine_scheduler():
-    basic_net = nn.Sequential(nn.Linear(1, 1))
-    optimizer = torch.optim.Adam(basic_net.parameters(), lr=0.01)
-
-    lr_scheduler = create_warmup_cosine_scheduler(
-        optimizer,
-        CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05),
-        0.01,
-        0.1,
+class TestCosineLRScheduleConfigLrMultiplier:
+    @pytest.mark.parametrize(
+        ("step", "expected"),
+        [
+            (0, 0.5),
+            (1, 1.0),
+            (2, 1.0),
+            (6, 0.55),
+            (10, 0.1),
+            (15, 0.1),
+        ],
     )
-    assert isinstance(lr_scheduler, SequentialLR)
+    def test_warms_up_then_decays_to_floor(self, step, expected):
+        config = CosineLRScheduleConfig(
+            num_steps=10, warmup_proportion=0.2, min_lr_ratio=0.1
+        )
+
+        assert config.lr_multiplier(step, start_step=0) == pytest.approx(expected)
+
+    def test_starts_at_peak_without_warmup(self):
+        config = CosineLRScheduleConfig(num_steps=4)
+
+        assert config.lr_multiplier(0, start_step=0) == pytest.approx(1.0)
+        assert config.lr_multiplier(4, start_step=0) == pytest.approx(0.1)
+
+    def test_floor_of_one_holds_the_peak(self):
+        config = CosineLRScheduleConfig(num_steps=10, min_lr_ratio=1.0)
+
+        assert [config.lr_multiplier(step, start_step=0) for step in range(12)] == (
+            [1.0] * 12
+        )
+
+    @pytest.mark.parametrize(
+        ("kwargs", "match"),
+        [
+            ({"num_steps": 0}, "num_steps must be at least 1"),
+            ({"num_steps": 10, "warmup_proportion": 1.0}, "warmup_proportion"),
+            ({"num_steps": 10, "warmup_proportion": -0.1}, "warmup_proportion"),
+            ({"num_steps": 10, "min_lr_ratio": 1.5}, "min_lr_ratio"),
+            ({"num_steps": 10, "actor_start_step": 10}, "actor_start_step"),
+            ({"num_steps": 10, "actor_start_step": -1}, "actor_start_step"),
+        ],
+    )
+    def test_rejects_out_of_range_fields(self, kwargs, match):
+        with pytest.raises(ValueError, match=match):
+            CosineLRScheduleConfig(**kwargs)
+
+    @pytest.mark.parametrize(
+        ("step", "expected"),
+        [
+            (0, 0.0),
+            (1, 0.0),
+            (2, 0.5),
+            (3, 1.0),
+            (8, 0.55),
+            (12, 0.1),
+            (20, 0.1),
+        ],
+    )
+    def test_holds_at_zero_then_runs_the_schedule_over_the_steps_left(
+        self, step, expected
+    ):
+        # Two held steps leave 10: two warmup steps, then cosine to the floor at 12.
+        config = CosineLRScheduleConfig(
+            num_steps=12, warmup_proportion=0.2, min_lr_ratio=0.1
+        )
+
+        assert config.lr_multiplier(step, start_step=2) == pytest.approx(expected)
+
+
+class TestCreateWarmupCosineScheduler:
+    def test_each_param_group_follows_its_own_peak(self):
+        # Arrange
+        actor = nn.Parameter(torch.zeros(1))
+        critic = nn.Parameter(torch.zeros(1))
+        optimizer = torch.optim.SGD(
+            [{"params": [actor], "lr": 1e-4}, {"params": [critic], "lr": 1e-3}]
+        )
+        config = CosineLRScheduleConfig(
+            num_steps=10, warmup_proportion=0.2, min_lr_ratio=0.1
+        )
+
+        # Act
+        scheduler = create_warmup_cosine_scheduler(optimizer, config)
+        at_start = scheduler.get_last_lr()
+        for _ in range(6):
+            optimizer.step()
+            scheduler.step()
+        at_mid = scheduler.get_last_lr()
+
+        # Assert
+        assert at_start == pytest.approx([5e-5, 5e-4])
+        assert at_mid == pytest.approx([5.5e-5, 5.5e-4])
+
+    def test_only_critic_groups_start_before_actor_start_step(self):
+        # Arrange
+        groups = [
+            {"params": [nn.Parameter(torch.zeros(1))], "lr": 1e-4, "group": name}
+            for name in ("actor", "actor_replicated", "critic", "critic_replicated")
+        ]
+        optimizer = torch.optim.SGD(groups)
+        config = CosineLRScheduleConfig(
+            num_steps=12, warmup_proportion=0.2, actor_start_step=2
+        )
+
+        # Act
+        scheduler = create_warmup_cosine_scheduler(optimizer, config)
+
+        # Assert: critic warmup is 2 of 12 steps.
+        assert scheduler.get_last_lr() == pytest.approx([0.0, 0.0, 5e-5, 5e-5])
+
+    def test_start_step_resumes_with_current_lr_as_peak(self):
+        # Arrange
+        param = nn.Parameter(torch.zeros(1))
+        optimizer = torch.optim.SGD([param], lr=1e-4)
+        config = CosineLRScheduleConfig(
+            num_steps=10, warmup_proportion=0.2, min_lr_ratio=0.1
+        )
+        scheduler = create_warmup_cosine_scheduler(optimizer, config)
+        for _ in range(6):
+            optimizer.step()
+            scheduler.step()
+        optimizer.param_groups[0]["lr"] = 2e-4
+
+        # Act
+        rebuilt = create_warmup_cosine_scheduler(optimizer, config, start_step=6)
+
+        # Assert
+        assert rebuilt.last_epoch == 6
+        assert optimizer.param_groups[0]["lr"] == pytest.approx(1.1e-4)
 
 
 class TestRemoveNestedFiles:

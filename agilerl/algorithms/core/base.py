@@ -147,7 +147,6 @@ from agilerl.utils.algo_utils import (
     clone_llm,
     concatenate_tensors,
     configure_tf32_precision,
-    create_warmup_cosine_scheduler,
     filter_init_dict,
     get_input_size_from_space,
     get_output_size_from_space,
@@ -181,7 +180,7 @@ from agilerl.utils.phase_timer import PhaseTimer
 from agilerl.utils.torch_utils import release_device_memory
 
 if TYPE_CHECKING:
-    from torch.optim.lr_scheduler import SequentialLR
+    from torch.optim.lr_scheduler import LambdaLR
     from transformers import BitsAndBytesConfig, GenerationConfig, PreTrainedModel
 
 # Make imports visible to typechecker and import when required
@@ -236,6 +235,7 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
         is_rollout_prompt,
         language_model_attn_implementation,
         log_cuda_memory_snapshot,
+        make_llm_scheduler,
         move_params_to_cpu,
         move_params_to_gpu,
         needs_cross_rank_seq_padding,
@@ -502,7 +502,7 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
 
     metrics: AgentMetrics | MultiAgentMetrics
     # Optional LR scheduler, set by subclasses that use one (e.g. LLMAlgorithm).
-    lr_scheduler: SequentialLR | None
+    lr_scheduler: LambdaLR | None
 
     def __init__(
         self,
@@ -1138,17 +1138,16 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         optimizer = getattr(opt, "optimizer", None)
 
         if isinstance(self, LLMAlgorithm):
-            optimizer = opt.optimizer
-
             lr = (
                 tuple(getattr(self, lr_name) for lr_name in config.lr)
                 if isinstance(config.lr, tuple)
                 else getattr(self, config.lr)
             )
             self.lr_scheduler = LLMAlgorithm.update_lr(
-                optimizer,
+                opt,
                 lr=lr,
                 scheduler_config=self.cosine_lr_schedule_config,
+                schedule_step=self.lr_schedule_step,
             )
         else:
             # Multiple optimizers in a single attribute (i.e. multi-agent)
@@ -2787,7 +2786,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     :param group_size: Completions per prompt group. ``1`` when each
         ``batch_size`` item is already a sample (SFT, DPO, PPO, REINFORCE).
     :type group_size: int, optional
-    :param cosine_lr_schedule_config: The cosine LR schedule config.
+    :param cosine_lr_schedule_config: Warmup-cosine schedule stepped once per
+        ``learn`` call, with ``lr`` and ``lr_critic`` as the peaks; ``None``
+        holds both constant.
     :type cosine_lr_schedule_config: CosineLRScheduleConfig | None
     :param hp_config: The hyperparameter configuration.
     :type hp_config: Optional[HyperparameterConfig]
@@ -3372,18 +3373,18 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             lora_only=F  ->  the full actor state_dict is restored from
                              ``attributes.pt``.
 
-        When ``load_optimizer=True`` the optimizer (and LR scheduler) state is
-        restored from ``attributes.pt``; if the checkpoint contains no
-        optimizer state (saved with ``save_optimizer=False``), a
-        ``UserWarning`` is emitted and a freshly-initialised optimizer is
-        used. Without an LR scheduler, the optimizer's learning rates are set
-        to the loaded ``lr`` / ``lr_critic``.
+        When ``load_optimizer=True`` the optimizer state is restored from
+        ``attributes.pt``; if the checkpoint contains no optimizer state (saved
+        with ``save_optimizer=False``), a ``UserWarning`` is emitted and a
+        freshly-initialised optimizer is used. The LR schedule always resumes
+        at the checkpoint's learn step, with this instance's ``lr`` /
+        ``lr_critic`` (after any hyperparameter restore) as its peaks.
 
         :param path: Directory containing a checkpoint written by
             :meth:`save_checkpoint`.
         :type path: str
-        :param load_optimizer: If ``True`` also load the optimizer and LR
-            scheduler state so training can resume.
+        :param load_optimizer: If ``True`` also load the optimizer state so
+            training can resume.
         :type load_optimizer: bool
         :param overwrite_reference_adapter: Copy the checkpoint's ``actor``
             onto ``reference`` even when it has a ``reference/`` adapter.
@@ -3473,12 +3474,11 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             checkpoint, restore_config, restore_hyperparameters
         )
 
-        if self.lr_scheduler is not None:
-            if "lr_scheduler" in checkpoint:
-                self.lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
         # Unwrapped clones have no optimizer until ``wrap_models``.
-        elif self.optimizer is not None:
-            LLMAlgorithm.update_lr(self.optimizer, lr=(self.lr, self.lr_critic))
+        if self.optimizer is not None:
+            if self.lr_scheduler is not None and "lr_scheduler" in checkpoint:
+                self.lr_scheduler.last_epoch = checkpoint["lr_scheduler"]["last_epoch"]
+            self.apply_lr()
 
     def load_weights(
         self,
@@ -3579,6 +3579,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             for name, param in self.actor.named_parameters():
                 if "reference" in name:
                     param.requires_grad = False
+        self._restore_adapter_trainability(["actor", "critic"])
 
         if "reference" in self.selected_adapters and overwrite_reference_adapter:
             self._copy_adapter_tensors(
@@ -4026,21 +4027,23 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
     @staticmethod
     def update_lr(
-        optimizer: torch.optim.Optimizer,
+        optimizer: OptimizerWrapper,
         lr: float | tuple[float, float | None],
         scheduler_config: CosineLRScheduleConfig | None = None,
-    ) -> SequentialLR | None:
-        """Update the learning rate of the optimizer.
+        schedule_step: int = 0,
+    ) -> LambdaLR | None:
+        """Set the peak learning rate of each param group and rebuild the schedule.
 
-        :param optimizer: Optimizer
-        :type optimizer: Optimizer
+        :param optimizer: LLM optimizer.
+        :type optimizer: OptimizerWrapper
         :param lr: Learning rate value, or actor/critic pair; a ``None`` critic uses the actor rate.
         :type lr: float | tuple[float, float | None]
-        :param scheduler_config: Scheduler configuration
+        :param scheduler_config: Scheduler configuration; ``None`` holds ``lr`` constant.
         :type scheduler_config: CosineLRScheduleConfig | None
-
-        :return: A fresh warmup scheduler when ``scheduler_config`` is set.
-        :rtype: SequentialLR | None
+        :param schedule_step: Learn steps the schedule has already taken.
+        :type schedule_step: int
+        :return: Scheduler at ``schedule_step`` when ``scheduler_config`` is set.
+        :rtype: LambdaLR | None
         """
         if isinstance(lr, tuple):
             lr_actor, lr_critic = lr
@@ -4064,11 +4067,46 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             for param_group in optimizer.param_groups:
                 param_group["lr"] = lr
 
-        return (
-            create_warmup_cosine_scheduler(optimizer, scheduler_config, 1e-8, lr)
-            if scheduler_config is not None
-            else None
+        return make_llm_scheduler(optimizer, scheduler_config, schedule_step)
+
+    @property
+    def lr_schedule_step(self) -> int:
+        """Learn steps the LR schedule has taken; ``0`` without a schedule."""
+        return 0 if self.lr_scheduler is None else self.lr_scheduler.last_epoch
+
+    @property
+    def current_lr(self) -> float:
+        """Actor learning rate the next ``learn`` call trains with."""
+        if self.cosine_lr_schedule_config is None or self.lr_scheduler is None:
+            return self.lr
+        return self.lr * self.cosine_lr_schedule_config.lr_multiplier(
+            self.lr_scheduler.last_epoch,
+            self.cosine_lr_schedule_config.actor_start_step,
         )
+
+    @property
+    def current_lr_critic(self) -> float:
+        """Critic learning rate the next ``learn`` call trains with; ``lr`` is the peak without ``lr_critic``."""
+        peak = self.lr if self.lr_critic is None else self.lr_critic
+        if self.cosine_lr_schedule_config is None or self.lr_scheduler is None:
+            return peak
+        return peak * self.cosine_lr_schedule_config.lr_multiplier(
+            self.lr_scheduler.last_epoch, 0
+        )
+
+    def apply_lr(self) -> None:
+        """Set ``lr`` / ``lr_critic`` as the optimizer's peaks at the schedule's current step."""
+        self.lr_scheduler = LLMAlgorithm.update_lr(
+            self.optimizer,
+            lr=(self.lr, self.lr_critic),
+            scheduler_config=self.cosine_lr_schedule_config,
+            schedule_step=self.lr_schedule_step,
+        )
+
+    def _step_lr_scheduler(self) -> None:
+        """Advance the LR schedule by one learn step."""
+        if self.lr_scheduler is not None:
+            self.lr_scheduler.step()
 
     def _liger_head_gather(
         self,
@@ -5700,13 +5738,16 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             raise ValueError(msg)
 
     def _backward_pass(
-        self, loss: torch.Tensor, accumulation_steps: int | None = None
+        self,
+        loss: torch.Tensor,
+        accumulation_steps: int | None = None,
+        clip_groups: tuple[frozenset[str], ...] | None = None,
     ) -> OptimizerStep | None:
         """Perform a backward pass, accumulating gradients over micro-batches.
 
         Each call corresponds to one micro-batch. Gradients are accumulated
         for :attr:`gradient_accumulation_steps` calls before clipping,
-        stepping the optimizer (and LR scheduler) and zeroing gradients —
+        stepping the optimizer and zeroing gradients —
         uniformly across single-device and distributed (FSDP2) runs.
 
         Non-reentrant checkpointing recomputes the actor forward during
@@ -5718,12 +5759,15 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :param accumulation_steps: Micro-batches per optimizer step for this
             call; ``None`` uses :attr:`gradient_accumulation_steps`.
         :type accumulation_steps: int | None
+        :param clip_groups: Param group name sets clipped by their own norm;
+            ``None`` clips every group by the global norm.
+        :type clip_groups: tuple[frozenset[str], ...] | None
         :return: Gradient norms of the optimizer step, or ``None`` on
             micro-batches that only accumulate.
         :rtype: OptimizerStep | None
         """
         with self._amp_ctx():
-            step = self.shard_runtime.backward(
+            return self.shard_runtime.backward(
                 loss,
                 self.optimizer,
                 (
@@ -5733,11 +5777,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 ),
                 self.actor,
                 self.max_grad_norm,
-                lr_scheduler=self.lr_scheduler,
+                clip_groups=clip_groups,
             )
-        if step is not None and step.lr is not None:
-            self.lr = step.lr
-        return step
 
     def _stack_rollout_batch(
         self, experiences: LLMRolloutExperiences, turn_ids: torch.Tensor | None
