@@ -453,7 +453,7 @@ class LLMEnvSpec(EnvSpecBase):
 
     dataset: str | None = Field(
         default=None,
-        description="HuggingFace dataset id, or a Parquet path, for the dataset sources.",
+        description="HuggingFace dataset id, or a Parquet or JSONL path, for the dataset sources.",
     )
     dataset_path: str | None = Field(
         default=None, description="Object-store path to a user-supplied dataset."

@@ -23,6 +23,11 @@ from agilerl.arena.models.env import (
     LLMEnvType,
     OfflineEnvSpec,
 )
+from agilerl.data.jsonl import (
+    is_local_jsonl_dataset,
+    load_jsonl_dataset,
+    load_jsonl_train_eval_from_splits,
+)
 from agilerl.data.parquet import (
     is_local_parquet_dataset,
     load_parquet_dataset,
@@ -353,20 +358,27 @@ def _load_llm_dataset(
 
     A directory with a train split and at least one other split uses every
     train row for training and every other split's rows for eval. A flat
-    parquet source, a train-only directory, or split directories with no
-    train directory are divided with ``train_test_split``.
+    parquet or JSONL source, a train-only directory, or split directories
+    with no train directory are divided with ``train_test_split``.
     """
     dataset = spec.dataset
     if dataset is None:
         msg = "dataset is required to load rollout/preference/sft data"
         raise ValueError(msg)
-    if not is_local_parquet_dataset(dataset):
+    if is_local_parquet_dataset(dataset):
+        separated = load_train_eval_from_splits(dataset, column_rename=spec.columns)
+        loader = load_parquet_dataset
+    elif is_local_jsonl_dataset(dataset):
+        separated = load_jsonl_train_eval_from_splits(
+            dataset, column_rename=spec.columns
+        )
+        loader = load_jsonl_dataset
+    else:
         return _load_dataset_hf(spec, dataset, seed=seed)
-    separated = load_train_eval_from_splits(dataset, column_rename=spec.columns)
     if separated is not None:
         return separated
     split = _dataset_train_test_split(spec)
-    ds = load_parquet_dataset(dataset, column_rename=spec.columns)
+    ds = loader(dataset, column_rename=spec.columns)
     split_ds = ds.train_test_split(test_size=1.0 - split, seed=_split_seed(seed))
     return split_ds["train"], split_ds["test"]
 
