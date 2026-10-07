@@ -35,7 +35,6 @@ from torch.optim.lr_scheduler import SequentialLR
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.architectures import (
-    FAMILY_RUNTIME_CONFIGS,
     family_runtime,
     install_family_patches,
     pretrained_model_type,
@@ -2841,21 +2840,10 @@ def peft_lora_state_dict_key_to_module_key(key: str) -> str:
     return key
 
 
-def _vllm_lora_key_prefix(model_type: str | None) -> str | None:
-    """Catalog vLLM language-layer prefix for ``model_type``, or None."""
-    if not isinstance(model_type, str):
-        return None
-    runtime = FAMILY_RUNTIME_CONFIGS.get(model_type)
-    if runtime is None:
-        return None
-    return runtime.language_tower.lora_key_prefix
-
-
 def remap_peft_lora_key_for_vllm(
     key: str,
     *,
     strip_multimodal_towers: bool | list[str] = False,
-    model_type: str | None = None,
 ) -> str:
     """Normalize PEFT LoRA keys (ClippableLinear, Nemotron Super VL vision/language/projector) for vLLM.
 
@@ -2865,10 +2853,6 @@ def remap_peft_lora_key_for_vllm(
         language-tower module (``model.``). Any other value keeps the nested
         VL prefix (``language_model.model.``).
     :type strip_multimodal_towers: bool | list[str]
-    :param model_type: Hugging Face ``model_type``; families declaring a
-        ``language_tower.lora_key_prefix`` gain vLLM's language-layer nesting
-        when towers are kept.
-    :type model_type: str | None
     :return: Key vLLM's LoRA loader expects.
     :rtype: str
     """
@@ -2876,16 +2860,6 @@ def remap_peft_lora_key_for_vllm(
         ".linear.lora_B.", ".lora_B."
     )
     key = key.replace(".base_layer.", ".")
-    vllm_prefix = _vllm_lora_key_prefix(model_type)
-    if (
-        vllm_prefix is not None
-        and strip_multimodal_towers is not True
-        and f"{vllm_prefix}layers." not in key
-    ):
-        if "model.language_model.layers." in key:
-            key = key.replace("model.language_model.layers.", f"{vllm_prefix}layers.")
-        elif "model.layers." in key:
-            key = key.replace("model.layers.", f"{vllm_prefix}layers.")
     if "language_model.backbone." in key:
         language_prefix = (
             "model." if strip_multimodal_towers is True else "language_model.model."
@@ -2956,7 +2930,6 @@ def filter_peft_state_dict_for_vllm_lora(
     target_modules: str | list[str] | None,
     expert_key_map: dict[str, str] | None = None,
     strip_multimodal_towers: bool | list[str] = False,
-    model_type: str | None = None,
 ) -> dict[str, torch.Tensor]:
     """Keep LoRA tensors whose modules match the trainer ``target_modules`` spec or expert map."""
     filtered: dict[str, torch.Tensor] = {}
@@ -2972,9 +2945,7 @@ def filter_peft_state_dict_for_vllm_lora(
             continue
         filtered[
             remap_peft_lora_key_for_vllm(
-                key,
-                strip_multimodal_towers=strip_multimodal_towers,
-                model_type=model_type,
+                key, strip_multimodal_towers=strip_multimodal_towers
             )
         ] = tensor
     return filtered
@@ -3093,13 +3064,11 @@ def save_peft_adapter_for_vllm_rollout(
         ).items()
     }
     n_before = len(state)
-    model_type = getattr(getattr(peft_model, "config", None), "model_type", None)
     state = filter_peft_state_dict_for_vllm_lora(
         state,
         target_modules,
         expert_key_map=expert_key_map,
         strip_multimodal_towers=strip_multimodal_towers,
-        model_type=model_type if isinstance(model_type, str) else None,
     )
     if not state:
         msg = (

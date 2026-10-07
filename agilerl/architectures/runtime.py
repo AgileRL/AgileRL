@@ -82,14 +82,6 @@ class LanguageTowerRuntimeConfig(BaseModel):
 
     hf_overrides: Callable[[object], object] | None = None
     model_class_overrides: dict[str, str] | None = None
-    lora_key_prefix: str | None = Field(
-        default=None,
-        min_length=1,
-        description=(
-            "Dotted path vLLM serves language decoder layers under, with "
-            "trailing dot, when it differs from the trainer's layout."
-        ),
-    )
 
 
 @dataclass(frozen=True)

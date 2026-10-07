@@ -87,14 +87,6 @@ GPT_OSS_RUNTIME_CONFIG = ModelRuntimeConfig(
     trainer=TrainerRuntimeConfig(attn_implementation="flex_attention"),
 )
 
-# vLLM nests Qwen3.5 language layers under language_model.model; the
-# trainer-side keys need the same prefix to bind engine LoRA adapters.
-QWEN3_5_RUNTIME_CONFIG = ModelRuntimeConfig(
-    language_tower=LanguageTowerRuntimeConfig(
-        lora_key_prefix="model.language_model.model.",
-    ),
-)
-
 FAMILY_RUNTIME_CONFIGS: Mapping[str, ModelRuntimeConfig] = {
     "nemotron_h": NEMOTRON_H_RUNTIME_CONFIG,
     "nemotron_h_omni": NEMOTRON_H_OMNI_RUNTIME_CONFIG,
@@ -103,10 +95,6 @@ FAMILY_RUNTIME_CONFIGS: Mapping[str, ModelRuntimeConfig] = {
     "gemma4": GEMMA4_RUNTIME_CONFIG,
     "gemma4_text": GEMMA4_RUNTIME_CONFIG,
     "gpt_oss": GPT_OSS_RUNTIME_CONFIG,
-    "qwen3_5": QWEN3_5_RUNTIME_CONFIG,
-    "qwen3_5_text": QWEN3_5_RUNTIME_CONFIG,
-    "qwen3_5_moe": QWEN3_5_RUNTIME_CONFIG,
-    "qwen3_5_moe_text": QWEN3_5_RUNTIME_CONFIG,
 }
 
 
