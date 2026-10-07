@@ -658,6 +658,10 @@ class EnvClientProtocol(Protocol):
         """Tool schemas advertised by the env (empty when none)."""
 
     @property
+    def takes_tool_calls(self) -> bool:
+        """Whether ``step`` takes parsed tool calls rather than the model's text."""
+
+    @property
     def rubric_components(self) -> tuple[str, ...]:
         """Leaf rubric names for component metrics (empty when none)."""
 

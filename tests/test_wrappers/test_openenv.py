@@ -437,8 +437,19 @@ def test_normalize_step_rejects_unsupported_tuple_length() -> None:
         ("plain text", "plain text"),
         ({"result": {"content": [{"text": "a"}, {"text": "b"}]}}, "a\nb"),
         ({"result": {"data": "tool data"}}, "tool data"),
+        (
+            {
+                "result": SimpleNamespace(
+                    content=[SimpleNamespace(text="obj")], data=None
+                )
+            },
+            "obj",
+        ),
+        ({"result": SimpleNamespace(content=[], data="obj-data")}, "obj-data"),
         ({"prompt": "p"}, "p"),
         ({"error": "boom"}, "Error: boom"),
+        ({"error": {"message": "nope"}}, "Error: nope"),
+        ({"error": SimpleNamespace(message="obj-err")}, "Error: obj-err"),
     ],
 )
 def test_observation_text_supports_openenv_and_mcp_shapes(
@@ -2143,8 +2154,7 @@ def test_custom_processor_renders_an_in_process_observation() -> None:
     harness.reset()
     assert harness._prompt_text == "board: 1,2,3"
     assert harness._step_env("go") == (
-        "board: 4,5",
-        "user",
+        [{"role": "user", "content": "board: 4,5"}],
         None,
         1.0,
         True,

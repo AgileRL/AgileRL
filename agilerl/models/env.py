@@ -509,6 +509,8 @@ def make_rollout_env_factory(
         "max_model_len": max_model_len,
         "chat_template_kwargs": dict(spec.chat_template_kwargs),
     }
+    if spec.min_reward is not None:
+        harness_kwargs["min_reward"] = spec.min_reward
     if spec.dataset_backed_rollout:
         return _make_dataset_rollout_factory(spec, tokenizer, harness_kwargs, seed=seed)
     if spec.env_url is not None:

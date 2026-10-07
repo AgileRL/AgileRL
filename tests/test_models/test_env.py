@@ -552,6 +552,33 @@ class TestLLMEnvSpec:
             "enable_thinking": False
         }
 
+    def test_min_reward_reaches_url_factory(self):
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.pad_token_id = 0
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            env_url="ws://envs.internal:8000",
+            max_turns=3,
+            min_reward=-1.0,
+        )
+        mock_rollout_cls = MagicMock()
+        with patch("agilerl.models.env.RolloutHarness", mock_rollout_cls):
+            make_rollout_env_factory(spec, mock_tokenizer)[0]()
+        assert mock_rollout_cls.call_args.kwargs["min_reward"] == -1.0
+
+    def test_unset_min_reward_leaves_the_harness_default(self):
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.pad_token_id = 0
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            entrypoint="tests.test_models.test_env:_StubTextEnv",
+            max_turns=2,
+        )
+        mock_rollout_cls = MagicMock()
+        with patch("agilerl.models.env.RolloutHarness", mock_rollout_cls):
+            make_rollout_env_factory(spec, mock_tokenizer)[0]()
+        assert "min_reward" not in mock_rollout_cls.local.call_args.kwargs
+
     def test_env_packages_are_installed_before_the_entrypoint_is_resolved(self):
         """An entrypoint whose deps are declared gets them installed first."""
         mock_tokenizer = MagicMock()

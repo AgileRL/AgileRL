@@ -44,6 +44,11 @@ class _StubAlgo:
 class _TinyTokenizer:
     """Raw-encoding tokenizer for the ``apply_chat_template=False`` paths."""
 
+    unk_token_id = None
+
+    def convert_tokens_to_ids(self, _token: str) -> None:
+        return None
+
     def __call__(self, texts, **kwargs):
         del kwargs
         return {"input_ids": torch.ones(len(texts), 4, dtype=torch.long)}

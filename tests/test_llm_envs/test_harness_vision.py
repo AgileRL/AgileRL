@@ -356,7 +356,9 @@ class TestRolloutHarnessVision:
         harness.full_ids = None
 
         with pytest.raises(RuntimeError, match="reset\\(\\) must run before step"):
-            harness._step_apply(("next", "user", None, 0.0, False, False, {}))
+            harness._step_apply(
+                ([{"role": "user", "content": "next"}], None, 0.0, False, False, {})
+            )
 
     def test_image_step_records_sampling_logps(self) -> None:
         def fake_processor(

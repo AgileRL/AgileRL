@@ -287,6 +287,10 @@ class TestAsyncBatchCollectorClose:
 class _ChrTokenizer:
     pad_token_id = 0
     pad_token = "<pad>"
+    unk_token_id = None
+
+    def convert_tokens_to_ids(self, _token: str) -> None:
+        return None
 
     def __call__(self, texts, **kwargs):
         ids = [[ord(c) for c in texts[0]]]

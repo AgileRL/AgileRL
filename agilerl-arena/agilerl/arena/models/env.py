@@ -499,6 +499,13 @@ class LLMEnvSpec(EnvSpecBase):
         default=None,
         description="Reward at which a rollout counts as solved, used for the success metric.",
     )
+    min_reward: float | None = Field(
+        default=None,
+        description=(
+            "Lowest reward the env gives. Scores a turn whose tool calls are "
+            "malformed or missing, which never reaches the env. Unset scores 0."
+        ),
+    )
     train_test_split: float | None = Field(
         default=None,
         ge=0.0,

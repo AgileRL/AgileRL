@@ -1,0 +1,819 @@
+# Copyright 2026 AgileRL
+# SPDX-License-Identifier: Apache-2.0
+
+"""Token-ID tool-call parsers, one per model family's tool-call format.
+
+Each parser class is one family's convention: the special tokens that wrap a
+call and the body format between them. It scans generation IDs for those
+tokens, then decodes only the segments between them. No regex on decoded
+text: a literal tag typed as prose tokenizes to ordinary IDs, never the
+special token ID, so it cannot false-positive. Detection probes each parser's
+required tokens against the tokenizer vocab and picks the first full match.
+
+- :class:`ToolCallTagParser`: Qwen, Hermes, Granite 4, Nemotron
+- :class:`Granite3ToolParser`: Granite 3
+- :class:`Gemma4ToolParser`: Gemma 4
+- :class:`HarmonyToolParser`: GPT-OSS
+"""
+
+from __future__ import annotations
+
+import enum
+import json
+import re
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
+
+from agilerl.utils.algo_utils import is_str_keyed_dict
+
+if TYPE_CHECKING:
+    from transformers import PreTrainedTokenizerBase
+
+__all__ = [
+    "Gemma4ToolParser",
+    "Granite3ToolParser",
+    "HarmonyToolParser",
+    "ParsedToolCall",
+    "ToolCallParseStatus",
+    "ToolCallTagParser",
+    "ToolParser",
+    "detect_tool_parser",
+    "get_tool_parser",
+]
+
+
+class ToolCallParseStatus(str, enum.Enum):
+    """Per-attempt outcome of parsing one tool-call block."""
+
+    OK = "ok"
+    INVALID_JSON = "invalid_json"
+    UNCLOSED_BLOCK = "unclosed_block"
+    MISSING_NAME = "missing_name"
+    MALFORMED_STRUCTURE = "malformed_structure"
+
+
+@dataclass
+class ParsedToolCall:
+    """One tool-call block as parsed, successful or malformed."""
+
+    raw: str
+    name: str | None = None
+    arguments: dict[str, Any] | None = None
+    token_span: tuple[int, int] | None = None
+    status: ToolCallParseStatus = ToolCallParseStatus.OK
+
+
+@dataclass(frozen=True)
+class HarmonyBlock:
+    """One Harmony ``<|start|>`` block body and where to resume scanning."""
+
+    start: int
+    body: str
+    recipient: str | None
+    span: tuple[int, int]
+    closed: bool
+    next_index: int
+
+
+@runtime_checkable
+class ToolParser(Protocol):
+    """Extracts tool calls from completion token IDs."""
+
+    REQUIRED_TOKENS: ClassVar[tuple[str, ...]]
+
+    def __init__(self, tokenizer: PreTrainedTokenizerBase) -> None: ...
+
+    def extract(
+        self,
+        token_ids: list[int],
+        tools: list[Any] | None = None,
+        /,
+    ) -> tuple[list[int], list[ParsedToolCall]]:
+        """Split IDs into content prefix plus every parse attempt.
+
+        Positional-only: parsers that ignore schemas name it ``_tools``.
+        """
+        ...
+
+
+class ToolCallTagParser:
+    """Angle-bracket tool blocks with JSON or XML bodies.
+
+    JSON bodies hold one object with name and arguments (Qwen, Hermes,
+    Granite 4 templates). XML bodies hold one function block with parameter
+    values as raw text (Nemotron templates). Bodies dispatch on their first
+    token: an object brace parses as JSON, a function tag as XML.
+    """
+
+    CALL_START = "<tool_call>"
+    CALL_END = "</tool_call>"
+    THINK_END = "</think>"
+    REQUIRED_TOKENS: ClassVar[tuple[str, ...]] = (CALL_START,)
+
+    def __init__(self, tokenizer: PreTrainedTokenizerBase) -> None:
+        """Cache this tokenizer's delimiter IDs."""
+        self._tokenizer = tokenizer
+        tag_id = _token_id(tokenizer, self.CALL_START)
+        if tag_id is None:
+            msg = f"Tool-call parsing needs {self.CALL_START} in the tokenizer vocab."
+            raise ValueError(msg)
+        self._tc_id = tag_id
+        self._tc_end_id = _token_id(tokenizer, self.CALL_END)
+        self._think_end_id = _token_id(tokenizer, self.THINK_END)
+
+    def extract(
+        self,
+        token_ids: list[int],
+        tools: list[Any] | None = None,
+    ) -> tuple[list[int], list[ParsedToolCall]]:
+        """Parse tool blocks from IDs, scanning past any thinking trace."""
+        scan_from = 0
+        if self._think_end_id is not None:
+            think_end = _find(token_ids, self._think_end_id)
+            if think_end != -1:
+                scan_from = think_end + 1
+        tc_start = _find(token_ids, self._tc_id, scan_from)
+        if tc_start == -1:
+            return token_ids, []
+        content_ids = token_ids[:tc_start]
+        params = _build_param_type_index(tools)
+        calls: list[ParsedToolCall] = []
+        index = tc_start
+        while index < len(token_ids):
+            if token_ids[index] != self._tc_id:
+                index += 1
+                continue
+            end = (
+                _find(token_ids, self._tc_end_id, index + 1)
+                if self._tc_end_id is not None
+                else -1
+            )
+            if end == -1:
+                raw = _decode(self._tokenizer, token_ids[index + 1 :]).strip()
+                calls.append(
+                    ParsedToolCall(
+                        raw=raw,
+                        token_span=(index, len(token_ids)),
+                        status=ToolCallParseStatus.UNCLOSED_BLOCK,
+                    )
+                )
+                break
+            raw = _decode(self._tokenizer, token_ids[index + 1 : end]).strip()
+            span = (index, end + 1)
+            if raw.startswith("<function="):
+                calls.append(_parsed_xml_call(raw, span, params))
+            else:
+                calls.append(_parsed_json_call(raw, span))
+            index = end + 1
+        return content_ids, calls
+
+
+class Granite3ToolParser:
+    """Bare calls: ``<|tool_call|>`` plus a JSON array to end of turn.
+
+    Granite 3 emits calls with no closing tag and no leading prose: one tag,
+    then ``[{"name", "arguments"}, ...]``. Array items share the block span;
+    per-item offsets are not cheaply recoverable.
+    """
+
+    CALL_START = "<|tool_call|>"
+    REQUIRED_TOKENS: ClassVar[tuple[str, ...]] = (CALL_START,)
+
+    def __init__(self, tokenizer: PreTrainedTokenizerBase) -> None:
+        """Cache this tokenizer's call-tag ID."""
+        self._tokenizer = tokenizer
+        tag_id = _token_id(tokenizer, self.CALL_START)
+        if tag_id is None:
+            msg = f"Granite parsing needs {self.CALL_START} in the tokenizer vocab."
+            raise ValueError(msg)
+        self._tc_id = tag_id
+
+    def extract(
+        self,
+        token_ids: list[int],
+        _tools: list[Any] | None = None,
+    ) -> tuple[list[int], list[ParsedToolCall]]:
+        """Parse the trailing call array from ``token_ids``."""
+        tag = _find(token_ids, self._tc_id)
+        if tag == -1:
+            return token_ids, []
+        content = _decode(self._tokenizer, token_ids[:tag]).strip()
+        if content:
+            return token_ids, [
+                ParsedToolCall(
+                    raw=content,
+                    token_span=(0, tag),
+                    status=ToolCallParseStatus.MALFORMED_STRUCTURE,
+                )
+            ]
+        raw = _decode(self._tokenizer, token_ids[tag + 1 :]).strip()
+        span = (tag, len(token_ids))
+        if not raw.startswith("["):
+            return token_ids, [
+                ParsedToolCall(
+                    raw=raw,
+                    token_span=span,
+                    status=ToolCallParseStatus.MALFORMED_STRUCTURE,
+                )
+            ]
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return token_ids, [
+                ParsedToolCall(
+                    raw=raw,
+                    token_span=span,
+                    status=ToolCallParseStatus.INVALID_JSON,
+                )
+            ]
+        if not isinstance(payload, list):
+            return token_ids, [
+                ParsedToolCall(
+                    raw=raw,
+                    token_span=span,
+                    status=ToolCallParseStatus.MALFORMED_STRUCTURE,
+                )
+            ]
+        calls = [_parsed_array_item(raw, item, span) for item in payload]
+        return token_ids[:tag], calls
+
+
+class Gemma4ToolParser:
+    """Native calls: ``<|tool_call>call:name{key:value,...}<tool_call|>``.
+
+    Gemma 4 argument values are custom ``key:value`` text, not JSON: strings
+    wrap in ``<|"|>`` delimiters, bare scalars stay strings for the executor
+    to coerce, and braces nest. Thought channels never nest call tags.
+    """
+
+    CALL_START = "<|tool_call>"
+    CALL_END = "<tool_call|>"
+    REQUIRED_TOKENS: ClassVar[tuple[str, ...]] = (CALL_START, CALL_END)
+
+    def __init__(self, tokenizer: PreTrainedTokenizerBase) -> None:
+        """Cache this tokenizer's delimiter IDs."""
+        self._tokenizer = tokenizer
+        start_id = _token_id(tokenizer, self.CALL_START)
+        end_id = _token_id(tokenizer, self.CALL_END)
+        if start_id is None or end_id is None:
+            msg = "Gemma parsing needs <|tool_call> tags in the vocab."
+            raise ValueError(msg)
+        self._tc_id = start_id
+        self._tc_end_id = end_id
+
+    def extract(
+        self,
+        token_ids: list[int],
+        _tools: list[Any] | None = None,
+    ) -> tuple[list[int], list[ParsedToolCall]]:
+        """Parse native Gemma calls from ``token_ids``."""
+        tc_start = _find(token_ids, self._tc_id)
+        if tc_start == -1:
+            return token_ids, []
+        content_ids = token_ids[:tc_start]
+        calls: list[ParsedToolCall] = []
+        index = tc_start
+        while index < len(token_ids):
+            if token_ids[index] != self._tc_id:
+                index += 1
+                continue
+            end = _find(token_ids, self._tc_end_id, index + 1)
+            if end == -1:
+                raw = _decode(self._tokenizer, token_ids[index + 1 :]).strip()
+                calls.append(
+                    ParsedToolCall(
+                        raw=raw,
+                        token_span=(index, len(token_ids)),
+                        status=ToolCallParseStatus.UNCLOSED_BLOCK,
+                    )
+                )
+                break
+            raw = _decode(self._tokenizer, token_ids[index + 1 : end]).strip()
+            calls.append(_parsed_gemma_call(raw, (index, end + 1)))
+            index = end + 1
+        return content_ids, calls
+
+
+class HarmonyToolParser:
+    """Channel blocks with ``to=functions.name`` recipients (GPT-OSS).
+
+    Each ``<|start|>`` block carries its recipient in the header; blocks
+    addressed to a function hold JSON arguments and close with ``<|call|>``.
+    Analysis and final channels are content, never calls. Parsing truncates
+    at the first ``<|return|>``.
+    """
+
+    BLOCK_START = "<|start|>"
+    MESSAGE = "<|message|>"
+    CALL_END = "<|call|>"
+    BLOCK_END = "<|end|>"
+    RETURN = "<|return|>"
+    REQUIRED_TOKENS: ClassVar[tuple[str, ...]] = (
+        BLOCK_START,
+        MESSAGE,
+        CALL_END,
+        BLOCK_END,
+    )
+
+    def __init__(self, tokenizer: PreTrainedTokenizerBase) -> None:
+        """Cache this tokenizer's channel IDs."""
+        self._tokenizer = tokenizer
+        start_id = _token_id(tokenizer, self.BLOCK_START)
+        message_id = _token_id(tokenizer, self.MESSAGE)
+        call_id = _token_id(tokenizer, self.CALL_END)
+        end_id = _token_id(tokenizer, self.BLOCK_END)
+        if start_id is None or message_id is None or call_id is None or end_id is None:
+            msg = "Harmony parsing needs channel tags in the tokenizer vocab."
+            raise ValueError(msg)
+        self._start_id = start_id
+        self._message_id = message_id
+        self._call_id = call_id
+        self._end_id = end_id
+        self._return_id = _token_id(tokenizer, self.RETURN)
+
+    def extract(
+        self,
+        token_ids: list[int],
+        _tools: list[Any] | None = None,
+    ) -> tuple[list[int], list[ParsedToolCall]]:
+        """Parse function-addressed blocks from ``token_ids``."""
+        ids = _harmony_ids_before_return(token_ids, self._return_id)
+        calls: list[ParsedToolCall] = []
+        first_call_start: int | None = None
+        index = 0
+        while True:
+            block = self._next_block(ids, index)
+            if block is None:
+                break
+            index = block.next_index
+            if block.recipient is None or not block.recipient.startswith("functions."):
+                continue
+            if first_call_start is None:
+                first_call_start = block.start
+            calls.append(
+                _parsed_harmony_call(
+                    block.body, block.recipient, block.span, block.closed
+                )
+            )
+        content_end = first_call_start if first_call_start is not None else len(ids)
+        return ids[:content_end], calls
+
+    def _next_block(self, ids: list[int], start: int) -> HarmonyBlock | None:
+        """Next ``<|start|>`` block at or after ``start``, or ``None``."""
+        index = start
+        while index < len(ids) and ids[index] != self._start_id:
+            index += 1
+        if index >= len(ids):
+            return None
+        message_at = _find(ids, self._message_id, index + 1)
+        if message_at == -1:
+            return None
+        header = _decode(self._tokenizer, ids[index + 1 : message_at])
+        body_end = _harmony_body_end(
+            ids, message_at, self._start_id, self._end_id, self._call_id
+        )
+        closed = body_end < len(ids) and ids[body_end] in (
+            self._end_id,
+            self._call_id,
+        )
+        next_index = body_end + 1 if closed else body_end
+        return HarmonyBlock(
+            start=index,
+            body=_decode(self._tokenizer, ids[message_at + 1 : body_end]),
+            recipient=_harmony_recipient(header),
+            span=(index, next_index),
+            closed=closed,
+            next_index=next_index,
+        )
+
+
+TOOL_PARSERS: dict[str, type[ToolParser]] = {
+    "tool_call": ToolCallTagParser,
+    "granite3": Granite3ToolParser,
+    "gemma4": Gemma4ToolParser,
+    "harmony": HarmonyToolParser,
+}
+
+
+def get_tool_parser(name: str, tokenizer: PreTrainedTokenizerBase) -> ToolParser:
+    """Build the named parser over ``tokenizer``.
+
+    :param name: Parser name from the registry.
+    :param tokenizer: Tokenizer defining the delimiter IDs.
+    :return: The parser.
+    :rtype: ToolParser
+    """
+    try:
+        parser_cls = TOOL_PARSERS[name]
+    except KeyError:
+        available = ", ".join(sorted(TOOL_PARSERS))
+        msg = f"Unknown tool_parser {name!r}. Available: {available}."
+        raise ValueError(msg) from None
+    return parser_cls(tokenizer)
+
+
+def detect_tool_parser(tokenizer: PreTrainedTokenizerBase) -> ToolParser | None:
+    """First registry parser whose required tokens are all in the vocab, or ``None``.
+
+    :param tokenizer: Tokenizer to probe.
+    :return: The matching parser, or ``None`` when no parser matches.
+    :rtype: ToolParser | None
+    """
+    for parser_cls in TOOL_PARSERS.values():
+        if all(
+            _token_id(tokenizer, token) is not None
+            for token in parser_cls.REQUIRED_TOKENS
+        ):
+            return parser_cls(tokenizer)
+    return None
+
+
+def _parsed_array_item(raw: str, item: object, span: tuple[int, int]) -> ParsedToolCall:
+    """One Granite array item: ``OK``, ``MISSING_NAME``, or malformed."""
+    if not is_str_keyed_dict(item):
+        return ParsedToolCall(
+            raw=raw,
+            token_span=span,
+            status=ToolCallParseStatus.MALFORMED_STRUCTURE,
+        )
+    name = item.get("name")
+    arguments = item.get("arguments")
+    if not isinstance(name, str) or not name:
+        return ParsedToolCall(
+            raw=raw,
+            token_span=span,
+            status=ToolCallParseStatus.MISSING_NAME,
+        )
+    if not is_str_keyed_dict(arguments):
+        return ParsedToolCall(
+            raw=raw,
+            token_span=span,
+            status=ToolCallParseStatus.MALFORMED_STRUCTURE,
+        )
+    return ParsedToolCall(
+        raw=raw,
+        name=name,
+        arguments=arguments,
+        token_span=span,
+        status=ToolCallParseStatus.OK,
+    )
+
+
+def _parsed_gemma_call(raw: str, span: tuple[int, int]) -> ParsedToolCall:
+    """One Gemma body: ``call:name{args}`` with custom-format args."""
+    malformed = ParsedToolCall(
+        raw=raw, token_span=span, status=ToolCallParseStatus.MALFORMED_STRUCTURE
+    )
+    if not raw.startswith("call:"):
+        return malformed
+    brace = raw.find("{", len("call:"))
+    if brace == -1:
+        return malformed
+    name = raw[len("call:") : brace].strip()
+    if not name:
+        return ParsedToolCall(
+            raw=raw, token_span=span, status=ToolCallParseStatus.MISSING_NAME
+        )
+    close = _matching_brace(raw, brace)
+    if close == -1 or raw[close + 1 :].strip():
+        return malformed
+    try:
+        arguments = _parse_gemma_args(raw[brace + 1 : close])
+    except ValueError:
+        return malformed
+    return ParsedToolCall(
+        raw=raw,
+        name=name,
+        arguments=arguments,
+        token_span=span,
+        status=ToolCallParseStatus.OK,
+    )
+
+
+GEMMA_STRING_DELIM = '<|"|>'
+
+
+def _matching_brace(text: str, opening: int) -> int:
+    """Index of the brace matching ``text[opening]``, skipping delim strings."""
+    depth = 0
+    index = opening
+    while index < len(text):
+        if text.startswith(GEMMA_STRING_DELIM, index):
+            end = text.find(GEMMA_STRING_DELIM, index + len(GEMMA_STRING_DELIM))
+            if end == -1:
+                return -1
+            index = end + len(GEMMA_STRING_DELIM)
+            continue
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    return -1
+
+
+def _parse_gemma_args(text: str) -> dict[str, Any]:
+    """Parse custom ``key:value`` args; strings stay bare for the executor."""
+    args: dict[str, Any] = {}
+    index = 0
+    while index < len(text):
+        while index < len(text) and text[index] in " ,\n\t":
+            index += 1
+        if index >= len(text):
+            break
+        key_start = index
+        while index < len(text) and text[index] != ":":
+            index += 1
+        if index >= len(text):
+            msg = "Gemma args end mid-key."
+            raise ValueError(msg)
+        key = text[key_start:index].strip()
+        index += 1
+        args[key], index = _parse_gemma_value(text, index)
+    return args
+
+
+def _parse_gemma_value(text: str, index: int) -> tuple[Any, int]:
+    """Parse one value at ``index``; return it plus the next index."""
+    while index < len(text) and text[index] in " \n\t":
+        index += 1
+    if text.startswith(GEMMA_STRING_DELIM, index):
+        start = index + len(GEMMA_STRING_DELIM)
+        end = text.find(GEMMA_STRING_DELIM, start)
+        if end == -1:
+            msg = "Gemma args hold an unterminated string."
+            raise ValueError(msg)
+        return text[start:end], end + len(GEMMA_STRING_DELIM)
+    if index < len(text) and text[index] == "{":
+        close = _matching_brace(text, index)
+        if close == -1:
+            msg = "Gemma args hold unbalanced braces."
+            raise ValueError(msg)
+        return _parse_gemma_args(text[index + 1 : close]), close + 1
+    if index < len(text) and text[index] == "[":
+        return _parse_gemma_array(text, index)
+    start = index
+    while index < len(text) and text[index] not in ",}]":
+        index += 1
+    return text[start:index].strip(), index
+
+
+def _parse_gemma_array(text: str, index: int) -> tuple[list[Any], int]:
+    """Parse one bracketed array at ``index``."""
+    index += 1
+    items: list[Any] = []
+    while True:
+        while index < len(text) and text[index] in " ,\n\t":
+            index += 1
+        if index >= len(text):
+            msg = "Gemma args hold an unterminated array."
+            raise ValueError(msg)
+        if text[index] == "]":
+            return items, index + 1
+        value, index = _parse_gemma_value(text, index)
+        items.append(value)
+
+
+def _harmony_ids_before_return(
+    token_ids: list[int], return_id: int | None
+) -> list[int]:
+    """IDs up to the first ``<|return|>``, or the full sequence when it is absent."""
+    if return_id is None:
+        return token_ids
+    terminal = _find(token_ids, return_id)
+    if terminal == -1:
+        return token_ids
+    return token_ids[:terminal]
+
+
+def _harmony_body_end(
+    ids: list[int],
+    message_at: int,
+    start_id: int,
+    end_id: int,
+    call_id: int,
+) -> int:
+    """Index of the first stop token after the message delimiter."""
+    body_end = len(ids)
+    for stop in (
+        _find(ids, start_id, message_at + 1),
+        _find(ids, end_id, message_at + 1),
+        _find(ids, call_id, message_at + 1),
+    ):
+        if stop != -1:
+            body_end = min(body_end, stop)
+    return body_end
+
+
+def _harmony_recipient(header: str) -> str | None:
+    """Addressee after ``to=`` in a Harmony header, or ``None``."""
+    match = re.search(r"to=([^\s<]+)", header)
+    return match.group(1) if match else None
+
+
+def _parsed_harmony_call(
+    body: str, recipient: str, span: tuple[int, int], closed: bool
+) -> ParsedToolCall:
+    """One function-addressed block: JSON args or a precise failure."""
+    name = recipient[len("functions.") :]
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        return ParsedToolCall(
+            raw=body,
+            name=name or None,
+            token_span=span,
+            status=ToolCallParseStatus.INVALID_JSON,
+        )
+    if not closed:
+        return ParsedToolCall(
+            raw=body,
+            name=name or None,
+            token_span=span,
+            status=ToolCallParseStatus.UNCLOSED_BLOCK,
+        )
+    if not name:
+        return ParsedToolCall(
+            raw=body,
+            token_span=span,
+            status=ToolCallParseStatus.MISSING_NAME,
+        )
+    if not isinstance(payload, dict):
+        return ParsedToolCall(
+            raw=body,
+            token_span=span,
+            status=ToolCallParseStatus.MALFORMED_STRUCTURE,
+        )
+    return ParsedToolCall(
+        raw=body,
+        name=name,
+        arguments=payload,
+        token_span=span,
+        status=ToolCallParseStatus.OK,
+    )
+
+
+def _parsed_json_call(raw: str, span: tuple[int, int]) -> ParsedToolCall:
+    """One JSON body: ``OK``, ``MISSING_NAME``, or malformed."""
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return ParsedToolCall(
+            raw=raw,
+            token_span=span,
+            status=ToolCallParseStatus.INVALID_JSON,
+        )
+    if not isinstance(payload, dict):
+        return ParsedToolCall(
+            raw=raw,
+            token_span=span,
+            status=ToolCallParseStatus.MALFORMED_STRUCTURE,
+        )
+    name = payload.get("name")
+    arguments = payload.get("arguments")
+    if not isinstance(name, str) or not name:
+        return ParsedToolCall(
+            raw=raw,
+            token_span=span,
+            status=ToolCallParseStatus.MISSING_NAME,
+        )
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except json.JSONDecodeError:
+            arguments = None
+    if not isinstance(arguments, dict):
+        return ParsedToolCall(
+            raw=raw,
+            token_span=span,
+            status=ToolCallParseStatus.MALFORMED_STRUCTURE,
+        )
+    return ParsedToolCall(
+        raw=raw,
+        name=name,
+        arguments=arguments,
+        token_span=span,
+        status=ToolCallParseStatus.OK,
+    )
+
+
+def _parsed_xml_call(
+    raw: str,
+    span: tuple[int, int],
+    params: dict[str, dict[str, dict[str, Any]]],
+) -> ParsedToolCall:
+    """One XML function body, with schema-aware value coercion."""
+    name_match = re.search(r"<function=([^>]+)>", raw)
+    if not name_match:
+        return ParsedToolCall(
+            raw=raw,
+            token_span=span,
+            status=ToolCallParseStatus.MALFORMED_STRUCTURE,
+        )
+    name = name_match.group(1)
+    schemas = params.get(name, {})
+    arguments: dict[str, Any] = {}
+    has_invalid_value = False
+    for match in re.finditer(PARAMETER_RE, raw):
+        value, invalid = _coerce_arg_value(
+            match.group(2).strip(), schemas.get(match.group(1))
+        )
+        arguments[match.group(1)] = value
+        has_invalid_value = has_invalid_value or invalid
+    return ParsedToolCall(
+        raw=raw,
+        name=name,
+        arguments=arguments,
+        token_span=span,
+        status=(
+            ToolCallParseStatus.INVALID_JSON
+            if has_invalid_value
+            else ToolCallParseStatus.OK
+        ),
+    )
+
+
+PARAMETER_RE = re.compile(r"<parameter=([^>]+)>\n?(.*?)\n?</" + "parameter>", re.DOTALL)
+
+
+def _coerce_arg_value(
+    text: str, param_schema: dict[str, Any] | None
+) -> tuple[Any, bool]:
+    """Coerce one raw XML parameter value to its schema type.
+
+    String-typed params stay verbatim. Any other value is JSON-decoded, and
+    kept as raw text if decoding fails. Returns ``(value, invalid)``:
+    ``invalid`` is true when decoding failed and the schema does not accept
+    a string, so the raw text cannot be a valid value.
+    """
+    string_allowed = False
+    if param_schema is not None:
+        declared = param_schema.get("type")
+        if declared == "string" or declared == ["string"]:
+            return text, False
+        branches = param_schema.get("anyOf") or param_schema.get("oneOf") or []
+        for branch in branches:
+            if isinstance(branch, dict) and branch.get("type") == "string":
+                string_allowed = True
+    try:
+        return json.loads(text), False
+    except (json.JSONDecodeError, ValueError):
+        return text, not string_allowed
+
+
+def _build_param_type_index(
+    tools: list[Any] | None,
+) -> dict[str, dict[str, dict[str, Any]]]:
+    """Map tool name to its parameter name to JSON-schema fragment."""
+    if not tools:
+        return {}
+    index: dict[str, dict[str, dict[str, Any]]] = {}
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        spec = tool.get("function", tool)
+        if not isinstance(spec, dict):
+            continue
+        name = spec.get("name")
+        if not isinstance(name, str):
+            continue
+        parameters = spec.get("parameters") or {}
+        properties = (
+            parameters.get("properties") if isinstance(parameters, dict) else None
+        )
+        if isinstance(properties, dict):
+            index[name] = {
+                key: value
+                for key, value in properties.items()
+                if isinstance(value, dict)
+            }
+    return index
+
+
+def _find(token_ids: list[int], target: int, start: int = 0) -> int:
+    """Index of ``target`` at or after ``start``, or ``-1``."""
+    for index in range(start, len(token_ids)):
+        if token_ids[index] == target:
+            return index
+    return -1
+
+
+def _decode(tokenizer: PreTrainedTokenizerBase, token_ids: list[int]) -> str:
+    """Decode IDs to text, keeping special tokens inside the segment."""
+    if not token_ids:
+        return ""
+    text = tokenizer.decode(token_ids, skip_special_tokens=False)
+    if not isinstance(text, str):
+        msg = "decode() of one sequence returns str"
+        raise TypeError(msg)
+    return text
+
+
+def _token_id(tokenizer: PreTrainedTokenizerBase, token: str) -> int | None:
+    """ID for ``token``, or ``None`` when the vocab lacks it."""
+    token_id = tokenizer.convert_tokens_to_ids(token)
+    if not isinstance(token_id, int) or token_id == tokenizer.unk_token_id:
+        return None
+    return token_id

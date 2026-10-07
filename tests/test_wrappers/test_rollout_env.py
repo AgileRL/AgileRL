@@ -47,6 +47,10 @@ def test_max_prompt_tokens_for_model_len() -> None:
 class _ChrTokenizer:
     pad_token_id = 0
     pad_token = "<pad>"
+    unk_token_id = None
+
+    def convert_tokens_to_ids(self, _token: str) -> None:
+        return None
 
     def __call__(self, texts, **kwargs):
         ids = [[ord(c) for c in texts[0]]]
@@ -316,7 +320,7 @@ class TestRolloutEnvChatTemplateBoundary:
         w.apply_chat_template = True
         w.tokenizer = _ChatTemplateRecordingTokenizer(_render_gemma_chat)
 
-        out = w._chat_template_boundary_ids("FEEDBACK")
+        out = w._chat_template_boundary_ids([{"role": "user", "content": "FEEDBACK"}])
 
         assert out is not None
         decoded = "".join(chr(int(x)) for x in out[0].tolist())
@@ -332,7 +336,7 @@ class TestRolloutEnvChatTemplateBoundary:
         w.apply_chat_template = True
         w.tokenizer = _ChatTemplateRecordingTokenizer(_render_chatml)
 
-        out = w._chat_template_boundary_ids("FEEDBACK")
+        out = w._chat_template_boundary_ids([{"role": "user", "content": "FEEDBACK"}])
 
         assert out is not None
         decoded = "".join(chr(int(x)) for x in out[0].tolist())
@@ -346,7 +350,7 @@ class TestRolloutEnvChatTemplateBoundary:
         w.apply_chat_template = True
         w.tokenizer = _ChatTemplateRecordingTokenizer(_render_llama)
 
-        out = w._chat_template_boundary_ids("FEEDBACK")
+        out = w._chat_template_boundary_ids([{"role": "user", "content": "FEEDBACK"}])
 
         assert out is not None
         decoded = "".join(chr(int(x)) for x in out[0].tolist())
@@ -360,7 +364,7 @@ class TestRolloutEnvChatTemplateBoundary:
         w = bare_rollout_env()
         w.apply_chat_template = True
         w.tokenizer = _ChatTemplateRecordingTokenizer(_render_raises)
-        assert w._chat_template_boundary_ids("F") is None
+        assert w._chat_template_boundary_ids([{"role": "user", "content": "F"}]) is None
 
     def test_returns_none_when_placeholder_is_stripped(self) -> None:
         # Pathological template whose render drops content entirely; the
@@ -368,7 +372,7 @@ class TestRolloutEnvChatTemplateBoundary:
         w = bare_rollout_env()
         w.apply_chat_template = True
         w.tokenizer = _ChatTemplateRecordingTokenizer(_render_drops_content)
-        assert w._chat_template_boundary_ids("F") is None
+        assert w._chat_template_boundary_ids([{"role": "user", "content": "F"}]) is None
 
     def test_returns_none_when_render_is_not_a_string(self) -> None:
         # Some tokenizers tokenize regardless of ``tokenize=False`` and hand
@@ -376,7 +380,7 @@ class TestRolloutEnvChatTemplateBoundary:
         w = bare_rollout_env()
         w.apply_chat_template = True
         w.tokenizer = _ChatTemplateRecordingTokenizer(_render_returns_ids)
-        assert w._chat_template_boundary_ids("F") is None
+        assert w._chat_template_boundary_ids([{"role": "user", "content": "F"}]) is None
 
     def test_returns_none_when_boundary_text_is_empty(self) -> None:
         # Render ends exactly at the placeholder -> nothing after it to
@@ -384,7 +388,7 @@ class TestRolloutEnvChatTemplateBoundary:
         w = bare_rollout_env()
         w.apply_chat_template = True
         w.tokenizer = _ChatTemplateRecordingTokenizer(_render_ends_at_placeholder)
-        assert w._chat_template_boundary_ids("F") is None
+        assert w._chat_template_boundary_ids([{"role": "user", "content": "F"}]) is None
 
     def test_returns_none_when_boundary_encodes_to_no_tokens(self) -> None:
         # A tokenizer that maps the boundary text to zero ids gives us
@@ -392,7 +396,7 @@ class TestRolloutEnvChatTemplateBoundary:
         w = bare_rollout_env()
         w.apply_chat_template = True
         w.tokenizer = _EmptyEncodeTokenizer(_render_chatml)
-        assert w._chat_template_boundary_ids("F") is None
+        assert w._chat_template_boundary_ids([{"role": "user", "content": "F"}]) is None
 
     def test_tokenize_feedback_prefers_chat_template_boundary(self) -> None:
         # With a working (Gemma-style) template, _tokenize_feedback must
@@ -401,7 +405,7 @@ class TestRolloutEnvChatTemplateBoundary:
         w = bare_rollout_env()
         w.apply_chat_template = True
         w.tokenizer = _ChatTemplateRecordingTokenizer(_render_gemma_chat)
-        out = w._tokenize_feedback("FEEDBACK")
+        out = w._tokenize_feedback([{"role": "user", "content": "FEEDBACK"}])
         decoded = "".join(chr(int(x)) for x in out[0].tolist())
         assert decoded.startswith("<end_of_turn>\n<start_of_turn>user\n")
         assert decoded.endswith("<start_of_turn>model\n")
@@ -416,7 +420,7 @@ class TestRolloutEnvChatTemplateBoundary:
         w._strict_chat_template_boundary = True
         w.tokenizer = _ChrTokenizerWithChatTemplateBroken()
         with pytest.raises(RuntimeError, match="could not render a 'user' feedback"):
-            w._tokenize_feedback("F")
+            w._tokenize_feedback([{"role": "user", "content": "F"}])
 
     def test_full_tokenize_feedback_falls_back_to_chatml(self) -> None:
         # If the chat-template path returns None (no apply_chat_template at
@@ -425,7 +429,7 @@ class TestRolloutEnvChatTemplateBoundary:
         w = bare_rollout_env()
         w.apply_chat_template = True
         w.tokenizer = _ChrTokenizerWithChatTemplateBroken()
-        out = w._tokenize_feedback("F")
+        out = w._tokenize_feedback([{"role": "user", "content": "F"}])
         assert out.shape[0] == 1
         assert out.shape[1] > 0
 
@@ -488,6 +492,10 @@ class _ChatTemplateRecordingTokenizer:
 
     pad_token_id = 0
     pad_token = "<pad>"
+    unk_token_id = None
+
+    def convert_tokens_to_ids(self, _token: str) -> None:
+        return None
 
     def __init__(self, renderer):
         self._renderer = renderer
@@ -562,7 +570,7 @@ class TestRolloutEnvChatTemplateKwargs:
         w.apply_chat_template = True
         w.chat_template_kwargs = {"enable_thinking": False}
         w.tokenizer = _KwargsRecordingChatTokenizer(_render_chatml)
-        out = w._chat_template_boundary_ids("FEEDBACK")
+        out = w._chat_template_boundary_ids([{"role": "user", "content": "FEEDBACK"}])
         assert out is not None
         assert w.tokenizer.calls == [{"enable_thinking": False}]
 
@@ -990,6 +998,10 @@ def _stub_env(*, done: bool = False, prompt: dict | None = None) -> _SyncStubEnv
 class _ChatTokenizer:
     pad_token_id = 0
     pad_token = "<pad>"
+    unk_token_id = None
+
+    def convert_tokens_to_ids(self, _token: str) -> None:
+        return None
 
     def apply_chat_template(self, messages, tokenize=True, add_generation_prompt=True):
         del add_generation_prompt
@@ -1327,20 +1339,20 @@ class TestFeedbackTerminatorDedupe:
         w.turn_rewards = []
         w.turn_boundaries = []
         # Frame whose prefix begins with the terminator (chr(7) encodes to id 7).
-        w._boundary_parts = {"user": ("\x07U:", ":A")}
+        w._boundary_parts = {("user",): ("\x07U:", ":A")}
         return w
 
     def test_sampled_terminator_is_not_doubled(self) -> None:
         w = self._env(_TerminatorTokenizer())
         w.full_ids = torch.tensor([[65, 66, 7]], dtype=torch.long)  # ends with EOS
-        w._step_apply(("fb", "user", None, 0.5, False, False, {}))
+        w._step_apply(([{"role": "user", "content": "fb"}], None, 0.5, False, False, {}))
         # One terminator total: the sampled one; the frame's duplicate is dropped.
         assert w.full_ids[0].tolist().count(7) == 1
 
     def test_truncated_turn_still_gets_the_frame_terminator(self) -> None:
         w = self._env(_TerminatorTokenizer())
         w.full_ids = torch.tensor([[65, 66, 67]], dtype=torch.long)  # no EOS sampled
-        w._step_apply(("fb", "user", None, 0.5, False, False, {}))
+        w._step_apply(([{"role": "user", "content": "fb"}], None, 0.5, False, False, {}))
         assert w.full_ids[0].tolist().count(7) == 1
 
     def test_non_special_equal_token_is_kept(self) -> None:
@@ -1348,7 +1360,7 @@ class TestFeedbackTerminatorDedupe:
         tokenizer.all_special_ids = []
         w = self._env(tokenizer)
         w.full_ids = torch.tensor([[65, 66, 7]], dtype=torch.long)
-        w._step_apply(("fb", "user", None, 0.5, False, False, {}))
+        w._step_apply(([{"role": "user", "content": "fb"}], None, 0.5, False, False, {}))
         # id 7 is ordinary content here; nothing may be silently dropped.
         assert w.full_ids[0].tolist().count(7) == 2
 
@@ -1376,7 +1388,7 @@ class TestRolloutEnvSpecialTokenGuards:
         w.tokenizer = _ChrTokenizer()  # no apply_chat_template -> frame render fails
         w.apply_chat_template = True
         with pytest.warns(UserWarning, match="ChatML markers"):
-            w._tokenize_feedback("fb")
+            w._tokenize_feedback([{"role": "user", "content": "fb"}])
 
     def test_warns_when_template_cannot_render_tools(self) -> None:
         from tests.helpers.rollout_doubles import FakeEnvClient
@@ -1608,10 +1620,12 @@ class TestRolloutEnvChatTemplateBoundaryExtra:
         w = bare_rollout_env()
         w.apply_chat_template = True
         w.tokenizer = _ChatTemplateRecordingTokenizer(_render_gemma_chat)
-        first = w._chat_template_boundary_ids("FEEDBACK")
+        first = w._chat_template_boundary_ids([{"role": "user", "content": "FEEDBACK"}])
         assert first is not None
-        assert "user" in w._boundary_parts
-        second = w._chat_template_boundary_ids("FEEDBACK")
+        assert ("user",) in w._boundary_parts
+        second = w._chat_template_boundary_ids(
+            [{"role": "user", "content": "FEEDBACK"}]
+        )
         assert second is not None
         assert torch.equal(first, second)
 
@@ -1621,7 +1635,7 @@ class TestRolloutEnvChatTemplateBoundaryExtra:
         w = bare_rollout_env()
         w.apply_chat_template = True
         w.tokenizer = _ChatTemplateRecordingTokenizer(_render_ends_at_feedback)
-        assert w._chat_template_boundary_ids("F") is None
+        assert w._chat_template_boundary_ids([{"role": "user", "content": "F"}]) is None
 
 
 class TestRolloutEnvEvalMode:
@@ -2013,4 +2027,6 @@ class TestRolloutEnvPhaseGuards:
         w.full_ids = None  # no reset() ran, so there is no transcript to append to
 
         with pytest.raises(RuntimeError, match="reset\\(\\) must run before step"):
-            w._step_apply(("fb", "user", None, 0.5, False, False, {}))
+            w._step_apply(
+                ([{"role": "user", "content": "fb"}], None, 0.5, False, False, {})
+            )

@@ -419,13 +419,26 @@ I/O threads.
 Tools
 -----
 
-An environment advertises tool schemas with a ``tools`` attribute (a list of
+A plain-text env advertises tool schemas with a ``tools`` attribute (a list of
 JSON schemas). AgileRL renders them into the chat template. There is no
 separate tools config.
 
-For an MCP tool instead of the plain text interface, pass
+An MCP-backed env (an ``MCPEnvironment`` subclass hosting tools) is driven by
+tool calls instead of text, with no manifest flag. Each model family has its
+own tool-call format: the special tokens around a call and the body between
+them. The harness picks the parser whose tokens are in the tokenizer vocab,
+reads every call from each generation's token IDs, and steps the env once per
+call, in order, within the turn. The turn's reward is the sum of those steps.
+A malformed call, or a turn with no call, runs nothing: the model gets a tool
+error to retry, and the turn scores ``min_reward`` (``0`` unless the manifest
+sets it). Tool schemas are discovered over ``list_tools`` and rendered into
+prompts through the chat template. Parsers cover the Qwen, Hermes, Granite,
+Nemotron, Gemma 4, and GPT-OSS model families; an MCP env with any other
+tokenizer fails at the first reset.
+
+For a single fixed tool instead of parsed calls, pass
 ``mcp_tool="<tool_name>"`` on ``RolloutHarness`` or in the manifest (with
-``env_url``).
+``env_url``). It sends the whole generation as that tool's argument.
 
 Lifecycle
 ---------

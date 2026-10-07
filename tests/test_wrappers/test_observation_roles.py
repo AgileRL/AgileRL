@@ -31,6 +31,10 @@ class _RoleRecordingTokenizer:
     """Renders each message as ``<role>:<content>|`` and records what it saw."""
 
     pad_token_id = 0
+    unk_token_id = None
+
+    def convert_tokens_to_ids(self, _token: str) -> None:
+        return None
 
     def __init__(self) -> None:
         self.messages: list[list[dict[str, str]]] = []
@@ -88,6 +92,10 @@ class _RoleEnvClient:
     @property
     def tools(self) -> list[Any]:
         return []
+
+    @property
+    def takes_tool_calls(self) -> bool:
+        return False
 
     @property
     def rubric_components(self) -> tuple[str, ...]:
@@ -148,10 +156,9 @@ def test_step_env_carries_the_role_alongside_the_text() -> None:
         apply_chat_template=False,
     )
     harness.reset()
-    text, role, _image, reward, terminated, truncated, _info = harness._step_env("go")
-    assert (text, role, reward, terminated, truncated) == (
-        "tool said 42",
-        "tool",
+    messages, _image, reward, terminated, truncated, _info = harness._step_env("go")
+    assert (messages, reward, terminated, truncated) == (
+        [{"role": "tool", "content": "tool said 42"}],
         1.0,
         False,
         False,
@@ -167,8 +174,8 @@ def test_payload_role_does_not_eat_the_observation_text() -> None:
         apply_chat_template=False,
     )
     harness.reset()
-    text, role, *_rest = harness._step_env("go")
-    assert (text, role) == ("tool said 42", "tool")
+    messages, *_rest = harness._step_env("go")
+    assert messages == [{"role": "tool", "content": "tool said 42"}]
 
 
 def test_tool_feedback_is_framed_as_a_tool_turn() -> None:
@@ -176,7 +183,7 @@ def test_tool_feedback_is_framed_as_a_tool_turn() -> None:
     w = bare_rollout_env()
     w.apply_chat_template = True
     w.tokenizer = _RoleRecordingTokenizer()
-    w._tokenize_feedback("42", "tool")
+    w._tokenize_feedback([{"role": "tool", "content": "42"}])
     probe = w.tokenizer.messages[-1]
     assert [m["role"] for m in probe] == ["user", "assistant", "tool"]
 
@@ -185,10 +192,10 @@ def test_each_role_caches_its_own_frame() -> None:
     w = bare_rollout_env()
     w.apply_chat_template = True
     w.tokenizer = _RoleRecordingTokenizer()
-    w._tokenize_feedback("a", "user")
-    w._tokenize_feedback("b", "tool")
-    w._tokenize_feedback("c", "user")
-    assert set(w._boundary_parts) == {"user", "tool"}
+    w._tokenize_feedback([{"role": "user", "content": "a"}])
+    w._tokenize_feedback([{"role": "tool", "content": "b"}])
+    w._tokenize_feedback([{"role": "user", "content": "c"}])
+    assert set(w._boundary_parts) == {("user",), ("tool",)}
     # Three feedback turns, two template renders: the repeat came from cache.
     assert len(w.tokenizer.messages) == 2
 
@@ -197,8 +204,8 @@ def test_user_and_tool_frames_differ() -> None:
     w = bare_rollout_env()
     w.apply_chat_template = True
     w.tokenizer = _RoleRecordingTokenizer()
-    as_user = w._tokenize_feedback("42", "user")
-    as_tool = w._tokenize_feedback("42", "tool")
+    as_user = w._tokenize_feedback([{"role": "user", "content": "42"}])
+    as_tool = w._tokenize_feedback([{"role": "tool", "content": "42"}])
     assert not torch.equal(as_user, as_tool)
 
 
@@ -207,9 +214,9 @@ def test_chatml_fallback_names_the_role() -> None:
     w = bare_rollout_env()
     w.apply_chat_template = True
     w.tokenizer = MiniTokenizer()  # no apply_chat_template -> fallback
-    w._boundary_parts = {"tool": None}
+    w._boundary_parts = {("tool",): None}
     with pytest.warns(UserWarning, match="'tool'"):
-        w._tokenize_feedback("42", "tool")
+        w._tokenize_feedback([{"role": "tool", "content": "42"}])
 
 
 # --- system prompt ---------------------------------------------------------
