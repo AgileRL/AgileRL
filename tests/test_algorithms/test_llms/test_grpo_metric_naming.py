@@ -190,8 +190,8 @@ class _Stub:
 
     def _backward_pass(
         self, _loss: torch.Tensor, _accumulation_steps: int | None = None
-    ) -> tuple[None, None]:
-        return None, None
+    ) -> None:
+        return None
 
     def _liger_loss(self, batch_ids: torch.Tensor, *_args: Any, **_kwargs: Any):
         """Record that the fused path ran."""

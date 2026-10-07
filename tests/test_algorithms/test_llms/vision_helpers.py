@@ -168,13 +168,18 @@ def routed_rows(
 ) -> set[tuple[str, tuple[int, ...]]]:
     """Check each forwarded row got the vision rows ``expected`` gives its real tokens.
 
+    A one-name routing covers every row of its forward.
+
     :return: The ``(adapter, real tokens)`` of every forwarded row.
     """
     routed = set()
     for forward in forwards:
         offset = 0
         pixel_ids = forward["pixel_values"][:, 0].long().tolist()
-        for row, adapter in zip(forward["input_ids"], forward["routing"], strict=True):
+        routing = forward["routing"]
+        if len(routing) == 1:
+            routing = routing * len(forward["input_ids"])
+        for row, adapter in zip(forward["input_ids"], routing, strict=True):
             count = int((row == IMAGE_TOKEN_ID).sum())
             tokens = tuple(row[row != PAD_TOKEN_ID].tolist())
             assert pixel_ids[offset : offset + count] == expected[tokens], (

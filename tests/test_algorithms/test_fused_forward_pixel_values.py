@@ -71,7 +71,7 @@ class TestFusedForwardPixelValues:
         )
 
         # Act
-        agent._fused_forward(ids, batch_size, pixel_values=pixel_values)
+        agent._fused_forward(ids, pixel_values=pixel_values)
 
         # Assert
         kwargs = agent._fused_model_pass.call_args.kwargs
@@ -90,7 +90,7 @@ class TestFusedForwardPixelValues:
         )
 
         # Act
-        agent._fused_forward(ids, batch_size)
+        agent._fused_forward(ids)
 
         # Assert
         assert agent._fused_model_pass.call_args.kwargs.get("pixel_values") is None
@@ -131,68 +131,6 @@ class TestFusedForwardPixelValues:
         forwarded = actor.call_args.kwargs["pixel_values"]
         assert forwarded.shape[0] == batch_size
         assert torch.equal(forwarded, pixel_values)
-
-    def test_fused_packed_forward_value_head_repeats_pixel_values(self) -> None:
-        # Arrange
-        agent = _make_llm_agent()
-        agent.use_value_head = True
-        batch_size = 3
-        seq_len = 6
-        ids = torch.randint(1, 32, (batch_size, seq_len))
-        mask = torch.ones_like(ids)
-        pixel_values = torch.randn(batch_size, 3, 4, 4)
-        hidden = torch.randn(2, seq_len, 8)
-        actor = MagicMock()
-        actor.forward = MagicMock(return_value=SimpleNamespace(logits=hidden))
-        agent.actor = actor
-        agent._get_unwrapped_actor = MagicMock(return_value=actor)
-        agent._fused_logprob_fn_and_head = MagicMock(
-            return_value=(
-                MagicMock(return_value=torch.zeros(1, seq_len - 1)),
-                torch.randn(32, 8),
-                None,
-            )
-        )
-        agent._patch_lm_head_to_identity = MagicMock(return_value=nullcontext())
-        agent._amp_ctx = MagicMock(return_value=nullcontext())
-        agent._activation_offload_ctx = MagicMock(return_value=nullcontext())
-
-        # Act
-        with patch(
-            "agilerl.algorithms.core.base.unpack_logprobs",
-            return_value=torch.zeros(batch_size, seq_len - 1),
-        ):
-            agent._fused_packed_forward(ids, mask, pixel_values=pixel_values)
-
-        # Assert
-        forwarded = actor.call_args.kwargs["pixel_values"]
-        expected = pixel_values.repeat(2, 1, 1, 1)
-        assert forwarded.shape[0] == 6
-        assert torch.equal(forwarded, expected)
-
-    def test_fused_forward_value_head_repeats_pixel_values(self) -> None:
-        # Arrange
-        agent = _make_llm_agent()
-        agent.use_value_head = True
-        batch_size = 2
-        seq_len = 5
-        ids = torch.randint(1, 32, (batch_size, seq_len))
-        pixel_values = torch.randn(batch_size, 3, 4, 4)
-        agent._packing_mode = MagicMock(return_value=None)
-        agent._fused_model_pass = MagicMock(
-            return_value=(
-                torch.zeros(batch_size * 2, seq_len - 1),
-                torch.zeros(batch_size * 2, seq_len - 1),
-            ),
-        )
-
-        # Act
-        agent._fused_forward(ids, batch_size, pixel_values=pixel_values)
-
-        # Assert
-        kwargs = agent._fused_model_pass.call_args.kwargs
-        expected = pixel_values.repeat(2, 1, 1, 1)
-        assert torch.equal(kwargs["pixel_values"], expected)
 
     def test_get_logprobs_passes_pixel_values_to_actor(self) -> None:
         # Arrange

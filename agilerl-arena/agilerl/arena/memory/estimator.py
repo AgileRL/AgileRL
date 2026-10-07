@@ -352,12 +352,13 @@ def block_backward_terms(
     A block-exclusive stack recomputes one attention, FFN or Mamba layer at a
     time, so each kind's terms are summed and the largest kind is kept.
     """
+    rows = settings.grad_forward_rows
     # PEFT casts a wrapped linear's input only when the adapters are wider.
     casts_apply = adapter_bytes > act_bytes
     dropout_applies = settings.lora_dropout > 0
     split = formulas.split_moe_lora_recompute_bytes(
         arch,
-        1,
+        rows,
         seq_len,
         settings.lora_packed_target_matrices,
         settings.packed_moe_dispatch,
@@ -368,7 +369,7 @@ def block_backward_terms(
     def terms(layer: BlockKind | None) -> tuple[int, int, int, int]:
         recompute = formulas.block_recompute_bytes(
             arch,
-            1,
+            rows,
             seq_len,
             act_bytes,
             backward=True,
@@ -379,7 +380,7 @@ def block_backward_terms(
         if casts_apply:
             casts = formulas.lora_input_cast_bytes(
                 arch,
-                1,
+                rows,
                 seq_len,
                 settings.lora_target_scope,
                 settings.gradient_checkpointing,
@@ -389,7 +390,7 @@ def block_backward_terms(
         if dropout_applies:
             dropout = formulas.lora_dropout_bytes(
                 arch,
-                1,
+                rows,
                 seq_len,
                 adapter_bytes,
                 settings.lora_target_scope,
@@ -423,26 +424,33 @@ def activation_peak(
     :param eager_mamba_scan: Mamba layers run HF's eager scan.
     """
     graph_rows = settings.grad_graph_rows
+    forward_rows = settings.grad_forward_rows
+    live_rows = graph_rows * forward_rows
     adam_resident = settings.fsdp is None or (
         not settings.fsdp.cpu_offload and not settings.fsdp.optim_cpu_offload
     )
     adam_always = adam if adam_resident else 0.0
     recompute = formulas.block_recompute_bytes(
-        arch, 1, seq_len, act_bytes, backward=True, eager_mamba_scan=eager_mamba_scan
+        arch,
+        forward_rows,
+        seq_len,
+        act_bytes,
+        backward=True,
+        eager_mamba_scan=eager_mamba_scan,
     )
     if settings.gradient_checkpointing:
-        saved = int(graph_rows * seq_len * arch.hidden_size * arch.n_layers * act_bytes)
+        saved = int(live_rows * seq_len * arch.hidden_size * arch.n_layers * act_bytes)
     else:
         saved = recompute * arch.n_layers * graph_rows
     if settings.activation_offload:
         saved = 0
-    loss_hidden = graph_rows * seq_len * arch.hidden_size * act_bytes
+    loss_hidden = live_rows * seq_len * arch.hidden_size * act_bytes
     recompute, lora_casts, lora_dropout, split_lora = block_backward_terms(
         arch, settings, seq_len, act_bytes, adapter_bytes, eager_mamba_scan
     )
     loss_lora_casts = 0 if settings.lora_casts_recompute_only else lora_casts
     # Two fp32 tiles are live at the loss instant: recomputed logits plus
-    # that tile's gradient.
+    # that tile's gradient. Tiles are fixed-size, so a fused critic row adds none.
     logit_rows = formulas.resolve_chunk_rows(arch.vocab_size, settings.chunk_rows)
     logit_tile = logit_rows * arch.vocab_size * 4
     # The chunk loop hoists an fp32 lm_head copy when the head runs below fp32.

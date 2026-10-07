@@ -32,6 +32,7 @@ from agilerl.lora.moe import (
     SortedExpertsLoraWrapper,
     TransposedExpertsLoraWrapper,
     install_packed_expert_grouped_gemm,
+    materializes_expert_lora,
     moe_expert_target_parameters,
     set_routed_experts_recompute,
     transposed_experts_local_forward,
@@ -411,6 +412,29 @@ def test_upgrade_is_idempotent_and_skips_unknown_conventions():
 
     _, upgraded = _sorted_pair()
     assert upgrade_moe_param_wrappers(upgraded) == 0
+
+
+class TestMaterializesExpertLora:
+    @pytest.mark.parametrize(
+        "pair_factory", [_sorted_pair, _routed_pair, _ungated_pair, _transposed_pair]
+    )
+    def test_upgraded_wrappers_run_contracted(self, pair_factory):
+        reference, upgraded = pair_factory()
+
+        assert materializes_expert_lora(upgraded) is False
+        assert materializes_expert_lora(reference) is True
+
+    def test_unrecognized_convention_stays_materialized(self):
+        model = inject_adapter_in_model(
+            _lora_config(["odd.weight"]), _odd_model(), adapter_name="actor"
+        )
+        with pytest.warns(UserWarning, match="unrecognized module conventions"):
+            upgrade_moe_param_wrappers(model)
+
+        assert materializes_expert_lora(model) is True
+
+    def test_dense_model_has_no_materialized_expert_lora(self):
+        assert materializes_expert_lora(_odd_model()) is False
 
 
 def test_disabled_adapters_match_base():

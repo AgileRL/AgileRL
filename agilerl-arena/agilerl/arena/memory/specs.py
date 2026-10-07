@@ -582,7 +582,8 @@ class TrainingSettings(BaseModel):
 
     Gradients scale with LoRA adapter parameters. Flat data parallel keeps
     AdamW state on the GPU. FSDP with ``optim_cpu_offload`` keeps it on CPU
-    except during ``step()``. The gradient micro-batch is always one row.
+    except during ``step()``. ``micro_batch_size`` is the rows of each
+    gradient micro-batch.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -625,6 +626,10 @@ class TrainingSettings(BaseModel):
     n_training_gpus: int = 1
     # None is flat data parallel: a full weight copy on each GPU.
     fsdp: FSDPConfig | None = None
+    # Completion rows per gradient forward and backward.
+    micro_batch_size: int = Field(default=1, ge=1)
+    # PPO only: actor and critic rows share one gradient forward and backward.
+    fuse_actor_critic_pass: bool = False
 
     @property
     def trajectories(self) -> int:
@@ -679,6 +684,11 @@ class TrainingSettings(BaseModel):
         backpropagate one graph.
         """
         return 2 if self.algorithm == "dpo" else 1
+
+    @property
+    def grad_forward_rows(self) -> int:
+        """Rows per gradient forward: the micro-batch, doubled when PPO fuses."""
+        return self.micro_batch_size * (2 if self.fuse_actor_critic_pass else 1)
 
     @property
     def n_adapter_rows(self) -> int:
@@ -739,6 +749,16 @@ class TrainingSettings(BaseModel):
             and self.fsdp.optim_cpu_offload
         ):
             msg = "FSDP cpu_offload and optim_cpu_offload are mutually exclusive"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _check_fuse_actor_critic_pass(self) -> Self:
+        if self.fuse_actor_critic_pass and self.algorithm != "ppo":
+            msg = (
+                "fuse_actor_critic_pass=True requires algorithm='ppo', "
+                f"got {self.algorithm!r}"
+            )
             raise ValueError(msg)
         return self
 

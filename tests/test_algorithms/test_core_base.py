@@ -4541,27 +4541,27 @@ class TestLLMBackwardPassGradNorms:
     def test_returns_pre_and_post_clip_norms_when_clipped(self):
         agent, loss = self._agent_and_loss([3.0, 4.0], max_grad_norm=1.0)
 
-        pre, post = LLMAlgorithm._backward_pass(agent, loss)
+        step = LLMAlgorithm._backward_pass(agent, loss)
 
-        assert pre == pytest.approx(5.0)
-        assert post == pytest.approx(1.0)
+        assert step.grad_norm_pre == pytest.approx(5.0)
+        assert step.grad_norm_post == pytest.approx(1.0)
 
     def test_returns_equal_norms_when_below_max(self):
         agent, loss = self._agent_and_loss([0.3, 0.4], max_grad_norm=1.0)
 
-        pre, post = LLMAlgorithm._backward_pass(agent, loss)
+        step = LLMAlgorithm._backward_pass(agent, loss)
 
-        assert pre == pytest.approx(0.5)
-        assert post == pytest.approx(0.5)
+        assert step.grad_norm_pre == pytest.approx(0.5)
+        assert step.grad_norm_post == pytest.approx(0.5)
 
     def test_accumulation_step_returns_no_norms(self):
         agent, loss = self._agent_and_loss(
             [3.0, 4.0], max_grad_norm=1.0, accumulation_steps=2
         )
 
-        pre, post = LLMAlgorithm._backward_pass(agent, loss)
+        step = LLMAlgorithm._backward_pass(agent, loss)
 
-        assert (pre, post) == (None, None)
+        assert step is None
 
 
 class _DummyRLWithTensor(DummyRLAlgorithm):
@@ -6835,23 +6835,26 @@ class TestLLMInitializeActorsExpertLoraGuards:
 
 @_LLM_DEPS_SKIP
 class TestLLMFusedForwardPaths:
-    def test_fused_forward_without_value_head(self):
+    @pytest.mark.parametrize("use_value_head", [False, True])
+    def test_fused_forward_routes_one_actor_row_per_sample(self, use_value_head):
+        # Arrange
         agent = _make_llm_agent()
-        agent.use_value_head = False
+        agent.use_value_head = use_value_head
         B, T, V, _H = 2, 5, 32, 8
         ids = torch.randint(1, V, (B, T))
         agent._packing_mode = MagicMock(return_value=None)
         agent._fused_model_pass = MagicMock(
-            return_value=(torch.zeros(B, T - 1), torch.zeros(B, T - 1))
+            return_value=(torch.full((B, T - 1), 2.0), torch.zeros(B, T - 1))
         )
 
-        log_probs, values = agent._fused_forward(ids, batch_size=B)
+        # Act
+        log_probs = agent._fused_forward(ids)
 
-        assert log_probs.shape == (B, T - 1)
-        assert values is None
-        agent._fused_model_pass.assert_called_once()
-        fused_ids = agent._fused_model_pass.call_args.args[0]
-        assert fused_ids.shape[0] == B
+        # Assert
+        assert torch.equal(log_probs, torch.full((B, T - 1), 2.0))
+        fused_ids, _mask, routing = agent._fused_model_pass.call_args.args
+        assert torch.equal(fused_ids, ids)
+        assert routing == ["actor"] * B
 
     def test_fused_forward_no_grad_respects_microbatch_size(self):
         agent = _make_llm_agent()
@@ -6895,67 +6898,29 @@ class TestLLMFusedForwardPaths:
         assert torch.isnan(ref_logprobs).all()
         assert values is None
 
-    def test_fused_forward_with_value_head(self):
+    @pytest.mark.parametrize("attn", ["flash_attention_2", "flex_attention"])
+    def test_fused_forward_uses_packed_path_when_enabled(self, attn):
+        # Arrange
         agent = _make_llm_agent()
         agent.use_value_head = True
-        B, T = 2, 5
-        ids = torch.randint(1, 32, (B, T))
-        agent._packing_mode = MagicMock(return_value=None)
-        agent._fused_model_pass = MagicMock(
-            return_value=(
-                torch.zeros(2 * B, T - 1),
-                torch.zeros(2 * B, T - 1),
-            )
-        )
-
-        log_probs, values = agent._fused_forward(ids, batch_size=B)
-
-        assert log_probs.shape == (B, T - 1)
-        assert values.shape == (B, T - 1)
-
-    def test_fused_forward_uses_packed_path_when_enabled(self):
-        agent = _make_llm_agent()
         agent.use_sequence_packing = True
-        agent.actor.config._attn_implementation = "flash_attention_2"
+        agent.actor.config._attn_implementation = attn
         B, T = 2, 5
         ids = torch.randint(1, 32, (B, T))
-        expected = (torch.zeros(B, T - 1), None)
+        expected = torch.zeros(B, T - 1)
 
+        # Act
         with (
             patch.object(
                 agent, "_fused_packed_forward", return_value=expected
             ) as packed_fwd,
             torch.enable_grad(),
         ):
-            _log_probs, values = agent._fused_forward(ids, batch_size=B)
-
-        packed_fwd.assert_called_once()
-        assert values is None
-
-    def test_fused_forward_value_head_stays_padded_under_varlen(self):
-        # Arrange: the critic row would share the varlen row with the actor.
-        agent = _make_llm_agent()
-        agent.use_value_head = True
-        agent.use_sequence_packing = True
-        agent.actor.config._attn_implementation = "flash_attention_2"
-        B, T = 2, 5
-        ids = torch.randint(1, 32, (B, T))
-        values = torch.full((2 * B, T - 1), 3.0)
-        agent._fused_model_pass = MagicMock(
-            return_value=(torch.zeros(2 * B, T - 1), values)
-        )
-
-        # Act
-        with (
-            patch.object(agent, "_fused_packed_forward") as packed_fwd,
-            torch.enable_grad(),
-        ):
-            log_probs, got_values = agent._fused_forward(ids, batch_size=B)
+            log_probs = agent._fused_forward(ids)
 
         # Assert
-        packed_fwd.assert_not_called()
-        assert log_probs.shape == (B, T - 1)
-        assert torch.equal(got_values, torch.full((B, T - 1), 3.0))
+        packed_fwd.assert_called_once()
+        assert log_probs is expected
 
     def test_fused_packed_forward_object_output(self):
         from contextlib import nullcontext
@@ -6988,10 +6953,10 @@ class TestLLMFusedForwardPaths:
             "agilerl.algorithms.core.base.unpack_logprobs",
             return_value=torch.zeros(B, T - 1),
         ):
-            log_probs, values = agent._fused_packed_forward(ids, mask)
+            log_probs = agent._fused_packed_forward(ids, mask)
 
         assert log_probs.shape == (B, T - 1)
-        assert values is None
+        assert actor.call_args.kwargs["input_ids"].shape == (1, B * T)
 
 
 @_LLM_DEPS_SKIP

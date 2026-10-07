@@ -23,6 +23,7 @@ from agilerl.lora.moe.grouped_gemm import grouped_mm_supported
 from agilerl.lora.moe.model import (
     bind_routed_experts_config,
     install_packed_expert_grouped_gemm,
+    materializes_expert_lora,
     moe_expert_target_parameters,
     set_routed_experts_recompute,
     upgrade_moe_param_wrappers,
@@ -44,6 +45,7 @@ __all__ = [
     "bind_routed_experts_config",
     "grouped_mm_supported",
     "install_packed_expert_grouped_gemm",
+    "materializes_expert_lora",
     "moe_expert_target_parameters",
     "resolve_adapters",
     "routed_experts_local_forward",

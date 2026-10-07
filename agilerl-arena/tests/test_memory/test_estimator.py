@@ -433,6 +433,19 @@ class TestTrainingSettingsInit:
         with pytest.raises(ValidationError, match="chunk_rows"):
             TrainingSettings(chunk_rows=0)
 
+    def test_fuse_actor_critic_pass_is_ppo_only(self):
+        assert TrainingSettings(algorithm="ppo", fuse_actor_critic_pass=True)
+
+        with pytest.raises(
+            ValidationError,
+            match="fuse_actor_critic_pass=True requires algorithm='ppo', got 'grpo'",
+        ):
+            TrainingSettings(algorithm="grpo", fuse_actor_critic_pass=True)
+
+    def test_micro_batch_size_must_be_positive(self):
+        with pytest.raises(ValidationError, match="micro_batch_size"):
+            TrainingSettings(micro_batch_size=0)
+
 
 class TestGenerationSettings:
     def test_concurrency_caps_at_max_num_seqs(self):
@@ -859,6 +872,14 @@ class TestAlgorithmTerms:
             < component(replicated, "adapters").n_bytes
         )
 
+    def test_ppo_split_pass_that_exceeds_the_device_does_not_fit(self, model):
+        small = DeviceSpec(total_bytes=4 * GiB)
+
+        bar = estimate_training(model, small, TrainingSettings(algorithm="ppo"))
+
+        assert bar.total_bytes > small.usable_bytes
+        assert not bar.fits
+
     def test_dpo_holds_both_preference_graphs(self, model, device):
         grpo = TrainingSettings(algorithm="grpo")
         dpo = TrainingSettings(algorithm="dpo")
@@ -901,6 +922,142 @@ class TestAlgorithmTerms:
         assert estimate.generation.components == ()
         assert estimate.generation.fits
         assert not generation_can_serve(estimate.generation)
+
+
+class TestFusedActorCriticPass:
+    """PPO actor and critic rows in one gradient forward and backward."""
+
+    def test_fused_backward_charges_the_critic_row(self, model, device):
+        # Arrange
+        seq_len = 16384
+        split = TrainingSettings(
+            algorithm="ppo", max_model_len=seq_len, lora_dropout=0.05
+        )
+        fused = split.model_copy(update={"fuse_actor_critic_pass": True})
+        h, n_layers = QWEN_05B.hidden_size, QWEN_05B.n_layers
+        extra_row = (
+            seq_len * h * n_layers * 2  # checkpoint boundaries
+            + seq_len * h * 2  # loss hidden state
+            + formulas.block_recompute_bytes(QWEN_05B, 1, seq_len, 2.0, backward=True)
+            + formulas.lora_input_cast_bytes(QWEN_05B, 1, seq_len)
+            + formulas.lora_dropout_bytes(QWEN_05B, 1, seq_len, 4.0)
+        )
+
+        # Act
+        split_bar = estimate_training(model, device, split)
+        fused_bar = estimate_training(model, device, fused)
+
+        # Assert
+        split_detail = component(split_bar, "activations").detail
+        fused_detail = component(fused_bar, "activations").detail
+        assert fused_bar.total_bytes > split_bar.total_bytes
+        assert (
+            fused_detail["backward_peak"] - split_detail["backward_peak"] == extra_row
+        )
+        assert fused_detail["checkpoint_boundaries"] == 2 * seq_len * h * n_layers * 2
+        assert fused_detail["loss_hidden_state"] == 2 * seq_len * h * 2
+        assert fused_detail["block_recompute"] == formulas.block_recompute_bytes(
+            QWEN_05B, 2, seq_len, 2.0, backward=True
+        )
+        assert fused_detail["lora_fp32_input_casts"] == (
+            formulas.lora_input_cast_bytes(QWEN_05B, 2, seq_len)
+        )
+        assert fused_detail["lora_dropout"] == formulas.lora_dropout_bytes(
+            QWEN_05B, 2, seq_len, 4.0
+        )
+        # The loss instant adds the critic row's saves; logit tiles stay the same.
+        assert fused_detail["loss_peak"] - split_detail["loss_peak"] == (
+            seq_len * h * n_layers * 2 + seq_len * h * 2
+        )
+
+    def test_config_fits_split_but_not_fused(self, model):
+        # Arrange
+        budget = DeviceSpec(total_bytes=8 * GiB, available_bytes=6 * GiB)
+        split = TrainingSettings(algorithm="ppo", max_model_len=16384)
+        fused = split.model_copy(update={"fuse_actor_critic_pass": True})
+
+        # Act
+        split_bar = estimate_training(model, budget, split)
+        fused_bar = estimate_training(model, budget, fused)
+
+        # Assert
+        assert split_bar.fits
+        assert not fused_bar.fits
+
+    def test_two_row_split_micro_batch_matches_one_row_fused(self, model, device):
+        # Arrange
+        seq_len = 4096
+        split = TrainingSettings(
+            algorithm="ppo",
+            max_model_len=seq_len,
+            lora_dropout=0.05,
+            micro_batch_size=2,
+        )
+        fused = split.model_copy(
+            update={"micro_batch_size": 1, "fuse_actor_critic_pass": True}
+        )
+
+        # Act
+        split_bar = estimate_training(model, device, split)
+        fused_bar = estimate_training(model, device, fused)
+
+        # Assert
+        h, n_layers = QWEN_05B.hidden_size, QWEN_05B.n_layers
+        split_detail = component(split_bar, "activations").detail
+        assert split.grad_forward_rows == fused.grad_forward_rows == 2
+        assert split_detail == component(fused_bar, "activations").detail
+        assert split_bar.total_bytes == fused_bar.total_bytes
+        assert split_detail["checkpoint_boundaries"] == 2 * seq_len * h * n_layers * 2
+        assert split_detail["block_recompute"] == formulas.block_recompute_bytes(
+            QWEN_05B, 2, seq_len, 2.0, backward=True
+        )
+
+    @pytest.mark.parametrize(
+        ("algorithm", "graphs"),
+        [("grpo", 1), ("cispo", 1), ("ppo", 1), ("dpo", 2)],
+    )
+    def test_micro_batch_scales_the_gradient_rows(
+        self, model, device, algorithm, graphs
+    ):
+        # Arrange: DPO keeps the chosen and rejected graphs until one loss.
+        seq_len = 1024
+        h, n_layers = QWEN_05B.hidden_size, QWEN_05B.n_layers
+        one_row = TrainingSettings(algorithm=algorithm, max_model_len=seq_len)
+        four_rows = one_row.model_copy(update={"micro_batch_size": 4})
+
+        # Act
+        one = component(estimate_training(model, device, one_row), "activations")
+        four = component(estimate_training(model, device, four_rows), "activations")
+
+        # Assert
+        assert one.detail["checkpoint_boundaries"] == (
+            graphs * seq_len * h * n_layers * 2
+        )
+        assert four.detail["checkpoint_boundaries"] == (
+            4 * graphs * seq_len * h * n_layers * 2
+        )
+        assert four.detail["lora_fp32_input_casts"] == (
+            formulas.lora_input_cast_bytes(QWEN_05B, 4, seq_len)
+        )
+        assert four.detail["nograd_peak"] == one.detail["nograd_peak"]
+
+    def test_fused_contracted_moe_charges_split_lora_for_both_rows(self, device):
+        model = ModelSpec(model_id="moe-test", arch=MOE_TINY)
+        settings = TrainingSettings(
+            algorithm="ppo",
+            fuse_actor_critic_pass=True,
+            lora_packed_target_matrices=2,
+            packed_moe_dispatch="contracted",
+            max_model_len=1024,
+        )
+
+        bar = estimate_training(model, device, settings)
+
+        assert component(bar, "activations").detail["split_moe_lora"] == (
+            formulas.split_moe_lora_recompute_bytes(
+                MOE_TINY, 2, 1024, 2, "contracted", 2, 4
+            )
+        )
 
 
 class TestEagerMambaScan:

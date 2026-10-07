@@ -217,6 +217,7 @@ class _Stub:
     _apply_kl_advantage_shaping = GRPO._apply_kl_advantage_shaping
     _compute_policy_loss = GRPO._compute_policy_loss
     _fused_kernel_loss = GRPO._fused_kernel_loss
+    _gradient_forward_inputs = GRPO._gradient_forward_inputs
     _liger_loss = GRPO._liger_loss
     _log_importance_weights = GRPO._log_importance_weights
     _logprobs_from_hidden_fused = staticmethod(GRPO._logprobs_from_hidden_fused)

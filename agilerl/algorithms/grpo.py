@@ -971,12 +971,10 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                             self._raise_if_loss_not_finite_on_any_rank(loss)
                             phase_timer.mark("forward")
 
-                            grad_pre, grad_post = self._backward_pass(
-                                loss, segment_steps
-                            )
-                        if grad_pre is not None and grad_post is not None:
-                            grad_norm_pre_total += grad_pre
-                            grad_norm_post_total += grad_post
+                            step = self._backward_pass(loss, segment_steps)
+                        if step is not None:
+                            grad_norm_pre_total += step.grad_norm_pre
+                            grad_norm_post_total += step.grad_norm_post
                             grad_updates += 1
                         # A micro-batch of padding rows has no action tokens to average.
                         if action_masks[minibatch_idxs].any():
