@@ -28,6 +28,7 @@ from agilerl.arena.inference.cache import (
     save_active_agent,
     save_active_session,
 )
+from agilerl.arena.memory.cli import memory_group
 from agilerl.arena.models import verdict as manifest_verdict
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.schema import manifest_schema
@@ -1379,6 +1380,7 @@ def projects_get_default(config: CommandConfig) -> None:
 
 
 register_on_prem_manifest_group(main)
+main.add_command(memory_group)
 
 
 if __name__ == "__main__":
