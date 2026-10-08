@@ -5,7 +5,7 @@
 
 Covers single-agent (on-policy, off-policy, offline, bandit), multi-agent,
 and LLM training scenarios, along with all supported network architectures
-(MLP, CNN, LSTM, SimBA, MultiInput).
+(MLP, CNN, LSTM, CNN→LSTM, SimBA, MultiInput).
 
 Test manifests live under ``tests/manifests/`` as YAML files.
 """
@@ -50,6 +50,7 @@ from agilerl.models.hpo import (
 )
 from agilerl.models.manifest import TrainingManifest, from_trainer_specs
 from agilerl.models.networks import (
+    CnnLstmSpec,
     CnnSpec,
     LstmSpec,
     MlpSpec,
@@ -368,6 +369,7 @@ DQN_MANIFEST = _load("dqn")
 RAINBOW_MANIFEST = _load("rainbow_dqn")
 PPO_MANIFEST = _load("ppo")
 PPO_CNN_MANIFEST = _load("ppo_cnn")
+PPO_CNN_LSTM_MANIFEST = _load("ppo_cnn_lstm")
 PPO_LSTM_MANIFEST = _load("ppo_lstm")
 DDPG_MANIFEST = _load("ddpg")
 DDPG_SIMBA_MANIFEST = _load("ddpg_simba")
@@ -483,6 +485,17 @@ class TestTrainingManifest:
                 "cnn",
                 {"channel_size": [32], "kernel_size": [3], "stride_size": [1]},
                 CnnSpec,
+            ),
+            (
+                "cnn_lstm",
+                {
+                    "channel_size": [32],
+                    "kernel_size": [3],
+                    "stride_size": [1],
+                    "hidden_state_size": 64,
+                    "num_layers": 1,
+                },
+                CnnLstmSpec,
             ),
             ("lstm", {"hidden_state_size": 64, "num_layers": 1}, LstmSpec),
             ("simba", {"hidden_size": 128, "num_blocks": 2}, SimbaSpec),
@@ -630,6 +643,7 @@ class TestLocalTrainerSingleAgent:
             (RAINBOW_MANIFEST, RainbowDQNSpec, MlpSpec),
             (PPO_MANIFEST, PPOSpec, MlpSpec),
             (PPO_CNN_MANIFEST, PPOSpec, CnnSpec),
+            (PPO_CNN_LSTM_MANIFEST, PPOSpec, CnnLstmSpec),
             (PPO_LSTM_MANIFEST, PPOSpec, LstmSpec),
             (DDPG_MANIFEST, DDPGSpec, MlpSpec),
             (DDPG_SIMBA_MANIFEST, DDPGSpec, SimbaSpec),
@@ -641,6 +655,7 @@ class TestLocalTrainerSingleAgent:
             "RainbowDQN-MLP",
             "PPO-MLP",
             "PPO-CNN",
+            "PPO-CNN-LSTM",
             "PPO-LSTM",
             "DDPG-MLP",
             "DDPG-SimBA",
@@ -1424,6 +1439,7 @@ _SINGLE_AGENT_CONFIGS = [
     ("dqn/dqn_lstm.yaml", DQNSpec, LstmSpec),
     ("ppo/ppo.yaml", PPOSpec, MlpSpec),
     ("ppo/ppo_image.yaml", PPOSpec, CnnSpec),
+    ("ppo/ppo_image_recurrent.yaml", PPOSpec, CnnLstmSpec),
     ("ppo/ppo_recurrent.yaml", PPOSpec, LstmSpec),
     ("ddpg/ddpg.yaml", DDPGSpec, MlpSpec),
     ("ddpg/ddpg_lstm.yaml", DDPGSpec, LstmSpec),
@@ -1461,6 +1477,7 @@ _OBS_SPACE_FOR_ENCODER = {
     LstmSpec: spaces.Box(-1.0, 1.0, shape=(4,), dtype=np.float32),
     SimbaSpec: spaces.Box(-1.0, 1.0, shape=(4,), dtype=np.float32),
     CnnSpec: spaces.Box(0, 255, shape=(3, 32, 32), dtype=np.uint8),
+    CnnLstmSpec: spaces.Box(0, 255, shape=(3, 32, 32), dtype=np.uint8),
     MultiInputSpec: spaces.Dict(
         {"vector": spaces.Box(-1.0, 1.0, shape=(4,), dtype=np.float32)}
     ),

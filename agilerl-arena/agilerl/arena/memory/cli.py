@@ -28,6 +28,7 @@ from rich.text import Text
 
 from agilerl.arena.memory.advice import advise
 from agilerl.arena.memory.estimator import PhaseBreakdown, estimate_run
+from agilerl.arena.memory.formulas import MAX_UNDERPREDICTION
 from agilerl.arena.memory.manifest import (
     llm_spec,
     lookup_gpu,
@@ -192,20 +193,42 @@ def _render_phase(breakdown: PhaseBreakdown, glyphs: ReportGlyphs) -> Panel:
             f"{size / GiB:.2f} GiB",
             f"{size / usable:.0%}",
         )
+    fits = breakdown.fits_with_buffer
     bar.append(glyphs.free * (BAR_WIDTH - drawn), style="grey30")
-    if not breakdown.fits:
+    if not fits:
         bar.append(" >>", style="bold red")
 
-    headroom = breakdown.headroom_bytes
+    # Training keeps the measured underprediction free. Generation is the
+    # engine's own budget and stays on the point estimate.
+    if breakdown.phase == "training":
+        limit = int(usable * (1 - MAX_UNDERPREDICTION))
+        headroom = limit - breakdown.total_bytes
+        room = (
+            (
+                f"{headroom / GiB:.2f} GiB under the {MAX_UNDERPREDICTION:.1%} buffer",
+                "green",
+            )
+            if headroom >= 0
+            else (
+                (
+                    f"SHORTFALL {-headroom / GiB:.2f} GiB past the "
+                    f"{MAX_UNDERPREDICTION:.1%} buffer"
+                ),
+                "bold red",
+            )
+        )
+    else:
+        headroom = breakdown.headroom_bytes
+        room = (
+            (f"{headroom / GiB:.2f} GiB headroom", "green")
+            if headroom >= 0
+            else (f"SHORTFALL {-headroom / GiB:.2f} GiB", "bold red")
+        )
     summary = Text.assemble(
         (f"{breakdown.total_bytes / GiB:.2f}", "bold"),
         f" / {usable / GiB:.2f} GiB usable{glyphs.separator}"
         f"{breakdown.device_total_bytes / GiB:.0f} GiB card{glyphs.separator}",
-        (
-            (f"{headroom / GiB:.2f} GiB headroom", "green")
-            if headroom >= 0
-            else (f"SHORTFALL {-headroom / GiB:.2f} GiB", "bold red")
-        ),
+        room,
     )
     warnings = [Text(f"! {w}", style="yellow") for w in breakdown.warnings]
     return Panel(
@@ -214,11 +237,11 @@ def _render_phase(breakdown: PhaseBreakdown, glyphs: ReportGlyphs) -> Panel:
         title_align="left",
         subtitle=(
             Text("FITS", style="bold green")
-            if breakdown.fits
+            if fits
             else Text("OVER BUDGET", style="bold red")
         ),
         subtitle_align="right",
-        border_style="green" if breakdown.fits else "red",
+        border_style="green" if fits else "red",
         width=PANEL_WIDTH,
     )
 
@@ -420,7 +443,7 @@ def main(
     estimate = estimate_run(config)
     if as_json:
         payload = estimate.model_dump(by_alias=True)
-        payload["fits"] = estimate.fits
+        payload["fits"] = estimate.fits_with_buffer
         payload["advice"] = [a.model_dump() for a in advise(config)]
         print(json.dumps(payload, indent=2))
         return EXIT_OK if estimate.fits else EXIT_OVER_BUDGET
@@ -438,7 +461,7 @@ def main(
     )
     console.print(_render_phase(estimate.training, glyphs))
     console.print(_render_phase(estimate.generation, glyphs))
-    if not estimate.fits:
+    if not estimate.fits_with_buffer:
         console.print(_render_fixes(config))
         logger.info("Blocked: apply a fix above or use a larger GPU.")
-    return EXIT_OK if estimate.fits else EXIT_OVER_BUDGET
+    return EXIT_OK if estimate.fits_with_buffer else EXIT_OVER_BUDGET

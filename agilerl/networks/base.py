@@ -14,6 +14,7 @@ from torch import nn
 
 from agilerl.modules import (
     EvolvableCNN,
+    EvolvableCnnLstm,
     EvolvableLSTM,
     EvolvableMLP,
     EvolvableMultiInput,
@@ -43,7 +44,12 @@ class SupportsNumOutputs(Protocol):
 
 
 DefaultEncoderType = (
-    EvolvableCNN | EvolvableMLP | EvolvableMultiInput | EvolvableSimBa | EvolvableLSTM
+    EvolvableCNN
+    | EvolvableCnnLstm
+    | EvolvableMLP
+    | EvolvableMultiInput
+    | EvolvableSimBa
+    | EvolvableLSTM
 )
 
 
@@ -135,6 +141,12 @@ def assert_correct_lstm_net_config(net_config: NetConfigType) -> None:
     )
 
 
+def assert_correct_cnn_lstm_net_config(net_config: NetConfigType) -> None:
+    """Assert CNN+LSTM encoder configuration (CNN stack + LSTM head)."""
+    assert_correct_cnn_net_config(net_config)
+    assert_correct_lstm_net_config(net_config)
+
+
 # TODO: Need to think of a way to do this check without the metaclass
 class NetworkMeta(ModuleMeta):
     """Metaclass for evolvable networks. Checks that the network has
@@ -196,8 +208,8 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
     :type latent_dim: int
     :param simba: If True, use a SimBa network for the encoder for vector spaces. Defaults to False.
     :type simba: bool
-    :param recurrent: If True, use a recurrent network for 2D observations. Defaults to False, whereby
-        the encoder is a nn.Flatten() followed by an `EvolvableMLP`.
+    :param recurrent: If True, use a recurrent encoder: LSTM on vector observations,
+        or CNN→LSTM on 3D image Box spaces. Defaults to False (MLP or CNN encoder).
     :type recurrent: bool
     :param device: Device to use for the network. Defaults to "cpu".
     :type device: DeviceType
@@ -615,6 +627,19 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
                 device=self.device,
                 name=self.encoder_name,
                 **net_config,
+            )
+        elif is_image_space(self.observation_space) and self.recurrent:
+            assert_correct_cnn_lstm_net_config(net_config)
+
+            obs_shape = self.observation_space.shape
+            assert obs_shape is not None, "Image observation spaces must have a shape."
+
+            encoder = EvolvableCnnLstm(
+                input_shape=list(obs_shape),
+                num_outputs=self.latent_dim,
+                net_config=dict(net_config),
+                device=self.device,
+                name=self.encoder_name,
             )
         elif is_image_space(self.observation_space):
             assert_correct_cnn_net_config(net_config)

@@ -1,0 +1,28 @@
+---
+algorithm:
+    name: PPO
+    lr: 0.001
+    learn_step: 250
+    recurrent: true
+    share_encoders: true
+
+environment:
+    name: DummyImage-v0
+    num_envs: 6
+
+network:
+    latent_dim: 64
+    arch: cnn_lstm
+    encoder_config:
+        channel_size: [32, 64]
+        kernel_size: [8, 4]
+        stride_size: [4, 2]
+        hidden_state_size: 64
+        num_layers: 1
+    head_config:
+        hidden_size: [64]
+
+training:
+    max_steps: 1000
+    evo_steps: 100
+    pop_size: 2

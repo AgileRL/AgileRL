@@ -14,6 +14,7 @@ from torch._dynamo.eval_frame import OptimizedModule
 
 from agilerl.modules import EvolvableModule, ModuleDict
 from agilerl.modules.configs import (
+    CnnLstmNetConfig,
     CnnNetConfig,
     LstmNetConfig,
     MlpNetConfig,
@@ -266,7 +267,9 @@ def config_from_dict(config_dict: NetConfigType) -> NetConfig:
     if isinstance(config_dict, NetConfig):
         return config_dict
     config_keys = config_dict.keys()
-    if "hidden_state_size" in config_keys:
+    if "channel_size" in config_keys and "hidden_state_size" in config_keys:
+        config_cls = CnnLstmNetConfig
+    elif "hidden_state_size" in config_keys:
         config_cls = LstmNetConfig
     elif "hidden_size" in config_keys:
         if "num_blocks" in config_keys:
@@ -334,12 +337,23 @@ def get_default_encoder_config(
     if isinstance(observation_space, (spaces.Dict, spaces.Tuple)):
         config = MultiInputNetConfig(output_activation=default_oa)
     elif is_image_space(observation_space):
-        config = CnnNetConfig(
-            channel_size=[32, 32],
-            kernel_size=[3, 3],
-            stride_size=[1, 1],
-            output_activation=default_oa,
-        )
+        if recurrent:
+            config = CnnLstmNetConfig(
+                channel_size=[32, 32],
+                kernel_size=[3, 3],
+                stride_size=[1, 1],
+                hidden_state_size=128,
+                num_layers=2,
+                activation=default_oa,
+                output_activation=default_oa,
+            )
+        else:
+            config = CnnNetConfig(
+                channel_size=[32, 32],
+                kernel_size=[3, 3],
+                stride_size=[1, 1],
+                output_activation=default_oa,
+            )
     elif simba:
         config = SimBaNetConfig(
             hidden_size=128,

@@ -257,7 +257,7 @@ def test_is_image_space():
 
 
 class TestIsChannelsLast:
-    @pytest.mark.parametrize("num_channels", [1, 3, 32])
+    @pytest.mark.parametrize("num_channels", [1, 3, 7, 32])
     def test_image_hwc(self, num_channels):
         assert is_channels_last(
             spaces.Box(0, 255, shape=(84, 84, num_channels), dtype=np.uint8)

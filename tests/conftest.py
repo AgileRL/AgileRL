@@ -71,10 +71,12 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 # Gloo resolves this machine's hostname for every process group unless pinned
-# to an interface, and that lookup takes tens of seconds on macOS CI runners.
-# Spawned gloo ranks inherit the variable; they only talk over loopback.
+# to an interface. Ubuntu maps that name to 127.0.1.1, and the TCP pair then
+# drops. Spawned gloo ranks inherit the variable; they only talk over loopback.
 if sys.platform == "darwin":
     os.environ.setdefault("GLOO_SOCKET_IFNAME", "lo0")
+elif sys.platform == "linux":
+    os.environ.setdefault("GLOO_SOCKET_IFNAME", "lo")
 
 from tests.gpu_host_env import apply as apply_gpu_host_env  # noqa: E402
 

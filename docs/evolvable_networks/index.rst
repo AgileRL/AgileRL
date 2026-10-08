@@ -29,6 +29,10 @@ Examples of the basic modules included in AgileRL are:
 
 - :class:`~agilerl.modules.cnn.EvolvableCNN`: Convolutional neural network (CNN) that maps image observations to a desired number of outputs, including mutation methods that allow for the random addition or removal of convolutional layers and neurons, as well as changing the kernel sizes.
 
+- :class:`~agilerl.modules.cnn_lstm.EvolvableCnnLstm`: CNN feature extractor followed by an LSTM for partially observable image tasks. Selected when ``recurrent=True`` on algorithms such as PPO and the observation space is a 3D image ``Box``. Declare ``arch: cnn_lstm`` in manifests. Encoder architecture mutation is disabled on the composite stack.
+
+- :class:`~agilerl.modules.lstm.EvolvableLSTM`: Recurrent encoder for vector observations when ``recurrent=True``.
+
 - :class:`~agilerl.modules.multi_input.EvolvableMultiInput`: Network that maps dictionary or tuple observations to a desired number of outputs. This module includes nested ``EvolvableModule``'s to process each element of the dictionary or tuple observation separately into a latent space, which are then concatenated and processed by a final dense layer to form a number of outputs. Includes the mutation methods of all nested ``EvolvableModule``'s.
 
 Below is an example of the simplest evolvable module included in AgileRL, the ``EvolvableMLP``.
@@ -65,7 +69,7 @@ This abstraction allows us to define common networks used in RL algorithms very 
 we just create a head to the the network that processes the encoded observations into an appropriate number of outputs (for e.g. policies or critics). Off-the-shelf ``EvolvableNetwork``'s
 in AgileRL natively support the following observation spaces:
 
-  - :class:`~gymnasium.spaces.Box`: Use an ``EvolvableMLP``, ``EvolvableCNN``, or ``EvolvableLSTM`` as the encoder, depending on the dimensionality of the observation space.
+  - :class:`~gymnasium.spaces.Box`: Use an ``EvolvableMLP``, ``EvolvableCNN``, ``EvolvableLSTM`` (1D vector, ``recurrent=True``), or ``EvolvableCnnLstm`` (3D image, ``recurrent=True``) as the encoder, depending on dimensionality and whether the task is partially observable.
   - :class:`~gymnasium.spaces.Dict` / :class:`~gymnasium.spaces.Tuple`: Use an ``EvolvableMultiInput`` as the encoder.
   - :class:`~gymnasium.spaces.MultiBinary` / :class:`~gymnasium.spaces.MultiDiscrete`: Use an ``EvolvableMLP`` as the encoder.
 
@@ -163,6 +167,40 @@ If your environment has a 3D ``Box`` observation space, by default the ``Evolvab
           latent_dim=32, # Dimension of the latent space representation
           min_latent_dim=8, # Minimum dimension of the latent space representation
           max_latent_dim=128, # Maximum dimension of the latent space representation
+      )
+
+If your environment has a 3D ``Box`` image observation space and the algorithm uses ``recurrent=True`` (for example Recurrent PPO on a POMDP), the encoder is :class:`~agilerl.modules.cnn_lstm.EvolvableCnnLstm`. Set ``arch: cnn_lstm`` in the manifest or omit ``arch`` and let the trainer infer it from the observation space.
+
+.. collapse:: Example CNN→LSTM Network Configuration
+
+  .. code-block:: python
+
+      from gymnasium.spaces import Box, Discrete
+
+      from agilerl.networks.actors import StochasticActor
+
+      encoder_config = {
+          "channel_size": [32, 32],
+          "kernel_size": [3, 3],
+          "stride_size": [1, 1],
+          "hidden_state_size": 128,
+          "num_layers": 2,
+      }
+
+      head_config = {
+          "hidden_size": [64],
+      }
+
+      observation_space = Box(low=0, high=255, shape=(3, 84, 84), dtype="uint8")
+      action_space = Discrete(2)
+
+      network = StochasticActor(
+          observation_space,
+          action_space,
+          encoder_config=encoder_config,
+          head_config=head_config,
+          recurrent=True,
+          latent_dim=64,
       )
 
 If your environment has a dictionary or tuple observation space, by default the ``EvolvableNetwork`` will use an ``EvolvableMultiInput`` as the encoder.

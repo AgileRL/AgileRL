@@ -159,7 +159,10 @@ For standard RL algorithms, this section is validated against :class:`~agilerl.m
 .. note::
 
   Make sure the fields you set under ``encoder_config`` match the initialisation arguments of the
-  encoder used for that observation space. See :ref:`evolvable_networks` for more detail.
+  encoder used for that observation space. See :ref:`evolvable_networks` for more detail. For manifests,
+  set ``encoder_config.arch`` (or top-level ``network.arch``) to one of ``mlp``, ``cnn``, ``cnn_lstm``,
+  ``lstm``, ``simba``, or ``multiinput``, or omit ``arch`` and let the trainer infer it from the
+  environment and algorithm flags such as ``recurrent``.
 
 **LLM Fine-tuning:**
 

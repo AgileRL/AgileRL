@@ -70,6 +70,7 @@ from agilerl.arena.models.model_info import (
     ModelStatus,
 )
 from agilerl.arena.models.networks import (
+    CnnLstmSpec,
     CnnSpec,
     ContinuousQNetworkSpec,
     CosineLRScheduleConfig,
@@ -126,6 +127,7 @@ __all__ = [
     "CISPOSpec",
     "CQNSpec",
     "CheckpointExportSpec",
+    "CnnLstmSpec",
     "CnnSpec",
     "ContinuousQNetworkSpec",
     "CosineLRScheduleConfig",

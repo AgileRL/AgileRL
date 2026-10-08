@@ -10,6 +10,7 @@ import pytest
 
 from agilerl.arena.memory import formulas
 from agilerl.arena.memory.specs import GiB, MiB, ModelArch, WeightVariant
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 
 ASSETS = Path(__file__).parent / "assets"
 
@@ -116,6 +117,34 @@ class TestParamCounts:
 
 
 class TestModelArchFromHfConfig:
+    def test_linear_attention_layers_are_recurrent_not_attention(self):
+        # Arrange: Qwen3.8-27B lists 48 linear_attention (gated delta net) and
+        # 16 full_attention layers; only the full ones hold a KV cache.
+        config = SUPPORTED_MODEL_INFO["Qwen/Qwen3.8-27B"].config
+
+        # Act
+        arch = ModelArch.from_hf_config(config)
+
+        # Assert
+        assert arch.attention_layers == 16
+        assert arch.n_mamba_layers == 48
+
+    def test_transformers_layer_type_names_read_like_the_hub_ones(self):
+        # ``mamba`` / ``attention`` and ``linear_attention`` / ``full_attention``
+        # are the same layer kinds.
+        hub = {**NEMOTRON_H_MOE, "layers_block_type": ["mamba", "moe", "attention"]}
+        renamed = {
+            **NEMOTRON_H_MOE,
+            "layers_block_type": ["linear_attention", "moe", "full_attention"],
+        }
+
+        hub_arch = ModelArch.from_hf_config(hub)
+        renamed_arch = ModelArch.from_hf_config(renamed)
+
+        assert renamed_arch.layer_kinds == ("mamba", "moe", "attention")
+        assert renamed_arch.layer_kinds == hub_arch.layer_kinds
+        assert renamed_arch.attention_layers == hub_arch.attention_layers == 1
+
     def test_tiny_llm_asset(self):
         config = json.loads((ASSETS / "tiny_llm" / "config.json").read_text())
         arch = ModelArch.from_hf_config(config)
@@ -570,13 +599,89 @@ QWEN3_4B = {
 }
 
 
+# Nemotron 3.5 Lightning 30B-A3B geometry, first seven layers: MoE layers
+# alternate with Mamba and attention and never sit side by side.
+NEMOTRON_H_MOE = {
+    "model_type": "nemotron_h",
+    "num_hidden_layers": 7,
+    "hidden_size": 2688,
+    "intermediate_size": 1856,
+    "num_attention_heads": 32,
+    "num_key_value_heads": 2,
+    "head_dim": 128,
+    "vocab_size": 131072,
+    "n_routed_experts": 128,
+    "num_experts_per_tok": 6,
+    "moe_intermediate_size": 1856,
+    "moe_shared_expert_intermediate_size": 3712,
+    "n_shared_experts": 1,
+    "mlp_hidden_act": "relu2",
+    "ssm_state_size": 128,
+    "conv_kernel": 4,
+    "n_groups": 8,
+    "mamba_num_heads": 64,
+    "mamba_head_dim": 64,
+    "chunk_size": 128,
+    "tie_word_embeddings": False,
+    "layers_block_type": [
+        "mamba",
+        "moe",
+        "mamba",
+        "moe",
+        "mamba",
+        "attention",
+        "moe",
+    ],
+}
+
+
 class TestRoutedExpertBytes:
+    def test_chunked_routed_backward_keeps_inputs_outputs_and_ungated_activation(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(NEMOTRON_H_MOE)
+        routed = 16384 * 6
+
+        # Act
+        backward = formulas.routed_expert_bytes(arch, 1, 16384, 2.0, backward=True)
+        forward = formulas.routed_expert_bytes(arch, 1, 16384, 2.0)
+
+        # Assert: the gathered input and expert output (hidden each), the up
+        # projection and its relu2 output (inter each); a no-grad pass keeps
+        # only the gathered input.
+        assert arch.chunked_routed_experts
+        assert not arch.gated_mlp
+        assert backward == routed * (2 * 2688 + 2 * 1856) * 2
+        assert forward == routed * 2688 * 2
+
+    def test_gated_chunked_routed_backward_keeps_gate_and_up(self):
+        qwen3_moe = {
+            "model_type": "qwen3_moe",
+            "num_hidden_layers": 4,
+            "hidden_size": 64,
+            "intermediate_size": 128,
+            "moe_intermediate_size": 32,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "head_dim": 16,
+            "vocab_size": 128,
+            "num_experts": 8,
+            "num_experts_per_tok": 2,
+        }
+        arch = ModelArch.from_hf_config(qwen3_moe)
+
+        backward = formulas.routed_expert_bytes(arch, 1, 1024, 2.0, backward=True)
+
+        assert arch.chunked_routed_experts
+        assert backward == 1024 * 2 * (2 * 64 + 3 * 32) * 2
+
     def test_matches_the_grouped_gemm_backward_workspace(self):
         arch = ModelArch.from_hf_config(GRANITE_MOE)
 
         backward = formulas.routed_expert_bytes(arch, 1, 16384, 2.0, backward=True)
 
-        # gather + expert output (hidden each), gate/up, activation, its grad.
+        # Granite's sorted experts: gather + expert output (hidden each),
+        # gate/up, activation, its grad.
+        assert not arch.chunked_routed_experts
         assert backward == 16384 * 8 * (2 * 1536 + 4 * 512) * 2
         assert backward == 1.25 * GiB
 
@@ -857,14 +962,22 @@ class TestAllocatorReserveBytes:
         # Floor at zero.
         assert formulas.allocator_reserve_bytes(-1 * MiB) == 0
 
-    def test_multi_rank_trainers_reserve_more_and_fsdp_most(self):
-        one_rank = formulas.allocator_reserve_bytes(100 * MiB)
+    def test_fsdp_reserves_more_than_flat_data_parallel(self):
         data_parallel = formulas.allocator_reserve_bytes(100 * MiB, n_ranks=4)
         fsdp = formulas.allocator_reserve_bytes(100 * MiB, n_ranks=4, sharded=True)
 
-        assert one_rank < data_parallel < fsdp
-        assert data_parallel == pytest.approx(9 * MiB)
-        assert fsdp == pytest.approx(14 * MiB)
+        assert data_parallel == pytest.approx(5.4 * MiB)
+        assert fsdp == pytest.approx(6.9 * MiB)
+        assert data_parallel < fsdp
+
+
+class TestRecommendationFits:
+    def test_keeps_the_underprediction_share_of_usable_memory_free(self):
+        usable = 10_000
+        limit = int(usable * (1 - formulas.MAX_UNDERPREDICTION))
+
+        assert formulas.recommendation_fits(limit, usable)
+        assert not formulas.recommendation_fits(limit + 1, usable)
 
 
 class TestMambaStateBytes:
@@ -1029,9 +1142,53 @@ class TestFSDPGatheredParams:
         assert block == mlp
         assert block > formulas.mamba_params_per_layer(arch)
         assert block > formulas.attention_params_per_layer(arch)
-        assert gathered == 2 * block + counts.lm_head
-        window_gap_bf16 = 2 * (block - formulas.mamba_params_per_layer(arch)) * 2
-        assert window_gap_bf16 == pytest.approx(241 * MiB, rel=0.01)
+        # Every MLP layer neighbours a Mamba layer, so a two-unit window
+        # holds one of each.
+        assert (
+            gathered == block + formulas.mamba_params_per_layer(arch) + counts.lm_head
+        )
+
+    def test_moe_window_holds_one_expert_block_and_its_neighbour(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(NEMOTRON_H_MOE)
+        counts = formulas.param_counts(arch)
+        experts, router = formulas.moe_params_per_layer(arch)
+        mamba = formulas.mamba_params_per_layer(arch)
+
+        # Act
+        gathered = formulas.fsdp_gathered_params(
+            counts,
+            arch,
+            n_gpus=4,
+            reshard_after_forward=True,
+            prefetch_units=1,
+            wrap_every_n_blocks=1,
+            cpu_offload=False,
+        )
+
+        # Assert: MoE blocks never sit side by side, so the second unit is a
+        # Mamba block, not a second expert stack.
+        assert arch.layer_kinds[:3] == ("mamba", "moe", "mamba")
+        assert gathered == experts + router + mamba + counts.lm_head
+
+    def test_wrap_groups_adjacent_layers_into_one_unit(self):
+        arch = ModelArch.from_hf_config(NEMOTRON_H_MOE)
+        counts = formulas.param_counts(arch)
+        experts, router = formulas.moe_params_per_layer(arch)
+        mamba = formulas.mamba_params_per_layer(arch)
+
+        gathered = formulas.fsdp_gathered_params(
+            counts,
+            arch,
+            n_gpus=4,
+            reshard_after_forward=True,
+            prefetch_units=1,
+            wrap_every_n_blocks=2,
+            cpu_offload=False,
+        )
+
+        # Units: [mamba, moe] [mamba, moe] [mamba, attention] [moe].
+        assert gathered == 2 * (mamba + experts + router) + counts.lm_head
 
 
 class TestLoraTensorPlacement:
@@ -1104,29 +1261,30 @@ class TestLoraTensorPlacement:
 
 
 class TestSplitMoeLoraRecomputeBytes:
-    def test_matches_the_fp32_and_bf16_adapter_snapshots(self):
+    def test_keeps_only_the_rank_wide_down_projection_per_matrix(self):
+        # Arrange
         arch = ModelArch.from_hf_config(GRANITE_MOE)
+        routed = 16384 * 8
 
-        fp32 = formulas.split_moe_lora_recompute_bytes(
-            arch, 1, 16384, 2, "contracted", 2, 4
-        )
-        bf16 = formulas.split_moe_lora_recompute_bytes(
-            arch, 1, 16384, 2, "contracted", 2, 2
+        # Act
+        split = formulas.split_moe_lora_recompute_bytes(
+            arch, 1, 16384, 2, "contracted", 2, 16
         )
 
-        # fp32 adapters add a cast copy of the expert input and output.
-        assert fp32 == 3.0 * GiB
-        assert bf16 == 1.0 * GiB
+        # Assert: the delta runs at the activation dtype and adds into the
+        # expert output in place, so each targeted matrix keeps x @ A only.
+        assert split == routed * 16 * 2 * 2
+        assert split == 8 * MiB
 
     def test_scales_with_microbatch_and_seq_on_contracted_path(self):
         one = formulas.split_moe_lora_recompute_bytes(
-            MOE_TINY, 1, 1024, 2, "contracted", 2, 2
+            MOE_TINY, 1, 1024, 2, "contracted", 2, 16
         )
         four = formulas.split_moe_lora_recompute_bytes(
-            MOE_TINY, 4, 1024, 2, "contracted", 2, 2
+            MOE_TINY, 4, 1024, 2, "contracted", 2, 16
         )
         longer = formulas.split_moe_lora_recompute_bytes(
-            MOE_TINY, 1, 2048, 2, "contracted", 2, 2
+            MOE_TINY, 1, 2048, 2, "contracted", 2, 16
         )
 
         assert one > 0
@@ -1136,19 +1294,19 @@ class TestSplitMoeLoraRecomputeBytes:
     def test_zero_when_materialized_or_not_moe(self):
         assert (
             formulas.split_moe_lora_recompute_bytes(
-                MOE_TINY, 1, 1024, 2, "materialized", 2, 4
+                MOE_TINY, 1, 1024, 2, "materialized", 2, 16
             )
             == 0
         )
         assert (
             formulas.split_moe_lora_recompute_bytes(
-                QWEN_05B, 1, 1024, 2, "contracted", 2, 4
+                QWEN_05B, 1, 1024, 2, "contracted", 2, 16
             )
             == 0
         )
         assert (
             formulas.split_moe_lora_recompute_bytes(
-                MOE_TINY, 1, 1024, 0, "contracted", 2, 4
+                MOE_TINY, 1, 1024, 0, "contracted", 2, 16
             )
             == 0
         )

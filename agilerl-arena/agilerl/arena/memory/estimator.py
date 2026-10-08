@@ -73,6 +73,13 @@ class PhaseBreakdown(BaseModel):
         return self.total_bytes <= self.device_usable_bytes
 
     @property
+    def fits_with_buffer(self) -> bool:
+        """Training fit leaves the underprediction share free; generation does not."""
+        if self.phase != "training":
+            return self.fits
+        return formulas.recommendation_fits(self.total_bytes, self.device_usable_bytes)
+
+    @property
     def headroom_bytes(self) -> int:
         return self.device_usable_bytes - self.total_bytes
 
@@ -88,6 +95,11 @@ class RunEstimate(BaseModel):
     @property
     def fits(self) -> bool:
         return self.training.fits and self.generation.fits
+
+    @property
+    def fits_with_buffer(self) -> bool:
+        """Both phases fit after the underprediction buffer."""
+        return self.training.fits_with_buffer and self.generation.fits_with_buffer
 
 
 def geometry_gap_warning(counts: formulas.ParamCounts) -> str | None:
@@ -363,7 +375,7 @@ def block_backward_terms(
         settings.lora_packed_target_matrices,
         settings.packed_moe_dispatch,
         act_bytes,
-        adapter_bytes,
+        settings.lora_rank,
     )
 
     def terms(layer: BlockKind | None) -> tuple[int, int, int, int]:

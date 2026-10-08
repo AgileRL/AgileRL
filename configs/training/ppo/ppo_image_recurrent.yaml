@@ -1,0 +1,65 @@
+---
+algorithm:
+    name: PPO
+    batch_size: 64
+    lr: 0.0003
+    learn_step: 4096
+    gamma: 0.99
+    gae_lambda: 0.95
+    action_std_init: 0.6
+    clip_coef: 0.2
+    ent_coef: 0.01
+    vf_coef: 0.5
+    max_grad_norm: 0.5
+    target_kl:
+    update_epochs: 4
+    share_encoders: true
+    recurrent: true
+
+environment:
+    name: DummyImage-v0
+    num_envs: 8
+mutation:
+    probabilities:
+        no_mut: 0.4
+        arch_mut: 0.0
+        new_layer: 0.0
+        params_mut: 0.2
+        act_mut: 0.0
+        rl_hp_mut: 0.2
+    rl_hp_selection:
+        lr:
+            min: 0.0001
+            max: 0.01
+        batch_size:
+            min: 8
+            max: 1024
+        learn_step:
+            min: 256
+            max: 8192
+    mutation_sd: 0.1
+    rand_seed: 42
+
+network:
+    latent_dim: 64
+    encoder_config:
+        channel_size: [32, 32]
+        kernel_size: [3, 3]
+        stride_size: [1, 1]
+        hidden_state_size: 128
+        num_layers: 2
+    head_config:
+        hidden_size:
+            - 64
+        activation: ReLU
+
+selection_strategy:
+    tournament_size: 2
+    elitism: true
+
+training:
+    max_steps: 500_000
+    pop_size: 2
+    evo_steps: 4096
+    eval_steps:
+    eval_loop: 1
