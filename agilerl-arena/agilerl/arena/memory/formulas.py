@@ -13,6 +13,7 @@ from dataclasses import dataclass, replace
 from agilerl.arena.memory.specs import (
     DTYPE_BYTES,
     BlockKind,
+    LayerKind,
     LoraTargetScope,
     MiB,
     ModelArch,
@@ -35,11 +36,18 @@ ADAM_BYTES_PER_PARAM = 8.0
 # Charged on the torch-side subtotal. Training only: generation sits in
 # vLLM's CuMem pool, reserved up front at ``gpu_memory_utilization``.
 ALLOCATOR_RESERVE_FRACTION = 0.07
-# Multi-rank trainers reserve more: gradient all-reduce buffers under flat
-# data parallel; FSDP's all-gather and reduce-scatter streams, whose blocks
-# the allocator pools per stream.
-ALLOCATOR_RESERVE_FRACTION_DATA_PARALLEL = 0.09
-ALLOCATOR_RESERVE_FRACTION_FSDP = 0.14
+# Flat data parallel keeps an all-reduce buffer. FSDP pools all-gather and
+# reduce-scatter blocks per stream, so it reserves a larger share.
+ALLOCATOR_RESERVE_FRACTION_DATA_PARALLEL = 0.054
+ALLOCATOR_RESERVE_FRACTION_FSDP = 0.069
+# Largest share by which a measured peak exceeded the estimate on the 4-GPU
+# grids. A GPU recommendation keeps this share of usable memory free.
+MAX_UNDERPREDICTION = 0.089
+
+
+def recommendation_fits(predicted_bytes: int, usable_bytes: int) -> bool:
+    """Whether a predicted peak still fits after the underprediction buffer."""
+    return predicted_bytes <= int(usable_bytes * (1 - MAX_UNDERPREDICTION))
 
 
 def allocator_reserve_bytes(
@@ -467,12 +475,23 @@ def routed_expert_bytes(
     output (``hidden`` each), gate/up (``2 x inter``) and the activation
     (``inter``). A checkpointed backward adds the activation's gradient.
     Nothing outlives the block.
+
+    ``arch.chunked_routed_experts`` runs experts in row chunks and writes
+    each chunk into the layer output. Backward keeps the gathered input, the
+    expert output, the up projection and the activation for every chunk; a
+    no-grad pass keeps only the gathered input.
     """
     if not arch.is_moe:
         return 0
     routed = rows * seq_len * (arch.n_experts_per_tok or 1)
+    h = arch.hidden_size
     inter = arch.expert_intermediate_size or arch.intermediate_size
-    width = 2 * arch.hidden_size + (4 if backward else 3) * inter
+    if not arch.chunked_routed_experts:
+        width = 2 * h + (4 if backward else 3) * inter
+    elif backward:
+        width = 2 * h + (3 if arch.gated_mlp else 2) * inter
+    else:
+        width = h
     return int(routed * width * act_bytes)
 
 
@@ -659,25 +678,19 @@ def split_moe_lora_recompute_bytes(
     packed_matrices: int,
     dispatch: PackedMoeDispatch,
     act_bytes: float,
-    adapter_bytes: float,
+    lora_rank: int,
 ) -> int:
-    """Split packed-expert LoRA deltas live during a checkpointed backward.
+    """Split packed-expert LoRA tensors live during a checkpointed backward.
 
-    Per routed token, the rank-``r`` deltas on the expert input and output
-    (``hidden`` and ``inter`` twice each) at the adapter dtype. Adapters
-    wider than the activations add a cast copy of both inputs. Zero when
-    dispatch is materialized (PEFT builds ``W_eff``) or nothing targets
-    packed experts.
+    The delta runs at the activation dtype and is added into the expert
+    output in place, so each targeted matrix keeps only ``x @ A``: ``r``
+    elements per routed token. Zero when dispatch is materialized (PEFT
+    builds ``W_eff``) or nothing targets packed experts.
     """
     if dispatch != "contracted" or not packed_matrices or not arch.is_moe:
         return 0
     routed = grad_rows * seq_len * (arch.n_experts_per_tok or 1)
-    hidden = arch.hidden_size
-    inter = arch.expert_intermediate_size or arch.intermediate_size
-    width = 2 * (hidden + inter)
-    if adapter_bytes > act_bytes:
-        width += hidden + inter
-    return int(routed * width * adapter_bytes)
+    return int(routed * lora_rank * packed_matrices * act_bytes)
 
 
 def lora_dropout_bytes(
@@ -742,6 +755,40 @@ def largest_block_params(counts: ParamCounts, arch: ModelArch) -> int:
     return int(body / max(arch.n_layers, 1))
 
 
+def layer_params(arch: ModelArch, kind: LayerKind) -> int:
+    """Parameters of one layer of a block-exclusive stack."""
+    if kind == "attention":
+        return attention_params_per_layer(arch)
+    if kind == "mamba":
+        return mamba_params_per_layer(arch)
+    if kind == "mlp":
+        return mlp_params_per_layer(arch)
+    experts, router = moe_params_per_layer(arch)
+    return experts + router
+
+
+def prefetch_window_params(
+    counts: ParamCounts, arch: ModelArch, live_units: int, wrap_every_n_blocks: int
+) -> int:
+    """Decoder parameters gathered at once: ``live_units`` neighbouring FSDP units.
+
+    With the layer order known, the window is the widest run of neighbouring
+    units, so a large block next to small ones is counted once. Otherwise
+    every unit is the widest block.
+    """
+    if not arch.layer_kinds:
+        return live_units * wrap_every_n_blocks * largest_block_params(counts, arch)
+    sizes = [layer_params(arch, kind) for kind in arch.layer_kinds]
+    units = [
+        sum(sizes[start : start + wrap_every_n_blocks])
+        for start in range(0, len(sizes), wrap_every_n_blocks)
+    ]
+    return max(
+        sum(units[start : start + live_units])
+        for start in range(len(units) - live_units + 1)
+    )
+
+
 def fsdp_gathered_params(
     counts: ParamCounts,
     arch: ModelArch,
@@ -766,10 +813,9 @@ def fsdp_gathered_params(
         return 0
     if not reshard_after_forward:
         return sharded
-    block = largest_block_params(counts, arch)
     n_units = max(1, -(-arch.n_layers // wrap_every_n_blocks))
     live = min(n_units, 1 + prefetch_units)
-    window = live * wrap_every_n_blocks * block
+    window = prefetch_window_params(counts, arch, live, wrap_every_n_blocks)
     head = 0 if arch.tied_embeddings else counts.lm_head
     extra_embed = max(counts.embedding - token_embedding_params(arch), 0)
     leftover = extra_embed + counts.multimodal_towers + max(counts.unattributed, 0)
