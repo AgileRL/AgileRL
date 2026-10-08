@@ -42,6 +42,7 @@ from agilerl.models.hpo import (
 )
 from agilerl.models.manifest import TrainingManifest
 from agilerl.models.networks import (
+    CnnLstmSpec,
     CnnSpec,
     ContinuousQNetworkSpec,
     DeterministicActorSpec,
@@ -93,6 +94,7 @@ __all__ = [
     "AlgoSpec",
     "CISPOSpec",
     "CQNSpec",
+    "CnnLstmSpec",
     "CnnSpec",
     "ContinuousQNetworkSpec",
     "DDPGSpec",

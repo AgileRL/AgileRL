@@ -270,8 +270,9 @@ class raise_on_any_rank(ContextDecorator):
             return False
         if not is_distributed() or dist.get_world_size() == 1:
             return False
-        failed = torch.tensor([int(exc is not None)], dtype=torch.int64)
-        failed = failed.to(resolve_device())
+        failed = torch.tensor(
+            [int(exc is not None)], dtype=torch.int64, device=_collective_device()
+        )
         dist.all_reduce(failed, op=dist.ReduceOp.MAX)
         if exc is None and failed.item():
             msg = "Peer rank failed in shard runtime collective"
@@ -315,7 +316,7 @@ def all_reduce_grads(
     ranks_with_grad = torch.tensor(
         [param.grad is not None for param in params],
         dtype=torch.long,
-        device=resolve_device(),
+        device=_collective_device(group),
     )
     dist.all_reduce(ranks_with_grad, op=dist.ReduceOp.SUM, group=group)
     group_size = dist.get_world_size(group)
@@ -359,6 +360,13 @@ def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def _collective_device(group: dist.ProcessGroup | None = None) -> str:
+    """CPU for a Gloo group; the training device otherwise."""
+    if dist.is_initialized() and dist.get_backend(group) == "gloo":
+        return "cpu"
+    return resolve_device()
 
 
 def resolve_device(requested: str | torch.device | None = None) -> str:

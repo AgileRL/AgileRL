@@ -10,6 +10,7 @@ import pytest
 from gymnasium import spaces
 
 from agilerl.models.networks import (
+    CnnLstmSpec,
     CnnSpec,
     LstmSpec,
     MlpSpec,
@@ -21,6 +22,7 @@ from agilerl.models.networks import (
     normalize_manifest_network,
 )
 from agilerl.modules.configs import (
+    CnnLstmNetConfig,
     CnnNetConfig,
     LstmNetConfig,
     MlpNetConfig,
@@ -46,12 +48,14 @@ TUPLE = spaces.Tuple((spaces.Box(-1.0, 1.0, shape=(2,)), spaces.Discrete(3)))
         (DICT, False, False, "multiinput"),
         (TUPLE, False, False, "multiinput"),
         (IMAGE, False, False, "cnn"),
+        (IMAGE, True, False, "cnn_lstm"),
         (VECTOR, False, False, "mlp"),
         (VECTOR, True, False, "lstm"),
         (VECTOR, False, True, "simba"),
         (VECTOR, True, True, "simba"),  # simba wins over recurrent
         (DICT, True, True, "multiinput"),  # space wins over flags
-        (IMAGE, True, True, "cnn"),
+        (IMAGE, True, True, "cnn_lstm"),  # simba does not apply to image spaces
+        (IMAGE, False, True, "cnn"),
     ],
 )
 def test_infer_encoder_arch(space, recurrent, simba, expected):
@@ -61,6 +65,7 @@ def test_infer_encoder_arch(space, recurrent, simba, expected):
 _CONFIG_TO_ARCH = {
     MlpNetConfig: "mlp",
     CnnNetConfig: "cnn",
+    CnnLstmNetConfig: "cnn_lstm",
     LstmNetConfig: "lstm",
     SimBaNetConfig: "simba",
     MultiInputNetConfig: "multiinput",
@@ -72,6 +77,9 @@ _CONFIG_TO_ARCH = {
     [
         (DICT, False, False),
         (IMAGE, False, False),
+        (IMAGE, True, False),
+        (IMAGE, True, True),
+        (IMAGE, False, True),
         (VECTOR, False, False),
         (VECTOR, True, False),
         (VECTOR, False, True),
@@ -97,6 +105,7 @@ def test_network_arch_is_resolvable_non_dict(value):
     [
         ("mlp", MlpSpec),
         ("cnn", CnnSpec),
+        ("cnn_lstm", CnnLstmSpec),
         ("lstm", LstmSpec),
         ("simba", SimbaSpec),
         ("multiinput", MultiInputSpec),

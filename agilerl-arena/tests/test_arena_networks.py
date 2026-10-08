@@ -9,6 +9,7 @@ import pytest
 
 from agilerl.arena.models.algorithms.rainbow_dqn import RainbowDQNSpec
 from agilerl.arena.models.networks import (
+    CnnLstmSpec,
     CnnSpec,
     CosineLRScheduleConfig,
     LoraConfigDict,
@@ -131,6 +132,144 @@ class TestCnnSpec:
             CnnSpec(channel_size=[16, 32], kernel_size=[3], stride_size=[1, 1])
 
 
+class TestCnnLstmSpec:
+    def test_valid_construction(self) -> None:
+        spec = CnnLstmSpec(
+            channel_size=[16],
+            kernel_size=[3],
+            stride_size=[1],
+            hidden_state_size=64,
+        )
+        assert spec.hidden_state_size == 64
+        assert spec.arch == "cnn_lstm"
+
+    def test_channel_size_outside_layer_range(self) -> None:
+        with pytest.raises(ValueError, match="hidden_layers must be between"):
+            CnnLstmSpec(
+                channel_size=[16] * 8,
+                kernel_size=[3] * 8,
+                stride_size=[1] * 8,
+                hidden_state_size=64,
+                max_hidden_layers=3,
+            )
+
+    def test_channel_below_min(self) -> None:
+        with pytest.raises(
+            ValueError,
+            match="channel_size must be greater than or equal to min_channel_size",
+        ):
+            CnnLstmSpec(
+                channel_size=[2],
+                kernel_size=[3],
+                stride_size=[1],
+                hidden_state_size=64,
+                min_channel_size=8,
+            )
+
+    def test_channel_above_max(self) -> None:
+        with pytest.raises(
+            ValueError,
+            match="channel_size must be less than or equal to max_channel_size",
+        ):
+            CnnLstmSpec(
+                channel_size=[512],
+                kernel_size=[3],
+                stride_size=[1],
+                hidden_state_size=64,
+                max_channel_size=256,
+            )
+
+    def test_hidden_state_size_exceeds_max(self) -> None:
+        with pytest.raises(ValueError, match="must be less than or equal to"):
+            CnnLstmSpec(
+                channel_size=[16],
+                kernel_size=[3],
+                stride_size=[1],
+                hidden_state_size=512,
+                max_hidden_state_size=256,
+            )
+
+    def test_num_layers_exceeds_max(self) -> None:
+        with pytest.raises(ValueError, match="must be less than or equal to"):
+            CnnLstmSpec(
+                channel_size=[16],
+                kernel_size=[3],
+                stride_size=[1],
+                hidden_state_size=64,
+                num_layers=10,
+                max_layers=6,
+            )
+
+    def test_mismatched_sizes(self) -> None:
+        with pytest.raises(ValueError, match="must have the same length"):
+            CnnLstmSpec(
+                channel_size=[16, 32],
+                kernel_size=[3],
+                stride_size=[1, 1],
+                hidden_state_size=64,
+            )
+
+    def test_mutation_bound_defaults_match_cnn_and_lstm_specs(self) -> None:
+        cnn = CnnSpec(channel_size=[16], kernel_size=[3], stride_size=[1])
+        lstm = LstmSpec(hidden_state_size=64)
+        composite = CnnLstmSpec(
+            channel_size=[16],
+            kernel_size=[3],
+            stride_size=[1],
+            hidden_state_size=64,
+        )
+        for name in (
+            "min_hidden_layers",
+            "max_hidden_layers",
+            "min_channel_size",
+            "max_channel_size",
+            "layer_norm",
+            "init_layers",
+            "activation",
+        ):
+            assert getattr(composite, name) == getattr(cnn, name), name
+        for name in (
+            "num_layers",
+            "min_hidden_state_size",
+            "max_hidden_state_size",
+            "min_layers",
+            "max_layers",
+            "dropout",
+        ):
+            assert getattr(composite, name) == getattr(lstm, name), name
+        assert composite.output_activation is None
+
+    def test_overlapping_field_descriptions_are_shared(self) -> None:
+        for name in (
+            "channel_size",
+            "kernel_size",
+            "stride_size",
+            "min_hidden_layers",
+            "max_hidden_layers",
+            "min_channel_size",
+            "max_channel_size",
+            "layer_norm",
+            "init_layers",
+            "activation",
+        ):
+            assert (
+                CnnLstmSpec.model_fields[name].description
+                is CnnSpec.model_fields[name].description
+            ), name
+        for name in (
+            "num_layers",
+            "min_hidden_state_size",
+            "max_hidden_state_size",
+            "min_layers",
+            "max_layers",
+            "dropout",
+        ):
+            assert (
+                CnnLstmSpec.model_fields[name].description
+                is LstmSpec.model_fields[name].description
+            ), name
+
+
 class TestMultiInputSpec:
     def test_valid_construction(self) -> None:
         spec = MultiInputSpec()
@@ -163,6 +302,22 @@ class TestNetworkSpec:
             head_config=MlpSpec(hidden_size=[64]),
         )
         assert spec.simba is True
+
+    def test_cnn_lstm_encoder_round_trips_arch(self) -> None:
+        from agilerl.arena.models.networks import dump_network_section
+
+        spec = QNetworkSpec(
+            encoder_config=CnnLstmSpec(
+                channel_size=[32],
+                kernel_size=[3],
+                stride_size=[1],
+                hidden_state_size=128,
+            ),
+            head_config=MlpSpec(hidden_size=[64]),
+        )
+        dumped = dump_network_section(spec, exclude_unset=True)
+        assert dumped["encoder_config"]["arch"] == "cnn_lstm"
+        assert dumped["encoder_config"]["hidden_state_size"] == 128
 
 
 class TestLoraConfigDict:
@@ -221,6 +376,12 @@ class TestEncoderArchHelpers:
 
         assert encoder_spec_for_arch("mlp") is MlpSpec
 
+    def test_cnn_lstm_arch_returns_spec(self) -> None:
+        from agilerl.arena.models.networks import ENCODER_ARCHS, encoder_spec_for_arch
+
+        assert "cnn_lstm" in ENCODER_ARCHS
+        assert encoder_spec_for_arch("cnn_lstm") is CnnLstmSpec
+
     def test_non_dict_network_is_not_resolvable(self) -> None:
         from agilerl.arena.models.networks import (
             network_arch_is_resolvable,
@@ -236,3 +397,20 @@ class TestEncoderArchHelpers:
 
         normalized = normalize_manifest_network({"arch": "mlp", "latent_dim": 32})
         assert normalized["encoder_config"] == {"arch": "mlp"}
+
+    def test_top_level_cnn_lstm_arch(self) -> None:
+        from agilerl.arena.models.networks import normalize_manifest_network
+
+        normalized = normalize_manifest_network(
+            {
+                "arch": "cnn_lstm",
+                "latent_dim": 64,
+                "encoder_config": {
+                    "channel_size": [32],
+                    "kernel_size": [3],
+                    "stride_size": [1],
+                    "hidden_state_size": 128,
+                },
+            },
+        )
+        assert normalized["encoder_config"]["arch"] == "cnn_lstm"

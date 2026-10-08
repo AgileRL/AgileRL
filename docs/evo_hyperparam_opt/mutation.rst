@@ -325,3 +325,7 @@ get very small without ever reaching zero.
     RNN architectures fall outside what ReGraMa can reset. The hidden units of a recurrent core
     have fused gate non-linearities and no single weight matrix whose rows are one unit's incoming weights,
     so only the layers from the output projection onward are reset.
+
+    :class:`~agilerl.modules.cnn_lstm.EvolvableCnnLstm` (image observations with ``recurrent=True``)
+    disables architecture mutation on the encoder until composite CNN and LSTM mutations exist.
+    Use ``arch: cnn_lstm`` in the manifest ``encoder_config`` for YAML-driven image POMDP runs.

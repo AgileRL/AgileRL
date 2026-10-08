@@ -700,7 +700,7 @@ class TestDistributedTerms:
 
         assert component(bar, "activations").detail["split_moe_lora"] == (
             formulas.split_moe_lora_recompute_bytes(
-                MOE_TINY, 1, 1024, 2, "contracted", 2, 4
+                MOE_TINY, 1, 1024, 2, "contracted", 2, settings.lora_rank
             )
         )
 
@@ -1055,7 +1055,7 @@ class TestFusedActorCriticPass:
 
         assert component(bar, "activations").detail["split_moe_lora"] == (
             formulas.split_moe_lora_recompute_bytes(
-                MOE_TINY, 2, 1024, 2, "contracted", 2, 4
+                MOE_TINY, 2, 1024, 2, "contracted", 2, settings.lora_rank
             )
         )
 

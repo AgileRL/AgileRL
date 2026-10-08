@@ -1,9 +1,9 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Field descriptions shared by more than one algorithm.
+"""Field descriptions shared by more than one algorithm or network spec.
 
-Defined once so the wording cannot drift between algorithms that expose
+Defined once so the wording cannot drift between specs that expose
 the same field.
 """
 
@@ -140,3 +140,19 @@ GROUP_SIZE = (
     "Completions sampled per prompt. The group is what the advantage is "
     "computed relative to, so this is the main GRPO setting to tune."
 )
+CHANNEL_SIZE = "Output channels of each convolutional layer, in order."
+KERNEL_SIZE = "Kernel size of each convolutional layer. Same length as channel_size."
+STRIDE_SIZE = "Stride of each convolutional layer. Same length as channel_size."
+MIN_CONV_LAYERS = "Fewest convolutional layers architecture mutation may shrink to."
+MAX_CONV_LAYERS = "Most convolutional layers architecture mutation may grow to."
+MIN_CHANNEL_SIZE = "Fewest channels a layer may be mutated to."
+MAX_CHANNEL_SIZE = "Most channels a layer may be mutated to."
+LAYER_NORM_CONV = "Apply layer normalization after each convolution."
+INIT_LAYERS = "Apply the library's weight initialization scheme."
+ACTIVATION_CONV = "Activation applied after each convolution."
+NUM_LSTM_LAYERS = "Stacked LSTM layers."
+MIN_HIDDEN_STATE_SIZE = "Narrowest the hidden state may be mutated to."
+MAX_HIDDEN_STATE_SIZE = "Widest the hidden state may be mutated to."
+MIN_LSTM_LAYERS = "Fewest LSTM layers architecture mutation may shrink to."
+MAX_LSTM_LAYERS = "Most LSTM layers architecture mutation may grow to."
+DROPOUT_LSTM = "Dropout applied between stacked LSTM layers."

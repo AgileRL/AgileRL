@@ -18,6 +18,24 @@ from pydantic import (
 )
 from typing_extensions import Self
 
+from agilerl.arena.models.descriptions import (
+    ACTIVATION_CONV,
+    CHANNEL_SIZE,
+    DROPOUT_LSTM,
+    INIT_LAYERS,
+    KERNEL_SIZE,
+    LAYER_NORM_CONV,
+    MAX_CHANNEL_SIZE,
+    MAX_CONV_LAYERS,
+    MAX_HIDDEN_STATE_SIZE,
+    MAX_LSTM_LAYERS,
+    MIN_CHANNEL_SIZE,
+    MIN_CONV_LAYERS,
+    MIN_HIDDEN_STATE_SIZE,
+    MIN_LSTM_LAYERS,
+    NUM_LSTM_LAYERS,
+    STRIDE_SIZE,
+)
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 
 T = TypeVar("T", bound=BaseModel)
@@ -79,9 +97,7 @@ class MlpSpec(BaseModel):
     layer_norm: bool = Field(
         default=True, description="Apply layer normalization after each hidden layer."
     )
-    init_layers: bool = Field(
-        default=True, description="Apply the library's weight initialization scheme."
-    )
+    init_layers: bool = Field(default=True, description=INIT_LAYERS)
     output_vanish: bool = Field(
         default=True,
         description="Scale the output layer's initial weights towards zero, so the network starts near-neutral.",
@@ -225,41 +241,31 @@ class CnnSpec(BaseModel):
 
     channel_size: list[int] = Field(
         min_length=1,
-        description="Output channels of each convolutional layer, in order.",
+        description=CHANNEL_SIZE,
     )
     kernel_size: list[int] = Field(
         min_length=1,
-        description="Kernel size of each convolutional layer. Same length as channel_size.",
+        description=KERNEL_SIZE,
     )
     stride_size: list[int] = Field(
         min_length=1,
-        description="Stride of each convolutional layer. Same length as channel_size.",
+        description=STRIDE_SIZE,
     )
     min_hidden_layers: int = Field(
         default=1,
         gt=0,
-        description="Fewest convolutional layers architecture mutation may shrink to.",
+        description=MIN_CONV_LAYERS,
     )
     max_hidden_layers: int = Field(
         default=6,
         gt=1,
-        description="Most convolutional layers architecture mutation may grow to.",
+        description=MAX_CONV_LAYERS,
     )
-    min_channel_size: int = Field(
-        default=8, gt=0, description="Fewest channels a layer may be mutated to."
-    )
-    max_channel_size: int = Field(
-        default=256, gt=1, description="Most channels a layer may be mutated to."
-    )
-    layer_norm: bool = Field(
-        default=False, description="Apply layer normalization after each convolution."
-    )
-    init_layers: bool = Field(
-        default=True, description="Apply the library's weight initialization scheme."
-    )
-    activation: MlpActivation = Field(
-        default="ReLU", description="Activation applied after each convolution."
-    )
+    min_channel_size: int = Field(default=8, gt=0, description=MIN_CHANNEL_SIZE)
+    max_channel_size: int = Field(default=256, gt=1, description=MAX_CHANNEL_SIZE)
+    layer_norm: bool = Field(default=False, description=LAYER_NORM_CONV)
+    init_layers: bool = Field(default=True, description=INIT_LAYERS)
+    activation: MlpActivation = Field(default="ReLU", description=ACTIVATION_CONV)
 
     arch: Literal["cnn"] = Field(
         default="cnn",
@@ -360,28 +366,28 @@ class LstmSpec(BaseModel):
     hidden_state_size: int = Field(
         gt=0, description="Width of the recurrent hidden state."
     )
-    num_layers: int = Field(default=1, gt=0, description="Stacked LSTM layers.")
+    num_layers: int = Field(default=1, gt=0, description=NUM_LSTM_LAYERS)
     min_hidden_state_size: int = Field(
-        default=8, gt=0, description="Narrowest the hidden state may be mutated to."
+        default=8, gt=0, description=MIN_HIDDEN_STATE_SIZE
     )
     max_hidden_state_size: int = Field(
-        default=256, gt=1, description="Widest the hidden state may be mutated to."
+        default=256, gt=1, description=MAX_HIDDEN_STATE_SIZE
     )
     min_layers: int = Field(
         default=1,
         ge=0,
-        description="Fewest LSTM layers architecture mutation may shrink to.",
+        description=MIN_LSTM_LAYERS,
     )
     max_layers: int = Field(
         default=6,
         ge=1,
-        description="Most LSTM layers architecture mutation may grow to.",
+        description=MAX_LSTM_LAYERS,
     )
     dropout: float = Field(
         default=0.0,
         ge=0.0,
         le=1.0,
-        description="Dropout applied between stacked LSTM layers.",
+        description=DROPOUT_LSTM,
     )
 
     arch: Literal["lstm"] = Field(
@@ -403,9 +409,129 @@ class LstmSpec(BaseModel):
         return min_max_validator("num_layers", "max_layers")(self)
 
 
-EncoderType = MlpSpec | CnnSpec | LstmSpec | MultiInputSpec | SimbaSpec
+class CnnLstmSpec(BaseModel):
+    """Model specification for CNN → LSTM encoders on image observations."""
 
-ENCODER_ARCHS = ("mlp", "cnn", "lstm", "simba", "multiinput")
+    model_config = ConfigDict(extra="forbid")
+
+    channel_size: list[int] = Field(
+        min_length=1,
+        description=CHANNEL_SIZE,
+    )
+    kernel_size: list[int] = Field(
+        min_length=1,
+        description=KERNEL_SIZE,
+    )
+    stride_size: list[int] = Field(
+        min_length=1,
+        description=STRIDE_SIZE,
+    )
+    hidden_state_size: int = Field(
+        gt=0,
+        description="Width of the recurrent hidden state after the CNN trunk.",
+    )
+    num_layers: int = Field(default=1, gt=0, description=NUM_LSTM_LAYERS)
+    min_hidden_layers: int = Field(
+        default=1,
+        gt=0,
+        description=MIN_CONV_LAYERS,
+    )
+    max_hidden_layers: int = Field(
+        default=6,
+        gt=1,
+        description=MAX_CONV_LAYERS,
+    )
+    min_channel_size: int = Field(default=8, gt=0, description=MIN_CHANNEL_SIZE)
+    max_channel_size: int = Field(default=256, gt=1, description=MAX_CHANNEL_SIZE)
+    layer_norm: bool = Field(default=False, description=LAYER_NORM_CONV)
+    init_layers: bool = Field(default=True, description=INIT_LAYERS)
+    activation: MlpActivation = Field(default="ReLU", description=ACTIVATION_CONV)
+    output_activation: MlpActivation | None = Field(
+        default=None,
+        description="Activation applied to the encoder output. Unset leaves it linear.",
+    )
+    min_hidden_state_size: int = Field(
+        default=8, gt=0, description=MIN_HIDDEN_STATE_SIZE
+    )
+    max_hidden_state_size: int = Field(
+        default=256, gt=1, description=MAX_HIDDEN_STATE_SIZE
+    )
+    min_layers: int = Field(
+        default=1,
+        ge=0,
+        description=MIN_LSTM_LAYERS,
+    )
+    max_layers: int = Field(
+        default=6,
+        ge=1,
+        description=MAX_LSTM_LAYERS,
+    )
+    dropout: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description=DROPOUT_LSTM,
+    )
+
+    arch: Literal["cnn_lstm"] = Field(
+        default="cnn_lstm",
+        exclude=True,
+        description="Selects a convolutional then recurrent encoder for image POMDPs.",
+    )
+
+    @model_validator(mode="after")
+    def _check_cnn_layers(self) -> Self:
+        min_max_validator("min_hidden_layers", "max_hidden_layers")(self)
+        if (
+            len(self.channel_size) < self.min_hidden_layers
+            or len(self.channel_size) > self.max_hidden_layers
+        ):
+            msg = (
+                f"hidden_layers must be between min_hidden_layers "
+                f"({self.min_hidden_layers}) and max_hidden_layers "
+                f"({self.max_hidden_layers})."
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _check_channel_size(self) -> Self:
+        min_max_validator("min_channel_size", "max_channel_size")(self)
+        if any(size < self.min_channel_size for size in self.channel_size):
+            msg = (
+                f"channel_size must be greater than or equal to "
+                f"min_channel_size ({self.min_channel_size})."
+            )
+            raise ValueError(msg)
+        if any(size > self.max_channel_size for size in self.channel_size):
+            msg = (
+                f"channel_size must be less than or equal to "
+                f"max_channel_size ({self.max_channel_size})."
+            )
+            raise ValueError(msg)
+        if len(self.channel_size) != len(self.kernel_size) or len(
+            self.channel_size,
+        ) != len(self.stride_size):
+            msg = (
+                f"channel_size, kernel_size, and stride_size must have the same "
+                f"length ({len(self.channel_size)})."
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _check_lstm_bounds(self) -> Self:
+        min_max_validator("min_hidden_state_size", "max_hidden_state_size")(self)
+        min_max_validator("min_hidden_state_size", "hidden_state_size")(self)
+        min_max_validator("hidden_state_size", "max_hidden_state_size")(self)
+        min_max_validator("min_layers", "max_layers")(self)
+        min_max_validator("min_layers", "num_layers")(self)
+        return min_max_validator("num_layers", "max_layers")(self)
+
+
+EncoderType = MlpSpec | CnnSpec | CnnLstmSpec | LstmSpec | MultiInputSpec | SimbaSpec
+
+ENCODER_ARCHS = ("mlp", "cnn", "cnn_lstm", "lstm", "simba", "multiinput")
 
 
 def encoder_spec_for_arch(arch: str) -> type[BaseModel]:

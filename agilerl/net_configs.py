@@ -174,6 +174,32 @@ class LstmNetConfig(NetConfig):
 
 
 @dataclass
+class CnnLstmNetConfig(NetConfig):
+    """Configuration for image observations with a recurrent (CNN → LSTM) encoder."""
+
+    channel_size: list[int]
+    kernel_size: list[int | tuple[int, ...]]
+    stride_size: list[int]
+    hidden_state_size: int
+    sample_input: torch.Tensor | None = field(default=None)
+    activation: str = field(default="ReLU")
+    output_activation: str | None = field(default=None)
+    block_type: Literal["Conv2d", "Conv3d"] = field(default="Conv2d")
+    num_layers: int = field(default=1)
+    min_hidden_layers: int = field(default=1)
+    max_hidden_layers: int = field(default=6)
+    min_channel_size: int = field(default=16)
+    max_channel_size: int = field(default=256)
+    layer_norm: bool = field(default=False)
+    init_layers: bool = field(default=True)
+    min_hidden_state_size: int = field(default=16)
+    max_hidden_state_size: int = field(default=500)
+    min_layers: int = field(default=1)
+    max_layers: int = field(default=4)
+    dropout: float = field(default=0.0)
+
+
+@dataclass
 class MultiInputNetConfig(NetConfig):
     """Configuration for the EvolvableMultiInput network."""
 

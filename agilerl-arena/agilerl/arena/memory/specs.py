@@ -28,6 +28,12 @@ FP32_RMS_NORM_MODEL_TYPES = frozenset({"granitemoe", "granitemoehybrid"})
 # Attention norms that upcast Q to fp32 inside the block (Qwen3 ``q_norm``).
 QK_NORM_MODEL_TYPES = frozenset({"qwen3", "qwen3_moe"})
 
+# Model types whose packed experts take the trainer's self-routing grouped-GEMM
+# path, which runs experts in row chunks and writes straight into the layer output.
+CHUNKED_ROUTED_EXPERT_MODEL_TYPES = frozenset(
+    {"nemotron_h", "nemotron_h_omni", "qwen3_moe"}
+)
+
 # Compute capability and model types where AgileRL trains Mamba layers with
 # HF's eager ``torch_forward`` scan; the fused SSM kernels return NaN there.
 EAGER_MAMBA_SCAN_CAPABILITY = (8, 9)
@@ -68,6 +74,8 @@ LoraTargetScope = Literal["all-linear", "attention-only"]
 PackedMoeDispatch = Literal["materialized", "contracted"]
 # One layer of a block-exclusive stack: an attention, FFN (MLP or MoE) or Mamba layer.
 BlockKind = Literal["attention", "ffn", "mamba"]
+# One layer of a block-exclusive stack, with MLP and MoE told apart.
+LayerKind = Literal["attention", "mamba", "mlp", "moe"]
 
 
 def _encoder_params(cfg: dict[str, Any]) -> int:
@@ -125,6 +133,11 @@ def _layer_type_list(text_cfg: dict[str, Any]) -> list[str]:
     return [str(entry).lower() for entry in entries]
 
 
+def _is_recurrent_layer(entry: str) -> bool:
+    """Mamba or linear-attention (gated delta net) layer: a recurrent state, no KV cache."""
+    return "mamba" in entry or "linear" in entry
+
+
 def _layer_mix(text_cfg: dict[str, Any], n_layers: int) -> tuple[int | None, int]:
     """(attention layers, recurrent layers) for a hybrid state-space model.
 
@@ -133,11 +146,14 @@ def _layer_mix(text_cfg: dict[str, Any], n_layers: int) -> tuple[int | None, int
     """
     entries = _layer_type_list(text_cfg)
     if entries:
-        recurrent = sum(1 for e in entries if "mamba" in e or "linear" in e)
+        recurrent = sum(1 for e in entries if _is_recurrent_layer(e))
         if not recurrent:
             # An explicit layer list wins over leftover ``mamba_*`` keys.
             return None, 0
-        return sum(1 for e in entries if "attention" in e), recurrent
+        attention = sum(
+            1 for e in entries if "attention" in e and not _is_recurrent_layer(e)
+        )
+        return attention, recurrent
 
     pattern = text_cfg.get("hybrid_override_pattern")
     if isinstance(pattern, str) and "M" in pattern:
@@ -176,6 +192,27 @@ def _ffn_layer_mix(text_cfg: dict[str, Any]) -> tuple[int | None, int | None]:
     if isinstance(pattern, str) and "M" in pattern and "-" in pattern:
         return pattern.count("-"), None
     return None, None
+
+
+def _layer_kind(entry: str) -> LayerKind:
+    """One ``layers_block_type`` entry or ``hybrid_override_pattern`` character."""
+    if entry in ("moe", "E"):
+        return "moe"
+    if entry in ("mlp", "-"):
+        return "mlp"
+    if entry == "*" or ("attention" in entry and not _is_recurrent_layer(entry)):
+        return "attention"
+    return "mamba"
+
+
+def _layer_kinds(text_cfg: dict[str, Any]) -> tuple[LayerKind, ...]:
+    """Each layer's kind, in order, for a block-exclusive stack; empty otherwise."""
+    entries = _layer_type_list(text_cfg) or list(
+        text_cfg.get("hybrid_override_pattern") or ""
+    )
+    if not {"moe", "mlp", "E", "-"} & set(entries):
+        return ()
+    return tuple(_layer_kind(entry) for entry in entries)
 
 
 class MambaGeometry(TypedDict, total=False):
@@ -260,6 +297,8 @@ def _decoder_fields(text_cfg: dict[str, Any]) -> dict[str, Any]:
         "gated_mlp": gated,
         "fp32_norm_inputs": text_cfg.get("model_type") in FP32_RMS_NORM_MODEL_TYPES,
         "qk_norm": text_cfg.get("model_type") in QK_NORM_MODEL_TYPES,
+        "chunked_routed_experts": text_cfg.get("model_type")
+        in CHUNKED_ROUTED_EXPERT_MODEL_TYPES,
         "eager_mamba_scan_family": text_cfg.get("model_type")
         in EAGER_MAMBA_SCAN_MODEL_TYPES,
         "attn_bias": bool(text_cfg.get("attention_bias") or text_cfg.get("qkv_bias")),
@@ -316,6 +355,7 @@ def _layout_fields(
         "n_mamba_layers": n_mamba,
         "n_mlp_layers": n_mlp,
         "n_moe_layers": n_moe,
+        "layer_kinds": _layer_kinds(text_cfg),
         **{f"mamba_{key}": value for key, value in geo.items()},
         "global_head_dim": text_cfg.get("global_head_dim") or None,
         "n_kv_shared_layers": int(text_cfg.get("num_kv_shared_layers") or 0),
@@ -350,14 +390,11 @@ class ModelArch(BaseModel):
     attn_bias: bool = False
     # SwiGLU (gate + up + down). Ungated MLPs use two matrices (up + down).
     gated_mlp: bool = True
-    # Trainer RMSNorm saves an fp32 copy of its input for backward
-    # (see :data:`FP32_RMS_NORM_MODEL_TYPES`).
+    # Trainer RMSNorm saves an fp32 copy of its input for backward.
     fp32_norm_inputs: bool = False
-    # Per-head Q/K norm upcasts Q to fp32 inside the block
-    # (see :data:`QK_NORM_MODEL_TYPES`).
+    # Per-head Q/K norm upcasts Q to fp32 inside the block.
     qk_norm: bool = False
-    # This family uses the eager Mamba scan on
-    # :data:`EAGER_MAMBA_SCAN_CAPABILITY`.
+    # Trains Mamba layers with HF's eager scan on compute capability 8.9.
     eager_mamba_scan_family: bool = False
 
     # None for dense models. Weights/optimizer scale with the total expert
@@ -373,6 +410,10 @@ class ModelArch(BaseModel):
     # keeps the every-layer default.
     n_mlp_layers: int | None = None
     n_moe_layers: int | None = None
+    # Layer kinds in order when the config lists them; empty when unknown.
+    layer_kinds: tuple[LayerKind, ...] = ()
+    # Packed experts run in row chunks on the self-routing grouped-GEMM path.
+    chunked_routed_experts: bool = False
 
     multimodal_tower_params: int = 0
 

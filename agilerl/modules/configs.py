@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from agilerl.net_configs import (
+    CnnLstmNetConfig,
     CnnNetConfig,
     LstmNetConfig,
     MlpNetConfig,
@@ -13,6 +14,7 @@ from agilerl.net_configs import (
 )
 
 __all__ = [
+    "CnnLstmNetConfig",
     "CnnNetConfig",
     "LstmNetConfig",
     "MlpNetConfig",

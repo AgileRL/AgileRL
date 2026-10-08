@@ -40,6 +40,7 @@ from agilerl.models.env import (
 from agilerl.models.hpo import MutationSpec
 from agilerl.models.manifest import from_trainer_specs
 from agilerl.models.networks import (
+    CnnLstmSpec,
     CnnSpec,
     FinetuningNetworkSpec,
     LoraConfigDict,
@@ -77,6 +78,21 @@ class TestNormalizeManifestNetwork:
             },
         )
         assert normalized["encoder_config"] == {"arch": "mlp"}
+
+    def test_top_level_cnn_lstm_arch(self):
+        normalized = normalize_manifest_network(
+            {
+                "arch": "cnn_lstm",
+                "latent_dim": 64,
+                "encoder_config": {
+                    "channel_size": [32],
+                    "kernel_size": [3],
+                    "stride_size": [1],
+                    "hidden_state_size": 128,
+                },
+            },
+        )
+        assert normalized["encoder_config"]["arch"] == "cnn_lstm"
 
     def test_missing_arch_deferred(self):
         # Deferred: no arch declared anywhere, so the data is returned
@@ -210,6 +226,42 @@ class TestCnnSpec:
         """channel/kernel/stride length mismatch."""
         with pytest.raises(ValueError, match="must have the same length"):
             CnnSpec(channel_size=[16, 32], kernel_size=[3], stride_size=[1, 1])
+
+
+class TestCnnLstmSpec:
+    """Covers CnnLstmSpec validators."""
+
+    def test_channel_size_outside_layer_range(self):
+        with pytest.raises(ValueError, match="hidden_layers must be between"):
+            CnnLstmSpec(
+                channel_size=[16] * 8,
+                kernel_size=[3] * 8,
+                stride_size=[1] * 8,
+                hidden_state_size=64,
+                max_hidden_layers=3,
+            )
+
+    def test_channel_below_min(self):
+        with pytest.raises(
+            ValueError,
+            match="channel_size must be greater than or equal to min_channel_size",
+        ):
+            CnnLstmSpec(
+                channel_size=[2],
+                kernel_size=[3],
+                stride_size=[1],
+                hidden_state_size=64,
+                min_channel_size=8,
+            )
+
+    def test_mismatched_sizes(self):
+        with pytest.raises(ValueError, match="must have the same length"):
+            CnnLstmSpec(
+                channel_size=[16, 32],
+                kernel_size=[3],
+                stride_size=[1, 1],
+                hidden_state_size=64,
+            )
 
 
 class TestFinetuningNetworkSpec:
@@ -1547,6 +1599,29 @@ class TestLstmSpecUpperBound:
     def test_num_layers_exceeds_max(self):
         with pytest.raises(ValidationError):
             LstmSpec(hidden_state_size=64, num_layers=10, max_layers=6)
+
+
+class TestCnnLstmSpecUpperBound:
+    def test_hidden_state_size_exceeds_max(self):
+        with pytest.raises(ValidationError):
+            CnnLstmSpec(
+                channel_size=[16],
+                kernel_size=[3],
+                stride_size=[1],
+                hidden_state_size=512,
+                max_hidden_state_size=256,
+            )
+
+    def test_num_layers_exceeds_max(self):
+        with pytest.raises(ValidationError):
+            CnnLstmSpec(
+                channel_size=[16],
+                kernel_size=[3],
+                stride_size=[1],
+                hidden_state_size=64,
+                num_layers=10,
+                max_layers=6,
+            )
 
 
 class TestMultiInputSpecUpperBound:

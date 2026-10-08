@@ -598,6 +598,30 @@ class TestArenaArchOptional:
         assert "arch" not in out["network"]
         assert out["network"]["encoder_config"]["arch"] == "mlp"
 
+    def test_arch_cnn_lstm_selects_encoder(self) -> None:
+        from agilerl.arena.models import CnnLstmSpec, NetworkSpec, TrainingManifest
+
+        raw = {
+            "algorithm": {"name": "PPO", "recurrent": True},
+            "environment": {"name": "merge-env", "version": "v1"},
+            "network": {
+                "arch": "cnn_lstm",
+                "encoder_config": {
+                    "channel_size": [32],
+                    "kernel_size": [3],
+                    "stride_size": [1],
+                    "hidden_state_size": 128,
+                },
+                "head_config": {"hidden_size": [64]},
+            },
+        }
+        validated = TrainingManifest.model_validate(raw)
+        assert isinstance(validated.network, NetworkSpec)
+        assert isinstance(validated.network.encoder_config, CnnLstmSpec)
+
+        out = TrainingManifest.get_validated(raw, mode="json")
+        assert out["network"]["encoder_config"]["arch"] == "cnn_lstm"
+
     def test_no_arch_leaves_the_encoder_deferred(self) -> None:
         from agilerl.arena.models import DeferredNetworkSpec, TrainingManifest
 

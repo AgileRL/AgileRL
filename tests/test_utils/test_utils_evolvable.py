@@ -107,6 +107,20 @@ def test_config_from_dict_hidden_state_size_selects_lstm():
     assert cfg.num_layers == 2
 
 
+def test_config_from_dict_image_recurrent_selects_cnn_lstm():
+    from agilerl.modules.configs import CnnLstmNetConfig
+
+    cfg = config_from_dict(
+        {
+            "channel_size": [16],
+            "kernel_size": [3],
+            "stride_size": [1],
+            "hidden_state_size": 64,
+        }
+    )
+    assert isinstance(cfg, CnnLstmNetConfig)
+
+
 def test_tuple_to_dict_space():
     tuple_space = spaces.Tuple(
         (
@@ -138,6 +152,10 @@ def test_get_default_encoder_config_branches():
     image_space = spaces.Box(0, 255, shape=(3, 32, 32), dtype="uint8")
     cfg = get_default_encoder_config(image_space)
     assert "channel_size" in cfg
+
+    cfg = get_default_encoder_config(image_space, recurrent=True)
+    assert "channel_size" in cfg
+    assert "hidden_state_size" in cfg
 
     box_space = spaces.Box(0, 1, shape=(4,), dtype="float32")
     cfg = get_default_encoder_config(box_space, simba=True)
