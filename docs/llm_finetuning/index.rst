@@ -72,6 +72,7 @@ This example demonstrates how to use the GRPO algorithm to fine-tune a LLM on a 
    environments
    batch_sizing
    distributed
+   memory_estimate
    fused_logprobs
    quantization
    llm_checkpoints
@@ -86,6 +87,9 @@ This example demonstrates how to use the GRPO algorithm to fine-tune a LLM on a 
 
    :doc:`distributed`
       Multi-GPU with ``torchrun``: a full replica per GPU, or FSDP2 sharding when the actor does not fit.
+
+   :doc:`memory_estimate`
+      ``arena memory estimate`` — peak VRAM for a training manifest.
 
    :doc:`fused_logprobs`
       Fused linear log-probability computation for memory-efficient training.
