@@ -741,7 +741,10 @@ class TestDatasetsListCommand:
 
 class TestDatasetsExistsCommand:
     def test_exists(self, runner, mock_client):
-        mock_client.dataset_exists.return_value = {"exists": True, "id": 3}
+        mock_client.dataset_exists.return_value = {
+            "exists": True,
+            "datasetType": "reasoning",
+        }
         with _patched_arena_client(mock_client):
             result = runner.invoke(main, ["datasets", "exists", "my-ds"])
         assert result.exit_code == 0

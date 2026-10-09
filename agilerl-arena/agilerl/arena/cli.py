@@ -16,6 +16,7 @@ import click
 import yaml
 
 from agilerl.arena import console
+from agilerl.arena.byoc import ArenaRootGroup, register_byoc_manifest_group
 from agilerl.arena.cli_manifest import handle_help_option
 from agilerl.arena.client import DATASET_CATEGORIES, MEMORY_SCOPES, MemoryScope
 from agilerl.arena.config import CommandConfig, arena_client
@@ -32,7 +33,6 @@ from agilerl.arena.memory.cli import memory_group
 from agilerl.arena.models import verdict as manifest_verdict
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.schema import manifest_schema
-from agilerl.arena.on_prem import ArenaRootGroup, register_on_prem_manifest_group
 from agilerl.arena.output import (
     emit_csv_preview,
     emit_result,
@@ -92,7 +92,7 @@ ClickDecorated = TypeVar("ClickDecorated", bound=Callable[..., Any] | click.Comm
     type=click.IntRange(1),
     default=300,
     show_default=True,
-    help="Timeout in seconds for file upload requests.",
+    help="Timeout in seconds for file uploads and cluster register.",
 )
 @click.option(
     "-h",
@@ -1379,8 +1379,8 @@ def projects_get_default(config: CommandConfig) -> None:
         click.echo("No default project set. Use 'arena projects set-default <name>'.")
 
 
-register_on_prem_manifest_group(main)
 main.add_command(memory_group)
+register_byoc_manifest_group(main)
 
 
 if __name__ == "__main__":

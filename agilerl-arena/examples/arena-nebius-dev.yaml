@@ -1,0 +1,65 @@
+---
+provider: nebius
+name: arena-nebius
+terraform_state:
+  # Dedicated bucket for Terraform state. Not the experiment-data bucket.
+    bucket: arena-nebius-tfstate
+  # key: clusters/arena-nebius/terraform.tfstate
+values:
+    tenant_id: tenant-e00t69c28j8pxr9tp4
+  # Region is required when project_id or storage_project_id is omitted.
+  # Provisioning then creates and manages the missing projects, plus a VPC
+  # network and subnet for this cluster.
+    region: eu-north1
+  # Existing Nebius projects and subnet. project_id holds the cluster, VPC, and
+  # shared filesystem; storage_project_id holds the experiment bucket and the
+  # Terraform state bucket, and destroy keeps it.
+  # project_id: project-e00avfkhpr00p76qmrfkvb
+  # storage_project_id: project-e00qq3wzr0e6z0e1yn
+  # subnet_id: vpcsubnet-e00hhb5qdq26v7sdvc
+    storage_bucket_name: arena-nebius-data
+    storage_endpoint: https://storage.eu-north1.nebius.cloud
+  # Existing Nebius service account for cluster nodes. Omit to create an
+  # "arena" account and add it to the tenant admins group.
+  # service_account_id: serviceaccount-...
+    arena:
+        min_node_count: 2
+        max_node_count: 10
+        platform: cpu-e2
+        preset: 2vcpu-8gb
+    workers:
+        - name: gpu
+          min_node_count: 0
+          max_node_count: 10
+          platform: gpu-h100-sxm
+          preset: 1gpu-16vcpu-200gb
+          gpu_drivers_preset: cuda13.0
+    object_storage:
+    # Maximum bucket capacity in GiB.
+        size_gib: 1024
+    shared_filesystem:
+    # Set false to create no shared filesystem or node mounts.
+        provision: true
+        type: NETWORK_SSD
+        size_gib: 256
+        mount_tag: csi-storage
+    inference:
+    # Dev and staging wildcard: *.{cluster}.inference.agilerl.rlops.ai
+        domain: arena-nebius.inference.agilerl.rlops.ai
+    # Host part only; FQDN is host + domain.
+        hostname_template: inference-{deploymentId}
+    # TLS secret in arena. Created as self-signed when missing.
+    # tls_secret_name: arena-inference-tls
+    gateway_api:
+    # Installs Gateway API v1.6.0 CRDs and enables Cilium Gateway API after provision.
+        enable: true
+        gateway_name: arena
+# Optional registration settings for `cluster register --spec`
+# and `provision --register-and-install`:
+registration:
+#   # In-cluster MinIO (lab). Secret defaults to arena-storage when true, storage when false.
+#   install_storage: false
+#   storage_prefix: models/
+    storage_secret_name: storage
+#   ingress_class_name: cilium
+    ray_data_pvc_size: 32Gi

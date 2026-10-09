@@ -1,0 +1,44 @@
+---
+provider: aws
+name: __CLUSTER_NAME__
+arena:
+    storage:
+        bucket: __CLUSTER_NAME__-data
+        endpoint: https://s3.eu-west-1.amazonaws.com
+    inference:
+        domain: __CLUSTER_NAME__.inference.agilerl.rlops.ai
+        hostname_template: inference-{deploymentId}
+    gateway:
+        # Creates an internet-facing ALB with the AWS Load Balancer Controller.
+        # HTTPS uses an ACM certificate that matches the inference domain.
+        enable: true
+        name: arena
+terraform_state:
+    # Dedicated bucket for Terraform state. Not the experiment-data bucket.
+    bucket: __CLUSTER_NAME__-tfstate
+    # create_bucket: true
+aws:
+    region: eu-west-1
+    # kubernetes_version: "1.36"
+    system:
+        min_node_count: 2
+        max_node_count: 10
+        instance_type: t3.xlarge
+    workers: []
+    # GPU workers are optional. num_cpus, memory_gib, gpu_type, and vram_gib
+    # are required when num_gpus is greater than zero.
+    # - name: gpu
+    #   min_node_count: 0
+    #   max_node_count: 4
+    #   instance_type: g6.xlarge
+    #   num_cpus: 16
+    #   num_gpus: 1
+    #   memory_gib: 64
+    #   gpu_type: l4
+    #   vram_gib: 24
+    object_storage:
+        size_gib: 1024
+    shared_filesystem:
+        # When true, provisioning creates an EFS file system, the EFS CSI controller,
+        # and a StorageClass named arena-shared.
+        provision: false
