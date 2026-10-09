@@ -56,14 +56,19 @@ arena manifest schema
 arena env validate --source path/to/my_env.py --name my-env
 ```
 
-### 4) Estimate GPU memory for an LLM manifest
+### 4) Check GPU memory (LLM manifests)
 
 ```bash
 arena memory estimate path/to/manifest.yaml --gpu "NVIDIA L4"
+
+# Longest context one dedicated L4 serving GPU can hold:
+arena memory solve max_model_len --inference --gpu "NVIDIA L4" \
+    --model Qwen/Qwen2.5-7B-Instruct
 ```
 
 `estimate` is a pre-submission gate (exit 0 fits, 3 over budget, 2 usage error).
-Install `agilerl-arena[hub]` unless you pass `--config path/to/config.json`.
+`solve` holds every other input fixed and returns the largest value of one
+field. Install `agilerl-arena[hub]` unless you pass `--config path/to/config.json`.
 See `agilerl/arena/memory/README.md`.
 
 ### 5) Submit a training manifest

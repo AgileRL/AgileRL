@@ -5,6 +5,8 @@ and the training / generation settings.
 
 ```
 arena memory estimate manifest.yaml --gpu "NVIDIA L4"
+arena memory solve max_model_len --inference --gpu "NVIDIA L4" \
+    --model Qwen/Qwen2.5-7B-Instruct
 ```
 
 `python -m agilerl.arena.memory estimate ...` is the same command. Pass
@@ -21,6 +23,13 @@ it (Hub safetensors index). Unparsed geometry (towers, per-layer embeddings)
 goes to `ParamCounts.unattributed` so weight bytes stay exact; activation,
 KV, and LoRA terms still come from the parsed decoder.
 
+`arena memory solve FIELD` holds the other inputs fixed and searches one
+field: a linear scan up from the minimum to the first fit, then bisection
+for the top of that fitting run. Training uses the same underprediction
+buffer as `estimate`. `--inference` is a dedicated serving GPU
+(utilization 0.9, 8 sequences, no trainer residual). Invertible fields:
+`max_model_len`, `max_num_seqs`.
+
 | module | role |
 |---|---|
 | `specs.py` | `config.json` → geometry; settings and device schemas |
@@ -28,4 +37,6 @@ KV, and LoRA terms still come from the parsed decoder.
 | `formulas.py` | parameter counts, KV, activations, tiles |
 | `estimator.py` | the two phase bars |
 | `advice.py` | ranked setting changes when a bar is over budget |
-| `cli.py` | `arena memory estimate` |
+| `solver.py` | invert one field: largest value that still fits |
+| `resources.py` | cheapest Arena resource tier whose node fits a manifest |
+| `cli.py` | `arena memory estimate` and `arena memory solve` |

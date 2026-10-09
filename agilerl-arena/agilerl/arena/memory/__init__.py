@@ -26,6 +26,14 @@ from agilerl.arena.memory.manifest import (
     run_config_from_manifest,
     training_settings_from_manifest,
 )
+from agilerl.arena.memory.solver import (
+    SOLVABLE_FIELDS,
+    CannotSolve,
+    SolveResult,
+    inference_run_config,
+    solve,
+    solve_inference,
+)
 from agilerl.arena.memory.specs import (
     DeviceSpec,
     GenerationSettings,
@@ -38,7 +46,9 @@ from agilerl.arena.memory.specs import (
 
 __all__ = [
     "GPU_CATALOGUE",
+    "SOLVABLE_FIELDS",
     "Advice",
+    "CannotSolve",
     "DeviceSpec",
     "GenerationSettings",
     "GpuInfo",
@@ -48,6 +58,7 @@ __all__ = [
     "PhaseBreakdown",
     "RunConfig",
     "RunEstimate",
+    "SolveResult",
     "TrainingSettings",
     "WeightVariant",
     "advise",
@@ -58,7 +69,10 @@ __all__ = [
     "estimate_training",
     "generation_can_serve",
     "generation_settings_from_manifest",
+    "inference_run_config",
     "lookup_gpu",
     "run_config_from_manifest",
+    "solve",
+    "solve_inference",
     "training_settings_from_manifest",
 ]
