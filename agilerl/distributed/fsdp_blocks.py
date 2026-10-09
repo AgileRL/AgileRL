@@ -9,6 +9,7 @@ import inspect
 import logging
 from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
+from functools import partial
 from typing import Any, cast
 
 import torch
@@ -27,6 +28,11 @@ from torch.distributed.fsdp import (
     register_fsdp_forward_method,
 )
 from torch.distributed.tensor import DTensor
+from torch.utils.checkpoint import (
+    CheckpointPolicy,
+    SelectiveCheckpointContext,
+    create_selective_checkpoint_contexts,
+)
 
 from agilerl.architectures.nemotron_h.mamba import block_type_mask_mapping
 from agilerl.arena.models.fsdp import FSDPConfig
@@ -394,6 +400,29 @@ def _set_prefetch(
                 current.set_modules_to_backward_prefetch(list(reversed(prev)))
 
 
+def _save_routing_policy(
+    _context: SelectiveCheckpointContext,
+    op: torch._ops.OpOverload,
+    *_args: Any,
+    **kwargs: Any,
+) -> CheckpointPolicy:
+    """Keep router ``topk`` and device-to-host copies from forward; recompute the rest.
+
+    A recomputed router can pick other experts, which changes dispatch shapes
+    and the all-to-all splits every expert-parallel peer expects.
+    """
+    if op.overloadpacket is torch.ops.aten.topk:
+        return CheckpointPolicy.MUST_SAVE
+    device = kwargs.get("device")
+    if (
+        op.overloadpacket is torch.ops.aten._to_copy
+        and isinstance(device, torch.device)
+        and device.type == "cpu"
+    ):
+        return CheckpointPolicy.MUST_SAVE
+    return CheckpointPolicy.PREFER_RECOMPUTE
+
+
 def _block_kind(block: nn.Module) -> str:
     """Kind of a transformer block for activation-checkpoint selection.
 
@@ -603,7 +632,8 @@ def apply_fsdp2(
     ``config.checkpoint_skip_layer_types`` and
     ``config.checkpoint_every_n_blocks`` are wrapped with
     ``checkpoint_wrapper`` before ``fully_shard`` so the checkpoint boundary
-    sits inside the FSDP unit.
+    sits inside the FSDP unit. Blocks holding packed experts reuse their
+    forward routing in the recompute.
 
     :param model: Model to shard (CPU or meta parameters).
     :type model: nn.Module
@@ -695,10 +725,20 @@ def apply_fsdp2(
     for block in blocks:
         unit = block
         if id(block) in checkpointed:
+            routing_kwargs = (
+                {
+                    "context_fn": partial(
+                        create_selective_checkpoint_contexts, _save_routing_policy
+                    )
+                }
+                if iter_packed_expert_modules(block)
+                else {}
+            )
             unit = checkpoint_wrapper(
                 block,
                 checkpoint_impl=CheckpointImpl.NO_REENTRANT,
                 preserve_rng_state=False,
+                **routing_kwargs,
             )
             _replace_child(model, block, unit)
         wrap_units.append(unit)

@@ -16,11 +16,19 @@ import torch.distributed as dist
 from peft import LoraConfig, get_peft_model
 from torch import nn
 from torch._dynamo.utils import counters
+from torch.distributed.tensor import DTensor
+from torch.utils.checkpoint import CheckpointPolicy
 from transformers import NemotronHConfig, NemotronHForCausalLM
 
 from agilerl.distributed import FSDPConfig, init_distributed
-from agilerl.distributed.fsdp import materialize_fsdp2_from_cpu_state
-from agilerl.distributed.fsdp_blocks import compile_dense_block_modules
+from agilerl.distributed.fsdp import (
+    canonical_fsdp_param_fqn,
+    materialize_fsdp2_from_cpu_state,
+)
+from agilerl.distributed.fsdp_blocks import (
+    _save_routing_policy,
+    compile_dense_block_modules,
+)
 from agilerl.lora.fused import (
     patch_lora_for_fused_forward,
     set_fused_adapter_routing,
@@ -250,6 +258,27 @@ def world_size_one(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, Non
     dist.destroy_process_group()
 
 
+class TestSaveRoutingPolicy:
+    def test_saves_router_topk(self) -> None:
+        policy = _save_routing_policy(None, torch.ops.aten.topk.default)
+
+        assert policy is CheckpointPolicy.MUST_SAVE
+
+    def test_saves_cpu_device_copy(self) -> None:
+        policy = _save_routing_policy(
+            None,
+            torch.ops.aten._to_copy.default,
+            device=torch.device("cpu"),
+        )
+
+        assert policy is CheckpointPolicy.MUST_SAVE
+
+    def test_recomputes_other_ops(self) -> None:
+        policy = _save_routing_policy(None, torch.ops.aten.add.Tensor)
+
+        assert policy is CheckpointPolicy.PREFER_RECOMPUTE
+
+
 class TestMaterializeFsdp2FromCpuStateCompileBlocks:
     @pytest.mark.usefixtures("world_size_one")
     def test_compile_blocks_compiles_dense_units_under_fsdp(self) -> None:
@@ -278,6 +307,46 @@ class TestMaterializeFsdp2FromCpuStateCompileBlocks:
         torch.testing.assert_close(
             model(input_ids=input_ids).logits, reference(input_ids=input_ids).logits
         )
+
+    @pytest.mark.usefixtures("world_size_one")
+    def test_compile_blocks_with_checkpointing_matches_eager(self) -> None:
+        # Arrange
+        model = tiny_hybrid_moe()
+        reference = copy.deepcopy(model)
+        config = FSDPConfig(
+            compile_blocks=True,
+            compile_backend=BACKEND,
+            param_dtype="float32",
+            reduce_dtype="float32",
+        )
+        materialize_fsdp2_from_cpu_state(
+            model, "cpu", config, gradient_checkpointing=True
+        )
+        input_ids = torch.randint(0, VOCAB, (2, 5))
+
+        # Act
+        logits = model(input_ids=input_ids).logits
+        expected = reference(input_ids=input_ids).logits
+        logits.square().mean().backward()
+        expected.square().mean().backward()
+
+        # Assert
+        torch.testing.assert_close(logits, expected)
+        expected_grads = {
+            name: param.grad for name, param in reference.named_parameters()
+        }
+        grads = {
+            canonical_fsdp_param_fqn(name): (
+                param.grad.full_tensor()
+                if isinstance(param.grad, DTensor)
+                else param.grad
+            )
+            for name, param in model.named_parameters()
+            if param.grad is not None
+        }
+        assert grads
+        for name, grad in grads.items():
+            torch.testing.assert_close(grad, expected_grads[name], msg=name)
 
     @pytest.mark.usefixtures("world_size_one")
     def test_compile_blocks_off_compiles_nothing(self) -> None:

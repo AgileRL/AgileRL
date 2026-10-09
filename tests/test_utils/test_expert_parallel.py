@@ -34,7 +34,7 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor, distribute_tensor
 from torch.distributed.tensor.placement_types import Replicate, Shard
 from torch.utils.checkpoint import checkpoint
-from transformers import NemotronHConfig
+from transformers import NemotronHConfig, PretrainedConfig
 from transformers.models.nemotron_h.modeling_nemotron_h import NemotronHMLP
 
 from agilerl.distributed import FSDPConfig, expert_parallel
@@ -229,21 +229,35 @@ def _free_port() -> int:
 
 
 def _spawn_ranks(worker, world_size: int = 2, timeout: float = 300.0) -> None:
-    port = _free_port()
-    ctx = mp.get_context("spawn")
-    queue: mp.Queue = ctx.Queue()
-    procs = [
-        ctx.Process(target=worker, args=(rank, world_size, port, queue))
-        for rank in range(world_size)
-    ]
-    for proc in procs:
-        proc.start()
-    results = [queue.get(timeout=timeout) for _ in range(world_size)]
-    for proc in procs:
-        proc.join(timeout=timeout)
-        assert proc.exitcode == 0, f"rank exited {proc.exitcode}"
-    for rank, status, err in sorted(results):
-        assert status == "ok", f"rank {rank}: {err}"
+    last_error: AssertionError | None = None
+    for _ in range(3):
+        port = _free_port()
+        ctx = mp.get_context("spawn")
+        queue: mp.Queue = ctx.Queue()
+        procs = [
+            ctx.Process(target=worker, args=(rank, world_size, port, queue))
+            for rank in range(world_size)
+        ]
+        for proc in procs:
+            proc.start()
+        try:
+            results = [queue.get(timeout=timeout) for _ in range(world_size)]
+            for proc in procs:
+                proc.join(timeout=timeout)
+                assert proc.exitcode == 0, f"rank exited {proc.exitcode}"
+            for rank, status, err in sorted(results):
+                assert status == "ok", f"rank {rank}: {err}"
+            return
+        except AssertionError as exc:
+            for proc in procs:
+                if proc.is_alive():
+                    proc.kill()
+                    proc.join(timeout=5.0)
+            if "DistNetworkError" not in str(exc):
+                raise
+            last_error = exc
+    assert last_error is not None
+    raise last_error
 
 
 class TestDataParallelFold:
@@ -826,6 +840,62 @@ def _materialize_dp_ep_worker(
             dist.destroy_process_group()
 
 
+def _materialize_meta_safetensors_dp_ep_worker(
+    rank: int, world_size: int, port: int, result_queue: Any
+) -> None:
+    """Packed 3-D safetensors load with leftover_dp>1 fills local expert rows."""
+    try:
+        _init_gloo(rank, world_size, port)
+        ep = 2
+        num_experts = 4
+        model = _arange_packed_moe(num_experts)
+        for param in model.parameters():
+            dist.broadcast(param.data, src=0)
+        original_up = model.layers[0].experts.up_proj.detach().cpu().clone()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            save_file(
+                {
+                    key: value.detach().cpu().contiguous()
+                    for key, value in model.state_dict().items()
+                },
+                os.path.join(tmp, "model.safetensors"),
+            )
+            model.config = PretrainedConfig()
+            model.config.name_or_path = tmp
+            model.to_empty(device="meta")
+            mesh = _materialize(
+                model,
+                FSDPConfig(
+                    ep=ep,
+                    wrap_every_n_blocks=1,
+                    param_persistence_threshold=0,
+                ),
+            )
+            assert mesh is not None
+            leftover_dp = mesh.leftover_dp
+            assert leftover_dp == world_size // ep
+            local = expert_local_tensor(model.layers[0].experts.up_proj)
+            local_e = num_experts // (ep * leftover_dp)
+            expected_expert = _ep_block_dp_half_expert(
+                rank, ep, num_experts, leftover_dp
+            )
+            assert local.shape[0] == local_e, tuple(local.shape)
+            expected = original_up[expected_expert : expected_expert + local_e]
+            assert torch.equal(local.detach().cpu(), expected), (
+                rank,
+                tuple(local.shape),
+                local.detach().cpu(),
+                expected,
+            )
+        result_queue.put((rank, "ok", None))
+    except Exception as exc:  # pragma: no cover
+        result_queue.put((rank, "err", repr(exc)))
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+
 @requires_gloo
 class TestMaterializeExpertParallel:
     def test_materialize_keeps_local_expert_count_at_e_over_ep(self):
@@ -836,6 +906,9 @@ class TestMaterializeExpertParallel:
 
     def test_dp_gt_one_experts_restore_via_sliced_write(self):
         _spawn_ranks(_dp_gt_one_slice_worker, world_size=4)
+
+    def test_meta_safetensors_leftover_dp_loads_local_expert_rows(self):
+        _spawn_ranks(_materialize_meta_safetensors_dp_ep_worker, world_size=4)
 
 
 def _check_expert_dim0_world_sharded(
@@ -2344,6 +2417,90 @@ def _fsdp_gathered_frozen_worker(
 class TestFsdpGatheredFrozenExperts:
     def test_checkpointed_backward_matches_dense_reference(self):
         _spawn_ranks(_fsdp_gathered_frozen_worker, world_size=4)
+
+
+class _DriftingRouterBlock(nn.Module):
+    """Routes inside the block; the second call (checkpoint recompute) picks experts 0 and 1."""
+
+    def __init__(self, moe: nn.Module):
+        super().__init__()
+        self.lin = nn.Linear(8, 8)
+        self.router = nn.Linear(8, 4, bias=False)
+        self.moe = moe
+        self.calls = 0
+
+    def forward(self, hidden_states):
+        hidden = self.lin(hidden_states)
+        logits = self.router(hidden)
+        if self.calls % 2 == 1:
+            logits = logits + torch.tensor([100.0, 100.0, -100.0, -100.0])
+        self.calls += 1
+        top_k_logits, top_k_index = logits.topk(2, -1)
+        return self.moe(hidden, top_k_index, torch.softmax(top_k_logits, -1))
+
+
+class _DriftingRouterMoeModel(nn.Module):
+    _no_split_modules: ClassVar = ["_DriftingRouterBlock"]
+
+    def __init__(self, moe: nn.Module):
+        super().__init__()
+        self.layers = nn.ModuleList([_DriftingRouterBlock(moe)])
+
+    def forward(self, hidden_states):
+        return self.layers[0](hidden_states)
+
+
+def _recompute_routing_drift_worker(
+    rank: int, world_size: int, port: int, result_queue: Any
+) -> None:
+    """Checkpoint recompute reuses forward routing when the router would pick differently."""
+    try:
+        _init_gloo(rank, world_size, port)
+        from agilerl.distributed import fsdp as fsdp_mod
+
+        ep = 2
+        mesh = build_parallel_mesh(world_size=world_size, ep=ep, device_type="cpu")
+        assert mesh is not None
+        model = _DriftingRouterMoeModel(_lora_routed_model(("actor",)))
+        for param in model.parameters():
+            dist.broadcast(param.data, src=0)
+        reference = copy.deepcopy(model)
+        torch.manual_seed(rank + 3)
+        hidden = torch.randn(6, 8)
+        upstream = torch.randn(6, 8)
+        ref_hidden = hidden.clone().requires_grad_(True)
+        (reference(ref_hidden) * upstream).sum().backward()
+
+        assert apply_expert_parallel(model, mesh.ep) == 1
+        fsdp_mod.apply_fsdp2(
+            model,
+            FSDPConfig(
+                ep=ep,
+                wrap_every_n_blocks=1,
+                param_persistence_threshold=0,
+                param_dtype="float32",
+                reduce_dtype="float32",
+            ),
+            mesh=mesh.hsdp,
+            expert_mesh=mesh.dp_mod_ep,
+            gradient_checkpointing=True,
+        )
+        ep_hidden = hidden.clone().requires_grad_(True)
+        (model(ep_hidden) * upstream).sum().backward()
+
+        assert torch.allclose(ep_hidden.grad, ref_hidden.grad, rtol=1e-5, atol=1e-7)
+        result_queue.put((rank, "ok", None))
+    except Exception as exc:  # pragma: no cover
+        result_queue.put((rank, "err", repr(exc)))
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+
+@requires_gloo
+class TestFsdpCheckpointRoutingRecompute:
+    def test_recompute_reuses_forward_routing(self):
+        _spawn_ranks(_recompute_routing_drift_worker, world_size=4)
 
 
 class _HsdpMoeBlock(nn.Module):

@@ -472,11 +472,14 @@ class TestLearnTelemetryReportsDiagnostics:
 PHASE_KEYS = {f"learn_phase_{phase}_s" for phase in LEARN_PHASES}
 
 
+OLD_LOGPROB_FORWARD_S = 0.05
+
+
 class _SlowOldLogprobsStub(_Stub):
-    """Stub whose no-grad old log-prob forward takes a known wall time."""
+    """Stub whose no-grad old log-prob forward sleeps a known duration."""
 
     def _fused_forward_no_grad(self, ids: torch.Tensor, _batch_size: int, **kwargs):
-        time.sleep(0.05)
+        time.sleep(OLD_LOGPROB_FORWARD_S)
         return super()._fused_forward_no_grad(ids, _batch_size, **kwargs)
 
 
@@ -496,9 +499,22 @@ class TestLearnPhaseTimings:
         assert PHASE_KEYS <= set(algo.metrics.logged)
         assert algo.shard_runtime.phase_timer.marks is None
 
-    def test_old_logprob_forward_time_lands_in_its_phase(self) -> None:
+    def test_old_logprob_forward_time_lands_in_its_phase(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         # Arrange: one-row micro-batches leave the second row for the no-grad
-        # forward. The stub backward pass marks nothing.
+        # forward. The stub backward pass marks nothing. Sleep advances the
+        # PhaseTimer clock.
+        ticks = [0.0]
+
+        def fake_sleep(seconds: float) -> None:
+            ticks[0] += seconds
+
+        monkeypatch.setattr(
+            "agilerl.utils.phase_timer.time.perf_counter",
+            lambda: ticks[0],
+        )
+        monkeypatch.setattr(time, "sleep", fake_sleep)
         algo = _SlowOldLogprobsStub(beta=0.0)
         algo.micro_batch_size_per_gpu = 1
 
@@ -507,8 +523,10 @@ class TestLearnPhaseTimings:
 
         # Assert
         assert algo.no_grad_forwards == [(1, False, True)]
-        assert metrics["learn_phase_no_grad_forward_s"] >= 0.05
-        assert metrics["learn_phase_forward_s"] < 0.05
+        assert metrics["learn_phase_no_grad_forward_s"] == pytest.approx(
+            OLD_LOGPROB_FORWARD_S
+        )
+        assert metrics["learn_phase_forward_s"] == 0.0
         assert metrics["learn_phase_backward_s"] == 0.0
 
     def test_an_emptied_batch_reports_every_phase_and_closes_the_timer(self) -> None:

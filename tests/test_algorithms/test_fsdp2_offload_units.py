@@ -886,6 +886,46 @@ class TestFsdpSafetensorsShardHelpers:
         assert dest.dtype == torch.bfloat16
         assert torch.all(dest == torch.ones(2, 4, dtype=torch.bfloat16))
 
+    def test_copy_safetensors_slice_takes_leftover_dp_half_of_ep_block(
+        self, tmp_path, monkeypatch
+    ):
+        from safetensors import safe_open
+        from safetensors.torch import save_file
+
+        from agilerl.distributed.fsdp import _copy_safetensors_slice
+
+        # Arrange
+        monkeypatch.setattr("torch.distributed.get_rank", lambda: 2)
+        weights = {"experts.up_proj": torch.arange(4).reshape(4, 1, 1).float()}
+        path = tmp_path / "model.safetensors"
+        save_file(weights, str(path))
+        dest = torch.empty(1, 1, 1)
+
+        # Act
+        with safe_open(str(path), framework="pt", device="cpu") as handle:
+            _copy_safetensors_slice(
+                handle,
+                "experts.up_proj",
+                (slice(0, 2), slice(0, 1), slice(0, 1)),
+                dest,
+                global_dim0=4,
+            )
+
+        # Assert
+        assert dest.item() == 1.0
+
+    def test_take_local_expert_rows_keeps_source_when_rows_do_not_split_evenly(
+        self,
+    ):
+        from agilerl.distributed.fsdp import _take_local_expert_rows
+
+        source = torch.arange(6).reshape(3, 2).float()
+        dest = torch.empty(2, 2)
+
+        out = _take_local_expert_rows(source, dest, global_dim0=6)
+
+        assert out is source
+
     def test_lora_a_seed_stable_and_lora_b_zeros(self):
         from agilerl.distributed.fsdp import _init_lora_parameter
 
