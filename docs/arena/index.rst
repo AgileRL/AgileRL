@@ -393,7 +393,8 @@ the algorithm, environment, training parameters, and evolutionary HPO settings. 
 and is mostly analogous for both the :class:`~agilerl.training.trainer.LocalTrainer` and training jobs in Arena.
 
 For an LLM manifest, check the GPU before you submit. ``arena memory estimate``
-prints the training and generation bars against the card.
+prints the training and generation bars against the card; ``arena memory solve``
+inverts one field (context length or concurrency) given the rest.
 See :ref:`llm_memory_estimate`.
 
 Here is an example manifest for training DQN on LunarLander-v3:

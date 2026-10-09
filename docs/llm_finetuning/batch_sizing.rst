@@ -152,3 +152,7 @@ Or in the ``algorithm`` section of a training manifest:
     takes the same number of optimizer steps per update. This is required, not
     incidental: ranks that stepped at different times would desynchronise the
     FSDP2 collectives.
+
+The memory estimator sizes a one-row micro-batch only. To fit a longer
+sequence, invert context or concurrency with
+:ref:`arena memory solve<llm_memory_estimate>`.
