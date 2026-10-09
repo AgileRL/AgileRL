@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import copy
 import os
-import socket
 import sys
 import traceback
 from functools import partial
@@ -45,6 +44,7 @@ from agilerl.distributed.tensor_parallel import (
     copy_input_to_region,
 )
 from agilerl.utils.llm_utils import get_lora_named_params
+from tests.dist_ports import get_free_port, gloo_rank_env
 
 _DIST_ENV = ("RANK", "LOCAL_RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT")
 
@@ -74,26 +74,12 @@ requires_gloo = pytest.mark.skipif(not _gloo_available(), reason="gloo unavailab
 
 
 def _init_gloo(rank: int, world_size: int, port: int) -> None:
-    os.environ.update(
-        {
-            "RANK": str(rank),
-            "LOCAL_RANK": str(rank),
-            "WORLD_SIZE": str(world_size),
-            "MASTER_ADDR": "127.0.0.1",
-            "MASTER_PORT": str(port),
-        }
-    )
+    os.environ.update(gloo_rank_env(rank, world_size, port))
     dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
 
 
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
 def _spawn_ranks(worker, world_size: int = 2, timeout: float = 300.0) -> None:
-    port = _free_port()
+    port = get_free_port()
     ctx = mp.get_context("spawn")
     queue: mp.Queue = ctx.Queue()
     procs = [
@@ -102,12 +88,18 @@ def _spawn_ranks(worker, world_size: int = 2, timeout: float = 300.0) -> None:
     ]
     for proc in procs:
         proc.start()
-    results = [queue.get(timeout=timeout) for _ in range(world_size)]
-    for proc in procs:
-        proc.join(timeout=timeout)
-        assert proc.exitcode == 0, f"rank exited {proc.exitcode}"
-    for rank, status, err in sorted(results):
-        assert status == "ok", f"rank {rank}: {err}"
+    try:
+        results = [queue.get(timeout=timeout) for _ in range(world_size)]
+        for proc in procs:
+            proc.join(timeout=timeout)
+            assert proc.exitcode == 0, f"rank exited {proc.exitcode}"
+        for rank, status, err in sorted(results):
+            assert status == "ok", f"rank {rank}: {err}"
+    finally:
+        for proc in procs:
+            if proc.is_alive():
+                proc.kill()
+                proc.join(timeout=5)
 
 
 def _broadcast_module(module: nn.Module) -> None:

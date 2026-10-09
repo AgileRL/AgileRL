@@ -22,6 +22,10 @@ from agilerl.architectures.nemotron_h.mamba import install_mamba_patches
 from agilerl.architectures.nemotron_h.tensor_parallel import (
     NEMOTRON_H_TENSOR_PARALLEL_PLAN,
 )
+from agilerl.architectures.qwen3_5 import (
+    QWEN3_5_MODEL_CLASS_OVERRIDES,
+    qwen3_5_language_tower_hf_override,
+)
 from agilerl.architectures.runtime import ModelRuntimeConfig
 
 NEMOTRON_VLLM_KWARGS = {
@@ -138,10 +142,15 @@ class TestFamilyRuntimeConfigs:
         )
 
     def test_qwen3_5_lookup(self) -> None:
-        assert (
-            FAMILY_RUNTIME_CONFIGS["qwen3_5"].language_tower.lora_key_prefix
-            == "model.language_model.model."
-        )
+        runtime = FAMILY_RUNTIME_CONFIGS["qwen3_5"]
+        tower = runtime.language_tower
+        assert tower.lora_key_prefix == "model.language_model.model."
+        assert tower.hf_overrides is qwen3_5_language_tower_hf_override
+        assert tower.model_class_overrides == QWEN3_5_MODEL_CLASS_OVERRIDES
+        assert runtime.vllm.mamba_cache_mode == "align"
+        assert runtime.vllm.enable_prefix_caching is True
+        assert runtime.multimodal_towers_kept_hf_override is None
+        assert runtime.enable_tower_connector_lora is False
 
     def test_catalog_excludes_gemma_and_gemma2(self) -> None:
         assert "gemma" not in FAMILY_RUNTIME_CONFIGS

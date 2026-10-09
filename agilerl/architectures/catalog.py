@@ -14,6 +14,11 @@ from agilerl.architectures.nemotron_h.language_tower import (
     omni_language_tower_hf_override,
 )
 from agilerl.architectures.nemotron_h.mamba import install_mamba_patches
+from agilerl.architectures.qwen3_5 import (
+    QWEN3_5_MODEL_CLASS_OVERRIDES,
+    qwen3_5_language_tower_hf_override,
+)
+from agilerl.architectures.qwen3_5.packed import install_qwen_gdn_patches
 from agilerl.architectures.runtime import (
     LanguageTowerRuntimeConfig,
     MambaPatchConfig,
@@ -87,12 +92,20 @@ GPT_OSS_RUNTIME_CONFIG = ModelRuntimeConfig(
     trainer=TrainerRuntimeConfig(attn_implementation="flex_attention"),
 )
 
-# vLLM nests Qwen3.5 language layers under language_model.model; the
-# trainer-side keys need the same prefix to bind engine LoRA adapters.
+# vLLM nests Qwen3.5 language layers under language_model.model when the
+# VL engine is kept; trainer keys need that prefix to bind engine LoRA.
+# Linear-attention rejects mamba_cache_mode "all"; align needs prefix caching.
 QWEN3_5_RUNTIME_CONFIG = ModelRuntimeConfig(
+    vllm=VllmRuntimeConfig(
+        mamba_cache_mode="align",
+        enable_prefix_caching=True,
+    ),
     language_tower=LanguageTowerRuntimeConfig(
+        hf_overrides=qwen3_5_language_tower_hf_override,
+        model_class_overrides=QWEN3_5_MODEL_CLASS_OVERRIDES,
         lora_key_prefix="model.language_model.model.",
     ),
+    patch=PatchRuntimeConfig(install=install_qwen_gdn_patches),
 )
 
 FAMILY_RUNTIME_CONFIGS: Mapping[str, ModelRuntimeConfig] = {

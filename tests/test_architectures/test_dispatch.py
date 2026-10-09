@@ -12,6 +12,7 @@ import pytest
 from agilerl import architectures
 from agilerl.architectures.catalog import FAMILY_RUNTIME_CONFIGS
 from agilerl.architectures.nemotron_h.mamba import install_mamba_patches
+from agilerl.architectures.qwen3_5.packed import install_qwen_gdn_patches
 from agilerl.architectures.runtime import (
     MambaPatchConfig,
     ModelRuntimeConfig,
@@ -135,6 +136,13 @@ class TestInstallFamilyPatches:
         patch = FAMILY_RUNTIME_CONFIGS["nemotron_h"].patch
         assert patch.install is install_mamba_patches
         assert patch.mamba is not None
+
+    def test_qwen_catalog_install_is_gdn_packed_patches(self) -> None:
+        patch = FAMILY_RUNTIME_CONFIGS["qwen3_5_moe"].patch
+        assert patch.install is install_qwen_gdn_patches
+        assert (
+            FAMILY_RUNTIME_CONFIGS["qwen3_5"].patch.install is install_qwen_gdn_patches
+        )
 
 
 class TestFamilyRuntime:

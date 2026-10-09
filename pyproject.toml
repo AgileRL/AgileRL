@@ -239,6 +239,7 @@ include = [
     "agilerl/algorithms/core/llm_ops/fused_loss.py",
     "agilerl/architectures/nemotron_h/liger.py",
     "agilerl/architectures/nemotron_h/omni_language.py",
+    "agilerl/architectures/qwen3_5/causal_lm.py",
     "agilerl/architectures/vllm_language.py",
     "agilerl/algorithms/core/llm_ops/vllm_colocate.py",
     "agilerl/algorithms/grpo.py",
@@ -249,6 +250,8 @@ include = [
 
 [tool.ty.overrides.rules]
 unresolved-import = "ignore"
+# Unknown vLLM bases cannot form an MRO on hosted CPU (no vLLM extra).
+inconsistent-mro = "ignore"
 # Suppressions these files need on Linux (where vllm/liger resolve
 # and their base classes become checkable) are necessarily unused elsewhere.
 unused-ignore-comment = "ignore"

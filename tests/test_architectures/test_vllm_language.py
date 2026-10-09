@@ -19,6 +19,12 @@ from agilerl.architectures.gemma4 import (
 from agilerl.architectures.nemotron_h.language_tower import (
     omni_language_tower_hf_override,
 )
+from agilerl.architectures.qwen3_5 import (
+    QWEN3_5_LANGUAGE_ARCHITECTURE,
+    QWEN3_5_MODEL_CLASS_OVERRIDES,
+    QWEN3_5_MOE_LANGUAGE_ARCHITECTURE,
+    qwen3_5_language_tower_hf_override,
+)
 from agilerl.architectures.runtime import ModelRuntimeConfig
 from agilerl.architectures.vllm_language import (
     apply_language_tower_engine_kwargs,
@@ -41,6 +47,23 @@ class TestNemotronHOmniLanguageForCausalLM:
         assert prefixes["language_model.lm_head."] == "lm_head."
         assert prefixes["vision_model."] is None
         assert prefixes["mlp1."] is None
+
+
+class TestQwen35LanguageForCausalLM:
+    @pytest.mark.vllm
+    def test_maps_language_prefixes_and_drops_towers(self) -> None:
+        pytest.importorskip("vllm")
+        from agilerl.architectures.qwen3_5.causal_lm import (
+            Qwen3_5MoeLanguageForCausalLM,
+        )
+
+        prefixes = Qwen3_5MoeLanguageForCausalLM.hf_to_vllm_mapper.orig_to_new_prefix
+        assert prefixes["model.language_model."] == "model."
+        assert prefixes["model.visual."] is None
+        assert prefixes["mtp."] is None
+        assert Qwen3_5MoeLanguageForCausalLM.is_3d_moe_weight is True
+        assert Qwen3_5MoeLanguageForCausalLM.is_hybrid is True
+        assert callable(Qwen3_5MoeLanguageForCausalLM.get_mamba_state_shape_from_config)
 
 
 class TestNestedLanguageConfig:
@@ -117,6 +140,41 @@ class TestGemma4LanguageTowerHfOverride:
 
         assert resolved is config
         assert config.architectures == [GEMMA4_LANGUAGE_ARCHITECTURE]
+
+
+class TestQwen35LanguageTowerHfOverride:
+    def test_sets_moe_architecture_on_text_config(self) -> None:
+        language = SimpleNamespace(model_type="qwen3_5_moe_text")
+        config = SimpleNamespace(
+            model_type="qwen3_5_moe",
+            architectures=["Qwen3_5MoeForConditionalGeneration"],
+            text_config=language,
+        )
+
+        resolved = qwen3_5_language_tower_hf_override(config)
+
+        assert resolved is language
+        assert language.architectures == [QWEN3_5_MOE_LANGUAGE_ARCHITECTURE]
+
+    def test_sets_dense_architecture_on_text_config(self) -> None:
+        language = SimpleNamespace(model_type="qwen3_5_text")
+        config = SimpleNamespace(
+            model_type="qwen3_5",
+            text_config=language,
+        )
+
+        resolved = qwen3_5_language_tower_hf_override(config)
+
+        assert resolved is language
+        assert language.architectures == [QWEN3_5_LANGUAGE_ARCHITECTURE]
+
+    def test_sets_moe_architecture_on_language_only_config(self) -> None:
+        config = SimpleNamespace(model_type="qwen3_5_moe_text")
+
+        resolved = qwen3_5_language_tower_hf_override(config)
+
+        assert resolved is config
+        assert config.architectures == [QWEN3_5_MOE_LANGUAGE_ARCHITECTURE]
 
 
 class TestApplyTowerConnectorLoraEngineKwargs:
@@ -199,6 +257,29 @@ class TestApplyLanguageTowerEngineKwargs:
         assert kwargs["hf_overrides"] is gemma4_language_tower_hf_override
         assert "model_class_overrides" not in kwargs
 
+    def test_qwen3_5_strip_sets_language_tower_override(self) -> None:
+        kwargs: dict[str, object] = {}
+
+        apply_language_tower_engine_kwargs(
+            kwargs,
+            strip_multimodal_towers=True,
+            runtime=FAMILY_RUNTIME_CONFIGS["qwen3_5_moe"],
+        )
+
+        assert kwargs["hf_overrides"] is qwen3_5_language_tower_hf_override
+        assert kwargs["model_class_overrides"] == QWEN3_5_MODEL_CLASS_OVERRIDES
+
+    def test_qwen3_5_kept_towers_leave_kwargs_alone(self) -> None:
+        kwargs: dict[str, object] = {}
+
+        apply_language_tower_engine_kwargs(
+            kwargs,
+            strip_multimodal_towers=False,
+            runtime=FAMILY_RUNTIME_CONFIGS["qwen3_5_moe"],
+        )
+
+        assert kwargs == {}
+
     def test_gemma4_kept_towers_leave_kwargs_alone(self) -> None:
         kwargs: dict[str, object] = {}
 
@@ -260,6 +341,167 @@ class TestApplyLanguageTowerEngineKwargs:
         )
 
         assert kwargs == {}
+
+
+QWEN3_5_CAUSAL_LM_MODULE = "agilerl.architectures.qwen3_5.causal_lm"
+
+
+def install_qwen3_5_vllm_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
+    class WeightsMapper:
+        def __init__(self, orig_to_new_prefix: dict[str, str | None]) -> None:
+            self.orig_to_new_prefix = orig_to_new_prefix
+
+        def apply(self, weights):
+            mapped = []
+            for name, data in weights:
+                out_name = name
+                drop = False
+                for prefix, new in self.orig_to_new_prefix.items():
+                    if name.startswith(prefix):
+                        if new is None:
+                            drop = True
+                        else:
+                            out_name = name.replace(prefix, new, 1)
+                        break
+                if not drop:
+                    mapped.append((out_name, data))
+            return mapped
+
+    class Qwen3_5ForCausalLM:
+        def load_weights(self, weights) -> set[str]:
+            return {name for name, _ in weights}
+
+    class Qwen3_5MoeForCausalLM:
+        def load_weights(self, weights) -> set[str]:
+            return {name for name, _ in weights}
+
+    class Qwen3_5ForConditionalGeneration:
+        @classmethod
+        def get_mamba_state_dtype_from_config(cls, vllm_config: object) -> tuple:
+            return ()
+
+        @classmethod
+        def get_mamba_state_shape_from_config(cls, vllm_config: object) -> tuple:
+            return ()
+
+        @classmethod
+        def get_mamba_state_copy_func(cls) -> tuple:
+            return ()
+
+    class IsHybrid:
+        is_hybrid = True
+
+    class SupportsMRoPE:
+        supports_mrope = True
+
+    def package(name: str) -> ModuleType:
+        mod = ModuleType(name)
+        mod.__path__ = []
+        return mod
+
+    vllm_mod = package("vllm")
+    executor = package("vllm.model_executor")
+    models = package("vllm.model_executor.models")
+    qwen3_5 = ModuleType("vllm.model_executor.models.qwen3_5")
+    interfaces = ModuleType("vllm.model_executor.models.interfaces")
+    utils = ModuleType("vllm.model_executor.models.utils")
+    qwen3_5.Qwen3_5ForCausalLM = Qwen3_5ForCausalLM
+    qwen3_5.Qwen3_5MoeForCausalLM = Qwen3_5MoeForCausalLM
+    qwen3_5.Qwen3_5ForConditionalGeneration = Qwen3_5ForConditionalGeneration
+    interfaces.IsHybrid = IsHybrid
+    interfaces.SupportsMRoPE = SupportsMRoPE
+    utils.WeightsMapper = WeightsMapper
+
+    monkeypatch.setitem(sys.modules, "vllm", vllm_mod)
+    monkeypatch.setitem(sys.modules, "vllm.model_executor", executor)
+    monkeypatch.setitem(sys.modules, "vllm.model_executor.models", models)
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm.model_executor.models.qwen3_5",
+        qwen3_5,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm.model_executor.models.interfaces",
+        interfaces,
+    )
+    monkeypatch.setitem(sys.modules, "vllm.model_executor.models.utils", utils)
+    monkeypatch.delitem(sys.modules, QWEN3_5_CAUSAL_LM_MODULE, raising=False)
+
+
+class TestQwen35LanguageMapperWithoutVllm:
+    def test_class_maps_vl_checkpoint_prefixes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        install_qwen3_5_vllm_stubs(monkeypatch)
+
+        try:
+            mod = importlib.import_module(QWEN3_5_CAUSAL_LM_MODULE)
+            mapper = mod.Qwen3_5MoeLanguageForCausalLM.hf_to_vllm_mapper
+            assert mapper.orig_to_new_prefix == {
+                "model.language_model.": "model.",
+                "model.visual.": None,
+                "mtp.": None,
+            }
+            assert (
+                mod.Qwen3_5LanguageForCausalLM.hf_to_vllm_mapper
+                is mod.Qwen3_5MoeLanguageForCausalLM.hf_to_vllm_mapper
+            )
+            assert mod.Qwen3_5MoeLanguageForCausalLM.is_3d_moe_weight is True
+            assert not hasattr(mod.Qwen3_5LanguageForCausalLM, "is_3d_moe_weight")
+            assert mod.Qwen3_5MoeLanguageForCausalLM.is_hybrid is True
+            assert callable(
+                mod.Qwen3_5MoeLanguageForCausalLM.get_mamba_state_shape_from_config
+            )
+        finally:
+            sys.modules.pop(QWEN3_5_CAUSAL_LM_MODULE, None)
+
+    def test_language_towers_compute_text_mrope_positions(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        install_qwen3_5_vllm_stubs(monkeypatch)
+
+        try:
+            mod = importlib.import_module(QWEN3_5_CAUSAL_LM_MODULE)
+            towers = (
+                mod.Qwen3_5LanguageForCausalLM,
+                mod.Qwen3_5MoeLanguageForCausalLM,
+            )
+
+            for tower in towers:
+                positions, delta = tower().get_mrope_input_positions([1, 2, 3, 4], [])
+
+                assert tower.supports_mrope is True
+                assert positions.tolist() == [[0, 1, 2, 3]] * 3
+                assert delta == 0
+
+            with pytest.raises(ValueError, match="text-only"):
+                mod.Qwen3_5MoeLanguageForCausalLM().get_mrope_input_positions(
+                    [1, 2], [object()]
+                )
+        finally:
+            sys.modules.pop(QWEN3_5_CAUSAL_LM_MODULE, None)
+
+    def test_language_towers_load_mapped_vl_weights(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        install_qwen3_5_vllm_stubs(monkeypatch)
+
+        try:
+            mod = importlib.import_module(QWEN3_5_CAUSAL_LM_MODULE)
+            weights = (
+                ("model.language_model.embed", object()),
+                ("model.visual.patch", object()),
+                ("mtp.head", object()),
+            )
+
+            for tower in (
+                mod.Qwen3_5LanguageForCausalLM,
+                mod.Qwen3_5MoeLanguageForCausalLM,
+            ):
+                assert tower().load_weights(weights) == {"model.embed"}
+        finally:
+            sys.modules.pop(QWEN3_5_CAUSAL_LM_MODULE, None)
 
 
 class TestOmniLanguageMapperWithoutVllm:

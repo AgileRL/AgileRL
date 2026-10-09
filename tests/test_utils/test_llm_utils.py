@@ -47,6 +47,10 @@ from agilerl.architectures.gemma4 import gemma4_language_tower_hf_override
 from agilerl.architectures.nemotron_h.language_tower import (
     omni_language_tower_hf_override,
 )
+from agilerl.architectures.qwen3_5 import (
+    QWEN3_5_MODEL_CLASS_OVERRIDES,
+    qwen3_5_language_tower_hf_override,
+)
 from agilerl.architectures.vllm_language import (
     nested_language_config,
 )
@@ -3389,6 +3393,19 @@ class TestBuildVllmLlmInitKwargs:
 
         assert kwargs["hf_overrides"] is gemma4_language_tower_hf_override
         assert "model_class_overrides" not in kwargs
+
+    def test_strip_multimodal_towers_applies_qwen3_5_language_tower(self, monkeypatch):
+        stub_catalog_model_type(monkeypatch, "qwen3_5_moe")
+        kwargs = build_vllm_llm_init_kwargs(
+            _vllm_config(strip_multimodal_towers=True),
+            trainer_model_name_or_path="Qwen/Qwen3.6-35B-A3B",
+            max_model_len=32768,
+        )
+
+        assert kwargs["hf_overrides"] is qwen3_5_language_tower_hf_override
+        assert kwargs["model_class_overrides"] == QWEN3_5_MODEL_CLASS_OVERRIDES
+        assert kwargs["mamba_cache_mode"] == "align"
+        assert kwargs["enable_prefix_caching"] is True
 
 
 class TestBuildVllmRolloutLoraRequest:
