@@ -4126,6 +4126,67 @@ class TestStrictLoraConfigLoading:
         loader.load_checkpoint(str(tmp_path), load_optimizer=False)
         assert loader.lora_config.r == 4
 
+    def test_checkpoint_with_extra_targets_loads_shared_weights(self, tmp_path):
+        # Arrange
+        torch.manual_seed(0)
+        saver = _build_grpo_with_lora(
+            get_lora_config(r=4, target_modules=("linear_1", "linear_2"))
+        )
+        with torch.no_grad():
+            for name, param in saver.actor.named_parameters():
+                if ".actor." in name:
+                    param.normal_()
+        saver.save_checkpoint(str(tmp_path), lora_only=True, save_optimizer=False)
+        saved = {
+            name: param.detach().clone()
+            for name, param in saver.actor.named_parameters()
+            if ".actor." in name and "linear_1" in name
+        }
+        loader = _build_grpo_with_lora(
+            get_lora_config(r=4, target_modules=("linear_1",))
+        )
+
+        # Act
+        with pytest.warns(UserWarning, match=r"target_modules \['linear_2'\]"):
+            loader.load_checkpoint(str(tmp_path), load_optimizer=False)
+
+        # Assert
+        loaded = {
+            name: param
+            for name, param in loader.actor.named_parameters()
+            if ".actor." in name
+        }
+        assert loaded.keys() == saved.keys()
+        for name, param in loaded.items():
+            assert torch.equal(param, saved[name])
+        assert set(loader.lora_config.target_modules) == {"linear_1"}
+
+    def test_checkpoint_with_extra_targets_and_other_diff_raises(self, tmp_path):
+        saver = _build_grpo_with_lora(
+            get_lora_config(r=2, target_modules=("linear_1", "linear_2"))
+        )
+        saver.save_checkpoint(str(tmp_path), lora_only=True, save_optimizer=False)
+
+        loader = _build_grpo_with_lora(
+            get_lora_config(r=4, target_modules=("linear_1",))
+        )
+        with pytest.raises(ValueError, match="LoRA configs differ"):
+            loader.load_checkpoint(str(tmp_path), load_optimizer=False)
+
+    def test_regex_target_modules_are_not_treated_as_dropped_extras(self):
+        current = LoraConfig(
+            r=4,
+            lora_alpha=8,
+            target_modules=r".*linear_1.*",
+            task_type="CAUSAL_LM",
+            lora_dropout=0.0,
+        )
+        checkpoint = get_lora_config(r=4, target_modules=("linear_1", "linear_2"))
+
+        dropped = LLMAlgorithm._lora_targets_dropped_on_load(current, checkpoint)
+
+        assert dropped == []
+
 
 def _build_tunable_grpo(*, lr: float, beta: float) -> GRPO:
     """Tiny GRPO whose ``lr`` is a registry hyperparameter."""

@@ -2661,3 +2661,36 @@ class TestLoraExpertsRecomputeGuards:
         out.sum().backward()
 
         assert torch.equal(hidden.grad, torch.zeros_like(hidden))
+
+
+class TestLowRankDelta:
+    @pytest.mark.parametrize("use_grouped_mm", [False, True], ids=["loop", "gmm"])
+    def test_matches_per_expert_reference(self, monkeypatch, use_grouped_mm):
+        # Arrange
+        torch.manual_seed(0)
+        counts = [3, 0, 2, 3]
+        scaling = 0.3
+        rows = torch.randn(sum(counts), HIDDEN, requires_grad=True)
+        lora_a = torch.randn(NUM_EXPERTS, 4, HIDDEN, requires_grad=True)
+        lora_b = torch.randn(NUM_EXPERTS, INTERMEDIATE, 4, requires_grad=True)
+        offs = moe_gemm.group_offsets(counts, rows.device)
+        if use_grouped_mm:
+            monkeypatch.setattr(moe_gemm, "_use_grouped_mm", lambda _x: True)
+        expected = torch.cat(
+            [
+                chunk @ lora_a[expert].T @ lora_b[expert].T * scaling
+                for expert, chunk in enumerate(rows.split(counts))
+            ]
+        )
+        expected_grads = torch.autograd.grad(
+            expected.square().sum(), (rows, lora_a, lora_b)
+        )
+
+        # Act
+        delta = moe_adapters.low_rank_delta(rows, lora_a, lora_b, counts, offs, scaling)
+        grads = torch.autograd.grad(delta.square().sum(), (rows, lora_a, lora_b))
+
+        # Assert
+        torch.testing.assert_close(delta, expected, rtol=1e-5, atol=1e-5)
+        for grad, expected_grad in zip(grads, expected_grads, strict=True):
+            torch.testing.assert_close(grad, expected_grad, rtol=1e-5, atol=1e-5)

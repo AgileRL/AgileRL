@@ -176,8 +176,9 @@ def low_rank_delta(
     scaling: float,
 ) -> torch.Tensor:
     """Scaled ``rows @ A[e]^T @ B[e]^T`` for expert-sorted rows with stacked ``[E, r, in]`` / ``[E, out, r]`` factors."""
-    down = grouped_linear(rows, lora_a, counts, offs)
-    return grouped_linear(down, lora_b, counts, offs).mul_(scaling)
+    # Scale the rank-r rows: no multiply runs over [rows, out] in forward or backward.
+    down = grouped_linear(rows, lora_a, counts, offs).mul_(scaling)
+    return grouped_linear(down, lora_b, counts, offs)
 
 
 def split_lora_delta(

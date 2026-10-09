@@ -3560,6 +3560,14 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 self.lora_config, ckpt_lora_config
             ):
                 self.lora_config = ckpt_lora_config
+            elif dropped_targets := self._lora_targets_dropped_on_load(
+                self.lora_config, ckpt_lora_config
+            ):
+                warnings.warn(
+                    f"Checkpoint also adapts target_modules {dropped_targets}; "
+                    "loading without those adapter weights.",
+                    stacklevel=2,
+                )
             else:
                 raise ValueError(
                     self._format_lora_config_mismatch_error(
@@ -6926,6 +6934,35 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             b_dict.pop(key, None)
         return a_dict == b_dict
 
+    @staticmethod
+    def _lora_targets_dropped_on_load(
+        current: LoraConfig, checkpoint: LoraConfig
+    ) -> list[str]:
+        """Checkpoint target modules a live config drops, if that is the only difference.
+
+        :param current: LoRA config from the live loading agent.
+        :type current: peft.LoraConfig
+        :param checkpoint: LoRA config persisted in the checkpoint.
+        :type checkpoint: peft.LoraConfig
+        :return: Sorted extra ``target_modules`` when ``checkpoint`` adapts a strict
+            superset of ``current``'s modules and matches it otherwise; else empty.
+        :rtype: list[str]
+        """
+        current_targets = current.target_modules
+        checkpoint_targets = checkpoint.target_modules
+        # A string is a regex over module names, not comparable as a set.
+        if not isinstance(current_targets, (list, set, tuple)) or not isinstance(
+            checkpoint_targets, (list, set, tuple)
+        ):
+            return []
+        if not set(current_targets) < set(checkpoint_targets):
+            return []
+        trimmed = copy.copy(checkpoint)
+        trimmed.target_modules = current_targets
+        if not LLMAlgorithm._lora_configs_equivalent(current, trimmed):
+            return []
+        return sorted(set(checkpoint_targets) - set(current_targets))
+
     def _load_adapter_weights(
         self,
         checkpoint_dir: str,
@@ -6933,9 +6970,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     ) -> None:
         """Overwrite a live adapter's weights from disk.
 
-        The checkpoint's LoRA config must match the live algorithm's config (a
-        mismatch is rejected up-front by :meth:`_load_model_checkpoint`), so the
-        adapter weights are loaded into the live adapter as-is.
+        The checkpoint's LoRA config matches the live algorithm's config, or adapts
+        extra target modules (:meth:`_load_model_checkpoint` rejects anything else).
+        Tensors for those extra modules have no live parameter and are skipped.
 
         :param checkpoint_dir: Directory written by :meth:`save_checkpoint`; must contain
             ``<adapter_name>/adapter_model.safetensors``.
