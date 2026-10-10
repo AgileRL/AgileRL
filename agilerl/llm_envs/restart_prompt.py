@@ -28,6 +28,8 @@ class KeptTurn(NamedTuple):
     :param obs_text: The observation's rendered text.
     :param role: Chat role the observation spoke as.
     :param image: The observation's image, or ``None``.
+    :param older_obs_text: Text shown in place of ``obs_text`` once a later
+        turn is kept, or ``None`` to show ``obs_text``.
     """
 
     gen_ids: torch.Tensor
@@ -35,6 +37,7 @@ class KeptTurn(NamedTuple):
     obs_text: str
     role: str
     image: object | None
+    older_obs_text: str | None
 
 
 class KeptTurnPiece(NamedTuple):
@@ -71,10 +74,11 @@ class RestartPromptMixin:
     _goal_images: list[Image.Image]
     _segment_prompt_tokens: int | None
     _segment_max_images: int | None
+    _restart_older_images: bool
     _tokenize_initial_prompt: Callable[[str], torch.Tensor]
     _chat_prompt_string: Callable[[str], str]
     _engine_ids: Callable[[str], torch.Tensor]
-    _prompt_budget: Callable[[], int | None]
+    _prompt_limit: Callable[[], int | None]
     _text_feedback_ids: Callable[[str, str, int], torch.Tensor]
     _decode: Callable[..., str]
     _image_feedback_turn_text: Callable[[str, str, int], str]
@@ -86,7 +90,7 @@ class RestartPromptMixin:
         """Restart prompt of the action list then the latest observation, in one user turn.
 
         :param image: The observation's image or images in placeholder order, or ``None``.
-        :return: ``None`` when the prompt is over the model budget.
+        :return: ``None`` when the prompt is over the prompt limit.
         """
         body = obs_text.removeprefix(IMAGE_USER_CONTENT_PREFIX)
         restart_text = (
@@ -117,7 +121,7 @@ class RestartPromptMixin:
                 list(image) if isinstance(image, list) else [image],
                 [ImageProcessorCall.from_inputs(text=prompt_str, image=image)],
             )
-        max_pt = self._prompt_budget()
+        max_pt = self._prompt_limit()
         if max_pt is not None and int(prompt_ids.shape[-1]) > max_pt:
             return None
         return restart
@@ -128,7 +132,9 @@ class RestartPromptMixin:
         """Restart prompt of the action list, then the kept turns as they were sampled.
 
         The goal images follow the action list. The last kept turn's
-        observation is the latest one. Kept images are taken newest first, at
+        observation is the latest one; earlier ones show their
+        ``older_obs_text`` when set, and their images only with
+        ``_restart_older_images``. Kept images are taken newest first, at
         most ``segment_max_images - 1`` with the goal images, so the next
         turn's image fits. The oldest turns are dropped until the prompt
         plus one more turn as long as the latest fits ``segment_prompt_tokens``
@@ -158,12 +164,7 @@ class RestartPromptMixin:
         else:
             head_str = self._chat_prompt_string(head_text)
             head_ids = head_engine_ids = self._engine_ids(head_str)
-        limits = [
-            limit
-            for limit in (self._segment_prompt_tokens, self._prompt_budget())
-            if limit is not None
-        ]
-        token_limit = min(limits) if limits else None
+        token_limit = self._prompt_limit()
         # The latest observation keeps its image even at segment_max_images=1.
         images_left = (
             None
@@ -194,10 +195,13 @@ class RestartPromptMixin:
         """Newest kept turns that fit the token and image budgets, oldest first."""
         pieces: list[KeptTurnPiece] = []
         for turn in reversed(self._kept_turns):
+            older = bool(pieces)
             piece = self._kept_turn_piece(
                 turn,
                 image_path=image_path,
-                with_image=images_left is None or images_left > 0,
+                with_image=(images_left is None or images_left > 0)
+                and (not older or self._restart_older_images),
+                older=older,
             )
             piece_len = int(piece.gen_ids.shape[1] + piece.train_ids.shape[1])
             if token_limit is not None and not pieces:
@@ -285,16 +289,20 @@ class RestartPromptMixin:
         )
 
     def _kept_turn_piece(
-        self, turn: KeptTurn, image_path: bool, with_image: bool
+        self, turn: KeptTurn, image_path: bool, with_image: bool, older: bool
     ) -> KeptTurnPiece:
         """One kept turn's sampled ids and the observation framed after them.
 
         :param turn: The kept turn.
         :param image_path: Whether the restarted prompt is an image prompt.
         :param with_image: Whether the observation may keep its image.
+        :param older: Whether a later turn is kept after this one.
         """
         gen_ids = turn.gen_ids.unsqueeze(0)
         obs_text = turn.obs_text
+        if older and turn.older_obs_text is not None:
+            prefix = IMAGE_USER_CONTENT_PREFIX if turn.image is not None else ""
+            obs_text = prefix + turn.older_obs_text
         keep_image = image_path and with_image and turn.image is not None
         if turn.image is not None and not keep_image:
             obs_text = obs_text.removeprefix(IMAGE_USER_CONTENT_PREFIX)

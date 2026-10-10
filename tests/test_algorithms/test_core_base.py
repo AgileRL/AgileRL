@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import io
 import logging
 import os
 import re
@@ -60,8 +61,9 @@ import torch.nn.functional as F
 from accelerate import Accelerator
 from accelerate.state import AcceleratorState
 from gymnasium import spaces
+from peft import LoraConfig
 from torch import nn, optim
-from torch.distributed.tensor import distribute_tensor
+from torch.distributed.tensor import DTensor, distribute_tensor
 from torch.distributed.tensor.placement_types import Shard
 
 from agilerl import HAS_LLM_DEPENDENCIES
@@ -83,6 +85,13 @@ from agilerl.algorithms.core.registry import (
     RLParameter,
 )
 from agilerl.algorithms.grpo import GRPO
+from agilerl.arena.memory import DeviceSpec, estimate_training
+from agilerl.arena.memory.formulas import (
+    MAX_UNDERPREDICTION,
+    TRAINING_HEADROOM_FRACTION,
+)
+from agilerl.arena.memory.manifest import ALGORITHM_NAMES
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.profiling import ProfilingConfig
 from agilerl.distributed import FSDPConfig
 from agilerl.distributed.expert_parallel import build_parallel_mesh
@@ -100,13 +109,18 @@ from agilerl.wrappers.agent import RSNorm
 from tests.helper_functions import capture_grama_snapshot
 from tests.test_algorithms.test_base import DummyMARLAlgorithm, DummyRLAlgorithm
 from tests.test_algorithms.test_llms.llm_helpers import create_module
+from tests.test_algorithms.test_llms.test_ppo_llm_passes import (
+    make_ppo,
+    patch_cuda_device,
+    save_checkpoint_config,
+)
 
 pytest.importorskip("peft", reason="LLM checkpoint tests require peft.")
 pytest.importorskip("transformers", reason="LLM checkpoint tests require transformers.")
 
 if HAS_LLM_DEPENDENCIES or TYPE_CHECKING:
     from peft import LoraConfig
-    from transformers import LlamaConfig
+    from transformers import LlamaConfig, NemotronHConfig, NemotronHForCausalLM
 
 _LLM_DEPS_SKIP = pytest.mark.skipif(
     not HAS_LLM_DEPENDENCIES,
@@ -2297,7 +2311,11 @@ class TestLLMWrapModels:
     def test_wrap_models_applies_fsdp2_when_configured(self):
         """FSDP2 materializes shards from CPU state, then builds the optimizer."""
         with patch("agilerl.algorithms.core.base.init_distributed", return_value=True):
-            agent = _make_llm_agent(fsdp_config=FSDPConfig())
+            agent = _make_llm_agent(
+                fsdp_config=FSDPConfig(
+                    routed_expert_chunk_mib=64, optim_cpu_offload=True
+                )
+            )
         agent.gradient_checkpointing = True
         original_actor = agent.actor
         with patch(
@@ -2354,6 +2372,321 @@ class TestLLMWrapModels:
 
         with pytest.raises(ValueError, match="cannot be combined"):
             LLMAlgorithm.wrap_models(agent)
+
+
+@pytest.fixture
+def moe_ppo(monkeypatch, tmp_path):
+    """Tiny CPU PPO whose memory estimate reads the Lightning 30B-A3B MoE config."""
+    agent = make_ppo()
+    lightning = SUPPORTED_MODEL_INFO[
+        "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16"
+    ]
+    save_checkpoint_config(agent, tmp_path, lightning.config)
+    monkeypatch.setattr(agent, "max_model_len", 16384)
+    return agent
+
+
+def estimate_gib(agent, chunk_mib: int, optim_cpu_offload: bool) -> float:
+    """Training estimate of ``agent`` at an EP-8 placement, in GiB."""
+    model, settings = agent._training_estimate_inputs(
+        ALGORITHM_NAMES[agent.algo], agent.beta, fuse_actor_critic_pass=True
+    )
+    fsdp = FSDPConfig(
+        ep=8,
+        routed_expert_chunk_mib=chunk_mib,
+        optim_cpu_offload=optim_cpu_offload,
+    )
+    device = DeviceSpec(total_bytes=2**50, name="test-gpu")
+    estimate = estimate_training(
+        model, device, settings.model_copy(update={"fsdp": fsdp})
+    )
+    return estimate.total_bytes / 2**30
+
+
+def with_buffer_gib(peak_gib: float) -> float:
+    """Smallest budget at which ``peak_gib`` fits with the underprediction buffer."""
+    return peak_gib / (1 - MAX_UNDERPREDICTION)
+
+
+def patch_budget_gib(agent, monkeypatch, budget_gib: float) -> None:
+    """Point ``agent`` at a CUDA device whose usable memory is ``budget_gib``."""
+    patch_cuda_device(
+        agent, monkeypatch, int(budget_gib / (1 - TRAINING_HEADROOM_FRACTION) * 2**30)
+    )
+
+
+class TestLLMAlgorithmResolveFsdpConfig:
+    def test_set_values_are_kept(self, moe_ppo, monkeypatch):
+        config = FSDPConfig(ep=8, routed_expert_chunk_mib=512, optim_cpu_offload=False)
+        patch_cuda_device(moe_ppo, monkeypatch, 2**30)
+
+        assert moe_ppo._resolve_fsdp_config(config) is config
+
+    @pytest.mark.parametrize(
+        ("cpu_offload", "optim_cpu_offload"), [(False, True), (True, False)]
+    )
+    def test_off_cuda_takes_the_smallest_chunk(
+        self, moe_ppo, cpu_offload, optim_cpu_offload
+    ):
+        resolved = moe_ppo._resolve_fsdp_config(FSDPConfig(cpu_offload=cpu_offload))
+
+        assert resolved.routed_expert_chunk_mib == 64
+        assert resolved.optim_cpu_offload is optim_cpu_offload
+
+    @pytest.mark.parametrize(
+        ("fits", "exceeds", "expected"),
+        [
+            ((512, False), None, (512, False)),
+            ((512, True), (512, False), (512, True)),
+            ((128, True), (256, True), (128, True)),
+            (None, (64, True), (64, True)),
+        ],
+        ids=["gpu-optimizer", "offload-at-512", "offload-at-128", "nothing-fits"],
+    )
+    def test_unset_fields_follow_the_budget(
+        self, moe_ppo, monkeypatch, fits, exceeds, expected
+    ):
+        # Arrange: the budget sits between the placement that fits and the one
+        # that does not, or 1 MiB past the one given. A GPU optimizer fits only
+        # with the underprediction buffer.
+        if exceeds is None:
+            budget = with_buffer_gib(estimate_gib(moe_ppo, *fits)) + 2**-10
+        elif fits is None:
+            budget = estimate_gib(moe_ppo, *exceeds) - 2**-10
+        else:
+            budget = (
+                estimate_gib(moe_ppo, *fits) + estimate_gib(moe_ppo, *exceeds)
+            ) / 2
+        patch_budget_gib(moe_ppo, monkeypatch, budget)
+
+        # Act
+        resolved = moe_ppo._resolve_fsdp_config(FSDPConfig(ep=8))
+
+        # Assert
+        assert (resolved.routed_expert_chunk_mib, resolved.optim_cpu_offload) == (
+            expected
+        )
+        assert resolved.ep == 8
+
+    def test_gpu_optimizer_inside_the_buffer_is_offloaded(self, moe_ppo, monkeypatch):
+        # Arrange: a GPU optimizer fits the budget, but not with the buffer.
+        patch_budget_gib(moe_ppo, monkeypatch, estimate_gib(moe_ppo, 512, False) + 1)
+
+        # Act
+        resolved = moe_ppo._resolve_fsdp_config(FSDPConfig(ep=8))
+
+        # Assert
+        assert resolved.routed_expert_chunk_mib == 512
+        assert resolved.optim_cpu_offload is True
+
+    def test_set_chunk_places_the_optimizer_at_that_chunk(self, moe_ppo, monkeypatch):
+        # Arrange: a GPU optimizer fits with the buffer at 64 MiB but not at 128 MiB.
+        budget = estimate_gib(moe_ppo, 64, False) + estimate_gib(moe_ppo, 128, False)
+        patch_budget_gib(moe_ppo, monkeypatch, with_buffer_gib(budget / 2))
+
+        # Act
+        resolved = moe_ppo._resolve_fsdp_config(
+            FSDPConfig(ep=8, routed_expert_chunk_mib=64)
+        )
+
+        # Assert
+        assert resolved.routed_expert_chunk_mib == 64
+        assert resolved.optim_cpu_offload is False
+
+    def test_repeat_calls_pick_the_same_values(self, moe_ppo, monkeypatch):
+        budget = estimate_gib(moe_ppo, 128, True) + estimate_gib(moe_ppo, 256, True)
+        patch_budget_gib(moe_ppo, monkeypatch, budget / 2)
+
+        picks = [moe_ppo._resolve_fsdp_config(FSDPConfig(ep=8)) for _ in range(3)]
+
+        assert picks[0] == picks[1] == picks[2]
+
+    def test_logs_the_choice_peak_and_budget(self, moe_ppo, monkeypatch, caplog):
+        # Arrange
+        peak = estimate_gib(moe_ppo, 512, False)
+        budget = with_buffer_gib(peak) + 1
+        patch_budget_gib(moe_ppo, monkeypatch, budget)
+
+        # Act
+        with caplog.at_level(logging.INFO, logger="agilerl.algorithms.core.base"):
+            moe_ppo._resolve_fsdp_config(FSDPConfig(ep=8))
+
+        # Assert
+        assert [record.levelno for record in caplog.records] == [logging.INFO]
+        assert (
+            "FSDP memory: routed_expert_chunk_mib=512, optim_cpu_offload=False; "
+            f"estimated peak {peak:.2f} GiB, budget {budget:.2f} GiB"
+        ) == caplog.records[0].getMessage()
+
+    def test_warns_when_no_choice_fits(self, moe_ppo, monkeypatch, caplog):
+        # Arrange
+        peak = estimate_gib(moe_ppo, 64, True)
+        patch_budget_gib(moe_ppo, monkeypatch, peak - 1)
+
+        # Act
+        with caplog.at_level(logging.INFO, logger="agilerl.algorithms.core.base"):
+            resolved = moe_ppo._resolve_fsdp_config(FSDPConfig(ep=8))
+
+        # Assert
+        assert (resolved.routed_expert_chunk_mib, resolved.optim_cpu_offload) == (
+            64,
+            True,
+        )
+        assert [record.levelno for record in caplog.records] == [logging.WARNING]
+        assert (
+            caplog.records[0]
+            .getMessage()
+            .endswith(
+                f"estimated peak {peak:.2f} GiB, budget {peak - 1:.2f} GiB (over budget)"
+            )
+        )
+
+    def test_every_rank_takes_rank_zero_pick(self, moe_ppo, monkeypatch):
+        # Arrange: this rank's device fits a GPU optimizer at 512 MiB; rank 0's
+        # picked 64 MiB with the optimizer offloaded.
+        patch_budget_gib(
+            moe_ppo, monkeypatch, with_buffer_gib(estimate_gib(moe_ppo, 512, False)) + 1
+        )
+        sent = []
+
+        def broadcast_from_rank_zero(objects, src=0):
+            sent.append((list(objects), src))
+            return [64, True]
+
+        monkeypatch.setattr(
+            core_base, "broadcast_object_list", broadcast_from_rank_zero
+        )
+
+        # Act
+        resolved = moe_ppo._resolve_fsdp_config(FSDPConfig(ep=8))
+
+        # Assert
+        assert sent == [([512, False], 0)]
+        assert (resolved.routed_expert_chunk_mib, resolved.optim_cpu_offload) == (
+            64,
+            True,
+        )
+        assert resolved.ep == 8
+
+
+class TestLLMAlgorithmTrainingEstimateInputs:
+    def test_rows_default_to_the_context_length(self, moe_ppo):
+        _, settings = moe_ppo._training_estimate_inputs(
+            ALGORITHM_NAMES[moe_ppo.algo], 0.0, fuse_actor_critic_pass=True
+        )
+
+        assert settings.max_model_len == 16384
+
+    def test_max_row_tokens_sizes_the_rows(self, moe_ppo, monkeypatch):
+        monkeypatch.setattr(moe_ppo, "max_row_tokens", 4096)
+
+        _, settings = moe_ppo._training_estimate_inputs(
+            ALGORITHM_NAMES[moe_ppo.algo], 0.0, fuse_actor_critic_pass=True
+        )
+
+        assert settings.max_model_len == 4096
+
+    def test_update_rows_are_every_rank_s_rows(self, moe_ppo, monkeypatch):
+        # Arrange: 8 prompts x 2 completions over 4 data-parallel ranks.
+        monkeypatch.setattr(core_base, "get_world_size", lambda: 4)
+        monkeypatch.setattr(moe_ppo, "shard_runtime", FSDPRuntime(FSDPConfig()))
+        moe_ppo.configure_batch_size_per_process(8, None, None, group_size=2)
+
+        # Act
+        _, settings = moe_ppo._training_estimate_inputs(
+            ALGORITHM_NAMES[moe_ppo.algo], 0.0, fuse_actor_critic_pass=True
+        )
+
+        # Assert
+        assert moe_ppo.batch_size_per_process == 4
+        assert settings.n_training_gpus == 4
+        assert settings.trajectories_per_update == 16
+        assert settings.trajectories == moe_ppo.batch_size_per_process
+
+
+@pytest.fixture
+def vwa_super_vl(monkeypatch, tmp_path):
+    """CPU CISPO shaped as the VWA Super-VL launch: 16 prompts x 8 over 16 trainer GPUs."""
+    agent = GRPO(
+        actor_network=create_module(
+            input_size=6, max_tokens=4, vocab_size=64, device="cpu"
+        ),
+        pad_token_id=63,
+        pad_token="<pad>",
+        loss_type="cispo",
+        beta=0.05,
+        max_output_tokens=4,
+        max_model_len=12,
+        wrap=False,
+        calc_position_embeddings=False,
+        device="cpu",
+        use_liger_loss=False,
+        lora_config=LoraConfig(r=4, target_modules=["linear_1"], task_type="CAUSAL_LM"),
+    )
+    fsdp = FSDPConfig(ep=8, shard_group_size=8, reduce_dtype="bfloat16")
+    monkeypatch.setattr(core_base, "get_world_size", lambda: 16)
+    monkeypatch.setattr(agent, "shard_runtime", FSDPRuntime(fsdp))
+    agent.configure_batch_size_per_process(16, 1, None, group_size=8)
+    monkeypatch.setattr(agent, "fsdp_config", fsdp)
+    monkeypatch.setattr(agent, "max_row_tokens", 24000 + 5120)
+    monkeypatch.setattr(agent, "gradient_checkpointing", True)
+    monkeypatch.setattr(
+        agent,
+        "lora_config",
+        LoraConfig(
+            r=8,
+            lora_alpha=32,
+            target_modules=["q_proj", "o_proj", "up_proj", "in_proj", "out_proj"],
+            target_parameters=["mixer.experts.up_proj", "mixer.experts.down_proj"],
+            lora_dropout=0.0,
+        ),
+    )
+    agent.actor.to(torch.bfloat16)
+    super_vl = SUPPORTED_MODEL_INFO[
+        "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16"
+    ]
+    save_checkpoint_config(agent, tmp_path, super_vl.config)
+    return agent
+
+
+class TestLLMAlgorithmResolveFsdpConfigVwa:
+    @pytest.mark.parametrize(
+        ("name", "cuda_gib"),
+        [("NVIDIA A100-SXM4-80GB", 79.15), ("NVIDIA H100 80GB HBM3", 79.11)],
+    )
+    def test_vwa_super_vl_offloads_at_256_mib(
+        self, vwa_super_vl, monkeypatch, name, cuda_gib
+    ):
+        # Arrange
+        monkeypatch.setattr(vwa_super_vl, "device", "cuda:0")
+        monkeypatch.setattr(
+            torch.cuda,
+            "get_device_properties",
+            lambda _device: SimpleNamespace(
+                total_memory=int(cuda_gib * 2**30), name=name, major=9, minor=0
+            ),
+        )
+
+        # Act
+        _, settings = vwa_super_vl._training_estimate_inputs(
+            ALGORITHM_NAMES[vwa_super_vl.algo], 0.05, fuse_actor_critic_pass=False
+        )
+        resolved = vwa_super_vl._resolve_fsdp_config(vwa_super_vl.fsdp_config)
+
+        # Assert
+        assert vwa_super_vl.batch_size_per_process == 8
+        assert settings.trajectories == 8
+        assert resolved.routed_expert_chunk_mib == 512
+        assert resolved.optim_cpu_offload is True
+
+
+class TestLLMAlgorithmTrainingDeviceSpec:
+    def test_budget_keeps_a_share_of_the_cuda_capacity_free(self, moe_ppo, monkeypatch):
+        patch_cuda_device(moe_ppo, monkeypatch, 80 * 2**30)
+
+        device = moe_ppo._training_device_spec()
+
+        assert device.usable_bytes == int(80 * 2**30 * 0.975)
 
 
 class TestLLMAlgorithmApplyLr:
@@ -3987,6 +4320,91 @@ class TestLLMSimpleCheckpointLoad:
                 )
 
 
+class TestLLMAlgorithmSnapshotCheckpoint:
+    def test_training_after_snapshot_does_not_change_written_checkpoint(
+        self, grpo_factory, tmp_path
+    ):
+        # Arrange
+        agent = _grpo_from_template(grpo_factory)
+        _, lora_param = get_param_by_name(agent, "lora_A.actor.weight")
+        for p in agent.actor.parameters():
+            if p.requires_grad:
+                p.grad = torch.ones_like(p)
+        agent.optimizer.step()
+        agent.optimizer.zero_grad()
+        with torch.no_grad():
+            lora_param.fill_(0.25)
+            find_exp_avg_in_opt_state(agent).fill_(0.5)
+        agent.scores = [1.0]
+
+        # Act
+        snapshot = agent.snapshot_checkpoint(lora_only=True, save_optimizer=True)
+        with torch.no_grad():
+            lora_param.fill_(9.0)
+        for p in agent.actor.parameters():
+            if p.requires_grad:
+                p.grad = torch.ones_like(p)
+        agent.optimizer.step()
+        agent.scores.append(2.0)
+        snapshot.write(tmp_path)
+        agent.load_checkpoint(str(tmp_path), load_optimizer=True)
+
+        # Assert
+        _, restored_lora = get_param_by_name(agent, "lora_A.actor.weight")
+        restored_exp_avg = find_exp_avg_in_opt_state(agent)
+        step = next(iter(agent.optimizer.optimizer.state.values()))["step"]
+        assert torch.equal(restored_lora, torch.full_like(restored_lora, 0.25))
+        assert torch.equal(restored_exp_avg, torch.full_like(restored_exp_avg, 0.5))
+        assert int(step) == 1
+        assert agent.scores == [1.0]
+
+    def test_snapshot_without_optimizer_loads_with_fresh_optimizer(
+        self, grpo_factory, tmp_path
+    ):
+        # Arrange
+        agent = _grpo_from_template(grpo_factory)
+        _, lora_param = get_param_by_name(agent, "lora_A.actor.weight")
+        with torch.no_grad():
+            lora_param.fill_(0.25)
+
+        # Act
+        agent.snapshot_checkpoint(lora_only=True, save_optimizer=False).write(tmp_path)
+        with torch.no_grad():
+            lora_param.fill_(9.0)
+        with pytest.warns(UserWarning, match="Optimizer state not found"):
+            agent.load_checkpoint(str(tmp_path), load_optimizer=True)
+
+        # Assert
+        _, restored_lora = get_param_by_name(agent, "lora_A.actor.weight")
+        assert torch.equal(restored_lora, torch.full_like(restored_lora, 0.25))
+        assert not load_attributes_checkpoint(tmp_path)["network_info"]["optimizers"]
+
+    def test_write_files_streams_the_written_directory_attributes_last(
+        self, grpo_factory, tmp_path
+    ):
+        # Arrange
+        agent = _grpo_from_template(grpo_factory)
+        snapshot = agent.snapshot_checkpoint(lora_only=True, save_optimizer=True)
+        streamed: dict[str, io.BytesIO] = {}
+
+        def open_stream(relative_path: str) -> nullcontext[io.BytesIO]:
+            streamed[relative_path] = io.BytesIO()
+            return nullcontext(streamed[relative_path])
+
+        # Act
+        snapshot.write_files(open_stream)
+        snapshot.write(tmp_path)
+
+        # Assert
+        written = {
+            path.relative_to(tmp_path).as_posix(): path.read_bytes()
+            for path in tmp_path.rglob("*")
+            if path.is_file()
+        }
+        assert list(streamed)[-1] == "attributes.pt"
+        assert {name: data.getvalue() for name, data in streamed.items()} == written
+
+
 # --------------------------------------------------------------------------- #
 # SAVE/LOAD — distributed path (real process group; identical on-disk format) #
 # --------------------------------------------------------------------------- #
@@ -5272,6 +5690,121 @@ class TestLLMCloneWithVllm:
         assert agent.llm is not None
 
 
+def _tiny_moe_actor() -> nn.Module:
+    """Two-layer NemotronH (attention + MoE); identical base weights on every rank."""
+    torch.manual_seed(0)
+    return NemotronHForCausalLM(
+        NemotronHConfig(
+            vocab_size=64,
+            hidden_size=32,
+            num_hidden_layers=2,
+            layers_block_type=["attention", "moe"],
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            head_dim=8,
+            n_routed_experts=4,
+            num_experts_per_tok=2,
+            moe_intermediate_size=16,
+            moe_shared_expert_intermediate_size=16,
+            n_group=1,
+            topk_group=1,
+        )
+    )
+
+
+def _full_lora_tensors(actor: nn.Module) -> dict[str, torch.Tensor]:
+    return {
+        name: (param.full_tensor() if isinstance(param, DTensor) else param)
+        .detach()
+        .clone()
+        for name, param in actor.named_parameters()
+        if ".lora_" in name
+    }
+
+
+def _lora_across_ranks_worker(
+    rank: int,
+    world_size: int,
+    port: int,
+    fsdp_config: FSDPConfig | None,
+    result_queue: mp.Queue,
+) -> None:
+    try:
+        os.environ.update(
+            RANK=str(rank),
+            LOCAL_RANK=str(rank),
+            WORLD_SIZE=str(world_size),
+            MASTER_ADDR="127.0.0.1",
+            MASTER_PORT=str(port),
+        )
+        dist.init_process_group("gloo", rank=rank, world_size=world_size)
+        # Liger's Triton kernels need a GPU; these ranks run on CPU.
+        patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False).start()
+        agent = GRPO(
+            actor_network=_tiny_moe_actor(),
+            pad_token_id=63,
+            pad_token="<pad>",
+            batch_size=2 * world_size,
+            group_size=2,
+            beta=0.0,
+            lr=1e-2,
+            max_grad_norm=None,
+            max_output_tokens=4,
+            max_model_len=12,
+            micro_batch_size_per_gpu=2,
+            mini_batch_size=4,
+            gradient_checkpointing=False,
+            calc_position_embeddings=False,
+            device="cpu",
+            use_liger_loss=False,
+            seed=7,
+            fsdp_config=fsdp_config,
+            lora_config=LoraConfig(
+                r=2,
+                lora_alpha=4,
+                lora_dropout=0.0,
+                target_modules=["q_proj", "v_proj"],
+                target_parameters=["mixer.experts.up_proj", "mixer.experts.down_proj"],
+            ),
+        )
+        initial = _full_lora_tensors(agent.actor)
+        generator = torch.Generator().manual_seed(rank)
+        ids = torch.randint(0, 63, (4, 8), generator=generator)
+        masks = torch.zeros(4, 7, dtype=torch.bool)
+        masks[:, 2:] = True
+        agent.learn(
+            (list(ids.split(1)), list(masks.split(1)), torch.tensor([1.0, 0, 0, 1]))
+        )
+        trained = _full_lora_tensors(agent.actor)
+        gathered: list[object] = [None] * world_size
+        dist.all_gather_object(gathered, (initial, trained))
+        rank0_initial, rank0_trained = gathered[0]
+
+        assert any(
+            "experts" in name and "lora_A" in name and tensor.abs().sum() > 0
+            for name, tensor in initial.items()
+        ), sorted(initial)
+        assert any(
+            "lora_B.actor" in name and tensor.abs().sum() > 0
+            for name, tensor in trained.items()
+        ), "learn left every actor LoRA B at zero"
+        for stage, state, reference in (
+            ("init", initial, rank0_initial),
+            ("after learn", trained, rank0_trained),
+        ):
+            differing = sorted(
+                name
+                for name, tensor in state.items()
+                if not torch.equal(tensor, reference[name])
+            )
+            assert not differing, f"{stage}: LoRA differs from rank 0: {differing}"
+        result_queue.put((rank, None))
+    except Exception as exc:
+        result_queue.put((rank, repr(exc)))
+    finally:
+        dist.destroy_process_group()
+
+
 class TestLLMInitializeActors:
     """_initialize_actors creates and configures PEFT-wrapped actors."""
 
@@ -5444,6 +5977,28 @@ class TestLLMInitializeActors:
             match=re.escape("actor_network.pretrained_model: a PeftModel was passed"),
         ):
             LLMAlgorithm._initialize_actors(agent, base_model, add_adapters=True)
+
+    @pytest.mark.parametrize(
+        ("world_size", "fsdp_config"),
+        [
+            (2, None),
+            (
+                4,
+                FSDPConfig(
+                    ep=2,
+                    shard_group_size=2,
+                    param_dtype="float32",
+                    reduce_dtype="float32",
+                    optim_cpu_offload=False,
+                ),
+            ),
+        ],
+        ids=["data_parallel", "hsdp_2x2_ep2"],
+    )
+    def test_dense_actor_lora_matches_across_ranks_after_init_and_learn(
+        self, world_size, fsdp_config
+    ):
+        _spawn_ranks(_lora_across_ranks_worker, world_size, fsdp_config, timeout=300.0)
 
 
 class TestLLMInitializeActorsTorchCompiler:

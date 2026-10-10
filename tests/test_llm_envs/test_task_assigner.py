@@ -86,8 +86,8 @@ class TestTaskAssignerAdaptiveSampling:
 
         rows = {assigner.next_row() for _ in range(200)}
 
-        assert rows == {5, 6, 7, 8, 9}
-        assert [row.row for row in assigner.row_stats()] == [5, 6, 7, 8, 9]
+        assert rows == {1, 3, 5, 7, 9}
+        assert [row.row for row in assigner.row_stats()] == [1, 3, 5, 7, 9]
 
     def test_counts_shard_sized_draws_as_epochs(self) -> None:
         assigner = TaskAssigner(4, seed=0, adaptive=True)
@@ -100,8 +100,81 @@ class TestTaskAssignerAdaptiveSampling:
     def test_rejects_an_outcome_for_a_row_outside_the_shard(self) -> None:
         assigner = TaskAssigner(10, seed=0, rank=0, world_size=2, adaptive=True)
 
-        with pytest.raises(ValueError, match=r"row 5 is outside this shard \[0, 5\)"):
+        with pytest.raises(
+            ValueError,
+            match=r"row 5 is outside this shard: rank 0 of 2 owns rows 0, 2, \.\.\., 8\.",
+        ):
             assigner.record_outcome(5, informative=True, success=None)
+
+    def test_rejects_an_outcome_for_a_row_past_the_shard(self) -> None:
+        assigner = TaskAssigner(5, seed=0, rank=0, world_size=2, adaptive=True)
+
+        with pytest.raises(ValueError, match="row 4 is outside this shard"):
+            assigner.record_outcome(4, informative=True, success=None)
+
+
+class TestTaskAssignerSharding:
+    @pytest.mark.parametrize("world_size", [2, 4])
+    def test_every_rank_gets_the_site_mix_of_a_site_sorted_dataset(
+        self, world_size: int
+    ) -> None:
+        # Arrange
+        sites = ["shopping"] * 8 + ["classifieds"] * 4
+        ranks = [
+            TaskAssigner(len(sites), seed=0, rank=rank, world_size=world_size)
+            for rank in range(world_size)
+        ]
+        shard_size = len(sites) // world_size
+
+        # Act
+        mixes = [
+            Counter(sites[assigner.next_row()] for _ in range(shard_size))
+            for assigner in ranks
+        ]
+
+        # Assert
+        expected = Counter(shopping=8 // world_size, classifieds=4 // world_size)
+        assert mixes == [expected] * world_size
+
+    def test_ranks_draw_disjoint_rows_that_cover_the_dataset(self) -> None:
+        ranks = [TaskAssigner(12, seed=0, rank=rank, world_size=3) for rank in range(3)]
+
+        epochs = [[assigner.next_row() for _ in range(4)] for assigner in ranks]
+
+        assert [sorted(rows) for rows in epochs] == [
+            [0, 3, 6, 9],
+            [1, 4, 7, 10],
+            [2, 5, 8, 11],
+        ]
+
+    def test_the_same_seed_draws_the_same_rows_on_a_rank(self) -> None:
+        def draws(seed: int) -> list[int]:
+            assigner = TaskAssigner(20, seed=seed, rank=1, world_size=2)
+            return [assigner.next_row() for _ in range(30)]
+
+        assert draws(3) == draws(3)
+        assert draws(3) != draws(4)
+
+    def test_a_merged_state_restores_every_ranks_rows(self) -> None:
+        # Arrange
+        saved = [
+            TaskAssigner(10, seed=0, rank=rank, world_size=2, adaptive=True)
+            for rank in range(2)
+        ]
+        feed(saved[0], 4, informative=True, times=3)
+        feed(saved[1], 3, informative=False, times=5)
+        merged = saved[0].state_dict() + saved[1].state_dict()
+        restored = [
+            TaskAssigner(10, seed=0, rank=rank, world_size=2, adaptive=True)
+            for rank in range(2)
+        ]
+
+        # Act
+        for assigner in restored:
+            assigner.load_state_dict(merged)
+
+        # Assert
+        assert [a.row_stats() for a in restored] == [a.row_stats() for a in saved]
 
 
 class TestTaskAssignerRecordOutcome:
@@ -295,8 +368,8 @@ class TestTaskAssignerLoadStateDict:
     def test_keeps_only_this_shards_rows_from_a_merged_state(self) -> None:
         # Arrange
         merged = [
-            {"row": 1, "informative": 2.0, "observed": 3.0},
-            {"row": 6, "informative": 0.5, "observed": 4.0},
+            {"row": 2, "informative": 2.0, "observed": 3.0},
+            {"row": 7, "informative": 0.5, "observed": 4.0},
         ]
         assigner = TaskAssigner(10, seed=0, rank=1, world_size=2, adaptive=True)
 
@@ -305,10 +378,10 @@ class TestTaskAssignerLoadStateDict:
 
         # Assert
         stats = {row.row: row for row in assigner.row_stats()}
-        assert stats[6].informative == 0.5
-        assert stats[6].observed == 4.0
-        assert stats[6].weight == pytest.approx(1.5 / 6.0)
-        assert [outcome["row"] for outcome in assigner.state_dict()] == [6]
+        assert stats[7].informative == 0.5
+        assert stats[7].observed == 4.0
+        assert stats[7].weight == pytest.approx(1.5 / 6.0)
+        assert [outcome["row"] for outcome in assigner.state_dict()] == [7]
 
     def test_resets_rows_missing_from_the_state_to_unseen(self) -> None:
         # Arrange

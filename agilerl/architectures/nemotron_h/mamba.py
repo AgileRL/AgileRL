@@ -21,7 +21,11 @@ import torch.utils.checkpoint
 from torch.distributed.tensor import DTensor
 
 from agilerl.architectures.runtime import PatchRuntimeConfig
-from agilerl.utils.llm_packing import RESETS_AT_DOCUMENT_BOUNDARY, packed_seq_idx
+from agilerl.utils.llm_packing import (
+    RESETS_AT_DOCUMENT_BOUNDARY,
+    packed_layout,
+    packed_seq_idx,
+)
 from agilerl.utils.patching import class_is_patched, try_import
 
 if TYPE_CHECKING:
@@ -540,8 +544,8 @@ def patch_nemotron_mamba_fused_path(
     (``None`` or ``(0, inf)``) is replaced with ``time_step_min`` and
     ``time_step_max`` for the forward. On compute capability 8.9 the forward
     uses ``torch_forward`` because the SSM kernels return NaN, and the gated
-    RMSNorm runs in PyTorch. ``conv1d`` and ``out_proj`` stay inside the kernel
-    on other GPUs; LoRA does not target them.
+    RMSNorm runs in PyTorch. On other GPUs ``conv1d`` stays inside the kernel,
+    and so does a trainable ``out_proj``; LoRA does not target either.
 
     :param mixer: Dotted path of the mixer class to patch.
     :type mixer: str
@@ -788,29 +792,36 @@ def _per_document(
     return torch.cat(rows)
 
 
-def _packed_split_scan(
+def _fused_split_scan(
     mixer: torch.nn.Module,
     kernel: Callable[..., torch.Tensor],
     hidden_states: torch.Tensor,
-    seq_idx: torch.Tensor,
+    seq_idx: torch.Tensor | None,
 ) -> torch.Tensor:
     """Fused Mamba2 forward whose conv and scan restart wherever ``seq_idx`` changes.
+
+    A frozen ``out_proj`` runs as its own matmul after the kernel, which then
+    returns the gated-norm output of width ``intermediate_size``, so backward
+    skips that weight's gradient. A trainable ``out_proj`` runs inside the kernel.
 
     :param mixer: Mamba2 mixer.
     :type mixer: torch.nn.Module
     :param kernel: ``mamba_split_conv1d_scan_combined`` from the mixer's module.
     :type kernel: Callable[..., torch.Tensor]
-    :param hidden_states: ``(B, L, H)`` packed rows.
+    :param hidden_states: ``(B, L, H)`` rows.
     :type hidden_states: torch.Tensor
-    :param seq_idx: ``(B, L)`` int32 document index per token.
-    :type seq_idx: torch.Tensor
+    :param seq_idx: ``(B, L)`` int32 document index per token, or None for one
+        document per row.
+    :type seq_idx: torch.Tensor | None
     :return: ``(B, L, H)`` mixer output.
     :rtype: torch.Tensor
     """
     module: Any = mixer
     limit = module.time_step_limit
     dt_limit = {} if limit is None else {"dt_limit": limit}
-    return kernel(
+    out_proj = module.out_proj
+    outside = not out_proj.weight.requires_grad
+    scan = kernel(
         module.in_proj(hidden_states),
         module.conv1d.weight.squeeze(1),
         module.conv1d.bias,
@@ -822,13 +833,16 @@ def _packed_split_scan(
         activation=module.activation,
         rmsnorm_weight=module.norm.weight,
         rmsnorm_eps=module.norm.variance_epsilon,
-        outproj_weight=module.out_proj.weight,
-        outproj_bias=module.out_proj.bias,
+        outproj_weight=None if outside else out_proj.weight,
+        outproj_bias=None if outside else out_proj.bias,
         headdim=module.head_dim,
         ngroups=module.n_groups,
         norm_before_gate=False,
         **dt_limit,
     )
+    if not outside:
+        return scan
+    return out_proj(scan.to(out_proj.weight.dtype))
 
 
 def _install_packed_mixer(mixer_cls: type) -> None:
@@ -862,12 +876,20 @@ def _install_packed_mixer(mixer_cls: type) -> None:
         attention_mask: torch.Tensor | None = None,
         seq_idx: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if seq_idx is None:
+        mixer: Any = self
+        # Transformers' fused-kernel condition; an all-ones mask takes its path.
+        unpacked_fused = (
+            mixer.use_mem_eff_path
+            and mixer.training
+            and cache_params is None
+            and attention_mask is None
+        )
+        if seq_idx is None and not unpacked_fused:
             return cuda_kernels_forward(
                 self, hidden_states, cache_params, attention_mask
             )
         kernel = kernels["mamba_split_conv1d_scan_combined"]
-        return _packed_split_scan(self, kernel, hidden_states, seq_idx)
+        return _fused_split_scan(self, kernel, hidden_states, seq_idx)
 
     @functools.wraps(forward)
     def packed_forward(
@@ -896,7 +918,13 @@ def _install_packed_mixer(mixer_cls: type) -> None:
 
 
 def _install_packed_block(block_cls: type, mixer_cls: type) -> None:
-    """Pass a packed row's ``seq_idx`` from this block's ``position_ids`` to its mixer."""
+    """Route a packed row's document layout from ``position_ids`` to this block's mixer.
+
+    A Mamba2 mixer gets ``seq_idx``. A single-row attention block gets
+    FlashAttention varlen offsets for a multi-document row and no
+    ``position_ids`` for a one-document row, so attention does not re-derive
+    the layout with a device sync.
+    """
     cls: Any = block_cls
     forward = cls.__dict__["forward"]
 
@@ -913,13 +941,28 @@ def _install_packed_block(block_cls: type, mixer_cls: type) -> None:
         block: Any = self
         seq_idx = None
         # A padding mask or a cache means the row is not packed.
-        if (
-            isinstance(block.mixer, mixer_cls)
-            and attention_mask is None
+        unpadded = (
+            attention_mask is None
             and past_key_values is None
             and position_ids is not None
-        ):
+        )
+        if unpadded and isinstance(block.mixer, mixer_cls):
             seq_idx = packed_seq_idx(position_ids)
+        elif (
+            unpadded
+            and block.block_type == "full_attention"
+            and position_ids.shape[0] == 1
+        ):
+            layout = packed_layout(position_ids)
+            position_ids = None
+            if layout is not None:
+                kwargs = {
+                    **kwargs,
+                    "cu_seq_lens_q": layout.cu_seqlens,
+                    "cu_seq_lens_k": layout.cu_seqlens,
+                    "max_length_q": layout.max_seqlen,
+                    "max_length_k": layout.max_seqlen,
+                }
         if seq_idx is None:
             return forward(
                 self,

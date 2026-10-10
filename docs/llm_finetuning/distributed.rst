@@ -134,9 +134,16 @@ usual production settings for LoRA / QLoRA.
        next module can reuse that memory. ``False`` keeps them gathered
        (faster, more VRAM).
    * - ``optim_cpu_offload``
-     - ``True``
+     - ``None``
      - Keep parameters and gradients on GPU; move Adam ``m``/``v`` to CPU
        except during ``step()``. Mutually exclusive with ``cpu_offload``.
+       ``None`` keeps a fused AdamW on GPU when the memory estimate fits,
+       else offloads.
+   * - ``routed_expert_chunk_mib``
+     - ``None``
+     - Byte budget (MiB) of each routed-expert chunk in MoE LoRA. Larger
+       chunks run faster and raise peak memory. ``None`` takes the largest
+       of 64/128/256/512 the memory estimate fits.
    * - ``cpu_offload``
      - ``False``
      - Offload sharded parameters and gradients to CPU

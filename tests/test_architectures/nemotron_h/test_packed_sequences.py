@@ -8,10 +8,15 @@ Mamba2 conv and scan must restart at each boundary, so every real token's
 log-prob equals the padded (one document per row) forward.
 """
 
+import itertools
 import logging
 
+import pytest
 import torch
 import torch.nn.functional as F
+from peft import LoraConfig, get_peft_model
+from transformers import AttentionInterface
+from transformers.masking_utils import AttentionMaskInterface, flash_attention_mask
 from transformers.models.nemotron_h import modeling_nemotron_h
 from transformers.models.nemotron_h.configuration_nemotron_h import NemotronHConfig
 from transformers.models.nemotron_h.modeling_nemotron_h import (
@@ -37,6 +42,46 @@ CHUNK_SIZE = 4
 # One document per chunk-boundary case: longer than two chunks, exactly one
 # chunk, a single token, and lengths that straddle chunk edges once packed.
 LENGTHS = (7, CHUNK_SIZE, 9, 1, 5)
+VARLEN_ATTENTION = "agilerl_test_varlen"
+
+
+@pytest.fixture
+def varlen_attention():
+    """Register a CPU stand-in for FlashAttention under :data:`VARLEN_ATTENTION`.
+
+    Attention is causal within each ``cu_seq_lens_q`` segment, or over the
+    whole row without one. Yields the list of layout kwargs each call received.
+    """
+    calls = []
+
+    def attend(module, query, key, value, attention_mask, scaling=None, **kwargs):
+        cu_seq_lens_q = kwargs.get("cu_seq_lens_q")
+        calls.append(
+            {
+                "position_ids": kwargs.get("position_ids"),
+                "cu_seq_lens_q": cu_seq_lens_q,
+                "max_length_q": kwargs.get("max_length_q"),
+            }
+        )
+        offsets = (
+            [0, query.shape[2]] if cu_seq_lens_q is None else cu_seq_lens_q.tolist()
+        )
+        segments = [
+            F.scaled_dot_product_attention(
+                query[:, :, start:end],
+                key[:, :, start:end],
+                value[:, :, start:end],
+                is_causal=True,
+                scale=scaling,
+                enable_gqa=True,
+            )
+            for start, end in itertools.pairwise(offsets)
+        ]
+        return torch.cat(segments, dim=2).transpose(1, 2).contiguous(), None
+
+    AttentionInterface.register(VARLEN_ATTENTION, attend)
+    AttentionMaskInterface.register(VARLEN_ATTENTION, flash_attention_mask)
+    return calls
 
 
 def _tiny_nemotron_h() -> NemotronHForCausalLM:
@@ -184,6 +229,81 @@ class TestPatchNemotronMambaPackedSequences:
         assert torch.equal(received["seq_idx"], seq_idx)
         assert received["chunk_size"] == CHUNK_SIZE
 
+    def test_unpacked_eval_call_runs_the_unpatched_cuda_forward(
+        self, pristine_nemotron_classes
+    ):
+        # Arrange
+        received = []
+
+        def unpatched(_mixer, hidden_states, cache_params=None, attention_mask=None):
+            received.append(hidden_states)
+            return hidden_states * 2
+
+        NemotronHMamba2Mixer.cuda_kernels_forward = unpatched
+        model = _tiny_nemotron_h().eval()
+        patch_nemotron_mamba_packed_sequences(mixer=MIXER_PATH, block=BLOCK_PATH)
+        mixer = model.model.layers[0].mixer
+        hidden = torch.randn(1, 6, model.config.hidden_size)
+
+        # Act
+        out = mixer.cuda_kernels_forward(hidden)
+
+        # Assert
+        assert torch.equal(out, hidden * 2)
+        assert len(received) == 1
+        assert received[0] is hidden
+
+    def test_attention_gets_document_offsets_for_a_packed_row(
+        self, pristine_nemotron_classes, varlen_attention
+    ):
+        # Arrange
+        model = _tiny_nemotron_h().eval()
+        patch_nemotron_mamba_packed_sequences(mixer=MIXER_PATH, block=BLOCK_PATH)
+        ids, mask = _right_padded_documents()
+        packed_batch = pack_padded_batch(ids, mask)
+        with torch.no_grad():
+            padded = _token_logprobs(model, ids, attention_mask=mask.long())
+        model.config._attn_implementation = VARLEN_ATTENTION
+
+        # Act
+        with torch.no_grad():
+            packed_row = _token_logprobs(
+                model, packed_batch.input_ids, position_ids=packed_batch.position_ids
+            )
+
+        # Assert
+        packed = unpack_logprobs(packed_row, packed_batch)
+        real = mask[:, 1:]
+        torch.testing.assert_close(packed[real], padded[real], atol=1e-5, rtol=0)
+        assert len(varlen_attention) == 1
+        call = varlen_attention[0]
+        assert call["position_ids"] is None
+        assert call["cu_seq_lens_q"].tolist() == packed_batch.cu_seqlens.tolist()
+        assert call["max_length_q"] == max(LENGTHS)
+
+    def test_attention_gets_no_layout_for_a_one_document_row(
+        self, pristine_nemotron_classes, varlen_attention
+    ):
+        # Arrange
+        model = _tiny_nemotron_h().eval()
+        model.config._attn_implementation = VARLEN_ATTENTION
+        ids = _right_padded_documents()[0][:1]
+        positions = torch.arange(ids.shape[1]).unsqueeze(0)
+        with torch.no_grad():
+            unpatched = _token_logprobs(model, ids, position_ids=positions)
+        varlen_attention.clear()
+
+        # Act
+        patch_nemotron_mamba_packed_sequences(mixer=MIXER_PATH, block=BLOCK_PATH)
+        with torch.no_grad():
+            patched = _token_logprobs(model, ids, position_ids=positions)
+
+        # Assert
+        assert torch.equal(patched, unpatched)
+        assert varlen_attention == [
+            {"position_ids": None, "cu_seq_lens_q": None, "max_length_q": None}
+        ]
+
     def test_marks_the_mixer_as_resetting_at_boundaries(
         self, pristine_nemotron_classes
     ):
@@ -224,3 +344,149 @@ class TestPatchNemotronMambaPackedSequences:
         # Assert
         assert "packed rows are not supported" in caplog.text
         assert RESETS_AT_DOCUMENT_BOUNDARY not in vars(NemotronHMamba2Mixer)
+
+
+class KernelOutProj(torch.autograd.Function):
+    """``out_proj`` as the fused kernel applies it: backward always forms the weight gradient."""
+
+    @staticmethod
+    def forward(ctx, scan, weight, bias, weight_grads):
+        ctx.save_for_backward(scan, weight)
+        ctx.has_bias = bias is not None
+        ctx.weight_grads = weight_grads
+        return F.linear(scan, weight, bias)
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        scan, weight = ctx.saved_tensors
+        dweight = torch.einsum("bso,bsd->od", grad_out, scan)
+        ctx.weight_grads.append(dweight)
+        dbias = grad_out.sum(dim=(0, 1)) if ctx.has_bias else None
+        return F.linear(grad_out, weight.t()), dweight, dbias, None
+
+
+def _stand_in_split_scan(weight_grads):
+    """CPU stand-in for ``mamba_split_conv1d_scan_combined`` with its ``out_proj`` contract."""
+
+    def split_scan(
+        zxbcdt,
+        *_args,
+        seq_idx=None,
+        rmsnorm_weight=None,
+        outproj_weight=None,
+        outproj_bias=None,
+        return_final_states=False,
+        **_kwargs,
+    ):
+        width = rmsnorm_weight.shape[0]
+        gate, hidden = zxbcdt[..., :width], zxbcdt[..., width : 2 * width]
+        if seq_idx is not None:
+            hidden = hidden + seq_idx.unsqueeze(-1)
+        scan = hidden * F.silu(gate) * rmsnorm_weight
+        if outproj_weight is None:
+            assert outproj_bias is None
+            out = scan
+        else:
+            out = KernelOutProj.apply(scan, outproj_weight, outproj_bias, weight_grads)
+        return (out, None) if return_final_states else out
+
+    return split_scan
+
+
+def _mixer_backward(seq_idx, train_out_proj):
+    """One mixer forward and backward through the stand-in kernel, with in_proj LoRA."""
+    base = _tiny_nemotron_h()
+    patch_nemotron_mamba_packed_sequences(mixer=MIXER_PATH, block=BLOCK_PATH)
+    lora_config = LoraConfig(
+        r=4,
+        lora_alpha=8,
+        lora_dropout=0.0,
+        target_modules=["in_proj"],
+        init_lora_weights=False,
+        task_type="CAUSAL_LM",
+    )
+    torch.manual_seed(2)
+    get_peft_model(base, lora_config, adapter_name="actor").train()
+    mixer = base.model.layers[0].mixer
+    mixer.out_proj.weight.requires_grad_(train_out_proj)
+    weight_grads = []
+    modeling_nemotron_h.mamba_split_conv1d_scan_combined = _stand_in_split_scan(
+        weight_grads
+    )
+    torch.manual_seed(3)
+    hidden = torch.randn(1, 6, base.config.hidden_size, requires_grad=True)
+    cotangent = torch.randn(1, 6, base.config.hidden_size)
+
+    out = mixer.cuda_kernels_forward(hidden, seq_idx=seq_idx)
+    (out * cotangent).sum().backward()
+
+    lora_grads = {
+        name: param.grad
+        for name, param in mixer.in_proj.named_parameters()
+        if "lora_" in name
+    }
+    return {
+        "out": out.detach(),
+        "hidden_grad": hidden.grad,
+        "lora_grads": lora_grads,
+        "kernel_weight_grads": len(weight_grads),
+        "out_proj_grad": mixer.out_proj.weight.grad,
+    }
+
+
+SEQ_IDX_CASES = {
+    "packed": torch.tensor([[0, 0, 0, 1, 1, 2]], dtype=torch.int32),
+    "unpacked": None,
+}
+
+
+class TestPackedMixerOutProj:
+    """A frozen ``out_proj`` runs after the fused scan and matches it inside."""
+
+    @pytest.mark.parametrize("case", list(SEQ_IDX_CASES))
+    def test_outputs_and_gradients_match_the_in_kernel_out_proj(
+        self, pristine_nemotron_classes, case
+    ):
+        # Arrange
+        seq_idx = SEQ_IDX_CASES[case]
+
+        # Act
+        fused = _mixer_backward(seq_idx, train_out_proj=True)
+        outside = _mixer_backward(seq_idx, train_out_proj=False)
+
+        # Assert: same fp32 ops forward; backward GEMMs differ only in layout.
+        assert torch.equal(outside["out"], fused["out"])
+        torch.testing.assert_close(
+            outside["hidden_grad"], fused["hidden_grad"], atol=1e-6, rtol=1e-5
+        )
+        assert set(outside["lora_grads"]) == {
+            "lora_A.actor.weight",
+            "lora_B.actor.weight",
+        }
+        for name, grad in fused["lora_grads"].items():
+            assert grad.abs().sum() > 0
+            torch.testing.assert_close(
+                outside["lora_grads"][name], grad, atol=1e-6, rtol=1e-5, msg=name
+            )
+
+    @pytest.mark.parametrize("case", list(SEQ_IDX_CASES))
+    def test_backward_skips_the_frozen_out_proj_weight_gradient(
+        self, pristine_nemotron_classes, case
+    ):
+        # Act
+        result = _mixer_backward(SEQ_IDX_CASES[case], train_out_proj=False)
+
+        # Assert
+        assert result["kernel_weight_grads"] == 0
+        assert result["out_proj_grad"] is None
+
+    @pytest.mark.parametrize("case", list(SEQ_IDX_CASES))
+    def test_a_trainable_out_proj_stays_in_the_kernel(
+        self, pristine_nemotron_classes, case
+    ):
+        # Act
+        result = _mixer_backward(SEQ_IDX_CASES[case], train_out_proj=True)
+
+        # Assert
+        assert result["kernel_weight_grads"] == 1
+        assert result["out_proj_grad"].abs().sum() > 0

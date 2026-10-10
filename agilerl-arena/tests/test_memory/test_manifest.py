@@ -153,6 +153,24 @@ class TestTrainingSettings:
         assert settings.algorithm == "ppo"
         assert settings.fuse_actor_critic_pass is expected
 
+    def test_host_memory_settings_come_from_the_training_section(self):
+        default = training_settings_from_manifest(GRPO)
+        overridden = training_settings_from_manifest(
+            manifest(
+                training={
+                    "checkpoint_optimizer": False,
+                    "rollout_mode": "async",
+                    "rollout_engines_per_agent": 1,
+                },
+                replay_buffer={"kind": "llm"},
+            )
+        )
+
+        assert default.checkpoint_optimizer is True
+        assert default.async_rollout is False
+        assert overridden.checkpoint_optimizer is False
+        assert overridden.async_rollout is True
+
     def test_a_classic_rl_manifest_is_refused(self):
         with pytest.raises(ValueError, match="LLM fine-tuning"):
             training_settings_from_manifest(DQN)
@@ -185,6 +203,56 @@ class TestTrainingSettings:
             )
         )
         assert settings.algorithm == "grpo"
+
+
+def segmented(segment_prompt_tokens: int | None, **algorithm: object) -> dict:
+    """GRPO on a multi-turn env that restarts context at *segment_prompt_tokens*."""
+    out = manifest(algorithm={"max_output_tokens": 128, **algorithm})
+    out["environment"] = {
+        "env_type": "rollout",
+        "env_url": "http://env",
+        "max_turns": 10,
+        "segment_prompt_tokens": segment_prompt_tokens,
+    }
+    return out
+
+
+class TestMaxRowTokens:
+    def test_segment_rows_size_the_training_estimate(self):
+        settings = training_settings_from_manifest(segmented(300))
+
+        assert settings.max_model_len == 300 + 128
+
+    def test_answer_continuation_adds_a_second_generation(self):
+        settings = training_settings_from_manifest(
+            segmented(
+                200,
+                answer_continuation=True,
+                constrain_answer_pattern=r"\d+",
+            )
+        )
+
+        assert settings.max_model_len == 200 + 2 * 128
+
+    def test_rows_never_exceed_the_context(self):
+        settings = training_settings_from_manifest(segmented(500))
+
+        assert settings.max_model_len == 512
+
+    def test_matching_explicit_value_is_kept(self):
+        validated = TrainingManifest.model_validate(segmented(300, max_row_tokens=428))
+
+        assert validated.algorithm.max_row_tokens == 428
+
+    def test_disagreeing_explicit_value_is_refused(self):
+        with pytest.raises(ValueError, match=r"max_row_tokens=400 disagrees with 428"):
+            TrainingManifest.model_validate(segmented(300, max_row_tokens=400))
+
+    def test_unsegmented_env_sizes_rows_to_the_context(self):
+        validated = TrainingManifest.model_validate(segmented(None))
+
+        assert validated.algorithm.max_row_tokens is None
+        assert training_settings_from_manifest(segmented(None)).max_model_len == 512
 
 
 class TestGenerationSettings:

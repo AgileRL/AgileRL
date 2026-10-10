@@ -20,7 +20,7 @@ from agilerl.lora.moe.adapters import (
     token_adapter_ids,
     wrapper_chain,
 )
-from agilerl.lora.moe.grouped_gemm import group_offsets
+from agilerl.lora.moe.grouped_gemm import ROUTED_EXPERT_CHUNK_BYTES, group_offsets
 from agilerl.lora.moe.layouts import (
     is_transposed_experts_module,
     routed_projection_names,
@@ -35,6 +35,8 @@ class SortedExpertsLoraWrapper(ParamWrapper):
     _self_routed_lora = True
     token_index: torch.Tensor | None = None
     n_tokens: int | None = None
+    # See ``chunk_bytes`` on :func:`split_lora_delta`.
+    chunk_bytes: int = ROUTED_EXPERT_CHUNK_BYTES
 
     def forward(
         self,
@@ -74,7 +76,15 @@ class SortedExpertsLoraWrapper(ParamWrapper):
         offs = group_offsets(counts, x.device) if x.is_cuda else None
         for name in adapters:
             if row_ids is None or id_map is None:
-                split_lora_delta(self, x, counts, name, offs, destination=result)
+                split_lora_delta(
+                    self,
+                    x,
+                    counts,
+                    name,
+                    offs,
+                    destination=result,
+                    chunk_bytes=self.chunk_bytes,
+                )
                 continue
             delta = split_lora_delta(self, x, counts, name, offs)
             mask = (row_ids == id_map[name]).to(delta.dtype).unsqueeze(-1)
@@ -89,8 +99,9 @@ class RoutedExpertsLoraWrapper(ParamWrapper):
     """Split-LoRA ``ParamWrapper`` for self-routing packed-experts modules."""
 
     _self_routed_lora = True
-    # See ``recompute`` on :func:`routed_experts_local_forward`.
+    # See ``recompute`` and ``chunk_bytes`` on :func:`routed_experts_local_forward`.
     recompute: bool = True
+    chunk_bytes: int = ROUTED_EXPERT_CHUNK_BYTES
 
     def forward(
         self,
@@ -132,6 +143,7 @@ class RoutedExpertsLoraWrapper(ParamWrapper):
             routing=routing,
             already_grouped=already_grouped,
             recompute=self.recompute,
+            chunk_bytes=self.chunk_bytes,
         )
 
 

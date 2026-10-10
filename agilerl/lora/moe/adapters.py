@@ -15,10 +15,13 @@ from torch.distributed.tensor import DTensor
 
 from agilerl.lora.fused import ROUTING_STATE, uniform_routed_adapter
 from agilerl.lora.moe.grouped_gemm import (
+    ROUTED_EXPERT_CHUNK_BYTES,
     add_grouped_linear,
     counts_list,
     counts_tensor,
     grouped_linear,
+    grouped_matmul,
+    grouped_operand,
 )
 
 
@@ -167,18 +170,22 @@ def partitioned_lora_delta(
     return delta * wrapper.scaling[adapter]
 
 
+def lora_operands(
+    lora_a: torch.Tensor, lora_b: torch.Tensor, scaling: float
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Grouped-GEMM operands of stacked ``[E, r, in]`` / ``[E, out, r]`` factors, with ``scaling`` folded into ``A``."""
+    # One [E, r, in] multiply per layer: no row chunk scales its rows.
+    return grouped_operand(lora_a * scaling), grouped_operand(lora_b)
+
+
 def low_rank_delta(
     rows: torch.Tensor,
-    lora_a: torch.Tensor,
-    lora_b: torch.Tensor,
-    counts: list[int],
+    a_operand: torch.Tensor,
+    b_operand: torch.Tensor,
     offs: torch.Tensor,
-    scaling: float,
 ) -> torch.Tensor:
-    """Scaled ``rows @ A[e]^T @ B[e]^T`` for expert-sorted rows with stacked ``[E, r, in]`` / ``[E, out, r]`` factors."""
-    # Scale the rank-r rows: no multiply runs over [rows, out] in forward or backward.
-    down = grouped_linear(rows, lora_a, counts, offs).mul_(scaling)
-    return grouped_linear(down, lora_b, counts, offs)
+    """``rows @ A[e]^T @ B[e]^T`` for expert-sorted rows with operands from :func:`lora_operands`."""
+    return grouped_matmul(grouped_matmul(rows, a_operand, offs), b_operand, offs)
 
 
 def split_lora_delta(
@@ -189,8 +196,12 @@ def split_lora_delta(
     offs: torch.Tensor | None = None,
     num_experts: int | None = None,
     destination: torch.Tensor | None = None,
+    chunk_bytes: int = ROUTED_EXPERT_CHUNK_BYTES,
 ) -> torch.Tensor:
-    """Low-rank delta for expert-sorted rows without materializing per-expert full-rank weights."""
+    """Low-rank delta for expert-sorted rows without materializing per-expert full-rank weights.
+
+    :param chunk_bytes: Largest up-projection chunk added into ``destination``.
+    """
     stacked = stacked_lora_weights(wrapper, adapter, x.dtype, num_experts)
     # Prefer the grouped GEMM on dense weights. The Linear fallback is for
     # still-partitioned DTensors (FSDP leftover outside a rooted forward).
@@ -215,5 +226,5 @@ def split_lora_delta(
         up = grouped_linear(down, b3, counts, offs)
         # ``up`` is a fresh GEMM output. Scaling it in place skips a second full copy.
         return up.mul_(scaling)
-    add_grouped_linear(destination, down, b3, counts, scaling)
+    add_grouped_linear(destination, down, b3, counts, scaling, chunk_bytes)
     return destination

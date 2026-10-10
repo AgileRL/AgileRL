@@ -16,7 +16,7 @@ from __future__ import annotations
 import datetime
 import os
 import random
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from contextlib import ContextDecorator
 from typing import Any
 
@@ -225,6 +225,7 @@ def aggregate_metrics_across_gpus(
 
 def aggregate_metrics_dict(
     metrics: dict[str, torch.Tensor | np.ndarray | float],
+    excluded: Collection[str] = (),
 ) -> dict[str, float]:
     """Average every metric across ranks in one all-reduce (local mean on a single device).
 
@@ -232,7 +233,10 @@ def aggregate_metrics_dict(
 
     :param metrics: Metric values on this rank, by name.
     :type metrics: dict[str, torch.Tensor | np.ndarray | float]
-    :return: Mean of each metric across ranks.
+    :param excluded: Metrics this rank leaves out of their cross-rank mean. A
+        metric every rank excludes averages to NaN.
+    :type excluded: Collection[str]
+    :return: Mean of each metric across the ranks that count it.
     :rtype: dict[str, float]
     """
     if not metrics:
@@ -245,9 +249,15 @@ def aggregate_metrics_dict(
             for value in metrics.values()
         ]
     )
+    counted = torch.tensor(
+        [name not in excluded for name in metrics], dtype=torch.bool, device=device
+    )
+    totals = torch.stack(
+        [torch.where(counted, local_means, 0.0), counted.to(torch.float32)]
+    )
     if distributed:
-        dist.all_reduce(local_means, op=dist.ReduceOp.AVG)
-    return dict(zip(metrics, local_means.tolist(), strict=True))
+        dist.all_reduce(totals, op=dist.ReduceOp.SUM)
+    return dict(zip(metrics, (totals[0] / totals[1]).tolist(), strict=True))
 
 
 class raise_on_any_rank(ContextDecorator):
@@ -271,7 +281,7 @@ class raise_on_any_rank(ContextDecorator):
         if not is_distributed() or dist.get_world_size() == 1:
             return False
         failed = torch.tensor(
-            [int(exc is not None)], dtype=torch.int64, device=_collective_device()
+            [int(exc is not None)], dtype=torch.int64, device=collective_device()
         )
         dist.all_reduce(failed, op=dist.ReduceOp.MAX)
         if exc is None and failed.item():
@@ -316,7 +326,7 @@ def all_reduce_grads(
     ranks_with_grad = torch.tensor(
         [param.grad is not None for param in params],
         dtype=torch.long,
-        device=_collective_device(group),
+        device=collective_device(group),
     )
     dist.all_reduce(ranks_with_grad, op=dist.ReduceOp.SUM, group=group)
     group_size = dist.get_world_size(group)
@@ -362,7 +372,7 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def _collective_device(group: dist.ProcessGroup | None = None) -> str:
+def collective_device(group: dist.ProcessGroup | None = None) -> str:
     """CPU for a Gloo group; the training device otherwise."""
     if dist.is_initialized() and dist.get_backend(group) == "gloo":
         return "cpu"

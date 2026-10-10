@@ -49,6 +49,11 @@ class TestFSDPConfig:
             ),
             ("ep", 0, "FSDPConfig.ep must be >= 1"),
             ("ep_token_blocks", 0, "FSDPConfig.ep_token_blocks must be >= 1"),
+            (
+                "routed_expert_chunk_mib",
+                0,
+                "FSDPConfig.routed_expert_chunk_mib must be >= 1",
+            ),
             ("tp", 0, "FSDPConfig.tp must be >= 1"),
             ("shard_group_size", 0, "FSDPConfig.shard_group_size must be >= 1"),
         ],
@@ -67,17 +72,23 @@ class TestFSDPConfig:
         assert FSDPConfig().ep_token_blocks == 1
         assert FSDPConfig(ep=8, ep_token_blocks=4).ep_token_blocks == 4
 
+    def test_memory_fields_default_to_unset(self) -> None:
+        config = FSDPConfig()
+
+        assert config.routed_expert_chunk_mib is None
+        assert config.optim_cpu_offload is None
+
+    def test_memory_fields_keep_set_values(self) -> None:
+        config = FSDPConfig(routed_expert_chunk_mib=1024, optim_cpu_offload=False)
+
+        assert config.routed_expert_chunk_mib == 1024
+        assert config.optim_cpu_offload is False
+
     def test_tp_and_shard_group_default_to_unset(self) -> None:
         config = FSDPConfig()
 
         assert config.tp == 1
         assert config.shard_group_size is None
-
-    def test_compile_blocks_defaults_off_with_inductor(self) -> None:
-        config = FSDPConfig()
-
-        assert config.compile_blocks is False
-        assert config.compile_backend == "inductor"
 
     def test_accepts_shard_group_divisible_by_ep_and_tp(self) -> None:
         config = FSDPConfig(ep=8, tp=2, shard_group_size=8)

@@ -34,6 +34,7 @@ from agilerl.typing import (
 )
 from agilerl.utils.algo_utils import get_experiences_samples
 from agilerl.utils.llm_utils import (
+    MicroBatchMetrics,
     is_preference_prompts,
 )
 
@@ -261,8 +262,8 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         :type experiences: PreferencePrompts
         :param training: Whether the agent is training or not
         :type training: bool
-        :return: Dict with keys ``loss``, ``chosen_reward``, ``rejected_reward``
-            and ``learn_phase_<phase>_s`` wall seconds.
+        :return: Dict with the cross-rank means of ``loss``, ``chosen_reward``
+            and ``rejected_reward``, and ``learn_phase_<phase>_s`` wall seconds.
         :rtype: dict[str, float]
         """
         phase_timer = self._start_learn_phases()
@@ -301,11 +302,10 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
             getattr(self, "micro_batch_size_per_gpu", self.batch_size_per_process),
         )
         batch_idxs = np.arange(num_samples)
-        learn_metrics = {
-            "loss": 0.0,
-            "chosen_reward": 0.0,
-            "rejected_reward": 0.0,
-        }
+        micro_batch_metrics = MicroBatchMetrics(
+            ("loss", "chosen_reward", "rejected_reward")
+        )
+        held_loss: torch.Tensor | None = None
         ref_rejected_log_probs, ref_chosen_log_probs = None, None
         phase_timer.mark("prepare")
         if not self.use_liger_loss:
@@ -347,15 +347,25 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
                 )
                 phase_timer.mark("forward")
                 if training:
-                    self._raise_if_loss_not_finite_on_any_rank(loss)
+                    held_loss = self._hold_loss_until_step(
+                        loss, held_loss, self.gradient_accumulation_steps
+                    )
                     self._backward_pass(loss)
+                micro_batch_metrics.add(
+                    {
+                        "loss": loss,
+                        "chosen_reward": chosen_reward.mean(),
+                        "rejected_reward": rejected_reward.mean(),
+                    }
+                )
+        # Gradients still pending a step carry into the next learn call.
+        if held_loss is not None:
+            self._raise_if_loss_not_finite_on_any_rank(held_loss)
 
-                learn_metrics["loss"] += loss.item()
-                learn_metrics["chosen_reward"] += chosen_reward.mean().item()
-                learn_metrics["rejected_reward"] += rejected_reward.mean().item()
-
+        updates = micro_batch_metrics.read()
         learn_metrics = {
-            key: value / num_samples for key, value in learn_metrics.items()
+            name: sum(update[name] for update in updates) / num_samples
+            for name in micro_batch_metrics.names
         }
 
         # Aggregate metrics across GPUs for both train/test paths. (Fresh dict
@@ -375,7 +385,7 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         if training:
             for key, value in phase_seconds.items():
                 self.metrics.log(key, value)
-        return {**learn_metrics, **phase_seconds}
+        return {**agg, **phase_seconds}
 
     def _dpo_loss(
         self,
@@ -428,7 +438,7 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
             batch_ref_rejected_log_probs,
             batch_ref_chosen_log_probs,
         ) = get_experiences_samples(
-            minibatch_idxs,
+            self._device_index(minibatch_idxs, chosen_input_ids.device),
             chosen_input_ids,
             chosen_attention_mask,
             rejected_input_ids,

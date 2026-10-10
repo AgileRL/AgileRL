@@ -38,14 +38,16 @@ class FSDPConfig:
         ),
     ] = False
     optim_cpu_offload: Annotated[
-        bool,
+        bool | None,
         Field(
             description=(
-                "Keep Adam state on CPU and move it to GPU only for step(). "
-                "Parameters and gradients stay on GPU."
+                "Keep Adam state on CPU and step it there with the default "
+                "AdamW kernel. Parameters and gradients stay on GPU. False "
+                "keeps Adam on GPU and steps it with fused AdamW. None picks "
+                "GPU when the memory estimate fits, else CPU."
             ),
         ),
-    ] = True
+    ] = None
     defer_grad_sync: Annotated[
         bool,
         Field(
@@ -154,6 +156,20 @@ class FSDPConfig:
             ),
         ),
     ] = 1
+    routed_expert_chunk_mib: Annotated[
+        int | None,
+        Field(
+            ge=1,
+            description=(
+                "MiB of the widest activation of one routed-expert row chunk "
+                "under expert LoRA, of one fp32 chunk of the expert-parallel "
+                "combine, and of one grouped LoRA GEMM output. Bigger chunks "
+                "launch fewer kernels per MoE layer; on Super-VL the learn "
+                "peak grows ~0.37 GiB per GiB of chunk. None picks the "
+                "largest of 64/128/256/512 the memory estimate fits."
+            ),
+        ),
+    ] = None
     tp: Annotated[
         int,
         Field(
@@ -175,20 +191,6 @@ class FSDPConfig:
             ),
         ),
     ] = None
-    compile_blocks: Annotated[
-        bool,
-        Field(
-            description=(
-                "torch.compile the dense submodules of each transformer block "
-                "(norms, MLPs) in place. MoE experts, routers, attention and "
-                "Mamba mixers stay eager."
-            ),
-        ),
-    ] = False
-    compile_backend: Annotated[
-        str,
-        Field(description="torch.compile backend for compile_blocks."),
-    ] = "inductor"
 
     def __post_init__(self) -> None:
         self.param_dtype = _dtype_name(self.param_dtype)
@@ -214,6 +216,12 @@ class FSDPConfig:
             raise ValueError(msg)
         if self.ep_token_blocks < 1:
             msg = "FSDPConfig.ep_token_blocks must be >= 1"
+            raise ValueError(msg)
+        if (
+            self.routed_expert_chunk_mib is not None
+            and self.routed_expert_chunk_mib < 1
+        ):
+            msg = "FSDPConfig.routed_expert_chunk_mib must be >= 1"
             raise ValueError(msg)
         if self.tp < 1:
             msg = "FSDPConfig.tp must be >= 1"

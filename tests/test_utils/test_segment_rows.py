@@ -18,6 +18,7 @@ from agilerl.utils.segment_rows import (
     append_vision_tails,
     filler_stand_in,
     filler_token_frac,
+    pad_row_values,
     pad_segment_rows,
     segment_window_layout,
     split_episode_segments,
@@ -508,6 +509,51 @@ class TestPadSegmentRows:
         padded = pad_segment_rows(rows, num_rows=4, width=6, pad_token_id=PAD)
 
         assert padded.sampling_logps is None
+
+
+class TestPadRowValues:
+    def test_per_token_values_widen_and_gain_filler_rows(self) -> None:
+        # Arrange: three split rows of five action positions, padded to 5 x 7.
+        rows = split_small_text_batch()
+        padded = pad_segment_rows(rows, num_rows=5, width=8, pad_token_id=PAD)
+        values = torch.arange(15.0).reshape(3, 5)
+
+        # Act
+        result = pad_row_values(values, padded, pad_value=-1.0)
+
+        # Assert
+        assert result.shape == (5, 7)
+        assert torch.equal(result[:3, :5], values)
+        assert torch.equal(result[:3, 5:], torch.full((3, 2), -1.0))
+        assert torch.equal(result[3:], torch.full((2, 7), -1.0))
+
+    @pytest.mark.parametrize(
+        "values",
+        [torch.tensor([[0.5], [1.5], [2.5]]), torch.tensor([0.5, 1.5, 2.5])],
+        ids=["column", "flat"],
+    )
+    def test_per_row_values_only_gain_filler_rows(self, values: torch.Tensor) -> None:
+        # Arrange
+        padded = pad_segment_rows(
+            split_small_text_batch(), num_rows=5, width=8, pad_token_id=PAD
+        )
+
+        # Act
+        result = pad_row_values(values, padded)
+
+        # Assert
+        assert result.shape == (5, *values.shape[1:])
+        assert result.flatten().tolist() == [0.5, 1.5, 2.5, 0.0, 0.0]
+
+    def test_keeps_the_value_dtype(self) -> None:
+        padded = pad_segment_rows(
+            split_small_text_batch(), num_rows=4, width=6, pad_token_id=PAD
+        )
+
+        result = pad_row_values(torch.tensor([[3], [4], [5]]), padded, pad_value=-1)
+
+        assert result.dtype == torch.long
+        assert result.flatten().tolist() == [3, 4, 5, -1]
 
 
 class TestAppendVisionTails:

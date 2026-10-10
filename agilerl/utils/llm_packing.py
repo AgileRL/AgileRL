@@ -31,6 +31,9 @@ and :func:`mixers_without_boundary_reset` lists mixers that would leak state.
 
 from __future__ import annotations
 
+import itertools
+import weakref
+from collections.abc import Sequence
 from typing import NamedTuple
 
 import torch
@@ -55,6 +58,7 @@ class PackedBatch(NamedTuple):
     :param batch_size: Number of original sequences ``B``.
     :param padded_seq_len: Original padded length ``T`` (so unpacking can
         rebuild the ``(B, T - 1)`` frame).
+    :param lengths: Host copy of ``seq_lengths``.
     """
 
     input_ids: torch.Tensor
@@ -64,6 +68,7 @@ class PackedBatch(NamedTuple):
     max_seqlen: int
     batch_size: int
     padded_seq_len: int
+    lengths: tuple[int, ...]
 
 
 def pack_padded_batch(
@@ -93,37 +98,114 @@ def pack_padded_batch(
     mask = attention_mask.bool()
     batch_size, padded_seq_len = input_ids.shape
     seq_lengths = mask.sum(dim=1).to(torch.long)  # (B,)
+    # The only device sync; every size below derives from these host lengths.
+    lengths = tuple(seq_lengths.tolist())
+    n_tokens = sum(lengths)
 
-    flat_ids = input_ids[mask].unsqueeze(0)  # (1, N), row-major over real tokens
+    # (1, N), row-major over real tokens
+    real = mask.flatten().nonzero_static(size=n_tokens).squeeze(1)
+    flat_ids = input_ids.flatten()[real].unsqueeze(0)
 
     cu = F.pad(seq_lengths.cumsum(0), (1, 0))  # (B+1,) int64 [0, L_0, L_0+L_1, ...]
     # position_ids: global index minus the start offset of each token's segment,
     # so each sequence's positions restart at 0 (vectorized arange-per-segment).
-    n_tokens = int(cu[-1])
-    starts = cu[:-1].repeat_interleave(seq_lengths)  # (N,) segment start per token
+    starts = cu[:-1].repeat_interleave(seq_lengths, output_size=n_tokens)
     position_ids = (torch.arange(n_tokens, device=input_ids.device) - starts).unsqueeze(
         0
     )  # (1, N)
 
-    cu_seqlens = cu.to(torch.int32)  # (B+1,)
-    max_seqlen = int(seq_lengths.max().item()) if seq_lengths.numel() else 0
-
     return PackedBatch(
         input_ids=flat_ids,
         position_ids=position_ids,
-        cu_seqlens=cu_seqlens,
+        cu_seqlens=cu.to(torch.int32),
         seq_lengths=seq_lengths,
-        max_seqlen=max_seqlen,
+        max_seqlen=max(lengths, default=0),
         batch_size=batch_size,
         padded_seq_len=padded_seq_len,
+        lengths=lengths,
     )
+
+
+class PackedLayout(NamedTuple):
+    """Document layout of packed rows.
+
+    :param seq_idx: ``(B, L)`` int32 document index, 0 for each row's first
+        document.
+    :param cu_seqlens: ``(D + 1,)`` int32 document offsets over the flattened
+        ``B * L`` tokens, ``D`` documents in total.
+    :param max_seqlen: Longest document length.
+    """
+
+    seq_idx: torch.Tensor
+    cu_seqlens: torch.Tensor
+    max_seqlen: int
+
+
+class LayoutMemo:
+    """Layout of the most recent ``position_ids`` tensor.
+
+    Every decoder block of one forward receives the same ``position_ids``
+    tensor, so the layout and its host sync are computed once per forward.
+    Callers must not modify ``position_ids`` in place after the first lookup.
+    """
+
+    def __init__(self) -> None:
+        self.key: weakref.ref[torch.Tensor] | None = None
+        self.layout: PackedLayout | None = None
+
+    def lookup(self, position_ids: torch.Tensor) -> tuple[bool, PackedLayout | None]:
+        """Cached layout for *position_ids*, if it is the remembered tensor."""
+        hit = self.key is not None and self.key() is position_ids
+        return hit, self.layout
+
+    def store(self, position_ids: torch.Tensor, layout: PackedLayout | None) -> None:
+        """Remember *layout* for *position_ids*."""
+        self.key = weakref.ref(position_ids)
+        self.layout = layout
+
+
+LAYOUT_MEMO = LayoutMemo()
+
+
+def packed_layout(position_ids: torch.Tensor) -> PackedLayout | None:
+    """Document layout of packed rows, or None when every row holds one document.
+
+    A document starts wherever ``position_ids`` does not step by one, the same
+    rule transformers uses to detect packed rows for attention masks. The
+    result is memoized on the ``position_ids`` tensor, so repeat calls within
+    one forward do not sync with the device.
+
+    :param position_ids: ``(B, L)`` positions; each packed document restarts at 0.
+    :type position_ids: torch.Tensor
+    :return: The :class:`PackedLayout`, or None.
+    :rtype: PackedLayout | None
+    """
+    hit, layout = LAYOUT_MEMO.lookup(position_ids)
+    if hit:
+        return layout
+    first = position_ids[:, :1] - 1
+    starts = torch.diff(position_ids, prepend=first, dim=-1) != 1
+    row_starts = starts.clone()
+    row_starts[:, 0] = True
+    # One device sync for the whole layout.
+    offsets = row_starts.flatten().nonzero().flatten().tolist()
+    if len(offsets) == position_ids.shape[0]:
+        layout = None
+    else:
+        offsets.append(position_ids.numel())
+        layout = PackedLayout(
+            seq_idx=starts.cumsum(-1, dtype=torch.int32),
+            cu_seqlens=torch.tensor(offsets, dtype=torch.int32).to(
+                position_ids.device, non_blocking=True
+            ),
+            max_seqlen=max(b - a for a, b in itertools.pairwise(offsets)),
+        )
+    LAYOUT_MEMO.store(position_ids, layout)
+    return layout
 
 
 def packed_seq_idx(position_ids: torch.Tensor) -> torch.Tensor | None:
     """Per-token document index of packed rows, or None when no row is packed.
-
-    A document starts wherever ``position_ids`` does not step by one, the same
-    rule transformers uses to detect packed rows for attention masks.
 
     :param position_ids: ``(B, L)`` positions; each packed document restarts at 0.
     :type position_ids: torch.Tensor
@@ -131,12 +213,8 @@ def packed_seq_idx(position_ids: torch.Tensor) -> torch.Tensor | None:
         when every row holds a single document.
     :rtype: torch.Tensor | None
     """
-    first = position_ids[:, :1] - 1
-    starts = torch.diff(position_ids, prepend=first, dim=-1) != 1
-    seq_idx = starts.cumsum(-1, dtype=torch.int32)
-    if not bool(seq_idx[:, -1].any()):
-        return None
-    return seq_idx
+    layout = packed_layout(position_ids)
+    return None if layout is None else layout.seq_idx
 
 
 def is_recurrent_mixer(module: nn.Module) -> bool:
@@ -188,32 +266,34 @@ def packed_segment_ids(
     return torch.repeat_interleave(
         torch.arange(packed.batch_size, device=device),
         packed.seq_lengths.to(device),
+        output_size=sum(packed.lengths),
     )
 
 
 def _scatter_packed(
     flat: torch.Tensor,
     packed: PackedBatch,
-    tokens_per_seg: torch.Tensor,
+    tokens_per_seg: Sequence[int],
     row_stride: int,
     trailing_dim: int | None,
 ) -> torch.Tensor:
     """Scatter the leading ``tokens_per_seg[b]`` rows of each packed segment.
 
     Shared core of both unpackers. For each original sequence *b*, the flat span
-    starting at ``cu[b]`` and spanning ``tokens_per_seg[b]`` rows is copied to
-    output rows ``b * row_stride + 0 .. tokens_per_seg[b] - 1`` (left-aligned),
-    leaving all other rows zero. Segments with no contributing rows are skipped.
-    Built with ``index_select`` / ``index_put`` so gradients flow back to ``flat``.
+    starting at ``sum(lengths[:b])`` and spanning ``tokens_per_seg[b]`` rows is
+    copied to output rows ``b * row_stride + 0 .. tokens_per_seg[b] - 1``
+    (left-aligned), leaving all other rows zero. Segments with no contributing
+    rows are skipped. Built with ``index_select`` / ``index_put`` so gradients
+    flow back to ``flat``.
 
     :param flat: ``(N,)`` or ``(N, H)`` packed rows to scatter.
     :type flat: torch.Tensor
-    :param packed: The :class:`PackedBatch` whose ``cu_seqlens`` give segment
+    :param packed: The :class:`PackedBatch` whose host ``lengths`` give segment
         offsets.
     :type packed: PackedBatch
-    :param tokens_per_seg: ``(B,)`` number of leading rows to take from each
-        segment (e.g. ``L_b - 1`` for logprobs, ``L_b`` for hidden states).
-    :type tokens_per_seg: torch.Tensor
+    :param tokens_per_seg: Number of leading rows to take from each segment
+        (e.g. ``L_b - 1`` for logprobs, ``L_b`` for hidden states).
+    :type tokens_per_seg: Sequence[int]
     :param row_stride: Output row stride per segment (``T - 1`` or ``T``).
     :type row_stride: int
     :param trailing_dim: ``H`` for a ``(N, H)`` payload, else ``None`` for ``(N,)``.
@@ -223,7 +303,6 @@ def _scatter_packed(
     :rtype: torch.Tensor
     """
     device = flat.device
-    cu = packed.cu_seqlens
     n_rows = packed.batch_size * row_stride
     out = (
         flat.new_zeros(n_rows)
@@ -233,11 +312,10 @@ def _scatter_packed(
 
     src_chunks: list[torch.Tensor] = []
     dst_chunks: list[torch.Tensor] = []
-    for b in range(packed.batch_size):
-        n = int(tokens_per_seg[b])
+    offsets = itertools.accumulate(packed.lengths, initial=0)
+    for b, (n, offset) in enumerate(zip(tokens_per_seg, offsets, strict=False)):
         if n <= 0:
             continue
-        offset = int(cu[b])
         src_chunks.append(torch.arange(offset, offset + n, device=device))
         dst_chunks.append(b * row_stride + torch.arange(n, device=device))
 
@@ -273,7 +351,7 @@ def unpack_logprobs(
     out = _scatter_packed(
         flat,
         packed,
-        tokens_per_seg=packed.seq_lengths - 1,  # L_b - 1 (skipped when <= 0)
+        tokens_per_seg=[length - 1 for length in packed.lengths],
         row_stride=tm1,
         trailing_dim=None,
     )
@@ -311,7 +389,7 @@ def unpack_values(
     out = _scatter_packed(
         flat,
         packed,
-        tokens_per_seg=packed.seq_lengths.clamp(max=tm1),  # L_b clamped to T-1
+        tokens_per_seg=[min(length, tm1) for length in packed.lengths],
         row_stride=tm1,
         trailing_dim=None,
     )
@@ -343,7 +421,7 @@ def unpack_hidden_states(
     out = _scatter_packed(
         flat,
         packed,
-        tokens_per_seg=packed.seq_lengths,  # L_b (skipped when == 0)
+        tokens_per_seg=packed.lengths,
         row_stride=t,
         trailing_dim=hidden_dim,
     )

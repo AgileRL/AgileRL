@@ -102,6 +102,24 @@ def multimodal_tower_params(config: dict[str, Any]) -> int:
     )
 
 
+def _vision_fields(config: dict[str, Any]) -> dict[str, int]:
+    """Vision tower output width, input image side and patch side; zeros without a tower."""
+    vision = config.get("vision_config")
+    if not isinstance(vision, dict):
+        return {}
+    return {
+        "vision_hidden_size": int(
+            config.get("vit_hidden_size") or vision.get("hidden_size") or 0
+        ),
+        "vision_image_size": int(
+            config.get("force_image_size") or vision.get("image_size") or 0
+        ),
+        "vision_patch_size": int(
+            config.get("patch_size") or vision.get("patch_size") or 0
+        ),
+    }
+
+
 def _sliding_layer_fraction(text_cfg: dict[str, Any]) -> float:
     """Fraction of layers using windowed attention.
 
@@ -329,6 +347,11 @@ def _moe_fields(text_cfg: dict[str, Any]) -> dict[str, Any]:
             else None
         ),
         "n_shared_experts": int(text_cfg.get("n_shared_experts") or 0),
+        "moe_latent_size": (
+            int(text_cfg["moe_latent_size"])
+            if text_cfg.get("moe_latent_size")
+            else None
+        ),
         "shared_expert_intermediate_size": (
             int(text_cfg["moe_shared_expert_intermediate_size"])
             if text_cfg.get("moe_shared_expert_intermediate_size")
@@ -363,6 +386,7 @@ def _layout_fields(
         "per_layer_input_dim": int(text_cfg.get("hidden_size_per_layer_input") or 0),
         "per_layer_input_vocab": int(text_cfg.get("vocab_size_per_layer_input") or 0),
         "multimodal_tower_params": multimodal_tower_params(config),
+        **_vision_fields(config),
     }
 
 
@@ -405,6 +429,10 @@ class ModelArch(BaseModel):
     n_shared_experts: int = 0
     # ``None`` falls back to ``expert_intermediate_size``.
     shared_expert_intermediate_size: int | None = None
+    # Width routed experts read and write (Nemotron-H latent MoE). Each MoE
+    # layer projects hidden -> latent before the experts and back after.
+    # ``None`` runs experts at ``hidden_size``.
+    moe_latent_size: int | None = None
 
     # Each layer is exactly one of Mamba, attention, MLP or MoE. ``None``
     # keeps the every-layer default.
@@ -416,6 +444,11 @@ class ModelArch(BaseModel):
     chunked_routed_experts: bool = False
 
     multimodal_tower_params: int = 0
+    # Vision tower output width per patch, and the square image and patch
+    # sides it encodes. Zero without a vision tower.
+    vision_hidden_size: int = 0
+    vision_image_size: int = 0
+    vision_patch_size: int = 0
 
     # Head dim on full-attention layers when it differs from the sliding
     # layers', which widens q/k/v on the full-attention layers.
@@ -499,6 +532,18 @@ class ModelArch(BaseModel):
     @property
     def is_moe(self) -> bool:
         return self.n_experts is not None and self.n_experts > 1
+
+    @property
+    def vision_patches_per_image(self) -> int:
+        """Patches the vision tower emits for one image."""
+        if not self.vision_patch_size:
+            return 0
+        return (self.vision_image_size // self.vision_patch_size) ** 2
+
+    @property
+    def expert_width(self) -> int:
+        """Feature width of a routed expert's input and output rows."""
+        return self.moe_latent_size or self.hidden_size
 
     @property
     def block_exclusive_layers(self) -> bool:
@@ -675,6 +720,13 @@ class TrainingSettings(BaseModel):
     micro_batch_size: int = Field(default=1, ge=1)
     # PPO only: actor and critic rows share one gradient forward and backward.
     fuse_actor_critic_pass: bool = False
+    # Unique images one learner GPU encodes per learn step. Each keeps its
+    # vision tower output in pinned host memory until the step ends.
+    images_per_update: int = Field(default=0, ge=0)
+    # The main rank's async checkpoint snapshot also holds the Adam moments.
+    checkpoint_optimizer: bool = False
+    # Async rollout: the next rollout batch waits in host memory during learn.
+    async_rollout: bool = False
 
     @property
     def trajectories(self) -> int:
@@ -685,6 +737,16 @@ class TrainingSettings(BaseModel):
         """
         total = self.trajectories_per_update or self.group_size
         return max(-(-total // self.n_training_gpus), 1)
+
+    @property
+    def shard_gpus(self) -> int:
+        """GPUs one copy of the weights is sharded across.
+
+        FSDP shards inside each ``shard_group_size`` group; the groups replicate.
+        """
+        if self.fsdp is None or self.fsdp.shard_group_size is None:
+            return self.n_training_gpus
+        return min(self.fsdp.shard_group_size, self.n_training_gpus)
 
     @property
     def uses_reference(self) -> bool:

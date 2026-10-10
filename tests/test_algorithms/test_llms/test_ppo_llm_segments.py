@@ -10,10 +10,14 @@ token alone, so a segment row's log-probs and values match its episode's.
 from __future__ import annotations
 
 import math
+import sys
+from collections.abc import Iterator
+from functools import partial
 from typing import Any
 
 import pytest
 import torch
+import torch.distributed as dist
 
 pytest.importorskip("transformers", reason="LLM tests require transformers.")
 pytest.importorskip("peft", reason="LLM tests require peft.")
@@ -22,15 +26,23 @@ from peft import LoraConfig
 
 from agilerl.algorithms.ppo_llm import PPO as LLMPPO
 from agilerl.utils.llm_utils import LEARN_PHASE_METRIC_NAMES
-from tests.test_algorithms.test_llms.llm_helpers import create_value_head_module
+from tests.test_algorithms.test_llms.llm_helpers import (
+    create_value_head_module,
+    scale_losses,
+)
 from tests.test_algorithms.test_llms.segment_helpers import (
     EPISODE_SEGMENTS,
     MEAN_SEGMENT_ROW_ACTION_TOKENS,
     episode_sampling_logps,
+    learn_rank_episodes,
+    learn_with_nan_loss_on_rank_zero,
     lora_weights,
     pad_to_eight_rows,
+    rank_local_step_gradients,
     record_step_gradients,
+    rows_from_other_ranks,
     segment_experiences,
+    spawn_balanced_learn,
     use_fake_liger_policy_loss,
 )
 
@@ -186,6 +198,37 @@ class TestPPOLearnEpisodeSegments:
         assert metrics["train_rows_padded"] == pytest.approx(8.0)
         assert metrics["kl"] == pytest.approx(MEAN_SEGMENT_ROW_ACTION_TOKENS)
 
+    @pytest.mark.parametrize("fuse", [False, True], ids=["split", "fused"])
+    def test_rows_from_other_ranks_train_to_the_same_gradient(
+        self, monkeypatch: pytest.MonkeyPatch, fuse: bool
+    ) -> None:
+        # Arrange: one optimizer step of 1-row micro-batches over 6 real rows.
+        local = _make_ppo(micro_batch_size_per_gpu=1, fuse_actor_critic_pass=fuse)
+        dealt = _make_ppo(micro_batch_size_per_gpu=1, fuse_actor_critic_pass=fuse)
+        local_grads = record_step_gradients(local, monkeypatch)
+        dealt_grads = record_step_gradients(dealt, monkeypatch)
+
+        # Act
+        local_metrics = local.learn(_experiences(), episode_segments=EPISODE_SEGMENTS)
+        monkeypatch.setattr(
+            "agilerl.algorithms.core.base.balance_rows_across_ranks",
+            rows_from_other_ranks,
+        )
+        dealt_metrics = dealt.learn(_experiences(), episode_segments=EPISODE_SEGMENTS)
+
+        # Assert
+        assert len(local_grads) == len(dealt_grads) == 1
+        assert any("critic" in name for name in local_grads[0])
+        for name, grad in local_grads[0].items():
+            # fp32 sums over a different micro-batch order.
+            assert torch.allclose(dealt_grads[0][name], grad, rtol=1e-5, atol=1e-7), (
+                name
+            )
+        for key in ("loss", "pg_loss", "vf_loss", "kl", "entropy"):
+            assert dealt_metrics[key] == pytest.approx(
+                local_metrics[key], rel=1e-5, abs=1e-7
+            ), key
+
     def test_no_segments_matches_all_none_segments(self) -> None:
         # Arrange
         unset = _make_ppo()
@@ -221,6 +264,96 @@ class TestPPOLearnEpisodeSegments:
             ValueError, match="Set importance_sampling_level='token' or 'turn'"
         ):
             agent.learn(_experiences(), episode_segments=EPISODE_SEGMENTS)
+
+
+def scale_value_losses(
+    agent: LLMPPO, monkeypatch: pytest.MonkeyPatch, scales: Iterator[float]
+) -> None:
+    """Make each value loss of ``agent`` carry the next scale."""
+    monkeypatch.setattr(
+        agent, "_ppo_value_loss", scale_losses(agent._ppo_value_loss, scales)
+    )
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or not dist.is_available(), reason="gloo unavailable"
+)
+class TestPPOLearnBalancedAcrossRanks:
+    @pytest.mark.parametrize("fuse", [False, True], ids=["split", "fused"])
+    def test_uneven_ranks_run_even_rows_with_their_local_gradients(
+        self, monkeypatch: pytest.MonkeyPatch, fuse: bool
+    ) -> None:
+        # Arrange: returns and advantages stay on each rank's own episodes, so
+        # the step averages rank 0's 4 local rows and rank 1's 2. Without a KL
+        # term or a reachable clip norm the step gradient is linear in the rows.
+        make_agent = partial(
+            _make_ppo, fuse_actor_critic_pass=fuse, beta=0.0, max_grad_norm=1e30
+        )
+        rank0, rank1 = rank_local_step_gradients(make_agent, monkeypatch)
+
+        # Act
+        reports = spawn_balanced_learn(make_agent)
+
+        # Assert: 4 and 2 rows are dealt out as 3 and 3.
+        for padded_rows, steps in reports:
+            assert padded_rows == pytest.approx(3.0)
+            assert len(steps) == 1
+            assert steps[0].keys() == rank0.keys()
+            for name in rank0:
+                # fp32 sums over a different micro-batch order and rank split,
+                # on critic gradients up to about 20.
+                torch.testing.assert_close(
+                    torch.from_numpy(steps[0][name]),
+                    (4 * rank0[name] + 2 * rank1[name]) / 6,
+                    rtol=1e-5,
+                    atol=1e-5,
+                    msg=name,
+                )
+
+    def test_sampling_log_probs_on_one_rank_reweight_only_its_rows(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange: only rank 0's episodes carry vLLM sampling log-probs, and
+        # one of its rows trains on rank 1.
+        make_agent = partial(_make_ppo, beta=0.0, max_grad_norm=1e30)
+        uncorrected, _ = rank_local_step_gradients(make_agent, monkeypatch)
+        rank0, rank1 = rank_local_step_gradients(
+            make_agent, monkeypatch, sampling_ranks=(0,)
+        )
+
+        # Act
+        reports = spawn_balanced_learn(
+            make_agent, partial(learn_rank_episodes, sampling_ranks=(0,))
+        )
+
+        # Assert
+        assert any(not torch.allclose(rank0[name], uncorrected[name]) for name in rank0)
+        for padded_rows, steps in reports:
+            assert padded_rows == pytest.approx(3.0)
+            assert len(steps) == 1
+            for name in rank0:
+                # fp32 sums over a different micro-batch order and rank split,
+                # on critic gradients up to about 20.
+                torch.testing.assert_close(
+                    torch.from_numpy(steps[0][name]),
+                    (4 * rank0[name] + 2 * rank1[name]) / 6,
+                    rtol=1e-5,
+                    atol=1e-5,
+                    msg=name,
+                )
+
+    def test_a_non_finite_loss_on_one_rank_raises_on_every_rank(self) -> None:
+        # Arrange: every loss of rank 0 is NaN, every loss of rank 1 finite.
+        learn = partial(learn_with_nan_loss_on_rank_zero, scale_loss=scale_value_losses)
+
+        # Act
+        reports = spawn_balanced_learn(_make_ppo, learn)
+
+        # Assert
+        for rank, ((error, weights_held), steps) in enumerate(reports):
+            assert f"rank={rank} local_finite={rank != 0}" in error
+            assert weights_held
+            assert steps == []
 
 
 class TestPPOLearnPhaseTimings:

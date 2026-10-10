@@ -17,7 +17,7 @@ from agilerl.llm_envs import (
     RolloutCollector,
     RolloutHarness,
 )
-from agilerl.llm_envs.harness import ACTION_HISTORY_MAX_CHARS
+from agilerl.llm_envs.harness import ACTION_HISTORY_MAX_CHARS, PROMPT_LIMIT_INFO_KEY
 from agilerl.llm_envs.rubrics import reward_fn_to_rubric
 from agilerl.llm_envs.task_assigner import _mix_seed
 from tests.helpers.rollout_doubles import (
@@ -281,7 +281,8 @@ class TestRolloutEnvStep:
         assert truncated is True
         assert terminated is False
         assert next_obs == {}
-        assert info == {}
+        assert info == {PROMPT_LIMIT_INFO_KEY: True}
+        assert torch.equal(w.get_episode_data()[0], completion)
 
     def test_later_turns_budget_from_the_actual_prompt_length(self, serve_env) -> None:
         env = _NonTerminalEnv()
@@ -1225,39 +1226,39 @@ class TestRolloutHarnessSegmentRestart:
         assert harness.done
         assert len(prompts) == 2
         assert segments is not None
-        # The first restart fits the 36-token budget; the second (37) does not.
-        assert segments.token_lengths.tolist() == [45, 79]
+        # The first restart (32) fits the 36-token budget; the second (37) does
+        # not, so the last row ends at its generation.
+        assert segments.token_lengths.tolist() == [45, 32 + len(REASONED_ACTION)]
         assert int(segments.token_lengths.sum()) == full_ids.shape[1]
         assert int(mask.sum()) == 2 * len(REASONED_ACTION)
 
-    def test_restart_prompt_over_budget_continues_while_the_context_fits(
-        self,
-    ) -> None:
+    def test_restart_prompt_over_the_threshold_ends_the_episode(self) -> None:
         # Arrange
         # No </think>: the history repeats the whole 30-char turn, so the
-        # 61-token restart prompt outgrows the 44-token continued one.
-        generation = "x" * 30
+        # 61-token restart prompt is over the 40-token threshold, as is the
+        # 44-token continued one.
+        generation = torch.tensor([[ord("x")] * 30], dtype=torch.long)
         harness = _segmented_text_harness(
             terminate_after=None, segment_prompt_tokens=40, max_model_len=51
         )
+        prompt, _info = harness.reset()
+        output = torch.cat([prompt["input_ids"], generation], dim=1)
 
         # Act
-        prompts = _run_text_episode(harness, generation)
+        next_prompt, _reward, terminated, truncated, info = harness.step(output)
         full_ids, mask, *_rest, segments = harness.get_episode_data()
 
         # Assert
-        texts = [_chr_text(prompt["input_ids"]) for prompt in prompts]
-        assert texts == ["prompt", "prompt" + generation + "feedback"]
-        assert harness.done
+        assert (next_prompt, terminated, truncated) == ({}, False, True)
+        assert info == {PROMPT_LIMIT_INFO_KEY: True}
         assert segments is None
-        # One row: continued prompt, second turn, and the feedback that truncated it.
-        assert full_ids.shape[1] == 44 + 30 + 8
-        assert int(mask.sum()) == 2 * 30
+        assert torch.equal(full_ids, output)
+        assert int(mask.sum()) == 30
 
     def test_restart_history_caps_a_long_unclosed_reasoning_turn(self) -> None:
         # Arrange
         generation = "r" * 400
-        harness = _segmented_text_harness(segment_prompt_tokens=60)
+        harness = _segmented_text_harness(segment_prompt_tokens=400)
 
         # Act
         prompts = _run_text_episode(harness, generation)
@@ -1274,6 +1275,18 @@ class TestRolloutHarnessSegmentRestart:
             match=f"segment_prompt_tokens must be a positive int or None, got {segment_prompt_tokens}",
         ):
             _segmented_text_harness(segment_prompt_tokens=segment_prompt_tokens)
+
+    def test_reset_prompt_over_the_threshold_ends_at_turn_zero(self) -> None:
+        # Arrange
+        harness = _segmented_text_harness(segment_prompt_tokens=5)
+
+        # Act
+        prompt, info = harness.reset()
+
+        # Assert
+        assert prompt == {}
+        assert harness.done
+        assert info == {PROMPT_LIMIT_INFO_KEY: True}
 
     def test_lock_step_trajectories_reject_a_restarted_episode(self) -> None:
         # Arrange
@@ -1295,6 +1308,29 @@ class TestRolloutHarnessSegmentRestart:
                 collector.get_trajectories()
         finally:
             collector.close()
+
+
+class TestRolloutHarnessSegmentRowBound:
+    @pytest.mark.parametrize("segment_prompt_tokens", range(31, 100, 4))
+    @pytest.mark.parametrize("generation", [REASONED_ACTION, "x" * 30])
+    def test_no_row_exceeds_the_threshold_plus_one_generation(
+        self, segment_prompt_tokens: int, generation: str
+    ) -> None:
+        # Arrange
+        harness = _segmented_text_harness(
+            terminate_after=None, segment_prompt_tokens=segment_prompt_tokens
+        )
+
+        # Act
+        prompts = _run_text_episode(harness, generation)
+        full_ids, *_rest, segments = harness.get_episode_data()
+
+        # Assert
+        rows = [full_ids.shape[1]] if segments is None else segments.token_lengths
+        assert max(prompt["input_ids"].shape[1] for prompt in prompts) <= (
+            segment_prompt_tokens
+        )
+        assert max(int(row) for row in rows) <= segment_prompt_tokens + len(generation)
 
 
 class _TerminatorTokenizer:
@@ -1333,14 +1369,14 @@ class TestFeedbackTerminatorDedupe:
     def test_sampled_terminator_is_not_doubled(self) -> None:
         w = self._env(_TerminatorTokenizer())
         w.full_ids = torch.tensor([[65, 66, 7]], dtype=torch.long)  # ends with EOS
-        w._step_apply(("fb", "user", None, 0.5, False, False, {}, None))
+        w._step_apply(("fb", "user", None, 0.5, False, False, {}, None, None))
         # One terminator total: the sampled one; the frame's duplicate is dropped.
         assert w.full_ids[0].tolist().count(7) == 1
 
     def test_truncated_turn_still_gets_the_frame_terminator(self) -> None:
         w = self._env(_TerminatorTokenizer())
         w.full_ids = torch.tensor([[65, 66, 67]], dtype=torch.long)  # no EOS sampled
-        w._step_apply(("fb", "user", None, 0.5, False, False, {}, None))
+        w._step_apply(("fb", "user", None, 0.5, False, False, {}, None, None))
         assert w.full_ids[0].tolist().count(7) == 1
 
     def test_non_special_equal_token_is_kept(self) -> None:
@@ -1348,7 +1384,7 @@ class TestFeedbackTerminatorDedupe:
         tokenizer.all_special_ids = []
         w = self._env(tokenizer)
         w.full_ids = torch.tensor([[65, 66, 7]], dtype=torch.long)
-        w._step_apply(("fb", "user", None, 0.5, False, False, {}, None))
+        w._step_apply(("fb", "user", None, 0.5, False, False, {}, None, None))
         # id 7 is ordinary content here; nothing may be silently dropped.
         assert w.full_ids[0].tolist().count(7) == 2
 
@@ -2013,4 +2049,4 @@ class TestRolloutEnvPhaseGuards:
         w.full_ids = None  # no reset() ran, so there is no transcript to append to
 
         with pytest.raises(RuntimeError, match="reset\\(\\) must run before step"):
-            w._step_apply(("fb", "user", None, 0.5, False, False, {}, None))
+            w._step_apply(("fb", "user", None, 0.5, False, False, {}, None, None))

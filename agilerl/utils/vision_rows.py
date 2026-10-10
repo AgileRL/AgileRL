@@ -24,10 +24,13 @@ class VisionRows:
     :param pixel_values: Vision tensor for the local batch.
     :param image_counts: Vision rows per token row, or ``None`` when every row
         has the same number.
+    :param image_keys: ``(N,)`` vision feature cache key of each vision row,
+        or ``None`` when the tower runs uncached.
     """
 
     pixel_values: torch.Tensor
     image_counts: Sequence[int] | None = None
+    image_keys: torch.Tensor | None = None
 
     def for_minibatch(
         self, minibatch_idxs: npt.NDArray[np.intp], sample_rows: int
@@ -40,6 +43,24 @@ class VisionRows:
         """
         return pixel_values_for_minibatch(
             self.pixel_values,
+            minibatch_idxs,
+            sample_rows=sample_rows,
+            image_counts=self.image_counts,
+        )
+
+    def keys_for_minibatch(
+        self, minibatch_idxs: npt.NDArray[np.intp], sample_rows: int
+    ) -> torch.Tensor | None:
+        """Vision feature cache keys of the vision rows :meth:`for_minibatch` returns.
+
+        :param minibatch_idxs: Sample rows included in the minibatch.
+        :param sample_rows: Local batch size (``token_ids.shape[0]``).
+        :return: ``(N,)`` keys, or ``None`` without :attr:`image_keys`.
+        """
+        if self.image_keys is None:
+            return None
+        return pixel_values_for_minibatch(
+            self.image_keys,
             minibatch_idxs,
             sample_rows=sample_rows,
             image_counts=self.image_counts,

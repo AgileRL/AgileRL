@@ -11,7 +11,7 @@ schema-version bump.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -24,11 +24,13 @@ from agilerl.arena.memory.specs import (
     DeviceSpec,
     GenerationSettings,
     GiB,
+    MiB,
     ModelArch,
     ModelSpec,
     RunConfig,
     TrainingSettings,
 )
+from agilerl.arena.models.fsdp import FSDPConfig
 
 PhaseName = Literal["training", "generation"]
 
@@ -63,10 +65,17 @@ class PhaseBreakdown(BaseModel):
     device_total_bytes: int
     device_usable_bytes: int
     warnings: tuple[str, ...] = ()
+    # Host RAM one training process holds beside the device peak. Not part
+    # of ``total_bytes`` or ``fits``.
+    host: tuple[MemoryComponent, ...] = ()
 
     @property
     def total_bytes(self) -> int:
         return sum(c.n_bytes for c in self.components)
+
+    @property
+    def host_total_bytes(self) -> int:
+        return sum(c.n_bytes for c in self.host)
 
     @property
     def fits(self) -> bool:
@@ -228,6 +237,11 @@ class AdapterState:
     grads: float
     step_grads: float
     adam: float
+    # Foreach AdamW temporaries during step() on the GPU.
+    adam_workspace: float
+    # Trained adapters and value head, unsharded.
+    trained_params: int
+    trained_bytes: float
 
 
 def _value_head_placement(hidden: int, threshold: int | None) -> tuple[int, int]:
@@ -249,7 +263,7 @@ def adapter_state(
 
     :param arch: Decoder geometry.
     :param settings: Training settings (rank, scope, FSDP).
-    :param shards: Training-GPU count; 1 means no FSDP shard.
+    :param shards: GPUs one weight copy is sharded across; 1 means no FSDP shard.
     :return: Adapter-state bytes on one GPU.
     """
     fsdp = settings.fsdp
@@ -321,12 +335,27 @@ def adapter_state(
             formulas.ADAM_BYTES_PER_PARAM,
             formulas.ADAM_BYTES_PER_PARAM,
         )
+    # Flat data parallel steps foreach AdamW on the GPU. FSDP steps fused
+    # AdamW on the GPU, or steps on the host when offloaded.
+    adam_workspace = (
+        resident_bytes(
+            trained_repl,
+            trained_shard,
+            formulas.FOREACH_ADAM_WORKSPACE_BYTES_PER_PARAM,
+            formulas.FOREACH_ADAM_WORKSPACE_BYTES_PER_PARAM,
+        )
+        if fsdp is None
+        else 0.0
+    )
     return AdapterState(
         bytes_per_param=replicated_bytes,
         adapters=adapters,
         grads=grads,
         step_grads=step_grads,
         adam=adam,
+        adam_workspace=adam_workspace,
+        trained_params=trained_repl + trained_shard,
+        trained_bytes=trained_repl * replicated_bytes + trained_shard * sharded_bytes,
     )
 
 
@@ -345,6 +374,7 @@ class ActivationPeak:
     saved: float
     recompute: float
     split_lora: float
+    routed_chunks: float
     loss_hidden: float
     lora_casts: float
     lora_dropout: float
@@ -358,8 +388,8 @@ def block_backward_terms(
     act_bytes: float,
     adapter_bytes: float,
     eager_mamba_scan: bool = False,
-) -> tuple[int, int, int, int]:
-    """Recompute, fp32 casts, LoRA dropout and split expert-LoRA of one checkpointed block.
+) -> tuple[int, int, int, int, int]:
+    """Recompute, fp32 casts, LoRA dropout, split expert-LoRA and routed chunks of one checkpointed block.
 
     A block-exclusive stack recomputes one attention, FFN or Mamba layer at a
     time, so each kind's terms are summed and the largest kind is kept.
@@ -377,8 +407,23 @@ def block_backward_terms(
         act_bytes,
         settings.lora_rank,
     )
+    fsdp = settings.fsdp
+    chunks = formulas.routed_chunk_bytes(
+        arch,
+        rows,
+        seq_len,
+        act_bytes,
+        (
+            formulas.DEFAULT_ROUTED_CHUNK_BYTES
+            if fsdp is None
+            else fsdp.routed_expert_chunk_mib * MiB
+        ),
+        expert_lora=settings.lora_packed_target_matrices > 0,
+        contracted=settings.packed_moe_dispatch == "contracted",
+        ep=1 if fsdp is None else fsdp.ep,
+    )
 
-    def terms(layer: BlockKind | None) -> tuple[int, int, int, int]:
+    def terms(layer: BlockKind | None) -> tuple[int, int, int, int, int]:
         recompute = formulas.block_recompute_bytes(
             arch,
             rows,
@@ -409,8 +454,14 @@ def block_backward_terms(
                 settings.gradient_checkpointing,
                 layer=layer,
             )
-        split_here = split if layer in (None, "ffn") else 0
-        return recompute, casts, dropout, split_here
+        moe_here = layer in (None, "ffn")
+        return (
+            recompute,
+            casts,
+            dropout,
+            split if moe_here else 0,
+            chunks if moe_here else 0,
+        )
 
     if not (arch.block_exclusive_layers and settings.gradient_checkpointing):
         return terms(None)
@@ -420,21 +471,20 @@ def block_backward_terms(
 def activation_peak(
     arch: ModelArch,
     settings: TrainingSettings,
+    adapters: AdapterState,
     *,
     act_bytes: float,
-    adapter_bytes: float,
-    grads: float,
-    step_grads: float,
-    adam: float,
     seq_len: int,
     eager_mamba_scan: bool = False,
 ) -> ActivationPeak:
     """Peak of backward, fused loss, no-grad logprob, and optimizer instants.
 
-    :param adapter_bytes: Bytes per LoRA element: fp32 under flat data
-        parallel, FSDP's ``param_dtype`` when sharded.
+    :param adapters: Adapter, gradient, and Adam bytes on one training GPU.
     :param eager_mamba_scan: Mamba layers run HF's eager scan.
     """
+    grads = adapters.grads
+    step_grads = adapters.step_grads
+    adam = adapters.adam
     graph_rows = settings.grad_graph_rows
     forward_rows = settings.grad_forward_rows
     live_rows = graph_rows * forward_rows
@@ -457,8 +507,15 @@ def activation_peak(
     if settings.activation_offload:
         saved = 0
     loss_hidden = live_rows * seq_len * arch.hidden_size * act_bytes
-    recompute, lora_casts, lora_dropout, split_lora = block_backward_terms(
-        arch, settings, seq_len, act_bytes, adapter_bytes, eager_mamba_scan
+    recompute, lora_casts, lora_dropout, split_lora, routed_chunks = (
+        block_backward_terms(
+            arch,
+            settings,
+            seq_len,
+            act_bytes,
+            adapters.bytes_per_param,
+            eager_mamba_scan,
+        )
     )
     loss_lora_casts = 0 if settings.lora_casts_recompute_only else lora_casts
     # Two fp32 tiles are live at the loss instant: recomputed logits plus
@@ -477,7 +534,14 @@ def activation_peak(
         else 0
     )
     backward_peak = (
-        grads + saved + recompute + loss_hidden + lora_casts + lora_dropout + split_lora
+        grads
+        + saved
+        + recompute
+        + loss_hidden
+        + lora_casts
+        + lora_dropout
+        + split_lora
+        + routed_chunks
     )
     loss_peak = grads + saved + loss_hidden + loss_lora_casts + logits
     nograd_peak = (
@@ -487,7 +551,7 @@ def activation_peak(
     backward_total = backward_peak + adam_always
     loss_total = loss_peak + adam_always
     nograd_total = nograd_peak + (adam_always if settings.has_nograd_pass else 0)
-    optimizer_total = optimizer_peak + adam
+    optimizer_total = optimizer_peak + adam + adapters.adam_workspace
     peak = max(backward_total, loss_total, nograd_total, optimizer_total)
     if peak == backward_total:
         activations, live_logits, live_grads, live_adam = (
@@ -511,7 +575,12 @@ def activation_peak(
             adam_always if settings.has_nograd_pass else 0,
         )
     else:
-        activations, live_logits, live_grads, live_adam = 0, 0, step_grads, adam
+        activations, live_logits, live_grads, live_adam = (
+            0,
+            0,
+            step_grads,
+            adam + adapters.adam_workspace,
+        )
     return ActivationPeak(
         activations=activations,
         logits=live_logits,
@@ -524,6 +593,7 @@ def activation_peak(
         saved=saved,
         recompute=recompute,
         split_lora=split_lora,
+        routed_chunks=routed_chunks,
         loss_hidden=loss_hidden,
         lora_casts=lora_casts,
         lora_dropout=lora_dropout,
@@ -542,7 +612,7 @@ def trainer_base_bytes(
     :param model: Training-side model spec.
     :param settings: Training settings (dtype, FSDP).
     :param counts: Analytic parameter split.
-    :param shards: Training-GPU count.
+    :param shards: GPUs one weight copy is sharded across.
     :return: Base-weight bytes on one GPU.
     """
     full = formulas.weight_bytes(counts, settings.weight_dtype, model.variant("base"))
@@ -579,22 +649,29 @@ def estimate_training(
     :param orchestrated: Charge the per-process job overhead.
     :return: Stacked-bar breakdown for the training phase.
     """
+    fsdp = settings.fsdp
+    resolved_note = None
+    if fsdp is not None and (
+        fsdp.routed_expert_chunk_mib is None or fsdp.optim_cpu_offload is None
+    ):
+        resolved = resolve_fsdp_memory(model, device, settings, orchestrated)
+        settings = settings.model_copy(update={"fsdp": resolved})
+        resolved_note = fsdp_resolution_note(fsdp, resolved)
     arch = model.arch
     counts = formulas.param_counts(arch, model.n_params)
     act_bytes = DTYPE_BYTES[settings.weight_dtype]
     seq_len = settings.max_model_len
     warnings = training_warnings(counts, settings)
-    shards = settings.n_training_gpus
+    if resolved_note:
+        warnings.append(resolved_note)
+    shards = settings.shard_gpus
     base = trainer_base_bytes(model, settings, counts, shards)
     adapters = adapter_state(arch, settings, shards)
     peak = activation_peak(
         arch,
         settings,
+        adapters,
         act_bytes=act_bytes,
-        adapter_bytes=adapters.bytes_per_param,
-        grads=adapters.grads,
-        step_grads=adapters.step_grads,
-        adam=adapters.adam,
         seq_len=seq_len,
         eager_mamba_scan=arch.eager_mamba_scan_family
         and device.compute_capability == EAGER_MAMBA_SCAN_CAPABILITY,
@@ -653,6 +730,7 @@ def estimate_training(
                 "checkpoint_boundaries": int(peak.saved),
                 "block_recompute": int(peak.recompute),
                 "split_moe_lora": int(peak.split_lora),
+                "routed_expert_chunks": int(peak.routed_chunks),
                 "loss_hidden_state": int(peak.loss_hidden),
                 "lora_fp32_input_casts": int(peak.lora_casts),
                 "lora_dropout": int(peak.lora_dropout),
@@ -689,10 +767,14 @@ def estimate_training(
             key="optimizer_state",
             label="AdamW state",
             n_bytes=max(int(peak.adam), 0),
-            detail={"step_bytes": int(adapters.adam)},
+            detail={
+                "step_bytes": int(adapters.adam),
+                "foreach_workspace": int(adapters.adam_workspace),
+            },
             note=(
                 "fp32 Adam moments. Resident for the whole step, or only "
-                "during step() when FSDP offloads them."
+                "during step() when FSDP offloads them. Foreach AdamW adds "
+                "one fp32 temporary per parameter during step()."
             ),
         ),
         MemoryComponent(
@@ -723,7 +805,152 @@ def estimate_training(
         device_total_bytes=device.total_bytes,
         device_usable_bytes=device.usable_bytes,
         warnings=tuple(warnings),
+        host=training_host_components(arch, settings, adapters, rollout, act_bytes),
     )
+
+
+def training_host_components(
+    arch: ModelArch,
+    settings: TrainingSettings,
+    adapters: AdapterState,
+    rollout: int,
+    act_bytes: float,
+) -> tuple[MemoryComponent, ...]:
+    """Host RAM of one training process during learn.
+
+    :param adapters: Adapter state on one GPU.
+    :param rollout: Bytes of one update's held rollout tensors.
+    :param act_bytes: Bytes per vision feature element.
+    :return: Host components.
+    """
+    fsdp = settings.fsdp
+    offloaded = fsdp is not None and bool(fsdp.optim_cpu_offload)
+    # Offloaded AdamW keeps pinned copies of each shard's params and grads
+    # beside its fp32 moments.
+    optimizer = adapters.adam + 2 * adapters.step_grads if offloaded else 0.0
+    image_pixels = 3 * arch.vision_image_size**2
+    vision_cache = (
+        settings.images_per_update
+        * arch.vision_patches_per_image
+        * arch.vision_hidden_size
+        * act_bytes
+    )
+    snapshot_adam = (
+        adapters.trained_params * formulas.ADAM_BYTES_PER_PARAM
+        if settings.checkpoint_optimizer
+        else 0.0
+    )
+    prefetched = (
+        rollout + settings.images_per_update * image_pixels * 4
+        if settings.async_rollout
+        else 0
+    )
+    return (
+        MemoryComponent(
+            key="optimizer_offload",
+            label="Offloaded AdamW (pinned)",
+            n_bytes=int(optimizer),
+            note="fp32 moments plus param and grad copies of this rank's shard.",
+        ),
+        MemoryComponent(
+            key="vision_feature_cache",
+            label="Vision feature cache (pinned)",
+            n_bytes=int(vision_cache),
+            detail={
+                "images": settings.images_per_update,
+                "patches_per_image": arch.vision_patches_per_image,
+            },
+            note="Frozen vision tower output per unique image, kept for one learn step.",
+        ),
+        MemoryComponent(
+            key="checkpoint_snapshot",
+            label="Async checkpoint snapshot (pinned)",
+            n_bytes=int(adapters.trained_bytes + snapshot_adam),
+            detail={
+                "trainable_params": int(adapters.trained_bytes),
+                "optimizer_state": int(snapshot_adam),
+            },
+            note="Main rank only: the gathered trained adapters, plus Adam moments when checkpoint_optimizer.",
+        ),
+        MemoryComponent(
+            key="prefetched_rollout",
+            label="Prefetched rollout batch",
+            n_bytes=int(prefetched),
+            note="The next update's tokens, masks and fp32 pixels while this one learns.",
+        ),
+    )
+
+
+def fsdp_resolution_note(requested: FSDPConfig, resolved: FSDPConfig) -> str:
+    """Warning naming the values picked for unset FSDP memory fields.
+
+    :param requested: Config with ``None`` fields.
+    :param resolved: Config :func:`resolve_fsdp_memory` returned.
+    :return: Warning text.
+    """
+    picks = []
+    if requested.routed_expert_chunk_mib is None:
+        picks.append(f"routed_expert_chunk_mib={resolved.routed_expert_chunk_mib}")
+    if requested.optim_cpu_offload is None:
+        placement = "CPU offload" if resolved.optim_cpu_offload else "GPU, fused AdamW"
+        picks.append(f"optim_cpu_offload={resolved.optim_cpu_offload} ({placement})")
+    return "Picked from this estimate: " + ", ".join(picks) + "."
+
+
+def resolve_fsdp_memory(
+    model: ModelSpec,
+    device: DeviceSpec,
+    settings: TrainingSettings,
+    orchestrated: bool = False,
+) -> FSDPConfig:
+    """FSDP config with unset chunk size and optimizer placement picked to fit the device.
+
+    ``routed_expert_chunk_mib=None`` takes the largest of
+    :data:`formulas.ROUTED_CHUNK_MIB_CHOICES` that fits with the optimizer
+    offloaded (or at the set placement), else the smallest. At that chunk,
+    ``optim_cpu_offload=None`` keeps the optimizer on the GPU when it fits
+    with the :data:`formulas.MAX_UNDERPREDICTION` buffer, else offloads it.
+    ``cpu_offload`` already steps on the host, so it resolves to ``False``.
+    Set values are kept.
+
+    :param model: Training-side model spec.
+    :param device: Training GPU.
+    :param settings: Training settings; ``fsdp`` must be set.
+    :param orchestrated: Charge the per-process job overhead.
+    :return: Config with every memory field set.
+    """
+    fsdp = settings.fsdp
+    if fsdp is None:
+        msg = "resolve_fsdp_memory needs settings.fsdp"
+        raise ValueError(msg)
+
+    def with_choice(chunk: int, offload: bool) -> FSDPConfig:
+        return replace(fsdp, routed_expert_chunk_mib=chunk, optim_cpu_offload=offload)
+
+    def estimate(chunk: int, offload: bool) -> PhaseBreakdown:
+        trial = settings.model_copy(update={"fsdp": with_choice(chunk, offload)})
+        return estimate_training(model, device, trial, orchestrated)
+
+    if fsdp.cpu_offload:
+        lightest = False
+    elif fsdp.optim_cpu_offload is None:
+        lightest = True
+    else:
+        lightest = fsdp.optim_cpu_offload
+    chunk = fsdp.routed_expert_chunk_mib
+    if chunk is None:
+        chunk = next(
+            (
+                c
+                for c in formulas.ROUTED_CHUNK_MIB_CHOICES
+                if estimate(c, lightest).fits
+            ),
+            formulas.ROUTED_CHUNK_MIB_CHOICES[-1],
+        )
+    offload = fsdp.optim_cpu_offload
+    if offload is None:
+        offload = not fsdp.cpu_offload and not estimate(chunk, False).fits_with_buffer
+    return with_choice(chunk, offload)
 
 
 def generation_warnings(

@@ -1207,13 +1207,14 @@ class TestReinforceLossLiger:
         old_lp = torch.zeros(2, 4)
         ref_lp = torch.zeros(2, 4)
         adv = torch.zeros(2, 4)
+        turn_ids = torch.zeros(2, 4, dtype=torch.long)
 
         with patch("agilerl.algorithms.reinforce_llm.HAS_LIGER_KERNEL", False):
             with pytest.raises(
                 ImportError,
                 match=r"Liger REINFORCE loss was requested.*Set use_liger_loss=False",
             ):
-                rf._reinforce_loss_liger(ids, mask, old_lp, ref_lp, adv)
+                rf._reinforce_loss_liger(ids, mask, old_lp, ref_lp, adv, turn_ids, 1)
 
     def test_drives_actor_forward_and_unpacks_metrics(self) -> None:
         """End-to-end with mocked Liger Function: actor pre-hook captures
@@ -1248,6 +1249,8 @@ class TestReinforceLossLiger:
                 old_lp,
                 ref_lp,
                 adv,
+                torch.zeros(B, T - 1, dtype=torch.long),
+                1,
             )
 
         mock_fn.assert_called_once()
@@ -1290,7 +1293,8 @@ class TestReinforceLossLiger:
                 old_lp,
                 ref_lp,
                 adv,
-                turn_ids=None,
+                torch.zeros(B, T - 1, dtype=torch.long),
+                1,
                 sampling_log_probs=sampling,
             )
         ratio = mock_fn.call_args.kwargs["vllm_is_ratio"]
@@ -1314,27 +1318,17 @@ class TestReinforceLossLiger:
             ) as mock_apply,
         ):
             mock_apply.return_value = (torch.tensor(0.4, requires_grad=True), fake_aux)
-            rf._reinforce_loss_liger(ids, mask, old_lp, ref_lp, adv)
+            rf._reinforce_loss_liger(
+                ids,
+                mask,
+                old_lp,
+                ref_lp,
+                adv,
+                torch.zeros(B, T - 1, dtype=torch.long),
+                1,
+            )
 
         assert mock_apply.call_args.kwargs["token_chunk_size"] == 123
-
-    def test_turn_level_requires_turn_ids(self) -> None:
-        rf = _cpu_llmreinforce(importance_sampling_level="turn")
-        B, T = 2, 5
-        ids = torch.randint(1, 50, (B, T), dtype=torch.long)
-        mask = torch.ones(B, T - 1, dtype=torch.float32)
-        zeros = torch.zeros(B, T - 1)
-
-        with (
-            patch("agilerl.algorithms.reinforce_llm.HAS_LIGER_KERNEL", True),
-            # The non-token-IS memory notice fires before the turn_ids check.
-            pytest.warns(UserWarning, match="NOT memory-bounded"),
-            pytest.raises(
-                ValueError,
-                match=r"importance_sampling_level='turn' requires turn_ids",
-            ),
-        ):
-            rf._reinforce_loss_liger(ids, mask, zeros, zeros, zeros, turn_ids=None)
 
     def test_turn_level_pools_advantages_and_passes_turn_args(self) -> None:
         """Turn-level IS pools the per-token advantages per turn (mean) and
@@ -1358,9 +1352,7 @@ class TestReinforceLossLiger:
         ):
             mock_apply.return_value = (torch.tensor(0.4, requires_grad=True), fake_aux)
             with pytest.warns(UserWarning, match="NOT memory-bounded"):
-                rf._reinforce_loss_liger(
-                    ids, mask, zeros, zeros, adv, turn_ids=turn_ids
-                )
+                rf._reinforce_loss_liger(ids, mask, zeros, zeros, adv, turn_ids, 2)
 
         call = mock_apply.call_args
         # Per-turn means: row 0 -> [mean(1, 3), mean(5, 7)]; row 1 ->
@@ -1396,7 +1388,9 @@ class TestReinforceLossLiger:
         ):
             mock_apply.return_value = (torch.tensor(0.4, requires_grad=True), fake_aux)
             with pytest.warns(UserWarning, match="NOT memory-bounded"):
-                rf._reinforce_loss_liger(ids, mask, zeros, zeros, adv)
+                rf._reinforce_loss_liger(
+                    ids, mask, zeros, zeros, adv, torch.zeros_like(ids[:, 1:]), 1
+                )
 
         call = mock_apply.call_args
         # Masked means: row 0 -> (1 + 3 + 5) / 3 = 3; row 1 -> 20 / 4 = 5.
@@ -1482,8 +1476,8 @@ class TestREINFORCELearnWithLiger:
                 sampling_logps=sampling_logps,
             )
         rf._reinforce_loss_liger.assert_called()
-        # sampling_log_probs threaded in as the final positional arg.
-        assert rf._reinforce_loss_liger.call_args.args[6] is not None
+        # sampling_log_probs threaded in after num_turns.
+        assert rf._reinforce_loss_liger.call_args.args[7] is not None
         assert not any(
             "token-level importance sampling" in str(w.message) for w in caught
         )

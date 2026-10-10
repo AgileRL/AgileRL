@@ -1115,13 +1115,15 @@ class TestPPOLearn:
 
     def test_llmppo_learn_loss_falls_on_fixed_batch(self):
         """Repeated steps on one fixed batch must lower the loss (learning)."""
+        # Arrange: seeded weights and no dropout make every step deterministic.
+        torch.manual_seed(0)
         actor = create_module(10, 8, 100, "cpu")
         lora = LoraConfig(
             r=4,
             lora_alpha=16,
             target_modules=["lin"],
             task_type="CAUSAL_LM",
-            lora_dropout=0.05,
+            lora_dropout=0.0,
             modules_to_save=["summary"],
         )
         ppo = LLMPPO(
@@ -1135,23 +1137,25 @@ class TestPPOLearn:
             max_model_len=32,
             wrap=True,
             gradient_checkpointing=False,
-            lr_actor=0.05,
-            lr_critic=0.05,
+            lr_actor=0.02,
+            lr_critic=0.02,
             update_epochs=1,
             device="cpu",
             seed=0,
         )
         vocab, inp, mtok = 100, 10, 8
         seq_len = inp + mtok
-        torch.manual_seed(7)
         completions = [torch.randint(0, vocab, (1, seq_len)) for _ in range(2)]
         masks = [torch.ones(1, seq_len - 1, dtype=torch.bool) for _ in range(2)]
         rewards = torch.tensor([[1.0], [-1.0]], dtype=torch.float32)
         batch = (completions, masks, rewards)
+
+        # Act
         losses = [ppo.learn(batch)["loss"] for _ in range(10)]
+
+        # Assert: at this lr ten steps cut the loss by over 10% for any seed.
         assert all(math.isfinite(v) for v in losses), losses
-        print(f"\nPPO-TREND first={losses[0]} last={losses[-1]}")
-        assert losses[-1] < losses[0], f"loss did not fall: {losses[0]} -> {losses[-1]}"
+        assert losses[-1] < 0.9 * losses[0], losses
 
 
 class TestPPOFusedNoGradBaseRoutedReference:
@@ -1485,6 +1489,7 @@ class TestPPOPolicyLossLiger:
                     ref_lp,
                     adv,
                     turn_ids,
+                    1,
                     "token",
                 )
 
@@ -1526,6 +1531,7 @@ class TestPPOPolicyLossLiger:
                 ref_lp,
                 adv,
                 turn_ids,
+                1,
                 "token",
             )
 
@@ -1560,6 +1566,7 @@ class TestPPOPolicyLossLiger:
                 ref_lp,
                 adv,
                 turn_ids,
+                1,
                 "token",
             )
 
@@ -1594,6 +1601,7 @@ class TestPPOPolicyLossLiger:
                 ref_lp,
                 adv,
                 turn_ids,
+                2,
                 "turn",
             )
 
@@ -1632,6 +1640,7 @@ class TestPPOPolicyLossLiger:
                 ref_lp,
                 adv,
                 turn_ids,
+                1,
                 "token",
                 sampling_log_probs=sampling,
             )
@@ -1668,6 +1677,7 @@ class TestPPOPolicyLossLiger:
                     zeros,
                     adv,
                     turn_ids,
+                    1,
                     "token",
                 )
 
@@ -1785,7 +1795,7 @@ class TestPPOLearnWithLiger:
             )
         ppo._ppo_policy_loss_liger.assert_called()
         # sampling_log_probs threaded in after ppo_granularity.
-        assert ppo._ppo_policy_loss_liger.call_args.args[7] is not None
+        assert ppo._ppo_policy_loss_liger.call_args.args[8] is not None
         assert not any(
             "token-level importance sampling" in str(w.message) for w in caught
         )

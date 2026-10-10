@@ -29,6 +29,7 @@ from agilerl.arena.models.algorithms.ppo import PPOSpec, RecurrentPPOSpec
 from agilerl.arena.models.env import GymEnvSpec, LLMEnvSpec, LLMEnvType
 from agilerl.arena.models.fsdp import FSDPConfig
 from agilerl.arena.models.manifest import _resolve_algorithm
+from agilerl.arena.models.networks import VLLMConfig
 from agilerl.arena.models.registry import AlgorithmRegistry, register
 from agilerl.arena.models.schema import _package_version
 from agilerl.arena.models.verdict import errors, loc_to_path, read_manifest, verdict
@@ -96,6 +97,15 @@ class TestTrainingSpecDefaults:
         assert spec.hpo is False
         assert spec.checkpoint_export is None
         assert spec.rollout_version_stamp is None
+
+    def test_checkpoints_store_optimizer_state_unless_disabled(self) -> None:
+        assert TrainingSpec().checkpoint_optimizer is True
+        assert (
+            TrainingSpec.model_validate(
+                {"checkpoint_optimizer": False}
+            ).checkpoint_optimizer
+            is False
+        )
 
     def test_held_out_eval_defaults_to_one_uncapped_greedy_pass(self) -> None:
         spec = TrainingSpec()
@@ -186,6 +196,22 @@ class TestCheckpointExportSpec:
     def test_rejects_unknown_trigger(self) -> None:
         with pytest.raises(ValidationError, match="trigger"):
             CheckpointExportSpec(format="merged", trigger="interval")
+
+
+class TestVLLMConfigLimitMmPerPrompt:
+    def test_parses_per_modality_counts(self) -> None:
+        config = VLLMConfig.model_validate(
+            {"limit_mm_per_prompt": {"image": 4, "video": 0}}
+        )
+
+        assert config.limit_mm_per_prompt == {"image": 4, "video": 0}
+
+    def test_defaults_to_unset(self) -> None:
+        assert VLLMConfig().limit_mm_per_prompt is None
+
+    def test_rejects_a_negative_count(self) -> None:
+        with pytest.raises(ValidationError, match="greater than or equal to 0"):
+            VLLMConfig(limit_mm_per_prompt={"image": -1})
 
 
 class TestLLMEnvType:
@@ -1014,6 +1040,47 @@ class TestLLMEnvSpecActionErrorField:
         spec = LLMEnvSpec(env_type="rollout", env_url="http://env", max_turns=10)
 
         assert spec.action_error_field == ""
+
+
+class TestLLMEnvSpecRestartOlderObservations:
+    def test_accepts_older_turn_settings_with_two_kept_turns(self) -> None:
+        spec = LLMEnvSpec(
+            env_type="rollout",
+            env_url="http://env",
+            max_turns=10,
+            segment_max_images=4,
+            restart_keep_turns=2,
+            restart_older_obs_field="url",
+            restart_older_images=False,
+        )
+
+        assert spec.restart_older_obs_field == "url"
+        assert spec.restart_older_images is False
+
+    def test_defaults_repeat_kept_turns_in_full(self) -> None:
+        spec = LLMEnvSpec(env_type="rollout", env_url="http://env", max_turns=10)
+
+        assert spec.restart_older_obs_field == ""
+        assert spec.restart_older_images is True
+
+    @pytest.mark.parametrize(
+        "older",
+        [{"restart_older_obs_field": "url"}, {"restart_older_images": False}],
+    )
+    def test_rejects_older_turn_settings_with_one_kept_turn(
+        self, older: dict[str, object]
+    ) -> None:
+        with pytest.raises(
+            ValidationError, match="set restart_keep_turns to 2 or more"
+        ):
+            LLMEnvSpec(
+                env_type="rollout",
+                env_url="http://env",
+                max_turns=10,
+                segment_max_images=4,
+                restart_keep_turns=1,
+                **older,
+            )
 
 
 class TestManifestHelpers:

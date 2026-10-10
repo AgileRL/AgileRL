@@ -10,10 +10,14 @@ VL forward does.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from contextlib import nullcontext
 from typing import Any
 
+import pytest
 import torch
 from torch import nn
+from transformers import PretrainedConfig, PreTrainedModel
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from agilerl.algorithms.core import LLMAlgorithm
@@ -100,6 +104,42 @@ class VisionHiddenStatesModel(DummyHiddenStatesModel):
 
 def vision_config() -> DummyConfig:
     return DummyConfig(input_size=6, max_tokens=4, vocab_size=VOCAB, hidden_size=32)
+
+
+class PixelTowerConfig(PretrainedConfig):
+    model_type = "pixel_tower"
+
+
+class PixelTower(PreTrainedModel):
+    """Vision tower that records the vision rows of every call."""
+
+    config_class = PixelTowerConfig
+
+    def __init__(self, config: PixelTowerConfig) -> None:
+        super().__init__(config)
+        self.proj = nn.Linear(PIXEL_DIM, 32)
+        self.rows: list[int] = []
+
+    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        self.rows.append(int(pixel_values.shape[0]))
+        return self.proj(pixel_values)
+
+
+class TowerVisionModel(VisionHiddenStatesModel):
+    """:class:`VisionHiddenStatesModel` whose vision projection is its image encoder."""
+
+    def __init__(self) -> None:
+        super().__init__(vision_config())
+        self.vision_proj = PixelTower(PixelTowerConfig())
+
+    def get_encoder(self, modality: str | None = None) -> nn.Module:
+        return self.vision_proj if modality == "image" else self
+
+
+def tower(agent: LLMAlgorithm) -> PixelTower:
+    return next(
+        module for module in agent.actor.modules() if isinstance(module, PixelTower)
+    )
 
 
 def vision_episodes() -> tuple[
@@ -212,14 +252,40 @@ def learn_on_vision_episodes(
     *,
     segmented: bool,
     pixel_offset: float = 0.0,
+    episodes: Sequence[int] = tuple(range(len(EPISODES))),
 ) -> dict[str, float]:
-    """Run one ``learn`` on ``EPISODES``, with every vision row shifted by ``pixel_offset``."""
+    """Run one ``learn`` on ``episodes`` of ``EPISODES``, with every vision row shifted by ``pixel_offset``."""
     token_ids, action_masks, rewards, turn_ids, pixel_values = vision_episodes()
+    episode_pixels = pixel_values.split(IMAGE_COUNTS)
+    order = list(episodes)
     return agent.learn(
-        (token_ids, action_masks, rewards),
-        turn_ids=turn_ids,
-        episode_segments=SEGMENTS if segmented else None,
-        pixel_values=pixel_values + pixel_offset,
-        pixel_image_counts=IMAGE_COUNTS,
+        (
+            [token_ids[i] for i in order],
+            [action_masks[i] for i in order],
+            rewards[order],
+        ),
+        turn_ids=turn_ids[order],
+        episode_segments=[SEGMENTS[i] for i in order] if segmented else None,
+        pixel_values=torch.cat([episode_pixels[i] for i in order]) + pixel_offset,
+        pixel_image_counts=[IMAGE_COUNTS[i] for i in order],
         image_token_id=IMAGE_TOKEN_ID,
     )
+
+
+# Rank 0 trains 4 segment rows with 5 vision rows, rank 1 2 rows with 3.
+RANK_VISION_EPISODES = ((0, 2), (1, 3))
+
+
+def learn_rank_vision_episodes(
+    agent: LLMAlgorithm, rank: int, cached: bool
+) -> tuple[int, dict[str, float]]:
+    """Learn on ``rank``'s :data:`RANK_VISION_EPISODES` segments; report tower vision rows and losses.
+
+    :param cached: Whether the tower reuses its outputs within the learn.
+    """
+    if not cached:
+        pytest.MonkeyPatch().setattr(agent._vision_cache, "step", nullcontext)
+    metrics = learn_on_vision_episodes(
+        agent, segmented=True, episodes=RANK_VISION_EPISODES[rank]
+    )
+    return sum(tower(agent).rows), {key: metrics[key] for key in ("loss", "kl")}
