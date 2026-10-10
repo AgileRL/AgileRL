@@ -311,7 +311,6 @@ class TestRainbowDQNLearn:
     ):
         accelerator = Accelerator() if accelerator_flag else None
         observation_space = request.getfixturevalue(observation_space)
-        torch.autograd.set_detect_anomaly(True)
         batch_size = 64
 
         # Create an instance of the DQN class
@@ -338,7 +337,8 @@ class TestRainbowDQNLearn:
         actor_target_pre_learn_sd = copy.deepcopy(dqn.actor_target.state_dict())
 
         # Call the learn method
-        loss, new_idxs, new_priorities = dqn.learn(experiences, per=False)
+        with torch.autograd.set_detect_anomaly(True):
+            loss, new_idxs, new_priorities = dqn.learn(experiences, per=False)
 
         assert loss > 0.0
         assert new_idxs is None

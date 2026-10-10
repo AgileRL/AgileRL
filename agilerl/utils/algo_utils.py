@@ -1790,13 +1790,13 @@ _ExperienceTs = TypeVarTuple("_ExperienceTs")
 
 
 def get_experiences_samples(
-    minibatch_indices: npt.NDArray,
+    minibatch_indices: npt.NDArray | torch.Tensor,
     *experiences: Unpack[_ExperienceTs],
 ) -> tuple[Unpack[_ExperienceTs]]:
     """Sample experiences given minibatch indices.
 
     :param minibatch_indices: Minibatch indices
-    :type minibatch_indices: npt.NDArray
+    :type minibatch_indices: npt.NDArray | torch.Tensor
     :param experiences: Experiences to sample from
     :type experiences: tuple[torch.Tensor[float], ...]
 
@@ -2201,6 +2201,9 @@ class VLLMConfig:
         of attribute names strips those instead, for models that mount
         unwanted modalities elsewhere. Defaults to ``False``.
     :type strip_multimodal_towers: bool | list[str], optional
+    :param limit_mm_per_prompt: Most items of each modality one prompt may
+        carry, e.g. ``{"image": 4, "video": 0}``. ``None`` keeps vLLM's limit.
+    :type limit_mm_per_prompt: dict[str, int] | None, optional
     :param lora_staging_dir: Root directory where the trained LoRA adapter is
         exported for vLLM to (re)load each sync. Staging is always
         process-private: in distributed runs each rank stages under a
@@ -2233,6 +2236,7 @@ class VLLMConfig:
     # See class docstring above. Required to avoid vLLM's memory-profiling
     # assertion when running multiple vLLM processes on a shared GPU.
     kv_cache_memory_bytes: int | None = None
+    limit_mm_per_prompt: dict[str, int] | None = None
     lora_staging_dir: str | None = None
 
     def __post_init__(self) -> None:

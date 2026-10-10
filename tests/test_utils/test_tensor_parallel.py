@@ -372,6 +372,7 @@ def _shared_kv_load_worker(
             wrap_every_n_blocks=1,
             param_persistence_threshold=0,
             param_dtype="float32",
+            routed_expert_chunk_mib=64,
         )
 
         # Act

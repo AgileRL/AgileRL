@@ -57,10 +57,13 @@ def _fake_split_scan(
     rmsnorm_weight=None,
     outproj_weight=None,
     outproj_bias=None,
+    return_final_states=False,
     **kwargs,
 ):
-    hidden = zxbcdt[..., : outproj_weight.shape[1]]
-    return F.linear(hidden, outproj_weight, outproj_bias), None
+    hidden = zxbcdt[..., : rmsnorm_weight.shape[0]]
+    if outproj_weight is not None:
+        hidden = F.linear(hidden, outproj_weight, outproj_bias)
+    return (hidden, None) if return_final_states else hidden
 
 
 def _fake_chunk_scan(hidden_states, dt, A, B, C, **kwargs):

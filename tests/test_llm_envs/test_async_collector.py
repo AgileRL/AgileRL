@@ -577,13 +577,14 @@ class TestAsyncBatchCollectorGetEpisodeData:
         # Arrange
         inner = RolloutCollector(
             env_factory=_harness_factory(
-                FakeEnvClient(terminate_after=3), max_turns=5, segment_prompt_tokens=20
+                FakeEnvClient(terminate_after=3), max_turns=5, segment_prompt_tokens=40
             ),
             batch_size=1,
             group_size=1,
         )
         collector = AsyncBatchCollector(inner)
-        gen = torch.tensor([[ord("a"), ord("b")]], dtype=torch.long)
+        # The restart history keeps only the action after </think>.
+        gen = torch.tensor([[ord(c) for c in "r" * 20 + "</think>a"]], dtype=torch.long)
 
         async def _run() -> EpisodeTensors:
             response = await collector.reset("ep-seg")
@@ -604,10 +605,10 @@ class TestAsyncBatchCollectorGetEpisodeData:
 
         # Assert
         assert segments is not None
-        # prompt(6) + ab + feedback(8) + ab; then the 39-char restart prompt + ab.
-        assert segments.token_lengths.tolist() == [18, 41]
+        # prompt(6) + gen(29); then the 32- and 37-char restart prompts + gen.
+        assert segments.token_lengths.tolist() == [35, 61, 66]
         assert int(segments.token_lengths.sum()) == ids.shape[-1]
-        assert _true_spans(mask[0]) == [2, 2, 2]
+        assert _true_spans(mask[0]) == [29, 29, 29]
 
 
 def _true_spans(mask: torch.Tensor) -> list[int]:

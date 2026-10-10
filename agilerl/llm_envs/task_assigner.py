@@ -87,8 +87,10 @@ def _mix_seed(value: int) -> int:
 class TaskAssigner:
     """Assign each episode a ``(seed, row_index)`` task; a GRPO group shares one.
 
-    Dataset rows are reshuffled each epoch and split into one equal shard per
-    data-parallel rank; a procedural env has no rows and is seeded instead.
+    Rank ``r`` owns rows ``r, r + world_size, r + 2 * world_size, ...``, so a
+    dataset ordered by site or template gives every rank the same mix. Each
+    shard has the same size and is reshuffled each epoch; a procedural env has
+    no rows and is seeded instead.
     With ``adaptive``, each row is instead drawn from the shard with probability
     proportional to its :class:`TaskRowStats` weight, fed by :meth:`record_outcome`.
 
@@ -119,7 +121,6 @@ class TaskAssigner:
         self.rank = int(rank)
         self.world_size = int(world_size)
         self._shard_size = self.dataset_size // self.world_size
-        self._shard_start = self.rank * self._shard_size
         if self.dataset_size > 0 and self._shard_size == 0:
             msg = (
                 f"rank {rank} of {world_size} gets an empty shard of a "
@@ -146,6 +147,17 @@ class TaskAssigner:
         """Smoothed informative rate of each shard row, in shard order."""
         return (self._informative + 1.0) / (self._observed + 2.0)
 
+    def _shard_row(self, index: int) -> int:
+        """Dataset row at position ``index`` of this rank's shard."""
+        return self.rank + index * self.world_size
+
+    def _shard_index(self, row: int) -> int | None:
+        """Position of dataset ``row`` in this rank's shard; ``None`` when another rank owns it."""
+        index, remainder = divmod(int(row) - self.rank, self.world_size)
+        if remainder != 0 or not 0 <= index < self._shard_size:
+            return None
+        return index
+
     def next_row(self) -> int:
         """Next row from the shard: the epoch-reshuffled stream, or a weighted draw when adaptive."""
         if self.adaptive:
@@ -154,14 +166,16 @@ class TaskAssigner:
             )
             self._draws += 1
             self.num_epochs = self._draws // self._shard_size
-            return index + self._shard_start
+            return self._shard_row(index)
         if self._pos >= len(self._epoch_order):  # epoch boundary (and first call)
             if self._epoch_order:
                 self.num_epochs += 1
-            self._epoch_order = (
-                torch.randperm(self._shard_size, generator=self._generator)
-                + self._shard_start
-            ).tolist()
+            self._epoch_order = [
+                self._shard_row(index)
+                for index in torch.randperm(
+                    self._shard_size, generator=self._generator
+                ).tolist()
+            ]
             self._pos = 0
         row = self._epoch_order[self._pos]
         self._pos += 1
@@ -181,11 +195,12 @@ class TaskAssigner:
             when the env has no threshold.
         :raises ValueError: If ``row`` is outside this rank's shard.
         """
-        index = int(row) - self._shard_start
-        if not 0 <= index < self._shard_size:
+        index = self._shard_index(row)
+        if index is None:
             msg = (
-                f"row {row} is outside this shard "
-                f"[{self._shard_start}, {self._shard_start + self._shard_size})."
+                f"row {row} is outside this shard: rank {self.rank} of "
+                f"{self.world_size} owns rows {self.rank}, "
+                f"{self._shard_row(1)}, ..., {self._shard_row(self._shard_size - 1)}."
             )
             raise ValueError(msg)
         self._informative[index] *= TASK_OUTCOME_DECAY
@@ -201,7 +216,7 @@ class TaskAssigner:
         counts = self._success_counts.tolist()
         return [
             TaskRowStats(
-                row=self._shard_start + index,
+                row=self._shard_row(index),
                 informative=float(self._informative[index]),
                 observed=float(self._observed[index]),
                 weight=float(weights[index]),
@@ -217,7 +232,7 @@ class TaskAssigner:
         counts = self._success_counts.tolist()
         return [
             TaskRowOutcome(
-                row=self._shard_start + index,
+                row=self._shard_row(index),
                 informative=float(self._informative[index]),
                 observed=float(self._observed[index]),
                 tied_failure=counts[index][0],
@@ -239,8 +254,8 @@ class TaskAssigner:
         self._observed.zero_()
         self._success_counts.zero_()
         for outcome in state:
-            index = int(outcome["row"]) - self._shard_start
-            if 0 <= index < self._shard_size:
+            index = self._shard_index(outcome["row"])
+            if index is not None:
                 self._informative[index] = float(outcome["informative"])
                 self._observed[index] = float(outcome["observed"])
                 self._success_counts[index] = torch.tensor(

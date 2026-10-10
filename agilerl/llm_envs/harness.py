@@ -42,10 +42,17 @@ from agilerl.utils.algo_utils import is_str_keyed_dict
 from agilerl.utils.env_utils import construct_entrypoint_env
 from agilerl.utils.llm_utils import max_prompt_tokens_for_model_len
 
-__all__ = ["RolloutHarness", "TranscriptContinuityError", "env_action_text"]
+__all__ = [
+    "PROMPT_LIMIT_INFO_KEY",
+    "RolloutHarness",
+    "TranscriptContinuityError",
+    "env_action_text",
+]
 
 # Every restart prompt repeats each entry; an unclosed reasoning block is the whole generation.
 ACTION_HISTORY_MAX_CHARS = 300
+# Set ``True`` in a step's info when the episode ends because no prompt fits the prompt limit.
+PROMPT_LIMIT_INFO_KEY = "prompt_limit"
 
 
 class TranscriptContinuityError(RuntimeError):
@@ -150,6 +157,8 @@ class RolloutHarness(RestartPromptMixin):
         segment_prompt_tokens: int | None = None,
         segment_max_images: int | None = None,
         restart_keep_turns: int = 0,
+        restart_older_obs_field: str = "",
+        restart_older_images: bool = True,
         action_error_field: str = "",
     ) -> None:
         """Drive a text env at the token level over ``env_client`` (a URL or a client object).
@@ -193,9 +202,11 @@ class RolloutHarness(RestartPromptMixin):
             prompt would exceed this many tokens. The restarted prompt holds the
             system prompt, the actions taken so far, the kept turns
             (``restart_keep_turns``) and the latest observation;
-            :meth:`get_episode_data` returns every segment. When that prompt is
-            over the model budget the context continues unrestarted while it
-            fits. ``None`` never restarts.
+            :meth:`get_episode_data` returns every segment. Every prompt the
+            policy sees stays within this limit, so a segment's training row is
+            at most this plus one turn's generation. When no restarted prompt
+            fits, the episode ends truncated and the step's info sets
+            ``PROMPT_LIMIT_INFO_KEY``. ``None`` never restarts.
         :param segment_max_images: Restart the episode's context when the next
             prompt would carry more than this many images (match the engine's
             ``limit_mm_per_prompt``). A restarted prompt carries one image, plus
@@ -213,6 +224,12 @@ class RolloutHarness(RestartPromptMixin):
             does not restart again. Kept turns are prompt context in the new
             segment, so they do not train again. ``0`` keeps only the action
             list.
+        :param restart_older_obs_field: Observation field a restarted prompt
+            shows, as ``field: value``, for each kept turn before the latest,
+            in place of that turn's full observation text. ``""`` repeats every
+            kept observation in full.
+        :param restart_older_images: Whether kept turns before the latest keep
+            their images in a restarted prompt.
         :param action_error_field: Observation field holding the error text of
             the action just taken; a non-blank value follows that action in the
             restarted prompt's action list. ``""`` lists actions alone.
@@ -244,6 +261,8 @@ class RolloutHarness(RestartPromptMixin):
             msg = f"restart_keep_turns must be >= 0, got {restart_keep_turns}."
             raise ValueError(msg)
         self._restart_keep_turns = restart_keep_turns
+        self._restart_older_obs_field = restart_older_obs_field
+        self._restart_older_images = restart_older_images
         self._action_error_field = action_error_field
         self._kept_turns: deque[KeptTurn] = deque(maxlen=restart_keep_turns)
         # This turn's sampled ids, held until its observation arrives.
@@ -796,6 +815,15 @@ class RolloutHarness(RestartPromptMixin):
             return None
         return max_prompt_tokens_for_model_len(self._max_model_len)
 
+    def _prompt_limit(self) -> int | None:
+        """Longest prompt the policy may see: the segment limit and model budget, or ``None``."""
+        limits = [
+            limit
+            for limit in (self._segment_prompt_tokens, self._prompt_budget())
+            if limit is not None
+        ]
+        return min(limits) if limits else None
+
     def _policy_prompt_from_state(self) -> dict[str, Any]:
         """Build the ``get_action`` prompt dict from harness state."""
         if self._multimodal_turn is not None:
@@ -980,7 +1008,7 @@ class RolloutHarness(RestartPromptMixin):
         self._kept_turns.clear()
         self._gen_ids = torch.empty(0, dtype=torch.long)
 
-        max_pt = self._prompt_budget()
+        max_pt = self._prompt_limit()
         if self._multimodal_turn is not None:
             prompt_len = int(self._multimodal_turn["prompt_token_len"])
         else:
@@ -990,10 +1018,13 @@ class RolloutHarness(RestartPromptMixin):
                 raise RuntimeError(msg)
             prompt_len = int(full_ids.shape[1])
         if max_pt is not None and prompt_len > max_pt:
+            if self._multimodal_turn is not None:
+                # No generation will adopt vLLM's ids, so the row is the processor's.
+                self.full_ids = self._multimodal_turn["input_ids"]
             self.done = True
             self.current_prompt = {}
             self._last_full_prompt_token_len = prompt_len
-            return self.current_prompt, info
+            return self.current_prompt, {**info, PROMPT_LIMIT_INFO_KEY: True}
 
         self.done = False
         self.current_prompt = self._policy_prompt_from_state()
@@ -1099,19 +1130,48 @@ class RolloutHarness(RestartPromptMixin):
         error = payload.get(self._action_error_field)
         return error if isinstance(error, str) and error.strip() else None
 
+    def _older_obs_text(self, payload: object) -> str | None:
+        """``field: value`` for ``restart_older_obs_field``, or ``None`` when it is unset.
+
+        :raises ValueError: If the observation has no such field.
+        """
+        field = self._restart_older_obs_field
+        if not field:
+            return None
+        if not is_str_keyed_dict(payload) or field not in payload:
+            msg = (
+                f"restart_older_obs_field={field!r} is not a field of the observation."
+            )
+            raise ValueError(msg)
+        value = payload[field]
+        text = f"{field}: {'' if value is None else value}"
+        return text.replace(IMAGE_PLACEHOLDER, ESCAPED_IMAGE_PLACEHOLDER)
+
     def _step_env(
         self, gen_text: str
-    ) -> tuple[str, str, object | None, float, bool, bool, dict[str, Any], str | None]:
+    ) -> tuple[
+        str,
+        str,
+        object | None,
+        float,
+        bool,
+        bool,
+        dict[str, Any],
+        str | None,
+        str | None,
+    ]:
         """Round-trip the env backend and render its observation — the parallelizable phase.
 
         Carries the observation's chat role alongside its text so :meth:`_step_apply`
         frames a tool result as a tool turn rather than as something the user said,
-        and the action's error text from ``action_error_field``, or ``None``.
+        the action's error text from ``action_error_field``, and the observation's
+        ``restart_older_obs_field`` text; each is ``None`` when absent or unset.
         """
         payload, reward, terminated, truncated, info = self._env_client.step(
             env_action_text(gen_text)
         )
         action_error = self._action_error_text(payload)
+        older_obs_text = self._older_obs_text(payload)
         if is_str_keyed_dict(payload) and (
             payload.get("image") is not None or payload.get("screenshot") is not None
         ):
@@ -1128,12 +1188,21 @@ class RolloutHarness(RestartPromptMixin):
             truncated,
             info,
             action_error,
+            older_obs_text,
         )
 
     def _step_apply(
         self,
         env_result: tuple[
-            str, str, object | None, float, bool, bool, dict[str, Any], str | None
+            str,
+            str,
+            object | None,
+            float,
+            bool,
+            bool,
+            dict[str, Any],
+            str | None,
+            str | None,
         ],
     ) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
         """Apply the env round-trip result: rewards, truncation, feedback tokens."""
@@ -1146,6 +1215,7 @@ class RolloutHarness(RestartPromptMixin):
             truncated,
             info,
             action_error,
+            older_obs_text,
         ) = env_result
         if action_error is not None and self._action_history:
             error_max_chars = 200
@@ -1176,6 +1246,7 @@ class RolloutHarness(RestartPromptMixin):
                         obs_text=feedback_text,
                         role=next_role,
                         image=next_image,
+                        older_obs_text=older_obs_text,
                     )
                 )
             if next_image is not None:
@@ -1218,7 +1289,7 @@ class RolloutHarness(RestartPromptMixin):
                         dim=1,
                     )
                     prompt_token_len = int(train_ids.shape[-1])
-                    max_pt = self._prompt_budget()
+                    max_pt = self._prompt_limit()
                     over_images = (
                         self._segment_max_images is not None
                         and len(self._episode_images) + 1 > self._segment_max_images
@@ -1228,15 +1299,11 @@ class RolloutHarness(RestartPromptMixin):
                     ) and self._restart_context(full_ids, feedback_text, next_image)
                     if restarted:
                         pass
-                    elif over_images:
-                        msg = (
-                            f"Turn {self._turn_idx} needs a context restart to stay "
-                            f"within segment_max_images={self._segment_max_images}, "
-                            "but the restarted prompt is over the prompt budget."
-                        )
-                        raise RuntimeError(msg)
-                    elif max_pt is not None and prompt_token_len > max_pt:
+                    elif over_images or (
+                        max_pt is not None and prompt_token_len > max_pt
+                    ):
                         truncated = True
+                        info = {**info, PROMPT_LIMIT_INFO_KEY: True}
                     else:
                         self._episode_images.append(next_image)
                         if self._episode_pixel_values is not None:
@@ -1277,10 +1344,13 @@ class RolloutHarness(RestartPromptMixin):
                 ) and self._restart_context(full_ids, feedback_text, None)
                 if (
                     not restarted
-                    and (max_pt := self._prompt_budget()) is not None
+                    and (max_pt := self._prompt_limit()) is not None
                     and prompt_len > max_pt
                 ):
+                    # The row ends at the last generation, as on any other end.
+                    self.full_ids = full_ids
                     truncated = True
+                    info = {**info, PROMPT_LIMIT_INFO_KEY: True}
 
             if not truncated:
                 prompt = self._policy_prompt_from_state()

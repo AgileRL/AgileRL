@@ -123,13 +123,54 @@ def gradient_checkpointing_module(model: nn.Module) -> GradientCheckpointable:
     raise TypeError(msg)
 
 
+def _host_copy(value: object) -> object:
+    """Copy every tensor in a nested dict / list / tuple to a new CPU tensor."""
+    if isinstance(value, torch.Tensor):
+        return value.detach().to("cpu", copy=True)
+    if isinstance(value, dict):
+        return {key: _host_copy(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return type(value)(_host_copy(item) for item in value)
+    return value
+
+
+def _copy_shared_storage(value: object, live_storage: set[int]) -> object:
+    """Clone every tensor in a nested dict / list / tuple whose storage is in ``live_storage``."""
+    if isinstance(value, torch.Tensor):
+        if value.untyped_storage().data_ptr() in live_storage:
+            return value.detach().clone()
+        return value
+    if isinstance(value, dict):
+        return {
+            key: _copy_shared_storage(item, live_storage) for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return type(value)(_copy_shared_storage(item, live_storage) for item in value)
+    return value
+
+
+def _detach_from_optimizer(
+    state: dict[str, Any], optimizer: torch.optim.Optimizer
+) -> dict[str, Any]:
+    """Clone exported tensors that alias ``optimizer``'s live state (e.g. CPU ``step``)."""
+    live_storage: set[int] = set()
+    for param_state in optimizer.state.values():
+        for value in param_state.values():
+            local = value.to_local() if isinstance(value, DTensor) else value
+            if isinstance(local, torch.Tensor):
+                live_storage.add(local.untyped_storage().data_ptr())
+    return {
+        key: _copy_shared_storage(item, live_storage) for key, item in state.items()
+    }
+
+
 def _optimizer_state_as_dict(optimizer: OptimizerWrapper) -> dict[str, Any]:
-    """``optimizer.state_dict()``; refuse list-shaped multi-opt state."""
+    """Host copy of ``optimizer.state_dict()``; refuse list-shaped multi-opt state."""
     state = optimizer.state_dict()
     if not isinstance(state, dict):
         msg = "optimizer.state_dict() must return a dict"
         raise TypeError(msg)
-    return state
+    return {key: _host_copy(value) for key, value in state.items()}
 
 
 def _place_param_optimizer_state(
@@ -438,7 +479,10 @@ class BaseRuntime(ABC):
         actor: nn.Module,
         optimizer: OptimizerWrapper,
     ) -> dict[str, Any]:
-        """Return a full optimizer state dict (FSDP2: on CPU, rank 0 only).
+        """Return a full optimizer state dict on CPU (FSDP2: rank 0 only).
+
+        No tensor in the result shares storage with the live optimizer state,
+        so later optimizer steps do not change it.
 
         :param actor: Actor module (dense or FSDP2-sharded).
         :type actor: nn.Module
@@ -748,6 +792,12 @@ class FSDPRuntime(BaseRuntime):
             make_llm_scheduler,
         )
 
+        if self.config.optim_cpu_offload is None:
+            msg = (
+                "FSDPConfig.optim_cpu_offload is unset. LLMAlgorithm.wrap_models "
+                "resolves it from the memory estimate; pass True or False here."
+            )
+            raise ValueError(msg)
         if self.config.cpu_offload and self.config.optim_cpu_offload:
             msg = (
                 "FSDPConfig.cpu_offload and optim_cpu_offload are mutually "
@@ -782,7 +832,11 @@ class FSDPRuntime(BaseRuntime):
             gradient_checkpointing=gradient_checkpointing,
         )
 
-        optimizer = make_llm_optimizer(wrapped, lr, lr_critic)
+        # Fused AdamW steps CPU-offloaded state slower than the default kernel.
+        on_gpu = torch.device(device).type == "cuda" and not (
+            self.config.cpu_offload or self.config.optim_cpu_offload
+        )
+        optimizer = make_llm_optimizer(wrapped, lr, lr_critic, fused=on_gpu)
         if self.config.optim_cpu_offload:
             inner = optimizer._single_optimizer()
             if isinstance(inner, CPUOffloadOptimizer):
@@ -823,11 +877,12 @@ class FSDPRuntime(BaseRuntime):
         inner_optimizer = optimizer._single_optimizer()
         if isinstance(inner_optimizer, CPUOffloadOptimizer):
             inner_optimizer = inner_optimizer.optimizer
-        return get_optimizer_state_dict(
+        state = get_optimizer_state_dict(
             actor,
             inner_optimizer,
             options=StateDictOptions(full_state_dict=True, cpu_offload=True),
         )
+        return _detach_from_optimizer(state, inner_optimizer)
 
     @raise_on_any_rank()
     def import_optimizer_state(

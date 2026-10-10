@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any, Literal, TypeVar, get_args, overload
+from typing import Annotated, Any, Literal, TypeVar, get_args, overload
 
 from pydantic import (
     BaseModel,
@@ -896,6 +896,13 @@ class VLLMConfig(BaseModel):
         description=(
             "Pin the KV cache to a fixed size. Needed when several vLLM "
             "processes share a GPU, whose memory profiling would otherwise clash."
+        ),
+    )
+    limit_mm_per_prompt: dict[str, Annotated[int, Field(ge=0)]] | None = Field(
+        default=None,
+        description=(
+            "Most items of each modality one prompt may carry, e.g. "
+            "{image: 4, video: 0}. Unset keeps vLLM's limit."
         ),
     )
     lora_staging_dir: str | None = Field(

@@ -26,7 +26,13 @@ from agilerl.distributed import FSDPConfig, resolve_device
 from agilerl.llm_envs import DatasetEnv
 from agilerl.utils.llm_utils import LEARN_PHASE_METRIC_NAMES
 from tests import TINY_LLM_FIXTURE_PATH
-from tests.test_algorithms.test_llms.llm_helpers import create_module
+from tests.test_algorithms.test_llms.llm_helpers import (
+    create_module,
+    optimizer_state,
+    record_outputs,
+    scale_losses,
+    trainable_weights,
+)
 
 
 def make_preference_gym(
@@ -1036,4 +1042,139 @@ class TestDPOLearnPhaseTimings:
             metrics["learn_phase_forward_s"]
         )
         assert dpo.shard_runtime.phase_timer.marks is None
+        dpo.clean_up()
+
+
+def random_preference_batch() -> dict[str, torch.Tensor | list[int]]:
+    """Four chosen/rejected pairs of six tokens with two-token prompts."""
+    generator = torch.Generator().manual_seed(0)
+    return {
+        "chosen_input_ids": torch.randint(0, 99, (4, 6), generator=generator),
+        "rejected_input_ids": torch.randint(0, 99, (4, 6), generator=generator),
+        "chosen_attention_mask": torch.ones(4, 6, dtype=torch.long),
+        "rejected_attention_mask": torch.ones(4, 6, dtype=torch.long),
+        "prompt_lengths": [2, 2, 2, 2],
+    }
+
+
+class TestDPOLearnMetrics:
+    def test_metrics_sum_the_micro_batches_over_the_samples(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange: two micro-batches of two pairs.
+        dpo = _make_cpu_dpo_for_branch_tests()
+        dpo_loss, outputs = record_outputs(dpo._dpo_loss)
+        monkeypatch.setattr(dpo, "_dpo_loss", dpo_loss)
+
+        # Act
+        metrics = dpo.learn(random_preference_batch())
+
+        # Assert
+        assert len(outputs) == 2
+        assert metrics["loss"] == pytest.approx(
+            sum(loss.item() for loss, _, _ in outputs) / 4, rel=1e-6
+        )
+        assert metrics["chosen_reward"] == pytest.approx(
+            sum(chosen.mean().item() for _, chosen, _ in outputs) / 4, rel=1e-6
+        )
+        assert metrics["rejected_reward"] == pytest.approx(
+            sum(rejected.mean().item() for _, _, rejected in outputs) / 4, rel=1e-6
+        )
+        dpo.clean_up()
+
+    def test_returns_the_cross_rank_means_it_logs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange: a second rank whose means differ from this rank's.
+        dpo = _make_cpu_dpo_for_branch_tests()
+        other_rank = {"loss": 1.0, "chosen_reward": 2.0, "rejected_reward": -2.0}
+        local: dict[str, float] = {}
+
+        def mean_with_other_rank(metrics: dict[str, float]) -> dict[str, float]:
+            local.update({name: float(value) for name, value in metrics.items()})
+            return {name: (local[name] + other_rank[name]) / 2 for name in metrics}
+
+        monkeypatch.setattr(
+            "agilerl.algorithms.dpo.aggregate_metrics_dict", mean_with_other_rank
+        )
+
+        # Act
+        metrics = dpo.learn(random_preference_batch())
+
+        # Assert
+        for name in ("loss", "chosen_reward", "rejected_reward"):
+            expected = (local[name] + other_rank[name]) / 2
+            assert metrics[name] == expected, name
+            assert dpo.metrics.get_mean(name) == pytest.approx(expected), name
+        assert dpo.metrics.get_mean("reward_margin") == pytest.approx(
+            metrics["chosen_reward"] - metrics["rejected_reward"]
+        )
+        dpo.clean_up()
+
+
+class TestDPOLearnNonFiniteLoss:
+    def test_finite_losses_step(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Arrange
+        dpo = _make_cpu_dpo_for_branch_tests()
+        monkeypatch.setattr(
+            dpo, "_dpo_loss", scale_losses(dpo._dpo_loss, iter([1.0, 1.0]))
+        )
+        before = trainable_weights(dpo.actor)
+
+        # Act
+        dpo.learn(random_preference_batch())
+
+        # Assert
+        after = trainable_weights(dpo.actor)
+        assert any(
+            not torch.equal(new, old) for new, old in zip(after, before, strict=True)
+        )
+        dpo.clean_up()
+
+    @pytest.mark.parametrize(
+        "window_scales",
+        [[float("nan"), 1.0], [1.0, float("nan")]],
+        ids=["first_micro_batch", "last_micro_batch"],
+    )
+    def test_raises_before_the_step_when_a_micro_batch_loss_is_not_finite(
+        self, monkeypatch: pytest.MonkeyPatch, window_scales: list[float]
+    ) -> None:
+        # Arrange: one optimizer step of two micro-batches per learn; a finite
+        # learn first gives the optimizer state to keep.
+        dpo = _make_cpu_dpo_for_branch_tests()
+        scales = iter([1.0, 1.0, *window_scales])
+        monkeypatch.setattr(dpo, "_dpo_loss", scale_losses(dpo._dpo_loss, scales))
+        dpo.learn(random_preference_batch())
+        before = trainable_weights(dpo.actor)
+        state_before = optimizer_state(dpo.optimizer)
+
+        # Act
+        with pytest.raises(ValueError, match="Loss is not finite"):
+            dpo.learn(random_preference_batch())
+
+        # Assert: it raises at the window's last micro-batch, before the step.
+        assert list(scales) == []
+        for new, old in zip(trainable_weights(dpo.actor), before, strict=True):
+            assert torch.equal(new, old)
+        state_after = optimizer_state(dpo.optimizer)
+        assert state_before
+        assert len(state_after) == len(state_before)
+        for new, old in zip(state_after, state_before, strict=True):
+            assert torch.equal(new, old)
+        dpo.clean_up()
+
+    def test_raises_when_the_micro_batch_left_pending_a_step_is_not_finite(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange: three micro-batches per step over two micro-batches leave
+        # the learn call's gradients pending the next one.
+        dpo = _make_cpu_dpo_for_branch_tests()
+        dpo.gradient_accumulation_steps = 3
+        scales = iter([1.0, float("nan")])
+        monkeypatch.setattr(dpo, "_dpo_loss", scale_losses(dpo._dpo_loss, scales))
+
+        # Act / Assert
+        with pytest.raises(ValueError, match="Loss is not finite"):
+            dpo.learn(random_preference_batch())
+        assert list(scales) == []
         dpo.clean_up()

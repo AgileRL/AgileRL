@@ -34,6 +34,7 @@ from agilerl.lora.moe import (
     install_packed_expert_grouped_gemm,
     materializes_expert_lora,
     moe_expert_target_parameters,
+    set_routed_experts_chunk_bytes,
     set_routed_experts_recompute,
     transposed_experts_local_forward,
     upgrade_moe_param_wrappers,
@@ -1194,6 +1195,7 @@ def _mock_cuda_torch(monkeypatch, grouped_mm):
     monkeypatch.setattr(torch, "tensor", cpu_tensor)
     monkeypatch.setattr(torch, "_grouped_mm", grouped_mm)
     monkeypatch.setattr(torch, "Generator", MagicMock())
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _index: (9, 0))
 
 
 def test_grouped_mm_probe_false_without_op(monkeypatch):
@@ -1213,14 +1215,34 @@ def test_grouped_mm_probe_true_when_op_matches_reference(monkeypatch):
     _mock_cuda_torch(monkeypatch, fake_grouped_mm)
     moe_gemm.grouped_mm_supported.cache_clear()
 
-    assert moe_gemm.grouped_mm_supported(1, torch.float32) is True
+    assert moe_gemm.grouped_mm_supported(1, torch.bfloat16) is True
 
 
 def test_grouped_mm_probe_false_when_op_mismatches(monkeypatch):
-    _mock_cuda_torch(monkeypatch, lambda x, w_t, offs: torch.zeros(8, 4))
+    _mock_cuda_torch(
+        monkeypatch, lambda x, w_t, offs: torch.zeros(x.shape[0], w_t.shape[-1])
+    )
     moe_gemm.grouped_mm_supported.cache_clear()
 
-    assert moe_gemm.grouped_mm_supported(2, torch.float32) is False
+    assert moe_gemm.grouped_mm_supported(2, torch.bfloat16) is False
+
+
+@pytest.mark.parametrize(
+    ("capability", "dtype"),
+    [((8, 0), torch.bfloat16), ((12, 0), torch.bfloat16), ((9, 0), torch.float32)],
+)
+def test_grouped_mm_probe_false_without_fused_kernel(monkeypatch, capability, dtype):
+    def fake_grouped_mm(x, w_t, offs):
+        bounds = [0, *offs.tolist()]
+        return torch.cat(
+            [x[start:end] @ w_t[i] for i, (start, end) in enumerate(pairwise(bounds))]
+        )
+
+    _mock_cuda_torch(monkeypatch, fake_grouped_mm)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _index: capability)
+    moe_gemm.grouped_mm_supported.cache_clear()
+
+    assert moe_gemm.grouped_mm_supported(3, dtype) is False
 
 
 def test_grouped_mm_probe_false_when_op_raises(monkeypatch):
@@ -1231,7 +1253,7 @@ def test_grouped_mm_probe_false_when_op_raises(monkeypatch):
     _mock_cuda_torch(monkeypatch, boom)
     moe_gemm.grouped_mm_supported.cache_clear()
 
-    assert moe_gemm.grouped_mm_supported(3, torch.float32) is False
+    assert moe_gemm.grouped_mm_supported(3, torch.bfloat16) is False
 
 
 def loop_grouped_mm(x, w_t, offs):
@@ -1253,7 +1275,7 @@ class TestGroupedMmSupported:
         probe_results = []
 
         def block(h: torch.Tensor) -> torch.Tensor:
-            probe_results.append(moe_gemm.grouped_mm_supported(4, torch.float32))
+            probe_results.append(moe_gemm.grouped_mm_supported(4, torch.bfloat16))
             return linear(h).relu()
 
         # Act
@@ -1271,7 +1293,7 @@ class TestGroupedMmSupported:
 
         # Act
         with torch.no_grad():
-            supported = moe_gemm.grouped_mm_supported(5, torch.float32)
+            supported = moe_gemm.grouped_mm_supported(5, torch.bfloat16)
 
         # Assert
         assert supported is True
@@ -1532,7 +1554,7 @@ def test_split_lora_delta_stacked_layouts():
     assert torch.allclose(grouped, transposed)
 
 
-def test_split_lora_delta_chunked_accumulate_matches_full(monkeypatch):
+def test_split_lora_delta_chunked_accumulate_matches_full():
     torch.manual_seed(0)
     experts, rank, hidden, out_dim = 3, 2, 8, 6
     counts = [5, 0, 7]
@@ -1541,7 +1563,7 @@ def test_split_lora_delta_chunked_accumulate_matches_full(monkeypatch):
     a3 = torch.randn(experts, rank, hidden, requires_grad=True)
     b3 = torch.randn(experts, out_dim, rank, requires_grad=True)
 
-    def run(rows, weight_a, weight_b, destination):
+    def run(rows, weight_a, weight_b, destination, chunk_bytes):
         lora_a = MagicMock()
         lora_a.weight = weight_a
         lora_b = MagicMock()
@@ -1553,17 +1575,21 @@ def test_split_lora_delta_chunked_accumulate_matches_full(monkeypatch):
         wrapper.r = {"actor": rank}
         wrapper.num_experts = experts
         return moe_adapters.split_lora_delta(
-            wrapper, rows, counts, "actor", destination=destination
+            wrapper,
+            rows,
+            counts,
+            "actor",
+            destination=destination,
+            chunk_bytes=chunk_bytes,
         )
 
-    full = run(x, a3, b3, None)
-    monkeypatch.setattr(moe_gemm, "GROUPED_LINEAR_CHUNK_BYTES", 1)
+    full = run(x, a3, b3, None, moe_gemm.ROUTED_EXPERT_CHUNK_BYTES)
     rows = x.detach().clone().requires_grad_(True)
     weight_a = a3.detach().clone().requires_grad_(True)
     weight_b = b3.detach().clone().requires_grad_(True)
     # Non-leaf, same as the expert GEMM output the delta is added into.
     destination = torch.zeros(total, out_dim, requires_grad=True) + 0
-    chunked = run(rows, weight_a, weight_b, destination)
+    chunked = run(rows, weight_a, weight_b, destination, 1)
 
     assert chunked is destination
     assert torch.allclose(chunked, full)
@@ -1576,7 +1602,7 @@ def test_split_lora_delta_chunked_accumulate_matches_full(monkeypatch):
 
 
 @pytest.mark.parametrize("experts_cls", [_UngatedExperts, _RoutedExperts])
-def test_scatter_routed_chunks_match_module(monkeypatch, experts_cls):
+def test_scatter_routed_chunks_match_module(experts_cls):
     torch.manual_seed(0)
     experts = experts_cls()
     hidden = torch.randn(5, HIDDEN, requires_grad=True)
@@ -1584,10 +1610,9 @@ def test_scatter_routed_chunks_match_module(monkeypatch, experts_cls):
     top_k_weights = torch.rand(5, TOP_K)
     ref = experts(hidden, top_k_index, top_k_weights)
 
-    monkeypatch.setattr(moe_routed, "ROUTED_EXPERT_CHUNK_BYTES", 1)
     other = hidden.detach().clone().requires_grad_(True)
     out = moe_routed.routed_experts_local_forward(
-        experts, other, top_k_index, top_k_weights
+        experts, other, top_k_index, top_k_weights, chunk_bytes=1
     )
 
     assert torch.allclose(out, ref, rtol=1e-5, atol=1e-6)
@@ -1599,10 +1624,13 @@ def test_scatter_routed_chunks_match_module(monkeypatch, experts_cls):
     }
     experts.zero_grad()
 
-    monkeypatch.setattr(moe_routed, "ROUTED_EXPERT_CHUNK_BYTES", 768 * 1024 * 1024)
     coarse_hidden = hidden.detach().clone().requires_grad_(True)
     coarse = moe_routed.routed_experts_local_forward(
-        experts, coarse_hidden, top_k_index, top_k_weights
+        experts,
+        coarse_hidden,
+        top_k_index,
+        top_k_weights,
+        chunk_bytes=768 * 1024 * 1024,
     )
     coarse.sum().backward()
     assert torch.allclose(coarse_hidden.grad, fine_hidden, rtol=1e-5, atol=1e-6)
@@ -1822,7 +1850,7 @@ class TestRoutedExpertsChunkedLora:
         top_k_weights = torch.rand(top_k_index.shape)
         ref_hidden = hidden.clone().requires_grad_(True)
         up_hidden = hidden.clone().requires_grad_(True)
-        monkeypatch.setattr(moe_routed, "ROUTED_EXPERT_CHUNK_BYTES", SMALL_CHUNK_BYTES)
+        set_routed_experts_chunk_bytes(upgraded, SMALL_CHUNK_BYTES)
         if use_grouped_mm:
             monkeypatch.setattr(moe_gemm, "_use_grouped_mm", lambda _x: True)
 
@@ -1839,7 +1867,7 @@ class TestRoutedExpertsChunkedLora:
 
     @pytest.mark.parametrize(("block_cls", "targets"), ROUTED_LORA_BLOCKS)
     def test_mixed_routing_multi_chunk_matches_per_adapter_runs(
-        self, monkeypatch, block_cls, targets
+        self, block_cls, targets
     ):
         # Arrange
         model = _expert_lora_model(
@@ -1847,7 +1875,7 @@ class TestRoutedExpertsChunkedLora:
         )
         patch_lora_for_fused_forward(model)
         x = torch.randn(12, HIDDEN)
-        monkeypatch.setattr(moe_routed, "ROUTED_EXPERT_CHUNK_BYTES", SMALL_CHUNK_BYTES)
+        set_routed_experts_chunk_bytes(model, SMALL_CHUNK_BYTES)
 
         # Act
         set_fused_adapter_routing(model, ["actor"] * 6 + ["critic"] * 6)
@@ -1891,7 +1919,7 @@ class TestRoutedExpertsChunkedLora:
             for layer in (*wrapper.lora_A.values(), *wrapper.lora_B.values()):
                 layer.weight = FakeDTensor(layer.weight.detach().clone())
         monkeypatch.setattr(moe_adapters, "DTensor", FakeDTensor)
-        monkeypatch.setattr(moe_routed, "ROUTED_EXPERT_CHUNK_BYTES", SMALL_CHUNK_BYTES)
+        set_routed_experts_chunk_bytes(upgraded, SMALL_CHUNK_BYTES)
         hidden = torch.randn(12, HIDDEN)
         top_k_weights = torch.rand(12, TOP_K)
 
@@ -2049,7 +2077,7 @@ class TestLoraExpertsFunction:
         model = _frozen_base_lora_block(block_cls, targets, act_fn)
         hidden = torch.randn(top_k_index.shape[0], HIDDEN)
         top_k_weights = torch.rand(top_k_index.shape)
-        monkeypatch.setattr(moe_routed, "ROUTED_EXPERT_CHUNK_BYTES", SMALL_CHUNK_BYTES)
+        set_routed_experts_chunk_bytes(model, SMALL_CHUNK_BYTES)
         if use_grouped_mm:
             monkeypatch.setattr(moe_gemm, "_use_grouped_mm", lambda _x: True)
 
@@ -2061,15 +2089,13 @@ class TestLoraExpertsFunction:
         _assert_runs_match(lean, graph)
 
     @pytest.mark.parametrize(("block_cls", "targets", "act_fn"), RECOMPUTE_BLOCKS)
-    def test_already_grouped_matches_graph_path(
-        self, monkeypatch, block_cls, targets, act_fn
-    ):
+    def test_already_grouped_matches_graph_path(self, block_cls, targets, act_fn):
         # Arrange
         model = _frozen_base_lora_block(block_cls, targets, act_fn)
         expert_ids = torch.tensor([[0], [0], [2], [2], [2], [3], [3], [3], [3]])
         hidden = torch.randn(expert_ids.shape[0], HIDDEN)
         top_k_weights = torch.rand(expert_ids.shape[0], 1)
-        monkeypatch.setattr(moe_routed, "ROUTED_EXPERT_CHUNK_BYTES", SMALL_CHUNK_BYTES)
+        set_routed_experts_chunk_bytes(model, SMALL_CHUNK_BYTES)
 
         # Act
         graph = _run_routed_experts(
@@ -2083,9 +2109,7 @@ class TestLoraExpertsFunction:
         _assert_runs_match(lean, graph)
 
     @pytest.mark.parametrize(("block_cls", "targets", "act_fn"), RECOMPUTE_BLOCKS)
-    def test_mixed_routing_matches_graph_path(
-        self, monkeypatch, block_cls, targets, act_fn
-    ):
+    def test_mixed_routing_matches_graph_path(self, block_cls, targets, act_fn):
         # Arrange
         model = _expert_lora_model(
             block_cls, targets, ("actor", "critic"), trainable=("actor", "critic")
@@ -2096,7 +2120,7 @@ class TestLoraExpertsFunction:
         patch_lora_for_fused_forward(model)
         set_fused_adapter_routing(model, ["actor"] * 6 + ["critic"] * 6)
         x = torch.randn(12, HIDDEN)
-        monkeypatch.setattr(moe_routed, "ROUTED_EXPERT_CHUNK_BYTES", SMALL_CHUNK_BYTES)
+        set_routed_experts_chunk_bytes(model, SMALL_CHUNK_BYTES)
 
         def run(recompute):
             set_routed_experts_recompute(model, recompute)
@@ -2128,7 +2152,7 @@ class TestLoraExpertsFunction:
     def test_saves_rows_not_intermediate_activations(self):
         # Arrange
         torch.manual_seed(0)
-        intermediate, n_tokens = 64, 32
+        intermediate, n_tokens = 64, 256
         block = _UngatedMoeBlock()
         block.experts.up_proj = nn.Parameter(
             torch.randn(NUM_EXPERTS, intermediate, HIDDEN) * 0.1
@@ -2235,9 +2259,7 @@ class TestSetRoutedExpertsRecompute:
         assert block.experts.recompute is True
 
     @pytest.mark.parametrize(("block_cls", "targets", "act_fn"), RECOMPUTE_BLOCKS)
-    def test_auto_inside_checkpoint_matches_recompute(
-        self, monkeypatch, block_cls, targets, act_fn
-    ):
+    def test_auto_inside_checkpoint_matches_recompute(self, block_cls, targets, act_fn):
         # Arrange
         torch.manual_seed(0)
         block = _frozen_base_lora_block(block_cls, targets, act_fn)
@@ -2245,7 +2267,7 @@ class TestSetRoutedExpertsRecompute:
             block, checkpoint_impl=CheckpointImpl.NO_REENTRANT, preserve_rng_state=False
         )
         hidden = torch.randn(12, HIDDEN)
-        monkeypatch.setattr(moe_routed, "ROUTED_EXPERT_CHUNK_BYTES", SMALL_CHUNK_BYTES)
+        set_routed_experts_chunk_bytes(model, SMALL_CHUNK_BYTES)
 
         def run(enabled):
             set_routed_experts_recompute(model, enabled)
@@ -2289,7 +2311,7 @@ class TestRoutedExpertChunkBudget:
     @pytest.mark.parametrize("recompute", [True, False], ids=["lean", "graph"])
     @pytest.mark.parametrize(("block_cls", "targets", "act_fn"), RECOMPUTE_BLOCKS)
     def test_default_budget_matches_one_row_chunks(
-        self, monkeypatch, block_cls, targets, act_fn, recompute
+        self, block_cls, targets, act_fn, recompute
     ):
         # Arrange
         torch.manual_seed(0)
@@ -2301,13 +2323,24 @@ class TestRoutedExpertChunkBudget:
         default = _run_routed_experts(
             model, recompute, hidden, UNEVEN_TOP2_INDEX, top_k_weights
         )
-        monkeypatch.setattr(moe_routed, "ROUTED_EXPERT_CHUNK_BYTES", 1)
+        set_routed_experts_chunk_bytes(model, 1)
         one_row = _run_routed_experts(
             model, recompute, hidden, UNEVEN_TOP2_INDEX, top_k_weights
         )
 
         # Assert
         _assert_runs_match(default, one_row)
+
+    def test_sets_sorted_wrapper_chunk(self):
+        _, upgraded = _sorted_pair()
+
+        set_routed_experts_chunk_bytes(upgraded, 1)
+
+        sorted_wrappers = [
+            m for m in _wrappers(upgraded) if isinstance(m, SortedExpertsLoraWrapper)
+        ]
+        assert sorted_wrappers
+        assert {m.chunk_bytes for m in sorted_wrappers} == {1}
 
 
 class TestScatterRows:
@@ -2375,7 +2408,7 @@ class TestGroupedGemmCoverage:
             torch, "_grouped_mm", lambda rows, w, offs: torch.ones(4, 4)
         )
 
-        out = moe_gemm.grouped_matmul(x, weight, [2, 2], offs)
+        out = moe_gemm.grouped_matmul(x, weight, offs)
 
         assert torch.equal(out, torch.ones(4, 4))
 
@@ -2384,7 +2417,7 @@ class TestGroupedGemmCoverage:
         weight = torch.randn(2, 4, 5)
 
         out = moe_gemm.grouped_matmul(
-            x, weight, [0, 0], torch.tensor([0, 0], dtype=torch.int32)
+            x, weight, torch.tensor([0, 0], dtype=torch.int32)
         )
 
         assert out.shape == (0, 5)
@@ -2395,7 +2428,12 @@ class TestGroupedGemmCoverage:
     def test_add_grouped_linear_returns_when_x_is_empty(self):
         destination = torch.ones(0, 4)
         moe_gemm.add_grouped_linear(
-            destination, torch.zeros(0, 5), torch.randn(1, 4, 5), [0], 1.0
+            destination,
+            torch.zeros(0, 5),
+            torch.randn(1, 4, 5),
+            [0],
+            1.0,
+            moe_gemm.ROUTED_EXPERT_CHUNK_BYTES,
         )
 
         assert destination.shape == (0, 4)
@@ -2405,7 +2443,9 @@ class TestGroupedGemmCoverage:
         x = torch.ones(2, 5)
         weight = torch.ones(1, 4, 5)
 
-        moe_gemm.add_grouped_linear(destination, x, weight, [2], 1.0)
+        moe_gemm.add_grouped_linear(
+            destination, x, weight, [2], 1.0, moe_gemm.ROUTED_EXPERT_CHUNK_BYTES
+        )
 
         assert destination.dtype == torch.float16
         assert torch.allclose(destination.float(), torch.full((2, 4), 5.0))
@@ -2499,15 +2539,12 @@ class TestRoutedExpertDtypeAndDTensor:
         destination = torch.zeros(2, 3, dtype=torch.float16)
         rows = torch.ones(2, 4)
 
+        chunked = moe_routed.ChunkedLora(
+            lora, moe_adapters.lora_operands(*lora.stacked, 1.0), None, None
+        )
+
         moe_routed._add_expert_loras(
-            destination,
-            rows,
-            [lora],
-            [2],
-            offs=None,
-            experts=slice(0, 1),
-            num_experts=1,
-            row_ids=None,
+            destination, rows, [chunked], 0, torch.tensor([2], dtype=torch.int32)
         )
 
         assert destination.dtype == torch.float16
@@ -2524,13 +2561,11 @@ class TestRoutedExpertDtypeAndDTensor:
             routed_weights=torch.ones(2, 1),
             row_ids=None,
         )
-        calls = {"n": 0}
 
-        def fake_linear(x, weight, counts, offs=None):
-            calls["n"] += 1
-            return torch.ones(x.shape[0], weight.shape[1])
+        def fake_matmul(x, weight, offs):
+            return torch.ones(x.shape[0], weight.shape[2])
 
-        monkeypatch.setattr(moe_routed, "grouped_linear", fake_linear)
+        monkeypatch.setattr(moe_routed, "grouped_matmul", fake_matmul)
 
         out = moe_routed._scatter_routed_expert_chunks(
             hidden,
@@ -2542,6 +2577,7 @@ class TestRoutedExpertDtypeAndDTensor:
             routing=routing,
             up_loras=(),
             down_loras=(),
+            chunk_bytes=moe_routed.ROUTED_EXPERT_CHUNK_BYTES,
         )
 
         assert out.dtype == hidden.dtype
@@ -2576,6 +2612,7 @@ class TestRoutedExpertDtypeAndDTensor:
             routing=routing,
             up_loras=(),
             down_loras=(),
+            chunk_bytes=moe_routed.ROUTED_EXPERT_CHUNK_BYTES,
         )
 
         assert out.shape == (1, 4)
@@ -2588,19 +2625,15 @@ class TestLoraExpertsRecomputeGuards:
         hidden = torch.ones(1, 4, requires_grad=True)
         token_idx = torch.tensor([0])
         weights = torch.ones(1, 1)
-        group_ends = torch.tensor([1])
+        offsets = torch.tensor([[1]], dtype=torch.int32)
         up_weight = torch.ones(1, 4, 4)
         down_weight = torch.ones(1, 4, 4)
         config = LoraExpertsConfig(
             act_fn=lambda t: t,
             gated=False,
-            plan=[(0, 1, [1], 0, 1)],
-            up_slots=(),
-            down_slots=(),
-        )
-        monkeypatch.setattr(
-            "agilerl.lora.moe.recompute.grouped_linear",
-            lambda *_a, **_k: torch.ones(1, 4),
+            sizes=(1,),
+            up_row_ids=(),
+            down_row_ids=(),
         )
         monkeypatch.setattr(
             "agilerl.lora.moe.recompute.grouped_matmul",
@@ -2611,7 +2644,7 @@ class TestLoraExpertsRecomputeGuards:
             hidden,
             token_idx,
             weights,
-            group_ends,
+            offsets,
             None,
             up_weight,
             down_weight,
@@ -2625,34 +2658,30 @@ class TestLoraExpertsRecomputeGuards:
         hidden = torch.ones(1, 4, requires_grad=True)
         token_idx = torch.tensor([0])
         weights = torch.ones(1, 1)
-        group_ends = torch.tensor([1])
+        offsets = torch.tensor([[1]], dtype=torch.int32)
         up_weight = torch.ones(1, 4, 4)
         down_weight = torch.ones(1, 4, 4)
         config = LoraExpertsConfig(
             act_fn=lambda t: t,
             gated=False,
-            plan=[(0, 1, [1], 0, 1)],
-            up_slots=(),
-            down_slots=(),
+            sizes=(1,),
+            up_row_ids=(),
+            down_row_ids=(),
         )
 
         def _grad(outputs, inputs, grad_outputs, allow_unused=False):
             return tuple(None for _ in inputs)
 
         monkeypatch.setattr(
-            "agilerl.lora.moe.recompute.grouped_linear",
-            lambda *_a, **_k: torch.ones(1, 4, requires_grad=True),
-        )
-        monkeypatch.setattr(
             "agilerl.lora.moe.recompute.grouped_matmul",
-            lambda *_a, **_k: torch.ones(1, 4),
+            lambda *_a, **_k: torch.ones(1, 4, requires_grad=True),
         )
         monkeypatch.setattr(torch.autograd, "grad", _grad)
         out = LoraExpertsFunction.apply(
             hidden,
             token_idx,
             weights,
-            group_ends,
+            offsets,
             None,
             up_weight,
             down_weight,
@@ -2687,7 +2716,8 @@ class TestLowRankDelta:
         )
 
         # Act
-        delta = moe_adapters.low_rank_delta(rows, lora_a, lora_b, counts, offs, scaling)
+        operands = moe_adapters.lora_operands(lora_a, lora_b, scaling)
+        delta = moe_adapters.low_rank_delta(rows, *operands, offs)
         grads = torch.autograd.grad(delta.square().sum(), (rows, lora_a, lora_b))
 
         # Assert

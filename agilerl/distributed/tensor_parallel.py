@@ -33,7 +33,7 @@ from torch.distributed.tensor.placement_types import Shard
 from torch.func import functional_call
 
 from agilerl.architectures import family_tensor_parallel_plans
-from agilerl.distributed.expert_parallel import _local_param_dict
+from agilerl.distributed.ep_forward import _local_param_dict
 
 
 def stash_tp(module: nn.Module, device_mesh: DeviceMesh) -> None:

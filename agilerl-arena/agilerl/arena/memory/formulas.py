@@ -31,6 +31,21 @@ CUDA_GRAPH_POOL_BYTES = 256 * MiB
 # fp32. AdamW keeps two fp32 moments per parameter.
 ADAPTER_BYTES_PER_PARAM = 4.0
 ADAM_BYTES_PER_PARAM = 8.0
+# Foreach AdamW builds one fp32 temporary per trained parameter in step();
+# the fused kernel builds none.
+FOREACH_ADAM_WORKSPACE_BYTES_PER_PARAM = 4.0
+# Routed-expert chunk budget when no FSDP config sets one.
+DEFAULT_ROUTED_CHUNK_BYTES = 64 * MiB
+# Budgets an unset ``FSDPConfig.routed_expert_chunk_mib`` picks from, largest first.
+# Super-VL VWA learn steps on H100 80GB ran 2.2% faster at 512 MiB than at 256
+# (busiest rank +0.69 GiB). That H100 rise is far above the A100 fit below, so
+# larger chunks are left out: the estimate would pass them on H100 and miss the peak.
+ROUTED_CHUNK_MIB_CHOICES = (512, 256, 128, 64)
+# Share of one chunk budget each chunked buffer adds to the MoE backward peak
+# (Super-VL, EP 8, expert LoRA). A100 80GB peaks rise 0.37 GiB per GiB of chunk
+# over 64-1024 MiB; the H100 80GB VWA busiest rank rose 0.69 GiB from 256 to
+# 512 MiB. 0.45 keeps the estimate at or above the H100 peak at 512 MiB.
+ROUTED_CHUNK_LIVE_FRACTION = 0.45
 
 # PyTorch caching-allocator slack: reserved above allocated.
 # Charged on the torch-side subtotal. Training only: generation sits in
@@ -43,6 +58,14 @@ ALLOCATOR_RESERVE_FRACTION_FSDP = 0.069
 # Largest share by which a measured peak exceeded the estimate on the 4-GPU
 # grids. A GPU recommendation keeps this share of usable memory free.
 MAX_UNDERPREDICTION = 0.089
+# Share of a training GPU's CUDA capacity (torch ``total_memory``) a runtime
+# memory pick leaves free. The estimate is in NVML device-used bytes, which
+# also count the driver's reservation that ``total_memory`` leaves out
+# (0.85 GiB on A100 80GB). On Super-VL learn steps (A100 80GB, EP 8, rows up
+# to 30.9k tokens) the busiest rank peaked 0.87 GiB over the estimate and EP
+# routing spread the ranks 1.5 GiB; at 2.5% that rank keeps about 2 GiB free
+# for a step routed more unevenly.
+TRAINING_HEADROOM_FRACTION = 0.025
 
 
 def recommendation_fits(predicted_bytes: int, usable_bytes: int) -> bool:
@@ -136,7 +159,10 @@ def mlp_params_per_layer(arch: ModelArch) -> int:
 
 
 def moe_params_per_layer(arch: ModelArch) -> tuple[int, int]:
-    """(expert parameters, router parameters) of one MoE block."""
+    """(expert parameters, router parameters) of one MoE block.
+
+    Latent MoE adds the hidden <-> latent projections to the expert count.
+    """
     n_experts = arch.n_experts
     if n_experts is None or n_experts <= 1:
         return 0, 0
@@ -144,8 +170,10 @@ def moe_params_per_layer(arch: ModelArch) -> tuple[int, int]:
     mlp_matrices = 3 if arch.gated_mlp else 2
     expert_inter = arch.expert_intermediate_size or arch.intermediate_size
     shared_inter = arch.shared_expert_intermediate_size or expert_inter
-    experts = n_experts * mlp_matrices * h * expert_inter
+    experts = n_experts * mlp_matrices * arch.expert_width * expert_inter
     experts += arch.n_shared_experts * mlp_matrices * h * shared_inter
+    if arch.moe_latent_size:
+        experts += 2 * h * arch.moe_latent_size
     return experts, h * n_experts
 
 
@@ -227,7 +255,7 @@ def packed_lora_param_count(arch: ModelArch, rank: int, n_matrices: int) -> int:
     if not n_matrices or n_experts is None or n_experts <= 1:
         return 0
     expert_inter = arch.expert_intermediate_size or arch.intermediate_size
-    per_matrix = n_experts * rank * (arch.hidden_size + expert_inter)
+    per_matrix = n_experts * rank * (arch.expert_width + expert_inter)
     return int(arch.moe_layers * n_matrices * per_matrix)
 
 
@@ -472,19 +500,20 @@ def routed_expert_bytes(
     """Live routed-expert tensors in one MoE block on the grouped-GEMM path.
 
     Per routed token (``tokens x top_k``): the gathered input and the expert
-    output (``hidden`` each), gate/up (``2 x inter``) and the activation
-    (``inter``). A checkpointed backward adds the activation's gradient.
-    Nothing outlives the block.
+    output (:attr:`ModelArch.expert_width` each), gate/up (``2 x inter``) and
+    the activation (``inter``). A checkpointed backward adds the activation's
+    gradient. Nothing outlives the block.
 
     ``arch.chunked_routed_experts`` runs experts in row chunks and writes
     each chunk into the layer output. Backward keeps the gathered input, the
     expert output, the up projection and the activation for every chunk; a
-    no-grad pass keeps only the gathered input.
+    no-grad pass keeps only the gathered input. The per-chunk gradient
+    buffers are :func:`routed_chunk_bytes`.
     """
     if not arch.is_moe:
         return 0
     routed = rows * seq_len * (arch.n_experts_per_tok or 1)
-    h = arch.hidden_size
+    h = arch.expert_width
     inter = arch.expert_intermediate_size or arch.intermediate_size
     if not arch.chunked_routed_experts:
         width = 2 * h + (4 if backward else 3) * inter
@@ -493,6 +522,44 @@ def routed_expert_bytes(
     else:
         width = h
     return int(routed * width * act_bytes)
+
+
+def routed_chunk_bytes(
+    arch: ModelArch,
+    rows: int,
+    seq_len: int,
+    act_bytes: float,
+    chunk_bytes: int,
+    expert_lora: bool,
+    contracted: bool,
+    ep: int,
+) -> int:
+    """Backward bytes of one MoE block that grow with the routed-expert chunk budget.
+
+    Each buffer is capped by the rows it chunks. The chunked routed path
+    (expert LoRA on ``arch.chunked_routed_experts``) and the expert-parallel
+    fp32 combine each add :data:`ROUTED_CHUNK_LIVE_FRACTION` of a chunk. The
+    sorted path's contracted LoRA up-projection holds one whole chunk output.
+
+    :param chunk_bytes: Widest ``[rows, features]`` activation of one chunk.
+    :param expert_lora: Packed expert matrices carry LoRA.
+    :param contracted: Expert LoRA runs split (``packed_moe_dispatch="contracted"``).
+    :param ep: Expert-parallel degree.
+    """
+    if not arch.is_moe:
+        return 0
+    routed = rows * seq_len * (arch.n_experts_per_tok or 1)
+    inter = arch.expert_intermediate_size or arch.intermediate_size
+    widest_row = max(arch.expert_width, inter) * act_bytes
+    fractional = 0.0
+    whole = 0.0
+    if expert_lora and arch.chunked_routed_experts:
+        fractional += min(chunk_bytes, routed * widest_row)
+    elif expert_lora and contracted:
+        whole += min(chunk_bytes, routed * widest_row)
+    if ep > 1:
+        fractional += min(chunk_bytes, routed * arch.expert_width * 4)
+    return int(fractional * ROUTED_CHUNK_LIVE_FRACTION + whole)
 
 
 def mamba_block_bytes(
@@ -911,9 +978,15 @@ def lora_tensor_placement(
     n_experts = arch.n_experts
     if packed_matrices and n_experts is not None and n_experts > 1:
         expert_inter = arch.expert_intermediate_size or arch.intermediate_size
-        copies = arch.moe_layers * packed_matrices * n_experts
+        # PEFT stacks every expert's factor into one ``[E * r, features]`` tensor.
         replicated, sharded = _add_lora_pair(
-            replicated, sharded, h, expert_inter, rank, copies, threshold
+            replicated,
+            sharded,
+            arch.expert_width,
+            expert_inter,
+            rank * n_experts,
+            arch.moe_layers * packed_matrices,
+            threshold,
         )
     target = lora_param_count(arch, rank, scope) + packed_lora_param_count(
         arch, rank, packed_matrices

@@ -22,7 +22,13 @@ from agilerl.distributed import FSDPConfig, resolve_device
 from agilerl.llm_envs import DatasetEnv
 from agilerl.utils.llm_utils import LEARN_PHASE_METRIC_NAMES
 from tests import TINY_LLM_FIXTURE_PATH
-from tests.test_algorithms.test_llms.llm_helpers import create_module
+from tests.test_algorithms.test_llms.llm_helpers import (
+    create_module,
+    optimizer_state,
+    record_outputs,
+    scale_losses,
+    trainable_weights,
+)
 
 
 def make_sft_gym(
@@ -951,4 +957,129 @@ class TestSFTLearnPhaseTimings:
             metrics["learn_phase_forward_s"]
         )
         assert sft.shard_runtime.phase_timer.marks is None
+        sft.clean_up()
+
+
+def make_cpu_sft() -> SFT:
+    """Tiny fp32 SFT on CPU with one optimizer step of two micro-batches per learn."""
+    return SFT(
+        actor_network=create_module(
+            input_size=10, max_tokens=20, vocab_size=100, device="cpu"
+        ),
+        pad_token_id=99,
+        pad_token="<pad>",
+        lora_config=LoraConfig(
+            r=4,
+            lora_alpha=16,
+            target_modules=["linear_1"],
+            task_type="CAUSAL_LM",
+            lora_dropout=0.0,
+        ),
+        batch_size=4,
+        micro_batch_size_per_gpu=2,
+        wrap=False,
+        gradient_checkpointing=False,
+        device="cpu",
+        use_liger_loss=False,
+    )
+
+
+def random_sft_batch() -> dict[str, torch.Tensor | list[int]]:
+    """Four six-token examples with two-token prompts."""
+    return {
+        "input_ids": torch.randint(
+            0, 99, (4, 6), generator=torch.Generator().manual_seed(0)
+        ),
+        "attention_mask": torch.ones(4, 6, dtype=torch.long),
+        "prompt_lengths": [2, 2, 2, 2],
+    }
+
+
+class TestSFTLearnMetrics:
+    def test_metrics_are_means_of_the_micro_batch_losses(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        sft = make_cpu_sft()
+        sft_loss, outputs = record_outputs(sft._sft_loss)
+        monkeypatch.setattr(sft, "_sft_loss", sft_loss)
+
+        # Act
+        metrics = sft.learn(random_sft_batch())
+
+        # Assert
+        losses = [loss.item() for loss in outputs]
+        assert len(losses) == 2
+        assert metrics["loss"] == pytest.approx(sum(losses) / 2, rel=1e-6)
+        assert metrics["perplexity"] == pytest.approx(
+            sum(np.exp(loss) for loss in losses) / 2, rel=1e-6
+        )
+        sft.clean_up()
+
+
+class TestSFTLearnNonFiniteLoss:
+    def test_finite_losses_step(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Arrange
+        sft = make_cpu_sft()
+        monkeypatch.setattr(
+            sft, "_sft_loss", scale_losses(sft._sft_loss, iter([1.0, 1.0]))
+        )
+        before = trainable_weights(sft.actor)
+
+        # Act
+        sft.learn(random_sft_batch())
+
+        # Assert
+        after = trainable_weights(sft.actor)
+        assert any(
+            not torch.equal(new, old) for new, old in zip(after, before, strict=True)
+        )
+        sft.clean_up()
+
+    @pytest.mark.parametrize(
+        "window_scales",
+        [[float("nan"), 1.0], [1.0, float("nan")]],
+        ids=["first_micro_batch", "last_micro_batch"],
+    )
+    def test_raises_before_the_step_when_a_micro_batch_loss_is_not_finite(
+        self, monkeypatch: pytest.MonkeyPatch, window_scales: list[float]
+    ) -> None:
+        # Arrange: one optimizer step of two micro-batches per learn; a finite
+        # learn first gives the optimizer state to keep.
+        sft = make_cpu_sft()
+        scales = iter([1.0, 1.0, *window_scales])
+        monkeypatch.setattr(sft, "_sft_loss", scale_losses(sft._sft_loss, scales))
+        sft.learn(random_sft_batch())
+        before = trainable_weights(sft.actor)
+        state_before = optimizer_state(sft.optimizer)
+
+        # Act
+        with pytest.raises(ValueError, match="Loss is not finite"):
+            sft.learn(random_sft_batch())
+
+        # Assert: it raises at the window's last micro-batch, before the step.
+        assert list(scales) == []
+        for new, old in zip(trainable_weights(sft.actor), before, strict=True):
+            assert torch.equal(new, old)
+        state_after = optimizer_state(sft.optimizer)
+        assert state_before
+        assert len(state_after) == len(state_before)
+        for new, old in zip(state_after, state_before, strict=True):
+            assert torch.equal(new, old)
+        sft.clean_up()
+
+    def test_raises_when_the_micro_batch_left_pending_a_step_is_not_finite(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange: three micro-batches per step over two micro-batches leave
+        # the learn call's gradients pending the next one.
+        sft = make_cpu_sft()
+        sft.gradient_accumulation_steps = 3
+        scales = iter([1.0, float("nan")])
+        monkeypatch.setattr(sft, "_sft_loss", scale_losses(sft._sft_loss, scales))
+
+        # Act / Assert
+        with pytest.raises(ValueError, match="Loss is not finite"):
+            sft.learn(random_sft_batch())
+        assert list(scales) == []
         sft.clean_up()

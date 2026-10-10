@@ -11,16 +11,26 @@ required.
 
 import logging
 import math
+import warnings
+from types import SimpleNamespace
+from typing import Any
 
 import numpy as np
 import pytest
 import torch
+import torch.distributed as dist
 
 from agilerl.algorithms.core import ActionResult
 from agilerl.algorithms.core.base import LLMAlgorithm
+from agilerl.distributed.process import aggregate_metrics_dict
 from agilerl.llm_envs import RolloutHarness
 from agilerl.metrics import AgentMetrics
 from tests.helpers.rollout_doubles import FakeEnvClient
+from tests.test_utils.test_expert_parallel import (
+    _init_gloo,
+    _spawn_ranks,
+    requires_gloo,
+)
 
 
 class _StubAlgo:
@@ -164,6 +174,42 @@ class TestLLMAlgorithmSegmentLossScales:
         assert scales.tolist() == [0.0, 0.0]
 
 
+class TestLLMAlgorithmEpochOrders:
+    def test_each_epoch_reshuffles_the_last_epoch_order(self) -> None:
+        # Arrange
+        batch_idxs = np.arange(10, 18)
+        algo = SimpleNamespace(rng=np.random.default_rng(3))
+        reference_rng = np.random.default_rng(3)
+        reference = batch_idxs.copy()
+        expected = []
+        for _ in range(3):
+            reference_rng.shuffle(reference)
+            expected.append(reference.copy())
+
+        # Act
+        orders = LLMAlgorithm._epoch_orders(algo, batch_idxs, 3, aligned=False)
+
+        # Assert
+        assert [order.tolist() for order in orders] == [
+            order.tolist() for order in expected
+        ]
+        assert batch_idxs.tolist() == list(range(10, 18))
+
+    def test_aligned_orders_on_one_process_match_the_local_draw(self) -> None:
+        batch_idxs = np.arange(6)
+
+        aligned = LLMAlgorithm._epoch_orders(
+            SimpleNamespace(rng=np.random.default_rng(0)), batch_idxs, 2, aligned=True
+        )
+        local = LLMAlgorithm._epoch_orders(
+            SimpleNamespace(rng=np.random.default_rng(0)), batch_idxs, 2, aligned=False
+        )
+
+        assert [order.tolist() for order in aligned] == [
+            order.tolist() for order in local
+        ]
+
+
 class TestLLMAlgorithmTestPromptGuard:
     def test_a_non_terminal_env_holding_no_prompt_is_rejected(self):
         """``done`` and ``current_prompt`` must agree, or get_action sees nothing.
@@ -273,11 +319,14 @@ class TestLLMAlgorithmAlignedSamplingLogprobsAndMetrics:
         sampling = [torch.tensor([0.0, -math.log(1.5)])]
 
         # Act
-        _, metrics = stub._aligned_sampling_logprobs_and_metrics(sampling, masks, old)
+        _, metrics, excluded = stub._aligned_sampling_logprobs_and_metrics(
+            sampling, masks, old
+        )
 
         # Assert
         assert metrics["vllm_is_ratio_mean"] == pytest.approx(1.25)
         assert metrics["vllm_is_ratio_std"] == pytest.approx(0.25)
+        assert excluded == ()
 
     def test_mismatch_within_limits_logs_nothing(
         self, caplog: pytest.LogCaptureFixture
@@ -339,3 +388,68 @@ class TestLLMAlgorithmAlignedSamplingLogprobsAndMetrics:
                 "(max 0.0200) at cap 2.00."
             )
         ]
+
+    def test_a_rank_without_captures_skips_no_rows_and_is_left_out_of_the_mean(
+        self, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        monkeypatch.setattr("agilerl.algorithms.core.base.any_rank", lambda _flag: True)
+        stub = SamplingMismatchStub()
+        masks = torch.ones(2, 3, dtype=torch.bool)
+        old = torch.full((2, 3), -1.0)
+
+        # Act
+        with (
+            caplog.at_level(logging.WARNING, logger="agilerl.algorithms.core.base"),
+            warnings.catch_warnings(record=True) as warned,
+        ):
+            warnings.simplefilter("always")
+            aligned, metrics, excluded = stub._aligned_sampling_logprobs_and_metrics(
+                None, masks, old
+            )
+
+        # Assert
+        assert aligned is not None
+        assert torch.equal(aligned, old)
+        assert metrics["vllm_is_rows_skipped"] == 0.0
+        assert set(excluded) == set(metrics) - {"vllm_is_rows_skipped"}
+        assert {"vllm_is_delta_mean", "vllm_mismatch_kl"} <= set(excluded)
+        assert caplog.records == []
+        assert warned == []
+
+    @requires_gloo
+    def test_cross_rank_mismatch_means_count_only_ranks_with_captures(self) -> None:
+        _spawn_ranks(_sampling_metrics_one_rank_captured_worker)
+
+
+def _sampling_metrics_one_rank_captured_worker(
+    rank: int, world_size: int, port: int, result_queue: Any
+) -> None:
+    try:
+        _init_gloo(rank, world_size, port)
+        # Arrange: rank 0 captured a 0.5 nat gap on every token; rank 1 captured none.
+        stub = SamplingMismatchStub(max_logprob_gap=1.0)
+        masks = torch.ones(2, 3, dtype=torch.bool)
+        old = torch.full((2, 3), -1.0)
+        sampling = [torch.full((3,), -1.5)] * 2 if rank == 0 else None
+
+        # Act
+        with warnings.catch_warnings(record=True) as warned:
+            warnings.simplefilter("always")
+            _, metrics, excluded = stub._aligned_sampling_logprobs_and_metrics(
+                sampling, masks, old
+            )
+        agg = aggregate_metrics_dict(dict(metrics), excluded=excluded)
+
+        # Assert
+        assert metrics["vllm_is_rows_skipped"] == 0.0
+        assert warned == []
+        assert agg["vllm_is_delta_mean"] == pytest.approx(0.5)
+        assert agg["vllm_mismatch_kl"] == pytest.approx(math.exp(0.5) - 1.5, rel=1e-5)
+        assert agg["vllm_is_rows_skipped"] == 0.0
+        result_queue.put((rank, "ok", None))
+    except Exception as exc:
+        result_queue.put((rank, "err", repr(exc)))
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()

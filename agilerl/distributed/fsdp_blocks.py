@@ -5,14 +5,12 @@
 
 from __future__ import annotations
 
-import inspect
 import logging
 from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any, cast
 
 import torch
-from peft.tuners.lora.layer import LoraLayer
 from torch import nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     CheckpointImpl,
@@ -30,7 +28,10 @@ from torch.distributed.tensor import DTensor
 
 from agilerl.architectures.nemotron_h.mamba import block_type_mask_mapping
 from agilerl.arena.models.fsdp import FSDPConfig
-from agilerl.distributed.expert_parallel import iter_packed_expert_modules
+from agilerl.distributed.expert_parallel import (
+    iter_packed_expert_modules,
+    routed_counts_contexts,
+)
 from agilerl.distributed.process import is_distributed
 from agilerl.distributed.tensor_parallel import set_tp_compute_dtype
 from agilerl.lora.moe.layouts import is_packed_experts_module
@@ -699,6 +700,7 @@ def apply_fsdp2(
                 block,
                 checkpoint_impl=CheckpointImpl.NO_REENTRANT,
                 preserve_rng_state=False,
+                context_fn=routed_counts_contexts,
             )
             _replace_child(model, block, unit)
         wrap_units.append(unit)
@@ -744,68 +746,3 @@ def apply_fsdp2(
         register_fsdp_forward_method(model, "generate")
     register_fsdp_forward_method(model, "forward")
     return model
-
-
-def _forward_takes_one_input(module: nn.Module) -> bool:
-    """Whether ``module.forward`` has exactly one named parameter."""
-    parameters = inspect.signature(module.forward).parameters.values()
-    named = [
-        param
-        for param in parameters
-        if param.kind not in (param.VAR_POSITIONAL, param.VAR_KEYWORD)
-    ]
-    return len(named) == 1
-
-
-def _params_in_linears_or_1d(module: nn.Module) -> bool:
-    """Whether every parameter under ``module`` sits in a linear layer or is 1-D."""
-    if isinstance(module, nn.Linear):
-        return True
-    if any(param.ndim != 1 for param in module.parameters(recurse=False)):
-        return False
-    return all(_params_in_linears_or_1d(child) for child in module.children())
-
-
-def _is_dense_unit(module: nn.Module) -> bool:
-    """Whether ``module`` is a dense submodule to compile as one graph."""
-    # A lone projection compiles to the same GEMM, and every LoRA projection
-    # shares one forward code object, so each weight shape is a recompile.
-    if isinstance(module, (nn.Linear, LoraLayer)):
-        return False
-    if next(module.parameters(), None) is None:
-        return False
-    return _forward_takes_one_input(module) and _params_in_linears_or_1d(module)
-
-
-def _dense_units(module: nn.Module) -> list[nn.Module]:
-    """Outermost dense submodules under ``module``, ``module`` included."""
-    if _is_dense_unit(module):
-        return [module]
-    return [unit for child in module.children() for unit in _dense_units(child)]
-
-
-def compile_dense_block_modules(model: nn.Module, backend: str) -> list[nn.Module]:
-    """``torch.compile`` the dense submodules of each transformer block in place.
-
-    A submodule compiles when its ``forward`` takes one input and every
-    parameter under it sits in a linear layer or a 1-D tensor: norms and
-    MLPs. Packed MoE experts hold 3-D stacked weights, so they, their LoRA
-    wrappers and the MoE block around them stay eager, as do routers,
-    attention and Mamba mixers (extra inputs, own kernels) and lone
-    projections. ``Module.compile`` leaves FSDP / checkpoint wrappers and
-    state-dict keys unchanged. ``dynamic=True`` keeps one graph across
-    sequence lengths.
-
-    :param model: Model whose transformer blocks to compile.
-    :type model: nn.Module
-    :param backend: ``torch.compile`` backend, e.g. ``"inductor"``.
-    :type backend: str
-    :return: The compiled submodules.
-    :rtype: list[nn.Module]
-    """
-    units = [
-        unit for block in _transformer_blocks(model) for unit in _dense_units(block)
-    ]
-    for unit in units:
-        unit.compile(backend=backend, dynamic=True)
-    return units

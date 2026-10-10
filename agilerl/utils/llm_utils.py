@@ -13,11 +13,16 @@ import random
 import re
 import shutil
 import sys
+import tempfile
 import textwrap
 import warnings
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from contextlib import AbstractContextManager
+from dataclasses import dataclass, field
+from io import BufferedWriter
 from pathlib import Path
 from typing import (
+    IO,
     TYPE_CHECKING,
     Any,
     Protocol,
@@ -98,6 +103,7 @@ if HAS_LLM_DEPENDENCIES:
     from transformers.modeling_utils import PreTrainedModel
 
     from agilerl.lora.moe import grouped_mm_supported
+    from agilerl.utils.hf_remote_code import load_remote_code, remote_code_lock
     from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 else:
     # Sentinels for missing optional LLM dependencies. All uses are gated on
@@ -197,6 +203,76 @@ VLLM_IS_METRIC_NAMES = (
     "vllm_is_frac_clamped",  # ratios hitting the upper clamp
     "vllm_is_rows_skipped",  # rows falling back to ratio 1 on token mismatch
 )
+
+
+class MicroBatchMetrics:
+    """Scalar metrics of each micro-batch, kept on the device until one host read.
+
+    :param names: Metric names every :meth:`add` call carries.
+    """
+
+    def __init__(self, names: Sequence[str]) -> None:
+        self.names = tuple(names)
+        self.rows: list[torch.Tensor] = []
+
+    def add(
+        self,
+        metrics: Mapping[str, torch.Tensor | float],
+        counted: torch.Tensor | bool = True,
+    ) -> None:
+        """Record one micro-batch's metrics without a host read.
+
+        :param metrics: Scalar value of each name; at least one is a tensor.
+        :type metrics: Mapping[str, torch.Tensor | float]
+        :param counted: Whether the micro-batch counts toward :meth:`read`.
+        :type counted: torch.Tensor | bool
+        """
+        if counted is False:
+            return
+        reference = next(
+            value for value in metrics.values() if isinstance(value, torch.Tensor)
+        )
+        values = []
+        for name in self.names:
+            value = metrics[name]
+            values.append(
+                value.detach().float().to(reference.device, non_blocking=True)
+                if isinstance(value, torch.Tensor)
+                else reference.new_full((), value, dtype=torch.float32)
+            )
+        values.append(
+            reference.new_ones((), dtype=torch.float32)
+            if counted is True
+            else counted.to(reference.device, torch.float32, non_blocking=True)
+        )
+        self.rows.append(torch.stack(values))
+
+    def read(self) -> list[dict[str, float]]:
+        """Metrics of each counted micro-batch in call order, from one host read.
+
+        :return: One dict of metric values per counted micro-batch.
+        :rtype: list[dict[str, float]]
+        """
+        if not self.rows:
+            return []
+        return [
+            dict(zip(self.names, row[:-1], strict=True))
+            for row in torch.stack(self.rows).tolist()
+            if row[-1]
+        ]
+
+    def means(self) -> dict[str, float]:
+        """Mean of each metric over the counted micro-batches, ``0.0`` without any.
+
+        :return: Mean value of each name.
+        :rtype: dict[str, float]
+        """
+        rows = self.read()
+        return {
+            name: sum(row[name] for row in rows) / max(len(rows), 1)
+            for name in self.names
+        }
+
 
 # Accepted spellings per bitsandbytes quantization preset
 BNB_QUANT_NONE_ALIASES = frozenset({"none"})
@@ -362,10 +438,11 @@ def load_pad_token_configs(
     )
     # A checkpoint can omit config.json or generation_config.json.
     try:
-        model_config = AutoConfig.from_pretrained(
-            model_name_or_path,
-            trust_remote_code=trust_remote_code,
-        )
+        with remote_code_lock(trust_remote_code):
+            model_config = AutoConfig.from_pretrained(
+                model_name_or_path,
+                trust_remote_code=trust_remote_code,
+            )
     except OSError:
         model_config = None
     try:
@@ -708,6 +785,229 @@ def get_lora_params(model: nn.Module) -> list[torch.Tensor]:
     return [p for _, p in get_lora_named_params(model)]
 
 
+@torch.no_grad()
+def gather_to_host(
+    named_tensors: Iterable[tuple[str, torch.Tensor]],
+    keep: bool,
+) -> dict[str, torch.Tensor]:
+    """Gather each tensor in full and copy it into a new host tensor.
+
+    Every rank must pass the same tensors (``full_tensor`` is a collective);
+    only ``keep`` ranks copy. CUDA sources land in pinned buffers through
+    non-blocking copies. The result never shares storage with the inputs.
+
+    :param named_tensors: ``(name, tensor)`` pairs, plain or ``DTensor``.
+    :type named_tensors: Iterable[tuple[str, torch.Tensor]]
+    :param keep: Whether this rank keeps the host copies.
+    :type keep: bool
+    :return: Host copies by name; empty when ``keep`` is false.
+    :rtype: dict[str, torch.Tensor]
+    """
+    # Bounds the gathered device tensors held alive by in-flight copies.
+    max_pending_bytes = 1 << 30
+    host: dict[str, torch.Tensor] = {}
+    pending: list[torch.Tensor] = []
+    pending_bytes = 0
+    for name, value in named_tensors:
+        full = value.full_tensor() if isinstance(value, DTensor) else value
+        if not keep:
+            continue
+        on_cuda = full.device.type == "cuda"
+        buffer = torch.empty(full.shape, dtype=full.dtype, pin_memory=on_cuda)
+        buffer.copy_(full, non_blocking=on_cuda)
+        host[name] = buffer
+        if not on_cuda:
+            continue
+        pending.append(full)
+        pending_bytes += full.numel() * full.element_size()
+        if pending_bytes >= max_pending_bytes:
+            torch.cuda.current_stream(full.device).synchronize()
+            pending.clear()
+            pending_bytes = 0
+    if pending:
+        torch.cuda.current_stream(pending[0].device).synchronize()
+    return host
+
+
+SAFETENSORS_DTYPES: dict[torch.dtype, str] = {
+    torch.float64: "F64",
+    torch.float32: "F32",
+    torch.float16: "F16",
+    torch.bfloat16: "BF16",
+    torch.float8_e4m3fn: "F8_E4M3",
+    torch.float8_e5m2: "F8_E5M2",
+    torch.int64: "I64",
+    torch.int32: "I32",
+    torch.int16: "I16",
+    torch.int8: "I8",
+    torch.uint8: "U8",
+    torch.bool: "BOOL",
+}
+
+
+CheckpointFileOpener = Callable[[str], AbstractContextManager[IO[bytes]]]
+
+
+def directory_opener(root: str | Path) -> CheckpointFileOpener:
+    """Return an opener that writes each checkpoint file under ``root``.
+
+    :param root: Checkpoint directory; parent directories are created as needed.
+    :type root: str | Path
+    :return: Opener taking a path relative to ``root``.
+    :rtype: CheckpointFileOpener
+    """
+
+    def open_file(relative_path: str) -> BufferedWriter:
+        path = Path(root) / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path.open("wb")
+
+    return open_file
+
+
+def write_safetensors(
+    tensors: Mapping[str, torch.Tensor],
+    file: IO[bytes],
+    metadata: dict[str, str] | None = None,
+) -> None:
+    """Write CPU ``tensors`` to ``file`` in the safetensors format, one tensor at a time.
+
+    :param tensors: CPU tensors by name.
+    :type tensors: Mapping[str, torch.Tensor]
+    :param file: Stream to write to.
+    :type file: IO[bytes]
+    :param metadata: String metadata stored in the header.
+    :type metadata: dict[str, str] | None
+    """
+    # Widest elements first keeps every tensor aligned to its element size.
+    names = sorted(tensors, key=lambda name: (-tensors[name].element_size(), name))
+    header: dict[str, object] = {} if metadata is None else {"__metadata__": metadata}
+    offset = 0
+    for name in names:
+        tensor = tensors[name]
+        end = offset + tensor.numel() * tensor.element_size()
+        header[name] = {
+            "dtype": SAFETENSORS_DTYPES[tensor.dtype],
+            "shape": list(tensor.shape),
+            "data_offsets": [offset, end],
+        }
+        offset = end
+    encoded = json.dumps(header, separators=(",", ":")).encode()
+    encoded += b" " * (-len(encoded) % 8)
+    file.write(len(encoded).to_bytes(8, "little"))
+    file.write(encoded)
+    for name in names:
+        flat = tensors[name].contiguous().reshape(-1)
+        file.write(flat.view(torch.uint8).numpy().data)
+
+
+@dataclass
+class LoraAdapterSnapshot:
+    """Host copy of LoRA adapter weights; :func:`write_lora_adapters` needs no collectives.
+
+    :param adapters: Adapter name to PEFT state dict (adapter segment stripped).
+    :type adapters: dict[str, dict[str, torch.Tensor]]
+    :param configs: Adapter name to PEFT adapter config.
+    :type configs: dict[str, Any]
+    :param value_head: Value-head weights, empty without a value head.
+    :type value_head: dict[str, torch.Tensor]
+    """
+
+    adapters: dict[str, dict[str, torch.Tensor]] = field(default_factory=dict)
+    configs: dict[str, Any] = field(default_factory=dict)
+    value_head: dict[str, torch.Tensor] = field(default_factory=dict)
+
+
+def snapshot_lora_adapters(
+    model: nn.Module,
+    selected_adapters: Sequence[str],
+    use_value_head: bool = False,
+    is_main: bool = True,
+) -> LoraAdapterSnapshot:
+    """Copy LoRA adapter weights (and the value head) to host memory.
+
+    All ranks must call this together (``full_tensor()`` is a collective).
+    Only adapter tensors are gathered; base-model shards stay sharded. Ranks
+    other than ``is_main`` return an empty snapshot.
+
+    :param model: Actor holding the adapters.
+    :type model: nn.Module
+    :param selected_adapters: Adapter names to copy.
+    :type selected_adapters: Sequence[str]
+    :param use_value_head: Whether ``model`` wraps the PEFT model with a value head.
+    :type use_value_head: bool
+    :param is_main: Whether this rank keeps the copies.
+    :type is_main: bool
+    :return: Host copy of the adapters.
+    :rtype: LoraAdapterSnapshot
+    """
+    # Value-head wrappers keep the PEFT model on ``pretrained_model``.
+    inner_model = getattr(model, "pretrained_model", None) if use_value_head else None
+    peft_model = inner_model if isinstance(inner_model, nn.Module) else model
+    peft_config = getattr(peft_model, "peft_config", None)
+    # Keyed like named_modules(): PEFT >= 0.21 selects adapter keys from module
+    # names, which keep the wrapper segments that state_dict() drops.
+    live_state = dict(peft_model.named_parameters())
+    snapshot = LoraAdapterSnapshot()
+    for adapter_name in selected_adapters:
+        # get_peft_model_state_dict filters by adapter and strips the
+        # adapter-name segment, the format load_lora_adapters reads.
+        raw_state = get_peft_model_state_dict(
+            peft_model, state_dict=live_state, adapter_name=adapter_name
+        )
+        tensors = gather_to_host(
+            (
+                (canonical_fsdp_param_fqn(key), value)
+                for key, value in raw_state.items()
+            ),
+            keep=is_main,
+        )
+        if not is_main:
+            continue
+        snapshot.adapters[adapter_name] = tensors
+        if isinstance(peft_config, dict) and adapter_name in peft_config:
+            snapshot.configs[adapter_name] = peft_config[adapter_name]
+    if use_value_head:
+        v_head_params = [
+            (name, param)
+            for name, param in model.named_parameters()
+            if "v_head" in name
+        ]
+        snapshot.value_head = gather_to_host(v_head_params, keep=is_main)
+    return snapshot
+
+
+def write_lora_adapters(
+    snapshot: LoraAdapterSnapshot, open_file: CheckpointFileOpener
+) -> None:
+    """Write an adapter snapshot in PEFT-compatible format through ``open_file``.
+
+    Each adapter goes to ``<adapter>/adapter_model.safetensors`` plus its
+    ``adapter_config.json``; the value head goes to ``pytorch_model.bin``.
+
+    :param snapshot: Host copy from :func:`snapshot_lora_adapters`.
+    :type snapshot: LoraAdapterSnapshot
+    :param open_file: Opens a file by its path relative to the checkpoint directory.
+    :type open_file: CheckpointFileOpener
+    """
+    for adapter_name, tensors in snapshot.adapters.items():
+        with open_file(f"{adapter_name}/adapter_model.safetensors") as file:
+            write_safetensors(tensors, file, metadata={"format": "pt"})
+        save_pretrained = getattr(
+            snapshot.configs.get(adapter_name), "save_pretrained", None
+        )
+        if not callable(save_pretrained):
+            continue
+        with tempfile.TemporaryDirectory() as config_dir:
+            save_pretrained(config_dir)
+            for config_file in sorted(Path(config_dir).iterdir()):
+                with open_file(f"{adapter_name}/{config_file.name}") as file:
+                    file.write(config_file.read_bytes())
+    if snapshot.value_head:
+        with open_file("pytorch_model.bin") as file:
+            torch.save(snapshot.value_head, file)
+
+
 def save_lora_adapters(
     model: nn.Module,
     path: str | Path,
@@ -715,12 +1015,7 @@ def save_lora_adapters(
     use_value_head: bool = False,
     is_main: bool = True,
 ) -> None:
-    r"""Save LoRA adapter weights and configs in PEFT-compatible format.
-
-    Gathers FSDP2-sharded adapter parameters to CPU *before* handing them to
-    safetensors, avoiding the invalid-storage error that occurs when
-    ``full_tensor()`` results are installed as live GPU ``nn.Parameter``\ s
-    and then serialised via PEFT's ``save_pretrained``.
+    """Save LoRA adapter weights and configs in PEFT-compatible format.
 
     All ranks must call this together (``full_tensor()`` is a collective),
     but only ``is_main`` writes to disk.
@@ -737,55 +1032,12 @@ def save_lora_adapters(
     :param is_main: Whether this rank writes files.
     :type is_main: bool
     """
-    base_path = Path(path)
-
-    for adapter_name in selected_adapters:
-        adapter_dir = base_path / adapter_name
-        if is_main:
-            adapter_dir.mkdir(parents=True, exist_ok=True)
-
-        # get_peft_model_state_dict filters by adapter and strips the
-        # adapter-name segment from the keys, producing the exact format
-        # that set_peft_model_state_dict expects on load. Value-head
-        # wrappers keep the PEFT model on ``pretrained_model``.
-        peft_model = (
-            model.pretrained_model
-            if use_value_head and hasattr(model, "pretrained_model")
-            else model
-        )
-        raw_state = get_peft_model_state_dict(peft_model, adapter_name=adapter_name)
-        cpu_state: dict[str, torch.Tensor] = {}
-        for key, value in raw_state.items():
-            if isinstance(value, DTensor):
-                value = value.full_tensor()
-            cpu_state[key] = value.to("cpu").contiguous()
-
-        if is_main:
-            save_file(
-                cpu_state,
-                str(adapter_dir / "adapter_model.safetensors"),
-                metadata={"format": "pt"},
-            )
-            peft_config = getattr(peft_model, "peft_config", None)
-            if isinstance(peft_config, dict) and adapter_name in peft_config:
-                adapter_cfg = peft_config[adapter_name]
-                save_pretrained = getattr(adapter_cfg, "save_pretrained", None)
-                if callable(save_pretrained):
-                    save_pretrained(str(adapter_dir))
-
-        del cpu_state
-        barrier()
-
-    # Save the value head (PPO's v_head Linear) as pytorch_model.bin
-    if use_value_head:
-        v_head_state: dict[str, torch.Tensor] = {}
-        for name, param in model.named_parameters():
-            if "v_head" in name:
-                full = param.full_tensor() if isinstance(param, DTensor) else param
-                v_head_state[name] = full.to("cpu").contiguous()
-        if is_main and v_head_state:
-            torch.save(v_head_state, str(base_path / "pytorch_model.bin"))
-        barrier()
+    snapshot = snapshot_lora_adapters(
+        model, selected_adapters, use_value_head=use_value_head, is_main=is_main
+    )
+    if is_main:
+        write_lora_adapters(snapshot, directory_opener(path))
+    barrier()
 
 
 def load_lora_adapters(
@@ -1645,6 +1897,11 @@ def create_model_from_name_or_path(
     )
     if model_config["attn_implementation"] == "flex_attention":
         patch_flex_attention_kernel_options()
+    load_remote_code(
+        model_name_or_path,
+        AutoModelForCausalLM,
+        model_config.get("trust_remote_code"),
+    )
     if add_value_head:
         model = AutoModelForCausalLMWithValueHead.from_pretrained(
             pretrained_model_name_or_path=model_name_or_path,
@@ -1662,6 +1919,7 @@ def make_llm_optimizer(
     actor: nn.Module,
     lr: float,
     lr_critic: float | None,
+    fused: bool = False,
 ) -> OptimizerWrapper:
     """Build an AdamW ``OptimizerWrapper`` with LLM actor/critic param groups.
 
@@ -1671,6 +1929,8 @@ def make_llm_optimizer(
     :type lr: float
     :param lr_critic: Critic/value-head learning rate, or ``None``.
     :type lr_critic: float | None
+    :param fused: Step with the fused AdamW kernel, defaults to False.
+    :type fused: bool, optional
     :return: Optimizer bound to ``actor`` trainable LoRA groups.
     :rtype: OptimizerWrapper
     """
@@ -1685,6 +1945,7 @@ def make_llm_optimizer(
         networks=[actor],
         network_names=["actor"],
         lr=lr,
+        optimizer_kwargs={"fused": True} if fused else None,
         lr_critic=lr_critic,
         is_llm_optimizer=True,
         lr_name="lr" if lr_critic is None else ("lr_actor", "lr_critic"),
@@ -2132,6 +2393,7 @@ def clipped_is_surrogate(
     clip_coef: float,
     loss_weight: torch.Tensor | None = None,
     turn_reduction: str = "mean",
+    num_turns: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Clipped PPO-style policy surrogate at a token/turn/trajectory IS level.
 
@@ -2167,14 +2429,19 @@ def clipped_is_surrogate(
     :param turn_reduction: Turn-level pooling reduction when
         ``importance_sampling_level="turn"``, one of ``"mean"`` or ``"sum"``.
     :type turn_reduction: str
+    :param num_turns: Number of turns for the turn level; inferred from
+        ``turn_ids`` when ``None``. Any count above the largest turn id gives
+        the same loss.
+    :type num_turns: int | None
     :return: ``(pg_loss, clipfrac)`` scalars.
     :rtype: tuple[torch.Tensor, torch.Tensor]
     """
-    num_turns = (
-        int(turn_ids.max().item()) + 1
-        if importance_sampling_level == "turn" and turn_ids is not None
-        else None
-    )
+    if (
+        num_turns is None
+        and importance_sampling_level == "turn"
+        and turn_ids is not None
+    ):
+        num_turns = int(turn_ids.max().item()) + 1
     log_importance_weights, unit_mask = pool_log_ratio_by_level(
         token_log_ratio,
         action_mask,
@@ -2808,6 +3075,8 @@ def build_vllm_llm_init_kwargs(
         kwargs["kv_cache_dtype"] = vllm_config.kv_cache_dtype
     if getattr(vllm_config, "kv_cache_memory_bytes", None) is not None:
         kwargs["kv_cache_memory_bytes"] = vllm_config.kv_cache_memory_bytes
+    if vllm_config.limit_mm_per_prompt is not None:
+        kwargs["limit_mm_per_prompt"] = vllm_config.limit_mm_per_prompt
     if getattr(vllm_config, "enforce_eager", None) is not None:
         # Force vLLM to skip CUDA-graph capture. Saves the ~2 GiB CUDA-graph
         # private pool (useful for colocated trainer/rollout setups with a

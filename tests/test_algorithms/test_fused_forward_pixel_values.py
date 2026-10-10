@@ -521,7 +521,7 @@ class TestLLMAlgorithmSegmentRows:
             None,
         ]
         pixel_values = torch.arange(2.0).unsqueeze(-1).expand(2, PIXEL_DIM).contiguous()
-        rows, _accumulation_steps = agent._segment_rows(
+        _split, rows = agent._segment_rows(
             ids,
             mask,
             segments,

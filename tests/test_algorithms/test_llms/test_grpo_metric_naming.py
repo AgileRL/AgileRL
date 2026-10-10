@@ -26,6 +26,7 @@ pytest.importorskip("transformers", reason="LLM tests require transformers.")
 pytest.importorskip("peft", reason="LLM tests require peft.")
 
 from agilerl.algorithms.core.base import LLMAlgorithm
+from agilerl.algorithms.core.llm_ops.frozen_vision import VisionFeatureCache
 from agilerl.algorithms.grpo import GRPO
 from agilerl.utils.learn_profiler import LearnProfiler
 from agilerl.utils.llm_utils import LEARN_PHASES
@@ -105,6 +106,7 @@ class _Stub:
         self.old_logprobs_source = "trainer"
         self.lr_scheduler = None
         self.no_grad_forwards: list[tuple[int, bool, bool]] = []
+        self._vision_cache = VisionFeatureCache()
         self.shard_runtime = SimpleNamespace(
             timed=lambda _name, **_fields: nullcontext(),
             micro_batches_until_step=lambda steps: steps,
@@ -119,7 +121,10 @@ class _Stub:
     _learn_start_log_probs = GRPO._learn_start_log_probs
     _liger_path_selected = GRPO._liger_path_selected
     _check_segments_supported = LLMAlgorithm._check_segments_supported
+    _device_index = staticmethod(LLMAlgorithm._device_index)
+    _epoch_orders = LLMAlgorithm._epoch_orders
     _has_episode_segments = LLMAlgorithm._has_episode_segments
+    _hold_loss_until_step = LLMAlgorithm._hold_loss_until_step
     _learn_phase_seconds = LLMAlgorithm._learn_phase_seconds
     _row_padding_stats = LLMAlgorithm._row_padding_stats
     _segment_rows = LLMAlgorithm._segment_rows

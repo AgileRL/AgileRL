@@ -137,17 +137,17 @@ def _probe_policy_weights(
         steps = accumulation_steps or agent.gradient_accumulation_steps
         (loss / steps).backward()
 
-    split_rows = agent._segment_rows
+    split_rows = agent._balanced_segment_rows
 
     def recording_segment_rows(*args, **kwargs):
-        rows, steps = split_rows(*args, **kwargs)
-        state["row_episodes"] = rows.row_episodes
-        return rows, steps
+        result = split_rows(*args, **kwargs)
+        state["row_episodes"] = result[0].row_episodes
+        return result
 
     monkeypatch.setattr(agent, "_loss", tracking_loss)
     monkeypatch.setattr(agent, "_learn_start_log_probs", zero_learn_start_log_probs)
     monkeypatch.setattr(agent, "_backward_pass", accumulate)
-    monkeypatch.setattr(agent, "_segment_rows", recording_segment_rows)
+    monkeypatch.setattr(agent, "_balanced_segment_rows", recording_segment_rows)
     if fused:
         agent.use_liger_loss = True
         monkeypatch.setattr(grpo_module, "HAS_LIGER_KERNEL", True)

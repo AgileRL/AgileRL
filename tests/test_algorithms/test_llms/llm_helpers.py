@@ -7,6 +7,9 @@ SFT/DPO tests import these without pulling in ``test_grpo``'s vLLM
 ``importorskip``, which is unavailable on macOS/Windows.
 """
 
+from collections.abc import Callable, Iterator
+from typing import Any
+
 import torch
 from torch import nn
 from transformers.configuration_utils import PretrainedConfig
@@ -14,6 +17,7 @@ from transformers.generation.utils import GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 
+from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
 from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 
 
@@ -160,3 +164,58 @@ def create_value_head_module(
     return AutoModelForCausalLMWithValueHead(
         DummyHiddenStatesModel(config=config, device=device)
     )
+
+
+def scale_losses(
+    loss_fn: Callable[..., Any], scales: Iterator[float]
+) -> Callable[..., Any]:
+    """``loss_fn`` whose loss, the first output of a tuple, carries the next scale."""
+
+    def scaled(*args: Any, **kwargs: Any) -> Any:
+        out = loss_fn(*args, **kwargs)
+        if isinstance(out, tuple):
+            return (out[0] * next(scales), *out[1:])
+        return out * next(scales)
+
+    return scaled
+
+
+def trainable_weights(model: nn.Module) -> list[torch.Tensor]:
+    return [p.detach().clone() for p in model.parameters() if p.requires_grad]
+
+
+def optimizer_state(optimizer: OptimizerWrapper) -> list[torch.Tensor]:
+    """Copy of every tensor of the optimizer's per-parameter state, in a fixed order."""
+    state = optimizer.state_dict()["state"]
+    return [
+        value.detach().clone()
+        for _, param_state in sorted(state.items())
+        for _, value in sorted(param_state.items())
+        if isinstance(value, torch.Tensor)
+    ]
+
+
+def record_outputs(fn: Callable[..., Any]) -> tuple[Callable[..., Any], list[Any]]:
+    """``fn`` that also appends each output to the returned list."""
+    outputs: list[Any] = []
+
+    def recorded(*args: Any, **kwargs: Any) -> Any:
+        out = fn(*args, **kwargs)
+        outputs.append(out)
+        return out
+
+    return recorded, outputs
+
+
+def record_calls(
+    fn: Callable[..., Any],
+) -> tuple[Callable[..., Any], list[tuple[tuple[Any, ...], dict[str, Any], Any]]]:
+    """``fn`` that also appends each call's ``(args, kwargs, output)`` to the returned list."""
+    calls: list[tuple[tuple[Any, ...], dict[str, Any], Any]] = []
+
+    def recorded(*args: Any, **kwargs: Any) -> Any:
+        out = fn(*args, **kwargs)
+        calls.append((args, kwargs, out))
+        return out
+
+    return recorded, calls

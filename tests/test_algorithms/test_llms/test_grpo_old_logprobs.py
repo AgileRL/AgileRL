@@ -18,6 +18,7 @@ from typing import Any
 import numpy as np
 import pytest
 import torch
+import torch.distributed as dist
 
 pytest.importorskip("transformers", reason="LLM tests require transformers.")
 pytest.importorskip("peft", reason="LLM tests require peft.")
@@ -27,6 +28,11 @@ from peft import LoraConfig
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.algorithms.grpo import GRPO
 from tests.test_algorithms.test_llms.llm_helpers import create_module
+from tests.test_utils.test_expert_parallel import (
+    _init_gloo,
+    _spawn_ranks,
+    requires_gloo,
+)
 
 PAD_TOKEN_ID = 63
 VOCAB = 64
@@ -496,6 +502,10 @@ class TestGRPOLearnMetricKeys:
         assert list(uncovered) == list(covered)
         assert uncovered["old_logprobs_trainer_rows"] == float(NUM_ROWS)
 
+    @requires_gloo
+    def test_a_rank_without_sampling_logprobs_reports_every_ranks_keys(self) -> None:
+        _spawn_ranks(_one_rank_captured_trainer_source_worker)
+
 
 class TestGRPORolloutActorRows:
     """Rollout-source rows that need the learn-start policy forward."""
@@ -710,3 +720,30 @@ class TestGRPOLoadCheckpoint:
         assert agent.lr == 5e-3
         assert {group["lr"] for group in agent.optimizer.param_groups} == {5e-3}
         assert agent.steps == 7
+
+
+def _one_rank_captured_trainer_source_worker(
+    rank: int, world_size: int, port: int, result_queue: Any
+) -> None:
+    try:
+        _init_gloo(rank, world_size, port)
+        # Arrange: four rows per rank; only rank 0 captured sampling log-probs.
+        agent = _make_grpo(batch_size=2 * world_size)
+        sampling_logps = _sampling_logps(agent, offset=-0.5) if rank == 0 else None
+
+        # Act
+        metrics = agent.learn(_experiences(), sampling_logps=sampling_logps)
+        every_rank_keys: list[list[str] | None] = [None] * world_size
+        dist.all_gather_object(every_rank_keys, list(metrics))
+
+        # Assert
+        assert every_rank_keys[0] == every_rank_keys[1]
+        assert "vllm_is_delta_mean" in every_rank_keys[0]
+        if rank == 1:
+            assert metrics["vllm_is_rows_skipped"] == 0.0
+        result_queue.put((rank, "ok", None))
+    except Exception as exc:
+        result_queue.put((rank, "err", repr(exc)))
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()

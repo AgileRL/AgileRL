@@ -148,7 +148,7 @@ def test_step_env_carries_the_role_alongside_the_text() -> None:
         apply_chat_template=False,
     )
     harness.reset()
-    text, role, _image, reward, terminated, truncated, _info, _error = (
+    text, role, _image, reward, terminated, truncated, _info, _error, _older = (
         harness._step_env("go")
     )
     assert (text, role, reward, terminated, truncated) == (

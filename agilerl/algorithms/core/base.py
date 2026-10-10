@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import inspect
+import io
 import logging
 import os
 import shutil
@@ -14,7 +15,7 @@ from abc import ABC, ABCMeta, abstractmethod
 from collections import OrderedDict, defaultdict, deque
 from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from importlib.metadata import version
 from itertools import accumulate, chain, groupby, pairwise
 from pathlib import Path
@@ -72,7 +73,13 @@ from agilerl.arena.memory import (
     PhaseBreakdown,
     TrainingSettings,
     estimate_training,
+    resolve_fsdp_memory,
 )
+from agilerl.arena.memory.formulas import (
+    ROUTED_CHUNK_MIB_CHOICES,
+    TRAINING_HEADROOM_FRACTION,
+)
+from agilerl.arena.memory.manifest import ALGORITHM_NAMES
 from agilerl.arena.memory.specs import Algorithm, WeightDtype
 from agilerl.arena.models.profiling import ProfilingConfig
 from agilerl.components.llm_rollout_data import EpisodeSegments
@@ -193,7 +200,9 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     )
     from transformers import PretrainedConfig
 
+    from agilerl.algorithms.core.llm_ops.checkpoint import LLMCheckpointSnapshot
     from agilerl.algorithms.core.llm_ops.frozen_vision import (
+        VisionFeatureCache,
         install_frozen_vision_no_grad,
     )
     from agilerl.algorithms.core.llm_ops.vllm_colocate import (
@@ -243,11 +252,14 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
         prepare_prompt_hf_generate,
         save_lora_adapters,
         save_peft_adapter_for_vllm_rollout,
+        snapshot_lora_adapters,
     )
+    from agilerl.utils.segment_balance import balance_rows_across_ranks
     from agilerl.utils.segment_rows import (
         SegmentRows,
         append_vision_tails,
         filler_token_frac,
+        pad_row_values,
         pad_segment_rows,
         segment_window_layout,
         split_episode_segments,
@@ -2881,6 +2893,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     _allowed_adapters = frozenset({"actor", "reference", "critic"})
     _vllm_rollout_adapter = "actor"
     _mini_batch_size_default: ClassVar[Literal["micro_batch", "batch"]] = "batch"
+    # KL coefficient; zero without a reference policy.
+    beta: float = 0.0
+    # PPO sets its resolved fused actor and critic pass before wrap_models.
+    _fuses_actor_critic_pass: bool = False
     actor: Any
     optimizer: Any
     llm: Any
@@ -2893,6 +2909,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     top_k: int | None
     min_p: float | None
     max_model_len: int
+    # Longest training row the memory estimate sizes for; None uses max_model_len.
+    max_row_tokens: int | None = None
     max_output_tokens: int | None
     min_output_tokens: int | None
     hf_generate_chunk_size: int
@@ -3028,6 +3046,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 fsdp_config.shard_group_size if fsdp_config is not None else None
             ),
         )
+        self._vision_cache = VisionFeatureCache()
         self.gradient_checkpointing = gradient_checkpointing
         self.use_liger_loss = use_liger_loss
         self.reference_update_tracker = 0  # Updated every time the reference policy is updated which is updated each time we pass through the train dataset
@@ -3288,58 +3307,88 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :type save_optimizer: bool
         """
         Path(path).mkdir(parents=True, exist_ok=True)
+        self.snapshot_checkpoint(
+            lora_only=lora_only, save_optimizer=save_optimizer
+        ).write(path)
+        barrier()
 
-        state_dict = {}
+    def snapshot_checkpoint(
+        self,
+        lora_only: bool = True,
+        save_optimizer: bool = True,
+    ) -> LLMCheckpointSnapshot:
+        """Copy the checkpoint of :meth:`save_checkpoint` into host memory.
+
+        All ranks must call this together (FSDP2 gathers are collective). The
+        snapshot holds the weights and optimizer state of this step: later
+        training does not change it, so :meth:`LLMCheckpointSnapshot.write`
+        may run on another thread while training continues.
+
+        :param lora_only: See :meth:`save_checkpoint`.
+        :type lora_only: bool
+        :param save_optimizer: See :meth:`save_checkpoint`.
+        :type save_optimizer: bool
+        :return: Host copy of the checkpoint; empty off the main process.
+        :rtype: LLMCheckpointSnapshot
+        """
+        is_main = is_main_process()
+        adapters = None
+        actor_state = None
         if lora_only:
-            save_lora_adapters(
-                model=self.actor,
-                path=path,
-                selected_adapters=self.selected_adapters,
+            adapters = snapshot_lora_adapters(
+                self.actor,
+                self.selected_adapters,
                 use_value_head=self.use_value_head,
-                is_main=is_main_process(),
+                is_main=is_main,
             )
         else:
-            # Full-model checkpoint: gather (FSDP2-aware) and inject the
-            # state_dict into attributes.pt. The actor is not an
-            # EvolvableModule, so it does not flow through the default
-            # module checkpointing loop in ``get_checkpoint_dict``.
-            state_dict = {
-                "actor_cls": self.actor.__class__,
-                "actor_init_dict": None,
-                "actor_state_dict": self.shard_runtime.export_model_state(self.actor),
-                "actor_module_dict_cls": None,
-            }
+            actor_state = self.shard_runtime.export_model_state(self.actor)
+            # Sharded exports gather into new host tensors; dense ones are live.
+            if not self.shard_runtime.is_sharded:
+                actor_state = {
+                    key: value.detach().to("cpu", copy=True)
+                    if isinstance(value, torch.Tensor)
+                    else value
+                    for key, value in actor_state.items()
+                }
+        optimizer_state = (
+            self.shard_runtime.export_optimizer_state(self.actor, self.optimizer)
+            if save_optimizer
+            else None
+        )
+        if not is_main:
+            return LLMCheckpointSnapshot(attributes=None)
 
-        # Build the checkpoint payload saved alongside adapter weights. The
-        # optimizer state (LoRA-sized) is embedded when ``save_optimizer=True``.
         checkpoint_dict = get_checkpoint_dict(
             self,
             omit_actor_info=True,
             omit_optimizer_info=not save_optimizer,
         )
-        if save_optimizer:
-            checkpoint_dict["network_info"]["optimizers"]["optimizer_state_dict"] = (
-                self.shard_runtime.export_optimizer_state(self.actor, self.optimizer)
-            )
         checkpoint_dict.pop("llm", None)
         checkpoint_dict.pop("tp_group", None)
         checkpoint_dict.pop("shard_runtime", None)
-        checkpoint_dict["_lora_only"] = lora_only
-        if state_dict:
-            checkpoint_dict["network_info"]["modules"] = state_dict
-
-        # Persist non-model attributes to ``attributes.pt``.
-        # In distributed runs only the main process writes the file.
-        if is_main_process():
-            checkpoint_path = Path(path) / "attributes.pt"
-            checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-            torch.save(
-                checkpoint_dict,
-                str(checkpoint_path),
-                pickle_module=dill,
+        checkpoint_dict["network_info"]["optimizers"].pop("optimizer_state_dict", None)
+        # Round trip through the checkpoint serializer so no live attribute
+        # (scores, fitness, rng, ...) is shared with the snapshot.
+        buffer = io.BytesIO()
+        torch.save(checkpoint_dict, buffer, pickle_module=dill)
+        buffer.seek(0)
+        checkpoint_dict = torch.load(buffer, weights_only=False, pickle_module=dill)
+        if optimizer_state is not None:
+            checkpoint_dict["network_info"]["optimizers"]["optimizer_state_dict"] = (
+                optimizer_state
             )
-
-        barrier()
+        checkpoint_dict["_lora_only"] = lora_only
+        if actor_state is not None:
+            # The actor is not an EvolvableModule, so it does not flow through
+            # the module checkpointing loop in ``get_checkpoint_dict``.
+            checkpoint_dict["network_info"]["modules"] = {
+                "actor_cls": self.actor.__class__,
+                "actor_init_dict": None,
+                "actor_state_dict": actor_state,
+                "actor_module_dict_cls": None,
+            }
+        return LLMCheckpointSnapshot(attributes=checkpoint_dict, adapters=adapters)
 
     def load_checkpoint(
         self,
@@ -3697,7 +3746,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             "Actor is set to None, please check that the actor is defined."
         )
         self.shard_runtime = (
-            DPRuntime() if self.fsdp_config is None else FSDPRuntime(self.fsdp_config)
+            DPRuntime()
+            if self.fsdp_config is None
+            else FSDPRuntime(self._resolve_fsdp_config(self.fsdp_config))
         )
         if (
             self.fsdp_config is not None
@@ -4409,7 +4460,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         sampling_logps: list[torch.Tensor | None] | None,
         action_masks: torch.Tensor,
         old_log_probs: torch.Tensor,
-    ) -> tuple[torch.Tensor | None, dict[str, float]]:
+    ) -> tuple[torch.Tensor | None, dict[str, float], tuple[str, ...]]:
         """Align captured vLLM sampling logprobs and summarise the mismatch.
 
         Aligns the per-row logprobs captured at rollout onto the ``(B, T-1)``
@@ -4417,7 +4468,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         vLLM-vs-trainer mismatch metrics whenever logprobs were captured —
         independently of whether the correction is applied to the loss — and
         warns when rows were skipped for a token-count mismatch. Shared by the
-        GRPO/PPO/REINFORCE ``learn`` implementations.
+        GRPO/PPO/REINFORCE ``learn`` implementations. When any rank captured
+        logprobs, a rank that captured none aligns every row to
+        ``old_log_probs`` and returns the same metrics, with no skipped rows and
+        its mismatch metrics excluded from their cross-rank means.
 
         :param sampling_logps: Per-row vLLM sampling logprobs from rollout, or
             ``None`` when none were captured.
@@ -4426,29 +4480,39 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :type action_masks: torch.Tensor
         :param old_log_probs: ``(B, T-1)`` frozen-policy logprobs.
         :type old_log_probs: torch.Tensor
-        :return: ``(aligned_logprobs_or_None, metrics)``.
-        :rtype: tuple[torch.Tensor | None, dict[str, float]]
+        :return: ``(aligned_logprobs_or_None, metrics, excluded)``, where
+            ``excluded`` names the metrics to leave out of the cross-rank mean
+            (:func:`~agilerl.distributed.process.aggregate_metrics_dict`).
+        :rtype: tuple[torch.Tensor | None, dict[str, float], tuple[str, ...]]
         """
+        captured = bool(sampling_logps)
+        if any_rank(captured) and not captured:
+            sampling_logps = [None] * int(action_masks.shape[0])
         is_metrics: dict[str, float] = {}
         sampling_log_probs, n_skipped = self._align_sampling_logprobs(
             sampling_logps, action_masks, old_log_probs
         )
-        if sampling_log_probs is not None:
-            is_metrics = self._sampling_mismatch_metrics(
-                old_log_probs, sampling_log_probs, action_masks
+        if sampling_log_probs is None:
+            return None, is_metrics, ()
+        is_metrics = self._sampling_mismatch_metrics(
+            old_log_probs, sampling_log_probs, action_masks
+        )
+        if not captured:
+            excluded = tuple(is_metrics)
+            is_metrics["vllm_is_rows_skipped"] = 0.0
+            return sampling_log_probs, is_metrics, excluded
+        self._warn_on_sampling_mismatch(is_metrics)
+        is_metrics["vllm_is_rows_skipped"] = float(n_skipped)
+        if n_skipped:
+            warnings.warn(
+                f"{n_skipped}/{action_masks.shape[0]} rows had a token-count "
+                "mismatch between captured vLLM logprobs and the action "
+                "mask; their importance ratio defaults to 1 (no "
+                "correction). Check rollout/trainer tokenisation if this "
+                "is large.",
+                stacklevel=2,
             )
-            self._warn_on_sampling_mismatch(is_metrics)
-            is_metrics["vllm_is_rows_skipped"] = float(n_skipped)
-            if n_skipped:
-                warnings.warn(
-                    f"{n_skipped}/{action_masks.shape[0]} rows had a token-count "
-                    "mismatch between captured vLLM logprobs and the action "
-                    "mask; their importance ratio defaults to 1 (no "
-                    "correction). Check rollout/trainer tokenisation if this "
-                    "is large.",
-                    stacklevel=2,
-                )
-        return sampling_log_probs, is_metrics
+        return sampling_log_probs, is_metrics, ()
 
     def _setup_actors(
         self,
@@ -4764,37 +4828,46 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :param add_adapters: Flag to indicate if adapters should be added to the model, defaults to True
         :type add_adapters: bool, optional
         """
-        if base_model is None:
-            model_config = (
-                dict(self.model_config) if isinstance(self.model_config, dict) else None
-            )
-            # wrap_models places the actor (dense ``.to(device)`` or FSDP2 shard).
-            # Sleep-mode vLLM also needs the trainer on CPU until engine init.
-            if model_config is None:
-                model_config = {}
-            model_config.setdefault("device_map", "cpu")
-            if (
-                self.colocated
-                and getattr(self, "llm", None) is not None
-                and torch.cuda.is_available()
-            ):
-                torch.cuda.empty_cache()
-                if torch.cuda.is_initialized():
-                    torch.cuda.synchronize()
-            base_model = create_model_from_name_or_path(
-                self.pretrained_model_name_or_path,
-                model_config=model_config,
-                add_value_head=self.use_value_head,
-                use_distributed=self.distributed,
-            )
+        # Process RNG is offset per rank, so fresh value-head and LoRA weights
+        # (initialized on CPU) need the shared seed to match across ranks.
+        with torch.random.fork_rng(devices=[], enabled=self.distributed):
+            if self.distributed:
+                torch.default_generator.manual_seed(self.seed)
+            if base_model is None:
+                model_config = (
+                    dict(self.model_config)
+                    if isinstance(self.model_config, dict)
+                    else None
+                )
+                # wrap_models places the actor (dense ``.to(device)`` or FSDP2 shard).
+                # Sleep-mode vLLM also needs the trainer on CPU until engine init.
+                if model_config is None:
+                    model_config = {}
+                model_config.setdefault("device_map", "cpu")
+                if (
+                    self.colocated
+                    and getattr(self, "llm", None) is not None
+                    and torch.cuda.is_available()
+                ):
+                    torch.cuda.empty_cache()
+                    if torch.cuda.is_initialized():
+                        torch.cuda.synchronize()
+                base_model = create_model_from_name_or_path(
+                    self.pretrained_model_name_or_path,
+                    model_config=model_config,
+                    add_value_head=self.use_value_head,
+                    use_distributed=self.distributed,
+                )
 
-        actor = self._attach_lora_adapters(base_model) if add_adapters else base_model
+            actor = (
+                self._attach_lora_adapters(base_model) if add_adapters else base_model
+            )
 
         self.actor = actor
         self.use_adapter("actor")
         patch_lora_for_fused_forward(actor)
         install_packed_expert_grouped_gemm(actor)
-        install_frozen_vision_no_grad(actor)
+        install_frozen_vision_no_grad(actor, self._vision_cache)
         set_routed_experts_recompute(actor, self.moe_lora_recompute)
 
         if self.torch_compiler:
@@ -5225,6 +5298,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         pixel_values: torch.Tensor | None = None,
         pixel_image_counts: Sequence[int] | None = None,
         score_mask: torch.Tensor | None = None,
+        image_keys: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Run the model on a fused batch with per-sample adapter routing.
 
@@ -5237,6 +5311,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :param score_mask: ``(B, seq_len - 1)`` positions whose log-probs are
             needed, or ``None`` to score every position.
         :type score_mask: torch.Tensor | None
+        :param image_keys: Vision feature cache key of each vision row, laid
+            out like *pixel_values*; ``None`` keeps the caller's keys.
+        :type image_keys: torch.Tensor | None
         :return: ``(log_probs, values)``; log_probs is ``(B, seq_len - 1)``.
         :rtype: tuple[torch.Tensor, torch.Tensor | None]
         """
@@ -5275,23 +5352,31 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             def _run_chunk(
                 start: int, end: int
             ) -> tuple[torch.Tensor, torch.Tensor | None]:
-                return self._run_fused_chunk(
-                    fused_ids[start:end],
-                    fused_mask[start:end],
-                    position_ids[start:end] if position_ids is not None else None,
-                    routing[start:end],
-                    fused_fn,
-                    head_w,
-                    head_b,
-                    self._pixel_values_for_fused_slice(
-                        pixel_values,
-                        start,
-                        end,
-                        total,
-                        image_counts=pixel_image_counts,
-                    ),
-                    score_mask[start:end] if score_mask is not None else None,
+                chunk_keys = self._pixel_values_for_fused_slice(
+                    image_keys, start, end, total, image_counts=pixel_image_counts
                 )
+                with (
+                    nullcontext()
+                    if chunk_keys is None
+                    else self._vision_cache.images(chunk_keys)
+                ):
+                    return self._run_fused_chunk(
+                        fused_ids[start:end],
+                        fused_mask[start:end],
+                        position_ids[start:end] if position_ids is not None else None,
+                        routing[start:end],
+                        fused_fn,
+                        head_w,
+                        head_b,
+                        self._pixel_values_for_fused_slice(
+                            pixel_values,
+                            start,
+                            end,
+                            total,
+                            image_counts=pixel_image_counts,
+                        ),
+                        score_mask[start:end] if score_mask is not None else None,
+                    )
 
             if len(chunks) == 1:
                 return _run_chunk(0, total)
@@ -5408,6 +5493,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         pixel_image_counts: Sequence[int] | None = None,
         include_actor: bool = True,
         score_mask: torch.Tensor | None = None,
+        image_keys: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Compute reference log-probs, actor log-probs, and critic values in
         one forward pass (under ``torch.no_grad``).
@@ -5441,6 +5527,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :param score_mask: ``(B, seq_len - 1)`` positions whose log-probs are
             needed, or ``None`` to score every position.
         :type score_mask: torch.Tensor | None
+        :param image_keys: ``(N,)`` vision feature cache key of each vision
+            row of *pixel_values*; ``None`` keeps the caller's keys.
+        :type image_keys: torch.Tensor | None
         :return: ``(reference_log_probs, actor_log_probs, critic_values)``
             each of shape ``(B, seq_len - 1)``.
         :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]
@@ -5490,6 +5579,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 pixel_values=fused_pixel_values,
                 pixel_image_counts=fused_image_counts,
                 score_mask=fused_score_mask,
+                image_keys=self._repeat_pixel_values_for_fused_rows(
+                    image_keys, fused_ids.shape[0], B
+                ),
             )
             unset_fused_adapter_routing(self.actor)
             missing = torch.full_like(log_probs[:B], float("nan"))
@@ -5540,14 +5632,19 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             return None
         impl = language_model_attn_implementation(self.actor)
         if impl in {"flash_attention_2", "flex_attention"}:
-            leaking = mixers_without_boundary_reset(self.actor)
-            if leaking:
-                msg = (
-                    "use_sequence_packing=True would carry recurrent state across "
-                    f"packed documents in {', '.join(leaking)}: these mixers do not "
-                    "reset at document boundaries. Set use_sequence_packing=False."
-                )
-                raise ValueError(msg)
+            # Mixer classes are patched before the first forward, so one scan
+            # of the actor's modules holds for its lifetime.
+            if getattr(self, "_boundary_reset_checked_actor", None) is not self.actor:
+                leaking = mixers_without_boundary_reset(self.actor)
+                if leaking:
+                    msg = (
+                        "use_sequence_packing=True would carry recurrent state "
+                        f"across packed documents in {', '.join(leaking)}: these "
+                        "mixers do not reset at document boundaries. Set "
+                        "use_sequence_packing=False."
+                    )
+                    raise ValueError(msg)
+                self._boundary_reset_checked_actor = self.actor
             return "varlen" if impl == "flash_attention_2" else "blockmask"
         if not getattr(self, "_packing_backend_warned", False):
             warnings.warn(
@@ -5745,6 +5842,78 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             msg = f"Loss is not finite: {loss}"
             raise ValueError(msg)
 
+    def _hold_loss_until_step(
+        self,
+        loss: torch.Tensor,
+        held_loss: torch.Tensor | None,
+        accumulation_steps: int,
+    ) -> torch.Tensor | None:
+        """Hold the first non-finite loss of an optimizer step; check it before the step.
+
+        Call before each backward. The check reads the host once per
+        optimizer step, before the backward that steps the optimizer, so a
+        non-finite loss raises on every rank before any step applies it.
+
+        :param loss: Loss of the micro-batch about to enter backward.
+        :type loss: torch.Tensor
+        :param held_loss: Loss this returned on the last call, or ``None``.
+        :type held_loss: torch.Tensor | None
+        :param accumulation_steps: Backward calls per optimizer step.
+        :type accumulation_steps: int
+        :return: The loss still held, or ``None`` once checked.
+        :rtype: torch.Tensor | None
+        """
+        held_loss = (
+            loss.detach()
+            if held_loss is None
+            else torch.where(held_loss.isfinite(), loss.detach(), held_loss)
+        )
+        if self.shard_runtime.micro_batches_until_step(accumulation_steps) > 1:
+            return held_loss
+        self._raise_if_loss_not_finite_on_any_rank(held_loss)
+        return None
+
+    def _epoch_orders(
+        self, batch_idxs: npt.NDArray[np.intp], epochs: int, aligned: bool
+    ) -> list[npt.NDArray[np.intp]]:
+        """Row order of each update epoch.
+
+        :param batch_idxs: Rows the update trains.
+        :type batch_idxs: npt.NDArray[np.intp]
+        :param epochs: Update epochs.
+        :type epochs: int
+        :param aligned: Whether every rank runs the same positions of the
+            order, as rank 0 draws them; balanced rows line up by position.
+        :type aligned: bool
+        :return: One order of ``batch_idxs`` per epoch.
+        :rtype: list[npt.NDArray[np.intp]]
+        """
+        positions = np.arange(len(batch_idxs))
+        orders = []
+        for _ in range(epochs):
+            self.rng.shuffle(positions)
+            orders.append(positions.copy())
+        if aligned:
+            orders = broadcast_object_list(orders)
+        return [batch_idxs[order] for order in orders]
+
+    @staticmethod
+    def _device_index(
+        idxs: npt.NDArray[np.intp], device: torch.device | str
+    ) -> torch.Tensor:
+        """``idxs`` on ``device``, to gather rows of device tensors.
+
+        A host index on a device tensor costs a blocking copy per gather.
+
+        :param idxs: Row indices.
+        :type idxs: npt.NDArray[np.intp]
+        :param device: Device of the tensors to gather from.
+        :type device: torch.device | str
+        :return: The indices as a tensor on ``device``.
+        :rtype: torch.Tensor
+        """
+        return torch.as_tensor(idxs).to(device, non_blocking=True)
+
     def _backward_pass(
         self,
         loss: torch.Tensor,
@@ -5821,6 +5990,68 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             rewards = rewards.unsqueeze(-1)
         return token_ids, action_masks, turn_ids.to(self.device), rewards
 
+    def _resolve_fsdp_config(self, config: FSDPConfig) -> FSDPConfig:
+        """``config`` with an unset chunk size and optimizer placement picked from the memory estimate.
+
+        Set values are kept. Off CUDA there is no device budget, so the
+        smallest chunk and a CPU optimizer are taken. On CUDA every rank takes
+        rank 0's pick, so ranks on different devices still run the same EP
+        collectives.
+
+        :param config: The run's FSDP config.
+        :type config: FSDPConfig
+        :return: FSDP config with every memory field set.
+        :rtype: FSDPConfig
+        """
+        if (
+            config.routed_expert_chunk_mib is not None
+            and config.optim_cpu_offload is not None
+        ):
+            return config
+        if torch.device(self.device).type != "cuda":
+            return replace(
+                config,
+                routed_expert_chunk_mib=(
+                    config.routed_expert_chunk_mib or ROUTED_CHUNK_MIB_CHOICES[-1]
+                ),
+                optim_cpu_offload=(
+                    not config.cpu_offload
+                    if config.optim_cpu_offload is None
+                    else config.optim_cpu_offload
+                ),
+            )
+        model, settings = self._training_estimate_inputs(
+            ALGORITHM_NAMES[self.algo],
+            self.beta,
+            fuse_actor_critic_pass=self._fuses_actor_critic_pass,
+        )
+        settings = settings.model_copy(update={"fsdp": config})
+        device = self._training_device_spec()
+        picked = resolve_fsdp_memory(model, device, settings)
+        chunk_mib, optim_cpu_offload = broadcast_object_list(
+            [picked.routed_expert_chunk_mib, picked.optim_cpu_offload]
+        )
+        resolved = replace(
+            picked,
+            routed_expert_chunk_mib=chunk_mib,
+            optim_cpu_offload=optim_cpu_offload,
+        )
+        estimate = estimate_training(
+            model, device, settings.model_copy(update={"fsdp": resolved})
+        )
+        gib = 1024**3
+        logger.log(
+            logging.INFO if estimate.fits else logging.WARNING,
+            "FSDP memory: routed_expert_chunk_mib=%d, optim_cpu_offload=%s; "
+            "estimated peak %.2f GiB, budget %.2f GiB%s",
+            resolved.routed_expert_chunk_mib,
+            resolved.optim_cpu_offload,
+            estimate.total_bytes / gib,
+            estimate.device_usable_bytes / gib,
+            "" if estimate.fits else " (over budget)",
+        )
+        return resolved
+
     def _estimate_training(
         self, algorithm: Algorithm, beta: float, *, fuse_actor_critic_pass: bool
     ) -> PhaseBreakdown:
@@ -5838,6 +6069,25 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :return: Training-phase memory breakdown against the budget.
         :rtype: PhaseBreakdown
         """
+        model, settings = self._training_estimate_inputs(
+            algorithm, beta, fuse_actor_critic_pass=fuse_actor_critic_pass
+        )
+        return estimate_training(model, self._training_device_spec(), settings)
+
+    def _training_estimate_inputs(
+        self, algorithm: Algorithm, beta: float, fuse_actor_critic_pass: bool
+    ) -> tuple[ModelSpec, TrainingSettings]:
+        """Model spec and training settings of this run for the memory estimator.
+
+        :param algorithm: Estimator algorithm family.
+        :type algorithm: Algorithm
+        :param beta: KL coefficient of the update.
+        :type beta: float
+        :param fuse_actor_critic_pass: PPO's fused actor and critic pass.
+        :type fuse_actor_critic_pass: bool
+        :return: Model spec and training settings.
+        :rtype: tuple[ModelSpec, TrainingSettings]
+        """
         weight_dtypes: dict[torch.dtype, WeightDtype] = {
             torch.float32: "fp32",
             torch.bfloat16: "bf16",
@@ -5849,10 +6099,15 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             and not isinstance(target_modules, str)
             and set(target_modules) <= {"q_proj", "k_proj", "v_proj", "o_proj"}
         )
+        n_training_gpus = self.shard_runtime.data_parallel_world(get_world_size())
         settings = TrainingSettings(
             algorithm=algorithm,
-            trajectories_per_update=self.batch_size,
-            max_model_len=self.max_model_len,
+            trajectories_per_update=self.batch_size_per_process * n_training_gpus,
+            max_model_len=(
+                self.max_model_len
+                if self.max_row_tokens is None
+                else self.max_row_tokens
+            ),
             micro_batch_size=self.micro_batch_size_per_gpu,
             lora_rank=self.lora_config.r,
             lora_target_scope="attention-only" if attention_only else "all-linear",
@@ -5869,7 +6124,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             gradient_checkpointing=self.gradient_checkpointing,
             activation_offload=self.activation_offload,
             chunk_rows=self.chunk_rows,
-            n_training_gpus=self.shard_runtime.data_parallel_world(get_world_size()),
+            n_training_gpus=n_training_gpus,
             fsdp=self.fsdp_config,
             fuse_actor_critic_pass=fuse_actor_critic_pass,
         )
@@ -5878,17 +6133,17 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         model_config = PretrainedConfig.get_config_dict(
             self.pretrained_model_name_or_path
         )[0]
-        return estimate_training(
-            ModelSpec(
-                model_id=self.pretrained_model_name_or_path,
-                arch=ModelArch.from_hf_config(model_config),
-            ),
-            self._training_device_spec(),
-            settings,
+        model = ModelSpec(
+            model_id=self.pretrained_model_name_or_path,
+            arch=ModelArch.from_hf_config(model_config),
         )
+        return model, settings
 
     def _training_device_spec(self) -> DeviceSpec:
         """Memory budget of this run's CUDA device during learn.
+
+        The budget is the device's CUDA capacity less
+        :data:`TRAINING_HEADROOM_FRACTION`.
 
         :return: Device spec, less a resident colocated vLLM engine's share.
         :rtype: DeviceSpec
@@ -5896,6 +6151,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         properties = torch.cuda.get_device_properties(torch.device(self.device))
         device_spec = DeviceSpec(
             total_bytes=properties.total_memory,
+            available_bytes=int(
+                properties.total_memory * (1 - TRAINING_HEADROOM_FRACTION)
+            ),
             name=properties.name,
             compute_capability=(properties.major, properties.minor),
         )
@@ -5994,8 +6252,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         pixel_values: torch.Tensor | None = None,
         pixel_image_counts: Sequence[int] | None = None,
         image_token_id: int | None = None,
-    ) -> tuple[SegmentRows, int]:
-        """Split segmented episodes into rows padded so every rank runs the same micro-batches.
+    ) -> tuple[SegmentRows, SegmentRows]:
+        """Split segmented episodes into rows, and pad them so every rank runs the same micro-batches.
 
         The update keeps the optimizer steps of the unsegmented episodes: each
         step accumulates a window of rows, and filler rows make every rank's
@@ -6023,13 +6281,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :param image_token_id: Token id the VL forward scatters one image
             feature row into; required with ``pixel_values``.
         :type image_token_id: int | None
-        :return: The padded rows, and the micro-batches each optimizer step accumulates.
-        :rtype: tuple[SegmentRows, int]
+        :return: The split rows, before filler rows, and those rows padded.
+        :rtype: tuple[SegmentRows, SegmentRows]
         """
-        optimizer_steps = -(
-            -len(episode_idxs)
-            // (self.micro_batch_size_per_gpu * self.gradient_accumulation_steps)
-        )
         rows = split_episode_segments(
             token_ids,
             action_masks,
@@ -6040,9 +6294,185 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             pixel_values=pixel_values,
             pixel_image_counts=pixel_image_counts,
         )
+        padded, _accumulation_steps = self._pad_segment_rows(
+            rows,
+            len(rows.training_rows(episode_idxs)),
+            self._segment_optimizer_steps(len(episode_idxs)),
+            image_token_id,
+        )
+        return rows, padded
+
+    def _balance_segment_rows(
+        self,
+        rows: SegmentRows,
+        train_rows: npt.NDArray[np.intp],
+        row_values: Sequence[tuple[torch.Tensor, float]],
+    ) -> tuple[SegmentRows, npt.NDArray[np.intp], list[torch.Tensor]]:
+        """Deal split rows out so each rank in a lockstep group trains about the same rows.
+
+        See :func:`~agilerl.utils.segment_balance.balance_rows_across_ranks`;
+        on one process, or with fewer training rows than ranks, the rows stay put.
+
+        :param rows: Split rows, before filler rows.
+        :type rows: SegmentRows
+        :param train_rows: Rows of ``rows`` the update trains.
+        :type train_rows: npt.NDArray[np.intp]
+        :param row_values: Values of ``rows`` that travel with them, each with
+            the value a per-position value takes past its row's end.
+        :type row_values: Sequence[tuple[torch.Tensor, float]]
+        :return: The rows this rank trains, which of them train, and their values.
+        :rtype: tuple[SegmentRows, npt.NDArray[np.intp], list[torch.Tensor]]
+        """
+        balanced = balance_rows_across_ranks(
+            rows,
+            train_rows,
+            row_values,
+            self.pad_token_id,
+            None if self.fsdp_config is None else self.fsdp_config.shard_group_size,
+        )
+        if balanced is None:
+            return rows, train_rows, [value for value, _ in row_values]
+        rows, values = balanced
+        return rows, np.arange(len(rows.row_episodes)), values
+
+    def _balanced_segment_frames(
+        self,
+        rows: SegmentRows,
+        frames: Sequence[tuple[torch.Tensor, float]],
+        num_episodes: int,
+        image_token_id: int | None,
+    ) -> tuple[SegmentRows, list[torch.Tensor], int, torch.Tensor | None]:
+        """Deal split rows and their per-position values out across ranks, then pad them.
+
+        Image keys number the vision rows of the padded rows
+        :meth:`_segment_rows` returns, in order, as the no-grad forward keys
+        them. A row this rank ran in that forward keeps its keys; rows from
+        other ranks and filler rows get negative keys of their own.
+
+        :param rows: Split rows of every episode, before filler rows.
+        :type rows: SegmentRows
+        :param frames: ``(R, W - 1)`` per-position values of ``rows``, each
+            with the value it takes past a row's end and on filler rows.
+        :type frames: Sequence[tuple[torch.Tensor, float]]
+        :param num_episodes: Episodes the update trains on this rank.
+        :type num_episodes: int
+        :param image_token_id: Token id the VL forward scatters one image
+            feature row into, or ``None`` in a text batch.
+        :type image_token_id: int | None
+        :return: The padded rows this rank trains, each frame on those rows,
+            the micro-batches each optimizer step accumulates, and the vision
+            feature cache key of each of their vision rows (``None`` in a text
+            batch).
+        :rtype: tuple[SegmentRows, list[torch.Tensor], int, torch.Tensor | None]
+        """
+        row_values = list(frames)
+        if rows.pixel_image_counts is not None:
+            no_grad_counts = np.maximum(rows.pixel_image_counts, 1)
+            device = rows.token_ids.device
+            row_values += [
+                (torch.full((len(no_grad_counts),), get_rank(), device=device), -1),
+                (
+                    torch.as_tensor(
+                        np.cumsum(no_grad_counts) - no_grad_counts, device=device
+                    ),
+                    -1,
+                ),
+            ]
+        balanced, train_rows, values = self._balance_segment_rows(
+            rows, np.arange(len(rows.row_episodes)), row_values
+        )
+        padded, accumulation_steps = self._pad_segment_rows(
+            balanced,
+            len(train_rows),
+            self._segment_optimizer_steps(num_episodes),
+            image_token_id,
+        )
+        image_keys = None
+        if padded.pixel_values is not None and padded.pixel_image_counts is not None:
+            if balanced is rows:
+                # Rows that stay put keep the no-grad layout, filler rows included.
+                image_keys = torch.arange(int(padded.pixel_values.shape[0]))
+            else:
+                owners, first_keys = (
+                    pad_row_values(value, padded, -1).tolist()
+                    for value in values[len(frames) :]
+                )
+                image_keys = self._balanced_image_keys(
+                    padded.pixel_image_counts, owners, first_keys
+                )
+        return (
+            padded,
+            [
+                pad_row_values(value, padded, pad)
+                for value, (_, pad) in zip(values[: len(frames)], frames, strict=True)
+            ],
+            accumulation_steps,
+            image_keys,
+        )
+
+    @staticmethod
+    def _balanced_image_keys(
+        image_counts: Sequence[int], owners: Sequence[int], first_keys: Sequence[int]
+    ) -> torch.Tensor:
+        """Vision feature cache key of each vision row of balanced rows.
+
+        :param image_counts: Vision rows per row.
+        :type image_counts: Sequence[int]
+        :param owners: Rank whose no-grad forward ran each row, ``-1`` on filler rows.
+        :type owners: Sequence[int]
+        :param first_keys: No-grad key of each row's first vision row.
+        :type first_keys: Sequence[int]
+        :return: ``(N,)`` keys: no-grad keys on this rank's rows, distinct
+            negative keys on every other row.
+        :rtype: torch.Tensor
+        """
+        rank = get_rank()
+        keys: list[int] = []
+        fresh = 0
+        for count, owner, first in zip(image_counts, owners, first_keys, strict=True):
+            if owner == rank:
+                keys.extend(range(first, first + count))
+            else:
+                keys.extend(range(-1 - fresh, -1 - fresh - count, -1))
+                fresh += count
+        return torch.tensor(keys, dtype=torch.long)
+
+    def _segment_optimizer_steps(self, num_episodes: int) -> int:
+        """Optimizer steps the unsegmented update of ``num_episodes`` episodes runs.
+
+        :param num_episodes: Episodes the update trains on this rank.
+        :type num_episodes: int
+        :return: Optimizer steps per epoch.
+        :rtype: int
+        """
+        return -(
+            -num_episodes
+            // (self.micro_batch_size_per_gpu * self.gradient_accumulation_steps)
+        )
+
+    def _pad_segment_rows(
+        self,
+        rows: SegmentRows,
+        num_rows: int,
+        optimizer_steps: int,
+        image_token_id: int | None,
+    ) -> tuple[SegmentRows, int]:
+        """Pad split rows so every rank runs the same micro-batches.
+
+        :param rows: Split rows, before filler rows.
+        :type rows: SegmentRows
+        :param num_rows: Rows of ``rows`` the update trains on this rank.
+        :type num_rows: int
+        :param optimizer_steps: Optimizer steps per epoch on this rank.
+        :type optimizer_steps: int
+        :param image_token_id: Token id the VL forward scatters one image
+            feature row into, or ``None`` in a text batch.
+        :type image_token_id: int | None
+        :return: The padded rows, and the micro-batches each optimizer step accumulates.
+        :rtype: tuple[SegmentRows, int]
+        """
         if image_token_id is not None:
             rows = append_vision_tails(rows, self.pad_token_id, image_token_id)
-        num_rows = len(rows.training_rows(episode_idxs))
         filtered_rows = int(rows.token_ids.shape[0]) - num_rows
         width = int(rows.token_ids.shape[1])
         world_size = get_world_size()

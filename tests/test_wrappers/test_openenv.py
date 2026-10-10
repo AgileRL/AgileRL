@@ -776,13 +776,13 @@ class TestTaskAssigner:
         assert TaskAssigner(0).assign(2, 2) == [(None, None)] * 4
 
     def test_ranks_shard_disjointly_and_cover_the_dataset(self) -> None:
-        """Two ranks emit disjoint contiguous row blocks covering every row — no process group."""
+        """Two ranks take alternate rows, disjoint and covering every row — no process group."""
         rank0 = TaskAssigner(10, seed=0, rank=0, world_size=2)
         rank1 = TaskAssigner(10, seed=0, rank=1, world_size=2)
         rows0 = {rank0.next_row() for _ in range(5)}
         rows1 = {rank1.next_row() for _ in range(5)}
-        assert rows0 == set(range(5))
-        assert rows1 == set(range(5, 10))
+        assert rows0 == {0, 2, 4, 6, 8}
+        assert rows1 == {1, 3, 5, 7, 9}
         assert rank0.num_epochs == 0
         rank0.next_row()
         assert rank0.num_epochs == 1  # epochs count passes over the rank's shard
@@ -2179,6 +2179,7 @@ def test_custom_processor_renders_an_in_process_observation() -> None:
         True,
         False,
         {},
+        None,
         None,
     )
     harness.close()

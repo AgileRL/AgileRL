@@ -111,7 +111,7 @@ class SegmentRows:
         :return: ``(R, 1)`` episode advantage per row, or ``(R, W - 1)``
             per-token advantages.
         """
-        if advantages.dim() == 2 and advantages.shape[-1] > 1:
+        if is_per_token(advantages):
             return self.split_frame(advantages, 0.0)
         real = np.flatnonzero(self.row_episodes >= 0)
         rows = advantages.new_zeros(len(self.row_episodes), *advantages.shape[1:])
@@ -305,6 +305,34 @@ def append_vision_tails(
         pixel_values=pixel_values,
         pixel_image_counts=[max(count, 1) for count in counts],
     )
+
+
+def is_per_token(advantages: torch.Tensor) -> bool:
+    """Whether ``advantages`` holds one value per action position rather than per row.
+
+    :param advantages: ``(R, 1)`` per-row or ``(R, W - 1)`` per-token advantages.
+    :return: ``True`` for per-token advantages.
+    """
+    return advantages.dim() == 2 and advantages.shape[-1] > 1
+
+
+def pad_row_values(
+    values: torch.Tensor, rows: SegmentRows, pad_value: float = 0.0
+) -> torch.Tensor:
+    """Values of split rows, ``pad_value`` on what vision tails and filler rows added to ``rows``.
+
+    :param values: ``(R, ...)`` per-row or ``(R, W - 1)`` per-token values of
+        the split rows.
+    :param rows: The rows after :func:`append_vision_tails` and
+        :func:`pad_segment_rows`, which widen rows on the right and append rows.
+    :param pad_value: Value of the added positions and rows.
+    :return: ``(R', ...)`` or ``(R', W' - 1)`` values.
+    """
+    if is_per_token(values):
+        widen = int(rows.action_masks.shape[1]) - int(values.shape[1])
+        values = torch.nn.functional.pad(values, (0, widen), value=pad_value)
+    extra = int(rows.token_ids.shape[0]) - int(values.shape[0])
+    return torch.cat([values, values.new_full((extra, *values.shape[1:]), pad_value)])
 
 
 def segment_window_layout(

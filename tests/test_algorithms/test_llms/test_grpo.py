@@ -747,8 +747,10 @@ class TestGRPOInit:
         assert grpo.optimizer.optimizer_cls is torch.optim.AdamW
         inner_opt = grpo.optimizer.optimizer
         if dist_mode == "fsdp2":
-            assert isinstance(inner_opt, CPUOffloadOptimizer)
-            inner_opt = inner_opt.optimizer
+            offloaded = grpo.shard_runtime.config.optim_cpu_offload
+            assert isinstance(inner_opt, CPUOffloadOptimizer) is offloaded
+            if offloaded:
+                inner_opt = inner_opt.optimizer
         assert isinstance(inner_opt, torch.optim.AdamW)
 
         if use_vllm:
@@ -5541,17 +5543,19 @@ class TestGRPOVLLMSamplingCorrection:
         assert torch.allclose(aligned[1], torch.tensor([-0.1, -0.2]), atol=1e-7)
 
     def test_aligned_and_metrics_none_path(self):
-        """No captured logprobs -> (None, {}) and no metrics computed."""
+        """No captured logprobs -> (None, {}, ()) and no metrics computed."""
         stub = self._stub()
         masks = torch.ones(2, 3, dtype=torch.bool)
         old = torch.zeros(2, 3)
         assert stub._aligned_sampling_logprobs_and_metrics(None, masks, old) == (
             None,
             {},
+            (),
         )
         assert stub._aligned_sampling_logprobs_and_metrics([], masks, old) == (
             None,
             {},
+            (),
         )
 
     def test_aligned_and_metrics_full_match_no_skip_metric(self):
@@ -5562,10 +5566,11 @@ class TestGRPOVLLMSamplingCorrection:
         flat = [torch.full((3,), -1.5)]
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            aligned, metrics = stub._aligned_sampling_logprobs_and_metrics(
+            aligned, metrics, excluded = stub._aligned_sampling_logprobs_and_metrics(
                 flat, masks, old
             )
         assert torch.allclose(aligned, torch.full((1, 3), -1.5), atol=1e-7)
+        assert excluded == ()
         # log-diff is 0.5 on every token: delta = 0.5, ratio = e^0.5 (< cap).
         assert metrics["vllm_is_delta_mean"] == pytest.approx(0.5, rel=1e-6)
         assert metrics["vllm_is_ratio_mean"] == pytest.approx(
@@ -5585,10 +5590,11 @@ class TestGRPOVLLMSamplingCorrection:
         # Row 0 aligns; row 1 has 1 logprob for 2 action tokens -> skipped.
         flat = [torch.full((2,), -1.5), torch.tensor([-0.5])]
         with pytest.warns(UserWarning, match="1/2 rows had a token-count mismatch"):
-            aligned, metrics = stub._aligned_sampling_logprobs_and_metrics(
+            aligned, metrics, excluded = stub._aligned_sampling_logprobs_and_metrics(
                 flat, masks, old
             )
         assert torch.allclose(aligned[0], torch.full((2,), -1.5), atol=1e-7)
+        assert excluded == ()
         assert torch.allclose(aligned[1], old[1], atol=1e-7)  # ratio-1 fallback
         assert metrics["vllm_is_rows_skipped"] == pytest.approx(1.0)
         # Row 0 contributes |log-diff| 0.5 per token, row 1 contributes 0.
