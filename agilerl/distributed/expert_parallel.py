@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
+from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from functools import partial
 from itertools import pairwise
@@ -33,16 +34,18 @@ from torch.distributed.tensor import (
 )
 from torch.distributed.tensor.placement_types import Shard
 from torch.func import functional_call
+from typing_extensions import Self
 
 from agilerl.distributed.process import all_reduce_grads
 from agilerl.lora.fused import ROUTING_STATE, patch_lora_for_fused_forward
 from agilerl.lora.moe.adapters import mixed_routing
-from agilerl.lora.moe.grouped_gemm import GROUPED_LINEAR_CHUNK_BYTES
+from agilerl.lora.moe.grouped_gemm import expert_row_counts
 from agilerl.lora.moe.layouts import (
     is_routed_experts_module,
     is_sorted_experts_module,
     routed_projection_names,
 )
+from agilerl.lora.moe.routed import ROUTED_EXPERT_CHUNK_BYTES
 from agilerl.lora.moe.wrappers import RoutedExpertsLoraWrapper
 
 
@@ -762,6 +765,11 @@ def _ep_param_grad_hook(param: nn.Parameter) -> Callable[[torch.Tensor], None]:
 
     def hook(grad: torch.Tensor) -> None:
         assert isinstance(param, DTensor)
+        local = param.to_local()
+        if grad.stride() != local.stride():
+            # Fused AdamW needs grad strides to match the param's. This hook
+            # skips AccumulateGrad, which would otherwise copy into that layout.
+            grad = torch.empty_like(local).copy_(grad)
         shard = DTensor.from_local(
             grad, param.device_mesh, param.placements, run_check=False
         )
@@ -837,10 +845,14 @@ def scatter_scaled_expert_rows(
     router_weights: torch.Tensor,
     token_idx: torch.Tensor,
     hidden_states: torch.Tensor,
+    chunk_bytes: int,
 ) -> torch.Tensor:
-    """Scale expert-sorted rows and scatter them to token order in fp32."""
+    """Scale expert-sorted rows and scatter them to token order in fp32.
+
+    :param chunk_bytes: Size of one fp32 chunk of scaled rows.
+    """
     result = torch.zeros_like(hidden_states, dtype=torch.float32)
-    _add_scaled_expert_rows(result, combined, router_weights, token_idx)
+    _add_scaled_expert_rows(result, combined, router_weights, token_idx, chunk_bytes)
     return result.to(dtype=hidden_states.dtype)
 
 
@@ -849,19 +861,24 @@ def _add_scaled_expert_rows(
     combined: torch.Tensor,
     router_weights: torch.Tensor,
     token_idx: torch.Tensor,
+    chunk_bytes: int,
 ) -> None:
     """Add router-scaled expert rows into the fp32 ``result`` at ``token_idx``."""
     router_weights = router_weights.to(dtype=torch.float32)
     # A full scaled copy of the combine buffer does not fit beside it.
     row_bytes = combined.shape[-1] * result.element_size()
-    chunk_rows = max(1, GROUPED_LINEAR_CHUNK_BYTES // row_bytes)
-    # Empty ``combined`` still adds one node, so its all-to-all runs in backward.
-    for start in range(0, max(combined.shape[0], 1), chunk_rows):
-        stop = min(start + chunk_rows, combined.shape[0])
-        piece = (
-            combined[start:stop].to(dtype=torch.float32) * router_weights[start:stop]
-        )
-        result.index_add_(0, token_idx[start:stop], piece)
+    chunk_rows = max(1, chunk_bytes // row_bytes)
+    # One split node concatenates the chunk grads in backward. Empty
+    # ``combined`` still yields one piece, so its all-to-all runs in backward.
+    pieces = zip(
+        combined.split(chunk_rows),
+        router_weights.split(chunk_rows),
+        token_idx.split(chunk_rows),
+        strict=True,
+    )
+    for rows, weights, index in pieces:
+        # The fp32 weights promote the product to fp32.
+        result.index_add_(0, index, rows * weights)
 
 
 def replicated_row_span(n_rows: int, group: dist.ProcessGroup) -> tuple[int, int]:
@@ -1024,6 +1041,78 @@ class TokenExchange:
     token_blocks: int
     # Side stream for the token all-to-alls, or ``None`` to run them in order.
     comm: torch.cuda.Stream | None
+    # Size of one fp32 chunk of router-scaled rows in the combine scatter.
+    chunk_bytes: int
+
+
+class RoutedCounts(NamedTuple):
+    """One routed EP call's ``[blocks, experts]`` row counts, on device and host."""
+
+    send: torch.Tensor
+    received: torch.Tensor
+    send_lists: list[list[int]]
+    received_lists: list[list[int]]
+
+
+class RoutedCountsScope:
+    """Record each routed EP call's counts in a checkpointed forward, or replay them in its recompute.
+
+    The recompute reruns the checkpointed block from its saved input, so it
+    makes the same routed EP calls in the same order with the same routing.
+    """
+
+    def __init__(self, calls: list[RoutedCounts], replay: bool) -> None:
+        self.calls = calls
+        self.replay = replay
+        self.position = 0
+        self.tokens: list[Token[RoutedCountsScope | None]] = []
+
+    def __enter__(self) -> Self:
+        self.position = 0
+        self.tokens.append(ROUTED_COUNTS_SCOPE.set(self))
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        ROUTED_COUNTS_SCOPE.reset(self.tokens.pop())
+
+
+ROUTED_COUNTS_SCOPE: ContextVar[RoutedCountsScope | None] = ContextVar(
+    "routed_counts_scope", default=None
+)
+
+
+def routed_counts_contexts() -> tuple[RoutedCountsScope, RoutedCountsScope]:
+    """``checkpoint`` ``context_fn``: the recompute reuses the forward's routed EP counts.
+
+    :return: Forward (record) and recompute (replay) contexts sharing one log.
+    """
+    calls: list[RoutedCounts] = []
+    return RoutedCountsScope(calls, replay=False), RoutedCountsScope(calls, replay=True)
+
+
+def _routed_counts(send: torch.Tensor, exchange: TokenExchange) -> RoutedCounts:
+    """Swap ``send`` with the EP peers and copy both to host, or replay the forward's copy.
+
+    :param send: ``[blocks, experts]`` rows this rank sends, from this call's routing.
+    :param exchange: EP group and its size.
+    :return: Device and host counts for the call.
+    """
+    scope = ROUTED_COUNTS_SCOPE.get()
+    if scope is not None and scope.replay:
+        recorded = scope.calls[scope.position]
+        scope.position += 1
+        # Checked on device, so the recompute issues no host sync.
+        torch._assert_async(
+            torch.eq(send, recorded.send).all(),
+            "Recompute routed tokens differently from the checkpointed forward",
+        )
+        return recorded
+    received = exchange_expert_counts(send, exchange.ep_group, exchange.ep_degree)
+    send_lists, received_lists = torch.stack((send, received)).tolist()
+    counts = RoutedCounts(send, received, send_lists, received_lists)
+    if scope is not None:
+        scope.calls.append(counts)
+    return counts
 
 
 def _base_experts(module: nn.Module) -> nn.Module:
@@ -1061,7 +1150,7 @@ def _sort_token_blocks(
     for start, stop in pairwise(bounds):
         block_experts = flat_experts[start * top_k : stop * top_k]
         orders.append(torch.argsort(block_experts, stable=True) + start * top_k)
-        counts.append(torch.bincount(block_experts, minlength=num_experts))
+        counts.append(expert_row_counts(block_experts, num_experts))
     return orders, torch.stack(counts).to(torch.long)
 
 
@@ -1149,12 +1238,17 @@ def _run_local_experts(
 
 
 def _scatter_block(
-    result: torch.Tensor, combined: CombinedBlock, flat_weights: torch.Tensor
+    result: torch.Tensor,
+    combined: CombinedBlock,
+    flat_weights: torch.Tensor,
+    chunk_bytes: int,
 ) -> None:
     """Add a combined block's router-scaled rows into ``result`` once they arrive."""
     _wait_for(combined.arrived)
     router_weights = flat_weights[combined.order].unsqueeze(-1)
-    _add_scaled_expert_rows(result, combined.rows, router_weights, combined.token_idx)
+    _add_scaled_expert_rows(
+        result, combined.rows, router_weights, combined.token_idx, chunk_bytes
+    )
 
 
 def _routed_ep_blocks(
@@ -1169,7 +1263,8 @@ def _routed_ep_blocks(
 ) -> torch.Tensor:
     """Dispatch, run local experts, and combine ``hidden_states`` in token blocks.
 
-    One all-to-all swaps every block's expert counts. Block ``b + 1``'s
+    One all-to-all swaps every block's expert counts; a checkpoint recompute
+    under :func:`routed_counts_contexts` reuses its forward's. Block ``b + 1``'s
     dispatch runs on ``exchange.comm`` while block ``b``'s experts run on the
     current stream, and block ``b - 1`` scatters while block ``b``'s combine is
     in flight. With ``exchange.comm=None`` every step runs in order.
@@ -1193,8 +1288,7 @@ def _routed_ep_blocks(
             exchange.token_blocks,
             local_e * exchange.ep_degree,
         )
-        received = exchange_expert_counts(send, exchange.ep_group, exchange.ep_degree)
-        send_lists, received_lists = torch.stack((send, received)).tolist()
+        counts = _routed_counts(send, exchange)
         experts = LocalExperts(
             module, inner, _local_param_dict(module, gathered), expert_kwargs
         )
@@ -1205,9 +1299,9 @@ def _routed_ep_blocks(
 
         def dispatch(block: int) -> DispatchedBlock:
             state = _dispatch_state(
-                received[block],
-                send_lists[block],
-                received_lists[block],
+                counts.received[block],
+                counts.send_lists[block],
+                counts.received_lists[block],
                 exchange.ep_group,
                 exchange.ep_degree,
                 local_e,
@@ -1241,10 +1335,10 @@ def _routed_ep_blocks(
             returned = _hand_over(exchange.comm, [unpermuted], [combined])
             del unpermuted
             if previous is not None:
-                _scatter_block(result, previous, flat_weights)
+                _scatter_block(result, previous, flat_weights, exchange.chunk_bytes)
             previous = CombinedBlock(combined, token_idx, orders[block], returned)
         assert previous is not None
-        _scatter_block(result, previous, flat_weights)
+        _scatter_block(result, previous, flat_weights, exchange.chunk_bytes)
         return result.to(dtype=hidden_states.dtype)
 
 
@@ -1330,11 +1424,18 @@ def _install_routed_ep_forward(
             )
         )
         comm = _comm_stream(comm_streams, hidden_states) if token_blocks > 1 else None
+        chunk_bytes = (
+            self.chunk_bytes
+            if isinstance(self, RoutedExpertsLoraWrapper)
+            else ROUTED_EXPERT_CHUNK_BYTES
+        )
         run_blocks = partial(
             _routed_ep_blocks,
             self,
             inner,
-            exchange=TokenExchange(ep_group, ep_degree, token_blocks, comm),
+            exchange=TokenExchange(
+                ep_group, ep_degree, token_blocks, comm, chunk_bytes
+            ),
             expert_kwargs=expert_kwargs,
         )
         if tp_group is None:

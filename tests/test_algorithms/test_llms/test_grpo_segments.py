@@ -10,11 +10,15 @@ Covers the cross-rank window loss normalizer and ``learn`` with
 from __future__ import annotations
 
 import math
+import sys
+from collections.abc import Iterator
+from functools import partial
 from typing import Any
 
 import numpy as np
 import pytest
 import torch
+import torch.distributed as dist
 
 pytest.importorskip("transformers", reason="LLM tests require transformers.")
 pytest.importorskip("peft", reason="LLM tests require peft.")
@@ -22,15 +26,21 @@ pytest.importorskip("peft", reason="LLM tests require peft.")
 from agilerl.algorithms.grpo import GRPO, _liger_global_token_count
 from agilerl.utils.segment_rows import split_episode_segments
 from agilerl.utils.vision_rows import VisionRows
+from tests.test_algorithms.test_llms.llm_helpers import scale_losses
 from tests.test_algorithms.test_llms.segment_helpers import (
     EPISODE_SEGMENTS,
     NUM_SEGMENT_ROWS,
     SEQ_LEN,
     episode_batch,
+    learn_uneven_episodes,
+    learn_with_nan_loss_on_rank_zero,
     lora_weights,
     pad_to_eight_rows,
     record_step_gradients,
+    rows_from_other_ranks,
+    seed_lora_weights,
     segment_experiences,
+    spawn_balanced_learn,
 )
 from tests.test_algorithms.test_llms.test_grpo_old_logprobs import (
     PAD_TOKEN_ID,
@@ -64,7 +74,7 @@ class TestLigerGlobalTokenCount:
     ) -> None:
         mask = torch.tensor([[True, False, True], [True, True, False]])
 
-        assert _liger_global_token_count(mask) == 4.0
+        assert _liger_global_token_count(mask).item() == 4.0
 
 
 class TestGRPOSegmentRows:
@@ -82,9 +92,7 @@ class TestGRPOSegmentRows:
         ids, mask = episode_batch(PAD_TOKEN_ID)
 
         # Act
-        rows, _accumulation_steps = agent._segment_rows(
-            ids, mask, EPISODE_SEGMENTS, np.arange(4)
-        )
+        _split, rows = agent._segment_rows(ids, mask, EPISODE_SEGMENTS, np.arange(4))
 
         # Assert
         assert tuple(rows.token_ids.shape) == (NUM_SEGMENT_ROWS, 14)
@@ -110,7 +118,7 @@ class TestGRPOReduceMaskedLoss:
         global_tokens = float(sum(int(mask.sum()) for mask in rank_masks))
         monkeypatch.setattr(
             "agilerl.algorithms.grpo._liger_global_token_count",
-            lambda _mask: global_tokens,
+            lambda _mask: torch.tensor(global_tokens),
         )
         monkeypatch.setattr(
             "agilerl.algorithms.grpo._liger_normalizer_world_size", lambda: 2
@@ -153,7 +161,7 @@ class TestGRPOReduceMaskedLoss:
         assert shares.tolist() == [0.0, 0.0]
 
     def test_without_a_window_rows_use_their_own_tokens(self) -> None:
-        agent = _make_grpo()
+        agent = _make_grpo(loss_norm="micro_batch")
         loss = torch.tensor([[1.0, 2.0, 0.0, 0.0], [3.0, 0.0, 5.0, 0.0]])
         mask = torch.tensor([[True, True, False, False], [True, False, True, False]])
 
@@ -396,6 +404,120 @@ class TestGRPOLearnEpisodeSegments:
         assert result is None
 
 
+class TestGRPOBalancedSegmentRows:
+    def test_rows_carry_their_episode_advantages_and_tokens(self) -> None:
+        # Arrange
+        agent = _make_grpo(micro_batch_size_per_gpu=1, mini_batch_size=1)
+        ids, mask = episode_batch(PAD_TOKEN_ID)
+        advantages = torch.tensor([[1.0], [2.0], [3.0], [4.0]])
+
+        # Act
+        rows, _steps, train_rows, row_advantages, episode_tokens = (
+            agent._balanced_segment_rows(
+                ids, mask, EPISODE_SEGMENTS, np.arange(4), advantages
+            )
+        )
+
+        # Assert: episodes 0 and 2 span two rows each; 24 action tokens in all.
+        assert rows.row_episodes.tolist() == [0, 0, 1, 2, 2, 3, -1, -1]
+        assert train_rows.tolist() == list(range(8))
+        assert row_advantages.flatten().tolist() == [1, 1, 2, 3, 3, 4, 0, 0]
+        assert episode_tokens.tolist() == [6, 6, 6, 4, 4, 8, 1, 1]
+
+    def test_rows_of_filtered_episodes_are_not_trained(self) -> None:
+        # Arrange
+        agent = _make_grpo(micro_batch_size_per_gpu=1, mini_batch_size=1)
+        ids, mask = episode_batch(PAD_TOKEN_ID)
+
+        # Act
+        rows, _steps, train_rows, _advantages, _tokens = agent._balanced_segment_rows(
+            ids, mask, EPISODE_SEGMENTS, np.array([0, 3]), torch.ones(4, 1)
+        )
+
+        # Assert
+        assert rows.row_episodes[train_rows].tolist() == [0, 0, 3, -1]
+
+    @pytest.mark.parametrize("loss_norm", ["micro_batch", "episode"])
+    def test_rows_from_other_ranks_train_to_the_same_gradient(
+        self, monkeypatch: pytest.MonkeyPatch, loss_norm: str
+    ) -> None:
+        # Arrange: one optimizer step of 1-row micro-batches over 6 real rows.
+        local = _make_grpo(micro_batch_size_per_gpu=1, loss_norm=loss_norm)
+        dealt = _make_grpo(micro_batch_size_per_gpu=1, loss_norm=loss_norm)
+        local_grads = record_step_gradients(local, monkeypatch)
+        dealt_grads = record_step_gradients(dealt, monkeypatch)
+
+        # Act
+        local.learn(_experiences(), episode_segments=EPISODE_SEGMENTS)
+        monkeypatch.setattr(
+            "agilerl.algorithms.core.base.balance_rows_across_ranks",
+            rows_from_other_ranks,
+        )
+        dealt.learn(_experiences(), episode_segments=EPISODE_SEGMENTS)
+
+        # Assert
+        assert len(local_grads) == len(dealt_grads) == 1
+        assert any(grad.abs().sum() > 0 for grad in local_grads[0].values())
+        for name, grad in local_grads[0].items():
+            # fp32 sums over a different micro-batch order.
+            assert torch.allclose(dealt_grads[0][name], grad, rtol=1e-5, atol=1e-7), (
+                name
+            )
+
+
+def scale_grpo_losses(
+    agent: GRPO, monkeypatch: pytest.MonkeyPatch, scales: Iterator[float]
+) -> None:
+    """Make each micro-batch loss of ``agent`` carry the next scale."""
+    monkeypatch.setattr(agent, "_loss", scale_losses(agent._loss, scales))
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or not dist.is_available(), reason="gloo unavailable"
+)
+class TestGRPOLearnBalancedAcrossRanks:
+    def test_uneven_ranks_run_even_rows_with_the_one_rank_gradient(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange: one rank accumulating all 6 rows in one step is the reference.
+        single = _make_grpo(micro_batch_size_per_gpu=1)
+        seed_lora_weights(single)
+        single_steps = record_step_gradients(single, monkeypatch)
+        learn_uneven_episodes(single, slice(0, 4))
+
+        # Act
+        reports = spawn_balanced_learn(_make_grpo)
+
+        # Assert: 4 and 2 rows are dealt out as 3 and 3.
+        assert len(single_steps) == 1
+        for padded_rows, steps in reports:
+            assert padded_rows == pytest.approx(3.0)
+            assert len(steps) == 1
+            assert steps[0].keys() == single_steps[0].keys()
+            for name, grad in single_steps[0].items():
+                # fp32 sums over a different micro-batch order and rank split.
+                torch.testing.assert_close(
+                    torch.from_numpy(steps[0][name]),
+                    grad,
+                    rtol=1e-5,
+                    atol=1e-6,
+                    msg=name,
+                )
+
+    def test_a_non_finite_loss_on_one_rank_raises_on_every_rank(self) -> None:
+        # Arrange: every loss of rank 0 is NaN, every loss of rank 1 finite.
+        learn = partial(learn_with_nan_loss_on_rank_zero, scale_loss=scale_grpo_losses)
+
+        # Act
+        reports = spawn_balanced_learn(_make_grpo, learn)
+
+        # Assert
+        for rank, ((error, weights_held), steps) in enumerate(reports):
+            assert f"rank={rank} local_finite={rank != 0}" in error
+            assert weights_held
+            assert steps == []
+
+
 class TestGRPOLoss:
     @staticmethod
     def _minibatch_pixel_values(
@@ -406,8 +528,18 @@ class TestGRPOLoss:
         per_token = torch.zeros(3, 3)
         seen: dict[str, torch.Tensor | None] = {}
 
-        def objective(batch_ids: torch.Tensor, *args: Any) -> tuple[torch.Tensor, ...]:
-            seen["pixel_values"] = args[-1]
+        def objective(
+            batch_ids: torch.Tensor,
+            _action_mask: torch.Tensor,
+            _advantages: torch.Tensor,
+            _old_log_probs: torch.Tensor | None,
+            _reference_log_probs: torch.Tensor,
+            _turn_ids: torch.Tensor | None,
+            _sampling_log_probs: torch.Tensor | None,
+            pixel_values: torch.Tensor | None,
+            _sampled_rows: torch.Tensor | None,
+        ) -> tuple[torch.Tensor, ...]:
+            seen["pixel_values"] = pixel_values
             zero = torch.tensor(0.0)
             return zero, zero, zero, per_token[: batch_ids.shape[0]]
 

@@ -26,6 +26,7 @@ pytest.importorskip("transformers", reason="LLM tests require transformers.")
 pytest.importorskip("peft", reason="LLM tests require peft.")
 
 from agilerl.algorithms.core.base import LLMAlgorithm
+from agilerl.algorithms.core.llm_ops.frozen_vision import VisionFeatureCache
 from agilerl.algorithms.grpo import GRPO
 from agilerl.utils.learn_profiler import LearnProfiler
 from agilerl.utils.llm_utils import LEARN_PHASES
@@ -77,6 +78,10 @@ class _Stub:
         self.vllm_importance_sampling_cap = 2.0
         self.vllm_max_logprob_gap = 0.1
         self.vllm_max_clip_fraction = 0.02
+        self.off_policy_token_mask_bounds = None
+        self.off_policy_sequence_mask_threshold = None
+        self.use_bias_correction_kl = False
+        self.kl_clamp = 10.0
         self.filter_zero_adv = filter_zero_adv
         self.adv_filter_eps = 0.0
         self.clip_coef_min = 0.8
@@ -89,7 +94,7 @@ class _Stub:
         self.micro_batch_size_per_gpu = 2
         self.gradient_accumulation_steps = 1
         self._is_correction_liger_warned = False
-        self._liger_non_token_warned = False
+        self._is_per_token_trajectory_liger_warned = False
         self._survivors = survivors
         self._advantages: torch.Tensor | None = None
         self._kl_value = kl_value
@@ -105,6 +110,7 @@ class _Stub:
         self.old_logprobs_source = "trainer"
         self.lr_scheduler = None
         self.no_grad_forwards: list[tuple[int, bool, bool]] = []
+        self._vision_cache = VisionFeatureCache()
         self.shard_runtime = SimpleNamespace(
             timed=lambda _name, **_fields: nullcontext(),
             micro_batches_until_step=lambda steps: steps,
@@ -115,11 +121,15 @@ class _Stub:
     _align_sampling_logprobs = GRPO._align_sampling_logprobs
     _aligned_sampling_logprobs_and_metrics = GRPO._aligned_sampling_logprobs_and_metrics
     _apply_kl_advantage_shaping = GRPO._apply_kl_advantage_shaping
+    _clipped_units = GRPO._clipped_units
     _compute_policy_loss = GRPO._compute_policy_loss
     _learn_start_log_probs = GRPO._learn_start_log_probs
     _liger_path_selected = GRPO._liger_path_selected
     _check_segments_supported = LLMAlgorithm._check_segments_supported
+    _device_index = staticmethod(LLMAlgorithm._device_index)
+    _epoch_orders = LLMAlgorithm._epoch_orders
     _has_episode_segments = LLMAlgorithm._has_episode_segments
+    _hold_loss_until_step = LLMAlgorithm._hold_loss_until_step
     _learn_phase_seconds = LLMAlgorithm._learn_phase_seconds
     _row_padding_stats = LLMAlgorithm._row_padding_stats
     _segment_rows = LLMAlgorithm._segment_rows
@@ -127,14 +137,17 @@ class _Stub:
     _step_lr_scheduler = LLMAlgorithm._step_lr_scheduler
     _log_importance_weights = GRPO._log_importance_weights
     _loss = GRPO._loss
+    _masks_off_policy_tokens = GRPO._masks_off_policy_tokens
+    _off_policy_mask_stats = GRPO._off_policy_mask_stats
     _objective_loss = GRPO._objective_loss
     _prepare_experience_batch = GRPO._prepare_experience_batch
     _raise_if_loss_not_finite_on_any_rank = (
         LLMAlgorithm._raise_if_loss_not_finite_on_any_rank
     )
-    _record_window_action_tokens = GRPO._record_window_action_tokens
+    _record_global_window_action_tokens = GRPO._record_global_window_action_tokens
     _reduce_masked_loss = GRPO._reduce_masked_loss
     _resolve_loss_window = GRPO._resolve_loss_window
+    _token_loss_weights = GRPO._token_loss_weights
     _rollout_old_log_probs = GRPO._rollout_old_log_probs
     _rows_with_full_sampling_logprobs = staticmethod(
         GRPO._rows_with_full_sampling_logprobs
@@ -146,8 +159,10 @@ class _Stub:
     _warn_if_micro_batches_straddle_optimizer_steps = (
         GRPO._warn_if_micro_batches_straddle_optimizer_steps
     )
-    _warn_liger_non_token_is = LLMAlgorithm._warn_liger_non_token_is
     _warn_liger_path_bypassed = GRPO._warn_liger_path_bypassed
+    _warn_per_token_trajectory_liger_bypass = (
+        GRPO._warn_per_token_trajectory_liger_bypass
+    )
     _warn_on_sampling_mismatch = GRPO._warn_on_sampling_mismatch
 
     def _prepare_vllm_for_training(self) -> None:
@@ -272,15 +287,16 @@ class TestLigerPathSelection:
         algo.learn(_experiences())
         assert (algo.liger_calls, algo.standard_calls) == (1, 0)
 
-    def test_an_unsupported_level_warns_about_memory_not_the_correction(self) -> None:
+    def test_an_unsupported_level_does_not_warn_at_loss_time(self) -> None:
         algo = _Stub(
             use_liger_loss=True,
             importance_sampling_level="turn",
             liger_level_supported=False,
         )
-        with pytest.warns(UserWarning, match="NOT memory-bounded"):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
             assert algo._use_liger_path() is False
-        assert algo._is_correction_liger_warned is False
+        assert caught == []
 
     def test_the_bypass_warning_is_emitted_once(self) -> None:
         algo = _Stub(use_liger_loss=True, importance_sampling_level="trajectory")
@@ -298,28 +314,97 @@ class TestLigerPathSelection:
             assert algo._use_liger_path() is False
         assert caught == []
 
+    def test_gspo_per_sequence_advantages_run_the_fused_path(self) -> None:
+        algo = _Stub(
+            use_liger_loss=True,
+            importance_sampling_level="trajectory",
+            vllm_importance_sampling_correction=False,
+        )
+        algo._advantages = torch.tensor([[0.5], [-0.5]])
 
-class TestProcessLigerMetrics:
-    """The fused kernel's aux list splits into KL and clip fraction by beta."""
+        algo.learn(_experiences())
 
-    def test_zero_beta_reads_clip_fraction_from_the_first_slot(self) -> None:
-        algo = _Stub(beta=0.0, use_liger_loss=True)
-        kl, clipfrac = GRPO.process_liger_metrics(
-            algo, [torch.tensor(0.1), torch.tensor(0.2)]
+        assert (algo.liger_calls, algo.standard_calls) == (1, 0)
+
+    def test_gspo_per_token_advantages_run_the_standard_path(self) -> None:
+        algo = _Stub(
+            use_liger_loss=True,
+            importance_sampling_level="trajectory",
+            vllm_importance_sampling_correction=False,
+        )
+        algo._advantages = torch.linspace(-1.0, 1.0, 2 * (SEQ_LEN - 1)).reshape(
+            2, SEQ_LEN - 1
         )
 
-        assert math.isnan(kl.item())
-        assert clipfrac.item() == pytest.approx(0.1)
+        with pytest.warns(UserWarning, match="no fused kernel for per-turn"):
+            algo.learn(_experiences())
 
-    def test_nonzero_beta_reads_kl_then_clip_fraction(self) -> None:
-        algo = _Stub(beta=0.04, use_liger_loss=True)
-        kl, clipfrac = GRPO.process_liger_metrics(
-            algo, [torch.tensor(0.25), torch.tensor(0.1)]
+        assert (algo.liger_calls, algo.standard_calls) == (0, 1)
+
+    def test_the_per_token_gspo_bypass_warns_once(self) -> None:
+        algo = _Stub(
+            use_liger_loss=True,
+            importance_sampling_level="trajectory",
+            vllm_importance_sampling_correction=False,
         )
+        algo._advantages = torch.ones(2, SEQ_LEN - 1)
+        with pytest.warns(UserWarning, match="no fused kernel for per-turn"):
+            algo.learn(_experiences())
 
-        assert kl is not None
-        assert kl.item() == pytest.approx(0.25)
-        assert clipfrac.item() == pytest.approx(0.1)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            algo.learn(_experiences())
+
+        assert [str(w.message) for w in caught if "per-turn" in str(w.message)] == []
+        assert (algo.liger_calls, algo.standard_calls) == (0, 2)
+
+
+class ObjectiveStub:
+    """Stand-in carrying the state ``_setup_objective`` reads."""
+
+    def __init__(self, advantage_granularity: str) -> None:
+        self.advantage_granularity = advantage_granularity
+        self.beta = 0.0
+        self.use_liger_loss = True
+
+    _setup_objective = GRPO._setup_objective
+    _resolve_standard_loss_fn = GRPO._resolve_standard_loss_fn
+    _grpo_loss_standard = GRPO._grpo_loss_standard
+    _cispo_loss = GRPO._cispo_loss
+
+
+class TestGRPOSetupObjectiveLigerSupport:
+    """Whether the configured objective has a fused kernel is decided at init."""
+
+    @pytest.mark.parametrize(
+        ("loss_type", "advantage_granularity"),
+        [("gspo", "trajectory"), ("gspo", "auto"), ("grpo", "turn")],
+    )
+    def test_supported_combinations_keep_the_fused_kernel(
+        self, loss_type: str, advantage_granularity: str
+    ) -> None:
+        algo = ObjectiveStub(advantage_granularity)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            algo._setup_objective(loss_type, None, False)
+
+        assert algo._liger_level_supported is True
+        assert [w for w in caught if "no fused" in str(w.message)] == []
+
+    def test_gspo_with_turn_advantages_has_no_fused_kernel(self) -> None:
+        algo = ObjectiveStub("turn")
+
+        with pytest.warns(
+            UserWarning,
+            match=(
+                "no fused gspo kernel at importance_sampling_level='trajectory' "
+                "with advantage_granularity='turn'"
+            ),
+        ):
+            algo._setup_objective("gspo", None, False)
+
+        assert algo._liger_level_supported is False
 
 
 class TestLearnReportsFixedKeys:

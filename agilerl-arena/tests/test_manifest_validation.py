@@ -1866,7 +1866,7 @@ class TestRolloutSamplingFields:
     def test_grpo_defaults_match_the_algorithm_ctor(self) -> None:
         assert GRPOSpec().group_size == 8
         spec = GRPOSpec.model_construct(group_size=4)
-        assert spec.top_p == 0.95
+        assert spec.top_p == 1.0
         assert spec.top_k == 50
         assert spec.min_p == 0.0
         assert spec.repetition_penalty == 1.0

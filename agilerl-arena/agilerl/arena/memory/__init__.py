@@ -15,6 +15,7 @@ from agilerl.arena.memory.estimator import (
     estimate_run,
     estimate_training,
     generation_can_serve,
+    resolve_fsdp_memory,
 )
 from agilerl.arena.memory.manifest import (
     GPU_CATALOGUE,
@@ -71,6 +72,7 @@ __all__ = [
     "generation_settings_from_manifest",
     "inference_run_config",
     "lookup_gpu",
+    "resolve_fsdp_memory",
     "run_config_from_manifest",
     "solve",
     "solve_inference",

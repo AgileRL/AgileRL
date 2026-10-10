@@ -342,6 +342,13 @@ class TrainingSpec(BaseModel):
         default=False,
         description="Overwrite the previous checkpoint instead of keeping each one.",
     )
+    checkpoint_optimizer: bool = Field(
+        default=True,
+        description=(
+            "Store the optimizer state in LLM checkpoints so a resumed run "
+            "keeps its Adam moments. Adds about twice the adapter's size."
+        ),
+    )
 
     evaluation_interval: int | None = Field(
         default=None,

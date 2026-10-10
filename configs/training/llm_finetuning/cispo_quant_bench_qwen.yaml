@@ -21,6 +21,7 @@ algorithm:
     filter_zero_adv: false
     max_output_tokens: 64
     use_liger_loss: true
+    loss_norm: accumulation_window
     use_sequence_packing: true
     vllm_importance_sampling_correction: true
     attn_implementation: flex_attention

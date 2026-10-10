@@ -10,6 +10,8 @@ path) or hidden states (fused path). Pure CPU on a tiny real model in fp32.
 
 from __future__ import annotations
 
+import inspect
+import math
 from typing import Any, ClassVar
 
 import numpy as np
@@ -28,6 +30,7 @@ from tests.test_algorithms.test_llms.segment_helpers import (
 )
 from tests.test_algorithms.test_llms.test_grpo_old_logprobs import (
     PAD_TOKEN_ID,
+    VOCAB,
     _make_grpo,
 )
 
@@ -46,6 +49,7 @@ class _ProbeFusedKernel:
     """
 
     loss_types: ClassVar[list[str]] = []
+    inputs: ClassVar[list[dict[str, Any]]] = []
 
     @classmethod
     def forward(
@@ -100,7 +104,10 @@ class _ProbeFusedKernel:
 
     @classmethod
     def apply(cls, *args):
-        """Invoke ``forward`` the way ``torch.autograd.Function.apply`` does."""
+        """Record the named inputs, then invoke ``forward`` the way ``torch.autograd.Function.apply`` does."""
+        bound = inspect.signature(cls.forward).bind(None, *args)
+        bound.apply_defaults()
+        cls.inputs.append(dict(bound.arguments))
         return cls.forward(None, *args)
 
 
@@ -137,21 +144,22 @@ def _probe_policy_weights(
         steps = accumulation_steps or agent.gradient_accumulation_steps
         (loss / steps).backward()
 
-    split_rows = agent._segment_rows
+    split_rows = agent._balanced_segment_rows
 
     def recording_segment_rows(*args, **kwargs):
-        rows, steps = split_rows(*args, **kwargs)
-        state["row_episodes"] = rows.row_episodes
-        return rows, steps
+        result = split_rows(*args, **kwargs)
+        state["row_episodes"] = result[0].row_episodes
+        return result
 
     monkeypatch.setattr(agent, "_loss", tracking_loss)
     monkeypatch.setattr(agent, "_learn_start_log_probs", zero_learn_start_log_probs)
     monkeypatch.setattr(agent, "_backward_pass", accumulate)
-    monkeypatch.setattr(agent, "_segment_rows", recording_segment_rows)
+    monkeypatch.setattr(agent, "_balanced_segment_rows", recording_segment_rows)
     if fused:
         agent.use_liger_loss = True
         monkeypatch.setattr(grpo_module, "HAS_LIGER_KERNEL", True)
         monkeypatch.setattr(_ProbeFusedKernel, "loss_types", [])
+        monkeypatch.setattr(_ProbeFusedKernel, "inputs", [])
         monkeypatch.setattr(grpo_module, KERNEL_NAME, _ProbeFusedKernel, raising=False)
         monkeypatch.setattr(
             agent,
@@ -250,6 +258,43 @@ class TestGRPOEpisodeLossNormLearn:
         assert _episode_totals(weights, row_episodes) == pytest.approx(
             [tokens / total_tokens for tokens in EPISODE_ACTION_TOKENS]
         )
+
+    def test_the_vwa_launch_config_weighs_tokens_exactly(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange: CISPO, loss_norm="episode", Liger, one row per micro-batch,
+        # kl_clamp 10. The zero probe makes the policy uniform, so each action
+        # token's K3 against the zero reference is 64 - ln(64) - 1 > 10.
+        agent = _make_episode_grpo(
+            loss_norm="episode", micro_batch_size_per_gpu=1, beta=0.05, kl_clamp=10.0
+        )
+        uniform_log_prob = -math.log(VOCAB)
+
+        # Act
+        weights, row_episodes, mask = _probe_policy_weights(
+            agent, monkeypatch, EPISODE_SEGMENTS, fused=True
+        )
+
+        # Assert: the kernel divides by the world size alone and every action
+        # token's reference is clamped to the policy log-prob.
+        assert len(_ProbeFusedKernel.inputs) == 6
+        for inputs in _ProbeFusedKernel.inputs:
+            action_tokens = inputs["attention_mask"] > 0
+            assert inputs["num_items_in_batch"] == 1.0
+            assert torch.allclose(
+                inputs["ref_per_token_logps"][action_tokens],
+                torch.full((int(action_tokens.sum()),), uniform_log_prob),
+                rtol=0.0,
+                atol=1e-6,
+            )
+        # Bit-exact fp32 1 / (episodes * episode_tokens).
+        for episode, tokens in enumerate(EPISODE_ACTION_TOKENS):
+            rows = torch.as_tensor(row_episodes == episode)
+            episode_weights = weights[rows][mask[rows].bool()]
+            assert torch.equal(
+                episode_weights, torch.full_like(episode_weights, 1 / (4 * tokens))
+            )
+        assert set(_ProbeFusedKernel.loss_types) == {"cispo"}
 
     def test_episode_mode_records_the_window_token_share(
         self, monkeypatch: pytest.MonkeyPatch

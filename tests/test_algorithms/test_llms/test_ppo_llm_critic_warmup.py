@@ -22,11 +22,11 @@ pytest.importorskip("peft", reason="LLM tests require peft.")
 from agilerl.algorithms.ppo_llm import PPO as LLMPPO
 from agilerl.distributed.fsdp import FSDPConfig
 from agilerl.utils.algo_utils import CosineLRScheduleConfig
+from tests.test_algorithms.test_llms.segment_helpers import seed_lora_weights
 from tests.test_algorithms.test_llms.test_ppo_llm_passes import (
     FUSE_MODES,
     learn_rows,
     make_ppo,
-    seed_lora_weights,
 )
 from tests.test_utils.test_expert_parallel import (
     _init_gloo,

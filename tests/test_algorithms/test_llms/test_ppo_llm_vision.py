@@ -9,10 +9,15 @@ Pure CPU on a tiny fp32 VL model; see :mod:`vision_helpers`.
 from __future__ import annotations
 
 import math
+import sys
+from contextlib import nullcontext
+from functools import partial
 from typing import Any
 
+import numpy as np
 import pytest
 import torch
+import torch.distributed as dist
 
 pytest.importorskip("transformers", reason="LLM tests require transformers.")
 pytest.importorskip("peft", reason="LLM tests require peft.")
@@ -23,6 +28,7 @@ from agilerl.algorithms.ppo_llm import PPO as LLMPPO
 from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 from tests.test_algorithms.test_llms.segment_helpers import (
     pad_to_eight_rows,
+    spawn_balanced_learn,
     use_fake_liger_policy_loss,
 )
 from tests.test_algorithms.test_llms.vision_helpers import (
@@ -30,11 +36,14 @@ from tests.test_algorithms.test_llms.vision_helpers import (
     IMAGE_TOKEN_ID,
     PAD_TOKEN_ID,
     SEGMENTS,
+    TowerVisionModel,
     VisionHiddenStatesModel,
     adapter_weights,
     expected_vision_rows,
     learn_on_vision_episodes,
+    learn_rank_vision_episodes,
     routed_rows,
+    tower,
     vision_config,
     vision_episodes,
     vision_model,
@@ -219,3 +228,104 @@ class TestPPOLearnVision:
                 pixel_values=pixel_values,
                 pixel_image_counts=IMAGE_COUNTS,
             )
+
+
+def make_tower_vision_ppo(**overrides: Any) -> LLMPPO:
+    """:func:`make_vision_ppo` on a :class:`TowerVisionModel` built from the same seed."""
+    torch.manual_seed(0)
+    return make_vision_ppo(
+        actor_network=AutoModelForCausalLMWithValueHead(TowerVisionModel()), **overrides
+    )
+
+
+class TestPPOLearnVisionCache:
+    @pytest.mark.parametrize("segmented", [True, False], ids=["segments", "episodes"])
+    @pytest.mark.parametrize("fuse", [False, True], ids=["split", "fused"])
+    def test_learn_runs_the_tower_once_per_vision_row(
+        self, segmented: bool, fuse: bool
+    ) -> None:
+        # Arrange
+        agent = make_tower_vision_ppo(fuse_actor_critic_pass=fuse)
+
+        # Act
+        learn_on_vision_episodes(agent, segmented=segmented)
+
+        # Assert
+        assert sum(tower(agent).rows) == sum(IMAGE_COUNTS)
+
+    @pytest.mark.parametrize("segmented", [True, False], ids=["segments", "episodes"])
+    @pytest.mark.parametrize("fuse", [False, True], ids=["split", "fused"])
+    def test_learn_matches_the_uncached_tower(
+        self, monkeypatch: pytest.MonkeyPatch, segmented: bool, fuse: bool
+    ) -> None:
+        # Arrange
+        cached = make_tower_vision_ppo(fuse_actor_critic_pass=fuse)
+        uncached = make_tower_vision_ppo(fuse_actor_critic_pass=fuse)
+        monkeypatch.setattr(uncached._vision_cache, "step", nullcontext)
+
+        # Act
+        cached_metrics = learn_on_vision_episodes(cached, segmented=segmented)
+        uncached_metrics = learn_on_vision_episodes(uncached, segmented=segmented)
+
+        # Assert: fp32 tower GEMMs over other batches may round differently in
+        # the last bits.
+        assert sum(tower(uncached).rows) > sum(tower(cached).rows)
+        for key in ("loss", "vf_loss", "kl"):
+            assert math.isfinite(cached_metrics[key]), key
+            assert math.isclose(
+                cached_metrics[key], uncached_metrics[key], rel_tol=0.0, abs_tol=1e-6
+            ), key
+        for adapter in ("actor", "critic"):
+            cached_weights = adapter_weights(cached, adapter)
+            uncached_weights = adapter_weights(uncached, adapter)
+            assert cached_weights.keys() == uncached_weights.keys()
+            for name, weight in cached_weights.items():
+                assert torch.allclose(
+                    weight, uncached_weights[name], rtol=0.0, atol=1e-6
+                ), name
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or not dist.is_available(), reason="gloo unavailable"
+)
+class TestPPOLearnVisionCacheAcrossRanks:
+    @pytest.mark.parametrize(
+        ("fuse", "copies"), [(False, 1), (True, 2)], ids=["split", "fused"]
+    )
+    def test_balanced_rows_run_the_tower_once_per_vision_row(
+        self, fuse: bool, copies: int
+    ) -> None:
+        # Arrange: rank 0's 4 rows (5 vision rows) and rank 1's 2 rows (3 vision
+        # rows, plus 2 filler vision rows in the no-grad forward) deal out as 3
+        # and 3. Rank 0 receives a row with 2 vision rows, rank 1 two rows with
+        # 3. A fused pass runs each row once per adapter.
+        make_agent = partial(make_tower_vision_ppo, fuse_actor_critic_pass=fuse)
+
+        # Act
+        cached = spawn_balanced_learn(
+            make_agent, partial(learn_rank_vision_episodes, cached=True)
+        )
+        uncached = spawn_balanced_learn(
+            make_agent, partial(learn_rank_vision_episodes, cached=False)
+        )
+
+        # Assert
+        assert [tower_rows for (tower_rows, _), _ in cached] == [
+            5 + 2 * copies,
+            5 + 3 * copies,
+        ]
+        for ((cached_rows, cached_losses), cached_steps), (
+            (uncached_rows, uncached_losses),
+            uncached_steps,
+        ) in zip(cached, uncached, strict=True):
+            assert uncached_rows > cached_rows
+            for key, loss in cached_losses.items():
+                assert math.isfinite(loss), key
+                assert math.isclose(
+                    loss, uncached_losses[key], rel_tol=0.0, abs_tol=1e-6
+                ), key
+            assert len(cached_steps) == len(uncached_steps) == 1
+            for name, grad in cached_steps[0].items():
+                np.testing.assert_allclose(
+                    grad, uncached_steps[0][name], rtol=0.0, atol=1e-6, err_msg=name
+                )

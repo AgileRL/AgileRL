@@ -13,6 +13,14 @@ BETA = (
     "Weight on the KL penalty holding the policy near the reference "
     "model. 0 disables the penalty entirely."
 )
+KL_CLAMP = (
+    "Per-token bound on the K3 KL penalty. 10 is the policy about 2.6 nats "
+    "below the reference on a token; tokens further below get no KL "
+    "gradient, so one diverged token cannot set the step's gradient norm. "
+    "Tokens above the reference keep their KL pull. With the fused Liger "
+    "GRPO loss a residual gradient of about beta times one bf16 rounding "
+    "step of the log-prob remains. Unset removes the bound."
+)
 MINI_BATCH = (
     "Trajectories one optimizer step covers, per rank. Must be a whole "
     "number of micro-batches. This is a learning-cadence decision, not "
@@ -91,6 +99,13 @@ TEMPERATURE = (
     "is greedy decoding."
 )
 MAX_OUTPUT_TOKENS = "Hard cap on tokens generated per completion."
+MAX_ROW_TOKENS = (
+    "Longest training row, prompt plus completion, that the trainer's memory "
+    "estimate sizes for. Unset uses max_model_len. An environment with "
+    "segment_prompt_tokens sets it to segment_prompt_tokens plus "
+    "max_output_tokens (twice max_output_tokens with answer_continuation), "
+    "capped at max_model_len; rollouts never produce a longer row."
+)
 MIN_OUTPUT_TOKENS = (
     "Floor on tokens generated per completion. Unset lets the model stop as "
     "soon as it emits an end-of-sequence token."

@@ -28,7 +28,7 @@ from agilerl.arena.models.algorithms.base import AlgoSpec, LLMAlgorithmSpec
 from agilerl.arena.models.algorithms.grpo import GRPOSpec
 from agilerl.arena.models.algorithms.ppo import PPOSpec
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
-from agilerl.arena.models.env import EnvSpec
+from agilerl.arena.models.env import EnvSpec, LLMEnvSpec
 from agilerl.arena.models.hpo import (
     MultiFrequencySelectionSpec,
     MutationSpec,
@@ -472,6 +472,28 @@ class TrainingManifest(BaseModel):
                 "lora_config",
                 self.network.lora_config,
                 source_set="lora_config" in self.network.model_fields_set,
+            )
+
+        if (
+            isinstance(self.algorithm, RolloutLLMSpec)
+            and isinstance(self.environment, LLMEnvSpec)
+            and self.environment.segment_prompt_tokens is not None
+            and self.algorithm.max_output_tokens is not None
+        ):
+            # The harness keeps every prompt within segment_prompt_tokens, so a
+            # segment's row is at most that plus one turn's generation. An
+            # answer continuation generates up to max_output_tokens more.
+            turn_tokens = self.algorithm.max_output_tokens * (
+                2 if self.algorithm.answer_continuation else 1
+            )
+            _copy_when_unset(
+                self.algorithm,
+                "max_row_tokens",
+                min(
+                    self.environment.segment_prompt_tokens + turn_tokens,
+                    self.algorithm.max_model_len,
+                ),
+                source_set=True,
             )
 
         if (

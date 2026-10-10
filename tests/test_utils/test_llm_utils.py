@@ -19,7 +19,8 @@ pytest.importorskip("datasets", reason="LLM dependencies not installed")
 
 from datasets import Dataset as Datasets
 from peft import LoraConfig, get_peft_model
-from safetensors.torch import load_file
+from safetensors import safe_open
+from safetensors.torch import load_file, save_file
 from torch import nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper,
@@ -56,6 +57,8 @@ from agilerl.llm_envs import DatasetEnv
 from agilerl.utils import llm_utils as llm_utils_module
 from agilerl.utils.algo_utils import CosineLRScheduleConfig
 from agilerl.utils.llm_utils import (
+    LoraAdapterSnapshot,
+    MicroBatchMetrics,
     adapt_lora_config_for_model,
     apply_pad_token_id,
     attention_mask_from_padded_ids,
@@ -75,15 +78,18 @@ from agilerl.utils.llm_utils import (
     compare_responses,
     create_model_from_name_or_path,
     cuda_tensor_bytes_in_module,
+    directory_opener,
     discover_clippable_inner_linear_module_keys,
     discover_clippable_projection_leaf_names,
     expert_lora_vllm_key_map,
     fill_outside_mask,
     filter_peft_state_dict_for_vllm_lora,
     format_colocated_vllm_oom_hint,
+    gather_to_host,
     get_lora_params,
     get_model_name_or_path,
     hf_completion_lengths,
+    k3_kl_penalty_reference,
     language_model_attn_implementation,
     list_peft_matched_module_keys,
     load_lora_adapters,
@@ -117,8 +123,11 @@ from agilerl.utils.llm_utils import (
     save_lora_adapters,
     save_peft_adapter_for_vllm_rollout,
     set_sub_model_attn_implementation,
+    snapshot_lora_adapters,
     validate_importance_sampling_level,
     value_fit,
+    write_lora_adapters,
+    write_safetensors,
 )
 from tests import TINY_LLM_FIXTURE_PATH
 
@@ -1016,6 +1025,79 @@ def test_k3_helper_matches_liger_direction() -> None:
     assert not torch.allclose(calculate_k3_kl(policy, ref), expected)
 
 
+class TestK3KlPenaltyReference:
+    def test_tokens_within_the_bound_keep_their_reference(self) -> None:
+        reference = torch.tensor([-1.0, -1.5, -0.5])
+        policy = torch.tensor([-1.2, -1.0, -0.5])
+
+        penalty_reference, clamped = k3_kl_penalty_reference(reference, policy, 10.0)
+
+        assert torch.equal(penalty_reference, reference)
+        assert clamped.tolist() == [False, False, False]
+
+    def test_a_token_past_the_bound_gets_zero_penalty_and_zero_gradient(
+        self,
+    ) -> None:
+        # Arrange
+        policy = torch.tensor([-1.0, -12.0], requires_grad=True)
+        reference = torch.tensor([-1.2, -1.0])
+
+        # Act
+        penalty_reference, clamped = k3_kl_penalty_reference(reference, policy, 10.0)
+        penalty = calculate_k3_kl(penalty_reference, policy)
+        penalty.sum().backward()
+
+        # Assert
+        assert clamped.tolist() == [False, True]
+        assert not penalty_reference.requires_grad
+        assert penalty[1].item() == 0.0
+        assert policy.grad is not None
+        assert policy.grad[1].item() == 0.0
+        assert policy.grad[0].item() == pytest.approx(1.0 - math.exp(-0.2), rel=1e-6)
+
+    def test_a_policy_far_above_the_reference_keeps_its_penalty_and_gradient(
+        self,
+    ) -> None:
+        # Arrange: k3 = exp(-13) + 13 - 1, about 12, past the bound.
+        policy = torch.tensor([-1.0], requires_grad=True)
+        reference = torch.tensor([-14.0])
+
+        # Act
+        penalty_reference, clamped = k3_kl_penalty_reference(reference, policy, 10.0)
+        penalty = calculate_k3_kl(penalty_reference, policy)
+        penalty.sum().backward()
+
+        # Assert
+        assert clamped.tolist() == [False]
+        assert torch.equal(penalty_reference, reference)
+        assert penalty.item() == pytest.approx(math.exp(-13.0) + 12.0, rel=1e-6)
+        assert policy.grad is not None
+        assert policy.grad.item() == pytest.approx(1.0 - math.exp(-13.0), rel=1e-6)
+
+    def test_skipped_tokens_get_zero_penalty_but_do_not_count_as_clamped(
+        self,
+    ) -> None:
+        reference = torch.tensor([-1.2, -1.0])
+        policy = torch.tensor([-1.0, -1.5])
+        skip = torch.tensor([True, False])
+
+        penalty_reference, clamped = k3_kl_penalty_reference(
+            reference, policy, 10.0, skip
+        )
+
+        assert penalty_reference.tolist() == pytest.approx([-1.0, -1.0])
+        assert clamped.tolist() == [False, False]
+
+    def test_no_bound_leaves_large_gaps_alone(self) -> None:
+        reference = torch.tensor([-1.0])
+        policy = torch.tensor([-12.0])
+
+        penalty_reference, clamped = k3_kl_penalty_reference(reference, policy, None)
+
+        assert torch.equal(penalty_reference, reference)
+        assert clamped.tolist() == [False]
+
+
 class TestFillOutsideMask:
     """:func:`fill_outside_mask` keeps masked reductions finite when padding
     slots hold NaN/Inf, which ``values * mask`` cannot do (``nan * 0 == nan``).
@@ -1061,6 +1143,49 @@ class TestFillOutsideMask:
         fill_outside_mask(values, mask).sum().backward()
 
         assert values.grad.tolist() == [[1.0, 0.0]]
+
+
+class TestMicroBatchMetrics:
+    def test_read_returns_each_micro_batch_in_call_order(self) -> None:
+        # Arrange
+        metrics = MicroBatchMetrics(("loss", "kl"))
+
+        # Act
+        metrics.add({"loss": torch.tensor(1.5), "kl": 0.25})
+        metrics.add({"loss": torch.tensor(-2.0, dtype=torch.float64), "kl": 0.5})
+
+        # Assert
+        assert metrics.read() == [{"loss": 1.5, "kl": 0.25}, {"loss": -2.0, "kl": 0.5}]
+
+    def test_means_skip_micro_batches_that_do_not_count(self) -> None:
+        # Arrange
+        metrics = MicroBatchMetrics(("loss",))
+
+        # Act
+        metrics.add({"loss": torch.tensor(1.0)}, counted=torch.tensor(True))
+        metrics.add({"loss": torch.tensor(100.0)}, counted=torch.tensor(False))
+        metrics.add({"loss": torch.tensor(200.0)}, counted=False)
+        metrics.add({"loss": torch.tensor(3.0)})
+
+        # Assert
+        assert metrics.read() == [{"loss": 1.0}, {"loss": 3.0}]
+        assert metrics.means() == {"loss": 2.0}
+
+    def test_means_are_zero_without_counted_micro_batches(self) -> None:
+        metrics = MicroBatchMetrics(("loss", "kl"))
+        metrics.add({"loss": torch.tensor(5.0), "kl": 1.0}, torch.tensor(False))
+
+        assert metrics.read() == []
+        assert metrics.means() == {"loss": 0.0, "kl": 0.0}
+
+    def test_detaches_tensors_that_carry_gradients(self) -> None:
+        weight = torch.tensor(2.0, requires_grad=True)
+        metrics = MicroBatchMetrics(("loss",))
+
+        metrics.add({"loss": weight * 3})
+
+        assert not metrics.rows[0].requires_grad
+        assert metrics.means() == {"loss": 6.0}
 
 
 class TestMaskedMeanAxis:
@@ -1273,6 +1398,28 @@ class TestClippedIsSurrogate:
         expected = -2.0 * ratio  # mean-pooled advantage, NOT 4.0
         assert torch.allclose(pg, expected, atol=1e-5)
 
+    def test_turn_count_above_the_largest_turn_gives_the_same_loss(self):
+        # Arrange
+        tlr, adv, mask, _B, T = self._setup()
+        turn_ids = torch.where(
+            mask.bool(),
+            (torch.arange(T) // 3).unsqueeze(0).expand_as(mask),
+            torch.full_like(mask, -1, dtype=torch.long),
+        )
+        weight = torch.rand_like(tlr)
+
+        # Act
+        inferred = clipped_is_surrogate(
+            tlr, adv, mask, turn_ids, "turn", 0.2, loss_weight=weight
+        )
+        widened = clipped_is_surrogate(
+            tlr, adv, mask, turn_ids, "turn", 0.2, loss_weight=weight, num_turns=5
+        )
+
+        # Assert
+        assert torch.equal(widened[0], inferred[0])
+        assert torch.equal(widened[1], inferred[1])
+
     def test_turn_requires_turn_ids(self):
         tlr, adv, mask, _B, _T = self._setup()
         with pytest.raises(ValueError, match="turn-level surrogate requires turn_ids"):
@@ -1391,6 +1538,37 @@ class TestMakeLlmOptimizer:
         assert by_group["critic"]["lr"] == 2e-4
         assert actor.actor_lora_A in by_group["actor"]["params"]
         assert actor.critic_lora_A in by_group["critic"]["params"]
+
+    def test_fused_steps_match_the_foreach_default(self):
+        # Arrange
+        class Actor(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.actor_lora_A = nn.Parameter(torch.randn(4, 4))
+
+        torch.manual_seed(0)
+        foreach_actor = Actor()
+        fused_actor = Actor()
+        fused_actor.load_state_dict(foreach_actor.state_dict())
+        foreach_opt = make_llm_optimizer(foreach_actor, lr=1e-2, lr_critic=None)
+        fused_opt = make_llm_optimizer(fused_actor, lr=1e-2, lr_critic=None, fused=True)
+        grads = [torch.randn(4, 4) for _ in range(3)]
+
+        # Act
+        for grad in grads:
+            for actor, opt in ((foreach_actor, foreach_opt), (fused_actor, fused_opt)):
+                actor.actor_lora_A.grad = grad.clone()
+                opt.step()
+
+        # Assert: fp32 AdamW on CPU; kernels differ only in operation order.
+        assert fused_opt.optimizer.defaults["fused"] is True
+        assert foreach_opt.optimizer.defaults["fused"] is None
+        torch.testing.assert_close(
+            fused_actor.actor_lora_A,
+            foreach_actor.actor_lora_A,
+            atol=1e-6,
+            rtol=1e-6,
+        )
 
 
 class TestMakeLlmScheduler:
@@ -2700,14 +2878,21 @@ class TestCreateModelFromNameOrPathDefaults:
 
     def test_nemotron_h_omni_forwards_trust_remote_code(self, monkeypatch):
         captured = {}
+        remote_code_loads = []
         monkeypatch.setattr(
             llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
+        )
+        monkeypatch.setattr(
+            llm_utils_module,
+            "load_remote_code",
+            lambda path, _auto_class, trust: remote_code_loads.append((path, trust)),
         )
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
         stub_catalog_model_type(monkeypatch, "nemotron_h_omni")
         create_model_from_name_or_path("nvidia/nemotron-omni")
         assert captured["kwargs"]["attn_implementation"] == "flash_attention_2"
         assert captured["kwargs"]["trust_remote_code"] is True
+        assert remote_code_loads == [("nvidia/nemotron-omni", True)]
 
     def test_caller_trust_remote_code_false_is_not_overwritten(self, monkeypatch):
         captured = {}
@@ -3171,6 +3356,7 @@ def _vllm_config(**overrides):
         "max_loras": 1,
         "max_num_batched_tokens": None,
         "strip_multimodal_towers": False,
+        "limit_mm_per_prompt": None,
     }
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -3225,6 +3411,7 @@ class TestBuildVllmLlmInitKwargs:
             "kv_cache_dtype",
             "kv_cache_memory_bytes",
             "enforce_eager",
+            "limit_mm_per_prompt",
         ):
             assert absent not in kwargs
 
@@ -3239,6 +3426,7 @@ class TestBuildVllmLlmInitKwargs:
                 enforce_eager=True,
                 max_num_batched_tokens=4096,
                 tensor_parallel_size=2,
+                limit_mm_per_prompt={"image": 4, "video": 0},
             ),
             trainer_model_name_or_path="org/base",
             max_model_len=8192,
@@ -3252,6 +3440,7 @@ class TestBuildVllmLlmInitKwargs:
         assert kwargs["kv_cache_memory_bytes"] == 123456
         assert kwargs["enforce_eager"] is True
         assert kwargs["max_num_batched_tokens"] == 4096
+        assert kwargs["limit_mm_per_prompt"] == {"image": 4, "video": 0}
         assert kwargs["seed"] == 2  # process_index // tensor_parallel_size
         assert kwargs["max_lora_rank"] == 64  # trainer rank outranks the config
 
@@ -4572,6 +4761,189 @@ class TestSaveLoraAdapters:
             )
 
         mock_barrier.assert_called_once_with()
+
+
+class TestGatherToHost:
+    def test_copies_do_not_share_storage_with_sources(self):
+        # Arrange
+        weight = torch.ones(2, 2)
+
+        # Act
+        host = gather_to_host([("w", weight)], keep=True)
+        weight.fill_(5.0)
+
+        # Assert
+        assert torch.equal(host["w"], torch.ones(2, 2))
+
+    def test_returns_nothing_when_not_kept(self):
+        host = gather_to_host([("w", torch.ones(2, 2))], keep=False)
+
+        assert host == {}
+
+
+class TestSnapshotLoraAdapters:
+    def test_checkpoint_wrapped_adapters_round_trip(self, tmp_path):
+        # Arrange: the wrapper adds ``_checkpoint_wrapped_module`` to live names only.
+        source = _tiny_nemotron_h_expert_lora(wrap_blocks=True)
+        target = _tiny_nemotron_h_expert_lora(wrap_blocks=True)
+        lora_names = [name for name, _ in source.named_parameters() if ".lora_" in name]
+        with torch.no_grad():
+            for name, param in target.named_parameters():
+                if ".lora_" in name:
+                    param.zero_()
+
+        # Act
+        snapshot = snapshot_lora_adapters(source, ["actor"])
+        write_lora_adapters(snapshot, directory_opener(tmp_path))
+        load_lora_adapters(target, tmp_path, "actor")
+
+        # Assert
+        source_params = dict(source.named_parameters())
+        target_params = dict(target.named_parameters())
+        assert len(snapshot.adapters["actor"]) == len(lora_names)
+        assert all(
+            torch.equal(target_params[name], source_params[name]) for name in lora_names
+        )
+
+    def test_written_adapter_holds_weights_at_snapshot_time(self, tmp_path):
+        # Arrange
+        model = nn.Linear(2, 2)
+        lora = torch.ones(2, 2)
+
+        # Act
+        with patch.object(
+            llm_utils_module,
+            "get_peft_model_state_dict",
+            return_value={"w": lora},
+        ):
+            snapshot = snapshot_lora_adapters(model, ["actor"])
+        lora.fill_(7.0)
+        write_lora_adapters(snapshot, directory_opener(tmp_path))
+
+        # Assert
+        saved = load_file(str(tmp_path / "actor" / "adapter_model.safetensors"))
+        assert torch.equal(saved["w"], torch.ones(2, 2))
+
+    def test_non_main_rank_holds_empty_snapshot(self, tmp_path):
+        # Arrange
+        model = nn.Linear(2, 2)
+
+        # Act
+        with patch.object(
+            llm_utils_module,
+            "get_peft_model_state_dict",
+            return_value={"w": torch.ones(2, 2)},
+        ):
+            snapshot = snapshot_lora_adapters(model, ["actor"], is_main=False)
+        write_lora_adapters(snapshot, directory_opener(tmp_path))
+
+        # Assert
+        assert snapshot.adapters == {}
+        assert not (tmp_path / "actor").exists()
+
+
+class TestWriteLoraAdapters:
+    def test_writes_weights_config_and_value_head(self, tmp_path):
+        # Arrange
+        config = LoraConfig(r=2, lora_alpha=4, target_modules=["c_attn"])
+        snapshot = LoraAdapterSnapshot(
+            adapters={"actor": {"w": torch.ones(2, 2)}},
+            configs={"actor": config},
+            value_head={"v_head.weight": torch.full((1, 2), 3.0)},
+        )
+        config.save_pretrained(str(tmp_path / "reference"))
+
+        # Act
+        write_lora_adapters(snapshot, directory_opener(tmp_path / "checkpoint"))
+
+        # Assert
+        checkpoint = tmp_path / "checkpoint"
+        assert sorted(
+            str(path.relative_to(checkpoint))
+            for path in checkpoint.rglob("*")
+            if path.is_file()
+        ) == [
+            "actor/adapter_config.json",
+            "actor/adapter_model.safetensors",
+            "pytorch_model.bin",
+        ]
+        assert (checkpoint / "actor" / "adapter_config.json").read_bytes() == (
+            tmp_path / "reference" / "adapter_config.json"
+        ).read_bytes()
+        assert torch.equal(
+            load_file(str(checkpoint / "actor" / "adapter_model.safetensors"))["w"],
+            torch.ones(2, 2),
+        )
+        assert torch.equal(
+            torch.load(checkpoint / "pytorch_model.bin")["v_head.weight"],
+            torch.full((1, 2), 3.0),
+        )
+
+
+class TestWriteSafetensors:
+    def test_round_trips_mixed_dtypes_and_metadata(self, tmp_path):
+        # Arrange
+        torch.manual_seed(0)
+        tensors = {
+            "bf16": torch.randn(3, 5).to(torch.bfloat16),
+            "f32": torch.randn(7),
+            "i8": torch.arange(5, dtype=torch.int8),
+            "mask": torch.tensor([True, False, True]),
+            "scalar": torch.tensor(2.5, dtype=torch.float64),
+            "empty": torch.empty(0, 4),
+            "transposed": torch.randn(4, 3).t(),
+        }
+        path = tmp_path / "adapter_model.safetensors"
+
+        # Act
+        with path.open("wb") as file:
+            write_safetensors(tensors, file, metadata={"format": "pt"})
+
+        # Assert
+        loaded = load_file(str(path))
+        with safe_open(str(path), framework="pt") as reader:
+            metadata = reader.metadata()
+        assert metadata == {"format": "pt"}
+        assert loaded.keys() == tensors.keys()
+        for name, tensor in tensors.items():
+            assert loaded[name].dtype == tensor.dtype
+            assert torch.equal(loaded[name], tensor)
+
+    def test_matches_safetensors_load_of_reference_file(self, tmp_path):
+        # Arrange
+        torch.manual_seed(0)
+        tensors = {"a": torch.randn(2, 3), "b": torch.randn(4).to(torch.float16)}
+        save_file(tensors, str(tmp_path / "reference.safetensors"))
+        path = tmp_path / "streamed.safetensors"
+
+        # Act
+        with path.open("wb") as file:
+            write_safetensors(tensors, file)
+
+        # Assert
+        reference = load_file(str(tmp_path / "reference.safetensors"))
+        streamed = load_file(str(path))
+        assert all(torch.equal(streamed[name], reference[name]) for name in tensors)
+        assert (
+            path.stat().st_size == (tmp_path / "reference.safetensors").stat().st_size
+        )
+
+    def test_rejects_unsupported_dtype(self, tmp_path):
+        with (
+            (tmp_path / "out.safetensors").open("wb") as file,
+            pytest.raises(KeyError, match="complex64"),
+        ):
+            write_safetensors({"z": torch.zeros(2, dtype=torch.complex64)}, file)
+
+
+class TestDirectoryOpener:
+    def test_creates_parent_directories(self, tmp_path):
+        open_file = directory_opener(tmp_path)
+
+        with open_file("actor/nested/data.bin") as file:
+            file.write(b"payload")
+
+        assert (tmp_path / "actor" / "nested" / "data.bin").read_bytes() == b"payload"
 
 
 class TestLoadLoraAdapters:

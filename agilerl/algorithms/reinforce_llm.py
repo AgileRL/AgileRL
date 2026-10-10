@@ -10,8 +10,8 @@ from typing import TYPE_CHECKING, Any, Literal
 import numpy as np
 import torch
 
-from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
-from agilerl.algorithms.core import ActionResult, LLMAlgorithm
+from agilerl import HAS_LIGER_KERNEL
+from agilerl.algorithms.core import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 
 if TYPE_CHECKING:
@@ -29,12 +29,16 @@ else:
     LigerFusedLinearPolicyLossFunction = None  # type: ignore[assignment]
     apply_fused_policy_loss = None  # type: ignore[assignment]
 from agilerl.components.llm_rollout_data import EpisodeSegments
-from agilerl.distributed import FSDPConfig, aggregate_metrics_dict, resolve_device
+from agilerl.distributed import (
+    FSDPConfig,
+    aggregate_metrics_dict,
+    resolve_device,
+)
 from agilerl.protocols import (
     PeftModelProtocol,
     PreTrainedModelProtocol,
 )
-from agilerl.typing import LLMObsType, LLMRolloutExperiences
+from agilerl.typing import LLMRolloutExperiences
 from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
     VLLMConfig,
@@ -45,19 +49,16 @@ from agilerl.utils.llm_utils import (
     REINFORCE_METRIC_NAMES,
     VLLM_IS_METRIC_NAMES,
     BitsAndBytesConfig,
+    MicroBatchMetrics,
     attention_mask_from_padded_ids,
     clipped_is_surrogate,
     masked_mean,
-    normalize_prompt_batch,
     pool_by_turns,
     resolve_batch_advantage_granularity,
     validate_importance_sampling_level,
 )
 from agilerl.utils.segment_rows import filler_stand_in
 from agilerl.utils.vision_rows import VisionRows
-
-if HAS_LLM_DEPENDENCIES:
-    from transformers import GenerationConfig
 
 
 class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
@@ -127,6 +128,9 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
     :type min_output_tokens: int | None
     :param max_model_len: Maximum context window length.
     :type max_model_len: int
+    :param max_row_tokens: Longest training row (prompt plus completion) the
+        memory estimate sizes for. ``None`` uses ``max_model_len``.
+    :type max_row_tokens: int | None, optional
     :param hf_generate_chunk_size: Number of prompts per HuggingFace generation
         chunk. Ignored when colocated.
     :type hf_generate_chunk_size: int | None, optional
@@ -271,6 +275,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         max_output_tokens: int | None = None,
         min_output_tokens: int | None = None,
         max_model_len: int = 1024,
+        max_row_tokens: int | None = None,
         hf_generate_chunk_size: int | None = None,
         lora_config: LoraConfig | None = None,
         cosine_lr_schedule_config: CosineLRScheduleConfig | None = None,
@@ -357,6 +362,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         self._setup_generation(
             max_output_tokens, min_output_tokens, max_model_len, hf_generate_chunk_size
         )
+        self.max_row_tokens = max_row_tokens
         self._setup_actors(actor_network, clone=clone)
 
         self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
@@ -369,58 +375,6 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
             *VLLM_IS_METRIC_NAMES,
         ):
             self.metrics.register(m)
-
-    def get_action(
-        self,
-        obs: LLMObsType,
-        training: bool = True,
-        **kwargs: Any,
-    ) -> ActionResult:
-        """Generate completion tokens for each prompt in the batch.
-
-        :param obs: A single prompt dict or a list of HF-style prompt dicts.
-        :type obs: LLMObsType
-        :param training: If ``False``, use near-deterministic decoding where applicable.
-        :type training: bool
-        :param kwargs: Additional keyword arguments accepted for base-class
-            signature compatibility. Unused in this implementation.
-        :type kwargs: Any
-        :return: An :class:`ActionResult` of per-prompt completion token IDs and
-            masks. When the vLLM sampling-mismatch correction is enabled
-            (training rollouts on the vLLM path), ``sampling_logps`` carries
-            the captured per-row sampling logprobs; otherwise it is ``None``.
-        :rtype: ActionResult
-        """
-        prompts = normalize_prompt_batch(obs)
-        # Capture vLLM sampling logprobs only for training rollouts when the
-        # mismatch correction is enabled; ``None`` on the HF path / eval.
-        sampling_logps: list[torch.Tensor | None] | None = None
-        capture_sampling_logps = (
-            training and self.colocated and self.vllm_importance_sampling_correction
-        )
-
-        with self.select_adapter("actor"):
-            self.actor.eval()
-            if not self.colocated:
-                token_ids_list, completion_masks = self._generate_with_hf(prompts)
-            else:
-                self._prepare_vllm_for_generation()
-                (
-                    token_ids_list,
-                    completion_masks,
-                    sampling_logps,
-                ) = self._generate_with_vllm_colocate(
-                    # RolloutPrompt is a TypedDict, i.e. a plain dict at
-                    # runtime; the base helper takes untyped prompt dicts.
-                    prompts,
-                    1,
-                    temperature=self.temperature
-                    if training
-                    else 0.01,  # Almost deterministic for evaluation
-                    capture_sampling_logps=capture_sampling_logps,
-                )
-
-        return ActionResult(token_ids_list, completion_masks, sampling_logps)
 
     def learn(
         self,
@@ -475,7 +429,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         phase_timer = self._start_learn_phases()
         self._prepare_vllm_for_training()
 
-        with self.trainer_offload_context():
+        with self.trainer_offload_context(), self._vision_cache.step():
             token_ids, action_masks, turn_ids, rewards_2d = self._stack_rollout_batch(
                 experiences, turn_ids
             )
@@ -488,20 +442,14 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                 if hasattr(self, "micro_batch_size_per_gpu")
                 else num_samples
             )
-            learn_metrics = {
-                "loss": 0.0,
-                "kl": 0.0,
-                "pg_loss": 0.0,
-                "entropy": 0.0,
-            }
-            updates = 0
+            learn_metrics = MicroBatchMetrics(("loss", "kl", "pg_loss", "entropy"))
 
             has_segments = self._has_episode_segments(episode_segments, num_samples)
-            rows = None
+            split = rows = None
             accumulation_steps = None
             if has_segments:
                 self._check_segments_supported(self.importance_sampling_level)
-                rows, accumulation_steps = self._segment_rows(
+                split, rows = self._segment_rows(
                     token_ids,
                     action_masks,
                     episode_segments,
@@ -514,11 +462,15 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                 pixel_image_counts = rows.pixel_image_counts
                 batch_size = self.micro_batch_size_per_gpu
             phase_timer.mark("prepare")
+            no_grad_images = 0 if pixel_values is None else int(pixel_values.shape[0])
             reference_log_probs, old_log_probs, _ = self._fused_forward_no_grad(
                 token_ids if rows is None else rows.token_ids,
                 batch_size,
                 pixel_values=pixel_values,
                 pixel_image_counts=pixel_image_counts,
+                image_keys=None
+                if pixel_values is None
+                else torch.arange(no_grad_images),
             )
             phase_timer.mark("no_grad_forward")
             if rows is not None:
@@ -548,54 +500,74 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                 )
             del token_rewards, token_penalised_rewards
 
-            sampling_log_probs, is_metrics = (
+            sampling_log_probs, is_metrics, is_excluded = (
                 self._aligned_sampling_logprobs_and_metrics(
                     sampling_logps, action_masks, old_log_probs
                 )
             )
 
             row_episodes = np.arange(num_samples)
-            if rows is not None:
+            image_keys = None if pixel_values is None else torch.arange(no_grad_images)
+            if split is not None:
+                frames = [
+                    (turn_ids, -1),
+                    (old_log_probs, 1.0),
+                    (reference_log_probs, 1.0),
+                    (advantages, 0.0),
+                ]
+                if sampling_log_probs is not None:
+                    frames.append((sampling_log_probs, 0.0))
+                rows, row_frames, accumulation_steps, image_keys = (
+                    self._balanced_segment_frames(
+                        split,
+                        [(split.split_frame(frame, pad), pad) for frame, pad in frames],
+                        num_samples,
+                        image_token_id,
+                    )
+                )
+                turn_ids, old_log_probs, reference_log_probs, advantages = row_frames[
+                    :4
+                ]
+                if sampling_log_probs is not None:
+                    sampling_log_probs = row_frames[4]
                 token_ids = rows.token_ids
                 action_masks = rows.action_masks
-                turn_ids = rows.split_frame(turn_ids, -1)
-                old_log_probs = rows.split_frame(old_log_probs, 1.0)
-                reference_log_probs = rows.split_frame(reference_log_probs, 1.0)
-                advantages = rows.split_frame(advantages, 0.0)
-                if sampling_log_probs is not None:
-                    sampling_log_probs = rows.split_frame(sampling_log_probs, 0.0)
+                pixel_values = rows.pixel_values
+                pixel_image_counts = rows.pixel_image_counts
                 row_episodes = rows.row_episodes
                 num_samples = int(token_ids.shape[0])
+            # At least 1: filler stand-in rows carry turn 0.
+            num_turns = max(int(turn_ids.max().item()) + 1, 1)
             batch_idxs = np.arange(num_samples)
             filler_rows = row_episodes < 0
             padding_stats = self._row_padding_stats(token_ids, row_episodes, batch_idxs)
-            vision_rows = (
-                VisionRows(pixel_values, pixel_image_counts)
-                if pixel_values is not None
-                else None
-            )
+            vision_rows = None
+            if pixel_values is not None:
+                vision_rows = VisionRows(pixel_values, pixel_image_counts, image_keys)
             phase_timer.mark("prepare")
 
+            backward_steps = accumulation_steps or self.gradient_accumulation_steps
+            held_loss: torch.Tensor | None = None
             self.actor.train()
-            for _epoch_idx in range(self.update_epochs):
-                self.rng.shuffle(batch_idxs)
+            for order in self._epoch_orders(
+                batch_idxs, self.update_epochs, aligned=has_segments
+            ):
                 loss_scales = None
                 if accumulation_steps is not None:
                     loss_scales = self._segment_loss_scales(
                         np.array(
                             [
-                                filler_rows[
-                                    batch_idxs[start : start + batch_size]
-                                ].all()
+                                filler_rows[order[start : start + batch_size]].all()
                                 for start in range(0, num_samples, batch_size)
                             ]
                         ),
                         accumulation_steps,
                     )
                 for start in range(0, num_samples, batch_size):
-                    minibatch_idxs = batch_idxs[
+                    minibatch_idxs = order[
                         start : min((start + batch_size), num_samples)
                     ]
+                    rows_index = self._device_index(minibatch_idxs, token_ids.device)
                     phase_timer.mark("other")
                     loss_scale = (
                         1.0
@@ -613,7 +585,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                         batch_advantages,
                         batch_turn_ids,
                     ) = get_experiences_samples(
-                        minibatch_idxs,
+                        rows_index,
                         token_ids,
                         action_masks,
                         old_log_probs,
@@ -628,17 +600,20 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                         )
 
                     batch_mask_bool = batch_action_mask.bool()
-                    batch_pixel_values = (
-                        vision_rows.for_minibatch(minibatch_idxs, num_samples)
-                        if vision_rows is not None
-                        else None
-                    )
+                    batch_pixel_values = batch_keys = None
+                    if vision_rows is not None:
+                        batch_pixel_values = vision_rows.for_minibatch(
+                            minibatch_idxs, num_samples
+                        )
+                        batch_keys = vision_rows.keys_for_minibatch(
+                            minibatch_idxs, num_samples
+                        )
 
                     # Slice the aligned vLLM sampling logprobs for this
                     # minibatch; ``None`` when the correction is off / no
                     # logprobs were captured.
                     batch_sampling_log_probs = (
-                        sampling_log_probs[minibatch_idxs]
+                        sampling_log_probs[rows_index]
                         if sampling_log_probs is not None
                         else None
                     )
@@ -670,29 +645,39 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                         # Works for both granularities since per-turn ReBN
                         # is already broadcast to per-token by the caller. The
                         # token-level vLLM correction is fused in via vllm_is_ratio.
-                        pg_loss, metrics = self._reinforce_loss_liger(
-                            batch_ids,
-                            batch_action_mask,
-                            batch_old_log_probs,
-                            batch_reference_log_probs,
-                            batch_advantages,
-                            batch_turn_ids,
-                            batch_sampling_log_probs,
-                            batch_pixel_values,
+                        with self._vision_cache.images(batch_keys):
+                            pg_loss, metrics = self._reinforce_loss_liger(
+                                batch_ids,
+                                batch_action_mask,
+                                batch_old_log_probs,
+                                batch_reference_log_probs,
+                                batch_advantages,
+                                batch_turn_ids,
+                                num_turns,
+                                batch_sampling_log_probs,
+                                batch_pixel_values,
+                            )
+                        held_loss = self._hold_loss_until_step(
+                            pg_loss, held_loss, backward_steps
                         )
-                        self._raise_if_loss_not_finite_on_any_rank(pg_loss)
                         phase_timer.mark("forward")
                         self._backward_pass(pg_loss * loss_scale, accumulation_steps)
                         if is_filler:
                             continue
-                        learn_metrics["kl"] += metrics["kl"]
-                        learn_metrics["entropy"] += metrics["entropy"]
-                        learn_metrics["pg_loss"] += metrics["pg_loss"]
-                        learn_metrics["loss"] += pg_loss.item()
-                        updates += 1
+                        learn_metrics.add(
+                            {
+                                "loss": pg_loss,
+                                "kl": metrics["kl"],
+                                "pg_loss": metrics["pg_loss"],
+                                "entropy": metrics["entropy"],
+                            }
+                        )
                         continue
 
-                    with self.select_adapter("actor"):
+                    with (
+                        self.select_adapter("actor"),
+                        self._vision_cache.images(batch_keys),
+                    ):
                         batch_log_probs = self._get_logprobs(
                             batch_ids,
                             batch_size=batch_size,
@@ -734,23 +719,29 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                         self.clip_coef,
                         loss_weight=loss_weight,
                         turn_reduction=self.turn_ratio_pooling,
+                        num_turns=num_turns,
                     )
 
-                    self._raise_if_loss_not_finite_on_any_rank(pg_loss)
+                    held_loss = self._hold_loss_until_step(
+                        pg_loss, held_loss, backward_steps
+                    )
                     phase_timer.mark("forward")
                     self._backward_pass(pg_loss * loss_scale, accumulation_steps)
                     if is_filler:
                         continue
+                    learn_metrics.add(
+                        {
+                            "loss": pg_loss,
+                            "kl": masked_mean(kl, batch_action_mask),
+                            "pg_loss": pg_loss,
+                            "entropy": masked_entropy,
+                        }
+                    )
+            # Gradients still pending a step carry into the next learn call.
+            if held_loss is not None:
+                self._raise_if_loss_not_finite_on_any_rank(held_loss)
 
-                    learn_metrics["kl"] += masked_mean(kl, batch_action_mask).item()
-                    learn_metrics["entropy"] += masked_entropy.item()
-                    learn_metrics["pg_loss"] += pg_loss.item()
-                    learn_metrics["loss"] += pg_loss.item()
-                    updates += 1
-
-        averaged = {
-            metric: value / max(updates, 1) for metric, value in learn_metrics.items()
-        }
+        averaged = learn_metrics.means()
         result = dict(averaged)
         # Sampling-mismatch metrics are computed once over the full batch, so
         # they bypass the per-update averaging above.
@@ -775,6 +766,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                 **padding_stats,
                 **phase_seconds,
             },
+            excluded=is_excluded,
         )
         agg["completion_length"] = int(agg["completion_length"])
         for key, value in agg.items():
@@ -864,41 +856,6 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                 once_attr="_reinforce_liger_mem_warned",
             )
 
-    def _setup_generation(
-        self,
-        max_output_tokens: int | None,
-        min_output_tokens: int | None,
-        max_model_len: int,
-        hf_generate_chunk_size: int | None,
-    ) -> None:
-        """Build the HF generation config."""
-        self.max_output_tokens = (
-            max_output_tokens if max_output_tokens is not None else max_model_len
-        )
-        self.min_output_tokens = min_output_tokens
-        self.max_model_len = max_model_len
-        self.hf_generate_chunk_size = int(
-            1 if hf_generate_chunk_size is None else max(1, hf_generate_chunk_size)
-        )
-        if self.colocated and hf_generate_chunk_size is not None:
-            warnings.warn(
-                "hf_generate_chunk_size is only used for HuggingFace generation "
-                "and is ignored when colocated.",
-                stacklevel=3,
-            )
-        self.generation_config = GenerationConfig(
-            do_sample=True,
-            temperature=self.temperature,
-            max_length=self.max_model_len,
-            max_new_tokens=max_output_tokens,
-            min_new_tokens=min_output_tokens,
-            pad_token_id=self.pad_token_id,
-            repetition_penalty=self.repetition_penalty,
-            top_p=self.top_p,
-            top_k=self.top_k,
-            min_p=self.min_p,
-        )
-
     def _reinforce_loss_liger(
         self,
         batch_ids: torch.Tensor,
@@ -906,10 +863,11 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         batch_old_log_probs: torch.Tensor,
         batch_reference_log_probs: torch.Tensor,
         batch_advantages: torch.Tensor,
-        turn_ids: torch.Tensor | None = None,
+        turn_ids: torch.Tensor,
+        num_turns: int,
         sampling_log_probs: torch.Tensor | None = None,
         pixel_values: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, dict[str, float]]:
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """REINFORCE clipped policy loss via the fused-linear PPO Function.
 
         Captures the last hidden state via an ``lm_head`` forward-pre-hook
@@ -932,12 +890,16 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         :type batch_reference_log_probs: torch.Tensor
         :param batch_advantages: ``(B, seq_len-1)`` per-token advantages.
         :type batch_advantages: torch.Tensor
+        :param turn_ids: ``(B, seq_len-1)`` turn index per token.
+        :type turn_ids: torch.Tensor
+        :param num_turns: Turn count of the whole learn batch.
+        :type num_turns: int
         :param pixel_values: Vision rows of the minibatch's token rows, or
             ``None`` for text.
         :type pixel_values: torch.Tensor | None
         :return: ``(pg_loss, metrics)`` where ``metrics`` carries
-            ``kl``, ``pg_loss``, ``entropy``, ``clipfrac`` Python floats.
-        :rtype: tuple[torch.Tensor, dict[str, float]]
+            ``kl``, ``pg_loss``, ``entropy``, ``clipfrac`` detached scalar tensors.
+        :rtype: tuple[torch.Tensor, dict[str, torch.Tensor]]
         """
         if not HAS_LIGER_KERNEL:
             msg = (
@@ -964,11 +926,8 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         full_turn_mask: torch.Tensor | None = None
         max_turns: int | None = None
         if is_level == "turn":
-            if turn_ids is None:
-                msg = "importance_sampling_level='turn' requires turn_ids."
-                raise ValueError(msg)
             turn_ids = turn_ids.to(self.device)
-            max_turns = int(turn_ids.max().item()) + 1
+            max_turns = num_turns
             full_turn_mask = torch.zeros(
                 turn_ids.shape[0], max_turns, device=self.device
             )
@@ -1052,12 +1011,12 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                 turn_log_ratio_reduction=self.turn_ratio_pooling,
                 vllm_is_ratio=vllm_is_ratio,
             )
-        # aux = [kl, clipfrac, pg_loss, entropy] scalars in fp32.
+        # aux = [kl, clipfrac, pg_loss, entropy, kl_clamp_frac] scalars in fp32.
         metrics = {
-            "kl": float(aux[0].item()),
-            "clipfrac": float(aux[1].item()),
-            "pg_loss": float(aux[2].item()),
-            "entropy": float(aux[3].item()),
+            "kl": aux[0].detach(),
+            "clipfrac": aux[1].detach(),
+            "pg_loss": aux[2].detach(),
+            "entropy": aux[3].detach(),
         }
         return loss, metrics
 

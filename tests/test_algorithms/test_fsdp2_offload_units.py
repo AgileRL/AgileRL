@@ -60,6 +60,7 @@ def _make_wrap_stub(**overrides) -> MagicMock:
     agent.lr_critic = None
     agent.device = "cpu"
     agent.lr_scheduler = None
+    agent._resolve_fsdp_config = MethodType(LLMAlgorithm._resolve_fsdp_config, agent)
     for k, v in overrides.items():
         setattr(agent, k, v)
     return agent
@@ -733,7 +734,10 @@ class TestFsdpResidencyGuards:
     """Control-flow guards for the no-full-GPU-model invariant."""
 
     def test_wrap_uses_materialize_helper(self):
-        agent = _make_wrap_stub(device="cuda:0")
+        agent = _make_wrap_stub(
+            device="cuda:0",
+            fsdp_config=FSDPConfig(routed_expert_chunk_mib=64, optim_cpu_offload=True),
+        )
         with patch(
             "agilerl.distributed.runtime.materialize_fsdp2_from_cpu_state",
             side_effect=lambda m, _d, _c, **_k: m,
@@ -1075,7 +1079,7 @@ class TestMaterializeFsdp2FromCpuState:
             patch("agilerl.distributed.fsdp._share_fsdp_comm_streams"),
         ):
             out = materialize_fsdp2_from_cpu_state(
-                model, "cpu", FSDPConfig(cpu_offload=True)
+                model, "cpu", FSDPConfig(cpu_offload=True, routed_expert_chunk_mib=64)
             )
 
         assert out is model
@@ -1110,7 +1114,7 @@ class TestMaterializeFsdp2FromCpuState:
             patch("agilerl.distributed.fsdp._share_fsdp_comm_streams"),
         ):
             out = materialize_fsdp2_from_cpu_state(
-                model, "cpu", FSDPConfig(cpu_offload=True)
+                model, "cpu", FSDPConfig(cpu_offload=True, routed_expert_chunk_mib=64)
             )
 
         assert out is model
@@ -1161,7 +1165,9 @@ class TestMaterializeFsdp2FromCpuState:
             patch("agilerl.distributed.fsdp.restore_after_to_empty"),
             patch("agilerl.distributed.fsdp._share_fsdp_comm_streams"),
         ):
-            materialize_fsdp2_from_cpu_state(model, "cpu", FSDPConfig(cpu_offload=True))
+            materialize_fsdp2_from_cpu_state(
+                model, "cpu", FSDPConfig(cpu_offload=True, routed_expert_chunk_mib=64)
+            )
 
         assert torch.equal(model.weight, expected)
 
@@ -1189,7 +1195,9 @@ class TestMaterializeFsdp2FromCpuState:
             patch("agilerl.distributed.fsdp.restore_after_to_empty"),
             patch("agilerl.distributed.fsdp._share_fsdp_comm_streams"),
         ):
-            materialize_fsdp2_from_cpu_state(model, "cpu", FSDPConfig(cpu_offload=True))
+            materialize_fsdp2_from_cpu_state(
+                model, "cpu", FSDPConfig(cpu_offload=True, routed_expert_chunk_mib=64)
+            )
 
         assert loaded == ["shard_load"]
 
@@ -1224,7 +1232,11 @@ class TestMaterializeFsdp2FromCpuState:
         materialize_fsdp2_from_cpu_state(
             model,
             "cpu",
-            FSDPConfig(param_dtype="float32", reduce_dtype="float32"),
+            FSDPConfig(
+                param_dtype="float32",
+                reduce_dtype="float32",
+                routed_expert_chunk_mib=64,
+            ),
             parallel_mesh=ParallelMesh(world=world, hsdp=world["shard"]),
             gradient_checkpointing=True,
         )

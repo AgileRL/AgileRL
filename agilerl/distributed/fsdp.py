@@ -39,7 +39,6 @@ from agilerl.distributed.expert_parallel import (
 )
 from agilerl.distributed.fsdp_blocks import (
     apply_fsdp2,
-    compile_dense_block_modules,
     resolve_causal_lm,
 )
 from agilerl.distributed.fsdp_meta import (
@@ -54,6 +53,7 @@ from agilerl.distributed.tensor_parallel import (
     apply_tensor_parallel,
     restore_tensor_parallel,
 )
+from agilerl.lora.moe import set_routed_experts_chunk_bytes
 
 WRAPPER_FQN_PARTS = frozenset({"_checkpoint_wrapped_module", "_fsdp_wrapped_module"})
 
@@ -1021,7 +1021,7 @@ def _load_sharded_weights_from_safetensors(model: nn.Module) -> None:
 def materialize_fsdp2_from_cpu_state(
     model: nn.Module,
     device: str | torch.device,
-    config: FSDPConfig | None = None,
+    config: FSDPConfig,
     parallel_mesh: ParallelMesh | None = None,
     gradient_checkpointing: bool = False,
 ) -> nn.Module:
@@ -1037,8 +1037,8 @@ def materialize_fsdp2_from_cpu_state(
     :type model: nn.Module
     :param device: Compute device for sharded parameter storage.
     :type device: str | torch.device
-    :param config: FSDP2 settings.
-    :type config: FSDPConfig | None
+    :param config: FSDP2 settings with ``routed_expert_chunk_mib`` set.
+    :type config: FSDPConfig
     :param parallel_mesh: HSDP / EP / TP mesh views; required when
         ``config.ep`` or ``config.tp`` is set, or ``config.shard_group_size``
         is smaller than the world.
@@ -1050,7 +1050,6 @@ def materialize_fsdp2_from_cpu_state(
     :return: The sharded model (same object).
     :rtype: nn.Module
     """
-    config = config or FSDPConfig()
     hsdp = config.shard_group_size not in (None, get_world_size())
     if parallel_mesh is None and (config.ep > 1 or config.tp > 1 or hsdp):
         msg = (
@@ -1071,7 +1070,14 @@ def materialize_fsdp2_from_cpu_state(
             for key, value in model.named_buffers()
             if key not in cpu_state
         }
+    if config.routed_expert_chunk_mib is None:
+        msg = (
+            "FSDPConfig.routed_expert_chunk_mib is unset. LLMAlgorithm.wrap_models "
+            "resolves it from the memory estimate; pass a MiB value here."
+        )
+        raise ValueError(msg)
     model.to_empty(device="meta")
+    set_routed_experts_chunk_bytes(model, config.routed_expert_chunk_mib * 1024 * 1024)
     mesh = None if parallel_mesh is None else parallel_mesh.hsdp
     ep_mesh = None if parallel_mesh is None else parallel_mesh.ep
     tp_mesh = None if parallel_mesh is None or config.tp <= 1 else parallel_mesh.tp
@@ -1098,10 +1104,6 @@ def materialize_fsdp2_from_cpu_state(
             expert_mesh = parallel_mesh.dp_mod_ep
     if config.tp > 1:
         apply_tensor_parallel(model, tp_mesh)
-    # Before apply_fsdp2: fully_shard renames block classes, hiding them from
-    # the _no_split_modules lookup.
-    if config.compile_blocks:
-        compile_dense_block_modules(model, config.compile_backend)
     apply_fsdp2(
         model,
         config,
@@ -1182,6 +1184,10 @@ class CPUOffloadOptimizer:
 
     Handles FSDP2 ``DTensor`` optimizer states by swapping ``_local_tensor``
     between CPU and GPU while preserving the DTensor wrapper.
+
+    With ``pin_memory``, each state keeps one pinned host buffer. Both
+    directions copy asynchronously and a move to CPU ends with one stream
+    sync, so host readers see finished values.
     """
 
     def __init__(
@@ -1190,14 +1196,18 @@ class CPUOffloadOptimizer:
         self.optimizer = optimizer
         self.pin_memory = pin_memory
         self._initialized = False
+        self.host_buffers: dict[torch.Tensor, dict[str, torch.Tensor]] = {}
 
-    def _to_device(self, tensor: torch.Tensor, device: str) -> torch.Tensor:
-        if device == "cpu":
-            moved = tensor.to("cpu")
-            if self.pin_memory and not moved.is_pinned():
-                return moved.pin_memory()
-            return moved
-        return tensor.to(device, non_blocking=True)
+    def _to_host(
+        self, tensor: torch.Tensor, buffer: torch.Tensor | None
+    ) -> torch.Tensor:
+        if (
+            buffer is None
+            or buffer.shape != tensor.shape
+            or buffer.dtype != tensor.dtype
+        ):
+            return tensor.to("cpu").pin_memory()
+        return buffer.copy_(tensor, non_blocking=True)
 
     def _move_states(self, device: str) -> None:
         # Non-fused, non-capturable Adam reads ``step`` on CPU; a device copy
@@ -1206,17 +1216,31 @@ class CPUOffloadOptimizer:
             self.optimizer.defaults.get("fused")
             or self.optimizer.defaults.get("capturable")
         )
-        for p in self.optimizer.state:
-            state = self.optimizer.state[p]
+        copied_from_cuda = False
+        for p, state in self.optimizer.state.items():
+            buffers = self.host_buffers.setdefault(p, {})
             for k, v in state.items():
                 if k == "step" and not step_on_device:
                     continue
+                local = v._local_tensor if isinstance(v, DTensor) else v
+                if not isinstance(local, torch.Tensor):
+                    continue
+                if device == "cpu" and not self.pin_memory:
+                    moved = local.to("cpu")
+                elif device == "cpu":
+                    copied_from_cuda = copied_from_cuda or local.is_cuda
+                    moved = self._to_host(local, buffers.get(k))
+                    buffers[k] = moved
+                else:
+                    moved = local.to(device, non_blocking=True)
                 if isinstance(v, DTensor):
                     new_dt = copy.copy(v)
-                    new_dt._local_tensor = self._to_device(v._local_tensor, device)
+                    new_dt._local_tensor = moved
                     state[k] = new_dt
-                elif isinstance(v, torch.Tensor):
-                    state[k] = self._to_device(v, device)
+                else:
+                    state[k] = moved
+        if copied_from_cuda:
+            torch.cuda.current_stream().synchronize()
 
     def step(self, closure: Callable[[], float] | None = None) -> float | None:
         if not self._initialized:

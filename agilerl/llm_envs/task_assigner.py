@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal, TypedDict
 
@@ -15,8 +16,10 @@ __all__ = ["GroupSuccess", "TaskAssigner", "TaskRowOutcome", "TaskRowStats"]
 
 # A row's outcome counts halve after this many newer outcomes of that row.
 TASK_OUTCOME_HALF_LIFE = 8
-# Decayed counts stay below 1 / (1 - decay) ~= 12, so a row's weight stays above ~0.07.
+# Decayed counts stay below 1 / (1 - decay) ~= 12, so a row with no family keeps a
+# weight above ~0.07.
 TASK_OUTCOME_DECAY = 0.5 ** (1 / TASK_OUTCOME_HALF_LIFE)
+DEFAULT_FAMILY_PRIOR_STRENGTH = 1.0
 
 # Whether a group's members all reached the success threshold, none did, or some did.
 GroupSuccess = Literal["tied_failure", "mixed", "tied_success"]
@@ -34,7 +37,8 @@ class TaskRowStats:
     :param row: Dataset row index.
     :param informative: Decayed count of groups whose rewards differed.
     :param observed: Decayed count of finished groups.
-    :param weight: ``(informative + 1) / (observed + 2)``; ``0.5`` for an unseen row.
+    :param weight: ``(informative + 1) / (observed + 2)``, ``0.5`` for an unseen row;
+        for a row in a family, ``(informative + k * family_rate) / (observed + k)``.
     :param tied_failure: Groups where no member reached the success threshold.
     :param mixed: Groups where some members reached the success threshold.
     :param tied_success: Groups where every member reached the success threshold.
@@ -87,16 +91,25 @@ def _mix_seed(value: int) -> int:
 class TaskAssigner:
     """Assign each episode a ``(seed, row_index)`` task; a GRPO group shares one.
 
-    Dataset rows are reshuffled each epoch and split into one equal shard per
-    data-parallel rank; a procedural env has no rows and is seeded instead.
+    Rank ``r`` owns rows ``r, r + world_size, r + 2 * world_size, ...``, so a
+    dataset ordered by site or template gives every rank the same mix. Each
+    shard has the same size and is reshuffled each epoch; a procedural env has
+    no rows and is seeded instead.
     With ``adaptive``, each row is instead drawn from the shard with probability
     proportional to its :class:`TaskRowStats` weight, fed by :meth:`record_outcome`.
+
+    A row in a family starts at its family's pooled informative rate over this
+    shard, and moves to its own rate as its groups outnumber
+    ``family_prior_strength``.
 
     :param dataset_size: Rows in the env's dataset; ``0`` for a procedural env.
     :param seed: Seed for the per-epoch shuffle or weighted draw (``None`` -> a fixed default).
     :param rank: This process's shard index in ``[0, world_size)``.
     :param world_size: Number of data-parallel shards (``1`` = no sharding).
     :param adaptive: Draw rows by recent informative-group rate instead of the epoch cycle.
+    :param families: Family key of every dataset row, ``None`` for a row in no family.
+    :param family_prior_strength: Groups' worth of weight the family rate carries in
+        a row's estimate.
     """
 
     def __init__(
@@ -107,6 +120,8 @@ class TaskAssigner:
         rank: int = 0,
         world_size: int = 1,
         adaptive: bool = False,
+        families: Sequence[str | None] | None = None,
+        family_prior_strength: float = DEFAULT_FAMILY_PRIOR_STRENGTH,
     ) -> None:
         """Build an assigner over this rank's shard with a seeded per-epoch shuffle."""
         if world_size < 1:
@@ -115,11 +130,16 @@ class TaskAssigner:
         if not 0 <= rank < world_size:
             msg = f"rank must be in [0, {world_size}), got {rank}."
             raise ValueError(msg)
+        if families is not None and len(families) != dataset_size:
+            msg = f"families has {len(families)} keys for a {dataset_size}-row dataset."
+            raise ValueError(msg)
+        if family_prior_strength <= 0:
+            msg = f"family_prior_strength must be > 0, got {family_prior_strength}."
+            raise ValueError(msg)
         self.dataset_size = int(dataset_size)
         self.rank = int(rank)
         self.world_size = int(world_size)
         self._shard_size = self.dataset_size // self.world_size
-        self._shard_start = self.rank * self._shard_size
         if self.dataset_size > 0 and self._shard_size == 0:
             msg = (
                 f"rank {rank} of {world_size} gets an empty shard of a "
@@ -141,10 +161,56 @@ class TaskAssigner:
         self._success_counts = torch.zeros(
             (self._shard_size, len(GROUP_SUCCESS_KINDS)), dtype=torch.long
         )
+        shard_families = (
+            []
+            if families is None
+            else [families[self._shard_row(index)] for index in range(self._shard_size)]
+        )
+        family_ids: dict[str, int] = {}
+        for key in shard_families:
+            if key is not None:
+                family_ids.setdefault(key, len(family_ids))
+        self._num_families = len(family_ids)
+        self._family_prior_strength = float(family_prior_strength)
+        self._grouped_rows = torch.tensor(
+            [index for index, key in enumerate(shard_families) if key is not None],
+            dtype=torch.long,
+        )
+        self._grouped_row_families = torch.tensor(
+            [family_ids[key] for key in shard_families if key is not None],
+            dtype=torch.long,
+        )
 
     def _row_weights(self) -> torch.Tensor:
         """Smoothed informative rate of each shard row, in shard order."""
-        return (self._informative + 1.0) / (self._observed + 2.0)
+        weights = (self._informative + 1.0) / (self._observed + 2.0)
+        if self._num_families == 0:
+            return weights
+        informative = self._informative[self._grouped_rows]
+        observed = self._observed[self._grouped_rows]
+        family_informative = torch.zeros(
+            self._num_families, dtype=torch.float64
+        ).index_add_(0, self._grouped_row_families, informative)
+        family_observed = torch.zeros(
+            self._num_families, dtype=torch.float64
+        ).index_add_(0, self._grouped_row_families, observed)
+        family_rate = (family_informative + 1.0) / (family_observed + 2.0)
+        strength = self._family_prior_strength
+        weights[self._grouped_rows] = (
+            informative + strength * family_rate[self._grouped_row_families]
+        ) / (observed + strength)
+        return weights
+
+    def _shard_row(self, index: int) -> int:
+        """Dataset row at position ``index`` of this rank's shard."""
+        return self.rank + index * self.world_size
+
+    def _shard_index(self, row: int) -> int | None:
+        """Position of dataset ``row`` in this rank's shard; ``None`` when another rank owns it."""
+        index, remainder = divmod(int(row) - self.rank, self.world_size)
+        if remainder != 0 or not 0 <= index < self._shard_size:
+            return None
+        return index
 
     def next_row(self) -> int:
         """Next row from the shard: the epoch-reshuffled stream, or a weighted draw when adaptive."""
@@ -154,14 +220,16 @@ class TaskAssigner:
             )
             self._draws += 1
             self.num_epochs = self._draws // self._shard_size
-            return index + self._shard_start
+            return self._shard_row(index)
         if self._pos >= len(self._epoch_order):  # epoch boundary (and first call)
             if self._epoch_order:
                 self.num_epochs += 1
-            self._epoch_order = (
-                torch.randperm(self._shard_size, generator=self._generator)
-                + self._shard_start
-            ).tolist()
+            self._epoch_order = [
+                self._shard_row(index)
+                for index in torch.randperm(
+                    self._shard_size, generator=self._generator
+                ).tolist()
+            ]
             self._pos = 0
         row = self._epoch_order[self._pos]
         self._pos += 1
@@ -181,11 +249,12 @@ class TaskAssigner:
             when the env has no threshold.
         :raises ValueError: If ``row`` is outside this rank's shard.
         """
-        index = int(row) - self._shard_start
-        if not 0 <= index < self._shard_size:
+        index = self._shard_index(row)
+        if index is None:
             msg = (
-                f"row {row} is outside this shard "
-                f"[{self._shard_start}, {self._shard_start + self._shard_size})."
+                f"row {row} is outside this shard: rank {self.rank} of "
+                f"{self.world_size} owns rows {self.rank}, "
+                f"{self._shard_row(1)}, ..., {self._shard_row(self._shard_size - 1)}."
             )
             raise ValueError(msg)
         self._informative[index] *= TASK_OUTCOME_DECAY
@@ -201,7 +270,7 @@ class TaskAssigner:
         counts = self._success_counts.tolist()
         return [
             TaskRowStats(
-                row=self._shard_start + index,
+                row=self._shard_row(index),
                 informative=float(self._informative[index]),
                 observed=float(self._observed[index]),
                 weight=float(weights[index]),
@@ -217,7 +286,7 @@ class TaskAssigner:
         counts = self._success_counts.tolist()
         return [
             TaskRowOutcome(
-                row=self._shard_start + index,
+                row=self._shard_row(index),
                 informative=float(self._informative[index]),
                 observed=float(self._observed[index]),
                 tied_failure=counts[index][0],
@@ -239,8 +308,8 @@ class TaskAssigner:
         self._observed.zero_()
         self._success_counts.zero_()
         for outcome in state:
-            index = int(outcome["row"]) - self._shard_start
-            if 0 <= index < self._shard_size:
+            index = self._shard_index(outcome["row"])
+            if index is not None:
                 self._informative[index] = float(outcome["informative"])
                 self._observed[index] = float(outcome["observed"])
                 self._success_counts[index] = torch.tensor(

@@ -117,6 +117,28 @@ class TestVisionRowsForMinibatch:
             vision_rows.for_minibatch(np.array([0]), sample_rows=2)
 
 
+class TestVisionRowsKeysForMinibatch:
+    def test_keys_follow_the_selected_vision_rows(self) -> None:
+        # Arrange
+        vision_rows = VisionRows(
+            torch.zeros(7, 1), image_counts=[3, 4], image_keys=torch.arange(10, 17)
+        )
+
+        # Act
+        keys = vision_rows.keys_for_minibatch(np.array([1, 0]), sample_rows=2)
+
+        # Assert
+        assert keys is not None
+        assert keys.tolist() == [13, 14, 15, 16, 10, 11, 12]
+
+    def test_no_keys_without_image_keys(self) -> None:
+        vision_rows = VisionRows(torch.zeros(4, 1))
+
+        keys = vision_rows.keys_for_minibatch(np.array([0]), sample_rows=4)
+
+        assert keys is None
+
+
 class TestVisionFillerRow:
     def test_picks_the_shortest_prefix_holding_one_vision_row(self) -> None:
         # Arrange: row 0 is longer but its first vision row ends sooner.

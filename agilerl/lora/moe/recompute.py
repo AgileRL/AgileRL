@@ -13,17 +13,8 @@ import torch
 from torch.autograd.function import once_differentiable
 
 from agilerl.lora.moe.adapters import low_rank_delta
-from agilerl.lora.moe.grouped_gemm import chunk_offsets, grouped_linear, grouped_matmul
+from agilerl.lora.moe.grouped_gemm import grouped_matmul, grouped_operand
 from agilerl.lora.moe.layouts import expert_activation
-
-
-@dataclass(frozen=True)
-class AdapterSlot:
-    """Scaling and mixed-routing row id of one adapter inside :class:`LoraExpertsFunction`."""
-
-    scaling: float
-    # Adapter id in the per-row ids under mixed routing, else ``None``.
-    row_id: int | None
 
 
 @dataclass(frozen=True)
@@ -32,43 +23,56 @@ class LoraExpertsConfig:
 
     act_fn: Callable[[torch.Tensor], torch.Tensor]
     gated: bool
-    # ``(start_row, taken, counts, start_expert, end_expert)`` per row chunk.
-    plan: list[tuple[int, int, list[int], int, int]]
-    up_slots: tuple[AdapterSlot, ...]
-    down_slots: tuple[AdapterSlot, ...]
+    # Rows per chunk of the expert-sorted rows.
+    sizes: tuple[int, ...]
+    # Mixed-routing row id of each up / down adapter, ``None`` when unrouted.
+    up_row_ids: tuple[int | None, ...]
+    down_row_ids: tuple[int | None, ...]
 
 
-def _slot_factors(
-    factors: Sequence[torch.Tensor],
-    slots: Sequence[AdapterSlot],
-    experts: slice,
+def _chunk_masks(
     row_ids: torch.Tensor | None,
+    adapter_row_ids: Sequence[int | None],
+    sizes: Sequence[int],
     dtype: torch.dtype,
-) -> list[tuple[torch.Tensor, torch.Tensor, float, torch.Tensor | None]]:
-    """Per-adapter ``(A, B, scaling, row_mask)`` for one chunk; ``factors`` alternate A and B."""
-    adapters = []
-    for slot, lora_a, lora_b in zip(slots, factors[::2], factors[1::2], strict=True):
-        mask = None
-        if slot.row_id is not None:
-            assert row_ids is not None
-            mask = (row_ids == slot.row_id).to(dtype).unsqueeze(-1)
-        adapters.append((lora_a[experts], lora_b[experts], slot.scaling, mask))
-    return adapters
+) -> list[tuple[torch.Tensor, ...] | None]:
+    """Per-adapter ``[rows, 1]`` row masks split into chunks, ``None`` when unrouted."""
+    masks: list[tuple[torch.Tensor, ...] | None] = []
+    for row_id in adapter_row_ids:
+        if row_id is None:
+            masks.append(None)
+            continue
+        assert row_ids is not None
+        masks.append((row_ids == row_id).to(dtype).unsqueeze(-1).split(sizes))
+    return masks
 
 
-def _adapter_delta(
+def _adapter_deltas(
     rows: torch.Tensor,
-    adapters: Sequence[tuple[torch.Tensor, torch.Tensor, float, torch.Tensor | None]],
-    counts: list[int],
+    operands: Sequence[torch.Tensor],
+    masks: Sequence[tuple[torch.Tensor, ...] | None],
+    chunk: int,
     offs: torch.Tensor,
-) -> torch.Tensor | None:
-    """Summed low-rank delta of every adapter for one chunk, or ``None`` without adapters."""
-    total: torch.Tensor | None = None
-    for lora_a, lora_b, scaling, mask in adapters:
-        delta = low_rank_delta(rows, lora_a, lora_b, counts, offs, scaling)
+) -> list[torch.Tensor]:
+    """Low-rank delta of every adapter for one chunk; ``operands`` alternate scaled A and B."""
+    deltas = []
+    for a_operand, b_operand, mask in zip(
+        operands[::2], operands[1::2], masks, strict=True
+    ):
+        delta = low_rank_delta(rows, a_operand, b_operand, offs)
         if mask is not None:
-            delta.mul_(mask)
-        total = delta if total is None else total.add_(delta)
+            delta.mul_(mask[chunk])
+        deltas.append(delta)
+    return deltas
+
+
+def _sum_deltas(deltas: list[torch.Tensor]) -> torch.Tensor | None:
+    """Sum of the adapter deltas, or ``None`` without adapters."""
+    if not deltas:
+        return None
+    total = deltas[0]
+    for delta in deltas[1:]:
+        total = total.add_(delta)
     return total
 
 
@@ -83,9 +87,11 @@ class LoraExpertsCtx(Protocol):
 class LoraExpertsFunction(torch.autograd.Function):
     """Routed experts on frozen packed weights with split LoRA, recomputing the up-projection in backward.
 
-    Saves the token rows, routing, and LoRA factors only. Rows are gathered and
-    outputs scattered one expert chunk at a time, so neither the expert-sorted
-    copy nor any ``[rows, intermediate]`` activation outlives its chunk.
+    Saves the token rows, routing, and LoRA operands only. Rows are gathered
+    and outputs scattered one row chunk at a time, so neither the
+    expert-sorted copy nor any ``[rows, intermediate]`` activation outlives its
+    chunk. Each chunk's grouped GEMMs see every local expert, empty groups
+    included, through that chunk's row of ``offsets``.
     """
 
     @staticmethod
@@ -94,57 +100,48 @@ class LoraExpertsFunction(torch.autograd.Function):
         hidden_states: torch.Tensor,
         token_idx: torch.Tensor,
         routed_weights: torch.Tensor,
-        group_ends: torch.Tensor,
+        offsets: torch.Tensor,
         row_ids: torch.Tensor | None,
         up_weight: torch.Tensor,
         down_weight: torch.Tensor,
         config: LoraExpertsConfig,
-        *factors: torch.Tensor,
+        *operands: torch.Tensor,
     ) -> torch.Tensor:
-        up_factors = factors[: 2 * len(config.up_slots)]
-        down_factors = factors[2 * len(config.up_slots) :]
+        n_up = 2 * len(config.up_row_ids)
+        dtype = hidden_states.dtype
+        up_masks = _chunk_masks(row_ids, config.up_row_ids, config.sizes, dtype)
+        down_masks = _chunk_masks(row_ids, config.down_row_ids, config.sizes, dtype)
+        up_operand = grouped_operand(up_weight)
+        down_operand = grouped_operand(down_weight)
         result = torch.zeros_like(hidden_states, dtype=torch.float32)
-        for start_row, taken, counts, start_expert, end_expert in config.plan:
-            stop = start_row + taken
-            experts = slice(start_expert, end_expert)
-            offs = chunk_offsets(group_ends, experts, start_row, stop)
-            chunk_ids = None if row_ids is None else row_ids[start_row:stop]
-            index = token_idx[start_row:stop]
+        chunks = zip(
+            token_idx.split(config.sizes),
+            routed_weights.split(config.sizes),
+            offsets.unbind(),
+            strict=True,
+        )
+        for chunk, (index, weights, offs) in enumerate(chunks):
             rows = hidden_states.index_select(0, index)
-            projected = grouped_linear(rows, up_weight[experts], counts, offs)
-            up_delta = _adapter_delta(
-                rows,
-                _slot_factors(
-                    up_factors, config.up_slots, experts, chunk_ids, rows.dtype
-                ),
-                counts,
-                offs,
-            )
-            if up_delta is not None:
-                projected.add_(up_delta)
+            projected = grouped_matmul(rows, up_operand, offs)
+            for delta in _adapter_deltas(rows, operands[:n_up], up_masks, chunk, offs):
+                projected.add_(delta)
             intermediate = expert_activation(projected, config.act_fn, config.gated)
-            out = grouped_linear(intermediate, down_weight[experts], counts, offs)
-            down_delta = _adapter_delta(
-                intermediate,
-                _slot_factors(
-                    down_factors, config.down_slots, experts, chunk_ids, rows.dtype
-                ),
-                counts,
-                offs,
-            )
-            if down_delta is not None:
-                out.add_(down_delta)
-            out.mul_(routed_weights[start_row:stop])
+            out = grouped_matmul(intermediate, down_operand, offs)
+            for delta in _adapter_deltas(
+                intermediate, operands[n_up:], down_masks, chunk, offs
+            ):
+                out.add_(delta)
+            out.mul_(weights)
             result.index_add_(0, index, out.to(torch.float32))
         ctx.save_for_backward(
             hidden_states,
             token_idx,
             routed_weights,
-            group_ends,
+            offsets,
             row_ids,
             up_weight,
             down_weight,
-            *factors,
+            *operands,
         )
         ctx.config = config
         return result.to(hidden_states.dtype)
@@ -159,70 +156,69 @@ class LoraExpertsFunction(torch.autograd.Function):
             hidden_states,
             token_idx,
             routed_weights,
-            group_ends,
+            offsets,
             row_ids,
             up_weight,
             down_weight,
-            *factors,
+            *operands,
         ) = ctx.saved_tensors
         config = ctx.config
-        # Forward inputs ahead of ``*factors``.
+        # Forward inputs ahead of ``*operands``.
         n_fixed = 8
         needs_rows = ctx.needs_input_grad[0]
         needs_weights = ctx.needs_input_grad[2]
-        needs_factors = ctx.needs_input_grad[n_fixed:]
-        n_up = 2 * len(config.up_slots)
+        needs_operands = ctx.needs_input_grad[n_fixed:]
+        n_up = 2 * len(config.up_row_ids)
+        dtype = hidden_states.dtype
+        up_masks = _chunk_masks(row_ids, config.up_row_ids, config.sizes, dtype)
+        down_masks = _chunk_masks(row_ids, config.down_row_ids, config.sizes, dtype)
+        up_operand = grouped_operand(up_weight)
+        # ``grad_rows @ down[e]`` is the down projection's transpose.
+        down_transposed = grouped_operand(down_weight).transpose(-2, -1)
         grad_hidden = (
             torch.zeros_like(hidden_states, dtype=torch.float32) if needs_rows else None
         )
         grad_weights = torch.zeros_like(routed_weights) if needs_weights else None
-        grad_factors = [
-            torch.zeros_like(factor, dtype=torch.float32) if needs else None
-            for factor, needs in zip(factors, needs_factors, strict=True)
+        chunk_weight_grads = (
+            None if grad_weights is None else grad_weights.split(config.sizes)
+        )
+        grad_operands = [
+            torch.zeros_like(operand, dtype=torch.float32) if needs else None
+            for operand, needs in zip(operands, needs_operands, strict=True)
         ]
-        for start_row, taken, counts, start_expert, end_expert in config.plan:
-            stop = start_row + taken
-            experts = slice(start_expert, end_expert)
-            offs = chunk_offsets(group_ends, experts, start_row, stop)
-            chunk_ids = None if row_ids is None else row_ids[start_row:stop]
-            index = token_idx[start_row:stop]
-            weights = routed_weights[start_row:stop]
+        # Leaves span every local expert; each chunk's grads add into the full stack.
+        leaves = [
+            operand.detach().requires_grad_(needs)
+            for operand, needs in zip(operands, needs_operands, strict=True)
+        ]
+        scales = routed_weights.to(grad_output.dtype)
+        chunks = zip(
+            token_idx.split(config.sizes),
+            scales.split(config.sizes),
+            offsets.unbind(),
+            strict=True,
+        )
+        for chunk, (index, scale, offs) in enumerate(chunks):
             rows = hidden_states.index_select(0, index)
-            grad_rows = grad_output.index_select(0, index).to(rows.dtype)
-            # Leaves hold only this chunk's experts, so the local graph and its
-            # factor grads stay chunk-sized.
-            leaves = [
-                factor[experts].detach().requires_grad_(needs)
-                for factor, needs in zip(factors, needs_factors, strict=True)
-            ]
-            whole = slice(None)
+            grad_rows = grad_output.index_select(0, index)
             with torch.enable_grad():
                 rows.requires_grad_(needs_rows)
-                projected = grouped_linear(rows, up_weight[experts], counts, offs)
-                up_delta = _adapter_delta(
-                    rows,
-                    _slot_factors(
-                        leaves[:n_up], config.up_slots, whole, chunk_ids, rows.dtype
-                    ),
-                    counts,
-                    offs,
-                )
-                if up_delta is not None:
-                    projected = projected + up_delta
+                projected = grouped_matmul(rows, up_operand, offs)
+                for delta in _adapter_deltas(
+                    rows, leaves[:n_up], up_masks, chunk, offs
+                ):
+                    projected.add_(delta)
                 intermediate = expert_activation(projected, config.act_fn, config.gated)
-                down_delta = _adapter_delta(
-                    intermediate,
-                    _slot_factors(
-                        leaves[n_up:], config.down_slots, whole, chunk_ids, rows.dtype
-                    ),
-                    counts,
-                    offs,
+                down_delta = _sum_deltas(
+                    _adapter_deltas(
+                        intermediate, leaves[n_up:], down_masks, chunk, offs
+                    )
                 )
             # The output is linear in ``intermediate`` through the frozen base,
             # so its transpose gives both the intermediate grad and the
             # router-weight grad without recomputing the down projection.
-            base_grad = grouped_matmul(grad_rows, down_weight[experts], counts, offs)
-            if grad_weights is not None:
+            base_grad = grouped_matmul(grad_rows, down_transposed, offs)
+            if chunk_weight_grads is not None:
                 score = (intermediate.detach().float() * base_grad.float()).sum(
                     -1, keepdim=True
                 )
@@ -230,8 +226,7 @@ class LoraExpertsFunction(torch.autograd.Function):
                     score += (down_delta.detach().float() * grad_rows.float()).sum(
                         -1, keepdim=True
                     )
-                grad_weights[start_row:stop] = score.to(grad_weights.dtype)
-            scale = weights.to(grad_rows.dtype)
+                chunk_weight_grads[chunk].copy_(score)
             outputs: list[torch.Tensor] = []
             output_grads: list[torch.Tensor] = []
             if intermediate.requires_grad:
@@ -260,16 +255,16 @@ class LoraExpertsFunction(torch.autograd.Function):
                     assert grad_hidden is not None
                     grad_hidden.index_add_(0, index, grad.float())
                     continue
-                target = grad_factors[position - 1]
+                target = grad_operands[position - 1]
                 assert target is not None
-                target[experts] += grad.float()
+                target.add_(grad)
         return (
             None if grad_hidden is None else grad_hidden.to(hidden_states.dtype),
             None,
             grad_weights,
             *([None] * (n_fixed - 3)),
             *(
-                None if grad is None else grad.to(factor.dtype)
-                for grad, factor in zip(grad_factors, factors, strict=True)
+                None if grad is None else grad.to(operand.dtype)
+                for grad, operand in zip(grad_operands, operands, strict=True)
             ),
         )

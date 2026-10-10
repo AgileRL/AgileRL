@@ -51,10 +51,16 @@ from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 from tests.test_algorithms.test_llms.llm_helpers import (
     DummyConfig,
     DummyHiddenStatesModel,
+    optimizer_state,
+    record_calls,
+    record_outputs,
+    scale_losses,
+    trainable_weights,
 )
 from tests.test_algorithms.test_llms.segment_helpers import (
     lora_weights,
     record_step_gradients,
+    seed_lora_weights,
     use_fake_liger_policy_loss,
 )
 from tests.test_algorithms.test_llms.test_ppo_llm_vision import (
@@ -179,6 +185,7 @@ def value_loss(
         batch["returns"],
         batch["mask"],
         batch["turn_ids"],
+        2,
         mode,
     )
 
@@ -193,6 +200,7 @@ def policy_loss(
         batch["reference_log_probs"],
         batch["advantages"],
         batch["turn_ids"],
+        2,
         mode,
     )
     return loss
@@ -358,7 +366,7 @@ class TestPPOSplitPassesMatchDoubledForward:
             **_kwargs: Any,
         ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
             loss = (policy_hidden.pow(2).sum(-1) * mask).sum() / mask.sum()
-            return loss, tuple(loss.detach() for _ in range(4))
+            return loss, tuple(loss.detach() for _ in range(5))
 
         reference = make_ppo()
         split = make_ppo()
@@ -395,6 +403,7 @@ class TestPPOSplitPassesMatchDoubledForward:
             batch["reference_log_probs"],
             batch["advantages"],
             batch["turn_ids"],
+            2,
             "token",
         )
         actor_loss.backward()
@@ -404,7 +413,13 @@ class TestPPOSplitPassesMatchDoubledForward:
         unset_fused_adapter_routing(split.actor)
 
         # Assert
-        assert set(metrics) == {"kl", "clipfrac", "pg_loss", "entropy"}
+        assert set(metrics) == {
+            "kl",
+            "clipfrac",
+            "pg_loss",
+            "entropy",
+            "kl_clamp_frac",
+        }
         torch.testing.assert_close(
             actor_loss + critic_loss, reference_loss, rtol=RTOL, atol=ATOL
         )
@@ -523,7 +538,7 @@ class TestPPOFusedPassMatchesDoubledForward:
             **_kwargs: Any,
         ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
             loss = (policy_hidden.pow(2).sum(-1) * mask).sum() / mask.sum()
-            return loss, tuple(loss.detach() for _ in range(4))
+            return loss, tuple(loss.detach() for _ in range(5))
 
         reference = make_ppo()
         fused = make_ppo()
@@ -562,6 +577,7 @@ class TestPPOFusedPassMatchesDoubledForward:
             batch["reference_log_probs"],
             batch["advantages"],
             batch["turn_ids"],
+            2,
             "token",
         )
         fused_loss = fused_policy + value_loss(fused, fused_values, batch, "token")
@@ -569,7 +585,13 @@ class TestPPOFusedPassMatchesDoubledForward:
         unset_fused_adapter_routing(fused.actor)
 
         # Assert
-        assert set(metrics) == {"kl", "clipfrac", "pg_loss", "entropy"}
+        assert set(metrics) == {
+            "kl",
+            "clipfrac",
+            "pg_loss",
+            "entropy",
+            "kl_clamp_frac",
+        }
         torch.testing.assert_close(fused_loss, reference_loss, rtol=RTOL, atol=ATOL)
         reference_grads = lora_grads(reference)
         fused_grads = lora_grads(fused)
@@ -597,15 +619,6 @@ def adapter_lora_names(agent: LLMPPO) -> set[str]:
         for name, _ in agent.actor.named_parameters()
         if "lora_" in name and ("actor" in name or "critic" in name)
     }
-
-
-def seed_lora_weights(agent: LLMPPO) -> None:
-    """Fill every LoRA weight from a fixed seed, however the agent was built."""
-    generator = torch.Generator().manual_seed(3)
-    with torch.no_grad():
-        for name, param in sorted(agent.actor.named_parameters()):
-            if "lora_" in name:
-                param.copy_(torch.randn(param.shape, generator=generator))
 
 
 def record_runtime_backwards(
@@ -986,6 +999,194 @@ class TestPPOFusedLearnMatchesSplitLearn:
             )
 
 
+class TestPPOLearnMetrics:
+    @FUSE_MODES
+    def test_metrics_are_means_of_the_micro_batch_losses(
+        self, monkeypatch: pytest.MonkeyPatch, fuse: bool
+    ) -> None:
+        # Arrange: one optimizer step of four 1-row micro-batches.
+        agent = make_ppo(
+            batch_size=4,
+            mini_batch_size=4,
+            micro_batch_size_per_gpu=1,
+            fuse_actor_critic_pass=fuse,
+        )
+        policy_loss, policy_outputs = record_outputs(agent._ppo_policy_loss)
+        value_loss, value_outputs = record_outputs(agent._ppo_value_loss)
+        monkeypatch.setattr(agent, "_ppo_policy_loss", policy_loss)
+        monkeypatch.setattr(agent, "_ppo_value_loss", value_loss)
+
+        # Act
+        metrics = learn_rows(agent)
+
+        # Assert
+        assert len(policy_outputs) == len(value_outputs) == 4
+        policy = [loss.item() for loss, _ in policy_outputs]
+        value = [loss.item() for loss in value_outputs]
+        assert metrics["loss"] == pytest.approx(
+            sum(p + v for p, v in zip(policy, value, strict=True)) / 4, rel=1e-6
+        )
+        assert metrics["vf_loss"] == pytest.approx(sum(value) / 4, rel=1e-6)
+        for key in ("pg_loss", "kl", "entropy", "clipfrac"):
+            expected = sum(float(out[key]) for _, out in policy_outputs) / 4
+            assert metrics[key] == pytest.approx(expected, rel=1e-6), key
+
+
+def learn_uneven_turns(agent: LLMPPO) -> dict[str, float]:
+    """One learn over four trajectories: rows 0-1 take two turns, rows 2-3 one."""
+    generator = torch.Generator().manual_seed(2)
+    ids = torch.randint(0, PAD_TOKEN_ID, (4, SEQ_LEN + 2), generator=generator)
+    mask = torch.zeros(4, SEQ_LEN + 1, dtype=torch.bool)
+    mask[:, 3:] = True
+    turn_ids = torch.full((4, SEQ_LEN + 1), -1)
+    turn_ids[:, 3:] = 0
+    turn_ids[:2, 5:] = 1
+    rewards = torch.tensor([[1.0, 0.5], [0.0, -1.0], [0.5, 0.0], [-1.0, 0.0]])
+    return agent.learn(
+        (list(ids.split(1)), list(mask.split(1)), rewards), turn_ids=turn_ids
+    )
+
+
+class TestPPOLearnTurnCount:
+    @FUSE_MODES
+    def test_micro_batch_losses_match_their_own_turn_count(
+        self, monkeypatch: pytest.MonkeyPatch, fuse: bool
+    ) -> None:
+        # Arrange: 1-row micro-batches, so rows 2-3 hold fewer turns than the batch.
+        agent = make_ppo(
+            batch_size=4,
+            mini_batch_size=4,
+            micro_batch_size_per_gpu=1,
+            fuse_actor_critic_pass=fuse,
+        )
+        policy_fn, value_fn = agent._ppo_policy_loss, agent._ppo_value_loss
+        policy_loss, policy_calls = record_calls(policy_fn)
+        value_loss, value_calls = record_calls(value_fn)
+        monkeypatch.setattr(agent, "_ppo_policy_loss", policy_loss)
+        monkeypatch.setattr(agent, "_ppo_value_loss", value_loss)
+
+        # Act
+        learn_uneven_turns(agent)
+
+        # Assert
+        local_counts = []
+        for args, kwargs, (loss, _) in policy_calls:
+            log_probs, *inputs, turn_ids, num_turns, granularity, sampling = args
+            local = int(turn_ids.max()) + 1
+            local_counts.append(local)
+            assert (num_turns, granularity) == (2, "turn")
+            with torch.no_grad():
+                expected, _ = policy_fn(
+                    log_probs, *inputs, turn_ids, local, granularity, sampling, **kwargs
+                )
+            assert torch.equal(loss.detach(), expected)
+        for args, kwargs, loss in value_calls:
+            values, *inputs, turn_ids, num_turns, granularity = args
+            assert num_turns == 2
+            with torch.no_grad():
+                expected = value_fn(
+                    values,
+                    *inputs,
+                    turn_ids,
+                    int(turn_ids.max()) + 1,
+                    granularity,
+                    **kwargs,
+                )
+            assert torch.equal(loss.detach(), expected)
+        assert sorted(local_counts) == [1, 1, 2, 2]
+        assert len(value_calls) == 4
+
+
+class TestPPOLearnNonFiniteLoss:
+    @FUSE_MODES
+    def test_finite_losses_step(
+        self, monkeypatch: pytest.MonkeyPatch, fuse: bool
+    ) -> None:
+        # Arrange
+        agent = make_ppo(
+            batch_size=4,
+            mini_batch_size=4,
+            micro_batch_size_per_gpu=1,
+            fuse_actor_critic_pass=fuse,
+        )
+        monkeypatch.setattr(
+            agent,
+            "_ppo_value_loss",
+            scale_losses(agent._ppo_value_loss, iter([1.0] * 4)),
+        )
+        before = trainable_weights(agent.actor)
+
+        # Act
+        learn_rows(agent)
+
+        # Assert
+        after = trainable_weights(agent.actor)
+        assert any(
+            not torch.equal(new, old) for new, old in zip(after, before, strict=True)
+        )
+
+    @FUSE_MODES
+    @pytest.mark.parametrize(
+        "window_scales",
+        [[float("nan"), 1.0, 1.0, 1.0], [1.0, 1.0, 1.0, float("nan")]],
+        ids=["first_micro_batch", "last_micro_batch"],
+    )
+    def test_raises_before_the_step_when_a_micro_batch_loss_is_not_finite(
+        self, monkeypatch: pytest.MonkeyPatch, fuse: bool, window_scales: list[float]
+    ) -> None:
+        # Arrange: one optimizer step of four 1-row micro-batches per learn; a
+        # finite learn first gives the optimizer state to keep.
+        agent = make_ppo(
+            batch_size=4,
+            mini_batch_size=4,
+            micro_batch_size_per_gpu=1,
+            fuse_actor_critic_pass=fuse,
+        )
+        scales = iter([1.0] * 4 + window_scales)
+        monkeypatch.setattr(
+            agent, "_ppo_value_loss", scale_losses(agent._ppo_value_loss, scales)
+        )
+        learn_rows(agent)
+        before = trainable_weights(agent.actor)
+        state_before = optimizer_state(agent.optimizer)
+
+        # Act
+        with pytest.raises(ValueError, match="Loss is not finite"):
+            learn_rows(agent)
+
+        # Assert: the raise lands on the window's last backward, before the step.
+        assert list(scales) == []
+        for new, old in zip(trainable_weights(agent.actor), before, strict=True):
+            assert torch.equal(new, old)
+        state_after = optimizer_state(agent.optimizer)
+        assert state_before
+        assert len(state_after) == len(state_before)
+        for new, old in zip(state_after, state_before, strict=True):
+            assert torch.equal(new, old)
+
+    @FUSE_MODES
+    def test_raises_when_the_micro_batch_left_pending_a_step_is_not_finite(
+        self, monkeypatch: pytest.MonkeyPatch, fuse: bool
+    ) -> None:
+        # Arrange: three micro-batches per step over four rows leave the last
+        # micro-batch's gradients pending the next learn call.
+        agent = make_ppo(
+            batch_size=4,
+            mini_batch_size=4,
+            micro_batch_size_per_gpu=1,
+            fuse_actor_critic_pass=fuse,
+        )
+        agent.gradient_accumulation_steps = 3
+        scales = iter([1.0, 1.0, 1.0, float("nan")])
+        monkeypatch.setattr(
+            agent, "_ppo_value_loss", scale_losses(agent._ppo_value_loss, scales)
+        )
+
+        # Act / Assert
+        with pytest.raises(ValueError, match="Loss is not finite"):
+            learn_rows(agent)
+
+
 def record_step_role_grad_norms(
     agent: LLMPPO, monkeypatch: pytest.MonkeyPatch
 ) -> list[dict[str, float]]:
@@ -1188,7 +1389,7 @@ class TestPPOFuseActorCriticPass:
 
     @pytest.mark.parametrize(
         ("total_gib", "fuse", "verb", "budget"),
-        [(80, True, "fuses", "76.00"), (1, False, "splits", "0.95")],
+        [(80, True, "fuses", "78.00"), (1, False, "splits", "0.97")],
         ids=["fits", "does-not-fit"],
     )
     def test_none_on_cuda_fuses_only_when_the_estimate_fits(
@@ -1217,7 +1418,7 @@ class TestPPOFuseActorCriticPass:
 
     @pytest.mark.parametrize(
         ("sleep_mode", "fuse", "budget"),
-        [(False, False, "0.20"), (True, True, "3.80")],
+        [(False, False, "0.30"), (True, True, "3.90")],
         ids=["resident-engine", "sleeping-engine"],
     )
     def test_none_on_cuda_leaves_a_resident_vllm_share_out_of_the_budget(
@@ -1230,7 +1431,7 @@ class TestPPOFuseActorCriticPass:
         budget: str,
     ) -> None:
         # Arrange: 4 GiB fits the ~1.7 GiB fused estimate unless vLLM keeps
-        # 90% of it: 0.95 * 4 - 0.9 * 4 = 0.2 GiB.
+        # 90% of it: 0.975 * 4 - 0.9 * 4 = 0.3 GiB.
         agent = make_ppo()
         save_checkpoint_config(agent, tmp_path)
         patch_cuda_device(agent, monkeypatch, 4 * 2**30)

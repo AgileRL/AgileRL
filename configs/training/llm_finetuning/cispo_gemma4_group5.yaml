@@ -17,7 +17,7 @@ algorithm:
     turn_advantage_trajectory_fallback: true
     importance_sampling_level: token
     adv_norm: mean_only
-    loss_norm: micro_batch
+    loss_norm: accumulation_window
     filter_zero_adv: true
     max_output_tokens: 2768
     use_liger_loss: true

@@ -485,6 +485,8 @@ class _GrpoLossStub:
     _apply_kl_advantage_shaping = GRPO._apply_kl_advantage_shaping
     _reduce_masked_loss = GRPO._reduce_masked_loss
     _resolve_loss_window = GRPO._resolve_loss_window
+    _token_loss_weights = GRPO._token_loss_weights
+    _clipped_units = GRPO._clipped_units
     _log_importance_weights = GRPO._log_importance_weights
     _compute_policy_loss = GRPO._compute_policy_loss
     _grpo_loss_standard = GRPO._grpo_loss_standard
@@ -1660,7 +1662,9 @@ class TestGRPOLigerLossDispatch:
         expected_is_level: str,
         expected_eps_high: str,
     ) -> None:
-        grpo = _make_cpu_grpo_for_branch_tests(loss_type=loss_type, beta=0.0)
+        grpo = _make_cpu_grpo_for_branch_tests(
+            loss_norm="micro_batch", loss_type=loss_type, beta=0.0
+        )
         fake_lm_head = nn.Linear(8, 16, bias=True)
         fake_loss = torch.tensor(0.5, requires_grad=True)
         fake_aux = (torch.tensor(0.1), torch.tensor(0.0))
@@ -1760,7 +1764,9 @@ class TestGRPOLigerLossDispatch:
         a naive ``squeeze(-1)`` collapses ``(1,)`` to a 0-dim scalar, which the
         token-level advantage-shape detection then rejects with a ``ValueError``.
         """
-        grpo = _make_cpu_grpo_for_branch_tests(loss_type=loss_type, beta=0.0)
+        grpo = _make_cpu_grpo_for_branch_tests(
+            loss_norm="micro_batch", loss_type=loss_type, beta=0.0
+        )
         assert grpo.importance_sampling_level == "token"
         fake_lm_head = nn.Linear(8, 16, bias=True)
         fake_loss = torch.tensor(0.5, requires_grad=True)
@@ -1846,7 +1852,9 @@ class TestGRPOLigerLossDispatch:
         """A per-token advantage whose token dim disagrees with ``n_act`` is
         unmappable to the flattened layout and must be rejected.
         """
-        grpo = _make_cpu_grpo_for_branch_tests(loss_type="grpo", beta=0.0)
+        grpo = _make_cpu_grpo_for_branch_tests(
+            loss_norm="micro_batch", loss_type="grpo", beta=0.0
+        )
         fake_lm_head = nn.Linear(8, 16, bias=True)
 
         with (
@@ -1970,7 +1978,9 @@ class TestGRPOLigerSequencePacking:
         [("grpo", "token"), ("cispo", "token"), ("gspo", "trajectory")],
     )
     def test_packed_liger_matches_padded(self, loss_type, expected_level):
-        grpo = _make_cpu_grpo_for_branch_tests(loss_type=loss_type, beta=0.0)
+        grpo = _make_cpu_grpo_for_branch_tests(
+            loss_norm="micro_batch", loss_type=loss_type, beta=0.0
+        )
         grpo.pad_token_id = 0
         assert grpo.importance_sampling_level == expected_level
 
@@ -2027,9 +2037,6 @@ class TestGRPOLigerSequencePacking:
         # Packed: same numbers, but the forward sees one (1, N) row.
         grpo.use_sequence_packing = True
         grpo.actor.config._attn_implementation = "flash_attention_2"
-        # Pre-set the consolidated warn-once flag to silence the canonical
-        # non-token-IS memory notice (now owned by the base helper).
-        grpo._liger_non_token_warned = True
         assert grpo._packing_mode() == "varlen"
         loss_packed, packed_shape = run()
         assert packed_shape == (1, sum(lengths))
@@ -2043,7 +2050,9 @@ class TestGRPOLigerSequencePacking:
         """An unsupported (dense) backend disables packing: the forward stays
         padded even with ``use_sequence_packing=True``.
         """
-        grpo = _make_cpu_grpo_for_branch_tests(loss_type="grpo", beta=0.0)
+        grpo = _make_cpu_grpo_for_branch_tests(
+            loss_norm="micro_batch", loss_type="grpo", beta=0.0
+        )
         grpo.pad_token_id = 0
         vocab, hidden = 16, 8
         actor = _CtxFreeActor(vocab, hidden).to(grpo.device)
@@ -3474,7 +3483,7 @@ class TestGRPOLearn:
 
         grpo.micro_batch_size_per_gpu = 1
         grpo.gradient_accumulation_steps = 2
-        original_record = GRPO._record_window_action_tokens
+        original_record = GRPO._record_global_window_action_tokens
         window_sizes: list[int] = []
 
         def record_spy(masks, idxs):
@@ -3496,7 +3505,9 @@ class TestGRPOLearn:
                 ),
             ) as mock_loss,
             patch.object(grpo, "_backward_pass", return_value=None),
-            patch.object(grpo, "_record_window_action_tokens", side_effect=record_spy),
+            patch.object(
+                grpo, "_record_global_window_action_tokens", side_effect=record_spy
+            ),
         ):
             grpo.learn((completion_ids, action_masks, rewards))
         # Four micro-batches of one sample fold into two optimizer steps, so
@@ -5810,7 +5821,9 @@ class TestGRPONonFinitePaddingIsIsolated:
         assert metrics["vllm_is_delta_mean"] == pytest.approx(0.2, rel=1e-5)
 
     def test_liger_kernel_receives_only_finite_inputs(self):
-        grpo = _make_cpu_grpo_for_branch_tests(loss_type="cispo", beta=0.04)
+        grpo = _make_cpu_grpo_for_branch_tests(
+            loss_norm="micro_batch", loss_type="cispo", beta=0.04
+        )
         fake_lm_head = nn.Linear(8, 16, bias=True)
         nan = float("nan")
         # Action mask marks token 0 only; token 1 is padding and carries NaN in
@@ -5952,19 +5965,35 @@ class TestGRPOInitWarnings:
         assert grpo.advantage_granularity == "turn"
         grpo.clean_up()
 
-    @pytest.mark.parametrize(
-        ("level", "algo_name"), [("turn", "GRPO"), ("trajectory", "GSPO")]
-    )
-    def test_init_liger_non_token_level_warns_memory_unbounded(self, level, algo_name):
+    def test_init_liger_turn_level_warns_it_runs_the_standard_path(self):
         with (
             patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True),
             patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
-            pytest.warns(UserWarning, match="NOT memory-bounded"),
+            pytest.warns(
+                UserWarning,
+                match="no fused grpo kernel at importance_sampling_level='turn'",
+            ),
         ):
             grpo = _make_cpu_grpo_for_branch_tests(
-                use_liger_loss=True, importance_sampling_level=level
+                use_liger_loss=True, importance_sampling_level="turn"
             )
-        assert grpo._liger_non_token_warned
+        assert grpo._liger_path_selected is False
+        grpo.clean_up()
+
+    def test_init_liger_trajectory_level_does_not_warn(self):
+        with (
+            patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True),
+            patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
+            warnings.catch_warnings(record=True) as caught,
+        ):
+            warnings.simplefilter("always")
+            grpo = _make_cpu_grpo_for_branch_tests(
+                use_liger_loss=True,
+                importance_sampling_level="trajectory",
+                vllm_importance_sampling_correction=False,
+            )
+        assert not [w for w in caught if "fused" in str(w.message)]
+        assert grpo._liger_path_selected is True
         grpo.clean_up()
 
 
@@ -6033,7 +6062,7 @@ class TestGRPOTurnAdvantageLearnPath:
         with (
             patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True),
             patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
-            pytest.warns(UserWarning, match="NOT memory-bounded"),
+            pytest.warns(UserWarning, match="no fused grpo kernel"),
         ):
             grpo = _make_cpu_grpo_for_branch_tests(
                 group_size=2,

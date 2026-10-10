@@ -389,7 +389,11 @@ def training_settings_from_manifest(
         algorithm=ALGORITHM_NAMES[spec.name],
         group_size=_group_size(spec),
         trajectories_per_update=spec.batch_size * _group_size(spec),
-        max_model_len=spec.max_model_len,
+        max_model_len=(
+            spec.max_row_tokens
+            if isinstance(spec, RolloutLLMSpec) and spec.max_row_tokens is not None
+            else spec.max_model_len
+        ),
         lora_rank=lora.lora_r,
         lora_target_scope=_lora_target_scope(lora),
         lora_dropout=lora.lora_dropout,
@@ -407,6 +411,8 @@ def training_settings_from_manifest(
         # Unset sizes separate passes: the trainer fuses only when that fits.
         fuse_actor_critic_pass=isinstance(spec, LLMPPOSpec)
         and spec.fuse_actor_critic_pass is True,
+        checkpoint_optimizer=manifest.training.checkpoint_optimizer,
+        async_rollout=manifest.training.async_rollout,
     )
 
 

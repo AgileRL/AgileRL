@@ -22,6 +22,7 @@ from agilerl.utils.llm_packing import (
     PackedBatch,
     mixers_without_boundary_reset,
     pack_padded_batch,
+    packed_layout,
     packed_seq_idx,
     unpack_hidden_states,
     unpack_logprobs,
@@ -58,6 +59,7 @@ class TestPackPaddedBatch:
         assert isinstance(packed, PackedBatch)
         assert packed.input_ids.shape == (1, n)
         assert packed.seq_lengths.tolist() == lengths
+        assert packed.lengths == tuple(lengths)
         assert packed.cu_seqlens.tolist() == [0, 6, 9, 13]
         assert packed.cu_seqlens.dtype == torch.int32
         assert packed.max_seqlen == 6
@@ -416,6 +418,53 @@ class TestPackedSeqIdx:
         assert packed_seq_idx(torch.tensor(positions)) is None
 
 
+class TestPackedLayout:
+    def test_offsets_and_longest_document_of_a_packed_row(self):
+        # Arrange
+        positions = torch.tensor([[0, 1, 2, 0, 1, 0]])
+
+        # Act
+        layout = packed_layout(positions)
+
+        # Assert
+        assert layout.seq_idx.tolist() == [[0, 0, 0, 1, 1, 2]]
+        assert layout.cu_seqlens.dtype == torch.int32
+        assert layout.cu_seqlens.tolist() == [0, 3, 5, 6]
+        assert layout.max_seqlen == 3
+
+    def test_offsets_span_every_row(self):
+        positions = torch.tensor([[0, 1, 0, 1], [0, 1, 2, 3]])
+
+        layout = packed_layout(positions)
+
+        assert layout.cu_seqlens.tolist() == [0, 2, 4, 8]
+        assert layout.max_seqlen == 4
+
+    def test_rows_holding_one_document_return_none(self):
+        assert packed_layout(torch.tensor([[0, 1, 2], [4, 5, 6]])) is None
+
+    def test_repeat_call_on_the_same_tensor_returns_the_memoized_layout(self):
+        # Arrange
+        positions = torch.tensor([[0, 1, 0]])
+        first = packed_layout(positions)
+
+        # Act
+        second = packed_layout(positions)
+
+        # Assert
+        assert second is first
+
+    def test_a_new_tensor_gets_its_own_layout(self):
+        # Arrange
+        packed_layout(torch.tensor([[0, 1, 0]]))
+
+        # Act
+        layout = packed_layout(torch.tensor([[0, 0, 1]]))
+
+        # Assert
+        assert layout.cu_seqlens.tolist() == [0, 1, 3]
+
+
 class TestMixersWithoutBoundaryReset:
     @pytest.mark.skipif(
         not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed"
@@ -517,6 +566,17 @@ class TestSequencePackingGate:
         with pytest.raises(
             ValueError, match=r"Mamba2Mixer.*use_sequence_packing=False"
         ):
+            stub._packing_mode()
+
+    def test_a_replaced_actor_is_checked_again(self):
+        # Arrange
+        stub = _PackingGateStub(True, "flash_attention_2")
+        assert stub._packing_mode() == "varlen"
+        stub.actor = AutoModelForCausalLM.from_config(_tiny_mamba2_config())
+        stub.actor.config._attn_implementation = "flash_attention_2"
+
+        # Act / Assert
+        with pytest.raises(ValueError, match="Mamba2Mixer"):
             stub._packing_mode()
 
     @pytest.mark.parametrize("impl", ["sdpa", "eager", "something_weird"])

@@ -33,7 +33,7 @@ from torch import nn
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor, distribute_tensor
 from torch.distributed.tensor.placement_types import Replicate, Shard
-from torch.utils.checkpoint import checkpoint
+from torch.utils.checkpoint import checkpoint, noop_context_fn
 from transformers import NemotronHConfig
 from transformers.models.nemotron_h.modeling_nemotron_h import NemotronHMLP
 
@@ -71,6 +71,7 @@ from agilerl.distributed.expert_parallel import (
     num_packed_experts,
     packed_expert_count,
     reference_dispatch_combine,
+    routed_counts_contexts,
     scatter_scaled_expert_rows,
     shard_experts_on_ep,
     token_combine,
@@ -87,7 +88,12 @@ from agilerl.distributed.fsdp import (
 )
 from agilerl.distributed.runtime import DPRuntime, FSDPRuntime
 from agilerl.lora.fused import ROUTING_STATE
+from agilerl.lora.moe import (
+    set_routed_experts_chunk_bytes,
+    set_routed_experts_recompute,
+)
 from agilerl.lora.moe import wrappers as moe_wrappers
+from agilerl.utils.llm_utils import make_llm_optimizer
 
 _DIST_ENV = ("RANK", "LOCAL_RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT")
 
@@ -120,7 +126,7 @@ class TestScatterScaledExpertRows:
             combined = leaf * 1
             if inplace_path:
                 out = scatter_scaled_expert_rows(
-                    combined, weights, index, hidden_states
+                    combined, weights, index, hidden_states, 64 * 1024 * 1024
                 )
             else:
                 out = torch.zeros_like(hidden_states)
@@ -136,14 +142,12 @@ class TestScatterScaledExpertRows:
         assert torch.allclose(scaled[1], reference[1])
         assert torch.allclose(scaled[2], reference[2])
 
-    def test_multi_chunk_bf16_accumulates_in_fp32(self, monkeypatch):
+    def test_multi_chunk_bf16_accumulates_in_fp32(self):
         # Arrange
         torch.manual_seed(0)
         rows, hidden, tokens = 23, 4, 5
         # 3 fp32 rows per chunk: 8 chunks, the last one partial.
-        monkeypatch.setattr(
-            expert_parallel, "GROUPED_LINEAR_CHUNK_BYTES", 3 * hidden * 4
-        )
+        chunk_bytes = 3 * hidden * 4
         index = torch.randint(0, tokens, (rows,))
         hidden_states = torch.randn(tokens, hidden, dtype=torch.bfloat16)
         leaf = torch.randn(rows, hidden, dtype=torch.bfloat16, requires_grad=True)
@@ -157,7 +161,9 @@ class TestScatterScaledExpertRows:
         (reference.to(torch.bfloat16) * upstream).sum().backward()
 
         # Act
-        out = scatter_scaled_expert_rows(leaf * 1, weights, index, hidden_states)
+        out = scatter_scaled_expert_rows(
+            leaf * 1, weights, index, hidden_states, chunk_bytes
+        )
         (out * upstream).sum().backward()
 
         # Assert
@@ -174,6 +180,7 @@ class TestScatterScaledExpertRows:
             torch.empty(0, 1),
             torch.empty(0, dtype=torch.long),
             hidden_states,
+            64 * 1024 * 1024,
         )
 
         assert out.dtype == torch.bfloat16
@@ -755,7 +762,10 @@ def _materialize_ep_worker(
         original_down = model.layers[0].experts.down_proj.detach().cpu().clone()
 
         ep_mesh, captured = _materialize_and_capture_meshes(
-            model, FSDPConfig(ep=world_size, wrap_every_n_blocks=1)
+            model,
+            FSDPConfig(
+                ep=world_size, wrap_every_n_blocks=1, routed_expert_chunk_mib=64
+            ),
         )
         assert ep_mesh.leftover_dp == 1
         assert tuple(ep_mesh.world.mesh_dim_names) == ("replicate", "shard")
@@ -803,7 +813,7 @@ def _materialize_dp_ep_worker(
         original_down = model.layers[0].experts.down_proj.detach().cpu().clone()
 
         ep_mesh, captured = _materialize_and_capture_meshes(
-            model, FSDPConfig(ep=ep, wrap_every_n_blocks=1)
+            model, FSDPConfig(ep=ep, wrap_every_n_blocks=1, routed_expert_chunk_mib=64)
         )
         assert ep_mesh.leftover_dp == world_size // ep
         assert captured["mesh"] is ep_mesh.hsdp
@@ -853,7 +863,9 @@ def _check_expert_dim0_world_sharded(
         model = _tiny_moe_actor(num_experts, hidden=256, intermediate=512)
         for param in model.parameters():
             dist.broadcast(param.data, src=0)
-        _materialize(model, FSDPConfig(ep=ep, wrap_every_n_blocks=1))
+        _materialize(
+            model, FSDPConfig(ep=ep, wrap_every_n_blocks=1, routed_expert_chunk_mib=64)
+        )
         for _name, module in iter_packed_expert_modules(model):
             for param in module.parameters(recurse=False):
                 assert isinstance(param, DTensor), type(param)
@@ -906,7 +918,9 @@ def _resume_slice_worker(
         for param in model.parameters():
             dist.broadcast(param.data, src=0)
         shapes = {name: tuple(param.shape) for name, param in model.named_parameters()}
-        _materialize(model, FSDPConfig(ep=2, wrap_every_n_blocks=1))
+        _materialize(
+            model, FSDPConfig(ep=2, wrap_every_n_blocks=1, routed_expert_chunk_mib=64)
+        )
         state = {
             name: torch.full(
                 shapes[name], 7.0 if "experts" in name else 3.0, dtype=torch.float32
@@ -996,7 +1010,10 @@ def _dp_gt_one_slice_worker(
             patch.object(fsdp_mod, "_write_full_tensor", spy_full),
             patch.object(fsdp_mod, "_write_ep_expert_slice", spy_slice),
         ):
-            _materialize(model, FSDPConfig(ep=2, wrap_every_n_blocks=1))
+            _materialize(
+                model,
+                FSDPConfig(ep=2, wrap_every_n_blocks=1, routed_expert_chunk_mib=64),
+            )
         experts = {
             id(param)
             for _name, module in iter_packed_expert_modules(model)
@@ -2081,6 +2098,206 @@ class TestRoutedExpertParallelTokenBlocks:
         _spawn_ranks(_token_blocks_worker)
 
 
+def _counts_replay_worker(
+    rank: int, world_size: int, port: int, result_queue: Any, token_blocks: int
+) -> None:
+    """A checkpoint recompute replays the forward's routed EP counts with identical results."""
+    try:
+        _init_gloo(rank, world_size, port)
+        # Arrange
+        mesh = build_parallel_mesh(
+            world_size=world_size, ep=world_size, device_type="cpu"
+        )
+        assert mesh is not None
+        base = _lora_routed_model(("actor",))
+        sizes = [7, 5]
+        hidden, index, weights, upstream = _routed_case(sum(sizes))
+        rows = slice(sum(sizes[:rank]), sum(sizes[: rank + 1]))
+        exchange = expert_parallel.exchange_expert_counts
+        exchanges: list[torch.Tensor] = []
+
+        def recording_exchange(*args: Any, **kwargs: Any) -> torch.Tensor:
+            exchanges.append(args[0])
+            return exchange(*args, **kwargs)
+
+        def run(context_fn: Any) -> tuple[Any, ...]:
+            model = copy.deepcopy(base)
+            assert apply_expert_parallel(model, mesh.ep, token_blocks=token_blocks) == 1
+            hidden_in = hidden[rows].clone().requires_grad_(True)
+            weights_in = weights[rows].clone().requires_grad_(True)
+            exchanges.clear()
+            with patch.object(
+                expert_parallel, "exchange_expert_counts", recording_exchange
+            ):
+                out = checkpoint(
+                    model,
+                    hidden_in,
+                    index[rows],
+                    weights_in,
+                    use_reentrant=False,
+                    context_fn=context_fn,
+                )
+                forward_exchanges = len(exchanges)
+                (out * upstream[rows]).sum().backward()
+            return (
+                out.detach(),
+                hidden_in.grad,
+                weights_in.grad,
+                _local_lora_grads(model),
+                forward_exchanges,
+                len(exchanges),
+            )
+
+        # Act
+        plain = run(noop_context_fn)
+        replayed = run(routed_counts_contexts)
+
+        # Assert
+        for expected, actual in zip(plain[:3], replayed[:3], strict=True):
+            assert torch.equal(expected, actual)
+        assert plain[3].keys() == replayed[3].keys()
+        for name, grad in plain[3].items():
+            assert torch.equal(grad, replayed[3][name]), name
+        assert plain[4:] == (1, 2), plain[4:]
+        assert replayed[4:] == (1, 1), replayed[4:]
+        result_queue.put((rank, "ok", None))
+    except Exception as exc:
+        result_queue.put((rank, "err", repr(exc)))
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+
+def _counts_replay_mismatch_worker(
+    rank: int, world_size: int, port: int, result_queue: Any
+) -> None:
+    """A recompute whose routing differs from its forward fails before any token moves."""
+    try:
+        _init_gloo(rank, world_size, port)
+        # Arrange
+        mesh = build_parallel_mesh(
+            world_size=world_size, ep=world_size, device_type="cpu"
+        )
+        assert mesh is not None
+        model = _lora_routed_model(("actor",))
+        assert apply_expert_parallel(model, mesh.ep) == 1
+        hidden, index, weights, upstream = _routed_case(6)
+        recompute_index = torch.zeros_like(index)
+        recompute_index[:, 1] = 1
+        assert not torch.equal(
+            torch.bincount(index.reshape(-1), minlength=4),
+            torch.bincount(recompute_index.reshape(-1), minlength=4),
+        )
+        routings = iter((index, recompute_index))
+
+        def block(hidden_in: torch.Tensor, weights_in: torch.Tensor) -> torch.Tensor:
+            return model(hidden_in, next(routings), weights_in)
+
+        out = checkpoint(
+            block,
+            hidden.clone().requires_grad_(True),
+            weights.clone().requires_grad_(True),
+            use_reentrant=False,
+            context_fn=routed_counts_contexts,
+        )
+
+        # Act / Assert
+        with pytest.raises(RuntimeError, match="Recompute routed tokens differently"):
+            (out * upstream).sum().backward()
+        result_queue.put((rank, "ok", None))
+    except Exception as exc:
+        result_queue.put((rank, "err", repr(exc)))
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+
+@requires_gloo
+class TestRoutedCountsContexts:
+    def test_recompute_reuses_forward_counts_with_identical_results(self):
+        _spawn_ranks(partial(_counts_replay_worker, token_blocks=1))
+
+    def test_recompute_reuses_forward_counts_in_token_blocks(self):
+        _spawn_ranks(partial(_counts_replay_worker, token_blocks=3))
+
+    def test_recompute_with_different_routing_raises(self):
+        _spawn_ranks(_counts_replay_mismatch_worker)
+
+
+def _row_chunks_worker(
+    rank: int, world_size: int, port: int, result_queue: Any
+) -> None:
+    """Routed EP in one-row expert and combine chunks, with and without recompute, matches a dense reference."""
+    try:
+        _init_gloo(rank, world_size, port)
+        # Arrange
+        mesh = build_parallel_mesh(
+            world_size=world_size, ep=world_size, device_type="cpu"
+        )
+        assert mesh is not None
+        base = _lora_routed_model(("actor",))
+        reference = copy.deepcopy(base)
+        sizes = [6, 5]
+        hidden, index, weights, upstream = _routed_case(sum(sizes))
+        rows = slice(sum(sizes[:rank]), sum(sizes[: rank + 1]))
+        ref_out, ref_hidden_grad, ref_weight_grad = _run_routed(
+            reference, hidden, index, weights, upstream
+        )
+        ref_grads = _reference_local_grads(reference, rank, world_size)
+        kernel = moe_wrappers.routed_experts_local_forward
+        calls: list[tuple[bool, int]] = []
+
+        def recording_kernel(*args: Any, **kwargs: Any) -> torch.Tensor:
+            calls.append((kwargs["recompute"], kwargs["chunk_bytes"]))
+            return kernel(*args, **kwargs)
+
+        # Act
+        results = {}
+        with patch.object(
+            moe_wrappers, "routed_experts_local_forward", recording_kernel
+        ):
+            for recompute in (False, True):
+                model = copy.deepcopy(base)
+                assert apply_expert_parallel(model, mesh.ep) == 1
+                set_routed_experts_recompute(model, recompute)
+                set_routed_experts_chunk_bytes(model, 1)
+                outputs = _run_routed(
+                    model, hidden[rows], index[rows], weights[rows], upstream[rows]
+                )
+                results[recompute] = (*outputs, _local_lora_grads(model))
+
+        # Assert
+        # fp32; chunking only reorders the per-expert sums.
+        tolerance = {"rtol": 1e-5, "atol": 1e-6}
+        for recompute, (out, hidden_grad, weight_grad, grads) in results.items():
+            assert torch.allclose(out, ref_out[rows], **tolerance), recompute
+            assert torch.allclose(hidden_grad, ref_hidden_grad[rows], **tolerance), (
+                recompute
+            )
+            assert torch.allclose(weight_grad, ref_weight_grad[rows], **tolerance), (
+                recompute
+            )
+            assert grads.keys() == ref_grads.keys()
+            for name, grad in grads.items():
+                assert torch.allclose(grad, ref_grads[name], **tolerance), (
+                    recompute,
+                    name,
+                )
+        assert set(calls) == {(False, 1), (True, 1)}
+        result_queue.put((rank, "ok", None))
+    except Exception as exc:
+        result_queue.put((rank, "err", repr(exc)))
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+
+@requires_gloo
+class TestRoutedExpertParallelRowChunks:
+    def test_one_row_chunks_match_dense_reference_with_and_without_recompute(self):
+        _spawn_ranks(_row_chunks_worker)
+
+
 def _replicated_tokens_worker(
     rank: int, world_size: int, port: int, result_queue: Any
 ) -> None:
@@ -2458,6 +2675,7 @@ def _hsdp_ep_step_worker(
             param_persistence_threshold=0,
             param_dtype="float32",
             reduce_dtype="float32",
+            routed_expert_chunk_mib=64,
         )
         mesh = build_parallel_mesh(
             world_size=world_size,
@@ -2577,6 +2795,69 @@ class TestFSDPRuntimeBackwardHsdpExpertParallel:
         _spawn_ranks(_fsdp_experts_ep2_worker, world_size=4)
 
 
+def _ep_adamw_step(model: nn.Module, fused: bool) -> list[nn.Parameter]:
+    """Run one FSDPRuntime AdamW step on ``model``; return its trainable params."""
+    config = FSDPConfig(
+        ep=2,
+        wrap_every_n_blocks=1,
+        param_persistence_threshold=0,
+        param_dtype="float32",
+        reduce_dtype="float32",
+        routed_expert_chunk_mib=64,
+    )
+    mesh = build_parallel_mesh(
+        world_size=dist.get_world_size(), ep=2, device_type="cpu"
+    )
+    materialize_fsdp2_from_cpu_state(model, "cpu", config, parallel_mesh=mesh)
+    runtime = FSDPRuntime(config)
+    runtime.parallel_mesh = mesh
+    optimizer = make_llm_optimizer(model, lr=0.1, lr_critic=None, fused=fused)
+    torch.manual_seed(dist.get_rank() + 1)
+    hidden = torch.randn(6, 8)
+    weights, index = torch.softmax(torch.randn(6, 4), -1).topk(2, -1)
+    upstream = torch.randn(6, 8)
+    loss = (model(hidden, index, weights) * upstream).sum()
+    runtime.backward(
+        loss, optimizer, gradient_accumulation_steps=1, actor=model, max_grad_norm=1e6
+    )
+    return [param for param in model.parameters() if param.requires_grad]
+
+
+def _ep_fused_adamw_worker(
+    rank: int, world_size: int, port: int, result_queue: Any
+) -> None:
+    try:
+        _init_gloo(rank, world_size, port)
+        # Arrange
+        model = _HsdpMoeModel(_lora_routed_model(("actor",)))
+        for param in model.parameters():
+            dist.broadcast(param.data, src=0)
+        reference = copy.deepcopy(model)
+
+        # Act
+        fused = _ep_adamw_step(model, fused=True)
+        unfused = _ep_adamw_step(reference, fused=False)
+
+        # Assert
+        assert any(isinstance(param, DTensor) for param in fused)
+        for param, expected in zip(fused, unfused, strict=True):
+            assert torch.allclose(
+                _full_value(param.detach()), _full_value(expected.detach()), atol=1e-6
+            )
+        result_queue.put((rank, "ok", None))
+    except Exception as exc:  # pragma: no cover
+        result_queue.put((rank, "err", repr(exc)))
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+
+@requires_gloo
+class TestFSDPRuntimeBackwardExpertParallelFusedAdamW:
+    def test_fused_step_on_ep_lora_matches_unfused_step(self):
+        _spawn_ranks(_ep_fused_adamw_worker)
+
+
 def _sync_grads_unknown_mesh_worker(
     rank: int, world_size: int, port: int, result_queue: Any
 ) -> None:
@@ -2631,6 +2912,7 @@ def _shard_group_spans_world_worker(
             shard_group_size=world_size,
             wrap_every_n_blocks=1,
             param_persistence_threshold=0,
+            routed_expert_chunk_mib=64,
         )
 
         # fully_shard's default mesh follows the host accelerator (MPS on macOS).
@@ -3132,7 +3414,10 @@ class TestMaterializeEpWithoutPackedExperts:
 
         with pytest.raises(RuntimeError, match="no packed"):
             materialize_fsdp2_from_cpu_state(
-                nn.Linear(2, 2), "cpu", FSDPConfig(ep=2), parallel_mesh=mesh
+                nn.Linear(2, 2),
+                "cpu",
+                FSDPConfig(ep=2, routed_expert_chunk_mib=64),
+                parallel_mesh=mesh,
             )
 
 

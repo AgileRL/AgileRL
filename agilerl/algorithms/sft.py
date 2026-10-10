@@ -24,6 +24,7 @@ from agilerl.typing import (
     SFTPrompts,
 )
 from agilerl.utils.llm_utils import (
+    MicroBatchMetrics,
     is_sft_prompts,
 )
 
@@ -277,12 +278,8 @@ class SFT(LLMAlgorithm[SFTPrompts]):
             getattr(self, "micro_batch_size_per_gpu", self.batch_size_per_process),
         )
         batch_idxs = np.arange(num_samples)
-        num_updates = 0
-
-        learn_metrics = {
-            "loss": 0.0,
-            "perplexity": 0.0,
-        }
+        micro_batch_metrics = MicroBatchMetrics(("loss",))
+        held_loss: torch.Tensor | None = None
 
         phase_timer.mark("prepare")
         for _ in range(self.update_epochs):
@@ -298,17 +295,23 @@ class SFT(LLMAlgorithm[SFTPrompts]):
                 )
                 phase_timer.mark("forward")
                 if training:
-                    self._raise_if_loss_not_finite_on_any_rank(loss)
+                    held_loss = self._hold_loss_until_step(
+                        loss, held_loss, self.gradient_accumulation_steps
+                    )
                     self._backward_pass(loss)
-                loss_val = loss.item()
-                learn_metrics["loss"] += loss_val
-                learn_metrics["perplexity"] += float(np.exp(min(loss_val, 100)))
-                num_updates += 1
+                micro_batch_metrics.add({"loss": loss})
+        # Gradients still pending a step carry into the next learn call.
+        if held_loss is not None:
+            self._raise_if_loss_not_finite_on_any_rank(held_loss)
 
+        losses = [update["loss"] for update in micro_batch_metrics.read()]
+        num_updates = max(len(losses), 1)
         # ``aggregate_metrics_dict`` takes an invariant dict over the full raw
         # metric-value union, so annotate the averaged dict to that exact type.
         averaged_metrics: dict[str, torch.Tensor | npt.NDArray | float] = {
-            key: value / max(num_updates, 1) for key, value in learn_metrics.items()
+            "loss": sum(losses) / num_updates,
+            "perplexity": sum(float(np.exp(min(loss, 100))) for loss in losses)
+            / num_updates,
         }
 
         learn_metrics = aggregate_metrics_dict(averaged_metrics)

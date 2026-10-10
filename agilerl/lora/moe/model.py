@@ -203,6 +203,22 @@ def set_routed_experts_recompute(model: nn.Module, enabled: bool | None) -> None
             )
 
 
+def set_routed_experts_chunk_bytes(model: nn.Module, chunk_bytes: int) -> None:
+    """Set the row-chunk budget of every routed and sorted experts LoRA wrapper.
+
+    :param model: Model holding ``RoutedExpertsLoraWrapper`` or
+        ``SortedExpertsLoraWrapper`` layers.
+    :type model: nn.Module
+    :param chunk_bytes: Widest ``[rows, features]`` activation of one row
+        chunk, one fp32 chunk of the expert-parallel combine, and one grouped
+        LoRA GEMM output. Bigger chunks launch fewer kernels per MoE layer.
+    :type chunk_bytes: int
+    """
+    for module in model.modules():
+        if isinstance(module, (RoutedExpertsLoraWrapper, SortedExpertsLoraWrapper)):
+            module.chunk_bytes = chunk_bytes
+
+
 def bind_routed_experts_config(model: nn.Module) -> None:
     """Point packed experts that have no ``act_fn`` at the model config.
 

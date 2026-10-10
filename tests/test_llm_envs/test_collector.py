@@ -16,7 +16,7 @@ import torch
 
 from agilerl.components.llm_rollout_data import EpisodeSegments
 from agilerl.llm_envs import RolloutCollector
-from agilerl.llm_envs.task_assigner import _mix_seed
+from agilerl.llm_envs.task_assigner import TASK_OUTCOME_DECAY, _mix_seed
 from tests.helpers.rollout_doubles import RolloutEnvDoubleMixin
 
 
@@ -519,6 +519,38 @@ class TestRolloutCollectorAssignGroupTask:
             assert all(0 < rows[row] < 80 for row in range(8) if row != 5)
             assert weights[5] > 0.9
             assert all(weights[row] < 0.09 for row in range(8) if row != 5)
+        finally:
+            collector.close()
+
+    def test_unseen_rows_take_their_task_familys_rate(self) -> None:
+        # Arrange
+        collector = RolloutCollector(
+            env_factory=partial(_RowEnv, []),
+            batch_size=1,
+            group_size=1,
+            base_seed=3,
+            adaptive_task_sampling=True,
+            task_families=["good"] * 4 + ["dead"] * 4,
+        )
+        try:
+            collector.assign_group_task(0)
+
+            # Act
+            for row in (0, 1, 4, 5):
+                for _ in range(10):
+                    collector.record_group_outcome(
+                        row, informative=row < 4, success=None
+                    )
+
+            # Assert
+            weights = [stats.weight for stats in collector.task_row_stats()]
+            observed = 2 * (1 - TASK_OUTCOME_DECAY**10) / (1 - TASK_OUTCOME_DECAY)
+            assert (
+                weights[2]
+                == weights[3]
+                == pytest.approx((observed + 1) / (observed + 2))
+            )
+            assert weights[6] == weights[7] == pytest.approx(1 / (observed + 2))
         finally:
             collector.close()
 

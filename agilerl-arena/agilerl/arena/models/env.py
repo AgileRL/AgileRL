@@ -189,13 +189,25 @@ def check_restart_keep_turns(
     restart_keep_turns: int,
     segment_prompt_tokens: int | None,
     segment_max_images: int | None,
+    restart_older_obs_field: str,
+    restart_older_images: bool,
 ) -> None:
     """Reject kept turns without a restart limit, or with no room for the next turn's image.
+
+    Also reject settings for older kept turns when fewer than two turns are kept.
 
     :param restart_keep_turns: Turns a restarted context repeats word for word.
     :param segment_prompt_tokens: Token count that restarts the context.
     :param segment_max_images: Image count that restarts the context.
+    :param restart_older_obs_field: Field shown for kept turns before the latest.
+    :param restart_older_images: Whether kept turns before the latest keep images.
     """
+    if (restart_older_obs_field or not restart_older_images) and restart_keep_turns < 2:
+        msg = (
+            "restart_older_obs_field and restart_older_images apply to kept "
+            "turns before the latest; set restart_keep_turns to 2 or more."
+        )
+        raise ValueError(msg)
     if not restart_keep_turns:
         return
     if segment_prompt_tokens is None and segment_max_images is None:
@@ -607,6 +619,22 @@ class LLMEnvSpec(EnvSpecBase):
             "segment_max_images. 0 keeps only the list of past actions."
         ),
     )
+    restart_older_obs_field: str = Field(
+        default="",
+        description=(
+            "Observation field a restarted context shows, as 'field: value', "
+            "for each kept turn before the latest, in place of that turn's "
+            "full observation text. Needs restart_keep_turns of 2 or more. "
+            "Empty repeats every kept observation in full."
+        ),
+    )
+    restart_older_images: bool = Field(
+        default=True,
+        description=(
+            "Whether kept turns before the latest keep their images in a "
+            "restarted context. False needs restart_keep_turns of 2 or more."
+        ),
+    )
     action_error_field: str = Field(
         default="",
         description=(
@@ -683,6 +711,24 @@ class LLMEnvSpec(EnvSpecBase):
             "recent groups had differing rewards, so tasks that keep giving tied "
             "groups are drawn less (Ray async rollouts only). Unset keeps the "
             "per-epoch shuffle."
+        ),
+    )
+    task_family_field: str | None = Field(
+        default=None,
+        description=(
+            "Field of each env_config.tasks row naming the row's family, such "
+            "as a template id. Under adaptive_task_sampling, a row with few "
+            "groups is drawn by its family's pooled rate of differing rewards. "
+            "The field is not sent to the env. Unset puts no row in a family."
+        ),
+    )
+    task_family_prior_strength: float = Field(
+        default=1.0,
+        gt=0.0,
+        description=(
+            "Groups' worth of weight a family's rate carries in a row's "
+            "estimate; a row with more groups than this is drawn mostly by "
+            "its own rate."
         ),
     )
 
@@ -829,6 +875,12 @@ class LLMEnvSpec(EnvSpecBase):
         )
         if self.env_type != "rollout":
             return self
+        if self.task_family_field is not None and not self.adaptive_task_sampling:
+            msg = (
+                "task_family_field weights rows under adaptive_task_sampling; "
+                "set adaptive_task_sampling: true or drop it."
+            )
+            raise ValueError(msg)
         dataset = self._named_dataset()
         sources = {
             "a dataset": dataset,
@@ -946,6 +998,8 @@ class LLMEnvSpec(EnvSpecBase):
             restart_keep_turns=self.restart_keep_turns,
             segment_prompt_tokens=self.segment_prompt_tokens,
             segment_max_images=self.segment_max_images,
+            restart_older_obs_field=self.restart_older_obs_field,
+            restart_older_images=self.restart_older_images,
         )
         return self
 

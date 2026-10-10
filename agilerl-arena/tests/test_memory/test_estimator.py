@@ -12,6 +12,7 @@ from agilerl.arena.memory.estimator import (
     estimate_training,
     generation_can_serve,
     geometry_gap_warning,
+    resolve_fsdp_memory,
 )
 from agilerl.arena.memory.specs import (
     DeviceSpec,
@@ -28,8 +29,10 @@ from agilerl.arena.models.fsdp import FSDPConfig
 from tests.test_memory.test_formulas import (
     FALCON_H1,
     MOE_TINY,
+    NEMOTRON_H_MOE,
     NEMOTRON_NANO_MAMBA,
     QWEN_05B,
+    SUPER_VL,
 )
 
 # One layer, wide MLP: attention LoRA stays under the 100k persistence
@@ -489,7 +492,7 @@ class TestDistributedTerms:
 
     def test_fsdp_offload_flags_are_exclusive(self):
         with pytest.raises(ValidationError, match="mutually exclusive"):
-            TrainingSettings(fsdp=FSDPConfig(cpu_offload=True))
+            TrainingSettings(fsdp=FSDPConfig(cpu_offload=True, optim_cpu_offload=True))
 
     def test_fsdp_on_one_gpu_keeps_the_base_and_stores_lora_in_bf16(
         self, model, device
@@ -618,7 +621,7 @@ class TestDistributedTerms:
 
     def test_optim_cpu_offload_charges_adam_only_at_the_step(self, model, device):
         offloaded = estimate_training(
-            model, device, TrainingSettings(fsdp=FSDPConfig())
+            model, device, TrainingSettings(fsdp=FSDPConfig(optim_cpu_offload=True))
         )
         resident = estimate_training(
             model,
@@ -639,7 +642,7 @@ class TestDistributedTerms:
             model,
             device,
             TrainingSettings(
-                fsdp=FSDPConfig(),
+                fsdp=FSDPConfig(optim_cpu_offload=True),
                 max_model_len=8,
                 lora_rank=64,
                 lora_target_scope="all-linear",
@@ -1103,3 +1106,453 @@ class TestEagerMambaScan:
             estimate_training(nano, unknown, settings).total_bytes
             < estimate_training(nano, ada, settings).total_bytes
         )
+
+
+# MoE and attention only, so the routed-expert block sets the backward peak.
+MOE_MODEL = ModelSpec(
+    model_id="nemotron-moe",
+    arch=ModelArch.from_hf_config(
+        {
+            **NEMOTRON_H_MOE,
+            "num_hidden_layers": 3,
+            "layers_block_type": ["moe", "attention", "moe"],
+        }
+    ),
+)
+
+
+def moe_settings(**fsdp: object) -> TrainingSettings:
+    """Expert-LoRA EP 8 SFT at 16k tokens; with no no-grad pass the backward binds."""
+    return TrainingSettings(
+        algorithm="sft",
+        max_model_len=16384,
+        lora_rank=8,
+        lora_packed_target_matrices=2,
+        packed_moe_dispatch="contracted",
+        n_training_gpus=8,
+        fsdp=FSDPConfig(ep=8, **fsdp),
+    )
+
+
+def host(breakdown, key):
+    return next(c for c in breakdown.host if c.key == key)
+
+
+def budget_device(usable_bytes: int) -> DeviceSpec:
+    return DeviceSpec(total_bytes=80 * GiB, available_bytes=usable_bytes, name="budget")
+
+
+class TestRoutedChunkTerm:
+    def test_training_peak_grows_with_the_chunk(self, device):
+        totals = [
+            estimate_training(
+                MOE_MODEL,
+                device,
+                moe_settings(routed_expert_chunk_mib=mib, optim_cpu_offload=True),
+            ).total_bytes
+            for mib in (64, 256, 1024)
+        ]
+
+        assert totals[0] < totals[1] < totals[2]
+
+    def test_activations_detail_reports_the_chunk_term(self, device):
+        # Arrange
+        settings = moe_settings(routed_expert_chunk_mib=256, optim_cpu_offload=True)
+
+        # Act
+        breakdown = estimate_training(MOE_MODEL, device, settings)
+
+        # Assert
+        expected = formulas.routed_chunk_bytes(
+            MOE_MODEL.arch,
+            1,
+            16384,
+            2.0,
+            256 * MiB,
+            expert_lora=True,
+            contracted=True,
+            ep=8,
+        )
+        detail = component(breakdown, "activations").detail
+        assert detail["routed_expert_chunks"] == expected > 0
+
+
+class TestOptimizerPlacement:
+    def test_data_parallel_charges_the_foreach_workspace(self, model, device):
+        breakdown = estimate_training(model, device, TrainingSettings())
+
+        trained = formulas.lora_param_count(model.arch, 16)
+        detail = component(breakdown, "optimizer_state").detail
+        assert detail["foreach_workspace"] == trained * 4
+
+    def test_fsdp_gpu_optimizer_keeps_adam_resident_and_steps_fused(
+        self, model, device
+    ):
+        breakdown = estimate_training(
+            model, device, TrainingSettings(fsdp=FSDPConfig(optim_cpu_offload=False))
+        )
+
+        trained = formulas.lora_param_count(model.arch, 16)
+        optimizer = component(breakdown, "optimizer_state")
+        assert optimizer.n_bytes == trained * 8
+        assert optimizer.detail["foreach_workspace"] == 0
+
+    def test_gpu_optimizer_costs_more_device_memory_than_offload(self, device):
+        offloaded = estimate_training(
+            MOE_MODEL,
+            device,
+            moe_settings(routed_expert_chunk_mib=64, optim_cpu_offload=True),
+        )
+        resident = estimate_training(
+            MOE_MODEL,
+            device,
+            moe_settings(routed_expert_chunk_mib=64, optim_cpu_offload=False),
+        )
+
+        assert resident.total_bytes > offloaded.total_bytes
+
+
+class TestTrainingHostBreakdown:
+    def test_offloaded_optimizer_pins_moments_params_and_grads(self, model, device):
+        # Arrange
+        settings = TrainingSettings(fsdp=FSDPConfig(optim_cpu_offload=True))
+
+        # Act
+        breakdown = estimate_training(model, device, settings)
+
+        # Assert
+        adam = component(breakdown, "optimizer_state").detail["step_bytes"]
+        step_grads = component(breakdown, "activations").detail["step_grads"]
+        assert host(breakdown, "optimizer_offload").n_bytes == adam + 2 * step_grads
+
+    def test_gpu_optimizer_pins_nothing(self, model, device):
+        breakdown = estimate_training(
+            model, device, TrainingSettings(fsdp=FSDPConfig(optim_cpu_offload=False))
+        )
+
+        assert host(breakdown, "optimizer_offload").n_bytes == 0
+
+    def test_vision_cache_holds_each_image_tower_output(self, device):
+        # Arrange: 32 x 32 patches of 1280 per 512 px image, bf16.
+        arch = QWEN_05B.model_copy(
+            update={
+                "vision_hidden_size": 1280,
+                "vision_image_size": 512,
+                "vision_patch_size": 16,
+            }
+        )
+        vision_model = ModelSpec(model_id="vision", arch=arch)
+
+        # Act
+        without = estimate_training(vision_model, device, TrainingSettings())
+        with_images = estimate_training(
+            vision_model, device, TrainingSettings(images_per_update=10)
+        )
+
+        # Assert
+        assert host(with_images, "vision_feature_cache").n_bytes == 10 * 1024 * 1280 * 2
+        assert host(without, "vision_feature_cache").n_bytes == 0
+        assert with_images.total_bytes == without.total_bytes
+
+    def test_checkpoint_snapshot_adds_adam_when_checkpointing_the_optimizer(
+        self, model, device
+    ):
+        # Arrange
+        trained = formulas.lora_param_count(model.arch, 16)
+
+        # Act
+        weights_only = estimate_training(model, device, TrainingSettings())
+        with_optimizer = estimate_training(
+            model, device, TrainingSettings(checkpoint_optimizer=True)
+        )
+
+        # Assert: flat data parallel keeps fp32 adapters.
+        assert host(weights_only, "checkpoint_snapshot").n_bytes == trained * 4
+        assert host(with_optimizer, "checkpoint_snapshot").n_bytes == trained * 12
+
+    def test_async_rollout_holds_the_next_rollout_batch(self, model, device):
+        held = estimate_training(model, device, TrainingSettings())
+        prefetched = estimate_training(
+            model, device, TrainingSettings(async_rollout=True)
+        )
+
+        rollout = component(held, "overhead").detail["rollout_tensors"]
+        assert host(held, "prefetched_rollout").n_bytes == 0
+        assert host(prefetched, "prefetched_rollout").n_bytes == rollout
+        assert prefetched.host_total_bytes > held.host_total_bytes
+
+
+class TestResolveFsdpMemory:
+    def peak(self, chunk: int, offload: bool) -> int:
+        return estimate_training(
+            MOE_MODEL,
+            budget_device(80 * GiB),
+            moe_settings(routed_expert_chunk_mib=chunk, optim_cpu_offload=offload),
+        ).total_bytes
+
+    def test_set_values_are_kept(self):
+        settings = moe_settings(routed_expert_chunk_mib=128, optim_cpu_offload=True)
+
+        resolved = resolve_fsdp_memory(MOE_MODEL, budget_device(80 * GiB), settings)
+
+        assert resolved.routed_expert_chunk_mib == 128
+        assert resolved.optim_cpu_offload is True
+
+    def test_ample_budget_picks_the_largest_chunk_and_a_gpu_optimizer(self):
+        resolved = resolve_fsdp_memory(
+            MOE_MODEL, budget_device(80 * GiB), moe_settings()
+        )
+
+        assert resolved.routed_expert_chunk_mib == 512
+        assert resolved.optim_cpu_offload is False
+
+    def test_unset_chunk_takes_the_largest_that_fits(self):
+        # Arrange: 128 MiB fits with the optimizer offloaded, 256 MiB does not.
+        usable = (self.peak(128, True) + self.peak(256, True)) // 2
+
+        # Act
+        resolved = resolve_fsdp_memory(MOE_MODEL, budget_device(usable), moe_settings())
+
+        # Assert
+        assert resolved.routed_expert_chunk_mib == 128
+
+    def test_gpu_optimizer_needs_the_underprediction_buffer(self):
+        # Arrange
+        settings = moe_settings(routed_expert_chunk_mib=64)
+        gpu_peak = self.peak(64, False)
+        offload_budget = (self.peak(64, True) + gpu_peak) // 2
+        buffered_budget = int(gpu_peak / (1 - formulas.MAX_UNDERPREDICTION)) + 1
+
+        # Act
+        tight = resolve_fsdp_memory(MOE_MODEL, budget_device(offload_budget), settings)
+        unbuffered = resolve_fsdp_memory(MOE_MODEL, budget_device(gpu_peak), settings)
+        roomy = resolve_fsdp_memory(MOE_MODEL, budget_device(buffered_budget), settings)
+
+        # Assert
+        assert tight.optim_cpu_offload is True
+        assert unbuffered.optim_cpu_offload is True
+        assert roomy.optim_cpu_offload is False
+
+    def test_nothing_fits_takes_the_smallest_chunk_and_offload(self):
+        resolved = resolve_fsdp_memory(MOE_MODEL, budget_device(GiB), moe_settings())
+
+        assert resolved.routed_expert_chunk_mib == 64
+        assert resolved.optim_cpu_offload is True
+
+    def test_full_cpu_offload_never_offloads_the_optimizer_again(self):
+        settings = TrainingSettings(fsdp=FSDPConfig(cpu_offload=True))
+
+        resolved = resolve_fsdp_memory(MOE_MODEL, budget_device(80 * GiB), settings)
+
+        assert resolved.optim_cpu_offload is False
+
+    def test_same_inputs_pick_the_same_values(self):
+        usable = (self.peak(128, True) + self.peak(256, True)) // 2
+
+        picks = [
+            resolve_fsdp_memory(MOE_MODEL, budget_device(usable), moe_settings())
+            for _ in range(3)
+        ]
+
+        assert picks[0] == picks[1] == picks[2]
+
+    def test_estimate_training_sizes_the_resolved_config_and_names_it(self):
+        # Arrange
+        device = budget_device(80 * GiB)
+
+        # Act
+        auto = estimate_training(MOE_MODEL, device, moe_settings())
+        explicit = estimate_training(
+            MOE_MODEL,
+            device,
+            moe_settings(routed_expert_chunk_mib=512, optim_cpu_offload=False),
+        )
+
+        # Assert
+        assert auto.total_bytes == explicit.total_bytes
+        assert auto.warnings[-1] == (
+            "Picked from this estimate: routed_expert_chunk_mib=512, "
+            "optim_cpu_offload=False (GPU, fused AdamW)."
+        )
+
+    def test_needs_an_fsdp_config(self, model, device):
+        with pytest.raises(ValueError, match=r"needs settings\.fsdp"):
+            resolve_fsdp_memory(model, device, TrainingSettings())
+
+
+SUPER_VL_MODEL = ModelSpec(
+    model_id="super-vl", arch=ModelArch.from_hf_config(SUPER_VL.config)
+)
+# torch ``total_memory`` of an A100 80GB; the H100 80GB value is assumed.
+A100_80GB_CUDA_BYTES = int(79.15 * GiB)
+H100_80GB_CUDA_BYTES = int(79.11 * GiB)
+
+
+def super_vl_cispo(
+    max_model_len: int, n_training_gpus: int, **fsdp: object
+) -> TrainingSettings:
+    """Super-VL CISPO with expert LoRA, EP 8 and FSDP inside groups of 8 GPUs."""
+    return TrainingSettings(
+        algorithm="cispo",
+        trajectories_per_update=128,
+        max_model_len=max_model_len,
+        lora_rank=8,
+        lora_packed_target_matrices=2,
+        packed_moe_dispatch="contracted",
+        beta=0.05,
+        use_separate_reference_adapter=False,
+        n_training_gpus=n_training_gpus,
+        checkpoint_optimizer=True,
+        async_rollout=True,
+        fsdp=FSDPConfig(ep=8, shard_group_size=8, reduce_dtype="bfloat16", **fsdp),
+    )
+
+
+def training_gpu(name: str, cuda_bytes: int) -> DeviceSpec:
+    """Training GPU budgeted as the trainer budgets it at runtime."""
+    return DeviceSpec(
+        total_bytes=cuda_bytes,
+        available_bytes=int(cuda_bytes * (1 - formulas.TRAINING_HEADROOM_FRACTION)),
+        name=name,
+    )
+
+
+class TestSuperVlCalibration:
+    """Super-VL learn steps on A100 80GB, optimizer offloaded, rows up to 30,892."""
+
+    @pytest.fixture
+    def a100(self):
+        return training_gpu("NVIDIA A100-SXM4-80GB", A100_80GB_CUDA_BYTES)
+
+    def estimate(self, device: DeviceSpec, chunk_mib: int) -> float:
+        settings = super_vl_cispo(
+            30892, 8, routed_expert_chunk_mib=chunk_mib, optim_cpu_offload=True
+        )
+        return estimate_training(SUPER_VL_MODEL, device, settings).total_bytes / GiB
+
+    @pytest.mark.parametrize(
+        ("chunk_mib", "rank0_peak_gib"), [(64, 77.68), (256, 77.95)]
+    )
+    def test_estimate_tracks_the_rank0_peak(self, a100, chunk_mib, rank0_peak_gib):
+        assert self.estimate(a100, chunk_mib) == pytest.approx(rank0_peak_gib, abs=0.75)
+
+    def test_estimate_at_1024_mib_stays_above_the_rank0_peak(self, a100):
+        # The chunk term follows the steeper H100 rise, so A100 is overestimated here.
+        assert 78.09 <= self.estimate(a100, 1024) < 78.09 + 1.25
+
+    def test_busiest_rank_stays_inside_the_runtime_headroom(self, a100):
+        # Arrange: the node's busiest rank peaked at 79.2 GiB at 64 MiB.
+        busiest_peak_gib = 79.2
+        headroom_gib = A100_80GB_CUDA_BYTES * formulas.TRAINING_HEADROOM_FRACTION / GiB
+
+        # Act
+        excess_gib = busiest_peak_gib - self.estimate(a100, 64)
+
+        # Assert
+        assert 0 < excess_gib < 1.0
+        assert excess_gib < headroom_gib
+
+    def test_busiest_rank_at_256_mib_stays_inside_the_runtime_headroom(self, a100):
+        # Arrange: rank 0 rose 0.27 GiB from 64 to 256 MiB; the busiest rank
+        # is taken to rise by the same amount from its 79.2 GiB at 64 MiB.
+        busiest_peak_gib = 79.2 + (77.95 - 77.68)
+        headroom_gib = A100_80GB_CUDA_BYTES * formulas.TRAINING_HEADROOM_FRACTION / GiB
+
+        # Act
+        excess_gib = busiest_peak_gib - self.estimate(a100, 256)
+
+        # Assert
+        assert 0 < excess_gib < headroom_gib
+
+
+class TestSuperVlVwaPicks:
+    """VWA launch shape: 16 trainer GPUs, rows up to 24,000 + 5,120 tokens."""
+
+    @pytest.mark.parametrize(
+        ("name", "cuda_bytes"),
+        [
+            ("NVIDIA A100-SXM4-80GB", A100_80GB_CUDA_BYTES),
+            ("NVIDIA H100 80GB HBM3", H100_80GB_CUDA_BYTES),
+        ],
+    )
+    def test_picks_512_mib_with_the_optimizer_offloaded(self, name, cuda_bytes):
+        resolved = resolve_fsdp_memory(
+            SUPER_VL_MODEL, training_gpu(name, cuda_bytes), super_vl_cispo(29120, 16)
+        )
+
+        assert resolved.routed_expert_chunk_mib == 512
+        assert resolved.optim_cpu_offload is True
+
+    def test_h100_estimate_at_512_mib_covers_the_measured_busiest_rank(self):
+        # Arrange: H100 VWA busiest rank peaked at 76.47 GiB (NVML) at 512 MiB.
+        device = training_gpu("NVIDIA H100 80GB HBM3", H100_80GB_CUDA_BYTES)
+        settings = super_vl_cispo(
+            29120, 16, routed_expert_chunk_mib=512, optim_cpu_offload=True
+        )
+
+        # Act
+        estimate_gib = (
+            estimate_training(SUPER_VL_MODEL, device, settings).total_bytes / GiB
+        )
+
+        # Assert
+        assert 76.47 <= estimate_gib < device.available_bytes / GiB
+
+    def test_h100_pick_leaves_room_for_the_busiest_rank(self):
+        # Arrange: EP routing spread A100 ranks 1.5 GiB over one learn step.
+        rank_spread = int(1.5 * GiB)
+        device = training_gpu("NVIDIA H100 80GB HBM3", H100_80GB_CUDA_BYTES)
+        settings = super_vl_cispo(29120, 16)
+        resolved = resolve_fsdp_memory(SUPER_VL_MODEL, device, settings)
+
+        # Act
+        peak = estimate_training(
+            SUPER_VL_MODEL, device, settings.model_copy(update={"fsdp": resolved})
+        ).total_bytes
+
+        # Assert
+        assert peak + rank_spread < H100_80GB_CUDA_BYTES
+
+    def test_max_model_len_rows_fit_no_chunk(self):
+        # Arrange
+        device = training_gpu("NVIDIA A100-SXM4-80GB", A100_80GB_CUDA_BYTES)
+        settings = super_vl_cispo(
+            32768, 16, routed_expert_chunk_mib=64, optim_cpu_offload=True
+        )
+
+        # Act
+        breakdown = estimate_training(SUPER_VL_MODEL, device, settings)
+
+        # Assert
+        assert not breakdown.fits
+
+
+class TestTrainingSettingsShardGpusProperty:
+    def test_shard_group_caps_the_shard_count(self):
+        settings = super_vl_cispo(29120, 16)
+
+        assert settings.shard_gpus == 8
+
+    def test_without_a_shard_group_every_training_gpu_shards(self):
+        settings = TrainingSettings(n_training_gpus=16, fsdp=FSDPConfig(ep=8))
+
+        assert settings.shard_gpus == 16
+
+    def test_replicated_groups_shard_weights_like_one_group(self):
+        # Arrange
+        device = training_gpu("NVIDIA A100-SXM4-80GB", A100_80GB_CUDA_BYTES)
+        fsdp = {"routed_expert_chunk_mib": 256, "optim_cpu_offload": True}
+
+        # Act
+        two_groups = estimate_training(
+            SUPER_VL_MODEL, device, super_vl_cispo(29120, 16, **fsdp)
+        )
+        one_group = estimate_training(
+            SUPER_VL_MODEL, device, super_vl_cispo(29120, 8, **fsdp)
+        )
+
+        # Assert
+        for key in ("base_weights", "adapters", "grads"):
+            assert (
+                component(two_groups, key).n_bytes == component(one_group, key).n_bytes
+            )

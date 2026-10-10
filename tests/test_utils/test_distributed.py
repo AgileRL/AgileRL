@@ -812,13 +812,13 @@ class TestAggregateMetricsDict:
         assert all(isinstance(value, float) for value in out.values())
 
     def test_averages_every_metric_in_one_all_reduce(self):
-        # Arrange
+        # Arrange: the peer rank reports loss 3, kl 0 and clip 1.
         reduced: list[torch.Tensor] = []
 
-        def average_with_peer(tensor, op):
-            assert op == dist.ReduceOp.AVG
+        def sum_with_peer(tensor, op):
+            assert op == dist.ReduceOp.SUM
             reduced.append(tensor.clone())
-            tensor.add_(torch.tensor([3.0, 0.0, 1.0])).div_(2)
+            tensor.add_(torch.tensor([[3.0, 0.0, 1.0], [1.0, 1.0, 1.0]]))
 
         # Act
         with (
@@ -827,7 +827,7 @@ class TestAggregateMetricsDict:
             patch("agilerl.distributed.process.resolve_device", return_value="cpu"),
             patch(
                 "agilerl.distributed.process.dist.all_reduce",
-                side_effect=average_with_peer,
+                side_effect=sum_with_peer,
             ),
         ):
             out = aggregate_metrics_dict(
@@ -836,14 +836,87 @@ class TestAggregateMetricsDict:
 
         # Assert
         assert len(reduced) == 1
-        assert torch.equal(reduced[0][[0, 2]], torch.tensor([2.0, 0.5]))
+        assert torch.equal(reduced[0][:, [0, 2]], torch.tensor([[2.0, 0.5], [1, 1]]))
         assert list(out) == ["loss", "kl", "clip"]
         assert out["loss"] == 2.5
         assert np.isnan(out["kl"])
         assert out["clip"] == 0.75
 
+    def test_an_excluded_metric_averages_over_the_other_ranks_only(self):
+        # Arrange: the peer rank counts both metrics, with loss 3 and kl 0.4.
+        def sum_with_peer(tensor, op):
+            tensor.add_(torch.tensor([[3.0, 0.4], [1.0, 1.0]]))
+
+        # Act
+        with (
+            patch("agilerl.distributed.process.is_distributed", return_value=True),
+            patch("agilerl.distributed.process.dist.get_world_size", return_value=2),
+            patch("agilerl.distributed.process.resolve_device", return_value="cpu"),
+            patch(
+                "agilerl.distributed.process.dist.all_reduce",
+                side_effect=sum_with_peer,
+            ),
+        ):
+            out = aggregate_metrics_dict(
+                {"loss": 1.0, "kl": float("nan")}, excluded=("kl",)
+            )
+
+        # Assert
+        assert out["loss"] == 2.0
+        assert out["kl"] == pytest.approx(0.4)
+
+    def test_a_metric_every_rank_excludes_is_nan(self):
+        out = aggregate_metrics_dict({"loss": 1.0, "kl": 0.2}, excluded=("kl",))
+
+        assert out["loss"] == 1.0
+        assert np.isnan(out["kl"])
+
     def test_empty_dict_returns_empty(self):
         assert aggregate_metrics_dict({}) == {}
+
+    def test_single_process_maximized_metric_is_its_local_mean(self):
+        out = aggregate_metrics_dict(
+            {"loss": 1.0, "peak_gib": torch.tensor([2.0, 4.0])},
+            maximized=("peak_gib",),
+        )
+
+        assert out == {"loss": 1.0, "peak_gib": 3.0}
+
+    def test_maximized_metrics_take_the_largest_rank_value_in_the_same_all_reduce(
+        self,
+    ):
+        # Arrange: this is rank 0 of 2; rank 1 reports loss 3, peak 70, retries 0.
+        reduced: list[torch.Tensor] = []
+
+        def sum_with_peer(tensor, op):
+            assert op == dist.ReduceOp.SUM
+            reduced.append(tensor.clone())
+            peer = torch.zeros_like(tensor)
+            peer[0] = torch.tensor([3.0, 70.0, 0.0])
+            peer[1] = torch.tensor([1.0, 1.0, 1.0])
+            peer[3] = torch.tensor([0.0, 70.0, 0.0])
+            tensor.add_(peer)
+
+        # Act
+        with (
+            patch("agilerl.distributed.process.is_distributed", return_value=True),
+            patch("agilerl.distributed.process.dist.get_world_size", return_value=2),
+            patch("agilerl.distributed.process.dist.get_rank", return_value=0),
+            patch("agilerl.distributed.process.resolve_device", return_value="cpu"),
+            patch(
+                "agilerl.distributed.process.dist.all_reduce",
+                side_effect=sum_with_peer,
+            ),
+        ):
+            out = aggregate_metrics_dict(
+                {"loss": 1.0, "peak_gib": 75.5, "retries": -1.0},
+                maximized=("peak_gib", "retries"),
+            )
+
+        # Assert
+        assert len(reduced) == 1
+        assert reduced[0].shape == (4, 3)
+        assert out == {"loss": 2.0, "peak_gib": 75.5, "retries": 0.0}
 
 
 class TestSyncGrads:
@@ -1415,6 +1488,31 @@ class TestExportOptimizerState:
 
         assert out == {"state": {}, "param_groups": []}
 
+    def test_later_steps_do_not_change_exported_state(self):
+        # Arrange
+        torch.manual_seed(0)
+        model = nn.Linear(2, 2)
+        inner = torch.optim.Adam(model.parameters(), lr=1e-2)
+        optimizer = MagicMock()
+        optimizer.state_dict.side_effect = inner.state_dict
+        model(torch.randn(4, 2)).sum().backward()
+        inner.step()
+
+        # Act
+        out = DPRuntime().export_optimizer_state(model, optimizer)
+        exported = copy.deepcopy(out)
+        model(torch.randn(4, 2)).sum().backward()
+        inner.step()
+
+        # Assert
+        for param_id, param_state in exported["state"].items():
+            assert torch.equal(out["state"][param_id]["step"], param_state["step"])
+            assert torch.equal(
+                out["state"][param_id]["exp_avg"], param_state["exp_avg"]
+            )
+        assert int(inner.state[model.weight]["step"]) == 2
+        assert int(out["state"][0]["step"]) == 1
+
 
 class TestFSDPOptimizerState:
     def test_export_passthrough_when_not_sharded(self):
@@ -1444,11 +1542,39 @@ class TestFSDPOptimizerState:
         ):
             out = FSDPRuntime(FSDPConfig()).export_optimizer_state(actor, optimizer)
 
-        assert out is expected
+        assert out == expected
         _, kwargs = mock_get.call_args
         assert mock_get.call_args.args == (actor, inner)
         assert kwargs["options"].full_state_dict is True
         assert kwargs["options"].cpu_offload is True
+
+    def test_export_does_not_alias_live_step_tensor(self):
+        # Arrange
+        torch.manual_seed(0)
+        model = nn.Linear(2, 2)
+        inner = torch.optim.Adam(model.parameters(), lr=1e-2)
+        model(torch.randn(4, 2)).sum().backward()
+        inner.step()
+        optimizer = MagicMock()
+        optimizer._single_optimizer.return_value = inner
+        live_step = inner.state[model.weight]["step"]
+        gathered = {"state": {"weight": {"step": live_step}}, "param_groups": []}
+
+        # Act
+        with (
+            patch("agilerl.distributed.runtime.FSDPModule", object),
+            patch(
+                "agilerl.distributed.runtime.get_optimizer_state_dict",
+                return_value=gathered,
+            ),
+        ):
+            out = FSDPRuntime(FSDPConfig()).export_optimizer_state(model, optimizer)
+        model(torch.randn(4, 2)).sum().backward()
+        inner.step()
+
+        # Assert
+        assert int(inner.state[model.weight]["step"]) == 2
+        assert int(out["state"]["weight"]["step"]) == 1
 
     def test_import_scatters_state_and_reoffloads(self):
         model = nn.Linear(2, 2)
@@ -1664,6 +1790,47 @@ class TestFSDPRuntimeImportAdapterTensors:
 
 
 class TestFSDPPrepareActorOffload:
+    @pytest.mark.parametrize(
+        ("device", "cpu_offload", "optim_cpu_offload", "fused"),
+        [
+            ("cuda:0", False, False, True),
+            ("cuda:0", False, True, False),
+            ("cuda:0", True, False, False),
+            ("cpu", False, False, False),
+        ],
+        ids=["gpu", "optim-cpu-offload", "cpu-offload", "cpu"],
+    )
+    def test_only_a_gpu_optimizer_steps_fused(
+        self, device, cpu_offload, optim_cpu_offload, fused
+    ):
+        # Arrange
+        actor = _LoraActor()
+        config = FSDPConfig(
+            cpu_offload=cpu_offload, optim_cpu_offload=optim_cpu_offload
+        )
+
+        # Act
+        with patch(
+            "agilerl.distributed.runtime.materialize_fsdp2_from_cpu_state",
+            return_value=actor,
+        ):
+            result = FSDPRuntime(config).prepare_actor(
+                actor,
+                device=device,
+                colocated=device != "cpu",
+                cosine_lr_schedule_config=None,
+                lr=1e-4,
+                lr_critic=None,
+                restore_adapter_trainability=MagicMock(),
+            )
+
+        # Assert
+        optimizer = result.optimizer.optimizer
+        if optim_cpu_offload:
+            assert isinstance(optimizer, CPUOffloadOptimizer)
+            optimizer = optimizer.optimizer
+        assert bool(optimizer.defaults["fused"]) is fused
+
     def test_rejects_already_offloaded_optimizer(self):
         actor = nn.Linear(2, 2)
         inner = CPUOffloadOptimizer(MagicMock(), pin_memory=False)
@@ -1681,7 +1848,7 @@ class TestFSDPPrepareActorOffload:
             ),
         ):
             with pytest.raises(TypeError, match="already CPU-offloaded"):
-                FSDPRuntime(FSDPConfig()).prepare_actor(
+                FSDPRuntime(FSDPConfig(optim_cpu_offload=True)).prepare_actor(
                     actor,
                     device="cpu",
                     colocated=False,
@@ -3365,25 +3532,62 @@ class TestCPUOffloadOptimizer:
                 if key != "step":
                     assert v is pinned
 
-    def test_to_device_moves_cuda_with_non_blocking(self):
-        _model, opt = self._make_optimizer("cpu")
-        offload = CPUOffloadOptimizer(opt, pin_memory=False)
-        tensor = MagicMock()
+    def test_pinned_states_reuse_their_host_buffers_and_match_adamw(self):
+        # Arrange
+        torch.manual_seed(0)
+        model, opt = self._make_optimizer("cpu")
+        reference = copy.deepcopy(model)
+        reference_opt = torch.optim.AdamW(reference.parameters(), lr=1e-3)
+        offload = CPUOffloadOptimizer(opt, pin_memory=True)
+        pin_patch = patch.object(torch.Tensor, "pin_memory", torch.Tensor.clone)
+        torch.manual_seed(1)
+        with pin_patch:
+            self._step_once(model, offload, "cpu")
+        torch.manual_seed(1)
+        self._step_once(reference, reference_opt, "cpu")
 
-        out = offload._to_device(tensor, "cuda")
+        def moments():
+            return [
+                value
+                for state in offload.state.values()
+                for key, value in state.items()
+                if key != "step"
+            ]
 
-        tensor.to.assert_called_once_with("cuda", non_blocking=True)
-        assert out is tensor.to.return_value
+        host_states = moments()
 
-    def _record_moves(self, offload):
+        # Act
+        devices, move_patch = self._record_moves()
+        torch.manual_seed(2)
+        with pin_patch, move_patch:
+            self._step_once(model, offload, "cpu")
+        torch.manual_seed(2)
+        self._step_once(reference, reference_opt, "cpu")
+
+        # Assert: the moments return to the host tensors they left from, and
+        # only the device copy is a ``.to`` call.
+        assert devices == ["cuda"] * len(host_states)
+        assert all(
+            after is before
+            for after, before in zip(moments(), host_states, strict=True)
+        )
+        for param, expected in zip(
+            model.parameters(), reference.parameters(), strict=True
+        ):
+            torch.testing.assert_close(param, expected, atol=0, rtol=0)
+
+    def _record_moves(self):
+        """Record ``.to("cuda" | "cpu")`` calls; tensors stay on the CPU."""
         devices: list[str] = []
-        real_to_device = CPUOffloadOptimizer._to_device
+        real_to = torch.Tensor.to
 
-        def record(self, tensor, device):
-            devices.append(device)
-            return real_to_device(self, tensor, "cpu")
+        def record(tensor, *args, **kwargs):
+            if args and args[0] in ("cuda", "cpu"):
+                devices.append(args[0])
+                return real_to(tensor, "cpu")
+            return real_to(tensor, *args, **kwargs)
 
-        return devices, patch.object(CPUOffloadOptimizer, "_to_device", record)
+        return devices, patch.object(torch.Tensor, "to", record)
 
     def test_step_after_init_moves_states_around_step(self):
         # Arrange — stepped once so states exist and live on CPU
@@ -3392,7 +3596,7 @@ class TestCPUOffloadOptimizer:
         self._step_once(model, offload, "cpu")
 
         # Act — moves are recorded; tensors stay on CPU in this process
-        devices, move_patch = self._record_moves(offload)
+        devices, move_patch = self._record_moves()
         with move_patch:
             self._step_once(model, offload, "cpu")
 
@@ -3411,7 +3615,7 @@ class TestCPUOffloadOptimizer:
         self._step_once(model, offload, "cpu")
 
         # Act
-        devices, move_patch = self._record_moves(offload)
+        devices, move_patch = self._record_moves()
         with move_patch:
             sd = offload.state_dict()
 
@@ -3428,7 +3632,7 @@ class TestCPUOffloadOptimizer:
         model_a, opt_a = self._make_optimizer("cpu")
         offload_a = CPUOffloadOptimizer(opt_a, pin_memory=False)
         self._step_once(model_a, offload_a, "cpu")
-        _devices_a, snapshot_patch = self._record_moves(offload_a)
+        _devices_a, snapshot_patch = self._record_moves()
         with snapshot_patch:
             sd = offload_a.state_dict()
 
@@ -3444,7 +3648,7 @@ class TestCPUOffloadOptimizer:
                 assert v.device.type == "cpu"
 
         # Act — the next step round-trips instead of re-running init
-        devices, move_patch = self._record_moves(offload_b)
+        devices, move_patch = self._record_moves()
         with move_patch:
             self._step_once(model_b, offload_b, "cpu")
 
@@ -3775,7 +3979,7 @@ class TestFSDPPrepareActorExpertParallel:
             ),
             patch("agilerl.utils.llm_utils.make_llm_scheduler", return_value=None),
         ):
-            FSDPRuntime(FSDPConfig(ep=2)).prepare_actor(
+            FSDPRuntime(FSDPConfig(ep=2, optim_cpu_offload=False)).prepare_actor(
                 actor,
                 device="cpu",
                 colocated=False,

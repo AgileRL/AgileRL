@@ -1363,3 +1363,119 @@ class TestLoraInputCastBytes:
         assert formulas.lora_input_cast_bytes(
             hybrid, 8, 512, gradient_checkpointing=False
         ) == formulas.lora_input_cast_bytes(dense, 8, 512, gradient_checkpointing=False)
+
+
+SUPER_VL = SUPPORTED_MODEL_INFO["nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16"]
+
+
+class TestLatentMoe:
+    def test_routed_experts_run_at_the_latent_width(self):
+        arch = ModelArch.from_hf_config(SUPER_VL.config)
+
+        assert arch.moe_latent_size == 1024
+        assert arch.expert_width == 1024
+
+    def test_expert_params_add_the_latent_projections(self):
+        # Arrange
+        dense = ModelArch.from_hf_config(NEMOTRON_H_MOE)
+        latent = ModelArch.from_hf_config({**NEMOTRON_H_MOE, "moe_latent_size": 1024})
+
+        # Act
+        experts, _ = formulas.moe_params_per_layer(latent)
+
+        # Assert: 128 ungated experts at 1024 wide, the shared expert at
+        # hidden width, and the hidden <-> latent projections.
+        assert dense.expert_width == 2688
+        assert experts == 128 * 2 * 1024 * 1856 + 2 * 2688 * 3712 + 2 * 2688 * 1024
+
+
+class TestVisionFields:
+    def test_super_vl_tower_emits_1024_patches_of_1280(self):
+        arch = ModelArch.from_hf_config(SUPER_VL.config)
+
+        assert arch.vision_hidden_size == 1280
+        assert arch.vision_image_size == 512
+        assert arch.vision_patches_per_image == (512 // 16) ** 2
+
+    def test_text_only_model_has_no_patches(self):
+        assert QWEN_05B.vision_patches_per_image == 0
+
+
+class TestRoutedChunkBytes:
+    def test_chunked_expert_lora_grows_with_the_chunk_until_the_rows_cap_it(self):
+        # Arrange: 16384 x 6 routed rows of the widest (2688) bf16 row.
+        arch = ModelArch.from_hf_config(NEMOTRON_H_MOE)
+        rows_bytes = 16384 * 6 * 2688 * 2
+
+        def chunk_term(chunk_mib: int) -> int:
+            return formulas.routed_chunk_bytes(
+                arch,
+                1,
+                16384,
+                2.0,
+                chunk_mib * MiB,
+                expert_lora=True,
+                contracted=True,
+                ep=1,
+            )
+
+        # Act
+        terms = [chunk_term(mib) for mib in (64, 256, 1024)]
+
+        # Assert
+        fraction = formulas.ROUTED_CHUNK_LIVE_FRACTION
+        assert terms == [
+            int(64 * MiB * fraction),
+            int(256 * MiB * fraction),
+            int(rows_bytes * fraction),
+        ]
+
+    def test_expert_parallel_adds_an_fp32_combine_chunk(self):
+        arch = ModelArch.from_hf_config(NEMOTRON_H_MOE)
+
+        term = formulas.routed_chunk_bytes(
+            arch, 1, 16384, 2.0, 64 * MiB, expert_lora=True, contracted=True, ep=8
+        )
+
+        assert term == int(2 * 64 * MiB * formulas.ROUTED_CHUNK_LIVE_FRACTION)
+
+    def test_sorted_contracted_lora_holds_one_whole_chunk(self):
+        arch = ModelArch.from_hf_config(GRANITE_MOE)
+
+        term = formulas.routed_chunk_bytes(
+            arch, 1, 16384, 2.0, 16 * MiB, expert_lora=True, contracted=True, ep=1
+        )
+
+        assert not arch.chunked_routed_experts
+        assert term == 16 * MiB
+
+    def test_no_expert_lora_and_dense_models_are_zero(self):
+        moe = ModelArch.from_hf_config(NEMOTRON_H_MOE)
+
+        frozen = formulas.routed_chunk_bytes(
+            moe, 1, 16384, 2.0, 64 * MiB, expert_lora=False, contracted=True, ep=1
+        )
+        dense = formulas.routed_chunk_bytes(
+            QWEN_05B, 1, 16384, 2.0, 64 * MiB, expert_lora=True, contracted=True, ep=8
+        )
+
+        assert (frozen, dense) == (0, 0)
+
+
+class TestPackedExpertLoraPlacement:
+    def test_each_layer_matrix_shards_as_one_stacked_tensor(self):
+        # Arrange: one expert's factor (4 x 16 = 64) sits under the threshold,
+        # the stacked [E * r, 16] tensor (256) does not.
+        threshold = 100
+
+        # Act
+        base_repl, base_shard = formulas.lora_tensor_placement(
+            MOE_TINY, 4, "attention-only", 0, threshold
+        )
+        repl, shard = formulas.lora_tensor_placement(
+            MOE_TINY, 4, "attention-only", 2, threshold
+        )
+
+        # Assert
+        assert repl == base_repl
+        assert shard - base_shard == formulas.packed_lora_param_count(MOE_TINY, 4, 2)

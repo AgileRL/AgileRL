@@ -18,7 +18,11 @@ from PIL import Image
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from agilerl.llm_envs.collector import RolloutCollector
-from agilerl.llm_envs.harness import RolloutHarness, TranscriptContinuityError
+from agilerl.llm_envs.harness import (
+    PROMPT_LIMIT_INFO_KEY,
+    RolloutHarness,
+    TranscriptContinuityError,
+)
 from agilerl.llm_envs.observation import (
     ESCAPED_IMAGE_PLACEHOLDER,
     IMAGE_PLACEHOLDER,
@@ -361,7 +365,9 @@ class TestRolloutHarnessVision:
         harness.full_ids = None
 
         with pytest.raises(RuntimeError, match="reset\\(\\) must run before step"):
-            harness._step_apply(("next", "user", None, 0.0, False, False, {}, None))
+            harness._step_apply(
+                ("next", "user", None, 0.0, False, False, {}, None, None)
+            )
 
     def test_image_step_records_sampling_logps(self) -> None:
         def fake_processor(
@@ -1203,7 +1209,7 @@ class TestRolloutHarnessSegmentRestart:
         restarted = tokenizer.decode(prompts[2]["input_ids"][0])
         assert "Previous actions:\n1. noop()\n2. noop()\n\nfeedback" in restarted
 
-    def test_image_restart_over_budget_continues_while_the_context_fits(
+    def test_image_restart_over_the_threshold_ends_the_episode(
         self, image_token_tokenizer: PreTrainedTokenizerBase
     ) -> None:
         # Arrange
@@ -1212,31 +1218,25 @@ class TestRolloutHarnessSegmentRestart:
         # Quoting escapes every ', so the history entry outgrows the sampled turn.
         sampled = [*newline_first_tokens(tokenizer, "say: " + "'" * 60 + "x"), end]
         continued = run_image_episode(numbered_screen_harness(tokenizer), sampled)
-        continued_len = continued[1]["prompt_token_len"]
-        threshold = continued_len - 1
-        restarted = run_image_episode(
-            numbered_screen_harness(tokenizer, segment_prompt_tokens=threshold),
-            sampled,
-        )
-        assert restarted[1]["prompt_token_len"] > continued_len
-        harness = numbered_screen_harness(
-            tokenizer,
-            segment_prompt_tokens=threshold,
-            max_model_len=continued_len + 1,
-        )
+        threshold = continued[1]["prompt_token_len"] - 1
+        harness = numbered_screen_harness(tokenizer, segment_prompt_tokens=threshold)
+        prompt, _info = harness.reset()
+        output = vllm_image_turn(prompt, sampled)
 
         # Act
-        prompts = run_image_episode(harness, sampled)
-        *_rest, pixel_values, segments = harness.get_episode_data()
+        next_prompt, _reward, terminated, truncated, info = harness.step(
+            output, sampling_logps=torch.zeros(len(sampled))
+        )
+        full_ids, *_rest, pixel_values, segments = harness.get_episode_data()
 
         # Assert
-        assert [prompt["prompt"] for prompt in prompts] == [
-            prompt["prompt"] for prompt in continued[:2]
-        ]
-        assert harness.done
+        assert (next_prompt, terminated, truncated) == ({}, False, True)
+        assert info == {PROMPT_LIMIT_INFO_KEY: True}
+        assert torch.equal(full_ids, output)
+        assert full_ids.shape[1] <= threshold + len(sampled)
         assert segments is None
         assert pixel_values is not None
-        assert pixel_values[:, 0].tolist() == [0.0, 1.0]
+        assert pixel_values[:, 0].tolist() == [0.0]
 
     def test_image_restart_and_continued_prompt_over_budget_truncate(
         self, image_token_tokenizer: PreTrainedTokenizerBase
@@ -1360,7 +1360,7 @@ class TestRolloutHarnessSegmentRestart:
             f"Question:\n{goal}<|im_end|>\n<|im_start|>assistant\n<think>\n"
         )
 
-    def test_image_limit_restart_over_budget_raises(
+    def test_image_limit_restart_over_the_prompt_budget_ends_the_episode(
         self, image_token_tokenizer: PreTrainedTokenizerBase
     ) -> None:
         # Arrange
@@ -1374,17 +1374,41 @@ class TestRolloutHarnessSegmentRestart:
             tokenizer, segment_max_images=1, max_model_len=continued_len + 1
         )
         prompt, _info = harness.reset()
+        output = vllm_image_turn(prompt, sampled)
 
-        # Act / Assert
-        with pytest.raises(
-            RuntimeError,
-            match=r"Turn 1 needs a context restart to stay within "
-            r"segment_max_images=1, but the restarted prompt is over the prompt budget",
-        ):
-            harness.step(
-                vllm_image_turn(prompt, sampled),
-                sampling_logps=torch.zeros(len(sampled)),
-            )
+        # Act
+        next_prompt, _reward, terminated, truncated, info = harness.step(
+            output, sampling_logps=torch.zeros(len(sampled))
+        )
+
+        # Assert
+        assert (next_prompt, terminated, truncated) == ({}, False, True)
+        assert info == {PROMPT_LIMIT_INFO_KEY: True}
+        assert torch.equal(harness.get_episode_data()[0], output)
+
+    def test_image_reset_over_the_threshold_ends_at_turn_zero_with_a_prompt_row(
+        self, image_token_tokenizer: PreTrainedTokenizerBase
+    ) -> None:
+        # Arrange
+        prompt, _info = numbered_screen_harness(image_token_tokenizer).reset()
+        prompt_len = int(prompt["prompt_token_len"])
+        harness = numbered_screen_harness(
+            image_token_tokenizer, segment_prompt_tokens=prompt_len - 1
+        )
+
+        # Act
+        next_prompt, info = harness.reset()
+        full_ids, action_mask, *_rest, pixel_values, segments = (
+            harness.get_episode_data()
+        )
+
+        # Assert
+        assert next_prompt == {}
+        assert info == {PROMPT_LIMIT_INFO_KEY: True}
+        assert torch.equal(full_ids, prompt["input_ids"])
+        assert not action_mask.any()
+        assert pixel_values is not None
+        assert segments is None
 
     @pytest.mark.parametrize("segment_max_images", [0, -1])
     def test_rejects_a_non_positive_image_limit(
@@ -1484,6 +1508,41 @@ def screen_turn(page: int, image: bool = True) -> str:
 def sampled_turn(turn: int) -> str:
     """Turn ``turn``'s sampled text, its end-of-turn token included."""
     return f"\nreason {turn}</think>click('{turn}')<|im_end|>\n"
+
+
+class TestRolloutHarnessSegmentRowBound:
+    @pytest.mark.parametrize("segment_prompt_tokens", range(40, 160, 8))
+    def test_no_row_exceeds_the_threshold_plus_one_generation(
+        self, image_token_tokenizer: PreTrainedTokenizerBase, segment_prompt_tokens: int
+    ) -> None:
+        # Arrange
+        harness = reasoning_screen_harness(
+            image_token_tokenizer,
+            max_turns=12,
+            segment_prompt_tokens=segment_prompt_tokens,
+            segment_max_images=4,
+            restart_keep_turns=2,
+        )
+
+        # Act
+        prompts, sampled = run_reasoning_episode(harness, image_token_tokenizer)
+        full_ids, *_rest, pixel_values, segments = harness.get_episode_data()
+
+        # Assert
+        assert pixel_values is not None
+        rows = [full_ids.shape[1]] if segments is None else segments.token_lengths
+        # One pixel row per image.
+        pixel_rows = (
+            [pixel_values.shape[0]]
+            if segments is None or segments.pixel_rows is None
+            else segments.pixel_rows
+        )
+        longest_turn = max(len(turn) for turn in sampled)
+        assert max(prompt["prompt_token_len"] for prompt in prompts) <= (
+            segment_prompt_tokens
+        )
+        assert max(int(row) for row in rows) <= segment_prompt_tokens + longest_turn
+        assert max(int(count) for count in pixel_rows) <= 4
 
 
 class TestRolloutHarnessRestartKeepTurns:
@@ -1609,8 +1668,9 @@ class TestRolloutHarnessRestartKeepTurns:
         self, image_token_tokenizer: PreTrainedTokenizerBase
     ) -> None:
         # Arrange
+        # The action list fits 60 tokens; the latest turn plus room for another does not.
         harness = reasoning_screen_harness(
-            image_token_tokenizer, segment_prompt_tokens=1, restart_keep_turns=2
+            image_token_tokenizer, segment_prompt_tokens=60, restart_keep_turns=2
         )
 
         # Act
@@ -1757,6 +1817,191 @@ class TestRolloutHarnessRestartKeepTurns:
             )
 
 
+class UrlScreenClient(NumberedScreenClient):
+    """Numbered screen env whose page ``n`` observation also carries ``url``."""
+
+    def step(self, action: Any) -> tuple[object, float, bool, bool, dict[str, Any]]:
+        page, *rest = super().step(action)
+        return {**page, "url": f"http://site/{len(self.actions)}"}, *rest
+
+
+def long_page_text(page: int) -> str:
+    """Page ``page``'s text, long next to the action list."""
+    return f"page {page}" + " row" * 30
+
+
+class UrlTextClient(FakeEnvClient):
+    """Text env whose page ``n`` observation carries ``prompt`` and ``url``."""
+
+    def step(self, action: Any) -> tuple[object, float, bool, bool, dict[str, Any]]:
+        del action
+        self.step_calls += 1
+        page = {
+            "prompt": long_page_text(self.step_calls),
+            "url": f"http://site/{self.step_calls}",
+        }
+        return page, 0.0, False, False, {}
+
+
+def url_screen_harness(
+    tokenizer: PreTrainedTokenizerBase, max_turns: int = 4, **harness_kwargs: Any
+) -> RolloutHarness:
+    """URL screen harness keeping 2 turns; each image expands to 3 context tokens."""
+    return RolloutHarness(
+        UrlScreenClient(),
+        tokenizer,
+        max_turns=max_turns,
+        system_prompt=INSTRUCTION,
+        vision_processor=context_token_processor(tokenizer, tokens_per_image=3),
+        restart_keep_turns=2,
+        **harness_kwargs,
+    )
+
+
+def url_turn(page: int, image: bool = True) -> str:
+    """The user turn showing only ``page``'s URL, then the thinking prefill."""
+    placeholder = f"{IMAGE_PLACEHOLDER}\n" if image else ""
+    return (
+        f"<|im_start|>user\n{placeholder}url: http://site/{page}\n{INSTRUCTION}"
+        "<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    )
+
+
+class TestRolloutHarnessRestartOlderObservations:
+    def test_older_kept_turn_shows_the_field_in_place_of_its_page(
+        self, image_token_tokenizer: PreTrainedTokenizerBase
+    ) -> None:
+        # Arrange
+        harness = url_screen_harness(
+            image_token_tokenizer,
+            segment_max_images=3,
+            restart_older_obs_field="url",
+        )
+
+        # Act
+        prompts, _sampled = run_reasoning_episode(harness, image_token_tokenizer)
+
+        # Assert
+        assert prompts[3]["prompt"] == (
+            f"{SYSTEM_TURN}<|im_start|>user\n"
+            "Previous actions:\n1. click('0')\n2. click('1')\n3. click('2')\n"
+            f"{INSTRUCTION}<|im_end|>\n<|im_start|>assistant\n<think>\n"
+            f"{sampled_turn(1)}{url_turn(2)}{sampled_turn(2)}{screen_turn(3)}"
+        )
+        assert prompts[3]["image"][0][0] == 2.0
+        assert prompts[3]["image"][1][0] == 3.0
+
+    def test_older_kept_turn_drops_its_image(
+        self, image_token_tokenizer: PreTrainedTokenizerBase
+    ) -> None:
+        # Arrange
+        harness = url_screen_harness(
+            image_token_tokenizer,
+            segment_max_images=3,
+            restart_older_obs_field="url",
+            restart_older_images=False,
+        )
+
+        # Act
+        prompts, _sampled = run_reasoning_episode(harness, image_token_tokenizer)
+
+        # Assert
+        assert prompts[3]["prompt"].endswith(
+            f"{sampled_turn(1)}{url_turn(2, image=False)}"
+            f"{sampled_turn(2)}{screen_turn(3)}"
+        )
+        assert prompts[3]["prompt"].count(IMAGE_PLACEHOLDER) == 1
+        assert prompts[3]["image"][0] == 3.0
+
+    def test_dropping_older_images_leaves_room_for_more_pages_per_segment(
+        self, image_token_tokenizer: PreTrainedTokenizerBase
+    ) -> None:
+        # Arrange
+        tokenizer = image_token_tokenizer
+        with_images = url_screen_harness(tokenizer, max_turns=6, segment_max_images=3)
+        without_images = url_screen_harness(
+            tokenizer,
+            max_turns=6,
+            segment_max_images=3,
+            restart_older_images=False,
+        )
+        run_reasoning_episode(with_images, tokenizer)
+        _prompts, sampled = run_reasoning_episode(without_images, tokenizer)
+
+        # Act
+        *_, kept_segments = with_images.get_episode_data()
+        _ids, mask, _turns, _rewards, _logps, pixel_values, segments = (
+            without_images.get_episode_data()
+        )
+
+        # Assert
+        assert kept_segments is not None
+        assert segments is not None
+        assert kept_segments.token_lengths.numel() == 3
+        assert segments.token_lengths.numel() == 2
+        assert int(mask.sum()) == sum(len(s) for s in sampled)
+        assert pixel_values is not None
+        assert torch.equal(
+            rebuilt_pixel_values(
+                without_images.episode_image_calls(),
+                context_token_processor(tokenizer, tokens_per_image=3),
+            ),
+            pixel_values,
+        )
+
+    def test_text_restart_shows_the_field_for_the_older_turn(
+        self, thinking_tokenizer: PreTrainedTokenizerBase
+    ) -> None:
+        # Arrange
+        tokenizer = thinking_tokenizer
+        end = tokenizer.convert_tokens_to_ids("<|im_end|>")
+        sampled = [*tokenizer.encode("ok</think>noop()", add_special_tokens=False), end]
+        reference = run_text_episode(
+            RolloutHarness(
+                UrlTextClient(), tokenizer, max_turns=4, system_prompt=INSTRUCTION
+            ),
+            sampled,
+        )
+        harness = RolloutHarness(
+            UrlTextClient(),
+            tokenizer,
+            max_turns=4,
+            system_prompt=INSTRUCTION,
+            segment_prompt_tokens=int(reference[3]["input_ids"].shape[1]) - 1,
+            restart_keep_turns=2,
+            restart_older_obs_field="url",
+        )
+
+        # Act
+        prompts = run_text_episode(harness, sampled)
+
+        # Assert
+        restarted = tokenizer.decode(prompts[3]["input_ids"][0])
+        assert restarted.endswith(
+            "ok</think>noop()<|im_end|>\n<|im_start|>user\nurl: http://site/2<|im_end|>\n"
+            "<|im_start|>assistant\n<think>\n"
+            f"ok</think>noop()<|im_end|>\n<|im_start|>user\n{long_page_text(3)}"
+            "<|im_end|>\n<|im_start|>assistant\n<think>\n"
+        )
+
+    def test_rejects_a_field_the_observation_lacks(
+        self, image_token_tokenizer: PreTrainedTokenizerBase
+    ) -> None:
+        # Arrange
+        harness = url_screen_harness(
+            image_token_tokenizer,
+            segment_max_images=3,
+            restart_older_obs_field="title",
+        )
+
+        # Act / Assert
+        with pytest.raises(
+            ValueError,
+            match="restart_older_obs_field='title' is not a field of the observation",
+        ):
+            run_reasoning_episode(harness, image_token_tokenizer)
+
+
 class ActionErrorClient(FakeEnvClient):
     """Text env whose observations carry the given errors in ``step_error``, then none."""
 
@@ -1778,8 +2023,12 @@ class TestRolloutHarnessActionHistory:
         # Arrange
         tokenizer = thinking_tokenizer
         end = tokenizer.convert_tokens_to_ids("<|im_end|>")
+        # The reasoning outgrows the error text, so the third turn's prompt
+        # crosses the threshold while its restart prompt fits.
         sampled = [
-            *tokenizer.encode("ok</think>click('12')", add_special_tokens=False),
+            *tokenizer.encode(
+                "thinking " * 40 + "</think>click('12')", add_special_tokens=False
+            ),
             end,
         ]
         harness = RolloutHarness(
@@ -1787,7 +2036,7 @@ class TestRolloutHarnessActionHistory:
             tokenizer,
             max_turns=4,
             system_prompt=INSTRUCTION,
-            segment_prompt_tokens=1,
+            segment_prompt_tokens=160,
             action_error_field="step_error",
         )
 
@@ -1818,7 +2067,7 @@ class TestRolloutHarnessActionHistory:
             tokenizer,
             max_turns=3,
             system_prompt=INSTRUCTION,
-            segment_prompt_tokens=1,
+            segment_prompt_tokens=60,
         )
 
         # Act
@@ -1845,7 +2094,7 @@ class TestRolloutHarnessActionHistory:
             tokenizer,
             max_turns=2,
             system_prompt=INSTRUCTION,
-            segment_prompt_tokens=1,
+            segment_prompt_tokens=200,
         )
 
         # Act

@@ -25,6 +25,7 @@ from agilerl.lora.moe.model import (
     install_packed_expert_grouped_gemm,
     materializes_expert_lora,
     moe_expert_target_parameters,
+    set_routed_experts_chunk_bytes,
     set_routed_experts_recompute,
     upgrade_moe_param_wrappers,
 )
@@ -49,6 +50,7 @@ __all__ = [
     "moe_expert_target_parameters",
     "resolve_adapters",
     "routed_experts_local_forward",
+    "set_routed_experts_chunk_bytes",
     "set_routed_experts_recompute",
     "split_lora_delta",
     "transposed_experts_local_forward",

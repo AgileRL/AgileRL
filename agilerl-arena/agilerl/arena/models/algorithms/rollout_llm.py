@@ -16,6 +16,7 @@ from agilerl.arena.models.descriptions import (
     IS_CAP,
     IS_CORRECTION,
     MAX_OUTPUT_TOKENS,
+    MAX_ROW_TOKENS,
     MICRO_BATCH,
     MIN_OUTPUT_TOKENS,
     MIN_P,
@@ -39,10 +40,11 @@ class RolloutLLMSpec(LLMAlgorithmSpec):
     repetition_penalty: float = Field(
         default=1.0, ge=0.0, description=REPETITION_PENALTY
     )
-    top_p: float = Field(default=0.95, ge=0.0, le=1.0, description=TOP_P)
+    top_p: float = Field(default=1.0, ge=0.0, le=1.0, description=TOP_P)
     top_k: int = Field(default=50, ge=0, description=TOP_K)
     min_p: float = Field(default=0.0, ge=0.0, le=1.0, description=MIN_P)
     max_output_tokens: int | None = Field(default=None, description=MAX_OUTPUT_TOKENS)
+    max_row_tokens: int | None = Field(default=None, ge=1, description=MAX_ROW_TOKENS)
     beta: float = Field(default=0.001, ge=0.0, le=1.0, description=BETA)
     mini_batch_size: int | None = Field(default=None, ge=1, description=MINI_BATCH)
     micro_batch_size_per_gpu: int | None = Field(
