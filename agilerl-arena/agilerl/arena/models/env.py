@@ -713,6 +713,24 @@ class LLMEnvSpec(EnvSpecBase):
             "per-epoch shuffle."
         ),
     )
+    task_family_field: str | None = Field(
+        default=None,
+        description=(
+            "Field of each env_config.tasks row naming the row's family, such "
+            "as a template id. Under adaptive_task_sampling, a row with few "
+            "groups is drawn by its family's pooled rate of differing rewards. "
+            "The field is not sent to the env. Unset puts no row in a family."
+        ),
+    )
+    task_family_prior_strength: float = Field(
+        default=1.0,
+        gt=0.0,
+        description=(
+            "Groups' worth of weight a family's rate carries in a row's "
+            "estimate; a row with more groups than this is drawn mostly by "
+            "its own rate."
+        ),
+    )
 
     env_hosts: int | None = Field(
         default=None,
@@ -857,6 +875,12 @@ class LLMEnvSpec(EnvSpecBase):
         )
         if self.env_type != "rollout":
             return self
+        if self.task_family_field is not None and not self.adaptive_task_sampling:
+            msg = (
+                "task_family_field weights rows under adaptive_task_sampling; "
+                "set adaptive_task_sampling: true or drop it."
+            )
+            raise ValueError(msg)
         dataset = self._named_dataset()
         sources = {
             "a dataset": dataset,

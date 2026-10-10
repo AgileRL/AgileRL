@@ -272,6 +272,7 @@ def generate_grpo(
     sleep_mode=False,
     from_name=False,
     use_liger_loss=False,
+    **kwargs,
 ):
     gc.collect()
     torch.cuda.empty_cache()
@@ -364,6 +365,7 @@ def generate_grpo(
         "micro_batch_size_per_gpu": micro_batch_size_per_gpu,
         "use_liger_loss": use_liger_loss,
     }
+    grpo_kwargs.update(kwargs)
     return GRPO(**grpo_kwargs)
 
 
@@ -481,11 +483,19 @@ class _GrpoLossStub:
         self.device = device
         self._window_action_tokens = None
         self._segment_accumulation_steps = None
+        self.off_policy_token_mask_bounds = None
+        self.off_policy_sequence_mask_threshold = None
+        self.use_bias_correction_kl = False
+        self.kl_clamp = 10.0
 
     _apply_kl_advantage_shaping = GRPO._apply_kl_advantage_shaping
     _reduce_masked_loss = GRPO._reduce_masked_loss
     _resolve_loss_window = GRPO._resolve_loss_window
+    _token_loss_weights = GRPO._token_loss_weights
+    _clipped_units = GRPO._clipped_units
     _log_importance_weights = GRPO._log_importance_weights
+    _masks_off_policy_tokens = GRPO._masks_off_policy_tokens
+    _off_policy_drops = GRPO._off_policy_drops
     _compute_policy_loss = GRPO._compute_policy_loss
     _grpo_loss_standard = GRPO._grpo_loss_standard
     _gspo_loss = GRPO._gspo_loss
@@ -1652,7 +1662,7 @@ class TestGRPOLigerLossDispatch:
         ),
         [
             ("cispo", "cispo", "token", "clip_coef_max"),
-            ("gspo", "grpo", "trajectory", "clip_coef_max - 1.0"),
+            ("gspo", "grpo", "sequence", "clip_coef_max - 1.0"),
         ],
     )
     def test_liger_loss_dispatches_per_loss_type(
@@ -1662,7 +1672,9 @@ class TestGRPOLigerLossDispatch:
         expected_is_level: str,
         expected_eps_high: str,
     ) -> None:
-        grpo = _make_cpu_grpo_for_branch_tests(loss_type=loss_type, beta=0.0)
+        grpo = _make_cpu_grpo_for_branch_tests(
+            loss_norm="micro_batch", loss_type=loss_type, beta=0.0
+        )
         fake_lm_head = nn.Linear(8, 16, bias=True)
         fake_loss = torch.tensor(0.5, requires_grad=True)
         fake_aux = (torch.tensor(0.1), torch.tensor(0.0))
@@ -1718,7 +1730,9 @@ class TestGRPOLigerLossDispatch:
         """token-level Liger + captured vLLM logprobs fuses the clamped
         trainer/vLLM ratio into the kernel (``vllm_is_ratio`` arg, pos 24).
         """
-        grpo = _make_cpu_grpo_for_branch_tests(loss_type="grpo", beta=0.0)
+        grpo = _make_cpu_grpo_for_branch_tests(
+            loss_norm="micro_batch", loss_type="grpo", beta=0.0
+        )
         fake_lm_head = nn.Linear(8, 16, bias=True)
         fake_aux = (torch.tensor(0.1), torch.tensor(0.0))
         with (
@@ -1731,6 +1745,7 @@ class TestGRPOLigerLossDispatch:
                 LLMAlgorithm, "select_adapter", lambda self, name: nullcontext()
             ),
         ):
+            mock_fn.forward = _DummyLigerFn.forward
             mock_fn.apply.return_value = (
                 torch.tensor(0.5, requires_grad=True),
                 fake_aux,
@@ -1762,7 +1777,9 @@ class TestGRPOLigerLossDispatch:
         a naive ``squeeze(-1)`` collapses ``(1,)`` to a 0-dim scalar, which the
         token-level advantage-shape detection then rejects with a ``ValueError``.
         """
-        grpo = _make_cpu_grpo_for_branch_tests(loss_type=loss_type, beta=0.0)
+        grpo = _make_cpu_grpo_for_branch_tests(
+            loss_norm="micro_batch", loss_type=loss_type, beta=0.0
+        )
         assert grpo.importance_sampling_level == "token"
         fake_lm_head = nn.Linear(8, 16, bias=True)
         fake_loss = torch.tensor(0.5, requires_grad=True)
@@ -1803,7 +1820,9 @@ class TestGRPOLigerLossDispatch:
         path must reshape it to ``(batch * n_act,)`` alongside the hidden
         states (and not broadcast it like the per-trajectory shapes).
         """
-        grpo = _make_cpu_grpo_for_branch_tests(loss_type="grpo", beta=0.0)
+        grpo = _make_cpu_grpo_for_branch_tests(
+            loss_norm="micro_batch", loss_type="grpo", beta=0.0
+        )
         fake_lm_head = nn.Linear(8, 16, bias=True)
         fake_loss = torch.tensor(0.5, requires_grad=True)
         fake_aux = (torch.tensor(0.1), torch.tensor(0.0))
@@ -1818,6 +1837,7 @@ class TestGRPOLigerLossDispatch:
                 LLMAlgorithm, "select_adapter", lambda self, name: nullcontext()
             ),
         ):
+            mock_fn.forward = _DummyLigerFn.forward
             mock_fn.apply.return_value = (fake_loss, fake_aux)
             fake_output = MagicMock()
             fake_output.logits = torch.randn(2, 3, 8, requires_grad=True)
@@ -1848,7 +1868,9 @@ class TestGRPOLigerLossDispatch:
         """A per-token advantage whose token dim disagrees with ``n_act`` is
         unmappable to the flattened layout and must be rejected.
         """
-        grpo = _make_cpu_grpo_for_branch_tests(loss_type="grpo", beta=0.0)
+        grpo = _make_cpu_grpo_for_branch_tests(
+            loss_norm="micro_batch", loss_type="grpo", beta=0.0
+        )
         fake_lm_head = nn.Linear(8, 16, bias=True)
 
         with (
@@ -1972,7 +1994,9 @@ class TestGRPOLigerSequencePacking:
         [("grpo", "token"), ("cispo", "token"), ("gspo", "trajectory")],
     )
     def test_packed_liger_matches_padded(self, loss_type, expected_level):
-        grpo = _make_cpu_grpo_for_branch_tests(loss_type=loss_type, beta=0.0)
+        grpo = _make_cpu_grpo_for_branch_tests(
+            loss_norm="micro_batch", loss_type=loss_type, beta=0.0
+        )
         grpo.pad_token_id = 0
         assert grpo.importance_sampling_level == expected_level
 
@@ -2029,9 +2053,6 @@ class TestGRPOLigerSequencePacking:
         # Packed: same numbers, but the forward sees one (1, N) row.
         grpo.use_sequence_packing = True
         grpo.actor.config._attn_implementation = "flash_attention_2"
-        # Pre-set the consolidated warn-once flag to silence the canonical
-        # non-token-IS memory notice (now owned by the base helper).
-        grpo._liger_non_token_warned = True
         assert grpo._packing_mode() == "varlen"
         loss_packed, packed_shape = run()
         assert packed_shape == (1, sum(lengths))
@@ -2045,7 +2066,9 @@ class TestGRPOLigerSequencePacking:
         """An unsupported (dense) backend disables packing: the forward stays
         padded even with ``use_sequence_packing=True``.
         """
-        grpo = _make_cpu_grpo_for_branch_tests(loss_type="grpo", beta=0.0)
+        grpo = _make_cpu_grpo_for_branch_tests(
+            loss_norm="micro_batch", loss_type="grpo", beta=0.0
+        )
         grpo.pad_token_id = 0
         vocab, hidden = 16, 8
         actor = _CtxFreeActor(vocab, hidden).to(grpo.device)
@@ -3169,6 +3192,8 @@ class TestGRPOLoss:
         pretrained_model_name_or_path,
         micro_batch_size_per_gpu,
     ):
+        # Independently sampled N(0,1) old/ref log-probs sit outside the
+        # default IcePop band, so the token mask would zero the loss.
         grpo = grpo_factory(
             dist_mode_factory,
             model_factory,
@@ -3181,6 +3206,8 @@ class TestGRPOLoss:
             use_vllm,
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
+            off_policy_token_mask_bounds=None,
+            off_policy_sequence_mask_threshold=None,
         )
         advantages = torch.arange(0, 10, device=grpo.device).unsqueeze(1)
         normal_dist = torch.distributions.normal.Normal(0.0, 1.0)
@@ -3196,6 +3223,7 @@ class TestGRPOLoss:
         mask = torch.ones_like(log_probs)
         mask[:, -3:] = 0
         mask = mask.to(torch.bool)
+        grpo._record_global_window_action_tokens(mask, np.arange(10))
         loss, kl, _, _ = grpo._loss(
             minibatch_idxs=torch.arange(10, device=grpo.device),
             token_ids=torch.randint(
@@ -3476,7 +3504,7 @@ class TestGRPOLearn:
 
         grpo.micro_batch_size_per_gpu = 1
         grpo.gradient_accumulation_steps = 2
-        original_record = GRPO._record_window_action_tokens
+        original_record = GRPO._record_global_window_action_tokens
         window_sizes: list[int] = []
 
         def record_spy(masks, idxs):
@@ -3498,7 +3526,9 @@ class TestGRPOLearn:
                 ),
             ) as mock_loss,
             patch.object(grpo, "_backward_pass", return_value=None),
-            patch.object(grpo, "_record_window_action_tokens", side_effect=record_spy),
+            patch.object(
+                grpo, "_record_global_window_action_tokens", side_effect=record_spy
+            ),
         ):
             grpo.learn((completion_ids, action_masks, rewards))
         # Four micro-batches of one sample fold into two optimizer steps, so
@@ -4005,6 +4035,9 @@ class TestGRPOLearn:
         assert set(metrics.keys()) == {
             "loss",
             "kl",
+            "kl_clamp_frac",
+            "off_policy_token_mask_frac",
+            "off_policy_seq_mask_frac",
             "clipfrac",
             "completion_length",
             "adv_mean",
@@ -5816,7 +5849,13 @@ class TestGRPONonFinitePaddingIsIsolated:
         assert metrics["vllm_is_delta_mean"] == pytest.approx(0.2, rel=1e-5)
 
     def test_liger_kernel_receives_only_finite_inputs(self):
-        grpo = _make_cpu_grpo_for_branch_tests(loss_type="cispo", beta=0.04)
+        grpo = _make_cpu_grpo_for_branch_tests(
+            loss_norm="micro_batch",
+            loss_type="cispo",
+            beta=0.04,
+            off_policy_token_mask_bounds=None,
+            off_policy_sequence_mask_threshold=None,
+        )
         fake_lm_head = nn.Linear(8, 16, bias=True)
         nan = float("nan")
         # Action mask marks token 0 only; token 1 is padding and carries NaN in
@@ -5958,19 +5997,37 @@ class TestGRPOInitWarnings:
         assert grpo.advantage_granularity == "turn"
         grpo.clean_up()
 
-    @pytest.mark.parametrize(
-        ("level", "algo_name"), [("turn", "GRPO"), ("trajectory", "GSPO")]
-    )
-    def test_init_liger_non_token_level_warns_memory_unbounded(self, level, algo_name):
+    def test_init_liger_turn_level_warns_it_runs_the_standard_path(self):
         with (
             patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True),
             patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
-            pytest.warns(UserWarning, match="NOT memory-bounded"),
+            pytest.warns(
+                UserWarning,
+                match="no fused grpo kernel at importance_sampling_level='turn'",
+            ),
         ):
             grpo = _make_cpu_grpo_for_branch_tests(
-                use_liger_loss=True, importance_sampling_level=level
+                use_liger_loss=True, importance_sampling_level="turn"
             )
-        assert grpo._liger_non_token_warned
+        assert grpo._liger_path_selected is False
+        grpo.clean_up()
+
+    def test_init_liger_trajectory_level_does_not_warn(self):
+        with (
+            patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True),
+            patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
+            warnings.catch_warnings(record=True) as caught,
+        ):
+            warnings.simplefilter("always")
+            grpo = _make_cpu_grpo_for_branch_tests(
+                use_liger_loss=True,
+                importance_sampling_level="trajectory",
+                vllm_importance_sampling_correction=False,
+                off_policy_token_mask_bounds=None,
+                off_policy_sequence_mask_threshold=None,
+            )
+        assert not [w for w in caught if "fused" in str(w.message)]
+        assert grpo._liger_path_selected is True
         grpo.clean_up()
 
 
@@ -6039,7 +6096,7 @@ class TestGRPOTurnAdvantageLearnPath:
         with (
             patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True),
             patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
-            pytest.warns(UserWarning, match="NOT memory-bounded"),
+            pytest.warns(UserWarning, match="no fused grpo kernel"),
         ):
             grpo = _make_cpu_grpo_for_branch_tests(
                 group_size=2,

@@ -366,7 +366,7 @@ class TestPPOSplitPassesMatchDoubledForward:
             **_kwargs: Any,
         ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
             loss = (policy_hidden.pow(2).sum(-1) * mask).sum() / mask.sum()
-            return loss, tuple(loss.detach() for _ in range(4))
+            return loss, tuple(loss.detach() for _ in range(5))
 
         reference = make_ppo()
         split = make_ppo()
@@ -413,7 +413,13 @@ class TestPPOSplitPassesMatchDoubledForward:
         unset_fused_adapter_routing(split.actor)
 
         # Assert
-        assert set(metrics) == {"kl", "clipfrac", "pg_loss", "entropy"}
+        assert set(metrics) == {
+            "kl",
+            "clipfrac",
+            "pg_loss",
+            "entropy",
+            "kl_clamp_frac",
+        }
         torch.testing.assert_close(
             actor_loss + critic_loss, reference_loss, rtol=RTOL, atol=ATOL
         )
@@ -532,7 +538,7 @@ class TestPPOFusedPassMatchesDoubledForward:
             **_kwargs: Any,
         ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
             loss = (policy_hidden.pow(2).sum(-1) * mask).sum() / mask.sum()
-            return loss, tuple(loss.detach() for _ in range(4))
+            return loss, tuple(loss.detach() for _ in range(5))
 
         reference = make_ppo()
         fused = make_ppo()
@@ -579,7 +585,13 @@ class TestPPOFusedPassMatchesDoubledForward:
         unset_fused_adapter_routing(fused.actor)
 
         # Assert
-        assert set(metrics) == {"kl", "clipfrac", "pg_loss", "entropy"}
+        assert set(metrics) == {
+            "kl",
+            "clipfrac",
+            "pg_loss",
+            "entropy",
+            "kl_clamp_frac",
+        }
         torch.testing.assert_close(fused_loss, reference_loss, rtol=RTOL, atol=ATOL)
         reference_grads = lora_grads(reference)
         fused_grads = lora_grads(fused)

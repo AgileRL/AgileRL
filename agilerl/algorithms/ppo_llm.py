@@ -59,6 +59,7 @@ from agilerl.utils.llm_utils import (
     MicroBatchMetrics,
     calculate_k3_kl,
     clipped_is_surrogate,
+    k3_kl_penalty_reference,
     masked_mean,
     masked_whiten,
     normalize_prompt_batch,
@@ -283,6 +284,13 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         (e.g. ``"language_model"``). Passed to
         :func:`adapt_lora_config_for_model`.
     :type lora_target_scope: str | None, optional
+    :param kl_clamp: Per-token bound on the K3 KL penalty. Tokens where the
+        policy sits below the reference with K3 above the bound (10 is about
+        2.6 nats below) get no KL gradient and add nothing to the loss.
+        The ``kl`` metric stays unbounded; ``kl_clamp_frac`` reports the
+        share of action tokens past the bound. ``None`` disables the bound,
+        defaults to 10.0. Must be > 0.
+    :type kl_clamp: float | None, optional
     """
 
     _mini_batch_size_default = "micro_batch"
@@ -354,6 +362,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         vllm_importance_sampling_cap: float = 2.0,
         vllm_max_logprob_gap: float = 0.1,
         vllm_max_clip_fraction: float = 0.02,
+        kl_clamp: float | None = 10.0,
     ) -> None:
 
         resolved_device = resolve_device(device)
@@ -406,7 +415,11 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         self._validate_core_args(
             batch_size, lr_actor, clip_coef, update_epochs, actor_network, clone
         )
+        if kl_clamp is not None and kl_clamp <= 0.0:
+            msg = f"kl_clamp must be > 0 or None, got {kl_clamp}."
+            raise ValueError(msg)
         self.beta = beta
+        self.kl_clamp = kl_clamp
         self.vf_coef = vf_coef
         self.clip_coef = clip_coef
         # Expose lr_actor explicitly (base stores it as ``self.lr``): the split
@@ -569,7 +582,15 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
 
             batch_size = min(num_samples, self.micro_batch_size_per_gpu)
             learn_metrics = MicroBatchMetrics(
-                ("vf_loss", "policy_loss", "pg_loss", "kl", "entropy", "clipfrac")
+                (
+                    "vf_loss",
+                    "policy_loss",
+                    "pg_loss",
+                    "kl",
+                    "kl_clamp_frac",
+                    "entropy",
+                    "clipfrac",
+                )
             )
             grad_norm_totals = {
                 "grad_norm_pre": 0.0,
@@ -848,7 +869,14 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                         if critic_warmup:
                             policy_loss = token_ids.new_zeros((), dtype=torch.float32)
                             metrics = dict.fromkeys(
-                                ("kl", "entropy", "clipfrac", "pg_loss"), 0.0
+                                (
+                                    "kl",
+                                    "kl_clamp_frac",
+                                    "entropy",
+                                    "clipfrac",
+                                    "pg_loss",
+                                ),
+                                0.0,
                             )
                         elif use_liger:
                             with self._vision_cache.images(batch_keys):
@@ -1422,11 +1450,16 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         :param num_turns: Turn count of the whole learn batch.
         :type num_turns: int
         :return: ``(policy_loss, metrics)`` with ``metrics`` keying detached
-            scalar tensors: ``kl``, ``pg_loss``, ``clipfrac``, ``entropy``.
+            scalar tensors: ``kl``, ``kl_clamp_frac``, ``pg_loss``, ``clipfrac``,
+            ``entropy``.
         :rtype: tuple[torch.Tensor, dict[str, torch.Tensor]]
         """
         log_probs = torch.masked_fill(log_probs, ~action_mask.bool(), 1.0)
         kl = calculate_k3_kl(reference_log_probs, log_probs)
+        penalty_reference, clamped = k3_kl_penalty_reference(
+            reference_log_probs, log_probs, self.kl_clamp
+        )
+        kl_penalty = calculate_k3_kl(penalty_reference, log_probs)
         masked_entropy = masked_mean(-log_probs.detach(), action_mask)
         token_log_ratio = log_probs - old_log_probs
 
@@ -1453,14 +1486,14 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             turn_reduction=self.turn_ratio_pooling,
             num_turns=num_turns,
         )
-        kl_loss = masked_mean(kl, action_mask)
         metrics = {
-            "kl": kl_loss.detach(),
+            "kl": masked_mean(kl, action_mask).detach(),
+            "kl_clamp_frac": masked_mean(clamped.float(), action_mask),
             "entropy": masked_entropy.mean(),
             "clipfrac": clipfrac.detach(),
             "pg_loss": pg_loss.mean().detach(),
         }
-        return pg_loss + self.beta * kl_loss, metrics
+        return pg_loss + self.beta * masked_mean(kl_penalty, action_mask), metrics
 
     def _ppo_value_loss(
         self,
@@ -1531,7 +1564,8 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             ``None`` for text.
         :type pixel_values: torch.Tensor | None
         :return: ``(policy_loss, metrics)`` with ``metrics`` keying detached
-            scalar tensors: ``kl``, ``pg_loss``, ``clipfrac``, ``entropy``.
+            scalar tensors: ``kl``, ``kl_clamp_frac``, ``pg_loss``, ``clipfrac``,
+            ``entropy``.
         :rtype: tuple[torch.Tensor, dict[str, torch.Tensor]]
         """
         batch_ids = batch_ids.to(self.device)
@@ -1588,7 +1622,8 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         :param num_turns: Turn count of the whole learn batch.
         :type num_turns: int
         :return: ``(policy_loss, metrics)`` with ``metrics`` keying detached
-            scalar tensors: ``kl``, ``pg_loss``, ``clipfrac``, ``entropy``.
+            scalar tensors: ``kl``, ``kl_clamp_frac``, ``pg_loss``, ``clipfrac``,
+            ``entropy``.
         :rtype: tuple[torch.Tensor, dict[str, torch.Tensor]]
         """
         if not HAS_LIGER_KERNEL:
@@ -1669,12 +1704,14 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                 ),
                 turn_log_ratio_reduction=self.turn_ratio_pooling,
                 vllm_is_ratio=vllm_is_ratio,
+                kl_clamp=self.kl_clamp,
             )
         metrics = {
             "kl": aux[0].detach(),
             "clipfrac": aux[1].detach(),
             "pg_loss": aux[2].detach(),
             "entropy": aux[3].detach(),
+            "kl_clamp_frac": aux[4].detach(),
         }
         return loss_pg_kl, metrics
 

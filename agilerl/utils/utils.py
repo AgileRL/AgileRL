@@ -822,7 +822,7 @@ def create_population(
                 group_size=INIT_HP.get("GROUP_SIZE", 8),
                 temperature=INIT_HP.get("TEMPERATURE", 0.9),
                 repetition_penalty=INIT_HP.get("REPETITION_PENALTY", 1.0),
-                top_p=INIT_HP.get("TOP_P", 0.95),
+                top_p=INIT_HP.get("TOP_P", 1.0),
                 top_k=INIT_HP.get("TOP_K", 50),
                 min_p=INIT_HP.get("MIN_P", 0.0),
                 offload_trainer_during_rollout=INIT_HP.get(
@@ -843,7 +843,7 @@ def create_population(
                 use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", True),
                 cast_logprobs_to_fp32=INIT_HP.get("CAST_LOGPROBS_TO_FP32", True),
                 use_kl_advantage_shaping=INIT_HP.get("USE_KL_ADVANTAGE_SHAPING", False),
-                adv_norm=INIT_HP.get("ADV_NORM", "mean_std"),
+                adv_norm=INIT_HP.get("ADV_NORM", "mean_only"),
                 loss_type=INIT_HP.get("LOSS_TYPE", "grpo"),
                 # ``None`` (no config key) lets GRPO resolve the default per
                 # loss_type — "token", or "trajectory" for gspo — without

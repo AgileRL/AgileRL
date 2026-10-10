@@ -158,6 +158,7 @@ GRPO_METRIC_NAMES = (
     "adv_zero_frac",  # samples with no contrastive signal
     "kl_ref",  # K3 vs reference over the update loop
     "kl_old",  # K3 vs rollout policy over the update loop
+    "kl_clamp_frac",  # action tokens whose K3 vs reference exceeds kl_clamp
     "is_ratio_mean",  # mean pooled importance ratio
     "is_ratio_p05",  # 5th percentile pooled importance ratio
     "is_ratio_p50",  # median pooled importance ratio
@@ -167,6 +168,8 @@ GRPO_METRIC_NAMES = (
     "is_frac_clip_pos",  # upper clips binding on positive advantages
     "is_frac_clip_neg",  # lower clips binding on negative advantages
     "old_logprobs_trainer_rows",  # rows whose old log-probs the trainer scored
+    "off_policy_token_mask_frac",  # action tokens the off-policy token mask dropped
+    "off_policy_seq_mask_frac",  # action tokens the off-policy sequence mask dropped
     "grad_norm_pre",  # global grad norm before clipping
     "grad_norm_post",  # global grad norm after clipping
 )
@@ -176,6 +179,7 @@ PPO_METRIC_NAMES = (
     "pg_loss",  # clipped policy-surrogate loss
     "vf_loss",  # clipped value loss
     "kl",  # update-averaged K3 vs reference
+    "kl_clamp_frac",  # action tokens whose K3 vs reference exceeds kl_clamp
     "clipfrac",  # binding-clip fraction
     "grad_norm_pre",  # actor LoRA grad norm before clipping
     "grad_norm_post",  # actor LoRA grad norm after clipping
@@ -2972,6 +2976,40 @@ def calculate_k3_kl(
     """
     diff = reference_log_probs - policy_log_probs
     return torch.exp(diff) - diff - 1.0
+
+
+def k3_kl_penalty_reference(
+    reference_log_probs: torch.Tensor,
+    policy_log_probs: torch.Tensor,
+    kl_clamp: float | None,
+    skip: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reference log-probs zeroing the K3 penalty past ``kl_clamp`` and at ``skip``.
+
+    :param reference_log_probs: Reference-policy log-probs.
+    :type reference_log_probs: torch.Tensor
+    :param policy_log_probs: Current-policy log-probs of the same tokens.
+    :type policy_log_probs: torch.Tensor
+    :param kl_clamp: Per-token K3 bound, or ``None`` for no bound.
+    :type kl_clamp: float | None
+    :param skip: Boolean mask of further tokens to leave out of the penalty.
+    :type skip: torch.Tensor | None
+    :return: Penalty reference log-probs and the boolean mask of tokens past
+        ``kl_clamp``.
+    :rtype: tuple[torch.Tensor, torch.Tensor]
+    """
+    with torch.no_grad():
+        policy = policy_log_probs.detach()
+        if kl_clamp is None:
+            clamped = torch.zeros_like(policy, dtype=torch.bool)
+        else:
+            # K3's gradient 1 - exp(ref - logp) is bounded by 1 where the
+            # policy sits above the reference, so only the side below is clamped.
+            clamped = (calculate_k3_kl(reference_log_probs, policy) > kl_clamp) & (
+                reference_log_probs > policy
+            )
+        neutral = clamped if skip is None else clamped | skip
+        return torch.where(neutral, policy, reference_log_probs), clamped
 
 
 # ---------------------------------------------------------------------------

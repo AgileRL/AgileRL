@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import queue
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, wait
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -18,6 +18,7 @@ from agilerl.components.llm_rollout_data import EpisodeSegments
 from agilerl.distributed.process import get_rank, get_world_size
 from agilerl.llm_envs.harness import RolloutHarness
 from agilerl.llm_envs.task_assigner import (
+    DEFAULT_FAMILY_PRIOR_STRENGTH,
     GroupSuccess,
     TaskAssigner,
     TaskRowOutcome,
@@ -61,6 +62,8 @@ class RolloutCollector:
         rank: int | None = None,
         world_size: int | None = None,
         adaptive_task_sampling: bool = False,
+        task_families: Sequence[str | None] | None = None,
+        task_family_prior_strength: float = DEFAULT_FAMILY_PRIOR_STRENGTH,
     ) -> None:
         """Create ``(batch_size / world_size) * group_size`` env wrappers on this rank.
 
@@ -83,6 +86,10 @@ class RolloutCollector:
         :param adaptive_task_sampling: Draw each group's dataset row by its recent
             informative-group rate (see :meth:`record_group_outcome`) instead of
             the epoch cycle.
+        :param task_families: Family key of every dataset row (``None`` for a row
+            in no family); a row with few groups is weighted by its family's rate.
+        :param task_family_prior_strength: Groups' worth of weight a family's rate
+            carries in a row's estimate.
         """
         if batch_size <= 0:
             msg = f"batch_size must be > 0, got {batch_size}."
@@ -120,6 +127,8 @@ class RolloutCollector:
         self._rank = rank
         self._world_size = world_size
         self.adaptive_task_sampling = adaptive_task_sampling
+        self._task_families = task_families
+        self._task_family_prior_strength = task_family_prior_strength
         # --- per-episode state (untouched by the lock-step path) ---
         self._base_seed = int(base_seed) if base_seed is not None else None
         self._slot_acquire_timeout_s = slot_acquire_timeout_s
@@ -487,6 +496,8 @@ class RolloutCollector:
                 rank=self._rank,
                 world_size=self._world_size,
                 adaptive=self.adaptive_task_sampling,
+                families=self._task_families,
+                family_prior_strength=self._task_family_prior_strength,
             )
             self.rubric_component_names = tuple(self.envs[0].rubric_components)
 

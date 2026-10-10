@@ -15,6 +15,7 @@ from agilerl.arena.models.descriptions import (
     CLIP_COEF,
     GROUP_SIZE,
     IS_LEVEL,
+    KL_CLAMP,
     LR,
     WHITEN_ADVANTAGES,
 )
@@ -31,7 +32,7 @@ class GRPOSpec(RolloutLLMSpec):
     clip_coef: float = Field(default=0.2, ge=0.0, le=1.0, description=CLIP_COEF)
 
     adv_norm: Literal["mean_only", "mean_std"] = Field(
-        default="mean_std",
+        default="mean_only",
         description=(
             "How group advantages are normalized. 'mean_only' subtracts the "
             "group mean; 'mean_std' also divides by its standard deviation."
@@ -85,11 +86,12 @@ class GRPOSpec(RolloutLLMSpec):
         ),
     )
     loss_norm: Literal["micro_batch", "accumulation_window", "episode"] = Field(
-        default="micro_batch",
+        default="accumulation_window",
         description=(
-            "Token count the loss is averaged over: each micro-batch on its "
-            "own, or the whole accumulation window. The window is the unbiased "
-            "choice when micro-batches have uneven lengths. 'episode' gives "
+            "Token count the loss is averaged over: the whole accumulation "
+            "window across all data-parallel ranks (default), or each "
+            "micro-batch on its own. The window is the unbiased choice when "
+            "micro-batches have uneven lengths. 'episode' gives "
             "every episode of the window the same total policy weight, "
             "averaging tokens within an episode, so long episodes do not "
             "outweigh short ones."
@@ -105,6 +107,31 @@ class GRPOSpec(RolloutLLMSpec):
             "missing some of them, e.g. after env truncation."
         ),
     )
+    off_policy_token_mask_bounds: tuple[float, float] | None = Field(
+        default=(0.5, 5.0),
+        description=(
+            "(low, high) band on each token's ratio of the current policy to "
+            "the policy that sampled it. Tokens outside get no policy or KL "
+            "gradient (IcePop). Set null to mask nothing."
+        ),
+    )
+    off_policy_sequence_mask_threshold: float | None = Field(
+        default=0.03,
+        ge=0.0,
+        description=(
+            "Drop the policy and KL gradient of negative-advantage completions whose "
+            "mean log(sampling / current) log-prob gap exceeds this "
+            "(DeepSeek-V3.2 off-policy sequence masking). Set null to mask nothing."
+        ),
+    )
+    use_bias_correction_kl: bool = Field(
+        default=True,
+        description=(
+            "Weight the per-token KL by the importance ratio to the old "
+            "policy so its gradient is unbiased off-policy (DeepSeek-V3.2)."
+        ),
+    )
+    kl_clamp: float | None = Field(default=10.0, gt=0.0, description=KL_CLAMP)
     loss_type: Literal["grpo", "gspo", "cispo"] = Field(
         default="grpo",
         description=(

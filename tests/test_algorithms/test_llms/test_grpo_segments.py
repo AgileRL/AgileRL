@@ -74,7 +74,7 @@ class TestLigerGlobalTokenCount:
     ) -> None:
         mask = torch.tensor([[True, False, True], [True, True, False]])
 
-        assert _liger_global_token_count(mask) == 4.0
+        assert _liger_global_token_count(mask).item() == 4.0
 
 
 class TestGRPOSegmentRows:
@@ -118,7 +118,7 @@ class TestGRPOReduceMaskedLoss:
         global_tokens = float(sum(int(mask.sum()) for mask in rank_masks))
         monkeypatch.setattr(
             "agilerl.algorithms.grpo._liger_global_token_count",
-            lambda _mask: global_tokens,
+            lambda _mask: torch.tensor(global_tokens),
         )
         monkeypatch.setattr(
             "agilerl.algorithms.grpo._liger_normalizer_world_size", lambda: 2
@@ -161,7 +161,7 @@ class TestGRPOReduceMaskedLoss:
         assert shares.tolist() == [0.0, 0.0]
 
     def test_without_a_window_rows_use_their_own_tokens(self) -> None:
-        agent = _make_grpo()
+        agent = _make_grpo(loss_norm="micro_batch")
         loss = torch.tensor([[1.0, 2.0, 0.0, 0.0], [3.0, 0.0, 5.0, 0.0]])
         mask = torch.tensor([[True, True, False, False], [True, False, True, False]])
 
@@ -532,8 +532,18 @@ class TestGRPOLoss:
         per_token = torch.zeros(3, 3)
         seen: dict[str, torch.Tensor | None] = {}
 
-        def objective(batch_ids: torch.Tensor, *args: Any) -> tuple[torch.Tensor, ...]:
-            seen["pixel_values"] = args[-1]
+        def objective(
+            batch_ids: torch.Tensor,
+            _action_mask: torch.Tensor,
+            _advantages: torch.Tensor,
+            _old_log_probs: torch.Tensor | None,
+            _reference_log_probs: torch.Tensor,
+            _turn_ids: torch.Tensor | None,
+            _sampling_log_probs: torch.Tensor | None,
+            pixel_values: torch.Tensor | None,
+            _sampled_rows: torch.Tensor | None,
+        ) -> tuple[torch.Tensor, ...]:
+            seen["pixel_values"] = pixel_values
             zero = torch.tensor(0.0)
             return zero, zero, zero, per_token[: batch_ids.shape[0]]
 

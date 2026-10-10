@@ -16,6 +16,7 @@ from agilerl.arena.models.descriptions import (
     CLIP_COEF,
     GAE_LAMBDA,
     IS_LEVEL,
+    KL_CLAMP,
     LR_ACTOR,
     LR_CRITIC,
     TEMPERATURE,
@@ -34,6 +35,7 @@ class LLMPPOSpec(RolloutLLMSpec):
     temperature: float = Field(default=1.0, description=TEMPERATURE)
     top_p: float = Field(default=1.0, ge=0.0, le=1.0, description=TOP_P)
     beta: float = Field(default=0.001, ge=0.0, le=1.0, description=BETA)
+    kl_clamp: float | None = Field(default=10.0, gt=0.0, description=KL_CLAMP)
     max_grad_norm: float = Field(
         default=1.0,
         ge=0.0,

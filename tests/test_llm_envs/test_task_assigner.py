@@ -177,6 +177,136 @@ class TestTaskAssignerSharding:
         assert [a.row_stats() for a in restored] == [a.row_stats() for a in saved]
 
 
+def decayed(times: int) -> float:
+    """Decayed count after ``times`` outcomes of one row."""
+    return (1 - TASK_OUTCOME_DECAY**times) / (1 - TASK_OUTCOME_DECAY)
+
+
+class TestTaskAssignerFamilyPrior:
+    def test_an_unseen_row_inherits_its_familys_pooled_rate(self) -> None:
+        # Arrange
+        assigner = TaskAssigner(
+            5, seed=0, adaptive=True, families=["a", "a", "a", "b", "b"]
+        )
+
+        # Act
+        feed(assigner, 0, informative=True, times=6)
+        feed(assigner, 1, informative=True, times=2)
+        feed(assigner, 1, informative=False, times=1)
+        feed(assigner, 3, informative=False, times=8)
+
+        # Assert
+        weights = [row.weight for row in assigner.row_stats()]
+        family_a_informative = decayed(6) + TASK_OUTCOME_DECAY * decayed(2)
+        family_a = (family_a_informative + 1) / (decayed(6) + decayed(3) + 2)
+        family_b = 1 / (decayed(8) + 2)
+        assert weights[2] == pytest.approx(family_a)
+        assert weights[4] == pytest.approx(family_b)
+        assert weights[2] > 0.75
+        assert weights[4] < 0.13
+
+    def test_a_row_with_groups_moves_from_its_family_rate_to_its_own(self) -> None:
+        # Arrange
+        assigner = TaskAssigner(
+            4, seed=0, adaptive=True, families=["a"] * 4, family_prior_strength=2.0
+        )
+        feed(assigner, 0, informative=True, times=10)
+        feed(assigner, 1, informative=True, times=10)
+        weights = []
+
+        # Act
+        for _ in range(3):
+            feed(assigner, 3, informative=False, times=4)
+            weights.append(assigner.row_stats()[3].weight)
+
+        # Assert
+        observed = decayed(12)
+        family_rate = (2 * decayed(10) + 1) / (2 * decayed(10) + observed + 2)
+        assert weights[0] > weights[1] > weights[2]
+        assert weights[2] == pytest.approx(2 * family_rate / (observed + 2))
+        assert weights[2] < 0.15
+
+    def test_a_row_tied_twice_drops_further_below_its_family_than_today(self) -> None:
+        # Arrange
+        assigner = TaskAssigner(
+            3, seed=0, adaptive=True, families=["a"] * 3, family_prior_strength=1.0
+        )
+        today = TaskAssigner(3, seed=0, adaptive=True)
+        for sampler in (assigner, today):
+            feed(sampler, 0, informative=True, times=1)
+            feed(sampler, 0, informative=False, times=1)
+
+        # Act
+        for sampler in (assigner, today):
+            feed(sampler, 1, informative=False, times=2)
+
+        # Assert
+        [_, tied_twice, unseen] = assigner.row_stats()
+        [_, tied_twice_today, unseen_today] = today.row_stats()
+        assert tied_twice.weight / unseen.weight == pytest.approx(1 / (decayed(2) + 1))
+        assert tied_twice_today.weight / unseen_today.weight == pytest.approx(
+            1 / (decayed(2) + 2) / 0.5
+        )
+        assert tied_twice.weight / unseen.weight < 0.35
+        assert tied_twice_today.weight / unseen_today.weight > 0.5
+
+    def test_no_family_keys_give_todays_weights_and_draws(self) -> None:
+        # Arrange
+        today = TaskAssigner(6, seed=2, adaptive=True)
+        keyless = TaskAssigner(6, seed=2, adaptive=True, families=[None] * 6)
+        for sampler in (today, keyless):
+            feed(sampler, 1, informative=True, times=5)
+            feed(sampler, 4, informative=False, times=7)
+
+        # Act
+        draws = [keyless.next_row() for _ in range(60)]
+
+        # Assert
+        assert keyless.row_stats() == today.row_stats()
+        assert draws == [today.next_row() for _ in range(60)]
+
+    def test_a_row_without_a_key_keeps_todays_weight_beside_a_family(self) -> None:
+        # Arrange
+        assigner = TaskAssigner(3, seed=0, adaptive=True, families=[None, "a", "a"])
+
+        # Act
+        feed(assigner, 0, informative=False, times=3)
+        feed(assigner, 1, informative=True, times=3)
+
+        # Assert
+        [ungrouped, _, unseen] = assigner.row_stats()
+        assert ungrouped.weight == pytest.approx(1 / (decayed(3) + 2))
+        assert unseen.weight == pytest.approx((decayed(3) + 1) / (decayed(3) + 2))
+
+    def test_reads_a_later_shards_keys_by_global_row(self) -> None:
+        # Arrange
+        assigner = TaskAssigner(
+            4,
+            seed=0,
+            rank=1,
+            world_size=2,
+            adaptive=True,
+            families=["b", "a", "b", "a"],
+        )
+
+        # Act
+        feed(assigner, 1, informative=False, times=6)
+
+        # Assert
+        [_, unseen] = assigner.row_stats()
+        assert unseen.weight == pytest.approx(1 / (decayed(6) + 2))
+
+    def test_rejects_a_key_list_that_does_not_cover_the_dataset(self) -> None:
+        with pytest.raises(ValueError, match="families has 2 keys for a 3-row dataset"):
+            TaskAssigner(3, families=["a", "b"])
+
+    def test_rejects_a_prior_strength_that_is_not_positive(self) -> None:
+        with pytest.raises(
+            ValueError, match=r"family_prior_strength must be > 0, got 0\.0"
+        ):
+            TaskAssigner(2, families=["a", "a"], family_prior_strength=0.0)
+
+
 class TestTaskAssignerRecordOutcome:
     def test_counts_each_group_success_class_per_row(self) -> None:
         # Arrange
@@ -364,6 +494,46 @@ class TestTaskAssignerLoadStateDict:
 
         # Assert
         assert restored_rows == [saved.next_row() for _ in range(50)]
+
+    def test_json_round_trip_restores_family_weights_and_draws(self) -> None:
+        # Arrange
+        families = ["a", "a", "a", "b", "b", None]
+        saved = TaskAssigner(6, seed=1, adaptive=True, families=families)
+        feed(saved, 0, informative=True, times=4)
+        feed(saved, 3, informative=False, times=5)
+        feed(saved, 5, informative=True, times=2)
+        restored = TaskAssigner(6, seed=1, adaptive=True, families=families)
+
+        # Act
+        restored.load_state_dict(json.loads(json.dumps(saved.state_dict())))
+
+        # Assert
+        assert restored.row_stats() == saved.row_stats()
+        assert [restored.next_row() for _ in range(50)] == [
+            saved.next_row() for _ in range(50)
+        ]
+
+    def test_a_state_saved_without_families_loads_into_a_family_prior(self) -> None:
+        # Arrange
+        old_state = [
+            {"row": 0, "informative": 3.0, "observed": 3.0},
+            {"row": 2, "informative": 0.0, "observed": 2.0},
+        ]
+        assigner = TaskAssigner(
+            4,
+            seed=0,
+            adaptive=True,
+            families=["a", "a", "b", "b"],
+            family_prior_strength=1.0,
+        )
+
+        # Act
+        assigner.load_state_dict(json.loads(json.dumps(old_state)))
+
+        # Assert
+        assert [row.weight for row in assigner.row_stats()] == pytest.approx(
+            [(3 + 0.8) / 4, 0.8, 0.25 / 3, 0.25]
+        )
 
     def test_keeps_only_this_shards_rows_from_a_merged_state(self) -> None:
         # Arrange

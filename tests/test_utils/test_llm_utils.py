@@ -89,6 +89,7 @@ from agilerl.utils.llm_utils import (
     get_lora_params,
     get_model_name_or_path,
     hf_completion_lengths,
+    k3_kl_penalty_reference,
     language_model_attn_implementation,
     list_peft_matched_module_keys,
     load_lora_adapters,
@@ -1022,6 +1023,79 @@ def test_k3_helper_matches_liger_direction() -> None:
     assert torch.allclose(calculate_k3_kl(ref, policy), expected)
     # Swapped arguments give a different answer: order matters.
     assert not torch.allclose(calculate_k3_kl(policy, ref), expected)
+
+
+class TestK3KlPenaltyReference:
+    def test_tokens_within_the_bound_keep_their_reference(self) -> None:
+        reference = torch.tensor([-1.0, -1.5, -0.5])
+        policy = torch.tensor([-1.2, -1.0, -0.5])
+
+        penalty_reference, clamped = k3_kl_penalty_reference(reference, policy, 10.0)
+
+        assert torch.equal(penalty_reference, reference)
+        assert clamped.tolist() == [False, False, False]
+
+    def test_a_token_past_the_bound_gets_zero_penalty_and_zero_gradient(
+        self,
+    ) -> None:
+        # Arrange
+        policy = torch.tensor([-1.0, -12.0], requires_grad=True)
+        reference = torch.tensor([-1.2, -1.0])
+
+        # Act
+        penalty_reference, clamped = k3_kl_penalty_reference(reference, policy, 10.0)
+        penalty = calculate_k3_kl(penalty_reference, policy)
+        penalty.sum().backward()
+
+        # Assert
+        assert clamped.tolist() == [False, True]
+        assert not penalty_reference.requires_grad
+        assert penalty[1].item() == 0.0
+        assert policy.grad is not None
+        assert policy.grad[1].item() == 0.0
+        assert policy.grad[0].item() == pytest.approx(1.0 - math.exp(-0.2), rel=1e-6)
+
+    def test_a_policy_far_above_the_reference_keeps_its_penalty_and_gradient(
+        self,
+    ) -> None:
+        # Arrange: k3 = exp(-13) + 13 - 1, about 12, past the bound.
+        policy = torch.tensor([-1.0], requires_grad=True)
+        reference = torch.tensor([-14.0])
+
+        # Act
+        penalty_reference, clamped = k3_kl_penalty_reference(reference, policy, 10.0)
+        penalty = calculate_k3_kl(penalty_reference, policy)
+        penalty.sum().backward()
+
+        # Assert
+        assert clamped.tolist() == [False]
+        assert torch.equal(penalty_reference, reference)
+        assert penalty.item() == pytest.approx(math.exp(-13.0) + 12.0, rel=1e-6)
+        assert policy.grad is not None
+        assert policy.grad.item() == pytest.approx(1.0 - math.exp(-13.0), rel=1e-6)
+
+    def test_skipped_tokens_get_zero_penalty_but_do_not_count_as_clamped(
+        self,
+    ) -> None:
+        reference = torch.tensor([-1.2, -1.0])
+        policy = torch.tensor([-1.0, -1.5])
+        skip = torch.tensor([True, False])
+
+        penalty_reference, clamped = k3_kl_penalty_reference(
+            reference, policy, 10.0, skip
+        )
+
+        assert penalty_reference.tolist() == pytest.approx([-1.0, -1.0])
+        assert clamped.tolist() == [False, False]
+
+    def test_no_bound_leaves_large_gaps_alone(self) -> None:
+        reference = torch.tensor([-1.0])
+        policy = torch.tensor([-12.0])
+
+        penalty_reference, clamped = k3_kl_penalty_reference(reference, policy, None)
+
+        assert torch.equal(penalty_reference, reference)
+        assert clamped.tolist() == [False]
 
 
 class TestFillOutsideMask:
