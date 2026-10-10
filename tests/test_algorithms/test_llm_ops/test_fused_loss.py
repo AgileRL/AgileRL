@@ -37,6 +37,7 @@ from agilerl.algorithms.core.llm_ops.fused_loss import (
     flatten_tokens_for_fused_loss,
     llm_policy_loss_fn,
 )
+from tests.test_algorithms.test_llms.test_ppo_llm_segments import _make_ppo
 
 
 def test_no_liger_fused_module_raises_import_error(monkeypatch):
@@ -205,11 +206,12 @@ class TestLlmPpoLossFn:
             beta=beta,
         )
         assert torch.allclose(fused_loss, ref_loss, rtol=1e-6, atol=1e-6)
-        kl_m, clip_m, pg_m, ent_m = (m.item() for m in metrics)
+        kl_m, clip_m, pg_m, ent_m, clamp_m = (m.item() for m in metrics)
         assert abs(kl_m - ref_m["kl"]) < 1e-6
         assert abs(clip_m - ref_m["clipfrac"]) < 1e-6
         assert abs(pg_m - ref_m["pg_loss"]) < 1e-6
         assert abs(ent_m - ref_m["entropy"]) < 1e-6
+        assert clamp_m == 0.0
 
     def test_matches_unfused_beta_zero_reinforce_style(self) -> None:
         """REINFORCE folds KL into advantages upstream and runs with beta=0.
@@ -1285,6 +1287,177 @@ class TestApplyFusedPolicyLoss:
         loss.backward()
         assert hidden.grad is not None
         assert weight.grad is not None
+
+
+class TestLlmPolicyLossFnKlClamp:
+    """``kl_clamp`` bounds the per-token K3 penalty the same way on both PPO paths."""
+
+    BETA = 0.05
+    GAP = 11.0
+
+    @classmethod
+    def _inputs(cls, gap: bool) -> dict[str, torch.Tensor]:
+        """Two rows of four tokens; with ``gap``, token (0, 1) sits GAP nats low."""
+        generator = torch.Generator().manual_seed(0)
+        logits = torch.randn(2, 4, 16, generator=generator)
+        target_ids = torch.randint(0, 16, (2, 4), generator=generator)
+        per_token = (
+            torch.log_softmax(logits, dim=-1)
+            .gather(-1, target_ids.unsqueeze(-1))
+            .squeeze(-1)
+        )
+        reference = per_token + 0.3 * torch.randn(2, 4, generator=generator)
+        if gap:
+            reference[0, 1] = per_token[0, 1] + cls.GAP
+        return {
+            "logits": logits,
+            "target_ids": target_ids,
+            "old": per_token + 0.05 * torch.randn(2, 4, generator=generator),
+            "reference": reference,
+            "advantages": 0.1 * torch.randn(2, 4, generator=generator),
+            "mask": torch.ones(2, 4),
+        }
+
+    @classmethod
+    def _fused(
+        cls, inputs: dict[str, torch.Tensor], kl_clamp: float | None
+    ) -> tuple[torch.Tensor, list[torch.Tensor], torch.Tensor]:
+        logits = inputs["logits"].clone().requires_grad_(True)
+        loss, metrics = llm_policy_loss_fn(
+            log_probs=torch.log_softmax(logits, dim=-1),
+            selected_token_ids=inputs["target_ids"],
+            attention_mask=inputs["mask"],
+            advantages=inputs["advantages"],
+            full_attention_mask=inputs["mask"],
+            ref_per_token_logps=inputs["reference"],
+            old_per_token_logps=inputs["old"],
+            beta=cls.BETA,
+            kl_clamp=kl_clamp,
+        )
+        loss.backward()
+        assert logits.grad is not None
+        return loss.detach(), metrics, logits.grad
+
+    def test_tokens_within_the_bound_are_unchanged(self) -> None:
+        # Arrange
+        inputs = self._inputs(gap=False)
+
+        # Act
+        clamped_loss, clamped_metrics, clamped_grad = self._fused(inputs, 10.0)
+        loss, metrics, grad = self._fused(inputs, None)
+
+        # Assert
+        assert torch.equal(clamped_loss, loss)
+        assert torch.equal(clamped_grad, grad)
+        assert clamped_metrics[0] == metrics[0]
+        assert clamped_metrics[4].item() == 0.0
+
+    def test_a_policy_far_above_the_reference_keeps_its_kl_gradient(self) -> None:
+        # Arrange: token (0, 1) sits 14 nats above its reference, k3 about 13.
+        inputs = self._inputs(gap=False)
+        per_token = (
+            torch.log_softmax(inputs["logits"], dim=-1)
+            .gather(-1, inputs["target_ids"].unsqueeze(-1))
+            .squeeze(-1)
+        )
+        inputs["reference"][0, 1] = per_token[0, 1] - 14.0
+
+        # Act
+        clamped_loss, clamped_metrics, clamped_grad = self._fused(inputs, 10.0)
+        loss, _, grad = self._fused(inputs, None)
+
+        # Assert
+        assert torch.equal(clamped_loss, loss)
+        assert torch.equal(clamped_grad, grad)
+        assert clamped_metrics[4].item() == 0.0
+
+    def test_matches_the_standard_ppo_path_past_the_bound(self) -> None:
+        # Arrange
+        agent = _make_ppo(beta=self.BETA)
+        inputs = self._inputs(gap=True)
+        logits = inputs["logits"].clone().requires_grad_(True)
+        per_token = (
+            torch.log_softmax(logits, dim=-1)
+            .gather(-1, inputs["target_ids"].unsqueeze(-1))
+            .squeeze(-1)
+        )
+
+        # Act
+        fused_loss, fused_metrics, fused_grad = self._fused(inputs, agent.kl_clamp)
+        standard_loss, standard_metrics = agent._ppo_policy_loss(
+            per_token,
+            inputs["mask"],
+            inputs["old"],
+            inputs["reference"],
+            inputs["advantages"],
+            torch.zeros(2, 4, dtype=torch.long),
+            1,
+            "token",
+        )
+        standard_loss.backward()
+
+        # Assert
+        assert torch.allclose(fused_loss, standard_loss.detach(), rtol=1e-6)
+        assert logits.grad is not None
+        assert torch.allclose(fused_grad, logits.grad, rtol=1e-5, atol=1e-7)
+        assert fused_metrics[0].item() == pytest.approx(
+            standard_metrics["kl"], rel=1e-6
+        )
+        assert fused_metrics[4].item() == pytest.approx(
+            standard_metrics["kl_clamp_frac"]
+        )
+        assert standard_metrics["kl_clamp_frac"] == pytest.approx(1 / 8)
+
+    def test_apply_fused_policy_loss_forwards_the_bound(self) -> None:
+        # Arrange
+        hidden, weight, ids, mask, old_lp, _ = TestApplyFusedPolicyLoss._build_inputs(
+            2, 4, 16, 8
+        )
+        log_probs = torch.log_softmax(hidden @ weight.t(), dim=-1)
+        per_token = log_probs.gather(-1, ids.unsqueeze(-1)).squeeze(-1).detach()
+        ref_lp = per_token + 0.3
+        ref_lp[0, 1] = per_token[0, 1] + self.GAP
+        adv = torch.randn(2, 4) * 0.1
+        expected_loss, expected_metrics = llm_policy_loss_fn(
+            log_probs=log_probs,
+            selected_token_ids=ids,
+            attention_mask=mask,
+            advantages=adv,
+            full_attention_mask=mask,
+            ref_per_token_logps=ref_lp,
+            old_per_token_logps=old_lp,
+            beta=self.BETA,
+            kl_clamp=10.0,
+        )
+        expected_grad = torch.autograd.grad(expected_loss, hidden)[0]
+
+        # Act
+        loss, metrics = apply_fused_policy_loss(
+            policy_hidden=hidden,
+            head_w=weight,
+            head_b=None,
+            target_ids=ids,
+            attention_mask=mask,
+            advantages=adv,
+            ref_per_token_logps=ref_lp,
+            old_per_token_logps=old_lp,
+            beta=self.BETA,
+            epsilon_low=0.2,
+            epsilon_high=0.2,
+            temperature=1.0,
+            importance_sampling_level="token",
+            token_chunk_size=3,
+            kl_clamp=10.0,
+        )
+        loss.backward()
+
+        # Assert
+        assert torch.allclose(loss, expected_loss, rtol=1e-5, atol=1e-6)
+        for got, want in zip(metrics, expected_metrics, strict=True):
+            assert got.item() == pytest.approx(want.item(), rel=1e-5, abs=1e-6)
+        assert metrics[4].item() > 0.0
+        assert hidden.grad is not None
+        assert torch.allclose(hidden.grad, expected_grad, rtol=1e-4, atol=1e-6)
 
 
 class TestLigerDPOWithAlphaBackward:

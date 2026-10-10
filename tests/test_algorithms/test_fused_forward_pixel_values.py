@@ -21,6 +21,9 @@ from agilerl.components.llm_rollout_data import EpisodeSegments
 from agilerl.utils.segment_rows import SegmentRows
 from tests.test_algorithms.test_core_base import _LLM_DEPS_SKIP, _make_llm_agent
 from tests.test_algorithms.test_llms.llm_helpers import create_module
+from tests.test_algorithms.test_llms.test_grpo_episode_loss_norm import (
+    _ProbeFusedKernel,
+)
 from tests.test_algorithms.test_llms.vision_helpers import (
     IMAGE_TOKEN_ID,
     PAD_TOKEN_ID,
@@ -271,7 +274,9 @@ class TestFusedForwardPixelValues:
 class TestFusedKernelLossPixelValues:
     def test_fused_kernel_loss_moves_pixel_values_to_device(self) -> None:
         # Arrange
-        grpo = _make_cpu_grpo_for_kernel_tests(use_liger_loss=True)
+        grpo = _make_cpu_grpo_for_kernel_tests(
+            use_liger_loss=True, loss_norm="micro_batch"
+        )
         grpo.device = torch.device("cpu")
         batch_size = 2
         seq_len = 5
@@ -301,15 +306,14 @@ class TestFusedKernelLossPixelValues:
         )
         grpo._resolve_fused_chunk_rows = MagicMock(return_value=2)
 
-        fake_loss = torch.tensor(1.0, requires_grad=True)
-        fake_aux = (torch.tensor(0.0), torch.tensor(0.0))
-        mock_liger = MagicMock()
-        mock_liger.apply = MagicMock(return_value=(fake_loss, fake_aux))
-
         # Act
         with (
             patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
-            patch("agilerl.algorithms.grpo.LigerFusedLinearGRPOFunction", mock_liger),
+            patch(
+                "agilerl.algorithms.grpo.LigerFusedLinearGRPOFunction",
+                _ProbeFusedKernel,
+            ),
+            patch.object(_ProbeFusedKernel, "inputs", []) as kernel_inputs,
         ):
             grpo._fused_kernel_loss(
                 batch_ids,
@@ -324,10 +328,15 @@ class TestFusedKernelLossPixelValues:
         forwarded = captured[0]["pixel_values"]
         assert forwarded.device == grpo.device
         assert torch.equal(forwarded, pixel_values)
+        [inputs] = kernel_inputs
+        assert inputs["num_items_in_batch"] == 1.0
+        assert torch.equal(inputs["_input"], hidden[:, : seq_len - 1].reshape(-1, 1, 6))
 
     def test_fused_kernel_loss_packed_keeps_pixel_batch_size(self) -> None:
         # Arrange
-        grpo = _make_cpu_grpo_for_kernel_tests(use_liger_loss=True)
+        grpo = _make_cpu_grpo_for_kernel_tests(
+            use_liger_loss=True, loss_norm="micro_batch"
+        )
         grpo.device = torch.device("cpu")
         batch_size = 2
         seq_len = 6
@@ -358,11 +367,6 @@ class TestFusedKernelLossPixelValues:
         )
         grpo._resolve_fused_chunk_rows = MagicMock(return_value=2)
 
-        fake_loss = torch.tensor(1.0, requires_grad=True)
-        fake_aux = (torch.tensor(0.0), torch.tensor(0.0))
-        mock_liger = MagicMock()
-        mock_liger.apply = MagicMock(return_value=(fake_loss, fake_aux))
-
         # Act
         with (
             patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
@@ -370,7 +374,11 @@ class TestFusedKernelLossPixelValues:
                 "agilerl.algorithms.core.base.unpack_hidden_states",
                 return_value=padded_hidden,
             ),
-            patch("agilerl.algorithms.grpo.LigerFusedLinearGRPOFunction", mock_liger),
+            patch(
+                "agilerl.algorithms.grpo.LigerFusedLinearGRPOFunction",
+                _ProbeFusedKernel,
+            ),
+            patch.object(_ProbeFusedKernel, "inputs", []) as kernel_inputs,
         ):
             grpo._fused_kernel_loss(
                 batch_ids,
@@ -386,6 +394,11 @@ class TestFusedKernelLossPixelValues:
         assert forwarded.shape[0] == batch_size
         assert forwarded.device == grpo.device
         assert torch.equal(forwarded, pixel_values)
+        [inputs] = kernel_inputs
+        assert inputs["num_items_in_batch"] == 1.0
+        assert torch.equal(
+            inputs["_input"], padded_hidden[:, : seq_len - 1].reshape(-1, 1, 6)
+        )
 
 
 @_LLM_DEPS_SKIP

@@ -45,7 +45,7 @@ from liger_kernel.chunked_loss.fused_linear_preference import (
     LigerFusedLinearPreferenceBase,
 )
 
-from agilerl.utils.llm_utils import calculate_k3_kl
+from agilerl.utils.llm_utils import calculate_k3_kl, k3_kl_penalty_reference
 
 
 class SaveForBackwardCtx(Protocol):
@@ -71,6 +71,7 @@ def llm_policy_loss_fn(
     importance_sampling_level: str = "token",
     turn_log_ratio_reduction: str = "mean",
     vllm_is_ratio: torch.Tensor | None = None,
+    kl_clamp: float | None = None,
     # Liger's ``LigerFusedLinearPPOBase._compute_loss`` invokes the loss fn
     # with kwargs this fn does not consume (``ref_log_probs``, ``loss_type``,
     # ``max_completion_length``, ``sapo_temperature_pos``, ...), so a
@@ -144,7 +145,10 @@ def llm_policy_loss_fn(
         be pooled into the turn/trajectory ratio, so it is honoured for token
         mode only; ``None`` keeps the loss identical to the uncorrected path.
     :type vllm_is_ratio: torch.Tensor | None
-    :return: ``(chunk_loss, [kl, clipfrac, pg_loss, entropy])`` — first
+    :param kl_clamp: Per-token K3 bound of the KL penalty (see
+        :func:`k3_kl_penalty_reference`), or ``None`` for no bound.
+    :type kl_clamp: float | None
+    :return: ``(chunk_loss, [kl, clipfrac, pg_loss, entropy, kl_clamp_frac])`` — first
         element backprops; metrics are detached scalars contributing to
         the global mean across chunks.
     :rtype: tuple[torch.Tensor, list[torch.Tensor]]
@@ -164,8 +168,14 @@ def llm_policy_loss_fn(
     # still wants the kl scalar for monitoring. KL stays token-level in
     # both branches (matches the unfused PPO/REINFORCE convention).
     kl_div: torch.Tensor | None = None
+    kl_penalty: torch.Tensor | None = None
+    kl_clamped: torch.Tensor | None = None
     if ref_per_token_logps is not None:
         kl_div = calculate_k3_kl(ref_per_token_logps, per_token_logps)
+        penalty_reference, kl_clamped = k3_kl_penalty_reference(
+            ref_per_token_logps, per_token_logps, kl_clamp
+        )
+        kl_penalty = calculate_k3_kl(penalty_reference, per_token_logps)
 
     token_global_count = full_attention_mask.float().sum().clamp(min=1.0)
 
@@ -257,10 +267,10 @@ def llm_policy_loss_fn(
         raise ValueError(msg)
 
     chunk_loss = (pg_unit_loss * unit_mask).sum() / unit_global_count
-    if beta != 0.0 and kl_div is not None:
+    if beta != 0.0 and kl_penalty is not None:
         # KL term added at the token level — unfused PPO does the same.
         chunk_loss = chunk_loss + beta * (
-            (kl_div * attention_mask).sum() / token_global_count
+            (kl_penalty * attention_mask).sum() / token_global_count
         )
 
     # Metrics — detached scalars contributing to the global mean. The
@@ -281,8 +291,19 @@ def llm_policy_loss_fn(
         entropy_metric = (
             -per_token_logps.detach() * attention_mask
         ).sum() / token_global_count
+        kl_clamp_frac_metric = (
+            (kl_clamped.float() * attention_mask).sum() / token_global_count
+            if kl_clamped is not None
+            else torch.zeros((), device=log_probs.device, dtype=log_probs.dtype)
+        )
 
-    return chunk_loss, [kl_metric, clipfrac_metric, pg_loss_metric, entropy_metric]
+    return chunk_loss, [
+        kl_metric,
+        clipfrac_metric,
+        pg_loss_metric,
+        entropy_metric,
+        kl_clamp_frac_metric,
+    ]
 
 
 class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
@@ -323,6 +344,7 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
         importance_sampling_level: str = "token",
         turn_log_ratio_reduction: str = "mean",
         vllm_is_ratio: torch.Tensor | None = None,
+        kl_clamp: float | None = None,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
         """Chunked forward + backward.
 
@@ -398,6 +420,7 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
                 importance_sampling_level=importance_sampling_level,
                 turn_log_ratio_reduction=turn_log_ratio_reduction,
                 vllm_is_ratio=vllm_is_ratio_chunk,
+                kl_clamp=kl_clamp,
             )
 
         def fused_fwd_bwd(
@@ -553,6 +576,7 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
             None,  # importance_sampling_level
             None,  # turn_log_ratio_reduction
             None,  # vllm_is_ratio
+            None,  # kl_clamp
         )
 
 
@@ -633,6 +657,7 @@ def apply_fused_policy_loss(
     token_chunk_size: int = 2048,
     turn_log_ratio_reduction: str = "mean",
     vllm_is_ratio: torch.Tensor | None = None,
+    kl_clamp: float | None = None,
 ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
     """Run :class:`LigerFusedLinearPolicyLossFunction`, bounded at token level.
 
@@ -698,6 +723,8 @@ def apply_fused_policy_loss(
     :param turn_log_ratio_reduction: Turn-level reduction for pooled log-ratios,
         one of ``"mean"`` or ``"sum"``.
     :type turn_log_ratio_reduction: str
+    :param kl_clamp: Per-token K3 bound of the KL penalty, or ``None``.
+    :type kl_clamp: float | None
     :return: ``(loss, aux)`` straight from the fused Function.
     :rtype: tuple[torch.Tensor, tuple[torch.Tensor, ...]]
     """
@@ -741,6 +768,7 @@ def apply_fused_policy_loss(
             vllm_is_ratio.reshape(n_tokens, 1).contiguous()
             if vllm_is_ratio is not None
             else None,
+            kl_clamp,
         )
     return LigerFusedLinearPolicyLossFunction.apply(
         policy_hidden.contiguous(),
@@ -763,6 +791,7 @@ def apply_fused_policy_loss(
         importance_sampling_level,
         turn_log_ratio_reduction,
         None,  # vllm_is_ratio (token level only)
+        kl_clamp,
     )
 
 

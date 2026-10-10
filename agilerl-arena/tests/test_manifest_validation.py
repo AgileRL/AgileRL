@@ -665,6 +665,48 @@ class TestGroupReplay:
         assert replay_buffer.group_replay_max_age == 10
 
 
+def prefix_cache_reuse_manifest(**replay_buffer: object) -> dict:
+    """An async GRPO manifest that reuses the prefix cache across weight syncs."""
+    doc = manifest(
+        GRPO,
+        training={
+            "rollout_mode": "async",
+            "rollout_engines_per_agent": 1,
+            "reuse_prefix_cache_across_syncs": True,
+        },
+    )
+    doc["replay_buffer"] = {"kind": "llm", **replay_buffer}
+    return doc
+
+
+class TestPrefixCacheReuse:
+    def test_accepts_a_bounded_version_lag(self) -> None:
+        validated = TrainingManifest.model_validate(
+            prefix_cache_reuse_manifest(max_rollout_version_lag=4)
+        )
+
+        assert validated.training.reuse_prefix_cache_across_syncs is True
+        assert isinstance(validated.replay_buffer, LLMRolloutBufferSpec)
+        assert validated.replay_buffer.max_rollout_version_lag == 4
+
+    @pytest.mark.parametrize("replay_buffer", [{}, {"max_rollout_version_lag": 0}])
+    def test_rejects_an_unbounded_or_zero_version_lag(
+        self, replay_buffer: dict[str, object]
+    ) -> None:
+        with pytest.raises(ValidationError, match="max_rollout_version_lag >= 1"):
+            TrainingManifest.model_validate(
+                prefix_cache_reuse_manifest(**replay_buffer)
+            )
+
+    def test_off_by_default_without_a_version_lag(self) -> None:
+        doc = prefix_cache_reuse_manifest()
+        del doc["training"]["reuse_prefix_cache_across_syncs"]
+
+        validated = TrainingManifest.model_validate(doc)
+
+        assert validated.training.reuse_prefix_cache_across_syncs is False
+
+
 class TestEpochDrivenTraining:
     """A run may state its schedule in epochs; the trainer converts to steps."""
 
@@ -1866,7 +1908,7 @@ class TestRolloutSamplingFields:
     def test_grpo_defaults_match_the_algorithm_ctor(self) -> None:
         assert GRPOSpec().group_size == 8
         spec = GRPOSpec.model_construct(group_size=4)
-        assert spec.top_p == 0.95
+        assert spec.top_p == 1.0
         assert spec.top_k == 50
         assert spec.min_p == 0.0
         assert spec.repetition_penalty == 1.0

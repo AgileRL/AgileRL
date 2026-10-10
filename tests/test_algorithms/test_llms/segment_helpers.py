@@ -88,7 +88,7 @@ def action_token_policy_loss(
 ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
     """Liger fused policy loss stand-in: zero loss, ``kl`` = the micro-batch's action tokens."""
     zero = torch.tensor(0.0)
-    return (policy_hidden * 0.0).sum(), (mask.sum().float(), zero, zero, zero)
+    return (policy_hidden * 0.0).sum(), (mask.sum().float(), zero, zero, zero, zero)
 
 
 def use_fake_liger_policy_loss(

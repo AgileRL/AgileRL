@@ -23,8 +23,11 @@ from agilerl.arena.models import (
     TrainingManifest,
     TrainingSpec,
 )
+from agilerl.arena.models.algorithms.cispo import CISPOSpec
 from agilerl.arena.models.algorithms.dqn import DQNSpec
 from agilerl.arena.models.algorithms.grpo import GRPOSpec
+from agilerl.arena.models.algorithms.gspo import GSPOSpec
+from agilerl.arena.models.algorithms.llmppo import LLMPPOSpec
 from agilerl.arena.models.algorithms.ppo import PPOSpec, RecurrentPPOSpec
 from agilerl.arena.models.env import GymEnvSpec, LLMEnvSpec, LLMEnvType
 from agilerl.arena.models.fsdp import FSDPConfig
@@ -446,6 +449,93 @@ class TestGRPOClipCoef:
     def test_rejects_non_numeric_clip_coef(self) -> None:
         with pytest.raises(ValidationError, match="valid number"):
             GRPOSpec(group_size=2, clip_coef="wide")
+
+
+class TestGRPOSpecOffPolicyCorrections:
+    @pytest.mark.parametrize("spec_cls", [GRPOSpec, CISPOSpec, GSPOSpec])
+    def test_corrections_and_mean_only_advantages_are_on_by_default(
+        self, spec_cls: type[GRPOSpec]
+    ) -> None:
+        spec = spec_cls(group_size=2)
+
+        assert spec.off_policy_token_mask_bounds == (0.5, 5.0)
+        assert spec.off_policy_sequence_mask_threshold == 0.03
+        assert spec.use_bias_correction_kl is True
+        assert spec.adv_norm == "mean_only"
+        assert spec.top_p == 1.0
+
+    def test_yaml_null_and_false_turn_them_off(self) -> None:
+        spec = GRPOSpec.model_validate(
+            yaml.safe_load(
+                "group_size: 2\n"
+                "off_policy_token_mask_bounds: null\n"
+                "off_policy_sequence_mask_threshold: null\n"
+                "use_bias_correction_kl: false\n"
+                "adv_norm: mean_std\n"
+            )
+        )
+
+        assert spec.off_policy_token_mask_bounds is None
+        assert spec.off_policy_sequence_mask_threshold is None
+        assert spec.use_bias_correction_kl is False
+        assert spec.adv_norm == "mean_std"
+
+    def test_yaml_values_parse(self) -> None:
+        spec = GRPOSpec.model_validate(
+            yaml.safe_load(
+                "group_size: 2\n"
+                "off_policy_token_mask_bounds: [0.5, 5.0]\n"
+                "off_policy_sequence_mask_threshold: 0.05\n"
+                "use_bias_correction_kl: true\n"
+            )
+        )
+
+        assert spec.off_policy_token_mask_bounds == (0.5, 5.0)
+        assert spec.off_policy_sequence_mask_threshold == 0.05
+        assert spec.use_bias_correction_kl is True
+
+    def test_rejects_a_three_value_band(self) -> None:
+        with pytest.raises(ValidationError, match="at most 2 items"):
+            GRPOSpec(group_size=2, off_policy_token_mask_bounds=[0.5, 1.0, 5.0])
+
+    def test_rejects_a_negative_sequence_threshold(self) -> None:
+        with pytest.raises(ValidationError, match="greater than or equal to 0"):
+            GRPOSpec(group_size=2, off_policy_sequence_mask_threshold=-0.1)
+
+
+@pytest.mark.parametrize(
+    ("spec_cls", "required"),
+    [(GRPOSpec, {"group_size": 2}), (LLMPPOSpec, {})],
+    ids=["grpo", "llmppo"],
+)
+class TestKlClampField:
+    def test_defaults_to_ten(
+        self, spec_cls: type[BaseModel], required: dict[str, int]
+    ) -> None:
+        spec = spec_cls.model_validate(required)
+
+        assert spec.kl_clamp == 10.0
+
+    @pytest.mark.parametrize(("value", "expected"), [("2.5", 2.5), ("null", None)])
+    def test_yaml_value_parses(
+        self,
+        spec_cls: type[BaseModel],
+        required: dict[str, int],
+        value: str,
+        expected: float | None,
+    ) -> None:
+        spec = spec_cls.model_validate(
+            {**required, **yaml.safe_load(f"kl_clamp: {value}\n")}
+        )
+
+        assert spec.kl_clamp == expected
+
+    @pytest.mark.parametrize("value", [0.0, -1.0])
+    def test_rejects_a_non_positive_bound(
+        self, spec_cls: type[BaseModel], required: dict[str, int], value: float
+    ) -> None:
+        with pytest.raises(ValidationError, match="greater than 0"):
+            spec_cls.model_validate({**required, "kl_clamp": value})
 
 
 class TestDPOSFTAndRainbow:
@@ -1022,6 +1112,48 @@ class TestLLMEnvSpecRestartKeepTurns:
                 env_url="http://env",
                 max_turns=10,
                 restart_keep_turns=-1,
+            )
+
+
+class TestLLMEnvSpecTaskFamilyField:
+    def test_accepts_a_family_field_under_adaptive_sampling(self) -> None:
+        spec = LLMEnvSpec(
+            env_type="rollout",
+            env_url="http://env",
+            max_turns=10,
+            adaptive_task_sampling=True,
+            task_family_field="template_key",
+            task_family_prior_strength=0.5,
+        )
+
+        assert spec.task_family_field == "template_key"
+        assert spec.task_family_prior_strength == 0.5
+
+    def test_defaults_to_no_family(self) -> None:
+        spec = LLMEnvSpec(env_type="rollout", env_url="http://env", max_turns=10)
+
+        assert spec.task_family_field is None
+        assert spec.task_family_prior_strength == 1.0
+
+    def test_rejects_a_family_field_without_adaptive_sampling(self) -> None:
+        with pytest.raises(
+            ValidationError,
+            match="task_family_field weights rows under adaptive_task_sampling",
+        ):
+            LLMEnvSpec(
+                env_type="rollout",
+                env_url="http://env",
+                max_turns=10,
+                task_family_field="template_key",
+            )
+
+    def test_rejects_a_prior_strength_that_is_not_positive(self) -> None:
+        with pytest.raises(ValidationError, match="task_family_prior_strength"):
+            LLMEnvSpec(
+                env_type="rollout",
+                env_url="http://env",
+                max_turns=10,
+                task_family_prior_strength=0.0,
             )
 
 

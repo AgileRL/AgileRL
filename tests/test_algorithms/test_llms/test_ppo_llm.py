@@ -1509,7 +1509,7 @@ class TestPPOPolicyLossLiger:
         # Mock the fused-loss entry point so we don't need liger-kernel
         # installed. ``_ppo_policy_loss_liger`` calls ``apply_fused_policy_loss`` (which
         # wraps ``LigerFusedLinearPolicyLossFunction.apply``), so patch the
-        # wrapper. Returns a scalar loss and the four metric scalars the wrapper
+        # wrapper. Returns a scalar loss and the five metric scalars the wrapper
         # unpacks.
         fake_loss = torch.tensor(0.5, requires_grad=True)
         fake_aux = (
@@ -1517,6 +1517,7 @@ class TestPPOPolicyLossLiger:
             torch.tensor(0.2),  # clipfrac
             torch.tensor(0.3),  # pg_loss
             torch.tensor(0.4),  # entropy
+            torch.tensor(0.05),  # kl_clamp_frac
         )
 
         with (
@@ -1539,7 +1540,13 @@ class TestPPOPolicyLossLiger:
         mock_fn.assert_called_once()
         # Metric keys/values come from the (mocked) auxiliary tuple.
         assert metrics == pytest.approx(
-            {"kl": 0.1, "clipfrac": 0.2, "pg_loss": 0.3, "entropy": 0.4}
+            {
+                "kl": 0.1,
+                "clipfrac": 0.2,
+                "pg_loss": 0.3,
+                "entropy": 0.4,
+                "kl_clamp_frac": 0.05,
+            }
         )
         assert policy_loss is fake_loss
 
@@ -1552,7 +1559,7 @@ class TestPPOPolicyLossLiger:
         ref_lp = torch.zeros(B, T - 1)
         adv = torch.randn(B, T - 1) * 0.1
         turn_ids = torch.zeros(B, T - 1, dtype=torch.long)
-        fake_aux = tuple(torch.tensor(0.0) for _ in range(4))
+        fake_aux = tuple(torch.tensor(0.0) for _ in range(5))
 
         with (
             patch("agilerl.algorithms.ppo_llm.HAS_LIGER_KERNEL", True),
@@ -1587,7 +1594,7 @@ class TestPPOPolicyLossLiger:
         turn_ids = torch.tensor([[0, 0, 0, 1, 1], [0, 0, 1, 1, 1]], dtype=torch.long)
 
         fake_loss = torch.tensor(0.5, requires_grad=True)
-        fake_aux = tuple(torch.tensor(0.0) for _ in range(4))
+        fake_aux = tuple(torch.tensor(0.0) for _ in range(5))
 
         with (
             patch("agilerl.algorithms.ppo_llm.HAS_LIGER_KERNEL", True),
@@ -1627,7 +1634,7 @@ class TestPPOPolicyLossLiger:
         adv = torch.randn(B, T - 1) * 0.1
         turn_ids = torch.zeros(B, T - 1, dtype=torch.long)
         sampling = old_lp - 0.5  # non-trivial trainer/vLLM mismatch
-        fake_aux = tuple(torch.tensor(0.0) for _ in range(4))
+        fake_aux = tuple(torch.tensor(0.0) for _ in range(5))
         with (
             patch("agilerl.algorithms.ppo_llm.HAS_LIGER_KERNEL", True),
             patch("agilerl.algorithms.ppo_llm.apply_fused_policy_loss") as mock_fn,
@@ -1662,7 +1669,7 @@ class TestPPOPolicyLossLiger:
         zeros = torch.zeros(B, T - 1)
         adv = torch.tensor([[1.0, 3.0, 5.0, 100.0], [2.0, 4.0, 6.0, 8.0]])
         turn_ids = torch.zeros(B, T - 1, dtype=torch.long)
-        fake_aux = tuple(torch.tensor(0.0) for _ in range(4))
+        fake_aux = tuple(torch.tensor(0.0) for _ in range(5))
 
         with (
             patch("agilerl.algorithms.ppo_llm.HAS_LIGER_KERNEL", True),
@@ -1710,6 +1717,7 @@ class TestPPOLearnWithLiger:
         fake_loss = torch.tensor(0.42, requires_grad=True)
         fake_metrics = {
             "kl": 0.1,
+            "kl_clamp_frac": 0.0,
             "entropy": 0.2,
             "clipfrac": 0.3,
             "pg_loss": 0.4,
@@ -1766,6 +1774,7 @@ class TestPPOLearnWithLiger:
                 torch.tensor(0.5, requires_grad=True),
                 {
                     "kl": 0.1,
+                    "kl_clamp_frac": 0.0,
                     "entropy": 0.2,
                     "clipfrac": 0.0,
                     "pg_loss": 0.3,

@@ -40,7 +40,7 @@ class RolloutLLMSpec(LLMAlgorithmSpec):
     repetition_penalty: float = Field(
         default=1.0, ge=0.0, description=REPETITION_PENALTY
     )
-    top_p: float = Field(default=0.95, ge=0.0, le=1.0, description=TOP_P)
+    top_p: float = Field(default=1.0, ge=0.0, le=1.0, description=TOP_P)
     top_k: int = Field(default=50, ge=0, description=TOP_K)
     min_p: float = Field(default=0.0, ge=0.0, le=1.0, description=MIN_P)
     max_output_tokens: int | None = Field(default=None, description=MAX_OUTPUT_TOKENS)

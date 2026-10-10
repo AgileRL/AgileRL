@@ -1102,7 +1102,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                 turn_log_ratio_reduction=self.turn_ratio_pooling,
                 vllm_is_ratio=vllm_is_ratio,
             )
-        # aux = [kl, clipfrac, pg_loss, entropy] scalars in fp32.
+        # aux = [kl, clipfrac, pg_loss, entropy, kl_clamp_frac] scalars in fp32.
         metrics = {
             "kl": aux[0].detach(),
             "clipfrac": aux[1].detach(),

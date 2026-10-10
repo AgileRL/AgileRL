@@ -471,6 +471,20 @@ class TrainingSpec(BaseModel):
             "Both are LoRA-only — the base model is never re-sent."
         ),
     )
+    reuse_prefix_cache_across_syncs: bool = Field(
+        default=False,
+        description=(
+            "Keep the rollout engines' prefix cache across weight syncs under "
+            "async rollout, for windows of replay_buffer.max_rollout_version_lag "
+            "versions (K). A turn then reuses prefix KV computed under weights "
+            "up to K-1 versions older, like an in-flight weight update; the "
+            "sampling logprobs carry that mismatch to the off-policy "
+            "correction. Groups are stamped with their window's first version, "
+            "so the staleness fence and group replay age count the oldest "
+            "weights that KV can come from. Needs max_rollout_version_lag >= 1. "
+            "Off: every sync invalidates the cache."
+        ),
+    )
     weight_sync_interval: int | None = Field(
         default=None,
         ge=1,

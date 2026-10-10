@@ -203,6 +203,10 @@ class _Stub:
         self.calc_position_embeddings = False
         self.use_kl_advantage_shaping = False
         self.vllm_importance_sampling_cap = 2.0
+        self.off_policy_token_mask_bounds = None
+        self.off_policy_sequence_mask_threshold = None
+        self.use_bias_correction_kl = False
+        self.kl_clamp = 10.0
         self.activation_offload = activation_offload
         self.gradient_accumulation_steps = accumulation_steps
         self._window_action_tokens = window_tokens
@@ -215,19 +219,21 @@ class _Stub:
     _activation_offload_ctx = GRPO._activation_offload_ctx
     _actor_hidden_states = GRPO._actor_hidden_states
     _apply_kl_advantage_shaping = GRPO._apply_kl_advantage_shaping
+    _clipped_units = GRPO._clipped_units
     _compute_policy_loss = GRPO._compute_policy_loss
     _fused_kernel_loss = GRPO._fused_kernel_loss
     _gradient_forward_inputs = GRPO._gradient_forward_inputs
     _liger_loss = GRPO._liger_loss
     _log_importance_weights = GRPO._log_importance_weights
+    _masks_off_policy_tokens = GRPO._masks_off_policy_tokens
     _logprobs_from_hidden_fused = staticmethod(GRPO._logprobs_from_hidden_fused)
-    _record_window_action_tokens = GRPO._record_window_action_tokens
+    _record_global_window_action_tokens = GRPO._record_global_window_action_tokens
     _reduce_masked_loss = GRPO._reduce_masked_loss
     _resolve_loss_window = GRPO._resolve_loss_window
+    _token_loss_weights = GRPO._token_loss_weights
     _warn_if_micro_batches_straddle_optimizer_steps = (
         GRPO._warn_if_micro_batches_straddle_optimizer_steps
     )
-    process_liger_metrics = GRPO.process_liger_metrics
 
     def _get_lm_head(self) -> torch.nn.Linear:
         return self.lm_head
@@ -365,7 +371,7 @@ def fused_kernel(monkeypatch: pytest.MonkeyPatch) -> type[_FakeFusedKernel]:
 
 
 class TestGRPOLossNormConfig:
-    """The mode is validated at construction and defaults to the micro-batch."""
+    """The mode is validated at construction and defaults to the window."""
 
     @pytest.mark.parametrize(
         "loss_norm", ["micro_batch", "accumulation_window", "episode"]
@@ -377,9 +383,9 @@ class TestGRPOLossNormConfig:
         with pytest.raises(ValueError, match="Invalid loss_norm 'per_token'"):
             _Stub()._resolve_loss_norm("per_token")
 
-    def test_default_is_the_micro_batch(self) -> None:
+    def test_default_is_the_accumulation_window(self) -> None:
         default = inspect.signature(GRPO.__init__).parameters["loss_norm"].default
-        assert default == "micro_batch"
+        assert default == "accumulation_window"
 
     def test_the_window_is_accepted_when_each_micro_batch_is_a_step(self) -> None:
         algo = _Stub(accumulation_steps=1)
@@ -459,11 +465,36 @@ class TestWindowNormalizedReduction:
         expected = steps * float((loss * mask).sum()) / window_tokens
         assert float(reduced) == pytest.approx(expected, rel=1e-6)
 
-    def test_single_accumulation_step_uses_the_micro_batch(self) -> None:
+    def test_single_accumulation_step_normalizes_by_the_recorded_window(self) -> None:
         mask = _mask_of_lengths([4, 6], 8)
         loss = torch.full(mask.shape, 2.0) * mask
         algo = _Stub(accumulation_steps=1)
+        algo._record_global_window_action_tokens(mask, np.arange(2))
+
         reduced = algo._reduce_masked_loss(loss, mask).mean()
+
+        assert float(reduced) == pytest.approx(2.0)
+
+    @pytest.mark.skipif(
+        not torch.cuda.is_available(), reason="sync debug mode needs CUDA"
+    )
+    def test_single_accumulation_step_reduces_without_a_host_sync(self) -> None:
+        # Arrange
+        device = torch.device("cuda")
+        mask = _mask_of_lengths([4, 6], 8).to(device)
+        loss = torch.full(mask.shape, 2.0, device=device) * mask
+        algo = _Stub(accumulation_steps=1)
+        algo.device = device
+        algo._record_global_window_action_tokens(mask, np.arange(2))
+
+        # Act
+        torch.cuda.set_sync_debug_mode("error")
+        try:
+            reduced = algo._reduce_masked_loss(loss, mask).mean()
+        finally:
+            torch.cuda.set_sync_debug_mode("default")
+
+        # Assert
         assert float(reduced) == pytest.approx(2.0)
 
     def test_micro_batch_mode_keeps_the_per_sequence_mean(self) -> None:
@@ -474,10 +505,19 @@ class TestWindowNormalizedReduction:
         reduced = algo._reduce_masked_loss(loss, mask)
         assert torch.allclose(reduced, _micro_batch_reduce(loss, mask))
 
+    def test_a_per_sequence_loss_spreads_over_its_action_tokens(self) -> None:
+        mask = _mask_of_lengths([3, 9], 16)
+        loss = torch.tensor([[0.5], [-2.0]])
+        algo = _Stub(loss_norm="micro_batch")
+
+        shares = algo._reduce_masked_loss(loss, mask)
+
+        assert shares.tolist() == pytest.approx([0.5, -2.0])
+
     def test_non_finite_padding_stays_out_of_the_window_reduction(self) -> None:
         mask = torch.tensor([[1.0, 1.0, 0.0]])
         loss = torch.tensor([[2.0, 4.0, float("nan")]])
-        algo = _Stub(accumulation_steps=1)
+        algo = _Stub(accumulation_steps=1, window_tokens=2)
         reduced = algo._reduce_masked_loss(loss, mask)
         assert reduced.tolist() == pytest.approx([3.0])
 
@@ -489,7 +529,8 @@ class TestWindowNormalizedReduction:
 
     def test_window_without_action_tokens_gives_zero_shares(self) -> None:
         mask = torch.zeros(2, 8)
-        algo = _Stub(accumulation_steps=4, window_tokens=0)
+        algo = _Stub(accumulation_steps=4)
+        algo._record_global_window_action_tokens(mask, np.arange(2))
 
         shares = algo._reduce_masked_loss(torch.ones(mask.shape), mask)
 
@@ -498,10 +539,43 @@ class TestWindowNormalizedReduction:
     def test_empty_micro_batch_without_accumulation_gives_zero_shares(self) -> None:
         mask = torch.zeros(1, 8)
         algo = _Stub(accumulation_steps=1)
+        algo._record_global_window_action_tokens(mask, np.arange(1))
 
         shares = algo._reduce_masked_loss(torch.ones(mask.shape), mask)
 
         assert shares.tolist() == [0.0]
+
+
+class TestGRPOTokenLossWeights:
+    """The per-token weights both loss paths reduce with."""
+
+    def test_micro_batch_rows_each_spread_one_over_the_batch(self) -> None:
+        mask = _mask_of_lengths([2, 5], 8)
+        algo = _Stub(loss_norm="micro_batch")
+
+        weights = algo._token_loss_weights(mask, None)
+
+        assert weights[0, :2].tolist() == pytest.approx([1 / 4, 1 / 4])
+        assert weights[1, :5].tolist() == pytest.approx([1 / 10] * 5)
+        assert weights.sum(dim=-1).tolist() == pytest.approx([0.5, 0.5])
+        assert torch.all(weights[mask == 0] == 0.0)
+
+    def test_window_tokens_weigh_steps_over_window_tokens(self) -> None:
+        mask = _mask_of_lengths([2, 5], 8)
+        algo = _Stub(accumulation_steps=3, window_tokens=30)
+
+        weights = algo._token_loss_weights(mask, algo._resolve_loss_window())
+
+        assert torch.allclose(weights, mask * (3 / 30))
+
+    def test_rows_without_action_tokens_weigh_nothing(self) -> None:
+        mask = _mask_of_lengths([0, 4], 8)
+        algo = _Stub(loss_norm="micro_batch")
+
+        weights = algo._token_loss_weights(mask, None)
+
+        assert weights[0].tolist() == [0.0] * 8
+        assert weights[1, :4].tolist() == pytest.approx([1 / 8] * 4)
 
 
 class TestAccumulationSteps:
@@ -541,20 +615,33 @@ class TestStraddleWarning:
         assert self._emitted(_Stub(accumulation_steps=1), 3, 2) == []
 
 
-class TestWindowActionTokenRecording:
-    """The window counts only the samples that survive the advantage filter."""
+class TestGRPORecordGlobalWindowActionTokens:
+    """The window counts the action tokens of its own rows only."""
 
-    def test_only_surviving_samples_are_counted(self) -> None:
+    def test_only_the_window_rows_are_counted(self) -> None:
         algo = _Stub()
         action_masks = _mask_of_lengths([5, 9, 2], 16)
-        algo._record_window_action_tokens(action_masks, np.array([0, 2]))
-        assert algo._window_action_tokens == 5 + 2
 
-    def test_the_whole_batch_is_counted_without_filtering(self) -> None:
+        algo._record_global_window_action_tokens(action_masks, np.array([0, 2]))
+
+        assert algo._window_action_tokens.item() == 5 + 2
+
+    def test_the_count_stays_a_device_tensor(self) -> None:
         algo = _Stub()
         action_masks = _mask_of_lengths([5, 9, 2], 16)
-        algo._record_window_action_tokens(action_masks, np.arange(3))
-        assert algo._window_action_tokens == 5 + 9 + 2
+
+        algo._record_global_window_action_tokens(action_masks, np.arange(3))
+
+        assert isinstance(algo._window_action_tokens, torch.Tensor)
+        assert algo._window_action_tokens.device == action_masks.device
+        assert algo._window_action_tokens.item() == 5 + 9 + 2
+
+    def test_a_window_without_action_tokens_counts_one(self) -> None:
+        algo = _Stub()
+
+        algo._record_global_window_action_tokens(torch.zeros(2, 16), np.arange(2))
+
+        assert algo._window_action_tokens.item() == 1.0
 
 
 class TestFusedKernelNormalizer:
@@ -618,9 +705,11 @@ class TestFusedWindowNormalization:
         lengths: tuple[int, ...] = (5, 9),
         width: int = 16,
         loss_norm: str = "accumulation_window",
+        window_tokens: int | None = None,
     ):
         hidden, batch_ids, mask = _fused_inputs(list(lengths), width, seed)
-        window_tokens = sum(lengths) * 2
+        if window_tokens is None:
+            window_tokens = sum(lengths) * 2
         advantages = torch.tensor([[0.4], [-0.9]])
         algo = _Stub(
             loss_norm=loss_norm,
@@ -662,6 +751,7 @@ class TestFusedWindowNormalization:
             fused=fused_loss,
             eager=eager_loss,
             masked_sum=float((per_token * mask).sum()),
+            per_sequence_mean=float(_micro_batch_reduce(per_token, mask).mean()),
             window_tokens=window_tokens,
             steps=steps,
             min_ratio=float(ratio.min()),
@@ -674,9 +764,6 @@ class TestFusedWindowNormalization:
         result = self._run("grpo", "grpo", seed=11)
         expected = result.steps * result.masked_sum / result.window_tokens
         assert fused_kernel.last_loss_type == "dapo"
-        assert fused_kernel.last_num_items == pytest.approx(
-            result.window_tokens * _world_size(),
-        )
         assert result.fused.item() == pytest.approx(expected, rel=1e-5)
         assert result.eager.item() == pytest.approx(expected, rel=1e-5)
 
@@ -690,9 +777,6 @@ class TestFusedWindowNormalization:
         assert result.min_ratio >= CLIP_MIN
         expected = result.steps * result.masked_sum / result.window_tokens
         assert fused_kernel.last_loss_type == "cispo"
-        assert fused_kernel.last_num_items == pytest.approx(
-            result.window_tokens * _world_size(),
-        )
         assert result.fused.item() == pytest.approx(expected, rel=1e-5)
         assert result.eager.item() == pytest.approx(expected, rel=1e-5)
 
@@ -706,30 +790,29 @@ class TestFusedWindowNormalization:
         loss_type: str,
         objective: str,
     ) -> None:
-        result = self._run(loss_type, objective, seed=13, steps=1, lengths=(5, 9))
-        # The window record is ignored; the micro-batch's own mask spans it.
-        assert fused_kernel.last_num_items == pytest.approx(14.0 * _world_size())
+        result = self._run(
+            loss_type, objective, seed=13, steps=1, lengths=(5, 9), window_tokens=14
+        )
         assert result.fused.item() == pytest.approx(
             result.masked_sum / 14.0,
             rel=1e-5,
         )
 
-    def test_micro_batch_grpo_leaves_the_kernel_call_untouched(
+    @pytest.mark.parametrize(
+        ("loss_type", "objective"),
+        [("grpo", "grpo"), ("cispo", "cispo")],
+    )
+    def test_micro_batch_is_the_mean_of_per_sequence_means(
         self,
         fused_kernel: type[_FakeFusedKernel],
+        loss_type: str,
+        objective: str,
     ) -> None:
-        self._run("grpo", "grpo", seed=7, loss_norm="micro_batch")
-        assert fused_kernel.last_loss_type == "grpo"
-        assert fused_kernel.last_num_items is None
-        assert len(fused_kernel.last_args) == 24
+        result = self._run(loss_type, objective, seed=7, loss_norm="micro_batch")
 
-    def test_micro_batch_cispo_hands_the_kernel_the_global_token_count(
-        self,
-        fused_kernel: type[_FakeFusedKernel],
-    ) -> None:
-        self._run("cispo", "cispo", seed=7, loss_norm="micro_batch")
-        assert fused_kernel.last_loss_type == "cispo"
-        assert fused_kernel.last_num_items == pytest.approx(14.0)
+        assert result.min_ratio >= CLIP_MIN
+        assert result.fused.item() == pytest.approx(result.per_sequence_mean, rel=1e-5)
+        assert result.eager.item() == pytest.approx(result.per_sequence_mean, rel=1e-5)
 
     def test_window_without_action_tokens_gives_zero_loss(
         self,
@@ -737,7 +820,8 @@ class TestFusedWindowNormalization:
     ) -> None:
         # Arrange: a window of padding rows only.
         hidden, batch_ids, mask = _fused_inputs([0, 0], 16, seed=5)
-        algo = _Stub(loss_type="cispo", accumulation_steps=4, window_tokens=0)
+        algo = _Stub(loss_type="cispo", accumulation_steps=4)
+        algo._record_global_window_action_tokens(mask, np.arange(2))
         algo.hidden = hidden
 
         # Act
@@ -746,7 +830,6 @@ class TestFusedWindowNormalization:
         )
 
         # Assert
-        assert fused_kernel.last_num_items == pytest.approx(1.0 * _world_size())
         assert loss.item() == 0.0
 
 
@@ -784,7 +867,6 @@ class TestFusedActivationOffload:
         assert spy.pin_memory_flags == [True]
         assert spy.max_depth == 1
         assert spy.depth == 0
-        assert fused_kernel.last_num_items == pytest.approx(28.0 * _world_size())
 
     def test_the_context_is_inert_when_the_flag_is_off(
         self,
@@ -887,16 +969,14 @@ class TestFusedKernelScoredPositions:
             batch_ids, mask, advantages, old_log_probs, None
         )
 
-        # Assert: grpo divides by every (row, position) of the action frame,
-        # cispo by the action-token count.
+        # Assert: the mean over rows of each row's mean over its own tokens.
         ratio = torch.exp(log_probs - old_log_probs)
         if loss_type == "cispo":
             per_token = -(ratio.clamp(max=CLIP_MAX) * advantages * log_probs)
-            expected = (per_token * mask).sum() / mask.sum()
         else:
             clipped = ratio.clamp(CLIP_MIN, CLIP_MAX)
             per_token = -torch.min(ratio * advantages, clipped * advantages)
-            expected = (per_token * mask).sum() / mask.numel()
+        expected = _micro_batch_reduce(per_token, mask).mean()
         assert torch.allclose(loss, expected, atol=1e-6)
 
     @pytest.mark.parametrize("loss_type", ["grpo", "cispo"])
@@ -1052,10 +1132,9 @@ def _sharded_head_cispo_rank(rank: int, world_size: int, store_path: str) -> Non
         )
         loss.backward()
 
-        global_tokens = sum(sum(rank_lengths) for rank_lengths in RANK_ACTION_LENGTHS)
         ratio = torch.exp(log_probs.detach() - old_log_probs).clamp(max=CLIP_MAX)
         per_token = -(ratio * advantages * log_probs)
-        expected = (per_token * mask).sum() / max(global_tokens / world_size, 1.0)
+        expected = _micro_batch_reduce(per_token, mask).mean()
         fused_hidden_grad = hidden.grad.clone()
         hidden.grad = None
         expected.backward()
@@ -1070,7 +1149,7 @@ def _sharded_head_cispo_rank(rank: int, world_size: int, store_path: str) -> Non
 
 @pytest.mark.skipif(sys.platform == "win32", reason="gloo TCP transport is missing")
 class TestFusedKernelCollectivesAcrossRanks:
-    """Ranks with different action-row counts issue the same collectives."""
+    """Ranks with different action-row counts complete the sharded-head gather."""
 
     def test_uneven_row_chunks_complete_and_match_the_dense_reference(
         self, tmp_path: Path
@@ -1083,6 +1162,140 @@ class TestFusedKernelCollectivesAcrossRanks:
             context.Process(
                 target=_sharded_head_cispo_rank,
                 args=(rank, world_size, store_path),
+            )
+            for rank in range(world_size)
+        ]
+
+        # Act
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join(timeout=RANK_TIMEOUT_S)
+        hung = [process.pid for process in processes if process.is_alive()]
+        for process in processes:
+            if process.is_alive():
+                process.kill()
+
+        # Assert
+        assert hung == []
+        assert [process.exitcode for process in processes] == [0] * world_size
+
+
+WINDOW_RANK_LENGTHS = {
+    "uneven": ([[0], [3]], [[9, 4], [7, 1]]),
+    "empty": ([[0], [0]], [[0, 0], [0]]),
+}
+"""Per-scenario, per-rank micro-batch action lengths of one accumulation window."""
+
+
+def _window_micro_batch(rank: int, step: int, lengths: list[int]):
+    """Hidden states, token ids, action mask and advantages of one micro-batch."""
+    hidden, batch_ids, mask = _fused_inputs(lengths, RANK_WIDTH, seed=10 * rank + step)
+    advantages = torch.linspace(-0.8, 0.6, len(lengths)).unsqueeze(-1) + rank
+    return hidden, batch_ids, mask, advantages
+
+
+def _window_token_mean_rank(
+    rank: int, world_size: int, store_path: str, scenario: str
+) -> None:
+    """One rank of an accumulation window on the standard and the fused path."""
+    dist.init_process_group(
+        "gloo",
+        store=dist.FileStore(store_path, world_size),
+        rank=rank,
+        world_size=world_size,
+        timeout=datetime.timedelta(seconds=30),
+    )
+    try:
+        grpo_module.HAS_LIGER_KERNEL = True
+        grpo_module.LigerFusedLinearGRPOFunction = _FakeFusedKernel
+        windows = WINDOW_RANK_LENGTHS[scenario]
+        union = [
+            _window_micro_batch(other, step, lengths)
+            for other, rank_window in enumerate(windows)
+            for step, lengths in enumerate(rank_window)
+        ]
+        own = [
+            _window_micro_batch(rank, step, lengths)
+            for step, lengths in enumerate(windows[rank])
+        ]
+        steps = len(own)
+        torch.manual_seed(0)
+        initial_head = torch.nn.Linear(HIDDEN, VOCAB, bias=False)
+        heads = {}
+        for path in ("standard", "fused", "union"):
+            heads[path] = torch.nn.Linear(HIDDEN, VOCAB, bias=False)
+            heads[path].load_state_dict(initial_head.state_dict())
+        standard = _Stub(loss_type="cispo", accumulation_steps=steps)
+        standard.lm_head = heads["standard"]
+        fused = _Stub(loss_type="cispo", accumulation_steps=steps)
+        fused.lm_head = heads["fused"]
+        window_mask = torch.cat([mask for _, _, mask, _ in own])
+        window_rows = np.arange(window_mask.shape[0])
+        standard._record_global_window_action_tokens(window_mask, window_rows)
+        fused._record_global_window_action_tokens(window_mask, window_rows)
+
+        losses = []
+        for hidden, batch_ids, mask, advantages in own:
+            log_probs = _token_log_probs(standard, hidden, batch_ids, RANK_WIDTH)
+            standard_loss = standard._reduce_masked_loss(
+                -advantages * log_probs, mask
+            ).mean()
+            (standard_loss / steps).backward()
+            fused.hidden = hidden
+            fused_loss, _, _, _ = fused._liger_loss(
+                batch_ids, mask, advantages, None, None
+            )
+            (fused_loss / steps).backward()
+            losses += [standard_loss.detach(), fused_loss.detach()]
+        for path in ("standard", "fused"):
+            grad = heads[path].weight.grad
+            dist.all_reduce(grad, op=dist.ReduceOp.SUM)
+            grad /= world_size
+
+        reference = _Stub(loss_norm="micro_batch", lm_head=heads["union"])
+        union_sum = torch.zeros(())
+        union_tokens = 0.0
+        for hidden, batch_ids, mask, advantages in union:
+            log_probs = _token_log_probs(reference, hidden, batch_ids, RANK_WIDTH)
+            union_sum = union_sum + (-advantages * log_probs * mask).sum()
+            union_tokens += float(mask.sum())
+        (union_sum / max(union_tokens, 1.0)).backward()
+        expected = heads["union"].weight.grad
+
+        assert all(torch.isfinite(loss) for loss in losses), (rank, losses)
+        for path in ("standard", "fused"):
+            assert torch.allclose(heads[path].weight.grad, expected, atol=1e-6), (
+                rank,
+                path,
+                heads[path].weight.grad,
+                expected,
+            )
+        if union_tokens == 0.0:
+            assert all(loss.item() == 0.0 for loss in losses), (rank, losses)
+    except BaseException:
+        traceback.print_exc()
+        sys.exit(1)
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="gloo TCP transport is missing")
+class TestGRPOAccumulationWindowAcrossRanks:
+    """The rank-averaged window gradient is the token mean over every rank's tokens."""
+
+    @pytest.mark.parametrize("scenario", sorted(WINDOW_RANK_LENGTHS))
+    def test_averaged_gradient_is_the_union_token_mean(
+        self, tmp_path: Path, scenario: str
+    ) -> None:
+        # Arrange
+        world_size = len(WINDOW_RANK_LENGTHS[scenario])
+        context = multiprocessing.get_context("spawn")
+        store_path = str(tmp_path / "store")
+        processes = [
+            context.Process(
+                target=_window_token_mean_rank,
+                args=(rank, world_size, store_path, scenario),
             )
             for rank in range(world_size)
         ]

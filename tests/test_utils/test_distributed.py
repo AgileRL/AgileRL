@@ -874,6 +874,50 @@ class TestAggregateMetricsDict:
     def test_empty_dict_returns_empty(self):
         assert aggregate_metrics_dict({}) == {}
 
+    def test_single_process_maximized_metric_is_its_local_mean(self):
+        out = aggregate_metrics_dict(
+            {"loss": 1.0, "peak_gib": torch.tensor([2.0, 4.0])},
+            maximized=("peak_gib",),
+        )
+
+        assert out == {"loss": 1.0, "peak_gib": 3.0}
+
+    def test_maximized_metrics_take_the_largest_rank_value_in_the_same_all_reduce(
+        self,
+    ):
+        # Arrange: this is rank 0 of 2; rank 1 reports loss 3, peak 70, retries 0.
+        reduced: list[torch.Tensor] = []
+
+        def sum_with_peer(tensor, op):
+            assert op == dist.ReduceOp.SUM
+            reduced.append(tensor.clone())
+            peer = torch.zeros_like(tensor)
+            peer[0] = torch.tensor([3.0, 70.0, 0.0])
+            peer[1] = torch.tensor([1.0, 1.0, 1.0])
+            peer[3] = torch.tensor([0.0, 70.0, 0.0])
+            tensor.add_(peer)
+
+        # Act
+        with (
+            patch("agilerl.distributed.process.is_distributed", return_value=True),
+            patch("agilerl.distributed.process.dist.get_world_size", return_value=2),
+            patch("agilerl.distributed.process.dist.get_rank", return_value=0),
+            patch("agilerl.distributed.process.resolve_device", return_value="cpu"),
+            patch(
+                "agilerl.distributed.process.dist.all_reduce",
+                side_effect=sum_with_peer,
+            ),
+        ):
+            out = aggregate_metrics_dict(
+                {"loss": 1.0, "peak_gib": 75.5, "retries": -1.0},
+                maximized=("peak_gib", "retries"),
+            )
+
+        # Assert
+        assert len(reduced) == 1
+        assert reduced[0].shape == (4, 3)
+        assert out == {"loss": 2.0, "peak_gib": 75.5, "retries": 0.0}
+
 
 class TestSyncGrads:
     def test_leaves_grads_unchanged_without_process_group(self):

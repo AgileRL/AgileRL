@@ -13,6 +13,14 @@ BETA = (
     "Weight on the KL penalty holding the policy near the reference "
     "model. 0 disables the penalty entirely."
 )
+KL_CLAMP = (
+    "Per-token bound on the K3 KL penalty. 10 is the policy about 2.6 nats "
+    "below the reference on a token; tokens further below get no KL "
+    "gradient, so one diverged token cannot set the step's gradient norm. "
+    "Tokens above the reference keep their KL pull. With the fused Liger "
+    "GRPO loss a residual gradient of about beta times one bf16 rounding "
+    "step of the log-prob remains. Unset removes the bound."
+)
 MINI_BATCH = (
     "Trajectories one optimizer step covers, per rank. Must be a whole "
     "number of micro-batches. This is a learning-cadence decision, not "

@@ -520,6 +520,24 @@ class TrainingManifest(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _check_prefix_cache_reuse(self) -> Self:
+        """Prefix cache reuse spans ``max_rollout_version_lag`` versions, so it needs a bound."""
+        if not self.training.reuse_prefix_cache_across_syncs:
+            return self
+        lag = (
+            self.replay_buffer.max_rollout_version_lag
+            if isinstance(self.replay_buffer, LLMRolloutBufferSpec)
+            else None
+        )
+        if lag is None or lag < 1:
+            msg = (
+                "training.reuse_prefix_cache_across_syncs requires an LLM "
+                f"replay_buffer with max_rollout_version_lag >= 1, got {lag}"
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
     def _check_group_replay(self) -> Self:
         """Group replay swaps a member of a group whose returns tie, so it needs groups."""
         if not (

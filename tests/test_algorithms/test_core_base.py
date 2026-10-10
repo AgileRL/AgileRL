@@ -36,6 +36,8 @@ Test organisation:
 
 from __future__ import annotations
 
+import dataclasses
+import gc
 import importlib
 import inspect
 import io
@@ -46,6 +48,7 @@ import shutil
 import socket
 import sys
 import warnings
+import weakref
 from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -3761,6 +3764,20 @@ class TestLLMInitWarnings:
         assert agent.max_grad_norm == 1.5
 
 
+class TestLLMAlgorithmWarnLigerNonTokenIs:
+    def test_warns_once_then_is_silent(self):
+        owner = SimpleNamespace()
+
+        with pytest.warns(UserWarning, match="NOT memory-bounded"):
+            LLMAlgorithm._warn_liger_non_token_is(owner, "turn", "PPO")
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UserWarning)
+            LLMAlgorithm._warn_liger_non_token_is(owner, "turn", "PPO")
+
+        assert owner._liger_non_token_warned is True
+
+
 class TestLLMGetLmHead:
     def _peft_actor(self):
         inner = _TinyCausalLM(vocab_size=8, hidden_size=4)
@@ -4060,6 +4077,23 @@ def find_exp_avg_in_opt_state(agent) -> torch.Tensor | None:
     return None
 
 
+def tensors_in(obj) -> list[torch.Tensor]:
+    """Every tensor reachable through dicts, lists, tuples and dataclass fields."""
+    if isinstance(obj, torch.Tensor):
+        return [obj]
+    if isinstance(obj, dict):
+        return [t for value in obj.values() for t in tensors_in(value)]
+    if isinstance(obj, (list, tuple)):
+        return [t for value in obj for t in tensors_in(value)]
+    if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+        return [
+            t
+            for field in dataclasses.fields(obj)
+            for t in tensors_in(getattr(obj, field.name))
+        ]
+    return []
+
+
 def load_attributes_checkpoint(path):
     return torch.load(
         str(path / "attributes.pt"),
@@ -4357,6 +4391,36 @@ class TestLLMAlgorithmSnapshotCheckpoint:
         assert torch.equal(restored_exp_avg, torch.full_like(restored_exp_avg, 0.5))
         assert int(step) == 1
         assert agent.scores == [1.0]
+
+    def test_dropped_snapshot_frees_every_tensor_it_held(self, grpo_factory):
+        # Arrange
+        agent = _grpo_from_template(grpo_factory)
+        for p in agent.actor.parameters():
+            if p.requires_grad:
+                p.grad = torch.ones_like(p)
+        agent.optimizer.step()
+        live_storage = {
+            t.untyped_storage().data_ptr()
+            for t in [
+                *agent.actor.parameters(),
+                *tensors_in(dict(agent.optimizer.optimizer.state)),
+            ]
+        }
+        snapshot = agent.snapshot_checkpoint(lora_only=True, save_optimizer=True)
+        held = tensors_in(snapshot)
+        devices = {t.device.type for t in held}
+        shared = [t for t in held if t.untyped_storage().data_ptr() in live_storage]
+        refs = [weakref.ref(t) for t in held]
+
+        # Act
+        del snapshot, held
+        gc.collect()
+
+        # Assert
+        assert len(refs) > 0
+        assert devices == {"cpu"}
+        assert shared == []
+        assert [ref for ref in refs if ref() is not None] == []
 
     def test_snapshot_without_optimizer_loads_with_fresh_optimizer(
         self, grpo_factory, tmp_path
