@@ -121,7 +121,7 @@ class TestGemma4LanguageTowerHfOverride:
 
 class TestApplyTowerConnectorLoraEngineKwargs:
     @pytest.mark.parametrize("strip_multimodal_towers", [False, [], ["audio_tower"]])
-    def test_enables_when_family_supports_it_and_towers_load(
+    def test_enables_when_targets_reach_kept_towers(
         self, strip_multimodal_towers: bool | list[str]
     ) -> None:
         kwargs: dict[str, object] = {}
@@ -130,9 +130,37 @@ class TestApplyTowerConnectorLoraEngineKwargs:
             kwargs,
             strip_multimodal_towers,
             runtime=FAMILY_RUNTIME_CONFIGS["nemotron_h_omni"],
+            lora_target_modules=["q_proj", "query", "linear1"],
         )
 
         assert kwargs == {"enable_tower_connector_lora": True}
+
+    @pytest.mark.parametrize("lora_target_modules", ["all-linear", r".*\.fc1", None])
+    def test_enables_for_target_specs_without_names(
+        self, lora_target_modules: str | None
+    ) -> None:
+        kwargs: dict[str, object] = {}
+
+        apply_tower_connector_lora_engine_kwargs(
+            kwargs,
+            strip_multimodal_towers=False,
+            runtime=FAMILY_RUNTIME_CONFIGS["nemotron_h_omni"],
+            lora_target_modules=lora_target_modules,
+        )
+
+        assert kwargs == {"enable_tower_connector_lora": True}
+
+    def test_leaves_kwargs_when_targets_are_language_only(self) -> None:
+        kwargs: dict[str, object] = {}
+
+        apply_tower_connector_lora_engine_kwargs(
+            kwargs,
+            strip_multimodal_towers=False,
+            runtime=FAMILY_RUNTIME_CONFIGS["nemotron_h_omni"],
+            lora_target_modules={"q_proj", "k_proj", "in_proj", "up_proj"},
+        )
+
+        assert kwargs == {}
 
     def test_leaves_kwargs_when_serving_language_tower_only(self) -> None:
         kwargs: dict[str, object] = {}
@@ -141,6 +169,7 @@ class TestApplyTowerConnectorLoraEngineKwargs:
             kwargs,
             strip_multimodal_towers=True,
             runtime=FAMILY_RUNTIME_CONFIGS["nemotron_h_omni"],
+            lora_target_modules="all-linear",
         )
 
         assert kwargs == {}
@@ -152,6 +181,7 @@ class TestApplyTowerConnectorLoraEngineKwargs:
             kwargs,
             strip_multimodal_towers=False,
             runtime=FAMILY_RUNTIME_CONFIGS["gemma4"],
+            lora_target_modules="all-linear",
         )
 
         assert kwargs == {}

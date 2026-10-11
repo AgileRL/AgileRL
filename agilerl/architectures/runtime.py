@@ -124,6 +124,7 @@ class ModelRuntimeConfig(BaseModel):
     multimodal_towers_kept_hf_override: (
         Callable[[object], object] | Mapping[str, object] | None
     ) = None
-    # vLLM tower LoRA needs get_num_mm_encoder_tokens; stock stubs return None.
-    enable_tower_connector_lora: bool = False
+    # PEFT target names of the trainer's tower and connector linears. Empty for
+    # families without vLLM tower LoRA (it needs get_num_mm_encoder_tokens).
+    tower_connector_lora_targets: frozenset[str] = frozenset()
     tensor_parallel_plan: str | None = Field(default=None, min_length=1)

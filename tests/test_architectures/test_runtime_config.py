@@ -92,8 +92,11 @@ class TestFamilyRuntimeConfigs:
         assert omni.multimodal_towers_kept_hf_override == {
             "architectures": ["NemotronH_Super_Omni_Reasoning_V3"],
         }
-        assert omni.enable_tower_connector_lora is True
-        assert base.enable_tower_connector_lora is False
+        assert {"query", "fc1", "linear1"} <= omni.tower_connector_lora_targets
+        assert omni.tower_connector_lora_targets.isdisjoint(
+            {"q_proj", "in_proj", "up_proj", "down_proj"}
+        )
+        assert base.tower_connector_lora_targets == frozenset()
 
     def test_gemma4_adds_language_tower_without_tower_lora(self) -> None:
         gemma4 = FAMILY_RUNTIME_CONFIGS["gemma4"]
@@ -101,7 +104,7 @@ class TestFamilyRuntimeConfigs:
         assert gemma4.trainer == gemma3.trainer
         assert gemma4.language_tower.hf_overrides is gemma4_language_tower_hf_override
         assert gemma4.language_tower.model_class_overrides is None
-        assert gemma4.enable_tower_connector_lora is False
+        assert gemma4.tower_connector_lora_targets == frozenset()
         assert gemma3.language_tower.hf_overrides is None
         assert FAMILY_RUNTIME_CONFIGS["gemma4_text"].language_tower.hf_overrides is (
             gemma4_language_tower_hf_override
