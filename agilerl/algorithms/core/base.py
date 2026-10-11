@@ -7501,6 +7501,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             max_model_len=self.max_model_len,
             process_index=process_index,
             lora_rank=lora_rank,
+            lora_target_modules=(
+                self.lora_config.target_modules if self.lora_config else None
+            ),
         )
         self._ensure_vllm_lora_staging_dir()
         if is_main_process():

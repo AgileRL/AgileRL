@@ -3540,6 +3540,19 @@ class TestBuildVllmLlmInitKwargs:
 
         assert kwargs["enable_tower_connector_lora"] is True
 
+    def test_kept_towers_skip_tower_connector_lora_for_language_only_targets(
+        self, monkeypatch
+    ):
+        stub_catalog_model_type(monkeypatch, "nemotron_h_omni")
+        kwargs = build_vllm_llm_init_kwargs(
+            _vllm_config(strip_multimodal_towers=False),
+            trainer_model_name_or_path="org/vl-model",
+            max_model_len=32768,
+            lora_target_modules={"q_proj", "in_proj", "up_proj"},
+        )
+
+        assert "enable_tower_connector_lora" not in kwargs
+
     def test_kept_towers_skip_tower_connector_lora_for_unflagged_family(
         self, monkeypatch
     ):

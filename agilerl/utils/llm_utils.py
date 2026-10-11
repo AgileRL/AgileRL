@@ -16,7 +16,7 @@ import sys
 import tempfile
 import textwrap
 import warnings
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from io import BufferedWriter
@@ -3056,6 +3056,7 @@ def build_vllm_llm_init_kwargs(
     max_model_len: int,
     process_index: int = 0,
     lora_rank: int | None = None,
+    lora_target_modules: str | Collection[str] | None = None,
 ) -> dict[str, Any]:
     """Build kwargs for ``vllm.LLM`` from :class:`~agilerl.utils.algo_utils.VLLMConfig`.
 
@@ -3069,6 +3070,8 @@ def build_vllm_llm_init_kwargs(
     :type process_index: int
     :param lora_rank: Trainer LoRA rank, used to size ``max_lora_rank``.
     :type lora_rank: int | None
+    :param lora_target_modules: Trainer PEFT ``target_modules``; gates tower LoRA.
+    :type lora_target_modules: str | Collection[str] | None
     :return: Keyword arguments for ``vllm.LLM``.
     :rtype: dict[str, Any]
     """
@@ -3137,6 +3140,7 @@ def build_vllm_llm_init_kwargs(
             kwargs,
             strip_multimodal_towers=vllm_config.strip_multimodal_towers,
             runtime=runtime,
+            lora_target_modules=lora_target_modules,
         )
         apply_language_tower_engine_kwargs(
             kwargs,
