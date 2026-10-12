@@ -548,6 +548,32 @@ def _packed_checkpoint_keys(
     return None
 
 
+def _take_local_expert_rows(
+    source: torch.Tensor,
+    dest: torch.Tensor,
+    global_dim0: int,
+) -> torch.Tensor:
+    """Keep leftover-dp rows when ``source`` is still this rank's EP block."""
+    if tuple(source.shape) == tuple(dest.shape):
+        return source
+    source_rows = int(source.shape[0])
+    dest_rows = int(dest.shape[0])
+    even_dim0_split = (
+        source.ndim == dest.ndim
+        and tuple(source.shape[1:]) == tuple(dest.shape[1:])
+        and source_rows > dest_rows > 0
+        and source_rows % dest_rows == 0
+        and global_dim0 % source_rows == 0
+    )
+    if not even_dim0_split:
+        return source
+    ep = global_dim0 // source_rows
+    leftover_dp = source_rows // dest_rows
+    # rank = (replica * leftover_dp + dp_index) * ep + ep_index
+    dp_index = (torch.distributed.get_rank() // ep) % leftover_dp
+    return source.narrow(0, dp_index * dest_rows, dest_rows)
+
+
 def _copy_indexed_weights(
     key_files: dict[str, str],
     keys: list[str],
@@ -573,27 +599,13 @@ def _copy_indexed_weights(
         )
         raise RuntimeError(msg)
     source = stacked if index_slices is None else stacked[index_slices]
-    source_rows = int(source.shape[0])
-    dest_rows = int(dest.shape[0])
-    even_dim0_split = (
-        source.ndim == dest.ndim
-        and tuple(source.shape[1:]) == tuple(dest.shape[1:])
-        and source_rows > dest_rows > 0
-        and source_rows % dest_rows == 0
-        and global_shape[0] % source_rows == 0
-    )
-    if even_dim0_split:
-        ep = global_shape[0] // source_rows
-        leftover_dp = source_rows // dest_rows
-        # rank = (replica * leftover_dp + dp_index) * ep + ep_index
-        dp_index = (torch.distributed.get_rank() // ep) % leftover_dp
-        source = source.narrow(0, dp_index * dest_rows, dest_rows)
-        if tuple(source.shape) != tuple(dest.shape):
-            msg = (
-                f"Indexed weight slice {tuple(source.shape)} does not match "
-                f"destination shape {tuple(dest.shape)}"
-            )
-            raise RuntimeError(msg)
+    source = _take_local_expert_rows(source, dest, global_shape[0])
+    if tuple(source.shape) != tuple(dest.shape):
+        msg = (
+            f"Indexed weight slice {tuple(source.shape)} does not match "
+            f"destination shape {tuple(dest.shape)}"
+        )
+        raise RuntimeError(msg)
     dest.copy_(source.to(device=dest.device, dtype=dest.dtype))
 
 
@@ -700,8 +712,11 @@ def _copy_safetensors_slice(
     checkpoint_key: str,
     index_slices: tuple[slice, ...],
     dest: torch.Tensor,
+    global_dim0: int | None = None,
 ) -> None:
     source = handle.get_slice(checkpoint_key)[index_slices]
+    if global_dim0 is not None:
+        source = _take_local_expert_rows(source, dest, global_dim0)
     dest.copy_(source.to(device=dest.device, dtype=dest.dtype))
 
 
@@ -888,7 +903,7 @@ def _load_sharded_weights_from_safetensors(model: nn.Module) -> None:
         "language_model." in name for name, _ in model.named_parameters()
     )
     copies_by_path: dict[
-        str, list[tuple[str, tuple[slice, ...] | None, torch.Tensor]]
+        str, list[tuple[str, tuple[slice, ...] | None, torch.Tensor, int]]
     ] = {}
     indexed: list[
         tuple[list[str], tuple[int, ...], tuple[slice, ...] | None, torch.Tensor]
@@ -921,6 +936,7 @@ def _load_sharded_weights_from_safetensors(model: nn.Module) -> None:
                         checkpoint_key,
                         index_slices,
                         _parameter_dest_local(param),
+                        int(param.shape[0]),
                     )
                 )
                 if "vision_model." in canonical:
@@ -989,11 +1005,13 @@ def _load_sharded_weights_from_safetensors(model: nn.Module) -> None:
                 continue
             path = key_files[checkpoint_key]
             copies_by_path.setdefault(path, []).append(
-                (checkpoint_key, None, buf),
+                (checkpoint_key, None, buf, int(buf.shape[0]) if buf.ndim else 0),
             )
         for path in sorted(copies_by_path):
             with safe_open(path, framework="pt", device="cpu") as handle:
-                for checkpoint_key, index_slices, dest in copies_by_path[path]:
+                for checkpoint_key, index_slices, dest, global_dim0 in copies_by_path[
+                    path
+                ]:
                     if index_slices is None:
                         full = handle.get_tensor(checkpoint_key)
                         dest.copy_(full.to(device=dest.device, dtype=dest.dtype))
@@ -1003,6 +1021,7 @@ def _load_sharded_weights_from_safetensors(model: nn.Module) -> None:
                             checkpoint_key,
                             index_slices,
                             dest,
+                            global_dim0=global_dim0,
                         )
         for keys, global_shape, slices, dest in indexed:
             _copy_indexed_weights(key_files, keys, global_shape, slices, dest)
