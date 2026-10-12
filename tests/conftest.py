@@ -2,10 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import gc
-import itertools
 import os
 import shutil
-import socket
 import sys
 import tempfile
 from pathlib import Path
@@ -18,6 +16,7 @@ os.environ["COVERAGE_FILE"] = os.path.abspath(
     os.environ.get("COVERAGE_FILE", ".coverage")
 )
 
+from tests.dist_ports import get_free_port, gloo_socket_ifname
 from tests.xdist_async_vec import ASYNC_VEC_XDIST_GROUP, nodeid_spawns_async_vector_env
 
 # Register lightweight test environments
@@ -73,10 +72,9 @@ os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 # Gloo resolves this machine's hostname for every process group unless pinned
 # to an interface. Ubuntu maps that name to 127.0.1.1, and the TCP pair then
 # drops. Spawned gloo ranks inherit the variable; they only talk over loopback.
-if sys.platform == "darwin":
-    os.environ.setdefault("GLOO_SOCKET_IFNAME", "lo0")
-elif sys.platform == "linux":
-    os.environ.setdefault("GLOO_SOCKET_IFNAME", "lo")
+# Windows has no ``lo`` device — leave Gloo on its default interface.
+if (ifname := gloo_socket_ifname()) is not None:
+    os.environ.setdefault("GLOO_SOCKET_IFNAME", ifname)
 
 from tests.gpu_host_env import apply as apply_gpu_host_env  # noqa: E402
 
@@ -562,39 +560,6 @@ dist_env = {
     "WORLD_SIZE": "1",
     "CUDA_VISIBLE_DEVICES": "0",
 }
-
-
-_port_counter = itertools.count()
-
-
-def get_free_port():
-    """Pick a MASTER_PORT that won't collide across xdist workers.
-
-    The classic bind-to-port-0 / close / reuse dance is TOCTOU-racy: two
-    workers can be handed the same ephemeral port and the loser dies with
-    EADDRINUSE inside ``init_process_group``. Carve a disjoint 300-port range
-    per xdist worker and walk it with a per-process counter, probing each
-    candidate; fall back to an OS-assigned port only if the whole range is
-    somehow occupied.
-    """
-    worker = os.environ.get("PYTEST_XDIST_WORKER", "gw0")
-    try:
-        worker_num = int(worker.lstrip("gw"))
-    except ValueError:
-        worker_num = 0
-    base = 20000 + (worker_num % 100) * 300
-    for _ in range(300):
-        port = base + next(_port_counter) % 300
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            try:
-                s.bind(("127.0.0.1", port))
-            except OSError:
-                continue
-            return port
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
 
 
 @pytest.fixture
