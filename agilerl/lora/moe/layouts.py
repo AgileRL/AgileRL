@@ -7,12 +7,16 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
-from transformers.activations import get_activation
 
+from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.architectures.gptoss import experts as gptoss_experts
+
+if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
+    from transformers.activations import get_activation
 
 is_transposed_experts_module = gptoss_experts.is_gpt_oss_experts_module
 

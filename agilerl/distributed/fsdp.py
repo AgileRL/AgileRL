@@ -13,7 +13,7 @@ import re
 from collections.abc import Callable, Generator, Iterable, Sequence
 from contextlib import _GeneratorContextManager, contextmanager
 from pathlib import Path
-from typing import Any, Protocol, cast, overload
+from typing import TYPE_CHECKING, Any, Protocol, cast, overload
 
 import torch
 import torch.nn.init as init
@@ -24,11 +24,8 @@ from torch.distributed.fsdp import FSDPModule, share_comm_ctx
 from torch.distributed.tensor import DTensor, distribute_tensor
 from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
 from torch.distributed.tensor.placement_types import Shard
-from transformers import PretrainedConfig, PreTrainedModel
-from transformers.conversion_mapping import get_checkpoint_conversion_mapping
-from transformers.core_model_loading import WeightTransform
-from transformers.utils import SAFE_WEIGHTS_INDEX_NAME, SAFE_WEIGHTS_NAME, cached_file
 
+from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.arena.models.fsdp import FSDPConfig
 from agilerl.distributed.expert_parallel import (
     ParallelMesh,
@@ -54,6 +51,16 @@ from agilerl.distributed.tensor_parallel import (
     restore_tensor_parallel,
 )
 from agilerl.lora.moe import set_routed_experts_chunk_bytes
+
+if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
+    from transformers import PretrainedConfig, PreTrainedModel
+    from transformers.conversion_mapping import get_checkpoint_conversion_mapping
+    from transformers.core_model_loading import WeightTransform
+    from transformers.utils import (
+        SAFE_WEIGHTS_INDEX_NAME,
+        SAFE_WEIGHTS_NAME,
+        cached_file,
+    )
 
 WRAPPER_FQN_PARTS = frozenset({"_checkpoint_wrapped_module", "_fsdp_wrapped_module"})
 
