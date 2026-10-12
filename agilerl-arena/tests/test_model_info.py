@@ -140,6 +140,13 @@ class TestSupportedModelInfo:
 
         assert not {"fc1_latent_proj", "fc2_latent_proj"} & entry.modules
 
+    def test_qwen3_6_lists_vision_and_experts(self) -> None:
+        entry = SUPPORTED_MODEL_INFO["Qwen/Qwen3.6-35B-A3B"]
+
+        assert {"qkv", "linear_fc1", "linear_fc2"} <= entry.modules
+        assert "mlp.experts.gate_up_proj" in entry.parameters
+        assert entry.lora_ranks == (1, 8, 16, 32)
+
     def test_granite_micro_has_no_mamba_or_experts(self) -> None:
         entry = SUPPORTED_MODEL_INFO["ibm-granite/granite-4.0-micro"]
 

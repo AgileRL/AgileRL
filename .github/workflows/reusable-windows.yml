@@ -10,6 +10,7 @@ permissions:
 jobs:
     tests:
         runs-on: windows-2025
+        timeout-minutes: 40
         strategy:
             fail-fast: false
             max-parallel: 8
@@ -60,6 +61,7 @@ jobs:
                     -- \
                     --import-mode=importlib \
                     --junitxml=junit-windows.xml \
+                    --timeout=600 --timeout-method=thread \
                     -m "not llm and not gpu and not vllm" \
                     -n auto --dist loadgroup \
                     --durations=15 \

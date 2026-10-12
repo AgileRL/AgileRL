@@ -140,12 +140,12 @@
     "vision_start_token_id": 248053
   },
   "inspected": {
-    "num_params": 26895998464,
+    "num_params": 27356728560,
     "lora_info": {
       "down_proj": [
         {
           "kind": "module",
-          "scope": "model.layers.mlp",
+          "scope": "model.language_model.layers.mlp",
           "type": "Linear",
           "in_features": 17408,
           "out_features": 5120,
@@ -155,7 +155,7 @@
       "gate_proj": [
         {
           "kind": "module",
-          "scope": "model.layers.mlp",
+          "scope": "model.language_model.layers.mlp",
           "type": "Linear",
           "in_features": 5120,
           "out_features": 17408,
@@ -165,7 +165,7 @@
       "in_proj_a": [
         {
           "kind": "module",
-          "scope": "model.layers.linear_attn",
+          "scope": "model.language_model.layers.linear_attn",
           "type": "Linear",
           "in_features": 5120,
           "out_features": 48,
@@ -175,7 +175,7 @@
       "in_proj_b": [
         {
           "kind": "module",
-          "scope": "model.layers.linear_attn",
+          "scope": "model.language_model.layers.linear_attn",
           "type": "Linear",
           "in_features": 5120,
           "out_features": 48,
@@ -185,7 +185,7 @@
       "in_proj_qkv": [
         {
           "kind": "module",
-          "scope": "model.layers.linear_attn",
+          "scope": "model.language_model.layers.linear_attn",
           "type": "Linear",
           "in_features": 5120,
           "out_features": 10240,
@@ -195,7 +195,7 @@
       "in_proj_z": [
         {
           "kind": "module",
-          "scope": "model.layers.linear_attn",
+          "scope": "model.language_model.layers.linear_attn",
           "type": "Linear",
           "in_features": 5120,
           "out_features": 6144,
@@ -205,17 +205,53 @@
       "k_proj": [
         {
           "kind": "module",
-          "scope": "model.layers.self_attn",
+          "scope": "model.language_model.layers.self_attn",
           "type": "Linear",
           "in_features": 5120,
           "out_features": 1024,
           "count": 16
         }
       ],
+      "linear_fc1": [
+        {
+          "kind": "module",
+          "scope": "model.visual.blocks.mlp",
+          "type": "Linear",
+          "in_features": 1152,
+          "out_features": 4304,
+          "count": 27
+        },
+        {
+          "kind": "module",
+          "scope": "model.visual.merger",
+          "type": "Linear",
+          "in_features": 4608,
+          "out_features": 4608,
+          "count": 1
+        }
+      ],
+      "linear_fc2": [
+        {
+          "kind": "module",
+          "scope": "model.visual.blocks.mlp",
+          "type": "Linear",
+          "in_features": 4304,
+          "out_features": 1152,
+          "count": 27
+        },
+        {
+          "kind": "module",
+          "scope": "model.visual.merger",
+          "type": "Linear",
+          "in_features": 4608,
+          "out_features": 5120,
+          "count": 1
+        }
+      ],
       "o_proj": [
         {
           "kind": "module",
-          "scope": "model.layers.self_attn",
+          "scope": "model.language_model.layers.self_attn",
           "type": "Linear",
           "in_features": 6144,
           "out_features": 5120,
@@ -225,7 +261,7 @@
       "out_proj": [
         {
           "kind": "module",
-          "scope": "model.layers.linear_attn",
+          "scope": "model.language_model.layers.linear_attn",
           "type": "Linear",
           "in_features": 6144,
           "out_features": 5120,
@@ -235,17 +271,27 @@
       "q_proj": [
         {
           "kind": "module",
-          "scope": "model.layers.self_attn",
+          "scope": "model.language_model.layers.self_attn",
           "type": "Linear",
           "in_features": 5120,
           "out_features": 12288,
           "count": 16
         }
       ],
+      "qkv": [
+        {
+          "kind": "module",
+          "scope": "model.visual.blocks.attn",
+          "type": "Linear",
+          "in_features": 1152,
+          "out_features": 3456,
+          "count": 27
+        }
+      ],
       "up_proj": [
         {
           "kind": "module",
-          "scope": "model.layers.mlp",
+          "scope": "model.language_model.layers.mlp",
           "type": "Linear",
           "in_features": 5120,
           "out_features": 17408,
@@ -255,7 +301,7 @@
       "v_proj": [
         {
           "kind": "module",
-          "scope": "model.layers.self_attn",
+          "scope": "model.language_model.layers.self_attn",
           "type": "Linear",
           "in_features": 5120,
           "out_features": 1024,
