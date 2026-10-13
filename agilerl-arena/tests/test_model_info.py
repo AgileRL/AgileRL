@@ -18,7 +18,6 @@ from agilerl.arena.models.model_info import (
     ARCH_MOE,
     STATUS_DEPRECATED,
     STATUS_LIVE,
-    STATUS_PREVIEW,
     SUPPORTED_MODEL_INFO,
     ModelInfo,
     supported_path,
@@ -295,13 +294,10 @@ class TestModelInfoStatus:
             "ibm-granite/granite-4.0-h-tiny",
             "ibm-granite/granite-3.1-3b-a800m-instruct",
         }
-        preview = {"nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16"}
 
         for hub_id, status in statuses.items():
             if hub_id in deprecated:
                 assert status == STATUS_DEPRECATED, hub_id
-            elif hub_id in preview:
-                assert status == STATUS_PREVIEW, hub_id
             else:
                 assert status == STATUS_LIVE, hub_id
 
@@ -312,7 +308,7 @@ class TestModelInfoStatus:
         entry = SUPPORTED_MODEL_INFO[
             "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16"
         ]
-        assert entry.model_dump(mode="json")["status"] == "preview"
+        assert entry.model_dump(mode="json")["status"] == "live"
 
     def test_rejects_unknown_status(self) -> None:
         with pytest.raises(ValidationError, match="status"):
