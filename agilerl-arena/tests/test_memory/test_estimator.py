@@ -326,6 +326,31 @@ class TestEstimateGeneration:
         assert any("recurrent layers" in w for w in breakdown.warnings)
         assert any(str(block_size) in w for w in breakdown.warnings)
 
+    def test_a_full_budget_on_a_large_card_fits_the_whole_card(self, model):
+        # Arrange: 0.95 of an 80 GiB card plus the CUDA context and runtime
+        # exceeds 95% of the card but not the card.
+        a100 = DeviceSpec(total_bytes=80 * GiB, name="NVIDIA A100-SXM4-80GB")
+        settings = GenerationSettings(gpu_memory_utilization=0.95, max_model_len=4096)
+
+        # Act
+        breakdown = estimate_generation(model, a100, settings)
+
+        # Assert
+        assert breakdown.device_usable_bytes == a100.total_bytes
+        assert a100.usable_bytes < breakdown.total_bytes <= a100.total_bytes
+        assert breakdown.fits
+
+    def test_training_keeps_the_fragmentation_band(self, model, device):
+        # Act
+        breakdown = estimate_training(model, device, TrainingSettings(algorithm="grpo"))
+
+        # Assert
+        assert (
+            breakdown.device_usable_bytes
+            == device.usable_bytes
+            == int(device.total_bytes * 0.95)
+        )
+
 
 class TestGenerationCanServe:
     def test_requires_the_pool_to_cover_demand(self, model, device):
@@ -429,6 +454,16 @@ class TestDeviceSpecContextBytesProperty:
 
         assert pinned.usable_bytes == 10 * GiB
         assert DeviceSpec(total_bytes=24 * GiB).usable_bytes == int(24 * GiB * 0.95)
+
+
+class TestDeviceSpecGenerationUsableBytesProperty:
+    def test_is_the_whole_card(self):
+        assert DeviceSpec(total_bytes=80 * GiB).generation_usable_bytes == 80 * GiB
+
+    def test_uses_the_available_override(self):
+        pinned = DeviceSpec(total_bytes=80 * GiB, available_bytes=60 * GiB)
+
+        assert pinned.generation_usable_bytes == 60 * GiB
 
 
 class TestTrainingSettingsInit:
