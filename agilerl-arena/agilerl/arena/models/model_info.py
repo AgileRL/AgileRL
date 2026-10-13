@@ -226,7 +226,6 @@ SUPPORTED_MODEL_INFO: Mapping[str, ModelInfo] = {
         ModelInfo(
             hub_id="nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
             architecture=ARCH_HYBRID_MOE,
-            status=STATUS_PREVIEW,
         ),
         ModelInfo(hub_id="openai/gpt-oss-20b", architecture=ARCH_MOE),
     )
