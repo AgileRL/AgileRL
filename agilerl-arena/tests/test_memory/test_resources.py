@@ -12,7 +12,7 @@ from agilerl.arena.memory.formulas import MAX_UNDERPREDICTION
 from agilerl.arena.memory.manifest import run_config_from_manifest
 from agilerl.arena.memory.resources import check_tiers, gpus_required
 from agilerl.arena.models.manifest import TrainingManifest
-from tests.test_memory.test_cli import MANIFEST, OVERSIZE, TINY_CONFIG
+from tests.test_memory.test_cli import MANIFEST, NO_TIER_FITS, TINY_CONFIG
 
 
 def tier(name, gpu_type, num_gpus, price):
@@ -88,7 +88,7 @@ class TestCheckTiers:
         assert checks[3].estimate.fits
 
     def test_a_tier_whose_gpu_is_too_small_is_over_budget(self):
-        manifest = TrainingManifest.model_validate(OVERSIZE)
+        manifest = TrainingManifest.model_validate(NO_TIER_FITS)
         tiers = [tier("t4-2x", "Tesla T4", 2, 1.0)]
 
         (check,) = check_tiers(tiers, manifest.training, builder(manifest))

@@ -1127,7 +1127,7 @@ def estimate_generation(
         phase="generation",
         components=components,
         device_total_bytes=device.total_bytes,
-        device_usable_bytes=device.usable_bytes,
+        device_usable_bytes=device.generation_usable_bytes,
         warnings=tuple(warnings),
     )
 
@@ -1169,7 +1169,7 @@ def estimate_run(config: RunConfig) -> RunEstimate:
             phase="generation",
             components=(),
             device_total_bytes=device.total_bytes,
-            device_usable_bytes=device.usable_bytes,
+            device_usable_bytes=device.generation_usable_bytes,
             warnings=(
                 (
                     f"{config.training.algorithm} trains from a fixed dataset "

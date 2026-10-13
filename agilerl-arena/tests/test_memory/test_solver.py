@@ -228,7 +228,7 @@ class TestSolveSingleValley:
         result = solve_inference(config, "max_model_len", hi=32768)
 
         # Assert
-        assert result.value == 21120
+        assert result.value == 26672
         assert result.limited_by == "memory"
 
     def test_the_minimum_fails_while_mid_range_fits(self, model):

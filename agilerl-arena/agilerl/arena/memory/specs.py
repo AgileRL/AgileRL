@@ -626,8 +626,9 @@ class DeviceSpec(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     total_bytes: int
-    # Usable capacity override. ``None`` uses 95% of ``total_bytes``
-    # (allocator fragmentation). CUDA context is a demand-side component.
+    # Usable capacity override. ``None`` uses 95% of ``total_bytes`` for
+    # training (allocator fragmentation) and the whole card for generation.
+    # CUDA context is a demand-side component.
     available_bytes: int | None = None
     name: str | None = None
     # Bytes a bare CUDA context costs, before any tensor allocation.
@@ -665,6 +666,17 @@ class DeviceSpec(BaseModel):
         if self.available_bytes is not None:
             return self.available_bytes
         return int(self.total_bytes * 0.95)
+
+    @property
+    def generation_usable_bytes(self) -> int:
+        """Capacity the generation peak is checked against.
+
+        vLLM claims ``gpu_memory_utilization`` of the card once at startup, so
+        the fragmentation band does not apply; the whole card is the limit.
+        """
+        if self.available_bytes is not None:
+            return self.available_bytes
+        return self.total_bytes
 
 
 class TrainingSettings(BaseModel):

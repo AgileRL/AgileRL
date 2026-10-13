@@ -85,6 +85,15 @@ OVERSIZE = {
     },
 }
 
+#: A vLLM budget of 99% leaves no card room for the CUDA context and runtime.
+NO_TIER_FITS = {
+    **OVERSIZE,
+    "algorithm": {
+        **OVERSIZE["algorithm"],
+        "vllm_config": {"gpu_memory_utilization": 0.99},
+    },
+}
+
 
 @pytest.fixture
 def manifest_path(tmp_path):
@@ -109,6 +118,13 @@ def no_layers_config(tmp_path):
 def oversize_path(tmp_path):
     path = tmp_path / "oversize.yaml"
     path.write_text(yaml.safe_dump(OVERSIZE))
+    return str(path)
+
+
+@pytest.fixture
+def no_tier_fits_path(tmp_path):
+    path = tmp_path / "no_tier_fits.yaml"
+    path.write_text(yaml.safe_dump(NO_TIER_FITS))
     return str(path)
 
 
@@ -965,7 +981,7 @@ class TestMainResourceTier:
         ]
 
     def test_no_fitting_tier_lists_why_and_exits_over_budget(
-        self, oversize_path, capsys
+        self, no_tier_fits_path, capsys
     ):
         tiers = [
             {
@@ -982,7 +998,7 @@ class TestMainResourceTier:
             },
         ]
 
-        code = main(oversize_path, tiers=tiers, config_path=TINY_CONFIG)
+        code = main(no_tier_fits_path, tiers=tiers, config_path=TINY_CONFIG)
 
         out = capsys.readouterr().out
         assert code == EXIT_OVER_BUDGET
@@ -990,7 +1006,7 @@ class TestMainResourceTier:
         assert "  - t4-2x: generation over budget" in out
         assert "  - l4-1x: 1 GPUs, the job needs 2" in out
 
-    def test_json_lists_every_tier_when_none_fits(self, oversize_path, capsys):
+    def test_json_lists_every_tier_when_none_fits(self, no_tier_fits_path, capsys):
         tiers = [
             {
                 "name": "t4-2x",
@@ -1000,7 +1016,9 @@ class TestMainResourceTier:
             }
         ]
 
-        code = main(oversize_path, tiers=tiers, config_path=TINY_CONFIG, as_json=True)
+        code = main(
+            no_tier_fits_path, tiers=tiers, config_path=TINY_CONFIG, as_json=True
+        )
 
         payload = json.loads(capsys.readouterr().out)
         assert code == EXIT_OVER_BUDGET
