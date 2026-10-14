@@ -436,6 +436,44 @@ def test_main_require_tags_fails_without_tags(
     _assert_exit_err(capsys, "agilerl-arena/v", check_extras.main, ["--require-tags"])
 
 
+class TestArenaFinal:
+    def test_inside_the_range_passes(
+        self,
+        check_extras: ModuleType,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        pyproject = _write_pyproject(tmp_path)
+        _bind_repo(check_extras, tmp_path, pyproject)
+        check_extras.main(["--arena-final", "0.2.1"])
+        assert "OK:" in capsys.readouterr().out
+
+    def test_outside_the_range_fails(
+        self,
+        check_extras: ModuleType,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        pyproject = _write_pyproject(tmp_path)
+        _bind_repo(check_extras, tmp_path, pyproject)
+        _assert_exit_err(
+            capsys,
+            "outside the requirement range",
+            check_extras.main,
+            ["--arena-final", "0.3.0"],
+        )
+
+    def test_both_flags_fail(
+        self, check_extras: ModuleType, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _assert_exit_err(
+            capsys,
+            "pass either",
+            check_extras.main,
+            ["--require-tags", "--arena-final", "1.26.1"],
+        )
+
+
 def test_portable_skips_missing_tags(check_extras: ModuleType, tmp_path: Path) -> None:
     pyproject = _write_pyproject(tmp_path)
     _init_git(tmp_path)
