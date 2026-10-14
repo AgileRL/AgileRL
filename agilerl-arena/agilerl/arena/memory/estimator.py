@@ -143,19 +143,17 @@ def engine_terms(
     act_bytes = DTYPE_BYTES[settings.weight_dtype]
     counts = formulas.param_counts(arch, model.n_params)
     variant = model.variant(settings.weight_variant)
+    tp = settings.tensor_parallel_size
     batched_tokens = formulas.resolve_max_num_batched_tokens(
         settings.max_num_seqs, settings.max_model_len, settings.max_num_batched_tokens
     )
-    # Sampler buffers: per-sequence fp32 logits and probs over the vocab.
+    # Gathered fp32 logits and probs. vLLM all-gathers the vocab shard before sampling.
     sampler = 2 * settings.max_num_seqs * arch.vocab_size * 4
+    # Linears and embeddings are sharded; replicated norms sit inside this division.
     terms = {
-        "weights": formulas.weight_bytes(counts, settings.weight_dtype, variant),
-        "startup_peak": formulas.block_recompute_bytes(
-            arch,
-            1,
-            batched_tokens,
-            act_bytes,
-            engine_forward=True,
+        "weights": formulas.weight_bytes(counts, settings.weight_dtype, variant) // tp,
+        "startup_peak": formulas.engine_forward_bytes(
+            arch, batched_tokens, act_bytes, tp
         )
         + sampler,
         "cuda_graphs": 0 if settings.enforce_eager else formulas.CUDA_GRAPH_POOL_BYTES,
@@ -163,17 +161,20 @@ def engine_terms(
             settings.max_loras
             * formulas.lora_param_count(arch, settings.max_lora_rank)
             * act_bytes
-        ),
+        )
+        // tp,
         "kv_demand": formulas.kv_cache_demand_bytes(
             arch,
             settings.weight_dtype,
             settings.concurrency,
             settings.max_model_len,
+            tensor_parallel_size=tp,
         ),
         "mamba_state": formulas.mamba_state_bytes(
             arch,
             settings.max_num_seqs,
             state_dtype=settings.weight_dtype,
+            tensor_parallel_size=tp,
         ),
     }
     return terms, batched_tokens, sampler
@@ -976,8 +977,18 @@ def generation_warnings(
             "Multimodal engine residency is independent of "
             "gpu_memory_utilization; construction can peak above this bar."
         )
+    if settings.tensor_parallel_size > 1:
+        warnings.append(
+            f"Generation bar is one of {settings.tensor_parallel_size} "
+            "tensor-parallel ranks. Weights, KV heads, and Mamba state are "
+            "this rank's shard."
+        )
     if arch.is_hybrid_ssm:
-        block_size = formulas.aligned_kv_block_size(arch, settings.weight_dtype)
+        block_size = formulas.aligned_kv_block_size(
+            arch,
+            settings.weight_dtype,
+            tensor_parallel_size=settings.tensor_parallel_size,
+        )
         warnings.append(
             f"Hybrid state-space model: {arch.n_mamba_layers} recurrent layers "
             f"and {arch.attention_layers} attention. Only the attention layers "
@@ -1014,8 +1025,9 @@ def estimate_generation(
     """Peak generation-phase memory on the inference device.
 
     vLLM self-limits to ``gpu_memory_utilization * total_bytes``. The KV pool
-    is what remains after weights, prefill activations, CUDA graphs, and LoRA
-    slots. The device-level bar adds CUDA context.
+    is what remains after weights, prefill activations, CUDA graphs, LoRA
+    slots, and NCCL when the engine spans more than one GPU. The device-level
+    bar adds CUDA context.
     """
     arch = model.arch
     act_bytes = DTYPE_BYTES[settings.weight_dtype]
@@ -1027,7 +1039,9 @@ def estimate_generation(
     lora_slots = terms["lora_slots"]
     kv_demand = terms["kv_demand"]
     mamba_state = terms["mamba_state"]
-    non_kv = weights + startup_peak + graphs + lora_slots + mamba_state
+    # NCCL is up before vLLM sizes the pool, so it comes out of the budget.
+    nccl = device.nccl_bytes if settings.tensor_parallel_size > 1 else 0
+    non_kv = weights + startup_peak + graphs + lora_slots + mamba_state + nccl
     kv_pool = (
         settings.kv_cache_memory_bytes
         if settings.kv_cache_memory_bytes is not None
@@ -1042,12 +1056,11 @@ def estimate_generation(
     runtime_tokens = min(settings.concurrency * settings.prompt_len, batched_tokens)
     job_overhead = formulas.JOB_OVERHEAD_BYTES if orchestrated else 0
     runtime_activation = (
-        formulas.block_recompute_bytes(
+        formulas.engine_forward_bytes(
             arch,
-            1,
             runtime_tokens,
             act_bytes,
-            engine_forward=True,
+            settings.tensor_parallel_size,
         )
         + sampler
     )
@@ -1116,10 +1129,11 @@ def estimate_generation(
         MemoryComponent(
             key="overhead",
             label="Overhead (CUDA context, runtime)",
-            n_bytes=max(int(device.context_bytes + job_overhead), 0),
+            n_bytes=max(int(device.context_bytes + job_overhead + nccl), 0),
             detail={
                 "cuda_context": int(device.context_bytes),
                 "job_overhead": int(job_overhead),
+                **({"nccl": int(nccl)} if nccl else {}),
             },
         ),
     )

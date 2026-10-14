@@ -302,12 +302,6 @@ def _resolve_vllm(spec: LLMAlgorithmSpec) -> VLLMConfig:
             f"({spec.pretrained_model_name_or_path!r}); this estimator sizes one arch."
         )
         raise ValueError(msg)
-    if vllm.tensor_parallel_size != 1:
-        msg = (
-            f"tensor_parallel_size={vllm.tensor_parallel_size} is not modeled; "
-            "this estimator sizes single-GPU engines."
-        )
-        raise ValueError(msg)
     if spec.vllm_engine_args:
         warnings.warn(
             "vllm_engine_args are forwarded to vLLM verbatim; this estimator sizes "
@@ -423,11 +417,18 @@ def generation_settings_from_manifest(
 
     A rollout without an engine section names no engine to size. SFT and
     DPO start no engine, so their settings are defaults the estimator
-    ignores.
+    ignores. A colocated engine with ``tensor_parallel_size`` above 1
+    raises ``ValueError``.
     """
     manifest = _validated(manifest)
     spec = llm_spec(manifest)
     vllm = _resolve_vllm(spec)
+    if not manifest.training.async_rollout and vllm.tensor_parallel_size != 1:
+        msg = (
+            "Colocated vLLM requires tensor_parallel_size==1 (the in-process "
+            f"engine is single-GPU), got {vllm.tensor_parallel_size}."
+        )
+        raise ValueError(msg)
     lora = _lora_config(spec)
     stripped = _stripped_towers(vllm)
     _reject_kv_cache_quantization(vllm.kv_cache_dtype)
@@ -443,6 +444,7 @@ def generation_settings_from_manifest(
         weight_dtype=_weight_dtype(vllm.dtype),
         weight_variant="engine" if stripped else "base",
         concurrent_requests=spec.batch_size * _group_size(spec),
+        tensor_parallel_size=vllm.tensor_parallel_size,
     )
 
 

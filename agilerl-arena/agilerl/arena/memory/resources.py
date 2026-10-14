@@ -32,14 +32,16 @@ class TierCheck:
         return self.reason is None
 
 
-def gpus_required(training: TrainingSpec) -> int:
+def gpus_required(training: TrainingSpec, engine_tensor_parallel_size: int = 1) -> int:
     """GPUs one node needs: each member's trainers plus its rollout engines.
 
+    Each engine takes ``engine_tensor_parallel_size`` GPUs.
     ``rollout_engines_per_agent="auto"`` needs at least one engine per member.
     """
     engines = training.rollout_engines_per_agent
+    engine_count = 1 if engines == "auto" else engines
     per_member = training.training_gpus_per_agent + (
-        1 if engines == "auto" else engines
+        engine_count * engine_tensor_parallel_size
     )
     return training.pop_size * per_member
 
@@ -55,7 +57,7 @@ def check_tiers(
     :param training: The manifest's training section, for the GPU layout.
     :param build_config: The manifest's run config on one GPU of a tier.
     """
-    needed = gpus_required(training)
+    needed: int | None = None
     checks = []
     for tier in sorted(tiers, key=lambda t: t["price_per_node_hour"]):
         gpu_type = tier.get("gpu_type")
@@ -65,12 +67,19 @@ def check_tiers(
         if lookup_gpu(gpu_type) is None:
             checks.append(TierCheck(tier, f"unknown GPU {gpu_type!r}"))
             continue
+        config = build_config(device_spec_from_resource_class(tier))
+        if needed is None:
+            tp = (
+                config.generation.tensor_parallel_size
+                if config.training.uses_generation_engine
+                else 1
+            )
+            needed = gpus_required(training, tp)
         if tier["num_gpus"] < needed:
             checks.append(
                 TierCheck(tier, f"{tier['num_gpus']} GPUs, the job needs {needed}")
             )
             continue
-        config = build_config(device_spec_from_resource_class(tier))
         estimate = estimate_run(config)
         over = [
             phase.phase

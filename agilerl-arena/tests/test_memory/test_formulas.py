@@ -1479,3 +1479,104 @@ class TestPackedExpertLoraPlacement:
         # Assert
         assert repl == base_repl
         assert shard - base_shard == formulas.packed_lora_param_count(MOE_TINY, 4, 2)
+
+
+class TestTensorParallelRanks:
+    def test_one_rank_keeps_every_head(self):
+        ranks = formulas.tensor_parallel_ranks(QWEN_05B, 1)
+
+        assert (ranks.size, ranks.kv_heads, ranks.mamba_heads) == (1, 2, 0)
+        assert formulas.engine_forward_bytes(QWEN_05B, 128, 2.0, 1) == (
+            formulas.block_recompute_bytes(QWEN_05B, 1, 128, 2.0, engine_forward=True)
+        )
+
+    def test_degree_must_be_at_least_one(self):
+        with pytest.raises(ValueError, match="at least 1"):
+            formulas.tensor_parallel_ranks(QWEN_05B, 0)
+
+    def test_kv_heads_split_across_ranks(self):
+        ranks = formulas.tensor_parallel_ranks(QWEN_05B, 2)
+        full = formulas.kv_cache_demand_bytes(QWEN_05B, "bf16", 4, 128)
+        sharded = formulas.kv_cache_demand_bytes(
+            QWEN_05B, "bf16", 4, 128, tensor_parallel_size=2
+        )
+
+        assert ranks.kv_heads == 1
+        assert sharded * 2 == full
+
+    def test_fewer_kv_heads_than_ranks_replicate(self):
+        arch = QWEN_05B.model_copy(update={"n_heads": 8})
+
+        assert formulas.tensor_parallel_ranks(arch, 4).kv_heads == 1
+
+    def test_kv_heads_that_do_not_divide_raise(self):
+        arch = QWEN_05B.model_copy(update={"n_heads": 6, "n_kv_heads": 3})
+
+        with pytest.raises(ValueError, match="n_kv_heads"):
+            formulas.tensor_parallel_ranks(arch, 2)
+
+    def test_replicated_head_count_must_tile_the_ranks(self):
+        arch = QWEN_05B.model_copy(update={"n_heads": 6, "n_kv_heads": 2})
+
+        with pytest.raises(ValueError, match="n_kv_heads"):
+            formulas.tensor_parallel_ranks(arch, 3)
+
+    def test_attention_heads_must_divide(self):
+        with pytest.raises(ValueError, match="n_heads"):
+            formulas.tensor_parallel_ranks(QWEN_05B, 4)
+
+    def test_mamba_groups_must_divide(self):
+        arch = ModelArch.from_hf_config(NEMOTRON_NANO_MAMBA).model_copy(
+            update={
+                "n_heads": 3,
+                "n_kv_heads": 3,
+                "mamba_n_heads": 3,
+                "mamba_n_groups": 2,
+            }
+        )
+
+        with pytest.raises(ValueError, match="mamba_n_groups"):
+            formulas.tensor_parallel_ranks(arch, 3)
+
+    def test_mamba_heads_must_divide(self):
+        arch = ModelArch.from_hf_config(NEMOTRON_NANO_MAMBA).model_copy(
+            update={
+                "n_heads": 3,
+                "n_kv_heads": 3,
+                "mamba_n_heads": 4,
+                "mamba_n_groups": 3,
+            }
+        )
+
+        with pytest.raises(ValueError, match="mamba_n_heads"):
+            formulas.tensor_parallel_ranks(arch, 3)
+
+    def test_mamba_state_uses_local_heads(self):
+        arch = ModelArch.from_hf_config(NEMOTRON_NANO_MAMBA)
+        full = formulas.mamba_state_bytes(arch, 2)
+        half = formulas.mamba_state_bytes(arch, 2, tensor_parallel_size=2)
+
+        assert half * 2 == full
+
+    def test_sharded_forward_keeps_the_full_residual(self):
+        full = formulas.engine_forward_bytes(QWEN_05B, 32, 2.0, 1)
+        sharded = formulas.engine_forward_bytes(QWEN_05B, 32, 2.0, 2)
+        residual = 32 * 4 * QWEN_05B.hidden_size * 2
+
+        assert residual < sharded < full
+
+    def test_sharded_forward_uses_global_head_dim(self):
+        # Arrange
+        arch = QWEN_05B.model_copy(update={"global_head_dim": 128})
+        ranks = formulas.tensor_parallel_ranks(arch, 2)
+        seq_len = 32
+        extra_qkv = (arch.n_heads // ranks.size + 2 * ranks.kv_heads) * (
+            128 - arch.head_dim
+        )
+
+        # Act
+        local = formulas.engine_forward_bytes(QWEN_05B, seq_len, 2.0, 2)
+        peak = formulas.engine_forward_bytes(arch, seq_len, 2.0, 2)
+
+        # Assert: QKV on each rank uses the wider head.
+        assert peak - local == seq_len * extra_qkv * 2

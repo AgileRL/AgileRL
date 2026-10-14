@@ -318,6 +318,90 @@ class TestEstimateGeneration:
 
         assert any("Multimodal engine residency" in w for w in breakdown.warnings)
 
+    def test_tensor_parallel_rank_is_smaller_than_the_full_engine(self, model, device):
+        single = estimate_generation(model, device, GenerationSettings())
+        sharded = estimate_generation(
+            model, device, GenerationSettings(tensor_parallel_size=2)
+        )
+
+        assert (
+            component(sharded, "weights").n_bytes
+            == component(single, "weights").n_bytes // 2
+        )
+        assert (
+            component(sharded, "kv_cache").detail["worst_case_demand"]
+            == component(single, "kv_cache").detail["worst_case_demand"] // 2
+        )
+        sampler = 2 * GenerationSettings().max_num_seqs * model.arch.vocab_size * 4
+        assert (
+            component(sharded, "activation_peak").detail["sampler_buffers"] == sampler
+        )
+        assert component(single, "activation_peak").detail["sampler_buffers"] == sampler
+        budget = int(GenerationSettings().gpu_memory_utilization * device.total_bytes)
+        startup = component(sharded, "activation_peak").detail["startup_peak"]
+        non_kv = (
+            component(sharded, "weights").n_bytes
+            + startup
+            + component(sharded, "cuda_graphs").n_bytes
+            + component(sharded, "lora_slots").n_bytes
+            + component(sharded, "mamba_state").n_bytes
+            + device.nccl_bytes
+        )
+        assert component(sharded, "kv_cache").n_bytes == max(budget - non_kv, 0)
+        single_act = component(single, "activation_peak").n_bytes
+        sharded_act = component(sharded, "activation_peak").n_bytes
+        assert single_act // 2 < sharded_act < single_act
+        assert any("tensor-parallel" in warning for warning in sharded.warnings)
+        assert component(sharded, "overhead").detail["nccl"] == device.nccl_bytes
+
+    def test_pinned_kv_pool_is_not_divided_across_ranks(self, model, device):
+        pinned = estimate_generation(
+            model,
+            device,
+            GenerationSettings(
+                tensor_parallel_size=2, kv_cache_memory_bytes=123_456_789
+            ),
+        )
+
+        assert component(pinned, "kv_cache").n_bytes == 123_456_789
+
+    def test_replicated_kv_heads_stay_one_per_rank(self, device):
+        arch = QWEN_05B.model_copy(update={"n_heads": 8, "n_kv_heads": 2})
+        spec = ModelSpec(model_id="gqa", arch=arch)
+        two = estimate_generation(
+            spec, device, GenerationSettings(tensor_parallel_size=2)
+        )
+        four = estimate_generation(
+            spec, device, GenerationSettings(tensor_parallel_size=4)
+        )
+
+        assert (
+            component(two, "kv_cache").detail["worst_case_demand"]
+            == component(four, "kv_cache").detail["worst_case_demand"]
+        )
+        assert (
+            component(four, "weights").n_bytes == component(two, "weights").n_bytes // 2
+        )
+
+    def test_mamba_state_is_the_local_heads(self, device):
+        arch = ModelArch.from_hf_config(NEMOTRON_NANO_MAMBA)
+        spec = ModelSpec(model_id="nemotron", arch=arch)
+        single = estimate_generation(spec, device, GenerationSettings())
+        sharded = estimate_generation(
+            spec, device, GenerationSettings(tensor_parallel_size=2)
+        )
+
+        assert (
+            component(sharded, "mamba_state").n_bytes
+            == component(single, "mamba_state").n_bytes // 2
+        )
+
+    def test_indivisible_heads_are_refused(self, model, device):
+        with pytest.raises(ValueError, match="n_heads"):
+            estimate_generation(
+                model, device, GenerationSettings(tensor_parallel_size=4)
+            )
+
     def test_hybrid_warns_about_aligned_kv_pages(self, device):
         model = ModelSpec(model_id="falcon", arch=ModelArch.from_hf_config(FALCON_H1))
         breakdown = estimate_generation(model, device, GenerationSettings())

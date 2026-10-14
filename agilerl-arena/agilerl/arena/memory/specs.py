@@ -903,6 +903,8 @@ class GenerationSettings(BaseModel):
     # ``True`` skips CUDA-graph capture, at some decode-throughput cost.
     # ``None``/``False`` keeps graphs on.
     enforce_eager: bool | None = None
+    # GPUs the engine shards across. The bar is one rank.
+    tensor_parallel_size: int = Field(default=1, ge=1)
     max_lora_rank: int = 16
     max_loras: int = 1
     weight_dtype: WeightDtype = "bf16"

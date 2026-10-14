@@ -54,6 +54,12 @@ class TestGpusRequired:
 
         assert gpus_required(manifest.training) == 2
 
+    def test_tensor_parallel_multiplies_engine_gpus(self):
+        manifest = manifest_with(MANIFEST, rollout_engines_per_agent=1)
+
+        assert gpus_required(manifest.training) == 2
+        assert gpus_required(manifest.training, 2) == 3
+
 
 class TestCheckTiers:
     def test_orders_by_price_and_rules_out_unusable_tiers(self):
@@ -98,6 +104,25 @@ class TestCheckTiers:
         assert check.reason.endswith("over budget")
         assert check.estimate is not None
         assert not check.estimate.fits
+
+    def test_tensor_parallel_engine_needs_a_gpu_per_rank(self):
+        raw = {
+            **MANIFEST,
+            "algorithm": {
+                **MANIFEST["algorithm"],
+                "vllm_config": {
+                    **MANIFEST["algorithm"]["vllm_config"],
+                    "tensor_parallel_size": 2,
+                },
+            },
+        }
+        manifest = TrainingManifest.model_validate(raw)
+        tiers = [tier("l4-2x", "NVIDIA L4", 2, 2.0)]
+
+        (check,) = check_tiers(tiers, manifest.training, builder(manifest))
+
+        assert check.reason == "2 GPUs, the job needs 3"
+        assert check.estimate is None
 
     def test_a_point_estimate_inside_the_buffer_is_not_recommended(self, monkeypatch):
         # Arrange: the estimate is under the card and over the buffered line.

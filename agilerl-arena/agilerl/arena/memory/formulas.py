@@ -333,9 +333,79 @@ def mamba_page_bytes(arch: ModelArch, state_dtype: WeightDtype = "bf16") -> int:
     )
 
 
+@dataclass(frozen=True)
+class TensorParallelRanks:
+    """Head counts stored on one vLLM tensor-parallel rank."""
+
+    size: int
+    kv_heads: int
+    mamba_heads: int
+
+
+def tensor_parallel_ranks(
+    arch: ModelArch, tensor_parallel_size: int
+) -> TensorParallelRanks:
+    """Local KV and Mamba heads on one vLLM tensor-parallel rank.
+
+    vLLM requires ``n_heads`` to divide the degree. KV heads divide it when
+    there are at least as many heads as ranks; otherwise the degree must be
+    a multiple of ``n_kv_heads`` and each rank stores one replicated head.
+
+    :param arch: Model geometry.
+    :param tensor_parallel_size: Engine tensor-parallel degree.
+    :return: Head counts stored on one rank.
+    :raises ValueError: Attention or Mamba heads do not divide the degree.
+    """
+    tp = tensor_parallel_size
+    if tp < 1:
+        msg = f"tensor_parallel_size must be at least 1, got {tp}"
+        raise ValueError(msg)
+    if arch.n_heads % tp != 0:
+        msg = (
+            f"n_heads ({arch.n_heads}) must be divisible by tensor_parallel_size ({tp})"
+        )
+        raise ValueError(msg)
+    if arch.n_kv_heads == 0 or tp == 1:
+        kv_heads = arch.n_kv_heads
+    elif arch.n_kv_heads >= tp:
+        if arch.n_kv_heads % tp != 0:
+            msg = (
+                f"n_kv_heads ({arch.n_kv_heads}) must be divisible by "
+                f"tensor_parallel_size ({tp})"
+            )
+            raise ValueError(msg)
+        kv_heads = arch.n_kv_heads // tp
+    elif tp % arch.n_kv_heads != 0:
+        msg = (
+            f"tensor_parallel_size ({tp}) must be a multiple of n_kv_heads "
+            f"({arch.n_kv_heads}) when a rank stores a replicated KV head"
+        )
+        raise ValueError(msg)
+    else:
+        kv_heads = 1
+    mamba_heads = arch.mamba_n_heads
+    if tp > 1 and arch.n_mamba_layers:
+        if arch.mamba_n_heads % tp != 0:
+            msg = (
+                f"mamba_n_heads ({arch.mamba_n_heads}) must be divisible by "
+                f"tensor_parallel_size ({tp})"
+            )
+            raise ValueError(msg)
+        if arch.mamba_n_groups % tp != 0:
+            msg = (
+                f"mamba_n_groups ({arch.mamba_n_groups}) must be divisible by "
+                f"tensor_parallel_size ({tp})"
+            )
+            raise ValueError(msg)
+        mamba_heads = arch.mamba_n_heads // tp
+    return TensorParallelRanks(size=tp, kv_heads=kv_heads, mamba_heads=mamba_heads)
+
+
 def aligned_kv_block_size(
     arch: ModelArch,
     weight_dtype: WeightDtype = "bf16",
+    *,
+    tensor_parallel_size: int = 1,
 ) -> int:
     """Block size vLLM adopts so an attention page holds a Mamba page.
 
@@ -343,16 +413,27 @@ def aligned_kv_block_size(
     must match. vLLM raises the attention block size until its page is at
     least as large as a Mamba page, then pads the Mamba page up to it.
     The block size is then hundreds or thousands of tokens, and every
-    sequence's KV rounds up to that page.
+    sequence's KV rounds up to that page. ``tensor_parallel_size`` sizes
+    both pages from one rank's heads.
+
+    :param tensor_parallel_size: Engine tensor-parallel degree.
+    :return: Attention tokens in one hybrid cache block.
     """
     if not arch.is_hybrid_ssm or not arch.attention_layers:
         return KV_BLOCK_SIZE_DEFAULT
     per_token_per_layer = kv_cache_bytes_per_token(arch, weight_dtype) / (
         arch.attention_layers
     )
+    page = mamba_page_bytes(arch, weight_dtype)
+    if tensor_parallel_size > 1:
+        ranks = tensor_parallel_ranks(arch, tensor_parallel_size)
+        if arch.n_kv_heads:
+            per_token_per_layer *= ranks.kv_heads / arch.n_kv_heads
+        if arch.mamba_n_heads:
+            page = page * ranks.mamba_heads // arch.mamba_n_heads
     if per_token_per_layer <= 0:
         return KV_BLOCK_SIZE_DEFAULT
-    tokens = -(-mamba_page_bytes(arch, weight_dtype) // int(per_token_per_layer))
+    tokens = -(-page // int(per_token_per_layer))
     alignment = MAMBA_KERNEL_BLOCK_ALIGNMENT
     return max(KV_BLOCK_SIZE_DEFAULT, -(-tokens // alignment) * alignment)
 
@@ -361,6 +442,8 @@ def mamba_state_bytes(
     arch: ModelArch,
     concurrency: int,
     state_dtype: WeightDtype = "bf16",
+    *,
+    tensor_parallel_size: int = 1,
 ) -> int:
     """Recurrent-state cache for a hybrid model's Mamba layers.
 
@@ -368,13 +451,21 @@ def mamba_state_bytes(
     ``mamba2_state_shape``: a causal-conv window of ``(conv_dim, d_conv - 1)``
     and a recurrent state of ``(n_heads, d_head, d_state)``. Both are
     constant in context length, so this term scales with concurrency.
+    ``tensor_parallel_size`` keeps one rank's heads.
+
+    :param tensor_parallel_size: Engine tensor-parallel degree.
+    :return: Recurrent-state bytes on one rank.
     """
     if not arch.is_hybrid_ssm:
         return 0
     per_layer = mamba_page_bytes(arch, state_dtype)
-    return int(
+    total = int(
         arch.n_mamba_layers * per_layer * concurrency * MAMBA_STATE_BLOCKS_PER_SEQ
     )
+    if tensor_parallel_size == 1 or not arch.mamba_n_heads:
+        return total
+    local = tensor_parallel_ranks(arch, tensor_parallel_size).mamba_heads
+    return total * local // arch.mamba_n_heads
 
 
 def kv_cache_demand_bytes(
@@ -382,24 +473,38 @@ def kv_cache_demand_bytes(
     weight_dtype: WeightDtype,
     concurrency: int,
     seq_len: int,
+    *,
+    tensor_parallel_size: int = 1,
 ) -> int:
     """Worst-case KV bytes: every concurrent sequence at full context.
 
     Sliding-window layers cap per-sequence growth at the window, at the
     sliding head width; full-attention layers keep the full sequence at
-    :attr:`ModelArch.global_head_dim`.
+    :attr:`ModelArch.global_head_dim`. ``tensor_parallel_size`` keeps one
+    rank's KV heads.
+
+    :param tensor_parallel_size: Engine tensor-parallel degree.
+    :return: KV bytes on one rank.
     """
     kv_bytes = DTYPE_BYTES[weight_dtype]
     layer_kv = 2 * kv_storing_layers(arch) * arch.n_kv_heads * kv_bytes
     windowed, window_dim, full_dim = kv_layer_head_dims(arch)
     if arch.sliding_window is None:
-        return int(concurrency * seq_len * layer_kv * full_dim)
-    window_len = min(seq_len, arch.sliding_window)
-    return int(
-        concurrency
-        * layer_kv
-        * (windowed * window_len * window_dim + (1.0 - windowed) * seq_len * full_dim)
-    )
+        demand = int(concurrency * seq_len * layer_kv * full_dim)
+    else:
+        window_len = min(seq_len, arch.sliding_window)
+        demand = int(
+            concurrency
+            * layer_kv
+            * (
+                windowed * window_len * window_dim
+                + (1.0 - windowed) * seq_len * full_dim
+            )
+        )
+    if tensor_parallel_size == 1 or not arch.n_kv_heads:
+        return demand
+    local = tensor_parallel_ranks(arch, tensor_parallel_size).kv_heads
+    return demand * local // arch.n_kv_heads
 
 
 # Bounds on fused-logprob chunk rows. Floor: ``lm_head`` is re-read once per
@@ -706,6 +811,38 @@ def block_recompute_bytes(
         + 2 * norm_input
         + q_norm
     )
+
+
+def engine_forward_bytes(
+    arch: ModelArch,
+    seq_len: int,
+    act_bytes: float,
+    tensor_parallel_size: int = 1,
+) -> int:
+    """Peak transient activations of one vLLM block on one tensor-parallel rank.
+
+    The residual stream stays full width on every rank. QKV and MLP widths
+    are this rank's column-parallel shard.
+
+    :param arch: Model geometry.
+    :param seq_len: Tokens in the forward.
+    :param act_bytes: Bytes per activation element.
+    :param tensor_parallel_size: Engine tensor-parallel degree.
+    :return: Bytes live during the forward.
+    """
+    if tensor_parallel_size == 1:
+        return block_recompute_bytes(arch, 1, seq_len, act_bytes, engine_forward=True)
+    ranks = tensor_parallel_ranks(arch, tensor_parallel_size)
+    head_dim = arch.head_dim
+    if arch.global_head_dim and arch.global_head_dim != arch.head_dim:
+        head_dim = arch.global_head_dim
+    local_qkv = (arch.n_heads // ranks.size + 2 * ranks.kv_heads) * head_dim
+    mlp, _ = _block_mlp_recompute(
+        arch, 1, seq_len, act_bytes, backward=False, engine_forward=True
+    )
+    ple = arch.n_layers * arch.per_layer_input_dim
+    width = 4 * arch.hidden_size + local_qkv + mlp // ranks.size + ple
+    return int(seq_len * width * act_bytes)
 
 
 def nograd_forward_bytes(

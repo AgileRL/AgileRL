@@ -357,12 +357,27 @@ class TestGenerationSettings:
         settings = generation_settings_from_manifest(doc)
         assert settings.max_num_seqs == 8
 
-    def test_tensor_parallel_engine_is_refused(self):
+    def test_colocated_tensor_parallel_is_refused(self):
         doc = manifest(
             algorithm={"vllm_config": {"tensor_parallel_size": 2, "sleep_mode": True}}
         )
-        with pytest.raises(ValueError, match="tensor_parallel_size"):
+        with pytest.raises(ValueError, match="tensor_parallel_size==1"):
             generation_settings_from_manifest(doc)
+
+    def test_async_tensor_parallel_is_recorded(self):
+        doc = manifest(
+            algorithm={"vllm_config": {"tensor_parallel_size": 2}},
+            training={
+                "rollout_mode": "async",
+                "rollout_engines_per_agent": 1,
+                "rollout_batch_size": 1,
+            },
+            replay_buffer={"kind": "llm"},
+        )
+
+        settings = generation_settings_from_manifest(doc)
+
+        assert settings.tensor_parallel_size == 2
 
     def test_verbatim_engine_args_warn(self):
         doc = manifest(
