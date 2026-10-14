@@ -225,6 +225,11 @@ def training_warnings(
             "gradient_checkpointing=False saves every block's activations; "
             "expect roughly n_layers x the checkpointed footprint."
         )
+    if settings.sequence_packing:
+        warnings.append(
+            "use_sequence_packing packs the gradient forward into one row. "
+            "This estimate sizes every row padded to max_model_len."
+        )
     return warnings
 
 
@@ -525,7 +530,9 @@ def activation_peak(
     # The chunk loop hoists an fp32 lm_head copy when the head runs below fp32.
     fused_head = int(arch.vocab_size * arch.hidden_size * 4) if act_bytes < 4 else 0
     logits = logit_rows * arch.vocab_size * 8 + fused_head
-    nograd_rows = settings.n_adapter_rows
+    # A 1-row forward still stacks the consulted adapters. A larger micro-batch
+    # chunks that stack, so the live rows are the wider of the two.
+    nograd_rows = max(settings.n_adapter_rows, settings.micro_batch_size)
     nograd_pass = (
         formulas.nograd_forward_bytes(
             arch, nograd_rows, seq_len, act_bytes, eager_mamba_scan=eager_mamba_scan

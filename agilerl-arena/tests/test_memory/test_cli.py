@@ -6,6 +6,7 @@ Exit codes are a contract with the submission gate: non-zero refuses the job.
 """
 
 import builtins
+import copy
 import io
 import json
 import logging
@@ -126,6 +127,40 @@ def no_tier_fits_path(tmp_path):
     path = tmp_path / "no_tier_fits.yaml"
     path.write_text(yaml.safe_dump(NO_TIER_FITS))
     return str(path)
+
+
+class TestMultiRowMicroBatch:
+    def test_unset_micro_batch_estimates_a_larger_training_bar(self, tmp_path, capsys):
+        # Arrange
+        def write(name: str, micro: int | None) -> str:
+            doc = copy.deepcopy(MANIFEST)
+            doc["algorithm"]["batch_size"] = 16
+            doc["algorithm"]["group_size"] = 8
+            if micro is None:
+                del doc["algorithm"]["micro_batch_size_per_gpu"]
+            else:
+                doc["algorithm"]["micro_batch_size_per_gpu"] = micro
+            path = tmp_path / name
+            path.write_text(yaml.safe_dump(doc))
+            return str(path)
+
+        one_path = write("one.yaml", 1)
+        many_path = write("many.yaml", None)
+
+        # Act
+        one_code = main(one_path, config_path=TINY_CONFIG, device_gb=24, as_json=True)
+        one = json.loads(capsys.readouterr().out)
+        many_code = main(many_path, config_path=TINY_CONFIG, device_gb=24, as_json=True)
+        many = json.loads(capsys.readouterr().out)
+
+        # Assert
+        def total(phase: dict) -> int:
+            return sum(component["bytes"] for component in phase["components"])
+
+        assert one_code != EXIT_USAGE
+        assert many_code != EXIT_USAGE
+        assert total(many["training"]) > total(one["training"])
+        assert total(many["generation"]) == total(one["generation"])
 
 
 def _fake_hub(monkeypatch, get_safetensors_metadata):
