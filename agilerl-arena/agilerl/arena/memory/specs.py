@@ -739,6 +739,8 @@ class TrainingSettings(BaseModel):
     checkpoint_optimizer: bool = False
     # Async rollout: the next rollout batch waits in host memory during learn.
     async_rollout: bool = False
+    # Gradient forward packs into one row. The estimate still prices padded rows.
+    sequence_packing: bool = False
 
     @property
     def trajectories(self) -> int:
@@ -811,10 +813,9 @@ class TrainingSettings(BaseModel):
 
     @property
     def n_adapter_rows(self) -> int:
-        """Row multiplier of the fused no-grad forward.
+        """Adapters in one no-grad forward of a single sample.
 
-        Rollout algorithms repeat the batch once per consulted adapter.
-        DPO runs sequential single-row passes, so this is 1.
+        DPO scores chosen and rejected in separate passes, so this is 1.
         """
         if self.algorithm == "dpo":
             return 1

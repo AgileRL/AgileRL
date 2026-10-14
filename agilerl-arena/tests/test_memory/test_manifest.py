@@ -542,7 +542,10 @@ class TestDistributedAndOrchestration:
     def test_fsdp_config_and_gpu_count_come_from_the_manifest(self):
         settings = training_settings_from_manifest(
             manifest(
-                algorithm={"fsdp": {"reshard_after_forward": False}},
+                algorithm={
+                    "fsdp": {"reshard_after_forward": False},
+                    "batch_size": 4,
+                },
                 training={"training_gpus_per_agent": 4},
             )
         )
@@ -566,6 +569,7 @@ class TestDistributedAndOrchestration:
     def test_single_row_micro_batch_passes(self):
         settings = training_settings_from_manifest(GRPO)
         assert settings.trajectories == 8  # batch_size x group_size, one shard
+        assert settings.micro_batch_size == 1
 
     def test_flat_data_parallel_has_no_fsdp_config(self):
         assert training_settings_from_manifest(GRPO).fsdp is None
@@ -575,35 +579,175 @@ class TestDistributedAndOrchestration:
             manifest(algorithm={"batch_size": 1, "micro_batch_size_per_gpu": None})
         )
         assert settings.trajectories == 4
+        assert settings.micro_batch_size == 1
 
-    @pytest.mark.parametrize(
-        "doc",
-        [
-            # Explicit.
-            manifest(algorithm={"micro_batch_size_per_gpu": 5}),
-            # Unset on one GPU resolves to the per-rank batch.
-            manifest(algorithm={"batch_size": 8, "micro_batch_size_per_gpu": None}),
-            # mini_batch_size set alone becomes the micro-batch.
+
+class TestMicroBatchRows:
+    def test_unset_micro_batch_on_one_gpu_is_the_prompt_batch(self):
+        settings = training_settings_from_manifest(
             manifest(
                 algorithm={
+                    "batch_size": 16,
+                    "group_size": 8,
                     "micro_batch_size_per_gpu": None,
-                    "mini_batch_size": 3,
+                }
+            )
+        )
+
+        assert settings.micro_batch_size == 16
+
+    def test_unset_micro_batch_folds_tensor_parallel(self):
+        settings = training_settings_from_manifest(
+            manifest(
+                algorithm={
+                    "batch_size": 16,
+                    "group_size": 8,
+                    "micro_batch_size_per_gpu": None,
+                    "fsdp": {"tp": 2},
                 },
-                training={"training_gpus_per_agent": 2},
-            ),
-            # Unset on two GPUs resolves to batch_size // n_training_gpus.
+                training={"training_gpus_per_agent": 4},
+            )
+        )
+
+        assert settings.micro_batch_size == 8
+
+    def test_explicit_micro_batch_is_kept(self):
+        settings = training_settings_from_manifest(
             manifest(
                 algorithm={
                     "batch_size": 8,
+                    "group_size": 4,
+                    "micro_batch_size_per_gpu": 4,
+                }
+            )
+        )
+
+        assert settings.micro_batch_size == 4
+
+    def test_micro_batch_larger_than_the_rank_fails_divisibility(self):
+        with pytest.raises(ValueError, match="divisible by mini_batch_size"):
+            training_settings_from_manifest(
+                manifest(
+                    algorithm={
+                        "batch_size": 2,
+                        "group_size": 4,
+                        "micro_batch_size_per_gpu": 32,
+                    }
+                )
+            )
+
+    def test_batch_must_divide_by_the_data_parallel_size(self):
+        with pytest.raises(ValueError, match="divisible by the data-parallel"):
+            training_settings_from_manifest(
+                manifest(
+                    algorithm={"batch_size": 3, "micro_batch_size_per_gpu": None},
+                    training={"training_gpus_per_agent": 2},
+                )
+            )
+
+    def test_mini_batch_must_divide_the_rank_batch(self):
+        with pytest.raises(ValueError, match="divisible by mini_batch_size"):
+            training_settings_from_manifest(
+                manifest(
+                    algorithm={
+                        "batch_size": 2,
+                        "group_size": 4,
+                        "micro_batch_size_per_gpu": None,
+                        "mini_batch_size": 3,
+                    },
+                    training={"training_gpus_per_agent": 2},
+                )
+            )
+
+    def test_mini_batch_must_divide_by_the_micro_batch(self):
+        with pytest.raises(ValueError, match="divisible by micro_batch_size_per_gpu"):
+            training_settings_from_manifest(
+                {
+                    "algorithm": {
+                        "name": "SFT",
+                        "batch_size": 8,
+                        "micro_batch_size_per_gpu": 3,
+                    },
+                    "environment": {"dataset": "openai/gsm8k"},
+                    "network": {
+                        "pretrained_model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
+                        "max_context_length": 512,
+                    },
+                    "training": {"max_steps": 100},
+                }
+            )
+
+    def test_tensor_parallel_must_divide_the_trainer_world(self):
+        with pytest.raises(ValueError, match="divisible by tp"):
+            training_settings_from_manifest(
+                manifest(
+                    algorithm={"fsdp": {"tp": 3}},
+                    training={"training_gpus_per_agent": 2},
+                )
+            )
+
+    def test_sft_unset_micro_batch_is_the_rank_batch(self):
+        settings = training_settings_from_manifest(
+            {
+                "algorithm": {
+                    "name": "SFT",
+                    "batch_size": 8,
                     "micro_batch_size_per_gpu": None,
                 },
-                training={"training_gpus_per_agent": 2},
-            ),
-        ],
-    )
-    def test_non_single_row_micro_batch_is_refused(self, doc):
-        with pytest.raises(ValueError, match="single-row micro-batches"):
-            training_settings_from_manifest(doc)
+                "environment": {"dataset": "openai/gsm8k"},
+                "network": {
+                    "pretrained_model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
+                    "max_context_length": 512,
+                },
+                "training": {"max_steps": 100},
+            }
+        )
+
+        assert settings.micro_batch_size == 8
+
+    def test_dpo_micro_batch_keeps_two_graphs(self):
+        settings = training_settings_from_manifest(
+            {
+                "algorithm": {
+                    "name": "DPO",
+                    "batch_size": 8,
+                    "micro_batch_size_per_gpu": 4,
+                },
+                "environment": {"dataset": "openai/gsm8k"},
+                "network": {
+                    "pretrained_model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
+                    "max_context_length": 512,
+                },
+                "training": {"max_steps": 100},
+            }
+        )
+
+        assert settings.algorithm == "dpo"
+        assert settings.micro_batch_size == 4
+        assert settings.grad_graph_rows == 2
+
+    def test_sequence_packing_is_sized_as_padded_rows(self):
+        doc = manifest(
+            algorithm={
+                "use_sequence_packing": True,
+                "attn_implementation": "flash_attention_2",
+                "vllm_config": {"gpu_memory_utilization": 0.3},
+            },
+            training={
+                "rollout_mode": "async",
+                "rollout_engines_per_agent": 1,
+            },
+            replay_buffer={"kind": "llm"},
+        )
+
+        settings = training_settings_from_manifest(doc)
+        estimate = estimate_manifest(
+            doc, device_spec_from_resource_class(L4_TIER), TINY_CONFIG
+        )
+
+        assert settings.sequence_packing is True
+        assert settings.micro_batch_size == 1
+        assert any("padded" in warning for warning in estimate.training.warnings)
 
 
 class TestEnginelessAlgorithms:

@@ -789,6 +789,12 @@ class TestMambaBlockBytes:
 
 
 class TestBlockRecomputeBackwardPeak:
+    def test_rows_scale_the_block_linearly(self):
+        one = formulas.block_recompute_bytes(QWEN_05B, 1, 1024, 2.0, backward=True)
+        four = formulas.block_recompute_bytes(QWEN_05B, 4, 1024, 2.0, backward=True)
+
+        assert four == 4 * one
+
     def test_gated_backward_keeps_two_residuals_and_four_mlp_tensors(self):
         # Arrange
         seq_len = 16384
@@ -1448,6 +1454,19 @@ class TestRoutedChunkBytes:
 
         assert not arch.chunked_routed_experts
         assert term == 16 * MiB
+
+    def test_chunk_budget_stops_the_bytes_growing_with_rows(self):
+        arch = ModelArch.from_hf_config(GRANITE_MOE)
+        chunk = 1024
+
+        one = formulas.routed_chunk_bytes(
+            arch, 1, 128, 2.0, chunk, expert_lora=True, contracted=True, ep=1
+        )
+        many = formulas.routed_chunk_bytes(
+            arch, 16, 128, 2.0, chunk, expert_lora=True, contracted=True, ep=1
+        )
+
+        assert one == many == chunk
 
     def test_no_expert_lora_and_dense_models_are_zero(self):
         moe = ModelArch.from_hf_config(NEMOTRON_H_MOE)

@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from agilerl.arena.memory import formulas
+from agilerl.arena.memory.advice import advise
 from agilerl.arena.memory.estimator import (
     estimate_generation,
     estimate_run,
@@ -1064,8 +1065,10 @@ class TestFusedActorCriticPass:
         four_rows = one_row.model_copy(update={"micro_batch_size": 4})
 
         # Act
-        one = component(estimate_training(model, device, one_row), "activations")
-        four = component(estimate_training(model, device, four_rows), "activations")
+        one_bar = estimate_training(model, device, one_row)
+        four_bar = estimate_training(model, device, four_rows)
+        one = component(one_bar, "activations")
+        four = component(four_bar, "activations")
 
         # Assert
         assert one.detail["checkpoint_boundaries"] == (
@@ -1077,7 +1080,27 @@ class TestFusedActorCriticPass:
         assert four.detail["lora_fp32_input_casts"] == (
             formulas.lora_input_cast_bytes(QWEN_05B, 4, seq_len)
         )
-        assert four.detail["nograd_peak"] == one.detail["nograd_peak"]
+        one_nograd = max(one_row.n_adapter_rows, one_row.micro_batch_size)
+        four_nograd = max(four_rows.n_adapter_rows, four_rows.micro_batch_size)
+        assert four.detail["nograd_peak"] - one.detail["nograd_peak"] == (
+            formulas.nograd_forward_bytes(QWEN_05B, four_nograd, seq_len, 2.0)
+            - formulas.nograd_forward_bytes(QWEN_05B, one_nograd, seq_len, 2.0)
+        )
+        assert (
+            component(four_bar, "logits_workspace").n_bytes
+            == component(one_bar, "logits_workspace").n_bytes
+        )
+        assert (
+            component(four_bar, "base_weights").n_bytes
+            == component(one_bar, "base_weights").n_bytes
+        )
+        assert (
+            component(four_bar, "grads").n_bytes == component(one_bar, "grads").n_bytes
+        )
+        assert (
+            component(four_bar, "optimizer_state").n_bytes
+            == component(one_bar, "optimizer_state").n_bytes
+        )
 
     def test_fused_contracted_moe_charges_split_lora_for_both_rows(self, device):
         model = ModelSpec(model_id="moe-test", arch=MOE_TINY)
@@ -1096,6 +1119,42 @@ class TestFusedActorCriticPass:
                 MOE_TINY, 2, 1024, 2, "contracted", 2, settings.lora_rank
             )
         )
+
+
+class TestMicroBatchAdvice:
+    def test_over_budget_run_suggests_a_one_row_micro_batch(self, model):
+        # Arrange
+        device = DeviceSpec(total_bytes=8 * GiB, available_bytes=6 * GiB)
+        config = RunConfig(
+            model=model,
+            train_device=device,
+            gen_device=device,
+            training=TrainingSettings(max_model_len=16384, micro_batch_size=16),
+        )
+
+        # Act
+        tips = advise(config)
+
+        # Assert
+        match = next(
+            tip
+            for tip in tips
+            if tip.phase == "training" and "micro_batch_size_per_gpu" in tip.action
+        )
+        assert "16 -> 1" in match.action
+        assert match.saves_bytes > 0
+
+    def test_one_row_micro_batch_is_not_suggested(self, model, device):
+        config = RunConfig(
+            model=model,
+            train_device=device,
+            gen_device=device,
+            training=TrainingSettings(micro_batch_size=1),
+        )
+
+        actions = [tip.action for tip in advise(config)]
+
+        assert all("micro_batch_size_per_gpu" not in action for action in actions)
 
 
 class TestEagerMambaScan:
