@@ -526,6 +526,38 @@ class TestDistributedTerms:
         assert component(group, "optimizer_state").n_bytes == trained * 8
         assert any("data parallel" in w for w in group.warnings)
 
+    def test_fsdp_reserve_follows_layer_mix(self, model, device):
+        # Arrange
+        settings = TrainingSettings(fsdp=FSDPConfig(), n_training_gpus=4)
+        moe = ModelSpec(model_id="moe-test", arch=MOE_TINY)
+
+        # Act
+        dense_bar = estimate_training(model, device, settings)
+        moe_bar = estimate_training(moe, device, settings)
+        expert_parallel_bar = estimate_training(
+            moe, device, settings.model_copy(update={"fsdp": FSDPConfig(ep=2)})
+        )
+
+        # Assert
+        def reserve_share(bar):
+            by_key = {c.key: c.n_bytes for c in bar.components}
+            torch_side = sum(
+                v
+                for k, v in by_key.items()
+                if k not in ("overhead", "allocator_reserve")
+            )
+            return by_key["allocator_reserve"] / torch_side
+
+        assert reserve_share(dense_bar) == pytest.approx(
+            formulas.ALLOCATOR_RESERVE_FRACTION_FSDP, rel=1e-4
+        )
+        assert reserve_share(moe_bar) == pytest.approx(
+            formulas.ALLOCATOR_RESERVE_FRACTION_FSDP_MIXED_LAYERS, rel=1e-4
+        )
+        assert reserve_share(expert_parallel_bar) == pytest.approx(
+            formulas.ALLOCATOR_RESERVE_FRACTION_FSDP, rel=1e-4
+        )
+
     def test_fsdp_offload_flags_are_exclusive(self):
         with pytest.raises(ValidationError, match="mutually exclusive"):
             TrainingSettings(fsdp=FSDPConfig(cpu_offload=True, optim_cpu_offload=True))

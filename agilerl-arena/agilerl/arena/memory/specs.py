@@ -196,7 +196,7 @@ def _ffn_layer_mix(text_cfg: dict[str, Any]) -> tuple[int | None, int | None]:
     Most stacks put an FFN in every block alongside the mixer, and both
     counts stay ``None`` (every layer). Block-exclusive layouts use one
     block kind per layer: Mamba, attention, MLP, or MoE, in
-    ``layers_block_type`` ("moe" / "mlp") or as ``-`` in
+    ``layers_block_type`` ("moe" / "mlp") or as ``-`` / ``E`` in
     ``hybrid_override_pattern``. Mixer-only lists leave FFN counts unset.
     """
     entries = _layer_type_list(text_cfg)
@@ -207,8 +207,12 @@ def _ffn_layer_mix(text_cfg: dict[str, Any]) -> tuple[int | None, int | None]:
             return mlp, moe
 
     pattern = text_cfg.get("hybrid_override_pattern")
-    if isinstance(pattern, str) and "M" in pattern and "-" in pattern:
-        return pattern.count("-"), None
+    if (
+        isinstance(pattern, str)
+        and "M" in pattern
+        and ("-" in pattern or "E" in pattern)
+    ):
+        return pattern.count("-"), pattern.count("E") or None
     return None, None
 
 
@@ -306,7 +310,10 @@ def _decoder_fields(text_cfg: dict[str, Any]) -> dict[str, Any]:
     return {
         "n_layers": int(n_layers),
         "hidden_size": hidden,
-        "intermediate_size": int(text_cfg["intermediate_size"]),
+        # Expert-only stacks publish just the expert width.
+        "intermediate_size": int(
+            text_cfg.get("intermediate_size") or text_cfg["moe_intermediate_size"]
+        ),
         "n_heads": n_heads,
         "n_kv_heads": n_kv,
         "head_dim": int(text_cfg.get("head_dim") or hidden // n_heads),
@@ -334,6 +341,13 @@ def _moe_fields(text_cfg: dict[str, Any]) -> dict[str, Any]:
     n_experts = _first_int(
         text_cfg, "num_experts", "num_local_experts", "n_routed_experts"
     )
+    shared_inter = _first_int(
+        text_cfg,
+        "moe_shared_expert_intermediate_size",
+        "shared_expert_intermediate_size",
+    )
+    # Qwen-MoE names one shared expert by its width alone.
+    n_shared = int(text_cfg.get("n_shared_experts") or (1 if shared_inter else 0))
     return {
         "n_experts": n_experts or None,
         "n_experts_per_tok": (
@@ -346,17 +360,13 @@ def _moe_fields(text_cfg: dict[str, Any]) -> dict[str, Any]:
             if text_cfg.get("moe_intermediate_size")
             else None
         ),
-        "n_shared_experts": int(text_cfg.get("n_shared_experts") or 0),
+        "n_shared_experts": n_shared,
         "moe_latent_size": (
             int(text_cfg["moe_latent_size"])
             if text_cfg.get("moe_latent_size")
             else None
         ),
-        "shared_expert_intermediate_size": (
-            int(text_cfg["moe_shared_expert_intermediate_size"])
-            if text_cfg.get("moe_shared_expert_intermediate_size")
-            else None
-        ),
+        "shared_expert_intermediate_size": shared_inter or None,
     }
 
 

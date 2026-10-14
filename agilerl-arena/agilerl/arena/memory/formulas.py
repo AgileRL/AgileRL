@@ -55,6 +55,12 @@ ALLOCATOR_RESERVE_FRACTION = 0.07
 # reduce-scatter blocks per stream, so it reserves a larger share.
 ALLOCATOR_RESERVE_FRACTION_DATA_PARALLEL = 0.054
 ALLOCATOR_RESERVE_FRACTION_FSDP = 0.069
+# FSDP without expert parallel over routed experts or recurrent layers reserves
+# 9-17% above allocated on the A100 80GB grid (Granite MoE, Nemotron Nano and
+# Lightning at 16k-64k), against 2-5% on dense Qwen. Super-VL under EP 8 stays
+# at the FSDP share. 0.12 keeps the live models' 16k peaks inside
+# MAX_UNDERPREDICTION and over-predicts Nano at 64k by about 11%.
+ALLOCATOR_RESERVE_FRACTION_FSDP_MIXED_LAYERS = 0.12
 # Largest share by which a measured peak exceeded the estimate on the 4-GPU
 # grids. A GPU recommendation keeps this share of usable memory free.
 MAX_UNDERPREDICTION = 0.089
@@ -74,10 +80,18 @@ def recommendation_fits(predicted_bytes: int, usable_bytes: int) -> bool:
 
 
 def allocator_reserve_bytes(
-    allocated_bytes: float, n_ranks: int = 1, sharded: bool = False
+    allocated_bytes: float,
+    n_ranks: int = 1,
+    sharded: bool = False,
+    mixed_layers: bool = False,
 ) -> float:
-    """Caching-allocator reserved-but-unallocated bytes."""
-    if sharded:
+    """Caching-allocator reserved-but-unallocated bytes.
+
+    :param mixed_layers: The model has routed experts or recurrent layers.
+    """
+    if sharded and mixed_layers:
+        fraction = ALLOCATOR_RESERVE_FRACTION_FSDP_MIXED_LAYERS
+    elif sharded:
         fraction = ALLOCATOR_RESERVE_FRACTION_FSDP
     elif n_ranks > 1:
         fraction = ALLOCATOR_RESERVE_FRACTION_DATA_PARALLEL

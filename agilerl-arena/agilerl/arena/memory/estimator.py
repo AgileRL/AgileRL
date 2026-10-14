@@ -705,7 +705,12 @@ def estimate_training(
         + peak.adam
     )
     reserve = formulas.allocator_reserve_bytes(
-        torch_side, n_ranks=shards, sharded=settings.fsdp is not None and shards > 1
+        torch_side,
+        n_ranks=shards,
+        sharded=settings.fsdp is not None and shards > 1,
+        mixed_layers=(arch.is_moe or arch.is_hybrid_ssm)
+        and settings.fsdp is not None
+        and settings.fsdp.ep == 1,
     )
     components = (
         MemoryComponent(
