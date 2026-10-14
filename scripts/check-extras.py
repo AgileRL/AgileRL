@@ -24,9 +24,10 @@ except ModuleNotFoundError:  # python 3.10
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PARENT_PYPROJECT = REPO_ROOT / "pyproject.toml"
 
-# Exact pin used only while a framework +local wheel is being built.
+# Exact pin used only while a framework MR wheel is being built.
 _EXACT_RE = re.compile(
-    r"^agilerl-arena(?:\[[^\]]*\])?==(\d+\.\d+\.\d+(?:\+[A-Za-z0-9._-]+)?)(?:\s*;.*)?$"
+    r"^agilerl-arena(?:\[[^\]]*\])?=="
+    r"(\d+\.\d+\.\d+(?:\.dev\d+)?(?:\+[A-Za-z0-9._-]+)?)(?:\s*;.*)?$"
 )
 # Committed extra: compatible range, not an exact ==.
 _RANGE_RE = re.compile(
