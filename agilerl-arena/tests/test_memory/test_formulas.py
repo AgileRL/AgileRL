@@ -117,6 +117,36 @@ class TestParamCounts:
 
 
 class TestModelArchFromHfConfig:
+    def test_moe_only_config_reads_expert_and_shared_expert_widths(self):
+        # Arrange: Qwen3.6 has no dense intermediate_size; every layer is routed
+        # experts plus one shared expert sized by shared_expert_intermediate_size.
+        info = SUPPORTED_MODEL_INFO["Qwen/Qwen3.6-35B-A3B"]
+
+        # Act
+        arch = ModelArch.from_hf_config(info.config)
+        counts = formulas.param_counts(arch, info.num_params)
+
+        # Assert
+        assert arch.n_experts == 256
+        assert arch.expert_intermediate_size == 512
+        assert arch.intermediate_size == 512
+        assert arch.n_shared_experts == 1
+        assert arch.shared_expert_intermediate_size == 512
+        assert abs(counts.unattributed) / counts.total < 0.02
+
+    def test_expert_pattern_layers_carry_the_routed_experts(self):
+        # Arrange: Lightning's hybrid_override_pattern has 23 M, 6 * and 23 E.
+        info = SUPPORTED_MODEL_INFO["nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16"]
+
+        # Act
+        arch = ModelArch.from_hf_config(info.config)
+        counts = formulas.param_counts(arch, info.num_params)
+
+        # Assert
+        assert arch.moe_layers == 23
+        assert arch.mlp_layers == 0
+        assert abs(counts.unattributed) / counts.total < 0.02
+
     def test_linear_attention_layers_are_recurrent_not_attention(self):
         # Arrange: Qwen3.8-27B lists 48 linear_attention (gated delta net) and
         # 16 full_attention layers; only the full ones hold a KV cache.
