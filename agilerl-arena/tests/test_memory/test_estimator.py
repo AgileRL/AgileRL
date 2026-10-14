@@ -27,6 +27,7 @@ from agilerl.arena.memory.specs import (
     WeightVariant,
 )
 from agilerl.arena.models.fsdp import FSDPConfig
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from tests.test_memory.test_formulas import (
     FALCON_H1,
     MOE_TINY,
@@ -302,6 +303,75 @@ class TestEstimateGeneration:
         )
         assert component(breakdown, "kv_cache").n_bytes == 0
         assert any("fail at init" in w for w in breakdown.warnings)
+
+    def test_empty_kv_pool_does_not_fit(self, model, device):
+        # Arrange: weights and overhead use the whole utilization budget.
+        settings = GenerationSettings(gpu_memory_utilization=0.01)
+
+        # Act
+        breakdown = estimate_generation(model, device, settings)
+
+        # Assert
+        assert component(breakdown, "kv_cache").detail["pool"] == 0
+        assert breakdown.total_bytes <= breakdown.device_usable_bytes
+        assert not breakdown.fits
+
+    def test_pool_shorter_than_one_sequence_does_not_fit(self, model, device):
+        # Arrange: vLLM refuses to start without room for one max_model_len sequence.
+        settings = GenerationSettings(
+            max_model_len=32768, max_num_seqs=2, kv_cache_memory_bytes=1
+        )
+
+        # Act
+        breakdown = estimate_generation(model, device, settings)
+
+        # Assert
+        kv = component(breakdown, "kv_cache")
+        assert 0 < kv.detail["startup_pool"] < kv.detail["full_sequence_bytes"]
+        assert not breakdown.fits
+        assert any("cannot hold one 32768-token" in w for w in breakdown.warnings)
+
+    def test_pool_holding_one_sequence_still_fits_and_warns_of_preemption(
+        self, model, device
+    ):
+        # Arrange: one sequence fits, all 64 do not.
+        settings = GenerationSettings(
+            max_model_len=32768, max_num_seqs=64, kv_cache_memory_bytes=1 * GiB
+        )
+
+        # Act
+        breakdown = estimate_generation(model, device, settings)
+
+        # Assert
+        kv = component(breakdown, "kv_cache")
+        assert kv.detail["full_sequence_bytes"] <= kv.detail["startup_pool"]
+        assert kv.detail["pool"] < kv.detail["worst_case_demand"]
+        assert breakdown.fits
+        assert any("preempt" in w for w in breakdown.warnings)
+
+    def test_hybrid_mamba_state_shares_the_start_up_pool(self):
+        # Arrange: vLLM 0.25.1 started this on an A100-80 with 7.2 GiB for KV
+        # and Mamba state, though 64 slots of Mamba state alone exceed it.
+        info = SUPPORTED_MODEL_INFO["nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"]
+        model = ModelSpec(
+            model_id="nano",
+            arch=ModelArch.from_hf_config(info.config),
+            n_params=info.num_params,
+        )
+        a100 = DeviceSpec(total_bytes=int(79.25 * GiB), name="NVIDIA A100-SXM4-80GB")
+        settings = GenerationSettings(
+            gpu_memory_utilization=0.2, max_model_len=32768, max_num_seqs=64
+        )
+
+        # Act
+        breakdown = estimate_generation(model, a100, settings)
+
+        # Assert
+        kv = component(breakdown, "kv_cache")
+        assert kv.detail["pool"] == 0
+        assert kv.detail["full_sequence_bytes"] <= kv.detail["startup_pool"]
+        assert breakdown.fits
+        assert not any("fail at init" in w for w in breakdown.warnings)
 
     def test_moe_warns_about_fused_kernel_caches(self, device):
         model = ModelSpec(model_id="moe-test", arch=MOE_TINY)
