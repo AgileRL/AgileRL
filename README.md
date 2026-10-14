@@ -69,6 +69,8 @@ pip install agilerl               # classic RL + the Arena CLI
 | `agilerl[all]` | Box2D and LLM extras. |
 | `agilerl-arena` | [Arena](https://arena.agilerl.com) SDK and CLI only, no torch. Included with `agilerl`. |
 
+PyPI is the release of the commit production is running. `main` is newer source. The version string inside the cluster image is the trunk `.devN`.
+
 For the development tip of `main`: `pip install git+https://github.com/AgileRL/AgileRL.git@main`. For development mode: clone the repo and run `pip install -e .`.
 
 ## Train at Scale on Arena
