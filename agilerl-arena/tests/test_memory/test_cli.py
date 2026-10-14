@@ -712,10 +712,16 @@ class TestSolveMain:
         def total(bar):
             return sum(component["bytes"] for component in bar["components"])
 
+        def kv_demand(bar):
+            kv = next(c for c in bar["components"] if c["key"] == "kv_cache")
+            return kv["detail"]["worst_case_demand"]
+
         assert total(plain_payload["training"]) == 1842925488
         assert total(overridden_payload["training"]) == 1844349913
-        assert total(plain_payload["generation"]) == 22578829721
-        assert total(overridden_payload["generation"]) == 21839321497
+        # The generation bar fills the utilization budget at either context.
+        assert kv_demand(overridden_payload["generation"]) == 8 * kv_demand(
+            plain_payload["generation"]
+        )
 
     def test_async_defaults_the_gen_device_to_the_training_gpu(self, tmp_path, capsys):
         # Arrange

@@ -895,8 +895,8 @@ class GenerationSettings(BaseModel):
     # adds one token per sequence per step, so the activation peak tracks
     # prompt tokens in flight. ``None`` assumes the whole context is prompt.
     max_prompt_len: int | None = None
-    # ``None`` uses the framework's resolution rule:
-    # ``min(max_num_seqs * max_model_len, max(max_model_len, max_num_seqs * 8192))``.
+    # ``None`` takes vLLM's async-engine default, capped at
+    # ``max_num_seqs * max_model_len``.
     max_num_batched_tokens: int | None = None
     # Pin the KV pool size. ``None`` lets vLLM derive it from
     # ``gpu_memory_utilization``.

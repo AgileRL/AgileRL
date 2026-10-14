@@ -256,6 +256,38 @@ class TestMaxRowTokens:
 
 
 class TestGenerationSettings:
+    def test_family_catalog_sets_the_batched_tokens(self):
+        settings = generation_settings_from_manifest(
+            manifest(
+                network={
+                    "pretrained_model_name_or_path": (
+                        "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"
+                    )
+                }
+            )
+        )
+
+        assert settings.max_num_batched_tokens == 8192
+
+    def test_manifest_batched_tokens_beat_the_family_default(self):
+        settings = generation_settings_from_manifest(
+            manifest(
+                algorithm={"vllm_config": {"max_num_batched_tokens": 4096}},
+                network={
+                    "pretrained_model_name_or_path": (
+                        "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"
+                    )
+                },
+            )
+        )
+
+        assert settings.max_num_batched_tokens == 4096
+
+    def test_family_without_a_default_leaves_batched_tokens_to_vllm(self):
+        settings = generation_settings_from_manifest(GRPO)
+
+        assert settings.max_num_batched_tokens is None
+
     def test_defaults_are_the_resolved_engine_config(self):
         # Defaults come from the validated vLLM config.
         settings = generation_settings_from_manifest(GRPO)

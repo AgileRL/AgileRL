@@ -310,6 +310,8 @@ def kv_cache_bytes_per_token(arch: ModelArch, weight_dtype: WeightDtype) -> floa
 
 # vLLM's default KV block size.
 KV_BLOCK_SIZE_DEFAULT = 16
+# vLLM's max_num_batched_tokens when the engine config is built with no usage context.
+VLLM_ENGINE_MAX_NUM_BATCHED_TOKENS = 2048
 # Alignment the hybrid KV block size is rounded up to.
 MAMBA_KERNEL_BLOCK_ALIGNMENT = 32
 # Recurrent-state blocks resident per sequence. vLLM prefix caching
@@ -422,18 +424,13 @@ def resolve_chunk_rows(vocab_size: int, explicit: int | None = None) -> int:
 def resolve_max_num_batched_tokens(
     max_num_seqs: int, max_model_len: int, explicit: int | None = None
 ) -> int:
-    """Scheduler-step token cap for vLLM.
+    """Scheduler-step token cap the async rollout engine starts vLLM with.
 
-    An explicit value is returned as-is. Otherwise
-    ``min(max_num_seqs * max_model_len, max(max_model_len, max_num_seqs * 8192))``.
-    The 8192-per-sequence cap bounds compile tensors at long context.
+    Unset takes vLLM's default for an engine built with no usage context.
+    Either value is capped at every sequence at full context.
     """
-    if explicit is not None:
-        return explicit
-    return min(
-        max_num_seqs * max_model_len,
-        max(max_model_len, max_num_seqs * 8192),
-    )
+    requested = VLLM_ENGINE_MAX_NUM_BATCHED_TOKENS if explicit is None else explicit
+    return min(requested, max_num_seqs * max_model_len)
 
 
 def block_kinds(arch: ModelArch) -> tuple[BlockKind, ...]:
