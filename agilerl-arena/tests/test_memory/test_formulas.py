@@ -474,12 +474,15 @@ class TestResolveChunkRows:
 
 
 class TestResolveMaxNumBatchedTokens:
-    def test_caps_at_seqs_times_8192(self):
-        assert formulas.resolve_max_num_batched_tokens(8, 1024) == 8 * 1024
-        # Long context: capped at max(len, seqs * 8192).
-        assert formulas.resolve_max_num_batched_tokens(8, 32768) == 8 * 8192
-        assert formulas.resolve_max_num_batched_tokens(2, 32768) == 32768
+    def test_unset_takes_the_async_engine_default(self):
+        assert formulas.resolve_max_num_batched_tokens(8, 32768) == 2048
+
+    def test_explicit_value_wins(self):
         assert formulas.resolve_max_num_batched_tokens(8, 1024, explicit=4096) == 4096
+
+    def test_caps_at_every_sequence_at_full_context(self):
+        assert formulas.resolve_max_num_batched_tokens(1, 1024) == 1024
+        assert formulas.resolve_max_num_batched_tokens(2, 512, explicit=4096) == 1024
 
 
 class TestKvCacheBytesPerToken:

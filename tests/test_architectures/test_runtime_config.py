@@ -27,6 +27,7 @@ from agilerl.architectures.qwen3_5 import (
     qwen3_5_language_tower_hf_override,
 )
 from agilerl.architectures.runtime import ModelRuntimeConfig
+from agilerl.arena.memory.manifest import FAMILY_MAX_NUM_BATCHED_TOKENS
 
 NEMOTRON_VLLM_KWARGS = {
     "mamba_cache_mode": "align",
@@ -170,6 +171,17 @@ class TestFamilyRuntimeConfigs:
         )
         assert mamba.fused_path is True
         assert mamba.stream_ordering is True
+
+
+class TestFamilyMaxNumBatchedTokens:
+    def test_arena_estimator_matches_the_catalog(self) -> None:
+        catalog = {
+            family: runtime.vllm.max_num_batched_tokens
+            for family, runtime in FAMILY_RUNTIME_CONFIGS.items()
+            if runtime.vllm.max_num_batched_tokens is not None
+        }
+
+        assert catalog == FAMILY_MAX_NUM_BATCHED_TOKENS
 
 
 class TestFamilyTensorParallelPlans:

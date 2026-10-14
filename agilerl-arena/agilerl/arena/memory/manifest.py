@@ -35,6 +35,7 @@ from agilerl.arena.models.algorithms.llmppo import LLMPPOSpec
 from agilerl.arena.models.algorithms.llmreinforce import LLMREINFORCESpec
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
 from agilerl.arena.models.manifest import TrainingManifest
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.networks import LoraConfigDict, VLLMConfig
 
 # Manifest algorithm names -> the estimator's algorithm identifiers. The
@@ -57,6 +58,12 @@ ATTENTION_MODULES = frozenset(
 
 # Sequences the framework's colocated engine decodes when vllm_config sets none.
 COLOCATED_MAX_NUM_SEQS = 8
+
+# Must match max_num_batched_tokens in the framework's FAMILY_RUNTIME_CONFIGS.
+FAMILY_MAX_NUM_BATCHED_TOKENS: dict[str, int] = {
+    "nemotron_h": 8192,
+    "nemotron_h_omni": 8192,
+}
 
 
 class GpuInfo(BaseModel):
@@ -281,6 +288,16 @@ def _max_num_seqs(
     return rollout_batch_size // n_engines * _group_size(spec)
 
 
+def _max_num_batched_tokens(spec: LLMAlgorithmSpec, vllm: VLLMConfig) -> int | None:
+    """The manifest's value, else the model family's catalog default."""
+    if vllm.max_num_batched_tokens is not None:
+        return vllm.max_num_batched_tokens
+    info = SUPPORTED_MODEL_INFO.get(spec.pretrained_model_name_or_path)
+    if info is None:
+        return None
+    return FAMILY_MAX_NUM_BATCHED_TOKENS.get(info.config["model_type"])
+
+
 def _resolve_vllm(spec: LLMAlgorithmSpec) -> VLLMConfig:
     """The engine config the run starts, checked against what this estimator sizes."""
     # SFT and DPO start no engine; their generation bar is ignored.
@@ -479,7 +496,7 @@ def generation_settings_from_manifest(
         gpu_memory_utilization=vllm.gpu_memory_utilization,
         max_num_seqs=_max_num_seqs(manifest, spec, vllm),
         max_model_len=spec.max_model_len,
-        max_num_batched_tokens=vllm.max_num_batched_tokens,
+        max_num_batched_tokens=_max_num_batched_tokens(spec, vllm),
         kv_cache_memory_bytes=vllm.kv_cache_memory_bytes,
         enforce_eager=vllm.enforce_eager,
         max_lora_rank=max(vllm.max_lora_rank, lora.lora_r),
