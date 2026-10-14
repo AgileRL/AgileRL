@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -68,6 +69,10 @@ def _require_public_version(version: str) -> str:
                 "error: version must be immutable PEP 440 with no local suffix "
                 f"(got {version!r})"
             )
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+        _fail(
+            f"error: version must be a final X.Y.Z, not a dev or pre-release (got {version!r})"
+        )
     return version
 
 
