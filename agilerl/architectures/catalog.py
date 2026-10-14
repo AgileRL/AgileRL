@@ -6,9 +6,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import TYPE_CHECKING
 
-from transformers.configuration_utils import PretrainedConfig
-
+from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.architectures.gemma4 import gemma4_language_tower_hf_override
 from agilerl.architectures.nemotron_h.language_tower import (
     omni_language_tower_hf_override,
@@ -28,6 +28,9 @@ from agilerl.architectures.runtime import (
     VllmRuntimeConfig,
 )
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
+
+if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
+    from transformers.configuration_utils import PretrainedConfig
 
 # Trainer uses transformers' nemotron_h class; the checkpoint's auto_map code
 # supports only eager attention.

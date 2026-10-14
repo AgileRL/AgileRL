@@ -17,12 +17,14 @@ views live in :mod:`agilerl.distributed.ep_mesh`, the token all-to-alls in
 
 from __future__ import annotations
 
-from peft.tuners.lora.layer import ParamWrapper
+from typing import TYPE_CHECKING
+
 from torch import nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, distribute_tensor
 from torch.distributed.tensor.placement_types import Shard
 
+from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.distributed.ep_dispatch import (
     AllToAllCtx,
     AllToAllVar,
@@ -73,6 +75,9 @@ from agilerl.distributed.replicated_rows import (
     replicated_row_span,
 )
 from agilerl.lora.fused import patch_lora_for_fused_forward
+
+if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
+    from peft.tuners.lora.layer import ParamWrapper
 
 __all__ = [
     "ROUTED_COUNTS_SCOPE",

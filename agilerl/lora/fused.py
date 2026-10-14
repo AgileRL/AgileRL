@@ -21,12 +21,16 @@ from __future__ import annotations
 import itertools
 from collections.abc import Callable, Sequence
 from functools import partial
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from weakref import WeakKeyDictionary
 
 import torch
 import torch.nn as nn
-from peft.tuners.lora.layer import LoraLayer, ParamWrapper
+
+from agilerl import HAS_LLM_DEPENDENCIES
+
+if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
+    from peft.tuners.lora.layer import LoraLayer, ParamWrapper
 
 # Remembers each model's LoRA layers so we don't rescan on every call.
 # Weak keys: caching a model here never stops it being garbage-collected.
