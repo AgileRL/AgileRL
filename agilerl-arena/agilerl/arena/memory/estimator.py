@@ -79,7 +79,13 @@ class PhaseBreakdown(BaseModel):
 
     @property
     def fits(self) -> bool:
-        return self.total_bytes <= self.device_usable_bytes
+        """The peak is inside the card, and vLLM's start-up pool holds one full sequence."""
+        if self.total_bytes > self.device_usable_bytes:
+            return False
+        kv = next((c for c in self.components if c.key == "kv_cache"), None)
+        return (
+            kv is None or kv.detail["startup_pool"] >= kv.detail["full_sequence_bytes"]
+        )
 
     @property
     def fits_with_buffer(self) -> bool:
@@ -224,6 +230,11 @@ def training_warnings(
         warnings.append(
             "gradient_checkpointing=False saves every block's activations; "
             "expect roughly n_layers x the checkpointed footprint."
+        )
+    if settings.sequence_packing:
+        warnings.append(
+            "use_sequence_packing packs the gradient forward into one row. "
+            "This estimate sizes every row padded to max_model_len."
         )
     return warnings
 
@@ -525,7 +536,9 @@ def activation_peak(
     # The chunk loop hoists an fp32 lm_head copy when the head runs below fp32.
     fused_head = int(arch.vocab_size * arch.hidden_size * 4) if act_bytes < 4 else 0
     logits = logit_rows * arch.vocab_size * 8 + fused_head
-    nograd_rows = settings.n_adapter_rows
+    # A 1-row forward still stacks the consulted adapters. A larger micro-batch
+    # chunks that stack, so the live rows are the wider of the two.
+    nograd_rows = max(settings.n_adapter_rows, settings.micro_batch_size)
     nograd_pass = (
         formulas.nograd_forward_bytes(
             arch, nograd_rows, seq_len, act_bytes, eager_mamba_scan=eager_mamba_scan
@@ -959,6 +972,8 @@ def generation_warnings(
     *,
     kv_pool: int,
     kv_demand: int,
+    startup_pool: int,
+    full_sequence: int,
 ) -> list[str]:
     """User-facing generation-phase warnings."""
     arch = model.arch
@@ -989,11 +1004,18 @@ def generation_warnings(
             "page to match. Every sequence's KV therefore rounds up to that "
             "page, which dominates the cache for short sequences."
         )
-    if kv_pool <= 0:
+    if startup_pool <= 0:
         warnings.append(
             "gpu_memory_utilization budget is consumed by weights and engine "
             "overhead before any KV cache: vLLM will fail at init. Raise "
             "gpu_memory_utilization or shrink the model/variant."
+        )
+    elif startup_pool < full_sequence:
+        warnings.append(
+            f"KV pool ({startup_pool / GiB:.1f} GiB) cannot hold one "
+            f"{settings.max_model_len}-token sequence ({full_sequence / GiB:.1f} GiB): "
+            "vLLM will fail at init. Raise gpu_memory_utilization or lower "
+            "max_model_len."
         )
     elif kv_demand > kv_pool:
         warnings.append(
@@ -1033,11 +1055,22 @@ def estimate_generation(
         if settings.kv_cache_memory_bytes is not None
         else max(budget - non_kv, 0)
     )
+    # vLLM holds Mamba state in the KV pool and checks room for one request at start-up.
+    startup_pool = (
+        settings.kv_cache_memory_bytes
+        if settings.kv_cache_memory_bytes is not None
+        else max(budget - (non_kv - mamba_state), 0)
+    )
+    full_sequence = kv_demand // settings.concurrency + formulas.mamba_state_bytes(
+        arch, 1, state_dtype=settings.weight_dtype
+    )
     warnings = generation_warnings(
         model,
         settings,
         kv_pool=kv_pool,
         kv_demand=kv_demand,
+        startup_pool=startup_pool,
+        full_sequence=full_sequence,
     )
     runtime_tokens = min(settings.concurrency * settings.prompt_len, batched_tokens)
     job_overhead = formulas.JOB_OVERHEAD_BYTES if orchestrated else 0
@@ -1064,6 +1097,8 @@ def estimate_generation(
             detail={
                 "pool": int(kv_pool),
                 "worst_case_demand": int(kv_demand),
+                "startup_pool": int(startup_pool),
+                "full_sequence_bytes": int(full_sequence),
             },
             note=(
                 "Pinned via kv_cache_memory_bytes."
@@ -1127,7 +1162,7 @@ def estimate_generation(
         phase="generation",
         components=components,
         device_total_bytes=device.total_bytes,
-        device_usable_bytes=device.usable_bytes,
+        device_usable_bytes=device.generation_usable_bytes,
         warnings=tuple(warnings),
     )
 
@@ -1135,7 +1170,7 @@ def estimate_generation(
 def generation_can_serve(breakdown: PhaseBreakdown) -> bool:
     """Whether this generation bar can serve the advertised context.
 
-    ``fits`` is resident peak under the card. Serving also needs a non-empty
+    ``fits`` means vLLM starts. Serving also needs a non-empty
     KV pool that covers worst-case demand at ``max_model_len``. Demand above
     the pool means preemption under that context.
     """
@@ -1169,7 +1204,7 @@ def estimate_run(config: RunConfig) -> RunEstimate:
             phase="generation",
             components=(),
             device_total_bytes=device.total_bytes,
-            device_usable_bytes=device.usable_bytes,
+            device_usable_bytes=device.generation_usable_bytes,
             warnings=(
                 (
                     f"{config.training.algorithm} trains from a fixed dataset "

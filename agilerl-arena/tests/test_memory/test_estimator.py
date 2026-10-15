@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from agilerl.arena.memory import formulas
+from agilerl.arena.memory.advice import advise
 from agilerl.arena.memory.estimator import (
     estimate_generation,
     estimate_run,
@@ -26,6 +27,7 @@ from agilerl.arena.memory.specs import (
     WeightVariant,
 )
 from agilerl.arena.models.fsdp import FSDPConfig
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from tests.test_memory.test_formulas import (
     FALCON_H1,
     MOE_TINY,
@@ -302,6 +304,75 @@ class TestEstimateGeneration:
         assert component(breakdown, "kv_cache").n_bytes == 0
         assert any("fail at init" in w for w in breakdown.warnings)
 
+    def test_empty_kv_pool_does_not_fit(self, model, device):
+        # Arrange: weights and overhead use the whole utilization budget.
+        settings = GenerationSettings(gpu_memory_utilization=0.01)
+
+        # Act
+        breakdown = estimate_generation(model, device, settings)
+
+        # Assert
+        assert component(breakdown, "kv_cache").detail["pool"] == 0
+        assert breakdown.total_bytes <= breakdown.device_usable_bytes
+        assert not breakdown.fits
+
+    def test_pool_shorter_than_one_sequence_does_not_fit(self, model, device):
+        # Arrange: vLLM refuses to start without room for one max_model_len sequence.
+        settings = GenerationSettings(
+            max_model_len=32768, max_num_seqs=2, kv_cache_memory_bytes=1
+        )
+
+        # Act
+        breakdown = estimate_generation(model, device, settings)
+
+        # Assert
+        kv = component(breakdown, "kv_cache")
+        assert 0 < kv.detail["startup_pool"] < kv.detail["full_sequence_bytes"]
+        assert not breakdown.fits
+        assert any("cannot hold one 32768-token" in w for w in breakdown.warnings)
+
+    def test_pool_holding_one_sequence_still_fits_and_warns_of_preemption(
+        self, model, device
+    ):
+        # Arrange: one sequence fits, all 64 do not.
+        settings = GenerationSettings(
+            max_model_len=32768, max_num_seqs=64, kv_cache_memory_bytes=1 * GiB
+        )
+
+        # Act
+        breakdown = estimate_generation(model, device, settings)
+
+        # Assert
+        kv = component(breakdown, "kv_cache")
+        assert kv.detail["full_sequence_bytes"] <= kv.detail["startup_pool"]
+        assert kv.detail["pool"] < kv.detail["worst_case_demand"]
+        assert breakdown.fits
+        assert any("preempt" in w for w in breakdown.warnings)
+
+    def test_hybrid_mamba_state_shares_the_start_up_pool(self):
+        # Arrange: vLLM 0.25.1 started this on an A100-80 with 7.2 GiB for KV
+        # and Mamba state, though 64 slots of Mamba state alone exceed it.
+        info = SUPPORTED_MODEL_INFO["nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"]
+        model = ModelSpec(
+            model_id="nano",
+            arch=ModelArch.from_hf_config(info.config),
+            n_params=info.num_params,
+        )
+        a100 = DeviceSpec(total_bytes=int(79.25 * GiB), name="NVIDIA A100-SXM4-80GB")
+        settings = GenerationSettings(
+            gpu_memory_utilization=0.2, max_model_len=32768, max_num_seqs=64
+        )
+
+        # Act
+        breakdown = estimate_generation(model, a100, settings)
+
+        # Assert
+        kv = component(breakdown, "kv_cache")
+        assert kv.detail["pool"] == 0
+        assert kv.detail["full_sequence_bytes"] <= kv.detail["startup_pool"]
+        assert breakdown.fits
+        assert not any("fail at init" in w for w in breakdown.warnings)
+
     def test_moe_warns_about_fused_kernel_caches(self, device):
         model = ModelSpec(model_id="moe-test", arch=MOE_TINY)
         breakdown = estimate_generation(model, device, GenerationSettings())
@@ -325,6 +396,31 @@ class TestEstimateGeneration:
 
         assert any("recurrent layers" in w for w in breakdown.warnings)
         assert any(str(block_size) in w for w in breakdown.warnings)
+
+    def test_a_full_budget_on_a_large_card_fits_the_whole_card(self, model):
+        # Arrange: 0.95 of an 80 GiB card plus the CUDA context and runtime
+        # exceeds 95% of the card but not the card.
+        a100 = DeviceSpec(total_bytes=80 * GiB, name="NVIDIA A100-SXM4-80GB")
+        settings = GenerationSettings(gpu_memory_utilization=0.95, max_model_len=4096)
+
+        # Act
+        breakdown = estimate_generation(model, a100, settings)
+
+        # Assert
+        assert breakdown.device_usable_bytes == a100.total_bytes
+        assert a100.usable_bytes < breakdown.total_bytes <= a100.total_bytes
+        assert breakdown.fits
+
+    def test_training_keeps_the_fragmentation_band(self, model, device):
+        # Act
+        breakdown = estimate_training(model, device, TrainingSettings(algorithm="grpo"))
+
+        # Assert
+        assert (
+            breakdown.device_usable_bytes
+            == device.usable_bytes
+            == int(device.total_bytes * 0.95)
+        )
 
 
 class TestGenerationCanServe:
@@ -429,6 +525,16 @@ class TestDeviceSpecContextBytesProperty:
 
         assert pinned.usable_bytes == 10 * GiB
         assert DeviceSpec(total_bytes=24 * GiB).usable_bytes == int(24 * GiB * 0.95)
+
+
+class TestDeviceSpecGenerationUsableBytesProperty:
+    def test_is_the_whole_card(self):
+        assert DeviceSpec(total_bytes=80 * GiB).generation_usable_bytes == 80 * GiB
+
+    def test_uses_the_available_override(self):
+        pinned = DeviceSpec(total_bytes=80 * GiB, available_bytes=60 * GiB)
+
+        assert pinned.generation_usable_bytes == 60 * GiB
 
 
 class TestTrainingSettingsInit:
@@ -1029,8 +1135,10 @@ class TestFusedActorCriticPass:
         four_rows = one_row.model_copy(update={"micro_batch_size": 4})
 
         # Act
-        one = component(estimate_training(model, device, one_row), "activations")
-        four = component(estimate_training(model, device, four_rows), "activations")
+        one_bar = estimate_training(model, device, one_row)
+        four_bar = estimate_training(model, device, four_rows)
+        one = component(one_bar, "activations")
+        four = component(four_bar, "activations")
 
         # Assert
         assert one.detail["checkpoint_boundaries"] == (
@@ -1042,7 +1150,27 @@ class TestFusedActorCriticPass:
         assert four.detail["lora_fp32_input_casts"] == (
             formulas.lora_input_cast_bytes(QWEN_05B, 4, seq_len)
         )
-        assert four.detail["nograd_peak"] == one.detail["nograd_peak"]
+        one_nograd = max(one_row.n_adapter_rows, one_row.micro_batch_size)
+        four_nograd = max(four_rows.n_adapter_rows, four_rows.micro_batch_size)
+        assert four.detail["nograd_peak"] - one.detail["nograd_peak"] == (
+            formulas.nograd_forward_bytes(QWEN_05B, four_nograd, seq_len, 2.0)
+            - formulas.nograd_forward_bytes(QWEN_05B, one_nograd, seq_len, 2.0)
+        )
+        assert (
+            component(four_bar, "logits_workspace").n_bytes
+            == component(one_bar, "logits_workspace").n_bytes
+        )
+        assert (
+            component(four_bar, "base_weights").n_bytes
+            == component(one_bar, "base_weights").n_bytes
+        )
+        assert (
+            component(four_bar, "grads").n_bytes == component(one_bar, "grads").n_bytes
+        )
+        assert (
+            component(four_bar, "optimizer_state").n_bytes
+            == component(one_bar, "optimizer_state").n_bytes
+        )
 
     def test_fused_contracted_moe_charges_split_lora_for_both_rows(self, device):
         model = ModelSpec(model_id="moe-test", arch=MOE_TINY)
@@ -1061,6 +1189,42 @@ class TestFusedActorCriticPass:
                 MOE_TINY, 2, 1024, 2, "contracted", 2, settings.lora_rank
             )
         )
+
+
+class TestMicroBatchAdvice:
+    def test_over_budget_run_suggests_a_one_row_micro_batch(self, model):
+        # Arrange
+        device = DeviceSpec(total_bytes=8 * GiB, available_bytes=6 * GiB)
+        config = RunConfig(
+            model=model,
+            train_device=device,
+            gen_device=device,
+            training=TrainingSettings(max_model_len=16384, micro_batch_size=16),
+        )
+
+        # Act
+        tips = advise(config)
+
+        # Assert
+        match = next(
+            tip
+            for tip in tips
+            if tip.phase == "training" and "micro_batch_size_per_gpu" in tip.action
+        )
+        assert "16 -> 1" in match.action
+        assert match.saves_bytes > 0
+
+    def test_one_row_micro_batch_is_not_suggested(self, model, device):
+        config = RunConfig(
+            model=model,
+            train_device=device,
+            gen_device=device,
+            training=TrainingSettings(micro_batch_size=1),
+        )
+
+        actions = [tip.action for tip in advise(config)]
+
+        assert all("micro_batch_size_per_gpu" not in action for action in actions)
 
 
 class TestEagerMambaScan:

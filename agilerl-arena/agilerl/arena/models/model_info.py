@@ -26,7 +26,14 @@ if sys.version_info >= (3, 11):
 else:
     from importlib.abc import Traversable  # pragma: no cover
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field, field_serializer
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    computed_field,
+    field_serializer,
+    field_validator,
+)
 
 ModelArchitecture = Literal["dense", "hybrid", "moe", "hybrid_moe"]
 ARCH_DENSE: ModelArchitecture = "dense"
@@ -38,6 +45,8 @@ ModelStatus = Literal["live", "deprecated", "preview"]
 STATUS_LIVE: ModelStatus = "live"
 STATUS_DEPRECATED: ModelStatus = "deprecated"
 STATUS_PREVIEW: ModelStatus = "preview"
+
+ModelModality = Literal["text", "vision"]
 
 # vLLM ``LoRAConfig.max_lora_rank`` values.
 VLLM_LORA_RANKS = (1, 8, 16, 32, 64, 128, 256, 320, 512)
@@ -72,6 +81,21 @@ class ModelInfo(BaseModel):
             "preview (submission rejected)."
         ),
     )
+    modalities: tuple[ModelModality, ...] = Field(
+        default=("text",),
+        min_length=1,
+        description="Input modalities the model handles: text, or text and vision.",
+    )
+
+    @field_validator("modalities")
+    @classmethod
+    def _require_text_or_text_and_vision(
+        cls, value: tuple[ModelModality, ...]
+    ) -> tuple[ModelModality, ...]:
+        if value not in (("text",), ("text", "vision")):
+            msg = "modalities must be ('text',) or ('text', 'vision')"
+            raise ValueError(msg)
+        return value
 
     @cached_property
     def config(self) -> dict[str, Any]:
@@ -226,7 +250,7 @@ SUPPORTED_MODEL_INFO: Mapping[str, ModelInfo] = {
         ModelInfo(
             hub_id="nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
             architecture=ARCH_HYBRID_MOE,
-            status=STATUS_PREVIEW,
+            modalities=("text", "vision"),
         ),
         ModelInfo(hub_id="openai/gpt-oss-20b", architecture=ARCH_MOE),
     )

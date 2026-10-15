@@ -35,6 +35,7 @@ from agilerl.arena.models.algorithms.llmppo import LLMPPOSpec
 from agilerl.arena.models.algorithms.llmreinforce import LLMREINFORCESpec
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
 from agilerl.arena.models.manifest import TrainingManifest
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.networks import LoraConfigDict, VLLMConfig
 
 # Manifest algorithm names -> the estimator's algorithm identifiers. The
@@ -57,6 +58,12 @@ ATTENTION_MODULES = frozenset(
 
 # Sequences the framework's colocated engine decodes when vllm_config sets none.
 COLOCATED_MAX_NUM_SEQS = 8
+
+# Must match max_num_batched_tokens in the framework's FAMILY_RUNTIME_CONFIGS.
+FAMILY_MAX_NUM_BATCHED_TOKENS: dict[str, int] = {
+    "nemotron_h": 8192,
+    "nemotron_h_omni": 8192,
+}
 
 
 class GpuInfo(BaseModel):
@@ -281,6 +288,16 @@ def _max_num_seqs(
     return rollout_batch_size // n_engines * _group_size(spec)
 
 
+def _max_num_batched_tokens(spec: LLMAlgorithmSpec, vllm: VLLMConfig) -> int | None:
+    """The manifest's value, else the model family's catalog default."""
+    if vllm.max_num_batched_tokens is not None:
+        return vllm.max_num_batched_tokens
+    info = SUPPORTED_MODEL_INFO.get(spec.pretrained_model_name_or_path)
+    if info is None:
+        return None
+    return FAMILY_MAX_NUM_BATCHED_TOKENS.get(info.config["model_type"])
+
+
 def _resolve_vllm(spec: LLMAlgorithmSpec) -> VLLMConfig:
     """The engine config the run starts, checked against what this estimator sizes."""
     # SFT and DPO start no engine; their generation bar is ignored.
@@ -330,25 +347,67 @@ def _stripped_towers(vllm: VLLMConfig) -> bool:
     return False
 
 
-def _require_single_row_micro_batch(
-    spec: LLMAlgorithmSpec, n_training_gpus: int
-) -> None:
-    """Refuse any resolved micro-batch but one row, resolved as the trainer does."""
-    # Unset: the whole per-rank batch. mini_batch_size set alone is the micro-batch.
-    micro = spec.micro_batch_size_per_gpu
-    if micro is None:
-        if n_training_gpus < 2:
-            micro = spec.batch_size
-        elif isinstance(spec, RolloutLLMSpec) and spec.mini_batch_size is not None:
-            micro = spec.mini_batch_size
-        else:
-            micro = max(spec.batch_size // n_training_gpus, 1)
-    if micro != 1:
+def _data_parallel_size(spec: LLMAlgorithmSpec, n_training_gpus: int) -> int:
+    """Trainer world folded by tensor-parallel degree."""
+    tp = 1 if spec.fsdp is None else spec.fsdp.tp
+    if n_training_gpus % tp != 0:
         msg = (
-            f"micro_batch_size_per_gpu resolves to {micro}; this estimator sizes "
-            "single-row micro-batches only."
+            f"world_size ({n_training_gpus}) must be divisible by tp ({tp}) "
+            "for Tensor Parallel."
         )
         raise ValueError(msg)
+    return n_training_gpus // tp
+
+
+def resolve_micro_batch_rows(spec: LLMAlgorithmSpec, n_training_gpus: int) -> int:
+    """Rows in one training forward, matching the Ray builder and configure.
+
+    :param spec: Validated LLM algorithm spec.
+    :param n_training_gpus: Trainer ranks, ``training.training_gpus_per_agent``.
+    :return: Rows in one forward or backward.
+    :raises ValueError: When the batch does not split into whole micro-batches.
+    """
+    dp = _data_parallel_size(spec, n_training_gpus)
+    if spec.batch_size % dp != 0:
+        msg = (
+            f"Batch size ({spec.batch_size}) must be divisible by the data-parallel "
+            f"size ({dp})."
+        )
+        raise ValueError(msg)
+    per_rank = (spec.batch_size // dp) * _group_size(spec)
+    micro = spec.micro_batch_size_per_gpu or max(spec.batch_size // dp, 1)
+    # GRPO-family defaults an unset mini-batch to the micro-batch. SFT and DPO
+    # default it to the per-rank sample count.
+    mini_follows_micro = spec.name in {
+        "GRPO",
+        "GSPO",
+        "CISPO",
+        "LLMPPO",
+        "LLMREINFORCE",
+    }
+    if spec.mini_batch_size is not None:
+        mini = spec.mini_batch_size
+    elif mini_follows_micro:
+        mini = micro
+    else:
+        mini = per_rank
+    if mini % micro != 0:
+        msg = (
+            f"mini_batch_size ({mini}) must be divisible by "
+            f"micro_batch_size_per_gpu ({micro}): "
+            "gradient_accumulation_steps = mini_batch_size / "
+            "micro_batch_size_per_gpu must be a whole number of backward "
+            "passes."
+        )
+        raise ValueError(msg)
+    if per_rank % mini != 0:
+        msg = (
+            f"batch_size_per_process ({per_rank}) must be "
+            f"divisible by mini_batch_size ({mini}): a rank "
+            "must split into whole optimizer steps."
+        )
+        raise ValueError(msg)
+    return micro
 
 
 def _reject_unbounded_liger_loss(spec: LLMAlgorithmSpec) -> None:
@@ -374,15 +433,15 @@ def training_settings_from_manifest(
 ) -> TrainingSettings:
     """Trainer-side settings, read as the trainer reads the manifest.
 
-    Settings the estimator cannot size (quantization, multi-row micro-batches,
-    the eager backend, Liger above token level) raise ``ValueError``.
+    Settings the estimator cannot size (quantization, the eager backend,
+    Liger above token level) raise ``ValueError``.
     """
     manifest = _validated(manifest)
     spec = llm_spec(manifest)
     lora = _lora_config(spec)
     n_training_gpus = manifest.training.training_gpus_per_agent
     _reject_trainer_quantization(spec.quantization)
-    _require_single_row_micro_batch(spec, n_training_gpus)
+    micro_batch_size = resolve_micro_batch_rows(spec, n_training_gpus)
     _reject_eager_attn_implementation(spec.attn_implementation)
     _reject_unbounded_liger_loss(spec)
     return TrainingSettings(
@@ -413,6 +472,8 @@ def training_settings_from_manifest(
         and spec.fuse_actor_critic_pass is True,
         checkpoint_optimizer=manifest.training.checkpoint_optimizer,
         async_rollout=manifest.training.async_rollout,
+        micro_batch_size=micro_batch_size,
+        sequence_packing=spec.use_sequence_packing,
     )
 
 
@@ -435,7 +496,7 @@ def generation_settings_from_manifest(
         gpu_memory_utilization=vllm.gpu_memory_utilization,
         max_num_seqs=_max_num_seqs(manifest, spec, vllm),
         max_model_len=spec.max_model_len,
-        max_num_batched_tokens=vllm.max_num_batched_tokens,
+        max_num_batched_tokens=_max_num_batched_tokens(spec, vllm),
         kv_cache_memory_bytes=vllm.kv_cache_memory_bytes,
         enforce_eager=vllm.enforce_eager,
         max_lora_rank=max(vllm.max_lora_rank, lora.lora_r),

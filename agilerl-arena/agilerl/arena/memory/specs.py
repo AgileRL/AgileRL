@@ -196,7 +196,7 @@ def _ffn_layer_mix(text_cfg: dict[str, Any]) -> tuple[int | None, int | None]:
     Most stacks put an FFN in every block alongside the mixer, and both
     counts stay ``None`` (every layer). Block-exclusive layouts use one
     block kind per layer: Mamba, attention, MLP, or MoE, in
-    ``layers_block_type`` ("moe" / "mlp") or as ``-`` in
+    ``layers_block_type`` ("moe" / "mlp") or as ``-`` / ``E`` in
     ``hybrid_override_pattern``. Mixer-only lists leave FFN counts unset.
     """
     entries = _layer_type_list(text_cfg)
@@ -207,8 +207,12 @@ def _ffn_layer_mix(text_cfg: dict[str, Any]) -> tuple[int | None, int | None]:
             return mlp, moe
 
     pattern = text_cfg.get("hybrid_override_pattern")
-    if isinstance(pattern, str) and "M" in pattern and "-" in pattern:
-        return pattern.count("-"), None
+    if (
+        isinstance(pattern, str)
+        and "M" in pattern
+        and ("-" in pattern or "E" in pattern)
+    ):
+        return pattern.count("-"), pattern.count("E") or None
     return None, None
 
 
@@ -306,7 +310,10 @@ def _decoder_fields(text_cfg: dict[str, Any]) -> dict[str, Any]:
     return {
         "n_layers": int(n_layers),
         "hidden_size": hidden,
-        "intermediate_size": int(text_cfg["intermediate_size"]),
+        # Expert-only stacks publish just the expert width.
+        "intermediate_size": int(
+            text_cfg.get("intermediate_size") or text_cfg["moe_intermediate_size"]
+        ),
         "n_heads": n_heads,
         "n_kv_heads": n_kv,
         "head_dim": int(text_cfg.get("head_dim") or hidden // n_heads),
@@ -334,6 +341,13 @@ def _moe_fields(text_cfg: dict[str, Any]) -> dict[str, Any]:
     n_experts = _first_int(
         text_cfg, "num_experts", "num_local_experts", "n_routed_experts"
     )
+    shared_inter = _first_int(
+        text_cfg,
+        "moe_shared_expert_intermediate_size",
+        "shared_expert_intermediate_size",
+    )
+    # Qwen-MoE names one shared expert by its width alone.
+    n_shared = int(text_cfg.get("n_shared_experts") or (1 if shared_inter else 0))
     return {
         "n_experts": n_experts or None,
         "n_experts_per_tok": (
@@ -346,17 +360,13 @@ def _moe_fields(text_cfg: dict[str, Any]) -> dict[str, Any]:
             if text_cfg.get("moe_intermediate_size")
             else None
         ),
-        "n_shared_experts": int(text_cfg.get("n_shared_experts") or 0),
+        "n_shared_experts": n_shared,
         "moe_latent_size": (
             int(text_cfg["moe_latent_size"])
             if text_cfg.get("moe_latent_size")
             else None
         ),
-        "shared_expert_intermediate_size": (
-            int(text_cfg["moe_shared_expert_intermediate_size"])
-            if text_cfg.get("moe_shared_expert_intermediate_size")
-            else None
-        ),
+        "shared_expert_intermediate_size": shared_inter or None,
     }
 
 
@@ -626,8 +636,9 @@ class DeviceSpec(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     total_bytes: int
-    # Usable capacity override. ``None`` uses 95% of ``total_bytes``
-    # (allocator fragmentation). CUDA context is a demand-side component.
+    # Usable capacity override. ``None`` uses 95% of ``total_bytes`` for
+    # training (allocator fragmentation) and the whole card for generation.
+    # CUDA context is a demand-side component.
     available_bytes: int | None = None
     name: str | None = None
     # Bytes a bare CUDA context costs, before any tensor allocation.
@@ -665,6 +676,17 @@ class DeviceSpec(BaseModel):
         if self.available_bytes is not None:
             return self.available_bytes
         return int(self.total_bytes * 0.95)
+
+    @property
+    def generation_usable_bytes(self) -> int:
+        """Capacity the generation peak is checked against.
+
+        vLLM claims ``gpu_memory_utilization`` of the card once at startup, so
+        the fragmentation band does not apply; the whole card is the limit.
+        """
+        if self.available_bytes is not None:
+            return self.available_bytes
+        return self.total_bytes
 
 
 class TrainingSettings(BaseModel):
@@ -727,6 +749,8 @@ class TrainingSettings(BaseModel):
     checkpoint_optimizer: bool = False
     # Async rollout: the next rollout batch waits in host memory during learn.
     async_rollout: bool = False
+    # Gradient forward packs into one row. The estimate still prices padded rows.
+    sequence_packing: bool = False
 
     @property
     def trajectories(self) -> int:
@@ -799,10 +823,9 @@ class TrainingSettings(BaseModel):
 
     @property
     def n_adapter_rows(self) -> int:
-        """Row multiplier of the fused no-grad forward.
+        """Adapters in one no-grad forward of a single sample.
 
-        Rollout algorithms repeat the batch once per consulted adapter.
-        DPO runs sequential single-row passes, so this is 1.
+        DPO scores chosen and rejected in separate passes, so this is 1.
         """
         if self.algorithm == "dpo":
             return 1
@@ -882,8 +905,8 @@ class GenerationSettings(BaseModel):
     # adds one token per sequence per step, so the activation peak tracks
     # prompt tokens in flight. ``None`` assumes the whole context is prompt.
     max_prompt_len: int | None = None
-    # ``None`` uses the framework's resolution rule:
-    # ``min(max_num_seqs * max_model_len, max(max_model_len, max_num_seqs * 8192))``.
+    # ``None`` takes vLLM's async-engine default, capped at
+    # ``max_num_seqs * max_model_len``.
     max_num_batched_tokens: int | None = None
     # Pin the KV pool size. ``None`` lets vLLM derive it from
     # ``gpu_memory_utilization``.

@@ -24,9 +24,10 @@ except ModuleNotFoundError:  # python 3.10
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PARENT_PYPROJECT = REPO_ROOT / "pyproject.toml"
 
-# Exact pin used only while a framework +local wheel is being built.
+# Exact pin used only while a framework MR wheel is being built.
 _EXACT_RE = re.compile(
-    r"^agilerl-arena(?:\[[^\]]*\])?==(\d+\.\d+\.\d+(?:\+[A-Za-z0-9._-]+)?)(?:\s*;.*)?$"
+    r"^agilerl-arena(?:\[[^\]]*\])?=="
+    r"(\d+\.\d+\.\d+(?:\.dev\d+)?(?:\+[A-Za-z0-9._-]+)?)(?:\s*;.*)?$"
 )
 # Committed extra: compatible range, not an exact ==.
 _RANGE_RE = re.compile(
@@ -172,13 +173,13 @@ def _arena_requirements(path: Path) -> list[str]:
 
 def _check_arena_requirement(
     reqs: list[str],
-    *,
     require_tags: bool = False,
+    arena_final: str | None = None,
 ) -> str:
     """Return the agilerl-arena specifier after checking range vs build-time pin.
 
-    With ``require_tags``, the range must cover ``agilerl-arena/v*`` in this
-    clone (hub CI after ``git fetch --tags``).
+    ``arena_final`` must be inside the committed range. ``require_tags`` checks
+    ``agilerl-arena/v*`` in this clone.
     """
     if not reqs:
         _fail(f"Missing agilerl-arena in [project].dependencies ({PARENT_PYPROJECT})")
@@ -211,6 +212,15 @@ def _check_arena_requirement(
             "Expected one agilerl-arena>=X.Y.Z,<A.B range in "
             f"[project].dependencies ({PARENT_PYPROJECT})"
         )
+    if arena_final is not None:
+        if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", arena_final):
+            _fail(f"arena final must be X.Y.Z (got {arena_final!r})")
+        if not _in_range(arena_final, ranges[0]):
+            _fail(
+                f"agilerl-arena {arena_final} is outside the requirement range "
+                f"{ranges[0]} ({PARENT_PYPROJECT})"
+            )
+        return ranges[0]
     if not require_tags:
         return ranges[0]
     tagged = _last_namespaced_tag_version("agilerl-arena")
@@ -262,17 +272,26 @@ def _check_all_extra(extras: dict[str, list[str]]) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
-    """Validate extras; ``--require-tags`` also checks hub ``agilerl-arena/v*``."""
+    """Validate extras. ``--arena-final`` checks that one final is in range."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--require-tags",
         action="store_true",
         help="Require the agilerl-arena range to cover agilerl-arena/v* tags in this clone.",
     )
+    parser.add_argument(
+        "--arena-final",
+        default=None,
+        help="Final X.Y.Z the committed range must cover.",
+    )
     args = parser.parse_args(argv)
+    if args.require_tags and args.arena_final:
+        _fail("pass either --require-tags or --arena-final")
     extras = _extras(PARENT_PYPROJECT)
     spec = _check_arena_requirement(
-        _arena_requirements(PARENT_PYPROJECT), require_tags=args.require_tags
+        _arena_requirements(PARENT_PYPROJECT),
+        require_tags=args.require_tags,
+        arena_final=args.arena_final,
     )
     _check_all_extra(extras)
     print(
