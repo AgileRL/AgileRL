@@ -54,6 +54,17 @@ class TestGpusRequired:
 
         assert gpus_required(manifest.training) == 2
 
+    def test_tensor_parallel_engine_counts_a_gpu_per_rank(self):
+        manifest = manifest_with(
+            MANIFEST,
+            pop_size=1,
+            training_gpus_per_agent=2,
+            rollout_engines_per_agent=2,
+            rollout_batch_size=4,
+        )
+
+        assert gpus_required(manifest.training, tensor_parallel_size=4) == 2 + 2 * 4
+
 
 class TestCheckTiers:
     def test_orders_by_price_and_rules_out_unusable_tiers(self):
@@ -86,6 +97,17 @@ class TestCheckTiers:
         assert [c.fits for c in checks[3:]] == [True, True]
         assert checks[3].config.train_device.name == "NVIDIA L4"
         assert checks[3].estimate.fits
+
+    def test_tensor_parallel_engine_needs_a_gpu_per_rank(self):
+        manifest = TrainingManifest.model_validate(MANIFEST)
+        tiers = [tier("l4-4x", "NVIDIA L4", 4, 4.0)]
+
+        (check,) = check_tiers(
+            tiers, manifest.training, builder(manifest), tensor_parallel_size=4
+        )
+
+        assert not check.fits
+        assert check.reason == "4 GPUs, the job needs 5"
 
     def test_a_tier_whose_gpu_is_too_small_is_over_budget(self):
         manifest = TrainingManifest.model_validate(NO_TIER_FITS)

@@ -1720,3 +1720,90 @@ class TestTrainingSettingsShardGpusProperty:
             assert (
                 component(two_groups, key).n_bytes == component(one_group, key).n_bytes
             )
+
+
+class TestTrainingTensorParallelUnsupported:
+    def test_activations_stay_at_full_width(self, model, device):
+        # Arrange
+        common = {"n_training_gpus": 2, "max_model_len": 128}
+
+        # Act
+        plain = estimate_training(
+            model, device, TrainingSettings(fsdp=FSDPConfig(), **common)
+        )
+        parallel = estimate_training(
+            model, device, TrainingSettings(fsdp=FSDPConfig(tp=2), **common)
+        )
+
+        # Assert
+        assert component(parallel, "activations").n_bytes == (
+            component(plain, "activations").n_bytes
+        )
+        assert any("fsdp.tp=2 is not sized" in note for note in parallel.warnings)
+
+
+class TestFp8TensorParallelEngine:
+    def test_weights_are_one_byte_and_split_across_the_group(self, model, device):
+        # Arrange / Act
+        full = estimate_generation(model, device, GenerationSettings())
+        sharded = estimate_generation(
+            model,
+            device,
+            GenerationSettings(tensor_parallel_size=4, weight_quantization="fp8"),
+        )
+
+        # Assert: fp8 is half of bf16, and four ranks share the copy.
+        # This model has 2 KV heads, so TP 4 keeps one head on each rank.
+        assert component(sharded, "weights").n_bytes * 8 == (
+            component(full, "weights").n_bytes
+        )
+        assert (
+            component(sharded, "kv_cache").detail["worst_case_demand"] * 2
+            == (component(full, "kv_cache").detail["worst_case_demand"])
+        )
+
+    def test_super_vl_keeps_one_kv_head_and_quarters_mamba_state(self, device):
+        # Arrange: Nick's engine, TP 4 and FP8, 192 sequences at 32k.
+        common = {
+            "max_num_seqs": 192,
+            "max_model_len": 32768,
+            "gpu_memory_utilization": 0.8,
+        }
+
+        # Act
+        full = estimate_generation(SUPER_VL_MODEL, device, GenerationSettings(**common))
+        sharded = estimate_generation(
+            SUPER_VL_MODEL,
+            device,
+            GenerationSettings(
+                tensor_parallel_size=4, weight_quantization="fp8", **common
+            ),
+        )
+
+        # Assert
+        assert component(sharded, "weights").n_bytes * 8 == (
+            component(full, "weights").n_bytes
+        )
+        assert (
+            component(sharded, "kv_cache").detail["worst_case_demand"] * 2
+            == (component(full, "kv_cache").detail["worst_case_demand"])
+        )
+        assert component(sharded, "mamba_state").n_bytes * 4 == (
+            component(full, "mamba_state").n_bytes
+        )
+
+    def test_zero_kv_heads_leaves_demand_unscaled(self, device):
+        # Arrange: n_kv_heads == 0 cannot scale by heads_per_rank / n_kv_heads.
+        arch = ModelArch.from_hf_config(FALCON_H1).model_copy(update={"n_kv_heads": 0})
+        model = ModelSpec(model_id="falcon-no-kv", arch=arch)
+        settings = GenerationSettings(tensor_parallel_size=4, max_model_len=1024)
+
+        # Act
+        breakdown = estimate_generation(model, device, settings)
+
+        # Assert
+        demand = formulas.kv_cache_demand_bytes(
+            arch, settings.weight_dtype, settings.concurrency, settings.max_model_len
+        )
+        assert demand == 0
+        assert component(breakdown, "kv_cache").detail["worst_case_demand"] == 0

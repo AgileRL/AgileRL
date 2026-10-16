@@ -273,6 +273,15 @@ def weight_bytes(
     return int((counts.total - counts.multimodal_towers + towers) * DTYPE_BYTES[dtype])
 
 
+def kv_heads_per_rank(n_kv_heads: int, tensor_parallel: int) -> int:
+    """KV heads stored on one vLLM rank.
+
+    vLLM divides the heads by the tensor-parallel size. Fewer heads than
+    ranks are replicated, so each rank keeps at least one.
+    """
+    return max(1, n_kv_heads // tensor_parallel)
+
+
 def kv_storing_layers(arch: ModelArch) -> int:
     """Attention layers that keep their own K/V."""
     return arch.attention_layers - min(arch.n_kv_shared_layers, arch.attention_layers)
@@ -359,10 +368,48 @@ def aligned_kv_block_size(
     return max(KV_BLOCK_SIZE_DEFAULT, -(-tokens // alignment) * alignment)
 
 
+def mamba_page_per_rank(
+    arch: ModelArch, state_dtype: WeightDtype = "bf16", tensor_parallel: int = 1
+) -> int:
+    """One Mamba layer's state on one vLLM rank.
+
+    vLLM shards the conv window and the SSM state by the tensor-parallel
+    size. Heads must divide that size. Groups that do not divide it are
+    replicated up to one group per rank, which vLLM only allows when there
+    is a single group.
+    """
+    if tensor_parallel == 1 or not arch.is_hybrid_ssm:
+        return mamba_page_bytes(arch, state_dtype)
+    heads = arch.mamba_n_heads
+    groups = arch.mamba_n_groups
+    if heads % tensor_parallel != 0:
+        msg = (
+            f"mamba_num_heads ({heads}) must be divisible by "
+            f"tensor_parallel_size ({tensor_parallel})"
+        )
+        raise ValueError(msg)
+    if groups % tensor_parallel != 0 and groups != 1:
+        msg = (
+            f"mamba n_groups ({groups}) must divide tensor_parallel_size "
+            f"({tensor_parallel}), or be 1"
+        )
+        raise ValueError(msg)
+    if groups % tensor_parallel != 0:
+        groups = tensor_parallel
+    width = heads * arch.mamba_d_head
+    conv_dim = (width + 2 * groups * arch.mamba_d_state) // tensor_parallel
+    recurrent = (heads // tensor_parallel) * arch.mamba_d_head * arch.mamba_d_state
+    return int(
+        conv_dim * max(arch.mamba_d_conv - 1, 0) * DTYPE_BYTES[state_dtype]
+        + recurrent * DTYPE_BYTES[arch.mamba_ssm_state_dtype]
+    )
+
+
 def mamba_state_bytes(
     arch: ModelArch,
     concurrency: int,
     state_dtype: WeightDtype = "bf16",
+    tensor_parallel: int = 1,
 ) -> int:
     """Recurrent-state cache for a hybrid model's Mamba layers.
 
@@ -370,10 +417,11 @@ def mamba_state_bytes(
     ``mamba2_state_shape``: a causal-conv window of ``(conv_dim, d_conv - 1)``
     and a recurrent state of ``(n_heads, d_head, d_state)``. Both are
     constant in context length, so this term scales with concurrency.
+    ``tensor_parallel`` applies :func:`mamba_page_per_rank`.
     """
     if not arch.is_hybrid_ssm:
         return 0
-    per_layer = mamba_page_bytes(arch, state_dtype)
+    per_layer = mamba_page_per_rank(arch, state_dtype, tensor_parallel)
     return int(
         arch.n_mamba_layers * per_layer * concurrency * MAMBA_STATE_BLOCKS_PER_SEQ
     )
