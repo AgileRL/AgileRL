@@ -35,6 +35,10 @@ from tests import TINY_LLM_FIXTURE_PATH
 from tests.helpers.rollout_doubles import FakeEnvClient, MiniTokenizer
 
 
+def rewrite_action(text: str) -> str:
+    return text.replace("'", "\\'")
+
+
 class ChatTemplateTokenizer(MiniTokenizer):
     """Tokenizer whose chat template returns a fixed render."""
 
@@ -150,6 +154,47 @@ class TestRolloutHarnessVision:
             prompt["pixel_values"],
             torch.ones(1, 3, 2, 2),
         )
+
+    def test_named_image_fields_reach_the_prompt(self) -> None:
+        # Arrange
+        class NamedImageClient(FakeEnvClient):
+            def reset(
+                self, seed: int | None = None, *, row_index: int | None = None
+            ) -> tuple[object, dict[str, Any]]:
+                del seed, row_index
+                return {
+                    "text": "page",
+                    "page": [[0, 1], [2, 3]],
+                    "task_images": [[[255, 0, 0]]],
+                }, {}
+
+        def fake_processor(
+            *, text: str, images: object, return_tensors: str
+        ) -> dict[str, torch.Tensor]:
+            del text, return_tensors
+            rows = len(images) if isinstance(images, list) else 1
+            return {
+                "input_ids": torch.tensor([[1, 2, 3, 4]]),
+                "pixel_values": torch.ones(rows, 3, 2, 2),
+            }
+
+        harness = RolloutHarness(
+            NamedImageClient(),
+            MiniTokenizer(),
+            max_turns=1,
+            apply_chat_template=False,
+            vision_processor=fake_processor,
+            screenshot_field="page",
+            goal_images_field="task_images",
+        )
+
+        # Act
+        prompt, _info = harness.reset()
+
+        # Assert
+        assert prompt["prompt"].count(IMAGE_PLACEHOLDER) == 2
+        assert "page" in prompt["prompt"]
+        assert prompt["pixel_values"].shape[0] == 2
 
     def test_get_episode_data_before_reset_raises_never_called(self) -> None:
         # Arrange
@@ -272,7 +317,7 @@ class TestRolloutHarnessVision:
     ) -> None:
         monkeypatch.setattr(
             "agilerl.llm_envs.harness.observation_text_and_image",
-            lambda _payload: ("", object()),
+            lambda _payload, **_kwargs: ("", object()),
         )
         seen: list[str] = []
 
@@ -1215,11 +1260,15 @@ class TestRolloutHarnessSegmentRestart:
         # Arrange
         tokenizer = image_token_tokenizer
         end = tokenizer.convert_tokens_to_ids("<|im_end|>")
-        # Quoting escapes every ', so the history entry outgrows the sampled turn.
+        # Escaping every ' makes the history entry outgrow the sampled turn.
         sampled = [*newline_first_tokens(tokenizer, "say: " + "'" * 60 + "x"), end]
         continued = run_image_episode(numbered_screen_harness(tokenizer), sampled)
         threshold = continued[1]["prompt_token_len"] - 1
-        harness = numbered_screen_harness(tokenizer, segment_prompt_tokens=threshold)
+        harness = numbered_screen_harness(
+            tokenizer,
+            segment_prompt_tokens=threshold,
+            action_processor=rewrite_action,
+        )
         prompt, _info = harness.reset()
         output = vllm_image_turn(prompt, sampled)
 
@@ -1251,6 +1300,7 @@ class TestRolloutHarnessSegmentRestart:
             tokenizer,
             segment_prompt_tokens=continued_len - 1,
             max_model_len=continued_len,
+            action_processor=rewrite_action,
         )
 
         # Act
@@ -1366,12 +1416,15 @@ class TestRolloutHarnessSegmentRestart:
         # Arrange
         tokenizer = image_token_tokenizer
         end = tokenizer.convert_tokens_to_ids("<|im_end|>")
-        # Quoting escapes every ', so the history entry outgrows the sampled turn.
+        # Escaping every ' makes the history entry outgrow the sampled turn.
         sampled = [*newline_first_tokens(tokenizer, "say: " + "'" * 60 + "x"), end]
         continued = run_image_episode(numbered_screen_harness(tokenizer), sampled)
         continued_len = continued[1]["prompt_token_len"]
         harness = numbered_screen_harness(
-            tokenizer, segment_max_images=1, max_model_len=continued_len + 1
+            tokenizer,
+            segment_max_images=1,
+            max_model_len=continued_len + 1,
+            action_processor=rewrite_action,
         )
         prompt, _info = harness.reset()
         output = vllm_image_turn(prompt, sampled)
@@ -2084,6 +2137,9 @@ class TestRolloutHarnessActionHistory:
         self, thinking_tokenizer: PreTrainedTokenizerBase
     ) -> None:
         # Arrange
+        def wrap_fill(text: str) -> str:
+            return f"fill('{text[5:-1]}')"
+
         tokenizer = thinking_tokenizer
         end = tokenizer.convert_tokens_to_ids("<|im_end|>")
         action = "fill(" + "- " * 500_000 + "1)"
@@ -2095,6 +2151,7 @@ class TestRolloutHarnessActionHistory:
             max_turns=2,
             system_prompt=INSTRUCTION,
             segment_prompt_tokens=200,
+            action_processor=wrap_fill,
         )
 
         # Act

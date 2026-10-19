@@ -5,8 +5,6 @@
 
 from __future__ import annotations
 
-import ast
-import re
 import uuid
 import warnings
 from collections import deque
@@ -46,7 +44,7 @@ __all__ = [
     "PROMPT_LIMIT_INFO_KEY",
     "RolloutHarness",
     "TranscriptContinuityError",
-    "env_action_text",
+    "action_span",
 ]
 
 # Every restart prompt repeats each entry; an unclosed reasoning block is the whole generation.
@@ -59,50 +57,14 @@ class TranscriptContinuityError(RuntimeError):
     """A turn was sampled from a context that does not extend the tokens sampled so far."""
 
 
-def env_action_text(gen_text: str) -> str:
-    """Text the env executes: what follows the first ``</think>``, else the whole text.
+def action_span(gen_text: str) -> str:
+    """Text after the first ``</think>``, else the whole generation.
 
     A template that prefills an open ``<think>`` yields ``reasoning</think>action``
     with no opening tag. A reasoning block that never closes passes through whole.
     """
-    return _quote_unparsed_call(_action_span(gen_text))
-
-
-def _action_span(gen_text: str) -> str:
-    """The unquoted action: what follows the first ``</think>``, else the whole text."""
     _reasoning, closed, action = gen_text.partition("</think>")
     return action.strip() if closed else gen_text
-
-
-def _quote_unparsed_call(text: str) -> str:
-    """Wrap the payload of a call the env cannot parse as a string argument."""
-    raw = text.strip()
-    matched = re.match(r"\A([A-Za-z_][A-Za-z0-9_]*)\b(.*)\Z", raw, re.DOTALL)
-    if matched is None:
-        return text
-    name, rest = matched.group(1), matched.group(2).strip()
-    # A tag after the call is not a payload to quote.
-    if not rest or rest[0] not in "({:" or "<" in raw:
-        return text
-    try:
-        tree = ast.parse(raw)
-    # Deeply nested text overflows the parser's stack or the AST builder's recursion.
-    except (SyntaxError, MemoryError, RecursionError):
-        tree = None
-    if (
-        tree is not None
-        and len(tree.body) == 1
-        and isinstance(tree.body[0], ast.Expr)
-        and isinstance(tree.body[0].value, ast.Call)
-    ):
-        return raw
-    payload = rest.lstrip(":{( ").rstrip(")} ")
-    if len(payload) >= 2 and payload[0] == payload[-1] and payload[0] in "'\"":
-        payload = payload[1:-1]
-    if not payload:
-        return text
-    escaped = payload.replace("\\", "\\\\").replace("'", "\\'")
-    return f"{name}('{escaped}')"
 
 
 if TYPE_CHECKING:
@@ -145,6 +107,7 @@ class RolloutHarness(RestartPromptMixin):
         action_field: str = "message",
         observation_field: str | None = None,
         observation_processor: Callable[[Any], str] | None = None,
+        action_processor: Callable[[str], str] | None = None,
         instruction: str = "",
         strict_chat_template_boundary: bool = True,
         apply_chat_template: bool = True,
@@ -160,6 +123,8 @@ class RolloutHarness(RestartPromptMixin):
         restart_older_obs_field: str = "",
         restart_older_images: bool = True,
         action_error_field: str = "",
+        screenshot_field: str = "screenshot",
+        goal_images_field: str = "goal_images",
     ) -> None:
         """Drive a text env at the token level over ``env_client`` (a URL or a client object).
 
@@ -180,6 +145,9 @@ class RolloutHarness(RestartPromptMixin):
             text, replacing the default (:func:`process_observation`) for envs
             whose observations need more than a field lookup. Runs on the
             collector's I/O threads, so it must be thread-safe.
+        :param action_processor: Turns the post-``</think>`` action text into
+            what the env receives. ``None`` sends that text unchanged. The
+            restart prompt's action list uses the same callable.
         :param instruction: Prompt used when reset's observation renders empty.
         :param strict_chat_template_boundary: Raise when the chat template cannot
             render a multi-turn boundary; ``False`` warns and falls back to
@@ -212,7 +180,7 @@ class RolloutHarness(RestartPromptMixin):
             ``limit_mm_per_prompt``). A restarted prompt carries one image, plus
             kept turns' images up to ``segment_max_images - 1`` in all.
             ``None`` puts no image limit on a segment. The reset observation's
-            ``goal_images`` follow the first prompt's text, repeat in every
+            task images (``goal_images_field``) follow the first prompt's text, repeat in every
             restarted prompt, and count toward the limit. They are letterboxed
             to that observation's image size (the first goal image's size when
             it has none).
@@ -233,6 +201,10 @@ class RolloutHarness(RestartPromptMixin):
         :param action_error_field: Observation field holding the error text of
             the action just taken; a non-blank value follows that action in the
             restarted prompt's action list. ``""`` lists actions alone.
+        :param screenshot_field: Observation field holding the page image.
+            ``""`` reads no page image. ``image`` is always read when present.
+        :param goal_images_field: Observation field holding the task images
+            that follow the first prompt. ``""`` reads none.
         :ivar full_ids: Running token sequence of the current segment (prompt +
             generations + feedback).
         :ivar turn_boundaries: ``(start, end, turn_idx)`` spans of policy-generated
@@ -264,6 +236,8 @@ class RolloutHarness(RestartPromptMixin):
         self._restart_older_obs_field = restart_older_obs_field
         self._restart_older_images = restart_older_images
         self._action_error_field = action_error_field
+        self._screenshot_field = screenshot_field
+        self._goal_images_field = goal_images_field
         self._kept_turns: deque[KeptTurn] = deque(maxlen=restart_keep_turns)
         # This turn's sampled ids, held until its observation arrives.
         self._gen_ids = torch.empty(0, dtype=torch.long)
@@ -285,6 +259,7 @@ class RolloutHarness(RestartPromptMixin):
             observation_processor
             or partial(process_observation, observation_field=observation_field)
         )
+        self._action_processor = action_processor
         self._instruction = instruction
         self._strict_chat_template_boundary = strict_chat_template_boundary
         if isinstance(env_client, EnvClientProtocol):
@@ -914,12 +889,16 @@ class RolloutHarness(RestartPromptMixin):
         """
         _ = self.tools
         payload, info = self._env_client.reset(seed=seed, row_index=row_index)
-        obs_text, image = observation_text_and_image(payload)
+        obs_text, image = observation_text_and_image(
+            payload, screenshot_field=self._screenshot_field
+        )
         if image is None:
             obs_text = self._render_observation(payload) or self._instruction
         elif not obs_text:
             obs_text = self._instruction
-        self._goal_images = observation_goal_images(payload)
+        self._goal_images = observation_goal_images(
+            payload, goal_images_field=self._goal_images_field
+        )
         if self._goal_images:
             # Every image of an episode stacks into one pixel_values tensor, so
             # goal images take the observation image's size, letterboxed.
@@ -1110,12 +1089,18 @@ class RolloutHarness(RestartPromptMixin):
             )
             raise ValueError(msg)
 
+    def _processed_action(self, text: str) -> str:
+        """The action text the env executes."""
+        if self._action_processor is None:
+            return text
+        return self._action_processor(text)
+
     def _record_action(self, gen_text: str) -> None:
         """Add this turn's env action to the restart history, capped in length."""
         if self._segment_prompt_tokens is None and self._segment_max_images is None:
             return
-        raw = _action_span(gen_text)
-        action = _quote_unparsed_call(raw[:ACTION_HISTORY_MAX_CHARS])
+        raw = action_span(gen_text)
+        action = self._processed_action(raw[:ACTION_HISTORY_MAX_CHARS])
         if (
             len(raw) > ACTION_HISTORY_MAX_CHARS
             or len(action) > ACTION_HISTORY_MAX_CHARS
@@ -1168,14 +1153,20 @@ class RolloutHarness(RestartPromptMixin):
         ``restart_older_obs_field`` text; each is ``None`` when absent or unset.
         """
         payload, reward, terminated, truncated, info = self._env_client.step(
-            env_action_text(gen_text)
+            self._processed_action(action_span(gen_text))
         )
         action_error = self._action_error_text(payload)
         older_obs_text = self._older_obs_text(payload)
         if is_str_keyed_dict(payload) and (
-            payload.get("image") is not None or payload.get("screenshot") is not None
+            payload.get("image") is not None
+            or (
+                self._screenshot_field
+                and payload.get(self._screenshot_field) is not None
+            )
         ):
-            obs_text, image = observation_text_and_image(payload)
+            obs_text, image = observation_text_and_image(
+                payload, screenshot_field=self._screenshot_field
+            )
         else:
             image = None
             obs_text = self._render_observation(payload)
