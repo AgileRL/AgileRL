@@ -370,11 +370,10 @@ def _routed_counts(send: torch.Tensor, exchange: TokenExchange) -> RoutedCounts:
     if scope is not None and scope.replay:
         recorded = scope.calls[scope.position]
         scope.position += 1
-        # Checked on device, so the recompute issues no host sync.
-        torch._assert_async(
-            torch.eq(send, recorded.send).all(),
-            "Recompute routed tokens differently from the checkpointed forward",
-        )
+        # Host lists: a tensor eq would be a new op on non-reentrant recompute.
+        if send.tolist() != recorded.send_lists:
+            msg = "Recompute routed tokens differently from the checkpointed forward"
+            raise RuntimeError(msg)
         return recorded
     received = exchange_expert_counts(send, exchange.ep_group, exchange.ep_degree)
     send_lists, received_lists = torch.stack((send, received)).tolist()

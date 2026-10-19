@@ -236,9 +236,11 @@ def narrow_tensor(value: object) -> torch.Tensor:
 
 def to_agent_tensors(per_agent: TensorDict, device: DeviceType) -> TensorMapping:
     """Move each per-agent leaf of ``per_agent`` onto ``device``."""
+    target = torch.device(device)
+    moved = per_agent if per_agent.device == target else per_agent.to(target)
     return {
-        agent_id: narrow_tensor(agent_tensor).to(device)
-        for agent_id, agent_tensor in per_agent.items()
+        agent_id: narrow_tensor(agent_tensor)
+        for agent_id, agent_tensor in moved.items()
     }
 
 
@@ -413,12 +415,11 @@ def share_encoder_parameters(
         )
         networks.append(other)
 
-    # detaching encoder parameters from computation graph reduces
-    # memory overhead and speeds up training
+    # Detached leaves must replace the borrower Parameter slots.
     param_vals: TensorDict = from_module(policy.encoder).detach()
     for network in networks:
         target_params: TensorDict = param_vals.clone().lock_()
-        target_params.to_module(network.encoder)
+        target_params.to_module(network.encoder, preserve_module_state=False)
 
 
 def get_hidden_states_shape_from_model(
@@ -1813,6 +1814,8 @@ def get_experiences_samples(
         sampled_exp: Any
         if isinstance(exp, torch.Tensor):
             sampled_exp = exp[minibatch_indices]
+        elif isinstance(exp, TensorDict):
+            sampled_exp = exp[torch.as_tensor(minibatch_indices, dtype=torch.long)]
         elif isinstance(exp, dict):
             sampled_exp = {key: _take(value) for key, value in exp.items()}
         elif isinstance(exp, tuple):
@@ -1861,7 +1864,12 @@ def stack_experiences(
         # each branch re-asserts that element type since narrowing `first` does
         # not narrow `exp`.
         first = exp[0]
-        if isinstance(first, dict):
+        if isinstance(first, TensorDict):
+            stacked_exp = TensorDict.stack(
+                [e for e in exp if isinstance(e, TensorDict)],
+                dim=0,
+            )
+        elif isinstance(first, dict):
             grouped: defaultdict[str, list[Any]] = defaultdict(list)
             for it in exp:
                 assert is_str_keyed_dict(it)
@@ -1995,6 +2003,15 @@ def flatten_experiences(*experiences: ObservationType) -> tuple[ArrayOrTensor, .
         flattened_exp: Any
         if isinstance(exp, (torch.Tensor, np.ndarray)):
             flattened_exp = flatten(exp)
+        elif isinstance(exp, TensorDict):
+            if exp.batch_dims >= 2:
+                flattened_exp = exp.transpose(0, 1).reshape(-1)
+            elif exp.batch_dims == 1:
+                flattened_exp = (
+                    exp.unsqueeze(1).transpose(0, 1).reshape(exp.batch_size[0])
+                )
+            else:
+                flattened_exp = exp
         elif is_str_keyed_dict(exp):
             flattened_exp = {
                 key: flatten(value)
@@ -2455,6 +2472,12 @@ def concatenate_tensors(tensors: list[TorchObsType]) -> TorchObsType:
     :rtype: TorchObsType
     """
     first = tensors[0]
+    if isinstance(first, TensorDict):
+        tds: list[TensorDict] = []
+        for t in tensors:
+            assert isinstance(t, TensorDict)
+            tds.append(t)
+        return TensorDict.cat(tds, dim=0)
     if isinstance(first, dict):
         # Homogeneous by construction: all entries share the first entry's structure
         concat_dict: dict[str, Any] = {}

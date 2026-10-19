@@ -2647,21 +2647,18 @@ class TestFsdpGatheredFrozenExperts:
 
 
 class _DriftingRouterBlock(nn.Module):
-    """Routes inside the block; the second call (checkpoint recompute) picks experts 0 and 1."""
+    """Routes inside the block; ``recompute_bias`` is added on every call."""
 
     def __init__(self, moe: nn.Module):
         super().__init__()
         self.lin = nn.Linear(8, 8)
         self.router = nn.Linear(8, 4, bias=False)
         self.moe = moe
-        self.calls = 0
+        self.register_buffer("recompute_bias", torch.zeros(4))
 
     def forward(self, hidden_states):
         hidden = self.lin(hidden_states)
-        logits = self.router(hidden)
-        if self.calls % 2 == 1:
-            logits = logits + torch.tensor([100.0, 100.0, -100.0, -100.0])
-        self.calls += 1
+        logits = self.router(hidden) + self.recompute_bias
         top_k_logits, top_k_index = logits.topk(2, -1)
         return self.moe(hidden, top_k_index, torch.softmax(top_k_logits, -1))
 
@@ -2713,7 +2710,11 @@ def _recompute_routing_drift_worker(
             gradient_checkpointing=True,
         )
         ep_hidden = hidden.clone().requires_grad_(True)
-        (model(ep_hidden) * upstream).sum().backward()
+        out = model(ep_hidden)
+        for name, buf in model.named_buffers():
+            if name.endswith("recompute_bias"):
+                buf.copy_(torch.tensor([100.0, 100.0, -100.0, -100.0], dtype=buf.dtype))
+        (out * upstream).sum().backward()
 
         assert torch.allclose(ep_hidden.grad, ref_hidden.grad, rtol=1e-5, atol=1e-7)
         result_queue.put((rank, "ok", None))
