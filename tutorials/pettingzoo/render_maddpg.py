@@ -39,6 +39,7 @@ if __name__ == "__main__":
     env = ss.color_reduction_v0(env, mode="B")
     env = ss.resize_v1(env, x_size=84, y_size=84)
     env = ss.frame_stack_v1(env, 4)
+    env = ss.reshape_v0(env, (4, 84, 84))  # channels first, as in training
 
     env.reset()
 
@@ -48,6 +49,7 @@ if __name__ == "__main__":
     # Load the saved agent
     path = "./models/MADDPG/MADDPG_trained_agent.pt"
     maddpg = MADDPG.load(path, device)
+    maddpg.set_training_mode(False)  # act greedily, without exploration noise
 
     # Define test loop parameters
     episodes = 10  # Number of episodes to test agent on
