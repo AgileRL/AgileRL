@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 import warnings
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -251,14 +251,17 @@ def _reject_kv_cache_quantization(value: str | None) -> None:
         raise ValueError(msg)
 
 
-def _reject_engine_quantization(value: str | None) -> None:
-    """Refuse engine-side quantization: this estimator sizes unquantized engines."""
-    if value is not None and value.lower() != "none":
-        msg = (
-            f"Engine quantization ({value!r}) is not sized; this estimator sizes "
-            "unquantized engines."
-        )
-        raise ValueError(msg)
+def _engine_weight_quantization(value: str | None) -> Literal["none", "fp8"]:
+    """``fp8`` engine weights are one byte. Anything else is unquantized or refused."""
+    if value is None or value.lower() == "none":
+        return "none"
+    if value.lower() == "fp8":
+        return "fp8"
+    msg = (
+        f"Engine quantization ({value!r}) is not sized; this estimator sizes "
+        "bf16 and fp8 engines."
+    )
+    raise ValueError(msg)
 
 
 def _group_size(spec: LLMAlgorithmSpec) -> int:
@@ -310,19 +313,12 @@ def _resolve_vllm(spec: LLMAlgorithmSpec) -> VLLMConfig:
             "only, so name the rollout engine config."
         )
         raise ValueError(msg)
-    _reject_engine_quantization(vllm.quantization)
     model = vllm.vllm_model_name_or_path
     if model is not None and model != spec.pretrained_model_name_or_path:
         msg = (
             f"vllm_model_name_or_path ({model!r}) serves a different checkpoint "
             "than the trainer fine-tunes "
             f"({spec.pretrained_model_name_or_path!r}); this estimator sizes one arch."
-        )
-        raise ValueError(msg)
-    if vllm.tensor_parallel_size != 1:
-        msg = (
-            f"tensor_parallel_size={vllm.tensor_parallel_size} is not modeled; "
-            "this estimator sizes single-GPU engines."
         )
         raise ValueError(msg)
     if spec.vllm_engine_args:
@@ -502,6 +498,8 @@ def generation_settings_from_manifest(
         max_lora_rank=max(vllm.max_lora_rank, lora.lora_r),
         max_loras=vllm.max_loras,
         weight_dtype=_weight_dtype(vllm.dtype),
+        weight_quantization=_engine_weight_quantization(vllm.quantization),
+        tensor_parallel_size=vllm.tensor_parallel_size,
         weight_variant="engine" if stripped else "base",
         concurrent_requests=spec.batch_size * _group_size(spec),
     )

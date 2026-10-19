@@ -917,6 +917,11 @@ class GenerationSettings(BaseModel):
     max_lora_rank: int = 16
     max_loras: int = 1
     weight_dtype: WeightDtype = "bf16"
+    # ``fp8`` stores the engine weights at one byte. KV and activations stay
+    # at ``weight_dtype``.
+    weight_quantization: Literal["none", "fp8"] = "none"
+    # Ranks that share one engine copy. 1 is a single-GPU engine.
+    tensor_parallel_size: int = Field(default=1, ge=1)
     # Name of the :class:`WeightVariant` the engine loads (vLLM may load a
     # different variant than the trainer, e.g. a tower-stripped export).
     weight_variant: str = "base"

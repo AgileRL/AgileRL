@@ -1031,6 +1031,50 @@ class TestMambaStateBytes:
         assert formulas.mamba_state_bytes(QWEN_05B, 16) == 0
 
 
+class TestMambaPagePerRank:
+    def test_tp_one_matches_the_unsharded_page(self):
+        arch = ModelArch.from_hf_config(NEMOTRON_H)
+
+        assert formulas.mamba_page_per_rank(arch) == formulas.mamba_page_bytes(arch)
+        assert formulas.mamba_page_per_rank(QWEN_05B, tensor_parallel=4) == 0
+
+    def test_heads_must_divide_tensor_parallel(self):
+        arch = ModelArch.from_hf_config(NEMOTRON_H)
+
+        with pytest.raises(
+            ValueError,
+            match=r"mamba_num_heads \(128\) must be divisible by "
+            r"tensor_parallel_size \(3\)",
+        ):
+            formulas.mamba_page_per_rank(arch, tensor_parallel=3)
+
+    def test_groups_must_divide_or_be_one(self):
+        arch = ModelArch.from_hf_config(NEMOTRON_H)
+
+        with pytest.raises(
+            ValueError,
+            match=r"mamba n_groups \(8\) must divide tensor_parallel_size \(16\)",
+        ):
+            formulas.mamba_page_per_rank(arch, tensor_parallel=16)
+
+    def test_a_single_group_replicates_to_one_per_rank(self):
+        # Falcon-H1 publishes one Mamba group. vLLM copies it onto every rank.
+        arch = ModelArch.from_hf_config(FALCON_H1)
+        tp = 4
+        groups = tp
+        conv_dim = (
+            arch.mamba_n_heads * arch.mamba_d_head + 2 * groups * arch.mamba_d_state
+        ) // tp
+        recurrent = (arch.mamba_n_heads // tp) * arch.mamba_d_head * arch.mamba_d_state
+        expected = conv_dim * max(arch.mamba_d_conv - 1, 0) * 2 + recurrent * 4
+
+        page = formulas.mamba_page_per_rank(arch, tensor_parallel=tp)
+
+        assert arch.mamba_n_groups == 1
+        assert page == expected
+        assert 0 < page < formulas.mamba_page_bytes(arch)
+
+
 class TestAlignedKvBlockSize:
     def test_matches_vllm(self):
         """SSM state dtype changes the Mamba page and the aligned KV block size."""

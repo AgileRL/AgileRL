@@ -152,10 +152,19 @@ def engine_terms(
     batched_tokens = formulas.resolve_max_num_batched_tokens(
         settings.max_num_seqs, settings.max_model_len, settings.max_num_batched_tokens
     )
+    tp = settings.tensor_parallel_size
     # Sampler buffers: per-sequence fp32 logits and probs over the vocab.
-    sampler = 2 * settings.max_num_seqs * arch.vocab_size * 4
+    # Tensor parallel shards the lm_head, so each rank holds 1/tp of the vocab.
+    sampler = 2 * settings.max_num_seqs * arch.vocab_size * 4 // tp
+    weight_elems = formulas.weight_bytes(counts, settings.weight_dtype, variant)
+    weight_byte = (
+        1.0
+        if settings.weight_quantization == "fp8"
+        else DTYPE_BYTES[settings.weight_dtype]
+    )
+    weights = int(weight_elems / DTYPE_BYTES[settings.weight_dtype] * weight_byte / tp)
     terms = {
-        "weights": formulas.weight_bytes(counts, settings.weight_dtype, variant),
+        "weights": weights,
         "startup_peak": formulas.block_recompute_bytes(
             arch,
             1,
@@ -169,20 +178,34 @@ def engine_terms(
             settings.max_loras
             * formulas.lora_param_count(arch, settings.max_lora_rank)
             * act_bytes
+            / tp
         ),
-        "kv_demand": formulas.kv_cache_demand_bytes(
-            arch,
-            settings.weight_dtype,
-            settings.concurrency,
-            settings.max_model_len,
-        ),
+        "kv_demand": _kv_demand_per_rank(arch, settings),
         "mamba_state": formulas.mamba_state_bytes(
             arch,
             settings.max_num_seqs,
             state_dtype=settings.weight_dtype,
+            tensor_parallel=tp,
         ),
     }
     return terms, batched_tokens, sampler
+
+
+def _kv_demand_per_rank(arch: ModelArch, settings: GenerationSettings) -> int:
+    """KV bytes on one engine rank, replicating heads when TP exceeds them."""
+    demand = formulas.kv_cache_demand_bytes(
+        arch,
+        settings.weight_dtype,
+        settings.concurrency,
+        settings.max_model_len,
+    )
+    if arch.n_kv_heads == 0:
+        return demand
+    return (
+        demand
+        * formulas.kv_heads_per_rank(arch.n_kv_heads, settings.tensor_parallel_size)
+        // arch.n_kv_heads
+    )
 
 
 def training_warnings(
@@ -196,6 +219,11 @@ def training_warnings(
             "At beta=0 the estimate skips the reference forward, but the fused "
             "no-grad pass still builds that row, so the run pays for one extra "
             "row of activations."
+        )
+    if settings.fsdp is not None and settings.fsdp.tp > 1:
+        warnings.append(
+            f"fsdp.tp={settings.fsdp.tp} is not sized. Activations are priced "
+            "as if every rank held the full hidden state."
         )
     if settings.n_training_gpus > 1:
         n_gpus = settings.n_training_gpus
@@ -541,7 +569,11 @@ def activation_peak(
     nograd_rows = max(settings.n_adapter_rows, settings.micro_batch_size)
     nograd_pass = (
         formulas.nograd_forward_bytes(
-            arch, nograd_rows, seq_len, act_bytes, eager_mamba_scan=eager_mamba_scan
+            arch,
+            nograd_rows,
+            seq_len,
+            act_bytes,
+            eager_mamba_scan=eager_mamba_scan,
         )
         if settings.has_nograd_pass
         else 0
@@ -1062,7 +1094,10 @@ def estimate_generation(
         else max(budget - (non_kv - mamba_state), 0)
     )
     full_sequence = kv_demand // settings.concurrency + formulas.mamba_state_bytes(
-        arch, 1, state_dtype=settings.weight_dtype
+        arch,
+        1,
+        state_dtype=settings.weight_dtype,
+        tensor_parallel=settings.tensor_parallel_size,
     )
     warnings = generation_warnings(
         model,

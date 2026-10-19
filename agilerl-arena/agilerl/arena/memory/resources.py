@@ -32,15 +32,16 @@ class TierCheck:
         return self.reason is None
 
 
-def gpus_required(training: TrainingSpec) -> int:
+def gpus_required(training: TrainingSpec, tensor_parallel_size: int = 1) -> int:
     """GPUs one node needs: each member's trainers plus its rollout engines.
 
-    ``rollout_engines_per_agent="auto"`` needs at least one engine per member.
+    Each engine occupies ``tensor_parallel_size`` GPUs, matching
+    ``vllm_config.tensor_parallel_size``. ``rollout_engines_per_agent="auto"``
+    needs at least one engine per member.
     """
     engines = training.rollout_engines_per_agent
-    per_member = training.training_gpus_per_agent + (
-        1 if engines == "auto" else engines
-    )
+    engine_count = 1 if engines == "auto" else engines
+    per_member = training.training_gpus_per_agent + engine_count * tensor_parallel_size
     return training.pop_size * per_member
 
 
@@ -48,14 +49,16 @@ def check_tiers(
     tiers: Iterable[dict[str, Any]],
     training: TrainingSpec,
     build_config: Callable[[DeviceSpec], RunConfig],
+    tensor_parallel_size: int = 1,
 ) -> list[TierCheck]:
     """Every tier's verdict, cheapest first.
 
     :param tiers: Resource tiers as ``arena resources list`` returns them.
     :param training: The manifest's training section, for the GPU layout.
     :param build_config: The manifest's run config on one GPU of a tier.
+    :param tensor_parallel_size: GPUs each rollout engine occupies.
     """
-    needed = gpus_required(training)
+    needed = gpus_required(training, tensor_parallel_size)
     checks = []
     for tier in sorted(tiers, key=lambda t: t["price_per_node_hour"]):
         gpu_type = tier.get("gpu_type")

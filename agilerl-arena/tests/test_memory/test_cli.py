@@ -1009,6 +1009,18 @@ class TestMainResourceTier:
         assert "Cheapest resource tier that fits: l4-2x (2x NVIDIA L4" in out
         assert "Memory estimate" in out
 
+    def test_tensor_parallel_engine_needs_a_gpu_per_rank(self, tmp_path, capsys):
+        doc = copy.deepcopy(MANIFEST)
+        doc["algorithm"]["vllm_config"]["tensor_parallel_size"] = 4
+        path = tmp_path / "tp.yaml"
+        path.write_text(yaml.safe_dump(doc))
+
+        code = main(str(path), tiers=TIERS, config_path=TINY_CONFIG, no_color=True)
+
+        out = capsys.readouterr().out
+        assert code == EXIT_OVER_BUDGET
+        assert "the job needs 5" in out
+
     def test_json_names_the_tier_and_every_verdict(self, manifest_path, capsys):
         code = main(manifest_path, tiers=TIERS, config_path=TINY_CONFIG, as_json=True)
 

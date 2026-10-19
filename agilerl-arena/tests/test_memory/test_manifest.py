@@ -389,12 +389,14 @@ class TestGenerationSettings:
         settings = generation_settings_from_manifest(doc)
         assert settings.max_num_seqs == 8
 
-    def test_tensor_parallel_engine_is_refused(self):
+    def test_tensor_parallel_engine_is_sized(self):
         doc = manifest(
-            algorithm={"vllm_config": {"tensor_parallel_size": 2, "sleep_mode": True}}
+            algorithm={"vllm_config": {"tensor_parallel_size": 4, "sleep_mode": True}}
         )
-        with pytest.raises(ValueError, match="tensor_parallel_size"):
-            generation_settings_from_manifest(doc)
+
+        settings = generation_settings_from_manifest(doc)
+
+        assert settings.tensor_parallel_size == 4
 
     def test_verbatim_engine_args_warn(self):
         doc = manifest(
@@ -438,7 +440,7 @@ class TestGenerationSettings:
 
     @pytest.mark.parametrize(
         "quantization",
-        ["awq", "gptq", "fp8", "compressed-tensors", "bitsandbytes", "int8"],
+        ["awq", "gptq", "compressed-tensors", "bitsandbytes", "int8"],
     )
     def test_engine_quantization_is_refused(self, quantization):
         doc = manifest(
@@ -451,6 +453,15 @@ class TestGenerationSettings:
         )
         with pytest.raises(ValueError, match="Engine quantization"):
             generation_settings_from_manifest(doc)
+
+    def test_fp8_engine_weights_are_sized(self):
+        doc = manifest(
+            algorithm={"vllm_config": {"quantization": "fp8", "sleep_mode": True}}
+        )
+
+        settings = generation_settings_from_manifest(doc)
+
+        assert settings.weight_quantization == "fp8"
 
     def test_unrecognized_engine_dtype_is_refused(self):
         doc = manifest(algorithm={"vllm_config": {"dtype": "int4", "sleep_mode": True}})
