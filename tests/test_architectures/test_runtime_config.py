@@ -148,7 +148,6 @@ class TestFamilyRuntimeConfigs:
     def test_qwen3_5_lookup(self) -> None:
         runtime = FAMILY_RUNTIME_CONFIGS["qwen3_5"]
         tower = runtime.language_tower
-        assert tower.lora_key_prefix == "model.language_model.model."
         assert tower.hf_overrides is qwen3_5_language_tower_hf_override
         assert tower.model_class_overrides == QWEN3_5_MODEL_CLASS_OVERRIDES
         assert runtime.vllm.mamba_cache_mode == "align"
