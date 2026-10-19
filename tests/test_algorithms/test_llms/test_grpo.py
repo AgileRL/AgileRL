@@ -1649,7 +1649,7 @@ class TestGRPOLigerLossDispatch:
     :meth:`GRPO._liger_loss`. Each branch sets up ``liger_loss_type`` /
     ``importance_sampling_level`` / ``epsilon_*`` differently. We don't
     care about the actual Liger call result — patch ``_get_lm_head`` and
-    ``LigerFusedLinearGRPOFunction.apply`` so the test stays CPU-only and
+    ``LigerFusedLinearGRPOFrozenHeadFunction.apply`` so the test stays CPU-only and
     runs whether or not ``liger-kernel`` is installed.
     """
 
@@ -1686,7 +1686,9 @@ class TestGRPOLigerLossDispatch:
             patch.object(
                 grpo, "actor", new=MagicMock(wraps=grpo.actor)
             ),  # avoid touching the actor forward
-            patch("agilerl.algorithms.grpo.LigerFusedLinearGRPOFunction") as mock_fn,
+            patch(
+                "agilerl.algorithms.grpo.LigerFusedLinearGRPOFrozenHeadFunction"
+            ) as mock_fn,
             patch.object(
                 LLMAlgorithm,
                 "select_adapter",
@@ -1711,7 +1713,7 @@ class TestGRPOLigerLossDispatch:
                 reference_log_probs=torch.zeros((1, 1), dtype=torch.float32),
             )
 
-        # Inspect the kwargs passed to ``LigerFusedLinearGRPOFunction.apply``.
+        # Inspect the kwargs passed to ``LigerFusedLinearGRPOFrozenHeadFunction.apply``.
         # ``apply`` takes positional args in a fixed order — pluck the ones we
         # care about by index based on ``_liger_loss``'s call signature:
         # (hidden, weight, target_ids, mask, adv, bias, ref, old, None,
@@ -1740,7 +1742,9 @@ class TestGRPOLigerLossDispatch:
             patch.object(grpo, "_get_lm_head", return_value=fake_lm_head),
             patch.object(grpo, "_patch_lm_head_to_identity", nullcontext),
             patch.object(grpo, "actor", new=MagicMock(wraps=grpo.actor)),
-            patch("agilerl.algorithms.grpo.LigerFusedLinearGRPOFunction") as mock_fn,
+            patch(
+                "agilerl.algorithms.grpo.LigerFusedLinearGRPOFrozenHeadFunction"
+            ) as mock_fn,
             patch.object(
                 LLMAlgorithm, "select_adapter", lambda self, name: nullcontext()
             ),
@@ -1790,7 +1794,9 @@ class TestGRPOLigerLossDispatch:
             patch.object(grpo, "_get_lm_head", return_value=fake_lm_head),
             patch.object(grpo, "_patch_lm_head_to_identity", nullcontext),
             patch.object(grpo, "actor", new=MagicMock(wraps=grpo.actor)),
-            patch("agilerl.algorithms.grpo.LigerFusedLinearGRPOFunction") as mock_fn,
+            patch(
+                "agilerl.algorithms.grpo.LigerFusedLinearGRPOFrozenHeadFunction"
+            ) as mock_fn,
             patch.object(
                 LLMAlgorithm, "select_adapter", lambda self, name: nullcontext()
             ),
@@ -1832,7 +1838,9 @@ class TestGRPOLigerLossDispatch:
             patch.object(grpo, "_get_lm_head", return_value=fake_lm_head),
             patch.object(grpo, "_patch_lm_head_to_identity", nullcontext),
             patch.object(grpo, "actor", new=MagicMock(wraps=grpo.actor)),
-            patch("agilerl.algorithms.grpo.LigerFusedLinearGRPOFunction") as mock_fn,
+            patch(
+                "agilerl.algorithms.grpo.LigerFusedLinearGRPOFrozenHeadFunction"
+            ) as mock_fn,
             patch.object(
                 LLMAlgorithm, "select_adapter", lambda self, name: nullcontext()
             ),
@@ -1878,7 +1886,9 @@ class TestGRPOLigerLossDispatch:
             patch.object(grpo, "_get_lm_head", return_value=fake_lm_head),
             patch.object(grpo, "_patch_lm_head_to_identity", nullcontext),
             patch.object(grpo, "actor", new=MagicMock(wraps=grpo.actor)),
-            patch("agilerl.algorithms.grpo.LigerFusedLinearGRPOFunction") as mock_fn,
+            patch(
+                "agilerl.algorithms.grpo.LigerFusedLinearGRPOFrozenHeadFunction"
+            ) as mock_fn,
             patch.object(
                 LLMAlgorithm, "select_adapter", lambda self, name: nullcontext()
             ),
@@ -1920,7 +1930,7 @@ class _CtxFreeActor(nn.Module):
 
 
 class _DummyLigerFn:
-    """Deterministic stand-in for ``LigerFusedLinearGRPOFunction``.
+    """Deterministic stand-in for ``LigerFusedLinearGRPOFrozenHeadFunction``.
 
     Mirrors only the property that matters for packing equivalence: the loss is
     summed over masked-in (action) tokens and ignores everything else. The real
@@ -2027,7 +2037,7 @@ class TestGRPOLigerSequencePacking:
             with (
                 patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
                 patch(
-                    "agilerl.algorithms.grpo.LigerFusedLinearGRPOFunction",
+                    "agilerl.algorithms.grpo.LigerFusedLinearGRPOFrozenHeadFunction",
                     _DummyLigerFn,
                 ),
                 patch.object(grpo, "_get_lm_head", return_value=lm_head),
@@ -2084,7 +2094,8 @@ class TestGRPOLigerSequencePacking:
         with (
             patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
             patch(
-                "agilerl.algorithms.grpo.LigerFusedLinearGRPOFunction", _DummyLigerFn
+                "agilerl.algorithms.grpo.LigerFusedLinearGRPOFrozenHeadFunction",
+                _DummyLigerFn,
             ),
             patch.object(grpo, "_get_lm_head", return_value=lm_head),
             patch.object(grpo, "_patch_lm_head_to_identity", nullcontext),
@@ -5872,7 +5883,9 @@ class TestGRPONonFinitePaddingIsIsolated:
             patch.object(grpo, "_get_lm_head", return_value=fake_lm_head),
             patch.object(grpo, "_patch_lm_head_to_identity", nullcontext),
             patch.object(grpo, "actor", new=MagicMock(wraps=grpo.actor)),
-            patch("agilerl.algorithms.grpo.LigerFusedLinearGRPOFunction") as mock_fn,
+            patch(
+                "agilerl.algorithms.grpo.LigerFusedLinearGRPOFrozenHeadFunction"
+            ) as mock_fn,
             patch.object(
                 LLMAlgorithm, "select_adapter", lambda self, name: nullcontext()
             ),
@@ -5936,7 +5949,7 @@ class TestGRPORealLigerVllmCorrection:
         ``c`` at ``beta=0`` — the truncated-IS reweight the standard path also
         applies, here proven through the installed fused kernel.
         """
-        from agilerl.algorithms.grpo import LigerFusedLinearGRPOFunction
+        from agilerl.algorithms.grpo import LigerFusedLinearGRPOFrozenHeadFunction
 
         torch.manual_seed(0)
         device = "cuda"
@@ -5953,7 +5966,7 @@ class TestGRPORealLigerVllmCorrection:
 
         def run(vllm_is_ratio):
             # Positional layout mirrors GRPO._liger_loss exactly (pos 24 ratio).
-            loss, _ = LigerFusedLinearGRPOFunction.apply(
+            loss, _ = LigerFusedLinearGRPOFrozenHeadFunction.apply(
                 hidden,
                 weight,
                 target_ids,

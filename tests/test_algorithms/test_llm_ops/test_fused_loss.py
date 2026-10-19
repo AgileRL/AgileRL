@@ -26,13 +26,18 @@ if not HAS_LIGER_KERNEL:
         "fused_loss tests require liger-kernel; skipping on this platform.",
         allow_module_level=True,
     )
+from liger_kernel.chunked_loss.fused_linear_ppo import _selective_logprob_backward
 from liger_kernel.chunked_loss.fused_linear_preference import (
     LigerFusedLinearPreferenceBase,
 )
+from liger_kernel.chunked_loss.grpo_loss import LigerFusedLinearGRPOFunction
 
 from agilerl.algorithms.core.llm_ops.fused_loss import (
+    GRPO_KERNEL_TRAILING_INPUTS,
     LigerDPOWithAlpha,
+    LigerFusedLinearGRPOFrozenHeadFunction,
     LigerFusedLinearPolicyLossFunction,
+    _selective_logprob_hidden_grad,
     apply_fused_policy_loss,
     flatten_tokens_for_fused_loss,
     llm_policy_loss_fn,
@@ -60,7 +65,7 @@ def test_no_liger_fused_module_raises_import_error(monkeypatch):
 @pytest.mark.parametrize(
     ("module_path", "symbol"),
     [
-        ("agilerl.algorithms.grpo", "LigerFusedLinearGRPOFunction"),
+        ("agilerl.algorithms.grpo", "LigerFusedLinearGRPOFrozenHeadFunction"),
         ("agilerl.algorithms.ppo_llm", "LigerFusedLinearPolicyLossFunction"),
         ("agilerl.algorithms.reinforce_llm", "LigerFusedLinearPolicyLossFunction"),
     ],
@@ -886,6 +891,163 @@ class TestLlmPpoLossFnTrajectoryMode:
             )
             chunked_total = chunked_total + chunk_loss
         assert torch.allclose(single, chunked_total, rtol=1e-5, atol=1e-5)
+
+
+def grpo_kernel_args(
+    *,
+    loss_type: str,
+    beta: float,
+    head_trainable: bool,
+    n_tokens: int = 2100,
+    vocab: int = 5000,
+    hidden_size: int = 16,
+) -> tuple:
+    """Token-level GRPO kernel inputs: 2100 rows and 5000 vocab cross both Liger chunk sizes."""
+    torch.manual_seed(0)
+    hidden = torch.randn(n_tokens, 1, hidden_size, requires_grad=True)
+    weight = (torch.randn(vocab, hidden_size) * 0.02).requires_grad_(head_trainable)
+    ids = torch.randint(0, vocab, (n_tokens, 1))
+    mask = torch.ones(n_tokens, 1)
+    adv = torch.randn(n_tokens) * 0.1
+    old_lp = torch.randn(n_tokens, 1) * 0.05 - 8.0
+    ref_lp = torch.randn(n_tokens, 1) * 0.05 - 8.0 if beta else None
+    return (
+        hidden,
+        weight,
+        ids,
+        mask,
+        adv,
+        None,  # bias
+        ref_lp,
+        old_lp,
+        None,  # ref_input
+        None,  # ref_weight
+        None,  # ref_bias
+        beta,
+        0.2,  # epsilon_low
+        0.28,  # epsilon_high
+        loss_type,
+        None,  # max_completion_length
+        "token",
+        1.0,  # sapo_temperature_pos
+        1.05,  # sapo_temperature_neg
+        0.9,  # temperature
+        False,  # compiled
+        beta != 0.0,  # use_ref_model
+        n_tokens,  # chunk_size: one Liger chunk, so its row loop runs twice
+    )
+
+
+def run_grpo_kernel(kernel: type, args: tuple, scale: float) -> tuple:
+    """Loss, metrics and gradients after ``(scale * loss).backward()``."""
+    hidden, weight = args[0], args[1]
+    hidden.grad = None
+    weight.grad = None
+    loss, metrics = kernel.apply(*args)
+    (scale * loss).backward()
+    return loss.detach(), [m.detach() for m in metrics], hidden.grad, weight.grad
+
+
+class TestLigerFusedLinearGRPOFrozenHeadFunction:
+    @pytest.mark.parametrize(
+        ("loss_type", "beta"), [("dapo", 0.0), ("grpo", 0.04), ("cispo", 0.0)]
+    )
+    @pytest.mark.parametrize("scale", [1.0, 0.5])
+    def test_frozen_head_matches_liger_bit_for_bit(self, loss_type, beta, scale):
+        # Arrange
+        args = grpo_kernel_args(loss_type=loss_type, beta=beta, head_trainable=False)
+
+        # Act
+        liger = run_grpo_kernel(LigerFusedLinearGRPOFunction, args, scale)
+        frozen = run_grpo_kernel(LigerFusedLinearGRPOFrozenHeadFunction, args, scale)
+
+        # Assert
+        assert torch.equal(frozen[0], liger[0])
+        assert all(torch.equal(a, b) for a, b in zip(frozen[1], liger[1], strict=True))
+        assert torch.equal(frozen[2], liger[2])
+        assert frozen[3] is None
+        assert liger[3] is None
+
+    def test_trained_head_matches_liger_bit_for_bit(self):
+        # Arrange
+        args = grpo_kernel_args(loss_type="dapo", beta=0.04, head_trainable=True)
+
+        # Act
+        liger = run_grpo_kernel(LigerFusedLinearGRPOFunction, args, 0.5)
+        trained = run_grpo_kernel(LigerFusedLinearGRPOFrozenHeadFunction, args, 0.5)
+
+        # Assert
+        assert torch.equal(trained[0], liger[0])
+        assert torch.equal(trained[2], liger[2])
+        assert torch.equal(trained[3], liger[3])
+
+    def test_backward_returns_one_gradient_per_liger_input(self):
+        # Arrange
+        args = grpo_kernel_args(loss_type="dapo", beta=0.0, head_trainable=True)
+        loss, _ = LigerFusedLinearGRPOFunction.apply(*args)
+
+        # Act
+        liger_grads = LigerFusedLinearGRPOFunction.backward(
+            loss.grad_fn, torch.tensor(1.0)
+        )
+
+        # Assert
+        assert len(liger_grads) == 6 + GRPO_KERNEL_TRAILING_INPUTS
+
+
+class TestSelectiveLogprobHiddenGrad:
+    def test_matches_liger_hidden_gradient_bit_for_bit(self):
+        # Arrange: rows and vocab cross Liger's 2048-row and 4096-vocab chunks.
+        torch.manual_seed(0)
+        hidden = torch.randn(2100, 16)
+        weight = torch.randn(5000, 16) * 0.02
+        targets = torch.randint(0, 5000, (2100,))
+        log_z = torch.logsumexp((hidden @ weight.t()) / 0.9, dim=-1)
+        grad_logprobs = torch.randn(2100)
+
+        # Act
+        hidden_grad = _selective_logprob_hidden_grad(
+            hidden, weight, targets, None, log_z, grad_logprobs, 0.9
+        )
+        liger_hidden_grad, _, _ = _selective_logprob_backward(
+            hidden, weight, targets, None, log_z, grad_logprobs, 0.9, 4096
+        )
+
+        # Assert
+        assert torch.equal(hidden_grad, liger_hidden_grad)
+
+
+class TestLigerFusedLinearPolicyLossFunctionFrozenHead:
+    @staticmethod
+    def run(head_trainable: bool) -> tuple:
+        torch.manual_seed(0)
+        hidden = torch.randn(3, 6, 8, requires_grad=True)
+        weight = (torch.randn(40, 8) * 0.02).requires_grad_(head_trainable)
+        ids = torch.randint(0, 40, (3, 6))
+        mask = torch.ones(3, 6)
+        adv = torch.randn(3, 6) * 0.1
+        old_lp = torch.randn(3, 6) * 0.05
+        ref_lp = torch.randn(3, 6) * 0.05
+        loss, metrics = LigerFusedLinearPolicyLossFunction.apply(
+            hidden, weight, ids, mask, adv, None, ref_lp, old_lp,
+            0.01, 0.2, 0.2, 1.0, False, 1, None, None, None,
+        )  # fmt: skip
+        (0.5 * loss).backward()
+        return loss.detach(), [m.detach() for m in metrics], hidden.grad, weight.grad
+
+    def test_frozen_head_matches_trained_head_input_gradient(self):
+        # Act
+        trained = self.run(head_trainable=True)
+        frozen = self.run(head_trainable=False)
+
+        # Assert
+        assert torch.equal(frozen[0], trained[0])
+        assert all(
+            torch.equal(a, b) for a, b in zip(frozen[1], trained[1], strict=True)
+        )
+        assert torch.equal(frozen[2], trained[2])
+        assert trained[3] is not None
+        assert frozen[3] is None
 
 
 class TestLigerFusedLinearPolicyLossFunction:

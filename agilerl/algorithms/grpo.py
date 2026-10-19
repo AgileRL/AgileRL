@@ -21,11 +21,13 @@ if TYPE_CHECKING:
     from transformers import BitsAndBytesConfig, PreTrainedModel
 
 if HAS_LIGER_KERNEL or TYPE_CHECKING:
-    from liger_kernel.chunked_loss.grpo_loss import LigerFusedLinearGRPOFunction
+    from agilerl.algorithms.core.llm_ops.fused_loss import (
+        LigerFusedLinearGRPOFrozenHeadFunction,
+    )
 else:
     # Keep the name resolvable when liger-kernel isn't installed so unit
     # tests can patch it. ``_liger_loss`` guards against actual use.
-    LigerFusedLinearGRPOFunction = None  # type: ignore[assignment]
+    LigerFusedLinearGRPOFrozenHeadFunction = None
 
 from agilerl.algorithms.core import ActionResult, LLMAlgorithm
 from agilerl.algorithms.core.llm_ops.fused_logprobs import scored_position_index
@@ -157,7 +159,7 @@ def _liger_args_with_normalizer(
     normalizer: float | torch.Tensor,
 ) -> tuple[Any, ...]:
     """Fused-kernel arguments extended positionally (``apply`` takes no keywords) to carry ``num_items_in_batch``."""
-    parameters, index = _liger_normalizer_slot(LigerFusedLinearGRPOFunction)
+    parameters, index = _liger_normalizer_slot(LigerFusedLinearGRPOFrozenHeadFunction)
     values = list(args)
     for parameter in parameters[len(values) : index + 1]:
         if parameter.default is inspect.Parameter.empty:
@@ -3299,7 +3301,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                 kernel_args = _liger_args_with_normalizer(
                     kernel_args, window[1] * world_size
                 )
-            loss, _ = LigerFusedLinearGRPOFunction.apply(*kernel_args)
+            loss, _ = LigerFusedLinearGRPOFrozenHeadFunction.apply(*kernel_args)
 
         loss = loss.mean()
         if importance_sampling_level != "token" and window is not None:

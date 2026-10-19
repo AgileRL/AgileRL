@@ -43,7 +43,7 @@ CLIP_MIN = 0.8
 CLIP_MAX = 1.2
 VOCAB = 5
 HIDDEN = 3
-KERNEL_NAME = "LigerFusedLinearGRPOFunction"
+KERNEL_NAME = "LigerFusedLinearGRPOFrozenHeadFunction"
 TOKEN_COUNT_LOSS_TYPES = ("dapo", "cispo", "vespo")
 
 
@@ -1102,7 +1102,7 @@ def _sharded_head_cispo_rank(rank: int, world_size: int, store_path: str) -> Non
     )
     try:
         grpo_module.HAS_LIGER_KERNEL = True
-        grpo_module.LigerFusedLinearGRPOFunction = _ChunkedCispoKernel
+        grpo_module.LigerFusedLinearGRPOFrozenHeadFunction = _ChunkedCispoKernel
         torch.manual_seed(0)
         dense_head = torch.nn.Linear(HIDDEN, VOCAB, bias=False).requires_grad_(False)
         sharded_head = torch.nn.Linear(HIDDEN, VOCAB, bias=False)
@@ -1208,7 +1208,7 @@ def _window_token_mean_rank(
     )
     try:
         grpo_module.HAS_LIGER_KERNEL = True
-        grpo_module.LigerFusedLinearGRPOFunction = _FakeFusedKernel
+        grpo_module.LigerFusedLinearGRPOFrozenHeadFunction = _FakeFusedKernel
         windows = WINDOW_RANK_LENGTHS[scenario]
         union = [
             _window_micro_batch(other, step, lengths)

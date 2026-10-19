@@ -34,7 +34,7 @@ from tests.test_algorithms.test_llms.test_grpo_old_logprobs import (
     _make_grpo,
 )
 
-KERNEL_NAME = "LigerFusedLinearGRPOFunction"
+KERNEL_NAME = "LigerFusedLinearGRPOFrozenHeadFunction"
 ADVANTAGE = 0.5
 """Magnitude of every episode's advantage under ``adv_norm="mean_only"``."""
 EPISODE_ACTION_TOKENS = [6, 6, 4, 8]

@@ -310,7 +310,7 @@ class TestFusedKernelLossPixelValues:
         with (
             patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
             patch(
-                "agilerl.algorithms.grpo.LigerFusedLinearGRPOFunction",
+                "agilerl.algorithms.grpo.LigerFusedLinearGRPOFrozenHeadFunction",
                 _ProbeFusedKernel,
             ),
             patch.object(_ProbeFusedKernel, "inputs", []) as kernel_inputs,
@@ -375,7 +375,7 @@ class TestFusedKernelLossPixelValues:
                 return_value=padded_hidden,
             ),
             patch(
-                "agilerl.algorithms.grpo.LigerFusedLinearGRPOFunction",
+                "agilerl.algorithms.grpo.LigerFusedLinearGRPOFrozenHeadFunction",
                 _ProbeFusedKernel,
             ),
             patch.object(_ProbeFusedKernel, "inputs", []) as kernel_inputs,

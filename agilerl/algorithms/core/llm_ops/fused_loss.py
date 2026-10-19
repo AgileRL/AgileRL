@@ -24,6 +24,7 @@ import time — gate on :data:`agilerl.HAS_LIGER_KERNEL` before importing.
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Protocol
 
 import torch
@@ -40,18 +41,45 @@ if not HAS_LIGER_KERNEL:
     raise ImportError(msg)
 
 from liger_kernel.chunked_loss.dpo_loss import LigerFusedLinearDPOFunction
-from liger_kernel.chunked_loss.fused_linear_ppo import LigerFusedLinearPPOBase
+from liger_kernel.chunked_loss.fused_linear_ppo import (
+    _SELECTIVE_LOGPROB_SEQ_CHUNK_SIZE,
+    _SELECTIVE_LOGPROB_VOCAB_CHUNK_SIZE,
+    LigerFusedLinearPPOBase,
+    _maybe_mark_dynamic_dim1,
+    _selective_logprob_forward,
+)
 from liger_kernel.chunked_loss.fused_linear_preference import (
     LigerFusedLinearPreferenceBase,
 )
+from liger_kernel.chunked_loss.grpo_loss import LigerFusedLinearGRPOFunction
 
 from agilerl.utils.llm_utils import calculate_k3_kl, k3_kl_penalty_reference
+
+# Liger 0.8.2's GRPO forward takes 31 inputs: six tensors, then these.
+GRPO_KERNEL_TRAILING_INPUTS = 25
+# Position of the advantages among the chunked loss inputs.
+ADVANTAGES_COLUMN = 3
 
 
 class SaveForBackwardCtx(Protocol):
     """The one autograd-``ctx`` capability these forwards use."""
 
     def save_for_backward(self, *tensors: torch.Tensor | None) -> None: ...
+
+
+class SavedGradsCtx(Protocol):
+    """Autograd ``ctx`` holding ``(grad_input, grad_weight, grad_bias)``."""
+
+    saved_tensors: tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]
+
+
+class SelectiveLogProbCtx(SaveForBackwardCtx, Protocol):
+    """Autograd ``ctx`` of :class:`FrozenHeadSelectiveLogProb`."""
+
+    saved_tensors: tuple[
+        torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor
+    ]
+    temperature: float
 
 
 def llm_policy_loss_fn(
@@ -306,6 +334,438 @@ def llm_policy_loss_fn(
     ]
 
 
+def head_requires_grad(weight: torch.Tensor, bias: torch.Tensor | None) -> bool:
+    """Whether the lm_head weight or bias is trained."""
+    return weight.requires_grad or (bias is not None and bias.requires_grad)
+
+
+def scaled_saved_grads(
+    ctx: SavedGradsCtx, grad_output: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+    """Saved ``(grad_input, grad_weight, grad_bias)`` scaled by ``grad_output``.
+
+    A frozen head saves ``None`` for its weight and bias.
+    """
+    grad_input, grad_weight, grad_bias = ctx.saved_tensors
+    if grad_output == 1.0:
+        return grad_input, grad_weight, grad_bias
+    return (
+        grad_input * grad_output,
+        None if grad_weight is None else grad_weight * grad_output,
+        None if grad_bias is None else grad_bias * grad_output,
+    )
+
+
+def _selective_logprob_hidden_grad(
+    hidden: torch.Tensor,
+    weight: torch.Tensor,
+    targets: torch.Tensor,
+    bias: torch.Tensor | None,
+    log_z: torch.Tensor,
+    grad_logprobs: torch.Tensor,
+    temperature: float,
+) -> torch.Tensor:
+    """Liger 0.8.2's selective-logprob backward for the hidden states only.
+
+    Same per-chunk operations, in the same order, as Liger's
+    ``_selective_logprob_backward``, without the lm_head weight and bias
+    gradients.
+    """
+    inv_t = 1.0 / temperature
+    n_rows = hidden.shape[0]
+    vocab_size = weight.shape[0]
+    grad_hidden = torch.zeros(hidden.shape, device=hidden.device, dtype=torch.float32)
+    grad_logprobs = grad_logprobs.to(torch.float32)
+    for seq_start in range(0, n_rows, _SELECTIVE_LOGPROB_SEQ_CHUNK_SIZE):
+        seq_end = min(seq_start + _SELECTIVE_LOGPROB_SEQ_CHUNK_SIZE, n_rows)
+        hidden_chunk = hidden[seq_start:seq_end]
+        targets_chunk = targets[seq_start:seq_end]
+        grad_chunk = grad_logprobs[seq_start:seq_end]
+        logz_chunk = log_z[seq_start:seq_end]
+        row_idx = torch.arange(seq_end - seq_start, device=hidden.device)
+        for vocab_start in range(0, vocab_size, _SELECTIVE_LOGPROB_VOCAB_CHUNK_SIZE):
+            vocab_end = min(
+                vocab_start + _SELECTIVE_LOGPROB_VOCAB_CHUNK_SIZE, vocab_size
+            )
+            weight_chunk = weight[vocab_start:vocab_end]
+            logits_chunk = (hidden_chunk @ weight_chunk.to(hidden.dtype).t()).float()
+            if bias is not None:
+                logits_chunk.add_(bias[vocab_start:vocab_end].to(torch.float32))
+            logits_chunk.mul_(inv_t)
+
+            probs = torch.exp(logits_chunk - logz_chunk.unsqueeze(-1))
+            grad_logits = (-grad_chunk).unsqueeze(-1) * probs
+
+            in_chunk = (targets_chunk >= vocab_start) & (targets_chunk < vocab_end)
+            local_idx = torch.clamp(
+                targets_chunk - vocab_start, 0, vocab_end - vocab_start - 1
+            )
+            grad_logits[row_idx, local_idx] += grad_chunk * in_chunk
+            grad_logits.mul_(inv_t)
+
+            grad_hidden[seq_start:seq_end].add_(grad_logits @ weight_chunk.float())
+    return grad_hidden
+
+
+class FrozenHeadSelectiveLogProb(torch.autograd.Function):
+    """Liger's chunked selective log-probabilities, differentiable in the hidden states only."""
+
+    @staticmethod
+    def forward(
+        ctx: SelectiveLogProbCtx,
+        hidden: torch.Tensor,
+        weight: torch.Tensor,
+        targets: torch.Tensor,
+        bias: torch.Tensor | None,
+        temperature: float,
+    ) -> torch.Tensor:
+        logprobs, log_z = _selective_logprob_forward(
+            hidden,
+            weight,
+            targets,
+            bias,
+            temperature,
+            _SELECTIVE_LOGPROB_VOCAB_CHUNK_SIZE,
+        )
+        ctx.save_for_backward(hidden, weight, targets, bias, log_z)
+        ctx.temperature = temperature
+        return logprobs
+
+    @staticmethod
+    def backward(
+        ctx: SelectiveLogProbCtx, *grad_outputs: torch.Tensor
+    ) -> tuple[torch.Tensor | None, ...]:
+        (grad_logprobs,) = grad_outputs
+        hidden, weight, targets, bias, log_z = ctx.saved_tensors
+        grad_hidden = _selective_logprob_hidden_grad(
+            hidden, weight, targets, bias, log_z, grad_logprobs, ctx.temperature
+        )
+        return grad_hidden.to(hidden.dtype), None, None, None, None
+
+
+def frozen_head_chunk_logps(
+    input_chunk: torch.Tensor,
+    weight: torch.Tensor,
+    selected_token_ids: torch.Tensor,
+    bias: torch.Tensor | None,
+    temperature: float,
+) -> torch.Tensor:
+    """Selected-token log-probabilities of one chunk, shaped like Liger's ``chunk_forward``."""
+    batch_size, seq_len, hidden_size = input_chunk.shape
+    hidden = input_chunk.reshape(batch_size * seq_len, hidden_size).contiguous()
+    targets = selected_token_ids.reshape(batch_size * seq_len).contiguous()
+    logps = FrozenHeadSelectiveLogProb.apply(hidden, weight, targets, bias, temperature)
+    return logps.reshape(batch_size, seq_len)
+
+
+def frozen_head_ppo_forward(
+    cls: type[LigerFusedLinearPPOBase],
+    ctx: SaveForBackwardCtx,
+    _input: torch.Tensor,
+    weight: torch.Tensor,
+    selected_token_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    advantages: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    ref_per_token_logps: torch.Tensor | None = None,
+    old_per_token_logps: torch.Tensor | None = None,
+    ref_input: torch.Tensor | None = None,
+    ref_weight: torch.Tensor | None = None,
+    ref_bias: torch.Tensor | None = None,
+    epsilon_low: float = 0.2,
+    epsilon_high: float = 0.2,
+    beta: float = 0.04,
+    loss_type: str = "dapo",
+    max_completion_length: int | None = None,
+    importance_sampling_level: str = "token",
+    temperature: float = 1.0,
+    compiled: bool = True,
+    use_ref_model: bool = False,
+    chunk_size: int = 1,
+    sapo_temperature_pos: float = 1.0,
+    sapo_temperature_neg: float = 1.05,
+    vllm_is_ratio: torch.Tensor | None = None,
+    delta: float | None = None,
+    use_bias_correction_kl: bool = False,
+    vespo_k_pos: float = 2.0,
+    vespo_lambda_pos: float = 3.0,
+    vespo_k_neg: float = 3.0,
+    vespo_lambda_neg: float = 2.0,
+    num_items_in_batch: float | torch.Tensor | None = None,
+) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
+    """Liger 0.8.2's chunked PPO forward that skips the lm_head gradient when the head is frozen.
+
+    Liger re-enables ``requires_grad`` on the head inside every chunk, so it
+    builds and returns a full head gradient that autograd then drops. With a
+    trained head this defers to Liger unchanged.
+    """
+    options = {
+        "ref_per_token_logps": ref_per_token_logps,
+        "old_per_token_logps": old_per_token_logps,
+        "ref_input": ref_input,
+        "ref_weight": ref_weight,
+        "ref_bias": ref_bias,
+        "epsilon_low": epsilon_low,
+        "epsilon_high": epsilon_high,
+        "beta": beta,
+        "loss_type": loss_type,
+        "max_completion_length": max_completion_length,
+        "importance_sampling_level": importance_sampling_level,
+        "temperature": temperature,
+        "compiled": compiled,
+        "use_ref_model": use_ref_model,
+        "chunk_size": chunk_size,
+        "sapo_temperature_pos": sapo_temperature_pos,
+        "sapo_temperature_neg": sapo_temperature_neg,
+        "vllm_is_ratio": vllm_is_ratio,
+        "delta": delta,
+        "use_bias_correction_kl": use_bias_correction_kl,
+        "vespo_k_pos": vespo_k_pos,
+        "vespo_lambda_pos": vespo_lambda_pos,
+        "vespo_k_neg": vespo_k_neg,
+        "vespo_lambda_neg": vespo_lambda_neg,
+        "num_items_in_batch": num_items_in_batch,
+    }
+    if head_requires_grad(weight, bias):
+        return LigerFusedLinearPPOBase.forward(
+            cls,
+            ctx,
+            _input,
+            weight,
+            selected_token_ids,
+            attention_mask,
+            advantages,
+            bias,
+            **options,
+        )
+    if use_ref_model and ref_per_token_logps is None and ref_input is None:
+        msg = "If use_ref_model is True, ref_per_token_logps or ref_input must be provided"
+        raise ValueError(msg)
+    if loss_type == "dr_grpo" and max_completion_length is None:
+        msg = "max_completion_length must be provided for loss_type 'dr_grpo'"
+        raise ValueError(msg)
+    if vllm_is_ratio is not None and vllm_is_ratio.dim() == 1:
+        vllm_is_ratio = vllm_is_ratio.unsqueeze(-1)
+
+    loss_acc = torch.zeros((), device=_input.device, dtype=torch.float32)
+    grad_inputs: list[torch.Tensor] = []
+    aggregated_metrics: list[torch.Tensor | list[torch.Tensor]] = []
+    compute_loss = partial(
+        LigerFusedLinearPPOBase._compute_loss_from_logps,
+        full_attention_mask=attention_mask,
+        epsilon_low=epsilon_low,
+        epsilon_high=epsilon_high,
+        beta=beta,
+        loss_type=loss_type,
+        max_completion_length=max_completion_length,
+        importance_sampling_level=importance_sampling_level,
+        ppo_loss_fn=cls.ppo_loss_fn,
+        sapo_temperature_pos=sapo_temperature_pos,
+        sapo_temperature_neg=sapo_temperature_neg,
+        delta=delta,
+        use_bias_correction_kl=use_bias_correction_kl,
+        vespo_k_pos=vespo_k_pos,
+        vespo_lambda_pos=vespo_lambda_pos,
+        vespo_k_neg=vespo_k_neg,
+        vespo_lambda_neg=vespo_lambda_neg,
+        num_items_in_batch=num_items_in_batch,
+    )
+    compiled_compute_loss = torch.compile(compute_loss) if compiled else compute_loss
+
+    def chunk_loss_and_input_grad(
+        input_chunk: torch.Tensor,
+        selected_token_ids_chunk: torch.Tensor,
+        attention_mask_chunk: torch.Tensor,
+        advantages_chunk: torch.Tensor,
+        ref_per_token_logps_chunk: torch.Tensor | None,
+        old_per_token_logps_chunk: torch.Tensor | None,
+        ref_input_chunk: torch.Tensor | None,
+        vllm_is_ratio_chunk: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor, ...]]:
+        with torch.enable_grad():
+            input_chunk = input_chunk.detach().requires_grad_(True)
+            per_token_logps = frozen_head_chunk_logps(
+                input_chunk, weight, selected_token_ids_chunk, bias, temperature
+            )
+            if use_ref_model and ref_per_token_logps_chunk is None:
+                with torch.no_grad():
+                    ref_per_token_logps_chunk = LigerFusedLinearPPOBase.chunk_forward(
+                        ref_input_chunk,
+                        ref_weight,
+                        selected_token_ids_chunk,
+                        bias=ref_bias,
+                        temperature=temperature,
+                    )
+            chunk_loss, chunk_metrics = compiled_compute_loss(
+                per_token_logps,
+                attention_mask_chunk,
+                advantages_chunk,
+                ref_per_token_logps_chunk=ref_per_token_logps_chunk,
+                old_per_token_logps_chunk=old_per_token_logps_chunk,
+                vllm_is_ratio_chunk=vllm_is_ratio_chunk,
+            )
+            (grad_input,) = torch.autograd.grad(chunk_loss, [input_chunk])
+        return (
+            grad_input,
+            chunk_loss.detach(),
+            tuple(metric.detach() for metric in chunk_metrics),
+        )
+
+    chunks = max(1, _input.shape[0] // chunk_size)
+    no_chunks = [None] * chunks
+    columns = zip(
+        torch.chunk(_input, chunks=chunks, dim=0),
+        torch.chunk(selected_token_ids, chunks=chunks, dim=0),
+        torch.chunk(attention_mask, chunks=chunks, dim=0),
+        torch.chunk(advantages, chunks=chunks, dim=0),
+        torch.chunk(ref_per_token_logps, chunks=chunks, dim=0)
+        if use_ref_model and ref_per_token_logps is not None
+        else no_chunks,
+        torch.chunk(old_per_token_logps, chunks=chunks, dim=0)
+        if old_per_token_logps is not None
+        else no_chunks,
+        torch.chunk(ref_input, chunks=chunks, dim=0)
+        if use_ref_model and ref_per_token_logps is None and ref_input is not None
+        else no_chunks,
+        torch.chunk(vllm_is_ratio, chunks=chunks, dim=0)
+        if vllm_is_ratio is not None
+        else no_chunks,
+        strict=True,
+    )
+    for chunk_inputs in columns:
+        # Liger marks every chunked input but the advantages.
+        for index, tensor in enumerate(chunk_inputs):
+            if index != ADVANTAGES_COLUMN:
+                _maybe_mark_dynamic_dim1(tensor)
+        grad_input, chunk_loss, chunk_metrics = chunk_loss_and_input_grad(*chunk_inputs)
+        grad_inputs.append(grad_input)
+        loss_acc.add_(chunk_loss)
+        if not aggregated_metrics:
+            aggregated_metrics.extend(
+                torch.zeros((), device=metric.device) if metric.ndim == 0 else []
+                for metric in chunk_metrics
+            )
+        for metric, aggregate in zip(chunk_metrics, aggregated_metrics, strict=True):
+            if isinstance(aggregate, torch.Tensor):
+                aggregate.add_(metric)
+            else:
+                aggregate.append(metric)
+
+    ctx.save_for_backward(torch.cat(grad_inputs, dim=0), None, None)
+    final_metrics: list[torch.Tensor] = []
+    for aggregate in aggregated_metrics:
+        if isinstance(aggregate, torch.Tensor):
+            final_metrics.append(aggregate)
+        else:
+            final_metrics.append(torch.cat(aggregate, dim=0))
+    return loss_acc, tuple(final_metrics)
+
+
+class LigerFusedLinearGRPOFrozenHeadFunction(LigerFusedLinearGRPOFunction):
+    """Liger's GRPO loss without the lm_head gradient when the head is frozen."""
+
+    @classmethod
+    def forward(
+        cls,
+        ctx: SaveForBackwardCtx,
+        _input: torch.Tensor,
+        weight: torch.Tensor,
+        selected_token_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        advantages: torch.Tensor,
+        bias: torch.Tensor | None = None,
+        ref_per_token_logps: torch.Tensor | None = None,
+        old_per_token_logps: torch.Tensor | None = None,
+        ref_input: torch.Tensor | None = None,
+        ref_weight: torch.Tensor | None = None,
+        ref_bias: torch.Tensor | None = None,
+        beta: float = 0.04,
+        epsilon_low: float = 0.2,
+        epsilon_high: float = 0.2,
+        loss_type: str = "dapo",
+        max_completion_length: int | None = None,
+        importance_sampling_level: str = "token",
+        sapo_temperature_pos: float = 1.0,
+        sapo_temperature_neg: float = 1.05,
+        temperature: float = 1.0,
+        compiled: bool = True,
+        use_ref_model: bool = True,
+        chunk_size: int = 1,
+        vllm_is_ratio: torch.Tensor | None = None,
+        delta: float | None = None,
+        use_bias_correction_kl: bool = False,
+        vespo_k_pos: float = 2.0,
+        vespo_lambda_pos: float = 3.0,
+        vespo_k_neg: float = 3.0,
+        vespo_lambda_neg: float = 2.0,
+        num_items_in_batch: float | torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
+        """Liger 0.8.2's GRPO forward, positional order included, on :func:`frozen_head_ppo_forward`."""
+        if importance_sampling_level == "sequence" and loss_type in (
+            "cispo",
+            "sapo",
+            "vespo",
+        ):
+            msg = (
+                "Sequence-level importance sampling is not supported for "
+                f"loss_type='{loss_type}'. Use importance_sampling_level='token' instead."
+            )
+            raise ValueError(msg)
+        return frozen_head_ppo_forward(
+            cls,
+            ctx,
+            _input,
+            weight,
+            selected_token_ids,
+            attention_mask,
+            advantages,
+            bias,
+            ref_per_token_logps=ref_per_token_logps,
+            old_per_token_logps=old_per_token_logps,
+            ref_input=ref_input,
+            ref_weight=ref_weight,
+            ref_bias=ref_bias,
+            epsilon_low=epsilon_low,
+            epsilon_high=epsilon_high,
+            beta=beta,
+            loss_type=loss_type,
+            max_completion_length=max_completion_length,
+            importance_sampling_level=importance_sampling_level,
+            temperature=temperature,
+            compiled=compiled,
+            use_ref_model=use_ref_model,
+            chunk_size=chunk_size,
+            sapo_temperature_pos=sapo_temperature_pos,
+            sapo_temperature_neg=sapo_temperature_neg,
+            vllm_is_ratio=vllm_is_ratio,
+            delta=delta,
+            use_bias_correction_kl=use_bias_correction_kl,
+            vespo_k_pos=vespo_k_pos,
+            vespo_lambda_pos=vespo_lambda_pos,
+            vespo_k_neg=vespo_k_neg,
+            vespo_lambda_neg=vespo_lambda_neg,
+            num_items_in_batch=num_items_in_batch,
+        )
+
+    @staticmethod
+    def backward(
+        ctx: SavedGradsCtx,
+        grad_output: torch.Tensor,
+        *grad_metrics: torch.Tensor,
+    ) -> tuple[torch.Tensor | None, ...]:
+        grad_input, grad_weight, grad_bias = scaled_saved_grads(ctx, grad_output)
+        # One entry per Liger GRPO forward input after the six tensors above.
+        return (
+            grad_input,
+            grad_weight,
+            None,
+            None,
+            None,
+            grad_bias,
+            *([None] * GRPO_KERNEL_TRAILING_INPUTS),
+        )
+
+
 class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
     """Fused linear PPO-style policy loss with per-token or per-turn ratios.
 
@@ -358,9 +818,10 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
         to the per-token policy loss (token mode only), or ``None``.
         """
         loss_acc = torch.zeros((), device=_input.device, dtype=torch.float32)
-        grad_weight = torch.zeros_like(weight)
+        trains_head = head_requires_grad(weight, bias)
+        grad_weight = torch.zeros_like(weight) if trains_head else None
         grad_inputs: list[torch.Tensor] = []
-        grad_bias = torch.zeros_like(bias) if bias is not None else None
+        grad_bias = torch.zeros_like(bias) if trains_head and bias is not None else None
         # Scalar metrics accumulate into a zero tensor; non-scalar metrics
         # (not produced by llm_policy_loss_fn today) collect per-chunk values.
         aggregated_metrics: list[torch.Tensor | list[torch.Tensor]] = []
@@ -433,7 +894,12 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
             turn_ids_chunk: torch.Tensor | None,
             vllm_is_ratio_chunk: torch.Tensor | None,
         ) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, list[torch.Tensor]]]:
-            argnums = (0, 1, 5) if bias is not None else (0, 1)
+            if not trains_head:
+                argnums: tuple[int, ...] = (0,)
+            elif bias is not None:
+                argnums = (0, 1, 5)
+            else:
+                argnums = (0, 1)
             return torch.func.grad_and_value(
                 _compute_chunk_loss, argnums=argnums, has_aux=True
             )(
@@ -465,7 +931,7 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
             vllm_is_ratio_chunk: torch.Tensor | None,
         ) -> None:
             (
-                (chunk_grad_input, chunk_grad_weight, *chunk_grad_bias),
+                (chunk_grad_input, *chunk_grad_head),
                 (
                     chunk_loss,
                     chunk_metrics,
@@ -480,9 +946,10 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
                 turn_ids_chunk,
                 vllm_is_ratio_chunk,
             )
+            if grad_weight is not None:
+                grad_weight.add_(chunk_grad_head[0])
             if grad_bias is not None:
-                grad_bias.add_(chunk_grad_bias[0])
-            grad_weight.add_(chunk_grad_weight)
+                grad_bias.add_(chunk_grad_head[1])
             grad_inputs.append(chunk_grad_input)
             loss_acc.add_(chunk_loss)
             if not aggregated_metrics:
@@ -553,15 +1020,18 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
 
     @staticmethod
     def backward(
-        ctx: FunctionCtx,
+        ctx: SavedGradsCtx,
         grad_output: torch.Tensor,
         *grad_metrics: torch.Tensor,
     ) -> tuple[torch.Tensor | None, ...]:
-        grads = LigerFusedLinearPPOBase.backward(ctx, grad_output)
+        grad_input, grad_weight, grad_bias = scaled_saved_grads(ctx, grad_output)
         return (
-            *grads[
-                :6
-            ],  # _input, weight, selected_token_ids, attention_mask, advantages, bias
+            grad_input,
+            grad_weight,
+            None,  # selected_token_ids
+            None,  # attention_mask
+            None,  # advantages
+            grad_bias,
             None,  # ref_per_token_logps
             None,  # old_per_token_logps
             None,  # beta
