@@ -10,12 +10,16 @@ embeddings and fill RoPE buffers after ``to_empty``.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from typing import Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
 
 import torch
 from torch import nn
-from transformers.core_model_loading import Chunk, WeightConverter, WeightTransform
-from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
+
+from agilerl import HAS_LLM_DEPENDENCIES
+
+if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
+    from transformers.core_model_loading import Chunk, WeightConverter, WeightTransform
+    from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 
 
 @runtime_checkable
