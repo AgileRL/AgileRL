@@ -43,6 +43,7 @@ if __name__ == "__main__":
     # Load the saved agent
     path = "./models/MATD3/MATD3_trained_agent.pt"
     matd3 = MATD3.load(path, device)
+    matd3.set_training_mode(False)  # act greedily, without exploration noise
 
     # Define test loop parameters
     episodes = 10  # Number of episodes to test agent on
