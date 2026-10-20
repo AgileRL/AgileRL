@@ -118,11 +118,12 @@ Two practicalities:
   state where the trainer's subsequent device copies segfault. So for a fresh
   quantized trainer under ``sleep_mode`` the trainer is built first, offloaded
   to CPU, then vLLM starts.
-* **Text-only rollouts for multimodal bases.** RL rollouts are text-only, so a
-  multimodal base's unused vision/audio towers can be freed from vLLM's GPU
-  memory with ``VLLMConfig(strip_multimodal_towers=True)`` (or a list of
-  attribute names for non-standard layouts). Checkpoints are unaffected, since
-  only the LoRA adapter is saved.
+* **Text-only rollouts for multimodal bases.** vLLM can skip building and
+  loading a multimodal base's vision/audio towers with
+  ``VLLMConfig(strip_multimodal_towers=True)``, or a list of modalities to drop
+  (``["image", "video", "audio"]``). The model keeps its multimodal module
+  names, so LoRA adapters load the same way either way. Checkpoints are
+  unaffected, since only the LoRA adapter is saved.
 
 Quantizing the trainer (bitsandbytes + QLoRA)
 ---------------------------------------------

@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -27,6 +27,7 @@ class VllmRuntimeConfig(BaseModel):
     reasoning_parser: str | None = Field(default=None, min_length=1)
     enable_prefix_caching: bool | None = Field(default=None)
     trust_remote_code: bool | None = Field(default=None)
+    hf_overrides: dict[str, object] | None = Field(default=None)
 
 
 class TrainerRuntimeConfig(BaseModel):
@@ -74,8 +75,8 @@ class PatchRuntimeConfig(BaseModel):
 class LanguageTowerRuntimeConfig(BaseModel):
     """vLLM language-tower mapping that varies by Hugging Face ``model_type``.
 
-    Generic VL serving peels ``text_config`` / ``llm_config``. A family that
-    needs a custom vLLM class sets ``hf_overrides`` and ``model_class_overrides``.
+    A family whose stripped language config is not a registered vLLM architecture
+    sets ``hf_overrides`` and ``model_class_overrides``.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
@@ -113,9 +114,6 @@ class ModelRuntimeConfig(BaseModel):
     language_tower: LanguageTowerRuntimeConfig = Field(
         default_factory=LanguageTowerRuntimeConfig
     )
-    multimodal_towers_kept_hf_override: (
-        Callable[[object], object] | Mapping[str, object] | None
-    ) = None
     # PEFT target names of the trainer's tower and connector linears. Empty for
     # families without vLLM tower LoRA (it needs get_num_mm_encoder_tokens).
     tower_connector_lora_targets: frozenset[str] = frozenset()
