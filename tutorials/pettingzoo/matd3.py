@@ -86,10 +86,9 @@ if __name__ == "__main__":
     population_size = 4
     pop = MATD3.population(
         size=population_size,
-        observation_space=observation_spaces,
-        action_space=action_spaces,
+        observation_spaces=observation_spaces,
+        action_spaces=action_spaces,
         agent_ids=env.agents,
-        vect_noise_dim=num_envs,
         net_config=net_config,
         hp_config=hp_config,
         device=device,
@@ -128,10 +127,6 @@ if __name__ == "__main__":
     evo_steps = 10_000  # Evolution frequency
     eval_steps = None  # Evaluation steps per episode - go until done
     eval_loop = 1  # Number of evaluation episodes
-
-    # Directory for the elite checkpoints saved during training and the final agent
-    path = "./models/MATD3"
-    os.makedirs(path, exist_ok=True)
 
     pbar = default_progress_bar(max_steps)
 
@@ -252,12 +247,14 @@ if __name__ == "__main__":
                 env_name="simple_speaker_listener_v4",
                 algo="MATD3",
                 save_elite=True,
-                elite_path=os.path.join(path, "MATD3_elite.pt"),
+                elite_path="./models/MATD3",
             ),
         )
 
     # Save the trained algorithm
+    path = "./models/MATD3"
     filename = "MATD3_trained_agent.pt"
+    os.makedirs(path, exist_ok=True)
     save_path = os.path.join(path, filename)
     population.agents[0].save_checkpoint(save_path)
 
