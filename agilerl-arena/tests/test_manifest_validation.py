@@ -882,6 +882,15 @@ class TestSchema:
         )
         assert variant["properties"]["vllm_engine_args"]["x-ui-widget"] == "json"
 
+    @pytest.mark.parametrize("title", ["GRPO", "GSPO", "CISPO", "LLMPPO"])
+    def test_trainer_offload_is_not_on_the_form(self, title: str) -> None:
+        variant = next(
+            v
+            for v in manifest_schema()["properties"]["algorithm"]["oneOf"]
+            if v["title"] == title
+        )
+        assert "offload_trainer_during_rollout" not in variant["properties"]
+
     def test_a_model_with_fields_is_never_a_json_blob(self) -> None:
         schema = manifest_schema()
         blobs: list[str] = []

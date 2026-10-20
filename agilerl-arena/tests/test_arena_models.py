@@ -505,6 +505,27 @@ class TestGRPOSpecOffPolicyCorrections:
 
 @pytest.mark.parametrize(
     ("spec_cls", "required"),
+    [
+        (GRPOSpec, {"group_size": 2}),
+        (CISPOSpec, {"group_size": 2}),
+        (GSPOSpec, {"group_size": 2}),
+        (LLMPPOSpec, {}),
+    ],
+    ids=["grpo", "cispo", "gspo", "llmppo"],
+)
+class TestOffloadTrainerDuringRollout:
+    def test_is_not_a_manifest_field(
+        self, spec_cls: type[BaseModel], required: dict[str, int]
+    ) -> None:
+        assert "offload_trainer_during_rollout" not in spec_cls.model_fields
+        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+            spec_cls.model_validate(
+                {**required, "offload_trainer_during_rollout": True}
+            )
+
+
+@pytest.mark.parametrize(
+    ("spec_cls", "required"),
     [(GRPOSpec, {"group_size": 2}), (LLMPPOSpec, {})],
     ids=["grpo", "llmppo"],
 )
