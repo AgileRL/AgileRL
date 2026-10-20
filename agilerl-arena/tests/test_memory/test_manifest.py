@@ -429,7 +429,7 @@ class TestGenerationSettings:
         doc = manifest(
             algorithm={
                 "vllm_config": {
-                    "strip_multimodal_towers": ["vision_tower"],
+                    "strip_multimodal_towers": ["image"],
                     "sleep_mode": True,
                 }
             }

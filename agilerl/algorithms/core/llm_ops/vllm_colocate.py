@@ -9,8 +9,6 @@ per rollout. These helpers are independent of how the base is loaded:
 
 * :func:`patch_vllm_lora_keep_resident` stops vLLM from zeroing the single
   persistent rollout-adapter slot between forwards.
-* :func:`patch_vllm_strip_multimodal_towers` frees the GPU memory held by a
-  multimodal base's unused vision/audio towers (text-only RL never runs them).
 * :func:`get_vllm_internal_model` reaches the live ``nn.Module`` inside an
   in-process (``external_launcher``) engine.
 
@@ -19,10 +17,7 @@ See ``docs/llm_finetuning/quantization.rst`` for the full colocated picture.
 
 from __future__ import annotations
 
-import gc
-from typing import TYPE_CHECKING, Any, NoReturn
-
-import torch
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import torch.nn as nn
@@ -31,103 +26,7 @@ __all__ = [
     "get_vllm_internal_model",
     "patch_vllm_3d_moe_lora_flag",
     "patch_vllm_lora_keep_resident",
-    "patch_vllm_strip_multimodal_towers",
 ]
-
-
-class _StrippedTower:
-    """Falsy placeholder left in place of a tower freed by
-    :func:`patch_vllm_strip_multimodal_towers`; any use of it raises.
-    """
-
-    def __init__(self, path: str) -> None:
-        self._stripped_path = path
-
-    def __bool__(self) -> bool:
-        # Falsy so ``if self.vision_tower:``-style guards short-circuit.
-        return False
-
-    def _error(self, detail: str) -> str:
-        return (
-            f"Stripped multimodal tower '{self._stripped_path}' ({detail}). "
-            "The tower was freed to save GPU memory for text-only RL training; "
-            "this code path should not run. Set "
-            "VLLMConfig(strip_multimodal_towers=False) (or omit "
-            "--vllm-strip-multimodal-towers) to keep the towers loaded."
-        )
-
-    def __call__(self, *args: Any, **kwargs: Any) -> None:
-        raise RuntimeError(self._error("called as a forward path"))
-
-    def __getattr__(self, name: str) -> NoReturn:
-        raise AttributeError(self._error(f"attribute '{name}' accessed"))
-
-
-def patch_vllm_strip_multimodal_towers(
-    llm: Any,  # noqa: ANN401 -- opaque vLLM engine handle walked via getattr
-    tower_attrs: tuple[str, ...] | list[str] | None = None,
-) -> dict[str, int]:
-    """Free the GPU memory held by a multimodal base's unused towers.
-
-    Text-only RL rollouts never execute the vision/audio towers, so each tower
-    attribute found on the model (or one level down, on ``model.model``) is
-    replaced with a :class:`_StrippedTower` and its parameter storage freed.
-    Must be called **after** ``LLM(...)`` returns (vLLM's init memory profile
-    may touch the towers); idempotent. Checkpoints are unaffected — only the
-    LoRA adapter is saved.
-
-    :param llm: A constructed in-process ``vllm.LLM`` (external_launcher).
-    :type llm: vllm.LLM
-    :param tower_attrs: Attribute names to strip; ``None`` uses the standard
-        HF names.
-    :type tower_attrs: tuple[str, ...] | list[str] | None
-    :return: Mapping ``{tower_path: param_count_freed}``; empty if there is
-        nothing to strip or the model could not be reached.
-    :rtype: dict[str, int]
-    """
-    if tower_attrs is None:
-        # Standard HF names for *ForConditionalGeneration wrappers, plus
-        # Gemma-4-style per-modality embedders.
-        tower_attrs = (
-            "vision_tower",
-            "audio_tower",
-            "multi_modal_projector",
-            "embed_vision",
-            "embed_audio",
-        )
-    try:
-        model = get_vllm_internal_model(llm)
-    except Exception:
-        return {}
-
-    holders = [(model, "")]
-    inner = getattr(model, "model", None)
-    if inner is not None and inner is not model:
-        holders.append((inner, "model."))
-
-    freed: dict[str, int] = {}
-    for holder, prefix in holders:
-        for attr in tower_attrs:
-            sub = getattr(holder, attr, None)
-            if sub is None or isinstance(sub, _StrippedTower):
-                continue
-            try:
-                n_params = sum(int(p.numel()) for p in sub.parameters())
-            except Exception:
-                n_params = 0
-            if isinstance(holder, torch.nn.Module):
-                # nn.Module.__setattr__ refuses to replace a registered child
-                # with a non-Module; drop the registration first.
-                holder._modules.pop(attr, None)
-            path = f"{prefix}{attr}"
-            setattr(holder, attr, _StrippedTower(path))
-            freed[path] = n_params
-
-    if freed:
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-    return freed
 
 
 def patch_vllm_3d_moe_lora_flag(model_name_or_path: str) -> bool:
@@ -200,8 +99,7 @@ def get_vllm_internal_model(llm: Any) -> nn.Module:  # noqa: ANN401 -- opaque vL
 
     The other colocated patches need to mutate vLLM's running model in place —
     :func:`patch_vllm_lora_keep_resident` neutralizes ``reset_lora`` on its LoRA
-    layers and :func:`patch_vllm_strip_multimodal_towers` frees its tower
-    submodules. vLLM exposes no public accessor, so this walks the known
+    layers. vLLM exposes no public accessor, so this walks the known
     engine-core / executor attribute layouts to reach ``...model_runner.model``.
 
     :param llm: A constructed ``vllm.LLM`` instance.

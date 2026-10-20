@@ -14,10 +14,6 @@ from agilerl.architectures.catalog import (
     family_runtime,
     pretrained_model_type,
 )
-from agilerl.architectures.gemma4 import gemma4_language_tower_hf_override
-from agilerl.architectures.nemotron_h.language_tower import (
-    omni_language_tower_hf_override,
-)
 from agilerl.architectures.nemotron_h.mamba import install_mamba_patches
 from agilerl.architectures.nemotron_h.tensor_parallel import (
     NEMOTRON_H_TENSOR_PARALLEL_PLAN,
@@ -78,42 +74,36 @@ class TestFamilyRuntimeConfigs:
             "qwen3_5_moe_text",
         }
 
-    def test_nemotron_h_omni_keeps_nemotron_h_runtime_and_adds_language_tower(
+    def test_nemotron_h_omni_keeps_nemotron_h_runtime_and_sets_the_vllm_architecture(
         self,
     ) -> None:
         base = FAMILY_RUNTIME_CONFIGS["nemotron_h"]
         omni = FAMILY_RUNTIME_CONFIGS["nemotron_h_omni"]
-        assert omni.vllm == base.vllm
-        assert omni.patch.install is install_mamba_patches
-        assert omni.language_tower.hf_overrides is omni_language_tower_hf_override
-        assert omni.language_tower.model_class_overrides == {
-            "NemotronHOmniLanguageForCausalLM": (
-                "agilerl.architectures.nemotron_h.omni_language:"
-                "NemotronHOmniLanguageForCausalLM"
-            ),
-        }
-        assert base.language_tower.hf_overrides is None
-        assert base.language_tower.model_class_overrides is None
-        assert omni.multimodal_towers_kept_hf_override == {
+        assert omni.vllm.mamba_cache_mode == base.vllm.mamba_cache_mode
+        assert omni.vllm.hf_overrides == {
             "architectures": ["NemotronH_Super_Omni_Reasoning_V3"],
         }
+        assert base.vllm.hf_overrides is None
+        assert omni.patch.install is install_mamba_patches
+        assert omni.language_tower.hf_overrides is None
+        assert omni.language_tower.model_class_overrides is None
+        assert base.language_tower.hf_overrides is None
+        assert base.language_tower.model_class_overrides is None
         assert {"query", "fc1", "linear1"} <= omni.tower_connector_lora_targets
         assert omni.tower_connector_lora_targets.isdisjoint(
             {"q_proj", "in_proj", "up_proj", "down_proj"}
         )
         assert base.tower_connector_lora_targets == frozenset()
 
-    def test_gemma4_adds_language_tower_without_tower_lora(self) -> None:
+    def test_gemma4_uses_the_swa_trainer_without_tower_lora(self) -> None:
         gemma4 = FAMILY_RUNTIME_CONFIGS["gemma4"]
         gemma3 = FAMILY_RUNTIME_CONFIGS["gemma3"]
         assert gemma4.trainer == gemma3.trainer
-        assert gemma4.language_tower.hf_overrides is gemma4_language_tower_hf_override
+        assert gemma4.language_tower.hf_overrides is None
         assert gemma4.language_tower.model_class_overrides is None
         assert gemma4.tower_connector_lora_targets == frozenset()
         assert gemma3.language_tower.hf_overrides is None
-        assert FAMILY_RUNTIME_CONFIGS["gemma4_text"].language_tower.hf_overrides is (
-            gemma4_language_tower_hf_override
-        )
+        assert FAMILY_RUNTIME_CONFIGS["gemma4_text"].language_tower.hf_overrides is None
 
     def test_nemotron_h_lookup(self) -> None:
         config = FAMILY_RUNTIME_CONFIGS["nemotron_h"]
@@ -152,7 +142,6 @@ class TestFamilyRuntimeConfigs:
         assert tower.model_class_overrides == QWEN3_5_MODEL_CLASS_OVERRIDES
         assert runtime.vllm.mamba_cache_mode == "align"
         assert runtime.vllm.enable_prefix_caching is True
-        assert runtime.multimodal_towers_kept_hf_override is None
         assert runtime.tower_connector_lora_targets == frozenset()
 
     def test_catalog_excludes_gemma_and_gemma2(self) -> None:

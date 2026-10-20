@@ -59,7 +59,6 @@ from agilerl.utils.llm_utils import (
     build_vllm_rollout_lora_request,
     create_model_from_name_or_path,
     cuda_tensor_bytes_in_module,
-    filter_peft_state_dict_for_vllm_lora,
     list_peft_matched_module_keys,
     offload_colocated_trainer_from_gpu,
     peft_target_key_matches,
@@ -403,32 +402,7 @@ class TestJsonSafeValue:
         assert payload["target_modules"] == ["k_proj", "q_proj"]
 
 
-class TestFilterPeftStateDictForVllmLora:
-    def test_keeps_only_tensors_matching_target_modules(self):
-        target = build_scoped_lora_target_regex(
-            [
-                "q_proj",
-                "k_proj",
-                "v_proj",
-                "o_proj",
-                "up_proj",
-                "down_proj",
-                "gate_proj",
-            ],
-            "language_model",
-        )
-        state = {
-            "base_model.model.language_model.layers.0.self_attn.q_proj.lora_A.weight": torch.zeros(
-                1
-            ),
-            "base_model.model.vision_tower.encoder.layers.0.self_attn.q_proj.linear.lora_A.weight": torch.zeros(
-                1
-            ),
-        }
-        filtered = filter_peft_state_dict_for_vllm_lora(state, target)
-        assert len(filtered) == 1
-        assert "language_model" in next(iter(filtered))
-
+class TestRemapPeftLoraKeyForVllm:
     def test_remaps_clippable_linear_suffix(self):
         key = "base_model.model.language_model.layers.0.self_attn.q_proj.linear.lora_A.weight"
         assert (
