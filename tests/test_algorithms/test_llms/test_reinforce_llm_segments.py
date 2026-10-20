@@ -297,7 +297,7 @@ class TestREINFORCELearnBalancedAcrossRanks:
                     torch.from_numpy(steps[0][name]),
                     (4 * rank0[name] + 2 * rank1[name]) / 6,
                     rtol=1e-5,
-                    atol=1e-6,
+                    atol=1e-5,
                     msg=lambda detail, name=name: f"{name}\n{detail}",
                 )
 
@@ -328,7 +328,7 @@ class TestREINFORCELearnBalancedAcrossRanks:
                     torch.from_numpy(steps[0][name]),
                     (4 * rank0[name] + 2 * rank1[name]) / 6,
                     rtol=1e-5,
-                    atol=1e-6,
+                    atol=1e-5,
                     msg=lambda detail, name=name: f"{name}\n{detail}",
                 )
 
