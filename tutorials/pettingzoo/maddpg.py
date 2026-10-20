@@ -76,9 +76,10 @@ if __name__ == "__main__":
     population_size = 1
     pop = MADDPG.population(
         size=population_size,
-        observation_spaces=observation_spaces,
-        action_spaces=action_spaces,
+        observation_space=observation_spaces,
+        action_space=action_spaces,
         agent_ids=env.agents,
+        vect_noise_dim=num_envs,
         net_config=net_config,
         device=device,
         **init_hp,
