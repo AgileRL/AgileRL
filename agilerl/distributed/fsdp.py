@@ -31,7 +31,6 @@ from transformers.utils import SAFE_WEIGHTS_INDEX_NAME, SAFE_WEIGHTS_NAME, cache
 
 from agilerl.arena.models.fsdp import FSDPConfig
 from agilerl.distributed.expert_parallel import (
-    ParallelMesh,
     apply_expert_parallel,
     assert_packed_experts_ep_sharded,
     iter_packed_expert_modules,
@@ -43,12 +42,12 @@ from agilerl.distributed.fsdp_blocks import (
 )
 from agilerl.distributed.fsdp_meta import (
     ModelWithTiedWeightKeys,
-    init_embed_scale_buffers,
     init_rope_buffers,
     match_checkpoint_key,
     renamed_checkpoint_keys,
     restore_after_to_empty,
 )
+from agilerl.distributed.mesh import ParallelMesh
 from agilerl.distributed.process import get_world_size
 from agilerl.distributed.tensor_parallel import (
     apply_tensor_parallel,
@@ -1098,7 +1097,7 @@ def materialize_fsdp2_from_cpu_state(
         raise ValueError(msg)
     model.to_empty(device="meta")
     set_routed_experts_chunk_bytes(model, config.routed_expert_chunk_mib * 1024 * 1024)
-    mesh = None if parallel_mesh is None else parallel_mesh.hsdp
+    mesh = None if parallel_mesh is None else parallel_mesh.dp_shard
     ep_mesh = None if parallel_mesh is None else parallel_mesh.ep
     tp_mesh = None if parallel_mesh is None or config.tp <= 1 else parallel_mesh.tp
     expert_mesh = None
@@ -1119,9 +1118,8 @@ def materialize_fsdp2_from_cpu_state(
                 "expert modules."
             )
             raise RuntimeError(msg)
-        experts_skip_fsdp = parallel_mesh.leftover_dp == 1
-        if not experts_skip_fsdp:
-            expert_mesh = parallel_mesh.dp_mod_ep
+        experts_skip_fsdp = parallel_mesh.edp_shard is None
+        expert_mesh = parallel_mesh.edp_shard
     if config.tp > 1:
         apply_tensor_parallel(model, tp_mesh)
     apply_fsdp2(
@@ -1143,7 +1141,6 @@ def materialize_fsdp2_from_cpu_state(
     if cpu_state is None:
         _load_sharded_weights_from_safetensors(model)
         init_rope_buffers(model)
-        init_embed_scale_buffers(model)
     else:
         expert_keys = frozenset()
         if packed_ep_modules:

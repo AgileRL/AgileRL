@@ -1157,26 +1157,6 @@ class TestLLMEnvSpecTaskFamilyField:
             )
 
 
-class TestLLMEnvSpecImageFields:
-    def test_accepts_field_names(self) -> None:
-        spec = LLMEnvSpec(
-            env_type="rollout",
-            env_url="http://env",
-            max_turns=10,
-            screenshot_field="page",
-            goal_images_field="task_images",
-        )
-
-        assert spec.screenshot_field == "page"
-        assert spec.goal_images_field == "task_images"
-
-    def test_defaults_to_the_browsergym_keys(self) -> None:
-        spec = LLMEnvSpec(env_type="rollout", env_url="http://env", max_turns=10)
-
-        assert spec.screenshot_field == "screenshot"
-        assert spec.goal_images_field == "goal_images"
-
-
 class TestLLMEnvSpecActionErrorField:
     def test_accepts_a_field_name(self) -> None:
         spec = LLMEnvSpec(

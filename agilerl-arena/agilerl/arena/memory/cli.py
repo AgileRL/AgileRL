@@ -56,7 +56,6 @@ from agilerl.arena.memory.specs import (
     RunConfig,
     TrainingSettings,
 )
-from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
 from agilerl.arena.models.manifest import TrainingManifest
 
 logger = logging.getLogger(__name__)
@@ -491,15 +490,7 @@ def main(
     checks: list[TierCheck] = []
     try:
         if device is None:
-            tensor_parallel_size = 1
-            if isinstance(spec, RolloutLLMSpec) and spec.vllm_config is not None:
-                tensor_parallel_size = spec.vllm_config.tensor_parallel_size
-            checks = check_tiers(
-                tiers or [],
-                manifest.training,
-                build_config,
-                tensor_parallel_size,
-            )
+            checks = check_tiers(tiers or [], manifest.training, build_config)
             chosen = next((check for check in checks if check.fits), None)
             if chosen is None or chosen.config is None:
                 return _report_no_tier(checks, as_json)

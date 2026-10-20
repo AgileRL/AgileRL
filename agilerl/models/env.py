@@ -620,7 +620,6 @@ def _make_url_rollout_factory(
     timeout_s = _http_timeout_s(spec)
     observation_field = spec.observation_field
     observation_processor = _resolved_observation_processor(spec)
-    action_processor = _resolved_action_processor(spec)
     strict_boundary = _rollout_strict_chat_template_boundary(spec)
     remote_client_kwargs: dict[str, Any] = {
         "mcp_tool": mcp_tool,
@@ -640,9 +639,6 @@ def _make_url_rollout_factory(
             max_turns=url_max_turns,
             observation_field=observation_field,
             observation_processor=observation_processor,
-            action_processor=action_processor,
-            screenshot_field=spec.screenshot_field,
-            goal_images_field=spec.goal_images_field,
             strict_chat_template_boundary=strict_boundary,
             apply_chat_template=True,
             **harness_kwargs,
@@ -692,14 +688,10 @@ def _make_entrypoint_rollout_factory(
     action_field = spec.action_field
     observation_field = spec.observation_field
     observation_processor = _resolved_observation_processor(spec)
-    action_processor = _resolved_action_processor(spec)
     strict_boundary = _rollout_strict_chat_template_boundary(spec)
     local_harness_kwargs: dict[str, Any] = {
         "observation_field": observation_field,
         "observation_processor": observation_processor,
-        "action_processor": action_processor,
-        "screenshot_field": spec.screenshot_field,
-        "goal_images_field": spec.goal_images_field,
         "apply_chat_template": True,
         "strict_chat_template_boundary": strict_boundary,
         **harness_kwargs,
@@ -723,31 +715,14 @@ def _resolved_observation_processor(spec: LLMEnvSpec) -> Callable[[Any], str] | 
 
     :raises TypeError: If the dotted path resolves to something not callable.
     """
-    return _callable_entrypoint(spec.observation_processor, "observation_processor")
-
-
-def _resolved_action_processor(spec: LLMEnvSpec) -> Callable[[str], str] | None:
-    """Import ``spec.action_processor``, or ``None`` when the spec names none.
-
-    :raises TypeError: If the dotted path resolves to something not callable.
-    """
-    return _callable_entrypoint(spec.action_processor, "action_processor")
-
-
-def _callable_entrypoint(
-    entrypoint: str | None, field: str
-) -> Callable[..., Any] | None:
-    """Import ``entrypoint``, or ``None`` when the spec names none.
-
-    :param entrypoint: ``module:fn`` or ``path.py:fn``.
-    :param field: Spec field the path came from, named in the error.
-    :raises TypeError: If the path resolves to something not callable.
-    """
-    if entrypoint is None:
+    if spec.observation_processor is None:
         return None
-    resolved = resolve_entrypoint_target(entrypoint)
+    resolved = resolve_entrypoint_target(spec.observation_processor)
     if not callable(resolved):
-        msg = f"{field} '{entrypoint}' resolved to a non-callable object."
+        msg = (
+            f"observation_processor '{spec.observation_processor}' "
+            "resolved to a non-callable object."
+        )
         raise TypeError(msg)
     return resolved
 

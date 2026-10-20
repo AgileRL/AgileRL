@@ -79,13 +79,7 @@ class PhaseBreakdown(BaseModel):
 
     @property
     def fits(self) -> bool:
-        """The peak is inside the card, and vLLM's start-up pool holds one full sequence."""
-        if self.total_bytes > self.device_usable_bytes:
-            return False
-        kv = next((c for c in self.components if c.key == "kv_cache"), None)
-        return (
-            kv is None or kv.detail["startup_pool"] >= kv.detail["full_sequence_bytes"]
-        )
+        return self.total_bytes <= self.device_usable_bytes
 
     @property
     def fits_with_buffer(self) -> bool:
@@ -152,19 +146,10 @@ def engine_terms(
     batched_tokens = formulas.resolve_max_num_batched_tokens(
         settings.max_num_seqs, settings.max_model_len, settings.max_num_batched_tokens
     )
-    tp = settings.tensor_parallel_size
     # Sampler buffers: per-sequence fp32 logits and probs over the vocab.
-    # Tensor parallel shards the lm_head, so each rank holds 1/tp of the vocab.
-    sampler = 2 * settings.max_num_seqs * arch.vocab_size * 4 // tp
-    weight_elems = formulas.weight_bytes(counts, settings.weight_dtype, variant)
-    weight_byte = (
-        1.0
-        if settings.weight_quantization == "fp8"
-        else DTYPE_BYTES[settings.weight_dtype]
-    )
-    weights = int(weight_elems / DTYPE_BYTES[settings.weight_dtype] * weight_byte / tp)
+    sampler = 2 * settings.max_num_seqs * arch.vocab_size * 4
     terms = {
-        "weights": weights,
+        "weights": formulas.weight_bytes(counts, settings.weight_dtype, variant),
         "startup_peak": formulas.block_recompute_bytes(
             arch,
             1,
@@ -178,34 +163,20 @@ def engine_terms(
             settings.max_loras
             * formulas.lora_param_count(arch, settings.max_lora_rank)
             * act_bytes
-            / tp
         ),
-        "kv_demand": _kv_demand_per_rank(arch, settings),
+        "kv_demand": formulas.kv_cache_demand_bytes(
+            arch,
+            settings.weight_dtype,
+            settings.concurrency,
+            settings.max_model_len,
+        ),
         "mamba_state": formulas.mamba_state_bytes(
             arch,
             settings.max_num_seqs,
             state_dtype=settings.weight_dtype,
-            tensor_parallel=tp,
         ),
     }
     return terms, batched_tokens, sampler
-
-
-def _kv_demand_per_rank(arch: ModelArch, settings: GenerationSettings) -> int:
-    """KV bytes on one engine rank, replicating heads when TP exceeds them."""
-    demand = formulas.kv_cache_demand_bytes(
-        arch,
-        settings.weight_dtype,
-        settings.concurrency,
-        settings.max_model_len,
-    )
-    if arch.n_kv_heads == 0:
-        return demand
-    return (
-        demand
-        * formulas.kv_heads_per_rank(arch.n_kv_heads, settings.tensor_parallel_size)
-        // arch.n_kv_heads
-    )
 
 
 def training_warnings(
@@ -219,11 +190,6 @@ def training_warnings(
             "At beta=0 the estimate skips the reference forward, but the fused "
             "no-grad pass still builds that row, so the run pays for one extra "
             "row of activations."
-        )
-    if settings.fsdp is not None and settings.fsdp.tp > 1:
-        warnings.append(
-            f"fsdp.tp={settings.fsdp.tp} is not sized. Activations are priced "
-            "as if every rank held the full hidden state."
         )
     if settings.n_training_gpus > 1:
         n_gpus = settings.n_training_gpus
@@ -258,11 +224,6 @@ def training_warnings(
         warnings.append(
             "gradient_checkpointing=False saves every block's activations; "
             "expect roughly n_layers x the checkpointed footprint."
-        )
-    if settings.sequence_packing:
-        warnings.append(
-            "use_sequence_packing packs the gradient forward into one row. "
-            "This estimate sizes every row padded to max_model_len."
         )
     return warnings
 
@@ -302,18 +263,27 @@ def adapter_state(
 
     :param arch: Decoder geometry.
     :param settings: Training settings (rank, scope, FSDP).
-    :param shards: GPUs one weight copy is sharded across; 1 means no FSDP shard.
+    :param shards: GPUs one dense weight copy is sharded across; 1 means no FSDP shard.
     :return: Adapter-state bytes on one GPU.
     """
     fsdp = settings.fsdp
     threshold = None if fsdp is None else fsdp.param_persistence_threshold
-    replicated, sharded = formulas.lora_tensor_placement(
+    dense_repl, dense_shard = formulas.lora_tensor_placement(
+        arch,
+        settings.lora_rank,
+        settings.lora_target_scope,
+        0,
+        threshold,
+    )
+    all_repl, all_shard = formulas.lora_tensor_placement(
         arch,
         settings.lora_rank,
         settings.lora_target_scope,
         settings.lora_packed_target_matrices,
         threshold,
     )
+    packed_repl = all_repl - dense_repl
+    packed_shard = all_shard - dense_shard
     head_repl, head_shard = (
         _value_head_placement(arch.hidden_size, threshold)
         if settings.uses_critic
@@ -333,44 +303,61 @@ def adapter_state(
         and settings.trajectories > 1
         and not offload
     )
+    expert_shards = settings.expert_shard_gpus
 
     def resident_bytes(
         kept: int,
-        split: int,
+        dense_split: int,
+        packed_split: int,
         kept_bytes: float,
         split_bytes: float,
-        *,
         gather: bool = False,
     ) -> float:
         if offload:
             return kept * kept_bytes
-        divisor = 1 if gather else shards
-        return kept * kept_bytes + split * split_bytes / divisor
+        dense_div = 1 if gather else shards
+        packed_div = 1 if gather else expert_shards
+        return (
+            kept * kept_bytes
+            + dense_split * split_bytes / dense_div
+            + packed_split * split_bytes / packed_div
+        )
 
     n_resident = settings.n_resident_adapters
     n_trained = settings.n_trained_adapters
     adapters = resident_bytes(
-        replicated * n_resident, sharded * n_resident, replicated_bytes, sharded_bytes
+        (dense_repl + packed_repl) * n_resident + head_repl,
+        dense_shard * n_resident + head_shard,
+        packed_shard * n_resident,
+        replicated_bytes,
+        sharded_bytes,
     )
-    adapters += resident_bytes(head_repl, head_shard, replicated_bytes, sharded_bytes)
-    trained_repl = replicated * n_trained + head_repl
-    trained_shard = sharded * n_trained + head_shard
+    trained_repl = (dense_repl + packed_repl) * n_trained + head_repl
+    trained_dense_shard = dense_shard * n_trained + head_shard
+    trained_packed_shard = packed_shard * n_trained
+    trained_shard = trained_dense_shard + trained_packed_shard
     grads = resident_bytes(
         trained_repl,
-        trained_shard,
+        trained_dense_shard,
+        trained_packed_shard,
         replicated_bytes,
         sharded_bytes,
         gather=hold_grads,
     )
     step_grads = resident_bytes(
-        trained_repl, trained_shard, replicated_bytes, sharded_bytes
+        trained_repl,
+        trained_dense_shard,
+        trained_packed_shard,
+        replicated_bytes,
+        sharded_bytes,
     )
     if offload:
         adam = 0.0
     else:
         adam = resident_bytes(
             trained_repl,
-            trained_shard,
+            trained_dense_shard,
+            trained_packed_shard,
             formulas.ADAM_BYTES_PER_PARAM,
             formulas.ADAM_BYTES_PER_PARAM,
         )
@@ -380,6 +367,7 @@ def adapter_state(
         resident_bytes(
             trained_repl,
             trained_shard,
+            0,
             formulas.FOREACH_ADAM_WORKSPACE_BYTES_PER_PARAM,
             formulas.FOREACH_ADAM_WORKSPACE_BYTES_PER_PARAM,
         )
@@ -564,16 +552,10 @@ def activation_peak(
     # The chunk loop hoists an fp32 lm_head copy when the head runs below fp32.
     fused_head = int(arch.vocab_size * arch.hidden_size * 4) if act_bytes < 4 else 0
     logits = logit_rows * arch.vocab_size * 8 + fused_head
-    # A 1-row forward still stacks the consulted adapters. A larger micro-batch
-    # chunks that stack, so the live rows are the wider of the two.
-    nograd_rows = max(settings.n_adapter_rows, settings.micro_batch_size)
+    nograd_rows = settings.n_adapter_rows
     nograd_pass = (
         formulas.nograd_forward_bytes(
-            arch,
-            nograd_rows,
-            seq_len,
-            act_bytes,
-            eager_mamba_scan=eager_mamba_scan,
+            arch, nograd_rows, seq_len, act_bytes, eager_mamba_scan=eager_mamba_scan
         )
         if settings.has_nograd_pass
         else 0
@@ -657,15 +639,17 @@ def trainer_base_bytes(
     :param model: Training-side model spec.
     :param settings: Training settings (dtype, FSDP).
     :param counts: Analytic parameter split.
-    :param shards: GPUs one weight copy is sharded across.
+    :param shards: GPUs one dense weight copy is sharded across.
     :return: Base-weight bytes on one GPU.
     """
     full = formulas.weight_bytes(counts, settings.weight_dtype, model.variant("base"))
     fsdp = settings.fsdp
-    if fsdp is None or (shards <= 1 and not fsdp.cpu_offload):
+    expert_shards = settings.expert_shard_gpus
+    if fsdp is None or (shards <= 1 and expert_shards <= 1 and not fsdp.cpu_offload):
         return float(full)
     token = min(formulas.token_embedding_params(model.arch), max(counts.total, 0))
-    sharded_params = max(counts.total - token, 0)
+    expert_params = max(counts.moe_experts, 0)
+    dense_params = max(counts.total - token - expert_params, 0)
     gathered = formulas.fsdp_gathered_params(
         counts,
         model.arch,
@@ -676,7 +660,12 @@ def trainer_base_bytes(
         cpu_offload=fsdp.cpu_offload,
     )
     byte = DTYPE_BYTES[settings.weight_dtype]
-    resident = 0.0 if fsdp.cpu_offload else sharded_params * byte / shards
+    if fsdp.cpu_offload:
+        resident = 0.0
+    else:
+        resident = dense_params * byte / shards
+        if expert_params:
+            resident += expert_params * byte / expert_shards
     return token * byte + resident + gathered * byte
 
 
@@ -1004,8 +993,6 @@ def generation_warnings(
     *,
     kv_pool: int,
     kv_demand: int,
-    startup_pool: int,
-    full_sequence: int,
 ) -> list[str]:
     """User-facing generation-phase warnings."""
     arch = model.arch
@@ -1036,18 +1023,11 @@ def generation_warnings(
             "page to match. Every sequence's KV therefore rounds up to that "
             "page, which dominates the cache for short sequences."
         )
-    if startup_pool <= 0:
+    if kv_pool <= 0:
         warnings.append(
             "gpu_memory_utilization budget is consumed by weights and engine "
             "overhead before any KV cache: vLLM will fail at init. Raise "
             "gpu_memory_utilization or shrink the model/variant."
-        )
-    elif startup_pool < full_sequence:
-        warnings.append(
-            f"KV pool ({startup_pool / GiB:.1f} GiB) cannot hold one "
-            f"{settings.max_model_len}-token sequence ({full_sequence / GiB:.1f} GiB): "
-            "vLLM will fail at init. Raise gpu_memory_utilization or lower "
-            "max_model_len."
         )
     elif kv_demand > kv_pool:
         warnings.append(
@@ -1087,25 +1067,11 @@ def estimate_generation(
         if settings.kv_cache_memory_bytes is not None
         else max(budget - non_kv, 0)
     )
-    # vLLM holds Mamba state in the KV pool and checks room for one request at start-up.
-    startup_pool = (
-        settings.kv_cache_memory_bytes
-        if settings.kv_cache_memory_bytes is not None
-        else max(budget - (non_kv - mamba_state), 0)
-    )
-    full_sequence = kv_demand // settings.concurrency + formulas.mamba_state_bytes(
-        arch,
-        1,
-        state_dtype=settings.weight_dtype,
-        tensor_parallel=settings.tensor_parallel_size,
-    )
     warnings = generation_warnings(
         model,
         settings,
         kv_pool=kv_pool,
         kv_demand=kv_demand,
-        startup_pool=startup_pool,
-        full_sequence=full_sequence,
     )
     runtime_tokens = min(settings.concurrency * settings.prompt_len, batched_tokens)
     job_overhead = formulas.JOB_OVERHEAD_BYTES if orchestrated else 0
@@ -1132,8 +1098,6 @@ def estimate_generation(
             detail={
                 "pool": int(kv_pool),
                 "worst_case_demand": int(kv_demand),
-                "startup_pool": int(startup_pool),
-                "full_sequence_bytes": int(full_sequence),
             },
             note=(
                 "Pinned via kv_cache_memory_bytes."
@@ -1205,7 +1169,7 @@ def estimate_generation(
 def generation_can_serve(breakdown: PhaseBreakdown) -> bool:
     """Whether this generation bar can serve the advertised context.
 
-    ``fits`` means vLLM starts. Serving also needs a non-empty
+    ``fits`` is resident peak under the card. Serving also needs a non-empty
     KV pool that covers worst-case demand at ``max_model_len``. Demand above
     the pool means preemption under that context.
     """

@@ -6,7 +6,6 @@ import pytest
 from pydantic import ValidationError
 
 from agilerl.arena.memory import formulas
-from agilerl.arena.memory.advice import advise
 from agilerl.arena.memory.estimator import (
     estimate_generation,
     estimate_run,
@@ -27,7 +26,6 @@ from agilerl.arena.memory.specs import (
     WeightVariant,
 )
 from agilerl.arena.models.fsdp import FSDPConfig
-from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from tests.test_memory.test_formulas import (
     FALCON_H1,
     MOE_TINY,
@@ -303,75 +301,6 @@ class TestEstimateGeneration:
         )
         assert component(breakdown, "kv_cache").n_bytes == 0
         assert any("fail at init" in w for w in breakdown.warnings)
-
-    def test_empty_kv_pool_does_not_fit(self, model, device):
-        # Arrange: weights and overhead use the whole utilization budget.
-        settings = GenerationSettings(gpu_memory_utilization=0.01)
-
-        # Act
-        breakdown = estimate_generation(model, device, settings)
-
-        # Assert
-        assert component(breakdown, "kv_cache").detail["pool"] == 0
-        assert breakdown.total_bytes <= breakdown.device_usable_bytes
-        assert not breakdown.fits
-
-    def test_pool_shorter_than_one_sequence_does_not_fit(self, model, device):
-        # Arrange: vLLM refuses to start without room for one max_model_len sequence.
-        settings = GenerationSettings(
-            max_model_len=32768, max_num_seqs=2, kv_cache_memory_bytes=1
-        )
-
-        # Act
-        breakdown = estimate_generation(model, device, settings)
-
-        # Assert
-        kv = component(breakdown, "kv_cache")
-        assert 0 < kv.detail["startup_pool"] < kv.detail["full_sequence_bytes"]
-        assert not breakdown.fits
-        assert any("cannot hold one 32768-token" in w for w in breakdown.warnings)
-
-    def test_pool_holding_one_sequence_still_fits_and_warns_of_preemption(
-        self, model, device
-    ):
-        # Arrange: one sequence fits, all 64 do not.
-        settings = GenerationSettings(
-            max_model_len=32768, max_num_seqs=64, kv_cache_memory_bytes=1 * GiB
-        )
-
-        # Act
-        breakdown = estimate_generation(model, device, settings)
-
-        # Assert
-        kv = component(breakdown, "kv_cache")
-        assert kv.detail["full_sequence_bytes"] <= kv.detail["startup_pool"]
-        assert kv.detail["pool"] < kv.detail["worst_case_demand"]
-        assert breakdown.fits
-        assert any("preempt" in w for w in breakdown.warnings)
-
-    def test_hybrid_mamba_state_shares_the_start_up_pool(self):
-        # Arrange: vLLM 0.25.1 started this on an A100-80 with 7.2 GiB for KV
-        # and Mamba state, though 64 slots of Mamba state alone exceed it.
-        info = SUPPORTED_MODEL_INFO["nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"]
-        model = ModelSpec(
-            model_id="nano",
-            arch=ModelArch.from_hf_config(info.config),
-            n_params=info.num_params,
-        )
-        a100 = DeviceSpec(total_bytes=int(79.25 * GiB), name="NVIDIA A100-SXM4-80GB")
-        settings = GenerationSettings(
-            gpu_memory_utilization=0.2, max_model_len=32768, max_num_seqs=64
-        )
-
-        # Act
-        breakdown = estimate_generation(model, a100, settings)
-
-        # Assert
-        kv = component(breakdown, "kv_cache")
-        assert kv.detail["pool"] == 0
-        assert kv.detail["full_sequence_bytes"] <= kv.detail["startup_pool"]
-        assert breakdown.fits
-        assert not any("fail at init" in w for w in breakdown.warnings)
 
     def test_moe_warns_about_fused_kernel_caches(self, device):
         model = ModelSpec(model_id="moe-test", arch=MOE_TINY)
@@ -1135,10 +1064,8 @@ class TestFusedActorCriticPass:
         four_rows = one_row.model_copy(update={"micro_batch_size": 4})
 
         # Act
-        one_bar = estimate_training(model, device, one_row)
-        four_bar = estimate_training(model, device, four_rows)
-        one = component(one_bar, "activations")
-        four = component(four_bar, "activations")
+        one = component(estimate_training(model, device, one_row), "activations")
+        four = component(estimate_training(model, device, four_rows), "activations")
 
         # Assert
         assert one.detail["checkpoint_boundaries"] == (
@@ -1150,27 +1077,7 @@ class TestFusedActorCriticPass:
         assert four.detail["lora_fp32_input_casts"] == (
             formulas.lora_input_cast_bytes(QWEN_05B, 4, seq_len)
         )
-        one_nograd = max(one_row.n_adapter_rows, one_row.micro_batch_size)
-        four_nograd = max(four_rows.n_adapter_rows, four_rows.micro_batch_size)
-        assert four.detail["nograd_peak"] - one.detail["nograd_peak"] == (
-            formulas.nograd_forward_bytes(QWEN_05B, four_nograd, seq_len, 2.0)
-            - formulas.nograd_forward_bytes(QWEN_05B, one_nograd, seq_len, 2.0)
-        )
-        assert (
-            component(four_bar, "logits_workspace").n_bytes
-            == component(one_bar, "logits_workspace").n_bytes
-        )
-        assert (
-            component(four_bar, "base_weights").n_bytes
-            == component(one_bar, "base_weights").n_bytes
-        )
-        assert (
-            component(four_bar, "grads").n_bytes == component(one_bar, "grads").n_bytes
-        )
-        assert (
-            component(four_bar, "optimizer_state").n_bytes
-            == component(one_bar, "optimizer_state").n_bytes
-        )
+        assert four.detail["nograd_peak"] == one.detail["nograd_peak"]
 
     def test_fused_contracted_moe_charges_split_lora_for_both_rows(self, device):
         model = ModelSpec(model_id="moe-test", arch=MOE_TINY)
@@ -1189,42 +1096,6 @@ class TestFusedActorCriticPass:
                 MOE_TINY, 2, 1024, 2, "contracted", 2, settings.lora_rank
             )
         )
-
-
-class TestMicroBatchAdvice:
-    def test_over_budget_run_suggests_a_one_row_micro_batch(self, model):
-        # Arrange
-        device = DeviceSpec(total_bytes=8 * GiB, available_bytes=6 * GiB)
-        config = RunConfig(
-            model=model,
-            train_device=device,
-            gen_device=device,
-            training=TrainingSettings(max_model_len=16384, micro_batch_size=16),
-        )
-
-        # Act
-        tips = advise(config)
-
-        # Assert
-        match = next(
-            tip
-            for tip in tips
-            if tip.phase == "training" and "micro_batch_size_per_gpu" in tip.action
-        )
-        assert "16 -> 1" in match.action
-        assert match.saves_bytes > 0
-
-    def test_one_row_micro_batch_is_not_suggested(self, model, device):
-        config = RunConfig(
-            model=model,
-            train_device=device,
-            gen_device=device,
-            training=TrainingSettings(micro_batch_size=1),
-        )
-
-        actions = [tip.action for tip in advise(config)]
-
-        assert all("micro_batch_size_per_gpu" not in action for action in actions)
 
 
 class TestEagerMambaScan:
@@ -1702,6 +1573,23 @@ class TestTrainingSettingsShardGpusProperty:
 
         assert settings.shard_gpus == 16
 
+    def test_tensor_parallel_shrinks_the_dense_fsdp_group(self):
+        settings = TrainingSettings(n_training_gpus=8, fsdp=FSDPConfig(tp=2))
+
+        assert settings.shard_gpus == 4
+        assert settings.expert_shard_gpus == 4
+
+    def test_expert_parallel_with_tensor_parallel_uses_the_inner_group(self):
+        settings = TrainingSettings(n_training_gpus=8, fsdp=FSDPConfig(ep=4, tp=2))
+
+        assert settings.shard_gpus == 4
+        assert settings.expert_shard_gpus == 8
+
+    def test_experts_follow_the_dense_group_when_tp_is_one(self):
+        settings = TrainingSettings(n_training_gpus=8, fsdp=FSDPConfig(ep=8))
+
+        assert settings.expert_shard_gpus == settings.shard_gpus == 8
+
     def test_replicated_groups_shard_weights_like_one_group(self):
         # Arrange
         device = training_gpu("NVIDIA A100-SXM4-80GB", A100_80GB_CUDA_BYTES)
@@ -1722,88 +1610,116 @@ class TestTrainingSettingsShardGpusProperty:
             )
 
 
-class TestTrainingTensorParallelUnsupported:
-    def test_activations_stay_at_full_width(self, model, device):
-        # Arrange
-        common = {"n_training_gpus": 2, "max_model_len": 128}
-
-        # Act
-        plain = estimate_training(
-            model, device, TrainingSettings(fsdp=FSDPConfig(), **common)
-        )
-        parallel = estimate_training(
-            model, device, TrainingSettings(fsdp=FSDPConfig(tp=2), **common)
-        )
-
-        # Assert
-        assert component(parallel, "activations").n_bytes == (
-            component(plain, "activations").n_bytes
-        )
-        assert any("fsdp.tp=2 is not sized" in note for note in parallel.warnings)
-
-
-class TestFp8TensorParallelEngine:
-    def test_weights_are_one_byte_and_split_across_the_group(self, model, device):
-        # Arrange / Act
-        full = estimate_generation(model, device, GenerationSettings())
-        sharded = estimate_generation(
-            model,
-            device,
-            GenerationSettings(tensor_parallel_size=4, weight_quantization="fp8"),
-        )
-
-        # Assert: fp8 is half of bf16, and four ranks share the copy.
-        # This model has 2 KV heads, so TP 4 keeps one head on each rank.
-        assert component(sharded, "weights").n_bytes * 8 == (
-            component(full, "weights").n_bytes
-        )
-        assert (
-            component(sharded, "kv_cache").detail["worst_case_demand"] * 2
-            == (component(full, "kv_cache").detail["worst_case_demand"])
-        )
-
-    def test_super_vl_keeps_one_kv_head_and_quarters_mamba_state(self, device):
-        # Arrange: Nick's engine, TP 4 and FP8, 192 sequences at 32k.
-        common = {
-            "max_num_seqs": 192,
-            "max_model_len": 32768,
-            "gpu_memory_utilization": 0.8,
-        }
-
-        # Act
-        full = estimate_generation(SUPER_VL_MODEL, device, GenerationSettings(**common))
-        sharded = estimate_generation(
-            SUPER_VL_MODEL,
-            device,
-            GenerationSettings(
-                tensor_parallel_size=4, weight_quantization="fp8", **common
+class TestExpertShardsIgnoreTensorParallel:
+    def _moe_ep_tp_settings(self) -> TrainingSettings:
+        return TrainingSettings(
+            algorithm="sft",
+            lora_rank=8,
+            lora_packed_target_matrices=2,
+            n_training_gpus=8,
+            fsdp=FSDPConfig(
+                ep=4, tp=2, routed_expert_chunk_mib=64, optim_cpu_offload=False
             ),
         )
 
-        # Assert
-        assert component(sharded, "weights").n_bytes * 8 == (
-            component(full, "weights").n_bytes
+    def test_expert_resident_bytes_follow_ep_times_leftover(self, device):
+        # Arrange: granite-style 8 GPU inner group, ep=4 leftover=2, dense dp_shard=4.
+        settings = self._moe_ep_tp_settings()
+        counts = formulas.param_counts(MOE_MODEL.arch)
+        token = formulas.token_embedding_params(MOE_MODEL.arch)
+        byte = 2
+        gathered = formulas.fsdp_gathered_params(
+            counts,
+            MOE_MODEL.arch,
+            n_gpus=settings.shard_gpus,
+            reshard_after_forward=True,
+            prefetch_units=1,
+            wrap_every_n_blocks=1,
+            cpu_offload=False,
         )
-        assert (
-            component(sharded, "kv_cache").detail["worst_case_demand"] * 2
-            == (component(full, "kv_cache").detail["worst_case_demand"])
+        dense = counts.total - token - counts.moe_experts
+        expected = (
+            token * byte
+            + dense * byte / settings.shard_gpus
+            + counts.moe_experts * byte / settings.expert_shard_gpus
+            + gathered * byte
         )
-        assert component(sharded, "mamba_state").n_bytes * 4 == (
-            component(full, "mamba_state").n_bytes
+        dense_only = (
+            token * byte
+            + (counts.total - token) * byte / settings.shard_gpus
+            + gathered * byte
         )
-
-    def test_zero_kv_heads_leaves_demand_unscaled(self, device):
-        # Arrange: n_kv_heads == 0 cannot scale by heads_per_rank / n_kv_heads.
-        arch = ModelArch.from_hf_config(FALCON_H1).model_copy(update={"n_kv_heads": 0})
-        model = ModelSpec(model_id="falcon-no-kv", arch=arch)
-        settings = GenerationSettings(tensor_parallel_size=4, max_model_len=1024)
 
         # Act
-        breakdown = estimate_generation(model, device, settings)
+        breakdown = estimate_training(MOE_MODEL, device, settings)
 
         # Assert
-        demand = formulas.kv_cache_demand_bytes(
-            arch, settings.weight_dtype, settings.concurrency, settings.max_model_len
+        assert settings.shard_gpus == 4
+        assert settings.expert_shard_gpus == 8
+        assert component(breakdown, "base_weights").n_bytes == pytest.approx(
+            expected, abs=1
         )
-        assert demand == 0
-        assert component(breakdown, "kv_cache").detail["worst_case_demand"] == 0
+        assert component(breakdown, "base_weights").n_bytes < dense_only
+
+    def test_dense_tp_replicas_still_shard_experts_across_the_inner_group(self, device):
+        # Arrange: dp_shard=1, so dense FSDP is a no-op; experts still split
+        # across ep=2.
+        settings = TrainingSettings(
+            algorithm="sft",
+            n_training_gpus=2,
+            fsdp=FSDPConfig(
+                ep=2, tp=2, routed_expert_chunk_mib=64, optim_cpu_offload=False
+            ),
+        )
+        counts = formulas.param_counts(MOE_MODEL.arch)
+        token = formulas.token_embedding_params(MOE_MODEL.arch)
+        byte = 2
+        dense = counts.total - token - counts.moe_experts
+        expected = token * byte + dense * byte + counts.moe_experts * byte / 2
+
+        # Act
+        breakdown = estimate_training(MOE_MODEL, device, settings)
+
+        # Assert
+        assert settings.shard_gpus == 1
+        assert settings.expert_shard_gpus == 2
+        assert component(breakdown, "base_weights").n_bytes == pytest.approx(
+            expected, abs=1
+        )
+
+    def test_packed_adapter_bytes_follow_the_inner_group(self, device):
+        # Arrange
+        settings = self._moe_ep_tp_settings()
+        assert settings.fsdp is not None
+        threshold = settings.fsdp.param_persistence_threshold
+        dense_repl, dense_shard = formulas.lora_tensor_placement(
+            MOE_MODEL.arch, settings.lora_rank, settings.lora_target_scope, 0, threshold
+        )
+        all_repl, all_shard = formulas.lora_tensor_placement(
+            MOE_MODEL.arch,
+            settings.lora_rank,
+            settings.lora_target_scope,
+            settings.lora_packed_target_matrices,
+            threshold,
+        )
+        packed_repl = all_repl - dense_repl
+        packed_shard = all_shard - dense_shard
+        n_resident = settings.n_resident_adapters
+        expected = (
+            dense_repl * n_resident * 2
+            + dense_shard * n_resident * 2 / settings.shard_gpus
+            + packed_repl * n_resident * 2
+            + packed_shard * n_resident * 2 / settings.expert_shard_gpus
+        )
+        dense_only = (all_repl * n_resident * 2) + (
+            all_shard * n_resident * 2 / settings.shard_gpus
+        )
+
+        # Act
+        breakdown = estimate_training(MOE_MODEL, device, settings)
+
+        # Assert
+        assert component(breakdown, "adapters").n_bytes == pytest.approx(
+            expected, abs=1
+        )
+        assert component(breakdown, "adapters").n_bytes < dense_only

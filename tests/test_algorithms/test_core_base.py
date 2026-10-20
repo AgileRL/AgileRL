@@ -96,8 +96,7 @@ from agilerl.arena.memory.formulas import (
 from agilerl.arena.memory.manifest import ALGORITHM_NAMES
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.profiling import ProfilingConfig
-from agilerl.distributed import FSDPConfig
-from agilerl.distributed.expert_parallel import build_parallel_mesh
+from agilerl.distributed import FSDPConfig, build_parallel_mesh
 from agilerl.distributed.runtime import DPRuntime, FSDPRuntime
 from agilerl.modules import EvolvableMLP
 from agilerl.utils.algo_utils import (

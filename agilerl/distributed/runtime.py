@@ -24,10 +24,7 @@ from torch.nn.utils import clip_grad_norm_
 from torch.optim.lr_scheduler import LambdaLR
 
 from agilerl.distributed.expert_parallel import (
-    ParallelMesh,
-    build_parallel_mesh,
     iter_packed_expert_modules,
-    tp_data_parallel_size,
     validate_actor_ep,
 )
 from agilerl.distributed.fsdp import (
@@ -39,6 +36,11 @@ from agilerl.distributed.fsdp import (
     materialize_dtensors,
     materialize_fsdp2_from_cpu_state,
     set_full_model_state_dict,
+)
+from agilerl.distributed.mesh import (
+    ParallelMesh,
+    build_parallel_mesh,
+    tp_data_parallel_size,
 )
 from agilerl.distributed.process import (
     get_world_size,
@@ -821,6 +823,7 @@ class FSDPRuntime(BaseRuntime):
         self.parallel_mesh = build_parallel_mesh(
             ep=self.config.ep,
             tp=self.config.tp,
+            cp=1,
             shard_group_size=self.config.shard_group_size,
             device_type=torch.device(device).type,
         )

@@ -25,7 +25,7 @@ from torch.distributed.tensor import DTensor
 from torch.func import functional_call
 from typing_extensions import Self
 
-from agilerl.distributed.ep_dispatch import (
+from agilerl.distributed.expert_parallel.dispatch import (
     TokenDispatchState,
     all_to_all_single_autograd,
     dispatch_state,
@@ -34,11 +34,14 @@ from agilerl.distributed.ep_dispatch import (
     token_dispatch,
     unpermute_from_local_expert_major,
 )
-from agilerl.distributed.ep_sharding import expert_local_tensor, module_ep_degree
-from agilerl.distributed.replicated_rows import (
+from agilerl.distributed.expert_parallel.rows import (
     GatherReplicatedRows,
     SliceReplicatedRows,
     replicated_row_span,
+)
+from agilerl.distributed.expert_parallel.sharding import (
+    expert_local_tensor,
+    module_ep_degree,
 )
 from agilerl.lora.fused import ROUTING_STATE
 from agilerl.lora.moe.adapters import mixed_routing

@@ -15,17 +15,12 @@ and re-exported here.
 """
 
 from .expert_parallel import (
-    ParallelMesh,
     apply_expert_parallel,
-    build_parallel_mesh,
-    ep_data_parallel_size,
     packed_expert_counts,
     reference_dispatch_combine,
     token_combine,
     token_dispatch,
-    tp_data_parallel_size,
     validate_actor_ep,
-    validate_ep_degree,
 )
 from .fsdp import (
     CPUOffloadOptimizer,
@@ -37,6 +32,14 @@ from .fsdp import (
     reshard_fsdp_modules,
 )
 from .fsdp_blocks import apply_fsdp2
+from .mesh import (
+    MeshAxisName,
+    ParallelMesh,
+    build_parallel_mesh,
+    ep_data_parallel_size,
+    tp_data_parallel_size,
+    validate_ep_degree,
+)
 from .process import (
     aggregate_metrics_across_gpus,
     aggregate_metrics_dict,
@@ -74,6 +77,7 @@ __all__ = [
     "DPRuntime",
     "FSDPConfig",
     "FSDPRuntime",
+    "MeshAxisName",
     "ParallelMesh",
     "PrepareResult",
     "aggregate_metrics_across_gpus",

@@ -315,55 +315,6 @@ class TestModelInfoStatus:
             ModelInfo.model_validate({"hub_id": "org/x", "status": "beta"})
 
 
-class TestModelInfoModalitiesProperty:
-    def test_defaults_to_text(self) -> None:
-        assert ModelInfo(hub_id="org/x").modalities == ("text",)
-
-    def test_other_entries_keep_default(self) -> None:
-        for hub_id, entry in SUPPORTED_MODEL_INFO.items():
-            if hub_id == "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16":
-                continue
-
-            assert entry.modalities == ("text",), hub_id
-
-    def test_super_vl_handles_text_and_vision(self) -> None:
-        entry = SUPPORTED_MODEL_INFO[
-            "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16"
-        ]
-
-        assert entry.modalities == ("text", "vision")
-
-    def test_text_model_serializes_text_list(self) -> None:
-        dumped = SUPPORTED_MODEL_INFO["Qwen/Qwen3-4B"].model_dump(mode="json")
-
-        assert dumped["modalities"] == ["text"]
-
-    def test_super_vl_serializes_both_modalities(self) -> None:
-        dumped = SUPPORTED_MODEL_INFO[
-            "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16"
-        ].model_dump(mode="json")
-
-        assert dumped["modalities"] == ["text", "vision"]
-
-    def test_rejects_unknown_modality(self) -> None:
-        with pytest.raises(ValidationError, match="modalities"):
-            ModelInfo.model_validate({"hub_id": "org/x", "modalities": ["audio"]})
-
-    def test_rejects_empty_modalities(self) -> None:
-        with pytest.raises(ValidationError, match="modalities"):
-            ModelInfo.model_validate({"hub_id": "org/x", "modalities": []})
-
-    def test_rejects_duplicate_modalities(self) -> None:
-        with pytest.raises(ValidationError, match="modalities"):
-            ModelInfo.model_validate(
-                {"hub_id": "org/x", "modalities": ["text", "text"]}
-            )
-
-    def test_rejects_vision_only(self) -> None:
-        with pytest.raises(ValidationError, match="modalities"):
-            ModelInfo.model_validate({"hub_id": "org/x", "modalities": ["vision"]})
-
-
 class TestFinetuningNetworkSpecLoraTargets:
     def test_valid_targets_pass(self) -> None:
         spec = finetuning_network(

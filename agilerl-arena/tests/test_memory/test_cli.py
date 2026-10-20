@@ -6,7 +6,6 @@ Exit codes are a contract with the submission gate: non-zero refuses the job.
 """
 
 import builtins
-import copy
 import io
 import json
 import logging
@@ -127,40 +126,6 @@ def no_tier_fits_path(tmp_path):
     path = tmp_path / "no_tier_fits.yaml"
     path.write_text(yaml.safe_dump(NO_TIER_FITS))
     return str(path)
-
-
-class TestMultiRowMicroBatch:
-    def test_unset_micro_batch_estimates_a_larger_training_bar(self, tmp_path, capsys):
-        # Arrange
-        def write(name: str, micro: int | None) -> str:
-            doc = copy.deepcopy(MANIFEST)
-            doc["algorithm"]["batch_size"] = 16
-            doc["algorithm"]["group_size"] = 8
-            if micro is None:
-                del doc["algorithm"]["micro_batch_size_per_gpu"]
-            else:
-                doc["algorithm"]["micro_batch_size_per_gpu"] = micro
-            path = tmp_path / name
-            path.write_text(yaml.safe_dump(doc))
-            return str(path)
-
-        one_path = write("one.yaml", 1)
-        many_path = write("many.yaml", None)
-
-        # Act
-        one_code = main(one_path, config_path=TINY_CONFIG, device_gb=24, as_json=True)
-        one = json.loads(capsys.readouterr().out)
-        many_code = main(many_path, config_path=TINY_CONFIG, device_gb=24, as_json=True)
-        many = json.loads(capsys.readouterr().out)
-
-        # Assert
-        def total(phase: dict) -> int:
-            return sum(component["bytes"] for component in phase["components"])
-
-        assert one_code != EXIT_USAGE
-        assert many_code != EXIT_USAGE
-        assert total(many["training"]) > total(one["training"])
-        assert total(many["generation"]) == total(one["generation"])
 
 
 def _fake_hub(monkeypatch, get_safetensors_metadata):
@@ -712,16 +677,10 @@ class TestSolveMain:
         def total(bar):
             return sum(component["bytes"] for component in bar["components"])
 
-        def kv_demand(bar):
-            kv = next(c for c in bar["components"] if c["key"] == "kv_cache")
-            return kv["detail"]["worst_case_demand"]
-
         assert total(plain_payload["training"]) == 1842925488
         assert total(overridden_payload["training"]) == 1844349913
-        # The generation bar fills the utilization budget at either context.
-        assert kv_demand(overridden_payload["generation"]) == 8 * kv_demand(
-            plain_payload["generation"]
-        )
+        assert total(plain_payload["generation"]) == 22578829721
+        assert total(overridden_payload["generation"]) == 21839321497
 
     def test_async_defaults_the_gen_device_to_the_training_gpu(self, tmp_path, capsys):
         # Arrange
@@ -1008,18 +967,6 @@ class TestMainResourceTier:
         assert code == EXIT_OK
         assert "Cheapest resource tier that fits: l4-2x (2x NVIDIA L4" in out
         assert "Memory estimate" in out
-
-    def test_tensor_parallel_engine_needs_a_gpu_per_rank(self, tmp_path, capsys):
-        doc = copy.deepcopy(MANIFEST)
-        doc["algorithm"]["vllm_config"]["tensor_parallel_size"] = 4
-        path = tmp_path / "tp.yaml"
-        path.write_text(yaml.safe_dump(doc))
-
-        code = main(str(path), tiers=TIERS, config_path=TINY_CONFIG, no_color=True)
-
-        out = capsys.readouterr().out
-        assert code == EXIT_OVER_BUDGET
-        assert "the job needs 5" in out
 
     def test_json_names_the_tier_and_every_verdict(self, manifest_path, capsys):
         code = main(manifest_path, tiers=TIERS, config_path=TINY_CONFIG, as_json=True)

@@ -299,27 +299,6 @@ def test_vl_observation_screenshot_keeps_an_existing_image_prefix() -> None:
     assert isinstance(out_image, Image.Image)
 
 
-def test_vl_observation_reads_a_named_screenshot_field() -> None:
-    out_text, out_image = observation_text_and_image(
-        {"page": [[0, 1], [2, 3]], "screenshot": [[9, 9], [9, 9]]},
-        screenshot_field="page",
-    )
-
-    assert out_text == "<image>\nComplete the task shown in the image."
-    assert isinstance(out_image, Image.Image)
-    assert out_image.getpixel((0, 0)) == (0, 0, 0)
-
-
-def test_vl_observation_empty_screenshot_field_is_not_an_image() -> None:
-    with pytest.warns(UserWarning, match="no text"):
-        text, image = observation_text_and_image(
-            {"screenshot": [[0, 1], [2, 3]]}, screenshot_field=""
-        )
-
-    assert image is None
-    assert text == ""
-
-
 def test_vl_observation_screenshot_rejects_bad_shape() -> None:
     with pytest.raises(TypeError, match=r"got \(2, 2, 4\)"):
         observation_text_and_image({"screenshot": [[[0] * 4] * 2] * 2})
@@ -390,31 +369,6 @@ class TestObservationGoalImages:
     )
     def test_observation_without_goal_images_has_none(self, obs: object) -> None:
         assert observation_goal_images(obs) == []
-
-    def test_reads_a_named_field_and_skips_goal_images(self) -> None:
-        blue = [
-            [[[0, 0, 255], [0, 0, 255]], [[0, 0, 255], [0, 0, 255]]],
-        ]
-        images = observation_goal_images(
-            {
-                "goal_images": [
-                    [[[255, 0, 0], [255, 0, 0]], [[255, 0, 0], [255, 0, 0]]],
-                ],
-                "task_images": blue,
-            },
-            goal_images_field="task_images",
-        )
-
-        assert len(images) == 1
-        assert images[0].getpixel((0, 0)) == (0, 0, 255)
-
-    def test_an_empty_field_reads_none(self) -> None:
-        assert (
-            observation_goal_images(
-                {"goal_images": [[[255, 0, 0]]]}, goal_images_field=""
-            )
-            == []
-        )
 
 
 def test_vl_observation_string_is_text_only() -> None:

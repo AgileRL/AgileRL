@@ -1,114 +1,75 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Text after the first think close."""
+"""Env action text extracted from a generation."""
 
-import torch
-
-from agilerl.llm_envs.harness import RolloutHarness, action_span
-from tests.helpers.rollout_doubles import FakeEnvClient, MiniTokenizer
+from agilerl.llm_envs.harness import RolloutHarness, env_action_text
 
 
-class TestActionSpan:
+class TestEnvActionText:
     def test_keeps_a_bare_action(self) -> None:
-        assert action_span("click('12')") == "click('12')"
+        assert env_action_text("click('12')") == "click('12')"
 
     def test_drops_reasoning_from_a_prefilled_open_think(self) -> None:
         text = "The lamp is $5.\nSubmit it.</think>\n\nsend_msg_to_user('$5')"
 
-        assert action_span(text) == "send_msg_to_user('$5')"
+        assert env_action_text(text) == "send_msg_to_user('$5')"
 
     def test_drops_a_leading_closed_think_block(self) -> None:
         text = "<think>\nlook at bid 12\n</think>\nclick('12')"
 
-        assert action_span(text) == "click('12')"
+        assert env_action_text(text) == "click('12')"
 
     def test_drops_an_empty_think_block(self) -> None:
-        assert action_span("<think></think>click('1996')") == "click('1996')"
+        assert env_action_text("<think></think>click('1996')") == "click('1996')"
 
     def test_keeps_the_text_after_the_first_close(self) -> None:
         text = "first</think>click('3')</think>"
 
-        assert action_span(text) == "click('3')</think>"
+        assert env_action_text(text) == "click('3')</think>"
 
     def test_passes_unclosed_reasoning_through(self) -> None:
         text = "The page lists three lamps and the cheapest is"
 
-        assert action_span(text) == text
+        assert env_action_text(text) == text
 
     def test_reasoning_with_no_action_sends_nothing(self) -> None:
-        assert action_span("<think>only reasoning</think>") == ""
+        assert env_action_text("<think>only reasoning</think>") == ""
 
-    def test_leaves_a_colon_answer_unchanged(self) -> None:
-        assert action_span("Answer: 42") == "Answer: 42"
+    def test_quotes_an_unparsed_call(self) -> None:
+        assert (
+            env_action_text("send_msg_to_user($14.47-$23.50)")
+            == "send_msg_to_user('$14.47-$23.50')"
+        )
 
+    def test_quotes_an_unparsed_call_after_reasoning(self) -> None:
+        assert (
+            env_action_text("range found</think>\nsend_msg_to_user($14.47-$23.50)")
+            == "send_msg_to_user('$14.47-$23.50')"
+        )
 
-class RecordingClient(FakeEnvClient):
-    """Env client that keeps each action it is stepped with."""
+    def test_quotes_a_colon_call(self) -> None:
+        assert (
+            env_action_text("send_msg_to_user: $14.47-$23.50")
+            == "send_msg_to_user('$14.47-$23.50')"
+        )
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.actions: list[str] = []
+    def test_unquotes_a_quoted_colon_payload(self) -> None:
+        assert (
+            env_action_text('send_msg_to_user: "$5 off"')
+            == "send_msg_to_user('$5 off')"
+        )
 
-    def step(self, action: object) -> tuple[str, float, bool, bool, dict[str, object]]:
-        self.actions.append(str(action))
-        return super().step(action)
+    def test_passes_a_call_with_no_payload_through(self) -> None:
+        assert env_action_text("noop(") == "noop("
 
+    def test_keeps_a_parsed_call(self) -> None:
+        assert env_action_text("fill('55', 'red')") == "fill('55', 'red')"
 
-class RecordingTokenizer(MiniTokenizer):
-    """Decodes every generation as ``text`` and records each prompt it tokenizes."""
+    def test_quotes_a_call_too_nested_to_parse(self) -> None:
+        payload = "-" * 1_000_000 + "1"
 
-    def __init__(self, text: str) -> None:
-        self.text = text
-        self.prompts: list[str] = []
-
-    def decode(self, ids: object, **_: object) -> str:
-        del ids
-        return self.text
-
-    def __call__(self, texts: list[str], **_: object) -> dict[str, torch.Tensor]:
-        self.prompts.append(texts[0])
-        ids = torch.tensor([[1]], dtype=torch.long)
-        return {"input_ids": ids, "attention_mask": torch.ones_like(ids)}
-
-
-def rewrite_action(text: str) -> str:
-    return f"quoted({text})"
-
-
-def restarted_prompt(action: str, *, processor: object = None) -> tuple[list[str], str]:
-    """Step one action and return the env's actions and the restarted prompt."""
-    client = RecordingClient()
-    tokenizer = RecordingTokenizer(action)
-    harness = RolloutHarness(
-        client,
-        tokenizer,
-        max_turns=2,
-        apply_chat_template=False,
-        segment_prompt_tokens=2,
-        action_processor=processor,
-    )
-    harness.reset()
-    harness.step(torch.tensor([[1, 9]], dtype=torch.long))
-    return client.actions, tokenizer.prompts[-1]
-
-
-class TestRolloutHarnessActionProcessor:
-    def test_default_sends_the_action_text_unchanged(self) -> None:
-        # Act
-        actions, prompt = restarted_prompt("Answer: 42")
-
-        # Assert
-        assert actions == ["Answer: 42"]
-        assert "1. Answer: 42" in prompt
-
-    def test_processor_rewrites_the_env_action_and_the_restart_history(self) -> None:
-        # Act
-        actions, prompt = restarted_prompt("fill: hello", processor=rewrite_action)
-
-        # Assert
-        assert actions == ["quoted(fill: hello)"]
-        assert "1. quoted(fill: hello)" in prompt
+        assert env_action_text(f"fill({payload})") == f"fill('{payload}')"
 
 
 class TestTrailingInstruction:

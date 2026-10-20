@@ -237,21 +237,12 @@ def _cast_params(params: Iterable[nn.Parameter], dtype: torch.dtype) -> None:
             param.data = param.data.to(dtype=dtype)
 
 
-def _ple_embed(language: nn.Module | None) -> nn.Module | None:
-    """Packed per-layer embedding table on the language body, if present."""
-    if language is None:
-        return None
-    module = getattr(language, "embed_tokens_per_layer", None)
-    return module if isinstance(module, nn.Module) else None
-
-
 def _embed_params(model: nn.Module) -> set[nn.Parameter]:
     """Token-embedding parameters to leave replicated on the root unit.
 
     ``to_empty`` splits tied ``lm_head.weight`` from ``embed_tokens``. Both
     must be ignored or FSDP shards the head, then ``tie_weights()`` replaces
-    that DTensor with the dense embed Parameter. Per-layer embeddings are a
-    separate FSDP unit, not ignored here.
+    that DTensor with the dense embed Parameter.
     """
     causal = resolve_causal_lm(model)
     language = _language_model(causal)
@@ -340,31 +331,6 @@ def _shard_embed_and_lm_head(
     )
 
 
-def _shard_ple_embeddings(
-    model: nn.Module,
-    shard_kwargs: dict,
-    persistence_threshold: int,
-    extra_ignored: set[nn.Parameter] | None = None,
-    keep_dtype: set[nn.Parameter] | None = None,
-) -> None:
-    """Shard packed per-layer embeddings as their own FSDP unit.
-
-    Gemma 4 PLE is vocab * layers * ple_dim (billions of elements on E4B).
-    A dedicated unit all-gathers that table without mixing it into the root
-    leftover gather.
-    """
-    ple = _ple_embed(_language_model(resolve_causal_lm(model)))
-    if ple is None:
-        return
-    _shard_unit(
-        ple,
-        shard_kwargs,
-        persistence_threshold,
-        extra_ignored=extra_ignored,
-        keep_dtype=keep_dtype,
-    )
-
-
 def _prefetch_chains(
     model: nn.Module, block_units: Sequence[nn.Module]
 ) -> list[list[Any]]:
@@ -373,9 +339,9 @@ def _prefetch_chains(
     Blocks of one parent (a decoder ``layers`` list, a vision ``blocks``
     stack) run back to back, so only siblings prefetch each other. A unit
     with no explicit backward prefetch falls back to FSDP's recorded
-    post-forward order, which covers the jump between towers. Embed,
-    per-layer embeddings, and ``lm_head`` join the language model's chain,
-    or the last chain when no language model is found.
+    post-forward order, which covers the jump between towers. Embed and
+    ``lm_head`` join the language model's chain, or the last chain when no
+    language model is found.
     """
     unit_ids = {id(unit) for unit in block_units if isinstance(unit, FSDPModule)}
     causal = resolve_causal_lm(model)
@@ -401,13 +367,8 @@ def _prefetch_chains(
         embed = getattr(language, "embed_tokens", None) or getattr(
             language, "embeddings", None
         )
-        insert_at = 0
         if isinstance(embed, FSDPModule):
             language_chain.insert(0, embed)
-            insert_at = 1
-        ple = _ple_embed(language)
-        if isinstance(ple, FSDPModule):
-            language_chain.insert(insert_at, ple)
     lm_head = getattr(causal, "lm_head", None) or getattr(causal, "embed_out", None)
     if isinstance(lm_head, FSDPModule):
         language_chain.append(lm_head)
@@ -683,7 +644,7 @@ def apply_fsdp2(
     expert_mesh: DeviceMesh | None = None,
     gradient_checkpointing: bool = False,
 ) -> nn.Module:
-    """Shard ``model`` with FSDP2: blocks, PLE, embed/(untied) lm_head, root, prefetch.
+    """Shard ``model`` with FSDP2: blocks, embed/(untied) lm_head, root, prefetch.
 
     Parameters become DTensors in place, so any optimizer must be (re)built
     after this call. Callers must not pass a dense full-model replica on
@@ -818,13 +779,6 @@ def apply_fsdp2(
             keep_dtype=tp_trainable,
         )
     _shard_embed_and_lm_head(
-        model,
-        kwargs,
-        threshold,
-        extra_ignored=expert_params,
-        keep_dtype=tp_trainable,
-    )
-    _shard_ple_embeddings(
         model,
         kwargs,
         threshold,

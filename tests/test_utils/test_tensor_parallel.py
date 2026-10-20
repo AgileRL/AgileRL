@@ -29,9 +29,8 @@ from transformers.models.nemotron_h.modeling_nemotron_h import (
     NemotronHMoE,
 )
 
-from agilerl.distributed import FSDPConfig
+from agilerl.distributed import FSDPConfig, build_parallel_mesh
 from agilerl.distributed import tensor_parallel as tp_mod
-from agilerl.distributed.expert_parallel import build_parallel_mesh
 from agilerl.distributed.fsdp import (
     materialize_dtensors,
     materialize_fsdp2_from_cpu_state,
@@ -426,7 +425,7 @@ def _mixed_precision_worker(
                 param_dtype="bfloat16",
                 reduce_dtype="float32",
             ),
-            mesh=mesh.hsdp,
+            mesh=mesh.dp_shard,
         )
         forward_dtypes: list[torch.dtype] = []
         for name, module in attn.named_modules():
@@ -823,7 +822,7 @@ def _fsdp_worker(rank: int, world_size: int, port: int, result_queue: Any) -> No
         apply_fsdp2(
             model,
             FSDPConfig(tp=tp, wrap_every_n_blocks=1, param_persistence_threshold=0),
-            mesh=mesh.hsdp,
+            mesh=mesh.dp_shard,
         )
         after = {
             id(param)
@@ -865,7 +864,7 @@ def _lm_head_fsdp_worker(
         apply_fsdp2(
             head,
             FSDPConfig(tp=tp, wrap_every_n_blocks=1, param_persistence_threshold=0),
-            mesh=mesh.hsdp,
+            mesh=mesh.dp_shard,
         )
         weight = head.lm_head.weight
         if not isinstance(weight, DTensor) or weight.device_mesh is not mesh.tp:

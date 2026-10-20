@@ -30,8 +30,7 @@ from agilerl.architectures.nemotron_h.tensor_parallel import (
     permuted_local_from_full,
     realign_mamba_permuted_shards,
 )
-from agilerl.distributed import FSDPConfig
-from agilerl.distributed.expert_parallel import build_parallel_mesh
+from agilerl.distributed import FSDPConfig, build_parallel_mesh
 from agilerl.distributed.fsdp import materialize_dtensors
 from agilerl.distributed.fsdp_blocks import apply_fsdp2
 from agilerl.distributed.tensor_parallel import SharedSeedDropout
@@ -435,7 +434,7 @@ def _fsdp_worker(rank: int, world_size: int, port: int, result_queue: Any) -> No
         apply_fsdp2(
             model,
             FSDPConfig(tp=tp, wrap_every_n_blocks=1, param_persistence_threshold=0),
-            mesh=mesh.hsdp,
+            mesh=mesh.dp_shard,
         )
         after = {
             id(param)

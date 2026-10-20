@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Rewrite the committed agilerl-arena extra to an exact pin for one wheel build.
 #
-# Used only when publish-framework-dev.sh builds a framework MR wheel that
-# must Requires-Dist the matching arena .devN from the same pipeline. Stables
+# Used only when publish-framework-dev.sh builds a framework +local wheel that
+# must Requires-Dist the matching arena +local from the same pipeline. Stables
 # keep a compatible range in pyproject; the ML bundle records exact versions.
 #
 # Usage:
@@ -21,8 +21,8 @@ usage() {
 
 apply_pin() {
   local pin="${1:?pin required}"
-  if [[ ! "${pin}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.dev[0-9]+)?([+][A-Za-z0-9._-]+)?$ ]]; then
-    echo "error: pin ${pin} is not a PEP 440 X.Y.Z, X.Y.Z.devN or X.Y.Z+local" >&2
+  if [[ ! "${pin}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+][A-Za-z0-9._-]+)?$ ]]; then
+    echo "error: pin ${pin} is not a PEP 440 X.Y.Z or X.Y.Z+local" >&2
     exit 1
   fi
   if [[ ! -f "${PYPROJECT}" ]]; then
