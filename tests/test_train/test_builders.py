@@ -367,6 +367,15 @@ class TestLLMBuildGuards:
 
         assert isinstance(built["vllm_config"], VLLMConfig)
 
+    def test_colocated_omits_unset_old_logprobs_source(self, monkeypatch):
+        spec = GRPOSpec(
+            group_size=2,
+            pretrained_model_name_or_path="stub/model",
+        )
+        built = _build_llm_with_dummy_algo(spec, monkeypatch, rollout_mode="colocated")
+
+        assert "old_logprobs_source" not in built
+
     def test_vllm_config_is_dropped_when_the_trainer_does_not_host_vllm(
         self, monkeypatch
     ):

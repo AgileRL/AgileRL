@@ -4062,6 +4062,13 @@ class TestGRPOLearn:
             "old_logprobs_trainer_rows",
             "grad_norm_pre",
             "grad_norm_post",
+            "vllm_is_delta_mean",
+            "vllm_is_delta_max",
+            "vllm_mismatch_kl",
+            "vllm_is_ratio_mean",
+            "vllm_is_ratio_std",
+            "vllm_is_ratio_p95",
+            "vllm_is_frac_clamped",
             *LEARN_PHASE_METRIC_NAMES,
         }
         assert all(
@@ -5642,7 +5649,10 @@ class TestGRPOVLLMSamplingCorrection:
         monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
         monkeypatch.setattr("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True)
         grpo = _make_cpu_grpo_for_branch_tests(
-            group_size=2, update_epochs=1, use_liger_loss=True
+            group_size=2,
+            update_epochs=1,
+            use_liger_loss=True,
+            old_logprobs_source="trainer",
         )
         assert grpo.importance_sampling_level == "token"
         completion_ids, action_masks = _build_branch_experiences(batch_size=2)
@@ -5703,6 +5713,7 @@ class TestGRPOVLLMSamplingCorrection:
             update_epochs=1,
             use_liger_loss=True,
             importance_sampling_level="trajectory",
+            old_logprobs_source="trainer",
         )
         completion_ids, action_masks = _build_branch_experiences(batch_size=2)
         rewards = torch.tensor([1.0, -1.0], dtype=torch.float32)

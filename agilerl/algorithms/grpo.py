@@ -434,15 +434,17 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         torch.profiler trace of one learn micro-batch. ``None`` profiles nothing.
     :type profiling_config: ProfilingConfig | None, optional
     :param old_logprobs_source: Behaviour-policy log-probs the importance ratio
-        divides by. ``"trainer"`` (default) uses the trainer's policy at the
-        start of :meth:`learn`: micro-batches that run before this call's first
-        optimizer step take them from their own training forward, and only the
-        remaining rows get an extra no-grad forward. ``"rollout"`` uses the
-        rollout engine's sampling log-probs for rows that have them on every
-        action token. Other rows (e.g. env-truncated ones) get the learn-start
+        divides by. Unset uses ``"trainer"`` when vLLM is colocated in this
+        process and ``"rollout"`` otherwise. ``"rollout"`` uses the rollout
+        engine's sampling log-probs for rows that have them on every action
+        token. Other rows (e.g. env-truncated ones) get the learn-start
         policy's from the no-grad forward, which runs only when some rank has
         such a row. ``old_logprobs_trainer_rows`` reports their count.
-    :type old_logprobs_source: Literal["trainer", "rollout"], optional
+        ``"trainer"`` uses the trainer's policy at the start of :meth:`learn`:
+        micro-batches that run before this call's first optimizer step take
+        them from their own training forward, and only the remaining rows get
+        an extra no-grad forward.
+    :type old_logprobs_source: Literal["trainer", "rollout"] | None, optional
     :param off_policy_token_mask_bounds: ``(low, high)`` band on the per-token
         ratio of the current policy to the policy that sampled the token (the
         rollout engine's sampling log-probs, or the old policy when the batch
@@ -551,7 +553,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             "micro_batch", "accumulation_window", "episode"
         ] = "accumulation_window",
         profiling_config: ProfilingConfig | None = None,
-        old_logprobs_source: Literal["trainer", "rollout"] = "trainer",
+        old_logprobs_source: Literal["trainer", "rollout"] | None = None,
         off_policy_token_mask_bounds: tuple[float, float] | None = (0.5, 5.0),
         off_policy_sequence_mask_threshold: float | None = 0.03,
         use_bias_correction_kl: bool = True,
@@ -612,6 +614,8 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         self.top_k = top_k
         self.min_p = min_p
         self.loss_norm = self._resolve_loss_norm(loss_norm)
+        if old_logprobs_source is None:
+            old_logprobs_source = "trainer" if self.colocated else "rollout"
         if old_logprobs_source not in {"trainer", "rollout"}:
             msg = (
                 f"Invalid old_logprobs_source '{old_logprobs_source}'. Expected "
@@ -675,6 +679,17 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         ):
             self.metrics.register(name)
 
+    def _should_capture_sampling_logps(self, training: bool) -> bool:
+        """Whether this training call stores vLLM sampling log-probs."""
+        return (
+            training
+            and self.colocated
+            and (
+                self.vllm_importance_sampling_correction
+                or self.old_logprobs_source == "rollout"
+            )
+        )
+
     def get_action(
         self,
         obs: LLMObsType,
@@ -700,12 +715,10 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         """
         prompts = normalize_prompt_batch(obs)
         group_size = self.group_size if training and repeat_prompts else 1
-        # Capture vLLM sampling logprobs only for training rollouts when the
-        # mismatch correction is enabled; ``None`` on the HF path / eval.
+        # None on HF / eval. Training colocated rollouts store them for
+        # mismatch correction or rollout-as-old.
         sampling_logps: list[torch.Tensor | None] | None = None
-        capture_sampling_logps = (
-            training and self.colocated and self.vllm_importance_sampling_correction
-        )
+        capture_sampling_logps = self._should_capture_sampling_logps(training)
         with self.select_adapter("actor"):
             self.actor.eval()
             if not self.colocated:

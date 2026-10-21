@@ -27,6 +27,7 @@ from peft import LoraConfig
 
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.algorithms.grpo import GRPO
+from agilerl.utils.algo_utils import VLLMConfig
 from tests.test_algorithms.test_llms.llm_helpers import create_module
 from tests.test_utils.test_expert_parallel import (
     _init_gloo,
@@ -40,6 +41,15 @@ SEQ_LEN = 8
 PROMPT_LEN = 3
 NUM_ROWS = 4
 GRAD_ATOL = 1e-6
+
+
+def _stub_colocated_setup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skip in-process vLLM while still attaching LoRA adapters."""
+
+    def setup_without_vllm(self: GRPO, actor_network: Any, clone: bool = False) -> None:
+        self._initialize_actors(actor_network, add_adapters=not clone)
+
+    monkeypatch.setattr(GRPO, "_setup_actors", setup_without_vllm)
 
 
 def _make_grpo(**overrides: Any) -> GRPO:
@@ -167,12 +177,65 @@ def _assert_same_gradients(
 
 
 class TestGRPOOldLogprobsSourceConfig:
-    def test_trainer_is_the_default(self) -> None:
-        assert _make_grpo().old_logprobs_source == "trainer"
+    def test_rollout_is_the_default_without_colocated_vllm(self) -> None:
+        assert _make_grpo().old_logprobs_source == "rollout"
+
+    def test_colocated_vllm_defaults_to_the_trainer(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _stub_colocated_setup(monkeypatch)
+
+        agent = _make_grpo(vllm_config=VLLMConfig())
+
+        assert agent.colocated
+        assert agent.old_logprobs_source == "trainer"
+
+    def test_colocated_vllm_can_take_rollout_old_logprobs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _stub_colocated_setup(monkeypatch)
+
+        agent = _make_grpo(vllm_config=VLLMConfig(), old_logprobs_source="rollout")
+
+        assert agent.colocated
+        assert agent.old_logprobs_source == "rollout"
 
     def test_unknown_source_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="Invalid old_logprobs_source 'vllm'"):
             _make_grpo(old_logprobs_source="vllm")
+
+    def test_colocated_rollout_source_captures_sampling_logprobs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        agent = _make_grpo(
+            old_logprobs_source="rollout",
+            vllm_importance_sampling_correction=False,
+        )
+        agent.colocated = True
+        captured: dict[str, bool] = {}
+
+        def fake_generate(
+            prompts: Any,
+            group_size: int,
+            temperature: float | None,
+            capture_sampling_logps: bool = False,
+        ) -> tuple[list[torch.Tensor], list[torch.Tensor], None]:
+            captured["capture"] = capture_sampling_logps
+            n = len(prompts) * group_size
+            token_ids = [torch.ones(1, 4, dtype=torch.long) for _ in range(n)]
+            masks = [torch.ones(1, 3, dtype=torch.bool) for _ in range(n)]
+            return token_ids, masks, None
+
+        monkeypatch.setattr(agent, "_prepare_vllm_for_generation", lambda: None)
+        monkeypatch.setattr(agent, "_generate_with_vllm_colocate", fake_generate)
+
+        agent.get_action(
+            [{"input_ids": torch.ones(1, 2, dtype=torch.long)}],
+            training=True,
+            repeat_prompts=False,
+        )
+
+        assert captured["capture"] is True
 
 
 class TestGRPOLearnTrainerOldLogProbs:
@@ -182,7 +245,7 @@ class TestGRPOLearnTrainerOldLogProbs:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Arrange: 4 rows, 2 micro-batches, one optimizer step.
-        agent = _make_grpo()
+        agent = _make_grpo(old_logprobs_source="trainer")
         calls = _record_no_grad_forwards(agent, monkeypatch)
 
         # Act
@@ -203,10 +266,14 @@ class TestGRPOLearnTrainerOldLogProbs:
     ) -> None:
         # Arrange: the explicit agent scores every row up front.
         self_scored = _make_grpo(
-            mini_batch_size=mini_batch_size, update_epochs=update_epochs
+            old_logprobs_source="trainer",
+            mini_batch_size=mini_batch_size,
+            update_epochs=update_epochs,
         )
         explicit = _make_grpo(
-            mini_batch_size=mini_batch_size, update_epochs=update_epochs
+            old_logprobs_source="trainer",
+            mini_batch_size=mini_batch_size,
+            update_epochs=update_epochs,
         )
         monkeypatch.setattr(explicit, "_self_scored_micro_batches", lambda *_: 0)
         explicit_calls = _record_no_grad_forwards(explicit, monkeypatch)
@@ -228,7 +295,7 @@ class TestGRPOLearnTrainerOldLogProbs:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Arrange: 2 micro-batches, one optimizer step each.
-        agent = _make_grpo(mini_batch_size=2)
+        agent = _make_grpo(old_logprobs_source="trainer", mini_batch_size=2)
         calls = _record_no_grad_forwards(agent, monkeypatch)
 
         # Act
@@ -241,7 +308,7 @@ class TestGRPOLearnTrainerOldLogProbs:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Arrange
-        agent = _make_grpo(beta=0.04)
+        agent = _make_grpo(old_logprobs_source="trainer", beta=0.04)
         calls = _record_no_grad_forwards(agent, monkeypatch)
 
         # Act
@@ -254,7 +321,7 @@ class TestGRPOLearnTrainerOldLogProbs:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Arrange: its unit-ratio fallback needs old log-probs before the update.
-        agent = _make_grpo()
+        agent = _make_grpo(old_logprobs_source="trainer")
         sampling_logps: list[torch.Tensor | None] = list(_sampling_logps(agent))
         sampling_logps[0] = None
         forwarded_ids: list[torch.Tensor] = []
@@ -273,7 +340,7 @@ class TestGRPOLearnTrainerOldLogProbs:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Arrange
-        agent = _make_grpo()
+        agent = _make_grpo(old_logprobs_source="trainer")
         calls = _record_no_grad_forwards(agent, monkeypatch)
 
         # Act
@@ -285,7 +352,7 @@ class TestGRPOLearnTrainerOldLogProbs:
 
     def test_sampling_mismatch_metrics_compare_learn_start_log_probs(self) -> None:
         # Arrange: sampling log-probs sit 0.5 below the learn-start policy.
-        agent = _make_grpo()
+        agent = _make_grpo(old_logprobs_source="trainer")
         sampling_logps = _sampling_logps(agent, offset=-0.5)
 
         # Act
@@ -380,7 +447,7 @@ class TestGRPOLearnRolloutOldLogProbs:
         # both sources see the same old log-probs only if uncovered rows get
         # the learn-start policy's too.
         rollout = _make_grpo(old_logprobs_source="rollout", mini_batch_size=2)
-        trainer = _make_grpo(mini_batch_size=2)
+        trainer = _make_grpo(old_logprobs_source="trainer", mini_batch_size=2)
         sampling_logps = _partly_covered_sampling_logps(trainer)
         rollout_steps = _record_step_gradients(rollout, monkeypatch)
         trainer_steps = _record_step_gradients(trainer, monkeypatch)
@@ -434,7 +501,7 @@ class TestGRPOLearnRolloutOldLogProbs:
     ) -> None:
         # Arrange: two steps, so both sources reuse the old log-probs.
         rollout = _make_grpo(old_logprobs_source="rollout", mini_batch_size=2)
-        trainer = _make_grpo(mini_batch_size=2)
+        trainer = _make_grpo(old_logprobs_source="trainer", mini_batch_size=2)
         sampling_logps = _sampling_logps(trainer)
         rollout_steps = _record_step_gradients(rollout, monkeypatch)
         trainer_steps = _record_step_gradients(trainer, monkeypatch)
@@ -728,7 +795,7 @@ def _one_rank_captured_trainer_source_worker(
     try:
         _init_gloo(rank, world_size, port)
         # Arrange: four rows per rank; only rank 0 captured sampling log-probs.
-        agent = _make_grpo(batch_size=2 * world_size)
+        agent = _make_grpo(old_logprobs_source="trainer", batch_size=2 * world_size)
         sampling_logps = _sampling_logps(agent, offset=-0.5) if rank == 0 else None
 
         # Act

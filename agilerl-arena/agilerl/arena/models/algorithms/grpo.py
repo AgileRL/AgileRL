@@ -90,14 +90,17 @@ class GRPOSpec(RolloutLLMSpec):
             "outweigh short ones."
         ),
     )
-    old_logprobs_source: Literal["trainer", "rollout"] = Field(
-        default="trainer",
+    old_logprobs_source: Literal["trainer", "rollout"] | None = Field(
+        default=None,
         description=(
-            "Old policy for the clipped ratio. 'trainer' scores the learn-start "
-            "policy, skipping the extra forward for micro-batches before the "
-            "first optimizer step. 'rollout' uses the inference engine's "
-            "sampling log-probs and runs the extra forward only for completions "
-            "missing some of them, e.g. after env truncation."
+            "Old policy for the clipped ratio. Unset uses 'trainer' when "
+            "generation is colocated in the trainer process, and 'rollout' "
+            "when a separate engine sampled the tokens. 'rollout' uses the "
+            "inference engine's sampling log-probs and runs the extra forward "
+            "only for completions missing some of them, e.g. after env "
+            "truncation. 'trainer' scores the learn-start policy, skipping "
+            "the extra forward for micro-batches before the first optimizer "
+            "step."
         ),
     )
     off_policy_token_mask_bounds: tuple[float, float] | None = Field(

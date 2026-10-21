@@ -464,6 +464,14 @@ class TestGRPOSpecOffPolicyCorrections:
         assert spec.adv_norm == "mean_only"
         assert spec.top_p == 1.0
 
+    @pytest.mark.parametrize("spec_cls", [GRPOSpec, CISPOSpec, GSPOSpec])
+    def test_old_logprobs_source_is_unset_by_default(
+        self, spec_cls: type[GRPOSpec]
+    ) -> None:
+        spec = spec_cls(group_size=2)
+
+        assert spec.old_logprobs_source is None
+
     def test_yaml_null_and_false_turn_them_off(self) -> None:
         spec = GRPOSpec.model_validate(
             yaml.safe_load(
