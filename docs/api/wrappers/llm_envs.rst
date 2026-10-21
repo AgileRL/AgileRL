@@ -58,7 +58,7 @@ To drive a *real external* OpenEnv server (e.g. an env on the HuggingFace Hub), 
 session via :class:`~agilerl.llm_envs.openenv.RemoteEnvClient` and the server backs it with
 a fresh env instance, so the server's ``max_concurrent_envs`` must cover ``batch_size *
 group_size`` sessions plus one for the lazily built eval env. If that server exposes an
-MCP tool, pass ``mcp_tool=`` to :class:`~agilerl.llm_envs.RolloutHarness` /
+MCP tool, pass ``answer_tool=`` to :class:`~agilerl.llm_envs.RolloutHarness` /
 :class:`~agilerl.llm_envs.openenv.RemoteEnvClient` to make the tool available during
 rollouts. In a run manifest, ``request_timeout_s`` bounds each message at 300 seconds by
 default; ``0`` disables the bound.

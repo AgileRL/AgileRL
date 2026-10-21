@@ -512,8 +512,19 @@ def test_normalize_step_rejects_unsupported_tuple_length() -> None:
         ("plain text", "plain text"),
         ({"result": {"content": [{"text": "a"}, {"text": "b"}]}}, "a\nb"),
         ({"result": {"data": "tool data"}}, "tool data"),
+        (
+            {
+                "result": SimpleNamespace(
+                    content=[SimpleNamespace(text="obj")], data=None
+                )
+            },
+            "obj",
+        ),
+        ({"result": SimpleNamespace(content=[], data="obj-data")}, "obj-data"),
         ({"prompt": "p"}, "p"),
         ({"error": "boom"}, "Error: boom"),
+        ({"error": {"message": "nope"}}, "Error: nope"),
+        ({"error": SimpleNamespace(message="obj-err")}, "Error: obj-err"),
     ],
 )
 def test_observation_text_supports_openenv_and_mcp_shapes(
@@ -1668,9 +1679,9 @@ def test_server_start_times_out_when_never_ready(monkeypatch: Any) -> None:
 
 # --- RemoteEnvClient: MCP-tool action encoding --------------------------
 def test_step_encodes_mcp_call_tool_action() -> None:
-    """With ``mcp_tool`` set, the text is sent as OpenEnv's typed ``CallToolAction``."""
+    """With ``answer_tool`` set, the text is sent as OpenEnv's typed ``CallToolAction``."""
     client = RemoteEnvClient(
-        "http://stub.invalid", mcp_tool="echo", action_field="text"
+        "http://stub.invalid", answer_tool="echo", action_field="text"
     )
     client._session = _StubSession()
     obs, reward, terminated, _truncated, _info = client.step("hello")
@@ -2160,7 +2171,7 @@ def test_observation_does_not_guess_unnamed_string_fields(obs: dict[str, Any]) -
         assert process_observation(obs) == ""
 
 
-def test_mcp_tool_name_is_never_mistaken_for_the_text() -> None:
+def test_tool_name_is_never_mistaken_for_the_text() -> None:
     """`CallToolObservation.tool_name` is a string but names the tool, not the prompt."""
     from agilerl.llm_envs.observation import process_observation
 
@@ -2218,8 +2229,7 @@ def test_custom_processor_renders_an_in_process_observation() -> None:
     harness.reset()
     assert harness._prompt_text == "board: 1,2,3"
     assert harness._step_env("go") == (
-        "board: 4,5",
-        "user",
+        [{"role": "user", "content": "board: 4,5"}],
         None,
         1.0,
         True,

@@ -540,6 +540,13 @@ class LLMEnvSpec(EnvSpecBase):
         default=None,
         description="Reward at which a rollout counts as solved, used for the success metric.",
     )
+    min_reward: float | None = Field(
+        default=None,
+        description=(
+            "Lowest reward the env gives. Scores a turn whose tool calls are "
+            "malformed or missing, which never reaches the env. Unset scores 0."
+        ),
+    )
     train_test_split: float | None = Field(
         default=None,
         ge=0.0,
@@ -696,9 +703,13 @@ class LLMEnvSpec(EnvSpecBase):
             "interchangeable replicas dealt across rollout slots."
         ),
     )
-    mcp_tool: str | None = Field(
+    answer_tool: str | None = Field(
         default=None,
-        description="For an MCP-backed env, the tool the model's text is sent to.",
+        description=(
+            "For an MCP-backed env, one of its real tools receiving a turn's "
+            "prose when the turn has no tool call. Unset answers such a turn "
+            "with retry feedback."
+        ),
     )
     action_field: str | None = Field(
         default=None,
@@ -945,10 +956,10 @@ class LLMEnvSpec(EnvSpecBase):
             )
             raise ValueError(msg)
         if (
-            self.mcp_tool is not None or self.request_timeout_s is not None
+            self.answer_tool is not None or self.request_timeout_s is not None
         ) and dataset is not None:
             msg = (
-                "mcp_tool / request_timeout_s configure an env reached over "
+                "answer_tool / request_timeout_s configure an env reached over "
                 "HTTP; a rollout over dataset rows has no such env."
             )
             raise ValueError(msg)

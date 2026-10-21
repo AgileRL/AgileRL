@@ -15,6 +15,7 @@ import gymnasium as gym
 import pandas as pd
 from pettingzoo import ParallelEnv
 
+from agilerl.architectures.catalog import family_runtime
 from agilerl.arena.models.env import (
     BanditEnvSpec,
     EnvSpec,
@@ -23,6 +24,7 @@ from agilerl.arena.models.env import (
     LLMEnvType,
     OfflineEnvSpec,
 )
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.data.parquet import (
     is_local_parquet_dataset,
     load_parquet_dataset,
@@ -509,6 +511,13 @@ def make_rollout_env_factory(
         "max_model_len": max_model_len,
         "chat_template_kwargs": dict(spec.chat_template_kwargs),
     }
+    if spec.min_reward is not None:
+        harness_kwargs["min_reward"] = spec.min_reward
+    model_id = tokenizer.name_or_path
+    if isinstance(model_id, str) and model_id in SUPPORTED_MODEL_INFO:
+        parser = family_runtime(model_id).tool_call_parser
+        if parser is not None:
+            harness_kwargs["tool_call_parser"] = parser
     if spec.dataset_backed_rollout:
         return _make_dataset_rollout_factory(spec, tokenizer, harness_kwargs, seed=seed)
     if spec.env_url is not None:
@@ -615,7 +624,7 @@ def _make_url_rollout_factory(
     next_url = count()
     # A remote env's turn budget can't be probed; validation requires max_turns.
     url_max_turns = spec.max_turns or 1
-    mcp_tool = spec.mcp_tool
+    answer_tool = spec.answer_tool
     action_field = spec.action_field
     timeout_s = _http_timeout_s(spec)
     observation_field = spec.observation_field
@@ -623,7 +632,7 @@ def _make_url_rollout_factory(
     action_processor = _resolved_action_processor(spec)
     strict_boundary = _rollout_strict_chat_template_boundary(spec)
     remote_client_kwargs: dict[str, Any] = {
-        "mcp_tool": mcp_tool,
+        "answer_tool": answer_tool,
         "timeout_s": timeout_s,
     }
     if isinstance(action_field, str):
@@ -708,6 +717,8 @@ def _make_entrypoint_rollout_factory(
         local_harness_kwargs["screenshot_field"] = spec.screenshot_field
     if spec.goal_images_field is not None:
         local_harness_kwargs["goal_images_field"] = spec.goal_images_field
+    if spec.answer_tool is not None:
+        local_harness_kwargs["answer_tool"] = spec.answer_tool
 
     def _env_factory() -> RolloutHarness:
         return RolloutHarness.local(

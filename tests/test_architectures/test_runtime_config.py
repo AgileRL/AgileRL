@@ -24,6 +24,8 @@ from agilerl.architectures.qwen3_5 import (
 )
 from agilerl.architectures.runtime import ModelRuntimeConfig
 from agilerl.arena.memory.manifest import FAMILY_MAX_NUM_BATCHED_TOKENS
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
+from agilerl.llm_envs.tool_parsers import TOOL_PARSERS
 
 NEMOTRON_VLLM_KWARGS = {
     "mamba_cache_mode": "align",
@@ -61,6 +63,11 @@ def stub_config_model_type(monkeypatch: pytest.MonkeyPatch, model_type: str) -> 
 class TestFamilyRuntimeConfigs:
     def test_catalog_keys(self) -> None:
         assert set(FAMILY_RUNTIME_CONFIGS) == {
+            "qwen2",
+            "qwen3",
+            "qwen3_moe",
+            "granitemoe",
+            "granitemoehybrid",
             "nemotron_h",
             "nemotron_h_omni",
             "gemma3",
@@ -144,6 +151,20 @@ class TestFamilyRuntimeConfigs:
         assert runtime.vllm.enable_prefix_caching is True
         assert runtime.tower_connector_lora_targets == frozenset()
 
+    def test_every_supported_model_names_a_registered_tool_call_parser(
+        self,
+    ) -> None:
+        model_types = {
+            info.config["model_type"] for info in SUPPORTED_MODEL_INFO.values()
+        }
+
+        parsers = {
+            model_type: FAMILY_RUNTIME_CONFIGS[model_type].tool_call_parser
+            for model_type in model_types
+        }
+
+        assert all(name in TOOL_PARSERS for name in parsers.values()), parsers
+
     def test_catalog_excludes_gemma_and_gemma2(self) -> None:
         assert "gemma" not in FAMILY_RUNTIME_CONFIGS
         assert "gemma2" not in FAMILY_RUNTIME_CONFIGS
@@ -211,7 +232,7 @@ class TestFamilyRuntime:
         config = family_runtime("openai/gpt-oss-20b")
         assert config.trainer == FAMILY_RUNTIME_CONFIGS["gpt_oss"].trainer
 
-    @pytest.mark.parametrize("model_type", ["gemma", "gemma2", "qwen2", "llama"])
+    @pytest.mark.parametrize("model_type", ["gemma", "gemma2", "phi3", "llama"])
     def test_unknown_hub_type_returns_empty_defaults(
         self, monkeypatch: pytest.MonkeyPatch, model_type: str
     ) -> None:
