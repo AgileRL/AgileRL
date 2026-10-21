@@ -210,6 +210,24 @@ class ImageProcessorCall:
         return cls(text=text, images=images)
 
 
+def _field(value: object, name: str) -> object:
+    """``name`` of a dict (hosted env) or an attribute (in-process env), else ``None``."""
+    if isinstance(value, dict):
+        return value.get(name)
+    return getattr(value, name, None)
+
+
+def _mcp_result_text(result: object) -> str | None:
+    """Text from an MCP tool result's content blocks or ``data``, else ``None``."""
+    content = _field(result, "content")
+    blocks = content if isinstance(content, list) else []
+    texts = [text for block in blocks if isinstance(text := _field(block, "text"), str)]
+    if texts:
+        return "\n".join(texts)
+    data = _field(result, "data")
+    return data if isinstance(data, str) else None
+
+
 def process_observation(obs: object, observation_field: str | None = None) -> str:
     """Render an OpenEnv observation payload to prompt text.
 
@@ -234,27 +252,16 @@ def process_observation(obs: object, observation_field: str | None = None) -> st
         if isinstance(named, str):
             return named
     result = obs.get("result")
-    if isinstance(result, dict):
-        raw_blocks = result.get("content")
-        blocks = raw_blocks if isinstance(raw_blocks, list) else []
-        texts: list[str] = []
-        for block in blocks:
-            if not is_str_keyed_dict(block):
-                continue
-            block_text = block.get("text")
-            if isinstance(block_text, str):
-                texts.append(block_text)
-        if texts:
-            return "\n".join(texts)
-        data = result.get("data")
-        if isinstance(data, str):
-            return data
+    if result is not None:
+        rendered = _mcp_result_text(result)
+        if rendered is not None:
+            return rendered
     prompt = obs.get("prompt")
     if isinstance(prompt, str):
         return prompt
     error = obs.get("error")
     if error:
-        return f"Error: {error}"
+        return f"Error: {_field(error, 'message') or error}"
     asked = (
         f" No '{observation_field}' either, which the manifest named."
         if observation_field is not None

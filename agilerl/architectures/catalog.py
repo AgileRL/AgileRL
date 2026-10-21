@@ -47,6 +47,7 @@ NEMOTRON_H_RUNTIME_CONFIG = ModelRuntimeConfig(
         "agilerl.architectures.nemotron_h.tensor_parallel:"
         "NEMOTRON_H_TENSOR_PARALLEL_PLAN"
     ),
+    tool_call_parser="tool_call",
 )
 
 NEMOTRON_H_OMNI_RUNTIME_CONFIG = NEMOTRON_H_RUNTIME_CONFIG.model_copy(
@@ -85,8 +86,42 @@ GEMMA_SWA_RUNTIME_CONFIG = ModelRuntimeConfig(
     trainer=TrainerRuntimeConfig(attn_implementation="flex_attention"),
 )
 
+GEMMA4_RUNTIME_CONFIG = GEMMA_SWA_RUNTIME_CONFIG.model_copy(
+    update={"tool_call_parser": "gemma4"},
+)
+
 GPT_OSS_RUNTIME_CONFIG = ModelRuntimeConfig(
     trainer=TrainerRuntimeConfig(attn_implementation="flex_attention"),
+    tool_call_parser="harmony",
+)
+
+# Families whose only catalog setting is the tool-call format.
+TOOL_CALL_TAG_RUNTIME_CONFIG = ModelRuntimeConfig(tool_call_parser="tool_call")
+GRANITE3_RUNTIME_CONFIG = ModelRuntimeConfig(tool_call_parser="granite3")
+
+
+def granitemoehybrid_vllm_hf_override(config: object) -> object:
+    """Rename a Granite hybrid config's ``layer_types`` to vLLM's layer names.
+
+    :param config: Hugging Face config loaded from the checkpoint.
+    :type config: object
+    :return: The config with ``layer_types`` vLLM can build layers from.
+    :rtype: object
+    """
+    # vLLM's GraniteMoeHybrid model keys its decoder layers on these names;
+    # transformers' config calls them full_attention / linear_attention.
+    vllm_names = {"full_attention": "attention", "linear_attention": "mamba"}
+    # vLLM probes the override with a dummy config to read model_type first.
+    layer_types = vars(config).get("layer_types")
+    if layer_types is None:
+        return config
+    vars(config)["layer_types"] = [vllm_names.get(t, t) for t in layer_types]
+    return config
+
+
+GRANITE4_HYBRID_RUNTIME_CONFIG = ModelRuntimeConfig(
+    vllm=VllmRuntimeConfig(hf_overrides=granitemoehybrid_vllm_hf_override),
+    tool_call_parser="tool_call",
 )
 
 # Linear-attention rejects mamba_cache_mode "all"; align needs prefix caching.
@@ -100,15 +135,21 @@ QWEN3_5_RUNTIME_CONFIG = ModelRuntimeConfig(
         model_class_overrides=QWEN3_5_MODEL_CLASS_OVERRIDES,
     ),
     patch=PatchRuntimeConfig(install=install_qwen_gdn_patches),
+    tool_call_parser="tool_call",
 )
 
 FAMILY_RUNTIME_CONFIGS: Mapping[str, ModelRuntimeConfig] = {
+    "qwen2": TOOL_CALL_TAG_RUNTIME_CONFIG,
+    "qwen3": TOOL_CALL_TAG_RUNTIME_CONFIG,
+    "qwen3_moe": TOOL_CALL_TAG_RUNTIME_CONFIG,
+    "granitemoe": GRANITE3_RUNTIME_CONFIG,
+    "granitemoehybrid": GRANITE4_HYBRID_RUNTIME_CONFIG,
     "nemotron_h": NEMOTRON_H_RUNTIME_CONFIG,
     "nemotron_h_omni": NEMOTRON_H_OMNI_RUNTIME_CONFIG,
     "gemma3": GEMMA_SWA_RUNTIME_CONFIG,
     "gemma3_text": GEMMA_SWA_RUNTIME_CONFIG,
-    "gemma4": GEMMA_SWA_RUNTIME_CONFIG,
-    "gemma4_text": GEMMA_SWA_RUNTIME_CONFIG,
+    "gemma4": GEMMA4_RUNTIME_CONFIG,
+    "gemma4_text": GEMMA4_RUNTIME_CONFIG,
     "gpt_oss": GPT_OSS_RUNTIME_CONFIG,
     "qwen3_5": QWEN3_5_RUNTIME_CONFIG,
     "qwen3_5_text": QWEN3_5_RUNTIME_CONFIG,

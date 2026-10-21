@@ -27,7 +27,9 @@ class VllmRuntimeConfig(BaseModel):
     reasoning_parser: str | None = Field(default=None, min_length=1)
     enable_prefix_caching: bool | None = Field(default=None)
     trust_remote_code: bool | None = Field(default=None)
-    hf_overrides: dict[str, object] | None = Field(default=None)
+    hf_overrides: dict[str, object] | Callable[[object], object] | None = Field(
+        default=None
+    )
 
 
 class TrainerRuntimeConfig(BaseModel):
@@ -118,3 +120,5 @@ class ModelRuntimeConfig(BaseModel):
     # families without vLLM tower LoRA (it needs get_num_mm_encoder_tokens).
     tower_connector_lora_targets: frozenset[str] = frozenset()
     tensor_parallel_plan: str | None = Field(default=None, min_length=1)
+    # A name in agilerl.llm_envs.tool_parsers.TOOL_PARSERS; None detects from the vocab.
+    tool_call_parser: str | None = Field(default=None, min_length=1)

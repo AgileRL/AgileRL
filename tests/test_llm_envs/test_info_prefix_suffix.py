@@ -66,6 +66,14 @@ class _AffixEnvClient:
         return []
 
     @property
+    def takes_tool_calls(self) -> bool:
+        return False
+
+    @property
+    def answer_tool(self) -> str | None:
+        return None
+
+    @property
     def rubric_components(self) -> tuple[str, ...]:
         return ()
 
@@ -96,6 +104,6 @@ class TestHarnessInfoAffixes:
         )
         harness.reset()
 
-        text, *_rest = harness._step_env("go")
+        result = harness._step_env("go")
 
-        assert text == "movedboard2"
+        assert result.messages == [{"role": "user", "content": "movedboard2"}]

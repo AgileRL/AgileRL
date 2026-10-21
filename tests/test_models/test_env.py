@@ -552,6 +552,61 @@ class TestLLMEnvSpec:
             "enable_thinking": False
         }
 
+    def test_min_reward_reaches_url_factory(self):
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.pad_token_id = 0
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            env_url="ws://envs.internal:8000",
+            max_turns=3,
+            min_reward=-1.0,
+        )
+        mock_rollout_cls = MagicMock()
+        with patch("agilerl.models.env.RolloutHarness", mock_rollout_cls):
+            make_rollout_env_factory(spec, mock_tokenizer)[0]()
+        assert mock_rollout_cls.call_args.kwargs["min_reward"] == -1.0
+
+    def test_unset_min_reward_leaves_the_harness_default(self):
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.pad_token_id = 0
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            entrypoint="tests.test_models.test_env:_StubTextEnv",
+            max_turns=2,
+        )
+        mock_rollout_cls = MagicMock()
+        with patch("agilerl.models.env.RolloutHarness", mock_rollout_cls):
+            make_rollout_env_factory(spec, mock_tokenizer)[0]()
+        assert "min_reward" not in mock_rollout_cls.local.call_args.kwargs
+
+    def test_catalog_tool_call_parser_reaches_url_factory(self):
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.pad_token_id = 0
+        mock_tokenizer.name_or_path = "ibm-granite/granite-3.1-3b-a800m-instruct"
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            env_url="ws://envs.internal:8000",
+            max_turns=3,
+        )
+        mock_rollout_cls = MagicMock()
+        with patch("agilerl.models.env.RolloutHarness", mock_rollout_cls):
+            make_rollout_env_factory(spec, mock_tokenizer)[0]()
+        assert mock_rollout_cls.call_args.kwargs["tool_call_parser"] == "granite3"
+
+    def test_unknown_tokenizer_leaves_the_harness_parser_default(self):
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.pad_token_id = 0
+        mock_tokenizer.name_or_path = "not-a-supported-model"
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            entrypoint="tests.test_models.test_env:_StubTextEnv",
+            max_turns=2,
+        )
+        mock_rollout_cls = MagicMock()
+        with patch("agilerl.models.env.RolloutHarness", mock_rollout_cls):
+            make_rollout_env_factory(spec, mock_tokenizer)[0]()
+        assert "tool_call_parser" not in mock_rollout_cls.local.call_args.kwargs
+
     def test_env_packages_are_installed_before_the_entrypoint_is_resolved(self):
         """An entrypoint whose deps are declared gets them installed first."""
         mock_tokenizer = MagicMock()
@@ -1240,17 +1295,17 @@ class TestLLMEnvSpecRollout:
                 max_turns=1,
             )
 
-    def test_mcp_tool_rejected_for_dataset_backed_rollout(self):
+    def test_answer_tool_rejected_for_dataset_backed_rollout(self):
         with pytest.raises(
             ValueError,
-            match="mcp_tool / request_timeout_s",
+            match="answer_tool / request_timeout_s",
         ):
             LLMEnvSpec(
                 env_type=LLMEnvType.ROLLOUT,
                 dataset="ds",
                 reward_file_path="reward.py",
                 prompt_template={"user_0": "{question}"},
-                mcp_tool="run_code",
+                answer_tool="run_code",
             )
 
     def test_action_field_applies_to_entrypoint_envs(self):
@@ -1310,7 +1365,7 @@ class TestLLMEnvSpecRollout:
             env_type=LLMEnvType.ROLLOUT,
             env_url="http://env-host:8000",
             max_turns=4,
-            mcp_tool="run_code",
+            answer_tool="run_code",
             request_timeout_s=30.0,
         )
         mock_rollout_cls = MagicMock()
@@ -1325,7 +1380,7 @@ class TestLLMEnvSpecRollout:
         # env_url opens a WebSocket session; the transport params bake into the client.
         mock_session_cls.assert_called_once_with(
             "http://env-host:8000",
-            mcp_tool="run_code",
+            answer_tool="run_code",
             action_field="message",
             timeout_s=30.0,
         )
@@ -1403,6 +1458,35 @@ class TestLLMEnvSpecRollout:
             max_model_len=512,
             strict_chat_template_boundary=True,
         )
+
+    def test_entrypoint_factory_forwards_answer_tool(self):
+        mock_env = MagicMock()
+        mock_constructor = MagicMock(return_value=mock_env)
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.pad_token_id = 0
+
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            entrypoint="my_mod:MyEnv",
+            max_turns=5,
+            answer_tool="submit_answer",
+        )
+
+        mock_rollout_cls = MagicMock()
+
+        with (
+            patch(
+                "agilerl.utils.env_utils.resolve_entrypoint_target",
+                return_value=mock_constructor,
+            ),
+            patch("agilerl.models.env.RolloutHarness", mock_rollout_cls),
+        ):
+            factory, _max_turns = make_rollout_env_factory(
+                spec, mock_tokenizer, max_model_len=512, max_output_tokens=128
+            )
+            factory()
+
+        assert mock_rollout_cls.local.call_args.kwargs["answer_tool"] == "submit_answer"
 
     def test_entrypoint_factory_does_not_forward_system_prompt_to_constructor(self):
         mock_env = MagicMock()

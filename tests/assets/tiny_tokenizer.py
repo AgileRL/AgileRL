@@ -16,8 +16,13 @@ import torch
 class TinyTokenizer:
     """Encode/decode text to small token ids for lightweight LLM env tests."""
 
+    unk_token_id = None
+
     def __init__(self, pad_token_id: int = 0):
         self.pad_token_id = pad_token_id
+
+    def convert_tokens_to_ids(self, _token: str) -> None:
+        return None
 
     def encode(self, text: str, add_special_tokens: bool = True) -> list[int]:
         del add_special_tokens
