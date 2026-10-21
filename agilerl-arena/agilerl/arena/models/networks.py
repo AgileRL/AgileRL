@@ -795,8 +795,14 @@ class VLLMConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    tensor_parallel_size: int = Field(
-        default=1, ge=1, description="GPUs the model is sharded across for generation."
+    tensor_parallel_size: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "GPUs the model is sharded across for generation. Unset until the "
+            "allocation's memory estimate chooses a width. An explicit integer "
+            "is kept."
+        ),
     )
     gpu_memory_utilization: float = Field(
         default=0.3,
@@ -927,7 +933,6 @@ def default_colocated_vllm_config() -> VLLMConfig:
     return VLLMConfig(
         max_num_seqs=16,
         gpu_memory_utilization=0.9,
-        tensor_parallel_size=1,
         sleep_mode=True,
     )
 

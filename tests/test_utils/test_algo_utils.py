@@ -2814,6 +2814,10 @@ class TestInheritInitSignature:
 
 
 class TestVLLMConfig:
+    def test_tensor_parallel_size_defaults_to_unset(self):
+        assert VLLMConfig().tensor_parallel_size is None
+        assert VLLMConfig(tensor_parallel_size=1).tensor_parallel_size == 1
+
     @pytest.mark.parametrize("level", [1, 2])
     def test_valid_sleep_mode_level_accepted(self, level):
         assert VLLMConfig(sleep_mode_level=level).sleep_mode_level == level

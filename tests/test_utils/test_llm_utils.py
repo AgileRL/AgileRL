@@ -3411,6 +3411,20 @@ class TestBuildVllmLlmInitKwargs:
         ):
             assert absent not in kwargs
 
+    def test_unset_tensor_parallel_size_uses_one_gpu(self):
+        config = _vllm_config(tensor_parallel_size=None)
+
+        kwargs = build_vllm_llm_init_kwargs(
+            config,
+            trainer_model_name_or_path="org/base",
+            max_model_len=128,
+            process_index=0,
+        )
+
+        assert kwargs["tensor_parallel_size"] == 1
+        assert kwargs["seed"] == 0
+        assert config.tensor_parallel_size is None
+
     def test_optional_fields_and_lora_rank_floor(self):
         kwargs = build_vllm_llm_init_kwargs(
             _vllm_config(

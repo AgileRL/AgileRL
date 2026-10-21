@@ -7207,6 +7207,36 @@ class TestLLMInitEdgeCases:
 
         assert agent.colocated is True
 
+    def test_colocated_accepts_unset_tensor_parallel_size(self):
+        lora = MagicMock()
+        config = VLLMConfig(tensor_parallel_size=None)
+        with (
+            patch.object(LLMAlgorithm, "_initialize_actors"),
+            patch.object(LLMAlgorithm, "_configure_vllm"),
+            patch.object(LLMAlgorithm, "wrap_models"),
+            patch.object(EvolvableAlgorithm, "_registry_init"),
+        ):
+            agent = _StubLLMAlgorithm(
+                index=0,
+                batch_size=4,
+                lr=1e-4,
+                max_grad_norm=0.0,
+                clone=True,
+                calc_position_embeddings=False,
+                seed=42,
+                pad_token_id=0,
+                pad_token="<pad>",
+                use_liger_loss=False,
+                lora_config=lora,
+                actor_network=_make_mock_peft_actor(),
+                device="cpu",
+                model_name="mock-model",
+                vllm_config=config,
+            )
+
+        assert agent.colocated is True
+        assert agent.vllm_config.tensor_parallel_size is None
+
     def test_colocated_rejects_tensor_parallel_size_not_one(self):
         lora = MagicMock()
         with (

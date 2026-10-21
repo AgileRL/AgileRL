@@ -475,12 +475,18 @@ def training_settings_from_manifest(
 
 def generation_settings_from_manifest(
     manifest: TrainingManifest | str | Path | dict[str, Any],
+    tensor_parallel_size: int | None = None,
 ) -> GenerationSettings:
     """The engine-side settings the manifest's vLLM config pins down.
 
     A rollout without an engine section names no engine to size. SFT and
     DPO start no engine, so their settings are defaults the estimator
     ignores.
+
+    :param manifest: Training manifest.
+    :param tensor_parallel_size: Width to size. Required when a rollout
+        manifest leaves the width unset.
+    :return: Generation settings for the estimator.
     """
     manifest = _validated(manifest)
     spec = llm_spec(manifest)
@@ -488,21 +494,33 @@ def generation_settings_from_manifest(
     lora = _lora_config(spec)
     stripped = _stripped_towers(vllm)
     _reject_kv_cache_quantization(vllm.kv_cache_dtype)
-    return GenerationSettings(
-        gpu_memory_utilization=vllm.gpu_memory_utilization,
-        max_num_seqs=_max_num_seqs(manifest, spec, vllm),
-        max_model_len=spec.max_model_len,
-        max_num_batched_tokens=_max_num_batched_tokens(spec, vllm),
-        kv_cache_memory_bytes=vllm.kv_cache_memory_bytes,
-        enforce_eager=vllm.enforce_eager,
-        max_lora_rank=max(vllm.max_lora_rank, lora.lora_r),
-        max_loras=vllm.max_loras,
-        weight_dtype=_weight_dtype(vllm.dtype),
-        weight_quantization=_engine_weight_quantization(vllm.quantization),
-        tensor_parallel_size=vllm.tensor_parallel_size,
-        weight_variant="engine" if stripped else "base",
-        concurrent_requests=spec.batch_size * _group_size(spec),
+    weight_dtype = _weight_dtype(vllm.dtype)
+    weight_quantization = _engine_weight_quantization(vllm.quantization)
+    width = (
+        tensor_parallel_size
+        if tensor_parallel_size is not None
+        else vllm.tensor_parallel_size
     )
+    if width is None and isinstance(spec, RolloutLLMSpec):
+        msg = "tensor_parallel_size is unset; pass the width to size."
+        raise ValueError(msg)
+    settings: dict[str, Any] = {
+        "gpu_memory_utilization": vllm.gpu_memory_utilization,
+        "max_num_seqs": _max_num_seqs(manifest, spec, vllm),
+        "max_model_len": spec.max_model_len,
+        "max_num_batched_tokens": _max_num_batched_tokens(spec, vllm),
+        "kv_cache_memory_bytes": vllm.kv_cache_memory_bytes,
+        "enforce_eager": vllm.enforce_eager,
+        "max_lora_rank": max(vllm.max_lora_rank, lora.lora_r),
+        "max_loras": vllm.max_loras,
+        "weight_dtype": weight_dtype,
+        "weight_quantization": weight_quantization,
+        "weight_variant": "engine" if stripped else "base",
+        "concurrent_requests": spec.batch_size * _group_size(spec),
+    }
+    if width is not None:
+        settings["tensor_parallel_size"] = width
+    return GenerationSettings(**settings)
 
 
 def _model_spec(
@@ -533,6 +551,7 @@ def run_config_from_manifest(
     *,
     n_params: int | None = None,
     gen_device: DeviceSpec | None = None,
+    tensor_parallel_size: int | None = None,
 ) -> RunConfig:
     """Assemble the estimator's input from the three things a caller holds.
 
@@ -545,6 +564,8 @@ def run_config_from_manifest(
     :param n_params: Exact parameter count when known, e.g. from safetensors
         metadata; ``None`` falls back to the analytic count.
     :param gen_device: The rollout engine's device. Defaults to ``device``.
+    :param tensor_parallel_size: Engine width to size. Required when a rollout
+        manifest leaves the width unset.
     """
     manifest = _validated(manifest)
     spec = llm_spec(manifest)
@@ -555,7 +576,9 @@ def run_config_from_manifest(
             "this estimator sizes async rollout only."
         )
         raise ValueError(msg)
-    generation = generation_settings_from_manifest(manifest)
+    generation = generation_settings_from_manifest(
+        manifest, tensor_parallel_size=tensor_parallel_size
+    )
     return RunConfig(
         model=_model_spec(spec, model_config, n_params, generation),
         train_device=device,
@@ -573,10 +596,20 @@ def estimate_manifest(
     *,
     n_params: int | None = None,
     gen_device: DeviceSpec | None = None,
+    tensor_parallel_size: int | None = None,
 ) -> RunEstimate:
-    """Estimate both phase peaks straight from the manifest."""
+    """Estimate both phase peaks straight from the manifest.
+
+    :param tensor_parallel_size: Engine width to size. Required when a rollout
+        manifest leaves the width unset.
+    """
     return estimate_run(
         run_config_from_manifest(
-            manifest, device, model_config, n_params=n_params, gen_device=gen_device
+            manifest,
+            device,
+            model_config,
+            n_params=n_params,
+            gen_device=gen_device,
+            tensor_parallel_size=tensor_parallel_size,
         )
     )

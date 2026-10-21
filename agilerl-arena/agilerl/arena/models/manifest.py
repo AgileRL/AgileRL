@@ -9,7 +9,15 @@ from collections.abc import Callable
 from difflib import get_close_matches
 from pathlib import Path
 from types import UnionType
-from typing import Annotated, Any, Literal, Union, get_args, get_origin, overload
+from typing import (
+    Annotated,
+    Any,
+    Literal,
+    Union,
+    get_args,
+    get_origin,
+    overload,
+)
 
 import yaml
 from pydantic import (
@@ -693,6 +701,15 @@ class TrainingManifest(BaseModel):
                 algorithm.pop("num_envs", None)
             if "vect_noise_dim" not in self.algorithm.model_fields_set:
                 algorithm.pop("vect_noise_dim", None)
+            if isinstance(self.algorithm, RolloutLLMSpec):
+                vllm_config = self.algorithm.vllm_config
+                vllm_payload = algorithm.get("vllm_config")
+                if (
+                    isinstance(vllm_payload, dict)
+                    and vllm_config is not None
+                    and "tensor_parallel_size" not in vllm_config.model_fields_set
+                ):
+                    vllm_payload.pop("tensor_parallel_size", None)
         environment = payload.get("environment")
         if isinstance(environment, dict):
             if environment.get("screenshot_field") is None:

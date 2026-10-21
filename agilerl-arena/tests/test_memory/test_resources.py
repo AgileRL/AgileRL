@@ -32,9 +32,19 @@ def manifest_with(base, **training):
     )
 
 
-def builder(manifest):
+def builder(manifest, tensor_parallel_size: int | None = None):
     model_config = json.loads(Path(TINY_CONFIG).read_text())
-    return lambda device: run_config_from_manifest(manifest, device, model_config)
+    width = tensor_parallel_size
+    if width is None:
+        vllm = getattr(manifest.algorithm, "vllm_config", None)
+        if vllm is not None and vllm.tensor_parallel_size is not None:
+            width = vllm.tensor_parallel_size
+        else:
+            # These layout checks count one GPU per engine.
+            width = 1
+    return lambda device: run_config_from_manifest(
+        manifest, device, model_config, tensor_parallel_size=width
+    )
 
 
 class TestGpusRequired:
