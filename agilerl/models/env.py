@@ -641,10 +641,10 @@ def _make_url_rollout_factory(
             observation_field=observation_field,
             observation_processor=observation_processor,
             action_processor=action_processor,
-            screenshot_field=spec.screenshot_field,
-            goal_images_field=spec.goal_images_field,
             strict_chat_template_boundary=strict_boundary,
             apply_chat_template=True,
+            screenshot_field=spec.screenshot_field,
+            goal_images_field=spec.goal_images_field,
             **harness_kwargs,
         )
 
@@ -698,14 +698,16 @@ def _make_entrypoint_rollout_factory(
         "observation_field": observation_field,
         "observation_processor": observation_processor,
         "action_processor": action_processor,
-        "screenshot_field": spec.screenshot_field,
-        "goal_images_field": spec.goal_images_field,
         "apply_chat_template": True,
         "strict_chat_template_boundary": strict_boundary,
         **harness_kwargs,
     }
     if isinstance(action_field, str):
         local_harness_kwargs["action_field"] = action_field
+    if spec.screenshot_field is not None:
+        local_harness_kwargs["screenshot_field"] = spec.screenshot_field
+    if spec.goal_images_field is not None:
+        local_harness_kwargs["goal_images_field"] = spec.goal_images_field
 
     def _env_factory() -> RolloutHarness:
         return RolloutHarness.local(
