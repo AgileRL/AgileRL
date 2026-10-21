@@ -27,6 +27,7 @@ pytest.importorskip("peft", reason="LLM tests require peft.")
 
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.core.llm_ops.frozen_vision import VisionFeatureCache
+from agilerl.algorithms.core.sequence_layout import PackedSequence, PaddedSequence
 from agilerl.algorithms.grpo import GRPO
 from agilerl.utils.learn_profiler import LearnProfiler
 from agilerl.utils.llm_utils import LEARN_PHASES
@@ -103,7 +104,9 @@ class _Stub:
         self.learn_profiler = LearnProfiler(
             None, rank=0, world_size=1, shard_group_size=None
         )
-        self.packing_mode: str | None = None
+        self.sequence_layout = PaddedSequence(
+            pad_token_id=PAD_TOKEN_ID, calc_position_embeddings=False
+        )
         self.rng = np.random.default_rng(0)
         self.liger_calls = 0
         self.standard_calls = 0
@@ -167,10 +170,6 @@ class _Stub:
 
     def _prepare_vllm_for_training(self) -> None:
         return
-
-    def _packing_mode(self) -> str | None:
-        """Packing mode of the gradient forward."""
-        return self.packing_mode
 
     def trainer_offload_context(self):
         """Match the context ``learn`` wraps its body in."""
@@ -697,7 +696,9 @@ class TestLearnPaddingStats:
     def test_packed_forward_runs_without_padding(self) -> None:
         # Arrange
         algo = _Stub()
-        algo.packing_mode = "varlen"
+        algo.sequence_layout = PackedSequence(
+            pad_token_id=PAD_TOKEN_ID, calc_position_embeddings=False, mode="varlen"
+        )
 
         # Act
         metrics = algo.learn(_ragged_experiences())

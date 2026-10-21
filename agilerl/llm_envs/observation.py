@@ -26,7 +26,6 @@ __all__ = [
     "OBSERVATION_ROLES",
     "QUESTION_AFTER_CONTEXT",
     "ImageProcessorCall",
-    "apply_info_prefix_suffix",
     "encode_image_training_inputs",
     "goal_images_text",
     "observation_goal_images",
@@ -86,15 +85,8 @@ def _prompt_text_for_screenshot_obs(obs: Mapping[str, object]) -> str:
     return DEFAULT_SCREENSHOT_PROMPT
 
 
-def observation_text_and_image(
-    obs: object, *, screenshot_field: str = "screenshot"
-) -> tuple[str, object | None]:
-    """Render observation text and an optional single image for VL rollouts.
-
-    :param obs: The raw observation payload.
-    :param screenshot_field: Observation key holding the page image. ``""``
-        does not read one.
-    """
+def observation_text_and_image(obs: object) -> tuple[str, object | None]:
+    """Render observation text and an optional single image for VL rollouts."""
     if isinstance(obs, str):
         return obs, None
     if is_str_keyed_dict(obs) and obs.get("image") is not None:
@@ -105,32 +97,22 @@ def observation_text_and_image(
             msg = f"VL observation text must be str, got {type(text).__name__}."
             raise TypeError(msg)
         return _image_turn_text(text), obs["image"]
-    if (
-        screenshot_field
-        and is_str_keyed_dict(obs)
-        and obs.get(screenshot_field) is not None
-    ):
+    if is_str_keyed_dict(obs) and obs.get("screenshot") is not None:
         text = _prompt_text_for_screenshot_obs(obs)
-        return _image_turn_text(text), _screenshot_to_pil_rgb(obs[screenshot_field])
+        return _image_turn_text(text), _screenshot_to_pil_rgb(obs["screenshot"])
     return process_observation(obs), None
 
 
-def observation_goal_images(
-    obs: object, *, goal_images_field: str = "goal_images"
-) -> list[Image.Image]:
-    """Decode the task images an observation carries.
+def observation_goal_images(obs: object) -> list[Image.Image]:
+    """Decode the task images an observation carries under ``goal_images``.
 
-    Each entry is base64 image bytes or a pixel list, as the page image is.
+    Each entry is base64 image bytes or a pixel list, as ``screenshot`` is.
 
     :param obs: The raw observation payload.
-    :param goal_images_field: Observation key holding the images. ``""`` reads none.
     :return: The goal images as RGB, in order; empty when there are none.
+    :rtype: list[Image.Image]
     """
-    images = (
-        obs.get(goal_images_field)
-        if goal_images_field and is_str_keyed_dict(obs)
-        else None
-    )
+    images = obs.get("goal_images") if is_str_keyed_dict(obs) else None
     if not isinstance(images, list):
         return []
     return [_screenshot_to_pil_rgb(image) for image in images]
@@ -143,26 +125,6 @@ def goal_images_text(count: int) -> str:
     :rtype: str
     """
     return f"\n{IMAGE_PLACEHOLDER}" * count
-
-
-def apply_info_prefix_suffix(text: str, info: Mapping[str, Any]) -> str:
-    """Wrap prompt text in the env's ``info`` prefix/suffix when present.
-
-    Game envs in the gem convention return instructions as the observation and
-    the task body as ``info["suffix"]``; gem's own observation wrapper
-    concatenates them the same way.
-
-    :param text: The rendered observation text.
-    :param info: The env turn's info mapping.
-    :return: ``text`` with the prefix prepended and the suffix appended.
-    """
-    prefix = info.get("prefix")
-    suffix = info.get("suffix")
-    if isinstance(prefix, str) and prefix:
-        text = prefix + text
-    if isinstance(suffix, str) and suffix:
-        text = text + suffix
-    return text
 
 
 def _image_turn_text(text: str) -> str:

@@ -180,6 +180,37 @@ class FSDPConfig:
             ),
         ),
     ] = 1
+    cp: Annotated[
+        int,
+        Field(
+            ge=1,
+            description=(
+                "Context-parallel degree. Consecutive ranks hold the same "
+                "batch rows and one slice of each sequence. 1 keeps full "
+                "sequences on every rank."
+            ),
+        ),
+    ] = 1
+    cp_style: Annotated[
+        str,
+        Field(
+            description=(
+                "How context parallel redistributes sequence shards. Only "
+                "'ulysses' is supported: two all-to-alls around local flash "
+                "attention (and Mamba/GDN head-parallel all-to-alls)."
+            ),
+        ),
+    ] = "ulysses"
+    pp: Annotated[
+        int,
+        Field(
+            ge=1,
+            description=(
+                "Pipeline-parallel degree. Only 1 is supported; the mesh "
+                "keeps a size-1 pp axis."
+            ),
+        ),
+    ] = 1
     shard_group_size: Annotated[
         int | None,
         Field(
@@ -226,11 +257,27 @@ class FSDPConfig:
         if self.tp < 1:
             msg = "FSDPConfig.tp must be >= 1"
             raise ValueError(msg)
+        if self.cp < 1:
+            msg = "FSDPConfig.cp must be >= 1"
+            raise ValueError(msg)
+        if self.cp_style != "ulysses":
+            msg = (
+                f"FSDPConfig.cp_style={self.cp_style!r} is not supported: "
+                "only 'ulysses' is supported"
+            )
+            raise ValueError(msg)
+        if self.pp != 1:
+            msg = f"FSDPConfig.pp={self.pp} is not supported: only pp=1 is supported"
+            raise ValueError(msg)
         if self.shard_group_size is not None:
             if self.shard_group_size < 1:
                 msg = "FSDPConfig.shard_group_size must be >= 1"
                 raise ValueError(msg)
-            for name, degree in (("ep", self.ep), ("tp", self.tp)):
+            for name, degree in (
+                ("ep", self.ep),
+                ("tp", self.tp),
+                ("cp", self.cp),
+            ):
                 if self.shard_group_size % degree:
                     msg = (
                         f"FSDPConfig.shard_group_size={self.shard_group_size} "

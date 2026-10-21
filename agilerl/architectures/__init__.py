@@ -7,8 +7,10 @@ Per-``model_type`` trainer, vLLM, and patch defaults live in
 :mod:`agilerl.architectures.catalog`. :func:`family_runtime` reads
 ``config.json`` then looks up that type. :func:`install_family_patches` calls
 :attr:`~agilerl.architectures.runtime.PatchRuntimeConfig.install` when it is
-set. :func:`family_tensor_parallel_plans` resolves every family's
-:class:`~agilerl.architectures.runtime.TensorParallelPlan`.
+set. :func:`family_tensor_parallel_plans` and
+:func:`family_context_parallel_plans` resolve every family's
+:class:`~agilerl.architectures.runtime.TensorParallelPlan` and
+:class:`~agilerl.architectures.runtime.ContextParallelPlan`.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from agilerl.architectures.catalog import (
     pretrained_model_type,
 )
 from agilerl.architectures.runtime import (
+    ContextParallelPlan,
     MambaPatchConfig,
     ModelRuntimeConfig,
     PatchRuntimeConfig,
@@ -36,12 +39,14 @@ if TYPE_CHECKING:
 
 __all__ = [
     "FAMILY_RUNTIME_CONFIGS",
+    "ContextParallelPlan",
     "MambaPatchConfig",
     "ModelRuntimeConfig",
     "PatchRuntimeConfig",
     "TensorParallelPlan",
     "TrainerRuntimeConfig",
     "VllmRuntimeConfig",
+    "family_context_parallel_plans",
     "family_runtime",
     "family_tensor_parallel_plans",
     "install_family_patches",
@@ -65,6 +70,27 @@ def family_tensor_parallel_plans() -> list[TensorParallelPlan]:
         if runtime.tensor_parallel_plan is not None
     )
     plans: list[TensorParallelPlan] = []
+    for path in paths:
+        module_path, _, attribute = path.partition(":")
+        plans.append(getattr(importlib.import_module(module_path), attribute))
+    return plans
+
+
+def family_context_parallel_plans() -> list[ContextParallelPlan]:
+    """Resolve each distinct catalog context-parallel plan.
+
+    Plans match their own module classes, so every plan runs on any model,
+    including multimodal wrappers whose top-level ``model_type`` differs from
+    the language tower's.
+
+    :return: Plans in catalog order.
+    """
+    paths = dict.fromkeys(
+        runtime.context_parallel_plan
+        for runtime in FAMILY_RUNTIME_CONFIGS.values()
+        if runtime.context_parallel_plan is not None
+    )
+    plans: list[ContextParallelPlan] = []
     for path in paths:
         module_path, _, attribute = path.partition(":")
         plans.append(getattr(importlib.import_module(module_path), attribute))

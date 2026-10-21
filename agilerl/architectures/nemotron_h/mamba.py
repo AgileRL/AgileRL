@@ -245,6 +245,14 @@ def _zero_padding_states(
     return (zeroed, *args[1:]), kwargs
 
 
+def _eager_torch_forward(mixer: torch.nn.Module) -> object:
+    """Unbound ``torch_forward``: instance wrap if set, otherwise the class function."""
+    wrapped = vars(mixer).get("torch_forward")
+    if wrapped is not None:
+        return getattr(wrapped, "__func__", wrapped)
+    return type(mixer).__dict__.get("torch_forward")
+
+
 def _checkpointed_eager_scan(
     module: torch.nn.Module,
     eager: Callable[..., object],
@@ -303,7 +311,7 @@ def _install_fused_scan(module_cls: type) -> None:
             mixer.time_step_limit = (min_dt, max_dt)
         try:
             # SSM kernels on compute capability 8.9 return NaN.
-            eager = type(self).__dict__.get("torch_forward")
+            eager = _eager_torch_forward(self)
             if _ada_ssm_gpu(self) and callable(eager):
                 if not announced:
                     logger.debug(

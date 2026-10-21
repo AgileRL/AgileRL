@@ -24,10 +24,7 @@ from torch.nn.utils import clip_grad_norm_
 from torch.optim.lr_scheduler import LambdaLR
 
 from agilerl.distributed.expert_parallel import (
-    ParallelMesh,
-    build_parallel_mesh,
     iter_packed_expert_modules,
-    tp_data_parallel_size,
     validate_actor_ep,
 )
 from agilerl.distributed.fsdp import (
@@ -39,6 +36,11 @@ from agilerl.distributed.fsdp import (
     materialize_dtensors,
     materialize_fsdp2_from_cpu_state,
     set_full_model_state_dict,
+)
+from agilerl.distributed.mesh import (
+    ParallelMesh,
+    build_parallel_mesh,
+    tp_data_parallel_size,
 )
 from agilerl.distributed.process import (
     get_world_size,
@@ -765,10 +767,12 @@ class FSDPRuntime(BaseRuntime):
         self.parallel_mesh: ParallelMesh | None = None
 
     def data_parallel_world(self, process_world_size: int) -> int:
-        return tp_data_parallel_size(process_world_size, self.config.tp)
+        return tp_data_parallel_size(
+            process_world_size, self.config.tp * self.config.cp
+        )
 
     def data_parallel_rank(self, process_rank: int) -> int:
-        return process_rank // self.config.tp
+        return process_rank // (self.config.tp * self.config.cp)
 
     @property
     def is_sharded(self) -> bool:
@@ -818,9 +822,27 @@ class FSDPRuntime(BaseRuntime):
         restore_adapter_trainability(["actor", "critic"])
         if self.config.ep > 1:
             validate_actor_ep(actor, self.config.ep, get_world_size())
+        if self.config.cp > 1:
+            from agilerl.distributed.context_parallel import (
+                attention_head_counts,
+                model_attention_backend,
+                validate_cp_heads,
+            )
+
+            heads, kv_heads = attention_head_counts(actor)
+            validate_cp_heads(heads, kv_heads, self.config.cp)
+            backend = model_attention_backend(actor)
+            if backend != "flash_attention_2":
+                msg = (
+                    f"cp={self.config.cp} requires the actor's attention backend "
+                    f"to be 'flash_attention_2', got {backend!r}: the Ulysses "
+                    "substitution patches the flash-attention-2 forward."
+                )
+                raise ValueError(msg)
         self.parallel_mesh = build_parallel_mesh(
             ep=self.config.ep,
             tp=self.config.tp,
+            cp=self.config.cp,
             shard_group_size=self.config.shard_group_size,
             device_type=torch.device(device).type,
         )
@@ -831,6 +853,13 @@ class FSDPRuntime(BaseRuntime):
             parallel_mesh=self.parallel_mesh,
             gradient_checkpointing=gradient_checkpointing,
         )
+        if self.config.cp > 1:
+            from agilerl.distributed.context_parallel import substitute_hf_ulysses_attn
+
+            if self.parallel_mesh is None or self.parallel_mesh.cp is None:
+                msg = f"cp={self.config.cp} built no context-parallel mesh."
+                raise RuntimeError(msg)
+            substitute_hf_ulysses_attn(self.parallel_mesh.cp.get_group())
 
         # Fused AdamW steps CPU-offloaded state slower than the default kernel.
         on_gpu = torch.device(device).type == "cuda" and not (

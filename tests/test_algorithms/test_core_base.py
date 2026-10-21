@@ -87,6 +87,7 @@ from agilerl.algorithms.core.registry import (
     OptimizerConfig,
     RLParameter,
 )
+from agilerl.algorithms.core.sequence_layout import PackedSequence
 from agilerl.algorithms.grpo import GRPO
 from agilerl.arena.memory import DeviceSpec, estimate_training
 from agilerl.arena.memory.formulas import (
@@ -96,8 +97,7 @@ from agilerl.arena.memory.formulas import (
 from agilerl.arena.memory.manifest import ALGORITHM_NAMES
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.profiling import ProfilingConfig
-from agilerl.distributed import FSDPConfig
-from agilerl.distributed.expert_parallel import build_parallel_mesh
+from agilerl.distributed import FSDPConfig, build_parallel_mesh
 from agilerl.distributed.runtime import DPRuntime, FSDPRuntime
 from agilerl.modules import EvolvableMLP
 from agilerl.utils.algo_utils import (
@@ -1737,6 +1737,7 @@ def _make_llm_agent(
     batch_size=4,
     use_separate_reference_adapter=False,
     fsdp_config=None,
+    use_sequence_packing=False,
     mini_batch_size=None,
     group_size=1,
     algo_cls=None,
@@ -1785,6 +1786,7 @@ def _make_llm_agent(
             device="cpu",
             use_separate_reference_adapter=use_separate_reference_adapter,
             fsdp_config=fsdp_config,
+            use_sequence_packing=use_sequence_packing,
             offload_trainer_during_rollout=offload_trainer_during_rollout,
             profiling_config=profiling_config,
         )
@@ -2134,6 +2136,22 @@ class TestInitializeActorsCompiler:
         assert agent.activation_offload is False
         mock_compile.assert_called_once_with(actor, "default")
         assert agent.actor is actor
+
+
+class TestMoveLoraToVllm:
+    def test_rejects_missing_lora_targets(self, tmp_path):
+        agent = _make_llm_agent()
+        agent.actor = MagicMock()
+        agent._vllm_rollout_adapter = "actor"
+        agent._vllm_lora_staging_dir = tmp_path
+        agent.vllm_config = SimpleNamespace(lora_staging_dir=None)
+        agent.lora_config = SimpleNamespace(target_modules=None)
+
+        with (
+            patch("agilerl.algorithms.core.base.get_lora_params", return_value=[]),
+            pytest.raises(ValueError, match="target_modules or target_parameters"),
+        ):
+            agent._move_lora_to_vllm()
 
 
 class TestConfigureBatchSizePerProcess:
@@ -2589,6 +2607,20 @@ class TestLLMAlgorithmTrainingEstimateInputs:
         assert settings.n_training_gpus == 4
         assert settings.trajectories_per_update == 16
         assert settings.trajectories == moe_ppo.batch_size_per_process
+
+    def test_cp_keeps_world_gpus_and_folds_only_update_rows(self, moe_ppo, monkeypatch):
+        monkeypatch.setattr(core_base, "get_world_size", lambda: 4)
+        monkeypatch.setattr(moe_ppo, "shard_runtime", FSDPRuntime(FSDPConfig(cp=2)))
+        moe_ppo.configure_batch_size_per_process(8, None, None, group_size=2)
+        moe_ppo.fsdp_config = FSDPConfig(cp=2)
+
+        _, settings = moe_ppo._training_estimate_inputs(
+            ALGORITHM_NAMES[moe_ppo.algo], 0.0, fuse_actor_critic_pass=True
+        )
+
+        assert settings.n_training_gpus == 4
+        assert settings.shard_gpus == 2
+        assert settings.trajectories_per_update == 16
 
 
 @pytest.fixture
@@ -3406,9 +3438,9 @@ class TestFusedLinearLogprobsIntegration:
         hidden_calls: list[int] = []
         orig_hidden = agent._fused_chunk_hidden_and_value
 
-        def counting_hidden(chunk_ids, chunk_mask, chunk_pos, chunk_pixel_values=None):
+        def counting_hidden(chunk_ids, chunk_mask, chunk_pixel_values=None):
             hidden_calls.append(int(chunk_ids.shape[0]))
-            return orig_hidden(chunk_ids, chunk_mask, chunk_pos, chunk_pixel_values)
+            return orig_hidden(chunk_ids, chunk_mask, chunk_pixel_values)
 
         with (
             patch(
@@ -3464,9 +3496,9 @@ class TestFusedLinearLogprobsIntegration:
         forward_lengths: list[int] = []
         orig_hidden = agent._fused_chunk_hidden_and_value
 
-        def recording_hidden(chunk_ids, chunk_mask, chunk_pos, chunk_pixel_values=None):
+        def recording_hidden(chunk_ids, chunk_mask, chunk_pixel_values=None):
             forward_lengths.append(int(chunk_ids.shape[1]))
-            return orig_hidden(chunk_ids, chunk_mask, chunk_pos, chunk_pixel_values)
+            return orig_hidden(chunk_ids, chunk_mask, chunk_pixel_values)
 
         # Act
         with (
@@ -3504,9 +3536,9 @@ class TestFusedLinearLogprobsIntegration:
         forward_lengths: list[int] = []
         orig_hidden = agent._fused_chunk_hidden_and_value
 
-        def recording_hidden(chunk_ids, chunk_mask, chunk_pos, chunk_pixel_values=None):
+        def recording_hidden(chunk_ids, chunk_mask, chunk_pixel_values=None):
             forward_lengths.append(int(chunk_ids.shape[1]))
-            return orig_hidden(chunk_ids, chunk_mask, chunk_pos, chunk_pixel_values)
+            return orig_hidden(chunk_ids, chunk_mask, chunk_pixel_values)
 
         # Act
         with (
@@ -4774,7 +4806,14 @@ class TestLLMGenerateWithVllmColocate:
                 agent._generate_with_vllm_colocate([], 1, 0.9)
 
 
-def _fake_save_peft_adapter_for_vllm_rollout(peft_model, staging_dir, adapter_name):
+def _fake_save_peft_adapter_for_vllm_rollout(
+    peft_model,
+    staging_dir,
+    adapter_name,
+    target_modules,
+    expert_key_map=None,
+    strip_multimodal_towers=False,
+):
     from pathlib import Path
 
     adapter_dir = Path(staging_dir) / adapter_name
@@ -5602,15 +5641,19 @@ class TestLLMClonePlain:
         clone.colocated = False
         clone_actor = object()
         clone_runtime = object()
+        clone_layout = object()
         clone.actor = clone_actor
         clone.shard_runtime = clone_runtime
+        clone.sequence_layout = clone_layout
         agent.actor = object()
         agent.shard_runtime = object()
+        agent.sequence_layout = object()
 
         out = LLMAlgorithm._copy_clone_attributes(agent, clone)
 
         assert out.actor is clone_actor
         assert out.shard_runtime is clone_runtime
+        assert out.sequence_layout is clone_layout
 
 
 class TestLLMCloneSynchronisesProcesses:
@@ -7150,6 +7193,7 @@ class TestLLMCheckpointShardRuntime:
             checkpoint = load_attributes_checkpoint(tmp_path)
 
             assert "shard_runtime" not in checkpoint
+            assert "sequence_layout" not in checkpoint
         finally:
             grpo.clean_up()
 
@@ -7157,6 +7201,7 @@ class TestLLMCheckpointShardRuntime:
         # Arrange
         grpo = generate_tiny_grpo()
         live_runtime = grpo.shard_runtime
+        live_layout = grpo.sequence_layout
         grpo.save_checkpoint(str(tmp_path), lora_only=True)
         checkpoint = load_attributes_checkpoint(tmp_path)
         checkpoint["shard_runtime"] = FSDPRuntime(FSDPConfig(ep=2))
@@ -7168,6 +7213,7 @@ class TestLLMCheckpointShardRuntime:
 
             # Assert
             assert grpo.shard_runtime is live_runtime
+            assert grpo.sequence_layout is live_layout
         finally:
             grpo.clean_up()
 
@@ -7680,7 +7726,6 @@ class TestLLMFusedForwardPaths:
         agent.use_value_head = use_value_head
         B, T, V, _H = 2, 5, 32, 8
         ids = torch.randint(1, V, (B, T))
-        agent._packing_mode = MagicMock(return_value=None)
         agent._fused_model_pass = MagicMock(
             return_value=(torch.full((B, T - 1), 2.0), torch.zeros(B, T - 1))
         )
@@ -7737,64 +7782,49 @@ class TestLLMFusedForwardPaths:
         assert values is None
 
     @pytest.mark.parametrize("attn", ["flash_attention_2", "flex_attention"])
-    def test_fused_forward_uses_packed_path_when_enabled(self, attn):
-        # Arrange
+    def test_fused_forward_packs_under_grad(self, attn):
+        # Arrange: scoring restored hidden needs a real lm_head.
+        torch.manual_seed(0)
+        B, T, H, V = 2, 5, 8, 32
         agent = _make_llm_agent()
-        agent.use_value_head = True
+        agent.use_value_head = False
         agent.use_sequence_packing = True
-        agent.actor.config._attn_implementation = attn
-        B, T = 2, 5
-        ids = torch.randint(1, 32, (B, T))
-        expected = torch.zeros(B, T - 1)
+        agent.calc_position_embeddings = False
+        agent.temperature = 1.0
+        agent.cast_logprobs_to_fp32 = True
+        agent.pad_token_id = 0
+        actor = _TinyPeftWrapper(_TinyCausalLM(V, H))
+        actor.config._attn_implementation = attn
+        agent.actor = actor
+        agent.sequence_layout = PackedSequence(
+            pad_token_id=agent.pad_token_id,
+            calc_position_embeddings=False,
+            mode="varlen" if attn == "flash_attention_2" else "blockmask",
+        )
+        agent.select_adapter = lambda _name: nullcontext()
+        captured: list[torch.Size] = []
+        original_forward = agent.actor.forward
+
+        def recording_forward(**kwargs):
+            captured.append(kwargs["input_ids"].shape)
+            return original_forward(**kwargs)
+
+        agent.actor.forward = recording_forward
+        ids = torch.randint(1, V, (B, T))
 
         # Act
         with (
-            patch.object(
-                agent, "_fused_packed_forward", return_value=expected
-            ) as packed_fwd,
+            patch(
+                "agilerl.algorithms.core.base.set_fused_adapter_routing",
+                lambda *_a, **_kw: None,
+            ),
             torch.enable_grad(),
         ):
             log_probs = agent._fused_forward(ids)
 
         # Assert
-        packed_fwd.assert_called_once()
-        assert log_probs is expected
-
-    def test_fused_packed_forward_object_output(self):
-        from contextlib import nullcontext
-
-        agent = _make_llm_agent()
-        agent.use_value_head = False
-        agent.temperature = 1.0
-        agent.cast_logprobs_to_fp32 = True
-        B, T, H, V = 2, 6, 8, 32
-        ids = torch.randint(1, V, (B, T))
-        mask = torch.ones_like(ids)
-
-        hidden = torch.randn(1, T, H)
-        actor = MagicMock()
-        actor.forward = MagicMock(return_value=SimpleNamespace(logits=hidden))
-        agent.actor = actor
-        mock_fused_fn = MagicMock(return_value=torch.zeros(1, T - 1))
-        agent._fused_logprob_fn_and_head = MagicMock(
-            return_value=(
-                mock_fused_fn,
-                torch.randn(V, H),
-                None,
-            )
-        )
-        agent._patch_lm_head_to_identity = MagicMock(return_value=nullcontext())
-        agent._amp_ctx = MagicMock(return_value=nullcontext())
-        agent._activation_offload_ctx = MagicMock(return_value=nullcontext())
-
-        with patch(
-            "agilerl.algorithms.core.base.unpack_logprobs",
-            return_value=torch.zeros(B, T - 1),
-        ):
-            log_probs = agent._fused_packed_forward(ids, mask)
-
+        assert captured == [(1, B * T)]
         assert log_probs.shape == (B, T - 1)
-        assert actor.call_args.kwargs["input_ids"].shape == (1, B * T)
 
 
 @_LLM_DEPS_SKIP
@@ -7813,6 +7843,11 @@ class TestLLMGetLogprobsPacked:
         actor.config._attn_implementation = "flash_attention_2"
         actor.eval()
         agent.actor = actor
+        agent.sequence_layout = PackedSequence(
+            pad_token_id=agent.pad_token_id,
+            calc_position_embeddings=False,
+            mode="varlen",
+        )
 
         from contextlib import nullcontext
 
@@ -7851,6 +7886,11 @@ class TestLLMGetLogprobsPacked:
         actor = _TinyPeftWrapper(inner)
         actor.config._attn_implementation = "flash_attention_2"
         agent.actor = actor
+        agent.sequence_layout = PackedSequence(
+            pad_token_id=agent.pad_token_id,
+            calc_position_embeddings=False,
+            mode="varlen",
+        )
 
         from contextlib import nullcontext
 
@@ -7877,6 +7917,22 @@ class TestLLMGetLogprobsPacked:
 class TestLLMMoveLoraToVllmErrors:
     """Error paths of the adapter-only colocated vLLM LoRA sync."""
 
+    def test_raises_when_lora_config_missing(self):
+        agent = _make_llm_agent()
+        peft_ref = MagicMock()
+        peft_ref.parameters.return_value = [torch.tensor([1.0])]
+        peft_ref.named_parameters.return_value = []
+        peft_ref.set_adapter = MagicMock()
+        _setup_agent_for_vllm_lora_sync(agent, peft_ref)
+        agent.lora_config = None
+
+        with (
+            patch("agilerl.algorithms.core.base.is_main_process", return_value=True),
+            patch("agilerl.algorithms.core.base.barrier"),
+            pytest.raises(ValueError, match="lora_config is required"),
+        ):
+            agent._move_lora_to_vllm()
+
     def test_raises_when_adapter_export_missing(self, tmp_path):
         agent = _make_llm_agent()
         peft_ref = MagicMock()
@@ -7895,6 +7951,16 @@ class TestLLMMoveLoraToVllmErrors:
             ),
             pytest.raises(FileNotFoundError, match="PEFT adapter export"),
         ):
+            agent._move_lora_to_vllm()
+
+    def test_raises_when_vllm_config_missing(self):
+        agent = _make_llm_agent()
+        peft_ref = MagicMock()
+        peft_ref.parameters.return_value = [torch.tensor([1.0])]
+        _setup_agent_for_vllm_lora_sync(agent, peft_ref)
+        agent.vllm_config = None
+
+        with pytest.raises(ValueError, match="vllm_config is required"):
             agent._move_lora_to_vllm()
 
     def test_non_main_rank_exports_and_loads_adapter(self, tmp_path):
@@ -8170,6 +8236,28 @@ class TestLLMAlgorithmInitQuantizationConfig:
         assert agent.model_config["trust_remote_code"] is True
         # lm_head is force-skipped so the fused lm_head matmul stays exact.
         assert quantization_config.llm_int8_skip_modules == ["lm_head"]
+
+
+@_LLM_DEPS_SKIP
+class TestLLMAlgorithmContextParallelGuards:
+    def test_packing_with_cp_raises_at_init(self) -> None:
+        with pytest.raises(
+            ValueError, match="use_sequence_packing=True is not supported with cp=2"
+        ):
+            _make_llm_agent(
+                fsdp_config=FSDPConfig(cp=2, optim_cpu_offload=False),
+                use_sequence_packing=True,
+            )
+
+    def test_wrap_models_rejects_vision_language_with_cp(self) -> None:
+        actor = _make_mock_peft_actor()
+        actor.get_base_model = lambda: actor
+        actor.config = SimpleNamespace(vision_config=object())
+        agent = _make_llm_agent(actor_network=actor)
+        agent.fsdp_config = FSDPConfig(cp=2, optim_cpu_offload=False)
+
+        with pytest.raises(ValueError, match="vision-language"):
+            agent.wrap_models()
 
 
 def _lora_wrapped_actor(dtype=torch.float32, lora_dtype=None):

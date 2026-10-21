@@ -50,13 +50,13 @@ from agilerl.utils.algo_utils import (
     VLLMConfig,
     get_experiences_samples,
 )
-from agilerl.utils.llm_packing import unpack_hidden_states, unpack_values
 from agilerl.utils.llm_utils import (
     LLM_RL_COMMON_METRIC_NAMES,
     PPO_METRIC_NAMES,
     VLLM_IS_METRIC_NAMES,
     BitsAndBytesConfig,
     MicroBatchMetrics,
+    attention_mask_from_padded_ids,
     calculate_k3_kl,
     clipped_is_surrogate,
     k3_kl_penalty_reference,
@@ -1336,29 +1336,42 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         :return: ``(B, T, H)`` actor hidden states and ``(B, T - 1)`` critic values.
         :rtype: tuple[torch.Tensor, torch.Tensor]
         """
-        model_kwargs, packed = self._gradient_forward_inputs(
-            batch_ids, pixel_values, copies=2
-        )
-        rows = 1 if packed is not None else batch_ids.shape[0]
-        set_fused_adapter_routing(self.actor, ["actor"] * rows + ["critic"] * rows)
+        orig_len = batch_ids.shape[1]
+        mask = attention_mask_from_padded_ids(batch_ids, self.pad_token_id)
+        batch_ids, mask = self.sequence_layout.align(batch_ids, mask)
         sample_rows = int(batch_ids.shape[0])
-        with (
-            self._vision_cache.images(
-                self._repeat_pixel_values_for_fused_rows(
-                    image_keys, 2 * sample_rows, sample_rows
-                )
-            ),
-            self._patch_lm_head_to_identity(),
-            self._amp_ctx(),
-            self._activation_offload_ctx(),
-        ):
-            self.actor.train()
-            hidden, _, values = self.actor(**model_kwargs)
-        if packed is not None:
-            return unpack_hidden_states(hidden[:1], packed), unpack_values(
-                values[1], packed
+        extra: dict[str, Any] = {}
+        if pixel_values is not None:
+            extra["pixel_values"] = self._repeat_pixel_values_for_fused_rows(
+                pixel_values, 2 * sample_rows, sample_rows
             )
-        return hidden[:rows], values[rows:, :-1]
+        with self.sequence_layout.actor_kwargs(
+            batch_ids, mask, extra=extra or None, copies=2
+        ) as fwd:
+            rows = fwd.kwargs["input_ids"].shape[0]
+            adapters = rows // 2
+            set_fused_adapter_routing(
+                self.actor, ["actor"] * adapters + ["critic"] * adapters
+            )
+            with (
+                self._vision_cache.images(
+                    self._repeat_pixel_values_for_fused_rows(
+                        image_keys, 2 * sample_rows, sample_rows
+                    )
+                ),
+                self._patch_lm_head_to_identity(),
+                self._amp_ctx(),
+                self._activation_offload_ctx(),
+            ):
+                self.actor.train()
+                hidden, _, values = self.actor(**fwd.kwargs)
+            if fwd.packed is not None:
+                actor_hidden = fwd.restore(hidden[:1], "hidden")
+                critic_values = fwd.restore(values[1], "values")
+            else:
+                actor_hidden = fwd.restore(hidden[:adapters], "hidden")
+                critic_values = fwd.restore(values[adapters:], "values")
+        return actor_hidden[:, :orig_len], critic_values[:, : orig_len - 1]
 
     def _actor_log_probs_from_hidden(
         self, actor_hidden: torch.Tensor, batch_ids: torch.Tensor
@@ -1418,18 +1431,26 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         :return: ``(B, T - 1)`` per-token values.
         :rtype: torch.Tensor
         """
-        model_kwargs, packed = self._gradient_forward_inputs(batch_ids, pixel_values)
-        set_fused_adapter_routing(self.actor, ["critic"])
-        with (
-            self._patch_lm_head_to_identity(),
-            self._amp_ctx(),
-            self._activation_offload_ctx(),
-        ):
-            self.actor.train()
-            _, _, values = self.actor(**model_kwargs)
-        if packed is not None:
-            return unpack_values(values[0], packed)
-        return values[:, :-1]
+        orig_len = batch_ids.shape[1]
+        mask = attention_mask_from_padded_ids(batch_ids, self.pad_token_id)
+        batch_ids, mask = self.sequence_layout.align(batch_ids, mask)
+        extra: dict[str, Any] = {}
+        if pixel_values is not None:
+            extra["pixel_values"] = pixel_values
+        with self.sequence_layout.actor_kwargs(
+            batch_ids, mask, extra=extra or None
+        ) as fwd:
+            set_fused_adapter_routing(self.actor, ["critic"])
+            with (
+                self._patch_lm_head_to_identity(),
+                self._amp_ctx(),
+                self._activation_offload_ctx(),
+            ):
+                self.actor.train()
+                _, _, values = self.actor(**fwd.kwargs)
+            restored = values[0] if fwd.packed is not None else values
+            critic_values = fwd.restore(restored, "values")
+        return critic_values[:, : orig_len - 1]
 
     def _ppo_policy_loss(
         self,

@@ -35,6 +35,7 @@ from peft import LoraConfig
 from torch.utils.checkpoint import checkpoint
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
+from agilerl.algorithms.core.sequence_layout import PackedSequence
 from agilerl.algorithms.ppo_llm import PPO as LLMPPO
 from agilerl.arena.memory import estimate_training
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
@@ -493,7 +494,11 @@ class TestPPOFusedPassMatchesDoubledForward:
         # token's hidden state.
         padded = make_ppo()
         packed = make_ppo()
-        monkeypatch.setattr(packed, "_packing_mode", lambda: "blockmask")
+        packed.sequence_layout = PackedSequence(
+            pad_token_id=packed.pad_token_id,
+            calc_position_embeddings=packed.calc_position_embeddings,
+            mode="blockmask",
+        )
         forwards = record_grad_forwards(packed)
         batch = micro_batch()
         real_tokens = int((batch["ids"] != PAD_TOKEN_ID).sum())

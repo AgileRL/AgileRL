@@ -1335,13 +1335,10 @@ class TestLLMEnvSpecRollout:
             max_turns=4,
             observation_field=None,
             observation_processor=None,
-            action_processor=None,
             apply_chat_template=True,
             chat_template_kwargs={},
             max_model_len=512,
             strict_chat_template_boundary=True,
-            screenshot_field=None,
-            goal_images_field=None,
         )
         mock_rollout_cls.local.assert_not_called()
 
@@ -1397,7 +1394,6 @@ class TestLLMEnvSpecRollout:
             action_field="message",
             observation_field=None,
             observation_processor=None,
-            action_processor=None,
             apply_chat_template=True,
             chat_template_kwargs={},
             max_model_len=512,
@@ -1480,76 +1476,6 @@ class TestLLMEnvSpecRollout:
         kwargs = mock_rollout_cls.local.call_args.kwargs
         assert kwargs["observation_field"] is None
         assert kwargs["observation_processor"]({"info_state": [1, 2]}) == "obs:[1, 2]"
-
-    def test_image_observation_fields_reach_entrypoint_harness(self):
-        mock_tokenizer = MagicMock()
-        mock_tokenizer.pad_token_id = 0
-        spec = LLMEnvSpec(
-            env_type=LLMEnvType.ROLLOUT,
-            entrypoint="tests.test_models.test_env:_StubTextEnv",
-            max_turns=2,
-            screenshot_field="page",
-            goal_images_field="task_images",
-        )
-        mock_rollout_cls = MagicMock()
-        with patch("agilerl.models.env.RolloutHarness", mock_rollout_cls):
-            make_rollout_env_factory(spec, mock_tokenizer)[0]()
-        kwargs = mock_rollout_cls.local.call_args.kwargs
-        assert kwargs["screenshot_field"] == "page"
-        assert kwargs["goal_images_field"] == "task_images"
-
-    def test_image_fields_rejected_for_dataset_backed_rollout(self):
-        with pytest.raises(ValueError, match="no such observation"):
-            LLMEnvSpec(
-                env_type=LLMEnvType.ROLLOUT,
-                dataset="my_dataset",
-                rubric_file_path="rubric.py",
-                rubric_name="rubric",
-                prompt_template={"user_prompt": "{question}"},
-                screenshot_field="page",
-            )
-
-    def test_action_processor_rejected_for_dataset_backed_rollout(self):
-        with pytest.raises(ValueError, match="no such env"):
-            LLMEnvSpec(
-                env_type=LLMEnvType.ROLLOUT,
-                dataset="my_dataset",
-                rubric_file_path="rubric.py",
-                rubric_name="rubric",
-                prompt_template={"user_prompt": "{question}"},
-                action_processor="proc.py:rewrite",
-            )
-
-    def test_action_processor_resolves_and_reaches_the_harness(self, tmp_path):
-        proc_file = tmp_path / "proc.py"
-        proc_file.write_text("def rewrite(text):\n    return text.upper()\n")
-        mock_tokenizer = MagicMock()
-        mock_tokenizer.pad_token_id = 0
-        spec = LLMEnvSpec(
-            env_type=LLMEnvType.ROLLOUT,
-            entrypoint="tests.test_models.test_env:_StubTextEnv",
-            max_turns=2,
-            action_processor=f"{proc_file}:rewrite",
-        )
-        mock_rollout_cls = MagicMock()
-        with patch("agilerl.models.env.RolloutHarness", mock_rollout_cls):
-            make_rollout_env_factory(spec, mock_tokenizer)[0]()
-        kwargs = mock_rollout_cls.local.call_args.kwargs
-        assert kwargs["action_processor"]("fill: hello") == "FILL: HELLO"
-
-    def test_action_processor_must_resolve_to_a_callable(self, tmp_path):
-        proc_file = tmp_path / "proc.py"
-        proc_file.write_text("rewrite = 3\n")
-        mock_tokenizer = MagicMock()
-        mock_tokenizer.pad_token_id = 0
-        spec = LLMEnvSpec(
-            env_type=LLMEnvType.ROLLOUT,
-            entrypoint="tests.test_models.test_env:_StubTextEnv",
-            max_turns=1,
-            action_processor=f"{proc_file}:rewrite",
-        )
-        with pytest.raises(TypeError, match="non-callable"):
-            make_rollout_env_factory(spec, mock_tokenizer)
 
     def test_observation_processor_must_resolve_to_a_callable(self, tmp_path):
         proc_file = tmp_path / "proc.py"

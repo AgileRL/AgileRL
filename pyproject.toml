@@ -10,7 +10,7 @@ requires-python = ">=3.10,<3.14"
 
 dependencies = [
     "accelerate>=1.7.0",
-    "agilerl-arena>=1.28.0,<2.0",
+    "agilerl-arena>=1.18.0,<2.0",
     "dill>=0.3.7",
     "fastrand>=1.3.0",
     "flatten_dict>=0.4.2",
@@ -238,6 +238,7 @@ include = [
     "agilerl/algorithms/core/base.py",
     "agilerl/algorithms/core/llm_ops/fused_loss.py",
     "agilerl/architectures/nemotron_h/liger.py",
+    "agilerl/architectures/nemotron_h/omni_language.py",
     "agilerl/architectures/qwen3_5/causal_lm.py",
     "agilerl/architectures/vllm_language.py",
     "agilerl/algorithms/core/llm_ops/vllm_colocate.py",

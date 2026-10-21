@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -27,7 +27,6 @@ class VllmRuntimeConfig(BaseModel):
     reasoning_parser: str | None = Field(default=None, min_length=1)
     enable_prefix_caching: bool | None = Field(default=None)
     trust_remote_code: bool | None = Field(default=None)
-    hf_overrides: dict[str, object] | None = Field(default=None)
 
 
 class TrainerRuntimeConfig(BaseModel):
@@ -75,14 +74,22 @@ class PatchRuntimeConfig(BaseModel):
 class LanguageTowerRuntimeConfig(BaseModel):
     """vLLM language-tower mapping that varies by Hugging Face ``model_type``.
 
-    A family whose stripped language config is not a registered vLLM architecture
-    sets ``hf_overrides`` and ``model_class_overrides``.
+    Generic VL serving peels ``text_config`` / ``llm_config``. A family that
+    needs a custom vLLM class sets ``hf_overrides`` and ``model_class_overrides``.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
     hf_overrides: Callable[[object], object] | None = None
     model_class_overrides: dict[str, str] | None = None
+    lora_key_prefix: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Dotted path vLLM serves language decoder layers under, with "
+            "trailing dot, when it differs from the trainer's layout."
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -98,11 +105,22 @@ class TensorParallelPlan:
     restore: Callable[[nn.Module, DeviceMesh], None]
 
 
-class ModelRuntimeConfig(BaseModel):
-    """Per-``model_type`` runtime settings for vLLM, trainer, patches, and TP.
+@dataclass(frozen=True)
+class ContextParallelPlan:
+    """Context-parallel mixer wrap for the module classes one family defines.
 
-    ``tensor_parallel_plan`` is a ``module:attribute`` path to a
-    :class:`TensorParallelPlan`, resolved when sharding runs: plan modules
+    ``wrap`` runs before FSDP wraps the model and returns how many mixers it
+    wrapped. Modules of other families stay untouched.
+    """
+
+    wrap: Callable[[nn.Module, DeviceMesh], int]
+
+
+class ModelRuntimeConfig(BaseModel):
+    """Per-``model_type`` runtime settings for vLLM, trainer, patches, TP, and CP.
+
+    ``tensor_parallel_plan`` and ``context_parallel_plan`` are
+    ``module:attribute`` paths, resolved when wrap/shard runs: plan modules
     import :mod:`agilerl.distributed`, which imports this package.
     """
 
@@ -114,7 +132,11 @@ class ModelRuntimeConfig(BaseModel):
     language_tower: LanguageTowerRuntimeConfig = Field(
         default_factory=LanguageTowerRuntimeConfig
     )
+    multimodal_towers_kept_hf_override: (
+        Callable[[object], object] | Mapping[str, object] | None
+    ) = None
     # PEFT target names of the trainer's tower and connector linears. Empty for
     # families without vLLM tower LoRA (it needs get_num_mm_encoder_tokens).
     tower_connector_lora_targets: frozenset[str] = frozenset()
     tensor_parallel_plan: str | None = Field(default=None, min_length=1)
+    context_parallel_plan: str | None = Field(default=None, min_length=1)

@@ -667,27 +667,6 @@ class LLMEnvSpec(EnvSpecBase):
             "exclusive with observation_field."
         ),
     )
-    action_processor: str | None = Field(
-        default=None,
-        description=(
-            "module:fn entrypoint that turns the post-</think> action text "
-            "into what the env receives. Unset sends that text unchanged."
-        ),
-    )
-    screenshot_field: str | None = Field(
-        default=None,
-        description=(
-            "Observation field holding the page image. Empty or unset reads no "
-            "page image. A field named image is always read when present."
-        ),
-    )
-    goal_images_field: str | None = Field(
-        default=None,
-        description=(
-            "Observation field holding the task images that follow the first "
-            "prompt. Empty or unset reads none."
-        ),
-    )
 
     env_url: str | list[str] | None = Field(
         default=None,
@@ -987,21 +966,6 @@ class LLMEnvSpec(EnvSpecBase):
             msg = (
                 "observation_field / observation_processor render an env's "
                 "observations; a dataset-backed rollout builds its own prompts."
-            )
-            raise ValueError(msg)
-        if self.action_processor is not None and dataset is not None:
-            msg = (
-                "action_processor rewrites the text an env receives; a "
-                "dataset-backed rollout has no such env."
-            )
-            raise ValueError(msg)
-        if dataset is not None and (
-            (self.screenshot_field is not None and self.screenshot_field != "")
-            or (self.goal_images_field is not None and self.goal_images_field != "")
-        ):
-            msg = (
-                "screenshot_field and goal_images_field name env observation "
-                "keys; a dataset-backed rollout has no such observation."
             )
             raise ValueError(msg)
         if self.env_url is not None and self.max_turns is None:

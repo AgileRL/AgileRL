@@ -55,6 +55,7 @@ class TestFSDPConfig:
                 "FSDPConfig.routed_expert_chunk_mib must be >= 1",
             ),
             ("tp", 0, "FSDPConfig.tp must be >= 1"),
+            ("cp", 0, "FSDPConfig.cp must be >= 1"),
             ("shard_group_size", 0, "FSDPConfig.shard_group_size must be >= 1"),
         ],
     )
@@ -90,23 +91,39 @@ class TestFSDPConfig:
         assert config.tp == 1
         assert config.shard_group_size is None
 
+    def test_cp_pp_and_style_defaults(self) -> None:
+        config = FSDPConfig()
+
+        assert config.cp == 1
+        assert config.pp == 1
+        assert config.cp_style == "ulysses"
+
+    def test_rejects_non_ulysses_style(self) -> None:
+        with pytest.raises(ValueError, match="only 'ulysses' is supported"):
+            FSDPConfig(cp_style="ring")
+
+    def test_rejects_pipeline_parallel(self) -> None:
+        with pytest.raises(ValueError, match="only pp=1 is supported"):
+            FSDPConfig(pp=2)
+
     def test_accepts_shard_group_divisible_by_ep_and_tp(self) -> None:
         config = FSDPConfig(ep=8, tp=2, shard_group_size=8)
 
         assert config.shard_group_size == 8
 
     @pytest.mark.parametrize(
-        ("ep", "tp", "match"),
+        ("kwargs", "match"),
         [
-            (3, 1, "shard_group_size=8 must be divisible by ep=3"),
-            (1, 3, "shard_group_size=8 must be divisible by tp=3"),
+            ({"ep": 3, "tp": 1}, "shard_group_size=8 must be divisible by ep=3"),
+            ({"ep": 1, "tp": 3}, "shard_group_size=8 must be divisible by tp=3"),
+            ({"cp": 3}, "shard_group_size=8 must be divisible by cp=3"),
         ],
     )
     def test_rejects_shard_group_not_divisible(
-        self, ep: int, tp: int, match: str
+        self, kwargs: dict[str, int], match: str
     ) -> None:
         with pytest.raises(ValueError, match=match):
-            FSDPConfig(ep=ep, tp=tp, shard_group_size=8)
+            FSDPConfig(shard_group_size=8, **kwargs)
 
     def test_prefetch_and_checkpoint_policy_defaults(self) -> None:
         config = FSDPConfig()

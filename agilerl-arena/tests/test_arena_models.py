@@ -505,27 +505,6 @@ class TestGRPOSpecOffPolicyCorrections:
 
 @pytest.mark.parametrize(
     ("spec_cls", "required"),
-    [
-        (GRPOSpec, {"group_size": 2}),
-        (CISPOSpec, {"group_size": 2}),
-        (GSPOSpec, {"group_size": 2}),
-        (LLMPPOSpec, {}),
-    ],
-    ids=["grpo", "cispo", "gspo", "llmppo"],
-)
-class TestOffloadTrainerDuringRollout:
-    def test_is_not_a_manifest_field(
-        self, spec_cls: type[BaseModel], required: dict[str, int]
-    ) -> None:
-        assert "offload_trainer_during_rollout" not in spec_cls.model_fields
-        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
-            spec_cls.model_validate(
-                {**required, "offload_trainer_during_rollout": True}
-            )
-
-
-@pytest.mark.parametrize(
-    ("spec_cls", "required"),
     [(GRPOSpec, {"group_size": 2}), (LLMPPOSpec, {})],
     ids=["grpo", "llmppo"],
 )
@@ -1175,39 +1154,6 @@ class TestLLMEnvSpecTaskFamilyField:
                 env_url="http://env",
                 max_turns=10,
                 task_family_prior_strength=0.0,
-            )
-
-
-class TestLLMEnvSpecImageFields:
-    def test_accepts_field_names(self) -> None:
-        spec = LLMEnvSpec(
-            env_type="rollout",
-            env_url="http://env",
-            max_turns=10,
-            screenshot_field="page",
-            goal_images_field="task_images",
-        )
-
-        assert spec.screenshot_field == "page"
-        assert spec.goal_images_field == "task_images"
-
-    def test_unset_image_keys_stay_out_of_dump(self) -> None:
-        spec = LLMEnvSpec(env_type="rollout", env_url="http://env", max_turns=10)
-
-        assert spec.screenshot_field is None
-        assert spec.goal_images_field is None
-        dumped = spec.model_dump(exclude_none=True)
-        assert "screenshot_field" not in dumped
-        assert "goal_images_field" not in dumped
-
-    def test_dataset_backed_rollout_rejects_image_observation_keys(self) -> None:
-        with pytest.raises(ValidationError, match="no such observation"):
-            LLMEnvSpec(
-                env_type="rollout",
-                dataset="rows",
-                rubric_file_path="rubric.py",
-                prompt_template={"user_0": "{q}"},
-                screenshot_field="screenshot",
             )
 
 

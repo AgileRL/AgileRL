@@ -26,6 +26,7 @@ pytest.importorskip("peft", reason="LLM tests require peft.")
 from peft import LoraConfig
 
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
+from agilerl.algorithms.core.sequence_layout import PackedSequence, PaddedSequence
 from agilerl.algorithms.grpo import GRPO
 from tests.test_algorithms.test_llms.llm_helpers import create_module
 from tests.test_utils.test_expert_parallel import (
@@ -548,7 +549,17 @@ class TestScoredLogProbs:
     ) -> None:
         # Arrange
         agent = _make_grpo()
-        monkeypatch.setattr(agent, "_packing_mode", lambda: packing_mode)
+        if packing_mode is None:
+            agent.sequence_layout = PaddedSequence(
+                pad_token_id=agent.pad_token_id,
+                calc_position_embeddings=agent.calc_position_embeddings,
+            )
+        else:
+            agent.sequence_layout = PackedSequence(
+                pad_token_id=agent.pad_token_id,
+                calc_position_embeddings=agent.calc_position_embeddings,
+                mode=packing_mode,
+            )
         ids, mask = _batch()
 
         # Act

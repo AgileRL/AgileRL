@@ -17,6 +17,7 @@ from peft import LoraConfig
 
 from agilerl.algorithms import GRPO
 from agilerl.algorithms.core.base import LLMAlgorithm
+from agilerl.algorithms.core.sequence_layout import PackedSequence
 from agilerl.components.llm_rollout_data import EpisodeSegments
 from agilerl.utils.segment_rows import SegmentRows
 from tests.test_algorithms.test_core_base import _LLM_DEPS_SKIP, _make_llm_agent
@@ -68,7 +69,6 @@ class TestFusedForwardPixelValues:
         seq_len = 5
         ids = torch.randint(1, 32, (batch_size, seq_len))
         pixel_values = torch.randn(batch_size, 3, 4, 4)
-        agent._packing_mode = MagicMock(return_value=None)
         agent._fused_model_pass = MagicMock(
             return_value=(torch.zeros(batch_size, seq_len - 1), None),
         )
@@ -87,7 +87,6 @@ class TestFusedForwardPixelValues:
         batch_size = 2
         seq_len = 5
         ids = torch.randint(1, 32, (batch_size, seq_len))
-        agent._packing_mode = MagicMock(return_value=None)
         agent._fused_model_pass = MagicMock(
             return_value=(torch.zeros(batch_size, seq_len - 1), None),
         )
@@ -101,39 +100,30 @@ class TestFusedForwardPixelValues:
     def test_fused_packed_forward_keeps_pixel_batch_size(self) -> None:
         # Arrange
         agent = _make_llm_agent()
-        agent.use_value_head = False
+        agent.sequence_layout = PackedSequence(
+            pad_token_id=agent.pad_token_id,
+            calc_position_embeddings=False,
+            mode="varlen",
+        )
         batch_size = 2
         seq_len = 6
         ids = torch.randint(1, 32, (batch_size, seq_len))
         mask = torch.ones_like(ids)
         pixel_values = torch.randn(batch_size, 3, 4, 4)
-        hidden = torch.randn(1, seq_len, 8)
-        actor = MagicMock()
-        actor.forward = MagicMock(return_value=SimpleNamespace(logits=hidden))
-        agent.actor = actor
-        agent._get_unwrapped_actor = MagicMock(return_value=actor)
-        agent._fused_logprob_fn_and_head = MagicMock(
-            return_value=(
-                MagicMock(return_value=torch.zeros(1, seq_len - 1)),
-                torch.randn(32, 8),
-                None,
-            )
-        )
-        agent._patch_lm_head_to_identity = MagicMock(return_value=nullcontext())
-        agent._amp_ctx = MagicMock(return_value=nullcontext())
-        agent._activation_offload_ctx = MagicMock(return_value=nullcontext())
 
         # Act
-        with patch(
-            "agilerl.algorithms.core.base.unpack_logprobs",
-            return_value=torch.zeros(batch_size, seq_len - 1),
+        with (
+            torch.enable_grad(),
+            agent.sequence_layout.actor_kwargs(
+                ids, mask, extra={"pixel_values": pixel_values}
+            ) as fwd,
         ):
-            agent._fused_packed_forward(ids, mask, pixel_values=pixel_values)
+            forwarded = fwd.kwargs["pixel_values"]
 
         # Assert
-        forwarded = actor.call_args.kwargs["pixel_values"]
         assert forwarded.shape[0] == batch_size
         assert torch.equal(forwarded, pixel_values)
+        assert fwd.kwargs["input_ids"].shape[0] == 1
 
     def test_get_logprobs_passes_pixel_values_to_actor(self) -> None:
         # Arrange
@@ -237,7 +227,11 @@ class TestFusedForwardPixelValues:
             return original_forward(**kwargs)
 
         agent.actor.forward = recording_forward
-        agent._packing_mode = MagicMock(return_value="varlen")
+        agent.sequence_layout = PackedSequence(
+            pad_token_id=agent.pad_token_id,
+            calc_position_embeddings=False,
+            mode="varlen",
+        )
         batch_size = 2
         seq_len = 5
         ids = torch.randint(1, 32, (batch_size, seq_len))
@@ -257,7 +251,7 @@ class TestFusedForwardPixelValues:
         # Act
         with (
             patch(
-                "agilerl.algorithms.core.base.unpack_logprobs",
+                "agilerl.algorithms.core.sequence_layout.unpack_logprobs",
                 return_value=torch.zeros(batch_size, seq_len - 1),
             ),
             torch.enable_grad(),
@@ -294,7 +288,6 @@ class TestFusedKernelLossPixelValues:
             return (hidden,)
 
         grpo.actor.forward = recording_forward
-        grpo._packing_mode = MagicMock(return_value=None)
         grpo._get_lm_head = MagicMock(
             return_value=torch.nn.Linear(6, 64, bias=False),
         )
@@ -355,7 +348,11 @@ class TestFusedKernelLossPixelValues:
             return (packed_hidden,)
 
         grpo.actor.forward = recording_forward
-        grpo._packing_mode = MagicMock(return_value="varlen")
+        grpo.sequence_layout = PackedSequence(
+            pad_token_id=grpo.pad_token_id,
+            calc_position_embeddings=False,
+            mode="varlen",
+        )
         grpo._get_lm_head = MagicMock(
             return_value=torch.nn.Linear(6, 64, bias=False),
         )
@@ -371,7 +368,7 @@ class TestFusedKernelLossPixelValues:
         with (
             patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
             patch(
-                "agilerl.algorithms.core.base.unpack_hidden_states",
+                "agilerl.algorithms.core.sequence_layout.unpack_hidden_states",
                 return_value=padded_hidden,
             ),
             patch(

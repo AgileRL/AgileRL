@@ -196,7 +196,7 @@ def _ffn_layer_mix(text_cfg: dict[str, Any]) -> tuple[int | None, int | None]:
     Most stacks put an FFN in every block alongside the mixer, and both
     counts stay ``None`` (every layer). Block-exclusive layouts use one
     block kind per layer: Mamba, attention, MLP, or MoE, in
-    ``layers_block_type`` ("moe" / "mlp") or as ``-`` / ``E`` in
+    ``layers_block_type`` ("moe" / "mlp") or as ``-`` in
     ``hybrid_override_pattern``. Mixer-only lists leave FFN counts unset.
     """
     entries = _layer_type_list(text_cfg)
@@ -207,12 +207,8 @@ def _ffn_layer_mix(text_cfg: dict[str, Any]) -> tuple[int | None, int | None]:
             return mlp, moe
 
     pattern = text_cfg.get("hybrid_override_pattern")
-    if (
-        isinstance(pattern, str)
-        and "M" in pattern
-        and ("-" in pattern or "E" in pattern)
-    ):
-        return pattern.count("-"), pattern.count("E") or None
+    if isinstance(pattern, str) and "M" in pattern and "-" in pattern:
+        return pattern.count("-"), None
     return None, None
 
 
@@ -310,10 +306,7 @@ def _decoder_fields(text_cfg: dict[str, Any]) -> dict[str, Any]:
     return {
         "n_layers": int(n_layers),
         "hidden_size": hidden,
-        # Expert-only stacks publish just the expert width.
-        "intermediate_size": int(
-            text_cfg.get("intermediate_size") or text_cfg["moe_intermediate_size"]
-        ),
+        "intermediate_size": int(text_cfg["intermediate_size"]),
         "n_heads": n_heads,
         "n_kv_heads": n_kv,
         "head_dim": int(text_cfg.get("head_dim") or hidden // n_heads),
@@ -341,13 +334,6 @@ def _moe_fields(text_cfg: dict[str, Any]) -> dict[str, Any]:
     n_experts = _first_int(
         text_cfg, "num_experts", "num_local_experts", "n_routed_experts"
     )
-    shared_inter = _first_int(
-        text_cfg,
-        "moe_shared_expert_intermediate_size",
-        "shared_expert_intermediate_size",
-    )
-    # Qwen-MoE names one shared expert by its width alone.
-    n_shared = int(text_cfg.get("n_shared_experts") or (1 if shared_inter else 0))
     return {
         "n_experts": n_experts or None,
         "n_experts_per_tok": (
@@ -360,13 +346,17 @@ def _moe_fields(text_cfg: dict[str, Any]) -> dict[str, Any]:
             if text_cfg.get("moe_intermediate_size")
             else None
         ),
-        "n_shared_experts": n_shared,
+        "n_shared_experts": int(text_cfg.get("n_shared_experts") or 0),
         "moe_latent_size": (
             int(text_cfg["moe_latent_size"])
             if text_cfg.get("moe_latent_size")
             else None
         ),
-        "shared_expert_intermediate_size": shared_inter or None,
+        "shared_expert_intermediate_size": (
+            int(text_cfg["moe_shared_expert_intermediate_size"])
+            if text_cfg.get("moe_shared_expert_intermediate_size")
+            else None
+        ),
     }
 
 
@@ -749,8 +739,6 @@ class TrainingSettings(BaseModel):
     checkpoint_optimizer: bool = False
     # Async rollout: the next rollout batch waits in host memory during learn.
     async_rollout: bool = False
-    # Gradient forward packs into one row. The estimate still prices padded rows.
-    sequence_packing: bool = False
 
     @property
     def trajectories(self) -> int:
@@ -763,14 +751,33 @@ class TrainingSettings(BaseModel):
         return max(-(-total // self.n_training_gpus), 1)
 
     @property
-    def shard_gpus(self) -> int:
-        """GPUs one copy of the weights is sharded across.
-
-        FSDP shards inside each ``shard_group_size`` group; the groups replicate.
-        """
+    def inner_gpus(self) -> int:
+        """Ranks in one HSDP shard group, before splitting out ``cp`` and ``tp``."""
         if self.fsdp is None or self.fsdp.shard_group_size is None:
             return self.n_training_gpus
         return min(self.fsdp.shard_group_size, self.n_training_gpus)
+
+    @property
+    def shard_gpus(self) -> int:
+        """GPUs one copy of the dense weights is sharded across.
+
+        FSDP shards inside each ``dp_shard`` group (the inner shard group
+        divided by ``cp * tp``). HSDP groups replicate.
+        """
+        if self.fsdp is None:
+            return self.inner_gpus
+        return self.inner_gpus // (self.fsdp.cp * self.fsdp.tp)
+
+    @property
+    def expert_shard_gpus(self) -> int:
+        """GPUs packed expert weights are sharded across.
+
+        Expert parallel then leftover FSDP cover the inner group, not the
+        dense ``dp_shard`` group.
+        """
+        if self.fsdp is None or self.fsdp.ep <= 1:
+            return self.shard_gpus
+        return self.inner_gpus
 
     @property
     def uses_reference(self) -> bool:
@@ -823,9 +830,10 @@ class TrainingSettings(BaseModel):
 
     @property
     def n_adapter_rows(self) -> int:
-        """Adapters in one no-grad forward of a single sample.
+        """Row multiplier of the fused no-grad forward.
 
-        DPO scores chosen and rejected in separate passes, so this is 1.
+        Rollout algorithms repeat the batch once per consulted adapter.
+        DPO runs sequential single-row passes, so this is 1.
         """
         if self.algorithm == "dpo":
             return 1
@@ -905,8 +913,8 @@ class GenerationSettings(BaseModel):
     # adds one token per sequence per step, so the activation peak tracks
     # prompt tokens in flight. ``None`` assumes the whole context is prompt.
     max_prompt_len: int | None = None
-    # ``None`` takes vLLM's async-engine default, capped at
-    # ``max_num_seqs * max_model_len``.
+    # ``None`` uses the framework's resolution rule:
+    # ``min(max_num_seqs * max_model_len, max(max_model_len, max_num_seqs * 8192))``.
     max_num_batched_tokens: int | None = None
     # Pin the KV pool size. ``None`` lets vLLM derive it from
     # ``gpu_memory_utilization``.
@@ -917,11 +925,6 @@ class GenerationSettings(BaseModel):
     max_lora_rank: int = 16
     max_loras: int = 1
     weight_dtype: WeightDtype = "bf16"
-    # ``fp8`` stores the engine weights at one byte. KV and activations stay
-    # at ``weight_dtype``.
-    weight_quantization: Literal["none", "fp8"] = "none"
-    # Ranks that share one engine copy. 1 is a single-GPU engine.
-    tensor_parallel_size: int = Field(default=1, ge=1)
     # Name of the :class:`WeightVariant` the engine loads (vLLM may load a
     # different variant than the trainer, e.g. a tower-stripped export).
     weight_variant: str = "base"

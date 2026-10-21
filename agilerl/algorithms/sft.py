@@ -347,20 +347,13 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         """
         self.actor.train(mode=training)
 
-        model_kwargs: dict[str, Any] = {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "use_cache": False,
-        }
-        if self.calc_position_embeddings:
-            model_kwargs["position_ids"] = self._position_ids_from_mask(attention_mask)
-
-        # Run the transformer with the lm_head patched to identity so
-        # ``.logits`` is the final hidden state, then compute the loss from the
-        # hidden states + lm_head weight without ever materializing the full logits tensor.
-        with self._patch_lm_head_to_identity():
-            # FSDP2 all-gather hooks run on ``Module.__call__``.
-            hidden = self.actor(**model_kwargs).logits  # [B, L, H]
+        input_ids, attention_mask, labels = self.sequence_layout.align(
+            input_ids,
+            attention_mask,
+            labels,
+            pad_values=(0, -100),
+        )
+        hidden, _ = self._fused_chunk_hidden_and_value(input_ids, attention_mask)
         shift_hidden = hidden[:, :-1, :].contiguous()  # [B, L-1, H]
 
         if self.use_liger_loss:

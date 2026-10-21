@@ -853,32 +853,6 @@ class TestSchema:
         assert variant["properties"]["lr"]["x-ui-alias-of"] == "lr_actor"
         assert "x-ui-alias-of" not in variant["properties"]["lr_actor"]
 
-    def test_to_payload_omits_unset_llm_image_observation_keys(self) -> None:
-        payload = TrainingManifest.model_validate(GRPO).to_payload()
-        env = payload["environment"]
-        assert "screenshot_field" not in env
-        assert "goal_images_field" not in env
-
-    def test_to_payload_keeps_set_llm_image_observation_keys(self) -> None:
-        source = manifest(
-            GRPO,
-            environment={
-                "env_type": "rollout",
-                "env_url": "http://localhost",
-                "max_turns": 5,
-                "screenshot_field": "page",
-                "goal_images_field": "task_images",
-            },
-        )
-        env = source["environment"]
-        env.pop("dataset", None)
-        env.pop("reward_file_path", None)
-        env.pop("prompt_template", None)
-
-        payload = TrainingManifest.model_validate(source).to_payload()
-        assert payload["environment"]["screenshot_field"] == "page"
-        assert payload["environment"]["goal_images_field"] == "task_images"
-
     @pytest.mark.parametrize("source", [DQN, GRPO], ids=["rl", "llm"])
     def test_the_payload_we_submit_satisfies_the_schema_we_publish(
         self, source: dict
@@ -907,15 +881,6 @@ class TestSchema:
             if v["title"] == "GRPO"
         )
         assert variant["properties"]["vllm_engine_args"]["x-ui-widget"] == "json"
-
-    @pytest.mark.parametrize("title", ["GRPO", "GSPO", "CISPO", "LLMPPO"])
-    def test_trainer_offload_is_not_on_the_form(self, title: str) -> None:
-        variant = next(
-            v
-            for v in manifest_schema()["properties"]["algorithm"]["oneOf"]
-            if v["title"] == title
-        )
-        assert "offload_trainer_during_rollout" not in variant["properties"]
 
     def test_a_model_with_fields_is_never_a_json_blob(self) -> None:
         schema = manifest_schema()
@@ -1616,8 +1581,6 @@ class TestSchema:
             "rubric_name",
             "strict_chat_template_boundary",
             "action_field",
-            "screenshot_field",
-            "goal_images_field",
         ):
             field = props.get(name, {})
             assert "default" not in field, name

@@ -21,6 +21,7 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 
 from agilerl.algorithms.core import ActionResult
+from agilerl.algorithms.core.sequence_layout import PackedSequence, PaddedSequence
 from agilerl.algorithms.ppo_llm import PPO as LLMPPO
 from agilerl.distributed import FSDPConfig
 from agilerl.llm_envs import RolloutHarness
@@ -2011,6 +2012,10 @@ class TestPPOSequencePacking:
 
         # Padded baseline: one (B, T) forward per pass.
         ppo.use_sequence_packing = False
+        ppo.sequence_layout = PaddedSequence(
+            pad_token_id=ppo.pad_token_id,
+            calc_position_embeddings=ppo.calc_position_embeddings,
+        )
         lp_padded, v_padded, *shapes = run()
         assert shapes == [(b_size, t), (b_size, t)]
 
@@ -2018,6 +2023,11 @@ class TestPPOSequencePacking:
         for attn in ("flash_attention_2", "flex_attention"):
             ppo.use_sequence_packing = True
             ppo.actor.config._attn_implementation = attn
+            ppo.sequence_layout = PackedSequence(
+                pad_token_id=ppo.pad_token_id,
+                calc_position_embeddings=ppo.calc_position_embeddings,
+                mode="varlen" if attn == "flash_attention_2" else "blockmask",
+            )
             lp_packed, v_packed, *shapes = run()
             assert shapes == [(1, sum(lengths)), (1, sum(lengths))]
 

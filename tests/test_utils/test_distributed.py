@@ -33,8 +33,6 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import FSDPModule
 from torch.distributed.tensor import DTensor
 from torch.nn.utils import clip_grad_norm_
-from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
-from transformers.models.gemma4.modeling_gemma4 import Gemma4ForCausalLM
 from transformers.models.nemotron_h.configuration_nemotron_h import NemotronHConfig
 from transformers.models.nemotron_h.modeling_nemotron_h import NemotronHForCausalLM
 
@@ -42,7 +40,6 @@ from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
 from agilerl.distributed import (
     CPUOffloadOptimizer,
     FSDPConfig,
-    ParallelMesh,
     aggregate_metrics_across_gpus,
     aggregate_metrics_dict,
     all_ranks,
@@ -64,7 +61,6 @@ from agilerl.distributed import (
     is_distributed,
     is_main_process,
     materialize_dtensors,
-    materialize_fsdp2_from_cpu_state,
     packed_expert_counts,
     reference_dispatch_combine,
     resolve_device,
@@ -80,10 +76,6 @@ from agilerl.distributed import runtime as rmod
 from agilerl.distributed.fsdp import (
     reshard_fsdp_modules,
     set_full_model_state_dict,
-)
-from agilerl.distributed.fsdp_meta import (
-    init_embed_scale_buffers,
-    init_rope_buffers,
 )
 from agilerl.distributed.runtime import (
     DPRuntime,
@@ -1903,6 +1895,42 @@ class TestFSDPPrepareActorOffload:
             )
 
 
+class TestFSDPPrepareActorContextParallel:
+    @staticmethod
+    def _actor(heads: int, kv_heads: int, backend: str) -> nn.Module:
+        actor = nn.Linear(2, 2)
+        actor.config = SimpleNamespace(
+            num_attention_heads=heads,
+            num_key_value_heads=kv_heads,
+            _attn_implementation=backend,
+        )
+        return actor
+
+    def test_rejects_non_flash_attention_backend(self) -> None:
+        with pytest.raises(ValueError, match="flash_attention_2"):
+            FSDPRuntime(FSDPConfig(cp=2, optim_cpu_offload=False)).prepare_actor(
+                self._actor(8, 8, "sdpa"),
+                device="cpu",
+                colocated=False,
+                cosine_lr_schedule_config=None,
+                lr=1e-4,
+                lr_critic=None,
+                restore_adapter_trainability=MagicMock(),
+            )
+
+    def test_rejects_heads_that_do_not_divide_cp(self) -> None:
+        with pytest.raises(ValueError, match="num_attention_heads"):
+            FSDPRuntime(FSDPConfig(cp=2, optim_cpu_offload=False)).prepare_actor(
+                self._actor(7, 7, "flash_attention_2"),
+                device="cpu",
+                colocated=False,
+                cosine_lr_schedule_config=None,
+                lr=1e-4,
+                lr_critic=None,
+                restore_adapter_trainability=MagicMock(),
+            )
+
+
 class _LoraActor(nn.Module):
     """Tiny module whose trainable param matches ``init_llm_optimizer`` LoRA names."""
 
@@ -2491,30 +2519,6 @@ class TestSetPrefetch:
         assert blocks[2].backward_prefetch == [blocks[1]]
         assert model.lm_head.backward_prefetch == [blocks[2]]
 
-    def test_chains_ple_between_embed_and_language_blocks(self):
-        # Arrange
-        model = PrefetchVisionLM()
-        del model.vision
-        model.model.embed_tokens_per_layer = PrefetchUnit()
-        embed = model.model.embed_tokens
-        ple = model.model.embed_tokens_per_layer
-        first, second = model.model.layers
-        head = model.lm_head
-
-        # Act
-        with patch.object(bmod, "FSDPModule", PrefetchUnit):
-            bmod._set_prefetch(model, [first, second])
-
-        # Assert
-        assert embed.forward_prefetch == [ple]
-        assert ple.forward_prefetch == [first]
-        assert first.forward_prefetch == [second]
-        assert second.forward_prefetch == [head]
-        assert ple.backward_prefetch == [embed]
-        assert first.backward_prefetch == [ple]
-        assert second.backward_prefetch == [first]
-        assert head.backward_prefetch == [second]
-
 
 class TypedBlock(nn.Module):
     """Hybrid block stand-in: ``block_type`` names its mixer."""
@@ -2687,126 +2691,6 @@ class TestApplyFsdp2:
             tied.model.embed_tokens.weight in shard_kwargs[id(tied)]["ignored_params"]
         )
         assert tied.lm_head.weight in shard_kwargs[id(tied)]["ignored_params"]
-
-    def test_shards_per_layer_embeddings_as_their_own_unit(self, world_size_one):
-        class Block(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.lin = nn.Linear(2, 2)
-
-        class LanguageModel(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.embed_tokens = nn.Embedding(4, 2)
-                self.embed_tokens_per_layer = nn.Embedding(4, 6)
-                self.layers = nn.ModuleList([Block(), Block()])
-                self.norm = nn.LayerNorm(2)
-
-        class CausalLM(nn.Module):
-            _no_split_modules: ClassVar = ["Block"]
-
-            def __init__(self):
-                super().__init__()
-                self.config = type("Cfg", (), {"tie_word_embeddings": True})()
-                self.model = LanguageModel()
-                self.lm_head = nn.Linear(2, 4, bias=False)
-
-        # Arrange
-        model = CausalLM()
-        sharded: list[nn.Module] = []
-        shard_kwargs: dict[int, dict] = {}
-
-        def _record(module, **kwargs):
-            sharded.append(module)
-            shard_kwargs[id(module)] = kwargs
-            return module
-
-        # Act
-        with patch.object(bmod, "fully_shard", side_effect=_record):
-            apply_fsdp2(model, self.per_block)
-
-        # Assert — token embeddings stay replicated; PLE is its own unit
-        ple = model.model.embed_tokens_per_layer
-        assert model.model.embed_tokens not in sharded
-        assert ple in sharded
-        assert model.lm_head not in sharded
-        assert sharded[-1] is model
-        assert set(sharded) == {
-            model.model.layers[0],
-            model.model.layers[1],
-            ple,
-            model,
-        }
-        assert shard_kwargs[id(ple)]["reshard_after_forward"] is True
-        assert (
-            model.model.embed_tokens.weight in shard_kwargs[id(model)]["ignored_params"]
-        )
-
-    def test_layer0_lora_stays_finite_after_fsdp_train_forward(self, world_size_one):
-        torch.manual_seed(0)
-        config = Gemma4TextConfig(
-            vocab_size=64,
-            vocab_size_per_layer_input=64,
-            hidden_size=32,
-            intermediate_size=64,
-            num_hidden_layers=2,
-            num_attention_heads=4,
-            num_key_value_heads=2,
-            head_dim=8,
-            global_head_dim=8,
-            hidden_size_per_layer_input=8,
-            max_position_embeddings=32,
-            sliding_window=16,
-            pad_token_id=0,
-            tie_word_embeddings=True,
-            layer_types=["sliding_attention", "full_attention"],
-            num_kv_shared_layers=0,
-        )
-        model = get_peft_model(
-            Gemma4ForCausalLM(config),
-            LoraConfig(
-                r=4,
-                target_modules=["q_proj", "v_proj"],
-                lora_alpha=8,
-                lora_dropout=0.0,
-            ),
-            adapter_name="actor",
-        )
-        # FSDP's default mesh uses the process accelerator (MPS on macOS).
-        world = init_device_mesh("cpu", (1, 1), mesh_dim_names=("replicate", "shard"))
-
-        materialize_fsdp2_from_cpu_state(
-            model,
-            "cpu",
-            FSDPConfig(
-                param_dtype="bfloat16",
-                reduce_dtype="float32",
-                routed_expert_chunk_mib=64,
-                param_persistence_threshold=0,
-            ),
-            parallel_mesh=ParallelMesh(world=world, hsdp=world["shard"]),
-        )
-
-        language = model.get_base_model().model
-        assert isinstance(language.embed_tokens_per_layer, FSDPModule)
-        layer0 = language.layers[0].self_attn.q_proj.lora_A["actor"]
-        seen: dict[str, bool] = {}
-
-        def _hook(module, _args, _output):
-            weight = module.weight.detach()
-            if hasattr(weight, "full_tensor"):
-                weight = weight.full_tensor()
-            seen["finite"] = bool(torch.isfinite(weight).all())
-
-        handle = layer0.register_forward_hook(_hook)
-        ids = torch.randint(1, 64, (2, 8))
-        with torch.enable_grad():
-            logits = model(input_ids=ids).logits
-            logits.mean().backward()
-        handle.remove()
-
-        assert seen["finite"] is True
-        assert bool(torch.isfinite(logits).all())
 
     def test_checkpoint_wraps_blocks_then_shards_the_wrapper(self, world_size_one):
         from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
@@ -3581,102 +3465,6 @@ class TestRestoreNonpersistentBuffers:
 
         assert restored == 0
         assert torch.equal(model.running, torch.zeros(2))
-
-
-class TestInitRopeBuffers:
-    def test_fills_inv_freq_and_original_inv_freq(self):
-        class RotaryEmbedding(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.rope_type = "default"
-                self.config = SimpleNamespace()
-                self.register_buffer("inv_freq", torch.zeros(4))
-                self.register_buffer("original_inv_freq", torch.zeros(4))
-
-            @staticmethod
-            def compute_default_rope_parameters(_config, device=None):
-                return torch.arange(4, dtype=torch.float32, device=device), 1.0
-
-        module = RotaryEmbedding()
-        root = nn.Sequential(module)
-
-        init_rope_buffers(root)
-
-        expected = torch.arange(4, dtype=torch.float32)
-        assert torch.equal(module.inv_freq, expected)
-        assert torch.equal(module.original_inv_freq, expected)
-
-    def test_fills_per_layer_type_inv_freq(self):
-        class Gemma4TextRotaryEmbedding(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.config = SimpleNamespace()
-                self.rope_type = {
-                    "sliding_attention": "default",
-                    "full_attention": "proportional",
-                }
-                self.rope_init_fns = {
-                    "sliding_attention": self.compute,
-                    "full_attention": self.compute,
-                }
-                self.register_buffer("sliding_attention_inv_freq", torch.zeros(4))
-                self.register_buffer(
-                    "sliding_attention_original_inv_freq", torch.zeros(4)
-                )
-                self.register_buffer("full_attention_inv_freq", torch.zeros(4))
-                self.register_buffer("full_attention_original_inv_freq", torch.zeros(4))
-
-            @staticmethod
-            def compute(_config, device=None, layer_type=None, head_dim_key=None):
-                base = 1.0 if layer_type == "sliding_attention" else 2.0
-                if head_dim_key == "global_head_dim":
-                    base += 0.5
-                return torch.full((4,), base, device=device), 1.0
-
-        module = Gemma4TextRotaryEmbedding()
-
-        init_rope_buffers(module)
-
-        assert torch.equal(module.sliding_attention_inv_freq, torch.full((4,), 1.0))
-        assert torch.equal(
-            module.sliding_attention_original_inv_freq, torch.full((4,), 1.0)
-        )
-        assert torch.equal(module.full_attention_inv_freq, torch.full((4,), 2.5))
-        assert torch.equal(
-            module.full_attention_original_inv_freq, torch.full((4,), 2.5)
-        )
-
-
-class TestInitEmbedScaleBuffers:
-    def test_fills_embed_scale_from_scalar(self):
-        class ScaledWordEmbedding(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.scalar_embed_scale = 3.5
-                self.register_buffer("embed_scale", torch.tensor(0.0), persistent=False)
-
-        module = ScaledWordEmbedding()
-
-        init_embed_scale_buffers(module)
-
-        assert float(module.embed_scale) == 3.5
-
-    def test_skips_meta_embed_scale(self):
-        class ScaledWordEmbedding(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.scalar_embed_scale = 3.5
-                self.register_buffer(
-                    "embed_scale",
-                    torch.empty((), device="meta"),
-                    persistent=False,
-                )
-
-        module = ScaledWordEmbedding()
-
-        init_embed_scale_buffers(module)
-
-        assert module.embed_scale.is_meta
 
 
 class TestShareFsdpCommStreams:

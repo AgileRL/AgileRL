@@ -1,18 +1,11 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Expert-parallel mesh, ``Shard(0)`` placement, and torch all-to-all dispatch.
+"""Expert-parallel ``Shard(0)`` placement and torch all-to-all dispatch.
 
 ``ep > 1`` shards packed-expert weights on an ``ep`` mesh dim, moves tokens
-with torch all-to-all, and FSDP-shards expert modules on the leftover
-data-parallel axis. Non-expert parameters FSDP-shard inside a shard group
-and replicate across groups (HSDP).
-
-:func:`apply_expert_parallel` shards the experts and their LoRA adapters and
-installs the EP ``forward`` from :mod:`agilerl.distributed.ep_forward`. Mesh
-views live in :mod:`agilerl.distributed.ep_mesh`, the token all-to-alls in
-:mod:`agilerl.distributed.ep_dispatch`, and expert placement in
-:mod:`agilerl.distributed.ep_sharding`; their public names are re-exported here.
+with torch all-to-all, and FSDP-shards expert modules on leftover data-parallel
+ranks. Mesh views live in :mod:`agilerl.distributed.mesh`.
 """
 
 from __future__ import annotations
@@ -23,7 +16,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, distribute_tensor
 from torch.distributed.tensor.placement_types import Shard
 
-from agilerl.distributed.ep_dispatch import (
+from agilerl.distributed.expert_parallel.dispatch import (
     AllToAllCtx,
     AllToAllVar,
     TokenDispatchState,
@@ -33,7 +26,7 @@ from agilerl.distributed.ep_dispatch import (
     token_combine,
     token_dispatch,
 )
-from agilerl.distributed.ep_forward import (
+from agilerl.distributed.expert_parallel.forward import (
     ROUTED_COUNTS_SCOPE,
     CombinedBlock,
     DispatchedBlock,
@@ -46,14 +39,13 @@ from agilerl.distributed.ep_forward import (
     routed_counts_contexts,
     scatter_scaled_expert_rows,
 )
-from agilerl.distributed.ep_mesh import (
-    ParallelMesh,
-    build_parallel_mesh,
-    ep_data_parallel_size,
-    tp_data_parallel_size,
-    validate_ep_degree,
+from agilerl.distributed.expert_parallel.rows import (
+    GatherReplicatedRows,
+    ReplicatedRowsCtx,
+    SliceReplicatedRows,
+    replicated_row_span,
 )
-from agilerl.distributed.ep_sharding import (
+from agilerl.distributed.expert_parallel.sharding import (
     assert_packed_experts_ep_sharded,
     expert_local_tensor,
     expert_param_bytes_local,
@@ -66,12 +58,6 @@ from agilerl.distributed.ep_sharding import (
     stash_ep,
     validate_actor_ep,
 )
-from agilerl.distributed.replicated_rows import (
-    GatherReplicatedRows,
-    ReplicatedRowsCtx,
-    SliceReplicatedRows,
-    replicated_row_span,
-)
 from agilerl.lora.fused import patch_lora_for_fused_forward
 
 __all__ = [
@@ -82,7 +68,6 @@ __all__ = [
     "DispatchedBlock",
     "GatherReplicatedRows",
     "LocalExperts",
-    "ParallelMesh",
     "ReplicatedRowsCtx",
     "RoutedCounts",
     "RoutedCountsScope",
@@ -93,8 +78,6 @@ __all__ = [
     "all_to_all_single_autograd",
     "apply_expert_parallel",
     "assert_packed_experts_ep_sharded",
-    "build_parallel_mesh",
-    "ep_data_parallel_size",
     "exchange_expert_counts",
     "expert_local_tensor",
     "expert_param_bytes_local",
@@ -110,9 +93,7 @@ __all__ = [
     "shard_experts_on_ep",
     "token_combine",
     "token_dispatch",
-    "tp_data_parallel_size",
     "validate_actor_ep",
-    "validate_ep_degree",
 ]
 
 

@@ -35,6 +35,7 @@ import numpy as np
 
 from agilerl.algorithms import grpo as grpo_module
 from agilerl.algorithms.core.base import LLMAlgorithm
+from agilerl.algorithms.core.sequence_layout import PaddedSequence
 from agilerl.algorithms.grpo import GRPO
 from agilerl.distributed import FSDPConfig
 from agilerl.distributed.runtime import FSDPRuntime
@@ -214,6 +215,9 @@ class _Stub:
         self.lm_head = lm_head or torch.nn.Linear(HIDDEN, VOCAB, bias=False)
         self.hidden: torch.Tensor | None = None
         self.actor: Any = _CallableActor(self)
+        self.sequence_layout = PaddedSequence(
+            pad_token_id=0, calc_position_embeddings=False
+        )
 
     _resolve_loss_norm = GRPO._resolve_loss_norm
     _activation_offload_ctx = GRPO._activation_offload_ctx
@@ -222,7 +226,7 @@ class _Stub:
     _clipped_units = GRPO._clipped_units
     _compute_policy_loss = GRPO._compute_policy_loss
     _fused_kernel_loss = GRPO._fused_kernel_loss
-    _gradient_forward_inputs = GRPO._gradient_forward_inputs
+    _fused_chunk_hidden_and_value = GRPO._fused_chunk_hidden_and_value
     _liger_loss = GRPO._liger_loss
     _log_importance_weights = GRPO._log_importance_weights
     _masks_off_policy_tokens = GRPO._masks_off_policy_tokens
@@ -237,9 +241,6 @@ class _Stub:
 
     def _get_lm_head(self) -> torch.nn.Linear:
         return self.lm_head
-
-    def _packing_mode(self) -> None:
-        return None
 
     def _resolve_fused_chunk_rows(self, _vocab: int, _chunk_rows: int) -> int:
         return 2

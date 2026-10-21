@@ -9,7 +9,7 @@ without transformers or a GPU.
 
 import logging
 import sys
-from types import ModuleType, SimpleNamespace
+from types import MethodType, ModuleType, SimpleNamespace
 from typing import ClassVar
 
 import pytest
@@ -554,6 +554,37 @@ class TestNemotronMambaFusedPath:
         assert torch.equal(mixer(value), value + 3)
         assert mixer.seen == (0.001, 0.1)
         assert mixer.time_step_limit == (0.0, float("inf"))
+
+    def test_ada_gpu_uses_instance_torch_forward(self, monkeypatch):
+        mixer_cls = _make_fused_path_mixer_class([])
+        monkeypatch.setattr(mamba, "_resolve_mixer_class", lambda _mixer: mixer_cls)
+        monkeypatch.setattr(mamba, "_ada_ssm_gpu", lambda _module: True)
+
+        class Mixer(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                _nemotron_mamba_scan_fields(self)
+                self.use_mem_eff_path = False
+                self.time_step_limit = (0.001, 0.1)
+                self.time_step_min = 0.001
+                self.time_step_max = 0.1
+
+            def torch_forward(self, value: torch.Tensor) -> torch.Tensor:
+                return value + 3
+
+            def forward(self, value: torch.Tensor) -> torch.Tensor:
+                raise AssertionError(value)
+
+        Mixer.__name__ = "Mixer"
+        mixer = Mixer()
+
+        def wrapped(self, value: torch.Tensor) -> torch.Tensor:
+            return value + 7
+
+        mixer.torch_forward = MethodType(wrapped, mixer)
+        patch_nemotron_mamba_fused_path(mixer=MIXER, model=FakeModel([mixer]))
+
+        assert torch.equal(mixer(torch.ones(2)), torch.ones(2) + 7)
 
     def test_ada_torch_forward_zeros_padding(self, monkeypatch):
         mixer_cls = _make_fused_path_mixer_class([])

@@ -101,6 +101,13 @@ class LLMPPOSpec(RolloutLLMSpec):
             "or the value at the turn's final token."
         ),
     )
+    offload_trainer_during_rollout: bool = Field(
+        default=True,
+        description=(
+            "For colocated vLLM, offload the trainer's parameters while the "
+            "engine generates, trading a copy for headroom."
+        ),
+    )
     fuse_actor_critic_pass: bool | None = Field(
         default=None,
         description=(

@@ -215,13 +215,12 @@ class TestSolveSingleValley:
     """Generation fits() dips mid-range; the minimum failing must not end it."""
 
     def test_returns_the_run_top_when_the_minimum_does_not_fit(self, model):
-        # Arrange: the profile forward outgrows the serving forward mid-range.
+        # Arrange
         device = DeviceSpec(total_bytes=8 * GiB)
         settings = GenerationSettings(
             gpu_memory_utilization=0.9,
             max_num_seqs=8,
             concurrent_requests=2,
-            max_num_batched_tokens=32768,
         )
         config = inference_run_config(model, device, settings)
 
@@ -229,7 +228,7 @@ class TestSolveSingleValley:
         result = solve_inference(config, "max_model_len", hi=32768)
 
         # Assert
-        assert result.value == 10288
+        assert result.value == 26672
         assert result.limited_by == "memory"
 
     def test_the_minimum_fails_while_mid_range_fits(self, model):
@@ -242,7 +241,6 @@ class TestSolveSingleValley:
                 max_num_seqs=8,
                 concurrent_requests=2,
                 max_model_len=context,
-                max_num_batched_tokens=32768,
             )
             bar = estimate_run(inference_run_config(model, device, settings))
             return generation_can_serve(bar.generation)
@@ -332,8 +330,7 @@ class TestBareSolveOnAnInferenceConfig:
         assert bare.value == 9008
         assert bare.limited_by == "memory"
         assert bare.estimate.training.fits_with_buffer
-        assert dedicated.value == 32768
-        assert dedicated.limited_by == "bound"
+        assert dedicated.value == 22256
         assert dedicated.value > bare.value
         over = estimate_run(
             lockstep_max_model_len(

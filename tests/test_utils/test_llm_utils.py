@@ -44,9 +44,16 @@ from agilerl.architectures.flex_attention import (
     flex_decode_kernel_options,
     patch_flex_attention_kernel_options,
 )
+from agilerl.architectures.gemma4 import gemma4_language_tower_hf_override
+from agilerl.architectures.nemotron_h.language_tower import (
+    omni_language_tower_hf_override,
+)
 from agilerl.architectures.qwen3_5 import (
     QWEN3_5_MODEL_CLASS_OVERRIDES,
     qwen3_5_language_tower_hf_override,
+)
+from agilerl.architectures.vllm_language import (
+    nested_language_config,
 )
 from agilerl.distributed import fsdp as dmod
 from agilerl.distributed import gather_params
@@ -78,6 +85,7 @@ from agilerl.utils.llm_utils import (
     directory_opener,
     discover_clippable_inner_linear_module_keys,
     discover_clippable_projection_leaf_names,
+    expert_lora_vllm_key_map,
     fill_outside_mask,
     filter_peft_state_dict_for_vllm_lora,
     format_colocated_vllm_oom_hint,
@@ -3522,8 +3530,7 @@ class TestBuildVllmLlmInitKwargs:
             max_model_len=32768,
         )
 
-        assert kwargs["language_model_only"] is True
-        assert "hf_overrides" not in kwargs
+        assert kwargs["hf_overrides"] is nested_language_config
         assert "model_class_overrides" not in kwargs
         assert "enable_tower_connector_lora" not in kwargs
 
@@ -3562,7 +3569,7 @@ class TestBuildVllmLlmInitKwargs:
 
         assert "enable_tower_connector_lora" not in kwargs
 
-    def test_strip_multimodal_towers_serves_omni_language_model_only(self, monkeypatch):
+    def test_strip_multimodal_towers_applies_omni_language_tower(self, monkeypatch):
         stub_catalog_model_type(monkeypatch, "nemotron_h_omni")
         kwargs = build_vllm_llm_init_kwargs(
             _vllm_config(strip_multimodal_towers=True),
@@ -3570,15 +3577,15 @@ class TestBuildVllmLlmInitKwargs:
             max_model_len=32768,
         )
 
-        assert kwargs["language_model_only"] is True
-        assert kwargs["hf_overrides"] == {
-            "architectures": ["NemotronH_Super_Omni_Reasoning_V3"],
+        assert kwargs["hf_overrides"] is omni_language_tower_hf_override
+        assert kwargs["model_class_overrides"] == {
+            "NemotronHOmniLanguageForCausalLM": (
+                "agilerl.architectures.nemotron_h.omni_language:"
+                "NemotronHOmniLanguageForCausalLM"
+            ),
         }
-        assert "model_class_overrides" not in kwargs
 
-    def test_strip_multimodal_towers_serves_gemma4_language_model_only(
-        self, monkeypatch
-    ):
+    def test_strip_multimodal_towers_applies_gemma4_language_tower(self, monkeypatch):
         stub_catalog_model_type(monkeypatch, "gemma4")
         kwargs = build_vllm_llm_init_kwargs(
             _vllm_config(strip_multimodal_towers=True),
@@ -3586,8 +3593,7 @@ class TestBuildVllmLlmInitKwargs:
             max_model_len=32768,
         )
 
-        assert kwargs["language_model_only"] is True
-        assert "hf_overrides" not in kwargs
+        assert kwargs["hf_overrides"] is gemma4_language_tower_hf_override
         assert "model_class_overrides" not in kwargs
 
     def test_strip_multimodal_towers_applies_qwen3_5_language_tower(self, monkeypatch):
@@ -3661,58 +3667,142 @@ class TestPeftLoraKeyHelpers:
         key = "model.layers.0.q_proj.lora_A.weight"
         assert remap_peft_lora_key_for_vllm(key) == key
 
-    @pytest.mark.parametrize(
-        "key",
-        [
-            "language_model.backbone.layers.0.mixer.q_proj.lora_A.weight",
-            "model.language_model.layers.0.self_attn.q_proj.lora_A.weight",
-            "vision_model.encoder.layer.0.attention.attention.query.lora_A.weight",
-            "model.layers.0.self_attn.q_proj.lora_B.weight",
-            "backbone.layers.0.mixer.in_proj.lora_A.weight",
-        ],
-    )
-    def test_remap_leaves_hf_module_names_for_the_vllm_mapper(self, key):
+    def test_remap_nemotron_super_vl_vision_attention_query(self):
+        hf_key = "vision_model.encoder.layer.0.attention.attention.query.lora_A.weight"
+        assert (
+            remap_peft_lora_key_for_vllm(hf_key)
+            == "vision_model.model.encoder.layers.0.attn.query.lora_A.weight"
+        )
+
+    def test_remap_nemotron_super_vl_vision_attention_output_dense(self):
+        hf_key = "vision_model.encoder.layer.0.attention.output.dense.lora_B.weight"
+        assert (
+            remap_peft_lora_key_for_vllm(hf_key)
+            == "vision_model.model.encoder.layers.0.attn.proj.lora_B.weight"
+        )
+
+    def test_remap_nemotron_super_vl_vision_mlp_fc1(self):
+        hf_key = "vision_model.encoder.layer.3.mlp.fc1.lora_A.weight"
+        assert (
+            remap_peft_lora_key_for_vllm(hf_key)
+            == "vision_model.model.encoder.layers.3.mlp.fc1.lora_A.weight"
+        )
+
+    def test_remap_nemotron_super_vl_vision_projector_linear1(self):
+        assert (
+            remap_peft_lora_key_for_vllm("vision_projector.mlp1.linear1.lora_A.weight")
+            == "mlp1.1.lora_A.weight"
+        )
+
+    def test_remap_nemotron_super_vl_vision_projector_linear2(self):
+        assert (
+            remap_peft_lora_key_for_vllm("vision_projector.mlp1.linear2.lora_B.weight")
+            == "mlp1.3.lora_B.weight"
+        )
+
+    def test_remap_nemotron_super_vl_language_backbone(self):
+        hf_key = "language_model.backbone.layers.0.self_attn.q_proj.lora_A.weight"
+        assert (
+            remap_peft_lora_key_for_vllm(hf_key)
+            == "language_model.model.layers.0.self_attn.q_proj.lora_A.weight"
+        )
+
+    def test_remap_language_backbone_to_language_tower_when_stripping(self):
+        hf_key = "language_model.backbone.layers.0.self_attn.q_proj.lora_A.weight"
+        assert (
+            remap_peft_lora_key_for_vllm(hf_key, strip_multimodal_towers=True)
+            == "model.layers.0.self_attn.q_proj.lora_A.weight"
+        )
+
+    def test_remap_language_backbone_keeps_vl_prefix_for_named_tower_list(self):
+        hf_key = "language_model.backbone.layers.0.self_attn.q_proj.lora_A.weight"
+        assert (
+            remap_peft_lora_key_for_vllm(
+                hf_key, strip_multimodal_towers=["audio_tower"]
+            )
+            == "language_model.model.layers.0.self_attn.q_proj.lora_A.weight"
+        )
+
+    def test_remap_qwen_flat_language_layers_to_vllm_nesting(self):
+        assert (
+            remap_peft_lora_key_for_vllm(
+                "model.layers.0.self_attn.q_proj.lora_A.weight",
+                model_type="qwen3_5_text",
+            )
+            == "model.language_model.model.layers.0.self_attn.q_proj.lora_A.weight"
+        )
+
+    def test_remap_qwen_nested_language_layers_to_vllm_nesting(self):
+        assert (
+            remap_peft_lora_key_for_vllm(
+                "model.language_model.layers.0.mlp.down_proj.lora_B.weight",
+                model_type="qwen3_5",
+            )
+            == "model.language_model.model.layers.0.mlp.down_proj.lora_B.weight"
+        )
+
+    def test_remap_qwen_nesting_skipped_for_other_families(self):
+        key = "model.layers.0.self_attn.q_proj.lora_A.weight"
+        assert remap_peft_lora_key_for_vllm(key, model_type="llama") == key
+        assert remap_peft_lora_key_for_vllm(key) == key
+
+    def test_remap_qwen_nesting_skipped_when_stripping(self):
+        key = "model.layers.0.self_attn.q_proj.lora_A.weight"
+        assert (
+            remap_peft_lora_key_for_vllm(
+                key, strip_multimodal_towers=True, model_type="qwen3_5"
+            )
+            == key
+        )
+
+    def test_remap_passthrough_language_backbone_without_prefix(self):
+        key = "backbone.layers.0.mixer.in_proj.lora_A.weight"
         assert remap_peft_lora_key_for_vllm(key) == key
 
 
 class TestFilterPeftStateDictForVllmLora:
-    def test_keeps_lora_tensors_and_drops_trainer_only_segments(self):
-        lora_a = torch.zeros(1)
-        lora_b = torch.ones(1)
+    def test_keeps_matching_modules_and_remaps_keys(self):
+        t_keep = torch.zeros(1)
+        t_drop = torch.ones(1)
         state = {
-            "model.layers.0.q_proj.linear.lora_A.weight": lora_a,
-            "model.layers.0.out_proj.lora_B.weight": lora_b,
-            "v_head.summary.weight": torch.ones(1),
+            "model.layers.0.q_proj.linear.lora_A.weight": t_keep,
+            "model.layers.0.out_proj.lora_A.weight": t_drop,
         }
+        out = filter_peft_state_dict_for_vllm_lora(state, ["q_proj.linear"])
+        assert list(out) == ["model.layers.0.q_proj.lora_A.weight"]
+        assert out["model.layers.0.q_proj.lora_A.weight"] is t_keep
 
-        out = filter_peft_state_dict_for_vllm_lora(state)
+    def test_regex_target_modules_supported(self):
+        state = {"model.layers.0.q_proj.linear.lora_A.weight": torch.zeros(1)}
+        out = filter_peft_state_dict_for_vllm_lora(state, r"(?:.*\.)?(q_proj)\.linear")
+        assert list(out) == ["model.layers.0.q_proj.lora_A.weight"]
 
-        assert out == {
-            "model.layers.0.q_proj.lora_A.weight": lora_a,
-            "model.layers.0.out_proj.lora_B.weight": lora_b,
-        }
-        assert out["model.layers.0.q_proj.lora_A.weight"] is lora_a
+    def test_no_matches_yields_empty_dict(self):
+        state = {"model.layers.0.out_proj.lora_A.weight": torch.zeros(1)}
+        assert filter_peft_state_dict_for_vllm_lora(state, ["q_proj"]) == {}
 
-    def test_expert_key_map_routes_packed_expert_tensors(self):
+    def test_nemotron_super_vl_vision_query_remaps_filtered_key(self):
         tensor = torch.zeros(1)
-        state = {"model.layers.1.mixer.experts.base_layer.lora_A.weight": tensor}
-
-        out = filter_peft_state_dict_for_vllm_lora(
-            state,
-            expert_key_map={
-                "model.layers.1.mixer.experts.base_layer": (
-                    "model.layers.1.mixer.experts"
-                ),
-            },
-        )
-
-        assert out == {"model.layers.1.mixer.experts.lora_A.weight": tensor}
-
-    def test_non_lora_state_yields_empty_dict(self):
+        hf_key = "vision_model.encoder.layer.0.attention.attention.query.lora_A.weight"
+        out = filter_peft_state_dict_for_vllm_lora({hf_key: tensor}, ["query"])
+        assert list(out) == [
+            "vision_model.model.encoder.layers.0.attn.query.lora_A.weight"
+        ]
         assert (
-            filter_peft_state_dict_for_vllm_lora({"v_head.weight": torch.zeros(1)})
-            == {}
+            out["vision_model.model.encoder.layers.0.attn.query.lora_A.weight"]
+            is tensor
         )
+
+    def test_language_backbone_remaps_to_language_tower_when_stripping(self):
+        tensor = torch.zeros(1)
+        hf_key = "language_model.backbone.layers.0.self_attn.q_proj.lora_A.weight"
+        out = filter_peft_state_dict_for_vllm_lora(
+            {hf_key: tensor},
+            ["q_proj"],
+            strip_multimodal_towers=True,
+        )
+        assert list(out) == ["model.layers.0.self_attn.q_proj.lora_A.weight"]
+        assert out["model.layers.0.self_attn.q_proj.lora_A.weight"] is tensor
 
 
 class TestJsonSafeValue:
@@ -3775,16 +3865,23 @@ class TestSavePeftAdapterForVllmRollout:
     def test_requires_llm_dependencies(self, monkeypatch, tmp_path):
         monkeypatch.setattr(llm_utils_module, "HAS_LLM_DEPENDENCIES", False)
         with pytest.raises(ImportError, match="requires peft and transformers"):
-            save_peft_adapter_for_vllm_rollout(MagicMock(), tmp_path, "actor")
+            save_peft_adapter_for_vllm_rollout(
+                MagicMock(), tmp_path, "actor", target_modules=["q_proj"]
+            )
 
     def test_exports_filtered_remapped_adapter_with_config(self, monkeypatch, tmp_path):
         t_keep = torch.zeros(2)
         state = {
             "model.layers.0.q_proj.linear.lora_A.weight": t_keep,
-            "v_head.summary.weight": torch.ones(2),
+            "model.layers.0.out_proj.lora_A.weight": torch.ones(2),
         }
         calls = self._install_fakes(monkeypatch, state)
-        out = save_peft_adapter_for_vllm_rollout(self._peft_model(), tmp_path, "actor")
+        out = save_peft_adapter_for_vllm_rollout(
+            self._peft_model(),
+            tmp_path,
+            "actor",
+            target_modules=["q_proj.linear"],
+        )
         assert out == tmp_path / "actor"
         assert calls["adapter_name"] == "actor"
         assert list(calls["saved_tensors"]) == ["model.layers.0.q_proj.lora_A.weight"]
@@ -3793,47 +3890,20 @@ class TestSavePeftAdapterForVllmRollout:
         cfg = json.loads(
             (tmp_path / "actor" / "adapter_config.json").read_text(encoding="utf-8")
         )
-        assert cfg["target_modules"] == ["q_proj"]
+        assert cfg["target_modules"] == ["q_proj.linear"]
         assert cfg["r"] == 8
         assert cfg["lora_dtype"] == "torch.bfloat16"
 
-    def test_gathered_state_replaces_sharded_parameters(self, monkeypatch, tmp_path):
-        shard = torch.zeros(2)
-        dense = torch.ones(2)
-        key = "model.layers.0.q_proj.lora_A.weight"
-        calls = {}
-
-        def fake_get_state(_model, state_dict, adapter_name):
-            calls["adapter_name"] = adapter_name
-            calls["state_dict"] = dict(state_dict)
-            return dict(state_dict)
-
-        def fake_save_file(tensors, path):
-            calls["saved_tensors"] = tensors
-            Path(path).write_bytes(b"")
-
-        monkeypatch.setattr(
-            llm_utils_module, "get_peft_model_state_dict", fake_get_state
-        )
-        monkeypatch.setattr(llm_utils_module, "save_file", fake_save_file)
-        monkeypatch.setattr(llm_utils_module, "HAS_LLM_DEPENDENCIES", True)
-        model = SimpleNamespace(
-            peft_config={"actor": self._FakePeftConfig()},
-            named_parameters=lambda: [(key, shard)],
-        )
-
-        save_peft_adapter_for_vllm_rollout(
-            model, tmp_path, "actor", gathered_state={key: dense}
-        )
-
-        assert calls["adapter_name"] == "actor"
-        assert calls["state_dict"][key] is dense
-        assert calls["saved_tensors"]["model.layers.0.q_proj.lora_A.weight"] is dense
-
-    def test_raises_when_adapter_has_no_lora_tensors(self, monkeypatch, tmp_path):
-        self._install_fakes(monkeypatch, {"v_head.summary.weight": torch.zeros(2)})
-        with pytest.raises(ValueError, match="has no LoRA tensors to export"):
-            save_peft_adapter_for_vllm_rollout(self._peft_model(), tmp_path, "actor")
+    def test_raises_when_filter_drops_every_tensor(self, monkeypatch, tmp_path):
+        state = {"model.layers.0.out_proj.lora_A.weight": torch.zeros(2)}
+        self._install_fakes(monkeypatch, state)
+        with pytest.raises(ValueError, match="No LoRA tensors left for vLLM export"):
+            save_peft_adapter_for_vllm_rollout(
+                self._peft_model(),
+                tmp_path,
+                "actor",
+                target_modules=["q_proj"],
+            )
 
     class _FakeDTensor:
         """Stand-in for ``torch.distributed.tensor.DTensor``: records
@@ -3863,7 +3933,12 @@ class TestSavePeftAdapterForVllmRollout:
         monkeypatch.setattr(llm_utils_module, "DTensor", self._FakeDTensor)
 
         # Act
-        save_peft_adapter_for_vllm_rollout(self._peft_model(), tmp_path, "actor")
+        save_peft_adapter_for_vllm_rollout(
+            self._peft_model(),
+            tmp_path,
+            "actor",
+            target_modules=["q_proj.linear"],
+        )
 
         # Assert — DTensor was materialised via full_tensor()
         assert dt.full_tensor_calls == 1
@@ -3886,7 +3961,12 @@ class TestSavePeftAdapterForVllmRollout:
         monkeypatch.setattr(llm_utils_module, "DTensor", self._FakeDTensor)
 
         # Act
-        save_peft_adapter_for_vllm_rollout(self._peft_model(), tmp_path, "actor")
+        save_peft_adapter_for_vllm_rollout(
+            self._peft_model(),
+            tmp_path,
+            "actor",
+            target_modules=["q_proj.linear"],
+        )
 
         # Assert — both plain tensors saved as-is
         assert calls["saved_tensors"]["model.layers.0.q_proj.lora_A.weight"] is plain_a
@@ -3902,7 +3982,13 @@ class TestSavePeftAdapterForVllmRollout:
         experts = "base_model.model.model.layers.1.mixer.experts"
 
         # Act
-        out = save_peft_adapter_for_vllm_rollout(peft_model, tmp_path, "actor")
+        out = save_peft_adapter_for_vllm_rollout(
+            peft_model,
+            tmp_path,
+            "actor",
+            target_modules=peft_model.peft_config["actor"].target_modules,
+            expert_key_map=expert_lora_vllm_key_map(peft_model),
+        )
 
         # Assert
         saved = load_file(out / "adapter_model.safetensors")
@@ -3918,6 +4004,24 @@ class TestSavePeftAdapterForVllmRollout:
             saved[f"{experts}.base_layer.lora_B.weight"],
             experts_module.base_layer.lora_B["actor"].weight,
         )
+
+    def test_raises_when_trainable_lora_has_no_exported_tensor(self, tmp_path):
+        # Arrange
+        peft_model = _tiny_nemotron_h_expert_lora(wrap_blocks=True)
+
+        # Act / Assert
+        with pytest.raises(
+            ValueError,
+            match=r"6 trainable LoRA parameters of adapter 'actor' have no tensor "
+            r"in the vLLM export, e\.g\. \[.*k_proj",
+        ):
+            save_peft_adapter_for_vllm_rollout(
+                peft_model,
+                tmp_path,
+                "actor",
+                target_modules=["q_proj"],
+                expert_key_map=expert_lora_vllm_key_map(peft_model),
+            )
 
 
 def _tiny_nemotron_h_expert_lora(*, wrap_blocks: bool):

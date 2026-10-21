@@ -36,6 +36,7 @@ from agilerl.algorithms.core.base import (
     LLMAlgorithm,
     OptimizerWrapper,
 )
+from agilerl.algorithms.core.sequence_layout import PackedSequence, PaddedSequence
 from agilerl.algorithms.grpo import HAS_LIGER_KERNEL
 from agilerl.distributed import CPUOffloadOptimizer, FSDPConfig, resolve_device
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig, clone_llm
@@ -2053,6 +2054,11 @@ class TestGRPOLigerSequencePacking:
         # Packed: same numbers, but the forward sees one (1, N) row.
         grpo.use_sequence_packing = True
         grpo.actor.config._attn_implementation = "flash_attention_2"
+        grpo.sequence_layout = PackedSequence(
+            pad_token_id=grpo.pad_token_id,
+            calc_position_embeddings=grpo.calc_position_embeddings,
+            mode="varlen",
+        )
         assert grpo._packing_mode() == "varlen"
         loss_packed, packed_shape = run()
         assert packed_shape == (1, sum(lengths))
@@ -2076,6 +2082,12 @@ class TestGRPOLigerSequencePacking:
         lm_head = nn.Linear(hidden, vocab).to(grpo.device)
         grpo.use_sequence_packing = True
         grpo.actor.config._attn_implementation = "sdpa"
+        with pytest.warns(UserWarning, match="varlen/block-sparse"):
+            assert grpo._packing_mode() is None
+        grpo.sequence_layout = PaddedSequence(
+            pad_token_id=grpo.pad_token_id,
+            calc_position_embeddings=grpo.calc_position_embeddings,
+        )
 
         batch_ids = torch.tensor([[1, 2, 3, 0], [4, 5, 0, 0]], dtype=torch.long)
         action_mask = torch.tensor(
@@ -2091,7 +2103,6 @@ class TestGRPOLigerSequencePacking:
             patch.object(
                 LLMAlgorithm, "select_adapter", lambda self, name: nullcontext()
             ),
-            pytest.warns(UserWarning, match="varlen/block-sparse"),
         ):
             grpo._liger_loss(
                 batch_ids=batch_ids,

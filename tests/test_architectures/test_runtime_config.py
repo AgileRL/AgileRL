@@ -8,11 +8,21 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from agilerl.architectures import family_tensor_parallel_plans
+from agilerl.architectures import (
+    family_context_parallel_plans,
+    family_tensor_parallel_plans,
+)
 from agilerl.architectures.catalog import (
     FAMILY_RUNTIME_CONFIGS,
     family_runtime,
     pretrained_model_type,
+)
+from agilerl.architectures.gemma4 import gemma4_language_tower_hf_override
+from agilerl.architectures.nemotron_h.context_parallel import (
+    NEMOTRON_H_CONTEXT_PARALLEL_PLAN,
+)
+from agilerl.architectures.nemotron_h.language_tower import (
+    omni_language_tower_hf_override,
 )
 from agilerl.architectures.nemotron_h.mamba import install_mamba_patches
 from agilerl.architectures.nemotron_h.tensor_parallel import (
@@ -22,8 +32,8 @@ from agilerl.architectures.qwen3_5 import (
     QWEN3_5_MODEL_CLASS_OVERRIDES,
     qwen3_5_language_tower_hf_override,
 )
+from agilerl.architectures.qwen3_5.context_parallel import QWEN3_5_CONTEXT_PARALLEL_PLAN
 from agilerl.architectures.runtime import ModelRuntimeConfig
-from agilerl.arena.memory.manifest import FAMILY_MAX_NUM_BATCHED_TOKENS
 
 NEMOTRON_VLLM_KWARGS = {
     "mamba_cache_mode": "align",
@@ -74,36 +84,42 @@ class TestFamilyRuntimeConfigs:
             "qwen3_5_moe_text",
         }
 
-    def test_nemotron_h_omni_keeps_nemotron_h_runtime_and_sets_the_vllm_architecture(
+    def test_nemotron_h_omni_keeps_nemotron_h_runtime_and_adds_language_tower(
         self,
     ) -> None:
         base = FAMILY_RUNTIME_CONFIGS["nemotron_h"]
         omni = FAMILY_RUNTIME_CONFIGS["nemotron_h_omni"]
-        assert omni.vllm.mamba_cache_mode == base.vllm.mamba_cache_mode
-        assert omni.vllm.hf_overrides == {
-            "architectures": ["NemotronH_Super_Omni_Reasoning_V3"],
-        }
-        assert base.vllm.hf_overrides is None
+        assert omni.vllm == base.vllm
         assert omni.patch.install is install_mamba_patches
-        assert omni.language_tower.hf_overrides is None
-        assert omni.language_tower.model_class_overrides is None
+        assert omni.language_tower.hf_overrides is omni_language_tower_hf_override
+        assert omni.language_tower.model_class_overrides == {
+            "NemotronHOmniLanguageForCausalLM": (
+                "agilerl.architectures.nemotron_h.omni_language:"
+                "NemotronHOmniLanguageForCausalLM"
+            ),
+        }
         assert base.language_tower.hf_overrides is None
         assert base.language_tower.model_class_overrides is None
+        assert omni.multimodal_towers_kept_hf_override == {
+            "architectures": ["NemotronH_Super_Omni_Reasoning_V3"],
+        }
         assert {"query", "fc1", "linear1"} <= omni.tower_connector_lora_targets
         assert omni.tower_connector_lora_targets.isdisjoint(
             {"q_proj", "in_proj", "up_proj", "down_proj"}
         )
         assert base.tower_connector_lora_targets == frozenset()
 
-    def test_gemma4_uses_the_swa_trainer_without_tower_lora(self) -> None:
+    def test_gemma4_adds_language_tower_without_tower_lora(self) -> None:
         gemma4 = FAMILY_RUNTIME_CONFIGS["gemma4"]
         gemma3 = FAMILY_RUNTIME_CONFIGS["gemma3"]
         assert gemma4.trainer == gemma3.trainer
-        assert gemma4.language_tower.hf_overrides is None
+        assert gemma4.language_tower.hf_overrides is gemma4_language_tower_hf_override
         assert gemma4.language_tower.model_class_overrides is None
         assert gemma4.tower_connector_lora_targets == frozenset()
         assert gemma3.language_tower.hf_overrides is None
-        assert FAMILY_RUNTIME_CONFIGS["gemma4_text"].language_tower.hf_overrides is None
+        assert FAMILY_RUNTIME_CONFIGS["gemma4_text"].language_tower.hf_overrides is (
+            gemma4_language_tower_hf_override
+        )
 
     def test_nemotron_h_lookup(self) -> None:
         config = FAMILY_RUNTIME_CONFIGS["nemotron_h"]
@@ -138,10 +154,12 @@ class TestFamilyRuntimeConfigs:
     def test_qwen3_5_lookup(self) -> None:
         runtime = FAMILY_RUNTIME_CONFIGS["qwen3_5"]
         tower = runtime.language_tower
+        assert tower.lora_key_prefix == "model.language_model.model."
         assert tower.hf_overrides is qwen3_5_language_tower_hf_override
         assert tower.model_class_overrides == QWEN3_5_MODEL_CLASS_OVERRIDES
         assert runtime.vllm.mamba_cache_mode == "align"
         assert runtime.vllm.enable_prefix_caching is True
+        assert runtime.multimodal_towers_kept_hf_override is None
         assert runtime.tower_connector_lora_targets == frozenset()
 
     def test_catalog_excludes_gemma_and_gemma2(self) -> None:
@@ -161,17 +179,6 @@ class TestFamilyRuntimeConfigs:
         assert mamba.stream_ordering is True
 
 
-class TestFamilyMaxNumBatchedTokens:
-    def test_arena_estimator_matches_the_catalog(self) -> None:
-        catalog = {
-            family: runtime.vllm.max_num_batched_tokens
-            for family, runtime in FAMILY_RUNTIME_CONFIGS.items()
-            if runtime.vllm.max_num_batched_tokens is not None
-        }
-
-        assert catalog == FAMILY_MAX_NUM_BATCHED_TOKENS
-
-
 class TestFamilyTensorParallelPlans:
     def test_resolves_shared_nemotron_h_plan_once(self) -> None:
         plans = family_tensor_parallel_plans()
@@ -187,6 +194,26 @@ class TestFamilyTensorParallelPlans:
 
         with pytest.raises(ModuleNotFoundError, match=r"agilerl\.no_such_module"):
             family_tensor_parallel_plans()
+
+
+class TestFamilyContextParallelPlans:
+    def test_resolves_nemotron_h_and_qwen3_5_plans(self) -> None:
+        plans = family_context_parallel_plans()
+
+        assert plans == [
+            NEMOTRON_H_CONTEXT_PARALLEL_PLAN,
+            QWEN3_5_CONTEXT_PARALLEL_PLAN,
+        ]
+
+    def test_missing_plan_module_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setitem(
+            FAMILY_RUNTIME_CONFIGS,
+            "missing_family",
+            ModelRuntimeConfig(context_parallel_plan="agilerl.no_such_module:PLAN"),
+        )
+
+        with pytest.raises(ModuleNotFoundError, match=r"agilerl\.no_such_module"):
+            family_context_parallel_plans()
 
 
 class TestFamilyRuntime:

@@ -24,6 +24,7 @@ pytest.importorskip("peft", reason="LLM tests require peft.")
 
 from agilerl import HAS_LIGER_KERNEL
 from agilerl.algorithms import grpo as grpo_module
+from agilerl.algorithms.core.sequence_layout import PackedSequence
 from agilerl.algorithms.grpo import GRPO
 from tests.test_algorithms.test_llms.segment_helpers import (
     EPISODE_SEGMENTS,
@@ -380,6 +381,11 @@ class TestGRPOLearnLigerParity:
                 **OBJECTIVES[objective],
             )
             agent.actor.config._attn_implementation = "flash_attention_2"
+            agent.sequence_layout = PackedSequence(
+                pad_token_id=agent.pad_token_id,
+                calc_position_embeddings=agent.calc_position_embeddings,
+                mode="varlen",
+            )
             return agent
 
         # Act

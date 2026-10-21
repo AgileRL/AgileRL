@@ -28,7 +28,7 @@ from agilerl.distributed import (
     FSDPConfig,
     materialize_fsdp2_from_cpu_state,
 )
-from agilerl.distributed.expert_parallel import ParallelMesh
+from agilerl.distributed.mesh import ParallelMesh
 from agilerl.distributed.runtime import DPRuntime, FSDPRuntime
 
 cuda_required = pytest.mark.skipif(
@@ -1160,42 +1160,6 @@ class TestMaterializeFsdp2FromCpuState:
         assert out is model
         assert torch.equal(model.weight, expected)
 
-    def test_meta_load_fills_embed_scale_from_scalar(self, tmp_path):
-        from safetensors.torch import save_file
-
-        from agilerl.distributed import materialize_fsdp2_from_cpu_state
-
-        expected = torch.ones(2, 2)
-        save_file({"weight": expected}, str(tmp_path / "model.safetensors"))
-
-        class Tiny(nn.Module):
-            def __init__(self) -> None:
-                super().__init__()
-                self.weight = nn.Parameter(torch.empty(2, 2))
-                self.scalar_embed_scale = 5.0
-                self.register_buffer("embed_scale", torch.tensor(0.0), persistent=False)
-                self.config = PretrainedConfig(
-                    tie_word_embeddings=False, name_or_path=str(tmp_path)
-                )
-
-        with torch.device("meta"):
-            model = Tiny()
-
-        with (
-            patch(
-                "agilerl.distributed.fsdp.apply_fsdp2",
-                side_effect=lambda module, *_a, **_k: module,
-            ),
-            patch("agilerl.distributed.fsdp.restore_after_to_empty"),
-            patch("agilerl.distributed.fsdp._share_fsdp_comm_streams"),
-        ):
-            materialize_fsdp2_from_cpu_state(
-                model, "cpu", FSDPConfig(cpu_offload=True, routed_expert_chunk_mib=64)
-            )
-
-        assert torch.equal(model.weight, expected)
-        assert float(model.embed_scale) == 5.0
-
     def test_hub_id_resolves_through_cached_file(self, tmp_path):
 
         from safetensors.torch import save_file
@@ -1302,7 +1266,7 @@ class TestMaterializeFsdp2FromCpuState:
         lora = LoraConfig(r=4, target_modules=["q_proj", "v_proj"])
         model = get_peft_model(meta, lora, adapter_name="actor")
         ids = torch.randint(0, 64, (2, 6))
-        world = init_device_mesh("cpu", (1, 1), mesh_dim_names=("replicate", "shard"))
+        dp_shard = init_device_mesh("cpu", (1,), mesh_dim_names=("dp_shard",))
 
         # Act
         materialize_fsdp2_from_cpu_state(
@@ -1313,7 +1277,7 @@ class TestMaterializeFsdp2FromCpuState:
                 reduce_dtype="float32",
                 routed_expert_chunk_mib=64,
             ),
-            parallel_mesh=ParallelMesh(world=world, hsdp=world["shard"]),
+            parallel_mesh=ParallelMesh(dp_shard=dp_shard),
             gradient_checkpointing=True,
         )
         logits = model(input_ids=ids).logits

@@ -584,8 +584,6 @@ LLM_ENV_SCHEMA_DEFAULT_FIELDS = (
     "strict_chat_template_boundary",
     "num_envs",
     "action_field",
-    "screenshot_field",
-    "goal_images_field",
 )
 
 LLM_ONLY_TRAINING_SCHEMA_FIELDS = ("training_gpus_per_agent",)

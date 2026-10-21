@@ -13,7 +13,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, distribute_module, distribute_tensor
 from torch.distributed.tensor.placement_types import Shard
 
-from agilerl.distributed.ep_mesh import validate_ep_degree
+from agilerl.distributed.mesh import validate_ep_degree
 from agilerl.lora.moe.layouts import (
     is_routed_experts_module,
     is_sorted_experts_module,

@@ -1,7 +1,7 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Serve a multimodal checkpoint in vLLM with some or all of its towers skipped."""
+"""Map a multimodal checkpoint onto the language tower vLLM serves."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ from collections.abc import Collection
 from typing import Any, Protocol, runtime_checkable
 
 from agilerl.architectures.runtime import ModelRuntimeConfig
-from agilerl.arena.models.networks import VllmModality
 
 
 @runtime_checkable
@@ -39,49 +38,42 @@ def nested_language_config(config: object) -> object:
     return config
 
 
-def apply_multimodal_engine_kwargs(
+def apply_language_tower_engine_kwargs(
     kwargs: dict[str, Any],
-    strip_multimodal_towers: bool | list[VllmModality],
+    strip_multimodal_towers: bool | list[str],
     runtime: ModelRuntimeConfig,
 ) -> None:
-    """Skip stripped towers without changing the served module names.
-
-    ``True`` serves the language model only. A family with a language-tower
-    mapping uses that class; every other family sets ``language_model_only``.
-    A list names modalities (``image``, ``video``, ``audio``) and sets
-    ``limit_mm_per_prompt`` to 0 for each, so vLLM leaves those towers unbuilt.
+    """Set ``hf_overrides`` and family class mapping when serving a language tower.
 
     :param kwargs: vLLM engine kwargs mutated in place.
     :type kwargs: dict[str, Any]
-    :param strip_multimodal_towers: ``True`` serves the language model only; a
-        list names the modalities to drop.
-    :type strip_multimodal_towers: bool | list[VllmModality]
-    :param runtime: Family runtime. Language-tower mapping applies when set.
+    :param strip_multimodal_towers: ``True`` serves the language tower only. A
+        list still loads the multimodal engine; named towers are freed later.
+    :type strip_multimodal_towers: bool | list[str]
+    :param runtime: Family runtime whose language-tower mapping, if any, is applied.
     :type runtime: ModelRuntimeConfig
     """
     if strip_multimodal_towers is True:
         tower = runtime.language_tower
-        if tower.hf_overrides is not None or tower.model_class_overrides:
-            if tower.hf_overrides is not None:
-                kwargs["hf_overrides"] = tower.hf_overrides
-            if tower.model_class_overrides:
-                kwargs["model_class_overrides"] = {
-                    **kwargs.get("model_class_overrides", {}),
-                    **tower.model_class_overrides,
-                }
-            return
-        kwargs["language_model_only"] = True
+        if tower.hf_overrides is not None:
+            kwargs["hf_overrides"] = tower.hf_overrides
+        else:
+            kwargs["hf_overrides"] = nested_language_config
+        if tower.model_class_overrides:
+            kwargs["model_class_overrides"] = {
+                **kwargs.get("model_class_overrides", {}),
+                **tower.model_class_overrides,
+            }
         return
-    if strip_multimodal_towers:
-        kwargs["limit_mm_per_prompt"] = {
-            **kwargs.get("limit_mm_per_prompt", {}),
-            **dict.fromkeys(strip_multimodal_towers, 0),
-        }
+
+    kept_override = runtime.multimodal_towers_kept_hf_override
+    if kept_override is not None:
+        kwargs["hf_overrides"] = kept_override
 
 
 def apply_tower_connector_lora_engine_kwargs(
     kwargs: dict[str, Any],
-    strip_multimodal_towers: bool | list[VllmModality],
+    strip_multimodal_towers: bool | list[str],
     runtime: ModelRuntimeConfig,
     lora_target_modules: str | Collection[str] | None,
 ) -> None:
@@ -92,8 +84,8 @@ def apply_tower_connector_lora_engine_kwargs(
 
     :param kwargs: vLLM engine kwargs mutated in place.
     :type kwargs: dict[str, Any]
-    :param strip_multimodal_towers: ``True`` serves the language model only.
-    :type strip_multimodal_towers: bool | list[VllmModality]
+    :param strip_multimodal_towers: ``True`` serves the language tower only.
+    :type strip_multimodal_towers: bool | list[str]
     :param runtime: Family runtime; only families whose vLLM towers support LoRA enable it.
     :type runtime: ModelRuntimeConfig
     :param lora_target_modules: PEFT ``target_modules``. A string spec
