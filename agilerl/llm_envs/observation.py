@@ -26,6 +26,7 @@ __all__ = [
     "OBSERVATION_ROLES",
     "QUESTION_AFTER_CONTEXT",
     "ImageProcessorCall",
+    "apply_info_prefix_suffix",
     "encode_image_training_inputs",
     "goal_images_text",
     "observation_goal_images",
@@ -142,6 +143,26 @@ def goal_images_text(count: int) -> str:
     :rtype: str
     """
     return f"\n{IMAGE_PLACEHOLDER}" * count
+
+
+def apply_info_prefix_suffix(text: str, info: Mapping[str, Any]) -> str:
+    """Wrap prompt text in the env's ``info`` prefix/suffix when present.
+
+    Game envs in the gem convention return instructions as the observation and
+    the task body as ``info["suffix"]``; gem's own observation wrapper
+    concatenates them the same way.
+
+    :param text: The rendered observation text.
+    :param info: The env turn's info mapping.
+    :return: ``text`` with the prefix prepended and the suffix appended.
+    """
+    prefix = info.get("prefix")
+    suffix = info.get("suffix")
+    if isinstance(prefix, str) and prefix:
+        text = prefix + text
+    if isinstance(suffix, str) and suffix:
+        text = text + suffix
+    return text
 
 
 def _image_turn_text(text: str) -> str:
