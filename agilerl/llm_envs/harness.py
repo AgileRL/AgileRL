@@ -27,6 +27,7 @@ from agilerl.llm_envs.observation import (
     IMAGE_PLACEHOLDER,
     QUESTION_AFTER_CONTEXT,
     ImageProcessorCall,
+    apply_info_prefix_suffix,
     encode_image_training_inputs,
     goal_images_text,
     observation_goal_images,
@@ -928,7 +929,7 @@ class RolloutHarness(RestartPromptMixin):
             )
             self._goal_images = [ImageOps.pad(goal, size) for goal in self._goal_images]
             obs_text, image = self._with_goal_images(obs_text, image)
-        return obs_text, image, info
+        return apply_info_prefix_suffix(obs_text, info), image, info
 
     def _with_goal_images(
         self, obs_text: str, image: object | None
@@ -1189,7 +1190,7 @@ class RolloutHarness(RestartPromptMixin):
             image = None
             obs_text = self._render_observation(payload)
         return (
-            obs_text,
+            apply_info_prefix_suffix(obs_text, info),
             observation_role(payload, info),
             image,
             reward,
