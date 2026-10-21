@@ -29,6 +29,7 @@ from rich.text import Text
 
 from agilerl.arena.config import CommandConfig, arena_client
 from agilerl.arena.memory.advice import advise
+from agilerl.arena.memory.engine_parallel import resolve_engine_tensor_parallel
 from agilerl.arena.memory.estimator import PhaseBreakdown, estimate_run
 from agilerl.arena.memory.formulas import MAX_UNDERPREDICTION
 from agilerl.arena.memory.manifest import (
@@ -478,6 +479,13 @@ def main(
             file=sys.stderr,
         )
 
+    scored_width: int | None = None
+    unresolved = (
+        isinstance(spec, RolloutLLMSpec)
+        and spec.vllm_config is not None
+        and spec.vllm_config.tensor_parallel_size is None
+    )
+
     def build_config(train_device: DeviceSpec) -> RunConfig:
         return run_config_from_manifest(
             manifest,
@@ -485,26 +493,49 @@ def main(
             model_config,
             n_params=model_spec.n_params,
             gen_device=gen_device,
+            tensor_parallel_size=scored_width,
         )
+
+    def resolve_width(tier: dict[str, Any], device_spec: DeviceSpec) -> int | None:
+        nonlocal scored_width
+        trial = manifest.model_copy(deep=True)
+        width = resolve_engine_tensor_parallel(
+            trial,
+            int(tier["num_gpus"]),
+            device_spec,
+            int(tier["num_gpus"]),
+        )
+        scored_width = width
+        return width
 
     chosen: TierCheck | None = None
     checks: list[TierCheck] = []
     try:
         if device is None:
-            tensor_parallel_size = 1
-            if isinstance(spec, RolloutLLMSpec) and spec.vllm_config is not None:
-                tensor_parallel_size = spec.vllm_config.tensor_parallel_size
-            checks = check_tiers(
-                tiers or [],
-                manifest.training,
-                build_config,
-                tensor_parallel_size,
-            )
+            if unresolved:
+                checks = check_tiers(
+                    tiers or [],
+                    manifest.training,
+                    build_config,
+                    resolve_width=resolve_width,
+                )
+            else:
+                tensor_parallel_size = 1
+                if isinstance(spec, RolloutLLMSpec) and spec.vllm_config is not None:
+                    tensor_parallel_size = spec.vllm_config.tensor_parallel_size
+                checks = check_tiers(
+                    tiers or [],
+                    manifest.training,
+                    build_config,
+                    tensor_parallel_size,
+                )
             chosen = next((check for check in checks if check.fits), None)
             if chosen is None or chosen.config is None:
                 return _report_no_tier(checks, as_json)
             config = chosen.config
         else:
+            if unresolved:
+                scored_width = 1
             config = build_config(device)
     except KeyError as err:
         return _report_missing_key(err)
@@ -888,17 +919,26 @@ def _manifest_config(
     overrides: dict[str, object],
 ) -> tuple[RunConfig, int]:
     manifest = TrainingManifest.get_validated(manifest_path, mode="python")
-    resolved_id = llm_spec(manifest).pretrained_model_name_or_path
+    spec = llm_spec(manifest)
+    resolved_id = spec.pretrained_model_name_or_path
     if resolved_id is None:
         msg = "manifest names no pretrained model."
         raise ValueError(msg)
     model_config, model_spec = _model_spec_from_checkpoint(resolved_id, config_path)
+    width = None
+    if (
+        isinstance(spec, RolloutLLMSpec)
+        and spec.vllm_config is not None
+        and spec.vllm_config.tensor_parallel_size is None
+    ):
+        width = 1
     config = run_config_from_manifest(
         manifest,
         device,
         model_config,
         n_params=model_spec.n_params,
         gen_device=gen_device,
+        tensor_parallel_size=width,
     )
     config_updates: dict[str, object] = {}
     if overrides:

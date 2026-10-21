@@ -3162,9 +3162,11 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self._vllm_lora_staging_dir: Path | None = None
         self._vllm_lora_staging_dir_is_temp = True
         self._vllm_rollout_lora_request: Any | None = None
-        # Tensor parallelism is not yet available when colocated.
-        # colocated is vllm_config being set.
-        if vllm_config is not None and vllm_config.tensor_parallel_size != 1:
+        # Colocated generation is one in-process GPU. An omitted width is that GPU.
+        if vllm_config is not None and vllm_config.tensor_parallel_size not in (
+            None,
+            1,
+        ):
             msg = (
                 "Colocated vLLM requires tensor_parallel_size==1 (the "
                 f"in-process external_launcher engine is single-GPU), got "
@@ -6768,6 +6770,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         assert vllm_config is not None, (
             "vllm_config must be configured for colocated vLLM generation."
         )
+        tensor_parallel_size = vllm_config.tensor_parallel_size
+        if tensor_parallel_size is None:
+            # Unset width: this in-process engine uses one GPU.
+            tensor_parallel_size = 1
 
         def _vllm_request(prompt: RolloutPrompt) -> dict[str, Any]:
             image = prompt.get("image")
@@ -6814,18 +6820,14 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         token_prompts = [tp for tp in unique_tokens for _ in range(group_size)]
         max_output_tokens = [m for m in unique_max for _ in range(group_size)]
 
-        if vllm_config.tensor_parallel_size > 1:
+        if tensor_parallel_size > 1:
             orig_size = len(token_prompts)
 
             gathered_prompts_ids: list[Any] = [
-                None for _ in range(vllm_config.tensor_parallel_size)
+                None for _ in range(tensor_parallel_size)
             ]
-            gathered_token_prompts: list[Any] = [
-                None
-            ] * vllm_config.tensor_parallel_size
-            gathered_max_output_tokens: list[Any] = [
-                None
-            ] * vllm_config.tensor_parallel_size
+            gathered_token_prompts: list[Any] = [None] * tensor_parallel_size
+            gathered_max_output_tokens: list[Any] = [None] * tensor_parallel_size
 
             for gathered, obj in zip(
                 (
@@ -6903,7 +6905,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             if capture_sampling_logps
             else []
         )
-        if vllm_config.tensor_parallel_size > 1:
+        if tensor_parallel_size > 1:
             # Slice completions for this rank within its TP group.
             # Each rank generates all outputs — we keep only our share.
             local_rank_in_group = torch.distributed.get_rank(group=self.tp_group)
@@ -7433,23 +7435,27 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         num_processes = get_world_size()
         process_index = get_rank()
         local_process_index = get_local_rank()
-        if num_processes % self.vllm_config.tensor_parallel_size != 0:
-            msg = f"Tensor parallel size {self.vllm_config.tensor_parallel_size} must be a multiple of the number of processes {num_processes}."
+        tensor_parallel_size = self.vllm_config.tensor_parallel_size
+        if tensor_parallel_size is None:
+            # Unset width: this in-process engine uses one GPU.
+            tensor_parallel_size = 1
+        if num_processes % tensor_parallel_size != 0:
+            msg = f"Tensor parallel size {tensor_parallel_size} must be a multiple of the number of processes {num_processes}."
             raise ValueError(
                 msg,
             )
 
-        if self.vllm_config.tensor_parallel_size > 1:
+        if tensor_parallel_size > 1:
             self.tp_group, _ = torch.distributed.new_subgroups_by_enumeration(
                 [
                     list(
                         range(
-                            i * self.vllm_config.tensor_parallel_size,
-                            (i + 1) * self.vllm_config.tensor_parallel_size,
+                            i * tensor_parallel_size,
+                            (i + 1) * tensor_parallel_size,
                         ),
                     )
                     for i in range(
-                        num_processes // self.vllm_config.tensor_parallel_size,
+                        num_processes // tensor_parallel_size,
                     )
                 ],
             )

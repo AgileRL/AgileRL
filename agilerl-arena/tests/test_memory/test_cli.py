@@ -50,7 +50,10 @@ MANIFEST = {
         "group_size": 4,
         "batch_size": 2,
         "micro_batch_size_per_gpu": 1,
-        "vllm_config": {"gpu_memory_utilization": 0.85},
+        "vllm_config": {
+            "gpu_memory_utilization": 0.85,
+            "tensor_parallel_size": 1,
+        },
     },
     "environment": {
         "env_type": "rollout",
@@ -78,7 +81,10 @@ OVERSIZE = {
         "group_size": 4,
         "batch_size": 2,
         "micro_batch_size_per_gpu": 1,
-        "vllm_config": {"gpu_memory_utilization": 0.9},
+        "vllm_config": {
+            "gpu_memory_utilization": 0.9,
+            "tensor_parallel_size": 1,
+        },
     },
     "network": {
         "pretrained_model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
@@ -91,7 +97,10 @@ NO_TIER_FITS = {
     **OVERSIZE,
     "algorithm": {
         **OVERSIZE["algorithm"],
-        "vllm_config": {"gpu_memory_utilization": 0.99},
+        "vllm_config": {
+            "gpu_memory_utilization": 0.99,
+            "tensor_parallel_size": 1,
+        },
     },
 }
 
@@ -355,6 +364,17 @@ class TestMain:
         assert code == EXIT_OK
         assert "24 GiB card" in capsys.readouterr().out
 
+    def test_unset_width_on_a_named_gpu_sizes_as_one(self, tmp_path, capsys):
+        doc = copy.deepcopy(MANIFEST)
+        del doc["algorithm"]["vllm_config"]["tensor_parallel_size"]
+        path = tmp_path / "unset.yaml"
+        path.write_text(yaml.safe_dump(doc))
+
+        code = main(str(path), config_path=TINY_CONFIG, gpu="NVIDIA L4")
+
+        assert code == EXIT_OK
+        assert "24 GiB card" in capsys.readouterr().out
+
     def test_device_gb_overrides_the_named_gpu(self, manifest_path, capsys):
         code = main(
             manifest_path, config_path=TINY_CONFIG, gpu="NVIDIA L4", device_gb=20
@@ -615,7 +635,11 @@ ASYNC_MANIFEST = {
     **MANIFEST,
     "algorithm": {
         **MANIFEST["algorithm"],
-        "vllm_config": {"gpu_memory_utilization": 0.9, "max_num_seqs": 8},
+        "vllm_config": {
+            "gpu_memory_utilization": 0.9,
+            "max_num_seqs": 8,
+            "tensor_parallel_size": 1,
+        },
     },
     "training": {
         "max_steps": 100,
@@ -671,6 +695,22 @@ class TestSolveMain:
         assert "Solved max_model_len" in out
         assert "Training" in out
         assert "Generation" in out
+
+    def test_unset_width_from_a_manifest_sizes_as_one(self, tmp_path, capsys):
+        doc = copy.deepcopy(MANIFEST)
+        del doc["algorithm"]["vllm_config"]["tensor_parallel_size"]
+        path = tmp_path / "unset.yaml"
+        path.write_text(yaml.safe_dump(doc))
+
+        code = run_solve(
+            "max_model_len",
+            str(path),
+            gpu="NVIDIA L4",
+            config_path=TINY_CONFIG,
+        )
+
+        assert code == EXIT_OK
+        assert "Solved max_model_len" in capsys.readouterr().out
 
     def test_solves_max_num_seqs_from_a_manifest(self, manifest_path, capsys):
         # Act
@@ -1008,6 +1048,38 @@ class TestMainResourceTier:
         assert code == EXIT_OK
         assert "Cheapest resource tier that fits: l4-2x (2x NVIDIA L4" in out
         assert "Memory estimate" in out
+
+    def test_unset_width_resolves_for_a_tier_that_fits(self, tmp_path, capsys):
+        doc = copy.deepcopy(MANIFEST)
+        del doc["algorithm"]["vllm_config"]["tensor_parallel_size"]
+        path = tmp_path / "unset.yaml"
+        path.write_text(yaml.safe_dump(doc))
+
+        code = main(str(path), tiers=TIERS, config_path=TINY_CONFIG, no_color=True)
+
+        out = capsys.readouterr().out
+        assert code == EXIT_OK
+        assert "Cheapest resource tier that fits: l4-2x" in out
+
+    def test_unset_width_that_cannot_be_resolved_fails_the_tier(self, tmp_path, capsys):
+        doc = copy.deepcopy(MANIFEST)
+        del doc["algorithm"]["vllm_config"]["tensor_parallel_size"]
+        path = tmp_path / "unset.yaml"
+        path.write_text(yaml.safe_dump(doc))
+        tiers = [
+            {
+                "name": "l4-1x",
+                "gpu_type": "NVIDIA L4",
+                "num_gpus": 1,
+                "price_per_node_hour": 1.0,
+            }
+        ]
+
+        code = main(str(path), tiers=tiers, config_path=TINY_CONFIG, no_color=True)
+
+        out = capsys.readouterr().out
+        assert code == EXIT_OVER_BUDGET
+        assert "l4-1x: could not resolve tensor_parallel_size" in out
 
     def test_tensor_parallel_engine_needs_a_gpu_per_rank(self, tmp_path, capsys):
         doc = copy.deepcopy(MANIFEST)

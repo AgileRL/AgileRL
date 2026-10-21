@@ -3091,14 +3091,18 @@ def build_vllm_llm_init_kwargs(
         if explicit_batched_tokens is not None
         else family_vllm_kwargs.get("max_num_batched_tokens")
     )
+    tensor_parallel_size = vllm_config.tensor_parallel_size
+    if tensor_parallel_size is None:
+        # Unset width: this in-process engine uses one GPU.
+        tensor_parallel_size = 1
     kwargs: dict[str, Any] = {
         "model": vllm_model,
-        "tensor_parallel_size": vllm_config.tensor_parallel_size,
+        "tensor_parallel_size": tensor_parallel_size,
         "gpu_memory_utilization": vllm_config.gpu_memory_utilization,
         "max_num_seqs": vllm_config.max_num_seqs,
         "max_model_len": max_model_len,
         "distributed_executor_backend": "external_launcher",
-        "seed": process_index // vllm_config.tensor_parallel_size,
+        "seed": process_index // tensor_parallel_size,
         "max_num_batched_tokens": resolve_vllm_max_num_batched_tokens(
             vllm_config.max_num_seqs,
             max_model_len,

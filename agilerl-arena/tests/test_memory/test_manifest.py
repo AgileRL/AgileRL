@@ -10,11 +10,17 @@ import pytest
 
 from agilerl.arena.memory.manifest import (
     device_spec_from_resource_class,
-    estimate_manifest,
-    generation_settings_from_manifest,
     lookup_gpu,
-    run_config_from_manifest,
     training_settings_from_manifest,
+)
+from agilerl.arena.memory.manifest import (
+    estimate_manifest as _estimate_manifest,
+)
+from agilerl.arena.memory.manifest import (
+    generation_settings_from_manifest as _generation_settings_from_manifest,
+)
+from agilerl.arena.memory.manifest import (
+    run_config_from_manifest as _run_config_from_manifest,
 )
 from agilerl.arena.models.fsdp import FSDPConfig
 from agilerl.arena.models.manifest import TrainingManifest
@@ -57,6 +63,36 @@ def manifest(**overrides: dict) -> dict:
     for section, values in overrides.items():
         out.setdefault(section, {}).update(values)
     return out
+
+
+def _engine_width(doc: TrainingManifest | dict) -> int:
+    """Width these cases size. An omitted manifest width is one GPU."""
+    validated = (
+        doc
+        if isinstance(doc, TrainingManifest)
+        else TrainingManifest.model_validate(doc)
+    )
+    vllm = getattr(validated.algorithm, "vllm_config", None)
+    if vllm is not None and vllm.tensor_parallel_size is not None:
+        return vllm.tensor_parallel_size
+    return 1
+
+
+def generation_settings_from_manifest(doc, tensor_parallel_size=None):
+    width = _engine_width(doc) if tensor_parallel_size is None else tensor_parallel_size
+    return _generation_settings_from_manifest(doc, tensor_parallel_size=width)
+
+
+def run_config_from_manifest(doc, device, model_config, **kwargs):
+    if kwargs.get("tensor_parallel_size") is None:
+        kwargs["tensor_parallel_size"] = _engine_width(doc)
+    return _run_config_from_manifest(doc, device, model_config, **kwargs)
+
+
+def estimate_manifest(doc, device, model_config, **kwargs):
+    if kwargs.get("tensor_parallel_size") is None:
+        kwargs["tensor_parallel_size"] = _engine_width(doc)
+    return _estimate_manifest(doc, device, model_config, **kwargs)
 
 
 class TestTrainingSettings:

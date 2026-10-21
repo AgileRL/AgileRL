@@ -2113,8 +2113,9 @@ class CosineLRScheduleConfig:
 class VLLMConfig:
     """Data class to configure a colocated vLLM instance.
 
-    :param tensor_parallel_size: Number of GPUs for tensor parallelism, defaults to 1.
-    :type tensor_parallel_size: int, optional
+    :param tensor_parallel_size: GPUs for tensor parallelism. ``None`` leaves
+        the width unset.
+    :type tensor_parallel_size: int | None, optional
     :param gpu_memory_utilization: Fraction of GPU memory to reserve for vLLM KV cache,
         defaults to 0.3.
     :type gpu_memory_utilization: float, optional
@@ -2216,7 +2217,7 @@ class VLLMConfig:
     """
 
     # Colocate mode parameters
-    tensor_parallel_size: int = 1
+    tensor_parallel_size: int | None = None
     gpu_memory_utilization: float = 0.3
     max_num_seqs: int = 8
     max_num_batched_tokens: int | None = None

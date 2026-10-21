@@ -19,7 +19,8 @@ class TierCheck:
     """One tier's verdict for a manifest.
 
     ``config`` and ``estimate`` are ``None`` when the tier was ruled out
-    before estimating: no catalogue GPU, or too few GPUs for the layout.
+    before estimating: no catalogue GPU, too few GPUs for the layout, or
+    no engine width for this tier.
     """
 
     tier: dict[str, Any]
@@ -50,6 +51,7 @@ def check_tiers(
     training: TrainingSpec,
     build_config: Callable[[DeviceSpec], RunConfig],
     tensor_parallel_size: int = 1,
+    resolve_width: Callable[[dict[str, Any], DeviceSpec], int | None] | None = None,
 ) -> list[TierCheck]:
     """Every tier's verdict, cheapest first.
 
@@ -57,8 +59,9 @@ def check_tiers(
     :param training: The manifest's training section, for the GPU layout.
     :param build_config: The manifest's run config on one GPU of a tier.
     :param tensor_parallel_size: GPUs each rollout engine occupies.
+    :param resolve_width: Per-tier engine width. ``None`` from it rules that
+        tier out.
     """
-    needed = gpus_required(training, tensor_parallel_size)
     checks = []
     for tier in sorted(tiers, key=lambda t: t["price_per_node_hour"]):
         gpu_type = tier.get("gpu_type")
@@ -68,6 +71,14 @@ def check_tiers(
         if lookup_gpu(gpu_type) is None:
             checks.append(TierCheck(tier, f"unknown GPU {gpu_type!r}"))
             continue
+        width = tensor_parallel_size
+        if resolve_width is not None:
+            resolved = resolve_width(tier, device_spec_from_resource_class(tier))
+            if resolved is None:
+                checks.append(TierCheck(tier, "could not resolve tensor_parallel_size"))
+                continue
+            width = resolved
+        needed = gpus_required(training, width)
         if tier["num_gpus"] < needed:
             checks.append(
                 TierCheck(tier, f"{tier['num_gpus']} GPUs, the job needs {needed}")
