@@ -1191,11 +1191,24 @@ class TestLLMEnvSpecImageFields:
         assert spec.screenshot_field == "page"
         assert spec.goal_images_field == "task_images"
 
-    def test_defaults_to_the_browsergym_keys(self) -> None:
+    def test_unset_image_keys_stay_out_of_dump(self) -> None:
         spec = LLMEnvSpec(env_type="rollout", env_url="http://env", max_turns=10)
 
-        assert spec.screenshot_field == "screenshot"
-        assert spec.goal_images_field == "goal_images"
+        assert spec.screenshot_field is None
+        assert spec.goal_images_field is None
+        dumped = spec.model_dump(exclude_none=True)
+        assert "screenshot_field" not in dumped
+        assert "goal_images_field" not in dumped
+
+    def test_dataset_backed_rollout_rejects_image_observation_keys(self) -> None:
+        with pytest.raises(ValidationError, match="no such observation"):
+            LLMEnvSpec(
+                env_type="rollout",
+                dataset="rows",
+                rubric_file_path="rubric.py",
+                prompt_template={"user_0": "{q}"},
+                screenshot_field="screenshot",
+            )
 
 
 class TestLLMEnvSpecActionErrorField:

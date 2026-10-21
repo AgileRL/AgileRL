@@ -693,4 +693,10 @@ class TrainingManifest(BaseModel):
                 algorithm.pop("num_envs", None)
             if "vect_noise_dim" not in self.algorithm.model_fields_set:
                 algorithm.pop("vect_noise_dim", None)
+        environment = payload.get("environment")
+        if isinstance(environment, dict):
+            if environment.get("screenshot_field") is None:
+                environment.pop("screenshot_field", None)
+            if environment.get("goal_images_field") is None:
+                environment.pop("goal_images_field", None)
         return payload

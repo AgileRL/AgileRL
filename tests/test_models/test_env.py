@@ -1336,12 +1336,12 @@ class TestLLMEnvSpecRollout:
             observation_field=None,
             observation_processor=None,
             action_processor=None,
-            screenshot_field="screenshot",
-            goal_images_field="goal_images",
             apply_chat_template=True,
             chat_template_kwargs={},
             max_model_len=512,
             strict_chat_template_boundary=True,
+            screenshot_field=None,
+            goal_images_field=None,
         )
         mock_rollout_cls.local.assert_not_called()
 
@@ -1398,8 +1398,6 @@ class TestLLMEnvSpecRollout:
             observation_field=None,
             observation_processor=None,
             action_processor=None,
-            screenshot_field="screenshot",
-            goal_images_field="goal_images",
             apply_chat_template=True,
             chat_template_kwargs={},
             max_model_len=512,
@@ -1482,6 +1480,23 @@ class TestLLMEnvSpecRollout:
         kwargs = mock_rollout_cls.local.call_args.kwargs
         assert kwargs["observation_field"] is None
         assert kwargs["observation_processor"]({"info_state": [1, 2]}) == "obs:[1, 2]"
+
+    def test_image_observation_fields_reach_entrypoint_harness(self):
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.pad_token_id = 0
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            entrypoint="tests.test_models.test_env:_StubTextEnv",
+            max_turns=2,
+            screenshot_field="page",
+            goal_images_field="task_images",
+        )
+        mock_rollout_cls = MagicMock()
+        with patch("agilerl.models.env.RolloutHarness", mock_rollout_cls):
+            make_rollout_env_factory(spec, mock_tokenizer)[0]()
+        kwargs = mock_rollout_cls.local.call_args.kwargs
+        assert kwargs["screenshot_field"] == "page"
+        assert kwargs["goal_images_field"] == "task_images"
 
     def test_image_fields_rejected_for_dataset_backed_rollout(self):
         with pytest.raises(ValueError, match="no such observation"):

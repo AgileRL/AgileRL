@@ -1395,6 +1395,8 @@ class TestRolloutHarnessSegmentRestart:
             system_prompt=INSTRUCTION,
             vision_processor=processor,
             segment_max_images=1,
+            screenshot_field="screenshot",
+            goal_images_field="goal_images",
         )
 
         # Act
@@ -2441,6 +2443,8 @@ def goal_image_harness(
         max_turns=3,
         system_prompt=INSTRUCTION,
         vision_processor=pixel_level_processor(tokenizer),
+        screenshot_field="screenshot",
+        goal_images_field="goal_images",
         **harness_kwargs,
     )
 
@@ -2569,6 +2573,8 @@ class TestRolloutHarnessGoalImages:
             image_token_tokenizer,
             system_prompt=INSTRUCTION,
             vision_processor=pixel_level_processor(image_token_tokenizer),
+            screenshot_field="screenshot",
+            goal_images_field="goal_images",
         )
 
         # Act
@@ -2592,6 +2598,8 @@ class TestRolloutHarnessGoalImages:
             image_token_tokenizer,
             system_prompt=INSTRUCTION,
             vision_processor=pixel_level_processor(image_token_tokenizer),
+            screenshot_field="screenshot",
+            goal_images_field="goal_images",
         )
         harness.reset()
         client.goal_images = []
@@ -2612,6 +2620,8 @@ class TestRolloutHarnessGoalImages:
             image_token_tokenizer,
             system_prompt=INSTRUCTION,
             vision_processor=native_size_processor(image_token_tokenizer),
+            screenshot_field="screenshot",
+            goal_images_field="goal_images",
         )
 
         # Act
@@ -2640,6 +2650,8 @@ class TestRolloutHarnessGoalImages:
             vision_processor=native_size_processor(tokenizer),
             segment_max_images=4,
             restart_keep_turns=1,
+            screenshot_field="screenshot",
+            goal_images_field="goal_images",
         )
 
         # Act

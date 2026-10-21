@@ -674,18 +674,18 @@ class LLMEnvSpec(EnvSpecBase):
             "into what the env receives. Unset sends that text unchanged."
         ),
     )
-    screenshot_field: str = Field(
-        default="screenshot",
+    screenshot_field: str | None = Field(
+        default=None,
         description=(
-            "Observation field holding the page image. Empty reads no page "
-            "image. A field named image is always read when present."
+            "Observation field holding the page image. Empty or unset reads no "
+            "page image. A field named image is always read when present."
         ),
     )
-    goal_images_field: str = Field(
-        default="goal_images",
+    goal_images_field: str | None = Field(
+        default=None,
         description=(
             "Observation field holding the task images that follow the first "
-            "prompt. Empty reads none."
+            "prompt. Empty or unset reads none."
         ),
     )
 
@@ -996,8 +996,8 @@ class LLMEnvSpec(EnvSpecBase):
             )
             raise ValueError(msg)
         if dataset is not None and (
-            self.screenshot_field != "screenshot"
-            or self.goal_images_field != "goal_images"
+            (self.screenshot_field is not None and self.screenshot_field != "")
+            or (self.goal_images_field is not None and self.goal_images_field != "")
         ):
             msg = (
                 "screenshot_field and goal_images_field name env observation "

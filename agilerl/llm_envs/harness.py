@@ -89,6 +89,42 @@ def _coerced_system_prompt(value: object) -> str | None:
     return None
 
 
+def _resolve_rollout_env_client(
+    env_client: str | Callable[[], str] | EnvClientProtocol,
+    *,
+    timeout_s: float | None,
+    mcp_tool: str | None,
+    action_field: str,
+    tasks: Sequence[Mapping[str, Any]] | None,
+    eval_tasks: Sequence[Mapping[str, Any]] | None,
+) -> EnvClientProtocol:
+    if isinstance(env_client, EnvClientProtocol):
+        if (
+            timeout_s is not None
+            or mcp_tool is not None
+            or action_field != "message"
+            or tasks is not None
+            or eval_tasks is not None
+        ):
+            msg = (
+                "timeout_s / mcp_tool / action_field / tasks / "
+                "eval_tasks configure the transport and have no effect "
+                "on an already-built env client; set them on the client instead."
+            )
+            raise ValueError(msg)
+        return env_client
+    from agilerl.llm_envs.openenv import RemoteEnvClient  # optional extra: llm
+
+    return RemoteEnvClient(
+        env_client,
+        timeout_s=timeout_s,
+        mcp_tool=mcp_tool,
+        action_field=action_field,
+        tasks=tasks,
+        eval_tasks=eval_tasks,
+    )
+
+
 class RolloutHarness(RestartPromptMixin):
     """Token-level rollout env: tokenisation + turn loop over a text env client.
 
@@ -123,8 +159,8 @@ class RolloutHarness(RestartPromptMixin):
         restart_older_obs_field: str = "",
         restart_older_images: bool = True,
         action_error_field: str = "",
-        screenshot_field: str = "screenshot",
-        goal_images_field: str = "goal_images",
+        screenshot_field: str | None = None,
+        goal_images_field: str | None = None,
     ) -> None:
         """Drive a text env at the token level over ``env_client`` (a URL or a client object).
 
@@ -236,8 +272,8 @@ class RolloutHarness(RestartPromptMixin):
         self._restart_older_obs_field = restart_older_obs_field
         self._restart_older_images = restart_older_images
         self._action_error_field = action_error_field
-        self._screenshot_field = screenshot_field
-        self._goal_images_field = goal_images_field
+        self._screenshot_field = screenshot_field or ""
+        self._goal_images_field = goal_images_field or ""
         self._kept_turns: deque[KeptTurn] = deque(maxlen=restart_keep_turns)
         # This turn's sampled ids, held until its observation arrives.
         self._gen_ids = torch.empty(0, dtype=torch.long)
@@ -262,32 +298,14 @@ class RolloutHarness(RestartPromptMixin):
         self._action_processor = action_processor
         self._instruction = instruction
         self._strict_chat_template_boundary = strict_chat_template_boundary
-        if isinstance(env_client, EnvClientProtocol):
-            if (
-                timeout_s is not None
-                or mcp_tool is not None
-                or action_field != "message"
-                or tasks is not None
-                or eval_tasks is not None
-            ):
-                msg = (
-                    "timeout_s / mcp_tool / action_field / tasks / "
-                    "eval_tasks configure the transport and have no effect "
-                    "on an already-built env client; set them on the client instead."
-                )
-                raise ValueError(msg)
-            self._env_client: EnvClientProtocol = env_client
-        else:
-            from agilerl.llm_envs.openenv import RemoteEnvClient  # optional extra: llm
-
-            self._env_client = RemoteEnvClient(
-                env_client,
-                timeout_s=timeout_s,
-                mcp_tool=mcp_tool,
-                action_field=action_field,
-                tasks=tasks,
-                eval_tasks=eval_tasks,
-            )
+        self._env_client = _resolve_rollout_env_client(
+            env_client,
+            timeout_s=timeout_s,
+            mcp_tool=mcp_tool,
+            action_field=action_field,
+            tasks=tasks,
+            eval_tasks=eval_tasks,
+        )
         self.tokenizer = tokenizer
         self.apply_chat_template = apply_chat_template
         self.chat_template_kwargs: dict[str, Any] = dict(chat_template_kwargs or {})
