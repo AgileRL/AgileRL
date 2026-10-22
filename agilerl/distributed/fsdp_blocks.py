@@ -35,6 +35,7 @@ from torch.utils.checkpoint import (
 from agilerl.architectures.nemotron_h.mamba import block_type_mask_mapping
 from agilerl.arena.models.fsdp import FSDPConfig
 from agilerl.distributed.expert_parallel import (
+    COPYING_ROUTED_COUNTS,
     iter_packed_expert_modules,
     routed_counts_contexts,
 )
@@ -449,7 +450,12 @@ def _save_routing_policy(
     """Keep router ``topk`` and device-to-host copies from forward; recompute the rest.
 
     A recomputed router can pick other experts, which changes dispatch shapes
-    and the all-to-all splits every expert-parallel peer expects.
+    and the all-to-all splits every expert-parallel peer expects. Saved host
+    copies spare the recompute a host sync each.
+
+    Saved outputs replay in forward order per op, so a saved op must run the
+    same number of times in the recompute. The routed EP count copy runs only
+    in forward, so it is not saved.
     """
     if op.overloadpacket is torch.ops.aten.topk:
         return CheckpointPolicy.MUST_SAVE
@@ -458,6 +464,7 @@ def _save_routing_policy(
         op.overloadpacket is torch.ops.aten._to_copy
         and isinstance(device, torch.device)
         and device.type == "cpu"
+        and not COPYING_ROUTED_COUNTS.get()
     ):
         return CheckpointPolicy.MUST_SAVE
     return CheckpointPolicy.PREFER_RECOMPUTE

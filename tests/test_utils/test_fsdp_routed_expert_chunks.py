@@ -14,17 +14,26 @@ import torch
 import torch.distributed as dist
 from peft import LoraConfig, get_peft_model
 from torch import nn
-from torch.utils.checkpoint import CheckpointPolicy
+from torch.utils.checkpoint import CheckpointPolicy, checkpoint
 from transformers import NemotronHConfig, NemotronHForCausalLM
 
 from agilerl.distributed import FSDPConfig, init_distributed
+from agilerl.distributed.ep_forward import (
+    COPYING_ROUTED_COUNTS,
+    TokenExchange,
+    _routed_counts,
+)
 from agilerl.distributed.fsdp import materialize_fsdp2_from_cpu_state
-from agilerl.distributed.fsdp_blocks import _save_routing_policy
+from agilerl.distributed.fsdp_blocks import (
+    _block_checkpoint_contexts,
+    _save_routing_policy,
+)
 from agilerl.lora.fused import patch_lora_for_fused_forward
 from agilerl.lora.moe import (
     RoutedExpertsLoraWrapper,
     upgrade_moe_param_wrappers,
 )
+from agilerl.lora.moe.grouped_gemm import expert_row_counts
 
 VOCAB = 64
 
@@ -113,10 +122,68 @@ class TestSaveRoutingPolicy:
 
         assert policy is CheckpointPolicy.MUST_SAVE
 
+    def test_recomputes_routed_counts_copy(self) -> None:
+        copying = COPYING_ROUTED_COUNTS.set(True)
+
+        policy = _save_routing_policy(
+            None,
+            torch.ops.aten._to_copy.default,
+            device=torch.device("cpu"),
+        )
+
+        COPYING_ROUTED_COUNTS.reset(copying)
+        assert policy is CheckpointPolicy.PREFER_RECOMPUTE
+
     def test_recomputes_other_ops(self) -> None:
         policy = _save_routing_policy(None, torch.ops.aten.add.Tensor)
 
         assert policy is CheckpointPolicy.PREFER_RECOMPUTE
+
+
+class TestBlockCheckpointContexts:
+    @pytest.mark.usefixtures("world_size_one")
+    def test_recompute_matches_forward_after_routed_counts_copy(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        tolist = torch.Tensor.tolist
+        # CUDA ``.tolist()`` copies to host through ``_to_copy``; CPU tensors skip it.
+        monkeypatch.setattr(
+            torch.Tensor,
+            "tolist",
+            lambda t: tolist(
+                torch.ops.aten._to_copy.default(t, device=torch.device("cpu"))
+            ),
+        )
+        exchange = TokenExchange(dist.group.WORLD, 1, 1, None, 1 << 20)
+        torch.manual_seed(0)
+        weight = torch.randn(4, 3, requires_grad=True)
+        hidden = torch.randn(5, 4)
+        splits = torch.tensor([2, 3])
+
+        def block(x: torch.Tensor) -> torch.Tensor:
+            scores, experts = (x @ weight).topk(2, -1)
+            send = expert_row_counts(experts.reshape(-1), 3).unsqueeze(0)
+            _routed_counts(send, exchange)
+            chunks = scores.split(splits.tolist())
+            return torch.cat([chunk.pow(i + 2) for i, chunk in enumerate(chunks)])
+
+        upstream = torch.randn(5, 2)
+        (block(hidden) * upstream).sum().backward()
+        expected = weight.grad.clone()
+        weight.grad = None
+
+        # Act
+        out = checkpoint(
+            block,
+            hidden,
+            use_reentrant=False,
+            context_fn=_block_checkpoint_contexts(True),
+        )
+        (out * upstream).sum().backward()
+
+        # Assert
+        assert torch.equal(weight.grad, expected)
 
 
 class TestMaterializeFsdp2FromCpuStateRoutedExpertChunks:
