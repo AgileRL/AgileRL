@@ -349,6 +349,12 @@ ROUTED_COUNTS_SCOPE: ContextVar[RoutedCountsScope | None] = ContextVar(
     "routed_counts_scope", default=None
 )
 
+# Set while a routed EP call copies its counts to host. The recompute replays
+# those counts without the copy, so a checkpoint must not save it.
+COPYING_ROUTED_COUNTS: ContextVar[bool] = ContextVar(
+    "copying_routed_counts", default=False
+)
+
 
 def routed_counts_contexts() -> tuple[RoutedCountsScope, RoutedCountsScope]:
     """``checkpoint`` ``context_fn``: the recompute reuses the forward's routed EP counts.
@@ -377,7 +383,9 @@ def _routed_counts(send: torch.Tensor, exchange: TokenExchange) -> RoutedCounts:
         )
         return recorded
     received = exchange_expert_counts(send, exchange.ep_group, exchange.ep_degree)
+    copying = COPYING_ROUTED_COUNTS.set(True)
     send_lists, received_lists = torch.stack((send, received)).tolist()
+    COPYING_ROUTED_COUNTS.reset(copying)
     counts = RoutedCounts(send, received, send_lists, received_lists)
     if scope is not None:
         scope.calls.append(counts)
