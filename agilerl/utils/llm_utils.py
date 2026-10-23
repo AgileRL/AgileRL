@@ -1532,6 +1532,27 @@ def _example_module_keys_for_lora_scope(
     return keys[:limit]
 
 
+def _is_model_layers_module_key(key: str) -> bool:
+    """True when ``model`` and ``layers`` are consecutive dotted path segments."""
+    parts = key.split(".")
+    return any(
+        part == "model" and parts[i + 1] == "layers"
+        for i, part in enumerate(parts[:-1])
+    )
+
+
+def _example_module_keys_on_model(
+    model: nn.Module,
+    limit: int = 3,
+) -> list[str]:
+    """Sample leaf ``named_modules`` keys, preferring ``model.layers`` (for error messages)."""
+    keys = [
+        key for key, mod in model.named_modules() if key and not list(mod.children())
+    ]
+    layers = [key for key in keys if _is_model_layers_module_key(key)]
+    return (layers or keys)[:limit]
+
+
 def adapt_lora_config_for_model(
     model: nn.Module,
     lora_config: LoraConfig,
@@ -1579,12 +1600,21 @@ def adapt_lora_config_for_model(
         )
         if not matched:
             examples = _example_module_keys_for_lora_scope(model, scope)
+            model_examples = _example_module_keys_on_model(model)
             msg = (
                 f"No modules matched scoped LoRA target_modules for scope={scope!r} "
                 f"(regex={target_spec!r}). "
                 f"Example keys under scope: {examples}. "
+                f"Example keys on model: {model_examples}. "
                 "Check LORA_TARGET_SCOPE and TARGET_MODULES match the model layout."
             )
+            if not examples and any(
+                _is_model_layers_module_key(key) for key in model_examples
+            ):
+                msg += (
+                    " For causal LM layouts under model.layers.*, leave "
+                    "algorithm.lora_target_scope unset."
+                )
             raise ValueError(msg)
         adapted = _clone_lora_config_with_targets(lora_config, target_spec)
         logger.info(
