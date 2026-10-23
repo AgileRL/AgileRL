@@ -18,10 +18,12 @@ from vllm.model_executor.models.qwen3_5 import (
 from vllm.model_executor.models.utils import WeightsMapper
 
 # VL checkpoints store language weights under model.language_model; the
-# language-only module expects model.
+# language-only module expects model. vLLM strips base_model.model. before
+# mapping LoRA names, so the adapter form anchors on the bare infix.
 QWEN3_5_VL_LANGUAGE_MAPPER = WeightsMapper(
     orig_to_new_prefix={
         "model.language_model.": "model.",
+        "language_model.": "model.",
         "model.visual.": None,
         "mtp.": None,
     }

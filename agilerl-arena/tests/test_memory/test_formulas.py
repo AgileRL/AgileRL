@@ -896,6 +896,12 @@ class TestBlockRecomputeBackwardPeak:
 
         assert not ModelArch.from_hf_config(qwen2).qk_norm
 
+    def test_qwen3_5_text_has_query_key_norm(self):
+        qwen3_5 = dict(QWEN3_4B)
+        qwen3_5["model_type"] = "qwen3_5_text"
+
+        assert ModelArch.from_hf_config(qwen3_5).qk_norm
+
 
 class TestBlockRecomputeNormInputs:
     def test_stock_rms_norm_backward_keeps_two_fp32_norm_inputs(self):

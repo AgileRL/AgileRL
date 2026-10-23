@@ -775,7 +775,7 @@ class TestModelsSupportedCommand:
         assert set(models) == set(SUPPORTED_MODEL_INFO)
         qwen = models["Qwen/Qwen3-4B"]
         assert qwen["architecture"] == "dense"
-        assert qwen["status"] == "live"
+        assert qwen["status"] == "deprecated"
         assert models["Qwen/Qwen2.5-0.5B-Instruct"]["status"] == "deprecated"
         assert (
             models["nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16"]["status"]
