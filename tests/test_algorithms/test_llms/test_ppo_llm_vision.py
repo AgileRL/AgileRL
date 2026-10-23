@@ -26,9 +26,10 @@ from peft import LoraConfig
 
 from agilerl.algorithms.ppo_llm import PPO as LLMPPO
 from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
+from tests.rank_launch import run_ranks
 from tests.test_algorithms.test_llms.segment_helpers import (
+    balanced_learn_worker,
     pad_to_eight_rows,
-    spawn_balanced_learn,
     use_fake_liger_policy_loss,
 )
 from tests.test_algorithms.test_llms.vision_helpers import (
@@ -288,6 +289,7 @@ class TestPPOLearnVisionCache:
 @pytest.mark.skipif(
     sys.platform == "win32" or not dist.is_available(), reason="gloo unavailable"
 )
+@pytest.mark.multi_rank
 class TestPPOLearnVisionCacheAcrossRanks:
     @pytest.mark.parametrize(
         ("fuse", "copies"), [(False, 1), (True, 2)], ids=["split", "fused"]
@@ -302,11 +304,19 @@ class TestPPOLearnVisionCacheAcrossRanks:
         make_agent = partial(make_tower_vision_ppo, fuse_actor_critic_pass=fuse)
 
         # Act
-        cached = spawn_balanced_learn(
-            make_agent, partial(learn_rank_vision_episodes, cached=True)
+        cached = run_ranks(
+            balanced_learn_worker,
+            2,
+            make_agent,
+            partial(learn_rank_vision_episodes, cached=True),
+            backend=None,
         )
-        uncached = spawn_balanced_learn(
-            make_agent, partial(learn_rank_vision_episodes, cached=False)
+        uncached = run_ranks(
+            balanced_learn_worker,
+            2,
+            make_agent,
+            partial(learn_rank_vision_episodes, cached=False),
+            backend=None,
         )
 
         # Assert

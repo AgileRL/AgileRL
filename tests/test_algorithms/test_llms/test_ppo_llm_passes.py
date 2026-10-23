@@ -13,10 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import math
-import os
-import socket
 import sys
-import traceback
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -26,7 +23,6 @@ from typing import Any
 import pytest
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as mp
 
 pytest.importorskip("transformers", reason="LLM tests require transformers.")
 pytest.importorskip("peft", reason="LLM tests require peft.")
@@ -50,6 +46,7 @@ from agilerl.lora.fused import (
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import attention_mask_from_padded_ids
 from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
+from tests.rank_launch import run_ranks
 from tests.test_algorithms.test_llms.llm_helpers import (
     DummyConfig,
     DummyHiddenStatesModel,
@@ -644,75 +641,34 @@ def record_runtime_backwards(
 def fsdp_learn_worker(
     rank: int,
     world_size: int,
-    port: int,
     liger: bool,
     fuse: bool,
-    queue: Any,
-) -> None:
+) -> Any:
     """One FSDP2 rank: learn on its half of :func:`learn_rows` and report step grads."""
-    try:
-        os.environ.update(
-            {
-                "RANK": str(rank),
-                "LOCAL_RANK": str(rank),
-                "WORLD_SIZE": str(world_size),
-                "MASTER_ADDR": "127.0.0.1",
-                "MASTER_PORT": str(port),
-            }
-        )
-        # The default FSDP2 mesh follows the host accelerator (MPS on macOS);
-        # these ranks train on CPU.
-        torch._C._get_accelerator = lambda: torch.device("cpu")
-        agent = make_ppo(
-            batch_size=4,
-            mini_batch_size=2,
-            micro_batch_size_per_gpu=1,
-            whiten_advantages=False,
-            wrap=True,
-            fsdp_config=FSDPConfig(optim_cpu_offload=False, param_dtype="float32"),
-            fuse_actor_critic_pass=fuse,
-        )
-        seed_lora_weights(agent)
-        monkeypatch = pytest.MonkeyPatch()
-        if liger:
-            use_fake_liger_policy_loss(agent, monkeypatch, "agilerl.algorithms.ppo_llm")
-        steps = record_step_gradients(agent, monkeypatch)
-        learn_rows(agent, slice(2 * rank, 2 * rank + 2))
-        # NumPy arrays: a torch tensor in the queue shares memory that dies
-        # with this process before the parent reads it.
-        step_arrays = [
-            {name: grad.numpy() for name, grad in step.items()} for step in steps
-        ]
-        queue.put((rank, "ok", (adapter_lora_names(agent), step_arrays)))
-    except Exception:
-        queue.put((rank, "err", traceback.format_exc()))
-    finally:
-        if dist.is_initialized():
-            dist.destroy_process_group()
-
-
-def spawn_fsdp_learn(liger: bool, fuse: bool, world_size: int = 2) -> list[Any]:
-    """Run :func:`fsdp_learn_worker` on ``world_size`` gloo ranks; return each rank's report."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        port = int(sock.getsockname()[1])
-    ctx = mp.get_context("spawn")
-    queue = ctx.Queue()
-    procs = [
-        ctx.Process(
-            target=fsdp_learn_worker,
-            args=(rank, world_size, port, liger, fuse, queue),
-        )
-        for rank in range(world_size)
+    # The default FSDP2 mesh follows the host accelerator (MPS on macOS);
+    # these ranks train on CPU.
+    torch._C._get_accelerator = lambda: torch.device("cpu")
+    agent = make_ppo(
+        batch_size=4,
+        mini_batch_size=2,
+        micro_batch_size_per_gpu=1,
+        whiten_advantages=False,
+        wrap=True,
+        fsdp_config=FSDPConfig(optim_cpu_offload=False, param_dtype="float32"),
+        fuse_actor_critic_pass=fuse,
+    )
+    seed_lora_weights(agent)
+    monkeypatch = pytest.MonkeyPatch()
+    if liger:
+        use_fake_liger_policy_loss(agent, monkeypatch, "agilerl.algorithms.ppo_llm")
+    steps = record_step_gradients(agent, monkeypatch)
+    learn_rows(agent, slice(2 * rank, 2 * rank + 2))
+    # NumPy arrays: a torch tensor sent to the parent shares memory that dies
+    # with this process before the parent reads it.
+    step_arrays = [
+        {name: grad.numpy() for name, grad in step.items()} for step in steps
     ]
-    for proc in procs:
-        proc.start()
-    results = sorted(queue.get(timeout=300) for _ in range(world_size))
-    for proc in procs:
-        proc.join(timeout=300)
-    for rank, status, payload in results:
-        assert status == "ok", f"rank {rank}: {payload}"
-    return [payload for _, _, payload in results]
+    return (adapter_lora_names(agent), step_arrays)
 
 
 def record_grad_forwards(agent: LLMPPO) -> list[dict[str, Any]]:
@@ -1606,6 +1562,7 @@ class TestPPOUseAdapter:
 @pytest.mark.skipif(
     sys.platform == "win32" or not dist.is_available(), reason="gloo unavailable"
 )
+@pytest.mark.multi_rank
 class TestPPOLearnFSDP:
     @pytest.mark.parametrize("liger", [False, True], ids=["standard", "liger"])
     @FUSE_MODES
@@ -1630,7 +1587,7 @@ class TestPPOLearnFSDP:
         learn_rows(single)
 
         # Act
-        reports = spawn_fsdp_learn(liger, fuse)
+        reports = run_ranks(fsdp_learn_worker, 2, liger, fuse, backend=None)
 
         # Assert
         assert len(single_steps) == 1

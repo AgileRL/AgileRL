@@ -5,14 +5,10 @@
 
 from __future__ import annotations
 
-import os
 import socket
 
 from tests.dist_ports import (
-    GLOO_FILESTORE_ENV,
     get_free_port,
-    gloo_filestore,
-    gloo_init_method,
     gloo_rank_env,
     gloo_socket_ifname,
 )
@@ -55,37 +51,3 @@ class TestGlooSocketIfname:
 
         assert gloo_socket_ifname() is None
         assert "GLOO_SOCKET_IFNAME" not in gloo_rank_env(0, 2, 12345)
-
-
-class TestGlooInitMethod:
-    def test_tcp_when_filestore_env_is_unset(self, monkeypatch):
-        monkeypatch.delenv(GLOO_FILESTORE_ENV, raising=False)
-
-        assert gloo_init_method(23456) == "tcp://127.0.0.1:23456"
-
-    def test_file_url_when_filestore_env_is_set(self, monkeypatch):
-        monkeypatch.setenv(GLOO_FILESTORE_ENV, "/tmp/gloo-store")
-
-        assert gloo_init_method(23456) == "file:///tmp/gloo-store"
-
-
-class TestGlooFilestore:
-    def test_sets_and_restores_env(self, monkeypatch):
-        monkeypatch.delenv(GLOO_FILESTORE_ENV, raising=False)
-
-        with gloo_filestore():
-            path = os.environ[GLOO_FILESTORE_ENV]
-            assert os.path.basename(path) == "store"
-            assert path == os.path.join(os.path.dirname(path), "store")
-            assert os.path.isdir(os.path.dirname(path))
-            assert not os.path.exists(path)
-
-        assert GLOO_FILESTORE_ENV not in os.environ
-
-    def test_restores_previous_value(self, monkeypatch):
-        monkeypatch.setenv(GLOO_FILESTORE_ENV, "/previous/store")
-
-        with gloo_filestore():
-            assert os.environ[GLOO_FILESTORE_ENV] != "/previous/store"
-
-        assert os.environ[GLOO_FILESTORE_ENV] == "/previous/store"

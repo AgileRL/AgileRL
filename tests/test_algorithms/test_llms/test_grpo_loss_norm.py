@@ -11,14 +11,9 @@ kernel is a stand-in mirroring liger's signature and both of its reductions.
 
 from __future__ import annotations
 
-import datetime
 import inspect
-import multiprocessing
-import sys
-import traceback
 import warnings
 from contextlib import nullcontext
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -38,6 +33,7 @@ from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.grpo import GRPO
 from agilerl.distributed import FSDPConfig
 from agilerl.distributed.runtime import FSDPRuntime
+from tests.rank_launch import run_ranks
 
 CLIP_MIN = 0.8
 CLIP_MAX = 1.2
@@ -1088,94 +1084,55 @@ class _ShardedHeadStub(_Stub):
         return FSDPRuntime(FSDPConfig()).gather_layer(self.lm_head, device=self.device)
 
 
-def _sharded_head_cispo_rank(rank: int, world_size: int, store_path: str) -> None:
+def _sharded_head_cispo_rank(rank: int, world_size: int) -> None:
     """One rank of the fused CISPO loss with a vocab-sharded frozen head."""
-    dist.init_process_group(
-        "gloo",
-        store=dist.FileStore(store_path, world_size),
-        rank=rank,
-        world_size=world_size,
-        timeout=datetime.timedelta(seconds=30),
+    grpo_module.HAS_LIGER_KERNEL = True
+    grpo_module.LigerFusedLinearGRPOFunction = _ChunkedCispoKernel
+    torch.manual_seed(0)
+    dense_head = torch.nn.Linear(HIDDEN, VOCAB, bias=False).requires_grad_(False)
+    sharded_head = torch.nn.Linear(HIDDEN, VOCAB, bias=False)
+    sharded_head.weight = torch.nn.Parameter(
+        distribute_tensor(
+            dense_head.weight.clone(),
+            init_device_mesh("cpu", (world_size,)),
+            [Shard(0)],
+        ),
+        requires_grad=False,
     )
-    try:
-        grpo_module.HAS_LIGER_KERNEL = True
-        grpo_module.LigerFusedLinearGRPOFunction = _ChunkedCispoKernel
-        torch.manual_seed(0)
-        dense_head = torch.nn.Linear(HIDDEN, VOCAB, bias=False).requires_grad_(False)
-        sharded_head = torch.nn.Linear(HIDDEN, VOCAB, bias=False)
-        sharded_head.weight = torch.nn.Parameter(
-            distribute_tensor(
-                dense_head.weight.clone(),
-                init_device_mesh("cpu", (world_size,)),
-                [Shard(0)],
-            ),
-            requires_grad=False,
-        )
-        lengths = RANK_ACTION_LENGTHS[rank]
-        hidden, batch_ids, mask = _fused_inputs(lengths, RANK_WIDTH, seed=rank)
-        hidden.requires_grad_(True)
-        advantages = torch.linspace(-0.9, 0.7, len(lengths)).unsqueeze(-1)
-        reference = _Stub(loss_norm="micro_batch", lm_head=dense_head)
-        log_probs = _token_log_probs(reference, hidden, batch_ids, RANK_WIDTH)
-        spread = torch.linspace(0.0, 0.1, log_probs.numel()).reshape(log_probs.shape)
-        old_log_probs = (log_probs - spread).detach()
-        algo = _ShardedHeadStub(
-            loss_norm="micro_batch", loss_type="cispo", lm_head=sharded_head
-        )
-        algo.hidden = hidden
+    lengths = RANK_ACTION_LENGTHS[rank]
+    hidden, batch_ids, mask = _fused_inputs(lengths, RANK_WIDTH, seed=rank)
+    hidden.requires_grad_(True)
+    advantages = torch.linspace(-0.9, 0.7, len(lengths)).unsqueeze(-1)
+    reference = _Stub(loss_norm="micro_batch", lm_head=dense_head)
+    log_probs = _token_log_probs(reference, hidden, batch_ids, RANK_WIDTH)
+    spread = torch.linspace(0.0, 0.1, log_probs.numel()).reshape(log_probs.shape)
+    old_log_probs = (log_probs - spread).detach()
+    algo = _ShardedHeadStub(
+        loss_norm="micro_batch", loss_type="cispo", lm_head=sharded_head
+    )
+    algo.hidden = hidden
 
-        loss, _, _, _ = algo._liger_loss(
-            batch_ids, mask, advantages, old_log_probs, None
-        )
-        loss.backward()
+    loss, _, _, _ = algo._liger_loss(batch_ids, mask, advantages, old_log_probs, None)
+    loss.backward()
 
-        ratio = torch.exp(log_probs.detach() - old_log_probs).clamp(max=CLIP_MAX)
-        per_token = -(ratio * advantages * log_probs)
-        expected = _micro_batch_reduce(per_token, mask).mean()
-        fused_hidden_grad = hidden.grad.clone()
-        hidden.grad = None
-        expected.backward()
-        assert torch.allclose(loss, expected, atol=1e-6), (rank, loss, expected)
-        assert torch.allclose(fused_hidden_grad, hidden.grad, atol=1e-6), rank
-    except BaseException:
-        traceback.print_exc()
-        sys.exit(1)
-    finally:
-        dist.destroy_process_group()
+    ratio = torch.exp(log_probs.detach() - old_log_probs).clamp(max=CLIP_MAX)
+    per_token = -(ratio * advantages * log_probs)
+    expected = _micro_batch_reduce(per_token, mask).mean()
+    fused_hidden_grad = hidden.grad.clone()
+    hidden.grad = None
+    expected.backward()
+    assert torch.allclose(loss, expected, atol=1e-6), (rank, loss, expected)
+    assert torch.allclose(fused_hidden_grad, hidden.grad, atol=1e-6), rank
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="gloo TCP transport is missing")
+@pytest.mark.multi_rank
 class TestFusedKernelCollectivesAcrossRanks:
     """Ranks with different action-row counts complete the sharded-head gather."""
 
-    def test_uneven_row_chunks_complete_and_match_the_dense_reference(
-        self, tmp_path: Path
-    ) -> None:
-        # Arrange
-        world_size = len(RANK_ACTION_LENGTHS)
-        context = multiprocessing.get_context("spawn")
-        store_path = str(tmp_path / "store")
-        processes = [
-            context.Process(
-                target=_sharded_head_cispo_rank,
-                args=(rank, world_size, store_path),
-            )
-            for rank in range(world_size)
-        ]
-
-        # Act
-        for process in processes:
-            process.start()
-        for process in processes:
-            process.join(timeout=RANK_TIMEOUT_S)
-        hung = [process.pid for process in processes if process.is_alive()]
-        for process in processes:
-            if process.is_alive():
-                process.kill()
-
-        # Assert
-        assert hung == []
-        assert [process.exitcode for process in processes] == [0] * world_size
+    def test_uneven_row_chunks_complete_and_match_the_dense_reference(self) -> None:
+        run_ranks(
+            _sharded_head_cispo_rank, len(RANK_ACTION_LENGTHS), timeout=RANK_TIMEOUT_S
+        )
 
 
 WINDOW_RANK_LENGTHS = {
@@ -1192,121 +1149,83 @@ def _window_micro_batch(rank: int, step: int, lengths: list[int]):
     return hidden, batch_ids, mask, advantages
 
 
-def _window_token_mean_rank(
-    rank: int, world_size: int, store_path: str, scenario: str
-) -> None:
+def _window_token_mean_rank(rank: int, world_size: int, scenario: str) -> None:
     """One rank of an accumulation window on the standard and the fused path."""
-    dist.init_process_group(
-        "gloo",
-        store=dist.FileStore(store_path, world_size),
-        rank=rank,
-        world_size=world_size,
-        timeout=datetime.timedelta(seconds=30),
-    )
-    try:
-        grpo_module.HAS_LIGER_KERNEL = True
-        grpo_module.LigerFusedLinearGRPOFunction = _FakeFusedKernel
-        windows = WINDOW_RANK_LENGTHS[scenario]
-        union = [
-            _window_micro_batch(other, step, lengths)
-            for other, rank_window in enumerate(windows)
-            for step, lengths in enumerate(rank_window)
-        ]
-        own = [
-            _window_micro_batch(rank, step, lengths)
-            for step, lengths in enumerate(windows[rank])
-        ]
-        steps = len(own)
-        torch.manual_seed(0)
-        initial_head = torch.nn.Linear(HIDDEN, VOCAB, bias=False)
-        heads = {}
-        for path in ("standard", "fused", "union"):
-            heads[path] = torch.nn.Linear(HIDDEN, VOCAB, bias=False)
-            heads[path].load_state_dict(initial_head.state_dict())
-        standard = _Stub(loss_type="cispo", accumulation_steps=steps)
-        standard.lm_head = heads["standard"]
-        fused = _Stub(loss_type="cispo", accumulation_steps=steps)
-        fused.lm_head = heads["fused"]
-        window_mask = torch.cat([mask for _, _, mask, _ in own])
-        window_rows = np.arange(window_mask.shape[0])
-        standard._record_global_window_action_tokens(window_mask, window_rows)
-        fused._record_global_window_action_tokens(window_mask, window_rows)
+    grpo_module.HAS_LIGER_KERNEL = True
+    grpo_module.LigerFusedLinearGRPOFunction = _FakeFusedKernel
+    windows = WINDOW_RANK_LENGTHS[scenario]
+    union = [
+        _window_micro_batch(other, step, lengths)
+        for other, rank_window in enumerate(windows)
+        for step, lengths in enumerate(rank_window)
+    ]
+    own = [
+        _window_micro_batch(rank, step, lengths)
+        for step, lengths in enumerate(windows[rank])
+    ]
+    steps = len(own)
+    torch.manual_seed(0)
+    initial_head = torch.nn.Linear(HIDDEN, VOCAB, bias=False)
+    heads = {}
+    for path in ("standard", "fused", "union"):
+        heads[path] = torch.nn.Linear(HIDDEN, VOCAB, bias=False)
+        heads[path].load_state_dict(initial_head.state_dict())
+    standard = _Stub(loss_type="cispo", accumulation_steps=steps)
+    standard.lm_head = heads["standard"]
+    fused = _Stub(loss_type="cispo", accumulation_steps=steps)
+    fused.lm_head = heads["fused"]
+    window_mask = torch.cat([mask for _, _, mask, _ in own])
+    window_rows = np.arange(window_mask.shape[0])
+    standard._record_global_window_action_tokens(window_mask, window_rows)
+    fused._record_global_window_action_tokens(window_mask, window_rows)
 
-        losses = []
-        for hidden, batch_ids, mask, advantages in own:
-            log_probs = _token_log_probs(standard, hidden, batch_ids, RANK_WIDTH)
-            standard_loss = standard._reduce_masked_loss(
-                -advantages * log_probs, mask
-            ).mean()
-            (standard_loss / steps).backward()
-            fused.hidden = hidden
-            fused_loss, _, _, _ = fused._liger_loss(
-                batch_ids, mask, advantages, None, None
-            )
-            (fused_loss / steps).backward()
-            losses += [standard_loss.detach(), fused_loss.detach()]
-        for path in ("standard", "fused"):
-            grad = heads[path].weight.grad
-            dist.all_reduce(grad, op=dist.ReduceOp.SUM)
-            grad /= world_size
+    losses = []
+    for hidden, batch_ids, mask, advantages in own:
+        log_probs = _token_log_probs(standard, hidden, batch_ids, RANK_WIDTH)
+        standard_loss = standard._reduce_masked_loss(
+            -advantages * log_probs, mask
+        ).mean()
+        (standard_loss / steps).backward()
+        fused.hidden = hidden
+        fused_loss, _, _, _ = fused._liger_loss(batch_ids, mask, advantages, None, None)
+        (fused_loss / steps).backward()
+        losses += [standard_loss.detach(), fused_loss.detach()]
+    for path in ("standard", "fused"):
+        grad = heads[path].weight.grad
+        dist.all_reduce(grad, op=dist.ReduceOp.SUM)
+        grad /= world_size
 
-        reference = _Stub(loss_norm="micro_batch", lm_head=heads["union"])
-        union_sum = torch.zeros(())
-        union_tokens = 0.0
-        for hidden, batch_ids, mask, advantages in union:
-            log_probs = _token_log_probs(reference, hidden, batch_ids, RANK_WIDTH)
-            union_sum = union_sum + (-advantages * log_probs * mask).sum()
-            union_tokens += float(mask.sum())
-        (union_sum / max(union_tokens, 1.0)).backward()
-        expected = heads["union"].weight.grad
+    reference = _Stub(loss_norm="micro_batch", lm_head=heads["union"])
+    union_sum = torch.zeros(())
+    union_tokens = 0.0
+    for hidden, batch_ids, mask, advantages in union:
+        log_probs = _token_log_probs(reference, hidden, batch_ids, RANK_WIDTH)
+        union_sum = union_sum + (-advantages * log_probs * mask).sum()
+        union_tokens += float(mask.sum())
+    (union_sum / max(union_tokens, 1.0)).backward()
+    expected = heads["union"].weight.grad
 
-        assert all(torch.isfinite(loss) for loss in losses), (rank, losses)
-        for path in ("standard", "fused"):
-            assert torch.allclose(heads[path].weight.grad, expected, atol=1e-6), (
-                rank,
-                path,
-                heads[path].weight.grad,
-                expected,
-            )
-        if union_tokens == 0.0:
-            assert all(loss.item() == 0.0 for loss in losses), (rank, losses)
-    except BaseException:
-        traceback.print_exc()
-        sys.exit(1)
-    finally:
-        dist.destroy_process_group()
+    assert all(torch.isfinite(loss) for loss in losses), (rank, losses)
+    for path in ("standard", "fused"):
+        assert torch.allclose(heads[path].weight.grad, expected, atol=1e-6), (
+            rank,
+            path,
+            heads[path].weight.grad,
+            expected,
+        )
+    if union_tokens == 0.0:
+        assert all(loss.item() == 0.0 for loss in losses), (rank, losses)
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="gloo TCP transport is missing")
+@pytest.mark.multi_rank
 class TestGRPOAccumulationWindowAcrossRanks:
     """The rank-averaged window gradient is the token mean over every rank's tokens."""
 
     @pytest.mark.parametrize("scenario", sorted(WINDOW_RANK_LENGTHS))
-    def test_averaged_gradient_is_the_union_token_mean(
-        self, tmp_path: Path, scenario: str
-    ) -> None:
-        # Arrange
-        world_size = len(WINDOW_RANK_LENGTHS[scenario])
-        context = multiprocessing.get_context("spawn")
-        store_path = str(tmp_path / "store")
-        processes = [
-            context.Process(
-                target=_window_token_mean_rank,
-                args=(rank, world_size, store_path, scenario),
-            )
-            for rank in range(world_size)
-        ]
-
-        # Act
-        for process in processes:
-            process.start()
-        for process in processes:
-            process.join(timeout=RANK_TIMEOUT_S)
-        hung = [process.pid for process in processes if process.is_alive()]
-        for process in processes:
-            if process.is_alive():
-                process.kill()
-
-        # Assert
-        assert hung == []
-        assert [process.exitcode for process in processes] == [0] * world_size
+    def test_averaged_gradient_is_the_union_token_mean(self, scenario: str) -> None:
+        run_ranks(
+            _window_token_mean_rank,
+            len(WINDOW_RANK_LENGTHS[scenario]),
+            scenario,
+            timeout=RANK_TIMEOUT_S,
+        )

@@ -12,6 +12,9 @@ on:
             - pyproject.toml
             - uv.lock
     workflow_dispatch:
+    # PRs and hub MRs run GPU tests on 3.13 only; this run covers every version.
+    schedule:
+        - cron: 0 2 * * *
 
 concurrency:
     group: ci-${{ github.ref }}
@@ -24,6 +27,8 @@ jobs:
     linux:
         uses: ./.github/workflows/reusable-linux.yml
         secrets: inherit
+        with:
+            all_gpu_pythons: ${{ github.event_name == 'schedule' }}
     macos:
         uses: ./.github/workflows/reusable-macos.yml
     windows:

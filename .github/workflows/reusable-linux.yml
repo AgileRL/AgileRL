@@ -3,6 +3,10 @@ name: Linux
 
 on:
     workflow_call:
+        inputs:
+            all_gpu_pythons:
+                type: boolean
+                default: false
 
 permissions:
     contents: read
@@ -67,9 +71,9 @@ jobs:
                     --import-mode=importlib \
                     --junitxml=junit-cpu.xml \
                     -m "not gpu and not vllm" \
-                    -n auto --dist loadgroup \
+                    -n logical --dist loadgroup \
                     --durations=15 \
-                    --cov --cov-report=xml
+                    ${{ matrix.python-version == '3.13' && '--cov --cov-report=xml' || '' }}
             - name: Upload junit
               if: always()
               uses: actions/upload-artifact@v4
@@ -78,6 +82,7 @@ jobs:
                   path: junit-cpu.xml
                   if-no-files-found: ignore
             - name: Upload coverage reports to Codecov
+              if: matrix.python-version == '3.13'
               uses: codecov/codecov-action@v3
               with:
                   flags: cpu-${{ matrix.python-version }}-${{ matrix.shard }}
@@ -98,7 +103,7 @@ jobs:
             fail-fast: false
             max-parallel: 8
             matrix:
-                python-version: ['3.10', '3.11', '3.12', '3.13']
+                python-version: ${{ fromJSON(inputs.all_gpu_pythons && '["3.10", "3.11", "3.12", "3.13"]' || '["3.13"]') }}
                 shard: [1, 2]
         env:
             UV_CACHE_DIR: /tmp/uv-cache
@@ -153,8 +158,9 @@ jobs:
                     -m "gpu or vllm" \
                     -n auto --dist loadgroup \
                     --durations=15 \
-                    --cov --cov-report=xml
+                    ${{ matrix.python-version == '3.13' && '--cov --cov-report=xml' || '' }}
             - name: Upload coverage reports to Codecov
+              if: matrix.python-version == '3.13'
               uses: codecov/codecov-action@v3
               with:
                   flags: gpu-${{ matrix.python-version }}-${{ matrix.shard }}
