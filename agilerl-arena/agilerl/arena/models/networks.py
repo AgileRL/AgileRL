@@ -18,6 +18,8 @@ from pydantic import (
 )
 from typing_extensions import Self
 
+from agilerl.arena.memory.resolve.lora import OMITTED_MAX_LORA_RANK
+from agilerl.arena.memory.resolve.sequences import OMITTED_GPU_MEMORY_UTILIZATION
 from agilerl.arena.models.descriptions import (
     ACTIVATION_CONV,
     CHANNEL_SIZE,
@@ -805,7 +807,7 @@ class VLLMConfig(BaseModel):
         ),
     )
     gpu_memory_utilization: float = Field(
-        default=0.3,
+        default=OMITTED_GPU_MEMORY_UTILIZATION,
         ge=0.0,
         le=1.0,
         description=(
@@ -873,7 +875,9 @@ class VLLMConfig(BaseModel):
         description="KV cache dtype, e.g. fp8. Fits a longer context into the same memory.",
     )
     max_lora_rank: int = Field(
-        default=16, ge=1, description="Largest LoRA rank the engine will accept."
+        default=OMITTED_MAX_LORA_RANK,
+        ge=1,
+        description="Largest LoRA rank the engine will accept.",
     )
     max_loras: int = Field(
         default=1, ge=1, description="LoRA adapters the engine keeps loaded at once."

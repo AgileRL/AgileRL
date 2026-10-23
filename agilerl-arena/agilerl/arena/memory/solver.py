@@ -14,8 +14,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
+from agilerl.arena.memory.breakdown import PhaseName
 from agilerl.arena.memory.estimator import (
-    PhaseName,
     RunEstimate,
     estimate_run,
     generation_can_serve,

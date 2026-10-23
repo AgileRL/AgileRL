@@ -58,14 +58,6 @@ ALLOCATOR_RESERVE_FRACTION_FSDP = 0.069
 # Largest share by which a measured peak exceeded the estimate on the 4-GPU
 # grids. A GPU recommendation keeps this share of usable memory free.
 MAX_UNDERPREDICTION = 0.089
-# Share of a training GPU's CUDA capacity (torch ``total_memory``) a runtime
-# memory pick leaves free. The estimate is in NVML device-used bytes, which
-# also count the driver's reservation that ``total_memory`` leaves out
-# (0.85 GiB on A100 80GB). On Super-VL learn steps (A100 80GB, EP 8, rows up
-# to 30.9k tokens) the busiest rank peaked 0.87 GiB over the estimate and EP
-# routing spread the ranks 1.5 GiB; at 2.5% that rank keeps about 2 GiB free
-# for a step routed more unevenly.
-TRAINING_HEADROOM_FRACTION = 0.025
 
 
 def recommendation_fits(predicted_bytes: int, usable_bytes: int) -> bool:
@@ -121,6 +113,25 @@ class ParamCounts:
             + self.mamba
             + self.unattributed
         )
+
+
+def geometry_gap_warning(counts: ParamCounts) -> str | None:
+    """Warn when parsed geometry leaves a large share of parameters unattributed.
+
+    :param counts: Analytic parameter split from :func:`param_counts`.
+    :return: Warning text, or ``None`` when the gap is small.
+    """
+    gap_warn_fraction = 0.02
+    if counts.total <= 0:
+        return None
+    gap = counts.unattributed / counts.total
+    if gap < gap_warn_fraction:
+        return None
+    return (
+        f"{gap:.1%} of this checkpoint's parameters are not accounted for by "
+        "the parsed geometry. Weight bytes are exact (checkpoint metadata); "
+        "activation, KV and LoRA terms come from the geometry, so they are low."
+    )
 
 
 def attention_params_per_layer(arch: ModelArch) -> int:
@@ -450,23 +461,6 @@ def kv_cache_demand_bytes(
         * layer_kv
         * (windowed * window_len * window_dim + (1.0 - windowed) * seq_len * full_dim)
     )
-
-
-# Bounds on fused-logprob chunk rows. Floor: ``lm_head`` is re-read once per
-# chunk. Ceiling: the fp32 logit tile grows linearly with rows.
-FUSED_CHUNK_ROWS_MIN = 128
-FUSED_CHUNK_ROWS_MAX = 4096
-
-
-def resolve_chunk_rows(vocab_size: int, explicit: int | None = None) -> int:
-    """Fused-logprob chunk rows for a 256 MiB fp32 logit tile, clamped.
-
-    ``explicit`` is returned as-is; it is range-checked at construction.
-    """
-    if explicit is not None:
-        return explicit
-    rows = 256 * MiB // max(1, vocab_size * 4)
-    return max(FUSED_CHUNK_ROWS_MIN, min(FUSED_CHUNK_ROWS_MAX, rows))
 
 
 def resolve_max_num_batched_tokens(

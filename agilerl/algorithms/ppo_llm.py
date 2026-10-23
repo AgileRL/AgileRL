@@ -16,6 +16,8 @@ from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import ActionResult, LLMAlgorithm
 from agilerl.algorithms.core.optimizer_wrapper import REPLICATED_GROUP_SUFFIX
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
+from agilerl.arena.memory.resolve.chunk import resolve_chunk_rows
+from agilerl.arena.memory.resolve.fuse import resolve_fuse_actor_critic_pass
 from agilerl.lora.fused import set_fused_adapter_routing, unset_fused_adapter_routing
 
 if TYPE_CHECKING:
@@ -292,8 +294,6 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         defaults to 10.0. Must be > 0.
     :type kl_clamp: float | None, optional
     """
-
-    _mini_batch_size_default = "micro_batch"
 
     def __init__(
         self,
@@ -1286,30 +1286,27 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
     def _resolve_fuse_actor_critic_pass(self) -> bool:
         """Resolve whether the actor and critic rows share one gradient pass.
 
-        An explicit ``fuse_actor_critic_pass`` is kept. ``None`` fuses off
-        CUDA, else fuses when the estimated fused training peak fits the
-        budget of :meth:`_estimate_training`. Every input is fixed by the run
-        config and device model, so all ranks pick the same path.
-
         :return: Whether to run the fused pass.
         :rtype: bool
         """
-        if self.fuse_actor_critic_pass is not None:
-            return self.fuse_actor_critic_pass
-        if torch.device(self.device).type != "cuda":
-            return True
-        estimate = self._estimate_training(
-            "ppo", self.beta, fuse_actor_critic_pass=True
-        )
-        gib = 1024**3
-        logger.info(
-            "LLMPPO %s the actor and critic passes: fused peak %.2f GiB, "
-            "budget %.2f GiB",
-            "fuses" if estimate.fits else "splits",
-            estimate.total_bytes / gib,
-            estimate.device_usable_bytes / gib,
-        )
-        return estimate.fits
+        fused_fits = None
+        if (
+            self.fuse_actor_critic_pass is None
+            and torch.device(self.device).type == "cuda"
+        ):
+            estimate = self._estimate_training(
+                "ppo", self.beta, fuse_actor_critic_pass=True
+            )
+            gib = 1024**3
+            logger.info(
+                "LLMPPO %s the actor and critic passes: fused peak %.2f GiB, "
+                "budget %.2f GiB",
+                "fuses" if estimate.fits else "splits",
+                estimate.total_bytes / gib,
+                estimate.device_usable_bytes / gib,
+            )
+            fused_fits = estimate.fits
+        return resolve_fuse_actor_critic_pass(self.fuse_actor_critic_pass, fused_fits)
 
     def _actor_critic_hidden_states(
         self,
@@ -1698,7 +1695,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                 turn_ids=turn_ids_arg,
                 full_turn_mask=full_turn_mask,
                 max_turns=num_turns,
-                token_chunk_size=self._resolve_fused_chunk_rows(
+                token_chunk_size=resolve_chunk_rows(
                     head_w.shape[0],
                     self.chunk_rows,
                 ),

@@ -47,6 +47,7 @@ from transformers import BitsAndBytesConfig
 
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.reinforce_llm import REINFORCE
+from agilerl.arena.memory.resolve.lora import resolve_lora_rank_ceiling
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import (
     _json_safe_value,
@@ -64,7 +65,6 @@ from agilerl.utils.llm_utils import (
     peft_target_key_matches,
     remap_peft_lora_key_for_vllm,
     resolve_attn_implementation,
-    resolve_vllm_max_lora_rank,
     resolve_vllm_max_num_batched_tokens,
 )
 from agilerl.utils.utils import _prepare_llm_algo_kwargs
@@ -411,10 +411,10 @@ class TestRemapPeftLoraKeyForVllm:
         )
 
 
-class TestResolveVllmMaxLoraRank:
+class TestResolveLoraRankCeiling:
     def test_takes_max_of_config_and_trainer(self):
-        assert resolve_vllm_max_lora_rank(16, 32) == 32
-        assert resolve_vllm_max_lora_rank(64, 16) == 64
+        assert resolve_lora_rank_ceiling(16, 32) == 32
+        assert resolve_lora_rank_ceiling(64, 16) == 64
 
 
 class TestConfigureVllmKwargs:

@@ -12,7 +12,8 @@ from collections.abc import Callable
 
 from pydantic import BaseModel, ConfigDict
 
-from agilerl.arena.memory.estimator import PhaseName, estimate_run
+from agilerl.arena.memory.breakdown import PhaseName
+from agilerl.arena.memory.estimator import estimate_run
 from agilerl.arena.memory.specs import GiB, RunConfig
 
 
