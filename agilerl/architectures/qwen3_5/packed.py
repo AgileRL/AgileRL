@@ -12,6 +12,7 @@ document is run on its own: the torch GDN fallback ignores ``cu_seqlens``.
 from __future__ import annotations
 
 import functools
+import importlib.util
 import logging
 from collections.abc import Callable
 from typing import Any
@@ -190,10 +191,28 @@ def patch_qwen_gdn_packed_sequences(mixer: str, block: str) -> None:
     )
 
 
+def _require_gdn_fast_path() -> None:
+    """Fail GPU Qwen GDN setup when fused conv/scan kernels are missing."""
+    if not torch.cuda.is_available():
+        return
+    missing = [
+        package
+        for module, package in (
+            ("fla", "flash-linear-attention"),
+            ("causal_conv1d", "causal-conv1d"),
+        )
+        if importlib.util.find_spec(module) is None
+    ]
+    if not missing:
+        return
+    raise RuntimeError("Qwen GatedDeltaNet needs " + " and ".join(missing) + " on GPU")
+
+
 def install_qwen_gdn_patches(
     patch: PatchRuntimeConfig,
     model: object | None = None,
 ) -> None:
     """Install GDN packed-sequence patches for Qwen3.5 / Qwen3.6 families."""
+    _require_gdn_fast_path()
     for mixer, block in PACKED_TARGETS:
         patch_qwen_gdn_packed_sequences(mixer, block)

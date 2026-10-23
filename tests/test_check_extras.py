@@ -320,11 +320,13 @@ def test_arena_pin_override_requires_exact(
 
 def test_llm_extra_composes_cpu_llm_and_vllm(check_extras: ModuleType) -> None:
     extras = check_extras._extras(check_extras.PARENT_PYPROJECT)
+    fla = "flash-linear-attention==0.5.2; sys_platform == 'linux'"
 
-    assert extras["llm"] == ["agilerl[cpu-llm,vllm]"]
+    assert extras["llm"] == ["agilerl[cpu-llm,vllm]", fla]
     assert check_extras._requirements("llm", extras, set()) == (
         check_extras._requirements("cpu-llm", extras, set())
         | check_extras._requirements("vllm", extras, set())
+        | {fla}
     )
 
 
