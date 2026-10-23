@@ -57,8 +57,15 @@ def make_vision_grpo(**overrides: Any) -> GRPO:
 
 
 class TestGRPOLearnVisionCache:
-    @pytest.mark.parametrize("segmented", [True, False], ids=["segments", "episodes"])
-    def test_learn_runs_the_tower_once_per_vision_row(self, segmented: bool) -> None:
+    @pytest.mark.parametrize(
+        ("segmented", "vision_rows"),
+        # Segment rows add one filler row with one vision row per padded slot.
+        [(True, sum(IMAGE_COUNTS) + 2), (False, sum(IMAGE_COUNTS))],
+        ids=["segments", "episodes"],
+    )
+    def test_learn_runs_the_tower_once_per_vision_row(
+        self, segmented: bool, vision_rows: int
+    ) -> None:
         # Arrange
         agent = make_vision_grpo()
 
@@ -66,7 +73,7 @@ class TestGRPOLearnVisionCache:
         learn_on_vision_episodes(agent, segmented=segmented)
 
         # Assert
-        assert sum(tower(agent).rows) == sum(IMAGE_COUNTS)
+        assert sum(tower(agent).rows) == vision_rows
 
     @pytest.mark.parametrize("segmented", [True, False], ids=["segments", "episodes"])
     def test_learn_matches_the_uncached_tower(

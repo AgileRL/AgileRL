@@ -30,7 +30,6 @@ else:
 from agilerl.algorithms.core import ActionResult, LLMAlgorithm
 from agilerl.algorithms.core.llm_ops.fused_logprobs import scored_position_index
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.arena.memory.resolve.chunk import resolve_chunk_rows
 from agilerl.arena.models.profiling import ProfilingConfig
 from agilerl.components.llm_rollout_data import EpisodeSegments
 from agilerl.distributed import (
@@ -452,13 +451,14 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         carries none). Tokens outside the band get no policy or KL gradient
         (IcePop). In a batch with sampling log-probs, rows without them are
         not masked. Defaults to ``(0.5, 5.0)``; ``None`` masks nothing.
-        Requires ``0 <= low < 1 < high``.
+        ``loss_type='gspo'`` leaves this unset. Requires ``0 <= low < 1 < high``.
     :type off_policy_token_mask_bounds: tuple[float, float] | None, optional
     :param off_policy_sequence_mask_threshold: Drop the policy and KL
         gradient of every negative-advantage token of a row whose mean
         ``log(pi_sampling / pi_theta)`` over its action tokens exceeds this
         (DeepSeek-V3.2 off-policy sequence masking). Defaults to ``0.03``;
-        ``None`` masks nothing. Must be >= 0.
+        ``None`` masks nothing. ``loss_type='gspo'`` leaves this unset.
+        Must be >= 0.
     :type off_policy_sequence_mask_threshold: float | None, optional
     :param use_bias_correction_kl: Weight the per-token K3 KL by the
         un-clamped importance ratio ``pi_theta / pi_old`` so its gradient is
@@ -484,6 +484,8 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
 
     _segment_accumulation_steps: int | None = None
     """Micro-batches per optimizer step of the running segmented learn, else ``None``."""
+
+    _mini_batch_size_default = "micro_batch"
 
     def __init__(
         self,
@@ -622,6 +624,10 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             )
             raise ValueError(msg)
         self.old_logprobs_source = old_logprobs_source
+        # GSPO's sequence ratio has no per-token weight for these masks.
+        if loss_type == "gspo":
+            off_policy_token_mask_bounds = None
+            off_policy_sequence_mask_threshold = None
         if off_policy_token_mask_bounds is not None:
             low, high = off_policy_token_mask_bounds
             if not 0.0 <= low < 1.0 < high:
@@ -3201,7 +3207,10 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                 if old_log_probs is not None
                 else None
             )
-            chunk_size = resolve_chunk_rows(head_w.shape[0], self.chunk_rows)
+            chunk_size = self._resolve_fused_chunk_rows(
+                head_w.shape[0],
+                self.chunk_rows,
+            )
         else:
             # Trajectory-level (GSPO): keep the (B, L) layout and one-sequence-
             # per-chunk granularity (chunk_size=1 over the batch dim). Liger

@@ -6,11 +6,11 @@ from __future__ import annotations
 
 import pytest
 
+from agilerl.arena.memory.engine_parallel import resolve_engine_tensor_parallel
 from agilerl.arena.memory.manifest import (
     generation_settings_from_manifest,
     lookup_gpu,
 )
-from agilerl.arena.memory.resolve.engine import resolve_engine_tensor_parallel
 from agilerl.arena.memory.specs import DeviceSpec
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
 from agilerl.arena.models.manifest import TrainingManifest

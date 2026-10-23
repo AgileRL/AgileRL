@@ -304,7 +304,7 @@ class TestFusedKernelLossPixelValues:
         grpo._liger_head_gather = MagicMock(
             return_value=nullcontext((head.weight, head.bias))
         )
-        grpo.chunk_rows = 2
+        grpo._resolve_fused_chunk_rows = MagicMock(return_value=2)
 
         # Act
         with (
@@ -365,7 +365,7 @@ class TestFusedKernelLossPixelValues:
         grpo._liger_head_gather = MagicMock(
             return_value=nullcontext((head.weight, head.bias))
         )
-        grpo.chunk_rows = 2
+        grpo._resolve_fused_chunk_rows = MagicMock(return_value=2)
 
         # Act
         with (

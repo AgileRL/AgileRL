@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Any,
+    ClassVar,
     Generic,
     Literal,
     Protocol,
@@ -65,23 +66,21 @@ from agilerl.algorithms.core.registry import (
 )
 from agilerl.architectures import install_family_patches
 from agilerl.architectures.nemotron_h import register_nemotron_h_liger
-from agilerl.arena.memory.estimator import (
-    PhaseBreakdown,
-    estimate_training,
-    training_breakdown,
-)
-from agilerl.arena.memory.manifest import ALGORITHM_NAMES
-from agilerl.arena.memory.resolve.batch import resolve_mini_batch_size
-from agilerl.arena.memory.resolve.chunk import resolve_chunk_rows
-from agilerl.arena.memory.resolve.fsdp import resolve_fsdp_memory
-from agilerl.arena.memory.specs import (
-    Algorithm,
+from agilerl.arena.memory import (
     DeviceSpec,
     ModelArch,
     ModelSpec,
+    PhaseBreakdown,
     TrainingSettings,
-    WeightDtype,
+    estimate_training,
+    resolve_fsdp_memory,
 )
+from agilerl.arena.memory.formulas import (
+    ROUTED_CHUNK_MIB_CHOICES,
+    TRAINING_HEADROOM_FRACTION,
+)
+from agilerl.arena.memory.manifest import ALGORITHM_NAMES
+from agilerl.arena.memory.specs import Algorithm, WeightDtype
 from agilerl.arena.models.profiling import ProfilingConfig
 from agilerl.components.llm_rollout_data import EpisodeSegments
 from agilerl.distributed import (
@@ -2732,33 +2731,6 @@ def _vllm_sampled_token_logprobs(output: CompletionOutput) -> list[float]:
     return out
 
 
-def training_device_spec(
-    device: DeviceType,
-    vllm_config: VLLMConfig | None = None,
-    colocated: bool = False,
-) -> DeviceSpec:
-    """Memory budget of a CUDA device during learn.
-
-    :param device: CUDA device the trainer learns on.
-    :param vllm_config: Colocated engine config, when the trainer hosts vLLM.
-    :param colocated: Whether vLLM runs in the trainer process.
-    :return: Device spec for the memory estimate.
-    """
-    properties = torch.cuda.get_device_properties(torch.device(device))
-    device_spec = DeviceSpec(
-        total_bytes=properties.total_memory,
-        name=properties.name,
-        compute_capability=(properties.major, properties.minor),
-    )
-    # Without sleep mode a colocated engine keeps its memory share during learn.
-    if not colocated or vllm_config is None or vllm_config.sleep_mode:
-        return device_spec
-    engine_bytes = int(properties.total_memory * vllm_config.gpu_memory_utilization)
-    return device_spec.model_copy(
-        update={"available_bytes": device_spec.usable_bytes - engine_bytes}
-    )
-
-
 class HiddenStateHead(torch.nn.Identity):
     """Identity output head whose ``weight`` carries the replaced layer's dtype."""
 
@@ -2918,6 +2890,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
     _allowed_adapters = frozenset({"actor", "reference", "critic"})
     _vllm_rollout_adapter = "actor"
+    _mini_batch_size_default: ClassVar[Literal["micro_batch", "batch"]] = "batch"
     # KL coefficient; zero without a reference policy.
     beta: float = 0.0
     # PPO sets its resolved fused actor and critic pass before wrap_models.
@@ -6036,12 +6009,16 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         ):
             return config
         if torch.device(self.device).type != "cuda":
-            return resolve_fsdp_memory(
-                None,
-                None,
-                TrainingSettings(fsdp=config),
-                training_breakdown,
-                orchestrated=True,
+            return replace(
+                config,
+                routed_expert_chunk_mib=(
+                    config.routed_expert_chunk_mib or ROUTED_CHUNK_MIB_CHOICES[-1]
+                ),
+                optim_cpu_offload=(
+                    not config.cpu_offload
+                    if config.optim_cpu_offload is None
+                    else config.optim_cpu_offload
+                ),
             )
         model, settings = self._training_estimate_inputs(
             ALGORITHM_NAMES[self.algo],
@@ -6050,9 +6027,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         )
         settings = settings.model_copy(update={"fsdp": config})
         device = self._training_device_spec()
-        picked = resolve_fsdp_memory(
-            model, device, settings, training_breakdown, orchestrated=True
-        )
+        picked = resolve_fsdp_memory(model, device, settings)
         chunk_mib, optim_cpu_offload = broadcast_object_list(
             [picked.routed_expert_chunk_mib, picked.optim_cpu_offload]
         )
@@ -6062,10 +6037,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             optim_cpu_offload=optim_cpu_offload,
         )
         estimate = estimate_training(
-            model,
-            device,
-            settings.model_copy(update={"fsdp": resolved}),
-            orchestrated=True,
+            model, device, settings.model_copy(update={"fsdp": resolved})
         )
         gib = 1024**3
         logger.log(
@@ -6085,9 +6057,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     ) -> PhaseBreakdown:
         """Estimate this run's training peak on its CUDA device.
 
-        The budget is 95% of the device's CUDA capacity, less a colocated
-        vLLM engine's share when it stays resident during learn. The estimate
-        charges the per-process job overhead.
+        The budget is the device's total memory, less a colocated vLLM
+        engine's share when it stays resident during learn.
 
         :param algorithm: Estimator algorithm family.
         :type algorithm: Algorithm
@@ -6101,9 +6072,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         model, settings = self._training_estimate_inputs(
             algorithm, beta, fuse_actor_critic_pass=fuse_actor_critic_pass
         )
-        return estimate_training(
-            model, self._training_device_spec(), settings, orchestrated=True
-        )
+        return estimate_training(model, self._training_device_spec(), settings)
 
     def _training_estimate_inputs(
         self, algorithm: Algorithm, beta: float, fuse_actor_critic_pass: bool
@@ -6173,13 +6142,34 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     def _training_device_spec(self) -> DeviceSpec:
         """Memory budget of this run's CUDA device during learn.
 
-        Usable bytes follow :class:`DeviceSpec`: 95% of CUDA capacity when
-        available bytes are unset, less a resident colocated vLLM engine.
+        The budget is the device's CUDA capacity less
+        :data:`TRAINING_HEADROOM_FRACTION`.
 
-        :return: Device spec for the memory estimate.
+        :return: Device spec, less a resident colocated vLLM engine's share.
         :rtype: DeviceSpec
         """
-        return training_device_spec(self.device, self.vllm_config, self.colocated)
+        properties = torch.cuda.get_device_properties(torch.device(self.device))
+        device_spec = DeviceSpec(
+            total_bytes=properties.total_memory,
+            available_bytes=int(
+                properties.total_memory * (1 - TRAINING_HEADROOM_FRACTION)
+            ),
+            name=properties.name,
+            compute_capability=(properties.major, properties.minor),
+        )
+        # Without sleep mode a colocated engine keeps its memory share during learn.
+        if (
+            not self.colocated
+            or self.vllm_config is None
+            or self.vllm_config.sleep_mode
+        ):
+            return device_spec
+        engine_bytes = int(
+            properties.total_memory * self.vllm_config.gpu_memory_utilization
+        )
+        return device_spec.model_copy(
+            update={"available_bytes": device_spec.usable_bytes - engine_bytes}
+        )
 
     def _start_learn_phases(self) -> PhaseTimer:
         """Open the timing window of one ``learn`` on this agent's device.
@@ -6983,6 +6973,28 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         return token_ids_list, completion_masks, sampling_logps
 
     @staticmethod
+    def _resolve_fused_chunk_rows(vocab_size: int, explicit: int | None = None) -> int:
+        """Rows per fused ``(chunk_rows, vocab)`` logit tile.
+
+        Shared by the fused-linear-logprob (standard) path and the Liger
+        fused-loss path so both bound their per-chunk logit workspace
+        identically. A positive ``explicit`` overrides; ``None``
+        auto-tunes to a ~256 MB fp32 logit workspace (fewer rows at larger
+        vocab), clamped to ``[128, 4096]``.
+
+        :param vocab_size: lm_head output dim (rows of the logit tile's V axis).
+        :type vocab_size: int
+        :param explicit: Explicit override, or ``None`` to auto-tune.
+        :type explicit: int | None
+        :return: Rows per chunk.
+        :rtype: int
+        """
+        if explicit is not None:
+            return explicit
+        workspace_bytes = 256 * 1024 * 1024
+        return min(max(workspace_bytes // max(1, vocab_size * 4), 128), 4096)
+
+    @staticmethod
     def _logprobs_from_hidden_fused(
         hidden: torch.Tensor,
         head_w: torch.Tensor,
@@ -7027,7 +7039,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :return: ``(B, T)`` per-token logprobs in ``hidden.dtype``.
         :rtype: torch.Tensor
         """
-        chunk_rows = resolve_chunk_rows(head_w.shape[0], chunk_rows)
+        chunk_rows = LLMAlgorithm._resolve_fused_chunk_rows(
+            head_w.shape[0],
+            chunk_rows,
+        )
         return fused_linear_logprobs_chunked(
             hidden,
             head_w,
@@ -7078,7 +7093,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :return: ``(B, T)`` per-token logprobs in ``hidden.dtype``.
         :rtype: torch.Tensor
         """
-        chunk_rows = resolve_chunk_rows(head_w.shape[0], chunk_rows)
+        chunk_rows = LLMAlgorithm._resolve_fused_chunk_rows(
+            head_w.shape[0],
+            chunk_rows,
+        )
         return FusedLinearLogProbsFunction.apply(
             hidden,
             head_w,
@@ -7102,8 +7120,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         GRPO-family). Each data-parallel replica holds
         ``(batch_size / dp_size) * group_size`` samples, where ``dp_size`` is
         the process-group world folded by tensor-parallel degree
-        (``world_size / tp``). Unset ``mini_batch_size`` is that per-rank
-        count. Unset ``micro_batch_size_per_gpu`` uses the mini-batch.
+        (``world_size / tp``). Unset ``mini_batch_size`` uses ``micro_batch_size_per_gpu``
+        when the class default is ``"micro_batch"`` (RL rollout algorithms)
+        and that is set, else the per-rank collect. Unset
+        ``micro_batch_size_per_gpu`` uses the mini-batch.
         ``gradient_accumulation_steps`` is ``mini_batch_size /
         micro_batch_size_per_gpu``.
 
@@ -7138,10 +7158,15 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             raise ValueError(msg)
 
         self.batch_size_per_process = int(batch_size / dp_size) * group_size
-        self.mini_batch_size = resolve_mini_batch_size(
-            mini_batch_size,
-            self.batch_size_per_process,
-        )
+        if mini_batch_size is not None:
+            self.mini_batch_size = int(mini_batch_size)
+        elif (
+            self._mini_batch_size_default == "micro_batch"
+            and micro_batch_size_per_gpu is not None
+        ):
+            self.mini_batch_size = int(micro_batch_size_per_gpu)
+        else:
+            self.mini_batch_size = self.batch_size_per_process
         self.micro_batch_size_per_gpu = (
             int(micro_batch_size_per_gpu)
             if micro_batch_size_per_gpu is not None

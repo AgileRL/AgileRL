@@ -88,10 +88,12 @@ from agilerl.algorithms.core.registry import (
     RLParameter,
 )
 from agilerl.algorithms.grpo import GRPO
-from agilerl.arena.memory.estimator import estimate_training
-from agilerl.arena.memory.formulas import MAX_UNDERPREDICTION
+from agilerl.arena.memory import DeviceSpec, estimate_training
+from agilerl.arena.memory.formulas import (
+    MAX_UNDERPREDICTION,
+    TRAINING_HEADROOM_FRACTION,
+)
 from agilerl.arena.memory.manifest import ALGORITHM_NAMES
-from agilerl.arena.memory.specs import DeviceSpec
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.profiling import ProfilingConfig
 from agilerl.distributed import FSDPConfig
@@ -2143,16 +2145,18 @@ class TestConfigureBatchSizePerProcess:
         assert agent.mini_batch_size == 4
         assert agent.gradient_accumulation_steps == 4
 
-    def test_omitted_mini_batch_stays_the_rank_count_when_micro_is_set(self):
+    def test_micro_batch_default_steps_every_micro_batch(self):
         agent = _make_llm_agent()
+        agent._mini_batch_size_default = "micro_batch"
 
         agent.configure_batch_size_per_process(4, 1, None)
 
-        assert agent.mini_batch_size == 4
-        assert agent.gradient_accumulation_steps == 4
+        assert agent.mini_batch_size == 1
+        assert agent.gradient_accumulation_steps == 1
 
-    def test_omitted_micro_batch_uses_the_rank_batch(self):
+    def test_micro_batch_default_without_micro_uses_the_rank_batch(self):
         agent = _make_llm_agent()
+        agent._mini_batch_size_default = "micro_batch"
 
         agent.configure_batch_size_per_process(4, None, None)
 
@@ -2381,7 +2385,7 @@ def estimate_gib(agent, chunk_mib: int, optim_cpu_offload: bool) -> float:
     )
     device = DeviceSpec(total_bytes=2**50, name="test-gpu")
     estimate = estimate_training(
-        model, device, settings.model_copy(update={"fsdp": fsdp}), orchestrated=True
+        model, device, settings.model_copy(update={"fsdp": fsdp})
     )
     return estimate.total_bytes / 2**30
 
@@ -2393,7 +2397,9 @@ def with_buffer_gib(peak_gib: float) -> float:
 
 def patch_budget_gib(agent, monkeypatch, budget_gib: float) -> None:
     """Point ``agent`` at a CUDA device whose usable memory is ``budget_gib``."""
-    patch_cuda_device(agent, monkeypatch, int(budget_gib / 0.95 * 2**30))
+    patch_cuda_device(
+        agent, monkeypatch, int(budget_gib / (1 - TRAINING_HEADROOM_FRACTION) * 2**30)
+    )
 
 
 class TestLLMAlgorithmResolveFsdpConfig:
@@ -2602,6 +2608,7 @@ def vwa_super_vl(monkeypatch, tmp_path):
         calc_position_embeddings=False,
         device="cpu",
         use_liger_loss=False,
+        use_separate_reference_adapter=False,
         lora_config=LoraConfig(r=4, target_modules=["linear_1"], task_type="CAUSAL_LM"),
     )
     fsdp = FSDPConfig(ep=8, shard_group_size=8, reduce_dtype="bfloat16")
@@ -2635,10 +2642,10 @@ class TestLLMAlgorithmResolveFsdpConfigVwa:
         ("name", "cuda_gib"),
         [("NVIDIA A100-SXM4-80GB", 79.15), ("NVIDIA H100 80GB HBM3", 79.11)],
     )
-    def test_vwa_super_vl_takes_the_smallest_chunk(
-        self, vwa_super_vl, monkeypatch, caplog, name, cuda_gib
+    def test_vwa_super_vl_offloads_at_256_mib(
+        self, vwa_super_vl, monkeypatch, name, cuda_gib
     ):
-        # Arrange: 95% of these CUDA totals is under the lightest peak.
+        # Arrange
         monkeypatch.setattr(vwa_super_vl, "device", "cuda:0")
         monkeypatch.setattr(
             torch.cuda,
@@ -2652,16 +2659,13 @@ class TestLLMAlgorithmResolveFsdpConfigVwa:
         _, settings = vwa_super_vl._training_estimate_inputs(
             ALGORITHM_NAMES[vwa_super_vl.algo], 0.05, fuse_actor_critic_pass=False
         )
-        with caplog.at_level(logging.INFO, logger="agilerl.algorithms.core.base"):
-            resolved = vwa_super_vl._resolve_fsdp_config(vwa_super_vl.fsdp_config)
+        resolved = vwa_super_vl._resolve_fsdp_config(vwa_super_vl.fsdp_config)
 
         # Assert
         assert vwa_super_vl.batch_size_per_process == 8
         assert settings.trajectories == 8
-        assert resolved.routed_expert_chunk_mib == 64
+        assert resolved.routed_expert_chunk_mib == 512
         assert resolved.optim_cpu_offload is True
-        assert [record.levelno for record in caplog.records] == [logging.WARNING]
-        assert caplog.records[0].getMessage().endswith("(over budget)")
 
 
 class TestLLMAlgorithmTrainingDeviceSpec:
@@ -2670,20 +2674,7 @@ class TestLLMAlgorithmTrainingDeviceSpec:
 
         device = moe_ppo._training_device_spec()
 
-        assert device.available_bytes is None
-        assert device.usable_bytes == int(80 * 2**30 * 0.95)
-
-    def test_resident_colocated_engine_reduces_available_bytes(
-        self, moe_ppo, monkeypatch
-    ):
-        total = 80 * 2**30
-        patch_cuda_device(moe_ppo, monkeypatch, total)
-        moe_ppo.colocated = True
-        moe_ppo.vllm_config = VLLMConfig(gpu_memory_utilization=0.4, sleep_mode=False)
-
-        device = moe_ppo._training_device_spec()
-
-        assert device.available_bytes == int(total * 0.95) - int(total * 0.4)
+        assert device.usable_bytes == int(80 * 2**30 * 0.975)
 
 
 class TestLLMAlgorithmApplyLr:

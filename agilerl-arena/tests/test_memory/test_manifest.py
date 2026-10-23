@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from agilerl.arena.memory.estimator import estimate_run, estimate_training
 from agilerl.arena.memory.manifest import (
+    _liger_sequence_chunks,
     device_spec_from_resource_class,
     lookup_gpu,
     training_settings_from_manifest,
@@ -23,11 +23,9 @@ from agilerl.arena.memory.manifest import (
 from agilerl.arena.memory.manifest import (
     run_config_from_manifest as _run_config_from_manifest,
 )
-from agilerl.arena.memory.resolve.fuse import resolve_fuse_actor_critic_pass
-from agilerl.arena.memory.specs import DeviceSpec, GiB
+from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
 from agilerl.arena.models.fsdp import FSDPConfig
 from agilerl.arena.models.manifest import TrainingManifest
-from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 
 TINY_CONFIG = json.loads(
     (Path(__file__).parent / "assets" / "tiny_llm" / "config.json").read_text()
@@ -51,6 +49,27 @@ GRPO = {
         "max_context_length": 512,
     },
     "training": {"max_steps": 100},
+}
+
+# Liger with the vLLM correction off, so turn- and trajectory-level
+# losses reach the fused kernel.
+SEQUENCE_LIGER_ROLLOUT = {
+    "use_liger_loss": True,
+    "vllm_importance_sampling_correction": False,
+}
+
+# GRPO also needs the off-policy masks unset; they default on.
+SEQUENCE_LIGER = {
+    **SEQUENCE_LIGER_ROLLOUT,
+    "off_policy_token_mask_bounds": None,
+    "off_policy_sequence_mask_threshold": None,
+}
+
+ENGINE = {"vllm_config": {"gpu_memory_utilization": 0.85}}
+
+ASYNC_ROLLOUT = {
+    "training": {"rollout_mode": "async", "rollout_engines_per_agent": 1},
+    "replay_buffer": {"kind": "llm"},
 }
 
 DQN = {
@@ -172,7 +191,8 @@ class TestTrainingSettings:
 
     @pytest.mark.parametrize(
         ("fuse", "expected"),
-        [(True, True), (False, False), (None, True)],
+        # Unset sizes separate passes: the trainer fuses only when that fits.
+        [(True, True), (False, False), (None, False)],
     )
     def test_llmppo_fused_actor_critic_pass_reaches_the_estimate(self, fuse, expected):
         # Arrange
@@ -191,114 +211,6 @@ class TestTrainingSettings:
         # Assert
         assert settings.algorithm == "ppo"
         assert settings.fuse_actor_critic_pass is expected
-
-    @pytest.mark.parametrize(
-        ("fuse", "total_gib", "expected"),
-        [
-            (None, 4, True),
-            (None, 2, False),
-            (True, 2, True),
-            (False, 4, False),
-        ],
-    )
-    def test_run_config_fuse_actor_critic_pass_follows_the_device(
-        self, fuse: bool | None, total_gib: float, expected: bool
-    ) -> None:
-        # Arrange: 4 GiB holds the fused peak; 2 GiB does not.
-        doc = manifest()
-        algorithm: dict[str, object] = {
-            "name": "LLMPPO",
-            "batch_size": 2,
-            "micro_batch_size_per_gpu": 1,
-            "vllm_config": {"tensor_parallel_size": 1, "sleep_mode": True},
-        }
-        if fuse is not None:
-            algorithm["fuse_actor_critic_pass"] = fuse
-        doc["algorithm"] = algorithm
-        doc["training"]["rollout_mode"] = "async"
-        doc["training"]["rollout_engines_per_agent"] = 1
-        doc["replay_buffer"] = {"kind": "llm"}
-        device = DeviceSpec(total_bytes=int(total_gib * GiB), name="NVIDIA L4")
-        model_config = SUPPORTED_MODEL_INFO["Qwen/Qwen2.5-0.5B-Instruct"].config
-
-        # Act
-        config = run_config_from_manifest(doc, device, model_config)
-
-        # Assert
-        assert config.training.fuse_actor_critic_pass is expected
-        peak = estimate_run(config).training
-        at_bit = estimate_training(
-            config.model,
-            device,
-            config.training.model_copy(update={"fuse_actor_critic_pass": expected}),
-            orchestrated=True,
-        )
-        assert peak.total_bytes == at_bit.total_bytes
-
-    def test_unset_fuse_on_a_device_matches_the_shared_fit(self) -> None:
-        # Arrange
-        doc = manifest()
-        doc["algorithm"] = {
-            "name": "LLMPPO",
-            "batch_size": 2,
-            "micro_batch_size_per_gpu": 1,
-            "vllm_config": {"tensor_parallel_size": 1, "sleep_mode": True},
-        }
-        doc["training"]["rollout_mode"] = "async"
-        doc["training"]["rollout_engines_per_agent"] = 1
-        doc["replay_buffer"] = {"kind": "llm"}
-        model_config = SUPPORTED_MODEL_INFO["Qwen/Qwen2.5-0.5B-Instruct"].config
-        devices = (
-            DeviceSpec(total_bytes=int(24 * GiB), name="NVIDIA L4"),
-            DeviceSpec(total_bytes=int(1 * GiB), name="NVIDIA L4"),
-        )
-
-        # Act
-        bits = []
-        for device in devices:
-            config = run_config_from_manifest(doc, device, model_config)
-            fused = estimate_training(
-                config.model,
-                device,
-                config.training.model_copy(update={"fuse_actor_critic_pass": True}),
-                orchestrated=True,
-            )
-            expected = resolve_fuse_actor_critic_pass(None, fused.fits)
-
-            # Assert
-            assert config.training.fuse_actor_critic_pass is expected
-            bits.append(config.training.fuse_actor_critic_pass)
-
-        assert bits == [True, False]
-
-    def test_explicit_fuse_stays_when_the_fused_peak_does_not_fit(self) -> None:
-        # Arrange
-        doc = manifest()
-        doc["algorithm"] = {
-            "name": "LLMPPO",
-            "batch_size": 2,
-            "micro_batch_size_per_gpu": 1,
-            "fuse_actor_critic_pass": True,
-            "vllm_config": {"tensor_parallel_size": 1, "sleep_mode": True},
-        }
-        doc["training"]["rollout_mode"] = "async"
-        doc["training"]["rollout_engines_per_agent"] = 1
-        doc["replay_buffer"] = {"kind": "llm"}
-        device = DeviceSpec(total_bytes=int(1 * GiB), name="NVIDIA L4")
-        model_config = SUPPORTED_MODEL_INFO["Qwen/Qwen2.5-0.5B-Instruct"].config
-
-        # Act
-        config = run_config_from_manifest(doc, device, model_config)
-        fused = estimate_training(
-            config.model,
-            device,
-            config.training.model_copy(update={"fuse_actor_critic_pass": True}),
-            orchestrated=True,
-        )
-
-        # Assert
-        assert fused.fits is False
-        assert config.training.fuse_actor_critic_pass is True
 
     def test_host_memory_settings_come_from_the_training_section(self):
         default = training_settings_from_manifest(GRPO)
@@ -329,16 +241,71 @@ class TestTrainingSettings:
             )
 
     @pytest.mark.parametrize(
-        "algorithm",
+        ("algorithm", "weight_grad"),
         [
-            {"use_liger_loss": True, "importance_sampling_level": "turn"},
-            {"use_liger_loss": True, "importance_sampling_level": "trajectory"},
-            {"use_liger_loss": True, "loss_type": "gspo"},
+            ({"importance_sampling_level": "trajectory"}, True),
+            ({"loss_type": "gspo"}, True),
+            ({"importance_sampling_level": "turn"}, False),
+            ({"importance_sampling_level": "token"}, True),
+            # Turn advantages at trajectory level have no selective kernel.
+            (
+                {
+                    "importance_sampling_level": "trajectory",
+                    "advantage_granularity": "turn",
+                },
+                False,
+            ),
         ],
+        ids=["trajectory", "gspo", "turn", "token", "trajectory-turn-advantages"],
     )
-    def test_unbounded_liger_loss_is_refused(self, algorithm):
-        with pytest.raises(ValueError, match="chunked token-level"):
-            training_settings_from_manifest(manifest(algorithm=algorithm))
+    def test_grpo_liger_keeps_the_token_tile(self, algorithm, weight_grad):
+        settings = training_settings_from_manifest(
+            manifest(algorithm={**SEQUENCE_LIGER, **algorithm})
+        )
+
+        assert settings.liger_sequence_chunks is False
+        assert settings.liger_weight_grad is weight_grad
+
+    @pytest.mark.parametrize(
+        ("algorithm", "sequence_chunks", "weight_grad"),
+        [
+            ({"importance_sampling_level": "trajectory"}, True, False),
+            ({"importance_sampling_level": "token"}, False, True),
+            (
+                {
+                    "importance_sampling_level": "trajectory",
+                    "vllm_importance_sampling_correction": True,
+                },
+                False,
+                False,
+            ),
+            (
+                {"importance_sampling_level": "trajectory", "use_liger_loss": False},
+                False,
+                False,
+            ),
+        ],
+        ids=["trajectory", "token", "vllm-correction", "no-liger"],
+    )
+    def test_llmppo_liger_keeps_a_sequence_of_logits(
+        self, algorithm, sequence_chunks, weight_grad
+    ):
+        doc = manifest(**ASYNC_ROLLOUT)
+        doc["algorithm"] = {
+            "name": "LLMPPO",
+            "batch_size": 2,
+            "micro_batch_size_per_gpu": 1,
+            "use_liger_loss": True,
+            "vllm_importance_sampling_correction": False,
+            "importance_sampling_level": "trajectory",
+            **ENGINE,
+            **algorithm,
+        }
+
+        settings = training_settings_from_manifest(doc)
+
+        assert settings.liger_sequence_chunks is sequence_chunks
+        assert settings.liger_weight_grad is weight_grad
 
     def test_token_level_liger_loss_passes(self):
         settings = training_settings_from_manifest(
@@ -350,6 +317,129 @@ class TestTrainingSettings:
             )
         )
         assert settings.algorithm == "grpo"
+        assert settings.liger_sequence_chunks is False
+        assert settings.liger_weight_grad is True
+
+    @pytest.mark.parametrize(
+        ("algorithm", "sequence_chunks"),
+        [
+            ({}, True),
+            ({"turn_level_clip": False}, False),
+            ({"advantage_granularity": "token"}, False),
+            ({"importance_sampling_level": "turn"}, True),
+            ({"importance_sampling_level": "token"}, False),
+        ],
+        ids=[
+            "auto-resolves-to-turn-clip",
+            "auto-without-turn-clip-stays-on-the-token-tile",
+            "auto-token-advantages-stay-on-the-token-tile",
+            "turn",
+            "token",
+        ],
+    )
+    def test_llmppo_sequence_chunks_follow_the_trainer_kernel(
+        self, algorithm, sequence_chunks
+    ):
+        doc = manifest()
+        doc["algorithm"] = {
+            "name": "LLMPPO",
+            "batch_size": 2,
+            "micro_batch_size_per_gpu": 1,
+            **SEQUENCE_LIGER_ROLLOUT,
+            **algorithm,
+        }
+
+        settings = training_settings_from_manifest(doc)
+
+        assert settings.algorithm == "ppo"
+        assert settings.liger_sequence_chunks is sequence_chunks
+
+    @pytest.mark.parametrize(
+        ("importance_sampling_level", "sequence_chunks"),
+        [("trajectory", True), ("token", False)],
+    )
+    def test_llmreinforce_sequence_chunks_follow_the_trainer_kernel(
+        self, importance_sampling_level, sequence_chunks
+    ):
+        doc = manifest()
+        doc["algorithm"] = {
+            "name": "LLMREINFORCE",
+            "batch_size": 2,
+            "micro_batch_size_per_gpu": 1,
+            **SEQUENCE_LIGER_ROLLOUT,
+            "importance_sampling_level": importance_sampling_level,
+        }
+
+        settings = training_settings_from_manifest(doc)
+
+        assert settings.algorithm == "reinforce"
+        assert settings.liger_sequence_chunks is sequence_chunks
+
+    def test_other_rollout_specs_stay_on_the_token_tile(self):
+        spec = RolloutLLMSpec(
+            use_liger_loss=True,
+            vllm_importance_sampling_correction=False,
+        )
+
+        assert _liger_sequence_chunks(spec) is False
+
+
+class TestLigerSequenceLoss:
+    def test_default_gspo_manifest_returns_a_phase_breakdown(self):
+        # Arrange: GSPO defaults to loss_type="gspo" and use_liger_loss=True.
+        doc = manifest(algorithm={"name": "GSPO", **ENGINE}, **ASYNC_ROLLOUT)
+
+        # Act
+        settings = training_settings_from_manifest(doc)
+        estimate = estimate_manifest(
+            doc, device_spec_from_resource_class(L4_TIER), TINY_CONFIG
+        )
+
+        # Assert: GSPO streams log-probs, so the sequence tile stays off.
+        # The default correction leaves the standard path, which has no head grad.
+        assert settings.liger_sequence_chunks is False
+        assert settings.liger_weight_grad is False
+        assert estimate.training.total_bytes > 0
+
+    def test_a_card_below_the_sequence_tile_does_not_fit(self):
+        # Arrange: a long context makes the LLMPPO sequence tile the peak.
+        long_context = {"max_context_length": 32768}
+
+        def llmppo(use_liger_loss: bool) -> dict:
+            doc = manifest(network=long_context, **ASYNC_ROLLOUT)
+            doc["algorithm"] = {
+                "name": "LLMPPO",
+                "batch_size": 2,
+                "micro_batch_size_per_gpu": 1,
+                "use_liger_loss": use_liger_loss,
+                "vllm_importance_sampling_correction": False,
+                "importance_sampling_level": "trajectory",
+                **ENGINE,
+            }
+            return doc
+
+        sequence = llmppo(True)
+        token = llmppo(False)
+        probe = device_spec_from_resource_class(L4_TIER)
+        sequence_peak = estimate_manifest(
+            sequence, probe, TINY_CONFIG
+        ).training.total_bytes
+        token_estimate = estimate_manifest(token, probe, TINY_CONFIG).training
+        usable_share = token_estimate.device_usable_bytes / probe.total_bytes
+        card_gib = (
+            (sequence_peak + token_estimate.total_bytes) / 2 / usable_share / 1024**3
+        )
+        card = device_spec_from_resource_class(L4_TIER, gpu_memory_gib=card_gib)
+
+        # Act
+        sequence_fit = estimate_manifest(sequence, card, TINY_CONFIG).training
+        token_fit = estimate_manifest(token, card, TINY_CONFIG).training
+
+        # Assert
+        assert token_estimate.total_bytes < sequence_peak
+        assert token_fit.fits
+        assert not sequence_fit.fits
+        assert sequence_fit.total_bytes > sequence_fit.device_usable_bytes
 
 
 def segmented(segment_prompt_tokens: int | None, **algorithm: object) -> dict:
@@ -472,19 +562,19 @@ class TestGenerationSettings:
         assert settings.weight_dtype == "fp32"
 
     @pytest.mark.parametrize(
-        ("engines", "rollout_batch_size", "expected"),
-        [(2, 6, 12), ("auto", 6, 24), (2, 7, 16)],
+        ("engines", "expected"),
+        [(2, 12), ("auto", 24)],
     )
     def test_async_engine_without_max_num_seqs_runs_one_per_episode(
-        self, engines, rollout_batch_size, expected
+        self, engines, expected
     ):
-        # Arrange: group size 4. "auto" counts as one engine.
+        # Arrange: 6 groups of 4 per cycle; "auto" sizes one engine.
         doc = manifest(
             algorithm={"vllm_config": {"gpu_memory_utilization": 0.85}},
             training={
                 "rollout_mode": "async",
                 "rollout_engines_per_agent": engines,
-                "rollout_batch_size": rollout_batch_size,
+                "rollout_batch_size": 6,
             },
             replay_buffer={"kind": "llm"},
         )
@@ -692,77 +782,6 @@ class TestRunConfig:
                 GRPO, device_spec_from_resource_class(L4_TIER), TINY_CONFIG
             )
 
-    def test_async_lora_rank_snaps_to_a_vllm_accepted_value(self):
-        doc = manifest(
-            algorithm={
-                "lora_config": {"lora_r": 20},
-                "vllm_config": {"max_lora_rank": 20, "tensor_parallel_size": 1},
-            },
-            training={
-                "rollout_mode": "async",
-                "rollout_engines_per_agent": 1,
-                "rollout_batch_size": 1,
-            },
-            replay_buffer={"kind": "llm"},
-        )
-
-        settings = _generation_settings_from_manifest(doc)
-
-        assert settings.max_lora_rank == 32
-
-    @pytest.mark.parametrize(
-        ("lora_r", "max_lora_rank", "expected"),
-        [
-            (20, 20, 20),
-            (32, 8, 32),
-            (8, 20, 20),
-        ],
-    )
-    def test_colocated_lora_rank_stays_at_the_ceiling(
-        self, lora_r: int, max_lora_rank: int, expected: int
-    ) -> None:
-        # Arrange
-        doc = manifest(
-            algorithm={
-                "lora_config": {"lora_r": lora_r},
-                "vllm_config": {
-                    "max_lora_rank": max_lora_rank,
-                    "tensor_parallel_size": 1,
-                },
-            },
-        )
-
-        # Act
-        settings = _generation_settings_from_manifest(doc)
-
-        # Assert
-        assert settings.max_lora_rank == expected
-
-    def test_unknown_model_prices_the_rank_batch(self) -> None:
-        # Arrange: 8 prompts, group 4, on 2 trainer GPUs. The id is outside the catalog.
-        doc = manifest(
-            algorithm={
-                "batch_size": 8,
-                "micro_batch_size_per_gpu": None,
-                "vllm_config": {"tensor_parallel_size": 1},
-            },
-            network={"pretrained_model_name_or_path": "missing/not-a-model"},
-            training={
-                "rollout_mode": "async",
-                "rollout_engines_per_agent": 1,
-                "rollout_batch_size": 2,
-                "training_gpus_per_agent": 2,
-            },
-            replay_buffer={"kind": "llm"},
-        )
-        device = device_spec_from_resource_class(L4_TIER)
-
-        # Act
-        config = run_config_from_manifest(doc, device, TINY_CONFIG)
-
-        # Assert
-        assert config.training.micro_batch_size == 16
-
     def test_async_rollout_disaggregates(self):
         doc = manifest(
             algorithm={"vllm_config": {"gpu_memory_utilization": 0.9}},
@@ -840,11 +859,11 @@ class TestDistributedAndOrchestration:
             manifest(algorithm={"batch_size": 1, "micro_batch_size_per_gpu": None})
         )
         assert settings.trajectories == 4
-        assert settings.micro_batch_size == 4
+        assert settings.micro_batch_size == 1
 
 
 class TestMicroBatchRows:
-    def test_unset_micro_batch_on_one_gpu_is_the_rank_trajectory_count(self):
+    def test_unset_micro_batch_on_one_gpu_is_the_prompt_batch(self):
         settings = training_settings_from_manifest(
             manifest(
                 algorithm={
@@ -855,7 +874,7 @@ class TestMicroBatchRows:
             )
         )
 
-        assert settings.micro_batch_size == 128
+        assert settings.micro_batch_size == 16
 
     def test_unset_micro_batch_folds_tensor_parallel(self):
         settings = training_settings_from_manifest(
@@ -870,7 +889,7 @@ class TestMicroBatchRows:
             )
         )
 
-        assert settings.micro_batch_size == 64
+        assert settings.micro_batch_size == 8
 
     def test_explicit_micro_batch_is_kept(self):
         settings = training_settings_from_manifest(
@@ -886,7 +905,7 @@ class TestMicroBatchRows:
         assert settings.micro_batch_size == 4
 
     def test_micro_batch_larger_than_the_rank_fails_divisibility(self):
-        with pytest.raises(ValueError, match="divisible by micro_batch_size_per_gpu"):
+        with pytest.raises(ValueError, match="divisible by mini_batch_size"):
             training_settings_from_manifest(
                 manifest(
                     algorithm={

@@ -3,7 +3,7 @@
 """GPU memory estimation for LLM RL training and generation.
 
 Peak occupancy from model geometry, device, and training and generation
-settings. Manifest parsing lives in ``agilerl.arena.memory.manifest``.
+settings.
 """
 
 from agilerl.arena.memory.advice import Advice, advise
@@ -15,8 +15,18 @@ from agilerl.arena.memory.estimator import (
     estimate_run,
     estimate_training,
     generation_can_serve,
+    resolve_fsdp_memory,
 )
-from agilerl.arena.memory.resolve.fsdp import resolve_fsdp_memory
+from agilerl.arena.memory.manifest import (
+    GPU_CATALOGUE,
+    GpuInfo,
+    device_spec_from_resource_class,
+    estimate_manifest,
+    generation_settings_from_manifest,
+    lookup_gpu,
+    run_config_from_manifest,
+    training_settings_from_manifest,
+)
 from agilerl.arena.memory.solver import (
     SOLVABLE_FIELDS,
     CannotSolve,
@@ -36,11 +46,13 @@ from agilerl.arena.memory.specs import (
 )
 
 __all__ = [
+    "GPU_CATALOGUE",
     "SOLVABLE_FIELDS",
     "Advice",
     "CannotSolve",
     "DeviceSpec",
     "GenerationSettings",
+    "GpuInfo",
     "MemoryComponent",
     "ModelArch",
     "ModelSpec",
@@ -51,12 +63,18 @@ __all__ = [
     "TrainingSettings",
     "WeightVariant",
     "advise",
+    "device_spec_from_resource_class",
     "estimate_generation",
+    "estimate_manifest",
     "estimate_run",
     "estimate_training",
     "generation_can_serve",
+    "generation_settings_from_manifest",
     "inference_run_config",
+    "lookup_gpu",
     "resolve_fsdp_memory",
+    "run_config_from_manifest",
     "solve",
     "solve_inference",
+    "training_settings_from_manifest",
 ]

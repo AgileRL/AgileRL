@@ -198,7 +198,7 @@ class _Stub:
         self.temperature = 1.0
         self.cast_logprobs_to_fp32 = True
         self.max_output_tokens = 32
-        self.chunk_rows = 2
+        self.chunk_rows = 4
         self.pad_token_id = 0
         self.calc_position_embeddings = False
         self.use_kl_advantage_shaping = False
@@ -240,6 +240,9 @@ class _Stub:
 
     def _packing_mode(self) -> None:
         return None
+
+    def _resolve_fused_chunk_rows(self, _vocab: int, _chunk_rows: int) -> int:
+        return 2
 
     def _patch_lm_head_to_identity(self):
         return nullcontext()

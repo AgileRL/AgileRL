@@ -29,6 +29,7 @@ from rich.text import Text
 
 from agilerl.arena.config import CommandConfig, arena_client
 from agilerl.arena.memory.advice import advise
+from agilerl.arena.memory.engine_parallel import resolve_engine_tensor_parallel
 from agilerl.arena.memory.estimator import PhaseBreakdown, estimate_run
 from agilerl.arena.memory.formulas import MAX_UNDERPREDICTION
 from agilerl.arena.memory.manifest import (
@@ -36,7 +37,6 @@ from agilerl.arena.memory.manifest import (
     lookup_gpu,
     run_config_from_manifest,
 )
-from agilerl.arena.memory.resolve.engine import resolve_engine_tensor_parallel
 from agilerl.arena.memory.resources import TierCheck, check_tiers
 from agilerl.arena.memory.solver import (
     INFERENCE_GPU_MEMORY_UTILIZATION,

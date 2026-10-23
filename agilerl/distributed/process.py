@@ -65,12 +65,8 @@ def init_distributed(timeout_seconds: int = 1800) -> bool:
 
 
 def get_rank() -> int:
-    """Global rank (launcher ``RANK``, or 0 on a single device)."""
-    if is_distributed():
-        return dist.get_rank()
-    if distributed_env_present():
-        return int(os.environ["RANK"])
-    return 0
+    """Global rank (0 on a single device)."""
+    return dist.get_rank() if is_distributed() else 0
 
 
 def get_local_rank() -> int:
@@ -83,12 +79,8 @@ def get_local_rank() -> int:
 
 
 def get_world_size() -> int:
-    """Number of processes (launcher ``WORLD_SIZE``, or 1 on a single device)."""
-    if is_distributed():
-        return dist.get_world_size()
-    if distributed_env_present():
-        return int(os.environ["WORLD_SIZE"])
-    return 1
+    """Number of processes (1 on a single device)."""
+    return dist.get_world_size() if is_distributed() else 1
 
 
 def is_main_process() -> bool:

@@ -11,10 +11,11 @@ from agilerl.arena.memory.estimator import (
     estimate_generation,
     estimate_run,
     estimate_training,
+    fsdp_gathered_bytes,
     generation_can_serve,
-    training_breakdown,
+    geometry_gap_warning,
+    resolve_fsdp_memory,
 )
-from agilerl.arena.memory.resolve.fsdp import resolve_fsdp_memory
 from agilerl.arena.memory.specs import (
     DeviceSpec,
     GenerationSettings,
@@ -97,10 +98,12 @@ class TestEstimateTraining:
             component(breakdown, "grads").n_bytes
             < component(breakdown, "base_weights").n_bytes
         )
-        # Chunked loss: workspace is tiles + one fp32 (vocab, hidden) head, capped at 512 MiB + head.
+        # Chunked loss: tiles, one fp32 head, and the weight-dtype head grad.
         head_upcast = model.arch.vocab_size * model.arch.hidden_size * 4
+        head_grad = model.arch.vocab_size * model.arch.hidden_size * 2
         assert (
-            component(breakdown, "logits_workspace").n_bytes <= 512 * MiB + head_upcast
+            component(breakdown, "logits_workspace").n_bytes
+            <= 512 * MiB + head_upcast + head_grad
         )
 
     def test_monotonic_in_seq_len_and_update_size(self, model, device):
@@ -199,6 +202,27 @@ class TestEstimateTraining:
         generation = estimate_generation(model, device, GenerationSettings())
         assert "allocator_reserve" not in {c.key for c in generation.components}
 
+    def test_fsdp_reserve_holds_the_gather_pool_only_when_resharding(
+        self, model, device
+    ):
+        # Arrange
+        common = {"n_training_gpus": 4, "max_model_len": 128}
+
+        # Act
+        resharded = estimate_training(
+            model, device, TrainingSettings(fsdp=FSDPConfig(), **common)
+        )
+        kept = estimate_training(
+            model,
+            device,
+            TrainingSettings(fsdp=FSDPConfig(reshard_after_forward=False), **common),
+        )
+
+        # Assert: the pool is the gathered window already priced in base weights.
+        pool = component(resharded, "allocator_reserve").detail["fsdp_gather_pool"]
+        assert 0 < pool < component(resharded, "base_weights").n_bytes
+        assert component(kept, "allocator_reserve").detail["fsdp_gather_pool"] == 0
+
     def test_exact_checkpoint_count_moves_the_weights_component(self, model, device):
         baseline = component(
             estimate_training(model, device, TrainingSettings()), "base_weights"
@@ -242,7 +266,7 @@ class TestEstimateTraining:
         )
 
         assert empty.total == 0
-        assert formulas.geometry_gap_warning(empty) is None
+        assert geometry_gap_warning(empty) is None
 
 
 class TestEstimateGeneration:
@@ -555,6 +579,14 @@ class TestTrainingSettingsInit:
         with pytest.raises(ValidationError, match="micro_batch_size"):
             TrainingSettings(micro_batch_size=0)
 
+    def test_sft_drops_the_unspecified_policy_head_grad(self):
+        assert TrainingSettings(algorithm="sft").liger_weight_grad is False
+        assert TrainingSettings().liger_weight_grad is True
+        assert (
+            TrainingSettings(algorithm="sft", liger_weight_grad=True).liger_weight_grad
+            is True
+        )
+
 
 class TestGenerationSettings:
     def test_concurrency_caps_at_max_num_seqs(self):
@@ -578,6 +610,15 @@ class TestModelSpecVariant:
             model.variant("nf4")
 
         assert model.variant("base") == WeightVariant()
+
+
+class TestFsdpGatheredBytes:
+    def test_no_fsdp_gathers_nothing(self, model):
+        counts = formulas.param_counts(model.arch)
+
+        gathered = fsdp_gathered_bytes(model, TrainingSettings(), counts, shards=1)
+
+        assert gathered == 0.0
 
 
 class TestDistributedTerms:
@@ -917,6 +958,36 @@ class TestDistributedTrainerOverhead:
             assert overhead.detail["trainer_lib_overhead"] == 0
             assert overhead.detail["distributed_trainer_overhead"] == device.nccl_bytes
             assert overhead.n_bytes == sum(overhead.detail.values())
+
+    def test_mesh_process_groups_add_nccl_overhead(self, model, device):
+        # Arrange
+        common = {"n_training_gpus": 4, "max_model_len": 128}
+
+        # Act
+        fsdp = estimate_training(
+            model, device, TrainingSettings(fsdp=FSDPConfig(), **common)
+        )
+        hsdp = estimate_training(
+            model,
+            device,
+            TrainingSettings(fsdp=FSDPConfig(shard_group_size=2), **common),
+        )
+        tensor_parallel = estimate_training(
+            model, device, TrainingSettings(fsdp=FSDPConfig(tp=2), **common)
+        )
+
+        # Assert: TP runs its group and the TP-replica group beside the world
+        # group, even for a family without a TP plan. HSDP's groups are not charged.
+        def nccl(breakdown):
+            return component(breakdown, "overhead").detail[
+                "distributed_trainer_overhead"
+            ]
+
+        world = nccl(fsdp)
+        assert nccl(hsdp) == world
+        assert nccl(tensor_parallel) == int(
+            world * (1 + 2 * formulas.NCCL_GROUP_FRACTION)
+        )
 
     def test_nccl_bytes_follow_the_named_device_then_default(self):
         assert DeviceSpec(
@@ -1334,7 +1405,6 @@ class TestRoutedChunkTerm:
             2.0,
             256 * MiB,
             expert_lora=True,
-            contracted=True,
             ep=8,
         )
         detail = component(breakdown, "activations").detail
@@ -1457,16 +1527,14 @@ class TestResolveFsdpMemory:
     def test_set_values_are_kept(self):
         settings = moe_settings(routed_expert_chunk_mib=128, optim_cpu_offload=True)
 
-        resolved = resolve_fsdp_memory(
-            MOE_MODEL, budget_device(80 * GiB), settings, training_breakdown
-        )
+        resolved = resolve_fsdp_memory(MOE_MODEL, budget_device(80 * GiB), settings)
 
         assert resolved.routed_expert_chunk_mib == 128
         assert resolved.optim_cpu_offload is True
 
     def test_ample_budget_picks_the_largest_chunk_and_a_gpu_optimizer(self):
         resolved = resolve_fsdp_memory(
-            MOE_MODEL, budget_device(80 * GiB), moe_settings(), training_breakdown
+            MOE_MODEL, budget_device(80 * GiB), moe_settings()
         )
 
         assert resolved.routed_expert_chunk_mib == 512
@@ -1477,9 +1545,7 @@ class TestResolveFsdpMemory:
         usable = (self.peak(128, True) + self.peak(256, True)) // 2
 
         # Act
-        resolved = resolve_fsdp_memory(
-            MOE_MODEL, budget_device(usable), moe_settings(), training_breakdown
-        )
+        resolved = resolve_fsdp_memory(MOE_MODEL, budget_device(usable), moe_settings())
 
         # Assert
         assert resolved.routed_expert_chunk_mib == 128
@@ -1492,15 +1558,9 @@ class TestResolveFsdpMemory:
         buffered_budget = int(gpu_peak / (1 - formulas.MAX_UNDERPREDICTION)) + 1
 
         # Act
-        tight = resolve_fsdp_memory(
-            MOE_MODEL, budget_device(offload_budget), settings, training_breakdown
-        )
-        unbuffered = resolve_fsdp_memory(
-            MOE_MODEL, budget_device(gpu_peak), settings, training_breakdown
-        )
-        roomy = resolve_fsdp_memory(
-            MOE_MODEL, budget_device(buffered_budget), settings, training_breakdown
-        )
+        tight = resolve_fsdp_memory(MOE_MODEL, budget_device(offload_budget), settings)
+        unbuffered = resolve_fsdp_memory(MOE_MODEL, budget_device(gpu_peak), settings)
+        roomy = resolve_fsdp_memory(MOE_MODEL, budget_device(buffered_budget), settings)
 
         # Assert
         assert tight.optim_cpu_offload is True
@@ -1508,9 +1568,7 @@ class TestResolveFsdpMemory:
         assert roomy.optim_cpu_offload is False
 
     def test_nothing_fits_takes_the_smallest_chunk_and_offload(self):
-        resolved = resolve_fsdp_memory(
-            MOE_MODEL, budget_device(GiB), moe_settings(), training_breakdown
-        )
+        resolved = resolve_fsdp_memory(MOE_MODEL, budget_device(GiB), moe_settings())
 
         assert resolved.routed_expert_chunk_mib == 64
         assert resolved.optim_cpu_offload is True
@@ -1518,9 +1576,7 @@ class TestResolveFsdpMemory:
     def test_full_cpu_offload_never_offloads_the_optimizer_again(self):
         settings = TrainingSettings(fsdp=FSDPConfig(cpu_offload=True))
 
-        resolved = resolve_fsdp_memory(
-            MOE_MODEL, budget_device(80 * GiB), settings, training_breakdown
-        )
+        resolved = resolve_fsdp_memory(MOE_MODEL, budget_device(80 * GiB), settings)
 
         assert resolved.optim_cpu_offload is False
 
@@ -1528,9 +1584,7 @@ class TestResolveFsdpMemory:
         usable = (self.peak(128, True) + self.peak(256, True)) // 2
 
         picks = [
-            resolve_fsdp_memory(
-                MOE_MODEL, budget_device(usable), moe_settings(), training_breakdown
-            )
+            resolve_fsdp_memory(MOE_MODEL, budget_device(usable), moe_settings())
             for _ in range(3)
         ]
 
@@ -1557,20 +1611,7 @@ class TestResolveFsdpMemory:
 
     def test_needs_an_fsdp_config(self, model, device):
         with pytest.raises(ValueError, match=r"needs settings\.fsdp"):
-            resolve_fsdp_memory(model, device, TrainingSettings(), training_breakdown)
-
-    def test_needs_a_model_when_a_device_is_set(self, device):
-        # Arrange
-        settings = TrainingSettings(fsdp=FSDPConfig())
-
-        # Act / Assert
-        with pytest.raises(ValueError, match="needs a model when device is set"):
-            resolve_fsdp_memory(
-                None,
-                device,
-                settings,
-                training_breakdown,
-            )
+            resolve_fsdp_memory(model, device, TrainingSettings())
 
 
 SUPER_VL_MODEL = ModelSpec(
@@ -1602,8 +1643,12 @@ def super_vl_cispo(
 
 
 def training_gpu(name: str, cuda_bytes: int) -> DeviceSpec:
-    """Training GPU. The budget is DeviceSpec.usable_bytes."""
-    return DeviceSpec(total_bytes=cuda_bytes, name=name)
+    """Training GPU budgeted as the trainer budgets it at runtime."""
+    return DeviceSpec(
+        total_bytes=cuda_bytes,
+        available_bytes=int(cuda_bytes * (1 - formulas.TRAINING_HEADROOM_FRACTION)),
+        name=name,
+    )
 
 
 class TestSuperVlCalibration:
@@ -1620,19 +1665,26 @@ class TestSuperVlCalibration:
         return estimate_training(SUPER_VL_MODEL, device, settings).total_bytes / GiB
 
     @pytest.mark.parametrize(
-        ("chunk_mib", "rank0_peak_gib"), [(64, 77.68), (256, 77.95)]
+        ("chunk_mib", "rank0_peak_gib"), [(64, 77.68), (256, 77.95), (1024, 78.09)]
     )
-    def test_estimate_tracks_the_rank0_peak(self, a100, chunk_mib, rank0_peak_gib):
-        assert self.estimate(a100, chunk_mib) == pytest.approx(rank0_peak_gib, abs=0.75)
+    def test_estimate_tracks_the_busiest_rank_above_rank0(
+        self, a100, chunk_mib, rank0_peak_gib
+    ):
+        # Arrange: the busiest rank peaked at 79.2 GiB at 64 MiB and is taken
+        # to rise with chunk size as rank 0 did.
+        busiest_peak_gib = 79.2 + (rank0_peak_gib - 77.68)
 
-    def test_estimate_at_1024_mib_stays_above_the_rank0_peak(self, a100):
-        # The chunk term follows the steeper H100 rise, so A100 is overestimated here.
-        assert 78.09 <= self.estimate(a100, 1024) < 78.09 + 1.25
+        # Act
+        estimate_gib = self.estimate(a100, chunk_mib)
+
+        # Assert
+        assert estimate_gib > rank0_peak_gib
+        assert estimate_gib == pytest.approx(busiest_peak_gib, abs=0.75)
 
     def test_busiest_rank_stays_inside_the_runtime_headroom(self, a100):
         # Arrange: the node's busiest rank peaked at 79.2 GiB at 64 MiB.
         busiest_peak_gib = 79.2
-        headroom_gib = (a100.total_bytes - a100.usable_bytes) / GiB
+        headroom_gib = A100_80GB_CUDA_BYTES * formulas.TRAINING_HEADROOM_FRACTION / GiB
 
         # Act
         excess_gib = busiest_peak_gib - self.estimate(a100, 64)
@@ -1645,7 +1697,7 @@ class TestSuperVlCalibration:
         # Arrange: rank 0 rose 0.27 GiB from 64 to 256 MiB; the busiest rank
         # is taken to rise by the same amount from its 79.2 GiB at 64 MiB.
         busiest_peak_gib = 79.2 + (77.95 - 77.68)
-        headroom_gib = (a100.total_bytes - a100.usable_bytes) / GiB
+        headroom_gib = A100_80GB_CUDA_BYTES * formulas.TRAINING_HEADROOM_FRACTION / GiB
 
         # Act
         excess_gib = busiest_peak_gib - self.estimate(a100, 256)
@@ -1664,17 +1716,12 @@ class TestSuperVlVwaPicks:
             ("NVIDIA H100 80GB HBM3", H100_80GB_CUDA_BYTES),
         ],
     )
-    def test_picks_the_smallest_chunk_with_the_optimizer_offloaded(
-        self, name, cuda_bytes
-    ):
+    def test_picks_512_mib_with_the_optimizer_offloaded(self, name, cuda_bytes):
         resolved = resolve_fsdp_memory(
-            SUPER_VL_MODEL,
-            training_gpu(name, cuda_bytes),
-            super_vl_cispo(29120, 16),
-            training_breakdown,
+            SUPER_VL_MODEL, training_gpu(name, cuda_bytes), super_vl_cispo(29120, 16)
         )
 
-        assert resolved.routed_expert_chunk_mib == 64
+        assert resolved.routed_expert_chunk_mib == 512
         assert resolved.optim_cpu_offload is True
 
     def test_h100_estimate_at_512_mib_covers_the_measured_busiest_rank(self):
@@ -1690,16 +1737,14 @@ class TestSuperVlVwaPicks:
         )
 
         # Assert
-        assert 76.47 <= estimate_gib < device.total_bytes / GiB
+        assert 76.47 <= estimate_gib < device.available_bytes / GiB
 
     def test_h100_pick_leaves_room_for_the_busiest_rank(self):
         # Arrange: EP routing spread A100 ranks 1.5 GiB over one learn step.
         rank_spread = int(1.5 * GiB)
         device = training_gpu("NVIDIA H100 80GB HBM3", H100_80GB_CUDA_BYTES)
         settings = super_vl_cispo(29120, 16)
-        resolved = resolve_fsdp_memory(
-            SUPER_VL_MODEL, device, settings, training_breakdown
-        )
+        resolved = resolve_fsdp_memory(SUPER_VL_MODEL, device, settings)
 
         # Act
         peak = estimate_training(
@@ -1754,10 +1799,15 @@ class TestTrainingSettingsShardGpusProperty:
             )
 
 
-class TestTrainingTensorParallelUnsupported:
-    def test_activations_stay_at_full_width(self, model, device):
+class TestTrainingTensorParallel:
+    def test_linears_are_resident_at_one_over_tp_and_the_head_is_gathered_for_logits(
+        self, device
+    ):
         # Arrange
-        common = {"n_training_gpus": 2, "max_model_len": 128}
+        model = ModelSpec(
+            model_id="nano", arch=ModelArch.from_hf_config(NEMOTRON_NANO_MAMBA)
+        )
+        common = {"n_training_gpus": 4, "max_model_len": 128}
 
         # Act
         plain = estimate_training(
@@ -1768,10 +1818,173 @@ class TestTrainingTensorParallelUnsupported:
         )
 
         # Assert
-        assert component(parallel, "activations").n_bytes == (
-            component(plain, "activations").n_bytes
+        assert (
+            component(parallel, "base_weights").n_bytes
+            > component(plain, "base_weights").n_bytes
         )
-        assert any("fsdp.tp=2 is not sized" in note for note in parallel.warnings)
+        assert (
+            component(parallel, "activations").detail["block_recompute"]
+            < (component(plain, "activations").detail["block_recompute"])
+        )
+        assert (
+            component(parallel, "activations").detail["checkpoint_boundaries"]
+            == (component(plain, "activations").detail["checkpoint_boundaries"])
+        )
+        plain_logits = component(plain, "logits_workspace").detail
+        parallel_logits = component(parallel, "logits_workspace").detail
+        assert parallel_logits["chunk_tiles"] == plain_logits["chunk_tiles"]
+        assert parallel_logits["tp_head_gather"] == model.arch.vocab_size * (
+            model.arch.hidden_size * 2
+        )
+        assert not any("not sized" in note for note in parallel.warnings)
+
+    def test_family_without_a_plan_prices_weights_and_activations_as_fsdp(
+        self, model, device
+    ):
+        # Arrange
+        common = {"n_training_gpus": 4, "max_model_len": 128}
+
+        # Act
+        plain = estimate_training(
+            model, device, TrainingSettings(fsdp=FSDPConfig(), **common)
+        )
+        parallel = estimate_training(
+            model, device, TrainingSettings(fsdp=FSDPConfig(tp=2), **common)
+        )
+
+        # Assert
+        assert not model.arch.tensor_parallel_plan
+        assert component(parallel, "base_weights").n_bytes == (
+            component(plain, "base_weights").n_bytes
+        )
+        assert (
+            component(parallel, "activations").detail["block_recompute"]
+            == (component(plain, "activations").detail["block_recompute"])
+        )
+
+    def test_family_without_a_plan_shards_an_untied_head(self, device):
+        # Arrange
+        arch = QWEN_05B.model_copy(update={"tied_embeddings": False})
+        model = ModelSpec(model_id="untied", arch=arch)
+        head_bytes = formulas.param_counts(arch).lm_head * 2
+        common = {"n_training_gpus": 4, "max_model_len": 128}
+
+        # Act
+        plain = estimate_training(
+            model, device, TrainingSettings(fsdp=FSDPConfig(), **common)
+        )
+        parallel = estimate_training(
+            model, device, TrainingSettings(fsdp=FSDPConfig(tp=2), **common)
+        )
+
+        # Assert: the head leaves its 1/4 FSDP shard and full gather for a 1/2 TP
+        # shard, and the logprob loop gathers it to a dense copy at the loss.
+        assert component(parallel, "base_weights").n_bytes == pytest.approx(
+            component(plain, "base_weights").n_bytes - 0.75 * head_bytes, abs=1
+        )
+        assert (
+            component(parallel, "activations").detail["loss_peak"]
+            == component(plain, "activations").detail["loss_peak"] + head_bytes
+        )
+        assert (
+            component(parallel, "activations").detail["block_recompute"]
+            == (component(plain, "activations").detail["block_recompute"])
+        )
+
+    def test_trajectories_divide_by_data_parallel_ranks(self):
+        settings = TrainingSettings(
+            n_training_gpus=4,
+            trajectories_per_update=128,
+            fsdp=FSDPConfig(tp=2),
+        )
+
+        assert settings.data_parallel_gpus == 2
+        assert settings.trajectories == 64
+
+
+class TestTrainingExpertParallel:
+    def test_ep_filling_the_group_drops_the_expert_gather(self, device):
+        # Arrange
+        common = {"n_training_gpus": 8, "max_model_len": 1024, "algorithm": "sft"}
+        routed = formulas.routed_expert_params_per_layer(MOE_MODEL.arch)
+
+        # Act
+        plain = estimate_training(
+            MOE_MODEL, device, TrainingSettings(fsdp=FSDPConfig(), **common)
+        )
+        parallel = estimate_training(
+            MOE_MODEL, device, TrainingSettings(fsdp=FSDPConfig(ep=8), **common)
+        )
+
+        # Assert: the plain window gathers two neighbouring units, one of
+        # them a full expert layer; EP gathers none.
+        saved = (
+            component(plain, "base_weights").n_bytes
+            - component(parallel, "base_weights").n_bytes
+        )
+        assert saved >= routed * 2
+
+    def test_leftover_ranks_add_one_local_expert_layer(self, device):
+        common = {"n_training_gpus": 8, "max_model_len": 1024, "algorithm": "sft"}
+        routed = formulas.routed_expert_params_per_layer(MOE_MODEL.arch)
+
+        filled = estimate_training(
+            MOE_MODEL, device, TrainingSettings(fsdp=FSDPConfig(ep=8), **common)
+        )
+        leftover = estimate_training(
+            MOE_MODEL, device, TrainingSettings(fsdp=FSDPConfig(ep=4), **common)
+        )
+
+        assert component(leftover, "base_weights").n_bytes == pytest.approx(
+            component(filled, "base_weights").n_bytes + routed // 4 * 2, abs=8
+        )
+
+    def test_expert_lora_state_splits_over_the_ep_group(self, device):
+        # Arrange
+        common = {
+            "n_training_gpus": 8,
+            "max_model_len": 1024,
+            "algorithm": "sft",
+            "lora_packed_target_matrices": 2,
+        }
+        expert_lora = formulas.packed_lora_param_count(MOE_MODEL.arch, 16, 2)
+
+        # Act
+        ep8 = estimate_training(
+            MOE_MODEL, device, TrainingSettings(fsdp=FSDPConfig(ep=8), **common)
+        )
+        ep4 = estimate_training(
+            MOE_MODEL, device, TrainingSettings(fsdp=FSDPConfig(ep=4), **common)
+        )
+
+        # Assert: fp32 Adam moments over an eighth vs a quarter of the experts.
+        adam_gap = (
+            component(ep4, "optimizer_state").n_bytes
+            - component(ep8, "optimizer_state").n_bytes
+        )
+        assert adam_gap == pytest.approx(
+            expert_lora * formulas.ADAM_BYTES_PER_PARAM * (1 / 4 - 1 / 8), rel=1e-6
+        )
+
+    def test_token_exchange_is_reported_and_halves_under_tp(self, device):
+        common = {"n_training_gpus": 8, "max_model_len": 1024, "algorithm": "sft"}
+
+        ep = estimate_training(
+            MOE_MODEL, device, TrainingSettings(fsdp=FSDPConfig(ep=4), **common)
+        )
+        ep_tp = estimate_training(
+            MOE_MODEL, device, TrainingSettings(fsdp=FSDPConfig(ep=4, tp=2), **common)
+        )
+        plain = estimate_training(
+            MOE_MODEL, device, TrainingSettings(fsdp=FSDPConfig(), **common)
+        )
+
+        exchange = component(ep, "activations").detail["ep_token_exchange"]
+        assert exchange == formulas.ep_exchange_bytes(MOE_MODEL.arch, 1, 1024, 2.0, 4)
+        assert component(ep_tp, "activations").detail["ep_token_exchange"] * 2 == (
+            exchange
+        )
+        assert component(plain, "activations").detail["ep_token_exchange"] == 0
 
 
 class TestFp8TensorParallelEngine:
@@ -1839,3 +2052,68 @@ class TestFp8TensorParallelEngine:
         )
         assert demand == 0
         assert component(breakdown, "kv_cache").detail["worst_case_demand"] == 0
+
+
+class TestLigerSequenceLossTile:
+    def test_sequence_chunks_tile_a_whole_row_at_the_loss(self, model, device):
+        # Arrange: 16384-token rows outgrow the token-level tile's rows.
+        token_rows = formulas.resolve_chunk_rows(model.arch.vocab_size, None)
+        common = {"max_model_len": 16384}
+
+        # Act
+        token = estimate_training(model, device, TrainingSettings(**common))
+        sequence = estimate_training(
+            model, device, TrainingSettings(liger_sequence_chunks=True, **common)
+        )
+
+        # Assert
+        token_detail = component(token, "activations").detail
+        sequence_detail = component(sequence, "activations").detail
+        head_grad = model.arch.vocab_size * model.arch.hidden_size * 2
+        assert token_rows < 16384
+        assert (
+            sequence_detail["loss_peak"] - token_detail["loss_peak"]
+            == (16384 * formulas.LIGER_SEQUENCE_LOGIT_BYTES - token_rows * 8)
+            * model.arch.vocab_size
+            - head_grad
+        )
+        assert sequence_detail["nograd_peak"] == token_detail["nograd_peak"]
+
+    def test_token_loss_keeps_the_weight_dtype_head_grad(self, model, device):
+        # Arrange: a short row, so the loss instant is the peak.
+        token = estimate_training(model, device, TrainingSettings(max_model_len=1024))
+        sequence = estimate_training(
+            model,
+            device,
+            TrainingSettings(max_model_len=1024, liger_sequence_chunks=True),
+        )
+        head_grad = model.arch.vocab_size * model.arch.hidden_size * 2
+
+        # Act
+        token_logits = component(token, "logits_workspace").detail
+        sequence_logits = component(sequence, "logits_workspace").detail
+
+        # Assert
+        assert token_logits["weight_dtype_head_grad"] == head_grad
+        assert sequence_logits["weight_dtype_head_grad"] == 0
+
+    def test_the_standard_path_drops_the_weight_dtype_head_grad(self, model, device):
+        # Arrange: a short row, so the loss instant is the peak.
+        fused = TrainingSettings(max_model_len=1024, liger_weight_grad=True)
+        standard = TrainingSettings(max_model_len=1024, liger_weight_grad=False)
+        head_grad = model.arch.vocab_size * model.arch.hidden_size * 2
+
+        # Act
+        fused_bar = estimate_training(model, device, fused)
+        standard_bar = estimate_training(model, device, standard)
+
+        # Assert
+        assert (
+            component(standard_bar, "logits_workspace").detail["weight_dtype_head_grad"]
+            == 0
+        )
+        assert (
+            component(fused_bar, "activations").detail["loss_peak"]
+            - component(standard_bar, "activations").detail["loss_peak"]
+            == head_grad
+        )

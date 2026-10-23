@@ -16,25 +16,6 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict
 
 from agilerl.arena.memory.estimator import RunEstimate, estimate_run
-from agilerl.arena.memory.resolve.batch import (
-    per_rank_trajectories,
-    require_batch_split,
-    resolve_micro_batch_size_per_gpu,
-    resolve_mini_batch_size,
-    rollout_group_size,
-)
-from agilerl.arena.memory.resolve.fuse import (
-    resolve_fuse_actor_critic_pass,
-    training_settings_with_fuse,
-)
-from agilerl.arena.memory.resolve.lora import (
-    resolve_lora_rank_ceiling,
-    resolve_max_lora_rank,
-)
-from agilerl.arena.memory.resolve.sequences import (
-    prompts_per_engine,
-    resolve_max_num_seqs,
-)
 from agilerl.arena.memory.specs import (
     Algorithm,
     DeviceSpec,
@@ -74,6 +55,9 @@ ALGORITHM_NAMES: dict[str, Algorithm] = {
 ATTENTION_MODULES = frozenset(
     {"q_proj", "k_proj", "v_proj", "o_proj", "qkv_proj", "query", "key", "value"}
 )
+
+# Sequences the framework's colocated engine decodes when vllm_config sets none.
+COLOCATED_MAX_NUM_SEQS = 8
 
 # Must match max_num_batched_tokens in the framework's FAMILY_RUNTIME_CONFIGS.
 FAMILY_MAX_NUM_BATCHED_TOKENS: dict[str, int] = {
@@ -280,27 +264,31 @@ def _engine_weight_quantization(value: str | None) -> Literal["none", "fp8"]:
     raise ValueError(msg)
 
 
+def _group_size(spec: LLMAlgorithmSpec) -> int:
+    if isinstance(spec, GRPOSpec):
+        return spec.group_size
+    return 1
+
+
 def _max_num_seqs(
     manifest: TrainingManifest, spec: LLMAlgorithmSpec, vllm: VLLMConfig
 ) -> int:
-    """The manifest's ``max_num_seqs``, else sequences one engine decodes.
+    """The manifest's ``max_num_seqs``, else the count the rollout runtime derives.
 
-    ``auto`` counts as one engine.
+    An async engine runs one sequence per episode it keeps going:
+    ``rollout_batch_size // rollout_engines_per_agent x group_size``. ``auto``
+    counts one engine, the largest share any engine can get.
     """
+    if vllm.max_num_seqs is not None:
+        return vllm.max_num_seqs
     training = manifest.training
-    prompts = 0
-    if vllm.max_num_seqs is None and training.async_rollout:
-        engines = training.rollout_engines_per_agent
-        n_engines = 1 if engines == "auto" else int(engines)
-        # Async validation sets an unset rollout_batch_size to 1.
-        rollout_batch_size = int(training.rollout_batch_size or 1)
-        prompts = prompts_per_engine(rollout_batch_size, n_engines)
-    return resolve_max_num_seqs(
-        vllm.max_num_seqs,
-        prompts,
-        rollout_group_size(spec),
-        not training.async_rollout,
-    )
+    if not training.async_rollout:
+        return COLOCATED_MAX_NUM_SEQS
+    engines = training.rollout_engines_per_agent
+    n_engines = 1 if engines == "auto" else engines
+    # Async validation sets an unset rollout_batch_size to 1.
+    rollout_batch_size = training.rollout_batch_size or 1
+    return rollout_batch_size // n_engines * _group_size(spec)
 
 
 def _max_num_batched_tokens(spec: LLMAlgorithmSpec, vllm: VLLMConfig) -> int | None:
@@ -355,64 +343,156 @@ def _stripped_towers(vllm: VLLMConfig) -> bool:
     return False
 
 
+def _data_parallel_size(spec: LLMAlgorithmSpec, n_training_gpus: int) -> int:
+    """Trainer world folded by tensor-parallel degree."""
+    tp = 1 if spec.fsdp is None else spec.fsdp.tp
+    if n_training_gpus % tp != 0:
+        msg = (
+            f"world_size ({n_training_gpus}) must be divisible by tp ({tp}) "
+            "for Tensor Parallel."
+        )
+        raise ValueError(msg)
+    return n_training_gpus // tp
+
+
 def resolve_micro_batch_rows(spec: LLMAlgorithmSpec, n_training_gpus: int) -> int:
-    """Rows in one training forward, then the divisibility checks.
+    """Rows in one training forward, matching the Ray builder and configure.
 
     :param spec: Validated LLM algorithm spec.
     :param n_training_gpus: Trainer ranks, ``training.training_gpus_per_agent``.
-    :return: Rows in one forward.
-    :raises ValueError: When the mini-batch and micro-batch do not divide.
+    :return: Rows in one forward or backward.
+    :raises ValueError: When the batch does not split into whole micro-batches.
     """
-    micro = resolve_micro_batch_size_per_gpu(spec, n_training_gpus)
-    _, per_rank = per_rank_trajectories(spec, n_training_gpus)
-    mini = resolve_mini_batch_size(spec.mini_batch_size, per_rank)
-    require_batch_split(mini, int(micro), per_rank)
-    return int(micro)
-
-
-def _reject_unbounded_liger_loss(spec: LLMAlgorithmSpec) -> None:
-    """Refuse Liger loss outside token-level importance sampling."""
-    # Above token level the kernel takes whole sequences per chunk, unbounded.
-    # gspo forces trajectory level.
-    if not spec.use_liger_loss:
-        return
-    is_gspo = isinstance(spec, GRPOSpec) and spec.loss_type == "gspo"
-    level: str | None = None
-    if isinstance(spec, (GRPOSpec, LLMPPOSpec, LLMREINFORCESpec)):
-        level = spec.importance_sampling_level
-    if is_gspo or level in ("turn", "trajectory"):
+    dp = _data_parallel_size(spec, n_training_gpus)
+    if spec.batch_size % dp != 0:
         msg = (
-            "use_liger_loss with turn/trajectory importance sampling is not "
-            "memory-bounded; this estimator sizes the chunked token-level path."
+            f"Batch size ({spec.batch_size}) must be divisible by the data-parallel "
+            f"size ({dp})."
         )
         raise ValueError(msg)
+    per_rank = (spec.batch_size // dp) * _group_size(spec)
+    micro = spec.micro_batch_size_per_gpu or max(spec.batch_size // dp, 1)
+    # GRPO-family defaults an unset mini-batch to the micro-batch. SFT and DPO
+    # default it to the per-rank sample count.
+    mini_follows_micro = spec.name in {
+        "GRPO",
+        "GSPO",
+        "CISPO",
+        "LLMPPO",
+        "LLMREINFORCE",
+    }
+    if spec.mini_batch_size is not None:
+        mini = spec.mini_batch_size
+    elif mini_follows_micro:
+        mini = micro
+    else:
+        mini = per_rank
+    if mini % micro != 0:
+        msg = (
+            f"mini_batch_size ({mini}) must be divisible by "
+            f"micro_batch_size_per_gpu ({micro}): "
+            "gradient_accumulation_steps = mini_batch_size / "
+            "micro_batch_size_per_gpu must be a whole number of backward "
+            "passes."
+        )
+        raise ValueError(msg)
+    if per_rank % mini != 0:
+        msg = (
+            f"batch_size_per_process ({per_rank}) must be "
+            f"divisible by mini_batch_size ({mini}): a rank "
+            "must split into whole optimizer steps."
+        )
+        raise ValueError(msg)
+    return micro
 
 
-def training_settings_from_spec(
-    spec: LLMAlgorithmSpec,
-    n_training_gpus: int,
-    micro_batch_size: int,
-    checkpoint_optimizer: bool = False,
-    async_rollout: bool = False,
-) -> TrainingSettings:
-    """Trainer-side settings for one algorithm spec.
+def _above_token_is(spec: LLMAlgorithmSpec) -> bool:
+    """Whether the resolved importance-sampling level pools more than one token."""
+    if isinstance(spec, LLMPPOSpec) and spec.importance_sampling_level == "auto":
+        return spec.turn_level_clip and spec.advantage_granularity != "token"
+    if isinstance(spec, (LLMPPOSpec, LLMREINFORCESpec)):
+        return spec.importance_sampling_level != "token"
+    return False
 
-    :param spec: Validated LLM algorithm spec.
-    :param n_training_gpus: Trainer ranks.
-    :param micro_batch_size: Rows in one forward.
-    :param checkpoint_optimizer: The checkpoint snapshot holds Adam moments.
-    :param async_rollout: The next rollout batch stays in host memory during learn.
-    :return: Training settings.
-    :raises ValueError: Quantization, eager attention, or unbounded Liger loss.
+
+def _grpo_selective_kernel(spec: GRPOSpec) -> bool:
+    """Whether GRPO, GSPO, or CISPO runs the selective Liger kernel.
+
+    GSPO is trajectory level. Turn level, non-token CISPO, and turn advantages
+    at trajectory level have no fused kernel. Above token level the vLLM
+    correction and the off-policy masks take the standard path.
     """
-    _reject_trainer_quantization(spec.quantization)
-    _reject_eager_attn_implementation(spec.attn_implementation)
-    _reject_unbounded_liger_loss(spec)
+    level = (
+        "trajectory"
+        if spec.loss_type == "gspo"
+        else spec.importance_sampling_level or "token"
+    )
+    if level == "turn" or (spec.loss_type == "cispo" and level != "token"):
+        return False
+    if level == "trajectory" and spec.advantage_granularity == "turn":
+        return False
+    if level == "token":
+        return True
+    masks = (
+        spec.off_policy_token_mask_bounds is not None
+        or spec.off_policy_sequence_mask_threshold is not None
+    )
+    return not (spec.vllm_importance_sampling_correction or masks)
+
+
+def _liger_sequence_chunks(spec: LLMAlgorithmSpec) -> bool:
+    """Whether the Liger loss keeps one whole sequence of logits.
+
+    LLMPPO and REINFORCE do, above token level: the fused kernel materializes
+    a ``(sequence, vocab)`` tile. GRPO and GSPO stream selective log-probs in
+    a fixed chunk, including when the ratio is pooled per completion. Above
+    token level the vLLM sampling correction runs the standard path instead.
+    """
+    if (
+        not spec.use_liger_loss
+        or not isinstance(spec, RolloutLLMSpec)
+        or spec.vllm_importance_sampling_correction
+    ):
+        return False
+    if isinstance(spec, GRPOSpec):
+        return False
+    return _above_token_is(spec)
+
+
+def _liger_weight_grad(spec: LLMAlgorithmSpec) -> bool:
+    """Whether the fused loss keeps a weight-dtype grad of the whole lm_head.
+
+    The selective and policy kernels do. The standard log-prob path does not.
+    A sequence tile already includes this buffer.
+    """
+    if not spec.use_liger_loss or _liger_sequence_chunks(spec):
+        return False
+    if isinstance(spec, GRPOSpec):
+        return _grpo_selective_kernel(spec)
+    if isinstance(spec, (LLMPPOSpec, LLMREINFORCESpec)):
+        return not (spec.vllm_importance_sampling_correction and _above_token_is(spec))
+    return False
+
+
+def training_settings_from_manifest(
+    manifest: TrainingManifest | str | Path | dict[str, Any],
+) -> TrainingSettings:
+    """Trainer-side settings, read as the trainer reads the manifest.
+
+    Settings the estimator cannot size (quantization, the eager backend)
+    raise ``ValueError``.
+    """
+    manifest = _validated(manifest)
+    spec = llm_spec(manifest)
     lora = _lora_config(spec)
+    n_training_gpus = manifest.training.training_gpus_per_agent
+    _reject_trainer_quantization(spec.quantization)
+    micro_batch_size = resolve_micro_batch_rows(spec, n_training_gpus)
+    _reject_eager_attn_implementation(spec.attn_implementation)
     return TrainingSettings(
         algorithm=ALGORITHM_NAMES[spec.name],
-        group_size=rollout_group_size(spec),
-        trajectories_per_update=spec.batch_size * rollout_group_size(spec),
+        group_size=_group_size(spec),
+        trajectories_per_update=spec.batch_size * _group_size(spec),
         max_model_len=(
             spec.max_row_tokens
             if isinstance(spec, RolloutLLMSpec) and spec.max_row_tokens is not None
@@ -430,48 +510,17 @@ def training_settings_from_spec(
         gradient_checkpointing=spec.gradient_checkpointing,
         activation_offload=spec.activation_offload,
         chunk_rows=spec.chunk_rows,
+        liger_sequence_chunks=_liger_sequence_chunks(spec),
+        liger_weight_grad=_liger_weight_grad(spec),
         n_training_gpus=n_training_gpus,
         fsdp=spec.fsdp,
-        fuse_actor_critic_pass=(
-            resolve_fuse_actor_critic_pass(spec.fuse_actor_critic_pass, None)
-            if isinstance(spec, LLMPPOSpec)
-            else False
-        ),
-        checkpoint_optimizer=checkpoint_optimizer,
-        async_rollout=async_rollout,
-        micro_batch_size=micro_batch_size,
-        sequence_packing=spec.use_sequence_packing,
-    )
-
-
-def training_settings_from_manifest(
-    manifest: TrainingManifest | str | Path | dict[str, Any],
-    micro_batch_size: int | None = None,
-) -> TrainingSettings:
-    """Trainer-side settings, read as the trainer reads the manifest.
-
-    Settings the estimator cannot size (quantization, the eager backend,
-    Liger above token level) raise ``ValueError``.
-
-    :param manifest: Training manifest.
-    :param micro_batch_size: Rows in one forward. ``None`` resolves an omitted
-        field without a device.
-    :return: Training settings.
-    """
-    manifest = _validated(manifest)
-    spec = llm_spec(manifest)
-    n_training_gpus = manifest.training.training_gpus_per_agent
-    _reject_trainer_quantization(spec.quantization)
-    if micro_batch_size is None:
-        micro_batch_size = resolve_micro_batch_rows(spec, n_training_gpus)
-    _reject_eager_attn_implementation(spec.attn_implementation)
-    _reject_unbounded_liger_loss(spec)
-    return training_settings_from_spec(
-        spec,
-        n_training_gpus,
-        micro_batch_size,
+        # Unset sizes separate passes: the trainer fuses only when that fits.
+        fuse_actor_critic_pass=isinstance(spec, LLMPPOSpec)
+        and spec.fuse_actor_critic_pass is True,
         checkpoint_optimizer=manifest.training.checkpoint_optimizer,
         async_rollout=manifest.training.async_rollout,
+        micro_batch_size=micro_batch_size,
+        sequence_packing=spec.use_sequence_packing,
     )
 
 
@@ -513,16 +562,12 @@ def generation_settings_from_manifest(
         "max_num_batched_tokens": _max_num_batched_tokens(spec, vllm),
         "kv_cache_memory_bytes": vllm.kv_cache_memory_bytes,
         "enforce_eager": vllm.enforce_eager,
-        "max_lora_rank": (
-            resolve_max_lora_rank(vllm.max_lora_rank, lora.lora_r)
-            if manifest.training.async_rollout
-            else resolve_lora_rank_ceiling(vllm.max_lora_rank, lora.lora_r)
-        ),
+        "max_lora_rank": max(vllm.max_lora_rank, lora.lora_r),
         "max_loras": vllm.max_loras,
         "weight_dtype": weight_dtype,
         "weight_quantization": weight_quantization,
         "weight_variant": "engine" if stripped else "base",
-        "concurrent_requests": spec.batch_size * rollout_group_size(spec),
+        "concurrent_requests": spec.batch_size * _group_size(spec),
     }
     if width is not None:
         settings["tensor_parallel_size"] = width
@@ -575,24 +620,6 @@ def run_config_from_manifest(
     """
     manifest = _validated(manifest)
     spec = llm_spec(manifest)
-    # Chosen on a copy so this call does not pin the caller's omitted field.
-    model: ModelSpec | None = None
-    generation: GenerationSettings | None = None
-    if spec.micro_batch_size_per_gpu is None:
-        manifest = manifest.model_copy(deep=True)
-        spec = llm_spec(manifest)
-        generation = generation_settings_from_manifest(
-            manifest, tensor_parallel_size=tensor_parallel_size
-        )
-        model = _model_spec(spec, model_config, n_params, generation)
-        n_training_gpus = manifest.training.training_gpus_per_agent
-        base = training_settings_from_manifest(manifest, micro_batch_size=1)
-        micro = resolve_micro_batch_size_per_gpu(
-            spec, n_training_gpus, device, model, base
-        )
-        _, per_rank = per_rank_trajectories(spec, n_training_gpus)
-        spec.micro_batch_size_per_gpu = micro
-        spec.mini_batch_size = resolve_mini_batch_size(spec.mini_batch_size, per_rank)
     training = training_settings_from_manifest(manifest)
     if training.uses_generation_engine and not manifest.training.async_rollout:
         msg = (
@@ -600,19 +627,11 @@ def run_config_from_manifest(
             "this estimator sizes async rollout only."
         )
         raise ValueError(msg)
-    if model is None or generation is None:
-        generation = generation_settings_from_manifest(
-            manifest, tensor_parallel_size=tensor_parallel_size
-        )
-        model = _model_spec(spec, model_config, n_params, generation)
-    training = training_settings_with_fuse(
-        spec.fuse_actor_critic_pass if isinstance(spec, LLMPPOSpec) else None,
-        training,
-        model,
-        device,
+    generation = generation_settings_from_manifest(
+        manifest, tensor_parallel_size=tensor_parallel_size
     )
     return RunConfig(
-        model=model,
+        model=_model_spec(spec, model_config, n_params, generation),
         train_device=device,
         gen_device=gen_device or device,
         training=training,

@@ -1542,8 +1542,7 @@ class TestExperimentMethods:
     @pytest.mark.parametrize(
         ("hub_id", "warned"),
         [
-            ("Qwen/Qwen3.5-4B", False),
-            ("Qwen/Qwen3-4B", True),
+            ("Qwen/Qwen3-4B", False),
             ("Qwen/Qwen2.5-0.5B-Instruct", True),
         ],
     )

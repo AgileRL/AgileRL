@@ -585,40 +585,54 @@ class TestGRPOInit:
             device="cpu",
         )
         assert gspo.loss_type == "gspo"
+        assert gspo.off_policy_token_mask_bounds is None
+        assert gspo.off_policy_sequence_mask_threshold is None
         class_sig = str(inspect.signature(GSPO))
         init_sig = str(inspect.signature(GSPO.__init__))
         assert "loss_type" not in class_sig
         assert "loss_type" not in init_sig
+        assert "off_policy_token_mask_bounds" not in class_sig
+        assert "off_policy_sequence_mask_threshold" not in init_sig
         assert "self" not in class_sig
         assert isinstance(gspo, GRPO)
+        with pytest.raises(ValueError, match="off_policy_token_mask_bounds"):
+            GSPO(
+                actor_network=actor,
+                pad_token_id=63,
+                pad_token="<pad>",
+                batch_size=4,
+                group_size=2,
+                max_output_tokens=4,
+                max_model_len=12,
+                wrap=False,
+                gradient_checkpointing=False,
+                device="cpu",
+                off_policy_token_mask_bounds=(0.5, 5.0),
+            )
         gspo.clean_up()
 
-    def test_init_unset_mini_is_per_rank_trajectories(self):
-        """An omitted mini-batch is the per-rank trajectory count.
-
-        On one rank that count is ``batch_size * group_size``. Gradient
-        accumulation is that mini-batch divided by the micro-batch.
-        """
-        # Arrange / Act
+    def test_init_unset_mini_steps_every_micro_batch(self):
         grpo = _make_cpu_grpo_for_branch_tests(
             batch_size=4,
             group_size=2,
             micro_batch_size_per_gpu=1,
         )
 
-        # Assert
         assert grpo.batch_size == 4
         assert grpo.batch_size_per_process == 8
-        assert grpo.mini_batch_size == 8
-        assert grpo.gradient_accumulation_steps == 8
+        assert grpo.mini_batch_size == 1
+        assert grpo.gradient_accumulation_steps == 1
         grpo.clean_up()
 
-    def test_cispo_gspo_signatures_match_grpo_minus_loss_type(self):
-        # @inherit_init_signature must expose exactly GRPO's params minus
-        # loss_type (no model construction needed — pure signature introspection).
+    def test_cispo_gspo_signatures_drop_pinned_args(self):
+        # CISPO pins loss_type. GSPO also pins the off-policy masks.
         grpo_params = set(inspect.signature(GRPO.__init__).parameters) - {"loss_type"}
+        assert set(inspect.signature(CISPO.__init__).parameters) == grpo_params
+        assert set(inspect.signature(GSPO.__init__).parameters) == grpo_params - {
+            "off_policy_token_mask_bounds",
+            "off_policy_sequence_mask_threshold",
+        }
         for variant in (CISPO, GSPO):
-            assert set(inspect.signature(variant.__init__).parameters) == grpo_params
             assert "loss_type" not in inspect.signature(variant).parameters
             assert "self" not in inspect.signature(variant).parameters
 
@@ -1140,6 +1154,8 @@ class TestGRPOInit:
                 loss_type="gspo", importance_sampling_level="token"
             )
         assert grpo.importance_sampling_level == "trajectory"
+        assert grpo.off_policy_token_mask_bounds is None
+        assert grpo.off_policy_sequence_mask_threshold is None
         grpo.clean_up()
 
     @pytest.mark.parametrize("is_level", [None, "trajectory"])
@@ -1360,11 +1376,9 @@ class TestGRPOInit:
         with pytest.raises(
             ValueError,
             match=re.escape(
-                f"mini_batch_size ({batch_size * group_size}) must be divisible by "
-                f"micro_batch_size_per_gpu ({micro_batch_size_per_gpu}): "
-                "gradient_accumulation_steps = mini_batch_size / "
-                "micro_batch_size_per_gpu must be a whole number of backward "
-                "passes."
+                f"batch_size_per_process ({batch_size * group_size}) must be "
+                f"divisible by mini_batch_size ({micro_batch_size_per_gpu}): a rank "
+                "must split into whole optimizer steps."
             ),
         ):
             GRPO(

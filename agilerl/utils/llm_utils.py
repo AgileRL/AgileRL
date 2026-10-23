@@ -50,7 +50,6 @@ from agilerl.architectures.vllm_language import (
     apply_tower_connector_lora_engine_kwargs,
     nested_language_config,
 )
-from agilerl.arena.memory.resolve.lora import resolve_lora_rank_ceiling
 from agilerl.distributed.fsdp import CPUOffloadOptimizer, canonical_fsdp_param_fqn
 from agilerl.distributed.process import (
     allreduce_minmax_int,
@@ -3017,6 +3016,15 @@ def k3_kl_penalty_reference(
 # ---------------------------------------------------------------------------
 
 
+def resolve_vllm_max_lora_rank(
+    vllm_max_lora_rank: int,
+    lora_rank: int | None,
+) -> int:
+    """Ensure vLLM ``max_lora_rank`` is at least the trainer LoRA rank."""
+    trainer_rank = int(lora_rank or 0)
+    return max(int(vllm_max_lora_rank), trainer_rank)
+
+
 def resolve_vllm_max_num_batched_tokens(
     max_num_seqs: int,
     max_model_len: int,
@@ -3121,9 +3129,9 @@ def build_vllm_llm_init_kwargs(
     # Colocated vLLM always serves LoRA: the trainer shares vLLM's base and syncs
     # only the adapter per rollout.
     kwargs["enable_lora"] = True
-    kwargs["max_lora_rank"] = resolve_lora_rank_ceiling(
+    kwargs["max_lora_rank"] = resolve_vllm_max_lora_rank(
         vllm_config.max_lora_rank,
-        int(lora_rank or 0),
+        lora_rank,
     )
     kwargs["max_loras"] = vllm_config.max_loras
     for key, value in family_vllm_kwargs.items():

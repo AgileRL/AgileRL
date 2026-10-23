@@ -48,7 +48,6 @@ from agilerl.architectures.qwen3_5 import (
     QWEN3_5_MODEL_CLASS_OVERRIDES,
     qwen3_5_language_tower_hf_override,
 )
-from agilerl.arena.memory.resolve.lora import resolve_lora_rank_ceiling
 from agilerl.distributed import fsdp as dmod
 from agilerl.distributed import gather_params
 from agilerl.llm_envs import DatasetEnv
@@ -114,6 +113,7 @@ from agilerl.utils.llm_utils import (
     resolve_batch_advantage_granularity,
     resolve_llm_device,
     resolve_pad_token_id,
+    resolve_vllm_max_lora_rank,
     resolve_vllm_max_num_batched_tokens,
     sample_eval_prompts,
     save_lora_adapters,
@@ -3304,15 +3304,15 @@ class TestOffloadColocatedTrainerFromGpu:
         assert calls == {"sync": 1, "empty": 1}
 
 
-class TestResolveLoraRankCeiling:
+class TestResolveVllmMaxLoraRank:
     def test_no_trainer_rank_keeps_configured_value(self):
-        assert resolve_lora_rank_ceiling(16, 0) == 16
+        assert resolve_vllm_max_lora_rank(16, None) == 16
 
     def test_trainer_rank_raises_floor(self):
-        assert resolve_lora_rank_ceiling(16, 32) == 32
+        assert resolve_vllm_max_lora_rank(16, 32) == 32
 
     def test_configured_value_wins_when_larger(self):
-        assert resolve_lora_rank_ceiling(16, 8) == 16
+        assert resolve_vllm_max_lora_rank(16, 8) == 16
 
 
 class TestResolveVllmMaxNumBatchedTokens:

@@ -3,11 +3,9 @@
 
 """The builder layer: how a contract spec becomes a live algorithm."""
 
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-import torch
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import (
@@ -15,9 +13,6 @@ from agilerl.algorithms.core import (
     MultiAgentAlgorithm,
     SingleAgentAlgorithm,
 )
-from agilerl.arena.memory.manifest import training_settings_from_spec
-from agilerl.arena.memory.resolve.batch import resolve_micro_batch_size_per_gpu
-from agilerl.arena.memory.specs import DeviceSpec
 from agilerl.arena.models.algorithms import (
     DPOSpec,
     DQNSpec,
@@ -39,7 +34,6 @@ from agilerl.arena.models.networks import (
     QNetworkSpec,
     StochasticActorSpec,
 )
-from agilerl.arena.models.networks import VLLMConfig as VLLMConfigSpec
 from agilerl.arena.models.registry import MANIFEST_REGISTRY
 from agilerl.builders import (
     AlgorithmBuildRuntime,
@@ -312,38 +306,7 @@ class TestAlgoClassParadigmGuards:
             MultiAgentBuilder.algo_class(DQNSpec())
 
 
-CATALOG_HUB_ID = "Qwen/Qwen2.5-0.5B-Instruct"
-CUDA_CARD_BYTES = 4 * 1024**3
-
-
-def _patch_cuda_card(monkeypatch, total_bytes: int = CUDA_CARD_BYTES) -> None:
-    monkeypatch.setattr(
-        torch.cuda,
-        "get_device_properties",
-        lambda _device: SimpleNamespace(
-            total_memory=total_bytes,
-            name="NVIDIA L4",
-            major=8,
-            minor=9,
-        ),
-    )
-
-
-def _cuda_device_spec(
-    total_bytes: int = CUDA_CARD_BYTES,
-    available_bytes: int | None = None,
-) -> DeviceSpec:
-    return DeviceSpec(
-        total_bytes=total_bytes,
-        name="NVIDIA L4",
-        compute_capability=(8, 9),
-        available_bytes=available_bytes,
-    )
-
-
-def _build_llm_with_dummy_algo(
-    spec, monkeypatch, *, rollout_mode: str = "", device: str = "cpu"
-):
+def _build_llm_with_dummy_algo(spec, monkeypatch, *, rollout_mode: str = ""):
     built = {}
 
     class DummyAlgo:
@@ -370,12 +333,7 @@ def _build_llm_with_dummy_algo(
 
     tokenizer = MagicMock()
     tokenizer.pad_token = "<pad>"
-    LLMBuilder.build(
-        spec,
-        tokenizer=tokenizer,
-        runtime=AlgorithmBuildRuntime(device=device),
-        rollout_mode=rollout_mode,
-    )
+    LLMBuilder.build(spec, tokenizer=tokenizer, rollout_mode=rollout_mode)
     return built
 
 
@@ -459,7 +417,7 @@ class TestLLMBuildGuards:
 
         assert built["fsdp_config"] == FSDPConfig()
 
-    def test_distributed_omitted_micro_batch_is_rank_trajectories(self, monkeypatch):
+    def test_distributed_splits_batch_size_per_rank(self, monkeypatch):
         monkeypatch.setattr(llm_builder, "is_distributed", lambda: True)
         monkeypatch.setattr(llm_builder, "get_world_size", lambda: 2)
         spec = GRPOSpec(
@@ -469,129 +427,4 @@ class TestLLMBuildGuards:
         )
         built = _build_llm_with_dummy_algo(spec, monkeypatch)
 
-        assert built["micro_batch_size_per_gpu"] == resolve_micro_batch_size_per_gpu(
-            spec, 2
-        )
-        assert built["micro_batch_size_per_gpu"] == 8
-
-    def test_cpu_omitted_micro_batch_stays_unset(self, monkeypatch):
-        spec = GRPOSpec(
-            group_size=2,
-            pretrained_model_name_or_path="stub/model",
-            batch_size=8,
-        )
-        built = _build_llm_with_dummy_algo(spec, monkeypatch)
-
-        assert "micro_batch_size_per_gpu" not in built
-
-    def test_cuda_omitted_micro_batch_is_the_fit(self, monkeypatch):
-        _patch_cuda_card(monkeypatch)
-        spec = GRPOSpec(
-            group_size=4,
-            batch_size=4,
-            pretrained_model_name_or_path=CATALOG_HUB_ID,
-            max_model_len=128,
-        )
-        built = _build_llm_with_dummy_algo(spec, monkeypatch, device="cuda:0")
-
-        device = _cuda_device_spec()
-        settings = training_settings_from_spec(spec, 1, micro_batch_size=1)
-        expected = resolve_micro_batch_size_per_gpu(spec, 1, device, settings=settings)
-        omitted = resolve_micro_batch_size_per_gpu(spec, 1)
-
-        assert built["micro_batch_size_per_gpu"] == expected
-        assert expected < omitted
-
-    def test_cuda_omitted_micro_batch_uses_launcher_world_size(self, monkeypatch):
-        card_bytes = 24 * 1024**3
-        _patch_cuda_card(monkeypatch, total_bytes=card_bytes)
-        monkeypatch.setenv("RANK", "0")
-        monkeypatch.setenv("WORLD_SIZE", "4")
-        monkeypatch.setenv("MASTER_ADDR", "127.0.0.1")
-        monkeypatch.setenv("MASTER_PORT", "29500")
-        spec = GRPOSpec(
-            group_size=2,
-            batch_size=8,
-            pretrained_model_name_or_path=CATALOG_HUB_ID,
-            max_model_len=128,
-        )
-        built = _build_llm_with_dummy_algo(spec, monkeypatch, device="cuda:0")
-
-        device = _cuda_device_spec(total_bytes=card_bytes)
-        settings = training_settings_from_spec(spec, 4, micro_batch_size=1)
-        expected = resolve_micro_batch_size_per_gpu(spec, 4, device, settings=settings)
-        world_one = resolve_micro_batch_size_per_gpu(
-            spec,
-            1,
-            device,
-            settings=training_settings_from_spec(spec, 1, micro_batch_size=1),
-        )
-
-        assert built["micro_batch_size_per_gpu"] == expected
-        assert expected == 4
-        assert world_one == 16
-
-    def test_cuda_explicit_micro_batch_is_kept(self, monkeypatch):
-        _patch_cuda_card(monkeypatch, total_bytes=1024**3)
-        spec = GRPOSpec(
-            group_size=4,
-            batch_size=4,
-            pretrained_model_name_or_path=CATALOG_HUB_ID,
-            max_model_len=128,
-            micro_batch_size_per_gpu=8,
-        )
-        built = _build_llm_with_dummy_algo(spec, monkeypatch, device="cuda:0")
-
-        assert built["micro_batch_size_per_gpu"] == 8
-
-    def test_cuda_search_refuses_eager_attention(self, monkeypatch):
-        _patch_cuda_card(monkeypatch)
-        spec = GRPOSpec(
-            group_size=4,
-            batch_size=4,
-            pretrained_model_name_or_path=CATALOG_HUB_ID,
-            max_model_len=128,
-            attn_implementation="eager",
-        )
-
-        with pytest.raises(ValueError, match="attn_implementation='eager'"):
-            _build_llm_with_dummy_algo(spec, monkeypatch, device="cuda:0")
-
-    def test_colocated_resident_engine_shrinks_the_search_budget(self, monkeypatch):
-        utilization = 0.3
-        seen: dict[str, DeviceSpec] = {}
-        real_resolve = llm_builder.resolve_micro_batch_size_per_gpu
-
-        def record(spec, n_training_gpus, device=None, model=None, settings=None):
-            seen["device"] = device
-            return real_resolve(spec, n_training_gpus, device, model, settings)
-
-        monkeypatch.setattr(llm_builder, "resolve_micro_batch_size_per_gpu", record)
-        _patch_cuda_card(monkeypatch)
-        spec = GRPOSpec(
-            group_size=4,
-            batch_size=4,
-            pretrained_model_name_or_path=CATALOG_HUB_ID,
-            max_model_len=128,
-            vllm_config=VLLMConfigSpec(
-                gpu_memory_utilization=utilization,
-                sleep_mode=False,
-            ),
-        )
-        built = _build_llm_with_dummy_algo(
-            spec, monkeypatch, rollout_mode="colocated", device="cuda:0"
-        )
-
-        passed = seen["device"]
-        full = _cuda_device_spec()
-        settings = training_settings_from_spec(spec, 1, micro_batch_size=1)
-        with_engine = resolve_micro_batch_size_per_gpu(
-            spec, 1, passed, settings=settings
-        )
-        without = resolve_micro_batch_size_per_gpu(spec, 1, full, settings=settings)
-
-        assert passed.available_bytes == full.usable_bytes - int(
-            passed.total_bytes * utilization
-        )
-        assert built["micro_batch_size_per_gpu"] == with_engine
-        assert with_engine < without
+        assert built["micro_batch_size_per_gpu"] == 4

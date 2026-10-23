@@ -36,9 +36,7 @@ from torch.utils.checkpoint import checkpoint
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from agilerl.algorithms.ppo_llm import PPO as LLMPPO
-from agilerl.arena.memory.estimator import estimate_training
-from agilerl.arena.memory.resolve.fuse import training_settings_with_fuse
-from agilerl.arena.memory.specs import DeviceSpec
+from agilerl.arena.memory import estimate_training
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.distributed.fsdp import FSDPConfig
 from agilerl.lora.fused import (
@@ -1342,17 +1340,6 @@ class TestPPOLearnGradNorms:
         )
 
 
-def cuda_total_under_peak(peak_bytes: int) -> int:
-    """CUDA total whose 95% usable bytes are one byte under ``peak_bytes``."""
-    usable = peak_bytes - 1
-    total = usable * 20 // 19
-    while int(total * 0.95) < usable:
-        total += 1
-    while int(total * 0.95) > usable:
-        total -= 1
-    return total
-
-
 def patch_cuda_device(
     agent: LLMPPO, monkeypatch: pytest.MonkeyPatch, total_memory: int
 ) -> None:
@@ -1402,7 +1389,7 @@ class TestPPOFuseActorCriticPass:
 
     @pytest.mark.parametrize(
         ("total_gib", "fuse", "verb", "budget"),
-        [(80, True, "fuses", "76.00"), (1, False, "splits", "0.95")],
+        [(80, True, "fuses", "78.00"), (1, False, "splits", "0.97")],
         ids=["fits", "does-not-fit"],
     )
     def test_none_on_cuda_fuses_only_when_the_estimate_fits(
@@ -1431,7 +1418,7 @@ class TestPPOFuseActorCriticPass:
 
     @pytest.mark.parametrize(
         ("sleep_mode", "fuse", "budget"),
-        [(False, False, "0.20"), (True, True, "3.80")],
+        [(False, False, "0.30"), (True, True, "3.90")],
         ids=["resident-engine", "sleeping-engine"],
     )
     def test_none_on_cuda_leaves_a_resident_vllm_share_out_of_the_budget(
@@ -1444,7 +1431,7 @@ class TestPPOFuseActorCriticPass:
         budget: str,
     ) -> None:
         # Arrange: 4 GiB fits the ~1.7 GiB fused estimate unless vLLM keeps
-        # 90% of it: 0.95 * 4 - 0.9 * 4 = 0.2 GiB.
+        # 90% of it: 0.975 * 4 - 0.9 * 4 = 0.3 GiB.
         agent = make_ppo()
         save_checkpoint_config(agent, tmp_path)
         patch_cuda_device(agent, monkeypatch, 4 * 2**30)
@@ -1463,42 +1450,6 @@ class TestPPOFuseActorCriticPass:
         assert resolved is fuse
         assert f"budget {budget} GiB" in caplog.text
 
-    @pytest.mark.parametrize("fits", [True, False], ids=["fits", "over-budget"])
-    def test_omitted_fuse_matches_training_settings_with_fuse(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        tmp_path: Path,
-        fits: bool,
-    ) -> None:
-        # Arrange: over-budget sits one byte under the orchestrated fused peak.
-        agent = make_ppo()
-        save_checkpoint_config(agent, tmp_path)
-        model, settings = agent._training_estimate_inputs(
-            "ppo", agent.beta, fuse_actor_critic_pass=True
-        )
-        probe = DeviceSpec(
-            total_bytes=80 * 2**30, name="test-gpu", compute_capability=(8, 0)
-        )
-        peak = estimate_training(model, probe, settings, orchestrated=True).total_bytes
-        total = 80 * 2**30 if fits else cuda_total_under_peak(peak)
-        patch_cuda_device(agent, monkeypatch, total)
-        device = DeviceSpec(
-            total_bytes=total, name="test-gpu", compute_capability=(8, 0)
-        )
-
-        # Act
-        resolved = agent._resolve_fuse_actor_critic_pass()
-        expected = training_settings_with_fuse(
-            None, settings, model, device
-        ).fuse_actor_critic_pass
-
-        # Assert
-        assert agent._training_device_spec() == device
-        if not fits:
-            assert device.usable_bytes == peak - 1
-        assert expected is fits
-        assert resolved is expected
-
     def test_none_on_cuda_estimates_the_gradient_micro_batch(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -1508,9 +1459,9 @@ class TestPPOFuseActorCriticPass:
         patch_cuda_device(agent, monkeypatch, 80 * 2**30)
         estimated = []
 
-        def record_estimate(model, device, settings, orchestrated=False):
+        def record_estimate(model, device, settings):
             estimated.append(settings)
-            return estimate_training(model, device, settings, orchestrated=orchestrated)
+            return estimate_training(model, device, settings)
 
         monkeypatch.setattr(
             "agilerl.algorithms.core.base.estimate_training", record_estimate
@@ -1535,9 +1486,9 @@ class TestPPOFuseActorCriticPass:
         patch_cuda_device(agent, monkeypatch, 80 * 2**30)
         archs = []
 
-        def record_estimate(model, device, settings, orchestrated=False):
+        def record_estimate(model, device, settings):
             archs.append(model.arch)
-            return estimate_training(model, device, settings, orchestrated=orchestrated)
+            return estimate_training(model, device, settings)
 
         monkeypatch.setattr(
             "agilerl.algorithms.core.base.estimate_training", record_estimate
