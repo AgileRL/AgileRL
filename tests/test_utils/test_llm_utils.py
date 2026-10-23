@@ -2016,6 +2016,27 @@ class TestInferClippableLoraScope:
         assert llm_utils_module._infer_clippable_lora_scope(_PlainLinearModel()) is None
 
 
+class _CausalLmLinearModel(nn.Module):
+    """Plain ``nn.Linear`` projections under ``model.layers`` without a scope segment."""
+
+    def __init__(self):
+        super().__init__()
+        self.model = nn.Module()
+        self.model.layers = nn.ModuleList([nn.Module()])
+        self.model.layers[0].q_proj = nn.Linear(4, 4)
+
+
+class _LanguageModelLayersLinearModel(nn.Module):
+    """Plain ``nn.Linear`` under ``model.language_model.layers``."""
+
+    def __init__(self):
+        super().__init__()
+        self.model = nn.Module()
+        self.model.language_model = nn.Module()
+        self.model.language_model.layers = nn.ModuleList([nn.Module()])
+        self.model.language_model.layers[0].q_proj = nn.Linear(4, 4)
+
+
 class TestExampleModuleKeysForLoraScope:
     def test_returns_keys_under_scope_only(self):
         model = _LanguageScopedLinearModel()
@@ -2032,6 +2053,21 @@ class TestExampleModuleKeysForLoraScope:
         keys = llm_utils_module._example_module_keys_for_lora_scope(
             model, "language_model", limit=1
         )
+        assert keys == ["model.language_model.q_proj"]
+
+
+class TestExampleModuleKeysOnModel:
+    def test_prefers_model_layers_keys(self):
+        keys = llm_utils_module._example_module_keys_on_model(_CausalLmLinearModel())
+        assert keys == ["model.layers.0.q_proj"]
+
+    def test_falls_back_to_any_keys(self):
+        keys = llm_utils_module._example_module_keys_on_model(_PlainLinearModel())
+        assert keys == ["q_proj"]
+
+    def test_limit_truncates_examples(self):
+        model = _LanguageScopedLinearModel()
+        keys = llm_utils_module._example_module_keys_on_model(model, limit=1)
         assert keys == ["model.language_model.q_proj"]
 
 
@@ -2079,6 +2115,31 @@ class TestAdaptLoraConfigForModel:
             adapt_lora_config_for_model(model, cfg, lora_target_scope="language_model")
         assert "Example keys under scope" in str(exc_info.value)
         assert "model.language_model.q_proj" in str(exc_info.value)
+        assert "leave algorithm.lora_target_scope unset" not in str(exc_info.value)
+
+    def test_explicit_scope_mismatch_on_causal_lm_hints_unset_scope(self):
+        model = _CausalLmLinearModel()
+        cfg = _PlainLoraConfig(target_modules=["q_proj"])
+        with pytest.raises(
+            ValueError, match="No modules matched scoped LoRA target_modules"
+        ) as exc_info:
+            adapt_lora_config_for_model(model, cfg, lora_target_scope="language_model")
+        message = str(exc_info.value)
+        assert "Example keys under scope: []" in message
+        assert "Example keys on model: ['model.layers.0.q_proj']" in message
+        assert "leave algorithm.lora_target_scope unset" in message
+
+    def test_language_model_layers_mismatch_does_not_hint_unset_scope(self):
+        model = _LanguageModelLayersLinearModel()
+        cfg = _PlainLoraConfig(target_modules=["q_proj"])
+        with pytest.raises(
+            ValueError, match="No modules matched scoped LoRA target_modules"
+        ) as exc_info:
+            adapt_lora_config_for_model(model, cfg, lora_target_scope="text")
+        message = str(exc_info.value)
+        assert "Example keys under scope: []" in message
+        assert "model.language_model.layers.0.q_proj" in message
+        assert "leave algorithm.lora_target_scope unset" not in message
 
     def test_explicit_scope_with_empty_targets_raises(self):
         cfg = _PlainLoraConfig(target_modules=[])
