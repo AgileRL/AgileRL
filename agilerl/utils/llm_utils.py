@@ -96,7 +96,6 @@ if HAS_LLM_DEPENDENCIES:
     from safetensors.torch import save_file
     from transformers import (
         AutoConfig,
-        AutoModelForCausalLM,
         BitsAndBytesConfig,
         GenerationConfig,
     )
@@ -110,7 +109,6 @@ else:
     # HAS_LLM_DEPENDENCIES, so these are never reached at runtime.
     PreTrainedModel = Any
     Dataset = Any
-    AutoModelForCausalLM: Any = None
     AutoModelForCausalLMWithValueHead: Any = None
     BitsAndBytesConfig: Any = None
     ParamWrapper: Any = None
@@ -287,10 +285,6 @@ BNB_QUANT_NF4_ALIASES = frozenset(
 BNB_QUANT_PRESETS = (
     BNB_QUANT_NONE_ALIASES | BNB_QUANT_INT8_ALIASES | BNB_QUANT_NF4_ALIASES
 )
-
-# Gemma 4 wraps projections in *ClippableLinear; PEFT must target the inner ``.linear``
-# submodule via regex (see https://github.com/huggingface/peft/issues/3129).
-CLIPPABLE_LINEAR_WRAPPER_SUFFIX = "ClippableLinear"
 
 
 def _as_optional_int(value: object | None) -> int | None:
@@ -1171,55 +1165,6 @@ def build_bnb_quantization_config(
     raise TypeError(msg)
 
 
-def model_has_clippable_linear_wrappers(model: nn.Module) -> bool:
-    """Return True when the model uses *ClippableLinear projection wrappers.
-
-    :param model: Model to inspect.
-    :type model: nn.Module
-    :return: Whether any ClippableLinear wrapper is present.
-    :rtype: bool
-    """
-    return any(
-        mod.__class__.__name__.endswith(CLIPPABLE_LINEAR_WRAPPER_SUFFIX)
-        for mod in model.modules()
-    )
-
-
-def discover_clippable_projection_leaf_names(model: nn.Module) -> list[str]:
-    """Return leaf names (e.g. ``q_proj``) of *ClippableLinear wrapper modules.
-
-    :param model: Model to inspect.
-    :type model: nn.Module
-    :return: Sorted unique leaf names.
-    :rtype: list[str]
-    """
-    names: set[str] = set()
-    for name, mod in model.named_modules():
-        if mod.__class__.__name__.endswith(CLIPPABLE_LINEAR_WRAPPER_SUFFIX):
-            names.add(name.rsplit(".", 1)[-1])
-    return sorted(names)
-
-
-def discover_clippable_inner_linear_module_keys(model: nn.Module) -> list[str]:
-    """Return full ``named_modules`` keys for inner ``.linear`` weights in wrappers.
-
-    :param model: Model to inspect.
-    :type model: nn.Module
-    :return: Module keys ending in ``.linear``.
-    :rtype: list[str]
-    """
-    named = dict(model.named_modules())
-    keys: list[str] = []
-    for name, mod in model.named_modules():
-        if not mod.__class__.__name__.endswith(CLIPPABLE_LINEAR_WRAPPER_SUFFIX):
-            continue
-        inner_key = f"{name}.linear"
-        inner = named.get(inner_key)
-        if inner is not None and _is_peft_adaptable_linear(inner):
-            keys.append(inner_key)
-    return sorted(keys)
-
-
 def _is_peft_adaptable_linear(module: nn.Module) -> bool:
     """Return True when PEFT LoRA can wrap this weight module."""
     if isinstance(module, nn.Linear):
@@ -1274,103 +1219,76 @@ def list_peft_matched_module_keys(
 
 
 def _looks_like_peft_target_regex(spec: str) -> bool:
-    """Heuristic: the user passed a regex ``target_modules`` spec.
-
-    Needed by :func:`adapt_lora_config_for_model` to pass regex specs through
-    untouched instead of rewriting them like plain suffix names.
-    """
+    """Heuristic: the user passed a regex ``target_modules`` spec, kept as given."""
     return spec.startswith(".*") or r"\." in spec or "(" in spec
 
 
-def build_clippable_linear_lora_target_regex(
-    projection_names: list[str],
-) -> str:
-    r"""Build a PEFT regex that targets inner ``.linear`` inside *ClippableLinear.
+def language_model_prefix(model: nn.Module) -> str | None:
+    """Return the module path of a VL model's language model, or None for a text-only model.
 
-    Example::
-
-        .*\.(q_proj|k_proj|v_proj)\.linear
-
-    For projections under a multimodal scope, use
-    :func:`build_scoped_lora_target_regex` instead (it also matches plain
-    ``nn.Linear`` projections under the scope).
-
-    See https://github.com/huggingface/peft/issues/3129
+    :param model: Model PEFT will wrap.
+    :type model: nn.Module
+    :return: Shortest ``named_modules`` key ending in ``language_model``.
+    :rtype: str | None
     """
-    if not projection_names:
-        msg = "At least one projection name is required for the LoRA target regex."
-        raise ValueError(msg)
-    alts = "|".join(re.escape(name) for name in sorted(set(projection_names)))
-    # Optional prefix so top-level and nested keys both fullmatch.
-    return rf"(?:.*\.)?({alts})\.linear"
+    prefixes = [
+        name
+        for name, _ in model.named_modules()
+        if name.rsplit(".", 1)[-1] == "language_model"
+    ]
+    return min(prefixes, key=len) if prefixes else None
 
 
-def build_scoped_lora_target_regex(
-    projection_names: list[str],
-    scope: str,
+def _language_model_linear_leaf_names(model: nn.Module, prefix: str) -> list[str]:
+    """Leaf names of every adaptable linear under *prefix*, except ``lm_head``."""
+    names = {
+        name.rsplit(".", 1)[-1]
+        for name, module in model.named_modules()
+        if name.startswith(f"{prefix}.") and _is_peft_adaptable_linear(module)
+    }
+    # PEFT's all-linear leaves the output head frozen; some VL models nest it here.
+    return sorted(names - {"lm_head"})
+
+
+def _anchored_lora_target_regex(
+    language_names: list[str],
+    tower_names: list[str],
+    prefix: str,
 ) -> str:
-    r"""PEFT regex for projections under a multimodal scope (e.g. ``language_model``).
+    """PEFT regex: *language_names* under *prefix*, *tower_names* everywhere else.
 
-    Matches both:
-
-    * *ClippableLinear* inner weights (``…q_proj.linear``) on vision/audio towers
-    * Plain ``nn.Linear`` leaves (``…q_proj``) on the language model in Gemma 4
-
-    PEFT uses ``re.fullmatch`` on ``named_modules()`` keys (peft#3129).
+    PEFT matches a string ``target_modules`` with ``re.fullmatch`` on each
+    ``named_modules`` key.
     """
-    if not projection_names:
-        msg = "At least one projection name is required for the LoRA target regex."
-        raise ValueError(msg)
-    alts = "|".join(re.escape(name) for name in sorted(set(projection_names)))
-    scope_esc = re.escape(scope.strip("."))
-    # Scope may be the first path component (``language_model.layers.0.q_proj``)
-    # or nested (``model.language_model.layers.0.q_proj``).
-    return rf"(?:.*\.)?{scope_esc}.*\.(?:{alts})(?:\.linear)?$"
+    prefix_esc = re.escape(prefix)
+    patterns = []
+    if language_names:
+        alts = "|".join(re.escape(name) for name in language_names)
+        patterns.append(rf"{prefix_esc}\.(?:.*\.)?(?:{alts})")
+    if tower_names:
+        alts = "|".join(re.escape(name) for name in tower_names)
+        patterns.append(rf"(?!{prefix_esc}\.)(?:.*\.)?(?:{alts})")
+    return "|".join(f"(?:{pattern})" for pattern in patterns)
 
 
-def _normalize_projection_leaf_name(name: str) -> str:
-    """Strip a trailing ``.linear`` so YAML can use either ``q_proj`` or ``q_proj.linear``."""
-    return name.removesuffix(".linear")
-
-
-def _projection_names_for_clippable_lora(
-    model: nn.Module, raw_targets: str | Iterable[str] | None
+def lora_target_module_names(
+    target_modules: str | Iterable[str] | None,
 ) -> list[str] | None:
-    """Resolve projection leaf names, or ``None`` if ``raw_targets`` is already regex."""
-    if raw_targets is None:
+    """Language-model LoRA leaf names, or None for ``all-linear`` / an opaque regex.
+
+    :param target_modules: PEFT ``target_modules`` list, ``all-linear``, or regex.
+    :type target_modules: str | Iterable[str] | None
+    :return: Suffix names from a list or an anchored VL rewrite regex; otherwise None.
+    :rtype: list[str] | None
+    """
+    if target_modules is None or target_modules == "all-linear":
         return None
-    raw_list = [raw_targets] if isinstance(raw_targets, str) else list(raw_targets)
-    if any(_looks_like_peft_target_regex(t) for t in raw_list):
+    if not isinstance(target_modules, str):
+        return list(target_modules)
+    match = re.search(r"\(\?:\.\*\\\.\)\?\(\?:([^)]+)\)", target_modules)
+    if match is None:
         return None
-
-    names: list[str] = []
-    for target in raw_list:
-        if target == "all-linear":
-            names.extend(discover_clippable_projection_leaf_names(model))
-        else:
-            names.append(_normalize_projection_leaf_name(target))
-    return sorted(set(names))
-
-
-def build_clippable_linear_lora_target_suffixes(
-    projection_names: list[str],
-) -> list[str]:
-    """Build PEFT list targets ``q_proj.linear`` (suffix match, avoids regex pitfalls)."""
-    return [f"{name}.linear" for name in sorted(set(projection_names))]
-
-
-def _infer_clippable_lora_scope(model: nn.Module) -> str | None:
-    """Infer ``language_model`` / ``audio_tower`` scope only when all inner keys live under it."""
-    inner_keys = discover_clippable_inner_linear_module_keys(model)
-    if not inner_keys:
-        return None
-    for scope in ("language_model", "audio_tower"):
-        if all(
-            key == scope or key.startswith(f"{scope}.") or f".{scope}." in key
-            for key in inner_keys
-        ):
-            return scope
-    return None
+    return [re.sub(r"\\(.)", r"\1", part) for part in match.group(1).split("|")]
 
 
 # PEFT LoRA inject rejects these module names on Mamba-family model_type values
@@ -1517,158 +1435,95 @@ def _adapt_mamba_lora_config(model: nn.Module, lora_config: LoraConfig) -> LoraC
     return _clone_lora_config(lora_config, **updates)
 
 
-def _example_module_keys_for_lora_scope(
-    model: nn.Module,
-    scope: str,
-    limit: int = 3,
-) -> list[str]:
-    """Sample ``named_modules`` keys under a scope (for error messages)."""
-    scope_token = scope.strip(".")
-    keys = [
-        key
-        for key, _ in model.named_modules()
-        if f".{scope_token}." in key or key.startswith(f"{scope_token}.")
-    ]
-    return keys[:limit]
-
-
-def _is_model_layers_module_key(key: str) -> bool:
-    """True when ``model`` and ``layers`` are consecutive dotted path segments."""
-    parts = key.split(".")
-    return any(
-        part == "model" and parts[i + 1] == "layers"
-        for i, part in enumerate(parts[:-1])
-    )
-
-
-def _example_module_keys_on_model(
-    model: nn.Module,
-    limit: int = 3,
-) -> list[str]:
-    """Sample leaf ``named_modules`` keys, preferring ``model.layers`` (for error messages)."""
-    keys = [
-        key for key, mod in model.named_modules() if key and not list(mod.children())
-    ]
-    layers = [key for key in keys if _is_model_layers_module_key(key)]
-    return (layers or keys)[:limit]
-
-
 def adapt_lora_config_for_model(
     model: nn.Module,
     lora_config: LoraConfig,
-    lora_target_scope: str | None = None,
+    tower_target_modules: list[str] | None = None,
 ) -> LoraConfig:
-    r"""Rewrite ``LoraConfig.target_modules`` for PEFT (regex or suffix list).
+    """Rewrite ``LoraConfig.target_modules`` so PEFT wraps exactly the intended modules.
 
-    For *ClippableLinear* models (Gemma 4 vision/audio), short names like ``q_proj``
-    substring-match the wrapper and fail injection; use regex targets on the inner
-    ``.linear`` (https://github.com/huggingface/peft/issues/3129).
-
-    When ``lora_target_scope`` is set (e.g. ``language_model``), only modules under
-    that path are targeted. The scoped regex matches plain ``nn.Linear`` language
-    layers and ``.linear`` inside ClippableLinear towers. Unscoped fallbacks are
-    not used when the scope is explicit.
+    On a VL model, named targets and ``all-linear`` land only under the
+    language model; ``tower_target_modules`` names the tower and connector
+    modules to adapt outside it. A regex ``target_modules`` is kept as given.
 
     On Mamba-family ``model_type`` values, ``out_proj`` and ``conv1d`` are excluded
     from LoRA inject (PEFT 0.20+ forbids wrapping those fused-kernel modules).
 
     Packed-expert ``target_parameters`` force ``lora_dropout=0``; PEFT cannot
     factor dropout out of the parameter-level low-rank product.
+
+    :param model: Model PEFT will wrap.
+    :type model: nn.Module
+    :param lora_config: Trainer LoRA config.
+    :type lora_config: LoraConfig
+    :param tower_target_modules: Tower and connector module names to adapt, or None.
+    :type tower_target_modules: list[str] | None
+    :return: The config with resolved targets.
+    :rtype: LoraConfig
+    :raises ValueError: If tower targets are set on a text-only model or with a
+        regex ``target_modules``, or a target group matches no module.
     """
     lora_config = _zero_lora_dropout_for_target_parameters(lora_config)
     lora_config = _adapt_mamba_lora_config(model, lora_config)
+    prefix = language_model_prefix(model)
+    tower_names = sorted(set(tower_target_modules or ()))
+    if prefix is None:
+        if tower_names:
+            msg = (
+                f"tower_target_modules {tower_names} need a multimodal model; "
+                f"{type(model).__name__} has no language_model"
+            )
+            raise ValueError(msg)
+        return lora_config
     raw_targets = lora_config.target_modules
-    projection_names = _projection_names_for_clippable_lora(model, raw_targets)
-    if projection_names is None:
+    if isinstance(raw_targets, str) and raw_targets != "all-linear":
+        if tower_names:
+            msg = (
+                "tower_target_modules cannot be combined with a regex "
+                f"target_modules ({raw_targets!r}); name both as module lists"
+            )
+            raise ValueError(msg)
+        return lora_config
+    if raw_targets == "all-linear":
+        language_names = _language_model_linear_leaf_names(model, prefix)
+    else:
+        language_names = sorted(set(raw_targets or ()))
+    if not language_names and not tower_names:
         return lora_config
 
     exclude_modules = list(getattr(lora_config, "exclude_modules", None) or [])
-
-    explicit_scope = lora_target_scope is not None
-    scope = lora_target_scope if explicit_scope else _infer_clippable_lora_scope(model)
-
-    if scope is not None:
-        if not projection_names:
-            msg = (
-                "lora_target_scope is set but no projection names were resolved "
-                f"from target_modules={raw_targets!r}."
-            )
-            raise ValueError(msg)
-        target_spec = build_scoped_lora_target_regex(projection_names, scope)
-        matched = list_peft_matched_module_keys(
-            model, target_spec, exclude_modules=exclude_modules
-        )
-        if not matched:
-            examples = _example_module_keys_for_lora_scope(model, scope)
-            model_examples = _example_module_keys_on_model(model)
-            msg = (
-                f"No modules matched scoped LoRA target_modules for scope={scope!r} "
-                f"(regex={target_spec!r}). "
-                f"Example keys under scope: {examples}. "
-                f"Example keys on model: {model_examples}. "
-                "Check LORA_TARGET_SCOPE and TARGET_MODULES match the model layout."
-            )
-            if not examples and any(
-                _is_model_layers_module_key(key) for key in model_examples
-            ):
-                msg += (
-                    " For causal LM layouts under model.layers.*, leave "
-                    "algorithm.lora_target_scope unset."
-                )
-            raise ValueError(msg)
-        adapted = _clone_lora_config_with_targets(lora_config, target_spec)
-        logger.info(
-            "Adapted LoRA target_modules via scoped regex (%s) (%d modules), e.g. %s",
-            scope,
-            len(matched),
-            ", ".join(matched[:2]) + ("..." if len(matched) > 2 else ""),
-        )
-        return adapted
-
-    if not model_has_clippable_linear_wrappers(model):
-        return lora_config
-
-    if not projection_names:
-        msg = (
-            "Model uses ClippableLinear wrappers but no projection names were "
-            "resolved for LoRA targeting."
-        )
-        raise ValueError(msg)
-
-    suffix_targets = build_clippable_linear_lora_target_suffixes(projection_names)
-    candidate_specs: list[tuple[str, str | list[str]]] = [
-        ("suffix list", suffix_targets),
-        ("regex", build_clippable_linear_lora_target_regex(projection_names)),
-    ]
-
-    for label, target_spec in candidate_specs:
-        matched = list_peft_matched_module_keys(
-            model, target_spec, exclude_modules=exclude_modules
-        )
-        if not matched:
-            continue
-        if raw_targets == target_spec:
-            return lora_config
-        adapted = _clone_lora_config_with_targets(lora_config, target_spec)
-        logger.info(
-            "Adapted LoRA target_modules for ClippableLinear wrappers via %s "
-            "(%d modules), e.g. %s",
-            label,
-            len(matched),
-            ", ".join(matched[:2]) + ("..." if len(matched) > 2 else ""),
-        )
-        return adapted
-
-    sample_inner = discover_clippable_inner_linear_module_keys(model)[:5]
-    tried = [f"{label}={spec!r}" for label, spec in candidate_specs]
-    msg = (
-        "No modules matched LoRA target_modules for ClippableLinear layers. "
-        f"Tried: {'; '.join(tried)}. "
-        f"Example inner linear keys: {sample_inner}. "
-        "Set LORA_TARGET_SCOPE in INIT_HP if the tower path differs, or pass a "
-        "custom target_modules regex."
+    groups = (
+        (
+            "under",
+            language_names,
+            _anchored_lora_target_regex(language_names, [], prefix),
+        ),
+        ("outside", tower_names, _anchored_lora_target_regex([], tower_names, prefix)),
     )
-    raise ValueError(msg)
+    matched: list[str] = []
+    for where, names, spec in groups:
+        if not names:
+            continue
+        group_matched = list_peft_matched_module_keys(
+            model, spec, exclude_modules=exclude_modules
+        )
+        if not group_matched:
+            msg = (
+                f"No modules {where} {prefix!r} match LoRA targets {names}; "
+                "language-model linears are "
+                f"{_language_model_linear_leaf_names(model, prefix)}"
+            )
+            raise ValueError(msg)
+        matched.extend(group_matched)
+
+    target_spec = _anchored_lora_target_regex(language_names, tower_names, prefix)
+    logger.info(
+        "Anchored LoRA target_modules at %s (%d modules), e.g. %s",
+        prefix,
+        len(matched),
+        ", ".join(matched[:2]) + ("..." if len(matched) > 2 else ""),
+    )
+    return _clone_lora_config_with_targets(lora_config, target_spec)
 
 
 def log_cuda_memory_snapshot(label: str, device_index: int = 0) -> None:
@@ -1919,11 +1774,8 @@ def create_model_from_name_or_path(
 
     model_config = dict(model_config) if model_config else {}
     model_config.setdefault("torch_dtype", torch.bfloat16)
-    for key, value in (
-        family_runtime(model_name_or_path).trainer.model_dump(exclude_none=True).items()
-    ):
-        if key == "attn_implementation":
-            continue
+    trainer = family_runtime(model_name_or_path).trainer
+    for key, value in trainer.load_kwargs().items():
         model_config.setdefault(key, value)
     model_config["attn_implementation"] = resolve_attn_implementation(
         model_config.get("attn_implementation"),
@@ -1933,7 +1785,7 @@ def create_model_from_name_or_path(
         patch_flex_attention_kernel_options()
     load_remote_code(
         model_name_or_path,
-        AutoModelForCausalLM,
+        trainer.model_class,
         model_config.get("trust_remote_code"),
     )
     if add_value_head:
@@ -1942,7 +1794,7 @@ def create_model_from_name_or_path(
             **model_config,
         )
     else:
-        model = AutoModelForCausalLM.from_pretrained(
+        model = trainer.model_class.from_pretrained(
             pretrained_model_name_or_path=model_name_or_path,
             **model_config,
         )
@@ -3077,7 +2929,7 @@ def build_vllm_llm_init_kwargs(
     max_model_len: int,
     process_index: int = 0,
     lora_rank: int | None = None,
-    lora_target_modules: str | Collection[str] | None = None,
+    tower_lora_target_modules: Collection[str] | None = None,
 ) -> dict[str, Any]:
     """Build kwargs for ``vllm.LLM`` from :class:`~agilerl.utils.algo_utils.VLLMConfig`.
 
@@ -3091,8 +2943,8 @@ def build_vllm_llm_init_kwargs(
     :type process_index: int
     :param lora_rank: Trainer LoRA rank, used to size ``max_lora_rank``.
     :type lora_rank: int | None
-    :param lora_target_modules: Trainer PEFT ``target_modules``; gates tower LoRA.
-    :type lora_target_modules: str | Collection[str] | None
+    :param tower_lora_target_modules: ``lora_config.tower_target_modules``; enables tower LoRA.
+    :type tower_lora_target_modules: Collection[str] | None
     :return: Keyword arguments for ``vllm.LLM``.
     :rtype: dict[str, Any]
     """
@@ -3164,13 +3016,12 @@ def build_vllm_llm_init_kwargs(
         apply_multimodal_engine_kwargs(
             kwargs,
             strip_multimodal_towers=vllm_config.strip_multimodal_towers,
-            runtime=runtime,
         )
         apply_tower_connector_lora_engine_kwargs(
             kwargs,
             strip_multimodal_towers=vllm_config.strip_multimodal_towers,
             runtime=runtime,
-            lora_target_modules=lora_target_modules,
+            tower_target_modules=tower_lora_target_modules,
         )
     return kwargs
 

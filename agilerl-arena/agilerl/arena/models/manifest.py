@@ -513,6 +513,26 @@ class TrainingManifest(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _check_tower_lora_served(self) -> Self:
+        """Tower LoRA trains modules that a stripped engine never builds."""
+        if not isinstance(self.algorithm, RolloutLLMSpec):
+            return self
+        lora = self.algorithm.lora_config
+        vllm_config = self.algorithm.vllm_config
+        if (
+            lora is not None
+            and lora.tower_target_modules
+            and vllm_config is not None
+            and vllm_config.strip_multimodal_towers is True
+        ):
+            msg = (
+                "lora_config.tower_target_modules needs the towers served; set "
+                "vllm_config.strip_multimodal_towers to false"
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
     def _check_async_rollout_buffer(self) -> Self:
         """Async rollout queues generated groups, so it needs the LLM buffer."""
         if not self.training.async_rollout:

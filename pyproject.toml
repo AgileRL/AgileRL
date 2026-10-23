@@ -67,6 +67,7 @@ vllm = [
 ]
 llm = [
     "agilerl[cpu-llm,vllm]",
+    "flash-linear-attention==0.5.2; sys_platform == 'linux'",
 ]
 all = [
     "agilerl[box2d,llm]",

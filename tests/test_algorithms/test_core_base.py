@@ -113,7 +113,7 @@ from agilerl.utils.algo_utils import (
     create_warmup_cosine_scheduler,
 )
 from agilerl.utils.learn_profiler import LearnProfiler
-from agilerl.utils.llm_utils import make_llm_optimizer
+from agilerl.utils.llm_utils import adapt_lora_config_for_model, make_llm_optimizer
 from agilerl.utils.mutation_utils import target_activations
 from agilerl.wrappers.agent import RSNorm
 from tests.helper_functions import capture_grama_snapshot
@@ -2586,6 +2586,66 @@ class TestLLMAlgorithmTrainingEstimateInputs:
         assert settings.n_training_gpus == 4
         assert settings.trajectories_per_update == 16
         assert settings.trajectories == moe_ppo.batch_size_per_process
+
+    def test_vl_rewrite_keeps_attention_only_scope(self, tmp_path):
+        agent = make_ppo()
+        save_checkpoint_config(agent, tmp_path)
+        agent.lora_config = adapt_lora_config_for_model(
+            _vision_language_actor(),
+            LoraConfig(
+                r=4,
+                target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+                task_type="CAUSAL_LM",
+            ),
+        )
+
+        _, settings = agent._training_estimate_inputs(
+            ALGORITHM_NAMES[agent.algo], 0.0, fuse_actor_critic_pass=True
+        )
+
+        assert isinstance(agent.lora_config.target_modules, str)
+        assert settings.lora_target_scope == "attention-only"
+
+    def test_vl_rewrite_keeps_all_linear_scope(self, tmp_path):
+        agent = make_ppo()
+        save_checkpoint_config(agent, tmp_path)
+        agent.lora_config = adapt_lora_config_for_model(
+            _vision_language_actor(),
+            LoraConfig(r=4, target_modules="all-linear", task_type="CAUSAL_LM"),
+        )
+
+        _, settings = agent._training_estimate_inputs(
+            ALGORITHM_NAMES[agent.algo], 0.0, fuse_actor_critic_pass=True
+        )
+
+        assert isinstance(agent.lora_config.target_modules, str)
+        assert settings.lora_target_scope == "all-linear"
+
+
+def _vision_language_actor() -> nn.Module:
+    """Tiny VL module with language-model attention and MLP linears."""
+
+    class LanguageBlock(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.self_attn = nn.Module()
+            self.self_attn.q_proj = nn.Linear(4, 4)
+            self.self_attn.k_proj = nn.Linear(4, 4)
+            self.self_attn.v_proj = nn.Linear(4, 4)
+            self.self_attn.o_proj = nn.Linear(4, 4)
+            self.mlp = nn.Module()
+            self.mlp.gate_proj = nn.Linear(4, 8)
+            self.mlp.up_proj = nn.Linear(4, 8)
+            self.mlp.down_proj = nn.Linear(8, 4)
+
+    root = nn.Module()
+    root.model = nn.Module()
+    root.model.language_model = nn.Module()
+    root.model.language_model.layers = nn.ModuleList([LanguageBlock()])
+    root.model.visual = nn.Module()
+    root.model.visual.q_proj = nn.Linear(4, 4)
+    root.lm_head = nn.Linear(4, 8)
+    return root
 
 
 @pytest.fixture
@@ -7197,7 +7257,7 @@ class TestLLMInitEdgeCases:
                 vllm_config=VLLMConfig(tensor_parallel_size=2),
             )
 
-    def test_model_config_strips_lora_target_scope(self):
+    def test_keeps_model_config_and_tower_lora_targets(self):
         lora = MagicMock()
         with (
             patch.object(LLMAlgorithm, "_initialize_actors"),
@@ -7220,13 +7280,11 @@ class TestLLMInitEdgeCases:
                 actor_network=_make_mock_peft_actor(),
                 device="cpu",
                 model_name="mock-model",
-                model_config={
-                    "attn_implementation": "sdpa",
-                    "lora_target_scope": "inner",
-                },
+                model_config={"attn_implementation": "sdpa"},
+                lora_tower_target_modules=["query"],
             )
-        assert "lora_target_scope" not in agent.model_config
-        assert agent.model_config["attn_implementation"] == "sdpa"
+        assert agent.model_config == {"attn_implementation": "sdpa"}
+        assert agent.lora_tower_target_modules == ["query"]
 
     def test_raises_when_vllm_importance_sampling_cap_non_positive(self):
         lora = MagicMock()

@@ -7,19 +7,16 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from transformers import AutoModelForImageTextToText
 from transformers.configuration_utils import PretrainedConfig
 
 from agilerl.architectures.nemotron_h.mamba import install_mamba_patches
-from agilerl.architectures.qwen3_5 import (
-    QWEN3_5_MODEL_CLASS_OVERRIDES,
-    qwen3_5_language_tower_hf_override,
-)
 from agilerl.architectures.qwen3_5.packed import install_qwen_gdn_patches
 from agilerl.architectures.runtime import (
-    LanguageTowerRuntimeConfig,
     MambaPatchConfig,
     ModelRuntimeConfig,
     PatchRuntimeConfig,
+    TrainerModelClass,
     TrainerRuntimeConfig,
     VllmRuntimeConfig,
 )
@@ -54,6 +51,7 @@ NEMOTRON_H_OMNI_RUNTIME_CONFIG = NEMOTRON_H_RUNTIME_CONFIG.model_copy(
     update={
         # nemotron_h_omni is not a transformers model type; its config needs checkpoint code.
         "trainer": TrainerRuntimeConfig(
+            model_class=AutoModelForImageTextToText,
             attn_implementation="flash_attention_2",
             trust_remote_code=True,
         ),
@@ -82,8 +80,21 @@ NEMOTRON_H_OMNI_RUNTIME_CONFIG = NEMOTRON_H_RUNTIME_CONFIG.model_copy(
     },
 )
 
-GEMMA_SWA_RUNTIME_CONFIG = ModelRuntimeConfig(
+GEMMA_SWA_TEXT_RUNTIME_CONFIG = ModelRuntimeConfig(
     trainer=TrainerRuntimeConfig(attn_implementation="flex_attention"),
+)
+
+GEMMA_SWA_RUNTIME_CONFIG = GEMMA_SWA_TEXT_RUNTIME_CONFIG.model_copy(
+    update={
+        "trainer": TrainerRuntimeConfig(
+            model_class=AutoModelForImageTextToText,
+            attn_implementation="flex_attention",
+        ),
+    },
+)
+
+GEMMA4_TEXT_RUNTIME_CONFIG = GEMMA_SWA_TEXT_RUNTIME_CONFIG.model_copy(
+    update={"tool_call_parser": "gemma4"},
 )
 
 GEMMA4_RUNTIME_CONFIG = GEMMA_SWA_RUNTIME_CONFIG.model_copy(
@@ -125,17 +136,18 @@ GRANITE4_HYBRID_RUNTIME_CONFIG = ModelRuntimeConfig(
 )
 
 # Linear-attention rejects mamba_cache_mode "all"; align needs prefix caching.
-QWEN3_5_RUNTIME_CONFIG = ModelRuntimeConfig(
+QWEN3_5_TEXT_RUNTIME_CONFIG = ModelRuntimeConfig(
     vllm=VllmRuntimeConfig(
         mamba_cache_mode="align",
         enable_prefix_caching=True,
     ),
-    language_tower=LanguageTowerRuntimeConfig(
-        hf_overrides=qwen3_5_language_tower_hf_override,
-        model_class_overrides=QWEN3_5_MODEL_CLASS_OVERRIDES,
-    ),
     patch=PatchRuntimeConfig(install=install_qwen_gdn_patches),
     tool_call_parser="tool_call",
+)
+
+# AutoModelForCausalLM maps qwen3_5 to a text-only class that drops model.visual.
+QWEN3_5_RUNTIME_CONFIG = QWEN3_5_TEXT_RUNTIME_CONFIG.model_copy(
+    update={"trainer": TrainerRuntimeConfig(model_class=AutoModelForImageTextToText)},
 )
 
 FAMILY_RUNTIME_CONFIGS: Mapping[str, ModelRuntimeConfig] = {
@@ -147,14 +159,14 @@ FAMILY_RUNTIME_CONFIGS: Mapping[str, ModelRuntimeConfig] = {
     "nemotron_h": NEMOTRON_H_RUNTIME_CONFIG,
     "nemotron_h_omni": NEMOTRON_H_OMNI_RUNTIME_CONFIG,
     "gemma3": GEMMA_SWA_RUNTIME_CONFIG,
-    "gemma3_text": GEMMA_SWA_RUNTIME_CONFIG,
+    "gemma3_text": GEMMA_SWA_TEXT_RUNTIME_CONFIG,
     "gemma4": GEMMA4_RUNTIME_CONFIG,
-    "gemma4_text": GEMMA4_RUNTIME_CONFIG,
+    "gemma4_text": GEMMA4_TEXT_RUNTIME_CONFIG,
     "gpt_oss": GPT_OSS_RUNTIME_CONFIG,
     "qwen3_5": QWEN3_5_RUNTIME_CONFIG,
-    "qwen3_5_text": QWEN3_5_RUNTIME_CONFIG,
+    "qwen3_5_text": QWEN3_5_TEXT_RUNTIME_CONFIG,
     "qwen3_5_moe": QWEN3_5_RUNTIME_CONFIG,
-    "qwen3_5_moe_text": QWEN3_5_RUNTIME_CONFIG,
+    "qwen3_5_moe_text": QWEN3_5_TEXT_RUNTIME_CONFIG,
 }
 
 
@@ -179,3 +191,14 @@ def family_runtime(model_name_or_path: str) -> ModelRuntimeConfig:
         pretrained_model_type(model_name_or_path),
         ModelRuntimeConfig(),
     )
+
+
+def trainer_model_class(model_name_or_path: str) -> TrainerModelClass:
+    """Return the auto class every trainer load of this checkpoint builds.
+
+    :param model_name_or_path: Hugging Face model id or local path.
+    :type model_name_or_path: str
+    :return: ``AutoModelForCausalLM``, or ``AutoModelForImageTextToText`` for VL families.
+    :rtype: TrainerModelClass
+    """
+    return family_runtime(model_name_or_path).trainer.model_class

@@ -705,7 +705,10 @@ class RolloutHarness(RestartPromptMixin):
     def _require_vision_processor(self) -> Callable[..., Mapping[str, Any]]:
         """The vision processor; raises when the harness has none."""
         if self._vision_processor is None:
-            msg = "Image observations require vision_processor on RolloutHarness"
+            msg = (
+                "Image observations require vision_processor on RolloutHarness; "
+                "a VL model needs vllm_config.strip_multimodal_towers false"
+            )
             raise RuntimeError(msg)
         return self._vision_processor
 

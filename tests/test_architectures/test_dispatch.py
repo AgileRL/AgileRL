@@ -8,6 +8,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 
 from agilerl import architectures
 from agilerl.architectures.catalog import FAMILY_RUNTIME_CONFIGS
@@ -151,36 +152,33 @@ class TestFamilyRuntime:
     ) -> None:
         stub_config_model_type(monkeypatch, "gemma4")
         config = architectures.family_runtime("google/gemma-4")
-        assert config.trainer.model_dump(exclude_none=True) == {
-            "attn_implementation": "flex_attention"
-        }
+        assert config.trainer.attn_implementation == "flex_attention"
+        assert config.trainer.model_class is AutoModelForImageTextToText
+        assert config.trainer.load_kwargs() == {}
 
     def test_gpt_oss_trainer_dumps_flex_attention(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         stub_config_model_type(monkeypatch, "gpt_oss")
         config = architectures.family_runtime("openai/gpt-oss-20b")
-        assert config.trainer.model_dump(exclude_none=True) == {
-            "attn_implementation": "flex_attention"
-        }
+        assert config.trainer.attn_implementation == "flex_attention"
+        assert config.trainer.model_class is AutoModelForCausalLM
+        assert config.trainer.load_kwargs() == {}
 
     def test_nemotron_trainer_dumps_flash_attention_2(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         stub_config_model_type(monkeypatch, "nemotron_h")
         config = architectures.family_runtime("nvidia/nemotron")
-        assert config.trainer.model_dump(exclude_none=True) == {
-            "attn_implementation": "flash_attention_2",
-        }
+        assert config.trainer.attn_implementation == "flash_attention_2"
+        assert config.trainer.load_kwargs() == {}
 
     def test_llama_trainer_dumps_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
         stub_config_model_type(monkeypatch, "llama")
-        assert (
-            architectures.family_runtime("meta/llama").trainer.model_dump(
-                exclude_none=True
-            )
-            == {}
-        )
+        trainer = architectures.family_runtime("meta/llama").trainer
+        assert trainer.attn_implementation is None
+        assert trainer.model_class is AutoModelForCausalLM
+        assert trainer.load_kwargs() == {}
 
     def test_nemotron_vllm_dumps_engine_kwargs(
         self, monkeypatch: pytest.MonkeyPatch

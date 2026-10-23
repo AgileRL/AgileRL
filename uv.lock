@@ -115,6 +115,7 @@ dependencies = [
 all = [
     { name = "bitsandbytes", marker = "sys_platform == 'linux' or (extra == 'extra-7-agilerl-cpu' and extra == 'extra-7-agilerl-llm') or (extra == 'extra-7-agilerl-cpu' and extra == 'extra-7-agilerl-vllm')" },
     { name = "datasets" },
+    { name = "flash-linear-attention", marker = "sys_platform == 'linux' or (extra == 'extra-7-agilerl-cpu' and extra == 'extra-7-agilerl-llm') or (extra == 'extra-7-agilerl-cpu' and extra == 'extra-7-agilerl-vllm')" },
     { name = "gymnasium", extra = ["box2d"], marker = "sys_platform != 'win32' or (extra == 'extra-7-agilerl-cpu' and extra == 'extra-7-agilerl-llm') or (extra == 'extra-7-agilerl-cpu' and extra == 'extra-7-agilerl-vllm')" },
     { name = "liger-kernel", marker = "sys_platform == 'linux' or (extra == 'extra-7-agilerl-cpu' and extra == 'extra-7-agilerl-llm') or (extra == 'extra-7-agilerl-cpu' and extra == 'extra-7-agilerl-vllm')" },
     { name = "openenv" },
@@ -142,6 +143,7 @@ cpu-llm = [
 llm = [
     { name = "bitsandbytes", marker = "sys_platform == 'linux'" },
     { name = "datasets" },
+    { name = "flash-linear-attention", marker = "sys_platform == 'linux'" },
     { name = "liger-kernel", marker = "sys_platform == 'linux'" },
     { name = "openenv" },
     { name = "peft" },
@@ -189,6 +191,8 @@ requires-dist = [
     { name = "datasets", marker = "extra == 'llm'", specifier = "==5.0.1" },
     { name = "dill", specifier = ">=0.3.7" },
     { name = "fastrand", specifier = ">=1.3.0" },
+    { name = "flash-linear-attention", marker = "sys_platform == 'linux' and extra == 'all'", specifier = "==0.5.2" },
+    { name = "flash-linear-attention", marker = "sys_platform == 'linux' and extra == 'llm'", specifier = "==0.5.2" },
     { name = "flatten-dict", specifier = ">=0.4.2" },
     { name = "google-cloud-storage", specifier = ">=2.5.0" },
     { name = "gymnasium", specifier = ">=1.0.0" },
@@ -2168,6 +2172,31 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/b5/fe/997687a931ab51049acce6fa1f23e8f01216374ea81374ddee763c493db5/filelock-3.29.0.tar.gz", hash = "sha256:69974355e960702e789734cb4871f884ea6fe50bd8404051a3530bc07809cf90", size = 57571, upload-time = "2026-04-19T15:39:10.068Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/81/47/dd9a212ef6e343a6857485ffe25bba537304f1913bdbed446a23f7f592e1/filelock-3.29.0-py3-none-any.whl", hash = "sha256:96f5f6344709aa1572bbf631c640e4ebeeb519e08da902c39a001882f30ac258", size = 39812, upload-time = "2026-04-19T15:39:08.752Z" },
+]
+
+[[package]]
+name = "fla-core"
+version = "0.5.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "einops", marker = "(python_full_version < '3.11' and sys_platform == 'win32') or (sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32') or (sys_platform == 'darwin' and extra == 'extra-7-agilerl-cpu' and extra == 'extra-7-agilerl-llm') or (sys_platform == 'darwin' and extra == 'extra-7-agilerl-cpu' and extra == 'extra-7-agilerl-vllm') or (sys_platform == 'emscripten' and extra == 'extra-7-agilerl-cpu' and extra == 'extra-7-agilerl-llm') or (sys_platform == 'emscripten' and extra == 'extra-7-agilerl-cpu' and extra == 'extra-7-agilerl-vllm') or (sys_platform == 'win32' and extra == 'extra-7-agilerl-cpu' and extra == 'extra-7-agilerl-llm') or (sys_platform == 'win32' and extra == 'extra-7-agilerl-cpu' and extra == 'extra-7-agilerl-vllm')" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/94/85/20bdc0fbbbaeec27b5b198e0dbbbc51161a267066a4aebd9e4b413637c6c/fla_core-0.5.2.tar.gz", hash = "sha256:9360fc412f784c1c8f05c320ec2902d5d968764178c9b8a92efc919e17a39680", size = 587835, upload-time = "2026-07-27T18:26:19.424Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2d/ed/dfe19c4da779957eb6a42a26812f9b4e2280bf757a17a71933ff59ffcb98/fla_core-0.5.2-py3-none-any.whl", hash = "sha256:5e830c85bad3d0d34677f98ac7074d08687a3756f0f0499d95ceb96eb6920761", size = 819225, upload-time = "2026-07-27T18:26:16.147Z" },
+]
+
+[[package]]
+name = "flash-linear-attention"
+version = "0.5.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "fla-core", marker = "(python_full_version < '3.11' and sys_platform == 'win32') or (sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32') or (sys_platform == 'darwin' and extra == 'extra-7-agilerl-cpu' and extra == 'extra-7-agilerl-llm') or (sys_platform == 'darwin' and extra == 'extra-7-agilerl-cpu' and extra == 'extra-7-agilerl-vllm') or (sys_platform == 'emscripten' and extra == 'extra-7-agilerl-cpu' and extra == 'extra-7-agilerl-llm') or (sys_platform == 'emscripten' and extra == 'extra-7-agilerl-cpu' and extra == 'extra-7-agilerl-vllm') or (sys_platform == 'win32' and extra == 'extra-7-agilerl-cpu' and extra == 'extra-7-agilerl-llm') or (sys_platform == 'win32' and extra == 'extra-7-agilerl-cpu' and extra == 'extra-7-agilerl-vllm')" },
+    { name = "transformers", marker = "(python_full_version < '3.11' and sys_platform == 'win32') or (sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32') or (sys_platform == 'darwin' and extra == 'extra-7-agilerl-cpu' and extra == 'extra-7-agilerl-llm') or (sys_platform == 'darwin' and extra == 'extra-7-agilerl-cpu' and extra == 'extra-7-agilerl-vllm') or (sys_platform == 'emscripten' and extra == 'extra-7-agilerl-cpu' and extra == 'extra-7-agilerl-llm') or (sys_platform == 'emscripten' and extra == 'extra-7-agilerl-cpu' and extra == 'extra-7-agilerl-vllm') or (sys_platform == 'win32' and extra == 'extra-7-agilerl-cpu' and extra == 'extra-7-agilerl-llm') or (sys_platform == 'win32' and extra == 'extra-7-agilerl-cpu' and extra == 'extra-7-agilerl-vllm')" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d2/76/c180949eae5161b9fcf4c928cab52f0c257ce84c1a59b4462b1d2b6e5883/flash_linear_attention-0.5.2.tar.gz", hash = "sha256:c053d3a75c8f5b725063f719ae6bce0f4d9dac6da32735be8ae7d485a6c9820f", size = 208110, upload-time = "2026-07-27T18:26:20.536Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/90/d2/2070e3cf2148c5cce99ca4876633c4b7b89ec085323600bd3d47aeacd306/flash_linear_attention-0.5.2-py3-none-any.whl", hash = "sha256:dcf405d81f5426393b59037097aa700d0f4a841465d5028d5aa543f4502f2400", size = 399590, upload-time = "2026-07-27T18:26:17.912Z" },
 ]
 
 [[package]]

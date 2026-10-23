@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pydantic import BaseModel, ConfigDict, Field
 from torch import nn
 from torch.distributed.device_mesh import DeviceMesh
+from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 
 
 class VllmRuntimeConfig(BaseModel):
@@ -32,17 +33,34 @@ class VllmRuntimeConfig(BaseModel):
     )
 
 
-class TrainerRuntimeConfig(BaseModel):
-    """Trainer ``from_pretrained`` kwargs that vary by Hugging Face ``model_type``.
+TrainerModelClass = type[AutoModelForCausalLM] | type[AutoModelForImageTextToText]
 
-    Unset fields stay ``None`` so callers can ``setdefault`` into an existing
-    model-config dict without overwriting user values with empties.
+
+class TrainerRuntimeConfig(BaseModel):
+    """Trainer load settings that vary by Hugging Face ``model_type``.
+
+    ``model_class`` is the auto class every trainer load builds. The other
+    fields are ``from_pretrained`` kwargs; unset ones stay ``None`` so callers
+    can ``setdefault`` into an existing model-config dict without overwriting
+    user values with empties.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
+    # VL checkpoints build their full VL class so towers load, frozen.
+    model_class: TrainerModelClass = AutoModelForCausalLM
     attn_implementation: str | None = Field(default=None, min_length=1)
     trust_remote_code: bool | None = Field(default=None)
+
+    def load_kwargs(self) -> dict[str, object]:
+        """Return the ``from_pretrained`` kwargs this family sets, without the attention backend.
+
+        :return: ``trust_remote_code`` when set.
+        :rtype: dict[str, object]
+        """
+        return self.model_dump(
+            exclude_none=True, exclude={"model_class", "attn_implementation"}
+        )
 
 
 class MambaPatchConfig(BaseModel):
@@ -74,19 +92,6 @@ class PatchRuntimeConfig(BaseModel):
     mamba: MambaPatchConfig | None = Field(default=None)
 
 
-class LanguageTowerRuntimeConfig(BaseModel):
-    """vLLM language-tower mapping that varies by Hugging Face ``model_type``.
-
-    A family whose stripped language config is not a registered vLLM architecture
-    sets ``hf_overrides`` and ``model_class_overrides``.
-    """
-
-    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
-
-    hf_overrides: Callable[[object], object] | None = None
-    model_class_overrides: dict[str, str] | None = None
-
-
 @dataclass(frozen=True)
 class TensorParallelPlan:
     """Tensor-parallel hooks for the module classes one family defines.
@@ -113,11 +118,9 @@ class ModelRuntimeConfig(BaseModel):
     vllm: VllmRuntimeConfig = Field(default_factory=VllmRuntimeConfig)
     trainer: TrainerRuntimeConfig = Field(default_factory=TrainerRuntimeConfig)
     patch: PatchRuntimeConfig = Field(default_factory=PatchRuntimeConfig)
-    language_tower: LanguageTowerRuntimeConfig = Field(
-        default_factory=LanguageTowerRuntimeConfig
-    )
-    # PEFT target names of the trainer's tower and connector linears. Empty for
-    # families without vLLM tower LoRA (it needs get_num_mm_encoder_tokens).
+    # PEFT target names of the trainer's tower and connector linears that
+    # lora_config.tower_target_modules may name. Empty for families without
+    # vLLM tower LoRA (it needs get_num_mm_encoder_tokens).
     tower_connector_lora_targets: frozenset[str] = frozenset()
     tensor_parallel_plan: str | None = Field(default=None, min_length=1)
     # A name in agilerl.llm_envs.tool_parsers.TOOL_PARSERS; None detects from the vocab.

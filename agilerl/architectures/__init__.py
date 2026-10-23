@@ -20,6 +20,7 @@ from agilerl.architectures.catalog import (
     FAMILY_RUNTIME_CONFIGS,
     family_runtime,
     pretrained_model_type,
+    trainer_model_class,
 )
 from agilerl.architectures.runtime import (
     MambaPatchConfig,
@@ -46,6 +47,7 @@ __all__ = [
     "family_tensor_parallel_plans",
     "install_family_patches",
     "pretrained_model_type",
+    "trainer_model_class",
 ]
 
 

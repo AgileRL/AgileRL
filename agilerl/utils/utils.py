@@ -187,8 +187,6 @@ def _prepare_llm_algo_kwargs(
         )
     if "activation_offload" not in merged and "ACTIVATION_OFFLOAD" in INIT_HP:
         merged["activation_offload"] = bool(INIT_HP["ACTIVATION_OFFLOAD"])
-    if "lora_target_scope" not in merged and INIT_HP.get("LORA_TARGET_SCOPE"):
-        merged["lora_target_scope"] = INIT_HP["LORA_TARGET_SCOPE"]
     if "chunk_rows" not in merged and INIT_HP.get("CHUNK_ROWS"):
         merged["chunk_rows"] = int(INIT_HP["CHUNK_ROWS"])
     if "quantization_config" not in merged and INIT_HP.get("QUANTIZATION") is not None:
