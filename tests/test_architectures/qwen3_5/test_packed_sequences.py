@@ -3,6 +3,7 @@
 
 """Packed rows through a tiny Qwen3.5-MoE GDN stack match the padded batch."""
 
+import importlib.util
 import logging
 
 import pytest
@@ -17,7 +18,11 @@ from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
 )
 
 from agilerl.architectures import install_family_patches
-from agilerl.architectures.qwen3_5.packed import patch_qwen_gdn_packed_sequences
+from agilerl.architectures.qwen3_5.packed import (
+    install_qwen_gdn_patches,
+    patch_qwen_gdn_packed_sequences,
+)
+from agilerl.architectures.runtime import PatchRuntimeConfig
 from agilerl.utils.llm_packing import (
     RESETS_AT_DOCUMENT_BOUNDARY,
     mixers_without_boundary_reset,
@@ -233,3 +238,45 @@ class TestPatchQwenGdnPackedSequences:
         assert torch.equal(out, hidden)
         assert received["cu_seq_lens_q"].tolist() == [0, 2, 5]
         assert torch.equal(received["seq_idx"], seq_idx)
+
+
+class TestInstallQwenGdnPatches:
+    def test_gpu_without_fla_raises(self, monkeypatch) -> None:
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        real = importlib.util.find_spec
+
+        def find_spec(name: str, package: str | None = None):
+            if name == "fla":
+                return None
+            return real(name, package)
+
+        monkeypatch.setattr(importlib.util, "find_spec", find_spec)
+
+        with pytest.raises(RuntimeError, match="flash-linear-attention"):
+            install_qwen_gdn_patches(PatchRuntimeConfig())
+
+    def test_gpu_with_fused_kernels_installs_packed_patches(
+        self, monkeypatch, pristine_qwen_gdn_classes
+    ) -> None:
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        real = importlib.util.find_spec
+
+        def find_spec(name: str, package: str | None = None):
+            if name in {"fla", "causal_conv1d"}:
+                return object()
+            return real(name, package)
+
+        monkeypatch.setattr(importlib.util, "find_spec", find_spec)
+
+        install_qwen_gdn_patches(PatchRuntimeConfig())
+
+        assert getattr(Qwen3_5MoeGatedDeltaNet, RESETS_AT_DOCUMENT_BOUNDARY) is True
+
+    def test_cpu_without_fla_installs_packed_patches(
+        self, monkeypatch, pristine_qwen_gdn_classes
+    ) -> None:
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+        install_qwen_gdn_patches(PatchRuntimeConfig())
+
+        assert getattr(Qwen3_5MoeGatedDeltaNet, RESETS_AT_DOCUMENT_BOUNDARY) is True
