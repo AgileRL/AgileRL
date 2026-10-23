@@ -30,6 +30,7 @@ else:
 from agilerl.algorithms.core import ActionResult, LLMAlgorithm
 from agilerl.algorithms.core.llm_ops.fused_logprobs import scored_position_index
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
+from agilerl.arena.memory.resolve.chunk import resolve_chunk_rows
 from agilerl.arena.models.profiling import ProfilingConfig
 from agilerl.components.llm_rollout_data import EpisodeSegments
 from agilerl.distributed import (
@@ -483,8 +484,6 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
 
     _segment_accumulation_steps: int | None = None
     """Micro-batches per optimizer step of the running segmented learn, else ``None``."""
-
-    _mini_batch_size_default = "micro_batch"
 
     def __init__(
         self,
@@ -3202,10 +3201,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                 if old_log_probs is not None
                 else None
             )
-            chunk_size = self._resolve_fused_chunk_rows(
-                head_w.shape[0],
-                self.chunk_rows,
-            )
+            chunk_size = resolve_chunk_rows(head_w.shape[0], self.chunk_rows)
         else:
             # Trajectory-level (GSPO): keep the (B, L) layout and one-sequence-
             # per-chunk granularity (chunk_size=1 over the batch dim). Liger

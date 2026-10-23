@@ -593,17 +593,24 @@ class TestGRPOInit:
         assert isinstance(gspo, GRPO)
         gspo.clean_up()
 
-    def test_init_unset_mini_steps_every_micro_batch(self):
+    def test_init_unset_mini_is_per_rank_trajectories(self):
+        """An omitted mini-batch is the per-rank trajectory count.
+
+        On one rank that count is ``batch_size * group_size``. Gradient
+        accumulation is that mini-batch divided by the micro-batch.
+        """
+        # Arrange / Act
         grpo = _make_cpu_grpo_for_branch_tests(
             batch_size=4,
             group_size=2,
             micro_batch_size_per_gpu=1,
         )
 
+        # Assert
         assert grpo.batch_size == 4
         assert grpo.batch_size_per_process == 8
-        assert grpo.mini_batch_size == 1
-        assert grpo.gradient_accumulation_steps == 1
+        assert grpo.mini_batch_size == 8
+        assert grpo.gradient_accumulation_steps == 8
         grpo.clean_up()
 
     def test_cispo_gspo_signatures_match_grpo_minus_loss_type(self):
@@ -1353,9 +1360,11 @@ class TestGRPOInit:
         with pytest.raises(
             ValueError,
             match=re.escape(
-                f"batch_size_per_process ({batch_size * group_size}) must be "
-                f"divisible by mini_batch_size ({micro_batch_size_per_gpu}): a rank "
-                "must split into whole optimizer steps."
+                f"mini_batch_size ({batch_size * group_size}) must be divisible by "
+                f"micro_batch_size_per_gpu ({micro_batch_size_per_gpu}): "
+                "gradient_accumulation_steps = mini_batch_size / "
+                "micro_batch_size_per_gpu must be a whole number of backward "
+                "passes."
             ),
         ):
             GRPO(

@@ -8,10 +8,14 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+import torch
 from pydantic import BaseModel
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import LLMAlgorithm
+from agilerl.algorithms.core.base import training_device_spec
+from agilerl.arena.memory.manifest import training_settings_from_spec
+from agilerl.arena.memory.resolve.batch import resolve_micro_batch_size_per_gpu
 from agilerl.arena.models.algorithms import (
     AlgorithmSpec,
     LLMAlgorithmSpec,
@@ -124,10 +128,8 @@ class LLMBuilder(AlgorithmBuilder):
         kwargs = spec_kwargs(spec, hp_config=runtime.hp_config)
         kwargs.pop("pretrained_model_name_or_path", None)
 
-        cls._resolve_vllm_kwargs(
-            kwargs,
-            colocated=isinstance(spec, RolloutLLMSpec) and rollout_mode == "colocated",
-        )
+        colocated = isinstance(spec, RolloutLLMSpec) and rollout_mode == "colocated"
+        cls._resolve_vllm_kwargs(kwargs, colocated=colocated)
 
         if kwargs.get("lora_config") is not None:
             kwargs["lora_config"] = peft_lora_config(kwargs["lora_config"])
@@ -171,10 +173,29 @@ class LLMBuilder(AlgorithmBuilder):
             getattr(tokenizer, "eos_token_id", None),
         )
 
-        if "micro_batch_size_per_gpu" not in kwargs and is_distributed():
-            kwargs["micro_batch_size_per_gpu"] = max(
-                spec.batch_size // get_world_size(), 1
-            )
+        if "micro_batch_size_per_gpu" not in kwargs:
+            if torch.device(runtime.device).type == "cuda":
+                n_training_gpus = get_world_size()
+                device_spec = training_device_spec(
+                    runtime.device,
+                    kwargs.get("vllm_config"),
+                    colocated,
+                )
+                settings = training_settings_from_spec(
+                    spec,
+                    n_training_gpus,
+                    micro_batch_size=1,
+                )
+                kwargs["micro_batch_size_per_gpu"] = resolve_micro_batch_size_per_gpu(
+                    spec,
+                    n_training_gpus,
+                    device_spec,
+                    settings=settings,
+                )
+            elif is_distributed():
+                kwargs["micro_batch_size_per_gpu"] = resolve_micro_batch_size_per_gpu(
+                    spec, get_world_size()
+                )
         fsdp = getattr(spec, "fsdp", None)
         if fsdp is not None:
             kwargs["fsdp_config"] = fsdp

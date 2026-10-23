@@ -12,9 +12,9 @@ from agilerl.arena.memory.estimator import (
     estimate_run,
     estimate_training,
     generation_can_serve,
-    geometry_gap_warning,
-    resolve_fsdp_memory,
+    training_breakdown,
 )
+from agilerl.arena.memory.resolve.fsdp import resolve_fsdp_memory
 from agilerl.arena.memory.specs import (
     DeviceSpec,
     GenerationSettings,
@@ -242,7 +242,7 @@ class TestEstimateTraining:
         )
 
         assert empty.total == 0
-        assert geometry_gap_warning(empty) is None
+        assert formulas.geometry_gap_warning(empty) is None
 
 
 class TestEstimateGeneration:
@@ -1457,14 +1457,16 @@ class TestResolveFsdpMemory:
     def test_set_values_are_kept(self):
         settings = moe_settings(routed_expert_chunk_mib=128, optim_cpu_offload=True)
 
-        resolved = resolve_fsdp_memory(MOE_MODEL, budget_device(80 * GiB), settings)
+        resolved = resolve_fsdp_memory(
+            MOE_MODEL, budget_device(80 * GiB), settings, training_breakdown
+        )
 
         assert resolved.routed_expert_chunk_mib == 128
         assert resolved.optim_cpu_offload is True
 
     def test_ample_budget_picks_the_largest_chunk_and_a_gpu_optimizer(self):
         resolved = resolve_fsdp_memory(
-            MOE_MODEL, budget_device(80 * GiB), moe_settings()
+            MOE_MODEL, budget_device(80 * GiB), moe_settings(), training_breakdown
         )
 
         assert resolved.routed_expert_chunk_mib == 512
@@ -1475,7 +1477,9 @@ class TestResolveFsdpMemory:
         usable = (self.peak(128, True) + self.peak(256, True)) // 2
 
         # Act
-        resolved = resolve_fsdp_memory(MOE_MODEL, budget_device(usable), moe_settings())
+        resolved = resolve_fsdp_memory(
+            MOE_MODEL, budget_device(usable), moe_settings(), training_breakdown
+        )
 
         # Assert
         assert resolved.routed_expert_chunk_mib == 128
@@ -1488,9 +1492,15 @@ class TestResolveFsdpMemory:
         buffered_budget = int(gpu_peak / (1 - formulas.MAX_UNDERPREDICTION)) + 1
 
         # Act
-        tight = resolve_fsdp_memory(MOE_MODEL, budget_device(offload_budget), settings)
-        unbuffered = resolve_fsdp_memory(MOE_MODEL, budget_device(gpu_peak), settings)
-        roomy = resolve_fsdp_memory(MOE_MODEL, budget_device(buffered_budget), settings)
+        tight = resolve_fsdp_memory(
+            MOE_MODEL, budget_device(offload_budget), settings, training_breakdown
+        )
+        unbuffered = resolve_fsdp_memory(
+            MOE_MODEL, budget_device(gpu_peak), settings, training_breakdown
+        )
+        roomy = resolve_fsdp_memory(
+            MOE_MODEL, budget_device(buffered_budget), settings, training_breakdown
+        )
 
         # Assert
         assert tight.optim_cpu_offload is True
@@ -1498,7 +1508,9 @@ class TestResolveFsdpMemory:
         assert roomy.optim_cpu_offload is False
 
     def test_nothing_fits_takes_the_smallest_chunk_and_offload(self):
-        resolved = resolve_fsdp_memory(MOE_MODEL, budget_device(GiB), moe_settings())
+        resolved = resolve_fsdp_memory(
+            MOE_MODEL, budget_device(GiB), moe_settings(), training_breakdown
+        )
 
         assert resolved.routed_expert_chunk_mib == 64
         assert resolved.optim_cpu_offload is True
@@ -1506,7 +1518,9 @@ class TestResolveFsdpMemory:
     def test_full_cpu_offload_never_offloads_the_optimizer_again(self):
         settings = TrainingSettings(fsdp=FSDPConfig(cpu_offload=True))
 
-        resolved = resolve_fsdp_memory(MOE_MODEL, budget_device(80 * GiB), settings)
+        resolved = resolve_fsdp_memory(
+            MOE_MODEL, budget_device(80 * GiB), settings, training_breakdown
+        )
 
         assert resolved.optim_cpu_offload is False
 
@@ -1514,7 +1528,9 @@ class TestResolveFsdpMemory:
         usable = (self.peak(128, True) + self.peak(256, True)) // 2
 
         picks = [
-            resolve_fsdp_memory(MOE_MODEL, budget_device(usable), moe_settings())
+            resolve_fsdp_memory(
+                MOE_MODEL, budget_device(usable), moe_settings(), training_breakdown
+            )
             for _ in range(3)
         ]
 
@@ -1541,7 +1557,20 @@ class TestResolveFsdpMemory:
 
     def test_needs_an_fsdp_config(self, model, device):
         with pytest.raises(ValueError, match=r"needs settings\.fsdp"):
-            resolve_fsdp_memory(model, device, TrainingSettings())
+            resolve_fsdp_memory(model, device, TrainingSettings(), training_breakdown)
+
+    def test_needs_a_model_when_a_device_is_set(self, device):
+        # Arrange
+        settings = TrainingSettings(fsdp=FSDPConfig())
+
+        # Act / Assert
+        with pytest.raises(ValueError, match="needs a model when device is set"):
+            resolve_fsdp_memory(
+                None,
+                device,
+                settings,
+                training_breakdown,
+            )
 
 
 SUPER_VL_MODEL = ModelSpec(
@@ -1573,12 +1602,8 @@ def super_vl_cispo(
 
 
 def training_gpu(name: str, cuda_bytes: int) -> DeviceSpec:
-    """Training GPU budgeted as the trainer budgets it at runtime."""
-    return DeviceSpec(
-        total_bytes=cuda_bytes,
-        available_bytes=int(cuda_bytes * (1 - formulas.TRAINING_HEADROOM_FRACTION)),
-        name=name,
-    )
+    """Training GPU. The budget is DeviceSpec.usable_bytes."""
+    return DeviceSpec(total_bytes=cuda_bytes, name=name)
 
 
 class TestSuperVlCalibration:
@@ -1607,7 +1632,7 @@ class TestSuperVlCalibration:
     def test_busiest_rank_stays_inside_the_runtime_headroom(self, a100):
         # Arrange: the node's busiest rank peaked at 79.2 GiB at 64 MiB.
         busiest_peak_gib = 79.2
-        headroom_gib = A100_80GB_CUDA_BYTES * formulas.TRAINING_HEADROOM_FRACTION / GiB
+        headroom_gib = (a100.total_bytes - a100.usable_bytes) / GiB
 
         # Act
         excess_gib = busiest_peak_gib - self.estimate(a100, 64)
@@ -1620,7 +1645,7 @@ class TestSuperVlCalibration:
         # Arrange: rank 0 rose 0.27 GiB from 64 to 256 MiB; the busiest rank
         # is taken to rise by the same amount from its 79.2 GiB at 64 MiB.
         busiest_peak_gib = 79.2 + (77.95 - 77.68)
-        headroom_gib = A100_80GB_CUDA_BYTES * formulas.TRAINING_HEADROOM_FRACTION / GiB
+        headroom_gib = (a100.total_bytes - a100.usable_bytes) / GiB
 
         # Act
         excess_gib = busiest_peak_gib - self.estimate(a100, 256)
@@ -1639,12 +1664,17 @@ class TestSuperVlVwaPicks:
             ("NVIDIA H100 80GB HBM3", H100_80GB_CUDA_BYTES),
         ],
     )
-    def test_picks_512_mib_with_the_optimizer_offloaded(self, name, cuda_bytes):
+    def test_picks_the_smallest_chunk_with_the_optimizer_offloaded(
+        self, name, cuda_bytes
+    ):
         resolved = resolve_fsdp_memory(
-            SUPER_VL_MODEL, training_gpu(name, cuda_bytes), super_vl_cispo(29120, 16)
+            SUPER_VL_MODEL,
+            training_gpu(name, cuda_bytes),
+            super_vl_cispo(29120, 16),
+            training_breakdown,
         )
 
-        assert resolved.routed_expert_chunk_mib == 512
+        assert resolved.routed_expert_chunk_mib == 64
         assert resolved.optim_cpu_offload is True
 
     def test_h100_estimate_at_512_mib_covers_the_measured_busiest_rank(self):
@@ -1660,14 +1690,16 @@ class TestSuperVlVwaPicks:
         )
 
         # Assert
-        assert 76.47 <= estimate_gib < device.available_bytes / GiB
+        assert 76.47 <= estimate_gib < device.total_bytes / GiB
 
     def test_h100_pick_leaves_room_for_the_busiest_rank(self):
         # Arrange: EP routing spread A100 ranks 1.5 GiB over one learn step.
         rank_spread = int(1.5 * GiB)
         device = training_gpu("NVIDIA H100 80GB HBM3", H100_80GB_CUDA_BYTES)
         settings = super_vl_cispo(29120, 16)
-        resolved = resolve_fsdp_memory(SUPER_VL_MODEL, device, settings)
+        resolved = resolve_fsdp_memory(
+            SUPER_VL_MODEL, device, settings, training_breakdown
+        )
 
         # Act
         peak = estimate_training(

@@ -40,6 +40,11 @@ from torch.optim.lr_scheduler import LambdaLR
 from typing_extensions import TypeVarTuple, Unpack
 
 from agilerl import HAS_LLM_DEPENDENCIES
+from agilerl.arena.memory.resolve.lora import OMITTED_MAX_LORA_RANK
+from agilerl.arena.memory.resolve.sequences import (
+    COLOCATED_MAX_NUM_SEQS,
+    OMITTED_GPU_MEMORY_UTILIZATION,
+)
 from agilerl.arena.models.networks import VllmModality
 from agilerl.modules.base import EvolvableModule, ModuleDict
 from agilerl.modules.custom_components import NoisyLinear
@@ -2218,8 +2223,8 @@ class VLLMConfig:
 
     # Colocate mode parameters
     tensor_parallel_size: int | None = None
-    gpu_memory_utilization: float = 0.3
-    max_num_seqs: int = 8
+    gpu_memory_utilization: float = OMITTED_GPU_MEMORY_UTILIZATION
+    max_num_seqs: int = COLOCATED_MAX_NUM_SEQS
     max_num_batched_tokens: int | None = None
     enforce_eager: bool | None = None
     sleep_mode: bool = False
@@ -2228,7 +2233,7 @@ class VLLMConfig:
     quantization: str | None = None
     vllm_model_name_or_path: str | None = None
     kv_cache_dtype: str | None = None
-    max_lora_rank: int = 16
+    max_lora_rank: int = OMITTED_MAX_LORA_RANK
     max_loras: int = 1
     strip_multimodal_towers: bool | list[VllmModality] = False
     stop_sequences: list[str] | None = None

@@ -13,6 +13,7 @@ import torch
 from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import ActionResult, LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
+from agilerl.arena.memory.resolve.chunk import resolve_chunk_rows
 
 if TYPE_CHECKING:
     from peft import LoraConfig, PeftModel
@@ -247,8 +248,6 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         :func:`adapt_lora_config_for_model`.
     :type lora_target_scope: str | None, optional
     """
-
-    _mini_batch_size_default = "micro_batch"
 
     def __init__(
         self,
@@ -1095,7 +1094,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                 turn_ids=turn_ids_arg,
                 full_turn_mask=full_turn_mask,
                 max_turns=max_turns,
-                token_chunk_size=self._resolve_fused_chunk_rows(
+                token_chunk_size=resolve_chunk_rows(
                     head_w.shape[0],
                     self.chunk_rows,
                 ),

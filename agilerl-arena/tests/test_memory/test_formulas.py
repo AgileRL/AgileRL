@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from agilerl.arena.memory import formulas
+from agilerl.arena.memory.resolve.chunk import resolve_chunk_rows
 from agilerl.arena.memory.specs import GiB, MiB, ModelArch, WeightVariant
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 
@@ -497,10 +498,10 @@ class TestLoraParamCount:
 class TestResolveChunkRows:
     def test_targets_256mib_logit_tile(self):
         # 256 MiB / (151936 vocab * 4 bytes) = 441 rows.
-        assert formulas.resolve_chunk_rows(151936) == 441
-        assert formulas.resolve_chunk_rows(1000) == 4096  # clamped high
-        assert formulas.resolve_chunk_rows(10_000_000) == 128  # clamped low
-        assert formulas.resolve_chunk_rows(151936, explicit=64) == 64
+        assert resolve_chunk_rows(151936) == 441
+        assert resolve_chunk_rows(1000) == 4096  # clamped high
+        assert resolve_chunk_rows(10_000_000) == 128  # clamped low
+        assert resolve_chunk_rows(151936, explicit=64) == 64
 
 
 class TestResolveMaxNumBatchedTokens:

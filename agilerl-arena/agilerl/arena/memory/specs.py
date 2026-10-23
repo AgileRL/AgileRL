@@ -13,6 +13,11 @@ from typing import Any, Literal, TypedDict
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Self
 
+from agilerl.arena.memory.resolve.lora import OMITTED_MAX_LORA_RANK
+from agilerl.arena.memory.resolve.sequences import (
+    COLOCATED_MAX_NUM_SEQS,
+    OMITTED_GPU_MEMORY_UTILIZATION,
+)
 from agilerl.arena.models.fsdp import FSDPConfig
 
 GiB = 1024**3
@@ -898,8 +903,8 @@ class GenerationSettings(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    gpu_memory_utilization: float = 0.3
-    max_num_seqs: int = 8
+    gpu_memory_utilization: float = OMITTED_GPU_MEMORY_UTILIZATION
+    max_num_seqs: int = COLOCATED_MAX_NUM_SEQS
     max_model_len: int = 1024
     # Worst-case prompt length. Prefill dominates generation memory; decode
     # adds one token per sequence per step, so the activation peak tracks
@@ -914,7 +919,7 @@ class GenerationSettings(BaseModel):
     # ``True`` skips CUDA-graph capture, at some decode-throughput cost.
     # ``None``/``False`` keeps graphs on.
     enforce_eager: bool | None = None
-    max_lora_rank: int = 16
+    max_lora_rank: int = OMITTED_MAX_LORA_RANK
     max_loras: int = 1
     weight_dtype: WeightDtype = "bf16"
     # ``fp8`` stores the engine weights at one byte. KV and activations stay

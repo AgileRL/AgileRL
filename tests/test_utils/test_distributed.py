@@ -500,6 +500,18 @@ class TestGetRank:
     def test_zero_with_world_size_one(self, world_size_one):
         assert get_rank() == 0
 
+    def test_reads_launcher_rank_before_init(self, monkeypatch):
+        # Arrange
+        monkeypatch.setenv("RANK", "2")
+        monkeypatch.setenv("WORLD_SIZE", "4")
+        monkeypatch.setenv("MASTER_ADDR", "127.0.0.1")
+        monkeypatch.setenv("MASTER_PORT", "29500")
+
+        # Act / Assert
+        assert is_distributed() is False
+        assert get_rank() == 2
+        assert is_main_process() is False
+
 
 class TestGetLocalRank:
     def test_reads_local_rank_env(self):
@@ -520,6 +532,15 @@ class TestGetWorldSize:
 
     def test_one_with_world_size_one(self, world_size_one):
         assert get_world_size() == 1
+
+    def test_reads_launcher_world_size_before_init(self, monkeypatch):
+        monkeypatch.setenv("RANK", "0")
+        monkeypatch.setenv("WORLD_SIZE", "4")
+        monkeypatch.setenv("MASTER_ADDR", "127.0.0.1")
+        monkeypatch.setenv("MASTER_PORT", "29500")
+
+        assert is_distributed() is False
+        assert get_world_size() == 4
 
 
 class TestIsMainProcess:
@@ -1893,6 +1914,38 @@ class TestFSDPPrepareActorOffload:
     def test_rejects_an_unresolved_optimizer_placement(self):
         with pytest.raises(ValueError, match="optim_cpu_offload is unset"):
             FSDPRuntime(FSDPConfig(optim_cpu_offload=None)).prepare_actor(
+                nn.Linear(2, 2),
+                device="cpu",
+                colocated=False,
+                cosine_lr_schedule_config=None,
+                lr=1e-4,
+                lr_critic=None,
+                restore_adapter_trainability=MagicMock(),
+            )
+
+    def test_rejects_mutually_exclusive_offload_flags(self):
+        # Arrange
+        runtime = FSDPRuntime(FSDPConfig(cpu_offload=True, optim_cpu_offload=True))
+
+        # Act / Assert
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            runtime.prepare_actor(
+                nn.Linear(2, 2),
+                device="cpu",
+                colocated=True,
+                cosine_lr_schedule_config=None,
+                lr=1e-4,
+                lr_critic=None,
+                restore_adapter_trainability=MagicMock(),
+            )
+
+    def test_rejects_cpu_offload_without_colocated_vllm(self):
+        # Arrange
+        runtime = FSDPRuntime(FSDPConfig(cpu_offload=True, optim_cpu_offload=False))
+
+        # Act / Assert
+        with pytest.raises(ValueError, match="requires colocated vLLM"):
+            runtime.prepare_actor(
                 nn.Linear(2, 2),
                 device="cpu",
                 colocated=False,
