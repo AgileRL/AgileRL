@@ -261,6 +261,98 @@ class TestModelInfoInspected:
         ]
 
 
+PACKED_EXPERT_COUNTS = (
+    ("Qwen/Qwen3.6-35B-A3B", 256),
+    ("ibm-granite/granite-4.0-h-tiny", 64),
+    ("ibm-granite/granite-3.1-3b-a800m-instruct", 40),
+    ("nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16", 128),
+    ("nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16", 512),
+    ("openai/gpt-oss-20b", 32),
+)
+
+MODELS_WITHOUT_PACKED_EXPERTS = (
+    "Qwen/Qwen3-4B",
+    "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16",
+)
+
+
+class TestModelInfoSupportsExpertParallelProperty:
+    @pytest.mark.parametrize(
+        "hub_id",
+        [hub_id for hub_id, _count in PACKED_EXPERT_COUNTS],
+    )
+    def test_packed_expert_models(self, hub_id: str) -> None:
+        entry = SUPPORTED_MODEL_INFO[hub_id]
+
+        assert entry.supports_expert_parallel is True
+
+    @pytest.mark.parametrize("hub_id", MODELS_WITHOUT_PACKED_EXPERTS)
+    def test_models_without_packed_experts(self, hub_id: str) -> None:
+        entry = SUPPORTED_MODEL_INFO[hub_id]
+
+        assert entry.supports_expert_parallel is False
+
+    def test_serializes_in_model_dump(self) -> None:
+        dumped = SUPPORTED_MODEL_INFO["openai/gpt-oss-20b"].model_dump(mode="json")
+
+        assert dumped["supports_expert_parallel"] is True
+
+
+class TestModelInfoNumRoutedExpertsProperty:
+    @pytest.mark.parametrize(("hub_id", "expert_count"), PACKED_EXPERT_COUNTS)
+    def test_packed_expert_models(self, hub_id: str, expert_count: int) -> None:
+        entry = SUPPORTED_MODEL_INFO[hub_id]
+
+        assert entry.num_routed_experts == expert_count
+        assert entry.supports_expert_parallel is True
+
+    @pytest.mark.parametrize("hub_id", MODELS_WITHOUT_PACKED_EXPERTS)
+    def test_models_without_packed_experts(self, hub_id: str) -> None:
+        entry = SUPPORTED_MODEL_INFO[hub_id]
+
+        assert entry.num_routed_experts is None
+
+    def test_missing_key_raises_with_hub_id(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        bundled = {
+            "config": {"model_type": "custom"},
+            "inspected": {
+                "num_params": 1,
+                "lora_info": {
+                    "mlp.experts.down_proj": [{"kind": "parameter"}],
+                },
+            },
+        }
+        monkeypatch.setattr(model_info, "_bundled", lambda hub_id: bundled)
+        entry = ModelInfo(hub_id="org/missing-expert-count")
+
+        # Act / Assert
+        assert entry.supports_expert_parallel is True
+        with pytest.raises(ValueError, match="org/missing-expert-count"):
+            _ = entry.num_routed_experts
+
+    def test_every_packed_expert_entry_has_a_positive_count(self) -> None:
+        packed = {
+            hub_id: entry
+            for hub_id, entry in SUPPORTED_MODEL_INFO.items()
+            if entry.parameters
+        }
+
+        assert packed
+        for hub_id, entry in packed.items():
+            assert isinstance(entry.num_routed_experts, int)
+            assert entry.num_routed_experts > 0, hub_id
+
+    def test_serializes_in_model_dump(self) -> None:
+        moe = SUPPORTED_MODEL_INFO["Qwen/Qwen3.6-35B-A3B"].model_dump(mode="json")
+        dense = SUPPORTED_MODEL_INFO["Qwen/Qwen3-4B"].model_dump(mode="json")
+
+        assert moe["num_routed_experts"] == 256
+        assert dense["num_routed_experts"] is None
+
+
 class TestModelInfoArchitecture:
     def test_listed_architectures(self) -> None:
         architectures = {
