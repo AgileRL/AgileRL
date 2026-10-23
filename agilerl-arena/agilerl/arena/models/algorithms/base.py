@@ -313,13 +313,6 @@ class LLMAlgorithmSpec(AlgorithmSpec):
             "wasting compute."
         ),
     )
-    lora_target_scope: str | None = Field(
-        default=None,
-        description=(
-            "Restrict which blocks receive LoRA adapters, e.g. only the last N "
-            "layers. Unset adapts every matched module."
-        ),
-    )
     chunk_rows: int | None = Field(
         default=None,
         ge=1,

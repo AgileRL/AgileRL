@@ -4,7 +4,6 @@
 import json
 import logging
 import math
-import re
 import sys
 import types
 from pathlib import Path
@@ -26,6 +25,10 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper,
 )
 from transformers import (
+    CONFIG_MAPPING,
+    AutoConfig,
+    AutoModelForCausalLM,
+    AutoModelForImageTextToText,
     AutoTokenizer,
     LlamaConfig,
     LlamaForCausalLM,
@@ -40,15 +43,13 @@ from transformers import (
     SiglipVisionModel,
 )
 
+from agilerl.architectures import trainer_model_class
 from agilerl.architectures.flex_attention import (
     flex_decode_kernel_options,
     patch_flex_attention_kernel_options,
 )
-from agilerl.architectures.qwen3_5 import (
-    QWEN3_5_MODEL_CLASS_OVERRIDES,
-    qwen3_5_language_tower_hf_override,
-)
 from agilerl.arena.memory.resolve.lora import resolve_lora_rank_ceiling
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.distributed import fsdp as dmod
 from agilerl.distributed import gather_params
 from agilerl.llm_envs import DatasetEnv
@@ -63,10 +64,7 @@ from agilerl.utils.llm_utils import (
     baseline_free_turn_cells,
     batch_is_single_turn,
     build_bnb_quantization_config,
-    build_clippable_linear_lora_target_regex,
-    build_clippable_linear_lora_target_suffixes,
     build_completion_mask,
-    build_scoped_lora_target_regex,
     build_vllm_llm_init_kwargs,
     build_vllm_rollout_lora_request,
     calculate_k3_kl,
@@ -77,8 +75,6 @@ from agilerl.utils.llm_utils import (
     create_model_from_name_or_path,
     cuda_tensor_bytes_in_module,
     directory_opener,
-    discover_clippable_inner_linear_module_keys,
-    discover_clippable_projection_leaf_names,
     fill_outside_mask,
     filter_peft_state_dict_for_vllm_lora,
     format_colocated_vllm_oom_hint,
@@ -88,16 +84,17 @@ from agilerl.utils.llm_utils import (
     hf_completion_lengths,
     k3_kl_penalty_reference,
     language_model_attn_implementation,
+    language_model_prefix,
     list_peft_matched_module_keys,
     load_lora_adapters,
     log_cuda_memory_snapshot,
+    lora_target_module_names,
     make_llm_optimizer,
     make_llm_scheduler,
     masked_mean,
     masked_var,
     masked_whiten,
     max_prompt_tokens_for_model_len,
-    model_has_clippable_linear_wrappers,
     move_params_to_cpu,
     move_params_to_gpu,
     normalize_prompt_batch,
@@ -673,7 +670,6 @@ def test_llm_utils_fallback_types_when_no_llm_dependencies():
             # Verify the fallback sentinels
             assert llm_utils_reloaded.PreTrainedModel is Any
             assert llm_utils_reloaded.Dataset is Any
-            assert llm_utils_reloaded.AutoModelForCausalLM is None
             assert llm_utils_reloaded.AutoModelForCausalLMWithValueHead is None
             assert llm_utils_reloaded.BitsAndBytesConfig is None
     finally:
@@ -1661,69 +1657,38 @@ GiB = 1024**3
 
 
 # ---------------------------------------------------------------------------
-# Fixture models for the ClippableLinear / LoRA-targeting helpers
+# Fixture models for the LoRA-targeting helpers
 # ---------------------------------------------------------------------------
 
 
-class _FakeClippableLinear(nn.Module):
-    """Stand-in for Gemma's *ClippableLinear projection wrappers.
-
-    Only the class-name suffix matters to the helpers under test.
-    """
-
-    def __init__(self, inner: nn.Module | None = None):
-        super().__init__()
-        self.linear = nn.Linear(4, 4) if inner is None else inner
-
-
-class _ClippableTower(nn.Module):
-    """Vision-tower-like container of *ClippableLinear projection wrappers."""
-
+class _LanguageBlock(nn.Module):
     def __init__(self):
         super().__init__()
-        self.q_proj = _FakeClippableLinear()
-        self.k_proj = _FakeClippableLinear()
+        self.self_attn = nn.Module()
+        self.self_attn.q_proj = nn.Linear(4, 4)
+        self.self_attn.k_proj = nn.Linear(4, 4)
+        self.mlp = nn.Module()
+        self.mlp.up_proj = nn.Linear(4, 8)
 
 
-class _RootClippableModel(nn.Module):
-    """ClippableLinear wrappers outside any language_model/audio_tower scope."""
-
-    def __init__(self):
-        super().__init__()
-        self.tower = _ClippableTower()
-
-
-class _ScopedClippableModel(nn.Module):
-    """ClippableLinear wrappers nested under ``model.language_model``."""
-
-    def __init__(self):
-        super().__init__()
-        self.model = nn.Module()
-        self.model.language_model = _ClippableTower()
-
-
-class _AudioScopedClippableModel(nn.Module):
-    """ClippableLinear wrappers nested under ``model.audio_tower``."""
-
-    def __init__(self):
-        super().__init__()
-        self.model = nn.Module()
-        self.model.audio_tower = _ClippableTower()
-
-
-class _LanguageScopedLinearModel(nn.Module):
-    """Plain ``nn.Linear`` projections under a nested ``language_model`` scope."""
+class _VisionLanguageModel(nn.Module):
+    """``model.language_model`` beside a vision tower that reuses ``q_proj``."""
 
     def __init__(self):
         super().__init__()
         self.model = nn.Module()
         self.model.language_model = nn.Module()
-        self.model.language_model.q_proj = nn.Linear(4, 4)
-        self.model.language_model.mlp = nn.Linear(4, 4)
+        self.model.language_model.layers = nn.ModuleList(
+            [_LanguageBlock(), _LanguageBlock()]
+        )
+        self.model.visual = nn.Module()
+        self.model.visual.qkv = nn.Linear(4, 12)
+        self.model.visual.q_proj = nn.Linear(4, 4)
+        self.lm_head = nn.Linear(4, 8)
 
 
 class _PlainLinearModel(nn.Module):
-    """No ClippableLinear wrappers at all."""
+    """Text-only model: no ``language_model`` submodule."""
 
     def __init__(self):
         super().__init__()
@@ -1863,36 +1828,8 @@ class TestBuildBnbQuantizationConfig:
         assert build_bnb_quantization_config(None) is None
 
 
-class TestClippableLinearDiscovery:
-    def test_model_has_clippable_linear_wrappers(self):
-        assert model_has_clippable_linear_wrappers(_RootClippableModel())
-        assert not model_has_clippable_linear_wrappers(_PlainLinearModel())
-
-    def test_discover_projection_leaf_names_sorted(self):
-        assert discover_clippable_projection_leaf_names(_RootClippableModel()) == [
-            "k_proj",
-            "q_proj",
-        ]
-        assert discover_clippable_projection_leaf_names(_PlainLinearModel()) == []
-
-    def test_discover_inner_linear_module_keys(self):
-        keys = discover_clippable_inner_linear_module_keys(_RootClippableModel())
-        assert keys == ["tower.k_proj.linear", "tower.q_proj.linear"]
-
-    def test_discover_inner_keys_skips_non_adaptable_inner_modules(self):
-        model = nn.Module()
-        model.q_proj = _FakeClippableLinear(inner=nn.SiLU())
-        assert discover_clippable_inner_linear_module_keys(model) == []
-
-    def test_discover_inner_keys_accepts_bnb_quantized_linear_names(self):
-        class Linear4bit(nn.Module):
-            """Class name mimics the bitsandbytes 4-bit linear layer."""
-
-        model = nn.Module()
-        model.q_proj = _FakeClippableLinear(inner=Linear4bit())
-        assert discover_clippable_inner_linear_module_keys(model) == ["q_proj.linear"]
-
-    def test_is_peft_adaptable_linear(self):
+class TestIsPeftAdaptableLinear:
+    def test_accepts_linear_and_bnb_linear_names(self):
         class Linear8bitLt(nn.Module):
             """Class name mimics the bitsandbytes 8-bit linear layer."""
 
@@ -1914,64 +1851,16 @@ class TestPeftTargetKeyMatching:
         assert not peft_target_key_matches("model.layers.0.q_proj_extra", ["q_proj"])
 
     def test_list_matched_module_keys_respects_exclusions(self):
-        model = _RootClippableModel()
-        targets = ["q_proj.linear", "k_proj.linear"]
-        assert list_peft_matched_module_keys(model, targets) == [
-            "tower.q_proj.linear",
-            "tower.k_proj.linear",
+        model = _VisionLanguageModel()
+
+        assert list_peft_matched_module_keys(model, ["qkv", "k_proj"]) == [
+            "model.language_model.layers.0.self_attn.k_proj",
+            "model.language_model.layers.1.self_attn.k_proj",
+            "model.visual.qkv",
         ]
         assert list_peft_matched_module_keys(
-            model, targets, exclude_modules=["k_proj"]
-        ) == ["tower.q_proj.linear"]
-
-
-class TestLoraTargetRegexBuilders:
-    def test_clippable_regex_targets_inner_linear(self):
-        regex = build_clippable_linear_lora_target_regex(["q_proj", "k_proj", "q_proj"])
-        assert regex == r"(?:.*\.)?(k_proj|q_proj)\.linear"
-        assert re.fullmatch(regex, "model.layers.0.q_proj.linear")
-        assert re.fullmatch(regex, "k_proj.linear")
-        assert not re.fullmatch(regex, "model.layers.0.q_proj")
-
-    def test_clippable_regex_requires_projection_names(self):
-        with pytest.raises(ValueError, match="At least one projection name"):
-            build_clippable_linear_lora_target_regex([])
-
-    def test_scoped_regex_matches_plain_and_wrapped_projections(self):
-        regex = build_scoped_lora_target_regex(["q_proj"], "language_model")
-        assert re.fullmatch(regex, "model.language_model.layers.0.q_proj")
-        assert re.fullmatch(regex, "model.language_model.layers.0.q_proj.linear")
-        assert re.fullmatch(regex, "language_model.model.layers.0.q_proj")
-        assert re.fullmatch(regex, "language_model.q_proj")
-        assert not re.fullmatch(regex, "model.vision_tower.layers.0.q_proj")
-        assert not re.fullmatch(regex, "not_language_model.q_proj")
-
-    def test_scoped_regex_requires_projection_names(self):
-        with pytest.raises(ValueError, match="At least one projection name"):
-            build_scoped_lora_target_regex([], "language_model")
-
-    def test_suffix_targets_sorted_and_deduped(self):
-        assert build_clippable_linear_lora_target_suffixes(
-            ["q_proj", "k_proj", "q_proj"]
-        ) == ["k_proj.linear", "q_proj.linear"]
-
-
-class TestProjectionNameResolution:
-    def test_regex_spec_short_circuits_to_none(self):
-        assert (
-            llm_utils_module._projection_names_for_clippable_lora(
-                _PlainLinearModel(), r".*\.q_proj"
-            )
-            is None
-        )
-
-    def test_none_targets_returns_none(self):
-        assert (
-            llm_utils_module._projection_names_for_clippable_lora(
-                _PlainLinearModel(), None
-            )
-            is None
-        )
+            model, ["qkv", "k_proj"], exclude_modules=["k_proj"]
+        ) == ["model.visual.qkv"]
 
     def test_looks_like_peft_target_regex_heuristic(self):
         looks = llm_utils_module._looks_like_peft_target_regex
@@ -1981,210 +1870,165 @@ class TestProjectionNameResolution:
         assert not looks("q_proj")
         assert not looks("q_proj.linear")
 
-    def test_all_linear_expands_to_discovered_wrapper_names(self):
-        names = llm_utils_module._projection_names_for_clippable_lora(
-            _RootClippableModel(), "all-linear"
-        )
-        assert names == ["k_proj", "q_proj"]
 
-    def test_explicit_names_normalized_sorted_deduped(self):
-        names = llm_utils_module._projection_names_for_clippable_lora(
-            _PlainLinearModel(), ["v_proj.linear", "q_proj", "q_proj"]
-        )
-        assert names == ["q_proj", "v_proj"]
+class TestLanguageModelPrefix:
+    def test_vl_model_returns_shortest_language_model_path(self):
+        assert language_model_prefix(_VisionLanguageModel()) == "model.language_model"
 
-
-class TestInferClippableLoraScope:
-    def test_language_model_scope_inferred(self):
-        assert (
-            llm_utils_module._infer_clippable_lora_scope(_ScopedClippableModel())
-            == "language_model"
-        )
-
-    def test_audio_tower_scope_inferred(self):
-        assert (
-            llm_utils_module._infer_clippable_lora_scope(_AudioScopedClippableModel())
-            == "audio_tower"
-        )
-
-    def test_unscoped_wrappers_infer_none(self):
-        assert (
-            llm_utils_module._infer_clippable_lora_scope(_RootClippableModel()) is None
-        )
-
-    def test_no_wrappers_infer_none(self):
-        assert llm_utils_module._infer_clippable_lora_scope(_PlainLinearModel()) is None
-
-
-class _CausalLmLinearModel(nn.Module):
-    """Plain ``nn.Linear`` projections under ``model.layers`` without a scope segment."""
-
-    def __init__(self):
-        super().__init__()
-        self.model = nn.Module()
-        self.model.layers = nn.ModuleList([nn.Module()])
-        self.model.layers[0].q_proj = nn.Linear(4, 4)
-
-
-class _LanguageModelLayersLinearModel(nn.Module):
-    """Plain ``nn.Linear`` under ``model.language_model.layers``."""
-
-    def __init__(self):
-        super().__init__()
-        self.model = nn.Module()
-        self.model.language_model = nn.Module()
-        self.model.language_model.layers = nn.ModuleList([nn.Module()])
-        self.model.language_model.layers[0].q_proj = nn.Linear(4, 4)
-
-
-class TestExampleModuleKeysForLoraScope:
-    def test_returns_keys_under_scope_only(self):
-        model = _LanguageScopedLinearModel()
-        keys = llm_utils_module._example_module_keys_for_lora_scope(
-            model, "language_model"
-        )
-        assert keys == [
-            "model.language_model.q_proj",
-            "model.language_model.mlp",
-        ]
-
-    def test_limit_truncates_examples(self):
-        model = _LanguageScopedLinearModel()
-        keys = llm_utils_module._example_module_keys_for_lora_scope(
-            model, "language_model", limit=1
-        )
-        assert keys == ["model.language_model.q_proj"]
-
-
-class TestExampleModuleKeysOnModel:
-    def test_prefers_model_layers_keys(self):
-        keys = llm_utils_module._example_module_keys_on_model(_CausalLmLinearModel())
-        assert keys == ["model.layers.0.q_proj"]
-
-    def test_falls_back_to_any_keys(self):
-        keys = llm_utils_module._example_module_keys_on_model(_PlainLinearModel())
-        assert keys == ["q_proj"]
-
-    def test_limit_truncates_examples(self):
-        model = _LanguageScopedLinearModel()
-        keys = llm_utils_module._example_module_keys_on_model(model, limit=1)
-        assert keys == ["model.language_model.q_proj"]
+    def test_text_model_returns_none(self):
+        assert language_model_prefix(_PlainLinearModel()) is None
 
 
 class TestAdaptLoraConfigForModel:
-    def test_regex_targets_returned_unchanged(self):
-        cfg = _PlainLoraConfig(target_modules=r".*\.q_proj")
-        assert adapt_lora_config_for_model(_RootClippableModel(), cfg) is cfg
-
-    def test_plain_model_short_names_returned_unchanged(self):
+    def test_text_model_named_targets_returned_unchanged(self):
         cfg = _PlainLoraConfig(target_modules=["q_proj"])
+
         assert adapt_lora_config_for_model(_PlainLinearModel(), cfg) is cfg
 
-    def test_explicit_scope_rewrites_to_scoped_regex(self):
-        model = _LanguageScopedLinearModel()
+    def test_vl_named_targets_land_on_language_model_only(self):
+        # Arrange
+        model = _VisionLanguageModel()
         cfg = _PlainLoraConfig(target_modules=["q_proj"])
-        adapted = adapt_lora_config_for_model(
-            model, cfg, lora_target_scope="language_model"
-        )
-        expected = build_scoped_lora_target_regex(["q_proj"], "language_model")
-        assert adapted is not cfg
-        assert adapted.target_modules == expected
-        # Original config untouched (deepcopy clone path).
-        assert cfg.target_modules == ["q_proj"]
-        assert re.fullmatch(expected, "model.language_model.q_proj")
 
-    def test_explicit_scope_with_to_dict_config_reconstructs_class(self):
-        model = _LanguageScopedLinearModel()
-        cfg = _DictLoraConfig(target_modules=["q_proj"], r=16)
+        # Act
+        adapted = adapt_lora_config_for_model(model, cfg)
+
+        # Assert
+        assert list_peft_matched_module_keys(model, adapted.target_modules) == [
+            "model.language_model.layers.0.self_attn.q_proj",
+            "model.language_model.layers.1.self_attn.q_proj",
+        ]
+        assert cfg.target_modules == ["q_proj"]
+
+    def test_vl_all_linear_covers_language_linears_only(self):
+        model = _VisionLanguageModel()
+        cfg = _PlainLoraConfig(target_modules="all-linear")
+
+        adapted = adapt_lora_config_for_model(model, cfg)
+
+        matched = list_peft_matched_module_keys(model, adapted.target_modules)
+        assert len(matched) == 6
+        assert all(key.startswith("model.language_model.") for key in matched)
+
+    def test_tower_targets_land_outside_language_model(self):
+        model = _VisionLanguageModel()
+        cfg = _PlainLoraConfig(target_modules=["k_proj"])
+
         adapted = adapt_lora_config_for_model(
-            model, cfg, lora_target_scope="language_model"
+            model, cfg, tower_target_modules=["q_proj"]
         )
+
+        assert list_peft_matched_module_keys(model, adapted.target_modules) == [
+            "model.language_model.layers.0.self_attn.k_proj",
+            "model.language_model.layers.1.self_attn.k_proj",
+            "model.visual.q_proj",
+        ]
+
+    def test_to_dict_config_is_rebuilt_as_its_class(self):
+        cfg = _DictLoraConfig(target_modules=["q_proj"], r=16)
+
+        adapted = adapt_lora_config_for_model(_VisionLanguageModel(), cfg)
+
         assert isinstance(adapted, _DictLoraConfig)
         assert adapted is not cfg
         assert adapted.r == 16
-        assert adapted.target_modules == build_scoped_lora_target_regex(
-            ["q_proj"], "language_model"
-        )
 
-    def test_explicit_scope_without_matches_raises_with_examples(self):
-        model = _LanguageScopedLinearModel()
-        cfg = _PlainLoraConfig(target_modules=["v_proj"])
-        with pytest.raises(
-            ValueError, match="No modules matched scoped LoRA target_modules"
-        ) as exc_info:
-            adapt_lora_config_for_model(model, cfg, lora_target_scope="language_model")
-        assert "Example keys under scope" in str(exc_info.value)
-        assert "model.language_model.q_proj" in str(exc_info.value)
-        assert "leave algorithm.lora_target_scope unset" not in str(exc_info.value)
+    @pytest.mark.parametrize("targets", [None, []])
+    def test_vl_empty_targets_returned_unchanged(self, targets):
+        cfg = _PlainLoraConfig(target_modules=targets)
 
-    def test_explicit_scope_mismatch_on_causal_lm_hints_unset_scope(self):
-        model = _CausalLmLinearModel()
-        cfg = _PlainLoraConfig(target_modules=["q_proj"])
-        with pytest.raises(
-            ValueError, match="No modules matched scoped LoRA target_modules"
-        ) as exc_info:
-            adapt_lora_config_for_model(model, cfg, lora_target_scope="language_model")
-        message = str(exc_info.value)
-        assert "Example keys under scope: []" in message
-        assert "Example keys on model: ['model.layers.0.q_proj']" in message
-        assert "leave algorithm.lora_target_scope unset" in message
+        assert adapt_lora_config_for_model(_VisionLanguageModel(), cfg) is cfg
 
-    def test_language_model_layers_mismatch_does_not_hint_unset_scope(self):
-        model = _LanguageModelLayersLinearModel()
-        cfg = _PlainLoraConfig(target_modules=["q_proj"])
-        with pytest.raises(
-            ValueError, match="No modules matched scoped LoRA target_modules"
-        ) as exc_info:
-            adapt_lora_config_for_model(model, cfg, lora_target_scope="text")
-        message = str(exc_info.value)
-        assert "Example keys under scope: []" in message
-        assert "model.language_model.layers.0.q_proj" in message
-        assert "leave algorithm.lora_target_scope unset" not in message
+    def test_vl_regex_targets_returned_unchanged(self):
+        cfg = _PlainLoraConfig(target_modules=r".*\.visual\.qkv")
 
-    def test_explicit_scope_with_empty_targets_raises(self):
-        cfg = _PlainLoraConfig(target_modules=[])
-        with pytest.raises(ValueError, match="lora_target_scope is set but no"):
+        assert adapt_lora_config_for_model(_VisionLanguageModel(), cfg) is cfg
+
+    def test_regex_targets_with_tower_targets_raise(self):
+        cfg = _PlainLoraConfig(target_modules=r".*\.q_proj")
+
+        with pytest.raises(ValueError, match="cannot be combined with a regex"):
             adapt_lora_config_for_model(
-                _LanguageScopedLinearModel(), cfg, lora_target_scope="language_model"
+                _VisionLanguageModel(), cfg, tower_target_modules=["qkv"]
             )
 
-    def test_inferred_language_model_scope_with_all_linear(self):
-        model = _ScopedClippableModel()
-        cfg = _PlainLoraConfig(target_modules="all-linear")
-        adapted = adapt_lora_config_for_model(model, cfg)
-        assert adapted.target_modules == build_scoped_lora_target_regex(
-            ["k_proj", "q_proj"], "language_model"
-        )
-
-    def test_unscoped_clippable_rewrites_to_suffix_list(self):
-        model = _RootClippableModel()
+    def test_tower_targets_on_text_model_raise(self):
         cfg = _PlainLoraConfig(target_modules=["q_proj"])
-        adapted = adapt_lora_config_for_model(model, cfg)
-        assert adapted is not cfg
-        assert adapted.target_modules == ["q_proj.linear"]
-        assert cfg.target_modules == ["q_proj"]
 
-    def test_unscoped_clippable_with_matching_suffix_targets_is_identity(self):
-        model = _RootClippableModel()
-        cfg = _PlainLoraConfig(target_modules=["q_proj.linear"])
-        assert adapt_lora_config_for_model(model, cfg) is cfg
+        with pytest.raises(ValueError, match="need a multimodal model"):
+            adapt_lora_config_for_model(
+                _PlainLinearModel(), cfg, tower_target_modules=["qkv"]
+            )
 
-    def test_unscoped_clippable_with_empty_targets_raises(self):
-        cfg = _PlainLoraConfig(target_modules=[])
+    def test_tower_only_name_in_target_modules_raises(self):
+        cfg = _PlainLoraConfig(target_modules=["qkv"])
+
         with pytest.raises(
-            ValueError, match="ClippableLinear wrappers but no projection names"
-        ):
-            adapt_lora_config_for_model(_RootClippableModel(), cfg)
-
-    def test_unscoped_clippable_with_unmatched_projection_raises(self):
-        model = _RootClippableModel()
-        cfg = _PlainLoraConfig(target_modules=["v_proj"])
-        with pytest.raises(
-            ValueError,
-            match="No modules matched LoRA target_modules for ClippableLinear",
+            ValueError, match=r"No modules under 'model\.language_model'"
         ) as exc_info:
-            adapt_lora_config_for_model(model, cfg)
-        assert "LORA_TARGET_SCOPE" in str(exc_info.value)
+            adapt_lora_config_for_model(_VisionLanguageModel(), cfg)
+        assert "['k_proj', 'q_proj', 'up_proj']" in str(exc_info.value)
+
+    def test_unmatched_tower_targets_raise(self):
+        cfg = _PlainLoraConfig(target_modules=["q_proj"])
+
+        with pytest.raises(ValueError, match="No modules outside"):
+            adapt_lora_config_for_model(
+                _VisionLanguageModel(), cfg, tower_target_modules=["up_proj"]
+            )
+
+
+VL_SUPPORTED_MODEL_IDS = sorted(
+    hub_id
+    for hub_id, entry in SUPPORTED_MODEL_INFO.items()
+    if entry.language_model_prefix is not None
+    # Its config and model classes are checkpoint code, not in transformers.
+    and entry.model_type in CONFIG_MAPPING
+)
+
+
+class TestAdaptLoraConfigForSupportedVlModels:
+    def test_covers_every_transformers_vl_family(self):
+        families = {SUPPORTED_MODEL_INFO[h].model_type for h in VL_SUPPORTED_MODEL_IDS}
+
+        assert families == {"gemma4", "qwen3_5", "qwen3_5_moe"}
+
+    @pytest.mark.parametrize("target_modules", ["default", "all-linear"])
+    @pytest.mark.parametrize("hub_id", VL_SUPPORTED_MODEL_IDS)
+    def test_default_lora_never_reaches_towers(
+        self, hub_id: str, target_modules: str
+    ) -> None:
+        # Arrange
+        entry = SUPPORTED_MODEL_INFO[hub_id]
+        config = AutoConfig.for_model(**entry.config)
+        with torch.device("meta"):
+            model = trainer_model_class(hub_id).from_config(config)
+        targets = (
+            sorted(entry.default_lora_modules)
+            if target_modules == "default"
+            else target_modules
+        )
+        lora_config = LoraConfig(r=8, target_modules=targets)
+
+        # Act
+        adapted = adapt_lora_config_for_model(model, lora_config)
+        peft_model = get_peft_model(model, adapted)
+
+        # Assert
+        adapter_modules = {
+            name.removeprefix("base_model.model.").rsplit(".lora_A", 1)[0]
+            for name, _ in peft_model.named_parameters()
+            if ".lora_A." in name
+        }
+        assert adapter_modules
+        assert all(
+            name.startswith(f"{entry.language_model_prefix}.")
+            for name in adapter_modules
+        ), sorted(adapter_modules)[:5]
+        leaf_names = {name.rsplit(".", 1)[-1] for name in adapter_modules}
+        assert entry.default_lora_modules <= leaf_names
+        if target_modules == "default":
+            assert leaf_names == entry.default_lora_modules
 
 
 class TestAdaptLoraConfigForModelMamba:
@@ -2279,6 +2123,44 @@ class TestAdaptLoraConfigForModelMamba:
         )
 
         assert adapt_lora_config_for_model(_MambaLikeModel(), cfg) is cfg
+
+
+class TestLoraTargetModuleNames:
+    def test_named_list_is_returned(self):
+        assert lora_target_module_names(["q_proj", "v_proj"]) == ["q_proj", "v_proj"]
+
+    def test_all_linear_is_none(self):
+        assert lora_target_module_names("all-linear") is None
+        assert lora_target_module_names(None) is None
+
+    def test_opaque_regex_is_none(self):
+        assert lora_target_module_names(r".*\.q_proj") is None
+
+    def test_anchored_attention_regex_yields_language_leaves(self):
+        spec = llm_utils_module._anchored_lora_target_regex(
+            ["q_proj", "k_proj", "v_proj", "o_proj"],
+            ["visual"],
+            "model.language_model",
+        )
+
+        assert set(lora_target_module_names(spec)) == {
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+        }
+
+    def test_vl_rewrite_keeps_attention_leaf_names(self):
+        adapted = adapt_lora_config_for_model(
+            _VisionLanguageModel(),
+            _PlainLoraConfig(target_modules=["q_proj", "k_proj"]),
+        )
+
+        assert isinstance(adapted.target_modules, str)
+        assert set(lora_target_module_names(adapted.target_modules)) == {
+            "k_proj",
+            "q_proj",
+        }
 
 
 class TestLogCudaMemorySnapshot:
@@ -2839,14 +2721,32 @@ class TestCreateModelFromNameOrPathDefaults:
 
         return _Loader
 
+    @staticmethod
+    def _patch_auto_classes(monkeypatch, captured, on_load=None):
+        """Record which catalog auto class loads, and with what."""
+        for auto_class in (AutoModelForCausalLM, AutoModelForImageTextToText):
+
+            def from_pretrained(
+                pretrained_model_name_or_path, _cls=auto_class, **kwargs
+            ):
+                if on_load is not None:
+                    on_load()
+                captured["class"] = _cls
+                captured["name"] = pretrained_model_name_or_path
+                captured["kwargs"] = kwargs
+                return nn.Identity()
+
+            monkeypatch.setattr(
+                auto_class, "from_pretrained", staticmethod(from_pretrained)
+            )
+
     def test_defaults_to_bf16_and_sdpa(self, monkeypatch):
         captured = {}
-        monkeypatch.setattr(
-            llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
-        )
+        self._patch_auto_classes(monkeypatch, captured)
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
         out = create_model_from_name_or_path("org/tiny")
         assert isinstance(out, nn.Identity)
+        assert captured["class"] is AutoModelForCausalLM
         assert captured["name"] == "org/tiny"
         assert captured["kwargs"]["torch_dtype"] is torch.bfloat16
         assert captured["kwargs"]["attn_implementation"] == "sdpa"
@@ -2854,9 +2754,7 @@ class TestCreateModelFromNameOrPathDefaults:
 
     def test_caller_dtype_stays_authoritative(self, monkeypatch):
         captured = {}
-        monkeypatch.setattr(
-            llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
-        )
+        self._patch_auto_classes(monkeypatch, captured)
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
         create_model_from_name_or_path(
             "org/tiny", model_config={"torch_dtype": torch.float32}
@@ -2866,9 +2764,7 @@ class TestCreateModelFromNameOrPathDefaults:
     def test_flex_attention_triggers_kernel_options_patch(self, monkeypatch):
         captured = {}
         patch_calls = []
-        monkeypatch.setattr(
-            llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
-        )
+        self._patch_auto_classes(monkeypatch, captured)
         monkeypatch.setattr(
             llm_utils_module,
             "patch_flex_attention_kernel_options",
@@ -2885,9 +2781,7 @@ class TestCreateModelFromNameOrPathDefaults:
     def test_gemma_swa_defaults_to_flex_attention(self, monkeypatch, model_type: str):
         captured = {}
         patch_calls = []
-        monkeypatch.setattr(
-            llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
-        )
+        self._patch_auto_classes(monkeypatch, captured)
         monkeypatch.setattr(
             llm_utils_module,
             "patch_flex_attention_kernel_options",
@@ -2897,13 +2791,23 @@ class TestCreateModelFromNameOrPathDefaults:
         stub_catalog_model_type(monkeypatch, model_type)
         create_model_from_name_or_path("google/gemma")
         assert captured["kwargs"]["attn_implementation"] == "flex_attention"
+        assert captured["class"] is AutoModelForImageTextToText
         assert patch_calls == [1]
+
+    @pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe"])
+    def test_qwen3_5_vl_loads_its_vl_class(self, monkeypatch, model_type: str):
+        captured = {}
+        self._patch_auto_classes(monkeypatch, captured)
+        monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+        stub_catalog_model_type(monkeypatch, model_type)
+
+        create_model_from_name_or_path("Qwen/qwen3.5")
+
+        assert captured["class"] is AutoModelForImageTextToText
 
     def test_gemma2_does_not_default_to_flex_attention(self, monkeypatch):
         captured = {}
-        monkeypatch.setattr(
-            llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
-        )
+        self._patch_auto_classes(monkeypatch, captured)
         monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
         stub_catalog_model_type(monkeypatch, "gemma2")
         create_model_from_name_or_path("google/gemma-2-9b")
@@ -2911,9 +2815,7 @@ class TestCreateModelFromNameOrPathDefaults:
 
     def test_family_catalog_overrides_explicit_attn(self, monkeypatch):
         captured = {}
-        monkeypatch.setattr(
-            llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
-        )
+        self._patch_auto_classes(monkeypatch, captured)
         monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
         stub_catalog_model_type(monkeypatch, "gpt_oss")
         create_model_from_name_or_path(
@@ -2924,9 +2826,7 @@ class TestCreateModelFromNameOrPathDefaults:
 
     def test_nemotron_defaults_to_flash_attention_2(self, monkeypatch):
         captured = {}
-        monkeypatch.setattr(
-            llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
-        )
+        self._patch_auto_classes(monkeypatch, captured)
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
         stub_catalog_model_type(monkeypatch, "nemotron_h")
         create_model_from_name_or_path("nvidia/nemotron")
@@ -2936,9 +2836,7 @@ class TestCreateModelFromNameOrPathDefaults:
     def test_nemotron_h_omni_forwards_trust_remote_code(self, monkeypatch):
         captured = {}
         remote_code_loads = []
-        monkeypatch.setattr(
-            llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
-        )
+        self._patch_auto_classes(monkeypatch, captured)
         monkeypatch.setattr(
             llm_utils_module,
             "load_remote_code",
@@ -2953,9 +2851,7 @@ class TestCreateModelFromNameOrPathDefaults:
 
     def test_caller_trust_remote_code_false_is_not_overwritten(self, monkeypatch):
         captured = {}
-        monkeypatch.setattr(
-            llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
-        )
+        self._patch_auto_classes(monkeypatch, captured)
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
         stub_catalog_model_type(monkeypatch, "nemotron_h")
         create_model_from_name_or_path(
@@ -2966,16 +2862,15 @@ class TestCreateModelFromNameOrPathDefaults:
 
     def test_family_trainer_non_attn_keys_fill_when_absent(self, monkeypatch):
         captured = {}
-        monkeypatch.setattr(
-            llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
-        )
+        self._patch_auto_classes(monkeypatch, captured)
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
 
         class FakeTrainer:
             attn_implementation = None
+            model_class = self._fake_loader(captured)
 
-            def model_dump(self, exclude_none=True):
-                return {"attn_implementation": "eager", "use_cache": False}
+            def load_kwargs(self):
+                return {"use_cache": False}
 
         monkeypatch.setattr(
             llm_utils_module,
@@ -2990,15 +2885,14 @@ class TestCreateModelFromNameOrPathDefaults:
 
     def test_family_trainer_non_attn_keys_do_not_overwrite_caller(self, monkeypatch):
         captured = {}
-        monkeypatch.setattr(
-            llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
-        )
+        self._patch_auto_classes(monkeypatch, captured)
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
 
         class FakeTrainer:
             attn_implementation = None
+            model_class = self._fake_loader(captured)
 
-            def model_dump(self, exclude_none=True):
+            def load_kwargs(self):
                 return {"use_cache": False}
 
         monkeypatch.setattr(
@@ -3017,19 +2911,14 @@ class TestCreateModelFromNameOrPathDefaults:
     def test_family_patches_install_before_from_pretrained(self, monkeypatch):
         order: list[str] = []
         captured = {}
-        loader = self._fake_loader(captured)
-
-        class _Loader:
-            @staticmethod
-            def from_pretrained(pretrained_model_name_or_path, **kwargs):
-                order.append("from_pretrained")
-                return loader.from_pretrained(pretrained_model_name_or_path, **kwargs)
 
         def _install(*args, **_kwargs):
             order.append("install")
             return frozenset({"nemotron_h"})
 
-        monkeypatch.setattr(llm_utils_module, "AutoModelForCausalLM", _Loader)
+        self._patch_auto_classes(
+            monkeypatch, captured, on_load=lambda: order.append("from_pretrained")
+        )
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
         monkeypatch.setattr(llm_utils_module, "install_family_patches", _install)
         create_model_from_name_or_path("nvidia/Nemotron-H-8B")
@@ -3602,17 +3491,18 @@ class TestBuildVllmLlmInitKwargs:
         assert "model_class_overrides" not in kwargs
         assert "enable_tower_connector_lora" not in kwargs
 
-    def test_kept_multimodal_towers_enable_tower_connector_lora(self, monkeypatch):
+    def test_tower_lora_targets_enable_tower_connector_lora(self, monkeypatch):
         stub_catalog_model_type(monkeypatch, "nemotron_h_omni")
         kwargs = build_vllm_llm_init_kwargs(
             _vllm_config(strip_multimodal_towers=False),
             trainer_model_name_or_path="org/vl-model",
             max_model_len=32768,
+            tower_lora_target_modules=["query", "linear1"],
         )
 
         assert kwargs["enable_tower_connector_lora"] is True
 
-    def test_kept_towers_skip_tower_connector_lora_for_language_only_targets(
+    def test_kept_towers_skip_tower_connector_lora_without_tower_targets(
         self, monkeypatch
     ):
         stub_catalog_model_type(monkeypatch, "nemotron_h_omni")
@@ -3620,7 +3510,6 @@ class TestBuildVllmLlmInitKwargs:
             _vllm_config(strip_multimodal_towers=False),
             trainer_model_name_or_path="org/vl-model",
             max_model_len=32768,
-            lora_target_modules={"q_proj", "in_proj", "up_proj"},
         )
 
         assert "enable_tower_connector_lora" not in kwargs
@@ -3665,7 +3554,9 @@ class TestBuildVllmLlmInitKwargs:
         assert "hf_overrides" not in kwargs
         assert "model_class_overrides" not in kwargs
 
-    def test_strip_multimodal_towers_applies_qwen3_5_language_tower(self, monkeypatch):
+    def test_strip_multimodal_towers_serves_qwen3_5_language_model_only(
+        self, monkeypatch
+    ):
         stub_catalog_model_type(monkeypatch, "qwen3_5_moe")
         kwargs = build_vllm_llm_init_kwargs(
             _vllm_config(strip_multimodal_towers=True),
@@ -3673,8 +3564,9 @@ class TestBuildVllmLlmInitKwargs:
             max_model_len=32768,
         )
 
-        assert kwargs["hf_overrides"] is qwen3_5_language_tower_hf_override
-        assert kwargs["model_class_overrides"] == QWEN3_5_MODEL_CLASS_OVERRIDES
+        assert kwargs["language_model_only"] is True
+        assert "hf_overrides" not in kwargs
+        assert "model_class_overrides" not in kwargs
         assert kwargs["mamba_cache_mode"] == "align"
         assert kwargs["enable_prefix_caching"] is True
 

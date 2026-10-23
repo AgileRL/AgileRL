@@ -180,6 +180,14 @@ class TestPeftLoraConfig:
         assert lora.lora_alpha == 16
         assert set(lora.target_modules) == {"q_proj"}
 
+    def test_tower_targets_stay_out_of_the_peft_object(self):
+        lora = llm_builder.peft_lora_config(
+            LoraConfigDict(target_modules=["q_proj"], tower_target_modules=["query"])
+        )
+
+        assert set(lora.target_modules) == {"q_proj"}
+        assert not hasattr(lora, "tower_target_modules")
+
     def test_already_built_peft_config_is_returned(self):
         from peft import LoraConfig
 
@@ -436,6 +444,19 @@ class TestLLMBuildGuards:
         built = _build_llm_with_dummy_algo(spec, monkeypatch)
 
         assert "vllm_config" not in built
+
+    def test_tower_lora_targets_reach_the_constructor(self, monkeypatch):
+        spec = GRPOSpec(
+            group_size=2,
+            pretrained_model_name_or_path="stub/model",
+            lora_config=LoraConfigDict(
+                target_modules=["q_proj"], tower_target_modules=["query"]
+            ),
+        )
+        built = _build_llm_with_dummy_algo(spec, monkeypatch)
+
+        assert built["lora_tower_target_modules"] == ["query"]
+        assert set(built["lora_config"].target_modules) == {"q_proj"}
 
     def test_defaults_index_to_zero(self, monkeypatch):
         spec = GRPOSpec(

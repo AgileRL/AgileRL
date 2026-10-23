@@ -134,10 +134,10 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         backward on frozen packed base weights. ``None`` (default) recomputes
         only outside activation-checkpointed blocks.
     :type moe_lora_recompute: bool | None, optional
-    :param lora_target_scope: Optional PEFT LoRA path scope for multimodal models
-        (e.g. ``"language_model"``). Passed to
-        :func:`adapt_lora_config_for_model`.
-    :type lora_target_scope: str | None, optional
+    :param lora_tower_target_modules: Tower and connector modules of a VL model
+        to adapt as well. ``lora_config.target_modules`` always land on the
+        language model only. Defaults to None.
+    :type lora_tower_target_modules: list[str] | None, optional
     """
 
     def __init__(
@@ -173,7 +173,7 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         quantization_config: BitsAndBytesConfig | None = None,
         activation_offload: bool = False,
         moe_lora_recompute: bool | None = None,
-        lora_target_scope: str | None = None,
+        lora_tower_target_modules: list[str] | None = None,
     ) -> None:
         resolved_device = resolve_device(device)
         super().__init__(
@@ -207,7 +207,7 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
             quantization_config=quantization_config,
             activation_offload=activation_offload,
             moe_lora_recompute=moe_lora_recompute,
-            lora_target_scope=lora_target_scope,
+            lora_tower_target_modules=lora_tower_target_modules,
         )
         self.beta = beta
         self.nll_alpha = nll_alpha

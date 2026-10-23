@@ -22,7 +22,11 @@ from agilerl.arena.models.model_info import (
     ModelInfo,
     supported_path,
 )
-from agilerl.arena.models.networks import FinetuningNetworkSpec
+from agilerl.arena.models.networks import (
+    FinetuningNetworkSpec,
+    LoraConfigDict,
+    resolve_lora_defaults,
+)
 
 
 def finetuning_network(
@@ -30,11 +34,14 @@ def finetuning_network(
     target_modules: object = ("q_proj",),
     target_parameters: object = None,
     lora_r: int = 16,
+    tower_target_modules: object = None,
 ) -> FinetuningNetworkSpec:
     """Finetuning section for a Hub id with explicit LoRA targets."""
     lora: dict[str, object] = {"target_modules": target_modules, "lora_r": lora_r}
     if target_parameters is not None:
         lora["target_parameters"] = target_parameters
+    if tower_target_modules is not None:
+        lora["tower_target_modules"] = tower_target_modules
     return FinetuningNetworkSpec.model_validate(
         {
             "pretrained_model_name_or_path": hub_id,
@@ -428,14 +435,46 @@ class TestFinetuningNetworkSpecLoraTargets:
 
         assert spec.lora_config is not None
 
-    def test_super_vl_accepts_vision_modules(self) -> None:
+    def test_super_vl_accepts_vision_modules_as_tower_targets(self) -> None:
         spec = finetuning_network(
             "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
-            ("q_proj", "query", "linear1"),
+            ("q_proj",),
             lora_r=128,
+            tower_target_modules=["query", "linear1"],
         )
 
         assert spec.lora_config is not None
+        assert spec.lora_config.tower_target_modules == ["query", "linear1"]
+
+    @pytest.mark.parametrize(
+        ("hub_id", "tower_module"),
+        [
+            ("nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16", "query"),
+            ("Qwen/Qwen3.5-2B", "qkv"),
+            ("google/gemma-4-E4B-it", "linear"),
+        ],
+    )
+    def test_tower_module_in_target_modules_raises(
+        self, hub_id: str, tower_module: str
+    ) -> None:
+        with pytest.raises(
+            ValidationError, match=rf"\['{tower_module}'\] are tower modules"
+        ):
+            finetuning_network(hub_id, ("q_proj", tower_module))
+
+    def test_language_module_as_tower_target_raises(self) -> None:
+        with pytest.raises(
+            ValidationError, match=r"Unknown LoRA tower_target_modules \['q_proj'\]"
+        ):
+            finetuning_network(
+                "Qwen/Qwen3.5-2B", ("q_proj",), tower_target_modules=["q_proj"]
+            )
+
+    def test_tower_targets_on_text_model_raise(self) -> None:
+        with pytest.raises(ValidationError, match="valid tower modules: none"):
+            finetuning_network(
+                "Qwen/Qwen3-4B", ("q_proj",), tower_target_modules=["qkv"]
+            )
 
     def test_super_vl_rejects_latent_projections(self) -> None:
         with pytest.raises(
@@ -505,3 +544,104 @@ class TestFinetuningNetworkSpecExpertDefault:
 
         assert spec.lora_config is not None
         assert spec.lora_config.target_parameters is None
+
+
+VL_HUB_IDS = (
+    "Qwen/Qwen3.5-0.8B",
+    "Qwen/Qwen3.5-2B",
+    "Qwen/Qwen3.5-4B",
+    "Qwen/Qwen3.5-9B",
+    "Qwen/Qwen3.6-35B-A3B",
+    "Qwen/Qwen3.8-27B",
+    "google/gemma-4-E4B-it",
+    "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
+)
+
+
+class TestModelInfoDefaultLoraModulesProperty:
+    def test_vl_entries_are_exactly_the_checkpoints_with_towers(self) -> None:
+        vl = {h for h, e in SUPPORTED_MODEL_INFO.items() if e.language_model_prefix}
+
+        assert vl == set(VL_HUB_IDS)
+
+    @pytest.mark.parametrize("hub_id", VL_HUB_IDS)
+    def test_vl_default_is_every_module_scoped_under_the_language_model(
+        self, hub_id: str
+    ) -> None:
+        entry = SUPPORTED_MODEL_INFO[hub_id]
+        prefix = entry.language_model_prefix
+        assert prefix is not None
+        language_only = {
+            key
+            for key, group in entry.inspected["lora_info"].items()
+            if group[0]["kind"] == "module"
+            and all(item.get("scope", "").startswith(prefix) for item in group)
+        }
+
+        assert entry.default_lora_modules == language_only
+        assert entry.default_lora_modules.isdisjoint(entry.tower_lora_modules)
+        assert entry.default_lora_modules | entry.tower_lora_modules == entry.modules
+
+    def test_text_entry_defaults_to_every_module(self) -> None:
+        entry = SUPPORTED_MODEL_INFO["Qwen/Qwen3-4B"]
+
+        assert entry.default_lora_modules == entry.modules
+        assert entry.tower_lora_modules == frozenset()
+
+    def test_qwen3_5_default_skips_vision_modules(self) -> None:
+        entry = SUPPORTED_MODEL_INFO["Qwen/Qwen3.5-2B"]
+
+        assert entry.tower_lora_modules == {"qkv", "linear_fc1", "linear_fc2"}
+        assert "in_proj_qkv" in entry.default_lora_modules
+
+    def test_serializes_default_modules_sorted(self) -> None:
+        dumped = SUPPORTED_MODEL_INFO["google/gemma-4-E4B-it"].model_dump()
+
+        assert dumped["default_lora_modules"] == sorted(dumped["text_lora_modules"])
+        assert "linear" not in dumped["default_lora_modules"]
+
+
+class TestModelInfoVlFieldsValidation:
+    def test_prefix_without_text_modules_raises(self) -> None:
+        with pytest.raises(ValidationError, match="set together"):
+            ModelInfo(hub_id="Qwen/Qwen3.5-2B", language_model_prefix="model.x")
+
+    def test_unknown_text_module_raises(self) -> None:
+        with pytest.raises(ValidationError, match=r"\['nope'\] are not LoRA modules"):
+            ModelInfo(
+                hub_id="Qwen/Qwen3.5-2B",
+                language_model_prefix="model.language_model",
+                text_lora_modules=frozenset({"q_proj", "nope"}),
+            )
+
+
+class TestResolveLoraDefaults:
+    def test_packed_moe_model_adapts_every_expert(self) -> None:
+        lora = LoraConfigDict()
+
+        resolve_lora_defaults(lora, "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16")
+
+        assert lora.target_parameters == [
+            "mixer.experts.down_proj",
+            "mixer.experts.up_proj",
+        ]
+        assert lora.lora_dropout == 0.0
+
+    @pytest.mark.parametrize(
+        ("hub_id", "target_parameters"),
+        [
+            ("Qwen/Qwen3.6-35B-A3B", []),
+            ("Qwen/Qwen3.6-35B-A3B", ["mlp.experts.down_proj"]),
+            ("Qwen/Qwen3.5-2B", None),
+            ("org/untracked", None),
+        ],
+    )
+    def test_leaves_explicit_dense_and_untracked_configs(
+        self, hub_id: str, target_parameters: list[str] | None
+    ) -> None:
+        lora = LoraConfigDict(target_parameters=target_parameters)
+
+        resolve_lora_defaults(lora, hub_id)
+
+        assert lora.target_parameters == target_parameters
+        assert lora.lora_dropout == 0.05

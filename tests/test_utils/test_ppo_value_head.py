@@ -356,8 +356,8 @@ class TestAutoModelForCausalLMWithValueHeadFromPretrained:
             tmp_path / "pytorch_model.bin",
         )
         monkeypatch.setattr(
-            "agilerl.utils.ppo_value_head.AutoModelForCausalLM.from_pretrained",
-            lambda *args, **kwargs: base_model,
+            "agilerl.utils.ppo_value_head.trainer_model_class",
+            lambda _path: SimpleNamespace(from_pretrained=lambda *a, **k: base_model),
         )
         wrapped = AutoModelForCausalLMWithValueHead.from_pretrained(str(tmp_path))
         assert torch.allclose(wrapped.v_head.summary.weight, target_w)
@@ -367,8 +367,10 @@ class TestAutoModelForCausalLMWithValueHeadFromPretrained:
         self, tmp_path, monkeypatch
     ):
         monkeypatch.setattr(
-            "agilerl.utils.ppo_value_head.AutoModelForCausalLM.from_pretrained",
-            lambda *args, **kwargs: DummyPretrainedModel(),
+            "agilerl.utils.ppo_value_head.trainer_model_class",
+            lambda _path: SimpleNamespace(
+                from_pretrained=lambda *a, **k: DummyPretrainedModel()
+            ),
         )
         monkeypatch.setattr("agilerl.utils.ppo_value_head.get_peft_model", None)
         with pytest.raises(ImportError, match="peft is required"):
@@ -406,8 +408,8 @@ class TestAutoModelForCausalLMWithValueHeadFromPretrained:
         captured = {}
 
         monkeypatch.setattr(
-            "agilerl.utils.ppo_value_head.AutoModelForCausalLM.from_pretrained",
-            lambda *args, **kwargs: base_model,
+            "agilerl.utils.ppo_value_head.trainer_model_class",
+            lambda _path: SimpleNamespace(from_pretrained=lambda *a, **k: base_model),
         )
 
         def fake_get_peft_model(model, peft_config):

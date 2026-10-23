@@ -132,6 +132,9 @@ class LLMBuilder(AlgorithmBuilder):
         cls._resolve_vllm_kwargs(kwargs, colocated=colocated)
 
         if kwargs.get("lora_config") is not None:
+            kwargs["lora_tower_target_modules"] = kwargs[
+                "lora_config"
+            ].tower_target_modules
             kwargs["lora_config"] = peft_lora_config(kwargs["lora_config"])
         if kwargs.get("cosine_lr_schedule_config") is not None:
             kwargs["cosine_lr_schedule_config"] = cosine_lr_schedule_config(
@@ -260,7 +263,10 @@ def peft_lora_config(lora: LoraConfigDict | dict[str, Any] | LoraConfig) -> Lora
 
     if isinstance(lora, PeftLoraConfig):
         return lora
-    peft_lora = LoraConfigDict.model_validate(lora).model_dump()
+    # Tower targets reach the algorithm as lora_tower_target_modules, not through peft.
+    peft_lora = LoraConfigDict.model_validate(lora).model_dump(
+        exclude={"tower_target_modules"}
+    )
     peft_lora["r"] = peft_lora.pop("lora_r")
     return PeftLoraConfig(**peft_lora)
 

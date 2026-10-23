@@ -3,9 +3,8 @@
 # over the hard Sudoku env (mirrors cispo_quant_bench.yaml). REINFORCE uses
 # Return Batch Normalization (ReBN), not group-relative advantages, so the
 # GRPO-family settings (group_size / adv_norm / filter_zero_adv) do not apply.
-# Set algorithm.quantization to none | int8 | nf4 to switch recipe. The model
-# below should be a multimodal gemma with ClippableLinear-wrapped projections
-# (hence the ``.linear`` LoRA targets and ``lora_target_scope: language_model``).
+# Set algorithm.quantization to none | int8 | nf4 to switch recipe. LoRA
+# targets land on the gemma language model only.
 
 algorithm:
     name: LLMREINFORCE
@@ -20,7 +19,6 @@ algorithm:
     importance_sampling_level: turn
     max_output_tokens: 1024
     use_liger_loss: false
-    lora_target_scope: language_model
     quantization: none
     activation_offload: false
     vllm_config:

@@ -738,7 +738,16 @@ class LoraConfigDict(BaseModel):
         default="all-linear",
         description=(
             "Modules to attach adapters to: 'all-linear', or names such as "
-            "q_proj, k_proj, v_proj, o_proj."
+            "q_proj, k_proj, v_proj, o_proj. On a vision-language model these "
+            "land on the language model only."
+        ),
+    )
+    tower_target_modules: list[str] | None = Field(
+        default=None,
+        description=(
+            "Vision, audio or connector modules of a vision-language model to "
+            "adapt as well, e.g. query, key, value. Needs the towers served "
+            "(strip_multimodal_towers false)."
         ),
     )
     # Packed MoE expert parameter paths (PEFT ``target_parameters``), e.g.
@@ -941,6 +950,26 @@ def default_colocated_vllm_config() -> VLLMConfig:
     )
 
 
+def resolve_lora_defaults(lora: LoraConfigDict, hub_id: str) -> None:
+    """Fill a LoRA config's catalog defaults in place.
+
+    Unset ``target_parameters`` on a packed-MoE catalog model adapts every
+    expert path and sets ``lora_dropout`` to 0; ``[]`` adapts none. Untracked
+    Hub ids are left as they are.
+
+    :param lora: The config to resolve.
+    :type lora: LoraConfigDict
+    :param hub_id: The model the config trains.
+    :type hub_id: str
+    """
+    entry = SUPPORTED_MODEL_INFO.get(hub_id)
+    if entry is None or lora.target_parameters is not None or not entry.parameters:
+        return
+    lora.target_parameters = sorted(entry.parameters)
+    # PEFT parameter-level LoRA cannot apply dropout.
+    lora.lora_dropout = 0.0
+
+
 class FinetuningNetworkSpec(BaseModel):
     """Model specification for LLM finetuning networks."""
 
@@ -967,8 +996,9 @@ class FinetuningNetworkSpec(BaseModel):
 
         Ranks below the cap pass; the vLLM engine rounds ``max_lora_rank`` up
         to a value it accepts. ``target_modules`` is ``all-linear`` or a list
-        of stored module names, and ``target_parameters`` a list of stored
-        paths; both match exactly. Unset ``target_parameters`` on a packed-MoE
+        of the text model's module names, ``tower_target_modules`` a list of
+        module names outside it, and ``target_parameters`` a list of stored
+        paths; all match exactly. Unset ``target_parameters`` on a packed-MoE
         model adapts every expert path and sets ``lora_dropout`` to 0;
         ``[]`` adapts none.
         """
@@ -977,10 +1007,7 @@ class FinetuningNetworkSpec(BaseModel):
         lora = self.lora_config
         if entry is None or lora is None:
             return self
-        if lora.target_parameters is None and entry.parameters:
-            lora.target_parameters = sorted(entry.parameters)
-            # PEFT parameter-level LoRA cannot apply dropout.
-            lora.lora_dropout = 0.0
+        resolve_lora_defaults(lora, hub_id)
         if entry.lora_ranks is not None and lora.lora_r > max(entry.lora_ranks):
             msg = (
                 f"LoRA rank {lora.lora_r} is above the largest rank vLLM serves "
@@ -1000,6 +1027,21 @@ class FinetuningNetworkSpec(BaseModel):
             msg = (
                 f"Unknown LoRA target_modules {unknown} for {hub_id}; "
                 f"valid modules: {valid_modules}"
+            )
+            raise ValueError(msg)
+        elif towers := sorted(set(lora.target_modules) - entry.default_lora_modules):
+            msg = (
+                f"LoRA target_modules {towers} are tower modules of {hub_id}; "
+                "name them in tower_target_modules"
+            )
+            raise ValueError(msg)
+        if unknown := sorted(
+            set(lora.tower_target_modules or ()) - entry.tower_lora_modules
+        ):
+            valid = ", ".join(sorted(entry.tower_lora_modules)) or "none"
+            msg = (
+                f"Unknown LoRA tower_target_modules {unknown} for {hub_id}; "
+                f"valid tower modules: {valid}"
             )
             raise ValueError(msg)
         if unknown := sorted(set(lora.target_parameters or ()) - entry.parameters):

@@ -53,9 +53,6 @@ from agilerl.utils.llm_utils import (
     _json_safe_value,
     adapt_lora_config_for_model,
     build_bnb_quantization_config,
-    build_clippable_linear_lora_target_regex,
-    build_clippable_linear_lora_target_suffixes,
-    build_scoped_lora_target_regex,
     build_vllm_llm_init_kwargs,
     build_vllm_rollout_lora_request,
     create_model_from_name_or_path,
@@ -90,7 +87,7 @@ class TestCreateModelFromNameOrPath:
             return mock.MagicMock()
 
         with mock.patch(
-            "agilerl.utils.llm_utils.AutoModelForCausalLM.from_pretrained",
+            "transformers.AutoModelForCausalLM.from_pretrained",
             side_effect=_fake_from_pretrained,
         ):
             create_model_from_name_or_path(
@@ -110,7 +107,7 @@ class TestCreateModelFromNameOrPath:
             return mock.MagicMock()
 
         with mock.patch(
-            "agilerl.utils.llm_utils.AutoModelForCausalLM.from_pretrained",
+            "transformers.AutoModelForCausalLM.from_pretrained",
             side_effect=_fake_from_pretrained,
         ):
             create_model_from_name_or_path(
@@ -132,7 +129,7 @@ class TestCreateModelFromNameOrPath:
             return mock.MagicMock()
 
         with mock.patch(
-            "agilerl.utils.llm_utils.AutoModelForCausalLM.from_pretrained",
+            "transformers.AutoModelForCausalLM.from_pretrained",
             side_effect=_fake_from_pretrained,
         ):
             create_model_from_name_or_path(
@@ -149,7 +146,7 @@ class TestCreateModelFromNameOrPath:
             return mock.MagicMock()
 
         with mock.patch(
-            "agilerl.utils.llm_utils.AutoModelForCausalLM.from_pretrained",
+            "transformers.AutoModelForCausalLM.from_pretrained",
             side_effect=_fake_from_pretrained,
         ):
             create_model_from_name_or_path("dummy/path")
@@ -729,181 +726,63 @@ class TestPrepareVllmForGenerationOffload:
             agent._prepare_vllm_for_generation()
 
 
-class TestAdaptLoraConfigForClippableLinear:
+class TestAdaptLoraConfigForGemmaLayout:
     @staticmethod
-    def _gemma4_style_block():
-        class Gemma4ClippableLinear(torch.nn.Module):
-            def __init__(self, in_features: int, out_features: int) -> None:
-                super().__init__()
-                self.linear = torch.nn.Linear(in_features, out_features, bias=False)
-
-        class Block(torch.nn.Module):
-            def __init__(self) -> None:
-                super().__init__()
-                self.q_proj = Gemma4ClippableLinear(8, 8)
-                self.k_proj = Gemma4ClippableLinear(8, 8)
-                self.o_proj = Gemma4ClippableLinear(8, 8)
-
-        return Block()
-
-    def test_no_op_on_plain_linear_model(self):
-        from peft import LoraConfig
-
-        model = torch.nn.Module()
-        model.layer = torch.nn.Linear(4, 4)
-        cfg = LoraConfig(r=4, target_modules=["layer"])
-        assert adapt_lora_config_for_model(model, cfg) is cfg
-
-    def test_all_linear_becomes_suffix_targets(self):
-        from peft import LoraConfig
-
-        model = self._gemma4_style_block()
-        cfg = LoraConfig(r=4, target_modules="all-linear")
-        adapted = adapt_lora_config_for_model(model, cfg)
-        # peft normalizes target_modules to a set, so compare order-insensitively
-        # against the canonical (sorted) suffix list.
-        assert sorted(adapted.target_modules) == (
-            build_clippable_linear_lora_target_suffixes(["k_proj", "o_proj", "q_proj"])
-        )
-        assert sorted(list_peft_matched_module_keys(model, adapted.target_modules)) == [
-            "k_proj.linear",
-            "o_proj.linear",
-            "q_proj.linear",
-        ]
-
-    def test_explicit_proj_names_become_suffix_targets(self):
-        from peft import LoraConfig
-
-        model = self._gemma4_style_block()
-        cfg = LoraConfig(r=4, target_modules=["q_proj", "o_proj"])
-        adapted = adapt_lora_config_for_model(model, cfg)
-        assert sorted(adapted.target_modules) == ["o_proj.linear", "q_proj.linear"]
-        # A targeted projection's inner .linear matches; the wrapper alone does not.
-        assert peft_target_key_matches(
-            "model.layers.0.self_attn.q_proj.linear", adapted.target_modules
-        )
-        assert not peft_target_key_matches(
-            "model.layers.0.self_attn.q_proj", adapted.target_modules
-        )
-
-    def test_nested_wrapper_matches_via_suffix_list(self):
-        from peft import LoraConfig
-
-        class Gemma4ClippableLinear(torch.nn.Module):
-            def __init__(self, in_features: int, out_features: int) -> None:
-                super().__init__()
-                self.linear = torch.nn.Linear(in_features, out_features, bias=False)
-
-        class Block(torch.nn.Module):
-            def __init__(self) -> None:
-                super().__init__()
-                self.attn = torch.nn.Module()
-                self.attn.q_proj = Gemma4ClippableLinear(8, 8)
-
-        model = Block()
-        cfg = LoraConfig(r=4, target_modules="all-linear")
-        adapted = adapt_lora_config_for_model(model, cfg)
-        assert sorted(adapted.target_modules) == ["q_proj.linear"]
-        assert list_peft_matched_module_keys(model, adapted.target_modules) == [
-            "attn.q_proj.linear"
-        ]
-
-    def test_unscoped_regex_fullmatches_nested_keys(self):
-        import re
-
-        pattern = build_clippable_linear_lora_target_regex(["q_proj"])
-        assert re.fullmatch(pattern, "model.layers.0.self_attn.q_proj.linear")
-        assert re.fullmatch(pattern, "q_proj.linear")
-        assert re.fullmatch(pattern, "model.layers.0.self_attn.q_proj") is None
-
-    def test_user_regex_is_left_unchanged(self):
-        from peft import LoraConfig
-
-        model = self._gemma4_style_block()
-        custom = r".*\.language_model.*\.(q_proj|k_proj)\.linear"
-        cfg = LoraConfig(r=4, target_modules=custom)
-        assert adapt_lora_config_for_model(model, cfg) is cfg
-
-    def test_language_model_scope_only_when_all_inners_under_scope(self):
-        import re
-
-        from peft import LoraConfig
-
-        # Realistic Gemma-4 layout: the language model is nested under ``model``
-        # and uses plain nn.Linear projections (ClippableLinear is only on the
-        # vision/audio towers). The scoped regex requires the scope to be nested.
-        class Block(torch.nn.Module):
-            def __init__(self) -> None:
-                super().__init__()
-                self.model = torch.nn.Module()
-                self.model.language_model = torch.nn.Module()
-                self.model.language_model.layers = torch.nn.ModuleList(
-                    [torch.nn.Module()]
-                )
-                self.model.language_model.layers[0].q_proj = torch.nn.Linear(
-                    4, 4, bias=False
-                )
-
-        model = Block()
-        cfg = LoraConfig(r=4, target_modules=["q_proj"])
-        adapted = adapt_lora_config_for_model(
-            model, cfg, lora_target_scope="language_model"
-        )
-        scoped = build_scoped_lora_target_regex(["q_proj"], "language_model")
-        assert isinstance(adapted.target_modules, str)
-        assert adapted.target_modules == scoped
-        assert re.fullmatch(scoped, "model.language_model.layers.0.q_proj")
-        assert list_peft_matched_module_keys(model, adapted.target_modules) == [
-            "model.language_model.layers.0.q_proj"
-        ]
-
-    def test_scoped_regex_targets_plain_lm_and_not_vision_clippable(self):
-        import re
-
-        from peft import LoraConfig
+    def _gemma4_style_model() -> torch.nn.Module:
+        """Plain-linear language model beside a ClippableLinear vision tower."""
 
         class Gemma4ClippableLinear(torch.nn.Module):
             def __init__(self) -> None:
                 super().__init__()
                 self.linear = torch.nn.Linear(4, 4, bias=False)
 
-        class Block(torch.nn.Module):
-            def __init__(self) -> None:
-                super().__init__()
-                self.model = torch.nn.Module()
-                self.model.language_model = torch.nn.Module()
-                layer = torch.nn.Module()
-                layer.self_attn = torch.nn.Module()
-                layer.self_attn.q_proj = torch.nn.Linear(4, 4, bias=False)
-                layer.mlp = torch.nn.Module()
-                layer.mlp.gate_proj = torch.nn.Linear(4, 8, bias=False)
-                self.model.language_model.layers = torch.nn.ModuleList([layer])
-                vt_layer = torch.nn.Module()
-                vt_layer.self_attn = torch.nn.Module()
-                vt_layer.self_attn.q_proj = Gemma4ClippableLinear()
-                self.model.vision_tower = torch.nn.Module()
-                self.model.vision_tower.encoder = torch.nn.Module()
-                self.model.vision_tower.encoder.layers = torch.nn.ModuleList([vt_layer])
+        model = torch.nn.Module()
+        model.model = torch.nn.Module()
+        model.model.language_model = torch.nn.Module()
+        layer = torch.nn.Module()
+        layer.self_attn = torch.nn.Module()
+        layer.self_attn.q_proj = torch.nn.Linear(4, 4, bias=False)
+        layer.mlp = torch.nn.Module()
+        layer.mlp.gate_proj = torch.nn.Linear(4, 8, bias=False)
+        model.model.language_model.layers = torch.nn.ModuleList([layer])
+        vt_layer = torch.nn.Module()
+        vt_layer.self_attn = torch.nn.Module()
+        vt_layer.self_attn.q_proj = Gemma4ClippableLinear()
+        model.model.vision_tower = torch.nn.Module()
+        model.model.vision_tower.encoder = torch.nn.Module()
+        model.model.vision_tower.encoder.layers = torch.nn.ModuleList([vt_layer])
+        return model
 
-        model = Block()
-        cfg = LoraConfig(r=4, target_modules=["q_proj", "gate_proj"])
-        adapted = adapt_lora_config_for_model(
-            model, cfg, lora_target_scope="language_model"
-        )
-        matched = list_peft_matched_module_keys(model, adapted.target_modules)
-        assert matched == [
+    def test_no_op_on_plain_linear_model(self):
+        model = torch.nn.Module()
+        model.layer = torch.nn.Linear(4, 4)
+        cfg = LoraConfig(r=4, target_modules=["layer"])
+
+        assert adapt_lora_config_for_model(model, cfg) is cfg
+
+    @pytest.mark.parametrize("targets", [["q_proj", "gate_proj"], "all-linear"])
+    def test_targets_land_on_language_model_not_clippable_tower(
+        self, targets: list[str] | str
+    ):
+        model = self._gemma4_style_model()
+        cfg = LoraConfig(r=4, target_modules=targets)
+
+        adapted = adapt_lora_config_for_model(model, cfg)
+
+        assert list_peft_matched_module_keys(model, adapted.target_modules) == [
             "model.language_model.layers.0.self_attn.q_proj",
             "model.language_model.layers.0.mlp.gate_proj",
         ]
-        assert not any("vision_tower" in key for key in matched)
-        scoped = build_scoped_lora_target_regex(["q_proj"], "language_model")
-        assert re.fullmatch(scoped, "model.language_model.layers.0.self_attn.q_proj")
-        assert (
-            re.fullmatch(
-                scoped, "model.vision_tower.encoder.layers.0.self_attn.q_proj.linear"
-            )
-            is None
+        assert not peft_target_key_matches(
+            "model.vision_tower.encoder.layers.0.self_attn.q_proj.linear",
+            adapted.target_modules,
         )
+
+    def test_user_regex_is_left_unchanged(self):
+        custom = r".*\.language_model.*\.(q_proj|k_proj)"
+        cfg = LoraConfig(r=4, target_modules=custom)
+
+        assert adapt_lora_config_for_model(self._gemma4_style_model(), cfg) is cfg
 
 
 def _require_bf16_cuda() -> None:

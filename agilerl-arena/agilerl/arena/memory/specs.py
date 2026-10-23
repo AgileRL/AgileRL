@@ -86,18 +86,25 @@ LayerKind = Literal["attention", "mamba", "mlp", "moe"]
 
 
 def _encoder_params(cfg: dict[str, Any]) -> int:
-    """Rough parameter count of a transformer encoder from its config."""
+    """Rough parameter count of a transformer encoder from its config.
+
+    Qwen vision configs name the layer, head and position counts ``depth``,
+    ``num_heads`` and ``num_position_embeddings``.
+    """
     h = int(cfg.get("hidden_size") or 0)
-    layers = int(cfg.get("num_hidden_layers") or 0)
+    layers = int(cfg.get("num_hidden_layers") or cfg.get("depth") or 0)
     if not h or not layers:
         return 0
-    heads = int(cfg.get("num_attention_heads") or 1)
+    heads = int(cfg.get("num_attention_heads") or cfg.get("num_heads") or 1)
     head_dim = int(cfg.get("head_dim") or h // heads)
     kv_heads = int(cfg.get("num_key_value_heads") or heads)
     intermediate = int(cfg.get("intermediate_size") or 4 * h)
     attn = h * heads * head_dim + 2 * h * kv_heads * head_dim + heads * head_dim * h
     per_layer = attn + 2 * h * intermediate + 2 * h
-    return layers * per_layer + int(cfg.get("position_embedding_size") or 0) * h
+    positions = int(
+        cfg.get("position_embedding_size") or cfg.get("num_position_embeddings") or 0
+    )
+    return layers * per_layer + positions * h
 
 
 def multimodal_tower_params(config: dict[str, Any]) -> int:

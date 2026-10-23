@@ -42,34 +42,20 @@ def nested_language_config(config: object) -> object:
 def apply_multimodal_engine_kwargs(
     kwargs: dict[str, Any],
     strip_multimodal_towers: bool | list[VllmModality],
-    runtime: ModelRuntimeConfig,
 ) -> None:
     """Skip stripped towers without changing the served module names.
 
-    ``True`` serves the language model only. A family with a language-tower
-    mapping uses that class; every other family sets ``language_model_only``.
-    A list names modalities (``image``, ``video``, ``audio``) and sets
-    ``limit_mm_per_prompt`` to 0 for each, so vLLM leaves those towers unbuilt.
+    ``True`` sets ``language_model_only``. A list names modalities (``image``,
+    ``video``, ``audio``) and sets ``limit_mm_per_prompt`` to 0 for each, so
+    vLLM leaves those towers unbuilt.
 
     :param kwargs: vLLM engine kwargs mutated in place.
     :type kwargs: dict[str, Any]
     :param strip_multimodal_towers: ``True`` serves the language model only; a
         list names the modalities to drop.
     :type strip_multimodal_towers: bool | list[VllmModality]
-    :param runtime: Family runtime. Language-tower mapping applies when set.
-    :type runtime: ModelRuntimeConfig
     """
     if strip_multimodal_towers is True:
-        tower = runtime.language_tower
-        if tower.hf_overrides is not None or tower.model_class_overrides:
-            if tower.hf_overrides is not None:
-                kwargs["hf_overrides"] = tower.hf_overrides
-            if tower.model_class_overrides:
-                kwargs["model_class_overrides"] = {
-                    **kwargs.get("model_class_overrides", {}),
-                    **tower.model_class_overrides,
-                }
-            return
         kwargs["language_model_only"] = True
         return
     if strip_multimodal_towers:
@@ -83,27 +69,40 @@ def apply_tower_connector_lora_engine_kwargs(
     kwargs: dict[str, Any],
     strip_multimodal_towers: bool | list[VllmModality],
     runtime: ModelRuntimeConfig,
-    lora_target_modules: str | Collection[str] | None,
+    tower_target_modules: Collection[str] | None,
 ) -> None:
-    """Enable vLLM LoRA on multimodal towers and connectors when the adapter can reach them.
+    """Enable vLLM LoRA on multimodal towers and connectors when the adapter names them.
 
-    vLLM wraps every tower and connector linear once this is on, so an adapter
-    that only targets the language model would pay for empty LoRA layers.
+    vLLM wraps every tower and connector linear once this is on, so it stays
+    off for adapters on the language model only.
 
     :param kwargs: vLLM engine kwargs mutated in place.
     :type kwargs: dict[str, Any]
     :param strip_multimodal_towers: ``True`` serves the language model only.
     :type strip_multimodal_towers: bool | list[VllmModality]
-    :param runtime: Family runtime; only families whose vLLM towers support LoRA enable it.
+    :param runtime: Family runtime naming the tower targets vLLM supports.
     :type runtime: ModelRuntimeConfig
-    :param lora_target_modules: PEFT ``target_modules``. A string spec
-        (``"all-linear"`` or a regex) or ``None`` counts as reaching the towers.
-    :type lora_target_modules: str | Collection[str] | None
+    :param tower_target_modules: ``lora_config.tower_target_modules``.
+    :type tower_target_modules: Collection[str] | None
+    :raises ValueError: If towers are stripped, or a target is not a tower
+        module vLLM serves LoRA on for this family.
     """
-    tower_targets = runtime.tower_connector_lora_targets
-    if strip_multimodal_towers is True or not tower_targets:
+    if not tower_target_modules:
         return
-    named_targets = not isinstance(lora_target_modules, str | None)
-    if named_targets and tower_targets.isdisjoint(lora_target_modules):
-        return
+    if strip_multimodal_towers is True:
+        msg = (
+            "lora_config.tower_target_modules needs the towers served; set "
+            "vllm_config.strip_multimodal_towers to false"
+        )
+        raise ValueError(msg)
+    unsupported = sorted(
+        set(tower_target_modules) - runtime.tower_connector_lora_targets
+    )
+    if unsupported:
+        supported = sorted(runtime.tower_connector_lora_targets) or "none"
+        msg = (
+            f"vLLM cannot serve tower LoRA on {unsupported}; this family "
+            f"supports {supported}"
+        )
+        raise ValueError(msg)
     kwargs["enable_tower_connector_lora"] = True

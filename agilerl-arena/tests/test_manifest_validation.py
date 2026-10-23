@@ -599,6 +599,35 @@ def group_replay_manifest(**replay_buffer: object) -> dict:
     return doc
 
 
+class TestTowerLoraServed:
+    @staticmethod
+    def _super_vl(strip_multimodal_towers: bool) -> dict:
+        return manifest(
+            GRPO,
+            algorithm={
+                "vllm_config": {"strip_multimodal_towers": strip_multimodal_towers}
+            },
+            network={
+                "pretrained_model_name_or_path": (
+                    "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16"
+                ),
+                "lora_config": {
+                    "target_modules": ["q_proj"],
+                    "tower_target_modules": ["query"],
+                },
+            },
+        )
+
+    def test_kept_towers_accept_tower_targets(self) -> None:
+        validated = TrainingManifest.model_validate(self._super_vl(False))
+
+        assert validated.algorithm.lora_config.tower_target_modules == ["query"]
+
+    def test_stripped_towers_reject_tower_targets(self) -> None:
+        with pytest.raises(ValidationError, match="strip_multimodal_towers to false"):
+            TrainingManifest.model_validate(self._super_vl(True))
+
+
 class TestGroupReplay:
     def test_async_grpo_accepts_group_replay_without_max_reward(self) -> None:
         validated = TrainingManifest.model_validate(

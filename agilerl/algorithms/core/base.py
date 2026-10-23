@@ -243,6 +243,7 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
         is_rollout_prompt,
         language_model_attn_implementation,
         log_cuda_memory_snapshot,
+        lora_target_module_names,
         make_llm_scheduler,
         move_params_to_cpu,
         move_params_to_gpu,
@@ -2844,12 +2845,12 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     :param name: The name of the algorithm.
     :type name: str | None
     :param model_config: Keyword arguments for ``from_pretrained`` (not the HF
-        ``PretrainedConfig`` object). AgileRL-only keys such as ``lora_target_scope``
-        must not be placed here; use the dedicated ``lora_target_scope`` argument.
+        ``PretrainedConfig`` object).
     :type model_config: dict[str, Any] | PretrainedConfig | None
-    :param lora_target_scope: Optional PEFT LoRA path scope for multimodal models
-        (e.g. ``"language_model"``). Passed to :func:`adapt_lora_config_for_model`.
-    :type lora_target_scope: str | None, optional
+    :param lora_tower_target_modules: Tower and connector modules of a VL model
+        to adapt as well. ``lora_config.target_modules`` always land on the
+        language model only. Defaults to None.
+    :type lora_tower_target_modules: list[str] | None, optional
     :param chunk_rows: Primary chunk-size knob for fused logit tiles used by
         both the standard fused-logprob path and the Liger fused-loss path.
         ``None`` (default) preserves each path's auto-tuned behavior.
@@ -2977,7 +2978,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         quantization_config: BitsAndBytesConfig | None = None,
         activation_offload: bool = False,
         use_sequence_packing: bool = False,
-        lora_target_scope: str | None = None,
+        lora_tower_target_modules: list[str] | None = None,
         chunk_rows: int | None = None,
         vllm_importance_sampling_correction: bool = True,
         vllm_importance_sampling_cap: float = 2.0,
@@ -3103,13 +3104,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self.activation_offload = activation_offload
         self.moe_lora_recompute = moe_lora_recompute
         self.use_sequence_packing = bool(use_sequence_packing)
-        self.lora_target_scope = lora_target_scope
+        self.lora_tower_target_modules = lora_tower_target_modules
         if isinstance(model_config, dict):
-            # ``lora_target_scope`` is AgileRL-only; don't let it reach
-            # ``from_pretrained``.
-            model_dict = {
-                k: v for k, v in dict(model_config).items() if k != "lora_target_scope"
-            }
+            model_dict = dict(model_config)
             if quantization_config is not None:
                 model_dict.setdefault("quantization_config", quantization_config)
             model_config = model_dict
@@ -4718,7 +4715,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         lora_config = adapt_lora_config_for_model(
             peft_target,
             self.lora_config,
-            lora_target_scope=self.lora_target_scope,
+            tower_target_modules=self.lora_tower_target_modules,
         )
         self.lora_config = lora_config
         expert_target_parameters = getattr(lora_config, "target_parameters", None)
@@ -6125,6 +6122,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             torch.float16: "fp16",
         }
         target_modules = self.lora_config.target_modules
+        # Anchored VL regex still names the original language-model modules.
+        if isinstance(target_modules, str) and target_modules != "all-linear":
+            target_modules = lora_target_module_names(target_modules)
         attention_only = (
             bool(target_modules)
             and not isinstance(target_modules, str)
@@ -7458,9 +7458,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             max_model_len=self.max_model_len,
             process_index=process_index,
             lora_rank=lora_rank,
-            lora_target_modules=(
-                self.lora_config.target_modules if self.lora_config else None
-            ),
+            tower_lora_target_modules=self.lora_tower_target_modules,
         )
         self._ensure_vllm_lora_staging_dir()
         if is_main_process():

@@ -7,20 +7,18 @@ from __future__ import annotations
 
 import pytest
 from pydantic import ValidationError
+from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 
 from agilerl.architectures import family_tensor_parallel_plans
 from agilerl.architectures.catalog import (
     FAMILY_RUNTIME_CONFIGS,
     family_runtime,
     pretrained_model_type,
+    trainer_model_class,
 )
 from agilerl.architectures.nemotron_h.mamba import install_mamba_patches
 from agilerl.architectures.nemotron_h.tensor_parallel import (
     NEMOTRON_H_TENSOR_PARALLEL_PLAN,
-)
-from agilerl.architectures.qwen3_5 import (
-    QWEN3_5_MODEL_CLASS_OVERRIDES,
-    qwen3_5_language_tower_hf_override,
 )
 from agilerl.architectures.runtime import ModelRuntimeConfig
 from agilerl.arena.memory.manifest import FAMILY_MAX_NUM_BATCHED_TOKENS
@@ -34,15 +32,6 @@ NEMOTRON_VLLM_KWARGS = {
     "enable_prefix_caching": True,
     "trust_remote_code": True,
 }
-
-NEMOTRON_TRAINER_KWARGS = {"attn_implementation": "flash_attention_2"}
-NEMOTRON_OMNI_TRAINER_KWARGS = {
-    "attn_implementation": "flash_attention_2",
-    "trust_remote_code": True,
-}
-GEMMA_TRAINER_KWARGS = {"attn_implementation": "flex_attention"}
-EMPTY_TRAINER_KWARGS: dict[str, object] = {}
-FLEX_TRAINER_KWARGS = GEMMA_TRAINER_KWARGS
 
 SWA_MODEL_TYPES = ("gemma3", "gemma3_text", "gemma4", "gemma4_text")
 
@@ -92,10 +81,6 @@ class TestFamilyRuntimeConfigs:
         }
         assert base.vllm.hf_overrides is None
         assert omni.patch.install is install_mamba_patches
-        assert omni.language_tower.hf_overrides is None
-        assert omni.language_tower.model_class_overrides is None
-        assert base.language_tower.hf_overrides is None
-        assert base.language_tower.model_class_overrides is None
         assert {"query", "fc1", "linear1"} <= omni.tower_connector_lora_targets
         assert omni.tower_connector_lora_targets.isdisjoint(
             {"q_proj", "in_proj", "up_proj", "down_proj"}
@@ -106,24 +91,40 @@ class TestFamilyRuntimeConfigs:
         gemma4 = FAMILY_RUNTIME_CONFIGS["gemma4"]
         gemma3 = FAMILY_RUNTIME_CONFIGS["gemma3"]
         assert gemma4.trainer == gemma3.trainer
-        assert gemma4.language_tower.hf_overrides is None
-        assert gemma4.language_tower.model_class_overrides is None
         assert gemma4.tower_connector_lora_targets == frozenset()
-        assert gemma3.language_tower.hf_overrides is None
-        assert FAMILY_RUNTIME_CONFIGS["gemma4_text"].language_tower.hf_overrides is None
+
+    @pytest.mark.parametrize(
+        "model_type",
+        ["qwen3_5", "qwen3_5_moe", "gemma3", "gemma4", "nemotron_h_omni"],
+    )
+    def test_vl_families_train_their_vl_class(self, model_type: str) -> None:
+        trainer = FAMILY_RUNTIME_CONFIGS[model_type].trainer
+
+        assert trainer.model_class is AutoModelForImageTextToText
+
+    @pytest.mark.parametrize(
+        "model_type",
+        sorted(
+            set(FAMILY_RUNTIME_CONFIGS)
+            - {"qwen3_5", "qwen3_5_moe", "gemma3", "gemma4", "nemotron_h_omni"}
+        ),
+    )
+    def test_text_families_train_a_causal_lm(self, model_type: str) -> None:
+        trainer = FAMILY_RUNTIME_CONFIGS[model_type].trainer
+
+        assert trainer.model_class is AutoModelForCausalLM
 
     def test_nemotron_h_lookup(self) -> None:
         config = FAMILY_RUNTIME_CONFIGS["nemotron_h"]
         assert config.vllm.model_dump(exclude_none=True) == NEMOTRON_VLLM_KWARGS
-        assert config.trainer.model_dump(exclude_none=True) == NEMOTRON_TRAINER_KWARGS
+        assert config.trainer.load_kwargs() == {}
+        assert config.trainer.attn_implementation == "flash_attention_2"
         assert config.patch.install is install_mamba_patches
 
     def test_only_nemotron_h_omni_trainer_loads_checkpoint_code(self) -> None:
         omni = FAMILY_RUNTIME_CONFIGS["nemotron_h_omni"]
 
-        assert omni.trainer.model_dump(exclude_none=True) == (
-            NEMOTRON_OMNI_TRAINER_KWARGS
-        )
+        assert omni.trainer.load_kwargs() == {"trust_remote_code": True}
         assert FAMILY_RUNTIME_CONFIGS["nemotron_h"].trainer.trust_remote_code is None
 
     def test_nemotron_h_enables_prefix_caching(self) -> None:
@@ -132,21 +133,18 @@ class TestFamilyRuntimeConfigs:
     @pytest.mark.parametrize("model_type", SWA_MODEL_TYPES)
     def test_swa_lookup(self, model_type: str) -> None:
         assert (
-            FAMILY_RUNTIME_CONFIGS[model_type].trainer.model_dump(exclude_none=True)
-            == FLEX_TRAINER_KWARGS
+            FAMILY_RUNTIME_CONFIGS[model_type].trainer.attn_implementation
+            == "flex_attention"
         )
 
     def test_gpt_oss_lookup(self) -> None:
         assert (
-            FAMILY_RUNTIME_CONFIGS["gpt_oss"].trainer.model_dump(exclude_none=True)
-            == FLEX_TRAINER_KWARGS
+            FAMILY_RUNTIME_CONFIGS["gpt_oss"].trainer.attn_implementation
+            == "flex_attention"
         )
 
     def test_qwen3_5_lookup(self) -> None:
         runtime = FAMILY_RUNTIME_CONFIGS["qwen3_5"]
-        tower = runtime.language_tower
-        assert tower.hf_overrides is qwen3_5_language_tower_hf_override
-        assert tower.model_class_overrides == QWEN3_5_MODEL_CLASS_OVERRIDES
         assert runtime.vllm.mamba_cache_mode == "align"
         assert runtime.vllm.enable_prefix_caching is True
         assert runtime.tower_connector_lora_targets == frozenset()
@@ -239,7 +237,8 @@ class TestFamilyRuntime:
         stub_config_model_type(monkeypatch, model_type)
         config = family_runtime("some/model")
         assert config.vllm.model_dump(exclude_none=True) == {}
-        assert config.trainer.model_dump(exclude_none=True) == EMPTY_TRAINER_KWARGS
+        assert config.trainer.load_kwargs() == {}
+        assert config.trainer.model_class is AutoModelForCausalLM
         assert config.patch.install is None
 
     def test_missing_config_json_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -327,7 +326,6 @@ class TestPretrainedModelType:
 class TestRuntimeConfigsForbidExtra:
     def test_unknown_fields_are_rejected(self) -> None:
         from agilerl.architectures.runtime import (
-            LanguageTowerRuntimeConfig,
             MambaPatchConfig,
             ModelRuntimeConfig,
             PatchRuntimeConfig,
@@ -340,9 +338,36 @@ class TestRuntimeConfigsForbidExtra:
             (TrainerRuntimeConfig, {}),
             (MambaPatchConfig, {"mixer": "agilerl.architectures.nemotron_h.mamba"}),
             (PatchRuntimeConfig, {}),
-            (LanguageTowerRuntimeConfig, {}),
             (ModelRuntimeConfig, {}),
         )
         for cls, payload in cases:
             with pytest.raises(ValidationError, match="extra_forbidden"):
                 cls.model_validate({**payload, "__unknown__": True})
+
+
+class TestTrainerModelClass:
+    @pytest.mark.parametrize(
+        ("hub_id", "expected"),
+        [
+            ("Qwen/Qwen3.5-2B", AutoModelForImageTextToText),
+            ("Qwen/Qwen3.6-35B-A3B", AutoModelForImageTextToText),
+            ("google/gemma-4-E4B-it", AutoModelForImageTextToText),
+            (
+                "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
+                AutoModelForImageTextToText,
+            ),
+            ("nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16", AutoModelForCausalLM),
+            ("openai/gpt-oss-20b", AutoModelForCausalLM),
+        ],
+    )
+    def test_supported_ids_resolve_their_trainer_class(
+        self, hub_id: str, expected: type
+    ) -> None:
+        assert trainer_model_class(hub_id) is expected
+
+    def test_unknown_family_defaults_to_causal_lm(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stub_config_model_type(monkeypatch, "llama")
+
+        assert trainer_model_class("some/model") is AutoModelForCausalLM
