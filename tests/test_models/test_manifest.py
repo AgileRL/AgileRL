@@ -123,9 +123,9 @@ def test_get_validated_json_resolves_unset_optional_sections() -> None:
         "training": {"max_steps": 1_000_000, "evo_steps": 10_000, "pop_size": 4},
     }
     out = TrainingManifest.get_validated(raw, mode="json")
-    assert out["mutation"]["rl_hp_selection"] == {}
-    assert out["mutation"]["probabilities"]["no_mut"] == 1.0
-    assert out["mutation"]["probabilities"]["arch_mut"] == 0.0
+    assert out["mutation"]["rl_hp_selection"]["lr"]["max"] == 0.01
+    assert out["mutation"]["probabilities"]["no_mut"] == 0.4
+    assert out["mutation"]["probabilities"]["arch_mut"] == 0.2
     assert out["tournament_selection"]["tournament_size"] == 2
     assert out["tournament_selection"]["elitism"] is True
     # The encoder is inferred from the observation space, so there is no
@@ -432,6 +432,7 @@ class TestTrainingManifest:
                 "lora_alpha": 16,
                 "lora_dropout": 0.05,
                 "task_type": "CAUSAL_LM",
+                "target_modules": ["q_proj", "v_proj"],
             },
             "max_model_len": 512,
             "use_separate_reference_adapter": True,
@@ -556,12 +557,14 @@ class TestTrainingManifest:
 
     # -- Optional sections --------------------------------------------------
 
-    def test_optional_sections_default_to_none(self):
+    def test_classic_hpo_sections_default_when_omitted(self):
         data = _make_manifest(algo={"name": "DQN"})
         manifest = TrainingManifest.model_validate(data)
         assert manifest.network is None
-        assert manifest.mutation is None
-        assert manifest.replay_buffer is None
+        assert manifest.mutation is not None
+        assert manifest.mutation.probabilities.act_mut == 0.2
+        assert manifest.replay_buffer is not None
+        assert manifest.replay_buffer.max_size == 450_000
         assert manifest.selection_strategy is None
 
     def test_environment_required(self):
@@ -576,9 +579,9 @@ class TestTrainingManifest:
         }
         manifest = TrainingManifest.model_validate(data)
         assert isinstance(manifest.training, TrainingSpec)
-        assert manifest.training.max_steps == 1_000_000
-        assert manifest.training.pop_size == 1
-        assert manifest.training.hpo is False
+        assert manifest.training.max_steps == 2_000_000
+        assert manifest.training.pop_size == 4
+        assert manifest.training.hpo is True
 
     def test_environment_is_validated_not_passed_through(self):
         data = _make_manifest(
@@ -801,15 +804,17 @@ class TestLocalTrainerSingleAgent:
         assert isinstance(trainer.replay_buffer_spec, ReplayBufferSpec)
         assert trainer.replay_buffer_spec.max_size == 100_000
 
-    def test_optional_sections_none_when_omitted(self):
+    def test_trainer_mutation_defaults_when_omitted(self):
         data = _make_manifest(
             algo={"name": "DQN"},
             env={"name": "CartPole-v1"},
         )
         trainer = LocalTrainer.from_manifest(data)
-        assert trainer.mutation_spec is None
+        assert trainer.mutation_spec is not None
+        assert trainer.mutation_spec.probabilities.act_mut == 0.2
         assert trainer.selection_strategy_spec is None
-        assert trainer.replay_buffer_spec is None
+        assert trainer.replay_buffer_spec is not None
+        assert trainer.replay_buffer_spec.max_size == 450_000
 
     # -- Loading from files -------------------------------------------------
 
@@ -848,9 +853,9 @@ class TestLocalTrainerSingleAgent:
         assert isinstance(trainer, LocalTrainer)
         assert trainer.algorithm_spec.batch_size == 64  # DQN's constructor default
         assert trainer.env_spec.name == "CartPole-v1"
-        assert trainer.mutation_spec is None
+        assert trainer.mutation_spec is not None
         assert trainer.selection_strategy_spec is None
-        assert trainer.replay_buffer_spec is None
+        assert trainer.replay_buffer_spec is not None
 
 
 # ============================================================================
@@ -1196,12 +1201,6 @@ class TestTrainerGetValidatedManifestLLMNetwork:
                 "batch_size": 8,
                 "pretrained_model_name_or_path": "algo-model",
                 "max_model_len": 128,
-                "lora_config": {
-                    "lora_r": 2,
-                    "lora_alpha": 4,
-                    "target_modules": ["k_proj"],
-                    "task_type": "CAUSAL_LM",
-                },
             },
             env={
                 "env_type": "dataset",
@@ -1254,6 +1253,7 @@ class TestLocalTrainerLLM:
                 "lora_alpha": 16,
                 "lora_dropout": 0.05,
                 "task_type": "CAUSAL_LM",
+                "target_modules": ["q_proj", "v_proj"],
             },
             "max_model_len": 512,
             # Below max_model_len, so rollout prompts get a non-zero budget
@@ -1654,6 +1654,7 @@ class TestFromConfigFiles:
                     "lora_alpha": 16,
                     "lora_dropout": 0.05,
                     "task_type": "CAUSAL_LM",
+                    "target_modules": ["q_proj", "v_proj"],
                 },
                 "max_model_len": 512,
                 "use_separate_reference_adapter": True,

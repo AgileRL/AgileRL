@@ -20,6 +20,7 @@ from agilerl.arena.models.algorithms import (
     GRPOSpec,
     GSPOSpec,
     IPPOSpec,
+    LatentPPOSpec,
     LLMAlgorithmSpec,
     LLMPPOSpec,
     LLMREINFORCESpec,
@@ -33,8 +34,10 @@ from agilerl.arena.models.algorithms import (
     RolloutLLMSpec,
     SFTSpec,
     SingleAgentAlgorithmSpec,
+    SupervisedSpec,
     TD3Spec,
 )
+from agilerl.arena.models.defaults import default_manifest
 from agilerl.arena.models.env import (
     BanditEnvSpec,
     EnvContainerSpec,
@@ -43,7 +46,9 @@ from agilerl.arena.models.env import (
     GymEnvSpec,
     LLMEnvSpec,
     LLMEnvType,
+    NonTabularEnvSpec,
     OfflineEnvSpec,
+    TabularEnvSpec,
 )
 from agilerl.arena.models.hpo import (
     MultiFrequencySelectionSpec,
@@ -68,6 +73,9 @@ from agilerl.arena.models.model_info import (
     ModelArchitecture,
     ModelInfo,
     ModelStatus,
+    default_lora_rank,
+    default_lora_target_scope,
+    default_target_modules,
 )
 from agilerl.arena.models.networks import (
     CnnLstmSpec,
@@ -77,6 +85,7 @@ from agilerl.arena.models.networks import (
     DeterministicActorSpec,
     EncoderType,
     FinetuningNetworkSpec,
+    LatentPPONetworkSpec,
     LoraConfigDict,
     LstmSpec,
     MlpSpec,
@@ -93,6 +102,8 @@ from agilerl.arena.models.networks import (
     encoder_spec_for_arch,
     network_arch_is_resolvable,
     normalize_manifest_network,
+    resolve_lora_defaults,
+    resolve_lora_moe_backend,
 )
 from agilerl.arena.models.registry import MANIFEST_REGISTRY, AgentType, register
 from agilerl.arena.models.schema import SCHEMA_ID, manifest_schema
@@ -151,6 +162,8 @@ __all__ = [
     "LLMPPOSpec",
     "LLMREINFORCESpec",
     "LLMRolloutBufferSpec",
+    "LatentPPONetworkSpec",
+    "LatentPPOSpec",
     "LoraConfigDict",
     "LstmSpec",
     "MADDPGSpec",
@@ -169,6 +182,7 @@ __all__ = [
     "NetworkSpec",
     "NeuralTSSpec",
     "NeuralUCBSpec",
+    "NonTabularEnvSpec",
     "OfflineEnvSpec",
     "PPOSpec",
     "PerBufferArgs",
@@ -185,13 +199,19 @@ __all__ = [
     "SimbaSpec",
     "SingleAgentAlgorithmSpec",
     "StochasticActorSpec",
+    "SupervisedSpec",
     "TD3Spec",
+    "TabularEnvSpec",
     "TournamentSelectionSpec",
     "TrainingManifest",
     "TrainingSpec",
     "VLLMConfig",
     "ValueNetworkSpec",
     "default_colocated_vllm_config",
+    "default_lora_rank",
+    "default_lora_target_scope",
+    "default_manifest",
+    "default_target_modules",
     "dump_network_section",
     "encoder_spec_for_arch",
     "manifest_schema",
@@ -201,5 +221,7 @@ __all__ = [
     "normalize_network_section",
     "register",
     "resolve_frequency_ratios",
+    "resolve_lora_defaults",
+    "resolve_lora_moe_backend",
     "resolve_selection_brackets",
 ]

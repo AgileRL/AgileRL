@@ -19,7 +19,36 @@ from agilerl.arena.models.networks import (
     QNetworkSpec,
     SimbaSpec,
     min_max_validator,
+    resolve_lora_moe_backend,
 )
+
+
+class TestResolveLoraMoeBackend:
+    def test_auto_fp8_takes_marlin_below_sm89(self) -> None:
+        assert resolve_lora_moe_backend("fp8", None, (8, 0)) == "marlin"
+        assert resolve_lora_moe_backend("fp8_e4m3", "auto", (8, 6)) == "marlin"
+
+    def test_auto_fp8_takes_triton_on_sm89_up(self) -> None:
+        assert resolve_lora_moe_backend("fp8", None, (8, 9)) == "triton"
+        assert resolve_lora_moe_backend("fp8", None, (9, 0)) == "triton"
+
+    def test_auto_non_fp8_takes_triton(self) -> None:
+        assert resolve_lora_moe_backend("awq", None, (8, 0)) == "triton"
+        assert resolve_lora_moe_backend(None, None, (8, 0)) == "triton"
+
+    def test_auto_unknown_capability_takes_triton(self) -> None:
+        assert resolve_lora_moe_backend("fp8", None, None) == "triton"
+
+    @pytest.mark.parametrize("backend", ["marlin", "Triton"])
+    def test_explicit_lora_capable_backend_is_kept(self, backend: str) -> None:
+        assert resolve_lora_moe_backend("fp8", backend, (8, 0)) == backend
+
+    def test_backend_without_moe_lora_is_rejected(self) -> None:
+        with pytest.raises(
+            ValueError,
+            match=r"moe_backend='flashinfer-cutlass' has no MoE LoRA support",
+        ):
+            resolve_lora_moe_backend("fp8", "flashinfer-cutlass", (9, 0))
 
 
 class TestMinMaxValidator:

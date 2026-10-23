@@ -25,6 +25,8 @@ from agilerl.arena import ArenaClient
 from agilerl.arena.models import BanditEnvSpec as ArenaBanditEnvSpec
 from agilerl.arena.models import GymEnvSpec as ArenaEnvSpec
 from agilerl.arena.models import LLMEnvSpec as ArenaLLMEnvSpec
+from agilerl.arena.models import NonTabularEnvSpec as ArenaNonTabularEnvSpec
+from agilerl.arena.models import TabularEnvSpec as ArenaTabularEnvSpec
 from agilerl.arena.models import TrainingManifest as ArenaManifest
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
 from agilerl.builders import select_builder
@@ -1199,6 +1201,12 @@ class ArenaTrainer(Trainer):
         elif isinstance(env_data, ArenaLLMEnvSpec):
             msg = (
                 "ArenaTrainer does not run LLM environments; submit the "
+                "manifest with ArenaClient.submit_experiment instead."
+            )
+            raise ValueError(msg)
+        elif isinstance(env_data, (ArenaTabularEnvSpec, ArenaNonTabularEnvSpec)):
+            msg = (
+                "ArenaTrainer does not run dataset environments; submit the "
                 "manifest with ArenaClient.submit_experiment instead."
             )
             raise ValueError(msg)

@@ -73,6 +73,12 @@ class TestTrainingSpecValidators:
         ):
             TrainingSpec(max_steps=100, evo_steps=200)
 
+    def test_defers_evo_steps_check_when_max_steps_is_unset(self) -> None:
+        spec = TrainingSpec(evo_steps=1_500_000)
+
+        assert spec.max_steps == 1_000_000
+        assert spec.evo_steps == 1_500_000
+
     def test_rejects_eps_start_below_eps_end(self) -> None:
         with pytest.raises(
             ValueError, match=r"eps_start .* must be greater than or equal to eps_end"

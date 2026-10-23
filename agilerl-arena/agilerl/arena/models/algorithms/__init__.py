@@ -21,6 +21,7 @@ from agilerl.arena.models.algorithms.dqn import DQNSpec
 from agilerl.arena.models.algorithms.grpo import GRPOSpec
 from agilerl.arena.models.algorithms.gspo import GSPOSpec
 from agilerl.arena.models.algorithms.ippo import IPPOSpec
+from agilerl.arena.models.algorithms.latent_ppo import LatentPPOSpec
 from agilerl.arena.models.algorithms.llmppo import LLMPPOSpec
 from agilerl.arena.models.algorithms.llmreinforce import LLMREINFORCESpec
 from agilerl.arena.models.algorithms.maddpg import MADDPGSpec
@@ -31,6 +32,7 @@ from agilerl.arena.models.algorithms.ppo import PPOSpec, RecurrentPPOSpec
 from agilerl.arena.models.algorithms.rainbow_dqn import RainbowDQNSpec
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
 from agilerl.arena.models.algorithms.sft import SFTSpec
+from agilerl.arena.models.algorithms.supervised import SupervisedSpec
 from agilerl.arena.models.algorithms.td3 import TD3Spec
 
 __all__ = [
@@ -48,6 +50,7 @@ __all__ = [
     "LLMAlgorithmSpec",
     "LLMPPOSpec",
     "LLMREINFORCESpec",
+    "LatentPPOSpec",
     "MADDPGSpec",
     "MATD3Spec",
     "MultiAgentAlgorithmSpec",
@@ -59,5 +62,6 @@ __all__ = [
     "RolloutLLMSpec",
     "SFTSpec",
     "SingleAgentAlgorithmSpec",
+    "SupervisedSpec",
     "TD3Spec",
 ]

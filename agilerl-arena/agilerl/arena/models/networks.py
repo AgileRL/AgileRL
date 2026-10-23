@@ -14,6 +14,7 @@ from pydantic import (
     Field,
     SerializationInfo,
     field_serializer,
+    field_validator,
     model_validator,
 )
 from typing_extensions import Self
@@ -38,7 +39,11 @@ from agilerl.arena.models.descriptions import (
     NUM_LSTM_LAYERS,
     STRIDE_SIZE,
 )
-from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
+from agilerl.arena.models.model_info import (
+    SUPPORTED_MODEL_INFO,
+    default_lora_rank,
+    default_target_modules,
+)
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -717,6 +722,54 @@ class ValueNetworkSpec(NetworkSpec):
     """Model specification for evolvable value networks."""
 
 
+LATENT_NETWORK_KEYS = frozenset(
+    {
+        "training_mode",
+        "num_conv_blocks",
+        "pool_hw",
+        "attention_heads",
+        "log_sigma_scale",
+    }
+)
+
+
+class LatentPPONetworkSpec(BaseModel):
+    """Model specification for latent-PPO segmentation networks."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    training_mode: Literal["joint", "frozen_decoder"] = Field(
+        default="joint",
+        description="Train the decoder with the policy, or keep it frozen.",
+    )
+    num_conv_blocks: int = Field(
+        default=4, ge=1, description="Convolutional blocks in the encoder."
+    )
+    pool_hw: list[int] = Field(
+        default_factory=lambda: [8, 8],
+        min_length=2,
+        max_length=2,
+        description="Pooling height and width.",
+    )
+    attention_heads: int = Field(
+        default=8, ge=1, description="Attention heads in the latent policy."
+    )
+    log_sigma_scale: float = Field(
+        default=4.0, gt=0.0, description="Scale on the log-standard-deviation head."
+    )
+    arch: str | None = Field(
+        default=None, description="Encoder architecture tag, when one is set."
+    )
+    encoder_config: dict[str, Any] | None = Field(
+        default=None,
+        description="Encoder settings. Unvalidated: the latent builder ignores them.",
+    )
+    head_config: dict[str, Any] | None = Field(
+        default=None,
+        description="Head settings. Unvalidated: the latent builder ignores them.",
+    )
+
+
 class LoraConfigDict(BaseModel):
     """Model specification for LLM LoRA configuration."""
 
@@ -734,11 +787,11 @@ class LoraConfigDict(BaseModel):
         title="Alpha",
         description="LoRA scaling. Conventionally set to twice the rank.",
     )
-    target_modules: list[str] | str | set[str] = Field(
-        default="all-linear",
+    target_modules: list[str] | set[str] | None = Field(
+        default=None,
         description=(
-            "Modules to attach adapters to: 'all-linear', or names such as "
-            "q_proj, k_proj, v_proj, o_proj."
+            "Modules to attach adapters to, e.g. q_proj, k_proj, v_proj, "
+            "o_proj. Unset adapts the catalog default."
         ),
     )
     # Packed MoE expert parameter paths (PEFT ``target_parameters``), e.g.
@@ -761,11 +814,22 @@ class LoraConfigDict(BaseModel):
         description="Dropout on the adapter. Must be 0 when target_parameters is set.",
     )
 
+    @field_validator("target_modules", mode="before")
+    @classmethod
+    def _reject_target_strings(cls, value: object) -> object:
+        if isinstance(value, str):
+            msg = (
+                f"target_modules {value!r} is not accepted: omit it for the "
+                "catalog default, or pass explicit module names."
+            )
+            raise ValueError(msg)
+        return value
+
     @field_serializer("target_modules")
     @classmethod
     def _serialize_target_modules(
-        cls, v: list[str] | str | set[str], _info: SerializationInfo
-    ) -> list[str] | str:
+        cls, v: list[str] | set[str] | None, _info: SerializationInfo
+    ) -> list[str] | None:
         return sorted(v) if isinstance(v, set) else v
 
 
@@ -941,6 +1005,142 @@ def default_colocated_vllm_config() -> VLLMConfig:
     )
 
 
+FP8_QUANTIZATION_METHODS = frozenset({"fp8", "fp8_e4m3"})
+"""vLLM weight quantization methods that need native-FP8 MoE kernels."""
+
+LORA_MOE_BACKENDS = frozenset({"marlin", "triton"})
+"""``moe_backend`` values whose vLLM expert kernels apply MoE LoRA."""
+
+NATIVE_FP8_MIN_COMPUTE_CAPABILITY = (8, 9)
+"""Oldest CUDA capability with native FP8 (Triton needs SM89+)."""
+
+
+def resolve_lora_moe_backend(
+    quantization: str | None,
+    backend: str | None,
+    compute_capability: tuple[int, int] | None,
+) -> str:
+    """Effective MoE backend: auto resolved by GPU, explicit validated.
+
+    vLLM's quantized MoE backend picker ignores LoRA and can choose a kernel
+    that fails the MoE LoRA check at load. Triton additionally needs SM89+
+    native FP8, so pre-Hopper GPUs take marlin for FP8 weights.
+
+    :param quantization: Engine weight quantization, if any.
+    :type quantization: str | None
+    :param backend: Requested ``moe_backend``, or None for vLLM's default.
+    :type backend: str | None
+    :param compute_capability: CUDA capability of the serving GPU, or None
+        when unknown (unknown keeps the previous triton default).
+    :type compute_capability: tuple[int, int] | None
+    :returns: The backend to serve with.
+    :rtype: str
+    :raises ValueError: If ``backend`` names a kernel without MoE LoRA support.
+    """
+    normalized = (
+        str(backend if backend is not None else "auto").lower().replace("-", "_")
+    )
+    if backend is None or normalized == "auto":
+        fp8 = (
+            isinstance(quantization, str)
+            and quantization.lower() in FP8_QUANTIZATION_METHODS
+        )
+        if (
+            fp8
+            and compute_capability is not None
+            and compute_capability < NATIVE_FP8_MIN_COMPUTE_CAPABILITY
+        ):
+            return "marlin"
+        return "triton"
+    if normalized not in LORA_MOE_BACKENDS:
+        msg = (
+            f"vllm_config.moe_backend={backend!r} has no MoE LoRA support; "
+            f"quantized LoRA engines need one of {sorted(LORA_MOE_BACKENDS)}"
+        )
+        raise ValueError(msg)
+    return backend
+
+
+def resolve_lora_defaults(lora: LoraConfigDict, hub_id: str | None) -> LoraConfigDict:
+    """Resolve a LoRA config's catalog defaults in place.
+
+    Unset ``target_modules`` become the catalog module list (language-model
+    only when multimodal). An omitted rank becomes 16 (or the largest the
+    model serves), omitted expert parameters become every packed path, and
+    any expert parameters force dropout to 0.
+
+    :param lora: The config to resolve.
+    :type lora: LoraConfigDict
+    :param hub_id: The model to resolve against, if one is named.
+    :type hub_id: str | None
+    :returns: The resolved config.
+    :rtype: LoraConfigDict
+    """
+    if hub_id is None:
+        return lora
+    entry = SUPPORTED_MODEL_INFO.get(hub_id)
+    if entry is None:
+        if lora.target_modules is None:
+            msg = (
+                f"target_modules is required for untracked model {hub_id!r}: "
+                "arena only knows the catalog default for the models in "
+                "`models supported`."
+            )
+            raise ValueError(msg)
+        return lora
+    if lora.target_modules is None:
+        resolved = default_target_modules(hub_id)
+        if resolved is not None:
+            lora.target_modules = resolved
+    if lora.target_parameters is None and entry.parameters:
+        lora.target_parameters = sorted(entry.parameters)
+    if lora.target_parameters:
+        # PEFT parameter-level LoRA cannot apply dropout.
+        lora.lora_dropout = 0.0
+    if "lora_r" not in lora.model_fields_set:
+        lora.lora_r = default_lora_rank(hub_id)
+    return lora
+
+
+def check_lora_config_supported(lora: LoraConfigDict, hub_id: str | None) -> None:
+    """Reject a LoRA rank or targets a tracked Hub id cannot train with.
+
+    Ranks above the cap fail; ``target_modules`` and ``target_parameters``
+    must match stored names exactly. Untracked Hub ids skip validation.
+
+    :param lora: The resolved config to check.
+    :type lora: LoraConfigDict
+    :param hub_id: The model to check against, if one is named.
+    :type hub_id: str | None
+    :raises ValueError: If the rank or targets are unsupported.
+    """
+    if hub_id is None:
+        return
+    entry = SUPPORTED_MODEL_INFO.get(hub_id)
+    if entry is None:
+        return
+    if entry.lora_ranks is not None and lora.lora_r > max(entry.lora_ranks):
+        msg = (
+            f"LoRA rank {lora.lora_r} is above the largest rank vLLM serves "
+            f"for {hub_id} ({max(entry.lora_ranks)})"
+        )
+        raise ValueError(msg)
+    valid_modules = ", ".join(sorted(entry.modules))
+    if unknown := sorted(set(lora.target_modules or ()) - entry.modules):
+        msg = (
+            f"Unknown LoRA target_modules {unknown} for {hub_id}; "
+            f"valid modules: {valid_modules}"
+        )
+        raise ValueError(msg)
+    if unknown := sorted(set(lora.target_parameters or ()) - entry.parameters):
+        valid = ", ".join(sorted(entry.parameters)) or "none"
+        msg = (
+            f"Unknown LoRA target_parameters {unknown} for {hub_id}; "
+            f"valid parameters: {valid}"
+        )
+        raise ValueError(msg)
+
+
 class FinetuningNetworkSpec(BaseModel):
     """Model specification for LLM finetuning networks."""
 
@@ -951,62 +1151,45 @@ class FinetuningNetworkSpec(BaseModel):
         min_length=1,
         description="HuggingFace model id or local path to fine-tune.",
     )
-    max_context_length: int = Field(
-        ...,
+    max_context_length: int | None = Field(
+        default=None,
         ge=1,
-        description="Context window the run is sized for, prompt plus completion.",
+        description=(
+            "Context window the run is sized for, prompt plus completion. "
+            "Unset takes the catalog maximum."
+        ),
     )
     lora_config: LoraConfigDict | None = Field(
         default=None,
-        description="LoRA adapter configuration. Unset fine-tunes without adapters.",
+        description="LoRA adapter configuration. Unset trains LoRA with defaults.",
     )
 
     @model_validator(mode="after")
     def _check_lora_config_supported(self) -> Self:
-        """Reject a LoRA rank or targets a tracked Hub id cannot train with.
+        """Default the context length and LoRA config, then check them.
 
-        Ranks below the cap pass; the vLLM engine rounds ``max_lora_rank`` up
-        to a value it accepts. ``target_modules`` is ``all-linear`` or a list
-        of stored module names, and ``target_parameters`` a list of stored
-        paths; both match exactly. Unset ``target_parameters`` on a packed-MoE
-        model adapts every expert path and sets ``lora_dropout`` to 0;
-        ``[]`` adapts none.
+        A missing ``lora_config`` is LoRA on with defaults: rank 16 (or the
+        largest the model serves), the catalog modules (language-model only
+        when multimodal), every packed expert path, and dropout 0 with
+        experts. Ranks above the cap fail; the vLLM engine rounds
+        ``max_lora_rank`` up to a value it accepts. ``target_modules`` is a
+        list of stored module names, and ``target_parameters`` a list of
+        stored paths; both match exactly.
         """
         hub_id = self.pretrained_model_name_or_path
         entry = SUPPORTED_MODEL_INFO.get(hub_id)
-        lora = self.lora_config
-        if entry is None or lora is None:
-            return self
-        if lora.target_parameters is None and entry.parameters:
-            lora.target_parameters = sorted(entry.parameters)
-            # PEFT parameter-level LoRA cannot apply dropout.
-            lora.lora_dropout = 0.0
-        if entry.lora_ranks is not None and lora.lora_r > max(entry.lora_ranks):
-            msg = (
-                f"LoRA rank {lora.lora_r} is above the largest rank vLLM serves "
-                f"for {hub_id} ({max(entry.lora_ranks)})"
-            )
-            raise ValueError(msg)
-        valid_modules = ", ".join(sorted(entry.modules))
-        if isinstance(lora.target_modules, str):
-            if lora.target_modules != "all-linear":
+        if self.max_context_length is None:
+            if entry is None:
                 msg = (
-                    f"LoRA target_modules for {hub_id} must be 'all-linear' or a "
-                    f"list of module names, got {lora.target_modules!r}; "
-                    f"valid modules: {valid_modules}"
+                    "max_context_length is required for untracked model "
+                    f"{hub_id!r}: arena only knows the catalog maximum for "
+                    "the models in `models supported`."
                 )
                 raise ValueError(msg)
-        elif unknown := sorted(set(lora.target_modules) - entry.modules):
-            msg = (
-                f"Unknown LoRA target_modules {unknown} for {hub_id}; "
-                f"valid modules: {valid_modules}"
-            )
-            raise ValueError(msg)
-        if unknown := sorted(set(lora.target_parameters or ()) - entry.parameters):
-            valid = ", ".join(sorted(entry.parameters)) or "none"
-            msg = (
-                f"Unknown LoRA target_parameters {unknown} for {hub_id}; "
-                f"valid parameters: {valid}"
-            )
-            raise ValueError(msg)
+            self.max_context_length = entry.max_context_length
+        if self.lora_config is None:
+            self.lora_config = LoraConfigDict()
+        lora = resolve_lora_defaults(self.lora_config, hub_id)
+        self.lora_config = lora
+        check_lora_config_supported(lora, hub_id)
         return self

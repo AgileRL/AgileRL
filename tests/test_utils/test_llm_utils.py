@@ -118,6 +118,7 @@ from agilerl.utils.llm_utils import (
     sample_eval_prompts,
     save_lora_adapters,
     save_peft_adapter_for_vllm_rollout,
+    select_lora_moe_backend,
     set_sub_model_attn_implementation,
     snapshot_lora_adapters,
     validate_importance_sampling_level,
@@ -3358,10 +3359,55 @@ def _vllm_config(**overrides):
     return SimpleNamespace(**base)
 
 
+class TestSelectLoraMoeBackend:
+    """The engine-kwargs wrapper only touches quantized LoRA engines."""
+
+    def test_quantized_lora_engine_gets_backend(self) -> None:
+        engine_kwargs = {"enable_lora": True, "quantization": "fp8"}
+
+        select_lora_moe_backend(engine_kwargs, compute_capability=(9, 0))
+
+        assert engine_kwargs == {
+            "enable_lora": True,
+            "quantization": "fp8",
+            "moe_backend": "triton",
+        }
+
+    def test_unquantized_engine_keeps_vllm_default(self) -> None:
+        engine_kwargs = {"enable_lora": True}
+
+        select_lora_moe_backend(engine_kwargs, compute_capability=(9, 0))
+
+        assert engine_kwargs == {"enable_lora": True}
+
+    def test_engine_without_lora_keeps_vllm_default(self) -> None:
+        engine_kwargs = {"quantization": "fp8"}
+
+        select_lora_moe_backend(engine_kwargs, compute_capability=(9, 0))
+
+        assert engine_kwargs == {"quantization": "fp8"}
+
+
 class TestBuildVllmLlmInitKwargs:
     @pytest.fixture(autouse=True)
     def stub_llama_model_type(self, monkeypatch: pytest.MonkeyPatch) -> None:
         stub_catalog_model_type(monkeypatch, "llama")
+
+    def test_fp8_lora_engine_takes_marlin_on_pre_hopper(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "agilerl.utils.llm_utils.current_compute_capability",
+            lambda: (8, 0),
+        )
+
+        kwargs = build_vllm_llm_init_kwargs(
+            _vllm_config(quantization="fp8"),
+            trainer_model_name_or_path="org/base",
+            max_model_len=128,
+        )
+
+        assert kwargs["moe_backend"] == "marlin"
 
     def test_family_lookup_oserror_leaves_vllm_kwargs_empty(
         self, monkeypatch: pytest.MonkeyPatch

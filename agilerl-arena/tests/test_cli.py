@@ -296,6 +296,31 @@ class TestManifestCommands:
         assert result.exit_code == 1
         assert "not a registered algorithm" in result.output
 
+    def test_validate_gpu_rejects_triton_fp8_moe_on_a100(self, runner):
+        manifest = (
+            "algorithm: {name: GRPO, vllm_engine_args: "
+            "{quantization: fp8, moe_backend: triton}}\n"
+            "environment: {env_type: rollout, entrypoint: 'pkg:Env'}\n"
+            "network: {pretrained_model_name_or_path: openai/gpt-oss-20b}\n"
+        )
+
+        result = runner.invoke(
+            main, ["manifest", "validate", "-", "--gpu", "A100"], input=manifest
+        )
+
+        assert result.exit_code == 1
+        assert "marlin" in result.output
+
+    def test_validate_gpu_unknown_gpu_exits_failed(self, runner):
+        result = runner.invoke(
+            main,
+            ["manifest", "validate", "-", "--gpu", "9550XTREME"],
+            input="algorithm: {name: DQN}\nenvironment: {name: CartPole-v1}\n",
+        )
+
+        assert result.exit_code == 2
+        assert "unknown gpu" in result.output
+
     def test_validate_payload_prints_resolved_manifest(self, runner, tmp_path):
         path = tmp_path / "dqn.yaml"
         path.write_text(

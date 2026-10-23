@@ -12,7 +12,7 @@ import yaml
 from pydantic import ValidationError
 
 from agilerl.arena.models import __version__
-from agilerl.arena.models.manifest import TrainingManifest
+from agilerl.arena.models.manifest import TrainingManifest, check_llm_engine_for_gpu
 
 EXIT_OK = 0
 EXIT_INVALID = 1
@@ -73,11 +73,18 @@ def read_manifest(source: str) -> dict[str, Any]:
     return TrainingManifest.load(source)
 
 
-def verdict(document: dict[str, Any]) -> dict[str, Any]:
+def verdict(
+    document: dict[str, Any],
+    *,
+    gpu_capability: tuple[int, int] | None = None,
+) -> dict[str, Any]:
     """Validate *document* and report the outcome as one JSON-safe record.
 
     :param document: The raw manifest document.
     :type document: dict[str, Any]
+    :param gpu_capability: CUDA capability of the serving GPU, or None to
+        skip GPU-dependent checks.
+    :type gpu_capability: tuple[int, int] | None
     :returns: The verdict.
     :rtype: dict[str, Any]
     """
@@ -85,6 +92,21 @@ def verdict(document: dict[str, Any]) -> dict[str, Any]:
         manifest = TrainingManifest.model_validate(document)
     except (ValidationError, ValueError) as err:
         return {"ok": False, "errors": errors(err), "manifest_version": __version__}
+    if gpu_capability is not None:
+        try:
+            check_llm_engine_for_gpu(manifest, gpu_capability)
+        except ValueError as err:
+            return {
+                "ok": False,
+                "errors": [
+                    {
+                        "path": "algorithm.vllm_engine_args.moe_backend",
+                        "message": str(err),
+                        "kind": "value_error",
+                    }
+                ],
+                "manifest_version": __version__,
+            }
     return {
         "ok": True,
         "payload": manifest.to_payload(),

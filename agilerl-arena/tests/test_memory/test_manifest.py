@@ -746,7 +746,10 @@ class TestRunConfig:
                 "micro_batch_size_per_gpu": None,
                 "vllm_config": {"tensor_parallel_size": 1},
             },
-            network={"pretrained_model_name_or_path": "missing/not-a-model"},
+            network={
+                "pretrained_model_name_or_path": "missing/not-a-model",
+                "lora_config": {"target_modules": ["q_proj"]},
+            },
             training={
                 "rollout_mode": "async",
                 "rollout_engines_per_agent": 1,

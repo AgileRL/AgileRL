@@ -161,6 +161,7 @@ class TestResolveMicroBatchSizePerGpu:
         # Arrange
         raw = _manifest()
         raw["network"]["pretrained_model_name_or_path"] = "missing/not-a-model"
+        raw["network"]["lora_config"] = {"target_modules": ["q_proj"]}
         manifest = TrainingManifest.model_validate(raw)
 
         # Act
@@ -174,6 +175,7 @@ class TestResolveMicroBatchSizePerGpu:
         # Arrange: a passed spec would fit; the id is outside the catalog.
         raw = _manifest()
         raw["network"]["pretrained_model_name_or_path"] = "missing/not-a-model"
+        raw["network"]["lora_config"] = {"target_modules": ["q_proj"]}
         manifest = TrainingManifest.model_validate(raw)
         info = SUPPORTED_MODEL_INFO[HUB_ID]
         supplied = ModelSpec(

@@ -53,6 +53,23 @@ VLLM_LORA_RANKS = (1, 8, 16, 32, 64, 128, 256, 320, 512)
 # vLLM fused MoE LoRA rejects ranks above this.
 FUSED_MOE_LORA_MAX_RANK = 128
 
+# Default LoRA rank, when the model serves it.
+DEFAULT_LORA_RANK = 16
+# Multimodal models train LoRA on the language model only, never the towers.
+LANGUAGE_MODEL_SCOPE = "language_model"
+
+# PEFT/vLLM cannot wrap these module suffixes.
+VLLM_UNSUPPORTED_LORA_SUFFIXES = frozenset(
+    {"lm_head", "embed_tokens", "embeddings", "conv1d"}
+)
+# PEFT/vLLM wrap Linear and transformers Conv1D only.
+ALLOWED_LORA_MODULE_TYPES = frozenset({"Linear", "Conv1D"})
+# Projection suffixes that collide with a remaining `linear` leaf (Gemma-style
+# wrap): an unscoped `q_proj` suffix-matches the towers' `q_proj.linear`.
+LINEAR_COLLISION_SUFFIXES = frozenset(
+    {"q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"}
+)
+
 
 def supported_path(hub_id: str) -> Traversable:
     """Bundled ``config`` + ``inspected`` JSON for ``hub_id``."""
@@ -259,3 +276,77 @@ SUPPORTED_MODEL_INFO: Mapping[str, ModelInfo] = {
         ModelInfo(hub_id="openai/gpt-oss-20b", architecture=ARCH_MOE),
     )
 }
+
+
+def _wrappable_lora_modules(lora_info: dict[str, Any]) -> list[str]:
+    """Catalog module keys PEFT/vLLM can wrap, excluding expert parameters."""
+    modules: list[str] = []
+    for key, group in lora_info.items():
+        if key.startswith("_") or not isinstance(group, list):
+            continue
+        if group and all(entry.get("kind") == "parameter" for entry in group):
+            continue
+        if key in VLLM_UNSUPPORTED_LORA_SUFFIXES:
+            continue
+        if all(
+            entry.get("type") in (None, *ALLOWED_LORA_MODULE_TYPES) for entry in group
+        ):
+            modules.append(key)
+    return modules
+
+
+def _is_multimodal_lora(lora_info: dict[str, Any]) -> bool:
+    """Whether some LoRA entries sit outside the language model."""
+    scopes = {
+        str(entry.get("scope", ""))
+        for group in lora_info.values()
+        if isinstance(group, list)
+        for entry in group
+    }
+    has_language = any(LANGUAGE_MODEL_SCOPE in scope for scope in scopes)
+    has_tower = any(scope and LANGUAGE_MODEL_SCOPE not in scope for scope in scopes)
+    return has_language and has_tower
+
+
+def default_target_modules(hub_id: str) -> list[str] | None:
+    """Wrappable modules for a catalog id, or None when untracked.
+
+    Multimodal models default to language-model modules only, never the
+    vision or audio towers. Otherwise every wrappable module is targeted.
+    """
+    entry = SUPPORTED_MODEL_INFO.get(hub_id)
+    if entry is None:
+        return None
+    lora_info = entry.inspected["lora_info"]
+    modules = _wrappable_lora_modules(lora_info)
+    if _is_multimodal_lora(lora_info):
+        return sorted(
+            key
+            for key in modules
+            if all(
+                LANGUAGE_MODEL_SCOPE in str(entry.get("scope", ""))
+                for entry in lora_info[key]
+            )
+        )
+    if "linear" in modules:
+        modules = [key for key in modules if key not in LINEAR_COLLISION_SUFFIXES]
+    return sorted(modules)
+
+
+def default_lora_target_scope(hub_id: str) -> str | None:
+    """``language_model`` for multimodal catalog ids, else None."""
+    entry = SUPPORTED_MODEL_INFO.get(hub_id)
+    if entry is None:
+        return None
+    if _is_multimodal_lora(entry.inspected["lora_info"]):
+        return LANGUAGE_MODEL_SCOPE
+    return None
+
+
+def default_lora_rank(hub_id: str) -> int:
+    """Rank 16, or the largest the model serves when it cannot serve 16."""
+    entry = SUPPORTED_MODEL_INFO.get(hub_id)
+    ranks = entry.lora_ranks if entry is not None else None
+    if not ranks or DEFAULT_LORA_RANK <= max(ranks):
+        return DEFAULT_LORA_RANK
+    return max(ranks)

@@ -457,6 +457,61 @@ class BanditEnvSpec(EnvSpecBase):
     )
 
 
+class SupervisedEnvSpecBase(EnvSpecBase):
+    """A dataset a supervised or latent-PPO run trains over."""
+
+    dataset: str = Field(
+        min_length=1, description="Dataset name or id the run trains over."
+    )
+    name: str | None = Field(
+        default=None,
+        description="Catalog label only. Not the dataset id.",
+    )
+    columns: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Column mapping for the dataset, e.g. inputs and target "
+            "for a tabular dataset."
+        ),
+    )
+    preprocessed: bool = Field(
+        default=False,
+        description="The dataset already went through preprocessing.",
+    )
+    ignore_index: int | None = Field(
+        default=None, description="Label index to ignore in the loss function."
+    )
+    input_column: str = Field(
+        default="encodings", description="Column holding the model inputs."
+    )
+    target_column: str = Field(
+        default="label", description="Column holding the targets."
+    )
+    dataset_path: str | None = Field(
+        default=None, description="Object-store path to a user-supplied dataset."
+    )
+    hf_dataset_id: str | None = Field(
+        default=None, description="HuggingFace dataset id."
+    )
+
+
+class TabularEnvSpec(SupervisedEnvSpecBase):
+    """A row-based dataset for supervised learning."""
+
+    env_type: Literal["tabular"] = Field(
+        default="tabular", description="Selects a tabular dataset environment."
+    )
+
+
+class NonTabularEnvSpec(SupervisedEnvSpecBase):
+    """An image or multimodal dataset for supervised learning."""
+
+    env_type: Literal["non_tabular"] = Field(
+        default="non_tabular",
+        description="Selects a non-tabular dataset environment.",
+    )
+
+
 class LLMEnvSpec(EnvSpecBase):
     """The dataset or interactive environment an LLM algorithm fine-tunes against.
 
@@ -1165,6 +1220,11 @@ def _check_env_packages(env_packages: dict[str, Any]) -> None:
 
 
 EnvSpec = Annotated[
-    GymEnvSpec | OfflineEnvSpec | BanditEnvSpec | LLMEnvSpec,
+    GymEnvSpec
+    | OfflineEnvSpec
+    | BanditEnvSpec
+    | LLMEnvSpec
+    | TabularEnvSpec
+    | NonTabularEnvSpec,
     Field(discriminator="env_type"),
 ]

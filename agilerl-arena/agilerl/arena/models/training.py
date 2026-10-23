@@ -118,7 +118,7 @@ class ReplayBufferSpec(BaseModel):
     )
     name: str | None = Field(default=None, description="Label for the buffer in logs.")
     max_size: int = Field(
-        default=100_000,
+        default=450_000,
         ge=1,
         validation_alias=AliasChoices("max_size", "memory_size"),
         description=(
@@ -541,11 +541,20 @@ class TrainingSpec(BaseModel):
             raise ValueError(msg)
         return data
 
+    def check_evo_steps_fit_horizon(self) -> None:
+        """Raise when the evolution interval is longer than the run."""
+        if self.evo_steps is not None and self.evo_steps > self.max_steps:
+            msg = (
+                f"evo_steps ({self.evo_steps}) must be less than or equal to "
+                f"max_steps ({self.max_steps})."
+            )
+            raise ValueError(msg)
+
     @model_validator(mode="after")
     def _validate_training_parameters(self) -> Self:
-        if self.evo_steps is not None and self.evo_steps > self.max_steps:
-            msg = f"evo_steps ({self.evo_steps}) must be less than or equal to max_steps ({self.max_steps})."
-            raise ValueError(msg)
+        # Unset max_steps is still the 1_000_000 field default here.
+        if "max_steps" in self.model_fields_set:
+            self.check_evo_steps_fit_horizon()
         if self.evo_epochs is not None and self.num_epochs is None:
             msg = (
                 "training.evo_epochs needs training.num_epochs: the trainer only "

@@ -44,3 +44,10 @@ def test_attach_default_network_skips_llm_specs() -> None:
     algorithm = _default_algorithm_spec("GRPO")
     _attach_default_network(algorithm)
     assert getattr(algorithm, "net_config", None) is None
+
+
+@pytest.mark.parametrize("algo_name", ["Supervised", "LatentPPO"])
+def test_supervised_family_manifests_generate(tmp_path: Path, algo_name: str) -> None:
+    _path, payload = write_arena_manifest(algo_name, tmp_path)
+    assert payload["algorithm"]["name"] == algo_name
+    assert payload["environment"]["dataset"] == "mnist"

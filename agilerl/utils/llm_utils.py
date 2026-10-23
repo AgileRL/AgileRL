@@ -51,6 +51,7 @@ from agilerl.architectures.vllm_language import (
     nested_language_config,
 )
 from agilerl.arena.memory.resolve.lora import resolve_lora_rank_ceiling
+from agilerl.arena.models.networks import resolve_lora_moe_backend
 from agilerl.distributed.fsdp import CPUOffloadOptimizer, canonical_fsdp_param_fqn
 from agilerl.distributed.process import (
     allreduce_minmax_int,
@@ -3041,6 +3042,40 @@ def resolve_vllm_max_num_batched_tokens(
     return min(worst_case, concurrent_budget)
 
 
+def current_compute_capability() -> tuple[int, int] | None:
+    """This process's CUDA compute capability, or None without CUDA."""
+    if not torch.cuda.is_available():
+        return None
+    return torch.cuda.get_device_capability()
+
+
+def select_lora_moe_backend(
+    engine_kwargs: dict[str, Any], *, compute_capability: tuple[int, int] | None
+) -> None:
+    """Run quantized MoE experts on a LoRA-capable kernel the GPU supports.
+
+    The backend rule itself lives in the arena contract; this applies it to
+    engine arguments.
+
+    :param engine_kwargs: Engine arguments, updated in place.
+    :type engine_kwargs: dict[str, Any]
+    :param compute_capability: CUDA capability of the serving GPU, or None
+        when unknown (unknown keeps the previous triton default).
+    :type compute_capability: tuple[int, int] | None
+    :raises ValueError: If ``moe_backend`` names a kernel without MoE LoRA support.
+    """
+    if (
+        not engine_kwargs.get("enable_lora")
+        or engine_kwargs.get("quantization") is None
+    ):
+        return
+    engine_kwargs["moe_backend"] = resolve_lora_moe_backend(
+        engine_kwargs.get("quantization"),
+        engine_kwargs.get("moe_backend"),
+        compute_capability,
+    )
+
+
 def build_vllm_llm_init_kwargs(
     vllm_config: VLLMConfig,
     trainer_model_name_or_path: str,
@@ -3142,6 +3177,7 @@ def build_vllm_llm_init_kwargs(
             runtime=runtime,
             lora_target_modules=lora_target_modules,
         )
+    select_lora_moe_backend(kwargs, compute_capability=current_compute_capability())
     return kwargs
 
 

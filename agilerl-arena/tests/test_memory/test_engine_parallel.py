@@ -119,10 +119,10 @@ class TestResolveEngineTensorParallel:
         assert resolve_engine_tensor_parallel(manifest, 8, tiny, 8) is None
 
     def test_unknown_hub_id_returns_none(self) -> None:
-        # Arrange
-        manifest = TrainingManifest.model_validate(
-            _qwen_manifest(hub_id="missing/not-a-supported-model")
-        )
+        # Arrange: untracked models name their LoRA targets explicitly.
+        raw = _qwen_manifest(hub_id="missing/not-a-supported-model")
+        raw["network"]["lora_config"] = {"target_modules": ["q_proj"]}
+        manifest = TrainingManifest.model_validate(raw)
         device = _a100()
 
         # Act

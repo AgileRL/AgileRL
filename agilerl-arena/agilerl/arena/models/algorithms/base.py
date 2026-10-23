@@ -535,4 +535,9 @@ class LLMAlgorithmSpec(AlgorithmSpec):
         return self
 
 
-AlgoSpec = SingleAgentAlgorithmSpec | MultiAgentAlgorithmSpec | LLMAlgorithmSpec
+AlgoSpec = (
+    SingleAgentAlgorithmSpec
+    | MultiAgentAlgorithmSpec
+    | LLMAlgorithmSpec
+    | AlgorithmSpec
+)

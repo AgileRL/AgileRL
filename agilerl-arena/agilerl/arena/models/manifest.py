@@ -32,31 +32,65 @@ from pydantic import (
 )
 from typing_extensions import Self
 
-from agilerl.arena.models.algorithms.base import AlgoSpec, LLMAlgorithmSpec
+from agilerl.arena.models.algorithms.base import (
+    AlgoSpec,
+    LLMAlgorithmSpec,
+    MultiAgentAlgorithmSpec,
+    SingleAgentAlgorithmSpec,
+)
+from agilerl.arena.models.algorithms.ddpg import DDPGSpec
 from agilerl.arena.models.algorithms.grpo import GRPOSpec
-from agilerl.arena.models.algorithms.ppo import PPOSpec
+from agilerl.arena.models.algorithms.ippo import IPPOSpec
+from agilerl.arena.models.algorithms.latent_ppo import LatentPPOSpec
+from agilerl.arena.models.algorithms.maddpg import MADDPGSpec
+from agilerl.arena.models.algorithms.matd3 import MATD3Spec
+from agilerl.arena.models.algorithms.ppo import PPOSpec, RecurrentPPOSpec
+from agilerl.arena.models.algorithms.rainbow_dqn import RainbowDQNSpec
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
+from agilerl.arena.models.algorithms.sft import SFTSpec
+from agilerl.arena.models.algorithms.supervised import SupervisedSpec
+from agilerl.arena.models.algorithms.td3 import TD3Spec
 from agilerl.arena.models.env import EnvSpec, LLMEnvSpec
 from agilerl.arena.models.hpo import (
     MultiFrequencySelectionSpec,
+    MutationProbabilities,
     MutationSpec,
+    RLHyperparameter,
     SelectionStrategySpec,
     TournamentSelectionSpec,
+    hp_only_mutation_probabilities,
     no_op_mutation_probabilities,
 )
+from agilerl.arena.models.model_info import (
+    ARCH_HYBRID_MOE,
+    ARCH_MOE,
+    SUPPORTED_MODEL_INFO,
+    default_lora_target_scope,
+)
 from agilerl.arena.models.networks import (
+    FP8_QUANTIZATION_METHODS,
+    LATENT_NETWORK_KEYS,
+    NATIVE_FP8_MIN_COMPUTE_CAPABILITY,
     FinetuningNetworkSpec,
+    LatentPPONetworkSpec,
+    LoraConfigDict,
     MlpSpec,
     NetworkSpec,
+    check_lora_config_supported,
     default_colocated_vllm_config,
     dump_network_section,
     network_arch_is_resolvable,
     normalize_manifest_network,
+    resolve_lora_defaults,
+    resolve_lora_moe_backend,
 )
 from agilerl.arena.models.registry import MANIFEST_REGISTRY
 from agilerl.arena.models.training import (
     BufferSpec,
+    CheckpointExportSpec,
     LLMRolloutBufferSpec,
+    PerBufferArgs,
+    ReplayBufferSpec,
     TrainingSpec,
 )
 
@@ -81,6 +115,172 @@ def _copy_when_unset(
         msg = (
             f"algorithm.{field}={getattr(target, field)!r} disagrees with "
             f"{value!r} from another section."
+        )
+        raise ValueError(msg)
+
+
+def _is_classic_hpo(algorithm: AlgoSpec) -> bool:
+    """Whether the algorithm trains classic RL with evolutionary HPO by default."""
+    return (
+        isinstance(algorithm, (SingleAgentAlgorithmSpec, MultiAgentAlgorithmSpec))
+        and not algorithm.bandit
+        and not algorithm.offline
+    )
+
+
+def _network_arch_is_large(network: object) -> bool:
+    """Whether the network section asks for CNN-scale horizons."""
+    return isinstance(network, NetworkSpec) and network.encoder_config.arch in (
+        "cnn",
+        "multiinput",
+    )
+
+
+def _mutation_template(algorithm: AlgoSpec) -> MutationProbabilities | None:
+    """HPO mutation probabilities for the paradigm, or None to leave alone."""
+    if isinstance(algorithm, SFTSpec):
+        return hp_only_mutation_probabilities(0.4, 0.6)
+    if isinstance(algorithm, (LLMAlgorithmSpec, SupervisedSpec, LatentPPOSpec)):
+        return hp_only_mutation_probabilities(0.2, 0.8)
+    if _is_classic_hpo(algorithm):
+        # PPO/DDPG-family algorithms never mutate the activation function.
+        if isinstance(
+            algorithm,
+            (
+                PPOSpec,
+                RecurrentPPOSpec,
+                IPPOSpec,
+                DDPGSpec,
+                TD3Spec,
+                MADDPGSpec,
+                MATD3Spec,
+            ),
+        ):
+            return MutationProbabilities(act_mut=0.0)
+        return MutationProbabilities()
+    return None
+
+
+def _fill_probabilities(
+    mutation: MutationSpec, template: MutationProbabilities
+) -> None:
+    """Overlay the template's probabilities, keeping explicitly set fields."""
+    explicit = mutation.probabilities.model_dump(
+        include=set(mutation.probabilities.model_fields_set)
+    )
+    mutation.probabilities = template.model_copy(update=explicit)
+
+
+def _copy_ranges(
+    ranges: dict[str, RLHyperparameter],
+) -> dict[str, RLHyperparameter]:
+    """Copy HPO ranges off the shared class defaults."""
+    return {name: bounds.model_copy() for name, bounds in ranges.items()}
+
+
+def _algorithm_rl_hp(algorithm: AlgoSpec) -> dict[str, RLHyperparameter]:
+    """HPO ranges for the fields the algorithm declares, copied."""
+    return _copy_ranges(
+        {
+            name: bounds
+            for name, bounds in type(algorithm).hpo_ranges.items()
+            if name in type(algorithm).model_fields
+            and _is_numeric(type(algorithm).model_fields[name].annotation)
+        }
+    )
+
+
+def _supervised_rl_hp(
+    algorithm: SupervisedSpec | LatentPPOSpec,
+) -> dict[str, RLHyperparameter]:
+    """HPO ranges for supervised or latent runs, minus inapplicable fields."""
+    ranges = _algorithm_rl_hp(algorithm)
+    if isinstance(algorithm, SupervisedSpec):
+        if algorithm.task_type not in ("object_detection", "multiclass_classification"):
+            ranges.pop("label_smoothing", None)
+        if algorithm.entrypoint == "EvolvableMLP":
+            ranges.pop("dropout", None)
+    return ranges
+
+
+def _default_classic_buffer(algorithm: AlgoSpec) -> ReplayBufferSpec:
+    """The replay buffer an off-policy classic run gets when it names none."""
+    if isinstance(algorithm, RainbowDQNSpec):
+        return ReplayBufferSpec(
+            standard_buffer=False,
+            n_step_buffer=True,
+            per_buffer=True,
+            per_buffer_args=PerBufferArgs(alpha=0.6),
+        )
+    if isinstance(algorithm, MultiAgentAlgorithmSpec):
+        return ReplayBufferSpec(max_size=100_000)
+    return ReplayBufferSpec()
+
+
+def _fill_mutation_defaults(
+    algorithm: AlgoSpec, mutation: MutationSpec, hpo: bool
+) -> None:
+    """Overlay paradigm probabilities and ranges onto the mutation section."""
+    if _is_classic_hpo(algorithm) and not hpo:
+        return
+    template = _mutation_template(algorithm)
+    if template is None:
+        return
+    _fill_probabilities(mutation, template)
+    if "rl_hp_selection" in mutation.model_fields_set:
+        return
+    if _is_classic_hpo(algorithm):
+        mutation.rl_hp_selection = _algorithm_rl_hp(algorithm)
+    elif isinstance(algorithm, (SupervisedSpec, LatentPPOSpec)) and hpo:
+        mutation.rl_hp_selection = _supervised_rl_hp(algorithm)
+
+
+def check_llm_engine_for_gpu(
+    manifest: TrainingManifest, compute_capability: tuple[int, int]
+) -> None:
+    """Reject an FP8 MoE LoRA engine whose backend cannot run on this GPU.
+
+    Only generation algorithms (rollout LLMs) build vLLM engines, and only
+    catalog MoE models can be checked. An unset backend resolves at engine
+    build, so only an explicit one fails here.
+
+    :param manifest: The validated training manifest.
+    :type manifest: TrainingManifest
+    :param compute_capability: CUDA capability of the serving GPU.
+    :type compute_capability: tuple[int, int]
+    :raises ValueError: If an explicit backend cannot serve this run here.
+    """
+    algorithm = manifest.algorithm
+    if not isinstance(algorithm, RolloutLLMSpec):
+        return
+    network = manifest.network
+    model_id = (
+        network.pretrained_model_name_or_path
+        if isinstance(network, FinetuningNetworkSpec)
+        else algorithm.pretrained_model_name_or_path
+    )
+    entry = SUPPORTED_MODEL_INFO.get(model_id) if model_id else None
+    if entry is None or entry.architecture not in (ARCH_MOE, ARCH_HYBRID_MOE):
+        return
+    overrides = algorithm.vllm_engine_args or {}
+    vllm_config = algorithm.vllm_config
+    quantization = overrides.get(
+        "quantization", vllm_config.quantization if vllm_config else None
+    )
+    backend = overrides.get("moe_backend")
+    if backend is None:
+        return
+    resolve_lora_moe_backend(quantization, backend, compute_capability)
+    if (
+        str(backend).lower().replace("-", "_") == "triton"
+        and isinstance(quantization, str)
+        and quantization.lower() in FP8_QUANTIZATION_METHODS
+        and compute_capability < NATIVE_FP8_MIN_COMPUTE_CAPABILITY
+    ):
+        msg = (
+            f"moe_backend='triton' cannot serve FP8 MoE LoRA on this GPU "
+            f"(compute capability {compute_capability[0]}.{compute_capability[1]}): "
+            "Triton needs SM89+ native FP8. Use moe_backend='marlin'."
         )
         raise ValueError(msg)
 
@@ -183,6 +383,8 @@ def normalize_network_section(data: object) -> object:
         return data
     if "pretrained_model_name_or_path" in data:
         return data
+    if LATENT_NETWORK_KEYS & data.keys():
+        return data
     data = normalize_manifest_network(data)
     if isinstance(data, dict) and network_arch_is_resolvable(data):
         return NetworkSpec.model_validate(data)
@@ -236,7 +438,7 @@ AlgorithmSection = Annotated[
     PlainSerializer(_serialize_algorithm, return_type=dict[str, Any]),
 ]
 NetworkSection = Annotated[
-    FinetuningNetworkSpec | NetworkSpec | DeferredNetworkSpec,
+    FinetuningNetworkSpec | NetworkSpec | DeferredNetworkSpec | LatentPPONetworkSpec,
     BeforeValidator(normalize_network_section),
 ]
 SelectionSection = Annotated[
@@ -319,6 +521,47 @@ class TrainingManifest(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
+    def _merge_algorithm_lora_into_network(cls, data: object) -> object:
+        """Fold an algorithm-level ``lora_config`` into the network's.
+
+        LoRA is written in the network section and lifted onto the algorithm,
+        but documents may spell it under the algorithm instead. Shared keys
+        must agree; the merged network copy is the single value the contract
+        validates, and the lift below copies it back.
+        """
+        if not isinstance(data, dict):
+            return data
+        algorithm = data.get("algorithm")
+        network = data.get("network")
+        if not isinstance(algorithm, dict) or not isinstance(network, dict):
+            return data
+        algo_lora = algorithm.get("lora_config")
+        if algo_lora is None:
+            return data
+        if not isinstance(algo_lora, dict):
+            return data
+        net_lora = network.get("lora_config")
+        if net_lora is not None and not isinstance(net_lora, dict):
+            return data
+        net_lora = net_lora or {}
+        for key, value in algo_lora.items():
+            if key in net_lora and net_lora[key] != value:
+                msg = (
+                    f"algorithm.lora_config={algo_lora!r} disagrees with "
+                    f"network.lora_config={net_lora!r}."
+                )
+                raise ValueError(msg)
+        merged = {**net_lora, **algo_lora}
+        return {
+            **data,
+            "network": {**network, "lora_config": merged or None},
+            "algorithm": {
+                key: value for key, value in algorithm.items() if key != "lora_config"
+            },
+        }
+
+    @model_validator(mode="before")
+    @classmethod
     def _fold_network_mutation_ranges(cls, data: object) -> object:
         """Move ``mutation.network`` bounds onto the network they constrain.
 
@@ -335,9 +578,10 @@ class TrainingManifest(BaseModel):
             mutation = mutation.model_dump(exclude_none=True)
         ranges = (mutation or {}).get("network")
         network = data.get("network")
-        # Architecture-mutation bounds apply to encoder/head networks, not a pretrained model.
+        # Architecture-mutation bounds apply to encoder/head networks, not a
+        # pretrained or latent model.
         if isinstance(network, BaseModel) and not isinstance(
-            network, FinetuningNetworkSpec
+            network, (FinetuningNetworkSpec, LatentPPONetworkSpec)
         ):
             network = dump_network_section(network, exclude_unset=True)
         if (
@@ -373,16 +617,33 @@ class TrainingManifest(BaseModel):
     @model_validator(mode="after")
     def _check_network_matches_algorithm(self) -> Self:
         is_llm = isinstance(self.algorithm, LLMAlgorithmSpec)
-        if is_llm and isinstance(self.network, (NetworkSpec, DeferredNetworkSpec)):
+        is_latent = isinstance(self.algorithm, LatentPPOSpec)
+        if is_llm and isinstance(
+            self.network, (NetworkSpec, DeferredNetworkSpec, LatentPPONetworkSpec)
+        ):
             msg = (
                 f"{self.algorithm.name} fine-tunes a pretrained model, so the "
                 "network section must declare 'pretrained_model_name_or_path'."
             )
             raise ValueError(msg)
-        if not is_llm and isinstance(self.network, FinetuningNetworkSpec):
+        if is_latent and isinstance(
+            self.network, (NetworkSpec, DeferredNetworkSpec, FinetuningNetworkSpec)
+        ):
+            msg = (
+                f"{self.algorithm.name} trains a latent segmentation model, so "
+                "the network section must be a latent network (training_mode, "
+                "num_conv_blocks, ...), not an encoder/head network."
+            )
+            raise ValueError(msg)
+        if (
+            not is_llm
+            and not is_latent
+            and isinstance(self.network, (FinetuningNetworkSpec, LatentPPONetworkSpec))
+        ):
             msg = (
                 f"{self.algorithm.name} builds its own networks, so the network "
-                "section must not declare 'pretrained_model_name_or_path'."
+                "section must not declare 'pretrained_model_name_or_path' or "
+                "latent fields."
             )
             raise ValueError(msg)
         return self
@@ -435,16 +696,139 @@ class TrainingManifest(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _default_classic_training(self) -> Self:
+        """Fill the classic RL training loop: HPO on, arch-scaled horizons."""
+        if not _is_classic_hpo(self.algorithm):
+            return self
+        training = self.training
+        fields = training.model_fields_set
+        if "max_steps" not in fields:
+            training.max_steps = (
+                12_000_000 if _network_arch_is_large(self.network) else 2_000_000
+            )
+        if "evo_steps" not in fields and "evo_epochs" not in fields:
+            training.evo_steps = min(
+                320_000 if _network_arch_is_large(self.network) else 160_000,
+                training.max_steps,
+            )
+        if "learning_delay" not in fields and self.algorithm.off_policy:
+            training.learning_delay = 20_000
+        if "hpo" not in fields:
+            training.hpo = True
+        if "pop_size" not in fields:
+            training.pop_size = 4
+        if "experience_sharing" not in fields and self.algorithm.off_policy:
+            training.experience_sharing = True
+        if "sum_scores" not in fields and isinstance(
+            self.algorithm, MultiAgentAlgorithmSpec
+        ):
+            training.sum_scores = True
+        if (
+            self.algorithm.off_policy
+            and "expl_noise" not in type(self.algorithm).model_fields
+            and not isinstance(self.algorithm, RainbowDQNSpec)
+        ):
+            if "eps_start" not in fields:
+                training.eps_start = 1.0
+            if "eps_end" not in fields:
+                training.eps_end = 0.01
+            if "eps_decay" not in fields:
+                training.eps_decay = 0.99999
+        return self
+
+    @model_validator(mode="after")
+    def _default_llm_training(self) -> Self:
+        """Fill the LLM training loop from the environment regime."""
+        if not isinstance(self.algorithm, LLMAlgorithmSpec):
+            return self
+        training = self.training
+        fields = training.model_fields_set
+        if "reporting_interval" not in fields:
+            training.reporting_interval = 1
+        if "evaluation_interval" not in fields:
+            training.evaluation_interval = 10
+        if "checkpoint_export" not in fields:
+            training.checkpoint_export = CheckpointExportSpec()
+        environment = self.environment
+        if isinstance(environment, LLMEnvSpec):
+            if environment.env_type == "rollout":
+                if "max_steps" not in fields and isinstance(
+                    self.algorithm, RolloutLLMSpec
+                ):
+                    training.max_steps = 200
+                if (
+                    "num_epochs" not in fields
+                    and isinstance(self.algorithm, GRPOSpec)
+                    and environment.dataset_backed_rollout
+                ):
+                    training.num_epochs = 1
+            elif "num_epochs" not in fields:
+                training.num_epochs = 1
+        if training.async_rollout and "rollout_version_stamp" not in fields:
+            training.rollout_version_stamp = "oldest_turn"
+        return self
+
+    @model_validator(mode="after")
     def _empty_mutation_is_a_noop(self) -> Self:
-        """An empty ``mutation: {}`` is the same no-op as omitting the section."""
+        """An empty ``mutation: {}`` is the same no-op as omitting the section.
+
+        Except when HPO runs, where it keeps the field defaults for the
+        paradigm fill below.
+        """
         if self.mutation is not None and not self.mutation.model_fields_set:
+            if self.training.hpo and _mutation_template(self.algorithm) is not None:
+                return self
             self.mutation = MutationSpec(probabilities=no_op_mutation_probabilities())
+        return self
+
+    @model_validator(mode="after")
+    def _default_hpo_sections(self) -> Self:
+        """Fill the mutation section and classic replay buffer HPO runs use."""
+        algorithm = self.algorithm
+        classic_hpo = _is_classic_hpo(algorithm) and self.training.hpo
+        if classic_hpo and self.mutation is None:
+            self.mutation = MutationSpec()
+        mutation = self.mutation
+        if mutation is not None:
+            _fill_mutation_defaults(algorithm, mutation, self.training.hpo)
+        if (
+            _is_classic_hpo(algorithm)
+            and algorithm.off_policy
+            and self.replay_buffer is None
+        ):
+            self.replay_buffer = _default_classic_buffer(algorithm)
+        return self
+
+    @model_validator(mode="after")
+    def _default_supervised_latent_training(self) -> Self:
+        """Fill the epoch-driven training loop supervised and latent runs use."""
+        fields_set = self.training.model_fields_set
+        if isinstance(self.algorithm, SupervisedSpec):
+            detection = self.algorithm.task_type == "object_detection"
+            if "num_epochs" not in fields_set:
+                self.training.num_epochs = 8 if detection else 100
+            if "evo_steps" not in fields_set and "evo_epochs" not in fields_set:
+                self.training.evo_steps = 16 if detection else 128
+            if "reporting_interval" not in fields_set:
+                self.training.reporting_interval = 10
+        elif isinstance(self.algorithm, LatentPPOSpec):
+            if "max_steps" not in fields_set:
+                self.training.max_steps = 2_000
+            if "evo_steps" not in fields_set and "evo_epochs" not in fields_set:
+                self.training.evo_steps = 8
+            if "reporting_interval" not in fields_set:
+                self.training.reporting_interval = 10
         return self
 
     @model_validator(mode="after")
     def _resolve_cross_section_defaults(self) -> Self:
         """Fill in the values one section implies for another."""
-        if self.training.evo_steps is None and self.training.evo_epochs is None:
+        if (
+            self.training.evo_steps is None
+            and self.training.evo_epochs is None
+            and not isinstance(self.algorithm, (SupervisedSpec, LatentPPOSpec))
+            and not _is_classic_hpo(self.algorithm)
+        ):
             # An epoch-driven run states the interval as evo_epochs; the trainer
             # turns it into steps once it knows the dataset size, so defaulting
             # evo_steps here would put a second, contradictory answer in the payload.
@@ -475,12 +859,40 @@ class TrainingManifest(BaseModel):
                 self.network.max_context_length,
                 source_set=True,
             )
+            if self.algorithm.lora_config is None:
+                # Explicit null is the same as omitted: LoRA on with defaults.
+                self.algorithm.model_fields_set.discard("lora_config")
             _copy_when_unset(
                 self.algorithm,
                 "lora_config",
                 self.network.lora_config,
-                source_set="lora_config" in self.network.model_fields_set,
+                source_set=self.network.lora_config is not None,
             )
+
+        if isinstance(self.algorithm, LLMAlgorithmSpec):
+            algorithm = self.algorithm
+            if not isinstance(self.network, FinetuningNetworkSpec):
+                if algorithm.lora_config is None:
+                    # The network copy above fills the usual case; this covers
+                    # a manifest with no network section.
+                    algorithm.lora_config = resolve_lora_defaults(
+                        LoraConfigDict(), algorithm.pretrained_model_name_or_path
+                    )
+                else:
+                    resolve_lora_defaults(
+                        algorithm.lora_config,
+                        algorithm.pretrained_model_name_or_path,
+                    )
+                check_lora_config_supported(
+                    algorithm.lora_config, algorithm.pretrained_model_name_or_path
+                )
+            if (
+                algorithm.lora_target_scope is None
+                and "lora_target_scope" not in algorithm.model_fields_set
+            ):
+                algorithm.lora_target_scope = default_lora_target_scope(
+                    algorithm.pretrained_model_name_or_path or ""
+                )
 
         if (
             isinstance(self.algorithm, RolloutLLMSpec)
@@ -510,6 +922,12 @@ class TrainingManifest(BaseModel):
             and self.algorithm.vllm_config is None
         ):
             self.algorithm.vllm_config = default_colocated_vllm_config()
+        return self
+
+    @model_validator(mode="after")
+    def _evo_steps_fit_the_horizon(self) -> Self:
+        """Reject an evolution interval longer than the filled run length."""
+        self.training.check_evo_steps_fit_horizon()
         return self
 
     @model_validator(mode="after")

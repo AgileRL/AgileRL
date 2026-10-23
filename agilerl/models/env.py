@@ -22,7 +22,9 @@ from agilerl.arena.models.env import (
     GymEnvSpec,
     LLMEnvSpec,
     LLMEnvType,
+    NonTabularEnvSpec,
     OfflineEnvSpec,
+    TabularEnvSpec,
 )
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.data.parquet import (
@@ -57,7 +59,9 @@ __all__ = [
     "GymEnvSpec",
     "LLMEnvSpec",
     "LLMEnvType",
+    "NonTabularEnvSpec",
     "OfflineEnvSpec",
+    "TabularEnvSpec",
     "construct_custom_env_fn",
     "construct_custom_pz_env_fn",
     "make_bandit_env",

@@ -19,10 +19,13 @@ from agilerl.arena.models.algorithms import (
     LLMAlgorithmSpec,
     MultiAgentAlgorithmSpec,
     RolloutLLMSpec,
+    SingleAgentAlgorithmSpec,
 )
+from agilerl.arena.models.algorithms.latent_ppo import LatentPPOSpec
 from agilerl.arena.models.algorithms.ppo import PPOSpec, RecurrentPPOSpec
 from agilerl.arena.models.algorithms.rainbow_dqn import RainbowDQNSpec
 from agilerl.arena.models.algorithms.sft import SFTSpec
+from agilerl.arena.models.algorithms.supervised import SupervisedSpec
 from agilerl.arena.models.env import ENV_POD_DEFAULT_CPUS, LLMEnvType
 from agilerl.arena.models.manifest import API_VERSION, TrainingManifest, _is_numeric
 from agilerl.arena.models.registry import MANIFEST_REGISTRY
@@ -68,6 +71,10 @@ def algorithm_name_if(algorithm_names: tuple[str, ...]) -> dict[str, Any]:
 
 def training_then(defaults: dict[str, Any]) -> dict[str, Any]:
     return {"properties": {"training": {"properties": defaults}}}
+
+
+def algorithm_then(defaults: dict[str, Any]) -> dict[str, Any]:
+    return {"properties": {"algorithm": {"properties": defaults}}}
 
 
 def training_spec_ref(def_name: str) -> dict[str, Any]:
@@ -231,10 +238,20 @@ def training_schema_conditionals() -> list[dict[str, Any]]:
     def off_policy(spec: type[AlgoSpec]) -> bool:
         return spec.off_policy
 
-    def classic(spec: type[AlgoSpec]) -> bool:
-        return not issubclass(spec, LLMAlgorithmSpec)
+    def classic_hpo(spec: type[AlgoSpec]) -> bool:
+        return (
+            issubclass(spec, (SingleAgentAlgorithmSpec, MultiAgentAlgorithmSpec))
+            and not spec.bandit
+            and not spec.offline
+        )
 
-    classic_names = registered_algorithm_names(classic)
+    def supervised(spec: type[AlgoSpec]) -> bool:
+        return spec is SupervisedSpec
+
+    def latent_ppo(spec: type[AlgoSpec]) -> bool:
+        return spec is LatentPPOSpec
+
+    classic_hpo_names = registered_algorithm_names(classic_hpo)
     cnn_or_multiinput = ("cnn", "multiinput")
 
     return [
@@ -253,17 +270,89 @@ def training_schema_conditionals() -> list[dict[str, Any]]:
             "then": training_then({"reporting_interval": {"default": 1}}),
         },
         {
-            "if": algorithm_name_if(classic_names),
+            "if": algorithm_name_if(classic_hpo_names),
             "then": training_then({"evo_steps": {"default": 160000}}),
         },
         {
             "if": {
                 "allOf": [
-                    algorithm_name_if(classic_names),
+                    algorithm_name_if(classic_hpo_names),
                     network_encoder_arch_if(cnn_or_multiinput),
                 ]
             },
             "then": training_then({"evo_steps": {"default": 320000}}),
+        },
+        {
+            "if": algorithm_name_if(classic_hpo_names),
+            "then": training_then(
+                {
+                    "max_steps": {"default": 2000000},
+                    "hpo": {"default": True},
+                    "pop_size": {"default": 4},
+                }
+            ),
+        },
+        {
+            "if": {
+                "allOf": [
+                    algorithm_name_if(classic_hpo_names),
+                    network_encoder_arch_if(cnn_or_multiinput),
+                ]
+            },
+            "then": training_then({"max_steps": {"default": 12000000}}),
+        },
+        {
+            "if": algorithm_name_if(registered_algorithm_names(off_policy)),
+            "then": training_then({"learning_delay": {"default": 20000}}),
+        },
+        {
+            "if": algorithm_name_if(registered_algorithm_names(supervised)),
+            "then": training_then(
+                {
+                    "num_epochs": {"default": 100},
+                    "evo_steps": {"default": 128},
+                    "reporting_interval": {"default": 10},
+                }
+            ),
+        },
+        {
+            "if": {
+                "allOf": [
+                    algorithm_name_if(registered_algorithm_names(supervised)),
+                    {
+                        "properties": {
+                            "algorithm": {
+                                "properties": {
+                                    "task_type": {"const": "object_detection"}
+                                },
+                                "required": ["task_type"],
+                            }
+                        },
+                        "required": ["algorithm"],
+                    },
+                ]
+            },
+            "then": {
+                "properties": {
+                    **training_then(
+                        {
+                            "num_epochs": {"default": 8},
+                            "evo_steps": {"default": 16},
+                        }
+                    )["properties"],
+                    **algorithm_then({"batch_size": {"default": 32}})["properties"],
+                }
+            },
+        },
+        {
+            "if": algorithm_name_if(registered_algorithm_names(latent_ppo)),
+            "then": training_then(
+                {
+                    "max_steps": {"default": 2000},
+                    "evo_steps": {"default": 8},
+                    "reporting_interval": {"default": 10},
+                }
+            ),
         },
         {
             "if": algorithm_name_if(registered_algorithm_names(_llm_algorithm)),
@@ -687,7 +776,7 @@ def _publish_lora_config_schema(schema: dict[str, Any]) -> None:
     """Put LoRA rank / alpha / dropout on the served object the wizard reads."""
     lora_def = schema["$defs"]["LoraConfigDict"]
     lora_r = lora_def["properties"]["lora_r"]
-    lora_r["default"] = 1
+    lora_r["default"] = 16
     lora_r["title"] = "Rank"
     _inline_lora_config_inplace(schema, lora_def)
 

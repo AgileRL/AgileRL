@@ -9,7 +9,12 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from agilerl.models.env import BanditEnvSpec, GymEnvSpec
+from agilerl.models.env import (
+    BanditEnvSpec,
+    GymEnvSpec,
+    NonTabularEnvSpec,
+    TabularEnvSpec,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -20,7 +25,9 @@ if TYPE_CHECKING:
     from agilerl.models.env import LLMEnvSpec
     from agilerl.models.training import TrainingSpec
 
-    EnvSpecType = GymEnvSpec | BanditEnvSpec | LLMEnvSpec
+    EnvSpecType = (
+        GymEnvSpec | BanditEnvSpec | LLMEnvSpec | TabularEnvSpec | NonTabularEnvSpec
+    )
     # Loops return their concrete population list plus one fitness entry per
     # agent (a per-agent dict from the multi-agent loops); Sequence keeps the
     # alias covariant with those concrete types.

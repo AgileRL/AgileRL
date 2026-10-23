@@ -290,15 +290,17 @@ class TestFinetuningNetworkSpec:
         dumped = spec.model_dump(mode="json")
         assert dumped["lora_config"]["target_parameters"] == experts
 
-    def test_serialize_lora_none(self):
-        """_serialize_lora_config with None value."""
+    def test_explicit_none_lora_config_resolves_defaults(self):
+        """An explicit null lora_config is LoRA on with defaults."""
         spec = FinetuningNetworkSpec(
             pretrained_model_name_or_path="gpt2",
             max_context_length=512,
             lora_config=None,
         )
         dumped = spec.model_dump(mode="json")
-        assert dumped["lora_config"] is None
+        assert dumped["lora_config"] is not None
+        assert dumped["lora_config"]["lora_r"] == 16
+        assert dumped["lora_config"]["target_modules"] == "all-linear"
 
     def test_lora_config_dict_serialize_set_target_modules(self):
         """Line 363, 368, 372 of networks.py: _serialize_target_modules with set."""

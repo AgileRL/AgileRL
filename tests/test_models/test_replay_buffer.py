@@ -99,7 +99,7 @@ class TestReplayBufferSpecValidation:
 
     def test_defaults(self):
         spec = ReplayBufferSpec()
-        assert spec.max_size == 100_000
+        assert spec.max_size == 450_000
         assert spec.standard_buffer is True
         assert spec.n_step_buffer is False
         assert isinstance(spec.n_step_buffer_args, NStepBufferArgs)
@@ -172,7 +172,7 @@ class TestInitBufferStandard:
         spec = ReplayBufferSpec()
         buf = init_buffer(spec, DQNSpec())
         assert isinstance(buf, ReplayBuffer)
-        assert buf.max_size == 100_000
+        assert buf.max_size == 450_000
 
     def test_standard_buffer_custom_size(self):
         spec = ReplayBufferSpec(max_size=2048)

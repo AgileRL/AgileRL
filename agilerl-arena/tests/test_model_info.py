@@ -20,6 +20,9 @@ from agilerl.arena.models.model_info import (
     STATUS_LIVE,
     SUPPORTED_MODEL_INFO,
     ModelInfo,
+    default_lora_rank,
+    default_lora_target_scope,
+    default_target_modules,
     supported_path,
 )
 from agilerl.arena.models.networks import FinetuningNetworkSpec
@@ -59,6 +62,32 @@ def no_dims_entry(monkeypatch: pytest.MonkeyPatch) -> ModelInfo:
     }
     monkeypatch.setattr(model_info, "_bundled", lambda hub_id: bundled)
     return ModelInfo(hub_id="org/no-dims", architecture=ARCH_HYBRID_MOE)
+
+
+@pytest.fixture
+def tiny_dims_entry(monkeypatch: pytest.MonkeyPatch) -> ModelInfo:
+    """Entry whose smallest LoRA dim serves rank 8 at most."""
+    bundled = {
+        "config": {"model_type": "qwen3"},
+        "inspected": {
+            "num_params": 1000,
+            "lora_info": {
+                "q_proj": [
+                    {
+                        "kind": "module",
+                        "type": "Linear",
+                        "in_features": 2048,
+                        "out_features": 8,
+                        "count": 2,
+                    }
+                ],
+            },
+        },
+    }
+    monkeypatch.setattr(model_info, "_bundled", lambda hub_id: bundled)
+    entry = ModelInfo(hub_id="org/tiny-dims")
+    monkeypatch.setitem(SUPPORTED_MODEL_INFO, entry.hub_id, entry)
+    return entry
 
 
 class TestSupportedModelInfo:
@@ -450,13 +479,12 @@ class TestFinetuningNetworkSpecLoraTargets:
         with pytest.raises(ValidationError, match="all-linear"):
             finetuning_network("Qwen/Qwen3-4B", ["all-linear"])
 
-    def test_all_linear_string_passes(self) -> None:
-        spec = finetuning_network("Qwen/Qwen3-4B", "all-linear")
-
-        assert spec.lora_config is not None
+    def test_all_linear_string_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="not accepted"):
+            finetuning_network("Qwen/Qwen3-4B", "all-linear")
 
     def test_regex_string_raises(self) -> None:
-        with pytest.raises(ValidationError, match="must be 'all-linear' or a list"):
+        with pytest.raises(ValidationError, match="not accepted"):
             finetuning_network("Qwen/Qwen3-4B", r".*\.language_model.*\.(q_proj)$")
 
     def test_dotted_target_raises(self) -> None:
@@ -505,3 +533,351 @@ class TestFinetuningNetworkSpecExpertDefault:
 
         assert spec.lora_config is not None
         assert spec.lora_config.target_parameters is None
+
+
+class TestDefaultTargetModules:
+    @pytest.mark.parametrize(
+        ("hub_id", "expected"),
+        [
+            (
+                "Qwen/Qwen2.5-0.5B-Instruct",
+                [
+                    "down_proj",
+                    "gate_proj",
+                    "k_proj",
+                    "o_proj",
+                    "q_proj",
+                    "up_proj",
+                    "v_proj",
+                ],
+            ),
+            (
+                "Qwen/Qwen3-1.7B",
+                [
+                    "down_proj",
+                    "gate_proj",
+                    "k_proj",
+                    "o_proj",
+                    "q_proj",
+                    "up_proj",
+                    "v_proj",
+                ],
+            ),
+            (
+                "Qwen/Qwen3-4B",
+                [
+                    "down_proj",
+                    "gate_proj",
+                    "k_proj",
+                    "o_proj",
+                    "q_proj",
+                    "up_proj",
+                    "v_proj",
+                ],
+            ),
+            (
+                "Qwen/Qwen3.6-35B-A3B",
+                [
+                    "down_proj",
+                    "gate_proj",
+                    "in_proj_a",
+                    "in_proj_b",
+                    "in_proj_qkv",
+                    "in_proj_z",
+                    "k_proj",
+                    "o_proj",
+                    "out_proj",
+                    "q_proj",
+                    "up_proj",
+                    "v_proj",
+                ],
+            ),
+            (
+                "Qwen/Qwen3.8-27B",
+                [
+                    "down_proj",
+                    "gate_proj",
+                    "in_proj_a",
+                    "in_proj_b",
+                    "in_proj_qkv",
+                    "in_proj_z",
+                    "k_proj",
+                    "o_proj",
+                    "out_proj",
+                    "q_proj",
+                    "up_proj",
+                    "v_proj",
+                ],
+            ),
+            (
+                "ibm-granite/granite-4.0-micro",
+                [
+                    "input_linear",
+                    "k_proj",
+                    "o_proj",
+                    "output_linear",
+                    "q_proj",
+                    "v_proj",
+                ],
+            ),
+            (
+                "ibm-granite/granite-4.0-micro-base",
+                [
+                    "input_linear",
+                    "k_proj",
+                    "o_proj",
+                    "output_linear",
+                    "q_proj",
+                    "v_proj",
+                ],
+            ),
+            (
+                "ibm-granite/granite-4.0-h-tiny",
+                [
+                    "in_proj",
+                    "input_linear",
+                    "k_proj",
+                    "o_proj",
+                    "out_proj",
+                    "output_linear",
+                    "q_proj",
+                    "v_proj",
+                ],
+            ),
+            (
+                "ibm-granite/granite-3.1-3b-a800m-instruct",
+                ["k_proj", "o_proj", "q_proj", "v_proj"],
+            ),
+            (
+                "google/gemma-4-E4B-it",
+                [
+                    "down_proj",
+                    "gate_proj",
+                    "k_proj",
+                    "o_proj",
+                    "per_layer_input_gate",
+                    "per_layer_model_projection",
+                    "per_layer_projection",
+                    "q_proj",
+                    "up_proj",
+                    "v_proj",
+                ],
+            ),
+            (
+                "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16",
+                [
+                    "down_proj",
+                    "in_proj",
+                    "k_proj",
+                    "o_proj",
+                    "out_proj",
+                    "q_proj",
+                    "up_proj",
+                    "v_proj",
+                ],
+            ),
+            (
+                "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
+                [
+                    "down_proj",
+                    "in_proj",
+                    "k_proj",
+                    "o_proj",
+                    "out_proj",
+                    "q_proj",
+                    "up_proj",
+                    "v_proj",
+                ],
+            ),
+            (
+                "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
+                [
+                    "down_proj",
+                    "in_proj",
+                    "k_proj",
+                    "o_proj",
+                    "out_proj",
+                    "q_proj",
+                    "up_proj",
+                    "v_proj",
+                ],
+            ),
+            (
+                "openai/gpt-oss-20b",
+                ["k_proj", "o_proj", "q_proj", "v_proj"],
+            ),
+        ],
+    )
+    def test_per_model_defaults(self, hub_id: str, expected: list[str]) -> None:
+        assert default_target_modules(hub_id) == expected
+
+    def test_untracked_model_returns_none(self) -> None:
+        assert default_target_modules("org/custom") is None
+
+
+class TestDefaultLoraTargetScope:
+    @pytest.mark.parametrize(
+        "hub_id",
+        [
+            "Qwen/Qwen3.6-35B-A3B",
+            "Qwen/Qwen3.8-27B",
+            "google/gemma-4-E4B-it",
+            "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
+        ],
+    )
+    def test_multimodal_models_scope_to_language_model(self, hub_id: str) -> None:
+        assert default_lora_target_scope(hub_id) == "language_model"
+
+    @pytest.mark.parametrize(
+        "hub_id",
+        [
+            "Qwen/Qwen2.5-0.5B-Instruct",
+            "Qwen/Qwen3-1.7B",
+            "Qwen/Qwen3-4B",
+            "ibm-granite/granite-4.0-micro",
+            "ibm-granite/granite-4.0-micro-base",
+            "ibm-granite/granite-4.0-h-tiny",
+            "ibm-granite/granite-3.1-3b-a800m-instruct",
+            "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16",
+            "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
+            "openai/gpt-oss-20b",
+            "org/custom",
+        ],
+    )
+    def test_text_and_untracked_models_have_no_scope(self, hub_id: str) -> None:
+        assert default_lora_target_scope(hub_id) is None
+
+
+class TestDefaultLoraRank:
+    @pytest.mark.parametrize("hub_id", list(SUPPORTED_MODEL_INFO))
+    def test_catalog_models_default_to_rank_16(self, hub_id: str) -> None:
+        assert default_lora_rank(hub_id) == 16
+
+    def test_untracked_model_defaults_to_rank_16(self) -> None:
+        assert default_lora_rank("org/custom") == 16
+
+    def test_entry_without_dims_defaults_to_rank_16(
+        self, monkeypatch: pytest.MonkeyPatch, no_dims_entry: ModelInfo
+    ) -> None:
+        monkeypatch.setitem(SUPPORTED_MODEL_INFO, no_dims_entry.hub_id, no_dims_entry)
+
+        assert default_lora_rank(no_dims_entry.hub_id) == 16
+
+    def test_model_below_rank_16_defaults_to_its_cap(
+        self, tiny_dims_entry: ModelInfo
+    ) -> None:
+        assert tiny_dims_entry.lora_ranks == (1, 8)
+        assert default_lora_rank(tiny_dims_entry.hub_id) == 8
+
+
+class TestFinetuningNetworkSpecLoraDefaults:
+    def test_missing_lora_config_is_lora_on_with_defaults(self) -> None:
+        spec = FinetuningNetworkSpec.model_validate(
+            {
+                "pretrained_model_name_or_path": "Qwen/Qwen3-4B",
+                "max_context_length": 512,
+            }
+        )
+
+        assert spec.lora_config is not None
+        assert spec.lora_config.lora_r == 16
+        assert spec.lora_config.lora_alpha == 32
+        assert spec.lora_config.lora_dropout == 0.05
+        assert spec.lora_config.target_modules == [
+            "down_proj",
+            "gate_proj",
+            "k_proj",
+            "o_proj",
+            "q_proj",
+            "up_proj",
+            "v_proj",
+        ]
+        assert spec.lora_config.target_parameters is None
+
+    def test_explicit_null_lora_config_means_lora_defaults(self) -> None:
+        spec = FinetuningNetworkSpec.model_validate(
+            {
+                "pretrained_model_name_or_path": "Qwen/Qwen3-4B",
+                "max_context_length": 512,
+                "lora_config": None,
+            }
+        )
+
+        assert spec.lora_config is not None
+        assert spec.lora_config.lora_r == 16
+        assert spec.lora_config.target_modules == [
+            "down_proj",
+            "gate_proj",
+            "k_proj",
+            "o_proj",
+            "q_proj",
+            "up_proj",
+            "v_proj",
+        ]
+
+    def test_omitted_target_modules_resolve_to_catalog_list(self) -> None:
+        spec = FinetuningNetworkSpec.model_validate(
+            {
+                "pretrained_model_name_or_path": "Qwen/Qwen3-4B",
+                "max_context_length": 512,
+                "lora_config": {"lora_r": 8},
+            }
+        )
+
+        assert spec.lora_config is not None
+        assert spec.lora_config.lora_r == 8
+        assert spec.lora_config.target_modules == [
+            "down_proj",
+            "gate_proj",
+            "k_proj",
+            "o_proj",
+            "q_proj",
+            "up_proj",
+            "v_proj",
+        ]
+
+    def test_untracked_model_without_targets_raises(self) -> None:
+        with pytest.raises(ValidationError, match="target_modules is required"):
+            FinetuningNetworkSpec.model_validate(
+                {
+                    "pretrained_model_name_or_path": "org/custom",
+                    "max_context_length": 1024,
+                    "lora_config": {"lora_r": 8},
+                }
+            )
+
+    def test_untracked_model_with_explicit_targets_passes(self) -> None:
+        spec = FinetuningNetworkSpec.model_validate(
+            {
+                "pretrained_model_name_or_path": "org/custom",
+                "max_context_length": 1024,
+                "lora_config": {"target_modules": ["q_proj", "v_proj"]},
+            }
+        )
+
+        assert spec.lora_config is not None
+        assert spec.lora_config.target_modules == ["q_proj", "v_proj"]
+
+    def test_missing_context_length_takes_catalog_max(self) -> None:
+        spec = FinetuningNetworkSpec.model_validate(
+            {"pretrained_model_name_or_path": "Qwen/Qwen3-4B"}
+        )
+
+        assert spec.max_context_length == 40960
+
+    def test_missing_context_length_on_untracked_model_raises(self) -> None:
+        with pytest.raises(ValidationError, match="max_context_length is required"):
+            FinetuningNetworkSpec.model_validate(
+                {"pretrained_model_name_or_path": "org/custom"}
+            )
+
+    def test_explicit_expert_parameters_force_dropout_zero(self) -> None:
+        spec = finetuning_network(
+            "openai/gpt-oss-20b",
+            ("q_proj",),
+            ("mlp.experts.gate_up_proj",),
+        )
+
+        assert spec.lora_config is not None
+        assert spec.lora_config.target_parameters == ["mlp.experts.gate_up_proj"]
+        assert spec.lora_config.lora_dropout == 0.0

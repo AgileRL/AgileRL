@@ -48,6 +48,7 @@ from agilerl.arena.models.schema import (
     strip_non_form_algorithm_fields,
     training_then,
 )
+from agilerl.arena.models.verdict import verdict
 
 DQN = {
     "algorithm": {"name": "DQN", "lr": 0.001},
@@ -225,6 +226,50 @@ class TestResolution:
         )
         assert validated.training.evo_steps == 250
 
+    def test_classic_evo_steps_is_checked_against_the_filled_horizon(self) -> None:
+        validated = TrainingManifest.model_validate(
+            {
+                "algorithm": {"name": "DQN"},
+                "environment": {"name": "CartPole-v1"},
+                "training": {"evo_steps": 1_500_000},
+            }
+        )
+
+        assert validated.training.max_steps == 2_000_000
+        assert validated.training.evo_steps == 1_500_000
+
+        with pytest.raises(ValidationError, match="evo_steps"):
+            TrainingManifest.model_validate(
+                {
+                    "algorithm": {"name": "DQN"},
+                    "environment": {"name": "CartPole-v1"},
+                    "training": {"evo_steps": 2_000_001},
+                }
+            )
+
+    def test_rollout_evo_steps_is_checked_against_the_filled_horizon(self) -> None:
+        with pytest.raises(ValidationError, match="evo_steps"):
+            TrainingManifest.model_validate(
+                {
+                    "algorithm": {"name": "GRPO"},
+                    "environment": {"env_type": "rollout", "entrypoint": "pkg:Env"},
+                    "network": {
+                        "pretrained_model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
+                    },
+                    "training": {"evo_steps": 500},
+                }
+            )
+
+    def test_latent_evo_steps_is_checked_against_the_filled_horizon(self) -> None:
+        with pytest.raises(ValidationError, match="evo_steps"):
+            TrainingManifest.model_validate(
+                {
+                    "algorithm": {"name": "LatentPPO"},
+                    "environment": {"env_type": "non_tabular", "dataset": "seg"},
+                    "training": {"evo_steps": 5000},
+                }
+            )
+
     def test_env_width_reaches_the_algorithm(self) -> None:
         ddpg = copy.deepcopy(DQN)
         ddpg["algorithm"] = {"name": "DDPG", "lr_actor": 0.001}
@@ -306,7 +351,11 @@ class TestResolution:
 
     def test_empty_mutation_is_a_noop(self) -> None:
         payload = TrainingManifest.model_validate(
-            manifest(DQN, mutation={})
+            {
+                "algorithm": {"name": "CQN"},
+                "environment": {"env_type": "offline", "name": "CartPole-v1"},
+                "mutation": {},
+            }
         ).to_payload()
         assert payload["mutation"]["probabilities"]["arch_mut"] == 0.0
         assert payload["mutation"]["probabilities"]["no_mut"] == 1.0
@@ -326,7 +375,12 @@ class TestResolution:
         assert spec.mutation.dormant_threshold == 0.05
 
     def test_omitted_mutation_is_a_noop(self) -> None:
-        payload = TrainingManifest.model_validate(DQN).to_payload()
+        payload = TrainingManifest.model_validate(
+            {
+                "algorithm": {"name": "CQN"},
+                "environment": {"env_type": "offline", "name": "CartPole-v1"},
+            }
+        ).to_payload()
         assert payload["mutation"]["probabilities"]["arch_mut"] == 0.0
 
     def test_dqn_eval_steps_below_the_llm_interval_is_valid(self) -> None:
@@ -958,7 +1012,12 @@ class TestSchema:
     def test_the_payload_fills_the_sections_the_runtime_indexes_into(self) -> None:
         # Omitted mutation and tournament_selection dump with the keys later
         # readers index (rl_hp_selection, tournament_size, elitism).
-        payload = TrainingManifest.model_validate(DQN).to_payload()
+        payload = TrainingManifest.model_validate(
+            {
+                "algorithm": {"name": "CQN"},
+                "environment": {"env_type": "offline", "name": "CartPole-v1"},
+            }
+        ).to_payload()
         assert payload["mutation"]["rl_hp_selection"] == {}
         assert payload["mutation"]["probabilities"] == {
             "no_mut": 1.0,
@@ -974,7 +1033,11 @@ class TestSchema:
     def test_an_omitted_mutation_section_does_not_architecture_mutate(self) -> None:
         # An omitted mutation section dumps as a no-op so LoRA policies are
         # not architecture-mutated after arena submit.
-        for source in (DQN, GRPO):
+        cqn = {
+            "algorithm": {"name": "CQN"},
+            "environment": {"env_type": "offline", "name": "CartPole-v1"},
+        }
+        for source in (cqn, GRPO):
             payload = TrainingManifest.model_validate(source).to_payload()
             probs = payload["mutation"]["probabilities"]
             assert probs["no_mut"] == 1.0
@@ -1248,7 +1311,9 @@ class TestSchema:
             "replay_buffer",
         } <= set(properties)
 
-    def _applied_training_defaults(self, instance: dict) -> dict[str, object]:
+    def _applied_section_defaults(
+        self, instance: dict, section: str
+    ) -> dict[str, object]:
         applied: dict[str, object] = {}
         for cond in manifest_schema().get("allOf") or []:
             if_schema = cond.get("if")
@@ -1257,13 +1322,19 @@ class TestSchema:
                 continue
             if not Draft202012Validator(if_schema).is_valid(instance):
                 continue
-            training_props = (
-                then.get("properties", {}).get("training", {}).get("properties", {})
+            section_props = (
+                then.get("properties", {}).get(section, {}).get("properties", {})
             )
-            for name, field in training_props.items():
+            for name, field in section_props.items():
                 if "default" in field:
                     applied[name] = field["default"]
         return applied
+
+    def _applied_training_defaults(self, instance: dict) -> dict[str, object]:
+        return self._applied_section_defaults(instance, "training")
+
+    def _applied_algorithm_defaults(self, instance: dict) -> dict[str, object]:
+        return self._applied_section_defaults(instance, "algorithm")
 
     def test_training_conditionals_hang_off_the_root_schema(self) -> None:
         schema = manifest_schema()
@@ -1302,7 +1373,7 @@ class TestSchema:
 
     def test_ppo_does_not_pick_up_llmppo_or_off_policy_defaults(self) -> None:
         ppo = self._applied_training_defaults({"algorithm": {"name": "PPO"}})
-        assert "max_steps" not in ppo
+        assert ppo["max_steps"] == 2000000
         assert "experience_sharing" not in ppo
         assert "eps_start" not in ppo
 
@@ -1313,7 +1384,9 @@ class TestSchema:
         dqn = self._applied_training_defaults({"algorithm": {"name": "DQN"}})
         assert dqn["eps_start"] == 1.0
         assert dqn["experience_sharing"] is True
-        assert "max_steps" not in dqn
+        assert dqn["max_steps"] == 2000000
+        assert dqn["hpo"] is True
+        assert dqn["pop_size"] == 4
 
         training_only = self._applied_training_defaults({"max_steps": 1_000_000})
         assert training_only == {}
@@ -1364,9 +1437,35 @@ class TestSchema:
         grpo = self._applied_training_defaults({"algorithm": {"name": "GRPO"}})
         assert grpo["evo_steps"] == 20
         assert grpo["reporting_interval"] == 1
+        assert "hpo" not in grpo
+        assert "pop_size" not in grpo
 
         ppo = self._applied_training_defaults({"algorithm": {"name": "PPO"}})
         assert ppo["evo_steps"] == 160000
+        assert ppo["hpo"] is True
+        assert ppo["pop_size"] == 4
+
+    def test_object_detection_training_schema_defaults(self) -> None:
+        supervised = self._applied_training_defaults(
+            {"algorithm": {"name": "Supervised"}}
+        )
+        assert supervised["num_epochs"] == 100
+        assert supervised["evo_steps"] == 128
+        assert "batch_size" not in self._applied_algorithm_defaults(
+            {"algorithm": {"name": "Supervised"}}
+        )
+
+        detection_doc = {
+            "algorithm": {
+                "name": "Supervised",
+                "task_type": "object_detection",
+            }
+        }
+        detection = self._applied_training_defaults(detection_doc)
+        assert detection["num_epochs"] == 8
+        assert detection["evo_steps"] == 16
+        assert detection["reporting_interval"] == 10
+        assert self._applied_algorithm_defaults(detection_doc)["batch_size"] == 32
 
     def test_classic_cnn_and_multiinput_get_longer_evo_steps(self) -> None:
         mlp = self._applied_training_defaults(
@@ -1697,7 +1796,7 @@ class TestSchema:
         ]
         assert "$ref" not in network_lora
         properties = network_lora["properties"]
-        assert properties["lora_r"]["default"] == 1
+        assert properties["lora_r"]["default"] == 16
         assert properties["lora_r"]["title"] == "Rank"
         assert properties["lora_alpha"]["default"] == 32
         assert properties["lora_dropout"]["default"] == 0.05
@@ -1708,7 +1807,7 @@ class TestSchema:
             if v["title"] == "GRPO"
         )
         algo_lora = grpo["properties"]["lora_config"]
-        assert algo_lora["properties"]["lora_r"]["default"] == 1
+        assert algo_lora["properties"]["lora_r"]["default"] == 16
         assert "lora_alpha" in algo_lora["properties"]
         assert "lora_dropout" in algo_lora["properties"]
 
@@ -2007,3 +2106,422 @@ class TestExpertLoraReferenceAdapter:
         validated = TrainingManifest.model_validate(moe)
 
         assert validated.algorithm.use_separate_reference_adapter is True
+
+
+class TestLoraTargetScopeDefault:
+    def test_multimodal_model_scopes_to_language_model(self) -> None:
+        gemma = manifest(
+            GRPO,
+            network={"pretrained_model_name_or_path": "google/gemma-4-E4B-it"},
+        )
+
+        validated = TrainingManifest.model_validate(gemma)
+
+        assert validated.algorithm.lora_target_scope == "language_model"
+        assert validated.algorithm.lora_config is not None
+        assert "linear" not in validated.algorithm.lora_config.target_modules
+        assert "q_proj" in validated.algorithm.lora_config.target_modules
+
+    def test_text_model_has_no_scope(self) -> None:
+        validated = TrainingManifest.model_validate(GRPO)
+
+        assert validated.algorithm.lora_target_scope is None
+
+    def test_explicit_scope_wins(self) -> None:
+        gemma = manifest(
+            GRPO,
+            algorithm={"lora_target_scope": "model.embed_vision"},
+            network={"pretrained_model_name_or_path": "google/gemma-4-E4B-it"},
+        )
+
+        validated = TrainingManifest.model_validate(gemma)
+
+        assert validated.algorithm.lora_target_scope == "model.embed_vision"
+
+    def test_manifest_without_network_defaults_algorithm_lora(self) -> None:
+        doc = {
+            "algorithm": {
+                "name": "GRPO",
+                "pretrained_model_name_or_path": "Qwen/Qwen3-4B",
+            },
+            "environment": {
+                "env_type": "rollout",
+                "entrypoint": "pkg:Env",
+            },
+        }
+
+        validated = TrainingManifest.model_validate(doc)
+
+        assert validated.algorithm.lora_config is not None
+        assert validated.algorithm.lora_config.lora_r == 16
+        assert "q_proj" in validated.algorithm.lora_config.target_modules
+
+    def test_explicit_null_lora_resolves_to_defaults(self) -> None:
+        doc = manifest(GRPO, network={"lora_config": None})
+
+        validated = TrainingManifest.model_validate(doc)
+
+        assert validated.network.lora_config is not None
+        assert validated.network.lora_config.lora_r == 16
+        assert validated.algorithm.lora_config is not None
+        assert validated.algorithm.lora_config.lora_r == 16
+
+    def test_explicit_all_linear_is_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="not accepted"):
+            TrainingManifest.model_validate(
+                manifest(
+                    GRPO,
+                    network={"lora_config": {"target_modules": "all-linear"}},
+                )
+            )
+
+    def test_disagreeing_lora_configs_are_an_error(self) -> None:
+        with pytest.raises(ValidationError, match="lora_config"):
+            TrainingManifest.model_validate(
+                manifest(
+                    GRPO,
+                    algorithm={"lora_config": {"lora_r": 8}},
+                    network={"lora_config": {"lora_r": 32}},
+                )
+            )
+
+
+class TestClassicTrainingDefaults:
+    def test_dqn_training_loop(self) -> None:
+        validated = TrainingManifest.model_validate(
+            {
+                "algorithm": {"name": "DQN"},
+                "environment": {"name": "CartPole-v1"},
+            }
+        )
+
+        assert validated.training.max_steps == 2_000_000
+        assert validated.training.evo_steps == 160_000
+        assert validated.training.hpo is True
+        assert validated.training.pop_size == 4
+        assert validated.training.learning_delay == 20_000
+        assert validated.training.experience_sharing is True
+        assert validated.training.eps_start == 1.0
+        assert validated.training.eps_end == 0.01
+        assert validated.training.eps_decay == 0.99999
+
+    def test_cnn_scales_the_horizon(self) -> None:
+        validated = TrainingManifest.model_validate(
+            {
+                "algorithm": {"name": "DQN"},
+                "environment": {"name": "Breakout-v4"},
+                "network": {
+                    "encoder_config": {
+                        "arch": "cnn",
+                        "channel_size": [32],
+                        "kernel_size": [3],
+                        "stride_size": [1],
+                    },
+                    "head_config": {"hidden_size": [64]},
+                },
+            }
+        )
+
+        assert validated.training.max_steps == 12_000_000
+        assert validated.training.evo_steps == 320_000
+
+    def test_explicit_max_steps_survives(self) -> None:
+        validated = TrainingManifest.model_validate(
+            manifest(DQN, training={"max_steps": 123456})
+        )
+
+        assert validated.training.max_steps == 123456
+        assert validated.training.evo_steps == 123456
+
+    def test_on_policy_skips_delay_and_sharing(self) -> None:
+        validated = TrainingManifest.model_validate(
+            {
+                "algorithm": {"name": "PPO"},
+                "environment": {"name": "CartPole-v1"},
+            }
+        )
+
+        assert validated.training.hpo is True
+        assert validated.training.pop_size == 4
+        assert validated.training.learning_delay is None
+        assert validated.training.experience_sharing is None
+        assert validated.training.eps_start is None
+
+    def test_multi_agent_sums_scores(self) -> None:
+        validated = TrainingManifest.model_validate(
+            {
+                "algorithm": {"name": "IPPO"},
+                "environment": {"name": "mpe2.simple_speaker_listener_v4"},
+            }
+        )
+
+        assert validated.training.sum_scores is True
+
+    def test_explicit_hpo_false_leaves_training_alone(self) -> None:
+        validated = TrainingManifest.model_validate(
+            manifest(DQN, training={"hpo": False})
+        )
+
+        assert validated.training.hpo is False
+        assert validated.mutation is None
+
+    def test_bandits_and_offline_keep_arena_defaults(self) -> None:
+        bandit = TrainingManifest.model_validate(
+            {
+                "algorithm": {"name": "NeuralTS"},
+                "environment": {"env_type": "bandit"},
+            }
+        )
+        offline = TrainingManifest.model_validate(
+            {
+                "algorithm": {"name": "CQN"},
+                "environment": {"env_type": "offline", "name": "CartPole-v1"},
+            }
+        )
+
+        for validated in (bandit, offline):
+            assert validated.training.max_steps == 1_000_000
+            assert validated.training.hpo is False
+            assert validated.training.pop_size == 1
+            assert validated.mutation is None
+            assert validated.replay_buffer is None
+
+
+class TestMutationDefaults:
+    def test_dqn_gets_full_mutation(self) -> None:
+        validated = TrainingManifest.model_validate(
+            {
+                "algorithm": {"name": "DQN"},
+                "environment": {"name": "CartPole-v1"},
+            }
+        )
+
+        assert validated.mutation is not None
+        assert validated.mutation.probabilities.act_mut == 0.2
+        assert sorted(validated.mutation.rl_hp_selection) == [
+            "batch_size",
+            "gamma",
+            "learn_step",
+            "lr",
+            "tau",
+        ]
+
+    def test_ppo_family_zeroes_act_mut(self) -> None:
+        validated = TrainingManifest.model_validate(
+            {
+                "algorithm": {"name": "PPO"},
+                "environment": {"name": "CartPole-v1"},
+            }
+        )
+
+        assert validated.mutation is not None
+        assert validated.mutation.probabilities.act_mut == 0.0
+
+    def test_empty_mutation_fills_under_hpo(self) -> None:
+        validated = TrainingManifest.model_validate(manifest(DQN, mutation={}))
+
+        assert validated.mutation is not None
+        assert validated.mutation.probabilities.act_mut == 0.2
+        assert "lr" in validated.mutation.rl_hp_selection
+
+    def test_llm_mutation_is_hp_only(self) -> None:
+        validated = TrainingManifest.model_validate(
+            manifest(GRPO, mutation={"rl_hp_selection": {}})
+        )
+
+        assert validated.mutation is not None
+        probs = validated.mutation.probabilities
+        assert (probs.no_mut, probs.rl_hp_mut) == (0.2, 0.8)
+        assert probs.arch_mut == 0.0
+        assert validated.mutation.rl_hp_selection == {}
+
+    def test_sft_mutation_is_hp_only(self) -> None:
+        doc = {
+            "algorithm": {"name": "SFT"},
+            "environment": {
+                "env_type": "dataset",
+                "dataset": "org/sft",
+                "objective": "sft",
+            },
+            "network": {
+                "pretrained_model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
+                "max_context_length": 512,
+            },
+            "mutation": {"rl_hp_selection": {"lr": {"min": 1e-6, "max": 1e-4}}},
+        }
+
+        validated = TrainingManifest.model_validate(doc)
+
+        assert validated.mutation is not None
+        probs = validated.mutation.probabilities
+        assert (probs.no_mut, probs.rl_hp_mut) == (0.4, 0.6)
+
+    def test_supervised_mutation_fills_when_hpo(self) -> None:
+        doc = {
+            "algorithm": {"name": "Supervised"},
+            "environment": {"env_type": "tabular", "dataset": "mnist"},
+            "training": {"hpo": True},
+            "mutation": {},
+        }
+
+        validated = TrainingManifest.model_validate(doc)
+
+        assert validated.mutation is not None
+        assert validated.mutation.probabilities.rl_hp_mut == 0.8
+        assert sorted(validated.mutation.rl_hp_selection) == [
+            "batch_size",
+            "dropout",
+            "label_smoothing",
+            "lr",
+            "weight_decay",
+        ]
+
+    def test_supervised_regression_drops_label_smoothing(self) -> None:
+        doc = {
+            "algorithm": {
+                "name": "Supervised",
+                "task_type": "regression",
+                "loss_config": {"name": "MSELoss"},
+            },
+            "environment": {"env_type": "tabular", "dataset": "prices"},
+            "training": {"hpo": True},
+            "mutation": {},
+        }
+
+        validated = TrainingManifest.model_validate(doc)
+
+        assert validated.mutation is not None
+        assert "label_smoothing" not in validated.mutation.rl_hp_selection
+
+
+class TestReplayBufferDefaults:
+    def test_dqn_gets_standard_buffer(self) -> None:
+        validated = TrainingManifest.model_validate(
+            {
+                "algorithm": {"name": "DQN"},
+                "environment": {"name": "CartPole-v1"},
+            }
+        )
+
+        assert validated.replay_buffer is not None
+        assert validated.replay_buffer.max_size == 450_000
+        assert validated.replay_buffer.standard_buffer is True
+
+    def test_rainbow_gets_prioritized_multi_step_buffer(self) -> None:
+        validated = TrainingManifest.model_validate(
+            {
+                "algorithm": {"name": "RainbowDQN"},
+                "environment": {"name": "CartPole-v1"},
+            }
+        )
+
+        assert validated.replay_buffer is not None
+        assert validated.replay_buffer.standard_buffer is False
+        assert validated.replay_buffer.per_buffer is True
+        assert validated.replay_buffer.per_buffer_args.alpha == 0.6
+        assert validated.replay_buffer.n_step_buffer is True
+
+    def test_multi_agent_gets_smaller_buffer(self) -> None:
+        validated = TrainingManifest.model_validate(
+            {
+                "algorithm": {"name": "MADDPG"},
+                "environment": {"name": "mpe2.simple_speaker_listener_v4"},
+            }
+        )
+
+        assert validated.replay_buffer is not None
+        assert validated.replay_buffer.max_size == 100_000
+
+    def test_on_policy_gets_no_buffer(self) -> None:
+        validated = TrainingManifest.model_validate(
+            {
+                "algorithm": {"name": "PPO"},
+                "environment": {"name": "CartPole-v1"},
+            }
+        )
+
+        assert validated.replay_buffer is None
+
+
+class TestLLMTrainingDefaults:
+    def test_rollout_loop(self) -> None:
+        validated = TrainingManifest.model_validate(
+            {
+                "algorithm": {"name": "GRPO"},
+                "environment": {"env_type": "rollout", "entrypoint": "pkg:Env"},
+                "network": {
+                    "pretrained_model_name_or_path": "Qwen/Qwen3-4B",
+                },
+            }
+        )
+
+        assert validated.training.max_steps == 200
+        assert validated.training.reporting_interval == 1
+        assert validated.training.evaluation_interval == 10
+        assert validated.training.checkpoint_export is not None
+        assert validated.training.checkpoint_export.format == "adapter"
+
+    def test_dataset_loop_is_epoch_driven(self) -> None:
+        doc = {
+            "algorithm": {"name": "SFT"},
+            "environment": {
+                "env_type": "dataset",
+                "dataset": "org/sft",
+                "objective": "sft",
+            },
+            "network": {
+                "pretrained_model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
+                "max_context_length": 512,
+            },
+        }
+
+        validated = TrainingManifest.model_validate(doc)
+
+        assert validated.training.num_epochs == 1
+
+    def test_explicit_values_win(self) -> None:
+        validated = TrainingManifest.model_validate(
+            manifest(GRPO, training={"max_steps": 50, "reporting_interval": 5})
+        )
+
+        assert validated.training.max_steps == 50
+        assert validated.training.reporting_interval == 5
+
+
+MOE_FP8_TRITON = {
+    "algorithm": {
+        "name": "GRPO",
+        "vllm_engine_args": {"quantization": "fp8", "moe_backend": "triton"},
+    },
+    "environment": {"env_type": "rollout", "entrypoint": "pkg:Env"},
+    "network": {"pretrained_model_name_or_path": "openai/gpt-oss-20b"},
+}
+
+
+class TestValidateGpuFlag:
+    def test_triton_fp8_moe_fails_on_a100(self) -> None:
+        result = verdict(copy.deepcopy(MOE_FP8_TRITON), gpu_capability=(8, 0))
+
+        assert result["ok"] is False
+        assert result["errors"][0]["path"] == ("algorithm.vllm_engine_args.moe_backend")
+        assert "marlin" in result["errors"][0]["message"]
+
+    def test_triton_fp8_moe_passes_on_h100(self) -> None:
+        result = verdict(copy.deepcopy(MOE_FP8_TRITON), gpu_capability=(9, 0))
+
+        assert result["ok"] is True
+
+    def test_triton_fp8_moe_passes_without_gpu(self) -> None:
+        assert verdict(copy.deepcopy(MOE_FP8_TRITON))["ok"] is True
+
+    def test_unset_backend_passes_on_a100(self) -> None:
+        doc = copy.deepcopy(MOE_FP8_TRITON)
+        del doc["algorithm"]["vllm_engine_args"]["moe_backend"]
+
+        assert verdict(doc, gpu_capability=(8, 0))["ok"] is True
+
+    def test_triton_fp8_dense_passes_on_a100(self) -> None:
+        doc = copy.deepcopy(MOE_FP8_TRITON)
+        doc["network"]["pretrained_model_name_or_path"] = "Qwen/Qwen3-4B"
+
+        assert verdict(doc, gpu_capability=(8, 0))["ok"] is True

@@ -14,6 +14,7 @@ from typing import Any, TypeVar
 
 import click
 import yaml
+from pydantic import ValidationError
 
 from agilerl.arena import console
 from agilerl.arena.cli_manifest import handle_help_option
@@ -29,7 +30,9 @@ from agilerl.arena.inference.cache import (
     save_active_session,
 )
 from agilerl.arena.memory.cli import memory_group
+from agilerl.arena.memory.manifest import lookup_gpu
 from agilerl.arena.models import verdict as manifest_verdict
+from agilerl.arena.models.defaults import default_manifest
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.schema import manifest_schema
 from agilerl.arena.on_prem import ArenaRootGroup, register_on_prem_manifest_group
@@ -174,6 +177,11 @@ def manifest_group() -> None:
 @click.argument("manifest")
 @click.option("--payload", is_flag=True, help="Print the resolved manifest.")
 @click.option(
+    "--gpu",
+    default=None,
+    help="GPU to validate against, e.g. 'A100' (memory catalogue).",
+)
+@click.option(
     "--json",
     "as_json",
     is_flag=True,
@@ -182,15 +190,24 @@ def manifest_group() -> None:
         "either verdict; a non-zero exit then means the tool itself failed."
     ),
 )
-def manifest_validate(manifest: str, payload: bool, as_json: bool) -> None:
+def manifest_validate(
+    manifest: str, payload: bool, gpu: str | None, as_json: bool
+) -> None:
     """Validate MANIFEST (a path, or - for stdin) against the contract."""
+    gpu_capability: tuple[int, int] | None = None
+    if gpu is not None:
+        info = lookup_gpu(gpu)
+        if info is None:
+            click.echo(f"unknown gpu {gpu!r}", err=True)
+            sys.exit(manifest_verdict.EXIT_FAILED)
+        gpu_capability = (info.cc_major, info.cc_minor)
     try:
         document = manifest_verdict.read_manifest(manifest)
     except (OSError, ValueError, yaml.YAMLError) as err:
         click.echo(f"could not read {manifest}: {err}", err=True)
         sys.exit(manifest_verdict.EXIT_FAILED)
 
-    result = manifest_verdict.verdict(document)
+    result = manifest_verdict.verdict(document, gpu_capability=gpu_capability)
     if as_json:
         click.echo(json.dumps(result))
         return
@@ -209,6 +226,50 @@ def manifest_validate(manifest: str, payload: bool, as_json: bool) -> None:
 def manifest_schema_command() -> None:
     """Print the training manifest JSON Schema."""
     click.echo(json.dumps(manifest_schema(), indent=2))
+
+
+@manifest_group.command("defaults")
+@click.option("--algorithm", required=True, help="Registry algorithm name, e.g. GRPO.")
+@click.option(
+    "--model",
+    default=None,
+    help="Hub id to fine-tune. Required for LLM algorithms.",
+)
+@click.option(
+    "--env",
+    "env_json",
+    default=None,
+    help="Environment or dataset identity as a JSON object.",
+)
+@click.option(
+    "--network",
+    "network_json",
+    default=None,
+    help="Network identity as a JSON object.",
+)
+def manifest_defaults(
+    algorithm: str,
+    model: str | None,
+    env_json: str | None,
+    network_json: str | None,
+) -> None:
+    """Print the fully-defaulted run spec for an algorithm."""
+    try:
+        environment = json.loads(env_json) if env_json is not None else None
+        network = json.loads(network_json) if network_json is not None else None
+    except ValueError as err:
+        click.echo(f"could not parse JSON: {err}", err=True)
+        sys.exit(manifest_verdict.EXIT_FAILED)
+    try:
+        payload = default_manifest(
+            algorithm, model=model, environment=environment, network=network
+        )
+    except (ValidationError, ValueError) as err:
+        for error in manifest_verdict.errors(err):
+            where = f"{error['path']}: " if error["path"] else ""
+            click.echo(f"{where}{error['message']}", err=True)
+        sys.exit(manifest_verdict.EXIT_INVALID)
+    click.echo(json.dumps(payload, indent=2))
 
 
 @main.group("user")

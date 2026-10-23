@@ -61,7 +61,7 @@ class MutationProbabilities(BaseModel):
         description="Weight on perturbing the network weights directly.",
     )
     act_mut: float = Field(
-        default=0.0,
+        default=0.2,
         ge=0.0,
         le=1.0,
         description="Weight on swapping an activation function.",
@@ -83,6 +83,20 @@ def no_op_mutation_probabilities() -> MutationProbabilities:
         params_mut=0.0,
         act_mut=0.0,
         rl_hp_mut=0.0,
+    )
+
+
+def hp_only_mutation_probabilities(
+    no_mut: float, rl_hp_mut: float
+) -> MutationProbabilities:
+    """Probabilities that mutate hyperparameters but never the architecture."""
+    return MutationProbabilities(
+        no_mut=no_mut,
+        arch_mut=0.0,
+        new_layer=0.0,
+        params_mut=0.0,
+        act_mut=0.0,
+        rl_hp_mut=rl_hp_mut,
     )
 
 

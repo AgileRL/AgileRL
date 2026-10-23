@@ -34,6 +34,7 @@ from agilerl.arena.models import (
     TrainingSpec,
 )
 from agilerl.arena.models import GymEnvSpec as ArenaEnvSpec
+from agilerl.arena.models import TabularEnvSpec as ArenaTabularEnvSpec
 from agilerl.arena.models import TrainingManifest as ArenaManifest
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -45,6 +46,9 @@ _DEFAULT_ENV = {
     AgentType.OfflineAgent: "CartPole-v1",
     AgentType.BanditAgent: "CartPole-v1",
 }
+_SUPERVISED_AGENT_TYPES = frozenset(
+    {AgentType.SupervisedAgent, AgentType.LatentPPOAgent}
+)
 _GRPO_FAMILY = frozenset({"GRPO", "CISPO", "GSPO"})
 _OFF_POLICY_ALGOS = frozenset({"DQN", "DDPG", "TD3", "RainbowDQN", "MADDPG", "MATD3"})
 _DEFAULT_MLP_NETWORK: dict[type[NetworkSpec], NetworkSpec] = {
@@ -105,9 +109,13 @@ def _default_algorithm_spec(name: str):
 
 def _build_manifest_dict(algorithm, algo_name: str) -> dict[str, Any]:
     """Assemble a manifest dict from arena model instances."""
+    if algorithm.agent_type in _SUPERVISED_AGENT_TYPES:
+        environment: Any = ArenaTabularEnvSpec(dataset="mnist")
+    else:
+        environment = ArenaEnvSpec(name=_DEFAULT_ENV[algorithm.agent_type])
     data: dict[str, Any] = {
         "algorithm": algorithm,
-        "environment": ArenaEnvSpec(name=_DEFAULT_ENV[algorithm.agent_type]),
+        "environment": environment,
         "training": TrainingSpec(),
         "mutation": MutationSpec(),
         "selection_strategy": TournamentSelectionSpec(),
