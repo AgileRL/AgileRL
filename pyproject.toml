@@ -68,8 +68,15 @@ vllm = [
 llm = [
     "agilerl[cpu-llm,vllm]",
 ]
+verifiers = [
+    # verifiers needs Python >=3.11; agilerl still supports 3.10.
+    # Custom runtime backends (type: custom) first ship in the 0.4.1 dev builds.
+    "verifiers==0.4.1.dev63; python_version >= '3.11'",
+    # Tool envs are served as OpenEnv MCP environments.
+    "openenv>=0.4.1,<0.5; python_version >= '3.11'",
+]
 all = [
-    "agilerl[box2d,llm]",
+    "agilerl[box2d,llm,verifiers]",
 ]
 
 [dependency-groups]

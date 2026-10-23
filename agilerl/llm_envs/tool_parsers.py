@@ -69,6 +69,10 @@ class ParsedToolCall:
     arguments: dict[str, Any] | None = None
     token_span: tuple[int, int] | None = None
     status: ToolCallParseStatus = ToolCallParseStatus.OK
+    turn: tuple[ParsedToolCall, ...] = ()
+    """Every valid call of this call's turn, in order; set when the harness queues it."""
+    turn_index: int = 0
+    """This call's position in :attr:`turn`."""
 
 
 class ToolParser(ABC):

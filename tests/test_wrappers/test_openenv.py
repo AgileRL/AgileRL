@@ -2024,6 +2024,18 @@ def test_from_spec_loads_a_module_entrypoint() -> None:
     assert env._env_client._backend._inner.target == 4
 
 
+def test_from_spec_routes_env_config_action_field_to_the_client() -> None:
+    """An ``env_config`` action_field configures the client, not the constructor."""
+    env = RolloutHarness.from_spec(
+        lambda target: _CountingEnv(target=target),
+        {"target": 1, "action_field": "answer"},
+        MiniTokenizer(),
+        max_turns=2,
+        apply_chat_template=False,
+    )
+    assert env._env_client._action_field == "answer"
+
+
 def test_reset_retries_once_when_the_server_closed_an_idle_session() -> None:
     """A server-side idle close surfaces on the boundary reset; one re-dial heals it."""
     client = _session_client(

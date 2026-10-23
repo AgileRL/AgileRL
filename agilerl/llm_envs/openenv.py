@@ -41,12 +41,19 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
 
 __all__ = [
     "SESSION_LOOP",
+    "TURN_TOOL_CALLS_KEY",
+    "TURN_TOOL_CALL_INDEX_KEY",
     "InProcessEnvClient",
     "RemoteEnvClient",
     "SessionLoop",
 ]
 
 TransportT = TypeVar("TransportT")
+
+# A parsed call's ``CallToolAction.metadata`` names every call of its turn and its
+# position, so an env that answers a turn's calls together can on the first step.
+TURN_TOOL_CALLS_KEY = "turn_tool_calls"
+TURN_TOOL_CALL_INDEX_KEY = "turn_tool_call_index"
 
 
 class SessionLoop:
@@ -293,6 +300,7 @@ class RemoteEnvClient:
         self._evaluation_mode = False
         self._state: dict[str, Any] | None = None
         self._tools_cache: list[Any] | None = None
+        self._lists_tools = False
         self._connected = False
         self._broken = False
         self._redials = 0
@@ -347,6 +355,7 @@ class RemoteEnvClient:
         self._broken = False
         self._state = None
         self._tools_cache = None
+        self._lists_tools = False
 
     def _redial(self, attempt: int) -> None:
         """Replace a broken session with a fresh one, at an episode boundary only.
@@ -493,8 +502,15 @@ class RemoteEnvClient:
 
     @property
     def takes_tool_calls(self) -> bool:
-        """Whether steps take parsed tool calls: an MCP env, tools listed over the session."""
-        return "tools" not in self._fetch_state() and bool(self._fetch_tools())
+        """Whether steps take parsed tool calls: an MCP env, which answers a tool listing.
+
+        The listing may be empty: an env whose tools depend on the episode
+        advertises them on reset.
+        """
+        if "tools" in self._fetch_state():
+            return False
+        self._fetch_tools()
+        return self._lists_tools
 
     @property
     def rubric_components(self) -> tuple[str, ...]:
@@ -537,6 +553,7 @@ class RemoteEnvClient:
                 raise
             self._tools_cache = []
             return self._tools_cache
+        self._lists_tools = True
         obs = result.observation
         tools = obs.get("tools", []) if isinstance(obs, dict) else []
         self._tools_cache = _openai_tools(tools)
@@ -603,14 +620,23 @@ def _call_tool_action(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def _parsed_call_action(call: ParsedToolCall) -> dict[str, Any]:
-    """Wire-format ``CallToolAction`` dict for a parsed call.
+    """Wire-format ``CallToolAction`` dict for a parsed call, its turn on the metadata.
 
     :raises ValueError: If the call is malformed.
     """
     if call.name is None or call.arguments is None:
         msg = "A malformed tool call never steps an env."
         raise ValueError(msg)
-    return _call_tool_action(call.name, call.arguments)
+    action = _call_tool_action(call.name, call.arguments)
+    if call.turn:
+        action["metadata"] = {
+            TURN_TOOL_CALLS_KEY: [
+                {"name": sibling.name, "arguments": sibling.arguments}
+                for sibling in call.turn
+            ],
+            TURN_TOOL_CALL_INDEX_KEY: call.turn_index,
+        }
+    return action
 
 
 def _openai_tools(tools: list[Any]) -> list[dict[str, Any]]:

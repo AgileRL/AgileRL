@@ -52,7 +52,7 @@ jobs:
                   restore-keys: linux-cpu-durations-
             - name: Install dependencies
               run: |
-                  uv sync --locked --group dev --extra box2d --extra cpu-llm --extra cpu
+                  uv sync --locked --group dev --extra box2d --extra cpu-llm --extra cpu --extra verifiers
                   echo "$UV_PROJECT_ENVIRONMENT/bin" >> $GITHUB_PATH
             - name: Run CPU shard
               run: |

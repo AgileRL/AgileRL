@@ -10,6 +10,7 @@ import warnings
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
@@ -48,6 +49,7 @@ from agilerl.utils.env_utils import construct_entrypoint_env
 from agilerl.utils.llm_utils import max_prompt_tokens_for_model_len
 
 __all__ = [
+    "EPISODE_TOOLS_INFO_KEY",
     "PROMPT_LIMIT_INFO_KEY",
     "TOOL_CALLS_INFO_KEY",
     "TOOL_CALL_ERROR_INFO_KEY",
@@ -61,6 +63,9 @@ __all__ = [
 ACTION_HISTORY_MAX_CHARS = 300
 # Set ``True`` in a step's info when the episode ends because no prompt fits the prompt limit.
 PROMPT_LIMIT_INFO_KEY = "prompt_limit"
+# Reset info key for an env whose tools depend on the episode: OpenAI function
+# schemas the harness renders and parses against for that episode only.
+EPISODE_TOOLS_INFO_KEY = "episode_tools"
 # On a tool-call env, every step's info holds the valid calls the turn ran
 # (prose sent to ``answer_tool`` counts 0) and flags a turn rejected for a
 # malformed or missing call. Text envs set neither.
@@ -508,6 +513,9 @@ class RolloutHarness(RestartPromptMixin):
         # manifest naming a prompt for a registry env means. The harness reads
         # that attribute (or an explicit kwarg) so the chat template renders it.
         system_prompt = config.pop("system_prompt", None)
+        # The rollout builder carries the manifest's action_field here; keep it
+        # off the factory kwargs like system_prompt.
+        kwargs.setdefault("action_field", config.pop("action_field", "message"))
         if isinstance(spec, str) and is_url(spec):
             if "system_prompt" not in kwargs:
                 kwargs["system_prompt"] = system_prompt
@@ -1014,6 +1022,9 @@ class RolloutHarness(RestartPromptMixin):
                 )
                 raise ValueError(msg)
         payload, info = self._env_client.reset(seed=seed, row_index=row_index)
+        episode_tools = info.pop(EPISODE_TOOLS_INFO_KEY, None)
+        if episode_tools is not None:
+            self.tools = episode_tools
         obs_text, image = observation_text_and_image(
             payload, screenshot_field=self._screenshot_field
         )
@@ -1204,7 +1215,8 @@ class RolloutHarness(RestartPromptMixin):
         Text envs queue nothing and get the generation text. A turn with no
         call is prose for the env's ``answer_tool`` answer tool, or an error when
         no ``answer_tool`` is named. One malformed call fails the whole turn, so
-        no call runs.
+        no call runs. Each queued call carries the whole turn, so an env that
+        answers a turn's calls together sees all of them on the first step.
         """
         self._pending_tool_calls = []
         self._pending_tool_error = None
@@ -1220,7 +1232,11 @@ class RolloutHarness(RestartPromptMixin):
                 f"{TOOL_CALL_ERRORS[bad.status]} No calls ran; emit valid tool calls."
             )
             return
-        self._pending_tool_calls = calls
+        turn = tuple(calls)
+        self._pending_tool_calls = [
+            replace(call, turn=turn, turn_index=index)
+            for index, call in enumerate(calls)
+        ]
 
     def _reject_image_placeholder_ids(self, gen_ids: torch.Tensor) -> None:
         """Fail a turn whose sampled ids hold the image placeholder id.

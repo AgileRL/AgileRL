@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -14,8 +15,17 @@ import pytest
 import torch
 
 from agilerl.llm_envs import RolloutHarness
-from agilerl.llm_envs.harness import TOOL_CALL_ERROR_INFO_KEY, TOOL_CALLS_INFO_KEY
-from agilerl.llm_envs.openenv import InProcessEnvClient, RemoteEnvClient
+from agilerl.llm_envs.harness import (
+    EPISODE_TOOLS_INFO_KEY,
+    TOOL_CALL_ERROR_INFO_KEY,
+    TOOL_CALLS_INFO_KEY,
+)
+from agilerl.llm_envs.openenv import (
+    TURN_TOOL_CALL_INDEX_KEY,
+    TURN_TOOL_CALLS_KEY,
+    InProcessEnvClient,
+    RemoteEnvClient,
+)
 from agilerl.llm_envs.openenv_server import OpenEnvServer, TextObservation
 from agilerl.llm_envs.tool_parsers import (
     ParsedToolCall,
@@ -261,8 +271,10 @@ class RecordingClient:
         reward: float = 0.0,
         terminate_on: str | None = None,
         answer_tool: str | None = None,
+        reset_info: dict[str, Any] | None = None,
     ) -> None:
         self.actions: list[Any] = []
+        self._reset_info = dict(reset_info or {})
         self._takes_tool_calls = takes_tool_calls
         self._tools = list(tools or [])
         self._reward = reward
@@ -273,7 +285,7 @@ class RecordingClient:
         self, seed: int | None = None, *, row_index: int | None = None
     ) -> tuple[str, dict[str, Any]]:
         del seed, row_index
-        return "prompt", {}
+        return "prompt", dict(self._reset_info)
 
     def step(self, action: Any) -> tuple[str, float, bool, bool, dict[str, Any]]:
         self.actions.append(action)
@@ -541,6 +553,27 @@ class TestHarnessToolSteps:
         finally:
             harness.close()
 
+    def test_each_call_carries_its_whole_turn(self) -> None:
+        client = RecordingClient()
+        harness = RolloutHarness(
+            client, TagTokenizer(), max_turns=2, apply_chat_template=False
+        )
+        try:
+            both = call_ids("a", {"x": 1}) + call_ids("b", {"y": 2})
+
+            # Act
+            _step_with_ids(harness, both)
+
+            # Assert
+            for index, call in enumerate(client.actions):
+                assert call.turn_index == index
+                assert [(c.name, c.arguments) for c in call.turn] == [
+                    ("a", {"x": 1}),
+                    ("b", {"y": 2}),
+                ]
+        finally:
+            harness.close()
+
     def test_stops_running_calls_once_the_episode_ends(self) -> None:
         client = RecordingClient(reward=1.0, terminate_on="a")
         harness = RolloutHarness(
@@ -572,6 +605,40 @@ class TestHarnessToolSteps:
             # Assert
             assert client.actions == []
             assert "No calls ran" in _transcript_text(harness)
+        finally:
+            harness.close()
+
+
+class TestHarnessEpisodeTools:
+    def test_reset_info_tools_replace_the_env_tools_for_the_episode(self) -> None:
+        episode_tools = [{"type": "function", "function": {"name": "lookup"}}]
+        client = RecordingClient(
+            tools=[{"type": "function", "function": {"name": "stale"}}],
+            reset_info={EPISODE_TOOLS_INFO_KEY: episode_tools},
+        )
+        harness = RolloutHarness(
+            client, TagTokenizer(), max_turns=2, apply_chat_template=False
+        )
+        try:
+            # Act
+            _, info = harness.reset()
+
+            # Assert
+            assert harness.tools == episode_tools
+            assert EPISODE_TOOLS_INFO_KEY not in info
+        finally:
+            harness.close()
+
+    def test_env_tools_stay_without_episode_tools(self) -> None:
+        tools = [{"type": "function", "function": {"name": "add"}}]
+        client = RecordingClient(tools=tools)
+        harness = RolloutHarness(
+            client, TagTokenizer(), max_turns=2, apply_chat_template=False
+        )
+        try:
+            harness.reset()
+
+            assert harness.tools == tools
         finally:
             harness.close()
 
@@ -678,6 +745,21 @@ class TestRemoteToolSteps:
             "metadata": {},
         }
 
+    def test_parsed_call_sends_its_turn_on_the_metadata(self) -> None:
+        client, session = _stub_remote()
+        first, second = ok_call("add", {"a": 1}), ok_call("add", {"a": 2})
+        call = replace(second, turn=(first, second), turn_index=1)
+
+        client.step(call)
+
+        assert session.step_calls[-1]["metadata"] == {
+            TURN_TOOL_CALLS_KEY: [
+                {"name": "add", "arguments": {"a": 1}},
+                {"name": "add", "arguments": {"a": 2}},
+            ],
+            TURN_TOOL_CALL_INDEX_KEY: 1,
+        }
+
     def test_labels_tool_results_with_tool_role(self) -> None:
         client, _session = _stub_remote()
 
@@ -766,6 +848,11 @@ class TestRemoteEnvClientTakesToolCallsProperty:
 
         assert client.takes_tool_calls is True
         assert client.answer_tool == "answer"
+
+    def test_true_for_an_env_that_lists_no_tools_before_reset(self) -> None:
+        client, _session = _stub_remote(state={}, tools=[])
+
+        assert client.takes_tool_calls is True
 
     def test_false_when_the_server_rejects_the_listing(self) -> None:
         client, _session = _stub_remote(state={}, reject_list_tools=True)

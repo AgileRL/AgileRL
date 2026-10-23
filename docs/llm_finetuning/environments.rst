@@ -447,6 +447,45 @@ and the turn scores ``min_reward`` (``0`` unless the manifest sets it). Rules
 about which tools may run, in what order, and how an answer scores belong to
 the env, behind its tools.
 
+An env whose tools change per episode returns them from ``reset`` in the info
+under ``episode_tools`` (OpenAI function schemas); the harness renders and
+parses that episode against them. Each call the harness steps carries its
+whole turn on ``CallToolAction.metadata`` (``turn_tool_calls`` and
+``turn_tool_call_index``), so an env that must see a turn's calls together
+gets them on the turn's first step.
+
+Prime Intellect Hub (verifiers) envs
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``agilerl.llm_envs.verifiers_env:make`` serves a `verifiers
+<https://github.com/PrimeIntellect-ai/verifiers>`_ v1 env (``pip install
+agilerl[verifiers]``). The entrypoint is the taskset id; ``env_config`` is the
+verifiers env config. A taskset whose tasks bring tools is served as an MCP env
+with ``episode_tools``; give it ``answer_tool: verifiers_reply`` and
+``action_field: text`` so a turn without a call reaches verifiers as the
+model's reply:
+
+.. code-block:: yaml
+
+   environment:
+       env_type: rollout
+       factory: agilerl.llm_envs.verifiers_env:make
+       entrypoint: bfcl-v3
+       env_packages:
+           uv: [verifiers==0.4.1.dev63, "bfcl-v3 @ git+https://..."]
+       env_config:
+           taskset:
+               test_categories: [simple_python, parallel, multi_turn_base]
+           agent:
+               harness: {id: "null"}
+       answer_tool: verifiers_reply
+       action_field: text
+       max_turns: 6
+
+Tasks that deny network access or run in a container need a sandbox runtime
+under ``agent.runtime``: verifiers' ``docker`` or ``prime`` runtime, or your own
+backend as ``type: custom`` with its ``import_path``.
+
 Lifecycle
 ---------
 
