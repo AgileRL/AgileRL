@@ -35,11 +35,30 @@ class TestQwen35LanguageForCausalLM:
 
         prefixes = Qwen3_5MoeLanguageForCausalLM.hf_to_vllm_mapper.orig_to_new_prefix
         assert prefixes["model.language_model."] == "model."
+        assert prefixes["language_model."] == "model."
         assert prefixes["model.visual."] is None
         assert prefixes["mtp."] is None
         assert Qwen3_5MoeLanguageForCausalLM.is_3d_moe_weight is True
         assert Qwen3_5MoeLanguageForCausalLM.is_hybrid is True
         assert callable(Qwen3_5MoeLanguageForCausalLM.get_mamba_state_shape_from_config)
+
+    @pytest.mark.vllm
+    def test_lora_names_parse_to_tower_layers(self) -> None:
+        pytest.importorskip("vllm")
+        from vllm.lora.utils import parse_fine_tuned_lora_name
+
+        from agilerl.architectures.qwen3_5.causal_lm import (
+            Qwen3_5LanguageForCausalLM,
+        )
+
+        mapper = Qwen3_5LanguageForCausalLM.hf_to_vllm_mapper.get_unstacked_mapper()
+
+        module, _ = parse_fine_tuned_lora_name(
+            "base_model.model.language_model.layers.0.self_attn.q_proj.lora_A.weight",
+            mapper,
+        )
+
+        assert module == "model.layers.0.self_attn.q_proj"
 
 
 class TestNestedLanguageConfig:
@@ -327,6 +346,7 @@ class TestQwen35LanguageMapperWithoutVllm:
             mapper = mod.Qwen3_5MoeLanguageForCausalLM.hf_to_vllm_mapper
             assert mapper.orig_to_new_prefix == {
                 "model.language_model.": "model.",
+                "language_model.": "model.",
                 "model.visual.": None,
                 "mtp.": None,
             }

@@ -30,8 +30,10 @@ MAMBA_CHUNK_SIZE_DEFAULT = 256
 # fp32 copy of each norm input for backward.
 FP32_RMS_NORM_MODEL_TYPES = frozenset({"granitemoe", "granitemoehybrid"})
 
-# Attention norms that upcast Q to fp32 inside the block (Qwen3 ``q_norm``).
-QK_NORM_MODEL_TYPES = frozenset({"qwen3", "qwen3_moe"})
+# Attention norms that upcast Q to fp32 inside the block (Qwen3/3.5 ``q_norm``).
+QK_NORM_MODEL_TYPES = frozenset(
+    {"qwen3", "qwen3_moe", "qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"}
+)
 
 # Model types whose packed experts take the trainer's self-routing grouped-GEMM
 # path, which runs experts in row chunks and writes straight into the layer output.

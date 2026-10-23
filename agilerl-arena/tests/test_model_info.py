@@ -268,6 +268,7 @@ class TestModelInfoArchitecture:
         }
 
         assert architectures["Qwen/Qwen3-4B"] == ARCH_DENSE
+        assert architectures["Qwen/Qwen3.5-4B"] == ARCH_HYBRID
         assert architectures["google/gemma-4-E4B-it"] == ARCH_DENSE
         assert architectures["ibm-granite/granite-4.0-h-tiny"] == ARCH_HYBRID
         assert architectures["ibm-granite/granite-3.1-3b-a800m-instruct"] == ARCH_MOE
@@ -289,6 +290,8 @@ class TestModelInfoStatus:
         }
         deprecated = {
             "Qwen/Qwen2.5-0.5B-Instruct",
+            "Qwen/Qwen3-1.7B",
+            "Qwen/Qwen3-4B",
             "ibm-granite/granite-4.0-micro",
             "ibm-granite/granite-4.0-micro-base",
             "ibm-granite/granite-4.0-h-tiny",
