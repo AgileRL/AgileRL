@@ -7,17 +7,13 @@ from __future__ import annotations
 
 import copy
 import os
-import sys
-import traceback
-from functools import partial
 from types import SimpleNamespace
-from typing import Any, ClassVar
+from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as mp
 from peft import LoraConfig, inject_adapter_in_model
 from safetensors.torch import save_file
 from torch import nn
@@ -44,12 +40,7 @@ from agilerl.distributed.tensor_parallel import (
     copy_input_to_region,
 )
 from agilerl.utils.llm_utils import get_lora_named_params
-from tests.dist_ports import (
-    get_free_port,
-    gloo_filestore,
-    gloo_init_method,
-    gloo_rank_env,
-)
+from tests.rank_launch import run_ranks
 
 _DIST_ENV = ("RANK", "LOCAL_RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT")
 
@@ -67,50 +58,6 @@ def _clean_dist_state():
             os.environ.pop(var, None)
         else:
             os.environ[var] = value
-
-
-def _gloo_available() -> bool:
-    if sys.platform == "win32":
-        return False
-    return dist.is_available()
-
-
-requires_gloo = pytest.mark.skipif(not _gloo_available(), reason="gloo unavailable")
-
-
-def _init_gloo(rank: int, world_size: int, port: int) -> None:
-    os.environ.update(gloo_rank_env(rank, world_size, port))
-    dist.init_process_group(
-        backend="gloo",
-        init_method=gloo_init_method(port),
-        rank=rank,
-        world_size=world_size,
-    )
-
-
-def _spawn_ranks(worker, world_size: int = 2, timeout: float = 300.0) -> None:
-    port = get_free_port()
-    ctx = mp.get_context("spawn")
-    queue: mp.Queue = ctx.Queue()
-    procs = [
-        ctx.Process(target=worker, args=(rank, world_size, port, queue))
-        for rank in range(world_size)
-    ]
-    with gloo_filestore():
-        for proc in procs:
-            proc.start()
-        try:
-            results = [queue.get(timeout=timeout) for _ in range(world_size)]
-            for proc in procs:
-                proc.join(timeout=timeout)
-                assert proc.exitcode == 0, f"rank exited {proc.exitcode}"
-            for rank, status, err in sorted(results):
-                assert status == "ok", f"rank {rank}: {err}"
-        finally:
-            for proc in procs:
-                if proc.is_alive():
-                    proc.kill()
-                    proc.join(timeout=5)
 
 
 def _broadcast_module(module: nn.Module) -> None:
@@ -213,92 +160,74 @@ def _fill(module: nn.Module) -> None:
             param.normal_()
 
 
-def _attention_parity_worker(
-    rank: int, world_size: int, port: int, result_queue: Any
-) -> None:
-    try:
-        _init_gloo(rank, world_size, port)
-        torch.manual_seed(0)
-        tp = 2
-        head_dim = 4
-        attn = _attention(4, 2, head_dim=head_dim, hidden_size=16)
-        _with_lora(attn, ["q_proj", "k_proj", "v_proj", "o_proj"])
-        _broadcast_module(attn)
-        reference = copy.deepcopy(attn)
-        source = torch.randn(2, 4, attn.config.hidden_size)
-        probe = torch.randn(2, 4, attn.config.hidden_size)
-        dist.broadcast(source, src=0)
-        dist.broadcast(probe, src=0)
-        mesh = _tp_mesh(world_size, tp)
-        apply_tensor_parallel(attn, mesh.tp)
-        q_weight = attn.q_proj.weight
-        k_weight = attn.k_proj.weight
-        o_weight = attn.o_proj.weight
-        if not isinstance(q_weight, DTensor) or not isinstance(k_weight, DTensor):
-            msg = "q_proj and k_proj weights must be DTensors when kv heads divide tp"
-            raise AssertionError(msg)
-        if not isinstance(o_weight, DTensor) or o_weight.placements[0].dim != 1:
-            msg = "o_proj weight must be Shard(1)"
-            raise AssertionError(msg)
-        if k_weight.to_local().shape[0] * tp != k_weight.shape[0]:
-            msg = "k_proj local rows are not an even partition"
-            raise AssertionError(msg)
+def _attention_parity_worker(rank: int, world_size: int) -> None:
+    torch.manual_seed(0)
+    tp = 2
+    head_dim = 4
+    attn = _attention(4, 2, head_dim=head_dim, hidden_size=16)
+    _with_lora(attn, ["q_proj", "k_proj", "v_proj", "o_proj"])
+    _broadcast_module(attn)
+    reference = copy.deepcopy(attn)
+    source = torch.randn(2, 4, attn.config.hidden_size)
+    probe = torch.randn(2, 4, attn.config.hidden_size)
+    dist.broadcast(source, src=0)
+    dist.broadcast(probe, src=0)
+    mesh = _tp_mesh(world_size, tp)
+    apply_tensor_parallel(attn, mesh.tp)
+    q_weight = attn.q_proj.weight
+    k_weight = attn.k_proj.weight
+    o_weight = attn.o_proj.weight
+    if not isinstance(q_weight, DTensor) or not isinstance(k_weight, DTensor):
+        msg = "q_proj and k_proj weights must be DTensors when kv heads divide tp"
+        raise AssertionError(msg)
+    if not isinstance(o_weight, DTensor) or o_weight.placements[0].dim != 1:
+        msg = "o_proj weight must be Shard(1)"
+        raise AssertionError(msg)
+    if k_weight.to_local().shape[0] * tp != k_weight.shape[0]:
+        msg = "k_proj local rows are not an even partition"
+        raise AssertionError(msg)
 
-        expected, expected_input_grad = _forward_backward(reference, source, probe)
-        actual, actual_input_grad = _forward_backward(attn, source, probe)
+    expected, expected_input_grad = _forward_backward(reference, source, probe)
+    actual, actual_input_grad = _forward_backward(attn, source, probe)
 
-        _assert_exact(actual, expected, "output")
-        _assert_exact(actual_input_grad, expected_input_grad, "input grad")
-        _assert_grads_match(attn, reference)
-        result_queue.put((rank, "ok", None))
-    except BaseException:
-        result_queue.put((rank, "err", traceback.format_exc()))
-    finally:
-        if dist.is_initialized():
-            dist.destroy_process_group()
+    _assert_exact(actual, expected, "output")
+    _assert_exact(actual_input_grad, expected_input_grad, "input grad")
+    _assert_grads_match(attn, reference)
 
 
-def _shared_kv_worker(rank: int, world_size: int, port: int, result_queue: Any) -> None:
-    try:
-        _init_gloo(rank, world_size, port)
-        torch.manual_seed(0)
-        tp = 4
-        head_dim = 4
-        attn = _attention(8, 2, head_dim=head_dim, hidden_size=16)
-        _with_lora(attn, ["q_proj", "k_proj", "v_proj", "o_proj"])
-        _broadcast_module(attn)
-        reference = copy.deepcopy(attn)
-        source = torch.randn(2, 4, attn.config.hidden_size)
-        probe = torch.randn(2, 4, attn.config.hidden_size)
-        dist.broadcast(source, src=0)
-        dist.broadcast(probe, src=0)
-        mesh = _tp_mesh(world_size, tp)
-        apply_tensor_parallel(attn, mesh.tp)
-        k_weight = attn.k_proj.weight
-        v_weight = attn.v_proj.weight
-        if isinstance(k_weight, DTensor) or isinstance(v_weight, DTensor):
-            msg = "shared key/value weights must stay plain tensors"
-            raise AssertionError(msg)
-        if k_weight.shape[0] != 2 * head_dim or v_weight.shape[0] != 2 * head_dim:
-            msg = f"expected both kv heads on every rank, got {tuple(k_weight.shape)}"
-            raise AssertionError(msg)
-        replicated = getattr(attn.k_proj.base_layer, "tp_replicated_params", ())
-        if "weight" not in replicated:
-            msg = "shared k_proj.weight must be in tp_replicated_params"
-            raise AssertionError(msg)
+def _shared_kv_worker(rank: int, world_size: int) -> None:
+    torch.manual_seed(0)
+    tp = 4
+    head_dim = 4
+    attn = _attention(8, 2, head_dim=head_dim, hidden_size=16)
+    _with_lora(attn, ["q_proj", "k_proj", "v_proj", "o_proj"])
+    _broadcast_module(attn)
+    reference = copy.deepcopy(attn)
+    source = torch.randn(2, 4, attn.config.hidden_size)
+    probe = torch.randn(2, 4, attn.config.hidden_size)
+    dist.broadcast(source, src=0)
+    dist.broadcast(probe, src=0)
+    mesh = _tp_mesh(world_size, tp)
+    apply_tensor_parallel(attn, mesh.tp)
+    k_weight = attn.k_proj.weight
+    v_weight = attn.v_proj.weight
+    if isinstance(k_weight, DTensor) or isinstance(v_weight, DTensor):
+        msg = "shared key/value weights must stay plain tensors"
+        raise AssertionError(msg)
+    if k_weight.shape[0] != 2 * head_dim or v_weight.shape[0] != 2 * head_dim:
+        msg = f"expected both kv heads on every rank, got {tuple(k_weight.shape)}"
+        raise AssertionError(msg)
+    replicated = getattr(attn.k_proj.base_layer, "tp_replicated_params", ())
+    if "weight" not in replicated:
+        msg = "shared k_proj.weight must be in tp_replicated_params"
+        raise AssertionError(msg)
 
-        expected, expected_input_grad = _forward_backward(reference, source, probe)
-        actual, actual_input_grad = _forward_backward(attn, source, probe)
+    expected, expected_input_grad = _forward_backward(reference, source, probe)
+    actual, actual_input_grad = _forward_backward(attn, source, probe)
 
-        _assert_exact(actual, expected, "output")
-        _assert_exact(actual_input_grad, expected_input_grad, "input grad")
-        _assert_grads_match(attn, reference)
-        result_queue.put((rank, "ok", None))
-    except BaseException:
-        result_queue.put((rank, "err", traceback.format_exc()))
-    finally:
-        if dist.is_initialized():
-            dist.destroy_process_group()
+    _assert_exact(actual, expected, "output")
+    _assert_exact(actual_input_grad, expected_input_grad, "input grad")
+    _assert_grads_match(attn, reference)
 
 
 def _sgd_step(module: nn.Module, lr: float) -> None:
@@ -317,161 +246,123 @@ def _assert_lora_export_matches(module: nn.Module, reference: nn.Module) -> None
             _assert_exact(exported, reference_params[name].detach(), name)
 
 
-def _lora_export_worker(
-    tp: int, rank: int, world_size: int, port: int, result_queue: Any
-) -> None:
-    try:
-        # Arrange
-        _init_gloo(rank, world_size, port)
-        torch.manual_seed(0)
-        attn = _with_lora(
-            _attention(8, 2, head_dim=4, hidden_size=16),
-            ["q_proj", "k_proj", "v_proj", "o_proj"],
-        )
-        _broadcast_module(attn)
-        reference = copy.deepcopy(attn)
-        source = torch.randn(2, 4, 16)
-        probe = torch.randn(2, 4, 16)
-        dist.broadcast(source, src=0)
-        dist.broadcast(probe, src=0)
-        apply_tensor_parallel(attn, _tp_mesh(world_size, tp).tp)
+def _lora_export_worker(rank: int, world_size: int, tp: int) -> None:
+    # Arrange
+    torch.manual_seed(0)
+    attn = _with_lora(
+        _attention(8, 2, head_dim=4, hidden_size=16),
+        ["q_proj", "k_proj", "v_proj", "o_proj"],
+    )
+    _broadcast_module(attn)
+    reference = copy.deepcopy(attn)
+    source = torch.randn(2, 4, 16)
+    probe = torch.randn(2, 4, 16)
+    dist.broadcast(source, src=0)
+    dist.broadcast(probe, src=0)
+    apply_tensor_parallel(attn, _tp_mesh(world_size, tp).tp)
 
-        # Act
-        for module in (reference, attn):
-            _forward_backward(module, source, probe)
-            _sgd_step(module, lr=0.1)
+    # Act
+    for module in (reference, attn):
+        _forward_backward(module, source, probe)
+        _sgd_step(module, lr=0.1)
 
-        # Assert
-        _assert_lora_export_matches(attn, reference)
-        result_queue.put((rank, "ok", None))
-    except BaseException:
-        result_queue.put((rank, "err", traceback.format_exc()))
-    finally:
-        if dist.is_initialized():
-            dist.destroy_process_group()
+    # Assert
+    _assert_lora_export_matches(attn, reference)
 
 
-def _shared_kv_load_worker(
-    checkpoint_dir: str, rank: int, world_size: int, port: int, result_queue: Any
-) -> None:
-    try:
-        # Arrange
-        _init_gloo(rank, world_size, port)
-        torch.manual_seed(0)
-        head_dim = 4
-        dense = AttentionStack(_attention(8, 2, head_dim=head_dim, hidden_size=16))
-        if rank == 0:
-            save_file(dense.state_dict(), f"{checkpoint_dir}/model.safetensors")
-        dist.barrier()
-        with torch.device("meta"):
-            attn = _attention(8, 2, head_dim=head_dim, hidden_size=16)
-        attn.config._name_or_path = checkpoint_dir
-        model = AttentionStack(attn)
-        model.config = attn.config
-        source = torch.randn(2, 4, 16)
-        dist.broadcast(source, src=0)
-        config = FSDPConfig(
-            tp=world_size,
+def _shared_kv_load_worker(rank: int, world_size: int, checkpoint_dir: str) -> None:
+    # Arrange
+    torch.manual_seed(0)
+    head_dim = 4
+    dense = AttentionStack(_attention(8, 2, head_dim=head_dim, hidden_size=16))
+    if rank == 0:
+        save_file(dense.state_dict(), f"{checkpoint_dir}/model.safetensors")
+    dist.barrier()
+    with torch.device("meta"):
+        attn = _attention(8, 2, head_dim=head_dim, hidden_size=16)
+    attn.config._name_or_path = checkpoint_dir
+    model = AttentionStack(attn)
+    model.config = attn.config
+    source = torch.randn(2, 4, 16)
+    dist.broadcast(source, src=0)
+    config = FSDPConfig(
+        tp=world_size,
+        wrap_every_n_blocks=1,
+        param_persistence_threshold=0,
+        param_dtype="float32",
+        routed_expert_chunk_mib=64,
+    )
+
+    # Act
+    materialize_fsdp2_from_cpu_state(
+        model, "cpu", config, parallel_mesh=_tp_mesh(world_size, world_size)
+    )
+
+    # Assert
+    loaded = model.layers[0].attn
+    expected = dense.layers[0].attn
+    _assert_exact(loaded.k_proj.weight, expected.k_proj.weight, "k_proj.weight")
+    _assert_exact(loaded.v_proj.weight, expected.v_proj.weight, "v_proj.weight")
+    with torch.no_grad():
+        _assert_exact(_hidden(loaded(source)), _hidden(expected(source)), "output")
+
+
+def _mixed_precision_worker(rank: int, world_size: int) -> None:
+    # Arrange
+    torch.manual_seed(0)
+    tp = 2
+    attn = _attention(4, 1)
+    inject_adapter_in_model(
+        LoraConfig(r=2, target_modules=["q_proj", "k_proj", "v_proj", "o_proj"]),
+        attn,
+    )
+    model = AttentionStack(attn)
+    _broadcast_module(model)
+    for name, param in model.named_parameters():
+        param.requires_grad_("lora_" in name)
+    mesh = _tp_mesh(world_size, tp)
+    apply_tensor_parallel(model, mesh.tp)
+    apply_fsdp2(
+        model,
+        FSDPConfig(
+            tp=tp,
             wrap_every_n_blocks=1,
             param_persistence_threshold=0,
-            param_dtype="float32",
-            routed_expert_chunk_mib=64,
-        )
+            param_dtype="bfloat16",
+            reduce_dtype="float32",
+        ),
+        mesh=mesh.hsdp,
+    )
+    forward_dtypes: list[torch.dtype] = []
+    for name, module in attn.named_modules():
+        if ".lora_" in name and isinstance(module, nn.Linear):
+            module.register_forward_pre_hook(
+                lambda mod, _args: forward_dtypes.append(mod.weight.dtype)
+            )
+    trainable = [param for param in model.parameters() if param.requires_grad]
+    torch.manual_seed(rank)
+    source = torch.randn(2, 4, attn.config.hidden_size, dtype=torch.bfloat16)
 
-        # Act
-        materialize_fsdp2_from_cpu_state(
-            model, "cpu", config, parallel_mesh=_tp_mesh(world_size, world_size)
-        )
+    # Act
+    output = _hidden(attn(source))
+    output.float().sum().backward()
+    mesh.sync_grads(trainable, torch.float32)
+    sync_grads([param for param in trainable if not isinstance(param, DTensor)])
 
-        # Assert
-        loaded = model.layers[0].attn
-        expected = dense.layers[0].attn
-        _assert_exact(loaded.k_proj.weight, expected.k_proj.weight, "k_proj.weight")
-        _assert_exact(loaded.v_proj.weight, expected.v_proj.weight, "v_proj.weight")
-        with torch.no_grad():
-            _assert_exact(_hidden(loaded(source)), _hidden(expected(source)), "output")
-        result_queue.put((rank, "ok", None))
-    except BaseException:
-        result_queue.put((rank, "err", traceback.format_exc()))
-    finally:
-        if dist.is_initialized():
-            dist.destroy_process_group()
-
-
-def _mixed_precision_worker(
-    rank: int, world_size: int, port: int, result_queue: Any
-) -> None:
-    try:
-        # Arrange
-        _init_gloo(rank, world_size, port)
-        torch.manual_seed(0)
-        tp = 2
-        attn = _attention(4, 1)
-        inject_adapter_in_model(
-            LoraConfig(r=2, target_modules=["q_proj", "k_proj", "v_proj", "o_proj"]),
-            attn,
-        )
-        model = AttentionStack(attn)
-        _broadcast_module(model)
-        for name, param in model.named_parameters():
-            param.requires_grad_("lora_" in name)
-        mesh = _tp_mesh(world_size, tp)
-        apply_tensor_parallel(model, mesh.tp)
-        apply_fsdp2(
-            model,
-            FSDPConfig(
-                tp=tp,
-                wrap_every_n_blocks=1,
-                param_persistence_threshold=0,
-                param_dtype="bfloat16",
-                reduce_dtype="float32",
-            ),
-            mesh=mesh.hsdp,
-        )
-        forward_dtypes: list[torch.dtype] = []
-        for name, module in attn.named_modules():
-            if ".lora_" in name and isinstance(module, nn.Linear):
-                module.register_forward_pre_hook(
-                    lambda mod, _args: forward_dtypes.append(mod.weight.dtype)
-                )
-        trainable = [param for param in model.parameters() if param.requires_grad]
-        torch.manual_seed(rank)
-        source = torch.randn(2, 4, attn.config.hidden_size, dtype=torch.bfloat16)
-
-        # Act
-        output = _hidden(attn(source))
-        output.float().sum().backward()
-        mesh.sync_grads(trainable, torch.float32)
-        sync_grads([param for param in trainable if not isinstance(param, DTensor)])
-
-        # Assert
-        assert output.dtype == torch.bfloat16
-        assert len(forward_dtypes) == 8
-        assert set(forward_dtypes) == {torch.bfloat16}
-        assert {param.dtype for param in trainable} == {torch.float32}
-        assert {param.grad.dtype for param in trainable} == {torch.float32}
-        assert attn.q_proj.base_layer.weight.dtype == torch.bfloat16
-        result_queue.put((rank, "ok", None))
-    except BaseException:
-        result_queue.put((rank, "err", traceback.format_exc()))
-    finally:
-        if dist.is_initialized():
-            dist.destroy_process_group()
+    # Assert
+    assert output.dtype == torch.bfloat16
+    assert len(forward_dtypes) == 8
+    assert set(forward_dtypes) == {torch.bfloat16}
+    assert {param.dtype for param in trainable} == {torch.float32}
+    assert {param.grad.dtype for param in trainable} == {torch.float32}
+    assert attn.q_proj.base_layer.weight.dtype == torch.bfloat16
 
 
-def _heads_worker(rank: int, world_size: int, port: int, result_queue: Any) -> None:
-    try:
-        _init_gloo(rank, world_size, port)
-        attn = _attention(4, 2)
-        mesh = _tp_mesh(world_size, tp=3)
-        with pytest.raises(ValueError, match=r"num_attention_heads \(4\).*tp \(3\)"):
-            apply_tensor_parallel(attn, mesh.tp)
-        result_queue.put((rank, "ok", None))
-    except BaseException:
-        result_queue.put((rank, "err", traceback.format_exc()))
-    finally:
-        if dist.is_initialized():
-            dist.destroy_process_group()
+def _heads_worker(rank: int, world_size: int) -> None:
+    attn = _attention(4, 2)
+    mesh = _tp_mesh(world_size, tp=3)
+    with pytest.raises(ValueError, match=r"num_attention_heads \(4\).*tp \(3\)"):
+        apply_tensor_parallel(attn, mesh.tp)
 
 
 class LatentPair(nn.Module):
@@ -546,245 +437,217 @@ class CausalHead(nn.Module):
             self.lm_head.weight = self.embed.weight
 
 
-def _dense_worker(rank: int, world_size: int, port: int, result_queue: Any) -> None:
-    try:
-        _init_gloo(rank, world_size, port)
-        torch.manual_seed(0)
-        tp = 2
-        mesh = _tp_mesh(world_size, tp)
+def _dense_worker(rank: int, world_size: int) -> None:
+    torch.manual_seed(0)
+    tp = 2
+    mesh = _tp_mesh(world_size, tp)
 
-        mlp_config = NemotronHConfig(
-            hidden_size=8,
-            intermediate_size=8,
-            vocab_size=32,
-            num_attention_heads=4,
-            num_key_value_heads=4,
-            head_dim=4,
-            layers_block_type=["mlp"],
-            mlp_bias=False,
-        )
-        mlp = NemotronHMLP(mlp_config, intermediate_size=8)
-        mlp.eval()
-        _broadcast_module(mlp)
-        mlp_reference = copy.deepcopy(mlp)
-        mlp_source = torch.randn(2, 4, 8)
-        dist.broadcast(mlp_source, src=0)
-        apply_tensor_parallel(mlp, mesh.tp)
-        _assert_close(mlp(mlp_source), mlp_reference(mlp_source))
+    mlp_config = NemotronHConfig(
+        hidden_size=8,
+        intermediate_size=8,
+        vocab_size=32,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        head_dim=4,
+        layers_block_type=["mlp"],
+        mlp_bias=False,
+    )
+    mlp = NemotronHMLP(mlp_config, intermediate_size=8)
+    mlp.eval()
+    _broadcast_module(mlp)
+    mlp_reference = copy.deepcopy(mlp)
+    mlp_source = torch.randn(2, 4, 8)
+    dist.broadcast(mlp_source, src=0)
+    apply_tensor_parallel(mlp, mesh.tp)
+    _assert_close(mlp(mlp_source), mlp_reference(mlp_source))
 
-        latent = LatentPair(hidden=8, latent=4)
-        _broadcast_module(latent)
-        latent_reference = copy.deepcopy(latent)
-        latent_source = torch.randn(2, 4, 8)
-        dist.broadcast(latent_source, src=0)
-        apply_tensor_parallel(latent, mesh.tp)
-        latent_output = latent(latent_source)
-        _assert_close(latent_output, latent_reference(latent_source))
-        latent_output.sum().backward()
-        fc2_grad = latent.fc2_latent_proj.weight.grad
-        if isinstance(fc2_grad, DTensor):
-            fc2_grad = fc2_grad.to_local()
-        if not isinstance(fc2_grad, torch.Tensor) or not torch.isfinite(fc2_grad).all():
-            msg = "fc2_latent_proj.weight.grad is not finite"
-            raise AssertionError(msg)
+    latent = LatentPair(hidden=8, latent=4)
+    _broadcast_module(latent)
+    latent_reference = copy.deepcopy(latent)
+    latent_source = torch.randn(2, 4, 8)
+    dist.broadcast(latent_source, src=0)
+    apply_tensor_parallel(latent, mesh.tp)
+    latent_output = latent(latent_source)
+    _assert_close(latent_output, latent_reference(latent_source))
+    latent_output.sum().backward()
+    fc2_grad = latent.fc2_latent_proj.weight.grad
+    if isinstance(fc2_grad, DTensor):
+        fc2_grad = fc2_grad.to_local()
+    if not isinstance(fc2_grad, torch.Tensor) or not torch.isfinite(fc2_grad).all():
+        msg = "fc2_latent_proj.weight.grad is not finite"
+        raise AssertionError(msg)
 
-        moe_config = NemotronHConfig(
-            hidden_size=8,
-            vocab_size=32,
-            num_attention_heads=4,
-            num_key_value_heads=4,
-            head_dim=4,
-            moe_intermediate_size=8,
-            moe_shared_expert_intermediate_size=8,
-            moe_latent_size=4,
-            n_routed_experts=4,
-            num_experts_per_tok=1,
-            n_group=1,
-            topk_group=1,
-            layers_block_type=["moe"],
-            mlp_bias=False,
-        )
-        moe = NemotronHMoE(moe_config, layer_idx=0)
-        _fill(moe)
-        moe.eval()
-        _broadcast_module(moe)
-        moe_reference = copy.deepcopy(moe)
-        moe_source = torch.randn(2, 3, 8)
-        dist.broadcast(moe_source, src=0)
-        apply_tensor_parallel(moe, mesh.tp)
-        if not isinstance(moe.fc1_latent_proj.weight, DTensor):
-            msg = "NemotronHMoE.fc1_latent_proj.weight must be a DTensor"
-            raise AssertionError(msg)
-        if isinstance(moe.experts.up_proj, DTensor) or isinstance(
-            moe.gate.weight, DTensor
-        ):
-            msg = "routed experts and the router must stay plain tensors"
-            raise AssertionError(msg)
-        _assert_close(moe(moe_source), moe_reference(moe_source))
+    moe_config = NemotronHConfig(
+        hidden_size=8,
+        vocab_size=32,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        head_dim=4,
+        moe_intermediate_size=8,
+        moe_shared_expert_intermediate_size=8,
+        moe_latent_size=4,
+        n_routed_experts=4,
+        num_experts_per_tok=1,
+        n_group=1,
+        topk_group=1,
+        layers_block_type=["moe"],
+        mlp_bias=False,
+    )
+    moe = NemotronHMoE(moe_config, layer_idx=0)
+    _fill(moe)
+    moe.eval()
+    _broadcast_module(moe)
+    moe_reference = copy.deepcopy(moe)
+    moe_source = torch.randn(2, 3, 8)
+    dist.broadcast(moe_source, src=0)
+    apply_tensor_parallel(moe, mesh.tp)
+    if not isinstance(moe.fc1_latent_proj.weight, DTensor):
+        msg = "NemotronHMoE.fc1_latent_proj.weight must be a DTensor"
+        raise AssertionError(msg)
+    if isinstance(moe.experts.up_proj, DTensor) or isinstance(moe.gate.weight, DTensor):
+        msg = "routed experts and the router must stay plain tensors"
+        raise AssertionError(msg)
+    _assert_close(moe(moe_source), moe_reference(moe_source))
 
-        vision_attn = VisionAttention(hidden=8, num_heads=4, head_dim=2)
-        vision_mlp = VisionMLP(hidden=8, intermediate=8)
-        tower = VisionTower(vision_attn, vision_mlp)
-        tower.eval()
-        _broadcast_module(tower)
-        vision_reference = copy.deepcopy(tower)
-        vision_source = torch.randn(2, 4, 8)
-        dist.broadcast(vision_source, src=0)
-        apply_tensor_parallel(tower, mesh.tp)
-        _assert_close(
-            tower.vision_model.attn(vision_source),
-            vision_reference.vision_model.attn(vision_source),
-        )
-        _assert_close(
-            tower.vision_model.mlp(vision_source),
-            vision_reference.vision_model.mlp(vision_source),
-        )
+    vision_attn = VisionAttention(hidden=8, num_heads=4, head_dim=2)
+    vision_mlp = VisionMLP(hidden=8, intermediate=8)
+    tower = VisionTower(vision_attn, vision_mlp)
+    tower.eval()
+    _broadcast_module(tower)
+    vision_reference = copy.deepcopy(tower)
+    vision_source = torch.randn(2, 4, 8)
+    dist.broadcast(vision_source, src=0)
+    apply_tensor_parallel(tower, mesh.tp)
+    _assert_close(
+        tower.vision_model.attn(vision_source),
+        vision_reference.vision_model.attn(vision_source),
+    )
+    _assert_close(
+        tower.vision_model.mlp(vision_source),
+        vision_reference.vision_model.mlp(vision_source),
+    )
 
-        biased_mlp = VisionMLP(hidden=8, intermediate=8, bias=True)
-        biased_tower = VisionTower(
-            VisionAttention(hidden=8, num_heads=4, head_dim=2),
-            biased_mlp,
-        )
-        biased_tower.eval()
-        _broadcast_module(biased_tower)
-        biased_reference = copy.deepcopy(biased_tower)
-        biased_source = torch.randn(2, 4, 8)
-        dist.broadcast(biased_source, src=0)
-        apply_tensor_parallel(biased_tower, mesh.tp)
-        stale = biased_mlp.fc2.bias
-        replaced = nn.Parameter(
-            stale.detach().clone() + 1, requires_grad=stale.requires_grad
-        )
-        biased_mlp.fc2.bias = replaced
-        ref_bias = biased_reference.vision_model.mlp.fc2.bias
-        ref_bias.data.copy_(replaced.detach())
-        biased_out = biased_tower.vision_model.mlp(biased_source)
-        _assert_close(
-            biased_out,
-            biased_reference.vision_model.mlp(biased_source),
-        )
-        biased_out.sum().backward()
-        biased_reference.vision_model.mlp(biased_source).sum().backward()
-        bias_grad = biased_mlp.fc2.bias.grad
-        ref_grad = biased_reference.vision_model.mlp.fc2.bias.grad
-        if bias_grad is None or ref_grad is None:
-            msg = "fc2.bias.grad is missing"
-            raise AssertionError(msg)
-        _assert_close(bias_grad, ref_grad)
+    biased_mlp = VisionMLP(hidden=8, intermediate=8, bias=True)
+    biased_tower = VisionTower(
+        VisionAttention(hidden=8, num_heads=4, head_dim=2),
+        biased_mlp,
+    )
+    biased_tower.eval()
+    _broadcast_module(biased_tower)
+    biased_reference = copy.deepcopy(biased_tower)
+    biased_source = torch.randn(2, 4, 8)
+    dist.broadcast(biased_source, src=0)
+    apply_tensor_parallel(biased_tower, mesh.tp)
+    stale = biased_mlp.fc2.bias
+    replaced = nn.Parameter(
+        stale.detach().clone() + 1, requires_grad=stale.requires_grad
+    )
+    biased_mlp.fc2.bias = replaced
+    ref_bias = biased_reference.vision_model.mlp.fc2.bias
+    ref_bias.data.copy_(replaced.detach())
+    biased_out = biased_tower.vision_model.mlp(biased_source)
+    _assert_close(
+        biased_out,
+        biased_reference.vision_model.mlp(biased_source),
+    )
+    biased_out.sum().backward()
+    biased_reference.vision_model.mlp(biased_source).sum().backward()
+    bias_grad = biased_mlp.fc2.bias.grad
+    ref_grad = biased_reference.vision_model.mlp.fc2.bias.grad
+    if bias_grad is None or ref_grad is None:
+        msg = "fc2.bias.grad is missing"
+        raise AssertionError(msg)
+    _assert_close(bias_grad, ref_grad)
 
-        odd = CausalHead(vocab=7, hidden=8, tie=False)
-        with pytest.raises(ValueError, match=r"vocab_size \(7\).*tp \(2\)"):
-            apply_tensor_parallel(odd, mesh.tp)
+    odd = CausalHead(vocab=7, hidden=8, tie=False)
+    with pytest.raises(ValueError, match=r"vocab_size \(7\).*tp \(2\)"):
+        apply_tensor_parallel(odd, mesh.tp)
 
-        tied = CausalHead(vocab=16, hidden=8, tie=True)
-        apply_tensor_parallel(tied, mesh.tp)
-        if isinstance(tied.lm_head.weight, DTensor):
-            msg = "tied lm_head.weight must stay a plain tensor"
-            raise AssertionError(msg)
-        if tied.lm_head.weight is not tied.embed.weight:
-            msg = "tied lm_head.weight must stay the embedding weight"
-            raise AssertionError(msg)
+    tied = CausalHead(vocab=16, hidden=8, tie=True)
+    apply_tensor_parallel(tied, mesh.tp)
+    if isinstance(tied.lm_head.weight, DTensor):
+        msg = "tied lm_head.weight must stay a plain tensor"
+        raise AssertionError(msg)
+    if tied.lm_head.weight is not tied.embed.weight:
+        msg = "tied lm_head.weight must stay the embedding weight"
+        raise AssertionError(msg)
 
-        head = CausalHead(vocab=16, hidden=8, tie=False)
-        _broadcast_module(head)
-        head_reference = copy.deepcopy(head)
-        head_source = torch.randn(2, 4, 8)
-        dist.broadcast(head_source, src=0)
-        apply_tensor_parallel(head, mesh.tp)
-        _assert_close(head.lm_head(head_source), head_reference.lm_head(head_source))
-        result_queue.put((rank, "ok", None))
-    except BaseException:
-        result_queue.put((rank, "err", traceback.format_exc()))
-    finally:
-        if dist.is_initialized():
-            dist.destroy_process_group()
+    head = CausalHead(vocab=16, hidden=8, tie=False)
+    _broadcast_module(head)
+    head_reference = copy.deepcopy(head)
+    head_source = torch.randn(2, 4, 8)
+    dist.broadcast(head_source, src=0)
+    apply_tensor_parallel(head, mesh.tp)
+    _assert_close(head.lm_head(head_source), head_reference.lm_head(head_source))
 
 
-def _latent_grad_worker(
-    rank: int, world_size: int, port: int, result_queue: Any
-) -> None:
-    try:
-        # Arrange
-        _init_gloo(rank, world_size, port)
-        torch.manual_seed(0)
-        mesh = _tp_mesh(world_size, tp=2)
-        latent = _with_lora(
-            LatentPair(hidden=8, latent=4), ["fc1_latent_proj", "fc2_latent_proj"]
-        )
-        mlp_config = NemotronHConfig(
-            hidden_size=8,
-            intermediate_size=8,
-            vocab_size=32,
-            num_attention_heads=4,
-            num_key_value_heads=4,
-            head_dim=4,
-            layers_block_type=["mlp"],
-            mlp_bias=False,
-        )
-        mlp = _with_lora(
-            NemotronHMLP(mlp_config, intermediate_size=8), ["up_proj", "down_proj"]
-        )
-        modules = [latent, mlp]
-        for module in modules:
-            _broadcast_module(module)
-        references = [copy.deepcopy(module) for module in modules]
-        source = torch.randn(2, 4, 8)
-        probe = torch.randn(2, 4, 8)
-        dist.broadcast(source, src=0)
-        dist.broadcast(probe, src=0)
-        for module in modules:
-            apply_tensor_parallel(module, mesh.tp)
+def _latent_grad_worker(rank: int, world_size: int) -> None:
+    # Arrange
+    torch.manual_seed(0)
+    mesh = _tp_mesh(world_size, tp=2)
+    latent = _with_lora(
+        LatentPair(hidden=8, latent=4), ["fc1_latent_proj", "fc2_latent_proj"]
+    )
+    mlp_config = NemotronHConfig(
+        hidden_size=8,
+        intermediate_size=8,
+        vocab_size=32,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        head_dim=4,
+        layers_block_type=["mlp"],
+        mlp_bias=False,
+    )
+    mlp = _with_lora(
+        NemotronHMLP(mlp_config, intermediate_size=8), ["up_proj", "down_proj"]
+    )
+    modules = [latent, mlp]
+    for module in modules:
+        _broadcast_module(module)
+    references = [copy.deepcopy(module) for module in modules]
+    source = torch.randn(2, 4, 8)
+    probe = torch.randn(2, 4, 8)
+    dist.broadcast(source, src=0)
+    dist.broadcast(probe, src=0)
+    for module in modules:
+        apply_tensor_parallel(module, mesh.tp)
 
-        for module, reference in zip(modules, references, strict=True):
-            # Act
-            expected, expected_input_grad = _forward_backward(reference, source, probe)
-            actual, actual_input_grad = _forward_backward(module, source, probe)
+    for module, reference in zip(modules, references, strict=True):
+        # Act
+        expected, expected_input_grad = _forward_backward(reference, source, probe)
+        actual, actual_input_grad = _forward_backward(module, source, probe)
 
-            # Assert
-            label = type(module).__name__
-            _assert_exact(actual, expected, f"{label} output")
-            _assert_exact(actual_input_grad, expected_input_grad, f"{label} input")
-            _assert_grads_match(module, reference)
-        result_queue.put((rank, "ok", None))
-    except BaseException:
-        result_queue.put((rank, "err", traceback.format_exc()))
-    finally:
-        if dist.is_initialized():
-            dist.destroy_process_group()
+        # Assert
+        label = type(module).__name__
+        _assert_exact(actual, expected, f"{label} output")
+        _assert_exact(actual_input_grad, expected_input_grad, f"{label} input")
+        _assert_grads_match(module, reference)
 
 
-def _dropout_worker(rank: int, world_size: int, port: int, result_queue: Any) -> None:
-    try:
-        _init_gloo(rank, world_size, port)
-        torch.manual_seed(rank)
-        latent = LatentPair(hidden=8, latent=4)
-        config = LoraConfig(
-            r=2,
-            target_modules=["fc1_latent_proj", "fc2_latent_proj"],
-            lora_dropout=0.5,
-        )
-        inject_adapter_in_model(config, latent)
-        mesh = _tp_mesh(world_size, tp=2)
-        apply_tensor_parallel(latent, mesh.tp)
-        column = latent.fc1_latent_proj.lora_dropout["default"]
-        row = latent.fc2_latent_proj.lora_dropout["default"]
-        column.train()
+def _dropout_worker(rank: int, world_size: int) -> None:
+    torch.manual_seed(rank)
+    latent = LatentPair(hidden=8, latent=4)
+    config = LoraConfig(
+        r=2,
+        target_modules=["fc1_latent_proj", "fc2_latent_proj"],
+        lora_dropout=0.5,
+    )
+    inject_adapter_in_model(config, latent)
+    mesh = _tp_mesh(world_size, tp=2)
+    apply_tensor_parallel(latent, mesh.tp)
+    column = latent.fc1_latent_proj.lora_dropout["default"]
+    row = latent.fc2_latent_proj.lora_dropout["default"]
+    column.train()
 
-        mask = column(torch.ones(256))
-        masks = [torch.empty_like(mask) for _ in range(world_size)]
-        dist.all_gather(masks, mask)
+    mask = column(torch.ones(256))
+    masks = [torch.empty_like(mask) for _ in range(world_size)]
+    dist.all_gather(masks, mask)
 
-        assert isinstance(column, SharedSeedDropout)
-        assert isinstance(row, nn.Dropout)
-        assert torch.equal(masks[0], masks[1])
-        assert bool((mask == 0).any())
-        assert bool((mask == 2).any())
-        result_queue.put((rank, "ok", None))
-    except BaseException:
-        result_queue.put((rank, "err", traceback.format_exc()))
-    finally:
-        if dist.is_initialized():
-            dist.destroy_process_group()
+    assert isinstance(column, SharedSeedDropout)
+    assert isinstance(row, nn.Dropout)
+    assert torch.equal(masks[0], masks[1])
+    assert bool((mask == 0).any())
+    assert bool((mask == 2).any())
 
 
 class AttentionBlock(nn.Module):
@@ -802,118 +665,100 @@ class AttentionStack(nn.Module):
         self.layers = nn.ModuleList([AttentionBlock(attn)])
 
 
-def _fsdp_worker(rank: int, world_size: int, port: int, result_queue: Any) -> None:
-    try:
-        _init_gloo(rank, world_size, port)
-        torch.manual_seed(0)
-        tp = 2
-        attn = _attention(4, 2)
-        model = AttentionStack(attn)
-        _broadcast_module(model)
-        mesh = _tp_mesh(world_size, tp)
-        apply_tensor_parallel(model, mesh.tp)
-        before = {
-            id(param)
-            for param in model.parameters()
-            if isinstance(param, DTensor) and param.device_mesh is mesh.tp
-        }
-        if not before:
-            msg = "expected attention DTensors on the tp mesh"
-            raise AssertionError(msg)
-        apply_fsdp2(
-            model,
-            FSDPConfig(tp=tp, wrap_every_n_blocks=1, param_persistence_threshold=0),
-            mesh=mesh.hsdp,
-        )
-        after = {
-            id(param)
-            for param in model.parameters()
-            if isinstance(param, DTensor) and param.device_mesh is mesh.tp
-        }
-        if after != before:
-            msg = "attention DTensors must stay on the tp mesh"
-            raise AssertionError(msg)
-        q_weight = model.layers[0].attn.q_proj.weight
-        if not isinstance(q_weight, DTensor) or q_weight.device_mesh is not mesh.tp:
-            msg = "q_proj.weight must stay on the tp mesh"
-            raise AssertionError(msg)
-        lin = model.layers[0].lin.weight
-        if not isinstance(lin, DTensor) or lin.device_mesh is mesh.tp:
-            msg = "non-TP linear must be on the FSDP mesh"
-            raise AssertionError(msg)
-        result_queue.put((rank, "ok", None))
-    except BaseException:
-        result_queue.put((rank, "err", traceback.format_exc()))
-    finally:
-        if dist.is_initialized():
-            dist.destroy_process_group()
+def _fsdp_worker(rank: int, world_size: int) -> None:
+    torch.manual_seed(0)
+    tp = 2
+    attn = _attention(4, 2)
+    model = AttentionStack(attn)
+    _broadcast_module(model)
+    mesh = _tp_mesh(world_size, tp)
+    apply_tensor_parallel(model, mesh.tp)
+    before = {
+        id(param)
+        for param in model.parameters()
+        if isinstance(param, DTensor) and param.device_mesh is mesh.tp
+    }
+    if not before:
+        msg = "expected attention DTensors on the tp mesh"
+        raise AssertionError(msg)
+    apply_fsdp2(
+        model,
+        FSDPConfig(tp=tp, wrap_every_n_blocks=1, param_persistence_threshold=0),
+        mesh=mesh.hsdp,
+    )
+    after = {
+        id(param)
+        for param in model.parameters()
+        if isinstance(param, DTensor) and param.device_mesh is mesh.tp
+    }
+    if after != before:
+        msg = "attention DTensors must stay on the tp mesh"
+        raise AssertionError(msg)
+    q_weight = model.layers[0].attn.q_proj.weight
+    if not isinstance(q_weight, DTensor) or q_weight.device_mesh is not mesh.tp:
+        msg = "q_proj.weight must stay on the tp mesh"
+        raise AssertionError(msg)
+    lin = model.layers[0].lin.weight
+    if not isinstance(lin, DTensor) or lin.device_mesh is mesh.tp:
+        msg = "non-TP linear must be on the FSDP mesh"
+        raise AssertionError(msg)
 
 
-def _lm_head_fsdp_worker(
-    rank: int, world_size: int, port: int, result_queue: Any
-) -> None:
-    try:
-        _init_gloo(rank, world_size, port)
-        tp = 2
-        head = CausalHead(16, 8, tie=False)
-        mesh = _tp_mesh(world_size, tp)
-        apply_tensor_parallel(head, mesh.tp)
-        weight = head.lm_head.weight
-        if not isinstance(weight, DTensor) or weight.device_mesh is not mesh.tp:
-            msg = "lm_head.weight must be on the tp mesh before FSDP"
-            raise AssertionError(msg)
-        apply_fsdp2(
-            head,
-            FSDPConfig(tp=tp, wrap_every_n_blocks=1, param_persistence_threshold=0),
-            mesh=mesh.hsdp,
-        )
-        weight = head.lm_head.weight
-        if not isinstance(weight, DTensor) or weight.device_mesh is not mesh.tp:
-            msg = "lm_head.weight must stay on the tp mesh"
-            raise AssertionError(msg)
-        result_queue.put((rank, "ok", None))
-    except BaseException:
-        result_queue.put((rank, "err", traceback.format_exc()))
-    finally:
-        if dist.is_initialized():
-            dist.destroy_process_group()
+def _lm_head_fsdp_worker(rank: int, world_size: int) -> None:
+    tp = 2
+    head = CausalHead(16, 8, tie=False)
+    mesh = _tp_mesh(world_size, tp)
+    apply_tensor_parallel(head, mesh.tp)
+    weight = head.lm_head.weight
+    if not isinstance(weight, DTensor) or weight.device_mesh is not mesh.tp:
+        msg = "lm_head.weight must be on the tp mesh before FSDP"
+        raise AssertionError(msg)
+    apply_fsdp2(
+        head,
+        FSDPConfig(tp=tp, wrap_every_n_blocks=1, param_persistence_threshold=0),
+        mesh=mesh.hsdp,
+    )
+    weight = head.lm_head.weight
+    if not isinstance(weight, DTensor) or weight.device_mesh is not mesh.tp:
+        msg = "lm_head.weight must stay on the tp mesh"
+        raise AssertionError(msg)
 
 
-@requires_gloo
+@pytest.mark.multi_rank
 class TestApplyTensorParallel:
     def test_attention_forward_and_grads_match_unsharded(self):
-        _spawn_ranks(_attention_parity_worker)
+        run_ranks(_attention_parity_worker)
 
     def test_shared_kv_head_forward_and_grads_match_unsharded(self):
-        _spawn_ranks(_shared_kv_worker, world_size=4)
+        run_ranks(_shared_kv_worker, 4)
 
     @pytest.mark.parametrize("tp", [2, 4])
     def test_lora_export_after_step_matches_unsharded(self, tp):
-        _spawn_ranks(partial(_lora_export_worker, tp), world_size=tp)
+        run_ranks(_lora_export_worker, tp, tp)
 
     def test_shared_kv_head_load_matches_checkpoint(self, tmp_path):
-        _spawn_ranks(partial(_shared_kv_load_worker, str(tmp_path)), world_size=4)
+        run_ranks(_shared_kv_load_worker, 4, str(tmp_path))
 
     def test_lora_runs_in_param_dtype_and_grads_sync_in_reduce_dtype(self):
-        _spawn_ranks(_mixed_precision_worker, world_size=4)
+        run_ranks(_mixed_precision_worker, 4)
 
     def test_latent_and_mlp_grads_match_unsharded(self):
-        _spawn_ranks(_latent_grad_worker)
+        run_ranks(_latent_grad_worker)
 
     def test_column_lora_dropout_mask_matches_across_ranks(self):
-        _spawn_ranks(_dropout_worker)
+        run_ranks(_dropout_worker)
 
     def test_attention_heads_not_divisible_by_tp_raises(self):
-        _spawn_ranks(_heads_worker, world_size=3)
+        run_ranks(_heads_worker, 3)
 
     def test_mlp_latent_vision_and_lm_head_match_unsharded(self):
-        _spawn_ranks(_dense_worker)
+        run_ranks(_dense_worker)
 
     def test_fsdp_leaves_attention_dtensors_on_tp_mesh(self):
-        _spawn_ranks(_fsdp_worker)
+        run_ranks(_fsdp_worker)
 
     def test_fsdp_leaves_lm_head_on_tp_mesh(self):
-        _spawn_ranks(_lm_head_fsdp_worker)
+        run_ranks(_lm_head_fsdp_worker)
 
 
 class TestTensorParallelGuards:

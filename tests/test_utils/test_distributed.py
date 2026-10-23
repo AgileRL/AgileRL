@@ -17,7 +17,7 @@ import os
 import subprocess
 import sys
 from types import SimpleNamespace
-from typing import Any, ClassVar
+from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -95,14 +95,10 @@ from agilerl.distributed.runtime import (
 from agilerl.utils.algo_utils import CosineLRScheduleConfig
 from agilerl.utils.llm_utils import save_lora_adapters
 from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
+from tests.rank_launch import run_ranks
 from tests.test_algorithms.test_llms.llm_helpers import (
     DummyConfig,
     DummyMLPPreTrainedModel,
-)
-from tests.test_utils.test_expert_parallel import (
-    _init_gloo,
-    _spawn_ranks,
-    requires_gloo,
 )
 
 cuda_required = pytest.mark.skipif(
@@ -986,97 +982,67 @@ class TestSyncGrads:
         # Assert
         mock_all_reduce.assert_not_called()
 
-    @requires_gloo
+    @pytest.mark.multi_rank
     def test_averages_grads_and_skips_params_with_no_grad_on_every_rank(self):
-        _spawn_ranks(_sync_grads_skips_unused_worker)
+        run_ranks(_sync_grads_skips_unused_worker)
 
-    @requires_gloo
+    @pytest.mark.multi_rank
     def test_leaves_every_grad_none_when_no_rank_has_one(self):
-        _spawn_ranks(_sync_grads_all_unused_worker)
+        run_ranks(_sync_grads_all_unused_worker)
 
-    @requires_gloo
+    @pytest.mark.multi_rank
     def test_raises_on_every_rank_when_ranks_disagree_on_a_grad(self):
-        _spawn_ranks(_sync_grads_mismatch_worker)
+        run_ranks(_sync_grads_mismatch_worker)
 
 
-def _sync_grads_skips_unused_worker(
-    rank: int, world_size: int, port: int, result_queue: Any
-) -> None:
-    try:
-        _init_gloo(rank, world_size, port)
-        # Arrange — ranks hold grads 1 and 3
-        first = nn.Parameter(torch.zeros(2))
-        first.grad = torch.full((2,), 2.0 * rank + 1)
-        unused = nn.Parameter(torch.zeros(4))
-        second = nn.Parameter(torch.zeros(3))
-        second.grad = torch.full((3,), 2.0 * rank + 1)
-        optimizer = torch.optim.AdamW([first, unused, second], lr=0.1)
+def _sync_grads_skips_unused_worker(rank: int, world_size: int) -> None:
+    # Arrange — ranks hold grads 1 and 3
+    first = nn.Parameter(torch.zeros(2))
+    first.grad = torch.full((2,), 2.0 * rank + 1)
+    unused = nn.Parameter(torch.zeros(4))
+    second = nn.Parameter(torch.zeros(3))
+    second.grad = torch.full((3,), 2.0 * rank + 1)
+    optimizer = torch.optim.AdamW([first, unused, second], lr=0.1)
 
-        # Act
-        sync_grads([first, unused, second])
-        optimizer.step()
+    # Act
+    sync_grads([first, unused, second])
+    optimizer.step()
 
-        # Assert
-        assert torch.equal(first.grad, torch.full((2,), 2.0))
-        assert torch.equal(second.grad, torch.full((3,), 2.0))
-        assert unused.grad is None
-        assert torch.equal(unused.detach(), torch.zeros(4))
-        assert unused not in optimizer.state
-        result_queue.put((rank, "ok", None))
-    except Exception as exc:
-        result_queue.put((rank, "err", repr(exc)))
-    finally:
-        if dist.is_initialized():
-            dist.destroy_process_group()
+    # Assert
+    assert torch.equal(first.grad, torch.full((2,), 2.0))
+    assert torch.equal(second.grad, torch.full((3,), 2.0))
+    assert unused.grad is None
+    assert torch.equal(unused.detach(), torch.zeros(4))
+    assert unused not in optimizer.state
 
 
-def _sync_grads_all_unused_worker(
-    rank: int, world_size: int, port: int, result_queue: Any
-) -> None:
-    try:
-        _init_gloo(rank, world_size, port)
-        # Arrange
-        params = [nn.Parameter(torch.zeros(2)), nn.Parameter(torch.zeros(3))]
+def _sync_grads_all_unused_worker(rank: int, world_size: int) -> None:
+    # Arrange
+    params = [nn.Parameter(torch.zeros(2)), nn.Parameter(torch.zeros(3))]
 
-        # Act
-        sync_grads(params)
+    # Act
+    sync_grads(params)
 
-        # Assert
-        assert all(param.grad is None for param in params)
-        result_queue.put((rank, "ok", None))
-    except Exception as exc:
-        result_queue.put((rank, "err", repr(exc)))
-    finally:
-        if dist.is_initialized():
-            dist.destroy_process_group()
+    # Assert
+    assert all(param.grad is None for param in params)
 
 
-def _sync_grads_mismatch_worker(
-    rank: int, world_size: int, port: int, result_queue: Any
-) -> None:
-    try:
-        _init_gloo(rank, world_size, port)
-        # Arrange — only rank 0 has a grad for ``partial``
-        shared = nn.Parameter(torch.zeros(2))
-        shared.grad = torch.full((2,), float(rank + 1))
-        partial = nn.Parameter(torch.zeros(2))
-        if rank == 0:
-            partial.grad = torch.ones(2)
+def _sync_grads_mismatch_worker(rank: int, world_size: int) -> None:
+    # Arrange — only rank 0 has a grad for ``partial``
+    shared = nn.Parameter(torch.zeros(2))
+    shared.grad = torch.full((2,), float(rank + 1))
+    partial = nn.Parameter(torch.zeros(2))
+    if rank == 0:
+        partial.grad = torch.ones(2)
 
-        # Act
-        with pytest.raises(
-            RuntimeError, match="1 params have a grad on some ranks but not others"
-        ):
-            sync_grads([shared, partial])
+    # Act
+    with pytest.raises(
+        RuntimeError, match="1 params have a grad on some ranks but not others"
+    ):
+        sync_grads([shared, partial])
 
-        # Assert
-        assert torch.equal(shared.grad, torch.full((2,), float(rank + 1)))
-        result_queue.put((rank, "ok", None))
-    except Exception as exc:
-        result_queue.put((rank, "err", repr(exc)))
-    finally:
-        if dist.is_initialized():
-            dist.destroy_process_group()
+    # Assert
+    assert torch.equal(shared.grad, torch.full((2,), float(rank + 1)))
 
 
 class TestMaterializeDtensors:
@@ -2862,9 +2828,6 @@ class TestApplyFsdp2:
         assert bool(torch.isfinite(logits).all())
 
     def test_checkpoint_wraps_blocks_then_shards_the_wrapper(self, world_size_one):
-        from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
-            CheckpointWrapper,
-        )
 
         class Block(nn.Module):
             def __init__(self):

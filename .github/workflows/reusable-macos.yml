@@ -33,9 +33,10 @@ jobs:
             - name: Install dependencies
               run: |
                   uv sync --locked --all-groups --extra all
+            # Linux runs the multi_rank (gloo process group) tests; macOS ranks
+            # cannot fork from the preloaded forkserver and spawn is several times slower.
             - name: Run macOS shard
               run: |
-                  rm -f .coverage .coverage.*
                   uv run python scripts/pytest_shard.py run \
                     --root tests \
                     --root agilerl-arena/tests \
@@ -45,10 +46,9 @@ jobs:
                     -- \
                     --import-mode=importlib \
                     --junitxml=junit-macos.xml \
-                    -m "not gpu and not vllm" \
-                    -n auto --dist loadgroup \
-                    --durations=15 \
-                    --cov --cov-report=term-missing
+                    -m "not gpu and not vllm and not multi_rank" \
+                    -n logical --dist loadgroup \
+                    --durations=15
             - name: Upload junit
               if: always()
               uses: actions/upload-artifact@v4

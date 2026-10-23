@@ -112,7 +112,7 @@ explicit = true
 
 [tool.pytest.ini_options]
 addopts = [
-    "-n", "auto",
+    "-n", "logical",
     "--dist", "loadgroup",
     "--durations=0",
     "--durations-min=1.0",
@@ -136,6 +136,7 @@ filterwarnings = [
 markers = [
     "vllm: needs vLLM (import or real engine). Hosted Linux CPU excludes these; the GPU job runs them. Real vLLM init is loadgroup-pinned because GPU memory profiling fails when peer workers free memory mid-init.",
     "gpu: tests that use a GPU (CUDA, etc.) but do NOT initialise real vLLM (exclude with -m 'not gpu'). Safe to fan out across multiple xdist workers.",
+    "multi_rank: runs a torch.distributed process group across child processes (tests.rank_launch.run_ranks). Skipped on Windows (no gloo).",
 ]
 
 [tool.coverage.run]

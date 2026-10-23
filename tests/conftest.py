@@ -8,6 +8,11 @@ import sys
 import tempfile
 from pathlib import Path
 
+# xdist workers already fill the CPUs. Per-worker OpenMP pools on top of that
+# contend for cores and run the suite 2-4x slower. Set before numpy/torch load.
+if os.environ.get("PYTEST_XDIST_WORKER"):
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+
 import gymnasium as gym
 
 # Must be absolute before isolate_working_directory chdirs. A relative
@@ -220,8 +225,11 @@ def pytest_collection_modifyitems(config, items):
     skip_no_cuda = pytest.mark.skip(
         reason="Requires a usable CUDA device (gpu/vllm-marked); none available."
     )
+    skip_no_gloo = pytest.mark.skip(reason="multi_rank tests need gloo")
     gputest_count = 0
     for item in items:
+        if sys.platform == "win32" and item.get_closest_marker("multi_rank"):
+            item.add_marker(skip_no_gloo)
         if item.get_closest_marker("vllm") or item.get_closest_marker("gpu"):
             item.add_marker(gputest_groups[gputest_count % len(gputest_groups)])
             gputest_count += 1

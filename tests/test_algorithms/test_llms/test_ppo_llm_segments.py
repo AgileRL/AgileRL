@@ -26,6 +26,7 @@ from peft import LoraConfig
 
 from agilerl.algorithms.ppo_llm import PPO as LLMPPO
 from agilerl.utils.llm_utils import LEARN_PHASE_METRIC_NAMES
+from tests.rank_launch import run_ranks
 from tests.test_algorithms.test_llms.llm_helpers import (
     create_value_head_module,
     scale_losses,
@@ -33,6 +34,7 @@ from tests.test_algorithms.test_llms.llm_helpers import (
 from tests.test_algorithms.test_llms.segment_helpers import (
     EPISODE_SEGMENTS,
     MEAN_SEGMENT_ROW_ACTION_TOKENS,
+    balanced_learn_worker,
     episode_sampling_logps,
     learn_rank_episodes,
     learn_with_nan_loss_on_rank_zero,
@@ -42,7 +44,6 @@ from tests.test_algorithms.test_llms.segment_helpers import (
     record_step_gradients,
     rows_from_other_ranks,
     segment_experiences,
-    spawn_balanced_learn,
     use_fake_liger_policy_loss,
 )
 
@@ -278,6 +279,7 @@ def scale_value_losses(
 @pytest.mark.skipif(
     sys.platform == "win32" or not dist.is_available(), reason="gloo unavailable"
 )
+@pytest.mark.multi_rank
 class TestPPOLearnBalancedAcrossRanks:
     @pytest.mark.parametrize("fuse", [False, True], ids=["split", "fused"])
     def test_uneven_ranks_run_even_rows_with_their_local_gradients(
@@ -292,7 +294,7 @@ class TestPPOLearnBalancedAcrossRanks:
         rank0, rank1 = rank_local_step_gradients(make_agent, monkeypatch)
 
         # Act
-        reports = spawn_balanced_learn(make_agent)
+        reports = run_ranks(balanced_learn_worker, 2, make_agent, backend=None)
 
         # Assert: 4 and 2 rows are dealt out as 3 and 3.
         for padded_rows, steps in reports:
@@ -322,8 +324,12 @@ class TestPPOLearnBalancedAcrossRanks:
         )
 
         # Act
-        reports = spawn_balanced_learn(
-            make_agent, partial(learn_rank_episodes, sampling_ranks=(0,))
+        reports = run_ranks(
+            balanced_learn_worker,
+            2,
+            make_agent,
+            partial(learn_rank_episodes, sampling_ranks=(0,)),
+            backend=None,
         )
 
         # Assert
@@ -347,7 +353,7 @@ class TestPPOLearnBalancedAcrossRanks:
         learn = partial(learn_with_nan_loss_on_rank_zero, scale_loss=scale_value_losses)
 
         # Act
-        reports = spawn_balanced_learn(_make_ppo, learn)
+        reports = run_ranks(balanced_learn_worker, 2, _make_ppo, learn, backend=None)
 
         # Assert
         for rank, ((error, weights_held), steps) in enumerate(reports):

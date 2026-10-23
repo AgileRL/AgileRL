@@ -25,9 +25,10 @@ pytest.importorskip("peft", reason="LLM tests require peft.")
 from peft import LoraConfig
 
 from agilerl.algorithms.reinforce_llm import REINFORCE
+from tests.rank_launch import run_ranks
 from tests.test_algorithms.test_llms.segment_helpers import (
+    balanced_learn_worker,
     pad_to_eight_rows,
-    spawn_balanced_learn,
     use_fake_liger_policy_loss,
 )
 from tests.test_algorithms.test_llms.vision_helpers import (
@@ -232,6 +233,7 @@ class TestREINFORCELearnVisionCache:
 @pytest.mark.skipif(
     sys.platform == "win32" or not dist.is_available(), reason="gloo unavailable"
 )
+@pytest.mark.multi_rank
 class TestREINFORCELearnVisionCacheAcrossRanks:
     def test_balanced_rows_run_the_tower_once_per_vision_row(self) -> None:
         # Arrange: rank 0's 4 rows (5 vision rows) and rank 1's 2 rows (3 vision
@@ -239,13 +241,19 @@ class TestREINFORCELearnVisionCacheAcrossRanks:
         # and 3. Rank 0 receives a row with 2 vision rows, rank 1 two rows with 3.
 
         # Act
-        cached = spawn_balanced_learn(
+        cached = run_ranks(
+            balanced_learn_worker,
+            2,
             make_tower_vision_reinforce,
             partial(learn_rank_vision_episodes, cached=True),
+            backend=None,
         )
-        uncached = spawn_balanced_learn(
+        uncached = run_ranks(
+            balanced_learn_worker,
+            2,
             make_tower_vision_reinforce,
             partial(learn_rank_vision_episodes, cached=False),
+            backend=None,
         )
 
         # Assert

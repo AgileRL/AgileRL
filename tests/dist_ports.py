@@ -7,15 +7,10 @@ from __future__ import annotations
 
 import itertools
 import os
-import shutil
 import socket
 import sys
-import tempfile
-from collections.abc import Iterator
-from contextlib import contextmanager
 
 port_counter = itertools.count()
-GLOO_FILESTORE_ENV = "AGILERL_TEST_GLOO_FILESTORE"
 
 
 def get_free_port() -> int:
@@ -69,27 +64,3 @@ def gloo_rank_env(rank: int, world_size: int, port: int) -> dict[str, str]:
     if ifname is not None:
         env["GLOO_SOCKET_IFNAME"] = ifname
     return env
-
-
-def gloo_init_method(port: int) -> str:
-    """FileStore URL when spawned, otherwise TCP on ``127.0.0.1``."""
-    store = os.environ.get(GLOO_FILESTORE_ENV)
-    if store:
-        return f"file://{store}"
-    return f"tcp://127.0.0.1:{port}"
-
-
-@contextmanager
-def gloo_filestore() -> Iterator[None]:
-    """Point spawned Gloo ranks at a unique FileStore path for this spawn."""
-    tmp = tempfile.mkdtemp(prefix="gloo-pg-")
-    old = os.environ.get(GLOO_FILESTORE_ENV)
-    os.environ[GLOO_FILESTORE_ENV] = os.path.join(tmp, "store")
-    try:
-        yield
-    finally:
-        if old is None:
-            os.environ.pop(GLOO_FILESTORE_ENV, None)
-        else:
-            os.environ[GLOO_FILESTORE_ENV] = old
-        shutil.rmtree(tmp, ignore_errors=True)

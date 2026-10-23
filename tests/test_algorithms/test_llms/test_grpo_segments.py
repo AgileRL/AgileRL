@@ -26,11 +26,13 @@ pytest.importorskip("peft", reason="LLM tests require peft.")
 from agilerl.algorithms.grpo import GRPO, _liger_global_token_count
 from agilerl.utils.segment_rows import split_episode_segments
 from agilerl.utils.vision_rows import VisionRows
+from tests.rank_launch import run_ranks
 from tests.test_algorithms.test_llms.llm_helpers import scale_losses
 from tests.test_algorithms.test_llms.segment_helpers import (
     EPISODE_SEGMENTS,
     NUM_SEGMENT_ROWS,
     SEQ_LEN,
+    balanced_learn_worker,
     episode_batch,
     learn_uneven_episodes,
     learn_with_nan_loss_on_rank_zero,
@@ -40,7 +42,6 @@ from tests.test_algorithms.test_llms.segment_helpers import (
     rows_from_other_ranks,
     seed_lora_weights,
     segment_experiences,
-    spawn_balanced_learn,
 )
 from tests.test_algorithms.test_llms.test_grpo_old_logprobs import (
     PAD_TOKEN_ID,
@@ -479,6 +480,7 @@ def scale_grpo_losses(
 @pytest.mark.skipif(
     sys.platform == "win32" or not dist.is_available(), reason="gloo unavailable"
 )
+@pytest.mark.multi_rank
 class TestGRPOLearnBalancedAcrossRanks:
     def test_uneven_ranks_run_even_rows_with_the_one_rank_gradient(
         self, monkeypatch: pytest.MonkeyPatch
@@ -490,7 +492,7 @@ class TestGRPOLearnBalancedAcrossRanks:
         learn_uneven_episodes(single, slice(0, 4))
 
         # Act
-        reports = spawn_balanced_learn(_make_grpo)
+        reports = run_ranks(balanced_learn_worker, 2, _make_grpo, backend=None)
 
         # Assert: 4 and 2 rows are dealt out as 3 and 3.
         assert len(single_steps) == 1
@@ -513,7 +515,7 @@ class TestGRPOLearnBalancedAcrossRanks:
         learn = partial(learn_with_nan_loss_on_rank_zero, scale_loss=scale_grpo_losses)
 
         # Act
-        reports = spawn_balanced_learn(_make_grpo, learn)
+        reports = run_ranks(balanced_learn_worker, 2, _make_grpo, learn, backend=None)
 
         # Assert
         for rank, ((error, weights_held), steps) in enumerate(reports):

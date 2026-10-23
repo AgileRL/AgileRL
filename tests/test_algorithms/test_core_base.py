@@ -36,6 +36,7 @@ Test organisation:
 
 from __future__ import annotations
 
+import copy as copy_mod
 import dataclasses
 import gc
 import importlib
@@ -45,11 +46,12 @@ import logging
 import os
 import re
 import shutil
-import socket
 import sys
+import tempfile
 import warnings
 import weakref
 from contextlib import contextmanager, nullcontext
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
@@ -59,15 +61,17 @@ import numpy as np
 import pytest
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as mp
 import torch.nn.functional as F
 from accelerate import Accelerator
 from accelerate.state import AcceleratorState
 from gymnasium import spaces
-from peft import LoraConfig
+from peft import LoraConfig, inject_adapter_in_model
+from peft.tuners.lora.layer import ParamWrapper
+from peft.tuners.tuners_utils import BaseTunerLayer
 from torch import nn, optim
 from torch.distributed.tensor import DTensor, distribute_tensor
 from torch.distributed.tensor.placement_types import Shard
+from torch.optim.lr_scheduler import StepLR
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import DQN, IPPO, PPO
@@ -83,6 +87,7 @@ from agilerl.algorithms.core.base import (
 from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
 from agilerl.algorithms.core.registry import (
     HyperparameterConfig,
+    MutationRegistry,
     NetworkGroup,
     OptimizerConfig,
     RLParameter,
@@ -97,7 +102,11 @@ from agilerl.arena.models.profiling import ProfilingConfig
 from agilerl.distributed import FSDPConfig
 from agilerl.distributed.expert_parallel import build_parallel_mesh
 from agilerl.distributed.runtime import DPRuntime, FSDPRuntime
-from agilerl.modules import EvolvableMLP
+from agilerl.lora.fused import (
+    patch_lora_for_fused_forward,
+)
+from agilerl.modules import EvolvableMLP, ModuleDict
+from agilerl.typing import MultiAgentSetup
 from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
     VLLMConfig,
@@ -108,7 +117,12 @@ from agilerl.utils.llm_utils import make_llm_optimizer
 from agilerl.utils.mutation_utils import target_activations
 from agilerl.wrappers.agent import RSNorm
 from tests.helper_functions import capture_grama_snapshot
-from tests.test_algorithms.test_base import DummyMARLAlgorithm, DummyRLAlgorithm
+from tests.rank_launch import run_ranks
+from tests.test_algorithms.test_base import (
+    DummyMARLAlgorithm,
+    DummyRLAlgorithm,
+    DummyRLAlgorithmNoPolicy,
+)
 from tests.test_algorithms.test_llms.llm_helpers import create_module
 from tests.test_algorithms.test_llms.test_ppo_llm_passes import (
     make_ppo,
@@ -438,7 +452,6 @@ class TestCopyAttributes:
         assert clone.extra_attr == 42
 
     def test_copy_attributes_copies_mutation_registry(self, dummy_agent):
-        from agilerl.algorithms.core.registry import MutationRegistry
 
         clone = DummyRLAlgorithm(
             dummy_agent.observation_space,
@@ -813,7 +826,6 @@ class TestRegisterMutationHook:
 
 class TestCopyAttributesTensorRuntimeError:
     def test_copy_attributes_tensor_deepcopy_fallback_to_clone(self, dummy_agent):
-        import copy as copy_mod
 
         clone = DummyRLAlgorithm(
             dummy_agent.observation_space,
@@ -842,7 +854,6 @@ class TestCopyAttributesTensorRuntimeError:
 
 class TestLoadCheckpointLrScheduler:
     def test_load_checkpoint_restores_lr_scheduler(self, dummy_agent, tmp_path):
-        from torch.optim.lr_scheduler import StepLR
 
         dummy_agent.lr_scheduler = StepLR(
             dummy_agent.dummy_optimizer.optimizer, step_size=1, gamma=0.5
@@ -887,7 +898,6 @@ class TestPopulationParameterized:
 
 class TestRegistryInitHpConfig:
     def test_registry_init_rejects_unsupported_hp_dtype(self, vector_space):
-        from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 
         class BadHpAlgo(DummyRLAlgorithm):
             def __init__(self, obs_space, act_space, index=0):
@@ -1123,7 +1133,6 @@ class TestRegistryInitEvolvableNotInRegistry:
 
 class TestRegistryInitHpMissingAttribute:
     def test_registry_init_raises_when_hp_not_set_as_attribute(self, vector_space):
-        from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 
         class MissingHpAlgo(DummyRLAlgorithm):
             def __init__(self, obs_space, act_space, index=0):
@@ -1386,7 +1395,6 @@ class TestMultiAgentGetSetup:
         obs = [vector_space, vector_space]
         act = [spaces.Discrete(2), spaces.Discrete(2)]
         agent = DummyMARLAlgorithm(obs, act, agent_ids=["agent_0", "agent_1"], index=0)
-        from agilerl.typing import MultiAgentSetup
 
         assert agent.get_setup() == MultiAgentSetup.HOMOGENEOUS
 
@@ -1407,7 +1415,6 @@ class TestMultiAgentGetSetup:
             agent_ids=["agent_0", "other_agent_0", "other_other_agent_0"],
             index=0,
         )
-        from agilerl.typing import MultiAgentSetup
 
         assert agent.get_setup() == MultiAgentSetup.HETEROGENEOUS
 
@@ -1518,7 +1525,6 @@ class TestRegistryInitEvolvableNotRegistered:
 
 class TestRegistryInitHpMissing:
     def test_registry_init_raises_when_hp_not_set_as_attribute(self, vector_space):
-        from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 
         class MissingHpAlgo(DummyRLAlgorithm):
             def __init__(self, obs_space, act_space, index=0):
@@ -1538,7 +1544,6 @@ class TestGetPolicy:
         assert policy is dummy_agent.dummy_actor
 
     def test_get_policy_raises_when_no_policy_group(self, vector_space):
-        from tests.test_algorithms.test_base import DummyRLAlgorithmNoPolicy
 
         action_space = spaces.Discrete(2)
         agent = DummyRLAlgorithmNoPolicy(vector_space, action_space, index=0)
@@ -1562,7 +1567,6 @@ class TestMultiAgentUnknownSpaceType:
 
 class TestMultiAgentInvalidModuleDictKeys:
     def test_registry_init_raises_when_module_dict_key_invalid(self, vector_space):
-        from agilerl.modules import ModuleDict
 
         class BadKeyAlgo(DummyMARLAlgorithm):
             def __init__(self, obs_spaces, act_spaces, agent_ids, index=0):
@@ -2064,7 +2068,6 @@ class TestLLMCloneHelpers:
 
 class TestAttachLoraAdaptersExperts:
     def test_expert_lora_upgrades_wrappers_and_unifies_dtypes(self):
-        from peft import LoraConfig
 
         agent = _make_llm_agent()
         agent.lora_config = LoraConfig(
@@ -3217,8 +3220,6 @@ class TestFusedLinearLogprobsIntegration:
         agent.calc_position_embeddings = False
         agent.pad_token_id = 0
 
-        from contextlib import contextmanager
-
         @contextmanager
         def _noop_select(_name: str):
             yield
@@ -3227,11 +3228,6 @@ class TestFusedLinearLogprobsIntegration:
         return agent, actor
 
     def _build_lora_agent(self, vocab_size: int, hidden_size: int) -> LLMAlgorithm:
-        from peft import LoraConfig, inject_adapter_in_model
-
-        from agilerl.lora.fused import (
-            patch_lora_for_fused_forward,
-        )
 
         torch.manual_seed(0)
         model = inject_adapter_in_model(
@@ -3373,7 +3369,6 @@ class TestFusedLinearLogprobsIntegration:
         assert spy.call_args.kwargs["cast_to_fp32"] is cast_to_fp32
 
     def test_fused_model_pass_gathers_lm_head_once_across_chunks(self) -> None:
-        from contextlib import contextmanager
 
         torch.manual_seed(5)
         B, T, H, V = 2, 4, 8, 64
@@ -4785,7 +4780,6 @@ class TestLLMGenerateWithVllmColocate:
 
 
 def _fake_save_peft_adapter_for_vllm_rollout(peft_model, staging_dir, adapter_name):
-    from pathlib import Path
 
     adapter_dir = Path(staging_dir) / adapter_name
     adapter_dir.mkdir(parents=True, exist_ok=True)
@@ -4815,9 +4809,6 @@ def _setup_agent_for_vllm_lora_sync(agent, peft_ref):
     ``peft_ref`` is the PEFT model the adapter-only sync
     touches (it exports the LoRA delta, never base weights).
     """
-    import tempfile
-    from pathlib import Path
-
     agent.vllm_config = VLLMConfig()
     agent._vllm_lora_staging_dir = Path(tempfile.mkdtemp())
     agent._vllm_lora_staging_dir_is_temp = True
@@ -5672,10 +5663,6 @@ class TestLLMCloneSynchronisesProcesses:
 class TestLLMColocatedSleepModeClone:
     def test_colocated_sleep_mode_clone_skips_second_vllm_engine(self):
         """Sleep-mode clones build the trainer only; parent's llm is moved later."""
-        from types import SimpleNamespace
-
-        from agilerl.utils.algo_utils import VLLMConfig
-
         agent = SimpleNamespace(
             vllm_config=VLLMConfig(sleep_mode=True),
             llm=MagicMock(name="stale_llm"),
@@ -5774,86 +5761,68 @@ def _full_lora_tensors(actor: nn.Module) -> dict[str, torch.Tensor]:
 
 
 def _lora_across_ranks_worker(
-    rank: int,
-    world_size: int,
-    port: int,
-    fsdp_config: FSDPConfig | None,
-    result_queue: mp.Queue,
+    rank: int, world_size: int, fsdp_config: FSDPConfig | None
 ) -> None:
-    try:
-        os.environ.update(
-            RANK=str(rank),
-            LOCAL_RANK=str(rank),
-            WORLD_SIZE=str(world_size),
-            MASTER_ADDR="127.0.0.1",
-            MASTER_PORT=str(port),
-        )
-        dist.init_process_group("gloo", rank=rank, world_size=world_size)
-        # Liger's Triton kernels need a GPU; these ranks run on CPU.
-        patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False).start()
-        agent = GRPO(
-            actor_network=_tiny_moe_actor(),
-            pad_token_id=63,
-            pad_token="<pad>",
-            batch_size=2 * world_size,
-            group_size=2,
-            beta=0.0,
-            lr=1e-2,
-            max_grad_norm=None,
-            max_output_tokens=4,
-            max_model_len=12,
-            micro_batch_size_per_gpu=2,
-            mini_batch_size=4,
-            gradient_checkpointing=False,
-            calc_position_embeddings=False,
-            device="cpu",
-            use_liger_loss=False,
-            seed=7,
-            fsdp_config=fsdp_config,
-            lora_config=LoraConfig(
-                r=2,
-                lora_alpha=4,
-                lora_dropout=0.0,
-                target_modules=["q_proj", "v_proj"],
-                target_parameters=["mixer.experts.up_proj", "mixer.experts.down_proj"],
-            ),
-        )
-        initial = _full_lora_tensors(agent.actor)
-        generator = torch.Generator().manual_seed(rank)
-        ids = torch.randint(0, 63, (4, 8), generator=generator)
-        masks = torch.zeros(4, 7, dtype=torch.bool)
-        masks[:, 2:] = True
-        agent.learn(
-            (list(ids.split(1)), list(masks.split(1)), torch.tensor([1.0, 0, 0, 1]))
-        )
-        trained = _full_lora_tensors(agent.actor)
-        gathered: list[object] = [None] * world_size
-        dist.all_gather_object(gathered, (initial, trained))
-        rank0_initial, rank0_trained = gathered[0]
+    # Liger's Triton kernels need a GPU; these ranks run on CPU.
+    patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False).start()
+    agent = GRPO(
+        actor_network=_tiny_moe_actor(),
+        pad_token_id=63,
+        pad_token="<pad>",
+        batch_size=2 * world_size,
+        group_size=2,
+        beta=0.0,
+        lr=1e-2,
+        max_grad_norm=None,
+        max_output_tokens=4,
+        max_model_len=12,
+        micro_batch_size_per_gpu=2,
+        mini_batch_size=4,
+        gradient_checkpointing=False,
+        calc_position_embeddings=False,
+        device="cpu",
+        use_liger_loss=False,
+        seed=7,
+        fsdp_config=fsdp_config,
+        lora_config=LoraConfig(
+            r=2,
+            lora_alpha=4,
+            lora_dropout=0.0,
+            target_modules=["q_proj", "v_proj"],
+            target_parameters=["mixer.experts.up_proj", "mixer.experts.down_proj"],
+        ),
+    )
+    initial = _full_lora_tensors(agent.actor)
+    generator = torch.Generator().manual_seed(rank)
+    ids = torch.randint(0, 63, (4, 8), generator=generator)
+    masks = torch.zeros(4, 7, dtype=torch.bool)
+    masks[:, 2:] = True
+    agent.learn(
+        (list(ids.split(1)), list(masks.split(1)), torch.tensor([1.0, 0, 0, 1]))
+    )
+    trained = _full_lora_tensors(agent.actor)
+    gathered: list[object] = [None] * world_size
+    dist.all_gather_object(gathered, (initial, trained))
+    rank0_initial, rank0_trained = gathered[0]
 
-        assert any(
-            "experts" in name and "lora_A" in name and tensor.abs().sum() > 0
-            for name, tensor in initial.items()
-        ), sorted(initial)
-        assert any(
-            "lora_B.actor" in name and tensor.abs().sum() > 0
-            for name, tensor in trained.items()
-        ), "learn left every actor LoRA B at zero"
-        for stage, state, reference in (
-            ("init", initial, rank0_initial),
-            ("after learn", trained, rank0_trained),
-        ):
-            differing = sorted(
-                name
-                for name, tensor in state.items()
-                if not torch.equal(tensor, reference[name])
-            )
-            assert not differing, f"{stage}: LoRA differs from rank 0: {differing}"
-        result_queue.put((rank, None))
-    except Exception as exc:
-        result_queue.put((rank, repr(exc)))
-    finally:
-        dist.destroy_process_group()
+    assert any(
+        "experts" in name and "lora_A" in name and tensor.abs().sum() > 0
+        for name, tensor in initial.items()
+    ), sorted(initial)
+    assert any(
+        "lora_B.actor" in name and tensor.abs().sum() > 0
+        for name, tensor in trained.items()
+    ), "learn left every actor LoRA B at zero"
+    for stage, state, reference in (
+        ("init", initial, rank0_initial),
+        ("after learn", trained, rank0_trained),
+    ):
+        differing = sorted(
+            name
+            for name, tensor in state.items()
+            if not torch.equal(tensor, reference[name])
+        )
+        assert not differing, f"{stage}: LoRA differs from rank 0: {differing}"
 
 
 class TestLLMInitializeActors:
@@ -6029,6 +5998,7 @@ class TestLLMInitializeActors:
         ):
             LLMAlgorithm._initialize_actors(agent, base_model, add_adapters=True)
 
+    @pytest.mark.multi_rank
     @pytest.mark.parametrize(
         ("world_size", "fsdp_config"),
         [
@@ -6049,7 +6019,7 @@ class TestLLMInitializeActors:
     def test_dense_actor_lora_matches_across_ranks_after_init_and_learn(
         self, world_size, fsdp_config
     ):
-        _spawn_ranks(_lora_across_ranks_worker, world_size, fsdp_config, timeout=300.0)
+        run_ranks(_lora_across_ranks_worker, world_size, fsdp_config, timeout=300.0)
 
 
 class TestLLMInitializeActorsTorchCompiler:
@@ -6547,8 +6517,6 @@ class TestLLMReinitOptFromConfig:
     def test_reinit_opt_from_config_llm_with_split_lr_config(self):
         agent = _make_llm_agent()
         agent.cosine_lr_schedule_config = None
-
-        from agilerl.algorithms.core.registry import OptimizerConfig
 
         config = OptimizerConfig(
             name="optimizer",
@@ -7083,70 +7051,24 @@ class TestLLMShardedCheckpointBranches:
             grpo.clean_up()
 
 
-def _spawn_ranks(
-    worker, world_size: int, *args: object, timeout: float = 120.0
-) -> None:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        port = int(sock.getsockname()[1])
-    ctx = mp.get_context("spawn")
-    result_queue = ctx.Queue()
-    procs = [
-        ctx.Process(target=worker, args=(rank, world_size, port, *args, result_queue))
-        for rank in range(world_size)
-    ]
-    for proc in procs:
-        proc.start()
-    try:
-        for _ in procs:
-            rank, error = result_queue.get(timeout=timeout)
-            assert error is None, f"rank {rank}: {error}"
-    finally:
-        # A rank whose peer failed can sit in a collective forever.
-        for proc in procs:
-            proc.join(timeout=10)
-            if proc.is_alive():
-                proc.kill()
+def _resume_ep_mesh_worker(rank: int, world_size: int, checkpoint_dir: str) -> None:
+    agent = generate_tiny_grpo()
+    agent.shard_runtime = FSDPRuntime(FSDPConfig(ep=world_size))
+    agent.shard_runtime.parallel_mesh = build_parallel_mesh(
+        ep=world_size, device_type="cpu"
+    )
+    ep_mesh = agent.shard_runtime.parallel_mesh.ep
+    expert = nn.Parameter(
+        distribute_tensor(torch.zeros(world_size, 2), ep_mesh, [Shard(0)])
+    )
+    expert.grad = distribute_tensor(torch.ones(world_size, 2), ep_mesh, [Shard(0)])
 
+    agent.save_checkpoint(checkpoint_dir, lora_only=True)
+    agent.load_checkpoint(checkpoint_dir)
+    agent.shard_runtime.parallel_mesh.sync_grads([expert], torch.float32)
 
-def _resume_ep_mesh_worker(
-    rank: int,
-    world_size: int,
-    port: int,
-    checkpoint_dir: str,
-    result_queue: mp.Queue,
-) -> None:
-    try:
-        os.environ.update(
-            RANK=str(rank),
-            LOCAL_RANK=str(rank),
-            WORLD_SIZE=str(world_size),
-            MASTER_ADDR="127.0.0.1",
-            MASTER_PORT=str(port),
-        )
-        dist.init_process_group("gloo", rank=rank, world_size=world_size)
-        agent = generate_tiny_grpo()
-        agent.shard_runtime = FSDPRuntime(FSDPConfig(ep=world_size))
-        agent.shard_runtime.parallel_mesh = build_parallel_mesh(
-            ep=world_size, device_type="cpu"
-        )
-        ep_mesh = agent.shard_runtime.parallel_mesh.ep
-        expert = nn.Parameter(
-            distribute_tensor(torch.zeros(world_size, 2), ep_mesh, [Shard(0)])
-        )
-        expert.grad = distribute_tensor(torch.ones(world_size, 2), ep_mesh, [Shard(0)])
-
-        agent.save_checkpoint(checkpoint_dir, lora_only=True)
-        agent.load_checkpoint(checkpoint_dir)
-        agent.shard_runtime.parallel_mesh.sync_grads([expert], torch.float32)
-
-        # Each rank owns one expert row; EP grads divide by the world size.
-        assert torch.equal(expert.grad.to_local(), torch.full((1, 2), 0.5))
-        result_queue.put((rank, None))
-    except Exception as exc:
-        result_queue.put((rank, repr(exc)))
-    finally:
-        dist.destroy_process_group()
+    # Each rank owns one expert row; EP grads divide by the world size.
+    assert torch.equal(expert.grad.to_local(), torch.full((1, 2), 0.5))
 
 
 class TestLLMCheckpointShardRuntime:
@@ -7181,8 +7103,9 @@ class TestLLMCheckpointShardRuntime:
         finally:
             grpo.clean_up()
 
+    @pytest.mark.multi_rank
     def test_resumed_ep_mesh_syncs_expert_grads_on_every_rank(self, tmp_path):
-        _spawn_ranks(_resume_ep_mesh_worker, 2, str(tmp_path))
+        run_ranks(_resume_ep_mesh_worker, 2, str(tmp_path))
 
 
 @_LLM_DEPS_SKIP
@@ -7668,7 +7591,6 @@ class TestLLMInitializeActorsExpertLoraGuards:
     def test_target_parameters_attaches_actor_reference_and_critic_wrappers(
         self,
     ) -> None:
-        from peft.tuners.lora.layer import ParamWrapper
 
         lora = LoraConfig(
             r=4,
@@ -7801,7 +7723,6 @@ class TestLLMFusedForwardPaths:
         assert log_probs is expected
 
     def test_fused_packed_forward_object_output(self):
-        from contextlib import nullcontext
 
         agent = _make_llm_agent()
         agent.use_value_head = False
@@ -7854,8 +7775,6 @@ class TestLLMGetLogprobsPacked:
         actor.eval()
         agent.actor = actor
 
-        from contextlib import nullcontext
-
         agent.select_adapter = lambda _name: nullcontext()
 
         ids = torch.randint(1, V, (B, T))
@@ -7891,8 +7810,6 @@ class TestLLMGetLogprobsPacked:
         actor = _TinyPeftWrapper(inner)
         actor.config._attn_implementation = "flash_attention_2"
         agent.actor = actor
-
-        from contextlib import nullcontext
 
         agent.select_adapter = lambda _name: nullcontext()
         ids = torch.randint(1, V, (B, T))
@@ -8214,8 +8131,6 @@ class TestLLMAlgorithmInitQuantizationConfig:
 
 def _lora_wrapped_actor(dtype=torch.float32, lora_dtype=None):
     """Tiny model with real PEFT tuner layers injected."""
-    from peft import LoraConfig, inject_adapter_in_model
-
     model = torch.nn.Sequential()
     model.add_module("proj", torch.nn.Linear(8, 8, bias=False))
     model.add_module("out", torch.nn.Linear(8, 4, bias=False))
@@ -8239,7 +8154,6 @@ def _lora_wrapped_actor(dtype=torch.float32, lora_dtype=None):
 
 
 def _tuner_layers(model):
-    from peft.tuners.tuners_utils import BaseTunerLayer
 
     return [m for m in model.modules() if isinstance(m, BaseTunerLayer)]
 
