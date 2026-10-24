@@ -26,9 +26,10 @@ MiB = 1024**2
 # Default Mamba-2 chunked-scan chunk length.
 MAMBA_CHUNK_SIZE_DEFAULT = 256
 
-# Model types whose trainer RMSNorm is the stock HF module, which keeps an
-# fp32 copy of each norm input for backward.
-FP32_RMS_NORM_MODEL_TYPES = frozenset({"granitemoe", "granitemoehybrid"})
+# Model types the trainer runs without Liger's model patches. The stock HF
+# RMSNorm keeps an fp32 copy of each norm input for backward, and the stock
+# gated MLP keeps its unfused intermediates.
+STOCK_HF_MODULE_MODEL_TYPES = frozenset({"granitemoe", "granitemoehybrid"})
 
 # Attention norms that upcast Q to fp32 inside the block (Qwen3/3.5 ``q_norm``).
 QK_NORM_MODEL_TYPES = frozenset(
@@ -46,27 +47,33 @@ CHUNKED_ROUTED_EXPERT_MODEL_TYPES = frozenset(
 EAGER_MAMBA_SCAN_CAPABILITY = (8, 9)
 EAGER_MAMBA_SCAN_MODEL_TYPES = frozenset({"nemotron_h", "nemotron_h_omni"})
 
+# Families with a catalog training tensor-parallel plan. Under fsdp.tp > 1 the
+# trainer leaves other families' decoder layers and activations unsharded; an
+# untied lm_head is sharded for every family.
+TENSOR_PARALLEL_MODEL_TYPES = frozenset({"nemotron_h", "nemotron_h_omni"})
+
 # CUDA context bytes keyed by torch device name: device memory in use after
 # the first torch allocation.
 CUDA_CONTEXT_BYTES_BY_DEVICE: dict[str, int] = {
     "NVIDIA A100-SXM4-40GB": 1268 * MiB,
     "NVIDIA A100-SXM4-80GB": 1268 * MiB,
-    # Estimated from its driver reservation, SM count and resident threads.
-    "NVIDIA H100 80GB HBM3": 1000 * MiB,
+    # One-rank FSDP non-torch memory less the job and trainer library overhead.
+    "NVIDIA H100 80GB HBM3": 1440 * MiB,
     "NVIDIA L4": 694 * MiB,
 }
 # Unlisted devices use the largest listed value.
 CUDA_CONTEXT_BYTES_DEFAULT = 1268 * MiB
 
-# NCCL communicator and buffer bytes on each rank of a multi-rank trainer,
-# keyed by torch device name. Set by the interconnect; constant across rank
-# count and sharding mode.
-NCCL_BYTES_BY_DEVICE: dict[str, int] = {
-    "NVIDIA A100-SXM4-40GB": 600 * MiB,
-    "NVIDIA A100-SXM4-80GB": 600 * MiB,
-    "NVIDIA L4": 91 * MiB,
+# NCCL bytes one rank holds for a 4-rank process group on one node, with NCCL
+# cuMem off as the trainer runs FSDP, keyed by torch device name. L4 is
+# scaled from its cuMem-on world group by the A100 cuMem-off ratio.
+NCCL_GROUP_BYTES_BY_DEVICE: dict[str, int] = {
+    "NVIDIA A100-SXM4-40GB": 820 * MiB,
+    "NVIDIA A100-SXM4-80GB": 820 * MiB,
+    "NVIDIA H100 80GB HBM3": 950 * MiB,
+    "NVIDIA L4": 125 * MiB,
 }
-NCCL_BYTES_DEFAULT = 600 * MiB
+NCCL_GROUP_BYTES_DEFAULT = 820 * MiB
 
 # Bytes per element.
 DTYPE_BYTES: dict[str, float] = {
@@ -334,12 +341,14 @@ def _decoder_fields(text_cfg: dict[str, Any]) -> dict[str, Any]:
         "vocab_size": int(text_cfg["vocab_size"]),
         "tied_embeddings": bool(text_cfg.get("tie_word_embeddings", False)),
         "gated_mlp": gated,
-        "fp32_norm_inputs": text_cfg.get("model_type") in FP32_RMS_NORM_MODEL_TYPES,
+        "stock_hf_modules": text_cfg.get("model_type") in STOCK_HF_MODULE_MODEL_TYPES,
         "qk_norm": text_cfg.get("model_type") in QK_NORM_MODEL_TYPES,
         "chunked_routed_experts": text_cfg.get("model_type")
         in CHUNKED_ROUTED_EXPERT_MODEL_TYPES,
         "eager_mamba_scan_family": text_cfg.get("model_type")
         in EAGER_MAMBA_SCAN_MODEL_TYPES,
+        "tensor_parallel_plan": text_cfg.get("model_type")
+        in TENSOR_PARALLEL_MODEL_TYPES,
         "attn_bias": bool(text_cfg.get("attention_bias") or text_cfg.get("qkv_bias")),
         "sliding_window": (
             text_cfg.get("sliding_window")
@@ -438,12 +447,14 @@ class ModelArch(BaseModel):
     attn_bias: bool = False
     # SwiGLU (gate + up + down). Ungated MLPs use two matrices (up + down).
     gated_mlp: bool = True
-    # Trainer RMSNorm saves an fp32 copy of its input for backward.
-    fp32_norm_inputs: bool = False
+    # Trainer runs the stock HF RMSNorm and gated MLP, without Liger's patch.
+    stock_hf_modules: bool = False
     # Per-head Q/K norm upcasts Q to fp32 inside the block.
     qk_norm: bool = False
     # Trains Mamba layers with HF's eager scan on compute capability 8.9.
     eager_mamba_scan_family: bool = False
+    # Training tensor parallel shards this family's decoder layers.
+    tensor_parallel_plan: bool = False
 
     # None for dense models. Weights/optimizer scale with the total expert
     # count; activations scale with the active (routed) count.
@@ -504,6 +515,11 @@ class ModelArch(BaseModel):
     @property
     def is_hybrid_ssm(self) -> bool:
         return self.n_mamba_layers > 0
+
+    @property
+    def irregular_blocks(self) -> bool:
+        """Blocks run stock norms and MLP, Mamba scans or routed experts."""
+        return self.stock_hf_modules or self.is_moe or self.is_hybrid_ssm
 
     @property
     def attention_layers(self) -> int:
@@ -660,6 +676,8 @@ class DeviceSpec(BaseModel):
     cuda_context_bytes: int | None = None
     # CUDA compute capability ``(major, minor)``; ``None`` when unknown.
     compute_capability: tuple[int, int] | None = None
+    # GPUs on this device's node. ``None`` puts every trainer rank on one node.
+    gpus_per_node: int | None = Field(default=None, ge=1)
 
     @property
     def context_bytes(self) -> int:
@@ -673,11 +691,11 @@ class DeviceSpec(BaseModel):
         return CUDA_CONTEXT_BYTES_DEFAULT
 
     @property
-    def nccl_bytes(self) -> int:
-        """NCCL memory on each rank of a multi-rank trainer on this device."""
+    def nccl_group_bytes(self) -> int:
+        """NCCL memory one rank holds for a 4-rank process group on one node."""
         if self.name is None:
-            return NCCL_BYTES_DEFAULT
-        return NCCL_BYTES_BY_DEVICE.get(self.name, NCCL_BYTES_DEFAULT)
+            return NCCL_GROUP_BYTES_DEFAULT
+        return NCCL_GROUP_BYTES_BY_DEVICE.get(self.name, NCCL_GROUP_BYTES_DEFAULT)
 
     @property
     def usable_bytes(self) -> int:
@@ -747,6 +765,12 @@ class TrainingSettings(BaseModel):
     # Fused-logprob tile rows. ``None`` auto-tunes to a ~256 MiB fp32 logit
     # workspace, clamped to [128, 4096].
     chunk_rows: int | None = None
+    # LLMPPO and REINFORCE Liger losses above token level keep one whole
+    # sequence of logits, so the tile spans max_model_len rows.
+    liger_sequence_chunks: bool = False
+    # The fused Liger kernel keeps a weight-dtype grad of the whole lm_head.
+    # The sequence tile already includes it. The standard log-prob path does not.
+    liger_weight_grad: bool = True
     # Data-parallel trainer GPUs. The estimate is per GPU; this is the
     # shard group size.
     n_training_gpus: int = 1
@@ -767,14 +791,23 @@ class TrainingSettings(BaseModel):
     sequence_packing: bool = False
 
     @property
+    def data_parallel_gpus(self) -> int:
+        """Ranks that each hold a distinct batch shard.
+
+        Tensor-parallel ranks share one shard, so they do not divide it again.
+        """
+        tp = 1 if self.fsdp is None else self.fsdp.tp
+        return max(self.n_training_gpus // tp, 1)
+
+    @property
     def trajectories(self) -> int:
         """Completion rows one learner GPU sees per update.
 
         ``None`` assumes a single prompt group. Under data parallelism the
-        update shards across learner GPUs.
+        update shards across :attr:`data_parallel_gpus`.
         """
         total = self.trajectories_per_update or self.group_size
-        return max(-(-total // self.n_training_gpus), 1)
+        return max(-(-total // self.data_parallel_gpus), 1)
 
     @property
     def shard_gpus(self) -> int:
@@ -895,6 +928,18 @@ class TrainingSettings(BaseModel):
             msg = "FSDP cpu_offload and optim_cpu_offload are mutually exclusive"
             raise ValueError(msg)
         return self
+
+    @model_validator(mode="before")
+    @classmethod
+    def _sft_drops_the_policy_head_grad(cls, data: object) -> object:
+        # SFT's fused cross-entropy skips a grad of the frozen lm_head.
+        if (
+            isinstance(data, dict)
+            and data.get("algorithm") == "sft"
+            and "liger_weight_grad" not in data
+        ):
+            return {**data, "liger_weight_grad": False}
+        return data
 
     @model_validator(mode="after")
     def _check_fuse_actor_critic_pass(self) -> Self:

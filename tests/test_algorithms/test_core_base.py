@@ -2665,6 +2665,7 @@ def vwa_super_vl(monkeypatch, tmp_path):
         calc_position_embeddings=False,
         device="cpu",
         use_liger_loss=False,
+        use_separate_reference_adapter=False,
         lora_config=LoraConfig(r=4, target_modules=["linear_1"], task_type="CAUSAL_LM"),
     )
     fsdp = FSDPConfig(ep=8, shard_group_size=8, reduce_dtype="bfloat16")
@@ -2701,8 +2702,10 @@ class TestLLMAlgorithmResolveFsdpConfigVwa:
     def test_vwa_super_vl_takes_the_smallest_chunk(
         self, vwa_super_vl, monkeypatch, caplog, name, cuda_gib
     ):
-        # Arrange: 95% of these CUDA totals is under the lightest peak.
+        # Arrange: 95% of these CUDA totals is under the lightest peak. The
+        # launch puts 8 trainer ranks on each node.
         monkeypatch.setattr(vwa_super_vl, "device", "cuda:0")
+        monkeypatch.setenv("LOCAL_WORLD_SIZE", "8")
         monkeypatch.setattr(
             torch.cuda,
             "get_device_properties",
@@ -2747,6 +2750,20 @@ class TestLLMAlgorithmTrainingDeviceSpec:
         device = moe_ppo._training_device_spec()
 
         assert device.available_bytes == int(total * 0.95) - int(total * 0.4)
+
+    def test_node_size_is_the_local_world_size(self, moe_ppo, monkeypatch):
+        patch_cuda_device(moe_ppo, monkeypatch, 80 * 2**30)
+        monkeypatch.setenv("LOCAL_WORLD_SIZE", "8")
+
+        assert moe_ppo._training_device_spec().gpus_per_node == 8
+
+    def test_without_a_local_world_size_every_rank_shares_one_node(
+        self, moe_ppo, monkeypatch
+    ):
+        patch_cuda_device(moe_ppo, monkeypatch, 80 * 2**30)
+        monkeypatch.delenv("LOCAL_WORLD_SIZE", raising=False)
+
+        assert moe_ppo._training_device_spec().gpus_per_node is None
 
 
 class TestLLMAlgorithmApplyLr:
