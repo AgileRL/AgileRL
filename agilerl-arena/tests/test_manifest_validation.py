@@ -613,7 +613,7 @@ class TestTowerLoraServed:
                 ),
                 "lora_config": {
                     "target_modules": ["q_proj"],
-                    "tower_target_modules": ["query"],
+                    "tower_target_modules": ["q_proj"],
                 },
             },
         )
@@ -621,7 +621,7 @@ class TestTowerLoraServed:
     def test_kept_towers_accept_tower_targets(self) -> None:
         validated = TrainingManifest.model_validate(self._super_vl(False))
 
-        assert validated.algorithm.lora_config.tower_target_modules == ["query"]
+        assert validated.algorithm.lora_config.tower_target_modules == ["q_proj"]
 
     def test_stripped_towers_reject_tower_targets(self) -> None:
         with pytest.raises(ValidationError, match="strip_multimodal_towers to false"):

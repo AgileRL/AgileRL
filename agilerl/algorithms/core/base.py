@@ -6625,8 +6625,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
         Adapter-only sync (colocated vLLM always serves LoRA): vLLM keeps its
         own base and only the LoRA delta is synced per rollout via
-        ``llm_engine.add_lora``. Compatible with vLLM-side weight quantization
-        (e.g. ``bitsandbytes`` for QLoRA rollouts).
+        ``llm_engine.add_lora``. Compatible with vLLM-side weight quantization.
 
         **Does not touch base weights.** vLLM owns its base across the
         native sleep/wake cycle; the trainer holds (and offloads) its own.

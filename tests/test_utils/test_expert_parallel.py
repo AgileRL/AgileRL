@@ -2144,7 +2144,7 @@ class TestFsdpGatheredFrozenExperts:
 
 
 class _DriftingRouterBlock(nn.Module):
-    """Routes inside the block; the second call (checkpoint recompute) picks experts 0 and 1."""
+    """Routes inside the block; values drift to experts 0 and 1 on the second call."""
 
     def __init__(self, moe: nn.Module):
         super().__init__()
@@ -2156,8 +2156,10 @@ class _DriftingRouterBlock(nn.Module):
     def forward(self, hidden_states):
         hidden = self.lin(hidden_states)
         logits = self.router(hidden)
-        if self.calls % 2 == 1:
-            logits = logits + torch.tensor([100.0, 100.0, -100.0, -100.0])
+        # Same ops in forward and recompute; only the values drift, forcing
+        # experts 0 and 1 on the second call (checkpoint recompute). SAC
+        # forbids ops the forward never ran, so the drift cannot add any.
+        logits = logits + self.calls * torch.tensor([100.0, 100.0, -100.0, -100.0])
         self.calls += 1
         top_k_logits, top_k_index = logits.topk(2, -1)
         return self.moe(hidden, top_k_index, torch.softmax(top_k_logits, -1))

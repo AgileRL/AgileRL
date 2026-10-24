@@ -17,8 +17,8 @@ if HAS_LLM_DEPENDENCIES:
         NemotronHMamba2Mixer,
     )
 
-KERNEL_GLOBALS = ("mamba_split_conv1d_scan_combined", "mamba_chunk_scan_combined")
-MIXER_METHODS = ("__init__", "forward", "torch_forward", "cuda_kernels_forward")
+KERNEL_GLOBALS = ("mamba2_split_conv1d_scan_combined", "mamba2_chunk_scan")
+MIXER_METHODS = ("__init__", "forward")
 MIXER_FLAGS = (
     FUSED_PATH_PATCHED_FLAG,
     STREAM_PATCHED_FLAG,

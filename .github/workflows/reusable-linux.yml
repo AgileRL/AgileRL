@@ -145,6 +145,12 @@ jobs:
             - name: Run GPU shard
               run: |
                   rm -f .coverage .coverage.*
+                  # vLLM 0.32 needs Python >= 3.11; on 3.10 the extra
+                  # installs nothing, so only CUDA-marked tests run there.
+                  marker="gpu or vllm"
+                  if [[ "${{ matrix.python-version }}" == "3.10" ]]; then
+                    marker="gpu"
+                  fi
                   uv run python scripts/pytest_shard.py run \
                     --root tests \
                     --root agilerl-arena/tests \
@@ -155,7 +161,7 @@ jobs:
                     --import-mode=importlib \
                     --junitxml=junit-gpu.xml \
                     --timeout=600 --timeout-method=thread \
-                    -m "gpu or vllm" \
+                    -m "$marker" \
                     -n auto --dist loadgroup \
                     --durations=15 \
                     ${{ matrix.python-version == '3.13' && '--cov --cov-report=xml' || '' }}

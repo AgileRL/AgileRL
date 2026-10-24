@@ -389,6 +389,9 @@ def _routed_counts(send: torch.Tensor, exchange: TokenExchange) -> RoutedCounts:
     counts = RoutedCounts(send, received, send_lists, received_lists)
     if scope is not None:
         scope.calls.append(counts)
+        # SAC replays forward-recorded ops during recompute; run the replay
+        # assert's comparison here too so it resolves there.
+        torch._assert_async(torch.eq(send, send).all(), "unreachable")
     return counts
 
 

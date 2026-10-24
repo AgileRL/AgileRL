@@ -238,7 +238,7 @@ def _local_mixer_sizes(mixer: NemotronHMamba2Mixer, tp: int) -> Iterator[None]:
     local_groups = int(n_groups) // tp
     local_intermediate = local_heads * int(mixer.head_dim)
     local_conv = local_intermediate + 2 * local_groups * int(mixer.ssm_state_size)
-    # torch_forward and cuda_kernels_forward split projections with these.
+    # The mixer forward splits projections with these.
     mixer.num_heads = local_heads
     mixer.n_groups = local_groups
     mixer.intermediate_size = local_intermediate

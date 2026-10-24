@@ -3,6 +3,7 @@
 
 """Packed rows through a tiny Qwen3.5-MoE GDN stack match the padded batch."""
 
+import importlib.machinery
 import importlib.util
 import logging
 
@@ -18,6 +19,7 @@ from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
 )
 
 from agilerl.architectures import install_family_patches
+from agilerl.architectures.qwen3_5 import packed as qwen_packed
 from agilerl.architectures.qwen3_5.packed import (
     install_qwen_gdn_patches,
     patch_qwen_gdn_packed_sequences,
@@ -210,8 +212,11 @@ class TestPatchQwenGdnPackedSequences:
                 block=BLOCK_PATH,
             )
 
-    def test_fla_varlen_forward_injects_cu_seqlens(self, pristine_qwen_gdn_classes):
+    def test_fla_varlen_forward_injects_cu_seqlens(
+        self, pristine_qwen_gdn_classes, monkeypatch
+    ):
         received = {}
+        monkeypatch.setattr(qwen_packed, "_varlen_kernels_ready", lambda: True)
 
         def unpatched(
             self, hidden_states, cache_params=None, attention_mask=None, **kwargs
@@ -223,13 +228,6 @@ class TestPatchQwenGdnPackedSequences:
         patch_qwen_gdn_packed_sequences(mixer=MIXER_PATH, block=BLOCK_PATH)
 
         mixer = Qwen3_5MoeGatedDeltaNet.__new__(Qwen3_5MoeGatedDeltaNet)
-        mixer.causal_conv1d_fn = object()
-
-        def scan(*_args, **_kwargs):
-            return None
-
-        scan.__module__ = "fla.ops.gated_delta_rule"
-        mixer.chunk_gated_delta_rule = scan
         hidden = torch.zeros(1, 5, 4)
         seq_idx = torch.tensor([[0, 0, 1, 1, 1]], dtype=torch.int32)
 
@@ -255,7 +253,7 @@ class TestInstallQwenGdnPatches:
         with pytest.raises(RuntimeError, match="flash-linear-attention"):
             install_qwen_gdn_patches(PatchRuntimeConfig())
 
-    def test_gpu_with_fused_kernels_installs_packed_patches(
+    def test_gpu_with_fla_and_causal_conv1d_installs_packed_patches(
         self, monkeypatch, pristine_qwen_gdn_classes
     ) -> None:
         monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
@@ -263,7 +261,7 @@ class TestInstallQwenGdnPatches:
 
         def find_spec(name: str, package: str | None = None):
             if name in {"fla", "causal_conv1d"}:
-                return object()
+                return importlib.machinery.ModuleSpec(name, None)
             return real(name, package)
 
         monkeypatch.setattr(importlib.util, "find_spec", find_spec)

@@ -31,7 +31,7 @@ NEMOTRON_H_RUNTIME_CONFIG = ModelRuntimeConfig(
         max_num_batched_tokens=8192,
         reasoning_parser="nemotron_v3",
         enable_prefix_caching=True,
-        trust_remote_code=True,
+        dense_mamba_prefix_cache=True,
     ),
     patch=PatchRuntimeConfig(
         install=install_mamba_patches,
@@ -47,34 +47,48 @@ NEMOTRON_H_RUNTIME_CONFIG = ModelRuntimeConfig(
     tool_call_parser="tool_call",
 )
 
+
+def nemotron_h_omni_vllm_hf_override(config: object) -> object:
+    """Point a native ``nemotron_h_omni`` config at NemotronHVLLoRA and restore ``vit_hidden_size``.
+
+    :param config: Hugging Face config loaded from the checkpoint.
+    :type config: object
+    :return: The config vLLM's Nemotron VL model can build from.
+    :rtype: object
+    """
+    fields = vars(config)
+    # Serve through NemotronHVLLoRA, which adds tower and connector LoRA.
+    fields["architectures"] = ["NemotronH_Super_Omni_Reasoning_V3"]
+    # vLLM's Nemotron VL model reads the checkpoint's legacy name; the native
+    # config stores it as vision_hidden_size. vLLM also probes with a dummy config.
+    if "vision_hidden_size" in fields:
+        fields["vit_hidden_size"] = fields["vision_hidden_size"]
+    return config
+
+
 NEMOTRON_H_OMNI_RUNTIME_CONFIG = NEMOTRON_H_RUNTIME_CONFIG.model_copy(
     update={
-        # nemotron_h_omni is not a transformers model type; its config needs checkpoint code.
+        # Native nemotron_h_omni; remote code stopped loading on 5.19.
         "trainer": TrainerRuntimeConfig(
             model_class=AutoModelForImageTextToText,
             attn_implementation="flash_attention_2",
-            trust_remote_code=True,
+            trust_remote_code=False,
         ),
-        # The checkpoint's NemotronH_Omni_Reasoning_V3 is not a vLLM architecture.
         "vllm": NEMOTRON_H_RUNTIME_CONFIG.vllm.model_copy(
-            update={
-                "hf_overrides": {
-                    "architectures": ["NemotronH_Super_Omni_Reasoning_V3"],
-                },
-            },
+            update={"hf_overrides": nemotron_h_omni_vllm_hf_override},
         ),
         "tower_connector_lora_targets": frozenset(
             {
-                "query",
-                "key",
-                "value",
-                "dense",
+                "q_proj",
+                "k_proj",
+                "v_proj",
+                "o_proj",
                 "fc1",
                 "fc2",
                 "patch_projection",
                 "video_patch_projection",
-                "linear1",
-                "linear2",
+                "linear_1",
+                "linear_2",
             }
         ),
     },
@@ -140,6 +154,7 @@ QWEN3_5_TEXT_RUNTIME_CONFIG = ModelRuntimeConfig(
     vllm=VllmRuntimeConfig(
         mamba_cache_mode="align",
         enable_prefix_caching=True,
+        dense_mamba_prefix_cache=True,
     ),
     patch=PatchRuntimeConfig(install=install_qwen_gdn_patches),
     tool_call_parser="tool_call",
@@ -178,10 +193,7 @@ def pretrained_model_type(model_name_or_path: str) -> str:
     entry = SUPPORTED_MODEL_INFO.get(model_name_or_path)
     if entry is not None:
         return entry.config["model_type"]
-    config_dict, _ = PretrainedConfig.get_config_dict(
-        model_name_or_path,
-        trust_remote_code=True,
-    )
+    config_dict, _ = PretrainedConfig.get_config_dict(model_name_or_path)
     return config_dict["model_type"]
 
 

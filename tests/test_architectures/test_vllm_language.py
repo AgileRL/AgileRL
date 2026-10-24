@@ -26,7 +26,7 @@ class TestQwen35ConditionalGenerationLoraNames:
             Qwen3_5ForConditionalGeneration,
         )
 
-        mapper = Qwen3_5ForConditionalGeneration.hf_to_vllm_mapper
+        mapper = Qwen3_5ForConditionalGeneration.hf_to_vllm_mapper.get_rename_mapper()
 
         module, _ = parse_fine_tuned_lora_name(
             "base_model.model.model.language_model.layers.0.self_attn.q_proj"
@@ -73,7 +73,7 @@ class TestApplyTowerConnectorLoraEngineKwargs:
             kwargs,
             strip_multimodal_towers,
             runtime=FAMILY_RUNTIME_CONFIGS["nemotron_h_omni"],
-            tower_target_modules=["query", "linear1"],
+            tower_target_modules=["q_proj", "linear_1"],
         )
 
         assert kwargs == {"enable_tower_connector_lora": True}
@@ -99,12 +99,12 @@ class TestApplyTowerConnectorLoraEngineKwargs:
                 {},
                 strip_multimodal_towers=True,
                 runtime=FAMILY_RUNTIME_CONFIGS["nemotron_h_omni"],
-                tower_target_modules=["query"],
+                tower_target_modules=["q_proj"],
             )
 
     @pytest.mark.parametrize(
         ("family", "targets"),
-        [("gemma4", ["linear"]), ("nemotron_h_omni", ["q_proj"])],
+        [("gemma4", ["linear"]), ("nemotron_h_omni", ["in_proj"])],
     )
     def test_rejects_targets_vllm_cannot_serve(
         self, family: str, targets: list[str]

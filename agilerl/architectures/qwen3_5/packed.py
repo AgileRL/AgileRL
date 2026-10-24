@@ -80,14 +80,15 @@ def _per_document(
     return torch.cat(rows)
 
 
-def _varlen_kernels_ready(mixer: nn.Module) -> bool:
-    """Whether conv and scan honor packed document boundaries in one call."""
-    conv = getattr(mixer, "causal_conv1d_fn", None)
-    scan = getattr(mixer, "chunk_gated_delta_rule", None)
+def _varlen_kernels_ready() -> bool:
+    """Whether conv and scan honor packed document boundaries in one call.
+
+    transformers resolves the GDN conv and scan to causal-conv1d and FLA when
+    those packages import; its PyTorch fallbacks drop ``seq_idx`` / ``cu_seqlens``.
+    """
     return (
-        conv is not None
-        and scan is not None
-        and getattr(scan, "__module__", "").startswith("fla")
+        importlib.util.find_spec("causal_conv1d") is not None
+        and importlib.util.find_spec("fla") is not None
     )
 
 
@@ -108,7 +109,7 @@ def _install_packed_mixer(mixer_cls: type) -> None:
         if seq_idx is None:
             return forward(self, hidden_states, cache_params, attention_mask, **kwargs)
         # FLA varlen GDN only accepts a flattened packed row (B=1) with cu_seqlens.
-        if _varlen_kernels_ready(self) and hidden_states.shape[0] == 1:
+        if _varlen_kernels_ready() and hidden_states.shape[0] == 1:
             if kwargs.get("cu_seq_lens_q") is None:
                 kwargs = {**kwargs, "cu_seq_lens_q": _cu_seqlens(seq_idx)}
             return forward(self, hidden_states, cache_params, attention_mask, **kwargs)

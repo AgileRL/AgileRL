@@ -22,6 +22,9 @@ from agilerl.architectures.catalog import (
     pretrained_model_type,
     trainer_model_class,
 )
+from agilerl.architectures.nemotron_h_omni import (
+    register_nemotron_h_omni_native_loading,
+)
 from agilerl.architectures.runtime import (
     MambaPatchConfig,
     ModelRuntimeConfig,
@@ -47,6 +50,7 @@ __all__ = [
     "family_tensor_parallel_plans",
     "install_family_patches",
     "pretrained_model_type",
+    "register_nemotron_h_omni_native_loading",
     "trainer_model_class",
 ]
 
@@ -89,3 +93,6 @@ def install_family_patches(
     if install is None:
         return
     install(runtime.patch, model=model)
+
+
+register_nemotron_h_omni_native_loading()

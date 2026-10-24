@@ -38,7 +38,7 @@ dependencies = [
     "SuperSuit>=3.9.0",
     "tabulate>=0.9.0",
     "termcolor>=1.1.0",
-    "torch>=2.11.0",
+    "torch>=2.13.0",
     "tensordict==0.13.0",
     "tqdm>=4.66.4",
     "wandb>=0.18.0",
@@ -50,20 +50,20 @@ box2d = [
     "gymnasium[box2d]>=1.0.0; sys_platform != 'win32'",
 ]
 cpu = [
-    # Same 2.11 line as the default Linux CUDA wheel; the CPU index also publishes newer torch.
-    "torch>=2.11.0,<2.12",
+    # Same 2.13 line as the default Linux CUDA wheel; the CPU index also publishes newer torch.
+    "torch>=2.13.0,<2.14",
 ]
 # LLM Python stack without vLLM. Hosted CPU CI uses this with the cpu extra.
 cpu-llm = [
-    "bitsandbytes==0.49.2; sys_platform == 'linux'",
-    "datasets==5.0.1",
-    "liger-kernel==0.8.2; sys_platform == 'linux'",
+    "bitsandbytes==0.50.2; sys_platform == 'linux'",
+    "datasets==5.1.0",
+    "liger-kernel==0.8.5; sys_platform == 'linux'",
     "openenv>=0.4.1,<0.5",
-    "peft==0.21.0",
-    "transformers==5.14.1",
+    "peft==0.21.2",
+    "transformers==5.19.0",
 ]
 vllm = [
-    "vllm==0.25.1; sys_platform == 'linux'",
+    "vllm==0.32.0; sys_platform == 'linux' and python_version >= '3.11'",
 ]
 llm = [
     "agilerl[cpu-llm,vllm]",
@@ -199,7 +199,7 @@ no-build-isolation-package = [
 
 # Overrides replace upstream transitive pins.
 override-dependencies = [
-    # torch 2.11.0's cu13 wheel pins nvidia-nccl-cu13==2.28.9 in its metadata,
+    # torch 2.13.0's cu13 wheel pins nvidia-nccl-cu13==2.29.7 in its metadata,
     # but its binary actually references ncclDevCommDestroy, which was only
     # added in NCCL 2.30. Following torch's pin gets you an undefined-symbol
     # ImportError on first `import torch`. Override the pin to >=2.30.
