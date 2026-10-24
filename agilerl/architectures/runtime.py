@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 from torch import nn
@@ -31,6 +32,22 @@ class VllmRuntimeConfig(BaseModel):
     hf_overrides: dict[str, object] | Callable[[object], object] | None = Field(
         default=None
     )
+    # vLLM >=0.32 keeps Mamba prefix-cache states only at each prompt's replay
+    # boundary, so a later turn recomputes the previous reply.
+    dense_mamba_prefix_cache: bool | None = Field(default=None)
+
+    def engine_kwargs(self) -> dict[str, Any]:
+        """Return the engine kwargs this family sets.
+
+        :return: Set fields as vLLM engine arguments.
+        :rtype: dict[str, Any]
+        """
+        kwargs = self.model_dump(
+            exclude_none=True, exclude={"dense_mamba_prefix_cache"}
+        )
+        if self.dense_mamba_prefix_cache:
+            kwargs["prefix_cache_retention_interval"] = None
+        return kwargs
 
 
 TrainerModelClass = type[AutoModelForCausalLM] | type[AutoModelForImageTextToText]
@@ -120,7 +137,7 @@ class ModelRuntimeConfig(BaseModel):
     patch: PatchRuntimeConfig = Field(default_factory=PatchRuntimeConfig)
     # PEFT target names of the trainer's tower and connector linears that
     # lora_config.tower_target_modules may name. Empty for families without
-    # vLLM tower LoRA (it needs get_num_mm_encoder_tokens).
+    # vLLM tower LoRA (it needs get_mm_lora_token_counts).
     tower_connector_lora_targets: frozenset[str] = frozenset()
     tensor_parallel_plan: str | None = Field(default=None, min_length=1)
     # A name in agilerl.llm_envs.tool_parsers.TOOL_PARSERS; None detects from the vocab.

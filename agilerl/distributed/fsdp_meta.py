@@ -79,15 +79,16 @@ def init_rope_buffers(model: nn.Module) -> None:
 
 def _init_single_rope(module: nn.Module) -> None:
     rope_type = cast("str", module.rope_type)
+    # "default" and vision "axial" live on the module, as in HF ``_init_weights``.
     rope_fn = cast(
         "Callable[..., tuple[torch.Tensor, object]]",
-        module.compute_default_rope_parameters
-        if rope_type == "default"
-        else ROPE_INIT_FUNCTIONS[rope_type],
+        getattr(module, f"compute_{rope_type}_rope_parameters", None)
+        or ROPE_INIT_FUNCTIONS[rope_type],
     )
     inv_freq_buf = cast("torch.Tensor", module.inv_freq)
     original_buf = cast("torch.Tensor", module.original_inv_freq)
-    inv_freq, _ = rope_fn(module.config, inv_freq_buf.device)
+    # Keyword device: the default fn is static and takes ``(config, **kwargs)``.
+    inv_freq, _ = rope_fn(module.config, device=inv_freq_buf.device)
     inv_freq_buf.copy_(inv_freq)
     original_buf.copy_(inv_freq)
 

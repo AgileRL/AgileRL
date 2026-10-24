@@ -10,6 +10,7 @@ import pytest
 
 from agilerl.arena.memory.estimator import estimate_run, estimate_training
 from agilerl.arena.memory.manifest import (
+    check_fp8_moe_backend_for_device,
     device_spec_from_resource_class,
     lookup_gpu,
     training_settings_from_manifest,
@@ -60,6 +61,12 @@ DQN = {
 }
 
 L4_TIER = {"name": "l4-1x", "gpu_type": "NVIDIA L4", "num_gpus": 1, "ram_gb": 32}
+A100_TIER = {
+    "name": "a100-80-1x",
+    "gpu_type": "NVIDIA A100-SXM4-80GB",
+    "num_gpus": 1,
+    "ram_gb": 128,
+}
 
 
 def manifest(**overrides: dict) -> dict:
@@ -797,6 +804,75 @@ class TestRunConfig:
         validated = TrainingManifest.model_validate(copy.deepcopy(GRPO))
         settings = training_settings_from_manifest(validated)
         assert settings.algorithm == "grpo"
+
+
+class TestCheckFp8MoeBackendForDevice:
+    @pytest.mark.parametrize(
+        "quantization",
+        ["fp8", "fp8_per_block", "fp8_per_tensor", "fp8_per_channel"],
+    )
+    def test_fp8_family_without_marlin_fails_below_sm89(
+        self, quantization: str
+    ) -> None:
+        with pytest.raises(ValueError, match="moe_backend='marlin'"):
+            check_fp8_moe_backend_for_device(quantization, None, True, 8, 0)
+
+    def test_marlin_passes_below_sm89(self) -> None:
+        check_fp8_moe_backend_for_device("fp8_per_block", "marlin", True, 8, 0)
+
+    @pytest.mark.parametrize("cc", [(9, 0), (8, 9)])
+    def test_native_fp8_hardware_skips(self, cc: tuple[int, int]) -> None:
+        check_fp8_moe_backend_for_device("fp8", None, True, *cc)
+
+    def test_dense_models_skip(self) -> None:
+        check_fp8_moe_backend_for_device("fp8", None, False, 8, 0)
+
+    @pytest.mark.parametrize("quantization", [None, "awq", "mxfp8"])
+    def test_non_fp8_quantization_skips(self, quantization: str | None) -> None:
+        check_fp8_moe_backend_for_device(quantization, None, True, 8, 0)
+
+
+class TestRunConfigFp8MoeBackend:
+    def _doc(self, quantization: str, moe_backend: str | None = None) -> dict:
+        algorithm: dict[str, object] = {"vllm_config": {"quantization": quantization}}
+        if moe_backend is not None:
+            algorithm["vllm_engine_args"] = {"moe_backend": moe_backend}
+        return manifest(
+            algorithm=algorithm,
+            training={
+                "rollout_mode": "async",
+                "rollout_engines_per_agent": 1,
+            },
+            replay_buffer={"kind": "llm"},
+        )
+
+    def _moe_config(self) -> dict:
+        return dict(TINY_CONFIG, num_experts=8, num_experts_per_tok=2)
+
+    def test_fp8_without_marlin_fails_on_a100(self) -> None:
+        with pytest.raises(ValueError, match="moe_backend='marlin'"):
+            run_config_from_manifest(
+                self._doc("fp8"),
+                device_spec_from_resource_class(A100_TIER),
+                self._moe_config(),
+            )
+
+    def test_fp8_with_marlin_sizes_on_a100(self) -> None:
+        config = run_config_from_manifest(
+            self._doc("fp8", "marlin"),
+            device_spec_from_resource_class(A100_TIER),
+            self._moe_config(),
+        )
+
+        assert config.generation.weight_quantization == "fp8"
+
+    def test_fp8_per_block_without_marlin_reports_marlin_first(self) -> None:
+        with pytest.raises(ValueError, match="moe_backend='marlin'"):
+            run_config_from_manifest(
+                self._doc("fp8_per_block"),
+                device_spec_from_resource_class(A100_TIER),
+                self._moe_config(),
+            )
 
 
 class TestDistributedAndOrchestration:

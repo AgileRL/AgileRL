@@ -823,7 +823,7 @@ def get_placeholder_value(
         if isinstance(agent_space, spaces.Dict):
             return {k: np.full(v.shape or (), np.nan) for k, v in agent_space.items()}
         if isinstance(agent_space, spaces.Tuple):
-            return tuple(np.full(s.shape, np.nan) for s in agent_space)
+            return tuple(np.full(s.shape or (), np.nan) for s in agent_space.spaces)
         return np.full(agent_space.shape or (), np.nan)
     return None
 

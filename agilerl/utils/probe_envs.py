@@ -89,7 +89,8 @@ class ConstantRewardImageEnv(ProbeEnv):
 class ConstantRewardDictEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Dict(
-            {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 0.0, (1, 3, 3))},
+            discrete=spaces.Discrete(1),
+            box=spaces.Box(0.0, 0.0, (1, 3, 3)),
         )
         self.action_space = spaces.Discrete(1)
         self.sample_obs = [{"discrete": np.array([[0]]), "box": np.zeros((1, 1, 3, 3))}]
@@ -183,7 +184,8 @@ class ConstantRewardContActionsImageEnv(ProbeEnv):
 class ConstantRewardContActionsDictEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Dict(
-            {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 0.0, (1, 3, 3))},
+            discrete=spaces.Discrete(1),
+            box=spaces.Box(0.0, 0.0, (1, 3, 3)),
         )
         self.action_space = spaces.Box(0.0, 1.0, (1,))
         self.sample_obs = [{"discrete": np.array([[0]]), "box": np.zeros((1, 1, 3, 3))}]
@@ -278,7 +280,8 @@ class ObsDependentRewardImageEnv(ProbeEnv):
 class ObsDependentRewardDictEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Dict(
-            {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 1.0, (1, 3, 3))},
+            discrete=spaces.Discrete(1),
+            box=spaces.Box(0.0, 1.0, (1, 3, 3)),
         )
         self.action_space = spaces.Discrete(1)
         self.last_obs = {"discrete": 1, "box": np.ones((1, 3, 3))}
@@ -389,7 +392,8 @@ class ObsDependentRewardContActionsImageEnv(ProbeEnv):
 class ObsDependentRewardContActionsDictEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Dict(
-            {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 1.0, (1, 3, 3))},
+            discrete=spaces.Discrete(1),
+            box=spaces.Box(0.0, 1.0, (1, 3, 3)),
         )
         self.action_space = spaces.Box(0.0, 1.0, (1,))
         self.last_obs = {"discrete": 1, "box": np.ones((1, 3, 3))}
@@ -498,7 +502,8 @@ class DiscountedRewardImageEnv(ProbeEnv):
 class DiscountedRewardDictEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Dict(
-            {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 1.0, (1, 3, 3))},
+            discrete=spaces.Discrete(1),
+            box=spaces.Box(0.0, 1.0, (1, 3, 3)),
         )
         self.action_space = spaces.Discrete(1)
         self.last_obs = {"discrete": 0, "box": np.zeros((1, 3, 3))}
@@ -606,7 +611,8 @@ class DiscountedRewardContActionsImageEnv(ProbeEnv):
 class DiscountedRewardContActionsDictEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Dict(
-            {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 1.0, (1, 3, 3))},
+            discrete=spaces.Discrete(1),
+            box=spaces.Box(0.0, 1.0, (1, 3, 3)),
         )
         self.action_space = spaces.Box(0.0, 1.0, (1,))
         self.last_obs = {"discrete": 0, "box": np.zeros((1, 3, 3))}
@@ -712,7 +718,8 @@ class FixedObsPolicyImageEnv(ProbeEnv):
 class FixedObsPolicyDictEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Dict(
-            {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 0.0, (1, 3, 3))},
+            discrete=spaces.Discrete(1),
+            box=spaces.Box(0.0, 0.0, (1, 3, 3)),
         )
         self.action_space = spaces.Discrete(2)
         self.sample_obs = [{"discrete": np.array([[0]]), "box": np.zeros((1, 1, 3, 3))}]
@@ -808,7 +815,8 @@ class FixedObsPolicyContActionsImageEnv(ProbeEnv):
 class FixedObsPolicyContActionsDictEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Dict(
-            {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 1.0, (1, 3, 3))},
+            discrete=spaces.Discrete(1),
+            box=spaces.Box(0.0, 1.0, (1, 3, 3)),
         )
         self.action_space = spaces.Box(0.0, 1.0, (1,))
         self.sample_obs = [{"discrete": np.array([[0]]), "box": np.zeros((1, 1, 3, 3))}]
@@ -911,7 +919,8 @@ class PolicyImageEnv(ProbeEnv):
 class PolicyDictEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Dict(
-            {"discrete": spaces.Discrete(2), "box": spaces.Box(0.0, 1.0, (1, 3, 3))},
+            discrete=spaces.Discrete(2),
+            box=spaces.Box(0.0, 1.0, (1, 3, 3)),
         )
         self.action_space = spaces.Discrete(2)
         self.last_obs = {"discrete": 1, "box": np.ones((1, 3, 3))}
@@ -1086,7 +1095,8 @@ class PolicyContActionsImageEnv(ProbeEnv):
 class PolicyContActionsDictEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Dict(
-            {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 1.0, (1, 3, 3))},
+            discrete=spaces.Discrete(1),
+            box=spaces.Box(0.0, 1.0, (1, 3, 3)),
         )
         self.action_space = spaces.Box(0.0, 1.0, (2,))
         self.last_obs = {"discrete": 0, "box": np.zeros((1, 3, 3))}

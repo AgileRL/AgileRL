@@ -1722,10 +1722,14 @@ def report_model_kernels(model: nn.Module, attn_implementation: str) -> None:
                 f"{module.config._attn_implementation}",
             )
         namespace_name = type(module).__module__
-        # Mamba-style modeling modules expose a module-level fast-path flag.
-        fast_path = getattr(
-            sys.modules.get(namespace_name), "is_fast_path_available", None
-        )
+        namespace = sys.modules.get(namespace_name)
+        # Legacy modeling modules expose a module-level fast-path flag.
+        fast_path = getattr(namespace, "is_fast_path_available", None)
+        if fast_path is None and hasattr(
+            namespace, "mamba2_split_conv1d_scan_combined"
+        ):
+            # Transformers 5.16+ resolves the fused kernel from mamba_ssm when installed.
+            fast_path = importlib.util.find_spec("mamba_ssm") is not None
         if fast_path is not None and namespace_name not in namespaces_seen:
             namespaces_seen.add(namespace_name)
             lines.append(f"mamba fast path {namespace_name}: {fast_path}")
@@ -2955,7 +2959,7 @@ def build_vllm_llm_init_kwargs(
     )
     try:
         runtime = family_runtime(vllm_model)
-        family_vllm_kwargs = runtime.vllm.model_dump(exclude_none=True)
+        family_vllm_kwargs = runtime.vllm.engine_kwargs()
     except OSError:
         runtime = None
         family_vllm_kwargs = {}

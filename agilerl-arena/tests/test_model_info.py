@@ -122,14 +122,10 @@ class TestSupportedModelInfo:
             "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16"
         ]
         vision_targets = {
-            "query",
-            "key",
-            "value",
-            "dense",
             "fc1",
             "fc2",
-            "linear1",
-            "linear2",
+            "linear_1",
+            "linear_2",
         }
 
         assert vision_targets <= entry.modules
@@ -138,6 +134,11 @@ class TestSupportedModelInfo:
             assert "language_model" not in target.get("scope", "")
             assert "in_features" not in target
             assert "out_features" not in target
+        vision_scopes = [
+            target.get("scope", "") for target in entry.inspected["lora_info"]["q_proj"]
+        ]
+
+        assert "vision_model.encoder.layer.attention" in vision_scopes
 
     def test_super_vl_excludes_latent_projections(self) -> None:
         entry = SUPPORTED_MODEL_INFO[
@@ -440,16 +441,16 @@ class TestFinetuningNetworkSpecLoraTargets:
             "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
             ("q_proj",),
             lora_r=128,
-            tower_target_modules=["query", "linear1"],
+            tower_target_modules=["q_proj", "linear_1"],
         )
 
         assert spec.lora_config is not None
-        assert spec.lora_config.tower_target_modules == ["query", "linear1"]
+        assert spec.lora_config.tower_target_modules == ["q_proj", "linear_1"]
 
     @pytest.mark.parametrize(
         ("hub_id", "tower_module"),
         [
-            ("nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16", "query"),
+            ("nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16", "fc1"),
             ("Qwen/Qwen3.5-2B", "qkv"),
             ("google/gemma-4-E4B-it", "linear"),
         ],
@@ -571,16 +572,25 @@ class TestModelInfoDefaultLoraModulesProperty:
         entry = SUPPORTED_MODEL_INFO[hub_id]
         prefix = entry.language_model_prefix
         assert prefix is not None
-        language_only = {
+        language = {
             key
             for key, group in entry.inspected["lora_info"].items()
             if group[0]["kind"] == "module"
-            and all(item.get("scope", "").startswith(prefix) for item in group)
+            and any(item.get("scope", "").startswith(prefix) for item in group)
         }
 
-        assert entry.default_lora_modules == language_only
-        assert entry.default_lora_modules.isdisjoint(entry.tower_lora_modules)
+        assert entry.default_lora_modules == language
         assert entry.default_lora_modules | entry.tower_lora_modules == entry.modules
+
+    def test_super_vl_attention_names_are_language_and_tower_modules(self) -> None:
+        entry = SUPPORTED_MODEL_INFO[
+            "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16"
+        ]
+        attention = {"q_proj", "k_proj", "v_proj", "o_proj"}
+
+        assert attention <= entry.default_lora_modules
+        assert attention <= entry.tower_lora_modules
+        assert entry.tower_lora_modules.isdisjoint({"in_proj", "out_proj"})
 
     def test_text_entry_defaults_to_every_module(self) -> None:
         entry = SUPPORTED_MODEL_INFO["Qwen/Qwen3-4B"]

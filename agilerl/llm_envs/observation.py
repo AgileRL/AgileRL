@@ -191,7 +191,33 @@ def encode_image_training_inputs(
     ):
         msg = "processor must return torch input_ids and pixel_values tensors"
         raise TypeError(msg)
+    image_grid_hw = encoded.get("image_grid_hw")
+    if isinstance(image_grid_hw, torch.Tensor):
+        pixel_values = patch_grid_rows(pixel_values, image_grid_hw)
     return input_ids, pixel_values
+
+
+def patch_grid_rows(
+    pixel_values: torch.Tensor, image_grid_hw: torch.Tensor
+) -> torch.Tensor:
+    """Fold packed ``(total_patches, patch_dim)`` patches into one ``(h, w, patch_dim)`` row per image.
+
+    :param pixel_values: Row-major patches of every image, concatenated.
+    :param image_grid_hw: ``(N, 2)`` patch grid of each image.
+    :return: ``(N, h, w, patch_dim)`` patch-grid rows.
+    :raises ValueError: If the images resize to different patch grids.
+    """
+    grids = {tuple(grid) for grid in image_grid_hw.tolist()}
+    if len(grids) != 1:
+        msg = (
+            f"Images of one processor call resize to patch grids {sorted(grids)}; "
+            "vision rows need one grid per call."
+        )
+        raise ValueError(msg)
+    ((grid_height, grid_width),) = grids
+    return pixel_values.reshape(
+        len(image_grid_hw), grid_height, grid_width, pixel_values.shape[-1]
+    )
 
 
 @dataclass(frozen=True)

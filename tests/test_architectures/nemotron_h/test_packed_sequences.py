@@ -26,6 +26,7 @@ from transformers.models.nemotron_h.modeling_nemotron_h import (
 
 from agilerl.architectures import install_family_patches
 from agilerl.architectures.nemotron_h.mamba import (
+    _fused_split_scan,
     patch_nemotron_mamba_packed_sequences,
 )
 from agilerl.utils.llm_packing import (
@@ -215,13 +216,12 @@ class TestPatchNemotronMambaPackedSequences:
             weight = kwargs["outproj_weight"]
             return F.linear(zxbcdt[..., : weight.shape[1]], weight)
 
-        modeling_nemotron_h.mamba_split_conv1d_scan_combined = split_scan
         hidden = torch.randn(1, 6, model.config.hidden_size)
         seq_idx = torch.tensor([[0, 0, 0, 1, 1, 2]], dtype=torch.int32)
 
         # Act
         with torch.no_grad():
-            out = mixer.cuda_kernels_forward(hidden, seq_idx=seq_idx)
+            out = _fused_split_scan(mixer, split_scan, hidden, seq_idx)
 
         # Assert
         projected = mixer.in_proj(hidden)[..., : mixer.out_proj.weight.shape[1]]
@@ -229,9 +229,7 @@ class TestPatchNemotronMambaPackedSequences:
         assert torch.equal(received["seq_idx"], seq_idx)
         assert received["chunk_size"] == CHUNK_SIZE
 
-    def test_unpacked_eval_call_runs_the_unpatched_cuda_forward(
-        self, pristine_nemotron_classes
-    ):
+    def test_unpacked_call_runs_the_unpatched_forward(self, pristine_nemotron_classes):
         # Arrange
         received = []
 
@@ -239,14 +237,13 @@ class TestPatchNemotronMambaPackedSequences:
             received.append(hidden_states)
             return hidden_states * 2
 
-        NemotronHMamba2Mixer.cuda_kernels_forward = unpatched
-        model = _tiny_nemotron_h().eval()
+        NemotronHMamba2Mixer.forward = unpatched
         patch_nemotron_mamba_packed_sequences(mixer=MIXER_PATH, block=BLOCK_PATH)
-        mixer = model.model.layers[0].mixer
-        hidden = torch.randn(1, 6, model.config.hidden_size)
+        mixer = _tiny_nemotron_h().eval().model.layers[0].mixer
+        hidden = torch.randn(1, 6, mixer.in_proj.in_features)
 
         # Act
-        out = mixer.cuda_kernels_forward(hidden)
+        out = mixer(hidden)
 
         # Assert
         assert torch.equal(out, hidden * 2)
@@ -366,7 +363,7 @@ class KernelOutProj(torch.autograd.Function):
 
 
 def _stand_in_split_scan(weight_grads):
-    """CPU stand-in for ``mamba_split_conv1d_scan_combined`` with its ``out_proj`` contract."""
+    """CPU stand-in for ``mamba2_split_conv1d_scan_combined`` with its ``out_proj`` contract."""
 
     def split_scan(
         zxbcdt,
@@ -410,14 +407,12 @@ def _mixer_backward(seq_idx, train_out_proj):
     mixer = base.model.layers[0].mixer
     mixer.out_proj.weight.requires_grad_(train_out_proj)
     weight_grads = []
-    modeling_nemotron_h.mamba_split_conv1d_scan_combined = _stand_in_split_scan(
-        weight_grads
-    )
+    split_scan = _stand_in_split_scan(weight_grads)
     torch.manual_seed(3)
     hidden = torch.randn(1, 6, base.config.hidden_size, requires_grad=True)
     cotangent = torch.randn(1, 6, base.config.hidden_size)
 
-    out = mixer.cuda_kernels_forward(hidden, seq_idx=seq_idx)
+    out = _fused_split_scan(mixer, split_scan, hidden, seq_idx)
     (out * cotangent).sum().backward()
 
     lora_grads = {

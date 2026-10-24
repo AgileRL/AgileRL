@@ -8,11 +8,16 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
+from transformers.configuration_utils import PretrainedConfig
+from transformers.models.nemotron_h_omni.configuration_nemotron_h_omni import (
+    NemotronH_Omni_Reasoning_V3_Config,
+)
 
 from agilerl.architectures import family_tensor_parallel_plans
 from agilerl.architectures.catalog import (
     FAMILY_RUNTIME_CONFIGS,
     family_runtime,
+    nemotron_h_omni_vllm_hf_override,
     pretrained_model_type,
     trainer_model_class,
 )
@@ -20,7 +25,7 @@ from agilerl.architectures.nemotron_h.mamba import install_mamba_patches
 from agilerl.architectures.nemotron_h.tensor_parallel import (
     NEMOTRON_H_TENSOR_PARALLEL_PLAN,
 )
-from agilerl.architectures.runtime import ModelRuntimeConfig
+from agilerl.architectures.runtime import ModelRuntimeConfig, VllmRuntimeConfig
 from agilerl.arena.memory.manifest import FAMILY_MAX_NUM_BATCHED_TOKENS
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.llm_envs.tool_parsers import TOOL_PARSERS
@@ -30,7 +35,7 @@ NEMOTRON_VLLM_KWARGS = {
     "max_num_batched_tokens": 8192,
     "reasoning_parser": "nemotron_v3",
     "enable_prefix_caching": True,
-    "trust_remote_code": True,
+    "prefix_cache_retention_interval": None,
 }
 
 SWA_MODEL_TYPES = ("gemma3", "gemma3_text", "gemma4", "gemma4_text")
@@ -76,14 +81,12 @@ class TestFamilyRuntimeConfigs:
         base = FAMILY_RUNTIME_CONFIGS["nemotron_h"]
         omni = FAMILY_RUNTIME_CONFIGS["nemotron_h_omni"]
         assert omni.vllm.mamba_cache_mode == base.vllm.mamba_cache_mode
-        assert omni.vllm.hf_overrides == {
-            "architectures": ["NemotronH_Super_Omni_Reasoning_V3"],
-        }
+        assert omni.vllm.hf_overrides is nemotron_h_omni_vllm_hf_override
         assert base.vllm.hf_overrides is None
         assert omni.patch.install is install_mamba_patches
-        assert {"query", "fc1", "linear1"} <= omni.tower_connector_lora_targets
+        assert {"q_proj", "fc1", "linear_1"} <= omni.tower_connector_lora_targets
         assert omni.tower_connector_lora_targets.isdisjoint(
-            {"q_proj", "in_proj", "up_proj", "down_proj"}
+            {"in_proj", "up_proj", "down_proj", "out_proj"}
         )
         assert base.tower_connector_lora_targets == frozenset()
 
@@ -116,16 +119,20 @@ class TestFamilyRuntimeConfigs:
 
     def test_nemotron_h_lookup(self) -> None:
         config = FAMILY_RUNTIME_CONFIGS["nemotron_h"]
-        assert config.vllm.model_dump(exclude_none=True) == NEMOTRON_VLLM_KWARGS
+        assert config.vllm.engine_kwargs() == NEMOTRON_VLLM_KWARGS
         assert config.trainer.load_kwargs() == {}
         assert config.trainer.attn_implementation == "flash_attention_2"
         assert config.patch.install is install_mamba_patches
 
-    def test_only_nemotron_h_omni_trainer_loads_checkpoint_code(self) -> None:
+    def test_no_family_loads_checkpoint_code(self) -> None:
         omni = FAMILY_RUNTIME_CONFIGS["nemotron_h_omni"]
 
-        assert omni.trainer.load_kwargs() == {"trust_remote_code": True}
-        assert FAMILY_RUNTIME_CONFIGS["nemotron_h"].trainer.trust_remote_code is None
+        assert omni.trainer.load_kwargs() == {"trust_remote_code": False}
+        assert all(
+            runtime.trainer.trust_remote_code is not True
+            and runtime.vllm.trust_remote_code is not True
+            for runtime in FAMILY_RUNTIME_CONFIGS.values()
+        )
 
     def test_nemotron_h_enables_prefix_caching(self) -> None:
         assert FAMILY_RUNTIME_CONFIGS["nemotron_h"].vllm.enable_prefix_caching is True
@@ -178,6 +185,31 @@ class TestFamilyRuntimeConfigs:
         )
         assert mamba.fused_path is True
         assert mamba.stream_ordering is True
+
+
+class TestVllmRuntimeConfigEngineKwargs:
+    def test_dense_mamba_prefix_cache_retains_every_state(self) -> None:
+        config = VllmRuntimeConfig(
+            mamba_cache_mode="align", dense_mamba_prefix_cache=True
+        )
+
+        kwargs = config.engine_kwargs()
+
+        assert kwargs == {
+            "mamba_cache_mode": "align",
+            "prefix_cache_retention_interval": None,
+        }
+
+    def test_unset_fields_add_no_kwargs(self) -> None:
+        assert VllmRuntimeConfig(reasoning_parser="qwen3").engine_kwargs() == {
+            "reasoning_parser": "qwen3"
+        }
+
+    @pytest.mark.parametrize("model_type", ["nemotron_h", "qwen3_5"])
+    def test_hybrid_mamba_families_cache_densely(self, model_type: str) -> None:
+        kwargs = FAMILY_RUNTIME_CONFIGS[model_type].vllm.engine_kwargs()
+
+        assert kwargs["prefix_cache_retention_interval"] is None
 
 
 class TestFamilyMaxNumBatchedTokens:
@@ -236,7 +268,7 @@ class TestFamilyRuntime:
     ) -> None:
         stub_config_model_type(monkeypatch, model_type)
         config = family_runtime("some/model")
-        assert config.vllm.model_dump(exclude_none=True) == {}
+        assert config.vllm.engine_kwargs() == {}
         assert config.trainer.load_kwargs() == {}
         assert config.trainer.model_class is AutoModelForCausalLM
         assert config.patch.install is None
@@ -294,7 +326,7 @@ class TestPretrainedModelType:
             fake_get_config_dict,
         )
         assert pretrained_model_type("nvidia/unlisted-model") == "nemotron_h"
-        assert seen["trust_remote_code"] is True
+        assert "trust_remote_code" not in seen
 
     def test_missing_config_json_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def raise_missing(*args: object, **kwargs: object) -> None:
@@ -371,3 +403,29 @@ class TestTrainerModelClass:
         stub_config_model_type(monkeypatch, "llama")
 
         assert trainer_model_class("some/model") is AutoModelForCausalLM
+
+
+class TestNemotronHOmniVllmHfOverride:
+    def test_native_config_gets_the_lora_architecture_and_vit_hidden_size(
+        self,
+    ) -> None:
+        # Arrange
+        config = NemotronH_Omni_Reasoning_V3_Config(vision_hidden_size=1024)
+
+        # Act
+        overridden = nemotron_h_omni_vllm_hf_override(config)
+
+        # Assert
+        assert overridden is config
+        assert config.architectures == ["NemotronH_Super_Omni_Reasoning_V3"]
+        assert config.vit_hidden_size == 1024
+
+    def test_probe_config_without_a_vision_size_gets_only_the_architecture(
+        self,
+    ) -> None:
+        config = PretrainedConfig()
+
+        nemotron_h_omni_vllm_hf_override(config)
+
+        assert config.architectures == ["NemotronH_Super_Omni_Reasoning_V3"]
+        assert not hasattr(config, "vit_hidden_size")

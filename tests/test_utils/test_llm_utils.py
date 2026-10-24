@@ -1,6 +1,7 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib.util
 import json
 import logging
 import math
@@ -44,6 +45,7 @@ from transformers import (
 )
 
 from agilerl.architectures import trainer_model_class
+from agilerl.architectures.catalog import nemotron_h_omni_vllm_hf_override
 from agilerl.architectures.flex_attention import (
     flex_decode_kernel_options,
     patch_flex_attention_kernel_options,
@@ -56,6 +58,8 @@ from agilerl.llm_envs import DatasetEnv
 from agilerl.utils import llm_utils as llm_utils_module
 from agilerl.utils.algo_utils import CosineLRScheduleConfig
 from agilerl.utils.llm_utils import (
+    MAMBA_LORA_FORBIDDEN_MODULES,
+    MAMBA_LORA_MODEL_TYPES,
     LoraAdapterSnapshot,
     MicroBatchMetrics,
     adapt_lora_config_for_model,
@@ -1982,16 +1986,23 @@ VL_SUPPORTED_MODEL_IDS = sorted(
     hub_id
     for hub_id, entry in SUPPORTED_MODEL_INFO.items()
     if entry.language_model_prefix is not None
-    # Its config and model classes are checkpoint code, not in transformers.
+    # Checkpoint-code model types have no transformers config class.
     and entry.model_type in CONFIG_MAPPING
 )
+
+
+def _decode_config_float(obj: dict[str, Any]) -> Any:
+    """Decode the ``{"__float__": "Infinity"}`` form configs store non-finite floats in."""
+    if obj.keys() == {"__float__"}:
+        return float(obj["__float__"])
+    return obj
 
 
 class TestAdaptLoraConfigForSupportedVlModels:
     def test_covers_every_transformers_vl_family(self):
         families = {SUPPORTED_MODEL_INFO[h].model_type for h in VL_SUPPORTED_MODEL_IDS}
 
-        assert families == {"gemma4", "qwen3_5", "qwen3_5_moe"}
+        assert families == {"gemma4", "nemotron_h_omni", "qwen3_5", "qwen3_5_moe"}
 
     @pytest.mark.parametrize("target_modules", ["default", "all-linear"])
     @pytest.mark.parametrize("hub_id", VL_SUPPORTED_MODEL_IDS)
@@ -2000,7 +2011,10 @@ class TestAdaptLoraConfigForSupportedVlModels:
     ) -> None:
         # Arrange
         entry = SUPPORTED_MODEL_INFO[hub_id]
-        config = AutoConfig.for_model(**entry.config)
+        config_dict = json.loads(
+            json.dumps(entry.config), object_hook=_decode_config_float
+        )
+        config = AutoConfig.for_model(**config_dict)
         with torch.device("meta"):
             model = trainer_model_class(hub_id).from_config(config)
         targets = (
@@ -2026,9 +2040,12 @@ class TestAdaptLoraConfigForSupportedVlModels:
             for name in adapter_modules
         ), sorted(adapter_modules)[:5]
         leaf_names = {name.rsplit(".", 1)[-1] for name in adapter_modules}
-        assert entry.default_lora_modules <= leaf_names
+        expected = entry.default_lora_modules
+        if entry.model_type in MAMBA_LORA_MODEL_TYPES:
+            expected -= MAMBA_LORA_FORBIDDEN_MODULES
+        assert expected <= leaf_names
         if target_modules == "default":
-            assert leaf_names == entry.default_lora_modules
+            assert leaf_names == expected
 
 
 class TestAdaptLoraConfigForModelMamba:
@@ -2449,7 +2466,7 @@ class TestReportModelKernels:
             ),
         )
         mixer_namespace = type(model.backbone.layers[0].mixer).__module__
-        fast_path = sys.modules[mixer_namespace].is_fast_path_available
+        fast_path = importlib.util.find_spec("mamba_ssm") is not None
 
         # Act
         with caplog.at_level(logging.DEBUG, logger=llm_utils_module.__name__):
@@ -2846,8 +2863,8 @@ class TestCreateModelFromNameOrPathDefaults:
         stub_catalog_model_type(monkeypatch, "nemotron_h_omni")
         create_model_from_name_or_path("nvidia/nemotron-omni")
         assert captured["kwargs"]["attn_implementation"] == "flash_attention_2"
-        assert captured["kwargs"]["trust_remote_code"] is True
-        assert remote_code_loads == [("nvidia/nemotron-omni", True)]
+        assert captured["kwargs"]["trust_remote_code"] is False
+        assert remote_code_loads == [("nvidia/nemotron-omni", False)]
 
     def test_caller_trust_remote_code_false_is_not_overwritten(self, monkeypatch):
         captured = {}
@@ -3415,7 +3432,7 @@ class TestBuildVllmLlmInitKwargs:
         assert kwargs["max_num_batched_tokens"] == 8192
         assert kwargs["reasoning_parser"] == "nemotron_v3"
         assert kwargs["enable_prefix_caching"] is True
-        assert kwargs["trust_remote_code"] is True
+        assert "trust_remote_code" not in kwargs
 
     def test_nemotron_family_default_is_capped_when_context_is_short(self, monkeypatch):
         stub_catalog_model_type(monkeypatch, "nemotron_h")
@@ -3497,7 +3514,7 @@ class TestBuildVllmLlmInitKwargs:
             _vllm_config(strip_multimodal_towers=False),
             trainer_model_name_or_path="org/vl-model",
             max_model_len=32768,
-            tower_lora_target_modules=["query", "linear1"],
+            tower_lora_target_modules=["q_proj", "linear_1"],
         )
 
         assert kwargs["enable_tower_connector_lora"] is True
@@ -3535,9 +3552,7 @@ class TestBuildVllmLlmInitKwargs:
         )
 
         assert kwargs["language_model_only"] is True
-        assert kwargs["hf_overrides"] == {
-            "architectures": ["NemotronH_Super_Omni_Reasoning_V3"],
-        }
+        assert kwargs["hf_overrides"] is nemotron_h_omni_vllm_hf_override
         assert "model_class_overrides" not in kwargs
 
     def test_strip_multimodal_towers_serves_gemma4_language_model_only(

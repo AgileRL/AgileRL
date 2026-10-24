@@ -10,10 +10,11 @@ far less GPU memory, at the cost of a small amount of rounding error.
 
 AgileRL uses
 `bitsandbytes <https://github.com/bitsandbytes-foundation/bitsandbytes>`_ to
-quantize the Hugging Face **trainer** (the model that actually learns), and pairs
-it with a matching bitsandbytes-quantized `vLLM <https://docs.vllm.ai/>`_
-**rollout engine** (the fast inference engine that generates responses during
-training), so both sides run from the same low-precision base weights.
+quantize the Hugging Face **trainer** (the model that actually learns). The
+`vLLM <https://docs.vllm.ai/>`_ **rollout engine** (the fast inference engine
+that generates responses during training) runs its base unquantized, or with
+another vLLM-supported method (AWQ, GPTQ, FP8, ...) via
+``VLLMConfig.quantization``; only the LoRA adapters are synced into it.
 
 .. note:: A few terms used throughout this page
 
@@ -46,8 +47,6 @@ Why quantize?
   quantization (NF4 is a 4-bit number format designed for neural-network
   weights) of the base recovers full-fine-tuning quality in practice. This is
   the `QLoRA <https://arxiv.org/abs/2305.14314>`_ recipe.
-* **Faster rollout.** Quantized weights mean less memory bandwidth per
-  forward pass, which speeds up generation on the vLLM side.
 
 The cost is some quantization error on the frozen base. The defaults below
 are chosen to keep that cost minimal.
@@ -68,17 +67,17 @@ generate completions). They are quantized independently:
      - Rollout (vLLM)
    * - Weight quantization
      - bitsandbytes: ``int8`` or ``nf4`` (4-bit)
-     - ``bitsandbytes`` (AgileRL-validated); other vLLM methods (AWQ, GPTQ,
-       ...) forward verbatim via ``VLLMConfig.quantization`` but are not
+     - Unquantized by default; other vLLM methods (AWQ, GPTQ, FP8, ...)
+       forward verbatim via ``VLLMConfig.quantization`` but are not
        validated here
    * - What is synced
      - Trains the BF16 LoRA adapters
      - Receives **only** the LoRA adapters each step; base weights are never
        re-uploaded
 
-When you train with QLoRA and a colocated vLLM rollout, the trainer and the
-rollout engine each hold their own copy of the (quantized) base on the same
-GPU and take turns using it (see :ref:`colocated_native_sleep` below). Every
+When you train with QLoRA and a colocated vLLM rollout, the quantized trainer
+base and the rollout engine take turns on the same GPU (see
+:ref:`colocated_native_sleep` below). Every
 training step only the small LoRA adapter weights are exported from the trainer
 and loaded into vLLM; a colocated engine always serves LoRA, so there is
 nothing to enable. The quantized base weights stay frozen in 4-bit; they are
@@ -90,9 +89,9 @@ Colocated rollout (native vLLM sleep/wake)
 ------------------------------------------
 
 When vLLM is colocated with the trainer on the same GPU, the two share the GPU
-*in time* rather than sharing weight storage. vLLM loads (and, with
-``quantization="bitsandbytes"``, quantizes) its own base; the trainer loads its
-own base too. Across each rollout↔train cycle at most one base is resident on
+*in time* rather than sharing weight storage. vLLM loads its own base and the
+trainer loads its own base too. Across each rollout↔train cycle at most one
+base is resident on
 the GPU at a time:
 
 * during **rollout**, the trainer's base is offloaded to CPU
@@ -104,12 +103,9 @@ the GPU at a time:
   and backward passes (the training step). ``wake_up()`` restores vLLM's base
   before the next rollout.
 
-This relies on vLLM ``>= 0.22``, whose ``sleep(level=1)`` moves the base out to
-host RAM and back without any loss of precision, for **both** dense (BF16/FP16)
-and bitsandbytes 4-bit weights. (Earlier vLLM versions could not restore a 4-bit
-base correctly, so this colocated path requires a recent vLLM; AgileRL pins
-``vllm>=0.23``.) It happens automatically for colocated rollouts; there is
-nothing to configure.
+This relies on vLLM ``sleep(level=1)``, which moves the base out to host RAM
+and back without any loss of precision. It happens automatically for colocated
+rollouts; there is nothing to configure.
 
 Two practicalities:
 
@@ -232,28 +228,10 @@ Quantizing the vLLM rollout
 ---------------------------
 
 The rollout engine is configured through
-:class:`~agilerl.utils.algo_utils.VLLMConfig`. The AgileRL-validated path is
-``quantization="bitsandbytes"``, which pairs naturally with an ``nf4`` trainer
-for colocated QLoRA rollouts:
-
-.. code-block:: python
-
-    from agilerl.algorithms import GRPO
-    from agilerl.utils.algo_utils import VLLMConfig
-
-    vllm_config = VLLMConfig(
-        gpu_memory_utilization=0.3,
-        quantization="bitsandbytes",   # AgileRL-validated path
-        dtype="bfloat16",
-        max_lora_rank=16,              # >= trainer lora_config.r
-    )
-
-    agent = GRPO(..., vllm_config=vllm_config)
-
-``VLLMConfig.quantization`` is forwarded verbatim to
-``vllm.LLM(quantization=...)``. Any other vLLM-supported backend (e.g. ``"awq"``,
-``"gptq"``, ``"fp8"``, ``"compressed-tensors"``) is accepted but is not validated
-by AgileRL. Those
+:class:`~agilerl.utils.algo_utils.VLLMConfig`. ``VLLMConfig.quantization`` is
+forwarded verbatim to ``vllm.LLM(quantization=...)``; any vLLM-supported
+backend (e.g. ``"awq"``, ``"gptq"``, ``"fp8"``, ``"compressed-tensors"``) is
+accepted but is not validated by AgileRL. Those
 paths typically need a pre-quantized checkpoint, set separately via
 ``vllm_model_name_or_path``:
 
@@ -320,10 +298,9 @@ A typical memory-constrained QLoRA + colocated-vLLM setup on A100:
         task_type="CAUSAL_LM", lora_dropout=0.05,
     )
 
-    # Rollout: bnb-quantized vLLM engine, adapters synced each step.
+    # Rollout: unquantized vLLM engine, adapters synced each step.
     vllm_config = VLLMConfig(
         gpu_memory_utilization=0.3,
-        quantization="bitsandbytes",
         dtype="bfloat16",
         max_lora_rank=16,
     )
@@ -336,5 +313,5 @@ A typical memory-constrained QLoRA + colocated-vLLM setup on A100:
         vllm_config=vllm_config,
     )
 
-Here the base weights are quantized once on each side and frozen; only the
+Here the trainer base is quantized once and frozen; only the
 BF16 LoRA adapters are trained and synced into vLLM every step.

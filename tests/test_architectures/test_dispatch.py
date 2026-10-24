@@ -184,21 +184,14 @@ class TestFamilyRuntime:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         stub_config_model_type(monkeypatch, "nemotron_h")
-        assert architectures.family_runtime("nvidia/nemotron").vllm.model_dump(
-            exclude_none=True
-        ) == {
+        assert architectures.family_runtime("nvidia/nemotron").vllm.engine_kwargs() == {
             "mamba_cache_mode": "align",
             "max_num_batched_tokens": 8192,
             "reasoning_parser": "nemotron_v3",
             "enable_prefix_caching": True,
-            "trust_remote_code": True,
+            "prefix_cache_retention_interval": None,
         }
 
     def test_llama_vllm_dumps_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
         stub_config_model_type(monkeypatch, "llama")
-        assert (
-            architectures.family_runtime("meta/llama").vllm.model_dump(
-                exclude_none=True
-            )
-            == {}
-        )
+        assert architectures.family_runtime("meta/llama").vllm.engine_kwargs() == {}

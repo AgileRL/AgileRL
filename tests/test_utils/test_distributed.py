@@ -3622,6 +3622,27 @@ class TestInitRopeBuffers:
         assert torch.equal(module.inv_freq, expected)
         assert torch.equal(module.original_inv_freq, expected)
 
+    def test_fills_axial_vision_rope(self):
+        # Arrange
+        modeling = pytest.importorskip("transformers.models.qwen3_5.modeling_qwen3_5")
+        config_module = pytest.importorskip(
+            "transformers.models.qwen3_5.configuration_qwen3_5"
+        )
+        module = modeling.Qwen3_5VisionRotaryEmbedding(
+            config_module.Qwen3_5VisionConfig()
+        )
+        expected = module.inv_freq.clone()
+        module.inv_freq.zero_()
+        module.original_inv_freq.zero_()
+
+        # Act
+        init_rope_buffers(nn.Sequential(module))
+
+        # Assert
+        assert module.rope_type == "axial"
+        assert torch.equal(module.inv_freq, expected)
+        assert torch.equal(module.original_inv_freq, expected)
+
     def test_fills_per_layer_type_inv_freq(self):
         class Gemma4TextRotaryEmbedding(nn.Module):
             def __init__(self):
