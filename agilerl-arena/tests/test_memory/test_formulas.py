@@ -670,6 +670,32 @@ NEMOTRON_H_MOE = {
 
 
 class TestRoutedExpertBytes:
+    def test_expert_lora_backward_matches_the_granite_snapshot(self):
+        # Arrange: granite-3.1-3b-a800m at 16k: 16384 x 8 routed rows fit one
+        # 512 MiB chunk. A100 snapshot: five [rows, 1536] buffers plus gate/up
+        # and activation, 2432 MiB.
+        arch = ModelArch.from_hf_config(GRANITE_MOE)
+
+        # Act
+        backward = formulas.routed_expert_bytes(
+            arch, 1, 16384, 2.0, backward=True, lora_chunk_bytes=512 * MiB
+        )
+
+        # Assert
+        assert backward == 2432 * MiB
+
+    def test_rows_past_the_chunk_only_grow_the_gathered_input_and_its_gradient(self):
+        arch = ModelArch.from_hf_config(GRANITE_MOE)
+
+        def backward(seq_len: int) -> int:
+            return formulas.routed_expert_bytes(
+                arch, 1, seq_len, 2.0, backward=True, lora_chunk_bytes=512 * MiB
+            )
+
+        # 32k and 64k rows both overflow the chunk, so only the gathered input
+        # and its gradient grow.
+        assert backward(65536) - backward(32768) == 2 * 32768 * 8 * 1536 * 2
+
     def test_chunked_routed_backward_keeps_inputs_outputs_and_ungated_activation(self):
         # Arrange
         arch = ModelArch.from_hf_config(NEMOTRON_H_MOE)
@@ -907,30 +933,33 @@ class TestBlockRecomputeNormInputs:
     def test_stock_rms_norm_backward_keeps_two_fp32_norm_inputs(self):
         # Arrange
         granite = ModelArch.from_hf_config(GRANITE_MOE)
-        fused = granite.model_copy(update={"fp32_norm_inputs": False})
+        fused = granite.model_copy(update={"stock_hf_modules": False})
 
         # Act
         stock = formulas.block_recompute_bytes(granite, 1, 65536, 2.0, backward=True)
         liger = formulas.block_recompute_bytes(fused, 1, 65536, 2.0, backward=True)
 
         # Assert: a 64k-token Granite MoE snapshot held two 0.375 GiB fp32 copies.
-        assert granite.fp32_norm_inputs
+        assert granite.stock_hf_modules
         assert stock - liger == 2 * 65536 * 1536 * 4
         assert stock - liger == 0.75 * GiB
 
     def test_liger_families_and_forward_pay_nothing(self):
         granite = ModelArch.from_hf_config(GRANITE_MOE)
-        fused = granite.model_copy(update={"fp32_norm_inputs": False})
+        fused = granite.model_copy(update={"stock_hf_modules": False})
 
-        assert not ModelArch.from_hf_config(QWEN3_4B).fp32_norm_inputs
-        assert not ModelArch.from_hf_config(NEMOTRON_NANO_MAMBA).fp32_norm_inputs
+        assert not ModelArch.from_hf_config(QWEN3_4B).stock_hf_modules
+        assert not ModelArch.from_hf_config(NEMOTRON_NANO_MAMBA).stock_hf_modules
         assert formulas.block_recompute_bytes(
             granite, 1, 1024, 2.0
         ) == formulas.block_recompute_bytes(fused, 1, 1024, 2.0)
 
     def test_block_exclusive_layer_keeps_one_norm_input(self):
-        nano = ModelArch.from_hf_config(NEMOTRON_NANO_MAMBA)
-        stock = nano.model_copy(update={"fp32_norm_inputs": True})
+        # A non-gated MLP keeps the stock MLP term out of the difference.
+        nano = ModelArch.from_hf_config(NEMOTRON_NANO_MAMBA).model_copy(
+            update={"gated_mlp": False}
+        )
+        stock = nano.model_copy(update={"stock_hf_modules": True})
 
         added = {
             kind: formulas.block_recompute_bytes(
@@ -943,6 +972,21 @@ class TestBlockRecomputeNormInputs:
         }
 
         assert added == dict.fromkeys(("attention", "ffn", "mamba"), 4096 * 3136 * 4)
+
+    def test_stock_gated_mlp_backward_keeps_two_more_intermediates(self):
+        # Arrange: granite-4.0-micro's snapshot held the gate/up output, the
+        # activation and three gradients, six intermediate widths, against
+        # the four the fused MLP keeps.
+        qwen = ModelArch.from_hf_config(QWEN3_4B)
+        stock = qwen.model_copy(update={"stock_hf_modules": True})
+
+        # Act
+        added = formulas.block_recompute_bytes(
+            stock, 1, 16384, 2.0, backward=True
+        ) - formulas.block_recompute_bytes(qwen, 1, 16384, 2.0, backward=True)
+
+        # Assert: two fp32 norm inputs plus two bf16 intermediates.
+        assert added == 2 * 16384 * 2560 * 4 + 2 * 16384 * 9728 * 2
 
 
 class TestLoraDropoutBytes:
@@ -1008,13 +1052,27 @@ class TestAllocatorReserveBytes:
         # Floor at zero.
         assert formulas.allocator_reserve_bytes(-1 * MiB) == 0
 
-    def test_fsdp_reserves_more_than_flat_data_parallel(self):
-        data_parallel = formulas.allocator_reserve_bytes(100 * MiB, n_ranks=4)
-        fsdp = formulas.allocator_reserve_bytes(100 * MiB, n_ranks=4, sharded=True)
+    def test_fsdp_charges_the_gather_pool_plus_a_fragmentation_share(self):
+        regular = formulas.allocator_reserve_bytes(
+            100 * MiB, n_ranks=4, sharded=True, gather_pool_bytes=10 * MiB
+        )
+        irregular = formulas.allocator_reserve_bytes(
+            100 * MiB,
+            n_ranks=4,
+            sharded=True,
+            irregular_blocks=True,
+            gather_pool_bytes=10 * MiB,
+        )
+
+        assert regular == pytest.approx(10.5 * MiB)
+        assert irregular == pytest.approx(13.4 * MiB)
+
+    def test_data_parallel_ignores_the_fsdp_terms(self):
+        data_parallel = formulas.allocator_reserve_bytes(
+            100 * MiB, n_ranks=4, irregular_blocks=True, gather_pool_bytes=10 * MiB
+        )
 
         assert data_parallel == pytest.approx(5.4 * MiB)
-        assert fsdp == pytest.approx(6.9 * MiB)
-        assert data_parallel < fsdp
 
 
 class TestRecommendationFits:
@@ -1122,6 +1180,81 @@ MOE_TINY = ModelArch(
     n_experts_per_tok=2,
     expert_intermediate_size=32,
 )
+
+
+class TestTensorParallelWidths:
+    def test_query_splits_and_indivisible_kv_stays_whole(self):
+        assert formulas.qkv_width_per_rank(QWEN_05B, 1) == QWEN_05B.peak_qkv_dim
+        assert formulas.qkv_width_per_rank(QWEN_05B, 2) == QWEN_05B.peak_qkv_dim // 2
+
+        replicated_kv = QWEN_05B.model_copy(update={"n_kv_heads": 1, "n_heads": 14})
+        full = formulas.qkv_width_per_rank(replicated_kv, 1)
+        local = formulas.qkv_width_per_rank(replicated_kv, 2)
+        # Query halves. The single KV head is copied onto both ranks.
+        assert local == full - replicated_kv.n_heads * replicated_kv.head_dim // 2
+
+    def test_qkv_width_uses_the_wider_global_head_dim(self):
+        arch = QWEN_05B.model_copy(update={"global_head_dim": 128})
+
+        assert formulas.qkv_width_per_rank(arch, 1) == arch.peak_qkv_dim
+        assert formulas.qkv_width_per_rank(arch, 2) == arch.peak_qkv_dim // 2
+
+    def test_tensor_parallel_linears_leave_the_fsdp_gather(self):
+        arch = QWEN_05B.model_copy(update={"tensor_parallel_plan": True})
+        counts = formulas.param_counts(arch)
+        kwargs = {
+            "n_gpus": 4,
+            "reshard_after_forward": True,
+            "prefetch_units": 1,
+            "wrap_every_n_blocks": 1,
+            "cpu_offload": False,
+        }
+
+        full = formulas.fsdp_gathered_params(counts, arch, **kwargs)
+        narrowed = formulas.fsdp_gathered_params(
+            counts, arch, tensor_parallel=2, **kwargs
+        )
+
+        assert formulas.tensor_parallel_params(counts, arch) == (
+            counts.attention + counts.mlp
+        )
+        assert narrowed < full
+
+    def test_without_a_plan_only_an_untied_head_leaves_the_fsdp_gather(self):
+        arch = QWEN_05B.model_copy(update={"tied_embeddings": False})
+        counts = formulas.param_counts(arch)
+        kwargs = {
+            "n_gpus": 4,
+            "reshard_after_forward": True,
+            "prefetch_units": 1,
+            "wrap_every_n_blocks": 1,
+            "cpu_offload": False,
+        }
+
+        full = formulas.fsdp_gathered_params(counts, arch, **kwargs)
+        narrowed = formulas.fsdp_gathered_params(
+            counts, arch, tensor_parallel=2, **kwargs
+        )
+
+        assert formulas.tensor_parallel_params(counts, arch) == counts.lm_head
+        assert narrowed == full - counts.lm_head
+
+    def test_gather_stream_spans_two_moe_layers_of_a_tp_planned_hybrid(self):
+        # Arrange: Lightning TP 2 on A100 held two MoE all-gathers at once.
+        arch = ModelArch.from_hf_config(NEMOTRON_H_MOE)
+        counts = formulas.param_counts(arch)
+        moe_layer = formulas.layer_params(arch, "moe")
+
+        # Act
+        allocated = formulas.prefetch_window_params(counts, arch, 2, 1, 2)
+        stream = formulas.prefetch_window_params(
+            counts, arch, 2, 1, 2, stream_peak=True
+        )
+
+        # Assert
+        assert arch.tensor_parallel_plan
+        assert allocated == moe_layer
+        assert stream == 2 * moe_layer
 
 
 class TestFSDPGatheredParams:
@@ -1279,6 +1412,132 @@ class TestFSDPGatheredParams:
 
         # Units: [mamba, moe] [mamba, moe] [mamba, attention] [moe].
         assert gathered == 2 * (mamba + experts + router) + counts.lm_head
+
+
+GATHER_KWARGS = {
+    "n_gpus": 4,
+    "reshard_after_forward": True,
+    "prefetch_units": 1,
+    "wrap_every_n_blocks": 1,
+    "cpu_offload": False,
+}
+
+
+class TestRoutedExpertParamsPerLayer:
+    def test_dense_arch_has_no_routed_experts(self):
+        assert formulas.routed_expert_params_per_layer(QWEN_05B) == 0
+
+
+class TestFSDPGatheredParamsExpertParallel:
+    def test_ep_filling_the_shard_group_gathers_no_routed_experts(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(NEMOTRON_H_MOE)
+        counts = formulas.param_counts(arch)
+        experts, router = formulas.moe_params_per_layer(arch)
+        routed = formulas.routed_expert_params_per_layer(arch)
+        mamba = formulas.mamba_params_per_layer(arch)
+        attention = formulas.attention_params_per_layer(arch)
+
+        # Act
+        gathered = formulas.fsdp_gathered_params(
+            counts, arch, expert_parallel=4, **GATHER_KWARGS
+        )
+
+        # Assert: the MoE block unit keeps its router and shared experts only,
+        # so a Mamba + attention pair can be the widest window.
+        assert 0 < routed < experts
+        block_moe = experts - routed + router
+        assert gathered == max(block_moe, attention) + mamba + counts.lm_head
+
+    def test_leftover_ranks_gather_one_layer_of_local_experts(self):
+        arch = ModelArch.from_hf_config(NEMOTRON_H_MOE)
+        counts = formulas.param_counts(arch)
+        routed = formulas.routed_expert_params_per_layer(arch)
+
+        filled = formulas.fsdp_gathered_params(
+            counts, arch, expert_parallel=4, **GATHER_KWARGS
+        )
+        leftover = formulas.fsdp_gathered_params(
+            counts, arch, expert_parallel=2, **GATHER_KWARGS
+        )
+
+        assert leftover == filled + routed // 2
+
+    def test_no_reshard_holds_every_local_expert_layer(self):
+        arch = ModelArch.from_hf_config(NEMOTRON_H_MOE)
+        counts = formulas.param_counts(arch)
+        routed = formulas.routed_expert_params_per_layer(arch)
+        sharded = counts.total - formulas.token_embedding_params(arch)
+        kwargs = {**GATHER_KWARGS, "reshard_after_forward": False}
+
+        gathered = formulas.fsdp_gathered_params(
+            counts, arch, expert_parallel=2, **kwargs
+        )
+
+        assert gathered == sharded - arch.moe_layers * routed // 2
+
+    def test_tensor_parallel_uniform_moe_stack_keeps_experts_gathered(self):
+        arch = ModelArch.from_hf_config(GRANITE_MOE)
+        counts = formulas.param_counts(arch)
+        block_moe = formulas.block_moe_params_per_layer(arch)
+
+        gathered = formulas.fsdp_gathered_params(
+            counts, arch, tensor_parallel=2, **GATHER_KWARGS
+        )
+
+        assert not arch.layer_kinds
+        assert gathered >= 2 * block_moe
+
+
+class TestTrainerNcclBytes:
+    WORLD = 600 * MiB
+
+    def test_plain_fsdp_holds_only_the_world_group(self):
+        assert formulas.trainer_nccl_bytes(self.WORLD, 4, 4) == self.WORLD
+
+    @pytest.mark.parametrize(
+        ("n_gpus", "shard", "ep", "tp", "groups", "all_to_all"),
+        [
+            (4, 2, 1, 1, 0, False),  # HSDP's own groups are not charged
+            (4, 4, 1, 2, 2, False),  # TP and the ranks sharing a TP shard
+            (4, 4, 4, 1, 1, True),  # EP spans the shard group
+            (4, 4, 2, 1, 2, True),  # EP and its leftover data-parallel ranks
+            (4, 4, 2, 2, 4, True),  # EP x TP
+            (16, 8, 8, 1, 1, True),  # HSDP x EP filling the shard group
+            (16, 8, 4, 1, 3, True),  # HSDP x EP with flattened replicas
+        ],
+    )
+    def test_counts_the_groups_the_mesh_builds(
+        self, n_gpus, shard, ep, tp, groups, all_to_all
+    ):
+        expected = 1 + groups * formulas.NCCL_GROUP_FRACTION
+        if all_to_all:
+            expected += formulas.NCCL_ALL_TO_ALL_FRACTION
+
+        nccl = formulas.trainer_nccl_bytes(self.WORLD, n_gpus, shard, ep, tp)
+
+        assert nccl == int(self.WORLD * expected)
+
+
+class TestEpExchangeBytes:
+    def test_holds_five_routed_row_buffers(self):
+        rows, seq_len, act_bytes = 1, 1024, 2
+        routed = rows * seq_len * MOE_TINY.n_experts_per_tok
+
+        exchange = formulas.ep_exchange_bytes(MOE_TINY, rows, seq_len, act_bytes, 2)
+
+        assert exchange == 5 * routed * MOE_TINY.expert_width * act_bytes
+
+    def test_tensor_parallel_ranks_route_their_share_of_tokens(self):
+        full = formulas.ep_exchange_bytes(MOE_TINY, 1, 1024, 2, 2)
+
+        split = formulas.ep_exchange_bytes(MOE_TINY, 1, 1024, 2, 2, tensor_parallel=2)
+
+        assert split * 2 == full
+
+    def test_zero_without_expert_parallel_or_experts(self):
+        assert formulas.ep_exchange_bytes(MOE_TINY, 1, 1024, 2, 1) == 0
+        assert formulas.ep_exchange_bytes(QWEN_05B, 1, 1024, 2, 4) == 0
 
 
 class TestLoraTensorPlacement:
@@ -1505,7 +1764,6 @@ class TestRoutedChunkBytes:
                 2.0,
                 chunk_mib * MiB,
                 expert_lora=True,
-                contracted=True,
                 ep=1,
             )
 
@@ -1524,42 +1782,29 @@ class TestRoutedChunkBytes:
         arch = ModelArch.from_hf_config(NEMOTRON_H_MOE)
 
         term = formulas.routed_chunk_bytes(
-            arch, 1, 16384, 2.0, 64 * MiB, expert_lora=True, contracted=True, ep=8
+            arch, 1, 16384, 2.0, 64 * MiB, expert_lora=True, ep=8
         )
 
         assert term == int(2 * 64 * MiB * formulas.ROUTED_CHUNK_LIVE_FRACTION)
 
-    def test_sorted_contracted_lora_holds_one_whole_chunk(self):
+    def test_other_families_hold_no_chunk_term_here(self):
         arch = ModelArch.from_hf_config(GRANITE_MOE)
 
         term = formulas.routed_chunk_bytes(
-            arch, 1, 16384, 2.0, 16 * MiB, expert_lora=True, contracted=True, ep=1
+            arch, 1, 16384, 2.0, 16 * MiB, expert_lora=True, ep=1
         )
 
         assert not arch.chunked_routed_experts
-        assert term == 16 * MiB
-
-    def test_chunk_budget_stops_the_bytes_growing_with_rows(self):
-        arch = ModelArch.from_hf_config(GRANITE_MOE)
-        chunk = 1024
-
-        one = formulas.routed_chunk_bytes(
-            arch, 1, 128, 2.0, chunk, expert_lora=True, contracted=True, ep=1
-        )
-        many = formulas.routed_chunk_bytes(
-            arch, 16, 128, 2.0, chunk, expert_lora=True, contracted=True, ep=1
-        )
-
-        assert one == many == chunk
+        assert term == 0
 
     def test_no_expert_lora_and_dense_models_are_zero(self):
         moe = ModelArch.from_hf_config(NEMOTRON_H_MOE)
 
         frozen = formulas.routed_chunk_bytes(
-            moe, 1, 16384, 2.0, 64 * MiB, expert_lora=False, contracted=True, ep=1
+            moe, 1, 16384, 2.0, 64 * MiB, expert_lora=False, ep=1
         )
         dense = formulas.routed_chunk_bytes(
-            QWEN_05B, 1, 16384, 2.0, 64 * MiB, expert_lora=True, contracted=True, ep=8
+            QWEN_05B, 1, 16384, 2.0, 64 * MiB, expert_lora=True, ep=8
         )
 
         assert (frozen, dense) == (0, 0)
@@ -1582,3 +1827,20 @@ class TestPackedExpertLoraPlacement:
         # Assert
         assert repl == base_repl
         assert shard - base_shard == formulas.packed_lora_param_count(MOE_TINY, 4, 2)
+
+
+class TestModelArchIrregularBlocksProperty:
+    def test_liger_fused_dense_blocks_are_regular(self):
+        assert not QWEN_05B.irregular_blocks
+
+    @pytest.mark.parametrize(
+        "arch",
+        [
+            QWEN_05B.model_copy(update={"stock_hf_modules": True}),
+            MOE_TINY,
+            ModelArch.from_hf_config(NEMOTRON_NANO_MAMBA),
+        ],
+        ids=["stock-norm-and-mlp", "routed-experts", "mamba"],
+    )
+    def test_stock_norms_routed_experts_and_mamba_are_irregular(self, arch):
+        assert arch.irregular_blocks

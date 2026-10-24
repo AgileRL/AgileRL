@@ -421,22 +421,72 @@ def resolve_micro_batch_rows(spec: LLMAlgorithmSpec, n_training_gpus: int) -> in
     return int(micro)
 
 
-def _reject_unbounded_liger_loss(spec: LLMAlgorithmSpec) -> None:
-    """Refuse Liger loss outside token-level importance sampling."""
-    # Above token level the kernel takes whole sequences per chunk, unbounded.
-    # gspo forces trajectory level.
-    if not spec.use_liger_loss:
-        return
-    is_gspo = isinstance(spec, GRPOSpec) and spec.loss_type == "gspo"
-    level: str | None = None
-    if isinstance(spec, (GRPOSpec, LLMPPOSpec, LLMREINFORCESpec)):
-        level = spec.importance_sampling_level
-    if is_gspo or level in ("turn", "trajectory"):
-        msg = (
-            "use_liger_loss with turn/trajectory importance sampling is not "
-            "memory-bounded; this estimator sizes the chunked token-level path."
-        )
-        raise ValueError(msg)
+def _above_token_is(spec: LLMAlgorithmSpec) -> bool:
+    """Whether the resolved importance-sampling level pools more than one token."""
+    if isinstance(spec, LLMPPOSpec) and spec.importance_sampling_level == "auto":
+        return spec.turn_level_clip and spec.advantage_granularity != "token"
+    if isinstance(spec, (LLMPPOSpec, LLMREINFORCESpec)):
+        return spec.importance_sampling_level != "token"
+    return False
+
+
+def _grpo_selective_kernel(spec: GRPOSpec) -> bool:
+    """Whether GRPO, GSPO, or CISPO runs the selective Liger kernel.
+
+    GSPO is trajectory level. Turn level, non-token CISPO, and turn advantages
+    at trajectory level have no fused kernel. Above token level the vLLM
+    correction and the off-policy masks take the standard path.
+    """
+    level = (
+        "trajectory"
+        if spec.loss_type == "gspo"
+        else spec.importance_sampling_level or "token"
+    )
+    if level == "turn" or (spec.loss_type == "cispo" and level != "token"):
+        return False
+    if level == "trajectory" and spec.advantage_granularity == "turn":
+        return False
+    if level == "token":
+        return True
+    masks = (
+        spec.off_policy_token_mask_bounds is not None
+        or spec.off_policy_sequence_mask_threshold is not None
+    )
+    return not (spec.vllm_importance_sampling_correction or masks)
+
+
+def _liger_sequence_chunks(spec: LLMAlgorithmSpec) -> bool:
+    """Whether the Liger loss keeps one whole sequence of logits.
+
+    LLMPPO and REINFORCE do, above token level: the fused kernel materializes
+    a ``(sequence, vocab)`` tile. GRPO and GSPO stream selective log-probs in
+    a fixed chunk, including when the ratio is pooled per completion. Above
+    token level the vLLM sampling correction runs the standard path instead.
+    """
+    if (
+        not spec.use_liger_loss
+        or not isinstance(spec, RolloutLLMSpec)
+        or spec.vllm_importance_sampling_correction
+    ):
+        return False
+    if isinstance(spec, GRPOSpec):
+        return False
+    return _above_token_is(spec)
+
+
+def _liger_weight_grad(spec: LLMAlgorithmSpec) -> bool:
+    """Whether the fused loss keeps a weight-dtype grad of the whole lm_head.
+
+    The selective and policy kernels do. The standard log-prob path does not.
+    A sequence tile already includes this buffer.
+    """
+    if not spec.use_liger_loss or _liger_sequence_chunks(spec):
+        return False
+    if isinstance(spec, GRPOSpec):
+        return _grpo_selective_kernel(spec)
+    if isinstance(spec, (LLMPPOSpec, LLMREINFORCESpec)):
+        return not (spec.vllm_importance_sampling_correction and _above_token_is(spec))
+    return False
 
 
 def training_settings_from_spec(
@@ -454,11 +504,10 @@ def training_settings_from_spec(
     :param checkpoint_optimizer: The checkpoint snapshot holds Adam moments.
     :param async_rollout: The next rollout batch stays in host memory during learn.
     :return: Training settings.
-    :raises ValueError: Quantization, eager attention, or unbounded Liger loss.
+    :raises ValueError: Quantization or eager attention.
     """
     _reject_trainer_quantization(spec.quantization)
     _reject_eager_attn_implementation(spec.attn_implementation)
-    _reject_unbounded_liger_loss(spec)
     lora = _lora_config(spec)
     return TrainingSettings(
         algorithm=ALGORITHM_NAMES[spec.name],
@@ -481,6 +530,8 @@ def training_settings_from_spec(
         gradient_checkpointing=spec.gradient_checkpointing,
         activation_offload=spec.activation_offload,
         chunk_rows=spec.chunk_rows,
+        liger_sequence_chunks=_liger_sequence_chunks(spec),
+        liger_weight_grad=_liger_weight_grad(spec),
         n_training_gpus=n_training_gpus,
         fsdp=spec.fsdp,
         fuse_actor_critic_pass=(
@@ -501,8 +552,8 @@ def training_settings_from_manifest(
 ) -> TrainingSettings:
     """Trainer-side settings, read as the trainer reads the manifest.
 
-    Settings the estimator cannot size (quantization, the eager backend,
-    Liger above token level) raise ``ValueError``.
+    Settings the estimator cannot size (quantization, the eager backend)
+    raise ``ValueError``.
 
     :param manifest: Training manifest.
     :param micro_batch_size: Rows in one forward. ``None`` resolves an omitted
@@ -516,7 +567,6 @@ def training_settings_from_manifest(
     if micro_batch_size is None:
         micro_batch_size = resolve_micro_batch_rows(spec, n_training_gpus)
     _reject_eager_attn_implementation(spec.attn_implementation)
-    _reject_unbounded_liger_loss(spec)
     return training_settings_from_spec(
         spec,
         n_training_gpus,

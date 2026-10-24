@@ -97,7 +97,7 @@ class TestResolveMicroBatchSizePerGpu:
     def test_wide_micro_batch_shrinks_to_one_that_fits(self) -> None:
         # Arrange: 16 trajectories do not fit; 8 does.
         manifest = TrainingManifest.model_validate(_manifest())
-        device = _device(4)
+        device = _device(4.31)
 
         # Act
         chosen = _resolve(manifest, device)
@@ -318,7 +318,7 @@ class TestResolveMicroBatchSizePerGpu:
         # Arrange
         raw = _manifest()
         caller = TrainingManifest.model_validate(raw)
-        device = _device(4)
+        device = _device(4.31)
         model_config = SUPPORTED_MODEL_INFO[HUB_ID].config
 
         # Act

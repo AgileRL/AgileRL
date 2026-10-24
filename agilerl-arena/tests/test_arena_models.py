@@ -452,7 +452,7 @@ class TestGRPOClipCoef:
 
 
 class TestGRPOSpecOffPolicyCorrections:
-    @pytest.mark.parametrize("spec_cls", [GRPOSpec, CISPOSpec, GSPOSpec])
+    @pytest.mark.parametrize("spec_cls", [GRPOSpec, CISPOSpec])
     def test_corrections_and_mean_only_advantages_are_on_by_default(
         self, spec_cls: type[GRPOSpec]
     ) -> None:
@@ -463,6 +463,26 @@ class TestGRPOSpecOffPolicyCorrections:
         assert spec.use_bias_correction_kl is True
         assert spec.adv_norm == "mean_only"
         assert spec.top_p == 1.0
+
+    def test_gspo_leaves_off_policy_masks_unset(self) -> None:
+        spec = GSPOSpec(group_size=2)
+
+        assert spec.off_policy_token_mask_bounds is None
+        assert spec.off_policy_sequence_mask_threshold is None
+
+        forced = GRPOSpec(group_size=2, loss_type="gspo")
+        assert forced.off_policy_token_mask_bounds is None
+        assert forced.off_policy_sequence_mask_threshold is None
+
+    def test_gspo_rejects_off_policy_masks(self) -> None:
+        with pytest.raises(ValidationError, match="off_policy_token_mask_bounds"):
+            GSPOSpec(group_size=2, off_policy_token_mask_bounds=(0.5, 5.0))
+        with pytest.raises(ValidationError, match="off_policy_sequence_mask_threshold"):
+            GRPOSpec(
+                group_size=2,
+                loss_type="gspo",
+                off_policy_sequence_mask_threshold=0.03,
+            )
 
     @pytest.mark.parametrize("spec_cls", [GRPOSpec, CISPOSpec, GSPOSpec])
     def test_old_logprobs_source_is_unset_by_default(

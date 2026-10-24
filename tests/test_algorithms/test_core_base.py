@@ -2665,6 +2665,7 @@ def vwa_super_vl(monkeypatch, tmp_path):
         calc_position_embeddings=False,
         device="cpu",
         use_liger_loss=False,
+        use_separate_reference_adapter=False,
         lora_config=LoraConfig(r=4, target_modules=["linear_1"], task_type="CAUSAL_LM"),
     )
     fsdp = FSDPConfig(ep=8, shard_group_size=8, reduce_dtype="bfloat16")

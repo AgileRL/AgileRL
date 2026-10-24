@@ -7,7 +7,8 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
+from typing_extensions import Self
 
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
 from agilerl.arena.models.descriptions import (
@@ -108,7 +109,7 @@ class GRPOSpec(RolloutLLMSpec):
         description=(
             "(low, high) band on each token's ratio of the current policy to "
             "the policy that sampled it. Tokens outside get no policy or KL "
-            "gradient (IcePop). Set null to mask nothing."
+            "gradient (IcePop). Set null to mask nothing. GSPO leaves this unset."
         ),
     )
     off_policy_sequence_mask_threshold: float | None = Field(
@@ -117,7 +118,8 @@ class GRPOSpec(RolloutLLMSpec):
         description=(
             "Drop the policy and KL gradient of negative-advantage completions whose "
             "mean log(sampling / current) log-prob gap exceeds this "
-            "(DeepSeek-V3.2 off-policy sequence masking). Set null to mask nothing."
+            "(DeepSeek-V3.2 off-policy sequence masking). Set null to mask "
+            "nothing. GSPO leaves this unset."
         ),
     )
     use_bias_correction_kl: bool = Field(
@@ -141,3 +143,23 @@ class GRPOSpec(RolloutLLMSpec):
             "torch.profiler trace of one micro-batch. Unset profiles nothing."
         ),
     )
+
+    @model_validator(mode="after")
+    def _gspo_leaves_off_policy_masks_unset(self) -> Self:
+        """GSPO's sequence-level ratio has no per-token mask weight."""
+        if self.loss_type != "gspo":
+            return self
+        configured = [
+            name
+            for name in (
+                "off_policy_token_mask_bounds",
+                "off_policy_sequence_mask_threshold",
+            )
+            if name in self.model_fields_set and getattr(self, name) is not None
+        ]
+        if configured:
+            msg = "GSPO does not take " + " or ".join(configured)
+            raise ValueError(msg)
+        self.off_policy_token_mask_bounds = None
+        self.off_policy_sequence_mask_threshold = None
+        return self

@@ -361,7 +361,7 @@ class TestGRPOComputePolicyLossOffPolicyMasks:
         # is below the 0.8 clip, so every token's surrogate is -exp(-2/3).
         agent = _make_grpo(
             loss_norm="micro_batch",
-            loss_type="gspo",
+            importance_sampling_level="trajectory",
             off_policy_token_mask_bounds=ICEPOP_BAND,
         )
         mask = torch.ones(1, 3, dtype=torch.bool)
@@ -535,7 +535,7 @@ class TestGRPOFusedKernelLossOffPolicyMasks:
     def test_trajectory_level_masks_run_the_standard_path(self) -> None:
         agent = _make_grpo(
             loss_norm="micro_batch",
-            loss_type="gspo",
+            importance_sampling_level="trajectory",
             use_liger_loss=True,
             vllm_importance_sampling_correction=False,
             off_policy_token_mask_bounds=ICEPOP_BAND,

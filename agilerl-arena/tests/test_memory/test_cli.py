@@ -756,8 +756,8 @@ class TestSolveMain:
             kv = next(c for c in bar["components"] if c["key"] == "kv_cache")
             return kv["detail"]["worst_case_demand"]
 
-        assert total(plain_payload["training"]) == 1842925488
-        assert total(overridden_payload["training"]) == 1844349913
+        assert total(plain_payload["training"]) == 1853311507
+        assert total(overridden_payload["training"]) == 1854735932
         # The generation bar fills the utilization budget at either context.
         assert kv_demand(overridden_payload["generation"]) == 8 * kv_demand(
             plain_payload["generation"]
