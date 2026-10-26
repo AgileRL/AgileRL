@@ -125,30 +125,6 @@ TOOL_CALL_TAG_RUNTIME_CONFIG = ModelRuntimeConfig(tool_call_parser="tool_call")
 GRANITE3_RUNTIME_CONFIG = ModelRuntimeConfig(tool_call_parser="granite3")
 
 
-def granitemoehybrid_vllm_hf_override(config: object) -> object:
-    """Rename a Granite hybrid config's ``layer_types`` to vLLM's layer names.
-
-    :param config: Hugging Face config loaded from the checkpoint.
-    :type config: object
-    :return: The config with ``layer_types`` vLLM can build layers from.
-    :rtype: object
-    """
-    # vLLM's GraniteMoeHybrid model keys its decoder layers on these names;
-    # transformers' config calls them full_attention / linear_attention.
-    vllm_names = {"full_attention": "attention", "linear_attention": "mamba"}
-    # vLLM probes the override with a dummy config to read model_type first.
-    layer_types = vars(config).get("layer_types")
-    if layer_types is None:
-        return config
-    vars(config)["layer_types"] = [vllm_names.get(t, t) for t in layer_types]
-    return config
-
-
-GRANITE4_HYBRID_RUNTIME_CONFIG = ModelRuntimeConfig(
-    vllm=VllmRuntimeConfig(hf_overrides=granitemoehybrid_vllm_hf_override),
-    tool_call_parser="tool_call",
-)
-
 # Linear-attention rejects mamba_cache_mode "all"; align needs prefix caching.
 QWEN3_5_TEXT_RUNTIME_CONFIG = ModelRuntimeConfig(
     vllm=VllmRuntimeConfig(
@@ -170,7 +146,7 @@ FAMILY_RUNTIME_CONFIGS: Mapping[str, ModelRuntimeConfig] = {
     "qwen3": TOOL_CALL_TAG_RUNTIME_CONFIG,
     "qwen3_moe": TOOL_CALL_TAG_RUNTIME_CONFIG,
     "granitemoe": GRANITE3_RUNTIME_CONFIG,
-    "granitemoehybrid": GRANITE4_HYBRID_RUNTIME_CONFIG,
+    "granitemoehybrid": TOOL_CALL_TAG_RUNTIME_CONFIG,
     "nemotron_h": NEMOTRON_H_RUNTIME_CONFIG,
     "nemotron_h_omni": NEMOTRON_H_OMNI_RUNTIME_CONFIG,
     "gemma3": GEMMA_SWA_RUNTIME_CONFIG,
