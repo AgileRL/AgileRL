@@ -182,6 +182,29 @@ class ModelInfo(BaseModel):
 
     @computed_field
     @property
+    def supports_expert_parallel(self) -> bool:
+        """True when the model has packed expert modules."""
+        return bool(self.parameters)
+
+    @computed_field
+    @property
+    def num_routed_experts(self) -> int | None:
+        """Routed expert count; None when the model has no packed experts."""
+        if not self.parameters:
+            return None
+        text_config = self.text_config
+        for key in ("n_routed_experts", "num_experts", "num_local_experts"):
+            value = text_config.get(key)
+            if isinstance(value, int):
+                return value
+        msg = (
+            f"{self.hub_id} has packed experts but text_config has no routed "
+            "expert count (n_routed_experts, num_experts, num_local_experts)"
+        )
+        raise ValueError(msg)
+
+    @computed_field
+    @property
     def num_params(self) -> int | None:
         """Total parameters; None when the config cannot be built offline."""
         return self.inspected["num_params"]

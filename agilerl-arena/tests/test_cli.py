@@ -784,6 +784,11 @@ class TestModelsSupportedCommand:
         assert qwen["max_context_length"] == 40960
         assert qwen["lora_ranks"] == [1, 8, 16, 32, 64, 128, 256, 320, 512]
         assert "_gram_estimate" in qwen["lora_info"]
+        assert qwen["supports_expert_parallel"] is False
+        assert qwen["num_routed_experts"] is None
+        lightning = models["nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16"]
+        assert lightning["supports_expert_parallel"] is True
+        assert lightning["num_routed_experts"] == 128
 
 
 class TestModelsInfoCommand:
