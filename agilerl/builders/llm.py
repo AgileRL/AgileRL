@@ -22,7 +22,7 @@ from agilerl.arena.models.algorithms import (
     RolloutLLMSpec,
 )
 from agilerl.arena.models.networks import CosineLRScheduleConfig as CosineLRScheduleSpec
-from agilerl.arena.models.networks import LoraConfigDict, default_colocated_vllm_config
+from agilerl.arena.models.networks import LoraConfigDict, default_rollout_vllm_config
 from agilerl.builders.base import (
     AlgorithmBuilder,
     AlgorithmBuildRuntime,
@@ -76,7 +76,7 @@ class LLMBuilder(AlgorithmBuilder):
             kwargs.pop("vllm_config", None)
             return
         if kwargs.get("vllm_config") is None:
-            kwargs["vllm_config"] = default_colocated_vllm_config()
+            kwargs["vllm_config"] = default_rollout_vllm_config()
         vllm_cfg = kwargs["vllm_config"]
         if isinstance(vllm_cfg, BaseModel):
             vllm_cfg = vllm_cfg.model_dump(exclude_none=True)

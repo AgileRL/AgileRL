@@ -165,6 +165,7 @@ class TestPackedPatches:
         assert image_grid_hw.tolist() == [[2, 4], [2, 4]]
 
 
+@pytest.mark.usefixtures("torch_kernels")
 class TestNemotronHOmniGetImageFeatures:
     def test_patch_grid_rows_forward_matches_packed_patches(self) -> None:
         # Arrange
@@ -185,3 +186,21 @@ class TestNemotronHOmniGetImageFeatures:
 
         # Assert
         assert torch.equal(from_rows, from_patches)
+
+
+class TestNemotronHOmniVisionFillerFeatures:
+    def test_runs_the_tower_on_one_image(self) -> None:
+        # Arrange
+        model = _tiny_model()
+        tower_inputs: list[torch.Tensor] = []
+        model.vision_model.register_forward_hook(
+            lambda _module, args, _output: tower_inputs.append(args[0])
+        )
+
+        # Act
+        with torch.no_grad():
+            features = model.vision_filler_features(torch.device("cpu"))
+
+        # Assert
+        assert len(tower_inputs) == 1
+        assert [tuple(image.shape) for image in features.pooler_output] == [(1, 32)]

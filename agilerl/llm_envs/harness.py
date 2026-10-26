@@ -26,6 +26,7 @@ from agilerl.llm_envs.observation import (
     IMAGE_PLACEHOLDER,
     QUESTION_AFTER_CONTEXT,
     ImageProcessorCall,
+    ImageTokens,
     apply_info_prefix_suffix,
     encode_image_training_inputs,
     goal_images_text,
@@ -193,8 +194,11 @@ class RolloutHarness(RestartPromptMixin):
         apply_chat_template: bool = True,
         chat_template_kwargs: dict[str, Any] | None = None,
         max_model_len: int | None = None,
+        max_output_tokens: int | None = None,
         system_prompt: str | None = None,
+        repeat_system_prompt: bool = False,
         vision_processor: Callable[..., Mapping[str, Any]] | None = None,
+        image_tokens: ImageTokens | None = None,
         tasks: Sequence[Mapping[str, Any]] | None = None,
         eval_tasks: Sequence[Mapping[str, Any]] | None = None,
         segment_prompt_tokens: int | None = None,
@@ -242,17 +246,27 @@ class RolloutHarness(RestartPromptMixin):
             render (e.g. ``{"enable_thinking": False}``); the env's tool schemas
             are set on top under ``tools``.
         :param max_model_len: Engine context length; enables stop-on-overflow when set.
+        :param max_output_tokens: Per-turn generation cap. With a context restart
+            setting, prompts stay within ``max_model_len - max_output_tokens`` so
+            every turn can generate in full.
         :param system_prompt: Rendered as a leading ``system`` message ahead of the
             env's first observation. Requires ``apply_chat_template``; a template
             without a system slot raises at reset rather than dropping it silently.
+        :param repeat_system_prompt: Also put the system prompt after the first
+            observation and after each image feedback turn, ahead of a trailing
+            ``Question:`` block. ``False`` sends each observation unchanged.
         :param vision_processor: Callable ``(text=..., images=..., return_tensors='pt')``
             that returns ``input_ids`` and ``pixel_values`` for image observations.
             Each image turn's new text is processed alone with that turn's image;
             ``pixel_values`` concatenate along dim 0 across turns.
+        :param image_tokens: The model's image placeholder
+            (:meth:`ImageTokens.from_processor`). ``None`` keeps
+            :data:`IMAGE_PLACEHOLDER`, for processors that expand it themselves.
         :param tasks: Per-row reset kwargs forwarded to a URL-backed client.
         :param eval_tasks: Held-out per-row reset kwargs for eval mode on a URL-backed client.
         :param segment_prompt_tokens: Restart the episode's context when the next
-            prompt would exceed this many tokens. The restarted prompt holds the
+            prompt would exceed this many tokens or the model's prompt budget,
+            whichever is lower. The restarted prompt holds the
             system prompt, the actions taken so far, the kept turns
             (``restart_keep_turns``) and the latest observation;
             :meth:`get_episode_data` returns every segment. Every prompt the
@@ -263,7 +277,8 @@ class RolloutHarness(RestartPromptMixin):
         :param segment_max_images: Restart the episode's context when the next
             prompt would carry more than this many images (match the engine's
             ``limit_mm_per_prompt``). A restarted prompt carries one image, plus
-            kept turns' images up to ``segment_max_images - 1`` in all.
+            kept turns' images up to ``segment_max_images - 1`` in all. Set,
+            it also restarts the context at the model's prompt budget.
             ``None`` puts no image limit on a segment. The reset observation's
             task images (``goal_images_field``) follow the first prompt's text, repeat in every
             restarted prompt, and count toward the limit. They are letterboxed
@@ -303,6 +318,8 @@ class RolloutHarness(RestartPromptMixin):
         :ivar done: Whether the episode has terminated.
         :ivar current_prompt: Latest policy-ready prompt; ``{}`` once done.
         :ivar sampling_logps: Per-turn vLLM sampling logprobs (empty on the HF path).
+        :ivar sampling_supports: Per-turn ``(n, K)`` token ids vLLM could sample
+            at each generated token (empty unless the engine records them).
         """
         self.max_turns = max_turns
         if segment_prompt_tokens is not None and segment_prompt_tokens < 1:
@@ -368,6 +385,7 @@ class RolloutHarness(RestartPromptMixin):
         self._tools: list[Any] | None = None
         self._tools_known = False
         self._max_model_len = max_model_len
+        self._max_output_tokens = max_output_tokens
         self.full_ids: torch.Tensor | None = None
         self.turn_boundaries: list[tuple[int, int, int]] = []
         self.turn_rewards: list[float] = []
@@ -388,6 +406,7 @@ class RolloutHarness(RestartPromptMixin):
         # message get different frames, and so do one and two tool results.
         self._boundary_parts: dict[tuple[str, ...], tuple[str, ...] | None] = {}
         self._system_prompt = system_prompt or None
+        self._repeat_system_prompt = repeat_system_prompt
         if self._system_prompt is not None and not self.apply_chat_template:
             msg = (
                 "system_prompt is rendered through the chat template; with "
@@ -398,14 +417,16 @@ class RolloutHarness(RestartPromptMixin):
         self.done: bool = False
         self.current_prompt: dict[str, Any] = {}
         self.sampling_logps: list[torch.Tensor] = []
+        self.sampling_supports: list[torch.Tensor] = []
         self._special_ids_cache: frozenset[int] | None = None
         self._vision_processor = vision_processor
+        self.image_tokens = image_tokens or ImageTokens()
         # The VL forward scatters one image feature row into every id equal to
-        # the placeholder, generated ones included.
+        # the image token, generated ones included.
         self._image_placeholder_id: int | None = (
             None
             if vision_processor is None
-            else tokenizer.get_vocab().get(IMAGE_PLACEHOLDER)
+            else tokenizer.get_vocab().get(self.image_tokens.image_token)
         )
         self._multimodal_turn: dict[str, Any] | None = None
         self._episode_pixel_values: torch.Tensor | None = None
@@ -610,7 +631,7 @@ class RolloutHarness(RestartPromptMixin):
 
     def _with_trailing_instruction(self, content: str) -> str:
         """Put the instruction after the observation text and leave the question last."""
-        if self._system_prompt is None:
+        if self._system_prompt is None or not self._repeat_system_prompt:
             return content
         if QUESTION_AFTER_CONTEXT in content:
             context, question = content.rsplit(QUESTION_AFTER_CONTEXT, 1)
@@ -618,9 +639,9 @@ class RolloutHarness(RestartPromptMixin):
         return f"{content}\n{self._system_prompt}"
 
     def _chat_prompt_string(self, obs_text: str) -> str:
-        """Render one user turn (plus optional system) through the chat template."""
+        """Render one image-prompt user turn (plus optional system), with the model's image placeholders."""
         if not self.apply_chat_template:
-            return obs_text
+            return self.image_tokens.render(obs_text)
         messages, chat_template_kwargs = self._user_turn_chat_template_inputs(obs_text)
         rendered = self.tokenizer.apply_chat_template(
             messages,
@@ -631,7 +652,7 @@ class RolloutHarness(RestartPromptMixin):
         if not isinstance(rendered, str):
             msg = "apply_chat_template(tokenize=False) must return str"
             raise TypeError(msg)
-        return rendered
+        return self.image_tokens.render(rendered)
 
     def _image_feedback_turn_text(
         self, feedback_text: str, role: str, last_token_id: int
@@ -647,7 +668,7 @@ class RolloutHarness(RestartPromptMixin):
         """
         content = self._with_trailing_instruction(feedback_text)
         if not self.apply_chat_template:
-            return content
+            return self.image_tokens.render(content)
         parts = self._feedback_boundary_parts((role,))
         if parts is None:
             msg = (
@@ -660,7 +681,7 @@ class RolloutHarness(RestartPromptMixin):
         if last_token_id in self._special_ids():
             end_text = self._decode([last_token_id], skip_special_tokens=False)
             prefix = prefix.removeprefix(end_text)
-        return prefix + content + suffix
+        return prefix + self.image_tokens.render(content) + suffix
 
     def _require_transcript_continues(
         self, transcript_ids: torch.Tensor, prompt_ids: torch.Tensor
@@ -707,7 +728,8 @@ class RolloutHarness(RestartPromptMixin):
         if self._vision_processor is None:
             msg = (
                 "Image observations require vision_processor on RolloutHarness; "
-                "a VL model needs vllm_config.strip_multimodal_towers false"
+                "a VL model needs vllm_config.strip_multimodal_towers false, "
+                "which environment.modality text turns on when unset"
             )
             raise RuntimeError(msg)
         return self._vision_processor
@@ -901,9 +923,19 @@ class RolloutHarness(RestartPromptMixin):
         return torch.tensor([encoded], dtype=torch.long)
 
     def _prompt_budget(self) -> int | None:
-        """Max prompt tokens before context overflow, or ``None`` when no model length is set."""
+        """Max prompt tokens the model length allows, or ``None`` when it is not set.
+
+        With a context restart setting and ``max_output_tokens``, the budget
+        leaves room for a full turn; otherwise it leaves one token.
+        """
         if self._max_model_len is None:
             return None
+        restarts = (
+            self._segment_prompt_tokens is not None
+            or self._segment_max_images is not None
+        )
+        if restarts and self._max_output_tokens is not None:
+            return max(0, self._max_model_len - self._max_output_tokens)
         return max_prompt_tokens_for_model_len(self._max_model_len)
 
     def _prompt_limit(self) -> int | None:
@@ -1110,6 +1142,7 @@ class RolloutHarness(RestartPromptMixin):
         self._transcript = None
         self._sampled_ids = None
         self.sampling_logps = []
+        self.sampling_supports = []
         self._segments = []
         self._action_history = []
         self._kept_turns.clear()
@@ -1141,6 +1174,7 @@ class RolloutHarness(RestartPromptMixin):
         self,
         token_ids: torch.Tensor,
         sampling_logps: torch.Tensor | None = None,
+        sampling_supports: torch.Tensor | None = None,
     ) -> str:
         """Decode and record this turn's generation; return its text (tokenizer phase)."""
         if self._last_full_prompt_token_len is None:
@@ -1158,6 +1192,8 @@ class RolloutHarness(RestartPromptMixin):
             gen_text = self._decode(gen_ids.tolist(), skip_special_tokens=True)
             if sampling_logps is not None:
                 self.sampling_logps.append(sampling_logps)
+            if sampling_supports is not None:
+                self.sampling_supports.append(sampling_supports)
             sampled_text = self._decode(gen_ids.tolist(), skip_special_tokens=False)
             engine_ids = turn["prompt_token_ids"]
             self._transcript = (
@@ -1192,6 +1228,8 @@ class RolloutHarness(RestartPromptMixin):
         gen_text = self._decode(gen_ids.tolist(), skip_special_tokens=True)
         if sampling_logps is not None:
             self.sampling_logps.append(sampling_logps)
+        if sampling_supports is not None:
+            self.sampling_supports.append(sampling_supports)
         self.full_ids = torch.cat([full_ids, gen_ids.unsqueeze(0)], dim=1)
         gen_end = self.full_ids.shape[1]
         self.turn_boundaries.append((prompt_len, gen_end, self._turn_idx))
@@ -1238,7 +1276,7 @@ class RolloutHarness(RestartPromptMixin):
         if count:
             msg = (
                 f"Turn {self._turn_idx} generated the image placeholder "
-                f"{IMAGE_PLACEHOLDER!r} (id {self._image_placeholder_id}) {count} "
+                f"{self.image_tokens.image_token!r} (id {self._image_placeholder_id}) {count} "
                 "time(s); its training row would have more image positions than "
                 "pixel rows. Suppress the id at sampling time."
             )
@@ -1443,7 +1481,7 @@ class RolloutHarness(RestartPromptMixin):
                     transcript_text, transcript_engine_ids = self._transcript
                 # A sampled turn that spells the placeholder would be expanded as
                 # another image, and its trained ids cannot change: end here.
-                if transcript_text.count(IMAGE_PLACEHOLDER) != len(
+                if transcript_text.count(self.image_tokens.image_token) != len(
                     self._episode_images
                 ):
                     truncated = True
@@ -1542,11 +1580,11 @@ class RolloutHarness(RestartPromptMixin):
         return prompt, reward, terminated, truncated, info
 
     def _over_segment_tokens(self, prompt_len: int) -> bool:
-        """Whether a ``prompt_len``-token prompt restarts the context."""
-        return (
-            self._segment_prompt_tokens is not None
-            and prompt_len > self._segment_prompt_tokens
-        )
+        """Whether a ``prompt_len``-token prompt restarts the context: past the segment limit or the model budget."""
+        if self._segment_prompt_tokens is None and self._segment_max_images is None:
+            return False
+        max_pt = self._prompt_limit()
+        return max_pt is not None and prompt_len > max_pt
 
     def _restart_context(
         self, segment_ids: torch.Tensor, obs_text: str, image: object | None

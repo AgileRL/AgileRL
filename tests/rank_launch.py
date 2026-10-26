@@ -27,6 +27,7 @@ from multiprocessing.connection import Connection, wait
 from multiprocessing.context import BaseContext
 from multiprocessing.process import BaseProcess
 from typing import Any
+from unittest.mock import patch
 
 import torch
 import torch.distributed as dist
@@ -60,6 +61,7 @@ def run_ranks(
     *args: Any,
     backend: str | None = "gloo",
     timeout: float = 300.0,
+    cpu: bool = False,
 ) -> list[Any]:
     """Run ``worker(rank, world_size, *args)`` on every rank and return the results.
 
@@ -69,18 +71,20 @@ def run_ranks(
 
     :param worker: Module-level function, so the rank process can import it.
     :param backend: ``"gloo"``, ``"nccl"`` (rank ``r`` uses ``cuda:r``) or None.
+    :param cpu: Hide CUDA from the ranks, so distributed setup picks gloo and CPU.
     :return: Each rank's return value, in rank order.
     """
     ctx = rank_context()
     store_dir = tempfile.mkdtemp(prefix="rank-store-")
     store = os.path.join(store_dir, "store")
     port = get_free_port()
+    cpu_env = {"CUDA_VISIBLE_DEVICES": ""} if cpu else {}
     pipes = [ctx.Pipe(duplex=False) for _ in range(world_size)]
     procs = [
         ctx.Process(
             target=rank_main,
             args=(
-                dict(os.environ),
+                dict(os.environ) | cpu_env,
                 worker,
                 rank,
                 world_size,
@@ -93,8 +97,11 @@ def run_ranks(
         )
         for rank in range(world_size)
     ]
-    for proc in procs:
-        proc.start()
+    # Spawned ranks start with this environment, and can initialise CUDA while
+    # unpickling the worker, before ``rank_main`` applies its own.
+    with patch.dict(os.environ, cpu_env):
+        for proc in procs:
+            proc.start()
     for _, sender in pipes:
         sender.close()
     readers = {pipes[rank][0]: rank for rank in range(world_size)}

@@ -21,9 +21,11 @@ from agilerl.utils.llm_packing import (
     RESETS_AT_DOCUMENT_BOUNDARY,
     PackedBatch,
     mixers_without_boundary_reset,
+    pack_next_token_frame,
     pack_padded_batch,
     packed_layout,
     packed_seq_idx,
+    run_per_document,
     unpack_hidden_states,
     unpack_logprobs,
     unpack_values,
@@ -186,6 +188,36 @@ class TestUnpackLogprobs:
                     dense_lp[b, : length - 1],
                     atol=1e-5,
                 )
+
+
+class TestPackNextTokenFrame:
+    def test_takes_each_rows_real_positions_in_packed_order(self) -> None:
+        # Arrange
+        attention_mask = torch.tensor([[0, 1, 1, 1], [1, 1, 0, 0]])
+        frame = torch.arange(2 * 3 * 2).reshape(2, 3, 2)
+
+        # Act
+        packed = pack_next_token_frame(frame, attention_mask, -1)
+
+        # Assert
+        # Row 0 holds tokens 1..3 (positions 1, 2, then its appended tail); row 1
+        # holds tokens 0..1 (position 0; position 1's prediction is dropped).
+        expected = torch.stack(
+            [frame[0, 1], frame[0, 2], torch.tensor([-1, -1]), frame[1, 0]]
+        )
+        assert torch.equal(packed, expected.unsqueeze(0))
+
+    def test_lines_up_with_the_packed_targets(self) -> None:
+        ids = torch.tensor([[5, 6, 7, 0], [8, 9, 0, 0]])
+        attention_mask = torch.tensor([[1, 1, 1, 0], [1, 1, 0, 0]])
+        next_token = ids[:, 1:].masked_fill(attention_mask[:, 1:] == 0, -1)
+
+        frame = pack_next_token_frame(next_token, attention_mask, -1)
+
+        packed_targets = pack_padded_batch(ids, attention_mask).input_ids[0, 1:]
+        assert packed_targets.tolist() == [6, 7, 8, 9]
+        # The prediction across the row boundary takes the fill value.
+        assert frame[0].tolist() == [6, 7, -1, 9]
 
 
 class TestUnpackValues:
@@ -463,6 +495,49 @@ class TestPackedLayout:
 
         # Assert
         assert layout.cu_seqlens.tolist() == [0, 1, 3]
+
+
+class TestRunPerDocument:
+    def test_rows_with_one_layout_run_each_document_together(self):
+        # Arrange
+        hidden = torch.arange(2 * 5 * 3, dtype=torch.float32).reshape(2, 5, 3)
+        seq_idx = torch.tensor([[0, 0, 1, 1, 1], [0, 0, 1, 1, 1]])
+        spans = []
+
+        def run(document: torch.Tensor) -> torch.Tensor:
+            spans.append(tuple(document.shape))
+            return document.cumsum(1)
+
+        # Act
+        out = run_per_document(run, hidden, seq_idx)
+
+        # Assert
+        assert spans == [(2, 2, 3), (2, 3, 3)]
+        expected = torch.cat([hidden[:, :2].cumsum(1), hidden[:, 2:].cumsum(1)], 1)
+        assert torch.equal(out, expected)
+
+    def test_rows_with_different_layouts_run_row_by_row(self):
+        # Arrange
+        hidden = torch.arange(2 * 4 * 3, dtype=torch.float32).reshape(2, 4, 3)
+        seq_idx = torch.tensor([[0, 1, 1, 1], [0, 0, 0, 1]])
+        spans = []
+
+        def run(document: torch.Tensor) -> torch.Tensor:
+            spans.append(tuple(document.shape))
+            return document.cumsum(1)
+
+        # Act
+        out = run_per_document(run, hidden, seq_idx)
+
+        # Assert
+        assert spans == [(1, 1, 3), (1, 3, 3), (1, 3, 3), (1, 1, 3)]
+        expected = torch.stack(
+            [
+                torch.cat([hidden[0, :1].cumsum(0), hidden[0, 1:].cumsum(0)]),
+                torch.cat([hidden[1, :3].cumsum(0), hidden[1, 3:].cumsum(0)]),
+            ]
+        )
+        assert torch.equal(out, expected)
 
 
 class TestMixersWithoutBoundaryReset:

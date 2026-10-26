@@ -138,14 +138,19 @@ class InProcessEnvClient:
         *,
         row_index: int | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Reset the local env and return ``(payload, info)`` — the observation's raw fields."""
+        """Reset the local env and return ``(payload, info)`` — the observation's raw fields.
+
+        :raises RuntimeError: If the reset observation reports an ``error``.
+        """
         obs = self._backend.reset(
             seed=seed,
             row_index=row_index,
             evaluation=True if self._evaluation_mode else None,
         )
+        payload = _observation_payload(obs)
+        _raise_reset_error(payload, seed, row_index, self._evaluation_mode)
         info = dict(obs.metadata) if obs.metadata else {}
-        return _observation_payload(obs), info
+        return payload, info
 
     def step(
         self, action: object
@@ -409,6 +414,8 @@ class RemoteEnvClient:
         kwargs merged when ``row_index`` is set. ``evaluation`` is sent in eval mode.
         A broken, unreachable or server-reaped session is re-dialled here, the
         episode boundary (see :meth:`_at_boundary`).
+
+        :raises RuntimeError: If the reset observation reports an ``error``.
         """
         kwargs: dict[str, Any] = {}
         if seed is not None and int(seed) >= 0:
@@ -426,6 +433,7 @@ class RemoteEnvClient:
         if self._evaluation_mode:
             kwargs["evaluation"] = True
         result = self._at_boundary(lambda session: session.reset(**kwargs))
+        _raise_reset_error(result.observation, seed, row_index, self._evaluation_mode)
         raw_meta = getattr(result, "metadata", None)
         info = dict(raw_meta) if isinstance(raw_meta, dict) else {}
         return result.observation, info
@@ -580,6 +588,28 @@ def _is_transport_error(exc: Exception) -> bool:
 def _observation_payload(obs: Observation) -> dict[str, Any]:
     """The observation's raw field values, keyed as they would appear on the wire."""
     return {name: getattr(obs, name) for name in type(obs).model_fields}
+
+
+def _raise_reset_error(
+    observation: dict[str, Any],
+    seed: int | None,
+    row_index: int | None,
+    evaluation: bool,
+) -> None:
+    """Raise if a reset observation reports an ``error``.
+
+    :param observation: The reset observation's fields.
+    :param seed: The seed the reset was asked for.
+    :param row_index: The row the reset was asked for.
+    :param evaluation: Whether the reset targeted the held-out split.
+    :raises RuntimeError: If ``observation`` carries a non-empty ``error``.
+    """
+    error = observation.get("error")
+    if error:
+        # A tasks row can carry a whole task payload; row_index names it.
+        task = {"seed": seed, "row_index": row_index, "evaluation": evaluation}
+        msg = f"Env reset failed for {task}: {error}"
+        raise RuntimeError(msg)
 
 
 def _step_info(obs: object, result: object) -> dict[str, Any]:

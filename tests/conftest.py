@@ -6,6 +6,7 @@ import os
 import shutil
 import sys
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 
 # xdist workers already fill the CPUs. Per-worker OpenMP pools on top of that
@@ -655,6 +656,25 @@ def serve_env():
     yield _serve
     for server in servers:
         server.stop()
+
+
+@pytest.fixture
+def torch_kernels(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tiny CPU Qwen3.5 and Nemotron-H models run the PyTorch kernels."""
+    # Defers transformers, an llm extra.
+    from tests.torch_kernels import use_torch_kernels
+
+    use_torch_kernels(monkeypatch)
+
+
+@pytest.fixture
+def pristine_nemotron_classes() -> Iterator[None]:
+    """Undo Nemotron-H Mamba patches a test installs, so later tests see stock classes."""
+    # Defers transformers, an llm extra.
+    from tests.nemotron_classes import restore_nemotron_classes
+
+    with restore_nemotron_classes():
+        yield
 
 
 @pytest.fixture(autouse=True)

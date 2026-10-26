@@ -90,6 +90,8 @@ def register_nemotron_h_omni_native_loading() -> None:
         NemotronH_Omni_Reasoning_V3.get_image_features = accept_patch_grid_rows(
             native_get_image_features
         )
+        omni_cls: Any = NemotronH_Omni_Reasoning_V3
+        omni_cls.vision_filler_features = vision_filler_features
 
 
 def packed_patches(pixel_values: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -129,6 +131,16 @@ def accept_patch_grid_rows(
         return get_image_features(self, pixel_values, image_grid_hw, **kwargs)
 
     return get_image_features_from_rows
+
+
+def vision_filler_features(
+    self: NemotronH_Omni_Reasoning_V3, device: torch.device
+) -> BaseModelOutputWithPooling:
+    """Image features of one zero image on the smallest grid the pixel shuffle takes."""
+    side = round(1 / self.config.downsample_ratio)
+    return self.get_image_features(
+        torch.zeros(1, side, side, self.vision_model.config.patch_dim, device=device)
+    )
 
 
 def _as_list(patterns: str | list[str]) -> list[str]:

@@ -652,15 +652,19 @@ class TestREINFORCEGetAction:
             patch.object(
                 rf,
                 "_generate_with_vllm_colocate",
-                return_value=(mocked_ids, mocked_masks, None),
+                return_value=(mocked_ids, mocked_masks, None, None),
             ) as mock_generate,
         ):
-            completion_ids, action_masks, _ = rf.get_action(prompts, training=False)
+            completion_ids, action_masks, _, _ = rf.get_action(prompts, training=False)
 
         mock_prepare.assert_called_once()
         mock_move.assert_called_once()
         mock_generate.assert_called_once_with(
-            prompts, 1, temperature=0.01, capture_sampling_logps=False
+            prompts,
+            1,
+            temperature=0.01,
+            capture_sampling_logps=False,
+            capture_sampling_supports=False,
         )
         rf.llm.wake_up.assert_called_once()
         rf._prepare_vllm_for_training()
@@ -680,7 +684,9 @@ class TestREINFORCEGetAction:
             for _ in range(3)
         ]
         for training in (True, False):
-            completion_ids, action_masks, _ = rf.get_action(prompts, training=training)
+            completion_ids, action_masks, _, _ = rf.get_action(
+                prompts, training=training
+            )
             assert len(completion_ids) == len(prompts)
             assert len(action_masks) == len(prompts)
             for row_ids, action_mask in zip(completion_ids, action_masks, strict=True):
@@ -710,7 +716,7 @@ class TestREINFORCEGetAction:
         ]
 
         rf.actor = _NoParamModule()
-        completion_ids, action_masks, _ = rf.get_action(prompts, training=True)
+        completion_ids, action_masks, _, _ = rf.get_action(prompts, training=True)
 
         assert_vllm_get_action_contract(
             token_ids=completion_ids,
@@ -752,7 +758,9 @@ class TestREINFORCEComputeRebnAdvantages:
         rewards = torch.tensor([[1.0, 1.0, 1.0], [3.0, 3.0, 3.0]])
         action_mask = torch.ones(2, 3, dtype=torch.bool)
         turn_ids = torch.zeros(2, 3, dtype=torch.long)
-        adv = stub._compute_rebn_advantages(rewards, action_mask, turn_ids)
+        adv = stub._compute_rebn_advantages(
+            rewards, torch.zeros_like(rewards), action_mask, turn_ids
+        )
         assert torch.allclose(adv[0], torch.full((3,), adv[0, 0]))
         assert torch.allclose(adv[1], torch.full((3,), adv[1, 0]))
         assert adv[0, 0] < 0 < adv[1, 0]
@@ -763,10 +771,10 @@ class TestREINFORCEComputeRebnAdvantages:
         action_mask = torch.ones(1, 4, dtype=torch.bool)
         turn_ids = torch.tensor([[0, 0, 1, 1]])
         a = _RebnStub(gamma=1.0)._compute_rebn_advantages(
-            rewards, action_mask, turn_ids
+            rewards, torch.zeros_like(rewards), action_mask, turn_ids
         )
         b = _RebnStub(gamma=0.5)._compute_rebn_advantages(
-            rewards, action_mask, turn_ids
+            rewards, torch.zeros_like(rewards), action_mask, turn_ids
         )
         assert not torch.allclose(a, b)
 
@@ -775,7 +783,9 @@ class TestREINFORCEComputeRebnAdvantages:
         action_mask = torch.tensor([[True, True, False]])
         turn_ids = torch.tensor([[0, 1, -1]])
         rewards = torch.tensor([[1.0, 2.0, 0.0]])
-        advantages = stub._compute_rebn_advantages(rewards, action_mask, turn_ids)
+        advantages = stub._compute_rebn_advantages(
+            rewards, torch.zeros_like(rewards), action_mask, turn_ids
+        )
         assert advantages[0, 2].item() == 0.0
 
     def test_compute_rebn_advantages_skips_zscore_when_at_most_one_valid_turn_return(
@@ -786,7 +796,9 @@ class TestREINFORCEComputeRebnAdvantages:
         rewards = torch.tensor([[2.0, 2.0, 2.0]])
         action_mask = torch.ones(1, 3, dtype=torch.bool)
         turn_ids = torch.zeros(1, 3, dtype=torch.long)
-        advantages = stub._compute_rebn_advantages(rewards, action_mask, turn_ids)
+        advantages = stub._compute_rebn_advantages(
+            rewards, torch.zeros_like(rewards), action_mask, turn_ids
+        )
         assert torch.allclose(advantages, torch.zeros_like(advantages))
 
 

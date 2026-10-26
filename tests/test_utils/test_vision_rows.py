@@ -5,14 +5,20 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import nullcontext
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import torch
 
 from agilerl.utils.vision_rows import (
+    PinnedStaging,
     VisionRows,
     append_vision_filler_rows,
     pixel_values_for_minibatch,
+    prefetch_to_device,
     vision_filler_row,
 )
 
@@ -88,6 +94,39 @@ class TestPixelValuesForMinibatch:
 
         assert torch.equal(selected, pixel_values[3:])
 
+    def test_consecutive_rows_share_the_batch_storage(self) -> None:
+        pixel_values = torch.arange(6.0).reshape(6, 1)
+
+        selected = pixel_values_for_minibatch(
+            pixel_values, np.array([1, 2]), sample_rows=4, image_counts=[1, 2, 1, 2]
+        )
+
+        assert selected.flatten().tolist() == [1.0, 2.0, 3.0]
+        assert selected.untyped_storage().data_ptr() == (
+            pixel_values.untyped_storage().data_ptr()
+        )
+
+    def test_scattered_rows_are_copied_in_minibatch_order(self) -> None:
+        pixel_values = torch.arange(6.0).reshape(6, 1)
+
+        selected = pixel_values_for_minibatch(
+            pixel_values, np.array([3, 0]), sample_rows=4, image_counts=[1, 2, 1, 2]
+        )
+
+        assert selected.flatten().tolist() == [4.0, 5.0, 0.0]
+        assert selected.untyped_storage().data_ptr() != (
+            pixel_values.untyped_storage().data_ptr()
+        )
+
+    def test_an_empty_minibatch_has_no_vision_rows(self) -> None:
+        pixel_values = torch.arange(6.0).reshape(3, 2)
+
+        selected = pixel_values_for_minibatch(
+            pixel_values, np.array([], dtype=np.intp), sample_rows=3
+        )
+
+        assert selected.shape == (0, 2)
+
 
 class TestVisionRowsForMinibatch:
     def test_selects_the_vision_rows_of_the_kept_rows(self) -> None:
@@ -115,28 +154,6 @@ class TestVisionRowsForMinibatch:
 
         with pytest.raises(ValueError, match="image counts summing to 4"):
             vision_rows.for_minibatch(np.array([0]), sample_rows=2)
-
-
-class TestVisionRowsKeysForMinibatch:
-    def test_keys_follow_the_selected_vision_rows(self) -> None:
-        # Arrange
-        vision_rows = VisionRows(
-            torch.zeros(7, 1), image_counts=[3, 4], image_keys=torch.arange(10, 17)
-        )
-
-        # Act
-        keys = vision_rows.keys_for_minibatch(np.array([1, 0]), sample_rows=2)
-
-        # Assert
-        assert keys is not None
-        assert keys.tolist() == [13, 14, 15, 16, 10, 11, 12]
-
-    def test_no_keys_without_image_keys(self) -> None:
-        vision_rows = VisionRows(torch.zeros(4, 1))
-
-        keys = vision_rows.keys_for_minibatch(np.array([0]), sample_rows=4)
-
-        assert keys is None
 
 
 class TestVisionFillerRow:
@@ -211,3 +228,220 @@ class TestAppendVisionFillerRows:
 
         assert torch.equal(padded_pixels, pixel_values)
         assert padded_counts == [2, 1]
+
+
+class FakeEvent:
+    """CPU stand-in for ``torch.cuda.Event``."""
+
+    def __init__(self) -> None:
+        self.recorded_on: FakeStream | None = None
+        self.synchronized = False
+
+    def record(self, stream: FakeStream) -> None:
+        self.recorded_on = stream
+
+    def synchronize(self) -> None:
+        self.synchronized = True
+
+
+class FakeStream:
+    """CPU stand-in for ``torch.cuda.Stream``."""
+
+    def __init__(self, device: torch.device | None = None) -> None:
+        self.device = device
+        self.waited: list[FakeEvent] = []
+
+    def wait_event(self, event: FakeEvent) -> None:
+        self.waited.append(event)
+
+
+@pytest.fixture
+def fake_cuda(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    """CUDA streams, events, pinning and host-to-device copies, run on the CPU."""
+    current = FakeStream()
+    events: list[FakeEvent] = []
+    recorded: list[tuple[torch.Tensor, FakeStream]] = []
+    real_empty = torch.empty
+    real_to = torch.Tensor.to
+
+    def make_event() -> FakeEvent:
+        events.append(FakeEvent())
+        return events[-1]
+
+    def empty(
+        *args: object, pin_memory: bool = False, **kwargs: object
+    ) -> torch.Tensor:
+        return real_empty(*args, **kwargs)
+
+    def to(self: torch.Tensor, *args: object, **kwargs: object) -> torch.Tensor:
+        if args and isinstance(args[0], torch.device) and args[0].type == "cuda":
+            return self.clone()
+        return real_to(self, *args, **kwargs)
+
+    def record_stream(self: torch.Tensor, stream: FakeStream) -> None:
+        recorded.append((self, stream))
+
+    monkeypatch.setattr(torch.cuda, "Stream", FakeStream)
+    monkeypatch.setattr(torch.cuda, "stream", lambda _stream: nullcontext())
+    monkeypatch.setattr(torch.cuda, "Event", make_event)
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda _device=None: current)
+    monkeypatch.setattr(torch, "empty", empty)
+    monkeypatch.setattr(torch.Tensor, "to", to)
+    monkeypatch.setattr(torch.Tensor, "record_stream", record_stream)
+    return SimpleNamespace(current=current, events=events, recorded=recorded)
+
+
+class TestPrefetchToDevice:
+    def test_returns_each_chunk_on_the_device_in_order(self) -> None:
+        # Arrange
+        chunks = [torch.ones(1, 2), torch.ones(3, 2), torch.ones(2, 2)]
+
+        # Act
+        copies = list(prefetch_to_device(iter(chunks), "meta", PinnedStaging()))
+
+        # Assert
+        assert [copy.device.type for copy in copies] == ["meta"] * 3
+        assert [copy.shape for copy in copies] == [chunk.shape for chunk in chunks]
+
+    def test_reads_one_chunk_ahead_of_the_caller(self) -> None:
+        # Arrange
+        reads: list[int] = []
+
+        def chunks() -> Iterator[torch.Tensor]:
+            for index in range(4):
+                reads.append(index)
+                yield torch.full((1, 2), float(index))
+
+        copies = prefetch_to_device(chunks(), "cpu", PinnedStaging())
+
+        # Act
+        first = next(copies)
+        reads_after_first = list(reads)
+        second = next(copies)
+
+        # Assert
+        assert first.tolist() == [[0.0, 0.0]]
+        assert second.tolist() == [[1.0, 1.0]]
+        assert reads_after_first == [0, 1]
+        assert reads == [0, 1, 2]
+
+    def test_ahead_zero_reads_each_chunk_when_asked(self) -> None:
+        # Arrange
+        reads: list[int] = []
+
+        def chunks() -> Iterator[torch.Tensor]:
+            for index in range(3):
+                reads.append(index)
+                yield torch.full((1, 2), float(index))
+
+        copies = prefetch_to_device(chunks(), "cpu", PinnedStaging(), ahead=0)
+
+        # Act
+        first = next(copies)
+        reads_after_first = list(reads)
+        second = next(copies)
+
+        # Assert
+        assert first.tolist() == [[0.0, 0.0]]
+        assert second.tolist() == [[1.0, 1.0]]
+        assert reads_after_first == [0]
+        assert reads == [0, 1]
+
+    def test_empty_chunks_stay_empty(self) -> None:
+        # Arrange
+        chunks = [torch.ones(0, 2), torch.ones(1, 2)]
+
+        # Act
+        copies = list(prefetch_to_device(chunks, "meta", PinnedStaging()))
+
+        # Assert
+        assert [tuple(copy.shape) for copy in copies] == [(0, 2), (1, 2)]
+
+    def test_cuda_copies_wait_on_their_side_stream_copy(
+        self, fake_cuda: SimpleNamespace
+    ) -> None:
+        # Arrange
+        torch.manual_seed(0)
+        chunks = [torch.randn(4, 8), torch.randn(2, 8)]
+
+        # Act
+        copies = list(prefetch_to_device(chunks, "cuda", PinnedStaging()))
+
+        # Assert
+        for copy, chunk in zip(copies, chunks, strict=True):
+            assert torch.equal(copy, chunk)
+        assert fake_cuda.current.waited == fake_cuda.events
+        assert all(
+            event.recorded_on is not fake_cuda.current for event in fake_cuda.events
+        )
+        assert [tensor for tensor, _ in fake_cuda.recorded] == copies
+        assert all(stream is fake_cuda.current for _, stream in fake_cuda.recorded)
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+    def test_cuda_copies_match_the_host_chunks(self) -> None:
+        # Arrange
+        torch.manual_seed(0)
+        chunks = [torch.randn(4, 8), torch.randn(0, 8), torch.randn(2, 8)]
+
+        # Act
+        copies = list(prefetch_to_device(chunks, "cuda", PinnedStaging()))
+
+        # Assert
+        assert all(copy.is_cuda for copy in copies)
+        for copy, chunk in zip(copies, chunks, strict=True):
+            assert torch.equal(copy.cpu(), chunk)
+
+
+class TestPinnedStagingCopyTo:
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+    def test_later_passes_reuse_the_pinned_buffers(self) -> None:
+        # Arrange: an odd chunk count starts the second pass on the other
+        # buffer, so two passes leave both at the largest chunk.
+        torch.manual_seed(0)
+        staging = PinnedStaging()
+        chunks = [torch.randn(4, 8), torch.randn(3, 8), torch.randn(4, 8)]
+        for _ in range(2):
+            list(prefetch_to_device(chunks, "cuda", staging))
+        warm = [buffer.data_ptr() for buffer in staging.buffers]
+
+        # Act
+        copies = list(prefetch_to_device(chunks, "cuda", staging))
+
+        # Assert
+        assert [buffer.data_ptr() for buffer in staging.buffers] == warm
+        assert all(buffer.is_pinned() for buffer in staging.buffers)
+        for copy, chunk in zip(copies, chunks, strict=True):
+            assert torch.equal(copy.cpu(), chunk)
+
+    def test_buffers_grow_to_the_largest_chunk(
+        self, fake_cuda: SimpleNamespace
+    ) -> None:
+        # Arrange
+        staging = PinnedStaging()
+        chunks = [torch.ones(1, 8), torch.ones(2, 8), torch.ones(6, 8)]
+
+        # Act
+        list(prefetch_to_device(chunks, "cuda", staging))
+
+        # Assert: chunks 0 and 2 share a buffer, chunk 1 has the other.
+        assert [buffer.numel() for buffer in staging.buffers] == [6 * 8 * 4, 2 * 8 * 4]
+
+    def test_a_buffer_is_refilled_after_its_last_copy_is_done(
+        self, fake_cuda: SimpleNamespace
+    ) -> None:
+        # Arrange
+        staging = PinnedStaging()
+        stream = FakeStream()
+        device = torch.device("cuda")
+        _, first_done = staging.copy_to(torch.ones(1, 2), device, stream)
+        _, second_done = staging.copy_to(torch.ones(1, 2), device, stream)
+        first_done_before_refill = first_done.synchronized
+
+        # Act
+        copy, _ = staging.copy_to(torch.full((1, 2), 3.0), device, stream)
+
+        # Assert
+        assert not first_done_before_refill
+        assert first_done.synchronized
+        assert not second_done.synchronized
+        assert copy.tolist() == [[3.0, 3.0]]

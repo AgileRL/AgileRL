@@ -12,11 +12,14 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import TypeVar
 
 import torch
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from agilerl.utils.algo_utils import stack_and_pad_experiences
+
+T = TypeVar("T")
 
 
 @dataclass(frozen=True)
@@ -41,11 +44,14 @@ class Trajectory(BaseModel):
 
     :param token_ids: ``(1, T)`` prompt and generated token ids for the whole episode.
     :param action_masks: ``(1, T - 1)`` mask marking action (model-generated) positions.
-    :param turn_ids: ``(1, T - 1)`` turn index per action token, ``-1`` elsewhere.
+    :param turn_ids: ``(1, T - 1)`` turn index per generated token, vLLM-forced
+        tokens outside ``action_masks`` included; ``-1`` elsewhere.
     :param rewards: ``(max_turns,)`` or ``(1, max_turns)`` per-turn rewards.
     :param sampling_logps: Optional 1-D generated-token sampling logprobs.
     :param pixel_values: Optional vision tensor for trainer forward on VL episodes.
     :param segments: Segment layout when the episode context restarted, else ``None``.
+    :param sampling_supports: Optional ``(n, K)`` token ids the sampler could
+        draw at each generated token, ``-1`` padded, parallel to ``sampling_logps``.
     """
 
     token_ids: torch.Tensor
@@ -55,6 +61,7 @@ class Trajectory(BaseModel):
     sampling_logps: torch.Tensor | None = None
     pixel_values: torch.Tensor | None = None
     segments: EpisodeSegments | None = None
+    sampling_supports: torch.Tensor | None = None
 
     model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True, extra="forbid")
 
@@ -133,6 +140,8 @@ class LLMExperienceBatch:
     :param turn_ids: ``(B, T_max - 1)`` tensor padded with ``-1``, or ``None`` when empty.
     :param token_lengths: ``(B,)`` long tensor of per-row sequence lengths.
     :param sampling_logps: Per-row logprob tensors, or ``None`` when none were captured.
+    :param sampling_supports: Per-row ``(n, K)`` sampling supports, or ``None``
+        when none were recorded.
     :param pixel_values: Per-row vision tensors, or ``None`` when none were captured.
     :param segments: Per-row segment layouts, or ``None`` when no row restarted.
     """
@@ -143,6 +152,7 @@ class LLMExperienceBatch:
     turn_ids: torch.Tensor | None
     token_lengths: torch.Tensor
     sampling_logps: list[torch.Tensor | None] | None = None
+    sampling_supports: list[torch.Tensor | None] | None = None
     pixel_values: list[torch.Tensor | None] | None = None
     segments: list[EpisodeSegments | None] | None = None
 
@@ -189,9 +199,6 @@ def collate_rollout_groups(groups: Sequence[RolloutGroup]) -> LLMExperienceBatch
         ],
         padding_values=[0.0],
     )
-    logps = [traj.sampling_logps for traj in trajectories]
-    pixels = [traj.pixel_values for traj in trajectories]
-    segments = [traj.segments for traj in trajectories]
     return LLMExperienceBatch(
         token_ids=[traj.token_ids for traj in trajectories],
         action_masks=[traj.action_masks for traj in trajectories],
@@ -201,7 +208,15 @@ def collate_rollout_groups(groups: Sequence[RolloutGroup]) -> LLMExperienceBatch
             [int(traj.token_ids.shape[-1]) for traj in trajectories],
             dtype=torch.long,
         ),
-        sampling_logps=logps if any(lp is not None for lp in logps) else None,
-        pixel_values=pixels if any(pv is not None for pv in pixels) else None,
-        segments=segments if any(seg is not None for seg in segments) else None,
+        sampling_logps=_unless_all_none([traj.sampling_logps for traj in trajectories]),
+        sampling_supports=_unless_all_none(
+            [traj.sampling_supports for traj in trajectories]
+        ),
+        pixel_values=_unless_all_none([traj.pixel_values for traj in trajectories]),
+        segments=_unless_all_none([traj.segments for traj in trajectories]),
     )
+
+
+def _unless_all_none(values: list[T | None]) -> list[T | None] | None:
+    """``values``, or ``None`` when every entry is ``None``."""
+    return values if any(value is not None for value in values) else None

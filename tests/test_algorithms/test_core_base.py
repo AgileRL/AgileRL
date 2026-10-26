@@ -50,10 +50,11 @@ import sys
 import tempfile
 import warnings
 import weakref
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, patch
 
 import dill
@@ -84,6 +85,7 @@ from agilerl.algorithms.core.base import (
     get_checkpoint_dict,
     get_optimizer_cls,
 )
+from agilerl.algorithms.core.llm_ops.frozen_vision import VisionFeatureCache
 from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
 from agilerl.algorithms.core.registry import (
     HyperparameterConfig,
@@ -135,7 +137,25 @@ pytest.importorskip("transformers", reason="LLM checkpoint tests require transfo
 
 if HAS_LLM_DEPENDENCIES or TYPE_CHECKING:
     from peft import LoraConfig
-    from transformers import LlamaConfig, NemotronHConfig, NemotronHForCausalLM
+    from transformers import (
+        Gemma4Config,
+        Gemma4ForCausalLM,
+        Gemma4ForConditionalGeneration,
+        Gemma4TextConfig,
+        GptOssConfig,
+        GptOssForCausalLM,
+        GraniteConfig,
+        GraniteForCausalLM,
+        GraniteMoeConfig,
+        GraniteMoeForCausalLM,
+        GraniteMoeHybridConfig,
+        GraniteMoeHybridForCausalLM,
+        LlamaConfig,
+        NemotronHConfig,
+        NemotronHForCausalLM,
+        Qwen3Config,
+        Qwen3ForCausalLM,
+    )
 
 _LLM_DEPS_SKIP = pytest.mark.skipif(
     not HAS_LLM_DEPENDENCIES,
@@ -303,6 +323,144 @@ class TestRaiseIfLossNotFiniteOnAnyRank:
             )
         assert result is None
         reduce_call.assert_called_once()
+
+
+class FillerVisionModel(nn.Module):
+    """VL stand-in that counts filler-image tower runs."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.filler_runs = 0
+
+    def forward(
+        self, input_ids: torch.Tensor, pixel_values: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        return input_ids.float()
+
+    def get_decoder(self) -> nn.Module:
+        return self
+
+    def vision_filler_features(self, device: torch.device) -> torch.Tensor:
+        self.filler_runs += 1
+        return torch.ones(1, device=device)
+
+
+class VisionStepStub(SimpleNamespace):
+    _engine_strip_multimodal_towers = LLMAlgorithm._engine_strip_multimodal_towers
+
+
+class TestLLMAlgorithmVisionStep:
+    def run_text_forward(
+        self,
+        world_size: int,
+        images_on_any_rank: bool,
+        vllm_config: VLLMConfig | None = None,
+        rollout_strip_multimodal_towers: bool | list[str] = False,
+    ) -> tuple[FillerVisionModel, dict | None, MagicMock]:
+        module = FillerVisionModel()
+        stub = VisionStepStub(
+            _vision_language_module=module,
+            _vision_cache=VisionFeatureCache(),
+            vllm_config=vllm_config,
+            rollout_strip_multimodal_towers=rollout_strip_multimodal_towers,
+        )
+        with (
+            patch(
+                "agilerl.algorithms.core.base.get_world_size", return_value=world_size
+            ),
+            patch(
+                "agilerl.algorithms.core.base.any_rank",
+                return_value=images_on_any_rank,
+            ) as any_rank,
+            patch(
+                "agilerl.algorithms.core.llm_ops.vision_lockstep.any_rank",
+                return_value=images_on_any_rank,
+            ),
+            LLMAlgorithm._vision_step(stub, None),
+        ):
+            entries = stub._vision_cache.entries
+            module(input_ids=torch.ones(1, 2))
+        return module, entries, any_rank
+
+    def test_images_on_another_rank_run_the_filler_with_the_cache_on(self) -> None:
+        module, entries, _ = self.run_text_forward(2, images_on_any_rank=True)
+
+        assert module.filler_runs == 1
+        assert entries == {}
+
+    def test_no_images_on_any_rank_skip_the_filler(self) -> None:
+        module, entries, _ = self.run_text_forward(2, images_on_any_rank=False)
+
+        assert module.filler_runs == 0
+        assert entries == {}
+
+    def test_one_rank_skips_the_filler(self) -> None:
+        module, entries, _ = self.run_text_forward(1, images_on_any_rank=True)
+
+        assert module.filler_runs == 0
+        assert entries == {}
+
+    @pytest.mark.parametrize("strip_multimodal_towers", [True, ["image"]])
+    def test_stripped_image_tower_skips_the_rank_check(
+        self, strip_multimodal_towers: bool | list[str]
+    ) -> None:
+        # Arrange
+        vllm_config = VLLMConfig(strip_multimodal_towers=strip_multimodal_towers)
+
+        # Act
+        module, entries, any_rank = self.run_text_forward(
+            2, images_on_any_rank=True, vllm_config=vllm_config
+        )
+
+        # Assert
+        any_rank.assert_not_called()
+        assert module.filler_runs == 0
+        assert entries == {}
+
+    def test_stripped_rollout_engine_image_tower_skips_the_rank_check(self) -> None:
+        # Act
+        module, entries, any_rank = self.run_text_forward(
+            2, images_on_any_rank=True, rollout_strip_multimodal_towers=["image"]
+        )
+
+        # Assert
+        any_rank.assert_not_called()
+        assert module.filler_runs == 0
+        assert entries == {}
+
+
+def row_slice(values: torch.Tensor, start: int, end: int) -> torch.Tensor:
+    """Vision rows ``start:end``, one per fused row."""
+    return values[start:end]
+
+
+class TestLLMAlgorithmPlannedChunkImages:
+    def test_keyed_chunks_plan_their_cache_keys(self) -> None:
+        chunk_keys = {(0, 1): torch.tensor([3]), (1, 3): torch.tensor([4, 5])}
+
+        planned = LLMAlgorithm._planned_chunk_images(
+            torch.zeros(3, 2), chunk_keys, row_slice
+        )
+
+        assert planned == [[3], [4, 5]]
+
+    def test_no_pixel_values_plan_no_images(self) -> None:
+        chunk_keys = {(0, 1): None, (1, 2): None}
+
+        planned = LLMAlgorithm._planned_chunk_images(None, chunk_keys, row_slice)
+
+        assert planned == [[], []]
+
+    def test_unkeyed_chunks_plan_unkeyed_images_only_where_they_have_rows(
+        self,
+    ) -> None:
+        chunk_keys = {(0, 1): None, (1, 2): None}
+
+        planned = LLMAlgorithm._planned_chunk_images(
+            torch.zeros(1, 2), chunk_keys, row_slice
+        )
+
+        assert planned == [None, []]
 
 
 class TestGetOptimizerCls:
@@ -1656,7 +1814,7 @@ class _MockPeftActor(torch.nn.Module):
         super().__init__()
         self._dummy_param = torch.nn.Parameter(torch.tensor([1.0]))
         self.name_or_path = "mock-model"
-        self.config = SimpleNamespace(model_type="llama")
+        self.config = LlamaConfig()
         self.peft_config = {}
         self.base_model = MagicMock()
         causal = MagicMock()
@@ -1693,6 +1851,15 @@ class _MockPeftActor(torch.nn.Module):
         out = MagicMock()
         out.logits = torch.randn(batch_size, seq_len, 100)
         return out
+
+
+class ValueHeadModelStub(torch.nn.Module):
+    """Value-head wrapper shape: the LM under ``pretrained_model``, its config on top."""
+
+    def __init__(self, pretrained_model: object) -> None:
+        super().__init__()
+        self.pretrained_model = pretrained_model
+        self.config = LlamaConfig()
 
 
 def _make_mock_peft_actor():
@@ -1803,6 +1970,9 @@ def _make_llm_agent(
     agent.max_output_tokens = None
     agent.max_model_len = 512
     agent.temperature = 1.0
+    agent.top_k = 0
+    agent.top_p = 1.0
+    agent.min_p = 0.0
     agent.registry = MagicMock()
     agent.registry.hooks = []
     agent.registry.groups = []
@@ -2110,6 +2280,108 @@ class TestAttachLoraAdaptersExperts:
         assert out is peft_model
         mock_upgrade.assert_called_once_with(peft_model)
         assert lora_weight.dtype == torch.float32
+
+
+def _tiny_gemma4_with_audio() -> Gemma4ForConditionalGeneration:
+    torch.manual_seed(0)
+    config = Gemma4Config(
+        text_config={
+            "vocab_size": 128,
+            "vocab_size_per_layer_input": 128,
+            "hidden_size": 32,
+            "hidden_size_per_layer_input": 8,
+            "num_hidden_layers": 2,
+            "layer_types": ["sliding_attention", "full_attention"],
+            "num_attention_heads": 2,
+            "num_key_value_heads": 1,
+            "head_dim": 16,
+            "global_head_dim": 16,
+            "intermediate_size": 64,
+            "num_kv_shared_layers": 0,
+            "sliding_window": 8,
+            "pad_token_id": 0,
+        },
+        vision_config={
+            "num_hidden_layers": 1,
+            "hidden_size": 16,
+            "intermediate_size": 32,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 2,
+            "head_dim": 8,
+            "global_head_dim": 8,
+            "patch_size": 2,
+            "pooling_kernel_size": 2,
+            "position_embedding_size": 64,
+        },
+        audio_config={
+            "hidden_size": 16,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 2,
+            "subsampling_conv_channels": [4, 4],
+            "output_proj_dims": 16,
+        },
+        image_token_id=100,
+        boi_token_id=101,
+        eoi_token_id=102,
+        audio_token_id=103,
+        boa_token_id=104,
+        eoa_token_id=105,
+        video_token_id=106,
+    )
+    return Gemma4ForConditionalGeneration(config)
+
+
+class TestAttachLoraAdaptersTowerScope:
+    @pytest.mark.parametrize(
+        ("vllm_config", "rollout_strip_multimodal_towers"),
+        [
+            (None, ["audio"]),
+            (VLLMConfig(strip_multimodal_towers=["audio"]), False),
+        ],
+    )
+    def test_stripped_audio_tower_gets_no_lora(
+        self, vllm_config, rollout_strip_multimodal_towers
+    ):
+        # Arrange
+        agent = _make_llm_agent()
+        agent.lora_config = LoraConfig(r=2, target_modules=["q_proj"])
+        agent.selected_adapters = ["actor"]
+        agent.lora_tower_target_modules = ["linear", "embedding_projection"]
+        agent.vllm_config = vllm_config
+        agent.rollout_strip_multimodal_towers = rollout_strip_multimodal_towers
+
+        # Act
+        with patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False):
+            actor = agent._attach_lora_adapters(_tiny_gemma4_with_audio())
+
+        # Assert
+        adapted = {
+            name.removeprefix("base_model.model.").split(".lora_A.")[0]
+            for name, _ in actor.named_parameters()
+            if ".lora_A." in name
+        }
+        towers = {name.split(".")[1] for name in adapted}
+        assert towers == {"embed_vision", "language_model", "vision_tower"}
+        assert "model.vision_tower.encoder.layers.0.mlp.up_proj.linear" in adapted
+
+    def test_served_audio_tower_gets_lora(self):
+        agent = _make_llm_agent()
+        agent.lora_config = LoraConfig(r=2, target_modules=["q_proj"])
+        agent.selected_adapters = ["actor"]
+        agent.lora_tower_target_modules = ["linear", "embedding_projection"]
+        agent.vllm_config = None
+
+        with patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False):
+            actor = agent._attach_lora_adapters(_tiny_gemma4_with_audio())
+
+        assert any(
+            ".audio_tower." in name and ".lora_A." in name
+            for name, _ in actor.named_parameters()
+        )
+        assert any(
+            ".embed_audio." in name and ".lora_A." in name
+            for name, _ in actor.named_parameters()
+        )
 
 
 class TestInitializeActorsCompiler:
@@ -2961,6 +3233,48 @@ class TestLogprobsFromHiddenFused:
         assert result.dtype == torch.bfloat16
         assert torch.equal(result, ref)
 
+    def test_penalised_rollout_weights_reweight_to_the_trainer_policy(self) -> None:
+        """vLLM draws from penalised logits; the trainer scores unpenalised ones
+        over the same support, so ``exp(trainer - rollout)`` reweights the
+        rollout distribution onto the trainer policy exactly.
+        """
+        # Arrange
+        torch.manual_seed(3)
+        T, H, V, K = 5, 32, 64, 8
+        temperature, penalty = 0.8, 1.3
+        hidden = torch.randn(1, T, H)
+        weight = torch.randn(V, H) * 0.5
+        logits = hidden[0] @ weight.t()
+        seen = torch.zeros(V, dtype=torch.bool)
+        seen[torch.randperm(V)[:20]] = True
+        # vLLM's repetition penalty, then temperature, then top-k.
+        penalised = torch.where(
+            seen, torch.where(logits > 0, logits / penalty, logits * penalty), logits
+        )
+        support = (penalised / temperature).topk(K, dim=-1).indices
+        rollout_logps = torch.log_softmax(
+            penalised.gather(-1, support) / temperature, dim=-1
+        )
+        targets = support.t().contiguous()
+
+        # Act
+        trainer_logps = LLMAlgorithm._logprobs_from_hidden_fused(
+            hidden.expand(K, T, H),
+            weight,
+            None,
+            targets,
+            temperature=temperature,
+            support_ids=support.unsqueeze(0).expand(K, T, K),
+        ).t()
+
+        # Assert
+        expected = torch.log_softmax(logits.gather(-1, support) / temperature, dim=-1)
+        assert torch.allclose(trainer_logps, expected, atol=1e-5)
+        weights = (trainer_logps - rollout_logps).exp()
+        reweighted = (rollout_logps.exp() * weights).sum(-1)
+        assert torch.allclose(reweighted, torch.ones(T), atol=1e-5)
+        assert not torch.allclose(rollout_logps, trainer_logps, atol=1e-2)
+
     def test_keeps_input_dtype_when_cast_disabled(self) -> None:
         """``cast_to_fp32=False`` keeps bf16 throughout — the reduction
         runs in input dtype, matching a hand-rolled bf16
@@ -3214,12 +3528,17 @@ class TestFusedLinearLogProbsGrad:
 class _TinyCausalLM(torch.nn.Module):
     """Minimal HF-style causal LM (embedding → linear body → lm_head)
     used by the integration tests below to exercise the lm_head→Identity
-    monkey-patch against a real ``nn.Linear`` head.
+    monkey-patch against a real ``nn.Linear`` head. Like Gemma, it softcaps
+    whatever its head returns when the config sets ``final_logit_softcapping``.
     """
 
-    def __init__(self, vocab_size: int, hidden_size: int) -> None:
+    def __init__(
+        self, vocab_size: int, hidden_size: int, softcap: float | None = None
+    ) -> None:
         super().__init__()
         self.name_or_path = "tiny-causal"
+        self.config = LlamaConfig()
+        self.config.final_logit_softcapping = softcap
         self.embed = torch.nn.Embedding(vocab_size, hidden_size)
         self.body = torch.nn.Linear(hidden_size, hidden_size)
         self.lm_head = torch.nn.Linear(hidden_size, vocab_size, bias=False)
@@ -3241,7 +3560,11 @@ class _TinyCausalLM(torch.nn.Module):
     ) -> SimpleNamespace:
         x = self.embed(input_ids)
         x = self.body(x)
-        return SimpleNamespace(logits=self.lm_head(x))
+        logits = self.lm_head(x)
+        softcap = self.config.get_text_config().final_logit_softcapping
+        if softcap is not None:
+            logits = softcap * torch.tanh(logits / softcap)
+        return SimpleNamespace(logits=logits)
 
 
 class _TinyPeftWrapper(torch.nn.Module):
@@ -3251,13 +3574,184 @@ class _TinyPeftWrapper(torch.nn.Module):
         super().__init__()
         self.base_model = torch.nn.Module()
         self.base_model.model = inner
-        self.config = LlamaConfig()
+        self.config = inner.config
 
     def get_base_model(self) -> _TinyCausalLM:
         return self.base_model.model
 
     def forward(self, **kwargs: object) -> SimpleNamespace:
         return self.base_model.model(**kwargs)
+
+
+class TestLLMAlgorithmInitializeActors:
+    """The actor's final-logit softcap is read once and gates the Liger kernels."""
+
+    def test_softcapped_model_falls_back_from_liger(self) -> None:
+        agent = _make_llm_agent()
+        agent.use_liger_loss = True
+        actor = _TinyPeftWrapper(_TinyCausalLM(8, 4, softcap=30.0))
+
+        with (
+            patch.object(agent, "use_adapter"),
+            pytest.warns(UserWarning, match="softcaps its final logits at 30.0"),
+        ):
+            LLMAlgorithm._initialize_actors(agent, actor, add_adapters=False)
+
+        assert agent.final_logit_softcap == 30.0
+        assert agent.use_liger_loss is False
+
+    def test_softcapped_model_keeps_liger_whose_loss_applies_the_cap(self) -> None:
+        agent = _make_llm_agent()
+        agent.use_liger_loss = True
+        agent._liger_applies_logit_softcap = True
+        actor = _TinyPeftWrapper(_TinyCausalLM(8, 4, softcap=30.0))
+
+        with patch.object(agent, "use_adapter"):
+            LLMAlgorithm._initialize_actors(agent, actor, add_adapters=False)
+
+        assert agent.final_logit_softcap == 30.0
+        assert agent.use_liger_loss is True
+
+    def test_uncapped_model_keeps_liger(self) -> None:
+        agent = _make_llm_agent()
+        agent.use_liger_loss = True
+        actor = _TinyPeftWrapper(_TinyCausalLM(8, 4))
+
+        with patch.object(agent, "use_adapter"):
+            LLMAlgorithm._initialize_actors(agent, actor, add_adapters=False)
+
+        assert agent.final_logit_softcap is None
+        assert agent.use_liger_loss is True
+
+
+def _tiny_text_config_kwargs() -> dict[str, Any]:
+    return {
+        "vocab_size": 64,
+        "hidden_size": 32,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 8,
+        "intermediate_size": 48,
+        "max_position_embeddings": 64,
+    }
+
+
+class TestLLMAlgorithmGetLogprobsMatchesModelLogits:
+    """Fused hidden-state logprobs equal ``log_softmax`` of the model's own logits.
+
+    One tiny model per catalog family: Gemma softcaps its final logits, the
+    Granite family divides them by ``logits_scaling``, NemotronH upcasts them,
+    and Qwen / gpt-oss apply nothing after ``lm_head``.
+    """
+
+    @pytest.mark.parametrize(
+        "build_model",
+        [
+            pytest.param(
+                lambda: Gemma4ForCausalLM(
+                    Gemma4TextConfig(
+                        **_tiny_text_config_kwargs(),
+                        final_logit_softcapping=0.5,
+                        layer_types=["sliding_attention", "full_attention"],
+                        sliding_window=8,
+                        hidden_size_per_layer_input=8,
+                        num_kv_shared_layers=0,
+                    )
+                ),
+                id="gemma4",
+            ),
+            pytest.param(
+                lambda: GraniteForCausalLM(
+                    GraniteConfig(**_tiny_text_config_kwargs(), logits_scaling=3.0)
+                ),
+                id="granite",
+            ),
+            pytest.param(
+                lambda: GraniteMoeForCausalLM(
+                    GraniteMoeConfig(
+                        **_tiny_text_config_kwargs(),
+                        logits_scaling=3.0,
+                        num_local_experts=4,
+                        num_experts_per_tok=2,
+                    )
+                ),
+                id="granitemoe",
+            ),
+            pytest.param(
+                lambda: GraniteMoeHybridForCausalLM(
+                    GraniteMoeHybridConfig(
+                        **_tiny_text_config_kwargs(),
+                        logits_scaling=3.0,
+                        layer_types=["attention", "attention"],
+                        num_local_experts=0,
+                        shared_intermediate_size=48,
+                        mamba_n_heads=4,
+                        mamba_d_head=16,
+                        mamba_expand=2,
+                    )
+                ),
+                id="granitemoehybrid",
+            ),
+            pytest.param(lambda: _tiny_moe_actor(), id="nemotron_h"),
+            pytest.param(
+                lambda: Qwen3ForCausalLM(Qwen3Config(**_tiny_text_config_kwargs())),
+                id="qwen3",
+            ),
+            pytest.param(
+                lambda: GptOssForCausalLM(
+                    GptOssConfig(
+                        **_tiny_text_config_kwargs(),
+                        num_local_experts=4,
+                        num_experts_per_tok=2,
+                        layer_types=["sliding_attention", "full_attention"],
+                        sliding_window=8,
+                    )
+                ),
+                id="gpt_oss",
+            ),
+        ],
+    )
+    @pytest.mark.usefixtures("pristine_nemotron_classes")
+    def test_fused_logprobs_match_model_logits(
+        self, build_model: Callable[[], torch.nn.Module]
+    ) -> None:
+        # Arrange
+        torch.manual_seed(0)
+        # Liger's instance patches are Triton kernels; these models run on CPU.
+        with patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False):
+            agent = GRPO(
+                actor_network=build_model(),
+                pad_token_id=63,
+                pad_token="<pad>",
+                batch_size=2,
+                group_size=2,
+                max_output_tokens=4,
+                max_model_len=16,
+                gradient_checkpointing=False,
+                calc_position_embeddings=False,
+                device="cpu",
+                use_liger_loss=False,
+                seed=7,
+                lora_config=LoraConfig(
+                    r=2, lora_alpha=4, lora_dropout=0.0, target_modules=["q_proj"]
+                ),
+            )
+        ids = torch.randint(0, 63, (2, 12), generator=torch.Generator().manual_seed(1))
+
+        # Act
+        with torch.no_grad():
+            fused = agent._get_logprobs(ids, batch_size=2, eval_mode=True)
+            with agent.select_adapter("actor"):
+                logits = agent.actor(input_ids=ids).logits.float()
+
+        # Assert
+        reference = (
+            torch.log_softmax(logits[:, :-1] / agent.temperature, dim=-1)
+            .gather(dim=-1, index=ids[:, 1:].unsqueeze(-1))
+            .squeeze(-1)
+        )
+        assert torch.allclose(fused, reference, rtol=0, atol=1e-5)
 
 
 class TestFusedLinearLogprobsIntegration:
@@ -3269,13 +3763,14 @@ class TestFusedLinearLogprobsIntegration:
     """
 
     def _build_agent(
-        self, vocab_size: int, hidden_size: int
+        self, vocab_size: int, hidden_size: int, softcap: float | None = None
     ) -> tuple[LLMAlgorithm, _TinyPeftWrapper]:
         agent = _make_llm_agent()
-        actor = _TinyPeftWrapper(_TinyCausalLM(vocab_size, hidden_size))
+        actor = _TinyPeftWrapper(_TinyCausalLM(vocab_size, hidden_size, softcap))
         actor.eval()
         agent.actor = actor
         agent.use_value_head = False
+        agent.final_logit_softcap = softcap
         agent.temperature = 0.7
         agent.calc_position_embeddings = False
         agent.pad_token_id = 0
@@ -3352,6 +3847,64 @@ class TestFusedLinearLogprobsIntegration:
         assert isinstance(
             actor.get_base_model().get_output_embeddings(), torch.nn.Linear
         )
+
+    @pytest.mark.parametrize("grad_enabled", [False, True])
+    def test_fused_matches_softcapped_model_logits(self, grad_enabled: bool) -> None:
+        # Arrange
+        torch.manual_seed(0)
+        B, T, H, V = 3, 7, 16, 256
+        agent, actor = self._build_agent(V, H, softcap=2.0)
+        with torch.no_grad():
+            actor.get_base_model().lm_head.weight.mul_(8.0)
+        ids = torch.randint(1, V, (B, T))
+        with torch.no_grad():
+            full_logits = actor(input_ids=ids).logits / agent.temperature
+            lp_ref = (
+                F.log_softmax(full_logits[:, :-1].float(), dim=-1)
+                .gather(dim=-1, index=ids[:, 1:].unsqueeze(-1))
+                .squeeze(-1)
+            )
+
+        # Act
+        with torch.set_grad_enabled(grad_enabled):
+            lp_fused = agent._get_logprobs(
+                ids, batch_size=B, use_reference=False, eval_mode=True
+            )
+
+        # Assert
+        assert torch.allclose(lp_fused.detach(), lp_ref, rtol=1e-5, atol=1e-5)
+        assert actor.get_base_model().config.final_logit_softcapping == 2.0
+
+    @pytest.mark.parametrize("grad_enabled", [False, True])
+    def test_fused_scores_the_logit_biased_distribution(
+        self, grad_enabled: bool
+    ) -> None:
+        # Arrange
+        torch.manual_seed(0)
+        B, T, H, V = 3, 7, 16, 256
+        agent, actor = self._build_agent(V, H, softcap=2.0)
+        agent.logit_bias = {5: -100.0, 9: 1.5}
+        logit_bias = torch.zeros(V)
+        logit_bias[[5, 9]] = torch.tensor([-100.0, 1.5])
+        with torch.no_grad():
+            actor.get_base_model().lm_head.weight.mul_(8.0)
+        ids = torch.randint(1, V, (B, T))
+        with torch.no_grad():
+            logits = (actor(input_ids=ids).logits + logit_bias) / agent.temperature
+            lp_ref = (
+                F.log_softmax(logits[:, :-1].float(), dim=-1)
+                .gather(dim=-1, index=ids[:, 1:].unsqueeze(-1))
+                .squeeze(-1)
+            )
+
+        # Act
+        with torch.set_grad_enabled(grad_enabled):
+            lp_fused = agent._get_logprobs(
+                ids, batch_size=B, use_reference=False, eval_mode=True
+            )
+
+        # Assert
+        assert torch.allclose(lp_fused.detach(), lp_ref, rtol=1e-5, atol=1e-5)
 
     def test_no_grad_fused_method_skipped_when_grad_enabled(self) -> None:
         """Under grad, ``_get_logprobs`` uses the gradient-aware fused fn, so
@@ -3878,6 +4431,19 @@ class TestLLMGetLmHead:
 
         assert agent._get_lm_head() is original
 
+    def test_patch_returns_hidden_state_of_softcapped_model_then_restores_cap(self):
+        agent = _make_llm_agent()
+        inner = _TinyCausalLM(vocab_size=8, hidden_size=4, softcap=0.5)
+        agent.actor = _TinyPeftWrapper(inner)
+        agent.use_value_head = False
+        ids = torch.tensor([[1, 2, 3]])
+
+        with torch.no_grad(), agent._patch_lm_head_to_identity():
+            hidden = agent.actor(input_ids=ids).logits
+
+        assert torch.allclose(hidden, inner.body(inner.embed(ids)))
+        assert inner.config.final_logit_softcapping == 0.5
+
     def test_patch_restores_head_on_exception(self):
         agent = _make_llm_agent()
         actor, original = self._peft_actor()
@@ -3943,6 +4509,17 @@ class TestLLMGetLmHead:
             assert b is None
 
 
+@pytest.fixture
+def colocated_cuda_device(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Stand in for the CUDA device colocated vLLM runs on and isolate the env it writes."""
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    with patch.dict(os.environ):
+        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        os.environ.pop("VLLM_CACHE_ROOT", None)
+        yield
+
+
+@pytest.mark.usefixtures("colocated_cuda_device")
 class TestLLMConfigureVllm:
     @pytest.fixture(autouse=True)
     def stub_llama_auto_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3969,6 +4546,51 @@ class TestLLMConfigureVllm:
             agent._configure_vllm()
         assert isinstance(agent.vllm_config, VLLMConfig)
         mock_llm_cls.assert_called_once()
+
+    @pytest.mark.parametrize(
+        ("top_k", "top_p", "records"),
+        [(20, 1.0, True), (20, 0.9, True), (0, 1.0, False), (None, 1.0, False)],
+    )
+    def test_engine_records_sampling_supports_when_top_k_filters(
+        self, top_k: int | None, top_p: float, records: bool
+    ):
+        # Arrange
+        agent = _make_llm_agent()
+        agent.vllm_config = VLLMConfig()
+        agent.temperature = 0.9
+        agent.top_k = top_k
+        agent.top_p = top_p
+        agent.min_p = 0.0
+        mock_llm_cls = MagicMock()
+
+        # Act
+        with (
+            patch.dict(os.environ, {}),
+            patch("agilerl.algorithms.core.base.LLM", mock_llm_cls, create=True),
+        ):
+            agent._configure_vllm()
+
+        # Assert
+        assert agent.records_sampling_supports is records
+        assert mock_llm_cls.call_args.kwargs["return_sampling_mask"] is records
+
+    def test_rejects_a_filter_the_engine_cannot_report(self):
+        agent = _make_llm_agent()
+        agent.vllm_config = VLLMConfig()
+        agent.temperature = 0.9
+        agent.top_k = 0
+        agent.top_p = 0.9
+        agent.min_p = 0.0
+        mock_llm_cls = MagicMock()
+
+        with (
+            patch.dict(os.environ, {}),
+            patch("agilerl.algorithms.core.base.LLM", mock_llm_cls, create=True),
+            pytest.raises(ValueError, match="top_p narrows the distribution"),
+        ):
+            agent._configure_vllm()
+
+        mock_llm_cls.assert_not_called()
 
     def test_raises_when_tp_size_invalid(self):
         agent = _make_llm_agent(batch_size=12)
@@ -6001,9 +6623,8 @@ class TestLLMInitializeActors:
         agent.selected_adapters = ("actor", "critic")
         agent.lora_config = MagicMock()
 
-        base_model = torch.nn.Module()
         dense_inner = MagicMock(spec=[])
-        base_model.pretrained_model = dense_inner
+        base_model = ValueHeadModelStub(dense_inner)
         peft_actor = _make_mock_peft_actor()
         peft_actor.peft_config = {}
 
@@ -6355,6 +6976,7 @@ class TestLLMLoadAdapterWeights:
         mock_load.assert_called_once()
 
 
+@pytest.mark.usefixtures("colocated_cuda_device")
 class TestLLMConfigureVllmPaths:
     """_configure_vllm under various world-size / TP configurations."""
 
@@ -6388,6 +7010,48 @@ class TestLLMConfigureVllmPaths:
         assert agent.llm is mock_llm_instance
         mock_llm_cls.assert_called_once()
         mock_barrier.assert_called()
+
+    @pytest.mark.parametrize(
+        ("visible_devices", "device", "expected_key"),
+        [
+            ("4,5", "cuda:1", "gpu_5"),
+            (None, "cuda:3", "gpu_3"),
+            (None, "cuda", "gpu_0"),
+        ],
+    )
+    def test_configure_vllm_keys_compile_cache_by_physical_gpu(
+        self, visible_devices, device, expected_key
+    ):
+        # Arrange
+        agent = _make_llm_agent()
+        agent.device = device
+        agent.vllm_config = VLLMConfig()
+        agent.max_model_len = 512
+        if visible_devices is not None:
+            os.environ["CUDA_VISIBLE_DEVICES"] = visible_devices
+
+        # Act
+        with patch("agilerl.algorithms.core.base.LLM", return_value=MagicMock()):
+            agent._configure_vllm()
+
+        # Assert
+        assert os.environ["VLLM_CACHE_ROOT"] == str(
+            Path(tempfile.gettempdir()) / "vllm_compile_cache" / expected_key
+        )
+
+    def test_configure_vllm_keys_explicit_compile_cache_root_by_gpu(self):
+        agent = _make_llm_agent()
+        agent.device = "cuda:2"
+        agent.vllm_config = VLLMConfig()
+        agent.max_model_len = 512
+        os.environ["VLLM_CACHE_ROOT"] = "/custom/vllm/cache"
+
+        with patch("agilerl.algorithms.core.base.LLM", return_value=MagicMock()):
+            agent._configure_vllm()
+
+        assert os.environ["VLLM_CACHE_ROOT"] == str(
+            Path("/custom/vllm/cache") / "gpu_2"
+        )
 
     def test_configure_vllm_marks_3d_moe_lora_capable_models(self, caplog):
         agent = _make_llm_agent()
@@ -6812,7 +7476,7 @@ class TestLLMGenerateWithVllmColocateFullPaths:
                 return_value=(torch.zeros(2, 5), None),
             ),
         ):
-            completion_ids, action_masks, _ = agent._generate_with_vllm_colocate(
+            completion_ids, action_masks, _, _ = agent._generate_with_vllm_colocate(
                 prompts, group_size=2, temperature=0.9
             )
         assert len(completion_ids) == 2
@@ -6860,7 +7524,7 @@ class TestLLMGenerateWithVllmColocateFullPaths:
                 return_value=(torch.zeros(2, 5), None),
             ),
         ):
-            token_ids, _action_masks, _ = agent._generate_with_vllm_colocate(
+            token_ids, _action_masks, _, _ = agent._generate_with_vllm_colocate(
                 prompts, group_size=2, temperature=0.9
             )
 
@@ -6914,7 +7578,7 @@ class TestLLMGenerateWithVllmColocateFullPaths:
                 return_value=(torch.zeros(2, 5), None),
             ),
         ):
-            token_ids, action_masks, _ = agent._generate_with_vllm_colocate(
+            token_ids, action_masks, _, _ = agent._generate_with_vllm_colocate(
                 prompts, group_size=2, temperature=0.9
             )
 
@@ -6979,6 +7643,118 @@ class TestLLMGenerateWithVllmColocateFullPaths:
         assert captured[0]["max_tokens"] == 15
         assert captured[0]["min_tokens"] == 15
 
+    @pytest.mark.parametrize(
+        ("top_k", "min_p", "expected_top_k", "expected_min_p"),
+        [(None, None, 0, 0.0), (50, 0.05, 50, 0.05)],
+    )
+    def test_generate_with_vllm_colocate_passes_every_sampling_field(
+        self,
+        top_k: int | None,
+        min_p: float | None,
+        expected_top_k: int,
+        expected_min_p: float,
+    ):
+        # Arrange
+        agent = _make_llm_agent()
+        agent.pad_token = "<pad>"
+        agent.pad_token_id = 0
+        agent.max_output_tokens = 20
+        agent.max_model_len = 100
+        agent.repetition_penalty = 1.1
+        agent.temperature = 1.0
+        agent.top_p = 0.95
+        agent.top_k = top_k
+        agent.min_p = min_p
+        agent.min_output_tokens = 2
+
+        vllm_config = MagicMock()
+        vllm_config.tensor_parallel_size = 1
+        vllm_config.presence_penalty = 0.3
+        vllm_config.frequency_penalty = 0.2
+        vllm_config.stop_sequences = None
+        agent.vllm_config = vllm_config
+        agent.device = "cpu"
+
+        prompts = [{"input_ids": torch.tensor([[1, 2, 3]]), "text": "hello"}]
+        mock_output = MagicMock()
+        mock_output.outputs = [MagicMock(token_ids=list(range(5)))]
+        agent.llm = MagicMock()
+        agent.llm.generate.return_value = [mock_output]
+
+        captured: list[dict] = []
+
+        def capture_sampling_params(**kwargs):
+            captured.append(kwargs)
+            return MagicMock()
+
+        # Act
+        with (
+            patch(
+                "agilerl.algorithms.core.base.SamplingParams",
+                side_effect=capture_sampling_params,
+                create=True,
+            ),
+            patch(
+                "agilerl.algorithms.core.base.stack_and_pad_experiences",
+                return_value=(torch.zeros(1, 5), None),
+            ),
+        ):
+            agent._generate_with_vllm_colocate(prompts, group_size=1, temperature=0.9)
+
+        # Assert
+        assert captured[0] == {
+            "n": 1,
+            "temperature": 0.9,
+            "top_p": 0.95,
+            "top_k": expected_top_k,
+            "min_p": expected_min_p,
+            "repetition_penalty": 1.1,
+            "presence_penalty": 0.3,
+            "frequency_penalty": 0.2,
+            "max_tokens": 20,
+            "min_tokens": 2,
+        }
+
+    def test_generate_with_vllm_colocate_passes_the_logit_bias(self):
+        # Arrange
+        agent = _make_llm_agent()
+        agent.pad_token_id = 0
+        agent.max_output_tokens = 20
+        agent.max_model_len = 100
+        agent.repetition_penalty = 1.0
+        agent.top_p = 1.0
+        agent.top_k = None
+        agent.min_p = None
+        agent.min_output_tokens = None
+        agent.logit_bias = {5: -100.0, 9: 1.5}
+        agent.device = "cpu"
+        agent.vllm_config = VLLMConfig(tensor_parallel_size=1)
+        agent.llm = MagicMock()
+        agent.llm.generate.return_value = [
+            SimpleNamespace(outputs=[SimpleNamespace(token_ids=[4, 6])])
+        ]
+        captured: list[dict] = []
+
+        def capture_sampling_params(**kwargs):
+            captured.append(kwargs)
+            return MagicMock()
+
+        # Act
+        with patch(
+            "agilerl.algorithms.core.base.SamplingParams",
+            side_effect=capture_sampling_params,
+            create=True,
+        ):
+            agent._generate_with_vllm_colocate(
+                [{"input_ids": torch.tensor([[1, 2, 3]]), "text": "hello"}],
+                group_size=1,
+                temperature=0.9,
+            )
+
+        # Assert
+        assert len(captured) == 1
+        assert captured[0]["logit_bias"] == {5: -100.0, 9: 1.5}
+
 
 class TestLLMGenerateWithVllmColocateTP:
     """_generate_with_vllm_colocate gathers and slices with tensor_parallel > 1."""
@@ -7030,7 +7806,7 @@ class TestLLMGenerateWithVllmColocateTP:
             patch("torch.distributed.all_gather_object", side_effect=fake_all_gather),
             patch("torch.distributed.get_rank", return_value=0),
         ):
-            completion_ids, _action_masks, _ = agent._generate_with_vllm_colocate(
+            completion_ids, _action_masks, _, _ = agent._generate_with_vllm_colocate(
                 prompts, group_size=2, temperature=0.9
             )
         assert len(completion_ids) == 1
@@ -7539,6 +8315,7 @@ class _PackedMoeModel(torch.nn.Module):
 
     def __init__(self, num_experts: int = 4, hidden: int = 8) -> None:
         super().__init__()
+        self.config = LlamaConfig()
         self.layers = torch.nn.ModuleList()
         for _ in range(2):
             block = torch.nn.Module()
@@ -8079,7 +8856,7 @@ class TestLLMGenerateWithVllmColocateErrors:
             patch("torch.distributed.all_gather_object", side_effect=fake_all_gather),
             patch("torch.distributed.get_rank", return_value=0),
         ):
-            _, _, sampling_logps = agent._generate_with_vllm_colocate(
+            _, _, sampling_logps, _ = agent._generate_with_vllm_colocate(
                 prompts,
                 group_size=2,
                 temperature=0.9,
@@ -8088,6 +8865,95 @@ class TestLLMGenerateWithVllmColocateErrors:
 
         assert sampling_logps is not None
         assert len(sampling_logps) == 2
+
+    def test_tp_slice_keeps_this_rank_sampling_supports(self):
+        # Arrange
+        agent = _make_llm_agent()
+        agent.pad_token_id = 0
+        agent.max_output_tokens = 20
+        agent.max_model_len = 100
+        agent.repetition_penalty = 1.0
+        agent.top_p = 1.0
+        agent.top_k = 2
+        agent.min_p = None
+        agent.min_output_tokens = None
+        agent.device = "cpu"
+        agent.vllm_config = VLLMConfig(tensor_parallel_size=2)
+        agent.tp_group = MagicMock()
+        prompts = [{"input_ids": torch.tensor([[1, 2, 3]]), "text": "hello"}]
+        agent.llm = MagicMock()
+        agent.llm.generate.return_value = [
+            SimpleNamespace(
+                outputs=[
+                    SimpleNamespace(
+                        token_ids=[4 + row, 5],
+                        sampling_mask=SimpleNamespace(token_ids=[[4 + row, 9], [5]]),
+                    )
+                ]
+            )
+            for row in range(4)
+        ]
+
+        def fake_all_gather(dest, src, group=None):
+            for i in range(len(dest)):
+                dest[i] = src
+
+        # Act
+        with (
+            patch(
+                "agilerl.algorithms.core.base.SamplingParams",
+                return_value=MagicMock(),
+                create=True,
+            ),
+            patch("torch.distributed.all_gather_object", side_effect=fake_all_gather),
+            patch("torch.distributed.get_rank", return_value=1),
+        ):
+            _, _, sampling_logps, sampling_supports = (
+                agent._generate_with_vllm_colocate(
+                    prompts,
+                    group_size=2,
+                    temperature=0.9,
+                    capture_sampling_supports=True,
+                )
+            )
+
+        # Assert
+        assert sampling_logps is None
+        assert sampling_supports is not None
+        assert [support.tolist() for support in sampling_supports] == [
+            [[6, 9], [5, -1]],
+            [[7, 9], [5, -1]],
+        ]
+
+    def test_sampling_supports_are_none_unless_captured(self):
+        agent = _make_llm_agent()
+        agent.pad_token_id = 0
+        agent.max_output_tokens = 20
+        agent.max_model_len = 100
+        agent.repetition_penalty = 1.0
+        agent.top_p = 1.0
+        agent.top_k = 2
+        agent.min_p = None
+        agent.min_output_tokens = None
+        agent.device = "cpu"
+        agent.vllm_config = VLLMConfig(tensor_parallel_size=1)
+        agent.llm = MagicMock()
+        agent.llm.generate.return_value = [
+            SimpleNamespace(outputs=[SimpleNamespace(token_ids=[4, 5])])
+        ]
+
+        with patch(
+            "agilerl.algorithms.core.base.SamplingParams",
+            return_value=MagicMock(),
+            create=True,
+        ):
+            *_, sampling_supports = agent._generate_with_vllm_colocate(
+                [{"input_ids": torch.tensor([[1, 2, 3]]), "text": "hello"}],
+                group_size=1,
+                temperature=0.01,
+            )
+
+        assert sampling_supports is None
 
 
 @_LLM_DEPS_SKIP

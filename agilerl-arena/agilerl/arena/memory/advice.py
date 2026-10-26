@@ -120,6 +120,23 @@ def _generation_candidates(
 ) -> list[tuple[str, Callable[[RunConfig], RunConfig]]]:
     g = config.generation
     candidates: list[tuple[str, Callable[[RunConfig], RunConfig]]] = []
+    stripped = next(
+        (v.name for v in config.model.variants if v.stripped_multimodal), None
+    )
+    if (
+        stripped is not None
+        and not config.model.variant(g.weight_variant).stripped_multimodal
+        and config.training.images_per_row == 0
+    ):
+        candidates.append(
+            (
+                (
+                    "Skip the multimodal towers in the engine "
+                    "(strip_multimodal_towers=True; text-only envs)"
+                ),
+                _update("generation", weight_variant=stripped),
+            )
+        )
     if not g.enforce_eager:
         candidates.append(
             (

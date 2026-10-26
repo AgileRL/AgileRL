@@ -5,7 +5,9 @@ import importlib.util
 import json
 import logging
 import math
+import os
 import sys
+import tempfile
 import types
 from pathlib import Path
 from types import SimpleNamespace
@@ -62,8 +64,10 @@ from agilerl.utils.llm_utils import (
     MAMBA_LORA_MODEL_TYPES,
     LoraAdapterSnapshot,
     MicroBatchMetrics,
+    RolloutSampling,
     adapt_lora_config_for_model,
     apply_pad_token_id,
+    apply_vllm_compile_cache_env,
     attention_mask_from_padded_ids,
     baseline_free_turn_cells,
     batch_is_single_turn,
@@ -1194,6 +1198,28 @@ class TestMaskedMeanAxis:
         assert result.shape == (2,)
         assert result.tolist() == pytest.approx([2.0, 8.0])
 
+    def test_row_without_mask_averages_to_zero(self) -> None:
+        values = torch.tensor([[1.0, 3.0], [4.0, 8.0]])
+        mask = torch.tensor([[1.0, 1.0], [0.0, 0.0]])
+
+        result = masked_mean(values, mask, axis=1)
+
+        assert result.tolist() == [2.0, 0.0]
+
+
+class TestMaskedMean:
+    def test_averages_the_masked_values(self) -> None:
+        values = torch.tensor([[1.0, 3.0], [4.0, 8.0]])
+        mask = torch.tensor([[1, 0], [1, 1]], dtype=torch.bool)
+
+        assert masked_mean(values, mask).item() == pytest.approx(13.0 / 3.0)
+
+    def test_empty_mask_averages_to_zero(self) -> None:
+        values = torch.tensor([[1.0, 3.0]])
+        mask = torch.zeros(1, 2, dtype=torch.bool)
+
+        assert masked_mean(values, mask).item() == 0.0
+
 
 class TestMaskedWhiten:
     def test_leaves_values_unchanged_with_fewer_than_two_unmasked(self) -> None:
@@ -1691,6 +1717,24 @@ class _VisionLanguageModel(nn.Module):
         self.lm_head = nn.Linear(4, 8)
 
 
+class _AudioVisionLanguageModel(nn.Module):
+    """``model.language_model`` beside vision and audio towers sharing a leaf name."""
+
+    def __init__(self):
+        super().__init__()
+        self.model = nn.Module()
+        self.model.language_model = nn.Module()
+        self.model.language_model.q_proj = nn.Linear(4, 4)
+        self.model.vision_tower = nn.Module()
+        self.model.vision_tower.linear = nn.Linear(4, 4)
+        self.model.audio_tower = nn.Module()
+        self.model.audio_tower.linear = nn.Linear(4, 4)
+        self.model.embed_audio = nn.Module()
+        self.model.embed_audio.embedding_projection = nn.Linear(4, 4)
+        self.model.embed_vision = nn.Module()
+        self.model.embed_vision.embedding_projection = nn.Linear(4, 4)
+
+
 class _PlainLinearModel(nn.Module):
     """Text-only model: no ``language_model`` submodule."""
 
@@ -1981,6 +2025,42 @@ class TestAdaptLoraConfigForModel:
                 _VisionLanguageModel(), cfg, tower_target_modules=["up_proj"]
             )
 
+    def test_skipped_tower_modules_get_no_lora(self):
+        # Arrange
+        model = _AudioVisionLanguageModel()
+        cfg = _PlainLoraConfig(target_modules=["q_proj"])
+
+        # Act
+        adapted = adapt_lora_config_for_model(
+            model,
+            cfg,
+            tower_target_modules=["linear", "embedding_projection"],
+            skipped_tower_modules=["audio_tower", "embed_audio"],
+        )
+
+        # Assert
+        assert list_peft_matched_module_keys(model, adapted.target_modules) == [
+            "model.language_model.q_proj",
+            "model.vision_tower.linear",
+            "model.embed_vision.embedding_projection",
+        ]
+
+    def test_tower_targets_only_in_skipped_towers_raise(self):
+        cfg = _PlainLoraConfig(target_modules=["q_proj"])
+
+        with pytest.raises(ValueError, match="No modules outside"):
+            adapt_lora_config_for_model(
+                _AudioVisionLanguageModel(),
+                cfg,
+                tower_target_modules=["linear"],
+                skipped_tower_modules=[
+                    "audio_tower",
+                    "embed_audio",
+                    "embed_vision",
+                    "vision_tower",
+                ],
+            )
+
 
 VL_SUPPORTED_MODEL_IDS = sorted(
     hub_id
@@ -2158,6 +2238,7 @@ class TestLoraTargetModuleNames:
             ["q_proj", "k_proj", "v_proj", "o_proj"],
             ["visual"],
             "model.language_model",
+            ["audio_tower"],
         )
 
         assert set(lora_target_module_names(spec)) == {
@@ -3325,6 +3406,47 @@ def _vllm_config(**overrides):
     return SimpleNamespace(**base)
 
 
+class TestRolloutSamplingVllmKwargs:
+    def test_every_field_reaches_the_kwargs(self) -> None:
+        sampling = RolloutSampling(
+            temperature=0.9,
+            top_p=0.95,
+            top_k=50,
+            min_p=0.05,
+            repetition_penalty=1.1,
+            presence_penalty=0.3,
+            frequency_penalty=0.2,
+            min_tokens=4,
+        )
+
+        kwargs = sampling.vllm_kwargs(max_tokens=64)
+
+        assert kwargs == {
+            "temperature": 0.9,
+            "top_p": 0.95,
+            "top_k": 50,
+            "min_p": 0.05,
+            "repetition_penalty": 1.1,
+            "presence_penalty": 0.3,
+            "frequency_penalty": 0.2,
+            "max_tokens": 64,
+            "min_tokens": 4,
+        }
+
+    def test_defaults_leave_the_distribution_untruncated(self) -> None:
+        kwargs = RolloutSampling(temperature=1.0).vllm_kwargs(max_tokens=64)
+
+        assert (kwargs["top_p"], kwargs["top_k"], kwargs["min_p"]) == (1.0, 0, 0.0)
+        assert kwargs["min_tokens"] == 0
+
+    def test_min_tokens_is_capped_at_max_tokens(self) -> None:
+        sampling = RolloutSampling(temperature=1.0, min_tokens=32)
+
+        kwargs = sampling.vllm_kwargs(max_tokens=8)
+
+        assert kwargs["min_tokens"] == 8
+
+
 class TestBuildVllmLlmInitKwargs:
     @pytest.fixture(autouse=True)
     def stub_llama_model_type(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3363,6 +3485,7 @@ class TestBuildVllmLlmInitKwargs:
         assert kwargs["max_num_batched_tokens"] == 65536
         assert kwargs["model_impl"] == "vllm"
         assert kwargs["enable_sleep_mode"] is True
+        assert kwargs["logprobs_mode"] == "processed_logprobs"
         # Colocated vLLM always serves the trainer's LoRA adapter.
         assert kwargs["enable_lora"] is True
         assert kwargs["max_lora_rank"] == 16
@@ -3623,15 +3746,11 @@ class TestPeftLoraKeyHelpers:
             == "base.layers.0.q_proj.weight"
         )
 
-    def test_remap_strips_clippable_inner_linear_suffix(self):
-        assert (
-            remap_peft_lora_key_for_vllm("model.layers.0.q_proj.linear.lora_A.weight")
-            == "model.layers.0.q_proj.lora_A.weight"
-        )
-        assert (
-            remap_peft_lora_key_for_vllm("model.layers.0.q_proj.linear.lora_B.weight")
-            == "model.layers.0.q_proj.lora_B.weight"
-        )
+    @pytest.mark.parametrize("matrix", ["lora_A", "lora_B"])
+    def test_remap_keeps_the_clippable_inner_linear(self, matrix):
+        key = f"model.vision_tower.encoder.layers.0.self_attn.q_proj.linear.{matrix}.weight"
+
+        assert remap_peft_lora_key_for_vllm(key) == key
 
     def test_remap_strips_base_layer_segment(self):
         assert (
@@ -3658,7 +3777,7 @@ class TestPeftLoraKeyHelpers:
 
 
 class TestFilterPeftStateDictForVllmLora:
-    def test_keeps_lora_tensors_and_drops_trainer_only_segments(self):
+    def test_keeps_only_lora_tensors(self):
         lora_a = torch.zeros(1)
         lora_b = torch.ones(1)
         state = {
@@ -3670,10 +3789,10 @@ class TestFilterPeftStateDictForVllmLora:
         out = filter_peft_state_dict_for_vllm_lora(state)
 
         assert out == {
-            "model.layers.0.q_proj.lora_A.weight": lora_a,
+            "model.layers.0.q_proj.linear.lora_A.weight": lora_a,
             "model.layers.0.out_proj.lora_B.weight": lora_b,
         }
-        assert out["model.layers.0.q_proj.lora_A.weight"] is lora_a
+        assert out["model.layers.0.q_proj.linear.lora_A.weight"] is lora_a
 
     def test_expert_key_map_routes_packed_expert_tensors(self):
         tensor = torch.zeros(1)
@@ -3769,8 +3888,13 @@ class TestSavePeftAdapterForVllmRollout:
         out = save_peft_adapter_for_vllm_rollout(self._peft_model(), tmp_path, "actor")
         assert out == tmp_path / "actor"
         assert calls["adapter_name"] == "actor"
-        assert list(calls["saved_tensors"]) == ["model.layers.0.q_proj.lora_A.weight"]
-        assert calls["saved_tensors"]["model.layers.0.q_proj.lora_A.weight"] is t_keep
+        assert list(calls["saved_tensors"]) == [
+            "model.layers.0.q_proj.linear.lora_A.weight"
+        ]
+        assert (
+            calls["saved_tensors"]["model.layers.0.q_proj.linear.lora_A.weight"]
+            is t_keep
+        )
         assert calls["saved_path"] == tmp_path / "actor" / "adapter_model.safetensors"
         cfg = json.loads(
             (tmp_path / "actor" / "adapter_config.json").read_text(encoding="utf-8")
@@ -3851,10 +3975,13 @@ class TestSavePeftAdapterForVllmRollout:
         assert dt.full_tensor_calls == 1
         # Assert — plain tensor passed through untouched
         assert (
-            calls["saved_tensors"]["model.layers.0.q_proj.lora_A.weight"]
+            calls["saved_tensors"]["model.layers.0.q_proj.linear.lora_A.weight"]
             is materialized
         )
-        assert calls["saved_tensors"]["model.layers.0.q_proj.lora_B.weight"] is plain
+        assert (
+            calls["saved_tensors"]["model.layers.0.q_proj.linear.lora_B.weight"]
+            is plain
+        )
 
     def test_state_with_only_plain_tensors_passes_through(self, monkeypatch, tmp_path):
         # Arrange — no DTensors at all
@@ -3871,8 +3998,9 @@ class TestSavePeftAdapterForVllmRollout:
         save_peft_adapter_for_vllm_rollout(self._peft_model(), tmp_path, "actor")
 
         # Assert — both plain tensors saved as-is
-        assert calls["saved_tensors"]["model.layers.0.q_proj.lora_A.weight"] is plain_a
-        assert calls["saved_tensors"]["model.layers.0.q_proj.lora_B.weight"] is plain_b
+        saved = calls["saved_tensors"]
+        assert saved["model.layers.0.q_proj.linear.lora_A.weight"] is plain_a
+        assert saved["model.layers.0.q_proj.linear.lora_B.weight"] is plain_b
 
     @pytest.mark.parametrize("wrap_blocks", [False, True], ids=["plain", "wrapped"])
     def test_exports_every_expert_lora_tensor_in_vllm_layout(
@@ -4983,3 +5111,77 @@ class TestPreparePromptHfGenerate:
 
         assert torch.equal(tensors["pixel_values"], pixel_values)
         assert tensors["pixel_values"].device == device
+
+
+class TestApplyVllmCompileCacheEnv:
+    """Compile cache root is per GPU set, under an explicit root when one is set."""
+
+    def test_sets_cache_root_from_sorted_gpu_ids(self, monkeypatch) -> None:
+        monkeypatch.delenv("VLLM_CACHE_ROOT", raising=False)
+
+        root = apply_vllm_compile_cache_env([5, 3])
+
+        expected = str(Path(tempfile.gettempdir()) / "vllm_compile_cache" / "gpu_3_5")
+        assert root == expected
+        assert os.environ["VLLM_CACHE_ROOT"] == root
+
+    def test_reuses_root_on_the_same_gpus(self, monkeypatch) -> None:
+        monkeypatch.delenv("VLLM_CACHE_ROOT", raising=False)
+        first = apply_vllm_compile_cache_env([2])
+        monkeypatch.delenv("VLLM_CACHE_ROOT")
+
+        second = apply_vllm_compile_cache_env([2])
+
+        assert first == second
+
+    def test_separates_roots_on_different_gpus(self, monkeypatch) -> None:
+        monkeypatch.delenv("VLLM_CACHE_ROOT", raising=False)
+        first = apply_vllm_compile_cache_env([2])
+        monkeypatch.delenv("VLLM_CACHE_ROOT")
+
+        second = apply_vllm_compile_cache_env([6])
+
+        assert first != second
+
+    def test_separates_tp_set_from_its_first_gpu(self, monkeypatch) -> None:
+        monkeypatch.delenv("VLLM_CACHE_ROOT", raising=False)
+        single = apply_vllm_compile_cache_env([1])
+        monkeypatch.delenv("VLLM_CACHE_ROOT")
+
+        pair = apply_vllm_compile_cache_env([1, 2])
+
+        assert single != pair
+
+    def test_keys_explicit_cache_root_by_gpu_ids(self, monkeypatch) -> None:
+        monkeypatch.setenv("VLLM_CACHE_ROOT", "/custom/vllm/cache")
+
+        root = apply_vllm_compile_cache_env([5, 3])
+
+        assert root == str(Path("/custom/vllm/cache") / "gpu_3_5")
+        assert os.environ["VLLM_CACHE_ROOT"] == root
+
+    def test_separates_explicit_cache_root_on_different_gpus(self, monkeypatch) -> None:
+        monkeypatch.setenv("VLLM_CACHE_ROOT", "/custom/vllm/cache")
+        first = apply_vllm_compile_cache_env([2, 3])
+        monkeypatch.setenv("VLLM_CACHE_ROOT", "/custom/vllm/cache")
+
+        second = apply_vllm_compile_cache_env([5, 6])
+
+        assert first != second
+
+    def test_repeat_call_on_the_same_gpus_keeps_the_root(self, monkeypatch) -> None:
+        monkeypatch.setenv("VLLM_CACHE_ROOT", "/custom/vllm/cache")
+        first = apply_vllm_compile_cache_env([2, 3])
+
+        second = apply_vllm_compile_cache_env([3, 2])
+
+        assert second == first == str(Path("/custom/vllm/cache") / "gpu_2_3")
+
+    def test_repeat_call_on_other_gpus_moves_to_a_sibling(self, monkeypatch) -> None:
+        monkeypatch.setenv("VLLM_CACHE_ROOT", "/custom/vllm/cache")
+        apply_vllm_compile_cache_env([0])
+
+        second = apply_vllm_compile_cache_env([1])
+
+        assert second == str(Path("/custom/vllm/cache") / "gpu_1")
+        assert os.environ["VLLM_CACHE_ROOT"] == second

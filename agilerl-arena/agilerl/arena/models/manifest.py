@@ -35,7 +35,10 @@ from typing_extensions import Self
 from agilerl.arena.models.algorithms.base import AlgoSpec, LLMAlgorithmSpec
 from agilerl.arena.models.algorithms.grpo import GRPOSpec
 from agilerl.arena.models.algorithms.ppo import PPOSpec
-from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
+from agilerl.arena.models.algorithms.rollout_llm import (
+    RolloutLLMSpec,
+    records_sampling_supports,
+)
 from agilerl.arena.models.env import EnvSpec, LLMEnvSpec
 from agilerl.arena.models.hpo import (
     MultiFrequencySelectionSpec,
@@ -44,11 +47,12 @@ from agilerl.arena.models.hpo import (
     TournamentSelectionSpec,
     no_op_mutation_probabilities,
 )
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.networks import (
     FinetuningNetworkSpec,
     MlpSpec,
     NetworkSpec,
-    default_colocated_vllm_config,
+    default_rollout_vllm_config,
     dump_network_section,
     network_arch_is_resolvable,
     normalize_manifest_network,
@@ -429,6 +433,46 @@ class TrainingManifest(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _check_mutated_sampling_support(self) -> Self:
+        """Reject HPO moving ``temperature`` or ``top_p`` to values rollout cannot score."""
+        if (
+            not isinstance(self.algorithm, RolloutLLMSpec)
+            or self.mutation is None
+            or not self.mutation.rl_hp_selection
+        ):
+            return self
+        accepted = _mutable_names(type(self.algorithm))
+        lowest = {
+            "temperature": self.algorithm.temperature,
+            "top_p": self.algorithm.top_p,
+        }
+        for spelling, bounds in self.mutation.rl_hp_selection.items():
+            field = accepted[spelling]
+            if field in lowest:
+                lowest[field] = min(lowest[field], bounds.min)
+        prefix = "mutation.rl_hp_selection can reach sampling rollout cannot score"
+        # vLLM rejects temperature <= 0 on an engine that records supports.
+        if self.algorithm.top_k > 0 and lowest["temperature"] <= 0:
+            msg = (
+                f"{prefix}: temperature min {lowest['temperature']} must be > 0 "
+                f"with top_k={self.algorithm.top_k}, which records sampling "
+                "supports only at temperature > 0."
+            )
+            raise ValueError(msg)
+        try:
+            records_sampling_supports(
+                lowest["temperature"],
+                self.algorithm.top_k,
+                lowest["top_p"],
+                self.algorithm.min_p,
+                self.algorithm.constrain_answer_pattern,
+            )
+        except ValueError as exc:
+            msg = f"{prefix}: {exc}"
+            raise ValueError(msg) from exc
+        return self
+
+    @model_validator(mode="after")
     def _resolve_selection_brackets(self) -> Self:
         if isinstance(self.selection_strategy, MultiFrequencySelectionSpec):
             self.selection_strategy.resolve_brackets(self.training.pop_size)
@@ -504,12 +548,37 @@ class TrainingManifest(BaseModel):
                 source_set=True,
             )
 
+        # Ray validates with training.rollout_mode dropped, so an async run
+        # starts the same default engine.
         if (
             isinstance(self.algorithm, RolloutLLMSpec)
-            and self.training.rollout_mode == "colocated"
             and self.algorithm.vllm_config is None
         ):
-            self.algorithm.vllm_config = default_colocated_vllm_config()
+            self.algorithm.vllm_config = default_rollout_vllm_config()
+        return self
+
+    @model_validator(mode="after")
+    def _strip_towers_for_text_only_envs(self) -> Self:
+        """Strip a VL model's engine towers when the env never sends images."""
+        if not (
+            isinstance(self.algorithm, RolloutLLMSpec)
+            and isinstance(self.environment, LLMEnvSpec)
+            and self.environment.text_only
+            and self.algorithm.vllm_config is not None
+            and "strip_multimodal_towers"
+            not in self.algorithm.vllm_config.model_fields_set
+        ):
+            return self
+        hub_id = self.algorithm.pretrained_model_name_or_path
+        model = SUPPORTED_MODEL_INFO.get(hub_id) if hub_id is not None else None
+        lora = self.algorithm.lora_config
+        # Tower LoRA trains the towers, so the engine must keep them.
+        if (
+            model is not None
+            and "vision" in model.modalities
+            and not (lora is not None and lora.tower_target_modules)
+        ):
+            self.algorithm.vllm_config.strip_multimodal_towers = True
         return self
 
     @model_validator(mode="after")
@@ -533,6 +602,30 @@ class TrainingManifest(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _check_image_tower_served(self) -> Self:
+        """An env that sends images needs the engine's image tower."""
+        if not (
+            isinstance(self.algorithm, RolloutLLMSpec)
+            and isinstance(self.environment, LLMEnvSpec)
+            and self.algorithm.vllm_config is not None
+        ):
+            return self
+        env = self.environment
+        towers = self.algorithm.vllm_config.strip_multimodal_towers
+        sends_images = (
+            env.modality == "vision" or env.screenshot_field or env.goal_images_field
+        )
+        if sends_images and (
+            towers is True or (isinstance(towers, list) and "image" in towers)
+        ):
+            msg = (
+                "the environment sends images, so the engine needs its image "
+                "tower; set vllm_config.strip_multimodal_towers to false"
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
     def _check_async_rollout_buffer(self) -> Self:
         """Async rollout queues generated groups, so it needs the LLM buffer."""
         if not self.training.async_rollout:
@@ -546,6 +639,22 @@ class TrainingManifest(BaseModel):
             msg = f"Async rollout requires an LLMRolloutBufferSpec, got {got}"
             raise ValueError(msg)
         return self
+
+    @model_validator(mode="after")
+    def _check_async_stop_sequences(self) -> Self:
+        """Async turns generate without detokenizing, so vLLM cannot match stop strings."""
+        if not (
+            self.training.async_rollout
+            and isinstance(self.algorithm, RolloutLLMSpec)
+            and self.algorithm.vllm_config is not None
+            and self.algorithm.vllm_config.stop_sequences
+        ):
+            return self
+        msg = (
+            "vllm_config.stop_sequences is not supported with async rollout; end "
+            "turns with stop tokens or the env's turn protocol."
+        )
+        raise ValueError(msg)
 
     @model_validator(mode="after")
     def _check_prefix_cache_reuse(self) -> Self:

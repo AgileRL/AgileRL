@@ -317,6 +317,49 @@ class TestSolveWithoutAnEngine:
         assert not over.training.fits_with_buffer
 
 
+class TestSolveRebuild:
+    def test_micro_batch_resolved_per_candidate_reaches_the_single_row_top(self, model):
+        # Arrange: the rebuild picks the largest micro-batch that fits, as a
+        # manifest with an omitted micro-batch does.
+        device = DeviceSpec(total_bytes=int(4.5 * GiB))
+        base = RunConfig(
+            model=model,
+            train_device=device,
+            gen_device=device,
+            training=TrainingSettings(
+                algorithm="sft", micro_batch_size=8, trajectories_per_update=8
+            ),
+            generation=GenerationSettings(),
+        )
+
+        def at(length: int, micro: int) -> RunConfig:
+            training = base.training.model_copy(update={"micro_batch_size": micro})
+            return lockstep_max_model_len(
+                base.model_copy(update={"training": training}), length
+            )
+
+        def rebuild(length: int) -> RunConfig:
+            fitting = (
+                micro
+                for micro in (8, 4, 2)
+                if estimate_run(at(length, micro)).training.fits_with_buffer
+            )
+            return at(length, next(fitting, 1))
+
+        # Act
+        held = solve(base, "max_model_len", hi=32768)
+        rebuilt = solve(base, "max_model_len", hi=32768, rebuild=rebuild)
+        over = estimate_run(at(rebuilt.value + formulas.KV_BLOCK_SIZE_DEFAULT, 1))
+
+        # Assert
+        assert held.value == 48
+        assert rebuilt.value == 432
+        assert rebuilt.limited_by == "memory"
+        assert rebuilt.config.training.micro_batch_size == 1
+        assert rebuilt.config.training.max_model_len == 432
+        assert not over.training.fits_with_buffer
+
+
 class TestBareSolveOnAnInferenceConfig:
     def test_bare_solve_caps_on_the_dummy_training_bar(self, model):
         # Arrange
@@ -329,7 +372,7 @@ class TestBareSolveOnAnInferenceConfig:
         dedicated = solve_inference(config, "max_model_len", hi=32768)
 
         # Assert
-        assert bare.value == 9008
+        assert bare.value == 9504
         assert bare.limited_by == "memory"
         assert bare.estimate.training.fits_with_buffer
         assert dedicated.value == 32768

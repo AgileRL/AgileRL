@@ -330,19 +330,28 @@ class TestModelInfoModalitiesProperty:
     def test_defaults_to_text(self) -> None:
         assert ModelInfo(hub_id="org/x").modalities == ("text",)
 
-    def test_other_entries_keep_default(self) -> None:
+    def test_entries_with_a_vision_tower_handle_vision(self) -> None:
         for hub_id, entry in SUPPORTED_MODEL_INFO.items():
-            if hub_id == "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16":
-                continue
+            expected = (
+                ("text", "vision") if "vision_config" in entry.config else ("text",)
+            )
 
-            assert entry.modalities == ("text",), hub_id
+            assert entry.modalities == expected, hub_id
 
-    def test_super_vl_handles_text_and_vision(self) -> None:
-        entry = SUPPORTED_MODEL_INFO[
-            "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16"
-        ]
+    @pytest.mark.parametrize(
+        "hub_id",
+        [
+            "Qwen/Qwen3.5-0.8B",
+            "Qwen/Qwen3.6-35B-A3B",
+            "google/gemma-4-E4B-it",
+            "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
+        ],
+    )
+    def test_vl_entries_handle_text_and_vision(self, hub_id: str) -> None:
+        assert SUPPORTED_MODEL_INFO[hub_id].modalities == ("text", "vision")
 
-        assert entry.modalities == ("text", "vision")
+    def test_text_entries_keep_default(self) -> None:
+        assert SUPPORTED_MODEL_INFO["Qwen/Qwen3-4B"].modalities == ("text",)
 
     def test_text_model_serializes_text_list(self) -> None:
         dumped = SUPPORTED_MODEL_INFO["Qwen/Qwen3-4B"].model_dump(mode="json")

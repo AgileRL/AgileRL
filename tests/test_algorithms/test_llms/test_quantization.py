@@ -400,12 +400,10 @@ class TestJsonSafeValue:
 
 
 class TestRemapPeftLoraKeyForVllm:
-    def test_remaps_clippable_linear_suffix(self):
-        key = "base_model.model.language_model.layers.0.self_attn.q_proj.linear.lora_A.weight"
-        assert (
-            remap_peft_lora_key_for_vllm(key)
-            == "base_model.model.language_model.layers.0.self_attn.q_proj.lora_A.weight"
-        )
+    def test_keeps_clippable_linear_suffix(self):
+        key = "base_model.model.model.vision_tower.encoder.layers.0.self_attn.q_proj.linear.lora_A.weight"
+
+        assert remap_peft_lora_key_for_vllm(key) == key
 
 
 class TestResolveLoraRankCeiling:

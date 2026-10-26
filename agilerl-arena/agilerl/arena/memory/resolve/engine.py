@@ -7,15 +7,12 @@ from __future__ import annotations
 from typing import Literal
 
 from agilerl.arena.memory.estimator import estimate_generation, generation_can_serve
-from agilerl.arena.memory.manifest import generation_settings_from_manifest
-from agilerl.arena.memory.solver import solve
-from agilerl.arena.memory.specs import (
-    DeviceSpec,
-    ModelArch,
-    ModelSpec,
-    RunConfig,
-    WeightVariant,
+from agilerl.arena.memory.manifest import (
+    MANIFEST_WEIGHT_VARIANTS,
+    generation_settings_from_manifest,
 )
+from agilerl.arena.memory.solver import solve
+from agilerl.arena.memory.specs import DeviceSpec, MiB, ModelArch, ModelSpec, RunConfig
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
 from agilerl.arena.models.manifest import TrainingManifest
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
@@ -84,28 +81,26 @@ def resolve_engine_tensor_parallel(
     if not candidates:
         return None
 
-    settings = generation_settings_from_manifest(
-        manifest, tensor_parallel_size=candidates[0][0]
-    )
     counted = info.inspected["num_params"]
     n_params = counted if isinstance(counted, int) else None
-    variants = [WeightVariant()]
-    if settings.weight_variant == "engine":
-        variants.append(WeightVariant(name="engine", stripped_multimodal=True))
     model = ModelSpec(
         model_id=hub_id,
         arch=ModelArch.from_hf_config(info.config),
         n_params=n_params,
-        variants=tuple(variants),
+        variants=MANIFEST_WEIGHT_VARIANTS,
     )
     pinned = "max_num_seqs" in vllm.model_fields_set
+    # The predicted KV pool runs 0.01-0.44 GiB above vLLM 0.32's measured pool
+    # (L4 drift rows; Qwen3.6-35B-A3B on A100 at TP=1 and 2), and vLLM preempts
+    # once demand passes the pool, so a width must clear demand by this much.
+    kv_margin = 512 * MiB
 
     def resident_sequences(width: int, engines: int) -> int:
         trial = generation_settings_from_manifest(manifest, tensor_parallel_size=width)
         try:
             if pinned:
                 breakdown = estimate_generation(model, device, trial)
-                if not generation_can_serve(breakdown):
+                if not generation_can_serve(breakdown, kv_margin):
                     return 0
                 return engines * trial.max_num_seqs
             run = RunConfig(
@@ -114,7 +109,9 @@ def resolve_engine_tensor_parallel(
                 gen_device=device,
                 generation=trial,
             )
-            solved = solve(run, "max_num_seqs", phases=("generation",))
+            solved = solve(
+                run, "max_num_seqs", phases=("generation",), kv_margin_bytes=kv_margin
+            )
         except ValueError:
             # Illegal Mamba TP widths raise; a width that cannot be solved scores 0.
             return 0

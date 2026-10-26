@@ -23,6 +23,9 @@ import torch.distributed as dist
 from torch import nn
 from torch.distributed.tensor import DTensor
 from torch.func import functional_call
+
+# No public API pops the active torch dispatch modes.
+from torch.utils._python_dispatch import _disable_current_modes
 from typing_extensions import Self
 
 from agilerl.distributed.ep_dispatch import (
@@ -349,12 +352,6 @@ ROUTED_COUNTS_SCOPE: ContextVar[RoutedCountsScope | None] = ContextVar(
     "routed_counts_scope", default=None
 )
 
-# Set while a routed EP call copies its counts to host. The recompute replays
-# those counts without the copy, so a checkpoint must not save it.
-COPYING_ROUTED_COUNTS: ContextVar[bool] = ContextVar(
-    "copying_routed_counts", default=False
-)
-
 
 def routed_counts_contexts() -> tuple[RoutedCountsScope, RoutedCountsScope]:
     """``checkpoint`` ``context_fn``: the recompute reuses the forward's routed EP counts.
@@ -382,10 +379,11 @@ def _routed_counts(send: torch.Tensor, exchange: TokenExchange) -> RoutedCounts:
             "Recompute routed tokens differently from the checkpointed forward",
         )
         return recorded
-    received = exchange_expert_counts(send, exchange.ep_group, exchange.ep_degree)
-    copying = COPYING_ROUTED_COUNTS.set(True)
-    send_lists, received_lists = torch.stack((send, received)).tolist()
-    COPYING_ROUTED_COUNTS.reset(copying)
+    # Hidden from dispatch modes: the recompute replays these counts without
+    # the exchange or copy, and selective checkpointing indexes every op call.
+    with _disable_current_modes():
+        received = exchange_expert_counts(send, exchange.ep_group, exchange.ep_degree)
+        send_lists, received_lists = torch.stack((send, received)).tolist()
     counts = RoutedCounts(send, received, send_lists, received_lists)
     if scope is not None:
         scope.calls.append(counts)

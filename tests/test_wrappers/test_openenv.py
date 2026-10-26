@@ -33,6 +33,7 @@ from agilerl.llm_envs import (
     TaskAssigner,
 )
 from agilerl.llm_envs import openenv_server as openenv_server_module
+from agilerl.llm_envs.digit_image import DigitImageEnv
 from agilerl.llm_envs.env_sources import (
     EnvSource,
     is_url,
@@ -185,6 +186,54 @@ class TestRemoteEnvClientInit:
 
 
 class TestRemoteEnvClientReset:
+    @pytest.mark.parametrize("error", [None, ""])
+    def test_returns_the_observation_and_info_when_no_error_is_reported(
+        self, error: str | None
+    ) -> None:
+        # Arrange
+        observation = {"prompt": "Cancel order 42.", "error": error}
+        client = _session_client(reset_observation=observation)
+
+        # Act
+        payload, info = client.reset(row_index=0)
+
+        # Assert
+        assert payload == {"prompt": "Cancel order 42.", "error": error}
+        assert info == {}
+
+    def test_raises_when_the_observation_reports_an_error(self) -> None:
+        # Arrange
+        client = _session_client(
+            reset_observation={"prompt": "", "error": "Scenario 'shop' not found"}
+        )
+
+        # Act / Assert
+        with pytest.raises(
+            RuntimeError,
+            match=(
+                r"^Env reset failed for \{'seed': 7, 'row_index': 3, "
+                r"'evaluation': False\}: Scenario 'shop' not found$"
+            ),
+        ):
+            client.reset(seed=7, row_index=3)
+
+    def test_error_names_a_tasks_row_by_index_without_its_payload(self) -> None:
+        # Arrange
+        client = _session_client(
+            tasks=[{"task": {"goal": "g" * 5000}}],
+            reset_observation={"error": "bad task"},
+        )
+
+        # Act / Assert
+        with pytest.raises(
+            RuntimeError,
+            match=(
+                r"^Env reset failed for \{'seed': None, 'row_index': 0, "
+                r"'evaluation': False\}: bad task$"
+            ),
+        ):
+            client.reset(row_index=0)
+
     def test_rejects_a_row_index_outside_the_tasks(self) -> None:
         client = RemoteEnvClient("http://stub.invalid", tasks=[{"task_id": 0}])
 
@@ -477,13 +526,14 @@ def test_normalize_reset_accepts_prompt_and_image_dict() -> None:
 
 
 def test_openenv_wrapper_reset_forwards_vl_text_and_image() -> None:
-    """``OpenEnvWrapper`` surfaces prefixed prompt text and the image on reset."""
+    """``OpenEnvWrapper`` surfaces prefixed prompt text and a base64 PNG image on reset."""
+    image = Image.new("RGB", (2, 1), (10, 20, 30))
 
     class _VlResetEnv:
         def reset(self, seed: int | None = None) -> tuple[dict[str, object], dict]:
             del seed
             return (
-                {"text": "Question?", "image": "img-bytes"},
+                {"text": "Question?", "image": image},
                 {"system_prompt": "Be brief."},
             )
 
@@ -491,12 +541,62 @@ def test_openenv_wrapper_reset_forwards_vl_text_and_image() -> None:
             return "", 0.0, True, False, {}
 
     obs = OpenEnvWrapper(_VlResetEnv()).reset()
-    expected_prompt, _ = observation_text_and_image(
-        {"text": "Question?", "image": "img-bytes"}
-    )
-    assert obs.prompt == expected_prompt
-    assert obs.image == "img-bytes"
+
+    assert obs.prompt == "<image>\nQuestion?"
+    with Image.open(io.BytesIO(base64.b64decode(obs.image))) as sent:
+        assert sent.getpixel((0, 0)) == (10, 20, 30)
     assert obs.metadata == {"system_prompt": "Be brief."}
+
+
+def test_openenv_wrapper_reset_encodes_each_pil_image_in_a_list() -> None:
+    """PIL images in a reset list become base64 PNG; pixel lists pass through."""
+    image = Image.new("RGB", (2, 1), (10, 20, 30))
+    pixels = [[[40, 50, 60]]]
+
+    class _MultiImageResetEnv:
+        def reset(self) -> tuple[dict[str, object], dict]:
+            return {"text": "Both?", "image": [image, pixels]}, {}
+
+        def step(self, action: str) -> tuple[str, float, bool, bool, dict]:
+            return "", 0.0, True, False, {}
+
+    obs = OpenEnvWrapper(_MultiImageResetEnv()).reset()
+
+    sent, passed = obs.image
+    with Image.open(io.BytesIO(base64.b64decode(sent))) as decoded:
+        assert decoded.getpixel((0, 0)) == (10, 20, 30)
+    assert passed == pixels
+
+
+def test_vl_observation_decodes_each_base64_image_in_a_list() -> None:
+    encoded = []
+    for level in (40, 90):
+        buffer = io.BytesIO()
+        Image.new("RGB", (2, 1), (level, level, level)).save(buffer, format="PNG")
+        encoded.append(base64.b64encode(buffer.getvalue()).decode("ascii"))
+
+    _text, images = observation_text_and_image({"text": "Both?", "image": encoded})
+
+    assert [image.getpixel((0, 0)) for image in images] == [
+        (40, 40, 40),
+        (90, 90, 90),
+    ]
+
+
+def test_server_sends_a_pil_reset_image_the_client_decodes() -> None:
+    """A PIL reset image crosses the JSON wire and reaches the client as the same pixels."""
+    env = DigitImageEnv(image_size=16)
+    expected = env.reset(seed=3)[0]["image"]
+
+    with OpenEnvServer(DigitImageEnv(image_size=16)) as server:
+        client = RemoteEnvClient(base_url=server.base_url)
+        payload, _info = client.reset(seed=3)
+        text, image = observation_text_and_image(payload)
+        client.close()
+
+    assert text == "<image>\nWhat digit is shown? Answer with the digit."
+    assert isinstance(image, Image.Image)
+    np.testing.assert_array_equal(np.asarray(image), np.asarray(expected))
 
 
 def test_normalize_step_rejects_unsupported_tuple_length() -> None:
@@ -692,8 +792,69 @@ def test_port_and_base_url_require_a_running_server() -> None:
 
 
 # --- InProcessEnvClient: drive a local env directly, no HTTP -------------------
+class ErrorObservation(Observation):
+    """Observation with the ``error`` field a failed reset reports."""
+
+    error: str | None = None
+
+
+class ResetErrorEnv(Environment):
+    """OpenEnv ``Environment`` whose reset observation carries ``error``."""
+
+    def __init__(self, error: str | None) -> None:
+        super().__init__()
+        self.error = error
+
+    def reset(
+        self,
+        seed: int | None = None,
+        episode_id: str | None = None,
+        **kwargs: Any,
+    ) -> ErrorObservation:
+        del seed, episode_id, kwargs
+        return ErrorObservation(error=self.error)
+
+    def step(
+        self,
+        action: Any,
+        timeout_s: float | None = None,
+        **kwargs: Any,
+    ) -> ErrorObservation:
+        del action, timeout_s, kwargs
+        return ErrorObservation(done=True)
+
+    @property
+    def state(self) -> State:
+        return State()
+
+
 class TestInProcessEnvClient:
     """In-process env client (no HTTP): folds suffix, routes eval split, forwards close."""
+
+    def test_reset_without_an_error_returns_the_observation(self) -> None:
+        """A reset whose ``error`` is empty hands its fields back."""
+        client = InProcessEnvClient(ResetErrorEnv(None))
+
+        payload, info = client.reset(seed=7, row_index=3)
+
+        assert payload["error"] is None
+        assert info == {}
+
+    def test_reset_error_raises_with_the_task(self) -> None:
+        """A reset observation's ``error`` raises with the seed, row and split."""
+        client = InProcessEnvClient(ResetErrorEnv("task volume missing"))
+
+        with (
+            client.eval_mode(),
+            pytest.raises(
+                RuntimeError,
+                match=(
+                    r"^Env reset failed for \{'seed': 7, 'row_index': 3, "
+                    r"'evaluation': True\}: task volume missing$"
+                ),
+            ),
+        ):
+            client.reset(seed=7, row_index=3)
 
     def test_drives_env_directly(self) -> None:
         """``InProcessEnvClient`` calls the env in-process and hands over its raw fields."""
@@ -910,9 +1071,13 @@ class _StubSession:
         state_error: Exception | None = None,
         step_errors: list[Exception] | None = None,
         reset_errors: list[Exception] | None = None,
+        reset_observation: dict[str, Any] | None = None,
     ) -> None:
         self.reset_calls: list[dict[str, Any]] = []
         self.step_calls: list[Any] = []
+        self._reset_observation = (
+            reset_observation if reset_observation is not None else {"prompt": "prompt"}
+        )
         self._state = state if state is not None else {}
         self._state_error = state_error
         self._step_errors = list(step_errors or [])
@@ -929,7 +1094,9 @@ class _StubSession:
         if self._reset_errors:
             raise self._reset_errors.pop(0)
         self.reset_calls.append(kwargs)
-        return SimpleNamespace(observation="prompt", reward=None, done=False)
+        return SimpleNamespace(
+            observation=self._reset_observation, reward=None, done=False
+        )
 
     async def step(self, action: Any) -> Any:
         self.step_calls.append(action)
@@ -943,9 +1110,11 @@ class _StubSession:
         return self._state
 
 
-def _session_client(**stub_kwargs: Any) -> RemoteEnvClient:
+def _session_client(
+    tasks: list[dict[str, Any]] | None = None, **stub_kwargs: Any
+) -> RemoteEnvClient:
     """A session client whose transport is a :class:`_StubSession` (lazy connect: no I/O)."""
-    client = RemoteEnvClient("http://stub.invalid")
+    client = RemoteEnvClient("http://stub.invalid", tasks=tasks)
     client._session = _StubSession(**stub_kwargs)
     return client
 
@@ -1033,7 +1202,7 @@ def test_session_reset_forwards_eval_and_positive_seed_only() -> None:
     client = _session_client()
     with client.eval_mode():
         prompt, info = client.reset(seed=-2, row_index=3)
-    assert prompt == "prompt"
+    assert prompt == {"prompt": "prompt"}
     assert info == {}
     assert client._session.reset_calls[-1] == {"row_index": 3, "evaluation": True}
 
@@ -1153,7 +1322,7 @@ def test_websocket_error_breaks_the_episode_and_reset_redials() -> None:
     fresh = _StubSession()
     client._build_session = lambda: fresh  # type: ignore[method-assign]
     prompt, _info = client.reset()
-    assert prompt == "prompt"
+    assert prompt == {"prompt": "prompt"}
     assert client._session is fresh
     assert client._redials == 1
 
@@ -1167,7 +1336,7 @@ def test_timeout_breaks_the_episode_and_reset_redials() -> None:
         client.step("go")
     client._build_session = lambda: _StubSession()  # type: ignore[method-assign]
     prompt, _info = client.reset()
-    assert prompt == "prompt"
+    assert prompt == {"prompt": "prompt"}
 
 
 def test_redial_resolves_the_url_provider_again(
@@ -1195,7 +1364,7 @@ def test_redial_resolves_the_url_provider_again(
     with pytest.raises(websockets.exceptions.WebSocketException):
         client.step("go")
     prompt, _info = client.reset()
-    assert prompt == "prompt"
+    assert prompt == {"prompt": "prompt"}
     assert dialled == ["http://host-a:1", "http://host-b:2"]
 
 
@@ -1257,7 +1426,7 @@ class TestRemoteEnvClientResetRedial:
         prompt, _info = client.reset(seed=1)
 
         # Assert
-        assert prompt == "prompt"
+        assert prompt == {"prompt": "prompt"}
         assert client._redials == 2
         assert 0.1 <= sleeps[0] <= 0.7
         assert 0.2 <= sleeps[1] <= 1.4
@@ -1303,7 +1472,7 @@ class TestSessionLoopRun:
             ]
 
         # Assert
-        assert prompts == ["prompt"] * 8
+        assert prompts == [{"prompt": "prompt"}] * 8
         assert loop_threads == ["openenv-sessions"] * 8
 
     def test_errors_propagate_to_the_calling_thread(self) -> None:
@@ -1322,7 +1491,7 @@ def test_state_server_error_propagates() -> None:
     )
     with pytest.raises(RuntimeError, match="UNKNOWN"):
         _ = client.tools
-    assert client.reset()[0] == "prompt"
+    assert client.reset()[0] == {"prompt": "prompt"}
 
 
 # --- timeout pass-through to OpenEnv's client --------------------------------
@@ -2032,7 +2201,7 @@ def test_reset_retries_once_when_the_server_closed_an_idle_session() -> None:
     fresh = _StubSession()
     client._build_session = lambda: fresh  # type: ignore[method-assign]
     prompt, _info = client.reset()
-    assert prompt == "prompt"
+    assert prompt == {"prompt": "prompt"}
     assert client._session is fresh
     assert client._redials == 1
 

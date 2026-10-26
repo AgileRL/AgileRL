@@ -18,10 +18,11 @@ keeps each image's tower output for the rest of the step.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Hashable, Iterator
+from collections.abc import Callable, Hashable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
+from typing import NamedTuple
 
 import torch
 import torch.nn as nn
@@ -48,6 +49,17 @@ DROPOUT_MODULES = (
 CALL_ARG_TYPES = (bool, int, float, str, type(None))
 
 
+class CallKey(NamedTuple):
+    """Non-image arguments of a tower call, which its cache entries share."""
+
+    rows_per_image: int
+    image_shape: tuple[int, ...]
+    image_dtype: torch.dtype
+    args: tuple[Hashable, ...]
+    kwargs: tuple[tuple[str, Hashable], ...]
+    mode: bool | None
+
+
 @dataclass(frozen=True)
 class TowerCall:
     """Output layout of tower calls that share their non-image arguments.
@@ -64,10 +76,17 @@ class VisionFeatureCache:
     """Frozen vision tower outputs of one learn step, one entry per image.
 
     Callers name the images of the next tower calls with :meth:`images`; keys
-    only mean something inside one :meth:`step`. A call whose images all have
-    entries for the same non-image arguments reuses them. Any other call runs
-    the tower and stores each image's slice of every output tensor in host
-    memory.
+    only mean something inside one :meth:`step`. The images are the first
+    positional argument, or ``pixel_values``. They hold one row per key, or
+    an equal run of packed rows per key next to tensor arguments with one
+    equal row per key (a patch grid). Every other tensor argument has one row per
+    key or per image row, and belongs to the image its key names. Output
+    tensors are image-major.
+
+    A call whose images all have entries for the same non-image arguments
+    reuses them. Any other call runs the tower and stores each image's slice
+    of every output tensor in host memory. A call that will reuse entries can
+    take :meth:`stand_in` images, which hold no pixels.
 
     :param mode_dependent: Whether train mode can change the tower output, so
         entries from eval-mode calls are kept apart from train-mode ones.
@@ -75,9 +94,14 @@ class VisionFeatureCache:
 
     def __init__(self, mode_dependent: bool = True) -> None:
         self.mode_dependent = mode_dependent
-        self.entries: dict[tuple[Hashable, int], list[torch.Tensor]] | None = None
-        self.calls: dict[Hashable, TowerCall] = {}
+        self.entries: dict[tuple[CallKey, int], list[torch.Tensor]] | None = None
+        self.calls: dict[CallKey, TowerCall] = {}
         self.keys: list[int] | None = None
+        self.tower: nn.Module | None = None
+        # "run" or "reuse" when ranks agreed on the next tower call.
+        self.agreed: str | None = None
+        # One element per (dtype, device) that every stand-in image aliases.
+        self.placeholders: dict[tuple[torch.dtype, torch.device], torch.Tensor] = {}
 
     @contextmanager
     def step(self) -> Iterator[None]:
@@ -89,6 +113,51 @@ class VisionFeatureCache:
         finally:
             self.entries = None
             self.calls = {}
+            self.agreed = None
+
+    def covers(self) -> bool:
+        """Whether every image the next tower call names has an entry."""
+        return self.keys is not None and self.reuse_dtype(self.keys) is not None
+
+    def reuse_dtype(self, keys: Sequence[int]) -> torch.dtype | None:
+        """:meth:`image_dtype` of ``keys`` in the tower's current mode.
+
+        :param keys: Keys of the images.
+        :return: The dtype a call reusing them takes, or ``None``.
+        """
+        tower = self.tower
+        return None if tower is None else self.image_dtype(keys, tower.training)
+
+    def image_dtype(self, keys: Sequence[int], training: bool) -> torch.dtype | None:
+        """Image dtype of a stored tower call with an entry for every image in ``keys``.
+
+        :param keys: Keys of the images.
+        :param training: Whether the tower runs in train mode.
+        :return: The dtype the tower saw, or ``None`` when no call holds them all.
+        """
+        entries = self.entries
+        if not entries or not keys or self.tower is None:
+            return None
+        mode = training if self.mode_dependent else None
+        for call in self.calls:
+            if call.mode == mode and all((call, key) in entries for key in keys):
+                return call.image_dtype
+        return None
+
+    def stand_in(
+        self, shape: Sequence[int], dtype: torch.dtype, device: str | torch.device
+    ) -> torch.Tensor:
+        """``shape`` images of one shared element, for a tower call that reuses every entry.
+
+        :param shape: Shape of the images the call would take.
+        :param dtype: :meth:`image_dtype` of those images.
+        :param device: Device of the call.
+        :return: A view of one element.
+        """
+        key = (dtype, torch.device(device))
+        if key not in self.placeholders:
+            self.placeholders[key] = torch.zeros((), dtype=dtype, device=device)
+        return self.placeholders[key].expand(*shape)
 
     @contextmanager
     def images(self, keys: torch.Tensor | None) -> Iterator[None]:
@@ -111,57 +180,101 @@ class VisionFeatureCache:
         args: tuple[object, ...],
         kwargs: dict[str, object],
     ) -> object:
-        """Tower output for ``forward(*args, **kwargs)``, from the cache when every image has an entry."""
+        """Tower output for ``forward(*args, **kwargs)``, from the cache when every image has an entry.
+
+        :raises RuntimeError: If ranks agreed to reuse entries this call lacks.
+        """
         entries = self.entries
         keys = self.keys
-        pixel_values = args[0] if args else None
-        if (
-            entries is None
-            or keys is None
-            or not isinstance(pixel_values, torch.Tensor)
-            or pixel_values.shape[0] != len(keys)
+        call = (
+            None
+            if entries is None or not keys
+            else self._call_key(tower, args, kwargs, len(keys))
+        )
+        if entries is not None and keys and call is not None and self.agreed != "run":
+            hit = self._lookup(entries, call, keys)
+            if hit is not None:
+                return hit
+        if self.agreed == "reuse":
+            msg = "Ranks agreed to reuse cached vision features this call lacks"
+            raise RuntimeError(msg)
+        pixels = args[0] if args else kwargs.get("pixel_values")
+        if isinstance(pixels, torch.Tensor) and any(
+            pixels.untyped_storage().data_ptr()
+            == placeholder.untyped_storage().data_ptr()
+            for placeholder in self.placeholders.values()
         ):
-            return forward(*args, **kwargs)
-        call = self._call_key(tower, args, kwargs)
-        if call is None:
-            return forward(*args, **kwargs)
+            msg = "A vision tower call on stand-in images lacks cached features"
+            raise RuntimeError(msg)
+        output = forward(*args, **kwargs)
+        if entries is not None and keys and call is not None:
+            self._store(entries, call, keys, output)
+        return output
+
+    def _lookup(
+        self,
+        entries: dict[tuple[CallKey, int], list[torch.Tensor]],
+        call: CallKey,
+        keys: list[int],
+    ) -> object | None:
+        """The stored output of ``keys`` for ``call``, or ``None`` unless every key has an entry."""
         stored = [entries.get((call, key)) for key in keys]
         hits = [entry for entry in stored if entry is not None]
         layout = self.calls.get(call)
-        if layout is not None and len(hits) == len(keys):
-            return tree_unflatten(
-                [
-                    torch.cat(
-                        [
-                            entry[leaf].to(layout.device, non_blocking=True)
-                            for entry in hits
-                        ]
-                    )
-                    for leaf in range(len(hits[0]))
-                ],
-                layout.spec,
-            )
-        output = forward(*args, **kwargs)
-        self._store(entries, call, keys, output)
-        return output
+        if layout is None or len(hits) != len(keys):
+            return None
+        return tree_unflatten(
+            [
+                torch.cat(
+                    [entry[leaf].to(layout.device, non_blocking=True) for entry in hits]
+                )
+                for leaf in range(len(hits[0]))
+            ],
+            layout.spec,
+        )
 
     def _call_key(
         self,
         tower: nn.Module,
         args: tuple[object, ...],
         kwargs: dict[str, object],
-    ) -> Hashable | None:
-        """Key of a call's non-image arguments, or ``None`` when they cannot key a cache."""
-        extra = (*args[1:], *kwargs.values())
-        if not all(isinstance(value, CALL_ARG_TYPES) for value in extra):
+        images: int,
+    ) -> CallKey | None:
+        """Key of a call's non-image arguments, or ``None`` when its layout cannot key a cache."""
+        if args:
+            pixels, args, extra = args[0], args[1:], kwargs
+        else:
+            pixels = kwargs.get("pixel_values")
+            extra = {
+                name: value for name, value in kwargs.items() if value is not pixels
+            }
+        if not isinstance(pixels, torch.Tensor) or pixels.dim() == 0:
             return None
+        rows = pixels.shape[0]
+        if rows % images or not _keyable_arguments(
+            [*args, *extra.values()], images, rows
+        ):
+            return None
+
+        def describe(value: object) -> Hashable:
+            if not isinstance(value, torch.Tensor):
+                return value
+            return (value.shape[0] == images, tuple(value.shape[1:]), value.dtype)
+
         mode = tower.training if self.mode_dependent else None
-        return (args[1:], tuple(sorted(kwargs.items())), mode)
+        return CallKey(
+            rows // images,
+            tuple(pixels.shape[1:]),
+            pixels.dtype,
+            tuple(describe(value) for value in args),
+            tuple(sorted((name, describe(value)) for name, value in extra.items())),
+            mode,
+        )
 
     def _store(
         self,
-        entries: dict[tuple[Hashable, int], list[torch.Tensor]],
-        call: Hashable,
+        entries: dict[tuple[CallKey, int], list[torch.Tensor]],
+        call: CallKey,
         keys: list[int],
         output: object,
     ) -> None:
@@ -170,7 +283,7 @@ class VisionFeatureCache:
         if not leaves or not all(
             isinstance(leaf, torch.Tensor)
             and leaf.dim() > 0
-            and leaf.shape[0] == len(keys)
+            and leaf.shape[0] % len(keys) == 0
             for leaf in leaves
         ):
             return
@@ -178,8 +291,25 @@ class VisionFeatureCache:
         self.calls[call] = TowerCall(spec, device)
         for image, key in enumerate(keys):
             entries[(call, key)] = [
-                _host_copy(leaf[image : image + 1]) for leaf in leaves
+                _host_copy(leaf.chunk(len(keys))[image]) for leaf in leaves
             ]
+
+
+def _keyable_arguments(values: list[object], images: int, rows: int) -> bool:
+    """Whether a tower call's non-image arguments are the same for every image it holds."""
+    tensors = [value for value in values if isinstance(value, torch.Tensor)]
+    if not all(
+        isinstance(value, (torch.Tensor, *CALL_ARG_TYPES)) for value in values
+    ) or not all(
+        tensor.dim() > 0 and tensor.shape[0] in (images, rows) for tensor in tensors
+    ):
+        return False
+    if rows == images:
+        return True
+    per_image = [tensor for tensor in tensors if tensor.shape[0] == images]
+    return bool(per_image) and all(
+        torch.equal(tensor, tensor[:1].expand_as(tensor)) for tensor in per_image
+    )
 
 
 def _host_copy(tensor: torch.Tensor) -> torch.Tensor:
@@ -237,7 +367,7 @@ def install_frozen_vision_no_grad(
     :param model: Actor (PEFT or value-head wrappers included).
     :type model: nn.Module
     :param cache: Cache the tower reuses its outputs from within a learn step.
-        Its ``mode_dependent`` flag is set from the tower.
+        Its ``mode_dependent`` flag and ``tower`` are set from the tower.
     :type cache: VisionFeatureCache
     :return: Module path of the tower that runs without autograd, or ``None``.
     :rtype: str | None
@@ -264,6 +394,7 @@ def install_frozen_vision_no_grad(
     )
     if tower_cache is not None:
         tower_cache.mode_dependent = _output_depends_on_mode(tower)
+        tower_cache.tower = tower
     forward = tower.forward
     if isinstance(forward, partial) and forward.func is _no_grad_forward:
         if forward.args[2] is tower_cache:

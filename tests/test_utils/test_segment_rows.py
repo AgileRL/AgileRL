@@ -68,6 +68,7 @@ def split_small_batch(**overrides: Any) -> SegmentRows:
         sampling_logps=batch["sampling_logps"],
         pixel_values=batch["pixel_values"],
         pixel_image_counts=batch["pixel_image_counts"],
+        sampling_supports=batch.get("sampling_supports"),
     )
 
 
@@ -139,6 +140,24 @@ class TestSplitEpisodeSegments:
             pytest.approx([-0.1]),
             pytest.approx([-0.2]),
             pytest.approx([-0.3, -0.4, -0.5]),
+        ]
+
+    def test_sampling_supports_split_like_the_logps(self) -> None:
+        # Arrange: one (n, K) support row per action token.
+        supports = [
+            torch.tensor([[2, 4], [5, -1]], dtype=torch.int32),
+            torch.tensor([[8, -1], [1, 3], [2, -1]], dtype=torch.int32),
+        ]
+
+        # Act
+        rows = split_small_batch(sampling_supports=supports)
+
+        # Assert
+        assert rows.sampling_supports is not None
+        assert [row.tolist() for row in rows.sampling_supports] == [
+            [[2, 4]],
+            [[5, -1]],
+            [[8, -1], [1, 3], [2, -1]],
         ]
 
     def test_short_sampling_logps_leave_segment_rows_without_logps(self) -> None:
@@ -502,6 +521,23 @@ class TestPadSegmentRows:
             padded.token_ids[:3, 6:], torch.full((3, 2), PAD, dtype=torch.long)
         )
         assert not padded.action_masks[:, 5:].any()
+
+    def test_padding_rows_carry_empty_sampling_supports(self) -> None:
+        supports = [
+            torch.tensor([[2, 4], [5, -1]], dtype=torch.int32),
+            torch.tensor([[8, -1], [1, 3], [2, -1]], dtype=torch.int32),
+        ]
+        rows = split_small_text_batch(sampling_supports=supports)
+
+        padded = pad_segment_rows(rows, num_rows=5, width=6, pad_token_id=PAD)
+
+        assert padded.sampling_supports is not None
+        assert [row.tolist() for row in padded.sampling_supports[:3]] == [
+            [[2, 4]],
+            [[5, -1]],
+            [[8, -1], [1, 3], [2, -1]],
+        ]
+        assert [row.shape[0] for row in padded.sampling_supports[3:]] == [0, 0]
 
     def test_missing_sampling_logps_stay_missing(self) -> None:
         rows = split_small_text_batch(sampling_logps=None)

@@ -12,8 +12,10 @@ from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 
 from agilerl import architectures
 from agilerl.architectures.catalog import FAMILY_RUNTIME_CONFIGS
+from agilerl.architectures.gemma4 import install_gemma4_vision_patches
 from agilerl.architectures.nemotron_h.mamba import install_mamba_patches
 from agilerl.architectures.qwen3_5.packed import install_qwen_gdn_patches
+from agilerl.architectures.qwen3_5.vision import install_qwen3_5_vl_patches
 from agilerl.architectures.runtime import (
     MambaPatchConfig,
     ModelRuntimeConfig,
@@ -22,7 +24,7 @@ from agilerl.architectures.runtime import (
 
 
 def recording_install(sink: list[object]):
-    def install(patch: PatchRuntimeConfig, *, model=None):
+    def install(patch: PatchRuntimeConfig, model=None):
         sink.append((patch, model))
 
     return install
@@ -138,12 +140,20 @@ class TestInstallFamilyPatches:
         assert patch.install is install_mamba_patches
         assert patch.mamba is not None
 
-    def test_qwen_catalog_install_is_gdn_packed_patches(self) -> None:
-        patch = FAMILY_RUNTIME_CONFIGS["qwen3_5_moe"].patch
-        assert patch.install is install_qwen_gdn_patches
-        assert (
-            FAMILY_RUNTIME_CONFIGS["qwen3_5"].patch.install is install_qwen_gdn_patches
-        )
+    def test_qwen_vl_catalog_install_adds_vision_rows(self) -> None:
+        for model_type in ("qwen3_5", "qwen3_5_moe"):
+            patch = FAMILY_RUNTIME_CONFIGS[model_type].patch
+            assert patch.install is install_qwen3_5_vl_patches, model_type
+
+    def test_gemma4_vl_catalog_install_adds_vision_rows(self) -> None:
+        patch = FAMILY_RUNTIME_CONFIGS["gemma4"].patch
+        assert patch.install is install_gemma4_vision_patches
+        assert FAMILY_RUNTIME_CONFIGS["gemma4_text"].patch.install is None
+
+    def test_qwen_text_catalog_install_is_gdn_packed_patches(self) -> None:
+        for model_type in ("qwen3_5_text", "qwen3_5_moe_text"):
+            patch = FAMILY_RUNTIME_CONFIGS[model_type].patch
+            assert patch.install is install_qwen_gdn_patches, model_type
 
 
 class TestFamilyRuntime:

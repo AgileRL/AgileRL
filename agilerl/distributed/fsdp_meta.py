@@ -23,6 +23,10 @@ class ModelWithTiedWeightKeys(Protocol):
     all_tied_weights_keys: Mapping[str, str]
 
 
+class PerLayerTypeConfig(Protocol):
+    per_layer_config: Mapping[str, object]
+
+
 def restore_after_to_empty(model: nn.Module) -> None:
     """Re-tie input/output embeddings, which ``to_empty`` unties.
 
@@ -97,20 +101,14 @@ def _init_per_layer_type_rope(
     module: nn.Module,
     layer_fns: Mapping[str, Callable[..., tuple[torch.Tensor, object]]],
 ) -> None:
-    rope_types = getattr(module, "rope_type", {})
+    # Head dims differ by layer type; each type's config carries its own.
+    layer_configs = cast("PerLayerTypeConfig", module.config).per_layer_config
     for layer_type, rope_fn in layer_fns.items():
-        kwargs: dict[str, object] = {"layer_type": layer_type}
-        if (
-            layer_type == "full_attention"
-            and isinstance(rope_types, dict)
-            and rope_types.get(layer_type) == "proportional"
-        ):
-            kwargs["head_dim_key"] = "global_head_dim"
         inv_freq_buf = cast("torch.Tensor", getattr(module, f"{layer_type}_inv_freq"))
         original_buf = cast(
             "torch.Tensor", getattr(module, f"{layer_type}_original_inv_freq")
         )
-        inv_freq, _ = rope_fn(module.config, **kwargs)
+        inv_freq, _ = rope_fn(layer_configs[layer_type], layer_type=layer_type)
         inv_freq = inv_freq.to(device=inv_freq_buf.device, dtype=inv_freq_buf.dtype)
         inv_freq_buf.copy_(inv_freq)
         original_buf.copy_(inv_freq)

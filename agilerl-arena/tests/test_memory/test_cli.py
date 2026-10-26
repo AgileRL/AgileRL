@@ -36,6 +36,7 @@ from agilerl.arena.memory.cli import (
 )
 from agilerl.arena.memory.specs import ModelArch
 from agilerl.arena.models.manifest import TrainingManifest
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 
 
 def run_solve(field: str, manifest_path: str | None = None, **kwargs: Any) -> int:
@@ -103,6 +104,71 @@ NO_TIER_FITS = {
         },
     },
 }
+
+
+#: Qwen3.6-35B-A3B on one 8-GPU node: four trainers, ``auto`` engines, width unset.
+UNSET_WIDTH_MOE = {
+    "algorithm": {
+        "name": "CISPO",
+        "group_size": 8,
+        "batch_size": 16,
+        "fsdp": True,
+        "use_liger_loss": True,
+        "use_separate_reference_adapter": True,
+        "vllm_config": {"gpu_memory_utilization": 0.95, "max_num_seqs": 16},
+    },
+    "environment": {
+        "env_type": "rollout",
+        "name": "AgentWorldModel",
+        "env_url": "http://env.invalid:8000",
+        "max_turns": 1,
+    },
+    "network": {
+        "pretrained_model_name_or_path": "Qwen/Qwen3.6-35B-A3B",
+        "max_context_length": 4096,
+        "lora_config": {
+            "lora_r": 1,
+            "lora_alpha": 32,
+            "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj"],
+        },
+    },
+    "training": {
+        "max_steps": 200,
+        "rollout_mode": "async",
+        "rollout_engines_per_agent": "auto",
+        "rollout_batch_size": 16,
+        "training_gpus_per_agent": 4,
+    },
+    "replay_buffer": {"kind": "llm", "name": "async_llm", "memory_size": 256},
+}
+
+#: SFT trains without a rollout engine.
+SFT_MANIFEST = {
+    "algorithm": {"name": "SFT", "micro_batch_size_per_gpu": 1},
+    "environment": {"dataset": "openai/gsm8k"},
+    "network": {
+        "pretrained_model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
+        "max_context_length": 512,
+    },
+    "training": {"max_steps": 100},
+}
+
+
+@pytest.fixture
+def moe_config_path(tmp_path):
+    path = tmp_path / "qwen36" / "config.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps(SUPPORTED_MODEL_INFO["Qwen/Qwen3.6-35B-A3B"].config))
+    return str(path)
+
+
+def write_manifest(tmp_path, doc, name, max_context_length=None):
+    doc = copy.deepcopy(doc)
+    if max_context_length is not None:
+        doc["network"]["max_context_length"] = max_context_length
+    path = tmp_path / name
+    path.write_text(yaml.safe_dump(doc))
+    return str(path)
 
 
 @pytest.fixture
@@ -362,18 +428,82 @@ class TestMain:
     def test_gpu_name_resolves_the_device(self, manifest_path, capsys):
         code = main(manifest_path, config_path=TINY_CONFIG, gpu="NVIDIA L4")
         assert code == EXIT_OK
-        assert "24 GiB card" in capsys.readouterr().out
+        assert "22 GiB card" in capsys.readouterr().out
 
-    def test_unset_width_on_a_named_gpu_sizes_as_one(self, tmp_path, capsys):
-        doc = copy.deepcopy(MANIFEST)
-        del doc["algorithm"]["vllm_config"]["tensor_parallel_size"]
-        path = tmp_path / "unset.yaml"
-        path.write_text(yaml.safe_dump(doc))
+    @pytest.mark.parametrize(("max_context_length", "width"), [(4096, 1), (32768, 2)])
+    def test_unset_width_is_the_width_the_run_resolves_on_the_node(
+        self, tmp_path, moe_config_path, capsys, max_context_length, width
+    ):
+        # Arrange: TP=1 cannot hold 16 sequences of 32768 tokens with margin.
+        path = write_manifest(tmp_path, UNSET_WIDTH_MOE, "moe.yaml", max_context_length)
 
-        code = main(str(path), config_path=TINY_CONFIG, gpu="NVIDIA L4")
+        # Act
+        code = main(
+            path,
+            config_path=moe_config_path,
+            gpu="A100-80GB",
+            num_gpus=8,
+            as_json=True,
+        )
+
+        # Assert
+        payload = json.loads(capsys.readouterr().out)
+        assert code == EXIT_OK
+        assert payload["engine"] == {"tensor_parallel_size": width, "max_num_seqs": 16}
+
+    def test_unset_width_without_num_gpus_is_a_usage_error(self, tmp_path, capsys):
+        path = write_manifest(tmp_path, UNSET_WIDTH_MOE, "moe.yaml")
+
+        code = main(path, config_path=TINY_CONFIG, gpu="A100-80GB")
+
+        assert code == EXIT_USAGE
+        assert "tensor_parallel_size is unset" in capsys.readouterr().err
+
+    def test_engineless_manifest_reports_no_engine(self, tmp_path, capsys):
+        path = write_manifest(tmp_path, SFT_MANIFEST, "sft.yaml")
+
+        code = main(path, config_path=TINY_CONFIG, gpu="NVIDIA L4", as_json=True)
 
         assert code == EXIT_OK
-        assert "24 GiB card" in capsys.readouterr().out
+        assert json.loads(capsys.readouterr().out)["engine"] is None
+
+    def test_auto_engines_split_an_omitted_max_num_seqs(self, tmp_path, capsys):
+        # Arrange: 8 prompts of group 4 over the four engines 5 GPUs leave.
+        doc = copy.deepcopy(MANIFEST)
+        doc["training"].update(rollout_engines_per_agent="auto", rollout_batch_size=8)
+        path = write_manifest(tmp_path, doc, "auto.yaml")
+
+        # Act
+        code = main(
+            path, config_path=TINY_CONFIG, gpu="NVIDIA L4", num_gpus=5, as_json=True
+        )
+
+        # Assert
+        payload = json.loads(capsys.readouterr().out)
+        assert code == EXIT_OK
+        assert payload["engine"] == {"tensor_parallel_size": 1, "max_num_seqs": 2 * 4}
+
+    def test_auto_engines_with_omitted_max_num_seqs_need_num_gpus(
+        self, tmp_path, capsys
+    ):
+        doc = copy.deepcopy(MANIFEST)
+        doc["training"]["rollout_engines_per_agent"] = "auto"
+        path = write_manifest(tmp_path, doc, "auto.yaml")
+
+        code = main(path, config_path=TINY_CONFIG, gpu="NVIDIA L4")
+
+        assert code == EXIT_USAGE
+        assert "max_num_seqs is unset with auto rollout engines" in (
+            capsys.readouterr().err
+        )
+
+    def test_num_gpus_too_few_for_the_layout_is_a_usage_error(
+        self, manifest_path, capsys
+    ):
+        code = main(manifest_path, config_path=TINY_CONFIG, gpu="NVIDIA L4", num_gpus=1)
+
+        assert code == EXIT_USAGE
+        assert "1 GPUs, the job needs 2" in capsys.readouterr().err
 
     def test_device_gb_overrides_the_named_gpu(self, manifest_path, capsys):
         code = main(
@@ -696,21 +826,103 @@ class TestSolveMain:
         assert "Training" in out
         assert "Generation" in out
 
-    def test_unset_width_from_a_manifest_sizes_as_one(self, tmp_path, capsys):
-        doc = copy.deepcopy(MANIFEST)
-        del doc["algorithm"]["vllm_config"]["tensor_parallel_size"]
-        path = tmp_path / "unset.yaml"
-        path.write_text(yaml.safe_dump(doc))
+    def test_unset_width_is_resolved_at_each_candidate_context(
+        self, tmp_path, moe_config_path, capsys
+    ):
+        # Arrange
+        path = write_manifest(tmp_path, UNSET_WIDTH_MOE, "moe.yaml")
 
+        # Act
+        code = run_solve(
+            "max_model_len",
+            path,
+            gpu="A100-80GB",
+            num_gpus=8,
+            config_path=moe_config_path,
+            as_json=True,
+        )
+        payload = json.loads(capsys.readouterr().out)
+        verdicts = []
+        for context in (payload["value"], payload["value"] + 16):
+            submitted = write_manifest(
+                tmp_path, UNSET_WIDTH_MOE, f"at-{context}.yaml", context
+            )
+            verdict = main(
+                submitted,
+                config_path=moe_config_path,
+                gpu="A100-80GB",
+                num_gpus=8,
+                as_json=True,
+            )
+            engine = json.loads(capsys.readouterr().out)["engine"]
+            verdicts.append((verdict, engine["tensor_parallel_size"]))
+
+        # Assert: the cutoff is the run's at TP=2, past the TP=1 KV limit.
+        assert code == EXIT_OK
+        assert payload["limited_by"] == "memory"
+        assert payload["engine"]["tensor_parallel_size"] == 2
+        assert payload["value"] > 32768
+        assert verdicts == [(EXIT_OK, 2), (EXIT_OVER_BUDGET, 2)]
+
+    def test_unset_width_without_num_gpus_is_a_usage_error(self, tmp_path, capsys):
+        path = write_manifest(tmp_path, UNSET_WIDTH_MOE, "moe.yaml")
+
+        code = run_solve(
+            "max_model_len", path, gpu="A100-80GB", config_path=TINY_CONFIG
+        )
+
+        assert code == EXIT_USAGE
+        assert "pass --num-gpus" in capsys.readouterr().err
+
+    def test_inference_with_num_gpus_is_a_usage_error(self, capsys):
+        code = run_solve(
+            "max_model_len",
+            inference=True,
+            gpu="NVIDIA L4",
+            num_gpus=2,
+            model_id="tiny",
+            config_path=TINY_CONFIG,
+        )
+
+        assert code == EXIT_USAGE
+        assert "drop --num-gpus" in capsys.readouterr().err
+
+    def test_omitted_micro_batch_is_resolved_at_each_candidate_context(
+        self, tmp_path, capsys
+    ):
+        # Arrange: 32 rows a rank resolve to one 32-row forward at 512 tokens.
+        doc = copy.deepcopy(MANIFEST)
+        del doc["algorithm"]["micro_batch_size_per_gpu"]
+        doc["algorithm"]["batch_size"] = 8
+        path = tmp_path / "omitted.yaml"
+        path.write_text(yaml.safe_dump(doc))
+        config_path = tmp_path / "config.json"
+        config_path.write_text(
+            json.dumps(SUPPORTED_MODEL_INFO["Qwen/Qwen2.5-0.5B-Instruct"].config)
+        )
+
+        # Act
         code = run_solve(
             "max_model_len",
             str(path),
             gpu="NVIDIA L4",
-            config_path=TINY_CONFIG,
+            config_path=str(config_path),
+            as_json=True,
+        )
+        payload = json.loads(capsys.readouterr().out)
+        submitted = copy.deepcopy(doc)
+        submitted["network"]["max_context_length"] = payload["value"]
+        submitted_path = tmp_path / "submitted.yaml"
+        submitted_path.write_text(yaml.safe_dump(submitted))
+        estimate_code = main(
+            str(submitted_path), config_path=str(config_path), gpu="NVIDIA L4"
         )
 
+        # Assert: the RoPE cap, not the 3264 a 32-row forward allows.
         assert code == EXIT_OK
-        assert "Solved max_model_len" in capsys.readouterr().out
+        assert payload["value"] == 32768
+        assert payload["limited_by"] == "bound"
+        assert estimate_code == EXIT_OK
 
     def test_solves_max_num_seqs_from_a_manifest(self, manifest_path, capsys):
         # Act
@@ -756,8 +968,8 @@ class TestSolveMain:
             kv = next(c for c in bar["components"] if c["key"] == "kv_cache")
             return kv["detail"]["worst_case_demand"]
 
-        assert total(plain_payload["training"]) == 1842925488
-        assert total(overridden_payload["training"]) == 1844349913
+        assert total(plain_payload["training"]) == 1678691873
+        assert total(overridden_payload["training"]) == 1680116298
         # The generation bar fills the utilization budget at either context.
         assert kv_demand(overridden_payload["generation"]) == 8 * kv_demand(
             plain_payload["generation"]
@@ -1061,7 +1273,8 @@ class TestMainResourceTier:
         assert code == EXIT_OK
         assert "Cheapest resource tier that fits: l4-2x" in out
 
-    def test_unset_width_that_cannot_be_resolved_fails_the_tier(self, tmp_path, capsys):
+    def test_unset_width_on_a_tier_without_room_for_an_engine(self, tmp_path, capsys):
+        # Arrange: the run starts a width-1 engine, which one GPU cannot host.
         doc = copy.deepcopy(MANIFEST)
         del doc["algorithm"]["vllm_config"]["tensor_parallel_size"]
         path = tmp_path / "unset.yaml"
@@ -1075,11 +1288,19 @@ class TestMainResourceTier:
             }
         ]
 
+        # Act
         code = main(str(path), tiers=tiers, config_path=TINY_CONFIG, no_color=True)
 
+        # Assert
         out = capsys.readouterr().out
         assert code == EXIT_OVER_BUDGET
-        assert "l4-1x: could not resolve tensor_parallel_size" in out
+        assert "l4-1x: 1 GPUs, the job needs 2" in out
+
+    def test_num_gpus_with_a_tier_search_is_a_usage_error(self, manifest_path, capsys):
+        code = main(manifest_path, tiers=TIERS, config_path=TINY_CONFIG, num_gpus=2)
+
+        assert code == EXIT_USAGE
+        assert "--num-gpus needs --gpu or --device-gb" in capsys.readouterr().err
 
     def test_tensor_parallel_engine_needs_a_gpu_per_rank(self, tmp_path, capsys):
         doc = copy.deepcopy(MANIFEST)

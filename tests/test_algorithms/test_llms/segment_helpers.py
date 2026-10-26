@@ -72,6 +72,24 @@ def episode_sampling_logps(pad_token_id: int) -> list[torch.Tensor]:
     ]
 
 
+def episode_sampling_supports(pad_token_id: int, width: int = 3) -> list[torch.Tensor]:
+    """One sampling support per action token of each episode: the token and its next ids.
+
+    ``width == 1`` forces every token. Otherwise every third token is forced and
+    the rest are padded with ``-1`` to ``width``.
+    """
+    ids, mask = episode_batch(pad_token_id)
+    supports = []
+    for row_ids, row_mask in zip(ids, mask, strict=True):
+        targets = row_ids[1:][row_mask]
+        row = torch.stack(
+            [(targets + offset) % pad_token_id for offset in range(width)], dim=1
+        ).to(torch.int32)
+        row[::3, 1:] = -1
+        supports.append(row)
+    return supports
+
+
 def action_token_policy_loss(
     policy_hidden: torch.Tensor,
     _head_w: torch.Tensor,

@@ -9,6 +9,7 @@ engine is underfilled), so plain bisection can miss.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -156,6 +157,8 @@ def solve(
     *,
     hi: int | None = None,
     phases: tuple[PhaseName, ...] | None = None,
+    kv_margin_bytes: int = 0,
+    rebuild: Callable[[int], RunConfig] | None = None,
 ) -> SolveResult:
     """Largest value of ``field`` at which ``config`` still fits.
 
@@ -164,6 +167,10 @@ def solve(
 
     :param phases: Phases to check; defaults to the phases ``field`` moves.
         Dedicated inference passes ``("generation",)``.
+    :param kv_margin_bytes: KV pool bytes worst-case demand must leave free.
+    :param rebuild: Config at a candidate value, for settings resolved from
+        it (a manifest's omitted micro-batch or engine width). ``None`` holds
+        them at ``config``.
     :raises CannotSolve: No value fits; a ``ValueError`` subclass.
     """
     if field not in SOLVABLE_FIELDS:
@@ -178,18 +185,23 @@ def solve(
     checked = phases if phases is not None else _default_phases(config, spec)
 
     aligned_hi = _align_down(bound, spec.align)
+
+    def candidate(value: int) -> RunConfig:
+        base = config if rebuild is None else rebuild(value)
+        return _apply(base, spec, value)
+
     # Generation fits() has one valley, so scan to the first fit, then bisect.
-    found = _first_fit(config, spec, checked, aligned_hi)
+    found = _first_fit(candidate, spec, checked, aligned_hi, kv_margin_bytes)
     if found is None:
         msg = (
             f"no {field} value up to {bound} fits on this device; "
             "the model is larger than the card at the other settings given."
         )
         raise CannotSolve(msg)
-    first, first_estimate = found
+    first, first_config, first_estimate = found
 
-    solved = _apply(config, spec, aligned_hi)
-    ok, estimate = _fits(solved, spec, checked)
+    solved = candidate(aligned_hi)
+    ok, estimate = _fits(solved, spec, checked, kv_margin_bytes)
     if ok:
         return SolveResult(
             field=field,
@@ -201,14 +213,14 @@ def solve(
             unchecked_over_budget=_unchecked(estimate, checked),
         )
 
-    best, best_estimate = first, first_estimate
+    best, best_config, best_estimate = first, first_config, first_estimate
     low, high = first, aligned_hi
     while low <= high:
         mid = _align_down((low + high) // 2, spec.align)
-        candidate = _apply(config, spec, mid)
-        ok, estimate = _fits(candidate, spec, checked)
+        trial = candidate(mid)
+        ok, estimate = _fits(trial, spec, checked, kv_margin_bytes)
         if ok:
-            best, best_estimate = mid, estimate
+            best, best_config, best_estimate = mid, trial, estimate
             low = mid + spec.align
         else:
             high = mid - spec.align
@@ -218,7 +230,7 @@ def solve(
         value=best,
         limited_by="memory",
         bound=bound,
-        config=_apply(config, spec, best),
+        config=best_config,
         estimate=best_estimate,
         unchecked_over_budget=_unchecked(best_estimate, checked),
     )
@@ -253,18 +265,19 @@ def _apply(config: RunConfig, spec: FieldSpec, value: int) -> RunConfig:
 
 
 def _first_fit(
-    config: RunConfig,
+    candidate: Callable[[int], RunConfig],
     spec: FieldSpec,
     phases: tuple[PhaseName, ...],
     aligned_hi: int,
-) -> tuple[int, RunEstimate] | None:
+    kv_margin_bytes: int,
+) -> tuple[int, RunConfig, RunEstimate] | None:
     """Lowest fitting value, scanning up from the minimum in align steps."""
     value = spec.lo
     while value <= aligned_hi:
-        candidate = _apply(config, spec, value)
-        ok, estimate = _fits(candidate, spec, phases)
+        trial = candidate(value)
+        ok, estimate = _fits(trial, spec, phases, kv_margin_bytes)
         if ok:
-            return value, estimate
+            return value, trial, estimate
         value += spec.align
     return None
 
@@ -280,13 +293,16 @@ def _unchecked(
 
 
 def _fits(
-    config: RunConfig, spec: FieldSpec, phases: tuple[PhaseName, ...]
+    config: RunConfig,
+    spec: FieldSpec,
+    phases: tuple[PhaseName, ...],
+    kv_margin_bytes: int,
 ) -> tuple[bool, RunEstimate]:
     estimate = estimate_run(config)
     for name in phases:
         breakdown = estimate.generation if name == "generation" else estimate.training
         if spec.require_kv_headroom and name == "generation":
-            if not generation_can_serve(breakdown):
+            if not generation_can_serve(breakdown, kv_margin_bytes):
                 return False, estimate
         elif not breakdown.fits_with_buffer:
             return False, estimate

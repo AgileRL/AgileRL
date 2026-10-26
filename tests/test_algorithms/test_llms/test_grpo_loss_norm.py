@@ -101,7 +101,10 @@ class _FakeFusedKernel:
         """
         cls.last_num_items = num_items_in_batch
         cls.last_loss_type = loss_type
-        logits = (_input.squeeze(1) @ weight.t()) / temperature
+        logits = _input.squeeze(1) @ weight.t()
+        if bias is not None:
+            logits = logits + bias
+        logits = logits / temperature
         logps = torch.log_softmax(logits, dim=-1).gather(
             1,
             selected_token_ids.reshape(-1, 1),
@@ -203,6 +206,7 @@ class _Stub:
         self.off_policy_sequence_mask_threshold = None
         self.use_bias_correction_kl = False
         self.kl_clamp = 10.0
+        self.logit_bias: dict[int, float] | None = None
         self.activation_offload = activation_offload
         self.gradient_accumulation_steps = accumulation_steps
         self._window_action_tokens = window_tokens
@@ -221,6 +225,7 @@ class _Stub:
     _gradient_forward_inputs = GRPO._gradient_forward_inputs
     _liger_loss = GRPO._liger_loss
     _log_importance_weights = GRPO._log_importance_weights
+    _logit_bias_vector = GRPO._logit_bias_vector
     _masks_off_policy_tokens = GRPO._masks_off_policy_tokens
     _logprobs_from_hidden_fused = staticmethod(GRPO._logprobs_from_hidden_fused)
     _record_global_window_action_tokens = GRPO._record_global_window_action_tokens
@@ -1009,6 +1014,43 @@ class TestFusedKernelScoredPositions:
             implicit.lm_head.weight.grad, explicit.lm_head.weight.grad, atol=1e-6
         )
         assert torch.allclose(implicit_log_probs, explicit_log_probs, atol=1e-6)
+
+    def test_logit_bias_reaches_the_loss_and_the_log_probs(
+        self,
+        fused_kernel: type[_FakeFusedKernel],
+    ) -> None:
+        # Arrange
+        width = 16
+        hidden, batch_ids, mask = _fused_inputs([5, 9], width, seed=37)
+        advantages = torch.tensor([[0.4], [-0.9]])
+        algo = _Stub(loss_norm="micro_batch", loss_type="cispo")
+        algo.hidden = hidden
+        algo.logit_bias = {1: -100.0, 3: 2.0}
+        logit_bias = torch.zeros(VOCAB)
+        logit_bias[[1, 3]] = torch.tensor([-100.0, 2.0])
+        logits = algo.lm_head(hidden[:, :width]) + logit_bias
+        log_probs = (
+            torch.log_softmax(logits, dim=-1)
+            .gather(2, batch_ids[:, 1:].unsqueeze(-1))[..., 0]
+            .detach()
+        )
+        spread = torch.linspace(0.0, 0.1, steps=log_probs.numel()).reshape(
+            log_probs.shape
+        )
+        old_log_probs = log_probs - spread
+
+        # Act
+        loss, _, _, fused_log_probs = algo._liger_loss(
+            batch_ids, mask, advantages, old_log_probs, None
+        )
+
+        # Assert
+        ratio = torch.exp(log_probs - old_log_probs)
+        per_token = -(ratio.clamp(max=CLIP_MAX) * advantages * log_probs)
+        expected = _micro_batch_reduce(per_token, mask).mean()
+        keep = mask.bool()
+        assert torch.allclose(loss, expected, atol=1e-6)
+        assert torch.allclose(fused_log_probs[keep], log_probs[keep], atol=1e-5)
 
 
 class TestLigerNormalizerWorldSize:

@@ -18,6 +18,7 @@ from agilerl.components.llm_rollout_data import (
     collate_rollout_groups,
     validate_episode_segments,
 )
+from agilerl.rollouts.on_policy import collate_llm_rollouts
 
 
 def make_trajectory(seq_len, n_action=None, max_turns=2, with_logps=False):
@@ -268,6 +269,25 @@ class TestSyncTrainerWiring:
         assert batch.sampling_logps is not None
         assert batch.sampling_logps[0] is logps[0]
         assert batch.sampling_logps[1] is None
+
+    def test_sampling_supports_threaded_through_batch(self):
+        cids, masks, turns, rewards = self._make_rollout(2, 1, 2, random.Random(6))
+        supports = [None, torch.tensor([[4, 5], [6, -1]], dtype=torch.int32)]
+
+        batch = collate_llm_rollouts(
+            cids, masks, turns, rewards, group_size=1, all_sampling_supports=supports
+        )
+
+        assert batch.sampling_supports is not None
+        assert batch.sampling_supports[0] is None
+        assert batch.sampling_supports[1] is supports[1]
+
+    def test_sampling_supports_none_when_absent(self):
+        cids, masks, turns, rewards = self._make_rollout(2, 1, 2, random.Random(6))
+
+        batch = collate_llm_rollouts(cids, masks, turns, rewards, group_size=1)
+
+        assert batch.sampling_supports is None
 
     def test_pixel_values_threaded_through_batch(self):
         from agilerl.rollouts.on_policy import collate_llm_rollouts

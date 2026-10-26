@@ -18,11 +18,7 @@ from torch.utils.checkpoint import CheckpointPolicy, checkpoint
 from transformers import NemotronHConfig, NemotronHForCausalLM
 
 from agilerl.distributed import FSDPConfig, init_distributed
-from agilerl.distributed.ep_forward import (
-    COPYING_ROUTED_COUNTS,
-    TokenExchange,
-    _routed_counts,
-)
+from agilerl.distributed.ep_forward import TokenExchange, _routed_counts
 from agilerl.distributed.fsdp import materialize_fsdp2_from_cpu_state
 from agilerl.distributed.fsdp_blocks import (
     _block_checkpoint_contexts,
@@ -122,18 +118,6 @@ class TestSaveRoutingPolicy:
 
         assert policy is CheckpointPolicy.MUST_SAVE
 
-    def test_recomputes_routed_counts_copy(self) -> None:
-        copying = COPYING_ROUTED_COUNTS.set(True)
-
-        policy = _save_routing_policy(
-            None,
-            torch.ops.aten._to_copy.default,
-            device=torch.device("cpu"),
-        )
-
-        COPYING_ROUTED_COUNTS.reset(copying)
-        assert policy is CheckpointPolicy.PREFER_RECOMPUTE
-
     def test_recomputes_other_ops(self) -> None:
         policy = _save_routing_policy(None, torch.ops.aten.add.Tensor)
 
@@ -166,9 +150,12 @@ class TestBlockCheckpointContexts:
             send = expert_row_counts(experts.reshape(-1), 3).unsqueeze(0)
             _routed_counts(send, exchange)
             chunks = scores.split(splits.tolist())
-            return torch.cat([chunk.pow(i + 2) for i, chunk in enumerate(chunks)])
+            # The cast is a later ``_to_copy`` the recompute must not misread.
+            return torch.cat(
+                [chunk.to(torch.float64).pow(i + 2) for i, chunk in enumerate(chunks)]
+            )
 
-        upstream = torch.randn(5, 2)
+        upstream = torch.randn(5, 2, dtype=torch.float64)
         (block(hidden) * upstream).sum().backward()
         expected = weight.grad.clone()
         weight.grad = None

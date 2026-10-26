@@ -919,7 +919,7 @@ class TestBatchRolloutEnvStep:
         assert len(vec.envs[0].sampling_logps) == 2
         assert vec.envs[1].sampling_logps == []
 
-        *_parts, sampling, _pixel_values = vec.get_trajectories()
+        *_parts, sampling, _pixel_values, _supports = vec.get_trajectories()
         assert sampling is not None
         assert torch.equal(sampling[0], torch.tensor([-0.1, -0.2, -0.3]))
         assert sampling[1] is None
@@ -944,7 +944,7 @@ class TestBatchRolloutEnvStep:
         ]
         # sampling_logps omitted entirely -> nothing accumulates.
         _ = vec.step(completions)
-        *_parts, sampling, _pixel_values = vec.get_trajectories()
+        *_parts, sampling, _pixel_values, _supports = vec.get_trajectories()
         assert sampling is None
         assert _pixel_values is None
 
@@ -953,7 +953,7 @@ class TestBatchRolloutEnvStep:
         assert len(vec.envs[0].sampling_logps) == 1
         _ = vec.reset(seed=1)
         assert vec.envs[0].sampling_logps == []
-        *_parts, sampling, _pixel_values = vec.get_trajectories()
+        *_parts, sampling, _pixel_values, _supports = vec.get_trajectories()
         assert sampling is None
         assert _pixel_values is None
 
@@ -1668,8 +1668,11 @@ class TestBatchRolloutEnvGetTrajectories:
                 torch.tensor([[1, 2, 3]], dtype=torch.long),
             ]
         )
-        # get_trajectories ends with batch_steps, all_sampling_logps, all_pixel_values.
-        *_parts, batch_steps, _sampling_logps, _pixel_values = vec.get_trajectories()
+        # get_trajectories ends with batch_steps, all_sampling_logps,
+        # all_pixel_values, all_sampling_supports.
+        *_parts, batch_steps, _sampling_logps, _pixel_values, _supports = (
+            vec.get_trajectories()
+        )
         assert batch_steps == 1
 
 
