@@ -9,6 +9,7 @@ from types import MethodType
 from typing import TYPE_CHECKING, Any, cast
 
 from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
+from agilerl.utils.patching import library_shim
 
 if TYPE_CHECKING:
     import torch
@@ -259,6 +260,8 @@ def _liger_backbone(model: PreTrainedModel) -> torch.nn.Module:
     return getattr(model, getattr(model, "base_model_prefix", "model"), model)
 
 
+@library_shim("liger-kernel", "==0.8.*")
+@library_shim("transformers", "==5.19.*")
 def register_nemotron_h_liger() -> bool:
     """Register Nemotron-H model types with Liger's AutoLiger apply map.
 

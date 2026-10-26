@@ -21,6 +21,7 @@ from agilerl.architectures.runtime import (
     VllmRuntimeConfig,
 )
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
+from agilerl.utils.patching import library_shim
 
 # Trainer uses transformers' nemotron_h class; the checkpoint's auto_map code
 # supports only eager attention.
@@ -48,6 +49,7 @@ NEMOTRON_H_RUNTIME_CONFIG = ModelRuntimeConfig(
 )
 
 
+@library_shim("vllm", "==0.32.*")
 def nemotron_h_omni_vllm_hf_override(config: object) -> object:
     """Point a native ``nemotron_h_omni`` config at NemotronHVLLoRA and restore ``vit_hidden_size``.
 

@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
+from agilerl.utils.patching import library_shim
+
 if TYPE_CHECKING:
     from torch.nn.attention.flex_attention import BlockMask
 
@@ -47,6 +49,8 @@ def flex_decode_kernel_options(
     return {"BLOCK_M": q_block_size}
 
 
+@library_shim("torch", "==2.13.*")
+@library_shim("transformers", "==5.19.*")
 def patch_flex_attention_kernel_options(options: dict[str, Any] | None = None) -> None:
     """Inject SRAM-safe Triton ``kernel_options`` into transformers' flex-attn path.
 
