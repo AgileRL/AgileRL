@@ -23,7 +23,7 @@ from torch import nn
 
 from agilerl.architectures.runtime import PatchRuntimeConfig
 from agilerl.utils.llm_packing import RESETS_AT_DOCUMENT_BOUNDARY, packed_seq_idx
-from agilerl.utils.patching import class_is_patched, try_import
+from agilerl.utils.patching import class_is_patched, library_shim, try_import
 
 logger = logging.getLogger(__name__)
 
@@ -209,6 +209,7 @@ def _require_gdn_fast_path() -> None:
     raise RuntimeError("Qwen GatedDeltaNet needs " + " and ".join(missing) + " on GPU")
 
 
+@library_shim("transformers", "==5.19.*")
 def install_qwen_gdn_patches(
     patch: PatchRuntimeConfig,
     model: object | None = None,

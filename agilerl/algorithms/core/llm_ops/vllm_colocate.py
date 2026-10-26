@@ -19,6 +19,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from agilerl.utils.patching import library_shim
+
 if TYPE_CHECKING:
     import torch.nn as nn
 
@@ -29,6 +31,7 @@ __all__ = [
 ]
 
 
+@library_shim("vllm", "==0.32.*")
 def patch_vllm_3d_moe_lora_flag(model_name_or_path: str) -> bool:
     """Mark the model's vLLM class as taking stacked-3D MoE LoRA adapters.
 
@@ -53,6 +56,7 @@ def patch_vllm_3d_moe_lora_flag(model_name_or_path: str) -> bool:
     return True
 
 
+@library_shim("vllm", "==0.32.*")
 def patch_vllm_lora_keep_resident(llm: Any) -> int:  # noqa: ANN401 -- opaque vLLM engine handle walked via getattr
     """Keep vLLM's LoRA slot weights resident by neutralizing ``reset_lora``.
 

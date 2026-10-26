@@ -26,7 +26,7 @@ from agilerl.utils.llm_packing import (
     packed_layout,
     packed_seq_idx,
 )
-from agilerl.utils.patching import class_is_patched, try_import
+from agilerl.utils.patching import class_is_patched, library_shim, try_import
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -1039,6 +1039,7 @@ def patch_nemotron_mamba_packed_sequences(mixer: str, block: str) -> None:
     )
 
 
+@library_shim("transformers", "==5.19.*")
 def install_mamba_patches(
     patch: PatchRuntimeConfig,
     model: PreTrainedModel | PeftModel | None = None,

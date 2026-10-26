@@ -42,7 +42,7 @@ from agilerl.distributed.expert_parallel import (
 from agilerl.distributed.process import is_distributed
 from agilerl.distributed.tensor_parallel import set_tp_compute_dtype
 from agilerl.lora.moe.layouts import is_packed_experts_module
-from agilerl.utils.patching import class_is_patched
+from agilerl.utils.patching import class_is_patched, library_shim
 
 
 def _transformer_blocks(model: nn.Module) -> list[nn.Module]:
@@ -478,6 +478,7 @@ def _together(*cms: Any) -> Iterator[None]:
         yield
 
 
+@library_shim("torch", "==2.13.*")
 def _block_checkpoint_contexts(save_router: bool) -> Callable[[], tuple[Any, Any]]:
     """EP count replay, plus router topk save on packed-expert blocks."""
 
