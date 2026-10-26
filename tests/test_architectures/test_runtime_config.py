@@ -172,6 +172,14 @@ class TestFamilyRuntimeConfigs:
             "linear_fc2",
         }
 
+    @pytest.mark.parametrize(
+        "model_type", ["qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"]
+    )
+    def test_qwen3_5_families_name_a_reasoning_parser(self, model_type: str) -> None:
+        kwargs = FAMILY_RUNTIME_CONFIGS[model_type].vllm.engine_kwargs()
+
+        assert kwargs["reasoning_parser"] == "qwen3"
+
     def test_every_supported_model_names_a_registered_tool_call_parser(
         self,
     ) -> None:

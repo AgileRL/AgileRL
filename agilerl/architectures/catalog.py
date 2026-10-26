@@ -154,6 +154,7 @@ GRANITE3_RUNTIME_CONFIG = ModelRuntimeConfig(tool_call_parser="granite3")
 QWEN3_5_TEXT_RUNTIME_CONFIG = ModelRuntimeConfig(
     vllm=VllmRuntimeConfig(
         mamba_cache_mode="align",
+        reasoning_parser="qwen3",
         enable_prefix_caching=True,
         dense_mamba_prefix_cache=True,
     ),

@@ -475,6 +475,30 @@ class TestPackedLayout:
     def test_rows_holding_one_document_return_none(self):
         assert packed_layout(torch.tensor([[0, 1, 2], [4, 5, 6]])) is None
 
+    def test_right_padded_rows_return_none(self):
+        # Arrange
+        mask = torch.tensor([[1, 1, 1, 0, 0, 0], [1, 1, 1, 1, 1, 0]])
+        positions = mask.cumsum(-1) - 1
+        positions.masked_fill_(mask == 0, 1)
+
+        # Act
+        layout = packed_layout(positions)
+
+        # Assert
+        assert layout is None
+
+    def test_pad_tail_extends_the_last_packed_document(self):
+        layout = packed_layout(torch.tensor([[0, 1, 2, 0, 1, 1, 1, 1]]))
+
+        assert layout.seq_idx.tolist() == [[0, 0, 0, 1, 1, 1, 1, 1]]
+        assert layout.cu_seqlens.tolist() == [0, 3, 8]
+
+    def test_left_padding_is_its_own_document(self):
+        layout = packed_layout(torch.tensor([[1, 1, 0, 1, 2]]))
+
+        assert layout.cu_seqlens.tolist() == [0, 2, 5]
+        assert layout.max_seqlen == 3
+
     def test_repeat_call_on_the_same_tensor_returns_the_memoized_layout(self):
         # Arrange
         positions = torch.tensor([[0, 1, 0]])
