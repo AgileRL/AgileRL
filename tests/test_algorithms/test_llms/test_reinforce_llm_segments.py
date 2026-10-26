@@ -40,6 +40,7 @@ from tests.test_algorithms.test_llms.segment_helpers import (
     MEAN_SEGMENT_ROW_ACTION_TOKENS,
     balanced_learn_worker,
     episode_sampling_logps,
+    episode_sampling_supports,
     learn_rank_episodes,
     learn_with_nan_loss_on_rank_zero,
     lora_weights,
@@ -463,3 +464,54 @@ class TestREINFORCELearnPhaseTimings:
         assert all(metrics[key] >= 0.0 for key in LEARN_PHASE_METRIC_NAMES)
         assert metrics["learn_phase_forward_s"] > 0.0
         assert agent.shard_runtime.phase_timer.marks is None
+
+
+class TestREINFORCELearnSamplingSupports:
+    def test_forced_tokens_score_a_zero_log_prob(self) -> None:
+        # Arrange: every action token is forced, so its log-prob over its
+        # support is 0 whatever the policy.
+        agent = _make_reinforce()
+        supports = episode_sampling_supports(PAD_TOKEN_ID, width=1)
+        sampling_logps = [torch.zeros(row.shape[0]) for row in supports]
+
+        # Act
+        metrics = agent.learn(
+            _experiences(), sampling_logps=sampling_logps, sampling_supports=supports
+        )
+
+        # Assert
+        assert metrics["vllm_is_delta_mean"] == pytest.approx(0.0, abs=1e-6)
+        assert metrics["vllm_is_delta_max"] == pytest.approx(0.0, abs=1e-6)
+
+    def test_segment_rows_match_the_unsegmented_gradient(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        overrides = {
+            "batch_size": 8,
+            "micro_batch_size_per_gpu": 8,
+            "mini_batch_size": 8,
+        }
+        unsegmented = _make_reinforce(**overrides)
+        segmented = _make_reinforce(**overrides)
+        unsegmented_grads = record_step_gradients(unsegmented, monkeypatch)
+        segmented_grads = record_step_gradients(segmented, monkeypatch)
+        learn_kwargs = {
+            "sampling_logps": episode_sampling_logps(PAD_TOKEN_ID),
+            "sampling_supports": episode_sampling_supports(PAD_TOKEN_ID),
+        }
+
+        # Act
+        unsegmented.learn(_experiences(), **learn_kwargs)
+        segmented.learn(
+            _experiences(), episode_segments=EPISODE_SEGMENTS, **learn_kwargs
+        )
+
+        # Assert
+        assert len(unsegmented_grads) == len(segmented_grads) == 1
+        assert any(grad.abs().sum() > 0 for grad in unsegmented_grads[0].values())
+        for name, grad in unsegmented_grads[0].items():
+            # fp32 sums over differently shaped rows.
+            assert torch.allclose(
+                segmented_grads[0][name], grad, rtol=1e-5, atol=1e-7
+            ), name

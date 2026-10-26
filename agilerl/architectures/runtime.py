@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -13,6 +13,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from torch import nn
 from torch.distributed.device_mesh import DeviceMesh
 from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
+
+from agilerl.arena.models.networks import VllmModality
 
 
 class VllmRuntimeConfig(BaseModel):
@@ -139,6 +141,11 @@ class ModelRuntimeConfig(BaseModel):
     # lora_config.tower_target_modules may name. Empty for families without
     # vLLM tower LoRA (it needs get_mm_lora_token_counts).
     tower_connector_lora_targets: frozenset[str] = frozenset()
+    # Trainer tower and connector module names mapped to the modalities vLLM
+    # builds them for; vLLM skips a module once all its modalities are stripped.
+    tower_modalities: Mapping[str, frozenset[VllmModality]] = Field(
+        default_factory=dict
+    )
     tensor_parallel_plan: str | None = Field(default=None, min_length=1)
     # A name in agilerl.llm_envs.tool_parsers.TOOL_PARSERS; None detects from the vocab.
     tool_call_parser: str | None = Field(default=None, min_length=1)

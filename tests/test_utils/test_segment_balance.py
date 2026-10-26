@@ -9,10 +9,12 @@ The cross-rank tests spawn two gloo ranks, which exchange rows on CPU.
 from __future__ import annotations
 
 from dataclasses import replace
+from unittest.mock import patch
 
 import numpy as np
 import pytest
 import torch
+import torch.distributed as dist
 
 from agilerl.utils.segment_balance import balance_rows_across_ranks, balanced_row_plan
 from agilerl.utils.segment_rows import SegmentRows, split_episode_segments
@@ -151,6 +153,41 @@ def balance_worker(rank: int, world_size: int) -> None:
         assert dealt_tokens.tolist() == [20.0, 11.0]
 
 
+def supports_worker(rank: int, world_size: int) -> None:
+    if rank == 0:
+        rows = split_small_batch(
+            sampling_supports=[
+                torch.tensor([[2, 4], [5, -1]], dtype=torch.int32),
+                torch.tensor([[8, -1], [1, 3], [2, -1]], dtype=torch.int32),
+            ]
+        )
+    else:
+        rows = replace(
+            rank_one_rows(),
+            sampling_supports=[torch.tensor([[12, 30, 31], [13, -1, -1]])],
+        )
+
+    balanced = balance_rows_across_ranks(
+        rows, np.arange(len(rows.row_episodes)), [], PAD, None
+    )
+
+    assert balanced is not None
+    balanced, _values = balanced
+    assert balanced.sampling_supports is not None
+    if rank == 0:
+        assert [row.tolist() for row in balanced.sampling_supports] == [
+            [[8, -1], [1, 3], [2, -1]],
+            [[2, 4]],
+        ]
+    else:
+        # Rank 1 takes rank 0's row 1 with its own support width.
+        assert [row.tolist() for row in balanced.sampling_supports] == [
+            [[12, 30, 31], [13, -1, -1]],
+            [[5, -1]],
+        ]
+        assert balanced.sampling_supports[1].dtype == torch.int32
+
+
 def values_worker(rank: int, world_size: int) -> None:
     rows = split_small_batch() if rank == 0 else rank_one_rows()
     num_rows, width = rows.action_masks.shape
@@ -219,6 +256,40 @@ def devices_worker(rank: int, world_size: int, device: str) -> None:
         assert logps[0].tolist() == pytest.approx([-0.3, -0.4])
         assert logps[1] is None
         assert logps[2].tolist() == pytest.approx([-0.7, -0.8])
+
+
+def vision_messages_worker(rank: int, world_size: int) -> None:
+    rows = four_long_rows() if rank == 0 else rank_one_rows()
+    # float64 vision rows tell their messages apart from every other part.
+    rows = replace(rows, pixel_values=rows.pixel_values.double())
+    advantages, episode_tokens = row_values(rows, rank)
+
+    with patch.object(
+        dist, "batch_isend_irecv", wraps=dist.batch_isend_irecv
+    ) as exchange:
+        balanced = balance_rows_across_ranks(
+            rows,
+            np.arange(len(rows.row_episodes)),
+            [(advantages, 0.0), (episode_tokens, 0.0)],
+            PAD,
+            None,
+        )
+
+    # Rank 1 takes rank 0's rows 1 and 3, one vision row of 2 values each,
+    # and no message holds more than one of them.
+    vision_values = [
+        sum(op.tensor.numel() for op in ops if op.tensor.dtype == torch.float64)
+        for (ops,), _ in exchange.call_args_list
+    ]
+    assert sum(vision_values) == 4
+    assert max(vision_values) == 2
+    assert balanced is not None
+    balanced, _values = balanced
+    assert balanced.pixel_values.dtype == torch.float64
+    if rank == 0:
+        assert balanced.pixel_values.tolist() == [[0, 1], [4, 5]]
+    else:
+        assert balanced.pixel_values.tolist() == [[2, 3], [6, 7], [20, 21]]
 
 
 def too_few_rows_worker(rank: int, world_size: int) -> None:
@@ -305,6 +376,10 @@ class TestBalanceRowsAcrossRanks:
         run_ranks(balance_worker)
 
     @pytest.mark.multi_rank
+    def test_sampling_supports_move_with_their_rows(self) -> None:
+        run_ranks(supports_worker)
+
+    @pytest.mark.multi_rank
     def test_values_keep_their_dtype_shape_and_pad(self) -> None:
         run_ranks(values_worker)
 
@@ -327,6 +402,10 @@ class TestBalanceRowsAcrossRanks:
     )
     def test_rows_stay_on_their_devices(self, device: str) -> None:
         run_ranks(devices_worker, 2, device)
+
+    @pytest.mark.multi_rank
+    def test_vision_rows_travel_one_row_per_message(self) -> None:
+        run_ranks(vision_messages_worker)
 
     @pytest.mark.multi_rank
     def test_fewer_rows_than_ranks_are_left_in_place(self) -> None:

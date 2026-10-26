@@ -57,6 +57,7 @@ from tests.test_algorithms.test_llms.llm_helpers import (
     trainable_weights,
 )
 from tests.test_algorithms.test_llms.segment_helpers import (
+    action_token_policy_loss,
     lora_weights,
     record_step_gradients,
     seed_lora_weights,
@@ -881,6 +882,35 @@ class TestPPOLearnPasses:
         for step in steps:
             assert step.keys() == adapter_lora_names(agent)
 
+    @FUSE_MODES
+    def test_a_row_without_action_tokens_adds_no_loss_or_metrics(
+        self, fuse: bool
+    ) -> None:
+        """A micro-batch whose every action vLLM forced trains like no row at all."""
+        # Arrange
+        generator = torch.Generator().manual_seed(2)
+        ids = list(
+            torch.randint(0, PAD_TOKEN_ID, (2, SEQ_LEN + 2), generator=generator).split(
+                1
+            )
+        )
+        masks = [torch.zeros(1, SEQ_LEN + 1, dtype=torch.bool) for _ in range(2)]
+        masks[0][0, 3:] = True
+        agents = [
+            make_ppo(micro_batch_size_per_gpu=1, fuse_actor_critic_pass=fuse)
+            for _ in range(2)
+        ]
+
+        # Act
+        with_forced_row = agents[0].learn((ids, masks, torch.tensor([1.0, 0.0])))
+        live_row_only = agents[1].learn((ids[:1], masks[:1], torch.tensor([1.0])))
+
+        # Assert: float32 sums over different batch shapes differ in the last bits
+        for name in ("loss", "pg_loss", "vf_loss", "kl", "entropy", "clipfrac"):
+            assert with_forced_row[name] == pytest.approx(
+                live_row_only[name], rel=1e-6, abs=1e-7
+            ), name
+
 
 class TestPPOFusedLearnMatchesSplitLearn:
     @pytest.mark.parametrize("liger", [False, True], ids=["standard", "liger"])
@@ -1053,6 +1083,75 @@ class TestPPOLearnTurnCount:
             assert torch.equal(loss.detach(), expected)
         assert sorted(local_counts) == [1, 1, 2, 2]
         assert len(value_calls) == 4
+
+
+def learn_three_turns(agent: LLMPPO, forced: bool) -> dict[str, float]:
+    """One learn over two three-turn episodes of three tokens per turn.
+
+    With ``forced``, every token of row 0's middle and last turn leaves the
+    action mask and keeps its turn id.
+    """
+    generator = torch.Generator().manual_seed(2)
+    ids = torch.randint(0, PAD_TOKEN_ID, (2, 11), generator=generator)
+    turn_ids = torch.tensor([[-1, 0, 0, 0, 1, 1, 1, 2, 2, 2]]).repeat(2, 1)
+    mask = turn_ids >= 0
+    if forced:
+        mask[0, 4:] = False
+    rewards = torch.tensor([[0.5, 1.0, 2.0], [0.0, -1.0, 0.5]])
+    return agent.learn(
+        (list(ids.split(1)), list(mask.split(1)), rewards), turn_ids=turn_ids
+    )
+
+
+class TestPPOLearnForcedTurns:
+    """A turn of forced tokens keeps its reward and its place in the episode."""
+
+    def test_returns_and_advantages_match_the_episode_with_free_turns(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        results = {}
+        for forced in (False, True):
+            agent = make_ppo(advantage_granularity="turn", gamma=0.9)
+            gae, gae_calls = record_calls(agent._compute_gae_returns)
+            monkeypatch.setattr(agent, "_compute_gae_returns", gae)
+
+            # Act
+            metrics = learn_three_turns(agent, forced=forced)
+            ((_args, _kwargs, (returns, advantages)),) = gae_calls
+            results[forced] = (returns, advantages, metrics["vf_loss"])
+
+        # Assert
+        free_returns, free_advantages, free_vf_loss = results[False]
+        forced_returns, forced_advantages, forced_vf_loss = results[True]
+        assert torch.equal(forced_returns, free_returns)
+        assert torch.equal(forced_advantages, free_advantages)
+        assert forced_vf_loss == free_vf_loss
+
+    def test_a_fully_forced_turn_is_no_unit_of_the_liger_turn_loss(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        agent = make_ppo(advantage_granularity="turn", importance_sampling_level="turn")
+        use_fake_liger_policy_loss(agent, monkeypatch, "agilerl.algorithms.ppo_llm")
+        kernel, kernel_calls = record_calls(action_token_policy_loss)
+        monkeypatch.setattr(
+            "agilerl.algorithms.ppo_llm.apply_fused_policy_loss", kernel
+        )
+
+        # Act
+        learn_three_turns(agent, forced=True)
+
+        # Assert
+        ((_args, kwargs, _out),) = kernel_calls
+        assert sorted(kwargs["full_turn_mask"].tolist()) == [
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0],
+        ]
+        assert sorted(kwargs["turn_ids"].tolist()) == [
+            [-1, 0, 0, 0, -1, -1, -1, -1, -1, -1],
+            [-1, 0, 0, 0, 1, 1, 1, 2, 2, 2],
+        ]
 
 
 class TestPPOLearnNonFiniteLoss:

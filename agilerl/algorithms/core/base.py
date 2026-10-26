@@ -13,9 +13,17 @@ import tempfile
 import warnings
 from abc import ABC, ABCMeta, abstractmethod
 from collections import OrderedDict, defaultdict, deque
-from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
+from collections.abc import (
+    Callable,
+    Generator,
+    Iterable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import asdict, replace
+from functools import partial
 from importlib.metadata import version
 from itertools import accumulate, chain, groupby, pairwise
 from pathlib import Path
@@ -63,8 +71,16 @@ from agilerl.algorithms.core.registry import (
     OptimizerConfig,
     OptimizerFactory,
 )
-from agilerl.architectures import install_family_patches
+from agilerl.architectures import (
+    FAMILY_RUNTIME_CONFIGS,
+    ModelRuntimeConfig,
+    install_family_patches,
+)
 from agilerl.architectures.nemotron_h import register_nemotron_h_liger
+from agilerl.architectures.vllm_language import (
+    serves_images,
+    unbuilt_tower_modules,
+)
 from agilerl.arena.memory.estimator import (
     PhaseBreakdown,
     estimate_training,
@@ -82,6 +98,8 @@ from agilerl.arena.memory.specs import (
     TrainingSettings,
     WeightDtype,
 )
+from agilerl.arena.models.algorithms.rollout_llm import records_sampling_supports
+from agilerl.arena.models.networks import VllmModality
 from agilerl.arena.models.profiling import ProfilingConfig
 from agilerl.components.llm_rollout_data import EpisodeSegments
 from agilerl.distributed import (
@@ -179,13 +197,21 @@ from agilerl.utils.learn_profiler import LearnProfiler
 from agilerl.utils.llm_packing import (
     PackedBatch,
     mixers_without_boundary_reset,
+    pack_next_token_frame,
     pack_padded_batch,
     unpack_hidden_states,
     unpack_logprobs,
 )
 from agilerl.utils.mutation_utils import target_activations
 from agilerl.utils.phase_timer import PhaseTimer
+from agilerl.utils.sampling_supports import extract_vllm_sampling_supports
 from agilerl.utils.torch_utils import release_device_memory
+from agilerl.utils.vision_rows import (
+    PinnedStaging,
+    VisionRows,
+    pixel_values_for_minibatch,
+    prefetch_to_device,
+)
 
 if TYPE_CHECKING:
     from torch.optim.lr_scheduler import LambdaLR
@@ -205,6 +231,12 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from agilerl.algorithms.core.llm_ops.frozen_vision import (
         VisionFeatureCache,
         install_frozen_vision_no_grad,
+    )
+    from agilerl.algorithms.core.llm_ops.vision_lockstep import (
+        PlannedImages,
+        VisionLockstep,
+        vision_language_module,
+        vision_lockstep,
     )
     from agilerl.algorithms.core.llm_ops.vllm_colocate import (
         patch_vllm_3d_moe_lora_flag,
@@ -226,7 +258,9 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from agilerl.utils.llm_utils import (
         LEARN_PHASE_METRIC_NAMES,
         LEARN_PHASES,
+        RolloutSampling,
         adapt_lora_config_for_model,
+        apply_vllm_compile_cache_env,
         attention_mask_from_padded_ids,
         build_completion_mask,
         build_vllm_llm_init_kwargs,
@@ -2851,6 +2885,11 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         to adapt as well. ``lora_config.target_modules`` always land on the
         language model only. Defaults to None.
     :type lora_tower_target_modules: list[str] | None, optional
+    :param rollout_strip_multimodal_towers: ``strip_multimodal_towers`` of a
+        vLLM engine outside this process that serves the adapter; tower LoRA
+        skips the towers it leaves unbuilt. A colocated engine uses
+        ``vllm_config`` instead. Defaults to False.
+    :type rollout_strip_multimodal_towers: bool | list[VllmModality], optional
     :param chunk_rows: Primary chunk-size knob for fused logit tiles used by
         both the standard fused-logprob path and the Liger fused-loss path.
         ``None`` (default) preserves each path's auto-tuned behavior.
@@ -2915,6 +2954,11 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     :param profiling_config: Opt-in CUDA memory snapshot on OOM and a
         torch.profiler trace of one learn micro-batch. ``None`` profiles nothing.
     :type profiling_config: ProfilingConfig | None, optional
+    :param logit_bias: Token id to logit offset vLLM adds to the softcapped
+        logits when it samples (its ``logit_bias``). Policy, old and reference
+        log-probs add the same offsets, so they score the distribution
+        rollouts sample from. ``None`` adds none.
+    :type logit_bias: dict[int, float] | None, optional
     """
 
     _allowed_adapters = frozenset({"actor", "reference", "critic"})
@@ -2923,6 +2967,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     beta: float = 0.0
     # PPO sets its resolved fused actor and critic pass before wrap_models.
     _fuses_actor_critic_pass: bool = False
+    # Whether this algorithm's Liger loss applies the model's final-logit softcap.
+    _liger_applies_logit_softcap: bool = False
     actor: Any
     optimizer: Any
     llm: Any
@@ -2930,10 +2976,12 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     lr: float
     colocated: bool
     temperature: float
-    repetition_penalty: float | None
-    top_p: float | None
+    repetition_penalty: float
+    top_p: float
     top_k: int | None
     min_p: float | None
+    # Colocated engine reports the token ids each rollout token was drawn from.
+    records_sampling_supports: bool
     max_model_len: int
     # Longest training row the memory estimate sizes for; None uses max_model_len.
     max_row_tokens: int | None = None
@@ -2979,6 +3027,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         activation_offload: bool = False,
         use_sequence_packing: bool = False,
         lora_tower_target_modules: list[str] | None = None,
+        rollout_strip_multimodal_towers: bool | list[VllmModality] = False,
         chunk_rows: int | None = None,
         vllm_importance_sampling_correction: bool = True,
         vllm_importance_sampling_cap: float = 2.0,
@@ -2986,6 +3035,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         vllm_max_logprob_gap: float = 0.1,
         vllm_max_clip_fraction: float = 0.02,
         profiling_config: ProfilingConfig | None = None,
+        logit_bias: dict[int, float] | None = None,
     ) -> None:
         if not HAS_LLM_DEPENDENCIES:
             msg = "LLM dependencies are not installed. Please install them using `pip install agilerl[llm]`."
@@ -3073,8 +3123,12 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             ),
         )
         self._vision_cache = VisionFeatureCache()
+        self._vision_lockstep: VisionLockstep | None = None
+        self._pixel_staging = PinnedStaging()
+        self._vision_language_module: PreTrainedModel | None = None
         self.gradient_checkpointing = gradient_checkpointing
         self.use_liger_loss = use_liger_loss
+        self.final_logit_softcap: float | None = None
         self.reference_update_tracker = 0  # Updated every time the reference policy is updated which is updated each time we pass through the train dataset
         self.calc_position_embeddings = calc_position_embeddings
         self.pad_token_id = pad_token_id
@@ -3105,6 +3159,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self.moe_lora_recompute = moe_lora_recompute
         self.use_sequence_packing = bool(use_sequence_packing)
         self.lora_tower_target_modules = lora_tower_target_modules
+        self.rollout_strip_multimodal_towers = rollout_strip_multimodal_towers
         if isinstance(model_config, dict):
             model_dict = dict(model_config)
             if quantization_config is not None:
@@ -3160,6 +3215,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self.vllm_importance_sampling_cap = float(vllm_importance_sampling_cap)
         self.vllm_max_logprob_gap = float(vllm_max_logprob_gap)
         self.vllm_max_clip_fraction = float(vllm_max_clip_fraction)
+        self.logit_bias = logit_bias
         # Kept on when not colocated: rollout engines still sample from vLLM.
         self._is_correction_liger_warned = False
         # Warn-once flag for the canonical Liger + non-token importance-sampling
@@ -4177,6 +4233,13 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             self.lr_scheduler.last_epoch, 0
         )
 
+    @property
+    def _engine_strip_multimodal_towers(self) -> bool | list[VllmModality]:
+        """``strip_multimodal_towers`` of the vLLM engine that serves this agent."""
+        if self.vllm_config is not None:
+            return self.vllm_config.strip_multimodal_towers
+        return self.rollout_strip_multimodal_towers
+
     def apply_lr(self) -> None:
         """Set ``lr`` / ``lr_critic`` as the optimizer's peaks at the schedule's current step."""
         self.lr_scheduler = LLMAlgorithm.update_lr(
@@ -4314,7 +4377,32 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             else LLMAlgorithm._logprobs_from_hidden_fused
         )
         lm_head = self._get_lm_head()
-        return fused_fn, lm_head.weight, lm_head.bias
+        return (
+            partial(
+                fused_fn,
+                softcap=self.final_logit_softcap,
+                logit_bias=self._logit_bias_vector(lm_head.weight.shape[0]),
+            ),
+            lm_head.weight,
+            lm_head.bias,
+        )
+
+    def _logit_bias_vector(self, vocab_size: int) -> torch.Tensor | None:
+        """``(V,)`` fp32 offsets of :attr:`logit_bias` on the device, or ``None`` without any.
+
+        :param vocab_size: Rows of the lm_head.
+        :type vocab_size: int
+        :return: Dense logit offsets, zero for tokens without one.
+        :rtype: torch.Tensor | None
+        """
+        if self.logit_bias is None:
+            return None
+        vector = torch.zeros(vocab_size, dtype=torch.float32, device=self.device)
+        ids = torch.tensor(list(self.logit_bias), dtype=torch.long, device=self.device)
+        vector[ids] = torch.tensor(
+            list(self.logit_bias.values()), dtype=torch.float32, device=self.device
+        )
+        return vector
 
     def _warn_liger_non_token_is(
         self,
@@ -4395,6 +4483,58 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 continue
             out[b, pos] = flat.to(device=out.device, dtype=out.dtype)
         return out, n_skipped
+
+    @staticmethod
+    def _align_sampling_supports(
+        sampling_supports: Sequence[torch.Tensor | None] | None,
+        token_ids: torch.Tensor,
+        action_masks: torch.Tensor,
+    ) -> torch.Tensor | None:
+        """Scatter per-row sampling supports onto a ``(B, T-1, K)`` action frame on the CPU.
+
+        Each row's ``(n, K_row)`` supports, ``-1`` padded, go to the ``True``
+        positions of its action mask in order. Every other position, and every
+        position of a row whose support count does not match its mask, gets a
+        ``-1`` row and is normalized over the full vocabulary, as the
+        trainer-scored rows whose sampling log-probs are dropped.
+
+        :param sampling_supports: Per-row ``(n, K_row)`` supports, or ``None``.
+        :type sampling_supports: Sequence[torch.Tensor | None] | None
+        :param token_ids: ``(B, T)`` token ids.
+        :type token_ids: torch.Tensor
+        :param action_masks: ``(B, T-1)`` action-token mask.
+        :type action_masks: torch.Tensor
+        :return: ``(B, T-1, K)`` int32 supports, ``K >= 2``, or ``None`` when no
+            row has any.
+        :rtype: torch.Tensor | None
+        :raises ValueError: If a sampled token is outside its support.
+        """
+        rows = [] if sampling_supports is None else list(sampling_supports)
+        widths = [int(row.shape[-1]) for row in rows if row is not None]
+        if not widths:
+            return None
+        mask = action_masks.to(torch.bool).cpu()
+        # torch.compile specializes a width of 1 and recompiles the fused kernel.
+        frame = torch.full((*mask.shape, max(*widths, 2)), -1, dtype=torch.int32)
+        for row, supports in enumerate(rows):
+            if supports is None:
+                continue
+            positions = mask[row].nonzero(as_tuple=True)[0]
+            if positions.numel() == supports.shape[0]:
+                frame[row, positions, : supports.shape[-1]] = supports.to(
+                    device="cpu", dtype=torch.int32
+                )
+        targets = token_ids[:, 1:].cpu().to(torch.int32)
+        outside = (frame[..., 0] >= 0) & ~(frame == targets.unsqueeze(-1)).any(-1)
+        if outside.any():
+            row, position = outside.nonzero()[0].tolist()
+            msg = (
+                f"Token {int(targets[row, position])} at row {row}, position "
+                f"{position} is outside the sampling support vLLM recorded for "
+                "it; the supports are misaligned with the action mask."
+            )
+            raise ValueError(msg)
+        return frame
 
     def _sampling_mismatch_metrics(
         self,
@@ -4712,10 +4852,19 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 use_gradient_checkpointing=self.gradient_checkpointing,
                 gradient_checkpointing_kwargs={"use_reentrant": False},
             )
+        skipped_tower_modules = None
+        if self.lora_tower_target_modules:
+            skipped_tower_modules = unbuilt_tower_modules(
+                self._engine_strip_multimodal_towers,
+                FAMILY_RUNTIME_CONFIGS.get(
+                    peft_target.config.model_type, ModelRuntimeConfig()
+                ),
+            )
         lora_config = adapt_lora_config_for_model(
             peft_target,
             self.lora_config,
             tower_target_modules=self.lora_tower_target_modules,
+            skipped_tower_modules=skipped_tower_modules,
         )
         self.lora_config = lora_config
         expert_target_parameters = getattr(lora_config, "target_parameters", None)
@@ -4834,6 +4983,29 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             return vh_wrapper
         return peft_target
 
+    def _read_final_logit_softcap(self, actor_config: PretrainedConfig) -> None:
+        """Store the model's final-logit softcap; turn off Liger loss if it cannot apply it.
+
+        :param actor_config: Config of the actor model.
+        :type actor_config: PretrainedConfig
+        """
+        self.final_logit_softcap = getattr(
+            actor_config.get_text_config(), "final_logit_softcapping", None
+        )
+        if (
+            self.use_liger_loss
+            and self.final_logit_softcap is not None
+            and not self._liger_applies_logit_softcap
+        ):
+            warnings.warn(
+                f"use_liger_loss=True, but {actor_config.model_type} softcaps its "
+                f"final logits at {self.final_logit_softcap}, which the "
+                f"{type(self).__name__} Liger kernel does not. Falling back to "
+                "standard loss.",
+                stacklevel=3,
+            )
+            self.use_liger_loss = False
+
     def _initialize_actors(
         self,
         base_model: torch.nn.Module | None,
@@ -4888,10 +5060,12 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             )
 
         self.actor = actor
+        self._read_final_logit_softcap(cast("PretrainedConfig", actor.config))
         self.use_adapter("actor")
         patch_lora_for_fused_forward(actor)
         install_packed_expert_grouped_gemm(actor)
         install_frozen_vision_no_grad(actor, self._vision_cache)
+        self._vision_language_module = vision_language_module(actor)
         set_routed_experts_recompute(actor, self.moe_lora_recompute)
 
         if self.torch_compiler:
@@ -5111,6 +5285,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         head_w: torch.Tensor,
         head_b: torch.Tensor | None,
         score_mask: torch.Tensor | None = None,
+        support_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Score shifted hidden states to ``(B, S-1)`` logprobs."""
         return self._score_hidden(
@@ -5120,6 +5295,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             head_b,
             target_ids[:, 1:],
             score_mask,
+            support_ids,
         )
 
     def _score_hidden(
@@ -5130,6 +5306,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         head_b: torch.Tensor | None,
         target_ids: torch.Tensor,
         score_mask: torch.Tensor | None,
+        support_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Per-token log-probs of ``target_ids``, with the lm_head run only where ``score_mask`` is set.
 
@@ -5146,6 +5323,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :param score_mask: ``(B, T)`` positions whose log-probs are needed, or
             ``None`` to score every position.
         :type score_mask: torch.Tensor | None
+        :param support_ids: ``(B, T, K)`` sampling support of each position
+            (:func:`~agilerl.algorithms.core.llm_ops.fused_logprobs.support_scores`),
+            or ``None`` to normalize every position over the full vocabulary.
+        :type support_ids: torch.Tensor | None
         :return: ``(B, T)`` log-probs, zero outside ``score_mask`` when it is given.
         :rtype: torch.Tensor
         """
@@ -5154,17 +5335,38 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             "cast_to_fp32": self.cast_logprobs_to_fp32,
             "chunk_rows": self.chunk_rows,
         }
+        if support_ids is not None:
+            support_ids = support_ids.to(hidden.device)
         if score_mask is None:
-            return fused_fn(hidden, head_w, head_b, target_ids, **kwargs)
+            return fused_fn(
+                hidden, head_w, head_b, target_ids, support_ids=support_ids, **kwargs
+            )
         keep = score_mask.to(device=hidden.device, dtype=torch.bool)
         index = scored_position_index(keep)
+        picked_keep = keep.gather(1, index)
         picked_hidden = hidden.gather(
             1, index.unsqueeze(-1).expand(-1, -1, hidden.shape[-1])
         )
+        picked_targets = target_ids.gather(1, index)
+        picked_support = None
+        if support_ids is not None:
+            picked_support = support_ids.gather(
+                1, index.unsqueeze(-1).expand(-1, -1, support_ids.shape[-1])
+            )
+            # Padding columns are discarded; a one-id support keeps them off
+            # the full-vocab path.
+            picked_support[..., 0] = torch.where(
+                picked_keep, picked_support[..., 0], picked_targets
+            )
         picked = fused_fn(
-            picked_hidden, head_w, head_b, target_ids.gather(1, index), **kwargs
+            picked_hidden,
+            head_w,
+            head_b,
+            picked_targets,
+            support_ids=picked_support,
+            **kwargs,
         )
-        picked = fill_outside_mask(picked, keep.gather(1, index))
+        picked = fill_outside_mask(picked, picked_keep)
         return picked.new_zeros(target_ids.shape).scatter(1, index, picked)
 
     def _repeat_pixel_values_for_fused_rows(
@@ -5185,6 +5387,11 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             )
             raise ValueError(msg)
         repeat = fused_rows // sample_rows
+        if not any(pixel_values.stride()):
+            # Every element aliases one value, so a view repeats it without a copy.
+            return pixel_values[:1].expand(
+                repeat * pixel_values.shape[0], *pixel_values.shape[1:]
+            )
         return pixel_values.repeat(
             repeat,
             *([1] * (pixel_values.ndim - 1)),
@@ -5192,12 +5399,12 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
     def _pixel_values_for_fused_slice(
         self,
-        pixel_values: torch.Tensor | None,
+        pixel_values: torch.Tensor,
         start: int,
         end: int,
         fused_rows: int,
         image_counts: Sequence[int] | None = None,
-    ) -> torch.Tensor | None:
+    ) -> torch.Tensor:
         """Vision rows for fused rows ``[start, end)``.
 
         Dim 0 matches the fused batch when each row has one image. A repeated
@@ -5205,8 +5412,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         ``image_counts`` is the image count of each fused row when those counts differ.
         A slice over every fused row keeps every vision row.
         """
-        if pixel_values is None:
-            return None
         leading = int(pixel_values.shape[0])
         if image_counts is not None:
             offset = sum(int(count) for count in image_counts[:start])
@@ -5242,6 +5447,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         head_b: torch.Tensor | None,
         chunk_pixel_values: torch.Tensor | None = None,
         chunk_score_mask: torch.Tensor | None = None,
+        chunk_support_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Route, forward, and score one fused micro-batch.
 
@@ -5259,6 +5465,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 chunk_pos = chunk_pos[:, :seq_len]
             if chunk_score_mask is not None:
                 chunk_score_mask = chunk_score_mask[:, : seq_len - 1]
+            if chunk_support_ids is not None:
+                chunk_support_ids = chunk_support_ids[:, : seq_len - 1]
         trailing_pad = orig_seq_len - int(chunk_ids.shape[1])
         hidden, value = self._fused_chunk_hidden_and_value(
             chunk_ids,
@@ -5267,7 +5475,13 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             chunk_pixel_values,
         )
         chunk_lp = self._fused_chunk_logprobs(
-            hidden, chunk_ids, fused_fn, head_w, head_b, chunk_score_mask
+            hidden,
+            chunk_ids,
+            fused_fn,
+            head_w,
+            head_b,
+            chunk_score_mask,
+            chunk_support_ids,
         )
         del hidden
         chunk_v = (
@@ -5313,6 +5527,116 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         assert logprobs_out is not None
         return logprobs_out, values_out
 
+    @staticmethod
+    def _fused_chunks(
+        total: int, routing: list[str], batch_size: int | None, split_adapter_runs: bool
+    ) -> list[tuple[int, int]]:
+        """Fused rows of each :meth:`_fused_model_pass` forward, in run order.
+
+        :param total: Fused rows.
+        :param routing: Adapter of each fused row.
+        :param batch_size: Rows per forward, or ``None`` for one forward.
+        :param split_adapter_runs: Whether each forward stays within one adapter run.
+        :return: ``(start, end)`` of each forward.
+        """
+        if batch_size is None:
+            return [(0, total)]
+        # Vision-tower LoRA layers see image rows, which a chunk can only
+        # route correctly when all its rows share one adapter.
+        runs = (
+            [len(list(run)) for _, run in groupby(routing)]
+            if split_adapter_runs
+            else [total]
+        )
+        run_starts = [0, *accumulate(runs)]
+        return [
+            (start, min(start + batch_size, run_end))
+            for run_start, run_end in pairwise(run_starts)
+            for start in range(run_start, run_end, batch_size)
+        ]
+
+    def _fused_vision_slice(
+        self,
+        values: torch.Tensor,
+        start: int,
+        end: int,
+        total: int,
+        pixel_image_counts: Sequence[int] | None,
+        pixel_row_mask: npt.NDArray[np.bool_] | None,
+    ) -> torch.Tensor:
+        """Vision rows of fused rows ``start:end`` in ``values``, laid out like a :meth:`_fused_model_pass` batch.
+
+        :param values: Tensor with one entry per vision row.
+        :param start: First fused row.
+        :param end: Fused row after the last.
+        :param total: Fused rows.
+        :param pixel_image_counts: Vision rows per token row, or ``None``.
+        :param pixel_row_mask: Rows each adapter run holds, or ``None``.
+        :return: The entries of those vision rows.
+        """
+        if pixel_row_mask is None:
+            return self._pixel_values_for_fused_slice(
+                values, start, end, total, image_counts=pixel_image_counts
+            )
+        marked_rows = np.flatnonzero(pixel_row_mask)
+        first = start % len(marked_rows)
+        return pixel_values_for_minibatch(
+            values,
+            marked_rows[first : first + end - start],
+            len(pixel_row_mask),
+            image_counts=pixel_image_counts,
+        )
+
+    @staticmethod
+    def _planned_chunk_images(
+        pixel_values: torch.Tensor | None,
+        chunk_keys: dict[tuple[int, int], torch.Tensor | None],
+        vision_slice: Callable[[torch.Tensor, int, int], torch.Tensor],
+    ) -> list[PlannedImages]:
+        """Images of each chunk, as :meth:`VisionLockstep.plan` takes them.
+
+        :param pixel_values: Vision rows of the fused batch, or ``None``.
+        :param chunk_keys: Cache keys of each chunk's vision rows, or ``None``.
+        :param vision_slice: Vision rows of a chunk in a tensor laid out like *pixel_values*.
+        :return: Planned images of each chunk, in run order.
+        """
+        if pixel_values is None:
+            return [[] for _ in chunk_keys]
+        vision_rows = torch.arange(pixel_values.shape[0])
+        planned: list[PlannedImages] = []
+        for chunk, keys in chunk_keys.items():
+            if keys is not None:
+                planned.append(keys.tolist())
+            elif vision_slice(vision_rows, *chunk).numel():
+                planned.append(None)
+            else:
+                planned.append([])
+        return planned
+
+    def _chunk_vision_rows(
+        self,
+        pixel_values: torch.Tensor,
+        chunk_keys: dict[tuple[int, int], torch.Tensor | None],
+        vision_slice: Callable[[torch.Tensor, int, int], torch.Tensor],
+    ) -> Iterator[torch.Tensor]:
+        """Host vision rows of each chunk, or a stand-in when its tower call reuses every image.
+
+        :param pixel_values: Vision rows of the fused batch.
+        :param chunk_keys: Cache keys of each chunk's vision rows, or ``None``.
+        :param vision_slice: Vision rows of a chunk in a tensor laid out like *pixel_values*.
+        :return: Iterator over each chunk's vision rows, in run order.
+        """
+        lockstep = self._vision_lockstep
+        for index, (chunk, keys) in enumerate(chunk_keys.items()):
+            reused = keys is not None and (lockstep is None or lockstep.reuses(index))
+            dtype = self._vision_cache.reuse_dtype(keys.tolist()) if reused else None
+            if keys is None or dtype is None:
+                yield vision_slice(pixel_values, *chunk)
+            else:
+                yield self._vision_cache.stand_in(
+                    (len(keys), *pixel_values.shape[1:]), dtype, self.device
+                )
+
     def _fused_model_pass(
         self,
         fused_ids: torch.Tensor,
@@ -5323,6 +5647,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         pixel_image_counts: Sequence[int] | None = None,
         score_mask: torch.Tensor | None = None,
         image_keys: torch.Tensor | None = None,
+        pixel_row_mask: npt.NDArray[np.bool_] | None = None,
+        support_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Run the model on a fused batch with per-sample adapter routing.
 
@@ -5338,52 +5664,75 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :param image_keys: Vision feature cache key of each vision row, laid
             out like *pixel_values*; ``None`` keeps the caller's keys.
         :type image_keys: torch.Tensor | None
+        :param pixel_row_mask: ``(R,)`` mask over the token rows that
+            *pixel_values*, *pixel_image_counts* and *image_keys* describe,
+            marking the rows each adapter run holds, in order. Each adapter
+            run is as long as the marked rows, and fused row ``r`` reads the
+            vision rows of marked row ``r % runs``. ``None``: every fused row
+            reads its own.
+        :type pixel_row_mask: npt.NDArray[np.bool_] | None
+        :param support_ids: ``(B, seq_len - 1, K)`` sampling support per
+            position (:meth:`_score_hidden`), or ``None``.
+        :type support_ids: torch.Tensor | None
         :return: ``(log_probs, values)``; log_probs is ``(B, seq_len - 1)``.
         :rtype: tuple[torch.Tensor, torch.Tensor | None]
         """
         # Generate / weight-sync can leave FSDP units unsharded. fused
         # lm_head gemm then full_tensor()s a stale buffer.
         reshard_fsdp_modules(self.actor)
-        if pixel_values is not None:
-            pixel_values = pixel_values.to(self.device)
         total = fused_ids.shape[0]
         seq_len_out = fused_ids.shape[1] - 1
         position_ids = None
         if self.calc_position_embeddings:
             position_ids = self._position_ids_from_mask(fused_mask)
-        if batch_size is None:
-            chunks = [(0, total)]
-        else:
-            # Vision-tower LoRA layers see image rows, which a chunk can only
-            # route correctly when all its rows share one adapter.
-            runs = (
-                [len(list(run)) for _, run in groupby(routing)]
-                if pixel_values is not None
-                else [total]
+        chunks = self._fused_chunks(
+            total, routing, batch_size, split_adapter_runs=pixel_values is not None
+        )
+        vision_slice = partial(
+            self._fused_vision_slice,
+            total=total,
+            pixel_image_counts=pixel_image_counts,
+            pixel_row_mask=pixel_row_mask,
+        )
+        chunk_keys = {
+            chunk: None if image_keys is None else vision_slice(image_keys, *chunk)
+            for chunk in chunks
+        }
+        # Every rank runs the same no-grad chunks, so they agree on every
+        # chunk's tower call up front.
+        lockstep = self._vision_lockstep
+        plan = (
+            nullcontext()
+            if lockstep is None or batch_size is None
+            else lockstep.plan(
+                self._planned_chunk_images(pixel_values, chunk_keys, vision_slice)
             )
-            run_starts = [0, *accumulate(runs)]
-            chunks = [
-                (start, min(start + batch_size, run_end))
-                for run_start, run_end in pairwise(run_starts)
-                for start in range(run_start, run_end, batch_size)
-            ]
+        )
+        # Chunks run in ``chunks`` order, so only the running and the next
+        # chunk's vision rows are on the device.
+        device_pixels = (
+            None
+            if pixel_values is None
+            else prefetch_to_device(
+                self._chunk_vision_rows(pixel_values, chunk_keys, vision_slice),
+                self.device,
+                self._pixel_staging,
+            )
+        )
         fused_fn, _, _ = self._fused_logprob_fn_and_head()
         # One lm_head all-gather for the whole pass; chunks only differ in hidden.
-        with self.shard_runtime.gather_layer(
-            self._get_lm_head(), device=fused_ids.device
-        ) as (head_w, head_b):
+        with (
+            plan,
+            self.shard_runtime.gather_layer(
+                self._get_lm_head(), device=fused_ids.device
+            ) as (head_w, head_b),
+        ):
 
             def _run_chunk(
                 start: int, end: int
             ) -> tuple[torch.Tensor, torch.Tensor | None]:
-                chunk_keys = self._pixel_values_for_fused_slice(
-                    image_keys, start, end, total, image_counts=pixel_image_counts
-                )
-                with (
-                    nullcontext()
-                    if chunk_keys is None
-                    else self._vision_cache.images(chunk_keys)
-                ):
+                keys = chunk_keys[(start, end)]
+                with nullcontext() if keys is None else self._vision_cache.images(keys):
                     return self._run_fused_chunk(
                         fused_ids[start:end],
                         fused_mask[start:end],
@@ -5392,14 +5741,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                         fused_fn,
                         head_w,
                         head_b,
-                        self._pixel_values_for_fused_slice(
-                            pixel_values,
-                            start,
-                            end,
-                            total,
-                            image_counts=pixel_image_counts,
-                        ),
+                        None if device_pixels is None else next(device_pixels),
                         score_mask[start:end] if score_mask is not None else None,
+                        support_ids[start:end] if support_ids is not None else None,
                     )
 
             if len(chunks) == 1:
@@ -5411,6 +5755,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         ids: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
         pixel_values: torch.Tensor | None = None,
+        support_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Gradient-bearing actor log-probs, every row routed to the actor adapter.
 
@@ -5431,6 +5776,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :type attention_mask: torch.Tensor | None, optional
         :param pixel_values: Vision rows of *ids*, or ``None`` for text.
         :type pixel_values: torch.Tensor | None
+        :param support_ids: ``(B, seq_len - 1, K)`` sampling support per
+            position (:meth:`_score_hidden`), or ``None``.
+        :type support_ids: torch.Tensor | None
         :return: Actor log-probs ``(B, seq_len - 1)``.
         :rtype: torch.Tensor
         """
@@ -5439,13 +5787,16 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
         # Packed path for the gradient forward only; no-grad passes stay padded.
         if torch.is_grad_enabled() and self._packing_mode() is not None:
-            return self._fused_packed_forward(ids, attention_mask, pixel_values)
+            return self._fused_packed_forward(
+                ids, attention_mask, pixel_values, support_ids
+            )
 
         log_probs, _ = self._fused_model_pass(
             ids,
             attention_mask,
             ["actor"] * ids.shape[0],
             pixel_values=pixel_values,
+            support_ids=support_ids,
         )
         return log_probs
 
@@ -5454,6 +5805,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         ids: torch.Tensor,
         attention_mask: torch.Tensor,
         pixel_values: torch.Tensor | None = None,
+        support_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Padding-free packed variant of the gradient :meth:`_fused_forward`.
 
@@ -5470,6 +5822,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :type attention_mask: torch.Tensor
         :param pixel_values: Vision rows of *ids*, or ``None`` for text.
         :type pixel_values: torch.Tensor | None
+        :param support_ids: ``(B, seq_len - 1, K)`` sampling support per
+            position (:meth:`_score_hidden`), or ``None``.
+        :type support_ids: torch.Tensor | None
         :return: Actor log-probs ``(B, seq_len - 1)``.
         :rtype: torch.Tensor
         """
@@ -5504,6 +5859,11 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             temperature=self.temperature,
             cast_to_fp32=self.cast_logprobs_to_fp32,
             chunk_rows=self.chunk_rows,
+            support_ids=(
+                None
+                if support_ids is None
+                else pack_next_token_frame(support_ids, attention_mask, -1)
+            ),
         )
         return unpack_logprobs(packed_lp, packed)
 
@@ -5518,6 +5878,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         include_actor: bool = True,
         score_mask: torch.Tensor | None = None,
         image_keys: torch.Tensor | None = None,
+        pixel_row_mask: npt.NDArray[np.bool_] | None = None,
+        support_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Compute reference log-probs, actor log-probs, and critic values in
         one forward pass (under ``torch.no_grad``).
@@ -5554,6 +5916,15 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :param image_keys: ``(N,)`` vision feature cache key of each vision
             row of *pixel_values*; ``None`` keeps the caller's keys.
         :type image_keys: torch.Tensor | None
+        :param pixel_row_mask: ``(R,)`` mask over the token rows that
+            *pixel_values*, *pixel_image_counts* and *image_keys* describe,
+            marking the rows *ids* holds, in order. ``None``: *ids* holds
+            every row.
+        :type pixel_row_mask: npt.NDArray[np.bool_] | None
+        :param support_ids: ``(B, seq_len - 1, K)`` sampling support per
+            position (:meth:`_score_hidden`), applied to the reference and
+            actor rows alike, or ``None``.
+        :type support_ids: torch.Tensor | None
         :return: ``(reference_log_probs, actor_log_probs, critic_values)``
             each of shape ``(B, seq_len - 1)``.
         :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]
@@ -5582,30 +5953,26 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             fused_score_mask = (
                 score_mask.repeat(N, 1) if score_mask is not None else None
             )
+            fused_support_ids = (
+                support_ids.repeat(N, 1, 1) if support_ids is not None else None
+            )
             routing: list[str] = []
             for adapter in adapters:
                 routing.extend([adapter] * B)
 
-            fused_pixel_values = self._repeat_pixel_values_for_fused_rows(
-                pixel_values,
-                fused_ids.shape[0],
-                B,
-            )
-            fused_image_counts = None
-            if pixel_image_counts is not None:
-                repeat = fused_ids.shape[0] // B
-                fused_image_counts = list(pixel_image_counts) * repeat
             log_probs, values = self._fused_model_pass(
                 fused_ids,
                 fused_mask,
                 routing,
                 batch_size=batch_size,
-                pixel_values=fused_pixel_values,
-                pixel_image_counts=fused_image_counts,
+                pixel_values=pixel_values,
+                pixel_image_counts=pixel_image_counts,
                 score_mask=fused_score_mask,
-                image_keys=self._repeat_pixel_values_for_fused_rows(
-                    image_keys, fused_ids.shape[0], B
+                image_keys=image_keys,
+                pixel_row_mask=(
+                    np.ones(B, dtype=bool) if pixel_row_mask is None else pixel_row_mask
                 ),
+                support_ids=fused_support_ids,
             )
             unset_fused_adapter_routing(self.actor)
             missing = torch.full_like(log_probs[:B], float("nan"))
@@ -5690,6 +6057,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         attention_mask: torch.Tensor | None = None,
         pixel_values: torch.Tensor | None = None,
         score_mask: torch.Tensor | None = None,
+        support_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Find the log probabilities for a set of previously generated ids.
 
@@ -5706,6 +6074,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :param score_mask: ``(B, seq_len - 1)`` positions whose log-probs are
             needed, or ``None`` to score every position.
         :type score_mask: torch.Tensor | None, optional
+        :param support_ids: ``(B, seq_len - 1, K)`` sampling support per
+            position (:meth:`_score_hidden`), or ``None``.
+        :type support_ids: torch.Tensor | None, optional
         :return: Log probabilities of the completion IDs.
         :rtype: torch.Tensor
         """
@@ -5722,8 +6093,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 position_ids = self._position_ids_from_mask(attention_mask)
 
             fused_fn, _head_w, _head_b = self._fused_logprob_fn_and_head()
-            if pixel_values is not None:
-                pixel_values = pixel_values.to(self.device)
             # Pack only the gradient forward (the per-epoch hot path). The
             # no-grad old/reference passes stay padded so they are mutually
             # consistent; the packed-vs-padded gap for the current policy is the
@@ -5739,7 +6108,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 # A chunk spanning the whole batch keeps every image tile.
                 batch_pixel_values = (
                     pixel_values
-                    if end_idx - batch == num_samples
+                    if pixel_values is None or end_idx - batch == num_samples
                     else self._pixel_values_for_fused_slice(
                         pixel_values, batch, end_idx, num_samples
                     )
@@ -5785,6 +6154,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 batch_score_mask = (
                     score_mask[batch:end_idx] if score_mask is not None else None
                 )
+                batch_support_ids = (
+                    support_ids[batch:end_idx] if support_ids is not None else None
+                )
                 if packed is not None:
                     packed_score_mask = None
                     if batch_score_mask is not None:
@@ -5813,6 +6185,11 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                             head_b,
                             packed.input_ids[:, 1:],
                             packed_score_mask,
+                            None
+                            if batch_support_ids is None
+                            else pack_next_token_frame(
+                                batch_support_ids, batch_attention_mask, -1
+                            ),
                         )
                     # Map back to the dense (mb, T-1) frame so the loss path is
                     # unchanged; cross-segment boundary predictions are dropped.
@@ -5829,6 +6206,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                             head_b,
                             batch_ids[:, 1:],
                             batch_score_mask,
+                            batch_support_ids,
                         )
 
                 first = None
@@ -6204,6 +6582,98 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             f"learn_phase_{phase}_s": seconds.get(phase, 0.0) for phase in LEARN_PHASES
         }
 
+    @contextmanager
+    def _vision_step(self, pixel_values: torch.Tensor | None) -> Generator[None]:
+        """Hold one learn's vision tower outputs, with every rank's tower calls in step.
+
+        When several ranks learn and any has images, each actor forward runs
+        the vision tower on every rank or on none (:func:`vision_lockstep`),
+        since a cache hit also skips the tower's FSDP2 collectives. An engine
+        with its image tower stripped makes no image rollouts, so no rank
+        checks the others.
+
+        :param pixel_values: This rank's vision rows, or ``None``.
+        :type pixel_values: torch.Tensor | None
+        """
+        module = self._vision_language_module
+        with self._vision_cache.step():
+            if (
+                module is None
+                or get_world_size() == 1
+                or not serves_images(self._engine_strip_multimodal_towers)
+                or not any_rank(pixel_values is not None)
+            ):
+                yield
+                return
+            with vision_lockstep(module, self._vision_cache) as lockstep:
+                self._vision_lockstep = lockstep
+                try:
+                    yield
+                finally:
+                    self._vision_lockstep = None
+
+    def _learn_vision_rows(
+        self,
+        vision_rows: VisionRows | None,
+        micro_batches: Sequence[npt.NDArray[np.intp]],
+        sample_rows: int,
+    ) -> Iterator[tuple[torch.Tensor | None, torch.Tensor | None]]:
+        """Device vision rows and cache keys of each learn micro-batch, in run order; every rank calls it together.
+
+        :param vision_rows: Vision rows of the learn batch, or ``None`` for text.
+        :param micro_batches: Token rows of each micro-batch, in run order.
+        :param sample_rows: Token rows of the learn batch.
+        :return: ``(pixel_values, image_keys)`` of each micro-batch.
+        """
+        batch_keys = None
+        dtype = None
+        if vision_rows is not None and vision_rows.image_keys is not None:
+            batch_keys = [
+                pixel_values_for_minibatch(
+                    vision_rows.image_keys,
+                    rows,
+                    sample_rows,
+                    image_counts=vision_rows.image_counts,
+                )
+                for rows in micro_batches
+            ]
+            dtype = self._vision_cache.image_dtype(
+                torch.cat(batch_keys).tolist(), training=True
+            )
+        if (
+            self._vision_language_module is not None
+            and get_world_size() > 1
+            and serves_images(self._engine_strip_multimodal_towers)
+            and any_rank(vision_rows is not None and dtype is None)
+        ):
+            dtype = None
+        if vision_rows is None:
+            return iter([(None, None)] * len(micro_batches))
+        # Every rank in lockstep holds a train-mode tower output for each image,
+        # so the forwards reuse them and take stand-ins that copy no pixels.
+        if batch_keys is not None and dtype is not None:
+            image_shape = vision_rows.pixel_values.shape[1:]
+            return (
+                (
+                    self._vision_cache.stand_in(
+                        (len(keys), *image_shape), dtype, self.device
+                    ),
+                    keys,
+                )
+                for keys in batch_keys
+            )
+        # A copy starts when its micro-batch is requested, so none is held
+        # through the backward before it.
+        pixels = prefetch_to_device(
+            (vision_rows.for_minibatch(rows, sample_rows) for rows in micro_batches),
+            self.device,
+            self._pixel_staging,
+            ahead=0,
+        )
+        return (
+            (next(pixels), keys) for keys in batch_keys or [None] * len(micro_batches)
+        )
+
     def _has_episode_segments(
         self,
         episode_segments: Sequence[EpisodeSegments | None] | None,
@@ -6262,6 +6732,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         pixel_values: torch.Tensor | None = None,
         pixel_image_counts: Sequence[int] | None = None,
         image_token_id: int | None = None,
+        sampling_supports: Sequence[torch.Tensor | None] | None = None,
     ) -> tuple[SegmentRows, SegmentRows]:
         """Split segmented episodes into rows, and pad them so every rank runs the same micro-batches.
 
@@ -6291,6 +6762,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :param image_token_id: Token id the VL forward scatters one image
             feature row into; required with ``pixel_values``.
         :type image_token_id: int | None
+        :param sampling_supports: Per-episode ``(n, K)`` sampling supports, or ``None``.
+        :type sampling_supports: Sequence[torch.Tensor | None] | None
         :return: The split rows, before filler rows, and those rows padded.
         :rtype: tuple[SegmentRows, SegmentRows]
         """
@@ -6303,6 +6776,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             sampling_logps=sampling_logps,
             pixel_values=pixel_values,
             pixel_image_counts=pixel_image_counts,
+            sampling_supports=sampling_supports,
         )
         padded, _accumulation_steps = self._pad_segment_rows(
             rows,
@@ -6701,15 +7175,17 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self._vllm_moved = True
 
     def _generate_with_hf(
-        self, prompts: Sequence[RolloutPrompt]
+        self, prompts: Sequence[RolloutPrompt], group_size: int = 1
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-        """Generate one completion per prompt with HuggingFace ``generate``.
+        """Generate ``group_size`` completions per prompt with HuggingFace ``generate``.
 
         Runs under the caller's adapter and eval mode, in chunks of
         ``hf_generate_chunk_size`` prompts.
 
         :param prompts: Prompt mappings for this rank.
         :type prompts: Sequence[RolloutPrompt]
+        :param group_size: Completions per prompt.
+        :type group_size: int
         :return: Per-prompt completion token tensors and matching action masks.
         :rtype: tuple[list[torch.Tensor], list[torch.Tensor]]
         """
@@ -6721,7 +7197,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         with torch.no_grad(), self._amp_ctx():
             for start in range(0, len(prompts), self.hf_generate_chunk_size):
                 for prompt in prompts[start : start + self.hf_generate_chunk_size]:
-                    hf_inputs = prepare_prompt_hf_generate(prompt, actor_device)
+                    hf_inputs = prepare_prompt_hf_generate(
+                        prompt, actor_device, group_size=group_size
+                    )
                     prompt_len = int(hf_inputs["input_ids"].shape[-1])
                     token_ids = self.actor.generate(
                         **hf_inputs,
@@ -6749,10 +7227,14 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self,
         prompts: Sequence[RolloutPrompt],
         group_size: int,
-        temperature: float | None,
+        temperature: float,
         capture_sampling_logps: bool = False,
+        capture_sampling_supports: bool = False,
     ) -> tuple[
-        list[torch.Tensor], list[torch.Tensor], list[torch.Tensor | None] | None
+        list[torch.Tensor],
+        list[torch.Tensor],
+        list[torch.Tensor | None] | None,
+        list[torch.Tensor | None] | None,
     ]:
         """Generate completions with colocated vLLM for GRPO/LLMPPO-style batches.
 
@@ -6768,9 +7250,21 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :param group_size: Repeat factor per prompt (1 for plain PPO).
         :type group_size: int
         :param temperature: Temperature for sampling.
-        :type temperature: float | None
-        :return: Per-prompt completion token tensors and matching action masks.
-        :rtype: tuple[list[torch.Tensor], list[torch.Tensor]]
+        :type temperature: float
+        :param capture_sampling_logps: Return each completion's sampled-token
+            logprobs. vLLM reports them after penalties, temperature and
+            filtering, i.e. under the distribution the token was drawn from;
+            the trainer scores the same token without penalties, so the
+            importance ratio between the two is exact for penalised rollouts.
+        :type capture_sampling_logps: bool
+        :param capture_sampling_supports: Return the ``(n, K)`` token ids vLLM
+            could sample at each generated token. Needs an engine built with
+            ``return_sampling_mask``.
+        :type capture_sampling_supports: bool
+        :return: Per-prompt completion token tensors, matching action masks,
+            and per-completion sampling logprobs and supports (each ``None``
+            when not captured).
+        :rtype: tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor | None] | None, list[torch.Tensor | None] | None]
         """
         if SamplingParams is None:
             msg = "vLLM is required for colocated generation. Install AgileRL with vLLM support for this platform: `pip install agilerl[llm]`."
@@ -6863,29 +7357,32 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             all_prompts_ids = prompts_ids
             all_max_output_tokens = max_output_tokens
 
-        configured_min_tokens = (
-            0 if self.min_output_tokens is None else int(self.min_output_tokens)
+        sampling = RolloutSampling(
+            temperature=temperature,
+            top_p=self.top_p,
+            top_k=0 if self.top_k is None else self.top_k,
+            min_p=0.0 if self.min_p is None else self.min_p,
+            repetition_penalty=self.repetition_penalty,
+            presence_penalty=vllm_config.presence_penalty,
+            frequency_penalty=vllm_config.frequency_penalty,
+            min_tokens=(
+                0 if self.min_output_tokens is None else int(self.min_output_tokens)
+            ),
         )
         generation_kwargs: dict[str, Any] = {
             "n": 1,  # vLLM on each GPU generates only 1 in colocate mode
-            "repetition_penalty": self.repetition_penalty,
-            "temperature": temperature,
-            "top_p": self.top_p,
-            "top_k": -1 if (self.top_k is None or self.top_k == 0) else self.top_k,
-            "min_p": 0.0 if self.min_p is None else self.min_p,
-            "presence_penalty": vllm_config.presence_penalty,
-            "frequency_penalty": vllm_config.frequency_penalty,
         }
         if capture_sampling_logps:
             # logprobs=0 → vLLM returns the sampled token's logprob only.
             generation_kwargs["logprobs"] = 0
         if vllm_config.stop_sequences:
             generation_kwargs["stop"] = vllm_config.stop_sequences
+        if self.logit_bias is not None:
+            generation_kwargs["logit_bias"] = self.logit_bias
         sampling_params = [
             SamplingParams(
                 **generation_kwargs,
-                max_tokens=max_output_token,
-                min_tokens=min(configured_min_tokens, max_output_token),
+                **sampling.vllm_kwargs(max_output_token),
             )
             for max_output_token in all_max_output_tokens
         ]
@@ -6914,6 +7411,15 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             if capture_sampling_logps
             else []
         )
+        sampling_supports: list[torch.Tensor | None] | None = (
+            [
+                extract_vllm_sampling_supports(output)
+                for outputs in all_outputs
+                for output in outputs.outputs
+            ]
+            if capture_sampling_supports
+            else None
+        )
         if tensor_parallel_size > 1:
             # Slice completions for this rank within its TP group.
             # Each rank generates all outputs — we keep only our share.
@@ -6926,6 +7432,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             prompts_ids = all_prompts_ids[tp_slice]
             if capture_sampling_logps:
                 sampling_logps_flat = sampling_logps_flat[tp_slice]
+            if sampling_supports is not None:
+                sampling_supports = sampling_supports[tp_slice]
 
         gen_lens_flat = [len(ids) for ids in generated_ids]
 
@@ -6979,7 +7487,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             for i, token_ids in enumerate(token_ids_list)
         ]
 
-        return token_ids_list, completion_masks, sampling_logps
+        return token_ids_list, completion_masks, sampling_logps, sampling_supports
 
     @staticmethod
     def _logprobs_from_hidden_fused(
@@ -6990,6 +7498,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         temperature: float = 1.0,
         cast_to_fp32: bool = True,
         chunk_rows: int | None = None,
+        softcap: float | None = None,
+        support_ids: torch.Tensor | None = None,
+        logit_bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Per-token target logprobs without materializing the full ``(B, T, V)``
         logits tensor.
@@ -7023,6 +7534,13 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             ``None`` (default) it is resolved from the vocab size via
             a ~256 MB fp32 workspace heuristic.
         :type chunk_rows: int | None, optional
+        :param softcap: final-logit softcap of the model's head, or ``None``.
+        :type softcap: float | None, optional
+        :param support_ids: ``(B, T, K)`` sampling support per position,
+            ``-1`` padded; a position with one is normalized over it alone.
+        :type support_ids: torch.Tensor | None, optional
+        :param logit_bias: ``(V,)`` fp32 offsets added after the softcap, or ``None``.
+        :type logit_bias: torch.Tensor | None, optional
         :return: ``(B, T)`` per-token logprobs in ``hidden.dtype``.
         :rtype: torch.Tensor
         """
@@ -7035,6 +7553,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             temperature=temperature,
             cast_to_fp32=cast_to_fp32,
             chunk_rows=chunk_rows,
+            softcap=softcap,
+            support_ids=support_ids,
+            logit_bias=logit_bias,
         )
 
     @staticmethod
@@ -7046,6 +7567,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         temperature: float = 1.0,
         cast_to_fp32: bool = True,
         chunk_rows: int | None = None,
+        softcap: float | None = None,
+        support_ids: torch.Tensor | None = None,
+        logit_bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Gradient-aware version of :meth:`_logprobs_from_hidden_fused`.
 
@@ -7074,6 +7598,13 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             When ``None`` (default) it is resolved from the vocab size via
             a ~256 MB fp32 workspace heuristic.
         :type chunk_rows: int | None, optional
+        :param softcap: final-logit softcap of the model's head, or ``None``.
+        :type softcap: float | None, optional
+        :param support_ids: ``(B, T, K)`` sampling support per position,
+            ``-1`` padded; a position with one is normalized over it alone.
+        :type support_ids: torch.Tensor | None, optional
+        :param logit_bias: ``(V,)`` fp32 offsets added after the softcap, or ``None``.
+        :type logit_bias: torch.Tensor | None, optional
         :return: ``(B, T)`` per-token logprobs in ``hidden.dtype``.
         :rtype: torch.Tensor
         """
@@ -7086,6 +7617,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             temperature,
             cast_to_fp32,
             chunk_rows,
+            softcap,
+            support_ids,
+            logit_bias,
         )
 
     def configure_batch_size_per_process(
@@ -7459,7 +7993,25 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             lora_rank=lora_rank,
             tower_lora_target_modules=self.lora_tower_target_modules,
         )
+        self.records_sampling_supports = records_sampling_supports(
+            self.temperature,
+            0 if self.top_k is None else self.top_k,
+            self.top_p,
+            0.0 if self.min_p is None else self.min_p,
+            None,
+        )
+        llm_kwargs["return_sampling_mask"] = self.records_sampling_supports
         self._ensure_vllm_lora_staging_dir()
+        device_index = torch.device(self.device).index
+        if device_index is None:
+            device_index = torch.cuda.current_device()
+        visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+        gpu_id = (
+            visible_devices.split(",")[device_index].strip()
+            if visible_devices
+            else device_index
+        )
+        apply_vllm_compile_cache_env([gpu_id])
         if is_main_process():
             warnings.warn(
                 f"colocated init: starting vLLM LLM() with "
@@ -7561,11 +8113,19 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         """Replace ``lm_head`` with ``nn.Identity`` so ``output.logits`` is hidden state."""
         parent, attr = self._get_lm_head_parent()
         original = getattr(parent, attr)
+        # The model softcaps whatever its head returns; a hidden state must pass
+        # through unchanged.
+        text_config = parent.config.get_text_config()
+        softcap = getattr(text_config, "final_logit_softcapping", None)
         setattr(parent, attr, HiddenStateHead(original.weight.dtype))
+        if softcap is not None:
+            text_config.final_logit_softcapping = None
         try:
             yield original
         finally:
             setattr(parent, attr, original)
+            if softcap is not None:
+                text_config.final_logit_softcapping = softcap
 
     @contextmanager
     def _offload_trainer_for_rollout(

@@ -12,6 +12,9 @@ import torch
 import torch.nn as nn
 from torch.distributed.tensor import DTensor
 
+# No public API pops the active torch dispatch modes.
+from torch.utils._python_dispatch import _disable_current_modes
+
 # Default widest [rows, features] activation of one routed-expert row chunk,
 # one fp32 expert-parallel combine chunk, and one grouped LoRA GEMM output.
 # On Super-VL the learn peak grows ~0.37 GiB per GiB of chunk. Each chunk adds
@@ -32,10 +35,12 @@ def grouped_mm_supported(device_index: int, dtype: torch.dtype) -> bool:
         return False
     # The first call can run inside a checkpointed or no_grad forward. The
     # probe needs its own backward: grad on, and identity hooks keep its saved
-    # tensors out of the checkpoint so recompute matches.
+    # tensors out of the checkpoint. Its ops run once, so no dispatch mode may
+    # record them: selective checkpointing indexes every op call on recompute.
     with (
         torch.enable_grad(),
         torch.autograd.graph.saved_tensors_hooks(lambda t: t, lambda t: t),
+        _disable_current_modes(),
     ):
         try:
             device = torch.device("cuda", device_index)

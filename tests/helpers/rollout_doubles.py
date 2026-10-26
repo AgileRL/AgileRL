@@ -103,6 +103,8 @@ class FakeEnvClient:
 class RolloutEnvDoubleMixin:
     """Map ``RolloutCollector``'s phased reset/step onto a double's reset()/step()."""
 
+    sampling_supports: tuple[torch.Tensor, ...] = ()
+
     @property
     def rubric_components(self) -> tuple[str, ...]:
         return ()
@@ -125,11 +127,18 @@ class RolloutEnvDoubleMixin:
         del obs_text, info, image
         return self._pending_reset
 
-    def _step_prepare(self, full_completion: Any, sampling_logps: Any = None) -> str:
+    def _step_prepare(
+        self,
+        full_completion: Any,
+        sampling_logps: Any = None,
+        sampling_supports: torch.Tensor | None = None,
+    ) -> str:
         # Mirror the real phase contract: completions are normalized to 2-D here.
         if full_completion.dim() == 1:
             full_completion = full_completion.unsqueeze(0)
         self._pending_step = (full_completion, sampling_logps)
+        if sampling_supports is not None:
+            self.sampling_supports = (*self.sampling_supports, sampling_supports)
         return ""
 
     def _step_env(self, gen_text: str) -> Any:
@@ -246,6 +255,7 @@ def bare_rollout_env() -> RolloutHarness:
     w.sampling_logps = []  # read by get_episode_data
     w._segments = []  # read by get_episode_data
     w._segment_prompt_tokens = None  # __init__ default, read by the feedback path
+    w._segment_max_images = None  # __init__ default, read by the feedback path
     w._restart_keep_turns = 0  # __init__ default, read by the feedback path
     w._tool_parser = None  # __init__ default, read by the step phases
     w._takes_tool_calls = None  # __init__ default, read by the step phases

@@ -29,7 +29,13 @@ from agilerl.arena.models.algorithms.grpo import GRPOSpec
 from agilerl.arena.models.algorithms.gspo import GSPOSpec
 from agilerl.arena.models.algorithms.llmppo import LLMPPOSpec
 from agilerl.arena.models.algorithms.ppo import PPOSpec, RecurrentPPOSpec
-from agilerl.arena.models.env import GymEnvSpec, LLMEnvSpec, LLMEnvType
+from agilerl.arena.models.env import (
+    EnvHostVolume,
+    EnvServiceSpec,
+    GymEnvSpec,
+    LLMEnvSpec,
+    LLMEnvType,
+)
 from agilerl.arena.models.fsdp import FSDPConfig
 from agilerl.arena.models.manifest import _resolve_algorithm
 from agilerl.arena.models.networks import VLLMConfig
@@ -738,6 +744,11 @@ CLASSIFIEDS_SERVICE = {
         {"name": "web", "image": "classifieds-web:1", "port": 9980},
     ],
 }
+ZIM_VOLUME = {
+    "name": "zim",
+    "host_path": "/var/cache/agilerl-zim",
+    "mount_path": "/data",
+}
 
 
 class TestLLMEnvSpecEnvPods:
@@ -853,6 +864,29 @@ class TestLLMEnvSpecEnvPods:
                 },
                 "repeats a container name",
             ),
+            (
+                {"host_volumes": [ZIM_VOLUME, {**ZIM_VOLUME, "mount_path": "/other"}]},
+                r"repeats a host volume name: \['zim', 'zim'\]",
+            ),
+            (
+                {"host_volumes": [ZIM_VOLUME, {**ZIM_VOLUME, "name": "copy"}]},
+                "mounts more than one host volume at /data",
+            ),
+            (
+                {
+                    "host_volumes": [ZIM_VOLUME],
+                    "containers": [
+                        {
+                            "name": "web",
+                            "image": "a:1",
+                            "port": 80,
+                            "command": ["serve"],
+                            "memory_rootfs": "1Gi",
+                        },
+                    ],
+                },
+                "host_volumes are not visible under memory_rootfs",
+            ),
         ],
     )
     def test_service_spec_errors(self, change: dict, match: str) -> None:
@@ -877,6 +911,47 @@ class TestLLMEnvSpecEnvPods:
 
         with pytest.raises(ValidationError, match=match):
             EnvContainerSpec.model_validate({"name": "web", "image": "a:1", **change})
+
+    def test_service_host_volumes_parse(self) -> None:
+        service = EnvServiceSpec.model_validate(
+            {**CLASSIFIEDS_SERVICE, "host_volumes": [ZIM_VOLUME]}
+        )
+
+        assert service.host_volumes == [
+            EnvHostVolume(
+                name="zim", host_path="/var/cache/agilerl-zim", mount_path="/data"
+            )
+        ]
+        assert EnvServiceSpec.model_validate(CLASSIFIEDS_SERVICE).host_volumes == []
+
+    @pytest.mark.parametrize(
+        ("change", "match"),
+        [
+            ({"host_path": "var/cache/agilerl-zim"}, "host_path must be an absolute"),
+            ({"mount_path": "/data/../etc"}, "mount_path must be an absolute path"),
+            ({"host_path": "/var/cache/agilerl-zim/"}, "host_path must be an absolute"),
+            ({"host_path": "/var/cache/agilerl-zim/../../../lib"}, "without '..'"),
+            (
+                {"host_path": "/var/lib/rancher"},
+                "host_path must be under /var/cache/agilerl-",
+            ),
+            ({"mount_path": "/"}, "mount_path must be an absolute path"),
+            ({"mount_path": "/dev/shm"}, "shared-memory mount"),
+            ({"mount_path": "/dev/shm/x"}, "shared-memory mount"),
+            ({"name": "Zim"}, "should match pattern"),
+            ({"read_only": False}, "Extra inputs are not permitted"),
+        ],
+    )
+    def test_host_volume_errors(self, change: dict, match: str) -> None:
+        with pytest.raises(ValidationError, match=match):
+            EnvHostVolume.model_validate({**ZIM_VOLUME, **change})
+
+    def test_host_volume_mounts_beside_dev_shm(self) -> None:
+        volume = EnvHostVolume.model_validate(
+            {**ZIM_VOLUME, "mount_path": "/dev/shmem"}
+        )
+
+        assert volume.mount_path == "/dev/shmem"
 
 
 class TestLLMEnvSpecSurfaces:
@@ -1234,6 +1309,23 @@ class TestLLMEnvSpecActionErrorField:
         spec = LLMEnvSpec(env_type="rollout", env_url="http://env", max_turns=10)
 
         assert spec.action_error_field == ""
+
+
+class TestLLMEnvSpecRepeatSystemPrompt:
+    def test_accepts_the_setting(self) -> None:
+        spec = LLMEnvSpec(
+            env_type="rollout",
+            env_url="http://env",
+            max_turns=10,
+            repeat_system_prompt=True,
+        )
+
+        assert spec.repeat_system_prompt is True
+
+    def test_defaults_off(self) -> None:
+        spec = LLMEnvSpec(env_type="rollout", env_url="http://env", max_turns=10)
+
+        assert spec.repeat_system_prompt is False
 
 
 class TestLLMEnvSpecRestartOlderObservations:

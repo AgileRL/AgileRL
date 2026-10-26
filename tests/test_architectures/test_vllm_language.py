@@ -14,6 +14,8 @@ from agilerl.architectures.vllm_language import (
     apply_multimodal_engine_kwargs,
     apply_tower_connector_lora_engine_kwargs,
     nested_language_config,
+    serves_images,
+    unbuilt_tower_modules,
 )
 
 
@@ -78,6 +80,28 @@ class TestApplyTowerConnectorLoraEngineKwargs:
 
         assert kwargs == {"enable_tower_connector_lora": True}
 
+    @pytest.mark.parametrize(
+        ("family", "targets"),
+        [
+            ("qwen3_5", ["qkv", "linear_fc1", "linear_fc2"]),
+            ("qwen3_5_moe", ["qkv", "linear_fc1", "linear_fc2"]),
+            ("gemma4", ["linear", "input_proj", "embedding_projection"]),
+        ],
+    )
+    def test_enables_vision_tower_targets_of_vl_families(
+        self, family: str, targets: list[str]
+    ) -> None:
+        kwargs: dict[str, object] = {}
+
+        apply_tower_connector_lora_engine_kwargs(
+            kwargs,
+            strip_multimodal_towers=False,
+            runtime=FAMILY_RUNTIME_CONFIGS[family],
+            tower_target_modules=targets,
+        )
+
+        assert kwargs == {"enable_tower_connector_lora": True}
+
     @pytest.mark.parametrize("tower_target_modules", [None, []])
     def test_leaves_kwargs_without_tower_targets(
         self, tower_target_modules: list[str] | None
@@ -104,7 +128,11 @@ class TestApplyTowerConnectorLoraEngineKwargs:
 
     @pytest.mark.parametrize(
         ("family", "targets"),
-        [("gemma4", ["linear"]), ("nemotron_h_omni", ["in_proj"])],
+        [
+            ("gemma4", ["q_proj"]),
+            ("qwen3_5", ["proj"]),
+            ("nemotron_h_omni", ["in_proj"]),
+        ],
     )
     def test_rejects_targets_vllm_cannot_serve(
         self, family: str, targets: list[str]
@@ -116,6 +144,47 @@ class TestApplyTowerConnectorLoraEngineKwargs:
                 runtime=FAMILY_RUNTIME_CONFIGS[family],
                 tower_target_modules=targets,
             )
+
+
+class TestUnbuiltTowerModules:
+    def test_audio_strip_drops_the_gemma4_audio_tower(self) -> None:
+        unbuilt = unbuilt_tower_modules(["audio"], FAMILY_RUNTIME_CONFIGS["gemma4"])
+
+        assert unbuilt == ["audio_tower", "embed_audio"]
+
+    def test_vision_tower_stays_while_video_is_served(self) -> None:
+        unbuilt = unbuilt_tower_modules(["image"], FAMILY_RUNTIME_CONFIGS["gemma4"])
+
+        assert unbuilt == []
+
+    def test_image_and_video_strip_drops_the_vision_tower(self) -> None:
+        unbuilt = unbuilt_tower_modules(
+            ["image", "video"], FAMILY_RUNTIME_CONFIGS["qwen3_5"]
+        )
+
+        assert unbuilt == ["visual"]
+
+    def test_strip_all_drops_every_tower(self) -> None:
+        unbuilt = unbuilt_tower_modules(True, FAMILY_RUNTIME_CONFIGS["gemma4"])
+
+        assert unbuilt == ["audio_tower", "embed_audio", "embed_vision", "vision_tower"]
+
+    @pytest.mark.parametrize("strip_multimodal_towers", [False, []])
+    def test_served_towers_are_all_built(
+        self, strip_multimodal_towers: bool | list[str]
+    ) -> None:
+        unbuilt = unbuilt_tower_modules(
+            strip_multimodal_towers, FAMILY_RUNTIME_CONFIGS["gemma4"]
+        )
+
+        assert unbuilt == []
+
+    def test_shared_omni_tower_survives_an_audio_strip(self) -> None:
+        unbuilt = unbuilt_tower_modules(
+            ["audio"], FAMILY_RUNTIME_CONFIGS["nemotron_h_omni"]
+        )
+
+        assert unbuilt == []
 
 
 class TestApplyMultimodalEngineKwargs:
@@ -139,3 +208,19 @@ class TestApplyMultimodalEngineKwargs:
         apply_multimodal_engine_kwargs(kwargs, strip_multimodal_towers=False)
 
         assert kwargs == {}
+
+
+class TestServesImages:
+    @pytest.mark.parametrize(
+        ("strip_multimodal_towers", "expected"),
+        [
+            (False, True),
+            (["audio", "video"], True),
+            (True, False),
+            (["image"], False),
+        ],
+    )
+    def test_reports_whether_the_image_tower_is_served(
+        self, strip_multimodal_towers: bool | list[str], expected: bool
+    ) -> None:
+        assert serves_images(strip_multimodal_towers) is expected

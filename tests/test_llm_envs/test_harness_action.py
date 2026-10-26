@@ -1,11 +1,14 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Text after the first think close."""
+"""Text after the first think close, and where the system prompt sits."""
 
+import pytest
 import torch
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from agilerl.llm_envs.harness import RolloutHarness, action_span
+from tests import TINY_LLM_FIXTURE_PATH
 from tests.helpers.rollout_doubles import FakeEnvClient, MiniTokenizer
 
 
@@ -111,11 +114,86 @@ class TestRolloutHarnessActionProcessor:
         assert "1. quoted(fill: hello)" in prompt
 
 
-class TestTrailingInstruction:
-    def test_leaves_the_question_after_the_instruction(self) -> None:
-        harness = RolloutHarness.__new__(RolloutHarness)
-        harness._system_prompt = "Answer now."
+class ObservationClient(FakeEnvClient):
+    """Env client whose reset returns ``observation``."""
 
-        rendered = harness._with_trailing_instruction("goal\n\npage\n\nQuestion:\ngoal")
+    def __init__(self, observation: str) -> None:
+        super().__init__()
+        self.observation = observation
 
-        assert rendered == "goal\n\npage\nAnswer now.\n\nQuestion:\ngoal"
+    def reset(
+        self, seed: int | None = None, *, row_index: int | None = None
+    ) -> tuple[str, dict[str, object]]:
+        super().reset(seed, row_index=row_index)
+        return self.observation, {}
+
+
+@pytest.fixture(scope="module")
+def chat_tokenizer() -> PreTrainedTokenizerBase:
+    return AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+
+
+def first_prompt(
+    tokenizer: PreTrainedTokenizerBase, observation: str, **harness_kwargs: object
+) -> str:
+    """Decoded first prompt for ``observation`` behind the ``Answer now.`` system prompt."""
+    harness = RolloutHarness(
+        ObservationClient(observation),
+        tokenizer,
+        max_turns=1,
+        system_prompt="Answer now.",
+        **harness_kwargs,
+    )
+    prompt, _info = harness.reset()
+    return tokenizer.decode(prompt["input_ids"][0], skip_special_tokens=False)
+
+
+def rendered_turns(tokenizer: PreTrainedTokenizerBase, user_content: str) -> str:
+    """The system turn and one user turn holding ``user_content``."""
+    return tokenizer.apply_chat_template(
+        [
+            {"role": "system", "content": "Answer now."},
+            {"role": "user", "content": user_content},
+        ],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+
+
+class TestRolloutHarnessRepeatSystemPrompt:
+    def test_first_user_turn_is_the_observation(
+        self, chat_tokenizer: PreTrainedTokenizerBase
+    ) -> None:
+        # Arrange
+        observation = "goal\n\npage\n\nQuestion:\ngoal"
+
+        # Act
+        prompt = first_prompt(chat_tokenizer, observation)
+
+        # Assert
+        assert prompt == rendered_turns(chat_tokenizer, observation)
+        assert prompt.count("Answer now.") == 1
+
+    def test_repeat_puts_the_system_prompt_before_the_trailing_question(
+        self, chat_tokenizer: PreTrainedTokenizerBase
+    ) -> None:
+        # Act
+        prompt = first_prompt(
+            chat_tokenizer,
+            "goal\n\npage\n\nQuestion:\ngoal",
+            repeat_system_prompt=True,
+        )
+
+        # Assert
+        assert prompt == rendered_turns(
+            chat_tokenizer, "goal\n\npage\nAnswer now.\n\nQuestion:\ngoal"
+        )
+
+    def test_repeat_appends_the_system_prompt_without_a_question(
+        self, chat_tokenizer: PreTrainedTokenizerBase
+    ) -> None:
+        # Act
+        prompt = first_prompt(chat_tokenizer, "page", repeat_system_prompt=True)
+
+        # Assert
+        assert prompt == rendered_turns(chat_tokenizer, "page\nAnswer now.")

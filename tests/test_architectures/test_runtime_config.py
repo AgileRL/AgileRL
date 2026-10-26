@@ -90,11 +90,23 @@ class TestFamilyRuntimeConfigs:
         )
         assert base.tower_connector_lora_targets == frozenset()
 
-    def test_gemma4_uses_the_swa_trainer_without_tower_lora(self) -> None:
+    def test_gemma4_uses_the_swa_trainer(self) -> None:
         gemma4 = FAMILY_RUNTIME_CONFIGS["gemma4"]
         gemma3 = FAMILY_RUNTIME_CONFIGS["gemma3"]
         assert gemma4.trainer == gemma3.trainer
-        assert gemma4.tower_connector_lora_targets == frozenset()
+
+    def test_every_arena_tower_lora_module_is_served(self) -> None:
+        unserved = {
+            hub_id: sorted(
+                entry.tower_lora_modules
+                - FAMILY_RUNTIME_CONFIGS[
+                    entry.config["model_type"]
+                ].tower_connector_lora_targets
+            )
+            for hub_id, entry in SUPPORTED_MODEL_INFO.items()
+        }
+
+        assert {hub_id: names for hub_id, names in unserved.items() if names} == {}
 
     @pytest.mark.parametrize(
         "model_type",
@@ -154,7 +166,11 @@ class TestFamilyRuntimeConfigs:
         runtime = FAMILY_RUNTIME_CONFIGS["qwen3_5"]
         assert runtime.vllm.mamba_cache_mode == "align"
         assert runtime.vllm.enable_prefix_caching is True
-        assert runtime.tower_connector_lora_targets == frozenset()
+        assert runtime.tower_connector_lora_targets == {
+            "qkv",
+            "linear_fc1",
+            "linear_fc2",
+        }
 
     def test_every_supported_model_names_a_registered_tool_call_parser(
         self,

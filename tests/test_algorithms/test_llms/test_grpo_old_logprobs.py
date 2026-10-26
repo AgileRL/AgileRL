@@ -208,6 +208,7 @@ class TestGRPOOldLogprobsSourceConfig:
             vllm_importance_sampling_correction=False,
         )
         agent.colocated = True
+        agent.records_sampling_supports = False
         captured: dict[str, bool] = {}
 
         def fake_generate(
@@ -215,12 +216,13 @@ class TestGRPOOldLogprobsSourceConfig:
             group_size: int,
             temperature: float | None,
             capture_sampling_logps: bool = False,
-        ) -> tuple[list[torch.Tensor], list[torch.Tensor], None]:
+            capture_sampling_supports: bool = False,
+        ) -> tuple[list[torch.Tensor], list[torch.Tensor], None, None]:
             captured["capture"] = capture_sampling_logps
             n = len(prompts) * group_size
             token_ids = [torch.ones(1, 4, dtype=torch.long) for _ in range(n)]
             masks = [torch.ones(1, 3, dtype=torch.bool) for _ in range(n)]
-            return token_ids, masks, None
+            return token_ids, masks, None, None
 
         monkeypatch.setattr(agent, "_prepare_vllm_for_generation", lambda: None)
         monkeypatch.setattr(agent, "_generate_with_vllm_colocate", fake_generate)
@@ -232,6 +234,57 @@ class TestGRPOOldLogprobsSourceConfig:
         )
 
         assert captured["capture"] is True
+
+
+class TestGRPOGetActionSamplingSupports:
+    @pytest.fixture
+    def agent(self, monkeypatch: pytest.MonkeyPatch) -> GRPO:
+        agent = _make_grpo()
+        agent.colocated = True
+        agent.records_sampling_supports = True
+
+        def fake_generate(
+            prompts: Any,
+            group_size: int,
+            temperature: float | None,
+            capture_sampling_logps: bool = False,
+            capture_sampling_supports: bool = False,
+        ) -> tuple[
+            list[torch.Tensor], list[torch.Tensor], None, list[torch.Tensor] | None
+        ]:
+            n = len(prompts) * group_size
+            token_ids = [torch.ones(1, 4, dtype=torch.long) for _ in range(n)]
+            masks = [torch.ones(1, 3, dtype=torch.bool) for _ in range(n)]
+            supports = [
+                torch.tensor([[1, 2], [1, -1]], dtype=torch.int32) for _ in range(n)
+            ]
+            return (
+                token_ids,
+                masks,
+                None,
+                supports if capture_sampling_supports else None,
+            )
+
+        monkeypatch.setattr(agent, "_prepare_vllm_for_generation", lambda: None)
+        monkeypatch.setattr(agent, "_generate_with_vllm_colocate", fake_generate)
+        return agent
+
+    def test_training_rollouts_return_the_engine_supports(self, agent: GRPO) -> None:
+        result = agent.get_action(
+            [{"input_ids": torch.ones(1, 2, dtype=torch.long)}],
+            training=True,
+            repeat_prompts=False,
+        )
+
+        assert result.sampling_supports is not None
+        assert result.sampling_supports[0].tolist() == [[1, 2], [1, -1]]
+
+    def test_evaluation_rollouts_return_no_supports(self, agent: GRPO) -> None:
+        result = agent.get_action(
+            [{"input_ids": torch.ones(1, 2, dtype=torch.long)}], training=False
+        )
+
+        assert result.sampling_supports is None
 
 
 class TestGRPOLearnTrainerOldLogProbs:
@@ -540,6 +593,266 @@ class TestGRPOLearnRolloutOldLogProbs:
 
         # Assert
         assert "Rollout engine and trainer log-probs diverge" not in caplog.text
+
+
+def _actor_log_softmax(agent: GRPO) -> torch.Tensor:
+    """``(B, T - 1, V)`` learn-start policy log-softmax from a plain actor forward."""
+    ids, _ = _batch()
+    with torch.no_grad(), agent.select_adapter("actor"):
+        logits = agent.actor(input_ids=ids).logits
+    return (logits[:, :-1] / agent.temperature).log_softmax(-1)
+
+
+def _supported_sampling(
+    agent: GRPO, width: int = 3
+) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+    """Per-row supports and the learn-start policy's log-probs over them.
+
+    Each action token's support is the token and its likeliest rivals, padded
+    with ``-1``; each row's last action token is forced (a support of one).
+    """
+    ids, mask = _batch()
+    log_probs = _actor_log_softmax(agent)
+    supports, logps = [], []
+    for row in range(NUM_ROWS):
+        positions = mask[row].nonzero().squeeze(1).tolist()
+        row_supports = torch.full((len(positions), width), -1, dtype=torch.int32)
+        row_logps = torch.zeros(len(positions))
+        for index, position in enumerate(positions):
+            target = int(ids[row, position + 1])
+            allowed = [target]
+            if index < len(positions) - 1:
+                ranked = log_probs[row, position].topk(width).indices.tolist()
+                allowed += [token for token in ranked if token != target][: width - 1]
+            row_supports[index, : len(allowed)] = torch.tensor(allowed)
+            position_log_probs = log_probs[row, position]
+            row_logps[index] = position_log_probs[target] - position_log_probs[
+                allowed
+            ].logsumexp(0)
+        supports.append(row_supports)
+        logps.append(row_logps)
+    return supports, logps
+
+
+class TestGRPOLearnSamplingSupports:
+    """Log-probs normalized over the support vLLM sampled each token from."""
+
+    def test_rollout_old_logprobs_match_the_policy_over_the_support(self) -> None:
+        # Arrange: one optimizer step, so the update policy is the learn-start one.
+        agent = _make_grpo(old_logprobs_source="rollout")
+        supports, sampling_logps = _supported_sampling(agent)
+
+        # Act
+        metrics = agent.learn(
+            _experiences(), sampling_logps=sampling_logps, sampling_supports=supports
+        )
+
+        # Assert
+        assert metrics["kl_old"] == pytest.approx(0.0, abs=1e-6)
+        assert metrics["vllm_is_delta_mean"] == pytest.approx(0.0, abs=1e-5)
+        assert metrics["vllm_is_delta_max"] == pytest.approx(0.0, abs=1e-5)
+
+    def test_penalised_rollout_logprobs_give_the_exact_importance_ratio(
+        self,
+    ) -> None:
+        # Arrange: vLLM applies the penalty before top-k, then reports the
+        # token's log-prob under that penalised distribution.
+        agent = _make_grpo(old_logprobs_source="trainer")
+        ids, mask = _batch()
+        log_probs = _actor_log_softmax(agent)
+        penalty, width = 0.7, 3
+        supports, sampling_logps, expected_deltas = [], [], []
+        for row in range(NUM_ROWS):
+            positions = mask[row].nonzero().squeeze(1).tolist()
+            row_supports = torch.full((len(positions), width), -1, dtype=torch.int32)
+            row_logps = torch.zeros(len(positions))
+            for index, position in enumerate(positions):
+                target = int(ids[row, position + 1])
+                seen = torch.zeros(VOCAB, dtype=torch.bool)
+                seen[ids[row, : position + 1]] = True
+                penalised = log_probs[row, position] - penalty * seen.float()
+                ranked = penalised.topk(width).indices.tolist()
+                rivals = [token for token in ranked if token != target]
+                allowed = [target, *rivals[: width - 1]]
+                row_supports[index] = torch.tensor(allowed)
+                behaviour = penalised[target] - penalised[allowed].logsumexp(0)
+                policy = log_probs[row, position, target] - log_probs[
+                    row, position, allowed
+                ].logsumexp(0)
+                row_logps[index] = behaviour
+                expected_deltas.append(float(policy - behaviour))
+            supports.append(row_supports)
+            sampling_logps.append(row_logps)
+        deltas = torch.tensor(expected_deltas)
+
+        # Act
+        metrics = agent.learn(
+            _experiences(), sampling_logps=sampling_logps, sampling_supports=supports
+        )
+
+        # Assert
+        assert deltas.abs().max() > 0.05
+        assert metrics["vllm_is_delta_mean"] == pytest.approx(
+            float(deltas.abs().mean()), abs=1e-5
+        )
+        assert metrics["vllm_is_ratio_mean"] == pytest.approx(
+            float(deltas.exp().clamp(max=agent.vllm_importance_sampling_cap).mean()),
+            abs=1e-5,
+        )
+
+    def test_full_vocabulary_scoring_diverges_from_support_logprobs(self) -> None:
+        agent = _make_grpo(old_logprobs_source="rollout")
+        _supports, sampling_logps = _supported_sampling(agent)
+
+        metrics = agent.learn(_experiences(), sampling_logps=sampling_logps)
+
+        assert metrics["vllm_is_delta_mean"] > 1.0
+
+    def test_gradients_match_the_trainer_source_over_the_support(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange: two steps, so both sources reuse their old log-probs.
+        rollout = _make_grpo(old_logprobs_source="rollout", mini_batch_size=2)
+        trainer = _make_grpo(old_logprobs_source="trainer", mini_batch_size=2)
+        supports, sampling_logps = _supported_sampling(trainer)
+        rollout_steps = _record_step_gradients(rollout, monkeypatch)
+        trainer_steps = _record_step_gradients(trainer, monkeypatch)
+
+        # Act
+        rollout.learn(
+            _experiences(), sampling_logps=sampling_logps, sampling_supports=supports
+        )
+        trainer.learn(
+            _experiences(), sampling_logps=sampling_logps, sampling_supports=supports
+        )
+
+        # Assert
+        _assert_same_gradients(rollout_steps, trainer_steps)
+
+    @pytest.mark.parametrize("packing_mode", [None, "varlen"])
+    def test_scored_logprobs_are_normalized_over_the_support(
+        self, monkeypatch: pytest.MonkeyPatch, packing_mode: str | None
+    ) -> None:
+        # Arrange
+        agent = _make_grpo()
+        monkeypatch.setattr(agent, "_packing_mode", lambda: packing_mode)
+        ids, mask = _batch()
+        supports, expected = _supported_sampling(agent)
+        support_ids = GRPO._align_sampling_supports(supports, ids, mask)
+
+        # Act
+        scored = agent._get_logprobs(
+            ids, batch_size=2, score_mask=mask, support_ids=support_ids
+        )
+
+        # Assert
+        assert torch.allclose(scored[mask], torch.cat(expected), atol=1e-5)
+
+    def test_a_token_outside_its_support_raises(self) -> None:
+        agent = _make_grpo()
+        supports, sampling_logps = _supported_sampling(agent)
+        supports[2][0] = torch.tensor([PAD_TOKEN_ID, -1, -1], dtype=torch.int32)
+
+        with pytest.raises(ValueError, match="outside the sampling support"):
+            agent.learn(
+                _experiences(),
+                sampling_logps=sampling_logps,
+                sampling_supports=supports,
+            )
+
+
+class TestLLMAlgorithmAlignSamplingSupports:
+    """Per-row sampling supports scattered onto the action frame."""
+
+    def test_single_token_supports_get_a_two_wide_frame(self) -> None:
+        # Arrange
+        agent = _make_grpo()
+        ids, mask = _batch()
+        supports = [
+            ids[row, 1:][mask[row]].to(torch.int32).unsqueeze(-1)
+            for row in range(NUM_ROWS)
+        ]
+
+        # Act
+        frame = GRPO._align_sampling_supports(supports, ids, mask)
+        scored = agent._get_logprobs(
+            ids, batch_size=2, score_mask=mask, support_ids=frame
+        )
+
+        # Assert
+        assert frame.shape == (NUM_ROWS, SEQ_LEN - 1, 2)
+        assert torch.equal(frame[..., 0][mask], ids[:, 1:][mask].to(torch.int32))
+        assert (frame[..., 0][~mask] == -1).all()
+        assert (frame[..., 1] == -1).all()
+        assert torch.allclose(scored[mask], torch.zeros(int(mask.sum())))
+
+    def test_a_row_without_supports_keeps_a_padded_frame(self) -> None:
+        # Arrange
+        ids = torch.tensor([[1, 2, 3], [4, 5, 6]])
+        mask = torch.tensor([[True, True], [True, True]])
+        supports = [torch.tensor([[2, 7], [3, -1]], dtype=torch.int32), None]
+
+        # Act
+        frame = GRPO._align_sampling_supports(supports, ids, mask)
+
+        # Assert
+        assert frame.tolist() == [[[2, 7], [3, -1]], [[-1, -1], [-1, -1]]]
+
+
+class TestGRPOObjectiveLoss:
+    """Which loss path a minibatch runs, with and without sampling supports."""
+
+    @staticmethod
+    def _liger_agent(
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> tuple[GRPO, tuple, list[int]]:
+        # liger-kernel is a CUDA extra; only the routing is under test.
+        agent = _make_grpo(vllm_importance_sampling_correction=False)
+        agent.use_liger_loss = True
+        liger_result = tuple(torch.tensor(float(i)) for i in range(4))
+        liger_calls: list[int] = []
+
+        def liger_loss(*_args: Any, **_kwargs: Any) -> tuple:
+            liger_calls.append(1)
+            return liger_result
+
+        monkeypatch.setattr(agent, "_liger_loss", liger_loss)
+        return agent, liger_result, liger_calls
+
+    def test_a_batch_without_supports_runs_the_liger_kernel(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        agent, liger_result, _calls = self._liger_agent(monkeypatch)
+        ids, mask = _batch()
+        zeros = torch.zeros(mask.shape)
+
+        # Act
+        result = agent._objective_loss(
+            ids, mask, torch.zeros(NUM_ROWS, 1), zeros, zeros, None, None
+        )
+
+        # Assert
+        assert result is liger_result
+
+    def test_a_batch_with_supports_runs_the_standard_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        agent, _result, liger_calls = self._liger_agent(monkeypatch)
+        supports, sampling_logps = _supported_sampling(agent)
+
+        # Act
+        with pytest.warns(UserWarning, match="normalizes over vLLM's sampling support"):
+            metrics = agent.learn(
+                _experiences(),
+                sampling_logps=sampling_logps,
+                sampling_supports=supports,
+            )
+
+        # Assert
+        assert liger_calls == []
+        assert math.isfinite(metrics["loss"])
 
 
 class TestGRPOLearnMetricKeys:

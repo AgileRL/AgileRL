@@ -7,7 +7,8 @@ from __future__ import annotations
 
 from typing import ClassVar
 
-from pydantic import Field
+from pydantic import Field, model_validator
+from typing_extensions import Self
 
 from agilerl.arena.models.algorithms.base import LLMAlgorithmSpec
 from agilerl.arena.models.descriptions import (
@@ -31,6 +32,58 @@ from agilerl.arena.models.descriptions import (
 )
 from agilerl.arena.models.env import LLMEnvType
 from agilerl.arena.models.networks import CosineLRScheduleConfig, VLLMConfig
+
+
+def records_sampling_supports(
+    temperature: float,
+    top_k: int,
+    top_p: float,
+    min_p: float,
+    constrain_answer_pattern: str | None,
+) -> bool:
+    """Whether rollout records the token ids vLLM could sample at each generated token.
+
+    The trainer scores a token over the support vLLM drew it from (grammar,
+    ``min_p``, ``top_k`` and ``top_p`` applied), which vLLM reports only for
+    requests with ``top_k > 0`` and ``temperature > 0``.
+
+    :param temperature: Training sampling temperature.
+    :type temperature: float
+    :param top_k: Most likely tokens kept per step; ``0`` keeps every token.
+    :type top_k: int
+    :param top_p: Nucleus sampling probability mass.
+    :type top_p: float
+    :param min_p: Floor relative to the most likely token's probability.
+    :type min_p: float
+    :param constrain_answer_pattern: Answer regex turns are constrained to, or
+        ``None``.
+    :type constrain_answer_pattern: str | None
+    :return: ``True`` when the sampling settings let vLLM report supports.
+    :rtype: bool
+    :raises ValueError: If ``top_p``, ``min_p`` or an answer grammar narrows the
+        sampling distribution but vLLM cannot report its support.
+    """
+    if top_k > 0 and temperature > 0:
+        return True
+    narrowed = [
+        name
+        for name, applies in (
+            ("top_p", top_p < 1.0),
+            ("min_p", min_p > 0.0),
+            ("constrain_answer_pattern", constrain_answer_pattern is not None),
+        )
+        if applies
+    ]
+    if narrowed:
+        msg = (
+            f"{', '.join(narrowed)} narrows the distribution rollout samples from, "
+            "and vLLM reports that support only with top_k > 0 and temperature > 0 "
+            f"(got top_k={top_k}, temperature={temperature}); without it the "
+            "trainer's importance ratio compares different distributions. Set "
+            "top_k > 0 and temperature > 0."
+        )
+        raise ValueError(msg)
+    return False
 
 
 class RolloutLLMSpec(LLMAlgorithmSpec):
@@ -69,6 +122,17 @@ class RolloutLLMSpec(LLMAlgorithmSpec):
     )
 
     env_type: ClassVar[LLMEnvType] = LLMEnvType.ROLLOUT
+
+    @model_validator(mode="after")
+    def _validate_sampling_support(self) -> Self:
+        records_sampling_supports(
+            self.temperature,
+            self.top_k,
+            self.top_p,
+            self.min_p,
+            self.constrain_answer_pattern,
+        )
+        return self
 
     def _max_output_tokens(self) -> int | None:
         return self.max_output_tokens

@@ -246,6 +246,7 @@ include = [
     "agilerl/algorithms/grpo.py",
     "agilerl/algorithms/sft.py",
     "agilerl/utils/llm_utils.py",
+    "agilerl/utils/sampling_supports.py",
     "agilerl/utils/utils.py",
 ]
 

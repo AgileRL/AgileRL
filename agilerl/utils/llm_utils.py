@@ -1254,11 +1254,12 @@ def _anchored_lora_target_regex(
     language_names: list[str],
     tower_names: list[str],
     prefix: str,
+    skipped_towers: list[str],
 ) -> str:
     """PEFT regex: *language_names* under *prefix*, *tower_names* everywhere else.
 
-    PEFT matches a string ``target_modules`` with ``re.fullmatch`` on each
-    ``named_modules`` key.
+    Tower names inside a *skipped_towers* module do not match. PEFT matches a
+    string ``target_modules`` with ``re.fullmatch`` on each ``named_modules`` key.
     """
     prefix_esc = re.escape(prefix)
     patterns = []
@@ -1267,7 +1268,12 @@ def _anchored_lora_target_regex(
         patterns.append(rf"{prefix_esc}\.(?:.*\.)?(?:{alts})")
     if tower_names:
         alts = "|".join(re.escape(name) for name in tower_names)
-        patterns.append(rf"(?!{prefix_esc}\.)(?:.*\.)?(?:{alts})")
+        skip = ""
+        if skipped_towers:
+            # ``.+`` keeps lora_target_module_names from reading these as targets.
+            skipped = "|".join(re.escape(name) for name in skipped_towers)
+            skip = rf"(?!(?:.+\.)?(?:{skipped})\.)"
+        patterns.append(rf"(?!{prefix_esc}\.){skip}(?:.*\.)?(?:{alts})")
     return "|".join(f"(?:{pattern})" for pattern in patterns)
 
 
@@ -1439,12 +1445,14 @@ def adapt_lora_config_for_model(
     model: nn.Module,
     lora_config: LoraConfig,
     tower_target_modules: list[str] | None = None,
+    skipped_tower_modules: list[str] | None = None,
 ) -> LoraConfig:
     """Rewrite ``LoraConfig.target_modules`` so PEFT wraps exactly the intended modules.
 
     On a VL model, named targets and ``all-linear`` land only under the
     language model; ``tower_target_modules`` names the tower and connector
-    modules to adapt outside it. A regex ``target_modules`` is kept as given.
+    modules to adapt outside it, except inside ``skipped_tower_modules``. A
+    regex ``target_modules`` is kept as given.
 
     On Mamba-family ``model_type`` values, ``out_proj`` and ``conv1d`` are excluded
     from LoRA inject (PEFT 0.20+ forbids wrapping those fused-kernel modules).
@@ -1458,6 +1466,9 @@ def adapt_lora_config_for_model(
     :type lora_config: LoraConfig
     :param tower_target_modules: Tower and connector module names to adapt, or None.
     :type tower_target_modules: list[str] | None
+    :param skipped_tower_modules: Tower and connector modules the vLLM engine
+        leaves unbuilt, so they get no LoRA; or None.
+    :type skipped_tower_modules: list[str] | None
     :return: The config with resolved targets.
     :rtype: LoraConfig
     :raises ValueError: If tower targets are set on a text-only model or with a
@@ -1491,14 +1502,19 @@ def adapt_lora_config_for_model(
     if not language_names and not tower_names:
         return lora_config
 
+    skipped_towers = sorted(set(skipped_tower_modules or ()))
     exclude_modules = list(getattr(lora_config, "exclude_modules", None) or [])
     groups = (
         (
             "under",
             language_names,
-            _anchored_lora_target_regex(language_names, [], prefix),
+            _anchored_lora_target_regex(language_names, [], prefix, []),
         ),
-        ("outside", tower_names, _anchored_lora_target_regex([], tower_names, prefix)),
+        (
+            "outside",
+            tower_names,
+            _anchored_lora_target_regex([], tower_names, prefix, skipped_towers),
+        ),
     )
     matched: list[str] = []
     for where, names, spec in groups:
@@ -1516,7 +1532,9 @@ def adapt_lora_config_for_model(
             raise ValueError(msg)
         matched.extend(group_matched)
 
-    target_spec = _anchored_lora_target_regex(language_names, tower_names, prefix)
+    target_spec = _anchored_lora_target_regex(
+        language_names, tower_names, prefix, skipped_towers
+    )
     logger.info(
         "Anchored LoRA target_modules at %s (%d modules), e.g. %s",
         prefix,
@@ -1894,10 +1912,20 @@ def fill_outside_mask(
 def masked_mean(
     values: torch.Tensor, mask: torch.Tensor, axis: int | None = None
 ) -> torch.Tensor:
-    """Compute mean of tensor with a masked values."""
+    """Mean of ``values`` over a 0/1 ``mask``; an empty mask averages to ``0``.
+
+    :param values: Values to reduce.
+    :type values: torch.Tensor
+    :param mask: 0/1 mask selecting which values count.
+    :type mask: torch.Tensor
+    :param axis: Dimension to reduce, or ``None`` for all of them.
+    :type axis: int | None
+    :return: The masked mean.
+    :rtype: torch.Tensor
+    """
     if axis is not None:
-        return (values * mask).sum(dim=axis) / mask.sum(dim=axis)
-    return (values * mask).sum() / mask.sum()
+        return (values * mask).sum(dim=axis) / mask.sum(dim=axis).clamp(min=1)
+    return (values * mask).sum() / mask.sum().clamp(min=1)
 
 
 def masked_var(
@@ -2927,6 +2955,94 @@ def resolve_vllm_max_num_batched_tokens(
     return min(worst_case, concurrent_budget)
 
 
+VLLM_LOGPROBS_MODE = "processed_logprobs"
+"""vLLM ``logprobs_mode`` every rollout engine runs with.
+
+The trainer's importance ratio divides by the probability a token was drawn
+with, which is the distribution after penalties, logit bias, temperature,
+``min_p`` and top-k/top-p. vLLM's default ``raw_logprobs`` is taken before all
+of them.
+"""
+
+
+@dataclass(frozen=True)
+class RolloutSampling:
+    """Per-request vLLM sampling settings rollout generation draws tokens with.
+
+    :param temperature: Sampling temperature.
+    :type temperature: float
+    :param top_p: Nucleus sampling probability mass; ``1.0`` keeps every token.
+    :type top_p: float
+    :param top_k: Most likely tokens kept per step; ``0`` keeps every token.
+    :type top_k: int
+    :param min_p: Floor relative to the most likely token's probability.
+    :type min_p: float
+    :param repetition_penalty: Penalty on tokens already in the prompt or output.
+    :type repetition_penalty: float
+    :param presence_penalty: Penalty on tokens that already appeared.
+    :type presence_penalty: float
+    :param frequency_penalty: Penalty scaled by how often a token appeared.
+    :type frequency_penalty: float
+    :param min_tokens: Tokens generated before a stop token may end the request.
+    :type min_tokens: int
+    """
+
+    temperature: float
+    top_p: float = 1.0
+    top_k: int = 0
+    min_p: float = 0.0
+    repetition_penalty: float = 1.0
+    presence_penalty: float = 0.0
+    frequency_penalty: float = 0.0
+    min_tokens: int = 0
+
+    def vllm_kwargs(self, max_tokens: int) -> dict[str, Any]:
+        """Return ``SamplingParams`` keyword arguments for one request.
+
+        :param max_tokens: Maximum tokens the request generates.
+        :type max_tokens: int
+        :return: Sampling keyword arguments, ``min_tokens`` capped at *max_tokens*.
+        :rtype: dict[str, Any]
+        """
+        return {
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "top_k": self.top_k,
+            "min_p": self.min_p,
+            "repetition_penalty": self.repetition_penalty,
+            "presence_penalty": self.presence_penalty,
+            "frequency_penalty": self.frequency_penalty,
+            "max_tokens": max_tokens,
+            "min_tokens": min(self.min_tokens, max_tokens),
+        }
+
+
+def apply_vllm_compile_cache_env(gpu_ids: Sequence[int | str]) -> str:
+    """Point ``VLLM_CACHE_ROOT`` at a compile cache directory for this GPU set, under any explicit root.
+
+    :param gpu_ids: Node-local GPU ids, or ``CUDA_VISIBLE_DEVICES`` entries, of the engine's devices.
+    :type gpu_ids: Sequence[int | str]
+    :return: The cache root in effect after this call.
+    :rtype: str
+    """
+    # Compiled graphs hard-code ``cuda:<id>`` but vLLM's cache key omits the
+    # device. TP rank ``r`` runs on the ``r``-th lowest GPU, so the set fixes
+    # every rank's device.
+    gpu_dir = "gpu_" + "_".join(sorted(str(gpu_id) for gpu_id in gpu_ids))
+    existing = os.environ.get("VLLM_CACHE_ROOT")
+    parent = (
+        Path(existing)
+        if existing
+        else Path(tempfile.gettempdir()) / "vllm_compile_cache"
+    )
+    # A root this function set is already one GPU set's directory.
+    if parent.name.startswith("gpu_"):
+        parent = parent.parent
+    cache_root = str(parent / gpu_dir)
+    os.environ["VLLM_CACHE_ROOT"] = cache_root
+    return cache_root
+
+
 def build_vllm_llm_init_kwargs(
     vllm_config: VLLMConfig,
     trainer_model_name_or_path: str,
@@ -2988,6 +3104,7 @@ def build_vllm_llm_init_kwargs(
         ),
         "model_impl": "vllm",
         "enable_sleep_mode": vllm_config.sleep_mode,
+        "logprobs_mode": VLLM_LOGPROBS_MODE,
     }
     if vllm_config.dtype is not None:
         kwargs["dtype"] = vllm_config.dtype
@@ -3074,20 +3191,17 @@ def peft_lora_state_dict_key_to_module_key(key: str) -> str:
 
 
 def remap_peft_lora_key_for_vllm(key: str) -> str:
-    """Drop trainer-only module structure from a PEFT LoRA key.
+    """Drop the PEFT ``.base_layer`` segment the Hugging Face checkpoint does not have.
 
-    Removes the ClippableLinear ``.linear`` and PEFT ``.base_layer`` segments
-    that the Hugging Face checkpoint does not have. Hugging Face to vLLM module
-    renames are the serving model's ``hf_to_vllm_mapper``, applied by vLLM.
+    Hugging Face to vLLM module renames are the serving model's
+    ``hf_to_vllm_mapper``, applied by vLLM. A Gemma 4 ClippableLinear keeps its
+    inner ``.linear``: vLLM serves the tower with that module wrapped.
 
     :param key: PEFT state-dict key.
     :type key: str
     :return: Key in the checkpoint's module naming.
     :rtype: str
     """
-    key = key.replace(".linear.lora_A.", ".lora_A.").replace(
-        ".linear.lora_B.", ".lora_B."
-    )
     return key.replace(".base_layer.", ".")
 
 

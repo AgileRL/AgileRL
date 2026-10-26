@@ -322,6 +322,7 @@ def _rollout_collect_return(*, batch_steps=3, n_trajectories=1, seq_len=8):
         42,
         None,  # all_sampling_logps
         None,
+        None,
     )
 
 
@@ -870,7 +871,9 @@ class TestTrainLlmRollout:
         assert mock_agent.test.call_count == 0
         # The rollout loop passes turn_ids and sampling_logps unconditionally;
         # every rollout algorithm's learn() accepts both.
-        mock_agent.learn.assert_called_with(ANY, turn_ids=ANY, sampling_logps=ANY)
+        mock_agent.learn.assert_called_with(
+            ANY, turn_ids=ANY, sampling_logps=ANY, sampling_supports=ANY
+        )
         # No checkpoint/elite path was configured, so nothing may be written.
         assert mock_save.call_count == 0
 
@@ -925,7 +928,7 @@ class TestTrainLlmRollout:
         mock_agent = _make_rollout_mock_agent(spec=agent_spec)
         pixel_rows = [torch.zeros(1, 3, 2, 2), torch.ones(2, 3, 2, 2)]
         collected = _rollout_collect_return(batch_steps=3, n_trajectories=2)
-        collected = (*collected[:-1], pixel_rows)
+        collected = (*collected[:7], pixel_rows, None)
 
         with (
             patch(
@@ -1049,6 +1052,7 @@ class TestTrainLlmRollout:
             123,  # group_seed
             sampling_logps,  # all_sampling_logps (non-None)
             None,
+            None,
         )
         with (
             patch(
@@ -1081,6 +1085,46 @@ class TestTrainLlmRollout:
         forwarded = learn_kwargs.get("sampling_logps")
         assert forwarded is not None
         assert forwarded[0] is sampling_logps[0]
+
+    def test_train_llm_rollout_forwards_sampling_supports_to_learn(self):
+        # Arrange
+        mock_agent = _make_rollout_mock_agent(spec=GRPO)
+        supports = [torch.tensor([[1, 2]] * 7, dtype=torch.int32)]
+        collected = _rollout_collect_return(batch_steps=3)
+        collected = (*collected[:8], supports)
+
+        with (
+            patch(
+                "agilerl.training.llm.rollout.default_progress_bar",
+                return_value=MagicMock(),
+            ),
+            patch("agilerl.training.llm.rollout.init_loggers", return_value=[]),
+            patch(
+                "agilerl.training.llm.rollout.aggregate_metrics_across_gpus",
+                return_value=0.5,
+            ),
+            patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
+            patch("agilerl.training.llm.rollout.RolloutCollector"),
+            patch(
+                "agilerl.training.llm.rollout.collect_rollouts_llm",
+                return_value=collected,
+            ),
+        ):
+            # Act
+            train_llm_rollout(
+                pop=[mock_agent],
+                env_factory=MagicMock(),
+                max_turns=2,
+                init_hp={"BATCH_SIZE": 1, "ALGO": mock_agent.algo},
+                max_steps=3,
+                evaluation_interval=100,
+                verbose=False,
+            )
+
+        # Assert
+        forwarded = mock_agent.learn.call_args.kwargs["sampling_supports"]
+        assert forwarded is not None
+        assert forwarded[0] is supports[0]
 
     def test_train_llm_rollout_derives_group_seed_from_agent_seed(self):
         """The first rollout seeds from the agent's configured seed (rank 0)."""
@@ -1943,6 +1987,7 @@ def test_collect_rollouts_llm_breaks_when_vector_env_has_no_active_prompts():
         [torch.zeros(1, 7, dtype=torch.long)],
         [torch.ones(2, dtype=torch.float32)],
         1,
+        None,
         None,
         None,
     )

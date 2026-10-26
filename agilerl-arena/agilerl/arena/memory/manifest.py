@@ -52,7 +52,11 @@ from agilerl.arena.models.algorithms.base import LLMAlgorithmSpec
 from agilerl.arena.models.algorithms.grpo import GRPOSpec
 from agilerl.arena.models.algorithms.llmppo import LLMPPOSpec
 from agilerl.arena.models.algorithms.llmreinforce import LLMREINFORCESpec
-from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
+from agilerl.arena.models.algorithms.rollout_llm import (
+    RolloutLLMSpec,
+    records_sampling_supports,
+)
+from agilerl.arena.models.env import LLMEnvSpec
 from agilerl.arena.models.manifest import TrainingManifest
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.networks import LoraConfigDict, VLLMConfig
@@ -73,6 +77,12 @@ ALGORITHM_NAMES: dict[str, Algorithm] = {
 # Module names that mean an adapter touches attention projections only.
 ATTENTION_MODULES = frozenset(
     {"q_proj", "k_proj", "v_proj", "o_proj", "qkv_proj", "query", "key", "value"}
+)
+
+# The engine variant drops the multimodal towers; a model without towers sizes it as base.
+MANIFEST_WEIGHT_VARIANTS = (
+    WeightVariant(),
+    WeightVariant(name="engine", stripped_multimodal=True),
 )
 
 # Must match max_num_batched_tokens in the framework's FAMILY_RUNTIME_CONFIGS.
@@ -105,6 +115,8 @@ class GpuInfo(BaseModel):
 # The accelerators Arena resource classes are built from, in match order —
 # longer tokens first, because "A100" contains "A10" and "L40S" contains
 # "L4". Matched against the tier's ``gpu_type`` after normalisation.
+# ``total_gib`` is CUDA-visible memory (``torch.cuda.mem_get_info`` total):
+# measured on A100-80 and L4, nominal on the rest.
 GPU_CATALOGUE: tuple[tuple[str, GpuInfo], ...] = (
     ("H200", GpuInfo(name="NVIDIA H200", total_gib=141, cc_major=9, cc_minor=0)),
     (
@@ -113,7 +125,7 @@ GPU_CATALOGUE: tuple[tuple[str, GpuInfo], ...] = (
     ),
     (
         "A100-80",
-        GpuInfo(name="NVIDIA A100-SXM4-80GB", total_gib=80, cc_major=8, cc_minor=0),
+        GpuInfo(name="NVIDIA A100-SXM4-80GB", total_gib=79.25, cc_major=8, cc_minor=0),
     ),
     (
         "A100",
@@ -121,7 +133,7 @@ GPU_CATALOGUE: tuple[tuple[str, GpuInfo], ...] = (
     ),
     ("A10", GpuInfo(name="NVIDIA A10G", total_gib=24, cc_major=8, cc_minor=6)),
     ("L40", GpuInfo(name="NVIDIA L40S", total_gib=48, cc_major=8, cc_minor=9)),
-    ("L4", GpuInfo(name="NVIDIA L4", total_gib=24, cc_major=8, cc_minor=9)),
+    ("L4", GpuInfo(name="NVIDIA L4", total_gib=22.03, cc_major=8, cc_minor=9)),
     ("T4", GpuInfo(name="Tesla T4", total_gib=16, cc_major=7, cc_minor=5)),
     (
         "V100",
@@ -332,17 +344,23 @@ def check_fp8_moe_backend_for_device(
 
 
 def _max_num_seqs(
-    manifest: TrainingManifest, spec: LLMAlgorithmSpec, vllm: VLLMConfig
+    manifest: TrainingManifest,
+    spec: LLMAlgorithmSpec,
+    vllm: VLLMConfig,
+    rollout_engines: int | None,
 ) -> int:
     """The manifest's ``max_num_seqs``, else sequences one engine decodes.
 
-    ``auto`` counts as one engine.
+    Without ``rollout_engines``, ``auto`` counts as one engine.
     """
     training = manifest.training
     prompts = 0
     if vllm.max_num_seqs is None and training.async_rollout:
         engines = training.rollout_engines_per_agent
-        n_engines = 1 if engines == "auto" else int(engines)
+        if rollout_engines is not None:
+            n_engines = rollout_engines
+        else:
+            n_engines = 1 if engines == "auto" else int(engines)
         # Async validation sets an unset rollout_batch_size to 1.
         rollout_batch_size = int(training.rollout_batch_size or 1)
         prompts = prompts_per_engine(rollout_batch_size, n_engines)
@@ -367,15 +385,9 @@ def _max_num_batched_tokens(spec: LLMAlgorithmSpec, vllm: VLLMConfig) -> int | N
 def _resolve_vllm(spec: LLMAlgorithmSpec) -> VLLMConfig:
     """The engine config the run starts, checked against what this estimator sizes."""
     # SFT and DPO start no engine; their generation bar is ignored.
-    if not isinstance(spec, RolloutLLMSpec):
+    if not isinstance(spec, RolloutLLMSpec) or spec.vllm_config is None:
         return VLLMConfig()
     vllm = spec.vllm_config
-    if vllm is None:
-        msg = (
-            f"{spec.name} names no vllm_config; this estimator sizes vLLM rollout "
-            "only, so name the rollout engine config."
-        )
-        raise ValueError(msg)
     model = vllm.vllm_model_name_or_path
     if model is not None and model != spec.pretrained_model_name_or_path:
         msg = (
@@ -439,12 +451,35 @@ def _reject_unbounded_liger_loss(spec: LLMAlgorithmSpec) -> None:
         raise ValueError(msg)
 
 
+def image_inputs(manifest: TrainingManifest) -> tuple[int, int, int]:
+    """Images per completion row and the size the environment renders them at.
+
+    :param manifest: Validated manifest.
+    :return: ``(images_per_row, width, height)``; zeros without image fields.
+    """
+    env = manifest.environment
+    if not isinstance(env, LLMEnvSpec) or not (
+        env.screenshot_field or env.goal_images_field
+    ):
+        return 0, 0, 0
+    # BrowserGym captures at the viewport the OpenEnv server reads from these.
+    width = int(env.env_vars.get("BROWSERGYM_VIEWPORT_WIDTH", 1280))
+    height = int(env.env_vars.get("BROWSERGYM_VIEWPORT_HEIGHT", 720))
+    spec = llm_spec(manifest)
+    engine_limit = None
+    if isinstance(spec, RolloutLLMSpec) and spec.vllm_config is not None:
+        engine_limit = (spec.vllm_config.limit_mm_per_prompt or {}).get("image")
+    return env.segment_max_images or engine_limit or 1, width, height
+
+
 def training_settings_from_spec(
     spec: LLMAlgorithmSpec,
     n_training_gpus: int,
     micro_batch_size: int,
     checkpoint_optimizer: bool = False,
     async_rollout: bool = False,
+    images: tuple[int, int, int] = (0, 0, 0),
+    segmented_rows: bool = False,
 ) -> TrainingSettings:
     """Trainer-side settings for one algorithm spec.
 
@@ -453,6 +488,8 @@ def training_settings_from_spec(
     :param micro_batch_size: Rows in one forward.
     :param checkpoint_optimizer: The checkpoint snapshot holds Adam moments.
     :param async_rollout: The next rollout batch stays in host memory during learn.
+    :param images: ``(images_per_row, width, height)`` from :func:`image_inputs`.
+    :param segmented_rows: Episodes train as segment rows.
     :return: Training settings.
     :raises ValueError: Quantization, eager attention, or unbounded Liger loss.
     """
@@ -460,6 +497,17 @@ def training_settings_from_spec(
     _reject_eager_attn_implementation(spec.attn_implementation)
     _reject_unbounded_liger_loss(spec)
     lora = _lora_config(spec)
+    images_per_row, image_width, image_height = images
+    support_width = 0
+    if isinstance(spec, RolloutLLMSpec) and records_sampling_supports(
+        spec.temperature,
+        spec.top_k,
+        spec.top_p,
+        spec.min_p,
+        spec.constrain_answer_pattern,
+    ):
+        # Support frames are padded to at least two ids.
+        support_width = max(spec.top_k, 2)
     return TrainingSettings(
         algorithm=ALGORITHM_NAMES[spec.name],
         group_size=rollout_group_size(spec),
@@ -481,6 +529,10 @@ def training_settings_from_spec(
         gradient_checkpointing=spec.gradient_checkpointing,
         activation_offload=spec.activation_offload,
         chunk_rows=spec.chunk_rows,
+        sampling_support_width=support_width,
+        support_scored_loss=not (
+            isinstance(spec, (LLMPPOSpec, LLMREINFORCESpec)) and spec.use_liger_loss
+        ),
         n_training_gpus=n_training_gpus,
         fsdp=spec.fsdp,
         fuse_actor_critic_pass=(
@@ -492,6 +544,11 @@ def training_settings_from_spec(
         async_rollout=async_rollout,
         micro_batch_size=micro_batch_size,
         sequence_packing=spec.use_sequence_packing,
+        images_per_row=images_per_row,
+        image_width=image_width,
+        image_height=image_height,
+        vision_tower_lora=bool(lora.tower_target_modules),
+        segmented_rows=segmented_rows,
     )
 
 
@@ -517,28 +574,33 @@ def training_settings_from_manifest(
         micro_batch_size = resolve_micro_batch_rows(spec, n_training_gpus)
     _reject_eager_attn_implementation(spec.attn_implementation)
     _reject_unbounded_liger_loss(spec)
+    env = manifest.environment
     return training_settings_from_spec(
         spec,
         n_training_gpus,
         micro_batch_size,
         checkpoint_optimizer=manifest.training.checkpoint_optimizer,
         async_rollout=manifest.training.async_rollout,
+        images=image_inputs(manifest),
+        segmented_rows=isinstance(env, LLMEnvSpec)
+        and (
+            env.segment_prompt_tokens is not None or env.segment_max_images is not None
+        ),
     )
 
 
 def generation_settings_from_manifest(
     manifest: TrainingManifest | str | Path | dict[str, Any],
     tensor_parallel_size: int | None = None,
+    rollout_engines: int | None = None,
 ) -> GenerationSettings:
     """The engine-side settings the manifest's vLLM config pins down.
-
-    A rollout without an engine section names no engine to size. SFT and
-    DPO start no engine, so their settings are defaults the estimator
-    ignores.
 
     :param manifest: Training manifest.
     :param tensor_parallel_size: Width to size. Required when a rollout
         manifest leaves the width unset.
+    :param rollout_engines: Engines per member the allocation starts, which
+        split an omitted ``max_num_seqs``. ``None`` reads the manifest.
     :return: Generation settings for the estimator.
     """
     manifest = _validated(manifest)
@@ -559,9 +621,10 @@ def generation_settings_from_manifest(
         raise ValueError(msg)
     settings: dict[str, Any] = {
         "gpu_memory_utilization": vllm.gpu_memory_utilization,
-        "max_num_seqs": _max_num_seqs(manifest, spec, vllm),
+        "max_num_seqs": _max_num_seqs(manifest, spec, vllm, rollout_engines),
         "max_model_len": spec.max_model_len,
         "max_num_batched_tokens": _max_num_batched_tokens(spec, vllm),
+        "max_images_per_prompt": (vllm.limit_mm_per_prompt or {}).get("image"),
         "kv_cache_memory_bytes": vllm.kv_cache_memory_bytes,
         "enforce_eager": vllm.enforce_eager,
         "max_lora_rank": (
@@ -570,6 +633,7 @@ def generation_settings_from_manifest(
             else resolve_lora_rank_ceiling(vllm.max_lora_rank, lora.lora_r)
         ),
         "max_loras": vllm.max_loras,
+        "lora_packed_target_matrices": len(lora.target_parameters or []),
         "weight_dtype": weight_dtype,
         "weight_quantization": weight_quantization,
         "weight_variant": "engine" if stripped else "base",
@@ -584,11 +648,7 @@ def _model_spec(
     spec: LLMAlgorithmSpec,
     model_config: dict[str, Any],
     n_params: int | None,
-    generation: GenerationSettings,
 ) -> ModelSpec:
-    variants = [WeightVariant()]
-    if generation.weight_variant == "engine":
-        variants.append(WeightVariant(name="engine", stripped_multimodal=True))
     model_id = spec.pretrained_model_name_or_path
     if model_id is None:
         msg = "manifest names no pretrained model."
@@ -597,7 +657,7 @@ def _model_spec(
         model_id=model_id,
         arch=ModelArch.from_hf_config(model_config),
         n_params=n_params,
-        variants=tuple(variants),
+        variants=MANIFEST_WEIGHT_VARIANTS,
     )
 
 
@@ -609,6 +669,7 @@ def run_config_from_manifest(
     n_params: int | None = None,
     gen_device: DeviceSpec | None = None,
     tensor_parallel_size: int | None = None,
+    rollout_engines: int | None = None,
 ) -> RunConfig:
     """Assemble the estimator's input from the three things a caller holds.
 
@@ -623,6 +684,8 @@ def run_config_from_manifest(
     :param gen_device: The rollout engine's device. Defaults to ``device``.
     :param tensor_parallel_size: Engine width to size. Required when a rollout
         manifest leaves the width unset.
+    :param rollout_engines: Engines per member the allocation starts.
+        ``None`` reads the manifest, counting ``auto`` as one.
     """
     manifest = _validated(manifest)
     spec = llm_spec(manifest)
@@ -638,19 +701,14 @@ def run_config_from_manifest(
                 gpu.cc_minor,
             )
     # Chosen on a copy so this call does not pin the caller's omitted field.
-    model: ModelSpec | None = None
-    generation: GenerationSettings | None = None
+    # The run picks it on the catalog model, so the search does too.
     if spec.micro_batch_size_per_gpu is None:
         manifest = manifest.model_copy(deep=True)
         spec = llm_spec(manifest)
-        generation = generation_settings_from_manifest(
-            manifest, tensor_parallel_size=tensor_parallel_size
-        )
-        model = _model_spec(spec, model_config, n_params, generation)
         n_training_gpus = manifest.training.training_gpus_per_agent
         base = training_settings_from_manifest(manifest, micro_batch_size=1)
         micro = resolve_micro_batch_size_per_gpu(
-            spec, n_training_gpus, device, model, base
+            spec, n_training_gpus, device, settings=base
         )
         _, per_rank = per_rank_trajectories(spec, n_training_gpus)
         spec.micro_batch_size_per_gpu = micro
@@ -662,11 +720,12 @@ def run_config_from_manifest(
             "this estimator sizes async rollout only."
         )
         raise ValueError(msg)
-    if model is None or generation is None:
-        generation = generation_settings_from_manifest(
-            manifest, tensor_parallel_size=tensor_parallel_size
-        )
-        model = _model_spec(spec, model_config, n_params, generation)
+    generation = generation_settings_from_manifest(
+        manifest,
+        tensor_parallel_size=tensor_parallel_size,
+        rollout_engines=rollout_engines,
+    )
+    model = _model_spec(spec, model_config, n_params)
     training = training_settings_with_fuse(
         spec.fuse_actor_critic_pass if isinstance(spec, LLMPPOSpec) else None,
         training,

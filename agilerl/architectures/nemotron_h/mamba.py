@@ -25,6 +25,7 @@ from agilerl.utils.llm_packing import (
     RESETS_AT_DOCUMENT_BOUNDARY,
     packed_layout,
     packed_seq_idx,
+    run_per_document,
 )
 from agilerl.utils.patching import class_is_patched, library_shim, try_import
 
@@ -37,7 +38,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "block_type_mask_mapping",
     "install_mamba_patches",
     "patch_nemotron_mamba_fused_path",
     "patch_nemotron_mamba_packed_sequences",
@@ -66,38 +66,6 @@ FUSED_COMBINED_NAMES = (
     "mamba2_split_conv1d_scan_combined",
     "mamba_split_conv1d_scan_combined",
 )
-
-
-def block_type_mask_mapping(
-    module: object,
-    embeds: torch.Tensor,
-    attention_mask: torch.Tensor | dict[str, object] | None,
-    past_key_values: object | None,
-    position_ids: torch.Tensor | None,
-) -> tuple[dict[str, object], torch.Tensor | None]:
-    """HF keys for ``full_attention`` / ``linear_attention`` masks."""
-    if position_ids is None:
-        get_seq_length = getattr(past_key_values, "get_seq_length", None)
-        past_seen = get_seq_length() if callable(get_seq_length) else 0
-        position_ids = torch.arange(embeds.shape[1], device=embeds.device) + past_seen
-        position_ids = position_ids.unsqueeze(0)
-    masking = try_import("transformers.masking_utils")
-    mask_kwargs = {
-        "config": getattr(module, "config", None),
-        "inputs_embeds": embeds,
-        "attention_mask": attention_mask,
-        "past_key_values": past_key_values,
-        "position_ids": position_ids,
-    }
-    mapping: dict[str, object] = {}
-    if masking is not None:
-        create_causal = getattr(masking, "create_causal_mask", None)
-        create_linear = getattr(masking, "create_recurrent_attention_mask", None)
-        if callable(create_causal):
-            mapping["full_attention"] = create_causal(**mask_kwargs)
-        if callable(create_linear):
-            mapping["linear_attention"] = create_linear(**mask_kwargs)
-    return mapping, position_ids
 
 
 def _resolve_mixer_class(mixer: str) -> type | None:
@@ -805,30 +773,6 @@ def _patch_stream_class(mixer_cls: type) -> None:
     )
 
 
-def _per_document(
-    run: Callable[[torch.Tensor], torch.Tensor],
-    hidden_states: torch.Tensor,
-    seq_idx: torch.Tensor,
-) -> torch.Tensor:
-    """Run *run* on each packed document of each row on its own and rejoin the rows.
-
-    :param run: Mixer forward over one ``(1, L_doc, H)`` document.
-    :type run: Callable[[torch.Tensor], torch.Tensor]
-    :param hidden_states: ``(B, L, H)`` packed rows.
-    :type hidden_states: torch.Tensor
-    :param seq_idx: ``(B, L)`` document index per token.
-    :type seq_idx: torch.Tensor
-    :return: ``(B, L, H)`` outputs.
-    :rtype: torch.Tensor
-    """
-    rows = []
-    for row, row_seq_idx in zip(hidden_states.split(1), seq_idx, strict=True):
-        lengths = torch.unique_consecutive(row_seq_idx, return_counts=True)[1]
-        documents = row.split(lengths.tolist(), dim=1)
-        rows.append(torch.cat([run(document) for document in documents], dim=1))
-    return torch.cat(rows)
-
-
 def _fused_split_scan(
     mixer: torch.nn.Module,
     kernel: Callable[..., torch.Tensor],
@@ -929,7 +873,7 @@ def _install_packed_mixer(mixer_cls: type) -> None:
                 )
             if fused is not None:
                 return fused
-        return _per_document(
+        return run_per_document(
             lambda document: forward(
                 mixer, document, cache_params, attention_mask, **kwargs
             ),

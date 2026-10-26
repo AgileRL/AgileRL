@@ -27,8 +27,16 @@ MiB = 1024**2
 MAMBA_CHUNK_SIZE_DEFAULT = 256
 
 # Model types whose trainer RMSNorm is the stock HF module, which keeps an
-# fp32 copy of each norm input for backward.
-FP32_RMS_NORM_MODEL_TYPES = frozenset({"granitemoe", "granitemoehybrid"})
+# fp32 copy of each norm input for backward. Gemma 4's norm upcasts with
+# ``hidden_states.float()`` under Liger too.
+FP32_RMS_NORM_MODEL_TYPES = frozenset({"granitemoe", "granitemoehybrid", "gemma4_text"})
+
+# Model types with a norm before and after both the attention and the MLP.
+SANDWICH_NORM_MODEL_TYPES = frozenset({"gemma4_text"})
+
+# Model types Liger has no SwiGLU kernel for. The stock gated MLP keeps the
+# activated gate for backward besides gate and up.
+STOCK_GATED_MLP_MODEL_TYPES = frozenset({"granitemoehybrid"})
 
 # Attention norms that upcast Q to fp32 inside the block (Qwen3/3.5 ``q_norm``).
 QK_NORM_MODEL_TYPES = frozenset(
@@ -45,6 +53,25 @@ CHUNKED_ROUTED_EXPERT_MODEL_TYPES = frozenset(
 # HF's eager ``torch_forward`` scan; the fused SSM kernels return NaN there.
 EAGER_MAMBA_SCAN_CAPABILITY = (8, 9)
 EAGER_MAMBA_SCAN_MODEL_TYPES = frozenset({"nemotron_h", "nemotron_h_omni"})
+
+# Outer config model types whose vLLM class sets ``is_3d_moe_weight``, so the
+# engine wraps experts in the 3D fused-MoE LoRA layout.
+VLLM_3D_MOE_LORA_MODEL_TYPES = frozenset(
+    {"gpt_oss", "interns1_pro", "qwen3_5_moe", "qwen3_omni_moe", "qwen3_vl_moe"}
+)
+
+# Outer config model types whose HF class lists its tower encoder blocks in
+# ``_no_split_modules``, so FSDP shards each block as its own unit.
+TOWER_BLOCK_UNIT_MODEL_TYPES = frozenset({"gemma4", "qwen3_5", "qwen3_5_moe"})
+
+# Vision patches in the image vLLM encodes when profiling a model that keeps
+# its towers, keyed by outer config ``model_type``. Qwen3.5/3.6: the
+# preprocessor's 16,777,216-pixel longest edge over 16x16 patches. Families
+# absent here have no measured profile and add no encoder term.
+VISION_PROFILE_PATCHES_BY_MODEL_TYPE: dict[str, int] = {
+    "qwen3_5": 65536,
+    "qwen3_5_moe": 65536,
+}
 
 # CUDA context bytes keyed by torch device name: device memory in use after
 # the first torch allocation.
@@ -83,10 +110,29 @@ PackedMoeDispatch = Literal["materialized", "contracted"]
 BlockKind = Literal["attention", "ffn", "mamba"]
 # One layer of a block-exclusive stack, with MLP and MoE told apart.
 LayerKind = Literal["attention", "mamba", "mlp", "moe"]
+VisionResize = Literal["none", "merge_grid", "pooled_budget", "dynamic_tiles"]
+
+# How each family's image processor sizes an image's patch grid, keyed by
+# outer config ``model_type``. ``merge_grid``: Qwen2-VL ``smart_resize`` to
+# multiples of patch x merge. ``pooled_budget``: Gemma4's aspect-preserving
+# fit under soft tokens x pool^2 patches. ``dynamic_tiles``: Nemotron RADIO
+# dynamic resolution between its min and max patches.
+VISION_RESIZE_BY_MODEL_TYPE: dict[str, VisionResize] = {
+    "qwen3_5": "merge_grid",
+    "qwen3_5_moe": "merge_grid",
+    "gemma4": "pooled_budget",
+    "nemotron_h_omni": "dynamic_tiles",
+}
+
+# Families whose VisionFeatureCache keeps frozen tower outputs through a learn
+# step. A LoRA-trained tower runs with autograd and bypasses the cache.
+VISION_FEATURE_CACHE_MODEL_TYPES: frozenset[str] = frozenset(
+    {"qwen3_5", "qwen3_5_moe", "gemma4"}
+)
 
 
-def _encoder_params(cfg: dict[str, Any]) -> int:
-    """Rough parameter count of a transformer encoder from its config.
+def _encoder_params(cfg: dict[str, Any]) -> tuple[int, int]:
+    """Rough (block, total) parameter counts of a transformer encoder from its config.
 
     Qwen vision configs name the layer, head and position counts ``depth``,
     ``num_heads`` and ``num_position_embeddings``.
@@ -94,7 +140,7 @@ def _encoder_params(cfg: dict[str, Any]) -> int:
     h = int(cfg.get("hidden_size") or 0)
     layers = int(cfg.get("num_hidden_layers") or cfg.get("depth") or 0)
     if not h or not layers:
-        return 0
+        return 0, 0
     heads = int(cfg.get("num_attention_heads") or cfg.get("num_heads") or 1)
     head_dim = int(cfg.get("head_dim") or h // heads)
     kv_heads = int(cfg.get("num_key_value_heads") or heads)
@@ -104,33 +150,75 @@ def _encoder_params(cfg: dict[str, Any]) -> int:
     positions = int(
         cfg.get("position_embedding_size") or cfg.get("num_position_embeddings") or 0
     )
-    return layers * per_layer + positions * h
+    blocks = layers * per_layer
+    return blocks, blocks + positions * h
+
+
+def _tower_configs(config: dict[str, Any]) -> list[dict[str, Any]]:
+    """Vision and audio encoder configs present in ``config``."""
+    return [
+        config[key]
+        for key in ("vision_config", "audio_config")
+        if isinstance(config.get(key), dict)
+    ]
 
 
 def multimodal_tower_params(config: dict[str, Any]) -> int:
-    """Lower-bound params treating vision/audio configs as transformer encoders."""
-    return sum(
-        _encoder_params(config[key])
-        for key in ("vision_config", "audio_config")
-        if isinstance(config.get(key), dict)
-    )
+    """Lower-bound params treating vision/audio configs as transformer encoders.
+
+    :param config: Hugging Face model config.
+    :return: Tower parameter count.
+    """
+    return sum(_encoder_params(cfg)[1] for cfg in _tower_configs(config))
+
+
+def multimodal_tower_block_params(config: dict[str, Any]) -> int:
+    """Encoder-block share of :func:`multimodal_tower_params` that FSDP shards as units.
+
+    :param config: Hugging Face model config.
+    :return: Block parameter count; zero for models FSDP does not wrap per block.
+    """
+    if config.get("model_type") not in TOWER_BLOCK_UNIT_MODEL_TYPES:
+        return 0
+    return sum(_encoder_params(cfg)[0] for cfg in _tower_configs(config))
 
 
 def _vision_fields(config: dict[str, Any]) -> dict[str, int]:
-    """Vision tower output width, input image side and patch side; zeros without a tower."""
+    """Vision tower geometry; empty without a tower."""
     vision = config.get("vision_config")
     if not isinstance(vision, dict):
         return {}
+    model_type = config.get("model_type", "")
+    # Patches per side merged into one token: Qwen's spatial merge, Gemma4's
+    # pooling kernel, Nemotron's pixel shuffle.
+    merge = vision.get("spatial_merge_size") or vision.get("pooling_kernel_size")
+    if not merge and config.get("downsample_ratio"):
+        merge = round(1 / config["downsample_ratio"])
+    soft_tokens = int(config.get("vision_soft_tokens_per_image") or 0)
     return {
         "vision_hidden_size": int(
             config.get("vit_hidden_size") or vision.get("hidden_size") or 0
         ),
-        "vision_image_size": int(
-            config.get("force_image_size") or vision.get("image_size") or 0
-        ),
         "vision_patch_size": int(
             config.get("patch_size") or vision.get("patch_size") or 0
         ),
+        "vision_intermediate_size": int(vision.get("intermediate_size") or 0),
+        "vision_n_layers": int(
+            vision.get("depth") or vision.get("num_hidden_layers") or 0
+        ),
+        "vision_in_channels": int(vision.get("in_channels") or 3),
+        "vision_temporal_patch_size": int(vision.get("temporal_patch_size") or 1),
+        "vision_out_hidden_size": int(vision.get("out_hidden_size") or 0),
+        "vision_spatial_merge_size": int(merge or 1),
+        "vision_profile_patches": VISION_PROFILE_PATCHES_BY_MODEL_TYPE.get(
+            model_type, 0
+        ),
+        "vision_resize": VISION_RESIZE_BY_MODEL_TYPE.get(model_type, "none"),
+        "vision_min_patches": int(vision.get("min_num_patches") or 0),
+        "vision_max_patches": int(
+            vision.get("max_num_patches") or soft_tokens * int(merge or 1) ** 2
+        ),
+        "vision_feature_cache": model_type in VISION_FEATURE_CACHE_MODEL_TYPES,
     }
 
 
@@ -261,6 +349,7 @@ class MambaGeometry(TypedDict, total=False):
     d_head: int
     conv_dim: int
     chunk_size: int
+    gated_delta: bool
 
 
 def _mamba_state_geometry(text_cfg: dict[str, Any], hidden: int) -> MambaGeometry:
@@ -283,6 +372,7 @@ def _mamba_state_geometry(text_cfg: dict[str, Any], hidden: int) -> MambaGeometr
             "d_head": v_dim,
             "conv_dim": 2 * k_heads * k_dim + v_heads * v_dim,
             "chunk_size": int(text_cfg.get("chunk_size") or MAMBA_CHUNK_SIZE_DEFAULT),
+            "gated_delta": True,
         }
 
     d_state = _first_int(text_cfg, "mamba_d_state", "ssm_state_size", "mamba_state_dim")
@@ -335,6 +425,7 @@ def _decoder_fields(text_cfg: dict[str, Any]) -> dict[str, Any]:
         "tied_embeddings": bool(text_cfg.get("tie_word_embeddings", False)),
         "gated_mlp": gated,
         "fp32_norm_inputs": text_cfg.get("model_type") in FP32_RMS_NORM_MODEL_TYPES,
+        "stock_gated_mlp": text_cfg.get("model_type") in STOCK_GATED_MLP_MODEL_TYPES,
         "qk_norm": text_cfg.get("model_type") in QK_NORM_MODEL_TYPES,
         "chunked_routed_experts": text_cfg.get("model_type")
         in CHUNKED_ROUTED_EXPERT_MODEL_TYPES,
@@ -408,8 +499,13 @@ def _layout_fields(
         "n_kv_shared_layers": int(text_cfg.get("num_kv_shared_layers") or 0),
         "double_wide_mlp": bool(text_cfg.get("use_double_wide_mlp", False)),
         "per_layer_input_dim": int(text_cfg.get("hidden_size_per_layer_input") or 0),
+        "norms_per_block": (
+            4 if text_cfg.get("model_type") in SANDWICH_NORM_MODEL_TYPES else 2
+        )
+        + (1 if text_cfg.get("hidden_size_per_layer_input") else 0),
         "per_layer_input_vocab": int(text_cfg.get("vocab_size_per_layer_input") or 0),
         "multimodal_tower_params": multimodal_tower_params(config),
+        "multimodal_tower_block_params": multimodal_tower_block_params(config),
         **_vision_fields(config),
     }
 
@@ -438,8 +534,13 @@ class ModelArch(BaseModel):
     attn_bias: bool = False
     # SwiGLU (gate + up + down). Ungated MLPs use two matrices (up + down).
     gated_mlp: bool = True
+    # Trainer gated MLP saves the activated gate as its own tensor.
+    stock_gated_mlp: bool = False
     # Trainer RMSNorm saves an fp32 copy of its input for backward.
     fp32_norm_inputs: bool = False
+    # RMSNorms over the hidden state in one decoder block, including a
+    # per-layer-input norm.
+    norms_per_block: int = 2
     # Per-head Q/K norm upcasts Q to fp32 inside the block.
     qk_norm: bool = False
     # Trains Mamba layers with HF's eager scan on compute capability 8.9.
@@ -466,13 +567,35 @@ class ModelArch(BaseModel):
     layer_kinds: tuple[LayerKind, ...] = ()
     # Packed experts run in row chunks on the self-routing grouped-GEMM path.
     chunked_routed_experts: bool = False
+    # vLLM serves this model's expert LoRA in the 3D fused-MoE layout.
+    vllm_3d_moe_lora: bool = False
 
     multimodal_tower_params: int = 0
-    # Vision tower output width per patch, and the square image and patch
-    # sides it encodes. Zero without a vision tower.
+    # Tower params inside encoder blocks FSDP shards as their own units.
+    multimodal_tower_block_params: int = 0
+    # Vision tower width per patch and the patch side. Zero without a vision
+    # tower.
     vision_hidden_size: int = 0
-    vision_image_size: int = 0
     vision_patch_size: int = 0
+    # Vision encoder MLP width, pixel channels, frames per temporal patch,
+    # merged output width and side of the patch merge. Read by the engine's
+    # encoder profile.
+    vision_intermediate_size: int = 0
+    vision_in_channels: int = 3
+    vision_temporal_patch_size: int = 1
+    vision_out_hidden_size: int = 0
+    vision_spatial_merge_size: int = 1
+    # Vision encoder blocks.
+    vision_n_layers: int = 0
+    # Patches vLLM encodes for its start-up profile image; 0 when unmeasured.
+    vision_profile_patches: int = 0
+    # The image processor's patch-grid rule, and its per-image patch bounds
+    # under ``pooled_budget`` and ``dynamic_tiles``.
+    vision_resize: VisionResize = "none"
+    vision_min_patches: int = 0
+    vision_max_patches: int = 0
+    # VisionFeatureCache keeps this family's tower outputs through a learn step.
+    vision_feature_cache: bool = False
 
     # Head dim on full-attention layers when it differs from the sliding
     # layers', which widens q/k/v on the full-attention layers.
@@ -500,6 +623,8 @@ class ModelArch(BaseModel):
     # ``2 * k_heads * k_dim + v_heads * v_dim``.
     mamba_conv_dim: int = 0
     mamba_chunk_size: int = MAMBA_CHUNK_SIZE_DEFAULT
+    # Recurrent layers are gated-delta-net rather than Mamba-2.
+    mamba_gated_delta: bool = False
 
     @property
     def is_hybrid_ssm(self) -> bool:
@@ -558,13 +683,6 @@ class ModelArch(BaseModel):
         return self.n_experts is not None and self.n_experts > 1
 
     @property
-    def vision_patches_per_image(self) -> int:
-        """Patches the vision tower emits for one image."""
-        if not self.vision_patch_size:
-            return 0
-        return (self.vision_image_size // self.vision_patch_size) ** 2
-
-    @property
     def expert_width(self) -> int:
         """Feature width of a routed expert's input and output rows."""
         return self.moe_latent_size or self.hidden_size
@@ -573,6 +691,15 @@ class ModelArch(BaseModel):
     def block_exclusive_layers(self) -> bool:
         """Whether each layer holds exactly one block kind."""
         return self.n_mlp_layers is not None or self.n_moe_layers is not None
+
+    @property
+    def sublayer_transients(self) -> bool:
+        """Whether one block's activation peak sits in a single attention, FFN or recurrent sub-layer.
+
+        True for block-exclusive stacks, and for gated-delta-net stacks, whose
+        forward frees the mixer's tensors before the MLP beside it runs.
+        """
+        return self.block_exclusive_layers or self.mamba_gated_delta
 
     @property
     def moe_layers(self) -> int:
@@ -605,7 +732,12 @@ class ModelArch(BaseModel):
         layout = _layout_fields(
             text_cfg, decoder["n_layers"], decoder["hidden_size"], config
         )
-        return cls(**decoder, **moe, **layout)
+        return cls(
+            **decoder,
+            **moe,
+            **layout,
+            vllm_3d_moe_lora=config.get("model_type") in VLLM_3D_MOE_LORA_MODEL_TYPES,
+        )
 
 
 class WeightVariant(BaseModel):
@@ -747,6 +879,13 @@ class TrainingSettings(BaseModel):
     # Fused-logprob tile rows. ``None`` auto-tunes to a ~256 MiB fp32 logit
     # workspace, clamped to [128, 4096].
     chunk_rows: int | None = None
+    # Widest vLLM sampling support rollout records per token (``top_k``); 0
+    # records none. The no-grad pass scores those tokens from their support's
+    # lm_head rows.
+    sampling_support_width: int = Field(default=0, ge=0)
+    # The gradient pass scores supported tokens from their support rows too.
+    # PPO and REINFORCE's Liger loss scores the full vocabulary.
+    support_scored_loss: bool = False
     # Data-parallel trainer GPUs. The estimate is per GPU; this is the
     # shard group size.
     n_training_gpus: int = 1
@@ -756,9 +895,15 @@ class TrainingSettings(BaseModel):
     micro_batch_size: int = Field(default=1, ge=1)
     # PPO only: actor and critic rows share one gradient forward and backward.
     fuse_actor_critic_pass: bool = False
-    # Unique images one learner GPU encodes per learn step. Each keeps its
-    # vision tower output in pinned host memory until the step ends.
-    images_per_update: int = Field(default=0, ge=0)
+    # Images in each completion row, and the width and height the environment
+    # renders them at.
+    images_per_row: int = Field(default=0, ge=0)
+    image_width: int = Field(default=0, ge=0)
+    image_height: int = Field(default=0, ge=0)
+    # LoRA adapts the vision tower, which then runs with autograd.
+    vision_tower_lora: bool = False
+    # Episodes train as segment rows, which lockstep ranks balance before learning.
+    segmented_rows: bool = False
     # The main rank's async checkpoint snapshot also holds the Adam moments.
     checkpoint_optimizer: bool = False
     # Async rollout: the next rollout batch waits in host memory during learn.
@@ -775,6 +920,11 @@ class TrainingSettings(BaseModel):
         """
         total = self.trajectories_per_update or self.group_size
         return max(-(-total // self.n_training_gpus), 1)
+
+    @property
+    def images_per_update(self) -> int:
+        """Images one learner GPU holds per update."""
+        return self.trajectories * self.images_per_row
 
     @property
     def shard_gpus(self) -> int:
@@ -834,21 +984,6 @@ class TrainingSettings(BaseModel):
     def grad_forward_rows(self) -> int:
         """Rows per gradient forward: the micro-batch, doubled when PPO fuses."""
         return self.micro_batch_size * (2 if self.fuse_actor_critic_pass else 1)
-
-    @property
-    def n_adapter_rows(self) -> int:
-        """Adapters in one no-grad forward of a single sample.
-
-        DPO scores chosen and rejected in separate passes, so this is 1.
-        """
-        if self.algorithm == "dpo":
-            return 1
-        rows = 1  # the actor's own logprobs
-        if self.uses_reference:
-            rows += 1
-        if self.uses_critic:
-            rows += 1
-        return rows
 
     @property
     def lora_casts_recompute_only(self) -> bool:
@@ -922,6 +1057,8 @@ class GenerationSettings(BaseModel):
     # ``None`` takes vLLM's async-engine default, capped at
     # ``max_num_seqs * max_model_len``.
     max_num_batched_tokens: int | None = None
+    # ``limit_mm_per_prompt["image"]``. ``None`` takes vLLM's unset-modality limit.
+    max_images_per_prompt: int | None = None
     # Pin the KV pool size. ``None`` lets vLLM derive it from
     # ``gpu_memory_utilization``.
     kv_cache_memory_bytes: int | None = None
@@ -930,6 +1067,10 @@ class GenerationSettings(BaseModel):
     enforce_eager: bool | None = None
     max_lora_rank: int = OMITTED_MAX_LORA_RANK
     max_loras: int = 1
+    # Adapter ``target_parameters`` on packed experts. Any switches the
+    # engine to vLLM's 3D fused-MoE LoRA layout, as AgileRL patches the
+    # model's ``is_3d_moe_weight`` flag on.
+    lora_packed_target_matrices: int = 0
     weight_dtype: WeightDtype = "bf16"
     # ``fp8`` stores the engine weights at one byte. KV and activations stay
     # at ``weight_dtype``.

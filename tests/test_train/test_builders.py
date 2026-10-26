@@ -511,7 +511,7 @@ class TestLLMBuildGuards:
             group_size=4,
             batch_size=4,
             pretrained_model_name_or_path=CATALOG_HUB_ID,
-            max_model_len=128,
+            max_model_len=1024,
         )
         built = _build_llm_with_dummy_algo(spec, monkeypatch, device="cuda:0")
 

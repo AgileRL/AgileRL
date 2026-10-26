@@ -15,6 +15,7 @@ import json
 import logging
 import math
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -36,13 +37,18 @@ from agilerl.arena.memory.manifest import (
     lookup_gpu,
     run_config_from_manifest,
 )
-from agilerl.arena.memory.resolve.engine import resolve_engine_tensor_parallel
-from agilerl.arena.memory.resources import TierCheck, check_tiers
+from agilerl.arena.memory.resources import (
+    TierCheck,
+    check_tiers,
+    engine_width,
+    engines_per_member,
+)
 from agilerl.arena.memory.solver import (
     INFERENCE_GPU_MEMORY_UTILIZATION,
     INFERENCE_MAX_NUM_SEQS,
     SOLVABLE_FIELDS,
     CannotSolve,
+    SolveResult,
     architectural_context_limit,
     inference_run_config,
     solve,
@@ -55,7 +61,6 @@ from agilerl.arena.memory.specs import (
     ModelArch,
     ModelSpec,
     RunConfig,
-    TrainingSettings,
 )
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
 from agilerl.arena.models.manifest import TrainingManifest
@@ -328,6 +333,41 @@ def _resolve_device(
     return None
 
 
+def _allocation_layout(
+    manifest: TrainingManifest, num_gpus: int | None, device: DeviceSpec
+) -> tuple[int | None, int | None]:
+    """Engine width and engines per member the run starts on ``num_gpus``; ``None`` reads the manifest.
+
+    :raises ValueError: The run picks them from a GPU count and ``num_gpus``
+        is unset, or the node has too few GPUs.
+    """
+    if num_gpus is not None:
+        width = engine_width(manifest, num_gpus, device)
+        return width, engines_per_member(manifest.training, num_gpus, width)
+    spec = manifest.algorithm
+    if not isinstance(spec, RolloutLLMSpec) or spec.vllm_config is None:
+        return None, None
+    vllm = spec.vllm_config
+    training = manifest.training
+    if vllm.tensor_parallel_size is None:
+        msg = (
+            "tensor_parallel_size is unset, so the run picks it from the node's "
+            "GPUs; pass --num-gpus."
+        )
+        raise ValueError(msg)
+    if (
+        training.async_rollout
+        and training.rollout_engines_per_agent == "auto"
+        and vllm.max_num_seqs is None
+    ):
+        msg = (
+            "max_num_seqs is unset with auto rollout engines, so the run splits "
+            "it across the engines the node's GPUs give; pass --num-gpus."
+        )
+        raise ValueError(msg)
+    return None, None
+
+
 @click.group("memory")
 def memory_group() -> None:
     """Estimate GPU memory, or solve one setting against a card."""
@@ -358,6 +398,15 @@ def memory_group() -> None:
     help="Rollout-engine GPU memory in GiB for async manifests.",
 )
 @click.option(
+    "--num-gpus",
+    type=click.IntRange(min=1),
+    default=None,
+    help=(
+        "GPUs on the node the run gets (the tier's num_gpus). Needed when the "
+        "run picks tensor_parallel_size or max_num_seqs from it."
+    ),
+)
+@click.option(
     "--config",
     "config_path",
     default=None,
@@ -382,6 +431,7 @@ def memory_estimate(
     device_gb: float | None,
     gen_gpu: str | None,
     gen_device_gb: float | None,
+    num_gpus: int | None,
     config_path: str | None,
     as_json: bool,
     no_color: bool,
@@ -405,6 +455,7 @@ def memory_estimate(
             tiers=tiers,
             gen_gpu=gen_gpu,
             gen_device_gb=gen_device_gb,
+            num_gpus=num_gpus,
             config_path=config_path,
             as_json=as_json,
             no_color=no_color,
@@ -420,6 +471,7 @@ def main(
     tiers: list[dict[str, Any]] | None = None,
     gen_gpu: str | None = None,
     gen_device_gb: float | None = None,
+    num_gpus: int | None = None,
     config_path: str | None = None,
     as_json: bool = False,
     no_color: bool = False,
@@ -428,6 +480,7 @@ def main(
 
     :param tiers: Resource tiers to pick the cheapest fitting one from when
         neither ``gpu`` nor ``device_gb`` is given.
+    :param num_gpus: GPUs on the node, for the engine layout the run picks.
     """
     try:
         device = _resolve_device(
@@ -448,6 +501,12 @@ def main(
         return EXIT_USAGE
     if device is None and gen_device is not None:
         print("--gen-gpu/--gen-device-gb needs --gpu or --device-gb.", file=sys.stderr)
+        return EXIT_USAGE
+    if device is None and num_gpus is not None:
+        print(
+            "--num-gpus needs --gpu or --device-gb; a resource tier names its own.",
+            file=sys.stderr,
+        )
         return EXIT_USAGE
 
     try:
@@ -479,64 +538,33 @@ def main(
             file=sys.stderr,
         )
 
-    scored_width: int | None = None
-    unresolved = (
-        isinstance(spec, RolloutLLMSpec)
-        and spec.vllm_config is not None
-        and spec.vllm_config.tensor_parallel_size is None
-    )
-
-    def build_config(train_device: DeviceSpec) -> RunConfig:
+    def build_config(
+        train_device: DeviceSpec, width: int | None, engines: int | None
+    ) -> RunConfig:
         return run_config_from_manifest(
             manifest,
             train_device,
             model_config,
             n_params=model_spec.n_params,
             gen_device=gen_device,
-            tensor_parallel_size=scored_width,
+            tensor_parallel_size=width,
+            rollout_engines=engines,
         )
-
-    def resolve_width(tier: dict[str, Any], device_spec: DeviceSpec) -> int | None:
-        nonlocal scored_width
-        trial = manifest.model_copy(deep=True)
-        width = resolve_engine_tensor_parallel(
-            trial,
-            int(tier["num_gpus"]),
-            device_spec,
-            int(tier["num_gpus"]),
-        )
-        scored_width = width
-        return width
 
     chosen: TierCheck | None = None
     checks: list[TierCheck] = []
     try:
         if device is None:
-            if unresolved:
-                checks = check_tiers(
-                    tiers or [],
-                    manifest.training,
-                    build_config,
-                    resolve_width=resolve_width,
-                )
-            else:
-                tensor_parallel_size = 1
-                if isinstance(spec, RolloutLLMSpec) and spec.vllm_config is not None:
-                    tensor_parallel_size = spec.vllm_config.tensor_parallel_size
-                checks = check_tiers(
-                    tiers or [],
-                    manifest.training,
-                    build_config,
-                    tensor_parallel_size,
-                )
+            checks = check_tiers(tiers or [], manifest, build_config)
             chosen = next((check for check in checks if check.fits), None)
             if chosen is None or chosen.config is None:
                 return _report_no_tier(checks, as_json)
             config = chosen.config
         else:
-            if unresolved:
-                scored_width = 1
-            config = build_config(device)
+            width, engines = _allocation_layout(
+                manifest, num_gpus, gen_device or device
+            )
+            config = build_config(device, width, engines)
     except KeyError as err:
         return _report_missing_key(err)
     except ValueError as err:
@@ -547,6 +575,7 @@ def main(
     if as_json:
         payload = estimate.model_dump(by_alias=True)
         payload["fits"] = estimate.fits_with_buffer
+        payload["engine"] = _engine_payload(config)
         payload["advice"] = [a.model_dump() for a in advise(config)]
         if chosen is not None:
             payload["resource"] = chosen.tier
@@ -569,6 +598,15 @@ def main(
             ("Memory estimate", "bold"), f"{glyphs.separator}{config.model.model_id}"
         )
     )
+    if config.training.uses_generation_engine:
+        generation = config.generation
+        console.print(
+            Text(
+                f"Rollout engine: tensor_parallel_size={generation.tensor_parallel_size}"
+                f"{glyphs.separator}max_num_seqs={generation.max_num_seqs}",
+                style="dim",
+            )
+        )
     console.print(
         Text("Training and generation are separate peaks, one bar each.", style="dim")
     )
@@ -578,6 +616,16 @@ def main(
         console.print(_render_fixes(config))
         logger.info("Blocked: apply a fix above or use a larger GPU.")
     return EXIT_OK if estimate.fits_with_buffer else EXIT_OVER_BUDGET
+
+
+def _engine_payload(config: RunConfig) -> dict[str, int] | None:
+    """The rollout engine's resolved width and sequences; ``None`` without one."""
+    if not config.training.uses_generation_engine:
+        return None
+    return {
+        "tensor_parallel_size": config.generation.tensor_parallel_size,
+        "max_num_seqs": config.generation.max_num_seqs,
+    }
 
 
 def _describe_tier(tier: dict[str, Any]) -> str:
@@ -625,6 +673,7 @@ class SolveRequest:
     device_gb: float | None = None
     gen_gpu: str | None = None
     gen_device_gb: float | None = None
+    num_gpus: int | None = None
     model_id: str | None = None
     config_path: str | None = None
     max_num_seqs: int | None = None
@@ -671,6 +720,15 @@ class SolveRequest:
     type=float,
     default=None,
     help="Rollout-engine GPU memory in GiB for async manifests.",
+)
+@click.option(
+    "--num-gpus",
+    type=click.IntRange(min=1),
+    default=None,
+    help=(
+        "GPUs on the node the run gets. Needed when the run picks "
+        "tensor_parallel_size or max_num_seqs from it."
+    ),
 )
 @click.option(
     "--model",
@@ -745,28 +803,16 @@ def memory_solve(ctx: click.Context, **params: Any) -> None:
 def solve_main(request: SolveRequest) -> int:
     """Invert one setting. Separated from Click so callers get a plain int."""
     field = request.field
-    manifest_path = request.manifest_path
     inference = request.inference
-    gpu = request.gpu
-    device_gb = request.device_gb
-    gen_gpu = request.gen_gpu
-    gen_device_gb = request.gen_device_gb
-    model_id = request.model_id
-    config_path = request.config_path
-    max_num_seqs = request.max_num_seqs
-    gpu_memory_utilization = request.gpu_memory_utilization
-    max_model_len = request.max_model_len
-    enforce_eager = request.enforce_eager
-    max_loras = request.max_loras
-    hi = request.hi
-    as_json = request.as_json
-    no_color = request.no_color
     try:
         device = _resolve_device(
-            gpu, device_gb, flag="--gpu", capacity_flag="--device-gb"
+            request.gpu, request.device_gb, flag="--gpu", capacity_flag="--device-gb"
         )
         gen_device = _resolve_device(
-            gen_gpu, gen_device_gb, flag="--gen-gpu", capacity_flag="--gen-device-gb"
+            request.gen_gpu,
+            request.gen_device_gb,
+            flag="--gen-gpu",
+            capacity_flag="--gen-device-gb",
         )
     except ValueError as err:
         print(err, file=sys.stderr)
@@ -774,69 +820,94 @@ def solve_main(request: SolveRequest) -> int:
     if device is None:
         print("Pass --gpu or --device-gb (see --help).", file=sys.stderr)
         return EXIT_USAGE
-
-    if inference and manifest_path is not None:
-        print("--inference does not take a training manifest.", file=sys.stderr)
-        return EXIT_USAGE
-    if not inference and manifest_path is None:
-        print("Pass a MANIFEST, or --inference with --model.", file=sys.stderr)
-        return EXIT_USAGE
-    if inference and gen_device is not None:
-        print(
-            "--inference sizes one GPU; drop --gen-gpu/--gen-device-gb.",
-            file=sys.stderr,
-        )
+    overrides = _solve_overrides(request)
+    usage_error = _solve_usage_error(request, gen_device, overrides)
+    if usage_error is not None:
+        print(usage_error, file=sys.stderr)
         return EXIT_USAGE
 
-    overrides = {
-        key: value
-        for key, value in {
-            "max_num_seqs": max_num_seqs,
-            "gpu_memory_utilization": gpu_memory_utilization,
-            "max_model_len": max_model_len,
-            "enforce_eager": enforce_eager,
-            "max_loras": max_loras,
-        }.items()
-        if value is not None
-    }
-    if field in overrides:
-        flag = field.replace("_", "-")
-        print(f"--{flag} is the setting being solved; drop it.", file=sys.stderr)
-        return EXIT_USAGE
-
+    rebuild: Callable[[int], RunConfig] | None = None
     try:
-        # Past the checks above, no manifest means --inference.
-        if manifest_path is None:
+        # Past the usage checks, no manifest means --inference.
+        if request.manifest_path is None:
             config, arch_limit = _inference_config(
-                device, model_id=model_id, config_path=config_path, overrides=overrides
-            )
-        else:
-            config, arch_limit = _manifest_config(
-                manifest_path,
                 device,
-                config_path=config_path,
-                gen_device=gen_device,
+                model_id=request.model_id,
+                config_path=request.config_path,
                 overrides=overrides,
             )
+        else:
+            build, arch_limit = _manifest_config(
+                request.manifest_path,
+                device,
+                field,
+                config_path=request.config_path,
+                gen_device=gen_device,
+                num_gpus=request.num_gpus,
+                overrides=overrides,
+            )
+            config = build(None)
+            rebuild = build
     except KeyError as err:
         return _report_missing_key(err)
     except (OSError, ValueError, ValidationError, yaml.YAMLError) as err:
         print(str(err), file=sys.stderr)
         return EXIT_USAGE
 
-    bound = hi
+    bound = request.hi
     if field == "max_model_len":
         bound = arch_limit if bound is None else min(bound, arch_limit)
-    solver = solve_inference if inference else solve
     try:
-        result = solver(config, field, hi=bound)
+        if inference:
+            result = solve_inference(config, field, hi=bound)
+        else:
+            result = solve(config, field, hi=bound, rebuild=rebuild)
     except CannotSolve as err:
         print(str(err), file=sys.stderr)
         return EXIT_OVER_BUDGET
     except ValueError as err:
         print(str(err), file=sys.stderr)
         return EXIT_USAGE
+    _print_solve_result(result, inference, request.as_json, request.no_color)
+    return EXIT_OK
 
+
+def _solve_overrides(request: SolveRequest) -> dict[str, object]:
+    """The engine and context flags the request sets."""
+    flags = {
+        "max_num_seqs": request.max_num_seqs,
+        "gpu_memory_utilization": request.gpu_memory_utilization,
+        "max_model_len": request.max_model_len,
+        "enforce_eager": request.enforce_eager,
+        "max_loras": request.max_loras,
+    }
+    return {key: value for key, value in flags.items() if value is not None}
+
+
+def _solve_usage_error(
+    request: SolveRequest,
+    gen_device: DeviceSpec | None,
+    overrides: dict[str, object],
+) -> str | None:
+    """The message for a flag combination ``solve`` cannot run, else ``None``."""
+    inference = request.inference
+    if inference and request.manifest_path is not None:
+        return "--inference does not take a training manifest."
+    if not inference and request.manifest_path is None:
+        return "Pass a MANIFEST, or --inference with --model."
+    if inference and gen_device is not None:
+        return "--inference sizes one GPU; drop --gen-gpu/--gen-device-gb."
+    if inference and request.num_gpus is not None:
+        return "--inference sizes one GPU; drop --num-gpus."
+    if request.field in overrides:
+        flag = request.field.replace("_", "-")
+        return f"--{flag} is the setting being solved; drop it."
+    return None
+
+
+def _print_solve_result(
+    result: SolveResult, inference: bool, as_json: bool, no_color: bool
+) -> None:
     if as_json:
         payload = {
             "field": result.field,
@@ -846,12 +917,16 @@ def solve_main(request: SolveRequest) -> int:
             "mode": "inference" if inference else "training",
             "model": result.config.model.model_id,
             "unchecked_over_budget": list(result.unchecked_over_budget),
+            "engine": {
+                "tensor_parallel_size": result.config.generation.tensor_parallel_size,
+                "max_num_seqs": result.config.generation.max_num_seqs,
+            },
             "generation": result.estimate.generation.model_dump(by_alias=True),
         }
         if not inference:
             payload["training"] = result.estimate.training.model_dump(by_alias=True)
         print(json.dumps(payload, indent=2))
-        return EXIT_OK
+        return
 
     reason = "checkpoint / --hi cap" if result.limited_by == "bound" else "GPU memory"
     mode = "inference" if inference else "training"
@@ -873,6 +948,7 @@ def solve_main(request: SolveRequest) -> int:
     console.print(
         Text(
             f"{result.config.model.model_id}{glyphs.separator}{mode}{glyphs.separator}"
+            f"TP={result.config.generation.tensor_parallel_size}{glyphs.separator}"
             f"{result.config.generation.max_num_seqs} seqs{glyphs.separator}"
             f"gmu={result.config.generation.gpu_memory_utilization:g}",
             style="dim",
@@ -881,7 +957,6 @@ def solve_main(request: SolveRequest) -> int:
     if not inference:
         console.print(_render_phase(result.estimate.training, glyphs))
     console.print(_render_phase(result.estimate.generation, glyphs))
-    return EXIT_OK
 
 
 def _inference_config(
@@ -913,11 +988,14 @@ def _inference_config(
 def _manifest_config(
     manifest_path: str,
     device: DeviceSpec,
+    field: str,
     *,
     config_path: str | None,
     gen_device: DeviceSpec | None,
+    num_gpus: int | None,
     overrides: dict[str, object],
-) -> tuple[RunConfig, int]:
+) -> tuple[Callable[[int | None], RunConfig], int]:
+    """A run config builder at a value of ``field`` (``None``: the manifest's), and the RoPE cap."""
     manifest = TrainingManifest.get_validated(manifest_path, mode="python")
     spec = llm_spec(manifest)
     resolved_id = spec.pretrained_model_name_or_path
@@ -925,37 +1003,29 @@ def _manifest_config(
         msg = "manifest names no pretrained model."
         raise ValueError(msg)
     model_config, model_spec = _model_spec_from_checkpoint(resolved_id, config_path)
-    width = None
-    if (
-        isinstance(spec, RolloutLLMSpec)
-        and spec.vllm_config is not None
-        and spec.vllm_config.tensor_parallel_size is None
-    ):
-        width = 1
-    config = run_config_from_manifest(
-        manifest,
-        device,
-        model_config,
-        n_params=model_spec.n_params,
-        gen_device=gen_device,
-        tensor_parallel_size=width,
-    )
-    config_updates: dict[str, object] = {}
-    if overrides:
-        # model_copy skips validation; re-validate so a bad flag is a usage
-        # error, not a downstream crash.
-        config_updates["generation"] = GenerationSettings.model_validate(
-            {**config.generation.model_dump(), **overrides}
+    engine_device = gen_device or device
+
+    def build(value: int | None) -> RunConfig:
+        trial = manifest.model_copy(deep=True)
+        trial_spec = llm_spec(trial)
+        vllm = (
+            trial_spec.vllm_config if isinstance(trial_spec, RolloutLLMSpec) else None
         )
-    if "max_model_len" in overrides:
-        # The manifest holds one context length; a generation-only override
-        # would desync the training side from the submitted run.
-        config_updates["training"] = TrainingSettings.model_validate(
-            {
-                **config.training.model_dump(),
-                "max_model_len": overrides["max_model_len"],
-            }
+        settings = overrides if value is None else {**overrides, field: value}
+        for key, setting in settings.items():
+            if key == "max_model_len":
+                setattr(trial_spec, key, setting)
+            elif vllm is not None:
+                setattr(vllm, key, setting)
+        width, engines = _allocation_layout(trial, num_gpus, engine_device)
+        return run_config_from_manifest(
+            trial,
+            device,
+            model_config,
+            n_params=model_spec.n_params,
+            gen_device=gen_device,
+            tensor_parallel_size=width,
+            rollout_engines=engines,
         )
-    if config_updates:
-        config = config.model_copy(update=config_updates)
-    return config, architectural_context_limit(model_config)
+
+    return build, architectural_context_limit(model_config)

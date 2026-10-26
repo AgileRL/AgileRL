@@ -5,7 +5,7 @@
 import pytest
 from pydantic import ValidationError
 
-from agilerl.arena.memory import formulas
+from agilerl.arena.memory import formulas, vision
 from agilerl.arena.memory.advice import advise
 from agilerl.arena.memory.estimator import (
     estimate_generation,
@@ -14,6 +14,7 @@ from agilerl.arena.memory.estimator import (
     generation_can_serve,
     training_breakdown,
 )
+from agilerl.arena.memory.resolve.chunk import resolve_chunk_rows
 from agilerl.arena.memory.resolve.fsdp import resolve_fsdp_memory
 from agilerl.arena.memory.specs import (
     DeviceSpec,
@@ -134,21 +135,19 @@ class TestEstimateTraining:
     def test_beta_zero_skips_the_reference_forward_but_keeps_the_adapter(
         self, model, device
     ):
-        # beta=0 keeps the reference adapter and drops the no-grad reference row from activations.
+        # beta=0 keeps the reference adapter; the reference rows run as their own
+        # micro-batch forwards, so the no-grad peak does not move.
         with_kl = TrainingSettings(beta=0.001, max_model_len=4096)
         without_kl = TrainingSettings(beta=0.0, max_model_len=4096)
 
-        assert with_kl.n_adapter_rows == 2
-        assert without_kl.n_adapter_rows == 1
         assert with_kl.n_resident_adapters == without_kl.n_resident_adapters
 
         hot = estimate_training(model, device, with_kl)
         cold = estimate_training(model, device, without_kl)
 
-        # No-grad drops one of two fused rows.
         assert (
             component(cold, "activations").detail["nograd_peak"]
-            < (component(hot, "activations").detail["nograd_peak"])
+            == (component(hot, "activations").detail["nograd_peak"])
         )
         assert component(cold, "adapters").n_bytes == component(hot, "adapters").n_bytes
         assert cold.total_bytes <= hot.total_bytes
@@ -260,7 +259,8 @@ class TestEstimateGeneration:
                 "lora_slots",
             )
         )
-        assert engine_side == pytest.approx(budget, rel=0.01)
+        engine_runtime = component(breakdown, "overhead").detail["engine_runtime"]
+        assert engine_side + engine_runtime == pytest.approx(budget, rel=0.01)
 
         pinned = estimate_generation(
             model,
@@ -411,6 +411,128 @@ class TestEstimateGeneration:
         assert a100.usable_bytes < breakdown.total_bytes <= a100.total_bytes
         assert breakdown.fits
 
+    def test_moe_engine_charges_fused_expert_lora_stacks(self, device):
+        # Arrange
+        moe = ModelSpec(model_id="moe-test", arch=MOE_TINY)
+        dense_rank = formulas.lora_param_count(MOE_TINY, 16)
+        settings = GenerationSettings(max_lora_rank=16, max_loras=2)
+        packed = settings.model_copy(update={"lora_packed_target_matrices": 2})
+
+        # Act
+        layout_2d = estimate_generation(moe, device, settings)
+        layout_3d = estimate_generation(moe, device, packed)
+
+        # Assert
+        stacks_2d = formulas.engine_expert_lora_param_count(MOE_TINY, 16, 1, False)
+        stacks_3d = formulas.engine_expert_lora_param_count(MOE_TINY, 16, 1, True)
+        assert component(layout_2d, "lora_slots").n_bytes == 2 * 2 * (
+            dense_rank + stacks_2d
+        )
+        assert component(layout_3d, "lora_slots").n_bytes == 2 * 2 * (
+            dense_rank + stacks_3d
+        )
+        assert component(layout_3d, "kv_cache").n_bytes - component(
+            layout_2d, "kv_cache"
+        ).n_bytes == 2 * 2 * (stacks_2d - stacks_3d)
+
+    def test_model_declaring_3d_expert_weights_uses_the_3d_layout(self, device):
+        # Arrange
+        declared = ModelSpec(
+            model_id="moe-3d",
+            arch=MOE_TINY.model_copy(update={"vllm_3d_moe_lora": True}),
+        )
+        settings = GenerationSettings(max_lora_rank=16)
+
+        # Act
+        breakdown = estimate_generation(declared, device, settings)
+
+        # Assert
+        stacks_3d = formulas.engine_expert_lora_param_count(MOE_TINY, 16, 1, True)
+        assert component(breakdown, "lora_slots").n_bytes == 2 * (
+            formulas.lora_param_count(MOE_TINY, 16) + stacks_3d
+        )
+        assert ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["Qwen/Qwen3.6-35B-A3B"].config
+        ).vllm_3d_moe_lora
+        assert not ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["ibm-granite/granite-3.1-3b-a800m-instruct"].config
+        ).vllm_3d_moe_lora
+
+    def test_engine_runtime_comes_out_of_the_kv_budget_on_every_rank(self):
+        # Arrange
+        info = SUPPORTED_MODEL_INFO["Qwen/Qwen3.6-35B-A3B"]
+        qwen36 = ModelSpec(
+            model_id="Qwen/Qwen3.6-35B-A3B",
+            arch=ModelArch.from_hf_config(info.config),
+            n_params=info.num_params,
+        )
+        a100 = DeviceSpec(total_bytes=int(79.25 * GiB), name="NVIDIA A100-SXM4-80GB")
+        one_rank = GenerationSettings(gpu_memory_utilization=0.95, max_model_len=4096)
+        two_ranks = one_rank.model_copy(update={"tensor_parallel_size": 2})
+
+        # Act
+        tp1 = component(estimate_generation(qwen36, a100, one_rank), "overhead")
+        tp2 = component(estimate_generation(qwen36, a100, two_ranks), "overhead")
+
+        # Assert: vLLM 0.32 logged 2.49 GiB (TP=1) and 2.31 GiB (TP=2).
+        assert tp1.detail["engine_runtime"] == tp2.detail["engine_runtime"]
+        assert tp1.detail["engine_runtime"] / GiB == pytest.approx(2.4, abs=0.1)
+        assert tp1.n_bytes == (a100.context_bytes + tp1.detail["engine_runtime"])
+
+    def test_kept_vision_tower_charges_the_encoder_profile(self):
+        # Arrange
+        info = SUPPORTED_MODEL_INFO["Qwen/Qwen3.6-35B-A3B"]
+        arch = ModelArch.from_hf_config(info.config)
+        qwen36 = ModelSpec(
+            model_id="Qwen/Qwen3.6-35B-A3B",
+            arch=arch,
+            n_params=info.num_params,
+            variants=(
+                WeightVariant(),
+                WeightVariant(name="engine", stripped_multimodal=True),
+            ),
+        )
+        a100 = DeviceSpec(total_bytes=80 * GiB, name="NVIDIA A100-SXM4-80GB")
+        kept = GenerationSettings(
+            gpu_memory_utilization=0.9, max_model_len=4096, tensor_parallel_size=2
+        )
+        stripped = kept.model_copy(update={"weight_variant": "engine"})
+
+        # Act
+        with_tower = estimate_generation(qwen36, a100, kept)
+        without_tower = estimate_generation(qwen36, a100, stripped)
+
+        # Assert
+        encoder, _ = vision.encoder_profile_bytes(arch, 2.0, 2, 1)
+        peak = component(with_tower, "activation_peak")
+        assert peak.n_bytes == encoder
+        assert peak.detail["startup_peak"] == encoder
+        assert (
+            component(without_tower, "activation_peak").detail["startup_peak"] < encoder
+        )
+
+    def test_large_token_cap_charges_several_profile_images(self):
+        # Arrange
+        info = SUPPORTED_MODEL_INFO["Qwen/Qwen3.6-35B-A3B"]
+        arch = ModelArch.from_hf_config(info.config)
+        qwen36 = ModelSpec(
+            model_id="Qwen/Qwen3.6-35B-A3B", arch=arch, n_params=info.num_params
+        )
+        a100 = DeviceSpec(total_bytes=80 * GiB, name="NVIDIA A100-SXM4-80GB")
+        settings = GenerationSettings(
+            gpu_memory_utilization=0.9,
+            max_model_len=32768,
+            max_num_batched_tokens=32768,
+            tensor_parallel_size=2,
+        )
+
+        # Act
+        breakdown = estimate_generation(qwen36, a100, settings)
+
+        # Assert
+        encoder, _ = vision.encoder_profile_bytes(arch, 2.0, 2, 2)
+        assert component(breakdown, "activation_peak").detail["startup_peak"] == encoder
+
     def test_training_keeps_the_fragmentation_band(self, model, device):
         # Act
         breakdown = estimate_training(model, device, TrainingSettings(algorithm="grpo"))
@@ -463,6 +585,16 @@ class TestGenerationCanServe:
 
         assert estimate.generation.components == ()
         assert not generation_can_serve(estimate.generation)
+
+    def test_margin_must_stay_free_after_demand(self, model, device):
+        # Arrange
+        breakdown = estimate_generation(model, device, GenerationSettings())
+        kv = component(breakdown, "kv_cache").detail
+        spare = kv["pool"] - kv["worst_case_demand"]
+
+        # Act / Assert
+        assert generation_can_serve(breakdown, spare)
+        assert not generation_can_serve(breakdown, spare + 1)
 
 
 class TestEstimateRun:
@@ -638,6 +770,62 @@ class TestDistributedTerms:
         )
         assert any("resharded" in w for w in sharded.warnings)
 
+    def test_fsdp_slack_adds_the_all_gather_pool(self, model, device):
+        # Arrange
+        counts = formulas.param_counts(model.arch)
+        block = formulas.largest_block_params(counts, model.arch)
+
+        # Act
+        sharded = estimate_training(
+            model,
+            device,
+            TrainingSettings(fsdp=FSDPConfig(), n_training_gpus=4),
+        )
+        flat = estimate_training(model, device, TrainingSettings(n_training_gpus=4))
+
+        # Assert: a tied dense model pools its two-block prefetch window.
+        slack = component(sharded, "allocator_reserve")
+        assert slack.detail["all_gather_pool"] == 2 * block * 2
+        assert slack.n_bytes == pytest.approx(
+            slack.detail["compute_stream"] + slack.detail["all_gather_pool"], abs=1
+        )
+        assert component(flat, "allocator_reserve").detail["all_gather_pool"] == 0
+
+    @pytest.mark.parametrize("max_model_len", [16384, 2048])
+    def test_untied_head_counts_only_above_the_activations(self, device, max_model_len):
+        # Arrange
+        untied = ModelSpec(
+            model_id="untied",
+            arch=QWEN_05B.model_copy(update={"tied_embeddings": False}),
+        )
+        counts = formulas.param_counts(untied.arch)
+        token = formulas.token_embedding_params(untied.arch)
+        gathered = formulas.fsdp_gathered_params(
+            counts,
+            untied.arch,
+            n_gpus=4,
+            reshard_after_forward=True,
+            prefetch_units=1,
+            wrap_every_n_blocks=1,
+            cpu_offload=False,
+        )
+        settings = TrainingSettings(
+            fsdp=FSDPConfig(), n_training_gpus=4, max_model_len=max_model_len
+        )
+
+        # Act
+        sharded = estimate_training(untied, device, settings)
+
+        # Assert
+        activations = component(sharded, "activations").n_bytes
+        head_above = max(counts.lm_head * 2 - activations, 0)
+        assert component(sharded, "base_weights").n_bytes == pytest.approx(
+            (token + (counts.total - token) / 4 + gathered - counts.lm_head) * 2
+            + head_above,
+            abs=1,
+        )
+        assert (head_above == 0) == (max_model_len == 16384)
+
     def test_fsdp_without_reshard_holds_the_gathered_body(self, model, device):
         freed = estimate_training(
             model,
@@ -719,10 +907,28 @@ class TestDistributedTerms:
         )
 
         assert component(held, "activations").detail["backward_grads"] == pytest.approx(
-            (replicated + sharded_params) * 2, abs=1
+            replicated * 2 + sharded_params * 4, abs=1
         )
         assert component(synced, "activations").detail["backward_grads"] == (
             pytest.approx(replicated * 2 + sharded_params * 2 / 4, abs=1)
+        )
+
+    def test_held_grads_take_the_reduce_dtype(self, device):
+        model = ModelSpec(model_id="wide", arch=WIDE)
+        settings = TrainingSettings(
+            fsdp=FSDPConfig(reduce_dtype="bfloat16"),
+            n_training_gpus=4,
+            lora_rank=16,
+            group_size=8,
+        )
+        replicated, sharded_params = formulas.lora_tensor_placement(
+            WIDE, 16, "all-linear", 0, 100_000
+        )
+
+        held = estimate_training(model, device, settings)
+
+        assert component(held, "activations").detail["backward_grads"] == pytest.approx(
+            (replicated + sharded_params) * 2, abs=1
         )
 
     def test_optim_cpu_offload_charges_adam_only_at_the_step(self, model, device):
@@ -937,7 +1143,6 @@ class TestAlgorithmTerms:
         grpo = TrainingSettings(algorithm="grpo")
         ppo = TrainingSettings(algorithm="ppo")
 
-        assert ppo.n_adapter_rows == 3
         assert ppo.n_resident_adapters == 3
         assert ppo.n_trained_adapters == 2
         assert grpo.n_trained_adapters == 1
@@ -949,10 +1154,10 @@ class TestAlgorithmTerms:
             > component(grpo_bd, "adapters").n_bytes
         )
         assert component(ppo_bd, "grads").n_bytes > component(grpo_bd, "grads").n_bytes
-        # PPO's third fused row can make no-grad the binding instant; compare nograd_peak and totals.
+        # The critic rows run as their own micro-batch forwards.
         assert (
             component(ppo_bd, "activations").detail["nograd_peak"]
-            > component(grpo_bd, "activations").detail["nograd_peak"]
+            == component(grpo_bd, "activations").detail["nograd_peak"]
         )
         assert ppo_bd.total_bytes > grpo_bd.total_bytes
 
@@ -1002,11 +1207,6 @@ class TestAlgorithmTerms:
             > component(g, "activations").detail["backward_peak"]
         )
 
-    def test_dpo_reference_at_beta_zero_does_not_fuse(self):
-        settings = TrainingSettings(algorithm="dpo", beta=0.0)
-        assert settings.uses_reference
-        assert settings.n_adapter_rows == 1  # sequential passes
-
     def test_sft_has_no_nograd_instant_and_no_engine(self, model, device):
         settings = TrainingSettings(algorithm="sft")
         assert not settings.has_nograd_pass
@@ -1016,7 +1216,6 @@ class TestAlgorithmTerms:
 
     def test_sft_has_no_reference_or_critic(self):
         settings = TrainingSettings(algorithm="sft")
-        assert settings.n_adapter_rows == 1
         assert settings.n_resident_adapters == 1
         assert not settings.uses_reference
 
@@ -1031,6 +1230,196 @@ class TestAlgorithmTerms:
         assert estimate.generation.components == ()
         assert estimate.generation.fits
         assert not generation_can_serve(estimate.generation)
+
+
+class TestActivationPeakLossPeak:
+    """Loss instant: the gradient pass's logit workspace."""
+
+    def test_support_scored_loss_swaps_vocab_tiles_for_support_rows(
+        self, model, device
+    ):
+        # Arrange
+        vocab, h = QWEN_05B.vocab_size, QWEN_05B.hidden_size
+        chunk = resolve_chunk_rows(vocab, None)
+        full = TrainingSettings(max_model_len=1024)
+        supported = full.model_copy(
+            update={"sampling_support_width": 20, "support_scored_loss": True}
+        )
+
+        # Act
+        full_peak = component(estimate_training(model, device, full), "activations")
+        support_peak = component(
+            estimate_training(model, device, supported), "activations"
+        )
+
+        # Assert
+        vocab_workspace = chunk * vocab * 8 + vocab * h * 4
+        support_rows = formulas.support_rows_bytes(QWEN_05B, chunk, 20, 2.0)
+        assert full_peak.detail["loss_peak"] - support_peak.detail["loss_peak"] == (
+            vocab_workspace - support_rows
+        )
+
+    def test_a_full_vocabulary_loss_keeps_its_workspace(self, model, device):
+        # Arrange
+        full = TrainingSettings(algorithm="ppo", max_model_len=1024)
+        liger = full.model_copy(update={"sampling_support_width": 20})
+
+        # Act
+        full_peak = component(estimate_training(model, device, full), "activations")
+        liger_peak = component(estimate_training(model, device, liger), "activations")
+
+        # Assert
+        assert liger_peak.detail["loss_peak"] == full_peak.detail["loss_peak"]
+        assert liger_peak.detail["nograd_peak"] < full_peak.detail["nograd_peak"]
+
+
+class TestActivationPeakNogradPeak:
+    """No-grad logprob instant: one micro-batch forward, then the head."""
+
+    def test_block_binds_when_it_outweighs_the_fp32_head(self, device):
+        # Arrange
+        arch = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["Qwen/Qwen3.5-0.8B"].config
+        )
+        model = ModelSpec(model_id="Qwen/Qwen3.5-0.8B", arch=arch)
+        settings = TrainingSettings(max_model_len=32768, algorithm="ppo")
+
+        # Act
+        detail = component(estimate_training(model, device, settings), "activations")
+
+        # Assert
+        assert detail.detail["nograd_peak"] == formulas.nograd_forward_bytes(
+            arch, 1, 32768, 2.0
+        )
+
+    def test_head_binds_at_short_context(self, model, device):
+        # Arrange
+        seq_len = 1024
+        settings = TrainingSettings(max_model_len=seq_len)
+        h, vocab = QWEN_05B.hidden_size, QWEN_05B.vocab_size
+        tile = resolve_chunk_rows(vocab, settings.chunk_rows) * vocab * 4
+
+        # Act
+        detail = component(estimate_training(model, device, settings), "activations")
+
+        # Assert
+        assert detail.detail["nograd_peak"] == seq_len * h * 2 + tile + vocab * h * 4
+
+    def test_supports_score_the_head_without_an_fp32_copy(self, model, device):
+        # Arrange
+        seq_len = 1024
+        settings = TrainingSettings(max_model_len=seq_len, sampling_support_width=20)
+        h, vocab = QWEN_05B.hidden_size, QWEN_05B.vocab_size
+        rows = formulas.support_rows_bytes(
+            QWEN_05B, resolve_chunk_rows(vocab, None), 20, 2.0
+        )
+
+        # Act
+        detail = component(estimate_training(model, device, settings), "activations")
+
+        # Assert
+        assert detail.detail["nograd_peak"] == seq_len * h * 2 + rows
+
+    def test_fused_adapter_rows_do_not_widen_the_forward(self, device):
+        # Arrange
+        arch = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["Qwen/Qwen3.5-0.8B"].config
+        )
+        model = ModelSpec(model_id="Qwen/Qwen3.5-0.8B", arch=arch)
+        grpo = TrainingSettings(max_model_len=16384, beta=0.0)
+        ppo = grpo.model_copy(update={"algorithm": "ppo", "beta": 0.001})
+
+        # Act
+        one_adapter = estimate_training(model, device, grpo)
+        three_adapters = estimate_training(model, device, ppo)
+
+        # Assert
+        assert (
+            component(one_adapter, "activations").detail["nograd_peak"]
+            == component(three_adapters, "activations").detail["nograd_peak"]
+        )
+
+    def test_vision_rows_of_two_chunks_are_on_the_device(self, device):
+        # Arrange: 4 images of 1280x2048, 60 MiB of fp32 pixels each.
+        arch = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["Qwen/Qwen3.5-0.8B"].config
+        )
+        model = ModelSpec(model_id="Qwen/Qwen3.5-0.8B", arch=arch)
+        text = TrainingSettings(max_model_len=32768, micro_batch_size=2)
+        images = text.model_copy(
+            update={"images_per_row": 4, "image_width": 1280, "image_height": 2048}
+        )
+
+        # Act
+        text_detail = component(estimate_training(model, device, text), "activations")
+        image_detail = component(
+            estimate_training(model, device, images), "activations"
+        )
+
+        # Assert
+        assert image_detail.detail["nograd_vision_rows"] == 2 * 2 * 4 * 60 * MiB
+        assert (
+            image_detail.detail["nograd_peak"] - text_detail.detail["nograd_peak"]
+            == 2 * 2 * 4 * 60 * MiB
+        )
+
+
+class TestActivationPeakSegmentBalancePeak:
+    """Balancing segment rows holds one row to and from each lockstep peer."""
+
+    def test_holds_a_row_each_way_per_peer(self, device):
+        # Arrange
+        arch = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["Qwen/Qwen3.5-0.8B"].config
+        )
+        model = ModelSpec(model_id="Qwen/Qwen3.5-0.8B", arch=arch)
+        settings = TrainingSettings(
+            n_training_gpus=4,
+            images_per_row=4,
+            image_width=1280,
+            image_height=2048,
+            segmented_rows=True,
+        )
+
+        # Act
+        detail = component(estimate_training(model, device, settings), "activations")
+
+        # Assert
+        assert detail.detail["segment_balance_peak"] == 2 * 3 * 4 * 60 * MiB
+
+    def test_binds_when_it_outweighs_the_learn_passes(self, device):
+        # Arrange: 8 lockstep ranks of 16 images of 1280x2048 at 1k tokens.
+        arch = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["Qwen/Qwen3.5-0.8B"].config
+        )
+        model = ModelSpec(model_id="Qwen/Qwen3.5-0.8B", arch=arch)
+        settings = TrainingSettings(
+            max_model_len=1024,
+            n_training_gpus=8,
+            images_per_row=16,
+            image_width=1280,
+            image_height=2048,
+            segmented_rows=True,
+        )
+
+        # Act
+        bar = estimate_training(model, device, settings)
+
+        # Assert
+        assert component(bar, "activations").n_bytes == 2 * 7 * 16 * 60 * MiB
+
+    def test_unsegmented_rows_stay_put(self, device):
+        arch = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["Qwen/Qwen3.5-0.8B"].config
+        )
+        model = ModelSpec(model_id="Qwen/Qwen3.5-0.8B", arch=arch)
+        settings = TrainingSettings(
+            n_training_gpus=4, images_per_row=4, image_width=1280, image_height=2048
+        )
+
+        detail = component(estimate_training(model, device, settings), "activations")
+
+        assert detail.detail["segment_balance_peak"] == 0
 
 
 class TestFusedActorCriticPass:
@@ -1093,7 +1482,9 @@ class TestFusedActorCriticPass:
         assert split_bar.fits
         assert not fused_bar.fits
 
-    def test_two_row_split_micro_batch_matches_one_row_fused(self, model, device):
+    def test_two_row_split_micro_batch_matches_one_row_fused_gradients(
+        self, model, device
+    ):
         # Arrange
         seq_len = 4096
         split = TrainingSettings(
@@ -1112,9 +1503,14 @@ class TestFusedActorCriticPass:
 
         # Assert
         h, n_layers = QWEN_05B.hidden_size, QWEN_05B.n_layers
-        split_detail = component(split_bar, "activations").detail
+        split_detail = dict(component(split_bar, "activations").detail)
+        fused_detail = dict(component(fused_bar, "activations").detail)
         assert split.grad_forward_rows == fused.grad_forward_rows == 2
-        assert split_detail == component(fused_bar, "activations").detail
+        # Two-row no-grad forwards score one more row at the fp32 head.
+        assert split_detail.pop("nograd_peak") - fused_detail.pop("nograd_peak") == (
+            seq_len * h * 2
+        )
+        assert split_detail == fused_detail
         assert split_bar.total_bytes == fused_bar.total_bytes
         assert split_detail["checkpoint_boundaries"] == 2 * seq_len * h * n_layers * 2
         assert split_detail["block_recompute"] == formulas.block_recompute_bytes(
@@ -1150,11 +1546,9 @@ class TestFusedActorCriticPass:
         assert four.detail["lora_fp32_input_casts"] == (
             formulas.lora_input_cast_bytes(QWEN_05B, 4, seq_len)
         )
-        one_nograd = max(one_row.n_adapter_rows, one_row.micro_batch_size)
-        four_nograd = max(four_rows.n_adapter_rows, four_rows.micro_batch_size)
+        # At 1k tokens the fp32 head outweighs a block; it scores 3 more rows.
         assert four.detail["nograd_peak"] - one.detail["nograd_peak"] == (
-            formulas.nograd_forward_bytes(QWEN_05B, four_nograd, seq_len, 2.0)
-            - formulas.nograd_forward_bytes(QWEN_05B, one_nograd, seq_len, 2.0)
+            3 * seq_len * h * 2
         )
         assert (
             component(four_bar, "logits_workspace").n_bytes
@@ -1225,6 +1619,87 @@ class TestMicroBatchAdvice:
         actions = [tip.action for tip in advise(config)]
 
         assert all("micro_batch_size_per_gpu" not in action for action in actions)
+
+
+class TestStripTowersAdvice:
+    @staticmethod
+    def _towered(model, variants):
+        return model.model_copy(
+            update={
+                "arch": model.arch.model_copy(
+                    update={"multimodal_tower_params": 2_000_000_000}
+                ),
+                "variants": variants,
+            }
+        )
+
+    def test_over_budget_engine_suggests_stripping_the_towers(self, model):
+        # Arrange: 4 GB of tower weights overrun a 4 GiB card's engine budget.
+        device = DeviceSpec(total_bytes=4 * GiB)
+        engine = WeightVariant(name="engine", stripped_multimodal=True)
+        towered = self._towered(model, (WeightVariant(), engine))
+        config = RunConfig(model=towered, train_device=device, gen_device=device)
+        stripped = config.model_copy(
+            update={
+                "generation": config.generation.model_copy(
+                    update={"weight_variant": "engine"}
+                )
+            }
+        )
+        expected = (
+            estimate_run(config).generation.total_bytes
+            - estimate_run(stripped).generation.total_bytes
+        )
+
+        # Act
+        tips = advise(config)
+
+        # Assert
+        match = next(tip for tip in tips if "strip_multimodal_towers" in tip.action)
+        assert match.phase == "generation"
+        assert match.saves_bytes == expected
+        assert expected > 0
+
+    def test_no_stripped_variant_means_no_strip_advice(self, model):
+        device = DeviceSpec(total_bytes=4 * GiB)
+        towered = self._towered(model, (WeightVariant(),))
+        config = RunConfig(model=towered, train_device=device, gen_device=device)
+
+        actions = [tip.action for tip in advise(config)]
+
+        assert all("strip_multimodal_towers" not in action for action in actions)
+
+    def test_an_already_stripped_engine_gets_no_strip_advice(self, model):
+        device = DeviceSpec(total_bytes=4 * GiB)
+        engine = WeightVariant(name="engine", stripped_multimodal=True)
+        towered = self._towered(model, (WeightVariant(), engine))
+        config = RunConfig(
+            model=towered,
+            train_device=device,
+            gen_device=device,
+            generation=GenerationSettings(weight_variant="engine"),
+        )
+
+        actions = [tip.action for tip in advise(config)]
+
+        assert all("strip_multimodal_towers" not in action for action in actions)
+
+    def test_image_rows_get_no_strip_advice(self, model):
+        device = DeviceSpec(total_bytes=4 * GiB)
+        engine = WeightVariant(name="engine", stripped_multimodal=True)
+        towered = self._towered(model, (WeightVariant(), engine))
+        config = RunConfig(
+            model=towered,
+            train_device=device,
+            gen_device=device,
+            training=TrainingSettings(
+                images_per_row=1, image_width=1280, image_height=720
+            ),
+        )
+
+        actions = [tip.action for tip in advise(config)]
+
+        assert all("strip_multimodal_towers" not in action for action in actions)
 
 
 class TestEagerMambaScan:
@@ -1340,6 +1815,36 @@ class TestRoutedChunkTerm:
         detail = component(breakdown, "activations").detail
         assert detail["routed_expert_chunks"] == expected > 0
 
+    def test_recurrent_block_keeps_the_chunks_of_the_experts_beside_it(self, device):
+        # Arrange
+        info = SUPPORTED_MODEL_INFO["Qwen/Qwen3.6-35B-A3B"]
+        qwen36 = ModelSpec(
+            model_id="Qwen/Qwen3.6-35B-A3B",
+            arch=ModelArch.from_hf_config(info.config),
+            n_params=info.num_params,
+        )
+        settings = moe_settings(routed_expert_chunk_mib=256, optim_cpu_offload=True)
+
+        # Act
+        breakdown = estimate_training(qwen36, device, settings)
+
+        # Assert
+        detail = component(breakdown, "activations").detail
+        assert detail["block_recompute"] == formulas.block_recompute_bytes(
+            qwen36.arch, 1, 16384, 2.0, backward=True, layer="mamba"
+        )
+        assert detail["routed_expert_chunks"] == formulas.routed_chunk_bytes(
+            qwen36.arch,
+            1,
+            16384,
+            2.0,
+            256 * MiB,
+            expert_lora=True,
+            contracted=True,
+            ep=8,
+        )
+        assert detail["routed_expert_chunks"] > 0
+
 
 class TestOptimizerPlacement:
     def test_data_parallel_charges_the_foreach_workspace(self, model, device):
@@ -1397,26 +1902,128 @@ class TestTrainingHostBreakdown:
         assert host(breakdown, "optimizer_offload").n_bytes == 0
 
     def test_vision_cache_holds_each_image_tower_output(self, device):
-        # Arrange: 32 x 32 patches of 1280 per 512 px image, bf16.
-        arch = QWEN_05B.model_copy(
-            update={
-                "vision_hidden_size": 1280,
-                "vision_image_size": 512,
-                "vision_patch_size": 16,
-            }
+        # Arrange: Qwen3.5, 8 rows x 2 screenshots of 44 x 80 patches.
+        arch = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["Qwen/Qwen3.5-0.8B"].config
         )
-        vision_model = ModelSpec(model_id="vision", arch=arch)
+        vision_model = ModelSpec(model_id="Qwen/Qwen3.5-0.8B", arch=arch)
+        screenshots = TrainingSettings(
+            images_per_row=2, image_width=1280, image_height=720
+        )
 
         # Act
         without = estimate_training(vision_model, device, TrainingSettings())
-        with_images = estimate_training(
-            vision_model, device, TrainingSettings(images_per_update=10)
-        )
+        with_images = estimate_training(vision_model, device, screenshots)
 
         # Assert
-        assert host(with_images, "vision_feature_cache").n_bytes == 10 * 1024 * 1280 * 2
+        cache = host(with_images, "vision_feature_cache").n_bytes
+        # Pinned blocks: 3520 x 768 bf16 rounds to 8 MiB, 880 x 1024 to 2 MiB.
+        assert cache == 8 * 2 * (8 + 2) * MiB
         assert host(without, "vision_feature_cache").n_bytes == 0
         assert with_images.total_bytes == without.total_bytes
+
+    def test_vision_rows_live_once_beside_two_pinned_staging_buffers(self, device):
+        # Arrange: 8 rows x 4 images of 1280x2048, 60 MiB of fp32 pixels each.
+        arch = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["Qwen/Qwen3.5-0.8B"].config
+        )
+        vision_model = ModelSpec(model_id="Qwen/Qwen3.5-0.8B", arch=arch)
+        settings = TrainingSettings(
+            images_per_row=4, image_width=1280, image_height=2048
+        )
+
+        # Act
+        bar = estimate_training(vision_model, device, settings)
+
+        # Assert
+        assert host(bar, "vision_rows").n_bytes == 8 * 4 * 60 * MiB
+        # One micro-batch row is 240 MiB, in a 256 MiB pinned block.
+        assert host(bar, "vision_row_staging").n_bytes == 2 * 256 * MiB
+
+    def test_text_rows_hold_no_vision_rows(self, device):
+        arch = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["Qwen/Qwen3.5-0.8B"].config
+        )
+        vision_model = ModelSpec(model_id="Qwen/Qwen3.5-0.8B", arch=arch)
+
+        bar = estimate_training(vision_model, device, TrainingSettings())
+
+        assert host(bar, "vision_rows").n_bytes == 0
+        assert host(bar, "vision_row_staging").n_bytes == 0
+
+    def test_tower_lora_bypasses_the_cache_and_holds_tower_activations(self, device):
+        # Arrange
+        arch = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["Qwen/Qwen3.5-0.8B"].config
+        )
+        vision_model = ModelSpec(model_id="Qwen/Qwen3.5-0.8B", arch=arch)
+        frozen = TrainingSettings(
+            images_per_row=2, image_width=1280, image_height=2048, lora_dropout=0.05
+        )
+        trained = frozen.model_copy(update={"vision_tower_lora": True})
+
+        # Act
+        frozen_bar = estimate_training(vision_model, device, frozen)
+        trained_bar = estimate_training(vision_model, device, trained)
+
+        # Assert
+        frozen_detail = component(frozen_bar, "activations").detail
+        trained_detail = component(trained_bar, "activations").detail
+        assert host(trained_bar, "vision_feature_cache").n_bytes == 0
+        assert host(frozen_bar, "vision_feature_cache").n_bytes > 0
+        # fp32 adapters: 480 MiB of tower tensors plus 150 MiB of merger dropout.
+        assert frozen_detail["vision_tower_lora"] == 0
+        assert trained_detail["vision_tower_lora"] == 630 * MiB
+        assert (
+            trained_detail["backward_peak"] - frozen_detail["backward_peak"]
+            == 630 * MiB
+        )
+        assert trained_detail["loss_peak"] - frozen_detail["loss_peak"] == 630 * MiB
+
+    def test_catalog_vision_family_charges_no_feature_cache(self, device):
+        # Arrange
+        vision_model = ModelSpec(
+            model_id="super-vl", arch=ModelArch.from_hf_config(SUPER_VL.config)
+        )
+        screenshots = TrainingSettings(
+            images_per_row=4, image_width=1280, image_height=720
+        )
+
+        # Act
+        breakdown = estimate_training(vision_model, device, screenshots)
+
+        # Assert
+        assert host(breakdown, "vision_feature_cache").n_bytes == 0
+
+    @pytest.mark.parametrize(
+        ("hub_id", "row_bytes"),
+        [
+            ("Qwen/Qwen3.5-0.8B", 44 * 80 * 1536 * 4),
+            ("google/gemma-4-E4B-it", 36 * 66 * 768 * 4),
+            ("nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16", 46 * 80 * 768 * 4),
+        ],
+    )
+    def test_async_rollout_holds_the_next_updates_pixel_rows(
+        self, device, hub_id, row_bytes
+    ):
+        # Arrange: 8 rows x 4 screenshots at the 1280x720 viewport.
+        arch = ModelArch.from_hf_config(SUPPORTED_MODEL_INFO[hub_id].config)
+        vision_model = ModelSpec(model_id=hub_id, arch=arch)
+        text = TrainingSettings(async_rollout=True)
+        screenshots = text.model_copy(
+            update={"images_per_row": 4, "image_width": 1280, "image_height": 720}
+        )
+
+        # Act
+        without = estimate_training(vision_model, device, text)
+        with_images = estimate_training(vision_model, device, screenshots)
+
+        # Assert
+        pixels = (
+            host(with_images, "prefetched_rollout").n_bytes
+            - host(without, "prefetched_rollout").n_bytes
+        )
+        assert pixels == 8 * 4 * row_bytes
 
     def test_checkpoint_snapshot_adds_adam_when_checkpointing_the_optimizer(
         self, model, device

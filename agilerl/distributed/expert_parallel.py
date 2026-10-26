@@ -34,7 +34,6 @@ from agilerl.distributed.ep_dispatch import (
     token_dispatch,
 )
 from agilerl.distributed.ep_forward import (
-    COPYING_ROUTED_COUNTS,
     ROUTED_COUNTS_SCOPE,
     CombinedBlock,
     DispatchedBlock,
@@ -76,7 +75,6 @@ from agilerl.distributed.replicated_rows import (
 from agilerl.lora.fused import patch_lora_for_fused_forward
 
 __all__ = [
-    "COPYING_ROUTED_COUNTS",
     "ROUTED_COUNTS_SCOPE",
     "AllToAllCtx",
     "AllToAllVar",

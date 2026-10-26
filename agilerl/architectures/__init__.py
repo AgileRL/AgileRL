@@ -92,7 +92,7 @@ def install_family_patches(
     install = runtime.patch.install
     if install is None:
         return
-    install(runtime.patch, model=model)
+    install(runtime.patch, model)
 
 
 register_nemotron_h_omni_native_loading()

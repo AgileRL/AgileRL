@@ -493,6 +493,80 @@ class TestLLMAlgorithmFusedForwardNoGrad:
         # Assert
         assert seen == [[0.0], [1.0, 2.0], [0.0], [1.0, 2.0]]
 
+    def test_every_adapter_reads_the_callers_vision_rows(self) -> None:
+        # Arrange: reference, actor and two micro-batches per adapter.
+        agent = _make_cpu_grpo_for_kernel_tests()
+        ids = torch.randint(1, 32, (4, 5))
+        pixel_values = torch.arange(6.0).reshape(6, 1)
+        storages: list[int] = []
+
+        def record_storage(
+            _module: torch.nn.Module,
+            _args: tuple[Any, ...],
+            kwargs: dict[str, Any],
+        ) -> None:
+            storages.append(kwargs["pixel_values"].untyped_storage().data_ptr())
+
+        handle = agent.actor.get_base_model().register_forward_pre_hook(
+            record_storage, with_kwargs=True
+        )
+
+        # Act
+        try:
+            agent._fused_forward_no_grad(
+                ids, 2, pixel_values=pixel_values, pixel_image_counts=[1, 2, 1, 2]
+            )
+        finally:
+            handle.remove()
+
+        # Assert: no forward reads a host copy of the vision rows.
+        assert len(storages) == 4
+        assert set(storages) == {pixel_values.untyped_storage().data_ptr()}
+
+
+@_LLM_DEPS_SKIP
+class TestGRPOLearnStartLogProbs:
+    def test_actor_rows_read_the_callers_vision_rows(self) -> None:
+        # Arrange: actor log-probs for rows 1, 2 and 3 of 4, one row per forward.
+        agent = _make_cpu_grpo_for_kernel_tests(beta=0.0)
+        ids = torch.randint(1, 32, (4, 5))
+        action_masks = torch.ones(4, 4, dtype=torch.bool)
+        pixel_values = torch.arange(6.0).reshape(6, 1)
+        forwards: list[tuple[int, list[float]]] = []
+
+        def record_pixels(
+            _module: torch.nn.Module,
+            _args: tuple[Any, ...],
+            kwargs: dict[str, Any],
+        ) -> None:
+            pixels = kwargs["pixel_values"]
+            forwards.append(
+                (pixels.untyped_storage().data_ptr(), pixels.flatten().tolist())
+            )
+
+        handle = agent.actor.get_base_model().register_forward_pre_hook(
+            record_pixels, with_kwargs=True
+        )
+
+        # Act
+        try:
+            agent._learn_start_log_probs(
+                ids,
+                action_masks,
+                1,
+                np.array([1, 2, 3]),
+                pixel_values=pixel_values,
+                pixel_image_counts=[1, 2, 1, 2],
+            )
+        finally:
+            handle.remove()
+
+        # Assert: each forward reads its row's vision rows from the caller's tensor.
+        assert [pixels for _, pixels in forwards] == [[1.0, 2.0], [3.0], [4.0, 5.0]]
+        assert {storage for storage, _ in forwards} == {
+            pixel_values.untyped_storage().data_ptr()
+        }
+
 
 @_LLM_DEPS_SKIP
 class TestLLMAlgorithmSegmentRows:

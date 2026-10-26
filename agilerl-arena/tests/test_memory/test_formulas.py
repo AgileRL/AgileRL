@@ -332,6 +332,9 @@ class TestModelArchFromHfConfig:
         assert arch.mamba_d_conv == 4
         assert arch.mamba_chunk_size == 64
         assert arch.mamba_conv_dim == 2 * 16 * 128 + 32 * 64
+        assert arch.mamba_gated_delta
+        assert arch.sublayer_transients
+        assert not arch.block_exclusive_layers
 
     def test_counts_vision_encoder_params(self):
         empty = ModelArch.from_hf_config(
@@ -502,6 +505,24 @@ class TestResolveChunkRows:
         assert resolve_chunk_rows(1000) == 4096  # clamped high
         assert resolve_chunk_rows(10_000_000) == 128  # clamped low
         assert resolve_chunk_rows(151936, explicit=64) == 64
+
+
+class TestSupportRowsBytes:
+    def test_a_narrow_support_fills_one_vocab_tile_with_head_rows(self):
+        # 441 * 151936 // (20 * 896) = 3739 tokens of 20 rows; bf16 plus fp32.
+        assert formulas.support_rows_bytes(QWEN_05B, 441, 20, 2.0) == (
+            3739 * 20 * 896 * 6
+        )
+
+    def test_an_fp32_head_holds_one_copy(self):
+        assert formulas.support_rows_bytes(QWEN_05B, 441, 20, 4.0) == (
+            3739 * 20 * 896 * 4
+        )
+
+    def test_a_wide_support_keeps_the_tile_token_count(self):
+        assert formulas.support_rows_bytes(QWEN_05B, 441, 1000, 2.0) == (
+            441 * 1000 * 896 * 6
+        )
 
 
 class TestResolveMaxNumBatchedTokens:
@@ -820,6 +841,131 @@ class TestMambaBlockBytes:
         without = formulas.block_recompute_bytes(dense, 1, 1024, 2.0)
 
         assert with_scan - without == formulas.mamba_block_bytes(falcon, 1, 1024, 2.0)
+        assert not falcon.mamba_gated_delta
+
+
+class TestGatedDeltaBlockBytes:
+    def test_forward_matches_the_fla_kernel_snapshot(self):
+        # Qwen3.5-0.8B no-grad forward at 16k: 31744 bf16 elements per token.
+        arch = ModelArch.from_hf_config(QWEN35_08B.config)
+
+        forward = formulas.gated_delta_block_bytes(arch, 1, 16384, 2.0)
+
+        assert forward == 16384 * 31744 * 2
+        assert forward == 992 * MiB
+
+    def test_backward_adds_the_in_proj_output_and_gate(self):
+        arch = ModelArch.from_hf_config(QWEN35_08B.config)
+
+        forward = formulas.gated_delta_block_bytes(arch, 2, 4096, 2.0)
+        backward = formulas.gated_delta_block_bytes(arch, 2, 4096, 2.0, backward=True)
+
+        assert backward - forward == 2 * 4096 * (6144 + 2048) * 2
+
+    def test_mamba2_and_attention_only_stacks_are_zero(self):
+        mamba2 = ModelArch.from_hf_config(NEMOTRON_NANO_MAMBA)
+
+        assert formulas.gated_delta_block_bytes(mamba2, 1, 16384, 2.0) == 0
+        assert formulas.gated_delta_block_bytes(QWEN_05B, 1, 16384, 2.0) == 0
+        assert formulas.gated_delta_saved_bytes(mamba2, 1, 16384, 2.0) == 0
+        assert formulas.gated_delta_saved_bytes(QWEN_05B, 1, 16384, 2.0) == 0
+
+    def test_saved_set_matches_the_recompute_snapshot(self):
+        # Qwen3.6-35B-A3B FSDP 32k: 3.375 GiB of GDN tensors live in the MoE backward.
+        arch = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["Qwen/Qwen3.6-35B-A3B"].config
+        )
+
+        saved = formulas.gated_delta_saved_bytes(arch, 1, 32768, 2.0)
+
+        assert saved == 32768 * (
+            (8192 + 2 * 4096 + 3 * 4096 + 32 * 64) * 2 + 3 * 4096 * 4
+        )
+        assert saved == 3456 * MiB
+
+    def test_forward_peaks_in_the_recurrent_sub_layer(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(QWEN35_08B.config)
+        tokens = 16384
+
+        # Act
+        forward = formulas.block_recompute_bytes(arch, 1, tokens, 2.0)
+        nograd = formulas.nograd_forward_bytes(arch, 1, tokens, 2.0)
+
+        # Assert
+        assert forward == tokens * 4 * 1024 * 2 + 992 * MiB
+        assert nograd == forward + tokens * 1024 * 2
+        assert nograd == pytest.approx(1.125 * GiB, rel=0.001)
+
+    def test_backward_keeps_the_recurrent_tensors_through_the_mlp(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(QWEN35_08B.config)
+        tokens = 16384
+
+        # Act
+        backward = formulas.block_recompute_bytes(arch, 1, tokens, 2.0, backward=True)
+        mamba = formulas.block_recompute_bytes(
+            arch, 1, tokens, 2.0, backward=True, layer="mamba"
+        )
+        mlp = formulas.block_recompute_bytes(
+            arch, 1, tokens, 2.0, backward=True, layer="ffn"
+        )
+
+        # Assert: two residual copies, the gated MLP's four tensors, the GDN's saved set.
+        assert backward == tokens * (2 * 1024 + 4 * 3584) * 2 + 928 * MiB
+        assert backward == mamba
+        assert mlp == tokens * (2 * 1024 + 4 * 3584) * 2
+
+    def test_moe_backward_keeps_the_recurrent_tensors_through_the_experts(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["Qwen/Qwen3.6-35B-A3B"].config
+        )
+        tokens = 32768
+        routed = formulas.routed_expert_bytes(arch, 1, tokens, 2.0, backward=True)
+
+        # Act
+        mamba = formulas.block_recompute_bytes(
+            arch, 1, tokens, 2.0, backward=True, layer="mamba"
+        )
+
+        # Assert: residual copies, the GDN's saved set, the shared expert, routed experts.
+        assert routed == 3072 * MiB
+        assert mamba == tokens * (2 * 2048 + 4 * 512) * 2 + 3456 * MiB + routed
+
+    def test_backward_keeps_the_kernel_peak_when_the_mlp_is_narrow(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(QWEN35_08B.config).model_copy(
+            update={"intermediate_size": 256}
+        )
+        tokens = 16384
+
+        # Act
+        mamba = formulas.block_recompute_bytes(
+            arch, 1, tokens, 2.0, backward=True, layer="mamba"
+        )
+
+        # Assert: the kernel's backward outgrows the saved set plus a narrow MLP.
+        assert mamba == tokens * 2 * 1024 * 2 + 1248 * MiB
+
+    def test_block_exclusive_stack_keeps_one_sub_layer(self):
+        arch = ModelArch.from_hf_config(QWEN35_08B.config).model_copy(
+            update={"n_mlp_layers": 24}
+        )
+        tokens = 16384
+
+        backward = formulas.block_recompute_bytes(arch, 1, tokens, 2.0, backward=True)
+
+        assert backward == tokens * 2 * 1024 * 2 + 1248 * MiB
+
+    def test_lora_dropout_charges_the_recurrent_sub_layer_and_mlp(self):
+        arch = ModelArch.from_hf_config(QWEN35_08B.config)
+
+        dropout = formulas.lora_dropout_bytes(arch, 1, 16384, 2.0)
+        mamba = formulas.lora_dropout_bytes(arch, 1, 16384, 2.0, layer="mamba")
+
+        assert mamba == 16384 * (4 * 1024 + 2048 + 2 * 1024 + 3584) * 3
+        assert dropout == mamba
 
 
 class TestBlockRecomputeBackwardPeak:
@@ -944,6 +1090,49 @@ class TestBlockRecomputeNormInputs:
 
         assert added == dict.fromkeys(("attention", "ffn", "mamba"), 4096 * 3136 * 4)
 
+    def test_gemma4_keeps_five_fp32_norm_inputs(self):
+        # Arrange
+        gemma = ModelArch.from_hf_config(GEMMA4_E4B.config)
+        fused = gemma.model_copy(update={"fp32_norm_inputs": False})
+
+        # Act
+        stock = formulas.block_recompute_bytes(gemma, 1, 16384, 2.0, backward=True)
+        liger = formulas.block_recompute_bytes(fused, 1, 16384, 2.0, backward=True)
+
+        # Assert: four sandwich norms and the per-layer-input norm.
+        assert gemma.fp32_norm_inputs
+        assert gemma.norms_per_block == 5
+        assert stock - liger == 5 * 16384 * 2560 * 4
+
+
+class TestBlockRecomputeStockGatedMlp:
+    def test_stock_mlp_backward_keeps_the_activated_gate(self):
+        # Arrange
+        granite = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["ibm-granite/granite-4.0-micro"].config
+        )
+        fused = granite.model_copy(update={"stock_gated_mlp": False})
+
+        # Act
+        stock = formulas.block_recompute_bytes(granite, 1, 32768, 2.0, backward=True)
+        liger = formulas.block_recompute_bytes(fused, 1, 32768, 2.0, backward=True)
+
+        # Assert: a 32k-token granite-4.0-micro snapshot held a 0.5 GiB SiLU output.
+        assert granite.stock_gated_mlp
+        assert stock - liger == 32768 * 8192 * 2
+        assert stock - liger == 0.5 * GiB
+
+    def test_forward_and_liger_families_pay_nothing(self):
+        granite = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["ibm-granite/granite-4.0-micro"].config
+        )
+        fused = granite.model_copy(update={"stock_gated_mlp": False})
+
+        assert not ModelArch.from_hf_config(QWEN3_4B).stock_gated_mlp
+        assert formulas.block_recompute_bytes(
+            granite, 1, 1024, 2.0
+        ) == formulas.block_recompute_bytes(fused, 1, 1024, 2.0)
+
 
 class TestLoraDropoutBytes:
     def test_matches_the_fp32_and_bf16_adapter_snapshots(self):
@@ -1008,13 +1197,23 @@ class TestAllocatorReserveBytes:
         # Floor at zero.
         assert formulas.allocator_reserve_bytes(-1 * MiB) == 0
 
-    def test_fsdp_reserves_more_than_flat_data_parallel(self):
+    def test_fsdp_compute_stream_reserves_less_than_flat_data_parallel(self):
         data_parallel = formulas.allocator_reserve_bytes(100 * MiB, n_ranks=4)
         fsdp = formulas.allocator_reserve_bytes(100 * MiB, n_ranks=4, sharded=True)
 
         assert data_parallel == pytest.approx(5.4 * MiB)
-        assert fsdp == pytest.approx(6.9 * MiB)
-        assert data_parallel < fsdp
+        assert fsdp == pytest.approx(2 * MiB)
+
+    def test_mixed_tensor_sizes_reserve_more_under_fsdp(self):
+        mixed = formulas.allocator_reserve_bytes(
+            100 * MiB, n_ranks=4, sharded=True, mixed_sizes=True
+        )
+        unsharded = formulas.allocator_reserve_bytes(
+            100 * MiB, n_ranks=4, mixed_sizes=True
+        )
+
+        assert mixed == pytest.approx(6.4 * MiB)
+        assert unsharded == pytest.approx(5.4 * MiB)
 
 
 class TestRecommendationFits:
@@ -1281,6 +1480,92 @@ class TestFSDPGatheredParams:
         assert gathered == 2 * (mamba + experts + router) + counts.lm_head
 
 
+class TestFSDPReshardedSideParams:
+    def test_tied_dense_model_has_no_side_unit(self):
+        counts = formulas.param_counts(QWEN_05B)
+
+        assert formulas.fsdp_resharded_side_params(counts, QWEN_05B) == 0
+
+    def test_untied_head_is_a_side_unit(self):
+        untied = QWEN_05B.model_copy(update={"tied_embeddings": False})
+        counts = formulas.param_counts(untied)
+
+        assert formulas.fsdp_resharded_side_params(counts, untied) == counts.lm_head
+
+    def test_per_layer_embeddings_are_a_side_unit_and_the_root_is_not(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(GEMMA4_E4B.config)
+        counts = formulas.param_counts(arch, GEMMA4_E4B.num_params)
+        per_layer = counts.embedding - formulas.token_embedding_params(arch)
+
+        # Act
+        side = formulas.fsdp_resharded_side_params(counts, arch)
+
+        # Assert: the tower root and unattributed parameters stay gathered.
+        assert arch.tied_embeddings
+        assert counts.unattributed > 0
+        assert side == per_layer
+        assert 5.2 * GiB < side * 2 < 5.3 * GiB
+
+
+class TestFSDPGatherPoolParams:
+    def test_dense_model_pools_a_prefetch_window(self):
+        counts = formulas.param_counts(QWEN_05B)
+        block = formulas.largest_block_params(counts, QWEN_05B)
+
+        pool = formulas.fsdp_gather_pool_params(counts, QWEN_05B, 1, 1, 1, 4)
+
+        assert pool == 2 * block
+
+    def test_per_layer_embeddings_pool_beside_the_first_unit(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(GEMMA4_E4B.config)
+        counts = formulas.param_counts(arch, GEMMA4_E4B.num_params)
+        per_layer = counts.embedding - formulas.token_embedding_params(arch)
+        block = formulas.largest_block_params(counts, arch)
+
+        # Act
+        pool = formulas.fsdp_gather_pool_params(counts, arch, 1, 1, 1, 4)
+
+        # Assert: 4-GPU Gemma 4 E4B held 5.43 GiB on its all-gather stream.
+        assert pool == per_layer + block
+        assert 5.3 * GiB < pool * 2 < 5.5 * GiB
+
+    def test_untied_head_pools_beside_the_last_unit(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(NEMOTRON_H)
+        counts = formulas.param_counts(arch)
+
+        # Act
+        pool = formulas.fsdp_gather_pool_params(counts, arch, 1, 1, 1, 4)
+
+        # Assert
+        assert arch.layer_kinds[-1] == "mlp"
+        assert pool == counts.lm_head + formulas.mlp_params_per_layer(arch)
+
+    def test_expert_parallel_gathers_only_a_ranks_expert_share(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(NEMOTRON_H_MOE)
+        counts = formulas.param_counts(arch)
+        experts, router = formulas.moe_params_per_layer(arch)
+        inter = arch.expert_intermediate_size or arch.intermediate_size
+        routed = arch.n_experts * 2 * arch.expert_width * inter
+        unit_without_routed = experts - routed + router
+
+        # Act
+        dense = formulas.fsdp_gather_pool_params(counts, arch, 1, 1, 1, 8)
+        ep_only = formulas.fsdp_gather_pool_params(counts, arch, 1, 1, 8, 8)
+        ep_with_dp = formulas.fsdp_gather_pool_params(counts, arch, 1, 1, 8, 16)
+
+        # Assert: the head pools beside the last (MoE) unit. EP over the whole
+        # shard group leaves no rank to gather experts from.
+        assert not arch.gated_mlp
+        assert arch.layer_kinds[-1] == "moe"
+        assert dense == counts.lm_head + experts + router == 1_649_786_880
+        assert ep_only == counts.lm_head + unit_without_routed == 372_621_312
+        assert ep_with_dp == ep_only + routed // 8 == 532_267_008
+
+
 class TestLoraTensorPlacement:
     def test_flat_dp_replicates_every_tensor(self):
         replicated, sharded = formulas.lora_tensor_placement(
@@ -1456,6 +1741,9 @@ class TestLoraInputCastBytes:
 
 
 SUPER_VL = SUPPORTED_MODEL_INFO["nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16"]
+QWEN36 = SUPPORTED_MODEL_INFO["Qwen/Qwen3.6-35B-A3B"]
+QWEN35_08B = SUPPORTED_MODEL_INFO["Qwen/Qwen3.5-0.8B"]
+GEMMA4_E4B = SUPPORTED_MODEL_INFO["google/gemma-4-E4B-it"]
 
 
 class TestLatentMoe:
@@ -1480,15 +1768,67 @@ class TestLatentMoe:
 
 
 class TestVisionFields:
-    def test_super_vl_tower_emits_1024_patches_of_1280(self):
+    def test_super_vl_reads_its_dynamic_tile_bounds(self):
         arch = ModelArch.from_hf_config(SUPER_VL.config)
 
         assert arch.vision_hidden_size == 1280
-        assert arch.vision_image_size == 512
-        assert arch.vision_patches_per_image == (512 // 16) ** 2
+        assert arch.vision_resize == "dynamic_tiles"
+        assert (arch.vision_min_patches, arch.vision_max_patches) == (1024, 13312)
+        assert arch.vision_spatial_merge_size == 2
 
-    def test_text_only_model_has_no_patches(self):
-        assert QWEN_05B.vision_patches_per_image == 0
+    def test_gemma4_budget_is_soft_tokens_times_the_pool(self):
+        arch = ModelArch.from_hf_config(GEMMA4_E4B.config)
+
+        assert arch.vision_resize == "pooled_budget"
+        assert arch.vision_spatial_merge_size == 3
+        assert arch.vision_max_patches == 280 * 9
+
+    def test_qwen_and_gemma_towers_keep_a_feature_cache(self):
+        towers = [SUPER_VL, QWEN36, QWEN35_08B, GEMMA4_E4B]
+
+        cached = [
+            ModelArch.from_hf_config(t.config).vision_feature_cache for t in towers
+        ]
+
+        assert cached == [False, True, True, True]
+
+    def test_vision_encoder_depth(self):
+        depths = [
+            ModelArch.from_hf_config(t.config).vision_n_layers
+            for t in (QWEN35_08B, GEMMA4_E4B)
+        ]
+
+        assert depths == [12, 16]
+
+
+class TestMultimodalTowerBlockParams:
+    def test_qwen36_tower_blocks_leave_the_fsdp_root(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(QWEN36.config)
+        whole_tower = arch.model_copy(update={"multimodal_tower_block_params": 0})
+        counts = formulas.param_counts(arch)
+        kwargs = {
+            "n_gpus": 4,
+            "reshard_after_forward": True,
+            "prefetch_units": 1,
+            "wrap_every_n_blocks": 1,
+            "cpu_offload": False,
+        }
+
+        # Act
+        gathered = formulas.fsdp_gathered_params(counts, arch, **kwargs)
+        with_whole_tower = formulas.fsdp_gathered_params(counts, whole_tower, **kwargs)
+
+        # Assert: 27 blocks of the 1152-wide, 4304-inner vision encoder.
+        assert arch.multimodal_tower_block_params == 411_132_672
+        assert arch.multimodal_tower_block_params < arch.multimodal_tower_params
+        assert gathered == with_whole_tower - arch.multimodal_tower_block_params
+
+    def test_tower_without_block_units_stays_at_the_root(self):
+        arch = ModelArch.from_hf_config(SUPER_VL.config)
+
+        assert arch.multimodal_tower_params > 0
+        assert arch.multimodal_tower_block_params == 0
 
 
 class TestRoutedChunkBytes:
@@ -1529,7 +1869,7 @@ class TestRoutedChunkBytes:
 
         assert term == int(2 * 64 * MiB * formulas.ROUTED_CHUNK_LIVE_FRACTION)
 
-    def test_sorted_contracted_lora_holds_one_whole_chunk(self):
+    def test_sorted_contracted_lora_holds_four_whole_chunks(self):
         arch = ModelArch.from_hf_config(GRANITE_MOE)
 
         term = formulas.routed_chunk_bytes(
@@ -1537,7 +1877,7 @@ class TestRoutedChunkBytes:
         )
 
         assert not arch.chunked_routed_experts
-        assert term == 16 * MiB
+        assert term == 4 * 16 * MiB
 
     def test_chunk_budget_stops_the_bytes_growing_with_rows(self):
         arch = ModelArch.from_hf_config(GRANITE_MOE)
@@ -1550,7 +1890,7 @@ class TestRoutedChunkBytes:
             arch, 16, 128, 2.0, chunk, expert_lora=True, contracted=True, ep=1
         )
 
-        assert one == many == chunk
+        assert one == many == 4 * chunk
 
     def test_no_expert_lora_and_dense_models_are_zero(self):
         moe = ModelArch.from_hf_config(NEMOTRON_H_MOE)
@@ -1582,3 +1922,20 @@ class TestPackedExpertLoraPlacement:
         # Assert
         assert repl == base_repl
         assert shard - base_shard == formulas.packed_lora_param_count(MOE_TINY, 4, 2)
+
+
+class TestEngineExpertLoraParamCount:
+    def test_3d_layout_packs_gate_and_up_into_one_slice(self):
+        # 2 layers * 4 experts * rank 8 * (2 * 16 hidden + 3 * 32 inter)
+        assert formulas.engine_expert_lora_param_count(MOE_TINY, 8, 1, True) == 8192
+
+    def test_2d_gated_layout_keeps_a_slice_per_projection(self):
+        # 2 * 4 * 8 * (2 * 16 + 16 + 3 * 32)
+        assert formulas.engine_expert_lora_param_count(MOE_TINY, 8, 1, False) == 9216
+
+    def test_tensor_parallel_shards_only_the_intermediate_dimension(self):
+        # 2 * 4 * 8 * (2 * 16 + 3 * 16)
+        assert formulas.engine_expert_lora_param_count(MOE_TINY, 8, 2, True) == 5120
+
+    def test_dense_model_has_no_expert_stacks(self):
+        assert formulas.engine_expert_lora_param_count(QWEN_05B, 8, 1, False) == 0

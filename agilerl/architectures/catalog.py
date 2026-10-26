@@ -10,8 +10,10 @@ from collections.abc import Mapping
 from transformers import AutoModelForImageTextToText
 from transformers.configuration_utils import PretrainedConfig
 
+from agilerl.architectures.gemma4 import install_gemma4_vision_patches
 from agilerl.architectures.nemotron_h.mamba import install_mamba_patches
 from agilerl.architectures.qwen3_5.packed import install_qwen_gdn_patches
+from agilerl.architectures.qwen3_5.vision import install_qwen3_5_vl_patches
 from agilerl.architectures.runtime import (
     MambaPatchConfig,
     ModelRuntimeConfig,
@@ -114,7 +116,28 @@ GEMMA4_TEXT_RUNTIME_CONFIG = GEMMA_SWA_TEXT_RUNTIME_CONFIG.model_copy(
 )
 
 GEMMA4_RUNTIME_CONFIG = GEMMA_SWA_RUNTIME_CONFIG.model_copy(
-    update={"tool_call_parser": "gemma4"},
+    update={
+        "tool_call_parser": "gemma4",
+        "patch": PatchRuntimeConfig(install=install_gemma4_vision_patches),
+        # vLLM swaps every tower linear for a LoRA layer and keeps HF names;
+        # attention and MLP linears sit under clippable wrappers as ``linear``.
+        "tower_connector_lora_targets": frozenset(
+            {
+                "linear",
+                "input_proj",
+                "embedding_projection",
+                "input_proj_linear",
+                "output_proj",
+                "relative_k_proj",
+            }
+        ),
+        "tower_modalities": {
+            "vision_tower": frozenset({"image", "video"}),
+            "embed_vision": frozenset({"image", "video"}),
+            "audio_tower": frozenset({"audio"}),
+            "embed_audio": frozenset({"audio"}),
+        },
+    },
 )
 
 GPT_OSS_RUNTIME_CONFIG = ModelRuntimeConfig(
@@ -140,7 +163,13 @@ QWEN3_5_TEXT_RUNTIME_CONFIG = ModelRuntimeConfig(
 
 # AutoModelForCausalLM maps qwen3_5 to a text-only class that drops model.visual.
 QWEN3_5_RUNTIME_CONFIG = QWEN3_5_TEXT_RUNTIME_CONFIG.model_copy(
-    update={"trainer": TrainerRuntimeConfig(model_class=AutoModelForImageTextToText)},
+    update={
+        "trainer": TrainerRuntimeConfig(model_class=AutoModelForImageTextToText),
+        "patch": PatchRuntimeConfig(install=install_qwen3_5_vl_patches),
+        # The patch embedding ``proj`` is a Conv3d that vLLM serves without LoRA.
+        "tower_connector_lora_targets": frozenset({"qkv", "linear_fc1", "linear_fc2"}),
+        "tower_modalities": {"visual": frozenset({"image", "video"})},
+    },
 )
 
 FAMILY_RUNTIME_CONFIGS: Mapping[str, ModelRuntimeConfig] = {

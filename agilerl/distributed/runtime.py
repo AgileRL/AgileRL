@@ -40,6 +40,7 @@ from agilerl.distributed.fsdp import (
     materialize_fsdp2_from_cpu_state,
     set_full_model_state_dict,
 )
+from agilerl.distributed.fsdp_blocks import UnforwardedFSDPUnits
 from agilerl.distributed.process import (
     get_world_size,
     raise_on_any_rank,
@@ -763,6 +764,7 @@ class FSDPRuntime(BaseRuntime):
         super().__init__()
         self.config = config
         self.parallel_mesh: ParallelMesh | None = None
+        self.unforwarded_units = UnforwardedFSDPUnits([])
 
     def data_parallel_world(self, process_world_size: int) -> int:
         return tp_data_parallel_size(process_world_size, self.config.tp)
@@ -831,6 +833,7 @@ class FSDPRuntime(BaseRuntime):
             parallel_mesh=self.parallel_mesh,
             gradient_checkpointing=gradient_checkpointing,
         )
+        self.unforwarded_units = UnforwardedFSDPUnits(wrapped.modules())
 
         # Fused AdamW steps CPU-offloaded state slower than the default kernel.
         on_gpu = torch.device(device).type == "cuda" and not (
@@ -1007,6 +1010,11 @@ class FSDPRuntime(BaseRuntime):
                 msg = "defer_grad_sync requires an FSDP2-sharded actor"
                 raise TypeError(msg)
             actor.set_requires_gradient_sync(is_step_boundary, recurse=True)
+            # A sync-disabled post-backward reads each param's unsharded copy,
+            # which FSDP2 builds on a unit's first forward. A unit that has not
+            # run forward has no grads to defer, so its sync stays on.
+            for unit in self.unforwarded_units:
+                unit.set_requires_gradient_sync(True, recurse=False)
 
         if gradient_accumulation_steps > 1:
             loss = loss / gradient_accumulation_steps

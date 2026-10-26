@@ -26,6 +26,14 @@ from agilerl.arena.memory.specs import (
 # enforce_eager. It cancels in the generation total: subtracted from the KV
 # budget, added back as residency.
 CUDA_GRAPH_POOL_BYTES = 256 * MiB
+# vLLM's non-torch memory (kernel workspaces, loaded kernels, NCCL), as a share
+# of the unsharded engine weights, charged on every rank. vLLM counts it inside
+# the gpu_memory_utilization budget. Qwen3.6-35B-A3B on A100 80GB under vLLM
+# 0.32 logged 2.49 GiB at TP=1 and 2.31 GiB at TP=2 (3.8% and 3.5% of 65.4 GiB),
+# so it does not shrink with TP; the L4 KV pools of Qwen3-4B and granite-3.1
+# cap it near 3.6%. Fit only on vLLM 0.32, those three models (3B to 35B
+# weights) and TP 1 to 2; larger models and wider TP are extrapolated.
+ENGINE_RUNTIME_FRACTION = 0.036
 # Bytes per LoRA parameter under flat data parallel. PEFT
 # ``autocast_adapter_dtype=True`` stores adapters and their gradients in
 # fp32. AdamW keeps two fp32 moments per parameter.
@@ -46,15 +54,28 @@ ROUTED_CHUNK_MIB_CHOICES = (512, 256, 128, 64)
 # over 64-1024 MiB; the H100 80GB VWA busiest rank rose 0.69 GiB from 256 to
 # 512 MiB. 0.45 keeps the estimate at or above the H100 peak at 512 MiB.
 ROUTED_CHUNK_LIVE_FRACTION = 0.45
+# Chunk-sized buffers the sorted path's contracted expert LoRA keeps live in
+# the MoE backward (the up-projection output, its gradient and their casts).
+# granite-3.1-3b-a800m FSDP: 4 puts the L4 512 MiB rows at -2.5%/-1.6% and the
+# A100 rows at +0.8% to +2.4%; 4.5 pushes A100 past +4%.
+CONTRACTED_CHUNK_LIVE_MULTIPLE = 4
 
 # PyTorch caching-allocator slack: reserved above allocated.
 # Charged on the torch-side subtotal. Training only: generation sits in
 # vLLM's CuMem pool, reserved up front at ``gpu_memory_utilization``.
 ALLOCATOR_RESERVE_FRACTION = 0.07
-# Flat data parallel keeps an all-reduce buffer. FSDP pools all-gather and
-# reduce-scatter blocks per stream, so it reserves a larger share.
+# Flat data parallel keeps an all-reduce buffer.
 ALLOCATOR_RESERVE_FRACTION_DATA_PARALLEL = 0.054
-ALLOCATOR_RESERVE_FRACTION_FSDP = 0.069
+# FSDP compute stream; the all-gather stream's pool is charged separately
+# (:func:`fsdp_gather_pool_params`). Blocks without fp32 temporaries free
+# bf16 tensors the next activations reuse: dense Qwen, Nemotron-H and
+# LLMPPO rows on A100 and L4 left 0-2.3% of allocated free.
+ALLOCATOR_RESERVE_FRACTION_FSDP = 0.02
+# Stock fp32 RMSNorm temporaries leave hidden-sized holes: granite-3.1,
+# granite-4.0 and Gemma 4 rows left 2-11% free, most at long context. EP
+# dispatch buffers change size with routing; Super-VL A100 rank-0 peaks
+# need 0.064.
+ALLOCATOR_RESERVE_FRACTION_FSDP_MIXED_SIZES = 0.064
 # Largest share by which a measured peak exceeded the estimate on the 4-GPU
 # grids. A GPU recommendation keeps this share of usable memory free.
 MAX_UNDERPREDICTION = 0.089
@@ -66,10 +87,19 @@ def recommendation_fits(predicted_bytes: int, usable_bytes: int) -> bool:
 
 
 def allocator_reserve_bytes(
-    allocated_bytes: float, n_ranks: int = 1, sharded: bool = False
+    allocated_bytes: float,
+    n_ranks: int = 1,
+    sharded: bool = False,
+    mixed_sizes: bool = False,
 ) -> float:
-    """Caching-allocator reserved-but-unallocated bytes."""
-    if sharded:
+    """Caching-allocator reserved-but-unallocated bytes on the compute stream.
+
+    :param mixed_sizes: The step frees tensors the next activations do not
+        fit (fp32 norm temporaries, expert-parallel dispatch buffers).
+    """
+    if sharded and mixed_sizes:
+        fraction = ALLOCATOR_RESERVE_FRACTION_FSDP_MIXED_SIZES
+    elif sharded:
         fraction = ALLOCATOR_RESERVE_FRACTION_FSDP
     elif n_ranks > 1:
         fraction = ALLOCATOR_RESERVE_FRACTION_DATA_PARALLEL
@@ -268,6 +298,34 @@ def packed_lora_param_count(arch: ModelArch, rank: int, n_matrices: int) -> int:
     expert_inter = arch.expert_intermediate_size or arch.intermediate_size
     per_matrix = n_experts * rank * (arch.expert_width + expert_inter)
     return int(arch.moe_layers * n_matrices * per_matrix)
+
+
+def engine_expert_lora_param_count(
+    arch: ModelArch, rank: int, tensor_parallel: int, packed_3d: bool
+) -> int:
+    """Per-rank parameters of one vLLM fused-MoE LoRA slot.
+
+    :param arch: Model architecture.
+    :param rank: Engine LoRA rank.
+    :param tensor_parallel: Engine tensor-parallel width.
+    :param packed_3d: The engine uses the 3D expert layout.
+    :return: Slot parameters on one rank; 0 for a dense model.
+    """
+    n_experts = arch.n_experts
+    if n_experts is None or n_experts <= 1:
+        return 0
+    h = arch.expert_width
+    # vLLM wraps every fused-MoE layer once LoRA is on, whatever the adapter
+    # targets: w13 and w2 A/B stacks over all experts, intermediate dim TP-sharded.
+    inter = (arch.expert_intermediate_size or arch.intermediate_size) // tensor_parallel
+    # The 3D layout packs gate and up into one w13 slice; the 2D layout keeps
+    # one slice each when the MLP is gated.
+    if packed_3d:
+        per_expert = 2 * h + 3 * inter
+    else:
+        slices = 2 if arch.gated_mlp else 1
+        per_expert = slices * h + h + (slices + 1) * inter
+    return int(arch.moe_layers * n_experts * rank * per_expert)
 
 
 def weight_bytes(
@@ -578,7 +636,8 @@ def routed_chunk_bytes(
     Each buffer is capped by the rows it chunks. The chunked routed path
     (expert LoRA on ``arch.chunked_routed_experts``) and the expert-parallel
     fp32 combine each add :data:`ROUTED_CHUNK_LIVE_FRACTION` of a chunk. The
-    sorted path's contracted LoRA up-projection holds one whole chunk output.
+    sorted path's contracted LoRA holds
+    :data:`CONTRACTED_CHUNK_LIVE_MULTIPLE` whole chunks.
 
     :param chunk_bytes: Widest ``[rows, features]`` activation of one chunk.
     :param expert_lora: Packed expert matrices carry LoRA.
@@ -595,7 +654,7 @@ def routed_chunk_bytes(
     if expert_lora and arch.chunked_routed_experts:
         fractional += min(chunk_bytes, routed * widest_row)
     elif expert_lora and contracted:
-        whole += min(chunk_bytes, routed * widest_row)
+        whole += CONTRACTED_CHUNK_LIVE_MULTIPLE * min(chunk_bytes, routed * widest_row)
     if ep > 1:
         fractional += min(chunk_bytes, routed * arch.expert_width * 4)
     return int(fractional * ROUTED_CHUNK_LIVE_FRACTION + whole)
@@ -642,6 +701,66 @@ def mamba_block_bytes(
     return int(total)
 
 
+def gated_delta_block_bytes(
+    arch: ModelArch,
+    rows: int,
+    seq_len: int,
+    act_bytes: float,
+    backward: bool = False,
+) -> int:
+    """Live tensors of one gated-delta-net layer's fla chunk kernel in the trainer.
+
+    :param arch: Model architecture.
+    :param rows: Sequences in the micro-batch.
+    :param seq_len: Tokens per sequence.
+    :param act_bytes: Bytes per activation element.
+    :param backward: Whether the layer runs a checkpointed backward.
+    :return: Peak bytes of the kernel's tensors; zero without gated-delta layers.
+    """
+    if not (arch.n_mamba_layers and arch.mamba_gated_delta):
+        return 0
+    heads = arch.mamba_n_heads
+    key = heads * arch.mamba_d_state
+    value = heads * arch.mamba_d_head
+    state = heads * arch.mamba_d_state * arch.mamba_d_head / GATED_DELTA_CHUNK
+    # Per token: conv1d output, contiguous q/k/v at the value-head count,
+    # l2-normed q and k, gate z, WY w and u, updated values, output, the
+    # intra-chunk matrix, and one (d_state, d_head) state per head per chunk.
+    width = (
+        arch.mamba_conv_dim + 5 * key + 5 * value + heads * GATED_DELTA_CHUNK + state
+    )
+    # A checkpointed backward also keeps the in_proj_qkv output and its gate.
+    if backward:
+        width += arch.mamba_conv_dim + value
+    return int(rows * seq_len * width * act_bytes)
+
+
+def gated_delta_saved_bytes(
+    arch: ModelArch,
+    rows: int,
+    seq_len: int,
+    act_bytes: float,
+) -> int:
+    """Tensors a recomputed gated-delta-net layer keeps for its own backward.
+
+    :param arch: Model architecture.
+    :param rows: Sequences in the micro-batch.
+    :param seq_len: Tokens per sequence.
+    :param act_bytes: Bytes per activation element.
+    :return: Saved bytes; zero without gated-delta layers.
+    """
+    if not (arch.n_mamba_layers and arch.mamba_gated_delta):
+        return 0
+    heads = arch.mamba_n_heads
+    key = heads * arch.mamba_d_state
+    value = heads * arch.mamba_d_head
+    # Per token: in_proj_qkv output, l2-normed q and k at the value-head
+    # count, contiguous v, the intra-chunk matrix, and the gated RMSNorm's
+    # scaled input and output plus its fp32 input, gate and SiLU.
+    width = arch.mamba_conv_dim + 2 * key + 3 * value + heads * GATED_DELTA_CHUNK
+    return int(rows * seq_len * (width * act_bytes + 3 * value * 4))
+
+
 def _block_mlp_recompute(
     arch: ModelArch,
     rows: int,
@@ -669,8 +788,11 @@ def _block_mlp_recompute(
             routed = routed_expert_bytes(arch, rows, seq_len, act_bytes, backward)
     else:
         active_width = int(arch.intermediate_size * arch.peak_mlp_width_factor)
-    # Gated backward: gate, up, fused output, and one gradient.
-    mlp_count = mlp_matrices + 1 if backward and arch.gated_mlp else mlp_matrices
+    # Gated backward: gate, up, fused output, and one gradient, plus the
+    # activated gate when the MLP is not fused.
+    mlp_count = mlp_matrices
+    if backward and arch.gated_mlp:
+        mlp_count += 2 if arch.stock_gated_mlp else 1
     mlp = mlp_count * active_width
     if backward and not arch.gated_mlp:
         # Activation plus its gradient for each of the two matrices.
@@ -698,11 +820,18 @@ def block_recompute_bytes(
     keeps an fp32 copy of each norm input on the backward.
 
     In the trainer, routed experts run the grouped-GEMM path
-    (:func:`routed_expert_bytes`) and Mamba mixers their chunked scan
-    (:func:`mamba_block_bytes`). A block-exclusive stack's block is one
-    attention, FFN or Mamba layer: ``layer`` picks one, else the widest
-    counts; otherwise a block holds all of them. ``engine_forward=True``
-    sizes routed experts as the active FFN width (vLLM's in-kernel routing).
+    (:func:`routed_expert_bytes`), Mamba mixers their chunked scan
+    (:func:`mamba_block_bytes`) and gated-delta-net mixers the fla chunk
+    kernel (:func:`gated_delta_block_bytes`). When
+    :attr:`ModelArch.sublayer_transients` holds, a block peaks in one
+    attention, FFN or recurrent sub-layer: ``layer`` picks one, else the
+    widest counts; otherwise a block holds all of them. On a stack whose
+    layers carry an FFN beside the mixer, a checkpointed backward charges
+    the mixer's saved tensors and that FFN together; a gated-delta-net
+    layer peaks at the larger of that and its kernel's own backward
+    (:func:`gated_delta_saved_bytes`).
+    ``engine_forward=True`` sizes routed experts as the active FFN width
+    (vLLM's in-kernel routing).
     """
     h = arch.hidden_size
     # One block's transient peaks at the widest block: checkpointed
@@ -718,23 +847,40 @@ def block_recompute_bytes(
     tokens = rows * seq_len
     if engine_forward:
         return int(tokens * (4 * h + qkv_dim + mlp + ple) * act_bytes)
-    mamba = mamba_block_bytes(
-        arch, rows, seq_len, act_bytes, backward, eager_scan=eager_mamba_scan
-    )
+    if arch.mamba_gated_delta:
+        mamba = tokens * residual * act_bytes + gated_delta_block_bytes(
+            arch, rows, seq_len, act_bytes, backward
+        )
+    else:
+        mamba = mamba_block_bytes(
+            arch, rows, seq_len, act_bytes, backward, eager_scan=eager_mamba_scan
+        )
     # fp32 RMSNorm inputs saved for backward, one per norm in the block.
     norm_input = tokens * h * 4 if backward and arch.fp32_norm_inputs else 0
     q_norm = (
         tokens * arch.n_heads * arch.head_dim * 4 if backward and arch.qk_norm else 0
     )
-    if arch.block_exclusive_layers:
-        # The scan term already holds the Mamba layer's residual copy.
+    if arch.sublayer_transients:
+        ffn = tokens * (mlp + ple) * act_bytes + routed + norm_input
+        # Both recurrent terms hold the layer's residual copy.
         by_layer = {
             "attention": tokens * (residual + qkv_dim) * act_bytes
             + norm_input
             + q_norm,
-            "ffn": tokens * (residual + mlp + ple) * act_bytes + routed + norm_input,
+            "ffn": tokens * residual * act_bytes + ffn,
             "mamba": mamba + norm_input,
         }
+        if backward and not arch.block_exclusive_layers:
+            # Recompute rebuilds the whole layer, so the mixer's saved
+            # tensors stay live through the backward of the FFN beside it.
+            # The recurrent kernel's own backward runs once the FFN's are freed.
+            by_layer["attention"] += ffn
+            mamba_saved = (
+                tokens * residual * act_bytes
+                + gated_delta_saved_bytes(arch, rows, seq_len, act_bytes)
+                + norm_input
+            )
+            by_layer["mamba"] = max(by_layer["mamba"], mamba_saved + ffn)
         if layer is not None:
             return int(by_layer[layer])
         return int(max(by_layer.values()))
@@ -742,7 +888,7 @@ def block_recompute_bytes(
         tokens * (residual + qkv_dim + mlp + ple) * act_bytes
         + routed
         + mamba
-        + 2 * norm_input
+        + arch.norms_per_block * norm_input
         + q_norm
     )
 
@@ -766,8 +912,29 @@ def nograd_forward_bytes(
     return int(block + hidden_out)
 
 
+def support_rows_bytes(
+    arch: ModelArch, chunk_rows: int, width: int, act_bytes: float
+) -> int:
+    """Peak of one support-scored logprob chunk: its tokens' gathered lm_head rows.
+
+    A chunk takes enough tokens for ``width`` head rows each to fill one vocab
+    tile, and at least ``chunk_rows``. Rows gather in the head's dtype; below
+    fp32 the upcast holds both copies.
+
+    :param chunk_rows: Tokens in one vocab tile.
+    :param width: Widest sampling support, in token ids.
+    :param act_bytes: Bytes per lm_head element.
+    """
+    tokens = max(chunk_rows, chunk_rows * arch.vocab_size // (width * arch.hidden_size))
+    elements = tokens * width * arch.hidden_size
+    return int(elements * (act_bytes + 4 if act_bytes < 4 else act_bytes))
+
+
 # Chunk length of AgileRL's eager Mamba scan.
 EAGER_MAMBA_SCAN_CHUNK = 64
+
+# Chunk length of fla's chunked gated-delta-rule kernel.
+GATED_DELTA_CHUNK = 64
 
 # Per-process job overhead charged when ``orchestrated`` is set.
 JOB_OVERHEAD_BYTES = 50 * MiB
@@ -813,9 +980,11 @@ def lora_dropout_bytes(
     With ``lora_dropout > 0`` PEFT feeds each wrapped linear's adapter a
     dropped-out copy of its input at the adapter dtype and keeps a one-byte
     mask for backward. Under gradient checkpointing one block's copies are
-    live at once; otherwise every layer's are. A block-exclusive stack's
-    block is one attention, MLP or Mamba layer: ``layer`` picks one, else
-    the widest counts. A parallel mixer stack charges all three in one block.
+    live at once; otherwise every layer's are. When
+    :attr:`ModelArch.sublayer_transients` holds, a block's peak sits in one
+    attention, MLP or recurrent sub-layer: ``layer`` picks one, else the
+    widest counts. A mixer on a stack whose layers carry an MLP beside it
+    adds that MLP. A parallel mixer stack charges all three in one block.
     """
     h = arch.hidden_size
     # q/k/v read the residual stream, o reads the concatenated heads.
@@ -824,12 +993,23 @@ def lora_dropout_bytes(
     if scope == "all-linear" and arch.mlp_layers:
         inter = int(arch.intermediate_size * arch.peak_mlp_width_factor)
         mlp = (2 * h if arch.gated_mlp else h) + inter
-    # Mamba LoRA wraps in_proj (the residual); out_proj is never wrapped.
-    mamba = h if scope == "all-linear" and arch.n_mamba_layers else 0
+    mamba = 0
+    if scope == "all-linear" and arch.n_mamba_layers:
+        # Gated-delta-net LoRA wraps four residual-stream in_proj linears and
+        # out_proj; Mamba-2 LoRA wraps in_proj only.
+        mamba = (
+            4 * h + arch.mamba_n_heads * arch.mamba_d_head
+            if arch.mamba_gated_delta
+            else h
+        )
     if layer is not None:
         width = {"attention": attention, "ffn": mlp, "mamba": mamba}[layer]
+        if layer != "ffn" and not arch.block_exclusive_layers:
+            width += mlp
     elif arch.block_exclusive_layers:
         width = max(attention, mlp, mamba)
+    elif arch.sublayer_transients:
+        width = max(attention, mamba) + mlp
     else:
         width = attention + mlp + mamba
     per_block = rows * seq_len * width * (adapter_bytes + 1)
@@ -908,9 +1088,10 @@ def fsdp_gathered_params(
     """Unsharded parameter elements held besides the resident shard.
 
     Excludes the replicated token embeddings. ``reshard_after_forward``
-    keeps a prefetch window of decoder units, plus an untied ``lm_head`` and
-    root leftovers (multimodal towers, per-layer embeddings). Otherwise every
-    sharded parameter stays gathered. A single GPU with resident parameters
+    keeps a prefetch window of decoder units, plus an untied ``lm_head``,
+    per-layer embeddings, and the root unit (tower parameters outside the
+    encoder blocks, unattributed parameters) at their own gather. Otherwise
+    every sharded parameter stays gathered. A single GPU with resident parameters
     has no second copy.
     """
     token = min(token_embedding_params(arch), max(counts.total, 0))
@@ -922,10 +1103,84 @@ def fsdp_gathered_params(
     n_units = max(1, -(-arch.n_layers // wrap_every_n_blocks))
     live = min(n_units, 1 + prefetch_units)
     window = prefetch_window_params(counts, arch, live, wrap_every_n_blocks)
+    head, extra_embed, root = _side_units(counts, arch)
+    return min(sharded, window + head + extra_embed + root)
+
+
+def _side_units(counts: ParamCounts, arch: ModelArch) -> tuple[int, int, int]:
+    """Untied ``lm_head``, per-layer embedding, and root-unit elements.
+
+    The root unit holds tower parameters outside the encoder blocks and
+    parameters no group accounts for.
+    """
     head = 0 if arch.tied_embeddings else counts.lm_head
     extra_embed = max(counts.embedding - token_embedding_params(arch), 0)
-    leftover = extra_embed + counts.multimodal_towers + max(counts.unattributed, 0)
-    return min(sharded, window + head + leftover)
+    tower_root = max(counts.multimodal_towers - arch.multimodal_tower_block_params, 0)
+    return head, extra_embed, tower_root + max(counts.unattributed, 0)
+
+
+def fsdp_resharded_side_params(counts: ParamCounts, arch: ModelArch) -> int:
+    """Gathered elements of the untied ``lm_head`` and per-layer embeddings.
+
+    :param counts: Parameter counts of the model.
+    :param arch: Model architecture.
+    :return: Gathered elements of the two side units.
+    """
+    # Each side unit reshards after its own forward or backward, so neither
+    # is live during the decoder backward; the root unit stays gathered.
+    head, extra_embed, _root = _side_units(counts, arch)
+    return head + extra_embed
+
+
+def fsdp_gather_pool_params(
+    counts: ParamCounts,
+    arch: ModelArch,
+    wrap_every_n_blocks: int,
+    prefetch_units: int,
+    ep: int,
+    shards: int,
+) -> int:
+    """Elements FSDP's all-gather stream keeps reserved for the whole step.
+
+    :param counts: Parameter counts of the model.
+    :param arch: Model architecture.
+    :param wrap_every_n_blocks: Decoder blocks per FSDP unit.
+    :param prefetch_units: Units FSDP gathers ahead of the running one.
+    :param ep: Expert-parallel width.
+    :param shards: FSDP shard count.
+    :return: Elements of the widest set of gathered outputs in flight together.
+    """
+    # The all-gather stream's cache keeps its high-water mark out of the
+    # compute stream's reach: a prefetch window of decoder units, or a side
+    # unit beside its neighbour (root and per-layer embeddings before the
+    # first decoder unit, an untied lm_head after the last).
+    if arch.layer_kinds:
+        sizes = [layer_params(arch, kind) for kind in arch.layer_kinds]
+        routed_layers = [kind == "moe" for kind in arch.layer_kinds]
+    else:
+        sizes = [largest_block_params(counts, arch)] * arch.n_layers
+        routed_layers = [arch.is_moe] * arch.n_layers
+    # Routed experts leave the block units under expert parallel; a rank
+    # gathers its 1/ep share only when there are FSDP ranks beyond ep.
+    if ep > 1 and arch.is_moe:
+        inter = arch.expert_intermediate_size or arch.intermediate_size
+        matrices = 3 if arch.gated_mlp else 2
+        routed = arch.n_experts * matrices * arch.expert_width * inter
+        local = routed // ep if shards > ep else 0
+        sizes = [
+            size - routed + local if is_routed else size
+            for size, is_routed in zip(sizes, routed_layers, strict=True)
+        ]
+    units = [
+        sum(sizes[start : start + wrap_every_n_blocks])
+        for start in range(0, len(sizes), wrap_every_n_blocks)
+    ]
+    live = min(len(units), 1 + prefetch_units)
+    window = max(
+        sum(units[start : start + live]) for start in range(len(units) - live + 1)
+    )
+    head, extra_embed, root = _side_units(counts, arch)
+    return max(window, max(extra_embed, root) + units[0], head + units[-1])
 
 
 def _bin_lora_numel(numel: int, threshold: int | None) -> tuple[int, int]:

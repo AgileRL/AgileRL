@@ -640,15 +640,19 @@ class TestPPOGetAction:
             patch.object(
                 ppo,
                 "_generate_with_vllm_colocate",
-                return_value=(mocked_ids, mocked_masks, None),
+                return_value=(mocked_ids, mocked_masks, None, None),
             ) as mock_generate,
         ):
-            completion_ids, action_masks, _ = ppo.get_action(prompts, training=False)
+            completion_ids, action_masks, _, _ = ppo.get_action(prompts, training=False)
 
         mock_prepare.assert_called_once()
         mock_move.assert_called_once()
         mock_generate.assert_called_once_with(
-            prompts, 1, temperature=0.01, capture_sampling_logps=False
+            prompts,
+            1,
+            temperature=0.01,
+            capture_sampling_logps=False,
+            capture_sampling_supports=False,
         )
         ppo.llm.wake_up.assert_called_once()
         ppo._prepare_vllm_for_training()
@@ -673,7 +677,9 @@ class TestPPOGetAction:
             for _ in range(batch_size)
         ]
         for training in (True, False):
-            completion_ids, action_masks, _ = ppo.get_action(prompts, training=training)
+            completion_ids, action_masks, _, _ = ppo.get_action(
+                prompts, training=training
+            )
             assert_vllm_get_action_contract(
                 token_ids=completion_ids,
                 action_masks=action_masks,
@@ -707,7 +713,7 @@ class TestPPOGetAction:
         ]
 
         ppo.actor = _NoParamModule()
-        completion_ids, action_masks, _ = ppo.get_action(prompts, training=True)
+        completion_ids, action_masks, _, _ = ppo.get_action(prompts, training=True)
 
         assert_vllm_get_action_contract(
             token_ids=completion_ids,
@@ -1986,7 +1992,15 @@ class TestPPOSequencePacking:
             action_mask[b, : length - 1] = True
 
         def fake_fused_fn(
-            h, weight, bias, targets, *, temperature, cast_to_fp32, chunk_rows
+            h,
+            weight,
+            bias,
+            targets,
+            *,
+            temperature,
+            cast_to_fp32,
+            chunk_rows,
+            support_ids,
         ):
             # Context-free per-token logprob over the (already next-token-
             # shifted) hidden features. Identical closed form padded or packed,
@@ -2156,7 +2170,9 @@ class TestPPOColocatedVllm:
             for _ in range(batch_size)
         ]
 
-        token_ids, action_masks, sampling_logps = ppo.get_action(prompts, training=True)
+        token_ids, action_masks, sampling_logps, _ = ppo.get_action(
+            prompts, training=True
+        )
         # The rollout parks the trainer on CPU; ``learn`` must bring the whole
         # tree — base weights and value head alike — back onto the GPU.
         unwrapped = ppo.actor

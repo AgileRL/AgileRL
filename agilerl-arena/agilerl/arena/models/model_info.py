@@ -301,6 +301,7 @@ def qwen3_5_vl(hub_id: str, architecture: ModelArchitecture) -> ModelInfo:
     return ModelInfo(
         hub_id=hub_id,
         architecture=architecture,
+        modalities=("text", "vision"),
         language_model_prefix=VL_LANGUAGE_MODEL_PREFIX,
         text_lora_modules=QWEN3_5_TEXT_LORA_MODULES,
     )
@@ -334,6 +335,7 @@ SUPPORTED_MODEL_INFO: Mapping[str, ModelInfo] = {
         ),
         ModelInfo(
             hub_id="google/gemma-4-E4B-it",
+            modalities=("text", "vision"),
             language_model_prefix=VL_LANGUAGE_MODEL_PREFIX,
             text_lora_modules=GEMMA4_TEXT_LORA_MODULES,
         ),

@@ -121,7 +121,9 @@ class TestREINFORCETest:
         )
 
         for training in (True, False):
-            completion_ids, action_masks, _ = rf.get_action(prompts, training=training)
+            completion_ids, action_masks, _, _ = rf.get_action(
+                prompts, training=training
+            )
             assert_vllm_get_action_contract(
                 token_ids=completion_ids,
                 action_masks=action_masks,
@@ -193,7 +195,7 @@ class TestREINFORCETest:
             for _ in range(batch_size)
         ]
 
-        first_ids, first_masks, _ = rf.get_action(prompts, training=True)
+        first_ids, first_masks, _, _ = rf.get_action(prompts, training=True)
         assert rf._vllm_awake
         assert_vllm_get_action_contract(
             token_ids=first_ids,
@@ -208,7 +210,7 @@ class TestREINFORCETest:
         rf._prepare_vllm_for_training()
         assert not rf._vllm_awake
 
-        second_ids, _, _ = rf.get_action(prompts, training=True)
+        second_ids, _, _, _ = rf.get_action(prompts, training=True)
         assert rf._vllm_awake
         for first, second in zip(first_ids, second_ids, strict=True):
             assert torch.equal(first, second), (

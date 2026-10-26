@@ -3,6 +3,7 @@
 
 import copy
 
+import pytest
 import torch
 from peft import LoraConfig, PeftModel, get_peft_model
 from torch import nn
@@ -13,10 +14,34 @@ from transformers import (
     LlavaConfig,
     LlavaForConditionalGeneration,
 )
+from transformers.models.gemma4.modeling_gemma4 import Gemma4Model
 
 from agilerl.algorithms.core.llm_ops.frozen_vision import (
     VisionFeatureCache,
     install_frozen_vision_no_grad,
+)
+from agilerl.algorithms.core.llm_ops.vision_lockstep import FILLER_METHOD
+from agilerl.architectures.gemma4 import (
+    ACCEPTS_VISION_ROWS as GEMMA_ACCEPTS_VISION_ROWS,
+)
+from agilerl.architectures.gemma4 import install_gemma4_vision_patches
+from agilerl.architectures.qwen3_5.vision import install_qwen3_5_vl_patches
+from agilerl.architectures.runtime import PatchRuntimeConfig
+from tests.test_architectures.qwen3_5.vision_helpers import GRID as QWEN_GRID
+from tests.test_architectures.qwen3_5.vision_helpers import (
+    PATCH_DIM as QWEN_PATCH_DIM,
+)
+from tests.test_architectures.qwen3_5.vision_helpers import (
+    image_prompt,
+    restored_qwen_vl_model,
+    tiny_qwen_vl,
+)
+from tests.test_architectures.test_gemma4 import BOI, EOI, tiny_gemma4
+from tests.test_architectures.test_gemma4 import GRID as GEMMA_GRID
+from tests.test_architectures.test_gemma4 import IMAGE as GEMMA_IMAGE
+from tests.test_architectures.test_gemma4 import PATCH_DIM as GEMMA_PATCH_DIM
+from tests.test_architectures.test_gemma4 import (
+    TOKENS_PER_IMAGE as GEMMA_TOKENS_PER_IMAGE,
 )
 
 IMAGE_TOKEN_ID = 63
@@ -403,6 +428,83 @@ class TestVisionFeatureCache:
         assert cache.mode_dependent is True
         assert calls == [2]
 
+    def test_stand_in_images_reuse_the_tower_output(self) -> None:
+        # Arrange
+        model, cache, pixel_values, expected, calls = cached_llava()
+
+        # Act
+        with cache.step(), cache.images(torch.arange(2)):
+            image_logits(model, pixel_values)
+            dtype = cache.image_dtype([0, 1], training=True)
+            stand_in = cache.stand_in(pixel_values.shape, dtype, "cpu")
+            reused = image_logits(model, stand_in)
+
+        # Assert
+        assert dtype == pixel_values.dtype
+        assert stand_in.untyped_storage().nbytes() == pixel_values.element_size()
+        assert calls == [1]
+        assert torch.equal(reused, expected)
+
+    def test_image_dtype_needs_an_entry_for_every_image(self) -> None:
+        # Arrange
+        model, cache, pixel_values, _, _ = cached_llava()
+
+        # Act
+        with cache.step():
+            with cache.images(torch.arange(2)):
+                image_logits(model, pixel_values)
+            held = cache.image_dtype([1, 0], training=True)
+            missing = cache.image_dtype([0, 2], training=True)
+
+        # Assert
+        assert held == pixel_values.dtype
+        assert missing is None
+
+    def test_stand_in_images_without_entries_raise(self) -> None:
+        # Arrange
+        model, cache, pixel_values, _, calls = cached_llava()
+        stand_in = cache.stand_in(pixel_values.shape, pixel_values.dtype, "cpu")
+
+        # Act / Assert
+        with (
+            cache.step(),
+            cache.images(torch.arange(2)),
+            pytest.raises(RuntimeError, match="stand-in images lacks cached features"),
+        ):
+            image_logits(model, stand_in)
+        assert calls == [0]
+
+    def test_agreed_reuse_without_entries_raises(self) -> None:
+        # Arrange
+        cache = VisionFeatureCache()
+        pixel_values = images(2)
+
+        # Act / Assert
+        with cache.step(), cache.images(torch.arange(2)):
+            cache.agreed = "reuse"
+            with pytest.raises(RuntimeError, match="reuse cached vision features"):
+                cache.run(nn.Identity(), lambda pixels: pixels, (pixel_values,), {})
+
+    def test_calls_without_a_pixel_tensor_run_the_tower(self) -> None:
+        # Arrange
+        cache = VisionFeatureCache()
+        calls = []
+
+        def forward(pixel_values: list[float]) -> list[float]:
+            calls.append(pixel_values)
+            return pixel_values
+
+        # Act
+        with cache.step(), cache.images(torch.arange(2)):
+            outputs = [
+                cache.run(nn.Identity(), forward, (), {"pixel_values": [1.0, 2.0]})
+                for _ in range(2)
+            ]
+
+        # Assert
+        assert len(calls) == 2
+        assert outputs == [[1.0, 2.0], [1.0, 2.0]]
+
     def test_calls_outside_a_step_run_the_tower(self) -> None:
         # Arrange
         model, cache, pixel_values, expected, calls = cached_llava()
@@ -495,6 +597,48 @@ class TestVisionFeatureCache:
         assert len(calls) == 2
         assert all(torch.equal(output, pixel_values.mean()) for output in outputs)
 
+    def test_packed_rows_without_a_per_image_tensor_run_the_tower(self) -> None:
+        # Arrange
+        cache = VisionFeatureCache()
+        patches = torch.randn(4, 3)
+        calls = []
+
+        def forward(pixels: torch.Tensor) -> torch.Tensor:
+            calls.append(pixels)
+            return pixels * 2
+
+        # Act
+        with cache.step(), cache.images(torch.arange(2)):
+            outputs = [
+                cache.run(nn.Identity(), forward, (patches,), {}) for _ in range(2)
+            ]
+
+        # Assert
+        assert len(calls) == 2
+        assert all(torch.equal(output, patches * 2) for output in outputs)
+
+    def test_packed_rows_of_unequal_grids_run_the_tower(self) -> None:
+        # Arrange
+        cache = VisionFeatureCache()
+        patches = torch.randn(12, 3)
+        grid_thw = torch.tensor([[1, 2, 2], [1, 2, 4]])
+        calls = []
+
+        def forward(pixels: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
+            calls.append(grid)
+            return pixels * 2
+
+        # Act
+        with cache.step(), cache.images(torch.arange(2)):
+            outputs = [
+                cache.run(nn.Identity(), forward, (patches, grid_thw), {})
+                for _ in range(2)
+            ]
+
+        # Assert
+        assert len(calls) == 2
+        assert all(torch.equal(output, patches * 2) for output in outputs)
+
     def test_tower_with_adapter_layers_runs_uncached(self) -> None:
         # Arrange
         model = tiny_llava_peft(["q_proj", "v_proj"])
@@ -512,3 +656,95 @@ class TestVisionFeatureCache:
         # Assert
         assert path == TOWER_PATH
         assert calls == [2]
+
+
+def frozen_vl(model: nn.Module) -> tuple[VisionFeatureCache, list[int]]:
+    """Freeze ``model``'s tower behind a feature cache; log each real tower forward."""
+    tower = model.model.get_encoder(modality="image")
+    tower.requires_grad_(False)
+    cache = VisionFeatureCache()
+    install_frozen_vision_no_grad(model, cache)
+    calls = [0]
+    first_block = next(module for module in tower.modules() if module is not tower)
+    first_block.register_forward_pre_hook(lambda *_: calls.__setitem__(0, calls[0] + 1))
+    return cache, calls
+
+
+@pytest.mark.usefixtures("torch_kernels")
+class TestVisionFeatureCacheVisionRows:
+    def test_qwen_packed_patches_reuse_the_tower_output(self) -> None:
+        # Arrange
+        with restored_qwen_vl_model():
+            install_qwen3_5_vl_patches(PatchRuntimeConfig())
+            model = tiny_qwen_vl()
+            input_ids = torch.tensor([image_prompt([3], images=2)])
+            rows = torch.randn(2, QWEN_GRID, QWEN_GRID, QWEN_PATCH_DIM)
+            with torch.no_grad():
+                expected = model(input_ids=input_ids, pixel_values=rows).logits
+            cache, calls = frozen_vl(model)
+
+            # Act
+            with torch.no_grad(), cache.step(), cache.images(torch.arange(2)):
+                outputs = [
+                    model(input_ids=input_ids, pixel_values=rows).logits
+                    for _ in range(3)
+                ]
+
+        # Assert
+        assert calls == [1]
+        assert all(torch.equal(output, expected) for output in outputs)
+
+    def test_qwen_reordered_keys_return_each_image_in_call_order(self) -> None:
+        # Arrange
+        with restored_qwen_vl_model():
+            install_qwen3_5_vl_patches(PatchRuntimeConfig())
+            model = tiny_qwen_vl()
+            input_ids = torch.tensor([image_prompt([3], images=2)])
+            torch.manual_seed(1)
+            rows = torch.randn(2, QWEN_GRID, QWEN_GRID, QWEN_PATCH_DIM)
+            with torch.no_grad():
+                expected = model(input_ids=input_ids, pixel_values=rows.flip(0)).logits
+            cache, calls = frozen_vl(model)
+
+            # Act
+            with torch.no_grad(), cache.step():
+                with cache.images(torch.tensor([0, 1])):
+                    model(input_ids=input_ids, pixel_values=rows)
+                with cache.images(torch.tensor([1, 0])):
+                    reordered = model(
+                        input_ids=input_ids, pixel_values=rows.flip(0)
+                    ).logits
+
+        # Assert: fp32 tower GEMMs over a reordered batch may round differently
+        # in the last bits.
+        assert calls == [1]
+        assert torch.allclose(reordered, expected, rtol=0.0, atol=1e-6)
+
+    def test_gemma4_keyword_rows_reuse_the_tower_output(self) -> None:
+        # Arrange
+        get_image_features = Gemma4Model.__dict__["get_image_features"]
+        try:
+            install_gemma4_vision_patches(PatchRuntimeConfig())
+            model = tiny_gemma4()
+            image = [BOI, *([GEMMA_IMAGE] * GEMMA_TOKENS_PER_IMAGE), EOI]
+            input_ids = torch.tensor([[3, *image, 5, *image, 6]])
+            rows = torch.rand(2, GEMMA_GRID, GEMMA_GRID, GEMMA_PATCH_DIM)
+            with torch.no_grad():
+                expected = model(input_ids=input_ids, pixel_values=rows).logits
+            cache, calls = frozen_vl(model)
+
+            # Act
+            with torch.no_grad(), cache.step(), cache.images(torch.arange(2)):
+                outputs = [
+                    model(input_ids=input_ids, pixel_values=rows).logits
+                    for _ in range(3)
+                ]
+        finally:
+            Gemma4Model.get_image_features = get_image_features
+            for name in (GEMMA_ACCEPTS_VISION_ROWS, FILLER_METHOD):
+                if name in vars(Gemma4Model):
+                    delattr(Gemma4Model, name)
+
+        # Assert
+        assert calls == [1]
+        assert all(torch.equal(output, expected) for output in outputs)

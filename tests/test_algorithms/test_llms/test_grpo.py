@@ -2143,7 +2143,7 @@ class TestGRPOGetAction:
             for _ in range(3)
         ]
         for training in (True, False):
-            completion_ids, action_masks, _ = grpo.get_action(
+            completion_ids, action_masks, _, _ = grpo.get_action(
                 prompts, training=training
             )
             expected_group_size = grpo.group_size if training else 1
@@ -2176,7 +2176,7 @@ class TestGRPOGetAction:
                 return getattr(real_actor, name)
 
         grpo.actor = _NoParamActor()
-        completion_ids, action_masks, _ = grpo.get_action(prompts, training=False)
+        completion_ids, action_masks, _, _ = grpo.get_action(prompts, training=False)
         assert len(completion_ids) == 1
         assert len(action_masks) == 1
         grpo.clean_up()
@@ -2250,6 +2250,7 @@ class TestGRPOGetAction:
                 return_value=(
                     [torch.ones(1, 10, dtype=torch.long)],
                     [torch.ones(1, 9, dtype=torch.bool)],
+                    None,
                     None,
                 ),
             ) as mock_generate_with_vllm_colocate,
@@ -2413,7 +2414,7 @@ class TestGRPOGenerateWithVllmColocate:
             SimpleNamespace(outputs=[SimpleNamespace(token_ids=[10])]),
             SimpleNamespace(outputs=[SimpleNamespace(token_ids=[11, 12])]),
         ]
-        completion_ids, action_masks, _ = grpo._generate_with_vllm_colocate(
+        completion_ids, action_masks, _, _ = grpo._generate_with_vllm_colocate(
             prompts=prompts,
             group_size=2,
             temperature=0.7,
@@ -2458,7 +2459,7 @@ class TestGRPOGenerateWithVllmColocate:
             ),
             patch.object(torch.distributed, "get_rank", return_value=1),
         ):
-            completion_ids, action_masks, _ = grpo._generate_with_vllm_colocate(
+            completion_ids, action_masks, _, _ = grpo._generate_with_vllm_colocate(
                 prompts=prompts,
                 group_size=1,
                 temperature=0.7,
@@ -4584,6 +4585,16 @@ class TestGRPOSaveLoadCheckpointResume:
 
 
 class TestGRPOClone:
+    def test_clone_keeps_the_logit_bias(self) -> None:
+        grpo = _make_cpu_grpo_for_branch_tests(logit_bias={5: -100.0})
+
+        clone = grpo.clone(index=1)
+
+        assert clone.logit_bias == {5: -100.0}
+        assert clone._logit_bias_vector(64)[5].item() == -100.0
+        grpo.clean_up()
+        clone.clean_up()
+
     @pytest.mark.parametrize("dist_mode", ["dist"])
     @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
     @pytest.mark.parametrize("vocab_size", [1000])

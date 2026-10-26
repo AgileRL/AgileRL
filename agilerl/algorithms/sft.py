@@ -144,6 +144,8 @@ class SFT(LLMAlgorithm[SFTPrompts]):
     :type lora_tower_target_modules: list[str] | None, optional
     """
 
+    _liger_applies_logit_softcap = True
+
     def __init__(
         self,
         pad_token_id: int,
@@ -370,9 +372,9 @@ class SFT(LLMAlgorithm[SFTPrompts]):
                 head_w = head_w.to(dtype=flat_hidden.dtype)
                 if head_b is not None:
                     head_b = head_b.to(dtype=flat_hidden.dtype)
-                loss = LigerFusedLinearCrossEntropyLoss(ignore_index=-100)(
-                    head_w, flat_hidden, labels.view(-1), head_b
-                )
+                loss = LigerFusedLinearCrossEntropyLoss(
+                    ignore_index=-100, softcap=self.final_logit_softcap
+                )(head_w, flat_hidden, labels.view(-1), head_b)
 
         else:
             # Standard path, also token-chunked: per-token target logprobs via the

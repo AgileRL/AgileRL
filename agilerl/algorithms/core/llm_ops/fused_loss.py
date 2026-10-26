@@ -45,6 +45,7 @@ from liger_kernel.chunked_loss.fused_linear_preference import (
     LigerFusedLinearPreferenceBase,
 )
 
+from agilerl.algorithms.core.llm_ops.fused_logprobs import support_scores
 from agilerl.utils.llm_utils import calculate_k3_kl, k3_kl_penalty_reference
 
 
@@ -72,6 +73,7 @@ def llm_policy_loss_fn(
     turn_log_ratio_reduction: str = "mean",
     vllm_is_ratio: torch.Tensor | None = None,
     kl_clamp: float | None = None,
+    support_ids: torch.Tensor | None = None,
     # Liger's ``LigerFusedLinearPPOBase._compute_loss`` invokes the loss fn
     # with kwargs this fn does not consume (``ref_log_probs``, ``loss_type``,
     # ``max_completion_length``, ``sapo_temperature_pos``, ...), so a
@@ -148,14 +150,26 @@ def llm_policy_loss_fn(
     :param kl_clamp: Per-token K3 bound of the KL penalty (see
         :func:`k3_kl_penalty_reference`), or ``None`` for no bound.
     :type kl_clamp: float | None
+    :param support_ids: ``(chunk_B, T, K)`` sampling support of each token,
+        ``-1`` padded; a token with a support takes its logprob over that
+        support alone. ``None`` normalizes over the full vocabulary.
+    :type support_ids: torch.Tensor | None
     :return: ``(chunk_loss, [kl, clipfrac, pg_loss, entropy, kl_clamp_frac])`` — first
         element backprops; metrics are detached scalars contributing to
         the global mean across chunks.
     :rtype: tuple[torch.Tensor, list[torch.Tensor]]
     """
-    per_token_logps = log_probs.gather(
-        dim=-1, index=selected_token_ids.unsqueeze(-1)
-    ).squeeze(-1)
+    if support_ids is None:
+        per_token_logps = log_probs.gather(
+            dim=-1, index=selected_token_ids.unsqueeze(-1)
+        ).squeeze(-1)
+    else:
+        per_token_logps, support_log_z, restricted = support_scores(
+            log_probs, support_ids, selected_token_ids
+        )
+        per_token_logps = per_token_logps - torch.where(
+            restricted, support_log_z, torch.zeros_like(support_log_z)
+        )
 
     if old_per_token_logps is None:
         # PPO/REINFORCE always pass old_log_probs; this guards against a
@@ -345,6 +359,9 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
         turn_log_ratio_reduction: str = "mean",
         vllm_is_ratio: torch.Tensor | None = None,
         kl_clamp: float | None = None,
+        softcap: float | None = None,
+        support_ids: torch.Tensor | None = None,
+        logit_bias: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
         """Chunked forward + backward.
 
@@ -356,6 +373,11 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
         reduces to the existing token-mode behavior; ``vllm_is_ratio`` is the
         detached, upper-clamped per-token vLLM sampling-mismatch ratio applied
         to the per-token policy loss (token mode only), or ``None``.
+        ``softcap`` squashes the logits to ``softcap * tanh(logits / softcap)``
+        before the temperature, as the model's own head does.
+        ``support_ids`` is chunked the same way (see :func:`llm_policy_loss_fn`).
+        ``logit_bias`` is a ``(V,)`` offset added after the softcap, as vLLM
+        applies its ``logit_bias``.
         """
         loss_acc = torch.zeros((), device=_input.device, dtype=torch.float32)
         grad_weight = torch.zeros_like(weight)
@@ -378,6 +400,7 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
             old_per_token_logps_chunk: torch.Tensor | None = None,
             turn_ids_chunk: torch.Tensor | None = None,
             vllm_is_ratio_chunk: torch.Tensor | None = None,
+            support_ids_chunk: torch.Tensor | None = None,
         ) -> tuple[torch.Tensor, list[torch.Tensor]]:
             # Liger 0.8.0 rewrote ``LigerFusedLinearPPOBase.chunk_forward`` into a
             # selective-logp kernel that doesn't compose with the grad_and_value
@@ -392,6 +415,10 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
             logits = torch.matmul(input_chunk, weight_local.t())
             if bias_local is not None:
                 logits = logits + bias_local
+            if softcap is not None:
+                logits = softcap * torch.tanh(logits / softcap)
+            if logit_bias is not None:
+                logits = logits + logit_bias.to(logits.dtype)
             if temperature != 1.0:
                 logits = logits / temperature
             log_probs = torch.log_softmax(logits.float(), dim=-1)
@@ -421,6 +448,7 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
                 turn_log_ratio_reduction=turn_log_ratio_reduction,
                 vllm_is_ratio=vllm_is_ratio_chunk,
                 kl_clamp=kl_clamp,
+                support_ids=support_ids_chunk,
             )
 
         def fused_fwd_bwd(
@@ -432,6 +460,7 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
             old_per_token_logps_chunk: torch.Tensor | None,
             turn_ids_chunk: torch.Tensor | None,
             vllm_is_ratio_chunk: torch.Tensor | None,
+            support_ids_chunk: torch.Tensor | None,
         ) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, list[torch.Tensor]]]:
             argnums = (0, 1, 5) if bias is not None else (0, 1)
             return torch.func.grad_and_value(
@@ -447,6 +476,7 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
                 old_per_token_logps_chunk=old_per_token_logps_chunk,
                 turn_ids_chunk=turn_ids_chunk,
                 vllm_is_ratio_chunk=vllm_is_ratio_chunk,
+                support_ids_chunk=support_ids_chunk,
             )
 
         if compiled:  # pragma: no cover -- requires torch.compile warmup
@@ -463,6 +493,7 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
             old_per_token_logps_chunk: torch.Tensor | None,
             turn_ids_chunk: torch.Tensor | None,
             vllm_is_ratio_chunk: torch.Tensor | None,
+            support_ids_chunk: torch.Tensor | None,
         ) -> None:
             (
                 (chunk_grad_input, chunk_grad_weight, *chunk_grad_bias),
@@ -479,6 +510,7 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
                 old_per_token_logps_chunk,
                 turn_ids_chunk,
                 vllm_is_ratio_chunk,
+                support_ids_chunk,
             )
             if grad_bias is not None:
                 grad_bias.add_(chunk_grad_bias[0])
@@ -524,8 +556,13 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
             if vllm_is_ratio is not None
             else [None] * chunks
         )
+        _support_chunks = (
+            torch.chunk(support_ids, chunks=chunks, dim=0)
+            if support_ids is not None
+            else [None] * chunks
+        )
 
-        for ic, idc, mc, ac, rc, oc, tc, vc in zip(
+        for ic, idc, mc, ac, rc, oc, tc, vc, sc in zip(
             _input_chunks,
             _ids_chunks,
             _mask_chunks,
@@ -534,9 +571,10 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
             _old_chunks,
             _turn_chunks,
             _vllm_chunks,
+            _support_chunks,
             strict=True,
         ):
-            accumulate_chunk(ic, idc, mc, ac, rc, oc, tc, vc)
+            accumulate_chunk(ic, idc, mc, ac, rc, oc, tc, vc, sc)
 
         grad_input = torch.cat(grad_inputs, dim=0)
         # grad_bias is None when the layer has no bias; save_for_backward
@@ -577,6 +615,9 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
             None,  # turn_log_ratio_reduction
             None,  # vllm_is_ratio
             None,  # kl_clamp
+            None,  # softcap
+            None,  # support_ids
+            None,  # logit_bias
         )
 
 
@@ -658,6 +699,9 @@ def apply_fused_policy_loss(
     turn_log_ratio_reduction: str = "mean",
     vllm_is_ratio: torch.Tensor | None = None,
     kl_clamp: float | None = None,
+    softcap: float | None = None,
+    support_ids: torch.Tensor | None = None,
+    logit_bias: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
     """Run :class:`LigerFusedLinearPolicyLossFunction`, bounded at token level.
 
@@ -725,6 +769,13 @@ def apply_fused_policy_loss(
     :type turn_log_ratio_reduction: str
     :param kl_clamp: Per-token K3 bound of the KL penalty, or ``None``.
     :type kl_clamp: float | None
+    :param softcap: Final-logit softcap of the model's head, or ``None``.
+    :type softcap: float | None
+    :param support_ids: ``(B, T_act, K)`` sampling support of each action
+        token, ``-1`` padded, or ``None`` for full-vocabulary logprobs.
+    :type support_ids: torch.Tensor | None
+    :param logit_bias: ``(V,)`` fp32 offsets added after the softcap, or ``None``.
+    :type logit_bias: torch.Tensor | None
     :return: ``(loss, aux)`` straight from the fused Function.
     :rtype: tuple[torch.Tensor, tuple[torch.Tensor, ...]]
     """
@@ -769,6 +820,11 @@ def apply_fused_policy_loss(
             if vllm_is_ratio is not None
             else None,
             kl_clamp,
+            softcap,
+            support_ids.reshape(n_tokens, 1, -1).contiguous()
+            if support_ids is not None
+            else None,
+            logit_bias,
         )
     return LigerFusedLinearPolicyLossFunction.apply(
         policy_hidden.contiguous(),
@@ -792,6 +848,9 @@ def apply_fused_policy_loss(
         turn_log_ratio_reduction,
         None,  # vllm_is_ratio (token level only)
         kl_clamp,
+        softcap,
+        support_ids,
+        logit_bias,
     )
 
 

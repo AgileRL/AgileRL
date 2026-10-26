@@ -28,6 +28,7 @@ from agilerl.llm_envs.observation import (
     IMAGE_PLACEHOLDER,
     IMAGE_USER_CONTENT_PREFIX,
     ImageProcessorCall,
+    ImageTokens,
     encode_image_training_inputs,
 )
 from agilerl.utils.segment_rows import split_episode_segments
@@ -447,6 +448,39 @@ class TestRolloutHarnessVision:
 
         assert harness.sampling_logps == [logps]
 
+    def test_image_step_records_sampling_supports(self) -> None:
+        # Arrange
+        def fake_processor(
+            *, text: str, images: object, return_tensors: str
+        ) -> dict[str, torch.Tensor]:
+            del text, images, return_tensors
+            return {
+                "input_ids": torch.tensor([[1, 2, 3, 4]]),
+                "pixel_values": torch.ones(1, 3, 2, 2),
+            }
+
+        def env_factory() -> RolloutHarness:
+            return RolloutHarness(
+                ImageResetClient(),
+                MiniTokenizer(),
+                max_turns=1,
+                apply_chat_template=False,
+                vision_processor=fake_processor,
+            )
+
+        collector = RolloutCollector(env_factory, batch_size=1, group_size=1)
+        supports = torch.tensor([[4, 9], [5, -1], [6, -1], [7, 2]], dtype=torch.int32)
+        try:
+            collector.reset(seed=0)
+
+            # Act
+            collector.step([torch.arange(8).unsqueeze(0)], sampling_supports=[supports])
+
+            # Assert
+            assert collector.envs[0].sampling_supports == [supports]
+        finally:
+            collector.close()
+
     def test_second_image_turn_keeps_the_first_turn_in_place(self) -> None:
         # Arrange
         prompts = iter([[11, 12, 13, 14], [5, 6], [8]])
@@ -706,9 +740,11 @@ def thinking_tokenizer() -> PreTrainedTokenizerBase:
     return tokenizer
 
 
-def thinking_harness(
-    tokenizer: PreTrainedTokenizerBase, client: ScreenTurnClient
-) -> RolloutHarness:
+def tokenizing_processor(
+    tokenizer: PreTrainedTokenizerBase,
+) -> Callable[..., dict[str, torch.Tensor]]:
+    """Processor that tokenizes the text as is, with one zero pixel row per image."""
+
     def processor(
         *, text: str, images: object, return_tensors: str
     ) -> dict[str, torch.Tensor]:
@@ -718,12 +754,19 @@ def thinking_harness(
         )
         return {"input_ids": encoded["input_ids"], "pixel_values": torch.zeros(count)}
 
+    return processor
+
+
+def thinking_harness(
+    tokenizer: PreTrainedTokenizerBase, client: ScreenTurnClient
+) -> RolloutHarness:
     return RolloutHarness(
         client,
         tokenizer,
         max_turns=3,
         system_prompt=INSTRUCTION,
-        vision_processor=processor,
+        repeat_system_prompt=True,
+        vision_processor=tokenizing_processor(tokenizer),
     )
 
 
@@ -1076,6 +1119,7 @@ def numbered_screen_harness(
         tokenizer,
         max_turns=3,
         system_prompt=INSTRUCTION,
+        repeat_system_prompt=True,
         vision_processor=context_token_processor(tokenizer, tokens_per_image=3),
         **harness_kwargs,
     )
@@ -1262,6 +1306,140 @@ class TestRolloutHarnessSegmentRestart:
         assert all(p["input_ids"].shape[1] <= threshold for p in prompts[1:])
         restarted = tokenizer.decode(prompts[2]["input_ids"][0])
         assert "Previous actions:\n1. noop()\n2. noop()\n\nfeedback" in restarted
+
+    def test_image_context_restarts_at_a_model_budget_below_the_segment_limit(
+        self, image_token_tokenizer: PreTrainedTokenizerBase
+    ) -> None:
+        # Arrange
+        tokenizer = image_token_tokenizer
+        end = tokenizer.convert_tokens_to_ids("<|im_end|>")
+        sampled = [*newline_first_tokens(tokenizer, "ok</think>noop()"), end]
+        reference = run_image_episode(numbered_screen_harness(tokenizer), sampled)
+        second_len = reference[1]["prompt_token_len"]
+        by_segment = numbered_screen_harness(
+            tokenizer, segment_prompt_tokens=second_len - 1
+        )
+        by_budget = numbered_screen_harness(
+            tokenizer, segment_prompt_tokens=1_000_000, max_model_len=second_len
+        )
+
+        # Act
+        run_image_episode(by_segment, sampled)
+        prompts = run_image_episode(by_budget, sampled)
+        expected = by_segment.get_episode_data()
+        got = by_budget.get_episode_data()
+
+        # Assert
+        assert len(prompts) == 3
+        assert all(prompt["prompt_token_len"] < second_len for prompt in prompts)
+        assert got[6] is not None
+        assert expected[6] is not None
+        assert torch.equal(got[6].token_lengths, expected[6].token_lengths)
+        for want, have in zip(expected[:6], got[:6], strict=True):
+            assert torch.equal(have, want)
+
+    def test_text_context_restarts_at_a_model_budget_below_the_segment_limit(
+        self, thinking_tokenizer: PreTrainedTokenizerBase
+    ) -> None:
+        # Arrange
+        tokenizer = thinking_tokenizer
+        end = tokenizer.convert_tokens_to_ids("<|im_end|>")
+        sampled = [*tokenizer.encode("ok</think>noop()", add_special_tokens=False), end]
+        reference = run_text_episode(chat_text_harness(tokenizer), sampled)
+        second_len = int(reference[1]["input_ids"].shape[1])
+        by_segment = chat_text_harness(tokenizer, segment_prompt_tokens=second_len - 1)
+        by_budget = chat_text_harness(
+            tokenizer, segment_prompt_tokens=1_000_000, max_model_len=second_len
+        )
+
+        # Act
+        run_text_episode(by_segment, sampled)
+        prompts = run_text_episode(by_budget, sampled)
+        full_ids, *_rest, segments = by_budget.get_episode_data()
+
+        # Assert
+        assert len(prompts) == 3
+        assert all(prompt["input_ids"].shape[1] < second_len for prompt in prompts)
+        assert segments is not None
+        assert segments.token_lengths.numel() == 3
+        assert torch.equal(full_ids, by_segment.get_episode_data()[0])
+
+    def test_text_context_restarts_with_room_for_a_full_turn(
+        self, thinking_tokenizer: PreTrainedTokenizerBase
+    ) -> None:
+        # Arrange
+        tokenizer = thinking_tokenizer
+        end = tokenizer.convert_tokens_to_ids("<|im_end|>")
+        sampled = [*tokenizer.encode("ok</think>noop()", add_special_tokens=False), end]
+        reference = run_text_episode(chat_text_harness(tokenizer), sampled)
+        second_len = int(reference[1]["input_ids"].shape[1])
+        max_output_tokens = 8
+        by_segment = chat_text_harness(tokenizer, segment_prompt_tokens=second_len - 1)
+        by_budget = chat_text_harness(
+            tokenizer,
+            segment_prompt_tokens=1_000_000,
+            max_model_len=second_len - 1 + max_output_tokens,
+            max_output_tokens=max_output_tokens,
+        )
+
+        # Act
+        run_text_episode(by_segment, sampled)
+        prompts = run_text_episode(by_budget, sampled)
+        full_ids, *_rest, segments = by_budget.get_episode_data()
+
+        # Assert
+        assert len(prompts) == 3
+        assert all(prompt["input_ids"].shape[1] < second_len for prompt in prompts)
+        assert segments is not None
+        assert segments.token_lengths.numel() == 3
+        assert torch.equal(full_ids, by_segment.get_episode_data()[0])
+
+    def test_text_turn_budget_does_not_shorten_episodes_without_restart_settings(
+        self, thinking_tokenizer: PreTrainedTokenizerBase
+    ) -> None:
+        # Arrange
+        tokenizer = thinking_tokenizer
+        end = tokenizer.convert_tokens_to_ids("<|im_end|>")
+        sampled = [*tokenizer.encode("ok</think>noop()", add_special_tokens=False), end]
+        reference = run_text_episode(chat_text_harness(tokenizer), sampled)
+        second_len = int(reference[1]["input_ids"].shape[1])
+        harness = chat_text_harness(
+            tokenizer, max_model_len=second_len + 1, max_output_tokens=8
+        )
+
+        # Act
+        prompts = run_text_episode(harness, sampled)
+
+        # Assert
+        assert [int(p["input_ids"].shape[1]) for p in prompts[:2]] == [
+            int(reference[0]["input_ids"].shape[1]),
+            second_len,
+        ]
+
+    def test_text_model_budget_ends_the_episode_without_restart_settings(
+        self, thinking_tokenizer: PreTrainedTokenizerBase
+    ) -> None:
+        # Arrange
+        tokenizer = thinking_tokenizer
+        end = tokenizer.convert_tokens_to_ids("<|im_end|>")
+        sampled = [*tokenizer.encode("ok</think>noop()", add_special_tokens=False), end]
+        reference = run_text_episode(chat_text_harness(tokenizer), sampled)
+        second_len = int(reference[1]["input_ids"].shape[1])
+        harness = chat_text_harness(tokenizer, max_model_len=second_len)
+        prompt, _info = harness.reset()
+        output = torch.cat([prompt["input_ids"], torch.tensor([sampled])], dim=1)
+
+        # Act
+        next_prompt, _reward, terminated, truncated, info = harness.step(
+            output, sampling_logps=torch.zeros(len(sampled))
+        )
+        full_ids, *_rest, segments = harness.get_episode_data()
+
+        # Assert
+        assert (next_prompt, terminated, truncated) == ({}, False, True)
+        assert info == {PROMPT_LIMIT_INFO_KEY: True}
+        assert torch.equal(full_ids, output)
+        assert segments is None
 
     def test_image_restart_over_the_threshold_ends_the_episode(
         self, image_token_tokenizer: PreTrainedTokenizerBase
@@ -1523,6 +1701,7 @@ def reasoning_screen_harness(
         tokenizer,
         max_turns=max_turns,
         system_prompt=INSTRUCTION,
+        repeat_system_prompt=True,
         vision_processor=context_token_processor(tokenizer, tokens_per_image=3),
         **harness_kwargs,
     )
@@ -1857,8 +2036,8 @@ class TestRolloutHarnessRestartKeepTurns:
         restarted = prompts[3]["input_ids"][0].tolist()
         assert tokenizer.decode(restarted) == (
             f"{SYSTEM_TURN}<|im_start|>user\nPrevious actions:\n"
-            f"1. noop()\n2. noop()\n3. noop()\n"
-            f"{INSTRUCTION}<|im_end|>\n<|im_start|>assistant\n<think>\n"
+            "1. noop()\n2. noop()\n3. noop()"
+            "<|im_end|>\n<|im_start|>assistant\n<think>\n"
             "ok</think>noop()<|im_end|>\n<|im_start|>user\nfeedback<|im_end|>\n"
             "<|im_start|>assistant\n<think>\n"
         )
@@ -1916,6 +2095,7 @@ def url_screen_harness(
         tokenizer,
         max_turns=max_turns,
         system_prompt=INSTRUCTION,
+        repeat_system_prompt=True,
         vision_processor=context_token_processor(tokenizer, tokens_per_image=3),
         restart_keep_turns=2,
         **harness_kwargs,
@@ -2451,6 +2631,7 @@ def goal_image_harness(
         tokenizer,
         max_turns=3,
         system_prompt=INSTRUCTION,
+        repeat_system_prompt=True,
         vision_processor=pixel_level_processor(tokenizer),
         screenshot_field="screenshot",
         goal_images_field="goal_images",
@@ -2674,3 +2855,97 @@ class TestRolloutHarnessGoalImages:
         assert pixel_values is not None
         assert tuple(pixel_values.shape) == (7, 3, 16, 32)
         assert pixel_values[:, 0, 8, 16].tolist() == [0, 200, 201, 1, 200, 201, 2]
+
+
+QWEN_IMAGE_TOKENS = ImageTokens(
+    "<|vision_start|><|image_pad|><|vision_end|>", "<|image_pad|>"
+)
+
+
+class TagSpellingScreenClient(ScreenTurnClient):
+    """Image env whose page text spells the model's image token."""
+
+    def reset(
+        self, seed: int | None = None, *, row_index: int | None = None
+    ) -> tuple[object, dict[str, Any]]:
+        del seed, row_index
+        return {"text": "an <|image_pad|> tag", "image": object()}, {}
+
+
+class TestRolloutHarnessModelImageTokens:
+    def test_each_prompt_holds_one_model_image_token_per_image(
+        self, thinking_tokenizer: PreTrainedTokenizerBase
+    ) -> None:
+        # Arrange
+        tokenizer = thinking_tokenizer
+        image_pad = tokenizer.convert_tokens_to_ids("<|image_pad|>")
+        end = tokenizer.convert_tokens_to_ids("<|im_end|>")
+        sampled = [*tokenizer.encode("ok</think>noop()", add_special_tokens=False), end]
+        harness = RolloutHarness(
+            ScreenTurnClient(),
+            tokenizer,
+            max_turns=3,
+            system_prompt=INSTRUCTION,
+            vision_processor=tokenizing_processor(tokenizer),
+            image_tokens=QWEN_IMAGE_TOKENS,
+        )
+        prompt, _info = harness.reset()
+        prompts = [prompt]
+
+        # Act
+        for _turn in range(2):
+            _prompt_ids, output = vllm_turn(prompt, sampled)
+            prompt, *_ = harness.step(output)
+            prompts.append(prompt)
+
+        # Assert
+        assert [
+            p["prompt_token_ids"][0].tolist().count(image_pad) for p in prompts
+        ] == [1, 2, 3]
+        assert [p["input_ids"][0].tolist().count(image_pad) for p in prompts] == [
+            1,
+            2,
+            3,
+        ]
+        assert all(IMAGE_PLACEHOLDER not in p["prompt"] for p in prompts)
+
+    def test_env_text_spelling_the_image_token_is_escaped(
+        self, thinking_tokenizer: PreTrainedTokenizerBase
+    ) -> None:
+        # Arrange
+        tokenizer = thinking_tokenizer
+        image_pad = tokenizer.convert_tokens_to_ids("<|image_pad|>")
+        harness = RolloutHarness(
+            TagSpellingScreenClient(),
+            tokenizer,
+            max_turns=1,
+            vision_processor=tokenizing_processor(tokenizer),
+            image_tokens=QWEN_IMAGE_TOKENS,
+        )
+
+        # Act
+        prompt, _info = harness.reset()
+
+        # Assert
+        assert prompt["prompt_token_ids"][0].tolist().count(image_pad) == 1
+        assert "an &lt;|image_pad|&gt; tag" in prompt["prompt"]
+
+    def test_generated_model_image_token_fails_the_turn(
+        self, thinking_tokenizer: PreTrainedTokenizerBase
+    ) -> None:
+        # Arrange
+        tokenizer = thinking_tokenizer
+        image_pad = tokenizer.convert_tokens_to_ids("<|image_pad|>")
+        harness = RolloutHarness(
+            ScreenTurnClient(),
+            tokenizer,
+            max_turns=2,
+            vision_processor=tokenizing_processor(tokenizer),
+            image_tokens=QWEN_IMAGE_TOKENS,
+        )
+        prompt, _info = harness.reset()
+        _prompt_ids, output = vllm_turn(prompt, [image_pad])
+
+        # Act / Assert
+        with pytest.raises(ValueError, match=r"image placeholder '<\|image_pad\|>'"):
+            harness.step(output)

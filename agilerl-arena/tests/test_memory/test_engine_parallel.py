@@ -14,7 +14,7 @@ from agilerl.arena.memory.resolve.engine import resolve_engine_tensor_parallel
 from agilerl.arena.memory.specs import DeviceSpec
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
 from agilerl.arena.models.manifest import TrainingManifest
-from agilerl.arena.models.networks import VLLMConfig, default_colocated_vllm_config
+from agilerl.arena.models.networks import VLLMConfig, default_rollout_vllm_config
 
 
 def _qwen_manifest(
@@ -70,6 +70,23 @@ class TestResolveEngineTensorParallel:
         assert isinstance(manifest.algorithm, RolloutLLMSpec)
         assert manifest.algorithm.vllm_config is not None
         assert manifest.algorithm.vllm_config.tensor_parallel_size == 2
+
+    @pytest.mark.parametrize(("context", "expected"), [(4096, 1), (5120, 2)])
+    def test_a_width_must_clear_demand_by_the_kv_margin(
+        self, context: int, expected: int
+    ) -> None:
+        # Arrange: TP=1 predicts a 1.93 GiB attention pool on four leftover
+        # A100s. 16 sequences at 4096 tokens want 1.25 GiB; at 5120 they want
+        # 1.56 GiB, inside the pool but past vLLM's measured 1.49 GiB.
+        raw = _qwen_manifest()
+        raw["network"]["max_context_length"] = context
+        manifest = TrainingManifest.model_validate(raw)
+
+        # Act
+        width = resolve_engine_tensor_parallel(manifest, 8, _a100(), 8)
+
+        # Assert
+        assert width == expected
 
     @pytest.mark.parametrize("width", [1, 4])
     def test_explicit_width_is_left_unchanged(self, width: int) -> None:
@@ -177,10 +194,10 @@ class TestResolveEngineTensorParallel:
         assert manifest.algorithm.vllm_config.tensor_parallel_size == 2
 
 
-class TestDefaultColocatedVllmConfig:
+class TestDefaultRolloutVllmConfig:
     def test_leaves_tensor_parallel_size_unset(self) -> None:
         # Act
-        config = default_colocated_vllm_config()
+        config = default_rollout_vllm_config()
 
         # Assert
         assert config.tensor_parallel_size is None

@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pydantic import BaseModel, ConfigDict
 
 import agilerl.arena.memory.formulas as formulas
+import agilerl.arena.memory.vision as vision
 from agilerl.arena.memory.breakdown import MemoryComponent, PhaseBreakdown
 from agilerl.arena.memory.formulas import geometry_gap_warning
 from agilerl.arena.memory.resolve.chunk import resolve_chunk_rows
@@ -32,6 +33,10 @@ from agilerl.arena.memory.specs import (
     ModelSpec,
     RunConfig,
     TrainingSettings,
+)
+from agilerl.arena.memory.trainer_residency import (
+    trainer_allocator_slack,
+    trainer_base_bytes,
 )
 from agilerl.arena.models.fsdp import FSDPConfig
 
@@ -80,24 +85,39 @@ def engine_terms(
         if settings.weight_quantization == "fp8"
         else DTYPE_BYTES[settings.weight_dtype]
     )
-    weights = int(weight_elems / DTYPE_BYTES[settings.weight_dtype] * weight_byte / tp)
-    terms = {
-        "weights": weights,
-        "startup_peak": formulas.block_recompute_bytes(
+    unsharded_weights = weight_elems / DTYPE_BYTES[settings.weight_dtype] * weight_byte
+    weights = int(unsharded_weights / tp)
+    decoder_startup = (
+        formulas.block_recompute_bytes(
             arch,
             1,
             batched_tokens,
             act_bytes,
             engine_forward=True,
         )
-        + sampler,
+        + sampler
+    )
+    terms = {
+        "weights": weights,
+        "startup_peak": _with_encoder_profile(
+            model, settings, batched_tokens, decoder_startup
+        ),
         "cuda_graphs": 0 if settings.enforce_eager else formulas.CUDA_GRAPH_POOL_BYTES,
         "lora_slots": int(
             settings.max_loras
             * formulas.lora_param_count(arch, settings.max_lora_rank)
             * act_bytes
             / tp
-        ),
+        )
+        + settings.max_loras
+        * formulas.engine_expert_lora_param_count(
+            arch,
+            settings.max_lora_rank,
+            tp,
+            packed_3d=arch.vllm_3d_moe_lora or settings.lora_packed_target_matrices > 0,
+        )
+        * act_bytes,
+        "engine_runtime": int(formulas.ENGINE_RUNTIME_FRACTION * unsharded_weights),
         "kv_demand": _kv_demand_per_rank(arch, settings),
         "mamba_state": formulas.mamba_state_bytes(
             arch,
@@ -107,6 +127,35 @@ def engine_terms(
         ),
     }
     return terms, batched_tokens, sampler
+
+
+def _with_encoder_profile(
+    model: ModelSpec,
+    settings: GenerationSettings,
+    batched_tokens: int,
+    decoder_bytes: int,
+) -> int:
+    """Activation peak of a decoder pass that follows vLLM's maximum-image encode.
+
+    :param batched_tokens: The engine's resolved scheduler-step token cap.
+    :param decoder_bytes: Decoder activation and sampler bytes of the pass.
+    """
+    if model.variant(settings.weight_variant).stripped_multimodal:
+        return decoder_bytes
+    items = vision.encoder_profile_items(
+        model.arch,
+        batched_tokens,
+        settings.max_num_seqs,
+        settings.max_model_len,
+        settings.max_images_per_prompt,
+    )
+    encoder, outputs = vision.encoder_profile_bytes(
+        model.arch,
+        DTYPE_BYTES[settings.weight_dtype],
+        settings.tensor_parallel_size,
+        items,
+    )
+    return max(decoder_bytes + outputs, encoder)
 
 
 def _kv_demand_per_rank(arch: ModelArch, settings: GenerationSettings) -> int:
@@ -257,7 +306,8 @@ def estimate_generation(
     lora_slots = terms["lora_slots"]
     kv_demand = terms["kv_demand"]
     mamba_state = terms["mamba_state"]
-    non_kv = weights + startup_peak + graphs + lora_slots + mamba_state
+    engine_runtime = terms["engine_runtime"]
+    non_kv = weights + startup_peak + graphs + lora_slots + mamba_state + engine_runtime
     kv_pool = (
         settings.kv_cache_memory_bytes
         if settings.kv_cache_memory_bytes is not None
@@ -285,7 +335,10 @@ def estimate_generation(
     )
     runtime_tokens = min(settings.concurrency * settings.prompt_len, batched_tokens)
     job_overhead = formulas.JOB_OVERHEAD_BYTES if orchestrated else 0
-    runtime_activation = (
+    runtime_activation = _with_encoder_profile(
+        model,
+        settings,
+        batched_tokens,
         formulas.block_recompute_bytes(
             arch,
             1,
@@ -293,7 +346,7 @@ def estimate_generation(
             act_bytes,
             engine_forward=True,
         )
-        + sampler
+        + sampler,
     )
     components = (
         MemoryComponent(
@@ -362,10 +415,11 @@ def estimate_generation(
         MemoryComponent(
             key="overhead",
             label="Overhead (CUDA context, runtime)",
-            n_bytes=max(int(device.context_bytes + job_overhead), 0),
+            n_bytes=max(int(device.context_bytes + job_overhead + engine_runtime), 0),
             detail={
                 "cuda_context": int(device.context_bytes),
                 "job_overhead": int(job_overhead),
+                "engine_runtime": int(engine_runtime),
             },
         ),
     )
@@ -378,13 +432,15 @@ def estimate_generation(
     )
 
 
-def generation_can_serve(breakdown: PhaseBreakdown) -> bool:
+def generation_can_serve(breakdown: PhaseBreakdown, kv_margin_bytes: int = 0) -> bool:
     """Whether this generation bar can serve the advertised context.
 
-    ``fits`` means vLLM starts. Serving also needs a non-empty
-    KV pool that covers worst-case demand at ``max_model_len``. Demand above
-    the pool means preemption under that context.
+    :param breakdown: Generation-phase breakdown.
+    :param kv_margin_bytes: Pool bytes demand must leave free.
+    :return: True when vLLM starts and its KV pool covers worst-case demand.
     """
+    # ``fits`` only means vLLM starts; demand above the pool at
+    # max_model_len means preemption.
     if breakdown.phase != "generation" or not breakdown.fits:
         return False
     kv = next((c for c in breakdown.components if c.key == "kv_cache"), None)
@@ -392,7 +448,7 @@ def generation_can_serve(breakdown: PhaseBreakdown) -> bool:
         return False
     pool = kv.detail["pool"]
     demand = kv.detail["worst_case_demand"]
-    return pool > 0 and demand <= pool
+    return pool > 0 and demand + kv_margin_bytes <= pool
 
 
 def estimate_run(config: RunConfig) -> RunEstimate:
@@ -591,9 +647,13 @@ def _adapter_state_bytes(
     sharded_bytes: float,
     shards: int,
     offload: bool,
-    hold_grads: bool,
+    held_grad_bytes: float | None,
 ) -> AdapterState:
-    """Adapter, gradient, and Adam bytes for one placement and dtype."""
+    """Adapter, gradient, and Adam bytes for one placement and dtype.
+
+    :param held_grad_bytes: Bytes per element of the unsharded grads held
+        between micro-batches, or ``None`` when every backward reduce-scatters.
+    """
     n_resident = settings.n_resident_adapters
     n_trained = settings.n_trained_adapters
     adapters = _resident_bytes(
@@ -613,10 +673,10 @@ def _adapter_state_bytes(
         trained_repl,
         trained_shard,
         replicated_bytes,
-        sharded_bytes,
+        sharded_bytes if held_grad_bytes is None else held_grad_bytes,
         shards,
         offload,
-        gather=hold_grads,
+        gather=held_grad_bytes is not None,
     )
     step_grads = _resident_bytes(
         trained_repl,
@@ -669,20 +729,22 @@ def adapter_state(
         if settings.uses_critic
         else (0, 0)
     )
+    offload = fsdp is not None and fsdp.cpu_offload
+    held_grad_bytes = None
     if fsdp is None:
         replicated_bytes = formulas.ADAPTER_BYTES_PER_PARAM
         sharded_bytes = formulas.ADAPTER_BYTES_PER_PARAM
     else:
         replicated_bytes = FSDP_PARAM_BYTES[fsdp.param_dtype]
         sharded_bytes = DTYPE_BYTES[settings.weight_dtype]
-    offload = fsdp is not None and fsdp.cpu_offload
-    hold_grads = (
-        fsdp is not None
-        and fsdp.defer_grad_sync
-        and shards > 1
-        and settings.trajectories > 1
-        and not offload
-    )
+        if (
+            fsdp.defer_grad_sync
+            and shards > 1
+            and settings.trajectories > 1
+            and not offload
+        ):
+            # FSDP2 accumulates held unsharded grads in the reduce dtype.
+            held_grad_bytes = FSDP_PARAM_BYTES[fsdp.reduce_dtype]
     return _adapter_state_bytes(
         settings,
         replicated,
@@ -693,7 +755,7 @@ def adapter_state(
         sharded_bytes,
         shards,
         offload,
-        hold_grads,
+        held_grad_bytes,
     )
 
 
@@ -717,6 +779,9 @@ class ActivationPeak:
     lora_casts: float
     lora_dropout: float
     fused_head: int
+    tower_lora: float
+    nograd_pixels: float
+    balance_peak: float
 
 
 def block_backward_terms(
@@ -729,8 +794,10 @@ def block_backward_terms(
 ) -> tuple[int, int, int, int, int]:
     """Recompute, fp32 casts, LoRA dropout, split expert-LoRA and routed chunks of one checkpointed block.
 
-    A block-exclusive stack recomputes one attention, FFN or Mamba layer at a
-    time, so each kind's terms are summed and the largest kind is kept.
+    When :attr:`ModelArch.sublayer_transients` holds, the recompute peaks in
+    one attention, FFN or recurrent sub-layer, so each kind's terms are
+    summed and the largest kind is kept. A mixer kind on a stack whose
+    layers carry an FFN beside it includes that FFN's terms.
     """
     rows = settings.grad_forward_rows
     # PEFT casts a wrapped linear's input only when the adapters are wider.
@@ -792,7 +859,7 @@ def block_backward_terms(
                 settings.gradient_checkpointing,
                 layer=layer,
             )
-        moe_here = layer in (None, "ffn")
+        moe_here = layer in (None, "ffn") or not arch.block_exclusive_layers
         return (
             recompute,
             casts,
@@ -801,7 +868,7 @@ def block_backward_terms(
             chunks if moe_here else 0,
         )
 
-    if not (arch.block_exclusive_layers and settings.gradient_checkpointing):
+    if not (arch.sublayer_transients and settings.gradient_checkpointing):
         return terms(None)
     return max((terms(kind) for kind in formulas.block_kinds(arch)), key=sum)
 
@@ -819,9 +886,13 @@ class ActivationTerms:
     lora_dropout: float
     logits: float
     fused_head: int
-    logit_tile: float
+    nograd_logits: float
     nograd_pass: float
+    nograd_hidden: float
+    nograd_pixels: float
+    balance_pixels: float
     loss_lora_casts: float
+    tower_lora: float
 
 
 @dataclass(frozen=True)
@@ -836,6 +907,66 @@ class BindingInstant:
     loss_peak: float
     nograd_peak: float
     optimizer_peak: float
+
+
+def _vision_activation_terms(
+    arch: ModelArch,
+    settings: TrainingSettings,
+    adapters: AdapterState,
+    act_bytes: float,
+    live_rows: int,
+) -> tuple[float, float, float]:
+    """Tower LoRA activations, no-grad vision row copies, and balanced segment rows."""
+    if not settings.images_per_row:
+        return 0, 0, 0
+    rows, cols = vision.vision_patch_grid(
+        arch, settings.image_width, settings.image_height
+    )
+    row_pixels = settings.images_per_row * vision.vision_pixel_bytes(arch, rows * cols)
+    tower_lora = (
+        vision.vision_tower_lora_bytes(
+            arch,
+            live_rows * settings.images_per_row * rows * cols,
+            act_bytes,
+            adapters.bytes_per_param,
+            settings.lora_dropout > 0,
+        )
+        if settings.vision_tower_lora
+        else 0
+    )
+    # The no-grad pass copies each chunk's vision rows one chunk ahead.
+    nograd_pixels = (
+        2 * settings.micro_batch_size * row_pixels if settings.has_nograd_pass else 0
+    )
+    # Balancing sends one row to and receives one row from each peer per round.
+    balance_pixels = (
+        2 * (settings.shard_gpus - 1) * row_pixels if settings.segmented_rows else 0
+    )
+    return tower_lora, nograd_pixels, balance_pixels
+
+
+def _logit_terms(
+    arch: ModelArch,
+    settings: TrainingSettings,
+    act_bytes: float,
+) -> tuple[float, int, float]:
+    """Loss-instant logits, the hoisted fp32 head, and no-grad head bytes."""
+    # Two fp32 tiles are live at the loss instant: recomputed logits plus
+    # that tile's gradient. Tiles are fixed-size, so a fused critic row adds none.
+    logit_rows = resolve_chunk_rows(arch.vocab_size, settings.chunk_rows)
+    # The chunk loop hoists an fp32 lm_head copy when the head runs below fp32.
+    fused_head = int(arch.vocab_size * arch.hidden_size * 4) if act_bytes < 4 else 0
+    logits = logit_rows * arch.vocab_size * 8 + fused_head
+    nograd_logits = logit_rows * arch.vocab_size * 4 + fused_head
+    if settings.sampling_support_width:
+        support_rows = formulas.support_rows_bytes(
+            arch, logit_rows, settings.sampling_support_width, act_bytes
+        )
+        nograd_logits = support_rows
+        if settings.support_scored_loss:
+            logits = support_rows
+            fused_head = 0
+    return logits, fused_head, nograd_logits
 
 
 def _activation_terms(
@@ -876,26 +1007,22 @@ def _activation_terms(
         )
     )
     loss_lora_casts = 0 if settings.lora_casts_recompute_only else lora_casts
-    # Two fp32 tiles are live at the loss instant: recomputed logits plus
-    # that tile's gradient. Tiles are fixed-size, so a fused critic row adds none.
-    logit_rows = resolve_chunk_rows(arch.vocab_size, settings.chunk_rows)
-    logit_tile = logit_rows * arch.vocab_size * 4
-    # The chunk loop hoists an fp32 lm_head copy when the head runs below fp32.
-    fused_head = int(arch.vocab_size * arch.hidden_size * 4) if act_bytes < 4 else 0
-    logits = logit_rows * arch.vocab_size * 8 + fused_head
-    # A 1-row forward still stacks the consulted adapters. A larger micro-batch
-    # chunks that stack, so the live rows are the wider of the two.
-    nograd_rows = max(settings.n_adapter_rows, settings.micro_batch_size)
+    logits, fused_head, nograd_logits = _logit_terms(arch, settings, act_bytes)
+    # The fused pass splits the stacked adapter rows into micro-batch forwards.
     nograd_pass = (
         formulas.nograd_forward_bytes(
             arch,
-            nograd_rows,
+            settings.micro_batch_size,
             seq_len,
             act_bytes,
             eager_mamba_scan=eager_mamba_scan,
         )
         if settings.has_nograd_pass
         else 0
+    )
+    nograd_hidden = settings.micro_batch_size * seq_len * arch.hidden_size * act_bytes
+    tower_lora, nograd_pixels, balance_pixels = _vision_activation_terms(
+        arch, settings, adapters, act_bytes, live_rows
     )
     return ActivationTerms(
         saved=saved,
@@ -907,9 +1034,13 @@ def _activation_terms(
         lora_dropout=lora_dropout,
         logits=logits,
         fused_head=fused_head,
-        logit_tile=logit_tile,
+        nograd_logits=nograd_logits,
         nograd_pass=nograd_pass,
+        nograd_hidden=nograd_hidden,
+        nograd_pixels=nograd_pixels,
+        balance_pixels=balance_pixels,
         loss_lora_casts=loss_lora_casts,
+        tower_lora=tower_lora,
     )
 
 
@@ -932,49 +1063,50 @@ def _binding_instant(
         + terms.lora_dropout
         + terms.split_lora
         + terms.routed_chunks
+        + terms.tower_lora
     )
     loss_peak = (
-        grads + terms.saved + terms.loss_hidden + terms.loss_lora_casts + terms.logits
+        grads
+        + terms.saved
+        + terms.loss_hidden
+        + terms.loss_lora_casts
+        + terms.tower_lora
+        + terms.logits
     )
+    # Block transients are freed before the head scores the final hidden state.
+    nograd_head = terms.nograd_hidden + terms.nograd_logits
     nograd_peak = (
-        (terms.nograd_pass + terms.logit_tile + terms.fused_head)
+        max(terms.nograd_pass, nograd_head) + terms.nograd_pixels
         if settings.has_nograd_pass
         else 0
     )
     optimizer_peak = step_grads
-    backward_total = backward_peak + adam_always
-    loss_total = loss_peak + adam_always
-    nograd_total = nograd_peak + (adam_always if settings.has_nograd_pass else 0)
-    optimizer_total = optimizer_peak + adam + adapters.adam_workspace
-    peak = max(backward_total, loss_total, nograd_total, optimizer_total)
-    if peak == backward_total:
-        activations, live_logits, live_grads, live_adam = (
-            backward_peak - grads,
-            0,
-            grads,
-            adam_always,
-        )
-    elif peak == loss_total:
-        activations, live_logits, live_grads, live_adam = (
-            loss_peak - terms.logits - grads,
-            terms.logits,
-            grads,
-            adam_always,
-        )
-    elif peak == nograd_total:
-        activations, live_logits, live_grads, live_adam = (
-            terms.nograd_pass,
-            terms.logit_tile + terms.fused_head,
-            0,
-            adam_always if settings.has_nograd_pass else 0,
-        )
+    if terms.nograd_pass >= nograd_head:
+        nograd_live = (terms.nograd_pass + terms.nograd_pixels, 0, 0, adam_always)
     else:
-        activations, live_logits, live_grads, live_adam = (
+        nograd_live = (
+            terms.nograd_hidden + terms.nograd_pixels,
+            terms.nograd_logits,
             0,
-            0,
-            step_grads,
-            adam + adapters.adam_workspace,
+            adam_always,
         )
+    # (total, (activations, logits, grads, adam)); a tie goes to the earlier instant.
+    instants = (
+        (backward_peak + adam_always, (backward_peak - grads, 0, grads, adam_always)),
+        (
+            loss_peak + adam_always,
+            (loss_peak - terms.logits - grads, terms.logits, grads, adam_always),
+        ),
+        (nograd_peak + (adam_always if settings.has_nograd_pass else 0), nograd_live),
+        (terms.balance_pixels + adam_always, (terms.balance_pixels, 0, 0, adam_always)),
+        (
+            optimizer_peak + adam + adapters.adam_workspace,
+            (0, 0, step_grads, adam + adapters.adam_workspace),
+        ),
+    )
+    _, (activations, live_logits, live_grads, live_adam) = max(
+        instants, key=lambda instant: instant[0]
+    )
     return BindingInstant(
         activations=activations,
         logits=live_logits,
@@ -1047,41 +1179,18 @@ def activation_peak(
         lora_casts=terms.lora_casts,
         lora_dropout=terms.lora_dropout,
         fused_head=terms.fused_head,
+        tower_lora=terms.tower_lora,
+        nograd_pixels=terms.nograd_pixels,
+        balance_peak=terms.balance_pixels,
     )
 
 
-def trainer_base_bytes(
-    model: ModelSpec,
-    settings: TrainingSettings,
-    counts: formulas.ParamCounts,
-    shards: int,
-) -> float:
-    """Frozen base weights on one training GPU, including the FSDP gather.
-
-    :param model: Training-side model spec.
-    :param settings: Training settings (dtype, FSDP).
-    :param counts: Analytic parameter split.
-    :param shards: GPUs one weight copy is sharded across.
-    :return: Base-weight bytes on one GPU.
-    """
-    full = formulas.weight_bytes(counts, settings.weight_dtype, model.variant("base"))
-    fsdp = settings.fsdp
-    if fsdp is None or (shards <= 1 and not fsdp.cpu_offload):
-        return float(full)
-    token = min(formulas.token_embedding_params(model.arch), max(counts.total, 0))
-    sharded_params = max(counts.total - token, 0)
-    gathered = formulas.fsdp_gathered_params(
-        counts,
-        model.arch,
-        n_gpus=shards,
-        reshard_after_forward=fsdp.reshard_after_forward,
-        prefetch_units=fsdp.prefetch_units,
-        wrap_every_n_blocks=fsdp.wrap_every_n_blocks,
-        cpu_offload=fsdp.cpu_offload,
-    )
-    byte = DTYPE_BYTES[settings.weight_dtype]
-    resident = 0.0 if fsdp.cpu_offload else sharded_params * byte / shards
-    return token * byte + resident + gathered * byte
+def _vision_row_staging_bytes(settings: TrainingSettings, image_pixels: float) -> float:
+    """Two pinned buffers, each grown to the largest no-grad chunk's vision rows."""
+    if not (settings.images_per_update and settings.has_nograd_pass):
+        return 0
+    chunk = settings.micro_batch_size * settings.images_per_row * image_pixels
+    return 2 * vision.pinned_block_bytes(chunk)
 
 
 def training_host_components(
@@ -1103,23 +1212,23 @@ def training_host_components(
     # Offloaded AdamW keeps pinned copies of each shard's params and grads
     # beside its fp32 moments.
     optimizer = adapters.adam + 2 * adapters.step_grads if offloaded else 0.0
-    image_pixels = 3 * arch.vision_image_size**2
-    vision_cache = (
-        settings.images_per_update
-        * arch.vision_patches_per_image
-        * arch.vision_hidden_size
-        * act_bytes
+    rows, cols = vision.vision_patch_grid(
+        arch, settings.image_width, settings.image_height
     )
+    images = settings.images_per_update
+    image_pixels = vision.vision_pixel_bytes(arch, rows * cols)
+    vision_cache = (
+        images * vision.vision_feature_cache_bytes(arch, rows * cols, act_bytes)
+        if arch.vision_feature_cache and not settings.vision_tower_lora
+        else 0
+    )
+    staging = _vision_row_staging_bytes(settings, image_pixels)
     snapshot_adam = (
         adapters.trained_params * formulas.ADAM_BYTES_PER_PARAM
         if settings.checkpoint_optimizer
         else 0.0
     )
-    prefetched = (
-        rollout + settings.images_per_update * image_pixels * 4
-        if settings.async_rollout
-        else 0
-    )
+    prefetched = rollout + images * image_pixels if settings.async_rollout else 0
     return (
         MemoryComponent(
             key="optimizer_offload",
@@ -1131,11 +1240,21 @@ def training_host_components(
             key="vision_feature_cache",
             label="Vision feature cache (pinned)",
             n_bytes=int(vision_cache),
-            detail={
-                "images": settings.images_per_update,
-                "patches_per_image": arch.vision_patches_per_image,
-            },
+            detail={"images": images, "patches_per_image": rows * cols},
             note="Frozen vision tower output per unique image, kept for one learn step.",
+        ),
+        MemoryComponent(
+            key="vision_rows",
+            label="Vision rows",
+            n_bytes=int(images * image_pixels),
+            detail={"images": images, "patches_per_image": rows * cols},
+            note="This update's fp32 pixels, one host tensor every adapter run reads.",
+        ),
+        MemoryComponent(
+            key="vision_row_staging",
+            label="Vision row staging (pinned)",
+            n_bytes=int(staging),
+            note="Two page-locked buffers no-grad chunks' vision rows pass through to the GPU.",
         ),
         MemoryComponent(
             key="checkpoint_snapshot",
@@ -1151,6 +1270,7 @@ def training_host_components(
             key="prefetched_rollout",
             label="Prefetched rollout batch",
             n_bytes=int(prefetched),
+            detail={"images": images, "patches_per_image": rows * cols},
             note="The next update's tokens, masks and fp32 pixels while this one learns.",
         ),
     )
@@ -1197,6 +1317,7 @@ def _activation_workspace_components(
                 "backward_peak": int(peak.backward_peak),
                 "loss_peak": int(peak.loss_peak),
                 "nograd_peak": int(peak.nograd_peak),
+                "segment_balance_peak": int(peak.balance_peak),
                 "optimizer_peak": int(peak.optimizer_peak),
                 "checkpoint_boundaries": int(peak.saved),
                 "block_recompute": int(peak.recompute),
@@ -1205,12 +1326,14 @@ def _activation_workspace_components(
                 "loss_hidden_state": int(peak.loss_hidden),
                 "lora_fp32_input_casts": int(peak.lora_casts),
                 "lora_dropout": int(peak.lora_dropout),
+                "vision_tower_lora": int(peak.tower_lora),
+                "nograd_vision_rows": int(peak.nograd_pixels),
                 "backward_grads": int(adapters.grads),
                 "step_grads": int(adapters.step_grads),
             },
             note=(
-                "Peak of the gradient micro-batch pass vs the fused no-grad "
-                "logprob pass (actor+reference rows)."
+                "Peak of the gradient micro-batch pass vs one no-grad logprob "
+                "micro-batch forward and segment-row balancing."
             ),
         ),
         MemoryComponent(
@@ -1244,6 +1367,7 @@ def _runtime_components(
     rollout: int,
     overhead: int,
     reserve: float,
+    gather_pool: float,
     job_overhead: int,
     lib_overhead: int,
     distributed_overhead: int,
@@ -1279,10 +1403,15 @@ def _runtime_components(
         MemoryComponent(
             key="allocator_reserve",
             label="Caching-allocator slack",
-            n_bytes=max(int(reserve), 0),
+            n_bytes=max(int(reserve + gather_pool), 0),
+            detail={
+                "compute_stream": int(reserve),
+                "all_gather_pool": int(gather_pool),
+            },
             note=(
                 "PyTorch reserves more than it allocates: segment rounding plus "
-                "blocks it cannot reuse for a differently-shaped request."
+                "blocks it cannot reuse for a differently-shaped request. FSDP's "
+                "all-gather stream keeps a pool of its own."
             ),
         ),
     )
@@ -1309,7 +1438,6 @@ def training_breakdown(
     seq_len = settings.max_model_len
     warnings = training_warnings(counts, settings)
     shards = settings.shard_gpus
-    base = trainer_base_bytes(model, settings, counts, shards)
     adapters = adapter_state(arch, settings, shards)
     peak = activation_peak(
         arch,
@@ -1320,6 +1448,7 @@ def training_breakdown(
         eager_mamba_scan=arch.eager_mamba_scan_family
         and device.compute_capability == EAGER_MAMBA_SCAN_CAPABILITY,
     )
+    base = trainer_base_bytes(model, settings, counts, shards, peak.activations)
     # Held per-update tensors: completions, masks, old/ref/sampling logprobs,
     # advantages.
     rollout = 6 * settings.trajectories * seq_len * 4
@@ -1341,8 +1470,8 @@ def training_breakdown(
         + peak.logits
         + peak.adam
     )
-    reserve = formulas.allocator_reserve_bytes(
-        torch_side, n_ranks=shards, sharded=settings.fsdp is not None and shards > 1
+    reserve, gather_pool = trainer_allocator_slack(
+        arch, settings, counts, shards, torch_side
     )
     components = (
         _model_state_components(base, adapters, peak)
@@ -1354,6 +1483,7 @@ def training_breakdown(
             rollout,
             overhead,
             reserve,
+            gather_pool,
             job_overhead,
             lib_overhead,
             distributed_overhead,

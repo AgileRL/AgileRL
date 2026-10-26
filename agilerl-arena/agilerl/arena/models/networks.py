@@ -896,7 +896,9 @@ class VLLMConfig(BaseModel):
         description=(
             "Skip loading the vision or audio towers in the generation copy, "
             "freeing their memory. True skips every tower; a list names the "
-            "modalities to drop (image, video, audio)."
+            "modalities to drop (image, video, audio). Unset is true for a "
+            "text-only environment (modality text, or dataset rows) on a "
+            "vision-language catalog model without tower LoRA, else false."
         ),
     )
     stop_sequences: list[str] | None = Field(
@@ -934,13 +936,13 @@ class VLLMConfig(BaseModel):
     )
 
 
-def default_colocated_vllm_config() -> VLLMConfig:
-    """The vLLM settings a colocated run gets when the manifest names none.
+def default_rollout_vllm_config() -> VLLMConfig:
+    """The vLLM settings a rollout run gets when the manifest names none.
 
     Colocated generation shares the trainer's GPU, so it sleeps between calls;
     sleeping is what affords the 0.9 memory utilization.
 
-    :returns: The default colocated engine config.
+    :returns: The default engine config.
     :rtype: VLLMConfig
     """
     return VLLMConfig(

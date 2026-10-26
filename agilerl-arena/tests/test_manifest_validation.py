@@ -33,7 +33,10 @@ from agilerl.arena.models import (
     manifest_schema,
 )
 from agilerl.arena.models.algorithms import RolloutLLMSpec
+from agilerl.arena.models.algorithms.rollout_llm import records_sampling_supports
 from agilerl.arena.models.env import LLMEnvType
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
+from agilerl.arena.models.networks import VllmModality
 from agilerl.arena.models.schema import (
     LORA_CONFIG_REF,
     _inline_lora_config_inplace,
@@ -626,6 +629,283 @@ class TestTowerLoraServed:
     def test_stripped_towers_reject_tower_targets(self) -> None:
         with pytest.raises(ValidationError, match="strip_multimodal_towers to false"):
             TrainingManifest.model_validate(self._super_vl(True))
+
+
+class TestRecordsSamplingSupports:
+    def test_top_k_sampling_records_supports(self) -> None:
+        assert records_sampling_supports(1.0, 20, 1.0, 0.05, r"\\boxed\{\d+\}")
+
+    def test_unfiltered_sampling_records_none(self) -> None:
+        assert not records_sampling_supports(0.9, 0, 1.0, 0.0, None)
+
+    def test_greedy_top_k_sampling_records_none(self) -> None:
+        assert not records_sampling_supports(0.0, 20, 1.0, 0.0, None)
+
+
+class TestRolloutLLMSpecSamplingSupport:
+    @pytest.mark.parametrize(
+        "sampling",
+        [
+            {},
+            {"top_k": 20, "top_p": 0.95, "min_p": 0.05},
+            {"top_k": 0, "top_p": 1.0, "min_p": 0.0},
+            {"top_k": 20, "constrain_answer_pattern": r"\\boxed\{\d+\}"},
+        ],
+    )
+    def test_sampling_with_a_reported_support_validates(self, sampling: dict) -> None:
+        validated = TrainingManifest.model_validate(manifest(GRPO, algorithm=sampling))
+
+        assert validated.algorithm.top_k == sampling.get("top_k", 50)
+
+    @pytest.mark.parametrize(
+        ("sampling", "narrowed"),
+        [
+            ({"top_k": 0, "top_p": 0.9}, "top_p"),
+            ({"top_k": 0, "min_p": 0.1}, "min_p"),
+            (
+                {"top_k": 0, "constrain_answer_pattern": r"\\boxed\{\d+\}"},
+                "constrain_answer_pattern",
+            ),
+            ({"top_k": 20, "temperature": 0.0, "top_p": 0.9}, "top_p"),
+        ],
+    )
+    def test_a_narrowed_distribution_without_a_reported_support_is_rejected(
+        self, sampling: dict, narrowed: str
+    ) -> None:
+        with pytest.raises(
+            ValidationError, match=f"{narrowed} narrows the distribution rollout"
+        ):
+            TrainingManifest.model_validate(manifest(GRPO, algorithm=sampling))
+
+
+class TestTrainingManifestMutatedSamplingSupport:
+    def test_top_p_mutation_validates_with_a_reported_support(self) -> None:
+        doc = manifest(
+            GRPO,
+            mutation={"rl_hp_selection": {"top_p": {"min": 0.8, "max": 1.0}}},
+        )
+
+        validated = TrainingManifest.model_validate(doc)
+
+        assert validated.mutation.rl_hp_selection["top_p"].min == 0.8
+
+    def test_top_p_mutation_without_a_reported_support_is_rejected(self) -> None:
+        doc = manifest(
+            GRPO,
+            algorithm={"top_k": 0},
+            mutation={"rl_hp_selection": {"top_p": {"min": 0.8, "max": 1.0}}},
+        )
+
+        with pytest.raises(
+            ValidationError,
+            match=r"mutation\.rl_hp_selection can reach sampling rollout cannot "
+            r"score: top_p narrows",
+        ):
+            TrainingManifest.model_validate(doc)
+
+    def test_temperature_mutation_to_zero_with_top_k_is_rejected(self) -> None:
+        doc = manifest(
+            GRPO,
+            algorithm={"top_k": 20},
+            mutation={"rl_hp_selection": {"temperature": {"min": 0.0, "max": 1.2}}},
+        )
+
+        with pytest.raises(
+            ValidationError, match=r"temperature min 0\.0 must be > 0 with top_k=20"
+        ):
+            TrainingManifest.model_validate(doc)
+
+    def test_temperature_mutation_to_zero_without_top_k_validates(self) -> None:
+        doc = manifest(
+            GRPO,
+            algorithm={"top_k": 0},
+            mutation={"rl_hp_selection": {"temperature": {"min": 0.0, "max": 1.2}}},
+        )
+
+        validated = TrainingManifest.model_validate(doc)
+
+        assert validated.mutation.rl_hp_selection["temperature"].min == 0.0
+
+
+def env_rollout(
+    environment: dict, model: str = "Qwen/Qwen3.5-0.8B", **overrides: dict
+) -> dict:
+    """GRPO over an env_url rollout serving *model*."""
+    doc = manifest(GRPO, **overrides)
+    doc["network"]["pretrained_model_name_or_path"] = model
+    doc["environment"] = {
+        "env_type": "rollout",
+        "env_url": "http://env",
+        "max_turns": 1,
+        **environment,
+    }
+    return doc
+
+
+def resolved_strip(doc: dict) -> bool | list[VllmModality]:
+    algorithm = TrainingManifest.model_validate(doc).algorithm
+    assert isinstance(algorithm, RolloutLLMSpec)
+    assert algorithm.vllm_config is not None
+    return algorithm.vllm_config.strip_multimodal_towers
+
+
+class TestStripMultimodalTowersResolution:
+    def test_text_env_on_a_vl_model_strips_the_towers(self) -> None:
+        # Arrange
+        doc = env_rollout({"modality": "text"})
+
+        # Act
+        payload = TrainingManifest.get_validated(doc)
+
+        # Assert
+        assert payload["algorithm"]["vllm_config"]["strip_multimodal_towers"] is True
+        assert payload["environment"]["modality"] == "text"
+
+    def test_async_text_env_without_vllm_config_strips_the_towers(self) -> None:
+        # Arrange
+        doc = env_rollout(
+            {"modality": "text", "max_turns": 20},
+            model="Qwen/Qwen3.6-35B-A3B",
+            training={"rollout_mode": "async", "rollout_engines_per_agent": 1},
+            replay_buffer={"kind": "llm"},
+        )
+
+        # Act
+        payload = TrainingManifest.get_validated(doc)
+
+        # Assert
+        assert payload["training"]["rollout_mode"] == "async"
+        assert payload["algorithm"]["vllm_config"]["strip_multimodal_towers"] is True
+        assert payload["algorithm"]["vllm_config"]["max_num_seqs"] == 16
+        assert payload["algorithm"]["vllm_config"]["gpu_memory_utilization"] == 0.9
+
+    def test_dataset_rollout_on_a_vl_model_strips_the_towers(self) -> None:
+        doc = manifest(
+            GRPO, network={"pretrained_model_name_or_path": "Qwen/Qwen3.5-0.8B"}
+        )
+
+        assert resolved_strip(doc) is True
+
+    def test_tower_lora_keeps_the_towers(self) -> None:
+        doc = env_rollout(
+            {"modality": "text"},
+            model="nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
+            network={
+                "lora_config": {
+                    "target_modules": ["q_proj"],
+                    "tower_target_modules": ["q_proj"],
+                }
+            },
+        )
+
+        assert resolved_strip(doc) is False
+
+    def test_image_fields_without_modality_keep_the_towers(self) -> None:
+        doc = env_rollout({"screenshot_field": "screenshot"})
+
+        assert resolved_strip(doc) is False
+
+    @pytest.mark.parametrize("modality", [None, "vision"])
+    def test_unknown_or_vision_env_keeps_the_towers(self, modality: str | None) -> None:
+        doc = env_rollout({"modality": modality})
+
+        assert resolved_strip(doc) is False
+
+    def test_vision_model_strips_by_its_modalities(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        hub_id = "Qwen/Qwen3.5-0.8B"
+        monkeypatch.setitem(
+            SUPPORTED_MODEL_INFO,
+            hub_id,
+            SUPPORTED_MODEL_INFO[hub_id].model_copy(
+                update={"language_model_prefix": None}
+            ),
+        )
+        doc = env_rollout({"modality": "text"}, model=hub_id)
+
+        # Act
+        strip = resolved_strip(doc)
+
+        # Assert
+        assert strip is True
+
+    def test_text_only_model_is_left_unstripped(self) -> None:
+        doc = env_rollout({"modality": "text"}, model="Qwen/Qwen2.5-0.5B-Instruct")
+
+        assert resolved_strip(doc) is False
+
+    def test_explicit_false_wins_over_a_text_env(self) -> None:
+        doc = env_rollout(
+            {"modality": "text"},
+            algorithm={"vllm_config": {"strip_multimodal_towers": False}},
+        )
+
+        assert resolved_strip(doc) is False
+
+    def test_text_modality_rejects_image_fields(self) -> None:
+        doc = env_rollout({"modality": "text", "screenshot_field": "screenshot"})
+
+        with pytest.raises(ValidationError, match="modality text means the env sends"):
+            TrainingManifest.model_validate(doc)
+
+    def test_vision_modality_rejects_a_dataset_rollout(self) -> None:
+        doc = manifest(GRPO, environment={"modality": "vision"})
+
+        with pytest.raises(ValidationError, match="modality vision needs image"):
+            TrainingManifest.model_validate(doc)
+
+
+class TestImageTowerServed:
+    def test_image_env_keeps_the_towers_it_names(self) -> None:
+        doc = env_rollout(
+            {"screenshot_field": "screenshot"},
+            algorithm={"vllm_config": {"strip_multimodal_towers": ["video"]}},
+        )
+
+        assert resolved_strip(doc) == ["video"]
+
+    def test_vision_env_rejects_stripped_towers(self) -> None:
+        doc = env_rollout(
+            {"modality": "vision"},
+            algorithm={"vllm_config": {"strip_multimodal_towers": True}},
+        )
+
+        with pytest.raises(ValidationError, match="needs its image tower"):
+            TrainingManifest.model_validate(doc)
+
+    def test_image_fields_reject_a_stripped_image_tower(self) -> None:
+        doc = env_rollout(
+            {"goal_images_field": "goal_images"},
+            algorithm={"vllm_config": {"strip_multimodal_towers": ["image"]}},
+        )
+
+        with pytest.raises(ValidationError, match="needs its image tower"):
+            TrainingManifest.model_validate(doc)
+
+
+class TestAsyncStopSequences:
+    def test_colocated_rollout_keeps_stop_sequences(self) -> None:
+        doc = env_rollout(
+            {"modality": "text"},
+            algorithm={"vllm_config": {"stop_sequences": ["</answer>"]}},
+        )
+
+        payload = TrainingManifest.get_validated(doc)
+
+        assert payload["algorithm"]["vllm_config"]["stop_sequences"] == ["</answer>"]
+
+    def test_async_rollout_rejects_stop_sequences(self) -> None:
+        doc = env_rollout(
+            {"modality": "text"},
+            algorithm={"vllm_config": {"stop_sequences": ["</answer>"]}},
+            training={"rollout_mode": "async", "rollout_engines_per_agent": 1},
+            replay_buffer={"kind": "llm"},
+        )
+
+        with pytest.raises(ValidationError, match="stop_sequences is not supported"):
+            TrainingManifest.model_validate(doc)
 
 
 class TestGroupReplay:

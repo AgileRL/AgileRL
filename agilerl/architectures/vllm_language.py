@@ -39,6 +39,17 @@ def nested_language_config(config: object) -> object:
     return config
 
 
+def serves_images(strip_multimodal_towers: bool | list[VllmModality]) -> bool:
+    """Whether an engine with these towers stripped takes image prompts.
+
+    :param strip_multimodal_towers: ``vllm_config.strip_multimodal_towers``.
+    :type strip_multimodal_towers: bool | list[VllmModality]
+    """
+    if strip_multimodal_towers is True:
+        return False
+    return "image" not in (strip_multimodal_towers or ())
+
+
 def apply_multimodal_engine_kwargs(
     kwargs: dict[str, Any],
     strip_multimodal_towers: bool | list[VllmModality],
@@ -63,6 +74,30 @@ def apply_multimodal_engine_kwargs(
             **kwargs.get("limit_mm_per_prompt", {}),
             **dict.fromkeys(strip_multimodal_towers, 0),
         }
+
+
+def unbuilt_tower_modules(
+    strip_multimodal_towers: bool | list[VllmModality],
+    runtime: ModelRuntimeConfig,
+) -> list[str]:
+    """Trainer tower and connector modules vLLM leaves unbuilt under *strip_multimodal_towers*.
+
+    :param strip_multimodal_towers: ``True`` serves the language model only; a
+        list names the modalities to drop.
+    :type strip_multimodal_towers: bool | list[VllmModality]
+    :param runtime: Family runtime mapping tower modules to their modalities.
+    :type runtime: ModelRuntimeConfig
+    :return: Module names whose modalities are all stripped, sorted.
+    :rtype: list[str]
+    """
+    if strip_multimodal_towers is True:
+        return sorted(runtime.tower_modalities)
+    stripped = set(strip_multimodal_towers or ())
+    return sorted(
+        name
+        for name, modalities in runtime.tower_modalities.items()
+        if modalities <= stripped
+    )
 
 
 def apply_tower_connector_lora_engine_kwargs(

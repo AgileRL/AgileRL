@@ -376,7 +376,8 @@ class TestGRPOGetActionActorDevice:
         captured: list = []
 
         # Act
-        with _patch_hf_generate_path("agilerl.algorithms.grpo", captured):
+        agent._generate_with_hf = MethodType(LLMAlgorithm._generate_with_hf, agent)
+        with _patch_hf_generate_path("agilerl.algorithms.core.base", captured):
             GRPO.get_action(agent, _dummy_prompts(), training=False)
 
         # Assert — prompts sent to self.device, not the CPU param device
@@ -388,7 +389,8 @@ class TestGRPOGetActionActorDevice:
         captured: list = []
 
         # Act
-        with _patch_hf_generate_path("agilerl.algorithms.grpo", captured):
+        agent._generate_with_hf = MethodType(LLMAlgorithm._generate_with_hf, agent)
+        with _patch_hf_generate_path("agilerl.algorithms.core.base", captured):
             GRPO.get_action(agent, _dummy_prompts(), training=False)
 
         # Assert — prompts sent to the param device (CPU), not self.device

@@ -23,7 +23,7 @@ from agilerl.distributed import collective_device, is_distributed
 from agilerl.utils.llm_utils import attention_mask_from_padded_ids
 from agilerl.utils.segment_rows import SegmentRows, is_per_token
 
-TOKENS, ACTION_MASK, SAMPLING_LOGPS, TURN_IDS = range(4)
+TOKENS, ACTION_MASK, SAMPLING_LOGPS, SAMPLING_SUPPORTS, TURN_IDS = range(5)
 """Positions of a row's first flat parts; ``TURN_IDS`` only when the rows carry
 turn ids. Row values and vision rows follow."""
 
@@ -38,6 +38,8 @@ class RankRows:
     :param starts: First episode token per row.
     :param image_counts: Vision rows per row.
     :param logp_sizes: Sampling log-probs per row, ``-1`` where a row has none.
+    :param support_shapes: ``(n, K)`` sampling supports per row, ``None``
+        where a row has none.
     :param num_episodes: Episodes in the rank's batch.
     :param value_shapes: Shape of one row of each row value, ``None`` for a
         value per action position.
@@ -46,6 +48,7 @@ class RankRows:
     :param has_logps: Whether the rows carry sampling log-probs.
     :param pixel_shape: Shape of one vision row, or ``None`` in a text batch.
     :param pixel_dtype: Dtype of the vision rows, or ``None`` in a text batch.
+    :param has_supports: Whether the rows carry sampling supports.
     """
 
     costs: list[int]
@@ -54,6 +57,7 @@ class RankRows:
     starts: list[int]
     image_counts: list[int]
     logp_sizes: list[int]
+    support_shapes: list[tuple[int, int] | None]
     num_episodes: int
     value_shapes: tuple[tuple[int, ...] | None, ...]
     value_dtypes: tuple[torch.dtype, ...]
@@ -61,6 +65,7 @@ class RankRows:
     has_logps: bool
     pixel_shape: tuple[int, ...] | None
     pixel_dtype: torch.dtype | None
+    has_supports: bool
 
     @property
     def first_value_part(self) -> int:
@@ -70,10 +75,11 @@ class RankRows:
     def part_dtypes(self) -> list[torch.dtype]:
         """Dtype of each flat part a row travels as.
 
-        :return: Dtypes of tokens, action mask and sampling log-probs, then
-            turn ids when carried, each row value, and vision rows when carried.
+        :return: Dtypes of tokens, action mask, sampling log-probs and sampling
+            supports, then turn ids when carried, each row value, and vision
+            rows when carried.
         """
-        dtypes = [torch.long, torch.uint8, torch.float32]
+        dtypes = [torch.long, torch.uint8, torch.float32, torch.int32]
         if self.has_turn_ids:
             dtypes.append(torch.long)
         dtypes.extend(self.value_dtypes)
@@ -88,7 +94,13 @@ class RankRows:
         :return: Element count per part.
         """
         length = self.lengths[row]
-        sizes = [length, length - 1, max(self.logp_sizes[row], 0)]
+        support_shape = self.support_shapes[row]
+        sizes = [
+            length,
+            length - 1,
+            max(self.logp_sizes[row], 0),
+            0 if support_shape is None else int(np.prod(support_shape)),
+        ]
         if self.has_turn_ids:
             sizes.append(length - 1)
         sizes.extend(
@@ -222,7 +234,13 @@ def balance_rows_across_ranks(
         world_size if shard_group_size is None else shard_group_size,
     )
     local_parts = _local_parts(rows, train_rows, values, local)
-    received = _exchange_parts(local_parts, layouts, plan, rank)
+    received = _exchange_parts(
+        local_parts,
+        layouts,
+        plan,
+        rank,
+        None if rows.pixel_values is None else rows.pixel_values.device,
+    )
     parts = [
         local_parts[row] if source == rank else received[source].pop(0)
         for source, row in plan[rank]
@@ -255,6 +273,7 @@ def _rank_rows(
     """
     counts = rows.pixel_image_counts or [0] * len(rows.row_episodes)
     logps = rows.sampling_logps
+    supports = rows.sampling_supports
     pixels = rows.pixel_values
     real_tokens = attention_mask_from_padded_ids(
         rows.token_ids[train_rows], pad_token_id
@@ -269,6 +288,12 @@ def _rank_rows(
             -1 if logps is None or logps[row] is None else int(logps[row].numel())
             for row in train_rows
         ],
+        support_shapes=[
+            None
+            if supports is None or (row_supports := supports[row]) is None
+            else (int(row_supports.shape[0]), int(row_supports.shape[1]))
+            for row in train_rows
+        ],
         num_episodes=int(rows.row_episodes.max(initial=-1)) + 1,
         value_shapes=tuple(
             None if is_per_token(value) else tuple(value.shape[1:]) for value in values
@@ -278,6 +303,7 @@ def _rank_rows(
         has_logps=logps is not None,
         pixel_shape=tuple(pixels.shape[1:]) if pixels is not None else None,
         pixel_dtype=pixels.dtype if pixels is not None else None,
+        has_supports=supports is not None,
     )
 
 
@@ -298,13 +324,20 @@ def _local_parts(
     counts = rows.pixel_image_counts or [0] * len(rows.row_episodes)
     image_offsets = np.cumsum([0, *counts])
     no_logps = rows.action_masks.new_zeros(0, dtype=torch.float32)
+    no_supports = rows.action_masks.new_zeros(0, dtype=torch.int32)
     all_parts = []
     for row, length in zip(train_rows, layout.lengths, strict=True):
         logps = rows.sampling_logps[row] if rows.sampling_logps is not None else None
+        supports = (
+            rows.sampling_supports[row] if rows.sampling_supports is not None else None
+        )
         parts = [
             rows.token_ids[row, :length].long(),
             rows.action_masks[row, : length - 1].to(torch.uint8),
             logps.float() if logps is not None else no_logps,
+            supports.to(torch.int32).reshape(-1)
+            if supports is not None
+            else no_supports,
         ]
         if rows.turn_ids is not None:
             parts.append(rows.turn_ids[row, : length - 1].long())
@@ -324,39 +357,106 @@ def _exchange_parts(
     layouts: list[RankRows],
     plan: list[list[tuple[int, int]]],
     rank: int,
+    pixel_device: torch.device | None,
 ) -> dict[int, list[list[torch.Tensor]]]:
     """Send each row to the rank that runs it and receive this rank's rows.
 
     One point-to-point message per part kind and peer; both sides size it
-    from the layouts, and skip it when it is empty.
+    from the layouts, and skip it when it is empty. Vision rows then travel
+    one row per peer and direction at a time (:func:`_exchange_vision_rows`).
 
     :param local_parts: Flat parts of this rank's training rows.
     :param layouts: Every rank's layout.
     :param plan: Per destination rank, its rows as ``(source rank, source row)``.
     :param rank: This rank.
+    :param pixel_device: Device of this rank's vision rows, or ``None`` in a
+        text batch.
     :return: Per source rank, the flat parts of the rows it sent, in ``plan`` order.
     """
     device = collective_device()
     dtypes = layouts[rank].part_dtypes()
+    # Vision rows are the last part when the rows carry them.
+    num_kinds = len(dtypes) - int(pixel_device is not None)
     ops = []
     received: dict[int, list[list[torch.Tensor]]] = {}
+    outgoing: dict[int, list[torch.Tensor]] = {}
+    incoming: dict[int, list[int]] = {}
     for peer in range(len(layouts)):
         if peer == rank:
             continue
         sent = [local_parts[row] for source, row in plan[peer] if source == rank]
-        ops.extend(_send_ops(sent, len(dtypes), peer, device))
+        ops.extend(_send_ops(sent, num_kinds, peer, device))
         sizes = [
             layouts[peer].part_sizes(row)
             for source, row in plan[rank]
             if source == peer
         ]
         if sizes:
-            recv_ops, received[peer] = _recv_ops(sizes, dtypes, peer, device)
+            recv_ops, received[peer] = _recv_ops(
+                sizes, dtypes[:num_kinds], peer, device
+            )
             ops.extend(recv_ops)
+        if pixel_device is not None:
+            outgoing[peer] = [parts[-1] for parts in sent]
+            incoming[peer] = [row_sizes[-1] for row_sizes in sizes]
+    _run_p2p(ops)
+    if pixel_device is not None:
+        _exchange_vision_rows(
+            outgoing, incoming, received, dtypes[-1], device, pixel_device
+        )
+    return received
+
+
+def _exchange_vision_rows(
+    outgoing: dict[int, list[torch.Tensor]],
+    incoming: dict[int, list[int]],
+    received: dict[int, list[list[torch.Tensor]]],
+    dtype: torch.dtype,
+    device: str,
+    pixel_device: torch.device,
+) -> None:
+    """Send and receive vision rows in rounds of one row per peer and direction.
+
+    A round holds at most one row per peer each way on ``device``. Each
+    received row is appended to its row's parts in ``received`` on
+    ``pixel_device`` before the next round starts.
+
+    :param outgoing: Per peer, the flat vision rows of each row it receives.
+    :param incoming: Per peer, the vision row elements of each row it sends.
+    :param received: Per source rank, the parts of each received row.
+    :param dtype: Dtype of the vision rows.
+    :param device: Device the collective runs on.
+    :param pixel_device: Device this rank keeps its vision rows on.
+    """
+    rounds = max(
+        (len(rows) for rows in (*outgoing.values(), *incoming.values())), default=0
+    )
+    for index in range(rounds):
+        ops = [
+            dist.P2POp(dist.isend, rows[index].to(device), peer)
+            for peer, rows in outgoing.items()
+            if index < len(rows) and rows[index].numel()
+        ]
+        arrivals = [
+            (peer, torch.empty(sizes[index], dtype=dtype, device=device))
+            for peer, sizes in incoming.items()
+            if index < len(sizes)
+        ]
+        ops.extend(
+            dist.P2POp(dist.irecv, buffer, peer)
+            for peer, buffer in arrivals
+            if buffer.numel()
+        )
+        _run_p2p(ops)
+        for peer, buffer in arrivals:
+            received[peer][index].append(buffer.to(pixel_device))
+
+
+def _run_p2p(ops: list[dist.P2POp]) -> None:
+    """Run point-to-point ops and wait for them."""
     if ops:
         for request in dist.batch_isend_irecv(ops):
             request.wait()
-    return received
 
 
 def _send_ops(
@@ -473,6 +573,16 @@ def _assemble(
             part if layouts[source].logp_sizes[row] >= 0 else None
             for part, (source, row) in zip(columns[SAMPLING_LOGPS], plan, strict=True)
         ]
+    sampling_supports = None
+    if any(rank_rows.has_supports for rank_rows in layouts):
+        sampling_supports = [
+            None
+            if (shape := layouts[source].support_shapes[row]) is None
+            else part.reshape(shape)
+            for part, (source, row) in zip(
+                columns[SAMPLING_SUPPORTS], plan, strict=True
+            )
+        ]
     starts = np.array([layouts[source].starts[row] for source, row in plan])
     lengths = np.array([layouts[source].lengths[row] for source, row in plan])
     balanced = SegmentRows(
@@ -488,5 +598,6 @@ def _assemble(
         sampling_logps=sampling_logps,
         pixel_values=pixel_values,
         pixel_image_counts=image_counts,
+        sampling_supports=sampling_supports,
     )
     return balanced, values
