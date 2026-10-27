@@ -16,8 +16,10 @@ import pytest
 from click.testing import CliRunner
 
 from agilerl.arena.cli import (
+    CLI_PLUGIN_GROUP,
     _redact_agent_rows_for_display,
     arena_client,
+    load_cli_plugins,
     main,
 )
 from agilerl.arena.config import CommandConfig, build_client
@@ -261,6 +263,62 @@ class TestMainGroup:
         with patch("agilerl.arena.config.build_client"):
             result = runner.invoke(main, ["--request-timeout", "42", "_test_ctx"])
         assert "timeout=42" in result.output
+
+
+class FakeEntryPoint:
+    def __init__(self, register):
+        self._register = register
+
+    def load(self):
+        return self._register
+
+
+class TestLoadCliPlugins:
+    def test_registers_plugin_commands_on_the_group(self, runner, monkeypatch):
+        # Arrange
+        def register(group: click.Group) -> None:
+            @group.command("hello")
+            def hello() -> None:
+                click.echo("hello from plugin")
+
+        requested = []
+
+        def fake_entry_points(*, group):
+            requested.append(group)
+            return [FakeEntryPoint(register)]
+
+        monkeypatch.setattr("agilerl.arena.cli.entry_points", fake_entry_points)
+        group = click.Group("arena")
+
+        # Act
+        load_cli_plugins(group)
+        result = runner.invoke(group, ["hello"])
+
+        # Assert
+        assert requested == [CLI_PLUGIN_GROUP]
+        assert result.exit_code == 0
+        assert result.output == "hello from plugin\n"
+
+    def test_no_plugins_leaves_the_group_unchanged(self, monkeypatch):
+        monkeypatch.setattr("agilerl.arena.cli.entry_points", lambda *, group: [])
+        group = click.Group("arena")
+
+        load_cli_plugins(group)
+
+        assert group.commands == {}
+
+    def test_plugin_error_propagates(self, monkeypatch):
+        def broken(group: click.Group) -> None:
+            msg = "plugin failed to register"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(
+            "agilerl.arena.cli.entry_points",
+            lambda *, group: [FakeEntryPoint(broken)],
+        )
+
+        with pytest.raises(RuntimeError, match="plugin failed to register"):
+            load_cli_plugins(click.Group("arena"))
 
 
 class TestManifestCommands:
