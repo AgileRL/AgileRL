@@ -170,10 +170,11 @@ LAYOUT_MEMO = LayoutMemo()
 def packed_layout(position_ids: torch.Tensor) -> PackedLayout | None:
     """Document layout of packed rows, or None when every row holds one document.
 
-    A document starts wherever ``position_ids`` does not step by one, the same
-    rule transformers uses to detect packed rows for attention masks. The
-    result is memoized on the ``position_ids`` tensor, so repeat calls within
-    one forward do not sync with the device.
+    A document starts at each row start and wherever ``position_ids`` is 0, the
+    rule FlashAttention varlen uses. Pad tokens of a padded row repeat one
+    position, so they extend the document before them instead of each becoming
+    a document. The result is memoized on the ``position_ids`` tensor, so
+    repeat calls within one forward do not sync with the device.
 
     :param position_ids: ``(B, L)`` positions; each packed document restarts at 0.
     :type position_ids: torch.Tensor
@@ -183,8 +184,8 @@ def packed_layout(position_ids: torch.Tensor) -> PackedLayout | None:
     hit, layout = LAYOUT_MEMO.lookup(position_ids)
     if hit:
         return layout
-    first = position_ids[:, :1] - 1
-    starts = torch.diff(position_ids, prepend=first, dim=-1) != 1
+    starts = position_ids == 0
+    starts[:, 0] = False
     row_starts = starts.clone()
     row_starts[:, 0] = True
     # One device sync for the whole layout.

@@ -433,17 +433,40 @@ def resolve_micro_batch_rows(spec: LLMAlgorithmSpec, n_training_gpus: int) -> in
     return int(micro)
 
 
+def _grpo_fuses_above_token_level(spec: GRPOSpec) -> bool:
+    """Whether GRPO runs its fused Liger kernel at turn or trajectory level.
+
+    Mirrors ``GRPO._liger_level_supported`` and ``GRPO._liger_path_selected``.
+    Every other combination runs the standard path, which is memory-bounded.
+    """
+    level = (
+        "trajectory"
+        if spec.loss_type == "gspo"
+        else spec.importance_sampling_level or "token"
+    )
+    if level != "trajectory" or spec.loss_type == "cispo":
+        return False
+    if spec.advantage_granularity == "turn":
+        return False
+    return not (
+        spec.vllm_importance_sampling_correction
+        or spec.off_policy_token_mask_bounds is not None
+        or spec.off_policy_sequence_mask_threshold is not None
+    )
+
+
 def _reject_unbounded_liger_loss(spec: LLMAlgorithmSpec) -> None:
-    """Refuse Liger loss outside token-level importance sampling."""
+    """Refuse Liger loss where the fused kernel runs above token level."""
     # Above token level the kernel takes whole sequences per chunk, unbounded.
-    # gspo forces trajectory level.
     if not spec.use_liger_loss:
         return
-    is_gspo = isinstance(spec, GRPOSpec) and spec.loss_type == "gspo"
-    level: str | None = None
-    if isinstance(spec, (GRPOSpec, LLMPPOSpec, LLMREINFORCESpec)):
-        level = spec.importance_sampling_level
-    if is_gspo or level in ("turn", "trajectory"):
+    if isinstance(spec, GRPOSpec):
+        unbounded = _grpo_fuses_above_token_level(spec)
+    elif isinstance(spec, (LLMPPOSpec, LLMREINFORCESpec)):
+        unbounded = spec.importance_sampling_level in ("turn", "trajectory")
+    else:
+        unbounded = False
+    if unbounded:
         msg = (
             "use_liger_loss with turn/trajectory importance sampling is not "
             "memory-bounded; this estimator sizes the chunked token-level path."

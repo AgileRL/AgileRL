@@ -384,14 +384,63 @@ class TestTrainingSettings:
     @pytest.mark.parametrize(
         "algorithm",
         [
-            {"use_liger_loss": True, "importance_sampling_level": "turn"},
-            {"use_liger_loss": True, "importance_sampling_level": "trajectory"},
-            {"use_liger_loss": True, "loss_type": "gspo"},
+            {"importance_sampling_level": "trajectory"},
+            {"loss_type": "gspo"},
         ],
     )
-    def test_unbounded_liger_loss_is_refused(self, algorithm):
+    def test_unbounded_grpo_liger_loss_is_refused(self, algorithm):
+        doc = manifest(
+            algorithm={
+                "use_liger_loss": True,
+                "vllm_importance_sampling_correction": False,
+                "off_policy_token_mask_bounds": None,
+                "off_policy_sequence_mask_threshold": None,
+                **algorithm,
+            }
+        )
+
         with pytest.raises(ValueError, match="chunked token-level"):
-            training_settings_from_manifest(manifest(algorithm=algorithm))
+            training_settings_from_manifest(doc)
+
+    @pytest.mark.parametrize("level", ["turn", "trajectory"])
+    def test_unbounded_llmppo_liger_loss_is_refused(self, level):
+        doc = manifest()
+        doc["algorithm"] = {
+            "name": "LLMPPO",
+            "batch_size": 2,
+            "micro_batch_size_per_gpu": 1,
+            "use_liger_loss": True,
+            "importance_sampling_level": level,
+        }
+
+        with pytest.raises(ValueError, match="chunked token-level"):
+            training_settings_from_manifest(doc)
+
+    @pytest.mark.parametrize(
+        "algorithm",
+        [
+            {"loss_type": "gspo", "vllm_importance_sampling_correction": True},
+            {"loss_type": "gspo", "off_policy_token_mask_bounds": (0.5, 5.0)},
+            {"loss_type": "gspo", "off_policy_sequence_mask_threshold": 0.03},
+            {"loss_type": "gspo", "advantage_granularity": "turn"},
+            {"loss_type": "cispo", "importance_sampling_level": "trajectory"},
+            {"importance_sampling_level": "turn"},
+        ],
+    )
+    def test_grpo_liger_loss_on_the_standard_path_passes(self, algorithm):
+        doc = manifest(
+            algorithm={
+                "use_liger_loss": True,
+                "vllm_importance_sampling_correction": False,
+                "off_policy_token_mask_bounds": None,
+                "off_policy_sequence_mask_threshold": None,
+                **algorithm,
+            }
+        )
+
+        settings = training_settings_from_manifest(doc)
+
+        assert settings.algorithm == "grpo"
 
     def test_token_level_liger_loss_passes(self):
         settings = training_settings_from_manifest(

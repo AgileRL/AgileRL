@@ -475,6 +475,37 @@ class TestPatchQwenGdnPackedSequences:
             [0] + [1] * 5 + [2] * 6 + [3] * 8,
         ]
 
+    def test_padded_rows_without_a_mask_reach_the_mixer_without_offsets(
+        self, pristine_qwen_gdn_classes, monkeypatch
+    ):
+        # Arrange
+        received = []
+        monkeypatch.setattr(qwen_packed, "_varlen_kernels_ready", lambda: True)
+
+        def unpatched(
+            self, hidden_states, cache_params=None, attention_mask=None, **kwargs
+        ):
+            received.append(kwargs)
+            return hidden_states
+
+        Qwen3_5MoeGatedDeltaNet.forward = unpatched
+        patch_qwen_gdn_packed_sequences(mixer=MIXER_PATH, text_model=TEXT_MODEL_PATH)
+        model = _tiny_qwen_moe().eval()
+        ids, mask = _right_padded_documents()
+        # Trainer convention: real tokens count from 0, pads sit at 1.
+        positions = mask.long().cumsum(-1) - 1
+        positions.masked_fill_(mask == 0, 1)
+
+        # Act
+        with torch.no_grad():
+            model(input_ids=ids, position_ids=positions, use_cache=False)
+
+        # Assert
+        assert received
+        for kwargs in received:
+            assert "seq_idx" not in kwargs
+            assert "cu_seq_lens_q" not in kwargs
+
     def test_varlen_scan_runs_packed_rows_as_one_row(
         self, pristine_qwen_gdn_classes, monkeypatch
     ):
