@@ -1192,10 +1192,10 @@ class ArenaClient:
         resource_id: str | int | None,
         num_nodes: int | None,
         experiment_name: str | None,
-        reward_file: str | os.PathLike[str] | bytes,
+        reward_file: str | os.PathLike[str] | bytes | None,
         completion: str | None,
     ) -> dict[str, tuple[None, str] | tuple[str, BinaryIO | bytes, str]]:
-        """Build multipart form parts for reasoning submit with reward validation."""
+        """Build multipart form parts for a submit; ``reward_file`` adds the reward part."""
         text_fields: dict[str, str | None] = {
             "manifest": json.dumps(manifest),
             "project": project,
@@ -1207,11 +1207,12 @@ class ArenaClient:
         files: dict[str, tuple[None, str] | tuple[str, BinaryIO | bytes, str]] = {
             **multipart_text_fields(text_fields)
         }
-        files["reward_file"] = prepare_file_upload(
-            reward_file,
-            default_name="reward.py",
-            content_type="text/x-python",
-        )
+        if reward_file is not None:
+            files["reward_file"] = prepare_file_upload(
+                reward_file,
+                default_name="reward.py",
+                content_type="text/x-python",
+            )
         return files
 
     def list_experiments(self, project: str | None = None) -> list[dict[str, Any]]:

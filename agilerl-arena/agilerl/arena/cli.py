@@ -9,6 +9,7 @@ import sys
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from importlib.metadata import entry_points
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -1379,8 +1380,24 @@ def projects_get_default(config: CommandConfig) -> None:
         click.echo("No default project set. Use 'arena projects set-default <name>'.")
 
 
+CLI_PLUGIN_GROUP = "agilerl.arena.cli"
+
+
+def load_cli_plugins(group: click.Group) -> None:
+    """Let installed packages add commands to *group*.
+
+    Each entry point in ``agilerl.arena.cli`` names a callable that takes the
+    group, e.g. ``[project.entry-points."agilerl.arena.cli"] my = "pkg.cli:register"``.
+
+    :param group: The CLI group plugins register commands on.
+    """
+    for plugin in entry_points(group=CLI_PLUGIN_GROUP):
+        plugin.load()(group)
+
+
 register_on_prem_manifest_group(main)
 main.add_command(memory_group)
+load_cli_plugins(main)
 
 
 if __name__ == "__main__":
