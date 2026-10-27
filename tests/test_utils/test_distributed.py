@@ -29,7 +29,7 @@ from torch import nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     CheckpointWrapper,
 )
-from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
+from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import FSDPModule
 from torch.distributed.tensor import DTensor
 from torch.nn.utils import clip_grad_norm_
@@ -4121,68 +4121,6 @@ class TestInitEmbedScaleBuffers:
         init_embed_scale_buffers(module)
 
         assert module.embed_scale.is_meta
-
-
-class TestDeferredSplitPassReduceDtype:
-    """Two backward passes over different params of one FSDP unit with deferred sync.
-
-    A split actor/critic learn holds the policy pass's gradients while the
-    value pass runs. Held gradients wait in ``reduce_dtype``; the step
-    boundary then collects them next to the fresh value gradients and
-    reduce-scatter requires one dtype across the unit.
-    """
-
-    def _split_pass_model(self) -> nn.Module:
-        model = nn.Sequential(nn.Linear(8, 8), nn.Linear(8, 8)).to(torch.bfloat16)
-        for param in model.parameters():
-            param.requires_grad_(True)
-        return model
-
-    def _shard_single_unit(self, model: nn.Module, reduce_dtype: str) -> None:
-        # A CPU mesh keeps the test off the default device (MPS on macOS).
-        mesh = DeviceMesh("cpu", [0])
-        apply_fsdp2(
-            model,
-            FSDPConfig(param_persistence_threshold=0, reduce_dtype=reduce_dtype),
-            mesh=mesh,
-        )
-
-    def _run_split_passes(self, model: nn.Module) -> None:
-        # PEFT adapter switching enables one adapter's gradients per pass;
-        # toggling requires_grad reproduces that attribution.
-        inputs = torch.randn(2, 8, dtype=torch.bfloat16)
-        model[1].weight.requires_grad_(False)
-        model[1].bias.requires_grad_(False)
-        model.set_requires_gradient_sync(False, recurse=True)
-        model(inputs).pow(2).mean().backward()
-        model[0].weight.requires_grad_(False)
-        model[0].bias.requires_grad_(False)
-        model[1].weight.requires_grad_(True)
-        model[1].bias.requires_grad_(True)
-        model.set_requires_gradient_sync(True, recurse=True)
-        model(inputs).pow(2).mean().backward()
-
-    def test_split_passes_mix_held_and_fresh_gradients(self, world_size_one):
-        # Arrange
-        model = self._split_pass_model()
-        self._shard_single_unit(model, reduce_dtype="float32")
-
-        # Act / Assert
-        with pytest.raises(AssertionError, match="uniform gradient dtype"):
-            self._run_split_passes(model)
-
-    def test_param_dtype_reduce_keeps_split_passes_uniform(self, world_size_one):
-        # Arrange
-        model = self._split_pass_model()
-        self._shard_single_unit(model, reduce_dtype="bfloat16")
-
-        # Act
-        self._run_split_passes(model)
-
-        # Assert
-        grads = [param.grad for param in model.parameters()]
-        assert all(grad is not None for grad in grads)
-        assert {grad.dtype for grad in grads} == {torch.bfloat16}
 
 
 class TestShareFsdpCommStreams:

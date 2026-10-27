@@ -317,41 +317,6 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 
-def _align_fsdp_reduce_dtype(config: FSDPConfig, multi_pass: bool) -> FSDPConfig:
-    """Reduce gradients in parameter dtype for split actor/critic passes.
-
-    Deferred sync holds a pass's gradients in ``reduce_dtype``; a split learn
-    touches actor parameters on the policy pass and critic parameters on the
-    value pass, so a step boundary collects held policy gradients next to
-    fresh value gradients and reduce-scatter requires one dtype across the
-    unit. Reducing in parameter dtype keeps held and fresh gradients uniform.
-
-    :param config: The run's FSDP config.
-    :type config: FSDPConfig
-    :param multi_pass: Whether one optimizer step runs separate policy and
-        value backward passes over different parameters.
-    :type multi_pass: bool
-    :return: ``config`` with ``reduce_dtype`` set to ``param_dtype`` for
-        split-pass runs, else ``config`` unchanged.
-    :rtype: FSDPConfig
-    """
-    if (
-        not multi_pass
-        or not config.defer_grad_sync
-        or config.reduce_dtype == config.param_dtype
-    ):
-        return config
-    logger.info(
-        "FSDP reduce_dtype %s differs from param_dtype %s with split "
-        "actor/critic passes; reducing in %s so held and fresh gradients "
-        "share one dtype.",
-        config.reduce_dtype,
-        config.param_dtype,
-        config.param_dtype,
-    )
-    return replace(config, reduce_dtype=config.param_dtype)
-
-
 def _is_readonly_property(obj: object, name: str) -> bool:
     """Return True when ``name`` is a property without a setter on ``obj``'s type.
 
@@ -2815,10 +2780,13 @@ def training_device_spec(
     :return: Device spec for the memory estimate.
     """
     properties = torch.cuda.get_device_properties(torch.device(device))
+    # Trainer ranks on this node, as torchrun and the Ray workers set it.
+    local_world_size = os.environ.get("LOCAL_WORLD_SIZE")
     device_spec = DeviceSpec(
         total_bytes=properties.total_memory,
         name=properties.name,
         compute_capability=(properties.major, properties.minor),
+        gpus_per_node=None if local_world_size is None else int(local_world_size),
     )
     # Without sleep mode a colocated engine keeps its memory share during learn.
     if not colocated or vllm_config is None or vllm_config.sleep_mode:
@@ -6440,10 +6408,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :return: FSDP config with every memory field set.
         :rtype: FSDPConfig
         """
-        config = _align_fsdp_reduce_dtype(
-            config,
-            multi_pass=self.use_value_head and not self._fuses_actor_critic_pass,
-        )
         if (
             config.routed_expert_chunk_mib is not None
             and config.optim_cpu_offload is not None

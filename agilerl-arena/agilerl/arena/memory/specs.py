@@ -49,10 +49,15 @@ CHUNKED_ROUTED_EXPERT_MODEL_TYPES = frozenset(
     {"nemotron_h", "nemotron_h_omni", "qwen3_moe"}
 )
 
-# Compute capability and model types where AgileRL trains Mamba layers with
-# HF's eager ``torch_forward`` scan; the fused SSM kernels return NaN there.
-EAGER_MAMBA_SCAN_CAPABILITY = (8, 9)
-EAGER_MAMBA_SCAN_MODEL_TYPES = frozenset({"nemotron_h", "nemotron_h_omni"})
+# Model types whose packed experts use gpt-oss's transposed layout
+# (``x @ W + b``, clamped interleaved SwiGLU). AgileRL runs them in a
+# per-expert loop and adds their split LoRA delta unchunked.
+TRANSPOSED_EXPERT_MODEL_TYPES = frozenset({"gpt_oss"})
+
+# Compute capability and model types where AgileRL skips the fused combined
+# Mamba kernel, which returns NaN there; the mixer runs HF's unfused path.
+UNFUSED_MAMBA_SCAN_CAPABILITY = (8, 9)
+UNFUSED_MAMBA_SCAN_MODEL_TYPES = frozenset({"nemotron_h", "nemotron_h_omni"})
 
 # Outer config model types whose vLLM class sets ``is_3d_moe_weight``, so the
 # engine wraps experts in the 3D fused-MoE LoRA layout.
@@ -72,28 +77,36 @@ VISION_PROFILE_PATCHES_BY_MODEL_TYPE: dict[str, int] = {
     "qwen3_5": 65536,
     "qwen3_5_moe": 65536,
 }
+# Families with a catalog training tensor-parallel plan. Under fsdp.tp > 1 the
+# trainer leaves other families' decoder layers and activations unsharded; an
+# untied lm_head is sharded for every family.
+TENSOR_PARALLEL_MODEL_TYPES = frozenset({"nemotron_h", "nemotron_h_omni"})
+# Model types whose vLLM config keeps the SSM state cache in fp32 unless the
+# checkpoint names a dtype. Other families keep it in the model dtype.
+FP32_SSM_STATE_MODEL_TYPES = frozenset({"nemotron_h", "nemotron_h_omni"})
 
 # CUDA context bytes keyed by torch device name: device memory in use after
 # the first torch allocation.
 CUDA_CONTEXT_BYTES_BY_DEVICE: dict[str, int] = {
     "NVIDIA A100-SXM4-40GB": 1268 * MiB,
     "NVIDIA A100-SXM4-80GB": 1268 * MiB,
-    # Estimated from its driver reservation, SM count and resident threads.
-    "NVIDIA H100 80GB HBM3": 1000 * MiB,
+    # One-rank FSDP non-torch memory less the job and trainer library overhead.
+    "NVIDIA H100 80GB HBM3": 1440 * MiB,
     "NVIDIA L4": 694 * MiB,
 }
 # Unlisted devices use the largest listed value.
 CUDA_CONTEXT_BYTES_DEFAULT = 1268 * MiB
 
-# NCCL communicator and buffer bytes on each rank of a multi-rank trainer,
-# keyed by torch device name. Set by the interconnect; constant across rank
-# count and sharding mode.
-NCCL_BYTES_BY_DEVICE: dict[str, int] = {
-    "NVIDIA A100-SXM4-40GB": 600 * MiB,
-    "NVIDIA A100-SXM4-80GB": 600 * MiB,
-    "NVIDIA L4": 91 * MiB,
+# NCCL bytes one rank holds for a 4-rank process group on one node, with NCCL
+# cuMem off as the trainer runs FSDP, keyed by torch device name. L4 is
+# scaled from its cuMem-on world group by the A100 cuMem-off ratio.
+NCCL_GROUP_BYTES_BY_DEVICE: dict[str, int] = {
+    "NVIDIA A100-SXM4-40GB": 820 * MiB,
+    "NVIDIA A100-SXM4-80GB": 820 * MiB,
+    "NVIDIA H100 80GB HBM3": 950 * MiB,
+    "NVIDIA L4": 125 * MiB,
 }
-NCCL_BYTES_DEFAULT = 600 * MiB
+NCCL_GROUP_BYTES_DEFAULT = 820 * MiB
 
 # Bytes per element.
 DTYPE_BYTES: dict[str, float] = {
@@ -103,6 +116,11 @@ DTYPE_BYTES: dict[str, float] = {
 }
 
 WeightDtype = Literal["fp32", "bf16", "fp16"]
+TORCH_DTYPE_NAMES: dict[str, WeightDtype] = {
+    "float32": "fp32",
+    "bfloat16": "bf16",
+    "float16": "fp16",
+}
 Algorithm = Literal["grpo", "gspo", "cispo", "ppo", "reinforce", "dpo", "sft"]
 LoraTargetScope = Literal["all-linear", "attention-only"]
 PackedMoeDispatch = Literal["materialized", "contracted"]
@@ -350,6 +368,7 @@ class MambaGeometry(TypedDict, total=False):
     conv_dim: int
     chunk_size: int
     gated_delta: bool
+    ssm_state_dtype: WeightDtype
 
 
 def _mamba_state_geometry(text_cfg: dict[str, Any], hidden: int) -> MambaGeometry:
@@ -373,6 +392,9 @@ def _mamba_state_geometry(text_cfg: dict[str, Any], hidden: int) -> MambaGeometr
             "conv_dim": 2 * k_heads * k_dim + v_heads * v_dim,
             "chunk_size": int(text_cfg.get("chunk_size") or MAMBA_CHUNK_SIZE_DEFAULT),
             "gated_delta": True,
+            "ssm_state_dtype": TORCH_DTYPE_NAMES[
+                text_cfg.get("mamba_ssm_dtype") or "bfloat16"
+            ],
         }
 
     d_state = _first_int(text_cfg, "mamba_d_state", "ssm_state_size", "mamba_state_dim")
@@ -394,6 +416,14 @@ def _mamba_state_geometry(text_cfg: dict[str, Any], hidden: int) -> MambaGeometr
         "chunk_size": _first_int(
             text_cfg, "chunk_size", "mamba_chunk_size", default=MAMBA_CHUNK_SIZE_DEFAULT
         ),
+        "ssm_state_dtype": TORCH_DTYPE_NAMES[
+            text_cfg.get("mamba_ssm_cache_dtype")
+            or (
+                "float32"
+                if text_cfg.get("model_type") in FP32_SSM_STATE_MODEL_TYPES
+                else "bfloat16"
+            )
+        ],
     }
 
 
@@ -429,8 +459,12 @@ def _decoder_fields(text_cfg: dict[str, Any]) -> dict[str, Any]:
         "qk_norm": text_cfg.get("model_type") in QK_NORM_MODEL_TYPES,
         "chunked_routed_experts": text_cfg.get("model_type")
         in CHUNKED_ROUTED_EXPERT_MODEL_TYPES,
-        "eager_mamba_scan_family": text_cfg.get("model_type")
-        in EAGER_MAMBA_SCAN_MODEL_TYPES,
+        "transposed_experts": text_cfg.get("model_type")
+        in TRANSPOSED_EXPERT_MODEL_TYPES,
+        "unfused_mamba_scan_family": text_cfg.get("model_type")
+        in UNFUSED_MAMBA_SCAN_MODEL_TYPES,
+        "tensor_parallel_plan": text_cfg.get("model_type")
+        in TENSOR_PARALLEL_MODEL_TYPES,
         "attn_bias": bool(text_cfg.get("attention_bias") or text_cfg.get("qkv_bias")),
         "sliding_window": (
             text_cfg.get("sliding_window")
@@ -543,8 +577,10 @@ class ModelArch(BaseModel):
     norms_per_block: int = 2
     # Per-head Q/K norm upcasts Q to fp32 inside the block.
     qk_norm: bool = False
-    # Trains Mamba layers with HF's eager scan on compute capability 8.9.
-    eager_mamba_scan_family: bool = False
+    # Trains Mamba layers on HF's unfused path on compute capability 8.9.
+    unfused_mamba_scan_family: bool = False
+    # Training tensor parallel shards this family's decoder layers.
+    tensor_parallel_plan: bool = False
 
     # None for dense models. Weights/optimizer scale with the total expert
     # count; activations scale with the active (routed) count.
@@ -567,6 +603,8 @@ class ModelArch(BaseModel):
     layer_kinds: tuple[LayerKind, ...] = ()
     # Packed experts run in row chunks on the self-routing grouped-GEMM path.
     chunked_routed_experts: bool = False
+    # Packed experts use gpt-oss's transposed layout; see TRANSPOSED_EXPERT_MODEL_TYPES.
+    transposed_experts: bool = False
     # vLLM serves this model's expert LoRA in the 3D fused-MoE layout.
     vllm_3d_moe_lora: bool = False
 
@@ -696,10 +734,16 @@ class ModelArch(BaseModel):
     def sublayer_transients(self) -> bool:
         """Whether one block's activation peak sits in a single attention, FFN or recurrent sub-layer.
 
-        True for block-exclusive stacks, and for gated-delta-net stacks, whose
-        forward frees the mixer's tensors before the MLP beside it runs.
+        True for block-exclusive stacks, and for stacks where each layer runs
+        one mixer (attention or recurrent), whose forward frees the mixer's
+        tensors before the FFN beside it runs.
         """
-        return self.block_exclusive_layers or self.mamba_gated_delta
+        one_mixer_per_layer = (
+            self.n_mamba_layers > 0
+            and self.n_attention_layers is not None
+            and self.n_attention_layers + self.n_mamba_layers == self.n_layers
+        )
+        return self.block_exclusive_layers or one_mixer_per_layer
 
     @property
     def moe_layers(self) -> int:
@@ -792,6 +836,8 @@ class DeviceSpec(BaseModel):
     cuda_context_bytes: int | None = None
     # CUDA compute capability ``(major, minor)``; ``None`` when unknown.
     compute_capability: tuple[int, int] | None = None
+    # GPUs on this device's node. ``None`` puts every trainer rank on one node.
+    gpus_per_node: int | None = Field(default=None, ge=1)
 
     @property
     def context_bytes(self) -> int:
@@ -805,11 +851,11 @@ class DeviceSpec(BaseModel):
         return CUDA_CONTEXT_BYTES_DEFAULT
 
     @property
-    def nccl_bytes(self) -> int:
-        """NCCL memory on each rank of a multi-rank trainer on this device."""
+    def nccl_group_bytes(self) -> int:
+        """NCCL memory one rank holds for a 4-rank process group on one node."""
         if self.name is None:
-            return NCCL_BYTES_DEFAULT
-        return NCCL_BYTES_BY_DEVICE.get(self.name, NCCL_BYTES_DEFAULT)
+            return NCCL_GROUP_BYTES_DEFAULT
+        return NCCL_GROUP_BYTES_BY_DEVICE.get(self.name, NCCL_GROUP_BYTES_DEFAULT)
 
     @property
     def usable_bytes(self) -> int:
@@ -886,6 +932,12 @@ class TrainingSettings(BaseModel):
     # The gradient pass scores supported tokens from their support rows too.
     # PPO and REINFORCE's Liger loss scores the full vocabulary.
     support_scored_loss: bool = False
+    # LLMPPO and REINFORCE Liger losses above token level keep one whole
+    # sequence of logits, so the tile spans max_model_len rows.
+    liger_sequence_chunks: bool = False
+    # The fused Liger kernel keeps a weight-dtype grad of the whole lm_head.
+    # The sequence tile already includes it. The standard log-prob path does not.
+    liger_weight_grad: bool = True
     # Data-parallel trainer GPUs. The estimate is per GPU; this is the
     # shard group size.
     n_training_gpus: int = 1
@@ -912,14 +964,23 @@ class TrainingSettings(BaseModel):
     sequence_packing: bool = False
 
     @property
+    def data_parallel_gpus(self) -> int:
+        """Ranks that each hold a distinct batch shard.
+
+        Tensor-parallel ranks share one shard, so they do not divide it again.
+        """
+        tp = 1 if self.fsdp is None else self.fsdp.tp
+        return max(self.n_training_gpus // tp, 1)
+
+    @property
     def trajectories(self) -> int:
         """Completion rows one learner GPU sees per update.
 
         ``None`` assumes a single prompt group. Under data parallelism the
-        update shards across learner GPUs.
+        update shards across :attr:`data_parallel_gpus`.
         """
         total = self.trajectories_per_update or self.group_size
-        return max(-(-total // self.n_training_gpus), 1)
+        return max(-(-total // self.data_parallel_gpus), 1)
 
     @property
     def images_per_update(self) -> int:
@@ -1030,6 +1091,18 @@ class TrainingSettings(BaseModel):
             msg = "FSDP cpu_offload and optim_cpu_offload are mutually exclusive"
             raise ValueError(msg)
         return self
+
+    @model_validator(mode="before")
+    @classmethod
+    def _sft_drops_the_policy_head_grad(cls, data: object) -> object:
+        # SFT's fused cross-entropy skips a grad of the frozen lm_head.
+        if (
+            isinstance(data, dict)
+            and data.get("algorithm") == "sft"
+            and "liger_weight_grad" not in data
+        ):
+            return {**data, "liger_weight_grad": False}
+        return data
 
     @model_validator(mode="after")
     def _check_fuse_actor_critic_pass(self) -> Self:
