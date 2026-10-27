@@ -372,7 +372,7 @@ class TestBareSolveOnAnInferenceConfig:
         dedicated = solve_inference(config, "max_model_len", hi=32768)
 
         # Assert
-        assert bare.value == 9504
+        assert bare.value == 3456
         assert bare.limited_by == "memory"
         assert bare.estimate.training.fits_with_buffer
         assert dedicated.value == 32768

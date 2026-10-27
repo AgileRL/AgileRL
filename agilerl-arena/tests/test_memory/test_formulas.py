@@ -43,6 +43,7 @@ NEMOTRON_H = {
     "mamba_num_groups": 8,
     "mamba_num_heads": 128,
     "mamba_head_dim": 80,
+    "mamba_ssm_cache_dtype": "float32",
 }
 # Falcon-H1 runs attention and SSM in parallel in every block, so both counts are n_layers.
 FALCON_H1 = {
@@ -207,9 +208,9 @@ class TestModelArchFromHfConfig:
         assert arch.n_kv_heads == 1  # MQA
 
         # Windowed layers cap KV growth at long context.
-        windowed = formulas.kv_cache_demand_bytes(arch, "bf16", 8, 8192)
+        windowed = formulas.kv_cache_demand_bytes(arch, "bf16", 8, 8192, 0)
         globl = formulas.kv_cache_demand_bytes(
-            arch.model_copy(update={"sliding_window": None}), "bf16", 8, 8192
+            arch.model_copy(update={"sliding_window": None}), "bf16", 8, 8192, 0
         )
         assert windowed < globl / 3
 
@@ -335,6 +336,75 @@ class TestModelArchFromHfConfig:
         assert arch.mamba_gated_delta
         assert arch.sublayer_transients
         assert not arch.block_exclusive_layers
+
+    def test_one_mixer_per_layer_mamba_stack_peaks_in_one_sublayer(self):
+        arch = ModelArch.from_hf_config(
+            {
+                **DECODER_TINY,
+                "layer_types": ["attention", "mamba", "mamba", "mamba"] * 2,
+            }
+        )
+
+        assert (arch.attention_layers, arch.n_mamba_layers) == (2, 6)
+        assert not arch.mamba_gated_delta
+        assert arch.sublayer_transients
+
+    @pytest.mark.parametrize(
+        ("model_id", "dtype"),
+        [
+            ("ibm-granite/granite-4.0-h-tiny", "bf16"),
+            ("nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16", "fp32"),
+            ("nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16", "fp32"),
+            ("Qwen/Qwen3.5-2B", "fp32"),
+        ],
+    )
+    def test_ssm_state_dtype_follows_vllm(self, model_id, dtype):
+        arch = ModelArch.from_hf_config(SUPPORTED_MODEL_INFO[model_id].config)
+
+        assert arch.mamba_ssm_state_dtype == dtype
+
+    def test_gpt_oss_experts_keep_the_clamped_swiglu_intermediates(self):
+        arch = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["openai/gpt-oss-20b"].config
+        )
+        routed = 1024 * arch.n_experts_per_tok
+        inter = arch.expert_intermediate_size or arch.intermediate_size
+
+        forward = formulas.routed_expert_bytes(arch, 1, 1024, 2.0)
+        backward = formulas.routed_expert_bytes(arch, 1, 1024, 2.0, backward=True)
+
+        assert arch.transposed_experts
+        assert forward == routed * (2 * arch.expert_width + 8 * inter) * 2
+        assert backward == routed * (2 * arch.expert_width + 9 * inter) * 2
+
+    def test_gpt_oss_contracted_lora_is_not_capped_by_the_chunk(self):
+        arch = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["openai/gpt-oss-20b"].config
+        )
+        sorted_path = arch.model_copy(update={"transposed_experts": False})
+        common = {
+            "rows": 1,
+            "seq_len": 65536,
+            "act_bytes": 2.0,
+            "chunk_bytes": 512 * MiB,
+            "expert_lora": True,
+            "contracted": True,
+            "ep": 1,
+        }
+        routed = 65536 * arch.n_experts_per_tok
+        inter = arch.expert_intermediate_size or arch.intermediate_size
+        widest = max(arch.expert_width, inter) * 2
+
+        transposed = formulas.routed_chunk_bytes(arch, **common)
+        capped = formulas.routed_chunk_bytes(sorted_path, **common)
+
+        assert transposed == formulas.CONTRACTED_CHUNK_LIVE_MULTIPLE * routed * widest
+        assert capped == formulas.CONTRACTED_CHUNK_LIVE_MULTIPLE * 512 * MiB
+
+    def test_parallel_mixer_stack_sums_its_sublayers(self):
+        arch = ModelArch.from_hf_config(FALCON_H1)
+
+        assert not arch.sublayer_transients
 
     def test_counts_vision_encoder_params(self):
         empty = ModelArch.from_hf_config(
@@ -571,9 +641,10 @@ class TestKvCacheBytesPerToken:
 
         # Act
         per_token = formulas.kv_cache_bytes_per_token(arch, "bf16")
-        demand = formulas.kv_cache_demand_bytes(arch, "bf16", 8, 8192)
+        demand = formulas.kv_cache_demand_bytes(arch, "bf16", 8, 8192, 0)
 
-        # Assert: full-attention KV at the 512-wide head.
+        # Assert: full-attention KV at the 512-wide head; a 512-token window
+        # holds 511 tokens in 32 blocks, plus one.
         assert per_token == pytest.approx(2 * storing * 1 * mean_dh * kv_bytes)
         assert demand == int(
             8
@@ -581,7 +652,7 @@ class TestKvCacheBytesPerToken:
             * storing
             * 1
             * kv_bytes
-            * (windowed * min(8192, 512) * 256 + (1.0 - windowed) * 8192 * 512)
+            * (windowed * 33 * 16 * 256 + (1.0 - windowed) * 8192 * 512)
         )
         sliding_only = formulas.kv_cache_bytes_per_token(
             arch.model_copy(update={"global_head_dim": None}), "bf16"
@@ -593,7 +664,7 @@ class TestKvCacheBytesPerToken:
         assert formulas.kv_cache_bytes_per_token(full, "bf16") == (
             2 * storing * 1 * 512 * 2
         )
-        assert formulas.kv_cache_demand_bytes(full, "bf16", 8, 8192) == int(
+        assert formulas.kv_cache_demand_bytes(full, "bf16", 8, 8192, 0) == int(
             8 * 8192 * 2 * storing * 1 * 2 * 512
         )
 
@@ -601,9 +672,23 @@ class TestKvCacheBytesPerToken:
 class TestKvCacheDemandBytes:
     def test_sliding_window_caps_growth(self):
         windowed = QWEN_05B.model_copy(update={"sliding_window": 1024})
-        full = formulas.kv_cache_demand_bytes(QWEN_05B, "bf16", 8, 8192)
-        capped = formulas.kv_cache_demand_bytes(windowed, "bf16", 8, 8192)
-        assert capped == full // 8  # window is 1/8 of the sequence
+        full = formulas.kv_cache_demand_bytes(QWEN_05B, "bf16", 8, 8192, 0)
+        capped = formulas.kv_cache_demand_bytes(windowed, "bf16", 8, 8192, 0)
+        # 1023 tokens round to 64 blocks, plus one: 1040 of 8192 tokens.
+        assert capped == full * 1040 // 8192
+
+    def test_sliding_window_holds_the_in_flight_tokens(self):
+        # gpt-oss on vLLM 0.32: a 128-token window with two 2048-token steps
+        # in flight holds 265 blocks per sequence.
+        windowed = QWEN_05B.model_copy(update={"sliding_window": 128})
+        full = formulas.kv_cache_demand_bytes(QWEN_05B, "bf16", 1, 16384, 0)
+
+        held = formulas.kv_cache_demand_bytes(windowed, "bf16", 1, 16384, 2 * 2048)
+        capped = formulas.kv_cache_demand_bytes(windowed, "bf16", 1, 2048, 2 * 2048)
+
+        assert held == full * 265 * 16 // 16384
+        # A 2048-token sequence caps the window at 128 blocks, plus one.
+        assert capped == full * 129 * 16 // 16384
 
 
 class TestWeightBytes:
@@ -804,17 +889,18 @@ class TestMambaBlockBytes:
         assert 0 < forward < backward
         assert formulas.mamba_block_bytes(QWEN_05B, 1, 16384, 2.0) == 0
 
-    def test_eager_scan_adds_the_fp32_broadcast_product(self):
+    def test_unfused_scan_adds_backward_bytes_per_inner_channel(self):
         arch = ModelArch.from_hf_config(NEMOTRON_NANO_MAMBA)
+        d_inner = arch.mamba_n_heads * arch.mamba_d_head
 
         fused = formulas.mamba_block_bytes(arch, 1, 16384, 2.0, backward=True)
-        eager = formulas.mamba_block_bytes(
-            arch, 1, 16384, 2.0, backward=True, eager_scan=True
+        unfused = formulas.mamba_block_bytes(
+            arch, 1, 16384, 2.0, backward=True, unfused_scan=True
         )
+        forward = formulas.mamba_block_bytes(arch, 1, 16384, 2.0, unfused_scan=True)
 
-        # An L4 trainer asked for one 48 GiB tensor at 16k tokens.
-        assert eager - fused == 16384 * 64 * 96 * 128 * 4
-        assert eager - fused == 48 * GiB
+        assert unfused - fused == 16384 * d_inner * formulas.UNFUSED_MAMBA_SCAN_BYTES
+        assert forward == formulas.mamba_block_bytes(arch, 1, 16384, 2.0)
 
     def test_block_exclusive_recompute_is_the_widest_layer(self):
         arch = ModelArch.from_hf_config(NEMOTRON_NANO_MAMBA)
@@ -1075,7 +1161,10 @@ class TestBlockRecomputeNormInputs:
         ) == formulas.block_recompute_bytes(fused, 1, 1024, 2.0)
 
     def test_block_exclusive_layer_keeps_one_norm_input(self):
-        nano = ModelArch.from_hf_config(NEMOTRON_NANO_MAMBA)
+        # A non-gated MLP keeps the stock MLP term out of the difference.
+        nano = ModelArch.from_hf_config(NEMOTRON_NANO_MAMBA).model_copy(
+            update={"gated_mlp": False}
+        )
         stock = nano.model_copy(update={"fp32_norm_inputs": True})
 
         added = {
@@ -1226,15 +1315,75 @@ class TestRecommendationFits:
 
 
 class TestMambaStateBytes:
-    def test_charges_two_blocks_per_sequence(self):
+    def test_charges_padded_pages_over_padded_groups(self):
         arch = ModelArch.from_hf_config(NEMOTRON_H)
-        per_layer = formulas.mamba_page_bytes(arch)
-        expected = arch.n_mamba_layers * per_layer * 16 * 2
 
-        assert formulas.mamba_state_bytes(arch, 16) == expected > 0
+        state = formulas.mamba_state_bytes(arch, 16)
+
+        # 27 Mamba layers pad to 7 groups of 4; each page pads to 1312 tokens
+        # of attention KV; Mamba-2 holds 3 blocks per sequence.
+        assert state == 7 * 4 * 1312 * 4096 * 16 * 3
         assert formulas.mamba_page_bytes(QWEN_05B) == 0
-        # Align mode caps residency at two blocks however long the context runs.
         assert formulas.mamba_state_bytes(QWEN_05B, 16) == 0
+
+    def test_gated_delta_holds_two_blocks_and_mamba2_three(self):
+        gated = ModelArch.from_hf_config(
+            {
+                **DECODER_TINY,
+                "layer_types": ["full_attention", "linear"] * 4,
+                "linear_key_head_dim": 128,
+                "linear_value_head_dim": 64,
+                "linear_num_key_heads": 16,
+                "linear_num_value_heads": 32,
+                "linear_conv_kernel_dim": 4,
+            }
+        )
+
+        assert formulas.mamba_state_blocks_per_seq(gated) == 2
+        assert (
+            formulas.mamba_state_blocks_per_seq(ModelArch.from_hf_config(NEMOTRON_H))
+            == 3
+        )
+
+
+class TestHybridKvGroups:
+    def test_groups_take_the_smaller_layer_count(self):
+        arch = ModelArch.from_hf_config(NEMOTRON_H)
+
+        assert formulas.hybrid_kv_groups(arch) == (4, 1, 7)
+
+    def test_groups_take_the_larger_count_when_close(self):
+        falcon = ModelArch.from_hf_config(FALCON_H1)
+        close = falcon.model_copy(
+            update={"n_attention_layers": 12, "n_mamba_layers": 13}
+        )
+
+        assert formulas.hybrid_kv_groups(falcon) == (24, 1, 1)
+        assert formulas.hybrid_kv_groups(close) == (13, 1, 1)
+
+
+class TestHybridKvDemandBytes:
+    def test_each_sequence_rounds_up_to_whole_blocks(self):
+        arch = ModelArch.from_hf_config(NEMOTRON_H)
+        page = formulas.hybrid_page_bytes(arch)
+
+        one_token = formulas.hybrid_kv_demand_bytes(arch, "bf16", 2, 1)
+        one_block = formulas.hybrid_kv_demand_bytes(arch, "bf16", 2, 1312)
+        past_block = formulas.hybrid_kv_demand_bytes(arch, "bf16", 2, 1313)
+
+        assert one_token == one_block == 2 * 4 * page
+        assert past_block == 2 * one_block
+
+    def test_tensor_parallel_shrinks_the_page(self):
+        arch = ModelArch.from_hf_config(NEMOTRON_H)
+
+        assert formulas.hybrid_page_bytes(arch, tensor_parallel=2) == (
+            formulas.aligned_kv_block_size(arch, tensor_parallel=2)
+            * formulas.attention_token_bytes(arch, tensor_parallel=2)
+        )
+        assert formulas.attention_token_bytes(arch, tensor_parallel=2) == (
+            formulas.attention_token_bytes(arch) // 2
+        )
 
 
 class TestMambaPagePerRank:
@@ -1272,7 +1421,7 @@ class TestMambaPagePerRank:
             arch.mamba_n_heads * arch.mamba_d_head + 2 * groups * arch.mamba_d_state
         ) // tp
         recurrent = (arch.mamba_n_heads // tp) * arch.mamba_d_head * arch.mamba_d_state
-        expected = conv_dim * max(arch.mamba_d_conv - 1, 0) * 2 + recurrent * 4
+        expected = conv_dim * max(arch.mamba_d_conv - 1, 0) * 2 + recurrent * 2
 
         page = formulas.mamba_page_per_rank(arch, tensor_parallel=tp)
 
@@ -1321,6 +1470,81 @@ MOE_TINY = ModelArch(
     n_experts_per_tok=2,
     expert_intermediate_size=32,
 )
+
+
+class TestTensorParallelWidths:
+    def test_query_splits_and_indivisible_kv_stays_whole(self):
+        assert formulas.qkv_width_per_rank(QWEN_05B, 1) == QWEN_05B.peak_qkv_dim
+        assert formulas.qkv_width_per_rank(QWEN_05B, 2) == QWEN_05B.peak_qkv_dim // 2
+
+        replicated_kv = QWEN_05B.model_copy(update={"n_kv_heads": 1, "n_heads": 14})
+        full = formulas.qkv_width_per_rank(replicated_kv, 1)
+        local = formulas.qkv_width_per_rank(replicated_kv, 2)
+        # Query halves. The single KV head is copied onto both ranks.
+        assert local == full - replicated_kv.n_heads * replicated_kv.head_dim // 2
+
+    def test_qkv_width_uses_the_wider_global_head_dim(self):
+        arch = QWEN_05B.model_copy(update={"global_head_dim": 128})
+
+        assert formulas.qkv_width_per_rank(arch, 1) == arch.peak_qkv_dim
+        assert formulas.qkv_width_per_rank(arch, 2) == arch.peak_qkv_dim // 2
+
+    def test_tensor_parallel_linears_leave_the_fsdp_gather(self):
+        arch = QWEN_05B.model_copy(update={"tensor_parallel_plan": True})
+        counts = formulas.param_counts(arch)
+        kwargs = {
+            "n_gpus": 4,
+            "reshard_after_forward": True,
+            "prefetch_units": 1,
+            "wrap_every_n_blocks": 1,
+            "cpu_offload": False,
+        }
+
+        full = formulas.fsdp_gathered_params(counts, arch, **kwargs)
+        narrowed = formulas.fsdp_gathered_params(
+            counts, arch, tensor_parallel=2, **kwargs
+        )
+
+        assert formulas.tensor_parallel_params(counts, arch) == (
+            counts.attention + counts.mlp
+        )
+        assert narrowed < full
+
+    def test_without_a_plan_only_an_untied_head_leaves_the_fsdp_gather(self):
+        arch = QWEN_05B.model_copy(update={"tied_embeddings": False})
+        counts = formulas.param_counts(arch)
+        kwargs = {
+            "n_gpus": 4,
+            "reshard_after_forward": True,
+            "prefetch_units": 1,
+            "wrap_every_n_blocks": 1,
+            "cpu_offload": False,
+        }
+
+        full = formulas.fsdp_gathered_params(counts, arch, **kwargs)
+        narrowed = formulas.fsdp_gathered_params(
+            counts, arch, tensor_parallel=2, **kwargs
+        )
+
+        assert formulas.tensor_parallel_params(counts, arch) == counts.lm_head
+        assert narrowed == full - counts.lm_head
+
+    def test_gather_stream_spans_two_moe_layers_of_a_tp_planned_hybrid(self):
+        # Arrange: Lightning TP 2 on A100 held two MoE all-gathers at once.
+        arch = ModelArch.from_hf_config(NEMOTRON_H_MOE)
+        counts = formulas.param_counts(arch)
+        moe_layer = formulas.layer_params(arch, "moe")
+
+        # Act
+        allocated = formulas.prefetch_window_params(counts, arch, 2, 1, 2)
+        pool = formulas.fsdp_gather_pool_params(
+            counts, arch, 1, 1, 1, 4, tensor_parallel=2
+        )
+
+        # Assert
+        assert arch.tensor_parallel_plan
+        assert allocated == moe_layer
+        assert pool == 2 * moe_layer
 
 
 class TestFSDPGatheredParams:
@@ -1516,6 +1740,18 @@ class TestFSDPGatherPoolParams:
         pool = formulas.fsdp_gather_pool_params(counts, QWEN_05B, 1, 1, 1, 4)
 
         assert pool == 2 * block
+
+    def test_tensor_parallel_plan_leaves_only_norms_to_gather(self):
+        arch = QWEN_05B.model_copy(update={"tensor_parallel_plan": True})
+        counts = formulas.param_counts(arch)
+        norms_per_layer = counts.norms // arch.n_layers
+
+        on_mesh = formulas.fsdp_gather_pool_params(counts, arch, 1, 1, 1, 4, 2)
+        off_mesh = formulas.fsdp_gather_pool_params(counts, arch, 1, 1, 1, 4)
+
+        assert not arch.layer_kinds
+        assert on_mesh == 2 * norms_per_layer
+        assert off_mesh == 2 * formulas.largest_block_params(counts, arch)
 
     def test_per_layer_embeddings_pool_beside_the_first_unit(self):
         # Arrange
@@ -1939,3 +2175,139 @@ class TestEngineExpertLoraParamCount:
 
     def test_dense_model_has_no_expert_stacks(self):
         assert formulas.engine_expert_lora_param_count(QWEN_05B, 8, 1, False) == 0
+
+
+GATHER_KWARGS = {
+    "n_gpus": 4,
+    "reshard_after_forward": True,
+    "prefetch_units": 1,
+    "wrap_every_n_blocks": 1,
+    "cpu_offload": False,
+}
+
+
+class TestRoutedExpertParamsPerLayer:
+    def test_dense_arch_has_no_routed_experts(self):
+        assert formulas.routed_expert_params_per_layer(QWEN_05B) == 0
+
+
+class TestFSDPGatheredParamsExpertParallel:
+    def test_ep_filling_the_shard_group_gathers_no_routed_experts(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(NEMOTRON_H_MOE)
+        counts = formulas.param_counts(arch)
+        experts, router = formulas.moe_params_per_layer(arch)
+        routed = formulas.routed_expert_params_per_layer(arch)
+        mamba = formulas.mamba_params_per_layer(arch)
+        attention = formulas.attention_params_per_layer(arch)
+
+        # Act
+        gathered = formulas.fsdp_gathered_params(
+            counts, arch, expert_parallel=4, **GATHER_KWARGS
+        )
+
+        # Assert: the MoE block unit keeps its router and shared experts only,
+        # so a Mamba + attention pair can be the widest window.
+        assert 0 < routed < experts
+        block_moe = experts - routed + router
+        assert gathered == max(block_moe, attention) + mamba + counts.lm_head
+
+    def test_leftover_ranks_gather_one_layer_of_local_experts(self):
+        arch = ModelArch.from_hf_config(NEMOTRON_H_MOE)
+        counts = formulas.param_counts(arch)
+        routed = formulas.routed_expert_params_per_layer(arch)
+
+        filled = formulas.fsdp_gathered_params(
+            counts, arch, expert_parallel=4, **GATHER_KWARGS
+        )
+        leftover = formulas.fsdp_gathered_params(
+            counts, arch, expert_parallel=2, **GATHER_KWARGS
+        )
+
+        assert leftover == filled + routed // 2
+
+    def test_no_reshard_holds_every_local_expert_layer(self):
+        arch = ModelArch.from_hf_config(NEMOTRON_H_MOE)
+        counts = formulas.param_counts(arch)
+        routed = formulas.routed_expert_params_per_layer(arch)
+        sharded = counts.total - formulas.token_embedding_params(arch)
+        kwargs = {**GATHER_KWARGS, "reshard_after_forward": False}
+
+        gathered = formulas.fsdp_gathered_params(
+            counts, arch, expert_parallel=2, **kwargs
+        )
+
+        assert gathered == sharded - arch.moe_layers * routed // 2
+
+    def test_tensor_parallel_uniform_moe_stack_keeps_experts_gathered(self):
+        arch = ModelArch.from_hf_config(GRANITE_MOE)
+        counts = formulas.param_counts(arch)
+        block_moe = formulas.block_moe_params_per_layer(arch)
+
+        gathered = formulas.fsdp_gathered_params(
+            counts, arch, tensor_parallel=2, **GATHER_KWARGS
+        )
+
+        assert not arch.layer_kinds
+        assert gathered >= 2 * block_moe
+
+
+class TestTrainerNcclBytes:
+    GROUP = 100 * MiB
+
+    def test_plain_fsdp_on_one_node_holds_the_base_and_world_group(self):
+        assert formulas.trainer_nccl_bytes(self.GROUP, 4, 4) == pytest.approx(
+            1.14 * self.GROUP, abs=1
+        )
+
+    @pytest.mark.parametrize(
+        ("n_gpus", "shard", "ep", "tp", "gpus_per_node", "fraction"),
+        [
+            (4, 2, 1, 1, None, 1.14 + 0.65 + 0.65),  # HSDP shard and replicate
+            (4, 4, 1, 2, None, 1.14 + 0.65 + 0.65),  # TP and its replica ranks
+            (4, 4, 4, 1, None, 1.14 + 1.0 + 1.1),  # EP spans the shard group
+            (4, 4, 2, 1, None, 1.14 + 0.65 + 1.1 + 0.65),  # EP and its leftover ranks
+            (4, 4, 2, 2, None, 1.14 + 0.65 + 1.1 + 0.65 + 0.65 + 0.65),  # EP x TP
+            (4, 4, 4, 1, 2, 0.14 + 0.06 + 0.06 + 0.54),  # EP across two nodes
+            (8, 8, 1, 1, 4, 0.14 + 0.06),  # world across two nodes
+            (8, 4, 1, 1, 4, 0.14 + 0.06 + 1.0 + 0.06),  # a shard per node
+            (16, 8, 8, 1, 8, 0.14 + 0.06 + 1.13 + 0.06 + 1.13 + 1.1),  # HSDP x EP
+            # HSDP x EP with on-node leftover ranks and cross-node replicas.
+            (16, 8, 4, 1, 8, 0.14 + 0.06 + 1.13 + 0.06 + 1.0 + 1.1 + 0.65 + 0.06),
+        ],
+    )
+    def test_charges_each_group_by_size_and_node_span(
+        self, n_gpus, shard, ep, tp, gpus_per_node, fraction
+    ):
+        nccl = formulas.trainer_nccl_bytes(
+            self.GROUP, n_gpus, shard, ep, tp, gpus_per_node
+        )
+
+        assert nccl == pytest.approx(fraction * self.GROUP, abs=1)
+
+    @pytest.mark.parametrize(
+        ("group_size", "fraction"), [(2, 0.65), (3, 1.0), (4, 1.0), (8, 1.13)]
+    )
+    def test_on_node_fraction_grows_with_group_size(self, group_size, fraction):
+        assert formulas.nccl_on_node_fraction(group_size) == fraction
+
+
+class TestEpExchangeBytes:
+    def test_holds_four_routed_row_buffers(self):
+        rows, seq_len, act_bytes = 1, 1024, 2
+        routed = rows * seq_len * MOE_TINY.n_experts_per_tok
+
+        exchange = formulas.ep_exchange_bytes(MOE_TINY, rows, seq_len, act_bytes, 2)
+
+        assert exchange == 4 * routed * MOE_TINY.expert_width * act_bytes
+
+    def test_tensor_parallel_ranks_route_their_share_of_tokens(self):
+        full = formulas.ep_exchange_bytes(MOE_TINY, 1, 1024, 2, 2)
+
+        split = formulas.ep_exchange_bytes(MOE_TINY, 1, 1024, 2, 2, tensor_parallel=2)
+
+        assert split * 2 == full
+
+    def test_zero_without_expert_parallel_or_experts(self):
+        assert formulas.ep_exchange_bytes(MOE_TINY, 1, 1024, 2, 1) == 0
+        assert formulas.ep_exchange_bytes(QWEN_05B, 1, 1024, 2, 4) == 0

@@ -2780,10 +2780,13 @@ def training_device_spec(
     :return: Device spec for the memory estimate.
     """
     properties = torch.cuda.get_device_properties(torch.device(device))
+    # Trainer ranks on this node, as torchrun and the Ray workers set it.
+    local_world_size = os.environ.get("LOCAL_WORLD_SIZE")
     device_spec = DeviceSpec(
         total_bytes=properties.total_memory,
         name=properties.name,
         compute_capability=(properties.major, properties.minor),
+        gpus_per_node=None if local_world_size is None else int(local_world_size),
     )
     # Without sleep mode a colocated engine keeps its memory share during learn.
     if not colocated or vllm_config is None or vllm_config.sleep_mode:
