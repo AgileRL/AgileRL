@@ -2829,6 +2829,48 @@ def training_device_spec(
     )
 
 
+def broadcast_fsdp_memory_pick(
+    model: ModelSpec,
+    device: DeviceSpec,
+    settings: TrainingSettings,
+    picked: FSDPConfig,
+) -> FSDPConfig:
+    """Broadcast rank 0's FSDP memory pick and log the peak it implies.
+
+    :param model: Training model.
+    :param device: Training GPU.
+    :param settings: Training settings. ``fsdp`` is replaced with the pick.
+    :param picked: Resolve result. Set fields are already kept.
+    :return: Config every rank wraps with.
+    """
+    chunk_mib, optim_cpu_offload = broadcast_object_list(
+        [picked.routed_expert_chunk_mib, picked.optim_cpu_offload]
+    )
+    resolved = replace(
+        picked,
+        routed_expert_chunk_mib=chunk_mib,
+        optim_cpu_offload=optim_cpu_offload,
+    )
+    estimate = estimate_training(
+        model,
+        device,
+        settings.model_copy(update={"fsdp": resolved}),
+        orchestrated=True,
+    )
+    gib = 1024**3
+    logger.log(
+        logging.INFO if estimate.fits else logging.WARNING,
+        "FSDP memory: routed_expert_chunk_mib=%d, optim_cpu_offload=%s; "
+        "estimated peak %.2f GiB, budget %.2f GiB%s",
+        resolved.routed_expert_chunk_mib,
+        resolved.optim_cpu_offload,
+        estimate.total_bytes / gib,
+        estimate.device_usable_bytes / gib,
+        "" if estimate.fits else " (over budget)",
+    )
+    return resolved
+
+
 class HiddenStateHead(torch.nn.Identity):
     """Identity output head whose ``weight`` carries the replaced layer's dtype."""
 
@@ -6433,12 +6475,15 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         Set values are kept. Off CUDA there is no device budget, so the
         smallest chunk and a CPU optimizer are taken. On CUDA every rank takes
         rank 0's pick, so ranks on different devices still run the same EP
-        collectives.
+        collectives. An algorithm with no ``max_model_len`` must already have
+        both memory fields set.
 
         :param config: The run's FSDP config.
         :type config: FSDPConfig
         :return: FSDP config with every memory field set.
         :rtype: FSDPConfig
+        :raises ValueError: On CUDA when a memory field is unset and this
+            algorithm has no ``max_model_len``.
         """
         config = _align_fsdp_reduce_dtype(
             config,
@@ -6457,6 +6502,12 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 training_breakdown,
                 orchestrated=True,
             )
+        if self.max_row_tokens is None and not hasattr(self, "max_model_len"):
+            msg = (
+                f"{type(self).__name__} has unset FSDP memory settings and no "
+                "max_model_len. Set routed_expert_chunk_mib and optim_cpu_offload."
+            )
+            raise ValueError(msg)
         model, settings = self._training_estimate_inputs(
             ALGORITHM_NAMES[self.algo],
             self.beta,
@@ -6467,32 +6518,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         picked = resolve_fsdp_memory(
             model, device, settings, training_breakdown, orchestrated=True
         )
-        chunk_mib, optim_cpu_offload = broadcast_object_list(
-            [picked.routed_expert_chunk_mib, picked.optim_cpu_offload]
-        )
-        resolved = replace(
-            picked,
-            routed_expert_chunk_mib=chunk_mib,
-            optim_cpu_offload=optim_cpu_offload,
-        )
-        estimate = estimate_training(
-            model,
-            device,
-            settings.model_copy(update={"fsdp": resolved}),
-            orchestrated=True,
-        )
-        gib = 1024**3
-        logger.log(
-            logging.INFO if estimate.fits else logging.WARNING,
-            "FSDP memory: routed_expert_chunk_mib=%d, optim_cpu_offload=%s; "
-            "estimated peak %.2f GiB, budget %.2f GiB%s",
-            resolved.routed_expert_chunk_mib,
-            resolved.optim_cpu_offload,
-            estimate.total_bytes / gib,
-            estimate.device_usable_bytes / gib,
-            "" if estimate.fits else " (over budget)",
-        )
-        return resolved
+        return broadcast_fsdp_memory_pick(model, device, settings, picked)
 
     def _estimate_training(
         self, algorithm: Algorithm, beta: float, *, fuse_actor_critic_pass: bool

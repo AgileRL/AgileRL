@@ -1226,6 +1226,7 @@ class TestLLMAlgorithmSpecBuild:
             "gradient_checkpointing": True,
             "use_liger_loss": False,
             "seed": 42,
+            "fsdp": None,
         }
         object.__setattr__(spec, "__dict__", attrs)
         object.__setattr__(spec, "__pydantic_fields_set__", set(attrs.keys()))
