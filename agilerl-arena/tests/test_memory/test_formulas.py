@@ -10,7 +10,13 @@ import pytest
 
 from agilerl.arena.memory import formulas
 from agilerl.arena.memory.resolve.chunk import resolve_chunk_rows
-from agilerl.arena.memory.specs import GiB, MiB, ModelArch, WeightVariant
+from agilerl.arena.memory.specs import (
+    GiB,
+    MiB,
+    ModelArch,
+    TrainingSettings,
+    WeightVariant,
+)
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 
 ASSETS = Path(__file__).parent / "assets"
@@ -525,6 +531,45 @@ class TestSupportRowsBytes:
         )
 
 
+class TestLogitTerms:
+    def test_bf16_hoists_an_fp32_head_copy(self):
+        settings = TrainingSettings()
+
+        logits, fused_head, nograd = formulas.logit_terms(QWEN_05B, settings, 2.0)
+
+        rows = resolve_chunk_rows(QWEN_05B.vocab_size, settings.chunk_rows)
+        assert fused_head == QWEN_05B.vocab_size * QWEN_05B.hidden_size * 4
+        assert logits == rows * QWEN_05B.vocab_size * 8 + fused_head
+        assert nograd == rows * QWEN_05B.vocab_size * 4 + fused_head
+
+    def test_fp32_does_not_hoist_a_head_copy(self):
+        _, fused_head, _ = formulas.logit_terms(QWEN_05B, TrainingSettings(), 4.0)
+
+        assert fused_head == 0
+
+    def test_support_scored_loss_replaces_vocab_tiles(self):
+        settings = TrainingSettings(sampling_support_width=20, support_scored_loss=True)
+
+        logits, fused_head, nograd = formulas.logit_terms(QWEN_05B, settings, 2.0)
+
+        rows = resolve_chunk_rows(QWEN_05B.vocab_size, settings.chunk_rows)
+        support = formulas.support_rows_bytes(QWEN_05B, rows, 20, 2.0)
+        assert logits == support
+        assert nograd == support
+        assert fused_head == 0
+
+    def test_support_width_without_scored_loss_keeps_vocab_loss_tiles(self):
+        settings = TrainingSettings(sampling_support_width=20)
+
+        logits, fused_head, nograd = formulas.logit_terms(QWEN_05B, settings, 2.0)
+
+        rows = resolve_chunk_rows(QWEN_05B.vocab_size, settings.chunk_rows)
+        support = formulas.support_rows_bytes(QWEN_05B, rows, 20, 2.0)
+        assert nograd == support
+        assert fused_head == QWEN_05B.vocab_size * QWEN_05B.hidden_size * 4
+        assert logits == rows * QWEN_05B.vocab_size * 8 + fused_head
+
+
 class TestResolveMaxNumBatchedTokens:
     def test_unset_takes_the_async_engine_default(self):
         assert formulas.resolve_max_num_batched_tokens(8, 32768) == 2048
@@ -763,6 +808,33 @@ class TestRoutedExpertBytes:
 
         assert engine != trainer
         assert engine > 0
+
+
+class TestSavedRouterTopkBytes:
+    def test_charges_fp32_scores_and_int64_indices_per_moe_layer(self):
+        arch = ModelArch.from_hf_config(GRANITE_MOE)
+
+        saved = formulas.saved_router_topk_bytes(arch, 1, 16384)
+
+        # 32 MoE layers x 16k tokens x top-8, 4 + 8 bytes per routed slot.
+        assert saved == 32 * 16384 * 8 * 12
+        assert saved == 48 * MiB
+
+    def test_block_exclusive_stack_charges_only_moe_layers(self):
+        arch = ModelArch.from_hf_config(
+            {
+                **NEMOTRON_H_MOE,
+                "num_hidden_layers": 3,
+                "layers_block_type": ["moe", "attention", "moe"],
+            }
+        )
+
+        saved = formulas.saved_router_topk_bytes(arch, 2, 1024)
+
+        assert saved == 2 * 2 * 1024 * 6 * 12
+
+    def test_dense_model_saves_nothing(self):
+        assert formulas.saved_router_topk_bytes(QWEN_05B, 1, 16384) == 0
 
 
 # Nemotron 3 Nano 4B Mamba-2 geometry. At one rank's 16k-token FSDP backward
