@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
+from agilerl.arena.memory.resolve.chunk import resolve_chunk_rows
 from agilerl.arena.memory.specs import (
     DTYPE_BYTES,
     BlockKind,
@@ -18,6 +19,7 @@ from agilerl.arena.memory.specs import (
     MiB,
     ModelArch,
     PackedMoeDispatch,
+    TrainingSettings,
     WeightDtype,
     WeightVariant,
 )
@@ -621,6 +623,21 @@ def routed_expert_bytes(
     return int(routed * width * act_bytes)
 
 
+def saved_router_topk_bytes(arch: ModelArch, rows: int, seq_len: int) -> int:
+    """Router top-k outputs every checkpointed MoE block saves for backward.
+
+    Selective checkpointing keeps each router's ``(tokens, top_k)`` scores
+    and int64 expert indices on device until that block's backward, so
+    recompute replays the forward routing. Activation offload does not
+    move them. Scores are charged at fp32, the widest a router picks on.
+    """
+    if not arch.is_moe:
+        return 0
+    routed = rows * seq_len * (arch.n_experts_per_tok or 1)
+    slot_bytes = DTYPE_BYTES["fp32"] + 8
+    return int(routed * arch.moe_layers * slot_bytes)
+
+
 def routed_chunk_bytes(
     arch: ModelArch,
     rows: int,
@@ -928,6 +945,30 @@ def support_rows_bytes(
     tokens = max(chunk_rows, chunk_rows * arch.vocab_size // (width * arch.hidden_size))
     elements = tokens * width * arch.hidden_size
     return int(elements * (act_bytes + 4 if act_bytes < 4 else act_bytes))
+
+
+def logit_terms(
+    arch: ModelArch,
+    settings: TrainingSettings,
+    act_bytes: float,
+) -> tuple[float, int, float]:
+    """Loss-instant logits, the hoisted fp32 head, and no-grad head bytes."""
+    # Two fp32 tiles are live at the loss instant: recomputed logits plus
+    # that tile's gradient. Tiles are fixed-size, so a fused critic row adds none.
+    logit_rows = resolve_chunk_rows(arch.vocab_size, settings.chunk_rows)
+    # The chunk loop hoists an fp32 lm_head copy when the head runs below fp32.
+    fused_head = int(arch.vocab_size * arch.hidden_size * 4) if act_bytes < 4 else 0
+    logits = logit_rows * arch.vocab_size * 8 + fused_head
+    nograd_logits = logit_rows * arch.vocab_size * 4 + fused_head
+    if settings.sampling_support_width:
+        support_rows = support_rows_bytes(
+            arch, logit_rows, settings.sampling_support_width, act_bytes
+        )
+        nograd_logits = support_rows
+        if settings.support_scored_loss:
+            logits = support_rows
+            fused_head = 0
+    return logits, fused_head, nograd_logits
 
 
 # Chunk length of AgileRL's eager Mamba scan.

@@ -19,7 +19,6 @@ import agilerl.arena.memory.formulas as formulas
 import agilerl.arena.memory.vision as vision
 from agilerl.arena.memory.breakdown import MemoryComponent, PhaseBreakdown
 from agilerl.arena.memory.formulas import geometry_gap_warning
-from agilerl.arena.memory.resolve.chunk import resolve_chunk_rows
 from agilerl.arena.memory.resolve.fsdp import resolve_fsdp_memory
 from agilerl.arena.memory.specs import (
     DTYPE_BYTES,
@@ -772,6 +771,7 @@ class ActivationPeak:
     nograd_peak: float
     optimizer_peak: float
     saved: float
+    router_topk: float
     recompute: float
     split_lora: float
     routed_chunks: float
@@ -878,6 +878,7 @@ class ActivationTerms:
     """Checkpoint, logit, and no-grad bytes inside one training step."""
 
     saved: float
+    router_topk: float
     recompute: float
     split_lora: float
     routed_chunks: float
@@ -945,30 +946,6 @@ def _vision_activation_terms(
     return tower_lora, nograd_pixels, balance_pixels
 
 
-def _logit_terms(
-    arch: ModelArch,
-    settings: TrainingSettings,
-    act_bytes: float,
-) -> tuple[float, int, float]:
-    """Loss-instant logits, the hoisted fp32 head, and no-grad head bytes."""
-    # Two fp32 tiles are live at the loss instant: recomputed logits plus
-    # that tile's gradient. Tiles are fixed-size, so a fused critic row adds none.
-    logit_rows = resolve_chunk_rows(arch.vocab_size, settings.chunk_rows)
-    # The chunk loop hoists an fp32 lm_head copy when the head runs below fp32.
-    fused_head = int(arch.vocab_size * arch.hidden_size * 4) if act_bytes < 4 else 0
-    logits = logit_rows * arch.vocab_size * 8 + fused_head
-    nograd_logits = logit_rows * arch.vocab_size * 4 + fused_head
-    if settings.sampling_support_width:
-        support_rows = formulas.support_rows_bytes(
-            arch, logit_rows, settings.sampling_support_width, act_bytes
-        )
-        nograd_logits = support_rows
-        if settings.support_scored_loss:
-            logits = support_rows
-            fused_head = 0
-    return logits, fused_head, nograd_logits
-
-
 def _activation_terms(
     arch: ModelArch,
     settings: TrainingSettings,
@@ -995,6 +972,10 @@ def _activation_terms(
         saved = recompute * arch.n_layers * graph_rows
     if settings.activation_offload:
         saved = 0
+    # FSDP selective checkpointing stores aten.topk in its cache.
+    router_topk = 0
+    if settings.gradient_checkpointing and settings.fsdp is not None:
+        router_topk = formulas.saved_router_topk_bytes(arch, live_rows, seq_len)
     loss_hidden = live_rows * seq_len * arch.hidden_size * act_bytes
     recompute, lora_casts, lora_dropout, split_lora, routed_chunks = (
         block_backward_terms(
@@ -1007,7 +988,7 @@ def _activation_terms(
         )
     )
     loss_lora_casts = 0 if settings.lora_casts_recompute_only else lora_casts
-    logits, fused_head, nograd_logits = _logit_terms(arch, settings, act_bytes)
+    logits, fused_head, nograd_logits = formulas.logit_terms(arch, settings, act_bytes)
     # The fused pass splits the stacked adapter rows into micro-batch forwards.
     nograd_pass = (
         formulas.nograd_forward_bytes(
@@ -1026,6 +1007,7 @@ def _activation_terms(
     )
     return ActivationTerms(
         saved=saved,
+        router_topk=router_topk,
         recompute=recompute,
         split_lora=split_lora,
         routed_chunks=routed_chunks,
@@ -1057,6 +1039,7 @@ def _binding_instant(
     backward_peak = (
         grads
         + terms.saved
+        + terms.router_topk
         + terms.recompute
         + terms.loss_hidden
         + terms.lora_casts
@@ -1068,6 +1051,7 @@ def _binding_instant(
     loss_peak = (
         grads
         + terms.saved
+        + terms.router_topk
         + terms.loss_hidden
         + terms.loss_lora_casts
         + terms.tower_lora
@@ -1172,6 +1156,7 @@ def activation_peak(
         nograd_peak=instant.nograd_peak,
         optimizer_peak=instant.optimizer_peak,
         saved=terms.saved,
+        router_topk=terms.router_topk,
         recompute=terms.recompute,
         split_lora=terms.split_lora,
         routed_chunks=terms.routed_chunks,
@@ -1320,6 +1305,7 @@ def _activation_workspace_components(
                 "segment_balance_peak": int(peak.balance_peak),
                 "optimizer_peak": int(peak.optimizer_peak),
                 "checkpoint_boundaries": int(peak.saved),
+                "saved_router_topk": int(peak.router_topk),
                 "block_recompute": int(peak.recompute),
                 "split_moe_lora": int(peak.split_lora),
                 "routed_expert_chunks": int(peak.routed_chunks),
