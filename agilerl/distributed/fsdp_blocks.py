@@ -628,7 +628,9 @@ def apply_fsdp2(
     for block in blocks:
         unit = block
         if id(block) in checkpointed:
-            save_router = bool(iter_packed_expert_modules(block))
+            save_router = any(
+                is_packed_experts_module(module) for module in block.modules()
+            )
             if save_router:
                 patch_moe_routers(block)
             unit = checkpoint_wrapper(
