@@ -7,9 +7,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
-from agilerl import HAS_LLM_DEPENDENCIES
+
 from transformers import AutoModelForImageTextToText
 
+from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.architectures.gemma4 import install_gemma4_vision_patches
 from agilerl.architectures.nemotron_h.mamba import install_mamba_patches
 from agilerl.architectures.qwen3_5.packed import install_qwen_gdn_patches
