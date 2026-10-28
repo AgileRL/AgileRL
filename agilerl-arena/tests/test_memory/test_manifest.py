@@ -10,6 +10,7 @@ import pytest
 
 from agilerl.arena.memory.estimator import estimate_run, estimate_training
 from agilerl.arena.memory.manifest import (
+    _liger_sequence_chunks,
     check_fp8_moe_backend_for_device,
     device_spec_from_resource_class,
     lookup_gpu,
@@ -26,6 +27,7 @@ from agilerl.arena.memory.manifest import (
 )
 from agilerl.arena.memory.resolve.fuse import resolve_fuse_actor_critic_pass
 from agilerl.arena.memory.specs import DeviceSpec, GiB
+from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
 from agilerl.arena.models.fsdp import FSDPConfig
 from agilerl.arena.models.manifest import TrainingManifest
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
@@ -52,6 +54,27 @@ GRPO = {
         "max_context_length": 512,
     },
     "training": {"max_steps": 100},
+}
+
+# Liger with the vLLM correction off, so turn- and trajectory-level
+# losses reach the fused kernel.
+SEQUENCE_LIGER_ROLLOUT = {
+    "use_liger_loss": True,
+    "vllm_importance_sampling_correction": False,
+}
+
+# GRPO also needs the off-policy masks unset; they default on.
+SEQUENCE_LIGER = {
+    **SEQUENCE_LIGER_ROLLOUT,
+    "off_policy_token_mask_bounds": None,
+    "off_policy_sequence_mask_threshold": None,
+}
+
+ENGINE = {"vllm_config": {"gpu_memory_utilization": 0.85}}
+
+ASYNC_ROLLOUT = {
+    "training": {"rollout_mode": "async", "rollout_engines_per_agent": 1},
+    "replay_buffer": {"kind": "llm"},
 }
 
 DQN = {
@@ -382,65 +405,75 @@ class TestTrainingSettings:
             )
 
     @pytest.mark.parametrize(
-        "algorithm",
+        ("algorithm", "sequence_chunks", "weight_grad"),
         [
-            {"importance_sampling_level": "trajectory"},
-            {"loss_type": "gspo"},
+            # GRPO's fused kernel at trajectory level takes one sequence per chunk.
+            ({"importance_sampling_level": "trajectory"}, True, False),
+            ({"loss_type": "gspo"}, True, False),
+            ({"importance_sampling_level": "turn"}, False, False),
+            ({"importance_sampling_level": "token"}, False, True),
+            # Turn advantages at trajectory level have no fused kernel.
+            (
+                {
+                    "importance_sampling_level": "trajectory",
+                    "advantage_granularity": "turn",
+                },
+                False,
+                False,
+            ),
         ],
+        ids=["trajectory", "gspo", "turn", "token", "trajectory-turn-advantages"],
     )
-    def test_unbounded_grpo_liger_loss_is_refused(self, algorithm):
-        doc = manifest(
-            algorithm={
-                "use_liger_loss": True,
-                "vllm_importance_sampling_correction": False,
-                "off_policy_token_mask_bounds": None,
-                "off_policy_sequence_mask_threshold": None,
-                **algorithm,
-            }
+    def test_grpo_liger_tile_follows_the_kernel(
+        self, algorithm, sequence_chunks, weight_grad
+    ):
+        settings = training_settings_from_manifest(
+            manifest(algorithm={**SEQUENCE_LIGER, **algorithm})
         )
 
-        with pytest.raises(ValueError, match="chunked token-level"):
-            training_settings_from_manifest(doc)
+        assert settings.liger_sequence_chunks is sequence_chunks
+        assert settings.liger_weight_grad is weight_grad
 
-    @pytest.mark.parametrize("level", ["turn", "trajectory"])
-    def test_unbounded_llmppo_liger_loss_is_refused(self, level):
-        doc = manifest()
+    @pytest.mark.parametrize(
+        ("algorithm", "sequence_chunks", "weight_grad"),
+        [
+            ({"importance_sampling_level": "trajectory"}, True, False),
+            ({"importance_sampling_level": "token"}, False, True),
+            (
+                {
+                    "importance_sampling_level": "trajectory",
+                    "vllm_importance_sampling_correction": True,
+                },
+                False,
+                False,
+            ),
+            (
+                {"importance_sampling_level": "trajectory", "use_liger_loss": False},
+                False,
+                False,
+            ),
+        ],
+        ids=["trajectory", "token", "vllm-correction", "no-liger"],
+    )
+    def test_llmppo_liger_keeps_a_sequence_of_logits(
+        self, algorithm, sequence_chunks, weight_grad
+    ):
+        doc = manifest(**ASYNC_ROLLOUT)
         doc["algorithm"] = {
             "name": "LLMPPO",
             "batch_size": 2,
             "micro_batch_size_per_gpu": 1,
             "use_liger_loss": True,
-            "importance_sampling_level": level,
+            "vllm_importance_sampling_correction": False,
+            "importance_sampling_level": "trajectory",
+            **ENGINE,
+            **algorithm,
         }
-
-        with pytest.raises(ValueError, match="chunked token-level"):
-            training_settings_from_manifest(doc)
-
-    @pytest.mark.parametrize(
-        "algorithm",
-        [
-            {"loss_type": "gspo", "vllm_importance_sampling_correction": True},
-            {"loss_type": "gspo", "off_policy_token_mask_bounds": (0.5, 5.0)},
-            {"loss_type": "gspo", "off_policy_sequence_mask_threshold": 0.03},
-            {"loss_type": "gspo", "advantage_granularity": "turn"},
-            {"loss_type": "cispo", "importance_sampling_level": "trajectory"},
-            {"importance_sampling_level": "turn"},
-        ],
-    )
-    def test_grpo_liger_loss_on_the_standard_path_passes(self, algorithm):
-        doc = manifest(
-            algorithm={
-                "use_liger_loss": True,
-                "vllm_importance_sampling_correction": False,
-                "off_policy_token_mask_bounds": None,
-                "off_policy_sequence_mask_threshold": None,
-                **algorithm,
-            }
-        )
 
         settings = training_settings_from_manifest(doc)
 
-        assert settings.algorithm == "grpo"
+        assert settings.liger_sequence_chunks is sequence_chunks
+        assert settings.liger_weight_grad is weight_grad
 
     def test_token_level_liger_loss_passes(self):
         settings = training_settings_from_manifest(
@@ -452,6 +485,129 @@ class TestTrainingSettings:
             )
         )
         assert settings.algorithm == "grpo"
+        assert settings.liger_sequence_chunks is False
+        assert settings.liger_weight_grad is True
+
+    @pytest.mark.parametrize(
+        ("algorithm", "sequence_chunks"),
+        [
+            ({}, True),
+            ({"turn_level_clip": False}, False),
+            ({"advantage_granularity": "token"}, False),
+            ({"importance_sampling_level": "turn"}, True),
+            ({"importance_sampling_level": "token"}, False),
+        ],
+        ids=[
+            "auto-resolves-to-turn-clip",
+            "auto-without-turn-clip-stays-on-the-token-tile",
+            "auto-token-advantages-stay-on-the-token-tile",
+            "turn",
+            "token",
+        ],
+    )
+    def test_llmppo_sequence_chunks_follow_the_trainer_kernel(
+        self, algorithm, sequence_chunks
+    ):
+        doc = manifest()
+        doc["algorithm"] = {
+            "name": "LLMPPO",
+            "batch_size": 2,
+            "micro_batch_size_per_gpu": 1,
+            **SEQUENCE_LIGER_ROLLOUT,
+            **algorithm,
+        }
+
+        settings = training_settings_from_manifest(doc)
+
+        assert settings.algorithm == "ppo"
+        assert settings.liger_sequence_chunks is sequence_chunks
+
+    @pytest.mark.parametrize(
+        ("importance_sampling_level", "sequence_chunks"),
+        [("trajectory", True), ("token", False)],
+    )
+    def test_llmreinforce_sequence_chunks_follow_the_trainer_kernel(
+        self, importance_sampling_level, sequence_chunks
+    ):
+        doc = manifest()
+        doc["algorithm"] = {
+            "name": "LLMREINFORCE",
+            "batch_size": 2,
+            "micro_batch_size_per_gpu": 1,
+            **SEQUENCE_LIGER_ROLLOUT,
+            "importance_sampling_level": importance_sampling_level,
+        }
+
+        settings = training_settings_from_manifest(doc)
+
+        assert settings.algorithm == "reinforce"
+        assert settings.liger_sequence_chunks is sequence_chunks
+
+    def test_other_rollout_specs_stay_on_the_token_tile(self):
+        spec = RolloutLLMSpec(
+            use_liger_loss=True,
+            vllm_importance_sampling_correction=False,
+        )
+
+        assert _liger_sequence_chunks(spec) is False
+
+
+class TestLigerSequenceLoss:
+    def test_default_gspo_manifest_returns_a_phase_breakdown(self):
+        # Arrange: GSPO defaults to loss_type="gspo" and use_liger_loss=True.
+        doc = manifest(algorithm={"name": "GSPO", **ENGINE}, **ASYNC_ROLLOUT)
+
+        # Act
+        settings = training_settings_from_manifest(doc)
+        estimate = estimate_manifest(
+            doc, device_spec_from_resource_class(L4_TIER), TINY_CONFIG
+        )
+
+        # Assert: GSPO streams log-probs, so the sequence tile stays off.
+        # The default correction leaves the standard path, which has no head grad.
+        assert settings.liger_sequence_chunks is False
+        assert settings.liger_weight_grad is False
+        assert estimate.training.total_bytes > 0
+
+    def test_a_card_below_the_sequence_tile_does_not_fit(self):
+        # Arrange: a long context makes the LLMPPO sequence tile the peak.
+        long_context = {"max_context_length": 32768}
+
+        def llmppo(use_liger_loss: bool) -> dict:
+            doc = manifest(network=long_context, **ASYNC_ROLLOUT)
+            doc["algorithm"] = {
+                "name": "LLMPPO",
+                "batch_size": 2,
+                "micro_batch_size_per_gpu": 1,
+                "use_liger_loss": use_liger_loss,
+                "vllm_importance_sampling_correction": False,
+                "importance_sampling_level": "trajectory",
+                **ENGINE,
+            }
+            return doc
+
+        sequence = llmppo(True)
+        token = llmppo(False)
+        probe = device_spec_from_resource_class(L4_TIER)
+        sequence_peak = estimate_manifest(
+            sequence, probe, TINY_CONFIG
+        ).training.total_bytes
+        token_estimate = estimate_manifest(token, probe, TINY_CONFIG).training
+        usable_share = token_estimate.device_usable_bytes / probe.total_bytes
+        card_gib = (
+            (sequence_peak + token_estimate.total_bytes) / 2 / usable_share / 1024**3
+        )
+        card = device_spec_from_resource_class(L4_TIER, gpu_memory_gib=card_gib)
+
+        # Act
+        sequence_fit = estimate_manifest(sequence, card, TINY_CONFIG).training
+        token_fit = estimate_manifest(token, card, TINY_CONFIG).training
+
+        # Assert
+        assert token_estimate.total_bytes < sequence_peak
+        assert token_fit.fits
+        assert not sequence_fit.fits
+        assert sequence_fit.total_bytes > sequence_fit.device_usable_bytes
 
 
 def screenshots(**environment: object) -> dict:
@@ -873,6 +1029,13 @@ class TestDeviceFromResourceClass:
         assert device.name == "NVIDIA L4"
         assert device.total_bytes == int(22.03 * 1024**3)
         assert device.compute_capability == (8, 9)
+
+    @pytest.mark.parametrize(
+        ("gpu_type", "cuda_gib"),
+        [("NVIDIA H100 80GB HBM3", 79.11), ("a100 80gb", 79.25), ("NVIDIA L4", 22.03)],
+    )
+    def test_measured_cards_carry_their_cuda_visible_total(self, gpu_type, cuda_gib):
+        assert lookup_gpu(gpu_type).total_gib == cuda_gib
 
     def test_gpu_type_spellings(self):
         assert lookup_gpu("a100 80gb").total_gib == 79.25
@@ -1334,6 +1497,27 @@ class TestMicroBatchRows:
         assert settings.algorithm == "dpo"
         assert settings.micro_batch_size == 4
         assert settings.grad_graph_rows == 2
+
+    @pytest.mark.parametrize("use_liger_loss", [True, False])
+    def test_dpo_liger_loss_holds_whole_sequences(self, use_liger_loss):
+        settings = training_settings_from_manifest(
+            {
+                "algorithm": {
+                    "name": "DPO",
+                    "batch_size": 8,
+                    "use_liger_loss": use_liger_loss,
+                },
+                "environment": {"dataset": "openai/gsm8k"},
+                "network": {
+                    "pretrained_model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
+                    "max_context_length": 512,
+                },
+                "training": {"max_steps": 100},
+            }
+        )
+
+        assert settings.liger_sequence_chunks is use_liger_loss
+        assert settings.liger_weight_grad is False
 
     def test_sequence_packing_is_sized_as_padded_rows(self):
         doc = manifest(

@@ -100,7 +100,7 @@ class TestResolveMicroBatchSizePerGpu:
         raw = _manifest()
         raw["algorithm"]["top_k"] = 0
         manifest = TrainingManifest.model_validate(raw)
-        device = _device(4)
+        device = _device(4.31)
 
         # Act
         chosen = _resolve(manifest, device)
@@ -322,7 +322,7 @@ class TestResolveMicroBatchSizePerGpu:
         raw = _manifest()
         raw["algorithm"]["top_k"] = 0
         caller = TrainingManifest.model_validate(raw)
-        device = _device(4)
+        device = _device(4.31)
         model_config = SUPPORTED_MODEL_INFO[HUB_ID].config
 
         # Act

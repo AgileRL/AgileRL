@@ -211,11 +211,11 @@ class TestSolve:
         assert result.config.generation.max_model_len == 2048
 
 
-class TestSolveSingleValley:
-    """Generation fits() dips mid-range; the minimum failing must not end it."""
+class TestSolveEngineReserve:
+    """vLLM reserves its gpu_memory_utilization budget at any context length."""
 
-    def test_returns_the_run_top_when_the_minimum_does_not_fit(self, model):
-        # Arrange: the profile forward outgrows the serving forward mid-range.
+    def test_no_context_fits_when_the_reserve_outgrows_the_card(self, model):
+        # Arrange: 0.9 of 8 GiB plus the CUDA context is more than the card.
         device = DeviceSpec(total_bytes=8 * GiB)
         settings = GenerationSettings(
             gpu_memory_utilization=0.9,
@@ -225,18 +225,15 @@ class TestSolveSingleValley:
         )
         config = inference_run_config(model, device, settings)
 
-        # Act
-        result = solve_inference(config, "max_model_len", hi=32768)
+        # Act + Assert
+        with pytest.raises(CannotSolve, match="no max_model_len value up to 32768"):
+            solve_inference(config, "max_model_len", hi=32768)
 
-        # Assert
-        assert result.value == 10288
-        assert result.limited_by == "memory"
-
-    def test_the_minimum_fails_while_mid_range_fits(self, model):
+    def test_the_engine_bar_does_not_move_with_context(self, model):
         # Arrange
         device = DeviceSpec(total_bytes=8 * GiB)
 
-        def serves(context: int) -> bool:
+        def engine_bar(context: int) -> int:
             settings = GenerationSettings(
                 gpu_memory_utilization=0.9,
                 max_num_seqs=8,
@@ -244,13 +241,15 @@ class TestSolveSingleValley:
                 max_model_len=context,
                 max_num_batched_tokens=32768,
             )
-            bar = estimate_run(inference_run_config(model, device, settings))
-            return generation_can_serve(bar.generation)
+            run = estimate_run(inference_run_config(model, device, settings))
+            return run.generation.total_bytes
 
-        # Act + Assert
-        assert not serves(16)
-        assert serves(4096)
-        assert not serves(32768)
+        # Act
+        bars = [engine_bar(context) for context in (16, 4096, 32768)]
+
+        # Assert: the start-up profile's peak stays reserved after it frees.
+        assert bars[0] == bars[1] == bars[2]
+        assert bars[0] > device.generation_usable_bytes
 
 
 class TestSolveWithoutAnEngine:
@@ -372,7 +371,7 @@ class TestBareSolveOnAnInferenceConfig:
         dedicated = solve_inference(config, "max_model_len", hi=32768)
 
         # Assert
-        assert bare.value == 9504
+        assert bare.value == 3456
         assert bare.limited_by == "memory"
         assert bare.estimate.training.fits_with_buffer
         assert dedicated.value == 32768

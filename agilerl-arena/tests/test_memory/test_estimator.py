@@ -14,6 +14,15 @@ from agilerl.arena.memory.estimator import (
     generation_can_serve,
     training_breakdown,
 )
+from agilerl.arena.memory.lora_placement import (
+    lora_tensor_placement,
+    split_moe_lora_recompute_bytes,
+)
+from agilerl.arena.memory.nccl import (
+    TP_RUNTIME_BYTES,
+    nccl_on_node_fraction,
+    trainer_nccl_bytes,
+)
 from agilerl.arena.memory.resolve.chunk import resolve_chunk_rows
 from agilerl.arena.memory.resolve.fsdp import resolve_fsdp_memory
 from agilerl.arena.memory.specs import (
@@ -98,10 +107,12 @@ class TestEstimateTraining:
             component(breakdown, "grads").n_bytes
             < component(breakdown, "base_weights").n_bytes
         )
-        # Chunked loss: workspace is tiles + one fp32 (vocab, hidden) head, capped at 512 MiB + head.
+        # Chunked loss: tiles, one fp32 head, and the weight-dtype head grad.
         head_upcast = model.arch.vocab_size * model.arch.hidden_size * 4
+        head_grad = model.arch.vocab_size * model.arch.hidden_size * 2
         assert (
-            component(breakdown, "logits_workspace").n_bytes <= 512 * MiB + head_upcast
+            component(breakdown, "logits_workspace").n_bytes
+            <= 512 * MiB + head_upcast + head_grad
         )
 
     def test_monotonic_in_seq_len_and_update_size(self, model, device):
@@ -545,6 +556,56 @@ class TestEstimateGeneration:
         )
 
 
+class TestEngineCompileCopy:
+    def gemma(self) -> ModelSpec:
+        info = SUPPORTED_MODEL_INFO["google/gemma-4-E4B-it"]
+        return ModelSpec(
+            model_id="gemma",
+            arch=ModelArch.from_hf_config(info.config),
+            n_params=info.num_params,
+        )
+
+    def test_gemma4_compiling_engine_fails_on_an_l4_at_0_85(self):
+        # Arrange: the CISPO-DATASET-ROLLOUT engine. vLLM had -1.04 GiB of KV.
+        settings = GenerationSettings(
+            gpu_memory_utilization=0.85,
+            max_num_seqs=16,
+            max_model_len=512,
+            max_num_batched_tokens=2048,
+            max_loras=1,
+            max_lora_rank=16,
+        )
+        l4 = DeviceSpec(total_bytes=int(22.03 * GiB), name="NVIDIA L4")
+
+        # Act
+        compiled = generation_can_serve(estimate_generation(self.gemma(), l4, settings))
+        eager = generation_can_serve(
+            estimate_generation(
+                self.gemma(), l4, settings.model_copy(update={"enforce_eager": True})
+            )
+        )
+
+        # Assert: the compile pass's per-layer embedding copy is what runs out.
+        assert not compiled
+        assert eager
+
+    def test_model_without_per_layer_embeddings_pays_nothing(self, model):
+        settings = GenerationSettings(gpu_memory_utilization=0.5, max_model_len=1024)
+        device = DeviceSpec(total_bytes=24 * GiB, name="NVIDIA L4")
+
+        compiled = component(
+            estimate_generation(model, device, settings), "kv_cache"
+        ).n_bytes
+        eager = component(
+            estimate_generation(
+                model, device, settings.model_copy(update={"enforce_eager": True})
+            ),
+            "kv_cache",
+        ).n_bytes
+
+        assert eager - compiled == formulas.CUDA_GRAPH_POOL_BYTES
+
+
 class TestGenerationCanServe:
     def test_requires_the_pool_to_cover_demand(self, model, device):
         fits = estimate_generation(
@@ -639,7 +700,7 @@ class TestDeviceSpecContextBytesProperty:
         )
         assert (
             DeviceSpec(total_bytes=80 * GiB, name="NVIDIA H100 80GB HBM3").context_bytes
-            == 1000 * MiB
+            == 1440 * MiB
         )
         assert (
             DeviceSpec(total_bytes=24 * GiB, name="mystery-card").context_bytes
@@ -686,6 +747,14 @@ class TestTrainingSettingsInit:
     def test_micro_batch_size_must_be_positive(self):
         with pytest.raises(ValidationError, match="micro_batch_size"):
             TrainingSettings(micro_batch_size=0)
+
+    def test_sft_drops_the_unspecified_policy_head_grad(self):
+        assert TrainingSettings(algorithm="sft").liger_weight_grad is False
+        assert TrainingSettings().liger_weight_grad is True
+        assert (
+            TrainingSettings(algorithm="sft", liger_weight_grad=True).liger_weight_grad
+            is True
+        )
 
 
 class TestGenerationSettings:
@@ -863,7 +932,7 @@ class TestDistributedTerms:
                 trajectories_per_update=4,
             ),
         )
-        replicated, sharded_params = formulas.lora_tensor_placement(
+        replicated, sharded_params = lora_tensor_placement(
             WIDE, 16, "all-linear", 0, 100_000
         )
 
@@ -902,7 +971,7 @@ class TestDistributedTerms:
                 group_size=8,
             ),
         )
-        replicated, sharded_params = formulas.lora_tensor_placement(
+        replicated, sharded_params = lora_tensor_placement(
             WIDE, 16, "all-linear", 0, 100_000
         )
 
@@ -921,7 +990,7 @@ class TestDistributedTerms:
             lora_rank=16,
             group_size=8,
         )
-        replicated, sharded_params = formulas.lora_tensor_placement(
+        replicated, sharded_params = lora_tensor_placement(
             WIDE, 16, "all-linear", 0, 100_000
         )
 
@@ -943,10 +1012,11 @@ class TestDistributedTerms:
         trained = formulas.lora_param_count(model.arch, 16)
 
         assert component(offloaded, "optimizer_state").n_bytes == 0
+        # Two bf16 moments per FSDP adapter parameter.
         assert component(offloaded, "optimizer_state").detail["step_bytes"] == (
-            trained * 8
+            trained * 4
         )
-        assert component(resident, "optimizer_state").n_bytes == trained * 8
+        assert component(resident, "optimizer_state").n_bytes == trained * 4
 
     def test_optimizer_step_is_the_peak_when_adam_lives_on_cpu(self, device):
         model = ModelSpec(model_id="wide", arch=WIDE)
@@ -1014,7 +1084,7 @@ class TestDistributedTerms:
         bar = estimate_training(model, device, settings)
 
         assert component(bar, "activations").detail["split_moe_lora"] == (
-            formulas.split_moe_lora_recompute_bytes(
+            split_moe_lora_recompute_bytes(
                 MOE_TINY, 1, 1024, 2, "contracted", 2, settings.lora_rank
             )
         )
@@ -1118,21 +1188,79 @@ class TestDistributedTrainerOverhead:
         one_rank = component(single, "overhead").detail
         assert one_rank["trainer_lib_overhead"] == formulas.TRAINER_LIB_OVERHEAD_BYTES
         assert one_rank["distributed_trainer_overhead"] == 0
+        world = trainer_nccl_bytes(device.nccl_group_bytes, 4, 4)
         for estimate in (data_parallel, fsdp):
             overhead = component(estimate, "overhead")
             assert overhead.detail["trainer_lib_overhead"] == 0
-            assert overhead.detail["distributed_trainer_overhead"] == device.nccl_bytes
+            assert overhead.detail["distributed_trainer_overhead"] == world
             assert overhead.n_bytes == sum(overhead.detail.values())
 
-    def test_nccl_bytes_follow_the_named_device_then_default(self):
+    def test_mesh_process_groups_add_nccl_overhead(self, model, device):
+        # Arrange
+        common = {"n_training_gpus": 4, "max_model_len": 128}
+        group = device.nccl_group_bytes
+
+        # Act
+        fsdp = estimate_training(
+            model, device, TrainingSettings(fsdp=FSDPConfig(), **common)
+        )
+        hsdp = estimate_training(
+            model,
+            device,
+            TrainingSettings(fsdp=FSDPConfig(shard_group_size=2), **common),
+        )
+        tensor_parallel = estimate_training(
+            model, device, TrainingSettings(fsdp=FSDPConfig(tp=2), **common)
+        )
+
+        # Assert: HSDP adds its shard and replicate groups; TP adds its group,
+        # the TP-replica group and the TP runtime, even without a TP plan.
+        def nccl(breakdown):
+            return component(breakdown, "overhead").detail[
+                "distributed_trainer_overhead"
+            ]
+
+        two_rank_groups = int(group * 2 * nccl_on_node_fraction(2))
+        assert nccl(hsdp) - nccl(fsdp) == pytest.approx(two_rank_groups, abs=1)
+        assert nccl(tensor_parallel) - nccl(fsdp) == pytest.approx(
+            two_rank_groups + TP_RUNTIME_BYTES, abs=1
+        )
+
+    def test_ranks_across_nodes_hold_less_nccl_than_one_node(self, model, device):
+        # Arrange
+        settings = TrainingSettings(n_training_gpus=8, fsdp=FSDPConfig())
+        two_nodes = device.model_copy(update={"gpus_per_node": 4})
+
+        # Act
+        one_node_bar = estimate_training(model, device, settings)
+        two_node_bar = estimate_training(model, two_nodes, settings)
+
+        # Assert
+        def nccl(breakdown):
+            return component(breakdown, "overhead").detail[
+                "distributed_trainer_overhead"
+            ]
+
+        assert nccl(two_node_bar) < nccl(one_node_bar)
+        assert nccl(two_node_bar) == trainer_nccl_bytes(
+            device.nccl_group_bytes, 8, 8, gpus_per_node=4
+        )
+
+    def test_nccl_group_bytes_follow_the_named_device_then_default(self):
         assert DeviceSpec(
             total_bytes=80 * GiB, name="NVIDIA A100-SXM4-80GB"
-        ).nccl_bytes == (600 * MiB)
-        assert DeviceSpec(total_bytes=24 * GiB, name="NVIDIA L4").nccl_bytes == 91 * MiB
-        assert DeviceSpec(total_bytes=24 * GiB, name="mystery-card").nccl_bytes == (
-            600 * MiB
+        ).nccl_group_bytes == (820 * MiB)
+        assert DeviceSpec(
+            total_bytes=80 * GiB, name="NVIDIA H100 80GB HBM3"
+        ).nccl_group_bytes == (950 * MiB)
+        assert (
+            DeviceSpec(total_bytes=24 * GiB, name="NVIDIA L4").nccl_group_bytes
+            == 125 * MiB
         )
-        assert DeviceSpec(total_bytes=24 * GiB).nccl_bytes == 600 * MiB
+        assert DeviceSpec(
+            total_bytes=24 * GiB, name="mystery-card"
+        ).nccl_group_bytes == (820 * MiB)
+        assert DeviceSpec(total_bytes=24 * GiB).nccl_group_bytes == 820 * MiB
 
 
 class TestAlgorithmTerms:
@@ -1207,6 +1335,24 @@ class TestAlgorithmTerms:
             > component(g, "activations").detail["backward_peak"]
         )
 
+    def test_dpo_liger_loss_tiles_a_whole_pair_of_sequences(self, model, device):
+        # Arrange: Liger's preference loss chunks over chosen/rejected pairs.
+        token = TrainingSettings(algorithm="dpo", max_model_len=1024)
+        pair = token.model_copy(update={"liger_sequence_chunks": True})
+
+        # Act
+        token_bar = estimate_training(model, device, token)
+        pair_bar = estimate_training(model, device, pair)
+
+        # Assert
+        vocab = model.arch.vocab_size
+        tile = 2 * 1024 * vocab * formulas.LIGER_SEQUENCE_LOGIT_BYTES
+        assert (
+            component(pair_bar, "activations").detail["loss_peak"]
+            > component(token_bar, "activations").detail["loss_peak"]
+        )
+        assert component(pair_bar, "logits_workspace").n_bytes >= tile
+
     def test_sft_has_no_nograd_instant_and_no_engine(self, model, device):
         settings = TrainingSettings(algorithm="sft")
         assert not settings.has_nograd_pass
@@ -1247,16 +1393,21 @@ class TestActivationPeakLossPeak:
         )
 
         # Act
-        full_peak = component(estimate_training(model, device, full), "activations")
+        full_estimate = estimate_training(model, device, full)
+        full_peak = component(full_estimate, "activations")
         support_peak = component(
             estimate_training(model, device, supported), "activations"
         )
 
-        # Assert
+        # Assert: support rows also drop the fused kernel's lm_head grad.
         vocab_workspace = chunk * vocab * 8 + vocab * h * 4
+        head_grad = component(full_estimate, "logits_workspace").detail[
+            "weight_dtype_head_grad"
+        ]
         support_rows = formulas.support_rows_bytes(QWEN_05B, chunk, 20, 2.0)
+        assert head_grad > 0
         assert full_peak.detail["loss_peak"] - support_peak.detail["loss_peak"] == (
-            vocab_workspace - support_rows
+            vocab_workspace + head_grad - support_rows
         )
 
     def test_a_full_vocabulary_loss_keeps_its_workspace(self, model, device):
@@ -1579,7 +1730,7 @@ class TestFusedActorCriticPass:
         bar = estimate_training(model, device, settings)
 
         assert component(bar, "activations").detail["split_moe_lora"] == (
-            formulas.split_moe_lora_recompute_bytes(
+            split_moe_lora_recompute_bytes(
                 MOE_TINY, 2, 1024, 2, "contracted", 2, settings.lora_rank
             )
         )
@@ -1702,8 +1853,8 @@ class TestStripTowersAdvice:
         assert all("strip_multimodal_towers" not in action for action in actions)
 
 
-class TestEagerMambaScan:
-    def test_nemotron_h_on_compute_capability_8_9_does_not_fit_an_l4(self):
+class TestUnfusedMambaScan:
+    def test_nemotron_h_on_compute_capability_8_9_adds_the_unfused_backward(self):
         # Arrange
         model = ModelSpec(
             model_id="nano", arch=ModelArch.from_hf_config(NEMOTRON_NANO_MAMBA)
@@ -1717,13 +1868,12 @@ class TestEagerMambaScan:
         fused = ada.model_copy(update={"compute_capability": (8, 0)})
 
         # Act
-        eager_bar = estimate_training(model, ada, settings)
+        unfused_bar = estimate_training(model, ada, settings)
         fused_bar = estimate_training(model, fused, settings)
 
-        # Assert: the eager scan's 48 GiB product is what the L4 ran out on.
-        assert fused_bar.fits
-        assert not eager_bar.fits
-        assert eager_bar.total_bytes - fused_bar.total_bytes > 48 * GiB
+        # Assert: 4x L4 FSDP at 16k measured 16.25 GiB and fit.
+        assert unfused_bar.fits
+        assert 2 * GiB < unfused_bar.total_bytes - fused_bar.total_bytes < 5 * GiB
 
     def test_other_families_and_unknown_capability_keep_the_fused_scan(self):
         nano = ModelSpec(
@@ -1736,14 +1886,16 @@ class TestEagerMambaScan:
         )
         unknown = ada.model_copy(update={"compute_capability": None})
 
-        assert not falcon.arch.eager_mamba_scan_family
+        assert not falcon.arch.unfused_mamba_scan_family
         assert (
             estimate_training(falcon, ada, settings).total_bytes
             == estimate_training(falcon, unknown, settings).total_bytes
         )
+        # At 16k the backward is the peak, so the unfused path shows.
+        long = settings.model_copy(update={"max_model_len": 16384})
         assert (
-            estimate_training(nano, unknown, settings).total_bytes
-            < estimate_training(nano, ada, settings).total_bytes
+            estimate_training(nano, unknown, long).total_bytes
+            < estimate_training(nano, ada, long).total_bytes
         )
 
 
@@ -1845,6 +1997,28 @@ class TestRoutedChunkTerm:
         )
         assert detail["routed_expert_chunks"] > 0
 
+    def test_tensor_parallel_ranks_split_the_routed_tokens(self, device):
+        # Arrange
+        settings = moe_settings(
+            routed_expert_chunk_mib=256, optim_cpu_offload=True, tp=2
+        ).model_copy(update={"n_training_gpus": 16})
+
+        # Act
+        breakdown = estimate_training(MOE_MODEL, device, settings)
+
+        # Assert
+        detail = component(breakdown, "activations").detail
+        assert detail["routed_expert_chunks"] == formulas.routed_chunk_bytes(
+            MOE_MODEL.arch,
+            1,
+            8192,
+            2.0,
+            256 * MiB,
+            expert_lora=True,
+            contracted=True,
+            ep=8,
+        )
+
 
 class TestSavedRouterTopkTerm:
     def test_checkpointed_moe_training_charges_router_topk(self, device):
@@ -1909,7 +2083,7 @@ class TestOptimizerPlacement:
 
         trained = formulas.lora_param_count(model.arch, 16)
         optimizer = component(breakdown, "optimizer_state")
-        assert optimizer.n_bytes == trained * 8
+        assert optimizer.n_bytes == trained * 4
         assert optimizer.detail["foreach_workspace"] == 0
 
     def test_gpu_optimizer_costs_more_device_memory_than_offload(self, device):
@@ -2255,8 +2429,8 @@ def super_vl_cispo(
 
 
 def training_gpu(name: str, cuda_bytes: int) -> DeviceSpec:
-    """Training GPU. The budget is DeviceSpec.usable_bytes."""
-    return DeviceSpec(total_bytes=cuda_bytes, name=name)
+    """Training GPU on an 8-GPU node. The budget is DeviceSpec.usable_bytes."""
+    return DeviceSpec(total_bytes=cuda_bytes, name=name, gpus_per_node=8)
 
 
 class TestSuperVlCalibration:
@@ -2273,14 +2447,21 @@ class TestSuperVlCalibration:
         return estimate_training(SUPER_VL_MODEL, device, settings).total_bytes / GiB
 
     @pytest.mark.parametrize(
-        ("chunk_mib", "rank0_peak_gib"), [(64, 77.68), (256, 77.95)]
+        ("chunk_mib", "rank0_peak_gib"), [(64, 77.68), (256, 77.95), (1024, 78.09)]
     )
-    def test_estimate_tracks_the_rank0_peak(self, a100, chunk_mib, rank0_peak_gib):
-        assert self.estimate(a100, chunk_mib) == pytest.approx(rank0_peak_gib, abs=1.0)
+    def test_estimate_tracks_the_busiest_rank_above_rank0(
+        self, a100, chunk_mib, rank0_peak_gib
+    ):
+        # Arrange: the busiest rank peaked at 79.2 GiB at 64 MiB and is taken
+        # to rise with chunk size as rank 0 did.
+        busiest_peak_gib = 79.2 + (rank0_peak_gib - 77.68)
 
-    def test_estimate_at_1024_mib_stays_above_the_rank0_peak(self, a100):
-        # The chunk term follows the steeper H100 rise, so A100 is overestimated here.
-        assert 78.09 <= self.estimate(a100, 1024) < 78.09 + 1.5
+        # Act
+        estimate_gib = self.estimate(a100, chunk_mib)
+
+        # Assert
+        assert estimate_gib > rank0_peak_gib
+        assert estimate_gib == pytest.approx(busiest_peak_gib, abs=1.0)
 
     def test_busiest_rank_stays_inside_the_runtime_headroom(self, a100):
         # Arrange: the node's busiest rank peaked at 79.2 GiB at 64 MiB.
@@ -2407,10 +2588,15 @@ class TestTrainingSettingsShardGpusProperty:
             )
 
 
-class TestTrainingTensorParallelUnsupported:
-    def test_activations_stay_at_full_width(self, model, device):
+class TestTrainingTensorParallel:
+    def test_linears_are_resident_at_one_over_tp_and_the_head_is_gathered_for_logits(
+        self, device
+    ):
         # Arrange
-        common = {"n_training_gpus": 2, "max_model_len": 128}
+        model = ModelSpec(
+            model_id="nano", arch=ModelArch.from_hf_config(NEMOTRON_NANO_MAMBA)
+        )
+        common = {"n_training_gpus": 4, "max_model_len": 128}
 
         # Act
         plain = estimate_training(
@@ -2421,10 +2607,174 @@ class TestTrainingTensorParallelUnsupported:
         )
 
         # Assert
-        assert component(parallel, "activations").n_bytes == (
-            component(plain, "activations").n_bytes
+        assert (
+            component(parallel, "base_weights").n_bytes
+            > component(plain, "base_weights").n_bytes
         )
-        assert any("fsdp.tp=2 is not sized" in note for note in parallel.warnings)
+        assert (
+            component(parallel, "activations").detail["block_recompute"]
+            < (component(plain, "activations").detail["block_recompute"])
+        )
+        assert (
+            component(parallel, "activations").detail["checkpoint_boundaries"]
+            == (component(plain, "activations").detail["checkpoint_boundaries"])
+        )
+        plain_logits = component(plain, "logits_workspace").detail
+        parallel_logits = component(parallel, "logits_workspace").detail
+        assert parallel_logits["chunk_tiles"] == plain_logits["chunk_tiles"]
+        assert parallel_logits["tp_head_gather"] == model.arch.vocab_size * (
+            model.arch.hidden_size * 2
+        )
+        assert not any("not sized" in note for note in parallel.warnings)
+
+    def test_family_without_a_plan_prices_weights_and_activations_as_fsdp(
+        self, model, device
+    ):
+        # Arrange
+        common = {"n_training_gpus": 4, "max_model_len": 128}
+
+        # Act
+        plain = estimate_training(
+            model, device, TrainingSettings(fsdp=FSDPConfig(), **common)
+        )
+        parallel = estimate_training(
+            model, device, TrainingSettings(fsdp=FSDPConfig(tp=2), **common)
+        )
+
+        # Assert
+        assert not model.arch.tensor_parallel_plan
+        assert component(parallel, "base_weights").n_bytes == (
+            component(plain, "base_weights").n_bytes
+        )
+        assert (
+            component(parallel, "activations").detail["block_recompute"]
+            == (component(plain, "activations").detail["block_recompute"])
+        )
+
+    def test_family_without_a_plan_shards_an_untied_head(self, device):
+        # Arrange
+        arch = QWEN_05B.model_copy(update={"tied_embeddings": False})
+        model = ModelSpec(model_id="untied", arch=arch)
+        head_bytes = formulas.param_counts(arch).lm_head * 2
+        common = {"n_training_gpus": 4, "max_model_len": 128}
+
+        # Act
+        plain = estimate_training(
+            model, device, TrainingSettings(fsdp=FSDPConfig(), **common)
+        )
+        parallel = estimate_training(
+            model, device, TrainingSettings(fsdp=FSDPConfig(tp=2), **common)
+        )
+
+        # Assert: the head leaves its 1/4 FSDP shard and full gather for a 1/2 TP
+        # shard, and the logprob loop gathers it to a dense copy at the loss.
+        assert component(parallel, "base_weights").n_bytes == pytest.approx(
+            component(plain, "base_weights").n_bytes - 0.75 * head_bytes, abs=1
+        )
+        assert (
+            component(parallel, "activations").detail["loss_peak"]
+            == component(plain, "activations").detail["loss_peak"] + head_bytes
+        )
+        assert (
+            component(parallel, "activations").detail["block_recompute"]
+            == (component(plain, "activations").detail["block_recompute"])
+        )
+
+    def test_trajectories_divide_by_data_parallel_ranks(self):
+        settings = TrainingSettings(
+            n_training_gpus=4,
+            trajectories_per_update=128,
+            fsdp=FSDPConfig(tp=2),
+        )
+
+        assert settings.data_parallel_gpus == 2
+        assert settings.trajectories == 64
+
+
+class TestTrainingExpertParallel:
+    def test_ep_filling_the_group_drops_the_expert_gather(self, device):
+        # Arrange
+        common = {"n_training_gpus": 8, "max_model_len": 1024, "algorithm": "sft"}
+        routed = formulas.routed_expert_params_per_layer(MOE_MODEL.arch)
+
+        # Act
+        plain = estimate_training(
+            MOE_MODEL, device, TrainingSettings(fsdp=FSDPConfig(), **common)
+        )
+        parallel = estimate_training(
+            MOE_MODEL, device, TrainingSettings(fsdp=FSDPConfig(ep=8), **common)
+        )
+
+        # Assert: the plain window gathers two neighbouring units, one of
+        # them a full expert layer; EP gathers none.
+        saved = (
+            component(plain, "base_weights").n_bytes
+            - component(parallel, "base_weights").n_bytes
+        )
+        assert saved >= routed * 2
+
+    def test_leftover_ranks_add_one_local_expert_layer(self, device):
+        common = {"n_training_gpus": 8, "max_model_len": 1024, "algorithm": "sft"}
+        routed = formulas.routed_expert_params_per_layer(MOE_MODEL.arch)
+
+        filled = estimate_training(
+            MOE_MODEL, device, TrainingSettings(fsdp=FSDPConfig(ep=8), **common)
+        )
+        leftover = estimate_training(
+            MOE_MODEL, device, TrainingSettings(fsdp=FSDPConfig(ep=4), **common)
+        )
+
+        assert component(leftover, "base_weights").n_bytes == pytest.approx(
+            component(filled, "base_weights").n_bytes + routed // 4 * 2, abs=8
+        )
+
+    def test_expert_lora_state_splits_over_the_ep_group(self, device):
+        # Arrange
+        common = {
+            "n_training_gpus": 8,
+            "max_model_len": 1024,
+            "algorithm": "sft",
+            "lora_packed_target_matrices": 2,
+        }
+        expert_lora = formulas.packed_lora_param_count(MOE_MODEL.arch, 16, 2)
+
+        # Act
+        ep8 = estimate_training(
+            MOE_MODEL, device, TrainingSettings(fsdp=FSDPConfig(ep=8), **common)
+        )
+        ep4 = estimate_training(
+            MOE_MODEL, device, TrainingSettings(fsdp=FSDPConfig(ep=4), **common)
+        )
+
+        # Assert: bf16 Adam moments over an eighth vs a quarter of the experts.
+        adam_gap = (
+            component(ep4, "optimizer_state").n_bytes
+            - component(ep8, "optimizer_state").n_bytes
+        )
+        assert adam_gap == pytest.approx(
+            expert_lora * formulas.ADAM_MOMENTS_PER_PARAM * 2 * (1 / 4 - 1 / 8),
+            rel=1e-6,
+        )
+
+    def test_token_exchange_is_reported_and_halves_under_tp(self, device):
+        common = {"n_training_gpus": 8, "max_model_len": 1024, "algorithm": "sft"}
+
+        ep = estimate_training(
+            MOE_MODEL, device, TrainingSettings(fsdp=FSDPConfig(ep=4), **common)
+        )
+        ep_tp = estimate_training(
+            MOE_MODEL, device, TrainingSettings(fsdp=FSDPConfig(ep=4, tp=2), **common)
+        )
+        plain = estimate_training(
+            MOE_MODEL, device, TrainingSettings(fsdp=FSDPConfig(), **common)
+        )
+
+        exchange = component(ep, "activations").detail["ep_token_exchange"]
+        assert exchange == formulas.ep_exchange_bytes(MOE_MODEL.arch, 1, 1024, 2.0, 4)
+        assert component(ep_tp, "activations").detail["ep_token_exchange"] * 2 == (
+            exchange
+        )
+        assert component(plain, "activations").detail["ep_token_exchange"] == 0
 
 
 class TestFp8TensorParallelEngine:
@@ -2488,7 +2838,72 @@ class TestFp8TensorParallelEngine:
 
         # Assert
         demand = formulas.kv_cache_demand_bytes(
-            arch, settings.weight_dtype, settings.concurrency, settings.max_model_len
+            arch, settings.weight_dtype, settings.concurrency, settings.max_model_len, 0
         )
         assert demand == 0
         assert component(breakdown, "kv_cache").detail["worst_case_demand"] == 0
+
+
+class TestLigerSequenceLossTile:
+    def test_sequence_chunks_tile_a_whole_row_at_the_loss(self, model, device):
+        # Arrange: 16384-token rows outgrow the token-level tile's rows.
+        token_rows = resolve_chunk_rows(model.arch.vocab_size, None)
+        common = {"max_model_len": 16384}
+
+        # Act
+        token = estimate_training(model, device, TrainingSettings(**common))
+        sequence = estimate_training(
+            model, device, TrainingSettings(liger_sequence_chunks=True, **common)
+        )
+
+        # Assert
+        token_detail = component(token, "activations").detail
+        sequence_detail = component(sequence, "activations").detail
+        head_grad = model.arch.vocab_size * model.arch.hidden_size * 2
+        assert token_rows < 16384
+        assert (
+            sequence_detail["loss_peak"] - token_detail["loss_peak"]
+            == (16384 * formulas.LIGER_SEQUENCE_LOGIT_BYTES - token_rows * 8)
+            * model.arch.vocab_size
+            - head_grad
+        )
+        assert sequence_detail["nograd_peak"] == token_detail["nograd_peak"]
+
+    def test_token_loss_keeps_the_weight_dtype_head_grad(self, model, device):
+        # Arrange: a short row, so the loss instant is the peak.
+        token = estimate_training(model, device, TrainingSettings(max_model_len=1024))
+        sequence = estimate_training(
+            model,
+            device,
+            TrainingSettings(max_model_len=1024, liger_sequence_chunks=True),
+        )
+        head_grad = model.arch.vocab_size * model.arch.hidden_size * 2
+
+        # Act
+        token_logits = component(token, "logits_workspace").detail
+        sequence_logits = component(sequence, "logits_workspace").detail
+
+        # Assert
+        assert token_logits["weight_dtype_head_grad"] == head_grad
+        assert sequence_logits["weight_dtype_head_grad"] == 0
+
+    def test_the_standard_path_drops_the_weight_dtype_head_grad(self, model, device):
+        # Arrange: a short row, so the loss instant is the peak.
+        fused = TrainingSettings(max_model_len=1024, liger_weight_grad=True)
+        standard = TrainingSettings(max_model_len=1024, liger_weight_grad=False)
+        head_grad = model.arch.vocab_size * model.arch.hidden_size * 2
+
+        # Act
+        fused_bar = estimate_training(model, device, fused)
+        standard_bar = estimate_training(model, device, standard)
+
+        # Assert
+        assert (
+            component(standard_bar, "logits_workspace").detail["weight_dtype_head_grad"]
+            == 0
+        )
+        assert (
+            component(fused_bar, "activations").detail["loss_peak"]
+            - component(standard_bar, "activations").detail["loss_peak"]
+            == head_grad
+        )

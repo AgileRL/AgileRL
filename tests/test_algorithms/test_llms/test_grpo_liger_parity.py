@@ -235,13 +235,16 @@ class TestGRPOLearnLigerParity:
             monkeypatch, use_liger_loss=True, **overrides
         )
 
-        # Assert: the trajectory level runs masked updates on the standard path.
+        # Assert: token-level GRPO and CISPO stay on the fused kernel. GSPO
+        # leaves the masks unset and stays there too.
+        masks_apply = masks == "masked" and objective != "gspo"
         assert standard_agent._liger_path_selected is False
-        assert fused_agent._liger_path_selected is not (
-            objective == "gspo" and masks == "masked"
-        )
+        assert fused_agent._liger_path_selected is True
         assert 0.0 < standard["clipfrac"] < 1.0
-        if masks == "masked":
+        if objective == "gspo":
+            assert standard_agent.off_policy_token_mask_bounds is None
+            assert standard_agent.off_policy_sequence_mask_threshold is None
+        if masks_apply:
             assert 0.0 < standard["off_policy_token_mask_frac"] < 1.0
             assert 0.0 < standard["off_policy_seq_mask_frac"] < 1.0
         if kl_term == "beta0":

@@ -3076,7 +3076,7 @@ def test_from_manifest_wrong_arch_is_overridden_when_omitted(tmp_path):
     [
         pytest.param(
             "mlp",
-            {"name": "CartPole-v1", "num_envs": 2},
+            {"name": "CartPole-v1", "num_envs": 2, "sync": True},
             {},
             {},
             # MlpSpec defaults (dataclass MlpNetConfig would be 500 / 3)
@@ -3088,6 +3088,7 @@ def test_from_manifest_wrong_arch_is_overridden_when_omitted(tmp_path):
             {
                 "name": "dict-obs-env",
                 "num_envs": 2,
+                "sync": True,
                 "entrypoint": "tests.test_train._dummy_envs:DictObsEnv",
             },
             {},
@@ -3101,6 +3102,7 @@ def test_from_manifest_wrong_arch_is_overridden_when_omitted(tmp_path):
             {
                 "name": "image-obs-env",
                 "num_envs": 2,
+                "sync": True,
                 "entrypoint": "tests.test_train._dummy_envs:ImageObsEnv",
             },
             {},
@@ -3111,7 +3113,7 @@ def test_from_manifest_wrong_arch_is_overridden_when_omitted(tmp_path):
         ),
         pytest.param(
             "lstm",
-            {"name": "CartPole-v1", "num_envs": 2},
+            {"name": "CartPole-v1", "num_envs": 2, "sync": True},
             {"recurrent": True},
             {},
             # LstmSpec defaults (dataclass LstmNetConfig would be 500 / 4)
@@ -3120,7 +3122,7 @@ def test_from_manifest_wrong_arch_is_overridden_when_omitted(tmp_path):
         ),
         pytest.param(
             "simba",
-            {"name": "CartPole-v1", "num_envs": 2},
+            {"name": "CartPole-v1", "num_envs": 2, "sync": True},
             {},
             {"simba": True},
             # SimbaSpec default (dataclass SimBaNetConfig would be 500)
@@ -3138,6 +3140,8 @@ def test_deferred_encoder_uses_spec_defaults_not_dataclass(
     Parametrized across every inferable arch (mlp, multiinput, cnn, lstm,
     simba) so the invariant is guarded regardless of which encoder the
     deferred path infers from the observation space / algorithm flags.
+    Environments use ``sync: True`` so this does not spawn AsyncVectorEnv
+    workers.
     """
     import yaml
 
