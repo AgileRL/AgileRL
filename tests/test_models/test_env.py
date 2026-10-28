@@ -8,7 +8,9 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pandas as pd
 import pytest
+import torch
 from pydantic import ValidationError
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 import agilerl.llm_envs  # noqa: F401
 from agilerl.models.env import (
@@ -27,6 +29,9 @@ from agilerl.models.env import (
     make_rollout_env_factory,
     make_single_env,
 )
+from tests import TINY_LLM_FIXTURE_PATH
+
+THINK_CLOSE_ID = 151668
 
 
 def _write_module(tmp_path, name: str, contents: str) -> None:
@@ -44,6 +49,121 @@ class _StubTextEnv:
 
     def step(self, action):
         return "", 0.0, True, False, {}
+
+
+class RecordingTextEnv:
+    """Single-turn text env that keeps each action it is stepped with."""
+
+    def __init__(self) -> None:
+        self.actions: list[object] = []
+
+    def reset(self, seed=None):
+        return "Buy the cheapest lamp.", {}
+
+    def step(self, action):
+        self.actions.append(action)
+        return "", 1.0, True, False, {}
+
+
+@pytest.fixture(scope="module")
+def gemma_style_tokenizer() -> PreTrainedTokenizerBase:
+    """Tiny tokenizer whose reasoning channel markers are special, as in Gemma 4."""
+    tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+    tokenizer.add_special_tokens(
+        {"additional_special_tokens": ["<|channel>", "<channel|>"]}
+    )
+    return tokenizer
+
+
+@pytest.fixture(scope="module")
+def harmony_style_tokenizer() -> PreTrainedTokenizerBase:
+    """Tiny tokenizer whose harmony channel markers are special, as in gpt-oss."""
+    tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+    tokenizer.add_special_tokens(
+        {
+            "additional_special_tokens": [
+                "<|channel|>",
+                "<|message|>",
+                "<|start|>",
+                "<|end|>",
+                "<|return|>",
+            ]
+        }
+    )
+    return tokenizer
+
+
+def step_colocated_rollout(
+    tokenizer: PreTrainedTokenizerBase, generation: str, reasoning_parser: str | None
+) -> list[object]:
+    """Step one rollout-factory harness on ``generation`` and return the env's actions."""
+    env = RecordingTextEnv()
+    spec = LLMEnvSpec(
+        env_type=LLMEnvType.ROLLOUT, entrypoint="my_mod:MyEnv", max_turns=1
+    )
+    with patch(
+        "agilerl.utils.env_utils.resolve_entrypoint_target",
+        return_value=lambda: env,
+    ):
+        factory, _max_turns = make_rollout_env_factory(
+            spec,
+            tokenizer,
+            max_model_len=512,
+            max_output_tokens=64,
+            reasoning_parser=reasoning_parser,
+        )
+        harness = factory()
+    prompt, _info = harness.reset()
+    generated = tokenizer.encode(
+        generation, add_special_tokens=False, return_tensors="pt"
+    )
+    harness.step(torch.cat([prompt["input_ids"], generated], dim=1))
+    return env.actions
+
+
+class TestMakeRolloutEnvFactoryReasoningParser:
+    GEMMA_GENERATION = "<|channel>thought\nthe lamp is $5<channel|>click('12')"
+
+    def test_gemma_parser_sends_only_the_post_reasoning_action(
+        self, gemma_style_tokenizer: PreTrainedTokenizerBase
+    ) -> None:
+        actions = step_colocated_rollout(
+            gemma_style_tokenizer, self.GEMMA_GENERATION, "gemma4"
+        )
+
+        assert actions == ["click('12')"]
+
+    def test_no_parser_splits_on_think_close(
+        self, gemma_style_tokenizer: PreTrainedTokenizerBase
+    ) -> None:
+        actions = step_colocated_rollout(
+            gemma_style_tokenizer, "the lamp is $5</think>\n\nclick('12')", None
+        )
+
+        assert actions == ["click('12')"]
+
+    def test_no_parser_leaves_a_gemma_reasoning_channel_in_the_action(
+        self, gemma_style_tokenizer: PreTrainedTokenizerBase
+    ) -> None:
+        actions = step_colocated_rollout(
+            gemma_style_tokenizer, self.GEMMA_GENERATION, None
+        )
+
+        assert actions == ["thought\nthe lamp is $5click('12')"]
+
+    def test_gpt_oss_parser_sends_only_the_final_channel(
+        self, harmony_style_tokenizer: PreTrainedTokenizerBase
+    ) -> None:
+        generation = (
+            "<|channel|>analysis<|message|>The final answer is 8.<|end|>"
+            "<|start|>assistant<|channel|>final<|message|>click('8')<|return|>"
+        )
+
+        actions = step_colocated_rollout(
+            harmony_style_tokenizer, generation, "openai_gptoss"
+        )
+
+        assert actions == ["click('8')"]
 
 
 class TestGymEnvSpec:
@@ -1361,6 +1481,8 @@ class TestLLMEnvSpecRollout:
     def test_env_url_factory_builds_session_client(self):
         mock_tokenizer = MagicMock()
         mock_tokenizer.pad_token_id = 0
+        mock_tokenizer.unk_token_id = None
+        mock_tokenizer.convert_tokens_to_ids.return_value = THINK_CLOSE_ID
         spec = LLMEnvSpec(
             env_type=LLMEnvType.ROLLOUT,
             env_url="http://env-host:8000",
@@ -1394,6 +1516,8 @@ class TestLLMEnvSpecRollout:
             apply_chat_template=True,
             chat_template_kwargs={},
             max_model_len=512,
+            reasoning_end_ids=(THINK_CLOSE_ID,),
+            include_reasoning=False,
             strict_chat_template_boundary=True,
             screenshot_field=None,
             goal_images_field=None,
@@ -1421,6 +1545,8 @@ class TestLLMEnvSpecRollout:
         mock_constructor = MagicMock(return_value=mock_env)
         mock_tokenizer = MagicMock()
         mock_tokenizer.pad_token_id = 0
+        mock_tokenizer.unk_token_id = None
+        mock_tokenizer.convert_tokens_to_ids.return_value = THINK_CLOSE_ID
 
         spec = LLMEnvSpec(
             env_type=LLMEnvType.ROLLOUT,
@@ -1456,6 +1582,8 @@ class TestLLMEnvSpecRollout:
             apply_chat_template=True,
             chat_template_kwargs={},
             max_model_len=512,
+            reasoning_end_ids=(THINK_CLOSE_ID,),
+            include_reasoning=False,
             strict_chat_template_boundary=True,
         )
 

@@ -35,6 +35,12 @@ from agilerl.llm_envs.observation import (
     observation_text_and_image,
     process_observation,
 )
+from agilerl.llm_envs.reasoning import (
+    REASONING_END_MARKER,
+    post_reasoning_text,
+    reasoning_trace_text,
+    tokenizer_reasoning_end_ids,
+)
 from agilerl.llm_envs.restart_prompt import KeptTurn, RestartPromptMixin
 from agilerl.llm_envs.tool_parsers import (
     Gemma4ToolParser,
@@ -105,10 +111,11 @@ class TranscriptContinuityError(RuntimeError):
 def action_span(gen_text: str) -> str:
     """Text after the first ``</think>``, else the whole generation.
 
-    A template that prefills an open ``<think>`` yields ``reasoning</think>action``
-    with no opening tag. A reasoning block that never closes passes through whole.
+    For text with no token ids, such as a hosted API's reply. A template that
+    prefills an open ``<think>`` yields ``reasoning</think>action`` with no
+    opening tag. A reasoning block that never closes passes through whole.
     """
-    _reasoning, closed, action = gen_text.partition("</think>")
+    _reasoning, closed, action = gen_text.partition(REASONING_END_MARKER)
     return action.strip() if closed else gen_text
 
 
@@ -211,6 +218,8 @@ class RolloutHarness(RestartPromptMixin):
         goal_images_field: str | None = None,
         tool_call_parser: str | None = None,
         min_reward: float = 0.0,
+        reasoning_end_ids: Sequence[int] | None = None,
+        include_reasoning: bool = False,
     ) -> None:
         """Drive a text env at the token level over ``env_client`` (a URL or a client object).
 
@@ -234,7 +243,7 @@ class RolloutHarness(RestartPromptMixin):
             text, replacing the default (:func:`process_observation`) for envs
             whose observations need more than a field lookup. Runs on the
             collector's I/O threads, so it must be thread-safe.
-        :param action_processor: Turns the post-``</think>`` action text into
+        :param action_processor: Turns the post-reasoning action text into
             what the env receives. ``None`` sends that text unchanged. The
             restart prompt's action list uses the same callable.
         :param instruction: Prompt used when reset's observation renders empty.
@@ -310,6 +319,12 @@ class RolloutHarness(RestartPromptMixin):
             ``None`` picks the parser whose tokens are in the tokenizer vocab.
         :param min_reward: Lowest reward the env gives. Scores a turn whose tool
             calls are malformed or missing, which never reaches the env.
+        :param reasoning_end_ids: Token ids that end a turn's reasoning; the env
+            receives only the text after them. ``None`` resolves ``</think>``
+            from the tokenizer.
+        :param include_reasoning: Send the env the whole turn, reasoning and its
+            markers included, with end-of-turn tokens dropped. The restart
+            history still lists only the post-reasoning action.
         :ivar full_ids: Running token sequence of the current segment (prompt +
             generations + feedback).
         :ivar turn_boundaries: ``(start, end, turn_idx)`` spans of policy-generated
@@ -378,6 +393,12 @@ class RolloutHarness(RestartPromptMixin):
             eval_tasks=eval_tasks,
         )
         self.tokenizer = tokenizer
+        self._reasoning_end_ids: tuple[int, ...] = (
+            tokenizer_reasoning_end_ids(tokenizer, REASONING_END_MARKER)
+            if reasoning_end_ids is None
+            else tuple(reasoning_end_ids)
+        )
+        self._include_reasoning = include_reasoning
         self._init_tool_calling(tokenizer, tool_call_parser, min_reward)
         self.apply_chat_template = apply_chat_template
         self.chat_template_kwargs: dict[str, Any] = dict(chat_template_kwargs or {})
@@ -1176,7 +1197,7 @@ class RolloutHarness(RestartPromptMixin):
         sampling_logps: torch.Tensor | None = None,
         sampling_supports: torch.Tensor | None = None,
     ) -> str:
-        """Decode and record this turn's generation; return its text (tokenizer phase)."""
+        """Record this turn's generation; return the text the env receives (tokenizer phase)."""
         if self._last_full_prompt_token_len is None:
             msg = "step() requires a prior reset() or step() that built a prompt"
             raise RuntimeError(msg)
@@ -1189,7 +1210,7 @@ class RolloutHarness(RestartPromptMixin):
             self._sampled_ids = sequence.detach()
             gen_ids = sequence[0, prompt_len:].detach()
             self._reject_image_placeholder_ids(gen_ids)
-            gen_text = self._decode(gen_ids.tolist(), skip_special_tokens=True)
+            action_text = self._action_text(gen_ids.tolist())
             if sampling_logps is not None:
                 self.sampling_logps.append(sampling_logps)
             if sampling_supports is not None:
@@ -1215,9 +1236,9 @@ class RolloutHarness(RestartPromptMixin):
                 (int(processor_ids.shape[1]), gen_end, self._turn_idx)
             )
             self._gen_ids = gen_ids
-            self._record_action(gen_text)
+            self._record_action(action_text)
             self._parse_tool_calls(gen_ids.tolist())
-            return gen_text
+            return self._env_text(gen_ids.tolist(), action_text)
         full_ids = self.full_ids
         if full_ids is None:
             msg = "step() requires a prior reset() or step() that built a prompt"
@@ -1225,7 +1246,7 @@ class RolloutHarness(RestartPromptMixin):
         # Only the new suffix crosses devices; the prefix is byte-identical to ``full_ids``.
         gen_ids = sequence[0, prompt_len:].detach().to(full_ids.device)
         self._reject_image_placeholder_ids(gen_ids)
-        gen_text = self._decode(gen_ids.tolist(), skip_special_tokens=True)
+        action_text = self._action_text(gen_ids.tolist())
         if sampling_logps is not None:
             self.sampling_logps.append(sampling_logps)
         if sampling_supports is not None:
@@ -1234,15 +1255,25 @@ class RolloutHarness(RestartPromptMixin):
         gen_end = self.full_ids.shape[1]
         self.turn_boundaries.append((prompt_len, gen_end, self._turn_idx))
         self._gen_ids = gen_ids
-        self._record_action(gen_text)
+        self._record_action(action_text)
         self._parse_tool_calls(gen_ids.tolist())
-        return gen_text
+        return self._env_text(gen_ids.tolist(), action_text)
+
+    def _action_text(self, gen_ids: list[int]) -> str:
+        """This turn's text after its reasoning-end marker, special tokens stripped."""
+        return post_reasoning_text(gen_ids, self._reasoning_end_ids, self._decode)
+
+    def _env_text(self, gen_ids: list[int], action_text: str) -> str:
+        """Text the env receives: the whole turn under ``include_reasoning``, else the action."""
+        if not self._include_reasoning:
+            return action_text
+        return reasoning_trace_text(gen_ids, self._special_ids(), self._decode)
 
     def _parse_tool_calls(self, gen_ids: list[int]) -> None:
         """Queue this turn's tool calls, or a retry error, for :meth:`_step_env`.
 
         Runs in the sequential phase because it decodes with the tokenizer.
-        Text envs queue nothing and get the generation text. A turn with no
+        Text envs queue nothing and get the post-reasoning text. A turn with no
         call is prose for the env's ``answer_tool`` answer tool, or an error when
         no ``answer_tool`` is named. One malformed call fails the whole turn, so
         no call runs.
@@ -1288,11 +1319,10 @@ class RolloutHarness(RestartPromptMixin):
             return text
         return self._action_processor(text)
 
-    def _record_action(self, gen_text: str) -> None:
+    def _record_action(self, raw: str) -> None:
         """Add this turn's env action to the restart history, capped in length."""
         if self._segment_prompt_tokens is None and self._segment_max_images is None:
             return
-        raw = action_span(gen_text)
         action = self._processed_action(raw[:ACTION_HISTORY_MAX_CHARS])
         if (
             len(raw) > ACTION_HISTORY_MAX_CHARS
@@ -1325,12 +1355,12 @@ class RolloutHarness(RestartPromptMixin):
         text = f"{field}: {'' if value is None else value}"
         return text.replace(IMAGE_PLACEHOLDER, ESCAPED_IMAGE_PLACEHOLDER)
 
-    def _step_env(self, gen_text: str) -> EnvStepResult:
+    def _step_env(self, action_text: str) -> EnvStepResult:
         """Round-trip the env backend and render its observations — the parallelizable phase.
 
         Queued tool calls run in order, one env step each; a queued parse error
-        scores ``min_reward`` with no env I/O; otherwise the generation text is
-        the one action. The queue empties here, so no tool runs twice.
+        scores ``min_reward`` with no env I/O; otherwise ``action_text`` is the
+        one action. The queue empties here, so no tool runs twice.
         """
         error, self._pending_tool_error = self._pending_tool_error, None
         if error is not None:
@@ -1356,7 +1386,7 @@ class RolloutHarness(RestartPromptMixin):
             )
         calls, self._pending_tool_calls = self._pending_tool_calls, []
         result = self._step_env_actions(
-            [*calls] or [self._processed_action(action_span(gen_text))]
+            [*calls] or [self._processed_action(action_text)]
         )
         if self._takes_tool_calls:
             result.info[TOOL_CALLS_INFO_KEY] = len(result.messages) if calls else 0
@@ -1632,8 +1662,8 @@ class RolloutHarness(RestartPromptMixin):
         Single-env convenience over the ``_step_*`` phases; ``sampling_logps`` is this
         turn's vLLM logprobs (or ``None``).
         """
-        gen_text = self._step_prepare(token_ids, sampling_logps)
-        return self._step_apply(self._step_env(gen_text))
+        action_text = self._step_prepare(token_ids, sampling_logps)
+        return self._step_apply(self._step_env(action_text))
 
     def episode_image_calls(self) -> list[ImageProcessorCall]:
         """Processor calls behind the episode's ``pixel_values``, in row order.

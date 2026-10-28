@@ -25,6 +25,11 @@ from agilerl.arena.models.descriptions import BETA, MICRO_BATCH, MINI_BATCH
 from agilerl.arena.models.env import LLMEnvType
 from agilerl.arena.models.fsdp import FSDPConfig
 from agilerl.arena.models.hpo import RLHyperparameter
+from agilerl.arena.models.model_info import (
+    REASONING_END_MARKERS,
+    enforces_thinking_budget,
+    resolve_reasoning_parser,
+)
 from agilerl.arena.models.networks import LoraConfigDict, NetworkSpec
 from agilerl.arena.models.registry import AgentType
 
@@ -455,6 +460,20 @@ class LLMAlgorithmSpec(AlgorithmSpec):
             raise ValueError(msg) from err
         return value
 
+    @field_validator("vllm_engine_args")
+    @classmethod
+    def _validate_reasoning_parser(cls, value: dict[str, Any]) -> dict[str, Any]:
+        """Rollouts split each turn on the reasoning parser's end marker, so it must be known."""
+        parser = value.get("reasoning_parser")
+        if parser is None or parser in REASONING_END_MARKERS:
+            return value
+        known = ", ".join(sorted(REASONING_END_MARKERS))
+        msg = (
+            f"vllm_engine_args.reasoning_parser={parser!r} has no known "
+            f"reasoning-end marker; set one of {known}"
+        )
+        raise ValueError(msg)
+
     @model_validator(mode="after")
     def _validate_answer_continuation(self) -> Self:
         """The continuation's grammar is built from constrain_answer_pattern."""
@@ -491,6 +510,31 @@ class LLMAlgorithmSpec(AlgorithmSpec):
             )
             raise ValueError(msg)
         return self
+
+    def check_thinking_budget_parser(self, model_type: str) -> None:
+        """Reject a thinking budget with no vLLM reasoning start/end tokens to enforce it.
+
+        :param model_type: Hugging Face ``model_type`` of the checkpoint.
+        :raises ValueError: If a budget is set and the reasoning parser is missing
+            or has no reasoning start/end tokens.
+        """
+        budget = self.thinking_token_budget
+        parser = resolve_reasoning_parser(self.vllm_engine_args, model_type)
+        if budget is None or enforces_thinking_budget(parser):
+            return
+        lacking = (
+            f"reasoning parser {parser}"
+            if parser
+            else self.pretrained_model_name_or_path
+        )
+        budget_parsers = filter(enforces_thinking_budget, REASONING_END_MARKERS)
+        msg = (
+            f"thinking_token_budget={budget} needs a vLLM reasoning parser with "
+            f"reasoning start and end tokens, and {lacking} has none. Unset "
+            "thinking_token_budget, or set algorithm.vllm_engine_args.reasoning_parser "
+            f"to one that has them: {', '.join(sorted(budget_parsers))}."
+        )
+        raise ValueError(msg)
 
     @model_validator(mode="after")
     def _validate_use_sequence_packing(self) -> Self:

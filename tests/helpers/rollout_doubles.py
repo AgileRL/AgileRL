@@ -269,6 +269,7 @@ def bare_rollout_env() -> RolloutHarness:
     w._multimodal_turn = None
     w._episode_pixel_values = None
     w._image_placeholder_id = None  # __init__ default for a text-only harness
+    w._reasoning_end_ids = ()  # read by the step phases; empty sends the whole generation
     # These tests drive the ChatML fallback deliberately, so they opt out of strict.
     w._strict_chat_template_boundary = False
     return w

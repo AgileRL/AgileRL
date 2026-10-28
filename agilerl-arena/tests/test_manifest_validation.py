@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import subprocess
 import sys
 
@@ -427,10 +428,22 @@ class TestNothingIsStrippedInTransit:
         validated = TrainingManifest.model_validate(
             manifest(
                 GRPO,
-                algorithm={"vllm_engine_args": {"reasoning_parser": "x"}},
+                algorithm={"vllm_engine_args": {"reasoning_parser": "gemma4"}},
             )
         )
-        assert validated.algorithm.vllm_engine_args == {"reasoning_parser": "x"}
+        assert validated.algorithm.vllm_engine_args == {"reasoning_parser": "gemma4"}
+
+    def test_a_reasoning_parser_without_a_known_end_marker_is_rejected(self) -> None:
+        with pytest.raises(
+            ValidationError,
+            match=r"reasoning_parser='mistral' has no known reasoning-end marker",
+        ):
+            TrainingManifest.model_validate(
+                manifest(
+                    GRPO,
+                    algorithm={"vllm_engine_args": {"reasoning_parser": "mistral"}},
+                )
+            )
 
     def test_a_payload_revalidates(self) -> None:
         payload = TrainingManifest.model_validate(GRPO).to_payload()
@@ -2316,3 +2329,88 @@ class TestExpertLoraReferenceAdapter:
         validated = TrainingManifest.model_validate(moe)
 
         assert validated.algorithm.use_separate_reference_adapter is True
+
+
+def thinking_budget_manifest(model: str, **algorithm: object) -> dict:
+    """GRPO manifest for *model* with a 64-token thinking budget."""
+    return manifest(
+        GRPO,
+        algorithm={"max_output_tokens": 128, "thinking_token_budget": 64, **algorithm},
+        network={"pretrained_model_name_or_path": model},
+    )
+
+
+class TestThinkingBudgetParser:
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "google/gemma-4-E4B-it",
+            "Qwen/Qwen3-1.7B",
+            "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16",
+        ],
+    )
+    def test_accepts_a_budget_for_a_model_with_a_reasoning_parser(
+        self, model: str
+    ) -> None:
+        validated = TrainingManifest.model_validate(thinking_budget_manifest(model))
+
+        assert validated.algorithm.thinking_token_budget == 64
+
+    def test_rejects_a_budget_for_a_model_without_a_reasoning_parser(self) -> None:
+        model = "Qwen/Qwen2.5-0.5B-Instruct"
+
+        with pytest.raises(
+            ValidationError,
+            match=(
+                r"thinking_token_budget=64 needs a vLLM reasoning parser with "
+                r"reasoning start and end tokens, and "
+                rf"{re.escape(model)} has none\. Unset thinking_token_budget, or "
+                r"set algorithm\.vllm_engine_args\.reasoning_parser to one that "
+                r"has them: deepseek_r1, gemma4, nemotron_v3, qwen3\."
+            ),
+        ):
+            TrainingManifest.model_validate(thinking_budget_manifest(model))
+
+    def test_rejects_a_budget_for_gpt_oss_whose_parser_cannot_enforce_it(
+        self,
+    ) -> None:
+        with pytest.raises(
+            ValidationError, match=r"and reasoning parser openai_gptoss has none\."
+        ):
+            TrainingManifest.model_validate(
+                thinking_budget_manifest("openai/gpt-oss-20b")
+            )
+
+    def test_rejects_a_manifest_reasoning_parser_without_reasoning_tokens(
+        self,
+    ) -> None:
+        doc = thinking_budget_manifest(
+            "openai/gpt-oss-20b", vllm_engine_args={"reasoning_parser": "openai_gptoss"}
+        )
+
+        with pytest.raises(
+            ValidationError, match=r"and reasoning parser openai_gptoss has none\."
+        ):
+            TrainingManifest.model_validate(doc)
+
+    def test_accepts_a_budget_with_a_manifest_reasoning_parser(self) -> None:
+        doc = thinking_budget_manifest(
+            "Qwen/Qwen2.5-0.5B-Instruct",
+            vllm_engine_args={"reasoning_parser": "deepseek_r1"},
+        )
+
+        validated = TrainingManifest.model_validate(doc)
+
+        assert validated.algorithm.thinking_token_budget == 64
+
+    def test_leaves_an_unsupported_model_to_the_runtime(self) -> None:
+        validated = TrainingManifest.model_validate(
+            thinking_budget_manifest("org/untracked")
+        )
+
+        assert validated.algorithm.thinking_token_budget == 64
+
+    def test_accepts_a_model_without_a_parser_when_no_budget_is_set(self) -> None:
+        validated = TrainingManifest.model_validate(GRPO)
+
+        assert validated.algorithm.thinking_token_budget is None
