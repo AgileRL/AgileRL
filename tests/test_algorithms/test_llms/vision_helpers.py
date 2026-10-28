@@ -10,7 +10,8 @@ VL forward does.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import weakref
+from collections.abc import Iterator, Sequence
 from contextlib import nullcontext
 from typing import Any
 
@@ -84,7 +85,11 @@ class VisionHiddenStatesModel(DummyHiddenStatesModel):
         embeds = self.embed(input_ids.long())
         if pixel_values is not None:
             image_embeds = torch.zeros_like(embeds)
-            image_embeds[placeholders] = self.vision_proj(pixel_values)
+            # Pixels in the tower dtype, features in the embedding dtype, as VL models cast.
+            tower_dtype = next(self.vision_proj.parameters()).dtype
+            image_embeds[placeholders] = self.vision_proj(
+                pixel_values.to(tower_dtype)
+            ).to(embeds.dtype)
             embeds = embeds + image_embeds
             routing = ROUTING_STATE.get(self.linear_1) or [
                 self.linear_1.active_adapters[0]
@@ -289,3 +294,47 @@ def learn_rank_vision_episodes(
         agent, segmented=True, episodes=RANK_VISION_EPISODES[rank]
     )
     return sum(tower(agent).rows), {key: metrics[key] for key in ("loss", "kl")}
+
+
+class VisionRowsLifetime:
+    """Whether each learn backward starts after the vision rows of its micro-batch are freed.
+
+    Wraps the agent's learn vision rows and backward pass; read :attr:`freed`
+    after ``learn``.
+    """
+
+    def __init__(self, agent: LLMAlgorithm, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.returned: list[weakref.ref[torch.Tensor]] = []
+        self.freed: list[bool] = []
+        learn_vision_rows = agent._learn_vision_rows
+        backward_pass = agent._backward_pass
+
+        def recorded_vision_rows(*args: Any, **kwargs: Any) -> Iterator[Any]:
+            return RecordedVisionRows(learn_vision_rows(*args, **kwargs), self)
+
+        def recorded_backward(*args: Any, **kwargs: Any) -> Any:
+            self.freed.append(self.returned[-1]() is None)
+            return backward_pass(*args, **kwargs)
+
+        monkeypatch.setattr(agent, "_learn_vision_rows", recorded_vision_rows)
+        monkeypatch.setattr(agent, "_backward_pass", recorded_backward)
+
+
+class RecordedVisionRows:
+    """Learn vision rows that keep only a weak reference to what they return."""
+
+    def __init__(
+        self,
+        micro_batches: Iterator[tuple[torch.Tensor, torch.Tensor | None]],
+        lifetime: VisionRowsLifetime,
+    ) -> None:
+        self.micro_batches = micro_batches
+        self.lifetime = lifetime
+
+    def __iter__(self) -> RecordedVisionRows:
+        return self
+
+    def __next__(self) -> tuple[torch.Tensor, torch.Tensor | None]:
+        pixel_values, keys = next(self.micro_batches)
+        self.lifetime.returned.append(weakref.ref(pixel_values))
+        return pixel_values, keys

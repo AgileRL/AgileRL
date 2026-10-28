@@ -328,9 +328,9 @@ These are the names this package reads:
    * - ``env_url``
      - ``None``
      - URL of an already-running OpenEnv server.
-   * - ``mcp_tool``
+   * - ``answer_tool``
      - ``None``
-     - MCP tool name; only applies with ``env_url``.
+     - Name of the env's answer tool for prose turns; only applies with ``env_url``.
    * - ``action_field``
      - ``message``
      - Field the env puts the model's text in (``message``, ``code``, …).
@@ -419,13 +419,33 @@ I/O threads.
 Tools
 -----
 
-An environment advertises tool schemas with a ``tools`` attribute (a list of
+A plain-text env advertises tool schemas with a ``tools`` attribute (a list of
 JSON schemas). AgileRL renders them into the chat template. There is no
 separate tools config.
 
-For an MCP tool instead of the plain text interface, pass
-``mcp_tool="<tool_name>"`` on ``RolloutHarness`` or in the manifest (with
-``env_url``).
+An MCP-backed env (an ``MCPEnvironment`` subclass hosting tools) is driven by
+tool calls instead of text. The harness detects this from the env itself, so
+manifests need no extra flag. The env never parses the model's output. Each
+model family has its own tool-call format: the special
+tokens around a call and the body between them. The harness reads every call
+from each generation's token IDs with that family's parser, and steps the env
+once per call, in order, within the turn. The turn's reward is the sum of those
+steps. Tool schemas are discovered over ``list_tools`` and rendered into
+prompts through the chat template.
+
+Parsers cover the Qwen, Hermes, Granite, Nemotron, Gemma 4, and GPT-OSS model
+families. Name one with ``tool_call_parser`` on ``RolloutHarness``; unset, the
+harness picks the parser whose tokens are in the tokenizer vocab. An MCP env
+with a tokenizer no parser matches fails at the first reset.
+
+A turn with no tool call is a prose answer. ``answer_tool="<tool_name>"`` on
+``RolloutHarness`` or in the manifest names one of the env's real tools (e.g.
+``guess``, ``submit_answer``) to receive that prose as its ``action_field``
+argument, so the env scores it. Without ``answer_tool`` the model gets a tool
+error to retry. A malformed call runs nothing: the model gets a tool error,
+and the turn scores ``min_reward`` (``0`` unless the manifest sets it). Rules
+about which tools may run, in what order, and how an answer scores belong to
+the env, behind its tools.
 
 Lifecycle
 ---------

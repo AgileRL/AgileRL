@@ -111,6 +111,7 @@ class _Stub:
         self.lr_scheduler = None
         self.no_grad_forwards: list[tuple[int, bool, bool]] = []
         self._vision_cache = VisionFeatureCache()
+        self._vision_language_module = None
         self.shard_runtime = SimpleNamespace(
             timed=lambda _name, **_fields: nullcontext(),
             micro_batches_until_step=lambda steps: steps,
@@ -119,6 +120,7 @@ class _Stub:
 
     learn = GRPO.learn
     _align_sampling_logprobs = GRPO._align_sampling_logprobs
+    _align_sampling_supports = staticmethod(GRPO._align_sampling_supports)
     _aligned_sampling_logprobs_and_metrics = GRPO._aligned_sampling_logprobs_and_metrics
     _apply_kl_advantage_shaping = GRPO._apply_kl_advantage_shaping
     _clipped_units = GRPO._clipped_units
@@ -131,10 +133,12 @@ class _Stub:
     _has_episode_segments = LLMAlgorithm._has_episode_segments
     _hold_loss_until_step = LLMAlgorithm._hold_loss_until_step
     _learn_phase_seconds = LLMAlgorithm._learn_phase_seconds
+    _learn_vision_rows = LLMAlgorithm._learn_vision_rows
     _row_padding_stats = LLMAlgorithm._row_padding_stats
     _segment_rows = LLMAlgorithm._segment_rows
     _start_learn_phases = LLMAlgorithm._start_learn_phases
     _step_lr_scheduler = LLMAlgorithm._step_lr_scheduler
+    _vision_step = LLMAlgorithm._vision_step
     _log_importance_weights = GRPO._log_importance_weights
     _loss = GRPO._loss
     _masks_off_policy_tokens = GRPO._masks_off_policy_tokens
@@ -360,7 +364,7 @@ class TestLigerPathSelection:
 
 
 class ObjectiveStub:
-    """Stand-in carrying the state ``_setup_objective`` reads."""
+    """Stand-in carrying the state ``_setup_objective`` and ``_setup_liger_objective`` read."""
 
     def __init__(self, advantage_granularity: str) -> None:
         self.advantage_granularity = advantage_granularity
@@ -368,6 +372,7 @@ class ObjectiveStub:
         self.use_liger_loss = True
 
     _setup_objective = GRPO._setup_objective
+    _setup_liger_objective = GRPO._setup_liger_objective
     _resolve_standard_loss_fn = GRPO._resolve_standard_loss_fn
     _grpo_loss_standard = GRPO._grpo_loss_standard
     _cispo_loss = GRPO._cispo_loss
@@ -387,13 +392,15 @@ class TestGRPOSetupObjectiveLigerSupport:
 
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            algo._setup_objective(loss_type, None, False)
+            algo._setup_objective(loss_type, None)
+            algo._setup_liger_objective(False)
 
         assert algo._liger_level_supported is True
         assert [w for w in caught if "no fused" in str(w.message)] == []
 
     def test_gspo_with_turn_advantages_has_no_fused_kernel(self) -> None:
         algo = ObjectiveStub("turn")
+        algo._setup_objective("gspo", None)
 
         with pytest.warns(
             UserWarning,
@@ -402,7 +409,7 @@ class TestGRPOSetupObjectiveLigerSupport:
                 "with advantage_granularity='turn'"
             ),
         ):
-            algo._setup_objective("gspo", None, False)
+            algo._setup_liger_objective(False)
 
         assert algo._liger_level_supported is False
 

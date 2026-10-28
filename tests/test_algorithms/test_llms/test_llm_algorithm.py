@@ -13,24 +13,21 @@ import logging
 import math
 import warnings
 from types import SimpleNamespace
-from typing import Any
 
 import numpy as np
 import pytest
 import torch
-import torch.distributed as dist
 
 from agilerl.algorithms.core import ActionResult
 from agilerl.algorithms.core.base import LLMAlgorithm
+from agilerl.algorithms.grpo import GRPO
+from agilerl.algorithms.ppo_llm import PPO
+from agilerl.algorithms.reinforce_llm import REINFORCE
 from agilerl.distributed.process import aggregate_metrics_dict
 from agilerl.llm_envs import RolloutHarness
 from agilerl.metrics import AgentMetrics
 from tests.helpers.rollout_doubles import FakeEnvClient
-from tests.test_utils.test_expert_parallel import (
-    _init_gloo,
-    _spawn_ranks,
-    requires_gloo,
-)
+from tests.rank_launch import run_ranks
 
 
 class _StubAlgo:
@@ -53,6 +50,11 @@ class _StubAlgo:
 
 class _TinyTokenizer:
     """Raw-encoding tokenizer for the ``apply_chat_template=False`` paths."""
+
+    unk_token_id = None
+
+    def convert_tokens_to_ids(self, _token: str) -> None:
+        return None
 
     def __call__(self, texts, **kwargs):
         del kwargs
@@ -119,9 +121,6 @@ class TestLLMAlgorithmTest:
         assert algo.fitness == [0.0]
 
     def test_subclasses_share_the_base_implementation(self):
-        from agilerl.algorithms.grpo import GRPO
-        from agilerl.algorithms.ppo_llm import PPO
-        from agilerl.algorithms.reinforce_llm import REINFORCE
 
         assert GRPO.test is LLMAlgorithm.test
         assert PPO.test is LLMAlgorithm.test
@@ -417,39 +416,29 @@ class TestLLMAlgorithmAlignedSamplingLogprobsAndMetrics:
         assert caplog.records == []
         assert warned == []
 
-    @requires_gloo
+    @pytest.mark.multi_rank
     def test_cross_rank_mismatch_means_count_only_ranks_with_captures(self) -> None:
-        _spawn_ranks(_sampling_metrics_one_rank_captured_worker)
+        run_ranks(_sampling_metrics_one_rank_captured_worker)
 
 
-def _sampling_metrics_one_rank_captured_worker(
-    rank: int, world_size: int, port: int, result_queue: Any
-) -> None:
-    try:
-        _init_gloo(rank, world_size, port)
-        # Arrange: rank 0 captured a 0.5 nat gap on every token; rank 1 captured none.
-        stub = SamplingMismatchStub(max_logprob_gap=1.0)
-        masks = torch.ones(2, 3, dtype=torch.bool)
-        old = torch.full((2, 3), -1.0)
-        sampling = [torch.full((3,), -1.5)] * 2 if rank == 0 else None
+def _sampling_metrics_one_rank_captured_worker(rank: int, world_size: int) -> None:
+    # Arrange: rank 0 captured a 0.5 nat gap on every token; rank 1 captured none.
+    stub = SamplingMismatchStub(max_logprob_gap=1.0)
+    masks = torch.ones(2, 3, dtype=torch.bool)
+    old = torch.full((2, 3), -1.0)
+    sampling = [torch.full((3,), -1.5)] * 2 if rank == 0 else None
 
-        # Act
-        with warnings.catch_warnings(record=True) as warned:
-            warnings.simplefilter("always")
-            _, metrics, excluded = stub._aligned_sampling_logprobs_and_metrics(
-                sampling, masks, old
-            )
-        agg = aggregate_metrics_dict(dict(metrics), excluded=excluded)
+    # Act
+    with warnings.catch_warnings(record=True) as warned:
+        warnings.simplefilter("always")
+        _, metrics, excluded = stub._aligned_sampling_logprobs_and_metrics(
+            sampling, masks, old
+        )
+    agg = aggregate_metrics_dict(dict(metrics), excluded=excluded)
 
-        # Assert
-        assert metrics["vllm_is_rows_skipped"] == 0.0
-        assert warned == []
-        assert agg["vllm_is_delta_mean"] == pytest.approx(0.5)
-        assert agg["vllm_mismatch_kl"] == pytest.approx(math.exp(0.5) - 1.5, rel=1e-5)
-        assert agg["vllm_is_rows_skipped"] == 0.0
-        result_queue.put((rank, "ok", None))
-    except Exception as exc:
-        result_queue.put((rank, "err", repr(exc)))
-    finally:
-        if dist.is_initialized():
-            dist.destroy_process_group()
+    # Assert
+    assert metrics["vllm_is_rows_skipped"] == 0.0
+    assert warned == []
+    assert agg["vllm_is_delta_mean"] == pytest.approx(0.5)
+    assert agg["vllm_mismatch_kl"] == pytest.approx(math.exp(0.5) - 1.5, rel=1e-5)
+    assert agg["vllm_is_rows_skipped"] == 0.0

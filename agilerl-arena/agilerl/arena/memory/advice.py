@@ -12,7 +12,8 @@ from collections.abc import Callable
 
 from pydantic import BaseModel, ConfigDict
 
-from agilerl.arena.memory.estimator import PhaseName, estimate_run
+from agilerl.arena.memory.breakdown import PhaseName
+from agilerl.arena.memory.estimator import estimate_run
 from agilerl.arena.memory.specs import GiB, RunConfig
 
 
@@ -75,6 +76,13 @@ def _training_candidates(
                 _update("training", trajectories_per_update=halved),
             )
         )
+    if t.micro_batch_size > 1:
+        candidates.append(
+            (
+                f"Set micro_batch_size_per_gpu to 1 ({t.micro_batch_size} -> 1)",
+                _update("training", micro_batch_size=1),
+            )
+        )
     if t.max_model_len > 512:
         candidates.append(_shorter_context_candidate(t.max_model_len))
     if not t.activation_offload:
@@ -112,6 +120,23 @@ def _generation_candidates(
 ) -> list[tuple[str, Callable[[RunConfig], RunConfig]]]:
     g = config.generation
     candidates: list[tuple[str, Callable[[RunConfig], RunConfig]]] = []
+    stripped = next(
+        (v.name for v in config.model.variants if v.stripped_multimodal), None
+    )
+    if (
+        stripped is not None
+        and not config.model.variant(g.weight_variant).stripped_multimodal
+        and config.training.images_per_row == 0
+    ):
+        candidates.append(
+            (
+                (
+                    "Skip the multimodal towers in the engine "
+                    "(strip_multimodal_towers=True; text-only envs)"
+                ),
+                _update("generation", weight_variant=stripped),
+            )
+        )
     if not g.enforce_eager:
         candidates.append(
             (

@@ -283,6 +283,7 @@ def collect_rollouts_llm(
     int,
     list[torch.Tensor | None] | None,
     list[torch.Tensor | None] | None,
+    list[torch.Tensor | None] | None,
 ]:
     """Collect multi-turn rollouts for LLM on-policy algorithms.
 
@@ -297,10 +298,11 @@ def collect_rollouts_llm(
     :param group_seed: Seed for the group of environments.
     :type group_seed: int
     :return: Episode tensors, masks, turn ids, rewards, counted batch steps,
-        updated group seed, per-trajectory vLLM sampling logprobs, and
-        per-trajectory vision ``pixel_values`` (each list uses the same
-        per-env collapse rule as :meth:`RolloutCollector.get_trajectories`).
-    :rtype: tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], int, int, list[torch.Tensor | None] | None, list[torch.Tensor | None] | None]
+        updated group seed, per-trajectory vLLM sampling logprobs,
+        per-trajectory vision ``pixel_values`` and per-trajectory ``(n, K)``
+        vLLM sampling supports (each list uses the same per-env collapse rule
+        as :meth:`RolloutCollector.get_trajectories`).
+    :rtype: tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], int, int, list[torch.Tensor | None] | None, list[torch.Tensor | None] | None, list[torch.Tensor | None] | None]
     """
     prompts = env.reset(
         seed=group_seed,
@@ -322,7 +324,11 @@ def collect_rollouts_llm(
                 )
             else:
                 action_result = agent.get_action(prompts, training=True)
-            prompts = env.step(action_result.token_ids, action_result.sampling_logps)
+            prompts = env.step(
+                action_result.token_ids,
+                action_result.sampling_logps,
+                action_result.sampling_supports,
+            )
     finally:
         if accelerator is not None:
             accelerator.wait_for_everyone()
@@ -335,6 +341,7 @@ def collect_rollouts_llm(
         batch_steps,
         all_sampling_logps,
         all_pixel_values,
+        all_sampling_supports,
     ) = env.get_trajectories()
     group_seed = group_seed + batch_size
 
@@ -347,6 +354,7 @@ def collect_rollouts_llm(
         group_seed,
         all_sampling_logps,
         all_pixel_values,
+        all_sampling_supports,
     )
 
 
@@ -359,6 +367,7 @@ def collate_llm_rollouts(
     *,
     group_size: int,
     all_pixel_values: list[torch.Tensor | None] | None = None,
+    all_sampling_supports: list[torch.Tensor | None] | None = None,
 ) -> LLMExperienceBatch:
     """Collate a collected LLM rollout into one grouped experience batch.
 
@@ -384,6 +393,10 @@ def collate_llm_rollouts(
     :param all_pixel_values: Per-trajectory vision tensors parallel to
         ``token_ids_list``, or ``None`` when none were captured.
     :type all_pixel_values: list[torch.Tensor | None] | None
+    :param all_sampling_supports: Per-trajectory ``(n, K)`` vLLM sampling
+        supports parallel to ``token_ids_list``, or ``None`` when none were
+        recorded.
+    :type all_sampling_supports: list[torch.Tensor | None] | None
     :return: The collated batch.
     :rtype: LLMExperienceBatch
     """
@@ -393,6 +406,9 @@ def collate_llm_rollouts(
         raise ValueError(msg)
     logps = all_sampling_logps if all_sampling_logps is not None else [None] * n
     pixels = all_pixel_values if all_pixel_values is not None else [None] * n
+    supports = (
+        all_sampling_supports if all_sampling_supports is not None else [None] * n
+    )
     groups = [
         RolloutGroup(
             group_size=group_size,
@@ -404,6 +420,7 @@ def collate_llm_rollouts(
                     rewards=rewards,
                     sampling_logps=sampling_logps,
                     pixel_values=pixel_values,
+                    sampling_supports=sampling_supports,
                 )
                 for (
                     token_ids,
@@ -412,6 +429,7 @@ def collate_llm_rollouts(
                     rewards,
                     sampling_logps,
                     pixel_values,
+                    sampling_supports,
                 ) in zip(
                     token_ids_list[sl],
                     action_masks_list[sl],
@@ -419,6 +437,7 @@ def collate_llm_rollouts(
                     all_rewards[sl],
                     logps[sl],
                     pixels[sl],
+                    supports[sl],
                     strict=True,
                 )
             ],

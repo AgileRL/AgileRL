@@ -376,7 +376,8 @@ class TestGRPOGetActionActorDevice:
         captured: list = []
 
         # Act
-        with _patch_hf_generate_path("agilerl.algorithms.grpo", captured):
+        agent._generate_with_hf = MethodType(LLMAlgorithm._generate_with_hf, agent)
+        with _patch_hf_generate_path("agilerl.algorithms.core.base", captured):
             GRPO.get_action(agent, _dummy_prompts(), training=False)
 
         # Assert — prompts sent to self.device, not the CPU param device
@@ -388,7 +389,8 @@ class TestGRPOGetActionActorDevice:
         captured: list = []
 
         # Act
-        with _patch_hf_generate_path("agilerl.algorithms.grpo", captured):
+        agent._generate_with_hf = MethodType(LLMAlgorithm._generate_with_hf, agent)
+        with _patch_hf_generate_path("agilerl.algorithms.core.base", captured):
             GRPO.get_action(agent, _dummy_prompts(), training=False)
 
         # Assert — prompts sent to the param device (CPU), not self.device
@@ -1159,6 +1161,42 @@ class TestMaterializeFsdp2FromCpuState:
 
         assert out is model
         assert torch.equal(model.weight, expected)
+
+    def test_meta_load_fills_embed_scale_from_scalar(self, tmp_path):
+        from safetensors.torch import save_file
+
+        from agilerl.distributed import materialize_fsdp2_from_cpu_state
+
+        expected = torch.ones(2, 2)
+        save_file({"weight": expected}, str(tmp_path / "model.safetensors"))
+
+        class Tiny(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.weight = nn.Parameter(torch.empty(2, 2))
+                self.scalar_embed_scale = 5.0
+                self.register_buffer("embed_scale", torch.tensor(0.0), persistent=False)
+                self.config = PretrainedConfig(
+                    tie_word_embeddings=False, name_or_path=str(tmp_path)
+                )
+
+        with torch.device("meta"):
+            model = Tiny()
+
+        with (
+            patch(
+                "agilerl.distributed.fsdp.apply_fsdp2",
+                side_effect=lambda module, *_a, **_k: module,
+            ),
+            patch("agilerl.distributed.fsdp.restore_after_to_empty"),
+            patch("agilerl.distributed.fsdp._share_fsdp_comm_streams"),
+        ):
+            materialize_fsdp2_from_cpu_state(
+                model, "cpu", FSDPConfig(cpu_offload=True, routed_expert_chunk_mib=64)
+            )
+
+        assert torch.equal(model.weight, expected)
+        assert float(model.embed_scale) == 5.0
 
     def test_hub_id_resolves_through_cached_file(self, tmp_path):
 

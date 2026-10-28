@@ -5,20 +5,32 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 from typing import TYPE_CHECKING, Any
 
+import torch
 from pydantic import BaseModel
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import LLMAlgorithm
+from agilerl.algorithms.core.base import (
+    broadcast_fsdp_memory_pick,
+    training_device_spec,
+)
+from agilerl.arena.memory.estimator import training_breakdown
+from agilerl.arena.memory.manifest import training_settings_from_spec
+from agilerl.arena.memory.resolve.batch import resolve_micro_batch_size_per_gpu
+from agilerl.arena.memory.resolve.fsdp import resolve_fsdp_memory
+from agilerl.arena.memory.specs import ModelArch, ModelSpec
 from agilerl.arena.models.algorithms import (
     AlgorithmSpec,
     LLMAlgorithmSpec,
     RolloutLLMSpec,
 )
+from agilerl.arena.models.fsdp import FSDPConfig
 from agilerl.arena.models.networks import CosineLRScheduleConfig as CosineLRScheduleSpec
-from agilerl.arena.models.networks import LoraConfigDict, default_colocated_vllm_config
+from agilerl.arena.models.networks import LoraConfigDict, default_rollout_vllm_config
 from agilerl.builders.base import (
     AlgorithmBuilder,
     AlgorithmBuildRuntime,
@@ -36,12 +48,63 @@ from agilerl.utils.llm_utils import (
     resolve_pad_token_id,
 )
 
+if HAS_LLM_DEPENDENCIES:
+    from transformers import PretrainedConfig
+
 if TYPE_CHECKING:
     from peft import LoraConfig, PeftModel
     from transformers import PreTrainedModel
     from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 logger = logging.getLogger(__name__)
+
+
+def fsdp_config_for_algorithm(
+    spec: LLMAlgorithmSpec,
+    algo_cls: type,
+    device: str | torch.device,
+    n_training_gpus: int,
+    micro_batch_size: int,
+) -> FSDPConfig | None:
+    """FSDP config for the constructor.
+
+    A constructor that takes ``max_model_len`` keeps unset memory fields for
+    the in-job estimate. On CUDA, the others are filled from the spec's context
+    length. Off CUDA the algorithm applies its own fallback.
+
+    :param spec: Algorithm spec.
+    :param algo_cls: Algorithm class about to be constructed.
+    :param device: Trainer device.
+    :param n_training_gpus: Trainer ranks.
+    :param micro_batch_size: Rows in one forward.
+    :return: FSDP config, or ``None`` when the spec has no FSDP section.
+    """
+    fsdp = spec.fsdp
+    if fsdp is None:
+        return None
+    if fsdp.routed_expert_chunk_mib is not None and fsdp.optim_cpu_offload is not None:
+        return fsdp
+    if torch.device(device).type != "cuda":
+        return fsdp
+    if "max_model_len" in inspect.signature(algo_cls.__init__).parameters:
+        return fsdp
+    model_id = spec.pretrained_model_name_or_path
+    if model_id is None:
+        msg = "FSDP memory settings need pretrained_model_name_or_path"
+        raise ValueError(msg)
+    model_config = PretrainedConfig.get_config_dict(model_id)[0]
+    model = ModelSpec(
+        model_id=model_id,
+        arch=ModelArch.from_hf_config(model_config),
+    )
+    settings = training_settings_from_spec(
+        spec, n_training_gpus, micro_batch_size
+    ).model_copy(update={"fsdp": fsdp})
+    device_spec = training_device_spec(device)
+    picked = resolve_fsdp_memory(
+        model, device_spec, settings, training_breakdown, orchestrated=True
+    )
+    return broadcast_fsdp_memory_pick(model, device_spec, settings, picked)
 
 
 class LLMBuilder(AlgorithmBuilder):
@@ -72,7 +135,7 @@ class LLMBuilder(AlgorithmBuilder):
             kwargs.pop("vllm_config", None)
             return
         if kwargs.get("vllm_config") is None:
-            kwargs["vllm_config"] = default_colocated_vllm_config()
+            kwargs["vllm_config"] = default_rollout_vllm_config()
         vllm_cfg = kwargs["vllm_config"]
         if isinstance(vllm_cfg, BaseModel):
             vllm_cfg = vllm_cfg.model_dump(exclude_none=True)
@@ -124,12 +187,13 @@ class LLMBuilder(AlgorithmBuilder):
         kwargs = spec_kwargs(spec, hp_config=runtime.hp_config)
         kwargs.pop("pretrained_model_name_or_path", None)
 
-        cls._resolve_vllm_kwargs(
-            kwargs,
-            colocated=isinstance(spec, RolloutLLMSpec) and rollout_mode == "colocated",
-        )
+        colocated = isinstance(spec, RolloutLLMSpec) and rollout_mode == "colocated"
+        cls._resolve_vllm_kwargs(kwargs, colocated=colocated)
 
         if kwargs.get("lora_config") is not None:
+            kwargs["lora_tower_target_modules"] = kwargs[
+                "lora_config"
+            ].tower_target_modules
             kwargs["lora_config"] = peft_lora_config(kwargs["lora_config"])
         if kwargs.get("cosine_lr_schedule_config") is not None:
             kwargs["cosine_lr_schedule_config"] = cosine_lr_schedule_config(
@@ -171,15 +235,38 @@ class LLMBuilder(AlgorithmBuilder):
             getattr(tokenizer, "eos_token_id", None),
         )
 
-        if "micro_batch_size_per_gpu" not in kwargs and is_distributed():
-            kwargs["micro_batch_size_per_gpu"] = max(
-                spec.batch_size // get_world_size(), 1
-            )
-        fsdp = getattr(spec, "fsdp", None)
-        if fsdp is not None:
-            kwargs["fsdp_config"] = fsdp
-
+        if "micro_batch_size_per_gpu" not in kwargs:
+            if torch.device(runtime.device).type == "cuda":
+                n_training_gpus = get_world_size()
+                device_spec = training_device_spec(
+                    runtime.device,
+                    kwargs.get("vllm_config"),
+                    colocated,
+                )
+                settings = training_settings_from_spec(
+                    spec,
+                    n_training_gpus,
+                    micro_batch_size=1,
+                )
+                kwargs["micro_batch_size_per_gpu"] = resolve_micro_batch_size_per_gpu(
+                    spec,
+                    n_training_gpus,
+                    device_spec,
+                    settings=settings,
+                )
+            elif is_distributed():
+                kwargs["micro_batch_size_per_gpu"] = resolve_micro_batch_size_per_gpu(
+                    spec, get_world_size()
+                )
         algo_cls = cls.algo_class(spec)
+        micro_batch_size = kwargs.get("micro_batch_size_per_gpu")
+        kwargs["fsdp_config"] = fsdp_config_for_algorithm(
+            spec,
+            algo_cls,
+            runtime.device,
+            get_world_size(),
+            1 if micro_batch_size is None else micro_batch_size,
+        )
         kwargs = constructor_kwargs(algo_cls, kwargs)
         algo = algo_cls(
             model_name=spec.pretrained_model_name_or_path,
@@ -239,7 +326,10 @@ def peft_lora_config(lora: LoraConfigDict | dict[str, Any] | LoraConfig) -> Lora
 
     if isinstance(lora, PeftLoraConfig):
         return lora
-    peft_lora = LoraConfigDict.model_validate(lora).model_dump()
+    # Tower targets reach the algorithm as lora_tower_target_modules, not through peft.
+    peft_lora = LoraConfigDict.model_validate(lora).model_dump(
+        exclude={"tower_target_modules"}
+    )
     peft_lora["r"] = peft_lora.pop("lora_r")
     return PeftLoraConfig(**peft_lora)
 

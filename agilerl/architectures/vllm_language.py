@@ -1,7 +1,7 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Map a multimodal checkpoint onto the language tower vLLM serves."""
+"""Serve a multimodal checkpoint in vLLM with some or all of its towers skipped."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from collections.abc import Collection
 from typing import Any, Protocol, runtime_checkable
 
 from agilerl.architectures.runtime import ModelRuntimeConfig
+from agilerl.arena.models.networks import VllmModality
 
 
 @runtime_checkable
@@ -38,64 +39,105 @@ def nested_language_config(config: object) -> object:
     return config
 
 
-def apply_language_tower_engine_kwargs(
+def serves_images(strip_multimodal_towers: bool | list[VllmModality]) -> bool:
+    """Whether an engine with these towers stripped takes image prompts.
+
+    :param strip_multimodal_towers: ``vllm_config.strip_multimodal_towers``.
+    :type strip_multimodal_towers: bool | list[VllmModality]
+    """
+    if strip_multimodal_towers is True:
+        return False
+    return "image" not in (strip_multimodal_towers or ())
+
+
+def apply_multimodal_engine_kwargs(
     kwargs: dict[str, Any],
-    strip_multimodal_towers: bool | list[str],
-    runtime: ModelRuntimeConfig,
+    strip_multimodal_towers: bool | list[VllmModality],
 ) -> None:
-    """Set ``hf_overrides`` and family class mapping when serving a language tower.
+    """Skip stripped towers without changing the served module names.
+
+    ``True`` sets ``language_model_only``. A list names modalities (``image``,
+    ``video``, ``audio``) and sets ``limit_mm_per_prompt`` to 0 for each, so
+    vLLM leaves those towers unbuilt.
 
     :param kwargs: vLLM engine kwargs mutated in place.
     :type kwargs: dict[str, Any]
-    :param strip_multimodal_towers: ``True`` serves the language tower only. A
-        list still loads the multimodal engine; named towers are freed later.
-    :type strip_multimodal_towers: bool | list[str]
-    :param runtime: Family runtime whose language-tower mapping, if any, is applied.
-    :type runtime: ModelRuntimeConfig
+    :param strip_multimodal_towers: ``True`` serves the language model only; a
+        list names the modalities to drop.
+    :type strip_multimodal_towers: bool | list[VllmModality]
     """
     if strip_multimodal_towers is True:
-        tower = runtime.language_tower
-        if tower.hf_overrides is not None:
-            kwargs["hf_overrides"] = tower.hf_overrides
-        else:
-            kwargs["hf_overrides"] = nested_language_config
-        if tower.model_class_overrides:
-            kwargs["model_class_overrides"] = {
-                **kwargs.get("model_class_overrides", {}),
-                **tower.model_class_overrides,
-            }
+        kwargs["language_model_only"] = True
         return
+    if strip_multimodal_towers:
+        kwargs["limit_mm_per_prompt"] = {
+            **kwargs.get("limit_mm_per_prompt", {}),
+            **dict.fromkeys(strip_multimodal_towers, 0),
+        }
 
-    kept_override = runtime.multimodal_towers_kept_hf_override
-    if kept_override is not None:
-        kwargs["hf_overrides"] = kept_override
+
+def unbuilt_tower_modules(
+    strip_multimodal_towers: bool | list[VllmModality],
+    runtime: ModelRuntimeConfig,
+) -> list[str]:
+    """Trainer tower and connector modules vLLM leaves unbuilt under *strip_multimodal_towers*.
+
+    :param strip_multimodal_towers: ``True`` serves the language model only; a
+        list names the modalities to drop.
+    :type strip_multimodal_towers: bool | list[VllmModality]
+    :param runtime: Family runtime mapping tower modules to their modalities.
+    :type runtime: ModelRuntimeConfig
+    :return: Module names whose modalities are all stripped, sorted.
+    :rtype: list[str]
+    """
+    if strip_multimodal_towers is True:
+        return sorted(runtime.tower_modalities)
+    stripped = set(strip_multimodal_towers or ())
+    return sorted(
+        name
+        for name, modalities in runtime.tower_modalities.items()
+        if modalities <= stripped
+    )
 
 
 def apply_tower_connector_lora_engine_kwargs(
     kwargs: dict[str, Any],
-    strip_multimodal_towers: bool | list[str],
+    strip_multimodal_towers: bool | list[VllmModality],
     runtime: ModelRuntimeConfig,
-    lora_target_modules: str | Collection[str] | None,
+    tower_target_modules: Collection[str] | None,
 ) -> None:
-    """Enable vLLM LoRA on multimodal towers and connectors when the adapter can reach them.
+    """Enable vLLM LoRA on multimodal towers and connectors when the adapter names them.
 
-    vLLM wraps every tower and connector linear once this is on, so an adapter
-    that only targets the language model would pay for empty LoRA layers.
+    vLLM wraps every tower and connector linear once this is on, so it stays
+    off for adapters on the language model only.
 
     :param kwargs: vLLM engine kwargs mutated in place.
     :type kwargs: dict[str, Any]
-    :param strip_multimodal_towers: ``True`` serves the language tower only.
-    :type strip_multimodal_towers: bool | list[str]
-    :param runtime: Family runtime; only families whose vLLM towers support LoRA enable it.
+    :param strip_multimodal_towers: ``True`` serves the language model only.
+    :type strip_multimodal_towers: bool | list[VllmModality]
+    :param runtime: Family runtime naming the tower targets vLLM supports.
     :type runtime: ModelRuntimeConfig
-    :param lora_target_modules: PEFT ``target_modules``. A string spec
-        (``"all-linear"`` or a regex) or ``None`` counts as reaching the towers.
-    :type lora_target_modules: str | Collection[str] | None
+    :param tower_target_modules: ``lora_config.tower_target_modules``.
+    :type tower_target_modules: Collection[str] | None
+    :raises ValueError: If towers are stripped, or a target is not a tower
+        module vLLM serves LoRA on for this family.
     """
-    tower_targets = runtime.tower_connector_lora_targets
-    if strip_multimodal_towers is True or not tower_targets:
+    if not tower_target_modules:
         return
-    named_targets = not isinstance(lora_target_modules, str | None)
-    if named_targets and tower_targets.isdisjoint(lora_target_modules):
-        return
+    if strip_multimodal_towers is True:
+        msg = (
+            "lora_config.tower_target_modules needs the towers served; set "
+            "vllm_config.strip_multimodal_towers to false"
+        )
+        raise ValueError(msg)
+    unsupported = sorted(
+        set(tower_target_modules) - runtime.tower_connector_lora_targets
+    )
+    if unsupported:
+        supported = sorted(runtime.tower_connector_lora_targets) or "none"
+        msg = (
+            f"vLLM cannot serve tower LoRA on {unsupported}; this family "
+            f"supports {supported}"
+        )
+        raise ValueError(msg)
     kwargs["enable_tower_connector_lora"] = True

@@ -3,6 +3,7 @@
 
 import copy
 from itertools import pairwise
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -18,6 +19,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 from torch.utils.checkpoint import checkpoint
 from transformers.modeling_layers import GradientCheckpointingLayer
 
+from agilerl import HAS_LIGER_KERNEL
 from agilerl.distributed import fsdp as dmod
 from agilerl.distributed import full_shape_views
 from agilerl.lora.fused import (
@@ -48,6 +50,9 @@ from agilerl.utils.llm_utils import (
     expert_lora_vllm_key_map,
     filter_peft_state_dict_for_vllm_lora,
 )
+
+if HAS_LIGER_KERNEL:
+    from liger_kernel.transformers.swiglu import LigerExperts
 
 NUM_EXPERTS = 4
 TOP_K = 2
@@ -919,8 +924,11 @@ def test_expert_lora_vllm_key_map_and_filter():
         f"{gate_up_key}.lora_A.weight": torch.zeros(2, 2),
         "other.lora_A.weight": torch.zeros(2, 2),
     }
-    filtered = filter_peft_state_dict_for_vllm_lora(state, None, expert_key_map=key_map)
-    assert list(filtered) == ["experts.base_layer.lora_A.weight"]
+    filtered = filter_peft_state_dict_for_vllm_lora(state, expert_key_map=key_map)
+    assert sorted(filtered) == [
+        "experts.base_layer.lora_A.weight",
+        "other.lora_A.weight",
+    ]
 
     _, ungated_block = _ungated_pair()
     key_map = expert_lora_vllm_key_map(ungated_block)
@@ -1354,6 +1362,35 @@ def test_routed_act_fn_falls_back_to_config_hidden_act():
 def test_routed_act_fn_raises_without_activation():
     with pytest.raises(RuntimeError, match="activation function"):
         moe_layouts.routed_experts_act_fn(nn.Linear(4, 4))
+
+
+@pytest.mark.skipif(not HAS_LIGER_KERNEL, reason="liger-kernel installs on Linux only")
+class TestRoutedExpertsLocalForwardLigerExperts:
+    def test_matches_stock_silu_experts(self):
+        # Arrange
+        torch.manual_seed(0)
+        reference = _RoutedExperts()
+        config = SimpleNamespace(
+            num_experts=NUM_EXPERTS,
+            moe_intermediate_size=INTERMEDIATE,
+            hidden_size=HIDDEN,
+            hidden_act="silu",
+        )
+        liger = LigerExperts(config)
+        liger.gate_up_proj.data.copy_(reference.gate_up_proj.data)
+        liger.down_proj.data.copy_(reference.down_proj.data)
+        hidden = torch.randn(5, HIDDEN)
+        top_k_index = torch.tensor([[0, 1], [2, 3], [1, 2], [3, 0], [0, 2]])
+        top_k_weights = torch.full((5, TOP_K), 0.5)
+
+        # Act
+        out = moe_routed.routed_experts_local_forward(
+            liger, hidden, top_k_index, top_k_weights
+        )
+
+        # Assert
+        expected = reference(hidden, top_k_index, top_k_weights)
+        assert torch.allclose(out, expected, atol=1e-6)
 
 
 def test_grouped_linear_noncontiguous_weight_skips_empty_experts():

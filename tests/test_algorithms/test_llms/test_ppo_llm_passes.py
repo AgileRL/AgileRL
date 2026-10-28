@@ -13,10 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import math
-import os
-import socket
 import sys
-import traceback
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -26,7 +23,6 @@ from typing import Any
 import pytest
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as mp
 
 pytest.importorskip("transformers", reason="LLM tests require transformers.")
 pytest.importorskip("peft", reason="LLM tests require peft.")
@@ -36,7 +32,9 @@ from torch.utils.checkpoint import checkpoint
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from agilerl.algorithms.ppo_llm import PPO as LLMPPO
-from agilerl.arena.memory import estimate_training
+from agilerl.arena.memory.estimator import estimate_training
+from agilerl.arena.memory.resolve.fuse import training_settings_with_fuse
+from agilerl.arena.memory.specs import DeviceSpec
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.distributed.fsdp import FSDPConfig
 from agilerl.lora.fused import (
@@ -48,6 +46,7 @@ from agilerl.lora.fused import (
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import attention_mask_from_padded_ids
 from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
+from tests.rank_launch import run_ranks
 from tests.test_algorithms.test_llms.llm_helpers import (
     DummyConfig,
     DummyHiddenStatesModel,
@@ -58,6 +57,7 @@ from tests.test_algorithms.test_llms.llm_helpers import (
     trainable_weights,
 )
 from tests.test_algorithms.test_llms.segment_helpers import (
+    action_token_policy_loss,
     lora_weights,
     record_step_gradients,
     seed_lora_weights,
@@ -642,75 +642,34 @@ def record_runtime_backwards(
 def fsdp_learn_worker(
     rank: int,
     world_size: int,
-    port: int,
     liger: bool,
     fuse: bool,
-    queue: Any,
-) -> None:
+) -> Any:
     """One FSDP2 rank: learn on its half of :func:`learn_rows` and report step grads."""
-    try:
-        os.environ.update(
-            {
-                "RANK": str(rank),
-                "LOCAL_RANK": str(rank),
-                "WORLD_SIZE": str(world_size),
-                "MASTER_ADDR": "127.0.0.1",
-                "MASTER_PORT": str(port),
-            }
-        )
-        # The default FSDP2 mesh follows the host accelerator (MPS on macOS);
-        # these ranks train on CPU.
-        torch._C._get_accelerator = lambda: torch.device("cpu")
-        agent = make_ppo(
-            batch_size=4,
-            mini_batch_size=2,
-            micro_batch_size_per_gpu=1,
-            whiten_advantages=False,
-            wrap=True,
-            fsdp_config=FSDPConfig(optim_cpu_offload=False, param_dtype="float32"),
-            fuse_actor_critic_pass=fuse,
-        )
-        seed_lora_weights(agent)
-        monkeypatch = pytest.MonkeyPatch()
-        if liger:
-            use_fake_liger_policy_loss(agent, monkeypatch, "agilerl.algorithms.ppo_llm")
-        steps = record_step_gradients(agent, monkeypatch)
-        learn_rows(agent, slice(2 * rank, 2 * rank + 2))
-        # NumPy arrays: a torch tensor in the queue shares memory that dies
-        # with this process before the parent reads it.
-        step_arrays = [
-            {name: grad.numpy() for name, grad in step.items()} for step in steps
-        ]
-        queue.put((rank, "ok", (adapter_lora_names(agent), step_arrays)))
-    except Exception:
-        queue.put((rank, "err", traceback.format_exc()))
-    finally:
-        if dist.is_initialized():
-            dist.destroy_process_group()
-
-
-def spawn_fsdp_learn(liger: bool, fuse: bool, world_size: int = 2) -> list[Any]:
-    """Run :func:`fsdp_learn_worker` on ``world_size`` gloo ranks; return each rank's report."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        port = int(sock.getsockname()[1])
-    ctx = mp.get_context("spawn")
-    queue = ctx.Queue()
-    procs = [
-        ctx.Process(
-            target=fsdp_learn_worker,
-            args=(rank, world_size, port, liger, fuse, queue),
-        )
-        for rank in range(world_size)
+    # The default FSDP2 mesh follows the host accelerator (MPS on macOS);
+    # these ranks train on CPU.
+    torch._C._get_accelerator = lambda: torch.device("cpu")
+    agent = make_ppo(
+        batch_size=4,
+        mini_batch_size=2,
+        micro_batch_size_per_gpu=1,
+        whiten_advantages=False,
+        wrap=True,
+        fsdp_config=FSDPConfig(optim_cpu_offload=False, param_dtype="float32"),
+        fuse_actor_critic_pass=fuse,
+    )
+    seed_lora_weights(agent)
+    monkeypatch = pytest.MonkeyPatch()
+    if liger:
+        use_fake_liger_policy_loss(agent, monkeypatch, "agilerl.algorithms.ppo_llm")
+    steps = record_step_gradients(agent, monkeypatch)
+    learn_rows(agent, slice(2 * rank, 2 * rank + 2))
+    # NumPy arrays: a torch tensor sent to the parent shares memory that dies
+    # with this process before the parent reads it.
+    step_arrays = [
+        {name: grad.numpy() for name, grad in step.items()} for step in steps
     ]
-    for proc in procs:
-        proc.start()
-    results = sorted(queue.get(timeout=300) for _ in range(world_size))
-    for proc in procs:
-        proc.join(timeout=300)
-    for rank, status, payload in results:
-        assert status == "ok", f"rank {rank}: {payload}"
-    return [payload for _, _, payload in results]
+    return (adapter_lora_names(agent), step_arrays)
 
 
 def record_grad_forwards(agent: LLMPPO) -> list[dict[str, Any]]:
@@ -923,6 +882,35 @@ class TestPPOLearnPasses:
         for step in steps:
             assert step.keys() == adapter_lora_names(agent)
 
+    @FUSE_MODES
+    def test_a_row_without_action_tokens_adds_no_loss_or_metrics(
+        self, fuse: bool
+    ) -> None:
+        """A micro-batch whose every action vLLM forced trains like no row at all."""
+        # Arrange
+        generator = torch.Generator().manual_seed(2)
+        ids = list(
+            torch.randint(0, PAD_TOKEN_ID, (2, SEQ_LEN + 2), generator=generator).split(
+                1
+            )
+        )
+        masks = [torch.zeros(1, SEQ_LEN + 1, dtype=torch.bool) for _ in range(2)]
+        masks[0][0, 3:] = True
+        agents = [
+            make_ppo(micro_batch_size_per_gpu=1, fuse_actor_critic_pass=fuse)
+            for _ in range(2)
+        ]
+
+        # Act
+        with_forced_row = agents[0].learn((ids, masks, torch.tensor([1.0, 0.0])))
+        live_row_only = agents[1].learn((ids[:1], masks[:1], torch.tensor([1.0])))
+
+        # Assert: float32 sums over different batch shapes differ in the last bits
+        for name in ("loss", "pg_loss", "vf_loss", "kl", "entropy", "clipfrac"):
+            assert with_forced_row[name] == pytest.approx(
+                live_row_only[name], rel=1e-6, abs=1e-7
+            ), name
+
 
 class TestPPOFusedLearnMatchesSplitLearn:
     @pytest.mark.parametrize("liger", [False, True], ids=["standard", "liger"])
@@ -1095,6 +1083,75 @@ class TestPPOLearnTurnCount:
             assert torch.equal(loss.detach(), expected)
         assert sorted(local_counts) == [1, 1, 2, 2]
         assert len(value_calls) == 4
+
+
+def learn_three_turns(agent: LLMPPO, forced: bool) -> dict[str, float]:
+    """One learn over two three-turn episodes of three tokens per turn.
+
+    With ``forced``, every token of row 0's middle and last turn leaves the
+    action mask and keeps its turn id.
+    """
+    generator = torch.Generator().manual_seed(2)
+    ids = torch.randint(0, PAD_TOKEN_ID, (2, 11), generator=generator)
+    turn_ids = torch.tensor([[-1, 0, 0, 0, 1, 1, 1, 2, 2, 2]]).repeat(2, 1)
+    mask = turn_ids >= 0
+    if forced:
+        mask[0, 4:] = False
+    rewards = torch.tensor([[0.5, 1.0, 2.0], [0.0, -1.0, 0.5]])
+    return agent.learn(
+        (list(ids.split(1)), list(mask.split(1)), rewards), turn_ids=turn_ids
+    )
+
+
+class TestPPOLearnForcedTurns:
+    """A turn of forced tokens keeps its reward and its place in the episode."""
+
+    def test_returns_and_advantages_match_the_episode_with_free_turns(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        results = {}
+        for forced in (False, True):
+            agent = make_ppo(advantage_granularity="turn", gamma=0.9)
+            gae, gae_calls = record_calls(agent._compute_gae_returns)
+            monkeypatch.setattr(agent, "_compute_gae_returns", gae)
+
+            # Act
+            metrics = learn_three_turns(agent, forced=forced)
+            ((_args, _kwargs, (returns, advantages)),) = gae_calls
+            results[forced] = (returns, advantages, metrics["vf_loss"])
+
+        # Assert
+        free_returns, free_advantages, free_vf_loss = results[False]
+        forced_returns, forced_advantages, forced_vf_loss = results[True]
+        assert torch.equal(forced_returns, free_returns)
+        assert torch.equal(forced_advantages, free_advantages)
+        assert forced_vf_loss == free_vf_loss
+
+    def test_a_fully_forced_turn_is_no_unit_of_the_liger_turn_loss(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        agent = make_ppo(advantage_granularity="turn", importance_sampling_level="turn")
+        use_fake_liger_policy_loss(agent, monkeypatch, "agilerl.algorithms.ppo_llm")
+        kernel, kernel_calls = record_calls(action_token_policy_loss)
+        monkeypatch.setattr(
+            "agilerl.algorithms.ppo_llm.apply_fused_policy_loss", kernel
+        )
+
+        # Act
+        learn_three_turns(agent, forced=True)
+
+        # Assert
+        ((_args, kwargs, _out),) = kernel_calls
+        assert sorted(kwargs["full_turn_mask"].tolist()) == [
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0],
+        ]
+        assert sorted(kwargs["turn_ids"].tolist()) == [
+            [-1, 0, 0, 0, -1, -1, -1, -1, -1, -1],
+            [-1, 0, 0, 0, 1, 1, 1, 2, 2, 2],
+        ]
 
 
 class TestPPOLearnNonFiniteLoss:
@@ -1340,6 +1397,17 @@ class TestPPOLearnGradNorms:
         )
 
 
+def cuda_total_under_peak(peak_bytes: int) -> int:
+    """CUDA total whose 95% usable bytes are one byte under ``peak_bytes``."""
+    usable = peak_bytes - 1
+    total = usable * 20 // 19
+    while int(total * 0.95) < usable:
+        total += 1
+    while int(total * 0.95) > usable:
+        total -= 1
+    return total
+
+
 def patch_cuda_device(
     agent: LLMPPO, monkeypatch: pytest.MonkeyPatch, total_memory: int
 ) -> None:
@@ -1389,7 +1457,7 @@ class TestPPOFuseActorCriticPass:
 
     @pytest.mark.parametrize(
         ("total_gib", "fuse", "verb", "budget"),
-        [(80, True, "fuses", "78.00"), (1, False, "splits", "0.97")],
+        [(80, True, "fuses", "76.00"), (1, False, "splits", "0.95")],
         ids=["fits", "does-not-fit"],
     )
     def test_none_on_cuda_fuses_only_when_the_estimate_fits(
@@ -1418,7 +1486,7 @@ class TestPPOFuseActorCriticPass:
 
     @pytest.mark.parametrize(
         ("sleep_mode", "fuse", "budget"),
-        [(False, False, "0.30"), (True, True, "3.90")],
+        [(False, False, "0.20"), (True, True, "3.80")],
         ids=["resident-engine", "sleeping-engine"],
     )
     def test_none_on_cuda_leaves_a_resident_vllm_share_out_of_the_budget(
@@ -1431,7 +1499,7 @@ class TestPPOFuseActorCriticPass:
         budget: str,
     ) -> None:
         # Arrange: 4 GiB fits the ~1.7 GiB fused estimate unless vLLM keeps
-        # 90% of it: 0.975 * 4 - 0.9 * 4 = 0.3 GiB.
+        # 90% of it: 0.95 * 4 - 0.9 * 4 = 0.2 GiB.
         agent = make_ppo()
         save_checkpoint_config(agent, tmp_path)
         patch_cuda_device(agent, monkeypatch, 4 * 2**30)
@@ -1450,6 +1518,42 @@ class TestPPOFuseActorCriticPass:
         assert resolved is fuse
         assert f"budget {budget} GiB" in caplog.text
 
+    @pytest.mark.parametrize("fits", [True, False], ids=["fits", "over-budget"])
+    def test_omitted_fuse_matches_training_settings_with_fuse(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        fits: bool,
+    ) -> None:
+        # Arrange: over-budget sits one byte under the orchestrated fused peak.
+        agent = make_ppo()
+        save_checkpoint_config(agent, tmp_path)
+        model, settings = agent._training_estimate_inputs(
+            "ppo", agent.beta, fuse_actor_critic_pass=True
+        )
+        probe = DeviceSpec(
+            total_bytes=80 * 2**30, name="test-gpu", compute_capability=(8, 0)
+        )
+        peak = estimate_training(model, probe, settings, orchestrated=True).total_bytes
+        total = 80 * 2**30 if fits else cuda_total_under_peak(peak)
+        patch_cuda_device(agent, monkeypatch, total)
+        device = DeviceSpec(
+            total_bytes=total, name="test-gpu", compute_capability=(8, 0)
+        )
+
+        # Act
+        resolved = agent._resolve_fuse_actor_critic_pass()
+        expected = training_settings_with_fuse(
+            None, settings, model, device
+        ).fuse_actor_critic_pass
+
+        # Assert
+        assert agent._training_device_spec() == device
+        if not fits:
+            assert device.usable_bytes == peak - 1
+        assert expected is fits
+        assert resolved is expected
+
     def test_none_on_cuda_estimates_the_gradient_micro_batch(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -1459,9 +1563,9 @@ class TestPPOFuseActorCriticPass:
         patch_cuda_device(agent, monkeypatch, 80 * 2**30)
         estimated = []
 
-        def record_estimate(model, device, settings):
+        def record_estimate(model, device, settings, orchestrated=False):
             estimated.append(settings)
-            return estimate_training(model, device, settings)
+            return estimate_training(model, device, settings, orchestrated=orchestrated)
 
         monkeypatch.setattr(
             "agilerl.algorithms.core.base.estimate_training", record_estimate
@@ -1486,9 +1590,9 @@ class TestPPOFuseActorCriticPass:
         patch_cuda_device(agent, monkeypatch, 80 * 2**30)
         archs = []
 
-        def record_estimate(model, device, settings):
+        def record_estimate(model, device, settings, orchestrated=False):
             archs.append(model.arch)
-            return estimate_training(model, device, settings)
+            return estimate_training(model, device, settings, orchestrated=orchestrated)
 
         monkeypatch.setattr(
             "agilerl.algorithms.core.base.estimate_training", record_estimate
@@ -1557,6 +1661,7 @@ class TestPPOUseAdapter:
 @pytest.mark.skipif(
     sys.platform == "win32" or not dist.is_available(), reason="gloo unavailable"
 )
+@pytest.mark.multi_rank
 class TestPPOLearnFSDP:
     @pytest.mark.parametrize("liger", [False, True], ids=["standard", "liger"])
     @FUSE_MODES
@@ -1581,7 +1686,7 @@ class TestPPOLearnFSDP:
         learn_rows(single)
 
         # Act
-        reports = spawn_fsdp_learn(liger, fuse)
+        reports = run_ranks(fsdp_learn_worker, 2, liger, fuse, backend=None)
 
         # Assert
         assert len(single_steps) == 1
@@ -1597,3 +1702,58 @@ class TestPPOLearnFSDP:
                     atol=ATOL,
                     msg=name,
                 )
+
+
+class TestResolveFsdpReduceDtype:
+    def test_split_passes_reduce_in_param_dtype(self) -> None:
+        # Arrange
+        agent = make_ppo(fuse_actor_critic_pass=False)
+
+        # Act
+        resolved = agent._resolve_fsdp_config(FSDPConfig())
+
+        # Assert
+        assert resolved.reduce_dtype == resolved.param_dtype == "bfloat16"
+
+    def test_fused_pass_keeps_configured_reduce_dtype(self) -> None:
+        # Arrange
+        agent = make_ppo(fuse_actor_critic_pass=True)
+
+        # Act
+        resolved = agent._resolve_fsdp_config(FSDPConfig())
+
+        # Assert
+        assert resolved.reduce_dtype == "float32"
+
+    def test_no_defer_keeps_configured_reduce_dtype(self) -> None:
+        # Arrange
+        agent = make_ppo(fuse_actor_critic_pass=False)
+
+        # Act
+        resolved = agent._resolve_fsdp_config(FSDPConfig(defer_grad_sync=False))
+
+        # Assert
+        assert resolved.reduce_dtype == "float32"
+
+    def test_no_value_head_keeps_configured_reduce_dtype(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        agent = make_ppo(fuse_actor_critic_pass=False)
+        monkeypatch.setattr(agent, "use_value_head", False)
+
+        # Act
+        resolved = agent._resolve_fsdp_config(FSDPConfig())
+
+        # Assert
+        assert resolved.reduce_dtype == "float32"
+
+    def test_already_equal_dtypes_keep_configured_reduce_dtype(self) -> None:
+        # Arrange
+        agent = make_ppo(fuse_actor_critic_pass=False)
+
+        # Act
+        resolved = agent._resolve_fsdp_config(FSDPConfig(reduce_dtype="bfloat16"))
+
+        # Assert
+        assert resolved.reduce_dtype == resolved.param_dtype == "bfloat16"

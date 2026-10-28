@@ -16,8 +16,10 @@ import pytest
 from click.testing import CliRunner
 
 from agilerl.arena.cli import (
+    CLI_PLUGIN_GROUP,
     _redact_agent_rows_for_display,
     arena_client,
+    load_cli_plugins,
     main,
 )
 from agilerl.arena.config import CommandConfig, build_client
@@ -261,6 +263,62 @@ class TestMainGroup:
         with patch("agilerl.arena.config.build_client"):
             result = runner.invoke(main, ["--request-timeout", "42", "_test_ctx"])
         assert "timeout=42" in result.output
+
+
+class FakeEntryPoint:
+    def __init__(self, register):
+        self._register = register
+
+    def load(self):
+        return self._register
+
+
+class TestLoadCliPlugins:
+    def test_registers_plugin_commands_on_the_group(self, runner, monkeypatch):
+        # Arrange
+        def register(group: click.Group) -> None:
+            @group.command("hello")
+            def hello() -> None:
+                click.echo("hello from plugin")
+
+        requested = []
+
+        def fake_entry_points(*, group):
+            requested.append(group)
+            return [FakeEntryPoint(register)]
+
+        monkeypatch.setattr("agilerl.arena.cli.entry_points", fake_entry_points)
+        group = click.Group("arena")
+
+        # Act
+        load_cli_plugins(group)
+        result = runner.invoke(group, ["hello"])
+
+        # Assert
+        assert requested == [CLI_PLUGIN_GROUP]
+        assert result.exit_code == 0
+        assert result.output == "hello from plugin\n"
+
+    def test_no_plugins_leaves_the_group_unchanged(self, monkeypatch):
+        monkeypatch.setattr("agilerl.arena.cli.entry_points", lambda *, group: [])
+        group = click.Group("arena")
+
+        load_cli_plugins(group)
+
+        assert group.commands == {}
+
+    def test_plugin_error_propagates(self, monkeypatch):
+        def broken(group: click.Group) -> None:
+            msg = "plugin failed to register"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(
+            "agilerl.arena.cli.entry_points",
+            lambda *, group: [FakeEntryPoint(broken)],
+        )
+
+        with pytest.raises(RuntimeError, match="plugin failed to register"):
+            load_cli_plugins(click.Group("arena"))
 
 
 class TestManifestCommands:
@@ -775,15 +833,20 @@ class TestModelsSupportedCommand:
         assert set(models) == set(SUPPORTED_MODEL_INFO)
         qwen = models["Qwen/Qwen3-4B"]
         assert qwen["architecture"] == "dense"
-        assert qwen["status"] == "live"
+        assert qwen["status"] == "deprecated"
         assert models["Qwen/Qwen2.5-0.5B-Instruct"]["status"] == "deprecated"
         assert (
             models["nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16"]["status"]
-            == "preview"
+            == "live"
         )
         assert qwen["max_context_length"] == 40960
         assert qwen["lora_ranks"] == [1, 8, 16, 32, 64, 128, 256, 320, 512]
         assert "_gram_estimate" in qwen["lora_info"]
+        assert qwen["supports_expert_parallel"] is False
+        assert qwen["num_routed_experts"] is None
+        lightning = models["nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16"]
+        assert lightning["supports_expert_parallel"] is True
+        assert lightning["num_routed_experts"] == 128
 
 
 class TestModelsInfoCommand:

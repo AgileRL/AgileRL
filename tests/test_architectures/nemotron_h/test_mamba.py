@@ -522,6 +522,28 @@ class TestNemotronMambaFusedPath:
         assert state == "state"
         assert state_again == "state"
 
+    def test_ada_fused_combined_kernel_returns_none(self, monkeypatch):
+        # Arrange
+        monkeypatch.setattr(mamba, "_ada_capability", lambda _device: True)
+        calls = []
+
+        def kernel(zxbcdt: torch.Tensor, **_kwargs: object) -> str:
+            calls.append(zxbcdt)
+            return "ran"
+
+        fused = mamba._call_kernel_with_full_tensors(kernel, fused_combined=True)
+        split = mamba._call_kernel_with_full_tensors(kernel)
+        zxbcdt = torch.ones(2)
+
+        # Act
+        fused_out = fused(zxbcdt, chunk_size=4)
+        split_out = split(zxbcdt, chunk_size=4)
+
+        # Assert
+        assert fused_out is None
+        assert split_out == "ran"
+        assert len(calls) == 1
+
     def test_ada_gpu_uses_torch_forward(self, monkeypatch):
         events = []
         mixer_cls = _make_fused_path_mixer_class(events)
@@ -1335,102 +1357,45 @@ class TestSdpaFullyMaskedRows:
         assert label(value) == ("x",)
 
 
-class TestBlockTypeMaskMapping:
-    def test_builds_full_and_linear_keys(self, monkeypatch):
-        masking = SimpleNamespace(
-            create_causal_mask=lambda **_kw: "causal",
-            create_recurrent_attention_mask=lambda **_kw: "linear",
-        )
-        monkeypatch.setattr(
-            mamba,
-            "try_import",
-            lambda path: masking if path == "transformers.masking_utils" else None,
-        )
-        embeds = torch.zeros(1, 3, 2)
-
-        mapping, position_ids = mamba.block_type_mask_mapping(
-            SimpleNamespace(config=object()),
-            embeds=embeds,
-            attention_mask=None,
-            past_key_values=None,
-            position_ids=None,
-        )
-
-        assert mapping == {
-            "full_attention": "causal",
-            "linear_attention": "linear",
-        }
-        assert position_ids.shape == (1, 3)
-
-    def test_missing_masking_utils_returns_empty_mapping(self, monkeypatch):
-        monkeypatch.setattr(mamba, "try_import", lambda _path: None)
-
-        mapping, position_ids = mamba.block_type_mask_mapping(
-            SimpleNamespace(config=object()),
-            embeds=torch.zeros(1, 2, 2),
-            attention_mask=None,
-            past_key_values=None,
-            position_ids=None,
-        )
-
-        assert mapping == {}
-        assert position_ids.shape == (1, 2)
-
-
 class TestPackedMixerCudaFastPath:
-    def test_runs_cuda_kernels_forward_on_the_default_stream(self, monkeypatch):
+    def test_packed_forward_runs_fused_scan_on_the_default_stream(self, monkeypatch):
         fake_mod = ModuleType("agilerl_test_packed_mixer")
-        fake_mod.is_fast_path_available = True
-        sys.modules["agilerl_test_packed_mixer"] = fake_mod
+        seen = {}
+
+        def split_scan(*_args, **kwargs):
+            seen.update(kwargs)
+            return "fused"
+
+        fake_mod.mamba2_split_conv1d_scan_combined = split_scan
+        monkeypatch.setitem(sys.modules, "agilerl_test_packed_mixer", fake_mod)
 
         class Mixer(torch.nn.Module):
             def __init__(self) -> None:
                 super().__init__()
-                self.in_proj = SimpleNamespace(
-                    weight=SimpleNamespace(device=SimpleNamespace(type="cuda"))
-                )
-                self.seen = None
-
-            def torch_forward(
-                self,
-                hidden_states,
-                cache_params=None,
-                attention_mask=None,
-                seq_idx=None,
-            ):
-                return hidden_states * 0
-
-            def cuda_kernels_forward(
-                self,
-                hidden_states,
-                cache_params=None,
-                attention_mask=None,
-                seq_idx=None,
-            ):
-                self.seen = seq_idx
-                return hidden_states + 1
+                self.in_proj = torch.nn.Linear(2, 8)
+                self.conv1d = torch.nn.Conv1d(4, 4, 2)
+                self.dt_bias = torch.zeros(2)
+                self.A_log = torch.zeros(2)
+                self.D = torch.zeros(2)
+                self.chunk_size = 4
+                self.activation = "silu"
+                self.norm = SimpleNamespace(weight=torch.ones(4), variance_epsilon=1e-5)
+                self.out_proj = torch.nn.Linear(4, 2)
+                self.head_dim = 4
+                self.n_groups = 1
+                self.time_step_limit = None
 
             def forward(
-                self,
-                hidden_states,
-                cache_params=None,
-                attention_mask=None,
-                seq_idx=None,
-                **kwargs,
+                self, hidden_states, cache_params=None, attention_mask=None, **kwargs
             ):
-                return self.torch_forward(
-                    hidden_states, cache_params, attention_mask, seq_idx
-                )
+                message = "packed fused path must not call forward"
+                raise AssertionError(message)
 
         Mixer.__module__ = "agilerl_test_packed_mixer"
         mamba._install_packed_mixer(Mixer)
-
-        def fake_cuda(self, hidden_states, seq_idx=None, **_kwargs):
-            self.seen = seq_idx
-            return hidden_states + 1
-
-        Mixer.cuda_kernels_forward = fake_cuda
+        monkeypatch.setattr(mamba, "_packed_uses_fused_scan", lambda *_args: True)
         mixer = Mixer()
+        mixer.train()
         entered = []
 
         class _StreamCtx:
@@ -1443,12 +1408,68 @@ class TestPackedMixerCudaFastPath:
 
         monkeypatch.setattr(torch.cuda, "default_stream", lambda _dev: "side")
         monkeypatch.setattr(torch.cuda, "stream", lambda _stream: _StreamCtx())
-        monkeypatch.setattr(torch.compiler, "is_compiling", lambda: False)
-        hidden = torch.ones(2, 2)
-        seq_idx = torch.zeros(2, 2, dtype=torch.int32)
+        hidden = torch.ones(2, 3, 2)
+        seq_idx = torch.arange(6, dtype=torch.int32).reshape(2, 3)
 
         out = mixer(hidden, seq_idx=seq_idx)
 
-        assert torch.equal(out, hidden + 1)
-        assert mixer.seen is seq_idx
+        assert out == "fused"
+        assert seen["seq_idx"] is seq_idx
         assert entered == [True]
+
+    @pytest.mark.parametrize("train_out_proj", [True, False])
+    def test_packed_forward_without_fused_scan_runs_each_document(
+        self, monkeypatch, train_out_proj
+    ):
+        fake_mod = ModuleType("agilerl_test_packed_mixer_fallback")
+        fake_mod.mamba2_split_conv1d_scan_combined = lambda *_a, **_k: None
+        monkeypatch.setitem(sys.modules, "agilerl_test_packed_mixer_fallback", fake_mod)
+        calls = []
+
+        class Mixer(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.in_proj = torch.nn.Linear(2, 8)
+                self.conv1d = torch.nn.Conv1d(4, 4, 2)
+                self.dt_bias = torch.zeros(2)
+                self.A_log = torch.zeros(2)
+                self.D = torch.zeros(2)
+                self.chunk_size = 4
+                self.activation = "silu"
+                self.norm = SimpleNamespace(weight=torch.ones(4), variance_epsilon=1e-5)
+                self.out_proj = torch.nn.Linear(4, 2)
+                self.head_dim = 4
+                self.n_groups = 1
+                self.time_step_limit = None
+
+            def forward(
+                self, hidden_states, cache_params=None, attention_mask=None, **kwargs
+            ):
+                calls.append(hidden_states)
+                return hidden_states * 2
+
+        Mixer.__module__ = "agilerl_test_packed_mixer_fallback"
+        mamba._install_packed_mixer(Mixer)
+        monkeypatch.setattr(mamba, "_packed_uses_fused_scan", lambda *_args: True)
+
+        class _StreamCtx:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+        monkeypatch.setattr(torch.cuda, "default_stream", lambda _dev: "side")
+        monkeypatch.setattr(torch.cuda, "stream", lambda _stream: _StreamCtx())
+        mixer = Mixer()
+        mixer.train()
+        mixer.out_proj.weight.requires_grad_(train_out_proj)
+        hidden = torch.arange(6, dtype=torch.float32).reshape(1, 3, 2)
+        seq_idx = torch.tensor([[0, 0, 1]], dtype=torch.int32)
+
+        out = mixer(hidden, seq_idx=seq_idx)
+
+        assert torch.equal(out, hidden * 2)
+        assert len(calls) == 2
+        assert torch.equal(calls[0], hidden[:, :2])
+        assert torch.equal(calls[1], hidden[:, 2:])

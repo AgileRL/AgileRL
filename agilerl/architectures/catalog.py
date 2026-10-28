@@ -7,27 +7,23 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
-
 from agilerl import HAS_LLM_DEPENDENCIES
-from agilerl.architectures.gemma4 import gemma4_language_tower_hf_override
-from agilerl.architectures.nemotron_h.language_tower import (
-    omni_language_tower_hf_override,
-)
+from transformers import AutoModelForImageTextToText
+
+from agilerl.architectures.gemma4 import install_gemma4_vision_patches
 from agilerl.architectures.nemotron_h.mamba import install_mamba_patches
-from agilerl.architectures.qwen3_5 import (
-    QWEN3_5_MODEL_CLASS_OVERRIDES,
-    qwen3_5_language_tower_hf_override,
-)
 from agilerl.architectures.qwen3_5.packed import install_qwen_gdn_patches
+from agilerl.architectures.qwen3_5.vision import install_qwen3_5_vl_patches
 from agilerl.architectures.runtime import (
-    LanguageTowerRuntimeConfig,
     MambaPatchConfig,
     ModelRuntimeConfig,
     PatchRuntimeConfig,
+    TrainerModelClass,
     TrainerRuntimeConfig,
     VllmRuntimeConfig,
 )
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
+from agilerl.utils.patching import library_shim
 
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from transformers.configuration_utils import PretrainedConfig
@@ -41,7 +37,7 @@ NEMOTRON_H_RUNTIME_CONFIG = ModelRuntimeConfig(
         max_num_batched_tokens=8192,
         reasoning_parser="nemotron_v3",
         enable_prefix_caching=True,
-        trust_remote_code=True,
+        dense_mamba_prefix_cache=True,
     ),
     patch=PatchRuntimeConfig(
         install=install_mamba_patches,
@@ -54,88 +50,149 @@ NEMOTRON_H_RUNTIME_CONFIG = ModelRuntimeConfig(
         "agilerl.architectures.nemotron_h.tensor_parallel:"
         "NEMOTRON_H_TENSOR_PARALLEL_PLAN"
     ),
+    tool_call_parser="tool_call",
 )
+
+
+@library_shim("vllm", "==0.32.*")
+def nemotron_h_omni_vllm_hf_override(config: object) -> object:
+    """Point a native ``nemotron_h_omni`` config at NemotronHVLLoRA and restore ``vit_hidden_size``.
+
+    :param config: Hugging Face config loaded from the checkpoint.
+    :type config: object
+    :return: The config vLLM's Nemotron VL model can build from.
+    :rtype: object
+    """
+    fields = vars(config)
+    # Serve through NemotronHVLLoRA, which adds tower and connector LoRA.
+    fields["architectures"] = ["NemotronH_Super_Omni_Reasoning_V3"]
+    # vLLM's Nemotron VL model reads the checkpoint's legacy name; the native
+    # config stores it as vision_hidden_size. vLLM also probes with a dummy config.
+    if "vision_hidden_size" in fields:
+        fields["vit_hidden_size"] = fields["vision_hidden_size"]
+    return config
+
 
 NEMOTRON_H_OMNI_RUNTIME_CONFIG = NEMOTRON_H_RUNTIME_CONFIG.model_copy(
     update={
-        # nemotron_h_omni is not a transformers model type; its config needs checkpoint code.
+        # Native nemotron_h_omni; remote code stopped loading on 5.19.
         "trainer": TrainerRuntimeConfig(
+            model_class=AutoModelForImageTextToText,
             attn_implementation="flash_attention_2",
-            trust_remote_code=True,
+            trust_remote_code=False,
         ),
-        "language_tower": LanguageTowerRuntimeConfig(
-            hf_overrides=omni_language_tower_hf_override,
-            model_class_overrides={
-                "NemotronHOmniLanguageForCausalLM": (
-                    "agilerl.architectures.nemotron_h.omni_language:"
-                    "NemotronHOmniLanguageForCausalLM"
-                ),
-            },
+        "vllm": NEMOTRON_H_RUNTIME_CONFIG.vllm.model_copy(
+            update={"hf_overrides": nemotron_h_omni_vllm_hf_override},
         ),
-        "multimodal_towers_kept_hf_override": {
-            "architectures": ["NemotronH_Super_Omni_Reasoning_V3"],
-        },
         "tower_connector_lora_targets": frozenset(
             {
-                "query",
-                "key",
-                "value",
-                "dense",
+                "q_proj",
+                "k_proj",
+                "v_proj",
+                "o_proj",
                 "fc1",
                 "fc2",
                 "patch_projection",
                 "video_patch_projection",
-                "linear1",
-                "linear2",
+                "linear_1",
+                "linear_2",
             }
         ),
     },
 )
 
-GEMMA_SWA_RUNTIME_CONFIG = ModelRuntimeConfig(
+GEMMA_SWA_TEXT_RUNTIME_CONFIG = ModelRuntimeConfig(
     trainer=TrainerRuntimeConfig(attn_implementation="flex_attention"),
+)
+
+GEMMA_SWA_RUNTIME_CONFIG = GEMMA_SWA_TEXT_RUNTIME_CONFIG.model_copy(
+    update={
+        "trainer": TrainerRuntimeConfig(
+            model_class=AutoModelForImageTextToText,
+            attn_implementation="flex_attention",
+        ),
+    },
+)
+
+GEMMA4_TEXT_RUNTIME_CONFIG = GEMMA_SWA_TEXT_RUNTIME_CONFIG.model_copy(
+    update={"tool_call_parser": "gemma4"},
 )
 
 GEMMA4_RUNTIME_CONFIG = GEMMA_SWA_RUNTIME_CONFIG.model_copy(
     update={
-        "language_tower": LanguageTowerRuntimeConfig(
-            hf_overrides=gemma4_language_tower_hf_override,
+        "tool_call_parser": "gemma4",
+        "patch": PatchRuntimeConfig(install=install_gemma4_vision_patches),
+        # vLLM swaps every tower linear for a LoRA layer and keeps HF names;
+        # attention and MLP linears sit under clippable wrappers as ``linear``.
+        "tower_connector_lora_targets": frozenset(
+            {
+                "linear",
+                "input_proj",
+                "embedding_projection",
+                "input_proj_linear",
+                "output_proj",
+                "relative_k_proj",
+            }
         ),
+        "tower_modalities": {
+            "vision_tower": frozenset({"image", "video"}),
+            "embed_vision": frozenset({"image", "video"}),
+            "audio_tower": frozenset({"audio"}),
+            "embed_audio": frozenset({"audio"}),
+        },
     },
 )
 
 GPT_OSS_RUNTIME_CONFIG = ModelRuntimeConfig(
     trainer=TrainerRuntimeConfig(attn_implementation="flex_attention"),
+    tool_call_parser="harmony",
 )
 
-# vLLM nests Qwen3.5 language layers under language_model.model when the
-# VL engine is kept; trainer keys need that prefix to bind engine LoRA.
+# Families whose only catalog setting is the tool-call format.
+TOOL_CALL_TAG_RUNTIME_CONFIG = ModelRuntimeConfig(tool_call_parser="tool_call")
+GRANITE3_RUNTIME_CONFIG = ModelRuntimeConfig(tool_call_parser="granite3")
+
+
 # Linear-attention rejects mamba_cache_mode "all"; align needs prefix caching.
-QWEN3_5_RUNTIME_CONFIG = ModelRuntimeConfig(
+QWEN3_5_TEXT_RUNTIME_CONFIG = ModelRuntimeConfig(
     vllm=VllmRuntimeConfig(
         mamba_cache_mode="align",
+        reasoning_parser="qwen3",
         enable_prefix_caching=True,
-    ),
-    language_tower=LanguageTowerRuntimeConfig(
-        hf_overrides=qwen3_5_language_tower_hf_override,
-        model_class_overrides=QWEN3_5_MODEL_CLASS_OVERRIDES,
-        lora_key_prefix="model.language_model.model.",
+        dense_mamba_prefix_cache=True,
     ),
     patch=PatchRuntimeConfig(install=install_qwen_gdn_patches),
+    tool_call_parser="tool_call",
+)
+
+# AutoModelForCausalLM maps qwen3_5 to a text-only class that drops model.visual.
+QWEN3_5_RUNTIME_CONFIG = QWEN3_5_TEXT_RUNTIME_CONFIG.model_copy(
+    update={
+        "trainer": TrainerRuntimeConfig(model_class=AutoModelForImageTextToText),
+        "patch": PatchRuntimeConfig(install=install_qwen3_5_vl_patches),
+        # The patch embedding ``proj`` is a Conv3d that vLLM serves without LoRA.
+        "tower_connector_lora_targets": frozenset({"qkv", "linear_fc1", "linear_fc2"}),
+        "tower_modalities": {"visual": frozenset({"image", "video"})},
+    },
 )
 
 FAMILY_RUNTIME_CONFIGS: Mapping[str, ModelRuntimeConfig] = {
+    "qwen2": TOOL_CALL_TAG_RUNTIME_CONFIG,
+    "qwen3": TOOL_CALL_TAG_RUNTIME_CONFIG,
+    "qwen3_moe": TOOL_CALL_TAG_RUNTIME_CONFIG,
+    "granitemoe": GRANITE3_RUNTIME_CONFIG,
+    "granitemoehybrid": TOOL_CALL_TAG_RUNTIME_CONFIG,
     "nemotron_h": NEMOTRON_H_RUNTIME_CONFIG,
     "nemotron_h_omni": NEMOTRON_H_OMNI_RUNTIME_CONFIG,
     "gemma3": GEMMA_SWA_RUNTIME_CONFIG,
-    "gemma3_text": GEMMA_SWA_RUNTIME_CONFIG,
+    "gemma3_text": GEMMA_SWA_TEXT_RUNTIME_CONFIG,
     "gemma4": GEMMA4_RUNTIME_CONFIG,
-    "gemma4_text": GEMMA4_RUNTIME_CONFIG,
+    "gemma4_text": GEMMA4_TEXT_RUNTIME_CONFIG,
     "gpt_oss": GPT_OSS_RUNTIME_CONFIG,
     "qwen3_5": QWEN3_5_RUNTIME_CONFIG,
-    "qwen3_5_text": QWEN3_5_RUNTIME_CONFIG,
+    "qwen3_5_text": QWEN3_5_TEXT_RUNTIME_CONFIG,
     "qwen3_5_moe": QWEN3_5_RUNTIME_CONFIG,
-    "qwen3_5_moe_text": QWEN3_5_RUNTIME_CONFIG,
+    "qwen3_5_moe_text": QWEN3_5_TEXT_RUNTIME_CONFIG,
 }
 
 
@@ -147,10 +204,7 @@ def pretrained_model_type(model_name_or_path: str) -> str:
     entry = SUPPORTED_MODEL_INFO.get(model_name_or_path)
     if entry is not None:
         return entry.config["model_type"]
-    config_dict, _ = PretrainedConfig.get_config_dict(
-        model_name_or_path,
-        trust_remote_code=True,
-    )
+    config_dict, _ = PretrainedConfig.get_config_dict(model_name_or_path)
     return config_dict["model_type"]
 
 
@@ -160,3 +214,14 @@ def family_runtime(model_name_or_path: str) -> ModelRuntimeConfig:
         pretrained_model_type(model_name_or_path),
         ModelRuntimeConfig(),
     )
+
+
+def trainer_model_class(model_name_or_path: str) -> TrainerModelClass:
+    """Return the auto class every trainer load of this checkpoint builds.
+
+    :param model_name_or_path: Hugging Face model id or local path.
+    :type model_name_or_path: str
+    :return: ``AutoModelForCausalLM``, or ``AutoModelForImageTextToText`` for VL families.
+    :rtype: TrainerModelClass
+    """
+    return family_runtime(model_name_or_path).trainer.model_class

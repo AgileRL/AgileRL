@@ -25,8 +25,9 @@ from agilerl.utils.llm_packing import (
     RESETS_AT_DOCUMENT_BOUNDARY,
     packed_layout,
     packed_seq_idx,
+    run_per_document,
 )
-from agilerl.utils.patching import class_is_patched, try_import
+from agilerl.utils.patching import class_is_patched, library_shim, try_import
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -37,7 +38,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "block_type_mask_mapping",
     "install_mamba_patches",
     "patch_nemotron_mamba_fused_path",
     "patch_nemotron_mamba_packed_sequences",
@@ -54,43 +54,18 @@ MAMBA_TP_SHARD_ATTR = "agilerl_mamba_tp_shard"
 SDPA_NAN_PATCHED_FLAG = "_agilerl_sdpa_nan_patched"
 SDPA_NAME = "scaled_dot_product_attention"
 RMSNORM_FN = "rmsnorm_fn"
+# New transformers names first; legacy names cover remote snapshots with old modeling.
 SSM_KERNEL_NAMES = (
     "causal_conv1d_fn",
+    "mamba2_chunk_scan",
+    "mamba2_split_conv1d_scan_combined",
     "mamba_chunk_scan_combined",
     "mamba_split_conv1d_scan_combined",
 )
-
-
-def block_type_mask_mapping(
-    module: object,
-    embeds: torch.Tensor,
-    attention_mask: torch.Tensor | dict[str, object] | None,
-    past_key_values: object | None,
-    position_ids: torch.Tensor | None,
-) -> tuple[dict[str, object], torch.Tensor | None]:
-    """HF keys for ``full_attention`` / ``linear_attention`` masks."""
-    if position_ids is None:
-        get_seq_length = getattr(past_key_values, "get_seq_length", None)
-        past_seen = get_seq_length() if callable(get_seq_length) else 0
-        position_ids = torch.arange(embeds.shape[1], device=embeds.device) + past_seen
-        position_ids = position_ids.unsqueeze(0)
-    masking = try_import("transformers.masking_utils")
-    mask_kwargs = {
-        "config": getattr(module, "config", None),
-        "inputs_embeds": embeds,
-        "attention_mask": attention_mask,
-        "past_key_values": past_key_values,
-        "position_ids": position_ids,
-    }
-    mapping: dict[str, object] = {}
-    if masking is not None:
-        create_causal = getattr(masking, "create_causal_mask", None)
-        create_linear = getattr(masking, "create_recurrent_attention_mask", None)
-        if callable(create_causal):
-            mapping["full_attention"] = create_causal(**mask_kwargs)
-        if callable(create_linear):
-            mapping["linear_attention"] = create_linear(**mask_kwargs)
-    return mapping, position_ids
+FUSED_COMBINED_NAMES = (
+    "mamba2_split_conv1d_scan_combined",
+    "mamba_split_conv1d_scan_combined",
+)
 
 
 def _resolve_mixer_class(mixer: str) -> type | None:
@@ -220,7 +195,7 @@ def _zero_padding_states(
 ) -> tuple[tuple[Any, ...], dict[str, Any]]:
     """Zero padded positions before the eager scan.
 
-    ``torch_forward`` leaves those positions intact when the batch size is 1.
+    The eager scan leaves those positions intact when the batch size is 1.
 
     :param args: Positional mixer arguments.
     :type args: tuple[Any, ...]
@@ -293,8 +268,9 @@ def _install_fused_scan(module_cls: type) -> None:
         # None and (0, inf) pass dt_limit=None into the fused kernel.
         mixer: Any = self
         limit = mixer.time_step_limit
-        min_dt = mixer.time_step_min
-        max_dt = mixer.time_step_max
+        # Transformers 5.16+ mixers set (time_step_min, inf) and carry no bounds.
+        min_dt = getattr(mixer, "time_step_min", None)
+        max_dt = getattr(mixer, "time_step_max", None)
         if (
             (limit is None or limit == (0.0, float("inf")))
             and min_dt is not None
@@ -302,7 +278,9 @@ def _install_fused_scan(module_cls: type) -> None:
         ):
             mixer.time_step_limit = (min_dt, max_dt)
         try:
-            # SSM kernels on compute capability 8.9 return NaN.
+            # Old-shape mixers on compute capability 8.9 run torch_forward
+            # because the SSM kernels return NaN. New-shape mixers lack it;
+            # the gathering wrapper suppresses their fused entry instead.
             eager = type(self).__dict__.get("torch_forward")
             if _ada_ssm_gpu(self) and callable(eager):
                 if not announced:
@@ -332,7 +310,7 @@ def _forward_calls_fused_scan(forward: object) -> bool:
     code = getattr(forward, "__code__", None)
     names = set(getattr(code, "co_names", ()))
     names.update(getattr(code, "co_freevars", ()))
-    return "mamba_split_conv1d_scan_combined" in names
+    return not names.isdisjoint(FUSED_COMBINED_NAMES)
 
 
 def _class_calls_fused_scan(module_cls: type) -> bool:
@@ -381,13 +359,33 @@ def _cast_floating_to(value: object, dtype: torch.dtype) -> object:
     return value
 
 
-def _call_kernel_with_full_tensors(kernel: object) -> object:
-    """Gather sharded arguments before *kernel* reads them by pointer."""
+def _call_kernel_with_full_tensors(
+    kernel: object, fused_combined: bool = False
+) -> object:
+    """Gather sharded arguments before *kernel* reads them by pointer.
+
+    The fused combined entry returns None on compute capability 8.9 so the
+    mixer falls back to the torch path; the SSM kernels return NaN there.
+    """
     announced = False
+    suppressed = False
 
     def gathered(*args: object, **kwargs: object) -> object:
-        nonlocal announced
+        nonlocal announced, suppressed
         call: Any = kernel
+        first_arg = args[0] if args else None
+        if (
+            fused_combined
+            and torch.is_tensor(first_arg)
+            and _ada_capability(first_arg.device)
+        ):
+            if not suppressed:
+                logger.debug(
+                    "[mamba-fused-path] %s returns None on compute capability 8.9",
+                    getattr(call, "__name__", "fused scan"),
+                )
+                suppressed = True
+            return None
         dtype: torch.dtype | None = None
 
         def prepare(value: object) -> object:
@@ -433,7 +431,13 @@ def _gather_ssm_kernel_parameters(module_cls: type) -> None:
             continue
         if getattr(kernel, KERNEL_FULL_TENSOR_FLAG, False):
             continue
-        setattr(module, name, _call_kernel_with_full_tensors(kernel))
+        setattr(
+            module,
+            name,
+            _call_kernel_with_full_tensors(
+                kernel, fused_combined=name in FUSED_COMBINED_NAMES
+            ),
+        )
 
 
 def _forward_calls_sdpa(fn: object) -> bool:
@@ -539,13 +543,14 @@ def patch_nemotron_mamba_fused_path(
 ) -> None:
     """Keep the fused SSM kernel and make its parameter reads safe.
 
-    Training calls ``mamba_split_conv1d_scan_combined``. Sharded parameters are
+    Training calls ``mamba2_split_conv1d_scan_combined``. Sharded parameters are
     gathered before that kernel reads them. An open ``time_step_limit``
     (``None`` or ``(0, inf)``) is replaced with ``time_step_min`` and
-    ``time_step_max`` for the forward. On compute capability 8.9 the forward
-    uses ``torch_forward`` because the SSM kernels return NaN, and the gated
-    RMSNorm runs in PyTorch. On other GPUs ``conv1d`` stays inside the kernel,
-    and so does a trainable ``out_proj``; LoRA does not target either.
+    ``time_step_max`` for the forward. On compute capability 8.9 the fused
+    entry returns None so the mixer falls back to the torch path, because the
+    SSM kernels return NaN, and the gated RMSNorm runs in PyTorch. On other
+    GPUs ``conv1d`` stays inside the kernel, and so does a trainable
+    ``out_proj``; LoRA does not target either.
 
     :param mixer: Dotted path of the mixer class to patch.
     :type mixer: str
@@ -768,53 +773,30 @@ def _patch_stream_class(mixer_cls: type) -> None:
     )
 
 
-def _per_document(
-    run: Callable[[torch.Tensor], torch.Tensor],
-    hidden_states: torch.Tensor,
-    seq_idx: torch.Tensor,
-) -> torch.Tensor:
-    """Run *run* on each packed document of each row on its own and rejoin the rows.
-
-    :param run: Mixer forward over one ``(1, L_doc, H)`` document.
-    :type run: Callable[[torch.Tensor], torch.Tensor]
-    :param hidden_states: ``(B, L, H)`` packed rows.
-    :type hidden_states: torch.Tensor
-    :param seq_idx: ``(B, L)`` document index per token.
-    :type seq_idx: torch.Tensor
-    :return: ``(B, L, H)`` outputs.
-    :rtype: torch.Tensor
-    """
-    rows = []
-    for row, row_seq_idx in zip(hidden_states.split(1), seq_idx, strict=True):
-        lengths = torch.unique_consecutive(row_seq_idx, return_counts=True)[1]
-        documents = row.split(lengths.tolist(), dim=1)
-        rows.append(torch.cat([run(document) for document in documents], dim=1))
-    return torch.cat(rows)
-
-
 def _fused_split_scan(
     mixer: torch.nn.Module,
     kernel: Callable[..., torch.Tensor],
     hidden_states: torch.Tensor,
     seq_idx: torch.Tensor | None,
-) -> torch.Tensor:
+) -> torch.Tensor | None:
     """Fused Mamba2 forward whose conv and scan restart wherever ``seq_idx`` changes.
 
     A frozen ``out_proj`` runs as its own matmul after the kernel, which then
     returns the gated-norm output of width ``intermediate_size``, so backward
     skips that weight's gradient. A trainable ``out_proj`` runs inside the kernel.
+    Returns None when the kernel does (no ``mamba_ssm``, or compute capability 8.9).
 
     :param mixer: Mamba2 mixer.
     :type mixer: torch.nn.Module
-    :param kernel: ``mamba_split_conv1d_scan_combined`` from the mixer's module.
+    :param kernel: ``mamba2_split_conv1d_scan_combined`` from the mixer's module.
     :type kernel: Callable[..., torch.Tensor]
     :param hidden_states: ``(B, L, H)`` rows.
     :type hidden_states: torch.Tensor
     :param seq_idx: ``(B, L)`` int32 document index per token, or None for one
         document per row.
     :type seq_idx: torch.Tensor | None
-    :return: ``(B, L, H)`` mixer output.
-    :rtype: torch.Tensor
+    :return: ``(B, L, H)`` mixer output, or None.
+    :rtype: torch.Tensor | None
     """
     module: Any = mixer
     limit = module.time_step_limit
@@ -838,58 +820,36 @@ def _fused_split_scan(
         headdim=module.head_dim,
         ngroups=module.n_groups,
         norm_before_gate=False,
+        return_final_states=False,
         **dt_limit,
     )
-    if not outside:
+    if scan is None or not outside:
         return scan
     return out_proj(scan.to(out_proj.weight.dtype))
+
+
+def _packed_uses_fused_scan(
+    mixer: torch.nn.Module,
+    hidden_states: torch.Tensor,
+    cache_params: object | None,
+) -> bool:
+    """Whether a packed row takes the fused kernel (CUDA, training, no cache)."""
+    module: Any = mixer
+    return (
+        module.training
+        and cache_params is None
+        and hidden_states.is_cuda
+        and not torch.compiler.is_compiling()
+    )
 
 
 def _install_packed_mixer(mixer_cls: type) -> None:
     """Give this mixer's forward a ``seq_idx`` argument that resets state per document."""
     cls: Any = mixer_cls
     forward = cls.__dict__["forward"]
-    torch_forward = cls.__dict__["torch_forward"]
-    cuda_kernels_forward = cls.__dict__["cuda_kernels_forward"]
-    # Mixer ``__init__`` assigns these module globals, so read them per call.
+    # Live module dict: the fused-path patch wraps the kernel global later,
+    # so the packed forward resolves it on every call.
     kernels = vars(sys.modules[mixer_cls.__module__])
-
-    @functools.wraps(torch_forward)
-    def packed_torch_forward(
-        self: torch.nn.Module,
-        input_states: torch.Tensor,
-        cache_params: object | None = None,
-        attention_mask: torch.Tensor | None = None,
-        seq_idx: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        if seq_idx is None:
-            return torch_forward(self, input_states, cache_params, attention_mask)
-        return _per_document(
-            lambda document: torch_forward(self, document), input_states, seq_idx
-        )
-
-    @functools.wraps(cuda_kernels_forward)
-    def packed_cuda_kernels_forward(
-        self: torch.nn.Module,
-        hidden_states: torch.Tensor,
-        cache_params: object | None = None,
-        attention_mask: torch.Tensor | None = None,
-        seq_idx: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        mixer: Any = self
-        # Transformers' fused-kernel condition; an all-ones mask takes its path.
-        unpacked_fused = (
-            mixer.use_mem_eff_path
-            and mixer.training
-            and cache_params is None
-            and attention_mask is None
-        )
-        if seq_idx is None and not unpacked_fused:
-            return cuda_kernels_forward(
-                self, hidden_states, cache_params, attention_mask
-            )
-        kernel = kernels["mamba_split_conv1d_scan_combined"]
-        return _fused_split_scan(self, kernel, hidden_states, seq_idx)
 
     @functools.wraps(forward)
     def packed_forward(
@@ -903,17 +863,24 @@ def _install_packed_mixer(mixer_cls: type) -> None:
         if seq_idx is None:
             return forward(self, hidden_states, cache_params, attention_mask, **kwargs)
         mixer: Any = self
-        if (
-            kernels["is_fast_path_available"]
-            and mixer.in_proj.weight.device.type == "cuda"
-            and not torch.compiler.is_compiling()
-        ):
+        if _packed_uses_fused_scan(mixer, hidden_states, cache_params):
             with torch.cuda.stream(torch.cuda.default_stream(hidden_states.device)):
-                return mixer.cuda_kernels_forward(hidden_states, seq_idx=seq_idx)
-        return mixer.torch_forward(hidden_states, seq_idx=seq_idx)
+                fused = _fused_split_scan(
+                    mixer,
+                    kernels["mamba2_split_conv1d_scan_combined"],
+                    hidden_states,
+                    seq_idx,
+                )
+            if fused is not None:
+                return fused
+        return run_per_document(
+            lambda document: forward(
+                mixer, document, cache_params, attention_mask, **kwargs
+            ),
+            hidden_states,
+            seq_idx,
+        )
 
-    cls.torch_forward = packed_torch_forward
-    cls.cuda_kernels_forward = packed_cuda_kernels_forward
     cls.forward = packed_forward
 
 
@@ -985,8 +952,8 @@ def patch_nemotron_mamba_packed_sequences(mixer: str, block: str) -> None:
 
     The block derives ``seq_idx`` from ``position_ids`` (a document starts
     wherever positions do not step by one) and passes it to its mixer. On CUDA
-    the fused kernel takes ``seq_idx`` directly; ``torch_forward`` runs each
-    document on its own. Unpacked rows take the unpatched path. The mixer class
+    the fused kernel takes ``seq_idx`` directly; otherwise each document runs
+    through forward on its own. Unpacked rows take the unpatched path. The mixer class
     is then marked with
     :data:`~agilerl.utils.llm_packing.RESETS_AT_DOCUMENT_BOUNDARY`.
 
@@ -1016,6 +983,7 @@ def patch_nemotron_mamba_packed_sequences(mixer: str, block: str) -> None:
     )
 
 
+@library_shim("transformers", "==5.19.*")
 def install_mamba_patches(
     patch: PatchRuntimeConfig,
     model: PreTrainedModel | PeftModel | None = None,

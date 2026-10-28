@@ -26,7 +26,16 @@ if sys.version_info >= (3, 11):
 else:
     from importlib.abc import Traversable  # pragma: no cover
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field, field_serializer
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    computed_field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
+from typing_extensions import Self
 
 ModelArchitecture = Literal["dense", "hybrid", "moe", "hybrid_moe"]
 ARCH_DENSE: ModelArchitecture = "dense"
@@ -38,6 +47,8 @@ ModelStatus = Literal["live", "deprecated", "preview"]
 STATUS_LIVE: ModelStatus = "live"
 STATUS_DEPRECATED: ModelStatus = "deprecated"
 STATUS_PREVIEW: ModelStatus = "preview"
+
+ModelModality = Literal["text", "vision"]
 
 # vLLM ``LoRAConfig.max_lora_rank`` values.
 VLLM_LORA_RANKS = (1, 8, 16, 32, 64, 128, 256, 320, 512)
@@ -72,6 +83,48 @@ class ModelInfo(BaseModel):
             "preview (submission rejected)."
         ),
     )
+    modalities: tuple[ModelModality, ...] = Field(
+        default=("text",),
+        min_length=1,
+        description="Input modalities the model handles: text, or text and vision.",
+    )
+    language_model_prefix: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Trainer module path of a VL checkpoint's language model, e.g. "
+            "model.language_model. None for text-only checkpoints."
+        ),
+    )
+    text_lora_modules: frozenset[str] | None = Field(
+        default=None,
+        description=(
+            "Default target_modules of a VL checkpoint: language-model linears "
+            "only. Text-only checkpoints default to every module."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _vl_entries_name_text_modules(self) -> Self:
+        if (self.language_model_prefix is None) != (self.text_lora_modules is None):
+            msg = "language_model_prefix and text_lora_modules are set together"
+            raise ValueError(msg)
+        if self.text_lora_modules is not None and (
+            unknown := sorted(self.text_lora_modules - self.modules)
+        ):
+            msg = f"text_lora_modules {unknown} are not LoRA modules of {self.hub_id}"
+            raise ValueError(msg)
+        return self
+
+    @field_validator("modalities")
+    @classmethod
+    def _require_text_or_text_and_vision(
+        cls, value: tuple[ModelModality, ...]
+    ) -> tuple[ModelModality, ...]:
+        if value not in (("text",), ("text", "vision")):
+            msg = "modalities must be ('text',) or ('text', 'vision')"
+            raise ValueError(msg)
+        return value
 
     @cached_property
     def config(self) -> dict[str, Any]:
@@ -100,9 +153,55 @@ class ModelInfo(BaseModel):
 
     @computed_field
     @property
+    def default_lora_modules(self) -> frozenset[str]:
+        """Default ``target_modules``: the text model's modules only."""
+        if self.text_lora_modules is None:
+            return self.modules
+        return self.text_lora_modules
+
+    @property
+    def tower_lora_modules(self) -> frozenset[str]:
+        """``tower_target_modules`` names: modules outside the language model."""
+        if self.language_model_prefix is None:
+            return frozenset()
+        return frozenset(
+            key
+            for key, group in self.inspected["lora_info"].items()
+            if group[0]["kind"] == "module"
+            and any(
+                not entry.get("scope", "").startswith(self.language_model_prefix)
+                for entry in group
+            )
+        )
+
+    @computed_field
+    @property
     def parameters(self) -> frozenset[str]:
         """Valid packed-expert ``target_parameters`` paths."""
         return self._target_keys("parameter")
+
+    @computed_field
+    @property
+    def supports_expert_parallel(self) -> bool:
+        """True when the model has packed expert modules."""
+        return bool(self.parameters)
+
+    @computed_field
+    @property
+    def num_routed_experts(self) -> int | None:
+        """Routed expert count; None when the model has no packed experts."""
+        if not self.parameters:
+            return None
+        text_config = self.text_config
+        for key in ("n_routed_experts", "num_experts", "num_local_experts"):
+            value = text_config.get(key)
+            if isinstance(value, int):
+                return value
+        msg = (
+            f"{self.hub_id} has packed experts but text_config has no routed "
+            "expert count (n_routed_experts, num_experts, num_local_experts)"
+        )
+        raise ValueError(msg)
 
     @computed_field
     @property
@@ -181,9 +280,14 @@ class ModelInfo(BaseModel):
             return text_config["num_hidden_layers"]
         return len(text_config["layers_block_type"])
 
-    @field_serializer("modules", "parameters")
-    def _serialize_sorted(self, value: frozenset[str]) -> list[str]:
-        return sorted(value)
+    @field_serializer(
+        "modules",
+        "parameters",
+        "text_lora_modules",
+        "default_lora_modules",
+    )
+    def _serialize_sorted(self, value: frozenset[str] | None) -> list[str] | None:
+        return None if value is None else sorted(value)
 
     def _target_keys(self, kind: str) -> frozenset[str]:
         return frozenset(
@@ -193,14 +297,51 @@ class ModelInfo(BaseModel):
         )
 
 
+VL_LANGUAGE_MODEL_PREFIX = "model.language_model"
+ATTENTION_LORA_MODULES = frozenset({"q_proj", "k_proj", "v_proj", "o_proj"})
+GATED_MLP_LORA_MODULES = frozenset({"gate_proj", "up_proj", "down_proj"})
+# Gated DeltaNet linear attention; the MoE shared expert uses the gated MLP names.
+QWEN3_5_TEXT_LORA_MODULES = (
+    ATTENTION_LORA_MODULES
+    | GATED_MLP_LORA_MODULES
+    | {"in_proj_qkv", "in_proj_z", "in_proj_a", "in_proj_b", "out_proj"}
+)
+GEMMA4_TEXT_LORA_MODULES = (
+    ATTENTION_LORA_MODULES
+    | GATED_MLP_LORA_MODULES
+    | {"per_layer_input_gate", "per_layer_projection", "per_layer_model_projection"}
+)
+NEMOTRON_H_TEXT_LORA_MODULES = ATTENTION_LORA_MODULES | {
+    "in_proj",
+    "out_proj",
+    "up_proj",
+    "down_proj",
+}
+
+
+def qwen3_5_vl(hub_id: str, architecture: ModelArchitecture) -> ModelInfo:
+    """Catalog entry for a Qwen3.5-family VL checkpoint."""
+    return ModelInfo(
+        hub_id=hub_id,
+        architecture=architecture,
+        modalities=("text", "vision"),
+        language_model_prefix=VL_LANGUAGE_MODEL_PREFIX,
+        text_lora_modules=QWEN3_5_TEXT_LORA_MODULES,
+    )
+
+
 SUPPORTED_MODEL_INFO: Mapping[str, ModelInfo] = {
     info.hub_id: info
     for info in (
         ModelInfo(hub_id="Qwen/Qwen2.5-0.5B-Instruct", status=STATUS_DEPRECATED),
-        ModelInfo(hub_id="Qwen/Qwen3-1.7B"),
-        ModelInfo(hub_id="Qwen/Qwen3-4B"),
-        ModelInfo(hub_id="Qwen/Qwen3.6-35B-A3B", architecture=ARCH_HYBRID_MOE),
-        ModelInfo(hub_id="Qwen/Qwen3.8-27B", architecture=ARCH_HYBRID),
+        ModelInfo(hub_id="Qwen/Qwen3-1.7B", status=STATUS_DEPRECATED),
+        ModelInfo(hub_id="Qwen/Qwen3-4B", status=STATUS_DEPRECATED),
+        qwen3_5_vl("Qwen/Qwen3.5-0.8B", ARCH_HYBRID),
+        qwen3_5_vl("Qwen/Qwen3.5-2B", ARCH_HYBRID),
+        qwen3_5_vl("Qwen/Qwen3.5-4B", ARCH_HYBRID),
+        qwen3_5_vl("Qwen/Qwen3.5-9B", ARCH_HYBRID),
+        qwen3_5_vl("Qwen/Qwen3.6-35B-A3B", ARCH_HYBRID_MOE),
+        qwen3_5_vl("Qwen/Qwen3.8-27B", ARCH_HYBRID),
         ModelInfo(hub_id="ibm-granite/granite-4.0-micro", status=STATUS_DEPRECATED),
         ModelInfo(
             hub_id="ibm-granite/granite-4.0-micro-base", status=STATUS_DEPRECATED
@@ -215,7 +356,12 @@ SUPPORTED_MODEL_INFO: Mapping[str, ModelInfo] = {
             architecture=ARCH_MOE,
             status=STATUS_DEPRECATED,
         ),
-        ModelInfo(hub_id="google/gemma-4-E4B-it"),
+        ModelInfo(
+            hub_id="google/gemma-4-E4B-it",
+            modalities=("text", "vision"),
+            language_model_prefix=VL_LANGUAGE_MODEL_PREFIX,
+            text_lora_modules=GEMMA4_TEXT_LORA_MODULES,
+        ),
         ModelInfo(
             hub_id="nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16", architecture=ARCH_HYBRID
         ),
@@ -226,7 +372,9 @@ SUPPORTED_MODEL_INFO: Mapping[str, ModelInfo] = {
         ModelInfo(
             hub_id="nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
             architecture=ARCH_HYBRID_MOE,
-            status=STATUS_PREVIEW,
+            modalities=("text", "vision"),
+            language_model_prefix="language_model",
+            text_lora_modules=NEMOTRON_H_TEXT_LORA_MODULES,
         ),
         ModelInfo(hub_id="openai/gpt-oss-20b", architecture=ARCH_MOE),
     )

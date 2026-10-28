@@ -23,11 +23,12 @@ from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 from torch import nn
 from torch.distributed.tensor import DTensor
-from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedModel
+from transformers import AutoConfig, PreTrainedModel
 from transformers.pytorch_utils import Conv1D
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME, SAFE_WEIGHTS_NAME, cached_file
 
+from agilerl.architectures import trainer_model_class
 from agilerl.distributed import (
     gather_params,
     is_main_process,
@@ -255,7 +256,7 @@ def _load_replay_peft(
     config = AutoConfig.from_pretrained(str(base_model_name_or_path))
     adapter_config = PeftConfig.from_pretrained(str(adapter_path))
     with init_empty_weights(include_buffers=True):
-        base = AutoModelForCausalLM.from_config(config)
+        base = trainer_model_class(str(base_model_name_or_path)).from_config(config)
         peft_model = get_peft_model(base, adapter_config, adapter_name=adapter_name)
     _assign_adapter_weights(peft_model, adapter_path, adapter_name)
     return peft_model, BaseWeightStore.from_checkpoint(base_model_name_or_path)

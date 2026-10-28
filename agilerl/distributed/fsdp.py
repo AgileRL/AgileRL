@@ -40,6 +40,7 @@ from agilerl.distributed.fsdp_blocks import (
 )
 from agilerl.distributed.fsdp_meta import (
     ModelWithTiedWeightKeys,
+    init_embed_scale_buffers,
     init_rope_buffers,
     match_checkpoint_key,
     renamed_checkpoint_keys,
@@ -1149,6 +1150,7 @@ def materialize_fsdp2_from_cpu_state(
     if cpu_state is None:
         _load_sharded_weights_from_safetensors(model)
         init_rope_buffers(model)
+        init_embed_scale_buffers(model)
     else:
         expert_keys = frozenset()
         if packed_ep_modules:

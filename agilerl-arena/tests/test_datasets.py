@@ -445,6 +445,20 @@ class TestBuildSubmitExperimentMultipart:
         assert "completion" not in files
         assert files["reward_file"][0] == "reward.py"
 
+    def test_omits_reward_part_without_reward_file(self):
+        files = ArenaClient._build_submit_experiment_multipart(
+            manifest={"algorithm": {"name": "PPO"}},
+            project="proj",
+            resource_id=None,
+            num_nodes=None,
+            experiment_name="exp",
+            reward_file=None,
+            completion=None,
+        )
+
+        assert sorted(files) == ["experiment_name", "manifest", "project"]
+        assert json.loads(files["manifest"][1]) == {"algorithm": {"name": "PPO"}}
+
 
 class TestBuildCreateDatasetMultipart:
     def test_string_mapping_passthrough(self):

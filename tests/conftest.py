@@ -6,7 +6,13 @@ import os
 import shutil
 import sys
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
+
+# xdist workers already fill the CPUs. Per-worker OpenMP pools on top of that
+# contend for cores and run the suite 2-4x slower. Set before numpy/torch load.
+if os.environ.get("PYTEST_XDIST_WORKER"):
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 import gymnasium as gym
 
@@ -220,8 +226,11 @@ def pytest_collection_modifyitems(config, items):
     skip_no_cuda = pytest.mark.skip(
         reason="Requires a usable CUDA device (gpu/vllm-marked); none available."
     )
+    skip_no_gloo = pytest.mark.skip(reason="multi_rank tests need gloo")
     gputest_count = 0
     for item in items:
+        if sys.platform == "win32" and item.get_closest_marker("multi_rank"):
+            item.add_marker(skip_no_gloo)
         if item.get_closest_marker("vllm") or item.get_closest_marker("gpu"):
             item.add_marker(gputest_groups[gputest_count % len(gputest_groups)])
             gputest_count += 1
@@ -647,6 +656,25 @@ def serve_env():
     yield _serve
     for server in servers:
         server.stop()
+
+
+@pytest.fixture
+def torch_kernels(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tiny CPU Qwen3.5 and Nemotron-H models run the PyTorch kernels."""
+    # Defers transformers, an llm extra.
+    from tests.torch_kernels import use_torch_kernels
+
+    use_torch_kernels(monkeypatch)
+
+
+@pytest.fixture
+def pristine_nemotron_classes() -> Iterator[None]:
+    """Undo Nemotron-H Mamba patches a test installs, so later tests see stock classes."""
+    # Defers transformers, an llm extra.
+    from tests.nemotron_classes import restore_nemotron_classes
+
+    with restore_nemotron_classes():
+        yield
 
 
 @pytest.fixture(autouse=True)

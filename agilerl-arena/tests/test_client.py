@@ -26,6 +26,7 @@ from agilerl.arena.exceptions import (
     ArenaTrainingError,
     ArenaValidationError,
 )
+from agilerl.arena.models.model_info import STATUS_PREVIEW, SUPPORTED_MODEL_INFO
 from agilerl.arena.output import StreamRichRenderer
 from agilerl.arena.stream import NDJsonStream
 
@@ -1541,7 +1542,8 @@ class TestExperimentMethods:
     @pytest.mark.parametrize(
         ("hub_id", "warned"),
         [
-            ("Qwen/Qwen3-4B", False),
+            ("Qwen/Qwen3.5-4B", False),
+            ("Qwen/Qwen3-4B", True),
             ("Qwen/Qwen2.5-0.5B-Instruct", True),
         ],
     )
@@ -1560,9 +1562,15 @@ class TestExperimentMethods:
         assert result == {"job_id": 3}
         assert (f"Model {hub_id} is deprecated" in caplog.text) is warned
 
-    def test_submit_experiment_rejects_preview_model(self, api_key_client):
+    def test_submit_experiment_rejects_preview_model(self, api_key_client, monkeypatch):
         api_key_client._open_stream = MagicMock()
         hub_id = "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16"
+        live = SUPPORTED_MODEL_INFO[hub_id]
+        monkeypatch.setitem(
+            SUPPORTED_MODEL_INFO,
+            hub_id,
+            live.model_copy(update={"status": STATUS_PREVIEW}),
+        )
 
         with pytest.raises(ArenaValidationError, match="is in preview"):
             api_key_client.submit_experiment(

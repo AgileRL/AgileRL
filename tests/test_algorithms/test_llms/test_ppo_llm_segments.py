@@ -26,6 +26,7 @@ from peft import LoraConfig
 
 from agilerl.algorithms.ppo_llm import PPO as LLMPPO
 from agilerl.utils.llm_utils import LEARN_PHASE_METRIC_NAMES
+from tests.rank_launch import run_ranks
 from tests.test_algorithms.test_llms.llm_helpers import (
     create_value_head_module,
     scale_losses,
@@ -33,7 +34,9 @@ from tests.test_algorithms.test_llms.llm_helpers import (
 from tests.test_algorithms.test_llms.segment_helpers import (
     EPISODE_SEGMENTS,
     MEAN_SEGMENT_ROW_ACTION_TOKENS,
+    balanced_learn_worker,
     episode_sampling_logps,
+    episode_sampling_supports,
     learn_rank_episodes,
     learn_with_nan_loss_on_rank_zero,
     lora_weights,
@@ -42,7 +45,6 @@ from tests.test_algorithms.test_llms.segment_helpers import (
     record_step_gradients,
     rows_from_other_ranks,
     segment_experiences,
-    spawn_balanced_learn,
     use_fake_liger_policy_loss,
 )
 
@@ -278,6 +280,7 @@ def scale_value_losses(
 @pytest.mark.skipif(
     sys.platform == "win32" or not dist.is_available(), reason="gloo unavailable"
 )
+@pytest.mark.multi_rank
 class TestPPOLearnBalancedAcrossRanks:
     @pytest.mark.parametrize("fuse", [False, True], ids=["split", "fused"])
     def test_uneven_ranks_run_even_rows_with_their_local_gradients(
@@ -292,7 +295,7 @@ class TestPPOLearnBalancedAcrossRanks:
         rank0, rank1 = rank_local_step_gradients(make_agent, monkeypatch)
 
         # Act
-        reports = spawn_balanced_learn(make_agent)
+        reports = run_ranks(balanced_learn_worker, 2, make_agent, backend=None)
 
         # Assert: 4 and 2 rows are dealt out as 3 and 3.
         for padded_rows, steps in reports:
@@ -322,8 +325,12 @@ class TestPPOLearnBalancedAcrossRanks:
         )
 
         # Act
-        reports = spawn_balanced_learn(
-            make_agent, partial(learn_rank_episodes, sampling_ranks=(0,))
+        reports = run_ranks(
+            balanced_learn_worker,
+            2,
+            make_agent,
+            partial(learn_rank_episodes, sampling_ranks=(0,)),
+            backend=None,
         )
 
         # Assert
@@ -347,7 +354,7 @@ class TestPPOLearnBalancedAcrossRanks:
         learn = partial(learn_with_nan_loss_on_rank_zero, scale_loss=scale_value_losses)
 
         # Act
-        reports = spawn_balanced_learn(_make_ppo, learn)
+        reports = run_ranks(balanced_learn_worker, 2, _make_ppo, learn, backend=None)
 
         # Assert
         for rank, ((error, weights_held), steps) in enumerate(reports):
@@ -369,3 +376,56 @@ class TestPPOLearnPhaseTimings:
         assert all(metrics[key] >= 0.0 for key in LEARN_PHASE_METRIC_NAMES)
         assert metrics["learn_phase_forward_s"] > 0.0
         assert agent.shard_runtime.phase_timer.marks is None
+
+
+class TestPPOLearnSamplingSupports:
+    def test_forced_tokens_score_a_zero_log_prob(self) -> None:
+        # Arrange: every action token is forced, so its log-prob over its
+        # support is 0 whatever the policy.
+        agent = _make_ppo()
+        supports = episode_sampling_supports(PAD_TOKEN_ID, width=1)
+        sampling_logps = [torch.zeros(row.shape[0]) for row in supports]
+
+        # Act
+        metrics = agent.learn(
+            _experiences(), sampling_logps=sampling_logps, sampling_supports=supports
+        )
+
+        # Assert
+        assert metrics["vllm_is_delta_mean"] == pytest.approx(0.0, abs=1e-6)
+        assert metrics["vllm_is_delta_max"] == pytest.approx(0.0, abs=1e-6)
+
+    @pytest.mark.parametrize("fuse", [False, True], ids=["split", "fused"])
+    def test_segment_rows_match_the_unsegmented_gradient(
+        self, monkeypatch: pytest.MonkeyPatch, fuse: bool
+    ) -> None:
+        # Arrange
+        overrides = {
+            "batch_size": 8,
+            "micro_batch_size_per_gpu": 8,
+            "mini_batch_size": 8,
+            "fuse_actor_critic_pass": fuse,
+        }
+        unsegmented = _make_ppo(**overrides)
+        segmented = _make_ppo(**overrides)
+        unsegmented_grads = record_step_gradients(unsegmented, monkeypatch)
+        segmented_grads = record_step_gradients(segmented, monkeypatch)
+        learn_kwargs = {
+            "sampling_logps": episode_sampling_logps(PAD_TOKEN_ID),
+            "sampling_supports": episode_sampling_supports(PAD_TOKEN_ID),
+        }
+
+        # Act
+        unsegmented.learn(_experiences(), **learn_kwargs)
+        segmented.learn(
+            _experiences(), episode_segments=EPISODE_SEGMENTS, **learn_kwargs
+        )
+
+        # Assert
+        assert len(unsegmented_grads) == len(segmented_grads) == 1
+        assert any(grad.abs().sum() > 0 for grad in unsegmented_grads[0].values())
+        for name, grad in unsegmented_grads[0].items():
+            # fp32 sums over differently shaped rows.
+            assert torch.allclose(
+                segmented_grads[0][name], grad, rtol=1e-5, atol=1e-7
+            ), name

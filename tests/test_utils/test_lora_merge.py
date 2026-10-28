@@ -28,13 +28,16 @@ from peft.tuners.lora.layer import LoraLayer
 from safetensors.torch import load_file, save_file
 from transformers import (
     AutoModelForCausalLM,
+    AutoModelForImageTextToText,
     GPT2Config,
     GPT2LMHeadModel,
     OPTConfig,
     OPTForCausalLM,
+    Qwen3_5Config,
 )
 
 from agilerl.utils import lora_merge as lora_merge_mod
+from agilerl.utils.llm_utils import adapt_lora_config_for_model
 from agilerl.utils.lora_merge import (
     ARENA_ARTIFACT_MANIFEST_FILENAME,
     MERGED_COMPLETE_MARKER,
@@ -99,6 +102,37 @@ def _tiny_opt() -> OPTForCausalLM:
             word_embed_proj_dim=16,
         )
     )
+
+
+def _tiny_qwen3_5_vl() -> nn.Module:
+    """Build a CPU Qwen3.5 VL model: one linear-attention and one full-attention layer."""
+    config = Qwen3_5Config(
+        text_config={
+            "vocab_size": 64,
+            "hidden_size": 32,
+            "intermediate_size": 64,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 1,
+            "head_dim": 16,
+            "linear_num_key_heads": 2,
+            "linear_num_value_heads": 2,
+            "linear_key_head_dim": 16,
+            "linear_value_head_dim": 16,
+            "layer_types": ["linear_attention", "full_attention"],
+            "tie_word_embeddings": True,
+        },
+        vision_config={
+            "depth": 1,
+            "hidden_size": 16,
+            "intermediate_size": 32,
+            "num_heads": 2,
+            "out_hidden_size": 32,
+            "num_position_embeddings": 16,
+        },
+        tie_word_embeddings=True,
+    )
+    return AutoModelForImageTextToText.from_config(config)
 
 
 def _tiny_peft(**lora_kwargs: Any) -> nn.Module:
@@ -428,6 +462,51 @@ class TestExportMergedPretrainedLive:
         )
 
 
+class TestExportMergedPretrainedVisionLanguage:
+    @pytest.mark.parametrize("shape", ["live", "replay"])
+    def test_qwen3_5_export_keeps_architecture_and_towers(
+        self, tmp_path: Path, shape: str
+    ) -> None:
+        # Arrange
+        torch.manual_seed(0)
+        base = _tiny_qwen3_5_vl()
+        base.save_pretrained(tmp_path / "base")
+        visual = {
+            name: tensor.clone()
+            for name, tensor in base.state_dict().items()
+            if name.startswith("model.visual.")
+        }
+        lora = adapt_lora_config_for_model(
+            base, _lora_config(["q_proj", "in_proj_qkv"], fan_in_fan_out=False)
+        )
+        peft_model = get_peft_model(base, lora, adapter_name="actor")
+        peft_model.save_pretrained(tmp_path / "ckpt")
+
+        # Act
+        if shape == "live":
+            export_merged_pretrained(
+                tmp_path / "merged",
+                model=peft_model,
+                torch_dtype=torch.float32,
+            )
+        else:
+            export_merged_pretrained(
+                tmp_path / "merged",
+                adapter_path=tmp_path / "ckpt" / "actor",
+                base_model_name_or_path=tmp_path / "base",
+                torch_dtype=torch.float32,
+            )
+
+        # Assert
+        config = json.loads((tmp_path / "merged" / "config.json").read_text())
+        assert config["architectures"] == ["Qwen3_5ForConditionalGeneration"]
+        assert config["model_type"] == "qwen3_5"
+        merged = load_file(tmp_path / "merged" / "model.safetensors")
+        assert visual
+        assert all(torch.equal(merged[name], tensor) for name, tensor in visual.items())
+        assert not any("lora_" in name for name in merged)
+
+
 class TestWriteMergedCompletenessFiles:
     def test_skips_adapter_config_and_writes_marker_last(self, tmp_path: Path) -> None:
         merged = tmp_path / "merged"
@@ -504,7 +583,7 @@ class TestExportMergedPretrainedReplay:
         peft_model.save_pretrained(tmp_path / "ckpt")
 
         with patch(
-            "agilerl.utils.lora_merge.AutoModelForCausalLM.from_pretrained",
+            "transformers.AutoModelForCausalLM.from_pretrained",
             side_effect=AssertionError("replay must not load the full model"),
         ):
             export_merged_pretrained(
@@ -1573,7 +1652,7 @@ class TestExportMergedPretrainedGPU:
         live_logits = _peft_logits(peft_model.cuda(), input_ids)
 
         with patch(
-            "agilerl.utils.lora_merge.AutoModelForCausalLM.from_pretrained",
+            "transformers.AutoModelForCausalLM.from_pretrained",
             side_effect=AssertionError("replay must not load the full model"),
         ):
             export_merged_pretrained(

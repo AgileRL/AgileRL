@@ -38,6 +38,12 @@ Invertible fields: ``max_model_len``, ``max_num_seqs``.
 ``python -m agilerl.arena.memory`` is the same CLI if the ``arena`` script is
 not on ``PATH``. Pass ``--config path/to/config.json`` to stay offline.
 
+The run picks ``vllm_config.tensor_parallel_size`` from the node's GPU count
+when the manifest leaves it unset. It splits an unset ``max_num_seqs`` across
+the engines ``rollout_engines_per_agent: auto`` starts. For either, pass
+``--num-gpus`` with ``--gpu`` or ``--device-gb``; a resource tier brings its
+own count. ``solve`` picks them again at each candidate value.
+
 The two phase bars (training and generation) never peak at once. Resource
 selection sizes against the larger of the two. The estimate errs high.
 

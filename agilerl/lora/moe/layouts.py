@@ -11,12 +11,16 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
-from agilerl import HAS_LLM_DEPENDENCIES
+from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
 from agilerl.architectures.gptoss import experts as gptoss_experts
 
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from transformers.activations import get_activation
+
+if HAS_LIGER_KERNEL:
+    from liger_kernel.transformers.swiglu import LigerExperts
 
 is_transposed_experts_module = gptoss_experts.is_gpt_oss_experts_module
 
@@ -90,13 +94,15 @@ def routed_experts_act_fn(
 ) -> Callable[[torch.Tensor], torch.Tensor]:
     """Activation for the packed grouped-GEMM path; never guessed.
 
-    Stock HF packed experts expose ``act_fn``. Fused kernels (LigerExperts)
-    drop it but keep the config that chose the activation. If neither exists,
-    raise instead of assuming a default.
+    Stock HF packed experts expose ``act_fn`` or a config with ``hidden_act``.
+    ``LigerExperts`` keeps neither but only builds for silu, so it runs SiLU.
+    Anything else raises instead of assuming a default.
     """
     act_fn = getattr(experts, "act_fn", None)
     if callable(act_fn):
         return act_fn
+    if HAS_LIGER_KERNEL and isinstance(experts, LigerExperts):
+        return F.silu
     config = getattr(experts, "config", None)
     hidden_act = getattr(config, "hidden_act", None)
     resolved = get_activation(hidden_act) if isinstance(hidden_act, str) else None

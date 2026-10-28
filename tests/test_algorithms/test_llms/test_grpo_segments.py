@@ -26,11 +26,13 @@ pytest.importorskip("peft", reason="LLM tests require peft.")
 from agilerl.algorithms.grpo import GRPO, _liger_global_token_count
 from agilerl.utils.segment_rows import split_episode_segments
 from agilerl.utils.vision_rows import VisionRows
+from tests.rank_launch import run_ranks
 from tests.test_algorithms.test_llms.llm_helpers import scale_losses
 from tests.test_algorithms.test_llms.segment_helpers import (
     EPISODE_SEGMENTS,
     NUM_SEGMENT_ROWS,
     SEQ_LEN,
+    balanced_learn_worker,
     episode_batch,
     learn_uneven_episodes,
     learn_with_nan_loss_on_rank_zero,
@@ -40,7 +42,6 @@ from tests.test_algorithms.test_llms.segment_helpers import (
     rows_from_other_ranks,
     seed_lora_weights,
     segment_experiences,
-    spawn_balanced_learn,
 )
 from tests.test_algorithms.test_llms.test_grpo_old_logprobs import (
     PAD_TOKEN_ID,
@@ -479,6 +480,7 @@ def scale_grpo_losses(
 @pytest.mark.skipif(
     sys.platform == "win32" or not dist.is_available(), reason="gloo unavailable"
 )
+@pytest.mark.multi_rank
 class TestGRPOLearnBalancedAcrossRanks:
     def test_uneven_ranks_run_even_rows_with_the_one_rank_gradient(
         self, monkeypatch: pytest.MonkeyPatch
@@ -490,7 +492,7 @@ class TestGRPOLearnBalancedAcrossRanks:
         learn_uneven_episodes(single, slice(0, 4))
 
         # Act
-        reports = spawn_balanced_learn(_make_grpo)
+        reports = run_ranks(balanced_learn_worker, 2, _make_grpo, backend=None)
 
         # Assert: 4 and 2 rows are dealt out as 3 and 3.
         assert len(single_steps) == 1
@@ -513,7 +515,7 @@ class TestGRPOLearnBalancedAcrossRanks:
         learn = partial(learn_with_nan_loss_on_rank_zero, scale_loss=scale_grpo_losses)
 
         # Act
-        reports = spawn_balanced_learn(_make_grpo, learn)
+        reports = run_ranks(balanced_learn_worker, 2, _make_grpo, learn, backend=None)
 
         # Assert
         for rank, ((error, weights_held), steps) in enumerate(reports):
@@ -522,58 +524,27 @@ class TestGRPOLearnBalancedAcrossRanks:
             assert steps == []
 
 
-class TestGRPOLoss:
-    @staticmethod
-    def _minibatch_pixel_values(
-        vision_rows: VisionRows | None, monkeypatch: pytest.MonkeyPatch
-    ) -> torch.Tensor | None:
-        """Pixel values ``_loss`` hands the objective for rows ``[2, 0]`` of 3."""
-        agent = _make_grpo()
-        per_token = torch.zeros(3, 3)
-        seen: dict[str, torch.Tensor | None] = {}
-
-        def objective(
-            batch_ids: torch.Tensor,
-            _action_mask: torch.Tensor,
-            _advantages: torch.Tensor,
-            _old_log_probs: torch.Tensor | None,
-            _reference_log_probs: torch.Tensor,
-            _turn_ids: torch.Tensor | None,
-            _sampling_log_probs: torch.Tensor | None,
-            pixel_values: torch.Tensor | None,
-            _sampled_rows: torch.Tensor | None,
-        ) -> tuple[torch.Tensor, ...]:
-            seen["pixel_values"] = pixel_values
-            zero = torch.tensor(0.0)
-            return zero, zero, zero, per_token[: batch_ids.shape[0]]
-
-        monkeypatch.setattr(agent, "_objective_loss", objective)
-        agent._loss(
-            np.array([2, 0]),
-            torch.zeros(3, 4, dtype=torch.long),
-            per_token.bool(),
-            torch.zeros(3, 1),
-            per_token,
-            per_token,
-            vision_rows=vision_rows,
-        )
-        return seen["pixel_values"]
-
-    def test_minibatch_gets_its_own_vision_rows(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+class TestGRPOLearnVisionRows:
+    def test_micro_batch_gets_its_own_vision_rows(self) -> None:
         # Arrange: rows 0, 1, 2 hold 2, 1 and 3 vision rows.
+        agent = _make_grpo()
         pixel_values = torch.arange(6.0).reshape(6, 1)
         vision_rows = VisionRows(pixel_values, image_counts=[2, 1, 3])
 
         # Act
-        selected = self._minibatch_pixel_values(vision_rows, monkeypatch)
+        [(selected, keys)] = list(
+            agent._learn_vision_rows(vision_rows, [np.array([2, 0])], 3)
+        )
 
         # Assert
-        assert selected is not None
         assert torch.equal(selected, pixel_values[[3, 4, 5, 0, 1]])
+        assert keys is None
 
-    def test_text_minibatch_has_no_vision_rows(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        assert self._minibatch_pixel_values(None, monkeypatch) is None
+    def test_text_micro_batches_have_no_vision_rows(self) -> None:
+        agent = _make_grpo()
+
+        micro_batches = list(
+            agent._learn_vision_rows(None, [np.array([2, 0]), np.array([1])], 3)
+        )
+
+        assert micro_batches == [(None, None), (None, None)]

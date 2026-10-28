@@ -6,14 +6,11 @@
 from __future__ import annotations
 
 import math
-import traceback
-from functools import partial
 from pathlib import Path
 from typing import Any
 
 import pytest
 import torch
-import torch.distributed as dist
 from torch.distributed.tensor import DTensor
 
 pytest.importorskip("transformers", reason="LLM tests require transformers.")
@@ -22,16 +19,12 @@ pytest.importorskip("peft", reason="LLM tests require peft.")
 from agilerl.algorithms.ppo_llm import PPO as LLMPPO
 from agilerl.distributed.fsdp import FSDPConfig
 from agilerl.utils.algo_utils import CosineLRScheduleConfig
+from tests.rank_launch import run_ranks
 from tests.test_algorithms.test_llms.segment_helpers import seed_lora_weights
 from tests.test_algorithms.test_llms.test_ppo_llm_passes import (
     FUSE_MODES,
     learn_rows,
     make_ppo,
-)
-from tests.test_utils.test_expert_parallel import (
-    _init_gloo,
-    _spawn_ranks,
-    requires_gloo,
 )
 
 
@@ -141,44 +134,34 @@ class TestPPOLearnCriticWarmup:
         assert -1.0 <= metrics["value_return_corr"] <= 1.0
 
 
-def _data_parallel_warmup_worker(
-    rank: int, world_size: int, port: int, result_queue: Any
-) -> None:
-    try:
-        _init_gloo(rank, world_size, port)
-        # Arrange — four rows per rank
-        agent = make_ppo(
-            batch_size=4 * world_size,
-            mini_batch_size=4,
-            micro_batch_size_per_gpu=2,
-            fuse_actor_critic_pass=False,
-            critic_warmup_steps=1,
-        )
-        before = role_weights(agent)
+def _data_parallel_warmup_worker(rank: int, world_size: int) -> None:
+    # Arrange — four rows per rank
+    agent = make_ppo(
+        batch_size=4 * world_size,
+        mini_batch_size=4,
+        micro_batch_size_per_gpu=2,
+        fuse_actor_critic_pass=False,
+        critic_warmup_steps=1,
+    )
+    before = role_weights(agent)
 
-        # Act
-        metrics = learn_rows(agent)
+    # Act
+    metrics = learn_rows(agent)
 
-        # Assert
-        after = role_weights(agent)
-        assert not changed(before["actor"], after["actor"])
-        assert changed(before["critic"], after["critic"])
-        assert metrics["critic_warmup"] == 1.0
-        assert metrics["grad_norm_pre"] == 0.0
-        assert math.isfinite(metrics["critic_grad_norm_pre"])
-        assert metrics["critic_grad_norm_pre"] > 0.0
-        result_queue.put((rank, "ok", None))
-    except Exception as exc:
-        result_queue.put((rank, "err", repr(exc)))
-    finally:
-        if dist.is_initialized():
-            dist.destroy_process_group()
+    # Assert
+    after = role_weights(agent)
+    assert not changed(before["actor"], after["actor"])
+    assert changed(before["critic"], after["critic"])
+    assert metrics["critic_warmup"] == 1.0
+    assert metrics["grad_norm_pre"] == 0.0
+    assert math.isfinite(metrics["critic_grad_norm_pre"])
+    assert metrics["critic_grad_norm_pre"] > 0.0
 
 
-@requires_gloo
+@pytest.mark.multi_rank
 class TestPPOLearnCriticWarmupDataParallel:
     def test_warmup_step_syncs_critic_grads_and_leaves_the_actor(self) -> None:
-        _spawn_ranks(_data_parallel_warmup_worker)
+        run_ranks(_data_parallel_warmup_worker)
 
 
 class TestPPOCriticWarmupCheckpoint:
@@ -247,76 +230,60 @@ def full_role_weights(agent: LLMPPO) -> dict[str, dict[str, torch.Tensor]]:
 
 
 def _fsdp_warmup_resume_worker(
-    path: str,
-    lora_only: bool,
-    restore_config: bool,
-    rank: int,
-    world_size: int,
-    port: int,
-    result_queue: Any,
+    rank: int, world_size: int, path: str, lora_only: bool, restore_config: bool
 ) -> None:
-    try:
-        _init_gloo(rank, world_size, port)
-        # The default FSDP2 mesh follows the host accelerator (MPS on macOS).
-        torch._C._get_accelerator = lambda: torch.device("cpu")
-        rows = slice(2 * rank, 2 * rank + 2)
-        # Arrange — checkpoint after the first of two critic-only steps
-        saved = make_fsdp_warmup_ppo()
-        seed_lora_weights(saved)
-        learn_rows(saved, rows)
-        saved_states = optimizer_states(saved)
-        saved_weights = full_role_weights(saved)
-        saved.save_checkpoint(path, lora_only=lora_only)
-        loaded = make_fsdp_warmup_ppo()
-        fresh_weights = full_role_weights(loaded)
+    # The default FSDP2 mesh follows the host accelerator (MPS on macOS).
+    torch._C._get_accelerator = lambda: torch.device("cpu")
+    rows = slice(2 * rank, 2 * rank + 2)
+    # Arrange — checkpoint after the first of two critic-only steps
+    saved = make_fsdp_warmup_ppo()
+    seed_lora_weights(saved)
+    learn_rows(saved, rows)
+    saved_states = optimizer_states(saved)
+    saved_weights = full_role_weights(saved)
+    saved.save_checkpoint(path, lora_only=lora_only)
+    loaded = make_fsdp_warmup_ppo()
+    fresh_weights = full_role_weights(loaded)
 
-        # Act
-        loaded.load_checkpoint(path, load_optimizer=True, restore_config=restore_config)
+    # Act
+    loaded.load_checkpoint(path, load_optimizer=True, restore_config=restore_config)
 
-        # Assert
-        loaded_weights = full_role_weights(loaded)
-        for role in ("actor", "critic"):
-            assert changed(fresh_weights[role], saved_weights[role])
-            assert loaded_weights[role].keys() == saved_weights[role].keys()
-            for name, weight in saved_weights[role].items():
-                assert torch.equal(loaded_weights[role][name], weight), name
-        loaded_states = optimizer_states(loaded)
-        assert loaded.critic_warmup_steps_done == 1
-        assert saved_states["actor"]
-        assert not any(saved_states["actor"].values())
-        assert not any(loaded_states["actor"].values())
-        assert loaded_states["critic"].keys() == saved_states["critic"].keys()
-        for name, state in saved_states["critic"].items():
-            assert state, name
-            assert loaded_states["critic"][name].keys() == state.keys(), name
-            for key, value in state.items():
-                assert torch.equal(loaded_states["critic"][name][key], value), (
-                    name,
-                    key,
-                )
-        assert learn_rows(loaded, rows)["critic_warmup"] == 1.0
-        assert not any(optimizer_states(loaded)["actor"].values())
-        assert learn_rows(loaded, rows)["critic_warmup"] == 0.0
-        assert all(optimizer_states(loaded)["actor"].values())
-        result_queue.put((rank, "ok", None))
-    except Exception:
-        result_queue.put((rank, "err", traceback.format_exc()))
-    finally:
-        if dist.is_initialized():
-            dist.destroy_process_group()
+    # Assert
+    loaded_weights = full_role_weights(loaded)
+    for role in ("actor", "critic"):
+        assert changed(fresh_weights[role], saved_weights[role])
+        assert loaded_weights[role].keys() == saved_weights[role].keys()
+        for name, weight in saved_weights[role].items():
+            assert torch.equal(loaded_weights[role][name], weight), name
+    loaded_states = optimizer_states(loaded)
+    assert loaded.critic_warmup_steps_done == 1
+    assert saved_states["actor"]
+    assert not any(saved_states["actor"].values())
+    assert not any(loaded_states["actor"].values())
+    assert loaded_states["critic"].keys() == saved_states["critic"].keys()
+    for name, state in saved_states["critic"].items():
+        assert state, name
+        assert loaded_states["critic"][name].keys() == state.keys(), name
+        for key, value in state.items():
+            assert torch.equal(loaded_states["critic"][name][key], value), (
+                name,
+                key,
+            )
+    assert learn_rows(loaded, rows)["critic_warmup"] == 1.0
+    assert not any(optimizer_states(loaded)["actor"].values())
+    assert learn_rows(loaded, rows)["critic_warmup"] == 0.0
+    assert all(optimizer_states(loaded)["actor"].values())
 
 
-@requires_gloo
+@pytest.mark.multi_rank
 class TestPPOCriticWarmupCheckpointFSDP:
     @pytest.mark.parametrize("lora_only", [True, False], ids=["lora", "full"])
     @pytest.mark.parametrize("restore_config", [True, False])
     def test_resumes_mid_warmup_with_optimizer_state(
         self, tmp_path: Path, lora_only: bool, restore_config: bool
     ) -> None:
-        _spawn_ranks(
-            partial(
-                _fsdp_warmup_resume_worker, str(tmp_path), lora_only, restore_config
-            )
+        run_ranks(
+            _fsdp_warmup_resume_worker, 2, str(tmp_path), lora_only, restore_config
         )
 
 

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from enum import Enum
+from pathlib import PurePosixPath
 from typing import Annotated, Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
@@ -112,8 +113,8 @@ class EnvContainerSpec(BaseModel):
             "Size of a memory-backed volume the image is unpacked into, for an "
             "image larger than a node's disk. The container then runs command "
             "under chroot in a privileged container: the image's ENTRYPOINT, "
-            "ENV and WORKDIR do not apply, so set command and env. The image "
-            "must pull without credentials."
+            "ENV and WORKDIR do not apply, so set command and env. The unpack "
+            "uses the Pod's image pull secrets."
         ),
     )
 
@@ -132,6 +133,60 @@ class EnvContainerSpec(BaseModel):
             msg = (
                 f"Container {self.name!r}: memory_rootfs runs the unpacked image "
                 "without its ENTRYPOINT; set command."
+            )
+            raise ValueError(msg)
+        return self
+
+
+class EnvHostVolume(BaseModel):
+    """A node directory mounted read-only into every container of a service."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(
+        pattern=DNS_LABEL_PATTERN,
+        max_length=40,
+        description="Volume name, unique within its service.",
+    )
+    host_path: str = Field(
+        description=(
+            "Directory on the node under /var/cache/agilerl-, where the platform "
+            "mounts the data it provides. The Pod does not start on a node "
+            "without it."
+        ),
+    )
+    mount_path: str = Field(description="Where the containers see the directory.")
+
+    @model_validator(mode="after")
+    def _check_paths(self) -> Self:
+        paths = {"host_path": self.host_path, "mount_path": self.mount_path}
+        for field, path in paths.items():
+            normal = PurePosixPath(path)
+            if (
+                not normal.is_absolute()
+                or path == "/"
+                or str(normal) != path
+                or ".." in normal.parts
+            ):
+                msg = (
+                    f"Host volume {self.name!r}: {field} must be an absolute path "
+                    f"without '..', a trailing slash or '/' itself; got {path!r}."
+                )
+                raise ValueError(msg)
+        node_data_root = "/var/cache/agilerl-"
+        if not self.host_path.startswith(node_data_root):
+            msg = (
+                f"Host volume {self.name!r}: host_path must be under "
+                f"{node_data_root}*; got {self.host_path!r}."
+            )
+            raise ValueError(msg)
+        # Every env container already mounts a memory volume at /dev/shm.
+        shm = PurePosixPath("/dev/shm")
+        mount = PurePosixPath(self.mount_path)
+        if mount == shm or shm in mount.parents:
+            msg = (
+                f"Host volume {self.name!r}: mount_path {self.mount_path!r} is in "
+                "/dev/shm, the containers' shared-memory mount; pick another path."
             )
             raise ValueError(msg)
         return self
@@ -168,12 +223,37 @@ class EnvServiceSpec(BaseModel):
         gt=0.0,
         description="How long the service may take to become ready.",
     )
+    host_volumes: list[EnvHostVolume] = Field(
+        default_factory=list,
+        description=(
+            "Node directories mounted read-only into every container, for data "
+            "the node provides (a disk the cluster attaches) rather than the image."
+        ),
+    )
 
     @model_validator(mode="after")
     def _check_service(self) -> Self:
         names = [container.name for container in self.containers]
         if len(set(names)) != len(names):
             msg = f"Service {self.name!r} repeats a container name: {names}."
+            raise ValueError(msg)
+        volume_names = [volume.name for volume in self.host_volumes]
+        if len(set(volume_names)) != len(volume_names):
+            msg = f"Service {self.name!r} repeats a host volume name: {volume_names}."
+            raise ValueError(msg)
+        mount_paths = [volume.mount_path for volume in self.host_volumes]
+        for path in mount_paths:
+            if mount_paths.count(path) > 1:
+                msg = (
+                    f"Service {self.name!r} mounts more than one host volume at {path}."
+                )
+                raise ValueError(msg)
+        rootfs = [c.name for c in self.containers if c.memory_rootfs is not None]
+        if self.host_volumes and rootfs:
+            msg = (
+                f"Service {self.name!r}: host_volumes are not visible under "
+                f"memory_rootfs, which containers {rootfs} set."
+            )
             raise ValueError(msg)
         serving = [c.name for c in self.containers if c.port is not None]
         if len(serving) != 1:
@@ -540,6 +620,13 @@ class LLMEnvSpec(EnvSpecBase):
         default=None,
         description="Reward at which a rollout counts as solved, used for the success metric.",
     )
+    min_reward: float | None = Field(
+        default=None,
+        description=(
+            "Lowest reward the env gives. Scores a turn whose tool calls are "
+            "malformed or missing, which never reaches the env. Unset scores 0."
+        ),
+    )
     train_test_split: float | None = Field(
         default=None,
         ge=0.0,
@@ -643,6 +730,14 @@ class LLMEnvSpec(EnvSpecBase):
             "lists the actions alone."
         ),
     )
+    repeat_system_prompt: bool = Field(
+        default=False,
+        description=(
+            "Also put env_config.system_prompt after the first observation and "
+            "after each image observation, ahead of a trailing 'Question:' "
+            "block. False sends each observation unchanged."
+        ),
+    )
     strict_chat_template_boundary: bool | None = Field(
         default=None,
         description=(
@@ -667,6 +762,35 @@ class LLMEnvSpec(EnvSpecBase):
             "exclusive with observation_field."
         ),
     )
+    action_processor: str | None = Field(
+        default=None,
+        description=(
+            "module:fn entrypoint that turns the post-</think> action text "
+            "into what the env receives. Unset sends that text unchanged."
+        ),
+    )
+    screenshot_field: str | None = Field(
+        default=None,
+        description=(
+            "Observation field holding the page image. Empty or unset reads no "
+            "page image. A field named image is always read when present."
+        ),
+    )
+    goal_images_field: str | None = Field(
+        default=None,
+        description=(
+            "Observation field holding the task images that follow the first "
+            "prompt. Empty or unset reads none."
+        ),
+    )
+    modality: Literal["text", "vision"] | None = Field(
+        default=None,
+        description=(
+            "What the env's observations carry: text only, or text and images "
+            "(vision). text lets a vision-language model's rollout engine skip "
+            "its multimodal towers. Unset is unknown and keeps them."
+        ),
+    )
 
     env_url: str | list[str] | None = Field(
         default=None,
@@ -675,9 +799,13 @@ class LLMEnvSpec(EnvSpecBase):
             "interchangeable replicas dealt across rollout slots."
         ),
     )
-    mcp_tool: str | None = Field(
+    answer_tool: str | None = Field(
         default=None,
-        description="For an MCP-backed env, the tool the model's text is sent to.",
+        description=(
+            "For an MCP-backed env, one of its real tools receiving a turn's "
+            "prose when the turn has no tool call. Unset answers such a turn "
+            "with retry feedback."
+        ),
     )
     action_field: str | None = Field(
         default=None,
@@ -848,6 +976,11 @@ class LLMEnvSpec(EnvSpecBase):
         """Whether this rollout env serves labelled rows scored by a rubric."""
         return self.env_type == "rollout" and self._named_dataset() is not None
 
+    @property
+    def text_only(self) -> bool:
+        """Whether every observation is text: declared text, or dataset rows."""
+        return self.modality == "text" or self.dataset_backed_rollout
+
     def _named_dataset(self) -> str | None:
         for value in (self.dataset, self.dataset_path, self.hf_dataset_id):
             if value is not None:
@@ -924,10 +1057,10 @@ class LLMEnvSpec(EnvSpecBase):
             )
             raise ValueError(msg)
         if (
-            self.mcp_tool is not None or self.request_timeout_s is not None
+            self.answer_tool is not None or self.request_timeout_s is not None
         ) and dataset is not None:
             msg = (
-                "mcp_tool / request_timeout_s configure an env reached over "
+                "answer_tool / request_timeout_s configure an env reached over "
                 "HTTP; a rollout over dataset rows has no such env."
             )
             raise ValueError(msg)
@@ -968,6 +1101,21 @@ class LLMEnvSpec(EnvSpecBase):
                 "observations; a dataset-backed rollout builds its own prompts."
             )
             raise ValueError(msg)
+        if self.action_processor is not None and dataset is not None:
+            msg = (
+                "action_processor rewrites the text an env receives; a "
+                "dataset-backed rollout has no such env."
+            )
+            raise ValueError(msg)
+        if dataset is not None and (
+            (self.screenshot_field is not None and self.screenshot_field != "")
+            or (self.goal_images_field is not None and self.goal_images_field != "")
+        ):
+            msg = (
+                "screenshot_field and goal_images_field name env observation "
+                "keys; a dataset-backed rollout has no such observation."
+            )
+            raise ValueError(msg)
         if self.env_url is not None and self.max_turns is None:
             msg = (
                 "max_turns is required with env_url: a remote env's turn budget "
@@ -988,6 +1136,24 @@ class LLMEnvSpec(EnvSpecBase):
         elif self.rubric_file_path is not None:
             msg = (
                 "rubric_file_path is not supported for env-backed rollout environments."
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _check_modality(self) -> Self:
+        if self.modality == "text" and (
+            self.screenshot_field or self.goal_images_field
+        ):
+            msg = (
+                "modality text means the env sends no images; drop "
+                "screenshot_field and goal_images_field, or set modality vision."
+            )
+            raise ValueError(msg)
+        if self.modality == "vision" and self.dataset_backed_rollout:
+            msg = (
+                "modality vision needs image observations; a dataset-backed "
+                "rollout sends text only."
             )
             raise ValueError(msg)
         return self

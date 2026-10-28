@@ -25,6 +25,7 @@ from agilerl.llm_envs.task_assigner import (
     TaskRowStats,
 )
 from agilerl.utils.llm_utils import is_rollout_prompt
+from agilerl.utils.sampling_supports import concat_sampling_supports
 
 __all__ = ["RolloutCollector"]
 
@@ -245,12 +246,15 @@ class RolloutCollector:
         self,
         token_ids: list[torch.Tensor],
         sampling_logps: list[torch.Tensor | None] | None = None,
+        sampling_supports: list[torch.Tensor | None] | None = None,
     ) -> list[RolloutPrompt] | None:
         """Step each active env with its turn's token sequence.
 
         :param token_ids: One ``prompt + generation`` tensor per active env.
         :param sampling_logps: vLLM logprobs parallel to ``token_ids``; entries or
             the whole list may be ``None``.
+        :param sampling_supports: ``(n, K)`` vLLM sampling supports parallel to
+            ``token_ids``, or ``None``.
         :return: Next active prompts after stepping.
         """
         active = self._active_envs()
@@ -266,11 +270,22 @@ class RolloutCollector:
                 f"envs: {len(sampling_logps)} != {len(active)}"
             )
             raise RuntimeError(msg)
+        if sampling_supports is not None and len(sampling_supports) != len(active):
+            msg = (
+                "Number of sampling supports does not match number of active "
+                f"envs: {len(sampling_supports)} != {len(active)}"
+            )
+            raise RuntimeError(msg)
         slps = sampling_logps if sampling_logps is not None else [None] * len(active)
+        supports = (
+            sampling_supports if sampling_supports is not None else [None] * len(active)
+        )
         # Phase 1 (sequential — tokenizer): decode + record each generation.
         gen_texts = [
-            env._step_prepare(full, sampling_logps=slp)
-            for env, full, slp in zip(active, token_ids, slps, strict=False)
+            env._step_prepare(full, sampling_logps=slp, sampling_supports=support)
+            for env, full, slp, support in zip(
+                active, token_ids, slps, supports, strict=False
+            )
         ]
         # Phase 2 (concurrent — pure I/O): round-trip each env backend at once.
         results = self._map_env_io(
@@ -354,14 +369,17 @@ class RolloutCollector:
         int,
         list[torch.Tensor | None] | None,
         list[torch.Tensor | None] | None,
+        list[torch.Tensor | None] | None,
     ]:
         """Collect complete episode tensors from all envs, in list order.
 
         :return: ``(token_ids_list, action_masks_list, all_turn_ids, all_rewards,
-            batch_steps, all_sampling_logps, all_pixel_values)`` where ``batch_steps``
-            is the summed turn count. ``all_sampling_logps`` is ``None`` when no vLLM
-            logprobs were captured, else one 1-D tensor per env (``None`` for envs that
-            captured none). ``all_pixel_values`` follows the same per-env collapse rule.
+            batch_steps, all_sampling_logps, all_pixel_values,
+            all_sampling_supports)`` where ``batch_steps`` is the summed turn
+            count. ``all_sampling_logps`` is ``None`` when no vLLM logprobs were
+            captured, else one 1-D tensor per env (``None`` for envs that
+            captured none). ``all_pixel_values`` and the ``(n, K)``
+            ``all_sampling_supports`` follow the same per-env collapse rule.
         :raises ValueError: If an episode's context restarted into segments.
         """
         token_ids_list: list[torch.Tensor] = []
@@ -370,6 +388,7 @@ class RolloutCollector:
         all_rewards: list[torch.Tensor] = []
         all_sampling_logps: list[torch.Tensor | None] = []
         all_pixel_values: list[torch.Tensor | None] = []
+        all_sampling_supports: list[torch.Tensor | None] = []
         batch_steps = 0
         for env in self._window_envs():
             (
@@ -395,6 +414,11 @@ class RolloutCollector:
             batch_steps += len(env.turn_boundaries)
             all_sampling_logps.append(sampling_logps)
             all_pixel_values.append(pixel_values)
+            all_sampling_supports.append(
+                concat_sampling_supports(env.sampling_supports)
+                if env.sampling_supports
+                else None
+            )
 
         return (
             token_ids_list,
@@ -411,6 +435,11 @@ class RolloutCollector:
             (
                 all_pixel_values
                 if any(pv is not None for pv in all_pixel_values)
+                else None
+            ),
+            (
+                all_sampling_supports
+                if any(support is not None for support in all_sampling_supports)
                 else None
             ),
         )

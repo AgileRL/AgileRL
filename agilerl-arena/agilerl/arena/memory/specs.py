@@ -13,6 +13,11 @@ from typing import Any, Literal, TypedDict
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Self
 
+from agilerl.arena.memory.resolve.lora import OMITTED_MAX_LORA_RANK
+from agilerl.arena.memory.resolve.sequences import (
+    COLOCATED_MAX_NUM_SEQS,
+    OMITTED_GPU_MEMORY_UTILIZATION,
+)
 from agilerl.arena.models.fsdp import FSDPConfig
 
 GiB = 1024**3
@@ -22,11 +27,21 @@ MiB = 1024**2
 MAMBA_CHUNK_SIZE_DEFAULT = 256
 
 # Model types whose trainer RMSNorm is the stock HF module, which keeps an
-# fp32 copy of each norm input for backward.
-FP32_RMS_NORM_MODEL_TYPES = frozenset({"granitemoe", "granitemoehybrid"})
+# fp32 copy of each norm input for backward. Gemma 4's norm upcasts with
+# ``hidden_states.float()`` under Liger too.
+FP32_RMS_NORM_MODEL_TYPES = frozenset({"granitemoe", "granitemoehybrid", "gemma4_text"})
 
-# Attention norms that upcast Q to fp32 inside the block (Qwen3 ``q_norm``).
-QK_NORM_MODEL_TYPES = frozenset({"qwen3", "qwen3_moe"})
+# Model types with a norm before and after both the attention and the MLP.
+SANDWICH_NORM_MODEL_TYPES = frozenset({"gemma4_text"})
+
+# Model types Liger has no SwiGLU kernel for. The stock gated MLP keeps the
+# activated gate for backward besides gate and up.
+STOCK_GATED_MLP_MODEL_TYPES = frozenset({"granitemoehybrid"})
+
+# Attention norms that upcast Q to fp32 inside the block (Qwen3/3.5 ``q_norm``).
+QK_NORM_MODEL_TYPES = frozenset(
+    {"qwen3", "qwen3_moe", "qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"}
+)
 
 # Model types whose packed experts take the trainer's self-routing grouped-GEMM
 # path, which runs experts in row chunks and writes straight into the layer output.
@@ -34,32 +49,64 @@ CHUNKED_ROUTED_EXPERT_MODEL_TYPES = frozenset(
     {"nemotron_h", "nemotron_h_omni", "qwen3_moe"}
 )
 
-# Compute capability and model types where AgileRL trains Mamba layers with
-# HF's eager ``torch_forward`` scan; the fused SSM kernels return NaN there.
-EAGER_MAMBA_SCAN_CAPABILITY = (8, 9)
-EAGER_MAMBA_SCAN_MODEL_TYPES = frozenset({"nemotron_h", "nemotron_h_omni"})
+# Model types whose packed experts use gpt-oss's transposed layout
+# (``x @ W + b``, clamped interleaved SwiGLU). AgileRL runs them in a
+# per-expert loop and adds their split LoRA delta unchunked.
+TRANSPOSED_EXPERT_MODEL_TYPES = frozenset({"gpt_oss"})
+
+# Compute capability and model types where AgileRL skips the fused combined
+# Mamba kernel, which returns NaN there; the mixer runs HF's unfused path.
+UNFUSED_MAMBA_SCAN_CAPABILITY = (8, 9)
+UNFUSED_MAMBA_SCAN_MODEL_TYPES = frozenset({"nemotron_h", "nemotron_h_omni"})
+
+# Outer config model types whose vLLM class sets ``is_3d_moe_weight``, so the
+# engine wraps experts in the 3D fused-MoE LoRA layout.
+VLLM_3D_MOE_LORA_MODEL_TYPES = frozenset(
+    {"gpt_oss", "interns1_pro", "qwen3_5_moe", "qwen3_omni_moe", "qwen3_vl_moe"}
+)
+
+# Outer config model types whose HF class lists its tower encoder blocks in
+# ``_no_split_modules``, so FSDP shards each block as its own unit.
+TOWER_BLOCK_UNIT_MODEL_TYPES = frozenset({"gemma4", "qwen3_5", "qwen3_5_moe"})
+
+# Vision patches in the image vLLM encodes when profiling a model that keeps
+# its towers, keyed by outer config ``model_type``. Qwen3.5/3.6: the
+# preprocessor's 16,777,216-pixel longest edge over 16x16 patches. Families
+# absent here have no measured profile and add no encoder term.
+VISION_PROFILE_PATCHES_BY_MODEL_TYPE: dict[str, int] = {
+    "qwen3_5": 65536,
+    "qwen3_5_moe": 65536,
+}
+# Families with a catalog training tensor-parallel plan. Under fsdp.tp > 1 the
+# trainer leaves other families' decoder layers and activations unsharded; an
+# untied lm_head is sharded for every family.
+TENSOR_PARALLEL_MODEL_TYPES = frozenset({"nemotron_h", "nemotron_h_omni"})
+# Model types whose vLLM config keeps the SSM state cache in fp32 unless the
+# checkpoint names a dtype. Other families keep it in the model dtype.
+FP32_SSM_STATE_MODEL_TYPES = frozenset({"nemotron_h", "nemotron_h_omni"})
 
 # CUDA context bytes keyed by torch device name: device memory in use after
 # the first torch allocation.
 CUDA_CONTEXT_BYTES_BY_DEVICE: dict[str, int] = {
     "NVIDIA A100-SXM4-40GB": 1268 * MiB,
     "NVIDIA A100-SXM4-80GB": 1268 * MiB,
-    # Estimated from its driver reservation, SM count and resident threads.
-    "NVIDIA H100 80GB HBM3": 1000 * MiB,
+    # One-rank FSDP non-torch memory less the job and trainer library overhead.
+    "NVIDIA H100 80GB HBM3": 1440 * MiB,
     "NVIDIA L4": 694 * MiB,
 }
 # Unlisted devices use the largest listed value.
 CUDA_CONTEXT_BYTES_DEFAULT = 1268 * MiB
 
-# NCCL communicator and buffer bytes on each rank of a multi-rank trainer,
-# keyed by torch device name. Set by the interconnect; constant across rank
-# count and sharding mode.
-NCCL_BYTES_BY_DEVICE: dict[str, int] = {
-    "NVIDIA A100-SXM4-40GB": 600 * MiB,
-    "NVIDIA A100-SXM4-80GB": 600 * MiB,
-    "NVIDIA L4": 91 * MiB,
+# NCCL bytes one rank holds for a 4-rank process group on one node, with NCCL
+# cuMem off as the trainer runs FSDP, keyed by torch device name. L4 is
+# scaled from its cuMem-on world group by the A100 cuMem-off ratio.
+NCCL_GROUP_BYTES_BY_DEVICE: dict[str, int] = {
+    "NVIDIA A100-SXM4-40GB": 820 * MiB,
+    "NVIDIA A100-SXM4-80GB": 820 * MiB,
+    "NVIDIA H100 80GB HBM3": 950 * MiB,
+    "NVIDIA L4": 125 * MiB,
 }
-NCCL_BYTES_DEFAULT = 600 * MiB
+NCCL_GROUP_BYTES_DEFAULT = 820 * MiB
 
 # Bytes per element.
 DTYPE_BYTES: dict[str, float] = {
@@ -69,6 +116,11 @@ DTYPE_BYTES: dict[str, float] = {
 }
 
 WeightDtype = Literal["fp32", "bf16", "fp16"]
+TORCH_DTYPE_NAMES: dict[str, WeightDtype] = {
+    "float32": "fp32",
+    "bfloat16": "bf16",
+    "float16": "fp16",
+}
 Algorithm = Literal["grpo", "gspo", "cispo", "ppo", "reinforce", "dpo", "sft"]
 LoraTargetScope = Literal["all-linear", "attention-only"]
 PackedMoeDispatch = Literal["materialized", "contracted"]
@@ -76,47 +128,115 @@ PackedMoeDispatch = Literal["materialized", "contracted"]
 BlockKind = Literal["attention", "ffn", "mamba"]
 # One layer of a block-exclusive stack, with MLP and MoE told apart.
 LayerKind = Literal["attention", "mamba", "mlp", "moe"]
+VisionResize = Literal["none", "merge_grid", "pooled_budget", "dynamic_tiles"]
+
+# How each family's image processor sizes an image's patch grid, keyed by
+# outer config ``model_type``. ``merge_grid``: Qwen2-VL ``smart_resize`` to
+# multiples of patch x merge. ``pooled_budget``: Gemma4's aspect-preserving
+# fit under soft tokens x pool^2 patches. ``dynamic_tiles``: Nemotron RADIO
+# dynamic resolution between its min and max patches.
+VISION_RESIZE_BY_MODEL_TYPE: dict[str, VisionResize] = {
+    "qwen3_5": "merge_grid",
+    "qwen3_5_moe": "merge_grid",
+    "gemma4": "pooled_budget",
+    "nemotron_h_omni": "dynamic_tiles",
+}
+
+# Families whose VisionFeatureCache keeps frozen tower outputs through a learn
+# step. A LoRA-trained tower runs with autograd and bypasses the cache.
+VISION_FEATURE_CACHE_MODEL_TYPES: frozenset[str] = frozenset(
+    {"qwen3_5", "qwen3_5_moe", "gemma4"}
+)
 
 
-def _encoder_params(cfg: dict[str, Any]) -> int:
-    """Rough parameter count of a transformer encoder from its config."""
+def _encoder_params(cfg: dict[str, Any]) -> tuple[int, int]:
+    """Rough (block, total) parameter counts of a transformer encoder from its config.
+
+    Qwen vision configs name the layer, head and position counts ``depth``,
+    ``num_heads`` and ``num_position_embeddings``.
+    """
     h = int(cfg.get("hidden_size") or 0)
-    layers = int(cfg.get("num_hidden_layers") or 0)
+    layers = int(cfg.get("num_hidden_layers") or cfg.get("depth") or 0)
     if not h or not layers:
-        return 0
-    heads = int(cfg.get("num_attention_heads") or 1)
+        return 0, 0
+    heads = int(cfg.get("num_attention_heads") or cfg.get("num_heads") or 1)
     head_dim = int(cfg.get("head_dim") or h // heads)
     kv_heads = int(cfg.get("num_key_value_heads") or heads)
     intermediate = int(cfg.get("intermediate_size") or 4 * h)
     attn = h * heads * head_dim + 2 * h * kv_heads * head_dim + heads * head_dim * h
     per_layer = attn + 2 * h * intermediate + 2 * h
-    return layers * per_layer + int(cfg.get("position_embedding_size") or 0) * h
+    positions = int(
+        cfg.get("position_embedding_size") or cfg.get("num_position_embeddings") or 0
+    )
+    blocks = layers * per_layer
+    return blocks, blocks + positions * h
+
+
+def _tower_configs(config: dict[str, Any]) -> list[dict[str, Any]]:
+    """Vision and audio encoder configs present in ``config``."""
+    return [
+        config[key]
+        for key in ("vision_config", "audio_config")
+        if isinstance(config.get(key), dict)
+    ]
 
 
 def multimodal_tower_params(config: dict[str, Any]) -> int:
-    """Lower-bound params treating vision/audio configs as transformer encoders."""
-    return sum(
-        _encoder_params(config[key])
-        for key in ("vision_config", "audio_config")
-        if isinstance(config.get(key), dict)
-    )
+    """Lower-bound params treating vision/audio configs as transformer encoders.
+
+    :param config: Hugging Face model config.
+    :return: Tower parameter count.
+    """
+    return sum(_encoder_params(cfg)[1] for cfg in _tower_configs(config))
+
+
+def multimodal_tower_block_params(config: dict[str, Any]) -> int:
+    """Encoder-block share of :func:`multimodal_tower_params` that FSDP shards as units.
+
+    :param config: Hugging Face model config.
+    :return: Block parameter count; zero for models FSDP does not wrap per block.
+    """
+    if config.get("model_type") not in TOWER_BLOCK_UNIT_MODEL_TYPES:
+        return 0
+    return sum(_encoder_params(cfg)[0] for cfg in _tower_configs(config))
 
 
 def _vision_fields(config: dict[str, Any]) -> dict[str, int]:
-    """Vision tower output width, input image side and patch side; zeros without a tower."""
+    """Vision tower geometry; empty without a tower."""
     vision = config.get("vision_config")
     if not isinstance(vision, dict):
         return {}
+    model_type = config.get("model_type", "")
+    # Patches per side merged into one token: Qwen's spatial merge, Gemma4's
+    # pooling kernel, Nemotron's pixel shuffle.
+    merge = vision.get("spatial_merge_size") or vision.get("pooling_kernel_size")
+    if not merge and config.get("downsample_ratio"):
+        merge = round(1 / config["downsample_ratio"])
+    soft_tokens = int(config.get("vision_soft_tokens_per_image") or 0)
     return {
         "vision_hidden_size": int(
             config.get("vit_hidden_size") or vision.get("hidden_size") or 0
         ),
-        "vision_image_size": int(
-            config.get("force_image_size") or vision.get("image_size") or 0
-        ),
         "vision_patch_size": int(
             config.get("patch_size") or vision.get("patch_size") or 0
         ),
+        "vision_intermediate_size": int(vision.get("intermediate_size") or 0),
+        "vision_n_layers": int(
+            vision.get("depth") or vision.get("num_hidden_layers") or 0
+        ),
+        "vision_in_channels": int(vision.get("in_channels") or 3),
+        "vision_temporal_patch_size": int(vision.get("temporal_patch_size") or 1),
+        "vision_out_hidden_size": int(vision.get("out_hidden_size") or 0),
+        "vision_spatial_merge_size": int(merge or 1),
+        "vision_profile_patches": VISION_PROFILE_PATCHES_BY_MODEL_TYPE.get(
+            model_type, 0
+        ),
+        "vision_resize": VISION_RESIZE_BY_MODEL_TYPE.get(model_type, "none"),
+        "vision_min_patches": int(vision.get("min_num_patches") or 0),
+        "vision_max_patches": int(
+            vision.get("max_num_patches") or soft_tokens * int(merge or 1) ** 2
+        ),
+        "vision_feature_cache": model_type in VISION_FEATURE_CACHE_MODEL_TYPES,
     }
 
 
@@ -196,7 +316,7 @@ def _ffn_layer_mix(text_cfg: dict[str, Any]) -> tuple[int | None, int | None]:
     Most stacks put an FFN in every block alongside the mixer, and both
     counts stay ``None`` (every layer). Block-exclusive layouts use one
     block kind per layer: Mamba, attention, MLP, or MoE, in
-    ``layers_block_type`` ("moe" / "mlp") or as ``-`` in
+    ``layers_block_type`` ("moe" / "mlp") or as ``-`` / ``E`` in
     ``hybrid_override_pattern``. Mixer-only lists leave FFN counts unset.
     """
     entries = _layer_type_list(text_cfg)
@@ -207,8 +327,12 @@ def _ffn_layer_mix(text_cfg: dict[str, Any]) -> tuple[int | None, int | None]:
             return mlp, moe
 
     pattern = text_cfg.get("hybrid_override_pattern")
-    if isinstance(pattern, str) and "M" in pattern and "-" in pattern:
-        return pattern.count("-"), None
+    if (
+        isinstance(pattern, str)
+        and "M" in pattern
+        and ("-" in pattern or "E" in pattern)
+    ):
+        return pattern.count("-"), pattern.count("E") or None
     return None, None
 
 
@@ -243,6 +367,8 @@ class MambaGeometry(TypedDict, total=False):
     d_head: int
     conv_dim: int
     chunk_size: int
+    gated_delta: bool
+    ssm_state_dtype: WeightDtype
 
 
 def _mamba_state_geometry(text_cfg: dict[str, Any], hidden: int) -> MambaGeometry:
@@ -265,6 +391,10 @@ def _mamba_state_geometry(text_cfg: dict[str, Any], hidden: int) -> MambaGeometr
             "d_head": v_dim,
             "conv_dim": 2 * k_heads * k_dim + v_heads * v_dim,
             "chunk_size": int(text_cfg.get("chunk_size") or MAMBA_CHUNK_SIZE_DEFAULT),
+            "gated_delta": True,
+            "ssm_state_dtype": TORCH_DTYPE_NAMES[
+                text_cfg.get("mamba_ssm_dtype") or "bfloat16"
+            ],
         }
 
     d_state = _first_int(text_cfg, "mamba_d_state", "ssm_state_size", "mamba_state_dim")
@@ -286,6 +416,14 @@ def _mamba_state_geometry(text_cfg: dict[str, Any], hidden: int) -> MambaGeometr
         "chunk_size": _first_int(
             text_cfg, "chunk_size", "mamba_chunk_size", default=MAMBA_CHUNK_SIZE_DEFAULT
         ),
+        "ssm_state_dtype": TORCH_DTYPE_NAMES[
+            text_cfg.get("mamba_ssm_cache_dtype")
+            or (
+                "float32"
+                if text_cfg.get("model_type") in FP32_SSM_STATE_MODEL_TYPES
+                else "bfloat16"
+            )
+        ],
     }
 
 
@@ -306,7 +444,10 @@ def _decoder_fields(text_cfg: dict[str, Any]) -> dict[str, Any]:
     return {
         "n_layers": int(n_layers),
         "hidden_size": hidden,
-        "intermediate_size": int(text_cfg["intermediate_size"]),
+        # Expert-only stacks publish just the expert width.
+        "intermediate_size": int(
+            text_cfg.get("intermediate_size") or text_cfg["moe_intermediate_size"]
+        ),
         "n_heads": n_heads,
         "n_kv_heads": n_kv,
         "head_dim": int(text_cfg.get("head_dim") or hidden // n_heads),
@@ -314,11 +455,16 @@ def _decoder_fields(text_cfg: dict[str, Any]) -> dict[str, Any]:
         "tied_embeddings": bool(text_cfg.get("tie_word_embeddings", False)),
         "gated_mlp": gated,
         "fp32_norm_inputs": text_cfg.get("model_type") in FP32_RMS_NORM_MODEL_TYPES,
+        "stock_gated_mlp": text_cfg.get("model_type") in STOCK_GATED_MLP_MODEL_TYPES,
         "qk_norm": text_cfg.get("model_type") in QK_NORM_MODEL_TYPES,
         "chunked_routed_experts": text_cfg.get("model_type")
         in CHUNKED_ROUTED_EXPERT_MODEL_TYPES,
-        "eager_mamba_scan_family": text_cfg.get("model_type")
-        in EAGER_MAMBA_SCAN_MODEL_TYPES,
+        "transposed_experts": text_cfg.get("model_type")
+        in TRANSPOSED_EXPERT_MODEL_TYPES,
+        "unfused_mamba_scan_family": text_cfg.get("model_type")
+        in UNFUSED_MAMBA_SCAN_MODEL_TYPES,
+        "tensor_parallel_plan": text_cfg.get("model_type")
+        in TENSOR_PARALLEL_MODEL_TYPES,
         "attn_bias": bool(text_cfg.get("attention_bias") or text_cfg.get("qkv_bias")),
         "sliding_window": (
             text_cfg.get("sliding_window")
@@ -334,6 +480,13 @@ def _moe_fields(text_cfg: dict[str, Any]) -> dict[str, Any]:
     n_experts = _first_int(
         text_cfg, "num_experts", "num_local_experts", "n_routed_experts"
     )
+    shared_inter = _first_int(
+        text_cfg,
+        "moe_shared_expert_intermediate_size",
+        "shared_expert_intermediate_size",
+    )
+    # Qwen-MoE names one shared expert by its width alone.
+    n_shared = int(text_cfg.get("n_shared_experts") or (1 if shared_inter else 0))
     return {
         "n_experts": n_experts or None,
         "n_experts_per_tok": (
@@ -346,17 +499,13 @@ def _moe_fields(text_cfg: dict[str, Any]) -> dict[str, Any]:
             if text_cfg.get("moe_intermediate_size")
             else None
         ),
-        "n_shared_experts": int(text_cfg.get("n_shared_experts") or 0),
+        "n_shared_experts": n_shared,
         "moe_latent_size": (
             int(text_cfg["moe_latent_size"])
             if text_cfg.get("moe_latent_size")
             else None
         ),
-        "shared_expert_intermediate_size": (
-            int(text_cfg["moe_shared_expert_intermediate_size"])
-            if text_cfg.get("moe_shared_expert_intermediate_size")
-            else None
-        ),
+        "shared_expert_intermediate_size": shared_inter or None,
     }
 
 
@@ -384,8 +533,13 @@ def _layout_fields(
         "n_kv_shared_layers": int(text_cfg.get("num_kv_shared_layers") or 0),
         "double_wide_mlp": bool(text_cfg.get("use_double_wide_mlp", False)),
         "per_layer_input_dim": int(text_cfg.get("hidden_size_per_layer_input") or 0),
+        "norms_per_block": (
+            4 if text_cfg.get("model_type") in SANDWICH_NORM_MODEL_TYPES else 2
+        )
+        + (1 if text_cfg.get("hidden_size_per_layer_input") else 0),
         "per_layer_input_vocab": int(text_cfg.get("vocab_size_per_layer_input") or 0),
         "multimodal_tower_params": multimodal_tower_params(config),
+        "multimodal_tower_block_params": multimodal_tower_block_params(config),
         **_vision_fields(config),
     }
 
@@ -414,12 +568,19 @@ class ModelArch(BaseModel):
     attn_bias: bool = False
     # SwiGLU (gate + up + down). Ungated MLPs use two matrices (up + down).
     gated_mlp: bool = True
+    # Trainer gated MLP saves the activated gate as its own tensor.
+    stock_gated_mlp: bool = False
     # Trainer RMSNorm saves an fp32 copy of its input for backward.
     fp32_norm_inputs: bool = False
+    # RMSNorms over the hidden state in one decoder block, including a
+    # per-layer-input norm.
+    norms_per_block: int = 2
     # Per-head Q/K norm upcasts Q to fp32 inside the block.
     qk_norm: bool = False
-    # Trains Mamba layers with HF's eager scan on compute capability 8.9.
-    eager_mamba_scan_family: bool = False
+    # Trains Mamba layers on HF's unfused path on compute capability 8.9.
+    unfused_mamba_scan_family: bool = False
+    # Training tensor parallel shards this family's decoder layers.
+    tensor_parallel_plan: bool = False
 
     # None for dense models. Weights/optimizer scale with the total expert
     # count; activations scale with the active (routed) count.
@@ -442,13 +603,37 @@ class ModelArch(BaseModel):
     layer_kinds: tuple[LayerKind, ...] = ()
     # Packed experts run in row chunks on the self-routing grouped-GEMM path.
     chunked_routed_experts: bool = False
+    # Packed experts use gpt-oss's transposed layout; see TRANSPOSED_EXPERT_MODEL_TYPES.
+    transposed_experts: bool = False
+    # vLLM serves this model's expert LoRA in the 3D fused-MoE layout.
+    vllm_3d_moe_lora: bool = False
 
     multimodal_tower_params: int = 0
-    # Vision tower output width per patch, and the square image and patch
-    # sides it encodes. Zero without a vision tower.
+    # Tower params inside encoder blocks FSDP shards as their own units.
+    multimodal_tower_block_params: int = 0
+    # Vision tower width per patch and the patch side. Zero without a vision
+    # tower.
     vision_hidden_size: int = 0
-    vision_image_size: int = 0
     vision_patch_size: int = 0
+    # Vision encoder MLP width, pixel channels, frames per temporal patch,
+    # merged output width and side of the patch merge. Read by the engine's
+    # encoder profile.
+    vision_intermediate_size: int = 0
+    vision_in_channels: int = 3
+    vision_temporal_patch_size: int = 1
+    vision_out_hidden_size: int = 0
+    vision_spatial_merge_size: int = 1
+    # Vision encoder blocks.
+    vision_n_layers: int = 0
+    # Patches vLLM encodes for its start-up profile image; 0 when unmeasured.
+    vision_profile_patches: int = 0
+    # The image processor's patch-grid rule, and its per-image patch bounds
+    # under ``pooled_budget`` and ``dynamic_tiles``.
+    vision_resize: VisionResize = "none"
+    vision_min_patches: int = 0
+    vision_max_patches: int = 0
+    # VisionFeatureCache keeps this family's tower outputs through a learn step.
+    vision_feature_cache: bool = False
 
     # Head dim on full-attention layers when it differs from the sliding
     # layers', which widens q/k/v on the full-attention layers.
@@ -476,6 +661,8 @@ class ModelArch(BaseModel):
     # ``2 * k_heads * k_dim + v_heads * v_dim``.
     mamba_conv_dim: int = 0
     mamba_chunk_size: int = MAMBA_CHUNK_SIZE_DEFAULT
+    # Recurrent layers are gated-delta-net rather than Mamba-2.
+    mamba_gated_delta: bool = False
 
     @property
     def is_hybrid_ssm(self) -> bool:
@@ -534,13 +721,6 @@ class ModelArch(BaseModel):
         return self.n_experts is not None and self.n_experts > 1
 
     @property
-    def vision_patches_per_image(self) -> int:
-        """Patches the vision tower emits for one image."""
-        if not self.vision_patch_size:
-            return 0
-        return (self.vision_image_size // self.vision_patch_size) ** 2
-
-    @property
     def expert_width(self) -> int:
         """Feature width of a routed expert's input and output rows."""
         return self.moe_latent_size or self.hidden_size
@@ -549,6 +729,21 @@ class ModelArch(BaseModel):
     def block_exclusive_layers(self) -> bool:
         """Whether each layer holds exactly one block kind."""
         return self.n_mlp_layers is not None or self.n_moe_layers is not None
+
+    @property
+    def sublayer_transients(self) -> bool:
+        """Whether one block's activation peak sits in a single attention, FFN or recurrent sub-layer.
+
+        True for block-exclusive stacks, and for stacks where each layer runs
+        one mixer (attention or recurrent), whose forward frees the mixer's
+        tensors before the FFN beside it runs.
+        """
+        one_mixer_per_layer = (
+            self.n_mamba_layers > 0
+            and self.n_attention_layers is not None
+            and self.n_attention_layers + self.n_mamba_layers == self.n_layers
+        )
+        return self.block_exclusive_layers or one_mixer_per_layer
 
     @property
     def moe_layers(self) -> int:
@@ -581,7 +776,12 @@ class ModelArch(BaseModel):
         layout = _layout_fields(
             text_cfg, decoder["n_layers"], decoder["hidden_size"], config
         )
-        return cls(**decoder, **moe, **layout)
+        return cls(
+            **decoder,
+            **moe,
+            **layout,
+            vllm_3d_moe_lora=config.get("model_type") in VLLM_3D_MOE_LORA_MODEL_TYPES,
+        )
 
 
 class WeightVariant(BaseModel):
@@ -626,8 +826,9 @@ class DeviceSpec(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     total_bytes: int
-    # Usable capacity override. ``None`` uses 95% of ``total_bytes``
-    # (allocator fragmentation). CUDA context is a demand-side component.
+    # Usable capacity override. ``None`` uses 95% of ``total_bytes`` for
+    # training (allocator fragmentation) and the whole card for generation.
+    # CUDA context is a demand-side component.
     available_bytes: int | None = None
     name: str | None = None
     # Bytes a bare CUDA context costs, before any tensor allocation.
@@ -635,6 +836,8 @@ class DeviceSpec(BaseModel):
     cuda_context_bytes: int | None = None
     # CUDA compute capability ``(major, minor)``; ``None`` when unknown.
     compute_capability: tuple[int, int] | None = None
+    # GPUs on this device's node. ``None`` puts every trainer rank on one node.
+    gpus_per_node: int | None = Field(default=None, ge=1)
 
     @property
     def context_bytes(self) -> int:
@@ -648,11 +851,11 @@ class DeviceSpec(BaseModel):
         return CUDA_CONTEXT_BYTES_DEFAULT
 
     @property
-    def nccl_bytes(self) -> int:
-        """NCCL memory on each rank of a multi-rank trainer on this device."""
+    def nccl_group_bytes(self) -> int:
+        """NCCL memory one rank holds for a 4-rank process group on one node."""
         if self.name is None:
-            return NCCL_BYTES_DEFAULT
-        return NCCL_BYTES_BY_DEVICE.get(self.name, NCCL_BYTES_DEFAULT)
+            return NCCL_GROUP_BYTES_DEFAULT
+        return NCCL_GROUP_BYTES_BY_DEVICE.get(self.name, NCCL_GROUP_BYTES_DEFAULT)
 
     @property
     def usable_bytes(self) -> int:
@@ -665,6 +868,17 @@ class DeviceSpec(BaseModel):
         if self.available_bytes is not None:
             return self.available_bytes
         return int(self.total_bytes * 0.95)
+
+    @property
+    def generation_usable_bytes(self) -> int:
+        """Capacity the generation peak is checked against.
+
+        vLLM claims ``gpu_memory_utilization`` of the card once at startup, so
+        the fragmentation band does not apply; the whole card is the limit.
+        """
+        if self.available_bytes is not None:
+            return self.available_bytes
+        return self.total_bytes
 
 
 class TrainingSettings(BaseModel):
@@ -711,6 +925,19 @@ class TrainingSettings(BaseModel):
     # Fused-logprob tile rows. ``None`` auto-tunes to a ~256 MiB fp32 logit
     # workspace, clamped to [128, 4096].
     chunk_rows: int | None = None
+    # Widest vLLM sampling support rollout records per token (``top_k``); 0
+    # records none. The no-grad pass scores those tokens from their support's
+    # lm_head rows.
+    sampling_support_width: int = Field(default=0, ge=0)
+    # The gradient pass scores supported tokens from their support rows too.
+    # PPO and REINFORCE's Liger loss scores the full vocabulary.
+    support_scored_loss: bool = False
+    # LLMPPO and REINFORCE Liger losses above token level keep one whole
+    # sequence of logits, so the tile spans max_model_len rows.
+    liger_sequence_chunks: bool = False
+    # The fused Liger kernel keeps a weight-dtype grad of the whole lm_head.
+    # The sequence tile already includes it. The standard log-prob path does not.
+    liger_weight_grad: bool = True
     # Data-parallel trainer GPUs. The estimate is per GPU; this is the
     # shard group size.
     n_training_gpus: int = 1
@@ -720,23 +947,45 @@ class TrainingSettings(BaseModel):
     micro_batch_size: int = Field(default=1, ge=1)
     # PPO only: actor and critic rows share one gradient forward and backward.
     fuse_actor_critic_pass: bool = False
-    # Unique images one learner GPU encodes per learn step. Each keeps its
-    # vision tower output in pinned host memory until the step ends.
-    images_per_update: int = Field(default=0, ge=0)
+    # Images in each completion row, and the width and height the environment
+    # renders them at.
+    images_per_row: int = Field(default=0, ge=0)
+    image_width: int = Field(default=0, ge=0)
+    image_height: int = Field(default=0, ge=0)
+    # LoRA adapts the vision tower, which then runs with autograd.
+    vision_tower_lora: bool = False
+    # Episodes train as segment rows, which lockstep ranks balance before learning.
+    segmented_rows: bool = False
     # The main rank's async checkpoint snapshot also holds the Adam moments.
     checkpoint_optimizer: bool = False
     # Async rollout: the next rollout batch waits in host memory during learn.
     async_rollout: bool = False
+    # Gradient forward packs into one row. The estimate still prices padded rows.
+    sequence_packing: bool = False
+
+    @property
+    def data_parallel_gpus(self) -> int:
+        """Ranks that each hold a distinct batch shard.
+
+        Tensor-parallel ranks share one shard, so they do not divide it again.
+        """
+        tp = 1 if self.fsdp is None else self.fsdp.tp
+        return max(self.n_training_gpus // tp, 1)
 
     @property
     def trajectories(self) -> int:
         """Completion rows one learner GPU sees per update.
 
         ``None`` assumes a single prompt group. Under data parallelism the
-        update shards across learner GPUs.
+        update shards across :attr:`data_parallel_gpus`.
         """
         total = self.trajectories_per_update or self.group_size
-        return max(-(-total // self.n_training_gpus), 1)
+        return max(-(-total // self.data_parallel_gpus), 1)
+
+    @property
+    def images_per_update(self) -> int:
+        """Images one learner GPU holds per update."""
+        return self.trajectories * self.images_per_row
 
     @property
     def shard_gpus(self) -> int:
@@ -798,22 +1047,6 @@ class TrainingSettings(BaseModel):
         return self.micro_batch_size * (2 if self.fuse_actor_critic_pass else 1)
 
     @property
-    def n_adapter_rows(self) -> int:
-        """Row multiplier of the fused no-grad forward.
-
-        Rollout algorithms repeat the batch once per consulted adapter.
-        DPO runs sequential single-row passes, so this is 1.
-        """
-        if self.algorithm == "dpo":
-            return 1
-        rows = 1  # the actor's own logprobs
-        if self.uses_reference:
-            rows += 1
-        if self.uses_critic:
-            rows += 1
-        return rows
-
-    @property
     def lora_casts_recompute_only(self) -> bool:
         """Whether PEFT fp32 input casts exist only in checkpoint recompute.
 
@@ -859,6 +1092,18 @@ class TrainingSettings(BaseModel):
             raise ValueError(msg)
         return self
 
+    @model_validator(mode="before")
+    @classmethod
+    def _sft_drops_the_policy_head_grad(cls, data: object) -> object:
+        # SFT's fused cross-entropy skips a grad of the frozen lm_head.
+        if (
+            isinstance(data, dict)
+            and data.get("algorithm") == "sft"
+            and "liger_weight_grad" not in data
+        ):
+            return {**data, "liger_weight_grad": False}
+        return data
+
     @model_validator(mode="after")
     def _check_fuse_actor_critic_pass(self) -> Self:
         if self.fuse_actor_critic_pass and self.algorithm != "ppo":
@@ -875,25 +1120,36 @@ class GenerationSettings(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    gpu_memory_utilization: float = 0.3
-    max_num_seqs: int = 8
+    gpu_memory_utilization: float = OMITTED_GPU_MEMORY_UTILIZATION
+    max_num_seqs: int = COLOCATED_MAX_NUM_SEQS
     max_model_len: int = 1024
     # Worst-case prompt length. Prefill dominates generation memory; decode
     # adds one token per sequence per step, so the activation peak tracks
     # prompt tokens in flight. ``None`` assumes the whole context is prompt.
     max_prompt_len: int | None = None
-    # ``None`` uses the framework's resolution rule:
-    # ``min(max_num_seqs * max_model_len, max(max_model_len, max_num_seqs * 8192))``.
+    # ``None`` takes vLLM's async-engine default, capped at
+    # ``max_num_seqs * max_model_len``.
     max_num_batched_tokens: int | None = None
+    # ``limit_mm_per_prompt["image"]``. ``None`` takes vLLM's unset-modality limit.
+    max_images_per_prompt: int | None = None
     # Pin the KV pool size. ``None`` lets vLLM derive it from
     # ``gpu_memory_utilization``.
     kv_cache_memory_bytes: int | None = None
     # ``True`` skips CUDA-graph capture, at some decode-throughput cost.
     # ``None``/``False`` keeps graphs on.
     enforce_eager: bool | None = None
-    max_lora_rank: int = 16
+    max_lora_rank: int = OMITTED_MAX_LORA_RANK
     max_loras: int = 1
+    # Adapter ``target_parameters`` on packed experts. Any switches the
+    # engine to vLLM's 3D fused-MoE LoRA layout, as AgileRL patches the
+    # model's ``is_3d_moe_weight`` flag on.
+    lora_packed_target_matrices: int = 0
     weight_dtype: WeightDtype = "bf16"
+    # ``fp8`` stores the engine weights at one byte. KV and activations stay
+    # at ``weight_dtype``.
+    weight_quantization: Literal["none", "fp8"] = "none"
+    # Ranks that share one engine copy. 1 is a single-GPU engine.
+    tensor_parallel_size: int = Field(default=1, ge=1)
     # Name of the :class:`WeightVariant` the engine loads (vLLM may load a
     # different variant than the trainer, e.g. a tower-stripped export).
     weight_variant: str = "base"

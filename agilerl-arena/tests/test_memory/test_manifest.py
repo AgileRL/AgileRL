@@ -8,16 +8,29 @@ from pathlib import Path
 
 import pytest
 
+from agilerl.arena.memory.estimator import estimate_run, estimate_training
 from agilerl.arena.memory.manifest import (
+    _liger_sequence_chunks,
+    check_fp8_moe_backend_for_device,
     device_spec_from_resource_class,
-    estimate_manifest,
-    generation_settings_from_manifest,
     lookup_gpu,
-    run_config_from_manifest,
     training_settings_from_manifest,
 )
+from agilerl.arena.memory.manifest import (
+    estimate_manifest as _estimate_manifest,
+)
+from agilerl.arena.memory.manifest import (
+    generation_settings_from_manifest as _generation_settings_from_manifest,
+)
+from agilerl.arena.memory.manifest import (
+    run_config_from_manifest as _run_config_from_manifest,
+)
+from agilerl.arena.memory.resolve.fuse import resolve_fuse_actor_critic_pass
+from agilerl.arena.memory.specs import DeviceSpec, GiB
+from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
 from agilerl.arena.models.fsdp import FSDPConfig
 from agilerl.arena.models.manifest import TrainingManifest
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 
 TINY_CONFIG = json.loads(
     (Path(__file__).parent / "assets" / "tiny_llm" / "config.json").read_text()
@@ -43,6 +56,27 @@ GRPO = {
     "training": {"max_steps": 100},
 }
 
+# Liger with the vLLM correction off, so turn- and trajectory-level
+# losses reach the fused kernel.
+SEQUENCE_LIGER_ROLLOUT = {
+    "use_liger_loss": True,
+    "vllm_importance_sampling_correction": False,
+}
+
+# GRPO also needs the off-policy masks unset; they default on.
+SEQUENCE_LIGER = {
+    **SEQUENCE_LIGER_ROLLOUT,
+    "off_policy_token_mask_bounds": None,
+    "off_policy_sequence_mask_threshold": None,
+}
+
+ENGINE = {"vllm_config": {"gpu_memory_utilization": 0.85}}
+
+ASYNC_ROLLOUT = {
+    "training": {"rollout_mode": "async", "rollout_engines_per_agent": 1},
+    "replay_buffer": {"kind": "llm"},
+}
+
 DQN = {
     "algorithm": {"name": "DQN"},
     "environment": {"name": "LunarLander-v3", "num_envs": 8},
@@ -50,6 +84,12 @@ DQN = {
 }
 
 L4_TIER = {"name": "l4-1x", "gpu_type": "NVIDIA L4", "num_gpus": 1, "ram_gb": 32}
+A100_TIER = {
+    "name": "a100-80-1x",
+    "gpu_type": "NVIDIA A100-SXM4-80GB",
+    "num_gpus": 1,
+    "ram_gb": 128,
+}
 
 
 def manifest(**overrides: dict) -> dict:
@@ -57,6 +97,36 @@ def manifest(**overrides: dict) -> dict:
     for section, values in overrides.items():
         out.setdefault(section, {}).update(values)
     return out
+
+
+def _engine_width(doc: TrainingManifest | dict) -> int:
+    """Width these cases size. An omitted manifest width is one GPU."""
+    validated = (
+        doc
+        if isinstance(doc, TrainingManifest)
+        else TrainingManifest.model_validate(doc)
+    )
+    vllm = getattr(validated.algorithm, "vllm_config", None)
+    if vllm is not None and vllm.tensor_parallel_size is not None:
+        return vllm.tensor_parallel_size
+    return 1
+
+
+def generation_settings_from_manifest(doc, tensor_parallel_size=None):
+    width = _engine_width(doc) if tensor_parallel_size is None else tensor_parallel_size
+    return _generation_settings_from_manifest(doc, tensor_parallel_size=width)
+
+
+def run_config_from_manifest(doc, device, model_config, **kwargs):
+    if kwargs.get("tensor_parallel_size") is None:
+        kwargs["tensor_parallel_size"] = _engine_width(doc)
+    return _run_config_from_manifest(doc, device, model_config, **kwargs)
+
+
+def estimate_manifest(doc, device, model_config, **kwargs):
+    if kwargs.get("tensor_parallel_size") is None:
+        kwargs["tensor_parallel_size"] = _engine_width(doc)
+    return _estimate_manifest(doc, device, model_config, **kwargs)
 
 
 class TestTrainingSettings:
@@ -130,10 +200,24 @@ class TestTrainingSettings:
         assert settings.lora_packed_target_matrices == 2
         assert settings.packed_moe_dispatch == "contracted"
 
+    def test_packed_expert_targets_reach_the_engine(self):
+        doc = manifest(
+            network={
+                "pretrained_model_name_or_path": "ibm-granite/granite-3.1-3b-a800m-instruct",
+                "lora_config": {
+                    "target_parameters": [
+                        "block_sparse_moe.experts.gate_up_proj",
+                        "block_sparse_moe.experts.down_proj",
+                    ]
+                },
+            }
+        )
+
+        assert generation_settings_from_manifest(doc).lora_packed_target_matrices == 2
+
     @pytest.mark.parametrize(
         ("fuse", "expected"),
-        # Unset sizes separate passes: the trainer fuses only when that fits.
-        [(True, True), (False, False), (None, False)],
+        [(True, True), (False, False), (None, True)],
     )
     def test_llmppo_fused_actor_critic_pass_reaches_the_estimate(self, fuse, expected):
         # Arrange
@@ -152,6 +236,145 @@ class TestTrainingSettings:
         # Assert
         assert settings.algorithm == "ppo"
         assert settings.fuse_actor_critic_pass is expected
+
+    def test_top_k_sampling_records_supports_as_wide_as_top_k(self):
+        settings = training_settings_from_manifest(
+            manifest(algorithm={"top_k": 20, "temperature": 1.0})
+        )
+
+        assert settings.sampling_support_width == 20
+        assert settings.support_scored_loss is True
+
+    def test_unfiltered_sampling_records_no_supports(self):
+        settings = training_settings_from_manifest(manifest(algorithm={"top_k": 0}))
+
+        assert settings.sampling_support_width == 0
+
+    def test_llmppo_liger_loss_scores_the_full_vocabulary(self):
+        # Arrange
+        doc = manifest()
+        doc["algorithm"] = {
+            "name": "LLMPPO",
+            "batch_size": 2,
+            "micro_batch_size_per_gpu": 1,
+            "top_k": 20,
+            "use_liger_loss": True,
+        }
+
+        # Act
+        settings = training_settings_from_manifest(doc)
+
+        # Assert
+        assert settings.sampling_support_width == 20
+        assert settings.support_scored_loss is False
+
+    @pytest.mark.parametrize(
+        ("fuse", "total_gib", "expected"),
+        [
+            (None, 4, True),
+            (None, 2, False),
+            (True, 2, True),
+            (False, 4, False),
+        ],
+    )
+    def test_run_config_fuse_actor_critic_pass_follows_the_device(
+        self, fuse: bool | None, total_gib: float, expected: bool
+    ) -> None:
+        # Arrange: 4 GiB holds the fused peak; 2 GiB does not.
+        doc = manifest()
+        algorithm: dict[str, object] = {
+            "name": "LLMPPO",
+            "batch_size": 2,
+            "micro_batch_size_per_gpu": 1,
+            "vllm_config": {"tensor_parallel_size": 1, "sleep_mode": True},
+        }
+        if fuse is not None:
+            algorithm["fuse_actor_critic_pass"] = fuse
+        doc["algorithm"] = algorithm
+        doc["training"]["rollout_mode"] = "async"
+        doc["training"]["rollout_engines_per_agent"] = 1
+        doc["replay_buffer"] = {"kind": "llm"}
+        device = DeviceSpec(total_bytes=int(total_gib * GiB), name="NVIDIA L4")
+        model_config = SUPPORTED_MODEL_INFO["Qwen/Qwen2.5-0.5B-Instruct"].config
+
+        # Act
+        config = run_config_from_manifest(doc, device, model_config)
+
+        # Assert
+        assert config.training.fuse_actor_critic_pass is expected
+        peak = estimate_run(config).training
+        at_bit = estimate_training(
+            config.model,
+            device,
+            config.training.model_copy(update={"fuse_actor_critic_pass": expected}),
+            orchestrated=True,
+        )
+        assert peak.total_bytes == at_bit.total_bytes
+
+    def test_unset_fuse_on_a_device_matches_the_shared_fit(self) -> None:
+        # Arrange
+        doc = manifest()
+        doc["algorithm"] = {
+            "name": "LLMPPO",
+            "batch_size": 2,
+            "micro_batch_size_per_gpu": 1,
+            "vllm_config": {"tensor_parallel_size": 1, "sleep_mode": True},
+        }
+        doc["training"]["rollout_mode"] = "async"
+        doc["training"]["rollout_engines_per_agent"] = 1
+        doc["replay_buffer"] = {"kind": "llm"}
+        model_config = SUPPORTED_MODEL_INFO["Qwen/Qwen2.5-0.5B-Instruct"].config
+        devices = (
+            DeviceSpec(total_bytes=int(24 * GiB), name="NVIDIA L4"),
+            DeviceSpec(total_bytes=int(1 * GiB), name="NVIDIA L4"),
+        )
+
+        # Act
+        bits = []
+        for device in devices:
+            config = run_config_from_manifest(doc, device, model_config)
+            fused = estimate_training(
+                config.model,
+                device,
+                config.training.model_copy(update={"fuse_actor_critic_pass": True}),
+                orchestrated=True,
+            )
+            expected = resolve_fuse_actor_critic_pass(None, fused.fits)
+
+            # Assert
+            assert config.training.fuse_actor_critic_pass is expected
+            bits.append(config.training.fuse_actor_critic_pass)
+
+        assert bits == [True, False]
+
+    def test_explicit_fuse_stays_when_the_fused_peak_does_not_fit(self) -> None:
+        # Arrange
+        doc = manifest()
+        doc["algorithm"] = {
+            "name": "LLMPPO",
+            "batch_size": 2,
+            "micro_batch_size_per_gpu": 1,
+            "fuse_actor_critic_pass": True,
+            "vllm_config": {"tensor_parallel_size": 1, "sleep_mode": True},
+        }
+        doc["training"]["rollout_mode"] = "async"
+        doc["training"]["rollout_engines_per_agent"] = 1
+        doc["replay_buffer"] = {"kind": "llm"}
+        device = DeviceSpec(total_bytes=int(1 * GiB), name="NVIDIA L4")
+        model_config = SUPPORTED_MODEL_INFO["Qwen/Qwen2.5-0.5B-Instruct"].config
+
+        # Act
+        config = run_config_from_manifest(doc, device, model_config)
+        fused = estimate_training(
+            config.model,
+            device,
+            config.training.model_copy(update={"fuse_actor_critic_pass": True}),
+            orchestrated=True,
+        )
+
+        # Assert
+        assert fused.fits is False
+        assert config.training.fuse_actor_critic_pass is True
 
     def test_host_memory_settings_come_from_the_training_section(self):
         default = training_settings_from_manifest(GRPO)
@@ -182,16 +405,75 @@ class TestTrainingSettings:
             )
 
     @pytest.mark.parametrize(
-        "algorithm",
+        ("algorithm", "sequence_chunks", "weight_grad"),
         [
-            {"use_liger_loss": True, "importance_sampling_level": "turn"},
-            {"use_liger_loss": True, "importance_sampling_level": "trajectory"},
-            {"use_liger_loss": True, "loss_type": "gspo"},
+            # GRPO's fused kernel at trajectory level takes one sequence per chunk.
+            ({"importance_sampling_level": "trajectory"}, True, False),
+            ({"loss_type": "gspo"}, True, False),
+            ({"importance_sampling_level": "turn"}, False, False),
+            ({"importance_sampling_level": "token"}, False, True),
+            # Turn advantages at trajectory level have no fused kernel.
+            (
+                {
+                    "importance_sampling_level": "trajectory",
+                    "advantage_granularity": "turn",
+                },
+                False,
+                False,
+            ),
         ],
+        ids=["trajectory", "gspo", "turn", "token", "trajectory-turn-advantages"],
     )
-    def test_unbounded_liger_loss_is_refused(self, algorithm):
-        with pytest.raises(ValueError, match="chunked token-level"):
-            training_settings_from_manifest(manifest(algorithm=algorithm))
+    def test_grpo_liger_tile_follows_the_kernel(
+        self, algorithm, sequence_chunks, weight_grad
+    ):
+        settings = training_settings_from_manifest(
+            manifest(algorithm={**SEQUENCE_LIGER, **algorithm})
+        )
+
+        assert settings.liger_sequence_chunks is sequence_chunks
+        assert settings.liger_weight_grad is weight_grad
+
+    @pytest.mark.parametrize(
+        ("algorithm", "sequence_chunks", "weight_grad"),
+        [
+            ({"importance_sampling_level": "trajectory"}, True, False),
+            ({"importance_sampling_level": "token"}, False, True),
+            (
+                {
+                    "importance_sampling_level": "trajectory",
+                    "vllm_importance_sampling_correction": True,
+                },
+                False,
+                False,
+            ),
+            (
+                {"importance_sampling_level": "trajectory", "use_liger_loss": False},
+                False,
+                False,
+            ),
+        ],
+        ids=["trajectory", "token", "vllm-correction", "no-liger"],
+    )
+    def test_llmppo_liger_keeps_a_sequence_of_logits(
+        self, algorithm, sequence_chunks, weight_grad
+    ):
+        doc = manifest(**ASYNC_ROLLOUT)
+        doc["algorithm"] = {
+            "name": "LLMPPO",
+            "batch_size": 2,
+            "micro_batch_size_per_gpu": 1,
+            "use_liger_loss": True,
+            "vllm_importance_sampling_correction": False,
+            "importance_sampling_level": "trajectory",
+            **ENGINE,
+            **algorithm,
+        }
+
+        settings = training_settings_from_manifest(doc)
+
+        assert settings.liger_sequence_chunks is sequence_chunks
+        assert settings.liger_weight_grad is weight_grad
 
     def test_token_level_liger_loss_passes(self):
         settings = training_settings_from_manifest(
@@ -203,6 +485,225 @@ class TestTrainingSettings:
             )
         )
         assert settings.algorithm == "grpo"
+        assert settings.liger_sequence_chunks is False
+        assert settings.liger_weight_grad is True
+
+    @pytest.mark.parametrize(
+        ("algorithm", "sequence_chunks"),
+        [
+            ({}, True),
+            ({"turn_level_clip": False}, False),
+            ({"advantage_granularity": "token"}, False),
+            ({"importance_sampling_level": "turn"}, True),
+            ({"importance_sampling_level": "token"}, False),
+        ],
+        ids=[
+            "auto-resolves-to-turn-clip",
+            "auto-without-turn-clip-stays-on-the-token-tile",
+            "auto-token-advantages-stay-on-the-token-tile",
+            "turn",
+            "token",
+        ],
+    )
+    def test_llmppo_sequence_chunks_follow_the_trainer_kernel(
+        self, algorithm, sequence_chunks
+    ):
+        doc = manifest()
+        doc["algorithm"] = {
+            "name": "LLMPPO",
+            "batch_size": 2,
+            "micro_batch_size_per_gpu": 1,
+            **SEQUENCE_LIGER_ROLLOUT,
+            **algorithm,
+        }
+
+        settings = training_settings_from_manifest(doc)
+
+        assert settings.algorithm == "ppo"
+        assert settings.liger_sequence_chunks is sequence_chunks
+
+    @pytest.mark.parametrize(
+        ("importance_sampling_level", "sequence_chunks"),
+        [("trajectory", True), ("token", False)],
+    )
+    def test_llmreinforce_sequence_chunks_follow_the_trainer_kernel(
+        self, importance_sampling_level, sequence_chunks
+    ):
+        doc = manifest()
+        doc["algorithm"] = {
+            "name": "LLMREINFORCE",
+            "batch_size": 2,
+            "micro_batch_size_per_gpu": 1,
+            **SEQUENCE_LIGER_ROLLOUT,
+            "importance_sampling_level": importance_sampling_level,
+        }
+
+        settings = training_settings_from_manifest(doc)
+
+        assert settings.algorithm == "reinforce"
+        assert settings.liger_sequence_chunks is sequence_chunks
+
+    def test_other_rollout_specs_stay_on_the_token_tile(self):
+        spec = RolloutLLMSpec(
+            use_liger_loss=True,
+            vllm_importance_sampling_correction=False,
+        )
+
+        assert _liger_sequence_chunks(spec) is False
+
+
+class TestLigerSequenceLoss:
+    def test_default_gspo_manifest_returns_a_phase_breakdown(self):
+        # Arrange: GSPO defaults to loss_type="gspo" and use_liger_loss=True.
+        doc = manifest(algorithm={"name": "GSPO", **ENGINE}, **ASYNC_ROLLOUT)
+
+        # Act
+        settings = training_settings_from_manifest(doc)
+        estimate = estimate_manifest(
+            doc, device_spec_from_resource_class(L4_TIER), TINY_CONFIG
+        )
+
+        # Assert: GSPO streams log-probs, so the sequence tile stays off.
+        # The default correction leaves the standard path, which has no head grad.
+        assert settings.liger_sequence_chunks is False
+        assert settings.liger_weight_grad is False
+        assert estimate.training.total_bytes > 0
+
+    def test_a_card_below_the_sequence_tile_does_not_fit(self):
+        # Arrange: a long context makes the LLMPPO sequence tile the peak.
+        long_context = {"max_context_length": 32768}
+
+        def llmppo(use_liger_loss: bool) -> dict:
+            doc = manifest(network=long_context, **ASYNC_ROLLOUT)
+            doc["algorithm"] = {
+                "name": "LLMPPO",
+                "batch_size": 2,
+                "micro_batch_size_per_gpu": 1,
+                "use_liger_loss": use_liger_loss,
+                "vllm_importance_sampling_correction": False,
+                "importance_sampling_level": "trajectory",
+                **ENGINE,
+            }
+            return doc
+
+        sequence = llmppo(True)
+        token = llmppo(False)
+        probe = device_spec_from_resource_class(L4_TIER)
+        sequence_peak = estimate_manifest(
+            sequence, probe, TINY_CONFIG
+        ).training.total_bytes
+        token_estimate = estimate_manifest(token, probe, TINY_CONFIG).training
+        usable_share = token_estimate.device_usable_bytes / probe.total_bytes
+        card_gib = (
+            (sequence_peak + token_estimate.total_bytes) / 2 / usable_share / 1024**3
+        )
+        card = device_spec_from_resource_class(L4_TIER, gpu_memory_gib=card_gib)
+
+        # Act
+        sequence_fit = estimate_manifest(sequence, card, TINY_CONFIG).training
+        token_fit = estimate_manifest(token, card, TINY_CONFIG).training
+
+        # Assert
+        assert token_estimate.total_bytes < sequence_peak
+        assert token_fit.fits
+        assert not sequence_fit.fits
+        assert sequence_fit.total_bytes > sequence_fit.device_usable_bytes
+
+
+def screenshots(**environment: object) -> dict:
+    """GRPO on a remote env whose observations carry page screenshots."""
+    out = manifest(
+        algorithm={"vllm_config": {"limit_mm_per_prompt": {"image": 3}}},
+        network={"pretrained_model_name_or_path": "Qwen/Qwen3.5-0.8B"},
+        training={"rollout_mode": "async", "rollout_engines_per_agent": 1},
+        replay_buffer={"kind": "llm"},
+    )
+    out["environment"] = {
+        "env_type": "rollout",
+        "env_image": "browsergym-vwa:latest",
+        "env_port": 8000,
+        "max_turns": 10,
+        "screenshot_field": "screenshot",
+        **environment,
+    }
+    return out
+
+
+class TestImageInputs:
+    def test_screenshots_render_at_the_default_viewport(self):
+        settings = training_settings_from_manifest(screenshots())
+
+        assert (settings.image_width, settings.image_height) == (1280, 720)
+        assert settings.images_per_row == 3
+
+    def test_segment_max_images_bounds_the_row(self):
+        settings = training_settings_from_manifest(
+            screenshots(segment_max_images=2, segment_prompt_tokens=400)
+        )
+
+        assert settings.images_per_row == 2
+
+    def test_segment_limits_train_segment_rows(self):
+        segmented = training_settings_from_manifest(
+            screenshots(segment_max_images=2, segment_prompt_tokens=400)
+        )
+        whole = training_settings_from_manifest(screenshots())
+
+        assert segmented.segmented_rows
+        assert not whole.segmented_rows
+
+    def test_viewport_env_vars_set_the_image_size(self):
+        env_vars = {
+            "BROWSERGYM_VIEWPORT_WIDTH": "1280",
+            "BROWSERGYM_VIEWPORT_HEIGHT": "2048",
+        }
+
+        settings = training_settings_from_manifest(screenshots(env_vars=env_vars))
+
+        assert (settings.image_width, settings.image_height) == (1280, 2048)
+
+    def test_goal_images_alone_count_as_images(self):
+        settings = training_settings_from_manifest(
+            screenshots(screenshot_field="", goal_images_field="goal_images")
+        )
+
+        assert (settings.images_per_row, settings.image_width) == (3, 1280)
+
+    def test_tower_target_modules_train_the_vision_tower(self):
+        trained = screenshots()
+        trained["network"]["lora_config"] = {
+            "target_modules": ["q_proj"],
+            "tower_target_modules": ["qkv"],
+        }
+
+        settings = training_settings_from_manifest(trained)
+
+        assert settings.vision_tower_lora
+        assert not training_settings_from_manifest(screenshots()).vision_tower_lora
+
+    def test_text_environment_has_no_images(self):
+        settings = training_settings_from_manifest(GRPO)
+
+        assert settings.images_per_update == 0
+        assert (settings.image_width, settings.image_height) == (0, 0)
+
+    def test_qwen_vwa_estimate_holds_the_prefetched_pixels(self):
+        # Arrange: 2 prompts x 4 rows over 1 GPU, 3 screenshots of 44 x 80
+        # Qwen patches of 1536 fp32 values each.
+        config = SUPPORTED_MODEL_INFO["Qwen/Qwen3.5-0.8B"].config
+        device = DeviceSpec(total_bytes=80 * GiB, name="NVIDIA A100-SXM4-80GB")
+        text = screenshots(screenshot_field="")
+
+        # Act
+        with_images = estimate_manifest(screenshots(), device, config).training
+        without = estimate_manifest(text, device, config).training
+
+        # Assert
+        held = [
+            next(c.n_bytes for c in breakdown.host if c.key == "prefetched_rollout")
+            for breakdown in (with_images, without)
+        ]
+        assert held[0] - held[1] == 8 * 3 * 44 * 80 * 1536 * 4
 
 
 def segmented(segment_prompt_tokens: int | None, **algorithm: object) -> dict:
@@ -256,6 +757,38 @@ class TestMaxRowTokens:
 
 
 class TestGenerationSettings:
+    def test_family_catalog_sets_the_batched_tokens(self):
+        settings = generation_settings_from_manifest(
+            manifest(
+                network={
+                    "pretrained_model_name_or_path": (
+                        "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"
+                    )
+                }
+            )
+        )
+
+        assert settings.max_num_batched_tokens == 8192
+
+    def test_manifest_batched_tokens_beat_the_family_default(self):
+        settings = generation_settings_from_manifest(
+            manifest(
+                algorithm={"vllm_config": {"max_num_batched_tokens": 4096}},
+                network={
+                    "pretrained_model_name_or_path": (
+                        "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"
+                    )
+                },
+            )
+        )
+
+        assert settings.max_num_batched_tokens == 4096
+
+    def test_family_without_a_default_leaves_batched_tokens_to_vllm(self):
+        settings = generation_settings_from_manifest(GRPO)
+
+        assert settings.max_num_batched_tokens is None
+
     def test_defaults_are_the_resolved_engine_config(self):
         # Defaults come from the validated vLLM config.
         settings = generation_settings_from_manifest(GRPO)
@@ -293,19 +826,19 @@ class TestGenerationSettings:
         assert settings.weight_dtype == "fp32"
 
     @pytest.mark.parametrize(
-        ("engines", "expected"),
-        [(2, 12), ("auto", 24)],
+        ("engines", "rollout_batch_size", "expected"),
+        [(2, 6, 12), ("auto", 6, 24), (2, 7, 16)],
     )
     def test_async_engine_without_max_num_seqs_runs_one_per_episode(
-        self, engines, expected
+        self, engines, rollout_batch_size, expected
     ):
-        # Arrange: 6 groups of 4 per cycle; "auto" sizes one engine.
+        # Arrange: group size 4. "auto" counts as one engine.
         doc = manifest(
             algorithm={"vllm_config": {"gpu_memory_utilization": 0.85}},
             training={
                 "rollout_mode": "async",
                 "rollout_engines_per_agent": engines,
-                "rollout_batch_size": 6,
+                "rollout_batch_size": rollout_batch_size,
             },
             replay_buffer={"kind": "llm"},
         )
@@ -316,21 +849,17 @@ class TestGenerationSettings:
         # Assert
         assert settings.max_num_seqs == expected
 
+    def test_engine_image_limit_reaches_the_settings(self):
+        doc = manifest(algorithm={"vllm_config": {"limit_mm_per_prompt": {"image": 4}}})
+
+        settings = generation_settings_from_manifest(doc)
+
+        assert settings.max_images_per_prompt == 4
+
     @pytest.mark.parametrize("kv_cache_dtype", ["fp8", "fp8_e4m3", "int8"])
     def test_kv_cache_quantization_is_refused(self, kv_cache_dtype):
         doc = manifest(algorithm={"vllm_config": {"kv_cache_dtype": kv_cache_dtype}})
         with pytest.raises(ValueError, match="unquantized KV"):
-            generation_settings_from_manifest(doc)
-
-    def test_rollout_without_an_engine_config_is_refused(self):
-        doc = manifest(
-            training={
-                "rollout_mode": "async",
-                "rollout_engines_per_agent": 1,
-            },
-            replay_buffer={"kind": "llm"},
-        )
-        with pytest.raises(ValueError, match="no vllm_config"):
             generation_settings_from_manifest(doc)
 
     def test_engine_serving_another_checkpoint_is_refused(self):
@@ -357,12 +886,14 @@ class TestGenerationSettings:
         settings = generation_settings_from_manifest(doc)
         assert settings.max_num_seqs == 8
 
-    def test_tensor_parallel_engine_is_refused(self):
+    def test_tensor_parallel_engine_is_sized(self):
         doc = manifest(
-            algorithm={"vllm_config": {"tensor_parallel_size": 2, "sleep_mode": True}}
+            algorithm={"vllm_config": {"tensor_parallel_size": 4, "sleep_mode": True}}
         )
-        with pytest.raises(ValueError, match="tensor_parallel_size"):
-            generation_settings_from_manifest(doc)
+
+        settings = generation_settings_from_manifest(doc)
+
+        assert settings.tensor_parallel_size == 4
 
     def test_verbatim_engine_args_warn(self):
         doc = manifest(
@@ -391,11 +922,68 @@ class TestGenerationSettings:
         assert config.generation.weight_variant == "engine"
         assert config.model.variant("engine").stripped_multimodal is True
 
+    def test_text_env_on_a_vl_model_sizes_the_engine_variant(self):
+        doc = manifest(network={"pretrained_model_name_or_path": "Qwen/Qwen3.5-0.8B"})
+
+        settings = generation_settings_from_manifest(doc)
+
+        assert settings.weight_variant == "engine"
+
+    def test_async_text_env_without_vllm_config_sizes_the_tower_free_engine(self):
+        # Arrange
+        hub_id = "Qwen/Qwen3.6-35B-A3B"
+        doc = manifest(
+            environment={
+                "env_type": "rollout",
+                "env_url": "http://env",
+                "max_turns": 20,
+                "modality": "text",
+            },
+            network={"pretrained_model_name_or_path": hub_id},
+            training={"rollout_mode": "async", "rollout_engines_per_agent": 1},
+            replay_buffer={"kind": "llm"},
+        )
+        for key in ("dataset", "reward_file_path", "prompt_template"):
+            doc["environment"].pop(key)
+        device = device_spec_from_resource_class(A100_TIER)
+        info = SUPPORTED_MODEL_INFO[hub_id]
+
+        # Act
+        stripped = estimate_manifest(doc, device, info.config, n_params=info.num_params)
+        doc["algorithm"]["vllm_config"] = {"strip_multimodal_towers": False}
+        kept = estimate_manifest(doc, device, info.config, n_params=info.num_params)
+
+        # Assert
+        weights = {
+            name: next(
+                c.n_bytes for c in estimate.generation.components if c.key == "weights"
+            )
+            for name, estimate in (("stripped", stripped), ("kept", kept))
+        }
+        assert weights["stripped"] < weights["kept"]
+
+    def test_kept_towers_still_declare_the_engine_variant(self):
+        doc = manifest(
+            algorithm={"vllm_config": {"sleep_mode": True}},
+            training={
+                "rollout_mode": "async",
+                "rollout_engines_per_agent": 1,
+            },
+            replay_buffer={"kind": "llm"},
+        )
+
+        config = run_config_from_manifest(
+            doc, device_spec_from_resource_class(L4_TIER), TINY_CONFIG
+        )
+
+        assert config.generation.weight_variant == "base"
+        assert config.model.variant("engine").stripped_multimodal is True
+
     def test_partial_tower_list_warns_and_sizes_towers_kept(self):
         doc = manifest(
             algorithm={
                 "vllm_config": {
-                    "strip_multimodal_towers": ["vision_tower"],
+                    "strip_multimodal_towers": ["image"],
                     "sleep_mode": True,
                 }
             }
@@ -406,7 +994,7 @@ class TestGenerationSettings:
 
     @pytest.mark.parametrize(
         "quantization",
-        ["awq", "gptq", "fp8", "compressed-tensors", "bitsandbytes", "int8"],
+        ["awq", "gptq", "compressed-tensors", "bitsandbytes", "int8"],
     )
     def test_engine_quantization_is_refused(self, quantization):
         doc = manifest(
@@ -420,6 +1008,15 @@ class TestGenerationSettings:
         with pytest.raises(ValueError, match="Engine quantization"):
             generation_settings_from_manifest(doc)
 
+    def test_fp8_engine_weights_are_sized(self):
+        doc = manifest(
+            algorithm={"vllm_config": {"quantization": "fp8", "sleep_mode": True}}
+        )
+
+        settings = generation_settings_from_manifest(doc)
+
+        assert settings.weight_quantization == "fp8"
+
     def test_unrecognized_engine_dtype_is_refused(self):
         doc = manifest(algorithm={"vllm_config": {"dtype": "int4", "sleep_mode": True}})
         with pytest.raises(ValueError, match="Unknown vLLM dtype"):
@@ -430,11 +1027,18 @@ class TestDeviceFromResourceClass:
     def test_known_tier(self):
         device = device_spec_from_resource_class(L4_TIER)
         assert device.name == "NVIDIA L4"
-        assert device.total_bytes == 24 * 1024**3
+        assert device.total_bytes == int(22.03 * 1024**3)
         assert device.compute_capability == (8, 9)
 
+    @pytest.mark.parametrize(
+        ("gpu_type", "cuda_gib"),
+        [("NVIDIA H100 80GB HBM3", 79.11), ("a100 80gb", 79.25), ("NVIDIA L4", 22.03)],
+    )
+    def test_measured_cards_carry_their_cuda_visible_total(self, gpu_type, cuda_gib):
+        assert lookup_gpu(gpu_type).total_gib == cuda_gib
+
     def test_gpu_type_spellings(self):
-        assert lookup_gpu("a100 80gb").total_gib == 80
+        assert lookup_gpu("a100 80gb").total_gib == 79.25
         assert lookup_gpu("NVIDIA A100-SXM4-40GB").total_gib == 40
         assert lookup_gpu("L40S").total_gib == 48
         assert lookup_gpu("l4").name == "NVIDIA L4"
@@ -502,6 +1106,105 @@ class TestRunConfig:
                 GRPO, device_spec_from_resource_class(L4_TIER), TINY_CONFIG
             )
 
+    def test_async_lora_rank_snaps_to_a_vllm_accepted_value(self):
+        doc = manifest(
+            algorithm={
+                "lora_config": {"lora_r": 20},
+                "vllm_config": {"max_lora_rank": 20, "tensor_parallel_size": 1},
+            },
+            training={
+                "rollout_mode": "async",
+                "rollout_engines_per_agent": 1,
+                "rollout_batch_size": 1,
+            },
+            replay_buffer={"kind": "llm"},
+        )
+
+        settings = _generation_settings_from_manifest(doc)
+
+        assert settings.max_lora_rank == 32
+
+    @pytest.mark.parametrize(
+        ("lora_r", "max_lora_rank", "expected"),
+        [
+            (20, 20, 20),
+            (32, 8, 32),
+            (8, 20, 20),
+        ],
+    )
+    def test_colocated_lora_rank_stays_at_the_ceiling(
+        self, lora_r: int, max_lora_rank: int, expected: int
+    ) -> None:
+        # Arrange
+        doc = manifest(
+            algorithm={
+                "lora_config": {"lora_r": lora_r},
+                "vllm_config": {
+                    "max_lora_rank": max_lora_rank,
+                    "tensor_parallel_size": 1,
+                },
+            },
+        )
+
+        # Act
+        settings = _generation_settings_from_manifest(doc)
+
+        # Assert
+        assert settings.max_lora_rank == expected
+
+    def test_unknown_model_prices_the_rank_batch(self) -> None:
+        # Arrange: 8 prompts, group 4, on 2 trainer GPUs. The id is outside the catalog.
+        doc = manifest(
+            algorithm={
+                "batch_size": 8,
+                "micro_batch_size_per_gpu": None,
+                "vllm_config": {"tensor_parallel_size": 1},
+            },
+            network={"pretrained_model_name_or_path": "missing/not-a-model"},
+            training={
+                "rollout_mode": "async",
+                "rollout_engines_per_agent": 1,
+                "rollout_batch_size": 2,
+                "training_gpus_per_agent": 2,
+            },
+            replay_buffer={"kind": "llm"},
+        )
+        device = device_spec_from_resource_class(L4_TIER)
+
+        # Act
+        config = run_config_from_manifest(doc, device, TINY_CONFIG)
+
+        # Assert
+        assert config.training.micro_batch_size == 16
+
+    def test_omitted_micro_batch_is_searched_on_the_catalog_model(self) -> None:
+        # Arrange: 8 prompts, group 4, at 8192 tokens on one L4. The run sizes
+        # the forward on the catalog checkpoint whatever config is passed.
+        doc = manifest(
+            algorithm={
+                "batch_size": 8,
+                "micro_batch_size_per_gpu": None,
+                "vllm_config": {"tensor_parallel_size": 1},
+            },
+            network={"max_context_length": 8192},
+            training={
+                "rollout_mode": "async",
+                "rollout_engines_per_agent": 1,
+                "rollout_batch_size": 2,
+            },
+            replay_buffer={"kind": "llm"},
+        )
+        device = device_spec_from_resource_class(L4_TIER)
+        catalog = SUPPORTED_MODEL_INFO["Qwen/Qwen2.5-0.5B-Instruct"].config
+
+        # Act
+        tiny = run_config_from_manifest(doc, device, TINY_CONFIG)
+        listed = run_config_from_manifest(doc, device, catalog)
+
+        # Assert
+        assert tiny.training.micro_batch_size == 8
+        assert listed.training.micro_batch_size == 8
+
     def test_async_rollout_disaggregates(self):
         doc = manifest(
             algorithm={"vllm_config": {"gpu_memory_utilization": 0.9}},
@@ -538,11 +1241,83 @@ class TestRunConfig:
         assert settings.algorithm == "grpo"
 
 
+class TestCheckFp8MoeBackendForDevice:
+    @pytest.mark.parametrize(
+        "quantization",
+        ["fp8", "fp8_per_block", "fp8_per_tensor", "fp8_per_channel"],
+    )
+    def test_fp8_family_without_marlin_fails_below_sm89(
+        self, quantization: str
+    ) -> None:
+        with pytest.raises(ValueError, match="moe_backend='marlin'"):
+            check_fp8_moe_backend_for_device(quantization, None, True, 8, 0)
+
+    def test_marlin_passes_below_sm89(self) -> None:
+        check_fp8_moe_backend_for_device("fp8_per_block", "marlin", True, 8, 0)
+
+    @pytest.mark.parametrize("cc", [(9, 0), (8, 9)])
+    def test_native_fp8_hardware_skips(self, cc: tuple[int, int]) -> None:
+        check_fp8_moe_backend_for_device("fp8", None, True, *cc)
+
+    def test_dense_models_skip(self) -> None:
+        check_fp8_moe_backend_for_device("fp8", None, False, 8, 0)
+
+    @pytest.mark.parametrize("quantization", [None, "awq", "mxfp8"])
+    def test_non_fp8_quantization_skips(self, quantization: str | None) -> None:
+        check_fp8_moe_backend_for_device(quantization, None, True, 8, 0)
+
+
+class TestRunConfigFp8MoeBackend:
+    def _doc(self, quantization: str, moe_backend: str | None = None) -> dict:
+        algorithm: dict[str, object] = {"vllm_config": {"quantization": quantization}}
+        if moe_backend is not None:
+            algorithm["vllm_engine_args"] = {"moe_backend": moe_backend}
+        return manifest(
+            algorithm=algorithm,
+            training={
+                "rollout_mode": "async",
+                "rollout_engines_per_agent": 1,
+            },
+            replay_buffer={"kind": "llm"},
+        )
+
+    def _moe_config(self) -> dict:
+        return dict(TINY_CONFIG, num_experts=8, num_experts_per_tok=2)
+
+    def test_fp8_without_marlin_fails_on_a100(self) -> None:
+        with pytest.raises(ValueError, match="moe_backend='marlin'"):
+            run_config_from_manifest(
+                self._doc("fp8"),
+                device_spec_from_resource_class(A100_TIER),
+                self._moe_config(),
+            )
+
+    def test_fp8_with_marlin_sizes_on_a100(self) -> None:
+        config = run_config_from_manifest(
+            self._doc("fp8", "marlin"),
+            device_spec_from_resource_class(A100_TIER),
+            self._moe_config(),
+        )
+
+        assert config.generation.weight_quantization == "fp8"
+
+    def test_fp8_per_block_without_marlin_reports_marlin_first(self) -> None:
+        with pytest.raises(ValueError, match="moe_backend='marlin'"):
+            run_config_from_manifest(
+                self._doc("fp8_per_block"),
+                device_spec_from_resource_class(A100_TIER),
+                self._moe_config(),
+            )
+
+
 class TestDistributedAndOrchestration:
     def test_fsdp_config_and_gpu_count_come_from_the_manifest(self):
         settings = training_settings_from_manifest(
             manifest(
-                algorithm={"fsdp": {"reshard_after_forward": False}},
+                algorithm={
+                    "fsdp": {"reshard_after_forward": False},
+                    "batch_size": 4,
+                },
                 training={"training_gpus_per_agent": 4},
             )
         )
@@ -566,6 +1341,7 @@ class TestDistributedAndOrchestration:
     def test_single_row_micro_batch_passes(self):
         settings = training_settings_from_manifest(GRPO)
         assert settings.trajectories == 8  # batch_size x group_size, one shard
+        assert settings.micro_batch_size == 1
 
     def test_flat_data_parallel_has_no_fsdp_config(self):
         assert training_settings_from_manifest(GRPO).fsdp is None
@@ -575,35 +1351,196 @@ class TestDistributedAndOrchestration:
             manifest(algorithm={"batch_size": 1, "micro_batch_size_per_gpu": None})
         )
         assert settings.trajectories == 4
+        assert settings.micro_batch_size == 4
 
-    @pytest.mark.parametrize(
-        "doc",
-        [
-            # Explicit.
-            manifest(algorithm={"micro_batch_size_per_gpu": 5}),
-            # Unset on one GPU resolves to the per-rank batch.
-            manifest(algorithm={"batch_size": 8, "micro_batch_size_per_gpu": None}),
-            # mini_batch_size set alone becomes the micro-batch.
+
+class TestMicroBatchRows:
+    def test_unset_micro_batch_on_one_gpu_is_the_rank_trajectory_count(self):
+        settings = training_settings_from_manifest(
             manifest(
                 algorithm={
+                    "batch_size": 16,
+                    "group_size": 8,
                     "micro_batch_size_per_gpu": None,
-                    "mini_batch_size": 3,
+                }
+            )
+        )
+
+        assert settings.micro_batch_size == 128
+
+    def test_unset_micro_batch_folds_tensor_parallel(self):
+        settings = training_settings_from_manifest(
+            manifest(
+                algorithm={
+                    "batch_size": 16,
+                    "group_size": 8,
+                    "micro_batch_size_per_gpu": None,
+                    "fsdp": {"tp": 2},
                 },
-                training={"training_gpus_per_agent": 2},
-            ),
-            # Unset on two GPUs resolves to batch_size // n_training_gpus.
+                training={"training_gpus_per_agent": 4},
+            )
+        )
+
+        assert settings.micro_batch_size == 64
+
+    def test_explicit_micro_batch_is_kept(self):
+        settings = training_settings_from_manifest(
             manifest(
                 algorithm={
                     "batch_size": 8,
+                    "group_size": 4,
+                    "micro_batch_size_per_gpu": 4,
+                }
+            )
+        )
+
+        assert settings.micro_batch_size == 4
+
+    def test_micro_batch_larger_than_the_rank_fails_divisibility(self):
+        with pytest.raises(ValueError, match="divisible by micro_batch_size_per_gpu"):
+            training_settings_from_manifest(
+                manifest(
+                    algorithm={
+                        "batch_size": 2,
+                        "group_size": 4,
+                        "micro_batch_size_per_gpu": 32,
+                    }
+                )
+            )
+
+    def test_batch_must_divide_by_the_data_parallel_size(self):
+        with pytest.raises(ValueError, match="divisible by the data-parallel"):
+            training_settings_from_manifest(
+                manifest(
+                    algorithm={"batch_size": 3, "micro_batch_size_per_gpu": None},
+                    training={"training_gpus_per_agent": 2},
+                )
+            )
+
+    def test_mini_batch_must_divide_the_rank_batch(self):
+        with pytest.raises(ValueError, match="divisible by mini_batch_size"):
+            training_settings_from_manifest(
+                manifest(
+                    algorithm={
+                        "batch_size": 2,
+                        "group_size": 4,
+                        "micro_batch_size_per_gpu": None,
+                        "mini_batch_size": 3,
+                    },
+                    training={"training_gpus_per_agent": 2},
+                )
+            )
+
+    def test_mini_batch_must_divide_by_the_micro_batch(self):
+        with pytest.raises(ValueError, match="divisible by micro_batch_size_per_gpu"):
+            training_settings_from_manifest(
+                {
+                    "algorithm": {
+                        "name": "SFT",
+                        "batch_size": 8,
+                        "micro_batch_size_per_gpu": 3,
+                    },
+                    "environment": {"dataset": "openai/gsm8k"},
+                    "network": {
+                        "pretrained_model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
+                        "max_context_length": 512,
+                    },
+                    "training": {"max_steps": 100},
+                }
+            )
+
+    def test_tensor_parallel_must_divide_the_trainer_world(self):
+        with pytest.raises(ValueError, match="divisible by tp"):
+            training_settings_from_manifest(
+                manifest(
+                    algorithm={"fsdp": {"tp": 3}},
+                    training={"training_gpus_per_agent": 2},
+                )
+            )
+
+    def test_sft_unset_micro_batch_is_the_rank_batch(self):
+        settings = training_settings_from_manifest(
+            {
+                "algorithm": {
+                    "name": "SFT",
+                    "batch_size": 8,
                     "micro_batch_size_per_gpu": None,
                 },
-                training={"training_gpus_per_agent": 2},
-            ),
-        ],
-    )
-    def test_non_single_row_micro_batch_is_refused(self, doc):
-        with pytest.raises(ValueError, match="single-row micro-batches"):
-            training_settings_from_manifest(doc)
+                "environment": {"dataset": "openai/gsm8k"},
+                "network": {
+                    "pretrained_model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
+                    "max_context_length": 512,
+                },
+                "training": {"max_steps": 100},
+            }
+        )
+
+        assert settings.micro_batch_size == 8
+
+    def test_dpo_micro_batch_keeps_two_graphs(self):
+        settings = training_settings_from_manifest(
+            {
+                "algorithm": {
+                    "name": "DPO",
+                    "batch_size": 8,
+                    "micro_batch_size_per_gpu": 4,
+                },
+                "environment": {"dataset": "openai/gsm8k"},
+                "network": {
+                    "pretrained_model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
+                    "max_context_length": 512,
+                },
+                "training": {"max_steps": 100},
+            }
+        )
+
+        assert settings.algorithm == "dpo"
+        assert settings.micro_batch_size == 4
+        assert settings.grad_graph_rows == 2
+
+    @pytest.mark.parametrize("use_liger_loss", [True, False])
+    def test_dpo_liger_loss_holds_whole_sequences(self, use_liger_loss):
+        settings = training_settings_from_manifest(
+            {
+                "algorithm": {
+                    "name": "DPO",
+                    "batch_size": 8,
+                    "use_liger_loss": use_liger_loss,
+                },
+                "environment": {"dataset": "openai/gsm8k"},
+                "network": {
+                    "pretrained_model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
+                    "max_context_length": 512,
+                },
+                "training": {"max_steps": 100},
+            }
+        )
+
+        assert settings.liger_sequence_chunks is use_liger_loss
+        assert settings.liger_weight_grad is False
+
+    def test_sequence_packing_is_sized_as_padded_rows(self):
+        doc = manifest(
+            algorithm={
+                "use_sequence_packing": True,
+                "attn_implementation": "flash_attention_2",
+                "vllm_config": {"gpu_memory_utilization": 0.3},
+            },
+            training={
+                "rollout_mode": "async",
+                "rollout_engines_per_agent": 1,
+            },
+            replay_buffer={"kind": "llm"},
+        )
+
+        settings = training_settings_from_manifest(doc)
+        estimate = estimate_manifest(
+            doc, device_spec_from_resource_class(L4_TIER), TINY_CONFIG
+        )
+
+        assert settings.sequence_packing is True
+        assert settings.micro_batch_size == 1
+        assert any("padded" in warning for warning in estimate.training.warnings)
 
 
 class TestEnginelessAlgorithms:

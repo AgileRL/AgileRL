@@ -498,9 +498,12 @@ class ActionResult(NamedTuple):
     ``action_masks`` is what marks the generated span within it.
     ``sampling_logps`` holds the per-completion vLLM sampling logprobs captured
     for the sampling-mismatch correction, or ``None`` when not captured (HF
-    generation, evaluation, or correction disabled).
+    generation, evaluation, or correction disabled). ``sampling_supports``
+    holds each completion's ``(n, K)`` token ids vLLM could sample at each
+    generated token, or ``None`` when the engine does not record them.
     """
 
     token_ids: list[torch.Tensor]
     action_masks: list[torch.Tensor]
     sampling_logps: list[torch.Tensor | None] | None = None
+    sampling_supports: list[torch.Tensor | None] | None = None

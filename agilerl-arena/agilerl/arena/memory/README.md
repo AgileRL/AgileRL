@@ -15,6 +15,11 @@ to resolve a Hugging Face model id (metadata only).
 
 Exit 0 if both phases fit, 3 if either is over budget, 2 on a usage error.
 
+A manifest that leaves `vllm_config.tensor_parallel_size` or `max_num_seqs`
+unset (with `rollout_engines_per_agent: auto`) gets them from the node's GPU
+count, as the run does. Pass `--num-gpus` with `--gpu` or `--device-gb`; a
+resource tier brings its own count.
+
 Training and generation are separate peaks on separate devices. Resource
 selection uses the larger bar. The estimate errs high.
 
@@ -36,6 +41,7 @@ buffer as `estimate`. `--inference` is a dedicated serving GPU
 | `manifest.py` | manifest + GPU → `RunConfig` |
 | `formulas.py` | parameter counts, KV, activations, tiles |
 | `estimator.py` | the two phase bars |
+| `trainer_residency.py` | frozen base weights and allocator slack on one training GPU |
 | `advice.py` | ranked setting changes when a bar is over budget |
 | `solver.py` | invert one field: largest value that still fits |
 | `resources.py` | cheapest Arena resource tier whose node fits a manifest |

@@ -267,12 +267,6 @@
   "inspected": {
     "num_params": null,
     "lora_info": {
-      "dense": [
-        {
-          "kind": "module",
-          "scope": "vision_model.encoder.layer.attention.output"
-        }
-      ],
       "down_proj": [
         {
           "kind": "module",
@@ -285,12 +279,14 @@
       ],
       "fc1": [
         {
-          "kind": "module"
+          "kind": "module",
+          "scope": "vision_model.encoder.layer.mlp"
         }
       ],
       "fc2": [
         {
-          "kind": "module"
+          "kind": "module",
+          "scope": "vision_model.encoder.layer.mlp"
         }
       ],
       "in_proj": [
@@ -311,24 +307,22 @@
           "in_features": 4096,
           "out_features": 256,
           "count": 8
-        }
-      ],
-      "key": [
+        },
         {
           "kind": "module",
-          "scope": "vision_model.encoder.layer.attention.attention"
+          "scope": "vision_model.encoder.layer.attention"
         }
       ],
-      "linear1": [
+      "linear_1": [
         {
           "kind": "module",
-          "scope": "vision_projector.mlp1"
+          "scope": "multi_modal_projector"
         }
       ],
-      "linear2": [
+      "linear_2": [
         {
           "kind": "module",
-          "scope": "vision_projector.mlp1"
+          "scope": "multi_modal_projector"
         }
       ],
       "mixer.experts.down_proj": [
@@ -361,6 +355,10 @@
           "in_features": 4096,
           "out_features": 4096,
           "count": 8
+        },
+        {
+          "kind": "module",
+          "scope": "vision_model.encoder.layer.attention"
         }
       ],
       "out_proj": [
@@ -381,12 +379,10 @@
           "in_features": 4096,
           "out_features": 4096,
           "count": 8
-        }
-      ],
-      "query": [
+        },
         {
           "kind": "module",
-          "scope": "vision_model.encoder.layer.attention.attention"
+          "scope": "vision_model.encoder.layer.attention"
         }
       ],
       "up_proj": [
@@ -407,12 +403,10 @@
           "in_features": 4096,
           "out_features": 256,
           "count": 8
-        }
-      ],
-      "value": [
+        },
         {
           "kind": "module",
-          "scope": "vision_model.encoder.layer.attention.attention"
+          "scope": "vision_model.encoder.layer.attention"
         }
       ]
     }

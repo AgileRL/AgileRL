@@ -23,6 +23,9 @@ import torch.distributed as dist
 from torch import nn
 from torch.distributed.tensor import DTensor
 from torch.func import functional_call
+
+# No public API pops the active torch dispatch modes.
+from torch.utils._python_dispatch import _disable_current_modes
 from typing_extensions import Self
 
 from agilerl import HAS_LLM_DEPENDENCIES
@@ -379,11 +382,17 @@ def _routed_counts(send: torch.Tensor, exchange: TokenExchange) -> RoutedCounts:
             "Recompute routed tokens differently from the checkpointed forward",
         )
         return recorded
-    received = exchange_expert_counts(send, exchange.ep_group, exchange.ep_degree)
-    send_lists, received_lists = torch.stack((send, received)).tolist()
+    # Hidden from dispatch modes: the recompute replays these counts without
+    # the exchange or copy, and selective checkpointing indexes every op call.
+    with _disable_current_modes():
+        received = exchange_expert_counts(send, exchange.ep_group, exchange.ep_degree)
+        send_lists, received_lists = torch.stack((send, received)).tolist()
     counts = RoutedCounts(send, received, send_lists, received_lists)
     if scope is not None:
         scope.calls.append(counts)
+        # SAC replays forward-recorded ops during recompute; run the replay
+        # assert's comparison here too so it resolves there.
+        torch._assert_async(torch.eq(send, send).all(), "unreachable")
     return counts
 
 

@@ -1657,7 +1657,7 @@ class TestPrepareLlmAlgoKwargs:
         assert "vllm_config" not in merged
         assert merged["use_separate_reference_adapter"] is False
 
-    def test_lora_target_scope_and_chunk_rows_merge_from_init_hp(self):
+    def test_chunk_rows_merge_from_init_hp(self):
         from agilerl.utils.utils import _prepare_llm_algo_kwargs
 
         merged = _prepare_llm_algo_kwargs(
@@ -1666,10 +1666,9 @@ class TestPrepareLlmAlgoKwargs:
             model_name="foo/bar",
             lora_config=None,
             vllm_config=None,
-            INIT_HP=self._init_hp(LORA_TARGET_SCOPE="all", CHUNK_ROWS=4),
+            INIT_HP=self._init_hp(CHUNK_ROWS=4),
         )
 
-        assert merged["lora_target_scope"] == "all"
         assert merged["chunk_rows"] == 4
 
     def test_attn_implementation_injected_into_model_config(self):

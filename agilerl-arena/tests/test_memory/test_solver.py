@@ -211,44 +211,45 @@ class TestSolve:
         assert result.config.generation.max_model_len == 2048
 
 
-class TestSolveSingleValley:
-    """Generation fits() dips mid-range; the minimum failing must not end it."""
+class TestSolveEngineReserve:
+    """vLLM reserves its gpu_memory_utilization budget at any context length."""
 
-    def test_returns_the_run_top_when_the_minimum_does_not_fit(self, model):
-        # Arrange
+    def test_no_context_fits_when_the_reserve_outgrows_the_card(self, model):
+        # Arrange: 0.9 of 8 GiB plus the CUDA context is more than the card.
         device = DeviceSpec(total_bytes=8 * GiB)
         settings = GenerationSettings(
             gpu_memory_utilization=0.9,
             max_num_seqs=8,
             concurrent_requests=2,
+            max_num_batched_tokens=32768,
         )
         config = inference_run_config(model, device, settings)
 
-        # Act
-        result = solve_inference(config, "max_model_len", hi=32768)
+        # Act + Assert
+        with pytest.raises(CannotSolve, match="no max_model_len value up to 32768"):
+            solve_inference(config, "max_model_len", hi=32768)
 
-        # Assert
-        assert result.value == 21120
-        assert result.limited_by == "memory"
-
-    def test_the_minimum_fails_while_mid_range_fits(self, model):
+    def test_the_engine_bar_does_not_move_with_context(self, model):
         # Arrange
         device = DeviceSpec(total_bytes=8 * GiB)
 
-        def serves(context: int) -> bool:
+        def engine_bar(context: int) -> int:
             settings = GenerationSettings(
                 gpu_memory_utilization=0.9,
                 max_num_seqs=8,
                 concurrent_requests=2,
                 max_model_len=context,
+                max_num_batched_tokens=32768,
             )
-            bar = estimate_run(inference_run_config(model, device, settings))
-            return generation_can_serve(bar.generation)
+            run = estimate_run(inference_run_config(model, device, settings))
+            return run.generation.total_bytes
 
-        # Act + Assert
-        assert not serves(16)
-        assert serves(4096)
-        assert not serves(32768)
+        # Act
+        bars = [engine_bar(context) for context in (16, 4096, 32768)]
+
+        # Assert: the start-up profile's peak stays reserved after it frees.
+        assert bars[0] == bars[1] == bars[2]
+        assert bars[0] > device.generation_usable_bytes
 
 
 class TestSolveWithoutAnEngine:
@@ -315,6 +316,49 @@ class TestSolveWithoutAnEngine:
         assert not over.training.fits_with_buffer
 
 
+class TestSolveRebuild:
+    def test_micro_batch_resolved_per_candidate_reaches_the_single_row_top(self, model):
+        # Arrange: the rebuild picks the largest micro-batch that fits, as a
+        # manifest with an omitted micro-batch does.
+        device = DeviceSpec(total_bytes=int(4.5 * GiB))
+        base = RunConfig(
+            model=model,
+            train_device=device,
+            gen_device=device,
+            training=TrainingSettings(
+                algorithm="sft", micro_batch_size=8, trajectories_per_update=8
+            ),
+            generation=GenerationSettings(),
+        )
+
+        def at(length: int, micro: int) -> RunConfig:
+            training = base.training.model_copy(update={"micro_batch_size": micro})
+            return lockstep_max_model_len(
+                base.model_copy(update={"training": training}), length
+            )
+
+        def rebuild(length: int) -> RunConfig:
+            fitting = (
+                micro
+                for micro in (8, 4, 2)
+                if estimate_run(at(length, micro)).training.fits_with_buffer
+            )
+            return at(length, next(fitting, 1))
+
+        # Act
+        held = solve(base, "max_model_len", hi=32768)
+        rebuilt = solve(base, "max_model_len", hi=32768, rebuild=rebuild)
+        over = estimate_run(at(rebuilt.value + formulas.KV_BLOCK_SIZE_DEFAULT, 1))
+
+        # Assert
+        assert held.value == 48
+        assert rebuilt.value == 432
+        assert rebuilt.limited_by == "memory"
+        assert rebuilt.config.training.micro_batch_size == 1
+        assert rebuilt.config.training.max_model_len == 432
+        assert not over.training.fits_with_buffer
+
+
 class TestBareSolveOnAnInferenceConfig:
     def test_bare_solve_caps_on_the_dummy_training_bar(self, model):
         # Arrange
@@ -327,10 +371,11 @@ class TestBareSolveOnAnInferenceConfig:
         dedicated = solve_inference(config, "max_model_len", hi=32768)
 
         # Assert
-        assert bare.value == 9008
+        assert bare.value == 3456
         assert bare.limited_by == "memory"
         assert bare.estimate.training.fits_with_buffer
-        assert dedicated.value == 22256
+        assert dedicated.value == 32768
+        assert dedicated.limited_by == "bound"
         assert dedicated.value > bare.value
         over = estimate_run(
             lockstep_max_model_len(

@@ -27,6 +27,10 @@ class ModelWithTiedWeightKeys(Protocol):
     all_tied_weights_keys: Mapping[str, str]
 
 
+class PerLayerTypeConfig(Protocol):
+    per_layer_config: Mapping[str, object]
+
+
 def restore_after_to_empty(model: nn.Module) -> None:
     """Re-tie input/output embeddings, which ``to_empty`` unties.
 
@@ -63,29 +67,72 @@ def restore_after_to_empty(model: nn.Module) -> None:
 def init_rope_buffers(model: nn.Module) -> None:
     """Fill RoPE frequency buffers after a meta-device safetensors load.
 
-    ``inv_freq`` and ``original_inv_freq`` are non-persistent, so they are
-    not in the checkpoint. ``to_empty`` allocates them uninitialised. Needed
-    when the model was built on meta and loaded from safetensors (FSDP ranks
+    ``inv_freq`` / ``original_inv_freq``, and Gemma 4's
+    ``{layer_type}_inv_freq`` pairs, are non-persistent, so they are not in
+    the checkpoint. ``to_empty`` allocates them uninitialised. Needed when
+    the model was built on meta and loaded from safetensors (FSDP ranks
     sharing one checkpoint). Same computation as HuggingFace ``_init_weights``.
     """
     with torch.no_grad():
         for module in nn.Module.modules(model):
-            if "RotaryEmbedding" not in type(module).__name__ or not hasattr(
-                module, "original_inv_freq"
-            ):
+            if "RotaryEmbedding" not in type(module).__name__:
                 continue
-            rope_type = cast("str", module.rope_type)
-            rope_fn = cast(
-                "Callable[..., tuple[torch.Tensor, object]]",
-                module.compute_default_rope_parameters
-                if rope_type == "default"
-                else ROPE_INIT_FUNCTIONS[rope_type],
-            )
-            inv_freq_buf = cast("torch.Tensor", module.inv_freq)
-            original_buf = cast("torch.Tensor", module.original_inv_freq)
-            inv_freq, _ = rope_fn(module.config, inv_freq_buf.device)
-            inv_freq_buf.copy_(inv_freq)
-            original_buf.copy_(inv_freq)
+            layer_fns = getattr(module, "rope_init_fns", None)
+            if isinstance(layer_fns, dict) and layer_fns:
+                _init_per_layer_type_rope(module, layer_fns)
+                continue
+            if hasattr(module, "original_inv_freq"):
+                _init_single_rope(module)
+
+
+def _init_single_rope(module: nn.Module) -> None:
+    rope_type = cast("str", module.rope_type)
+    # "default" and vision "axial" live on the module, as in HF ``_init_weights``.
+    rope_fn = cast(
+        "Callable[..., tuple[torch.Tensor, object]]",
+        getattr(module, f"compute_{rope_type}_rope_parameters", None)
+        or ROPE_INIT_FUNCTIONS[rope_type],
+    )
+    inv_freq_buf = cast("torch.Tensor", module.inv_freq)
+    original_buf = cast("torch.Tensor", module.original_inv_freq)
+    # Keyword device: the default fn is static and takes ``(config, **kwargs)``.
+    inv_freq, _ = rope_fn(module.config, device=inv_freq_buf.device)
+    inv_freq_buf.copy_(inv_freq)
+    original_buf.copy_(inv_freq)
+
+
+def _init_per_layer_type_rope(
+    module: nn.Module,
+    layer_fns: Mapping[str, Callable[..., tuple[torch.Tensor, object]]],
+) -> None:
+    # Head dims differ by layer type; each type's config carries its own.
+    layer_configs = cast("PerLayerTypeConfig", module.config).per_layer_config
+    for layer_type, rope_fn in layer_fns.items():
+        inv_freq_buf = cast("torch.Tensor", getattr(module, f"{layer_type}_inv_freq"))
+        original_buf = cast(
+            "torch.Tensor", getattr(module, f"{layer_type}_original_inv_freq")
+        )
+        inv_freq, _ = rope_fn(layer_configs[layer_type], layer_type=layer_type)
+        inv_freq = inv_freq.to(device=inv_freq_buf.device, dtype=inv_freq_buf.dtype)
+        inv_freq_buf.copy_(inv_freq)
+        original_buf.copy_(inv_freq)
+
+
+def init_embed_scale_buffers(model: nn.Module) -> None:
+    """Fill non-persistent ``embed_scale`` from ``scalar_embed_scale``.
+
+    Gemma-style scaled word embeddings keep the multiplier as a buffer the
+    checkpoint omits. ``to_empty`` leaves it uninitialised.
+    """
+    with torch.no_grad():
+        for module in nn.Module.modules(model):
+            scale = getattr(module, "scalar_embed_scale", None)
+            buf = getattr(module, "embed_scale", None)
+            if not isinstance(scale, (int, float)) or not isinstance(buf, torch.Tensor):
+                continue
+            if buf.is_meta:
+                continue
+            buf.fill_(float(scale))
 
 
 def converted_checkpoint_key(

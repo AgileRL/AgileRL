@@ -29,7 +29,13 @@ from agilerl.arena.models.algorithms.grpo import GRPOSpec
 from agilerl.arena.models.algorithms.gspo import GSPOSpec
 from agilerl.arena.models.algorithms.llmppo import LLMPPOSpec
 from agilerl.arena.models.algorithms.ppo import PPOSpec, RecurrentPPOSpec
-from agilerl.arena.models.env import GymEnvSpec, LLMEnvSpec, LLMEnvType
+from agilerl.arena.models.env import (
+    EnvHostVolume,
+    EnvServiceSpec,
+    GymEnvSpec,
+    LLMEnvSpec,
+    LLMEnvType,
+)
 from agilerl.arena.models.fsdp import FSDPConfig
 from agilerl.arena.models.manifest import _resolve_algorithm
 from agilerl.arena.models.networks import VLLMConfig
@@ -452,7 +458,7 @@ class TestGRPOClipCoef:
 
 
 class TestGRPOSpecOffPolicyCorrections:
-    @pytest.mark.parametrize("spec_cls", [GRPOSpec, CISPOSpec, GSPOSpec])
+    @pytest.mark.parametrize("spec_cls", [GRPOSpec, CISPOSpec])
     def test_corrections_and_mean_only_advantages_are_on_by_default(
         self, spec_cls: type[GRPOSpec]
     ) -> None:
@@ -463,6 +469,34 @@ class TestGRPOSpecOffPolicyCorrections:
         assert spec.use_bias_correction_kl is True
         assert spec.adv_norm == "mean_only"
         assert spec.top_p == 1.0
+
+    def test_gspo_leaves_off_policy_masks_unset(self) -> None:
+        spec = GSPOSpec(group_size=2)
+
+        assert spec.off_policy_token_mask_bounds is None
+        assert spec.off_policy_sequence_mask_threshold is None
+
+        forced = GRPOSpec(group_size=2, loss_type="gspo")
+        assert forced.off_policy_token_mask_bounds is None
+        assert forced.off_policy_sequence_mask_threshold is None
+
+    def test_gspo_rejects_off_policy_masks(self) -> None:
+        with pytest.raises(ValidationError, match="off_policy_token_mask_bounds"):
+            GSPOSpec(group_size=2, off_policy_token_mask_bounds=(0.5, 5.0))
+        with pytest.raises(ValidationError, match="off_policy_sequence_mask_threshold"):
+            GRPOSpec(
+                group_size=2,
+                loss_type="gspo",
+                off_policy_sequence_mask_threshold=0.03,
+            )
+
+    @pytest.mark.parametrize("spec_cls", [GRPOSpec, CISPOSpec, GSPOSpec])
+    def test_old_logprobs_source_is_unset_by_default(
+        self, spec_cls: type[GRPOSpec]
+    ) -> None:
+        spec = spec_cls(group_size=2)
+
+        assert spec.old_logprobs_source is None
 
     def test_yaml_null_and_false_turn_them_off(self) -> None:
         spec = GRPOSpec.model_validate(
@@ -501,6 +535,27 @@ class TestGRPOSpecOffPolicyCorrections:
     def test_rejects_a_negative_sequence_threshold(self) -> None:
         with pytest.raises(ValidationError, match="greater than or equal to 0"):
             GRPOSpec(group_size=2, off_policy_sequence_mask_threshold=-0.1)
+
+
+@pytest.mark.parametrize(
+    ("spec_cls", "required"),
+    [
+        (GRPOSpec, {"group_size": 2}),
+        (CISPOSpec, {"group_size": 2}),
+        (GSPOSpec, {"group_size": 2}),
+        (LLMPPOSpec, {}),
+    ],
+    ids=["grpo", "cispo", "gspo", "llmppo"],
+)
+class TestOffloadTrainerDuringRollout:
+    def test_is_not_a_manifest_field(
+        self, spec_cls: type[BaseModel], required: dict[str, int]
+    ) -> None:
+        assert "offload_trainer_during_rollout" not in spec_cls.model_fields
+        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+            spec_cls.model_validate(
+                {**required, "offload_trainer_during_rollout": True}
+            )
 
 
 @pytest.mark.parametrize(
@@ -709,6 +764,11 @@ CLASSIFIEDS_SERVICE = {
         {"name": "web", "image": "classifieds-web:1", "port": 9980},
     ],
 }
+ZIM_VOLUME = {
+    "name": "zim",
+    "host_path": "/var/cache/agilerl-zim",
+    "mount_path": "/data",
+}
 
 
 class TestLLMEnvSpecEnvPods:
@@ -824,6 +884,29 @@ class TestLLMEnvSpecEnvPods:
                 },
                 "repeats a container name",
             ),
+            (
+                {"host_volumes": [ZIM_VOLUME, {**ZIM_VOLUME, "mount_path": "/other"}]},
+                r"repeats a host volume name: \['zim', 'zim'\]",
+            ),
+            (
+                {"host_volumes": [ZIM_VOLUME, {**ZIM_VOLUME, "name": "copy"}]},
+                "mounts more than one host volume at /data",
+            ),
+            (
+                {
+                    "host_volumes": [ZIM_VOLUME],
+                    "containers": [
+                        {
+                            "name": "web",
+                            "image": "a:1",
+                            "port": 80,
+                            "command": ["serve"],
+                            "memory_rootfs": "1Gi",
+                        },
+                    ],
+                },
+                "host_volumes are not visible under memory_rootfs",
+            ),
         ],
     )
     def test_service_spec_errors(self, change: dict, match: str) -> None:
@@ -848,6 +931,47 @@ class TestLLMEnvSpecEnvPods:
 
         with pytest.raises(ValidationError, match=match):
             EnvContainerSpec.model_validate({"name": "web", "image": "a:1", **change})
+
+    def test_service_host_volumes_parse(self) -> None:
+        service = EnvServiceSpec.model_validate(
+            {**CLASSIFIEDS_SERVICE, "host_volumes": [ZIM_VOLUME]}
+        )
+
+        assert service.host_volumes == [
+            EnvHostVolume(
+                name="zim", host_path="/var/cache/agilerl-zim", mount_path="/data"
+            )
+        ]
+        assert EnvServiceSpec.model_validate(CLASSIFIEDS_SERVICE).host_volumes == []
+
+    @pytest.mark.parametrize(
+        ("change", "match"),
+        [
+            ({"host_path": "var/cache/agilerl-zim"}, "host_path must be an absolute"),
+            ({"mount_path": "/data/../etc"}, "mount_path must be an absolute path"),
+            ({"host_path": "/var/cache/agilerl-zim/"}, "host_path must be an absolute"),
+            ({"host_path": "/var/cache/agilerl-zim/../../../lib"}, "without '..'"),
+            (
+                {"host_path": "/var/lib/rancher"},
+                "host_path must be under /var/cache/agilerl-",
+            ),
+            ({"mount_path": "/"}, "mount_path must be an absolute path"),
+            ({"mount_path": "/dev/shm"}, "shared-memory mount"),
+            ({"mount_path": "/dev/shm/x"}, "shared-memory mount"),
+            ({"name": "Zim"}, "should match pattern"),
+            ({"read_only": False}, "Extra inputs are not permitted"),
+        ],
+    )
+    def test_host_volume_errors(self, change: dict, match: str) -> None:
+        with pytest.raises(ValidationError, match=match):
+            EnvHostVolume.model_validate({**ZIM_VOLUME, **change})
+
+    def test_host_volume_mounts_beside_dev_shm(self) -> None:
+        volume = EnvHostVolume.model_validate(
+            {**ZIM_VOLUME, "mount_path": "/dev/shmem"}
+        )
+
+        assert volume.mount_path == "/dev/shmem"
 
 
 class TestLLMEnvSpecSurfaces:
@@ -1157,6 +1281,39 @@ class TestLLMEnvSpecTaskFamilyField:
             )
 
 
+class TestLLMEnvSpecImageFields:
+    def test_accepts_field_names(self) -> None:
+        spec = LLMEnvSpec(
+            env_type="rollout",
+            env_url="http://env",
+            max_turns=10,
+            screenshot_field="page",
+            goal_images_field="task_images",
+        )
+
+        assert spec.screenshot_field == "page"
+        assert spec.goal_images_field == "task_images"
+
+    def test_unset_image_keys_stay_out_of_dump(self) -> None:
+        spec = LLMEnvSpec(env_type="rollout", env_url="http://env", max_turns=10)
+
+        assert spec.screenshot_field is None
+        assert spec.goal_images_field is None
+        dumped = spec.model_dump(exclude_none=True)
+        assert "screenshot_field" not in dumped
+        assert "goal_images_field" not in dumped
+
+    def test_dataset_backed_rollout_rejects_image_observation_keys(self) -> None:
+        with pytest.raises(ValidationError, match="no such observation"):
+            LLMEnvSpec(
+                env_type="rollout",
+                dataset="rows",
+                rubric_file_path="rubric.py",
+                prompt_template={"user_0": "{q}"},
+                screenshot_field="screenshot",
+            )
+
+
 class TestLLMEnvSpecActionErrorField:
     def test_accepts_a_field_name(self) -> None:
         spec = LLMEnvSpec(
@@ -1172,6 +1329,23 @@ class TestLLMEnvSpecActionErrorField:
         spec = LLMEnvSpec(env_type="rollout", env_url="http://env", max_turns=10)
 
         assert spec.action_error_field == ""
+
+
+class TestLLMEnvSpecRepeatSystemPrompt:
+    def test_accepts_the_setting(self) -> None:
+        spec = LLMEnvSpec(
+            env_type="rollout",
+            env_url="http://env",
+            max_turns=10,
+            repeat_system_prompt=True,
+        )
+
+        assert spec.repeat_system_prompt is True
+
+    def test_defaults_off(self) -> None:
+        spec = LLMEnvSpec(env_type="rollout", env_url="http://env", max_turns=10)
+
+        assert spec.repeat_system_prompt is False
 
 
 class TestLLMEnvSpecRestartOlderObservations:

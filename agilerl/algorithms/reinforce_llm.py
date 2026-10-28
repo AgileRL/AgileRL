@@ -13,6 +13,8 @@ import torch
 from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import ActionResult, LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
+from agilerl.arena.memory.resolve.chunk import resolve_chunk_rows
+from agilerl.arena.models.networks import VllmModality
 
 if TYPE_CHECKING:
     from peft import LoraConfig, PeftModel
@@ -242,13 +244,21 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         gradient forward pass. Only honoured under a FlashAttention-2 backend;
         otherwise inert.
     :type use_sequence_packing: bool, optional
-    :param lora_target_scope: Optional PEFT LoRA path scope for multimodal models
-        (e.g. ``"language_model"``). Passed to
-        :func:`adapt_lora_config_for_model`.
-    :type lora_target_scope: str | None, optional
+    :param lora_tower_target_modules: Tower and connector modules of a VL model
+        to adapt as well. ``lora_config.target_modules`` always land on the
+        language model only. Defaults to None.
+    :type lora_tower_target_modules: list[str] | None, optional
+    :param rollout_strip_multimodal_towers: ``strip_multimodal_towers`` of a
+        vLLM engine outside this process that serves the adapter; tower LoRA
+        skips the towers it leaves unbuilt. A colocated engine uses
+        ``vllm_config`` instead. Defaults to False.
+    :type rollout_strip_multimodal_towers: bool | list[VllmModality], optional
+    :param logit_bias: Token id to logit offset vLLM adds when it samples;
+        the trainer's log-probs add the same. ``None`` adds none.
+    :type logit_bias: dict[int, float] | None, optional
     """
 
-    _mini_batch_size_default = "micro_batch"
+    _liger_applies_logit_softcap = True
 
     def __init__(
         self,
@@ -301,11 +311,13 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         activation_offload: bool = False,
         moe_lora_recompute: bool | None = None,
         use_sequence_packing: bool = False,
-        lora_target_scope: str | None = None,
+        lora_tower_target_modules: list[str] | None = None,
+        rollout_strip_multimodal_towers: bool | list[VllmModality] = False,
         vllm_importance_sampling_correction: bool = True,
         vllm_importance_sampling_cap: float = 2.0,
         vllm_max_logprob_gap: float = 0.1,
         vllm_max_clip_fraction: float = 0.02,
+        logit_bias: dict[int, float] | None = None,
     ) -> None:
 
         resolved_device = resolve_device(device)
@@ -344,11 +356,13 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
             activation_offload=activation_offload,
             moe_lora_recompute=moe_lora_recompute,
             use_sequence_packing=use_sequence_packing,
-            lora_target_scope=lora_target_scope,
+            lora_tower_target_modules=lora_tower_target_modules,
+            rollout_strip_multimodal_towers=rollout_strip_multimodal_towers,
             vllm_importance_sampling_correction=vllm_importance_sampling_correction,
             vllm_importance_sampling_cap=vllm_importance_sampling_cap,
             vllm_max_logprob_gap=vllm_max_logprob_gap,
             vllm_max_clip_fraction=vllm_max_clip_fraction,
+            logit_bias=logit_bias,
         )
         self._validate_core_args(
             batch_size, lr, clip_coef, update_epochs, actor_network, clone
@@ -405,6 +419,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         # Capture vLLM sampling logprobs only for training rollouts when the
         # mismatch correction is enabled; ``None`` on the HF path / eval.
         sampling_logps: list[torch.Tensor | None] | None = None
+        sampling_supports: list[torch.Tensor | None] | None = None
         capture_sampling_logps = (
             training and self.colocated and self.vllm_importance_sampling_correction
         )
@@ -419,6 +434,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                     token_ids_list,
                     completion_masks,
                     sampling_logps,
+                    sampling_supports,
                 ) = self._generate_with_vllm_colocate(
                     # RolloutPrompt is a TypedDict, i.e. a plain dict at
                     # runtime; the base helper takes untyped prompt dicts.
@@ -428,9 +444,13 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                     if training
                     else 0.01,  # Almost deterministic for evaluation
                     capture_sampling_logps=capture_sampling_logps,
+                    capture_sampling_supports=training
+                    and self.records_sampling_supports,
                 )
 
-        return ActionResult(token_ids_list, completion_masks, sampling_logps)
+        return ActionResult(
+            token_ids_list, completion_masks, sampling_logps, sampling_supports
+        )
 
     def learn(
         self,
@@ -441,6 +461,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         pixel_values: torch.Tensor | None = None,
         pixel_image_counts: Sequence[int] | None = None,
         image_token_id: int | None = None,
+        sampling_supports: list[torch.Tensor | None] | None = None,
     ) -> dict[str, float]:
         """Update actor using REINFORCE with Return Batch Normalization.
 
@@ -448,15 +469,18 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
             single-turn, ``rewards`` is a flat tensor of scalars; for multi-turn,
             shape ``[batch, max_turns]`` per-turn rewards.
         :type experiences: LLMRolloutExperiences
-        :param turn_ids: Optional ``[batch, seq_len - 1]`` tensor of turn indices per
-            token; ``-1`` for non-action tokens. If ``None``, all action tokens are
-            treated as turn ``0``.
+        :param turn_ids: Optional ``[batch, seq_len - 1]`` turn index per generated
+            token, including tokens outside the action mask; ``-1`` elsewhere.
+            If ``None``, all action tokens are treated as turn ``0``.
         :type turn_ids: torch.Tensor | None
         :param sampling_logps: Optional per-row flat vLLM sampling logprobs (one
             1-D tensor per trajectory, generated tokens only; concatenated across
             turns for multi-turn) for the vLLM sampling-mismatch correction.
-            Parallel to the stacked ``token_ids`` rows. ``None`` disables
-            the correction for this update.
+            vLLM reports them under the penalised distribution it sampled
+            from, and the policy carries no penalties, so the correction is
+            the exact policy-to-behaviour ratio. Parallel to the stacked
+            ``token_ids`` rows. ``None`` disables the correction for this
+            update.
         :type sampling_logps: list[torch.Tensor | None] | None
         :param episode_segments: Optional segment layout per trajectory,
             parallel to the stacked ``token_ids`` rows (``None`` for an
@@ -477,6 +501,12 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
             feature row into. Required with ``pixel_values`` and
             ``episode_segments``, to cut the filler rows down to one image.
         :type image_token_id: int | None
+        :param sampling_supports: Optional per-row ``(n, K)`` token ids vLLM
+            could sample at each generated token, ``-1`` padded, parallel to
+            ``sampling_logps``. The policy, old-policy and reference log-probs
+            of those tokens are normalized over their support, the
+            distribution vLLM sampled from.
+        :type sampling_supports: list[torch.Tensor | None] | None
         :return: Dict with keys ``loss``, ``kl``, ``pg_loss``,
             ``entropy``, averaged over all minibatch updates, plus row padding
             stats and ``learn_phase_<phase>_s`` wall seconds.
@@ -485,7 +515,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         phase_timer = self._start_learn_phases()
         self._prepare_vllm_for_training()
 
-        with self.trainer_offload_context(), self._vision_cache.step():
+        with self.trainer_offload_context(), self._vision_step(pixel_values):
             token_ids, action_masks, turn_ids, rewards_2d = self._stack_rollout_batch(
                 experiences, turn_ids
             )
@@ -513,10 +543,18 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                     pixel_values=pixel_values,
                     pixel_image_counts=pixel_image_counts,
                     image_token_id=image_token_id,
+                    sampling_supports=sampling_supports,
                 )
                 pixel_values = rows.pixel_values
                 pixel_image_counts = rows.pixel_image_counts
                 batch_size = self.micro_batch_size_per_gpu
+                support_ids = self._align_sampling_supports(
+                    rows.sampling_supports, rows.token_ids, rows.action_masks
+                )
+            else:
+                support_ids = self._align_sampling_supports(
+                    sampling_supports, token_ids, action_masks
+                )
             phase_timer.mark("prepare")
             no_grad_images = 0 if pixel_values is None else int(pixel_values.shape[0])
             reference_log_probs, old_log_probs, _ = self._fused_forward_no_grad(
@@ -527,6 +565,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                 image_keys=None
                 if pixel_values is None
                 else torch.arange(no_grad_images),
+                support_ids=support_ids,
             )
             phase_timer.mark("no_grad_forward")
             if rows is not None:
@@ -541,20 +580,18 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
             reference_log_probs = torch.masked_fill(
                 reference_log_probs, ~action_mask_bool, 1.0
             )
-            token_penalised_rewards = token_rewards - self.beta * (
-                old_log_probs - reference_log_probs
-            )
+            token_kl_penalty = self.beta * (old_log_probs - reference_log_probs)
 
             if policy_granularity == "token":
                 advantages = self._compute_rebn_advantages_token(
-                    token_penalised_rewards,
+                    token_rewards - token_kl_penalty,
                     action_masks,
                 )
             else:
                 advantages = self._compute_rebn_advantages(
-                    token_penalised_rewards, action_masks, turn_ids
+                    token_rewards, token_kl_penalty, action_masks, turn_ids
                 )
-            del token_rewards, token_penalised_rewards
+            del token_rewards, token_kl_penalty
 
             sampling_log_probs, is_metrics, is_excluded = (
                 self._aligned_sampling_logprobs_and_metrics(
@@ -592,22 +629,36 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                 pixel_image_counts = rows.pixel_image_counts
                 row_episodes = rows.row_episodes
                 num_samples = int(token_ids.shape[0])
+                support_ids = self._align_sampling_supports(
+                    rows.sampling_supports, token_ids, action_masks
+                )
             # At least 1: filler stand-in rows carry turn 0.
             num_turns = max(int(turn_ids.max().item()) + 1, 1)
             batch_idxs = np.arange(num_samples)
             filler_rows = row_episodes < 0
             padding_stats = self._row_padding_stats(token_ids, row_episodes, batch_idxs)
-            vision_rows = None
-            if pixel_values is not None:
-                vision_rows = VisionRows(pixel_values, pixel_image_counts, image_keys)
             phase_timer.mark("prepare")
 
             backward_steps = accumulation_steps or self.gradient_accumulation_steps
             held_loss: torch.Tensor | None = None
             self.actor.train()
-            for order in self._epoch_orders(
+            epoch_orders = self._epoch_orders(
                 batch_idxs, self.update_epochs, aligned=has_segments
-            ):
+            )
+            learn_vision = self._learn_vision_rows(
+                (
+                    VisionRows(pixel_values, pixel_image_counts, image_keys)
+                    if pixel_values is not None
+                    else None
+                ),
+                [
+                    order[start : start + batch_size]
+                    for order in epoch_orders
+                    for start in range(0, num_samples, batch_size)
+                ],
+                num_samples,
+            )
+            for order in epoch_orders:
                 loss_scales = None
                 if accumulation_steps is not None:
                     loss_scales = self._segment_loss_scales(
@@ -656,14 +707,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                         )
 
                     batch_mask_bool = batch_action_mask.bool()
-                    batch_pixel_values = batch_keys = None
-                    if vision_rows is not None:
-                        batch_pixel_values = vision_rows.for_minibatch(
-                            minibatch_idxs, num_samples
-                        )
-                        batch_keys = vision_rows.keys_for_minibatch(
-                            minibatch_idxs, num_samples
-                        )
+                    batch_pixel_values, batch_keys = next(learn_vision)
 
                     # Slice the aligned vLLM sampling logprobs for this
                     # minibatch; ``None`` when the correction is off / no
@@ -671,6 +715,11 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                     batch_sampling_log_probs = (
                         sampling_log_probs[rows_index]
                         if sampling_log_probs is not None
+                        else None
+                    )
+                    batch_support_ids = (
+                        support_ids[torch.as_tensor(minibatch_idxs)]
+                        if support_ids is not None
                         else None
                     )
                     # The correction is fused into the Liger kernel at token-level
@@ -712,11 +761,14 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                                 num_turns,
                                 batch_sampling_log_probs,
                                 batch_pixel_values,
+                                batch_support_ids,
                             )
                         held_loss = self._hold_loss_until_step(
                             pg_loss, held_loss, backward_steps
                         )
                         phase_timer.mark("forward")
+                        # Autograd keeps any vision rows backward reads.
+                        del batch_pixel_values
                         self._backward_pass(pg_loss * loss_scale, accumulation_steps)
                         if is_filler:
                             continue
@@ -740,6 +792,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                             use_reference=False,
                             eval_mode=False,
                             pixel_values=batch_pixel_values,
+                            support_ids=batch_support_ids,
                         )
                     batch_log_probs = torch.masked_fill(
                         batch_log_probs, ~batch_mask_bool, 1.0
@@ -782,6 +835,8 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                         pg_loss, held_loss, backward_steps
                     )
                     phase_timer.mark("forward")
+                    # Autograd keeps any vision rows backward reads.
+                    del batch_pixel_values
                     self._backward_pass(pg_loss * loss_scale, accumulation_steps)
                     if is_filler:
                         continue
@@ -791,7 +846,8 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                             "kl": masked_mean(kl, batch_action_mask),
                             "pg_loss": pg_loss,
                             "entropy": masked_entropy,
-                        }
+                        },
+                        counted=batch_action_mask.any(),
                     )
             # Gradients still pending a step carry into the next learn call.
             if held_loss is not None:
@@ -958,6 +1014,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         num_turns: int,
         sampling_log_probs: torch.Tensor | None = None,
         pixel_values: torch.Tensor | None = None,
+        support_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """REINFORCE clipped policy loss via the fused-linear PPO Function.
 
@@ -985,9 +1042,12 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         :type turn_ids: torch.Tensor
         :param num_turns: Turn count of the whole learn batch.
         :type num_turns: int
-        :param pixel_values: Vision rows of the minibatch's token rows, or
-            ``None`` for text.
+        :param pixel_values: Vision rows of the minibatch's token rows on the
+            device, or ``None`` for text.
         :type pixel_values: torch.Tensor | None
+        :param support_ids: ``(B, seq_len-1, K)`` sampling support per
+            position, or ``None``.
+        :type support_ids: torch.Tensor | None
         :return: ``(pg_loss, metrics)`` where ``metrics`` carries
             ``kl``, ``pg_loss``, ``entropy``, ``clipfrac`` detached scalar tensors.
         :rtype: tuple[torch.Tensor, dict[str, torch.Tensor]]
@@ -1017,7 +1077,8 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         full_turn_mask: torch.Tensor | None = None
         max_turns: int | None = None
         if is_level == "turn":
-            turn_ids = turn_ids.to(self.device)
+            # A turn with no action tokens is no unit of the policy loss.
+            turn_ids = torch.where(mask.bool(), turn_ids.to(self.device), -1)
             max_turns = num_turns
             full_turn_mask = torch.zeros(
                 turn_ids.shape[0], max_turns, device=self.device
@@ -1060,7 +1121,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         if self.calc_position_embeddings:
             kwargs["position_ids"] = self._position_ids_from_mask(attention_mask)
         if pixel_values is not None:
-            kwargs["pixel_values"] = pixel_values.to(self.device)
+            kwargs["pixel_values"] = pixel_values
 
         with (
             self._patch_lm_head_to_identity(),
@@ -1095,12 +1156,17 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                 turn_ids=turn_ids_arg,
                 full_turn_mask=full_turn_mask,
                 max_turns=max_turns,
-                token_chunk_size=self._resolve_fused_chunk_rows(
+                token_chunk_size=resolve_chunk_rows(
                     head_w.shape[0],
                     self.chunk_rows,
                 ),
                 turn_log_ratio_reduction=self.turn_ratio_pooling,
                 vllm_is_ratio=vllm_is_ratio,
+                softcap=self.final_logit_softcap,
+                support_ids=(
+                    None if support_ids is None else support_ids.to(self.device)
+                ),
+                logit_bias=self._logit_bias_vector(head_w.shape[0]),
             )
         # aux = [kl, clipfrac, pg_loss, entropy, kl_clamp_frac] scalars in fp32.
         metrics = {
@@ -1129,6 +1195,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
     def _compute_rebn_advantages(
         self,
         rewards: torch.Tensor,
+        kl_penalty: torch.Tensor,
         action_mask: torch.Tensor,
         turn_ids: torch.Tensor,
         eps: float = 1e-8,
@@ -1138,10 +1205,14 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         For each turn, computes the discounted Monte Carlo return G_t, then
         z-scores all per-turn returns across the batch to produce advantages.
         Advantages are broadcast back to token level for the policy gradient.
+        A turn's reward is its environment reward minus its mean KL penalty
+        over its action tokens; a turn without action tokens has no penalty.
 
         :param rewards: Per-token rewards ``[batch, seq_len]`` (from
             :meth:`_compute_token_rewards`).
         :type rewards: torch.Tensor
+        :param kl_penalty: Per-token ``beta``-weighted KL ``[batch, seq_len]``.
+        :type kl_penalty: torch.Tensor
         :param action_mask: Mask of action positions ``[batch, seq_len]``.
         :type action_mask: torch.Tensor
         :param turn_ids: Turn index per token ``[batch, seq_len]``; ``-1`` for padding.
@@ -1154,7 +1225,10 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         batch_size = rewards.shape[0]
         num_turns = int(turn_ids.max().item()) + 1
 
-        turn_rewards = pool_by_turns(rewards, turn_ids, num_turns)
+        action_turn_ids = torch.where(action_mask.bool(), turn_ids, -1)
+        turn_rewards = pool_by_turns(rewards, turn_ids, num_turns) - pool_by_turns(
+            kl_penalty, action_turn_ids, num_turns
+        )
 
         per_sample_num_turns = turn_ids.max(dim=1).values + 1
 
@@ -1241,13 +1315,14 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         rewards: torch.Tensor,
         turn_ids: torch.Tensor,
     ) -> torch.Tensor:
-        """Assign per-turn rewards to each action token based on turn_ids.
+        """Assign each turn's reward to every token of that turn.
 
         :param action_mask: Bool mask of action positions ``[batch, seq_len]``.
         :type action_mask: torch.Tensor
         :param rewards: Per-turn scalars ``[batch, max_turns]``.
         :type rewards: torch.Tensor
-        :param turn_ids: Turn index per token ``[batch, seq_len]``; ``-1`` for non-action.
+        :param turn_ids: Turn index per generated token ``[batch, seq_len]``,
+            forced tokens included; ``-1`` elsewhere.
         :type turn_ids: torch.Tensor
         :return: Per-token rewards ``[batch, seq_len]``.
         :rtype: torch.Tensor

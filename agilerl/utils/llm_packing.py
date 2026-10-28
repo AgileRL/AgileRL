@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import itertools
 import weakref
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import NamedTuple
 
 import torch
@@ -170,10 +170,11 @@ LAYOUT_MEMO = LayoutMemo()
 def packed_layout(position_ids: torch.Tensor) -> PackedLayout | None:
     """Document layout of packed rows, or None when every row holds one document.
 
-    A document starts wherever ``position_ids`` does not step by one, the same
-    rule transformers uses to detect packed rows for attention masks. The
-    result is memoized on the ``position_ids`` tensor, so repeat calls within
-    one forward do not sync with the device.
+    A document starts at each row start and wherever ``position_ids`` is 0, the
+    rule FlashAttention varlen uses. Pad tokens of a padded row repeat one
+    position, so they extend the document before them instead of each becoming
+    a document. The result is memoized on the ``position_ids`` tensor, so
+    repeat calls within one forward do not sync with the device.
 
     :param position_ids: ``(B, L)`` positions; each packed document restarts at 0.
     :type position_ids: torch.Tensor
@@ -183,8 +184,8 @@ def packed_layout(position_ids: torch.Tensor) -> PackedLayout | None:
     hit, layout = LAYOUT_MEMO.lookup(position_ids)
     if hit:
         return layout
-    first = position_ids[:, :1] - 1
-    starts = torch.diff(position_ids, prepend=first, dim=-1) != 1
+    starts = position_ids == 0
+    starts[:, 0] = False
     row_starts = starts.clone()
     row_starts[:, 0] = True
     # One device sync for the whole layout.
@@ -215,6 +216,36 @@ def packed_seq_idx(position_ids: torch.Tensor) -> torch.Tensor | None:
     """
     layout = packed_layout(position_ids)
     return None if layout is None else layout.seq_idx
+
+
+def run_per_document(
+    run: Callable[[torch.Tensor], torch.Tensor],
+    hidden_states: torch.Tensor,
+    seq_idx: torch.Tensor,
+) -> torch.Tensor:
+    """Run *run* on each packed document and rejoin the rows.
+
+    :param run: Mixer forward over one document's ``(rows, L_doc, H)`` span.
+    :type run: Callable[[torch.Tensor], torch.Tensor]
+    :param hidden_states: ``(B, L, H)`` packed rows.
+    :type hidden_states: torch.Tensor
+    :param seq_idx: ``(B, L)`` document index per token.
+    :type seq_idx: torch.Tensor
+    :return: ``(B, L, H)`` outputs.
+    :rtype: torch.Tensor
+    """
+    # Rows stacked from one packed row (one per routed adapter) run each
+    # document together, so fused LoRA routing still sees every row.
+    if bool((seq_idx == seq_idx[:1]).all()):
+        lengths = torch.unique_consecutive(seq_idx[0], return_counts=True)[1]
+        documents = hidden_states.split(lengths.tolist(), dim=1)
+        return torch.cat([run(document) for document in documents], dim=1)
+    rows = []
+    for row, row_seq_idx in zip(hidden_states.split(1), seq_idx, strict=True):
+        lengths = torch.unique_consecutive(row_seq_idx, return_counts=True)[1]
+        documents = row.split(lengths.tolist(), dim=1)
+        rows.append(torch.cat([run(document) for document in documents], dim=1))
+    return torch.cat(rows)
 
 
 def is_recurrent_mixer(module: nn.Module) -> bool:
@@ -325,6 +356,34 @@ def _scatter_packed(
         out = out.index_put((dst,), flat.index_select(0, src))
 
     return out
+
+
+def pack_next_token_frame(
+    frame: torch.Tensor,
+    attention_mask: torch.Tensor,
+    fill_value: float,
+) -> torch.Tensor:
+    """Pack a padded ``(B, T - 1, ...)`` next-token frame onto the packed predictions.
+
+    Packed position ``i`` predicts packed token ``i + 1``, so each row gains one
+    trailing ``fill_value`` position before its real positions are taken in the
+    order :func:`pack_padded_batch` takes tokens, and the final position, which
+    predicts nothing, is dropped.
+
+    :param frame: ``(B, T - 1, ...)`` value per next-token prediction.
+    :type frame: torch.Tensor
+    :param attention_mask: ``(B, T)`` mask; non-zero marks real tokens.
+    :type attention_mask: torch.Tensor
+    :param fill_value: Value of each row's appended position.
+    :type fill_value: float
+    :return: ``(1, N - 1, ...)`` values aligned to the packed predictions.
+    :rtype: torch.Tensor
+    """
+    frame = frame.to(attention_mask.device)
+    tail = frame.new_full((frame.shape[0], 1, *frame.shape[2:]), fill_value)
+    rows = torch.cat([frame, tail], dim=1).flatten(0, 1)
+    real = attention_mask.bool().flatten().nonzero().squeeze(1)
+    return rows[real][:-1].unsqueeze(0)
 
 
 def unpack_logprobs(

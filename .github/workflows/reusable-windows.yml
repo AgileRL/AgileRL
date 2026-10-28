@@ -51,7 +51,6 @@ jobs:
                   ONEDNN_MAX_CPU_ISA: AVX2
                   MKL_ENABLE_INSTRUCTIONS: AVX2
               run: |
-                  rm -f .coverage .coverage.*
                   uv run python scripts/pytest_shard.py run \
                     --root tests \
                     --root agilerl-arena/tests \
@@ -63,9 +62,8 @@ jobs:
                     --junitxml=junit-windows.xml \
                     --timeout=600 --timeout-method=thread \
                     -m "not llm and not gpu and not vllm" \
-                    -n auto --dist loadgroup \
-                    --durations=15 \
-                    --cov --cov-report=term-missing
+                    -n logical --dist loadgroup \
+                    --durations=15
             - name: Upload junit
               if: always()
               uses: actions/upload-artifact@v4

@@ -9,6 +9,7 @@ from types import MethodType
 from typing import TYPE_CHECKING, Any, cast
 
 from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
+from agilerl.utils.patching import library_shim
 
 if TYPE_CHECKING:
     import torch
@@ -35,16 +36,21 @@ if HAS_LIGER_KERNEL or TYPE_CHECKING:
     )
     from liger_kernel.transformers.relu_squared import LigerReLUSquared
     from liger_kernel.transformers.rms_norm import LigerRMSNorm
-    from liger_kernel.transformers.rope import liger_rotary_pos_emb
 
     HAS_LIGER = True
+
+    class LigerNemotronHRMSNorm(LigerRMSNorm):
+        """LigerRMSNorm that multiplies by the weight in fp32, as NemotronHRMSNorm does."""
+
+        def __init__(self, hidden_size: int, eps: float = 1e-6) -> None:
+            super().__init__(hidden_size, eps=eps, offset=0.0, casting_mode="gemma")
 else:
     HAS_LIGER = False
     MODEL_TYPE_TO_APPLY_LIGER_FN: dict[str, Any] = {}
     _patch_rms_norm_module: Any = None
     LigerRMSNorm: Any = None
+    LigerNemotronHRMSNorm: Any = None
     LigerReLUSquared: Any = None
-    liger_rotary_pos_emb: Any = None
     LigerCrossEntropyLoss: Any = None
     lce_maybe_trainable_lm_head: Any = None
     unpack_cross_entropy_result: Any = None
@@ -178,7 +184,6 @@ def _patch_relu2_mixer(
 
 def apply_liger_kernel_to_nemotron_h(
     rms_norm: bool = True,
-    rope: bool = True,
     relu_squared: bool = True,
     cross_entropy: bool = False,
     fused_linear_cross_entropy: bool = False,
@@ -189,8 +194,6 @@ def apply_liger_kernel_to_nemotron_h(
 
     :param rms_norm: Patch RMSNorm with LigerRMSNorm.
     :type rms_norm: bool
-    :param rope: Patch rotary embeddings with Liger RoPE.
-    :type rope: bool
     :param relu_squared: Patch ``relu2`` activations with LigerReLUSquared.
     :type relu_squared: bool
     :param cross_entropy: Use LigerCrossEntropyLoss (mutually exclusive with LCE).
@@ -215,10 +218,8 @@ def apply_liger_kernel_to_nemotron_h(
         raise ValueError(msg)
 
     nemotron_mod: Any = modeling_nemotron_h
-    if rope:
-        nemotron_mod.apply_rotary_pos_emb = liger_rotary_pos_emb
     if rms_norm:
-        nemotron_mod.NemotronHRMSNorm = LigerRMSNorm
+        nemotron_mod.NemotronHRMSNorm = LigerNemotronHRMSNorm
     if relu_squared:
         nemotron_mod.ACT2FN["relu2"] = LigerReLUSquared
     if cross_entropy:
@@ -232,13 +233,13 @@ def apply_liger_kernel_to_nemotron_h(
     if model is not None:
         base_model = _liger_backbone(model)
         if rms_norm:
-            _patch_rms_norm_module(base_model.norm_f)
+            _patch_rms_norm_module(base_model.norm_f, casting_mode="gemma")
         layers = cast("list[Any]", base_model.layers)
         for layer in layers:
             inner = list(getattr(layer, "blocks", ())) or [layer]
             for block in inner:
                 if rms_norm:
-                    _patch_rms_norm_module(block.norm)
+                    _patch_rms_norm_module(block.norm, casting_mode="gemma")
                 if relu_squared:
                     _patch_relu2_mixer(
                         block.mixer,
@@ -259,6 +260,8 @@ def _liger_backbone(model: PreTrainedModel) -> torch.nn.Module:
     return getattr(model, getattr(model, "base_model_prefix", "model"), model)
 
 
+@library_shim("liger-kernel", "==0.8.*")
+@library_shim("transformers", "==5.19.*")
 def register_nemotron_h_liger() -> bool:
     """Register Nemotron-H model types with Liger's AutoLiger apply map.
 

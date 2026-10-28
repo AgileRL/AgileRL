@@ -24,10 +24,11 @@ from openenv.core.env_server.interfaces import Environment, EnvironmentMetadata
 from openenv.core.env_server.mcp_environment import MCPEnvironment
 from openenv.core.env_server.mcp_types import CallToolAction, CallToolObservation
 from openenv.core.env_server.types import Action, Observation, State
+from PIL import Image
 from pydantic import ConfigDict, Field
 
 from agilerl.llm_envs.env_sources import is_url, spec_to_factory
-from agilerl.llm_envs.observation import observation_text_and_image
+from agilerl.llm_envs.observation import image_to_base64_png, observation_text_and_image
 from agilerl.utils.env_utils import construct_entrypoint_env
 
 if TYPE_CHECKING:
@@ -147,7 +148,7 @@ class OpenEnvWrapper(Environment):
                 reward=None,
                 done=False,
                 metadata=metadata,
-                image=image,
+                image=_wire_image(image),
             )
         return TextObservation(
             prompt=prompt,
@@ -196,6 +197,15 @@ class OpenEnvWrapper(Environment):
         if callable(closer):
             with contextlib.suppress(Exception):
                 closer()
+
+
+def _wire_image(image: object) -> object:
+    """Base64 PNG for each PIL image, which the JSON wire cannot carry."""
+    if isinstance(image, list):
+        return [_wire_image(item) for item in image]
+    if isinstance(image, Image.Image):
+        return image_to_base64_png(image)
+    return image
 
 
 def _normalize_reset(result: object) -> tuple[str, dict[str, Any], Any | None]:

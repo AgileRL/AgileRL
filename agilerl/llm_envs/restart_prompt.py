@@ -25,17 +25,16 @@ class KeptTurn(NamedTuple):
 
     :param gen_ids: The turn's sampled ids, 1-D.
     :param last_token_id: Last id of the transcript the observation extended.
-    :param obs_text: The observation's rendered text.
-    :param role: Chat role the observation spoke as.
+    :param messages: Observation messages, one per tool result when the turn
+        ran several calls.
     :param image: The observation's image, or ``None``.
-    :param older_obs_text: Text shown in place of ``obs_text`` once a later
-        turn is kept, or ``None`` to show ``obs_text``.
+    :param older_obs_text: Text shown in place of the messages' content once a
+        later turn is kept, or ``None`` to show those messages.
     """
 
     gen_ids: torch.Tensor
     last_token_id: int
-    obs_text: str
-    role: str
+    messages: list[dict[str, str]]
     image: object | None
     older_obs_text: str | None
 
@@ -79,7 +78,7 @@ class RestartPromptMixin:
     _chat_prompt_string: Callable[[str], str]
     _engine_ids: Callable[[str], torch.Tensor]
     _prompt_limit: Callable[[], int | None]
-    _text_feedback_ids: Callable[[str, str, int], torch.Tensor]
+    _text_feedback_ids: Callable[[list[dict[str, str]], int], torch.Tensor]
     _decode: Callable[..., str]
     _image_feedback_turn_text: Callable[[str, str, int], str]
     _require_vision_processor: Callable[[], Callable[..., Mapping[str, Any]]]
@@ -299,19 +298,24 @@ class RestartPromptMixin:
         :param older: Whether a later turn is kept after this one.
         """
         gen_ids = turn.gen_ids.unsqueeze(0)
-        obs_text = turn.obs_text
+        messages = [dict(message) for message in turn.messages]
         if older and turn.older_obs_text is not None:
             prefix = IMAGE_USER_CONTENT_PREFIX if turn.image is not None else ""
-            obs_text = prefix + turn.older_obs_text
+            messages = [
+                {"role": messages[-1]["role"], "content": prefix + turn.older_obs_text}
+            ]
         keep_image = image_path and with_image and turn.image is not None
         if turn.image is not None and not keep_image:
-            obs_text = obs_text.removeprefix(IMAGE_USER_CONTENT_PREFIX)
+            messages[0]["content"] = messages[0]["content"].removeprefix(
+                IMAGE_USER_CONTENT_PREFIX
+            )
+        obs_text = "\n\n".join(message["content"] for message in messages)
         if not image_path:
-            ids = self._text_feedback_ids(obs_text, turn.role, turn.last_token_id)
+            ids = self._text_feedback_ids(messages, turn.last_token_id)
             return KeptTurnPiece(gen_ids, ids, ids, "", "", None, None)
         gen_text = self._decode(gen_ids[0].tolist(), skip_special_tokens=False)
         feedback_text = self._image_feedback_turn_text(
-            obs_text, turn.role, turn.last_token_id
+            obs_text, messages[-1]["role"], turn.last_token_id
         )
         engine_ids = self._engine_ids(feedback_text)
         if not keep_image:

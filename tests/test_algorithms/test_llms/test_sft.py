@@ -113,7 +113,11 @@ def generate_sft(
         pad_token_id=vocab_size - 1,
         pad_token="<pad>",
         lora_config=lora_config,
-        fsdp_config=FSDPConfig() if dist_mode == "fsdp2" else None,
+        fsdp_config=(
+            FSDPConfig(routed_expert_chunk_mib=64, optim_cpu_offload=True)
+            if dist_mode == "fsdp2"
+            else None
+        ),
         device="cuda" if torch.cuda.is_available() else "cpu",
         micro_batch_size_per_gpu=micro_batch_size_per_gpu,
         use_liger_loss=use_liger_loss,
@@ -1083,3 +1087,28 @@ class TestSFTLearnNonFiniteLoss:
             sft.learn(random_sft_batch())
         assert list(scales) == []
         sft.clean_up()
+
+
+class TestSFTUnsetFSDPMemory:
+    def test_set_fields_skip_the_estimate(self) -> None:
+        # Arrange
+        agent = make_cpu_sft()
+        agent.device = "cuda"
+        config = FSDPConfig(routed_expert_chunk_mib=64, optim_cpu_offload=True)
+
+        # Act
+        resolved = agent._resolve_fsdp_config(config)
+
+        # Assert
+        assert resolved == config
+        agent.clean_up()
+
+    def test_cuda_without_memory_fields_raises(self) -> None:
+        # Arrange
+        agent = make_cpu_sft()
+        agent.device = "cuda"
+
+        # Act / Assert
+        with pytest.raises(ValueError, match="routed_expert_chunk_mib"):
+            agent._resolve_fsdp_config(FSDPConfig())
+        agent.clean_up()

@@ -585,33 +585,61 @@ class TestGRPOInit:
             device="cpu",
         )
         assert gspo.loss_type == "gspo"
+        assert gspo.off_policy_token_mask_bounds is None
+        assert gspo.off_policy_sequence_mask_threshold is None
         class_sig = str(inspect.signature(GSPO))
         init_sig = str(inspect.signature(GSPO.__init__))
         assert "loss_type" not in class_sig
         assert "loss_type" not in init_sig
+        assert "off_policy_token_mask_bounds" not in class_sig
+        assert "off_policy_sequence_mask_threshold" not in init_sig
         assert "self" not in class_sig
         assert isinstance(gspo, GRPO)
+        with pytest.raises(ValueError, match="off_policy_token_mask_bounds"):
+            GSPO(
+                actor_network=actor,
+                pad_token_id=63,
+                pad_token="<pad>",
+                batch_size=4,
+                group_size=2,
+                max_output_tokens=4,
+                max_model_len=12,
+                wrap=False,
+                gradient_checkpointing=False,
+                device="cpu",
+                off_policy_token_mask_bounds=(0.5, 5.0),
+            )
         gspo.clean_up()
 
-    def test_init_unset_mini_steps_every_micro_batch(self):
+    def test_init_unset_mini_is_per_rank_trajectories(self):
+        """An omitted mini-batch is the per-rank trajectory count.
+
+        On one rank that count is ``batch_size * group_size``. Gradient
+        accumulation is that mini-batch divided by the micro-batch.
+        """
+        # Arrange / Act
         grpo = _make_cpu_grpo_for_branch_tests(
             batch_size=4,
             group_size=2,
             micro_batch_size_per_gpu=1,
         )
 
+        # Assert
         assert grpo.batch_size == 4
         assert grpo.batch_size_per_process == 8
-        assert grpo.mini_batch_size == 1
-        assert grpo.gradient_accumulation_steps == 1
+        assert grpo.mini_batch_size == 8
+        assert grpo.gradient_accumulation_steps == 8
         grpo.clean_up()
 
-    def test_cispo_gspo_signatures_match_grpo_minus_loss_type(self):
-        # @inherit_init_signature must expose exactly GRPO's params minus
-        # loss_type (no model construction needed — pure signature introspection).
+    def test_cispo_gspo_signatures_drop_pinned_args(self):
+        # CISPO pins loss_type. GSPO also pins the off-policy masks.
         grpo_params = set(inspect.signature(GRPO.__init__).parameters) - {"loss_type"}
+        assert set(inspect.signature(CISPO.__init__).parameters) == grpo_params
+        assert set(inspect.signature(GSPO.__init__).parameters) == grpo_params - {
+            "off_policy_token_mask_bounds",
+            "off_policy_sequence_mask_threshold",
+        }
         for variant in (CISPO, GSPO):
-            assert set(inspect.signature(variant.__init__).parameters) == grpo_params
             assert "loss_type" not in inspect.signature(variant).parameters
             assert "self" not in inspect.signature(variant).parameters
 
@@ -1133,6 +1161,8 @@ class TestGRPOInit:
                 loss_type="gspo", importance_sampling_level="token"
             )
         assert grpo.importance_sampling_level == "trajectory"
+        assert grpo.off_policy_token_mask_bounds is None
+        assert grpo.off_policy_sequence_mask_threshold is None
         grpo.clean_up()
 
     @pytest.mark.parametrize("is_level", [None, "trajectory"])
@@ -1353,9 +1383,11 @@ class TestGRPOInit:
         with pytest.raises(
             ValueError,
             match=re.escape(
-                f"batch_size_per_process ({batch_size * group_size}) must be "
-                f"divisible by mini_batch_size ({micro_batch_size_per_gpu}): a rank "
-                "must split into whole optimizer steps."
+                f"mini_batch_size ({batch_size * group_size}) must be divisible by "
+                f"micro_batch_size_per_gpu ({micro_batch_size_per_gpu}): "
+                "gradient_accumulation_steps = mini_batch_size / "
+                "micro_batch_size_per_gpu must be a whole number of backward "
+                "passes."
             ),
         ):
             GRPO(
@@ -2134,7 +2166,7 @@ class TestGRPOGetAction:
             for _ in range(3)
         ]
         for training in (True, False):
-            completion_ids, action_masks, _ = grpo.get_action(
+            completion_ids, action_masks, _, _ = grpo.get_action(
                 prompts, training=training
             )
             expected_group_size = grpo.group_size if training else 1
@@ -2167,7 +2199,7 @@ class TestGRPOGetAction:
                 return getattr(real_actor, name)
 
         grpo.actor = _NoParamActor()
-        completion_ids, action_masks, _ = grpo.get_action(prompts, training=False)
+        completion_ids, action_masks, _, _ = grpo.get_action(prompts, training=False)
         assert len(completion_ids) == 1
         assert len(action_masks) == 1
         grpo.clean_up()
@@ -2241,6 +2273,7 @@ class TestGRPOGetAction:
                 return_value=(
                     [torch.ones(1, 10, dtype=torch.long)],
                     [torch.ones(1, 9, dtype=torch.bool)],
+                    None,
                     None,
                 ),
             ) as mock_generate_with_vllm_colocate,
@@ -2404,7 +2437,7 @@ class TestGRPOGenerateWithVllmColocate:
             SimpleNamespace(outputs=[SimpleNamespace(token_ids=[10])]),
             SimpleNamespace(outputs=[SimpleNamespace(token_ids=[11, 12])]),
         ]
-        completion_ids, action_masks, _ = grpo._generate_with_vllm_colocate(
+        completion_ids, action_masks, _, _ = grpo._generate_with_vllm_colocate(
             prompts=prompts,
             group_size=2,
             temperature=0.7,
@@ -2449,7 +2482,7 @@ class TestGRPOGenerateWithVllmColocate:
             ),
             patch.object(torch.distributed, "get_rank", return_value=1),
         ):
-            completion_ids, action_masks, _ = grpo._generate_with_vllm_colocate(
+            completion_ids, action_masks, _, _ = grpo._generate_with_vllm_colocate(
                 prompts=prompts,
                 group_size=1,
                 temperature=0.7,
@@ -4062,6 +4095,13 @@ class TestGRPOLearn:
             "old_logprobs_trainer_rows",
             "grad_norm_pre",
             "grad_norm_post",
+            "vllm_is_delta_mean",
+            "vllm_is_delta_max",
+            "vllm_mismatch_kl",
+            "vllm_is_ratio_mean",
+            "vllm_is_ratio_std",
+            "vllm_is_ratio_p95",
+            "vllm_is_frac_clamped",
             *LEARN_PHASE_METRIC_NAMES,
         }
         assert all(
@@ -4568,6 +4608,16 @@ class TestGRPOSaveLoadCheckpointResume:
 
 
 class TestGRPOClone:
+    def test_clone_keeps_the_logit_bias(self) -> None:
+        grpo = _make_cpu_grpo_for_branch_tests(logit_bias={5: -100.0})
+
+        clone = grpo.clone(index=1)
+
+        assert clone.logit_bias == {5: -100.0}
+        assert clone._logit_bias_vector(64)[5].item() == -100.0
+        grpo.clean_up()
+        clone.clean_up()
+
     @pytest.mark.parametrize("dist_mode", ["dist"])
     @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
     @pytest.mark.parametrize("vocab_size", [1000])
@@ -5642,7 +5692,10 @@ class TestGRPOVLLMSamplingCorrection:
         monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
         monkeypatch.setattr("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True)
         grpo = _make_cpu_grpo_for_branch_tests(
-            group_size=2, update_epochs=1, use_liger_loss=True
+            group_size=2,
+            update_epochs=1,
+            use_liger_loss=True,
+            old_logprobs_source="trainer",
         )
         assert grpo.importance_sampling_level == "token"
         completion_ids, action_masks = _build_branch_experiences(batch_size=2)
@@ -5703,6 +5756,7 @@ class TestGRPOVLLMSamplingCorrection:
             update_epochs=1,
             use_liger_loss=True,
             importance_sampling_level="trajectory",
+            old_logprobs_source="trainer",
         )
         completion_ids, action_masks = _build_branch_experiences(batch_size=2)
         rewards = torch.tensor([1.0, -1.0], dtype=torch.float32)

@@ -5,9 +5,6 @@
 
 from __future__ import annotations
 
-import os
-import socket
-import traceback
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import replace
 from itertools import repeat
@@ -16,8 +13,6 @@ from typing import Any
 import numpy as np
 import pytest
 import torch
-import torch.distributed as dist
-import torch.multiprocessing as mp
 
 from agilerl.algorithms.core import LLMAlgorithm
 from agilerl.components.llm_rollout_data import EpisodeSegments
@@ -75,6 +70,24 @@ def episode_sampling_logps(pad_token_id: int) -> list[torch.Tensor]:
     return [
         -4.0 + 0.1 * torch.randn(int(row.sum()), generator=generator) for row in mask
     ]
+
+
+def episode_sampling_supports(pad_token_id: int, width: int = 3) -> list[torch.Tensor]:
+    """One sampling support per action token of each episode: the token and its next ids.
+
+    ``width == 1`` forces every token. Otherwise every third token is forced and
+    the rest are padded with ``-1`` to ``width``.
+    """
+    ids, mask = episode_batch(pad_token_id)
+    supports = []
+    for row_ids, row_mask in zip(ids, mask, strict=True):
+        targets = row_ids[1:][row_mask]
+        row = torch.stack(
+            [(targets + offset) % pad_token_id for offset in range(width)], dim=1
+        ).to(torch.int32)
+        row[::3, 1:] = -1
+        supports.append(row)
+    return supports
 
 
 def action_token_policy_loss(
@@ -235,73 +248,28 @@ def learn_with_nan_loss_on_rank_zero(
 def balanced_learn_worker(
     rank: int,
     world_size: int,
-    port: int,
-    make_agent: Callable[..., LLMAlgorithm],
-    learn: Callable[[LLMAlgorithm, int], Any],
-    queue: Any,
-) -> None:
-    """One FSDP2 rank: report what ``learn`` returns for this rank, and the step grads."""
-    try:
-        os.environ.update(
-            {
-                "RANK": str(rank),
-                "LOCAL_RANK": str(rank),
-                "WORLD_SIZE": str(world_size),
-                "MASTER_ADDR": "127.0.0.1",
-                "MASTER_PORT": str(port),
-            }
-        )
-        # The default FSDP2 mesh follows the host accelerator (MPS on macOS);
-        # these ranks train on CPU.
-        torch._C._get_accelerator = lambda: torch.device("cpu")
-        agent = make_agent(
-            micro_batch_size_per_gpu=1,
-            mini_batch_size=2,
-            wrap=True,
-            fsdp_config=FSDPConfig(optim_cpu_offload=False, param_dtype="float32"),
-        )
-        seed_lora_weights(agent)
-        steps = record_step_gradients(agent, pytest.MonkeyPatch())
-        report = learn(agent, rank)
-        # NumPy arrays: a torch tensor in the queue shares memory that dies
-        # with this process before the parent reads it.
-        step_arrays = [
-            {name: grad.numpy() for name, grad in step.items()} for step in steps
-        ]
-        queue.put((rank, "ok", (report, step_arrays)))
-    except Exception:
-        queue.put((rank, "err", traceback.format_exc()))
-    finally:
-        if dist.is_initialized():
-            dist.destroy_process_group()
-
-
-def spawn_balanced_learn(
     make_agent: Callable[..., LLMAlgorithm],
     learn: Callable[[LLMAlgorithm, int], Any] = learn_rank_episodes,
-    world_size: int = 2,
-) -> list[Any]:
-    """Run :func:`balanced_learn_worker` on ``world_size`` gloo ranks; return each rank's report."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        port = int(sock.getsockname()[1])
-    ctx = mp.get_context("spawn")
-    queue = ctx.Queue()
-    procs = [
-        ctx.Process(
-            target=balanced_learn_worker,
-            args=(rank, world_size, port, make_agent, learn, queue),
-        )
-        for rank in range(world_size)
+) -> Any:
+    """One FSDP2 rank: report what ``learn`` returns for this rank, and the step grads."""
+    # The default FSDP2 mesh follows the host accelerator (MPS on macOS);
+    # these ranks train on CPU.
+    torch._C._get_accelerator = lambda: torch.device("cpu")
+    agent = make_agent(
+        micro_batch_size_per_gpu=1,
+        mini_batch_size=2,
+        wrap=True,
+        fsdp_config=FSDPConfig(optim_cpu_offload=False, param_dtype="float32"),
+    )
+    seed_lora_weights(agent)
+    steps = record_step_gradients(agent, pytest.MonkeyPatch())
+    report = learn(agent, rank)
+    # NumPy arrays: a torch tensor sent to the parent shares memory that dies
+    # with this process before the parent reads it.
+    step_arrays = [
+        {name: grad.numpy() for name, grad in step.items()} for step in steps
     ]
-    for proc in procs:
-        proc.start()
-    results = sorted(queue.get(timeout=300) for _ in range(world_size))
-    for proc in procs:
-        proc.join(timeout=300)
-    for rank, status, payload in results:
-        assert status == "ok", f"rank {rank}: {payload}"
-    return [payload for _, _, payload in results]
+    return (report, step_arrays)
 
 
 def rank_local_step_gradients(

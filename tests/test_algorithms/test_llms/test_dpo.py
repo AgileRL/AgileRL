@@ -117,7 +117,11 @@ def generate_dpo(
         pad_token_id=vocab_size - 1,
         pad_token="<pad>",
         lora_config=lora_config,
-        fsdp_config=FSDPConfig() if dist_mode == "fsdp2" else None,
+        fsdp_config=(
+            FSDPConfig(routed_expert_chunk_mib=64, optim_cpu_offload=True)
+            if dist_mode == "fsdp2"
+            else None
+        ),
         device="cuda" if torch.cuda.is_available() else "cpu",
         use_separate_reference_adapter=use_separate_reference_adapter,
         micro_batch_size_per_gpu=micro_batch_size_per_gpu,
@@ -1178,3 +1182,28 @@ class TestDPOLearnNonFiniteLoss:
             dpo.learn(random_preference_batch())
         assert list(scales) == []
         dpo.clean_up()
+
+
+class TestDPOUnsetFSDPMemory:
+    def test_set_fields_skip_the_estimate(self) -> None:
+        # Arrange
+        agent = _make_cpu_dpo_for_branch_tests()
+        agent.device = "cuda"
+        config = FSDPConfig(routed_expert_chunk_mib=64, optim_cpu_offload=True)
+
+        # Act
+        resolved = agent._resolve_fsdp_config(config)
+
+        # Assert
+        assert resolved == config
+        agent.clean_up()
+
+    def test_cuda_without_memory_fields_raises(self) -> None:
+        # Arrange
+        agent = _make_cpu_dpo_for_branch_tests()
+        agent.device = "cuda"
+
+        # Act / Assert
+        with pytest.raises(ValueError, match="routed_expert_chunk_mib"):
+            agent._resolve_fsdp_config(FSDPConfig())
+        agent.clean_up()

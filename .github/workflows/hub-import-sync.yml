@@ -1,0 +1,39 @@
+---
+# Start the hub import reconcile when a labeled pull request changes.
+# Reads the event only. Does not check out the pull request.
+name: Hub import sync
+
+on:
+    pull_request_target:
+        types: [opened, synchronize, labeled, reopened]
+        branches: [main]
+
+permissions: {}
+
+jobs:
+    trigger:
+        if: contains(github.event.pull_request.labels.*.name, 'hub-sync-import')
+        runs-on: ubuntu-24.04
+        steps:
+            - name: Trigger hub reconcile
+              env:
+                  TOKEN: ${{ secrets.HUB_IMPORT_TRIGGER_TOKEN }}
+                  URL: ${{ secrets.HUB_IMPORT_TRIGGER_URL }}
+                  PR: ${{ github.event.pull_request.number }}
+              run: |
+                  if [[ -z "${TOKEN}" ]]; then
+                    echo "error: Actions secret HUB_IMPORT_TRIGGER_TOKEN is not set" >&2
+                    exit 1
+                  fi
+                  if [[ -z "${URL}" ]]; then
+                    echo "error: Actions secret HUB_IMPORT_TRIGGER_URL is not set" >&2
+                    exit 1
+                  fi
+                  curl -fsS -X POST \
+                    --form "token=${TOKEN}" \
+                    --form "ref=main" \
+                    --form "variables[SYNC_IMPORT_RECONCILE]=1" \
+                    --form "variables[SYNC_IMPORT_PR]=${PR}" \
+                    "${URL}" \
+                    >/dev/null
+                  echo "triggered import reconcile for PR #${PR}"

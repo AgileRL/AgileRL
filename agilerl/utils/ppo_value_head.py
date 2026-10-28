@@ -14,7 +14,9 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
-from transformers import AutoModelForCausalLM, GenerationConfig, PreTrainedModel
+from transformers import GenerationConfig, PreTrainedModel
+
+from agilerl.architectures import trainer_model_class
 
 if TYPE_CHECKING:
     from transformers.generation.utils import GenerateOutput
@@ -260,7 +262,8 @@ class AutoModelForCausalLMWithValueHead(nn.Module):
 
         resume_sd: dict[str, Any] | None = None
         if isinstance(pretrained_model_name_or_path, str):
-            pretrained_model = AutoModelForCausalLM.from_pretrained(
+            model_class = trainer_model_class(pretrained_model_name_or_path)
+            pretrained_model = model_class.from_pretrained(
                 pretrained_model_name_or_path,
                 *model_args,
                 **kwargs,

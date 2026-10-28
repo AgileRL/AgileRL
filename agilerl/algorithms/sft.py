@@ -138,11 +138,13 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         backward on frozen packed base weights. ``None`` (default) recomputes
         only outside activation-checkpointed blocks.
     :type moe_lora_recompute: bool | None, optional
-    :param lora_target_scope: Optional PEFT LoRA path scope for multimodal models
-        (e.g. ``"language_model"``). Passed to
-        :func:`adapt_lora_config_for_model`.
-    :type lora_target_scope: str | None, optional
+    :param lora_tower_target_modules: Tower and connector modules of a VL model
+        to adapt as well. ``lora_config.target_modules`` always land on the
+        language model only. Defaults to None.
+    :type lora_tower_target_modules: list[str] | None, optional
     """
+
+    _liger_applies_logit_softcap = True
 
     def __init__(
         self,
@@ -173,7 +175,7 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         quantization_config: BitsAndBytesConfig | None = None,
         activation_offload: bool = False,
         moe_lora_recompute: bool | None = None,
-        lora_target_scope: str | None = None,
+        lora_tower_target_modules: list[str] | None = None,
     ) -> None:
         resolved_device = resolve_device(device)
         super().__init__(
@@ -205,7 +207,7 @@ class SFT(LLMAlgorithm[SFTPrompts]):
             quantization_config=quantization_config,
             activation_offload=activation_offload,
             moe_lora_recompute=moe_lora_recompute,
-            lora_target_scope=lora_target_scope,
+            lora_tower_target_modules=lora_tower_target_modules,
         )
         self.temperature = 0
         self.update_epochs = update_epochs
@@ -370,9 +372,9 @@ class SFT(LLMAlgorithm[SFTPrompts]):
                 head_w = head_w.to(dtype=flat_hidden.dtype)
                 if head_b is not None:
                     head_b = head_b.to(dtype=flat_hidden.dtype)
-                loss = LigerFusedLinearCrossEntropyLoss(ignore_index=-100)(
-                    head_w, flat_hidden, labels.view(-1), head_b
-                )
+                loss = LigerFusedLinearCrossEntropyLoss(
+                    ignore_index=-100, softcap=self.final_logit_softcap
+                )(head_w, flat_hidden, labels.view(-1), head_b)
 
         else:
             # Standard path, also token-chunked: per-token target logprobs via the

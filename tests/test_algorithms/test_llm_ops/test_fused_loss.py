@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import importlib
 import sys
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -287,6 +288,51 @@ class TestLlmPpoLossFn:
         scaled = run(torch.full((B, T), c))
         assert torch.allclose(ones, base, atol=1e-6)
         assert torch.allclose(scaled, c * base, atol=1e-6)
+
+    def test_support_ids_renormalize_restricted_tokens_over_their_support(
+        self,
+    ) -> None:
+        # Arrange
+        torch.manual_seed(7)
+        B, T, V = 2, 3, 16
+        log_probs = torch.log_softmax(torch.randn(B, T, V), dim=-1)
+        target_ids = torch.randint(0, V, (B, T))
+        support_ids = torch.full((B, T, 3), -1, dtype=torch.int32)
+        support_ids[..., 0] = target_ids
+        support_ids[..., 1] = (target_ids + 1) % V
+        support_ids[0, :, 2] = (target_ids[0] + 2) % V
+        support_ids[1, 1:] = -1
+        full_vocab = log_probs.gather(-1, target_ids.unsqueeze(-1)).squeeze(-1)
+        support_log_z = torch.logsumexp(
+            log_probs.gather(-1, support_ids.clamp(min=0).long()).masked_fill(
+                support_ids < 0, float("-inf")
+            ),
+            dim=-1,
+        )
+        expected = torch.where(
+            support_ids[..., 0] >= 0, full_vocab - support_log_z, full_vocab
+        )
+
+        # Act
+        scored = torch.empty(B, T)
+        for b in range(B):
+            for t in range(T):
+                token_mask = torch.zeros(B, T)
+                token_mask[b, t] = 1.0
+                _, metrics = llm_policy_loss_fn(
+                    log_probs=log_probs,
+                    selected_token_ids=target_ids,
+                    attention_mask=token_mask,
+                    advantages=torch.zeros(B, T),
+                    full_attention_mask=token_mask,
+                    support_ids=support_ids,
+                )
+                scored[b, t] = -metrics[3]
+
+        # Assert
+        torch.testing.assert_close(scored, expected, rtol=0.0, atol=1e-6)
+        assert not torch.allclose(scored[0], full_vocab[0], atol=1e-3)
+        torch.testing.assert_close(scored[1, 1:], full_vocab[1, 1:], rtol=0.0, atol=0.0)
 
     def test_chunk_accumulation_recovers_global_loss(self) -> None:
         """Splitting the batch and summing chunk losses must equal the
@@ -1287,6 +1333,99 @@ class TestApplyFusedPolicyLoss:
         loss.backward()
         assert hidden.grad is not None
         assert weight.grad is not None
+
+    def test_softcap_matches_softcapped_reference(self) -> None:
+        # Arrange
+        B, T, V, H = 2, 5, 32, 8
+        hidden, weight, ids, mask, old_lp, ref_lp = self._build_inputs(B, T, V, H)
+        with torch.no_grad():
+            weight.mul_(100.0)
+        adv = torch.randn(B, T) * 0.1
+        kwargs: dict[str, Any] = {
+            "target_ids": ids,
+            "attention_mask": mask,
+            "advantages": adv,
+            "ref_per_token_logps": ref_lp,
+            "old_per_token_logps": old_lp,
+            "beta": 0.01,
+            "epsilon_low": 0.2,
+            "epsilon_high": 0.2,
+            "temperature": 0.7,
+            "importance_sampling_level": "token",
+            "token_chunk_size": 3,
+        }
+
+        # Act
+        loss, _ = apply_fused_policy_loss(hidden, weight, None, softcap=2.0, **kwargs)
+        fused_grads = torch.autograd.grad(loss, (hidden, weight))
+        uncapped, _ = apply_fused_policy_loss(hidden, weight, None, **kwargs)
+        logits = 2.0 * torch.tanh((hidden @ weight.t()) / 2.0) / 0.7
+        ref_loss, _ = llm_policy_loss_fn(
+            log_probs=torch.log_softmax(logits, dim=-1),
+            selected_token_ids=ids,
+            attention_mask=mask,
+            advantages=adv,
+            full_attention_mask=mask,
+            ref_per_token_logps=ref_lp,
+            old_per_token_logps=old_lp,
+            beta=0.01,
+        )
+        ref_grads = torch.autograd.grad(ref_loss, (hidden, weight))
+
+        # Assert
+        assert torch.allclose(loss, ref_loss, rtol=1e-4, atol=1e-5)
+        assert not torch.allclose(uncapped, ref_loss, rtol=1e-2, atol=1e-3)
+        assert torch.allclose(fused_grads[0], ref_grads[0], rtol=1e-4, atol=1e-5)
+        assert torch.allclose(fused_grads[1], ref_grads[1], rtol=1e-4, atol=1e-5)
+
+    def test_logit_bias_adds_after_the_softcap(self) -> None:
+        # Arrange
+        B, T, V, H = 2, 5, 32, 8
+        hidden, weight, ids, mask, old_lp, ref_lp = self._build_inputs(B, T, V, H)
+        with torch.no_grad():
+            weight.mul_(100.0)
+        adv = torch.randn(B, T) * 0.1
+        logit_bias = torch.zeros(V)
+        logit_bias[[3, 11]] = torch.tensor([-100.0, 1.5])
+        kwargs: dict[str, Any] = {
+            "target_ids": ids,
+            "attention_mask": mask,
+            "advantages": adv,
+            "ref_per_token_logps": ref_lp,
+            "old_per_token_logps": old_lp,
+            "beta": 0.01,
+            "epsilon_low": 0.2,
+            "epsilon_high": 0.2,
+            "temperature": 0.7,
+            "importance_sampling_level": "token",
+            "token_chunk_size": 3,
+            "softcap": 2.0,
+        }
+
+        # Act
+        loss, _ = apply_fused_policy_loss(
+            hidden, weight, None, logit_bias=logit_bias, **kwargs
+        )
+        fused_grads = torch.autograd.grad(loss, (hidden, weight))
+        unbiased, _ = apply_fused_policy_loss(hidden, weight, None, **kwargs)
+        logits = (2.0 * torch.tanh((hidden @ weight.t()) / 2.0) + logit_bias) / 0.7
+        ref_loss, _ = llm_policy_loss_fn(
+            log_probs=torch.log_softmax(logits, dim=-1),
+            selected_token_ids=ids,
+            attention_mask=mask,
+            advantages=adv,
+            full_attention_mask=mask,
+            ref_per_token_logps=ref_lp,
+            old_per_token_logps=old_lp,
+            beta=0.01,
+        )
+        ref_grads = torch.autograd.grad(ref_loss, (hidden, weight))
+
+        # Assert
+        assert torch.allclose(loss, ref_loss, rtol=1e-4, atol=1e-5)
+        assert not torch.allclose(unbiased, ref_loss, rtol=1e-2, atol=1e-3)
+        assert torch.allclose(fused_grads[0], ref_grads[0], rtol=1e-4, atol=1e-5)
+        assert torch.allclose(fused_grads[1], ref_grads[1], rtol=1e-4, atol=1e-5)
 
 
 class TestLlmPolicyLossFnKlClamp:

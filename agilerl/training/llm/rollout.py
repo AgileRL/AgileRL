@@ -322,6 +322,7 @@ def train_llm_rollout(
                     group_seed,
                     all_sampling_logps,
                     all_pixel_values,
+                    all_sampling_supports,
                 ) = collect_rollouts_llm(
                     agent=agent,
                     env=rollout_collector,
@@ -353,6 +354,7 @@ def train_llm_rollout(
                     all_sampling_logps,
                     group_size=group_size,
                     all_pixel_values=all_pixel_values,
+                    all_sampling_supports=all_sampling_supports,
                 )
                 # Empty batches have no trajectories; learn() raises on them.
                 # Skip on every rank if any rank is empty (keeps collectives aligned).
@@ -404,6 +406,7 @@ def train_llm_rollout(
                         experiences,
                         turn_ids=turn_ids,
                         sampling_logps=batch.sampling_logps,
+                        sampling_supports=batch.sampling_supports,
                         **learn_kwargs,
                     )
 

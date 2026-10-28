@@ -61,6 +61,9 @@ arena env validate --source path/to/my_env.py --name my-env
 ```bash
 arena memory estimate path/to/manifest.yaml --gpu "NVIDIA L4"
 
+# An unset engine width or max_num_seqs is resolved from the node's GPUs:
+arena memory estimate path/to/manifest.yaml --gpu "NVIDIA L4" --num-gpus 4
+
 # Longest context one dedicated L4 serving GPU can hold:
 arena memory solve max_model_len --inference --gpu "NVIDIA L4" \
     --model Qwen/Qwen2.5-7B-Instruct

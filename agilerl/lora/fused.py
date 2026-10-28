@@ -32,6 +32,8 @@ from agilerl import HAS_LLM_DEPENDENCIES
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from peft.tuners.lora.layer import LoraLayer, ParamWrapper
 
+from agilerl.utils.patching import library_shim
+
 # Remembers each model's LoRA layers so we don't rescan on every call.
 # Weak keys: caching a model here never stops it being garbage-collected.
 LORA_LAYER_CACHE: WeakKeyDictionary[nn.Module, list[LoraLayer]] = WeakKeyDictionary()
@@ -269,6 +271,7 @@ def _validate_routing(layers: list[LoraLayer], routing: Sequence[str]) -> None:
         raise ValueError(msg)
 
 
+@library_shim("peft", "==0.21.*")
 def patch_lora_for_fused_forward(model: nn.Module) -> None:
     """Swap every LoRA layer's ``forward`` for the fused-routing forward.
 

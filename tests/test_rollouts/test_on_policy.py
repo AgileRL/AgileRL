@@ -224,6 +224,7 @@ class TestCollectRolloutsLlmOrdering:
             next_group_seed,
             _logps,
             _pixel_values,
+            _supports,
         ) = collect_rollouts_llm(
             agent=agent,
             env=env,
@@ -296,6 +297,7 @@ class TestCollectRolloutsLlmGrpo:
             1,
             None,
             None,
+            None,
         )
 
         agent = MagicMock()
@@ -329,6 +331,7 @@ class TestCollectRolloutsLlmGrpo:
             0,
             None,
             None,
+            None,
         )
         agent = MagicMock()
         agent.__class__ = GRPO
@@ -360,6 +363,7 @@ class TestCollectRolloutsLlmGrpo:
             [torch.zeros(1, 1, dtype=torch.long)],
             [torch.ones(1, dtype=torch.float32)],
             1,
+            None,
             None,
             None,
         )

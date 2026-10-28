@@ -40,17 +40,17 @@ from torch.optim.lr_scheduler import LambdaLR
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.architectures import (
-    FAMILY_RUNTIME_CONFIGS,
     family_runtime,
     install_family_patches,
     pretrained_model_type,
 )
 from agilerl.architectures.flex_attention import patch_flex_attention_kernel_options
 from agilerl.architectures.vllm_language import (
-    apply_language_tower_engine_kwargs,
+    apply_multimodal_engine_kwargs,
     apply_tower_connector_lora_engine_kwargs,
     nested_language_config,
 )
+from agilerl.arena.memory.resolve.lora import resolve_lora_rank_ceiling
 from agilerl.distributed.fsdp import CPUOffloadOptimizer, canonical_fsdp_param_fqn
 from agilerl.distributed.process import (
     allreduce_minmax_int,
@@ -96,7 +96,6 @@ if HAS_LLM_DEPENDENCIES:
     from safetensors.torch import save_file
     from transformers import (
         AutoConfig,
-        AutoModelForCausalLM,
         BitsAndBytesConfig,
         GenerationConfig,
     )
@@ -110,7 +109,6 @@ else:
     # HAS_LLM_DEPENDENCIES, so these are never reached at runtime.
     PreTrainedModel = Any
     Dataset = Any
-    AutoModelForCausalLM: Any = None
     AutoModelForCausalLMWithValueHead: Any = None
     BitsAndBytesConfig: Any = None
     ParamWrapper: Any = None
@@ -287,10 +285,6 @@ BNB_QUANT_NF4_ALIASES = frozenset(
 BNB_QUANT_PRESETS = (
     BNB_QUANT_NONE_ALIASES | BNB_QUANT_INT8_ALIASES | BNB_QUANT_NF4_ALIASES
 )
-
-# Gemma 4 wraps projections in *ClippableLinear; PEFT must target the inner ``.linear``
-# submodule via regex (see https://github.com/huggingface/peft/issues/3129).
-CLIPPABLE_LINEAR_WRAPPER_SUFFIX = "ClippableLinear"
 
 
 def _as_optional_int(value: object | None) -> int | None:
@@ -1171,55 +1165,6 @@ def build_bnb_quantization_config(
     raise TypeError(msg)
 
 
-def model_has_clippable_linear_wrappers(model: nn.Module) -> bool:
-    """Return True when the model uses *ClippableLinear projection wrappers.
-
-    :param model: Model to inspect.
-    :type model: nn.Module
-    :return: Whether any ClippableLinear wrapper is present.
-    :rtype: bool
-    """
-    return any(
-        mod.__class__.__name__.endswith(CLIPPABLE_LINEAR_WRAPPER_SUFFIX)
-        for mod in model.modules()
-    )
-
-
-def discover_clippable_projection_leaf_names(model: nn.Module) -> list[str]:
-    """Return leaf names (e.g. ``q_proj``) of *ClippableLinear wrapper modules.
-
-    :param model: Model to inspect.
-    :type model: nn.Module
-    :return: Sorted unique leaf names.
-    :rtype: list[str]
-    """
-    names: set[str] = set()
-    for name, mod in model.named_modules():
-        if mod.__class__.__name__.endswith(CLIPPABLE_LINEAR_WRAPPER_SUFFIX):
-            names.add(name.rsplit(".", 1)[-1])
-    return sorted(names)
-
-
-def discover_clippable_inner_linear_module_keys(model: nn.Module) -> list[str]:
-    """Return full ``named_modules`` keys for inner ``.linear`` weights in wrappers.
-
-    :param model: Model to inspect.
-    :type model: nn.Module
-    :return: Module keys ending in ``.linear``.
-    :rtype: list[str]
-    """
-    named = dict(model.named_modules())
-    keys: list[str] = []
-    for name, mod in model.named_modules():
-        if not mod.__class__.__name__.endswith(CLIPPABLE_LINEAR_WRAPPER_SUFFIX):
-            continue
-        inner_key = f"{name}.linear"
-        inner = named.get(inner_key)
-        if inner is not None and _is_peft_adaptable_linear(inner):
-            keys.append(inner_key)
-    return sorted(keys)
-
-
 def _is_peft_adaptable_linear(module: nn.Module) -> bool:
     """Return True when PEFT LoRA can wrap this weight module."""
     if isinstance(module, nn.Linear):
@@ -1274,103 +1219,82 @@ def list_peft_matched_module_keys(
 
 
 def _looks_like_peft_target_regex(spec: str) -> bool:
-    """Heuristic: the user passed a regex ``target_modules`` spec.
-
-    Needed by :func:`adapt_lora_config_for_model` to pass regex specs through
-    untouched instead of rewriting them like plain suffix names.
-    """
+    """Heuristic: the user passed a regex ``target_modules`` spec, kept as given."""
     return spec.startswith(".*") or r"\." in spec or "(" in spec
 
 
-def build_clippable_linear_lora_target_regex(
-    projection_names: list[str],
-) -> str:
-    r"""Build a PEFT regex that targets inner ``.linear`` inside *ClippableLinear.
+def language_model_prefix(model: nn.Module) -> str | None:
+    """Return the module path of a VL model's language model, or None for a text-only model.
 
-    Example::
-
-        .*\.(q_proj|k_proj|v_proj)\.linear
-
-    For projections under a multimodal scope, use
-    :func:`build_scoped_lora_target_regex` instead (it also matches plain
-    ``nn.Linear`` projections under the scope).
-
-    See https://github.com/huggingface/peft/issues/3129
+    :param model: Model PEFT will wrap.
+    :type model: nn.Module
+    :return: Shortest ``named_modules`` key ending in ``language_model``.
+    :rtype: str | None
     """
-    if not projection_names:
-        msg = "At least one projection name is required for the LoRA target regex."
-        raise ValueError(msg)
-    alts = "|".join(re.escape(name) for name in sorted(set(projection_names)))
-    # Optional prefix so top-level and nested keys both fullmatch.
-    return rf"(?:.*\.)?({alts})\.linear"
+    prefixes = [
+        name
+        for name, _ in model.named_modules()
+        if name.rsplit(".", 1)[-1] == "language_model"
+    ]
+    return min(prefixes, key=len) if prefixes else None
 
 
-def build_scoped_lora_target_regex(
-    projection_names: list[str],
-    scope: str,
+def _language_model_linear_leaf_names(model: nn.Module, prefix: str) -> list[str]:
+    """Leaf names of every adaptable linear under *prefix*, except ``lm_head``."""
+    names = {
+        name.rsplit(".", 1)[-1]
+        for name, module in model.named_modules()
+        if name.startswith(f"{prefix}.") and _is_peft_adaptable_linear(module)
+    }
+    # PEFT's all-linear leaves the output head frozen; some VL models nest it here.
+    return sorted(names - {"lm_head"})
+
+
+def _anchored_lora_target_regex(
+    language_names: list[str],
+    tower_names: list[str],
+    prefix: str,
+    skipped_towers: list[str],
 ) -> str:
-    r"""PEFT regex for projections under a multimodal scope (e.g. ``language_model``).
+    """PEFT regex: *language_names* under *prefix*, *tower_names* everywhere else.
 
-    Matches both:
-
-    * *ClippableLinear* inner weights (``…q_proj.linear``) on vision/audio towers
-    * Plain ``nn.Linear`` leaves (``…q_proj``) on the language model in Gemma 4
-
-    PEFT uses ``re.fullmatch`` on ``named_modules()`` keys (peft#3129).
+    Tower names inside a *skipped_towers* module do not match. PEFT matches a
+    string ``target_modules`` with ``re.fullmatch`` on each ``named_modules`` key.
     """
-    if not projection_names:
-        msg = "At least one projection name is required for the LoRA target regex."
-        raise ValueError(msg)
-    alts = "|".join(re.escape(name) for name in sorted(set(projection_names)))
-    scope_esc = re.escape(scope.strip("."))
-    # Scope may be the first path component (``language_model.layers.0.q_proj``)
-    # or nested (``model.language_model.layers.0.q_proj``).
-    return rf"(?:.*\.)?{scope_esc}.*\.(?:{alts})(?:\.linear)?$"
+    prefix_esc = re.escape(prefix)
+    patterns = []
+    if language_names:
+        alts = "|".join(re.escape(name) for name in language_names)
+        patterns.append(rf"{prefix_esc}\.(?:.*\.)?(?:{alts})")
+    if tower_names:
+        alts = "|".join(re.escape(name) for name in tower_names)
+        skip = ""
+        if skipped_towers:
+            # ``.+`` keeps lora_target_module_names from reading these as targets.
+            skipped = "|".join(re.escape(name) for name in skipped_towers)
+            skip = rf"(?!(?:.+\.)?(?:{skipped})\.)"
+        patterns.append(rf"(?!{prefix_esc}\.){skip}(?:.*\.)?(?:{alts})")
+    return "|".join(f"(?:{pattern})" for pattern in patterns)
 
 
-def _normalize_projection_leaf_name(name: str) -> str:
-    """Strip a trailing ``.linear`` so YAML can use either ``q_proj`` or ``q_proj.linear``."""
-    return name.removesuffix(".linear")
-
-
-def _projection_names_for_clippable_lora(
-    model: nn.Module, raw_targets: str | Iterable[str] | None
+def lora_target_module_names(
+    target_modules: str | Iterable[str] | None,
 ) -> list[str] | None:
-    """Resolve projection leaf names, or ``None`` if ``raw_targets`` is already regex."""
-    if raw_targets is None:
+    """Language-model LoRA leaf names, or None for ``all-linear`` / an opaque regex.
+
+    :param target_modules: PEFT ``target_modules`` list, ``all-linear``, or regex.
+    :type target_modules: str | Iterable[str] | None
+    :return: Suffix names from a list or an anchored VL rewrite regex; otherwise None.
+    :rtype: list[str] | None
+    """
+    if target_modules is None or target_modules == "all-linear":
         return None
-    raw_list = [raw_targets] if isinstance(raw_targets, str) else list(raw_targets)
-    if any(_looks_like_peft_target_regex(t) for t in raw_list):
+    if not isinstance(target_modules, str):
+        return list(target_modules)
+    match = re.search(r"\(\?:\.\*\\\.\)\?\(\?:([^)]+)\)", target_modules)
+    if match is None:
         return None
-
-    names: list[str] = []
-    for target in raw_list:
-        if target == "all-linear":
-            names.extend(discover_clippable_projection_leaf_names(model))
-        else:
-            names.append(_normalize_projection_leaf_name(target))
-    return sorted(set(names))
-
-
-def build_clippable_linear_lora_target_suffixes(
-    projection_names: list[str],
-) -> list[str]:
-    """Build PEFT list targets ``q_proj.linear`` (suffix match, avoids regex pitfalls)."""
-    return [f"{name}.linear" for name in sorted(set(projection_names))]
-
-
-def _infer_clippable_lora_scope(model: nn.Module) -> str | None:
-    """Infer ``language_model`` / ``audio_tower`` scope only when all inner keys live under it."""
-    inner_keys = discover_clippable_inner_linear_module_keys(model)
-    if not inner_keys:
-        return None
-    for scope in ("language_model", "audio_tower"):
-        if all(
-            key == scope or key.startswith(f"{scope}.") or f".{scope}." in key
-            for key in inner_keys
-        ):
-            return scope
-    return None
+    return [re.sub(r"\\(.)", r"\1", part) for part in match.group(1).split("|")]
 
 
 # PEFT LoRA inject rejects these module names on Mamba-family model_type values
@@ -1517,128 +1441,107 @@ def _adapt_mamba_lora_config(model: nn.Module, lora_config: LoraConfig) -> LoraC
     return _clone_lora_config(lora_config, **updates)
 
 
-def _example_module_keys_for_lora_scope(
-    model: nn.Module,
-    scope: str,
-    limit: int = 3,
-) -> list[str]:
-    """Sample ``named_modules`` keys under a scope (for error messages)."""
-    scope_token = scope.strip(".")
-    keys = [
-        key
-        for key, _ in model.named_modules()
-        if f".{scope_token}." in key or key.startswith(f"{scope_token}.")
-    ]
-    return keys[:limit]
-
-
 def adapt_lora_config_for_model(
     model: nn.Module,
     lora_config: LoraConfig,
-    lora_target_scope: str | None = None,
+    tower_target_modules: list[str] | None = None,
+    skipped_tower_modules: list[str] | None = None,
 ) -> LoraConfig:
-    r"""Rewrite ``LoraConfig.target_modules`` for PEFT (regex or suffix list).
+    """Rewrite ``LoraConfig.target_modules`` so PEFT wraps exactly the intended modules.
 
-    For *ClippableLinear* models (Gemma 4 vision/audio), short names like ``q_proj``
-    substring-match the wrapper and fail injection; use regex targets on the inner
-    ``.linear`` (https://github.com/huggingface/peft/issues/3129).
-
-    When ``lora_target_scope`` is set (e.g. ``language_model``), only modules under
-    that path are targeted. The scoped regex matches plain ``nn.Linear`` language
-    layers and ``.linear`` inside ClippableLinear towers. Unscoped fallbacks are
-    not used when the scope is explicit.
+    On a VL model, named targets and ``all-linear`` land only under the
+    language model; ``tower_target_modules`` names the tower and connector
+    modules to adapt outside it, except inside ``skipped_tower_modules``. A
+    regex ``target_modules`` is kept as given.
 
     On Mamba-family ``model_type`` values, ``out_proj`` and ``conv1d`` are excluded
     from LoRA inject (PEFT 0.20+ forbids wrapping those fused-kernel modules).
 
     Packed-expert ``target_parameters`` force ``lora_dropout=0``; PEFT cannot
     factor dropout out of the parameter-level low-rank product.
+
+    :param model: Model PEFT will wrap.
+    :type model: nn.Module
+    :param lora_config: Trainer LoRA config.
+    :type lora_config: LoraConfig
+    :param tower_target_modules: Tower and connector module names to adapt, or None.
+    :type tower_target_modules: list[str] | None
+    :param skipped_tower_modules: Tower and connector modules the vLLM engine
+        leaves unbuilt, so they get no LoRA; or None.
+    :type skipped_tower_modules: list[str] | None
+    :return: The config with resolved targets.
+    :rtype: LoraConfig
+    :raises ValueError: If tower targets are set on a text-only model or with a
+        regex ``target_modules``, or a target group matches no module.
     """
     lora_config = _zero_lora_dropout_for_target_parameters(lora_config)
     lora_config = _adapt_mamba_lora_config(model, lora_config)
+    prefix = language_model_prefix(model)
+    tower_names = sorted(set(tower_target_modules or ()))
+    if prefix is None:
+        if tower_names:
+            msg = (
+                f"tower_target_modules {tower_names} need a multimodal model; "
+                f"{type(model).__name__} has no language_model"
+            )
+            raise ValueError(msg)
+        return lora_config
     raw_targets = lora_config.target_modules
-    projection_names = _projection_names_for_clippable_lora(model, raw_targets)
-    if projection_names is None:
+    if isinstance(raw_targets, str) and raw_targets != "all-linear":
+        if tower_names:
+            msg = (
+                "tower_target_modules cannot be combined with a regex "
+                f"target_modules ({raw_targets!r}); name both as module lists"
+            )
+            raise ValueError(msg)
+        return lora_config
+    if raw_targets == "all-linear":
+        language_names = _language_model_linear_leaf_names(model, prefix)
+    else:
+        language_names = sorted(set(raw_targets or ()))
+    if not language_names and not tower_names:
         return lora_config
 
+    skipped_towers = sorted(set(skipped_tower_modules or ()))
     exclude_modules = list(getattr(lora_config, "exclude_modules", None) or [])
-
-    explicit_scope = lora_target_scope is not None
-    scope = lora_target_scope if explicit_scope else _infer_clippable_lora_scope(model)
-
-    if scope is not None:
-        if not projection_names:
-            msg = (
-                "lora_target_scope is set but no projection names were resolved "
-                f"from target_modules={raw_targets!r}."
-            )
-            raise ValueError(msg)
-        target_spec = build_scoped_lora_target_regex(projection_names, scope)
-        matched = list_peft_matched_module_keys(
-            model, target_spec, exclude_modules=exclude_modules
-        )
-        if not matched:
-            examples = _example_module_keys_for_lora_scope(model, scope)
-            msg = (
-                f"No modules matched scoped LoRA target_modules for scope={scope!r} "
-                f"(regex={target_spec!r}). "
-                f"Example keys under scope: {examples}. "
-                "Check LORA_TARGET_SCOPE and TARGET_MODULES match the model layout."
-            )
-            raise ValueError(msg)
-        adapted = _clone_lora_config_with_targets(lora_config, target_spec)
-        logger.info(
-            "Adapted LoRA target_modules via scoped regex (%s) (%d modules), e.g. %s",
-            scope,
-            len(matched),
-            ", ".join(matched[:2]) + ("..." if len(matched) > 2 else ""),
-        )
-        return adapted
-
-    if not model_has_clippable_linear_wrappers(model):
-        return lora_config
-
-    if not projection_names:
-        msg = (
-            "Model uses ClippableLinear wrappers but no projection names were "
-            "resolved for LoRA targeting."
-        )
-        raise ValueError(msg)
-
-    suffix_targets = build_clippable_linear_lora_target_suffixes(projection_names)
-    candidate_specs: list[tuple[str, str | list[str]]] = [
-        ("suffix list", suffix_targets),
-        ("regex", build_clippable_linear_lora_target_regex(projection_names)),
-    ]
-
-    for label, target_spec in candidate_specs:
-        matched = list_peft_matched_module_keys(
-            model, target_spec, exclude_modules=exclude_modules
-        )
-        if not matched:
-            continue
-        if raw_targets == target_spec:
-            return lora_config
-        adapted = _clone_lora_config_with_targets(lora_config, target_spec)
-        logger.info(
-            "Adapted LoRA target_modules for ClippableLinear wrappers via %s "
-            "(%d modules), e.g. %s",
-            label,
-            len(matched),
-            ", ".join(matched[:2]) + ("..." if len(matched) > 2 else ""),
-        )
-        return adapted
-
-    sample_inner = discover_clippable_inner_linear_module_keys(model)[:5]
-    tried = [f"{label}={spec!r}" for label, spec in candidate_specs]
-    msg = (
-        "No modules matched LoRA target_modules for ClippableLinear layers. "
-        f"Tried: {'; '.join(tried)}. "
-        f"Example inner linear keys: {sample_inner}. "
-        "Set LORA_TARGET_SCOPE in INIT_HP if the tower path differs, or pass a "
-        "custom target_modules regex."
+    groups = (
+        (
+            "under",
+            language_names,
+            _anchored_lora_target_regex(language_names, [], prefix, []),
+        ),
+        (
+            "outside",
+            tower_names,
+            _anchored_lora_target_regex([], tower_names, prefix, skipped_towers),
+        ),
     )
-    raise ValueError(msg)
+    matched: list[str] = []
+    for where, names, spec in groups:
+        if not names:
+            continue
+        group_matched = list_peft_matched_module_keys(
+            model, spec, exclude_modules=exclude_modules
+        )
+        if not group_matched:
+            msg = (
+                f"No modules {where} {prefix!r} match LoRA targets {names}; "
+                "language-model linears are "
+                f"{_language_model_linear_leaf_names(model, prefix)}"
+            )
+            raise ValueError(msg)
+        matched.extend(group_matched)
+
+    target_spec = _anchored_lora_target_regex(
+        language_names, tower_names, prefix, skipped_towers
+    )
+    logger.info(
+        "Anchored LoRA target_modules at %s (%d modules), e.g. %s",
+        prefix,
+        len(matched),
+        ", ".join(matched[:2]) + ("..." if len(matched) > 2 else ""),
+    )
+    return _clone_lora_config_with_targets(lora_config, target_spec)
 
 
 def log_cuda_memory_snapshot(label: str, device_index: int = 0) -> None:
@@ -1837,10 +1740,14 @@ def report_model_kernels(model: nn.Module, attn_implementation: str) -> None:
                 f"{module.config._attn_implementation}",
             )
         namespace_name = type(module).__module__
-        # Mamba-style modeling modules expose a module-level fast-path flag.
-        fast_path = getattr(
-            sys.modules.get(namespace_name), "is_fast_path_available", None
-        )
+        namespace = sys.modules.get(namespace_name)
+        # Legacy modeling modules expose a module-level fast-path flag.
+        fast_path = getattr(namespace, "is_fast_path_available", None)
+        if fast_path is None and hasattr(
+            namespace, "mamba2_split_conv1d_scan_combined"
+        ):
+            # Transformers 5.16+ resolves the fused kernel from mamba_ssm when installed.
+            fast_path = importlib.util.find_spec("mamba_ssm") is not None
         if fast_path is not None and namespace_name not in namespaces_seen:
             namespaces_seen.add(namespace_name)
             lines.append(f"mamba fast path {namespace_name}: {fast_path}")
@@ -1889,11 +1796,8 @@ def create_model_from_name_or_path(
 
     model_config = dict(model_config) if model_config else {}
     model_config.setdefault("torch_dtype", torch.bfloat16)
-    for key, value in (
-        family_runtime(model_name_or_path).trainer.model_dump(exclude_none=True).items()
-    ):
-        if key == "attn_implementation":
-            continue
+    trainer = family_runtime(model_name_or_path).trainer
+    for key, value in trainer.load_kwargs().items():
         model_config.setdefault(key, value)
     model_config["attn_implementation"] = resolve_attn_implementation(
         model_config.get("attn_implementation"),
@@ -1903,7 +1807,7 @@ def create_model_from_name_or_path(
         patch_flex_attention_kernel_options()
     load_remote_code(
         model_name_or_path,
-        AutoModelForCausalLM,
+        trainer.model_class,
         model_config.get("trust_remote_code"),
     )
     if add_value_head:
@@ -1912,7 +1816,7 @@ def create_model_from_name_or_path(
             **model_config,
         )
     else:
-        model = AutoModelForCausalLM.from_pretrained(
+        model = trainer.model_class.from_pretrained(
             pretrained_model_name_or_path=model_name_or_path,
             **model_config,
         )
@@ -2008,10 +1912,20 @@ def fill_outside_mask(
 def masked_mean(
     values: torch.Tensor, mask: torch.Tensor, axis: int | None = None
 ) -> torch.Tensor:
-    """Compute mean of tensor with a masked values."""
+    """Mean of ``values`` over a 0/1 ``mask``; an empty mask averages to ``0``.
+
+    :param values: Values to reduce.
+    :type values: torch.Tensor
+    :param mask: 0/1 mask selecting which values count.
+    :type mask: torch.Tensor
+    :param axis: Dimension to reduce, or ``None`` for all of them.
+    :type axis: int | None
+    :return: The masked mean.
+    :rtype: torch.Tensor
+    """
     if axis is not None:
-        return (values * mask).sum(dim=axis) / mask.sum(dim=axis)
-    return (values * mask).sum() / mask.sum()
+        return (values * mask).sum(dim=axis) / mask.sum(dim=axis).clamp(min=1)
+    return (values * mask).sum() / mask.sum().clamp(min=1)
 
 
 def masked_var(
@@ -3017,15 +2931,6 @@ def k3_kl_penalty_reference(
 # ---------------------------------------------------------------------------
 
 
-def resolve_vllm_max_lora_rank(
-    vllm_max_lora_rank: int,
-    lora_rank: int | None,
-) -> int:
-    """Ensure vLLM ``max_lora_rank`` is at least the trainer LoRA rank."""
-    trainer_rank = int(lora_rank or 0)
-    return max(int(vllm_max_lora_rank), trainer_rank)
-
-
 def resolve_vllm_max_num_batched_tokens(
     max_num_seqs: int,
     max_model_len: int,
@@ -3050,13 +2955,101 @@ def resolve_vllm_max_num_batched_tokens(
     return min(worst_case, concurrent_budget)
 
 
+VLLM_LOGPROBS_MODE = "processed_logprobs"
+"""vLLM ``logprobs_mode`` every rollout engine runs with.
+
+The trainer's importance ratio divides by the probability a token was drawn
+with, which is the distribution after penalties, logit bias, temperature,
+``min_p`` and top-k/top-p. vLLM's default ``raw_logprobs`` is taken before all
+of them.
+"""
+
+
+@dataclass(frozen=True)
+class RolloutSampling:
+    """Per-request vLLM sampling settings rollout generation draws tokens with.
+
+    :param temperature: Sampling temperature.
+    :type temperature: float
+    :param top_p: Nucleus sampling probability mass; ``1.0`` keeps every token.
+    :type top_p: float
+    :param top_k: Most likely tokens kept per step; ``0`` keeps every token.
+    :type top_k: int
+    :param min_p: Floor relative to the most likely token's probability.
+    :type min_p: float
+    :param repetition_penalty: Penalty on tokens already in the prompt or output.
+    :type repetition_penalty: float
+    :param presence_penalty: Penalty on tokens that already appeared.
+    :type presence_penalty: float
+    :param frequency_penalty: Penalty scaled by how often a token appeared.
+    :type frequency_penalty: float
+    :param min_tokens: Tokens generated before a stop token may end the request.
+    :type min_tokens: int
+    """
+
+    temperature: float
+    top_p: float = 1.0
+    top_k: int = 0
+    min_p: float = 0.0
+    repetition_penalty: float = 1.0
+    presence_penalty: float = 0.0
+    frequency_penalty: float = 0.0
+    min_tokens: int = 0
+
+    def vllm_kwargs(self, max_tokens: int) -> dict[str, Any]:
+        """Return ``SamplingParams`` keyword arguments for one request.
+
+        :param max_tokens: Maximum tokens the request generates.
+        :type max_tokens: int
+        :return: Sampling keyword arguments, ``min_tokens`` capped at *max_tokens*.
+        :rtype: dict[str, Any]
+        """
+        return {
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "top_k": self.top_k,
+            "min_p": self.min_p,
+            "repetition_penalty": self.repetition_penalty,
+            "presence_penalty": self.presence_penalty,
+            "frequency_penalty": self.frequency_penalty,
+            "max_tokens": max_tokens,
+            "min_tokens": min(self.min_tokens, max_tokens),
+        }
+
+
+def apply_vllm_compile_cache_env(gpu_ids: Sequence[int | str]) -> str:
+    """Point ``VLLM_CACHE_ROOT`` at a compile cache directory for this GPU set, under any explicit root.
+
+    :param gpu_ids: Node-local GPU ids, or ``CUDA_VISIBLE_DEVICES`` entries, of the engine's devices.
+    :type gpu_ids: Sequence[int | str]
+    :return: The cache root in effect after this call.
+    :rtype: str
+    """
+    # Compiled graphs hard-code ``cuda:<id>`` but vLLM's cache key omits the
+    # device. TP rank ``r`` runs on the ``r``-th lowest GPU, so the set fixes
+    # every rank's device.
+    gpu_dir = "gpu_" + "_".join(sorted(str(gpu_id) for gpu_id in gpu_ids))
+    existing = os.environ.get("VLLM_CACHE_ROOT")
+    parent = (
+        Path(existing)
+        if existing
+        else Path(tempfile.gettempdir()) / "vllm_compile_cache"
+    )
+    # A root this function set is already one GPU set's directory.
+    if parent.name.startswith("gpu_"):
+        parent = parent.parent
+    cache_root = str(parent / gpu_dir)
+    os.environ["VLLM_CACHE_ROOT"] = cache_root
+    return cache_root
+
+
 def build_vllm_llm_init_kwargs(
     vllm_config: VLLMConfig,
     trainer_model_name_or_path: str,
     max_model_len: int,
     process_index: int = 0,
     lora_rank: int | None = None,
-    lora_target_modules: str | Collection[str] | None = None,
+    tower_lora_target_modules: Collection[str] | None = None,
 ) -> dict[str, Any]:
     """Build kwargs for ``vllm.LLM`` from :class:`~agilerl.utils.algo_utils.VLLMConfig`.
 
@@ -3070,8 +3063,8 @@ def build_vllm_llm_init_kwargs(
     :type process_index: int
     :param lora_rank: Trainer LoRA rank, used to size ``max_lora_rank``.
     :type lora_rank: int | None
-    :param lora_target_modules: Trainer PEFT ``target_modules``; gates tower LoRA.
-    :type lora_target_modules: str | Collection[str] | None
+    :param tower_lora_target_modules: ``lora_config.tower_target_modules``; enables tower LoRA.
+    :type tower_lora_target_modules: Collection[str] | None
     :return: Keyword arguments for ``vllm.LLM``.
     :rtype: dict[str, Any]
     """
@@ -3082,7 +3075,7 @@ def build_vllm_llm_init_kwargs(
     )
     try:
         runtime = family_runtime(vllm_model)
-        family_vllm_kwargs = runtime.vllm.model_dump(exclude_none=True)
+        family_vllm_kwargs = runtime.vllm.engine_kwargs()
     except OSError:
         runtime = None
         family_vllm_kwargs = {}
@@ -3092,14 +3085,18 @@ def build_vllm_llm_init_kwargs(
         if explicit_batched_tokens is not None
         else family_vllm_kwargs.get("max_num_batched_tokens")
     )
+    tensor_parallel_size = vllm_config.tensor_parallel_size
+    if tensor_parallel_size is None:
+        # Unset width: this in-process engine uses one GPU.
+        tensor_parallel_size = 1
     kwargs: dict[str, Any] = {
         "model": vllm_model,
-        "tensor_parallel_size": vllm_config.tensor_parallel_size,
+        "tensor_parallel_size": tensor_parallel_size,
         "gpu_memory_utilization": vllm_config.gpu_memory_utilization,
         "max_num_seqs": vllm_config.max_num_seqs,
         "max_model_len": max_model_len,
         "distributed_executor_backend": "external_launcher",
-        "seed": process_index // vllm_config.tensor_parallel_size,
+        "seed": process_index // tensor_parallel_size,
         "max_num_batched_tokens": resolve_vllm_max_num_batched_tokens(
             vllm_config.max_num_seqs,
             max_model_len,
@@ -3107,6 +3104,7 @@ def build_vllm_llm_init_kwargs(
         ),
         "model_impl": "vllm",
         "enable_sleep_mode": vllm_config.sleep_mode,
+        "logprobs_mode": VLLM_LOGPROBS_MODE,
     }
     if vllm_config.dtype is not None:
         kwargs["dtype"] = vllm_config.dtype
@@ -3126,9 +3124,9 @@ def build_vllm_llm_init_kwargs(
     # Colocated vLLM always serves LoRA: the trainer shares vLLM's base and syncs
     # only the adapter per rollout.
     kwargs["enable_lora"] = True
-    kwargs["max_lora_rank"] = resolve_vllm_max_lora_rank(
+    kwargs["max_lora_rank"] = resolve_lora_rank_ceiling(
         vllm_config.max_lora_rank,
-        lora_rank,
+        int(lora_rank or 0),
     )
     kwargs["max_loras"] = vllm_config.max_loras
     for key, value in family_vllm_kwargs.items():
@@ -3136,16 +3134,15 @@ def build_vllm_llm_init_kwargs(
     if runtime is not None:
         if runtime.trainer.trust_remote_code is not None:
             kwargs.setdefault("trust_remote_code", runtime.trainer.trust_remote_code)
+        apply_multimodal_engine_kwargs(
+            kwargs,
+            strip_multimodal_towers=vllm_config.strip_multimodal_towers,
+        )
         apply_tower_connector_lora_engine_kwargs(
             kwargs,
             strip_multimodal_towers=vllm_config.strip_multimodal_towers,
             runtime=runtime,
-            lora_target_modules=lora_target_modules,
-        )
-        apply_language_tower_engine_kwargs(
-            kwargs,
-            strip_multimodal_towers=vllm_config.strip_multimodal_towers,
-            runtime=runtime,
+            tower_target_modules=tower_lora_target_modules,
         )
     return kwargs
 
@@ -3193,70 +3190,19 @@ def peft_lora_state_dict_key_to_module_key(key: str) -> str:
     return key
 
 
-def _vllm_lora_key_prefix(model_type: str | None) -> str | None:
-    """Catalog vLLM language-layer prefix for ``model_type``, or None."""
-    if not isinstance(model_type, str):
-        return None
-    runtime = FAMILY_RUNTIME_CONFIGS.get(model_type)
-    if runtime is None:
-        return None
-    return runtime.language_tower.lora_key_prefix
+def remap_peft_lora_key_for_vllm(key: str) -> str:
+    """Drop the PEFT ``.base_layer`` segment the Hugging Face checkpoint does not have.
 
-
-def remap_peft_lora_key_for_vllm(
-    key: str,
-    *,
-    strip_multimodal_towers: bool | list[str] = False,
-    model_type: str | None = None,
-) -> str:
-    """Normalize PEFT LoRA keys (ClippableLinear, Nemotron Super VL vision/language/projector) for vLLM.
+    Hugging Face to vLLM module renames are the serving model's
+    ``hf_to_vllm_mapper``, applied by vLLM. A Gemma 4 ClippableLinear keeps its
+    inner ``.linear``: vLLM serves the tower with that module wrapped.
 
     :param key: PEFT state-dict key.
     :type key: str
-    :param strip_multimodal_towers: ``True`` remaps language keys onto the
-        language-tower module (``model.``). Any other value keeps the nested
-        VL prefix (``language_model.model.``).
-    :type strip_multimodal_towers: bool | list[str]
-    :param model_type: Hugging Face ``model_type``; families declaring a
-        ``language_tower.lora_key_prefix`` gain vLLM's language-layer nesting
-        when towers are kept.
-    :type model_type: str | None
-    :return: Key vLLM's LoRA loader expects.
+    :return: Key in the checkpoint's module naming.
     :rtype: str
     """
-    key = key.replace(".linear.lora_A.", ".lora_A.").replace(
-        ".linear.lora_B.", ".lora_B."
-    )
-    key = key.replace(".base_layer.", ".")
-    vllm_prefix = _vllm_lora_key_prefix(model_type)
-    if (
-        vllm_prefix is not None
-        and strip_multimodal_towers is not True
-        and f"{vllm_prefix}layers." not in key
-    ):
-        if "model.language_model.layers." in key:
-            key = key.replace("model.language_model.layers.", f"{vllm_prefix}layers.")
-        elif "model.layers." in key:
-            key = key.replace("model.layers.", f"{vllm_prefix}layers.")
-    if "language_model.backbone." in key:
-        language_prefix = (
-            "model." if strip_multimodal_towers is True else "language_model.model."
-        )
-        key = key.replace("language_model.backbone.", language_prefix)
-    if "vision_model.encoder.layer." in key:
-        key = key.replace(
-            "vision_model.encoder.layer.", "vision_model.model.encoder.layers."
-        )
-    if "vision_model.model.encoder.layers." in key:
-        key = key.replace(".attention.attention.query", ".attn.query")
-        key = key.replace(".attention.attention.key", ".attn.key")
-        key = key.replace(".attention.attention.value", ".attn.value")
-        key = key.replace(".attention.output.dense", ".attn.proj")
-    if "vision_projector.mlp1.linear1" in key:
-        key = key.replace("vision_projector.mlp1.linear1", "mlp1.1")
-    if "vision_projector.mlp1.linear2" in key:
-        key = key.replace("vision_projector.mlp1.linear2", "mlp1.3")
-    return key
+    return key.replace(".base_layer.", ".")
 
 
 def expert_lora_vllm_key_map(peft_model: nn.Module) -> dict[str, str]:
@@ -3304,31 +3250,29 @@ def expert_lora_vllm_key_map(peft_model: nn.Module) -> dict[str, str]:
 
 
 def filter_peft_state_dict_for_vllm_lora(
-    state_dict: dict[str, torch.Tensor],
-    target_modules: str | list[str] | None,
-    expert_key_map: dict[str, str] | None = None,
-    strip_multimodal_towers: bool | list[str] = False,
-    model_type: str | None = None,
+    state_dict: Mapping[str, torch.Tensor],
+    expert_key_map: Mapping[str, str] | None = None,
 ) -> dict[str, torch.Tensor]:
-    """Keep LoRA tensors whose modules match the trainer ``target_modules`` spec or expert map."""
+    """Keep the LoRA tensors of a PEFT state dict, keyed for vLLM's LoRA loader.
+
+    :param state_dict: PEFT state dict of one adapter.
+    :type state_dict: Mapping[str, torch.Tensor]
+    :param expert_key_map: Packed-expert key map from
+        :func:`expert_lora_vllm_key_map`.
+    :type expert_key_map: Mapping[str, str] | None
+    :return: LoRA tensors, the same tensor objects as ``state_dict``.
+    :rtype: dict[str, torch.Tensor]
+    """
     filtered: dict[str, torch.Tensor] = {}
     for key, tensor in state_dict.items():
         module_key = peft_lora_state_dict_key_to_module_key(key)
+        if module_key == key:
+            continue
         if expert_key_map is not None and module_key in expert_key_map:
             suffix = key.removeprefix(module_key)
             filtered[f"{expert_key_map[module_key]}{suffix}"] = tensor
             continue
-        if target_modules is None or not peft_target_key_matches(
-            module_key, target_modules
-        ):
-            continue
-        filtered[
-            remap_peft_lora_key_for_vllm(
-                key,
-                strip_multimodal_towers=strip_multimodal_towers,
-                model_type=model_type,
-            )
-        ] = tensor
+        filtered[remap_peft_lora_key_for_vllm(key)] = tensor
     return filtered
 
 
@@ -3399,22 +3343,67 @@ def _json_safe_value(obj: object) -> JSONValue:
     return str(obj)
 
 
+def vllm_lora_state_dict(
+    peft_model: PeftModel,
+    adapter_name: str,
+    gathered_state: Mapping[str, torch.Tensor] | None = None,
+) -> dict[str, torch.Tensor]:
+    """Return an adapter's LoRA tensors keyed the way vLLM's LoRA loader parses them.
+
+    :param peft_model: PEFT model holding the adapter.
+    :type peft_model: PeftModel
+    :param adapter_name: Adapter to export.
+    :type adapter_name: str
+    :param gathered_state: Dense tensors keyed by ``named_parameters`` name, from
+        an all-rank gather. Under FSDP2 the state-dict hooks return sharded
+        DTensors even for gathered params, so the dense values are swapped in.
+    :type gathered_state: Mapping[str, torch.Tensor] | None
+    :return: LoRA tensors keyed for vLLM.
+    :rtype: dict[str, torch.Tensor]
+    :raises ValueError: If the adapter has no LoRA tensors, or a trainable LoRA
+        tensor is missing from the export.
+    """
+    if not HAS_LLM_DEPENDENCIES:
+        msg = "vllm_lora_state_dict requires peft and transformers."
+        raise ImportError(msg)
+
+    # Keyed like named_modules(): PEFT >= 0.21 selects adapter keys from module
+    # names, which keep the wrapper segments that state_dict() drops.
+    live_state: dict[str, torch.Tensor] = dict(peft_model.named_parameters())
+    if gathered_state is not None:
+        live_state.update(gathered_state)
+    raw = {
+        canonical_fsdp_param_fqn(key): tensor
+        for key, tensor in get_peft_model_state_dict(
+            peft_model, state_dict=live_state, adapter_name=adapter_name
+        ).items()
+    }
+    target_parameters = getattr(
+        peft_model.peft_config[adapter_name], "target_parameters", None
+    )
+    state = filter_peft_state_dict_for_vllm_lora(
+        raw,
+        expert_key_map=(
+            expert_lora_vllm_key_map(peft_model) if target_parameters else None
+        ),
+    )
+    if not state:
+        msg = (
+            f"Adapter {adapter_name!r} has no LoRA tensors to export "
+            f"({len(raw)} state-dict tensors)"
+        )
+        raise ValueError(msg)
+    check_vllm_lora_export_complete(peft_model, adapter_name, live_state, state)
+    return state
+
+
 def save_peft_adapter_for_vllm_rollout(
     peft_model: PeftModel,
     staging_dir: Path | str,
     adapter_name: str,
-    target_modules: str | list[str] | None,
-    expert_key_map: dict[str, str] | None = None,
-    strip_multimodal_towers: bool | list[str] = False,
+    gathered_state: Mapping[str, torch.Tensor] | None = None,
 ) -> Path:
-    """Export a PEFT adapter checkpoint that vLLM can load for colocated rollout.
-
-    Keeps only tensors that match the same ``target_modules`` spec used for PEFT
-    training (from :func:`adapt_lora_config_for_model`) or the packed-experts
-    ``expert_key_map`` (from :func:`expert_lora_vllm_key_map`). Rewrites
-    ClippableLinear ``.linear`` suffixes in keys for vLLM. ``staging_dir`` must
-    be process-private (AgileRL stages per-rank when distributed): every caller
-    writes the adapter files.
+    """Write an adapter checkpoint that vLLM loads with ``LoRARequest``.
 
     :param peft_model: PEFT model holding the adapter.
     :type peft_model: PeftModel
@@ -3422,54 +3411,13 @@ def save_peft_adapter_for_vllm_rollout(
     :type staging_dir: Path | str
     :param adapter_name: Adapter to export.
     :type adapter_name: str
-    :param target_modules: PEFT ``target_modules`` spec used in training.
-    :type target_modules: str | list[str] | None
-    :param expert_key_map: Packed-expert key map from
-        :func:`expert_lora_vllm_key_map`.
-    :type expert_key_map: dict[str, str] | None
+    :param gathered_state: Dense LoRA tensors keyed by ``named_parameters`` name.
+    :type gathered_state: Mapping[str, torch.Tensor] | None
     :return: Directory containing the exported adapter.
     :rtype: Path
     """
-    if not HAS_LLM_DEPENDENCIES:
-        msg = "save_peft_adapter_for_vllm_rollout requires peft and transformers."
-        raise ImportError(msg)
-
     adapter_path = Path(staging_dir) / adapter_name
-    # Keyed like named_modules(): PEFT >= 0.21 selects adapter keys from module
-    # names, which keep the wrapper segments that state_dict() drops.
-    live_state = dict(peft_model.named_parameters())
-    state = {
-        canonical_fsdp_param_fqn(key): tensor
-        for key, tensor in get_peft_model_state_dict(
-            peft_model, state_dict=live_state, adapter_name=adapter_name
-        ).items()
-    }
-    n_before = len(state)
-    model_type = getattr(getattr(peft_model, "config", None), "model_type", None)
-    state = filter_peft_state_dict_for_vllm_lora(
-        state,
-        target_modules,
-        expert_key_map=expert_key_map,
-        strip_multimodal_towers=strip_multimodal_towers,
-        model_type=model_type if isinstance(model_type, str) else None,
-    )
-    if not state:
-        msg = (
-            f"No LoRA tensors left for vLLM export after filtering with "
-            f"target_modules={target_modules!r} (had {n_before} tensors). "
-            "Ensure adapt_lora_config_for_model ran with the intended "
-            "LORA_TARGET_SCOPE before training."
-        )
-        raise ValueError(msg)
-    check_vllm_lora_export_complete(peft_model, adapter_name, live_state, state)
-    if n_before != len(state):
-        logger.info(
-            "vLLM LoRA export: kept %d / %d tensors (target_modules=%r)",
-            len(state),
-            n_before,
-            target_modules,
-        )
-
+    state = vllm_lora_state_dict(peft_model, adapter_name, gathered_state)
     adapter_path.mkdir(parents=True, exist_ok=True)
     # FSDP2 keeps adapter params as sharded ``DTensor``s; ``gather_params``
     # may not install dense locals on the module for every param, so
@@ -3484,7 +3432,7 @@ def save_peft_adapter_for_vllm_rollout(
     cfg_dict: dict[str, JSONValue] = {
         str(key): _json_safe_value(value) for key, value in peft_cfg.to_dict().items()
     }
-    cfg_dict["target_modules"] = _json_safe_value(target_modules or [])
+    cfg_dict["target_modules"] = cfg_dict.get("target_modules") or []
 
     (adapter_path / "adapter_config.json").write_text(
         json.dumps(cfg_dict, indent=2),
