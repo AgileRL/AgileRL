@@ -22,7 +22,7 @@ from agilerl.architectures.runtime import (
     TrainerRuntimeConfig,
     VllmRuntimeConfig,
 )
-from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
+from agilerl.arena.models.model_info import REASONING_PARSERS, SUPPORTED_MODEL_INFO
 from agilerl.utils.patching import library_shim
 
 # Trainer uses transformers' nemotron_h class; the checkpoint's auto_map code
@@ -32,10 +32,10 @@ NEMOTRON_H_RUNTIME_CONFIG = ModelRuntimeConfig(
     vllm=VllmRuntimeConfig(
         mamba_cache_mode="align",
         max_num_batched_tokens=8192,
-        reasoning_parser="nemotron_v3",
         enable_prefix_caching=True,
         dense_mamba_prefix_cache=True,
     ),
+    reasoning_parser=REASONING_PARSERS["nemotron_h"],
     patch=PatchRuntimeConfig(
         install=install_mamba_patches,
         mamba=MambaPatchConfig(
@@ -112,12 +112,16 @@ GEMMA_SWA_RUNTIME_CONFIG = GEMMA_SWA_TEXT_RUNTIME_CONFIG.model_copy(
 )
 
 GEMMA4_TEXT_RUNTIME_CONFIG = GEMMA_SWA_TEXT_RUNTIME_CONFIG.model_copy(
-    update={"tool_call_parser": "gemma4"},
+    update={
+        "tool_call_parser": "gemma4",
+        "reasoning_parser": REASONING_PARSERS["gemma4_text"],
+    },
 )
 
 GEMMA4_RUNTIME_CONFIG = GEMMA_SWA_RUNTIME_CONFIG.model_copy(
     update={
         "tool_call_parser": "gemma4",
+        "reasoning_parser": REASONING_PARSERS["gemma4"],
         "patch": PatchRuntimeConfig(install=install_gemma4_vision_patches),
         # vLLM swaps every tower linear for a LoRA layer and keeps HF names;
         # attention and MLP linears sit under clippable wrappers as ``linear``.
@@ -143,23 +147,27 @@ GEMMA4_RUNTIME_CONFIG = GEMMA_SWA_RUNTIME_CONFIG.model_copy(
 GPT_OSS_RUNTIME_CONFIG = ModelRuntimeConfig(
     trainer=TrainerRuntimeConfig(attn_implementation="flex_attention"),
     tool_call_parser="harmony",
+    reasoning_parser=REASONING_PARSERS["gpt_oss"],
 )
 
 # Families whose only catalog setting is the tool-call format.
 TOOL_CALL_TAG_RUNTIME_CONFIG = ModelRuntimeConfig(tool_call_parser="tool_call")
 GRANITE3_RUNTIME_CONFIG = ModelRuntimeConfig(tool_call_parser="granite3")
+QWEN3_RUNTIME_CONFIG = ModelRuntimeConfig(
+    tool_call_parser="tool_call", reasoning_parser=REASONING_PARSERS["qwen3"]
+)
 
 
 # Linear-attention rejects mamba_cache_mode "all"; align needs prefix caching.
 QWEN3_5_TEXT_RUNTIME_CONFIG = ModelRuntimeConfig(
     vllm=VllmRuntimeConfig(
         mamba_cache_mode="align",
-        reasoning_parser="qwen3",
         enable_prefix_caching=True,
         dense_mamba_prefix_cache=True,
     ),
     patch=PatchRuntimeConfig(install=install_qwen_gdn_patches),
     tool_call_parser="tool_call",
+    reasoning_parser=REASONING_PARSERS["qwen3_5_text"],
 )
 
 # AutoModelForCausalLM maps qwen3_5 to a text-only class that drops model.visual.
@@ -175,8 +183,8 @@ QWEN3_5_RUNTIME_CONFIG = QWEN3_5_TEXT_RUNTIME_CONFIG.model_copy(
 
 FAMILY_RUNTIME_CONFIGS: Mapping[str, ModelRuntimeConfig] = {
     "qwen2": TOOL_CALL_TAG_RUNTIME_CONFIG,
-    "qwen3": TOOL_CALL_TAG_RUNTIME_CONFIG,
-    "qwen3_moe": TOOL_CALL_TAG_RUNTIME_CONFIG,
+    "qwen3": QWEN3_RUNTIME_CONFIG,
+    "qwen3_moe": QWEN3_RUNTIME_CONFIG,
     "granitemoe": GRANITE3_RUNTIME_CONFIG,
     "granitemoehybrid": TOOL_CALL_TAG_RUNTIME_CONFIG,
     "nemotron_h": NEMOTRON_H_RUNTIME_CONFIG,

@@ -197,7 +197,6 @@ class TestFamilyRuntime:
         assert architectures.family_runtime("nvidia/nemotron").vllm.engine_kwargs() == {
             "mamba_cache_mode": "align",
             "max_num_batched_tokens": 8192,
-            "reasoning_parser": "nemotron_v3",
             "enable_prefix_caching": True,
             "prefix_cache_retention_interval": None,
         }

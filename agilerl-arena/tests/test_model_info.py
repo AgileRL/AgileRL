@@ -16,10 +16,13 @@ from agilerl.arena.models.model_info import (
     ARCH_HYBRID,
     ARCH_HYBRID_MOE,
     ARCH_MOE,
+    NON_REASONING_MODEL_TYPES,
+    REASONING_PARSERS,
     STATUS_DEPRECATED,
     STATUS_LIVE,
     SUPPORTED_MODEL_INFO,
     ModelInfo,
+    resolve_reasoning_parser,
     supported_path,
 )
 from agilerl.arena.models.networks import (
@@ -756,3 +759,59 @@ class TestResolveLoraDefaults:
 
         assert lora.target_parameters == target_parameters
         assert lora.lora_dropout == 0.05
+
+
+class TestResolveReasoningParser:
+    def test_every_supported_model_resolves_to_its_family_parser(self) -> None:
+        expected = {
+            "Qwen/Qwen2.5-0.5B-Instruct": None,
+            "Qwen/Qwen3-1.7B": "qwen3",
+            "Qwen/Qwen3-4B": "qwen3",
+            "Qwen/Qwen3.5-0.8B": "qwen3",
+            "Qwen/Qwen3.5-2B": "qwen3",
+            "Qwen/Qwen3.5-4B": "qwen3",
+            "Qwen/Qwen3.5-9B": "qwen3",
+            "Qwen/Qwen3.6-35B-A3B": "qwen3",
+            "Qwen/Qwen3.8-27B": "qwen3",
+            "ibm-granite/granite-4.0-micro": None,
+            "ibm-granite/granite-4.0-micro-base": None,
+            "ibm-granite/granite-4.0-h-tiny": None,
+            "ibm-granite/granite-3.1-3b-a800m-instruct": None,
+            "google/gemma-4-E4B-it": "gemma4",
+            "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16": "nemotron_v3",
+            "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16": "nemotron_v3",
+            "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16": "nemotron_v3",
+            "openai/gpt-oss-20b": "openai_gptoss",
+        }
+
+        resolved = {
+            hub_id: resolve_reasoning_parser({}, info.model_type)
+            for hub_id, info in SUPPORTED_MODEL_INFO.items()
+        }
+
+        assert resolved == expected
+
+    def test_every_supported_model_has_a_reasoning_decision(self) -> None:
+        undecided = {
+            hub_id: info.config["model_type"]
+            for hub_id, info in SUPPORTED_MODEL_INFO.items()
+            if info.config["model_type"] not in REASONING_PARSERS
+            and info.config["model_type"] not in NON_REASONING_MODEL_TYPES
+        }
+
+        assert undecided == {}
+
+    def test_no_model_type_is_both_reasoning_and_non_reasoning(self) -> None:
+        assert set(REASONING_PARSERS) & NON_REASONING_MODEL_TYPES == set()
+
+    def test_manifest_parser_wins_over_the_family_parser(self) -> None:
+        assert (
+            resolve_reasoning_parser({"reasoning_parser": "deepseek_r1"}, "gemma4")
+            == "deepseek_r1"
+        )
+
+    def test_manifest_parser_applies_to_an_unknown_model_type(self) -> None:
+        assert resolve_reasoning_parser({"reasoning_parser": "qwen3"}, None) == "qwen3"
+
+    def test_unknown_model_type_without_a_manifest_parser_has_none(self) -> None:
+        assert resolve_reasoning_parser({}, None) is None

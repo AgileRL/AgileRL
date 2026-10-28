@@ -1538,3 +1538,104 @@ class TestPydanticModelsForbidExtra:
 
         assert missing == wire_subset
         assert all(extra_by_name[name] == "ignore" for name in wire_subset)
+
+
+class TestLLMAlgorithmSpecCheckThinkingBudgetParser:
+    @pytest.mark.parametrize(
+        ("model_type", "vllm_engine_args"),
+        [
+            ("gemma4", {}),
+            ("qwen3", {}),
+            ("nemotron_h", {}),
+            ("llama", {"reasoning_parser": "deepseek_r1"}),
+        ],
+    )
+    def test_accepts_a_budget_with_reasoning_tokens(
+        self, model_type: str, vllm_engine_args: dict[str, str]
+    ) -> None:
+        spec = GRPOSpec(
+            group_size=2,
+            max_output_tokens=32,
+            thinking_token_budget=8,
+            vllm_engine_args=vllm_engine_args,
+        )
+
+        spec.check_thinking_budget_parser(model_type)
+
+    def test_accepts_no_budget_without_a_parser(self) -> None:
+        GRPOSpec(group_size=2).check_thinking_budget_parser("gpt_oss")
+
+    def test_rejects_a_budget_for_a_model_without_a_parser(self) -> None:
+        spec = GRPOSpec(
+            group_size=2,
+            max_output_tokens=32,
+            thinking_token_budget=8,
+            pretrained_model_name_or_path="Qwen/Qwen2.5-0.5B-Instruct",
+        )
+
+        with pytest.raises(
+            ValueError,
+            match=(
+                r"^thinking_token_budget=8 needs a vLLM reasoning parser with "
+                r"reasoning start and end tokens, and Qwen/Qwen2\.5-0\.5B-Instruct "
+                r"has none\. Unset thinking_token_budget, or set "
+                r"algorithm\.vllm_engine_args\.reasoning_parser to one that has "
+                r"them: deepseek_r1, gemma4, nemotron_v3, qwen3\.$"
+            ),
+        ):
+            spec.check_thinking_budget_parser("qwen2")
+
+    def test_rejects_a_budget_for_gpt_oss_whose_parser_cannot_enforce_it(
+        self,
+    ) -> None:
+        spec = GRPOSpec(
+            group_size=2,
+            max_output_tokens=32,
+            thinking_token_budget=8,
+            pretrained_model_name_or_path="openai/gpt-oss-20b",
+        )
+
+        with pytest.raises(
+            ValueError, match=r"and reasoning parser openai_gptoss has none\."
+        ):
+            spec.check_thinking_budget_parser("gpt_oss")
+
+    def test_rejects_a_manifest_parser_without_reasoning_tokens(self) -> None:
+        spec = GRPOSpec(
+            group_size=2,
+            max_output_tokens=32,
+            thinking_token_budget=8,
+            vllm_engine_args={"reasoning_parser": "openai_gptoss"},
+        )
+
+        with pytest.raises(
+            ValueError, match=r"and reasoning parser openai_gptoss has none\."
+        ):
+            spec.check_thinking_budget_parser("gpt_oss")
+
+
+class TestLLMEnvSpecSendsReasoningProperty:
+    def test_reward_file_rollout_sends_the_reasoning(self) -> None:
+        spec = LLMEnvSpec(
+            env_type="rollout",
+            dataset="rows",
+            rubric_file_path="rubric.py",
+            prompt_template={"user_0": "{q}"},
+        )
+
+        assert spec.sends_reasoning is True
+
+    def test_env_url_rollout_sends_only_the_action(self) -> None:
+        spec = LLMEnvSpec(env_type="rollout", env_url="http://env", max_turns=1)
+
+        assert spec.sends_reasoning is False
+
+    def test_include_reasoning_overrides_the_default(self) -> None:
+        spec = LLMEnvSpec(
+            env_type="rollout",
+            env_url="http://env",
+            max_turns=1,
+            include_reasoning=True,
+        )
+
+        assert spec.sends_reasoning is True

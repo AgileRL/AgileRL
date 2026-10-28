@@ -305,6 +305,12 @@ These are the names this package reads:
    * - ``max_reward``
      - ``None``
      - Maximum achievable reward, used for accuracy reporting.
+   * - ``include_reasoning``
+     - ``None``
+     - Send each turn's reasoning, with the model's markers (``</think>``,
+       Gemma 4 channels, gpt-oss harmony channels), to the reward or env.
+       Unset sends it to a ``rubric_file_path`` reward and sends an
+       ``entrypoint`` / ``env_url`` env only the text after the reasoning.
    * - ``entrypoint``
      - ``None``
      - The env to build: a registry id, or ``module:Class`` /

@@ -709,6 +709,17 @@ class TrainingManifest(BaseModel):
             raise ValueError(msg)
         return self
 
+    @model_validator(mode="after")
+    def _check_thinking_budget_parser(self) -> Self:
+        """vLLM enforces thinking_token_budget only through a reasoning parser."""
+        if not isinstance(self.algorithm, LLMAlgorithmSpec):
+            return self
+        model = SUPPORTED_MODEL_INFO.get(self.algorithm.pretrained_model_name_or_path)
+        # Only supported ids have a model_type offline; the Ray driver checks the rest.
+        if model is not None:
+            self.algorithm.check_thinking_budget_parser(model.model_type)
+        return self
+
     @field_serializer("network", mode="wrap")
     def _serialize_network(
         self, value: object, handler: Callable[[object], object], info: object

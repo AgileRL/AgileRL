@@ -58,16 +58,18 @@ class RecordingClient(FakeEnvClient):
         return super().step(action)
 
 
+GENERATED_ID = 9
+
+
 class RecordingTokenizer(MiniTokenizer):
-    """Decodes every generation as ``text`` and records each prompt it tokenizes."""
+    """Decodes ``GENERATED_ID`` as ``text`` and records each prompt it tokenizes."""
 
     def __init__(self, text: str) -> None:
         self.text = text
         self.prompts: list[str] = []
 
-    def decode(self, ids: object, **_: object) -> str:
-        del ids
-        return self.text
+    def decode(self, ids: list[int], **_: object) -> str:
+        return self.text if list(ids) == [GENERATED_ID] else ""
 
     def __call__(self, texts: list[str], **_: object) -> dict[str, torch.Tensor]:
         self.prompts.append(texts[0])
@@ -75,14 +77,86 @@ class RecordingTokenizer(MiniTokenizer):
         return {"input_ids": ids, "attention_mask": torch.ones_like(ids)}
 
 
+class PieceTokenizer(RecordingTokenizer):
+    """Decodes ids piece by piece, dropping ``special_ids`` when asked to skip them."""
+
+    def __init__(self, pieces: dict[int, str], special_ids: frozenset[int]) -> None:
+        super().__init__("")
+        self.pieces = pieces
+        self.special_ids = special_ids
+
+    def decode(self, ids: list[int], skip_special_tokens: bool = False) -> str:
+        return "".join(
+            self.pieces[i]
+            for i in ids
+            if not (skip_special_tokens and i in self.special_ids)
+        )
+
+    @property
+    def all_special_ids(self) -> list[int]:
+        return sorted(self.special_ids)
+
+    def get_vocab(self) -> dict[str, int]:
+        return {piece: token_id for token_id, piece in self.pieces.items()}
+
+    def encode(self, text: str, **kwargs: object) -> list[int]:
+        vocab = self.get_vocab()
+        return [vocab[text]] if text in vocab else super().encode(text, **kwargs)
+
+
+GEMMA_CHANNEL_OPEN = 100
+GEMMA_CHANNEL_CLOSE = 101
+QWEN_THINK_CLOSE = 151668
+REASONING_ID = 10
+ACTION_ID = 11
+GEMMA_TOKENIZER_PIECES = {
+    GEMMA_CHANNEL_OPEN: "<|channel>",
+    GEMMA_CHANNEL_CLOSE: "<channel|>",
+    REASONING_ID: "thought\nthe lamp is $5",
+    ACTION_ID: "click('12')",
+}
+QWEN_TOKENIZER_PIECES = {
+    QWEN_THINK_CLOSE: "</think>",
+    REASONING_ID: "the lamp is $5",
+    ACTION_ID: "\n\nclick('12')",
+}
+HARMONY_CHANNEL = 200005
+HARMONY_FINAL = 17196
+HARMONY_MESSAGE = 200008
+HARMONY_END = 200007
+HARMONY_START = 200006
+HARMONY_ANALYSIS = 20
+HARMONY_ASSISTANT = 21
+HARMONY_TOKENIZER_PIECES = {
+    HARMONY_CHANNEL: "<|channel|>",
+    HARMONY_FINAL: "final",
+    HARMONY_MESSAGE: "<|message|>",
+    HARMONY_END: "<|end|>",
+    HARMONY_START: "<|start|>",
+    HARMONY_ANALYSIS: "analysis",
+    HARMONY_ASSISTANT: "assistant",
+    REASONING_ID: "the final lamp is $5",
+    ACTION_ID: "click('12')",
+}
+HARMONY_SPECIAL_IDS = frozenset(
+    {HARMONY_CHANNEL, HARMONY_MESSAGE, HARMONY_END, HARMONY_START}
+)
+HARMONY_FINAL_HEADER = (HARMONY_CHANNEL, HARMONY_FINAL, HARMONY_MESSAGE)
+
+
 def rewrite_action(text: str) -> str:
     return f"quoted({text})"
 
 
-def restarted_prompt(action: str, *, processor: object = None) -> tuple[list[str], str]:
-    """Step one action and return the env's actions and the restarted prompt."""
+def step_once(
+    tokenizer: RecordingTokenizer,
+    gen_ids: list[int],
+    processor: object = None,
+    reasoning_end_ids: tuple[int, ...] | None = None,
+    include_reasoning: bool = False,
+) -> tuple[list[str], str]:
+    """Step one generation and return the env's actions and the restarted prompt."""
     client = RecordingClient()
-    tokenizer = RecordingTokenizer(action)
     harness = RolloutHarness(
         client,
         tokenizer,
@@ -90,10 +164,17 @@ def restarted_prompt(action: str, *, processor: object = None) -> tuple[list[str
         apply_chat_template=False,
         segment_prompt_tokens=2,
         action_processor=processor,
+        reasoning_end_ids=reasoning_end_ids,
+        include_reasoning=include_reasoning,
     )
     harness.reset()
-    harness.step(torch.tensor([[1, 9]], dtype=torch.long))
+    harness.step(torch.tensor([[1, *gen_ids]], dtype=torch.long))
     return client.actions, tokenizer.prompts[-1]
+
+
+def restarted_prompt(action: str, *, processor: object = None) -> tuple[list[str], str]:
+    """Step one action and return the env's actions and the restarted prompt."""
+    return step_once(RecordingTokenizer(action), [GENERATED_ID], processor)
 
 
 class TestRolloutHarnessActionProcessor:
@@ -112,6 +193,129 @@ class TestRolloutHarnessActionProcessor:
         # Assert
         assert actions == ["quoted(fill: hello)"]
         assert "1. quoted(fill: hello)" in prompt
+
+
+class TestRolloutHarnessReasoningEnd:
+    def test_special_token_end_marker_keeps_reasoning_out_of_the_action(self) -> None:
+        # Arrange
+        tokenizer = PieceTokenizer(
+            GEMMA_TOKENIZER_PIECES,
+            frozenset({GEMMA_CHANNEL_OPEN, GEMMA_CHANNEL_CLOSE}),
+        )
+        gen_ids = [GEMMA_CHANNEL_OPEN, REASONING_ID, GEMMA_CHANNEL_CLOSE, ACTION_ID]
+
+        # Act
+        actions, prompt = step_once(
+            tokenizer, gen_ids, reasoning_end_ids=(GEMMA_CHANNEL_CLOSE,)
+        )
+
+        # Assert
+        assert actions == ["click('12')"]
+        assert "1. click('12')" in prompt
+        assert "the lamp is $5" not in prompt
+
+    def test_think_close_is_resolved_from_the_tokenizer_by_default(self) -> None:
+        # Arrange
+        tokenizer = PieceTokenizer(QWEN_TOKENIZER_PIECES, frozenset())
+
+        # Act
+        actions, prompt = step_once(
+            tokenizer, [REASONING_ID, QWEN_THINK_CLOSE, ACTION_ID]
+        )
+
+        # Assert
+        assert actions == ["click('12')"]
+        assert "1. click('12')" in prompt
+        assert "the lamp is $5" not in prompt
+
+    def test_unclosed_reasoning_is_sent_whole(self) -> None:
+        tokenizer = PieceTokenizer(QWEN_TOKENIZER_PIECES, frozenset())
+
+        actions, _prompt = step_once(tokenizer, [REASONING_ID, ACTION_ID])
+
+        assert actions == ["the lamp is $5\n\nclick('12')"]
+
+    def test_harmony_final_channel_keeps_the_analysis_out_of_the_action(
+        self,
+    ) -> None:
+        # Arrange
+        tokenizer = PieceTokenizer(HARMONY_TOKENIZER_PIECES, HARMONY_SPECIAL_IDS)
+        gen_ids = [
+            HARMONY_CHANNEL,
+            HARMONY_ANALYSIS,
+            HARMONY_MESSAGE,
+            REASONING_ID,
+            HARMONY_END,
+            HARMONY_START,
+            HARMONY_ASSISTANT,
+            *HARMONY_FINAL_HEADER,
+            ACTION_ID,
+        ]
+
+        # Act
+        actions, prompt = step_once(
+            tokenizer, gen_ids, reasoning_end_ids=HARMONY_FINAL_HEADER
+        )
+
+        # Assert
+        assert actions == ["click('12')"]
+        assert "1. click('12')" in prompt
+        assert "the final lamp is $5" not in prompt
+
+
+GEMMA_TURN_END = 106
+GEMMA_TRACE_PIECES = {**GEMMA_TOKENIZER_PIECES, GEMMA_TURN_END: "<turn|>"}
+GEMMA_TRACE_SPECIAL_IDS = frozenset(
+    {GEMMA_CHANNEL_OPEN, GEMMA_CHANNEL_CLOSE, GEMMA_TURN_END}
+)
+
+
+class TestRolloutHarnessIncludeReasoning:
+    def test_sends_the_whole_turn_with_its_markers(self) -> None:
+        # Arrange
+        tokenizer = PieceTokenizer(GEMMA_TRACE_PIECES, GEMMA_TRACE_SPECIAL_IDS)
+        gen_ids = [
+            GEMMA_CHANNEL_OPEN,
+            REASONING_ID,
+            GEMMA_CHANNEL_CLOSE,
+            ACTION_ID,
+            GEMMA_TURN_END,
+        ]
+
+        # Act
+        actions, prompt = step_once(
+            tokenizer,
+            gen_ids,
+            reasoning_end_ids=(GEMMA_CHANNEL_CLOSE,),
+            include_reasoning=True,
+        )
+
+        # Assert
+        assert actions == ["<|channel>thought\nthe lamp is $5<channel|>click('12')"]
+        assert "1. click('12')" in prompt
+        assert "the lamp is $5" not in prompt
+
+    def test_think_trace_reaches_a_format_reward(self) -> None:
+        tokenizer = PieceTokenizer(QWEN_TOKENIZER_PIECES, frozenset())
+
+        actions, _prompt = step_once(
+            tokenizer,
+            [REASONING_ID, QWEN_THINK_CLOSE, ACTION_ID],
+            include_reasoning=True,
+        )
+
+        assert actions == ["the lamp is $5</think>\n\nclick('12')"]
+
+    def test_default_sends_only_the_action(self) -> None:
+        tokenizer = PieceTokenizer(GEMMA_TRACE_PIECES, GEMMA_TRACE_SPECIAL_IDS)
+
+        actions, _prompt = step_once(
+            tokenizer,
+            [GEMMA_CHANNEL_OPEN, REASONING_ID, GEMMA_CHANNEL_CLOSE, ACTION_ID],
+            reasoning_end_ids=(GEMMA_CHANNEL_CLOSE,),
+        )
+
+        assert actions == ["click('12')"]
 
 
 class ObservationClient(FakeEnvClient):

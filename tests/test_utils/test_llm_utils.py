@@ -3553,7 +3553,7 @@ class TestBuildVllmLlmInitKwargs:
         )
         assert kwargs["mamba_cache_mode"] == "align"
         assert kwargs["max_num_batched_tokens"] == 8192
-        assert kwargs["reasoning_parser"] == "nemotron_v3"
+        assert "reasoning_parser" not in kwargs
         assert kwargs["enable_prefix_caching"] is True
         assert "trust_remote_code" not in kwargs
 
@@ -3576,7 +3576,6 @@ class TestBuildVllmLlmInitKwargs:
         )
         assert kwargs["max_num_batched_tokens"] == 4096
         assert kwargs["mamba_cache_mode"] == "align"
-        assert kwargs["reasoning_parser"] == "nemotron_v3"
         assert kwargs["enable_prefix_caching"] is True
 
     def test_family_defaults_follow_vllm_model_not_trainer_path(self, monkeypatch):

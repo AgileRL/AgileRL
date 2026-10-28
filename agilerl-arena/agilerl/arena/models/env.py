@@ -627,6 +627,15 @@ class LLMEnvSpec(EnvSpecBase):
             "malformed or missing, which never reaches the env. Unset scores 0."
         ),
     )
+    include_reasoning: bool | None = Field(
+        default=None,
+        description=(
+            "Send the env or reward function each turn's reasoning with its "
+            "markers, not only the text after the reasoning ends. Unset sends "
+            "it to a reward file over dataset rows and not to an env that "
+            "runs the action."
+        ),
+    )
     train_test_split: float | None = Field(
         default=None,
         ge=0.0,
@@ -975,6 +984,13 @@ class LLMEnvSpec(EnvSpecBase):
     def dataset_backed_rollout(self) -> bool:
         """Whether this rollout env serves labelled rows scored by a rubric."""
         return self.env_type == "rollout" and self._named_dataset() is not None
+
+    @property
+    def sends_reasoning(self) -> bool:
+        """Whether each turn's reasoning reaches the env or reward function."""
+        if self.include_reasoning is not None:
+            return self.include_reasoning
+        return self.dataset_backed_rollout
 
     @property
     def text_only(self) -> bool:
