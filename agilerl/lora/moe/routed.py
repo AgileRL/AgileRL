@@ -7,13 +7,13 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 import torch
 import torch.nn as nn
-from peft.tuners.lora.layer import ParamWrapper
 from torch.distributed.tensor import DTensor
 
+from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.lora.moe.adapters import (
     ExpertLora,
     lora_operands,
@@ -36,6 +36,9 @@ from agilerl.lora.moe.layouts import (
     routed_projection_names,
 )
 from agilerl.lora.moe.recompute import LoraExpertsConfig, LoraExpertsFunction
+
+if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
+    from peft.tuners.lora.layer import ParamWrapper
 
 
 @dataclass(frozen=True)

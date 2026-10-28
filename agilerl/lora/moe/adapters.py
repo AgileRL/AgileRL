@@ -7,12 +7,13 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
-from peft.tuners.lora.layer import ParamWrapper
 from torch.distributed.tensor import DTensor
 
+from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.lora.fused import ROUTING_STATE, uniform_routed_adapter
 from agilerl.lora.moe.grouped_gemm import (
     ROUTED_EXPERT_CHUNK_BYTES,
@@ -23,6 +24,9 @@ from agilerl.lora.moe.grouped_gemm import (
     grouped_matmul,
     grouped_operand,
 )
+
+if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
+    from peft.tuners.lora.layer import ParamWrapper
 
 
 @dataclass(frozen=True)

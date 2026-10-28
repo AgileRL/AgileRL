@@ -18,6 +18,9 @@ the per-expert GEMMs, ``adapters`` the LoRA deltas, ``routed`` / ``recompute``
 subclasses, and ``model`` the whole-model passes.
 """
 
+from typing import TYPE_CHECKING
+
+from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.lora.moe.adapters import resolve_adapters, split_lora_delta, wrapper_chain
 from agilerl.lora.moe.grouped_gemm import grouped_mm_supported
 from agilerl.lora.moe.model import (
@@ -32,11 +35,14 @@ from agilerl.lora.moe.model import (
 from agilerl.lora.moe.recompute import LoraExpertsFunction
 from agilerl.lora.moe.routed import routed_experts_local_forward
 from agilerl.lora.moe.transposed import transposed_experts_local_forward
-from agilerl.lora.moe.wrappers import (
-    RoutedExpertsLoraWrapper,
-    SortedExpertsLoraWrapper,
-    TransposedExpertsLoraWrapper,
-)
+
+# The wrappers subclass PEFT's ``ParamWrapper``, so they need the LLM extras.
+if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
+    from agilerl.lora.moe.wrappers import (
+        RoutedExpertsLoraWrapper,
+        SortedExpertsLoraWrapper,
+        TransposedExpertsLoraWrapper,
+    )
 
 __all__ = [
     "LoraExpertsFunction",

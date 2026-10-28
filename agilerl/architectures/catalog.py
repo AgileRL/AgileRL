@@ -6,15 +6,15 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import TYPE_CHECKING
 
-from transformers import AutoModelForImageTextToText
-from transformers.configuration_utils import PretrainedConfig
-
+from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.architectures.gemma4 import install_gemma4_vision_patches
 from agilerl.architectures.nemotron_h.mamba import install_mamba_patches
 from agilerl.architectures.qwen3_5.packed import install_qwen_gdn_patches
 from agilerl.architectures.qwen3_5.vision import install_qwen3_5_vl_patches
 from agilerl.architectures.runtime import (
+    AutoModelForImageTextToText,
     MambaPatchConfig,
     ModelRuntimeConfig,
     PatchRuntimeConfig,
@@ -24,6 +24,9 @@ from agilerl.architectures.runtime import (
 )
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.utils.patching import library_shim
+
+if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
+    from transformers.configuration_utils import PretrainedConfig
 
 # Trainer uses transformers' nemotron_h class; the checkpoint's auto_map code
 # supports only eager attention.
