@@ -27,6 +27,10 @@ class VllmRuntimeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     mamba_cache_mode: str | None = Field(default=None, min_length=1)
+    # Mamba2 decode kernel that caches recent SSM inputs instead of the full
+    # state. Only NemotronHForCausalLM supports it; the VL wrapper raises, and
+    # the default Triton backend needs the V1 model runner.
+    use_replayssm: bool | None = Field(default=None)
     max_num_batched_tokens: int | None = Field(default=None, ge=1)
     reasoning_parser: str | None = Field(default=None, min_length=1)
     enable_prefix_caching: bool | None = Field(default=None)

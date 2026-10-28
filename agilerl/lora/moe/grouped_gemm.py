@@ -10,6 +10,7 @@ from functools import cache
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
 
 # No public API pops the active torch dispatch modes.
@@ -24,9 +25,7 @@ ROUTED_EXPERT_CHUNK_BYTES = 64 * 1024 * 1024
 
 @cache
 def grouped_mm_supported(device_index: int, dtype: torch.dtype) -> bool:
-    """Whether ``torch._grouped_mm`` runs its fused kernel here and computes correct results (fwd and bwd, transposed views)."""
-    if not hasattr(torch, "_grouped_mm"):
-        return False
+    """Whether ``torch.nn.functional.grouped_mm`` runs its fused kernel here and computes correct results (fwd and bwd, transposed views)."""
     # Elsewhere torch loops over every group, empty ones included, after
     # copying the offsets to the host.
     if dtype != torch.bfloat16 or torch.cuda.get_device_capability(device_index)[
@@ -51,7 +50,7 @@ def grouped_mm_supported(device_index: int, dtype: torch.dtype) -> bool:
             x = x.requires_grad_(True)
             w = w.requires_grad_(True)
             offs = torch.tensor([5, 8], device=device, dtype=torch.int32)
-            out = torch._grouped_mm(x, w.transpose(-2, -1), offs=offs)
+            out = F.grouped_mm(x, w.transpose(-2, -1), offs=offs)
             reference = torch.cat([x[:5] @ w[0].mT, x[5:] @ w[1].mT])
             if not torch.allclose(out.float(), reference.float(), atol=1e-2):
                 return False
@@ -92,7 +91,7 @@ def counts_tensor(
 def group_offsets(
     counts: Sequence[int] | torch.Tensor, device: torch.device
 ) -> torch.Tensor:
-    """Cumulative per-expert row offsets in the layout ``torch._grouped_mm`` takes."""
+    """Cumulative per-expert row offsets in the layout ``torch.nn.functional.grouped_mm`` takes."""
     return torch.cumsum(counts_tensor(counts, device), dim=0).to(torch.int32)
 
 
@@ -137,7 +136,7 @@ def _dims_aligned(itemsize: int, *dims: int) -> bool:
 
 
 def _grouped_mm_operand_ready(mat: torch.Tensor) -> bool:
-    """Whether ``mat`` has a last-two-dims layout ``_grouped_mm`` accepts."""
+    """Whether ``mat`` has a last-two-dims layout ``grouped_mm`` accepts."""
     if mat.dim() != 3:
         return False
     alignment = 16 // mat.element_size()
@@ -193,7 +192,7 @@ def grouped_linear(
             operand = operand.contiguous()
         if offs is None:
             offs = group_offsets(counts, x.device)
-        return torch._grouped_mm(x, operand, offs=offs)
+        return F.grouped_mm(x, operand, offs=offs)
     # FSDP's gathered expert block is a narrow view. cuBLAS rejects that
     # stride, and a zero-row expert is an empty gemm it also rejects.
     weight = weight.contiguous()
@@ -230,7 +229,7 @@ def grouped_matmul(
         and _use_grouped_mm(x)
         and _grouped_mm_operand_ready(weight)
     ):
-        return torch._grouped_mm(x, weight, offs=offs)
+        return F.grouped_mm(x, weight, offs=offs)
     pieces = [
         rows @ weight[expert]
         for expert, rows in enumerate(x.split(offset_counts(offs)))

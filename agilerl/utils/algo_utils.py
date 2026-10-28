@@ -2145,6 +2145,12 @@ class VLLMConfig:
         colocated LoRA-only sync never re-pushes the base, so it requires
         level 1. Defaults to 1.
     :type sleep_mode_level: int, optional
+    :param sleep_mode_offload_cudagraph: Back CUDA-graph memory up to CPU during
+        sleep and restore it on wake, so a colocated engine can keep graphs
+        without holding their pool while training.  Only takes effect with
+        ``sleep_mode``.  ``None`` (the default) omits the kwarg so vLLM keeps
+        its own default, defaults to None.
+    :type sleep_mode_offload_cudagraph: bool | None, optional
     :param dtype: Model weight dtype passed to the vLLM ``LLM`` constructor
         (e.g. ``"bfloat16"``, ``"float16"``).  ``None`` lets vLLM choose,
         defaults to None.
@@ -2229,6 +2235,7 @@ class VLLMConfig:
     enforce_eager: bool | None = None
     sleep_mode: bool = False
     sleep_mode_level: int = 1
+    sleep_mode_offload_cudagraph: bool | None = None
     dtype: str | None = None
     quantization: str | None = None
     vllm_model_name_or_path: str | None = None

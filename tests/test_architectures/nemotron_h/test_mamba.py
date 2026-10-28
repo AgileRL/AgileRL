@@ -1358,7 +1358,7 @@ class TestSdpaFullyMaskedRows:
 
 
 class TestPackedMixerCudaFastPath:
-    def test_packed_forward_runs_fused_scan_on_the_default_stream(self, monkeypatch):
+    def test_packed_forward_runs_fused_scan_on_the_current_stream(self, monkeypatch):
         fake_mod = ModuleType("agilerl_test_packed_mixer")
         seen = {}
 
@@ -1406,7 +1406,6 @@ class TestPackedMixerCudaFastPath:
             def __exit__(self, *_exc):
                 return False
 
-        monkeypatch.setattr(torch.cuda, "default_stream", lambda _dev: "side")
         monkeypatch.setattr(torch.cuda, "stream", lambda _stream: _StreamCtx())
         hidden = torch.ones(2, 3, 2)
         seq_idx = torch.arange(6, dtype=torch.int32).reshape(2, 3)
@@ -1415,7 +1414,7 @@ class TestPackedMixerCudaFastPath:
 
         assert out == "fused"
         assert seen["seq_idx"] is seq_idx
-        assert entered == [True]
+        assert entered == []
 
     @pytest.mark.parametrize("train_out_proj", [True, False])
     def test_packed_forward_without_fused_scan_runs_each_document(
@@ -1473,3 +1472,165 @@ class TestPackedMixerCudaFastPath:
         assert len(calls) == 2
         assert torch.equal(calls[0], hidden[:, :2])
         assert torch.equal(calls[1], hidden[:, 2:])
+
+
+class TestPackedBlockLayoutKwargs:
+    def _install(self, block_cls, mixer_cls):
+        mamba._install_packed_block(block_cls, mixer_cls)
+
+    def test_mamba_block_prefers_seq_idx_kwarg(self):
+        seen = {}
+
+        class Mixer(torch.nn.Module):
+            def forward(self, hidden_states, seq_idx=None):
+                seen["seq_idx"] = seq_idx
+                return hidden_states
+
+        class Block(torch.nn.Module):
+            block_type = "linear_attention"
+
+            def __init__(self):
+                super().__init__()
+                self.mixer = Mixer()
+                self.norm = torch.nn.LayerNorm(4)
+
+            def forward(
+                self,
+                hidden_states,
+                past_key_values=None,
+                attention_mask=None,
+                position_ids=None,
+                use_cache=False,
+                **kwargs,
+            ):
+                msg = "mamba path must not call forward"
+                raise AssertionError(msg)
+
+        self._install(Block, Mixer)
+        block = Block()
+        hidden = torch.ones(1, 5, 4)
+        # Deliberately off from the derived layout: preference must win.
+        passed = torch.tensor([[0, 1, 2, 3, 4]], dtype=torch.int32)
+        position_ids = torch.tensor([[0, 1, 2, 0, 1]])
+
+        out = block(hidden, position_ids=position_ids, seq_idx=passed)
+
+        assert seen["seq_idx"] is passed
+        assert out.shape == hidden.shape
+
+    def test_mamba_block_derives_seq_idx_without_kwarg(self):
+        seen = {}
+
+        class Mixer(torch.nn.Module):
+            def forward(self, hidden_states, seq_idx=None):
+                seen["seq_idx"] = seq_idx
+                return hidden_states
+
+        class Block(torch.nn.Module):
+            block_type = "linear_attention"
+
+            def __init__(self):
+                super().__init__()
+                self.mixer = Mixer()
+                self.norm = torch.nn.LayerNorm(4)
+
+            def forward(
+                self,
+                hidden_states,
+                past_key_values=None,
+                attention_mask=None,
+                position_ids=None,
+                use_cache=False,
+                **kwargs,
+            ):
+                msg = "mamba path must not call forward"
+                raise AssertionError(msg)
+
+        self._install(Block, Mixer)
+        block = Block()
+        hidden = torch.ones(1, 5, 4)
+        position_ids = torch.tensor([[0, 1, 2, 0, 1]])
+
+        block(hidden, position_ids=position_ids)
+
+        assert seen["seq_idx"].tolist() == [[0, 0, 0, 1, 1]]
+
+    def test_attention_block_prefers_cu_seq_kwargs(self):
+        seen = {}
+
+        class Mixer(torch.nn.Module):
+            pass
+
+        class Block(torch.nn.Module):
+            block_type = "full_attention"
+
+            def __init__(self):
+                super().__init__()
+                self.mixer = torch.nn.Linear(4, 4)
+
+            def forward(
+                self,
+                hidden_states,
+                past_key_values=None,
+                attention_mask=None,
+                position_ids=None,
+                use_cache=False,
+                **kwargs,
+            ):
+                seen["kwargs"] = kwargs
+                seen["position_ids"] = position_ids
+                return hidden_states
+
+        self._install(Block, Mixer)
+        block = Block()
+        hidden = torch.ones(1, 5, 4)
+        position_ids = torch.tensor([[0, 1, 2, 0, 1]])
+        cu = torch.tensor([0, 5], dtype=torch.int32)
+
+        block(
+            hidden,
+            position_ids=position_ids,
+            cu_seq_lens_q=cu,
+            cu_seq_lens_k=cu,
+            max_length_q=5,
+            max_length_k=5,
+        )
+
+        assert seen["kwargs"]["cu_seq_lens_q"] is cu
+        assert seen["kwargs"]["max_length_q"] == 5
+        assert seen["position_ids"] is None
+
+    def test_attention_block_derives_cu_seq_without_kwargs(self):
+        seen = {}
+
+        class Mixer(torch.nn.Module):
+            pass
+
+        class Block(torch.nn.Module):
+            block_type = "full_attention"
+
+            def __init__(self):
+                super().__init__()
+                self.mixer = torch.nn.Linear(4, 4)
+
+            def forward(
+                self,
+                hidden_states,
+                past_key_values=None,
+                attention_mask=None,
+                position_ids=None,
+                use_cache=False,
+                **kwargs,
+            ):
+                seen["kwargs"] = kwargs
+                return hidden_states
+
+        self._install(Block, Mixer)
+        block = Block()
+        hidden = torch.ones(1, 5, 4)
+        position_ids = torch.tensor([[0, 1, 2, 0, 1]])
+
+        block(hidden, position_ids=position_ids)
+
+        assert seen["kwargs"]["cu_seq_lens_q"].tolist() == [0, 3, 5]
+        assert seen["kwargs"]["max_length_q"] == 3

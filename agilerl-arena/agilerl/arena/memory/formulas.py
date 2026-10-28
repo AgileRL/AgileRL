@@ -23,6 +23,7 @@ from agilerl.arena.memory.specs import (
     WeightDtype,
     WeightVariant,
 )
+from agilerl.arena.models.fsdp import FSDPConfig
 
 # Upper bound on the CUDA-graph pool the vLLM engine captures unless
 # enforce_eager. It cancels in the generation total: subtracted from the KV
@@ -523,6 +524,55 @@ def kv_cache_demand_bytes(
     )
 
 
+# Liger selective-logprob streaming tiles (sequence rows x vocab columns).
+SELECTIVE_SEQ_ROWS = 2048
+SELECTIVE_VOCAB_TILE = 4096
+
+
+def selective_logprob_tile_bytes(rows: int, vocab_size: int) -> int:
+    """Fp32 workspace of one selective-logprob tile step.
+
+    The kernel streams sequence chunks of ``SELECTIVE_SEQ_ROWS`` rows over
+    vocab tiles of ``SELECTIVE_VOCAB_TILE`` columns; a short row or a narrow
+    vocab uses a smaller tile.
+    """
+    return min(rows, SELECTIVE_SEQ_ROWS) * min(vocab_size, SELECTIVE_VOCAB_TILE) * 4
+
+
+# Storage of an FSDP-replicated parameter, keyed by ``FSDPConfig.param_dtype``.
+FSDP_PARAM_BYTES = {
+    "bfloat16": 2.0,
+    "float16": 2.0,
+    "float32": 4.0,
+    "float64": 8.0,
+}
+
+
+def reduce_scatter_buffer_bytes(
+    arch: ModelArch, fsdp: FSDPConfig | None, grads: float
+) -> float:
+    """Extra reduce-scatter copy-in buffers live at the backward peak.
+
+    Each buffer past the first holds one unit's grads in the reduce dtype.
+
+    :param arch: Model geometry (layer count sets the unit count).
+    :param fsdp: FSDP config, or ``None`` without FSDP.
+    :param grads: One GPU's gradient bytes.
+    :return: Buffer bytes, 0 without extra buffers.
+    """
+    extra = 0 if fsdp is None else fsdp.reduce_scatter_max_input_buffers - 1
+    if extra <= 0 or fsdp is None:
+        return 0.0
+    n_units = max(1, -(-arch.n_layers // fsdp.wrap_every_n_blocks))
+    return (
+        extra
+        * grads
+        / n_units
+        * FSDP_PARAM_BYTES[fsdp.reduce_dtype]
+        / FSDP_PARAM_BYTES[fsdp.param_dtype]
+    )
+
+
 def resolve_max_num_batched_tokens(
     max_num_seqs: int, max_model_len: int, explicit: int | None = None
 ) -> int:
@@ -929,6 +979,25 @@ def nograd_forward_bytes(
     return int(block + hidden_out)
 
 
+def nograd_pass_bytes(
+    arch: ModelArch,
+    settings: TrainingSettings,
+    seq_len: int,
+    act_bytes: float,
+    eager_mamba_scan: bool = False,
+) -> int:
+    """One micro-batch no-grad forward, or 0 without a no-grad pass."""
+    if not settings.has_nograd_pass:
+        return 0
+    return nograd_forward_bytes(
+        arch,
+        settings.micro_batch_size,
+        seq_len,
+        act_bytes,
+        eager_mamba_scan=eager_mamba_scan,
+    )
+
+
 def support_rows_bytes(
     arch: ModelArch, chunk_rows: int, width: int, act_bytes: float
 ) -> int:
@@ -953,9 +1022,19 @@ def logit_terms(
     act_bytes: float,
 ) -> tuple[float, int, float]:
     """Loss-instant logits, the hoisted fp32 head, and no-grad head bytes."""
+    logit_rows = resolve_chunk_rows(arch.vocab_size, settings.chunk_rows)
+    if (
+        settings.uses_selective_logprobs
+        and arch.final_logit_softcap is None
+        and not settings.sampling_support_width
+    ):
+        # The selective kernel streams one fp32 tile and holds fp32 grads of
+        # the chunk's hidden rows; it never copies the full head to fp32.
+        # Softcap and sampling-support runs keep the full-tile path below.
+        logit_tile = selective_logprob_tile_bytes(logit_rows, arch.vocab_size)
+        return logit_tile + logit_rows * arch.hidden_size * 4, 0, logit_tile
     # Two fp32 tiles are live at the loss instant: recomputed logits plus
     # that tile's gradient. Tiles are fixed-size, so a fused critic row adds none.
-    logit_rows = resolve_chunk_rows(arch.vocab_size, settings.chunk_rows)
     # The chunk loop hoists an fp32 lm_head copy when the head runs below fp32.
     fused_head = int(arch.vocab_size * arch.hidden_size * 4) if act_bytes < 4 else 0
     logits = logit_rows * arch.vocab_size * 8 + fused_head

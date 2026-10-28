@@ -31,7 +31,9 @@ from agilerl.arena.models.registry import AgentType
 # Attention backends that build a padding-free (packed) forward. A dense backend
 # builds an O(N^2) block-diagonal mask over the packed row instead, so packing
 # under one is silently a padded forward.
-PACKING_ATTN_IMPLEMENTATIONS = frozenset({"flash_attention_2", "flex_attention"})
+PACKING_ATTN_IMPLEMENTATIONS = frozenset(
+    {"flash_attention_2", "flex_attention", "torch_varlen"}
+)
 
 FSDP_KNOWN_FIELDS = frozenset(field.name for field in fields(FSDPConfig))
 FSDP_JSON_SCHEMA = {

@@ -438,6 +438,7 @@ def _decoder_fields(text_cfg: dict[str, Any]) -> dict[str, Any]:
             else None
         ),
         "sliding_window_layer_fraction": _sliding_layer_fraction(text_cfg),
+        "final_logit_softcap": text_cfg.get("final_logit_softcapping"),
     }
 
 
@@ -527,6 +528,9 @@ class ModelArch(BaseModel):
     head_dim: int
     vocab_size: int
     tied_embeddings: bool = False
+    # Final-logit softcap of the head (Gemma family); the fused loss keeps
+    # the full-logits path when one is set.
+    final_logit_softcap: float | None = None
     # Caps KV growth per sequence on the windowed layers.
     sliding_window: int | None = None
     # Ignored when ``sliding_window`` is None.
@@ -879,6 +883,9 @@ class TrainingSettings(BaseModel):
     # Fused-logprob tile rows. ``None`` auto-tunes to a ~256 MiB fp32 logit
     # workspace, clamped to [128, 4096].
     chunk_rows: int | None = None
+    # The loss runs Liger's fused kernel instead of the standard
+    # fused-linear-logprob path.
+    use_liger_loss: bool = True
     # Widest vLLM sampling support rollout records per token (``top_k``); 0
     # records none. The no-grad pass scores those tokens from their support's
     # lm_head rows.
@@ -970,6 +977,21 @@ class TrainingSettings(BaseModel):
         SFT backpropagates its targets directly.
         """
         return self.algorithm != "sft"
+
+    @property
+    def uses_selective_logprobs(self) -> bool:
+        """Whether loss and no-grad passes run Liger's selective kernel.
+
+        PPO, REINFORCE, and the GRPO family run selective per-token logprobs;
+        DPO and SFT run full-tile kernels either way.
+        """
+        return self.use_liger_loss and self.algorithm in (
+            "grpo",
+            "gspo",
+            "cispo",
+            "ppo",
+            "reinforce",
+        )
 
     @property
     def grad_graph_rows(self) -> int:

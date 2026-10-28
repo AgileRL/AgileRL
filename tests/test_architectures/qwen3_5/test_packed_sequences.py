@@ -413,17 +413,21 @@ class TestPatchQwenGdnPackedSequences:
                 text_model=TEXT_MODEL_PATH,
             )
 
+    @pytest.mark.parametrize(
+        ("pass_packed", "pass_q"),
+        [(True, False), (False, True), (True, True)],
+    )
     def test_fla_varlen_forward_passes_a_fresh_copy_of_the_offsets(
-        self, pristine_qwen_gdn_classes, monkeypatch
+        self, pristine_qwen_gdn_classes, monkeypatch, pass_packed, pass_q
     ):
         # Arrange
-        received = {}
+        received = []
         monkeypatch.setattr(qwen_packed, "_varlen_kernels_ready", lambda: True)
 
         def unpatched(
             self, hidden_states, cache_params=None, attention_mask=None, **kwargs
         ):
-            received.update(kwargs)
+            received.append(dict(kwargs))
             return hidden_states
 
         Qwen3_5MoeGatedDeltaNet.forward = unpatched
@@ -432,16 +436,26 @@ class TestPatchQwenGdnPackedSequences:
         hidden = torch.zeros(1, 5, 4)
         seq_idx = torch.tensor([[0, 0, 1, 1, 1]], dtype=torch.int32)
         offsets = torch.tensor([0, 2, 5], dtype=torch.int32)
+        call_kwargs = {"seq_idx": seq_idx}
+        if pass_packed:
+            call_kwargs[PACKED_CU_SEQLENS] = offsets
+        if pass_q:
+            call_kwargs["cu_seq_lens_q"] = offsets
 
         # Act
-        out = mixer.forward(hidden, seq_idx=seq_idx, **{PACKED_CU_SEQLENS: offsets})
+        out = mixer.forward(hidden, **call_kwargs)
+        mixer.forward(hidden, **call_kwargs)
 
         # Assert
         assert torch.equal(out, hidden)
-        assert torch.equal(received["cu_seq_lens_q"], offsets)
-        assert received["cu_seq_lens_q"] is not offsets
-        assert torch.equal(received["seq_idx"], seq_idx)
-        assert PACKED_CU_SEQLENS not in received
+        first, second = received
+        assert torch.equal(first["cu_seq_lens_q"], offsets)
+        assert first["cu_seq_lens_q"] is not offsets
+        assert second["cu_seq_lens_q"] is not offsets
+        assert second["cu_seq_lens_q"] is not first["cu_seq_lens_q"]
+        assert torch.equal(first["seq_idx"], seq_idx)
+        assert PACKED_CU_SEQLENS not in first
+        assert PACKED_CU_SEQLENS not in second
 
     def test_text_model_passes_offsets_spanning_every_packed_row(
         self, pristine_qwen_gdn_classes, monkeypatch

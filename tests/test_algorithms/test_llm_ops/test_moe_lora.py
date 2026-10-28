@@ -1113,7 +1113,7 @@ def test_grouped_mm_fast_path_matches_loop_on_cuda():
     x = torch.randn(64, HIDDEN, device="cuda")
     fast_out = fast(x)
     if not moe_gemm._use_grouped_mm(x):
-        pytest.skip("torch._grouped_mm unsupported on this GPU")
+        pytest.skip("grouped_mm unsupported on this GPU")
     with pytest.MonkeyPatch.context() as mp:
         # Force the loop path on the reference copy.
         mp.setattr(moe_gemm, "_use_grouped_mm", lambda _x: False)
@@ -1201,16 +1201,9 @@ def _mock_cuda_torch(monkeypatch, grouped_mm):
 
     monkeypatch.setattr(torch, "randn", cpu_randn)
     monkeypatch.setattr(torch, "tensor", cpu_tensor)
-    monkeypatch.setattr(torch, "_grouped_mm", grouped_mm)
+    monkeypatch.setattr(torch.nn.functional, "grouped_mm", grouped_mm)
     monkeypatch.setattr(torch, "Generator", MagicMock())
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _index: (9, 0))
-
-
-def test_grouped_mm_probe_false_without_op(monkeypatch):
-    monkeypatch.delattr(torch, "_grouped_mm", raising=False)
-    moe_gemm.grouped_mm_supported.cache_clear()
-
-    assert moe_gemm.grouped_mm_supported(0, torch.float32) is False
 
 
 def test_grouped_mm_probe_true_when_op_matches_reference(monkeypatch):
@@ -1265,7 +1258,7 @@ def test_grouped_mm_probe_false_when_op_raises(monkeypatch):
 
 
 def loop_grouped_mm(x, w_t, offs):
-    """Reference ``torch._grouped_mm``: one matmul per offset group."""
+    """Reference ``grouped_mm``: one matmul per offset group."""
     bounds = [0, *offs.tolist()]
     return torch.cat(
         [x[start:end] @ w_t[i] for i, (start, end) in enumerate(pairwise(bounds))]
@@ -1440,7 +1433,7 @@ def test_grouped_linear_fast_path_keeps_plain_transpose(monkeypatch):
         return torch.zeros(4, 4)
 
     monkeypatch.setattr(moe_gemm, "_use_grouped_mm", lambda _x: True)
-    monkeypatch.setattr(torch, "_grouped_mm", fake_grouped_mm)
+    monkeypatch.setattr(torch.nn.functional, "grouped_mm", fake_grouped_mm)
 
     out = moe_gemm.grouped_linear(x, weight, [2, 2])
 
@@ -1461,7 +1454,7 @@ def test_grouped_linear_fast_path_copies_irregular_stride(monkeypatch):
         return torch.zeros(4, 4)
 
     monkeypatch.setattr(moe_gemm, "_use_grouped_mm", lambda _x: True)
-    monkeypatch.setattr(torch, "_grouped_mm", fake_grouped_mm)
+    monkeypatch.setattr(torch.nn.functional, "grouped_mm", fake_grouped_mm)
 
     moe_gemm.grouped_linear(x, weight, [2, 2])
 
@@ -2442,7 +2435,7 @@ class TestGroupedGemmCoverage:
         monkeypatch.setattr(moe_gemm, "_use_grouped_mm", lambda _x: True)
         monkeypatch.setattr(moe_gemm, "_grouped_mm_operand_ready", lambda _w: True)
         monkeypatch.setattr(
-            torch, "_grouped_mm", lambda rows, w, offs: torch.ones(4, 4)
+            torch.nn.functional, "grouped_mm", lambda rows, w, offs: torch.ones(4, 4)
         )
 
         out = moe_gemm.grouped_matmul(x, weight, offs)

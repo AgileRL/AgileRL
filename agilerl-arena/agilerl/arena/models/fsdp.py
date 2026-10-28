@@ -91,6 +91,36 @@ class FSDPConfig:
             ),
         ),
     ] = 1
+    separate_reduce_scatter_group: Annotated[
+        bool,
+        Field(
+            description=(
+                "Run gradient reduce-scatter on its own process group so it "
+                "overlaps all-gather in backward. Adds one NCCL communicator."
+            ),
+        ),
+    ] = False
+    reduce_scatter_max_input_buffers: Annotated[
+        int,
+        Field(
+            ge=1,
+            description=(
+                "Reduce-scatter copy-in buffers kept in flight. 1 is FSDP's "
+                "default; higher removes the exposed reduce-scatter stall at "
+                "extra peak memory. Cannot combine with symm_mem_for_comm."
+            ),
+        ),
+    ] = 1
+    symm_mem_for_comm: Annotated[
+        bool,
+        Field(
+            description=(
+                "Allocate all-gather staging from symmetric memory for NCCL's "
+                "optimized path. CUDA only; single-node Copy Engine needs "
+                "NCCL_CTA_POLICY=2."
+            ),
+        ),
+    ] = False
     checkpoint_skip_layer_types: Annotated[
         tuple[str, ...],
         Field(
@@ -201,6 +231,16 @@ class FSDPConfig:
             raise ValueError(msg)
         if self.backward_prefetch_units < 1:
             msg = "FSDPConfig.backward_prefetch_units must be >= 1"
+            raise ValueError(msg)
+        if self.reduce_scatter_max_input_buffers < 1:
+            msg = "FSDPConfig.reduce_scatter_max_input_buffers must be >= 1"
+            raise ValueError(msg)
+        if self.symm_mem_for_comm and self.reduce_scatter_max_input_buffers > 1:
+            msg = (
+                "FSDPConfig symm_mem_for_comm cannot combine with "
+                "reduce_scatter_max_input_buffers > 1: torch rejects extra "
+                "buffers with the symmetric-memory reduce-scatter comm."
+            )
             raise ValueError(msg)
         if self.checkpoint_every_n_blocks < 1:
             msg = "FSDPConfig.checkpoint_every_n_blocks must be >= 1"

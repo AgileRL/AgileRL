@@ -3121,6 +3121,12 @@ def build_vllm_llm_init_kwargs(
         # private pool (useful for colocated trainer/rollout setups with a
         # tight GPU budget) at the cost of slightly slower per-step decode.
         kwargs["enforce_eager"] = vllm_config.enforce_eager
+    if getattr(vllm_config, "sleep_mode_offload_cudagraph", None) is not None:
+        # vLLM 0.32 backs the graph pool up to CPU during sleep, so a colocated
+        # engine keeps graphs without holding their pool while training.
+        kwargs["sleep_mode_offload_cudagraph"] = (
+            vllm_config.sleep_mode_offload_cudagraph
+        )
     # Colocated vLLM always serves LoRA: the trainer shares vLLM's base and syncs
     # only the adapter per rollout.
     kwargs["enable_lora"] = True

@@ -3266,6 +3266,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                     cast_to_fp32=self.cast_logprobs_to_fp32,
                     chunk_rows=self.chunk_rows,
                     logit_bias=logit_bias,
+                    selective=self.use_liger_loss and self.cast_logprobs_to_fp32,
                 )
             # Liger runs only without a softcap, so the logit bias folds into
             # the head bias exactly.

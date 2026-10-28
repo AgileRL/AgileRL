@@ -863,6 +863,14 @@ class VLLMConfig(BaseModel):
             "after every wake."
         ),
     )
+    sleep_mode_offload_cudagraph: bool | None = Field(
+        default=None,
+        description=(
+            "Back CUDA-graph memory up to host memory while asleep. Lets a "
+            "colocated engine keep graphs without holding their pool during "
+            "training. Needs sleep_mode."
+        ),
+    )
     dtype: str | None = Field(
         default=None,
         min_length=1,

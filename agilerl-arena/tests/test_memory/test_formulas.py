@@ -533,7 +533,7 @@ class TestSupportRowsBytes:
 
 class TestLogitTerms:
     def test_bf16_hoists_an_fp32_head_copy(self):
-        settings = TrainingSettings()
+        settings = TrainingSettings(use_liger_loss=False)
 
         logits, fused_head, nograd = formulas.logit_terms(QWEN_05B, settings, 2.0)
 
@@ -543,7 +543,9 @@ class TestLogitTerms:
         assert nograd == rows * QWEN_05B.vocab_size * 4 + fused_head
 
     def test_fp32_does_not_hoist_a_head_copy(self):
-        _, fused_head, _ = formulas.logit_terms(QWEN_05B, TrainingSettings(), 4.0)
+        _, fused_head, _ = formulas.logit_terms(
+            QWEN_05B, TrainingSettings(use_liger_loss=False), 4.0
+        )
 
         assert fused_head == 0
 
@@ -568,6 +570,14 @@ class TestLogitTerms:
         assert nograd == support
         assert fused_head == QWEN_05B.vocab_size * QWEN_05B.hidden_size * 4
         assert logits == rows * QWEN_05B.vocab_size * 8 + fused_head
+
+
+class TestSelectiveLogprobTile:
+    def test_streams_fixed_seq_by_vocab_tiles(self):
+        assert formulas.selective_logprob_tile_bytes(441, 151936) == (441 * 4096 * 4)
+        # Short rows and narrow vocabs use smaller tiles.
+        assert formulas.selective_logprob_tile_bytes(128, 151936) == 128 * 4096 * 4
+        assert formulas.selective_logprob_tile_bytes(441, 128) == 441 * 128 * 4
 
 
 class TestResolveMaxNumBatchedTokens:

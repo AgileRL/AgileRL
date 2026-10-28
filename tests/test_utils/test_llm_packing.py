@@ -24,6 +24,7 @@ from agilerl.utils.llm_packing import (
     pack_next_token_frame,
     pack_padded_batch,
     packed_layout,
+    packed_layout_kwargs,
     packed_seq_idx,
     run_per_document,
     unpack_hidden_states,
@@ -650,6 +651,10 @@ class TestSequencePackingGate:
         stub = _PackingGateStub(True, "flash_attention_2")
         assert stub._packing_mode() == "varlen"
 
+    def test_torch_varlen_uses_varlen(self):
+        stub = _PackingGateStub(True, "torch_varlen")
+        assert stub._packing_mode() == "varlen"
+
     def test_flex_uses_blockmask(self):
         stub = _PackingGateStub(True, "flex_attention")
         assert stub._packing_mode() == "blockmask"
@@ -698,3 +703,19 @@ class TestPackedSegmentIds:
         packed = pack_padded_batch(ids, mask)
         # Seq 0 occupies flat positions [0,1,2], seq 1 occupies [3,4].
         assert packed_segment_ids(packed, "cpu").tolist() == [0, 0, 0, 1, 1]
+
+
+class TestPackedLayoutKwargs:
+    def test_layout_matches_the_packed_batch(self):
+        lengths = [3, 2]
+        ids, mask = _make_batch(lengths)
+        packed = pack_padded_batch(ids, mask)
+
+        kwargs = packed_layout_kwargs(packed)
+
+        assert kwargs["cu_seq_lens_q"].tolist() == [0, 3, 5]
+        assert kwargs["cu_seq_lens_k"].tolist() == [0, 3, 5]
+        assert kwargs["max_length_q"] == 3
+        assert kwargs["max_length_k"] == 3
+        assert kwargs["seq_idx"].tolist() == [[0, 0, 0, 1, 1]]
+        assert kwargs["seq_idx"].dtype == torch.int32

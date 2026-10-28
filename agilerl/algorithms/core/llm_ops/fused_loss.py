@@ -24,6 +24,7 @@ import time — gate on :data:`agilerl.HAS_LIGER_KERNEL` before importing.
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Protocol
 
 import torch
@@ -56,8 +57,7 @@ class SaveForBackwardCtx(Protocol):
 
 
 def llm_policy_loss_fn(
-    log_probs: torch.Tensor,
-    selected_token_ids: torch.Tensor,
+    per_token_logps: torch.Tensor,
     attention_mask: torch.Tensor,
     advantages: torch.Tensor,
     full_attention_mask: torch.Tensor,
@@ -73,7 +73,6 @@ def llm_policy_loss_fn(
     turn_log_ratio_reduction: str = "mean",
     vllm_is_ratio: torch.Tensor | None = None,
     kl_clamp: float | None = None,
-    support_ids: torch.Tensor | None = None,
     # Liger's ``LigerFusedLinearPPOBase._compute_loss`` invokes the loss fn
     # with kwargs this fn does not consume (``ref_log_probs``, ``loss_type``,
     # ``max_completion_length``, ``sapo_temperature_pos``, ...), so a
@@ -100,11 +99,9 @@ def llm_policy_loss_fn(
     * ``"trajectory"`` — token log-ratios are mean-pooled over the whole
       completion (GSPO). ``advantages`` is ``(chunk_B, 1)``.
 
-    :param log_probs: ``(chunk_B, T, V)`` fp32 log-softmax of the chunk's
-        logits (the fused Function computes this inline per chunk).
-    :type log_probs: torch.Tensor
-    :param selected_token_ids: ``(chunk_B, T)`` target token ids.
-    :type selected_token_ids: torch.Tensor
+    :param per_token_logps: ``(chunk_B, T)`` selected-token logprobs the
+        fused Function computes per chunk.
+    :type per_token_logps: torch.Tensor
     :param attention_mask: ``(chunk_B, T)`` token-level action mask.
     :type attention_mask: torch.Tensor
     :param advantages: token mode ``(chunk_B, T)``; turn mode
@@ -150,27 +147,11 @@ def llm_policy_loss_fn(
     :param kl_clamp: Per-token K3 bound of the KL penalty (see
         :func:`k3_kl_penalty_reference`), or ``None`` for no bound.
     :type kl_clamp: float | None
-    :param support_ids: ``(chunk_B, T, K)`` sampling support of each token,
-        ``-1`` padded; a token with a support takes its logprob over that
-        support alone. ``None`` normalizes over the full vocabulary.
-    :type support_ids: torch.Tensor | None
     :return: ``(chunk_loss, [kl, clipfrac, pg_loss, entropy, kl_clamp_frac])`` — first
         element backprops; metrics are detached scalars contributing to
         the global mean across chunks.
     :rtype: tuple[torch.Tensor, list[torch.Tensor]]
     """
-    if support_ids is None:
-        per_token_logps = log_probs.gather(
-            dim=-1, index=selected_token_ids.unsqueeze(-1)
-        ).squeeze(-1)
-    else:
-        per_token_logps, support_log_z, restricted = support_scores(
-            log_probs, support_ids, selected_token_ids
-        )
-        per_token_logps = per_token_logps - torch.where(
-            restricted, support_log_z, torch.zeros_like(support_log_z)
-        )
-
     if old_per_token_logps is None:
         # PPO/REINFORCE always pass old_log_probs; this guards against a
         # caller forgetting (ratio == 1, gradient still well-defined).
@@ -293,7 +274,9 @@ def llm_policy_loss_fn(
         kl_metric = (
             (kl_div * attention_mask).sum() / token_global_count
             if kl_div is not None
-            else torch.zeros((), device=log_probs.device, dtype=log_probs.dtype)
+            else torch.zeros(
+                (), device=per_token_logps.device, dtype=per_token_logps.dtype
+            )
         )
         is_clipped = ratio != clipped_ratio
         clipfrac_metric = (
@@ -308,7 +291,9 @@ def llm_policy_loss_fn(
         kl_clamp_frac_metric = (
             (kl_clamped.float() * attention_mask).sum() / token_global_count
             if kl_clamped is not None
-            else torch.zeros((), device=log_probs.device, dtype=log_probs.dtype)
+            else torch.zeros(
+                (), device=per_token_logps.device, dtype=per_token_logps.dtype
+            )
         )
 
     return chunk_loss, [
@@ -320,6 +305,72 @@ def llm_policy_loss_fn(
     ]
 
 
+def _chunk_logps(
+    input_chunk: torch.Tensor,
+    weight_local: torch.Tensor,
+    selected_token_ids_chunk: torch.Tensor,
+    bias_local: torch.Tensor | None,
+    support_ids_chunk: torch.Tensor | None,
+    softcap: float | None,
+    logit_bias: torch.Tensor | None,
+    temperature: float,
+    cast_logprobs_to_fp32: bool,
+) -> torch.Tensor:
+    """Per-token logprobs for one chunk: selective kernel or inline full logits.
+
+    Softcap, support-scored, and logit-bias chunks run the inline
+    full-logits path: the selective kernel is a plain log-softmax plus
+    gather, fp32 or compute dtype by ``cast_logprobs_to_fp32``.
+    """
+    if (
+        cast_logprobs_to_fp32
+        and softcap is None
+        and logit_bias is None
+        and support_ids_chunk is None
+    ):
+        return LigerFusedLinearPPOBase.chunk_forward(
+            input_chunk,
+            weight_local,
+            selected_token_ids_chunk,
+            bias=bias_local,
+            temperature=temperature,
+        )
+    if input_chunk.dtype != weight_local.dtype:
+        # fp16 checkpoint under bf16 autocast: fp32 hidden, fp16 head.
+        compute_dtype = torch.promote_types(input_chunk.dtype, weight_local.dtype)
+        input_chunk = input_chunk.to(compute_dtype)
+        weight_local = weight_local.to(compute_dtype)
+    logits = torch.matmul(input_chunk, weight_local.t())
+    if bias_local is not None:
+        logits = logits + bias_local
+    if softcap is not None:
+        logits = softcap * torch.tanh(logits / softcap)
+    if logit_bias is not None:
+        logits = logits + logit_bias.to(logits.dtype)
+    if temperature != 1.0:
+        logits = logits / temperature
+    log_probs = torch.log_softmax(
+        logits.float() if cast_logprobs_to_fp32 else logits, dim=-1
+    )
+    if support_ids_chunk is None:
+        return log_probs.gather(-1, selected_token_ids_chunk.unsqueeze(-1)).squeeze(-1)
+    selected, support_log_z, restricted = support_scores(
+        log_probs, support_ids_chunk, selected_token_ids_chunk
+    )
+    return selected - torch.where(
+        restricted, support_log_z, torch.zeros_like(support_log_z)
+    )
+
+
+def _chunk_or_nones(
+    tensor: torch.Tensor | None, chunks: int
+) -> tuple[torch.Tensor | None, ...]:
+    """Chunk a tensor, or one ``None`` per chunk when it is absent."""
+    if tensor is None:
+        return (None,) * chunks
+    return torch.chunk(tensor, chunks=chunks, dim=0)
+
+
 class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
     """Fused linear PPO-style policy loss with per-token or per-turn ratios.
 
@@ -328,10 +379,12 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
     but overrides ``forward`` with our own chunk loop so we can slice
     ``turn_ids`` along dim 0 alongside the other chunked inputs —
     the base class hardcodes its chunked-arg list and doesn't expose
-    an injection point. The per-chunk logits + log-softmax are computed
-    inline: Liger >= 0.8.0's ``chunk_forward`` is a selective
-    per-token-logp kernel, and this loss needs the full
-    ``(chunk, T, V)`` log_probs.
+    an injection point. Per-token log-probs come from Liger's selective
+    kernel, which streams the vocab in fixed tiles instead of
+    materializing ``(rows, V)`` logits; with
+    ``cast_logprobs_to_fp32=False`` the chunk falls back to an inline
+    compute-dtype log-softmax plus gather. Softcap, support-scored, and
+    logit-bias chunks always run the inline full-logits path.
     """
 
     @classmethod
@@ -362,6 +415,7 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
         softcap: float | None = None,
         support_ids: torch.Tensor | None = None,
         logit_bias: torch.Tensor | None = None,
+        cast_logprobs_to_fp32: bool = True,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
         """Chunked forward + backward.
 
@@ -375,81 +429,44 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
         to the per-token policy loss (token mode only), or ``None``.
         ``softcap`` squashes the logits to ``softcap * tanh(logits / softcap)``
         before the temperature, as the model's own head does.
-        ``support_ids`` is chunked the same way (see :func:`llm_policy_loss_fn`).
+        ``support_ids`` restricts each token's normalizer to its sampling
+        support (``-1`` padded; ``None`` normalizes over the full vocabulary).
         ``logit_bias`` is a ``(V,)`` offset added after the softcap, as vLLM
         applies its ``logit_bias``.
+        ``cast_logprobs_to_fp32`` selects the fp32 selective kernel (default)
+        or the inline compute-dtype path. Softcap, support-scored, and
+        logit-bias chunks always run the inline full-logits path: the
+        selective kernel is a plain log-softmax plus gather.
         """
         loss_acc = torch.zeros((), device=_input.device, dtype=torch.float32)
-        grad_weight = torch.zeros_like(weight)
+        # A frozen head (LoRA) gets no weight or bias gradient, so neither is
+        # differentiated or held.
+        weight_requires_grad = weight.requires_grad
+        bias_requires_grad = bias is not None and bias.requires_grad
+        grad_weight = torch.zeros_like(weight) if weight_requires_grad else None
         grad_inputs: list[torch.Tensor] = []
-        grad_bias = torch.zeros_like(bias) if bias is not None else None
+        grad_bias = torch.zeros_like(bias) if bias_requires_grad else None
         # Scalar metrics accumulate into a zero tensor; non-scalar metrics
         # (not produced by llm_policy_loss_fn today) collect per-chunk values.
         aggregated_metrics: list[torch.Tensor | list[torch.Tensor]] = []
 
         full_attention_mask = attention_mask
 
-        def _compute_chunk_loss(
-            input_chunk: torch.Tensor,
-            weight_local: torch.Tensor,
-            selected_token_ids_chunk: torch.Tensor,
-            attention_mask_chunk: torch.Tensor,
-            advantages_chunk: torch.Tensor,
-            bias_local: torch.Tensor | None = None,
-            ref_per_token_logps_chunk: torch.Tensor | None = None,
-            old_per_token_logps_chunk: torch.Tensor | None = None,
-            turn_ids_chunk: torch.Tensor | None = None,
-            vllm_is_ratio_chunk: torch.Tensor | None = None,
-            support_ids_chunk: torch.Tensor | None = None,
-        ) -> tuple[torch.Tensor, list[torch.Tensor]]:
-            # Liger 0.8.0 rewrote ``LigerFusedLinearPPOBase.chunk_forward`` into a
-            # selective-logp kernel that doesn't compose with the grad_and_value
-            # transform below, so inline the numerically identical 0.7.0 math.
-            if input_chunk.dtype != weight_local.dtype:
-                # fp16 checkpoint under bf16 autocast: fp32 hidden, fp16 head.
-                compute_dtype = torch.promote_types(
-                    input_chunk.dtype, weight_local.dtype
-                )
-                input_chunk = input_chunk.to(compute_dtype)
-                weight_local = weight_local.to(compute_dtype)
-            logits = torch.matmul(input_chunk, weight_local.t())
-            if bias_local is not None:
-                logits = logits + bias_local
-            if softcap is not None:
-                logits = softcap * torch.tanh(logits / softcap)
-            if logit_bias is not None:
-                logits = logits + logit_bias.to(logits.dtype)
-            if temperature != 1.0:
-                logits = logits / temperature
-            log_probs = torch.log_softmax(logits.float(), dim=-1)
-            return llm_policy_loss_fn(
-                log_probs=log_probs,
-                selected_token_ids=selected_token_ids_chunk,
-                attention_mask=attention_mask_chunk,
-                advantages=advantages_chunk,
-                full_attention_mask=full_attention_mask,
-                ref_per_token_logps=(
-                    ref_per_token_logps_chunk.float()
-                    if ref_per_token_logps_chunk is not None
-                    else None
-                ),
-                old_per_token_logps=(
-                    old_per_token_logps_chunk.float()
-                    if old_per_token_logps_chunk is not None
-                    else None
-                ),
-                epsilon_low=epsilon_low,
-                epsilon_high=epsilon_high,
-                beta=beta,
-                turn_ids=turn_ids_chunk,
-                full_turn_mask=full_turn_mask,
-                max_turns=max_turns,
-                importance_sampling_level=importance_sampling_level,
-                turn_log_ratio_reduction=turn_log_ratio_reduction,
-                vllm_is_ratio=vllm_is_ratio_chunk,
-                kl_clamp=kl_clamp,
-                support_ids=support_ids_chunk,
-            )
+        # Only the loss math is compiled, not the selective logprob kernel
+        # (a custom autograd Function), mirroring Liger's own forward.
+        compute_loss = partial(
+            llm_policy_loss_fn,
+            full_attention_mask=full_attention_mask,
+            epsilon_low=epsilon_low,
+            epsilon_high=epsilon_high,
+            beta=beta,
+            max_turns=max_turns,
+            importance_sampling_level=importance_sampling_level,
+            turn_log_ratio_reduction=turn_log_ratio_reduction,
+        )
+        compiled_compute_loss = (
+            torch.compile(compute_loss) if compiled else compute_loss
+        )
 
         def fused_fwd_bwd(
             input_chunk: torch.Tensor,
@@ -461,28 +478,55 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
             turn_ids_chunk: torch.Tensor | None,
             vllm_is_ratio_chunk: torch.Tensor | None,
             support_ids_chunk: torch.Tensor | None,
-        ) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, list[torch.Tensor]]]:
-            argnums = (0, 1, 5) if bias is not None else (0, 1)
-            return torch.func.grad_and_value(
-                _compute_chunk_loss, argnums=argnums, has_aux=True
-            )(
-                input_chunk,
-                weight,
-                selected_token_ids_chunk,
-                attention_mask_chunk,
-                advantages_chunk,
-                bias,
-                ref_per_token_logps_chunk=ref_per_token_logps_chunk,
-                old_per_token_logps_chunk=old_per_token_logps_chunk,
-                turn_ids_chunk=turn_ids_chunk,
-                vllm_is_ratio_chunk=vllm_is_ratio_chunk,
-                support_ids_chunk=support_ids_chunk,
+        ) -> tuple[
+            tuple[torch.Tensor, ...], tuple[torch.Tensor, tuple[torch.Tensor, ...]]
+        ]:
+            with torch.enable_grad():
+                input_chunk = input_chunk.detach().requires_grad_(True)
+                weight_local = weight.detach().requires_grad_(weight_requires_grad)
+                bias_local = (
+                    bias.detach().requires_grad_(bias_requires_grad)
+                    if bias is not None
+                    else None
+                )
+                per_token_logps = _chunk_logps(
+                    input_chunk,
+                    weight_local,
+                    selected_token_ids_chunk,
+                    bias_local,
+                    support_ids_chunk,
+                    softcap,
+                    logit_bias,
+                    temperature,
+                    cast_logprobs_to_fp32,
+                )
+                ref_arg = ref_per_token_logps_chunk
+                old_arg = old_per_token_logps_chunk
+                if cast_logprobs_to_fp32:
+                    # Old/reference logprobs arrive in the hidden dtype.
+                    ref_arg = ref_arg.float() if ref_arg is not None else None
+                    old_arg = old_arg.float() if old_arg is not None else None
+                chunk_loss, chunk_metrics = compiled_compute_loss(
+                    per_token_logps,
+                    attention_mask_chunk,
+                    advantages_chunk,
+                    ref_per_token_logps=ref_arg,
+                    old_per_token_logps=old_arg,
+                    turn_ids=turn_ids_chunk,
+                    full_turn_mask=full_turn_mask,
+                    vllm_is_ratio=vllm_is_ratio_chunk,
+                    kl_clamp=kl_clamp,
+                )
+                grad_targets: list[torch.Tensor] = [input_chunk]
+                if weight_requires_grad:
+                    grad_targets.append(weight_local)
+                if bias_requires_grad and bias_local is not None:
+                    grad_targets.append(bias_local)
+                grads = torch.autograd.grad(chunk_loss, grad_targets)
+            return grads, (
+                chunk_loss.detach(),
+                tuple(metric.detach() for metric in chunk_metrics),
             )
-
-        if compiled:  # pragma: no cover -- requires torch.compile warmup
-            fwd_bwd_fn = torch.compile(fused_fwd_bwd)
-        else:
-            fwd_bwd_fn = fused_fwd_bwd
 
         def accumulate_chunk(
             input_chunk: torch.Tensor,
@@ -496,12 +540,12 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
             support_ids_chunk: torch.Tensor | None,
         ) -> None:
             (
-                (chunk_grad_input, chunk_grad_weight, *chunk_grad_bias),
+                (chunk_grad_input, *chunk_grad_params),
                 (
                     chunk_loss,
                     chunk_metrics,
                 ),
-            ) = fwd_bwd_fn(
+            ) = fused_fwd_bwd(
                 input_chunk,
                 selected_token_ids_chunk,
                 attention_mask_chunk,
@@ -512,9 +556,10 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
                 vllm_is_ratio_chunk,
                 support_ids_chunk,
             )
+            if grad_weight is not None:
+                grad_weight.add_(chunk_grad_params.pop(0))
             if grad_bias is not None:
-                grad_bias.add_(chunk_grad_bias[0])
-            grad_weight.add_(chunk_grad_weight)
+                grad_bias.add_(chunk_grad_params.pop(0))
             grad_inputs.append(chunk_grad_input)
             loss_acc.add_(chunk_loss)
             if not aggregated_metrics:
@@ -536,31 +581,11 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
         _ids_chunks = torch.chunk(selected_token_ids, chunks=chunks, dim=0)
         _mask_chunks = torch.chunk(attention_mask, chunks=chunks, dim=0)
         _adv_chunks = torch.chunk(advantages, chunks=chunks, dim=0)
-        _ref_chunks = (
-            torch.chunk(ref_per_token_logps, chunks=chunks, dim=0)
-            if ref_per_token_logps is not None
-            else [None] * chunks
-        )
-        _old_chunks = (
-            torch.chunk(old_per_token_logps, chunks=chunks, dim=0)
-            if old_per_token_logps is not None
-            else [None] * chunks
-        )
-        _turn_chunks = (
-            torch.chunk(turn_ids, chunks=chunks, dim=0)
-            if turn_ids is not None
-            else [None] * chunks
-        )
-        _vllm_chunks = (
-            torch.chunk(vllm_is_ratio, chunks=chunks, dim=0)
-            if vllm_is_ratio is not None
-            else [None] * chunks
-        )
-        _support_chunks = (
-            torch.chunk(support_ids, chunks=chunks, dim=0)
-            if support_ids is not None
-            else [None] * chunks
-        )
+        _ref_chunks = _chunk_or_nones(ref_per_token_logps, chunks)
+        _old_chunks = _chunk_or_nones(old_per_token_logps, chunks)
+        _turn_chunks = _chunk_or_nones(turn_ids, chunks)
+        _vllm_chunks = _chunk_or_nones(vllm_is_ratio, chunks)
+        _support_chunks = _chunk_or_nones(support_ids, chunks)
 
         for ic, idc, mc, ac, rc, oc, tc, vc, sc in zip(
             _input_chunks,
@@ -577,8 +602,6 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
             accumulate_chunk(ic, idc, mc, ac, rc, oc, tc, vc, sc)
 
         grad_input = torch.cat(grad_inputs, dim=0)
-        # grad_bias is None when the layer has no bias; save_for_backward
-        # accepts None at runtime, but torch types it as Tensor.
         ctx.save_for_backward(grad_input, grad_weight, grad_bias)
 
         final_metrics: list[torch.Tensor] = []
@@ -618,7 +641,39 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
             None,  # softcap
             None,  # support_ids
             None,  # logit_bias
+            None,  # cast_logprobs_to_fp32
         )
+
+
+def selective_logprobs_from_hidden(
+    hidden: torch.Tensor,
+    head_w: torch.Tensor,
+    head_b: torch.Tensor | None,
+    target_ids: torch.Tensor,
+    temperature: float = 1.0,
+) -> torch.Tensor:
+    """Per-token logprobs via Liger's selective kernel, in ``hidden.dtype``.
+
+    The same fp32 computation the fused policy loss runs, cast back like the
+    chunked logsumexp path so old and new logprobs share one rounding.
+
+    :param hidden: ``(B, T, H)`` last-hidden-state.
+    :type hidden: torch.Tensor
+    :param head_w: Dense ``(V, H)`` lm_head weight.
+    :type head_w: torch.Tensor
+    :param head_b: ``(V,)`` lm_head bias, or ``None``.
+    :type head_b: torch.Tensor | None
+    :param target_ids: ``(B, T)`` sampled token ids (caller does the shift).
+    :type target_ids: torch.Tensor
+    :param temperature: Logits divided by this before log_softmax.
+    :type temperature: float
+    :return: ``(B, T)`` per-token logprobs in ``hidden.dtype``.
+    :rtype: torch.Tensor
+    """
+    logps = LigerFusedLinearPPOBase.chunk_forward(
+        hidden, head_w, target_ids, bias=head_b, temperature=temperature
+    )
+    return logps.to(hidden.dtype) if logps.dtype != hidden.dtype else logps
 
 
 def flatten_tokens_for_fused_loss(
@@ -702,22 +757,23 @@ def apply_fused_policy_loss(
     softcap: float | None = None,
     support_ids: torch.Tensor | None = None,
     logit_bias: torch.Tensor | None = None,
+    cast_logprobs_to_fp32: bool = True,
 ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
     """Run :class:`LigerFusedLinearPolicyLossFunction`, bounded at token level.
 
     For ``importance_sampling_level="token"`` the per-token objective is
     token-independent, so the ``(B, T_act, H)`` hidden states are flattened to
     ``(B*T_act, 1, H)`` and the fused kernel chunks over *tokens* — each chunk
-    materializes only ``(token_chunk, vocab)`` logits in both the forward and
-    backward, the same memory-bounding trick GRPO/CISPO use. The global
-    token-count denominator is unchanged by flattening, so the result is exact.
+    streams the vocab in fixed tiles and holds fp32 grads of its token rows,
+    the same memory-bounding trick GRPO/CISPO use. The global token-count
+    denominator is unchanged by flattening, so the result is exact.
     ``token_chunk_size`` sets the tokens-per-chunk.
 
     Turn- and trajectory-level pooling couple a turn/trajectory's tokens, so they
     cannot be token-chunked: a chunk would only see part of the pooled unit.
-    Those levels keep the batch path (one sequence per chunk), which holds a
-    ``(seq_len, vocab)`` logits tensor per trajectory — not memory-bounded.
-    Use the standard (fused-linear-logprob) path for bounded memory there.
+    Those levels keep the batch path (one sequence per chunk), whose grad
+    buffers grow with the sequence length — not memory-bounded. Use the
+    standard (fused-linear-logprob) path for bounded memory there.
 
     :param policy_hidden: ``(B, T_act, H)`` hidden states already sliced to the
         action positions (caller does the ``[:, :-1]`` shift).
@@ -770,12 +826,18 @@ def apply_fused_policy_loss(
     :param kl_clamp: Per-token K3 bound of the KL penalty, or ``None``.
     :type kl_clamp: float | None
     :param softcap: Final-logit softcap of the model's head, or ``None``.
+        A set softcap runs the inline full-logits path, not the selective kernel.
     :type softcap: float | None
     :param support_ids: ``(B, T_act, K)`` sampling support of each action
         token, ``-1`` padded, or ``None`` for full-vocabulary logprobs.
+        A set support runs the inline full-logits path, not the selective kernel.
     :type support_ids: torch.Tensor | None
     :param logit_bias: ``(V,)`` fp32 offsets added after the softcap, or ``None``.
+        A set bias runs the inline full-logits path, not the selective kernel.
     :type logit_bias: torch.Tensor | None
+    :param cast_logprobs_to_fp32: Run the selective logprob kernel in fp32
+        (default). ``False`` runs an inline compute-dtype log-softmax.
+    :type cast_logprobs_to_fp32: bool
     :return: ``(loss, aux)`` straight from the fused Function.
     :rtype: tuple[torch.Tensor, tuple[torch.Tensor, ...]]
     """
@@ -825,6 +887,7 @@ def apply_fused_policy_loss(
             if support_ids is not None
             else None,
             logit_bias,
+            cast_logprobs_to_fp32,
         )
     return LigerFusedLinearPolicyLossFunction.apply(
         policy_hidden.contiguous(),
@@ -851,6 +914,7 @@ def apply_fused_policy_loss(
         softcap,
         support_ids,
         logit_bias,
+        cast_logprobs_to_fp32,
     )
 
 

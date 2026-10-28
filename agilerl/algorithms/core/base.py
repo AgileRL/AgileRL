@@ -119,6 +119,7 @@ from agilerl.distributed import (
     get_world_size,
     init_distributed,
     is_main_process,
+    materialize_dtensors,
     reshard_fsdp_modules,
     resolve_device,
     set_seed,
@@ -199,6 +200,7 @@ from agilerl.utils.llm_packing import (
     mixers_without_boundary_reset,
     pack_next_token_frame,
     pack_padded_batch,
+    packed_layout_kwargs,
     unpack_hidden_states,
     unpack_logprobs,
 )
@@ -4508,11 +4510,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         warnings.warn(
             f"{algo_name} with use_liger_loss=True at importance_sampling_level="
             f"'{level}' is permitted but NOT memory-bounded: the fused kernel "
-            "processes one whole sequence per chunk and materializes a "
-            "(seq_len, vocab) logits tensor per trajectory (the token-flatten "
-            "trick only applies at token level). For bounded memory set "
-            "use_liger_loss=False — the standard path is always memory-bounded "
-            "via the fused-linear-logprob path.",
+            "processes one whole sequence per chunk with grad buffers that grow "
+            "with its length (the token-flatten trick only applies at token "
+            "level). For bounded memory set use_liger_loss=False — the standard "
+            "path is always memory-bounded via the fused-linear-logprob path.",
             stacklevel=2,
         )
         setattr(self, once_attr, True)
@@ -5305,6 +5306,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 "position_ids": packed.position_ids.repeat(copies, 1),
                 "use_cache": False,
             }
+            if packing_mode == "varlen":
+                model_kwargs.update(packed_layout_kwargs(packed))
         else:
             attention_mask = attention_mask.repeat(copies, 1)
             model_kwargs = {
@@ -5414,6 +5417,14 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         }
         if support_ids is not None:
             support_ids = support_ids.to(hidden.device)
+        unwrapped = fused_fn.func if isinstance(fused_fn, partial) else fused_fn
+        if (
+            unwrapped is LLMAlgorithm._logprobs_from_hidden_fused
+            and self.use_liger_loss
+            and self.cast_logprobs_to_fp32
+        ):
+            # Old/reference logprobs use the selective kernel the Liger loss runs.
+            kwargs["selective"] = True
         if score_mask is None:
             return fused_fn(
                 hidden, head_w, head_b, target_ids, support_ids=support_ids, **kwargs
@@ -5914,6 +5925,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             "position_ids": packed.position_ids,
             "use_cache": False,
         }
+        if self._packing_mode() == "varlen":
+            forward_kwargs.update(packed_layout_kwargs(packed))
         if pixel_values is not None:
             forward_kwargs["pixel_values"] = pixel_values
         with (
@@ -6078,9 +6091,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         constraint onto each layer's native (causal / sliding-window) mask. We
         only gate on backends where that composed mask stays sparse:
 
-        * ``"varlen"`` — FlashAttention-2 turns the packed ``position_ids`` into
-          ``cu_seqlens`` (+ per-layer ``window_size``); no mask is materialized.
-          Memory/throughput-optimal and handles dynamic shapes with no recompile.
+        * ``"varlen"`` — FlashAttention-2 (or torch-native ``torch_varlen``)
+          turns the packed ``position_ids`` into ``cu_seqlens`` (+ per-layer
+          ``window_size``); no mask is materialized. Memory/throughput-optimal
+          and handles dynamic shapes with no recompile.
         * ``"blockmask"`` — FlexAttention builds a sparse block-diagonal
           ``BlockMask`` (active tiles + compiled ``mask_mod``, windowed on
           sliding layers). Needs no ``flash_attn`` build, but recompiles per
@@ -6099,7 +6113,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         if not getattr(self, "use_sequence_packing", False):
             return None
         impl = language_model_attn_implementation(self.actor)
-        if impl in {"flash_attention_2", "flex_attention"}:
+        if impl in {"flash_attention_2", "flex_attention", "torch_varlen"}:
             # Mixer classes are patched before the first forward, so one scan
             # of the actor's modules holds for its lifetime.
             if getattr(self, "_boundary_reset_checked_actor", None) is not self.actor:
@@ -6113,11 +6127,16 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                     )
                     raise ValueError(msg)
                 self._boundary_reset_checked_actor = self.actor
-            return "varlen" if impl == "flash_attention_2" else "blockmask"
+            return (
+                "varlen"
+                if impl in {"flash_attention_2", "torch_varlen"}
+                else "blockmask"
+            )
         if not getattr(self, "_packing_backend_warned", False):
             warnings.warn(
                 "use_sequence_packing=True needs a varlen/block-sparse attention "
-                "backend (flash_attention_2 or flex_attention); got "
+                "backend (flash_attention_2, flex_attention, or torch_varlen); "
+                "got "
                 f"{impl!r}, which has no sparse path. Falling back to the padded "
                 "forward (no packing).",
                 stacklevel=2,
@@ -6204,6 +6223,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                         "position_ids": packed.position_ids,
                         "use_cache": False,
                     }
+                    if packing_mode == "varlen":
+                        batch_model_kwargs.update(packed_layout_kwargs(packed))
                     if batch_pixel_values is not None:
                         batch_model_kwargs["pixel_values"] = batch_pixel_values
                 else:
@@ -7566,6 +7587,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         softcap: float | None = None,
         support_ids: torch.Tensor | None = None,
         logit_bias: torch.Tensor | None = None,
+        selective: bool = False,
     ) -> torch.Tensor:
         """Per-token target logprobs without materializing the full ``(B, T, V)``
         logits tensor.
@@ -7597,7 +7619,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :param chunk_rows: rows of the flattened ``(B*T)`` workspace per
             iteration; trades launch count vs ``chunk_rows * V`` peak. When
             ``None`` (default) it is resolved from the vocab size via
-            a ~256 MB fp32 workspace heuristic.
+            a ~256 MB fp32 workspace heuristic. Ignored on the selective path.
         :type chunk_rows: int | None, optional
         :param softcap: final-logit softcap of the model's head, or ``None``.
         :type softcap: float | None, optional
@@ -7606,9 +7628,36 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :type support_ids: torch.Tensor | None, optional
         :param logit_bias: ``(V,)`` fp32 offsets added after the softcap, or ``None``.
         :type logit_bias: torch.Tensor | None, optional
+        :param selective: prefer Liger's selective kernel (the fused loss's
+            own forward) over the chunked logsumexp. Needs ``cast_to_fp32``
+            and ``liger-kernel``; softcap, support-scored, and logit-bias
+            inputs run the chunked path.
+        :type selective: bool, optional
         :return: ``(B, T)`` per-token logprobs in ``hidden.dtype``.
         :rtype: torch.Tensor
         """
+        if selective:
+            if not cast_to_fp32:
+                msg = (
+                    "selective logprobs need cast_to_fp32=True: Liger's kernel "
+                    "runs in fp32."
+                )
+                raise ValueError(msg)
+            if (
+                HAS_LIGER_KERNEL
+                and softcap is None
+                and support_ids is None
+                and logit_bias is None
+            ):
+                # Liger is an optional extra the standard path must not import.
+                from agilerl.algorithms.core.llm_ops.fused_loss import (
+                    selective_logprobs_from_hidden,
+                )
+
+                with materialize_dtensors(head_w, head_b) as (dense_w, dense_b):
+                    return selective_logprobs_from_hidden(
+                        hidden, dense_w, dense_b, target_ids, temperature=temperature
+                    )
         chunk_rows = resolve_chunk_rows(head_w.shape[0], chunk_rows)
         return fused_linear_logprobs_chunked(
             hidden,

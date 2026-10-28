@@ -3015,6 +3015,134 @@ class TestApplyFsdp2:
         assert out is model
         assert set(sharded) == {blocks[0], blocks[1], model}
 
+    def test_comm_options_reach_every_fsdp_unit(self, world_size_one):
+        class Block(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.lin = nn.Linear(4, 4)
+
+        class Model(nn.Module):
+            _no_split_modules: ClassVar = ["Block"]
+
+            def __init__(self):
+                super().__init__()
+                self.layers = nn.ModuleList([Block(), Block()])
+
+        # Arrange
+        model = Model()
+        mesh = init_device_mesh("cpu", (1,))
+        config = FSDPConfig(
+            param_dtype="float32",
+            wrap_every_n_blocks=1,
+            # Tiny linears shard only when every parameter is managed.
+            param_persistence_threshold=0,
+            separate_reduce_scatter_group=True,
+            reduce_scatter_max_input_buffers=2,
+        )
+
+        # Act
+        apply_fsdp2(model, config, mesh=mesh)
+
+        # Assert — every unit reduce-scatters on its own group with 2 buffers
+        groups = [
+            group
+            for module in model.modules()
+            if isinstance(module, FSDPModule)
+            for group in module._get_fsdp_state()._fsdp_param_groups
+        ]
+        assert len(groups) > 0
+        assert all(
+            group._reduce_scatter_process_group is not group._all_gather_process_group
+            for group in groups
+        )
+        assert all(group.reduce_scatter_max_input_buffers == 2 for group in groups)
+
+    @pytest.mark.gpu
+    @cuda_required
+    def test_symm_mem_switches_all_gather_comms(self, world_size_one):
+        class Block(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.lin = nn.Linear(4, 4)
+
+        class Model(nn.Module):
+            _no_split_modules: ClassVar = ["Block"]
+
+            def __init__(self):
+                super().__init__()
+                self.layers = nn.ModuleList([Block(), Block()])
+
+        # Arrange
+        model = Model()
+        mesh = init_device_mesh("cpu", (1,))
+        config = FSDPConfig(
+            param_dtype="float32",
+            wrap_every_n_blocks=1,
+            # Tiny linears shard only when every parameter is managed.
+            param_persistence_threshold=0,
+            symm_mem_for_comm=True,
+        )
+
+        # Act
+        apply_fsdp2(model, config, mesh=mesh)
+
+        # Assert — every unit all-gathers through symmetric memory
+        comms = [
+            group._all_gather_comm
+            for module in model.modules()
+            if isinstance(module, FSDPModule)
+            for group in module._get_fsdp_state()._fsdp_param_groups
+        ]
+        assert len(comms) > 0
+        assert all(type(comm).__name__ == "SymmMemAllGather" for comm in comms)
+
+    def test_comm_defaults_leave_torch_settings_alone(self, world_size_one):
+        class Block(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.lin = nn.Linear(4, 4)
+
+        class Model(nn.Module):
+            _no_split_modules: ClassVar = ["Block"]
+
+            def __init__(self):
+                super().__init__()
+                self.layers = nn.ModuleList([Block(), Block()])
+
+        # Arrange
+        model = Model()
+        mesh = init_device_mesh("cpu", (1,))
+
+        # Act
+        apply_fsdp2(
+            model,
+            FSDPConfig(
+                param_dtype="float32",
+                wrap_every_n_blocks=1,
+                # Tiny linears shard only when every parameter is managed.
+                param_persistence_threshold=0,
+            ),
+            mesh=mesh,
+        )
+
+        # Assert — shared group, one buffer, default all-gather
+        groups = [
+            group
+            for module in model.modules()
+            if isinstance(module, FSDPModule)
+            for group in module._get_fsdp_state()._fsdp_param_groups
+        ]
+        assert len(groups) > 0
+        assert all(
+            group._reduce_scatter_process_group is group._all_gather_process_group
+            for group in groups
+        )
+        assert all(group.reduce_scatter_max_input_buffers == 1 for group in groups)
+        assert all(
+            type(group._all_gather_comm).__name__ == "DefaultAllGather"
+            for group in groups
+        )
+
     def test_replicates_embed_and_shards_untied_lm_head_before_root(
         self, world_size_one
     ):

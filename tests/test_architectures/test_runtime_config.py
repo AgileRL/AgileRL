@@ -229,6 +229,19 @@ class TestVllmRuntimeConfigEngineKwargs:
             "reasoning_parser": "qwen3"
         }
 
+    def test_use_replayssm_forwards_when_set(self) -> None:
+        config = VllmRuntimeConfig(use_replayssm=True)
+
+        assert config.engine_kwargs() == {"use_replayssm": True}
+
+    @pytest.mark.parametrize("model_type", ["nemotron_h", "nemotron_h_omni"])
+    def test_replayssm_stays_off_until_a_gpu_run_verifies_it(
+        self, model_type: str
+    ) -> None:
+        kwargs = FAMILY_RUNTIME_CONFIGS[model_type].vllm.engine_kwargs()
+
+        assert "use_replayssm" not in kwargs
+
     @pytest.mark.parametrize("model_type", ["nemotron_h", "qwen3_5"])
     def test_hybrid_mamba_families_cache_densely(self, model_type: str) -> None:
         kwargs = FAMILY_RUNTIME_CONFIGS[model_type].vllm.engine_kwargs()

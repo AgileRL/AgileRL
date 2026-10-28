@@ -956,8 +956,8 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         # Warn once, up front, when Liger is paired with a non-token IS level.
         # It is permitted but not memory-bounded: turn-/trajectory-level pooling
         # couples a unit's tokens, so the fused kernel processes one whole
-        # sequence per chunk and materializes a (seq_len, vocab) logits tensor
-        # per trajectory. The shared once-flag suppresses the loss-time dup.
+        # sequence per chunk with grad buffers that grow with its length.
+        # The shared once-flag suppresses the loss-time dup.
         if self.use_liger_loss and self.importance_sampling_level in {
             "turn",
             "trajectory",
@@ -1167,6 +1167,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                     None if support_ids is None else support_ids.to(self.device)
                 ),
                 logit_bias=self._logit_bias_vector(head_w.shape[0]),
+                cast_logprobs_to_fp32=self.cast_logprobs_to_fp32,
             )
         # aux = [kl, clipfrac, pg_loss, entropy, kl_clamp_frac] scalars in fp32.
         metrics = {

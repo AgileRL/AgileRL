@@ -31,12 +31,14 @@ from liger_kernel.chunked_loss.fused_linear_preference import (
     LigerFusedLinearPreferenceBase,
 )
 
+from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.core.llm_ops.fused_loss import (
     LigerDPOWithAlpha,
     LigerFusedLinearPolicyLossFunction,
     apply_fused_policy_loss,
     flatten_tokens_for_fused_loss,
     llm_policy_loss_fn,
+    selective_logprobs_from_hidden,
 )
 from tests.test_algorithms.test_llms.test_ppo_llm_segments import _make_ppo
 
@@ -93,6 +95,11 @@ def test_no_liger_fallback_sets_symbol_to_none(module_path: str, symbol: str) ->
         importlib.reload(mod)
 
 
+def _gather_logps(log_probs: torch.Tensor, target_ids: torch.Tensor) -> torch.Tensor:
+    """Selected-token logprobs, the math fn's input since the gather moved out."""
+    return log_probs.gather(-1, target_ids.unsqueeze(-1)).squeeze(-1)
+
+
 def test_llm_policy_loss_fn_with_old_per_token_logps_none_falls_back_to_detached():
     """``llm_policy_loss_fn`` allows ``old_per_token_logps=None`` for callers
     that forgot to pass it — fallback uses the current logprobs detached
@@ -108,8 +115,7 @@ def test_llm_policy_loss_fn_with_old_per_token_logps_none_falls_back_to_detached
     adv = torch.randn(B, T) * 0.1
 
     loss_with_none, metrics_with_none = llm_policy_loss_fn(
-        log_probs=log_probs,
-        selected_token_ids=target_ids,
+        per_token_logps=_gather_logps(log_probs, target_ids),
         attention_mask=mask,
         advantages=adv,
         full_attention_mask=mask,
@@ -195,8 +201,7 @@ class TestLlmPpoLossFn:
             log_probs, target_ids, mask, adv, old_log_probs, ref_log_probs, eps, beta
         )
         fused_loss, metrics = llm_policy_loss_fn(
-            log_probs=log_probs,
-            selected_token_ids=target_ids,
+            per_token_logps=_gather_logps(log_probs, target_ids),
             attention_mask=mask,
             advantages=adv,
             full_attention_mask=mask,
@@ -238,8 +243,7 @@ class TestLlmPpoLossFn:
             beta=0.0,
         )
         fused_loss, metrics = llm_policy_loss_fn(
-            log_probs=log_probs,
-            selected_token_ids=target_ids,
+            per_token_logps=_gather_logps(log_probs, target_ids),
             attention_mask=mask,
             advantages=adv,
             full_attention_mask=mask,
@@ -269,8 +273,7 @@ class TestLlmPpoLossFn:
 
         def run(vllm_is_ratio):
             loss, _ = llm_policy_loss_fn(
-                log_probs=log_probs,
-                selected_token_ids=target_ids,
+                per_token_logps=_gather_logps(log_probs, target_ids),
                 attention_mask=mask,
                 advantages=adv,
                 full_attention_mask=mask,
@@ -289,51 +292,6 @@ class TestLlmPpoLossFn:
         assert torch.allclose(ones, base, atol=1e-6)
         assert torch.allclose(scaled, c * base, atol=1e-6)
 
-    def test_support_ids_renormalize_restricted_tokens_over_their_support(
-        self,
-    ) -> None:
-        # Arrange
-        torch.manual_seed(7)
-        B, T, V = 2, 3, 16
-        log_probs = torch.log_softmax(torch.randn(B, T, V), dim=-1)
-        target_ids = torch.randint(0, V, (B, T))
-        support_ids = torch.full((B, T, 3), -1, dtype=torch.int32)
-        support_ids[..., 0] = target_ids
-        support_ids[..., 1] = (target_ids + 1) % V
-        support_ids[0, :, 2] = (target_ids[0] + 2) % V
-        support_ids[1, 1:] = -1
-        full_vocab = log_probs.gather(-1, target_ids.unsqueeze(-1)).squeeze(-1)
-        support_log_z = torch.logsumexp(
-            log_probs.gather(-1, support_ids.clamp(min=0).long()).masked_fill(
-                support_ids < 0, float("-inf")
-            ),
-            dim=-1,
-        )
-        expected = torch.where(
-            support_ids[..., 0] >= 0, full_vocab - support_log_z, full_vocab
-        )
-
-        # Act
-        scored = torch.empty(B, T)
-        for b in range(B):
-            for t in range(T):
-                token_mask = torch.zeros(B, T)
-                token_mask[b, t] = 1.0
-                _, metrics = llm_policy_loss_fn(
-                    log_probs=log_probs,
-                    selected_token_ids=target_ids,
-                    attention_mask=token_mask,
-                    advantages=torch.zeros(B, T),
-                    full_attention_mask=token_mask,
-                    support_ids=support_ids,
-                )
-                scored[b, t] = -metrics[3]
-
-        # Assert
-        torch.testing.assert_close(scored, expected, rtol=0.0, atol=1e-6)
-        assert not torch.allclose(scored[0], full_vocab[0], atol=1e-3)
-        torch.testing.assert_close(scored[1, 1:], full_vocab[1, 1:], rtol=0.0, atol=0.0)
-
     def test_chunk_accumulation_recovers_global_loss(self) -> None:
         """Splitting the batch and summing chunk losses must equal the
         single-shot loss — this is the invariant Liger's base class relies on
@@ -350,8 +308,7 @@ class TestLlmPpoLossFn:
         ref_log_probs = torch.randn(B, T) * 0.05
 
         single, _ = llm_policy_loss_fn(
-            log_probs=log_probs,
-            selected_token_ids=target_ids,
+            per_token_logps=_gather_logps(log_probs, target_ids),
             attention_mask=mask,
             advantages=adv,
             full_attention_mask=mask,
@@ -364,8 +321,7 @@ class TestLlmPpoLossFn:
         chunk_sum = torch.zeros((), dtype=single.dtype)
         for s, e in [(0, 2), (2, 4), (4, 6)]:
             chunk_loss, _ = llm_policy_loss_fn(
-                log_probs=log_probs[s:e],
-                selected_token_ids=target_ids[s:e],
+                per_token_logps=_gather_logps(log_probs[s:e], target_ids[s:e]),
                 attention_mask=mask[s:e],
                 advantages=adv[s:e],
                 full_attention_mask=mask,  # <- GLOBAL mask is the denominator
@@ -388,8 +344,7 @@ class TestLlmPpoLossFn:
         old_log_probs = torch.randn(B, T) * 0.05
 
         fused_loss, metrics = llm_policy_loss_fn(
-            log_probs=log_probs,
-            selected_token_ids=target_ids,
+            per_token_logps=_gather_logps(log_probs, target_ids),
             attention_mask=mask,
             advantages=adv,
             full_attention_mask=mask,
@@ -419,8 +374,7 @@ class TestLlmPpoLossFn:
         old_log_probs = per_token_logps.detach() - 1.0  # ratio ≈ e ≫ 1.2
 
         _, metrics = llm_policy_loss_fn(
-            log_probs=log_probs,
-            selected_token_ids=target_ids,
+            per_token_logps=_gather_logps(log_probs, target_ids),
             attention_mask=mask,
             advantages=adv,
             full_attention_mask=mask,
@@ -440,8 +394,7 @@ class TestLlmPpoLossFn:
         log_probs = torch.log_softmax(torch.randn(2, 4, 16), dim=-1)
         with pytest.raises(ValueError, match="importance_sampling_level='turn'"):
             llm_policy_loss_fn(
-                log_probs=log_probs,
-                selected_token_ids=torch.randint(0, 16, (2, 4)),
+                per_token_logps=_gather_logps(log_probs, torch.randint(0, 16, (2, 4))),
                 attention_mask=torch.ones(2, 4),
                 advantages=torch.randn(2, 4) * 0.1,
                 full_attention_mask=torch.ones(2, 4),
@@ -458,8 +411,7 @@ class TestLlmPpoLossFn:
         log_probs = torch.log_softmax(torch.randn(2, 4, 16), dim=-1)
         with pytest.raises(ValueError, match="Unknown importance_sampling_level"):
             llm_policy_loss_fn(
-                log_probs=log_probs,
-                selected_token_ids=torch.randint(0, 16, (2, 4)),
+                per_token_logps=_gather_logps(log_probs, torch.randint(0, 16, (2, 4))),
                 attention_mask=torch.ones(2, 4),
                 advantages=torch.randn(2, 1) * 0.1,
                 full_attention_mask=torch.ones(2, 4),
@@ -596,8 +548,7 @@ class TestLlmPpoLossFnTurnMode:
             beta,
         )
         fused_loss, metrics = llm_policy_loss_fn(
-            log_probs=log_probs,
-            selected_token_ids=target_ids,
+            per_token_logps=_gather_logps(log_probs, target_ids),
             attention_mask=token_mask,
             advantages=turn_adv,
             full_attention_mask=token_mask,
@@ -632,8 +583,7 @@ class TestLlmPpoLossFnTurnMode:
             ref_lp,
         ) = self._build_turn_inputs(B, T, V, max_turns, seed=3)
         loss, _ = llm_policy_loss_fn(
-            log_probs=log_probs,
-            selected_token_ids=target_ids,
+            per_token_logps=_gather_logps(log_probs, target_ids),
             attention_mask=token_mask,
             advantages=turn_adv,
             full_attention_mask=token_mask,
@@ -662,8 +612,7 @@ class TestLlmPpoLossFnTurnMode:
         ) = self._build_turn_inputs(B, T, V, max_turns, seed=3)
         with pytest.raises(ValueError, match="turn_log_ratio_reduction must be one of"):
             llm_policy_loss_fn(
-                log_probs=log_probs,
-                selected_token_ids=target_ids,
+                per_token_logps=_gather_logps(log_probs, target_ids),
                 attention_mask=token_mask,
                 advantages=turn_adv,
                 full_attention_mask=token_mask,
@@ -691,8 +640,7 @@ class TestLlmPpoLossFnTurnMode:
         ) = self._build_turn_inputs(B, T, V, max_turns, seed=11)
 
         single, _ = llm_policy_loss_fn(
-            log_probs=log_probs,
-            selected_token_ids=target_ids,
+            per_token_logps=_gather_logps(log_probs, target_ids),
             attention_mask=token_mask,
             advantages=turn_adv,
             full_attention_mask=token_mask,
@@ -707,8 +655,7 @@ class TestLlmPpoLossFnTurnMode:
         chunked_total = torch.zeros((), dtype=single.dtype)
         for s, e in [(0, 2), (2, 4), (4, 6)]:
             chunk_loss, _ = llm_policy_loss_fn(
-                log_probs=log_probs[s:e],
-                selected_token_ids=target_ids[s:e],
+                per_token_logps=_gather_logps(log_probs[s:e], target_ids[s:e]),
                 attention_mask=token_mask[s:e],
                 advantages=turn_adv[s:e],
                 full_attention_mask=token_mask,  # global denom
@@ -759,8 +706,7 @@ class TestLlmPpoLossFnTurnMode:
             beta=0.01,
         )
         fused_loss, _ = llm_policy_loss_fn(
-            log_probs=log_probs,
-            selected_token_ids=target_ids,
+            per_token_logps=_gather_logps(log_probs, target_ids),
             attention_mask=token_mask,
             advantages=turn_adv,
             full_attention_mask=token_mask,
@@ -783,8 +729,7 @@ class TestLlmPpoLossFnTurnMode:
         log_probs = torch.log_softmax(torch.randn(2, 4, 16), dim=-1)
         with pytest.raises(ValueError, match="turn-level"):
             llm_policy_loss_fn(
-                log_probs=log_probs,
-                selected_token_ids=torch.randint(0, 16, (2, 4)),
+                per_token_logps=_gather_logps(log_probs, torch.randint(0, 16, (2, 4))),
                 attention_mask=torch.ones(2, 4),
                 advantages=torch.randn(2, 2) * 0.1,
                 full_attention_mask=torch.ones(2, 4),
@@ -880,8 +825,7 @@ class TestLlmPpoLossFnTrajectoryMode:
             log_probs, ids, mask, adv, old_lp, ref_lp, eps, beta
         )
         fused_loss, metrics = llm_policy_loss_fn(
-            log_probs=log_probs,
-            selected_token_ids=ids,
+            per_token_logps=_gather_logps(log_probs, ids),
             attention_mask=mask,
             advantages=adv,
             full_attention_mask=mask,
@@ -907,8 +851,7 @@ class TestLlmPpoLossFnTrajectoryMode:
         log_probs, ids, mask, adv, old_lp, ref_lp = self._build_inputs(B, T, V, seed=21)
 
         single, _ = llm_policy_loss_fn(
-            log_probs=log_probs,
-            selected_token_ids=ids,
+            per_token_logps=_gather_logps(log_probs, ids),
             attention_mask=mask,
             advantages=adv,
             full_attention_mask=mask,
@@ -920,8 +863,7 @@ class TestLlmPpoLossFnTrajectoryMode:
         chunked_total = torch.zeros((), dtype=single.dtype)
         for s, e in [(0, 2), (2, 4), (4, 6)]:
             chunk_loss, _ = llm_policy_loss_fn(
-                log_probs=log_probs[s:e],
-                selected_token_ids=ids[s:e],
+                per_token_logps=_gather_logps(log_probs[s:e], ids[s:e]),
                 attention_mask=mask[s:e],
                 advantages=adv[s:e],
                 full_attention_mask=mask,  # global active-trajectory denom
@@ -982,8 +924,7 @@ class TestLigerFusedLinearPolicyLossFunction:
         logits = hidden @ weight.t()
         log_probs = torch.log_softmax(logits.float(), dim=-1)
         ref_loss, _ = llm_policy_loss_fn(
-            log_probs=log_probs,
-            selected_token_ids=ids,
+            per_token_logps=_gather_logps(log_probs, ids),
             attention_mask=mask,
             advantages=adv,
             full_attention_mask=mask,
@@ -992,6 +933,51 @@ class TestLigerFusedLinearPolicyLossFunction:
             beta=0.01,
         )
         assert torch.allclose(loss, ref_loss, rtol=1e-4, atol=1e-4)
+
+    def test_frozen_head_matches_trainable_input_grad_without_weight_grad(
+        self,
+    ) -> None:
+        # Arrange
+        B, T, V, H = 2, 4, 16, 8
+        hidden, weight, ids, mask, adv, old_lp, _ = self._build_inputs(
+            B, T, V, H, with_ref=False
+        )
+        frozen_hidden = hidden.detach().clone().requires_grad_(True)
+        frozen_weight = weight.detach().clone()
+
+        def run(h: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+            loss, _ = LigerFusedLinearPolicyLossFunction.apply(
+                h,
+                w,
+                ids,
+                mask,
+                adv,
+                None,
+                None,
+                old_lp,
+                0.0,
+                0.2,
+                0.2,
+                1.0,
+                False,
+                2,
+                None,
+                None,
+                None,
+            )
+            loss.backward()
+            return loss
+
+        # Act
+        trainable_loss = run(hidden, weight)
+        frozen_loss = run(frozen_hidden, frozen_weight)
+
+        # Assert
+        assert torch.equal(frozen_loss, trainable_loss)
+        assert frozen_weight.grad is None
+        assert weight.grad is not None
+        # Same fp32 math; only the weight-grad argnum is dropped.
+        assert torch.allclose(frozen_hidden.grad, hidden.grad, rtol=0, atol=1e-7)
 
     def test_backward_gradients_flow_to_hidden_and_weight(self) -> None:
         B, T, V, H = 2, 4, 16, 8
@@ -1169,8 +1155,7 @@ class TestLigerFusedLinearPolicyLossFunction:
             logits = (hidden @ weight.t()) / temp
             log_probs = torch.log_softmax(logits.float(), dim=-1)
             ref_loss, _ = llm_policy_loss_fn(
-                log_probs=log_probs,
-                selected_token_ids=ids,
+                per_token_logps=_gather_logps(log_probs, ids),
                 attention_mask=mask,
                 advantages=adv,
                 full_attention_mask=mask,
@@ -1183,6 +1168,199 @@ class TestLigerFusedLinearPolicyLossFunction:
         assert torch.allclose(loss, _reference(temperature), rtol=1e-4, atol=1e-4)
         # The branch is not a no-op: the scaled loss differs from unscaled.
         assert not torch.allclose(loss, _reference(1.0), rtol=1e-4, atol=1e-4)
+
+
+class TestSelectiveLogprobs:
+    """The selective kernel matches the inline log-softmax, forward and back."""
+
+    def test_helper_matches_gathered_log_softmax_in_fp32(self) -> None:
+        torch.manual_seed(0)
+        hidden = torch.randn(2, 5, 8, dtype=torch.float32)
+        weight = torch.randn(48, 8, dtype=torch.float32) * 0.02
+        ids = torch.randint(0, 48, (2, 5))
+
+        out = selective_logprobs_from_hidden(hidden, weight, None, ids)
+
+        # fp32 online softmax vs log_softmax differ only in summation order.
+        expected = _gather_logps(
+            torch.log_softmax((hidden @ weight.t()).float(), dim=-1), ids
+        )
+        assert out.dtype == torch.float32
+        assert torch.allclose(out, expected, rtol=1e-5, atol=1e-5)
+
+    def test_helper_casts_back_to_hidden_dtype(self) -> None:
+        torch.manual_seed(0)
+        hidden = torch.randn(2, 5, 8, dtype=torch.bfloat16)
+        weight = (torch.randn(48, 8, dtype=torch.float32) * 0.02).bfloat16()
+        ids = torch.randint(0, 48, (2, 5))
+
+        out = selective_logprobs_from_hidden(hidden, weight, None, ids)
+
+        assert out.dtype == torch.bfloat16
+
+    def test_function_without_fp32_cast_matches_bf16_reference(self) -> None:
+        torch.manual_seed(0)
+        B, T, V, H = 2, 4, 32, 8
+        hidden = torch.randn(B, T, H, dtype=torch.bfloat16, requires_grad=True)
+        weight = (torch.randn(V, H, dtype=torch.float32) * 0.02).bfloat16()
+        weight.requires_grad_(True)
+        ids = torch.randint(0, V, (B, T))
+        mask = torch.ones(B, T, dtype=torch.float32)
+        adv = torch.randn(B, T, dtype=torch.float32) * 0.1
+        old_lp = torch.randn(B, T, dtype=torch.float32) * 0.05
+
+        loss, _ = LigerFusedLinearPolicyLossFunction.apply(
+            hidden,
+            weight,
+            ids,
+            mask,
+            adv,
+            None,  # bias
+            None,  # ref
+            old_lp,
+            0.0,  # beta
+            0.2,
+            0.2,  # epsilon_low, epsilon_high
+            1.0,  # temperature
+            False,  # compiled
+            B,  # chunk_size: one chunk, same shapes as the reference
+            None,
+            None,
+            None,  # turn_ids, full_turn_mask, max_turns
+            "token",  # importance_sampling_level
+            "mean",  # turn_log_ratio_reduction
+            None,  # vllm_is_ratio
+            None,  # kl_clamp
+            False,  # cast_logprobs_to_fp32
+        )
+        ref_loss, _ = llm_policy_loss_fn(
+            per_token_logps=_gather_logps(
+                torch.log_softmax(hidden.detach() @ weight.detach().t(), dim=-1),
+                ids,
+            ),
+            attention_mask=mask,
+            advantages=adv,
+            full_attention_mask=mask,
+            old_per_token_logps=old_lp,
+            beta=0.0,
+        )
+
+        # bf16 CPU matmuls vary with kernel blocking; the math is identical.
+        assert torch.allclose(loss, ref_loss, rtol=1e-2, atol=1e-2)
+        loss.backward()
+        assert hidden.grad is not None
+        assert weight.grad is not None
+
+    def test_selective_old_logprobs_match_the_implicit_ratio_one(self) -> None:
+        torch.manual_seed(0)
+        B, T, V, H = 2, 4, 32, 8
+        hidden = torch.randn(B, T, H, dtype=torch.float32)
+        weight = torch.randn(V, H, dtype=torch.float32) * 0.02
+        ids = torch.randint(0, V, (B, T))
+        mask = torch.ones(B, T, dtype=torch.float32)
+        adv = torch.randn(B, T, dtype=torch.float32) * 0.1
+        old_lp = selective_logprobs_from_hidden(hidden, weight, None, ids)
+
+        loss_none, _ = apply_fused_policy_loss(
+            hidden,
+            weight,
+            None,
+            ids,
+            mask,
+            adv,
+            None,
+            None,
+            0.0,
+            0.2,
+            0.2,
+            1.0,
+            "token",
+            token_chunk_size=4,
+        )
+        loss_sel, _ = apply_fused_policy_loss(
+            hidden,
+            weight,
+            None,
+            ids,
+            mask,
+            adv,
+            None,
+            old_lp,
+            0.0,
+            0.2,
+            0.2,
+            1.0,
+            "token",
+            token_chunk_size=4,
+        )
+
+        # Same kernel, same inputs: old falls back to the identical tensor.
+        assert torch.equal(loss_none, loss_sel)
+
+    def test_no_grad_entry_point_matches_the_helper(self) -> None:
+        torch.manual_seed(0)
+        hidden = torch.randn(2, 5, 8, dtype=torch.float32)
+        weight = torch.randn(48, 8, dtype=torch.float32) * 0.02
+        ids = torch.randint(0, 48, (2, 5))
+
+        out = LLMAlgorithm._logprobs_from_hidden_fused(
+            hidden, weight, None, ids, selective=True
+        )
+        expected = selective_logprobs_from_hidden(hidden, weight, None, ids)
+
+        assert torch.equal(out, expected)
+
+    def test_no_grad_selective_needs_fp32_cast(self) -> None:
+        hidden = torch.randn(2, 5, 8, dtype=torch.float32)
+        weight = torch.randn(48, 8, dtype=torch.float32) * 0.02
+        ids = torch.randint(0, 48, (2, 5))
+
+        with pytest.raises(ValueError, match="selective logprobs need cast_to_fp32"):
+            LLMAlgorithm._logprobs_from_hidden_fused(
+                hidden, weight, None, ids, cast_to_fp32=False, selective=True
+            )
+
+    def test_score_hidden_routes_liger_loss_through_selective(self) -> None:
+        torch.manual_seed(0)
+        agent = _make_ppo(use_liger_loss=True)
+        hidden = torch.randn(2, 4, 8, dtype=torch.float32)
+        head_w = torch.randn(16, 8, dtype=torch.float32) * 0.02
+        target_ids = torch.randint(0, 16, (2, 4))
+
+        out = agent._score_hidden(
+            LLMAlgorithm._logprobs_from_hidden_fused,
+            hidden,
+            head_w,
+            None,
+            target_ids,
+            None,
+        )
+        expected = selective_logprobs_from_hidden(
+            hidden, head_w, None, target_ids, temperature=agent.temperature
+        )
+
+        assert torch.equal(out, expected)
+
+    def test_score_hidden_keeps_logsumexp_without_liger_loss(self) -> None:
+        torch.manual_seed(0)
+        agent = _make_ppo(use_liger_loss=False)
+        hidden = torch.randn(2, 4, 8, dtype=torch.float32)
+        head_w = torch.randn(16, 8, dtype=torch.float32) * 0.02
+        target_ids = torch.randint(0, 16, (2, 4))
+
+        out = agent._score_hidden(
+            LLMAlgorithm._logprobs_from_hidden_fused,
+            hidden,
+            head_w,
+            None,
+            target_ids,
+            None,
+        )
+        expected = LLMAlgorithm._logprobs_from_hidden_fused(
+            hidden, head_w, None, target_ids
+        )
+
+        assert torch.equal(out, expected)
 
 
 class TestFusedLossHelpers:
@@ -1271,8 +1449,7 @@ class TestApplyFusedPolicyLoss:
 
         log_probs = torch.log_softmax((hidden @ weight.t()).float(), dim=-1)
         ref_loss, ref_metrics = llm_policy_loss_fn(
-            log_probs=log_probs,
-            selected_token_ids=ids,
+            per_token_logps=_gather_logps(log_probs, ids),
             attention_mask=mask,
             advantages=adv,
             full_attention_mask=mask,
@@ -1319,8 +1496,7 @@ class TestApplyFusedPolicyLoss:
 
         log_probs = torch.log_softmax((hidden @ weight.t()).float(), dim=-1)
         ref_loss, _ = llm_policy_loss_fn(
-            log_probs=log_probs,
-            selected_token_ids=ids,
+            per_token_logps=_gather_logps(log_probs, ids),
             attention_mask=mask,
             advantages=adv,
             full_attention_mask=mask,
@@ -1361,8 +1537,7 @@ class TestApplyFusedPolicyLoss:
         uncapped, _ = apply_fused_policy_loss(hidden, weight, None, **kwargs)
         logits = 2.0 * torch.tanh((hidden @ weight.t()) / 2.0) / 0.7
         ref_loss, _ = llm_policy_loss_fn(
-            log_probs=torch.log_softmax(logits, dim=-1),
-            selected_token_ids=ids,
+            per_token_logps=_gather_logps(torch.log_softmax(logits, dim=-1), ids),
             attention_mask=mask,
             advantages=adv,
             full_attention_mask=mask,
@@ -1377,6 +1552,123 @@ class TestApplyFusedPolicyLoss:
         assert not torch.allclose(uncapped, ref_loss, rtol=1e-2, atol=1e-3)
         assert torch.allclose(fused_grads[0], ref_grads[0], rtol=1e-4, atol=1e-5)
         assert torch.allclose(fused_grads[1], ref_grads[1], rtol=1e-4, atol=1e-5)
+
+    def test_support_ids_renormalize_restricted_tokens_over_their_support(
+        self,
+    ) -> None:
+        # Arrange
+        B, T, V, H = 2, 3, 16, 8
+        hidden, weight, ids, mask, old_lp, ref_lp = self._build_inputs(
+            B, T, V, H, seed=7
+        )
+        support_ids = torch.full((B, T, 3), -1, dtype=torch.int32)
+        support_ids[..., 0] = ids
+        support_ids[..., 1] = (ids + 1) % V
+        support_ids[0, :, 2] = (ids[0] + 2) % V
+        support_ids[1, 1:] = -1
+        adv = torch.ones(B, T)
+        kwargs: dict[str, Any] = {
+            "target_ids": ids,
+            "attention_mask": mask,
+            "advantages": adv,
+            "ref_per_token_logps": ref_lp,
+            "old_per_token_logps": old_lp,
+            "beta": 0.01,
+            "epsilon_low": 0.2,
+            "epsilon_high": 0.2,
+            "temperature": 1.0,
+            "importance_sampling_level": "token",
+            "token_chunk_size": 2,
+        }
+
+        # Act
+        loss, _ = apply_fused_policy_loss(
+            hidden, weight, None, support_ids=support_ids, **kwargs
+        )
+        fused_grads = torch.autograd.grad(loss, (hidden, weight))
+        unrestricted, _ = apply_fused_policy_loss(hidden, weight, None, **kwargs)
+        log_probs = torch.log_softmax((hidden @ weight.t()).float(), dim=-1)
+        full_vocab = _gather_logps(log_probs, ids)
+        support_log_z = torch.logsumexp(
+            log_probs.gather(-1, support_ids.clamp(min=0).long()).masked_fill(
+                support_ids < 0, float("-inf")
+            ),
+            dim=-1,
+        )
+        expected_logps = torch.where(
+            support_ids[..., 0] >= 0, full_vocab - support_log_z, full_vocab
+        )
+        ref_loss, _ = llm_policy_loss_fn(
+            per_token_logps=expected_logps,
+            attention_mask=mask,
+            advantages=adv,
+            full_attention_mask=mask,
+            ref_per_token_logps=ref_lp,
+            old_per_token_logps=old_lp,
+            beta=0.01,
+        )
+        ref_grads = torch.autograd.grad(ref_loss, (hidden, weight))
+
+        # Assert
+        assert torch.allclose(loss, ref_loss, rtol=1e-4, atol=1e-5)
+        assert not torch.allclose(unrestricted, ref_loss, rtol=1e-2, atol=1e-3)
+        assert torch.allclose(fused_grads[0], ref_grads[0], rtol=1e-4, atol=1e-5)
+        assert torch.allclose(fused_grads[1], ref_grads[1], rtol=1e-4, atol=1e-5)
+
+    def test_inline_path_promotes_mismatched_dtypes_with_a_head_bias(self) -> None:
+        # Arrange: fp32 hidden with an fp16 head (an fp16 checkpoint under
+        # bf16 autocast) plus a head bias, forced onto the inline path by
+        # support ids that restrict nothing.
+        B, T, V, H = 2, 3, 16, 8
+        hidden, fp32_weight, ids, mask, old_lp, ref_lp = self._build_inputs(
+            B, T, V, H, seed=11
+        )
+        weight = fp32_weight.detach().half().requires_grad_(True)
+        head_b = torch.randn(V, dtype=torch.float32) * 0.01
+        head_b.requires_grad_(True)
+        support_ids = torch.full((B, T, 2), -1, dtype=torch.int32)
+        adv = torch.randn(B, T) * 0.1
+        kwargs: dict[str, Any] = {
+            "target_ids": ids,
+            "attention_mask": mask,
+            "advantages": adv,
+            "ref_per_token_logps": ref_lp,
+            "old_per_token_logps": old_lp,
+            "beta": 0.01,
+            "epsilon_low": 0.2,
+            "epsilon_high": 0.2,
+            "temperature": 1.0,
+            "importance_sampling_level": "token",
+            "token_chunk_size": 2,
+        }
+
+        # Act
+        loss, _ = apply_fused_policy_loss(
+            hidden, weight, head_b, support_ids=support_ids, **kwargs
+        )
+        fused_grads = torch.autograd.grad(loss, (hidden, weight, head_b))
+        log_probs = torch.log_softmax(
+            (hidden @ weight.float().t() + head_b).float(), dim=-1
+        )
+        ref_loss, _ = llm_policy_loss_fn(
+            per_token_logps=_gather_logps(log_probs, ids),
+            attention_mask=mask,
+            advantages=adv,
+            full_attention_mask=mask,
+            ref_per_token_logps=ref_lp,
+            old_per_token_logps=old_lp,
+            beta=0.01,
+        )
+        ref_grads = torch.autograd.grad(ref_loss, (hidden, weight, head_b))
+
+        # Assert
+        assert torch.allclose(loss, ref_loss, rtol=1e-4, atol=1e-5)
+        assert torch.allclose(fused_grads[0], ref_grads[0], rtol=1e-4, atol=1e-5)
+        # fp16 head grads: chunked accumulation rounds to the nearest ulp.
+        assert torch.allclose(
+            fused_grads[1].float(), ref_grads[1].float(), rtol=1e-3, atol=1e-4
+        )
+        assert torch.allclose(fused_grads[2], ref_grads[2], rtol=1e-4, atol=1e-5)
 
     def test_logit_bias_adds_after_the_softcap(self) -> None:
         # Arrange
@@ -1410,8 +1702,7 @@ class TestApplyFusedPolicyLoss:
         unbiased, _ = apply_fused_policy_loss(hidden, weight, None, **kwargs)
         logits = (2.0 * torch.tanh((hidden @ weight.t()) / 2.0) + logit_bias) / 0.7
         ref_loss, _ = llm_policy_loss_fn(
-            log_probs=torch.log_softmax(logits, dim=-1),
-            selected_token_ids=ids,
+            per_token_logps=_gather_logps(torch.log_softmax(logits, dim=-1), ids),
             attention_mask=mask,
             advantages=adv,
             full_attention_mask=mask,
@@ -1463,8 +1754,9 @@ class TestLlmPolicyLossFnKlClamp:
     ) -> tuple[torch.Tensor, list[torch.Tensor], torch.Tensor]:
         logits = inputs["logits"].clone().requires_grad_(True)
         loss, metrics = llm_policy_loss_fn(
-            log_probs=torch.log_softmax(logits, dim=-1),
-            selected_token_ids=inputs["target_ids"],
+            per_token_logps=_gather_logps(
+                torch.log_softmax(logits, dim=-1), inputs["target_ids"]
+            ),
             attention_mask=inputs["mask"],
             advantages=inputs["advantages"],
             full_attention_mask=inputs["mask"],
@@ -1558,8 +1850,7 @@ class TestLlmPolicyLossFnKlClamp:
         ref_lp[0, 1] = per_token[0, 1] + self.GAP
         adv = torch.randn(2, 4) * 0.1
         expected_loss, expected_metrics = llm_policy_loss_fn(
-            log_probs=log_probs,
-            selected_token_ids=ids,
+            per_token_logps=_gather_logps(log_probs, ids),
             attention_mask=mask,
             advantages=adv,
             full_attention_mask=mask,

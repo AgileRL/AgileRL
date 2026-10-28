@@ -378,6 +378,14 @@ class TestLLMAlgorithmSpecValidators:
         )
         assert spec.use_sequence_packing is True
 
+    def test_sequence_packing_with_torch_varlen(self) -> None:
+        spec = GRPOSpec(
+            group_size=2,
+            use_sequence_packing=True,
+            attn_implementation="torch_varlen",
+        )
+        assert spec.use_sequence_packing is True
+
     def test_deepspeed_is_rejected(self) -> None:
         with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
             GRPOSpec(group_size=2, deepspeed={"activation_checkpointing": {}})

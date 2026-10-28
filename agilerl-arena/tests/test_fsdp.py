@@ -56,6 +56,11 @@ class TestFSDPConfig:
             ),
             ("tp", 0, "FSDPConfig.tp must be >= 1"),
             ("shard_group_size", 0, "FSDPConfig.shard_group_size must be >= 1"),
+            (
+                "reduce_scatter_max_input_buffers",
+                0,
+                "FSDPConfig.reduce_scatter_max_input_buffers must be >= 1",
+            ),
         ],
     )
     def test_rejects_out_of_range_values(
@@ -67,6 +72,17 @@ class TestFSDPConfig:
     def test_ep_defaults_to_one(self) -> None:
         assert FSDPConfig().ep == 1
         assert FSDPConfig(ep=4).ep == 4
+
+    def test_comm_options_default_off(self) -> None:
+        config = FSDPConfig()
+
+        assert config.separate_reduce_scatter_group is False
+        assert config.reduce_scatter_max_input_buffers == 1
+        assert config.symm_mem_for_comm is False
+
+    def test_rejects_symm_mem_with_extra_reduce_scatter_buffers(self) -> None:
+        with pytest.raises(ValueError, match="cannot combine"):
+            FSDPConfig(symm_mem_for_comm=True, reduce_scatter_max_input_buffers=2)
 
     def test_ep_token_blocks_defaults_to_one(self) -> None:
         assert FSDPConfig().ep_token_blocks == 1

@@ -3396,6 +3396,7 @@ def _vllm_config(**overrides):
         "kv_cache_dtype": None,
         "kv_cache_memory_bytes": None,
         "enforce_eager": None,
+        "sleep_mode_offload_cudagraph": None,
         "max_lora_rank": 16,
         "max_loras": 1,
         "max_num_batched_tokens": None,
@@ -3497,6 +3498,7 @@ class TestBuildVllmLlmInitKwargs:
             "kv_cache_dtype",
             "kv_cache_memory_bytes",
             "enforce_eager",
+            "sleep_mode_offload_cudagraph",
             "limit_mm_per_prompt",
         ):
             assert absent not in kwargs
@@ -3524,6 +3526,7 @@ class TestBuildVllmLlmInitKwargs:
                 kv_cache_dtype="fp8",
                 kv_cache_memory_bytes=123456,
                 enforce_eager=True,
+                sleep_mode_offload_cudagraph=True,
                 max_num_batched_tokens=4096,
                 tensor_parallel_size=2,
                 limit_mm_per_prompt={"image": 4, "video": 0},
@@ -3539,6 +3542,7 @@ class TestBuildVllmLlmInitKwargs:
         assert kwargs["kv_cache_dtype"] == "fp8"
         assert kwargs["kv_cache_memory_bytes"] == 123456
         assert kwargs["enforce_eager"] is True
+        assert kwargs["sleep_mode_offload_cudagraph"] is True
         assert kwargs["max_num_batched_tokens"] == 4096
         assert kwargs["limit_mm_per_prompt"] == {"image": 4, "video": 0}
         assert kwargs["seed"] == 2  # process_index // tensor_parallel_size

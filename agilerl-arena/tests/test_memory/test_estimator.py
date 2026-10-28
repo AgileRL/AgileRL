@@ -137,8 +137,10 @@ class TestEstimateTraining:
     ):
         # beta=0 keeps the reference adapter; the reference rows run as their own
         # micro-batch forwards, so the no-grad peak does not move.
-        with_kl = TrainingSettings(beta=0.001, max_model_len=4096)
-        without_kl = TrainingSettings(beta=0.0, max_model_len=4096)
+        with_kl = TrainingSettings(beta=0.001, max_model_len=4096, use_liger_loss=False)
+        without_kl = TrainingSettings(
+            beta=0.0, max_model_len=4096, use_liger_loss=False
+        )
 
         assert with_kl.n_resident_adapters == without_kl.n_resident_adapters
 
@@ -732,6 +734,32 @@ class TestDistributedTerms:
         with pytest.raises(ValidationError, match="mutually exclusive"):
             TrainingSettings(fsdp=FSDPConfig(cpu_offload=True, optim_cpu_offload=True))
 
+    def test_reduce_scatter_buffers_add_unit_grad_tiles(self, model, device):
+        one = estimate_training(model, device, TrainingSettings(fsdp=FSDPConfig()))
+        two = estimate_training(
+            model,
+            device,
+            TrainingSettings(fsdp=FSDPConfig(reduce_scatter_max_input_buffers=2)),
+        )
+        three = estimate_training(
+            model,
+            device,
+            TrainingSettings(fsdp=FSDPConfig(reduce_scatter_max_input_buffers=3)),
+        )
+
+        one_detail = component(one, "activations").detail
+        two_detail = component(two, "activations").detail
+        three_detail = component(three, "activations").detail
+        grads = one_detail["backward_grads"]
+        expected = grads / model.arch.n_layers * 4 / 2
+
+        assert one_detail["reduce_scatter_buffers"] == 0
+        assert two_detail["reduce_scatter_buffers"] == pytest.approx(expected, abs=2)
+        assert three_detail["reduce_scatter_buffers"] == pytest.approx(
+            2 * expected, abs=2
+        )
+        assert two_detail["backward_peak"] > one_detail["backward_peak"]
+
     def test_fsdp_on_one_gpu_keeps_the_base_and_stores_lora_in_bf16(
         self, model, device
     ):
@@ -958,6 +986,7 @@ class TestDistributedTerms:
                 max_model_len=8,
                 lora_rank=64,
                 lora_target_scope="all-linear",
+                use_liger_loss=False,
             ),
         )
         detail = component(breakdown, "activations").detail
@@ -1079,6 +1108,57 @@ class TestDistributedTerms:
         assert component(offloaded, "activations").detail["checkpoint_boundaries"] == 0
 
 
+class TestSelectiveLogprobTerms:
+    """Liger's selective kernel streams vocab tiles instead of full rows."""
+
+    def test_loss_and_nograd_terms_use_selective_tiles(self, model, device):
+        # Short context keeps the no-grad head (not the forward) binding in
+        # both arms, so the peak deltas equal the term deltas exactly.
+        standard = estimate_training(
+            model, device, TrainingSettings(max_model_len=128, use_liger_loss=False)
+        )
+        selective = estimate_training(
+            model, device, TrainingSettings(max_model_len=128)
+        )
+
+        standard_detail = component(standard, "activations").detail
+        selective_detail = component(selective, "activations").detail
+        # QWEN_05B: 441 rows, vocab 151936, hidden 896.
+        tile = 441 * 4096 * 4
+        grad_hidden = 441 * 896 * 4
+        standard_logits = 441 * 151936 * 8 + 151936 * 896 * 4
+        standard_nograd = 441 * 151936 * 4 + 151936 * 896 * 4
+
+        assert selective_detail["loss_peak"] - standard_detail["loss_peak"] == (
+            pytest.approx(tile + grad_hidden - standard_logits, abs=4)
+        )
+        assert selective_detail["nograd_peak"] - standard_detail[
+            "nograd_peak"
+        ] == pytest.approx(tile - standard_nograd, abs=4)
+
+    def test_grad_hidden_scales_with_chunk_rows(self, model, device):
+        default = estimate_training(model, device, TrainingSettings())
+        narrow = estimate_training(model, device, TrainingSettings(chunk_rows=128))
+
+        default_peak = component(default, "activations").detail["loss_peak"]
+        narrow_peak = component(narrow, "activations").detail["loss_peak"]
+
+        assert narrow_peak - default_peak == pytest.approx(
+            (128 * 4096 * 4 + 128 * 896 * 4) - (441 * 4096 * 4 + 441 * 896 * 4),
+            abs=4,
+        )
+
+    @pytest.mark.parametrize("algorithm", ["grpo", "gspo", "cispo", "ppo", "reinforce"])
+    def test_policy_losses_use_selective_logprobs(self, algorithm):
+        assert TrainingSettings(algorithm=algorithm).uses_selective_logprobs is True
+
+    @pytest.mark.parametrize("algorithm", ["dpo", "sft"])
+    def test_preference_and_sft_losses_keep_full_tiles(self, algorithm):
+        settings = TrainingSettings(algorithm=algorithm)
+
+        assert settings.uses_selective_logprobs is False
+
+
 class TestOrchestratedOverhead:
     def test_orchestrated_charges_the_job_overhead_on_both_phases(self, model, device):
         plain_t = estimate_training(model, device, TrainingSettings())
@@ -1187,7 +1267,7 @@ class TestAlgorithmTerms:
         )
 
     def test_ppo_split_pass_that_exceeds_the_device_does_not_fit(self, model):
-        small = DeviceSpec(total_bytes=4 * GiB)
+        small = DeviceSpec(total_bytes=3 * GiB)
 
         bar = estimate_training(model, small, TrainingSettings(algorithm="ppo"))
 
@@ -1241,7 +1321,7 @@ class TestActivationPeakLossPeak:
         # Arrange
         vocab, h = QWEN_05B.vocab_size, QWEN_05B.hidden_size
         chunk = resolve_chunk_rows(vocab, None)
-        full = TrainingSettings(max_model_len=1024)
+        full = TrainingSettings(max_model_len=1024, use_liger_loss=False)
         supported = full.model_copy(
             update={"sampling_support_width": 20, "support_scored_loss": True}
         )
@@ -1261,7 +1341,9 @@ class TestActivationPeakLossPeak:
 
     def test_a_full_vocabulary_loss_keeps_its_workspace(self, model, device):
         # Arrange
-        full = TrainingSettings(algorithm="ppo", max_model_len=1024)
+        full = TrainingSettings(
+            algorithm="ppo", max_model_len=1024, use_liger_loss=False
+        )
         liger = full.model_copy(update={"sampling_support_width": 20})
 
         # Act
@@ -1295,7 +1377,7 @@ class TestActivationPeakNogradPeak:
     def test_head_binds_at_short_context(self, model, device):
         # Arrange
         seq_len = 1024
-        settings = TrainingSettings(max_model_len=seq_len)
+        settings = TrainingSettings(max_model_len=seq_len, use_liger_loss=False)
         h, vocab = QWEN_05B.hidden_size, QWEN_05B.vocab_size
         tile = resolve_chunk_rows(vocab, settings.chunk_rows) * vocab * 4
 
@@ -1492,6 +1574,7 @@ class TestFusedActorCriticPass:
             max_model_len=seq_len,
             lora_dropout=0.05,
             micro_batch_size=2,
+            use_liger_loss=False,
         )
         fused = split.model_copy(
             update={"micro_batch_size": 1, "fuse_actor_critic_pass": True}
@@ -1527,7 +1610,9 @@ class TestFusedActorCriticPass:
         # Arrange: DPO keeps the chosen and rejected graphs until one loss.
         seq_len = 1024
         h, n_layers = QWEN_05B.hidden_size, QWEN_05B.n_layers
-        one_row = TrainingSettings(algorithm=algorithm, max_model_len=seq_len)
+        one_row = TrainingSettings(
+            algorithm=algorithm, max_model_len=seq_len, use_liger_loss=False
+        )
         four_rows = one_row.model_copy(update={"micro_batch_size": 4})
 
         # Act

@@ -33,6 +33,10 @@ from agilerl.architectures.runtime import (
     TrainerRuntimeConfig,
     VllmRuntimeConfig,
 )
+from agilerl.architectures.torch_varlen import (
+    TORCH_VARLEN_IMPLEMENTATION,
+    register_torch_varlen_attention,
+)
 
 if TYPE_CHECKING:
     from peft import PeftModel
@@ -40,6 +44,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "FAMILY_RUNTIME_CONFIGS",
+    "TORCH_VARLEN_IMPLEMENTATION",
     "MambaPatchConfig",
     "ModelRuntimeConfig",
     "PatchRuntimeConfig",
@@ -51,6 +56,7 @@ __all__ = [
     "install_family_patches",
     "pretrained_model_type",
     "register_nemotron_h_omni_native_loading",
+    "register_torch_varlen_attention",
     "trainer_model_class",
 ]
 
@@ -95,4 +101,5 @@ def install_family_patches(
     install(runtime.patch, model)
 
 
+register_torch_varlen_attention()
 register_nemotron_h_omni_native_loading()

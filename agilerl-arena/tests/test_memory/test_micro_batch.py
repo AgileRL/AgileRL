@@ -96,9 +96,11 @@ class TestResolveMicroBatchSizePerGpu:
 
     def test_wide_micro_batch_shrinks_to_one_that_fits(self) -> None:
         # Arrange: unfiltered sampling scores the full vocabulary, so 16
-        # trajectories do not fit; 8 does.
+        # trajectories do not fit; 8 does. The standard loss path keeps the
+        # full tiles that make 16 oversized.
         raw = _manifest()
         raw["algorithm"]["top_k"] = 0
+        raw["algorithm"]["use_liger_loss"] = False
         manifest = TrainingManifest.model_validate(raw)
         device = _device(4)
 
@@ -321,6 +323,7 @@ class TestResolveMicroBatchSizePerGpu:
         # Arrange
         raw = _manifest()
         raw["algorithm"]["top_k"] = 0
+        raw["algorithm"]["use_liger_loss"] = False
         caller = TrainingManifest.model_validate(raw)
         device = _device(4)
         model_config = SUPPORTED_MODEL_INFO[HUB_ID].config

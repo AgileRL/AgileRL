@@ -34,7 +34,7 @@ from __future__ import annotations
 import itertools
 import weakref
 from collections.abc import Callable, Sequence
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import torch
 import torch.nn.functional as F
@@ -299,6 +299,30 @@ def packed_segment_ids(
         packed.seq_lengths.to(device),
         output_size=sum(packed.lengths),
     )
+
+
+def packed_layout_kwargs(packed: PackedBatch) -> dict[str, Any]:
+    """Document layout of a packed batch as ``model(...)`` kwargs.
+
+    Lets per-block wrappers skip re-deriving the layout from
+    ``position_ids`` (one device sync per forward). Varlen mode only: the
+    flex path builds its own block mask, and only single-row packing keeps
+    one row per ``cu_seqlens`` entry.
+
+    :param packed: The :class:`PackedBatch` being forwarded.
+    :type packed: PackedBatch
+    :return: ``cu_seq_lens_q/k``, ``max_length_q/k``, and ``seq_idx``.
+    :rtype: dict[str, Any]
+    """
+    return {
+        "cu_seq_lens_q": packed.cu_seqlens,
+        "cu_seq_lens_k": packed.cu_seqlens,
+        "max_length_q": packed.max_seqlen,
+        "max_length_k": packed.max_seqlen,
+        "seq_idx": packed_segment_ids(packed, packed.input_ids.device)
+        .to(torch.int32)
+        .unsqueeze(0),
+    }
 
 
 def _scatter_packed(

@@ -196,6 +196,7 @@ class _Stub:
         self.beta = 0.0
         self.temperature = 1.0
         self.cast_logprobs_to_fp32 = True
+        self.use_liger_loss = True
         self.max_output_tokens = 32
         self.chunk_rows = 2
         self.pad_token_id = 0

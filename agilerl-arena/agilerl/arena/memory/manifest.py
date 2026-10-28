@@ -552,6 +552,7 @@ def training_settings_from_spec(
         gradient_checkpointing=spec.gradient_checkpointing,
         activation_offload=spec.activation_offload,
         chunk_rows=spec.chunk_rows,
+        use_liger_loss=spec.use_liger_loss,
         sampling_support_width=support_width,
         support_scored_loss=not (
             isinstance(spec, (LLMPPOSpec, LLMREINFORCESpec)) and spec.use_liger_loss

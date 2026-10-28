@@ -864,13 +864,13 @@ def _install_packed_mixer(mixer_cls: type) -> None:
             return forward(self, hidden_states, cache_params, attention_mask, **kwargs)
         mixer: Any = self
         if _packed_uses_fused_scan(mixer, hidden_states, cache_params):
-            with torch.cuda.stream(torch.cuda.default_stream(hidden_states.device)):
-                fused = _fused_split_scan(
-                    mixer,
-                    kernels["mamba2_split_conv1d_scan_combined"],
-                    hidden_states,
-                    seq_idx,
-                )
+            # The kernel launches on the current stream; no hop needed.
+            fused = _fused_split_scan(
+                mixer,
+                kernels["mamba2_split_conv1d_scan_combined"],
+                hidden_states,
+                seq_idx,
+            )
             if fused is not None:
                 return fused
         return run_per_document(
@@ -885,10 +885,11 @@ def _install_packed_mixer(mixer_cls: type) -> None:
 
 
 def _install_packed_block(block_cls: type, mixer_cls: type) -> None:
-    """Route a packed row's document layout from ``position_ids`` to this block's mixer.
+    """Route a packed row's document layout to this block's mixer.
 
-    A Mamba2 mixer gets ``seq_idx``. A single-row attention block gets
-    FlashAttention varlen offsets for a multi-document row and no
+    Layout kwargs on the call win; otherwise the layout is derived from
+    ``position_ids``. A Mamba2 mixer gets ``seq_idx``. A single-row attention
+    block gets FlashAttention varlen offsets for a multi-document row and no
     ``position_ids`` for a one-document row, so attention does not re-derive
     the layout with a device sync.
     """
@@ -914,13 +915,24 @@ def _install_packed_block(block_cls: type, mixer_cls: type) -> None:
             and position_ids is not None
         )
         if unpadded and isinstance(block.mixer, mixer_cls):
-            seq_idx = packed_seq_idx(position_ids)
+            seq_idx = kwargs.pop("seq_idx", None)
+            if seq_idx is None:
+                seq_idx = packed_seq_idx(position_ids)
         elif (
             unpadded
             and block.block_type == "full_attention"
             and position_ids.shape[0] == 1
         ):
-            layout = packed_layout(position_ids)
+            provided = all(
+                kwargs.get(name) is not None
+                for name in (
+                    "cu_seq_lens_q",
+                    "cu_seq_lens_k",
+                    "max_length_q",
+                    "max_length_k",
+                )
+            )
+            layout = None if provided else packed_layout(position_ids)
             position_ids = None
             if layout is not None:
                 kwargs = {

@@ -418,6 +418,24 @@ TOPK_OP = torch.ops.aten.topk
 TO_COPY_OP = torch.ops.aten._to_copy
 
 
+def _set_comm_options(model: nn.Module, config: FSDPConfig) -> None:
+    """Enable torch 2.13 FSDP comm options on every sharded unit.
+
+    The reduce-scatter group and buffer cap recurse from the root; symmetric
+    memory has no recurse flag so each FSDP unit is set directly.
+    """
+    if config.separate_reduce_scatter_group:
+        cast("FSDPModule", model).set_separate_reduce_scatter_group(True)
+    if config.reduce_scatter_max_input_buffers > 1:
+        cast("FSDPModule", model).set_reduce_scatter_max_input_buffers(
+            config.reduce_scatter_max_input_buffers
+        )
+    if config.symm_mem_for_comm:
+        for module in model.modules():
+            if isinstance(module, FSDPModule):
+                module.set_symm_mem_for_comm()
+
+
 def _save_routing_policy(
     _context: SelectiveCheckpointContext,
     op: torch._ops.OpOverload,
@@ -679,6 +697,7 @@ def apply_fsdp2(
         config.prefetch_units,
         config.backward_prefetch_units,
     )
+    _set_comm_options(model, config)
     # PEFT ``generate`` delegates to ``base_model.generate`` and never enters
     # the FSDP-rooted ``forward``, so remaining root shards stay DTensors
     # against plain ``input_ids``. Register ``generate`` so FSDP2 all-gathers

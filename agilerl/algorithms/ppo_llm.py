@@ -1789,6 +1789,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                     None if support_ids is None else support_ids.to(self.device)
                 ),
                 logit_bias=self._logit_bias_vector(head_w.shape[0]),
+                cast_logprobs_to_fp32=self.cast_logprobs_to_fp32,
             )
         metrics = {
             "kl": aux[0].detach(),

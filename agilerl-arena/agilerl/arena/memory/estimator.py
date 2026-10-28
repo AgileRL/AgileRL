@@ -488,15 +488,6 @@ def estimate_run(config: RunConfig) -> RunEstimate:
     return RunEstimate(training=training, generation=generation)
 
 
-# Storage of an FSDP-replicated parameter, keyed by ``FSDPConfig.param_dtype``.
-FSDP_PARAM_BYTES = {
-    "bfloat16": 2.0,
-    "float16": 2.0,
-    "float32": 4.0,
-    "float64": 8.0,
-}
-
-
 def training_warnings(
     counts: formulas.ParamCounts,
     settings: TrainingSettings,
@@ -734,7 +725,7 @@ def adapter_state(
         replicated_bytes = formulas.ADAPTER_BYTES_PER_PARAM
         sharded_bytes = formulas.ADAPTER_BYTES_PER_PARAM
     else:
-        replicated_bytes = FSDP_PARAM_BYTES[fsdp.param_dtype]
+        replicated_bytes = formulas.FSDP_PARAM_BYTES[fsdp.param_dtype]
         sharded_bytes = DTYPE_BYTES[settings.weight_dtype]
         if (
             fsdp.defer_grad_sync
@@ -743,7 +734,7 @@ def adapter_state(
             and not offload
         ):
             # FSDP2 accumulates held unsharded grads in the reduce dtype.
-            held_grad_bytes = FSDP_PARAM_BYTES[fsdp.reduce_dtype]
+            held_grad_bytes = formulas.FSDP_PARAM_BYTES[fsdp.reduce_dtype]
     return _adapter_state_bytes(
         settings,
         replicated,
@@ -778,6 +769,7 @@ class ActivationPeak:
     loss_hidden: float
     lora_casts: float
     lora_dropout: float
+    rs_buffers: float
     fused_head: int
     tower_lora: float
     nograd_pixels: float
@@ -894,6 +886,7 @@ class ActivationTerms:
     balance_pixels: float
     loss_lora_casts: float
     tower_lora: float
+    rs_buffers: float
 
 
 @dataclass(frozen=True)
@@ -990,16 +983,8 @@ def _activation_terms(
     loss_lora_casts = 0 if settings.lora_casts_recompute_only else lora_casts
     logits, fused_head, nograd_logits = formulas.logit_terms(arch, settings, act_bytes)
     # The fused pass splits the stacked adapter rows into micro-batch forwards.
-    nograd_pass = (
-        formulas.nograd_forward_bytes(
-            arch,
-            settings.micro_batch_size,
-            seq_len,
-            act_bytes,
-            eager_mamba_scan=eager_mamba_scan,
-        )
-        if settings.has_nograd_pass
-        else 0
+    nograd_pass = formulas.nograd_pass_bytes(
+        arch, settings, seq_len, act_bytes, eager_mamba_scan
     )
     nograd_hidden = settings.micro_batch_size * seq_len * arch.hidden_size * act_bytes
     tower_lora, nograd_pixels, balance_pixels = _vision_activation_terms(
@@ -1023,6 +1008,9 @@ def _activation_terms(
         balance_pixels=balance_pixels,
         loss_lora_casts=loss_lora_casts,
         tower_lora=tower_lora,
+        rs_buffers=formulas.reduce_scatter_buffer_bytes(
+            arch, settings.fsdp, adapters.grads
+        ),
     )
 
 
@@ -1047,6 +1035,7 @@ def _binding_instant(
         + terms.split_lora
         + terms.routed_chunks
         + terms.tower_lora
+        + terms.rs_buffers
     )
     loss_peak = (
         grads
@@ -1163,6 +1152,7 @@ def activation_peak(
         loss_hidden=terms.loss_hidden,
         lora_casts=terms.lora_casts,
         lora_dropout=terms.lora_dropout,
+        rs_buffers=terms.rs_buffers,
         fused_head=terms.fused_head,
         tower_lora=terms.tower_lora,
         nograd_pixels=terms.nograd_pixels,
@@ -1314,6 +1304,7 @@ def _activation_workspace_components(
                 "lora_dropout": int(peak.lora_dropout),
                 "vision_tower_lora": int(peak.tower_lora),
                 "nograd_vision_rows": int(peak.nograd_pixels),
+                "reduce_scatter_buffers": int(peak.rs_buffers),
                 "backward_grads": int(adapters.grads),
                 "step_grads": int(adapters.step_grads),
             },

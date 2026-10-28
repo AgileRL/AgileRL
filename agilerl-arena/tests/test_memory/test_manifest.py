@@ -452,6 +452,8 @@ class TestTrainingSettings:
             )
         )
         assert settings.algorithm == "grpo"
+        assert settings.use_liger_loss is True
+        assert settings.uses_selective_logprobs is True
 
 
 def screenshots(**environment: object) -> dict:
@@ -912,6 +914,8 @@ class TestLlmSpec:
         )
 
         assert settings.algorithm == "grpo"
+        assert settings.use_liger_loss is False
+        assert settings.uses_selective_logprobs is False
 
     def test_a_manifest_without_a_model_is_refused(self):
         parsed = TrainingManifest.model_validate(
