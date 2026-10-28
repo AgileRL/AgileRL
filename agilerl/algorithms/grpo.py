@@ -454,13 +454,14 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         carries none). Tokens outside the band get no policy or KL gradient
         (IcePop). In a batch with sampling log-probs, rows without them are
         not masked. Defaults to ``(0.5, 5.0)``; ``None`` masks nothing.
-        Requires ``0 <= low < 1 < high``.
+        ``loss_type='gspo'`` leaves this unset. Requires ``0 <= low < 1 < high``.
     :type off_policy_token_mask_bounds: tuple[float, float] | None, optional
     :param off_policy_sequence_mask_threshold: Drop the policy and KL
         gradient of every negative-advantage token of a row whose mean
         ``log(pi_sampling / pi_theta)`` over its action tokens exceeds this
         (DeepSeek-V3.2 off-policy sequence masking). Defaults to ``0.03``;
-        ``None`` masks nothing. Must be >= 0.
+        ``None`` masks nothing. ``loss_type='gspo'`` leaves this unset.
+        Must be >= 0.
     :type off_policy_sequence_mask_threshold: float | None, optional
     :param use_bias_correction_kl: Weight the per-token K3 KL by the
         un-clamped importance ratio ``pi_theta / pi_old`` so its gradient is
@@ -634,6 +635,10 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             )
             raise ValueError(msg)
         self.old_logprobs_source = old_logprobs_source
+        # GSPO's sequence ratio has no per-token weight for these masks.
+        if loss_type == "gspo":
+            off_policy_token_mask_bounds = None
+            off_policy_sequence_mask_threshold = None
         if off_policy_token_mask_bounds is not None:
             low, high = off_policy_token_mask_bounds
             if not 0.0 <= low < 1.0 < high:

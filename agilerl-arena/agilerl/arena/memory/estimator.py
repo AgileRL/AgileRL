@@ -11,7 +11,7 @@ schema-version bump.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from pydantic import BaseModel, ConfigDict
 
@@ -19,14 +19,24 @@ import agilerl.arena.memory.formulas as formulas
 import agilerl.arena.memory.vision as vision
 from agilerl.arena.memory.breakdown import MemoryComponent, PhaseBreakdown
 from agilerl.arena.memory.formulas import geometry_gap_warning
+from agilerl.arena.memory.generation import (
+    estimate_generation,
+)
+from agilerl.arena.memory.generation import (
+    generation_can_serve as generation_can_serve,
+)
+from agilerl.arena.memory.lora_placement import (
+    lora_tensor_placement,
+    split_moe_lora_recompute_bytes,
+)
+from agilerl.arena.memory.nccl import TP_RUNTIME_BYTES, trainer_nccl_bytes
+from agilerl.arena.memory.resolve.chunk import resolve_chunk_rows
 from agilerl.arena.memory.resolve.fsdp import resolve_fsdp_memory
 from agilerl.arena.memory.specs import (
     DTYPE_BYTES,
-    EAGER_MAMBA_SCAN_CAPABILITY,
+    UNFUSED_MAMBA_SCAN_CAPABILITY,
     BlockKind,
     DeviceSpec,
-    GenerationSettings,
-    GiB,
     MiB,
     ModelArch,
     ModelSpec,
@@ -56,122 +66,6 @@ class RunEstimate(BaseModel):
     def fits_with_buffer(self) -> bool:
         """Both phases fit after the underprediction buffer."""
         return self.training.fits_with_buffer and self.generation.fits_with_buffer
-
-
-def engine_terms(
-    model: ModelSpec, settings: GenerationSettings
-) -> tuple[dict[str, int], int, int]:
-    """Engine-budget terms, scheduler-step token cap, and sampler buffer bytes.
-
-    :param model: Engine-side model spec.
-    :param settings: Generation settings (dtype, batching, LoRA slots).
-    :return: Budget terms, max batched tokens, and sampler buffer bytes.
-    """
-    arch = model.arch
-    act_bytes = DTYPE_BYTES[settings.weight_dtype]
-    counts = formulas.param_counts(arch, model.n_params)
-    variant = model.variant(settings.weight_variant)
-    batched_tokens = formulas.resolve_max_num_batched_tokens(
-        settings.max_num_seqs, settings.max_model_len, settings.max_num_batched_tokens
-    )
-    tp = settings.tensor_parallel_size
-    # Sampler buffers: per-sequence fp32 logits and probs over the vocab.
-    # Tensor parallel shards the lm_head, so each rank holds 1/tp of the vocab.
-    sampler = 2 * settings.max_num_seqs * arch.vocab_size * 4 // tp
-    weight_elems = formulas.weight_bytes(counts, settings.weight_dtype, variant)
-    weight_byte = (
-        1.0
-        if settings.weight_quantization == "fp8"
-        else DTYPE_BYTES[settings.weight_dtype]
-    )
-    unsharded_weights = weight_elems / DTYPE_BYTES[settings.weight_dtype] * weight_byte
-    weights = int(unsharded_weights / tp)
-    decoder_startup = (
-        formulas.block_recompute_bytes(
-            arch,
-            1,
-            batched_tokens,
-            act_bytes,
-            engine_forward=True,
-        )
-        + sampler
-    )
-    terms = {
-        "weights": weights,
-        "startup_peak": _with_encoder_profile(
-            model, settings, batched_tokens, decoder_startup
-        ),
-        "cuda_graphs": 0 if settings.enforce_eager else formulas.CUDA_GRAPH_POOL_BYTES,
-        "lora_slots": int(
-            settings.max_loras
-            * formulas.lora_param_count(arch, settings.max_lora_rank)
-            * act_bytes
-            / tp
-        )
-        + settings.max_loras
-        * formulas.engine_expert_lora_param_count(
-            arch,
-            settings.max_lora_rank,
-            tp,
-            packed_3d=arch.vllm_3d_moe_lora or settings.lora_packed_target_matrices > 0,
-        )
-        * act_bytes,
-        "engine_runtime": int(formulas.ENGINE_RUNTIME_FRACTION * unsharded_weights),
-        "kv_demand": _kv_demand_per_rank(arch, settings),
-        "mamba_state": formulas.mamba_state_bytes(
-            arch,
-            settings.max_num_seqs,
-            state_dtype=settings.weight_dtype,
-            tensor_parallel=tp,
-        ),
-    }
-    return terms, batched_tokens, sampler
-
-
-def _with_encoder_profile(
-    model: ModelSpec,
-    settings: GenerationSettings,
-    batched_tokens: int,
-    decoder_bytes: int,
-) -> int:
-    """Activation peak of a decoder pass that follows vLLM's maximum-image encode.
-
-    :param batched_tokens: The engine's resolved scheduler-step token cap.
-    :param decoder_bytes: Decoder activation and sampler bytes of the pass.
-    """
-    if model.variant(settings.weight_variant).stripped_multimodal:
-        return decoder_bytes
-    items = vision.encoder_profile_items(
-        model.arch,
-        batched_tokens,
-        settings.max_num_seqs,
-        settings.max_model_len,
-        settings.max_images_per_prompt,
-    )
-    encoder, outputs = vision.encoder_profile_bytes(
-        model.arch,
-        DTYPE_BYTES[settings.weight_dtype],
-        settings.tensor_parallel_size,
-        items,
-    )
-    return max(decoder_bytes + outputs, encoder)
-
-
-def _kv_demand_per_rank(arch: ModelArch, settings: GenerationSettings) -> int:
-    """KV bytes on one engine rank, replicating heads when TP exceeds them."""
-    demand = formulas.kv_cache_demand_bytes(
-        arch,
-        settings.weight_dtype,
-        settings.concurrency,
-        settings.max_model_len,
-    )
-    if arch.n_kv_heads == 0:
-        return demand
-    return (
-        demand
-        * formulas.kv_heads_per_rank(arch.n_kv_heads, settings.tensor_parallel_size)
-        // arch.n_kv_heads
-    )
 
 
 def estimate_training(
@@ -220,234 +114,6 @@ def fsdp_resolution_note(requested: FSDPConfig, resolved: FSDPConfig) -> str:
         placement = "CPU offload" if resolved.optim_cpu_offload else "GPU, fused AdamW"
         picks.append(f"optim_cpu_offload={resolved.optim_cpu_offload} ({placement})")
     return "Picked from this estimate: " + ", ".join(picks) + "."
-
-
-def generation_warnings(
-    model: ModelSpec,
-    settings: GenerationSettings,
-    *,
-    kv_pool: int,
-    kv_demand: int,
-    startup_pool: int,
-    full_sequence: int,
-) -> list[str]:
-    """User-facing generation-phase warnings."""
-    arch = model.arch
-    warnings: list[str] = []
-    gap = formulas.geometry_gap_warning(formulas.param_counts(arch, model.n_params))
-    if gap:
-        warnings.append(gap)
-    if arch.is_moe:
-        warnings.append(
-            "MoE serving peaks can exceed this bar by a few percent: vLLM's "
-            "fused-MoE kernel holds chunked intermediate caches beyond this bar."
-        )
-    if arch.multimodal_tower_params or arch.per_layer_input_dim:
-        warnings.append(
-            "Multimodal engine residency is independent of "
-            "gpu_memory_utilization; construction can peak above this bar."
-        )
-    if arch.is_hybrid_ssm:
-        block_size = formulas.aligned_kv_block_size(arch, settings.weight_dtype)
-        warnings.append(
-            f"Hybrid state-space model: {arch.n_mamba_layers} recurrent layers "
-            f"and {arch.attention_layers} attention. Only the attention layers "
-            "hold a KV cache; the recurrent state is constant in context length."
-        )
-        warnings.append(
-            f"vLLM raises the attention block size to {block_size} tokens "
-            "so an attention page holds a Mamba page, then pads the Mamba "
-            "page to match. Every sequence's KV therefore rounds up to that "
-            "page, which dominates the cache for short sequences."
-        )
-    if startup_pool <= 0:
-        warnings.append(
-            "gpu_memory_utilization budget is consumed by weights and engine "
-            "overhead before any KV cache: vLLM will fail at init. Raise "
-            "gpu_memory_utilization or shrink the model/variant."
-        )
-    elif startup_pool < full_sequence:
-        warnings.append(
-            f"KV pool ({startup_pool / GiB:.1f} GiB) cannot hold one "
-            f"{settings.max_model_len}-token sequence ({full_sequence / GiB:.1f} GiB): "
-            "vLLM will fail at init. Raise gpu_memory_utilization or lower "
-            "max_model_len."
-        )
-    elif kv_demand > kv_pool:
-        warnings.append(
-            f"Worst-case KV demand ({kv_demand / GiB:.1f} GiB for "
-            f"{settings.concurrency} sequences at {settings.max_model_len} tokens) "
-            f"exceeds the KV pool ({kv_pool / GiB:.1f} GiB): vLLM will "
-            "preempt and recompute, a throughput cliff."
-        )
-    return warnings
-
-
-def estimate_generation(
-    model: ModelSpec,
-    device: DeviceSpec,
-    settings: GenerationSettings,
-    orchestrated: bool = False,
-) -> PhaseBreakdown:
-    """Peak generation-phase memory on the inference device.
-
-    vLLM self-limits to ``gpu_memory_utilization * total_bytes``. The KV pool
-    is what remains after weights, prefill activations, CUDA graphs, and LoRA
-    slots. The device-level bar adds CUDA context.
-    """
-    arch = model.arch
-    act_bytes = DTYPE_BYTES[settings.weight_dtype]
-    budget = int(settings.gpu_memory_utilization * device.total_bytes)
-    terms, batched_tokens, sampler = engine_terms(model, settings)
-    weights = terms["weights"]
-    startup_peak = terms["startup_peak"]
-    graphs = terms["cuda_graphs"]
-    lora_slots = terms["lora_slots"]
-    kv_demand = terms["kv_demand"]
-    mamba_state = terms["mamba_state"]
-    engine_runtime = terms["engine_runtime"]
-    non_kv = weights + startup_peak + graphs + lora_slots + mamba_state + engine_runtime
-    kv_pool = (
-        settings.kv_cache_memory_bytes
-        if settings.kv_cache_memory_bytes is not None
-        else max(budget - non_kv, 0)
-    )
-    # vLLM holds Mamba state in the KV pool and checks room for one request at start-up.
-    startup_pool = (
-        settings.kv_cache_memory_bytes
-        if settings.kv_cache_memory_bytes is not None
-        else max(budget - (non_kv - mamba_state), 0)
-    )
-    full_sequence = kv_demand // settings.concurrency + formulas.mamba_state_bytes(
-        arch,
-        1,
-        state_dtype=settings.weight_dtype,
-        tensor_parallel=settings.tensor_parallel_size,
-    )
-    warnings = generation_warnings(
-        model,
-        settings,
-        kv_pool=kv_pool,
-        kv_demand=kv_demand,
-        startup_pool=startup_pool,
-        full_sequence=full_sequence,
-    )
-    runtime_tokens = min(settings.concurrency * settings.prompt_len, batched_tokens)
-    job_overhead = formulas.JOB_OVERHEAD_BYTES if orchestrated else 0
-    runtime_activation = _with_encoder_profile(
-        model,
-        settings,
-        batched_tokens,
-        formulas.block_recompute_bytes(
-            arch,
-            1,
-            runtime_tokens,
-            act_bytes,
-            engine_forward=True,
-        )
-        + sampler,
-    )
-    components = (
-        MemoryComponent(
-            key="weights",
-            label="Model weights (engine copy)",
-            n_bytes=max(int(weights), 0),
-        ),
-        MemoryComponent(
-            key="kv_cache",
-            label="KV cache pool",
-            n_bytes=max(int(kv_pool), 0),
-            detail={
-                "pool": int(kv_pool),
-                "worst_case_demand": int(kv_demand),
-                "startup_pool": int(startup_pool),
-                "full_sequence_bytes": int(full_sequence),
-            },
-            note=(
-                "Pinned via kv_cache_memory_bytes."
-                if settings.kv_cache_memory_bytes is not None
-                else "Sized by vLLM from the gpu_memory_utilization budget."
-            ),
-        ),
-        MemoryComponent(
-            key="activation_peak",
-            label="Prefill & sampling buffers",
-            n_bytes=max(int(runtime_activation), 0),
-            detail={
-                "runtime_tokens": int(runtime_tokens),
-                "sampler_buffers": int(sampler),
-                "startup_peak": int(startup_peak),
-            },
-            note=(
-                f"Serving peak over {runtime_tokens} tokens. The start-up "
-                f"scheduler step of {batched_tokens} tokens is larger and "
-                "sizes the KV pool."
-            ),
-        ),
-        MemoryComponent(
-            key="cuda_graphs",
-            label="CUDA graphs",
-            n_bytes=max(int(graphs), 0),
-            note="Set enforce_eager=True to skip capture (throughput cost).",
-        ),
-        MemoryComponent(
-            key="mamba_state",
-            label="Mamba recurrent state",
-            n_bytes=max(int(mamba_state), 0),
-            detail={
-                "recurrent_layers": arch.n_mamba_layers,
-                "state_blocks_per_seq": formulas.MAMBA_STATE_BLOCKS_PER_SEQ,
-            },
-            note=(
-                f"{arch.n_mamba_layers} recurrent layers against "
-                f"{arch.attention_layers} attention. Constant in context "
-                "length."
-                if arch.is_hybrid_ssm
-                else None
-            ),
-        ),
-        MemoryComponent(
-            key="lora_slots",
-            label="LoRA adapter slots",
-            n_bytes=max(int(lora_slots), 0),
-        ),
-        MemoryComponent(
-            key="overhead",
-            label="Overhead (CUDA context, runtime)",
-            n_bytes=max(int(device.context_bytes + job_overhead + engine_runtime), 0),
-            detail={
-                "cuda_context": int(device.context_bytes),
-                "job_overhead": int(job_overhead),
-                "engine_runtime": int(engine_runtime),
-            },
-        ),
-    )
-    return PhaseBreakdown(
-        phase="generation",
-        components=components,
-        device_total_bytes=device.total_bytes,
-        device_usable_bytes=device.generation_usable_bytes,
-        warnings=tuple(warnings),
-    )
-
-
-def generation_can_serve(breakdown: PhaseBreakdown, kv_margin_bytes: int = 0) -> bool:
-    """Whether this generation bar can serve the advertised context.
-
-    :param breakdown: Generation-phase breakdown.
-    :param kv_margin_bytes: Pool bytes demand must leave free.
-    :return: True when vLLM starts and its KV pool covers worst-case demand.
-    """
-    # ``fits`` only means vLLM starts; demand above the pool at
-    # max_model_len means preemption.
-    if breakdown.phase != "generation" or not breakdown.fits:
-        return False
-    kv = next((c for c in breakdown.components if c.key == "kv_cache"), None)
-    if kv is None:
-        return False
-    pool = kv.detail["pool"]
-    demand = kv.detail["worst_case_demand"]
-    return pool > 0 and demand + kv_margin_bytes <= pool
 
 
 def estimate_run(config: RunConfig) -> RunEstimate:
@@ -508,11 +174,6 @@ def training_warnings(
             "At beta=0 the estimate skips the reference forward, but the fused "
             "no-grad pass still builds that row, so the run pays for one extra "
             "row of activations."
-        )
-    if settings.fsdp is not None and settings.fsdp.tp > 1:
-        warnings.append(
-            f"fsdp.tp={settings.fsdp.tp} is not sized. Activations are priced "
-            "as if every rank held the full hidden state."
         )
     if settings.n_training_gpus > 1:
         n_gpus = settings.n_training_gpus
@@ -603,19 +264,21 @@ def _resident_bytes(
 def _adam_resident_bytes(
     trained_repl: int,
     trained_shard: int,
+    replicated_bytes: float,
+    sharded_bytes: float,
     shards: int,
     offload: bool,
     flat_data_parallel: bool,
 ) -> tuple[float, float]:
-    """fp32 Adam moments, and the foreach workspace when Adam steps on the GPU."""
+    """Adam moments, and the foreach workspace when Adam steps on the GPU."""
     if offload:
         adam = 0.0
     else:
         adam = _resident_bytes(
             trained_repl,
             trained_shard,
-            formulas.ADAM_BYTES_PER_PARAM,
-            formulas.ADAM_BYTES_PER_PARAM,
+            formulas.ADAM_MOMENTS_PER_PARAM * replicated_bytes,
+            formulas.ADAM_MOMENTS_PER_PARAM * sharded_bytes,
             shards,
             offload,
         )
@@ -688,6 +351,8 @@ def _adapter_state_bytes(
     adam, adam_workspace = _adam_resident_bytes(
         trained_repl,
         trained_shard,
+        replicated_bytes,
+        sharded_bytes,
         shards,
         offload,
         settings.fsdp is None,
@@ -704,6 +369,29 @@ def _adapter_state_bytes(
     )
 
 
+def _with_expert_lora(
+    state: AdapterState,
+    settings: TrainingSettings,
+    expert_lora: int,
+    sharded_bytes: float,
+    ep: int,
+) -> AdapterState:
+    """``state`` plus expert LoRA split across the EP group, outside FSDP."""
+    n_trained = settings.n_trained_adapters
+    expert_lora_bytes = expert_lora * sharded_bytes / ep
+    trained_expert_lora = expert_lora * n_trained
+    return replace(
+        state,
+        adapters=state.adapters + expert_lora_bytes * settings.n_resident_adapters,
+        grads=state.grads + expert_lora_bytes * n_trained,
+        step_grads=state.step_grads + expert_lora_bytes * n_trained,
+        adam=state.adam
+        + trained_expert_lora * formulas.ADAM_MOMENTS_PER_PARAM * sharded_bytes / ep,
+        trained_params=state.trained_params + trained_expert_lora,
+        trained_bytes=state.trained_bytes + trained_expert_lora * sharded_bytes,
+    )
+
+
 def adapter_state(
     arch: ModelArch, settings: TrainingSettings, shards: int
 ) -> AdapterState:
@@ -716,11 +404,20 @@ def adapter_state(
     """
     fsdp = settings.fsdp
     threshold = None if fsdp is None else fsdp.param_persistence_threshold
-    replicated, sharded = formulas.lora_tensor_placement(
+    ep = 1 if fsdp is None else fsdp.ep
+    # Expert LoRA under EP splits across the EP group only, outside FSDP.
+    expert_lora = (
+        formulas.packed_lora_param_count(
+            arch, settings.lora_rank, settings.lora_packed_target_matrices
+        )
+        if ep > 1
+        else 0
+    )
+    replicated, sharded = lora_tensor_placement(
         arch,
         settings.lora_rank,
         settings.lora_target_scope,
-        settings.lora_packed_target_matrices,
+        0 if ep > 1 else settings.lora_packed_target_matrices,
         threshold,
     )
     head_repl, head_shard = (
@@ -744,7 +441,7 @@ def adapter_state(
         ):
             # FSDP2 accumulates held unsharded grads in the reduce dtype.
             held_grad_bytes = FSDP_PARAM_BYTES[fsdp.reduce_dtype]
-    return _adapter_state_bytes(
+    state = _adapter_state_bytes(
         settings,
         replicated,
         sharded,
@@ -756,6 +453,9 @@ def adapter_state(
         offload,
         held_grad_bytes,
     )
+    if not expert_lora:
+        return state
+    return _with_expert_lora(state, settings, expert_lora, sharded_bytes, ep)
 
 
 @dataclass(frozen=True)
@@ -775,6 +475,7 @@ class ActivationPeak:
     recompute: float
     split_lora: float
     routed_chunks: float
+    ep_exchange: float
     loss_hidden: float
     lora_casts: float
     lora_dropout: float
@@ -782,6 +483,15 @@ class ActivationPeak:
     tower_lora: float
     nograd_pixels: float
     balance_peak: float
+    head_grad: int
+    tp_head_gather: int
+
+
+def training_tensor_parallel(arch: ModelArch, fsdp: FSDPConfig | None) -> int:
+    """Degree the trainer shards ``arch``'s decoder layers by; 1 for families without a plan."""
+    if fsdp is None or not arch.tensor_parallel_plan:
+        return 1
+    return fsdp.tp
 
 
 def block_backward_terms(
@@ -790,9 +500,9 @@ def block_backward_terms(
     seq_len: int,
     act_bytes: float,
     adapter_bytes: float,
-    eager_mamba_scan: bool = False,
-) -> tuple[int, int, int, int, int]:
-    """Recompute, fp32 casts, LoRA dropout, split expert-LoRA and routed chunks of one checkpointed block.
+    unfused_mamba_scan: bool = False,
+) -> tuple[int, int, int, int, int, int]:
+    """Recompute, fp32 casts, LoRA dropout, split expert-LoRA, routed chunks and EP exchange of one checkpointed block.
 
     When :attr:`ModelArch.sublayer_transients` holds, the recompute peaks in
     one attention, FFN or recurrent sub-layer, so each kind's terms are
@@ -803,7 +513,7 @@ def block_backward_terms(
     # PEFT casts a wrapped linear's input only when the adapters are wider.
     casts_apply = adapter_bytes > act_bytes
     dropout_applies = settings.lora_dropout > 0
-    split = formulas.split_moe_lora_recompute_bytes(
+    split = split_moe_lora_recompute_bytes(
         arch,
         rows,
         seq_len,
@@ -813,22 +523,37 @@ def block_backward_terms(
         settings.lora_rank,
     )
     fsdp = settings.fsdp
+    chunk_bytes = (
+        formulas.DEFAULT_ROUTED_CHUNK_BYTES
+        if fsdp is None
+        else fsdp.routed_expert_chunk_mib * MiB
+    )
+    expert_lora = settings.lora_packed_target_matrices > 0
+    # Under expert parallel the TP ranks of a sequence route a share of its
+    # tokens each, whether or not the family has a TP plan.
+    routed_split = 1 if fsdp is None or fsdp.ep <= 1 else fsdp.tp
     chunks = formulas.routed_chunk_bytes(
+        arch,
+        rows,
+        -(-seq_len // routed_split),
+        act_bytes,
+        chunk_bytes,
+        expert_lora=expert_lora,
+        contracted=settings.packed_moe_dispatch == "contracted",
+        ep=1 if fsdp is None else fsdp.ep,
+    )
+    # EP splits tokens across the TP group whether or not the family has a plan.
+    exchange = formulas.ep_exchange_bytes(
         arch,
         rows,
         seq_len,
         act_bytes,
-        (
-            formulas.DEFAULT_ROUTED_CHUNK_BYTES
-            if fsdp is None
-            else fsdp.routed_expert_chunk_mib * MiB
-        ),
-        expert_lora=settings.lora_packed_target_matrices > 0,
-        contracted=settings.packed_moe_dispatch == "contracted",
-        ep=1 if fsdp is None else fsdp.ep,
+        1 if fsdp is None else fsdp.ep,
+        1 if fsdp is None else fsdp.tp,
     )
+    tp = training_tensor_parallel(arch, fsdp)
 
-    def terms(layer: BlockKind | None) -> tuple[int, int, int, int, int]:
+    def terms(layer: BlockKind | None) -> tuple[int, int, int, int, int, int]:
         recompute = formulas.block_recompute_bytes(
             arch,
             rows,
@@ -836,7 +561,9 @@ def block_backward_terms(
             act_bytes,
             backward=True,
             layer=layer,
-            eager_mamba_scan=eager_mamba_scan,
+            unfused_mamba_scan=unfused_mamba_scan,
+            tensor_parallel=tp,
+            routed_split=routed_split,
         )
         casts = 0
         if casts_apply:
@@ -847,6 +574,7 @@ def block_backward_terms(
                 settings.lora_target_scope,
                 settings.gradient_checkpointing,
                 layer=layer,
+                tensor_parallel=tp,
             )
         dropout = 0
         if dropout_applies:
@@ -858,6 +586,7 @@ def block_backward_terms(
                 settings.lora_target_scope,
                 settings.gradient_checkpointing,
                 layer=layer,
+                tensor_parallel=tp,
             )
         moe_here = layer in (None, "ffn") or not arch.block_exclusive_layers
         return (
@@ -866,6 +595,7 @@ def block_backward_terms(
             dropout,
             split if moe_here else 0,
             chunks if moe_here else 0,
+            exchange if moe_here else 0,
         )
 
     if not (arch.sublayer_transients and settings.gradient_checkpointing):
@@ -882,12 +612,15 @@ class ActivationTerms:
     recompute: float
     split_lora: float
     routed_chunks: float
+    ep_exchange: float
     loss_hidden: float
     lora_casts: float
     lora_dropout: float
     logits: float
     fused_head: int
     nograd_logits: float
+    head_grad: int
+    tp_head_gather: int
     nograd_pass: float
     nograd_hidden: float
     nograd_pixels: float
@@ -946,6 +679,43 @@ def _vision_activation_terms(
     return tower_lora, nograd_pixels, balance_pixels
 
 
+def _logit_terms(
+    arch: ModelArch,
+    settings: TrainingSettings,
+    act_bytes: float,
+) -> tuple[float, int, float, int, int]:
+    """Loss-instant logits, the hoisted fp32 head, no-grad head bytes, the TP head gather and the weight-dtype head grad."""
+    # Two fp32 tiles are live at the loss instant: recomputed logits plus
+    # that tile's gradient. Token-level tiles are fixed-size, so a fused
+    # critic row adds none.
+    logit_rows = resolve_chunk_rows(arch.vocab_size, settings.chunk_rows)
+    # A sequence-chunked Liger loss tiles one whole row per graph: DPO's
+    # chosen and rejected rows of a pair are one chunk.
+    loss_tile = (
+        settings.grad_graph_rows
+        * settings.max_model_len
+        * arch.vocab_size
+        * formulas.LIGER_SEQUENCE_LOGIT_BYTES
+        if settings.liger_sequence_chunks
+        else logit_rows * arch.vocab_size * 8
+    )
+    # The chunk loop hoists an fp32 lm_head copy when the head runs below fp32.
+    fused_head = int(arch.vocab_size * arch.hidden_size * 4) if act_bytes < 4 else 0
+    tp_head_gather = tensor_parallel_head_gather_bytes(arch, settings, act_bytes)
+    head_grad = weight_dtype_head_grad(arch, settings, act_bytes)
+    logits = loss_tile + fused_head + tp_head_gather + head_grad
+    nograd_logits = logit_rows * arch.vocab_size * 4 + fused_head + tp_head_gather
+    if settings.sampling_support_width:
+        support_rows = formulas.support_rows_bytes(
+            arch, logit_rows, settings.sampling_support_width, act_bytes
+        )
+        nograd_logits = support_rows
+        if settings.support_scored_loss:
+            logits = support_rows
+            fused_head = 0
+    return logits, fused_head, nograd_logits, tp_head_gather, head_grad
+
+
 def _activation_terms(
     arch: ModelArch,
     settings: TrainingSettings,
@@ -955,52 +725,67 @@ def _activation_terms(
     live_rows: int,
     graph_rows: int,
     forward_rows: int,
-    eager_mamba_scan: bool = False,
+    unfused_mamba_scan: bool = False,
 ) -> ActivationTerms:
     """Checkpoint boundaries, block recompute, logits, and the no-grad pass."""
+    tp = training_tensor_parallel(arch, settings.fsdp)
     recompute = formulas.block_recompute_bytes(
         arch,
         forward_rows,
         seq_len,
         act_bytes,
         backward=True,
-        eager_mamba_scan=eager_mamba_scan,
+        unfused_mamba_scan=unfused_mamba_scan,
+        tensor_parallel=tp,
     )
-    if settings.gradient_checkpointing:
-        saved = int(live_rows * seq_len * arch.hidden_size * arch.n_layers * act_bytes)
-    else:
-        saved = recompute * arch.n_layers * graph_rows
-    if settings.activation_offload:
-        saved = 0
-    # FSDP selective checkpointing stores aten.topk in its cache.
-    router_topk = 0
-    if settings.gradient_checkpointing and settings.fsdp is not None:
-        router_topk = formulas.saved_router_topk_bytes(arch, live_rows, seq_len)
+
+    def checkpoint_saved() -> tuple[float, float]:
+        if settings.gradient_checkpointing:
+            saved = int(
+                live_rows * seq_len * arch.hidden_size * arch.n_layers * act_bytes
+            )
+        else:
+            saved = recompute * arch.n_layers * graph_rows
+        if settings.activation_offload:
+            saved = 0
+        # FSDP selective checkpointing stores aten.topk in its cache.
+        router_topk = 0
+        if settings.gradient_checkpointing and settings.fsdp is not None:
+            router_topk = formulas.saved_router_topk_bytes(arch, live_rows, seq_len)
+        return saved, router_topk
+
+    saved, router_topk = checkpoint_saved()
     loss_hidden = live_rows * seq_len * arch.hidden_size * act_bytes
-    recompute, lora_casts, lora_dropout, split_lora, routed_chunks = (
+    recompute, lora_casts, lora_dropout, split_lora, routed_chunks, ep_exchange = (
         block_backward_terms(
             arch,
             settings,
             seq_len,
             act_bytes,
             adapters.bytes_per_param,
-            eager_mamba_scan,
+            unfused_mamba_scan,
         )
     )
     loss_lora_casts = 0 if settings.lora_casts_recompute_only else lora_casts
-    logits, fused_head, nograd_logits = formulas.logit_terms(arch, settings, act_bytes)
-    # The fused pass splits the stacked adapter rows into micro-batch forwards.
-    nograd_pass = (
-        formulas.nograd_forward_bytes(
+    logits, fused_head, nograd_logits, tp_head_gather, head_grad = _logit_terms(
+        arch, settings, act_bytes
+    )
+
+    def nograd_pass_bytes() -> float:
+        if not settings.has_nograd_pass:
+            return 0
+        fsdp = settings.fsdp
+        return formulas.nograd_forward_bytes(
             arch,
             settings.micro_batch_size,
             seq_len,
             act_bytes,
-            eager_mamba_scan=eager_mamba_scan,
+            unfused_mamba_scan=unfused_mamba_scan,
+            tensor_parallel=tp,
+            routed_split=1 if fsdp is None or fsdp.ep <= 1 else fsdp.tp,
         )
-        if settings.has_nograd_pass
-        else 0
-    )
+
+    nograd_pass = nograd_pass_bytes()
     nograd_hidden = settings.micro_batch_size * seq_len * arch.hidden_size * act_bytes
     tower_lora, nograd_pixels, balance_pixels = _vision_activation_terms(
         arch, settings, adapters, act_bytes, live_rows
@@ -1011,12 +796,15 @@ def _activation_terms(
         recompute=recompute,
         split_lora=split_lora,
         routed_chunks=routed_chunks,
+        ep_exchange=ep_exchange,
         loss_hidden=loss_hidden,
         lora_casts=lora_casts,
         lora_dropout=lora_dropout,
         logits=logits,
         fused_head=fused_head,
         nograd_logits=nograd_logits,
+        head_grad=head_grad,
+        tp_head_gather=tp_head_gather,
         nograd_pass=nograd_pass,
         nograd_hidden=nograd_hidden,
         nograd_pixels=nograd_pixels,
@@ -1047,6 +835,7 @@ def _binding_instant(
         + terms.split_lora
         + terms.routed_chunks
         + terms.tower_lora
+        + terms.ep_exchange
     )
     loss_peak = (
         grads
@@ -1103,18 +892,44 @@ def _binding_instant(
     )
 
 
+def tensor_parallel_head_gather_bytes(
+    arch: ModelArch, settings: TrainingSettings, act_bytes: float
+) -> int:
+    """Dense copy of a tensor-parallel lm_head the logprob loop gathers, or 0."""
+    if arch.tied_embeddings or settings.fsdp is None or settings.fsdp.tp <= 1:
+        return 0
+    return int(arch.vocab_size * arch.hidden_size * act_bytes)
+
+
+def weight_dtype_head_grad(
+    arch: ModelArch, settings: TrainingSettings, act_bytes: float
+) -> int:
+    """Bytes of the fused kernel's weight-dtype lm_head gradient, or 0.
+
+    The sequence tile already includes this buffer. At fp32 the kernel's grad
+    is the head copy charged separately.
+    """
+    if (
+        settings.liger_sequence_chunks
+        or not settings.liger_weight_grad
+        or act_bytes >= 4
+    ):
+        return 0
+    return int(arch.vocab_size * arch.hidden_size * act_bytes)
+
+
 def activation_peak(
     arch: ModelArch,
     settings: TrainingSettings,
     adapters: AdapterState,
     act_bytes: float,
     seq_len: int,
-    eager_mamba_scan: bool = False,
+    unfused_mamba_scan: bool = False,
 ) -> ActivationPeak:
     """Peak of backward, fused loss, no-grad logprob, and optimizer instants.
 
     :param adapters: Adapter, gradient, and Adam bytes on one training GPU.
-    :param eager_mamba_scan: Mamba layers run HF's eager scan.
+    :param unfused_mamba_scan: Mamba layers run HF's unfused path.
     """
     grads = adapters.grads
     step_grads = adapters.step_grads
@@ -1135,7 +950,7 @@ def activation_peak(
         live_rows,
         graph_rows,
         forward_rows,
-        eager_mamba_scan,
+        unfused_mamba_scan,
     )
     instant = _binding_instant(
         terms,
@@ -1160,6 +975,7 @@ def activation_peak(
         recompute=terms.recompute,
         split_lora=terms.split_lora,
         routed_chunks=terms.routed_chunks,
+        ep_exchange=terms.ep_exchange,
         loss_hidden=terms.loss_hidden,
         lora_casts=terms.lora_casts,
         lora_dropout=terms.lora_dropout,
@@ -1167,6 +983,8 @@ def activation_peak(
         tower_lora=terms.tower_lora,
         nograd_pixels=terms.nograd_pixels,
         balance_peak=terms.balance_pixels,
+        head_grad=terms.head_grad,
+        tp_head_gather=terms.tp_head_gather,
     )
 
 
@@ -1209,7 +1027,7 @@ def training_host_components(
     )
     staging = _vision_row_staging_bytes(settings, image_pixels)
     snapshot_adam = (
-        adapters.trained_params * formulas.ADAM_BYTES_PER_PARAM
+        adapters.trained_bytes * formulas.ADAM_MOMENTS_PER_PARAM
         if settings.checkpoint_optimizer
         else 0.0
     )
@@ -1309,6 +1127,7 @@ def _activation_workspace_components(
                 "block_recompute": int(peak.recompute),
                 "split_moe_lora": int(peak.split_lora),
                 "routed_expert_chunks": int(peak.routed_chunks),
+                "ep_token_exchange": int(peak.ep_exchange),
                 "loss_hidden_state": int(peak.loss_hidden),
                 "lora_fp32_input_casts": int(peak.lora_casts),
                 "lora_dropout": int(peak.lora_dropout),
@@ -1328,10 +1147,19 @@ def _activation_workspace_components(
             n_bytes=max(int(peak.logits), 0),
             detail=(
                 {
-                    "chunk_tiles": max(int(peak.logits) - peak.fused_head, 0),
+                    "chunk_tiles": max(
+                        int(peak.logits)
+                        - peak.fused_head
+                        - peak.head_grad
+                        - peak.tp_head_gather,
+                        0,
+                    ),
                     "fp32_head_upcast": peak.fused_head,
+                    "weight_dtype_head_grad": peak.head_grad,
+                    "tp_head_gather": peak.tp_head_gather,
                 }
-                if peak.logits and peak.fused_head
+                if peak.logits
+                and (peak.fused_head or peak.head_grad or peak.tp_head_gather)
                 else {}
             ),
             note=(
@@ -1339,6 +1167,11 @@ def _activation_workspace_components(
                 + (
                     " Includes the fp32 lm_head copy the chunk loop hoists."
                     if peak.fused_head
+                    else ""
+                )
+                + (
+                    " Includes the dense copy of the tensor-parallel lm_head."
+                    if peak.tp_head_gather
                     else ""
                 )
             ),
@@ -1403,6 +1236,26 @@ def _runtime_components(
     )
 
 
+def trainer_distributed_bytes(
+    device: DeviceSpec, settings: TrainingSettings, shards: int
+) -> int:
+    """NCCL buffers and the tensor-parallel runtime on one rank of a multi-rank trainer.
+
+    :param shards: GPUs one weight copy is sharded across.
+    """
+    fsdp = settings.fsdp
+    tp = 1 if fsdp is None else fsdp.tp
+    nccl = trainer_nccl_bytes(
+        device.nccl_group_bytes,
+        settings.n_training_gpus,
+        shards,
+        1 if fsdp is None else fsdp.ep,
+        tp,
+        device.gpus_per_node,
+    )
+    return nccl + (TP_RUNTIME_BYTES if tp > 1 else 0)
+
+
 def training_breakdown(
     model: ModelSpec,
     device: DeviceSpec,
@@ -1431,8 +1284,8 @@ def training_breakdown(
         adapters,
         act_bytes=act_bytes,
         seq_len=seq_len,
-        eager_mamba_scan=arch.eager_mamba_scan_family
-        and device.compute_capability == EAGER_MAMBA_SCAN_CAPABILITY,
+        unfused_mamba_scan=arch.unfused_mamba_scan_family
+        and device.compute_capability == UNFUSED_MAMBA_SCAN_CAPABILITY,
     )
     base = trainer_base_bytes(model, settings, counts, shards, peak.activations)
     # Held per-update tensors: completions, masks, old/ref/sampling logprobs,
@@ -1440,7 +1293,9 @@ def training_breakdown(
     rollout = 6 * settings.trajectories * seq_len * 4
     job_overhead = formulas.JOB_OVERHEAD_BYTES if orchestrated else 0
     lib_overhead = formulas.TRAINER_LIB_OVERHEAD_BYTES if shards == 1 else 0
-    distributed_overhead = device.nccl_bytes if shards > 1 else 0
+    distributed_overhead = (
+        trainer_distributed_bytes(device, settings, shards) if shards > 1 else 0
+    )
     overhead = (
         device.context_bytes
         + rollout
