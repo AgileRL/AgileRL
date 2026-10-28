@@ -69,6 +69,7 @@ from gymnasium import spaces
 from peft import LoraConfig, inject_adapter_in_model
 from peft.tuners.lora.layer import ParamWrapper
 from peft.tuners.tuners_utils import BaseTunerLayer
+from tensordict import TensorDict
 from torch import nn, optim
 from torch.distributed.tensor import DTensor, distribute_tensor
 from torch.distributed.tensor.placement_types import Shard
@@ -498,8 +499,6 @@ class TestInspectAttributes:
             assert k in _inspect_signature_params(dummy_agent.__init__)
 
     def test_inspect_attributes_excludes_tensordict(self, dummy_agent):
-        from tensordict import TensorDict
-
         dummy_agent.buffer = TensorDict({"a": torch.zeros(1)}, batch_size=[])
         attrs = EvolvableAlgorithm.inspect_attributes(dummy_agent)
         assert "buffer" not in attrs
@@ -698,6 +697,20 @@ class TestToDevice:
     def test_to_device_empty_list_raises_index_error(self, dummy_agent):
         with pytest.raises(IndexError):
             dummy_agent.to_device([])
+
+    def test_to_device_tensordict(self, dummy_agent):
+        device = torch.device(dummy_agent.device)
+        exp = TensorDict(
+            {"states": torch.zeros(2, 4), "actions": torch.zeros(2, 1)},
+            batch_size=[2],
+        )
+
+        result = dummy_agent.to_device(exp)
+
+        assert len(result) == 1
+        assert isinstance(result[0], TensorDict)
+        assert result[0]["states"].device == device
+        assert result[0]["actions"].device == device
 
 
 class TestIndexAndMutProperties:

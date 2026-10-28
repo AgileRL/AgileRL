@@ -11,6 +11,7 @@ from agilerl.components.replay_buffer import (
     MultiStepReplayBuffer,
     PrioritizedReplayBuffer,
     ReplayBuffer,
+    maybe_to_device,
 )
 from agilerl.components.segment_tree import MinSegmentTree, SumSegmentTree
 
@@ -199,6 +200,39 @@ class TestReplayBufferAdd:
         assert sample["reward"].shape == (2, 1)
         assert sample["action"].shape == (2, 1)
 
+    def test_add_does_not_reshape_caller_action(self):
+        buffer = ReplayBuffer(max_size=10)
+        data = TensorDict(
+            {
+                "state": torch.tensor([[1, 2, 3], [4, 5, 6]]),
+                "action": torch.tensor([0.0, 1.0]),
+                "reward": torch.tensor([1.0, 2.0]),
+            },
+        )
+        data.batch_size = [2]
+
+        buffer.add(data)
+
+        assert data["action"].shape == (2,)
+        assert data["reward"].shape == (2,)
+
+    def test_add_does_not_reshape_locked_caller_action(self):
+        buffer = ReplayBuffer(max_size=10)
+        data = TensorDict(
+            {
+                "state": torch.tensor([[1, 2, 3], [4, 5, 6]]),
+                "action": torch.tensor([0.0, 1.0]),
+                "reward": torch.tensor([1.0, 2.0]),
+            },
+            batch_size=[2],
+            device="cpu",
+        )
+
+        buffer.add(data)
+
+        assert data["action"].shape == (2,)
+        assert data["reward"].shape == (2,)
+
     def test_add_with_nested_tensordict_1d_values_reshaped(self):
         """Test add() reshapes 1D values inside nested TensorDict."""
         buffer = ReplayBuffer(max_size=10)
@@ -238,6 +272,55 @@ class TestReplayBufferAdd:
         # Check buffer state
         assert len(buffer) == 2
         assert buffer.counter == 2
+
+
+class TestMaybeToDevice:
+    def test_returns_same_object_when_tensordict_device_matches(self):
+        data = TensorDict(
+            {"obs": torch.zeros(4)},
+            batch_size=[4],
+            device="cpu",
+        )
+
+        assert maybe_to_device(data, "cpu") is data
+
+    def test_clones_unlocked_tensordict_on_target_device(self):
+        data = TensorDict({"obs": torch.zeros(4), "reward": torch.zeros(1)})
+
+        moved = maybe_to_device(data, "cpu")
+
+        assert moved is not data
+        assert moved.device == torch.device("cpu")
+        assert data.device is None
+        assert data["obs"].shape == (4,)
+
+    def test_moves_leaves_when_device_differs(self):
+        data = TensorDict({"obs": torch.zeros(4), "reward": torch.zeros(1)})
+
+        moved = maybe_to_device(data, "meta")
+
+        assert moved is not data
+        assert moved["obs"].device.type == "meta"
+        assert moved["reward"].device.type == "meta"
+
+    def test_clones_nested_unlocked_tensordict(self):
+        data = TensorDict(
+            {
+                "obs": TensorDict({"img": torch.zeros(2, 3)}),
+                "reward": torch.zeros(2),
+            }
+        )
+
+        moved = maybe_to_device(data, "cpu")
+
+        assert moved is not data
+        assert moved.device == torch.device("cpu")
+        assert data.device is None
+
+    def test_empty_tensordict_does_not_raise(self):
+        moved = maybe_to_device(TensorDict(), "cpu")
+
+        assert isinstance(moved, TensorDict)
 
 
 class TestReplayBufferSample:

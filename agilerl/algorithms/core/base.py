@@ -1337,8 +1337,12 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         on_device: list[TorchObsType] = []
         for exp in experiences:
             moved: TorchObsType
-            # Check the Tensor leaf before the container arms so narrowing is exact.
-            if isinstance(exp, torch.Tensor):
+            # Check the Tensor / TensorDict leaf before the container arms so
+            # narrowing is exact. TensorDict.to() moves every leaf in one call.
+            if isinstance(exp, TensorDict):
+                target = torch.device(device)
+                moved = exp if exp.device == target else exp.to(target)
+            elif isinstance(exp, torch.Tensor):
                 moved = exp.to(device)
             elif isinstance(exp, dict):
                 moved = {key: val.to(device) for key, val in exp.items()}

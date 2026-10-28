@@ -853,9 +853,8 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentAlgorithm]):
 
         # MADDPG/MATD3 ``learn`` consume a TensorDict of nested per-agent fields.
         def _nested_td(fields: dict[str, Any]) -> TensorDict:
-            td = TensorDict({}, batch_size=[])
-            td.update(fields)
-            return td
+            # Positional source is TypeVar-bound to TensorCollection.
+            return TensorDict(batch_size=[], **fields)
 
         return _nested_td(
             {
