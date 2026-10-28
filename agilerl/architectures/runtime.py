@@ -7,14 +7,23 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field
 from torch import nn
 from torch.distributed.device_mesh import DeviceMesh
-from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 
+from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.arena.models.networks import VllmModality
+
+if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
+    from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
+
+    TrainerModelClass = type[AutoModelForCausalLM] | type[AutoModelForImageTextToText]
+else:
+    AutoModelForCausalLM = None
+    AutoModelForImageTextToText = None
+    TrainerModelClass = Any
 
 
 class VllmRuntimeConfig(BaseModel):
@@ -50,9 +59,6 @@ class VllmRuntimeConfig(BaseModel):
         if self.dense_mamba_prefix_cache:
             kwargs["prefix_cache_retention_interval"] = None
         return kwargs
-
-
-TrainerModelClass = type[AutoModelForCausalLM] | type[AutoModelForImageTextToText]
 
 
 class TrainerRuntimeConfig(BaseModel):
