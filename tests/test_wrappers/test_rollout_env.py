@@ -676,7 +676,7 @@ class TestRolloutEnvFromDataset:
         """With no ``prompt_builder`` the prompt is ``str(question)`` verbatim."""
         env = RolloutHarness.from_dataset(
             self._ROWS,
-            reward_fn_to_rubric(lambda c, a, q: 0.0),
+            reward_fn_to_rubric(lambda completion, answer, question: 0.0),
             _ChrTokenizer(),
             apply_chat_template=False,
         )
@@ -686,7 +686,7 @@ class TestRolloutEnvFromDataset:
         with pytest.raises(TypeError, match="single-turn"):
             RolloutHarness.from_dataset(
                 self._ROWS,
-                reward_fn_to_rubric(lambda c, a, q: 0.0),
+                reward_fn_to_rubric(lambda completion, answer, question: 0.0),
                 _ChrTokenizer(),
                 max_turns=2,
             )

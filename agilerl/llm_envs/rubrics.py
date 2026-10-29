@@ -11,8 +11,7 @@ auto-register); AgileRL does not add its own aggregation containers.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
-from typing import Any, Protocol
+from typing import Protocol
 
 from openenv.core.rubrics.base import Rubric
 
@@ -24,6 +23,10 @@ class RubricAction(Protocol):
 class RubricObservation(Protocol):
     answer: object
     question: object
+
+
+class RewardFn(Protocol):
+    def __call__(self, completion: str, answer: object, question: object) -> float: ...
 
 
 COMPONENT_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*")
@@ -52,7 +55,7 @@ def _require_rubric(rubric: Rubric) -> Rubric:
     if not isinstance(rubric, Rubric):
         msg = (
             f"rubric must be an openenv Rubric, got {type(rubric).__name__}. "
-            "Wrap a (completion, answer, question) -> float callable with "
+            "Wrap a callable of completion, answer, and question with "
             "reward_fn_to_rubric(...)."
         )
         raise TypeError(msg)
@@ -60,16 +63,16 @@ def _require_rubric(rubric: Rubric) -> Rubric:
 
 
 def reward_fn_to_rubric(
-    fn: Callable[[str, Any, Any], float],
+    fn: RewardFn,
     name: str | None = None,
 ) -> Rubric:
-    """Wrap a ``(completion, answer, question) -> float`` callable as a ``Rubric``.
+    """Wrap a reward function called as ``completion``, ``answer``, and ``question``.
 
-    One scorer, one scalar reward. For per-criterion metrics, write OpenEnv
-    ``Rubric`` subclasses and compose them (assign children as attributes so
-    they auto-register).
+    One scorer, one scalar reward. Parameter order does not matter. For
+    per-criterion metrics, write OpenEnv ``Rubric`` subclasses and compose
+    them (assign children as attributes so they auto-register).
 
-    :param fn: Scorer taking completion text, answer label, and question.
+    :param fn: Scorer called with completion, answer, and question by name.
     :param name: Component name for metrics; defaults to ``fn.__name__`` when valid.
     :returns: An OpenEnv ``Rubric`` instance.
     """
@@ -81,7 +84,7 @@ class RewardFnRubric(Rubric):
 
     def __init__(
         self,
-        fn: Callable[[str, Any, Any], float],
+        fn: RewardFn,
         name: str | None,
     ) -> None:
         super().__init__()
@@ -89,7 +92,13 @@ class RewardFnRubric(Rubric):
         self.component_name = name or _identifier_or(getattr(fn, "__name__", ""), "fn")
 
     def forward(self, action: RubricAction, observation: RubricObservation) -> float:
-        return float(self._fn(action.message, observation.answer, observation.question))
+        return float(
+            self._fn(
+                completion=action.message,
+                answer=observation.answer,
+                question=observation.question,
+            )
+        )
 
 
 def register_component_hooks(rubric: Rubric | None) -> tuple[str, ...]:
