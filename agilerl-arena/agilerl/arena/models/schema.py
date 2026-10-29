@@ -13,6 +13,7 @@ from typing import Any, cast, get_args
 
 from pydantic import AliasChoices, BaseModel
 
+from agilerl.arena.memory.resolve.rollout import async_rollout_algorithm
 from agilerl.arena.models.algorithms import (
     AlgoSpec,
     GRPOSpec,
@@ -195,20 +196,7 @@ def network_encoder_arch_if(archs: tuple[str, ...]) -> dict[str, Any]:
 
 
 def async_llm_rollout_if() -> dict[str, Any]:
-    return {
-        "allOf": [
-            algorithm_name_if(registered_algorithm_names(_llm_algorithm)),
-            {
-                "properties": {
-                    "training": {
-                        "properties": {"rollout_mode": {"const": "async"}},
-                        "required": ["rollout_mode"],
-                    }
-                },
-                "required": ["training"],
-            },
-        ]
-    }
+    return algorithm_name_if(registered_algorithm_names(async_rollout_algorithm))
 
 
 def training_schema_conditionals() -> list[dict[str, Any]]:

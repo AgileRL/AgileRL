@@ -12,9 +12,9 @@ from agilerl.lora.moe import grouped_gemm as moe_gemm
 from agilerl.lora.moe import routed as moe_routed
 from agilerl.lora.moe import (
     set_routed_experts_chunk_bytes,
-    set_routed_experts_recompute,
     upgrade_moe_param_wrappers,
 )
+from agilerl.lora.moe.wrappers import RoutedExpertsLoraWrapper
 
 NUM_EXPERTS = 4
 # Multiples of 4 keep fp32 rows 16-byte aligned, so the grouped GEMM path applies.
@@ -111,11 +111,11 @@ EXPERTS = [
 ]
 
 
-def lora_block(experts_cls, up_target):
+def lora_block(experts_cls, up_target, rank=RANK):
     """Frozen-base experts with one trainable split-LoRA adapter on both projections."""
     torch.manual_seed(0)
     config = LoraConfig(
-        r=RANK,
+        r=rank,
         lora_alpha=8,
         target_modules=[],
         target_parameters=[up_target, "experts.down_proj"],
@@ -126,6 +126,13 @@ def lora_block(experts_cls, up_target):
     for name, param in model.named_parameters():
         param.requires_grad_("lora" in name)
     return model
+
+
+def force_recompute(model, enabled):
+    """Pin every routed-experts LoRA wrapper to the recompute or full-graph path."""
+    for module in model.modules():
+        if isinstance(module, RoutedExpertsLoraWrapper):
+            module.recompute = enabled
 
 
 def run_experts(model, hidden, top_k_weights):
@@ -183,7 +190,7 @@ class TestRoutedExpertsLocalForwardParity:
         reference = lora_block(experts_cls, up_target)
         model = lora_block(experts_cls, up_target)
         upgrade_moe_param_wrappers(model)
-        set_routed_experts_recompute(model, recompute)
+        force_recompute(model, recompute)
         set_routed_experts_chunk_bytes(model, chunk_bytes)
         torch.manual_seed(1)
         hidden = torch.randn(TOP2_INDEX.shape[0], HIDDEN)
@@ -254,7 +261,7 @@ class TestRoutedExpertsLocalForwardChunks:
         # Arrange
         model = lora_block(experts_cls, up_target)
         upgrade_moe_param_wrappers(model)
-        set_routed_experts_recompute(model, recompute)
+        force_recompute(model, recompute)
         set_routed_experts_chunk_bytes(model, 160)
         monkeypatch.setattr(moe_gemm, "_use_grouped_mm", lambda _x: True)
         hidden = torch.randn(TOP2_INDEX.shape[0], HIDDEN, requires_grad=True)
@@ -273,3 +280,47 @@ class TestRoutedExpertsLocalForwardChunks:
         assert not recorder.ops & SYNC_OPS
         assert hidden.grad is not None
         assert top_k_weights.grad is not None
+
+
+class TestRoutedExpertsLoraRankAlignment:
+    @pytest.mark.parametrize("rank", [1, 2, 4, 8])
+    @pytest.mark.parametrize("recompute", [False, True], ids=["graph", "recompute"])
+    @pytest.mark.parametrize(("experts_cls", "up_target"), EXPERTS)
+    def test_bf16_grouped_path_matches_the_unpadded_loop(
+        self, monkeypatch, experts_cls, up_target, recompute, rank
+    ):
+        # Arrange
+        reference = lora_block(experts_cls, up_target, rank).to(torch.bfloat16)
+        model = lora_block(experts_cls, up_target, rank).to(torch.bfloat16)
+        for block in (reference, model):
+            upgrade_moe_param_wrappers(block)
+            force_recompute(block, recompute)
+        torch.manual_seed(1)
+        hidden = torch.randn(TOP2_INDEX.shape[0], HIDDEN, dtype=torch.bfloat16)
+        top_k_weights = torch.rand(TOP2_INDEX.shape, dtype=torch.bfloat16)
+        expected = run_experts(reference, hidden, top_k_weights)
+        expected_shapes = {
+            name: tensor.shape for name, tensor in reference.state_dict().items()
+        }
+
+        # Act
+        with monkeypatch.context() as patched:
+            patched.setattr(moe_gemm, "_use_grouped_mm", lambda _x: True)
+            # The per-expert loop reads group sizes back to the host.
+            patched.setattr(torch.Tensor, "tolist", raise_host_sync)
+            actual = run_experts(model, hidden, top_k_weights)
+
+        # Assert
+        # bf16 keeps 8 mantissa bits; the two paths round sums of at most 16
+        # products in a different order, so allow a few bf16 ulps.
+        tolerance = {"rtol": 2e-2, "atol": 2e-3}
+        for got, want in zip(actual[:3], expected[:3], strict=True):
+            torch.testing.assert_close(got, want, **tolerance)
+        assert set(actual[3]) == set(expected[3])
+        assert len(actual[3]) == 4
+        for name, grad in expected[3].items():
+            torch.testing.assert_close(actual[3][name], grad, **tolerance)
+        shapes = {name: tensor.shape for name, tensor in model.state_dict().items()}
+        assert shapes == expected_shapes
+        lora_a_rows = {shape[0] for name, shape in shapes.items() if "lora_A" in name}
+        assert lora_a_rows == {NUM_EXPERTS * rank}

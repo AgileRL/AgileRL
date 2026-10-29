@@ -37,6 +37,10 @@ from agilerl.arena.inference.cache import (
     normalized_deployment_name,
     save_binding,
 )
+from agilerl.arena.memory.manifest import (
+    explicit_colocated_rollout,
+    validated_run_manifest,
+)
 from agilerl.arena.models import LLMAlgorithmSpec, TrainingManifest
 from agilerl.arena.models.model_info import (
     STATUS_DEPRECATED,
@@ -1131,6 +1135,7 @@ class ArenaClient:
         """
         training_manifest = TrainingManifest.get_validated(manifest, mode="python")
         self._check_model_status(training_manifest)
+        self._check_rollout_mode(training_manifest)
         validated = training_manifest.to_payload()
         resolved_project = self._resolve_project(project)
 
@@ -1183,6 +1188,17 @@ class ArenaClient:
             raise ArenaValidationError(msg)
         if entry.status == STATUS_DEPRECATED:
             logger.warning("Model %s is deprecated and will be removed.", hub_id)
+
+    @staticmethod
+    def _check_rollout_mode(manifest: TrainingManifest) -> None:
+        """Reject a rollout LLM job that cannot run async, as Arena runs it."""
+        if explicit_colocated_rollout(manifest):
+            msg = (
+                "rollout_mode: colocated runs only locally; Arena runs rollout "
+                "LLM jobs async. Set rollout_mode: async or drop the key."
+            )
+            raise ArenaValidationError(msg)
+        validated_run_manifest(manifest)
 
     @staticmethod
     def _build_submit_experiment_multipart(

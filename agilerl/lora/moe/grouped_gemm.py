@@ -15,24 +15,31 @@ from torch.distributed.tensor import DTensor
 # No public API pops the active torch dispatch modes.
 from torch.utils._python_dispatch import _disable_current_modes
 
-# Default widest [rows, features] activation of one routed-expert row chunk,
-# one fp32 expert-parallel combine chunk, and one grouped LoRA GEMM output.
-# On Super-VL the learn peak grows ~0.37 GiB per GiB of chunk. Each chunk adds
-# a fixed set of small kernel launches that bound the step on the host.
-ROUTED_EXPERT_CHUNK_BYTES = 64 * 1024 * 1024
+from agilerl.arena.memory.resolve.moe import (
+    grouped_gemm_supported,
+    padded_expert_lora_rank,
+)
 
 
 @cache
 def grouped_mm_supported(device_index: int, dtype: torch.dtype) -> bool:
-    """Whether ``torch._grouped_mm`` runs its fused kernel here and computes correct results (fwd and bwd, transposed views)."""
+    """Whether expert GEMMs on this device and dtype run on ``torch._grouped_mm``.
+
+    Where :func:`grouped_gemm_supported` requires the grouped GEMM, the op must
+    compute correct results (fwd and bwd, transposed views) or this raises.
+
+    :param device_index: CUDA device index.
+    :param dtype: Activation dtype.
+    :return: ``True`` where the grouped GEMM is required, ``False`` for the per-expert loop.
+    :raises RuntimeError: If the grouped GEMM is required and ``torch._grouped_mm`` fails.
+    """
+    major, minor = torch.cuda.get_device_capability(device_index)
+    if not grouped_gemm_supported((major, minor), str(dtype).removeprefix("torch.")):
+        return False
+    failure = f"torch._grouped_mm failed on SM {major}.{minor}"
     if not hasattr(torch, "_grouped_mm"):
-        return False
-    # Elsewhere torch loops over every group, empty ones included, after
-    # copying the offsets to the host.
-    if dtype != torch.bfloat16 or torch.cuda.get_device_capability(device_index)[
-        0
-    ] not in (9, 10):
-        return False
+        msg = f"{failure}: torch {torch.__version__} has no torch._grouped_mm"
+        raise RuntimeError(msg)
     # The first call can run inside a checkpointed or no_grad forward. The
     # probe needs its own backward: grad on, and identity hooks keep its saved
     # tensors out of the checkpoint. Its ops run once, so no dispatch mode may
@@ -42,25 +49,31 @@ def grouped_mm_supported(device_index: int, dtype: torch.dtype) -> bool:
         torch.autograd.graph.saved_tensors_hooks(lambda t: t, lambda t: t),
         _disable_current_modes(),
     ):
+        device = torch.device("cuda", device_index)
+        generator = torch.Generator(device=device).manual_seed(0)
+        # Both inner dims stay 16-byte aligned in bf16, including after transpose.
+        x = torch.randn(8, 16, device=device, dtype=dtype, generator=generator)
+        w = torch.randn(2, 16, 16, device=device, dtype=dtype, generator=generator)
+        x = x.requires_grad_(True)
+        w = w.requires_grad_(True)
+        offs = torch.tensor([5, 8], device=device, dtype=torch.int32)
+        reference = torch.cat([x[:5] @ w[0].mT, x[5:] @ w[1].mT])
         try:
-            device = torch.device("cuda", device_index)
-            generator = torch.Generator(device=device).manual_seed(0)
-            # Both inner dims stay 16-byte aligned in bf16, including after transpose.
-            x = torch.randn(8, 16, device=device, dtype=dtype, generator=generator)
-            w = torch.randn(2, 16, 16, device=device, dtype=dtype, generator=generator)
-            x = x.requires_grad_(True)
-            w = w.requires_grad_(True)
-            offs = torch.tensor([5, 8], device=device, dtype=torch.int32)
             out = torch._grouped_mm(x, w.transpose(-2, -1), offs=offs)
-            reference = torch.cat([x[:5] @ w[0].mT, x[5:] @ w[1].mT])
-            if not torch.allclose(out.float(), reference.float(), atol=1e-2):
-                return False
+        except Exception as error:
+            msg = f"{failure}: {error}"
+            raise RuntimeError(msg) from error
+        if not torch.allclose(out.float(), reference.float(), atol=1e-2):
+            msg = f"{failure}: output differs from per-expert matmuls"
+            raise RuntimeError(msg)
+        try:
             # square() materializes the incoming gradient; the op's backward
             # rejects the zero-stride expanded grad a bare sum() would feed it.
             out.square().sum().backward()
-        except Exception:
-            return False
-    return x.grad is not None and w.grad is not None
+        except Exception as error:
+            msg = f"{failure} in backward: {error}"
+            raise RuntimeError(msg) from error
+    return True
 
 
 def _use_grouped_mm(x: torch.Tensor) -> bool:
@@ -213,6 +226,28 @@ def grouped_operand(weight: torch.Tensor) -> torch.Tensor:
         weight = weight.to_local()
     operand = weight.transpose(-2, -1)
     return operand if _grouped_mm_operand_ready(operand) else operand.contiguous()
+
+
+def pad_lora_rank(
+    lora_a: torch.Tensor, lora_b: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Zero-pad stacked ``[E, r, in]`` / ``[E, out, r]`` LoRA factors to a rank the grouped GEMM accepts.
+
+    The added rows of ``A`` and columns of ``B`` are zero, so every product is
+    exact, and gradients reach the unpadded factors through the pad.
+
+    :param lora_a: Stacked ``A`` factors.
+    :param lora_b: Stacked ``B`` factors.
+    :return: Padded factors when the grouped GEMM serves ``lora_a``, else the inputs.
+    """
+    rank = lora_a.shape[1]
+    padded = padded_expert_lora_rank(rank, lora_a.element_size())
+    if padded == rank or not _use_grouped_mm(lora_a):
+        return lora_a, lora_b
+    return (
+        nn.functional.pad(lora_a, (0, 0, 0, padded - rank)),
+        nn.functional.pad(lora_b, (0, padded - rank)),
+    )
 
 
 def grouped_matmul(

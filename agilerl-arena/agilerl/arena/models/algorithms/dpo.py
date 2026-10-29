@@ -7,8 +7,7 @@ from __future__ import annotations
 
 from typing import ClassVar
 
-from pydantic import Field, model_validator
-from typing_extensions import Self
+from pydantic import Field
 
 from agilerl.arena.models.algorithms.base import LLMAlgorithmSpec
 from agilerl.arena.models.descriptions import BETA, LR
@@ -33,14 +32,3 @@ class DPOSpec(LLMAlgorithmSpec):
 
     env_type: ClassVar[LLMEnvType] = LLMEnvType.DATASET
     objective: ClassVar[str] = "preference"
-
-    @model_validator(mode="after")
-    def _validate_use_sequence_packing(self) -> Self:
-        """DPO's forward is padded; packing would never be built for it."""
-        if self.use_sequence_packing:
-            msg = (
-                "DPO does not accept use_sequence_packing, so the padding-free "
-                "forward would never be built for this algorithm"
-            )
-            raise ValueError(msg)
-        return self

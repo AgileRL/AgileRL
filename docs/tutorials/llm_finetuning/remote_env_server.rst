@@ -166,7 +166,6 @@ the env scores a single answer. Everything else is an ordinary rollout config:
         vllm_config:
             gpu_memory_utilization: 0.7   # give vLLM room on a small GPU
             max_num_seqs: 8
-            sleep_mode: true
 
     environment:
         env_type: rollout

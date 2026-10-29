@@ -13,7 +13,6 @@ algorithm:
         tensor_parallel_size: 1
         gpu_memory_utilization: 0.3
         max_num_seqs: 8
-        sleep_mode: false
     calc_position_embeddings: true
 
 environment:

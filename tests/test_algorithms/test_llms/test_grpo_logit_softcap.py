@@ -5,14 +5,11 @@
 
 from __future__ import annotations
 
-import warnings
-
 import pytest
 
 pytest.importorskip("transformers", reason="LLM tests require transformers.")
 pytest.importorskip("peft", reason="LLM tests require peft.")
 
-from agilerl.algorithms.grpo import GRPO
 from tests.test_algorithms.test_llms.llm_helpers import (
     DummyConfig,
     DummyMLPPreTrainedModel,
@@ -30,47 +27,39 @@ def _softcapped_actor() -> DummyMLPPreTrainedModel:
     return DummyMLPPreTrainedModel(config=config, device="cpu")
 
 
-def _make_liger_grpo(monkeypatch: pytest.MonkeyPatch, **overrides: object) -> GRPO:
-    """GRPO asking for the Liger loss, with liger-kernel reported installed."""
-    monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
-    # liger-kernel's Triton model patches are Linux/CUDA only.
-    monkeypatch.setattr(
-        "agilerl.algorithms.core.base._apply_liger_kernel_to_instance",
-        lambda model, fused_linear_cross_entropy: None,
-        raising=False,
+class TestGRPOSoftcapLigerLoss:
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            pytest.param({}, id="token"),
+            pytest.param(
+                {
+                    "loss_type": "gspo",
+                    "vllm_importance_sampling_correction": False,
+                    "off_policy_token_mask_bounds": None,
+                    "off_policy_sequence_mask_threshold": None,
+                },
+                id="gspo",
+            ),
+        ],
     )
-    return _make_grpo(
-        actor_network=_softcapped_actor(), use_liger_loss=True, **overrides
-    )
-
-
-class TestGRPOSoftcapLigerFallback:
-    def test_softcapped_actor_keeps_kl_advantage_shaping(
-        self, monkeypatch: pytest.MonkeyPatch
+    def test_softcapped_actor_runs_the_standard_loss(
+        self, monkeypatch: pytest.MonkeyPatch, overrides: dict[str, object]
     ) -> None:
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            agent = _make_liger_grpo(
-                monkeypatch, beta=0.1, use_kl_advantage_shaping=True
-            )
-
-        messages = [str(warning.message) for warning in caught]
-        assert agent.use_liger_loss is False
-        assert agent.use_kl_advantage_shaping is True
-        assert any(f"softcaps its final logits at {SOFTCAP}" in m for m in messages)
-        assert not any(
-            "use_kl_advantage_shaping is not supported" in m for m in messages
+        # Arrange
+        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
+        # liger-kernel's Triton model patches are Linux/CUDA only.
+        monkeypatch.setattr(
+            "agilerl.algorithms.core.base._apply_liger_kernel_to_instance",
+            lambda model, fused_linear_cross_entropy: None,
+            raising=False,
         )
 
-    def test_softcapped_actor_skips_the_liger_level_warning(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            agent = _make_liger_grpo(
-                monkeypatch, loss_type="cispo", importance_sampling_level="turn"
-            )
+        # Act
+        agent = _make_grpo(
+            liger_loss=None, actor_network=_softcapped_actor(), **overrides
+        )
 
-        messages = [str(warning.message) for warning in caught]
-        assert agent.use_liger_loss is False
-        assert not any("has no fused cispo kernel" in m for m in messages)
+        # Assert
+        assert agent.final_logit_softcap == SOFTCAP
+        assert agent.liger_loss is False

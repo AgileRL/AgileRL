@@ -65,7 +65,7 @@ def lora_tensor_placement(
 ) -> tuple[int, int]:
     """(replicated elements, sharded elements) for one LoRA adapter.
 
-    ``threshold`` is FSDP's ``param_persistence_threshold``: a matrix with
+    ``threshold`` is FSDP's parameter persistence threshold: a matrix with
     fewer elements stays replicated. ``None`` is flat data parallel, so
     every tensor is replicated. The two counts sum to
     :func:`lora_param_count` plus :func:`packed_lora_param_count`.

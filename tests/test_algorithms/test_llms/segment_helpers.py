@@ -108,9 +108,8 @@ def use_fake_liger_policy_loss(
     agent: LLMAlgorithm, monkeypatch: pytest.MonkeyPatch, module: str
 ) -> None:
     """Train ``agent`` on the Liger path with :func:`action_token_policy_loss` as its kernel."""
-    monkeypatch.setattr(f"{module}.HAS_LIGER_KERNEL", True)
     monkeypatch.setattr(f"{module}.apply_fused_policy_loss", action_token_policy_loss)
-    agent.use_liger_loss = True
+    agent.liger_loss = True
 
 
 def pad_to_eight_rows(monkeypatch: pytest.MonkeyPatch) -> None:

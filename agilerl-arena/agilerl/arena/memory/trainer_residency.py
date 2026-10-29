@@ -48,9 +48,7 @@ def trainer_base_bytes(
         arch,
         n_gpus=shards,
         reshard_after_forward=fsdp.reshard_after_forward,
-        prefetch_units=fsdp.prefetch_units,
-        wrap_every_n_blocks=fsdp.wrap_every_n_blocks,
-        cpu_offload=fsdp.cpu_offload,
+        cpu_offload=bool(fsdp.cpu_offload),
         tensor_parallel=fsdp.tp,
         expert_parallel=fsdp.ep,
     )
@@ -97,8 +95,6 @@ def trainer_allocator_slack(
     pool = formulas.fsdp_gather_pool_params(
         counts,
         arch,
-        fsdp.wrap_every_n_blocks,
-        fsdp.prefetch_units,
         fsdp.ep,
         shards,
         fsdp.tp,

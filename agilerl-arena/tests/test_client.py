@@ -66,6 +66,7 @@ def _grpo_manifest(hub_id: str) -> dict:
             "max_context_length": 512,
         },
         "training": {"max_steps": 100},
+        "replay_buffer": {"kind": "llm"},
     }
 
 
@@ -1590,6 +1591,28 @@ class TestExperimentMethods:
 
         assert result == {"job_id": 3}
         assert "is deprecated" not in caplog.text
+
+    def test_submit_experiment_rejects_colocated_rollout(self, api_key_client):
+        api_key_client._open_stream = MagicMock()
+        manifest = _grpo_manifest("Qwen/Qwen3.5-4B")
+        manifest["training"]["rollout_mode"] = "colocated"
+
+        with pytest.raises(ArenaValidationError, match="rollout_mode: colocated"):
+            api_key_client.submit_experiment(manifest=manifest, project="proj")
+        api_key_client._open_stream.assert_not_called()
+
+    def test_submit_experiment_rejects_pinned_cpu_offload(self, api_key_client):
+        # Arrange
+        api_key_client._open_stream = MagicMock()
+        manifest = _grpo_manifest("Qwen/Qwen3.5-4B")
+        manifest["algorithm"]["fsdp"] = {"cpu_offload": True}
+
+        # Act / Assert
+        with pytest.raises(
+            ValueError, match=r"algorithm\.fsdp\.cpu_offload cannot be set"
+        ):
+            api_key_client.submit_experiment(manifest=manifest, project="proj")
+        api_key_client._open_stream.assert_not_called()
 
     def test_resume_experiment(self, api_key_client):
         api_key_client._request = MagicMock(return_value={"resumed": True})

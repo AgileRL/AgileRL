@@ -89,54 +89,46 @@ to a plain ("eager") PyTorch path. To force the eager path explicitly:
 
 How many positions go in each chunk (``chunk_rows``) is chosen automatically from
 the vocabulary size, so that one ``(chunk_rows, V)`` slab stays near a fixed
-memory budget (about 256 MB by default): models with bigger vocabularies get
-fewer rows per chunk, smaller ones more. Override it with the
-``chunk_rows`` constructor argument if you want manual control.
+memory budget (256 MiB of fp32 logits): models with bigger vocabularies get fewer rows
+per chunk, smaller ones more
+(:func:`~agilerl.arena.memory.resolve.chunk.resolve_chunk_rows`).
 
-Optional: the fused Liger loss
-------------------------------
+The fused Liger loss
+--------------------
 
-``use_liger_loss`` (default ``False``) is the one remaining loss-related switch.
-It fuses the **policy/KL part of the loss** (including the backward pass through
-``lm_head``) into `Liger Kernel <https://github.com/linkedin/Liger-Kernel>`_
-Triton primitives: a single fused pass that is faster than the standard path when
-it applies. It requires the ``liger-kernel`` package; if you pass ``True``
-without it installed, AgileRL warns and falls back to ``False``.
+When the ``liger-kernel`` package is installed, AgileRL fuses the **policy/KL
+part of the loss** (including the backward pass through ``lm_head``) into
+`Liger Kernel <https://github.com/linkedin/Liger-Kernel>`_ Triton primitives
+wherever the kernel can express the objective. There is no switch: the rule in
+:func:`~agilerl.arena.memory.resolve.liger.liger_loss_blocker` decides, and
+the memory estimator prices the path that runs. The update falls back to the
+standard path for KL advantage shaping, a final-logit softcap the kernel
+cannot apply, and (for GRPO, CISPO and GSPO) vLLM sampling supports.
 
-Whether the Liger path *also* stays memory-bounded depends on how the algorithm
-aggregates probabilities, its **importance-sampling level**:
+How the kernel chunks depends on the **importance-sampling level**:
 
-* **Token-level objectives** (GRPO, CISPO, PPO, REINFORCE). Each token is scored
-  independently, so the kernel can chunk by token: every chunk materializes only
-  ``(token_chunk, V)`` logits and memory stays bounded. The
-  ``liger_token_chunk_size`` argument (default 2048) sets the tokens per chunk.
-  This is the case where Liger is a clear win.
-* **Turn- and sequence-level objectives** (e.g. GSPO). These pool the tokens of a
-  whole turn or sequence together, so a single token chunk would only ever see
-  part of the unit being pooled, and the chunking trick can't apply. The kernel
-  then has to process one whole sequence at a time and materialize
-  ``(sequence length, V)`` logits per trajectory, which is **not** bounded at long
-  context. AgileRL warns and, where it can, routes these objectives to the
-  standard path instead.
+* **Token level** (GRPO, CISPO, PPO, REINFORCE). Each token is scored
+  independently, so the kernel chunks by token: every chunk materializes only
+  ``(token_chunk, V)`` logits, sized by ``chunk_rows``.
+* **Turn and trajectory level** (PPO, REINFORCE; GRPO and GSPO at trajectory
+  level). These pool the tokens of a turn or completion, so a token chunk would
+  see only part of the pooled unit. PPO and REINFORCE chunk one whole sequence
+  at a time and hold its ``(sequence length, V)`` fp32 logits per chunk; GRPO's
+  trajectory kernel tiles each sequence as token level does. Updates that weight
+  tokens by vLLM sampling log-probs (the vLLM correction, GRPO's off-policy
+  masks) run the standard path above token level, as do CISPO, turn-level GRPO
+  and per-turn GRPO advantages at trajectory level.
 
-Rule of thumb:
-
-* **Token-level** objective → ``use_liger_loss=True`` (fastest, memory-bounded).
-* **Turn-/sequence-level** objective at long context → ``use_liger_loss=False``.
-
-The standard path (Liger off) is always fused-linear and memory-bounded, so it is
-the safe default and the right choice whenever Liger doesn't help.
+The standard path is always fused-linear and memory-bounded.
 
 Precision
 ---------
 
-``cast_logprobs_to_fp32`` (on ``LLMAlgorithm``, default ``True``) controls
-whether the log-prob reductions (the ``gather`` and ``logsumexp`` steps) run in
-32-bit precision before casting back to the model's dtype. Because the working
-set is only one ``(chunk_rows, V)`` slice, fp32 is cheap here and improves
-numerical stability. The Liger gradient-time kernels use their own internal math
-and **ignore** this flag for the loss backward; it only governs the log-prob
-reductions.
+The log-prob reductions (the ``matmul``, ``gather`` and ``logsumexp`` steps)
+always run in fp32 before casting back to the model's dtype. Because the working
+set is only one ``(chunk_rows, V)`` slice, fp32 is cheap here and keeps
+importance-sampling ratios free of bf16 quantisation error. The Liger
+gradient-time kernels use their own internal math for the loss backward.
 
 Usage
 -----
@@ -145,9 +137,10 @@ Usage
 
     from agilerl.algorithms import GRPO, CISPO, GSPO, LLMPPO, LLMREINFORCE
 
-    # Memory-bounded fused log-probs are always on. Liger is opt-in for the loss.
-    agent = GRPO(...)                       # standard (always-bounded) loss path
-    agent = GRPO(..., use_liger_loss=True)  # fused Liger loss (token-level, bounded)
+    # Memory-bounded fused log-probs are always on. The fused Liger loss runs
+    # whenever liger-kernel is installed and the objective allows it.
+    agent = GRPO(...)
+    agent.liger_loss  # True when the update runs the fused Liger loss
 
 Example: what changes in memory?
 --------------------------------

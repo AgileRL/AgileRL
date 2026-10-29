@@ -28,7 +28,9 @@ from agilerl.arena.models.algorithms import (
     LLMAlgorithmSpec,
     RolloutLLMSpec,
 )
+from agilerl.arena.models.env import EnvSpec, LLMEnvSpec
 from agilerl.arena.models.fsdp import FSDPConfig
+from agilerl.arena.models.manifest import strips_multimodal_towers
 from agilerl.arena.models.networks import CosineLRScheduleConfig as CosineLRScheduleSpec
 from agilerl.arena.models.networks import LoraConfigDict, default_rollout_vllm_config
 from agilerl.builders.base import (
@@ -44,7 +46,6 @@ from agilerl.utils.llm_utils import (
     apply_pad_token_id,
     build_bnb_quantization_config,
     load_pad_token_configs,
-    resolve_attn_implementation,
     resolve_pad_token_id,
 )
 
@@ -82,7 +83,13 @@ def fsdp_config_for_algorithm(
     fsdp = spec.fsdp
     if fsdp is None:
         return None
-    if fsdp.routed_expert_chunk_mib is not None and fsdp.optim_cpu_offload is not None:
+    if None not in (
+        fsdp.reshard_after_forward,
+        fsdp.routed_expert_chunk_mib,
+        fsdp.optim_cpu_offload,
+        fsdp.activation_offload,
+        fsdp.cpu_offload,
+    ):
         return fsdp
     if torch.device(device).type != "cuda":
         return fsdp
@@ -102,7 +109,12 @@ def fsdp_config_for_algorithm(
     ).model_copy(update={"fsdp": fsdp})
     device_spec = training_device_spec(device)
     picked = resolve_fsdp_memory(
-        model, device_spec, settings, training_breakdown, orchestrated=True
+        model,
+        device_spec,
+        settings,
+        training_breakdown,
+        orchestrated=True,
+        micro_batch_floor=micro_batch_size,
     )
     return broadcast_fsdp_memory_pick(model, device_spec, settings, picked)
 
@@ -140,6 +152,8 @@ class LLMBuilder(AlgorithmBuilder):
         if isinstance(vllm_cfg, BaseModel):
             vllm_cfg = vllm_cfg.model_dump(exclude_none=True)
         if isinstance(vllm_cfg, dict):
+            # Colocated generation shares the trainer's GPU, so vLLM sleeps during learn.
+            vllm_cfg["sleep_mode"] = True
             kwargs["vllm_config"] = VLLMConfig(**vllm_cfg)
 
     @classmethod
@@ -151,6 +165,7 @@ class LLMBuilder(AlgorithmBuilder):
         runtime: AlgorithmBuildRuntime | None = None,
         actor_network: PreTrainedModel | PeftModel | None = None,
         rollout_mode: str = "",
+        environment: EnvSpec | None = None,
     ) -> LLMAlgorithm:
         """Build an LLM algorithm.
 
@@ -168,6 +183,9 @@ class LLMBuilder(AlgorithmBuilder):
         :param rollout_mode: ``training.rollout_mode``. Colocated runs vLLM in
             the trainer process.
         :type rollout_mode: str
+        :param environment: The run's environment spec; a text-only one lets
+            the engine skip a vision-language model's towers.
+        :type environment: EnvSpec | None
         :returns: LLM algorithm instance.
         :rtype: LLMAlgorithm
         :raises ValueError: If tokenizer is None.
@@ -189,6 +207,11 @@ class LLMBuilder(AlgorithmBuilder):
 
         colocated = isinstance(spec, RolloutLLMSpec) and rollout_mode == "colocated"
         cls._resolve_vllm_kwargs(kwargs, colocated=colocated)
+        if isinstance(spec, RolloutLLMSpec):
+            kwargs["rollout_strip_multimodal_towers"] = strips_multimodal_towers(
+                spec,
+                isinstance(environment, LLMEnvSpec) and environment.text_only,
+            )
 
         if kwargs.get("lora_config") is not None:
             kwargs["lora_tower_target_modules"] = kwargs[
@@ -207,10 +230,6 @@ class LLMBuilder(AlgorithmBuilder):
             kwargs["quantization_config"] = build_bnb_quantization_config(
                 kwargs.pop("quantization")
             )
-
-        model_config = cls._model_config_with_family_defaults(spec, kwargs)
-        if model_config:
-            kwargs["model_config"] = model_config
 
         model_config = None
         generation_config = None
@@ -284,30 +303,6 @@ class LLMBuilder(AlgorithmBuilder):
             index=index,
         )
         return algo
-
-    @staticmethod
-    def _model_config_with_family_defaults(
-        spec: LLMAlgorithmSpec,
-        kwargs: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Merge explicit attn and the resolved trainer backend into ``model_config``.
-
-        :param spec: LLM spec whose checkpoint id is read for family defaults.
-        :type spec: LLMAlgorithmSpec
-        :param kwargs: Constructor kwargs; ``attn_implementation`` is popped.
-        :type kwargs: dict[str, Any]
-        :return: ``model_config`` with ``attn_implementation`` resolved.
-        :rtype: dict[str, Any]
-        """
-        attn_implementation = kwargs.pop("attn_implementation", None)
-        model_config = dict(kwargs.get("model_config") or {})
-        if attn_implementation is not None and attn_implementation != "auto":
-            model_config.setdefault("attn_implementation", attn_implementation)
-        model_config["attn_implementation"] = resolve_attn_implementation(
-            model_config.get("attn_implementation"),
-            model_name_or_path=spec.pretrained_model_name_or_path,
-        )
-        return model_config
 
 
 def peft_lora_config(lora: LoraConfigDict | dict[str, Any] | LoraConfig) -> LoraConfig:

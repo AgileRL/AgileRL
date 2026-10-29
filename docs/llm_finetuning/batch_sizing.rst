@@ -57,9 +57,11 @@ validates both and raises rather than silently rounding.
 
 The two settings are independent:
 ``micro_batch_size_per_gpu`` is a **memory** setting, and
-``mini_batch_size`` is a **learning-cadence** setting. Lowering the
-micro-batch to fit a longer sequence into memory does not change how often the
-optimizer steps.
+``mini_batch_size`` is a **learning-cadence** setting. A smaller micro-batch
+fits a longer sequence into memory without changing how often the optimizer
+steps. A training manifest does not set the micro-batch: the run picks the
+largest one the memory estimate fits. It then turns gradient checkpointing off
+when that step still fits without it.
 
 Defaults
 --------
@@ -91,7 +93,7 @@ A worked example
 ----------------
 
 Take ``batch_size: 2``, ``group_size: 5``, on two data-parallel trainer ranks,
-with ``micro_batch_size_per_gpu: 1``:
+where the memory estimate picks a micro-batch of 1:
 
 * The rollout batch is ``2 * 5 = 10`` trajectories.
 * Split across 2 ranks, each rank holds **5 trajectories**.
@@ -143,7 +145,6 @@ Or in the ``algorithm`` section of a training manifest:
         name: GRPO
         batch_size: 2
         group_size: 5
-        micro_batch_size_per_gpu: 1
         mini_batch_size: 5
 
 .. note::
@@ -153,6 +154,6 @@ Or in the ``algorithm`` section of a training manifest:
     incidental: ranks that stepped at different times would desynchronise the
     FSDP2 collectives.
 
-The memory estimator sizes a one-row micro-batch only. To fit a longer
-sequence, invert context or concurrency with
+The memory estimator picks the micro-batch. To fit a longer sequence, invert
+context or concurrency with
 :ref:`arena memory solve<llm_memory_estimate>`.

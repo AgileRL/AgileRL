@@ -16,7 +16,7 @@ def prompts_per_engine(rollout_batch_size: int, n_engines: int) -> int:
     """Prompts one engine receives from a job batch.
 
     :param rollout_batch_size: Prompts in the job.
-    :param n_engines: Engines sharing that batch. ``auto`` is already 1 here.
+    :param n_engines: Engines sharing that batch.
     :return: ``ceil(rollout_batch_size / n_engines)``.
     """
     return math.ceil(rollout_batch_size / n_engines)

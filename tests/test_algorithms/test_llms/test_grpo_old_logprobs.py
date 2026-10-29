@@ -48,8 +48,12 @@ def _stub_colocated_setup(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(GRPO, "_setup_actors", setup_without_vllm)
 
 
-def _make_grpo(**overrides: Any) -> GRPO:
-    """Tiny fp32 GRPO on CPU: 2 prompts x 2 completions, one micro-batch of 2 rows."""
+def _make_grpo(liger_loss: bool | None = False, **overrides: Any) -> GRPO:
+    """Tiny fp32 GRPO on CPU: 2 prompts x 2 completions, one micro-batch of 2 rows.
+
+    :param liger_loss: Value to pin ``liger_loss`` to, or ``None`` to keep the
+        value resolved at init.
+    """
     torch.manual_seed(0)
     kwargs: dict[str, Any] = {
         "actor_network": create_module(
@@ -67,10 +71,8 @@ def _make_grpo(**overrides: Any) -> GRPO:
         "micro_batch_size_per_gpu": 2,
         "mini_batch_size": 4,
         "wrap": False,
-        "gradient_checkpointing": False,
         "calc_position_embeddings": False,
         "device": "cpu",
-        "use_liger_loss": False,
         "advantage_granularity": "trajectory",
         "lora_config": LoraConfig(
             r=4,
@@ -81,7 +83,10 @@ def _make_grpo(**overrides: Any) -> GRPO:
         ),
         **overrides,
     }
-    return GRPO(**kwargs)
+    agent = GRPO(**kwargs)
+    if liger_loss is not None:
+        agent.liger_loss = liger_loss
+    return agent
 
 
 def _batch() -> tuple[torch.Tensor, torch.Tensor]:
@@ -200,12 +205,17 @@ class TestGRPOOldLogprobsSourceConfig:
         with pytest.raises(ValueError, match="Invalid old_logprobs_source 'vllm'"):
             _make_grpo(old_logprobs_source="vllm")
 
-    def test_colocated_rollout_source_captures_sampling_logprobs(
-        self, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize(
+        ("source", "captures"), [("rollout", True), ("trainer", False)]
+    )
+    def test_colocated_capture_follows_the_old_logprobs_source_not_the_masks(
+        self, monkeypatch: pytest.MonkeyPatch, source: str, captures: bool
     ) -> None:
         agent = _make_grpo(
-            old_logprobs_source="rollout",
+            old_logprobs_source=source,
             vllm_importance_sampling_correction=False,
+            off_policy_token_mask_bounds=(0.5, 5.0),
+            off_policy_sequence_mask_threshold=0.03,
         )
         agent.colocated = True
         agent.records_sampling_supports = False
@@ -233,7 +243,7 @@ class TestGRPOOldLogprobsSourceConfig:
             repeat_prompts=False,
         )
 
-        assert captured["capture"] is True
+        assert captured["capture"] is captures
 
 
 class TestGRPOGetActionSamplingSupports:
@@ -799,16 +809,29 @@ class TestLLMAlgorithmAlignSamplingSupports:
         assert frame.tolist() == [[[2, 7], [3, -1]], [[-1, -1], [-1, -1]]]
 
 
+UNWEIGHTED_TOKENS: dict[str, Any] = {
+    "vllm_importance_sampling_correction": False,
+    "off_policy_token_mask_bounds": None,
+    "off_policy_sequence_mask_threshold": None,
+}
+TRAJECTORY_OBJECTIVES = [
+    pytest.param({"loss_type": "gspo"}, id="gspo"),
+    pytest.param({"importance_sampling_level": "trajectory"}, id="grpo-trajectory"),
+]
+
+
 class TestGRPOObjectiveLoss:
     """Which loss path a minibatch runs, with and without sampling supports."""
 
     @staticmethod
     def _liger_agent(
-        monkeypatch: pytest.MonkeyPatch,
+        monkeypatch: pytest.MonkeyPatch, **overrides: Any
     ) -> tuple[GRPO, tuple, list[int]]:
         # liger-kernel is a CUDA extra; only the routing is under test.
-        agent = _make_grpo(vllm_importance_sampling_correction=False)
-        agent.use_liger_loss = True
+        agent = _make_grpo(
+            liger_loss=True,
+            **{"vllm_importance_sampling_correction": False, **overrides},
+        )
         liger_result = tuple(torch.tensor(float(i)) for i in range(4))
         liger_calls: list[int] = []
 
@@ -835,24 +858,139 @@ class TestGRPOObjectiveLoss:
         # Assert
         assert result is liger_result
 
-    def test_a_batch_with_supports_runs_the_standard_path(
+    def test_a_batch_with_supports_runs_the_standard_loss(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Arrange
+        # Arrange: a non-colocated engine reports supports per batch.
         agent, _result, liger_calls = self._liger_agent(monkeypatch)
         supports, sampling_logps = _supported_sampling(agent)
 
         # Act
-        with pytest.warns(UserWarning, match="normalizes over vLLM's sampling support"):
-            metrics = agent.learn(
-                _experiences(),
-                sampling_logps=sampling_logps,
-                sampling_supports=supports,
-            )
+        metrics = agent.learn(
+            _experiences(),
+            sampling_logps=sampling_logps,
+            sampling_supports=supports,
+        )
+
+        # Assert
+        assert not agent.colocated
+        assert liger_calls == []
+        assert math.isfinite(metrics["loss"])
+
+    @pytest.mark.parametrize("objective", TRAJECTORY_OBJECTIVES)
+    def test_a_trajectory_batch_runs_the_liger_kernel(
+        self, monkeypatch: pytest.MonkeyPatch, objective: dict[str, Any]
+    ) -> None:
+        # Arrange
+        agent, liger_result, _calls = self._liger_agent(
+            monkeypatch, **objective, **UNWEIGHTED_TOKENS
+        )
+        ids, mask = _batch()
+        zeros = torch.zeros(mask.shape)
+
+        # Act
+        result = agent._objective_loss(
+            ids, mask, torch.zeros(NUM_ROWS, 1), zeros, zeros, None, None
+        )
+
+        # Assert
+        assert agent.importance_sampling_level == "trajectory"
+        assert result is liger_result
+
+    @pytest.mark.parametrize("objective", TRAJECTORY_OBJECTIVES)
+    def test_a_trajectory_batch_with_sampling_log_probs_runs_the_standard_loss(
+        self, monkeypatch: pytest.MonkeyPatch, objective: dict[str, Any]
+    ) -> None:
+        # Arrange
+        agent, _result, liger_calls = self._liger_agent(
+            monkeypatch, loss_norm="micro_batch", **objective, **UNWEIGHTED_TOKENS
+        )
+        ids, mask = _batch()
+        zeros = torch.zeros(mask.shape)
+
+        # Act
+        loss, _kl, _clipfrac, _log_probs = agent._objective_loss(
+            ids, mask, torch.ones(NUM_ROWS, 1), zeros, zeros, None, zeros - 1.0
+        )
 
         # Assert
         assert liger_calls == []
-        assert math.isfinite(metrics["loss"])
+        assert torch.isfinite(loss)
+        assert loss.requires_grad
+
+
+class TestGRPOLigerLossProperty:
+    """``liger_loss`` resolves at init from liger-kernel and the configured objective."""
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            pytest.param({}, id="token-default-sampling"),
+            pytest.param({"loss_type": "gspo", **UNWEIGHTED_TOKENS}, id="gspo"),
+            pytest.param(
+                {"importance_sampling_level": "trajectory", **UNWEIGHTED_TOKENS},
+                id="grpo-trajectory",
+            ),
+        ],
+    )
+    def test_objective_with_a_kernel_runs_liger(
+        self, liger_kernel_installed: None, overrides: dict[str, Any]
+    ) -> None:
+        # Act
+        with pytest.warns(UserWarning, match="Liger Loss used with LoRA"):
+            agent = _make_grpo(liger_loss=None, **overrides)
+
+        # Assert
+        assert agent.liger_loss is True
+        assert agent.lora_config.exclude_modules == ["lm_head"]
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            pytest.param({"use_kl_advantage_shaping": True}, id="kl-shaping"),
+            pytest.param({"loss_type": "gspo"}, id="gspo-reweighted-tokens"),
+            pytest.param(
+                {
+                    "loss_type": "cispo",
+                    "importance_sampling_level": "trajectory",
+                    **UNWEIGHTED_TOKENS,
+                },
+                id="cispo-trajectory",
+            ),
+            pytest.param(
+                {"importance_sampling_level": "turn", **UNWEIGHTED_TOKENS},
+                id="grpo-turn",
+            ),
+            pytest.param(
+                {
+                    "importance_sampling_level": "trajectory",
+                    "advantage_granularity": "turn",
+                    **UNWEIGHTED_TOKENS,
+                },
+                id="grpo-trajectory-turn-advantages",
+            ),
+        ],
+    )
+    def test_objective_without_a_kernel_runs_the_standard_loss(
+        self, liger_kernel_installed: None, overrides: dict[str, Any]
+    ) -> None:
+        # Act
+        agent = _make_grpo(liger_loss=None, **overrides)
+
+        # Assert
+        assert agent.liger_loss is False
+
+    def test_liger_stays_off_without_liger_kernel(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False)
+
+        # Act
+        agent = _make_grpo(liger_loss=None)
+
+        # Assert
+        assert agent.liger_loss is False
 
 
 class TestGRPOLearnMetricKeys:

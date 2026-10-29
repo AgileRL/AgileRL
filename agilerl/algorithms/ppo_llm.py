@@ -17,8 +17,8 @@ from agilerl.algorithms.core import ActionResult, LLMAlgorithm
 from agilerl.algorithms.core.optimizer_wrapper import REPLICATED_GROUP_SUFFIX
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.arena.memory.resolve.chunk import resolve_chunk_rows
-from agilerl.arena.memory.resolve.fuse import resolve_fuse_actor_critic_pass
-from agilerl.arena.models.networks import VllmModality
+from agilerl.arena.memory.resolve.liger import liger_loss_blocker, liger_loss_layout
+from agilerl.arena.models.algorithms.llmppo import LLMPPOSpec
 from agilerl.lora.fused import set_fused_adapter_routing, unset_fused_adapter_routing
 
 if TYPE_CHECKING:
@@ -32,8 +32,7 @@ if HAS_LIGER_KERNEL or TYPE_CHECKING:
     )
 else:
     # Keep the name resolvable when liger-kernel isn't installed so unit
-    # tests can patch it. ``_ppo_policy_loss_liger_from_hidden`` guards against
-    # actual use.
+    # tests can patch it. ``liger_loss`` is off without liger-kernel.
     LigerFusedLinearPolicyLossFunction = None  # type: ignore[assignment]
     apply_fused_policy_loss = None  # type: ignore[assignment]
 from agilerl.components.llm_rollout_data import EpisodeSegments
@@ -148,6 +147,9 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         ``gradient_accumulation_steps`` is derived as
         ``mini_batch_size / micro_batch_size_per_gpu``.
     :type mini_batch_size: int | None, optional
+    :param gradient_checkpointing: Recompute each transformer block in
+        backward. ``None`` picks it from the memory estimate.
+    :type gradient_checkpointing: bool | None, optional
     :param max_output_tokens: Maximum newly generated tokens per completion.
     :type max_output_tokens: int | None, optional
     :param min_output_tokens: Minimum newly generated tokens per completion.
@@ -193,9 +195,8 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         ``"trajectory"`` pools over the whole completion; the paired advantage is
         pooled to the same bucket. ``"auto"`` (default) uses the GAE granularity
         when ``turn_level_clip`` is set, else token. Turn/trajectory pooling
-        couples a unit's tokens and cannot be token-chunked in the fused kernel,
-        so set ``use_liger_loss=False`` there (the standard path is always
-        memory-bounded).
+        couples a unit's tokens, so the fused Liger loss chunks those levels
+        one sequence at a time.
     :type importance_sampling_level: Literal["auto", "token", "turn", "trajectory"], optional
     :param advantage_granularity: PPO action granularity. ``"turn"`` enforces
         turn-level updates, ``"token"`` enforces token-level updates, and
@@ -219,47 +220,10 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
     :param whiten_advantages: Whether to whiten computed advantages before PPO
         optimization.
     :type whiten_advantages: bool, optional
-    :param gradient_checkpointing: Enable gradient checkpointing.
-    :type gradient_checkpointing: bool, optional
-    :param torch_compiler: Optional torch compile mode.
-    :type torch_compiler: str | None, optional
-    :param cast_logprobs_to_fp32: When ``True`` (default), run the per-token
-        log-prob reduction (``gather`` / ``logsumexp``) in fp32 before casting
-        back to the input dtype, for numerically stable log-probs. ``False`` runs
-        it in the input dtype, saving a little memory at the cost of a per-token
-        bf16 quantisation error that can bias importance-sampling ratios.
-    :type cast_logprobs_to_fp32: bool, optional
-    :param chunk_rows: Primary chunk-size setting for fused logit tiles. Applies
-        to both standard and Liger paths.
-    :type chunk_rows: int | None, optional
-    :param use_liger_loss: Use the Liger fused policy loss, defaults to ``True``
-        (requires ``liger-kernel``). **Recommended for PPO**: via AgileRL's
-        ``LigerFusedLinearPolicyLossFunction`` (not the upstream Liger GRPO
-        kernel), it is roughly memory-neutral with a mild speedup that grows with
-        sequence length (~1.1x at long sequences) at token-level IS. Separate
-        from the Liger *model* patches (fused RMSNorm/RoPE/SwiGLU), which apply
-        whenever ``liger-kernel`` is installed.
-    :type use_liger_loss: bool, optional
-    :param fuse_actor_critic_pass: ``True`` runs the actor and critic rows of a
-        micro-batch in one forward and backward; ``False`` runs them as two
-        passes, so only one pass's activations are live. ``None`` (default)
-        fuses when the memory estimate of the fused pass fits this GPU's total
-        memory, and always fuses off CUDA.
-    :type fuse_actor_critic_pass: bool | None, optional
     :param quantization_config: Optional ``transformers.BitsAndBytesConfig`` for
         loading the base model in 4-/8-bit (QLoRA). ``lm_head`` is kept
         unquantized so the fused-linear-logprob path stays numerically exact.
     :type quantization_config: BitsAndBytesConfig | None, optional
-    :param activation_offload: When ``True``, run the training forward inside
-        ``torch.autograd.graph.save_on_cpu`` so tensors saved for backward live
-        in pinned host RAM instead of GPU memory. Trades PCIe bandwidth for GPU
-        memory (the win grows with sequence length); a no-op during rollout /
-        reference forwards.
-    :type activation_offload: bool, optional
-    :param moe_lora_recompute: Recompute routed-expert LoRA activations in
-        backward on frozen packed base weights. ``None`` (default) recomputes
-        only outside activation-checkpointed blocks.
-    :type moe_lora_recompute: bool | None, optional
     :param vllm_importance_sampling_correction: When ``True`` (default) and
         colocated, correct the rollout/trainer log-prob mismatch by
         weighting each training token by ``clamp(exp(trainer - sampling),
@@ -278,20 +242,15 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         tokens whose trainer/vLLM ratio reaches ``vllm_importance_sampling_cap``
         exceeds this (default ``0.02``). bf16 engines usually stay under 0.01.
     :type vllm_max_clip_fraction: float, optional
-    :param use_sequence_packing: Opt in to padding-free sequence packing for the
-        gradient forward. Only honoured under a FlashAttention-2 / FlexAttention
-        backend, otherwise inert; the fused actor+critic pass packs only under
-        FlexAttention, and the no-grad reference/old-value pass stays padded.
-    :type use_sequence_packing: bool, optional
     :param lora_tower_target_modules: Tower and connector modules of a VL model
         to adapt as well. ``lora_config.target_modules`` always land on the
         language model only. Defaults to None.
     :type lora_tower_target_modules: list[str] | None, optional
-    :param rollout_strip_multimodal_towers: ``strip_multimodal_towers`` of a
-        vLLM engine outside this process that serves the adapter; tower LoRA
-        skips the towers it leaves unbuilt. A colocated engine uses
-        ``vllm_config`` instead. Defaults to False.
-    :type rollout_strip_multimodal_towers: bool | list[VllmModality], optional
+    :param rollout_strip_multimodal_towers: Whether the vLLM engine serving the
+        adapter skips the model's multimodal towers; tower LoRA skips the towers
+        it leaves unbuilt. Builders derive it from the environment's modality.
+        Defaults to False.
+    :type rollout_strip_multimodal_towers: bool, optional
     :param kl_clamp: Per-token bound on the K3 KL penalty. Tokens where the
         policy sits below the reference with K3 above the bound (10 is about
         2.6 nats below) get no KL gradient and add nothing to the loss.
@@ -304,7 +263,8 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
     :type logit_bias: dict[int, float] | None, optional
     """
 
-    _liger_applies_logit_softcap = True
+    gradient_row_copies = LLMPPOSpec.gradient_row_copies
+    supports_sequence_packing = LLMPPOSpec.supports_sequence_packing
 
     def __init__(
         self,
@@ -336,6 +296,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         calc_position_embeddings: bool = True,
         micro_batch_size_per_gpu: int | None = None,
         mini_batch_size: int | None = None,
+        gradient_checkpointing: bool | None = None,
         max_output_tokens: int | None = None,
         min_output_tokens: int | None = None,
         max_model_len: int = 1024,
@@ -358,18 +319,9 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         turn_ratio_pooling: Literal["sum", "mean"] = "sum",
         turn_value_reduction: Literal["mean", "final_value"] = "final_value",
         whiten_advantages: bool = True,
-        gradient_checkpointing: bool = True,
-        torch_compiler: str | None = None,
-        cast_logprobs_to_fp32: bool = True,
-        chunk_rows: int | None = None,
-        use_liger_loss: bool = True,
-        fuse_actor_critic_pass: bool | None = None,
         quantization_config: BitsAndBytesConfig | None = None,
-        activation_offload: bool = False,
-        moe_lora_recompute: bool | None = None,
-        use_sequence_packing: bool = False,
         lora_tower_target_modules: list[str] | None = None,
-        rollout_strip_multimodal_towers: bool | list[VllmModality] = False,
+        rollout_strip_multimodal_towers: bool = False,
         vllm_importance_sampling_correction: bool = True,
         vllm_importance_sampling_cap: float = 2.0,
         vllm_max_logprob_gap: float = 0.1,
@@ -396,7 +348,6 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             pad_token=pad_token,
             use_value_head=True,
             vllm_config=vllm_config,
-            use_liger_loss=use_liger_loss,
             lora_config=lora_config,
             use_separate_reference_adapter=use_separate_reference_adapter,
             model_name=model_name,
@@ -404,6 +355,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             model_config=model_config,
             micro_batch_size_per_gpu=micro_batch_size_per_gpu,
             mini_batch_size=mini_batch_size,
+            gradient_checkpointing=gradient_checkpointing,
             cosine_lr_schedule_config=cosine_lr_schedule_config,
             hp_config=hp_config,
             offload_trainer_during_rollout=offload_trainer_during_rollout,
@@ -411,14 +363,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             device=resolved_device,
             fsdp_config=fsdp_config,
             name="LLMPPO",
-            gradient_checkpointing=gradient_checkpointing,
-            torch_compiler=torch_compiler,
-            cast_logprobs_to_fp32=cast_logprobs_to_fp32,
-            chunk_rows=chunk_rows,
             quantization_config=quantization_config,
-            activation_offload=activation_offload,
-            moe_lora_recompute=moe_lora_recompute,
-            use_sequence_packing=use_sequence_packing,
             lora_tower_target_modules=lora_tower_target_modules,
             rollout_strip_multimodal_towers=rollout_strip_multimodal_towers,
             vllm_importance_sampling_correction=vllm_importance_sampling_correction,
@@ -466,8 +411,6 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         )
         self.max_row_tokens = max_row_tokens
         self._setup_actors(actor_network, clone=clone)
-        self.fuse_actor_critic_pass = fuse_actor_critic_pass
-        self._fuses_actor_critic_pass = self._resolve_fuse_actor_critic_pass()
 
         # Register network groups for mutations
         self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
@@ -603,7 +546,6 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         phase_timer = self._start_learn_phases()
         self._prepare_vllm_for_training()
         critic_warmup = self.critic_warmup_steps_done < self.critic_warmup_steps
-        passes = 1 if self._fuses_actor_critic_pass or critic_warmup else 2
         with self.trainer_offload_context(), self._vision_step(pixel_values):
             token_ids, action_masks, turn_ids, rewards_2d = self._stack_rollout_batch(
                 experiences, turn_ids
@@ -765,9 +707,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             padding_stats = self._row_padding_stats(token_ids, row_episodes, batch_idxs)
             phase_timer.mark("prepare")
 
-            backward_steps = passes * (
-                accumulation_steps or self.gradient_accumulation_steps
-            )
+            backward_steps = accumulation_steps or self.gradient_accumulation_steps
             held_loss: torch.Tensor | None = None
             self.actor.train()
             epoch_orders = self._epoch_orders(
@@ -850,28 +790,6 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                         if support_ids is not None
                         else None
                     )
-                    # The correction is fused into the Liger kernel at token-level
-                    # IS (via vllm_is_ratio); turn/trajectory pooling can't express
-                    # the per-token reweight, so those fall back to the standard
-                    # path (warn once, like GRPO).
-                    liger_corr_fallback = (
-                        batch_sampling_log_probs is not None
-                        and self._resolve_is_level(ppo_granularity) != "token"
-                    )
-                    if (
-                        self.use_liger_loss
-                        and liger_corr_fallback
-                        and not self._is_correction_liger_warned
-                    ):
-                        warnings.warn(
-                            "use_liger_loss=True fuses the vLLM sampling-mismatch "
-                            "correction only at token-level importance sampling; "
-                            "turn/trajectory pooling uses the standard PyTorch path.",
-                            stacklevel=2,
-                        )
-                        self._is_correction_liger_warned = True
-
-                    use_liger = self.use_liger_loss and not liger_corr_fallback
                     policy_inputs = (
                         batch_action_mask,
                         batch_old_log_probs,
@@ -890,16 +808,47 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                         num_turns,
                         ppo_granularity,
                     )
-                    if self._fuses_actor_critic_pass and not critic_warmup:
+                    if critic_warmup:
+                        # Warmup fits the critic with the policy fixed, so
+                        # actor params keep no grad and take no optimizer step.
+                        values = self._critic_values(
+                            batch_ids, batch_pixel_values, batch_keys
+                        )
+                        policy_loss = token_ids.new_zeros((), dtype=torch.float32)
+                        metrics = dict.fromkeys(
+                            ("kl", "kl_clamp_frac", "entropy", "clipfrac", "pg_loss"),
+                            0.0,
+                        )
+                    else:
                         actor_hidden, values = self._actor_critic_hidden_states(
                             batch_ids, batch_pixel_values, batch_keys
+                        )
+                        supports = batch_support_ids is not None
+                        use_liger = self.liger_loss and self._liger_serves_batch(
+                            self._liger_loss_blocker(
+                                self._resolve_is_level(ppo_granularity),
+                                supports,
+                                batch_sampling_log_probs is not None,
+                            ),
+                            self._liger_loss_blocker(
+                                self.importance_sampling_level,
+                                self._config_records_sampling_supports(),
+                                self._config_reweights_tokens(),
+                            ),
                         )
                         if use_liger:
                             policy_loss, metrics = (
                                 self._ppo_policy_loss_liger_from_hidden(
                                     actor_hidden,
                                     batch_ids,
-                                    *policy_inputs,
+                                    batch_action_mask,
+                                    batch_old_log_probs,
+                                    batch_reference_log_probs,
+                                    batch_advantages,
+                                    batch_turn_ids,
+                                    num_turns,
+                                    ppo_granularity,
+                                    batch_sampling_log_probs,
                                     batch_support_ids,
                                 )
                             )
@@ -910,75 +859,20 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                                 ),
                                 *policy_inputs,
                             )
-                        vf_loss = self._ppo_value_loss(values, *value_inputs)
-                        total_loss = policy_loss + vf_loss
-                        held_loss = self._hold_loss_until_step(
-                            total_loss, held_loss, backward_steps
+                    vf_loss = self._ppo_value_loss(values, *value_inputs)
+                    total_loss = policy_loss + vf_loss
+                    held_loss = self._hold_loss_until_step(
+                        total_loss, held_loss, backward_steps
+                    )
+                    phase_timer.mark("forward")
+                    # Autograd keeps any vision rows backward reads.
+                    del batch_pixel_values
+                    steps = [
+                        self._backward_ppo_pass(
+                            total_loss * loss_scale, accumulation_steps
                         )
-                        phase_timer.mark("forward")
-                        # Autograd keeps any vision rows backward reads.
-                        del batch_pixel_values
-                        steps = [
-                            self._backward_ppo_pass(
-                                total_loss * loss_scale, accumulation_steps, passes
-                            )
-                        ]
-                        unset_fused_adapter_routing(self.actor)
-                    else:
-                        policy_step = None
-                        if critic_warmup:
-                            policy_loss = token_ids.new_zeros((), dtype=torch.float32)
-                            metrics = dict.fromkeys(
-                                (
-                                    "kl",
-                                    "kl_clamp_frac",
-                                    "entropy",
-                                    "clipfrac",
-                                    "pg_loss",
-                                ),
-                                0.0,
-                            )
-                        elif use_liger:
-                            with self._vision_cache.images(batch_keys):
-                                policy_loss, metrics = self._ppo_policy_loss_liger(
-                                    batch_ids,
-                                    *policy_inputs,
-                                    batch_pixel_values,
-                                    batch_support_ids,
-                                )
-                        else:
-                            with self._vision_cache.images(batch_keys):
-                                log_probs = self._fused_forward(
-                                    batch_ids,
-                                    pixel_values=batch_pixel_values,
-                                    support_ids=batch_support_ids,
-                                )
-                            policy_loss, metrics = self._ppo_policy_loss(
-                                log_probs, *policy_inputs
-                            )
-                        if not critic_warmup:
-                            held_loss = self._hold_loss_until_step(
-                                policy_loss, held_loss, backward_steps
-                            )
-                            phase_timer.mark("forward")
-                            policy_step = self._backward_ppo_pass(
-                                policy_loss * loss_scale, accumulation_steps, passes
-                            )
-                            unset_fused_adapter_routing(self.actor)
-
-                        with self._vision_cache.images(batch_keys):
-                            values = self._critic_values(batch_ids, batch_pixel_values)
-                        vf_loss = self._ppo_value_loss(values, *value_inputs)
-                        held_loss = self._hold_loss_until_step(
-                            vf_loss, held_loss, backward_steps
-                        )
-                        phase_timer.mark("forward")
-                        del batch_pixel_values
-                        value_step = self._backward_ppo_pass(
-                            vf_loss * loss_scale, accumulation_steps, passes
-                        )
-                        unset_fused_adapter_routing(self.actor)
-                        steps = [policy_step, value_step]
+                    ]
+                    unset_fused_adapter_routing(self.actor)
                     for step in steps:
                         if step is not None:
                             for key, norm in self._actor_critic_grad_norms(
@@ -1095,7 +989,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         importance_sampling_level: str,
         turn_ratio_pooling: str,
     ) -> None:
-        """Validate and resolve the importance-sampling level and Liger routing."""
+        """Validate and store the importance-sampling level and ratio pooling."""
         validate_importance_sampling_level(importance_sampling_level, allow_auto=True)
         if turn_ratio_pooling not in {"sum", "mean"}:
             msg = "turn_ratio_pooling must be one of ['mean', 'sum']."
@@ -1108,17 +1002,70 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         # Turn-level ratio pooling reduction (sum=product ratio, mean=geometric
         # mean ratio) used by both the standard and Liger PPO policy losses.
         self.turn_ratio_pooling = turn_ratio_pooling
-        # Warn once that Liger + an explicit non-token IS level is permitted
-        # but not memory-bounded ("auto" is covered at loss time instead).
-        if self.use_liger_loss and self.importance_sampling_level in {
-            "turn",
-            "trajectory",
-        }:
-            self._warn_liger_non_token_is(
-                self.importance_sampling_level,
-                "PPO",
-                once_attr="_ppo_liger_mem_warned",
-            )
+
+    def _liger_loss_blocker(
+        self,
+        importance_sampling_level: str,
+        records_sampling_supports: bool,
+        reweights_tokens: bool,
+    ) -> str | None:
+        """Why the fused Liger loss cannot serve a PPO update at these settings.
+
+        :param importance_sampling_level: Configured or batch-resolved level.
+        :type importance_sampling_level: str
+        :param records_sampling_supports: The update carries vLLM sampling supports.
+        :type records_sampling_supports: bool
+        :param reweights_tokens: The update reads vLLM sampling log-probs.
+        :type reweights_tokens: bool
+        :return: :func:`liger_loss_blocker` of the settings, or ``None``.
+        :rtype: str | None
+        """
+        return liger_loss_blocker(
+            "ppo",
+            importance_sampling_level,
+            records_sampling_supports,
+            False,
+            self.final_logit_softcap,
+            reweights_tokens,
+            None,
+        )
+
+    def _config_liger_loss_blocker(self) -> str | None:
+        """Why the configured PPO objective cannot run the fused Liger loss.
+
+        Non-colocated rollouts carry sampling supports and log-probs per batch.
+
+        :return: :func:`liger_loss_blocker` of the config, or ``None``.
+        :rtype: str | None
+        """
+        return self._liger_loss_blocker(
+            self.importance_sampling_level,
+            self._config_records_sampling_supports(),
+            self._config_reweights_tokens(),
+        )
+
+    def _liger_loss_layout(self) -> tuple[bool, bool]:
+        """Whether the batches the memory estimate sizes run the fused Liger loss, and on whole sequences.
+
+        Episodes size as multi-turn, so ``auto`` advantages resolve to turns.
+        Non-colocated batches may run either path, so they size as the fused
+        loss without reweighting, the larger of the two.
+
+        :return: :func:`liger_loss_layout` at :meth:`_resolve_is_level` of the
+            configured advantage granularity, when :attr:`liger_loss` is set.
+        :rtype: tuple[bool, bool]
+        """
+        granularity = "token" if self.advantage_granularity == "token" else "turn"
+        runs, whole_sequence = liger_loss_layout(
+            "ppo",
+            self._resolve_is_level(granularity),
+            self._config_records_sampling_supports(),
+            False,
+            self.final_logit_softcap,
+            self._config_reweights_tokens(),
+            None,
+        )
+        return self.liger_loss and runs, self.liger_loss and whole_sequence
 
     def _setup_generation(
         self,
@@ -1301,21 +1248,17 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         return token_returns, token_advantages * mask
 
     def _backward_ppo_pass(
-        self, loss: torch.Tensor, accumulation_steps: int | None, passes: int
+        self, loss: torch.Tensor, accumulation_steps: int | None
     ) -> OptimizerStep | None:
-        """Backward one pass of a micro-batch.
+        """Backward one micro-batch pass: fused actor and critic, or critic only in warmup.
 
-        With two passes per micro-batch, the accumulation window counts twice
-        as many backward calls and each loss doubles to keep the micro-batch's
-        weight. Actor and critic clip apart unless :attr:`share_grad_clip`.
+        Actor and critic clip apart unless :attr:`share_grad_clip`.
 
-        :param loss: Scaled loss of one pass.
+        :param loss: Scaled loss of the pass.
         :type loss: torch.Tensor
         :param accumulation_steps: Micro-batches per optimizer step; ``None``
             uses :attr:`gradient_accumulation_steps`.
         :type accumulation_steps: int | None
-        :param passes: Backward passes per micro-batch.
-        :type passes: int
         :return: Gradient norms of the optimizer step, or ``None`` when the
             pass only accumulates.
         :rtype: OptimizerStep | None
@@ -1325,7 +1268,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         clip_groups = tuple(
             frozenset({role, f"{role}{REPLICATED_GROUP_SUFFIX}"}) for role in roles
         )
-        return self._backward_pass(passes * loss, passes * steps, clip_groups or None)
+        return self._backward_pass(loss, steps, clip_groups or None)
 
     def _restore_checkpoint_attributes(
         self,
@@ -1333,7 +1276,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         restore_config: bool,
         restore_hyperparameters: bool,
     ) -> None:
-        """Restore attributes and the warmup count, then re-resolve the fused pass.
+        """Restore attributes and the warmup count.
 
         The warmup count is training state, restored even without ``restore_config``.
 
@@ -1348,32 +1291,6 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             checkpoint, restore_config, restore_hyperparameters
         )
         self.critic_warmup_steps_done = checkpoint.get("critic_warmup_steps_done", 0)
-        self._fuses_actor_critic_pass = self._resolve_fuse_actor_critic_pass()
-
-    def _resolve_fuse_actor_critic_pass(self) -> bool:
-        """Resolve whether the actor and critic rows share one gradient pass.
-
-        :return: Whether to run the fused pass.
-        :rtype: bool
-        """
-        fused_fits = None
-        if (
-            self.fuse_actor_critic_pass is None
-            and torch.device(self.device).type == "cuda"
-        ):
-            estimate = self._estimate_training(
-                "ppo", self.beta, fuse_actor_critic_pass=True
-            )
-            gib = 1024**3
-            logger.info(
-                "LLMPPO %s the actor and critic passes: fused peak %.2f GiB, "
-                "budget %.2f GiB",
-                "fuses" if estimate.fits else "splits",
-                estimate.total_bytes / gib,
-                estimate.device_usable_bytes / gib,
-            )
-            fused_fits = estimate.fits
-        return resolve_fuse_actor_critic_pass(self.fuse_actor_critic_pass, fused_fits)
 
     def _actor_critic_hidden_states(
         self,
@@ -1386,9 +1303,8 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         The batch runs once per adapter in a single forward with ``lm_head``
         identity-patched. The routing stays set until the caller unsets it
         after ``backward()``, so gradient checkpointing recomputes each row
-        under its own adapter. FlexAttention packs the batch once and runs the
-        packed row per adapter; FlashAttention-2 isolates packed documents only
-        on a single row, so other backends run padded.
+        under its own adapter. With packing on, the batch packs once and the
+        packed row runs per adapter.
 
         :param batch_ids: ``(B, T)`` right-padded token ids.
         :type batch_ids: torch.Tensor
@@ -1423,6 +1339,42 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                 values[1], packed
             )
         return hidden[:rows], values[rows:, :-1]
+
+    def _critic_values(
+        self,
+        batch_ids: torch.Tensor,
+        pixel_values: torch.Tensor | None = None,
+        image_keys: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Gradient-bearing critic forward, every row routed to the critic adapter.
+
+        ``lm_head`` is identity-patched so no logits are computed. The routing
+        stays set until the caller unsets it after ``backward()``, so gradient
+        checkpointing recomputes under the critic adapter.
+
+        :param batch_ids: ``(B, T)`` right-padded token ids.
+        :type batch_ids: torch.Tensor
+        :param pixel_values: Vision rows of the batch, or ``None`` for text.
+        :type pixel_values: torch.Tensor | None
+        :param image_keys: Vision feature cache key of each vision row, or
+            ``None`` to run the tower uncached.
+        :type image_keys: torch.Tensor | None
+        :return: ``(B, T - 1)`` per-token values.
+        :rtype: torch.Tensor
+        """
+        model_kwargs, packed = self._gradient_forward_inputs(batch_ids, pixel_values)
+        set_fused_adapter_routing(self.actor, ["critic"])
+        with (
+            self._vision_cache.images(image_keys),
+            self._patch_lm_head_to_identity(),
+            self._amp_ctx(),
+            self._activation_offload_ctx(),
+        ):
+            self.actor.train()
+            _, _, values = self.actor(**model_kwargs)
+        if packed is not None:
+            return unpack_values(values[0], packed)
+        return values[:, :-1]
 
     def _actor_log_probs_from_hidden(
         self,
@@ -1470,35 +1422,6 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             "critic_grad_norm_pre": pre["critic"] ** 0.5,
             "critic_grad_norm_post": post["critic"] ** 0.5,
         }
-
-    def _critic_values(
-        self, batch_ids: torch.Tensor, pixel_values: torch.Tensor | None = None
-    ) -> torch.Tensor:
-        """Gradient-bearing critic forward, every row routed to the critic adapter.
-
-        ``lm_head`` is identity-patched so no logits are computed. The routing
-        stays set until the caller unsets it after ``backward()``, so gradient
-        checkpointing recomputes under the critic adapter.
-
-        :param batch_ids: ``(B, T)`` right-padded token ids.
-        :type batch_ids: torch.Tensor
-        :param pixel_values: Vision rows of the batch, or ``None`` for text.
-        :type pixel_values: torch.Tensor | None
-        :return: ``(B, T - 1)`` per-token values.
-        :rtype: torch.Tensor
-        """
-        model_kwargs, packed = self._gradient_forward_inputs(batch_ids, pixel_values)
-        set_fused_adapter_routing(self.actor, ["critic"])
-        with (
-            self._patch_lm_head_to_identity(),
-            self._amp_ctx(),
-            self._activation_offload_ctx(),
-        ):
-            self.actor.train()
-            _, _, values = self.actor(**model_kwargs)
-        if packed is not None:
-            return unpack_values(values[0], packed)
-        return values[:, :-1]
 
     def _ppo_policy_loss(
         self,
@@ -1608,56 +1531,6 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             * self.vf_coef
         )
 
-    def _ppo_policy_loss_liger(
-        self,
-        batch_ids: torch.Tensor,
-        batch_action_mask: torch.Tensor,
-        batch_old_log_probs: torch.Tensor,
-        batch_reference_log_probs: torch.Tensor,
-        batch_advantages: torch.Tensor,
-        batch_turn_ids: torch.Tensor,
-        num_turns: int,
-        ppo_granularity: str,
-        sampling_log_probs: torch.Tensor | None = None,
-        pixel_values: torch.Tensor | None = None,
-        support_ids: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        """PPO policy + KL loss of the split actor pass via the fused-linear PPO Function.
-
-        Every row routes to the actor adapter and ``lm_head`` is
-        identity-patched, so the forward returns the hidden states
-        :meth:`_ppo_policy_loss_liger_from_hidden` scores. The routing stays
-        set until the caller unsets it after ``backward()``, so gradient
-        checkpointing recomputes under the actor adapter.
-
-        :param pixel_values: Vision rows of the minibatch's token rows, or
-            ``None`` for text.
-        :type pixel_values: torch.Tensor | None
-        :param support_ids: ``(B, T - 1, K)`` sampling support per position, or ``None``.
-        :type support_ids: torch.Tensor | None
-        :return: ``(policy_loss, metrics)`` with ``metrics`` keying detached
-            scalar tensors: ``kl``, ``kl_clamp_frac``, ``pg_loss``, ``clipfrac``,
-            ``entropy``.
-        :rtype: tuple[torch.Tensor, dict[str, torch.Tensor]]
-        """
-        batch_ids = batch_ids.to(self.device)
-        set_fused_adapter_routing(self.actor, ["actor"])
-        with self._activation_offload_ctx():
-            policy_hidden = self._actor_hidden_states(batch_ids, pixel_values)
-        return self._ppo_policy_loss_liger_from_hidden(
-            policy_hidden,
-            batch_ids,
-            batch_action_mask,
-            batch_old_log_probs,
-            batch_reference_log_probs,
-            batch_advantages,
-            batch_turn_ids,
-            num_turns,
-            ppo_granularity,
-            sampling_log_probs,
-            support_ids,
-        )
-
     def _ppo_policy_loss_liger_from_hidden(
         self,
         policy_hidden: torch.Tensor,
@@ -1676,25 +1549,21 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
 
         :class:`LigerFusedLinearPolicyLossFunction` computes the chunked policy
         + KL loss without ever materializing ``(B, T, V)`` for the autograd
-        graph.
-
-        Granularity dispatch:
-
-        * ``ppo_granularity == "token"``: per-token policy loss inside the
-          Liger Function.
-        * ``ppo_granularity == "turn"`` and ``self.turn_level_clip``:
-          token log-ratios are scatter-pooled into per-turn log-ratios
-          inside the Liger Function, against turn-level advantages.
-        * ``ppo_granularity == "turn"`` and not ``self.turn_level_clip``:
-          per-token policy loss (broadcast turn advantages to tokens up
-          front).
+        graph. At the importance-sampling level :meth:`_resolve_is_level`
+        picks, token level fuses the vLLM sampling correction; turn level pools
+        token log-ratios per turn against turn-mean advantages; trajectory level
+        pools them over the completion against its mean advantage.
 
         :param policy_hidden: ``(B, T, H)`` actor last hidden states with grad.
         :type policy_hidden: torch.Tensor
         :param batch_ids: ``(B, T)`` token ids the hidden states were run on.
         :type batch_ids: torch.Tensor
+        :param batch_turn_ids: ``(B, T - 1)`` turn index per position.
+        :type batch_turn_ids: torch.Tensor
         :param num_turns: Turn count of the whole learn batch.
         :type num_turns: int
+        :param ppo_granularity: Batch-resolved GAE advantage granularity.
+        :type ppo_granularity: str
         :param support_ids: ``(B, T - 1, K)`` sampling support per position, or ``None``.
         :type support_ids: torch.Tensor | None
         :return: ``(policy_loss, metrics)`` with ``metrics`` keying detached
@@ -1702,13 +1571,6 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             ``entropy``.
         :rtype: tuple[torch.Tensor, dict[str, torch.Tensor]]
         """
-        if not HAS_LIGER_KERNEL:
-            msg = (
-                "Liger PPO loss was requested but `liger-kernel` is not "
-                "available. Set use_liger_loss=False."
-            )
-            raise ImportError(msg)
-
         mask = batch_action_mask.to(self.device).contiguous()
         old_log_probs = batch_old_log_probs.to(self.device).contiguous()
         ref_log_probs = batch_reference_log_probs.to(self.device).contiguous()
@@ -1717,38 +1579,28 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         turn_ids = torch.where(
             mask.bool(), batch_turn_ids.to(self.device), -1
         ).contiguous()
-
-        # Resolve the IS / ratio-pooling level and pool advantages to match.
         is_level = self._resolve_is_level(ppo_granularity)
-        if is_level != "token":
-            self._warn_liger_non_token_is(
-                is_level, "PPO", once_attr="_ppo_liger_mem_warned"
-            )
-        # ``full_turn_mask`` covers the whole minibatch so chunks see consistent
-        # denominators for turn-level IS pooling.
+        # Turn denominators cover the whole minibatch so every chunk divides
+        # by the same turn count.
         full_turn_mask = torch.zeros(turn_ids.shape[0], num_turns, device=self.device)
         for t in range(num_turns):
             full_turn_mask[:, t] = (turn_ids == t).any(dim=1).float()
 
         turn_ids_arg: torch.Tensor | None = None
         if is_level == "turn":
-            # Liger fn expects per-turn advantages ``(B, num_turns)``; pool the
-            # per-token advantages by turn-mean to match the pooled ratio.
-            adv_for_liger = pool_by_turns(advantages, turn_ids, num_turns)
+            advantages = pool_by_turns(advantages, turn_ids, num_turns)
             turn_ids_arg = turn_ids
         elif is_level == "trajectory":
             mask_f = mask.to(advantages.dtype)
-            adv_for_liger = (advantages * mask_f).sum(
+            advantages = (advantages * mask_f).sum(dim=-1, keepdim=True) / mask_f.sum(
                 dim=-1, keepdim=True
-            ) / mask_f.sum(dim=-1, keepdim=True).clamp(min=1.0)  # (B, 1)
-        else:  # token
-            adv_for_liger = advantages
+            ).clamp(min=1.0)
 
-        # Truncated importance sampling fused into the kernel (token level only):
-        # reweight each token's policy loss by the detached, clamped trainer/vLLM
-        # ratio. Non-token IS routes the correction to the standard path.
+        # Truncated importance sampling fused into the kernel: reweight each
+        # token's policy loss by the detached, clamped trainer/vLLM ratio.
+        # Batches carry sampling log-probs on the fused path at token level only.
         vllm_is_ratio = None
-        if sampling_log_probs is not None and is_level == "token":
+        if sampling_log_probs is not None:
             with torch.no_grad():
                 mask_f = mask.to(old_log_probs.dtype)
                 vllm_is_ratio = torch.exp(
@@ -1756,9 +1608,6 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                 ).clamp(max=self.vllm_importance_sampling_cap)
 
         target_ids = batch_ids[:, 1:].contiguous()
-        # Token level token-flattens the hidden states so the fused kernel
-        # chunks tokens (bounded); turn/sequence keep the batch path. See
-        # :func:`apply_fused_policy_loss`.
         with self._liger_head_gather() as (head_w, head_b):
             loss_pg_kl, aux = apply_fused_policy_loss(
                 policy_hidden[:, :-1],
@@ -1766,7 +1615,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                 head_b,
                 target_ids,
                 mask,
-                adv_for_liger,
+                advantages,
                 ref_log_probs,
                 old_log_probs,
                 self.beta,
@@ -1777,11 +1626,8 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                 turn_ids=turn_ids_arg,
                 full_turn_mask=full_turn_mask,
                 max_turns=num_turns,
-                token_chunk_size=resolve_chunk_rows(
-                    head_w.shape[0],
-                    self.chunk_rows,
-                ),
                 turn_log_ratio_reduction=self.turn_ratio_pooling,
+                token_chunk_size=resolve_chunk_rows(head_w.shape[0]),
                 vllm_is_ratio=vllm_is_ratio,
                 kl_clamp=self.kl_clamp,
                 softcap=self.final_logit_softcap,

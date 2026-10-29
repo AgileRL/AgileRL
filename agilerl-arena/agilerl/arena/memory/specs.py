@@ -122,6 +122,18 @@ TORCH_DTYPE_NAMES: dict[str, WeightDtype] = {
     "float16": "fp16",
 }
 Algorithm = Literal["grpo", "gspo", "cispo", "ppo", "reinforce", "dpo", "sft"]
+# Manifest algorithm names -> the estimator's algorithm identifiers. The
+# estimator keys its reference/critic residency rules on these, so an
+# unmapped LLM algorithm is a hard error.
+ALGORITHM_NAMES: dict[str, Algorithm] = {
+    "GRPO": "grpo",
+    "GSPO": "gspo",
+    "CISPO": "cispo",
+    "LLMPPO": "ppo",
+    "LLMREINFORCE": "reinforce",
+    "DPO": "dpo",
+    "SFT": "sft",
+}
 LoraTargetScope = Literal["all-linear", "attention-only"]
 PackedMoeDispatch = Literal["materialized", "contracted"]
 # One layer of a block-exclusive stack: an attention, FFN (MLP or MoE) or Mamba layer.
@@ -148,6 +160,14 @@ VISION_FEATURE_CACHE_MODEL_TYPES: frozenset[str] = frozenset(
     {"qwen3_5", "qwen3_5_moe", "gemma4"}
 )
 
+# Tower config model types whose encoder MLP has gate, up and down projections.
+GATED_MLP_TOWER_MODEL_TYPES = frozenset({"gemma4_vision"})
+# Tower config model types that keep one position table per image axis.
+AXIS_POSITION_TOWER_MODEL_TYPES = frozenset({"gemma4_vision"})
+# Conformer audio towers. Each block adds a second macaron feed-forward, a
+# relative-position key projection and a light conv's h->2h and h->h linears.
+CONFORMER_TOWER_MODEL_TYPES = frozenset({"gemma4_audio"})
+
 
 def _encoder_params(cfg: dict[str, Any]) -> tuple[int, int]:
     """Rough (block, total) parameter counts of a transformer encoder from its config.
@@ -164,20 +184,32 @@ def _encoder_params(cfg: dict[str, Any]) -> tuple[int, int]:
     kv_heads = int(cfg.get("num_key_value_heads") or heads)
     intermediate = int(cfg.get("intermediate_size") or 4 * h)
     attn = h * heads * head_dim + 2 * h * kv_heads * head_dim + heads * head_dim * h
-    per_layer = attn + 2 * h * intermediate + 2 * h
+    model_type = cfg.get("model_type")
+    mlp_matrices = 3 if model_type in GATED_MLP_TOWER_MODEL_TYPES else 2
+    per_layer = attn + mlp_matrices * h * intermediate + 2 * h
+    if model_type in CONFORMER_TOWER_MODEL_TYPES:
+        per_layer += 2 * h * intermediate + 4 * h * h
     positions = int(
         cfg.get("position_embedding_size") or cfg.get("num_position_embeddings") or 0
     )
+    if model_type in AXIS_POSITION_TOWER_MODEL_TYPES:
+        positions *= 2
     blocks = layers * per_layer
     return blocks, blocks + positions * h
+
+
+# Encoder config keys and the vLLM modalities each tower serves. vLLM skips
+# building a tower once every one of its modalities is stripped.
+TOWER_MODALITIES: dict[str, frozenset[str]] = {
+    "vision_config": frozenset({"image", "video"}),
+    "audio_config": frozenset({"audio"}),
+}
 
 
 def _tower_configs(config: dict[str, Any]) -> list[dict[str, Any]]:
     """Vision and audio encoder configs present in ``config``."""
     return [
-        config[key]
-        for key in ("vision_config", "audio_config")
-        if isinstance(config.get(key), dict)
+        config[key] for key in TOWER_MODALITIES if isinstance(config.get(key), dict)
     ]
 
 
@@ -919,12 +951,11 @@ class TrainingSettings(BaseModel):
     # adapter copy; the reference forward still runs.
     use_separate_reference_adapter: bool = True
     weight_dtype: WeightDtype = "bf16"
-    gradient_checkpointing: bool = True
     # Save backward-saved activations to pinned host RAM.
     activation_offload: bool = False
-    # Fused-logprob tile rows. ``None`` auto-tunes to a ~256 MiB fp32 logit
-    # workspace, clamped to [128, 4096].
-    chunk_rows: int | None = None
+    # ``True`` saves only block inputs and recomputes each block in backward.
+    # ``False`` keeps every block's forward tensors until its backward.
+    gradient_checkpointing: bool = True
     # Widest vLLM sampling support rollout records per token (``top_k``); 0
     # records none. The no-grad pass scores those tokens from their support's
     # lm_head rows.
@@ -932,9 +963,9 @@ class TrainingSettings(BaseModel):
     # The gradient pass scores supported tokens from their support rows too.
     # PPO and REINFORCE's Liger loss scores the full vocabulary.
     support_scored_loss: bool = False
-    # LLMPPO and REINFORCE Liger losses above token level keep one whole
-    # sequence of logits, so the tile spans max_model_len rows.
-    liger_sequence_chunks: bool = False
+    # The fused Liger loss chunks one whole row at a time, holding its
+    # ``(max_model_len, vocab)`` logits.
+    whole_sequence_loss: bool = False
     # The fused Liger kernel keeps a weight-dtype grad of the whole lm_head.
     # The sequence tile already includes it. The standard log-prob path does not.
     liger_weight_grad: bool = True
@@ -945,8 +976,6 @@ class TrainingSettings(BaseModel):
     fsdp: FSDPConfig | None = None
     # Completion rows per gradient forward and backward.
     micro_batch_size: int = Field(default=1, ge=1)
-    # PPO only: actor and critic rows share one gradient forward and backward.
-    fuse_actor_critic_pass: bool = False
     # Images in each completion row, and the width and height the environment
     # renders them at.
     images_per_row: int = Field(default=0, ge=0)
@@ -1043,8 +1072,8 @@ class TrainingSettings(BaseModel):
 
     @property
     def grad_forward_rows(self) -> int:
-        """Rows per gradient forward: the micro-batch, doubled when PPO fuses."""
-        return self.micro_batch_size * (2 if self.fuse_actor_critic_pass else 1)
+        """Rows per gradient forward: the micro-batch, doubled for PPO's fused actor and critic rows."""
+        return self.micro_batch_size * (2 if self.algorithm == "ppo" else 1)
 
     @property
     def lora_casts_recompute_only(self) -> bool:
@@ -1079,10 +1108,7 @@ class TrainingSettings(BaseModel):
         return n
 
     @model_validator(mode="after")
-    def _check_chunk_rows(self) -> Self:
-        if self.chunk_rows is not None and self.chunk_rows < 1:
-            msg = f"chunk_rows must be at least 1, got {self.chunk_rows}"
-            raise ValueError(msg)
+    def _check_fsdp_offload(self) -> Self:
         if (
             self.fsdp is not None
             and self.fsdp.cpu_offload
@@ -1104,16 +1130,6 @@ class TrainingSettings(BaseModel):
             return {**data, "liger_weight_grad": False}
         return data
 
-    @model_validator(mode="after")
-    def _check_fuse_actor_critic_pass(self) -> Self:
-        if self.fuse_actor_critic_pass and self.algorithm != "ppo":
-            msg = (
-                "fuse_actor_critic_pass=True requires algorithm='ppo', "
-                f"got {self.algorithm!r}"
-            )
-            raise ValueError(msg)
-        return self
-
 
 class GenerationSettings(BaseModel):
     """vLLM settings (``VLLMConfig``) plus workload shape."""
@@ -1132,14 +1148,7 @@ class GenerationSettings(BaseModel):
     max_num_batched_tokens: int | None = None
     # ``limit_mm_per_prompt["image"]``. ``None`` takes vLLM's unset-modality limit.
     max_images_per_prompt: int | None = None
-    # Pin the KV pool size. ``None`` lets vLLM derive it from
-    # ``gpu_memory_utilization``.
-    kv_cache_memory_bytes: int | None = None
-    # ``True`` skips CUDA-graph capture, at some decode-throughput cost.
-    # ``None``/``False`` keeps graphs on.
-    enforce_eager: bool | None = None
     max_lora_rank: int = OMITTED_MAX_LORA_RANK
-    max_loras: int = 1
     # Adapter ``target_parameters`` on packed experts. Any switches the
     # engine to vLLM's 3D fused-MoE LoRA layout, as AgileRL patches the
     # model's ``is_3d_moe_weight`` flag on.

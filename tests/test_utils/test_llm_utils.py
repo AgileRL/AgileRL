@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import os
+import re
 import sys
 import tempfile
 import types
@@ -52,7 +53,6 @@ from agilerl.architectures.flex_attention import (
     flex_decode_kernel_options,
     patch_flex_attention_kernel_options,
 )
-from agilerl.arena.memory.resolve.lora import resolve_lora_rank_ceiling
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.distributed import fsdp as dmod
 from agilerl.distributed import gather_params
@@ -115,7 +115,6 @@ from agilerl.utils.llm_utils import (
     remap_peft_lora_key_for_vllm,
     render_chat_template,
     report_model_kernels,
-    resolve_attn_implementation,
     resolve_batch_advantage_granularity,
     resolve_llm_device,
     resolve_pad_token_id,
@@ -125,6 +124,7 @@ from agilerl.utils.llm_utils import (
     save_peft_adapter_for_vllm_rollout,
     set_sub_model_attn_implementation,
     snapshot_lora_adapters,
+    trainer_attn_implementation,
     validate_importance_sampling_level,
     value_fit,
     write_lora_adapters,
@@ -1517,15 +1517,14 @@ class TestCreateModelFromNameOrPathValueHead:
         ) as mock_loader:
             out = llm_utils_module.create_model_from_name_or_path(
                 "some/model",
+                "sdpa",
                 add_value_head=True,
                 use_distributed=False,
             )
         assert out is sentinel_model
-        # Default model_config is built when not supplied; verify the loader saw
-        # the model name plus the synthesized dtype/attn keys.
         call_kwargs = mock_loader.call_args.kwargs
         assert call_kwargs["pretrained_model_name_or_path"] == "some/model"
-        assert call_kwargs["attn_implementation"] == resolve_attn_implementation()
+        assert call_kwargs["attn_implementation"] == "sdpa"
 
 
 class TestMakeLlmOptimizer:
@@ -2329,76 +2328,108 @@ class TestFormatColocatedVllmOomHint:
         assert "≈0.00 GiB more free VRAM" in hint
 
 
-class TestResolveAttnImplementation:
-    def test_explicit_choice_is_authoritative(self):
-        assert resolve_attn_implementation("flex_attention") == "flex_attention"
-        assert resolve_attn_implementation("eager") == "eager"
+class TestTrainerAttnImplementation:
+    @pytest.fixture(autouse=True)
+    def clear_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ATTN_IMPLEMENTATION", raising=False)
+        monkeypatch.delenv("AGILERL_ATTN_IMPLEMENTATION", raising=False)
 
-    def test_auto_prefers_flash_attention_2_when_installed(self, monkeypatch):
+    @staticmethod
+    def stub_model_type(monkeypatch: pytest.MonkeyPatch, model_type: str) -> None:
+        monkeypatch.setattr(
+            "agilerl.architectures.catalog.PretrainedConfig.get_config_dict",
+            lambda path, **kwargs: ({"model_type": model_type}, {}),
+        )
+
+    def test_flash_attention_2_on_cuda_with_flash_attn(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self.stub_model_type(monkeypatch, "llama")
         monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
-        assert resolve_attn_implementation(None) == "flash_attention_2"
-        assert resolve_attn_implementation("auto") == "flash_attention_2"
 
-    def test_auto_falls_back_to_sdpa(self, monkeypatch):
+        assert trainer_attn_implementation("meta/llama", True) == "flash_attention_2"
+
+    def test_sdpa_off_cuda(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.stub_model_type(monkeypatch, "llama")
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
-        assert resolve_attn_implementation(None) == "sdpa"
 
-    def test_env_override_when_unset(self, monkeypatch):
-        monkeypatch.setenv("AGILERL_ATTN_IMPLEMENTATION", "eager")
-        assert resolve_attn_implementation(None) == "eager"
+        assert trainer_attn_implementation("meta/llama", False) == "sdpa"
 
-    def test_attn_implementation_env_beats_agilerl_env(self, monkeypatch):
+    def test_family_backend_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.stub_model_type(monkeypatch, "gemma4")
+        monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+
+        assert trainer_attn_implementation("google/gemma", True) == "flex_attention"
+
+    @pytest.mark.parametrize("model_type", ["qwen3", "nemotron_h"])
+    def test_raises_on_cuda_without_flash_attn(
+        self, monkeypatch: pytest.MonkeyPatch, model_type: str
+    ) -> None:
+        self.stub_model_type(monkeypatch, model_type)
+        monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+
+        with pytest.raises(
+            ImportError,
+            match=re.escape(
+                f"flash_attn is required on CUDA for model_type '{model_type}'. "
+                "Install it: pip install flash-attn --no-build-isolation"
+            ),
+        ):
+            trainer_attn_implementation("org/model", True)
+
+    def test_env_override_skips_the_flash_attn_check(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self.stub_model_type(monkeypatch, "qwen3")
+        monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+        monkeypatch.setenv("ATTN_IMPLEMENTATION", "sdpa")
+
+        assert trainer_attn_implementation("org/model", True) == "sdpa"
+
+    def test_agilerl_env_overrides_the_rule(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self.stub_model_type(monkeypatch, "gemma4")
+        monkeypatch.setenv("AGILERL_ATTN_IMPLEMENTATION", " eager ")
+
+        assert trainer_attn_implementation("google/gemma", True) == "eager"
+
+    def test_attn_implementation_env_beats_agilerl_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setenv("ATTN_IMPLEMENTATION", "sdpa")
         monkeypatch.setenv("AGILERL_ATTN_IMPLEMENTATION", "eager")
-        assert resolve_attn_implementation(None) == "sdpa"
 
-    def test_env_beats_explicit(self, monkeypatch):
-        monkeypatch.setenv("ATTN_IMPLEMENTATION", "eager")
-        assert resolve_attn_implementation("flex_attention") == "eager"
+        assert trainer_attn_implementation("google/gemma", True) == "sdpa"
 
-    def test_family_default_when_unset(self, monkeypatch):
-        monkeypatch.setattr(
-            "transformers.AutoConfig.from_pretrained",
-            lambda *args, **kwargs: SimpleNamespace(model_type="gemma4"),
-        )
-        monkeypatch.setattr(
-            "agilerl.architectures.catalog.PretrainedConfig.get_config_dict",
-            lambda path, **kwargs: ({"model_type": "gemma4"}, {}),
-        )
-        assert (
-            resolve_attn_implementation(None, model_name_or_path="google/gemma")
-            == "flex_attention"
-        )
-
-    def test_env_beats_family(self, monkeypatch):
-        monkeypatch.setenv("ATTN_IMPLEMENTATION", "sdpa")
-        monkeypatch.setattr(
-            "transformers.AutoConfig.from_pretrained",
-            lambda *args, **kwargs: SimpleNamespace(model_type="gemma4"),
-        )
-        monkeypatch.setattr(
-            "agilerl.architectures.catalog.PretrainedConfig.get_config_dict",
-            lambda path, **kwargs: ({"model_type": "gemma4"}, {}),
-        )
-        assert (
-            resolve_attn_implementation(None, model_name_or_path="google/gemma")
-            == "sdpa"
-        )
-
-    def test_nemotron_family_defaults_to_flash_attention_2(self, monkeypatch):
-        monkeypatch.setattr(
-            "transformers.AutoConfig.from_pretrained",
-            lambda *args, **kwargs: SimpleNamespace(model_type="nemotron_h"),
-        )
-        monkeypatch.setattr(
-            "agilerl.architectures.catalog.PretrainedConfig.get_config_dict",
-            lambda path, **kwargs: ({"model_type": "nemotron_h"}, {}),
-        )
+    def test_warns_for_an_unregistered_model_type(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        self.stub_model_type(monkeypatch, "llama")
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
-        assert (
-            resolve_attn_implementation(None, model_name_or_path="nvidia/nemotron")
-            == "flash_attention_2"
+
+        with caplog.at_level(logging.WARNING, logger="agilerl.utils.llm_utils"):
+            attn = trainer_attn_implementation("meta/llama", False)
+
+        assert attn == "sdpa"
+        assert "No attention backend is registered for model_type 'llama'" in (
+            caplog.text
         )
+
+    @pytest.mark.parametrize("model_type", ["qwen3", "gemma4"])
+    def test_registered_model_type_does_not_warn(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        model_type: str,
+    ) -> None:
+        self.stub_model_type(monkeypatch, model_type)
+        monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+
+        with caplog.at_level(logging.WARNING, logger="agilerl.utils.llm_utils"):
+            trainer_attn_implementation("org/model", False)
+
+        assert "No attention backend" not in caplog.text
 
 
 class TinyVLConfig(PretrainedConfig):
@@ -2838,11 +2869,11 @@ class TestCreateModelFromNameOrPathDefaults:
                 auto_class, "from_pretrained", staticmethod(from_pretrained)
             )
 
-    def test_defaults_to_bf16_and_sdpa(self, monkeypatch):
+    def test_loads_bf16_with_the_given_backend(self, monkeypatch):
         captured = {}
         self._patch_auto_classes(monkeypatch, captured)
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
-        out = create_model_from_name_or_path("org/tiny")
+        out = create_model_from_name_or_path("org/tiny", "sdpa")
         assert isinstance(out, nn.Identity)
         assert captured["class"] is AutoModelForCausalLM
         assert captured["name"] == "org/tiny"
@@ -2855,9 +2886,21 @@ class TestCreateModelFromNameOrPathDefaults:
         self._patch_auto_classes(monkeypatch, captured)
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
         create_model_from_name_or_path(
-            "org/tiny", model_config={"torch_dtype": torch.float32}
+            "org/tiny", "sdpa", model_config={"torch_dtype": torch.float32}
         )
         assert captured["kwargs"]["torch_dtype"] is torch.float32
+
+    def test_given_backend_beats_model_config(self, monkeypatch):
+        captured = {}
+        self._patch_auto_classes(monkeypatch, captured)
+        caller_config = {"attn_implementation": "eager"}
+
+        create_model_from_name_or_path(
+            "org/tiny", "flash_attention_2", model_config=caller_config
+        )
+
+        assert captured["kwargs"]["attn_implementation"] == "flash_attention_2"
+        assert caller_config == {"attn_implementation": "eager"}
 
     def test_flex_attention_triggers_kernel_options_patch(self, monkeypatch):
         captured = {}
@@ -2868,29 +2911,20 @@ class TestCreateModelFromNameOrPathDefaults:
             "patch_flex_attention_kernel_options",
             lambda *a, **k: patch_calls.append(1),
         )
-        caller_config = {"attn_implementation": "flex_attention"}
-        create_model_from_name_or_path("org/tiny", model_config=caller_config)
+        create_model_from_name_or_path("org/tiny", "flex_attention")
         assert captured["kwargs"]["attn_implementation"] == "flex_attention"
         assert patch_calls == [1]
-        # The caller's dict is copied, not mutated.
-        assert caller_config == {"attn_implementation": "flex_attention"}
 
     @pytest.mark.parametrize("model_type", ["gemma3", "gemma4"])
-    def test_gemma_swa_defaults_to_flex_attention(self, monkeypatch, model_type: str):
+    def test_gemma_swa_loads_its_vl_class(self, monkeypatch, model_type: str):
         captured = {}
-        patch_calls = []
         self._patch_auto_classes(monkeypatch, captured)
         monkeypatch.setattr(
-            llm_utils_module,
-            "patch_flex_attention_kernel_options",
-            lambda *a, **k: patch_calls.append(1),
+            llm_utils_module, "patch_flex_attention_kernel_options", lambda: None
         )
-        monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
         stub_catalog_model_type(monkeypatch, model_type)
-        create_model_from_name_or_path("google/gemma")
-        assert captured["kwargs"]["attn_implementation"] == "flex_attention"
+        create_model_from_name_or_path("google/gemma", "flex_attention")
         assert captured["class"] is AutoModelForImageTextToText
-        assert patch_calls == [1]
 
     @pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe"])
     def test_qwen3_5_vl_loads_its_vl_class(self, monkeypatch, model_type: str):
@@ -2899,36 +2933,16 @@ class TestCreateModelFromNameOrPathDefaults:
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
         stub_catalog_model_type(monkeypatch, model_type)
 
-        create_model_from_name_or_path("Qwen/qwen3.5")
+        create_model_from_name_or_path("Qwen/qwen3.5", "sdpa")
 
         assert captured["class"] is AutoModelForImageTextToText
 
-    def test_gemma2_does_not_default_to_flex_attention(self, monkeypatch):
-        captured = {}
-        self._patch_auto_classes(monkeypatch, captured)
-        monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
-        stub_catalog_model_type(monkeypatch, "gemma2")
-        create_model_from_name_or_path("google/gemma-2-9b")
-        assert captured["kwargs"]["attn_implementation"] == "flash_attention_2"
-
-    def test_family_catalog_overrides_explicit_attn(self, monkeypatch):
-        captured = {}
-        self._patch_auto_classes(monkeypatch, captured)
-        monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
-        stub_catalog_model_type(monkeypatch, "gpt_oss")
-        create_model_from_name_or_path(
-            "openai/gpt-oss-20b",
-            model_config={"attn_implementation": "sdpa"},
-        )
-        assert captured["kwargs"]["attn_implementation"] == "flex_attention"
-
-    def test_nemotron_defaults_to_flash_attention_2(self, monkeypatch):
+    def test_nemotron_loads_without_remote_code(self, monkeypatch):
         captured = {}
         self._patch_auto_classes(monkeypatch, captured)
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
         stub_catalog_model_type(monkeypatch, "nemotron_h")
-        create_model_from_name_or_path("nvidia/nemotron")
-        assert captured["kwargs"]["attn_implementation"] == "flash_attention_2"
+        create_model_from_name_or_path("nvidia/nemotron", "flash_attention_2")
         assert "trust_remote_code" not in captured["kwargs"]
 
     def test_nemotron_h_omni_forwards_trust_remote_code(self, monkeypatch):
@@ -2942,8 +2956,7 @@ class TestCreateModelFromNameOrPathDefaults:
         )
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
         stub_catalog_model_type(monkeypatch, "nemotron_h_omni")
-        create_model_from_name_or_path("nvidia/nemotron-omni")
-        assert captured["kwargs"]["attn_implementation"] == "flash_attention_2"
+        create_model_from_name_or_path("nvidia/nemotron-omni", "flash_attention_2")
         assert captured["kwargs"]["trust_remote_code"] is False
         assert remote_code_loads == [("nvidia/nemotron-omni", False)]
 
@@ -2954,17 +2967,17 @@ class TestCreateModelFromNameOrPathDefaults:
         stub_catalog_model_type(monkeypatch, "nemotron_h")
         create_model_from_name_or_path(
             "nvidia/nemotron",
+            "flash_attention_2",
             model_config={"trust_remote_code": False},
         )
         assert captured["kwargs"]["trust_remote_code"] is False
 
-    def test_family_trainer_non_attn_keys_fill_when_absent(self, monkeypatch):
+    def test_family_trainer_keys_fill_when_absent(self, monkeypatch):
         captured = {}
         self._patch_auto_classes(monkeypatch, captured)
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
 
         class FakeTrainer:
-            attn_implementation = None
             model_class = self._fake_loader(captured)
 
             def load_kwargs(self):
@@ -2976,18 +2989,17 @@ class TestCreateModelFromNameOrPathDefaults:
             lambda *_a, **_k: SimpleNamespace(trainer=FakeTrainer()),
         )
 
-        create_model_from_name_or_path("org/tiny")
+        create_model_from_name_or_path("org/tiny", "sdpa")
 
         assert captured["kwargs"]["use_cache"] is False
         assert captured["kwargs"]["attn_implementation"] == "sdpa"
 
-    def test_family_trainer_non_attn_keys_do_not_overwrite_caller(self, monkeypatch):
+    def test_family_trainer_keys_do_not_overwrite_caller(self, monkeypatch):
         captured = {}
         self._patch_auto_classes(monkeypatch, captured)
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
 
         class FakeTrainer:
-            attn_implementation = None
             model_class = self._fake_loader(captured)
 
             def load_kwargs(self):
@@ -3001,6 +3013,7 @@ class TestCreateModelFromNameOrPathDefaults:
 
         create_model_from_name_or_path(
             "org/tiny",
+            "sdpa",
             model_config={"use_cache": True},
         )
 
@@ -3019,7 +3032,7 @@ class TestCreateModelFromNameOrPathDefaults:
         )
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
         monkeypatch.setattr(llm_utils_module, "install_family_patches", _install)
-        create_model_from_name_or_path("nvidia/Nemotron-H-8B")
+        create_model_from_name_or_path("nvidia/Nemotron-H-8B", "flash_attention_2")
         assert order == ["install", "from_pretrained"]
         assert captured["name"] == "nvidia/Nemotron-H-8B"
 
@@ -3352,17 +3365,6 @@ class TestOffloadColocatedTrainerFromGpu:
         assert calls == {"sync": 1, "empty": 1}
 
 
-class TestResolveLoraRankCeiling:
-    def test_no_trainer_rank_keeps_configured_value(self):
-        assert resolve_lora_rank_ceiling(16, 0) == 16
-
-    def test_trainer_rank_raises_floor(self):
-        assert resolve_lora_rank_ceiling(16, 32) == 32
-
-    def test_configured_value_wins_when_larger(self):
-        assert resolve_lora_rank_ceiling(16, 8) == 16
-
-
 class TestResolveVllmMaxNumBatchedTokens:
     def test_explicit_value_is_authoritative(self):
         assert resolve_vllm_max_num_batched_tokens(8, 32768, explicit=4096) == 4096
@@ -3395,11 +3397,7 @@ def _vllm_config(**overrides):
         "quantization": None,
         "kv_cache_dtype": None,
         "kv_cache_memory_bytes": None,
-        "enforce_eager": None,
-        "max_lora_rank": 16,
-        "max_loras": 1,
         "max_num_batched_tokens": None,
-        "strip_multimodal_towers": False,
         "limit_mm_per_prompt": None,
     }
     base.update(overrides)
@@ -3488,7 +3486,7 @@ class TestBuildVllmLlmInitKwargs:
         assert kwargs["logprobs_mode"] == "processed_logprobs"
         # Colocated vLLM always serves the trainer's LoRA adapter.
         assert kwargs["enable_lora"] is True
-        assert kwargs["max_lora_rank"] == 16
+        assert kwargs["max_lora_rank"] == 8
         assert kwargs["max_loras"] == 1
         assert "trust_remote_code" not in kwargs
         for absent in (
@@ -3523,7 +3521,6 @@ class TestBuildVllmLlmInitKwargs:
                 quantization="bitsandbytes",
                 kv_cache_dtype="fp8",
                 kv_cache_memory_bytes=123456,
-                enforce_eager=True,
                 max_num_batched_tokens=4096,
                 tensor_parallel_size=2,
                 limit_mm_per_prompt={"image": 4, "video": 0},
@@ -3538,11 +3535,10 @@ class TestBuildVllmLlmInitKwargs:
         assert kwargs["quantization"] == "bitsandbytes"
         assert kwargs["kv_cache_dtype"] == "fp8"
         assert kwargs["kv_cache_memory_bytes"] == 123456
-        assert kwargs["enforce_eager"] is True
         assert kwargs["max_num_batched_tokens"] == 4096
         assert kwargs["limit_mm_per_prompt"] == {"image": 4, "video": 0}
         assert kwargs["seed"] == 2  # process_index // tensor_parallel_size
-        assert kwargs["max_lora_rank"] == 64  # trainer rank outranks the config
+        assert kwargs["max_lora_rank"] == 64
 
     def test_nemotron_family_defaults_fill_unset_engine_kwargs(self, monkeypatch):
         stub_catalog_model_type(monkeypatch, "nemotron_h")
@@ -3620,9 +3616,10 @@ class TestBuildVllmLlmInitKwargs:
     ):
         stub_catalog_model_type(monkeypatch, "qwen2_vl")
         kwargs = build_vllm_llm_init_kwargs(
-            _vllm_config(strip_multimodal_towers=True),
+            _vllm_config(),
             trainer_model_name_or_path="org/vl-model",
             max_model_len=32768,
+            strip_multimodal_towers=True,
         )
 
         assert kwargs["language_model_only"] is True
@@ -3633,7 +3630,7 @@ class TestBuildVllmLlmInitKwargs:
     def test_tower_lora_targets_enable_tower_connector_lora(self, monkeypatch):
         stub_catalog_model_type(monkeypatch, "nemotron_h_omni")
         kwargs = build_vllm_llm_init_kwargs(
-            _vllm_config(strip_multimodal_towers=False),
+            _vllm_config(),
             trainer_model_name_or_path="org/vl-model",
             max_model_len=32768,
             tower_lora_target_modules=["q_proj", "linear_1"],
@@ -3646,7 +3643,7 @@ class TestBuildVllmLlmInitKwargs:
     ):
         stub_catalog_model_type(monkeypatch, "nemotron_h_omni")
         kwargs = build_vllm_llm_init_kwargs(
-            _vllm_config(strip_multimodal_towers=False),
+            _vllm_config(),
             trainer_model_name_or_path="org/vl-model",
             max_model_len=32768,
         )
@@ -3658,7 +3655,7 @@ class TestBuildVllmLlmInitKwargs:
     ):
         stub_catalog_model_type(monkeypatch, "gemma4")
         kwargs = build_vllm_llm_init_kwargs(
-            _vllm_config(strip_multimodal_towers=False),
+            _vllm_config(),
             trainer_model_name_or_path="org/vl-model",
             max_model_len=32768,
         )
@@ -3668,9 +3665,10 @@ class TestBuildVllmLlmInitKwargs:
     def test_strip_multimodal_towers_serves_omni_language_model_only(self, monkeypatch):
         stub_catalog_model_type(monkeypatch, "nemotron_h_omni")
         kwargs = build_vllm_llm_init_kwargs(
-            _vllm_config(strip_multimodal_towers=True),
+            _vllm_config(),
             trainer_model_name_or_path="nvidia/nemotron-omni",
             max_model_len=32768,
+            strip_multimodal_towers=True,
         )
 
         assert kwargs["language_model_only"] is True
@@ -3682,9 +3680,10 @@ class TestBuildVllmLlmInitKwargs:
     ):
         stub_catalog_model_type(monkeypatch, "gemma4")
         kwargs = build_vllm_llm_init_kwargs(
-            _vllm_config(strip_multimodal_towers=True),
+            _vllm_config(),
             trainer_model_name_or_path="google/gemma-4-E4B-it",
             max_model_len=32768,
+            strip_multimodal_towers=True,
         )
 
         assert kwargs["language_model_only"] is True
@@ -3696,9 +3695,10 @@ class TestBuildVllmLlmInitKwargs:
     ):
         stub_catalog_model_type(monkeypatch, "qwen3_5_moe")
         kwargs = build_vllm_llm_init_kwargs(
-            _vllm_config(strip_multimodal_towers=True),
+            _vllm_config(),
             trainer_model_name_or_path="Qwen/Qwen3.6-35B-A3B",
             max_model_len=32768,
+            strip_multimodal_towers=True,
         )
 
         assert kwargs["language_model_only"] is True
@@ -4134,44 +4134,42 @@ class TestCheckVllmLoraExportComplete:
 class TestCrossRankLigerAlign:
     def test_needs_cross_rank_seq_padding_gates_on_liger_token_is(self):
         assert not llm_utils_module.needs_cross_rank_seq_padding(
-            SimpleNamespace(use_liger_loss=True, importance_sampling_level="token"),
+            SimpleNamespace(liger_loss=True, importance_sampling_level="token"),
             world_size=1,
         )
         assert not llm_utils_module.needs_cross_rank_seq_padding(
-            SimpleNamespace(use_liger_loss=False, importance_sampling_level="token"),
+            SimpleNamespace(liger_loss=False, importance_sampling_level="token"),
             world_size=2,
         )
         assert not llm_utils_module.needs_cross_rank_seq_padding(
-            SimpleNamespace(
-                use_liger_loss=True, importance_sampling_level="trajectory"
-            ),
+            SimpleNamespace(liger_loss=True, importance_sampling_level="trajectory"),
             world_size=2,
         )
-        # Missing attrs: use_liger_loss defaults False; IS level defaults "token".
+        # Missing attrs: liger_loss defaults False; IS level defaults "token".
         assert not llm_utils_module.needs_cross_rank_seq_padding(
             SimpleNamespace(),
             world_size=2,
         )
         assert llm_utils_module.needs_cross_rank_seq_padding(
-            SimpleNamespace(use_liger_loss=True, importance_sampling_level="token"),
+            SimpleNamespace(liger_loss=True, importance_sampling_level="token"),
             world_size=2,
         )
         assert llm_utils_module.needs_cross_rank_seq_padding(
-            SimpleNamespace(use_liger_loss=True),  # default IS level is token
+            SimpleNamespace(liger_loss=True),  # default IS level is token
             world_size=2,
         )
 
     def test_needs_cross_rank_seq_padding_gates_on_fsdp_or_distributed(self):
         assert llm_utils_module.needs_cross_rank_seq_padding(
-            SimpleNamespace(fsdp_config=object(), use_liger_loss=False),
+            SimpleNamespace(fsdp_config=object(), liger_loss=False),
             world_size=2,
         )
         assert llm_utils_module.needs_cross_rank_seq_padding(
-            SimpleNamespace(distributed=True, use_liger_loss=False),
+            SimpleNamespace(distributed=True, liger_loss=False),
             world_size=2,
         )
         assert not llm_utils_module.needs_cross_rank_seq_padding(
-            SimpleNamespace(distributed=True, use_liger_loss=False),
+            SimpleNamespace(distributed=True, liger_loss=False),
             world_size=1,
         )
 

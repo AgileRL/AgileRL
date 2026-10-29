@@ -5,8 +5,7 @@
 
 Every patch installs once at the class level and is idempotent. The mixer
 class is resolved from a dotted path when a patch runs, not when this module
-is imported: an absent target is a no-op with a warning, and a present class
-with the wrong shape raises.
+is imported: an absent target or a present class with the wrong shape raises.
 """
 
 from __future__ import annotations
@@ -14,6 +13,7 @@ from __future__ import annotations
 import functools
 import logging
 import sys
+from importlib import import_module
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
@@ -21,13 +21,14 @@ import torch.utils.checkpoint
 from torch.distributed.tensor import DTensor
 
 from agilerl.architectures.runtime import PatchRuntimeConfig
+from agilerl.arena.memory.resolve.mamba import mamba_scan_is_unfused
 from agilerl.utils.llm_packing import (
     RESETS_AT_DOCUMENT_BOUNDARY,
     packed_layout,
     packed_seq_idx,
     run_per_document,
 )
-from agilerl.utils.patching import class_is_patched, library_shim, try_import
+from agilerl.utils.patching import class_is_patched, library_shim
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -68,21 +69,19 @@ FUSED_COMBINED_NAMES = (
 )
 
 
-def _resolve_mixer_class(mixer: str) -> type | None:
-    """Resolve the mixer class at ``mixer``, or None when its module is absent.
+def _resolve_mixer_class(mixer: str) -> type:
+    """Resolve the mixer class at ``mixer``.
 
     :param mixer: Dotted path ``module.Class``.
     :type mixer: str
-    :return: The mixer class, or None.
-    :rtype: type | None
+    :return: The mixer class.
+    :rtype: type
     """
     module_path, sep, class_name = mixer.rpartition(".")
     if not sep or not module_path or not class_name:
         message = f"[mamba] invalid mixer path {mixer!r}"
         raise RuntimeError(message)
-    module = try_import(module_path)
-    if module is None:
-        return None
+    module = import_module(module_path)
     mixer_cls = getattr(module, class_name, None)
     if mixer_cls is None:
         message = f"[mamba] {module_path} is present but missing {class_name}"
@@ -112,7 +111,7 @@ def _ada_capability(device: torch.device) -> bool:
     """Whether SSM kernels on this device return NaN."""
     if device.type != "cuda":
         return False
-    return torch.cuda.get_device_capability(device) == (8, 9)
+    return mamba_scan_is_unfused(torch.cuda.get_device_capability(device))
 
 
 def _forward_calls_rmsnorm(forward: object) -> bool:
@@ -567,13 +566,6 @@ def patch_nemotron_mamba_fused_path(
         return
 
     mixer_cls = _resolve_mixer_class(mixer)
-    if mixer_cls is None:
-        logger.warning(
-            "[mamba-fused-path] %s unavailable; forward left unpatched",
-            mixer.rpartition(".")[2],
-        )
-        return
-
     _install_fused_scan(mixer_cls)
 
     if model is None:
@@ -708,12 +700,6 @@ def patch_nemotron_mamba_stream_ordering(
         return
 
     mixer_cls = _resolve_mixer_class(mixer)
-    if mixer_cls is None:
-        logger.warning(
-            "[mamba-stream] %s unavailable; forward left unpatched",
-            mixer.rpartition(".")[2],
-        )
-        return
     _patch_stream_class(mixer_cls)
     if model is None:
         return
@@ -966,12 +952,6 @@ def patch_nemotron_mamba_packed_sequences(mixer: str, block: str) -> None:
     """
     mixer_cls = _resolve_mixer_class(mixer)
     block_cls = _resolve_mixer_class(block)
-    if mixer_cls is None or block_cls is None:
-        logger.warning(
-            "[mamba-packed] %s unavailable; packed rows are not supported",
-            mixer.rpartition(".")[2],
-        )
-        return
     if class_is_patched(mixer_cls, RESETS_AT_DOCUMENT_BOUNDARY):
         return
     _install_packed_mixer(mixer_cls)

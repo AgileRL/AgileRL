@@ -84,7 +84,7 @@ class TestGRPOSegmentRows:
     ) -> None:
         # Arrange: a simulated second rank's segment rows are 14 tokens wide.
         agent = _make_grpo()
-        agent.use_liger_loss = True
+        agent.liger_loss = True
         monkeypatch.setattr("agilerl.algorithms.core.base.get_world_size", lambda: 2)
         monkeypatch.setattr(
             "agilerl.algorithms.core.base.allreduce_minmax_int",
@@ -396,7 +396,7 @@ class TestGRPOLearnEpisodeSegments:
     ) -> None:
         # Arrange
         agent = _make_grpo(loss_type=loss_type, loss_norm=loss_norm)
-        agent.use_liger_loss = True
+        agent.liger_loss = True
 
         # Act
         result = agent._check_segments_supported(agent.importance_sampling_level)

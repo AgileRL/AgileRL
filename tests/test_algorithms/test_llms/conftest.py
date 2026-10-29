@@ -10,6 +10,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
+from agilerl import HAS_LIGER_KERNEL
 from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 from tests.utils import (
     force_gpu_memory_release,
@@ -112,3 +113,15 @@ def generate_model(pretrained_model_name_or_path, add_value_head=False):
 @pytest.fixture
 def model_factory():
     return generate_model
+
+
+@pytest.fixture
+def liger_kernel_installed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Report liger-kernel as installed; skip its layer patch where it is not."""
+    monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
+    if not HAS_LIGER_KERNEL:
+        monkeypatch.setattr(
+            "agilerl.algorithms.core.base._apply_liger_kernel_to_instance",
+            lambda model, fused_linear_cross_entropy: None,
+            raising=False,
+        )

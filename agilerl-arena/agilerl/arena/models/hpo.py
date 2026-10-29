@@ -454,13 +454,13 @@ def mutation_ceiling(
     :type name: str
     :param current: The value the run starts at.
     :type current: int
-    :returns: The ceiling.
+    :returns: The range's ``max`` when ``rl_hp_mut`` is above zero and
+        ``name`` is in ``rl_hp_selection``, otherwise ``current``.
     :rtype: int
     """
-    selection = getattr(mutation_spec, "rl_hp_selection", None) or {}
-    if not isinstance(selection, dict):
+    if mutation_spec is None or mutation_spec.probabilities.rl_hp_mut == 0:
         return current
-    hp_range = selection.get(name)
+    hp_range = mutation_spec.rl_hp_selection.get(name)
     if hp_range is None:
         return current
-    return max(current, int(getattr(hp_range, "max", current)))
+    return max(current, int(hp_range.max))

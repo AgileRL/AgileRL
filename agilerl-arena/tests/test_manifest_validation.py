@@ -36,8 +36,8 @@ from agilerl.arena.models import (
 from agilerl.arena.models.algorithms import RolloutLLMSpec
 from agilerl.arena.models.algorithms.rollout_llm import records_sampling_supports
 from agilerl.arena.models.env import LLMEnvType
+from agilerl.arena.models.manifest import strips_multimodal_towers
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
-from agilerl.arena.models.networks import VllmModality
 from agilerl.arena.models.schema import (
     LORA_CONFIG_REF,
     _inline_lora_config_inplace,
@@ -176,6 +176,82 @@ class TestUnknownKeys:
                 manifest(GRPO, network={"lora_config": {"r": 8}})
             )
 
+    def test_vllm_enforce_eager_is_an_error(self) -> None:
+        with pytest.raises(
+            ValidationError,
+            match=r"vllm_config\.enforce_eager\n  Extra inputs are not permitted",
+        ):
+            TrainingManifest.model_validate(
+                manifest(GRPO, algorithm={"vllm_config": {"enforce_eager": True}})
+            )
+
+
+class TestResolvedMemoryFields:
+    def test_manifest_without_them_validates(self) -> None:
+        validated = TrainingManifest.get_validated(
+            manifest(GRPO, algorithm={"fsdp": {"shard_group_size": 2}}), mode="python"
+        )
+
+        assert validated.algorithm.micro_batch_size_per_gpu is None
+        assert validated.algorithm.fsdp.reshard_after_forward is None
+        assert validated.algorithm.fsdp.activation_offload is None
+
+    def test_picked_values_validate_on_the_model(self) -> None:
+        doc = manifest(
+            GRPO,
+            algorithm={
+                "micro_batch_size_per_gpu": 2,
+                "fsdp": {"reshard_after_forward": False, "activation_offload": False},
+            },
+        )
+
+        validated = TrainingManifest.model_validate(doc)
+
+        assert validated.algorithm.micro_batch_size_per_gpu == 2
+        assert validated.algorithm.fsdp.reshard_after_forward is False
+
+    @pytest.mark.parametrize(
+        ("algorithm", "dotted"),
+        [
+            ({"micro_batch_size_per_gpu": 1}, "micro_batch_size_per_gpu"),
+            ({"gradient_checkpointing": False}, "gradient_checkpointing"),
+            ({"activation_offload": True}, "activation_offload"),
+            ({"fsdp": {"reshard_after_forward": True}}, "fsdp.reshard_after_forward"),
+            ({"fsdp": {"optim_cpu_offload": True}}, "fsdp.optim_cpu_offload"),
+            (
+                {"fsdp": {"routed_expert_chunk_mib": 512}},
+                "fsdp.routed_expert_chunk_mib",
+            ),
+            ({"fsdp": {"activation_offload": False}}, "fsdp.activation_offload"),
+            ({"fsdp": {"cpu_offload": True}}, "fsdp.cpu_offload"),
+        ],
+    )
+    def test_a_pinned_field_is_refused(self, algorithm: dict, dotted: str) -> None:
+        with pytest.raises(ValueError, match=rf"algorithm\.{dotted} cannot be set"):
+            TrainingManifest.get_validated(manifest(GRPO, algorithm=algorithm))
+
+    def test_every_pinned_field_is_named(self) -> None:
+        doc = manifest(
+            GRPO,
+            algorithm={
+                "micro_batch_size_per_gpu": 1,
+                "fsdp": {"optim_cpu_offload": True},
+            },
+        )
+
+        with pytest.raises(
+            ValueError,
+            match=r"algorithm\.micro_batch_size_per_gpu, "
+            r"algorithm\.fsdp\.optim_cpu_offload cannot be set",
+        ):
+            TrainingManifest.get_validated(doc)
+
+    def test_a_section_without_an_algorithm_mapping_is_left_to_validation(
+        self,
+    ) -> None:
+        with pytest.raises(ValidationError):
+            TrainingManifest.get_validated(manifest(GRPO) | {"algorithm": None})
+
 
 class TestMalformedSections:
     # Shape errors must surface as ValidationError like any other bad input.
@@ -248,7 +324,6 @@ class TestResolution:
         validated = TrainingManifest.model_validate(GRPO)
         assert validated.training.rollout_mode == "colocated"
         assert validated.algorithm.vllm_config is not None
-        assert validated.algorithm.vllm_config.sleep_mode is True
         assert validated.algorithm.vllm_config.max_num_seqs == 16
         assert validated.algorithm.vllm_config.gpu_memory_utilization == 0.9
 
@@ -384,17 +459,17 @@ class TestResolution:
 
 class TestNothingIsStrippedInTransit:
     @pytest.mark.parametrize(
-        "field",
+        ("field", "value", "extra"),
         [
-            "use_liger_loss",
-            "use_separate_reference_adapter",
-            "micro_batch_size_per_gpu",
+            ("use_separate_reference_adapter", True, {}),
+            ("micro_batch_size_per_gpu", 4, {}),
         ],
     )
-    def test_llm_fields_survive_a_round_trip(self, field: str) -> None:
-        value = 4 if field == "micro_batch_size_per_gpu" else True
+    def test_llm_fields_survive_a_round_trip(
+        self, field: str, value: object, extra: dict
+    ) -> None:
         payload = TrainingManifest.model_validate(
-            manifest(GRPO, algorithm={field: value})
+            manifest(GRPO, algorithm={field: value, **extra})
         ).to_payload()
         assert payload["algorithm"][field] == value
 
@@ -586,22 +661,16 @@ class TestCrossSectionConsistency:
         with pytest.raises(ValidationError, match="carries an anchor"):
             TrainingManifest.model_validate(broken)
 
-    @pytest.mark.parametrize("name", ["SFT", "DPO"])
-    def test_padded_forward_algorithms_reject_sequence_packing(self, name) -> None:
-        # Neither algorithm builds the packed forward, so the request would be
-        # dropped without a word.
-        broken = manifest(
-            GRPO,
-            algorithm={
-                "name": name,
-                "use_sequence_packing": True,
-                "attn_implementation": "flash_attention_2",
-            },
-        )
-        broken["algorithm"].pop("group_size", None)
-        with pytest.raises(
-            ValidationError, match="does not accept use_sequence_packing"
-        ):
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [("use_sequence_packing", True), ("attn_implementation", "flex_attention")],
+    )
+    def test_packing_and_attention_backend_are_not_manifest_fields(
+        self, field: str, value: object
+    ) -> None:
+        broken = manifest(GRPO, algorithm={field: value})
+
+        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
             TrainingManifest.model_validate(broken)
 
 
@@ -613,35 +682,6 @@ def group_replay_manifest(**replay_buffer: object) -> dict:
     )
     doc["replay_buffer"] = {"kind": "llm", "group_replay_max_age": 10, **replay_buffer}
     return doc
-
-
-class TestTowerLoraServed:
-    @staticmethod
-    def _super_vl(strip_multimodal_towers: bool) -> dict:
-        return manifest(
-            GRPO,
-            algorithm={
-                "vllm_config": {"strip_multimodal_towers": strip_multimodal_towers}
-            },
-            network={
-                "pretrained_model_name_or_path": (
-                    "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16"
-                ),
-                "lora_config": {
-                    "target_modules": ["q_proj"],
-                    "tower_target_modules": ["q_proj"],
-                },
-            },
-        )
-
-    def test_kept_towers_accept_tower_targets(self) -> None:
-        validated = TrainingManifest.model_validate(self._super_vl(False))
-
-        assert validated.algorithm.lora_config.tower_target_modules == ["q_proj"]
-
-    def test_stripped_towers_reject_tower_targets(self) -> None:
-        with pytest.raises(ValidationError, match="strip_multimodal_towers to false"):
-            TrainingManifest.model_validate(self._super_vl(True))
 
 
 class TestRecordsSamplingSupports:
@@ -755,24 +795,20 @@ def env_rollout(
     return doc
 
 
-def resolved_strip(doc: dict) -> bool | list[VllmModality]:
-    algorithm = TrainingManifest.model_validate(doc).algorithm
-    assert isinstance(algorithm, RolloutLLMSpec)
-    assert algorithm.vllm_config is not None
-    return algorithm.vllm_config.strip_multimodal_towers
+def resolved_strip(doc: dict) -> bool:
+    validated = TrainingManifest.model_validate(doc)
+    assert isinstance(validated.algorithm, RolloutLLMSpec)
+    assert isinstance(validated.environment, LLMEnvSpec)
+    return strips_multimodal_towers(
+        validated.algorithm, validated.environment.text_only
+    )
 
 
 class TestStripMultimodalTowersResolution:
     def test_text_env_on_a_vl_model_strips_the_towers(self) -> None:
-        # Arrange
         doc = env_rollout({"modality": "text"})
 
-        # Act
-        payload = TrainingManifest.get_validated(doc)
-
-        # Assert
-        assert payload["algorithm"]["vllm_config"]["strip_multimodal_towers"] is True
-        assert payload["environment"]["modality"] == "text"
+        assert resolved_strip(doc) is True
 
     def test_async_text_env_without_vllm_config_strips_the_towers(self) -> None:
         # Arrange
@@ -788,7 +824,7 @@ class TestStripMultimodalTowersResolution:
 
         # Assert
         assert payload["training"]["rollout_mode"] == "async"
-        assert payload["algorithm"]["vllm_config"]["strip_multimodal_towers"] is True
+        assert resolved_strip(doc) is True
         assert payload["algorithm"]["vllm_config"]["max_num_seqs"] == 16
         assert payload["algorithm"]["vllm_config"]["gpu_memory_utilization"] == 0.9
 
@@ -849,13 +885,14 @@ class TestStripMultimodalTowersResolution:
 
         assert resolved_strip(doc) is False
 
-    def test_explicit_false_wins_over_a_text_env(self) -> None:
+    def test_strip_multimodal_towers_pin_is_rejected(self) -> None:
         doc = env_rollout(
             {"modality": "text"},
             algorithm={"vllm_config": {"strip_multimodal_towers": False}},
         )
 
-        assert resolved_strip(doc) is False
+        with pytest.raises(ValidationError, match="strip_multimodal_towers"):
+            TrainingManifest.model_validate(doc)
 
     def test_text_modality_rejects_image_fields(self) -> None:
         doc = env_rollout({"modality": "text", "screenshot_field": "screenshot"})
@@ -867,34 +904,6 @@ class TestStripMultimodalTowersResolution:
         doc = manifest(GRPO, environment={"modality": "vision"})
 
         with pytest.raises(ValidationError, match="modality vision needs image"):
-            TrainingManifest.model_validate(doc)
-
-
-class TestImageTowerServed:
-    def test_image_env_keeps_the_towers_it_names(self) -> None:
-        doc = env_rollout(
-            {"screenshot_field": "screenshot"},
-            algorithm={"vllm_config": {"strip_multimodal_towers": ["video"]}},
-        )
-
-        assert resolved_strip(doc) == ["video"]
-
-    def test_vision_env_rejects_stripped_towers(self) -> None:
-        doc = env_rollout(
-            {"modality": "vision"},
-            algorithm={"vllm_config": {"strip_multimodal_towers": True}},
-        )
-
-        with pytest.raises(ValidationError, match="needs its image tower"):
-            TrainingManifest.model_validate(doc)
-
-    def test_image_fields_reject_a_stripped_image_tower(self) -> None:
-        doc = env_rollout(
-            {"goal_images_field": "goal_images"},
-            algorithm={"vllm_config": {"strip_multimodal_towers": ["image"]}},
-        )
-
-        with pytest.raises(ValidationError, match="needs its image tower"):
             TrainingManifest.model_validate(doc)
 
 
@@ -918,6 +927,102 @@ class TestAsyncStopSequences:
         )
 
         with pytest.raises(ValidationError, match="stop_sequences is not supported"):
+            TrainingManifest.model_validate(doc)
+
+
+class TestCpuOffloadColocated:
+    def test_colocated_rollout_accepts_full_cpu_offload(self) -> None:
+        doc = manifest(GRPO, algorithm={"fsdp": {"cpu_offload": True}})
+
+        validated = TrainingManifest.model_validate(doc)
+
+        assert validated.algorithm.fsdp is not None
+        assert validated.algorithm.fsdp.cpu_offload is True
+
+    def test_async_rollout_rejects_full_cpu_offload(self) -> None:
+        doc = manifest(
+            GRPO,
+            algorithm={"fsdp": {"cpu_offload": True}},
+            training={"rollout_mode": "async", "rollout_engines_per_agent": 1},
+            replay_buffer={"kind": "llm"},
+        )
+
+        with pytest.raises(ValidationError, match=r"fsdp\.cpu_offload needs colocated"):
+            TrainingManifest.model_validate(doc)
+
+    def test_sft_accepts_full_cpu_offload(self) -> None:
+        doc = copy.deepcopy(GRPO)
+        doc["algorithm"] = {"name": "SFT", "fsdp": {"cpu_offload": True}}
+        doc["environment"] = {"env_type": "dataset", "objective": "sft", "dataset": "d"}
+
+        validated = TrainingManifest.model_validate(doc)
+
+        assert validated.algorithm.fsdp is not None
+        assert validated.algorithm.fsdp.cpu_offload is True
+
+    def test_async_rollout_accepts_optimizer_cpu_offload(self) -> None:
+        doc = manifest(
+            GRPO,
+            algorithm={"fsdp": {"optim_cpu_offload": True}},
+            training={"rollout_mode": "async", "rollout_engines_per_agent": 1},
+            replay_buffer={"kind": "llm"},
+        )
+
+        validated = TrainingManifest.model_validate(doc)
+
+        assert validated.algorithm.fsdp is not None
+        assert validated.algorithm.fsdp.optim_cpu_offload is True
+
+
+class TestRolloutEngines:
+    def test_rollout_algorithm_accepts_rollout_engines(self) -> None:
+        doc = manifest(GRPO, training={"rollout_engines_per_agent": 2})
+
+        validated = TrainingManifest.model_validate(doc)
+
+        assert validated.training.rollout_engines_per_agent == 2
+
+    @pytest.mark.parametrize(
+        ("name", "objective"), [("SFT", "sft"), ("DPO", "preference")]
+    )
+    def test_dataset_algorithm_accepts_no_rollout_engines(
+        self, name: str, objective: str
+    ) -> None:
+        doc = copy.deepcopy(GRPO)
+        doc["algorithm"] = {"name": name}
+        doc["environment"] = {
+            "env_type": "dataset",
+            "objective": objective,
+            "dataset": "d",
+        }
+
+        validated = TrainingManifest.model_validate(doc)
+
+        assert validated.training.rollout_engines_per_agent == 0
+
+    @pytest.mark.parametrize(
+        ("name", "objective"), [("SFT", "sft"), ("DPO", "preference")]
+    )
+    @pytest.mark.parametrize("engines", [2, "auto"])
+    def test_dataset_algorithm_rejects_rollout_engines(
+        self, name: str, objective: str, engines: int | str
+    ) -> None:
+        doc = copy.deepcopy(GRPO)
+        doc["algorithm"] = {"name": name}
+        doc["environment"] = {
+            "env_type": "dataset",
+            "objective": objective,
+            "dataset": "d",
+        }
+        doc["training"] = {
+            **doc.get("training", {}),
+            "rollout_engines_per_agent": engines,
+        }
+
+        with pytest.raises(
+            ValidationError,
+            match=f"rollout_engines_per_agent={engines} requires async rollout",
+        ):
             TrainingManifest.model_validate(doc)
 
 
@@ -1359,7 +1464,9 @@ class TestSchema:
         doc = manifest(
             GRPO,
             mutation={
-                "rl_hp_selection": {"gradient_checkpointing": {"min": 0, "max": 1}}
+                "rl_hp_selection": {
+                    "use_separate_reference_adapter": {"min": 0, "max": 1}
+                }
             },
         )
         with pytest.raises(ValidationError, match="not a number"):
@@ -1664,6 +1771,18 @@ class TestSchema:
         cqn = self._applied_training_defaults({"algorithm": {"name": "CQN"}})
         assert "experience_sharing" not in cqn
         assert "eps_start" not in cqn
+
+    @pytest.mark.parametrize("name", ["GRPO", "LLMPPO", "LLMREINFORCE"])
+    def test_rollout_llm_runs_default_the_async_version_stamp(self, name) -> None:
+        applied = self._applied_training_defaults({"algorithm": {"name": name}})
+
+        assert applied["rollout_version_stamp"] == "oldest_turn"
+
+    @pytest.mark.parametrize("name", ["SFT", "DPO"])
+    def test_dataset_llm_runs_leave_the_version_stamp_unset(self, name) -> None:
+        applied = self._applied_training_defaults({"algorithm": {"name": name}})
+
+        assert "rollout_version_stamp" not in applied
 
     def test_ppo_and_recurrent_ppo_learn_step_schema_defaults(self) -> None:
         variants = manifest_schema()["properties"]["algorithm"]["oneOf"]
@@ -2329,6 +2448,14 @@ class TestExpertLoraReferenceAdapter:
         validated = TrainingManifest.model_validate(moe)
 
         assert validated.algorithm.use_separate_reference_adapter is True
+
+
+class TestTrainingSpecWeightSyncBackend:
+    def test_the_removed_key_is_rejected(self) -> None:
+        broken = manifest(GRPO, training={"weight_sync_backend": "nccl"})
+
+        with pytest.raises(ValidationError, match="weight_sync_backend"):
+            TrainingManifest.model_validate(broken)
 
 
 def thinking_budget_manifest(model: str, **algorithm: object) -> dict:

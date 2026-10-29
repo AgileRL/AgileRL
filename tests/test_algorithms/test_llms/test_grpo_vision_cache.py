@@ -50,10 +50,8 @@ def make_vision_grpo(**overrides: Any) -> GRPO:
         "micro_batch_size_per_gpu": 2,
         "update_epochs": 1,
         "wrap": False,
-        "gradient_checkpointing": False,
         "calc_position_embeddings": False,
         "device": "cpu",
-        "use_liger_loss": False,
         "lora_config": LoraConfig(
             r=4,
             lora_alpha=8,
@@ -63,7 +61,9 @@ def make_vision_grpo(**overrides: Any) -> GRPO:
         ),
         **overrides,
     }
-    return GRPO(**kwargs)
+    agent = GRPO(**kwargs)
+    agent.liger_loss = False
+    return agent
 
 
 class TestGRPOLearnVisionCache:
@@ -500,7 +500,7 @@ class TestGRPOLearnVisionRows:
         tower(agent).train()
         monkeypatch.setattr(agent, "_vision_language_module", vision_model(agent))
         monkeypatch.setattr(agent, "vllm_config", None)
-        monkeypatch.setattr(agent, "rollout_strip_multimodal_towers", ["image"])
+        monkeypatch.setattr(agent, "rollout_strip_multimodal_towers", True)
         monkeypatch.setattr(base, "get_world_size", lambda: 2)
 
         def no_rank_check(_flag: bool) -> bool:

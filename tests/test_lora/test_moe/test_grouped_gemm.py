@@ -123,3 +123,56 @@ class TestGroupedMatmul:
         for grad, expected_grad in zip(grads, expected_grads, strict=True):
             torch.testing.assert_close(grad, expected_grad, rtol=1e-5, atol=1e-6)
         assert torch.equal(grads[1][1], torch.zeros(8, 4))
+
+
+class TestPadLoraRank:
+    def test_zero_pads_an_unaligned_bf16_rank_on_the_grouped_path(self, monkeypatch):
+        # Arrange
+        monkeypatch.setattr(moe_gemm, "_use_grouped_mm", lambda _x: True)
+        torch.manual_seed(0)
+        lora_a = torch.randn(3, 2, 16, dtype=torch.bfloat16)
+        lora_b = torch.randn(3, 8, 2, dtype=torch.bfloat16)
+
+        # Act
+        padded_a, padded_b = moe_gemm.pad_lora_rank(lora_a, lora_b)
+
+        # Assert
+        assert padded_a.shape == (3, 8, 16)
+        assert padded_b.shape == (3, 8, 8)
+        assert torch.equal(padded_a[:, :2], lora_a)
+        assert torch.equal(padded_b[..., :2], lora_b)
+        assert not padded_a[:, 2:].any()
+        assert not padded_b[..., 2:].any()
+
+    def test_gradients_reach_the_unpadded_factors(self, monkeypatch):
+        # Arrange
+        monkeypatch.setattr(moe_gemm, "_use_grouped_mm", lambda _x: True)
+        lora_a = torch.ones(2, 3, 16, dtype=torch.bfloat16, requires_grad=True)
+        lora_b = torch.ones(2, 8, 3, dtype=torch.bfloat16, requires_grad=True)
+
+        # Act
+        padded_a, padded_b = moe_gemm.pad_lora_rank(lora_a, lora_b)
+        (padded_a.sum() + padded_b.sum()).backward()
+
+        # Assert
+        assert torch.equal(lora_a.grad, torch.ones_like(lora_a))
+        assert torch.equal(lora_b.grad, torch.ones_like(lora_b))
+
+    def test_keeps_an_aligned_rank(self, monkeypatch):
+        monkeypatch.setattr(moe_gemm, "_use_grouped_mm", lambda _x: True)
+        lora_a = torch.randn(3, 8, 16, dtype=torch.bfloat16)
+        lora_b = torch.randn(3, 8, 8, dtype=torch.bfloat16)
+
+        padded_a, padded_b = moe_gemm.pad_lora_rank(lora_a, lora_b)
+
+        assert padded_a is lora_a
+        assert padded_b is lora_b
+
+    def test_keeps_factors_off_the_grouped_path(self):
+        lora_a = torch.randn(3, 2, 16, dtype=torch.bfloat16)
+        lora_b = torch.randn(3, 8, 2, dtype=torch.bfloat16)
+
+        padded_a, padded_b = moe_gemm.pad_lora_rank(lora_a, lora_b)
+
+        assert padded_a is lora_a
+        assert padded_b is lora_b

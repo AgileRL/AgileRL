@@ -83,6 +83,9 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         ``gradient_accumulation_steps`` is derived as
         ``mini_batch_size / micro_batch_size_per_gpu``.
     :type mini_batch_size: int | None, optional
+    :param gradient_checkpointing: Recompute each transformer block in
+        backward. ``None`` picks it from the memory estimate.
+    :type gradient_checkpointing: bool | None, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param lora_config: Config for LoRA, defaults to None
@@ -95,25 +98,6 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
     :type clone: bool, optional
     :param seed: Seed for the random number generator, defaults to 42
     :type seed: int, optional
-    :param gradient_checkpointing: Flag to indicate if gradient checkpointing should be used, defaults to True
-    :type gradient_checkpointing: bool, optional
-    :param torch_compiler: Torch compile mode (e.g. ``'default'``), defaults to None
-    :type torch_compiler: str | None, optional
-    :param use_liger_loss: Use Liger kernel for memory-efficient loss
-        computation. Defaults to ``True``. Pass ``False`` to opt out
-        (requires ``liger-kernel`` to be installed; warns and falls back
-        to ``False`` otherwise). When ``training=False`` the standard
-        path is always used regardless of this flag.
-    :type use_liger_loss: bool, optional
-    :param chunk_rows: Primary chunk-size knob for fused logit tiles used by
-        both standard and Liger paths.
-    :type chunk_rows: int | None, optional
-    :param cast_logprobs_to_fp32: When ``True`` (default), run the per-token
-        log-prob reduction (``gather`` / ``logsumexp``) in fp32 before casting
-        back to the input dtype, for numerically stable log-probs. ``False`` runs
-        it in the input dtype, saving a little memory at the cost of a per-token
-        bf16 quantisation error that can bias importance-sampling ratios.
-    :type cast_logprobs_to_fp32: bool, optional
     :param use_separate_reference_adapter: Keep a dedicated ``reference`` LoRA
         adapter whose weights are frozen snapshots of the actor used for the
         DPO log-probability baseline. When ``False`` the reference log-probs
@@ -124,16 +108,6 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         loading the base model in 4-/8-bit (QLoRA). ``lm_head`` is kept
         unquantized so the fused-linear-logprob path stays numerically exact.
     :type quantization_config: BitsAndBytesConfig | None, optional
-    :param activation_offload: When ``True``, run the training forward inside
-        ``torch.autograd.graph.save_on_cpu`` so tensors saved for backward live
-        in pinned host RAM instead of GPU memory. Trades PCIe bandwidth for GPU
-        memory (the win grows with sequence length); a no-op during rollout /
-        reference forwards.
-    :type activation_offload: bool, optional
-    :param moe_lora_recompute: Recompute routed-expert LoRA activations in
-        backward on frozen packed base weights. ``None`` (default) recomputes
-        only outside activation-checkpointed blocks.
-    :type moe_lora_recompute: bool | None, optional
     :param lora_tower_target_modules: Tower and connector modules of a VL model
         to adapt as well. ``lora_config.target_modules`` always land on the
         language model only. Defaults to None.
@@ -158,21 +132,15 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         calc_position_embeddings: bool = True,
         micro_batch_size_per_gpu: int | None = None,
         mini_batch_size: int | None = None,
+        gradient_checkpointing: bool | None = None,
         device: str | torch.device | None = None,
         lora_config: LoraConfig | None = None,
         fsdp_config: FSDPConfig | None = None,
         wrap: bool = True,
         clone: bool = False,
         seed: int = 42,
-        gradient_checkpointing: bool = True,
-        torch_compiler: str | None = None,
-        use_liger_loss: bool = True,
-        chunk_rows: int | None = None,
-        cast_logprobs_to_fp32: bool = True,
         use_separate_reference_adapter: bool = True,
         quantization_config: BitsAndBytesConfig | None = None,
-        activation_offload: bool = False,
-        moe_lora_recompute: bool | None = None,
         lora_tower_target_modules: list[str] | None = None,
     ) -> None:
         resolved_device = resolve_device(device)
@@ -186,27 +154,21 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
             seed=seed,
             pad_token_id=pad_token_id,
             pad_token=pad_token,
-            use_liger_loss=use_liger_loss,
-            chunk_rows=chunk_rows,
             lora_config=lora_config,
             model_name=model_name,
             actor_network=actor_network,
             model_config=model_config,
             micro_batch_size_per_gpu=micro_batch_size_per_gpu,
             mini_batch_size=mini_batch_size,
+            gradient_checkpointing=gradient_checkpointing,
             cosine_lr_schedule_config=None,
             hp_config=hp_config,
             wrap=wrap,
             device=resolved_device,
             fsdp_config=fsdp_config,
             name="DPO",
-            gradient_checkpointing=gradient_checkpointing,
-            torch_compiler=torch_compiler,
-            cast_logprobs_to_fp32=cast_logprobs_to_fp32,
             use_separate_reference_adapter=use_separate_reference_adapter,
             quantization_config=quantization_config,
-            activation_offload=activation_offload,
-            moe_lora_recompute=moe_lora_recompute,
             lora_tower_target_modules=lora_tower_target_modules,
         )
         self.beta = beta
@@ -308,7 +270,7 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         held_loss: torch.Tensor | None = None
         ref_rejected_log_probs, ref_chosen_log_probs = None, None
         phase_timer.mark("prepare")
-        if not self.use_liger_loss:
+        if not self.liger_loss:
             with torch.no_grad():
                 ref_rejected_log_probs = self._get_logprobs(
                     rejected_input_ids,
@@ -448,7 +410,7 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
             ref_rejected_log_probs,
             ref_chosen_log_probs,
         )
-        if self.use_liger_loss:
+        if self.liger_loss:
             return self._dpo_loss_liger(
                 batch_chosen_input_ids,
                 batch_rejected_input_ids,
@@ -565,12 +527,6 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         :return: Loss, chosen rewards, rejected rewards.
         :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         """
-        if not HAS_LIGER_KERNEL:
-            msg = (
-                "Liger DPO loss was requested but `liger-kernel` is not available. "
-                "Set use_liger_loss=False."
-            )
-            raise ImportError(msg)
 
         def _get_hidden(ids: torch.Tensor, attn_mask: torch.Tensor) -> torch.Tensor:
             """Run a forward pass and return hidden states fed into the language-model head.
@@ -654,7 +610,7 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
                 True,  # compiled
                 True,  # use_ref_model
                 False,  # average_log_prob (sum, matching _dpo_loss)
-                self.chunk_rows or 1,  # chunk_size (sequences per chunk)
+                1,  # chunk_size (preference pairs per chunk)
                 "sigmoid",  # loss_type
             )
         # aux = (chosen_logps, rejected_logps, chosen_logits_mean, rejected_logits_mean,

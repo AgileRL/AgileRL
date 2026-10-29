@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import math
 import time
-import warnings
 from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any
@@ -59,9 +58,9 @@ class _Stub:
         self,
         *,
         beta: float = 0.0,
-        use_liger_loss: bool = False,
+        liger_loss: bool = False,
         importance_sampling_level: str = "token",
-        liger_level_supported: bool = True,
+        advantage_granularity: str = "auto",
         vllm_importance_sampling_correction: bool = True,
         filter_zero_adv: bool = False,
         survivors: int | None = None,
@@ -71,9 +70,11 @@ class _Stub:
         self.device = torch.device("cpu")
         self.beta = beta
         self.loss_type = "grpo"
-        self.use_liger_loss = use_liger_loss
+        self.colocated = False
+        self.liger_loss = liger_loss
         self.importance_sampling_level = importance_sampling_level
-        self._liger_level_supported = liger_level_supported
+        self.advantage_granularity = advantage_granularity
+        self.final_logit_softcap = None
         self.vllm_importance_sampling_correction = vllm_importance_sampling_correction
         self.vllm_importance_sampling_cap = 2.0
         self.vllm_max_logprob_gap = 0.1
@@ -93,8 +94,6 @@ class _Stub:
         self.update_epochs = 1
         self.micro_batch_size_per_gpu = 2
         self.gradient_accumulation_steps = 1
-        self._is_correction_liger_warned = False
-        self._is_per_token_trajectory_liger_warned = False
         self._survivors = survivors
         self._advantages: torch.Tensor | None = None
         self._kl_value = kl_value
@@ -126,7 +125,10 @@ class _Stub:
     _clipped_units = GRPO._clipped_units
     _compute_policy_loss = GRPO._compute_policy_loss
     _learn_start_log_probs = GRPO._learn_start_log_probs
-    _liger_path_selected = GRPO._liger_path_selected
+    _liger_loss_blocker = GRPO._liger_loss_blocker
+    _config_reweights_tokens = GRPO._config_reweights_tokens
+    _config_records_sampling_supports = LLMAlgorithm._config_records_sampling_supports
+    _liger_serves_batch = staticmethod(LLMAlgorithm._liger_serves_batch)
     _check_segments_supported = LLMAlgorithm._check_segments_supported
     _device_index = staticmethod(LLMAlgorithm._device_index)
     _epoch_orders = LLMAlgorithm._epoch_orders
@@ -159,13 +161,8 @@ class _Stub:
     _sampling_mismatch_metrics = GRPO._sampling_mismatch_metrics
     _self_scored_micro_batches = GRPO._self_scored_micro_batches
     _summarize_update = GRPO._summarize_update
-    _use_liger_path = GRPO._use_liger_path
     _warn_if_micro_batches_straddle_optimizer_steps = (
         GRPO._warn_if_micro_batches_straddle_optimizer_steps
-    )
-    _warn_liger_path_bypassed = GRPO._warn_liger_path_bypassed
-    _warn_per_token_trajectory_liger_bypass = (
-        GRPO._warn_per_token_trajectory_liger_bypass
     )
     _warn_on_sampling_mismatch = GRPO._warn_on_sampling_mismatch
 
@@ -258,160 +255,229 @@ def _sampling_logps(batch_size: int = 2) -> list[torch.Tensor]:
 
 
 class TestLigerPathSelection:
-    """Only configuration decides the loss path, never the batch in hand."""
+    """``liger_loss`` and each batch's :func:`liger_loss_blocker` pick the loss path."""
 
     @pytest.mark.parametrize("sampling_logps", [None, _sampling_logps()])
     def test_token_level_keeps_the_fused_path_either_way(
         self,
         sampling_logps: list[torch.Tensor] | None,
     ) -> None:
-        algo = _Stub(use_liger_loss=True)
-        assert algo._liger_path_selected is True
+        algo = _Stub(liger_loss=True)
+
         algo.learn(_experiences(), sampling_logps=sampling_logps)
+
         assert (algo.liger_calls, algo.standard_calls) == (1, 0)
 
-    @pytest.mark.parametrize("sampling_logps", [None, _sampling_logps()])
-    def test_a_corrected_run_stays_on_the_standard_path_either_way(
-        self,
-        sampling_logps: list[torch.Tensor] | None,
-    ) -> None:
-        algo = _Stub(use_liger_loss=True, importance_sampling_level="trajectory")
-        assert algo._liger_path_selected is False
-        with pytest.warns(UserWarning, match="only at token-level"):
-            algo.learn(_experiences(), sampling_logps=sampling_logps)
+    def test_the_standard_path_runs_every_update_without_the_flag(self) -> None:
+        algo = _Stub(importance_sampling_level="trajectory")
+
+        algo.learn(_experiences(), sampling_logps=_sampling_logps())
+
         assert (algo.liger_calls, algo.standard_calls) == (0, 1)
 
-    def test_dropping_the_correction_returns_the_fused_path(self) -> None:
-        algo = _Stub(
-            use_liger_loss=True,
-            importance_sampling_level="trajectory",
-            vllm_importance_sampling_correction=False,
+    def test_a_batch_carrying_supports_runs_the_standard_loss(self) -> None:
+        # Arrange: the fused kernel normalizes over the full vocabulary, and a
+        # non-colocated engine reports supports per batch.
+        algo = _Stub(liger_loss=True)
+        batch_ids = torch.full((2, SEQ_LEN), PAD_TOKEN_ID + 1, dtype=torch.long)
+        action_mask = torch.ones(2, SEQ_LEN - 1, dtype=torch.bool)
+        support_ids = torch.zeros(2, SEQ_LEN - 1, 4, dtype=torch.long)
+
+        # Act
+        loss, *_ = algo._objective_loss(
+            batch_ids,
+            action_mask,
+            torch.ones(2, 1),
+            None,
+            torch.zeros(2, SEQ_LEN - 1),
+            None,
+            None,
+            support_ids=support_ids,
         )
-        assert algo._liger_path_selected is True
-        algo.learn(_experiences())
-        assert (algo.liger_calls, algo.standard_calls) == (1, 0)
 
-    def test_an_unsupported_level_does_not_warn_at_loss_time(self) -> None:
+        # Assert
+        assert (algo.liger_calls, algo.standard_calls) == (0, 1)
+        assert torch.isfinite(loss)
+
+    @pytest.mark.parametrize(
+        ("sampling_logps", "paths"),
+        [(None, (1, 0)), (_sampling_logps(), (0, 1))],
+        ids=["without-sampling-logps", "with-sampling-logps"],
+    )
+    def test_trajectory_level_falls_back_on_batches_with_sampling_logps(
+        self,
+        sampling_logps: list[torch.Tensor] | None,
+        paths: tuple[int, int],
+    ) -> None:
+        # Arrange
         algo = _Stub(
-            use_liger_loss=True,
-            importance_sampling_level="turn",
-            liger_level_supported=False,
-        )
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            assert algo._use_liger_path() is False
-        assert caught == []
-
-    def test_the_bypass_warning_is_emitted_once(self) -> None:
-        algo = _Stub(use_liger_loss=True, importance_sampling_level="trajectory")
-        with pytest.warns(UserWarning, match="only at token-level"):
-            algo._use_liger_path()
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            algo._use_liger_path()
-        assert caught == []
-
-    def test_no_bypass_warning_without_the_fused_kernel_requested(self) -> None:
-        algo = _Stub(importance_sampling_level="trajectory")
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            assert algo._use_liger_path() is False
-        assert caught == []
-
-    def test_gspo_per_sequence_advantages_run_the_fused_path(self) -> None:
-        algo = _Stub(
-            use_liger_loss=True,
+            liger_loss=True,
             importance_sampling_level="trajectory",
             vllm_importance_sampling_correction=False,
         )
         algo._advantages = torch.tensor([[0.5], [-0.5]])
 
-        algo.learn(_experiences())
+        # Act
+        algo.learn(_experiences(), sampling_logps=sampling_logps)
 
-        assert (algo.liger_calls, algo.standard_calls) == (1, 0)
+        # Assert
+        assert (algo.liger_calls, algo.standard_calls) == paths
 
-    def test_gspo_per_token_advantages_run_the_standard_path(self) -> None:
-        algo = _Stub(
-            use_liger_loss=True,
-            importance_sampling_level="trajectory",
-            vllm_importance_sampling_correction=False,
-        )
-        algo._advantages = torch.linspace(-1.0, 1.0, 2 * (SEQ_LEN - 1)).reshape(
-            2, SEQ_LEN - 1
-        )
+    def test_trajectory_level_raises_when_the_run_reweights_tokens(self) -> None:
+        # Arrange
+        algo = _Stub(liger_loss=True, importance_sampling_level="trajectory")
+        algo._advantages = torch.tensor([[0.5], [-0.5]])
 
-        with pytest.warns(UserWarning, match="no fused kernel for per-turn"):
-            algo.learn(_experiences())
-
-        assert (algo.liger_calls, algo.standard_calls) == (0, 1)
-
-    def test_the_per_token_gspo_bypass_warns_once(self) -> None:
-        algo = _Stub(
-            use_liger_loss=True,
-            importance_sampling_level="trajectory",
-            vllm_importance_sampling_correction=False,
-        )
-        algo._advantages = torch.ones(2, SEQ_LEN - 1)
-        with pytest.warns(UserWarning, match="no fused kernel for per-turn"):
-            algo.learn(_experiences())
-
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            algo.learn(_experiences())
-
-        assert [str(w.message) for w in caught if "per-turn" in str(w.message)] == []
-        assert (algo.liger_calls, algo.standard_calls) == (0, 2)
+        # Act / Assert
+        with pytest.raises(
+            ValueError,
+            match="The fused Liger loss cannot serve this batch: the grpo Liger "
+            "kernel weights tokens by vLLM sampling log-probs only at token-level "
+            "importance sampling, not 'trajectory'",
+        ):
+            algo.learn(_experiences(), sampling_logps=_sampling_logps())
+        assert (algo.liger_calls, algo.standard_calls) == (0, 0)
 
 
 class ObjectiveStub:
-    """Stand-in carrying the state ``_setup_objective`` and ``_setup_liger_objective`` read."""
+    """Stand-in carrying the state ``_setup_objective`` and ``_config_liger_loss_blocker`` read."""
 
     def __init__(self, advantage_granularity: str) -> None:
         self.advantage_granularity = advantage_granularity
         self.beta = 0.0
-        self.use_liger_loss = True
+        self.use_kl_advantage_shaping = False
+        self.final_logit_softcap = None
+        self.colocated = False
+        self.vllm_importance_sampling_correction = False
+        self.off_policy_token_mask_bounds = None
+        self.off_policy_sequence_mask_threshold = None
+        self.temperature = 1.0
+        self.top_k = 0
+        self.top_p = 1.0
+        self.min_p = 0.0
 
+    _masks_off_policy_tokens = GRPO._masks_off_policy_tokens
     _setup_objective = GRPO._setup_objective
-    _setup_liger_objective = GRPO._setup_liger_objective
+    _liger_loss_blocker = GRPO._liger_loss_blocker
+    _config_liger_loss_blocker = GRPO._config_liger_loss_blocker
+    _config_reweights_tokens = GRPO._config_reweights_tokens
+    _config_records_sampling_supports = LLMAlgorithm._config_records_sampling_supports
     _resolve_standard_loss_fn = GRPO._resolve_standard_loss_fn
     _grpo_loss_standard = GRPO._grpo_loss_standard
     _cispo_loss = GRPO._cispo_loss
 
 
-class TestGRPOSetupObjectiveLigerSupport:
+class TestGRPOConfigLigerLossBlocker:
     """Whether the configured objective has a fused kernel is decided at init."""
 
     @pytest.mark.parametrize(
-        ("loss_type", "advantage_granularity"),
-        [("gspo", "trajectory"), ("gspo", "auto"), ("grpo", "turn")],
+        ("loss_type", "is_level", "advantage_granularity"),
+        [
+            ("grpo", None, "trajectory"),
+            ("grpo", None, "turn"),
+            ("grpo", "token", "auto"),
+            ("cispo", None, "auto"),
+        ],
     )
-    def test_supported_combinations_keep_the_fused_kernel(
-        self, loss_type: str, advantage_granularity: str
+    def test_token_level_combinations_keep_the_fused_kernel(
+        self, loss_type: str, is_level: str | None, advantage_granularity: str
     ) -> None:
         algo = ObjectiveStub(advantage_granularity)
+        algo._setup_objective(loss_type, is_level)
 
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            algo._setup_objective(loss_type, None)
-            algo._setup_liger_objective(False)
+        assert algo._config_liger_loss_blocker() is None
 
-        assert algo._liger_level_supported is True
-        assert [w for w in caught if "no fused" in str(w.message)] == []
+    @pytest.mark.parametrize(
+        ("loss_type", "is_level", "advantage_granularity"),
+        [
+            ("gspo", None, "trajectory"),
+            ("gspo", None, "auto"),
+            ("grpo", "trajectory", "auto"),
+        ],
+    )
+    def test_trajectory_level_keeps_the_fused_kernel(
+        self, loss_type: str, is_level: str | None, advantage_granularity: str
+    ) -> None:
+        algo = ObjectiveStub(advantage_granularity)
+        algo._setup_objective(loss_type, is_level)
+
+        assert algo._config_liger_loss_blocker() is None
+
+    @pytest.mark.parametrize(
+        "reweighting",
+        [
+            {"vllm_importance_sampling_correction": True},
+            {"off_policy_token_mask_bounds": (0.5, 5.0)},
+            {"off_policy_sequence_mask_threshold": 0.03},
+        ],
+        ids=["sampling-correction", "token-mask", "sequence-mask"],
+    )
+    def test_reweighted_tokens_have_no_trajectory_kernel(
+        self, reweighting: dict[str, object]
+    ) -> None:
+        algo = ObjectiveStub("trajectory")
+        algo._setup_objective("gspo", None)
+        for name, value in reweighting.items():
+            setattr(algo, name, value)
+
+        assert algo._config_liger_loss_blocker() == (
+            "the gspo Liger kernel weights tokens by vLLM sampling log-probs only "
+            "at token-level importance sampling, not 'trajectory'"
+        )
 
     def test_gspo_with_turn_advantages_has_no_fused_kernel(self) -> None:
         algo = ObjectiveStub("turn")
-        algo._setup_objective("gspo", None)
+        with pytest.warns(UserWarning, match="one completion-level ratio"):
+            algo._setup_objective("gspo", None)
 
-        with pytest.warns(
-            UserWarning,
-            match=(
-                "no fused gspo kernel at importance_sampling_level='trajectory' "
-                "with advantage_granularity='turn'"
-            ),
-        ):
-            algo._setup_liger_objective(False)
+        blocker = algo._config_liger_loss_blocker()
 
-        assert algo._liger_level_supported is False
+        assert blocker == (
+            "the gspo Liger kernel takes one advantage per sequence at trajectory "
+            "level, not per-turn advantages"
+        )
+
+    @pytest.mark.parametrize(
+        ("loss_type", "is_level"), [("cispo", "trajectory"), ("grpo", "turn")]
+    )
+    def test_level_without_a_kernel_has_no_fused_kernel(
+        self, loss_type: str, is_level: str
+    ) -> None:
+        algo = ObjectiveStub("trajectory")
+        algo._setup_objective(loss_type, is_level)
+
+        assert algo._config_liger_loss_blocker() == (
+            f"the {loss_type} Liger kernel has no '{is_level}' importance-sampling "
+            "level"
+        )
+
+    def test_sampling_correction_keeps_the_token_level_kernel(self) -> None:
+        algo = ObjectiveStub("trajectory")
+        algo._setup_objective("grpo", None)
+        algo.vllm_importance_sampling_correction = True
+        algo.colocated = True
+
+        assert algo._config_liger_loss_blocker() is None
+
+    def test_colocated_sampling_supports_have_no_fused_kernel(self) -> None:
+        algo = ObjectiveStub("trajectory")
+        algo._setup_objective("grpo", None)
+        algo.colocated = True
+        algo.top_k = 50
+
+        blocker = algo._config_liger_loss_blocker()
+
+        assert blocker is not None
+        assert "vLLM's sampling support" in blocker
+
+    def test_kl_shaping_has_no_fused_kernel(self) -> None:
+        algo = ObjectiveStub("trajectory")
+        algo._setup_objective("grpo", None)
+        algo.use_kl_advantage_shaping = True
+
+        assert algo._config_liger_loss_blocker() == (
+            "KL advantage shaping has no fused Liger kernel"
+        )
 
 
 class TestLearnReportsFixedKeys:
@@ -424,21 +490,21 @@ class TestLearnReportsFixedKeys:
         assert metrics["clipfrac"] == pytest.approx(0.1)
 
     def test_the_fused_path_at_zero_beta_reports_nan_kl(self) -> None:
-        algo = _Stub(beta=0.0, use_liger_loss=True)
+        algo = _Stub(beta=0.0, liger_loss=True)
         metrics = algo.learn(_experiences())
 
         assert math.isnan(metrics["kl"])
         assert metrics["clipfrac"] == pytest.approx(0.1)
 
     def test_the_fused_path_with_a_kl_coefficient_reports_both(self) -> None:
-        algo = _Stub(beta=0.04, use_liger_loss=True)
+        algo = _Stub(beta=0.04, liger_loss=True)
         metrics = algo.learn(_experiences())
 
         assert metrics["kl"] == pytest.approx(0.25)
         assert metrics["clipfrac"] == pytest.approx(0.1)
 
     def test_an_emptied_batch_reports_zeros_under_fixed_keys(self) -> None:
-        algo = _Stub(beta=0.0, use_liger_loss=True, filter_zero_adv=True)
+        algo = _Stub(beta=0.0, liger_loss=True, filter_zero_adv=True)
         algo._survivors = 0
         with pytest.warns(UserWarning, match="advantage threshold"):
             emptied = algo.learn(_experiences())
@@ -449,11 +515,8 @@ class TestLearnReportsFixedKeys:
         assert emptied["completion_length"] == pytest.approx(SEQ_LEN)
 
     def test_a_batch_carrying_sampling_logprobs_reports_fixed_keys(self) -> None:
-        algo = _Stub(
-            beta=0.0, use_liger_loss=True, importance_sampling_level="trajectory"
-        )
-        with pytest.warns(UserWarning, match="only at token-level"):
-            corrected = algo.learn(_experiences(), sampling_logps=_sampling_logps())
+        algo = _Stub(beta=0.04, liger_loss=True)
+        corrected = algo.learn(_experiences(), sampling_logps=_sampling_logps())
         uncorrected = algo.learn(_experiences())
 
         for metrics in (corrected, uncorrected):
@@ -461,7 +524,7 @@ class TestLearnReportsFixedKeys:
             assert metrics["clipfrac"] == pytest.approx(0.1)
 
     def test_fixed_keys_reach_the_metrics_tracker(self) -> None:
-        algo = _Stub(beta=0.04, use_liger_loss=True)
+        algo = _Stub(beta=0.04, liger_loss=True)
         algo.learn(_experiences())
 
         assert algo.metrics.logged["kl"] == pytest.approx(0.25)

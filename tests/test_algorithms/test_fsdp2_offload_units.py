@@ -50,7 +50,6 @@ def _make_wrap_stub(**overrides) -> MagicMock:
     agent.colocated = False
     agent.ep = 1
     agent.cp = 1
-    agent.gradient_checkpointing = False
     agent.cosine_lr_schedule_config = None
     agent.lr = 1e-4
     agent.optimizer = MagicMock()
@@ -60,6 +59,7 @@ def _make_wrap_stub(**overrides) -> MagicMock:
     agent.lr_critic = None
     agent.device = "cpu"
     agent.lr_scheduler = None
+    agent.gradient_checkpointing = True
     agent._resolve_fsdp_config = MethodType(LLMAlgorithm._resolve_fsdp_config, agent)
     for k, v in overrides.items():
         setattr(agent, k, v)
@@ -169,9 +169,7 @@ class TestUntiedLmHeadNoReshard:
             return module
 
         with patch("agilerl.distributed.fsdp_blocks.fully_shard", side_effect=_record):
-            _shard_embed_and_lm_head(
-                model, {"reshard_after_forward": True}, persistence_threshold=0
-            )
+            _shard_embed_and_lm_head(model, {"reshard_after_forward": True})
 
         modules = [module for module, _ in seen]
         assert model.lm_head in modules
@@ -738,7 +736,13 @@ class TestFsdpResidencyGuards:
     def test_wrap_uses_materialize_helper(self):
         agent = _make_wrap_stub(
             device="cuda:0",
-            fsdp_config=FSDPConfig(routed_expert_chunk_mib=64, optim_cpu_offload=True),
+            fsdp_config=FSDPConfig(
+                reshard_after_forward=True,
+                routed_expert_chunk_mib=64,
+                optim_cpu_offload=True,
+                activation_offload=False,
+                cpu_offload=False,
+            ),
         )
         with patch(
             "agilerl.distributed.runtime.materialize_fsdp2_from_cpu_state",
@@ -750,7 +754,7 @@ class TestFsdpResidencyGuards:
             "cuda:0",
             agent.fsdp_config,
             parallel_mesh=None,
-            gradient_checkpointing=False,
+            gradient_checkpointing=True,
         )
 
     def test_fsdp_clone_uses_cpu_state_path(self):

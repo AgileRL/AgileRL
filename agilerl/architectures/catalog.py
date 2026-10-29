@@ -25,10 +25,7 @@ from agilerl.architectures.runtime import (
 from agilerl.arena.models.model_info import REASONING_PARSERS, SUPPORTED_MODEL_INFO
 from agilerl.utils.patching import library_shim
 
-# Trainer uses transformers' nemotron_h class; the checkpoint's auto_map code
-# supports only eager attention.
 NEMOTRON_H_RUNTIME_CONFIG = ModelRuntimeConfig(
-    trainer=TrainerRuntimeConfig(attn_implementation="flash_attention_2"),
     vllm=VllmRuntimeConfig(
         mamba_cache_mode="align",
         max_num_batched_tokens=8192,
@@ -75,7 +72,6 @@ NEMOTRON_H_OMNI_RUNTIME_CONFIG = NEMOTRON_H_RUNTIME_CONFIG.model_copy(
         # Native nemotron_h_omni; remote code stopped loading on 5.19.
         "trainer": TrainerRuntimeConfig(
             model_class=AutoModelForImageTextToText,
-            attn_implementation="flash_attention_2",
             trust_remote_code=False,
         ),
         "vllm": NEMOTRON_H_RUNTIME_CONFIG.vllm.model_copy(
@@ -98,17 +94,10 @@ NEMOTRON_H_OMNI_RUNTIME_CONFIG = NEMOTRON_H_RUNTIME_CONFIG.model_copy(
     },
 )
 
-GEMMA_SWA_TEXT_RUNTIME_CONFIG = ModelRuntimeConfig(
-    trainer=TrainerRuntimeConfig(attn_implementation="flex_attention"),
-)
+GEMMA_SWA_TEXT_RUNTIME_CONFIG = ModelRuntimeConfig()
 
-GEMMA_SWA_RUNTIME_CONFIG = GEMMA_SWA_TEXT_RUNTIME_CONFIG.model_copy(
-    update={
-        "trainer": TrainerRuntimeConfig(
-            model_class=AutoModelForImageTextToText,
-            attn_implementation="flex_attention",
-        ),
-    },
+GEMMA_SWA_RUNTIME_CONFIG = ModelRuntimeConfig(
+    trainer=TrainerRuntimeConfig(model_class=AutoModelForImageTextToText),
 )
 
 GEMMA4_TEXT_RUNTIME_CONFIG = GEMMA_SWA_TEXT_RUNTIME_CONFIG.model_copy(
@@ -145,7 +134,6 @@ GEMMA4_RUNTIME_CONFIG = GEMMA_SWA_RUNTIME_CONFIG.model_copy(
 )
 
 GPT_OSS_RUNTIME_CONFIG = ModelRuntimeConfig(
-    trainer=TrainerRuntimeConfig(attn_implementation="flex_attention"),
     tool_call_parser="harmony",
     reasoning_parser=REASONING_PARSERS["gpt_oss"],
 )

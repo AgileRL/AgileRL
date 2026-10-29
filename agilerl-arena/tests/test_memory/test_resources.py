@@ -71,12 +71,12 @@ class TestGpusRequired:
             rollout_batch_size=4,
         )
 
-        assert gpus_required(manifest.training) == 2 * (2 + 3)
+        assert gpus_required(manifest) == 2 * (2 + 3)
 
     def test_auto_engines_need_one_engine_per_member(self):
         manifest = manifest_with(MANIFEST, rollout_engines_per_agent="auto")
 
-        assert gpus_required(manifest.training) == 2
+        assert gpus_required(manifest) == 2
 
     def test_tensor_parallel_engine_counts_a_gpu_per_rank(self):
         manifest = manifest_with(
@@ -87,7 +87,7 @@ class TestGpusRequired:
             rollout_batch_size=4,
         )
 
-        assert gpus_required(manifest.training, tensor_parallel_size=4) == 2 + 2 * 4
+        assert gpus_required(manifest, tensor_parallel_size=4) == 2 + 2 * 4
 
 
 class TestEngineWidth:
@@ -132,20 +132,20 @@ class TestEnginesPerMember:
     def test_auto_fills_the_surplus_at_the_width(self):
         manifest = manifest_with(MANIFEST, pop_size=2, rollout_engines_per_agent="auto")
 
-        engines = engines_per_member(manifest.training, 8, tensor_parallel_size=2)
+        engines = engines_per_member(manifest, 8, tensor_parallel_size=2)
 
         assert engines == (8 - 2) // (2 * 2)
 
     def test_pinned_engines_are_kept(self):
         manifest = manifest_with(MANIFEST, rollout_engines_per_agent=2)
 
-        assert engines_per_member(manifest.training, 8, tensor_parallel_size=1) == 2
+        assert engines_per_member(manifest, 8, tensor_parallel_size=1) == 2
 
     def test_too_few_gpus_raise(self):
         manifest = manifest_with(MANIFEST, rollout_engines_per_agent=2)
 
         with pytest.raises(ValueError, match="2 GPUs, the job needs 3"):
-            engines_per_member(manifest.training, 2, tensor_parallel_size=1)
+            engines_per_member(manifest, 2, tensor_parallel_size=1)
 
 
 class TestCheckTiers:

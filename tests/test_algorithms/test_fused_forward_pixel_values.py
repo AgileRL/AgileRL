@@ -15,6 +15,7 @@ import pytest
 import torch
 from peft import LoraConfig
 
+from agilerl import HAS_LIGER_KERNEL
 from agilerl.algorithms import GRPO
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.components.llm_rollout_data import EpisodeSegments
@@ -49,9 +50,7 @@ def _make_cpu_grpo_for_kernel_tests(**kwargs: object) -> GRPO:
         "max_output_tokens": 4,
         "max_model_len": 12,
         "wrap": False,
-        "gradient_checkpointing": False,
         "device": "cpu",
-        "use_liger_loss": False,
         "advantage_granularity": "trajectory",
     }
     defaults.update(kwargs)
@@ -271,12 +270,11 @@ class TestFusedForwardPixelValues:
 
 
 @_LLM_DEPS_SKIP
+@pytest.mark.skipif(not HAS_LIGER_KERNEL, reason="liger-kernel is Linux-only.")
 class TestFusedKernelLossPixelValues:
     def test_fused_kernel_loss_moves_pixel_values_to_device(self) -> None:
         # Arrange
-        grpo = _make_cpu_grpo_for_kernel_tests(
-            use_liger_loss=True, loss_norm="micro_batch"
-        )
+        grpo = _make_cpu_grpo_for_kernel_tests(loss_norm="micro_batch")
         grpo.device = torch.device("cpu")
         batch_size = 2
         seq_len = 5
@@ -304,7 +302,6 @@ class TestFusedKernelLossPixelValues:
         grpo._liger_head_gather = MagicMock(
             return_value=nullcontext((head.weight, head.bias))
         )
-        grpo.chunk_rows = 2
 
         # Act
         with (
@@ -334,9 +331,7 @@ class TestFusedKernelLossPixelValues:
 
     def test_fused_kernel_loss_packed_keeps_pixel_batch_size(self) -> None:
         # Arrange
-        grpo = _make_cpu_grpo_for_kernel_tests(
-            use_liger_loss=True, loss_norm="micro_batch"
-        )
+        grpo = _make_cpu_grpo_for_kernel_tests(loss_norm="micro_batch")
         grpo.device = torch.device("cpu")
         batch_size = 2
         seq_len = 6
@@ -365,7 +360,6 @@ class TestFusedKernelLossPixelValues:
         grpo._liger_head_gather = MagicMock(
             return_value=nullcontext((head.weight, head.bias))
         )
-        grpo.chunk_rows = 2
 
         # Act
         with (

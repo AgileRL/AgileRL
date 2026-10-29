@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 import torch
 from torch import nn
@@ -23,6 +25,7 @@ from agilerl.architectures.gemma4 import install_gemma4_vision_patches
 from agilerl.architectures.qwen3_5.vision import install_qwen3_5_vl_patches
 from agilerl.architectures.runtime import PatchRuntimeConfig
 from agilerl.arena.models.fsdp import FSDPConfig
+from agilerl.distributed import fsdp_blocks
 from agilerl.distributed.fsdp_blocks import apply_fsdp2
 from agilerl.distributed.process import allreduce_sum_ints, any_rank
 from tests.rank_launch import run_ranks
@@ -103,15 +106,15 @@ def mixed_rank_worker(rank: int, world_size: int) -> bool:
     use_torch_kernels(pytest.MonkeyPatch())
     install_qwen3_5_vl_patches(PatchRuntimeConfig())
     model = tiny_qwen_vl().train()
-    apply_fsdp2(
-        model,
-        FSDPConfig(
-            param_dtype="float32",
-            reduce_dtype="float32",
-            param_persistence_threshold=0,
-        ),
-        mesh=init_device_mesh("cpu", (world_size,)),
-    )
+    with patch.object(fsdp_blocks, "PARAM_PERSISTENCE_THRESHOLD", 0):
+        apply_fsdp2(
+            model,
+            FSDPConfig(
+                param_dtype="float32",
+                reduce_dtype="float32",
+            ),
+            mesh=init_device_mesh("cpu", (world_size,)),
+        )
     if rank == 0:
         input_ids = IMAGE_IDS
         pixel_values = torch.rand(1, GRID, GRID, PATCH_DIM)
@@ -128,15 +131,15 @@ def mixed_rank_gemma4_worker(rank: int, world_size: int) -> bool:
     use_torch_kernels(pytest.MonkeyPatch())
     install_gemma4_vision_patches(PatchRuntimeConfig())
     model = gemma4.tiny_gemma4().train()
-    apply_fsdp2(
-        model,
-        FSDPConfig(
-            param_dtype="float32",
-            reduce_dtype="float32",
-            param_persistence_threshold=0,
-        ),
-        mesh=init_device_mesh("cpu", (world_size,)),
-    )
+    with patch.object(fsdp_blocks, "PARAM_PERSISTENCE_THRESHOLD", 0):
+        apply_fsdp2(
+            model,
+            FSDPConfig(
+                param_dtype="float32",
+                reduce_dtype="float32",
+            ),
+            mesh=init_device_mesh("cpu", (world_size,)),
+        )
     if rank == 0:
         image = [gemma4.BOI, *([gemma4.IMAGE] * gemma4.TOKENS_PER_IMAGE), gemma4.EOI]
         input_ids = torch.tensor([[3, *image, 5]])
@@ -157,15 +160,15 @@ def cached_mixed_rank_worker(rank: int, world_size: int) -> tuple[int, bool]:
     install_qwen3_5_vl_patches(PatchRuntimeConfig())
     model = tiny_qwen_vl().train()
     model.model.visual.requires_grad_(False)
-    apply_fsdp2(
-        model,
-        FSDPConfig(
-            param_dtype="float32",
-            reduce_dtype="float32",
-            param_persistence_threshold=0,
-        ),
-        mesh=init_device_mesh("cpu", (world_size,)),
-    )
+    with patch.object(fsdp_blocks, "PARAM_PERSISTENCE_THRESHOLD", 0):
+        apply_fsdp2(
+            model,
+            FSDPConfig(
+                param_dtype="float32",
+                reduce_dtype="float32",
+            ),
+            mesh=init_device_mesh("cpu", (world_size,)),
+        )
     cache = VisionFeatureCache()
     install_frozen_vision_no_grad(model, cache)
     runs = count_tower_runs(model)
@@ -237,15 +240,15 @@ def planned_mixed_rank_worker(
     install_qwen3_5_vl_patches(PatchRuntimeConfig())
     model = tiny_qwen_vl().train()
     model.model.visual.requires_grad_(False)
-    apply_fsdp2(
-        model,
-        FSDPConfig(
-            param_dtype="float32",
-            reduce_dtype="float32",
-            param_persistence_threshold=0,
-        ),
-        mesh=init_device_mesh("cpu", (world_size,)),
-    )
+    with patch.object(fsdp_blocks, "PARAM_PERSISTENCE_THRESHOLD", 0):
+        apply_fsdp2(
+            model,
+            FSDPConfig(
+                param_dtype="float32",
+                reduce_dtype="float32",
+            ),
+            mesh=init_device_mesh("cpu", (world_size,)),
+        )
     cache = VisionFeatureCache()
     install_frozen_vision_no_grad(model, cache)
     runs = count_tower_runs(model)

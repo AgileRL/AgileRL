@@ -433,9 +433,10 @@ class TrainingSpec(BaseModel):
         default="colocated",
         description=(
             "Where generation runs. 'colocated' alternates generation and "
-            "learning on the same GPU; 'async' moves generation onto "
-            "dedicated rollout engines that run continuously. Staleness is "
-            "bounded by replay_buffer.max_rollout_version_lag."
+            "learning on the same GPU, for local runs; 'async' moves "
+            "generation onto dedicated rollout engines that run continuously. "
+            "Arena runs every rollout LLM job async. "
+            "replay_buffer.max_rollout_version_lag, when set, bounds staleness."
         ),
     )
     rollout_batch_size: int | None = Field(
@@ -461,14 +462,6 @@ class TrainingSpec(BaseModel):
         description=(
             "Data-parallel trainer GPUs per population member. The replay "
             "buffer shards rollouts across them."
-        ),
-    )
-    weight_sync_backend: Literal["filesystem", "nccl"] | None = Field(
-        default=None,
-        description=(
-            "How updated LoRA adapters reach the rollout engines. 'nccl' "
-            "broadcasts over the network; 'filesystem' writes checkpoints. "
-            "Both are LoRA-only — the base model is never re-sent."
         ),
     )
     reuse_prefix_cache_across_syncs: bool = Field(
@@ -581,8 +574,6 @@ class TrainingSpec(BaseModel):
             )
             raise ValueError(msg)
 
-        if self.weight_sync_backend is None:
-            self.weight_sync_backend = "nccl"
         if self.rollout_batch_size is None:
             self.rollout_batch_size = 1
         if self.weight_sync_interval is None:

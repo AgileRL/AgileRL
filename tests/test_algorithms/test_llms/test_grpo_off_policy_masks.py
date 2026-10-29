@@ -17,6 +17,7 @@ import torch
 pytest.importorskip("transformers", reason="LLM tests require transformers.")
 pytest.importorskip("peft", reason="LLM tests require peft.")
 
+from agilerl import HAS_LIGER_KERNEL
 from agilerl.algorithms import grpo as grpo_module
 from tests.test_algorithms.test_llms.test_grpo_episode_loss_norm import (
     KERNEL_NAME,
@@ -452,6 +453,7 @@ class TestGRPOFusedKernelLossOffPolicyMasks:
         )
         return RecordingFusedKernel
 
+    @pytest.mark.skipif(not HAS_LIGER_KERNEL, reason="liger-kernel is Linux-only.")
     def test_masked_tokens_reach_the_kernel_as_zero_weight(
         self, recording_kernel: type
     ) -> None:
@@ -459,7 +461,7 @@ class TestGRPOFusedKernelLossOffPolicyMasks:
         agent = _make_grpo(
             loss_norm="micro_batch",
             loss_type="cispo",
-            use_liger_loss=True,
+            liger_loss=True,
             off_policy_token_mask_bounds=ICEPOP_BAND,
             use_bias_correction_kl=True,
         )
@@ -482,6 +484,7 @@ class TestGRPOFusedKernelLossOffPolicyMasks:
         assert torch.equal(args[VLLM_IS_RATIO_ARG].reshape(expected.shape), expected)
         assert args[BIAS_CORRECTION_KL_ARG] is True
 
+    @pytest.mark.skipif(not HAS_LIGER_KERNEL, reason="liger-kernel is Linux-only.")
     def test_rows_without_sampling_log_probs_keep_full_weight(
         self, recording_kernel: type
     ) -> None:
@@ -489,7 +492,7 @@ class TestGRPOFusedKernelLossOffPolicyMasks:
         agent = _make_grpo(
             loss_norm="micro_batch",
             loss_type="cispo",
-            use_liger_loss=True,
+            liger_loss=True,
             off_policy_token_mask_bounds=ICEPOP_BAND,
         )
         ids, mask = _batch()
@@ -515,11 +518,12 @@ class TestGRPOFusedKernelLossOffPolicyMasks:
         expected = torch.ones(NUM_ROWS, int(mask.sum(dim=1).max()))
         assert torch.equal(args[VLLM_IS_RATIO_ARG].reshape(expected.shape), expected)
 
+    @pytest.mark.skipif(not HAS_LIGER_KERNEL, reason="liger-kernel is Linux-only.")
     def test_unmasked_run_passes_no_token_weight(self, recording_kernel: type) -> None:
         agent = _make_grpo(
             loss_norm="micro_batch",
             loss_type="cispo",
-            use_liger_loss=True,
+            liger_loss=True,
             **NO_OFF_POLICY_CORRECTION,
         )
         ids, mask = _batch()
@@ -532,16 +536,20 @@ class TestGRPOFusedKernelLossOffPolicyMasks:
         assert args[VLLM_IS_RATIO_ARG] is None
         assert args[BIAS_CORRECTION_KL_ARG] is False
 
-    def test_trajectory_level_masks_run_the_standard_path(self) -> None:
+    def test_trajectory_level_runs_the_standard_loss(
+        self, liger_kernel_installed: None
+    ) -> None:
+        # Act
         agent = _make_grpo(
+            liger_loss=None,
             loss_norm="micro_batch",
             importance_sampling_level="trajectory",
-            use_liger_loss=True,
             vllm_importance_sampling_correction=False,
             off_policy_token_mask_bounds=ICEPOP_BAND,
         )
 
-        assert agent._liger_path_selected is False
+        # Assert
+        assert agent.liger_loss is False
 
 
 class TestGRPOLearnOffPolicyMasks:

@@ -458,6 +458,9 @@ class TestModelArchProperties:
         assert arch.peak_qkv_dim == (14 + 2 * 2) * 128
         assert QWEN_05B.peak_qkv_dim == (14 + 2 * 2) * 64
 
+    def test_mean_qkv_dim_without_a_wider_global_head_is_the_head_width(self):
+        assert QWEN_05B.mean_qkv_dim == (14 + 2 * 2) * 64
+
     def test_moe_layers_follows_n_moe_layers(self):
         arch = MOE_TINY.model_copy(update={"n_moe_layers": 1})
 
@@ -585,7 +588,6 @@ class TestResolveChunkRows:
         assert resolve_chunk_rows(151936) == 441
         assert resolve_chunk_rows(1000) == 4096  # clamped high
         assert resolve_chunk_rows(10_000_000) == 128  # clamped low
-        assert resolve_chunk_rows(151936, explicit=64) == 64
 
 
 class TestSupportRowsBytes:
@@ -618,7 +620,7 @@ class TestLogitTerms:
 
         logits, fused_head, nograd = formulas.logit_terms(QWEN_05B, settings, 2.0)
 
-        rows = resolve_chunk_rows(QWEN_05B.vocab_size, settings.chunk_rows)
+        rows = resolve_chunk_rows(QWEN_05B.vocab_size)
         assert fused_head == QWEN_05B.vocab_size * QWEN_05B.hidden_size * 4
         assert logits == rows * QWEN_05B.vocab_size * 8 + fused_head
         assert nograd == rows * QWEN_05B.vocab_size * 4 + fused_head
@@ -633,7 +635,7 @@ class TestLogitTerms:
 
         logits, fused_head, nograd = formulas.logit_terms(QWEN_05B, settings, 2.0)
 
-        rows = resolve_chunk_rows(QWEN_05B.vocab_size, settings.chunk_rows)
+        rows = resolve_chunk_rows(QWEN_05B.vocab_size)
         support = formulas.support_rows_bytes(QWEN_05B, rows, 20, 2.0)
         assert logits == support
         assert nograd == support
@@ -644,11 +646,25 @@ class TestLogitTerms:
 
         logits, fused_head, nograd = formulas.logit_terms(QWEN_05B, settings, 2.0)
 
-        rows = resolve_chunk_rows(QWEN_05B.vocab_size, settings.chunk_rows)
+        rows = resolve_chunk_rows(QWEN_05B.vocab_size)
         support = formulas.support_rows_bytes(QWEN_05B, rows, 20, 2.0)
         assert nograd == support
         assert fused_head == QWEN_05B.vocab_size * QWEN_05B.hidden_size * 4
         assert logits == rows * QWEN_05B.vocab_size * 8 + fused_head
+
+    def test_whole_sequence_loss_holds_one_row_of_logits(self):
+        # Arrange
+        settings = TrainingSettings(max_model_len=4096, whole_sequence_loss=True)
+        vocab, h = QWEN_05B.vocab_size, QWEN_05B.hidden_size
+        rows = resolve_chunk_rows(vocab)
+
+        # Act
+        logits, fused_head, nograd = formulas.logit_terms(QWEN_05B, settings, 2.0)
+
+        # Assert
+        assert rows < 4096
+        assert logits == 4096 * vocab * 8 + vocab * h * 4
+        assert nograd == rows * vocab * 4 + fused_head
 
 
 class TestResolveMaxNumBatchedTokens:
@@ -1338,16 +1354,6 @@ class TestLoraDropoutBytes:
         assert arch.block_exclusive_layers
         assert dropout == 1024 * mlp_width * 5
 
-    def test_without_checkpointing_every_layer_keeps_its_copies(self):
-        arch = ModelArch.from_hf_config(QWEN3_4B)
-
-        per_block = formulas.lora_dropout_bytes(arch, 1, 1024, 2.0)
-        every_layer = formulas.lora_dropout_bytes(
-            arch, 1, 1024, 2.0, gradient_checkpointing=False
-        )
-
-        assert every_layer == 36 * per_block
-
     def test_parallel_hybrid_includes_mamba_in_proj(self):
         arch = ModelArch.from_hf_config(FALCON_H1)
         h = arch.hidden_size
@@ -1578,8 +1584,6 @@ class TestTensorParallelWidths:
         kwargs = {
             "n_gpus": 4,
             "reshard_after_forward": True,
-            "prefetch_units": 1,
-            "wrap_every_n_blocks": 1,
             "cpu_offload": False,
         }
 
@@ -1599,8 +1603,6 @@ class TestTensorParallelWidths:
         kwargs = {
             "n_gpus": 4,
             "reshard_after_forward": True,
-            "prefetch_units": 1,
-            "wrap_every_n_blocks": 1,
             "cpu_offload": False,
         }
 
@@ -1619,10 +1621,8 @@ class TestTensorParallelWidths:
         moe_layer = formulas.layer_params(arch, "moe")
 
         # Act
-        allocated = formulas.prefetch_window_params(counts, arch, 2, 1, 2)
-        pool = formulas.fsdp_gather_pool_params(
-            counts, arch, 1, 1, 1, 4, tensor_parallel=2
-        )
+        allocated = formulas.prefetch_window_params(counts, arch, 2, 2)
+        pool = formulas.fsdp_gather_pool_params(counts, arch, 1, 4, tensor_parallel=2)
 
         # Assert
         assert arch.tensor_parallel_plan
@@ -1640,8 +1640,6 @@ class TestFSDPGatheredParams:
             QWEN_05B,
             n_gpus=4,
             reshard_after_forward=True,
-            prefetch_units=1,
-            wrap_every_n_blocks=1,
             cpu_offload=False,
         )
 
@@ -1657,8 +1655,6 @@ class TestFSDPGatheredParams:
             QWEN_05B,
             n_gpus=4,
             reshard_after_forward=False,
-            prefetch_units=1,
-            wrap_every_n_blocks=1,
             cpu_offload=False,
         )
 
@@ -1674,28 +1670,10 @@ class TestFSDPGatheredParams:
             untied,
             n_gpus=4,
             reshard_after_forward=True,
-            prefetch_units=1,
-            wrap_every_n_blocks=1,
             cpu_offload=False,
         )
 
         assert gathered == 2 * block + counts.lm_head
-
-    def test_wrap_and_prefetch_set_the_window(self):
-        counts = formulas.param_counts(QWEN_05B)
-        block = formulas.largest_block_params(counts, QWEN_05B)
-
-        gathered = formulas.fsdp_gathered_params(
-            counts,
-            QWEN_05B,
-            n_gpus=4,
-            reshard_after_forward=True,
-            prefetch_units=1,
-            wrap_every_n_blocks=2,
-            cpu_offload=False,
-        )
-
-        assert gathered == 4 * block
 
     def test_one_gpu_has_no_extra_copy_unless_parameters_are_offloaded(self):
         counts = formulas.param_counts(QWEN_05B)
@@ -1703,8 +1681,6 @@ class TestFSDPGatheredParams:
         kwargs = {
             "n_gpus": 1,
             "reshard_after_forward": True,
-            "prefetch_units": 1,
-            "wrap_every_n_blocks": 1,
         }
 
         assert (
@@ -1727,8 +1703,6 @@ class TestFSDPGatheredParams:
             arch,
             n_gpus=4,
             reshard_after_forward=True,
-            prefetch_units=1,
-            wrap_every_n_blocks=1,
             cpu_offload=False,
         )
 
@@ -1757,8 +1731,6 @@ class TestFSDPGatheredParams:
             arch,
             n_gpus=4,
             reshard_after_forward=True,
-            prefetch_units=1,
-            wrap_every_n_blocks=1,
             cpu_offload=False,
         )
 
@@ -1766,25 +1738,6 @@ class TestFSDPGatheredParams:
         # Mamba block, not a second expert stack.
         assert arch.layer_kinds[:3] == ("mamba", "moe", "mamba")
         assert gathered == experts + router + mamba + counts.lm_head
-
-    def test_wrap_groups_adjacent_layers_into_one_unit(self):
-        arch = ModelArch.from_hf_config(NEMOTRON_H_MOE)
-        counts = formulas.param_counts(arch)
-        experts, router = formulas.moe_params_per_layer(arch)
-        mamba = formulas.mamba_params_per_layer(arch)
-
-        gathered = formulas.fsdp_gathered_params(
-            counts,
-            arch,
-            n_gpus=4,
-            reshard_after_forward=True,
-            prefetch_units=1,
-            wrap_every_n_blocks=2,
-            cpu_offload=False,
-        )
-
-        # Units: [mamba, moe] [mamba, moe] [mamba, attention] [moe].
-        assert gathered == 2 * (mamba + experts + router) + counts.lm_head
 
 
 class TestFSDPReshardedSideParams:
@@ -1820,7 +1773,7 @@ class TestFSDPGatherPoolParams:
         counts = formulas.param_counts(QWEN_05B)
         block = formulas.largest_block_params(counts, QWEN_05B)
 
-        pool = formulas.fsdp_gather_pool_params(counts, QWEN_05B, 1, 1, 1, 4)
+        pool = formulas.fsdp_gather_pool_params(counts, QWEN_05B, 1, 4)
 
         assert pool == 2 * block
 
@@ -1829,8 +1782,8 @@ class TestFSDPGatherPoolParams:
         counts = formulas.param_counts(arch)
         norms_per_layer = counts.norms // arch.n_layers
 
-        on_mesh = formulas.fsdp_gather_pool_params(counts, arch, 1, 1, 1, 4, 2)
-        off_mesh = formulas.fsdp_gather_pool_params(counts, arch, 1, 1, 1, 4)
+        on_mesh = formulas.fsdp_gather_pool_params(counts, arch, 1, 4, 2)
+        off_mesh = formulas.fsdp_gather_pool_params(counts, arch, 1, 4)
 
         assert not arch.layer_kinds
         assert on_mesh == 2 * norms_per_layer
@@ -1844,7 +1797,7 @@ class TestFSDPGatherPoolParams:
         block = formulas.largest_block_params(counts, arch)
 
         # Act
-        pool = formulas.fsdp_gather_pool_params(counts, arch, 1, 1, 1, 4)
+        pool = formulas.fsdp_gather_pool_params(counts, arch, 1, 4)
 
         # Assert: 4-GPU Gemma 4 E4B held 5.43 GiB on its all-gather stream.
         assert pool == per_layer + block
@@ -1856,7 +1809,7 @@ class TestFSDPGatherPoolParams:
         counts = formulas.param_counts(arch)
 
         # Act
-        pool = formulas.fsdp_gather_pool_params(counts, arch, 1, 1, 1, 4)
+        pool = formulas.fsdp_gather_pool_params(counts, arch, 1, 4)
 
         # Assert
         assert arch.layer_kinds[-1] == "mlp"
@@ -1872,9 +1825,9 @@ class TestFSDPGatherPoolParams:
         unit_without_routed = experts - routed + router
 
         # Act
-        dense = formulas.fsdp_gather_pool_params(counts, arch, 1, 1, 1, 8)
-        ep_only = formulas.fsdp_gather_pool_params(counts, arch, 1, 1, 8, 8)
-        ep_with_dp = formulas.fsdp_gather_pool_params(counts, arch, 1, 1, 8, 16)
+        dense = formulas.fsdp_gather_pool_params(counts, arch, 1, 8)
+        ep_only = formulas.fsdp_gather_pool_params(counts, arch, 8, 8)
+        ep_with_dp = formulas.fsdp_gather_pool_params(counts, arch, 8, 16)
 
         # Assert: the head pools beside the last (MoE) unit. EP over the whole
         # shard group leaves no rank to gather experts from.
@@ -2013,11 +1966,6 @@ class TestLoraInputCastBytes:
         # Linear in gradient tokens.
         assert formulas.lora_input_cast_bytes(smol, 16, 4096) == 2048 * MiB
 
-        # Without checkpointing, every layer's casts are saved through backward.
-        assert formulas.lora_input_cast_bytes(
-            smol, 8, 4096, gradient_checkpointing=False
-        ) > 24 * formulas.lora_input_cast_bytes(smol, 8, 4096)
-
     def test_cover_dense_mlp_blocks_on_moe_hybrids(self):
         # Arrange: block-exclusive MoE with dense MLP blocks beside the experts.
         hybrid = MOE_TINY.model_copy(update={"n_mlp_layers": 2})
@@ -2034,13 +1982,11 @@ class TestLoraInputCastBytes:
         assert formulas.lora_input_cast_bytes(hybrid, 8, 512) == (
             formulas.lora_input_cast_bytes(dense, 8, 512)
         )
-        assert formulas.lora_input_cast_bytes(
-            hybrid, 8, 512, gradient_checkpointing=False
-        ) == formulas.lora_input_cast_bytes(dense, 8, 512, gradient_checkpointing=False)
 
 
 SUPER_VL = SUPPORTED_MODEL_INFO["nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16"]
 QWEN36 = SUPPORTED_MODEL_INFO["Qwen/Qwen3.6-35B-A3B"]
+GEMMA4_E4B = SUPPORTED_MODEL_INFO["google/gemma-4-E4B-it"]
 QWEN35_08B = SUPPORTED_MODEL_INFO["Qwen/Qwen3.5-0.8B"]
 GEMMA4_E4B = SUPPORTED_MODEL_INFO["google/gemma-4-E4B-it"]
 
@@ -2109,8 +2055,6 @@ class TestMultimodalTowerBlockParams:
         kwargs = {
             "n_gpus": 4,
             "reshard_after_forward": True,
-            "prefetch_units": 1,
-            "wrap_every_n_blocks": 1,
             "cpu_offload": False,
         }
 
@@ -2122,6 +2066,13 @@ class TestMultimodalTowerBlockParams:
         assert arch.multimodal_tower_block_params == 411_132_672
         assert arch.multimodal_tower_block_params < arch.multimodal_tower_params
         assert gathered == with_whole_tower - arch.multimodal_tower_block_params
+
+    def test_gemma4_towers_count_gated_vision_and_conformer_audio(self):
+        arch = ModelArch.from_hf_config(GEMMA4_E4B.config)
+
+        # 16 gated-MLP vision blocks, a (2, 10240, 768) position table and 12
+        # conformer audio blocks.
+        assert arch.multimodal_tower_params == 151_019_520 + 15_728_640 + 302_014_464
 
     def test_tower_without_block_units_stays_at_the_root(self):
         arch = ModelArch.from_hf_config(SUPER_VL.config)
@@ -2241,8 +2192,6 @@ class TestEngineExpertLoraParamCount:
 GATHER_KWARGS = {
     "n_gpus": 4,
     "reshard_after_forward": True,
-    "prefetch_units": 1,
-    "wrap_every_n_blocks": 1,
     "cpu_offload": False,
 }
 

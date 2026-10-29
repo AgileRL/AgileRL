@@ -6,12 +6,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from agilerl.arena.memory.estimator import estimate_training
 from agilerl.arena.memory.manifest import (
     run_config_from_manifest,
     training_settings_from_manifest,
 )
 from agilerl.arena.memory.resolve.batch import (
+    engine_group_size,
     resolve_micro_batch_size_per_gpu,
     resolve_mini_batch_size,
 )
@@ -67,6 +67,25 @@ def _resolve(manifest: TrainingManifest, device: DeviceSpec | None, model=None) 
     return resolve_micro_batch_size_per_gpu(
         spec, n_training_gpus, device, model, settings
     )
+
+
+class TestEngineGroupSize:
+    def test_fixed_group_size_is_kept(self) -> None:
+        manifest = TrainingManifest.model_validate(_manifest())
+
+        assert engine_group_size(manifest.algorithm, manifest.mutation) == 4
+
+    def test_mutable_group_size_is_raised_to_its_ceiling(self) -> None:
+        # Arrange
+        raw = _manifest()
+        raw["mutation"] = {"rl_hp_selection": {"group_size": {"min": 2, "max": 12}}}
+        manifest = TrainingManifest.model_validate(raw)
+
+        # Act
+        size = engine_group_size(manifest.algorithm, manifest.mutation)
+
+        # Assert
+        assert size == 12
 
 
 class TestResolveMiniBatchSize:
@@ -267,8 +286,10 @@ class TestResolveMicroBatchSizePerGpu:
         assert chosen == 16
         assert manifest.algorithm.micro_batch_size_per_gpu is None
 
-    def test_unset_llmppo_keeps_a_split_micro_when_fusion_does_not_fit(self) -> None:
-        # Arrange: 16 fused rows are over 5 GiB; the split peak fits.
+    def test_unset_llmppo_picks_a_fused_micro_when_sixteen_rows_do_not_fit(
+        self,
+    ) -> None:
+        # Arrange: 16 fused rows are over 5 GiB; 8 fit.
         raw = _manifest()
         raw["algorithm"]["name"] = "LLMPPO"
         del raw["algorithm"]["group_size"]
@@ -285,22 +306,12 @@ class TestResolveMicroBatchSizePerGpu:
         )
 
         # Assert
-        assert chosen == 16
+        assert chosen == 8
         assert manifest.algorithm.micro_batch_size_per_gpu is None
-        assert config.training.micro_batch_size == 16
-        assert config.training.fuse_actor_critic_pass is False
-        peak = estimate_training(
-            config.model, device, config.training, orchestrated=True
-        )
-        fused = estimate_training(
-            config.model,
-            device,
-            config.training.model_copy(update={"fuse_actor_critic_pass": True}),
-            orchestrated=True,
-        )
-        assert peak.total_bytes != fused.total_bytes
+        assert config.training.micro_batch_size == 8
+        assert config.training.grad_forward_rows == 16
 
-    def test_unset_llmppo_skips_a_micro_that_only_fits_split(self) -> None:
+    def test_unset_llmppo_skips_a_micro_outside_the_buffer(self) -> None:
         # Arrange: 16 fused rows are inside 5.5 GiB and outside the buffer.
         raw = _manifest()
         raw["algorithm"]["name"] = "LLMPPO"

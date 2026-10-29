@@ -14,7 +14,6 @@ from agilerl.architectures.vllm_language import (
     apply_multimodal_engine_kwargs,
     apply_tower_connector_lora_engine_kwargs,
     nested_language_config,
-    serves_images,
     unbuilt_tower_modules,
 )
 
@@ -65,15 +64,12 @@ class TestNestedLanguageConfig:
 
 
 class TestApplyTowerConnectorLoraEngineKwargs:
-    @pytest.mark.parametrize("strip_multimodal_towers", [False, [], ["audio"]])
-    def test_enables_when_tower_targets_are_named(
-        self, strip_multimodal_towers: bool | list[str]
-    ) -> None:
+    def test_enables_when_tower_targets_are_named(self) -> None:
         kwargs: dict[str, object] = {}
 
         apply_tower_connector_lora_engine_kwargs(
             kwargs,
-            strip_multimodal_towers,
+            strip_multimodal_towers=False,
             runtime=FAMILY_RUNTIME_CONFIGS["nemotron_h_omni"],
             tower_target_modules=["q_proj", "linear_1"],
         )
@@ -118,7 +114,7 @@ class TestApplyTowerConnectorLoraEngineKwargs:
         assert kwargs == {}
 
     def test_stripped_towers_reject_tower_targets(self) -> None:
-        with pytest.raises(ValueError, match="strip_multimodal_towers to false"):
+        with pytest.raises(ValueError, match="the engine strips them"):
             apply_tower_connector_lora_engine_kwargs(
                 {},
                 strip_multimodal_towers=True,
@@ -147,42 +143,13 @@ class TestApplyTowerConnectorLoraEngineKwargs:
 
 
 class TestUnbuiltTowerModules:
-    def test_audio_strip_drops_the_gemma4_audio_tower(self) -> None:
-        unbuilt = unbuilt_tower_modules(["audio"], FAMILY_RUNTIME_CONFIGS["gemma4"])
-
-        assert unbuilt == ["audio_tower", "embed_audio"]
-
-    def test_vision_tower_stays_while_video_is_served(self) -> None:
-        unbuilt = unbuilt_tower_modules(["image"], FAMILY_RUNTIME_CONFIGS["gemma4"])
-
-        assert unbuilt == []
-
-    def test_image_and_video_strip_drops_the_vision_tower(self) -> None:
-        unbuilt = unbuilt_tower_modules(
-            ["image", "video"], FAMILY_RUNTIME_CONFIGS["qwen3_5"]
-        )
-
-        assert unbuilt == ["visual"]
-
     def test_strip_all_drops_every_tower(self) -> None:
         unbuilt = unbuilt_tower_modules(True, FAMILY_RUNTIME_CONFIGS["gemma4"])
 
         assert unbuilt == ["audio_tower", "embed_audio", "embed_vision", "vision_tower"]
 
-    @pytest.mark.parametrize("strip_multimodal_towers", [False, []])
-    def test_served_towers_are_all_built(
-        self, strip_multimodal_towers: bool | list[str]
-    ) -> None:
-        unbuilt = unbuilt_tower_modules(
-            strip_multimodal_towers, FAMILY_RUNTIME_CONFIGS["gemma4"]
-        )
-
-        assert unbuilt == []
-
-    def test_shared_omni_tower_survives_an_audio_strip(self) -> None:
-        unbuilt = unbuilt_tower_modules(
-            ["audio"], FAMILY_RUNTIME_CONFIGS["nemotron_h_omni"]
-        )
+    def test_served_towers_are_all_built(self) -> None:
+        unbuilt = unbuilt_tower_modules(False, FAMILY_RUNTIME_CONFIGS["gemma4"])
 
         assert unbuilt == []
 
@@ -195,32 +162,9 @@ class TestApplyMultimodalEngineKwargs:
 
         assert kwargs == {"language_model_only": True}
 
-    def test_modality_list_zeroes_those_limits(self) -> None:
-        kwargs: dict[str, object] = {"limit_mm_per_prompt": {"image": 4}}
-
-        apply_multimodal_engine_kwargs(kwargs, strip_multimodal_towers=["audio"])
-
-        assert kwargs == {"limit_mm_per_prompt": {"image": 4, "audio": 0}}
-
     def test_kept_towers_leave_kwargs_alone(self) -> None:
         kwargs: dict[str, object] = {}
 
         apply_multimodal_engine_kwargs(kwargs, strip_multimodal_towers=False)
 
         assert kwargs == {}
-
-
-class TestServesImages:
-    @pytest.mark.parametrize(
-        ("strip_multimodal_towers", "expected"),
-        [
-            (False, True),
-            (["audio", "video"], True),
-            (True, False),
-            (["image"], False),
-        ],
-    )
-    def test_reports_whether_the_image_tower_is_served(
-        self, strip_multimodal_towers: bool | list[str], expected: bool
-    ) -> None:
-        assert serves_images(strip_multimodal_towers) is expected

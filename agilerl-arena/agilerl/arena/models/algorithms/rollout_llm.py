@@ -15,7 +15,6 @@ from agilerl.arena.models.descriptions import (
     BETA,
     COSINE_LR,
     IS_CAP,
-    IS_CORRECTION,
     MAX_OUTPUT_TOKENS,
     MAX_ROW_TOKENS,
     MICRO_BATCH,
@@ -110,9 +109,6 @@ class RolloutLLMSpec(LLMAlgorithmSpec):
         default=None, description=COSINE_LR
     )
     vllm_config: VLLMConfig | None = Field(default=None, description=VLLM_CONFIG)
-    vllm_importance_sampling_correction: bool = Field(
-        default=True, description=IS_CORRECTION
-    )
     vllm_importance_sampling_cap: float = Field(default=2.0, ge=0.0, description=IS_CAP)
     vllm_max_logprob_gap: float = Field(
         default=0.1, ge=0.0, description=VLLM_MAX_LOGPROB_GAP
@@ -120,8 +116,8 @@ class RolloutLLMSpec(LLMAlgorithmSpec):
     vllm_max_clip_fraction: float = Field(
         default=0.02, ge=0.0, le=1.0, description=VLLM_MAX_CLIP_FRACTION
     )
-
     env_type: ClassVar[LLMEnvType] = LLMEnvType.ROLLOUT
+    supports_sequence_packing: ClassVar[bool] = True
 
     @model_validator(mode="after")
     def _validate_sampling_support(self) -> Self:

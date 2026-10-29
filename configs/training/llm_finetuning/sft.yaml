@@ -6,7 +6,6 @@ algorithm:
     update_epochs: 1
     max_grad_norm: 0.1
     calc_position_embeddings: true
-    gradient_checkpointing: true
 
 environment:
     env_type: dataset

@@ -20,24 +20,16 @@ algorithm:
     loss_norm: accumulation_window
     filter_zero_adv: true
     max_output_tokens: 2768
-    use_liger_loss: true
-    use_sequence_packing: true
-    vllm_importance_sampling_correction: true
-    attn_implementation: flex_attention
     quantization: nf4
-    activation_offload: true
-    chunk_rows: 256
-    micro_batch_size_per_gpu: 1
     vllm_config:
         tensor_parallel_size: 1
         gpu_memory_utilization: 0.95
         max_num_seqs: 10
-        sleep_mode: true
         dtype: bfloat16
-        strip_multimodal_towers: true
 
 environment:
     env_type: rollout
+    modality: text
     factory: gem:make
     entrypoint: game:Sudoku-v0-hard
     env_packages:

@@ -451,8 +451,8 @@ class TestLlmPpoLossFn:
             )
 
     def test_unknown_importance_sampling_level_raises(self) -> None:
-        """An unrecognized level name (e.g. the pre-rename "sequence") must
-        raise rather than silently fall through to some default pooling.
+        """An unrecognized level name (e.g. "sequence") must raise rather
+        than silently fall through to some default pooling.
         """
         torch.manual_seed(6)
         log_probs = torch.log_softmax(torch.randn(2, 4, 16), dim=-1)
@@ -498,7 +498,7 @@ def _unfused_turn_reference(
     turn_log_ratio_sum = torch.zeros(B, max_turns, dtype=token_log_ratio.dtype)
     turn_log_ratio_sum.scatter_add_(1, safe_turn_ids, masked_token_log_ratio)
     # Length-normalized mean per turn (GSPO-consistent), matching the fused
-    # impl — not the old sum-pool. Divide by the active-token count per turn.
+    # impl. Divide by the active-token count per turn.
     turn_token_count = torch.zeros(B, max_turns, dtype=token_log_ratio.dtype)
     turn_token_count.scatter_add_(1, safe_turn_ids, token_mask.float())
     turn_log_ratio = turn_log_ratio_sum / turn_token_count.clamp(min=1.0)

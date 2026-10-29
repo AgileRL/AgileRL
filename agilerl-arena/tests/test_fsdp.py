@@ -38,15 +38,6 @@ class TestFSDPConfig:
     @pytest.mark.parametrize(
         ("field", "value", "match"),
         [
-            ("prefetch_units", 0, "prefetch_units must be >= 1"),
-            ("backward_prefetch_units", 0, "backward_prefetch_units must be >= 1"),
-            ("checkpoint_every_n_blocks", 0, "checkpoint_every_n_blocks must be >= 1"),
-            ("wrap_every_n_blocks", 0, "wrap_every_n_blocks must be >= 1"),
-            (
-                "param_persistence_threshold",
-                -1,
-                "param_persistence_threshold must be >= 0",
-            ),
             ("ep", 0, "FSDPConfig.ep must be >= 1"),
             ("ep_token_blocks", 0, "FSDPConfig.ep_token_blocks must be >= 1"),
             (
@@ -77,12 +68,16 @@ class TestFSDPConfig:
 
         assert config.routed_expert_chunk_mib is None
         assert config.optim_cpu_offload is None
+        assert config.cpu_offload is None
 
     def test_memory_fields_keep_set_values(self) -> None:
-        config = FSDPConfig(routed_expert_chunk_mib=1024, optim_cpu_offload=False)
+        config = FSDPConfig(
+            routed_expert_chunk_mib=1024, optim_cpu_offload=False, cpu_offload=False
+        )
 
         assert config.routed_expert_chunk_mib == 1024
         assert config.optim_cpu_offload is False
+        assert config.cpu_offload is False
 
     def test_tp_and_shard_group_default_to_unset(self) -> None:
         config = FSDPConfig()
@@ -108,19 +103,6 @@ class TestFSDPConfig:
         with pytest.raises(ValueError, match=match):
             FSDPConfig(ep=ep, tp=tp, shard_group_size=8)
 
-    def test_prefetch_and_checkpoint_policy_defaults(self) -> None:
-        config = FSDPConfig()
-
-        assert config.prefetch_units == 1
-        assert config.backward_prefetch_units == 1
-        assert config.checkpoint_skip_layer_types == ()
-        assert config.checkpoint_every_n_blocks == 1
-
-    def test_stores_checkpoint_skip_list_as_tuple(self) -> None:
-        config = FSDPConfig(checkpoint_skip_layer_types=["attention", "mlp"])
-
-        assert config.checkpoint_skip_layer_types == ("attention", "mlp")
-
 
 class TestFSDPJsonSchema:
     def test_every_field_has_a_description(self) -> None:
@@ -138,8 +120,6 @@ class TestFSDPJsonSchema:
     def test_carries_integer_bounds(self) -> None:
         properties = FSDP_JSON_SCHEMA["anyOf"][2]["properties"]
 
-        assert properties["prefetch_units"]["minimum"] == 1
-        assert properties["wrap_every_n_blocks"]["minimum"] == 1
-        assert properties["backward_prefetch_units"]["minimum"] == 1
-        assert properties["checkpoint_every_n_blocks"]["minimum"] == 1
-        assert properties["param_persistence_threshold"]["minimum"] == 0
+        assert properties["ep"]["minimum"] == 1
+        assert properties["ep_token_blocks"]["minimum"] == 1
+        assert properties["tp"]["minimum"] == 1

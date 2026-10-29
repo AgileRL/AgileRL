@@ -51,7 +51,6 @@ from agilerl.lora.moe.layouts import (
     is_sorted_experts_module,
     routed_projection_names,
 )
-from agilerl.lora.moe.routed import ROUTED_EXPERT_CHUNK_BYTES
 from agilerl.lora.moe.wrappers import RoutedExpertsLoraWrapper
 
 
@@ -655,12 +654,16 @@ def _route_replicated_span(
 
 
 def _install_routed_ep_forward(
-    module: nn.Module, token_blocks: int, tp_group: dist.ProcessGroup | None
+    module: nn.Module,
+    token_blocks: int,
+    chunk_bytes: int,
+    tp_group: dist.ProcessGroup | None,
 ) -> None:
     """Dispatch → local experts → combine, in ``token_blocks`` token blocks.
 
     :param module: Routed experts module, or its outer LoRA wrapper.
     :param token_blocks: Token blocks per call; see :func:`_routed_ep_blocks`.
+    :param chunk_bytes: Widest fp32 combine chunk.
     :param tp_group: Ranks holding the same tokens, or ``None``. Each routes
         only its :func:`replicated_row_span` and the outputs are all-gathered.
     """
@@ -702,11 +705,6 @@ def _install_routed_ep_forward(
             )
         )
         comm = _comm_stream(comm_streams, hidden_states) if token_blocks > 1 else None
-        chunk_bytes = (
-            self.chunk_bytes
-            if isinstance(self, RoutedExpertsLoraWrapper)
-            else ROUTED_EXPERT_CHUNK_BYTES
-        )
         run_blocks = partial(
             _routed_ep_blocks,
             self,
@@ -800,10 +798,13 @@ def _install_sorted_ep_forward(
 
 
 def install_ep_forward(
-    module: nn.Module, token_blocks: int, tp_group: dist.ProcessGroup | None
+    module: nn.Module,
+    token_blocks: int,
+    chunk_bytes: int,
+    tp_group: dist.ProcessGroup | None,
 ) -> None:
     experts = _base_experts(module)
     if is_routed_experts_module(experts):
-        _install_routed_ep_forward(module, token_blocks, tp_group)
+        _install_routed_ep_forward(module, token_blocks, chunk_bytes, tp_group)
     elif is_sorted_experts_module(experts):
         _install_sorted_ep_forward(module, tp_group)

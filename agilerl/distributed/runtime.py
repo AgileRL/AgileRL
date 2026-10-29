@@ -648,7 +648,9 @@ class DPRuntime(BaseRuntime):
                 gradient_checkpointing_kwargs={"use_reentrant": False}
             )
 
-        optimizer = make_llm_optimizer(placed, lr, lr_critic)
+        optimizer = make_llm_optimizer(
+            placed, lr, lr_critic, fused=target.type == "cuda"
+        )
         return PrepareResult(
             actor=placed,
             optimizer=optimizer,
@@ -794,12 +796,13 @@ class FSDPRuntime(BaseRuntime):
             make_llm_scheduler,
         )
 
-        if self.config.optim_cpu_offload is None:
-            msg = (
-                "FSDPConfig.optim_cpu_offload is unset. LLMAlgorithm.wrap_models "
-                "resolves it from the memory estimate; pass True or False here."
-            )
-            raise ValueError(msg)
+        for name in ("reshard_after_forward", "optim_cpu_offload"):
+            if getattr(self.config, name) is None:
+                msg = (
+                    f"FSDPConfig.{name} is unset. LLMAlgorithm.wrap_models "
+                    "resolves it from the memory estimate; pass True or False here."
+                )
+                raise ValueError(msg)
         if self.config.cpu_offload and self.config.optim_cpu_offload:
             msg = (
                 "FSDPConfig.cpu_offload and optim_cpu_offload are mutually "
@@ -1005,16 +1008,16 @@ class FSDPRuntime(BaseRuntime):
         """
         is_step_boundary = self._count_micro_batch(gradient_accumulation_steps)
 
-        if self.config.defer_grad_sync:
-            if not isinstance(actor, FSDPModule):
-                msg = "defer_grad_sync requires an FSDP2-sharded actor"
-                raise TypeError(msg)
-            actor.set_requires_gradient_sync(is_step_boundary, recurse=True)
-            # A sync-disabled post-backward reads each param's unsharded copy,
-            # which FSDP2 builds on a unit's first forward. A unit that has not
-            # run forward has no grads to defer, so its sync stays on.
-            for unit in self.unforwarded_units:
-                unit.set_requires_gradient_sync(True, recurse=False)
+        if not isinstance(actor, FSDPModule):
+            msg = "FSDPRuntime.backward requires an FSDP2-sharded actor"
+            raise TypeError(msg)
+        # Reduce-scatter only on the last micro-batch of an optimizer step.
+        actor.set_requires_gradient_sync(is_step_boundary, recurse=True)
+        # A sync-disabled post-backward reads each param's unsharded copy,
+        # which FSDP2 builds on a unit's first forward. A unit that has not
+        # run forward has no grads to defer, so its sync stays on.
+        for unit in self.unforwarded_units:
+            unit.set_requires_gradient_sync(True, recurse=False)
 
         if gradient_accumulation_steps > 1:
             loss = loss / gradient_accumulation_steps

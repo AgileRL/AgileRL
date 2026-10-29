@@ -44,6 +44,12 @@ AgileRL ships optional dependency groups that you can install as needed:
    * - ``agilerl[all]``
      - Box2D and LLM extras.
 
+LLM training on CUDA needs FlashAttention 2 for most models. Install it after torch:
+
+.. code-block:: bash
+
+   pip install flash-attn --no-build-isolation
+
 In development mode, quote the extras - for example:
 
 .. code-block:: bash

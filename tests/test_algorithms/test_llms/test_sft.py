@@ -74,7 +74,7 @@ def generate_sft(
     pretrained_model_name_or_path,
     micro_batch_size_per_gpu,
     from_name=False,
-    use_liger_loss=False,
+    liger_loss=False,
     update_epochs=1,
 ):
     gc.collect()
@@ -107,7 +107,7 @@ def generate_sft(
         task_type="CAUSAL_LM",
         lora_dropout=0.05,
     )
-    return SFT(
+    sft = SFT(
         actor_network=actor if not from_name else None,
         model_name=pretrained_model_name_or_path if from_name else None,
         pad_token_id=vocab_size - 1,
@@ -120,9 +120,10 @@ def generate_sft(
         ),
         device="cuda" if torch.cuda.is_available() else "cpu",
         micro_batch_size_per_gpu=micro_batch_size_per_gpu,
-        use_liger_loss=use_liger_loss,
         update_epochs=update_epochs,
     )
+    sft.liger_loss = liger_loss
+    return sft
 
 
 @pytest.fixture
@@ -267,7 +268,7 @@ class TestSFTLearn:
     @pytest.mark.gpu
     @pytest.mark.parametrize("data_batch_size", [32])
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-    @pytest.mark.parametrize("use_liger_loss", [False, True])
+    @pytest.mark.parametrize("liger_loss", [False, True])
     def test_sft_learn(
         self,
         sft_factory,
@@ -280,7 +281,7 @@ class TestSFTLearn:
         max_tokens,
         data_batch_size,
         micro_batch_size_per_gpu,
-        use_liger_loss,
+        liger_loss,
     ):
         sft = sft_factory(
             dist_mode_factory,
@@ -291,7 +292,7 @@ class TestSFTLearn:
             max_tokens,
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
-            use_liger_loss=use_liger_loss,
+            liger_loss=liger_loss,
         )
 
         tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path)
@@ -466,60 +467,27 @@ class TestSFTTest:
             ),
             device="cpu",
             micro_batch_size_per_gpu=1,
-            use_liger_loss=False,
         )
         with pytest.raises(TypeError, match="needs an objective='sft'"):
             sft.test(DummyPreferenceEnv(), loop=1)
 
 
-class TestSFTLigerUnavailableBehaviour:
-    @pytest.mark.parametrize("assertion_mode", ["warns_and_fallback", "private_guard"])
-    def test_sft_liger_unavailable_behaviour(
-        self,
-        monkeypatch,
-        sft_factory,
-        dist_mode_factory,
-        model_factory,
-        assertion_mode,
-    ):
-        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False)
-        monkeypatch.setattr("agilerl.algorithms.sft.HAS_LIGER_KERNEL", False)
-        if assertion_mode == "warns_and_fallback":
-            with pytest.warns(
-                UserWarning,
-                match=r"use_liger_loss=True requested.*Falling back to standard loss\.",
-            ):
-                sft = sft_factory(
-                    dist_mode_factory=dist_mode_factory,
-                    model_factory=model_factory,
-                    dist_mode=None,
-                    vocab_size=30,
-                    input_size=5,
-                    max_tokens=10,
-                    pretrained_model_name_or_path=None,
-                    micro_batch_size_per_gpu=None,
-                    from_name=False,
-                    use_liger_loss=True,
-                )
-            assert sft.use_liger_loss is False
-        else:
-            # When liger is unavailable and use_liger_loss=False, training should
-            # proceed normally using the standard PyTorch cross-entropy loss path.
-            sft = sft_factory(
-                dist_mode_factory=dist_mode_factory,
-                model_factory=model_factory,
-                dist_mode=None,
-                vocab_size=30,
-                input_size=5,
-                max_tokens=10,
-                pretrained_model_name_or_path=None,
-                micro_batch_size_per_gpu=None,
-                from_name=False,
-                use_liger_loss=False,
-            )
-            assert sft.use_liger_loss is False
+class TestSFTLigerLossProperty:
+    def test_liger_runs_with_liger_kernel(self, liger_kernel_installed):
+        # Act
+        with pytest.warns(UserWarning, match="Liger Loss used with LoRA"):
+            sft = make_cpu_sft(liger_loss=None)
 
-        sft.clean_up()
+        # Assert
+        assert sft.liger_loss is True
+        assert sft.lora_config.exclude_modules == ["lm_head"]
+
+    def test_liger_stays_off_without_liger_kernel(self, monkeypatch):
+        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False)
+
+        sft = make_cpu_sft(liger_loss=None)
+
+        assert sft.liger_loss is False
 
 
 class TestSFTLigerBiasCast:
@@ -539,9 +507,8 @@ class TestSFTLigerBiasCast:
             ),
             device="cpu",
             micro_batch_size_per_gpu=1,
-            use_liger_loss=False,
         )
-        sft.use_liger_loss = True
+        sft.liger_loss = True
 
         hidden = torch.randn(2, 6, 10)
         sft.actor = mock.MagicMock()
@@ -667,10 +634,6 @@ class TestSFTSaveLoadCheckpoint:
                 pad_token="<pad>",
                 device="cuda" if torch.cuda.is_available() else "cpu",
                 lora_config=copy.deepcopy(sft.lora_config),
-                # Match the saved agent's setting so the constructor doesn't
-                # mutate ``lora_config`` differently (``use_liger_loss=True``
-                # adds ``exclude_modules=["lm_head"]``).
-                use_liger_loss=sft.use_liger_loss,
             )
             own_profiler = new_sft.learn_profiler
             new_sft.load_checkpoint(tmpdir)
@@ -766,7 +729,7 @@ class TestSFTRecompile:
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
         )
-        # LLMAlgorithm.recompile() is a guarded no-op unless torch_compiler is enabled.
+        # LLM algorithms run with torch_compiler=None, so recompile is a no-op.
         sft.recompile()
         sft.clean_up()
 
@@ -939,10 +902,9 @@ class TestSFTLearnPhaseTimings:
             batch_size=4,
             micro_batch_size_per_gpu=2,
             wrap=False,
-            gradient_checkpointing=False,
             device="cpu",
-            use_liger_loss=False,
         )
+        sft.liger_loss = False
         experiences = {
             "input_ids": torch.randint(
                 0, 99, (4, 6), generator=torch.Generator().manual_seed(0)
@@ -964,9 +926,16 @@ class TestSFTLearnPhaseTimings:
         sft.clean_up()
 
 
-def make_cpu_sft() -> SFT:
-    """Tiny fp32 SFT on CPU with one optimizer step of two micro-batches per learn."""
-    return SFT(
+def make_cpu_sft(
+    liger_loss: bool | None = False, gradient_checkpointing: bool | None = None
+) -> SFT:
+    """Tiny fp32 SFT on CPU with one optimizer step of two micro-batches per learn.
+
+    :param liger_loss: Value to pin ``liger_loss`` to, or ``None`` to keep the
+        value resolved at init.
+    :param gradient_checkpointing: Constructor value.
+    """
+    sft = SFT(
         actor_network=create_module(
             input_size=10, max_tokens=20, vocab_size=100, device="cpu"
         ),
@@ -981,11 +950,13 @@ def make_cpu_sft() -> SFT:
         ),
         batch_size=4,
         micro_batch_size_per_gpu=2,
+        gradient_checkpointing=gradient_checkpointing,
         wrap=False,
-        gradient_checkpointing=False,
         device="cpu",
-        use_liger_loss=False,
     )
+    if liger_loss is not None:
+        sft.liger_loss = liger_loss
+    return sft
 
 
 def random_sft_batch() -> dict[str, torch.Tensor | list[int]]:
@@ -1094,7 +1065,13 @@ class TestSFTUnsetFSDPMemory:
         # Arrange
         agent = make_cpu_sft()
         agent.device = "cuda"
-        config = FSDPConfig(routed_expert_chunk_mib=64, optim_cpu_offload=True)
+        config = FSDPConfig(
+            reshard_after_forward=True,
+            routed_expert_chunk_mib=64,
+            optim_cpu_offload=True,
+            activation_offload=False,
+            cpu_offload=False,
+        )
 
         # Act
         resolved = agent._resolve_fsdp_config(config)
@@ -1109,6 +1086,27 @@ class TestSFTUnsetFSDPMemory:
         agent.device = "cuda"
 
         # Act / Assert
-        with pytest.raises(ValueError, match="routed_expert_chunk_mib"):
+        with pytest.raises(ValueError, match="SFT has unset FSDP memory settings"):
             agent._resolve_fsdp_config(FSDPConfig())
+        agent.clean_up()
+
+
+class TestSFTGradientCheckpointing:
+    def test_unset_turns_checkpointing_on(self) -> None:
+        agent = make_cpu_sft()
+
+        assert agent.gradient_checkpointing is True
+        agent.clean_up()
+
+    def test_clone_keeps_checkpointing_off(self) -> None:
+        # Arrange
+        agent = make_cpu_sft(gradient_checkpointing=False)
+
+        # Act
+        clone = agent.clone(wrap=False)
+
+        # Assert
+        assert agent.gradient_checkpointing is False
+        assert clone.gradient_checkpointing is False
+        clone.clean_up()
         agent.clean_up()

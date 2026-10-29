@@ -33,6 +33,7 @@ from agilerl.arena.memory.advice import advise
 from agilerl.arena.memory.estimator import PhaseBreakdown, estimate_run
 from agilerl.arena.memory.formulas import MAX_UNDERPREDICTION
 from agilerl.arena.memory.manifest import (
+    configured_rollout_engines,
     llm_spec,
     lookup_gpu,
     run_config_from_manifest,
@@ -343,23 +344,18 @@ def _allocation_layout(
     """
     if num_gpus is not None:
         width = engine_width(manifest, num_gpus, device)
-        return width, engines_per_member(manifest.training, num_gpus, width)
+        return width, engines_per_member(manifest, num_gpus, width)
     spec = manifest.algorithm
     if not isinstance(spec, RolloutLLMSpec) or spec.vllm_config is None:
         return None, None
     vllm = spec.vllm_config
-    training = manifest.training
     if vllm.tensor_parallel_size is None:
         msg = (
             "tensor_parallel_size is unset, so the run picks it from the node's "
             "GPUs; pass --num-gpus."
         )
         raise ValueError(msg)
-    if (
-        training.async_rollout
-        and training.rollout_engines_per_agent == "auto"
-        and vllm.max_num_seqs is None
-    ):
+    if configured_rollout_engines(manifest) == "auto" and vllm.max_num_seqs is None:
         msg = (
             "max_num_seqs is unset with auto rollout engines, so the run splits "
             "it across the engines the node's GPUs give; pass --num-gpus."
@@ -679,8 +675,6 @@ class SolveRequest:
     max_num_seqs: int | None = None
     gpu_memory_utilization: float | None = None
     max_model_len: int | None = None
-    enforce_eager: bool | None = None
-    max_loras: int | None = None
     hi: int | None = None
     as_json: bool = False
     no_color: bool = False
@@ -759,18 +753,6 @@ class SolveRequest:
     type=int,
     default=None,
     help="Context cap when solving a different setting.",
-)
-@click.option(
-    "--enforce-eager",
-    is_flag=True,
-    default=None,
-    help="Skip CUDA-graph capture, at some decode-throughput cost.",
-)
-@click.option(
-    "--max-loras",
-    type=int,
-    default=None,
-    help="LoRA adapter slots on the engine.",
 )
 @click.option(
     "--hi",
@@ -878,8 +860,6 @@ def _solve_overrides(request: SolveRequest) -> dict[str, object]:
         "max_num_seqs": request.max_num_seqs,
         "gpu_memory_utilization": request.gpu_memory_utilization,
         "max_model_len": request.max_model_len,
-        "enforce_eager": request.enforce_eager,
-        "max_loras": request.max_loras,
     }
     return {key: value for key, value in flags.items() if value is not None}
 

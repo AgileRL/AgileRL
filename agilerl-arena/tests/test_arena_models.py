@@ -366,17 +366,18 @@ class TestLLMAlgorithmSpecValidators:
         with pytest.raises(ValidationError, match="requires max_output_tokens"):
             DPOSpec(thinking_token_budget=8)
 
-    def test_sequence_packing_requires_packed_attention(self) -> None:
-        with pytest.raises(ValidationError, match="use_sequence_packing requires"):
-            GRPOSpec(group_size=2, use_sequence_packing=True)
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [("use_sequence_packing", True), ("attn_implementation", "sdpa")],
+    )
+    def test_packing_and_attention_backend_are_not_options(
+        self, field: str, value: object
+    ) -> None:
+        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+            GRPOSpec.model_validate({"group_size": 2, field: value})
 
-    def test_sequence_packing_with_flash_attention(self) -> None:
-        spec = GRPOSpec(
-            group_size=2,
-            use_sequence_packing=True,
-            attn_implementation="flash_attention_2",
-        )
-        assert spec.use_sequence_packing is True
+    def test_rollout_algorithms_support_sequence_packing(self) -> None:
+        assert GRPOSpec.supports_sequence_packing is True
 
     def test_deepspeed_is_rejected(self) -> None:
         with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
@@ -411,8 +412,24 @@ class TestLLMAlgorithmSpecValidators:
         spec = GRPOSpec(group_size=2, fsdp=None)
         assert spec.fsdp is None
 
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "prefetch_units",
+            "backward_prefetch_units",
+            "checkpoint_skip_layer_types",
+            "checkpoint_every_n_blocks",
+            "wrap_every_n_blocks",
+            "param_persistence_threshold",
+            "defer_grad_sync",
+        ],
+    )
+    def test_fsdp_tuning_keys_are_rejected(self, field: str) -> None:
+        with pytest.raises(ValidationError, match="Unknown fsdp keys"):
+            GRPOSpec(group_size=2, fsdp={field: 1})
+
     def test_fsdp_config_passes_through(self) -> None:
-        config = FSDPConfig(wrap_every_n_blocks=2)
+        config = FSDPConfig(ep=2)
         spec = GRPOSpec(group_size=2, fsdp=config)
         assert spec.fsdp == config
 
@@ -491,12 +508,18 @@ class TestGRPOSpecOffPolicyCorrections:
             )
 
     @pytest.mark.parametrize("spec_cls", [GRPOSpec, CISPOSpec, GSPOSpec])
-    def test_old_logprobs_source_is_unset_by_default(
-        self, spec_cls: type[GRPOSpec]
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("old_logprobs_source", "trainer"),
+            ("vllm_importance_sampling_correction", False),
+        ],
+    )
+    def test_sampling_logprob_options_are_not_fields(
+        self, spec_cls: type[GRPOSpec], field: str, value: object
     ) -> None:
-        spec = spec_cls(group_size=2)
-
-        assert spec.old_logprobs_source is None
+        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+            spec_cls.model_validate({"group_size": 2, field: value})
 
     def test_yaml_null_and_false_turn_them_off(self) -> None:
         spec = GRPOSpec.model_validate(
@@ -594,22 +617,15 @@ class TestKlClampField:
 
 
 class TestDPOSFTAndRainbow:
-    def test_dpo_rejects_sequence_packing(self) -> None:
+    def test_dpo_trains_padded(self) -> None:
         from agilerl.arena.models.algorithms.dpo import DPOSpec
 
-        assert DPOSpec().use_sequence_packing is False
-        with pytest.raises(
-            ValidationError, match="does not accept use_sequence_packing"
-        ):
-            DPOSpec(use_sequence_packing=True)
+        assert DPOSpec.supports_sequence_packing is False
 
-    def test_sft_rejects_sequence_packing(self) -> None:
+    def test_sft_trains_padded(self) -> None:
         from agilerl.arena.models.algorithms.sft import SFTSpec
 
-        with pytest.raises(
-            ValidationError, match="does not accept use_sequence_packing"
-        ):
-            SFTSpec(use_sequence_packing=True)
+        assert SFTSpec.supports_sequence_packing is False
 
     def test_sft_rejects_activation_offload(self) -> None:
         from agilerl.arena.models.algorithms.sft import SFTSpec
@@ -708,7 +724,6 @@ class TestTrainingSpec:
             rollout_engines_per_agent="auto",
             training_gpus_per_agent=1,
         )
-        assert spec.weight_sync_backend == "nccl"
         assert spec.rollout_batch_size == 1
         assert spec.weight_sync_interval == 1
 
@@ -1464,12 +1479,11 @@ class TestHpoHelpers:
             resolve_selection_brackets(8, 2, None, 1, 0, 1, 1)
 
     def test_mutation_ceiling(self) -> None:
-        from types import SimpleNamespace
-
         from agilerl.arena.models.hpo import (
             MutationSpec,
             RLHyperparameter,
             mutation_ceiling,
+            no_op_mutation_probabilities,
         )
 
         assert mutation_ceiling(None, "lr", 3) == 3
@@ -1480,7 +1494,11 @@ class TestHpoHelpers:
             }
         )
         assert mutation_ceiling(spec, "learn_step", 3) == 10
-        assert mutation_ceiling(SimpleNamespace(rl_hp_selection="nope"), "lr", 3) == 3
+        assert mutation_ceiling(spec, "learn_step", 16) == 16
+        frozen = spec.model_copy(
+            update={"probabilities": no_op_mutation_probabilities()}
+        )
+        assert mutation_ceiling(frozen, "learn_step", 3) == 3
 
 
 class TestReplayBufferParse:

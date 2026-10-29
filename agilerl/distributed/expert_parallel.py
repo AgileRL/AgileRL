@@ -23,6 +23,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, distribute_tensor
 from torch.distributed.tensor.placement_types import Shard
 
+from agilerl.arena.memory.formulas import DEFAULT_ROUTED_CHUNK_BYTES
 from agilerl.distributed.ep_dispatch import (
     AllToAllCtx,
     AllToAllVar,
@@ -233,6 +234,7 @@ def apply_expert_parallel(
     ep_mesh: DeviceMesh | None,
     tp_mesh: DeviceMesh | None = None,
     token_blocks: int = 1,
+    chunk_bytes: int = DEFAULT_ROUTED_CHUNK_BYTES,
 ) -> int:
     """``Shard(0)`` packed-expert weights on ``ep_mesh`` and wrap expert ``forward``.
 
@@ -247,6 +249,7 @@ def apply_expert_parallel(
         ranks.
     :param token_blocks: Token blocks per routed MoE call; block ``b + 1``'s
         all-to-all overlaps block ``b``'s experts on CUDA.
+    :param chunk_bytes: Widest fp32 combine chunk of a routed MoE call.
     :return: How many packed-expert base modules were parallelized.
     """
     if ep_mesh is None:
@@ -264,7 +267,9 @@ def apply_expert_parallel(
         for wrapper in wrappers:
             for link in _chain_links(wrapper):
                 _shard_wrapper_adapters(link, ep_mesh, num_experts, seen)
-        install_ep_forward(wrappers[0] if wrappers else module, token_blocks, tp_group)
+        install_ep_forward(
+            wrappers[0] if wrappers else module, token_blocks, chunk_bytes, tp_group
+        )
         count += 1
     if count:
         patch_lora_for_fused_forward(model)

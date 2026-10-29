@@ -195,9 +195,7 @@ class _Stub:
         self.clip_coef_max = CLIP_MAX
         self.beta = 0.0
         self.temperature = 1.0
-        self.cast_logprobs_to_fp32 = True
         self.max_output_tokens = 32
-        self.chunk_rows = 2
         self.pad_token_id = 0
         self.calc_position_embeddings = False
         self.use_kl_advantage_shaping = False
@@ -903,10 +901,7 @@ class TestFusedActivationOffload:
 
     def test_the_context_comes_from_the_algorithm_hierarchy(self) -> None:
         assert GRPO._activation_offload_ctx is LLMAlgorithm._activation_offload_ctx
-        assert (
-            inspect.signature(GRPO.__init__).parameters["activation_offload"].default
-            is False
-        )
+        assert "activation_offload" not in inspect.signature(GRPO.__init__).parameters
 
 
 class TestFusedKernelPolicyLogProbs:

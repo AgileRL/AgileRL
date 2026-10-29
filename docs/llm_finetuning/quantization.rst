@@ -104,8 +104,8 @@ the GPU at a time:
   before the next rollout.
 
 This relies on vLLM ``sleep(level=1)``, which moves the base out to host RAM
-and back without any loss of precision. It happens automatically for colocated
-rollouts; there is nothing to configure.
+and back without any loss of precision. It happens automatically when one colocated
+agent trains; there is nothing to configure.
 
 Two practicalities:
 
@@ -114,10 +114,11 @@ Two practicalities:
   state where the trainer's subsequent device copies segfault. So for a fresh
   quantized trainer under ``sleep_mode`` the trainer is built first, offloaded
   to CPU, then vLLM starts.
-* **Text-only rollouts for multimodal bases.** vLLM can skip building and
-  loading a multimodal base's vision/audio towers with
-  ``VLLMConfig(strip_multimodal_towers=True)``, or a list of modalities to drop
-  (``["image", "video", "audio"]``). The model keeps its multimodal module
+* **Text-only rollouts for multimodal bases.** vLLM skips building and
+  loading a vision-language base's towers when the environment sends text
+  only (``environment.modality: text``, or dataset rows) and no tower LoRA is
+  set. Direct construction takes ``rollout_strip_multimodal_towers=True`` on
+  the algorithm. The model keeps its multimodal module
   names, so LoRA adapters load the same way either way. Checkpoints are
   unaffected, since only the LoRA adapter is saved.
 
@@ -302,7 +303,6 @@ A typical memory-constrained QLoRA + colocated-vLLM setup on A100:
     vllm_config = VLLMConfig(
         gpu_memory_utilization=0.3,
         dtype="bfloat16",
-        max_lora_rank=16,
     )
 
     agent = GRPO(

@@ -644,6 +644,19 @@ class TestFinetuningNetworkSpecExpertDefault:
         assert spec.lora_config.target_parameters is not None
         assert spec.lora_config.lora_dropout == 0.0
 
+    def test_explicit_parameters_with_nonzero_dropout_raise(self) -> None:
+        with pytest.raises(ValidationError, match="lora_dropout must be 0"):
+            FinetuningNetworkSpec.model_validate(
+                {
+                    "pretrained_model_name_or_path": "openai/gpt-oss-20b",
+                    "max_context_length": 512,
+                    "lora_config": {
+                        "target_parameters": ["mlp.experts.gate_up_proj"],
+                        "lora_dropout": 0.1,
+                    },
+                }
+            )
+
     def test_dense_model_stays_without_parameters(self) -> None:
         spec = finetuning_network("Qwen/Qwen3-4B")
 
@@ -745,7 +758,6 @@ class TestResolveLoraDefaults:
         ("hub_id", "target_parameters"),
         [
             ("Qwen/Qwen3.6-35B-A3B", []),
-            ("Qwen/Qwen3.6-35B-A3B", ["mlp.experts.down_proj"]),
             ("Qwen/Qwen3.5-2B", None),
             ("org/untracked", None),
         ],
@@ -759,6 +771,14 @@ class TestResolveLoraDefaults:
 
         assert lora.target_parameters == target_parameters
         assert lora.lora_dropout == 0.05
+
+    def test_explicit_expert_paths_with_unset_dropout_take_zero(self) -> None:
+        lora = LoraConfigDict(target_parameters=["mlp.experts.down_proj"])
+
+        resolve_lora_defaults(lora, "Qwen/Qwen3.6-35B-A3B")
+
+        assert lora.target_parameters == ["mlp.experts.down_proj"]
+        assert lora.lora_dropout == 0.0
 
 
 class TestResolveReasoningParser:

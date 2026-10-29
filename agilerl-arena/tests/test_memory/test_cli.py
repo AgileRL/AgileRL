@@ -50,7 +50,6 @@ MANIFEST = {
         "name": "GRPO",
         "group_size": 4,
         "batch_size": 2,
-        "micro_batch_size_per_gpu": 1,
         "vllm_config": {
             "gpu_memory_utilization": 0.85,
             "tensor_parallel_size": 1,
@@ -81,7 +80,6 @@ OVERSIZE = {
         "name": "GRPO",
         "group_size": 4,
         "batch_size": 2,
-        "micro_batch_size_per_gpu": 1,
         "vllm_config": {
             "gpu_memory_utilization": 0.9,
             "tensor_parallel_size": 1,
@@ -113,7 +111,6 @@ UNSET_WIDTH_MOE = {
         "group_size": 8,
         "batch_size": 16,
         "fsdp": True,
-        "use_liger_loss": True,
         "use_separate_reference_adapter": True,
         "vllm_config": {"gpu_memory_utilization": 0.95, "max_num_seqs": 16},
     },
@@ -144,7 +141,7 @@ UNSET_WIDTH_MOE = {
 
 #: SFT trains without a rollout engine.
 SFT_MANIFEST = {
-    "algorithm": {"name": "SFT", "micro_batch_size_per_gpu": 1},
+    "algorithm": {"name": "SFT"},
     "environment": {"dataset": "openai/gsm8k"},
     "network": {
         "pretrained_model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
@@ -204,38 +201,19 @@ def no_tier_fits_path(tmp_path):
     return str(path)
 
 
-class TestMultiRowMicroBatch:
-    def test_unset_micro_batch_estimates_a_larger_training_bar(self, tmp_path, capsys):
-        # Arrange
-        def write(name: str, micro: int | None) -> str:
-            doc = copy.deepcopy(MANIFEST)
-            doc["algorithm"]["batch_size"] = 16
-            doc["algorithm"]["group_size"] = 8
-            if micro is None:
-                del doc["algorithm"]["micro_batch_size_per_gpu"]
-            else:
-                doc["algorithm"]["micro_batch_size_per_gpu"] = micro
-            path = tmp_path / name
-            path.write_text(yaml.safe_dump(doc))
-            return str(path)
+class TestPinnedMemoryFields:
+    def test_a_pinned_micro_batch_is_a_usage_error(self, tmp_path, capsys):
+        doc = copy.deepcopy(MANIFEST)
+        doc["algorithm"]["micro_batch_size_per_gpu"] = 1
+        path = tmp_path / "pinned.yaml"
+        path.write_text(yaml.safe_dump(doc))
 
-        one_path = write("one.yaml", 1)
-        many_path = write("many.yaml", None)
+        code = main(str(path), config_path=TINY_CONFIG, device_gb=24, as_json=True)
 
-        # Act
-        one_code = main(one_path, config_path=TINY_CONFIG, device_gb=24, as_json=True)
-        one = json.loads(capsys.readouterr().out)
-        many_code = main(many_path, config_path=TINY_CONFIG, device_gb=24, as_json=True)
-        many = json.loads(capsys.readouterr().out)
-
-        # Assert
-        def total(phase: dict) -> int:
-            return sum(component["bytes"] for component in phase["components"])
-
-        assert one_code != EXIT_USAGE
-        assert many_code != EXIT_USAGE
-        assert total(many["training"]) > total(one["training"])
-        assert total(many["generation"]) == total(one["generation"])
+        assert code == EXIT_USAGE
+        assert "algorithm.micro_batch_size_per_gpu cannot be set" in (
+            capsys.readouterr().err
+        )
 
 
 def _fake_hub(monkeypatch, get_safetensors_metadata):
@@ -892,7 +870,6 @@ class TestSolveMain:
     ):
         # Arrange: 32 rows a rank resolve to one 32-row forward at 512 tokens.
         doc = copy.deepcopy(MANIFEST)
-        del doc["algorithm"]["micro_batch_size_per_gpu"]
         doc["algorithm"]["batch_size"] = 8
         path = tmp_path / "omitted.yaml"
         path.write_text(yaml.safe_dump(doc))
@@ -968,8 +945,8 @@ class TestSolveMain:
             kv = next(c for c in bar["components"] if c["key"] == "kv_cache")
             return kv["detail"]["worst_case_demand"]
 
-        assert total(plain_payload["training"]) == 1678691873
-        assert total(overridden_payload["training"]) == 1680116298
+        assert total(plain_payload["training"]) == 1686160028
+        assert total(overridden_payload["training"]) == 1739861537
         # The generation bar fills the utilization budget at either context.
         assert kv_demand(overridden_payload["generation"]) == 8 * kv_demand(
             plain_payload["generation"]
@@ -1202,7 +1179,7 @@ class TestSolveMain:
 
 
 class TestMemorySolveCommand:
-    def test_accepts_engine_flags(self):
+    def test_solves_from_the_command_line(self):
         # Act
         result = CliRunner().invoke(
             memory_group,
@@ -1216,9 +1193,6 @@ class TestMemorySolveCommand:
                 "tiny",
                 "--config",
                 TINY_CONFIG,
-                "--enforce-eager",
-                "--max-loras",
-                "2",
                 "--no-color",
             ],
         )

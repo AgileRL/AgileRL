@@ -271,7 +271,7 @@ def generate_grpo(
     micro_batch_size_per_gpu,
     sleep_mode=False,
     from_name=False,
-    use_liger_loss=False,
+    liger_loss=False,
     **kwargs,
 ):
     gc.collect()
@@ -304,7 +304,6 @@ def generate_grpo(
             kv_cache_memory_bytes=32 * 1024 * 1024,
             max_num_seqs=1,
             sleep_mode=sleep_mode,
-            enforce_eager=False,
         )
 
         actor = model_factory(pretrained_model_name_or_path)
@@ -363,10 +362,11 @@ def generate_grpo(
         "max_output_tokens": max_tokens,
         "max_model_len": max_tokens + 5,
         "micro_batch_size_per_gpu": micro_batch_size_per_gpu,
-        "use_liger_loss": use_liger_loss,
     }
     grpo_kwargs.update(kwargs)
-    return GRPO(**grpo_kwargs)
+    grpo = GRPO(**grpo_kwargs)
+    grpo.liger_loss = liger_loss
+    return grpo
 
 
 @pytest.fixture
@@ -374,7 +374,12 @@ def grpo_factory():
     return generate_grpo
 
 
-def _make_cpu_grpo_for_branch_tests(**kwargs):
+def _make_cpu_grpo_for_branch_tests(liger_loss: bool | None = False, **kwargs):
+    """Tiny GRPO on CPU.
+
+    :param liger_loss: Value to pin ``liger_loss`` to, or ``None`` to keep the
+        value resolved at init.
+    """
     defaults = {
         "actor_network": create_module(
             input_size=6,
@@ -389,15 +394,13 @@ def _make_cpu_grpo_for_branch_tests(**kwargs):
         "max_output_tokens": 4,
         "max_model_len": 12,
         "wrap": False,
-        "gradient_checkpointing": False,
         "device": "cpu",
-        # Pin so the unfused learn() path is exercised by default
-        # regardless of liger-kernel availability. Liger-specific tests
-        # override this.
-        "use_liger_loss": False,
     }
     defaults.update(kwargs)
-    return GRPO(**defaults)
+    grpo = GRPO(**defaults)
+    if liger_loss is not None:
+        grpo.liger_loss = liger_loss
+    return grpo
 
 
 def _patch_surviving_sample_idxs(grpo, batch_idxs):
@@ -559,7 +562,6 @@ class TestGRPOInit:
             max_output_tokens=4,
             max_model_len=12,
             wrap=False,
-            gradient_checkpointing=False,
             device="cpu",
         )
         assert cispo.loss_type == "cispo"
@@ -581,7 +583,6 @@ class TestGRPOInit:
             max_output_tokens=4,
             max_model_len=12,
             wrap=False,
-            gradient_checkpointing=False,
             device="cpu",
         )
         assert gspo.loss_type == "gspo"
@@ -605,7 +606,6 @@ class TestGRPOInit:
                 max_output_tokens=4,
                 max_model_len=12,
                 wrap=False,
-                gradient_checkpointing=False,
                 device="cpu",
                 off_policy_token_mask_bounds=(0.5, 5.0),
             )
@@ -670,7 +670,6 @@ class TestGRPOInit:
                 max_output_tokens=8,
                 max_model_len=32,
                 wrap=False,
-                gradient_checkpointing=False,
                 device="cpu",
             )
         grpo.clean_up()
@@ -686,9 +685,7 @@ class TestGRPOInit:
             max_output_tokens=32,
             max_model_len=16,
             wrap=False,
-            gradient_checkpointing=False,
             device="cpu",
-            use_liger_loss=False,
         )
 
         assert grpo.max_output_tokens == 32
@@ -1129,22 +1126,6 @@ class TestGRPOInit:
         with pytest.raises(ValueError, match=re.escape(expected_msg)):
             _make_cpu_grpo_for_branch_tests(**extra_kwargs)
 
-    @pytest.mark.skipif(
-        not HAS_LIGER_KERNEL,
-        reason="KL-shaping liger warning path requires liger-kernel availability.",
-    )
-    def test_init_grpo_liger_warns_and_disables_unsupported_kl_shaping(self):
-        with pytest.warns(
-            UserWarning,
-            match="use_kl_advantage_shaping is not supported with use_liger_loss=True",
-        ):
-            grpo = _make_cpu_grpo_for_branch_tests(
-                use_liger_loss=True,
-                use_kl_advantage_shaping=True,
-            )
-        assert grpo.use_kl_advantage_shaping is False
-        grpo.clean_up()
-
     def test_init_grpo_cispo_warns_when_beta_nonzero(self):
         with pytest.warns(UserWarning, match="CISPO is typically used with beta=0"):
             grpo = _make_cpu_grpo_for_branch_tests(loss_type="cispo", beta=0.1)
@@ -1182,24 +1163,27 @@ class TestGRPOInit:
         ("loss_type", "is_level", "expected_supported"),
         [
             ("grpo", None, True),  # token level -> fused kernel
-            ("grpo", "turn", False),  # no fused turn mode
-            ("gspo", None, True),  # trajectory-level grpo objective
+            ("grpo", "turn", False),  # memory-bounded only at token level
+            ("gspo", None, False),  # gspo pools at trajectory level
             ("cispo", None, True),  # cispo @ token
-            ("cispo", "trajectory", False),  # cispo only fused at token level
+            ("cispo", "trajectory", False),  # memory-bounded only at token level
         ],
     )
-    def test_init_liger_level_supported_flag(
+    def test_config_liger_loss_blocker_follows_the_level(
         self, loss_type, is_level, expected_supported
     ):
-        """``_liger_level_supported`` routes ``_loss``: only token/trajectory
-        GRPO and token-level CISPO have a fused Liger kernel.
-        """
+        """Only token-level objectives have a memory-bounded fused Liger kernel."""
         grpo = _make_cpu_grpo_for_branch_tests(
             loss_type=loss_type,
             importance_sampling_level=is_level,
             beta=0.0,
+            off_policy_token_mask_bounds=None,
+            off_policy_sequence_mask_threshold=None,
         )
-        assert grpo._liger_level_supported is expected_supported
+
+        supported = grpo._config_liger_loss_blocker() is None
+
+        assert supported is expected_supported
         grpo.clean_up()
 
     @pytest.mark.gpu
@@ -1516,68 +1500,6 @@ class TestGRPOInit:
                 use_vllm=False,
             ).clean_up()
 
-    @pytest.mark.parametrize("assertion_mode", ["warns_and_fallback", "private_guard"])
-    def test_grpo_liger_unavailable_behaviour(
-        self,
-        monkeypatch,
-        grpo_factory,
-        model_factory,
-        dist_mode_factory,
-        assertion_mode,
-    ):
-        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False)
-        monkeypatch.setattr("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", False)
-        if assertion_mode == "warns_and_fallback":
-            with pytest.warns(
-                UserWarning,
-                match=r"use_liger_loss=True requested.*Falling back to standard loss\.",
-            ):
-                grpo = grpo_factory(
-                    dist_mode_factory=dist_mode_factory,
-                    model_factory=model_factory,
-                    dist_mode=None,
-                    vocab_size=30,
-                    input_size=5,
-                    max_tokens=10,
-                    use_separate_reference_adapter=False,
-                    pretrained_model_name_or_path=None,
-                    micro_batch_size_per_gpu=None,
-                    from_name=False,
-                    group_size=2,
-                    use_vllm=False,
-                    use_liger_loss=True,
-                )
-            assert grpo.use_liger_loss is False
-        else:
-            grpo = grpo_factory(
-                dist_mode_factory=dist_mode_factory,
-                model_factory=model_factory,
-                dist_mode=None,
-                vocab_size=30,
-                input_size=5,
-                max_tokens=10,
-                use_separate_reference_adapter=False,
-                pretrained_model_name_or_path=None,
-                micro_batch_size_per_gpu=None,
-                from_name=False,
-                group_size=2,
-                use_vllm=False,
-                use_liger_loss=False,
-            )
-            with pytest.raises(
-                ImportError,
-                match=r"Liger loss was requested but `liger-kernel` is not available\. Set use_liger_loss=False\.",
-            ):
-                grpo._liger_loss(
-                    batch_ids=torch.ones((1, 2), dtype=torch.long),
-                    action_mask=torch.ones((1, 1), dtype=torch.bool),
-                    advantages=torch.ones((1,), dtype=torch.float32),
-                    old_log_probs=torch.zeros((1, 1), dtype=torch.float32),
-                    reference_log_probs=torch.zeros((1, 1), dtype=torch.float32),
-                )
-
-        grpo.clean_up()
-
 
 class TestGRPOClipCoefTuple:
     """Cover the ``clip_coef`` tuple/list unpacking branch in
@@ -1694,7 +1616,7 @@ class TestGRPOLigerLossDispatch:
         ),
         [
             ("cispo", "cispo", "token", "clip_coef_max"),
-            ("gspo", "grpo", "sequence", "clip_coef_max - 1.0"),
+            ("grpo", "dapo", "token", "clip_coef_max - 1.0"),
         ],
     )
     def test_liger_loss_dispatches_per_loss_type(
@@ -1712,7 +1634,6 @@ class TestGRPOLigerLossDispatch:
         fake_aux = (torch.tensor(0.1), torch.tensor(0.0))
 
         with (
-            patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
             patch.object(grpo, "_get_lm_head", return_value=fake_lm_head),
             patch.object(grpo, "_patch_lm_head_to_identity", nullcontext),
             patch.object(
@@ -1768,7 +1689,6 @@ class TestGRPOLigerLossDispatch:
         fake_lm_head = nn.Linear(8, 16, bias=True)
         fake_aux = (torch.tensor(0.1), torch.tensor(0.0))
         with (
-            patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
             patch.object(grpo, "_get_lm_head", return_value=fake_lm_head),
             patch.object(grpo, "_patch_lm_head_to_identity", nullcontext),
             patch.object(grpo, "actor", new=MagicMock(wraps=grpo.actor)),
@@ -1818,7 +1738,6 @@ class TestGRPOLigerLossDispatch:
         fake_aux = (torch.tensor(0.1), torch.tensor(0.0))
 
         with (
-            patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
             patch.object(grpo, "_get_lm_head", return_value=fake_lm_head),
             patch.object(grpo, "_patch_lm_head_to_identity", nullcontext),
             patch.object(grpo, "actor", new=MagicMock(wraps=grpo.actor)),
@@ -1860,7 +1779,6 @@ class TestGRPOLigerLossDispatch:
         fake_aux = (torch.tensor(0.1), torch.tensor(0.0))
 
         with (
-            patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
             patch.object(grpo, "_get_lm_head", return_value=fake_lm_head),
             patch.object(grpo, "_patch_lm_head_to_identity", nullcontext),
             patch.object(grpo, "actor", new=MagicMock(wraps=grpo.actor)),
@@ -1906,7 +1824,6 @@ class TestGRPOLigerLossDispatch:
         fake_lm_head = nn.Linear(8, 16, bias=True)
 
         with (
-            patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
             patch.object(grpo, "_get_lm_head", return_value=fake_lm_head),
             patch.object(grpo, "_patch_lm_head_to_identity", nullcontext),
             patch.object(grpo, "actor", new=MagicMock(wraps=grpo.actor)),
@@ -2057,7 +1974,6 @@ class TestGRPOLigerSequencePacking:
 
         def run():
             with (
-                patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
                 patch(
                     "agilerl.algorithms.grpo.LigerFusedLinearGRPOFunction",
                     _DummyLigerFn,
@@ -2078,12 +1994,12 @@ class TestGRPOLigerSequencePacking:
             return loss, actor.last_input_shape
 
         # Padded baseline.
-        grpo.use_sequence_packing = False
+        grpo.sequence_packing = False
         loss_padded, padded_shape = run()
         assert padded_shape == (b_size, t)
 
         # Packed: same numbers, but the forward sees one (1, N) row.
-        grpo.use_sequence_packing = True
+        grpo.sequence_packing = True
         grpo.actor.config._attn_implementation = "flash_attention_2"
         assert grpo._packing_mode() == "varlen"
         loss_packed, packed_shape = run()
@@ -2093,47 +2009,6 @@ class TestGRPOLigerSequencePacking:
         assert torch.isfinite(loss_padded)
         assert loss_padded.abs() > 0
         assert torch.allclose(loss_packed, loss_padded, atol=1e-5)
-
-    def test_packing_disabled_on_dense_backend_falls_back(self):
-        """An unsupported (dense) backend disables packing: the forward stays
-        padded even with ``use_sequence_packing=True``.
-        """
-        grpo = _make_cpu_grpo_for_branch_tests(
-            loss_norm="micro_batch", loss_type="grpo", beta=0.0
-        )
-        grpo.pad_token_id = 0
-        vocab, hidden = 16, 8
-        actor = _CtxFreeActor(vocab, hidden).to(grpo.device)
-        grpo.actor = actor
-        lm_head = nn.Linear(hidden, vocab).to(grpo.device)
-        grpo.use_sequence_packing = True
-        grpo.actor.config._attn_implementation = "sdpa"
-
-        batch_ids = torch.tensor([[1, 2, 3, 0], [4, 5, 0, 0]], dtype=torch.long)
-        action_mask = torch.tensor(
-            [[True, True, False], [True, False, False]], dtype=torch.bool
-        )
-        with (
-            patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
-            patch(
-                "agilerl.algorithms.grpo.LigerFusedLinearGRPOFunction", _DummyLigerFn
-            ),
-            patch.object(grpo, "_get_lm_head", return_value=lm_head),
-            patch.object(grpo, "_patch_lm_head_to_identity", nullcontext),
-            patch.object(
-                LLMAlgorithm, "select_adapter", lambda self, name: nullcontext()
-            ),
-            pytest.warns(UserWarning, match="varlen/block-sparse"),
-        ):
-            grpo._liger_loss(
-                batch_ids=batch_ids,
-                action_mask=action_mask,
-                advantages=torch.randn(2),
-                old_log_probs=torch.zeros(2, 3),
-                reference_log_probs=torch.zeros(2, 3),
-            )
-        # Dense backend -> no packing -> padded (B, T) forward.
-        assert actor.last_input_shape == (2, 4)
 
 
 class TestGRPOGetAction:
@@ -2621,9 +2496,8 @@ class TestGRPOGspoLoss:
         (vocab-chunked, gradient-checkpointed lm_head) feeding the
         trajectory-level Stage-2 loss must match computing log-probs from
         materialized ``(B, T, V)`` logits — in both loss value and the
-        gradient back to the policy hidden states. This is the path GSPO
-        uses with ``use_liger_loss=False`` (the fused-linear-logprob path is
-        always on).
+        gradient back to the policy hidden states. This is the path of
+        GSPO's standard loss (the fused-linear-logprob path is always on).
         """
         stub = _GrpoLossStub(
             clip_coef_min=0.8,
@@ -2676,8 +2550,6 @@ class TestGRPOGspoLoss:
             bias,
             targets,
             temperature=temperature,
-            cast_to_fp32=True,
-            chunk_rows=5,
         )
         loss_fused, kl_fused, _ = stub._gspo_loss(
             mask,
@@ -2823,8 +2695,6 @@ class TestGRPOTurnLevel:
             bias,
             targets,
             temperature=temperature,
-            cast_to_fp32=True,
-            chunk_rows=5,
         )
         loss_fused, _, _ = loss_fn(mask, fused, old, ref, advantages, turn_ids)
         loss_fused.backward()
@@ -3286,7 +3156,7 @@ class TestGRPOLearn:
     @pytest.mark.vllm
     @pytest.mark.parametrize("batch_size", [6])
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-    @pytest.mark.parametrize("use_liger_loss", [False, True])
+    @pytest.mark.parametrize("liger_loss", [False, True])
     def test_grpo_learn(
         self,
         grpo_factory,
@@ -3302,9 +3172,9 @@ class TestGRPOLearn:
         pretrained_model_name_or_path,
         batch_size,
         micro_batch_size_per_gpu,
-        use_liger_loss,
+        liger_loss,
     ):
-        if use_vllm and use_liger_loss:
+        if use_vllm and liger_loss:
             pytest.skip("Skip vLLM learn path with liger in this mocked-call test.")
         mock_llm_instance = make_mock_vllm_instance(vllm.LLM)
         llm_patch_ctx = (
@@ -3326,9 +3196,9 @@ class TestGRPOLearn:
                 pretrained_model_name_or_path,
                 micro_batch_size_per_gpu,
                 sleep_mode=True,
-                use_liger_loss=use_liger_loss,
+                liger_loss=liger_loss,
             )
-        if use_vllm and use_liger_loss:
+        if use_vllm and liger_loss:
             pytest.skip("Skip vLLM learn path with liger in this mocked-call test.")
         mock_llm_instance = make_mock_vllm_instance(vllm.LLM)
         llm_patch_ctx = (
@@ -3350,7 +3220,7 @@ class TestGRPOLearn:
                 pretrained_model_name_or_path,
                 micro_batch_size_per_gpu,
                 sleep_mode=True,
-                use_liger_loss=use_liger_loss,
+                liger_loss=liger_loss,
             )
         completions = [
             torch.randint(
@@ -4399,10 +4269,6 @@ class TestGRPOSaveLoadCheckpoint:
                     else CosineLRScheduleConfig(num_steps=10, warmup_proportion=0.05)
                 ),
                 use_separate_reference_adapter=use_separate_reference_adapter,
-                # Match the saved agent's setting so the constructor doesn't
-                # mutate ``lora_config`` differently (``use_liger_loss=True``
-                # adds ``exclude_modules=["lm_head"]``).
-                use_liger_loss=grpo.use_liger_loss,
             )
             own_profiler = new_grpo.learn_profiler
             new_grpo.load_checkpoint(tmpdir)
@@ -4541,10 +4407,6 @@ class TestGRPOSaveLoadCheckpointResume:
             cosine_lr_schedule_config=None,
             use_separate_reference_adapter=use_separate_reference_adapter,
             max_output_tokens=max_tokens,
-            # Match the saved agent's setting so the constructor doesn't
-            # mutate ``lora_config`` differently (``use_liger_loss=True``
-            # adds ``exclude_modules=["lm_head"]``).
-            use_liger_loss=grpo.use_liger_loss,
         )
         new_grpo.load_checkpoint(tmpdir, load_optimizer=True)
 
@@ -5683,18 +5545,16 @@ class TestGRPOVLLMSamplingCorrection:
         # Row 0 contributes |log-diff| 0.5 per token, row 1 contributes 0.
         assert metrics["vllm_is_delta_mean"] == pytest.approx(0.25, rel=1e-6)
 
-    def test_learn_liger_token_with_sampling_logps_uses_fused_kernel(self, monkeypatch):
-        """token-level use_liger_loss=True + captured vLLM logprobs: the
+    def test_learn_liger_token_with_sampling_logps_uses_fused_kernel(self):
+        """token-level liger_loss=True + captured vLLM logprobs: the
         correction is fused into the kernel (``vllm_is_ratio``), so ``_loss``
         keeps the Liger path and threads ``sampling_log_probs`` through —
         no fallback warning.
         """
-        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
-        monkeypatch.setattr("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True)
         grpo = _make_cpu_grpo_for_branch_tests(
+            liger_loss=True,
             group_size=2,
             update_epochs=1,
-            use_liger_loss=True,
             old_logprobs_source="trainer",
         )
         assert grpo.importance_sampling_level == "token"
@@ -5738,70 +5598,21 @@ class TestGRPOVLLMSamplingCorrection:
         assert not any(
             "token-level importance sampling" in str(w.message) for w in caught
         )
-        assert grpo._is_correction_liger_warned is False
         grpo.clean_up()
 
-    def test_learn_liger_nontoken_with_sampling_logps_warns_and_uses_standard_path(
-        self, monkeypatch
-    ):
-        """trajectory-level (GSPO) use_liger_loss=True + captured vLLM logprobs:
-        the per-token reweight can't be pooled into the sequence ratio, so the
-        correction warns once and runs the standard path (``_liger_loss`` not
-        called).
-        """
+    def test_trajectory_level_with_masks_runs_the_standard_loss(self, monkeypatch):
+        """Trajectory-level GRPO with off-policy masks has no fused kernel."""
         monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
-        monkeypatch.setattr("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True)
+
         grpo = _make_cpu_grpo_for_branch_tests(
+            liger_loss=None,
             group_size=2,
             update_epochs=1,
-            use_liger_loss=True,
             importance_sampling_level="trajectory",
             old_logprobs_source="trainer",
         )
-        completion_ids, action_masks = _build_branch_experiences(batch_size=2)
-        rewards = torch.tensor([1.0, -1.0], dtype=torch.float32)
-        n_act = int(action_masks[0].sum())
-        sampling_logps = [
-            torch.full((n_act,), -3.0, dtype=torch.float32) for _ in range(2)
-        ]
 
-        def fake_fused_forward(ids, batch_size, **_kwargs):
-            shape = (ids.shape[0], ids.shape[1] - 1)
-            zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
-            return zeros, zeros, None
-
-        def fake_get_logprobs(
-            ids, batch_size, use_reference=False, eval_mode=False, **_kwargs
-        ):
-            return torch.zeros(
-                ids.shape[0],
-                ids.shape[1] - 1,
-                device=ids.device,
-                requires_grad=True,
-            )
-
-        with (
-            patch.object(
-                grpo, "_fused_forward_no_grad", side_effect=fake_fused_forward
-            ),
-            patch.object(grpo, "_get_logprobs", side_effect=fake_get_logprobs),
-            patch.object(grpo, "_backward_pass", return_value=None),
-            patch.object(grpo, "_liger_loss") as mock_liger_loss,
-            pytest.warns(
-                UserWarning,
-                match="only at token-level importance sampling",
-            ),
-        ):
-            metrics = grpo.learn(
-                (completion_ids, action_masks, rewards),
-                sampling_logps=sampling_logps,
-            )
-        # The fused kernel was bypassed in favour of the standard path.
-        mock_liger_loss.assert_not_called()
-        assert grpo._is_correction_liger_warned is True
-        assert "vllm_is_delta_mean" in metrics
-        assert torch.isfinite(torch.tensor(metrics["loss"]))
-        grpo.clean_up()
+        assert grpo.liger_loss is False
 
 
 class TestGRPONonFinitePaddingIsIsolated:
@@ -5922,7 +5733,6 @@ class TestGRPONonFinitePaddingIsIsolated:
         )
 
         with (
-            patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
             patch.object(grpo, "_get_lm_head", return_value=fake_lm_head),
             patch.object(grpo, "_patch_lm_head_to_identity", nullcontext),
             patch.object(grpo, "actor", new=MagicMock(wraps=grpo.actor)),
@@ -6051,39 +5861,6 @@ class TestGRPOInitWarnings:
         assert grpo.advantage_granularity == "turn"
         grpo.clean_up()
 
-    def test_init_liger_turn_level_warns_it_runs_the_standard_path(self):
-        with (
-            patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True),
-            patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
-            pytest.warns(
-                UserWarning,
-                match="no fused grpo kernel at importance_sampling_level='turn'",
-            ),
-        ):
-            grpo = _make_cpu_grpo_for_branch_tests(
-                use_liger_loss=True, importance_sampling_level="turn"
-            )
-        assert grpo._liger_path_selected is False
-        grpo.clean_up()
-
-    def test_init_liger_trajectory_level_does_not_warn(self):
-        with (
-            patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True),
-            patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
-            warnings.catch_warnings(record=True) as caught,
-        ):
-            warnings.simplefilter("always")
-            grpo = _make_cpu_grpo_for_branch_tests(
-                use_liger_loss=True,
-                importance_sampling_level="trajectory",
-                vllm_importance_sampling_correction=False,
-                off_policy_token_mask_bounds=None,
-                off_policy_sequence_mask_threshold=None,
-            )
-        assert not [w for w in caught if "fused" in str(w.message)]
-        assert grpo._liger_path_selected is True
-        grpo.clean_up()
-
 
 class TestGRPOTurnAdvantageLearnPath:
     def test_calculate_turn_advantage_indivisible_batch_raises(self):
@@ -6143,57 +5920,16 @@ class TestGRPOTurnAdvantageLearnPath:
         assert np.isfinite(metrics["loss"])
         grpo.clean_up()
 
-    def test_learn_liger_turn_level_falls_back_to_standard_path(self):
-        """Liger + turn-level IS has no fused kernel: learn() must warn and
-        run the standard path (turn_ids stacked into the minibatches).
-        """
-        with (
-            patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True),
-            patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
-            pytest.warns(UserWarning, match="no fused grpo kernel"),
-        ):
-            grpo = _make_cpu_grpo_for_branch_tests(
-                group_size=2,
-                update_epochs=1,
-                use_liger_loss=True,
-                importance_sampling_level="turn",
-                advantage_granularity="turn",
-            )
-        completion_ids, action_masks = _build_branch_experiences(batch_size=2)
-        turn_rewards = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
-        turn_ids = torch.zeros(2, 9, dtype=torch.long)
-        turn_ids[:, 5:] = 1
-        p1, p2, p3 = self._stubbed_forwards(grpo)
-        with p1, p2, p3, patch.object(grpo, "_liger_loss") as mock_liger:
-            metrics = grpo.learn(
-                (completion_ids, action_masks, turn_rewards), turn_ids=turn_ids
-            )
-        mock_liger.assert_not_called()
-        assert np.isfinite(metrics["loss"])
-        grpo.clean_up()
-
-
-@contextmanager
-def _liger_available():
-    """Make both liger gates report the kernel as installed."""
-    with (
-        patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True),
-        patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
-    ):
-        yield
-
 
 class TestGRPOMetricRegistration:
     """A real ``GRPO`` registers the fixed kl/clipfrac keys plus telemetry."""
 
-    @pytest.mark.parametrize("use_liger_loss", [False, True])
+    @pytest.mark.parametrize("has_liger_kernel", [False, True])
     def test_init_registers_kl_clipfrac_and_telemetry(
-        self, use_liger_loss: bool
+        self, has_liger_kernel: bool
     ) -> None:
-        with _liger_available():
-            grpo = _make_cpu_grpo_for_branch_tests(
-                use_liger_loss=use_liger_loss, beta=0.0
-            )
+        with patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", has_liger_kernel):
+            grpo = _make_cpu_grpo_for_branch_tests(liger_loss=None, beta=0.0)
         for name in (
             "loss",
             "kl",
