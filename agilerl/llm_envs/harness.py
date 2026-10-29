@@ -589,7 +589,7 @@ class RolloutHarness(RestartPromptMixin):
         Rows + rubric are served in-process as a single-turn
         :class:`~agilerl.llm_envs.qa_dataset.QADatasetEnv` (``max_turns`` fixed
         to 1); ``test_dataset`` rows are served under :meth:`eval_mode`. Wrap a
-        ``(completion, answer, question) -> float`` callable with
+        callable of ``completion``, ``answer``, and ``question`` with
         :func:`~agilerl.llm_envs.rubrics.reward_fn_to_rubric` first.
 
         :param dataset: Train rows, indexable to mappings with the question/answer keys.
