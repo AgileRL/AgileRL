@@ -44,7 +44,7 @@ NEMOTRON_H_RUNTIME_CONFIG = ModelRuntimeConfig(
         "agilerl.architectures.nemotron_h.tensor_parallel:"
         "NEMOTRON_H_TENSOR_PARALLEL_PLAN"
     ),
-    tool_call_parser="tool_call",
+    chat_format="tool_call",
 )
 
 
@@ -102,14 +102,14 @@ GEMMA_SWA_RUNTIME_CONFIG = ModelRuntimeConfig(
 
 GEMMA4_TEXT_RUNTIME_CONFIG = GEMMA_SWA_TEXT_RUNTIME_CONFIG.model_copy(
     update={
-        "tool_call_parser": "gemma4",
+        "chat_format": "gemma4",
         "reasoning_parser": REASONING_PARSERS["gemma4_text"],
     },
 )
 
 GEMMA4_RUNTIME_CONFIG = GEMMA_SWA_RUNTIME_CONFIG.model_copy(
     update={
-        "tool_call_parser": "gemma4",
+        "chat_format": "gemma4",
         "reasoning_parser": REASONING_PARSERS["gemma4"],
         "patch": PatchRuntimeConfig(install=install_gemma4_vision_patches),
         # vLLM swaps every tower linear for a LoRA layer and keeps HF names;
@@ -134,15 +134,15 @@ GEMMA4_RUNTIME_CONFIG = GEMMA_SWA_RUNTIME_CONFIG.model_copy(
 )
 
 GPT_OSS_RUNTIME_CONFIG = ModelRuntimeConfig(
-    tool_call_parser="harmony",
+    chat_format="harmony",
     reasoning_parser=REASONING_PARSERS["gpt_oss"],
 )
 
-# Families whose only catalog setting is the tool-call format.
-TOOL_CALL_TAG_RUNTIME_CONFIG = ModelRuntimeConfig(tool_call_parser="tool_call")
-GRANITE3_RUNTIME_CONFIG = ModelRuntimeConfig(tool_call_parser="granite3")
+# Families whose only catalog setting is the chat format.
+TOOL_CALL_TAG_RUNTIME_CONFIG = ModelRuntimeConfig(chat_format="tool_call")
+GRANITE3_RUNTIME_CONFIG = ModelRuntimeConfig(chat_format="granite3")
 QWEN3_RUNTIME_CONFIG = ModelRuntimeConfig(
-    tool_call_parser="tool_call", reasoning_parser=REASONING_PARSERS["qwen3"]
+    chat_format="tool_call", reasoning_parser=REASONING_PARSERS["qwen3"]
 )
 
 
@@ -154,7 +154,7 @@ QWEN3_5_TEXT_RUNTIME_CONFIG = ModelRuntimeConfig(
         dense_mamba_prefix_cache=True,
     ),
     patch=PatchRuntimeConfig(install=install_qwen_gdn_patches),
-    tool_call_parser="tool_call",
+    chat_format="tool_call",
     reasoning_parser=REASONING_PARSERS["qwen3_5_text"],
 )
 

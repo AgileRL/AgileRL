@@ -1,13 +1,11 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Locate a turn's reasoning-end marker in its generated token ids."""
+"""Token-id helpers for a turn's reasoning block."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-
-from agilerl.arena.models.model_info import REASONING_END_MARKERS
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Sequence
@@ -15,24 +13,10 @@ if TYPE_CHECKING:
     from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 REASONING_END_MARKER = "</think>"
-"""Marker closing a reasoning block for a run whose engine has no reasoning parser."""
+"""Marker closing a reasoning block in the tag format, or taught as plain text by a prompt."""
 
 SUBSEQUENCE_NOT_FOUND = -1
 """Index reported when a token-id pattern does not occur in a token-id sequence."""
-
-
-def reasoning_end_marker(reasoning_parser: str | None) -> str:
-    """Return the marker a vLLM reasoning parser ends a reasoning block with.
-
-    :param reasoning_parser: The run's vLLM reasoning parser, or ``None`` when
-        the model has none.
-    :type reasoning_parser: str | None
-    :return: The parser's end marker, or ``</think>`` for no parser.
-    :rtype: str
-    """
-    if reasoning_parser is None:
-        return REASONING_END_MARKER
-    return REASONING_END_MARKERS[reasoning_parser]
 
 
 def tokenizer_reasoning_end_ids(
@@ -116,41 +100,3 @@ def reasoning_trace_text(
     while ids and ids[-1] in special_ids:
         ids.pop()
     return decode(ids, skip_special_tokens=False).strip()
-
-
-def post_reasoning_text(
-    gen_ids: Sequence[int],
-    reasoning_end_ids: Sequence[int],
-    decode: Callable[..., str],
-) -> str:
-    """Decoded text after the first reasoning-end marker, else the whole generation.
-
-    The marker is found by token id first, so a marker the decode strips as a
-    special token still ends the reasoning. A multi-token marker can merge with
-    the tokens around it, so its full text is also matched in the decoded text;
-    a marker holding special tokens never survives that decode, so it matches by
-    id alone. A template that prefills the open marker yields
-    ``reasoning<end>action``; a reasoning block that never closes passes through
-    whole.
-
-    :param gen_ids: Token ids generated for the turn, prompt excluded.
-    :type gen_ids: Sequence[int]
-    :param reasoning_end_ids: Token ids spelling the reasoning-end marker.
-    :type reasoning_end_ids: Sequence[int]
-    :param decode: Tokenizer-style decode taking ``skip_special_tokens``; the env
-        receives its text with special tokens skipped.
-    :type decode: Callable[..., str]
-    :return: Action text, stripped when the reasoning closed.
-    :rtype: str
-    """
-    ids = list(gen_ids)
-    end = find_token_subsequence(ids, reasoning_end_ids)
-    if end != SUBSEQUENCE_NOT_FOUND:
-        tail = ids[end + len(reasoning_end_ids) :]
-        return decode(tail, skip_special_tokens=True).strip()
-    text = decode(ids, skip_special_tokens=True)
-    marker = decode(list(reasoning_end_ids), skip_special_tokens=False)
-    if not marker:
-        return text
-    _reasoning, closed, action = text.partition(marker)
-    return action.strip() if closed else text

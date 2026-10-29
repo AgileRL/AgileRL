@@ -26,7 +26,7 @@ from agilerl.arena.models.env import LLMEnvType
 from agilerl.arena.models.fsdp import FSDPConfig
 from agilerl.arena.models.hpo import RLHyperparameter
 from agilerl.arena.models.model_info import (
-    REASONING_END_MARKERS,
+    KNOWN_REASONING_PARSERS,
     enforces_thinking_budget,
     resolve_reasoning_parser,
 )
@@ -386,14 +386,14 @@ class LLMAlgorithmSpec(AlgorithmSpec):
     @field_validator("vllm_engine_args")
     @classmethod
     def _validate_reasoning_parser(cls, value: dict[str, Any]) -> dict[str, Any]:
-        """Rollouts split each turn on the reasoning parser's end marker, so it must be known."""
+        """Only reasoning parsers checked against the model's format parser may be set."""
         parser = value.get("reasoning_parser")
-        if parser is None or parser in REASONING_END_MARKERS:
+        if parser is None or parser in KNOWN_REASONING_PARSERS:
             return value
-        known = ", ".join(sorted(REASONING_END_MARKERS))
+        known = ", ".join(sorted(KNOWN_REASONING_PARSERS))
         msg = (
-            f"vllm_engine_args.reasoning_parser={parser!r} has no known "
-            f"reasoning-end marker; set one of {known}"
+            f"vllm_engine_args.reasoning_parser={parser!r} is not a supported "
+            f"reasoning parser; set one of {known}"
         )
         raise ValueError(msg)
 
@@ -450,7 +450,7 @@ class LLMAlgorithmSpec(AlgorithmSpec):
             if parser
             else self.pretrained_model_name_or_path
         )
-        budget_parsers = filter(enforces_thinking_budget, REASONING_END_MARKERS)
+        budget_parsers = filter(enforces_thinking_budget, KNOWN_REASONING_PARSERS)
         msg = (
             f"thinking_token_budget={budget} needs a vLLM reasoning parser with "
             f"reasoning start and end tokens, and {lacking} has none. Unset "

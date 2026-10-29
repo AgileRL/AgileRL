@@ -31,8 +31,6 @@ from agilerl.models.env import (
 )
 from tests import TINY_LLM_FIXTURE_PATH
 
-THINK_CLOSE_ID = 151668
-
 
 def _write_module(tmp_path, name: str, contents: str) -> None:
     module_path = tmp_path / f"{name}.py"
@@ -65,9 +63,19 @@ class RecordingTextEnv:
         return "", 1.0, True, False, {}
 
 
+GEMMA_SPECIAL_TOKENS = [
+    "<|channel>",
+    "<channel|>",
+    "<|tool_call>",
+    "<tool_call|>",
+    "<|tool_response>",
+    "<tool_response|>",
+]
+
+
 @pytest.fixture(scope="module")
-def gemma_style_tokenizer() -> PreTrainedTokenizerBase:
-    """Tiny tokenizer whose reasoning channel markers are special, as in Gemma 4."""
+def channel_marker_tokenizer() -> PreTrainedTokenizerBase:
+    """Tiny tokenizer with Gemma's channel markers but no Gemma tool tokens."""
     tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
     tokenizer.add_special_tokens(
         {"additional_special_tokens": ["<|channel>", "<channel|>"]}
@@ -76,8 +84,17 @@ def gemma_style_tokenizer() -> PreTrainedTokenizerBase:
 
 
 @pytest.fixture(scope="module")
+def gemma_style_tokenizer() -> PreTrainedTokenizerBase:
+    """Tiny tokenizer named as Gemma 4, with its tool and channel tokens special."""
+    tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+    tokenizer.add_special_tokens({"additional_special_tokens": GEMMA_SPECIAL_TOKENS})
+    tokenizer.name_or_path = "google/gemma-4-E4B-it"
+    return tokenizer
+
+
+@pytest.fixture(scope="module")
 def harmony_style_tokenizer() -> PreTrainedTokenizerBase:
-    """Tiny tokenizer whose harmony channel markers are special, as in gpt-oss."""
+    """Tiny tokenizer named as gpt-oss, with its harmony markers special."""
     tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
     tokenizer.add_special_tokens(
         {
@@ -87,14 +104,16 @@ def harmony_style_tokenizer() -> PreTrainedTokenizerBase:
                 "<|start|>",
                 "<|end|>",
                 "<|return|>",
+                "<|call|>",
             ]
         }
     )
+    tokenizer.name_or_path = "openai/gpt-oss-20b"
     return tokenizer
 
 
 def step_colocated_rollout(
-    tokenizer: PreTrainedTokenizerBase, generation: str, reasoning_parser: str | None
+    tokenizer: PreTrainedTokenizerBase, generation: str
 ) -> list[object]:
     """Step one rollout-factory harness on ``generation`` and return the env's actions."""
     env = RecordingTextEnv()
@@ -110,7 +129,6 @@ def step_colocated_rollout(
             tokenizer,
             max_model_len=512,
             max_output_tokens=64,
-            reasoning_parser=reasoning_parser,
         )
         harness = factory()
     prompt, _info = harness.reset()
@@ -121,37 +139,50 @@ def step_colocated_rollout(
     return env.actions
 
 
-class TestMakeRolloutEnvFactoryReasoningParser:
+class TestMakeRolloutEnvFactoryReasoningSplit:
     GEMMA_GENERATION = "<|channel>thought\nthe lamp is $5<channel|>click('12')"
 
-    def test_gemma_parser_sends_only_the_post_reasoning_action(
+    def test_gemma_sends_only_the_post_reasoning_action(
         self, gemma_style_tokenizer: PreTrainedTokenizerBase
     ) -> None:
+        actions = step_colocated_rollout(gemma_style_tokenizer, self.GEMMA_GENERATION)
+
+        assert actions == ["click('12')"]
+
+    def test_unsupported_model_splits_on_think_close(
+        self, channel_marker_tokenizer: PreTrainedTokenizerBase
+    ) -> None:
         actions = step_colocated_rollout(
-            gemma_style_tokenizer, self.GEMMA_GENERATION, "gemma4"
+            channel_marker_tokenizer, "the lamp is $5</think>\n\nclick('12')"
         )
 
         assert actions == ["click('12')"]
 
-    def test_no_parser_splits_on_think_close(
-        self, gemma_style_tokenizer: PreTrainedTokenizerBase
+    def test_unsupported_model_leaves_a_gemma_reasoning_channel_in_the_action(
+        self, channel_marker_tokenizer: PreTrainedTokenizerBase
     ) -> None:
         actions = step_colocated_rollout(
-            gemma_style_tokenizer, "the lamp is $5</think>\n\nclick('12')", None
-        )
-
-        assert actions == ["click('12')"]
-
-    def test_no_parser_leaves_a_gemma_reasoning_channel_in_the_action(
-        self, gemma_style_tokenizer: PreTrainedTokenizerBase
-    ) -> None:
-        actions = step_colocated_rollout(
-            gemma_style_tokenizer, self.GEMMA_GENERATION, None
+            channel_marker_tokenizer, self.GEMMA_GENERATION
         )
 
         assert actions == ["thought\nthe lamp is $5click('12')"]
 
-    def test_gpt_oss_parser_sends_only_the_final_channel(
+    def test_local_model_dir_uses_its_family_chat_format(self, tmp_path) -> None:
+        # Arrange
+        (tmp_path / "config.json").write_text('{"model_type": "gemma4"}')
+        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+        tokenizer.add_special_tokens(
+            {"additional_special_tokens": GEMMA_SPECIAL_TOKENS}
+        )
+        tokenizer.name_or_path = str(tmp_path)
+
+        # Act
+        actions = step_colocated_rollout(tokenizer, self.GEMMA_GENERATION)
+
+        # Assert
+        assert actions == ["click('12')"]
+
+    def test_gpt_oss_sends_only_the_final_channel(
         self, harmony_style_tokenizer: PreTrainedTokenizerBase
     ) -> None:
         generation = (
@@ -159,9 +190,7 @@ class TestMakeRolloutEnvFactoryReasoningParser:
             "<|start|>assistant<|channel|>final<|message|>click('8')<|return|>"
         )
 
-        actions = step_colocated_rollout(
-            harmony_style_tokenizer, generation, "openai_gptoss"
-        )
+        actions = step_colocated_rollout(harmony_style_tokenizer, generation)
 
         assert actions == ["click('8')"]
 
@@ -699,7 +728,7 @@ class TestLLMEnvSpec:
             make_rollout_env_factory(spec, mock_tokenizer)[0]()
         assert "min_reward" not in mock_rollout_cls.local.call_args.kwargs
 
-    def test_catalog_tool_call_parser_reaches_url_factory(self):
+    def test_catalog_chat_format_reaches_url_factory(self):
         mock_tokenizer = MagicMock()
         mock_tokenizer.pad_token_id = 0
         mock_tokenizer.name_or_path = "ibm-granite/granite-3.1-3b-a800m-instruct"
@@ -711,9 +740,9 @@ class TestLLMEnvSpec:
         mock_rollout_cls = MagicMock()
         with patch("agilerl.models.env.RolloutHarness", mock_rollout_cls):
             make_rollout_env_factory(spec, mock_tokenizer)[0]()
-        assert mock_rollout_cls.call_args.kwargs["tool_call_parser"] == "granite3"
+        assert mock_rollout_cls.call_args.kwargs["chat_format"] == "granite3"
 
-    def test_unknown_tokenizer_leaves_the_harness_parser_default(self):
+    def test_unknown_tokenizer_leaves_the_harness_chat_format_default(self):
         mock_tokenizer = MagicMock()
         mock_tokenizer.pad_token_id = 0
         mock_tokenizer.name_or_path = "not-a-supported-model"
@@ -725,7 +754,7 @@ class TestLLMEnvSpec:
         mock_rollout_cls = MagicMock()
         with patch("agilerl.models.env.RolloutHarness", mock_rollout_cls):
             make_rollout_env_factory(spec, mock_tokenizer)[0]()
-        assert "tool_call_parser" not in mock_rollout_cls.local.call_args.kwargs
+        assert "chat_format" not in mock_rollout_cls.local.call_args.kwargs
 
     def test_env_packages_are_installed_before_the_entrypoint_is_resolved(self):
         """An entrypoint whose deps are declared gets them installed first."""
@@ -1481,8 +1510,6 @@ class TestLLMEnvSpecRollout:
     def test_env_url_factory_builds_session_client(self):
         mock_tokenizer = MagicMock()
         mock_tokenizer.pad_token_id = 0
-        mock_tokenizer.unk_token_id = None
-        mock_tokenizer.convert_tokens_to_ids.return_value = THINK_CLOSE_ID
         spec = LLMEnvSpec(
             env_type=LLMEnvType.ROLLOUT,
             env_url="http://env-host:8000",
@@ -1516,7 +1543,6 @@ class TestLLMEnvSpecRollout:
             apply_chat_template=True,
             chat_template_kwargs={},
             max_model_len=512,
-            reasoning_end_ids=(THINK_CLOSE_ID,),
             include_reasoning=False,
             strict_chat_template_boundary=True,
             screenshot_field=None,
@@ -1545,8 +1571,6 @@ class TestLLMEnvSpecRollout:
         mock_constructor = MagicMock(return_value=mock_env)
         mock_tokenizer = MagicMock()
         mock_tokenizer.pad_token_id = 0
-        mock_tokenizer.unk_token_id = None
-        mock_tokenizer.convert_tokens_to_ids.return_value = THINK_CLOSE_ID
 
         spec = LLMEnvSpec(
             env_type=LLMEnvType.ROLLOUT,
@@ -1582,7 +1606,6 @@ class TestLLMEnvSpecRollout:
             apply_chat_template=True,
             chat_template_kwargs={},
             max_model_len=512,
-            reasoning_end_ids=(THINK_CLOSE_ID,),
             include_reasoning=False,
             strict_chat_template_boundary=True,
         )

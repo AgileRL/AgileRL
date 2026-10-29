@@ -1,18 +1,15 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Locating and splitting on a turn's reasoning-end marker by token id."""
+"""Token-id helpers for a turn's reasoning block."""
 
 import pytest
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
-from agilerl.arena.models.model_info import REASONING_PARSERS
 from agilerl.llm_envs.reasoning import (
     REASONING_END_MARKER,
     SUBSEQUENCE_NOT_FOUND,
     find_token_subsequence,
-    post_reasoning_text,
-    reasoning_end_marker,
     reasoning_trace_text,
     tokenizer_reasoning_end_ids,
 )
@@ -98,31 +95,6 @@ def tiny_tokenizer() -> PreTrainedTokenizerBase:
     return tokenizer
 
 
-class TestReasoningEndMarker:
-    @pytest.mark.parametrize(
-        ("reasoning_parser", "marker"),
-        [
-            ("gemma4", "<channel|>"),
-            ("qwen3", "</think>"),
-            ("nemotron_v3", "</think>"),
-            ("deepseek_r1", "</think>"),
-            ("openai_gptoss", "<|channel|>final<|message|>"),
-        ],
-    )
-    def test_returns_the_parser_end_marker(
-        self, reasoning_parser: str, marker: str
-    ) -> None:
-        assert reasoning_end_marker(reasoning_parser) == marker
-
-    def test_every_catalog_parser_has_an_end_marker(self) -> None:
-        markers = {reasoning_end_marker(p) for p in REASONING_PARSERS.values()}
-
-        assert markers == {"<channel|>", "</think>", "<|channel|>final<|message|>"}
-
-    def test_no_parser_falls_back_to_think_close(self) -> None:
-        assert reasoning_end_marker(None) == REASONING_END_MARKER
-
-
 class TestTokenizerReasoningEndIds:
     def test_vocab_token_resolves_to_its_single_id(
         self, tiny_tokenizer: PreTrainedTokenizerBase
@@ -143,7 +115,7 @@ class TestTokenizerReasoningEndIds:
 
     def test_harmony_final_header_resolves_to_its_encoding(self) -> None:
         ids = tokenizer_reasoning_end_ids(
-            HarmonyTokenizer(), reasoning_end_marker("openai_gptoss")
+            HarmonyTokenizer(), "<|channel|>final<|message|>"
         )
 
         assert ids == HARMONY_FINAL_HEADER
@@ -174,93 +146,8 @@ class TestFindTokenSubsequence:
     def test_truncated_trailing_pattern_reports_not_found(self) -> None:
         assert find_token_subsequence([1, 2, 7], [7, 8]) == SUBSEQUENCE_NOT_FOUND
 
-
-class TestPostReasoningText:
-    def test_drops_reasoning_closed_by_a_stripped_special_token(self) -> None:
-        # Arrange
-        gen_ids = [GEMMA_CHANNEL_OPEN, 10, GEMMA_CHANNEL_CLOSE, 12, 11]
-
-        # Act
-        action = post_reasoning_text(gen_ids, (GEMMA_CHANNEL_CLOSE,), decode_pieces)
-
-        # Assert
-        assert action == "click('12')"
-
-    def test_drops_reasoning_closed_by_a_plain_think_token(self) -> None:
-        action = post_reasoning_text(
-            [10, QWEN_THINK_CLOSE, 12, 11], (QWEN_THINK_CLOSE,), decode_pieces
-        )
-
-        assert action == "click('12')"
-
-    def test_matches_a_multi_token_marker_merged_with_its_neighbours(self) -> None:
-        # Arrange
-        think_close = (THINK_CLOSE_LT_SLASH, THINK_CLOSE_WORD, THINK_CLOSE_GT)
-        gen_ids = [10, DOT_LT_SLASH, THINK_CLOSE_WORD, GT_BLANK_LINE, 11]
-
-        # Act
-        action = post_reasoning_text(gen_ids, think_close, decode_pieces)
-
-        # Assert
-        assert action == "click('12')"
-
-    def test_passes_unclosed_reasoning_through_unstripped(self) -> None:
-        action = post_reasoning_text([10, 12], (GEMMA_CHANNEL_CLOSE,), decode_pieces)
-
-        assert action == "thought\n "
-
-    def test_reasoning_with_no_action_sends_nothing(self) -> None:
-        action = post_reasoning_text(
-            [10, QWEN_THINK_CLOSE], (QWEN_THINK_CLOSE,), decode_pieces
-        )
-
-        assert action == ""
-
-    def test_empty_marker_ids_pass_the_whole_generation_through(self) -> None:
-        action = post_reasoning_text([10, QWEN_THINK_CLOSE, 11], (), decode_pieces)
-
-        assert action == "thought\n</think>click('12')"
-
-
-class TestPostReasoningTextHarmony:
-    def test_sends_the_final_channel_after_the_analysis_channel(self) -> None:
-        # Arrange
-        gen_ids = [
-            *HARMONY_ANALYSIS,
-            HARMONY_END,
-            HARMONY_START,
-            23,
-            *HARMONY_FINAL_HEADER,
-            24,
-            HARMONY_RETURN,
-        ]
-
-        # Act
-        action = post_reasoning_text(gen_ids, HARMONY_FINAL_HEADER, decode_pieces)
-
-        # Assert
-        assert decode_pieces(gen_ids, skip_special_tokens=True) == (
-            "analysisThe final answer is 8.assistantfinalclick('8')"
-        )
-        assert action == "click('8')"
-
-    def test_reasoning_saying_final_without_a_final_channel_passes_through(
-        self,
-    ) -> None:
-        action = post_reasoning_text(
-            [*HARMONY_ANALYSIS, HARMONY_END], HARMONY_FINAL_HEADER, decode_pieces
-        )
-
-        assert action == "analysisThe final answer is 8."
-
-    def test_final_channel_without_analysis_sends_the_action(self) -> None:
-        action = post_reasoning_text(
-            [*HARMONY_FINAL_HEADER, 24, HARMONY_RETURN],
-            HARMONY_FINAL_HEADER,
-            decode_pieces,
-        )
-
-        assert action == "click('8')"
+    def test_partial_match_at_the_last_start_reports_not_found(self) -> None:
+        assert find_token_subsequence([1, 7, 9], [7, 8]) == SUBSEQUENCE_NOT_FOUND
 
 
 class TestReasoningTraceText:

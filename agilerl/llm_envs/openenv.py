@@ -25,9 +25,9 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from agilerl import HAS_LLM_DEPENDENCIES
+from agilerl.llm_envs.chat_formats import ParsedToolCall
 from agilerl.llm_envs.env_sources import redact_url_userinfo
 from agilerl.llm_envs.openenv_server import OpenEnvWrapper, wire_types
-from agilerl.llm_envs.tool_parsers import ParsedToolCall
 from agilerl.protocols import TextEnvProtocol
 from agilerl.utils.algo_utils import is_str_keyed_dict
 

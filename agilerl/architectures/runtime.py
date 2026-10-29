@@ -143,8 +143,8 @@ class ModelRuntimeConfig(BaseModel):
         default_factory=dict
     )
     tensor_parallel_plan: str | None = Field(default=None, min_length=1)
-    # A name in agilerl.llm_envs.tool_parsers.TOOL_PARSERS; None detects from the vocab.
-    tool_call_parser: str | None = Field(default=None, min_length=1)
+    # A name in agilerl.llm_envs.chat_formats.CHAT_FORMATS; None detects from the vocab.
+    chat_format: str | None = Field(default=None, min_length=1)
     # vLLM reasoning parser of a thinking family. Only the Ray rollout engine
     # enables it, for a thinking budget or answer grammar; otherwise its
     # reasoning_config makes every GPU step wait on the last step's tokens.

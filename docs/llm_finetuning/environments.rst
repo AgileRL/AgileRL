@@ -434,15 +434,17 @@ tool calls instead of text. The harness detects this from the env itself, so
 manifests need no extra flag. The env never parses the model's output. Each
 model family has its own tool-call format: the special
 tokens around a call and the body between them. The harness reads every call
-from each generation's token IDs with that family's parser, and steps the env
+from each generation's token IDs with that family's chat format, and steps the env
 once per call, in order, within the turn. The turn's reward is the sum of those
 steps. Tool schemas are discovered over ``list_tools`` and rendered into
 prompts through the chat template.
 
-Parsers cover the Qwen, Hermes, Granite, Nemotron, Gemma 4, and GPT-OSS model
-families. Name one with ``tool_call_parser`` on ``RolloutHarness``; unset, the
-harness picks the parser whose tokens are in the tokenizer vocab. An MCP env
-with a tokenizer no parser matches fails at the first reset.
+Chat formats cover the Qwen, Hermes, Granite, Nemotron, Gemma 4, and GPT-OSS
+model families. The same format also says where the model's reasoning ends, so
+the env acts only on the answer. Name one with ``chat_format`` on
+``RolloutHarness``; unset, the harness picks the format whose tokens are in the
+tokenizer vocab. An MCP env with a tokenizer no format matches fails at the
+first reset.
 
 A turn with no tool call is a prose answer. ``answer_tool="<tool_name>"`` on
 ``RolloutHarness`` or in the manifest names one of the env's real tools (e.g.

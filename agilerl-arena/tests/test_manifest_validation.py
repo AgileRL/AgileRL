@@ -508,10 +508,10 @@ class TestNothingIsStrippedInTransit:
         )
         assert validated.algorithm.vllm_engine_args == {"reasoning_parser": "gemma4"}
 
-    def test_a_reasoning_parser_without_a_known_end_marker_is_rejected(self) -> None:
+    def test_an_unsupported_reasoning_parser_is_rejected(self) -> None:
         with pytest.raises(
             ValidationError,
-            match=r"reasoning_parser='mistral' has no known reasoning-end marker",
+            match=r"reasoning_parser='mistral' is not a supported reasoning parser",
         ):
             TrainingManifest.model_validate(
                 manifest(

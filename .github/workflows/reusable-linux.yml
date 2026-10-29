@@ -59,6 +59,10 @@ jobs:
                   uv sync --locked --group dev --extra box2d --extra cpu-llm --extra cpu
                   echo "$UV_PROJECT_ENVIRONMENT/bin" >> $GITHUB_PATH
             - name: Run CPU shard
+              env:
+                  # Feedback-frame tests pull real tokenizers (Gemma is gated);
+                  # they skip on jobs without this token.
+                  HF_TOKEN: ${{ secrets.HF_TOKEN }}
               run: |
                   rm -f .coverage .coverage.*
                   uv run python scripts/pytest_shard.py run \

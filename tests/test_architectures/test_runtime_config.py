@@ -28,7 +28,7 @@ from agilerl.architectures.nemotron_h.tensor_parallel import (
 from agilerl.architectures.runtime import ModelRuntimeConfig, VllmRuntimeConfig
 from agilerl.arena.memory.manifest import FAMILY_MAX_NUM_BATCHED_TOKENS
 from agilerl.arena.models.model_info import REASONING_PARSERS, SUPPORTED_MODEL_INFO
-from agilerl.llm_envs.tool_parsers import TOOL_PARSERS
+from agilerl.llm_envs.chat_formats import CHAT_FORMATS
 
 NEMOTRON_VLLM_KWARGS = {
     "mamba_cache_mode": "align",
@@ -195,7 +195,7 @@ class TestFamilyRuntimeConfigs:
 
         assert "reasoning_parser" not in kwargs
 
-    def test_every_supported_model_names_a_registered_tool_call_parser(
+    def test_every_supported_model_names_a_registered_chat_format(
         self,
     ) -> None:
         model_types = {
@@ -203,11 +203,11 @@ class TestFamilyRuntimeConfigs:
         }
 
         parsers = {
-            model_type: FAMILY_RUNTIME_CONFIGS[model_type].tool_call_parser
+            model_type: FAMILY_RUNTIME_CONFIGS[model_type].chat_format
             for model_type in model_types
         }
 
-        assert all(name in TOOL_PARSERS for name in parsers.values()), parsers
+        assert all(name in CHAT_FORMATS for name in parsers.values()), parsers
 
     def test_catalog_excludes_gemma_and_gemma2(self) -> None:
         assert "gemma" not in FAMILY_RUNTIME_CONFIGS

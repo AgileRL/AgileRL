@@ -1,18 +1,19 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Token-ID tool-call parsers, one per model family's tool-call format.
+"""Chat formats: how each model family spells tool calls, reasoning and turn ends in tokens.
 
-Each parser finds its family's special-token delimiters in the generation IDs
-and decodes only the segments between them. A tag typed as prose tokenizes to
-ordinary IDs, never the special-token ID, so it cannot false-positive.
-Detection picks the first registered parser whose required tokens are all in
-the tokenizer vocab.
+A format finds its family's special-token delimiters in generation IDs and
+decodes only the segments between them, so a tag typed as prose (ordinary IDs,
+never the special-token ID) cannot false-positive. It says where reasoning
+ends, how tool results render back to the model, and which sampled token
+already closes a turn. Detection picks the first registered format whose
+required tokens are all in the tokenizer vocab.
 
-- :class:`ToolCallTagParser`: Qwen, Hermes, Granite 4, Nemotron
-- :class:`Granite3ToolParser`: Granite 3
-- :class:`Gemma4ToolParser`: Gemma 4
-- :class:`HarmonyToolParser`: GPT-OSS
+- :class:`ToolCallTagFormat`: Qwen, Hermes, Granite 4, Nemotron
+- :class:`Granite3Format`: Granite 3
+- :class:`Gemma4Format`: Gemma 4
+- :class:`HarmonyFormat`: GPT-OSS
 """
 
 from __future__ import annotations
@@ -25,22 +26,30 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from agilerl.llm_envs.reasoning import (
+    REASONING_END_MARKER,
+    SUBSEQUENCE_NOT_FOUND,
+    find_token_subsequence,
+)
 from agilerl.utils.algo_utils import is_str_keyed_dict
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizerBase
 
 __all__ = [
-    "TOOL_PARSERS",
-    "Gemma4ToolParser",
-    "Granite3ToolParser",
-    "HarmonyToolParser",
+    "CHAT_FORMATS",
+    "ChatFormat",
+    "Gemma4Format",
+    "Granite3Format",
+    "HarmonyFormat",
     "ParsedToolCall",
     "ToolCallParseStatus",
-    "ToolCallTagParser",
-    "ToolParser",
-    "detect_tool_parser",
-    "get_tool_parser",
+    "ToolCallTagFormat",
+    "action_span",
+    "action_text",
+    "detect_chat_format",
+    "get_chat_format",
+    "resolve_chat_format",
 ]
 
 GEMMA_STRING_DELIM = '<|"|>'
@@ -71,8 +80,8 @@ class ParsedToolCall:
     status: ToolCallParseStatus = ToolCallParseStatus.OK
 
 
-class ToolParser(ABC):
-    """Extracts tool calls from completion token IDs.
+class ChatFormat(ABC):
+    """One model family's tool-call, reasoning and turn-boundary tokens.
 
     Subclasses declare the special tokens they need; construction fails when
     the tokenizer lacks a required one.
@@ -80,19 +89,50 @@ class ToolParser(ABC):
 
     REQUIRED_TOKENS: ClassVar[tuple[str, ...]]
     OPTIONAL_TOKENS: ClassVar[tuple[str, ...]] = ()
+    REASONING_END: ClassVar[str | None] = None
 
     def __init__(self, tokenizer: PreTrainedTokenizerBase) -> None:
-        """Resolve this parser's delimiter IDs in ``tokenizer``."""
+        """Resolve this format's delimiter IDs in ``tokenizer``."""
         self._tokenizer = tokenizer
         self._ids = self.token_ids(tokenizer)
         missing = [token for token in self.REQUIRED_TOKENS if token not in self._ids]
         if missing:
             msg = f"{type(self).__name__} needs {', '.join(missing)} in the tokenizer vocab."
             raise ValueError(msg)
+        end_id = self._ids.get(self.REASONING_END) if self.REASONING_END else None
+        self.reasoning_end_ids: tuple[int, ...] = () if end_id is None else (end_id,)
+
+    def answer_start(self, token_ids: list[int]) -> int:
+        """Index just past the first reasoning close, or ``0`` when there is none.
+
+        :param token_ids: One generation's token IDs.
+        :return: Where the answer starts.
+        """
+        at = find_token_subsequence(token_ids, self.reasoning_end_ids)
+        if at == SUBSEQUENCE_NOT_FOUND:
+            return 0
+        return at + len(self.reasoning_end_ids)
+
+    def format_tool_results(self, _messages: list[dict[str, str]], /) -> str | None:
+        """Tool results in this format's own blocks, or ``None`` to frame them with the chat template.
+
+        :param _messages: The turn's feedback messages.
+        :return: Text to append after the sampled turn, or ``None``.
+        """
+        return None
+
+    def closes_turn(self, sampled_id: int, frame_id: int) -> bool:
+        """Whether a turn that ended in ``sampled_id`` already holds the frame's leading ``frame_id``.
+
+        :param sampled_id: Last token the model sampled.
+        :param frame_id: First token of the feedback frame.
+        :return: ``True`` when the frame's leading token is redundant.
+        """
+        return sampled_id == frame_id
 
     @classmethod
     def token_ids(cls, tokenizer: PreTrainedTokenizerBase) -> dict[str, int]:
-        """IDs of this parser's delimiter tokens that are in ``tokenizer``'s vocab."""
+        """IDs of this format's delimiter tokens that are in ``tokenizer``'s vocab."""
         ids: dict[str, int] = {}
         for token in (*cls.REQUIRED_TOKENS, *cls.OPTIONAL_TOKENS):
             token_id = tokenizer.convert_tokens_to_ids(token)
@@ -102,13 +142,13 @@ class ToolParser(ABC):
         return ids
 
     @abstractmethod
-    def extract(
+    def extract_tool_calls(
         self, token_ids: list[int], tools: list[Any] | None = None, /
     ) -> tuple[list[int], list[ParsedToolCall]]:
         """Split IDs into the content before the first call plus every parse attempt.
 
         :param token_ids: One generation's token IDs.
-        :param tools: Tool schemas, for parsers whose bodies need value types.
+        :param tools: Tool schemas, for formats whose bodies need value types.
         :return: Content IDs and one entry per call block, malformed ones included.
         """
 
@@ -150,7 +190,7 @@ class ToolParser(ABC):
         return token_ids[:first], calls
 
 
-class ToolCallTagParser(ToolParser):
+class ToolCallTagFormat(ChatFormat):
     """``<tool_call>`` blocks with JSON or XML bodies.
 
     JSON bodies hold one object with name and arguments (Qwen, Hermes,
@@ -160,15 +200,14 @@ class ToolCallTagParser(ToolParser):
 
     CALL_START = "<tool_call>"
     CALL_END = "</tool_call>"
-    THINK_END = "</think>"
+    REASONING_END = REASONING_END_MARKER
     REQUIRED_TOKENS: ClassVar[tuple[str, ...]] = (CALL_START,)
-    OPTIONAL_TOKENS: ClassVar[tuple[str, ...]] = (CALL_END, THINK_END)
+    OPTIONAL_TOKENS: ClassVar[tuple[str, ...]] = (CALL_END, REASONING_END_MARKER)
 
-    def extract(
+    def extract_tool_calls(
         self, token_ids: list[int], tools: list[Any] | None = None, /
     ) -> tuple[list[int], list[ParsedToolCall]]:
         """Parse tool blocks after any thinking trace."""
-        think_end = _find(token_ids, self._ids.get(self.THINK_END))
         params = _param_schemas(tools)
 
         def parse_body(raw: str, span: tuple[int, int]) -> ParsedToolCall:
@@ -177,11 +216,15 @@ class ToolCallTagParser(ToolParser):
             return _parsed_json_call(raw, span)
 
         return self._tagged_calls(
-            token_ids, self.CALL_START, self.CALL_END, parse_body, think_end + 1
+            token_ids,
+            self.CALL_START,
+            self.CALL_END,
+            parse_body,
+            self.answer_start(token_ids),
         )
 
 
-class Granite3ToolParser(ToolParser):
+class Granite3Format(ChatFormat):
     """One ``<|tool_call|>`` tag, then a JSON array of calls to end of turn.
 
     Granite 3 emits no closing tag and no leading prose. Array items share the
@@ -191,7 +234,7 @@ class Granite3ToolParser(ToolParser):
     CALL_START = "<|tool_call|>"
     REQUIRED_TOKENS: ClassVar[tuple[str, ...]] = (CALL_START,)
 
-    def extract(
+    def extract_tool_calls(
         self, token_ids: list[int], _tools: list[Any] | None = None, /
     ) -> tuple[list[int], list[ParsedToolCall]]:
         """Parse the trailing call array."""
@@ -215,34 +258,40 @@ class Granite3ToolParser(ToolParser):
         return token_ids[:tag], [_call_from_object(raw, item, span) for item in payload]
 
 
-class Gemma4ToolParser(ToolParser):
+class Gemma4Format(ChatFormat):
     """``<|tool_call>call:name{key:value,...}<tool_call|>`` blocks.
 
     Argument values are Gemma's own ``key:value`` text, not JSON: strings wrap
     in ``<|"|>``, bare scalars stay strings for the executor to coerce, and
-    braces nest.
+    braces nest. Reasoning is a ``<|channel>thought ... <channel|>`` block.
     """
 
     CALL_START = "<|tool_call>"
     CALL_END = "<tool_call|>"
     RESPONSE_START = "<|tool_response>"
     RESPONSE_END = "<tool_response|>"
+    REASONING_END = "<channel|>"
     REQUIRED_TOKENS: ClassVar[tuple[str, ...]] = (
         CALL_START,
         CALL_END,
         RESPONSE_START,
         RESPONSE_END,
     )
+    OPTIONAL_TOKENS: ClassVar[tuple[str, ...]] = (REASONING_END,)
 
-    def extract(
+    def extract_tool_calls(
         self, token_ids: list[int], _tools: list[Any] | None = None, /
     ) -> tuple[list[int], list[ParsedToolCall]]:
-        """Parse native Gemma calls."""
+        """Parse native Gemma calls after any thought channel."""
         return self._tagged_calls(
-            token_ids, self.CALL_START, self.CALL_END, _parsed_gemma_call
+            token_ids,
+            self.CALL_START,
+            self.CALL_END,
+            _parsed_gemma_call,
+            self.answer_start(token_ids),
         )
 
-    def format_responses(self, messages: list[dict[str, str]]) -> str | None:
+    def format_tool_results(self, messages: list[dict[str, str]], /) -> str | None:
         """One ``<|tool_response>response:name{value:...}<tool_response|>`` block per result.
 
         The template skips standalone tool messages, so results render mid-turn here instead of through a turn frame.
@@ -259,12 +308,13 @@ class Gemma4ToolParser(ToolParser):
         return "".join(parts)
 
 
-class HarmonyToolParser(ToolParser):
+class HarmonyFormat(ChatFormat):
     """Channel blocks addressed ``to=functions.name`` (GPT-OSS).
 
     Each ``<|start|>`` block names its recipient in the header. Function blocks
     hold JSON arguments and close with ``<|call|>``. Other blocks are content.
-    Parsing stops at the first ``<|return|>``.
+    Parsing stops at the first ``<|return|>``. Reasoning is the analysis
+    channel; the answer follows ``<|channel|>final<|message|>``.
     """
 
     BLOCK_START = "<|start|>"
@@ -272,15 +322,58 @@ class HarmonyToolParser(ToolParser):
     CALL_END = "<|call|>"
     BLOCK_END = "<|end|>"
     RETURN = "<|return|>"
+    CHANNEL = "<|channel|>"
+    FINAL_CHANNEL = "final"
     REQUIRED_TOKENS: ClassVar[tuple[str, ...]] = (
         BLOCK_START,
         MESSAGE,
         CALL_END,
         BLOCK_END,
     )
-    OPTIONAL_TOKENS: ClassVar[tuple[str, ...]] = (RETURN,)
+    OPTIONAL_TOKENS: ClassVar[tuple[str, ...]] = (RETURN, CHANNEL)
 
-    def extract(
+    def __init__(self, tokenizer: PreTrainedTokenizerBase) -> None:
+        """Resolve delimiter IDs and the ``<|channel|>final<|message|>`` answer marker."""
+        super().__init__(tokenizer)
+        channel_id = self._ids.get(self.CHANNEL)
+        if channel_id is not None:
+            final_ids = tokenizer.encode(self.FINAL_CHANNEL, add_special_tokens=False)
+            self.reasoning_end_ids = (channel_id, *final_ids, self._ids[self.MESSAGE])
+        self._message_end_ids = frozenset(
+            self._ids[token]
+            for token in (self.BLOCK_END, self.CALL_END, self.RETURN)
+            if token in self._ids
+        )
+
+    def format_tool_results(self, messages: list[dict[str, str]], /) -> str | None:
+        """One ``functions.name`` commentary block per result, then the assistant header.
+
+        The template renders a tool result only after a structured assistant
+        ``tool_calls`` entry, which the harness does not keep. Content is JSON
+        encoded, as the template's ``tojson`` filter does.
+        """
+        if not messages or any(message["role"] != "tool" for message in messages):
+            return None
+        blocks = "".join(
+            f"{self.BLOCK_START}{HARMONY_FUNCTION_PREFIX}{message.get('name') or 'unknown'}"
+            f" to=assistant{self.CHANNEL}commentary{self.MESSAGE}"
+            f"{json.dumps(message['content'], ensure_ascii=False)}{self.BLOCK_END}"
+            for message in messages
+        )
+        return f"{blocks}{self.BLOCK_START}assistant"
+
+    def closes_turn(self, sampled_id: int, frame_id: int) -> bool:
+        """``<|return|>`` and ``<|call|>`` end a message as ``<|end|>`` does.
+
+        The sampled token stays in the transcript, so a final answer reads
+        ``<|return|><|start|>`` where a template re-render has ``<|end|><|start|>``.
+        """
+        return sampled_id == frame_id or (
+            frame_id == self._ids[self.BLOCK_END]
+            and sampled_id in self._message_end_ids
+        )
+
+    def extract_tool_calls(
         self, token_ids: list[int], _tools: list[Any] | None = None, /
     ) -> tuple[list[int], list[ParsedToolCall]]:
         """Parse function-addressed blocks."""
@@ -314,40 +407,87 @@ class HarmonyToolParser(ToolParser):
         return ids[:content_end], calls
 
 
-TOOL_PARSERS: dict[str, type[ToolParser]] = {
-    "tool_call": ToolCallTagParser,
-    "granite3": Granite3ToolParser,
-    "gemma4": Gemma4ToolParser,
-    "harmony": HarmonyToolParser,
+CHAT_FORMATS: dict[str, type[ChatFormat]] = {
+    "tool_call": ToolCallTagFormat,
+    "granite3": Granite3Format,
+    "gemma4": Gemma4Format,
+    "harmony": HarmonyFormat,
 }
 
 
-def get_tool_parser(name: str, tokenizer: PreTrainedTokenizerBase) -> ToolParser:
-    """Build the named parser over ``tokenizer``.
+def get_chat_format(name: str, tokenizer: PreTrainedTokenizerBase) -> ChatFormat:
+    """Build the named format over ``tokenizer``.
 
-    :param name: Parser name from :data:`TOOL_PARSERS`.
+    :param name: Format name from :data:`CHAT_FORMATS`.
     :param tokenizer: Tokenizer defining the delimiter IDs.
-    :return: The parser.
+    :return: The format.
     """
     try:
-        parser_cls = TOOL_PARSERS[name]
+        format_cls = CHAT_FORMATS[name]
     except KeyError:
-        available = ", ".join(sorted(TOOL_PARSERS))
-        msg = f"Unknown tool_parser {name!r}. Available: {available}."
+        available = ", ".join(sorted(CHAT_FORMATS))
+        msg = f"Unknown chat_format {name!r}. Available: {available}."
         raise ValueError(msg) from None
-    return parser_cls(tokenizer)
+    return format_cls(tokenizer)
 
 
-def detect_tool_parser(tokenizer: PreTrainedTokenizerBase) -> ToolParser | None:
-    """First registered parser whose required tokens are all in the vocab, or ``None``.
+def detect_chat_format(tokenizer: PreTrainedTokenizerBase) -> ChatFormat | None:
+    """First registered format whose required tokens are all in the vocab, or ``None``.
 
     :param tokenizer: Tokenizer to probe.
-    :return: The matching parser, or ``None`` when no parser matches.
+    :return: The matching format, or ``None`` when none matches.
     """
-    for parser_cls in TOOL_PARSERS.values():
-        if set(parser_cls.REQUIRED_TOKENS) <= parser_cls.token_ids(tokenizer).keys():
-            return parser_cls(tokenizer)
+    for format_cls in CHAT_FORMATS.values():
+        if set(format_cls.REQUIRED_TOKENS) <= format_cls.token_ids(tokenizer).keys():
+            return format_cls(tokenizer)
     return None
+
+
+def resolve_chat_format(
+    tokenizer: PreTrainedTokenizerBase, name: str | None
+) -> ChatFormat | None:
+    """The named format, else the one the vocab matches, else ``None``.
+
+    :param tokenizer: Tokenizer defining the delimiter IDs.
+    :param name: Format name from :data:`CHAT_FORMATS`, or ``None`` to detect.
+    :return: The format, or ``None`` when ``name`` is unset and none matches.
+    """
+    if name is None:
+        return detect_chat_format(tokenizer)
+    return get_chat_format(name, tokenizer)
+
+
+def action_text(
+    decode: Callable[..., object],
+    token_ids: list[int],
+    chat_format: ChatFormat | None,
+) -> str:
+    """Text the env acts on: what follows the reasoning close, else the whole generation.
+
+    A generation with no close token still splits at a plain-text ``</think>``,
+    for models taught that format by the prompt.
+
+    :param decode: The sampling tokenizer's ``decode``.
+    :param token_ids: One generation's token IDs.
+    :param chat_format: The family's chat format, or ``None`` when none matched.
+    :return: The action text, special tokens removed.
+    """
+    start = 0 if chat_format is None else chat_format.answer_start(token_ids)
+    text = decode(token_ids[start:], skip_special_tokens=True)
+    if not isinstance(text, str):
+        msg = "decode() of one sequence returns str"
+        raise TypeError(msg)
+    return text.strip() if start else action_span(text)
+
+
+def action_span(gen_text: str) -> str:
+    """Text after the first ``</think>``, else the whole generation.
+
+    A template that prefills an open ``<think>`` yields ``reasoning</think>action``
+    with no opening tag. A reasoning block that never closes passes through whole.
+    """
+    _reasoning, closed, action = gen_text.partition(REASONING_END_MARKER)
+    return action.strip() if closed else gen_text
 
 
 def _failed(
