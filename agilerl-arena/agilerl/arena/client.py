@@ -2128,7 +2128,7 @@ class ArenaClient:
             self._cli_capabilities_cache = None
             return None
 
-        if resp.status_code == 404:
+        if resp.status_code in (404, 401, 403):
             self._cli_capabilities_cache = None
             return None
 
