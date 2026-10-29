@@ -1157,14 +1157,14 @@ def support_rows_bytes(
     """Peak of one support-scored logprob chunk: its tokens' gathered lm_head rows.
 
     A chunk takes enough tokens for ``width`` head rows each to fill one vocab
-    tile, and at least ``chunk_rows``. Rows gather in the head's dtype; below
-    fp32 the upcast holds both copies.
+    tile, or one token when its rows alone exceed the tile. Rows gather in the
+    head's dtype; below fp32 the upcast holds both copies.
 
     :param chunk_rows: Tokens in one vocab tile.
     :param width: Widest sampling support, in token ids.
     :param act_bytes: Bytes per lm_head element.
     """
-    tokens = max(chunk_rows, chunk_rows * arch.vocab_size // (width * arch.hidden_size))
+    tokens = max(1, chunk_rows * arch.vocab_size // (width * arch.hidden_size))
     elements = tokens * width * arch.hidden_size
     return int(elements * (act_bytes + 4 if act_bytes < 4 else act_bytes))
 
