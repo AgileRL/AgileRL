@@ -1,6 +1,6 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
-"""A LoRA rank above every accepted vLLM max_lora_rank is rejected."""
+"""vLLM max_lora_rank is the smallest accepted value covering the adapter rank."""
 
 import pytest
 
@@ -8,26 +8,18 @@ from agilerl.arena.memory.resolve.lora import resolve_max_lora_rank
 
 
 class TestResolveMaxLoraRank:
-    def test_rejects_an_adapter_rank_above_every_accepted_value(self) -> None:
-        # Arrange
-        configured = None
-        adapter_rank = 513
+    @pytest.mark.parametrize(
+        ("adapter_rank", "expected"),
+        [(0, 8), (2, 8), (8, 8), (9, 16), (16, 16), (300, 320), (512, 512)],
+    )
+    def test_rounds_the_adapter_rank_up_to_an_accepted_value(
+        self, adapter_rank: int, expected: int
+    ) -> None:
+        assert resolve_max_lora_rank(adapter_rank) == expected
 
-        # Act / Assert
+    def test_rejects_an_adapter_rank_above_every_accepted_value(self) -> None:
         with pytest.raises(
             ValueError,
             match="LoRA adapter rank 513 needs a vLLM max_lora_rank",
         ):
-            resolve_max_lora_rank(configured, adapter_rank)
-
-    def test_rejects_a_configured_ceiling_above_every_accepted_value(self) -> None:
-        # Arrange
-        configured = 1024
-        adapter_rank = 8
-
-        # Act / Assert
-        with pytest.raises(
-            ValueError,
-            match="configured max_lora_rank 1024 needs a vLLM max_lora_rank",
-        ):
-            resolve_max_lora_rank(configured, adapter_rank)
+            resolve_max_lora_rank(513)

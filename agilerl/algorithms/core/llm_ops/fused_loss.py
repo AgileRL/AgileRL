@@ -715,9 +715,8 @@ def apply_fused_policy_loss(
 
     Turn- and trajectory-level pooling couple a turn/trajectory's tokens, so they
     cannot be token-chunked: a chunk would only see part of the pooled unit.
-    Those levels keep the batch path (one sequence per chunk), which holds a
-    ``(seq_len, vocab)`` logits tensor per trajectory — not memory-bounded.
-    Use the standard (fused-linear-logprob) path for bounded memory there.
+    Those levels chunk one sequence at a time, holding that sequence's
+    ``(seq_len, vocab)`` fp32 logits per chunk.
 
     :param policy_hidden: ``(B, T_act, H)`` hidden states already sliced to the
         action positions (caller does the ``[:, :-1]`` shift).
@@ -761,8 +760,8 @@ def apply_fused_policy_loss(
     :param vllm_is_ratio: Optional detached, upper-clamped per-token vLLM
         sampling-mismatch ratio ``(B, T_act)`` (token level only). Token-flattened
         and multiplied into the per-token policy loss before the KL term. Turn /
-        trajectory pooling cannot express the per-token reweight, so it is ignored
-        there (callers fall back to the standard path for those levels).
+        trajectory pooling cannot express the per-token reweight, so those
+        levels ignore it.
     :type vllm_is_ratio: torch.Tensor | None
     :param turn_log_ratio_reduction: Turn-level reduction for pooled log-ratios,
         one of ``"mean"`` or ``"sum"``.

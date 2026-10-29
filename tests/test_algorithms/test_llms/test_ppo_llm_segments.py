@@ -70,10 +70,8 @@ def _make_ppo(**overrides: Any) -> LLMPPO:
         "mini_batch_size": 4,
         "update_epochs": 1,
         "wrap": False,
-        "gradient_checkpointing": False,
         "calc_position_embeddings": False,
         "device": "cpu",
-        "use_liger_loss": False,
         "lora_config": LoraConfig(
             r=4,
             lora_alpha=8,
@@ -84,7 +82,9 @@ def _make_ppo(**overrides: Any) -> LLMPPO:
         ),
         **overrides,
     }
-    return LLMPPO(**kwargs)
+    agent = LLMPPO(**kwargs)
+    agent.liger_loss = False
+    return agent
 
 
 def _experiences() -> tuple[list[torch.Tensor], list[torch.Tensor], torch.Tensor]:
@@ -111,12 +111,10 @@ class TestPPOLearnEpisodeSegments:
         [None, episode_sampling_logps(PAD_TOKEN_ID)],
         ids=["no_sampling_logps", "sampling_logps"],
     )
-    @pytest.mark.parametrize("fuse", [False, True], ids=["split", "fused"])
     def test_one_micro_batch_matches_the_unsegmented_gradient(
         self,
         monkeypatch: pytest.MonkeyPatch,
         sampling_logps: list[torch.Tensor | None] | None,
-        fuse: bool,
     ) -> None:
         # Arrange: every row fits one micro-batch, so returns, advantages and the
         # token-mean losses cover the same action tokens either way.
@@ -124,7 +122,6 @@ class TestPPOLearnEpisodeSegments:
             "batch_size": 8,
             "micro_batch_size_per_gpu": 8,
             "mini_batch_size": 8,
-            "fuse_actor_critic_pass": fuse,
         }
         unsegmented = _make_ppo(**overrides)
         segmented = _make_ppo(**overrides)
@@ -148,16 +145,14 @@ class TestPPOLearnEpisodeSegments:
                 segmented_grads[0][name], grad, rtol=1e-5, atol=1e-7
             ), name
 
-    @pytest.mark.parametrize("fuse", [False, True], ids=["split", "fused"])
     def test_filler_micro_batches_leave_the_gradient_unchanged(
-        self, monkeypatch: pytest.MonkeyPatch, fuse: bool
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Arrange: one optimizer step of 1-row micro-batches over 6 real rows,
         # once alone and once padded to 8 rows by a simulated second rank.
         overrides = {
             "micro_batch_size_per_gpu": 1,
             "mini_batch_size": 4,
-            "fuse_actor_critic_pass": fuse,
         }
         alone = _make_ppo(**overrides)
         padded = _make_ppo(**overrides)
@@ -181,15 +176,12 @@ class TestPPOLearnEpisodeSegments:
         for key in ("loss", "pg_loss", "vf_loss", "kl", "entropy"):
             assert math.isfinite(padded_metrics[key]), key
 
-    @pytest.mark.parametrize("fuse", [False, True], ids=["split", "fused"])
     def test_liger_metrics_leave_out_filler_micro_batches(
-        self, monkeypatch: pytest.MonkeyPatch, fuse: bool
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Arrange: the Liger kernel reports each micro-batch's action tokens as
         # its KL; 6 real 1-row micro-batches pad to 8 for a simulated second rank.
-        agent = _make_ppo(
-            micro_batch_size_per_gpu=1, mini_batch_size=4, fuse_actor_critic_pass=fuse
-        )
+        agent = _make_ppo(micro_batch_size_per_gpu=1, mini_batch_size=4)
         use_fake_liger_policy_loss(agent, monkeypatch, "agilerl.algorithms.ppo_llm")
         pad_to_eight_rows(monkeypatch)
 
@@ -200,13 +192,12 @@ class TestPPOLearnEpisodeSegments:
         assert metrics["train_rows_padded"] == pytest.approx(8.0)
         assert metrics["kl"] == pytest.approx(MEAN_SEGMENT_ROW_ACTION_TOKENS)
 
-    @pytest.mark.parametrize("fuse", [False, True], ids=["split", "fused"])
     def test_rows_from_other_ranks_train_to_the_same_gradient(
-        self, monkeypatch: pytest.MonkeyPatch, fuse: bool
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Arrange: one optimizer step of 1-row micro-batches over 6 real rows.
-        local = _make_ppo(micro_batch_size_per_gpu=1, fuse_actor_critic_pass=fuse)
-        dealt = _make_ppo(micro_batch_size_per_gpu=1, fuse_actor_critic_pass=fuse)
+        local = _make_ppo(micro_batch_size_per_gpu=1)
+        dealt = _make_ppo(micro_batch_size_per_gpu=1)
         local_grads = record_step_gradients(local, monkeypatch)
         dealt_grads = record_step_gradients(dealt, monkeypatch)
 
@@ -282,16 +273,13 @@ def scale_value_losses(
 )
 @pytest.mark.multi_rank
 class TestPPOLearnBalancedAcrossRanks:
-    @pytest.mark.parametrize("fuse", [False, True], ids=["split", "fused"])
     def test_uneven_ranks_run_even_rows_with_their_local_gradients(
-        self, monkeypatch: pytest.MonkeyPatch, fuse: bool
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Arrange: returns and advantages stay on each rank's own episodes, so
         # the step averages rank 0's 4 local rows and rank 1's 2. Without a KL
         # term or a reachable clip norm the step gradient is linear in the rows.
-        make_agent = partial(
-            _make_ppo, fuse_actor_critic_pass=fuse, beta=0.0, max_grad_norm=1e30
-        )
+        make_agent = partial(_make_ppo, beta=0.0, max_grad_norm=1e30)
         rank0, rank1 = rank_local_step_gradients(make_agent, monkeypatch)
 
         # Act
@@ -395,16 +383,14 @@ class TestPPOLearnSamplingSupports:
         assert metrics["vllm_is_delta_mean"] == pytest.approx(0.0, abs=1e-6)
         assert metrics["vllm_is_delta_max"] == pytest.approx(0.0, abs=1e-6)
 
-    @pytest.mark.parametrize("fuse", [False, True], ids=["split", "fused"])
     def test_segment_rows_match_the_unsegmented_gradient(
-        self, monkeypatch: pytest.MonkeyPatch, fuse: bool
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Arrange
         overrides = {
             "batch_size": 8,
             "micro_batch_size_per_gpu": 8,
             "mini_batch_size": 8,
-            "fuse_actor_critic_pass": fuse,
         }
         unsegmented = _make_ppo(**overrides)
         segmented = _make_ppo(**overrides)

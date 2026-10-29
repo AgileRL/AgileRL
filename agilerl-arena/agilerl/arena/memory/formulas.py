@@ -22,10 +22,10 @@ from agilerl.arena.memory.specs import (
     WeightDtype,
     WeightVariant,
 )
+from agilerl.arena.models.fsdp import PREFETCH_UNITS
 
-# Upper bound on the CUDA-graph pool the vLLM engine captures unless
-# enforce_eager. It cancels in the generation total: subtracted from the KV
-# budget, added back as residency.
+# Upper bound on the CUDA-graph pool the vLLM engine captures. It cancels in
+# the generation total: subtracted from the KV budget, added back as residency.
 CUDA_GRAPH_POOL_BYTES = 256 * MiB
 # vLLM's non-torch memory (kernel workspaces, loaded kernels, NCCL), as a share
 # of the unsharded engine weights. It sits inside the gpu_memory_utilization
@@ -36,10 +36,9 @@ ENGINE_RUNTIME_FRACTION = 0.036
 # fp32. AdamW keeps two moments per parameter in the parameter's dtype.
 ADAPTER_BYTES_PER_PARAM = 4.0
 ADAM_MOMENTS_PER_PARAM = 2
-# Foreach AdamW builds one fp32 temporary per trained parameter in step();
-# the fused kernel builds none.
-FOREACH_ADAM_WORKSPACE_BYTES_PER_PARAM = 4.0
-# Routed-expert chunk budget when no FSDP config sets one.
+# Widest [rows, features] activation of one routed-expert row chunk, one fp32
+# expert-parallel combine chunk, and one grouped LoRA GEMM output when no FSDP
+# config sets one. Each chunk adds a fixed set of small kernel launches.
 DEFAULT_ROUTED_CHUNK_BYTES = 64 * MiB
 # Budgets an unset ``FSDPConfig.routed_expert_chunk_mib`` picks from, largest
 # first. ROUTED_CHUNK_LIVE_FRACTION is not valid above 512 MiB.
@@ -1176,11 +1175,13 @@ def logit_terms(
 ) -> tuple[float, int, float]:
     """Loss-instant logits, the hoisted fp32 head, and no-grad head bytes."""
     # Two fp32 tiles are live at the loss instant: recomputed logits plus
-    # that tile's gradient. Tiles are fixed-size, so a fused critic row adds none.
-    logit_rows = resolve_chunk_rows(arch.vocab_size, settings.chunk_rows)
+    # that tile's gradient. Tiles are fixed-size, so a fused critic row adds
+    # none. The whole-sequence Liger loss tiles one full row.
+    logit_rows = resolve_chunk_rows(arch.vocab_size)
+    loss_rows = settings.max_model_len if settings.whole_sequence_loss else logit_rows
     # The chunk loop hoists an fp32 lm_head copy when the head runs below fp32.
     fused_head = int(arch.vocab_size * arch.hidden_size * 4) if act_bytes < 4 else 0
-    logits = logit_rows * arch.vocab_size * 8 + fused_head
+    logits = loss_rows * arch.vocab_size * 8 + fused_head
     nograd_logits = logit_rows * arch.vocab_size * 4 + fused_head
     if settings.sampling_support_width:
         support_rows = support_rows_bytes(
@@ -1320,16 +1321,15 @@ def prefetch_window_params(
     counts: ParamCounts,
     arch: ModelArch,
     live_units: int,
-    wrap_every_n_blocks: int,
     tensor_parallel: int = 1,
     expert_parallel: int = 1,
 ) -> int:
-    """Decoder parameters gathered at once: ``live_units`` neighbouring FSDP units.
+    """Decoder parameters gathered at once: ``live_units`` neighbouring blocks.
 
-    With the layer order known, the window is the widest run of neighbouring
-    units, so a large block next to small ones is counted once. Otherwise
-    every unit is the widest block. Layers with every linear on the TP mesh
-    gather nothing.
+    Each decoder block is one FSDP unit. With the layer order known, the
+    window is the widest run of neighbouring blocks, so a large block next
+    to small ones is counted once. Otherwise every block is the widest one.
+    Layers with every linear on the TP mesh gather nothing.
     """
     linears_on_tp = tensor_parallel > 1 and arch.tensor_parallel_plan
     if not arch.layer_kinds:
@@ -1338,20 +1338,16 @@ def prefetch_window_params(
             # A uniform stack's linears are on the TP mesh. Norms and MoE stay gathered.
             moe = arch.moe_layers * block_moe_params_per_layer(arch, expert_parallel)
             block = int((counts.norms + moe) / max(arch.n_layers, 1))
-        return live_units * wrap_every_n_blocks * block
+        return live_units * block
     tp_kinds = ("attention", "mamba", "mlp") if linears_on_tp else ()
     sizes = [
         0 if kind in tp_kinds else layer_params(arch, kind, expert_parallel)
         for kind in arch.layer_kinds
     ]
-    units = [
-        sum(sizes[start : start + wrap_every_n_blocks])
-        for start in range(0, len(sizes), wrap_every_n_blocks)
-    ]
-    live_units = min(live_units, len(units))
+    live_units = min(live_units, len(sizes))
     return max(
-        sum(units[start : start + live_units])
-        for start in range(len(units) - live_units + 1)
+        sum(sizes[start : start + live_units])
+        for start in range(len(sizes) - live_units + 1)
     )
 
 
@@ -1361,8 +1357,6 @@ def fsdp_gathered_params(
     *,
     n_gpus: int,
     reshard_after_forward: bool,
-    prefetch_units: int,
-    wrap_every_n_blocks: int,
     cpu_offload: bool,
     tensor_parallel: int = 1,
     expert_parallel: int = 1,
@@ -1393,10 +1387,9 @@ def fsdp_gathered_params(
             expert_layer = routed // expert_parallel
     if not reshard_after_forward:
         return sharded + arch.moe_layers * expert_layer
-    n_units = max(1, -(-arch.n_layers // wrap_every_n_blocks))
-    live = min(n_units, 1 + prefetch_units)
+    live = min(max(1, arch.n_layers), 1 + PREFETCH_UNITS)
     window = prefetch_window_params(
-        counts, arch, live, wrap_every_n_blocks, tensor_parallel, expert_parallel
+        counts, arch, live, tensor_parallel, expert_parallel
     )
     head, extra_embed, root = _side_units(counts, arch, tensor_parallel)
     return min(sharded, window + head + extra_embed + root) + expert_layer
@@ -1433,8 +1426,6 @@ def fsdp_resharded_side_params(counts: ParamCounts, arch: ModelArch) -> int:
 def fsdp_gather_pool_params(
     counts: ParamCounts,
     arch: ModelArch,
-    wrap_every_n_blocks: int,
-    prefetch_units: int,
     ep: int,
     shards: int,
     tensor_parallel: int = 1,
@@ -1443,8 +1434,6 @@ def fsdp_gather_pool_params(
 
     :param counts: Parameter counts of the model.
     :param arch: Model architecture.
-    :param wrap_every_n_blocks: Decoder blocks per FSDP unit.
-    :param prefetch_units: Units FSDP gathers ahead of the running one.
     :param ep: Expert-parallel width.
     :param shards: FSDP shard count.
     :param tensor_parallel: Training TP width; TP-planned linears gather nothing.
@@ -1482,13 +1471,9 @@ def fsdp_gather_pool_params(
             size - routed + local if is_routed else size
             for size, is_routed in zip(sizes, routed_layers, strict=True)
         ]
-    units = [
-        sum(sizes[start : start + wrap_every_n_blocks])
-        for start in range(0, len(sizes), wrap_every_n_blocks)
-    ]
-    live = min(len(units), 1 + prefetch_units)
+    live = min(len(sizes), 1 + PREFETCH_UNITS)
     window = max(
-        sum(units[start : start + live]) for start in range(len(units) - live + 1)
+        sum(sizes[start : start + live]) for start in range(len(sizes) - live + 1)
     )
     head, extra_embed, root = _side_units(counts, arch, tensor_parallel)
-    return max(window, max(extra_embed, root) + units[0], head + units[-1])
+    return max(window, max(extra_embed, root) + sizes[0], head + sizes[-1])

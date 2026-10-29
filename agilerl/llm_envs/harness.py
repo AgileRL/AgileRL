@@ -749,8 +749,8 @@ class RolloutHarness(RestartPromptMixin):
         if self._vision_processor is None:
             msg = (
                 "Image observations require vision_processor on RolloutHarness; "
-                "a VL model needs vllm_config.strip_multimodal_towers false, "
-                "which environment.modality text turns on when unset"
+                "a VL model's engine skips its towers when environment.modality "
+                "is text"
             )
             raise RuntimeError(msg)
         return self._vision_processor

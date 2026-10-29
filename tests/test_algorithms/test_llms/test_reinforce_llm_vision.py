@@ -67,10 +67,8 @@ def make_vision_reinforce(**overrides: Any) -> REINFORCE:
         "mini_batch_size": 4,
         "update_epochs": 1,
         "wrap": False,
-        "gradient_checkpointing": False,
         "calc_position_embeddings": False,
         "device": "cpu",
-        "use_liger_loss": False,
         "lora_config": LoraConfig(
             r=4,
             lora_alpha=8,
@@ -80,7 +78,9 @@ def make_vision_reinforce(**overrides: Any) -> REINFORCE:
         ),
         **overrides,
     }
-    return REINFORCE(**kwargs)
+    agent = REINFORCE(**kwargs)
+    agent.liger_loss = False
+    return agent
 
 
 class TestREINFORCELearnVision:

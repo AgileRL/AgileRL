@@ -418,12 +418,12 @@ def _cpu_grpo(**kwargs):
         "max_output_tokens": 4,
         "max_model_len": 12,
         "wrap": False,
-        "gradient_checkpointing": False,
         "device": "cpu",
-        "use_liger_loss": False,
     }
     defaults.update(kwargs)
-    return GRPO(**defaults)
+    agent = GRPO(**defaults)
+    agent.liger_loss = False
+    return agent
 
 
 class TestGRPOAdvantageGranularityContract:

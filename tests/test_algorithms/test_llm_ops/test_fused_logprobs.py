@@ -58,7 +58,7 @@ class TestScoredPositionIndex:
 def _fresh_compile_state():
     """Isolate the process-global compile cache between tests."""
     saved = dict(_FUSED_LOGPROB_COMPILE_STATE)
-    _FUSED_LOGPROB_COMPILE_STATE.update({"fn": None, "disabled": False})
+    _FUSED_LOGPROB_COMPILE_STATE.update({"fn": None})
     yield
     _FUSED_LOGPROB_COMPILE_STATE.update(saved)
 
@@ -68,7 +68,7 @@ def _args():
     h = torch.randn(4, 8)
     w = torch.randn(16, 8)
     targets = torch.randint(0, 16, (4,))
-    return h, w, None, targets, 1.0, True, None
+    return h, w, None, targets, 1.0, None
 
 
 def test_fused_logprob_chunk_applies_bias_and_temperature():
@@ -80,7 +80,7 @@ def test_fused_logprob_chunk_applies_bias_and_temperature():
     w = torch.randn(16, 8)
     bias = torch.randn(16)
     targets = torch.randint(0, 16, (4,))
-    out = _fused_logprob_chunk(h, w, bias, targets, 2.0, True, None)
+    out = _fused_logprob_chunk(h, w, bias, targets, 2.0, None)
     expected = (
         ((h @ w.t() + bias) / 2.0)
         .log_softmax(dim=-1)
@@ -98,7 +98,7 @@ def test_fused_logprob_chunk_promotes_mismatched_dtypes():
     w = torch.randn(16, 8, dtype=torch.float16)
     targets = torch.randint(0, 16, (4,))
 
-    out = _fused_logprob_chunk(h, w, None, targets, 1.0, False, None)
+    out = _fused_logprob_chunk(h, w, None, targets, 1.0, None)
 
     expected = (
         (h @ w.float().t())
@@ -143,21 +143,19 @@ class TestFusedLinearLogprobsSoftcap:
     def test_gradient_matches_autograd_through_softcap(self) -> None:
         # Arrange
         torch.manual_seed(1)
-        h = torch.randn(2, 5, 8, dtype=torch.float64, requires_grad=True)
-        w = (torch.randn(16, 8, dtype=torch.float64) * 4.0).requires_grad_(True)
+        h = torch.randn(2, 5, 8, dtype=torch.float32, requires_grad=True)
+        w = (torch.randn(16, 8, dtype=torch.float32) * 4.0).requires_grad_(True)
         targets = torch.randint(0, 16, (2, 5))
 
         # Act
-        fused = FusedLinearLogProbsFunction.apply(
-            h, w, None, targets, 0.7, False, 3, 3.0
-        )
+        fused = FusedLinearLogProbsFunction.apply(h, w, None, targets, 0.7, 3, 3.0)
         fused_grads = torch.autograd.grad(fused.sum(), (h, w))
         reference = _softcapped_reference(h, w, targets, 3.0, 0.7)
         reference_grads = torch.autograd.grad(reference.sum(), (h, w))
 
         # Assert
-        assert torch.allclose(fused_grads[0], reference_grads[0], atol=1e-10)
-        assert torch.allclose(fused_grads[1], reference_grads[1], atol=1e-10)
+        assert torch.allclose(fused_grads[0], reference_grads[0], atol=1e-5)
+        assert torch.allclose(fused_grads[1], reference_grads[1], atol=1e-5)
 
 
 def _biased_reference(
@@ -185,8 +183,8 @@ class TestFusedLinearLogprobsLogitBias:
     def test_chunked_logprobs_score_the_biased_logits(self) -> None:
         # Arrange
         hidden, weight, targets, supports = _support_case()
-        logit_bias = torch.zeros(16, dtype=torch.float64)
-        logit_bias[[7, 9]] = torch.tensor([-100.0, 1.5], dtype=torch.float64)
+        logit_bias = torch.zeros(16, dtype=torch.float32)
+        logit_bias[[7, 9]] = torch.tensor([-100.0, 1.5], dtype=torch.float32)
         expected = _biased_reference(hidden, weight, targets, supports, logit_bias)
 
         # Act
@@ -196,7 +194,6 @@ class TestFusedLinearLogprobsLogitBias:
             None,
             targets,
             temperature=0.7,
-            cast_to_fp32=False,
             chunk_rows=2,
             softcap=3.0,
             support_ids=supports,
@@ -208,14 +205,13 @@ class TestFusedLinearLogprobsLogitBias:
             None,
             targets,
             temperature=0.7,
-            cast_to_fp32=False,
             chunk_rows=2,
             softcap=3.0,
             support_ids=supports,
         )
 
         # Assert
-        assert torch.allclose(logps, expected, atol=1e-12)
+        assert torch.allclose(logps, expected, atol=1e-6)
         assert not torch.allclose(unbiased[0, [0, 2]], expected[0, [0, 2]], atol=1e-3)
         assert logps[0, 1].item() == 0.0
 
@@ -224,20 +220,20 @@ class TestFusedLinearLogprobsLogitBias:
         hidden, weight, targets, supports = _support_case()
         hidden.requires_grad_(True)
         weight.requires_grad_(True)
-        logit_bias = torch.zeros(16, dtype=torch.float64)
-        logit_bias[[7, 9]] = torch.tensor([-100.0, 1.5], dtype=torch.float64)
+        logit_bias = torch.zeros(16, dtype=torch.float32)
+        logit_bias[[7, 9]] = torch.tensor([-100.0, 1.5], dtype=torch.float32)
 
         # Act
         fused = FusedLinearLogProbsFunction.apply(
-            hidden, weight, None, targets, 0.7, False, 2, 3.0, supports, logit_bias
+            hidden, weight, None, targets, 0.7, 2, 3.0, supports, logit_bias
         )
         fused_grads = torch.autograd.grad(fused.sum(), (hidden, weight))
         reference = _biased_reference(hidden, weight, targets, supports, logit_bias)
         reference_grads = torch.autograd.grad(reference.sum(), (hidden, weight))
 
         # Assert
-        assert torch.allclose(fused_grads[0], reference_grads[0], atol=1e-10)
-        assert torch.allclose(fused_grads[1], reference_grads[1], atol=1e-10)
+        assert torch.allclose(fused_grads[0], reference_grads[0], atol=1e-5)
+        assert torch.allclose(fused_grads[1], reference_grads[1], atol=1e-5)
 
 
 class TestLLMAlgorithmLogitBiasVector:
@@ -273,21 +269,17 @@ class TestFusedLogprobChunkDispatch:
         assert torch.allclose(first, second)
         assert _FUSED_LOGPROB_COMPILE_STATE["fn"] is not None
 
-    def test_compiled_failure_latches_eager_fallback(self):
+    def test_compiled_failure_raises_without_fallback(self):
         def boom(*args, **kwargs):
             msg = "triton backend exploded"
             raise RuntimeError(msg)
 
-        expected = _fused_logprob_chunk(*_args())
         with patch("torch.compile", side_effect=lambda fn, **kw: boom):
-            got = _fused_logprob_chunk_dispatch(torch.device("cuda"), *_args())
-        assert torch.allclose(got, expected)
-        assert _FUSED_LOGPROB_COMPILE_STATE["disabled"] is True
-        # Latched: subsequent calls short-circuit to eager without recompiling.
-        with patch("torch.compile") as mock_compile:
-            again = _fused_logprob_chunk_dispatch(torch.device("cuda"), *_args())
-        mock_compile.assert_not_called()
-        assert torch.allclose(again, expected)
+            with pytest.raises(RuntimeError, match="triton backend exploded"):
+                _fused_logprob_chunk_dispatch(torch.device("cuda"), *_args())
+            # No eager fallback is latched: the cached compiled fn keeps raising.
+            with pytest.raises(RuntimeError, match="triton backend exploded"):
+                _fused_logprob_chunk_dispatch(torch.device("cuda"), *_args())
 
 
 def test_fused_logprob_backward_skips_when_no_inputs_require_grad():
@@ -301,7 +293,6 @@ def test_fused_logprob_backward_skips_when_no_inputs_require_grad():
         needs_bias_grad = False
         chunk_rows = 2
         temperature = 1.0
-        cast_to_fp32 = True
         softcap = None
         saved_tensors = (hidden, weight, None, targets, None, None)
 
@@ -314,8 +305,8 @@ def test_fused_logprob_backward_skips_when_no_inputs_require_grad():
 def _support_case() -> tuple[torch.Tensor, ...]:
     """Hidden states, head, targets and supports for one restricted and one free row."""
     torch.manual_seed(0)
-    hidden = torch.randn(1, 3, 8, dtype=torch.float64)
-    weight = torch.randn(16, 8, dtype=torch.float64)
+    hidden = torch.randn(1, 3, 8, dtype=torch.float32)
+    weight = torch.randn(16, 8, dtype=torch.float32)
     targets = torch.tensor([[5, 2, 9]])
     # Position 0: support {5, 7}; position 1: support {2} (forced); position 2: none.
     supports = torch.tensor([[[5, 7], [2, -1], [-1, -1]]], dtype=torch.int32)
@@ -379,13 +370,12 @@ class TestFusedLinearLogprobsChunked:
             None,
             targets,
             temperature=0.7,
-            cast_to_fp32=False,
             chunk_rows=2,
             support_ids=supports,
         )
 
         # Assert
-        assert torch.allclose(logps, expected, atol=1e-12)
+        assert torch.allclose(logps, expected, atol=1e-6)
         assert logps[0, 1].item() == 0.0
 
     def test_without_supports_normalizes_over_the_vocabulary(self) -> None:
@@ -394,10 +384,10 @@ class TestFusedLinearLogprobsChunked:
         expected = _reference_logprobs(hidden, weight, targets, full, 1.0)
 
         logps = fused_linear_logprobs_chunked(
-            hidden, weight, None, targets, cast_to_fp32=False, chunk_rows=2
+            hidden, weight, None, targets, chunk_rows=2
         )
 
-        assert torch.allclose(logps, expected, atol=1e-12)
+        assert torch.allclose(logps, expected, atol=1e-6)
 
     def test_rows_with_a_support_skip_the_vocabulary_matmul(self) -> None:
         # Arrange
@@ -419,13 +409,12 @@ class TestFusedLinearLogprobsChunked:
                 None,
                 targets[:, :2],
                 temperature=0.7,
-                cast_to_fp32=False,
                 chunk_rows=1,
                 support_ids=supports,
             )
 
         # Assert
-        assert torch.allclose(logps, expected, atol=1e-12)
+        assert torch.allclose(logps, expected, atol=1e-6)
 
     def test_a_vocab_wide_support_gathers_one_row_at_a_time(self) -> None:
         # Arrange
@@ -448,7 +437,6 @@ class TestFusedLinearLogprobsChunked:
                 weight,
                 None,
                 targets,
-                cast_to_fp32=False,
                 chunk_rows=2,
                 support_ids=supports,
             )
@@ -464,17 +452,15 @@ class TestLLMAlgorithmScoreHidden:
     ) -> None:
         # Arrange
         torch.manual_seed(4)
-        hidden = torch.randn(2, 3, 8, dtype=torch.float64)
-        weight = torch.randn(16, 8, dtype=torch.float64)
+        hidden = torch.randn(2, 3, 8, dtype=torch.float32)
+        weight = torch.randn(16, 8, dtype=torch.float32)
         targets = torch.tensor([[5, 2, 9], [1, 3, 4]])
         supports = torch.tensor(
             [[[5, 7], [2, 6], [-1, -1]], [[-1, -1], [3, 8], [-1, -1]]],
             dtype=torch.int32,
         )
         score_mask = supports[..., 0] >= 0
-        algo = SimpleNamespace(
-            temperature=0.7, cast_logprobs_to_fp32=False, chunk_rows=2
-        )
+        algo = SimpleNamespace(temperature=0.7)
         expected = _reference_logprobs(
             hidden[:1, :2], weight, targets[:1, :2], supports[:1, :2], 0.7
         )
@@ -487,7 +473,7 @@ class TestLLMAlgorithmScoreHidden:
         ):
             logps = LLMAlgorithm._score_hidden(
                 algo,
-                fused_linear_logprobs_chunked,
+                LLMAlgorithm._logprobs_from_hidden_fused,
                 hidden,
                 weight,
                 None,
@@ -497,7 +483,7 @@ class TestLLMAlgorithmScoreHidden:
             )
 
         # Assert
-        assert torch.allclose(logps[0, :2], expected[0], atol=1e-12)
+        assert torch.allclose(logps[0, :2], expected[0], atol=1e-6)
         assert logps[0, 2].item() == 0.0
         assert logps[1, 0].item() == 0.0
         assert logps[1, 2].item() == 0.0
@@ -508,9 +494,9 @@ class TestSupportLogprobChunk:
     def test_matches_the_masked_log_softmax_with_bias_and_softcap(self) -> None:
         # Arrange
         torch.manual_seed(2)
-        hidden = torch.randn(3, 8, dtype=torch.float64)
-        weight = torch.randn(16, 8, dtype=torch.float64) * 4.0
-        bias = torch.randn(16, dtype=torch.float64)
+        hidden = torch.randn(3, 8, dtype=torch.float32)
+        weight = torch.randn(16, 8, dtype=torch.float32) * 4.0
+        bias = torch.randn(16, dtype=torch.float32)
         targets = torch.tensor([5, 2, 11])
         supports = torch.tensor([[7, 5, 1], [2, -1, -1], [11, 3, -1]])
         logits = 3.0 * torch.tanh((hidden @ weight.t() + bias) / 3.0) / 0.7
@@ -525,12 +511,10 @@ class TestSupportLogprobChunk:
         )
 
         # Act
-        logps = support_logprob_chunk(
-            hidden, weight, bias, targets, 0.7, False, 3.0, supports
-        )
+        logps = support_logprob_chunk(hidden, weight, bias, targets, 0.7, 3.0, supports)
 
         # Assert
-        assert torch.allclose(logps, expected, atol=1e-12)
+        assert torch.allclose(logps, expected, atol=1e-6)
 
     def test_upcasts_a_bf16_head_to_the_fp32_result(self) -> None:
         torch.manual_seed(3)
@@ -542,7 +526,7 @@ class TestSupportLogprobChunk:
         expected = logits[:, [4, 9]].log_softmax(-1)[[0, 1], [0, 1]]
 
         logps = support_logprob_chunk(
-            hidden, weight, None, targets, 1.0, True, None, supports
+            hidden, weight, None, targets, 1.0, None, supports
         )
 
         assert logps.dtype == torch.float32
@@ -558,7 +542,6 @@ class TestSupportLogprobChunk:
             None,
             torch.tensor([3]),
             1.0,
-            False,
             None,
             torch.tensor([[1, 2]]),
         )
@@ -594,11 +577,11 @@ class TestFusedLinearLogProbsFunctionSupport:
 
         # Act
         FusedLinearLogProbsFunction.apply(
-            hidden, weight, None, targets, 0.7, False, 2, None, supports
+            hidden, weight, None, targets, 0.7, 2, None, supports
         ).sum().backward()
 
         # Assert
-        assert torch.allclose(hidden.grad, ref_hidden.grad, atol=1e-12)
-        assert torch.allclose(weight.grad, ref_weight.grad, atol=1e-12)
+        assert torch.allclose(hidden.grad, ref_hidden.grad, atol=1e-6)
+        assert torch.allclose(weight.grad, ref_weight.grad, atol=1e-6)
         # A forced token carries no gradient into its hidden state.
         assert torch.count_nonzero(hidden.grad[0, 1]) == 0

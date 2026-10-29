@@ -14,6 +14,7 @@ import torch.nn as nn
 from peft.tuners.lora.layer import ParamWrapper
 from torch.distributed.tensor import DTensor
 
+from agilerl.arena.memory.formulas import DEFAULT_ROUTED_CHUNK_BYTES
 from agilerl.lora.moe.adapters import (
     ExpertLora,
     lora_operands,
@@ -24,7 +25,6 @@ from agilerl.lora.moe.adapters import (
     token_adapter_ids,
 )
 from agilerl.lora.moe.grouped_gemm import (
-    ROUTED_EXPERT_CHUNK_BYTES,
     expert_row_counts,
     grouped_matmul,
     grouped_operand,
@@ -270,7 +270,7 @@ def routed_experts_local_forward(
     routing: Sequence[str] | None = None,
     already_grouped: bool | None = None,
     recompute: bool = False,
-    chunk_bytes: int = ROUTED_EXPERT_CHUNK_BYTES,
+    chunk_bytes: int = DEFAULT_ROUTED_CHUNK_BYTES,
 ) -> torch.Tensor:
     """Packed routed-experts forward with optional split-LoRA deltas.
 
@@ -281,7 +281,7 @@ def routed_experts_local_forward(
         backward. Applies when both base weights are frozen and the LoRA factors
         are not partitioned DTensors.
     :param chunk_bytes: Widest ``[rows, features]`` activation of one row
-        chunk; see :data:`ROUTED_EXPERT_CHUNK_BYTES`.
+        chunk; see :data:`~agilerl.arena.memory.formulas.DEFAULT_ROUTED_CHUNK_BYTES`.
     """
     projections = routed_projection_names(experts)
     if projections is None:

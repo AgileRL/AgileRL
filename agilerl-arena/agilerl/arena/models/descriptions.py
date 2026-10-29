@@ -28,7 +28,8 @@ MINI_BATCH = (
 )
 MICRO_BATCH = (
     "Trajectories per backward pass, per GPU. Affects only memory: it "
-    "changes what fits, not what the run learns."
+    "changes what fits, not what the run learns. Picked from the memory "
+    "estimate as the largest that fits; manifests cannot set it."
 )
 
 TAU = (
@@ -118,10 +119,6 @@ COSINE_LR = (
     "For a constant learning rate, set warmup_proportion 0 and min_lr_ratio 1.0."
 )
 VLLM_CONFIG = "vLLM engine settings for generation."
-IS_CORRECTION = (
-    "Correct for the mismatch between the vLLM sampler's log-probabilities and "
-    "the trainer's recomputed ones."
-)
 IS_CAP = "Upper bound applied to the vLLM importance-sampling correction ratio."
 VLLM_MAX_LOGPROB_GAP = (
     "Warn when the mean per-token log-prob gap between vLLM and the trainer "

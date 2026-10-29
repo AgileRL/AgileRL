@@ -30,6 +30,7 @@ from agilerl.arena.models.algorithms import (
     SFTSpec,
     SingleAgentAlgorithmSpec,
 )
+from agilerl.arena.models.env import LLMEnvSpec
 from agilerl.arena.models.fsdp import FSDPConfig
 from agilerl.arena.models.networks import (
     CosineLRScheduleConfig as CosineLRScheduleSpec,
@@ -223,7 +224,6 @@ def test_arena_only_fields_are_not_forwarded_to_the_constructor():
 
     spec = GRPOSpec(
         group_size=4,
-        attn_implementation="sdpa",
         quantization="nf4",
         vllm_engine_args={"trust_remote_code": True},
         pretrained_model_name_or_path="Qwen/Qwen2.5-0.5B-Instruct",
@@ -232,10 +232,8 @@ def test_arena_only_fields_are_not_forwarded_to_the_constructor():
     kwargs = spec_kwargs(spec, hp_config=None)
     filtered = constructor_kwargs(GRPO, kwargs)
 
-    assert kwargs["attn_implementation"] == "sdpa"
     assert kwargs["quantization"] == "nf4"
     assert kwargs["vllm_engine_args"] == {"trust_remote_code": True}
-    assert "attn_implementation" not in filtered
     assert "quantization" not in filtered
     assert "vllm_engine_args" not in filtered
     assert filtered["group_size"] == 4
@@ -351,7 +349,12 @@ def _cuda_device_spec(
 
 
 def _build_llm_with_dummy_algo(
-    spec, monkeypatch, *, rollout_mode: str = "", device: str = "cpu"
+    spec,
+    monkeypatch,
+    *,
+    rollout_mode: str = "",
+    device: str = "cpu",
+    environment=None,
 ):
     built = {}
 
@@ -384,6 +387,7 @@ def _build_llm_with_dummy_algo(
         tokenizer=tokenizer,
         runtime=AlgorithmBuildRuntime(device=device),
         rollout_mode=rollout_mode,
+        environment=environment,
     )
     return built
 
@@ -418,7 +422,26 @@ class TestLLMBuildGuards:
 
         assert isinstance(built["vllm_config"], VLLMConfig)
 
-    def test_colocated_omits_unset_old_logprobs_source(self, monkeypatch):
+    @pytest.mark.parametrize(
+        "vllm_config", [None, VLLMConfigSpec(gpu_memory_utilization=0.6)]
+    )
+    def test_colocated_vllm_sleeps(self, monkeypatch, vllm_config):
+        # Arrange
+        spec = GRPOSpec(
+            group_size=2,
+            pretrained_model_name_or_path="stub/model",
+            vllm_config=vllm_config,
+        )
+
+        # Act
+        built = _build_llm_with_dummy_algo(spec, monkeypatch, rollout_mode="colocated")
+
+        # Assert
+        assert built["vllm_config"].sleep_mode is True
+
+    def test_colocated_leaves_sampling_logprob_options_to_the_constructor(
+        self, monkeypatch
+    ):
         spec = GRPOSpec(
             group_size=2,
             pretrained_model_name_or_path="stub/model",
@@ -426,6 +449,7 @@ class TestLLMBuildGuards:
         built = _build_llm_with_dummy_algo(spec, monkeypatch, rollout_mode="colocated")
 
         assert "old_logprobs_source" not in built
+        assert "vllm_importance_sampling_correction" not in built
 
     def test_vllm_config_is_dropped_when_the_trainer_does_not_host_vllm(
         self, monkeypatch
@@ -566,57 +590,29 @@ class TestLLMBuildGuards:
 
         assert built["micro_batch_size_per_gpu"] == 8
 
-    def test_cuda_search_refuses_eager_attention(self, monkeypatch):
-        _patch_cuda_card(monkeypatch)
+
+@requires_llm
+class TestLLMBuilderBuildDerivedEngineSettings:
+    @pytest.mark.parametrize(
+        ("modality", "expected"), [("text", True), ("vision", False), (None, False)]
+    )
+    def test_text_only_env_strips_a_vl_model_towers(
+        self, monkeypatch, modality, expected
+    ):
         spec = GRPOSpec(
             group_size=4,
             batch_size=4,
-            pretrained_model_name_or_path=CATALOG_HUB_ID,
+            pretrained_model_name_or_path="Qwen/Qwen3.5-2B",
             max_model_len=128,
-            attn_implementation="eager",
+            vllm_config=VLLMConfigSpec(),
+        )
+        environment = LLMEnvSpec(
+            env_type="rollout", env_url="http://env", max_turns=1, modality=modality
         )
 
-        with pytest.raises(ValueError, match="attn_implementation='eager'"):
-            _build_llm_with_dummy_algo(spec, monkeypatch, device="cuda:0")
+        built = _build_llm_with_dummy_algo(spec, monkeypatch, environment=environment)
 
-    def test_colocated_resident_engine_shrinks_the_search_budget(self, monkeypatch):
-        utilization = 0.3
-        seen: dict[str, DeviceSpec] = {}
-        real_resolve = llm_builder.resolve_micro_batch_size_per_gpu
-
-        def record(spec, n_training_gpus, device=None, model=None, settings=None):
-            seen["device"] = device
-            return real_resolve(spec, n_training_gpus, device, model, settings)
-
-        monkeypatch.setattr(llm_builder, "resolve_micro_batch_size_per_gpu", record)
-        _patch_cuda_card(monkeypatch)
-        spec = GRPOSpec(
-            group_size=4,
-            batch_size=4,
-            pretrained_model_name_or_path=CATALOG_HUB_ID,
-            max_model_len=128,
-            vllm_config=VLLMConfigSpec(
-                gpu_memory_utilization=utilization,
-                sleep_mode=False,
-            ),
-        )
-        built = _build_llm_with_dummy_algo(
-            spec, monkeypatch, rollout_mode="colocated", device="cuda:0"
-        )
-
-        passed = seen["device"]
-        full = _cuda_device_spec()
-        settings = training_settings_from_spec(spec, 1, micro_batch_size=1)
-        with_engine = resolve_micro_batch_size_per_gpu(
-            spec, 1, passed, settings=settings
-        )
-        without = resolve_micro_batch_size_per_gpu(spec, 1, full, settings=settings)
-
-        assert passed.available_bytes == full.usable_bytes - int(
-            passed.total_bytes * utilization
-        )
-        assert built["micro_batch_size_per_gpu"] == with_engine
-        assert with_engine < without
+        assert built["rollout_strip_multimodal_towers"] is expected
 
 
 _TINY_TEXT_CONFIG = {
@@ -657,10 +653,15 @@ class TestFSDPConfigForAlgorithm:
         seen: list[int] = []
         real_resolve = llm_builder.resolve_fsdp_memory
 
-        def spy(model, device, settings, breakdown, orchestrated=False):
+        def spy(model, device, settings, breakdown, orchestrated, micro_batch_floor):
             seen.append(settings.max_model_len)
             return real_resolve(
-                model, device, settings, breakdown, orchestrated=orchestrated
+                model,
+                device,
+                settings,
+                breakdown,
+                orchestrated=orchestrated,
+                micro_batch_floor=micro_batch_floor,
             )
 
         monkeypatch.setattr(llm_builder, "resolve_fsdp_memory", spy)
@@ -690,10 +691,15 @@ class TestFSDPConfigForAlgorithm:
         seen: list[int] = []
         real_resolve = llm_builder.resolve_fsdp_memory
 
-        def spy(model, device, settings, breakdown, orchestrated=False):
+        def spy(model, device, settings, breakdown, orchestrated, micro_batch_floor):
             seen.append(settings.max_model_len)
             return real_resolve(
-                model, device, settings, breakdown, orchestrated=orchestrated
+                model,
+                device,
+                settings,
+                breakdown,
+                orchestrated=orchestrated,
+                micro_batch_floor=micro_batch_floor,
             )
 
         monkeypatch.setattr(llm_builder, "resolve_fsdp_memory", spy)
@@ -734,7 +740,13 @@ class TestFSDPConfigForAlgorithm:
         assert resolved is fsdp
 
     def test_keeps_fields_that_are_already_set(self) -> None:
-        fsdp = FSDPConfig(routed_expert_chunk_mib=64, optim_cpu_offload=True)
+        fsdp = FSDPConfig(
+            reshard_after_forward=True,
+            routed_expert_chunk_mib=64,
+            optim_cpu_offload=True,
+            activation_offload=False,
+            cpu_offload=False,
+        )
         spec = DPOSpec(pretrained_model_name_or_path="tiny", fsdp=fsdp)
 
         resolved = llm_builder.fsdp_config_for_algorithm(

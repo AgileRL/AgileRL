@@ -13,6 +13,7 @@ import sys
 from contextlib import nullcontext
 from functools import partial
 from typing import Any
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -70,10 +71,8 @@ def make_vision_ppo(**overrides: Any) -> LLMPPO:
         "mini_batch_size": 4,
         "update_epochs": 1,
         "wrap": False,
-        "gradient_checkpointing": False,
         "calc_position_embeddings": False,
         "device": "cpu",
-        "use_liger_loss": False,
         "lora_config": LoraConfig(
             r=4,
             lora_alpha=8,
@@ -84,7 +83,10 @@ def make_vision_ppo(**overrides: Any) -> LLMPPO:
         ),
         **overrides,
     }
-    return LLMPPO(**kwargs)
+    # The seeded multi-rank KL sits near fp32 overflow; LoRA keeps the
+    # lm_head as on a host without liger-kernel.
+    with patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False):
+        return LLMPPO(**kwargs)
 
 
 class TestPPOFusedForwardNoGradVision:
@@ -116,18 +118,14 @@ class TestPPOFusedForwardNoGradVision:
 class TestPPOLearnVision:
     @pytest.mark.parametrize("segmented", [True, False], ids=["segments", "episodes"])
     @pytest.mark.parametrize("liger", [False, True], ids=["standard", "liger"])
-    @pytest.mark.parametrize("fuse", [False, True], ids=["split", "fused"])
     def test_every_forward_gets_the_vision_rows_of_its_rows(
         self,
         monkeypatch: pytest.MonkeyPatch,
         segmented: bool,
         liger: bool,
-        fuse: bool,
     ) -> None:
         # Arrange
-        agent = make_vision_ppo(
-            importance_sampling_level="token", fuse_actor_critic_pass=fuse
-        )
+        agent = make_vision_ppo(importance_sampling_level="token")
         if liger:
             use_fake_liger_policy_loss(agent, monkeypatch, "agilerl.algorithms.ppo_llm")
         model = vision_model(agent)
@@ -189,14 +187,13 @@ class TestPPOLearnVision:
         assert metrics["entropy"] != pytest.approx(other_metrics["entropy"])
         assert metrics["vf_loss"] != pytest.approx(other_metrics["vf_loss"])
 
-    @pytest.mark.parametrize("fuse", [False, True], ids=["split", "fused"])
     def test_vision_filler_rows_train_with_one_vision_row(
-        self, monkeypatch: pytest.MonkeyPatch, fuse: bool
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Arrange: 1-row micro-batches over 6 real rows, padded to 8 by a
         # simulated second rank. A filler row is the first segment's one
         # placeholder with that segment's vision row 0.
-        agent = make_vision_ppo(micro_batch_size_per_gpu=1, fuse_actor_critic_pass=fuse)
+        agent = make_vision_ppo(micro_batch_size_per_gpu=1)
         model = vision_model(agent)
         pad_to_eight_rows(monkeypatch)
         filler_tokens = (IMAGE_TOKEN_ID,)
@@ -242,12 +239,9 @@ def make_tower_vision_ppo(**overrides: Any) -> LLMPPO:
 
 class TestPPOLearnVisionCache:
     @pytest.mark.parametrize("segmented", [True, False], ids=["segments", "episodes"])
-    @pytest.mark.parametrize("fuse", [False, True], ids=["split", "fused"])
-    def test_learn_runs_the_tower_once_per_vision_row(
-        self, segmented: bool, fuse: bool
-    ) -> None:
+    def test_learn_runs_the_tower_once_per_vision_row(self, segmented: bool) -> None:
         # Arrange
-        agent = make_tower_vision_ppo(fuse_actor_critic_pass=fuse)
+        agent = make_tower_vision_ppo()
 
         # Act
         learn_on_vision_episodes(agent, segmented=segmented)
@@ -256,13 +250,12 @@ class TestPPOLearnVisionCache:
         assert sum(tower(agent).rows) == sum(IMAGE_COUNTS)
 
     @pytest.mark.parametrize("segmented", [True, False], ids=["segments", "episodes"])
-    @pytest.mark.parametrize("fuse", [False, True], ids=["split", "fused"])
     def test_learn_matches_the_uncached_tower(
-        self, monkeypatch: pytest.MonkeyPatch, segmented: bool, fuse: bool
+        self, monkeypatch: pytest.MonkeyPatch, segmented: bool
     ) -> None:
         # Arrange
-        cached = make_tower_vision_ppo(fuse_actor_critic_pass=fuse)
-        uncached = make_tower_vision_ppo(fuse_actor_critic_pass=fuse)
+        cached = make_tower_vision_ppo()
+        uncached = make_tower_vision_ppo()
         monkeypatch.setattr(uncached._vision_cache, "step", nullcontext)
 
         # Act
@@ -292,17 +285,12 @@ class TestPPOLearnVisionCache:
 )
 @pytest.mark.multi_rank
 class TestPPOLearnVisionCacheAcrossRanks:
-    @pytest.mark.parametrize(
-        ("fuse", "copies"), [(False, 1), (True, 2)], ids=["split", "fused"]
-    )
-    def test_balanced_rows_run_the_tower_once_per_vision_row(
-        self, fuse: bool, copies: int
-    ) -> None:
+    def test_balanced_rows_run_the_tower_once_per_vision_row(self) -> None:
         # Arrange: rank 0's 4 rows (5 vision rows) and rank 1's 2 rows (3 vision
         # rows, plus 2 filler vision rows in the no-grad forward) deal out as 3
         # and 3. Rank 0 receives a row with 2 vision rows, rank 1 two rows with
         # 3. A fused pass runs each row once per adapter.
-        make_agent = partial(make_tower_vision_ppo, fuse_actor_critic_pass=fuse)
+        make_agent = partial(make_tower_vision_ppo)
 
         # Act
         cached = run_ranks(
@@ -323,10 +311,7 @@ class TestPPOLearnVisionCacheAcrossRanks:
         )
 
         # Assert
-        assert [tower_rows for (tower_rows, _), _ in cached] == [
-            5 + 2 * copies,
-            5 + 3 * copies,
-        ]
+        assert [tower_rows for (tower_rows, _), _ in cached] == [9, 11]
         for ((cached_rows, cached_losses), cached_steps), (
             (uncached_rows, uncached_losses),
             uncached_steps,
@@ -350,9 +335,7 @@ class TestPPOLearnVisionRowsLifetime:
         self, monkeypatch: pytest.MonkeyPatch, cached: bool
     ) -> None:
         # Arrange
-        agent = make_tower_vision_ppo(
-            fuse_actor_critic_pass=True, micro_batch_size_per_gpu=1
-        )
+        agent = make_tower_vision_ppo(micro_batch_size_per_gpu=1)
         if not cached:
             monkeypatch.setattr(agent._vision_cache, "step", nullcontext)
         lifetime = VisionRowsLifetime(agent, monkeypatch)
@@ -363,23 +346,3 @@ class TestPPOLearnVisionRowsLifetime:
         # Assert
         assert len(lifetime.freed) >= 2
         assert all(lifetime.freed)
-
-    @pytest.mark.parametrize("cached", [True, False], ids=["warm", "cold"])
-    def test_split_pass_frees_vision_rows_before_the_value_backward(
-        self, monkeypatch: pytest.MonkeyPatch, cached: bool
-    ) -> None:
-        # Arrange: the critic forward after the policy backward reads the rows.
-        agent = make_tower_vision_ppo(
-            fuse_actor_critic_pass=False, micro_batch_size_per_gpu=1
-        )
-        if not cached:
-            monkeypatch.setattr(agent._vision_cache, "step", nullcontext)
-        lifetime = VisionRowsLifetime(agent, monkeypatch)
-
-        # Act
-        learn_on_vision_episodes(agent, segmented=True)
-
-        # Assert
-        micro_batches = len(lifetime.returned)
-        assert micro_batches >= 2
-        assert lifetime.freed == [False, True] * micro_batches

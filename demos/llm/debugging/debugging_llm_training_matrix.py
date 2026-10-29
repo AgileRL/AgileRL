@@ -168,7 +168,6 @@ def build_init_hp(
         "BATCH_SIZE": batch_size,
         "UPDATE_EPOCHS": 1,
         "USE_VLLM": False,
-        "GRADIENT_CHECKPOINTING": False,
         "MAX_MODEL_LEN": max_model_len,
         "MAX_OUTPUT_TOKENS": max_output_tokens,
         "SEED": seed,

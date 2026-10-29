@@ -26,6 +26,7 @@ from agilerl.architectures.nemotron_h.mamba import (
 from agilerl.architectures.runtime import MambaPatchConfig, PatchRuntimeConfig
 
 MIXER = "transformers.models.nemotron_h.modeling_nemotron_h.NemotronHMamba2Mixer"
+MISSING_MIXER = "agilerl_missing_module.NemotronHMamba2Mixer"
 
 
 def _nemotron_mamba_scan_fields(module: torch.nn.Module) -> None:
@@ -117,24 +118,9 @@ class TestNemotronMambaFusedPath:
         assert any("disabled by caller" in record.message for record in caplog.records)
         assert mixer_cls(FakeConfig()).use_mem_eff_path is True
 
-    def test_missing_mixer_class_logs_warning_and_does_not_raise(
-        self,
-        monkeypatch,
-        caplog,
-    ):
-        monkeypatch.setattr(
-            mamba,
-            "_resolve_mixer_class",
-            lambda _mixer: None,
-        )
-
-        with caplog.at_level(logging.WARNING):
-            patch_nemotron_mamba_fused_path(mixer=MIXER)
-
-        assert any(
-            "NemotronHMamba2Mixer unavailable" in record.message
-            for record in caplog.records
-        )
+    def test_missing_mixer_module_raises(self):
+        with pytest.raises(ModuleNotFoundError, match="agilerl_missing_module"):
+            patch_nemotron_mamba_fused_path(mixer=MISSING_MIXER)
 
     def test_missing_attribute_leaves_init_alone(self, monkeypatch):
         mixer_cls = _make_mixer_class_without_mem_eff_attr()
@@ -796,20 +782,6 @@ class TestNemotronMambaFusedPath:
 
         assert early.use_mem_eff_path is True
 
-    def test_missing_mixer_class_skips_the_model_sweep(self, monkeypatch, caplog):
-        monkeypatch.setattr(
-            mamba,
-            "_resolve_mixer_class",
-            lambda _mixer: None,
-        )
-        events = []
-        early = _make_fused_path_mixer_class(events)(FakeConfig())
-
-        with caplog.at_level(logging.WARNING):
-            patch_nemotron_mamba_fused_path(mixer=MIXER, model=FakeModel([early]))
-
-        assert early.use_mem_eff_path is True
-
 
 class FakeStream:
     """Stream double recording the streams it is told to wait on."""
@@ -910,24 +882,9 @@ class TestNemotronMambaStreamOrdering:
 
         assert events == ["forward"]
 
-    def test_missing_mixer_class_logs_warning_and_does_not_raise(
-        self,
-        monkeypatch,
-        caplog,
-    ):
-        monkeypatch.setattr(
-            mamba,
-            "_resolve_mixer_class",
-            lambda _mixer: None,
-        )
-
-        with caplog.at_level(logging.WARNING):
-            patch_nemotron_mamba_stream_ordering(mixer=MIXER)
-
-        assert any(
-            "NemotronHMamba2Mixer unavailable" in record.message
-            for record in caplog.records
-        )
+    def test_missing_mixer_module_raises(self):
+        with pytest.raises(ModuleNotFoundError, match="agilerl_missing_module"):
+            patch_nemotron_mamba_stream_ordering(mixer=MISSING_MIXER)
 
     def test_missing_forward_raises(self, monkeypatch):
         class Mixer:
@@ -1183,15 +1140,14 @@ class TestBothMixerPatchesCoexist:
 
 class TestResolveMixerClass:
     def test_raises_when_attribute_missing(self, monkeypatch) -> None:
-        monkeypatch.setattr(mamba, "try_import", lambda _path: type("M", (), {})())
+        monkeypatch.setattr(mamba, "import_module", lambda _path: type("M", (), {})())
 
         with pytest.raises(RuntimeError, match="NemotronHMamba2Mixer"):
             mamba._resolve_mixer_class(MIXER)
 
-    def test_returns_none_when_module_missing(self, monkeypatch) -> None:
-        monkeypatch.setattr(mamba, "try_import", lambda _path: None)
-
-        assert mamba._resolve_mixer_class(MIXER) is None
+    def test_raises_when_module_missing(self) -> None:
+        with pytest.raises(ModuleNotFoundError, match="agilerl_missing_module"):
+            mamba._resolve_mixer_class(MISSING_MIXER)
 
     def test_returns_the_mixer(self, monkeypatch) -> None:
         mixer = type("NemotronHMamba2Mixer", (), {})
@@ -1201,7 +1157,7 @@ class TestResolveMixerClass:
             seen.append(path)
             return SimpleNamespace(NemotronHMamba2Mixer=mixer)
 
-        monkeypatch.setattr(mamba, "try_import", fake_import)
+        monkeypatch.setattr(mamba, "import_module", fake_import)
 
         assert mamba._resolve_mixer_class(MIXER) is mixer
         assert seen == ["transformers.models.nemotron_h.modeling_nemotron_h"]

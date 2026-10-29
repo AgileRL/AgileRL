@@ -77,9 +77,11 @@ class TestResolveEngineTensorParallel:
     ) -> None:
         # Arrange: TP=1 predicts a 1.93 GiB attention pool on four leftover
         # A100s. 16 sequences at 4096 tokens want 1.25 GiB; at 5120 they want
-        # 1.56 GiB, inside the pool but past vLLM's measured 1.49 GiB.
+        # 1.56 GiB, inside the pool but past vLLM's measured 1.49 GiB. 16
+        # prompts keep every engine at max_num_seqs.
         raw = _qwen_manifest()
         raw["network"]["max_context_length"] = context
+        raw["training"]["rollout_batch_size"] = 16
         manifest = TrainingManifest.model_validate(raw)
 
         # Act
@@ -122,7 +124,7 @@ class TestResolveEngineTensorParallel:
 
     def test_stripped_towers_still_resolve(self) -> None:
         raw = _qwen_manifest()
-        raw["algorithm"]["vllm_config"]["strip_multimodal_towers"] = True
+        raw["environment"]["modality"] = "text"
         manifest = TrainingManifest.model_validate(raw)
 
         width = resolve_engine_tensor_parallel(manifest, 8, _a100(), 8)
@@ -181,7 +183,6 @@ class TestResolveEngineTensorParallel:
         assert vllm_config is not None
         assert vllm_config.gpu_memory_utilization == 0.9
         assert vllm_config.max_num_seqs == 16
-        assert vllm_config.sleep_mode is True
         assert vllm_config.tensor_parallel_size is None
         assert "tensor_parallel_size" not in vllm_config.model_fields_set
 

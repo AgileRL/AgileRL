@@ -67,18 +67,15 @@ class TrainerRuntimeConfig(BaseModel):
 
     # VL checkpoints build their full VL class so towers load, frozen.
     model_class: TrainerModelClass = AutoModelForCausalLM
-    attn_implementation: str | None = Field(default=None, min_length=1)
     trust_remote_code: bool | None = Field(default=None)
 
     def load_kwargs(self) -> dict[str, object]:
-        """Return the ``from_pretrained`` kwargs this family sets, without the attention backend.
+        """Return the ``from_pretrained`` kwargs this family sets.
 
         :return: ``trust_remote_code`` when set.
         :rtype: dict[str, object]
         """
-        return self.model_dump(
-            exclude_none=True, exclude={"model_class", "attn_implementation"}
-        )
+        return self.model_dump(exclude_none=True, exclude={"model_class"})
 
 
 class MambaPatchConfig(BaseModel):

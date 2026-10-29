@@ -90,6 +90,9 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         ``gradient_accumulation_steps`` is derived as
         ``mini_batch_size / micro_batch_size_per_gpu``.
     :type mini_batch_size: int | None, optional
+    :param gradient_checkpointing: Recompute each transformer block in
+        backward. ``None`` picks it from the memory estimate.
+    :type gradient_checkpointing: bool | None, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param lora_config: LoRA config; when supplied the base model is wrapped with
@@ -105,19 +108,6 @@ class SFT(LLMAlgorithm[SFTPrompts]):
     :type clone: bool, optional
     :param seed: Random seed, defaults to 42
     :type seed: int, optional
-    :param gradient_checkpointing: Use gradient checkpointing to trade compute for
-        memory, defaults to True
-    :type gradient_checkpointing: bool, optional
-    :param use_liger_loss: Use the Liger fused-linear cross-entropy kernel,
-        defaults to ``True`` (requires ``liger-kernel``; warns and falls back
-        otherwise). Both this and the standard path are memory-bounded — the
-        full ``(B, L, V)`` logits are never materialized — so this is mainly a
-        speed/kernel choice. The Liger kernel auto-sizes its own chunk; the
-        standard path's chunk is set by ``chunk_rows``.
-    :type use_liger_loss: bool, optional
-    :param chunk_rows: Primary chunk-size knob for fused logit tiles. On SFT's
-        standard path this controls the fused-logprob chunk rows directly.
-    :type chunk_rows: int | None, optional
     :param use_separate_reference_adapter: Also create a ``reference`` LoRA adapter
         alongside ``actor``. SFT does not itself use a reference policy, so this
         defaults to ``False``; enable it when you plan to save an SFT checkpoint
@@ -128,23 +118,11 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         loading the base model in 4-/8-bit (QLoRA). ``lm_head`` is kept
         unquantized so the fused-linear-logprob path stays numerically exact.
     :type quantization_config: BitsAndBytesConfig | None, optional
-    :param activation_offload: When ``True``, run the training forward inside
-        ``torch.autograd.graph.save_on_cpu`` so tensors saved for backward live
-        in pinned host RAM instead of GPU memory. Trades PCIe bandwidth for GPU
-        memory (the win grows with sequence length); a no-op during rollout /
-        reference forwards.
-    :type activation_offload: bool, optional
-    :param moe_lora_recompute: Recompute routed-expert LoRA activations in
-        backward on frozen packed base weights. ``None`` (default) recomputes
-        only outside activation-checkpointed blocks.
-    :type moe_lora_recompute: bool | None, optional
     :param lora_tower_target_modules: Tower and connector modules of a VL model
         to adapt as well. ``lora_config.target_modules`` always land on the
         language model only. Defaults to None.
     :type lora_tower_target_modules: list[str] | None, optional
     """
-
-    _liger_applies_logit_softcap = True
 
     def __init__(
         self,
@@ -162,19 +140,15 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         calc_position_embeddings: bool = True,
         micro_batch_size_per_gpu: int | None = None,
         mini_batch_size: int | None = None,
+        gradient_checkpointing: bool | None = None,
         device: str | torch.device | None = None,
         lora_config: LoraConfig | None = None,
         fsdp_config: FSDPConfig | None = None,
         wrap: bool = True,
         clone: bool = False,
         seed: int = 42,
-        gradient_checkpointing: bool = True,
-        use_liger_loss: bool = True,
-        chunk_rows: int | None = None,
         use_separate_reference_adapter: bool = False,
         quantization_config: BitsAndBytesConfig | None = None,
-        activation_offload: bool = False,
-        moe_lora_recompute: bool | None = None,
         lora_tower_target_modules: list[str] | None = None,
     ) -> None:
         resolved_device = resolve_device(device)
@@ -188,8 +162,6 @@ class SFT(LLMAlgorithm[SFTPrompts]):
             seed=seed,
             pad_token_id=pad_token_id,
             pad_token=pad_token,
-            use_liger_loss=use_liger_loss,
-            chunk_rows=chunk_rows,
             lora_config=lora_config,
             use_separate_reference_adapter=use_separate_reference_adapter,
             model_name=model_name,
@@ -197,16 +169,14 @@ class SFT(LLMAlgorithm[SFTPrompts]):
             model_config=model_config,
             micro_batch_size_per_gpu=micro_batch_size_per_gpu,
             mini_batch_size=mini_batch_size,
+            gradient_checkpointing=gradient_checkpointing,
             cosine_lr_schedule_config=None,
             hp_config=hp_config,
             wrap=wrap,
             device=resolved_device,
             fsdp_config=fsdp_config,
             name="SFT",
-            gradient_checkpointing=gradient_checkpointing,
             quantization_config=quantization_config,
-            activation_offload=activation_offload,
-            moe_lora_recompute=moe_lora_recompute,
             lora_tower_target_modules=lora_tower_target_modules,
         )
         self.temperature = 0
@@ -365,7 +335,7 @@ class SFT(LLMAlgorithm[SFTPrompts]):
             hidden = self.actor(**model_kwargs).logits  # [B, L, H]
         shift_hidden = hidden[:, :-1, :].contiguous()  # [B, L-1, H]
 
-        if self.use_liger_loss:
+        if self.liger_loss:
             # Liger fused-linear CE: loss computed in bounded ``(chunk, V)`` tiles.
             flat_hidden = shift_hidden.view(-1, shift_hidden.size(-1))
             with self._liger_head_gather() as (head_w, head_b):
@@ -387,8 +357,6 @@ class SFT(LLMAlgorithm[SFTPrompts]):
                 head_b,
                 labels.masked_fill(ignore, 0),  # safe gather index; masked out below
                 temperature=1.0,
-                cast_to_fp32=self.cast_logprobs_to_fp32,
-                chunk_rows=self.chunk_rows,
             )  # [B, L-1]
             token_mask = (~ignore).to(logps.dtype)
             loss = -(logps * token_mask).sum() / token_mask.sum().clamp_min(1.0)

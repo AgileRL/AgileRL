@@ -16,6 +16,7 @@ import math
 import os
 import subprocess
 import sys
+from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any, ClassVar
 from unittest.mock import MagicMock, patch
@@ -1349,30 +1350,6 @@ class TestGatherParamsOwnerless:
             assert out[1] is None
 
 
-class TestGroupTransformerUnits:
-    def test_groups_consecutive_siblings(self):
-        # Arrange
-        blocks = [nn.Linear(2, 2) for _ in range(5)]
-        layers = nn.ModuleList(blocks)
-        model = nn.Sequential(layers)
-
-        # Act
-        groups = bmod._group_transformer_units(model, blocks, 2)
-
-        # Assert
-        assert groups == [blocks[:2], blocks[2:4], blocks[4:]]
-        assert list(layers) == blocks
-
-    def test_groups_never_span_two_parents(self):
-        vision = [nn.Linear(2, 2) for _ in range(3)]
-        language = [nn.Linear(2, 2) for _ in range(2)]
-        model = nn.Sequential(nn.ModuleList(vision), nn.ModuleList(language))
-
-        groups = bmod._group_transformer_units(model, vision + language, 2)
-
-        assert groups == [vision[:2], vision[2:], language]
-
-
 class TestReplaceChild:
     def test_raises_when_old_not_found(self):
         model = nn.Sequential(nn.Linear(2, 2))
@@ -1843,7 +1820,9 @@ class TestFSDPPrepareActorOffload:
         # Arrange
         actor = _LoraActor()
         config = FSDPConfig(
-            cpu_offload=cpu_offload, optim_cpu_offload=optim_cpu_offload
+            reshard_after_forward=True,
+            cpu_offload=cpu_offload,
+            optim_cpu_offload=optim_cpu_offload,
         )
 
         # Act
@@ -1885,7 +1864,9 @@ class TestFSDPPrepareActorOffload:
             ),
         ):
             with pytest.raises(TypeError, match="already CPU-offloaded"):
-                FSDPRuntime(FSDPConfig(optim_cpu_offload=True)).prepare_actor(
+                FSDPRuntime(
+                    FSDPConfig(reshard_after_forward=True, optim_cpu_offload=True)
+                ).prepare_actor(
                     actor,
                     device="cpu",
                     colocated=False,
@@ -1895,9 +1876,23 @@ class TestFSDPPrepareActorOffload:
                     restore_adapter_trainability=MagicMock(),
                 )
 
-    def test_rejects_an_unresolved_optimizer_placement(self):
-        with pytest.raises(ValueError, match="optim_cpu_offload is unset"):
-            FSDPRuntime(FSDPConfig(optim_cpu_offload=None)).prepare_actor(
+    @pytest.mark.parametrize(
+        ("reshard", "optim_cpu_offload", "unset"),
+        [
+            (True, None, "optim_cpu_offload"),
+            (None, False, "reshard_after_forward"),
+        ],
+    )
+    def test_rejects_an_unresolved_memory_field(
+        self, reshard, optim_cpu_offload, unset
+    ):
+        with pytest.raises(ValueError, match=rf"FSDPConfig\.{unset} is unset"):
+            FSDPRuntime(
+                FSDPConfig(
+                    reshard_after_forward=reshard,
+                    optim_cpu_offload=optim_cpu_offload,
+                )
+            ).prepare_actor(
                 nn.Linear(2, 2),
                 device="cpu",
                 colocated=False,
@@ -1909,7 +1904,11 @@ class TestFSDPPrepareActorOffload:
 
     def test_rejects_mutually_exclusive_offload_flags(self):
         # Arrange
-        runtime = FSDPRuntime(FSDPConfig(cpu_offload=True, optim_cpu_offload=True))
+        runtime = FSDPRuntime(
+            FSDPConfig(
+                reshard_after_forward=True, cpu_offload=True, optim_cpu_offload=True
+            )
+        )
 
         # Act / Assert
         with pytest.raises(ValueError, match="mutually exclusive"):
@@ -1925,7 +1924,11 @@ class TestFSDPPrepareActorOffload:
 
     def test_rejects_cpu_offload_without_colocated_vllm(self):
         # Arrange
-        runtime = FSDPRuntime(FSDPConfig(cpu_offload=True, optim_cpu_offload=False))
+        runtime = FSDPRuntime(
+            FSDPConfig(
+                reshard_after_forward=True, cpu_offload=True, optim_cpu_offload=False
+            )
+        )
 
         # Act / Assert
         with pytest.raises(ValueError, match="requires colocated vLLM"):
@@ -1989,6 +1992,17 @@ class TestDenseWrap:
         ]
         assert actor.actor_lora_A in opt_params
         assert result.lr_scheduler is None
+
+    def test_cpu_optimizer_steps_unfused(self):
+        result = _prepare_dp_actor(_LoraActor())
+
+        assert not result.optimizer.optimizer.defaults["fused"]
+
+    @pytest.mark.gpu
+    def test_cuda_optimizer_steps_fused(self):
+        result = _prepare_dp_actor(_LoraActor(), device="cuda")
+
+        assert result.optimizer.optimizer.defaults["fused"] is True
 
     def test_enables_hf_gradient_checkpointing(self):
         actor = _LoraActor()
@@ -2207,28 +2221,28 @@ def _vision_language_actor(train_vision: bool = True) -> VisionLanguageActor:
     return actor
 
 
-def _prepare_fsdp_actor(
-    actor: nn.Module, defer_grad_sync: bool
-) -> tuple[FSDPRuntime, PrepareResult]:
+def _prepare_fsdp_actor(actor: nn.Module) -> tuple[FSDPRuntime, PrepareResult]:
     # A reduce dtype distinct from the param dtype makes post-backward upcast
     # deferred grads, which reads each param's unsharded copy.
     runtime = FSDPRuntime(
         FSDPConfig(
+            reshard_after_forward=True,
             param_dtype="bfloat16",
             reduce_dtype="float32",
-            param_persistence_threshold=0,
             routed_expert_chunk_mib=64,
             optim_cpu_offload=False,
-            defer_grad_sync=defer_grad_sync,
         )
     )
     # FSDP's default mesh uses the process accelerator (MPS on macOS).
     world = init_device_mesh(
         "cpu", (1, dist.get_world_size()), mesh_dim_names=("replicate", "shard")
     )
-    with patch(
-        "agilerl.distributed.runtime.build_parallel_mesh",
-        return_value=ParallelMesh(world=world, hsdp=world["shard"]),
+    with (
+        patch(
+            "agilerl.distributed.runtime.build_parallel_mesh",
+            return_value=ParallelMesh(world=world, hsdp=world["shard"]),
+        ),
+        patch("agilerl.distributed.fsdp_blocks.PARAM_PERSISTENCE_THRESHOLD", 0),
     ):
         result = runtime.prepare_actor(
             actor,
@@ -2243,15 +2257,17 @@ def _prepare_fsdp_actor(
 
 
 def _accumulated_step(
-    defer_grad_sync: bool,
+    deferred: bool,
     micro_batches: list[torch.Tensor],
     use_vision: list[bool],
     train_vision: bool = True,
 ) -> tuple[list[OptimizerStep | None], dict[str, torch.Tensor]]:
-    """Backward each micro-batch of one window; full grads the optimizer stepped on."""
-    runtime, result = _prepare_fsdp_actor(
-        _vision_language_actor(train_vision), defer_grad_sync
-    )
+    """Backward each micro-batch of one window; full grads the optimizer stepped on.
+
+    :param deferred: Reduce-scatter on the last micro-batch only; False
+        reduce-scatters every micro-batch.
+    """
+    runtime, result = _prepare_fsdp_actor(_vision_language_actor(train_vision))
     names = {param: name for name, param in result.actor.named_parameters()}
     stepped: dict[str, torch.Tensor] = {}
 
@@ -2262,15 +2278,21 @@ def _accumulated_step(
                     stepped[names[param]] = full_grad(param).clone()
 
     result.optimizer._single_optimizer().register_step_pre_hook(capture_grads)
-    steps = [
-        runtime.backward(
-            result.actor(x, vision).sum(),
-            result.optimizer,
-            len(micro_batches),
-            result.actor,
-        )
-        for x, vision in zip(micro_batches, use_vision, strict=True)
-    ]
+    sync_every_micro_batch = (
+        nullcontext()
+        if deferred
+        else patch.object(result.actor, "set_requires_gradient_sync")
+    )
+    with sync_every_micro_batch:
+        steps = [
+            runtime.backward(
+                result.actor(x, vision).sum(),
+                result.optimizer,
+                len(micro_batches),
+                result.actor,
+            )
+            for x, vision in zip(micro_batches, use_vision, strict=True)
+        ]
     return steps, stepped
 
 
@@ -2299,7 +2321,7 @@ class TestUnforwardedFSDPUnits:
         actor = _vision_language_actor()
 
         # Act
-        runtime, _ = _prepare_fsdp_actor(actor, defer_grad_sync=True)
+        runtime, _ = _prepare_fsdp_actor(actor)
 
         # Assert
         assert list(runtime.unforwarded_units) == [
@@ -2311,7 +2333,7 @@ class TestUnforwardedFSDPUnits:
     def test_drops_units_that_ran_forward(self, world_size_one):
         # Arrange
         actor = _vision_language_actor()
-        runtime, result = _prepare_fsdp_actor(actor, defer_grad_sync=True)
+        runtime, result = _prepare_fsdp_actor(actor)
 
         # Act
         result.actor(torch.randn(4, 8))
@@ -2321,9 +2343,7 @@ class TestUnforwardedFSDPUnits:
 
     def test_empty_after_every_unit_ran_forward(self, world_size_one):
         # Arrange
-        runtime, result = _prepare_fsdp_actor(
-            _vision_language_actor(), defer_grad_sync=True
-        )
+        runtime, result = _prepare_fsdp_actor(_vision_language_actor())
 
         # Act
         result.actor(torch.randn(4, 8), True)
@@ -2406,9 +2426,7 @@ class TestFSDPRuntimeBackward:
         self, world_size_one
     ):
         # Arrange
-        runtime, result = _prepare_fsdp_actor(
-            _vision_language_actor(), defer_grad_sync=True
-        )
+        runtime, result = _prepare_fsdp_actor(_vision_language_actor())
         trainable = [p for p in result.actor.parameters() if p.requires_grad]
         x = torch.randn(4, 8)
 
@@ -2432,14 +2450,14 @@ class TestFSDPRuntimeBackward:
         optimizer._single_optimizer.return_value.param_groups = [
             {"params": [replicated, sharded]}
         ]
-        runtime = FSDPRuntime(FSDPConfig(defer_grad_sync=False))
+        runtime = FSDPRuntime(FSDPConfig())
         synced: list[list[nn.Parameter]] = []
 
         def capture(params):
             synced.append(list(params))
 
         monkeypatch.setattr("agilerl.distributed.runtime.sync_grads", capture)
-        runtime.backward(MagicMock(), optimizer, 1, actor=MagicMock())
+        runtime.backward(MagicMock(), optimizer, 1, actor=MagicMock(spec=FSDPModule))
 
         assert synced == [[replicated]]
         optimizer.step.assert_called_once()
@@ -2449,20 +2467,20 @@ class TestFSDPRuntimeBackward:
         param.grad = torch.ones(2)
         optimizer = MagicMock()
         optimizer.optimizer.param_groups = [{"params": [param]}]
-        runtime = FSDPRuntime(FSDPConfig(defer_grad_sync=False))
+        runtime = FSDPRuntime(FSDPConfig())
         synced: list[object] = []
         monkeypatch.setattr(
             "agilerl.distributed.runtime.sync_grads",
             lambda params: synced.append(list(params)),
         )
 
-        runtime.backward(MagicMock(), optimizer, 2, actor=MagicMock())
+        runtime.backward(MagicMock(), optimizer, 2, actor=MagicMock(spec=FSDPModule))
 
         assert synced == []
         optimizer.step.assert_not_called()
 
-    def test_rejects_defer_without_sharded_actor(self):
-        runtime = FSDPRuntime(FSDPConfig(defer_grad_sync=True))
+    def test_rejects_unsharded_actor(self):
+        runtime = FSDPRuntime(FSDPConfig())
 
         with pytest.raises(TypeError, match="FSDP2-sharded actor"):
             runtime.backward(MagicMock(), MagicMock(), 1, actor=nn.Linear(2, 2))
@@ -2474,13 +2492,13 @@ class TestFSDPRuntimeBackward:
         inner.param_groups = [{"params": [param]}]
         optimizer = MagicMock()
         optimizer._single_optimizer.return_value = inner
-        runtime = FSDPRuntime(FSDPConfig(defer_grad_sync=False))
+        runtime = FSDPRuntime(FSDPConfig())
 
         step = runtime.backward(
             MagicMock(),
             optimizer,
             1,
-            actor=MagicMock(),
+            actor=MagicMock(spec=FSDPModule),
             max_grad_norm=1.0,
         )
 
@@ -2503,14 +2521,14 @@ class TestFSDPRuntimeBackward:
         ]
         optimizer = MagicMock()
         optimizer._single_optimizer.return_value = inner
-        runtime = FSDPRuntime(FSDPConfig(defer_grad_sync=False))
+        runtime = FSDPRuntime(FSDPConfig())
 
         # Act
         step = runtime.backward(
             MagicMock(),
             optimizer,
             1,
-            actor=MagicMock(),
+            actor=MagicMock(spec=FSDPModule),
             max_grad_norm=1.0,
             clip_groups=ACTOR_CRITIC_CLIP_GROUPS,
         )
@@ -2522,12 +2540,9 @@ class TestFSDPRuntimeBackward:
         assert torch.allclose(critic.grad, torch.tensor([0.6, 0.8]), rtol=1e-6, atol=0)
 
 
-class TestDeferGradSync:
-    def test_fsdp_config_defaults_on(self):
-        assert FSDPConfig().defer_grad_sync is True
-
+class TestFSDPRuntimeBackwardGradSync:
     def test_toggles_sync_across_accumulation_window(self):
-        runtime = FSDPRuntime(FSDPConfig(defer_grad_sync=True))
+        runtime = FSDPRuntime(FSDPConfig())
         optimizer = MagicMock()
         loss = MagicMock()
         model = MagicMock(spec=FSDPModule)
@@ -2538,17 +2553,6 @@ class TestDeferGradSync:
         model.set_requires_gradient_sync.assert_called_with(True, recurse=True)
         assert model.set_requires_gradient_sync.call_count == 2
 
-        optimizer.step.assert_called_once()
-
-    def test_disabled_does_not_toggle(self):
-        runtime = FSDPRuntime(FSDPConfig(defer_grad_sync=False))
-        optimizer = MagicMock()
-        loss = MagicMock()
-        model = MagicMock()
-
-        runtime.backward(loss, optimizer, 1, actor=model)
-
-        model.set_requires_gradient_sync.assert_not_called()
         optimizer.step.assert_called_once()
 
 
@@ -2743,24 +2747,6 @@ class TestSetPrefetch:
         assert vision_blocks[1].backward_prefetch == [vision_blocks[0]]
         assert model.lm_head.backward_prefetch == [language_blocks[1]]
 
-    def test_forward_and_backward_depths_are_independent(self):
-        # Arrange
-        model = PrefetchVisionLM()
-        del model.vision
-        model.model.layers = nn.ModuleList([PrefetchUnit() for _ in range(3)])
-        embed = model.model.embed_tokens
-        blocks = list(model.model.layers)
-
-        # Act
-        with patch.object(bmod, "FSDPModule", PrefetchUnit):
-            bmod._set_prefetch(model, blocks, forward_units=2, backward_units=1)
-
-        # Assert
-        assert embed.forward_prefetch == [blocks[0], blocks[1]]
-        assert blocks[1].forward_prefetch == [blocks[2], model.lm_head]
-        assert blocks[2].backward_prefetch == [blocks[1]]
-        assert model.lm_head.backward_prefetch == [blocks[2]]
-
     def test_chains_ple_between_embed_and_language_blocks(self):
         # Arrange
         model = PrefetchVisionLM()
@@ -2795,14 +2781,8 @@ class TypedBlock(nn.Module):
         self.lin = nn.Linear(2, 2)
 
 
-class PlainBlock(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.lin = nn.Linear(2, 2)
-
-
 class HybridStack(nn.Module):
-    _no_split_modules: ClassVar = ["TypedBlock", "PlainBlock"]
+    _no_split_modules: ClassVar = ["TypedBlock"]
 
     def __init__(self, block_types: list[str]):
         super().__init__()
@@ -2898,9 +2878,8 @@ def full_grad(param: torch.Tensor) -> torch.Tensor:
     return grad.full_tensor() if isinstance(grad, DTensor) else grad
 
 
-class TestMaterializeFsdp2FromCpuStateGroupedBlocks:
-    grouped = FSDPConfig(
-        wrap_every_n_blocks=2,
+class TestMaterializeFsdp2FromCpuStateBlocks:
+    config = FSDPConfig(
         param_dtype="float32",
         reduce_dtype="float32",
         routed_expert_chunk_mib=64,
@@ -2922,7 +2901,7 @@ class TestMaterializeFsdp2FromCpuStateGroupedBlocks:
 
         # Act
         materialize_fsdp2_from_cpu_state(
-            model, "cpu", self.grouped, parallel_mesh=cpu_parallel_mesh()
+            model, "cpu", self.config, parallel_mesh=cpu_parallel_mesh()
         )
 
         # Assert
@@ -2930,9 +2909,7 @@ class TestMaterializeFsdp2FromCpuStateGroupedBlocks:
         with torch.no_grad():
             assert torch.equal(model(input_ids=ids).logits, expected)
 
-    def test_meta_model_loads_grouped_blocks_from_safetensors(
-        self, world_size_one, tmp_path
-    ):
+    def test_meta_model_loads_blocks_from_safetensors(self, world_size_one, tmp_path):
         # Arrange
         torch.manual_seed(0)
         reference = tiny_dense_lm()
@@ -2946,14 +2923,14 @@ class TestMaterializeFsdp2FromCpuStateGroupedBlocks:
 
         # Act
         materialize_fsdp2_from_cpu_state(
-            model, "cpu", self.grouped, parallel_mesh=cpu_parallel_mesh()
+            model, "cpu", self.config, parallel_mesh=cpu_parallel_mesh()
         )
 
         # Assert
         with torch.no_grad():
             assert torch.equal(model(input_ids=ids).logits, expected)
 
-    def test_checkpointed_groups_match_reference_grads(self, world_size_one):
+    def test_checkpointed_blocks_match_reference_grads(self, world_size_one):
         # Arrange
         torch.manual_seed(0)
         reference = tiny_hybrid_lm()
@@ -2963,7 +2940,7 @@ class TestMaterializeFsdp2FromCpuStateGroupedBlocks:
         materialize_fsdp2_from_cpu_state(
             model,
             "cpu",
-            self.grouped,
+            self.config,
             parallel_mesh=cpu_parallel_mesh(),
             gradient_checkpointing=True,
         )
@@ -2983,7 +2960,7 @@ class TestMaterializeFsdp2FromCpuStateGroupedBlocks:
 
 
 class TestApplyFsdp2:
-    per_block = FSDPConfig(wrap_every_n_blocks=1)
+    per_block = FSDPConfig(reshard_after_forward=True)
 
     def test_shards_transformer_blocks_and_root(self, world_size_one):
         class Block(nn.Module):
@@ -3174,17 +3151,17 @@ class TestApplyFsdp2:
         # FSDP's default mesh uses the process accelerator (MPS on macOS).
         world = init_device_mesh("cpu", (1, 1), mesh_dim_names=("replicate", "shard"))
 
-        materialize_fsdp2_from_cpu_state(
-            model,
-            "cpu",
-            FSDPConfig(
-                param_dtype="bfloat16",
-                reduce_dtype="float32",
-                routed_expert_chunk_mib=64,
-                param_persistence_threshold=0,
-            ),
-            parallel_mesh=ParallelMesh(world=world, hsdp=world["shard"]),
-        )
+        with patch.object(bmod, "PARAM_PERSISTENCE_THRESHOLD", 0):
+            materialize_fsdp2_from_cpu_state(
+                model,
+                "cpu",
+                FSDPConfig(
+                    param_dtype="bfloat16",
+                    reduce_dtype="float32",
+                    routed_expert_chunk_mib=64,
+                ),
+                parallel_mesh=ParallelMesh(world=world, hsdp=world["shard"]),
+            )
 
         language = model.get_base_model().model
         assert isinstance(language.embed_tokens_per_layer, FSDPModule)
@@ -3230,7 +3207,7 @@ class TestApplyFsdp2:
             sharded.append(module)
             return module
 
-        def _capture(_model, block_units, _forward_units, _backward_units):
+        def _capture(_model, block_units):
             captured_blocks.extend(block_units)
 
         with (
@@ -3249,109 +3226,42 @@ class TestApplyFsdp2:
         assert sharded[1] is model.layers[1]
         assert captured_blocks == [model.layers[0], model.layers[1]]
 
-    def test_checkpoint_skips_listed_block_kinds(self, world_size_one):
+    def test_checkpoint_wraps_every_block_kind(self, world_size_one):
         # Arrange
-        model = HybridStack(["mamba", "attention", "moe", "attention"])
+        model = HybridStack(["mamba", "attention", "moe"])
 
         # Act
         with patch.object(bmod, "fully_shard", side_effect=lambda m, **_kw: m):
-            apply_fsdp2(
-                model,
-                FSDPConfig(checkpoint_skip_layer_types=["attention"]),
-                gradient_checkpointing=True,
-            )
+            apply_fsdp2(model, FSDPConfig(), gradient_checkpointing=True)
 
         # Assert
-        assert checkpointed_kinds(model) == ["mamba", "moe"]
-        assert [
-            getattr(layer, "_checkpoint_wrapped_module", layer).block_type
-            for layer in model.layers
-        ] == [
-            "mamba",
-            "attention",
-            "moe",
-            "attention",
-        ]
+        assert checkpointed_kinds(model) == ["mamba", "attention", "moe"]
 
-    def test_checkpoint_every_n_counts_only_eligible_blocks(self, world_size_one):
-        # Arrange
-        model = HybridStack(["mamba", "attention", "moe", "mamba", "moe"])
-        config = FSDPConfig(
-            checkpoint_skip_layer_types=("attention",), checkpoint_every_n_blocks=2
-        )
-
-        # Act
-        with patch.object(bmod, "fully_shard", side_effect=lambda m, **_kw: m):
-            apply_fsdp2(model, config, gradient_checkpointing=True)
-
-        # Assert
-        wrapped = [isinstance(layer, CheckpointWrapper) for layer in model.layers]
-        assert wrapped == [True, False, False, True, False]
-
-    def test_checkpoint_kind_falls_back_to_class_name(self, world_size_one):
-        # Arrange
-        model = HybridStack(["moe"])
-        model.layers.append(PlainBlock())
-
-        # Act
-        with patch.object(bmod, "fully_shard", side_effect=lambda m, **_kw: m):
-            apply_fsdp2(
-                model,
-                FSDPConfig(checkpoint_skip_layer_types=("PlainBlock",)),
-                gradient_checkpointing=True,
-            )
-
-        # Assert
-        assert isinstance(model.layers[0], CheckpointWrapper)
-        assert isinstance(model.layers[1], PlainBlock)
-
-    def test_checkpoint_policy_ignored_without_gradient_checkpointing(
+    def test_no_block_is_checkpointed_without_gradient_checkpointing(
         self, world_size_one
     ):
         model = HybridStack(["mamba", "moe"])
 
         with patch.object(bmod, "fully_shard", side_effect=lambda m, **_kw: m):
-            apply_fsdp2(model, FSDPConfig(checkpoint_skip_layer_types=("moe",)))
+            apply_fsdp2(model, FSDPConfig())
 
         assert checkpointed_kinds(model) == []
 
-    def test_checkpoint_skip_of_unknown_kind_raises(self, world_size_one):
-        model = HybridStack(["mamba", "moe"])
-
-        with (
-            patch.object(bmod, "fully_shard", side_effect=lambda m, **_kw: m),
-            pytest.raises(ValueError, match=r"\['attention'\] match no transformer"),
-        ):
-            apply_fsdp2(
-                model,
-                FSDPConfig(checkpoint_skip_layer_types=("attention",)),
-                gradient_checkpointing=True,
-            )
-
-    def test_selective_checkpoint_keeps_hybrid_model_gradients(self, world_size_one):
+    def test_checkpoint_keeps_hybrid_model_gradients(self, world_size_one):
         # Arrange
         torch.manual_seed(0)
         reference = tiny_hybrid_lm()
         input_ids = torch.randint(0, reference.config.vocab_size, (2, 8))
-        fp32 = FSDPConfig(param_dtype="float32", wrap_every_n_blocks=1)
-        selective = FSDPConfig(
-            param_dtype="float32",
-            wrap_every_n_blocks=1,
-            checkpoint_skip_layer_types=("full_attention", "mlp"),
-        )
+        fp32 = FSDPConfig(param_dtype="float32")
         mesh = init_device_mesh("cpu", (1,))
-        runs = {
-            "none": (fp32, False),
-            "full": (fp32, True),
-            "selective": (selective, True),
-        }
+        runs = {"none": False, "full": True}
 
         # Act
         grads: dict[str, dict[str, torch.Tensor]] = {}
         wrapped: dict[str, list[str]] = {}
-        for name, (config, checkpointing) in runs.items():
+        for name, checkpointing in runs.items():
             model = copy.deepcopy(reference)
-            apply_fsdp2(model, config, mesh=mesh, gradient_checkpointing=checkpointing)
+            apply_fsdp2(model, fp32, mesh=mesh, gradient_checkpointing=checkpointing)
             model(input_ids=input_ids, labels=input_ids).loss.backward()
             wrapped[name] = checkpointed_kinds(model.model)
             grads[name] = {
@@ -3364,16 +3274,12 @@ class TestApplyFsdp2:
         assert wrapped == {
             "none": [],
             "full": ["linear_attention", "full_attention", "moe", "mlp"],
-            "selective": ["linear_attention", "moe"],
         }
         assert len(grads["none"]) > 0
-        assert grads["none"].keys() == grads["full"].keys() == grads["selective"].keys()
+        assert grads["none"].keys() == grads["full"].keys()
         for key, expected in grads["none"].items():
             # fp32 on CPU; recompute replays the same kernels, so drift stays at rounding.
             assert torch.allclose(grads["full"][key], expected, atol=1e-6, rtol=1e-5)
-            assert torch.allclose(
-                grads["selective"][key], expected, atol=1e-6, rtol=1e-5
-            )
 
     def test_sets_forward_prefetch_on_consecutive_blocks(self, world_size_one):
         class PrefetchBlock(nn.Module):
@@ -3416,54 +3322,6 @@ class TestApplyFsdp2:
             [],
             [[blocks[0]]],
             [[blocks[1]]],
-        ]
-
-    def test_prefetch_depth_two_prefetches_two_neighbours(self, world_size_one):
-        class PrefetchBlock(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.lin = nn.Linear(2, 2)
-                self.prefetch: list[list[nn.Module]] = []
-                self.backward_prefetch: list[list[nn.Module]] = []
-
-            def set_modules_to_forward_prefetch(self, modules):
-                self.prefetch.append(list(modules))
-
-            def set_modules_to_backward_prefetch(self, modules):
-                self.backward_prefetch.append(list(modules))
-
-        class Model(nn.Module):
-            _no_split_modules: ClassVar = ["PrefetchBlock"]
-
-            def __init__(self):
-                super().__init__()
-                self.layers = nn.ModuleList(
-                    [PrefetchBlock(), PrefetchBlock(), PrefetchBlock()]
-                )
-
-        model = Model()
-        blocks = list(model.layers)
-
-        with (
-            patch.object(bmod, "fully_shard", side_effect=lambda m, **_kw: m),
-            patch.object(bmod, "FSDPModule", PrefetchBlock),
-        ):
-            apply_fsdp2(
-                model,
-                FSDPConfig(
-                    prefetch_units=2, backward_prefetch_units=2, wrap_every_n_blocks=1
-                ),
-            )
-
-        assert [block.prefetch for block in blocks] == [
-            [[blocks[1], blocks[2]]],
-            [[blocks[2]]],
-            [],
-        ]
-        assert [block.backward_prefetch for block in blocks] == [
-            [],
-            [[blocks[0]]],
-            [[blocks[1], blocks[0]]],
         ]
 
     def test_forwards_mesh_to_fully_shard(self, world_size_one):
@@ -3513,8 +3371,8 @@ class TestApplyFsdp2:
         class Block(nn.Module):
             def __init__(self):
                 super().__init__()
-                self.lin = nn.Linear(64, 64)
-                self.norm = nn.LayerNorm(64)
+                self.lin = nn.Linear(512, 256)
+                self.norm = nn.LayerNorm(512)
 
         class Model(nn.Module):
             _no_split_modules: ClassVar = ["Block"]
@@ -3532,13 +3390,7 @@ class TestApplyFsdp2:
             return module
 
         with patch.object(bmod, "fully_shard", side_effect=_record):
-            apply_fsdp2(
-                model,
-                FSDPConfig(
-                    wrap_every_n_blocks=1,
-                    param_persistence_threshold=200,
-                ),
-            )
+            apply_fsdp2(model, FSDPConfig())
 
         ignored = seen[id(block)]["ignored_params"]
         assert block.norm.weight in ignored
@@ -3550,8 +3402,8 @@ class TestApplyFsdp2:
         class Block(nn.Module):
             def __init__(self):
                 super().__init__()
-                self.lin = nn.Linear(64, 64)
-                self.norm = nn.LayerNorm(64)
+                self.lin = nn.Linear(512, 256)
+                self.norm = nn.LayerNorm(512)
 
         class Model(nn.Module):
             _no_split_modules: ClassVar = ["Block"]
@@ -3565,32 +3417,12 @@ class TestApplyFsdp2:
         assert block.norm.weight.dtype == torch.float32
 
         with patch.object(bmod, "fully_shard", side_effect=lambda m, **_kw: m):
-            apply_fsdp2(
-                model,
-                FSDPConfig(
-                    wrap_every_n_blocks=1,
-                    param_persistence_threshold=200,
-                ),
-            )
+            apply_fsdp2(model, FSDPConfig())
 
         assert block.norm.weight.dtype == torch.bfloat16
         assert block.norm.bias.dtype == torch.bfloat16
         assert block.lin.bias.dtype == torch.bfloat16
         assert block.lin.weight.dtype == torch.float32
-
-    def test_threshold_zero_shards_every_parameter(self, world_size_one):
-        model = nn.Linear(2, 2)
-        seen_kwargs: list[dict] = []
-
-        with patch.object(
-            bmod,
-            "fully_shard",
-            side_effect=lambda m, **kw: seen_kwargs.append(kw) or m,
-        ):
-            apply_fsdp2(model, FSDPConfig(param_persistence_threshold=0))
-
-        assert seen_kwargs
-        assert "ignored_params" not in seen_kwargs[-1]
 
     def test_shards_root_only_without_no_split_metadata(self, world_size_one):
         # Arrange
@@ -3762,36 +3594,7 @@ class TestApplyFsdp2:
         assert model.layers[0].inner not in sharded
         assert model.layers[1].inner not in sharded
 
-    def test_groups_every_n_transformer_blocks(self, world_size_one):
-        class Block(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.lin = nn.Linear(2, 2)
-
-            def forward(self, hidden_states):
-                return self.lin(hidden_states)
-
-        class Model(nn.Module):
-            _no_split_modules: ClassVar = ["Block"]
-
-            def __init__(self):
-                super().__init__()
-                self.layers = nn.ModuleList([Block() for _ in range(4)])
-
-        model = Model()
-        raw = list(model.layers)
-        sharded: list[nn.Module] = []
-
-        with patch.object(
-            bmod, "fully_shard", side_effect=lambda m, **_kw: sharded.append(m) or m
-        ):
-            apply_fsdp2(model, FSDPConfig(wrap_every_n_blocks=2, prefetch_units=1))
-
-        assert list(model.layers) == raw
-        assert sharded[:2] == [raw[:2], raw[2:]]
-        assert sharded[-1] is model
-
-    def test_default_wrap_keeps_one_unit_per_block(self, world_size_one):
+    def test_wraps_one_unit_per_block(self, world_size_one):
         class Block(nn.Module):
             def __init__(self):
                 super().__init__()
@@ -3961,9 +3764,7 @@ class TestApplyFsdp2GradientCheckpointing:
         # Before apply_fsdp2, so the reference runs the unpatched routers.
         expected_loss, expected_grads = loss_and_full_grads(reference, input_ids)
         dtype_name = str(dtype).removeprefix("torch.")
-        config = FSDPConfig(
-            param_dtype=dtype_name, reduce_dtype=dtype_name, wrap_every_n_blocks=1
-        )
+        config = FSDPConfig(param_dtype=dtype_name, reduce_dtype=dtype_name)
         apply_fsdp2(
             model,
             config,
@@ -4141,11 +3942,8 @@ class TestDeferredSplitPassReduceDtype:
     def _shard_single_unit(self, model: nn.Module, reduce_dtype: str) -> None:
         # A CPU mesh keeps the test off the default device (MPS on macOS).
         mesh = DeviceMesh("cpu", [0])
-        apply_fsdp2(
-            model,
-            FSDPConfig(param_persistence_threshold=0, reduce_dtype=reduce_dtype),
-            mesh=mesh,
-        )
+        with patch.object(bmod, "PARAM_PERSISTENCE_THRESHOLD", 0):
+            apply_fsdp2(model, FSDPConfig(reduce_dtype=reduce_dtype), mesh=mesh)
 
     def _run_split_passes(self, model: nn.Module) -> None:
         # PEFT adapter switching enables one adapter's gradients per pass;
@@ -4793,7 +4591,9 @@ class TestFSDPPrepareActorExpertParallel:
             ),
             patch("agilerl.utils.llm_utils.make_llm_scheduler", return_value=None),
         ):
-            FSDPRuntime(FSDPConfig(ep=2, optim_cpu_offload=False)).prepare_actor(
+            FSDPRuntime(
+                FSDPConfig(reshard_after_forward=True, ep=2, optim_cpu_offload=False)
+            ).prepare_actor(
                 actor,
                 device="cpu",
                 colocated=False,

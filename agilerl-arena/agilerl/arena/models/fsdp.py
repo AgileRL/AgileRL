@@ -11,6 +11,10 @@ from typing import Annotated, ClassVar
 from pydantic import ConfigDict, Field
 
 FSDP_DTYPE_NAMES = frozenset({"bfloat16", "float16", "float32", "float64"})
+# Parameters with fewer elements stay unsharded on every rank.
+PARAM_PERSISTENCE_THRESHOLD = 100_000
+# FSDP units all-gathered ahead of the running one, in forward and in backward.
+PREFETCH_UNITS = 1
 
 
 @dataclass
@@ -20,44 +24,44 @@ class FSDPConfig:
     __pydantic_config__: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
 
     reshard_after_forward: Annotated[
-        bool,
+        bool | None,
         Field(
             description=(
                 "Free gathered parameters after each module's forward. False "
-                "keeps them gathered: faster, more VRAM."
+                "keeps them gathered: faster, more VRAM. Picked from the memory "
+                "estimate; manifests cannot set it. None picks False when the "
+                "estimated training peak fits with the underprediction buffer "
+                "at every other fastest choice, else True; off CUDA it picks True."
             ),
         ),
-    ] = True
+    ] = None
     cpu_offload: Annotated[
-        bool,
+        bool | None,
         Field(
             description=(
                 "Offload sharded parameters and gradients to CPU. Needs "
-                "colocated vLLM. Mutually exclusive with optim_cpu_offload."
+                "colocated vLLM generation: no async rollout engines. Mutually "
+                "exclusive with optim_cpu_offload. Picked from the memory "
+                "estimate; manifests cannot set it. None picks True only when "
+                "vLLM is colocated and the training peak is over the GPU at "
+                "every other lightest choice, activation offload and the "
+                "micro-batch floor; off CUDA it picks False."
             ),
         ),
-    ] = False
+    ] = None
     optim_cpu_offload: Annotated[
         bool | None,
         Field(
             description=(
                 "Keep Adam state on CPU and step it there with the default "
                 "AdamW kernel. Parameters and gradients stay on GPU. False "
-                "keeps Adam on GPU and steps it with fused AdamW. None picks "
-                "GPU when the memory estimate fits, else CPU."
+                "keeps Adam on GPU and steps it with fused AdamW. Picked from "
+                "the memory estimate; manifests cannot set it. None picks "
+                "GPU when the estimated training peak fits with the "
+                "underprediction buffer, else CPU; off CUDA it picks CPU."
             ),
         ),
     ] = None
-    defer_grad_sync: Annotated[
-        bool,
-        Field(
-            description=(
-                "Reduce-scatter gradients only on the last micro-batch of an "
-                "optimizer step. Saves communication; holds unsharded grads "
-                "in between."
-            ),
-        ),
-    ] = True
     param_dtype: Annotated[
         str,
         Field(
@@ -71,68 +75,6 @@ class FSDPConfig:
         str,
         Field(description="Dtype for gradient reduce-scatter and all-reduce."),
     ] = "float32"
-    prefetch_units: Annotated[
-        int,
-        Field(
-            ge=1,
-            description=(
-                "Neighbouring FSDP units to all-gather ahead during forward. "
-                "1 gathers unit i+1 while unit i runs."
-            ),
-        ),
-    ] = 1
-    backward_prefetch_units: Annotated[
-        int,
-        Field(
-            ge=1,
-            description=(
-                "Neighbouring FSDP units to all-gather ahead during backward. "
-                "1 gathers unit i-1 while unit i runs backward."
-            ),
-        ),
-    ] = 1
-    checkpoint_skip_layer_types: Annotated[
-        tuple[str, ...],
-        Field(
-            description=(
-                "Transformer block kinds left out of activation checkpointing. "
-                "A block's kind is its block_type (hybrid models, e.g. "
-                "'linear_attention', 'full_attention', 'moe') or else its class "
-                "name. Empty checkpoints every block. Applies when "
-                "gradient_checkpointing is on."
-            ),
-        ),
-    ] = ()
-    checkpoint_every_n_blocks: Annotated[
-        int,
-        Field(
-            ge=1,
-            description=(
-                "Checkpoint one in every n blocks not skipped by "
-                "checkpoint_skip_layer_types. 1 checkpoints all of them."
-            ),
-        ),
-    ] = 1
-    wrap_every_n_blocks: Annotated[
-        int,
-        Field(
-            ge=1,
-            description=(
-                "Consecutive transformer blocks per FSDP unit. Larger values "
-                "mean fewer, bigger collectives."
-            ),
-        ),
-    ] = 1
-    param_persistence_threshold: Annotated[
-        int,
-        Field(
-            ge=0,
-            description=(
-                "Parameters with fewer elements than this stay unsharded. "
-                "0 shards every parameter."
-            ),
-        ),
-    ] = 100_000
     ep: Annotated[
         int,
         Field(
@@ -165,8 +107,23 @@ class FSDPConfig:
                 "under expert LoRA, of one fp32 chunk of the expert-parallel "
                 "combine, and of one grouped LoRA GEMM output. Bigger chunks "
                 "launch fewer kernels per MoE layer; on Super-VL the learn "
-                "peak grows ~0.37 GiB per GiB of chunk. None picks the "
-                "largest of 64/128/256/512 the memory estimate fits."
+                "peak grows ~0.37 GiB per GiB of chunk. Picked from the memory "
+                "estimate; manifests cannot set it. None picks the "
+                "largest of 512/256/128/64 whose estimated training peak "
+                "fits, else 64; off CUDA it picks 64."
+            ),
+        ),
+    ] = None
+    activation_offload: Annotated[
+        bool | None,
+        Field(
+            description=(
+                "Offload backward-saved activations to host memory between "
+                "forward and backward. Saves GPU memory at the cost of PCIe "
+                "traffic. Picked from the memory estimate; manifests cannot "
+                "set it. None picks True only when the training peak is over "
+                "the GPU at every other lightest choice and a micro-batch of "
+                "1; off CUDA it picks False."
             ),
         ),
     ] = None
@@ -195,22 +152,6 @@ class FSDPConfig:
     def __post_init__(self) -> None:
         self.param_dtype = _dtype_name(self.param_dtype)
         self.reduce_dtype = _dtype_name(self.reduce_dtype)
-        self.checkpoint_skip_layer_types = tuple(self.checkpoint_skip_layer_types)
-        if self.prefetch_units < 1:
-            msg = "FSDPConfig.prefetch_units must be >= 1"
-            raise ValueError(msg)
-        if self.backward_prefetch_units < 1:
-            msg = "FSDPConfig.backward_prefetch_units must be >= 1"
-            raise ValueError(msg)
-        if self.checkpoint_every_n_blocks < 1:
-            msg = "FSDPConfig.checkpoint_every_n_blocks must be >= 1"
-            raise ValueError(msg)
-        if self.wrap_every_n_blocks < 1:
-            msg = "FSDPConfig.wrap_every_n_blocks must be >= 1"
-            raise ValueError(msg)
-        if self.param_persistence_threshold < 0:
-            msg = "FSDPConfig.param_persistence_threshold must be >= 0"
-            raise ValueError(msg)
         if self.ep < 1:
             msg = "FSDPConfig.ep must be >= 1"
             raise ValueError(msg)

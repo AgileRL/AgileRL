@@ -355,6 +355,7 @@ class TestGRPOSummarizeUpdateKlClampFrac:
         assert stats["kl_clamp_frac"] == 0.0
 
 
+@pytest.mark.skipif(not HAS_LIGER_KERNEL, reason="liger-kernel is Linux-only.")
 class TestGRPOFusedKernelLossKlClamp:
     @pytest.fixture
     def recording_kernel(self, monkeypatch: pytest.MonkeyPatch) -> type:
@@ -372,7 +373,7 @@ class TestGRPOFusedKernelLossKlClamp:
             loss_norm="micro_batch",
             loss_type="cispo",
             beta=BETA,
-            use_liger_loss=True,
+            liger_loss=True,
             off_policy_token_mask_bounds=ICEPOP_BAND,
         )
         ids, mask = _batch()
@@ -412,12 +413,12 @@ class TestGRPOKlClampLigerParity:
         results: list[dict[str, Any]] = []
 
         # Act
-        for use_liger_loss in (False, True):
+        for liger_loss in (False, True):
             agent = _make_grpo(
                 loss_norm="micro_batch",
                 loss_type=loss_type,
                 beta=BETA,
-                use_liger_loss=use_liger_loss,
+                liger_loss=liger_loss,
                 off_policy_token_mask_bounds=ICEPOP_BAND,
             )
             _, policy, _ = agent._fused_forward_no_grad(

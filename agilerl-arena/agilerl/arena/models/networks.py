@@ -18,7 +18,6 @@ from pydantic import (
 )
 from typing_extensions import Self
 
-from agilerl.arena.memory.resolve.lora import OMITTED_MAX_LORA_RANK
 from agilerl.arena.memory.resolve.sequences import OMITTED_GPU_MEMORY_UTILIZATION
 from agilerl.arena.models.descriptions import (
     ACTIVATION_CONV,
@@ -746,8 +745,8 @@ class LoraConfigDict(BaseModel):
         default=None,
         description=(
             "Vision, audio or connector modules of a vision-language model to "
-            "adapt as well, e.g. query, key, value. Needs the towers served "
-            "(strip_multimodal_towers false)."
+            "adapt as well, e.g. query, key, value. The rollout engine then "
+            "keeps its towers."
         ),
     )
     # Packed MoE expert parameter paths (PEFT ``target_parameters``), e.g.
@@ -844,25 +843,6 @@ class VLLMConfig(BaseModel):
             "trainer size it; raising it speeds up long prefills but costs memory."
         ),
     )
-    enforce_eager: bool | None = Field(
-        default=None,
-        description="Skip CUDA-graph capture. Starts faster, decodes slower.",
-    )
-    sleep_mode: bool = Field(
-        default=False,
-        description=(
-            "Release GPU memory between generation calls so the trainer can use "
-            "it. Required when generation is colocated with training."
-        ),
-    )
-    sleep_mode_level: Literal[1, 2] = Field(
-        default=1,
-        description=(
-            "1 offloads base weights to host memory and drops the KV cache; 2 "
-            "discards the weights, which is only safe when they are pushed back "
-            "after every wake."
-        ),
-    )
     dtype: str | None = Field(
         default=None,
         min_length=1,
@@ -883,24 +863,6 @@ class VLLMConfig(BaseModel):
         min_length=1,
         description="KV cache dtype, e.g. fp8. Fits a longer context into the same memory.",
     )
-    max_lora_rank: int = Field(
-        default=OMITTED_MAX_LORA_RANK,
-        ge=1,
-        description="Largest LoRA rank the engine will accept.",
-    )
-    max_loras: int = Field(
-        default=1, ge=1, description="LoRA adapters the engine keeps loaded at once."
-    )
-    strip_multimodal_towers: bool | list[VllmModality] = Field(
-        default=False,
-        description=(
-            "Skip loading the vision or audio towers in the generation copy, "
-            "freeing their memory. True skips every tower; a list names the "
-            "modalities to drop (image, video, audio). Unset is true for a "
-            "text-only environment (modality text, or dataset rows) on a "
-            "vision-language catalog model without tower LoRA, else false."
-        ),
-    )
     stop_sequences: list[str] | None = Field(
         default=None, description="Strings that end a completion when generated."
     )
@@ -913,14 +875,6 @@ class VLLMConfig(BaseModel):
         default=0.0,
         ge=0.0,
         description="Penalty on tokens in proportion to how often they appeared.",
-    )
-    kv_cache_memory_bytes: int | None = Field(
-        default=None,
-        ge=0,
-        description=(
-            "Pin the KV cache to a fixed size. Needed when several vLLM "
-            "processes share a GPU, whose memory profiling would otherwise clash."
-        ),
     )
     limit_mm_per_prompt: dict[str, Annotated[int, Field(ge=0)]] | None = Field(
         default=None,
@@ -939,8 +893,8 @@ class VLLMConfig(BaseModel):
 def default_rollout_vllm_config() -> VLLMConfig:
     """The vLLM settings a rollout run gets when the manifest names none.
 
-    Colocated generation shares the trainer's GPU, so it sleeps between calls;
-    sleeping is what affords the 0.9 memory utilization.
+    The 0.9 memory utilization relies on colocated generation sleeping between
+    calls.
 
     :returns: The default engine config.
     :rtype: VLLMConfig
@@ -948,7 +902,6 @@ def default_rollout_vllm_config() -> VLLMConfig:
     return VLLMConfig(
         max_num_seqs=16,
         gpu_memory_utilization=0.9,
-        sleep_mode=True,
     )
 
 
@@ -956,8 +909,9 @@ def resolve_lora_defaults(lora: LoraConfigDict, hub_id: str) -> None:
     """Fill a LoRA config's catalog defaults in place.
 
     Unset ``target_parameters`` on a packed-MoE catalog model adapts every
-    expert path and sets ``lora_dropout`` to 0; ``[]`` adapts none. Untracked
-    Hub ids are left as they are.
+    expert path and sets ``lora_dropout`` to 0; ``[]`` adapts none. Set
+    expert paths with an unset ``lora_dropout`` also take 0. Untracked Hub
+    ids are left as they are.
 
     :param lora: The config to resolve.
     :type lora: LoraConfigDict
@@ -965,11 +919,16 @@ def resolve_lora_defaults(lora: LoraConfigDict, hub_id: str) -> None:
     :type hub_id: str
     """
     entry = SUPPORTED_MODEL_INFO.get(hub_id)
-    if entry is None or lora.target_parameters is not None or not entry.parameters:
+    if entry is None or not entry.parameters:
         return
-    lora.target_parameters = sorted(entry.parameters)
+    filled = lora.target_parameters is None
+    if filled:
+        lora.target_parameters = sorted(entry.parameters)
     # PEFT parameter-level LoRA cannot apply dropout.
-    lora.lora_dropout = 0.0
+    if lora.target_parameters and (
+        filled or "lora_dropout" not in lora.model_fields_set
+    ):
+        lora.lora_dropout = 0.0
 
 
 class FinetuningNetworkSpec(BaseModel):
@@ -1002,7 +961,8 @@ class FinetuningNetworkSpec(BaseModel):
         module names outside it, and ``target_parameters`` a list of stored
         paths; all match exactly. Unset ``target_parameters`` on a packed-MoE
         model adapts every expert path and sets ``lora_dropout`` to 0;
-        ``[]`` adapts none.
+        ``[]`` adapts none. Expert paths with a set nonzero ``lora_dropout``
+        are rejected.
         """
         hub_id = self.pretrained_model_name_or_path
         entry = SUPPORTED_MODEL_INFO.get(hub_id)
@@ -1051,6 +1011,12 @@ class FinetuningNetworkSpec(BaseModel):
             msg = (
                 f"Unknown LoRA target_parameters {unknown} for {hub_id}; "
                 f"valid parameters: {valid}"
+            )
+            raise ValueError(msg)
+        if (lora.target_parameters or []) and lora.lora_dropout != 0:
+            msg = (
+                "lora_config.lora_dropout must be 0 when target_parameters "
+                "is set: PEFT parameter-level LoRA cannot factor dropout out."
             )
             raise ValueError(msg)
         return self

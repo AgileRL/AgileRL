@@ -55,16 +55,12 @@ def engine_terms(
         )
         + sampler
     )
-    # A compiling engine's profiling pass holds a copy of the per-layer
-    # embedding table; an eager engine does not. vLLM shards the table over TP.
-    compile_copy = (
-        0
-        if settings.enforce_eager
-        else int(
-            max(counts.embedding - formulas.token_embedding_params(arch), 0)
-            * act_bytes
-            / tp
-        )
+    # The compiling engine's profiling pass holds a copy of the per-layer
+    # embedding table. vLLM shards the table over TP.
+    compile_copy = int(
+        max(counts.embedding - formulas.token_embedding_params(arch), 0)
+        * act_bytes
+        / tp
     )
     terms = {
         "weights": weights,
@@ -72,15 +68,12 @@ def engine_terms(
             model, settings, batched_tokens, decoder_startup
         )
         + compile_copy,
-        "cuda_graphs": 0 if settings.enforce_eager else formulas.CUDA_GRAPH_POOL_BYTES,
+        "cuda_graphs": formulas.CUDA_GRAPH_POOL_BYTES,
+        # Engines serve one adapter (``max_loras=1``).
         "lora_slots": int(
-            settings.max_loras
-            * formulas.lora_param_count(arch, settings.max_lora_rank)
-            * act_bytes
-            / tp
+            formulas.lora_param_count(arch, settings.max_lora_rank) * act_bytes / tp
         )
-        + settings.max_loras
-        * formulas.engine_expert_lora_param_count(
+        + formulas.engine_expert_lora_param_count(
             arch,
             settings.max_lora_rank,
             tp,
@@ -296,14 +289,9 @@ def _generation_pools(
         + terms["mamba_state"]
         + terms["engine_runtime"]
     )
-    pinned = settings.kv_cache_memory_bytes
-    kv_pool = pinned if pinned is not None else max(budget - non_kv, 0)
+    kv_pool = max(budget - non_kv, 0)
     # vLLM holds Mamba state in the KV pool and checks room for one request at start-up.
-    startup_pool = (
-        pinned
-        if pinned is not None
-        else max(budget - (non_kv - terms["mamba_state"]), 0)
-    )
+    startup_pool = max(budget - (non_kv - terms["mamba_state"]), 0)
     full_sequence = terms[
         "kv_demand"
     ] // settings.concurrency + formulas.mamba_state_bytes(
@@ -343,11 +331,7 @@ def _kv_bar_components(
                 "startup_pool": int(startup_pool),
                 "full_sequence_bytes": int(full_sequence),
             },
-            note=(
-                "Pinned via kv_cache_memory_bytes."
-                if settings.kv_cache_memory_bytes is not None
-                else "Sized by vLLM from the gpu_memory_utilization budget."
-            ),
+            note="Sized by vLLM from the gpu_memory_utilization budget.",
         ),
         MemoryComponent(
             key="activation_peak",
@@ -381,7 +365,6 @@ def _residency_bar_components(
             key="cuda_graphs",
             label="CUDA graphs",
             n_bytes=max(int(terms["cuda_graphs"]), 0),
-            note="Set enforce_eager=True to skip capture (throughput cost).",
         ),
         MemoryComponent(
             key="mamba_state",

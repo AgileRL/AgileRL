@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import warnings
 from types import MethodType
 from typing import Any
 
@@ -17,6 +16,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 )
 from transformers.modeling_layers import GradientCheckpointingLayer
 
+from agilerl.arena.memory.resolve.moe import resolve_moe_lora_recompute
 from agilerl.lora.fused import patch_lora_for_fused_forward
 from agilerl.lora.moe.adapters import wrapper_chain
 from agilerl.lora.moe.grouped_gemm import grouped_linear
@@ -112,7 +112,6 @@ def upgrade_moe_param_wrappers(model: nn.Module) -> int:
         if isinstance(module, ParamWrapper)
     }
     upgraded = 0
-    fallbacks: list[str] = []
     for name, module in model.named_modules():
         if not isinstance(module, ParamWrapper) or id(module) in wrapped_bases:
             continue
@@ -138,18 +137,17 @@ def upgrade_moe_param_wrappers(model: nn.Module) -> int:
             module.__class__ = TransposedExpertsLoraWrapper
             upgraded += 1
         elif module.get_param().ndim == 3:
-            fallbacks.append(name)
+            msg = (
+                f"Packed-experts LoRA on {name!r} targets {sorted(chain)} of "
+                f"{type(base).__name__}, which matches no supported expert "
+                "layout (sorted ``weight``, routed gate/up + ``down_proj``, or "
+                "transposed ``gate_up_proj`` + ``down_proj``)."
+            )
+            raise ValueError(msg)
     _bind_gate_token_index(model)
     # Class swaps drop the instance fused-routing forward; re-attach it.
     if upgraded:
         patch_lora_for_fused_forward(model)
-    if fallbacks:
-        warnings.warn(
-            "Packed-experts LoRA wrappers on unrecognized module conventions "
-            "stay on PEFT's delta-materializing forward (memory-hungry): "
-            f"{fallbacks}.",
-            stacklevel=2,
-        )
     return upgraded
 
 
@@ -179,27 +177,24 @@ def _checkpoints_activations(module: nn.Module) -> bool:
     )
 
 
-def set_routed_experts_recompute(model: nn.Module, enabled: bool | None) -> None:
-    """Choose recompute-in-backward or the full autograd graph for every routed-experts LoRA wrapper.
+def set_routed_experts_recompute(model: nn.Module) -> None:
+    """Set recompute-in-backward on every routed-experts LoRA wrapper outside an activation-checkpointed block.
+
+    Recompute runs :class:`~agilerl.lora.moe.recompute.LoraExpertsFunction`
+    on frozen base weights. A checkpointed block already reruns the expert
+    forward in backward, so its wrappers keep the full graph.
 
     :param model: Model holding ``RoutedExpertsLoraWrapper`` layers.
     :type model: nn.Module
-    :param enabled: ``True`` runs :class:`~agilerl.lora.moe.recompute.LoraExpertsFunction`
-        on frozen base weights and ``False`` keeps the full graph. ``None``
-        keeps the full graph inside activation-checkpointed blocks, which
-        already rerun the expert forward in backward, and recomputes
-        everywhere else.
-    :type enabled: bool | None
     """
     checkpointed: set[int] = set()
-    if enabled is None:
-        for module in model.modules():
-            if _checkpoints_activations(module):
-                checkpointed.update(id(inner) for inner in module.modules())
+    for module in model.modules():
+        if _checkpoints_activations(module):
+            checkpointed.update(id(inner) for inner in module.modules())
     for module in model.modules():
         if isinstance(module, RoutedExpertsLoraWrapper):
-            module.recompute = (
-                id(module) not in checkpointed if enabled is None else enabled
+            module.recompute = resolve_moe_lora_recompute(
+                checkpointed=id(module) in checkpointed
             )
 
 

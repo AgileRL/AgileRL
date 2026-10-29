@@ -48,12 +48,7 @@ not in a single-process script.
     from agilerl.distributed import FSDPConfig
     from agilerl.utils.algo_utils import VLLMConfig
 
-    fsdp_config = FSDPConfig(
-        reshard_after_forward=True,
-        cpu_offload=False,
-        optim_cpu_offload=True,
-        defer_grad_sync=True,
-    )
+    fsdp_config = FSDPConfig()
 
     agent = GRPO(
         model_name="Qwen/Qwen2.5-3B",
@@ -121,6 +116,14 @@ See :ref:`arena_training` for authentication and job management.
 Construct with :class:`~agilerl.distributed.FSDPConfig`. Defaults are the
 usual production settings for LoRA / QLoRA.
 
+``reshard_after_forward``, ``optim_cpu_offload``, ``routed_expert_chunk_mib``,
+``activation_offload`` and ``cpu_offload`` are memory-vs-speed settings. Leave
+them unset: the algorithm picks the fastest combination the memory estimate
+fits on the device. It gives up speed in this order: reshard after forward, a
+smaller expert chunk, a smaller micro-batch, the optimizer to CPU, activation
+offload, then full CPU offload (colocated vLLM only). A training manifest
+rejects them.
+
 .. list-table::
    :widths: 28 14 58
    :header-rows: 1
@@ -129,33 +132,35 @@ usual production settings for LoRA / QLoRA.
      - Default
      - What it does
    * - ``reshard_after_forward``
-     - ``True``
+     - picked
      - Free the all-gathered parameters after each module's forward so the
        next module can reuse that memory. ``False`` keeps them gathered
        (faster, more VRAM).
    * - ``optim_cpu_offload``
-     - ``None``
+     - picked
      - Keep parameters and gradients on GPU; move Adam ``m``/``v`` to CPU
        except during ``step()``. Mutually exclusive with ``cpu_offload``.
-       ``None`` keeps a fused AdamW on GPU when the memory estimate fits,
-       else offloads.
    * - ``routed_expert_chunk_mib``
-     - ``None``
-     - Byte budget (MiB) of each routed-expert chunk in MoE LoRA. Larger
-       chunks run faster and raise peak memory. ``None`` takes the largest
-       of 64/128/256/512 the memory estimate fits.
+     - picked
+     - Byte budget (MiB) of each routed-expert chunk in MoE LoRA, one of
+       64/128/256/512. Larger chunks run faster and raise peak memory.
+   * - ``activation_offload``
+     - picked
+     - Move saved activations to host memory during the training forward.
+       Spends host RAM and PCIe time.
    * - ``cpu_offload``
-     - ``False``
+     - picked
      - Offload sharded parameters and gradients to CPU
-       (``CPUOffloadPolicy``). Requires colocated vLLM (``vllm_config``);
-       HuggingFace generate assumes weights stay on the compute device.
-   * - ``defer_grad_sync``
-     - ``True``
-     - Skip reduce-scatter until the last micro-batch of an optimizer step
-       (``set_requires_gradient_sync``). Saves communication; holds
-       unsharded grads in between. ``False`` reduce-scatters every backward.
+       (``CPUOffloadPolicy``). Picked only when nothing else fits. Requires
+       colocated vLLM (``vllm_config``); HuggingFace generate and async
+       rollout engines assume weights stay on the compute device.
 
 ``cpu_offload`` and ``optim_cpu_offload`` cannot both be ``True``.
+
+Each transformer block is one FSDP unit, and the next unit is all-gathered
+while the current one runs. Parameters under 100,000 elements stay
+replicated. Gradients are reduce-scattered only on the last micro-batch of
+an optimizer step, so unsharded grads are held in between.
 
 With ``create_population``, set ``FSDP`` in ``INIT_HP`` — ``True`` for
 defaults, or a dict of fields:
@@ -165,7 +170,7 @@ defaults, or a dict of fields:
     INIT_HP = {
         "ALGO": "GRPO",
         "FSDP": True,
-        # or: "FSDP": {"cpu_offload": False, "defer_grad_sync": True},
+        # or: "FSDP": {"shard_group_size": 8},
         ...
     }
 

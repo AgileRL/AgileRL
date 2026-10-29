@@ -142,6 +142,13 @@ jobs:
               run: |
                   uv sync --locked --all-groups --extra all
                   echo "$UV_PROJECT_ENVIRONMENT/bin" >> $GITHUB_PATH
+            - name: Install flash-attn
+              # The trainer raises without flash_attn on CUDA. The wheel must match uv.lock's torch (2.13, CUDA 13).
+              run: |
+                  py="cp$(echo '${{ matrix.python-version }}' | tr -d .)"
+                  uv pip install --python "$UV_PROJECT_ENVIRONMENT" \
+                    "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.47/flash_attn-2.8.3%2Bcu130torch2.13-${py}-${py}-linux_x86_64.whl"
+                  python -c "import flash_attn"
             - name: Run GPU shard
               run: |
                   rm -f .coverage .coverage.*

@@ -1111,6 +1111,7 @@ def materialize_fsdp2_from_cpu_state(
             ep_mesh,
             tp_mesh=tp_mesh,
             token_blocks=config.ep_token_blocks,
+            chunk_bytes=config.routed_expert_chunk_mib * 1024 * 1024,
         )
         packed_ep_modules = list(iter_packed_expert_modules(model))
         if not packed_ep_modules:

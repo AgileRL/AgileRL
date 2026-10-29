@@ -547,6 +547,7 @@ class LocalTrainer(Trainer):
             hp_config=self.hp_config,
             networks=self.networks,
             rollout_mode=self.training_spec.rollout_mode,
+            env_spec=self.env_spec,
         )
         # Classic RL algorithms keep Accelerate; LLM training uses torch.distributed.
         if not isinstance(self.algorithm_spec, LLMAlgorithmSpec):

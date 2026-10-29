@@ -79,7 +79,7 @@ def generate_dpo(
     pretrained_model_name_or_path,
     micro_batch_size_per_gpu,
     from_name=False,
-    use_liger_loss=False,
+    liger_loss=False,
 ):
     gc.collect()
     torch.cuda.empty_cache()
@@ -111,7 +111,7 @@ def generate_dpo(
         task_type="CAUSAL_LM",
         lora_dropout=0.05,
     )
-    return DPO(
+    dpo = DPO(
         actor_network=actor if not from_name else None,
         model_name=pretrained_model_name_or_path if from_name else None,
         pad_token_id=vocab_size - 1,
@@ -125,8 +125,9 @@ def generate_dpo(
         device="cuda" if torch.cuda.is_available() else "cpu",
         use_separate_reference_adapter=use_separate_reference_adapter,
         micro_batch_size_per_gpu=micro_batch_size_per_gpu,
-        use_liger_loss=use_liger_loss,
     )
+    dpo.liger_loss = liger_loss
+    return dpo
 
 
 @pytest.fixture
@@ -134,7 +135,12 @@ def dpo_factory():
     return generate_dpo
 
 
-def _make_cpu_dpo_for_branch_tests(**kwargs):
+def _make_cpu_dpo_for_branch_tests(liger_loss: bool | None = False, **kwargs):
+    """Tiny DPO on CPU.
+
+    :param liger_loss: Value to pin ``liger_loss`` to, or ``None`` to keep the
+        value resolved at init.
+    """
     vocab_size = kwargs.pop("vocab_size", 100)
     input_size = kwargs.pop("input_size", 10)
     max_tokens = kwargs.pop("max_tokens", 20)
@@ -157,15 +163,13 @@ def _make_cpu_dpo_for_branch_tests(**kwargs):
         "batch_size": 4,
         "micro_batch_size_per_gpu": 2,
         "wrap": False,
-        "gradient_checkpointing": False,
         "device": "cpu",
-        # Pin so the unfused learn() path is exercised by default
-        # regardless of liger-kernel availability. Liger-specific tests
-        # override this.
-        "use_liger_loss": False,
     }
     defaults.update(kwargs)
-    return DPO(**defaults)
+    dpo = DPO(**defaults)
+    if liger_loss is not None:
+        dpo.liger_loss = liger_loss
+    return dpo
 
 
 class TestDPOInit:
@@ -288,7 +292,7 @@ class TestDPOLearn:
     @pytest.mark.gpu
     @pytest.mark.parametrize("data_batch_size", [2])
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-    @pytest.mark.parametrize("use_liger_loss", [False, True])
+    @pytest.mark.parametrize("liger_loss", [False, True])
     def test_dpo_learn(
         self,
         dpo_factory,
@@ -302,7 +306,7 @@ class TestDPOLearn:
         max_tokens,
         data_batch_size,
         micro_batch_size_per_gpu,
-        use_liger_loss,
+        liger_loss,
     ):
         dpo = dpo_factory(
             dist_mode_factory,
@@ -314,7 +318,7 @@ class TestDPOLearn:
             use_separate_reference_adapter,
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
-            use_liger_loss=use_liger_loss,
+            liger_loss=liger_loss,
         )
 
         num_samples = 4
@@ -414,7 +418,6 @@ class TestDPOLearn:
             False,
             pretrained_model_name_or_path,
             None,
-            use_liger_loss=False,
         )
         for group in dpo.optimizer.optimizer.param_groups:
             group["lr"] = 1e-3
@@ -546,68 +549,30 @@ class TestDPOTest:
             dpo.test(DummySFTEnv(), loop=1)
 
 
-class TestDPOLigerUnavailableBehaviour:
-    @pytest.mark.parametrize("assertion_mode", ["warns_and_fallback", "private_guard"])
-    def test_dpo_liger_unavailable_behaviour(
-        self,
-        monkeypatch,
-        dpo_factory,
-        dist_mode_factory,
-        model_factory,
-        assertion_mode,
-    ):
-        # LLMAlgorithm reads HAS_LIGER_KERNEL from core.base; DPO's module copy is
-        # separate. Patch both so fallback warning runs on machines where liger is
-        # installed and _dpo_loss_liger still raises when called directly.
-        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False)
-        monkeypatch.setattr("agilerl.algorithms.dpo.HAS_LIGER_KERNEL", False)
-        if assertion_mode == "warns_and_fallback":
-            with pytest.warns(
-                UserWarning,
-                match=r"use_liger_loss=True requested.*Falling back to standard loss\.",
-            ):
-                dpo = dpo_factory(
-                    dist_mode_factory=dist_mode_factory,
-                    model_factory=model_factory,
-                    dist_mode=None,
-                    vocab_size=30,
-                    input_size=5,
-                    max_tokens=10,
-                    use_separate_reference_adapter=False,
-                    pretrained_model_name_or_path=None,
-                    micro_batch_size_per_gpu=None,
-                    from_name=False,
-                    use_liger_loss=True,
-                )
-            assert dpo.use_liger_loss is False
-        else:
-            dpo = dpo_factory(
-                dist_mode_factory=dist_mode_factory,
-                model_factory=model_factory,
-                dist_mode=None,
-                vocab_size=30,
-                input_size=5,
-                max_tokens=10,
-                use_separate_reference_adapter=False,
-                pretrained_model_name_or_path=None,
-                micro_batch_size_per_gpu=None,
-                from_name=False,
-                use_liger_loss=False,
-            )
-            with pytest.raises(
-                ImportError,
-                match=r"Liger DPO loss was requested but `liger-kernel` is not available\. Set use_liger_loss=False\.",
-            ):
-                dpo._dpo_loss_liger(
-                    chosen_ids=torch.ones((1, 2), dtype=torch.long),
-                    rejected_ids=torch.ones((1, 2), dtype=torch.long),
-                    chosen_attn=torch.ones((1, 2), dtype=torch.long),
-                    rejected_attn=torch.ones((1, 2), dtype=torch.long),
-                    chosen_mask=torch.ones((1, 1), dtype=torch.long),
-                    rejected_mask=torch.ones((1, 1), dtype=torch.long),
-                )
+class TestDPOLigerLossProperty:
+    def test_liger_runs_with_liger_kernel(self, liger_kernel_installed):
+        # Act
+        with pytest.warns(UserWarning, match="Liger Loss used with LoRA"):
+            dpo = _make_cpu_dpo_for_branch_tests(liger_loss=None)
 
-        dpo.clean_up()
+        # Assert
+        assert dpo.liger_loss is True
+        assert dpo.lora_config.exclude_modules == ["lm_head"]
+
+    def test_liger_stays_off_without_liger_kernel(self, monkeypatch):
+        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False)
+
+        dpo = _make_cpu_dpo_for_branch_tests(liger_loss=None)
+
+        assert dpo.liger_loss is False
+
+
+class TestDPOLigerLossLayout:
+    @pytest.mark.parametrize("liger_loss", [True, False])
+    def test_preference_pairs_size_as_whole_sequences(self, liger_loss: bool):
+        dpo = _make_cpu_dpo_for_branch_tests(liger_loss=liger_loss)
+
+        assert dpo._liger_loss_layout() == (liger_loss, liger_loss)
 
 
 class TestDPOLigerHiddenCapture:
@@ -621,11 +586,7 @@ class TestDPOLigerHiddenCapture:
             vocab_size=vocab_size,
             input_size=5,
             max_tokens=10,
-            use_liger_loss=False,
         )
-        # Force the liger branch; stub the kernel so the test runs without
-        # liger-kernel (and off-GPU) while capturing what would be fed to it.
-        monkeypatch.setattr("agilerl.algorithms.dpo.HAS_LIGER_KERNEL", True)
 
         lm_head = dpo._get_lm_head()
         hidden_size = lm_head.weight.shape[1]
@@ -650,8 +611,9 @@ class TestDPOLigerHiddenCapture:
                 aux = tuple(torch.zeros(()) for _ in range(7))
                 return torch.zeros(()), aux
 
-        # raising=False: the guarded import means the attribute is absent
-        # when liger-kernel is not installed.
+        # Stub the kernel so the test runs off-GPU while capturing what would
+        # be fed to it. raising=False: the guarded import means the attribute
+        # is absent when liger-kernel is not installed.
         monkeypatch.setattr(
             "agilerl.algorithms.dpo.LigerDPOWithAlpha", _FakeLigerDPO, raising=False
         )
@@ -776,10 +738,6 @@ class TestDPOSaveLoadCheckpoint:
                 device="cuda" if torch.cuda.is_available() else "cpu",
                 use_separate_reference_adapter=use_separate_reference_adapter,
                 lora_config=copy.deepcopy(dpo.lora_config),
-                # Match the saved agent's setting so the constructor doesn't
-                # mutate ``lora_config`` differently (``use_liger_loss=True``
-                # adds ``exclude_modules=["lm_head"]``).
-                use_liger_loss=dpo.use_liger_loss,
             )
             own_profiler = new_dpo.learn_profiler
             new_dpo.load_checkpoint(tmpdir)
@@ -1189,7 +1147,13 @@ class TestDPOUnsetFSDPMemory:
         # Arrange
         agent = _make_cpu_dpo_for_branch_tests()
         agent.device = "cuda"
-        config = FSDPConfig(routed_expert_chunk_mib=64, optim_cpu_offload=True)
+        config = FSDPConfig(
+            reshard_after_forward=True,
+            routed_expert_chunk_mib=64,
+            optim_cpu_offload=True,
+            activation_offload=False,
+            cpu_offload=False,
+        )
 
         # Act
         resolved = agent._resolve_fsdp_config(config)
@@ -1204,6 +1168,6 @@ class TestDPOUnsetFSDPMemory:
         agent.device = "cuda"
 
         # Act / Assert
-        with pytest.raises(ValueError, match="routed_expert_chunk_mib"):
+        with pytest.raises(ValueError, match="DPO has unset FSDP memory settings"):
             agent._resolve_fsdp_config(FSDPConfig())
         agent.clean_up()

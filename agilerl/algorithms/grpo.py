@@ -24,14 +24,19 @@ if HAS_LIGER_KERNEL or TYPE_CHECKING:
     from liger_kernel.chunked_loss.grpo_loss import LigerFusedLinearGRPOFunction
 else:
     # Keep the name resolvable when liger-kernel isn't installed so unit
-    # tests can patch it. ``_liger_loss`` guards against actual use.
+    # tests can patch it. ``liger_loss`` is off without liger-kernel.
     LigerFusedLinearGRPOFunction = None  # type: ignore[assignment]
 
 from agilerl.algorithms.core import ActionResult, LLMAlgorithm
 from agilerl.algorithms.core.llm_ops.fused_logprobs import scored_position_index
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.arena.memory.resolve.chunk import resolve_chunk_rows
-from agilerl.arena.models.networks import VllmModality
+from agilerl.arena.memory.resolve.liger import (
+    liger_loss_blocker,
+    liger_whole_sequence_loss,
+)
+from agilerl.arena.memory.specs import Algorithm
+from agilerl.arena.models.algorithms.grpo import GRPOSpec
 from agilerl.arena.models.profiling import ProfilingConfig
 from agilerl.components.llm_rollout_data import EpisodeSegments
 from agilerl.distributed import (
@@ -243,6 +248,9 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         ``gradient_accumulation_steps`` is derived as
         ``mini_batch_size / micro_batch_size_per_gpu``.
     :type mini_batch_size: int, optional
+    :param gradient_checkpointing: Recompute each transformer block in
+        backward. ``None`` picks it from the memory estimate.
+    :type gradient_checkpointing: bool | None, optional
     :param max_output_tokens: Max number of answer tokens, defaults to None
     :type max_output_tokens: int, optional
     :param min_output_tokens: Minimum output tokens, defaults to 0
@@ -278,19 +286,6 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
     :type vllm_config: VLLMConfig, optional
     :param seed: Seed for the random number generator, defaults to 42
     :type seed: int, optional
-    :param gradient_checkpointing: Flag to indicate if gradient checkpointing should be used, defaults to True
-    :type gradient_checkpointing: bool, optional
-    :param torch_compiler: Torch compile mode (e.g. ``'default'``), defaults to None
-    :type torch_compiler: str | None, optional
-    :param use_liger_loss: Use the Liger fused loss, defaults to ``True``
-        (requires ``liger-kernel``; warns and falls back otherwise). **Not
-        recommended for GRPO/CISPO/GSPO**: the upstream Liger GRPO kernel shows
-        no speedup over AgileRL's already memory-bounded standard path and uses
-        slightly more memory. PPO/REINFORCE route ``use_liger_loss`` through a
-        different AgileRL liger-based kernel where it *does* help (see their
-        docs). The Liger model patches (fused RMSNorm/RoPE/SwiGLU) apply whenever
-        ``liger-kernel`` is installed and are independent of this flag.
-    :type use_liger_loss: bool, optional
     :param use_kl_advantage_shaping: Apply KL-based shaping directly to token
         advantages before PPO clipping, defaults to False.
     :type use_kl_advantage_shaping: bool, optional
@@ -316,9 +311,10 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
           ``turn_ids`` in :meth:`learn`.
         * ``"trajectory"`` — pool over the whole completion (GSPO).
 
-        Turn/trajectory pooling couples a unit's tokens, so it has no fused Liger
-        kernel and runs on the standard (always memory-bounded) path; only token
-        level can use the Liger path when ``use_liger_loss=True``.
+        The fused Liger loss runs at token level, and at trajectory level for
+        ``grpo`` / ``gspo`` without the vLLM correction, off-policy masks or
+        per-turn advantages; KL advantage shaping and sampling supports have
+        none (:func:`~agilerl.arena.memory.resolve.liger.liger_loss_blocker`).
     :type importance_sampling_level: Literal["token", "turn", "trajectory"] | None, optional
     :param advantage_granularity: Unit at which the group-relative *advantage* is
         computed, independent of ``importance_sampling_level``. Defaults to
@@ -364,38 +360,19 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         played the turn the sample's trajectory advantage instead of zero,
         defaults to True. Turns nobody played stay at zero either way.
     :type turn_advantage_trajectory_fallback: bool, optional
-    :param cast_logprobs_to_fp32: When ``True`` (default), run the per-token
-        log-prob reduction (``gather`` / ``logsumexp``) in fp32 before casting
-        back to the input dtype, for numerically stable log-probs. ``False`` runs
-        it in the input dtype, saving a little memory at the cost of a per-token
-        bf16 quantisation error that can bias importance-sampling ratios.
-    :type cast_logprobs_to_fp32: bool, optional
-    :param chunk_rows: Primary chunk-size setting for fused logit tiles. Applies to
-        both standard and Liger paths.
-    :type chunk_rows: int | None, optional
     :param quantization_config: Optional ``transformers.BitsAndBytesConfig`` for
         loading the base model in 4-/8-bit (QLoRA). ``lm_head`` is kept
         unquantized so the fused-linear-logprob path stays numerically exact.
     :type quantization_config: BitsAndBytesConfig | None, optional
-    :param activation_offload: When ``True``, run the training forward inside
-        ``torch.autograd.graph.save_on_cpu`` so tensors saved for backward live
-        in pinned host RAM instead of GPU memory. Trades PCIe bandwidth for GPU
-        memory (the win grows with sequence length); a no-op during rollout /
-        reference forwards.
-    :type activation_offload: bool, optional
-    :param moe_lora_recompute: Recompute routed-expert LoRA activations in
-        backward on frozen packed base weights. ``None`` (default) recomputes
-        only outside activation-checkpointed blocks.
-    :type moe_lora_recompute: bool | None, optional
     :param lora_tower_target_modules: Tower and connector modules of a VL model
         to adapt as well. ``lora_config.target_modules`` always land on the
         language model only. Defaults to None.
     :type lora_tower_target_modules: list[str] | None, optional
-    :param rollout_strip_multimodal_towers: ``strip_multimodal_towers`` of a
-        vLLM engine outside this process that serves the adapter; tower LoRA
-        skips the towers it leaves unbuilt. A colocated engine uses
-        ``vllm_config`` instead. Defaults to False.
-    :type rollout_strip_multimodal_towers: bool | list[VllmModality], optional
+    :param rollout_strip_multimodal_towers: Whether the vLLM engine serving the
+        adapter skips the model's multimodal towers; tower LoRA skips the towers
+        it leaves unbuilt. Builders derive it from the environment's modality.
+        Defaults to False.
+    :type rollout_strip_multimodal_towers: bool, optional
     :param vllm_importance_sampling_correction: When ``True`` (default) and
         colocated, correct the rollout/trainer log-prob mismatch by
         weighting each training token by ``clamp(exp(trainer - sampling),
@@ -414,11 +391,6 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         tokens whose trainer/vLLM ratio reaches ``vllm_importance_sampling_cap``
         exceeds this (default ``0.02``). bf16 engines usually stay under 0.01.
     :type vllm_max_clip_fraction: float, optional
-    :param use_sequence_packing: Opt in to padding-free sequence packing for the
-        gradient forward (sequences pack into one varlen / blockmask pass). Only
-        honoured under a FlashAttention-2 / FlexAttention backend, otherwise
-        inert; the no-grad reference/old-logprob pass stays padded.
-    :type use_sequence_packing: bool, optional
     :param loss_norm: Token population the policy loss is normalized over.
         ``"accumulation_window"`` (default) takes the token mean over every
         action token entering the optimizer step, across the
@@ -482,14 +454,10 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
     :type logit_bias: dict[int, float] | None, optional
     """
 
+    supports_sequence_packing = GRPOSpec.supports_sequence_packing
+
     _window_action_tokens: torch.Tensor | float | None = None
     """This rank's share of the action tokens, across ranks, entering the optimizer step in progress."""
-
-    _is_per_token_trajectory_liger_warned: bool = False
-    """Whether the per-turn-advantage Liger bypass of :meth:`_objective_loss` has warned."""
-
-    _is_support_liger_warned: bool = False
-    """Whether the sampling-support Liger bypass of :meth:`_objective_loss` has warned."""
 
     _segment_accumulation_steps: int | None = None
     """Micro-batches per optimizer step of the running segmented learn, else ``None``."""
@@ -519,6 +487,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         calc_position_embeddings: bool = True,
         micro_batch_size_per_gpu: int | None = None,
         mini_batch_size: int | None = None,
+        gradient_checkpointing: bool | None = None,
         max_output_tokens: int | None = None,
         min_output_tokens: int | None = None,
         max_model_len: int | None = 1024,
@@ -532,9 +501,6 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         clone: bool = False,
         vllm_config: VLLMConfig | None = None,
         seed: int = 42,
-        gradient_checkpointing: bool = True,
-        torch_compiler: str | None = None,
-        use_liger_loss: bool = True,
         use_kl_advantage_shaping: bool = False,
         adv_norm: str = "mean_only",
         loss_type: Literal["grpo", "gspo", "cispo"] = "grpo",
@@ -546,18 +512,13 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         filter_zero_adv: bool = False,
         adv_filter_eps: float = 0.0,
         turn_advantage_trajectory_fallback: bool = True,
-        cast_logprobs_to_fp32: bool = True,
-        chunk_rows: int | None = None,
         quantization_config: BitsAndBytesConfig | None = None,
-        activation_offload: bool = False,
-        moe_lora_recompute: bool | None = None,
         lora_tower_target_modules: list[str] | None = None,
-        rollout_strip_multimodal_towers: bool | list[VllmModality] = False,
+        rollout_strip_multimodal_towers: bool = False,
         vllm_importance_sampling_correction: bool = True,
         vllm_importance_sampling_cap: float = 2.0,
         vllm_max_logprob_gap: float = 0.1,
         vllm_max_clip_fraction: float = 0.02,
-        use_sequence_packing: bool = False,
         loss_norm: Literal[
             "micro_batch", "accumulation_window", "episode"
         ] = "accumulation_window",
@@ -581,7 +542,6 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             pad_token_id=pad_token_id,
             pad_token=pad_token,
             offload_trainer_during_rollout=offload_trainer_during_rollout,
-            use_liger_loss=use_liger_loss,
             lora_config=lora_config,
             use_separate_reference_adapter=use_separate_reference_adapter,
             vllm_config=vllm_config,
@@ -590,6 +550,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             model_config=model_config,
             micro_batch_size_per_gpu=micro_batch_size_per_gpu,
             mini_batch_size=mini_batch_size,
+            gradient_checkpointing=gradient_checkpointing,
             group_size=group_size,
             cosine_lr_schedule_config=cosine_lr_schedule_config,
             wrap=wrap,
@@ -597,14 +558,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             device=resolved_device,
             fsdp_config=fsdp_config,
             name="GRPO",
-            gradient_checkpointing=gradient_checkpointing,
-            torch_compiler=torch_compiler,
-            cast_logprobs_to_fp32=cast_logprobs_to_fp32,
-            chunk_rows=chunk_rows,
             quantization_config=quantization_config,
-            activation_offload=activation_offload,
-            moe_lora_recompute=moe_lora_recompute,
-            use_sequence_packing=use_sequence_packing,
             lora_tower_target_modules=lora_tower_target_modules,
             rollout_strip_multimodal_towers=rollout_strip_multimodal_towers,
             vllm_importance_sampling_correction=vllm_importance_sampling_correction,
@@ -673,6 +627,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             adv_filter_eps,
             turn_advantage_trajectory_fallback,
         )
+        self.use_kl_advantage_shaping = use_kl_advantage_shaping
         self._setup_objective(loss_type, importance_sampling_level)
         self._setup_generation(
             max_output_tokens, min_output_tokens, max_model_len, hf_generate_chunk_size
@@ -680,8 +635,6 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         self.max_row_tokens = max_row_tokens
 
         self._setup_actors(actor_network, clone=clone)
-        # A softcapped actor head turns Liger off in _setup_actors.
-        self._setup_liger_objective(use_kl_advantage_shaping)
         # Register network groups for mutations
         self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
         if not clone:
@@ -1517,10 +1470,10 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
 
     def _setup_objective(
         self,
-        loss_type: str,
+        loss_type: Literal["grpo", "gspo", "cispo"],
         importance_sampling_level: str | None,
     ) -> None:
-        """Validate and resolve the objective, IS level, and Liger routing."""
+        """Validate and resolve the objective and IS level."""
         if loss_type not in {"grpo", "gspo", "cispo"}:
             msg = (
                 f"Invalid loss_type '{loss_type}'. "
@@ -1562,48 +1515,77 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                 "regularization to the objective.",
                 stacklevel=3,
             )
-        # Turn-level pooling, non-token CISPO, and per-turn advantages at
-        # trajectory level (Liger's sequence level takes one advantage per
-        # sequence) have no fused Liger kernel; those combinations run the
-        # standard path, which is always memory-bounded via the
-        # fused-linear-logprob path.
-        self._liger_level_supported = (
-            self.importance_sampling_level != "turn"
-            and not (loss_type == "cispo" and self.importance_sampling_level != "token")
-            and not (
-                self.importance_sampling_level == "trajectory"
-                and self.advantage_granularity == "turn"
-            )
-        )
         self._loss_fn = self._resolve_standard_loss_fn()
 
-    def _setup_liger_objective(self, use_kl_advantage_shaping: bool) -> None:
-        """Warn about objective settings the Liger kernel drops, once ``use_liger_loss`` is final.
+    def _liger_loss_blocker(
+        self,
+        records_sampling_supports: bool,
+        reweights_tokens: bool,
+        advantage_granularity: str,
+    ) -> str | None:
+        """Why the fused Liger loss cannot serve an update at these settings.
 
-        :param use_kl_advantage_shaping: Whether KL advantage shaping was requested.
-        :type use_kl_advantage_shaping: bool
+        :param records_sampling_supports: The update carries vLLM sampling supports.
+        :type records_sampling_supports: bool
+        :param reweights_tokens: The update weights tokens by vLLM sampling
+            log-probs or off-policy masks.
+        :type reweights_tokens: bool
+        :param advantage_granularity: Configured granularity, or ``turn`` for a
+            batch of per-turn advantages.
+        :type advantage_granularity: str
+        :return: :func:`liger_loss_blocker` of the settings, or ``None``.
+        :rtype: str | None
         """
-        if self.use_liger_loss and not self._liger_level_supported:
-            granularity = (
-                " with advantage_granularity='turn'"
-                if self.importance_sampling_level == "trajectory"
-                and self.advantage_granularity == "turn"
-                else ""
-            )
-            warnings.warn(
-                f"use_liger_loss=True has no fused {self.loss_type} kernel at "
-                f"importance_sampling_level='{self.importance_sampling_level}'"
-                f"{granularity}; updates use the standard PyTorch path.",
-                stacklevel=3,
-            )
-        if self.use_liger_loss and use_kl_advantage_shaping:
-            warnings.warn(
-                "use_kl_advantage_shaping is not supported with use_liger_loss=True; "
-                "disabling KL advantage shaping.",
-                stacklevel=3,
-            )
-            use_kl_advantage_shaping = False
-        self.use_kl_advantage_shaping = use_kl_advantage_shaping
+        return liger_loss_blocker(
+            self.loss_type,
+            self.importance_sampling_level,
+            records_sampling_supports,
+            self.use_kl_advantage_shaping,
+            self.final_logit_softcap,
+            reweights_tokens,
+            advantage_granularity,
+        )
+
+    def _estimator_algorithm(self) -> Algorithm:
+        """Objective the memory estimator and Liger rules key this run on.
+
+        :return: :attr:`loss_type`.
+        :rtype: Algorithm
+        """
+        return self.loss_type
+
+    def _liger_loss_layout(self) -> tuple[bool, bool]:
+        """Whether the batches the memory estimate sizes run the fused Liger loss, and on whole sequences.
+
+        :return: ``(liger_loss, whole_sequence)``: :func:`liger_whole_sequence_loss`
+            at the configured importance-sampling level.
+        :rtype: tuple[bool, bool]
+        """
+        return self.liger_loss, self.liger_loss and liger_whole_sequence_loss(
+            self.loss_type, self.importance_sampling_level
+        )
+
+    def _config_liger_loss_blocker(self) -> str | None:
+        """Why the configured objective cannot run the fused Liger loss.
+
+        Non-colocated rollouts carry sampling supports per batch.
+
+        :return: :func:`liger_loss_blocker` of the config, or ``None``.
+        :rtype: str | None
+        """
+        return self._liger_loss_blocker(
+            self._config_records_sampling_supports(),
+            self._config_reweights_tokens(),
+            self.advantage_granularity,
+        )
+
+    def _config_reweights_tokens(self) -> bool:
+        """Whether the update weights tokens by the vLLM correction or off-policy masks.
+
+        :return: The vLLM correction is on or an off-policy mask is set.
+        :rtype: bool
+        """
+        return self.vllm_importance_sampling_correction or self._masks_off_policy_tokens
 
     def _setup_generation(
         self,
@@ -2599,96 +2581,6 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                 else support_ids[torch.as_tensor(minibatch_idxs)],
             )
 
-    @property
-    def _liger_path_selected(self) -> bool:
-        """Whether this run's configuration puts updates on the fused Liger kernel.
-
-        The vLLM sampling-mismatch correction is fused into the kernel at
-        token-level IS (via ``vllm_is_ratio``); at turn/trajectory level the
-        per-token reweight cannot be pooled into the surrogate, so a run that
-        enables the correction runs the standard path throughout — rather than
-        alternating with the fused path as batches happen to carry sampling
-        log-probs, which would change the meaning of the reported auxiliary
-        scalar from update to update. The off-policy token and sequence masks
-        ride the same per-token weight and route the same way.
-
-        :return: ``True`` when updates run the fused kernel.
-        :rtype: bool
-        """
-        if not self.use_liger_loss or not self._liger_level_supported:
-            return False
-        return self.importance_sampling_level == "token" or not (
-            self.vllm_importance_sampling_correction or self._masks_off_policy_tokens
-        )
-
-    def _use_liger_path(self) -> bool:
-        """Whether to run the fused Liger kernel, warning once when it is bypassed.
-
-        :return: ``True`` when updates run the fused kernel.
-        :rtype: bool
-        """
-        if self.use_liger_loss and not self._liger_path_selected:
-            self._warn_liger_path_bypassed()
-        return self._liger_path_selected
-
-    def _warn_liger_path_bypassed(self) -> None:
-        """Warn once that the requested fused kernel cannot serve this run.
-
-        :return: None
-        :rtype: None
-        """
-        if not self._liger_level_supported:
-            # __init__ warns that this level has no fused kernel.
-            return
-        if not self._is_correction_liger_warned:
-            warnings.warn(
-                "use_liger_loss=True fuses the vLLM sampling-mismatch "
-                "correction and the off-policy masks only at token-level "
-                "importance sampling; "
-                f"importance_sampling_level='{self.importance_sampling_level}' "
-                "uses the standard PyTorch path. Set "
-                "vllm_importance_sampling_correction=False and leave "
-                "off_policy_token_mask_bounds / "
-                "off_policy_sequence_mask_threshold unset to run the fused "
-                "kernel.",
-                stacklevel=2,
-            )
-            self._is_correction_liger_warned = True
-
-    def _warn_per_token_trajectory_liger_bypass(self) -> None:
-        """Warn once that a batch's per-turn advantages run the standard path.
-
-        :return: None
-        :rtype: None
-        """
-        if self._is_per_token_trajectory_liger_warned:
-            return
-        warnings.warn(
-            "use_liger_loss=True has no fused kernel for per-turn advantages at "
-            f"importance_sampling_level='{self.importance_sampling_level}'; "
-            "batches that advantage_granularity='auto' resolves to turn "
-            "advantages use the standard PyTorch path. Set "
-            "advantage_granularity='trajectory' to keep every update fused.",
-            stacklevel=3,
-        )
-        self._is_per_token_trajectory_liger_warned = True
-
-    def _warn_support_liger_bypass(self) -> None:
-        """Warn once that batches with sampling supports run the standard path.
-
-        :return: None
-        :rtype: None
-        """
-        if self._is_support_liger_warned:
-            return
-        warnings.warn(
-            "use_liger_loss=True has no fused GRPO kernel that normalizes over "
-            "vLLM's sampling support; batches whose rollouts recorded one (any "
-            "top_k > 0 rollout) use the standard PyTorch path.",
-            stacklevel=3,
-        )
-        self._is_support_liger_warned = True
-
     def _objective_loss(
         self,
         batch_ids: torch.Tensor,
@@ -2704,8 +2596,9 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Run the configured objective on one minibatch.
 
-        Uses the fused Liger kernel when supported, otherwise the standard
-        loss function at the configured importance-sampling level.
+        Runs the fused Liger kernel when ``liger_loss`` is set and the batch
+        allows it, otherwise the standard loss function at the configured
+        importance-sampling level.
 
         :param old_log_probs: Behaviour-policy log-probs, or ``None`` to use
             this forward's detached log-probs (an importance ratio of exactly 1
@@ -2716,24 +2609,27 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         :type sampled_rows: torch.Tensor | None
         :param support_ids: ``(B, seq_len-1, K)`` sampling supports, or
             ``None``. Liger's GRPO kernel normalizes over the full vocabulary,
-            so a batch with supports runs the standard path.
+            so a batch with supports runs the standard loss.
         :type support_ids: torch.Tensor | None
         :return: Loss, KL, clip fraction, and detached policy log-probs.
         :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+        :raises ValueError: If ``liger_loss`` is set and the batch blocks the
+            fused loss at the configured advantage granularity.
         """
-        # Liger's sequence level takes one advantage per sequence; per-turn
-        # advantages from advantage_granularity="auto" run the standard path.
-        per_token_trajectory = (
-            self.importance_sampling_level == "trajectory"
-            and advantages.shape == action_mask.shape
-        )
-        use_liger_path = self._use_liger_path()
-        if use_liger_path and per_token_trajectory:
-            self._warn_per_token_trajectory_liger_bypass()
-        if use_liger_path and support_ids is not None:
-            self._warn_support_liger_bypass()
-            use_liger_path = False
-        if use_liger_path and not per_token_trajectory:
+        supports = support_ids is not None
+        per_turn_advantages = advantages.shape == action_mask.shape
+        if self.liger_loss and self._liger_serves_batch(
+            self._liger_loss_blocker(
+                supports,
+                sampling_log_probs is not None or self._masks_off_policy_tokens,
+                "turn" if per_turn_advantages else self.advantage_granularity,
+            ),
+            self._liger_loss_blocker(
+                self._config_records_sampling_supports(),
+                self._config_reweights_tokens(),
+                self.advantage_granularity,
+            ),
+        ):
             return self._liger_loss(
                 batch_ids,
                 action_mask,
@@ -2919,7 +2815,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         if sampling_log_probs is not None:
             # Truncated IS: reweight the policy term by the detached, clamped
             # trainer/vLLM probability ratio *before* the KL penalty, matching
-            # the fused Liger kernel so use_liger_loss is a pure perf toggle.
+            # the fused Liger kernel.
             with torch.no_grad():
                 mask_f = mask.to(loss.dtype)
                 is_ratio = torch.exp(
@@ -3053,9 +2949,8 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Run the fused Liger loss inside the activation-offload context.
 
-        The fused path is the whole gradient-bearing forward when
-        ``use_liger_loss=True``, so ``activation_offload`` reaches the training
-        forward only here.
+        The fused path is the whole gradient-bearing forward of a Liger
+        batch, so ``activation_offload`` reaches that forward only here.
 
         :param batch_ids: Input token IDs.
         :type batch_ids: torch.Tensor
@@ -3127,26 +3022,17 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             log-probs from the same hidden states.
         :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
         """
-        if not HAS_LIGER_KERNEL:
-            msg = (
-                "Liger loss was requested but `liger-kernel` is not available. "
-                "Set use_liger_loss=False."
-            )
-            raise ImportError(msg)
-
-        # Resolve Liger API parameters from the loss type + level.
-        # ``_objective_loss`` only routes here for Liger-supported combinations
-        # (grpo @ token/trajectory, cispo @ token); turn-level and GSPO with
-        # per-token advantages never reach this.
+        # ``_objective_loss`` routes here only where :func:`liger_loss_blocker`
+        # passes: grpo at token or trajectory level, gspo at trajectory level
+        # with one advantage per sequence, cispo at token level.
         importance_sampling_level = self.importance_sampling_level
         if self.loss_type == "cispo":
             objective = "cispo"
-            importance_sampling_level = "token"
             # Liger CISPO clamps importance weights against an *absolute* upper
             # bound (epsilon_high = clip_coef_max), not an offset from 1.0.
             epsilon_low = 1.0 - self.clip_coef_min  # unused by Liger CISPO
             epsilon_high = self.clip_coef_max
-        else:  # "grpo" objective (token or trajectory/GSPO level)
+        else:
             objective = "grpo"
             epsilon_low = 1.0 - self.clip_coef_min
             epsilon_high = self.clip_coef_max - 1.0
@@ -3245,7 +3131,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                 if old_log_probs is not None
                 else None
             )
-            chunk_size = resolve_chunk_rows(head_w.shape[0], self.chunk_rows)
+            chunk_size = resolve_chunk_rows(head_w.shape[0])
         else:
             # Trajectory-level (GSPO): keep the (B, L) layout and one-sequence-
             # per-chunk granularity (chunk_size=1 over the batch dim). Liger
@@ -3268,8 +3154,6 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                     head_b,
                     target_ids,
                     temperature=self.temperature,
-                    cast_to_fp32=self.cast_logprobs_to_fp32,
-                    chunk_rows=self.chunk_rows,
                     logit_bias=logit_bias,
                 )
             # Liger runs only without a softcap, so the logit bias folds into
@@ -3279,10 +3163,9 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                 head_b = logit_bias if head_b is None else head_b + logit_bias
             # vLLM sampling-mismatch correction (token-level IS only): the
             # detached, upper-clamped trainer/vLLM ratio is token-flattened and
-            # fused into the kernel. Trajectory level (GSPO) routes the
-            # correction to the standard path via ``_use_liger_path``. The
-            # off-policy masks ride the same per-token weight for the policy
-            # term and reach the KL term through its reference.
+            # fused into the kernel. The off-policy masks ride the same
+            # per-token weight for the policy term and reach the KL term
+            # through its reference.
             old_or_policy_log_probs = (
                 policy_log_probs if old_log_probs is None else old_log_probs
             )

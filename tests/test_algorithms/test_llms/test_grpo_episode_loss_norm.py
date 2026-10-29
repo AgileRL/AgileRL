@@ -156,8 +156,7 @@ def _probe_policy_weights(
     monkeypatch.setattr(agent, "_backward_pass", accumulate)
     monkeypatch.setattr(agent, "_balanced_segment_rows", recording_segment_rows)
     if fused:
-        agent.use_liger_loss = True
-        monkeypatch.setattr(grpo_module, "HAS_LIGER_KERNEL", True)
+        agent.liger_loss = True
         monkeypatch.setattr(_ProbeFusedKernel, "loss_types", [])
         monkeypatch.setattr(_ProbeFusedKernel, "inputs", [])
         monkeypatch.setattr(grpo_module, KERNEL_NAME, _ProbeFusedKernel, raising=False)

@@ -32,8 +32,6 @@ class TestTrainerAllocatorSlack:
         pool = formulas.fsdp_gather_pool_params(
             counts,
             QWEN_05B,
-            fsdp.wrap_every_n_blocks,
-            fsdp.prefetch_units,
             fsdp.ep,
             4,
         )

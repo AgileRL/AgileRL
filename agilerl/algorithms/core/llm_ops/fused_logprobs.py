@@ -24,7 +24,6 @@ from agilerl.distributed import materialize_dtensors
 def fp32_lm_head_operands(
     head_w: torch.Tensor,
     head_b: torch.Tensor | None,
-    cast_to_fp32: bool,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Upcast the lm_head for one chunk loop, hoisted out of the loop body.
 
@@ -36,12 +35,10 @@ def fp32_lm_head_operands(
     :type head_w: torch.Tensor
     :param head_b: ``(V,)`` or ``None``.
     :type head_b: torch.Tensor | None
-    :param cast_to_fp32: whether the loop runs its matmul in fp32.
-    :type cast_to_fp32: bool
     :return: The head operands to pass to every chunk.
     :rtype: tuple[torch.Tensor, torch.Tensor | None]
     """
-    if not cast_to_fp32 or head_w.dtype == torch.float32:
+    if head_w.dtype == torch.float32:
         return head_w, head_b
     bias = head_b.float() if head_b is not None else None
     return head_w.float(), bias
@@ -89,11 +86,10 @@ def _fused_logprob_chunk(
     head_b: torch.Tensor | None,
     target_chunk: torch.Tensor,
     temperature: float,
-    cast_to_fp32: bool,
     softcap: float | None,
     logit_bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Per-token logprobs for one flat ``(chunk_rows, H)`` slab of hidden states.
+    """Per-token fp32 logprobs for one flat ``(chunk_rows, H)`` slab of hidden states.
 
     Functional (no in-place ops) so it is safe under both ``torch.compile`` and
     the autograd recompute in :class:`FusedLinearLogProbsFunction`. The
@@ -110,10 +106,6 @@ def _fused_logprob_chunk(
     :type target_chunk: torch.Tensor
     :param temperature: logits divided by this before log_softmax (skip at 1.0).
     :type temperature: float
-    :param cast_to_fp32: upcast ``h_chunk`` so the matmul and the reduction run
-        in fp32; the head is expected to arrive fp32 already
-        (:func:`fp32_lm_head_operands`).
-    :type cast_to_fp32: bool
     :param softcap: squash logits to ``softcap * tanh(logits / softcap)`` before
         the temperature, as the model's own head does; ``None`` skips it.
     :type softcap: float | None
@@ -123,12 +115,11 @@ def _fused_logprob_chunk(
     :return: ``(chunk_rows,)`` per-token logprobs.
     :rtype: torch.Tensor
     """
-    if cast_to_fp32:
-        h_chunk = h_chunk.float()
+    h_chunk = h_chunk.float()
     if h_chunk.dtype != head_w.dtype:
-        # Chunk-tiling callers upcast the head once ahead of their loop, so this
-        # only fires for a direct call or an fp16 checkpoint under bf16 autocast
-        # (fp32 hidden, fp16 head). It copies the whole ``(V, H)`` head.
+        # Chunk-tiling callers upcast the head once ahead of their loop
+        # (fp32_lm_head_operands), so this only fires for a direct
+        # call. It copies the whole ``(V, H)`` head.
         compute_dtype = torch.promote_types(h_chunk.dtype, head_w.dtype)
         h_chunk = h_chunk.to(compute_dtype)
         head_w = head_w.to(compute_dtype)
@@ -152,7 +143,6 @@ def support_logprob_chunk(
     head_b: torch.Tensor | None,
     target_chunk: torch.Tensor,
     temperature: float,
-    cast_to_fp32: bool,
     softcap: float | None,
     support_chunk: torch.Tensor,
     logit_bias: torch.Tensor | None = None,
@@ -167,7 +157,7 @@ def support_logprob_chunk(
     :param h_chunk: ``(n, H)`` hidden states.
     :type h_chunk: torch.Tensor
     :param head_w: ``(V, H)`` in the model's dtype; gathered rows are upcast
-        when ``cast_to_fp32`` is set.
+        to fp32.
     :type head_w: torch.Tensor
     :param head_b: ``(V,)`` or ``None``.
     :type head_b: torch.Tensor | None
@@ -175,8 +165,6 @@ def support_logprob_chunk(
     :type target_chunk: torch.Tensor
     :param temperature: logits divided by this before normalizing (skip at 1.0).
     :type temperature: float
-    :param cast_to_fp32: run the dot products and the reduction in fp32.
-    :type cast_to_fp32: bool
     :param softcap: final-logit softcap of the model's head, or ``None``.
     :type softcap: float | None
     :param support_chunk: ``(n, K)`` support token ids, ``-1`` padded, with a
@@ -190,14 +178,8 @@ def support_logprob_chunk(
     present = support_chunk >= 0
     ids = support_chunk.long().clamp(min=0)
     matches = present & (ids == target_chunk.unsqueeze(-1))
-    rows = head_w[ids]
-    if cast_to_fp32:
-        h_chunk = h_chunk.float()
-        rows = rows.float()
-    compute_dtype = torch.promote_types(h_chunk.dtype, rows.dtype)
-    logits = torch.bmm(
-        rows.to(compute_dtype), h_chunk.to(compute_dtype).unsqueeze(-1)
-    ).squeeze(-1)
+    rows = head_w[ids].float()
+    logits = torch.bmm(rows, h_chunk.float().unsqueeze(-1)).squeeze(-1)
     if head_b is not None:
         logits = logits + head_b[ids].to(logits.dtype)
     if softcap is not None:
@@ -268,9 +250,9 @@ def row_chunks(
     return list(rows.split(step)) if rows.numel() else []
 
 
-# torch.compile cache for ``_fused_logprob_chunk`` (CUDA-only; any failure
-# latches ``disabled`` and the eager path is used for the rest of the process).
-_FUSED_LOGPROB_COMPILE_STATE: dict[str, Any] = {"fn": None, "disabled": False}
+# torch.compile cache for ``_fused_logprob_chunk`` (CUDA-only; compile
+# failures propagate).
+_FUSED_LOGPROB_COMPILE_STATE: dict[str, Any] = {"fn": None}
 
 
 def _fused_logprob_chunk_dispatch(
@@ -280,11 +262,10 @@ def _fused_logprob_chunk_dispatch(
     head_b: torch.Tensor | None,
     target_chunk: torch.Tensor,
     temperature: float,
-    cast_to_fp32: bool,
     softcap: float | None,
     logit_bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Run :func:`_fused_logprob_chunk`, compiled on CUDA with eager fallback."""
+    """Run :func:`_fused_logprob_chunk`, compiled on CUDA."""
     state = _FUSED_LOGPROB_COMPILE_STATE
     args = (
         h_chunk,
@@ -292,20 +273,14 @@ def _fused_logprob_chunk_dispatch(
         head_b,
         target_chunk,
         temperature,
-        cast_to_fp32,
         softcap,
         logit_bias,
     )
-    if device.type != "cuda" or state["disabled"]:
+    if device.type != "cuda":
         return _fused_logprob_chunk(*args)
     if state["fn"] is None:
         state["fn"] = torch.compile(_fused_logprob_chunk, dynamic=True)
-    try:
-        return state["fn"](*args)
-    except Exception:
-        # Triton/backend failure — drop to eager for the rest of the process.
-        state["disabled"] = True
-        return _fused_logprob_chunk(*args)
+    return state["fn"](*args)
 
 
 def scored_position_index(score_mask: torch.Tensor) -> torch.Tensor:
@@ -331,7 +306,6 @@ def fused_linear_logprobs_chunked(
     head_b: torch.Tensor | None,
     target_ids: torch.Tensor,
     temperature: float = 1.0,
-    cast_to_fp32: bool = True,
     *,
     chunk_rows: int,
     softcap: float | None = None,
@@ -357,9 +331,6 @@ def fused_linear_logprobs_chunked(
     :type target_ids: torch.Tensor
     :param temperature: logits divided by this before log_softmax (skipped at 1.0).
     :type temperature: float, optional
-    :param cast_to_fp32: run the per-chunk matmul and reduction in fp32, then
-        cast back.
-    :type cast_to_fp32: bool, optional
     :param chunk_rows: rows of the flattened ``(B*T)`` workspace per iteration.
     :type chunk_rows: int
     :param softcap: final-logit softcap of the model's head, or ``None``.
@@ -392,16 +363,13 @@ def fused_linear_logprobs_chunked(
                     full_bias,
                     flat_targets[rows],
                     temperature,
-                    cast_to_fp32,
                     softcap,
                     flat_support[rows],
                     logit_bias,
                 ).to(orig_dtype)
         vocab_chunks = row_chunks(vocab_rows, N, chunk_rows)
         if vocab_chunks:
-            compute_w, compute_b = fp32_lm_head_operands(
-                full_weight, full_bias, cast_to_fp32
-            )
+            compute_w, compute_b = fp32_lm_head_operands(full_weight, full_bias)
             for rows in vocab_chunks:
                 out[rows] = _fused_logprob_chunk_dispatch(
                     hidden.device,
@@ -410,7 +378,6 @@ def fused_linear_logprobs_chunked(
                     compute_b,
                     flat_targets[rows],
                     temperature,
-                    cast_to_fp32,
                     softcap,
                     logit_bias,
                 ).to(orig_dtype)
@@ -516,7 +483,6 @@ class FusedLinearLogProbsFunction(torch.autograd.Function):
         head_b: torch.Tensor | None,
         target_ids: torch.Tensor,
         temperature: float,
-        cast_to_fp32: bool,
         chunk_rows: int,
         softcap: float | None,
         support_ids: torch.Tensor | None = None,
@@ -529,7 +495,6 @@ class FusedLinearLogProbsFunction(torch.autograd.Function):
                 head_b,
                 target_ids,
                 temperature=temperature,
-                cast_to_fp32=cast_to_fp32,
                 chunk_rows=chunk_rows,
                 softcap=softcap,
                 support_ids=support_ids,
@@ -539,7 +504,6 @@ class FusedLinearLogProbsFunction(torch.autograd.Function):
             hidden, head_w, head_b, target_ids, support_ids, logit_bias
         )
         ctx.temperature = temperature
-        ctx.cast_to_fp32 = cast_to_fp32
         ctx.chunk_rows = chunk_rows
         ctx.softcap = softcap
         ctx.needs_hidden_grad = hidden.requires_grad
@@ -563,7 +527,6 @@ class FusedLinearLogProbsFunction(torch.autograd.Function):
         N = flat_h.shape[0]
         options = {
             "temperature": ctx.temperature,
-            "cast_to_fp32": ctx.cast_to_fp32,
             "softcap": ctx.softcap,
             "logit_bias": logit_bias,
         }
@@ -605,9 +568,7 @@ class FusedLinearLogProbsFunction(torch.autograd.Function):
             if vocab_chunks:
                 # Grad buffers above stay in the head's own dtype; the
                 # full-vocab recompute runs against one hoisted fp32 copy of it.
-                compute_w, compute_b = fp32_lm_head_operands(
-                    full_weight, full_bias, ctx.cast_to_fp32
-                )
+                compute_w, compute_b = fp32_lm_head_operands(full_weight, full_bias)
                 chunks += [
                     (
                         rows,
@@ -643,7 +604,6 @@ class FusedLinearLogProbsFunction(torch.autograd.Function):
             grad_hidden_out,
             grad_weight,
             grad_bias,
-            None,
             None,
             None,
             None,

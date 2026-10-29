@@ -15,7 +15,6 @@ import math
 from collections.abc import Callable
 from typing import Any
 
-import numpy as np
 import pytest
 import torch
 
@@ -25,6 +24,7 @@ pytest.importorskip("peft", reason="LLM tests require peft.")
 from agilerl import HAS_LIGER_KERNEL
 from agilerl.algorithms import grpo as grpo_module
 from agilerl.algorithms.grpo import GRPO
+from tests.test_algorithms.test_llms.llm_helpers import create_module
 from tests.test_algorithms.test_llms.segment_helpers import (
     EPISODE_SEGMENTS,
     segment_experiences,
@@ -37,6 +37,7 @@ from tests.test_algorithms.test_llms.test_grpo_off_policy_masks import (
 from tests.test_algorithms.test_llms.test_grpo_old_logprobs import (
     PAD_TOKEN_ID,
     PROMPT_LEN,
+    VOCAB,
     _make_grpo,
     _record_step_gradients,
 )
@@ -136,9 +137,9 @@ def _sampling_logps(agent: GRPO) -> list[torch.Tensor]:
 
 
 def _learn(
-    monkeypatch: pytest.MonkeyPatch, use_liger_loss: bool, **overrides: Any
+    monkeypatch: pytest.MonkeyPatch, liger_loss: bool, **overrides: Any
 ) -> tuple[GRPO, dict[str, float], list[dict[str, torch.Tensor]]]:
-    agent = _make_agent(use_liger_loss=use_liger_loss, **overrides)
+    agent = _make_agent(liger_loss=liger_loss, **overrides)
     sampling_logps = _sampling_logps(agent)
     steps = _record_step_gradients(agent, monkeypatch)
     metrics = agent.learn(_experiences(), sampling_logps=sampling_logps)
@@ -152,8 +153,8 @@ def _learn_both_paths(
 ) -> list[tuple[GRPO, dict[str, float], list[dict[str, torch.Tensor]]]]:
     """Standard then fused: each agent, its learn metrics and its optimizer-step gradients."""
     runs = []
-    for use_liger_loss in (False, True):
-        agent = make_agent(use_liger_loss)
+    for liger_loss in (False, True):
+        agent = make_agent(liger_loss)
         steps = _record_step_gradients(agent, monkeypatch)
         runs.append((agent, learn(agent), steps))
     return runs
@@ -229,17 +230,17 @@ class TestGRPOLearnLigerParity:
 
         # Act
         standard_agent, standard, standard_steps = _learn(
-            monkeypatch, use_liger_loss=False, **overrides
+            monkeypatch, liger_loss=False, **overrides
         )
         fused_agent, fused, fused_steps = _learn(
-            monkeypatch, use_liger_loss=True, **overrides
+            monkeypatch, liger_loss=True, **overrides
         )
 
-        # Assert: token-level GRPO and CISPO stay on the fused kernel. GSPO
-        # leaves the masks unset and stays there too.
+        # Assert: the standard agent runs standard; the fused agent runs fused.
+        # GSPO leaves the masks unset.
         masks_apply = masks == "masked" and objective != "gspo"
-        assert standard_agent._liger_path_selected is False
-        assert fused_agent._liger_path_selected is True
+        assert standard_agent.liger_loss is False
+        assert fused_agent.liger_loss is True
         assert 0.0 < standard["clipfrac"] < 1.0
         if objective == "gspo":
             assert standard_agent.off_policy_token_mask_bounds is None
@@ -272,8 +273,8 @@ class TestGRPOLearnLigerParity:
         (_, standard, standard_steps), (fused_agent, fused, fused_steps) = (
             _learn_both_paths(
                 monkeypatch,
-                lambda use_liger_loss: _make_agent(
-                    use_liger_loss=use_liger_loss,
+                lambda liger_loss: _make_agent(
+                    liger_loss=liger_loss,
                     advantage_granularity="turn",
                     **OBJECTIVES[objective],
                 ),
@@ -286,7 +287,46 @@ class TestGRPOLearnLigerParity:
         )
 
         # Assert
-        assert fused_agent._liger_path_selected is True
+        assert fused_agent.liger_loss is True
+        _assert_same_update(fused, fused_steps, standard, standard_steps)
+
+    @pytest.mark.parametrize(
+        "objective",
+        [{"loss_type": "gspo"}, {"importance_sampling_level": "trajectory"}],
+        ids=["gspo", "grpo-trajectory"],
+    )
+    def test_trajectory_level_matches_the_standard_learn(
+        self, monkeypatch: pytest.MonkeyPatch, objective: dict[str, str]
+    ) -> None:
+        # Arrange: no rollout log-probs, so every batch runs the fused kernel.
+        liger_calls: list[int] = []
+
+        def make_agent(liger_loss: bool) -> GRPO:
+            agent = _make_agent(
+                liger_loss=liger_loss,
+                old_logprobs_source="trainer",
+                **OFF_POLICY_MASKS["unmasked"],
+                **objective,
+            )
+            fused_loss = agent._liger_loss
+
+            def recording_liger_loss(*args: Any, **kwargs: Any) -> Any:
+                liger_calls.append(1)
+                return fused_loss(*args, **kwargs)
+
+            monkeypatch.setattr(agent, "_liger_loss", recording_liger_loss)
+            return agent
+
+        # Act
+        (_, standard, standard_steps), (fused_agent, fused, fused_steps) = (
+            _learn_both_paths(
+                monkeypatch, make_agent, lambda agent: agent.learn(_experiences())
+            )
+        )
+
+        # Assert
+        assert fused_agent.importance_sampling_level == "trajectory"
+        assert len(liger_calls) == NUM_ROWS // 2
         _assert_same_update(fused, fused_steps, standard, standard_steps)
 
     @pytest.mark.parametrize("objective", ["grpo", "cispo"])
@@ -294,9 +334,9 @@ class TestGRPOLearnLigerParity:
         self, monkeypatch: pytest.MonkeyPatch, objective: str
     ) -> None:
         # Arrange: four episodes split into six segment rows, two optimizer steps.
-        def make_agent(use_liger_loss: bool) -> GRPO:
+        def make_agent(liger_loss: bool) -> GRPO:
             agent = _make_grpo(
-                use_liger_loss=use_liger_loss,
+                liger_loss=liger_loss,
                 mini_batch_size=2,
                 **OBJECTIVES[objective],
             )
@@ -321,8 +361,7 @@ class TestGRPOLearnLigerParity:
     def test_the_default_loss_norm_matches_the_standard_learn(
         self, monkeypatch: pytest.MonkeyPatch, objective: str, mini_batch_size: int
     ) -> None:
-        # Arrange: one, two or four 2-row micro-batches per optimizer step;
-        # unmasked, so GSPO's trajectory level keeps the fused kernel.
+        # Arrange: one, two or four 2-row micro-batches per optimizer step.
         overrides = {
             "mini_batch_size": mini_batch_size,
             **OBJECTIVES[objective],
@@ -331,17 +370,17 @@ class TestGRPOLearnLigerParity:
 
         # Act
         standard_agent, standard, standard_steps = _learn(
-            monkeypatch, use_liger_loss=False, **overrides
+            monkeypatch, liger_loss=False, **overrides
         )
         fused_agent, fused, fused_steps = _learn(
-            monkeypatch, use_liger_loss=True, **overrides
+            monkeypatch, liger_loss=True, **overrides
         )
 
         # Assert
         assert (
             standard_agent.loss_norm == fused_agent.loss_norm == "accumulation_window"
         )
-        assert fused_agent._liger_path_selected is True
+        assert fused_agent.liger_loss is True
         assert len(standard_steps) == NUM_ROWS // mini_batch_size
         _assert_same_update(fused, fused_steps, standard, standard_steps)
 
@@ -359,15 +398,13 @@ class TestGRPOLearnLigerParity:
         }
 
         # Act
-        _, standard, standard_steps = _learn(
-            monkeypatch, use_liger_loss=False, **overrides
-        )
+        _, standard, standard_steps = _learn(monkeypatch, liger_loss=False, **overrides)
         fused_agent, fused, fused_steps = _learn(
-            monkeypatch, use_liger_loss=True, **overrides
+            monkeypatch, liger_loss=True, **overrides
         )
 
         # Assert
-        assert fused_agent._liger_path_selected is True
+        assert fused_agent.liger_loss is True
         assert 0.0 < standard["vllm_is_frac_clamped"] < 1.0
         _assert_same_update(fused, fused_steps, standard, standard_steps)
 
@@ -376,14 +413,19 @@ class TestGRPOLearnLigerParity:
         self, monkeypatch: pytest.MonkeyPatch, objective: str
     ) -> None:
         # Arrange
-        def make_agent(use_liger_loss: bool) -> GRPO:
-            agent = _make_agent(
-                use_liger_loss=use_liger_loss,
-                use_sequence_packing=True,
+        def make_agent(liger_loss: bool) -> GRPO:
+            torch.manual_seed(0)
+            actor_network = create_module(
+                input_size=6, max_tokens=4, vocab_size=VOCAB, device="cpu"
+            )
+            actor_network.config._attn_implementation = "flash_attention_2"
+            return _make_agent(
+                liger_loss=liger_loss,
+                off_policy_token_mask_bounds=None,
+                off_policy_sequence_mask_threshold=None,
+                actor_network=actor_network,
                 **OBJECTIVES[objective],
             )
-            agent.actor.config._attn_implementation = "flash_attention_2"
-            return agent
 
         # Act
         (_, standard, standard_steps), (fused_agent, fused, fused_steps) = (
@@ -401,6 +443,7 @@ class TestGRPOLearnLigerParity:
         _assert_same_update(fused, fused_steps, standard, standard_steps)
 
 
+@pytest.mark.skipif(not HAS_LIGER_KERNEL, reason="liger-kernel is Linux-only.")
 class TestGRPOFusedKernelLossLigerArguments:
     """The Liger loss type, level and divisor each configuration hands the kernel."""
 
@@ -429,7 +472,7 @@ class TestGRPOFusedKernelLossLigerArguments:
         self, recording_kernel: type, loss_type: str, liger_loss_type: str
     ) -> None:
         agent = _make_grpo(
-            loss_type=loss_type, use_liger_loss=True, loss_norm="micro_batch"
+            loss_type=loss_type, liger_loss=True, loss_norm="micro_batch"
         )
 
         args = self._call(agent)
@@ -440,40 +483,3 @@ class TestGRPOFusedKernelLossLigerArguments:
         assert args[IMPORTANCE_SAMPLING_LEVEL_ARG] == "token"
         assert args[NUM_ITEMS_ARG] == pytest.approx(1.0)
         assert torch.allclose(row_weights, torch.full((NUM_ROWS,), 1 / NUM_ROWS))
-
-    def test_gspo_runs_liger_sequence_level_on_the_per_sequence_mean(
-        self, recording_kernel: type
-    ) -> None:
-        agent = _make_grpo(
-            loss_type="gspo",
-            use_liger_loss=True,
-            vllm_importance_sampling_correction=False,
-            loss_norm="micro_batch",
-        )
-
-        args = self._call(agent)
-
-        assert args[LOSS_TYPE_ARG] == "grpo"
-        assert args[IMPORTANCE_SAMPLING_LEVEL_ARG] == "sequence"
-        assert set(args[3].unique().tolist()) <= {0.0, 1.0}
-
-    def test_gspo_window_divides_by_the_window_tokens(
-        self, recording_kernel: type
-    ) -> None:
-        # Arrange: two accumulated micro-batches per optimizer step.
-        agent = _make_grpo(
-            loss_type="gspo",
-            use_liger_loss=True,
-            vllm_importance_sampling_correction=False,
-            loss_norm="accumulation_window",
-        )
-        _, mask = _batch()
-        agent._record_global_window_action_tokens(mask, np.arange(NUM_ROWS))
-
-        # Act
-        args = self._call(agent)
-
-        # Assert: the batch's rows hold 27 action tokens.
-        assert args[LOSS_TYPE_ARG] == "dapo"
-        assert args[IMPORTANCE_SAMPLING_LEVEL_ARG] == "sequence"
-        assert float(args[NUM_ITEMS_ARG]) == 27.0

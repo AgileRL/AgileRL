@@ -9,12 +9,18 @@ from dataclasses import dataclass
 from typing import Any
 
 from agilerl.arena.memory.estimator import RunEstimate, estimate_run
-from agilerl.arena.memory.manifest import device_spec_from_resource_class, lookup_gpu
-from agilerl.arena.memory.resolve.engine import resolve_engine_tensor_parallel
+from agilerl.arena.memory.manifest import (
+    configured_rollout_engines,
+    device_spec_from_resource_class,
+    lookup_gpu,
+)
+from agilerl.arena.memory.resolve.engine import (
+    resolve_engine_tensor_parallel,
+    resolve_rollout_engines_per_agent,
+)
 from agilerl.arena.memory.specs import DeviceSpec, RunConfig
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
 from agilerl.arena.models.manifest import TrainingManifest
-from agilerl.arena.models.training import TrainingSpec
 
 
 @dataclass(frozen=True)
@@ -35,14 +41,15 @@ class TierCheck:
         return self.reason is None
 
 
-def gpus_required(training: TrainingSpec, tensor_parallel_size: int = 1) -> int:
+def gpus_required(manifest: TrainingManifest, tensor_parallel_size: int = 1) -> int:
     """GPUs one node needs: each member's trainers plus its rollout engines.
 
     Each engine occupies ``tensor_parallel_size`` GPUs, matching
-    ``vllm_config.tensor_parallel_size``. ``rollout_engines_per_agent="auto"``
-    needs at least one engine per member.
+    ``vllm_config.tensor_parallel_size``. ``auto`` rollout engines need at
+    least one engine per member.
     """
-    engines = training.rollout_engines_per_agent
+    training = manifest.training
+    engines = configured_rollout_engines(manifest)
     engine_count = 1 if engines == "auto" else engines
     per_member = training.training_gpus_per_agent + engine_count * tensor_parallel_size
     return training.pop_size * per_member
@@ -67,25 +74,28 @@ def engine_width(manifest: TrainingManifest, num_gpus: int, device: DeviceSpec) 
 
 
 def engines_per_member(
-    training: TrainingSpec, num_gpus: int, tensor_parallel_size: int
+    manifest: TrainingManifest, num_gpus: int, tensor_parallel_size: int
 ) -> int:
     """Rollout engines each member starts on ``num_gpus``, as the run splits them.
 
-    :param training: Training section of the manifest.
+    :param manifest: Validated training manifest.
     :param num_gpus: GPUs on the node.
     :param tensor_parallel_size: GPUs per rollout engine.
     :return: Engines per population member.
     :raises ValueError: The node has too few GPUs for the layout.
     """
-    needed = gpus_required(training, tensor_parallel_size)
+    needed = gpus_required(manifest, tensor_parallel_size)
     if num_gpus < needed:
         msg = f"{num_gpus} GPUs, the job needs {needed}"
         raise ValueError(msg)
-    engines = training.rollout_engines_per_agent
-    if engines != "auto":
-        return int(engines)
-    surplus = num_gpus - training.pop_size * training.training_gpus_per_agent
-    return surplus // (training.pop_size * tensor_parallel_size)
+    training = manifest.training
+    return resolve_rollout_engines_per_agent(
+        configured_rollout_engines(manifest),
+        num_gpus,
+        training.pop_size,
+        training.training_gpus_per_agent,
+        tensor_parallel_size,
+    )
 
 
 def check_tiers(
@@ -100,7 +110,6 @@ def check_tiers(
     :param build_config: The manifest's run config on one GPU of a tier, at
         the engine width and engines per member that tier starts.
     """
-    training = manifest.training
     checks = []
     for tier in sorted(tiers, key=lambda t: t["price_per_node_hour"]):
         gpu_type = tier.get("gpu_type")
@@ -113,11 +122,11 @@ def check_tiers(
         device = device_spec_from_resource_class(tier)
         num_gpus = int(tier["num_gpus"])
         width = engine_width(manifest, num_gpus, device)
-        needed = gpus_required(training, width)
+        needed = gpus_required(manifest, width)
         if num_gpus < needed:
             checks.append(TierCheck(tier, f"{num_gpus} GPUs, the job needs {needed}"))
             continue
-        engines = engines_per_member(training, num_gpus, width)
+        engines = engines_per_member(manifest, num_gpus, width)
         config = build_config(device, width, engines)
         estimate = estimate_run(config)
         over = [

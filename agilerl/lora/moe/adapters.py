@@ -13,15 +13,16 @@ import torch.nn as nn
 from peft.tuners.lora.layer import ParamWrapper
 from torch.distributed.tensor import DTensor
 
+from agilerl.arena.memory.formulas import DEFAULT_ROUTED_CHUNK_BYTES
 from agilerl.lora.fused import ROUTING_STATE, uniform_routed_adapter
 from agilerl.lora.moe.grouped_gemm import (
-    ROUTED_EXPERT_CHUNK_BYTES,
     add_grouped_linear,
     counts_list,
     counts_tensor,
     grouped_linear,
     grouped_matmul,
     grouped_operand,
+    pad_lora_rank,
 )
 
 
@@ -120,7 +121,10 @@ def stacked_lora_weights(
     dtype: torch.dtype,
     num_experts: int | None,
 ) -> tuple[torch.Tensor, torch.Tensor] | None:
-    """LoRA A as ``[E, r, in]`` and contiguous B as ``[E, out, r]`` in ``dtype``, or ``None`` for DTensors."""
+    """LoRA A as ``[E, r, in]`` and contiguous B as ``[E, out, r]`` in ``dtype``, or ``None`` for DTensors.
+
+    On the grouped-GEMM path ``r`` is zero-padded to the kernel's alignment.
+    """
     weight_a = wrapper.lora_A[adapter].weight
     weight_b = wrapper.lora_B[adapter].weight
     assert isinstance(weight_a, torch.Tensor)
@@ -146,7 +150,7 @@ def stacked_lora_weights(
         b_grouped = weight_b.view(weight_b.shape[0], rank, experts).permute(2, 0, 1)
     # The multiply stays in the activation dtype. A wider LoRA weight is cast.
     # The permuted B has strides no GEMM accepts; one copy serves every chunk.
-    return (
+    return pad_lora_rank(
         a3.to(dtype=dtype),
         b_grouped.to(dtype=dtype, memory_format=torch.contiguous_format),
     )
@@ -196,7 +200,7 @@ def split_lora_delta(
     offs: torch.Tensor | None = None,
     num_experts: int | None = None,
     destination: torch.Tensor | None = None,
-    chunk_bytes: int = ROUTED_EXPERT_CHUNK_BYTES,
+    chunk_bytes: int = DEFAULT_ROUTED_CHUNK_BYTES,
 ) -> torch.Tensor:
     """Low-rank delta for expert-sorted rows without materializing per-expert full-rank weights.
 

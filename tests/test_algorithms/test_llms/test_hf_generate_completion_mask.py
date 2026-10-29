@@ -44,7 +44,6 @@ def _cpu_algo(cls: type, *, value_head: bool = False, **kwargs: object) -> objec
         "max_output_tokens": 4,
         "max_model_len": 12,
         "wrap": False,
-        "gradient_checkpointing": False,
         "device": "cpu",
     }
     defaults.update(kwargs)

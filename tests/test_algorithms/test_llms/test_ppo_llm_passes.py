@@ -1,7 +1,7 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for the LLM PPO actor and critic passes, fused and split.
+"""Unit tests for the LLM PPO fused actor and critic pass.
 
 Pure CPU on tiny real models in fp32. The reference for each pass pair is one
 forward over the doubled ``[actor rows; critic rows]`` batch with one backward
@@ -11,7 +11,6 @@ of the summed loss.
 from __future__ import annotations
 
 import json
-import logging
 import math
 import sys
 from collections.abc import Iterator
@@ -31,11 +30,8 @@ from peft import LoraConfig
 from torch.utils.checkpoint import checkpoint
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
+from agilerl import HAS_LIGER_KERNEL
 from agilerl.algorithms.ppo_llm import PPO as LLMPPO
-from agilerl.arena.memory.estimator import estimate_training
-from agilerl.arena.memory.resolve.fuse import training_settings_with_fuse
-from agilerl.arena.memory.specs import DeviceSpec
-from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.distributed.fsdp import FSDPConfig
 from agilerl.lora.fused import (
     ROUTING_STATE,
@@ -58,7 +54,6 @@ from tests.test_algorithms.test_llms.llm_helpers import (
 )
 from tests.test_algorithms.test_llms.segment_helpers import (
     action_token_policy_loss,
-    lora_weights,
     record_step_gradients,
     seed_lora_weights,
     use_fake_liger_policy_loss,
@@ -97,6 +92,7 @@ class CheckpointedHiddenStatesModel(DummyHiddenStatesModel):
 
 def make_ppo(
     model_cls: type[DummyHiddenStatesModel] = DummyHiddenStatesModel,
+    attn_implementation: str = "eager",
     **overrides: Any,
 ) -> LLMPPO:
     """Tiny fp32 PPO on CPU whose actor and critic adapters start different."""
@@ -111,10 +107,11 @@ def make_ppo(
         num_attention_heads=4,
     )
     config.intermediate_size = 64
+    model = model_cls(config=config, device="cpu")
+    # The dummy forward ignores attention; set past HF's backend check.
+    model.config._attn_implementation = attn_implementation
     kwargs: dict[str, Any] = {
-        "actor_network": AutoModelForCausalLMWithValueHead(
-            model_cls(config=config, device="cpu")
-        ),
+        "actor_network": AutoModelForCausalLMWithValueHead(model),
         "pad_token_id": PAD_TOKEN_ID,
         "pad_token": "<pad>",
         "batch_size": 2,
@@ -123,10 +120,8 @@ def make_ppo(
         "max_model_len": 12,
         "update_epochs": 1,
         "wrap": False,
-        "gradient_checkpointing": False,
         "calc_position_embeddings": False,
         "device": "cpu",
-        "use_liger_loss": False,
         "lora_config": LoraConfig(
             r=4,
             lora_alpha=8,
@@ -138,6 +133,7 @@ def make_ppo(
         **overrides,
     }
     agent = LLMPPO(**kwargs)
+    agent.liger_loss = False
     with torch.no_grad():
         for name, param in agent.actor.named_parameters():
             if "lora_B" in name:
@@ -250,7 +246,8 @@ class TestPPOCriticValues:
         batch = micro_batch()
 
         # Act
-        value_loss(agent, agent._critic_values(batch["ids"]), batch, "token").backward()
+        _, critic_values = agent._actor_critic_hidden_states(batch["ids"])
+        value_loss(agent, critic_values, batch, "token").backward()
         unset_fused_adapter_routing(agent.actor)
 
         # Assert
@@ -273,7 +270,7 @@ class TestPPOCriticValues:
 
         # Act
         for agent in (eager, recomputed):
-            values = agent._critic_values(batch["ids"])
+            _, values = agent._actor_critic_hidden_states(batch["ids"])
             value_loss(agent, values, batch, "token").backward()
             unset_fused_adapter_routing(agent.actor)
 
@@ -289,147 +286,6 @@ class TestPPOCriticValues:
         for name, grad in eager_grads.items():
             # Same fp32 ops in the same order; recompute is bitwise.
             assert torch.equal(recomputed_grads[name], grad), name
-
-
-class TestPPOSplitPassesMatchDoubledForward:
-    @pytest.mark.parametrize("mode", ["token", "turn"])
-    @pytest.mark.parametrize("vision", [False, True], ids=["text", "vision"])
-    @pytest.mark.parametrize(
-        "model_cls",
-        [DummyHiddenStatesModel, CheckpointedHiddenStatesModel],
-        ids=["eager", "checkpointed"],
-    )
-    def test_losses_and_gradients_match(
-        self, mode: str, vision: bool, model_cls: type[DummyHiddenStatesModel]
-    ) -> None:
-        # Arrange
-        if vision:
-            if model_cls is CheckpointedHiddenStatesModel:
-                pytest.skip("vision model has no checkpointed variant")
-            reference = make_vision_ppo()
-            split = make_vision_ppo()
-            batch, pixel_values, counts = vision_micro_batch()
-        else:
-            reference = make_ppo(model_cls)
-            split = make_ppo(model_cls)
-            batch, pixel_values, counts = micro_batch(), None, None
-
-        # Act
-        log_probs, values = doubled_forward(
-            reference, batch["ids"], pixel_values, counts
-        )
-        reference_loss = policy_loss(reference, log_probs, batch, mode) + value_loss(
-            reference, values, batch, mode
-        )
-        reference_loss.backward()
-        unset_fused_adapter_routing(reference.actor)
-
-        actor_loss = policy_loss(
-            split,
-            split._fused_forward(batch["ids"], pixel_values=pixel_values),
-            batch,
-            mode,
-        )
-        actor_loss.backward()
-        unset_fused_adapter_routing(split.actor)
-        critic_loss = value_loss(
-            split, split._critic_values(batch["ids"], pixel_values), batch, mode
-        )
-        critic_loss.backward()
-        unset_fused_adapter_routing(split.actor)
-
-        # Assert
-        torch.testing.assert_close(
-            actor_loss + critic_loss, reference_loss, rtol=RTOL, atol=ATOL
-        )
-        reference_grads = lora_grads(reference)
-        split_grads = lora_grads(split)
-        assert split_grads.keys() == reference_grads.keys()
-        assert any("critic" in name for name in split_grads)
-        assert any("actor" in name for name in split_grads)
-        for name, grad in reference_grads.items():
-            torch.testing.assert_close(
-                split_grads[name], grad, rtol=RTOL, atol=ATOL, msg=name
-            )
-
-    def test_liger_policy_pass_matches_doubled_forward(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Arrange
-        def hidden_policy_loss(
-            policy_hidden: torch.Tensor,
-            _head_w: torch.Tensor,
-            _head_b: torch.Tensor | None,
-            _target_ids: torch.Tensor,
-            mask: torch.Tensor,
-            *_args: Any,
-            **_kwargs: Any,
-        ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
-            loss = (policy_hidden.pow(2).sum(-1) * mask).sum() / mask.sum()
-            return loss, tuple(loss.detach() for _ in range(5))
-
-        reference = make_ppo()
-        split = make_ppo()
-        use_fake_liger_policy_loss(split, monkeypatch, "agilerl.algorithms.ppo_llm")
-        monkeypatch.setattr(
-            "agilerl.algorithms.ppo_llm.apply_fused_policy_loss", hidden_policy_loss
-        )
-        batch = micro_batch()
-        ids = batch["ids"]
-        rows = ids.shape[0]
-
-        # Act
-        set_fused_adapter_routing(reference.actor, ["actor"] * rows + ["critic"] * rows)
-        with reference._patch_lm_head_to_identity():
-            hidden, _, values = reference.actor(
-                input_ids=ids.repeat(2, 1),
-                attention_mask=attention_mask_from_padded_ids(ids, PAD_TOKEN_ID).repeat(
-                    2, 1
-                ),
-            )
-        reference_policy, _ = hidden_policy_loss(
-            hidden[:rows, :-1], None, None, None, batch["mask"]
-        )
-        reference_loss = reference_policy + value_loss(
-            reference, values[rows:, :-1], batch, "token"
-        )
-        reference_loss.backward()
-        unset_fused_adapter_routing(reference.actor)
-
-        actor_loss, metrics = split._ppo_policy_loss_liger(
-            ids,
-            batch["mask"],
-            batch["old_log_probs"],
-            batch["reference_log_probs"],
-            batch["advantages"],
-            batch["turn_ids"],
-            2,
-            "token",
-        )
-        actor_loss.backward()
-        unset_fused_adapter_routing(split.actor)
-        critic_loss = value_loss(split, split._critic_values(ids), batch, "token")
-        critic_loss.backward()
-        unset_fused_adapter_routing(split.actor)
-
-        # Assert
-        assert set(metrics) == {
-            "kl",
-            "clipfrac",
-            "pg_loss",
-            "entropy",
-            "kl_clamp_frac",
-        }
-        torch.testing.assert_close(
-            actor_loss + critic_loss, reference_loss, rtol=RTOL, atol=ATOL
-        )
-        reference_grads = lora_grads(reference)
-        split_grads = lora_grads(split)
-        assert split_grads.keys() == reference_grads.keys()
-        for name, grad in reference_grads.items():
-            torch.testing.assert_close(
-                split_grads[name], grad, rtol=RTOL, atol=ATOL, msg=name
-            )
 
 
 class TestPPOFusedPassMatchesDoubledForward:
@@ -643,7 +499,6 @@ def fsdp_learn_worker(
     rank: int,
     world_size: int,
     liger: bool,
-    fuse: bool,
 ) -> Any:
     """One FSDP2 rank: learn on its half of :func:`learn_rows` and report step grads."""
     # The default FSDP2 mesh follows the host accelerator (MPS on macOS);
@@ -656,7 +511,6 @@ def fsdp_learn_worker(
         whiten_advantages=False,
         wrap=True,
         fsdp_config=FSDPConfig(optim_cpu_offload=False, param_dtype="float32"),
-        fuse_actor_critic_pass=fuse,
     )
     seed_lora_weights(agent)
     monkeypatch = pytest.MonkeyPatch()
@@ -695,21 +549,16 @@ def record_grad_forwards(agent: LLMPPO) -> list[dict[str, Any]]:
     return forwards
 
 
-FUSE_MODES = pytest.mark.parametrize("fuse", [False, True], ids=["split", "fused"])
-
-
 class TestPPOLearnPasses:
     @pytest.mark.parametrize("liger", [False, True], ids=["standard", "liger"])
-    @FUSE_MODES
     def test_every_gradient_forward_runs_one_micro_batch(
-        self, monkeypatch: pytest.MonkeyPatch, liger: bool, fuse: bool
+        self, monkeypatch: pytest.MonkeyPatch, liger: bool
     ) -> None:
         # Arrange
         agent = make_ppo(
             batch_size=4,
             mini_batch_size=4,
             micro_batch_size_per_gpu=2,
-            fuse_actor_critic_pass=fuse,
         )
         if liger:
             use_fake_liger_policy_loss(agent, monkeypatch, "agilerl.algorithms.ppo_llm")
@@ -718,28 +567,21 @@ class TestPPOLearnPasses:
         # Act
         learn_rows(agent)
 
-        # Assert: split runs an actor and a critic forward of
-        # micro_batch_size_per_gpu rows; fused runs both in one forward.
-        if fuse:
-            assert [f["adapters"] for f in forwards] == [{"actor", "critic"}] * 2
-            assert [f["input_ids"].shape[0] for f in forwards] == [4, 4]
-        else:
-            assert [f["adapters"] for f in forwards] == [{"actor"}, {"critic"}] * 2
-            assert [f["input_ids"].shape[0] for f in forwards] == [2, 2, 2, 2]
+        # Assert: fused runs actor and critic rows in one forward.
+        assert [f["adapters"] for f in forwards] == [{"actor", "critic"}] * 2
+        assert [f["input_ids"].shape[0] for f in forwards] == [4, 4]
 
     @pytest.mark.parametrize("liger", [False, True], ids=["standard", "liger"])
-    @FUSE_MODES
     def test_activation_offload_covers_every_gradient_forward(
-        self, monkeypatch: pytest.MonkeyPatch, liger: bool, fuse: bool
+        self, monkeypatch: pytest.MonkeyPatch, liger: bool
     ) -> None:
         # Arrange
         agent = make_ppo(
             batch_size=4,
             mini_batch_size=4,
             micro_batch_size_per_gpu=2,
-            fuse_actor_critic_pass=fuse,
-            activation_offload=True,
         )
+        agent.activation_offload = True
         if liger:
             use_fake_liger_policy_loss(agent, monkeypatch, "agilerl.algorithms.ppo_llm")
         save_on_cpu = torch.autograd.graph.save_on_cpu
@@ -766,12 +608,11 @@ class TestPPOLearnPasses:
         learn_rows(agent)
 
         # Assert
-        assert depths == [1] * (2 if fuse else 4)
+        assert depths == [1] * 2
 
     @pytest.mark.parametrize("liger", [False, True], ids=["standard", "liger"])
-    @FUSE_MODES
     def test_accumulated_micro_batches_match_one_micro_batch(
-        self, monkeypatch: pytest.MonkeyPatch, liger: bool, fuse: bool
+        self, monkeypatch: pytest.MonkeyPatch, liger: bool
     ) -> None:
         # Arrange: equal action counts per row, so the mean over one 4-row
         # micro-batch equals the mean of four 1-row micro-batch means.
@@ -779,13 +620,11 @@ class TestPPOLearnPasses:
             batch_size=4,
             mini_batch_size=4,
             micro_batch_size_per_gpu=1,
-            fuse_actor_critic_pass=fuse,
         )
         single = make_ppo(
             batch_size=4,
             mini_batch_size=4,
             micro_batch_size_per_gpu=4,
-            fuse_actor_critic_pass=fuse,
         )
         assert accumulated.gradient_accumulation_steps == 4
         assert single.gradient_accumulation_steps == 1
@@ -820,10 +659,9 @@ class TestPPOLearnPasses:
                 single_metrics[key], rel=1e-5, abs=1e-6
             ), key
 
-    @FUSE_MODES
-    def test_vision_passes_each_see_only_their_rows_images(self, fuse: bool) -> None:
+    def test_vision_passes_each_see_only_their_rows_images(self) -> None:
         # Arrange
-        agent = make_vision_ppo(micro_batch_size_per_gpu=2, fuse_actor_critic_pass=fuse)
+        agent = make_vision_ppo(micro_batch_size_per_gpu=2)
         forwards = record_grad_forwards(agent)
         token_ids, action_masks, rewards, turn_ids, pixel_values = vision_episodes()
 
@@ -837,10 +675,7 @@ class TestPPOLearnPasses:
 
         # Assert: each forward runs a micro-batch of rows per routed adapter,
         # with one vision row per placeholder of those rows.
-        if fuse:
-            assert [f["adapters"] for f in forwards] == [{"actor", "critic"}] * 2
-        else:
-            assert [f["adapters"] for f in forwards] == [{"actor"}, {"critic"}] * 2
+        assert [f["adapters"] for f in forwards] == [{"actor", "critic"}] * 2
         for forward in forwards:
             assert forward["input_ids"].shape[0] == 2 * len(forward["adapters"])
             assert forward["pixel_rows"] == int(
@@ -848,16 +683,14 @@ class TestPPOLearnPasses:
             )
 
     @pytest.mark.parametrize("liger", [False, True], ids=["standard", "liger"])
-    @FUSE_MODES
     def test_optimizer_steps_after_the_last_pass_of_each_window(
-        self, monkeypatch: pytest.MonkeyPatch, liger: bool, fuse: bool
+        self, monkeypatch: pytest.MonkeyPatch, liger: bool
     ) -> None:
         # Arrange: two optimizer steps of two micro-batches each.
         agent = make_ppo(
             batch_size=4,
             mini_batch_size=2,
             micro_batch_size_per_gpu=1,
-            fuse_actor_critic_pass=fuse,
         )
         assert agent.gradient_accumulation_steps == 2
         if liger:
@@ -869,23 +702,14 @@ class TestPPOLearnPasses:
         learn_rows(agent)
 
         # Assert
-        actor = frozenset({"actor"})
-        critic = frozenset({"critic"})
-        both = actor | critic
-        window = (
-            [(both, False), (both, True)]
-            if fuse
-            else [(actor, False), (critic, False), (actor, False), (critic, True)]
-        )
+        both = frozenset({"actor", "critic"})
+        window = [(both, False), (both, True)]
         assert backwards == window * 2
         assert len(steps) == 2
         for step in steps:
             assert step.keys() == adapter_lora_names(agent)
 
-    @FUSE_MODES
-    def test_a_row_without_action_tokens_adds_no_loss_or_metrics(
-        self, fuse: bool
-    ) -> None:
+    def test_a_row_without_action_tokens_adds_no_loss_or_metrics(self) -> None:
         """A micro-batch whose every action vLLM forced trains like no row at all."""
         # Arrange
         generator = torch.Generator().manual_seed(2)
@@ -896,10 +720,7 @@ class TestPPOLearnPasses:
         )
         masks = [torch.zeros(1, SEQ_LEN + 1, dtype=torch.bool) for _ in range(2)]
         masks[0][0, 3:] = True
-        agents = [
-            make_ppo(micro_batch_size_per_gpu=1, fuse_actor_critic_pass=fuse)
-            for _ in range(2)
-        ]
+        agents = [make_ppo(micro_batch_size_per_gpu=1) for _ in range(2)]
 
         # Act
         with_forced_row = agents[0].learn((ids, masks, torch.tensor([1.0, 0.0])))
@@ -912,92 +733,61 @@ class TestPPOLearnPasses:
             ), name
 
 
-class TestPPOFusedLearnMatchesSplitLearn:
-    @pytest.mark.parametrize("liger", [False, True], ids=["standard", "liger"])
-    @pytest.mark.parametrize(
-        "model_cls",
-        [DummyHiddenStatesModel, CheckpointedHiddenStatesModel],
-        ids=["eager", "checkpointed"],
-    )
-    # Unclipped norms are about 5.3 (actor) and 7.8 (critic).
-    @pytest.mark.parametrize(
-        "max_grad_norm", [1.0, 6.0], ids=["both_clipped", "critic_clipped"]
-    )
-    def test_metrics_gradients_and_weights_match(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        liger: bool,
-        model_cls: type[DummyHiddenStatesModel],
-        max_grad_norm: float,
-    ) -> None:
-        # Arrange: same seed, so both agents start from the same weights.
-        agents = {
-            fuse: make_ppo(
-                model_cls,
-                batch_size=4,
-                mini_batch_size=4,
-                micro_batch_size_per_gpu=2,
-                max_grad_norm=max_grad_norm,
-                fuse_actor_critic_pass=fuse,
-            )
-            for fuse in (True, False)
-        }
-        if liger:
-            for agent in agents.values():
-                use_fake_liger_policy_loss(
-                    agent, monkeypatch, "agilerl.algorithms.ppo_llm"
-                )
-        steps = {
-            fuse: record_step_gradients(agent, monkeypatch)
-            for fuse, agent in agents.items()
-        }
+def learn_ragged_rows(agent: LLMPPO) -> dict[str, float]:
+    """One learn over four trajectories; the last two tokens of row 1 are padding."""
+    generator = torch.Generator().manual_seed(2)
+    ids = torch.randint(0, PAD_TOKEN_ID, (4, SEQ_LEN + 2), generator=generator)
+    ids[1, -2:] = PAD_TOKEN_ID
+    mask = torch.zeros(4, SEQ_LEN + 1, dtype=torch.bool)
+    mask[:, 3:] = True
+    mask[1, -2:] = False
+    rewards = torch.tensor([1.0, 0.0, 0.5, -1.0])
+    return agent.learn((list(ids.split(1)), list(mask.split(1)), rewards))
+
+
+class TestPPOLearnPaddingStats:
+    def test_packed_forward_runs_without_padding(self) -> None:
+        # Arrange
+        agent = make_ppo(
+            attn_implementation="flex_attention",
+            batch_size=4,
+            mini_batch_size=4,
+            micro_batch_size_per_gpu=2,
+        )
+        forwards = record_grad_forwards(agent)
 
         # Act
-        metrics = {fuse: learn_rows(agent) for fuse, agent in agents.items()}
+        metrics = learn_ragged_rows(agent)
+
+        # Assert: 2 of 32 tokens pad; each packed forward stacks two packed rows.
+        assert metrics["padding_frac_before_packing"] == pytest.approx(2 / 32)
+        assert metrics["padding_frac_after_packing"] == 0.0
+        assert [f["input_ids"].shape for f in forwards] == [
+            torch.Size([2, 14]),
+            torch.Size([2, 16]),
+        ]
+
+    def test_padded_forward_keeps_the_batch_padding(self) -> None:
+        # Arrange
+        agent = make_ppo(batch_size=4, mini_batch_size=4, micro_batch_size_per_gpu=2)
+
+        # Act
+        metrics = learn_ragged_rows(agent)
 
         # Assert
-        assert len(steps[True]) == len(steps[False]) == 1
-        assert steps[True][0].keys() == steps[False][0].keys()
-        assert any("critic" in name for name in steps[True][0])
-        for name, grad in steps[False][0].items():
-            torch.testing.assert_close(
-                steps[True][0][name], grad, rtol=RTOL, atol=ATOL, msg=name
-            )
-        for key in (
-            "loss",
-            "pg_loss",
-            "vf_loss",
-            "kl",
-            "entropy",
-            "clipfrac",
-            "grad_norm_pre",
-            "grad_norm_post",
-            "critic_grad_norm_pre",
-            "critic_grad_norm_post",
-        ):
-            assert metrics[True][key] == pytest.approx(
-                metrics[False][key], rel=1e-5, abs=1e-6
-            ), key
-        split_weights = lora_weights(agents[False])
-        fused_weights = lora_weights(agents[True])
-        assert fused_weights.keys() == split_weights.keys()
-        for name, weight in split_weights.items():
-            torch.testing.assert_close(
-                fused_weights[name], weight, rtol=RTOL, atol=ATOL, msg=name
-            )
+        assert metrics["padding_frac_before_packing"] == pytest.approx(2 / 32)
+        assert metrics["padding_frac_after_packing"] == pytest.approx(2 / 32)
 
 
 class TestPPOLearnMetrics:
-    @FUSE_MODES
     def test_metrics_are_means_of_the_micro_batch_losses(
-        self, monkeypatch: pytest.MonkeyPatch, fuse: bool
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Arrange: one optimizer step of four 1-row micro-batches.
         agent = make_ppo(
             batch_size=4,
             mini_batch_size=4,
             micro_batch_size_per_gpu=1,
-            fuse_actor_critic_pass=fuse,
         )
         policy_loss, policy_outputs = record_outputs(agent._ppo_policy_loss)
         value_loss, value_outputs = record_outputs(agent._ppo_value_loss)
@@ -1035,17 +825,198 @@ def learn_uneven_turns(agent: LLMPPO) -> dict[str, float]:
     )
 
 
+def learn_turns_with_sampling_logps(
+    agent: LLMPPO, multi_turn: bool, sampling_logps: bool
+) -> dict[str, float]:
+    """One learn over four trajectories of one or two turns, with or without vLLM log-probs."""
+    generator = torch.Generator().manual_seed(2)
+    ids = torch.randint(0, PAD_TOKEN_ID, (4, SEQ_LEN + 2), generator=generator)
+    mask = torch.zeros(4, SEQ_LEN + 1, dtype=torch.bool)
+    mask[:, 3:] = True
+    turn_ids = torch.full((4, SEQ_LEN + 1), -1)
+    turn_ids[:, 3:] = 0
+    if multi_turn:
+        turn_ids[:, 5:] = 1
+    rewards = torch.tensor([[1.0, 0.5], [0.0, -1.0], [0.5, 0.0], [-1.0, 0.0]])
+    if not multi_turn:
+        rewards = rewards.sum(dim=-1)
+    action_tokens = int(mask[0].sum())
+    return agent.learn(
+        (list(ids.split(1)), list(mask.split(1)), rewards),
+        turn_ids=turn_ids,
+        sampling_logps=[torch.full((action_tokens,), -3.0)] * 4
+        if sampling_logps
+        else None,
+    )
+
+
+class TestPPOLearnLigerPathSelection:
+    """Each batch's resolved IS level picks the loss path."""
+
+    @pytest.mark.parametrize(
+        ("multi_turn", "sampling_logps", "fused"),
+        [(False, True, True), (True, False, True), (True, True, False)],
+        ids=["token-corrected", "turn-uncorrected", "turn-corrected"],
+    )
+    def test_auto_level_runs_liger_unless_a_turn_batch_reweights_tokens(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        multi_turn: bool,
+        sampling_logps: bool,
+        fused: bool,
+    ) -> None:
+        # Arrange: auto level pools multi-turn batches at turn level.
+        agent = make_ppo(batch_size=4, mini_batch_size=4, micro_batch_size_per_gpu=2)
+        use_fake_liger_policy_loss(agent, monkeypatch, "agilerl.algorithms.ppo_llm")
+        fused_loss, fused_calls = record_calls(action_token_policy_loss)
+        monkeypatch.setattr(
+            "agilerl.algorithms.ppo_llm.apply_fused_policy_loss", fused_loss
+        )
+
+        # Act
+        metrics = learn_turns_with_sampling_logps(agent, multi_turn, sampling_logps)
+
+        # Assert
+        assert agent.importance_sampling_level == "auto"
+        assert len(fused_calls) == (2 if fused else 0)
+        assert math.isfinite(metrics["loss"])
+
+    @pytest.mark.parametrize(
+        ("correction", "sampling_logps", "fused"),
+        [
+            (True, False, True),
+            (False, False, True),
+            (False, True, False),
+            (True, True, False),
+        ],
+        ids=[
+            "uncorrected-batch",
+            "uncorrected-run",
+            "batch-with-sampling-logps",
+            "corrected-batch-with-sampling-logps",
+        ],
+    )
+    def test_explicit_turn_level_falls_back_on_batches_with_sampling_logps(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        correction: bool,
+        sampling_logps: bool,
+        fused: bool,
+    ) -> None:
+        # Arrange
+        agent = make_ppo(
+            batch_size=4,
+            mini_batch_size=4,
+            micro_batch_size_per_gpu=2,
+            importance_sampling_level="turn",
+            vllm_importance_sampling_correction=correction,
+        )
+        use_fake_liger_policy_loss(agent, monkeypatch, "agilerl.algorithms.ppo_llm")
+        fused_loss, fused_calls = record_calls(action_token_policy_loss)
+        monkeypatch.setattr(
+            "agilerl.algorithms.ppo_llm.apply_fused_policy_loss", fused_loss
+        )
+
+        # Act
+        metrics = learn_turns_with_sampling_logps(agent, True, sampling_logps)
+
+        # Assert
+        assert len(fused_calls) == (2 if fused else 0)
+        assert math.isfinite(metrics["loss"])
+
+    def test_explicit_turn_level_raises_when_the_run_reweights_tokens(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange: a colocated run reads sampling log-probs on every batch.
+        agent = make_ppo(
+            batch_size=4,
+            mini_batch_size=4,
+            micro_batch_size_per_gpu=2,
+            importance_sampling_level="turn",
+        )
+        agent.colocated = True
+        agent.vllm_config = VLLMConfig()
+        use_fake_liger_policy_loss(agent, monkeypatch, "agilerl.algorithms.ppo_llm")
+        fused_loss, fused_calls = record_calls(action_token_policy_loss)
+        monkeypatch.setattr(
+            "agilerl.algorithms.ppo_llm.apply_fused_policy_loss", fused_loss
+        )
+
+        # Act / Assert
+        with pytest.raises(
+            ValueError,
+            match="The fused Liger loss cannot serve this batch: the ppo Liger "
+            "kernel weights tokens by vLLM sampling log-probs only at token-level "
+            "importance sampling, not 'turn'",
+        ):
+            learn_turns_with_sampling_logps(agent, True, True)
+        assert fused_calls == []
+
+
+@pytest.mark.skipif(not HAS_LIGER_KERNEL, reason="liger-kernel is Linux-only.")
+class TestPPOPolicyLossLigerFromHidden:
+    """The fused Liger policy loss pools turns and trajectories as the standard loss does."""
+
+    @pytest.mark.parametrize("is_level", ["turn", "trajectory"])
+    def test_loss_and_gradients_match_the_standard_loss(self, is_level: str) -> None:
+        # Arrange
+        agent = make_ppo(
+            importance_sampling_level=is_level,
+            vllm_importance_sampling_correction=False,
+            beta=0.05,
+        )
+        batch = micro_batch()
+        with torch.no_grad():
+            hidden = agent._actor_hidden_states(batch["ids"])
+        standard_hidden = hidden.clone().requires_grad_()
+        fused_hidden = hidden.clone().requires_grad_()
+
+        # Act
+        standard_loss, standard_metrics = agent._ppo_policy_loss(
+            agent._actor_log_probs_from_hidden(standard_hidden, batch["ids"]),
+            batch["mask"],
+            batch["old_log_probs"],
+            batch["reference_log_probs"],
+            batch["advantages"],
+            batch["turn_ids"],
+            2,
+            "turn",
+        )
+        standard_loss.backward()
+        fused_loss, fused_metrics = agent._ppo_policy_loss_liger_from_hidden(
+            fused_hidden,
+            batch["ids"],
+            batch["mask"],
+            batch["old_log_probs"],
+            batch["reference_log_probs"],
+            batch["advantages"],
+            batch["turn_ids"],
+            2,
+            "turn",
+        )
+        fused_loss.backward()
+
+        # Assert
+        assert torch.allclose(fused_loss, standard_loss, rtol=RTOL, atol=ATOL)
+        for key in ("kl", "clipfrac", "pg_loss"):
+            assert float(fused_metrics[key]) == pytest.approx(
+                float(standard_metrics[key]), rel=RTOL, abs=ATOL
+            ), key
+        assert standard_hidden.grad.abs().sum() > 0
+        assert torch.allclose(
+            fused_hidden.grad, standard_hidden.grad, rtol=RTOL, atol=ATOL
+        )
+
+
 class TestPPOLearnTurnCount:
-    @FUSE_MODES
     def test_micro_batch_losses_match_their_own_turn_count(
-        self, monkeypatch: pytest.MonkeyPatch, fuse: bool
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Arrange: 1-row micro-batches, so rows 2-3 hold fewer turns than the batch.
         agent = make_ppo(
             batch_size=4,
             mini_batch_size=4,
             micro_batch_size_per_gpu=1,
-            fuse_actor_critic_pass=fuse,
         )
         policy_fn, value_fn = agent._ppo_policy_loss, agent._ppo_value_loss
         policy_loss, policy_calls = record_calls(policy_fn)
@@ -1128,43 +1099,14 @@ class TestPPOLearnForcedTurns:
         assert torch.equal(forced_advantages, free_advantages)
         assert forced_vf_loss == free_vf_loss
 
-    def test_a_fully_forced_turn_is_no_unit_of_the_liger_turn_loss(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Arrange
-        agent = make_ppo(advantage_granularity="turn", importance_sampling_level="turn")
-        use_fake_liger_policy_loss(agent, monkeypatch, "agilerl.algorithms.ppo_llm")
-        kernel, kernel_calls = record_calls(action_token_policy_loss)
-        monkeypatch.setattr(
-            "agilerl.algorithms.ppo_llm.apply_fused_policy_loss", kernel
-        )
-
-        # Act
-        learn_three_turns(agent, forced=True)
-
-        # Assert
-        ((_args, kwargs, _out),) = kernel_calls
-        assert sorted(kwargs["full_turn_mask"].tolist()) == [
-            [1.0, 0.0, 0.0],
-            [1.0, 1.0, 1.0],
-        ]
-        assert sorted(kwargs["turn_ids"].tolist()) == [
-            [-1, 0, 0, 0, -1, -1, -1, -1, -1, -1],
-            [-1, 0, 0, 0, 1, 1, 1, 2, 2, 2],
-        ]
-
 
 class TestPPOLearnNonFiniteLoss:
-    @FUSE_MODES
-    def test_finite_losses_step(
-        self, monkeypatch: pytest.MonkeyPatch, fuse: bool
-    ) -> None:
+    def test_finite_losses_step(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Arrange
         agent = make_ppo(
             batch_size=4,
             mini_batch_size=4,
             micro_batch_size_per_gpu=1,
-            fuse_actor_critic_pass=fuse,
         )
         monkeypatch.setattr(
             agent,
@@ -1182,14 +1124,13 @@ class TestPPOLearnNonFiniteLoss:
             not torch.equal(new, old) for new, old in zip(after, before, strict=True)
         )
 
-    @FUSE_MODES
     @pytest.mark.parametrize(
         "window_scales",
         [[float("nan"), 1.0, 1.0, 1.0], [1.0, 1.0, 1.0, float("nan")]],
         ids=["first_micro_batch", "last_micro_batch"],
     )
     def test_raises_before_the_step_when_a_micro_batch_loss_is_not_finite(
-        self, monkeypatch: pytest.MonkeyPatch, fuse: bool, window_scales: list[float]
+        self, monkeypatch: pytest.MonkeyPatch, window_scales: list[float]
     ) -> None:
         # Arrange: one optimizer step of four 1-row micro-batches per learn; a
         # finite learn first gives the optimizer state to keep.
@@ -1197,7 +1138,6 @@ class TestPPOLearnNonFiniteLoss:
             batch_size=4,
             mini_batch_size=4,
             micro_batch_size_per_gpu=1,
-            fuse_actor_critic_pass=fuse,
         )
         scales = iter([1.0] * 4 + window_scales)
         monkeypatch.setattr(
@@ -1221,9 +1161,8 @@ class TestPPOLearnNonFiniteLoss:
         for new, old in zip(state_after, state_before, strict=True):
             assert torch.equal(new, old)
 
-    @FUSE_MODES
     def test_raises_when_the_micro_batch_left_pending_a_step_is_not_finite(
-        self, monkeypatch: pytest.MonkeyPatch, fuse: bool
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Arrange: three micro-batches per step over four rows leave the last
         # micro-batch's gradients pending the next learn call.
@@ -1231,7 +1170,6 @@ class TestPPOLearnNonFiniteLoss:
             batch_size=4,
             mini_batch_size=4,
             micro_batch_size_per_gpu=1,
-            fuse_actor_critic_pass=fuse,
         )
         agent.gradient_accumulation_steps = 3
         scales = iter([1.0, 1.0, 1.0, float("nan")])
@@ -1265,9 +1203,8 @@ def record_step_role_grad_norms(
 
 
 class TestPPOLearnGradNorms:
-    @FUSE_MODES
     def test_reports_actor_and_critic_norms_of_their_own_grads(
-        self, monkeypatch: pytest.MonkeyPatch, fuse: bool
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Arrange: one optimizer step, threshold far above the norms.
         agent = make_ppo(
@@ -1275,7 +1212,6 @@ class TestPPOLearnGradNorms:
             mini_batch_size=4,
             micro_batch_size_per_gpu=2,
             max_grad_norm=1e6,
-            fuse_actor_critic_pass=fuse,
         )
         steps = record_step_role_grad_norms(agent, monkeypatch)
 
@@ -1296,9 +1232,8 @@ class TestPPOLearnGradNorms:
             steps[0]["critic"], rel=1e-5
         )
 
-    @FUSE_MODES
     def test_clipping_scales_post_norms_below_pre_norms(
-        self, monkeypatch: pytest.MonkeyPatch, fuse: bool
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Arrange: same seed and rows, so both agents see identical pre-clip grads.
         unclipped = make_ppo(
@@ -1306,14 +1241,12 @@ class TestPPOLearnGradNorms:
             mini_batch_size=4,
             micro_batch_size_per_gpu=2,
             max_grad_norm=1e6,
-            fuse_actor_critic_pass=fuse,
         )
         clipped = make_ppo(
             batch_size=4,
             mini_batch_size=4,
             micro_batch_size_per_gpu=2,
             max_grad_norm=1e-3,
-            fuse_actor_critic_pass=fuse,
         )
         clipped_steps = record_step_role_grad_norms(clipped, monkeypatch)
 
@@ -1339,9 +1272,8 @@ class TestPPOLearnGradNorms:
         assert clipped_metrics["grad_norm_post"] == pytest.approx(1e-3, rel=1e-4)
         assert clipped_metrics["critic_grad_norm_post"] == pytest.approx(1e-3, rel=1e-4)
 
-    @FUSE_MODES
     def test_clipping_the_critic_leaves_a_smaller_actor_norm_unscaled(
-        self, monkeypatch: pytest.MonkeyPatch, fuse: bool
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Arrange: unclipped norms are about 5.3 (actor) and 7.8 (critic).
         agent = make_ppo(
@@ -1349,7 +1281,6 @@ class TestPPOLearnGradNorms:
             mini_batch_size=4,
             micro_batch_size_per_gpu=2,
             max_grad_norm=6.0,
-            fuse_actor_critic_pass=fuse,
         )
         steps = record_step_role_grad_norms(agent, monkeypatch)
 
@@ -1364,9 +1295,8 @@ class TestPPOLearnGradNorms:
         assert steps[0]["actor"] == pytest.approx(metrics["grad_norm_pre"], rel=1e-5)
         assert steps[0]["critic"] == pytest.approx(6.0, rel=1e-5)
 
-    @FUSE_MODES
     def test_share_grad_clip_scales_both_by_the_combined_norm(
-        self, monkeypatch: pytest.MonkeyPatch, fuse: bool
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Arrange: unclipped norms are about 5.3 (actor) and 7.8 (critic).
         agent = make_ppo(
@@ -1375,7 +1305,6 @@ class TestPPOLearnGradNorms:
             micro_batch_size_per_gpu=2,
             max_grad_norm=6.0,
             share_grad_clip=True,
-            fuse_actor_critic_pass=fuse,
         )
         steps = record_step_role_grad_norms(agent, monkeypatch)
 
@@ -1434,8 +1363,8 @@ def save_checkpoint_config(
     agent.pretrained_model_name_or_path = str(path)
 
 
-class TestPPOFuseActorCriticPass:
-    def test_none_fuses_off_cuda(self) -> None:
+class TestPPOLearnFusedActorCriticForward:
+    def test_learn_runs_actor_and_critic_rows_in_one_forward(self) -> None:
         # Arrange
         agent = make_ppo(batch_size=4, mini_batch_size=4, micro_batch_size_per_gpu=2)
         forwards = record_grad_forwards(agent)
@@ -1444,196 +1373,35 @@ class TestPPOFuseActorCriticPass:
         learn_rows(agent)
 
         # Assert
-        assert agent.fuse_actor_critic_pass is None
-        assert agent._fuses_actor_critic_pass is True
         assert [f["adapters"] for f in forwards] == [{"actor", "critic"}] * 2
 
-    @pytest.mark.parametrize("fuse", [False, True])
-    def test_explicit_choice_is_kept(self, fuse: bool) -> None:
-        agent = make_ppo(fuse_actor_critic_pass=fuse)
-
-        assert agent.fuse_actor_critic_pass is fuse
-        assert agent._fuses_actor_critic_pass is fuse
-
-    @pytest.mark.parametrize(
-        ("total_gib", "fuse", "verb", "budget"),
-        [(80, True, "fuses", "76.00"), (1, False, "splits", "0.95")],
-        ids=["fits", "does-not-fit"],
-    )
-    def test_none_on_cuda_fuses_only_when_the_estimate_fits(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
-        tmp_path: Path,
-        total_gib: int,
-        fuse: bool,
-        verb: str,
-        budget: str,
-    ) -> None:
-        # Arrange: the tiny model's fused estimate is about 1.7 GiB.
-        agent = make_ppo()
-        save_checkpoint_config(agent, tmp_path)
-        patch_cuda_device(agent, monkeypatch, total_gib * 2**30)
-
-        # Act
-        with caplog.at_level(logging.INFO, logger="agilerl.algorithms.ppo_llm"):
-            resolved = agent._resolve_fuse_actor_critic_pass()
-
-        # Assert
-        assert resolved is fuse
-        assert f"LLMPPO {verb} the actor and critic passes" in caplog.text
-        assert f"budget {budget} GiB" in caplog.text
-
-    @pytest.mark.parametrize(
-        ("sleep_mode", "fuse", "budget"),
-        [(False, False, "0.20"), (True, True, "3.80")],
-        ids=["resident-engine", "sleeping-engine"],
-    )
-    def test_none_on_cuda_leaves_a_resident_vllm_share_out_of_the_budget(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
-        tmp_path: Path,
-        sleep_mode: bool,
-        fuse: bool,
-        budget: str,
-    ) -> None:
-        # Arrange: 4 GiB fits the ~1.7 GiB fused estimate unless vLLM keeps
-        # 90% of it: 0.95 * 4 - 0.9 * 4 = 0.2 GiB.
-        agent = make_ppo()
-        save_checkpoint_config(agent, tmp_path)
-        patch_cuda_device(agent, monkeypatch, 4 * 2**30)
-        monkeypatch.setattr(agent, "colocated", True)
-        monkeypatch.setattr(
-            agent,
-            "vllm_config",
-            VLLMConfig(gpu_memory_utilization=0.9, sleep_mode=sleep_mode),
-        )
-
-        # Act
-        with caplog.at_level(logging.INFO, logger="agilerl.algorithms.ppo_llm"):
-            resolved = agent._resolve_fuse_actor_critic_pass()
-
-        # Assert
-        assert resolved is fuse
-        assert f"budget {budget} GiB" in caplog.text
-
-    @pytest.mark.parametrize("fits", [True, False], ids=["fits", "over-budget"])
-    def test_omitted_fuse_matches_training_settings_with_fuse(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        tmp_path: Path,
-        fits: bool,
-    ) -> None:
-        # Arrange: over-budget sits one byte under the orchestrated fused peak.
-        agent = make_ppo()
-        save_checkpoint_config(agent, tmp_path)
-        model, settings = agent._training_estimate_inputs(
-            "ppo", agent.beta, fuse_actor_critic_pass=True
-        )
-        probe = DeviceSpec(
-            total_bytes=80 * 2**30, name="test-gpu", compute_capability=(8, 0)
-        )
-        peak = estimate_training(model, probe, settings, orchestrated=True).total_bytes
-        total = 80 * 2**30 if fits else cuda_total_under_peak(peak)
-        patch_cuda_device(agent, monkeypatch, total)
-        device = DeviceSpec(
-            total_bytes=total, name="test-gpu", compute_capability=(8, 0)
-        )
-
-        # Act
-        resolved = agent._resolve_fuse_actor_critic_pass()
-        expected = training_settings_with_fuse(
-            None, settings, model, device
-        ).fuse_actor_critic_pass
-
-        # Assert
-        assert agent._training_device_spec() == device
-        if not fits:
-            assert device.usable_bytes == peak - 1
-        assert expected is fits
-        assert resolved is expected
-
-    def test_none_on_cuda_estimates_the_gradient_micro_batch(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_clone_learns_fused(self) -> None:
         # Arrange
-        agent = make_ppo(batch_size=6, mini_batch_size=6, micro_batch_size_per_gpu=3)
-        save_checkpoint_config(agent, tmp_path)
-        patch_cuda_device(agent, monkeypatch, 80 * 2**30)
-        estimated = []
-
-        def record_estimate(model, device, settings, orchestrated=False):
-            estimated.append(settings)
-            return estimate_training(model, device, settings, orchestrated=orchestrated)
-
-        monkeypatch.setattr(
-            "agilerl.algorithms.core.base.estimate_training", record_estimate
-        )
-
-        # Act
-        resolved = agent._resolve_fuse_actor_critic_pass()
-
-        # Assert
-        assert resolved is True
-        assert [s.micro_batch_size for s in estimated] == [3]
-        assert estimated[0].grad_forward_rows == 6
-
-    def test_none_on_cuda_reads_the_checkpoint_config_json(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        # Arrange: transformers' NemotronHConfig.to_dict drops num_hidden_layers
-        # and renames the layer types; the checkpoint's config.json keeps both.
-        agent = make_ppo()
-        nemotron = SUPPORTED_MODEL_INFO["nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"]
-        save_checkpoint_config(agent, tmp_path, nemotron.config)
-        patch_cuda_device(agent, monkeypatch, 80 * 2**30)
-        archs = []
-
-        def record_estimate(model, device, settings, orchestrated=False):
-            archs.append(model.arch)
-            return estimate_training(model, device, settings, orchestrated=orchestrated)
-
-        monkeypatch.setattr(
-            "agilerl.algorithms.core.base.estimate_training", record_estimate
-        )
-
-        # Act
-        agent._resolve_fuse_actor_critic_pass()
-
-        # Assert
-        (arch,) = archs
-        assert arch.n_layers == 42
-        assert arch.attention_layers == 4
-        assert arch.n_mamba_layers == 21
-        assert arch.is_moe is False
-
-    def test_clone_keeps_the_requested_mode(self) -> None:
-        agent = make_ppo()
-
+        agent = make_ppo(batch_size=4, mini_batch_size=4, micro_batch_size_per_gpu=2)
         clone = agent.clone()
+        forwards = record_grad_forwards(clone)
 
-        assert clone.fuse_actor_critic_pass is None
-        assert clone._fuses_actor_critic_pass is True
+        # Act
+        learn_rows(clone)
 
-    def test_checkpoint_load_re_resolves_on_the_loading_device(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        # Arrange: saved by a CPU agent that fused; loaded on a 1 GiB GPU.
-        saved = make_ppo()
+        # Assert
+        assert [f["adapters"] for f in forwards] == [{"actor", "critic"}] * 2
+
+    def test_checkpoint_load_keeps_the_fused_learn(self, tmp_path: Path) -> None:
+        # Arrange
+        saved = make_ppo(batch_size=4, mini_batch_size=4, micro_batch_size_per_gpu=2)
         save_checkpoint_config(saved, tmp_path / "model")
         saved.save_checkpoint(str(tmp_path / "checkpoint"))
-        loaded = make_ppo()
+        loaded = make_ppo(batch_size=4, mini_batch_size=4, micro_batch_size_per_gpu=2)
         save_checkpoint_config(loaded, tmp_path / "model")
-        patch_cuda_device(loaded, monkeypatch, 2**30)
 
         # Act
         loaded.load_checkpoint(str(tmp_path / "checkpoint"))
+        forwards = record_grad_forwards(loaded)
+        learn_rows(loaded)
 
         # Assert
-        assert saved._fuses_actor_critic_pass is True
-        assert loaded.fuse_actor_critic_pass is None
-        assert loaded._fuses_actor_critic_pass is False
+        assert [f["adapters"] for f in forwards] == [{"actor", "critic"}] * 2
 
 
 class TestPPOUseAdapter:
@@ -1664,18 +1432,16 @@ class TestPPOUseAdapter:
 @pytest.mark.multi_rank
 class TestPPOLearnFSDP:
     @pytest.mark.parametrize("liger", [False, True], ids=["standard", "liger"])
-    @FUSE_MODES
     def test_two_rank_step_matches_one_rank_accumulated_step(
-        self, monkeypatch: pytest.MonkeyPatch, liger: bool, fuse: bool
+        self, monkeypatch: pytest.MonkeyPatch, liger: bool
     ) -> None:
-        # Arrange: one split rank accumulating all four rows is the reference
+        # Arrange: one rank accumulating all four rows is the reference
         # for two ranks accumulating two rows each.
         single = make_ppo(
             batch_size=4,
             mini_batch_size=4,
             micro_batch_size_per_gpu=1,
             whiten_advantages=False,
-            fuse_actor_critic_pass=False,
         )
         seed_lora_weights(single)
         if liger:
@@ -1686,7 +1452,7 @@ class TestPPOLearnFSDP:
         learn_rows(single)
 
         # Act
-        reports = run_ranks(fsdp_learn_worker, 2, liger, fuse, backend=None)
+        reports = run_ranks(fsdp_learn_worker, 2, liger, backend=None)
 
         # Assert
         assert len(single_steps) == 1
@@ -1705,42 +1471,9 @@ class TestPPOLearnFSDP:
 
 
 class TestResolveFsdpReduceDtype:
-    def test_split_passes_reduce_in_param_dtype(self) -> None:
+    def test_keeps_configured_reduce_dtype(self) -> None:
         # Arrange
-        agent = make_ppo(fuse_actor_critic_pass=False)
-
-        # Act
-        resolved = agent._resolve_fsdp_config(FSDPConfig())
-
-        # Assert
-        assert resolved.reduce_dtype == resolved.param_dtype == "bfloat16"
-
-    def test_fused_pass_keeps_configured_reduce_dtype(self) -> None:
-        # Arrange
-        agent = make_ppo(fuse_actor_critic_pass=True)
-
-        # Act
-        resolved = agent._resolve_fsdp_config(FSDPConfig())
-
-        # Assert
-        assert resolved.reduce_dtype == "float32"
-
-    def test_no_defer_keeps_configured_reduce_dtype(self) -> None:
-        # Arrange
-        agent = make_ppo(fuse_actor_critic_pass=False)
-
-        # Act
-        resolved = agent._resolve_fsdp_config(FSDPConfig(defer_grad_sync=False))
-
-        # Assert
-        assert resolved.reduce_dtype == "float32"
-
-    def test_no_value_head_keeps_configured_reduce_dtype(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Arrange
-        agent = make_ppo(fuse_actor_critic_pass=False)
-        monkeypatch.setattr(agent, "use_value_head", False)
+        agent = make_ppo()
 
         # Act
         resolved = agent._resolve_fsdp_config(FSDPConfig())
@@ -1750,7 +1483,7 @@ class TestResolveFsdpReduceDtype:
 
     def test_already_equal_dtypes_keep_configured_reduce_dtype(self) -> None:
         # Arrange
-        agent = make_ppo(fuse_actor_critic_pass=False)
+        agent = make_ppo()
 
         # Act
         resolved = agent._resolve_fsdp_config(FSDPConfig(reduce_dtype="bfloat16"))

@@ -132,7 +132,6 @@ class TestFamilyRuntimeConfigs:
         config = FAMILY_RUNTIME_CONFIGS["nemotron_h"]
         assert config.vllm.engine_kwargs() == NEMOTRON_VLLM_KWARGS
         assert config.trainer.load_kwargs() == {}
-        assert config.trainer.attn_implementation == "flash_attention_2"
         assert config.patch.install is install_mamba_patches
 
     def test_no_family_loads_checkpoint_code(self) -> None:
@@ -147,19 +146,6 @@ class TestFamilyRuntimeConfigs:
 
     def test_nemotron_h_enables_prefix_caching(self) -> None:
         assert FAMILY_RUNTIME_CONFIGS["nemotron_h"].vllm.enable_prefix_caching is True
-
-    @pytest.mark.parametrize("model_type", SWA_MODEL_TYPES)
-    def test_swa_lookup(self, model_type: str) -> None:
-        assert (
-            FAMILY_RUNTIME_CONFIGS[model_type].trainer.attn_implementation
-            == "flex_attention"
-        )
-
-    def test_gpt_oss_lookup(self) -> None:
-        assert (
-            FAMILY_RUNTIME_CONFIGS["gpt_oss"].trainer.attn_implementation
-            == "flex_attention"
-        )
 
     def test_qwen3_5_lookup(self) -> None:
         runtime = FAMILY_RUNTIME_CONFIGS["qwen3_5"]

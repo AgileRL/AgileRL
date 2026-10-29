@@ -10,8 +10,6 @@ boundaries is a property of the FlashAttention-varlen backend and is
 validated on GPU.
 """
 
-import warnings
-
 import pytest
 import torch
 from torch import nn
@@ -166,7 +164,6 @@ class TestUnpackLogprobs:
             bias,
             ids[:, 1:],
             temperature=1.0,
-            cast_to_fp32=True,
         )
 
         packed = pack_padded_batch(ids, mask)
@@ -177,7 +174,6 @@ class TestUnpackLogprobs:
             bias,
             packed.input_ids[:, 1:],
             temperature=1.0,
-            cast_to_fp32=True,
         )
         unpacked = unpack_logprobs(packed_lp.reshape(-1), packed)
 
@@ -604,8 +600,8 @@ class _PackingGateStub:
 
     _packing_mode = LLMAlgorithm._packing_mode
 
-    def __init__(self, use_sequence_packing, attn_impl):
-        self.use_sequence_packing = use_sequence_packing
+    def __init__(self, sequence_packing, attn_impl):
+        self.sequence_packing = sequence_packing
         self.actor = AutoModelForCausalLM.from_config(
             _tiny_llama_config(), attn_implementation="eager"
         )
@@ -642,7 +638,7 @@ class TestSequencePackingGate:
         assert stub.actor.config._attn_implementation == "sdpa"
         assert mode == "varlen"
 
-    def test_disabled_when_flag_off(self):
+    def test_disabled_when_init_does_not_pack(self):
         stub = _PackingGateStub(False, "flash_attention_2")
         assert stub._packing_mode() is None
 
@@ -653,40 +649,6 @@ class TestSequencePackingGate:
     def test_flex_uses_blockmask(self):
         stub = _PackingGateStub(True, "flex_attention")
         assert stub._packing_mode() == "blockmask"
-
-    @pytest.mark.parametrize("impl", ["flash_attention_2", "flex_attention"])
-    def test_refuses_recurrent_mixers_that_do_not_reset(self, impl):
-        # Arrange
-        stub = _PackingGateStub(True, impl)
-        stub.actor = AutoModelForCausalLM.from_config(_tiny_mamba2_config())
-        stub.actor.config._attn_implementation = impl
-
-        # Act / Assert
-        with pytest.raises(
-            ValueError, match=r"Mamba2Mixer.*use_sequence_packing=False"
-        ):
-            stub._packing_mode()
-
-    def test_a_replaced_actor_is_checked_again(self):
-        # Arrange
-        stub = _PackingGateStub(True, "flash_attention_2")
-        assert stub._packing_mode() == "varlen"
-        stub.actor = AutoModelForCausalLM.from_config(_tiny_mamba2_config())
-        stub.actor.config._attn_implementation = "flash_attention_2"
-
-        # Act / Assert
-        with pytest.raises(ValueError, match="Mamba2Mixer"):
-            stub._packing_mode()
-
-    @pytest.mark.parametrize("impl", ["sdpa", "eager", "something_weird"])
-    def test_unsupported_backends_disable_and_warn_once(self, impl):
-        # Dense backends have no sparse path -> packing unsupported, warn once.
-        stub = _PackingGateStub(True, impl)
-        with pytest.warns(UserWarning, match="varlen/block-sparse"):
-            assert stub._packing_mode() is None
-        with warnings.catch_warnings():
-            warnings.simplefilter("error")
-            assert stub._packing_mode() is None
 
 
 class TestPackedSegmentIds:

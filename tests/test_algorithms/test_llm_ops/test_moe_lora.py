@@ -20,6 +20,7 @@ from torch.utils.checkpoint import checkpoint
 from transformers.modeling_layers import GradientCheckpointingLayer
 
 from agilerl import HAS_LIGER_KERNEL
+from agilerl.arena.memory.formulas import DEFAULT_ROUTED_CHUNK_BYTES
 from agilerl.distributed import fsdp as dmod
 from agilerl.distributed import full_shape_views
 from agilerl.lora.fused import (
@@ -409,15 +410,19 @@ def _odd_model():
     return model
 
 
-def test_upgrade_is_idempotent_and_skips_unknown_conventions():
+def test_upgrade_is_idempotent():
+    _, upgraded = _sorted_pair()
+
+    assert upgrade_moe_param_wrappers(upgraded) == 0
+
+
+def test_upgrade_raises_on_an_unknown_expert_layout():
     model = inject_adapter_in_model(
         _lora_config(["odd.weight"]), _odd_model(), adapter_name="actor"
     )
-    with pytest.warns(UserWarning, match="unrecognized module conventions"):
-        assert upgrade_moe_param_wrappers(model) == 0
 
-    _, upgraded = _sorted_pair()
-    assert upgrade_moe_param_wrappers(upgraded) == 0
+    with pytest.raises(ValueError, match=r"'odd'.*\['weight'\].*_OddExperts"):
+        upgrade_moe_param_wrappers(model)
 
 
 class TestMaterializesExpertLora:
@@ -430,12 +435,10 @@ class TestMaterializesExpertLora:
         assert materializes_expert_lora(upgraded) is False
         assert materializes_expert_lora(reference) is True
 
-    def test_unrecognized_convention_stays_materialized(self):
+    def test_unupgraded_wrapper_is_materialized(self):
         model = inject_adapter_in_model(
             _lora_config(["odd.weight"]), _odd_model(), adapter_name="actor"
         )
-        with pytest.warns(UserWarning, match="unrecognized module conventions"):
-            upgrade_moe_param_wrappers(model)
 
         assert materializes_expert_lora(model) is True
 
@@ -730,8 +733,6 @@ def test_fused_mixed_routing_raises_on_fallback_param_wrapper():
     model = inject_adapter_in_model(
         _lora_config(["odd.weight"]), _odd_model(), adapter_name="actor"
     )
-    with pytest.warns(UserWarning, match="unrecognized module conventions"):
-        upgrade_moe_param_wrappers(model)
     patch_lora_for_fused_forward(model)
     x = torch.randn(12, HIDDEN)
     with torch.no_grad():
@@ -1206,11 +1207,15 @@ def _mock_cuda_torch(monkeypatch, grouped_mm):
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _index: (9, 0))
 
 
-def test_grouped_mm_probe_false_without_op(monkeypatch):
+def test_grouped_mm_probe_raises_without_op_where_required(monkeypatch):
     monkeypatch.delattr(torch, "_grouped_mm", raising=False)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _index: (9, 0))
     moe_gemm.grouped_mm_supported.cache_clear()
 
-    assert moe_gemm.grouped_mm_supported(0, torch.float32) is False
+    with pytest.raises(
+        RuntimeError, match=r"torch\._grouped_mm failed on SM 9\.0: .* has no"
+    ):
+        moe_gemm.grouped_mm_supported(0, torch.bfloat16)
 
 
 def test_grouped_mm_probe_true_when_op_matches_reference(monkeypatch):
@@ -1226,13 +1231,22 @@ def test_grouped_mm_probe_true_when_op_matches_reference(monkeypatch):
     assert moe_gemm.grouped_mm_supported(1, torch.bfloat16) is True
 
 
-def test_grouped_mm_probe_false_when_op_mismatches(monkeypatch):
+def test_grouped_mm_probe_raises_when_op_mismatches(monkeypatch):
     _mock_cuda_torch(
         monkeypatch, lambda x, w_t, offs: torch.zeros(x.shape[0], w_t.shape[-1])
     )
     moe_gemm.grouped_mm_supported.cache_clear()
 
-    assert moe_gemm.grouped_mm_supported(2, torch.bfloat16) is False
+    with pytest.raises(
+        RuntimeError,
+        match=r"torch\._grouped_mm failed on SM 9\.0: output differs",
+    ):
+        moe_gemm.grouped_mm_supported(2, torch.bfloat16)
+
+
+def raise_grouped_mm(x, w_t, offs):
+    msg = "no grouped mm"
+    raise RuntimeError(msg)
 
 
 @pytest.mark.parametrize(
@@ -1240,28 +1254,38 @@ def test_grouped_mm_probe_false_when_op_mismatches(monkeypatch):
     [((8, 0), torch.bfloat16), ((12, 0), torch.bfloat16), ((9, 0), torch.float32)],
 )
 def test_grouped_mm_probe_false_without_fused_kernel(monkeypatch, capability, dtype):
-    def fake_grouped_mm(x, w_t, offs):
-        bounds = [0, *offs.tolist()]
-        return torch.cat(
-            [x[start:end] @ w_t[i] for i, (start, end) in enumerate(pairwise(bounds))]
-        )
-
-    _mock_cuda_torch(monkeypatch, fake_grouped_mm)
+    # A failing op proves these devices take the per-expert loop without probing.
+    _mock_cuda_torch(monkeypatch, raise_grouped_mm)
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _index: capability)
     moe_gemm.grouped_mm_supported.cache_clear()
 
     assert moe_gemm.grouped_mm_supported(3, dtype) is False
 
 
-def test_grouped_mm_probe_false_when_op_raises(monkeypatch):
-    def boom(x, w_t, offs):
-        msg = "no grouped mm"
-        raise RuntimeError(msg)
-
-    _mock_cuda_torch(monkeypatch, boom)
+def test_grouped_mm_probe_raises_when_op_raises(monkeypatch):
+    _mock_cuda_torch(monkeypatch, raise_grouped_mm)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _index: (10, 0))
     moe_gemm.grouped_mm_supported.cache_clear()
 
-    assert moe_gemm.grouped_mm_supported(3, torch.bfloat16) is False
+    with pytest.raises(
+        RuntimeError, match=r"torch\._grouped_mm failed on SM 10\.0: no grouped mm"
+    ) as raised:
+        moe_gemm.grouped_mm_supported(3, torch.bfloat16)
+
+    assert str(raised.value.__cause__) == "no grouped mm"
+
+
+def test_grouped_mm_probe_raises_when_backward_fails(monkeypatch):
+    def detached_grouped_mm(x, w_t, offs):
+        return loop_grouped_mm(x, w_t, offs).detach()
+
+    _mock_cuda_torch(monkeypatch, detached_grouped_mm)
+    moe_gemm.grouped_mm_supported.cache_clear()
+
+    with pytest.raises(
+        RuntimeError, match=r"torch\._grouped_mm failed on SM 9\.0 in backward"
+    ):
+        moe_gemm.grouped_mm_supported(3, torch.bfloat16)
 
 
 def loop_grouped_mm(x, w_t, offs):
@@ -1620,7 +1644,7 @@ def test_split_lora_delta_chunked_accumulate_matches_full():
             chunk_bytes=chunk_bytes,
         )
 
-    full = run(x, a3, b3, None, moe_gemm.ROUTED_EXPERT_CHUNK_BYTES)
+    full = run(x, a3, b3, None, DEFAULT_ROUTED_CHUNK_BYTES)
     rows = x.detach().clone().requires_grad_(True)
     weight_a = a3.detach().clone().requires_grad_(True)
     weight_b = b3.detach().clone().requires_grad_(True)
@@ -2051,9 +2075,16 @@ def _frozen_base_lora_block(block_cls, targets, act_fn):
     return model
 
 
+def _force_recompute(model, enabled):
+    """Pin every routed-experts LoRA wrapper to the recompute or full-graph path."""
+    for module in model.modules():
+        if isinstance(module, RoutedExpertsLoraWrapper):
+            module.recompute = enabled
+
+
 def _run_routed_experts(model, recompute, hidden, top_k_index, top_k_weights, **kw):
     """Forward and backward the experts; return output, input grads and LoRA grads."""
-    set_routed_experts_recompute(model, recompute)
+    _force_recompute(model, recompute)
     model.zero_grad(set_to_none=True)
     rows = hidden.clone().requires_grad_(True)
     weights = top_k_weights.clone().requires_grad_(True)
@@ -2160,7 +2191,7 @@ class TestLoraExpertsFunction:
         set_routed_experts_chunk_bytes(model, SMALL_CHUNK_BYTES)
 
         def run(recompute):
-            set_routed_experts_recompute(model, recompute)
+            _force_recompute(model, recompute)
             model.zero_grad(set_to_none=True)
             rows = x.clone().requires_grad_(True)
             out = model(rows)
@@ -2211,7 +2242,7 @@ class TestLoraExpertsFunction:
         dispatched_row_bytes = n_tokens * TOP_K * HIDDEN * hidden.element_size()
 
         def run(recompute):
-            set_routed_experts_recompute(model, recompute)
+            _force_recompute(model, recompute)
             return lambda: model.experts(hidden, top_k_index, top_k_weights)
 
         # Act
@@ -2242,21 +2273,22 @@ class TestLoraExpertsFunction:
 
 
 class TestSetRoutedExpertsRecompute:
-    def test_sets_every_routed_wrapper(self):
+    def test_recomputes_every_wrapper_without_checkpointing(self):
         # Arrange
         _reference, model = _routed_pair()
         wrappers = [
             m for m in model.modules() if isinstance(m, RoutedExpertsLoraWrapper)
         ]
+        _force_recompute(model, False)
 
         # Act
-        set_routed_experts_recompute(model, False)
+        set_routed_experts_recompute(model)
 
         # Assert
         assert wrappers
-        assert all(wrapper.recompute is False for wrapper in wrappers)
+        assert all(wrapper.recompute is True for wrapper in wrappers)
 
-    def test_auto_keeps_the_graph_only_inside_checkpoint_wrappers(self):
+    def test_keeps_the_graph_only_inside_checkpoint_wrappers(self):
         # Arrange
         _reference, checkpointed = _routed_pair()
         _reference, plain = _routed_pair()
@@ -2265,38 +2297,27 @@ class TestSetRoutedExpertsRecompute:
         )
 
         # Act
-        set_routed_experts_recompute(model, None)
+        set_routed_experts_recompute(model)
 
         # Assert
         assert checkpointed.experts.recompute is False
         assert plain.experts.recompute is True
 
     @pytest.mark.parametrize("gradient_checkpointing", [True, False])
-    def test_auto_follows_the_hf_layer_checkpointing_flag(self, gradient_checkpointing):
+    def test_follows_the_hf_layer_checkpointing_flag(self, gradient_checkpointing):
         # Arrange
         _reference, block = _routed_pair()
         layer = _HfCheckpointLayer(block)
         layer.gradient_checkpointing = gradient_checkpointing
 
         # Act
-        set_routed_experts_recompute(layer, None)
+        set_routed_experts_recompute(layer)
 
         # Assert
         assert block.experts.recompute is not gradient_checkpointing
 
-    def test_explicit_true_recomputes_inside_checkpoint_wrappers(self):
-        # Arrange
-        _reference, block = _routed_pair()
-        model = checkpoint_wrapper(block)
-
-        # Act
-        set_routed_experts_recompute(model, True)
-
-        # Assert
-        assert block.experts.recompute is True
-
     @pytest.mark.parametrize(("block_cls", "targets", "act_fn"), RECOMPUTE_BLOCKS)
-    def test_auto_inside_checkpoint_matches_recompute(self, block_cls, targets, act_fn):
+    def test_checkpointed_graph_matches_recompute(self, block_cls, targets, act_fn):
         # Arrange
         torch.manual_seed(0)
         block = _frozen_base_lora_block(block_cls, targets, act_fn)
@@ -2307,7 +2328,10 @@ class TestSetRoutedExpertsRecompute:
         set_routed_experts_chunk_bytes(model, SMALL_CHUNK_BYTES)
 
         def run(enabled):
-            set_routed_experts_recompute(model, enabled)
+            if enabled is None:
+                set_routed_experts_recompute(model)
+            else:
+                _force_recompute(model, enabled)
             model.zero_grad(set_to_none=True)
             rows = hidden.clone().requires_grad_(True)
             out = model(rows)
@@ -2320,17 +2344,17 @@ class TestSetRoutedExpertsRecompute:
             return out.detach(), rows.grad, grads, block.experts.recompute
 
         # Act
-        auto_out, auto_rows, auto_grads, auto_recompute = run(None)
+        graph_out, graph_rows, graph_grads, graph_recompute = run(None)
         lean_out, lean_rows, lean_grads, lean_recompute = run(True)
 
         # Assert
-        assert (auto_recompute, lean_recompute) == (False, True)
-        assert torch.allclose(auto_out, lean_out, rtol=1e-5, atol=1e-6)
-        assert torch.allclose(auto_rows, lean_rows, rtol=1e-5, atol=1e-6)
-        assert set(auto_grads) == set(lean_grads)
-        assert auto_grads
+        assert (graph_recompute, lean_recompute) == (False, True)
+        assert torch.allclose(graph_out, lean_out, rtol=1e-5, atol=1e-6)
+        assert torch.allclose(graph_rows, lean_rows, rtol=1e-5, atol=1e-6)
+        assert set(graph_grads) == set(lean_grads)
+        assert graph_grads
         for name, grad in lean_grads.items():
-            assert torch.allclose(auto_grads[name], grad, rtol=1e-5, atol=1e-6), name
+            assert torch.allclose(graph_grads[name], grad, rtol=1e-5, atol=1e-6), name
 
 
 class _HfCheckpointLayer(GradientCheckpointingLayer):
@@ -2470,7 +2494,7 @@ class TestGroupedGemmCoverage:
             torch.randn(1, 4, 5),
             [0],
             1.0,
-            moe_gemm.ROUTED_EXPERT_CHUNK_BYTES,
+            DEFAULT_ROUTED_CHUNK_BYTES,
         )
 
         assert destination.shape == (0, 4)
@@ -2481,7 +2505,7 @@ class TestGroupedGemmCoverage:
         weight = torch.ones(1, 4, 5)
 
         moe_gemm.add_grouped_linear(
-            destination, x, weight, [2], 1.0, moe_gemm.ROUTED_EXPERT_CHUNK_BYTES
+            destination, x, weight, [2], 1.0, DEFAULT_ROUTED_CHUNK_BYTES
         )
 
         assert destination.dtype == torch.float16
@@ -2614,7 +2638,7 @@ class TestRoutedExpertDtypeAndDTensor:
             routing=routing,
             up_loras=(),
             down_loras=(),
-            chunk_bytes=moe_routed.ROUTED_EXPERT_CHUNK_BYTES,
+            chunk_bytes=DEFAULT_ROUTED_CHUNK_BYTES,
         )
 
         assert out.dtype == hidden.dtype
@@ -2649,7 +2673,7 @@ class TestRoutedExpertDtypeAndDTensor:
             routing=routing,
             up_loras=(),
             down_loras=(),
-            chunk_bytes=moe_routed.ROUTED_EXPERT_CHUNK_BYTES,
+            chunk_bytes=DEFAULT_ROUTED_CHUNK_BYTES,
         )
 
         assert out.shape == (1, 4)

@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 from agilerl.arena.memory.estimator import estimate_training
-from agilerl.arena.memory.resolve.fuse import training_settings_with_fuse
 from agilerl.arena.memory.specs import (
     DeviceSpec,
     ModelArch,
@@ -14,7 +13,7 @@ from agilerl.arena.memory.specs import (
 )
 from agilerl.arena.models.algorithms.base import LLMAlgorithmSpec
 from agilerl.arena.models.algorithms.grpo import GRPOSpec
-from agilerl.arena.models.algorithms.llmppo import LLMPPOSpec
+from agilerl.arena.models.hpo import MutationSpec, mutation_ceiling
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 
 
@@ -45,6 +44,17 @@ def rollout_group_size(spec: LLMAlgorithmSpec) -> int:
     if isinstance(spec, GRPOSpec):
         return spec.group_size
     return 1
+
+
+def engine_group_size(spec: LLMAlgorithmSpec, mutation: MutationSpec | None) -> int:
+    """Completions per prompt a rollout engine's ``max_num_seqs`` is sized for.
+
+    :param spec: Validated LLM algorithm spec.
+    :param mutation: The manifest's mutation section, or ``None``.
+    :return: :func:`rollout_group_size`, raised to its HPO ceiling when
+        ``group_size`` mutates.
+    """
+    return mutation_ceiling(mutation, "group_size", rollout_group_size(spec))
 
 
 def resolve_mini_batch_size(configured: int | None, per_rank: int) -> int:
@@ -97,8 +107,12 @@ def require_batch_split(mini: int, micro: int, per_rank: int) -> None:
         raise ValueError(msg)
 
 
-def _catalog_model(spec: LLMAlgorithmSpec) -> ModelSpec | None:
-    """Training model from the bundled catalog, or None when the id is absent."""
+def catalog_model(spec: LLMAlgorithmSpec) -> ModelSpec | None:
+    """Training model from the bundled catalog, or None when the id is absent.
+
+    :param spec: Validated LLM algorithm spec.
+    :return: The spec's catalog model.
+    """
     hub_id = spec.pretrained_model_name_or_path
     info = SUPPORTED_MODEL_INFO.get(hub_id) if hub_id is not None else None
     if info is None or hub_id is None:
@@ -178,8 +192,8 @@ def resolve_micro_batch_size_per_gpu(
     # The omitted forward is the mini-batch: the largest count that divides it.
     require_batch_split(mini, mini, per_rank)
     candidates = _divisors_largest_first(mini)
-    catalog_model = _catalog_model(spec)
-    if device is None or catalog_model is None:
+    catalogued = catalog_model(spec)
+    if device is None or catalogued is None:
         return mini
     if settings is None:
         msg = (
@@ -187,15 +201,9 @@ def resolve_micro_batch_size_per_gpu(
             "when a device is set"
         )
         raise ValueError(msg)
-    search_model = model if model is not None else catalog_model
+    search_model = model if model is not None else catalogued
     for micro in candidates:
         trial = settings.model_copy(update={"micro_batch_size": micro})
-        trial = training_settings_with_fuse(
-            spec.fuse_actor_critic_pass if isinstance(spec, LLMPPOSpec) else None,
-            trial,
-            search_model,
-            device,
-        )
         breakdown = estimate_training(search_model, device, trial, orchestrated=True)
         if breakdown.fits_with_buffer:
             return micro

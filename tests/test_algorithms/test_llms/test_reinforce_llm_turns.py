@@ -16,22 +16,23 @@ pytest.importorskip("peft", reason="LLM tests require peft.")
 
 from peft import LoraConfig
 
+from agilerl import HAS_LIGER_KERNEL
 from agilerl.algorithms import reinforce_llm
 from agilerl.algorithms.reinforce_llm import REINFORCE
 from tests.test_algorithms.test_llms.llm_helpers import create_module, record_calls
-from tests.test_algorithms.test_llms.segment_helpers import (
-    action_token_policy_loss,
-    use_fake_liger_policy_loss,
-)
+from tests.test_algorithms.test_llms.segment_helpers import record_step_gradients
 
 PAD_TOKEN_ID = 63
 VOCAB = 64
 
 
-def make_turn_reinforce() -> REINFORCE:
-    """Tiny fp32 REINFORCE on CPU with turn-level IS and 1-row micro-batches."""
+def make_turn_reinforce(importance_sampling_level: str = "turn") -> REINFORCE:
+    """Tiny fp32 REINFORCE on CPU with 1-row micro-batches.
+
+    :param importance_sampling_level: Importance-sampling level of the update.
+    """
     torch.manual_seed(0)
-    return REINFORCE(
+    agent = REINFORCE(
         actor_network=create_module(
             input_size=6, max_tokens=4, vocab_size=VOCAB, device="cpu"
         ),
@@ -45,12 +46,10 @@ def make_turn_reinforce() -> REINFORCE:
         micro_batch_size_per_gpu=1,
         mini_batch_size=4,
         update_epochs=1,
-        importance_sampling_level="turn",
+        importance_sampling_level=importance_sampling_level,
         wrap=False,
-        gradient_checkpointing=False,
         calc_position_embeddings=False,
         device="cpu",
-        use_liger_loss=False,
         lora_config=LoraConfig(
             r=4,
             lora_alpha=8,
@@ -59,6 +58,8 @@ def make_turn_reinforce() -> REINFORCE:
             lora_dropout=0.0,
         ),
     )
+    agent.liger_loss = False
+    return agent
 
 
 def learn_uneven_turns(agent: REINFORCE) -> dict[str, float]:
@@ -74,6 +75,44 @@ def learn_uneven_turns(agent: REINFORCE) -> dict[str, float]:
     return agent.learn(
         (list(ids.split(1)), list(mask.split(1)), rewards), turn_ids=turn_ids
     )
+
+
+@pytest.mark.skipif(not HAS_LIGER_KERNEL, reason="liger-kernel is Linux-only.")
+class TestREINFORCELearnLigerLoss:
+    """The fused Liger loss pools turns and trajectories as the standard loss does."""
+
+    @pytest.mark.parametrize("is_level", ["turn", "trajectory"])
+    def test_loss_and_gradients_match_the_standard_learn(
+        self, monkeypatch: pytest.MonkeyPatch, is_level: str
+    ) -> None:
+        # Arrange
+        agents = {}
+        gradients = {}
+        for liger in (False, True):
+            agent = make_turn_reinforce(is_level)
+            agent.liger_loss = liger
+            gradients[liger] = record_step_gradients(agent, monkeypatch)
+            agents[liger] = agent
+        fused, fused_calls = record_calls(agents[True]._reinforce_loss_liger)
+        monkeypatch.setattr(agents[True], "_reinforce_loss_liger", fused)
+
+        # Act
+        metrics = {liger: learn_uneven_turns(agent) for liger, agent in agents.items()}
+
+        # Assert
+        assert len(fused_calls) == 4
+        for name in ("loss", "pg_loss", "kl"):
+            assert metrics[True][name] == pytest.approx(
+                metrics[False][name], rel=1e-5, abs=1e-6
+            ), name
+        for standard, fused_grads in zip(
+            gradients[False], gradients[True], strict=True
+        ):
+            assert standard.keys() == fused_grads.keys()
+            for name, grad in standard.items():
+                assert torch.allclose(fused_grads[name], grad, rtol=1e-5, atol=1e-6), (
+                    name
+                )
 
 
 class TestREINFORCELearnActionlessRows:
@@ -163,30 +202,6 @@ class TestREINFORCELearnForcedTurns:
         assert torch.equal(advantages[True], advantages[False] * masks[True])
         assert advantages[False][0, 3:].abs().min() > 0
 
-    def test_a_fully_forced_turn_is_no_unit_of_the_liger_turn_loss(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Arrange
-        agent = make_turn_reinforce()
-        use_fake_liger_policy_loss(
-            agent, monkeypatch, "agilerl.algorithms.reinforce_llm"
-        )
-        kernel, kernel_calls = record_calls(action_token_policy_loss)
-        monkeypatch.setattr(reinforce_llm, "apply_fused_policy_loss", kernel)
-
-        # Act
-        learn_three_turns(agent, forced=True)
-
-        # Assert
-        units = sorted(
-            (kwargs["full_turn_mask"].tolist(), kwargs["turn_ids"].tolist())
-            for _args, kwargs, _out in kernel_calls
-        )
-        assert units == [
-            ([[1.0, 0.0, 0.0]], [[-1, 0, 0, -1, -1, -1, -1]]),
-            ([[1.0, 1.0, 1.0]], [[-1, 0, 0, 1, 1, 2, 2]]),
-        ]
-
 
 def learn_with_kl(
     agent: REINFORCE, monkeypatch: pytest.MonkeyPatch, forced: bool
@@ -252,30 +267,19 @@ class TestREINFORCELearnForcedTurnKLPenalty:
             advantages[True], advantages[False] * masks[True], rtol=0.0, atol=1e-6
         )
 
-    @pytest.mark.parametrize("liger", [False, True], ids=["standard", "liger"])
-    def test_the_loss_sees_the_same_advantages_on_either_path(
-        self, monkeypatch: pytest.MonkeyPatch, liger: bool
+    def test_the_loss_sees_the_same_advantages(
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Arrange
         seen = {}
         for forced in (False, True):
             agent = make_kl_reinforce()
-            if liger:
-                use_fake_liger_policy_loss(
-                    agent, monkeypatch, "agilerl.algorithms.reinforce_llm"
-                )
-                loss, calls = record_calls(action_token_policy_loss)
-                monkeypatch.setattr(reinforce_llm, "apply_fused_policy_loss", loss)
-            else:
-                loss, calls = record_calls(reinforce_llm.clipped_is_surrogate)
-                monkeypatch.setattr(reinforce_llm, "clipped_is_surrogate", loss)
+            loss, calls = record_calls(reinforce_llm.clipped_is_surrogate)
+            monkeypatch.setattr(reinforce_llm, "clipped_is_surrogate", loss)
 
             # Act
             learn_with_kl(agent, monkeypatch, forced=forced)
-            seen[forced] = [
-                (args[5], kwargs["full_turn_mask"]) if liger else (args[1], args[2])
-                for args, kwargs, _out in calls
-            ]
+            seen[forced] = [(args[1], args[2]) for args, _kwargs, _out in calls]
 
         # Assert
         assert len(seen[True]) == len(seen[False]) == 2
