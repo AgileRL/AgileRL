@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import importlib
+
 import pytest
 from pydantic import ValidationError
 from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
@@ -13,7 +15,9 @@ from transformers.models.nemotron_h_omni.configuration_nemotron_h_omni import (
     NemotronH_Omni_Reasoning_V3_Config,
 )
 
+import agilerl
 from agilerl.architectures import family_tensor_parallel_plans
+from agilerl.architectures import runtime as runtime_module
 from agilerl.architectures.catalog import (
     FAMILY_RUNTIME_CONFIGS,
     family_runtime,
@@ -482,3 +486,19 @@ class TestNemotronHOmniVllmHfOverride:
 
         assert config.architectures == ["NemotronH_Super_Omni_Reasoning_V3"]
         assert not hasattr(config, "vit_hidden_size")
+
+
+class TestImportFallbacks:
+    def test_reload_without_llm_dependencies_leaves_auto_classes_unset(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(agilerl, "HAS_LLM_DEPENDENCIES", False)
+        try:
+            module = importlib.reload(runtime_module)
+
+            assert module.AutoModelForCausalLM is None
+            assert module.AutoModelForImageTextToText is None
+            assert module.TrainerRuntimeConfig().model_class is None
+        finally:
+            monkeypatch.undo()
+            importlib.reload(runtime_module)

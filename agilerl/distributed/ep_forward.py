@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from functools import partial
 from itertools import pairwise
 from types import MethodType
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import torch
 import torch.distributed as dist
@@ -28,6 +28,7 @@ from torch.func import functional_call
 from torch.utils._python_dispatch import _disable_current_modes
 from typing_extensions import Self
 
+from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.distributed.ep_dispatch import (
     TokenDispatchState,
     all_to_all_single_autograd,
@@ -52,7 +53,9 @@ from agilerl.lora.moe.layouts import (
     routed_projection_names,
 )
 from agilerl.lora.moe.routed import ROUTED_EXPERT_CHUNK_BYTES
-from agilerl.lora.moe.wrappers import RoutedExpertsLoraWrapper
+
+if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
+    from agilerl.lora.moe.wrappers import RoutedExpertsLoraWrapper
 
 
 @contextmanager
