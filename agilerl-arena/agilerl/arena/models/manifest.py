@@ -844,12 +844,15 @@ class TrainingManifest(BaseModel):
             if isinstance(self.algorithm, RolloutLLMSpec):
                 vllm_config = self.algorithm.vllm_config
                 vllm_payload = algorithm.get("vllm_config")
-                if (
-                    isinstance(vllm_payload, dict)
-                    and vllm_config is not None
-                    and "tensor_parallel_size" not in vllm_config.model_fields_set
-                ):
-                    vllm_payload.pop("tensor_parallel_size", None)
+                if isinstance(vllm_payload, dict) and vllm_config is not None:
+                    if "tensor_parallel_size" not in vllm_config.model_fields_set:
+                        vllm_payload.pop("tensor_parallel_size", None)
+                    if (
+                        "quantization" in vllm_config.model_fields_set
+                        and vllm_config.quantization is None
+                    ):
+                        # exclude_none drops an explicit null; restore it so a re-validation keeps bf16.
+                        vllm_payload["quantization"] = None
         environment = payload.get("environment")
         if isinstance(environment, dict):
             if environment.get("screenshot_field") is None:

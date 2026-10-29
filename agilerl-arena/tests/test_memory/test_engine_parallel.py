@@ -21,9 +21,11 @@ def _qwen_manifest(
     tensor_parallel_size: int | None = None,
     hub_id: str = "Qwen/Qwen3.6-35B-A3B",
 ) -> dict:
-    vllm_config: dict[str, int | float] = {
+    vllm_config: dict[str, int | float | None] = {
         "gpu_memory_utilization": 0.95,
         "max_num_seqs": 16,
+        # bf16 engine: the width expectations below size full weights.
+        "quantization": None,
     }
     if tensor_parallel_size is not None:
         vllm_config["tensor_parallel_size"] = tensor_parallel_size
@@ -189,9 +191,9 @@ class TestResolveEngineTensorParallel:
         width = resolve_engine_tensor_parallel(manifest, 8, device, 8)
 
         # Assert
-        assert width == 2
+        assert width == 1
         assert manifest.algorithm.vllm_config is not None
-        assert manifest.algorithm.vllm_config.tensor_parallel_size == 2
+        assert manifest.algorithm.vllm_config.tensor_parallel_size == 1
 
 
 class TestDefaultRolloutVllmConfig:

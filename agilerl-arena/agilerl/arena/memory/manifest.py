@@ -293,57 +293,6 @@ def _engine_weight_quantization(value: str | None) -> Literal["none", "fp8"]:
     raise ValueError(msg)
 
 
-FP8_NATIVE_MIN_CC = (8, 9)
-"""Lowest CUDA capability with native FP8 (vLLM's Triton FP8 MoE needs it)."""
-
-FP8_MOE_METHODS = frozenset(
-    {"fp8", "fp8_per_block", "fp8_per_tensor", "fp8_per_channel"}
-)
-"""Online quantization methods that serve MoE experts in FP8."""
-
-
-def check_fp8_moe_backend_for_device(
-    quantization: str | None,
-    moe_backend: str | None,
-    is_moe: bool,
-    cc_major: int,
-    cc_minor: int,
-) -> None:
-    """Require Marlin for FP8 LoRA MoE engines below native-FP8 hardware.
-
-    vLLM forces the Triton MoE backend on quantized LoRA engines, and its
-    Triton FP8 kernels need SM89+ native FP8, so every fp8 scheme fails at
-    engine startup on A100 and older. Marlin serves FP8 there. H100/L4 and
-    dense models keep whatever backend they name.
-
-    Callers check rollout engines, which serve LoRA in this stack.
-
-    :param quantization: Engine ``quantization``; only fp8-family methods trigger.
-    :param moe_backend: Explicit ``moe_backend`` engine arg, or None for default.
-    :param is_moe: Whether the model has MoE layers (dense FP8 never consults
-        the MoE backend oracle).
-    :param cc_major: Engine CUDA compute capability major.
-    :param cc_minor: Engine CUDA compute capability minor.
-    :raises ValueError: If Marlin is required but another backend (or none) is set.
-    """
-    if (
-        not is_moe
-        or quantization is None
-        or quantization.lower() not in FP8_MOE_METHODS
-        or (cc_major, cc_minor) >= FP8_NATIVE_MIN_CC
-    ):
-        return
-    backend = moe_backend if isinstance(moe_backend, str) else ""
-    if backend.strip().lower().replace("-", "_") == "marlin":
-        return
-    msg = (
-        f"Engine quantization {quantization!r} with LoRA needs "
-        f"moe_backend='marlin' on SM{cc_major}{cc_minor} (A100 and older have "
-        "no native FP8; vLLM's Triton FP8 MoE kernels need SM89+)."
-    )
-    raise ValueError(msg)
-
-
 def _max_num_seqs(
     manifest: TrainingManifest,
     spec: LLMAlgorithmSpec,
@@ -764,17 +713,6 @@ def run_config_from_manifest(
     """
     manifest = _validated(manifest)
     spec = llm_spec(manifest)
-    if isinstance(spec, RolloutLLMSpec):
-        gpu = lookup_gpu((gen_device or device).name or "")
-        if gpu is not None:
-            vllm = _resolve_vllm(spec)
-            check_fp8_moe_backend_for_device(
-                vllm.quantization,
-                spec.vllm_engine_args.get("moe_backend"),
-                ModelArch.from_hf_config(model_config).is_moe,
-                gpu.cc_major,
-                gpu.cc_minor,
-            )
     # Chosen on a copy so this call does not pin the caller's omitted field.
     # The run picks it on the catalog model, so the search does too.
     if spec.micro_batch_size_per_gpu is None:

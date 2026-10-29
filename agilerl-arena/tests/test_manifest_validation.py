@@ -456,6 +456,21 @@ class TestNothingIsStrippedInTransit:
         )
         assert payload["algorithm"]["use_separate_reference_adapter"] is False
 
+    def test_explicit_null_engine_quantization_survives_the_payload(self) -> None:
+        payload = TrainingManifest.get_validated(
+            manifest(GRPO, algorithm={"vllm_config": {"quantization": None}}),
+            mode="json",
+        )
+
+        assert payload["algorithm"]["vllm_config"]["quantization"] is None
+        reloaded = TrainingManifest.model_validate(payload)
+        assert reloaded.algorithm.vllm_config.quantization is None
+
+    def test_unset_engine_quantization_payloads_as_fp8(self) -> None:
+        payload = TrainingManifest.get_validated(GRPO, mode="json")
+
+        assert payload["algorithm"]["vllm_config"]["quantization"] == "fp8"
+
 
 class TestEnvironment:
     def test_every_environment_branch_can_be_versioned(self) -> None:

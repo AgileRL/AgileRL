@@ -115,7 +115,12 @@ UNSET_WIDTH_MOE = {
         "fsdp": True,
         "use_liger_loss": True,
         "use_separate_reference_adapter": True,
-        "vllm_config": {"gpu_memory_utilization": 0.95, "max_num_seqs": 16},
+        "vllm_config": {
+            "gpu_memory_utilization": 0.95,
+            "max_num_seqs": 16,
+            # bf16 engine: the width expectations below size full weights.
+            "quantization": None,
+        },
     },
     "environment": {
         "env_type": "rollout",

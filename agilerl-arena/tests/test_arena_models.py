@@ -223,6 +223,16 @@ class TestVLLMConfigLimitMmPerPrompt:
             VLLMConfig(limit_mm_per_prompt={"image": -1})
 
 
+class TestVLLMConfigQuantization:
+    def test_defaults_to_fp8(self) -> None:
+        assert VLLMConfig().quantization == "fp8"
+
+    def test_explicit_null_serves_the_checkpoint_as_stored(self) -> None:
+        config = VLLMConfig.model_validate({"quantization": None})
+
+        assert config.quantization is None
+
+
 class TestLLMEnvType:
     def test_str(self) -> None:
         assert str(LLMEnvType.ROLLOUT) == "rollout"

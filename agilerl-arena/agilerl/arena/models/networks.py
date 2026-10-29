@@ -869,9 +869,13 @@ class VLLMConfig(BaseModel):
         description="Weight dtype for generation, e.g. bfloat16. Unset lets vLLM choose.",
     )
     quantization: str | None = Field(
-        default=None,
+        default="fp8",
         min_length=1,
-        description="Quantization applied to the generation engine.",
+        description=(
+            "Quantization applied to the generation engine. fp8 quantizes the "
+            "bf16 base while vLLM loads it. Set null to serve the checkpoint "
+            "as stored, which a pre-quantized checkpoint requires."
+        ),
     )
     vllm_model_name_or_path: str | None = Field(
         default=None,
