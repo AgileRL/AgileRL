@@ -2180,6 +2180,13 @@ class TestGetCliCapabilities:
             with patch.object(api_key_client._http, "request", return_value=resp):
                 assert api_key_client._get_cli_capabilities(force_refresh=True) is None
 
+    @pytest.mark.parametrize("status_code", [401, 403])
+    def test_returns_none_on_unauthorized(self, api_key_client, status_code: int):
+        resp = _capabilities_response(status_code=status_code, is_success=False)
+        with patch.object(api_key_client, "_auth_headers", return_value={}):
+            with patch.object(api_key_client._http, "request", return_value=resp):
+                assert api_key_client._get_cli_capabilities(force_refresh=True) is None
+
     def test_raises_on_other_error_status(self, api_key_client):
         resp = _capabilities_response(status_code=500, is_success=False)
         with patch.object(api_key_client, "_auth_headers", return_value={}):

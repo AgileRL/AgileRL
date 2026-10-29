@@ -69,7 +69,7 @@ def capabilities_show_on_prem_root(config: CommandConfig) -> bool | None:
     :param config: The command configuration used to build a client.
     :type config: CommandConfig
     :returns: ``True``/``False`` for visibility, or ``None`` if capabilities could
-        not be loaded (no auth, **404**, bad JSON).
+        not be loaded (no auth, HTTP 404/401/403, bad JSON).
     :rtype: bool | None
     """
     client = build_client(config)
