@@ -17,6 +17,7 @@ from agilerl.algorithms.core.llm_ops.fused_logprobs import (
     _fused_logprob_chunk_dispatch,
     fused_linear_logprobs_chunked,
     scored_position_index,
+    support_chunk_rows,
     support_logprob_chunk,
     support_scores,
 )
@@ -426,6 +427,36 @@ class TestFusedLinearLogprobsChunked:
         # Assert
         assert torch.allclose(logps, expected, atol=1e-12)
 
+    def test_a_vocab_wide_support_gathers_one_row_at_a_time(self) -> None:
+        # Arrange
+        hidden, weight, targets, _supports = _support_case()
+        supports = torch.arange(16, dtype=torch.int32).expand(1, 3, 16)
+        expected = _reference_logprobs(hidden, weight, targets, supports, 1.0)
+        gathered_rows = []
+
+        def record_rows(h_chunk, *args):
+            gathered_rows.append(h_chunk.shape[0])
+            return support_logprob_chunk(h_chunk, *args)
+
+        # Act
+        with patch(
+            "agilerl.algorithms.core.llm_ops.fused_logprobs.support_logprob_chunk",
+            side_effect=record_rows,
+        ):
+            logps = fused_linear_logprobs_chunked(
+                hidden,
+                weight,
+                None,
+                targets,
+                cast_to_fp32=False,
+                chunk_rows=2,
+                support_ids=supports,
+            )
+
+        # Assert
+        assert torch.allclose(logps, expected, atol=1e-12)
+        assert gathered_rows == [1, 1, 1]
+
 
 class TestLLMAlgorithmScoreHidden:
     def test_padding_of_a_supports_batch_stays_off_the_vocabulary_matmul(
@@ -533,6 +564,20 @@ class TestSupportLogprobChunk:
         )
 
         assert logps.item() == float("-inf")
+
+
+class TestSupportChunkRows:
+    # Nemotron 3.5 Lightning lm_head: vocab 131072, hidden 2688.
+    head_w = torch.empty(131072, 2688, dtype=torch.bfloat16, device="meta")
+
+    def test_a_top_k_support_fills_one_vocab_tile(self) -> None:
+        assert support_chunk_rows(512, self.head_w, 50) == 499
+
+    def test_a_narrow_support_takes_more_rows_than_the_tile(self) -> None:
+        assert support_chunk_rows(512, self.head_w, 20) == 1248
+
+    def test_a_vocab_wide_support_takes_one_row(self) -> None:
+        assert support_chunk_rows(512, self.head_w, 131072) == 1
 
 
 class TestFusedLinearLogProbsFunctionSupport:

@@ -600,9 +600,15 @@ class TestSupportRowsBytes:
             3739 * 20 * 896 * 4
         )
 
-    def test_a_wide_support_keeps_the_tile_token_count(self):
+    def test_a_wide_support_takes_fewer_tokens_than_the_tile(self):
+        # 441 * 151936 // (1000 * 896) = 74 tokens of 1000 rows.
         assert formulas.support_rows_bytes(QWEN_05B, 441, 1000, 2.0) == (
-            441 * 1000 * 896 * 6
+            74 * 1000 * 896 * 6
+        )
+
+    def test_a_vocab_wide_support_takes_one_token(self):
+        assert formulas.support_rows_bytes(QWEN_05B, 441, 151936, 2.0) == (
+            151936 * 896 * 6
         )
 
 

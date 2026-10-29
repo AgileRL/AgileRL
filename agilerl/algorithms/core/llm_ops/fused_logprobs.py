@@ -224,11 +224,12 @@ def support_chunk_rows(chunk_rows: int, head_w: torch.Tensor, width: int) -> int
     :param width: support width ``K``.
     :type width: int
     :return: Rows whose ``(rows, K, H)`` gather has at most ``chunk_rows * V``
-        elements, and at least ``chunk_rows``.
+        elements, or one row when a single ``(K, H)`` gather exceeds that,
+        since a row's support is scored whole.
     :rtype: int
     """
     vocab, hidden = head_w.shape
-    return max(chunk_rows, chunk_rows * vocab // (width * hidden))
+    return max(1, chunk_rows * vocab // (width * hidden))
 
 
 def split_support_rows(
