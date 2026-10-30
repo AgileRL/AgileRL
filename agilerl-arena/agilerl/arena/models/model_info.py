@@ -54,6 +54,9 @@ ModelModality = Literal["text", "vision"]
 VLLM_LORA_RANKS = (1, 8, 16, 32, 64, 128, 256, 320, 512)
 # vLLM fused MoE LoRA rejects ranks above this.
 FUSED_MOE_LORA_MAX_RANK = 128
+# Trainer expert parallel shards routed and sorted expert stacks only;
+# gpt-oss stores its experts transposed, with per-expert biases.
+EXPERT_PARALLEL_UNSUPPORTED_MODEL_TYPES = frozenset({"gpt_oss"})
 
 # vLLM 0.32 reasoning parser per Hugging Face model_type of a thinking model.
 # vLLM enforces thinking_token_budget by forcing the parser's reasoning-end token.
@@ -244,8 +247,11 @@ class ModelInfo(BaseModel):
     @computed_field
     @property
     def supports_expert_parallel(self) -> bool:
-        """True when the model has packed expert modules."""
-        return bool(self.parameters)
+        """True when the model has packed experts the trainer can shard over EP."""
+        return (
+            bool(self.parameters)
+            and self.model_type not in EXPERT_PARALLEL_UNSUPPORTED_MODEL_TYPES
+        )
 
     @computed_field
     @property

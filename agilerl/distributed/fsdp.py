@@ -1038,6 +1038,21 @@ def _load_sharded_weights_from_safetensors(model: nn.Module) -> None:
     )
 
 
+def _move_ignored_to_device(model: nn.Module, device: str | torch.device) -> None:
+    """Move non-FSDP-managed params and buffers to the compute device.
+
+    With ``cpu_offload`` everything materializes on CPU, but FSDP only
+    gathers managed (DTensor) parameters. Ignored ones (embeddings, tiny
+    replicated params) and buffers would stay on CPU and fail the first
+    forward against CUDA inputs. Each tensor keeps its identity, so tied
+    weights stay tied.
+    """
+    compute = torch.device(device)
+    for tensor in [*model.parameters(), *model.buffers()]:
+        if not isinstance(tensor, DTensor):
+            tensor.data = tensor.data.to(compute)
+
+
 def materialize_fsdp2_from_cpu_state(
     model: nn.Module,
     device: str | torch.device,
@@ -1075,6 +1090,18 @@ def materialize_fsdp2_from_cpu_state(
         msg = (
             f"FSDPConfig(ep={config.ep}, tp={config.tp}, "
             f"shard_group_size={config.shard_group_size}) needs a ParallelMesh"
+        )
+        raise ValueError(msg)
+    if (
+        config.cpu_offload
+        and config.ep > 1
+        and parallel_mesh is not None
+        and parallel_mesh.leftover_dp == 1
+    ):
+        msg = (
+            f"FSDPConfig.cpu_offload with ep={config.ep} spanning the whole shard "
+            "group keeps experts out of FSDP, so they would stay on CPU. Use "
+            "optim_cpu_offload instead."
         )
         raise ValueError(msg)
     has_meta = any(param.is_meta for param in model.parameters())
@@ -1152,6 +1179,8 @@ def materialize_fsdp2_from_cpu_state(
             _scatter_ep_expert_slices(model, cpu_state, expert_keys)
         set_full_model_state_dict(model, cpu_state, strict=True, skip=expert_keys)
         _restore_nonpersistent_buffers(model, cpu_buffers or {})
+    if config.cpu_offload:
+        _move_ignored_to_device(model, device)
     if experts_skip_fsdp:
         assert_packed_experts_ep_sharded(
             model, config.ep, modules=[mod for _name, mod in packed_ep_modules]

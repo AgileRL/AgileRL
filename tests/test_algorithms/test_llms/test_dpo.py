@@ -644,6 +644,58 @@ class TestDPOLigerHiddenCapture:
         dpo.clean_up()
 
 
+class TestDPOLigerHeadDtype:
+    def test_head_matches_hidden_state_dtype(self, monkeypatch):
+        # Arrange: a bf16 lm_head behind fp32 hidden states.
+        vocab_size = 30
+        dpo = _make_cpu_dpo_for_branch_tests(
+            vocab_size=vocab_size,
+            input_size=5,
+            max_tokens=10,
+        )
+        monkeypatch.setattr("agilerl.algorithms.dpo.HAS_LIGER_KERNEL", True)
+        lm_head = dpo._get_lm_head()
+        lm_head.weight.data = lm_head.weight.data.to(torch.bfloat16)
+        captured = {}
+
+        class _FakeLigerDPO:
+            @staticmethod
+            def apply(
+                policy_hidden, weight, target, bias, ref_hidden, ref_weight, *rest
+            ):
+                captured["hidden"] = policy_hidden.dtype
+                captured["weight"] = weight.dtype
+                captured["ref_weight"] = ref_weight.dtype
+                return torch.zeros(()), tuple(torch.zeros(()) for _ in range(7))
+
+        monkeypatch.setattr(
+            "agilerl.algorithms.dpo.LigerDPOWithAlpha", _FakeLigerDPO, raising=False
+        )
+        b, seq_len = 2, 6
+        ids = torch.randint(0, vocab_size, (b, seq_len))
+        attn = torch.ones((b, seq_len), dtype=torch.long)
+        mask = torch.ones((b, seq_len - 1), dtype=torch.long)
+
+        # Act
+        dpo._dpo_loss_liger(
+            chosen_ids=ids,
+            rejected_ids=ids,
+            chosen_attn=attn,
+            rejected_attn=attn,
+            chosen_mask=mask,
+            rejected_mask=mask,
+        )
+
+        # Assert
+        assert captured == {
+            "hidden": torch.float32,
+            "weight": torch.float32,
+            "ref_weight": torch.float32,
+        }
+
+        dpo.clean_up()
+
+
 class TestDPOLoad:
     def test_dpo_load(self):
         with pytest.raises(NotImplementedError):

@@ -2895,6 +2895,27 @@ class HiddenStateHead(torch.nn.Identity):
         return torch.empty(0, dtype=self._weight_dtype)
 
 
+def match_liger_head_dtype(
+    head_w: torch.Tensor,
+    head_b: torch.Tensor | None,
+    dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Cast a gathered ``lm_head`` to the hidden-state dtype.
+
+    Liger kernels matmul hidden states against the head in one dtype; hidden
+    states can come out fp32 against a bf16 head.
+
+    :param head_w: Gathered head weight.
+    :param head_b: Gathered head bias, or None.
+    :param dtype: Hidden-state dtype to cast to.
+    :return: Cast weight and bias.
+    """
+    head_w = head_w.to(dtype=dtype)
+    if head_b is not None:
+        head_b = head_b.to(dtype=dtype)
+    return head_w, head_b
+
+
 class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT]):
     """Base object for all LLM algorithms in the AgileRL framework.
 
@@ -3872,7 +3893,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         result = self.shard_runtime.prepare_actor(
             self.actor,
             device=self.device,
-            colocated=self.colocated,
             cosine_lr_schedule_config=self.cosine_lr_schedule_config,
             lr=self.lr,
             lr_critic=self.lr_critic,
@@ -7216,7 +7236,15 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :type group_size: int
         :return: Per-prompt completion token tensors and matching action masks.
         :rtype: tuple[list[torch.Tensor], list[torch.Tensor]]
+        :raises ValueError: When FSDP ``cpu_offload`` keeps parameters on the CPU.
         """
+        if self.fsdp_config is not None and self.fsdp_config.cpu_offload:
+            msg = (
+                "HuggingFace generate does not support FSDP2 cpu_offload: it "
+                "assumes parameters live on the compute device. Set vllm_config "
+                "or use optim_cpu_offload instead (parameters stay on GPU)."
+            )
+            raise ValueError(msg)
         actor_device = self.shard_runtime.actor_compute_device(
             self.actor, torch.device(self.device)
         )

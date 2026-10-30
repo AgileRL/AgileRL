@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
     from agilerl.llm_envs import DatasetEnv
 
-from agilerl.algorithms.core.base import LLMAlgorithm
+from agilerl.algorithms.core.base import LLMAlgorithm, match_liger_head_dtype
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.distributed import (
     FSDPConfig,
@@ -595,6 +595,7 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         ref_hidden = ref_hidden[:, :-1, :].contiguous()
 
         with self._liger_head_gather() as (head_w, head_b):
+            head_w, head_b = match_liger_head_dtype(head_w, head_b, policy_hidden.dtype)
             loss, aux = LigerDPOWithAlpha.apply(
                 policy_hidden,
                 head_w,

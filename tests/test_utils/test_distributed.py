@@ -61,6 +61,7 @@ from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import (
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeForCausalLM
 
 from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.distributed import (
     CPUOffloadOptimizer,
     FSDPConfig,
@@ -1833,7 +1834,6 @@ class TestFSDPPrepareActorOffload:
             result = FSDPRuntime(config).prepare_actor(
                 actor,
                 device=device,
-                colocated=device != "cpu",
                 cosine_lr_schedule_config=None,
                 lr=1e-4,
                 lr_critic=None,
@@ -1869,7 +1869,6 @@ class TestFSDPPrepareActorOffload:
                 ).prepare_actor(
                     actor,
                     device="cpu",
-                    colocated=False,
                     cosine_lr_schedule_config=None,
                     lr=1e-4,
                     lr_critic=None,
@@ -1895,7 +1894,6 @@ class TestFSDPPrepareActorOffload:
             ).prepare_actor(
                 nn.Linear(2, 2),
                 device="cpu",
-                colocated=False,
                 cosine_lr_schedule_config=None,
                 lr=1e-4,
                 lr_critic=None,
@@ -1915,14 +1913,13 @@ class TestFSDPPrepareActorOffload:
             runtime.prepare_actor(
                 nn.Linear(2, 2),
                 device="cpu",
-                colocated=True,
                 cosine_lr_schedule_config=None,
                 lr=1e-4,
                 lr_critic=None,
                 restore_adapter_trainability=MagicMock(),
             )
 
-    def test_rejects_cpu_offload_without_colocated_vllm(self):
+    def test_accepts_cpu_offload_without_a_colocated_engine(self):
         # Arrange
         runtime = FSDPRuntime(
             FSDPConfig(
@@ -1930,17 +1927,22 @@ class TestFSDPPrepareActorOffload:
             )
         )
 
-        # Act / Assert
-        with pytest.raises(ValueError, match="requires colocated vLLM"):
-            runtime.prepare_actor(
+        # Act
+        with patch(
+            "agilerl.distributed.runtime.materialize_fsdp2_from_cpu_state",
+            side_effect=lambda m, _d, _c, **_k: m,
+        ):
+            result = runtime.prepare_actor(
                 nn.Linear(2, 2),
                 device="cpu",
-                colocated=False,
                 cosine_lr_schedule_config=None,
                 lr=1e-4,
                 lr_critic=None,
                 restore_adapter_trainability=MagicMock(),
             )
+
+        # Assert
+        assert result.optimizer is not None
 
 
 class _LoraActor(nn.Module):
@@ -1967,7 +1969,6 @@ def _prepare_dp_actor(
     return DPRuntime().prepare_actor(
         actor,
         device=device,
-        colocated=False,
         cosine_lr_schedule_config=cosine_lr_schedule_config,
         lr=lr,
         lr_critic=None,
@@ -2247,7 +2248,6 @@ def _prepare_fsdp_actor(actor: nn.Module) -> tuple[FSDPRuntime, PrepareResult]:
         result = runtime.prepare_actor(
             actor,
             device="cpu",
-            colocated=False,
             cosine_lr_schedule_config=None,
             lr=1e-2,
             lr_critic=None,
@@ -4514,6 +4514,15 @@ class TestValidateActorEp:
         with pytest.raises(ValueError, match="expert count 3 is not divisible"):
             validate_actor_ep(model, 2, world_size=4)
 
+    def test_rejects_gpt_oss_as_model_info_reports(self) -> None:
+        # Arrange: transposed, biased experts with an even expert count.
+        model = AutoModelForCausalLM.from_config(MOE_CONFIGS["gpt_oss"]())
+
+        # Act / Assert
+        with pytest.raises(ValueError, match="packed-expert"):
+            validate_actor_ep(model, 2, world_size=2)
+        assert not SUPPORTED_MODEL_INFO["openai/gpt-oss-20b"].supports_expert_parallel
+
 
 class TestValidateEpDegree:
     @pytest.mark.parametrize("ep", [1, 2, 8])
@@ -4596,7 +4605,6 @@ class TestFSDPPrepareActorExpertParallel:
             ).prepare_actor(
                 actor,
                 device="cpu",
-                colocated=False,
                 cosine_lr_schedule_config=None,
                 lr=1e-4,
                 lr_critic=None,

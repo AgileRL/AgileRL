@@ -10,7 +10,7 @@ import numpy.typing as npt
 import torch
 
 from agilerl import HAS_LIGER_KERNEL
-from agilerl.algorithms.core.base import LLMAlgorithm
+from agilerl.algorithms.core.base import LLMAlgorithm, match_liger_head_dtype
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.distributed import (
     FSDPConfig,
@@ -339,9 +339,9 @@ class SFT(LLMAlgorithm[SFTPrompts]):
             # Liger fused-linear CE: loss computed in bounded ``(chunk, V)`` tiles.
             flat_hidden = shift_hidden.view(-1, shift_hidden.size(-1))
             with self._liger_head_gather() as (head_w, head_b):
-                head_w = head_w.to(dtype=flat_hidden.dtype)
-                if head_b is not None:
-                    head_b = head_b.to(dtype=flat_hidden.dtype)
+                head_w, head_b = match_liger_head_dtype(
+                    head_w, head_b, flat_hidden.dtype
+                )
                 loss = LigerFusedLinearCrossEntropyLoss(
                     ignore_index=-100, softcap=self.final_logit_softcap
                 )(head_w, flat_hidden, labels.view(-1), head_b)

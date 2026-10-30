@@ -14,6 +14,7 @@ from agilerl.arena.memory.manifest import (
     check_fp8_moe_backend_for_device,
     device_spec_from_resource_class,
     lookup_gpu,
+    marlin_pads_non_gated_experts,
     resolve_training_memory,
     training_settings_from_manifest,
     training_settings_from_spec,
@@ -1205,6 +1206,49 @@ class TestCheckFp8MoeBackendForDevice:
         check_fp8_moe_backend_for_device(quantization, None, True, 8, 0)
 
 
+LIGHTNING = "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16"
+
+
+class TestMarlinPadsNonGatedExperts:
+    def _lightning(self) -> ModelArch:
+        return ModelArch.from_hf_config(SUPPORTED_MODEL_INFO[LIGHTNING].config)
+
+    @pytest.mark.parametrize("width", [2, 4, 8])
+    def test_misaligned_relu2_expert_shard_pads(self, width: int) -> None:
+        assert marlin_pads_non_gated_experts(
+            "fp8", "marlin", self._lightning(), width, False
+        )
+
+    def test_aligned_expert_width_does_not_pad(self) -> None:
+        # Lightning's 1856-wide experts are a multiple of 64 on one GPU.
+        assert not marlin_pads_non_gated_experts(
+            "fp8", "marlin", self._lightning(), 1, False
+        )
+
+    def test_engine_expert_parallel_keeps_experts_whole(self) -> None:
+        assert not marlin_pads_non_gated_experts(
+            "fp8", "marlin", self._lightning(), 2, True
+        )
+
+    def test_gated_experts_do_not_pad(self) -> None:
+        arch = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["Qwen/Qwen3.6-35B-A3B"].config
+        )
+
+        assert not marlin_pads_non_gated_experts("fp8", "marlin", arch, 8, False)
+
+    @pytest.mark.parametrize(
+        ("quantization", "moe_backend"),
+        [(None, "marlin"), ("awq", "marlin"), ("fp8", "triton"), ("fp8", None)],
+    )
+    def test_other_quantization_or_backend_does_not_pad(
+        self, quantization: str | None, moe_backend: str | None
+    ) -> None:
+        assert not marlin_pads_non_gated_experts(
+            quantization, moe_backend, self._lightning(), 2, False
+        )
+
+
 class TestRunConfigFp8MoeBackend:
     def _doc(self, quantization: str, moe_backend: str | None = None) -> dict:
         algorithm: dict[str, object] = {"vllm_config": {"quantization": quantization}}
@@ -1238,6 +1282,18 @@ class TestRunConfigFp8MoeBackend:
         )
 
         assert config.generation.weight_quantization == "fp8"
+
+    def test_misaligned_non_gated_marlin_sizes_bf16(self) -> None:
+        # 96-wide relu2 experts are not a multiple of Marlin's 64-row tile.
+        config = dict(self._moe_config(), hidden_act="relu2", moe_intermediate_size=96)
+
+        run = run_config_from_manifest(
+            self._doc("fp8", "marlin"),
+            device_spec_from_resource_class(A100_TIER),
+            config,
+        )
+
+        assert run.generation.weight_quantization == "none"
 
     def test_fp8_per_block_without_marlin_reports_marlin_first(self) -> None:
         with pytest.raises(ValueError, match="moe_backend='marlin'"):

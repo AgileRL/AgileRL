@@ -27,6 +27,7 @@ import pytest
 import torch
 import torch.distributed as dist
 from peft import LoraConfig, inject_adapter_in_model
+from peft.tuners.lora.layer import ParamWrapper
 from safetensors.torch import save_file
 from torch import nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
@@ -2820,6 +2821,25 @@ class TestRoutingOverride:
 
         assert module not in ROUTING_STATE
 
+    def test_override_covers_the_wrapper_chain(self) -> None:
+        # Arrange: outer wrapper over a member holding stale mixed routing.
+        member = MagicMock(spec=ParamWrapper)
+        member.parameter_name = "down_proj"
+        member.base_layer = MagicMock()
+        outer = MagicMock(spec=ParamWrapper)
+        outer.parameter_name = "gate_up_proj"
+        outer.base_layer = member
+        ROUTING_STATE[member] = ["actor", "critic"]
+
+        # Act
+        with _routing_override(outer, ["actor"]):
+            # Assert
+            assert ROUTING_STATE[outer] == ["actor"]
+            assert ROUTING_STATE[member] == ["actor"]
+
+        assert outer not in ROUTING_STATE
+        assert ROUTING_STATE[member] == ["actor", "critic"]
+
 
 class TestRunLocalExperts:
     def test_empty_rows_keep_trainable_params_in_the_graph(self):
@@ -2947,6 +2967,21 @@ class TestMaterializeNeedsMesh:
             materialize_fsdp2_from_cpu_state(
                 nn.Linear(2, 2), "cpu", FSDPConfig(ep=2), parallel_mesh=None
             )
+
+
+class TestMaterializeCpuOffloadWithExpertsOutsideFsdp:
+    def test_ep_spanning_the_shard_group_raises_and_keeps_the_weights(self):
+        # Arrange: one rank per shard group holds each expert, so experts skip FSDP.
+        model = nn.Linear(2, 2)
+        weight = model.weight.detach().clone()
+        mesh = MagicMock(spec=ParallelMesh, leftover_dp=1)
+
+        # Act / Assert
+        with pytest.raises(ValueError, match="experts out of FSDP"):
+            materialize_fsdp2_from_cpu_state(
+                model, "cpu", FSDPConfig(ep=2, cpu_offload=True), parallel_mesh=mesh
+            )
+        assert torch.equal(model.weight, weight)
 
 
 class TestMaterializeNeedsChunkSize:
