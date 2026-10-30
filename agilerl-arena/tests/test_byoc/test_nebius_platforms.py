@@ -603,7 +603,7 @@ class TestRegionCapacityForPreset:
             (row.region, row.zones, row.enabled, row.available) for row in capacities
         ] == [
             ("eu-north1", ("fabric-2", "fabric-7"), True, 14),
-            ("us-central1", (), False, 0),
+            ("us-central1", ("fabric-3",), True, 0),
         ]
 
     def test_skips_advice_rows_that_are_not_usable(self) -> None:
@@ -647,7 +647,7 @@ class TestRegionCapacityForPreset:
             for row in region_capacity_for_preset(
                 items, "gpu-l40s-a", "1gpu-16vcpu-64gb"
             )
-        ] == [("eu-west1", (), False, 0)]
+        ] == [("eu-west1", (), True, 0)]
 
     def test_list_capacity_advice_queries_the_tenant(
         self, monkeypatch: pytest.MonkeyPatch
@@ -780,6 +780,11 @@ class TestRegisterClassesCommand:
         assert compute["gramPerGpu"] == 96
         assert api.create_class.call_count == 1
         assert created["availabilities"] == []
+        assert created["enabled"] is False
+        assert (
+            "Disabled 'test-gpu-rtx6000-a-1gpu-16vcpu-200gb'. "
+            "The preset is not offered in any Nebius region." in result.output
+        )
 
     def test_registers_region_capacity_for_the_preset(
         self,
@@ -859,13 +864,14 @@ class TestRegisterClassesCommand:
             },
             {
                 "region": "us-central1",
-                "zones": [],
-                "enabled": False,
+                "zones": ["fabric-1"],
+                "enabled": True,
             },
         ]
+        assert created["enabled"] is True
         assert (
-            "Availability for 'test-gpu-rtx6000-a-1gpu-16vcpu-200gb': eu-north1 (24)."
-            in result.output
+            "Added availability for 'test-gpu-rtx6000-a-1gpu-16vcpu-200gb': "
+            "eu-north1 (24), us-central1 (0)." in result.output
         )
 
     def test_refreshes_availability_when_the_class_already_matches(self) -> None:

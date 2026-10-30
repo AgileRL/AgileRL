@@ -63,6 +63,7 @@ class ClusterResourceClass:
     metadata: dict[str, object]
     description: str = ""
     availabilities: tuple[ClassAvailability, ...] | None = None
+    enabled: bool | None = None
 
 
 def _write_yaml(path: Path, data: object, force: bool) -> None:
@@ -415,6 +416,12 @@ def _resource_class_diff(current: dict[str, object], desired: dict[str, object])
     )
 
 
+def _enabled_arg(enabled: bool | None) -> dict[str, bool]:
+    if enabled is None:
+        return {}
+    return {"enabled": enabled}
+
+
 def _availability_body(
     rows: Sequence[ClassAvailability],
 ) -> list[dict[str, object]]:
@@ -424,13 +431,18 @@ def _availability_body(
     ]
 
 
-def _echo_availability(name: str, rows: Sequence[ClassAvailability]) -> None:
+def _echo_availability(
+    name: str, rows: Sequence[ClassAvailability], added: bool
+) -> None:
     enabled = [row for row in rows if row.enabled]
     if not enabled:
-        click.echo(f"No Nebius region has capacity for {name!r}.")
+        click.echo(
+            f"Disabled {name!r}. The preset is not offered in any Nebius region."
+        )
         return
     listed = ", ".join(f"{row.region} ({row.available})" for row in enabled)
-    click.echo(f"Availability for {name!r}: {listed}.")
+    verb = "Added" if added else "Updated"
+    click.echo(f"{verb} availability for {name!r}: {listed}.")
 
 
 def _stored_class_fields(
@@ -469,10 +481,12 @@ def _update_existing_resource_class(
             )
             return resource_class.name
         api.replace_class_availabilities(
-            resource_class.name, _availability_body(availabilities)
+            resource_class.name,
+            _availability_body(availabilities),
+            **_enabled_arg(resource_class.enabled),
         )
         click.echo(f"Resource class {resource_class.name!r} already matches.")
-        _echo_availability(resource_class.name, availabilities)
+        _echo_availability(resource_class.name, availabilities, False)
         return resource_class.name
     click.echo(f"Resource class {resource_class.name!r} already exists:")
     click.echo(_resource_class_diff(current, desired_view))
@@ -489,10 +503,11 @@ def _update_existing_resource_class(
         metadata=desired_view["metadata"],
         description=resource_class.description,
         availabilities=availability_body,
+        **_enabled_arg(resource_class.enabled),
     )
     click.echo(f"Updated resource class {updated.get('name', resource_class.name)!r}.")
     if availabilities is not None:
-        _echo_availability(resource_class.name, availabilities)
+        _echo_availability(resource_class.name, availabilities, False)
     return resource_class.name
 
 
@@ -531,10 +546,11 @@ def ensure_resource_class(
         metadata=resource_class.metadata,
         description=resource_class.description,
         availabilities=availability_body,
+        **_enabled_arg(resource_class.enabled),
     )
     click.echo(f"Created resource class {created.get('name', resource_class.name)!r}.")
     if availabilities is not None:
-        _echo_availability(resource_class.name, availabilities)
+        _echo_availability(resource_class.name, availabilities, True)
     return resource_class.name
 
 

@@ -31,6 +31,7 @@ NEBIUS_GPU_WORKER_PRESET = re.compile(
     r"^(?P<gpus>\d+)gpu-(?P<cpus>\d+)vcpu-(?P<memory_gb>\d+)gb$"
 )
 NEBIUS_GPU_VRAM_GIB = {
+    "gpu-gb300": 279,
     "gpu-b300-sxm": 288,
     "gpu-b200-sxm": 180,
     "gpu-b200-sxm-a": 180,
@@ -42,6 +43,7 @@ NEBIUS_GPU_VRAM_GIB = {
     "gpu-l40s-d": 48,
 }
 NEBIUS_GPU_NAMES = {
+    "gpu-gb300": "NVIDIA® GB300",
     "gpu-b300-sxm": "NVIDIA® B300",
     "gpu-b200-sxm": "NVIDIA® B200",
     "gpu-b200-sxm-a": "NVIDIA® B200",

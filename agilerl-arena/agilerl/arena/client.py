@@ -117,6 +117,21 @@ class _TokenStore:
         self.refresh_token = None
 
 
+def _pause_for_rate_limit(response: httpx.Response) -> None:
+    """Wait for the Arena ``Retry-After`` delay before sending the request again."""
+    raw = response.headers.get("Retry-After")
+    try:
+        wait = int(raw)
+    except (TypeError, ValueError):
+        wait = 1
+    if wait < 1:
+        wait = 1
+    elif wait > 60:
+        wait = 60
+    logger.warning("Arena rate limit reached; retrying in %s seconds.", wait)
+    time.sleep(wait)
+
+
 def _check_writable_target(path: Path) -> None:
     """Ensure *path* can be created as a new file, making parent dirs as needed.
 
@@ -1920,6 +1935,7 @@ class ArenaClient:
         stream: bool = False,
         timeout: int | None = None,
         _retried: bool = False,
+        _rate_limit_attempts: int = 0,
         **kwargs: Any,
     ) -> httpx.Response:
         """Send an HTTP request with auth injection, 401-retry, and error handling.
@@ -2031,6 +2047,21 @@ class ArenaClient:
                 msg,
                 sdk_hint="Please run client.login() again.",
                 cli_hint="Please run 'arena login' to re-authenticate.",
+            )
+
+        if resp.status_code == 429 and _rate_limit_attempts < 5:
+            self._read_response_body(resp, stream=stream)
+            _pause_for_rate_limit(resp)
+            self._rewind_upload_files(kwargs.get("files"))
+            return self._send(
+                method,
+                path,
+                stream=stream,
+                timeout=timeout,
+                _retried=_retried,
+                _rate_limit_attempts=_rate_limit_attempts + 1,
+                headers=request_headers,
+                **kwargs,
             )
 
         # Handle non-success responses.

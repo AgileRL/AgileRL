@@ -1835,6 +1835,55 @@ nebius:
         assert config["storage_project_id"] == "storage-project-1"
         assert config["subnet_id"] == "subnet-1"
 
+    def test_sends_terraform_project_ids_when_arena_stored_null(
+        self,
+        command_config: CommandConfig,
+        client_context: Callable[[MagicMock], MagicMock],
+        tmp_path: Path,
+    ) -> None:
+        spec_path = tmp_path / "cluster.yaml"
+        spec_path.write_text(NEBIUS_SPEC, encoding="utf-8")
+        client = MagicMock()
+        client._request.return_value = [
+            {
+                "name": "spec-cluster",
+                "byoc_provider": {
+                    "provider": "nebius",
+                    "config": {
+                        "tenant_id": "tenant",
+                        "region": "eu-north1",
+                        "project_id": None,
+                        "storage_project_id": None,
+                    },
+                },
+            }
+        ]
+        with (
+            patch(
+                "agilerl.arena.byoc.commands.ClusterProvisioner.status",
+                return_value={
+                    "project_id": "project-created",
+                    "storage_project_id": "storage-created",
+                    "worker_node_group_ids": {"workers": "ng-1"},
+                },
+            ),
+            patch(
+                "agilerl.arena.byoc.commands.arena_client",
+                return_value=client_context(client),
+            ),
+            patch("agilerl.arena.byoc.commands.run_cluster_register") as run_mock,
+        ):
+            result = CliRunner().invoke(
+                build_cluster_register_command(),
+                ["nebius", "--spec", str(spec_path), "--skip-enable"],
+                obj=command_config,
+            )
+
+        assert result.exit_code == 0, result.output
+        config = run_mock.call_args.kwargs["byoc_provider"]["config"]
+        assert config["project_id"] == "project-created"
+        assert config["storage_project_id"] == "storage-created"
+
     def test_does_not_provision_when_stored_settings_cannot_be_loaded(
         self,
         command_config: CommandConfig,
@@ -2221,7 +2270,9 @@ class TestEnsureResourceClassDescription:
 
         assert name == "gpu"
         api.replace_class_availabilities.assert_called_once()
-        assert "Availability for 'gpu': eu-north1 (4)." in capsys.readouterr().out
+        assert (
+            "Updated availability for 'gpu': eu-north1 (4)." in capsys.readouterr().out
+        )
 
     def test_reports_when_no_region_has_capacity(
         self, capsys: pytest.CaptureFixture[str]
@@ -2234,19 +2285,41 @@ class TestEnsureResourceClassDescription:
             num_nodes=1,
             node_selector={"pool": "a"},
             metadata={},
-            availabilities=(
-                ClassAvailability(
-                    region="us-central1",
-                    zones=(),
-                    enabled=False,
-                    available=0,
-                ),
-            ),
+            availabilities=(),
+            enabled=False,
         )
 
         ensure_resource_class(api, "cluster", resource, yes=True)
 
-        assert "No Nebius region has capacity for 'gpu'." in capsys.readouterr().out
+        assert (
+            "Disabled 'gpu'. The preset is not offered in any Nebius region."
+            in capsys.readouterr().out
+        )
+        assert api.create_class.call_args.kwargs["enabled"] is False
+
+    def test_disables_a_matching_class_when_no_region_offers_the_preset(
+        self,
+    ) -> None:
+        api = MagicMock()
+        api.find_class.return_value = {
+            "num_nodes": 1,
+            "node_selector": {"pool": "a"},
+            "metadata": {},
+        }
+        resource = ClusterResourceClass(
+            name="gpu",
+            num_nodes=1,
+            node_selector={"pool": "a"},
+            metadata={},
+            availabilities=(),
+            enabled=False,
+        )
+
+        ensure_resource_class(api, "cluster", resource, yes=True)
+
+        api.replace_class_availabilities.assert_called_once_with(
+            "gpu", [], enabled=False
+        )
 
     def test_ignores_a_non_string_stored_description(self) -> None:
         api = MagicMock()
@@ -2325,4 +2398,6 @@ class TestEnsureResourceClassDescription:
         assert api.update_class.call_args.kwargs["availabilities"] == [
             {"region": "eu-north1", "zones": ["fabric-2"], "enabled": True}
         ]
-        assert "Availability for 'gpu': eu-north1 (4)." in capsys.readouterr().out
+        assert (
+            "Updated availability for 'gpu': eu-north1 (4)." in capsys.readouterr().out
+        )

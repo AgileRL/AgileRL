@@ -547,6 +547,47 @@ class TestRequest:
         assert token_client._tokens.access_token == "new_at"
         assert token_client._http.request.call_count == 2
 
+    @pytest.mark.parametrize(
+        ("retry_after", "expected_wait"),
+        [("2", 2), ("0", 1), ("120", 60)],
+    )
+    def test_429_retries_after_the_server_delay(
+        self, api_key_client, monkeypatch, retry_after: str, expected_wait: int
+    ):
+        limited = MagicMock()
+        limited.status_code = 429
+        limited.is_success = False
+        limited.headers = {"Retry-After": retry_after}
+        limited.text = "Rate limit exceeded"
+        ok = MagicMock()
+        ok.status_code = 200
+        ok.is_success = True
+        ok.headers = {"content-type": "application/json"}
+        ok.json.return_value = {"ok": True}
+        api_key_client._http.request = MagicMock(side_effect=[limited, ok])
+        slept: list[int] = []
+        monkeypatch.setattr("agilerl.arena.client.time.sleep", slept.append)
+
+        result = api_key_client._request("GET", "/api/test")
+
+        assert result == {"ok": True}
+        assert slept == [expected_wait]
+
+    def test_429_raises_when_the_limit_persists(self, api_key_client, monkeypatch):
+        limited = MagicMock()
+        limited.status_code = 429
+        limited.is_success = False
+        limited.headers = {}
+        limited.text = "Rate limit exceeded"
+        api_key_client._http.request = MagicMock(return_value=limited)
+        monkeypatch.setattr("agilerl.arena.client.time.sleep", lambda _seconds: None)
+
+        with pytest.raises(ArenaAPIError, match="Rate limit exceeded") as exc_info:
+            api_key_client._request("GET", "/api/test")
+
+        assert exc_info.value.status_code == 429
+        assert api_key_client._http.request.call_count == 6
+
     def test_default_timeout_defers_to_client_default(self, api_key_client):
         """timeout=None must not disable timeouts (httpx semantics)."""
         mock_resp = MagicMock()

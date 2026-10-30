@@ -790,9 +790,22 @@ def _register_existing_cluster(
     if cluster_spec is not None:
         values = _terraform_outputs_for_register(config, cluster_spec, options)
         resource_classes = _resource_classes_from_outputs(cluster_spec, values)
-        byoc_provider = fields.get("byoc_provider")
-        if isinstance(byoc_provider, dict):
-            attach_service_account_credentials(byoc_provider, values)
+
+        def output_text(key: str) -> str | None:
+            raw = values.get(key)
+            if isinstance(raw, str) and raw.strip():
+                return raw.strip()
+            return None
+
+        if isinstance(fields.get("byoc_provider"), dict):
+            fields["byoc_provider"] = get_provider(
+                cluster_spec.provider
+            ).registration_payload(
+                cluster_spec,
+                project_id=output_text("project_id"),
+                storage_project_id=output_text("storage_project_id"),
+            )
+            attach_service_account_credentials(fields["byoc_provider"], values)
     kubeconfig = _kubeconfig_for_register_install(
         config, cluster_spec, registration, options, output_dir
     )
@@ -1259,6 +1272,7 @@ def _register_gpu_resource_classes(
     names = set(_selected_worker_names(updated, selected))
     classes = _classes_for_workers(updated, group_ids, names, selected)
     advice = list_capacity_advice(spec.nebius_cloud().tenant_id)
+    api.load_classes()
     for resource_class in classes:
         ensure_resource_class(
             api,
@@ -1277,6 +1291,7 @@ def _with_region_capacity(
     rows = region_capacity_for_preset(advice, gpu["type"], compute["machineType"])
     return replace(
         resource_class,
+        enabled=bool(rows),
         availabilities=tuple(
             ClassAvailability(
                 region=row.region,
