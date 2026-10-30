@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "name": "arena-cluster-nebius",
+  "provider": "nebius",
+  "version": "1.0.0",
+  "orchestration": "nebius.v1",
+  "terraform_version": ">= 1.10.0",
+  "archive": "module.tar.gz",
+  "digest": "sha256:a238dbb11c7daf4db895450652910a524cfb53024fcab1b533833444acab7401",
+  "files": [
+    "main.tf",
+    "outputs.tf",
+    "variables.tf"
+  ]
+}
