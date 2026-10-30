@@ -63,6 +63,17 @@ class TestByocApi:
         mock_client._invoke_manifest_command.return_value = [{"name": "pool", "id": 7}]
         assert byoc_api.find_class("pool") == {"name": "pool", "id": 7}
 
+    def test_load_classes_lists_once(
+        self, byoc_api: ByocApi, mock_client: MagicMock
+    ) -> None:
+        mock_client._invoke_manifest_command.return_value = [{"name": "pool", "id": 7}]
+
+        byoc_api.load_classes()
+
+        assert byoc_api.find_class("pool") == {"name": "pool", "id": 7}
+        assert byoc_api.find_class("other") is None
+        mock_client._invoke_manifest_command.assert_called_once()
+
     def test_delete_class_skips_when_absent(
         self, byoc_api: ByocApi, mock_client: MagicMock
     ) -> None:
@@ -234,6 +245,25 @@ class TestByocApi:
         _invoke, body = mock_client._invoke_manifest_command.call_args.args
         assert body["availabilities"] == availabilities
 
+    def test_create_class_disables_when_no_region_offers_the_preset(
+        self, byoc_api: ByocApi, mock_client: MagicMock
+    ) -> None:
+        mock_client._invoke_manifest_command.return_value = {"name": "gpu"}
+
+        byoc_api.create_class(
+            name="gpu",
+            num_nodes=1,
+            cluster_name="prod-cluster",
+            node_selector={"nebius.com/platform": "gpu-l40s-d"},
+            metadata={"computeResource": {"numCpus": 32}},
+            availabilities=[],
+            enabled=False,
+        )
+
+        _invoke, body = mock_client._invoke_manifest_command.call_args.args
+        assert body["enabled"] is False
+        assert body["availabilities"] == []
+
     def test_update_class_sends_region_availability(
         self, byoc_api: ByocApi, mock_client: MagicMock
     ) -> None:
@@ -253,6 +283,22 @@ class TestByocApi:
         _invoke, body = mock_client._invoke_manifest_command.call_args.args
         assert body["availabilities"] == availabilities
 
+    def test_update_class_sends_enabled(
+        self, byoc_api: ByocApi, mock_client: MagicMock
+    ) -> None:
+        mock_client._invoke_manifest_command.return_value = {"name": "gpu"}
+
+        byoc_api.update_class(
+            name="gpu",
+            num_nodes=1,
+            node_selector={"nebius.com/platform": "gpu-l40s-d"},
+            metadata={"computeResource": {"numCpus": 32}},
+            enabled=False,
+        )
+
+        _invoke, body = mock_client._invoke_manifest_command.call_args.args
+        assert body["enabled"] is False
+
     def test_replace_class_availabilities_sends_only_regions(
         self, byoc_api: ByocApi, mock_client: MagicMock
     ) -> None:
@@ -268,6 +314,20 @@ class TestByocApi:
         assert body == {
             "name": "arena-nebius-gpu",
             "availabilities": availabilities,
+        }
+
+    def test_replace_class_availabilities_sends_enabled(
+        self, byoc_api: ByocApi, mock_client: MagicMock
+    ) -> None:
+        mock_client._invoke_manifest_command.return_value = {"name": "gpu"}
+
+        byoc_api.replace_class_availabilities("gpu", [], enabled=False)
+
+        _invoke, body = mock_client._invoke_manifest_command.call_args.args
+        assert body == {
+            "name": "gpu",
+            "availabilities": [],
+            "enabled": False,
         }
 
     def test_replace_class_availabilities_rejects_non_dict_response(

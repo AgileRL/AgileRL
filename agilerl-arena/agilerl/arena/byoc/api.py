@@ -111,6 +111,7 @@ class ByocApi:
         :type client: ArenaClient
         """
         self._client = client
+        self._listed_classes: object | None = None
 
     def enable(self) -> None:
         """Enable the BYOC provider for the account.
@@ -138,6 +139,10 @@ class ByocApi:
         """
         return self._client._invoke_manifest_command(endpoints.LIST_CLASSES, {})
 
+    def load_classes(self) -> None:
+        """Fetch resource classes once for later lookups."""
+        self._listed_classes = self.list_classes()
+
     def find_class(self, name: str) -> dict[str, Any] | None:
         """Return the resource class named *name*, or ``None`` if it does not exist.
 
@@ -146,7 +151,12 @@ class ByocApi:
         :returns: The matching class dictionary, or ``None`` if absent.
         :rtype: dict[str, Any] | None
         """
-        return class_by_name(self.list_classes(), name)
+        classes = (
+            self.list_classes()
+            if self._listed_classes is None
+            else self._listed_classes
+        )
+        return class_by_name(classes, name)
 
     def delete_class(self, name: str) -> None:
         """Delete the resource class named *name* if it is registered in Arena.
@@ -333,6 +343,7 @@ class ByocApi:
         metadata: dict[str, object],
         description: str = "",
         availabilities: list[dict[str, object]] | None = None,
+        enabled: bool | None = None,
     ) -> dict[str, Any]:
         """Create a BYOC resource class linked to a registered cluster."""
         logger.info(
@@ -351,6 +362,8 @@ class ByocApi:
             body["description"] = description
         if availabilities is not None:
             body["availabilities"] = availabilities
+        if enabled is not None:
+            body["enabled"] = enabled
         result = self._client._invoke_manifest_command(
             endpoints.CREATE_CLASS,
             body,
@@ -368,6 +381,7 @@ class ByocApi:
         metadata: dict[str, object],
         description: str = "",
         availabilities: list[dict[str, object]] | None = None,
+        enabled: bool | None = None,
     ) -> dict[str, Any]:
         """Update a BYOC resource class."""
         logger.info("Updating BYOC resource class %r…", name)
@@ -381,6 +395,8 @@ class ByocApi:
             body["description"] = description
         if availabilities is not None:
             body["availabilities"] = availabilities
+        if enabled is not None:
+            body["enabled"] = enabled
         result = self._client._invoke_manifest_command(
             endpoints.UPDATE_CLASS,
             body,
@@ -394,12 +410,16 @@ class ByocApi:
         self,
         name: str,
         availabilities: list[dict[str, object]],
+        enabled: bool | None = None,
     ) -> dict[str, Any]:
         """Replace Nebius region availability for a resource class."""
         logger.info("Updating availability for resource class %r…", name)
+        body: dict[str, object] = {"name": name, "availabilities": availabilities}
+        if enabled is not None:
+            body["enabled"] = enabled
         result = self._client._invoke_manifest_command(
             endpoints.UPDATE_CLASS,
-            {"name": name, "availabilities": availabilities},
+            body,
         )
         if not isinstance(result, dict):
             msg = "Unexpected resource class update response from Arena."

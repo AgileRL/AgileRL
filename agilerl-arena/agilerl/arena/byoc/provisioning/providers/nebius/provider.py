@@ -263,6 +263,43 @@ def _optional_string(value: object) -> str | None:
     return value.strip() if isinstance(value, str) and value.strip() else None
 
 
+def _write_nebius_kubeconfig(
+    cluster_id: str,
+    context: str,
+    kubeconfig_path: Path,
+    run: Callable[..., subprocess.CompletedProcess[str]],
+) -> None:
+    """Write a kubeconfig for the Nebius cluster."""
+    if resolve_kubeconfig_executable(["nebius"]) is None:
+        msg = (
+            "Nebius CLI not found. Install it, set NEBIUS_CLI to its path, "
+            "or add ~/.nebius/bin to PATH."
+        )
+        raise click.ClickException(msg)
+    argv = build_nebius_kubeconfig_argv(
+        cluster_id=cluster_id,
+        context_name=context,
+        kubeconfig_path=kubeconfig_path,
+    )
+    try:
+        result = run(argv, check=False, text=True)
+    except FileNotFoundError as exc:
+        msg = (
+            f"Nebius CLI not found: {argv[0]!r}. "
+            "Install it, set NEBIUS_CLI to its path, or add ~/.nebius/bin to PATH."
+        )
+        raise click.ClickException(msg) from exc
+    if result.returncode != 0:
+        msg = (
+            "Could not retrieve kubeconfig from Nebius "
+            f"({argv[0]} exited {result.returncode})."
+        )
+        raise click.ClickException(msg)
+    if not kubeconfig_path.is_file():
+        msg = "Nebius CLI did not write a kubeconfig file."
+        raise click.ClickException(msg)
+
+
 class NebiusProvider:
     """Provision Arena clusters on Nebius.
 
@@ -428,34 +465,7 @@ class NebiusProvider:
             msg = "Terraform output cluster_id must be a non-empty string."
             raise click.ClickException(msg)
         context = str(values["context"])
-        if resolve_kubeconfig_executable(["nebius"]) is None:
-            msg = (
-                "Nebius CLI not found. Install it, set NEBIUS_CLI to its path, "
-                "or add ~/.nebius/bin to PATH."
-            )
-            raise click.ClickException(msg)
-        argv = build_nebius_kubeconfig_argv(
-            cluster_id=cluster_id,
-            context_name=context,
-            kubeconfig_path=kubeconfig_path,
-        )
-        try:
-            result = run(argv, check=False, text=True)
-        except FileNotFoundError as exc:
-            msg = (
-                f"Nebius CLI not found: {argv[0]!r}. "
-                "Install it, set NEBIUS_CLI to its path, or add ~/.nebius/bin to PATH."
-            )
-            raise click.ClickException(msg) from exc
-        if result.returncode != 0:
-            msg = (
-                "Could not retrieve kubeconfig from Nebius "
-                f"({argv[0]} exited {result.returncode})."
-            )
-            raise click.ClickException(msg)
-        if not kubeconfig_path.is_file():
-            msg = "Nebius CLI did not write a kubeconfig file."
-            raise click.ClickException(msg)
+        _write_nebius_kubeconfig(cluster_id, context, kubeconfig_path, run)
         credentials = service_account_credentials(values)
         service_account_key = None if credentials is None else credentials[0]
         service_account_profile = None if credentials is None else credentials[1]
@@ -469,6 +479,8 @@ class NebiusProvider:
             storage_class_name=_optional_string(values.get("storage_class_name")),
             storage_endpoint=_optional_string(values.get("storage_endpoint")),
             storage_bucket=_optional_string(values.get("storage_bucket")),
+            project_id=_optional_string(values.get("project_id")),
+            storage_project_id=_optional_string(values.get("storage_project_id")),
             service_account_key=service_account_key,
             service_account_profile=service_account_profile,
         )
@@ -490,8 +502,8 @@ class NebiusProvider:
         tls_secret_name = inference.tls_secret_name
         outputs = replace(
             outputs,
-            project_id=cloud.project_id,
-            storage_project_id=cloud.storage_project_id,
+            project_id=cloud.project_id or outputs.project_id,
+            storage_project_id=cloud.storage_project_id or outputs.storage_project_id,
             inference_domain=inference_domain,
             inference_hostname_template=hostname_template,
             inference_tls_secret_name=tls_secret_name

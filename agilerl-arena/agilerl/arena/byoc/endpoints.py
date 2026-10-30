@@ -54,6 +54,7 @@ UPDATE_CLASS: ManifestInvoke = {
             "type": "json",
             "required": False,
         },
+        {"name": "enabled", "in": "body", "type": "bool", "required": False},
     ],
 }
 

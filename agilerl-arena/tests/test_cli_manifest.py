@@ -188,11 +188,14 @@ class TestInvokeManifestCommand:
         ) as mocked:
             api_key_client._invoke_manifest_command(
                 UPDATE_CLASS,
-                {"name": "pool", "availabilities": availabilities},
+                {"name": "pool", "availabilities": availabilities, "enabled": False},
             )
         _args, kwargs = mocked.call_args
         assert kwargs["params"] == {"name": "pool"}
-        assert kwargs["json"] == {"availabilities": availabilities}
+        assert kwargs["json"] == {
+            "availabilities": availabilities,
+            "enabled": False,
+        }
 
     def test_rejects_non_allowlisted_path(self, api_key_client: ArenaClient) -> None:
         invoke = {

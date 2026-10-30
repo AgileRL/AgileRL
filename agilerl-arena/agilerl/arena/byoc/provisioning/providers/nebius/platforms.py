@@ -90,15 +90,13 @@ def region_capacity_for_preset(
     for region in sorted(by_region):
         fabrics = by_region[region]
         total = sum(count for _, count in fabrics)
-        zones = tuple(
-            sorted(fabric for fabric, count in fabrics if fabric and count > 0)
-        )
-        # on_demand.available is how many VMs the quota and physical capacity allow.
+        zones = tuple(sorted(fabric for fabric, _count in fabrics if fabric))
+        # A listed region offers the preset. available is the free VM count now.
         capacities.append(
             RegionCapacity(
                 region=region,
                 zones=zones,
-                enabled=total > 0,
+                enabled=True,
                 available=total,
             )
         )

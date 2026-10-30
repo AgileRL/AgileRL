@@ -1832,6 +1832,9 @@ class TestParseNebiusGpuPreset:
 
 
 class TestNebiusGpuVramGib:
+    def test_returns_vram_for_gb300_platform(self) -> None:
+        assert nebius_gpu_vram_gib("gpu-gb300") == 279
+
     def test_returns_vram_for_h100_platform(self) -> None:
         assert nebius_gpu_vram_gib("gpu-h100-sxm") == 80
 
