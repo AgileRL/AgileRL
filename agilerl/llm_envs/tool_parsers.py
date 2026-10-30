@@ -189,7 +189,9 @@ class Granite3ToolParser(ToolParser):
     """
 
     CALL_START = "<|tool_call|>"
+    TURN_END = "<|end_of_text|>"
     REQUIRED_TOKENS: ClassVar[tuple[str, ...]] = (CALL_START,)
+    OPTIONAL_TOKENS: ClassVar[tuple[str, ...]] = (TURN_END,)
 
     def extract(
         self, token_ids: list[int], _tools: list[Any] | None = None, /
@@ -202,7 +204,9 @@ class Granite3ToolParser(ToolParser):
         if content:
             failed = _failed(content, (0, tag), ToolCallParseStatus.MALFORMED_STRUCTURE)
             return token_ids, [failed]
-        raw = self._decode(token_ids[tag + 1 :])
+        # Generated ids keep the end-of-turn stop token after the array.
+        turn_end = _find(token_ids, self._ids.get(self.TURN_END), tag + 1)
+        raw = self._decode(token_ids[tag + 1 : None if turn_end == -1 else turn_end])
         span = (tag, len(token_ids))
         if not raw.startswith("["):
             return token_ids, [

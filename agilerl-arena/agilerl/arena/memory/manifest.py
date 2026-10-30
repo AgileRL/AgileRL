@@ -402,6 +402,45 @@ def _async_engine_prompts(
     return prompts_per_engine(rollout_batch_size, n_engines)
 
 
+MARLIN_MOE_TILE = 64
+"""Marlin MoE pads a per-GPU expert width that is not a multiple of this."""
+
+
+def marlin_pads_non_gated_experts(
+    quantization: str | None,
+    moe_backend: str | None,
+    arch: ModelArch,
+    tensor_parallel_size: int,
+    expert_parallel: bool,
+) -> bool:
+    """Whether vLLM's Marlin FP8 MoE prep would fail on this engine's experts.
+
+    vLLM 0.32 pads a misaligned Marlin expert width as if ``w13`` held gate
+    and up halves, so non-gated (relu2) experts fail the reshape at load.
+    Engine expert parallel keeps each expert whole; TP splits its width.
+
+    :param quantization: Engine ``quantization``.
+    :param moe_backend: Explicit ``moe_backend`` engine arg, or None.
+    :param arch: Served model architecture.
+    :param tensor_parallel_size: Engine tensor-parallel width.
+    :param expert_parallel: Whether the engine sets ``enable_expert_parallel``.
+    :return: True when the engine must not serve FP8 on Marlin.
+    """
+    backend = moe_backend if isinstance(moe_backend, str) else ""
+    if (
+        not arch.is_moe
+        or arch.gated_mlp
+        or quantization is None
+        or quantization.lower() not in FP8_MOE_METHODS
+        or backend.strip().lower().replace("-", "_") != "marlin"
+    ):
+        return False
+    width = arch.expert_intermediate_size or arch.intermediate_size
+    if not expert_parallel:
+        width //= tensor_parallel_size
+    return width % MARLIN_MOE_TILE != 0
+
+
 def _max_num_seqs(
     manifest: TrainingManifest,
     spec: LLMAlgorithmSpec,
@@ -774,6 +813,37 @@ def resolve_training_memory(
     return manifest
 
 
+def _engine_served_manifest(
+    manifest: TrainingManifest,
+    model_config: dict[str, Any],
+    tensor_parallel_size: int | None,
+) -> TrainingManifest:
+    """The manifest as the rollout engine serves it.
+
+    An fp8 Marlin engine on misaligned non-gated experts serves bf16 on Triton
+    (:func:`marlin_pads_non_gated_experts`); a copy carries that change.
+    """
+    spec = llm_spec(manifest)
+    if not isinstance(spec, RolloutLLMSpec) or spec.vllm_config is None:
+        return manifest
+    width = tensor_parallel_size or spec.vllm_config.tensor_parallel_size
+    if width is None or not marlin_pads_non_gated_experts(
+        spec.vllm_config.quantization,
+        spec.vllm_engine_args.get("moe_backend"),
+        ModelArch.from_hf_config(model_config),
+        width,
+        bool(spec.vllm_engine_args.get("enable_expert_parallel")),
+    ):
+        return manifest
+    served = manifest.model_copy(deep=True)
+    served_spec = llm_spec(served)
+    assert isinstance(served_spec, RolloutLLMSpec)
+    assert served_spec.vllm_config is not None
+    served_spec.vllm_config.quantization = None
+    served_spec.vllm_engine_args["moe_backend"] = "triton"
+    return served
+
+
 def run_config_from_manifest(
     manifest: TrainingManifest | str | Path | dict[str, Any],
     device: DeviceSpec,
@@ -807,6 +877,7 @@ def run_config_from_manifest(
             "this estimator sizes async rollout only."
         )
         raise ValueError(msg)
+    manifest = _engine_served_manifest(manifest, model_config, tensor_parallel_size)
     spec = llm_spec(manifest)
     if isinstance(spec, RolloutLLMSpec):
         gpu = lookup_gpu((gen_device or device).name or "")

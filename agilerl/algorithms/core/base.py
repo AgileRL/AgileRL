@@ -3872,7 +3872,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         result = self.shard_runtime.prepare_actor(
             self.actor,
             device=self.device,
-            colocated=self.colocated,
             cosine_lr_schedule_config=self.cosine_lr_schedule_config,
             lr=self.lr,
             lr_critic=self.lr_critic,
@@ -7216,7 +7215,15 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :type group_size: int
         :return: Per-prompt completion token tensors and matching action masks.
         :rtype: tuple[list[torch.Tensor], list[torch.Tensor]]
+        :raises ValueError: When FSDP ``cpu_offload`` keeps parameters on the CPU.
         """
+        if self.fsdp_config is not None and self.fsdp_config.cpu_offload:
+            msg = (
+                "HuggingFace generate does not support FSDP2 cpu_offload: it "
+                "assumes parameters live on the compute device. Set vllm_config "
+                "or use optim_cpu_offload instead (parameters stay on GPU)."
+            )
+            raise ValueError(msg)
         actor_device = self.shard_runtime.actor_compute_device(
             self.actor, torch.device(self.device)
         )
