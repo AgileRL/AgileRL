@@ -137,7 +137,7 @@ class TestInvokeManifestCommand:
         self, api_key_client: ArenaClient
     ) -> None:
         """The classes/delete endpoint reads ``name`` from the query string."""
-        from agilerl.arena.on_prem.endpoints import DELETE_CLASS
+        from agilerl.arena.byoc.endpoints import DELETE_CLASS
 
         with patch.object(
             api_key_client, "_request", return_value={"ok": True}
@@ -146,6 +146,53 @@ class TestInvokeManifestCommand:
         _args, kwargs = mocked.call_args
         assert kwargs.get("params") == {"name": "pool"}
         assert "json" not in kwargs  # must NOT be sent as a JSON body
+
+    def test_update_class_sends_name_as_query_and_fields_as_body(
+        self, api_key_client: ArenaClient
+    ) -> None:
+        """The classes/update endpoint reads ``name`` from the query string."""
+        from agilerl.arena.byoc.endpoints import UPDATE_CLASS
+
+        with patch.object(
+            api_key_client, "_request", return_value={"name": "pool"}
+        ) as mocked:
+            api_key_client._invoke_manifest_command(
+                UPDATE_CLASS,
+                {
+                    "name": "pool",
+                    "num_nodes": 4,
+                    "node_selector": {"class": "gpu"},
+                    "metadata": {"computeResource": {"numCpus": 16}},
+                    "description": "NVIDIA® L40S Intel 1 GPU - 16 CPUs - 64 GB RAM.",
+                },
+            )
+        _args, kwargs = mocked.call_args
+        assert kwargs["params"] == {"name": "pool"}
+        assert kwargs["json"] == {
+            "num_nodes": 4,
+            "node_selector": {"class": "gpu"},
+            "metadata": {"computeResource": {"numCpus": 16}},
+            "description": "NVIDIA® L40S Intel 1 GPU - 16 CPUs - 64 GB RAM.",
+        }
+
+    def test_update_class_sends_availabilities_in_the_body(
+        self, api_key_client: ArenaClient
+    ) -> None:
+        from agilerl.arena.byoc.endpoints import UPDATE_CLASS
+
+        availabilities = [
+            {"region": "eu-north1", "zones": ["fabric-2"], "enabled": True}
+        ]
+        with patch.object(
+            api_key_client, "_request", return_value={"name": "pool"}
+        ) as mocked:
+            api_key_client._invoke_manifest_command(
+                UPDATE_CLASS,
+                {"name": "pool", "availabilities": availabilities},
+            )
+        _args, kwargs = mocked.call_args
+        assert kwargs["params"] == {"name": "pool"}
+        assert kwargs["json"] == {"availabilities": availabilities}
 
     def test_rejects_non_allowlisted_path(self, api_key_client: ArenaClient) -> None:
         invoke = {
@@ -157,10 +204,10 @@ class TestInvokeManifestCommand:
         with pytest.raises(ArenaValidationError):
             api_key_client._invoke_manifest_command(invoke, {})
 
-    def test_accepts_on_prem_prefix_json(self, api_key_client: ArenaClient) -> None:
+    def test_accepts_byoc_prefix_json(self, api_key_client: ArenaClient) -> None:
         invoke = {
             "method": "POST",
-            "path": "/api/cli/v1/on-prem/enable",
+            "path": "/api/cli/v1/byoc/enable",
             "responseKind": "json",
             "params": [],
         }
@@ -168,14 +215,40 @@ class TestInvokeManifestCommand:
             api_key_client, "_request", return_value={"ok": True}
         ) as mocked:
             api_key_client._invoke_manifest_command(invoke, {})
-        mocked.assert_called_once_with("POST", "/api/cli/v1/on-prem/enable")
+        mocked.assert_called_once_with("POST", "/api/cli/v1/byoc/enable")
+
+    @pytest.mark.parametrize(
+        ("request_timeout", "upload_timeout", "expected"),
+        [(30, 300, 300), (600, 300, 600)],
+    )
+    def test_cluster_register_uses_long_timeout(
+        self,
+        api_key_client: ArenaClient,
+        request_timeout: int,
+        upload_timeout: int,
+        expected: int,
+    ) -> None:
+        from agilerl.arena.byoc.endpoints import REGISTER_CLUSTER
+
+        api_key_client._request_timeout = request_timeout
+        api_key_client._upload_timeout = upload_timeout
+        with patch.object(
+            api_key_client,
+            "_request",
+            return_value={"cluster": {"name": "arena-nebius"}},
+        ) as mocked:
+            api_key_client._invoke_manifest_command(
+                REGISTER_CLUSTER, {"name": "arena-nebius"}
+            )
+
+        assert mocked.call_args.kwargs["timeout"] == expected
 
     def test_post_with_empty_manifest_params_sends_json_body(
         self, api_key_client: ArenaClient
     ) -> None:
         invoke = {
             "method": "POST",
-            "path": "/api/cli/v1/on-prem/classes/create",
+            "path": "/api/cli/v1/byoc/classes/create",
             "responseKind": "json",
             "params": [],
         }
@@ -190,7 +263,7 @@ class TestInvokeManifestCommand:
     ) -> None:
         invoke = {
             "method": "GET",
-            "path": "/api/cli/v1/on-prem/classes/deployment-setup",
+            "path": "/api/cli/v1/byoc/classes/deployment-setup",
             "responseKind": "binary",
             "params": [],
         }
@@ -204,7 +277,7 @@ class TestInvokeManifestCommand:
     def test_binary_branch_uses_raw(self, api_key_client: ArenaClient) -> None:
         invoke = {
             "method": "GET",
-            "path": "/api/cli/v1/on-prem/classes/deployment-setup",
+            "path": "/api/cli/v1/byoc/classes/deployment-setup",
             "responseKind": "binary",
             "params": [
                 {
@@ -230,7 +303,7 @@ class TestBuildManifestClickCommand:
     def test_help_registers_options(self) -> None:
         invoke = {
             "method": "GET",
-            "path": "/api/cli/v1/on-prem/classes/get",
+            "path": "/api/cli/v1/byoc/classes/get",
             "responseKind": "json",
             "params": [
                 {
@@ -389,25 +462,25 @@ class TestValidateManifestInvokeErrors:
         [
             {
                 "method": "OPTIONS",
-                "path": "/api/cli/v1/on-prem/x",
+                "path": "/api/cli/v1/byoc/x",
                 "responseKind": "json",
             },
-            {"method": "GET", "path": "/api/cli/v1/on-prem/x", "responseKind": "text"},
+            {"method": "GET", "path": "/api/cli/v1/byoc/x", "responseKind": "text"},
             {"method": "GET", "path": "/api/evil", "responseKind": "json"},
             {
                 "method": "GET",
-                "path": "/api/cli/v1/on-prem/../x",
+                "path": "/api/cli/v1/byoc/../x",
                 "responseKind": "json",
             },
             {
                 "method": "GET",
-                "path": "/api/cli/v1/on-prem/x",
+                "path": "/api/cli/v1/byoc/x",
                 "responseKind": "json",
                 "params": [{"name": "p", "in": "header", "type": "string"}],
             },
             {
                 "method": "GET",
-                "path": "/api/cli/v1/on-prem/x",
+                "path": "/api/cli/v1/byoc/x",
                 "responseKind": "json",
                 "params": [{"name": "p", "in": "query", "type": "float"}],
             },
@@ -424,7 +497,7 @@ class TestManifestCommandCallback:
     def test_json_command_forwards_parsed_args(self) -> None:
         invoke = {
             "method": "POST",
-            "path": "/api/cli/v1/on-prem/classes/create",
+            "path": "/api/cli/v1/byoc/classes/create",
             "responseKind": "json",
             "params": [_param_spec("name", in_="body", required=True)],
         }
@@ -450,7 +523,7 @@ class TestManifestCommandCallback:
         """
         invoke = {
             "method": "GET",
-            "path": "/api/cli/v1/on-prem/classes/get",
+            "path": "/api/cli/v1/byoc/classes/get",
             "responseKind": "json",
             "params": [_param_spec("name", in_="query", required=True)],
         }
@@ -465,7 +538,7 @@ class TestManifestCommandCallback:
         dest = tmp_path / "bundle.zip"
         invoke = {
             "method": "GET",
-            "path": "/api/cli/v1/on-prem/classes/deployment-setup",
+            "path": "/api/cli/v1/byoc/classes/deployment-setup",
             "responseKind": "binary",
             "params": [
                 _param_spec("name", in_="query", required=True),
@@ -509,7 +582,7 @@ class TestManifestCommandCallbackBinary:
     def _binary_get_command() -> click.Command:
         invoke = {
             "method": "GET",
-            "path": "/api/cli/v1/on-prem/classes/get",
+            "path": "/api/cli/v1/byoc/classes/get",
             "responseKind": "binary",
             "params": [
                 {
