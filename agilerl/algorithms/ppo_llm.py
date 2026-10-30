@@ -138,6 +138,10 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
     :type min_p: float, optional
     :param use_separate_reference_adapter: Whether to keep a separate reference adapter.
     :type use_separate_reference_adapter: bool, optional
+    :param reference_update_interval: Optimizer steps between copies of the
+        actor adapter onto the reference. ``None`` (default) keeps the
+        reference fixed.
+    :type reference_update_interval: int | None, optional
     :param calc_position_embeddings: Whether to compute position embeddings.
     :type calc_position_embeddings: bool, optional
     :param micro_batch_size_per_gpu: Optional target micro-batch size per GPU.
@@ -293,6 +297,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         top_k: int = 50,
         min_p: float = 0.0,
         use_separate_reference_adapter: bool = True,
+        reference_update_interval: int | None = None,
         calc_position_embeddings: bool = True,
         micro_batch_size_per_gpu: int | None = None,
         mini_batch_size: int | None = None,
@@ -350,6 +355,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             vllm_config=vllm_config,
             lora_config=lora_config,
             use_separate_reference_adapter=use_separate_reference_adapter,
+            reference_update_interval=reference_update_interval,
             model_name=model_name,
             actor_network=actor_network,
             model_config=model_config,

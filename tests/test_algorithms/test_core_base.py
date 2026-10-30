@@ -1885,6 +1885,7 @@ def _make_llm_agent(
     actor_network=None,
     batch_size=4,
     use_separate_reference_adapter=False,
+    reference_update_interval=None,
     fsdp_config=None,
     mini_batch_size=None,
     group_size=1,
@@ -1932,6 +1933,7 @@ def _make_llm_agent(
             cosine_lr_schedule_config=cosine_lr_schedule_config,
             device="cpu",
             use_separate_reference_adapter=use_separate_reference_adapter,
+            reference_update_interval=reference_update_interval,
             fsdp_config=fsdp_config,
             offload_trainer_during_rollout=offload_trainer_during_rollout,
             profiling_config=profiling_config,
@@ -3412,6 +3414,20 @@ class TestLLMBackwardPass:
         agent.optimizer.step.assert_called_once()
         agent.optimizer.zero_grad.assert_called_once()
 
+    def test_backward_pass_counts_optimizer_steps_not_micro_batches(self):
+        # Arrange
+        agent = _make_llm_agent(batch_size=4, micro_batch_size_per_gpu=2)
+        agent.max_grad_norm = None
+
+        # Act
+        counts = []
+        for _ in range(4):
+            LLMAlgorithm._backward_pass(agent, MagicMock())
+            counts.append(agent.optimizer_steps)
+
+        # Assert
+        assert counts == [0, 1, 1, 2]
+
 
 class TestLogprobsFromHiddenFused:
     """Cover the chunked matmul + max-shift gather/logsumexp kernel that
@@ -4834,90 +4850,165 @@ class TestLLMConfigureVllm:
 
 
 class TestLLMSetReferencePolicy:
-    def test_set_reference_with_separate_adapter(self):
+    @staticmethod
+    def _due_agent(use_separate_reference_adapter=True):
+        """Agent whose next ``set_reference_policy`` call is due to copy."""
+        agent = _make_llm_agent(
+            use_separate_reference_adapter=use_separate_reference_adapter,
+            reference_update_interval=1,
+        )
+        agent.optimizer_steps = 1
+        return agent
+
+    def test_copies_every_interval_optimizer_steps(self):
+        # Arrange
+        agent = _make_llm_agent(
+            use_separate_reference_adapter=True, reference_update_interval=2
+        )
+        ref_p = torch.tensor([0.0])
+        act_p = torch.tensor([0.0])
+        params = [("lora.reference.weight", ref_p), ("lora.actor.weight", act_p)]
+
+        # Act
+        seen = []
+        with patch.object(type(agent.actor), "named_parameters", return_value=params):
+            for step in range(1, 6):
+                agent.optimizer_steps = step
+                act_p.fill_(float(step))
+                agent.set_reference_policy()
+                seen.append(ref_p.item())
+
+        # Assert
+        assert seen == [0.0, 2.0, 2.0, 4.0, 4.0]
+        assert agent.reference_update_tracker == 2
+
+    def test_never_copies_without_interval(self):
         agent = _make_llm_agent(use_separate_reference_adapter=True)
-        ref_p = torch.tensor([1.0])
-        act_p = torch.tensor([2.0])
-        with patch.object(
-            type(agent.actor),
-            "named_parameters",
-            return_value=[
-                ("lora.reference.weight", ref_p),
-                ("lora.actor.weight", act_p),
-            ],
-        ):
-            agent.set_reference_policy(1)
-        assert torch.equal(ref_p, act_p)
+        agent.optimizer_steps = 10_000
+        with patch.object(LLMAlgorithm, "_copy_adapter_tensors") as mock_copy:
+            agent.set_reference_policy()
+        mock_copy.assert_not_called()
+        assert agent.reference_update_tracker == 0
+
+    def test_no_copy_before_first_interval(self):
+        agent = _make_llm_agent(
+            use_separate_reference_adapter=True, reference_update_interval=100
+        )
+        agent.optimizer_steps = 99
+        with patch.object(LLMAlgorithm, "_copy_adapter_tensors") as mock_copy:
+            agent.set_reference_policy()
+        mock_copy.assert_not_called()
+        assert agent.reference_update_tracker == 0
+
+    def test_no_copy_when_tracker_already_at_schedule(self):
+        agent = self._due_agent()
+        agent.reference_update_tracker = 1
+        with patch.object(LLMAlgorithm, "_copy_adapter_tensors") as mock_copy:
+            agent.set_reference_policy()
+        mock_copy.assert_not_called()
         assert agent.reference_update_tracker == 1
 
-    def test_set_reference_raises_on_no_source_params(self):
-        agent = _make_llm_agent(use_separate_reference_adapter=True)
+    def test_raises_on_no_source_params(self):
+        agent = self._due_agent()
         with (
             patch.object(
                 type(agent.actor),
                 "named_parameters",
-                return_value=[
-                    ("not_lora.weight", torch.tensor([1.0])),
-                ],
+                return_value=[("not_lora.weight", torch.tensor([1.0]))],
             ),
             pytest.raises(ValueError, match="No LoRA tensors found for source adapter"),
         ):
-            agent.set_reference_policy(1)
+            agent.set_reference_policy()
 
-    def test_set_reference_raises_on_no_target_params(self):
-        agent = _make_llm_agent(use_separate_reference_adapter=True)
+    def test_raises_on_no_target_params(self):
+        agent = self._due_agent()
+        with (
+            patch.object(
+                type(agent.actor),
+                "named_parameters",
+                return_value=[("lora.actor.weight", torch.tensor([1.0]))],
+            ),
+            pytest.raises(ValueError, match="No LoRA tensors found for target adapter"),
+        ):
+            agent.set_reference_policy()
+
+    def test_raises_on_missing_target_params(self):
+        agent = self._due_agent()
         with (
             patch.object(
                 type(agent.actor),
                 "named_parameters",
                 return_value=[
-                    ("lora.actor.weight", torch.tensor([1.0])),
+                    ("lora.reference.one.weight", torch.tensor([1.0])),
+                    ("lora.actor.one.weight", torch.tensor([1.0])),
+                    ("lora.actor.two.weight", torch.tensor([1.0])),
                 ],
             ),
-            pytest.raises(ValueError, match="No LoRA tensors found for target adapter"),
-        ):
-            agent.set_reference_policy(1)
-
-    def test_set_reference_missing_params(self):
-        agent = _make_llm_agent(use_separate_reference_adapter=True)
-        with patch.object(
-            type(agent.actor),
-            "named_parameters",
-            return_value=[
-                ("lora.reference.one.weight", torch.tensor([1.0])),
-                ("lora.actor.one.weight", torch.tensor([1.0])),
-                ("lora.actor.two.weight", torch.tensor([1.0])),
-            ],
-        ):
-            with pytest.raises(
+            pytest.raises(
                 ValueError,
                 match=r"Target adapter 'reference' is missing 1 LoRA tensors present in source adapter 'actor'\.",
-            ):
-                agent.set_reference_policy(1)
+            ),
+        ):
+            agent.set_reference_policy()
 
-    def test_set_reference_without_separate_adapter_warns_and_keeps_base(self):
+    def test_without_separate_adapter_warns_once_and_does_not_copy(self):
         """Base weights are immutable: the implicit reference cannot move, so an
         update request warns once and only advances the tracker.
         """
-        agent = _make_llm_agent(use_separate_reference_adapter=False)
+        agent = self._due_agent(use_separate_reference_adapter=False)
         with patch.object(LLMAlgorithm, "_copy_adapter_tensors") as mock_copy:
             with pytest.warns(UserWarning, match="stays the initial base policy"):
-                agent.set_reference_policy(1)
-            mock_copy.assert_not_called()
-            assert agent.reference_update_tracker == 1
-            # Warn-once: a second update advances the tracker silently.
+                agent.set_reference_policy()
+            agent.optimizer_steps = 2
             with warnings.catch_warnings():
                 warnings.simplefilter("error")
-                agent.set_reference_policy(2)
+                agent.set_reference_policy()
+        mock_copy.assert_not_called()
         assert agent.reference_update_tracker == 2
 
-    def test_no_update_when_tracker_equal(self):
+    def test_rejects_non_positive_interval(self):
+        with pytest.raises(
+            ValueError, match="reference_update_interval must be >= 1 or None"
+        ):
+            _make_llm_agent(reference_update_interval=0)
+
+
+class TestLLMAlgorithmRestoreCheckpointAttributes:
+    @pytest.mark.parametrize("restore_config", [True, False])
+    def test_keeps_tracker_from_a_step_scheduled_checkpoint(self, restore_config):
         agent = _make_llm_agent()
-        agent.reference_update_tracker = 5
+
+        agent._restore_checkpoint_attributes(
+            {"optimizer_steps": 450, "reference_update_tracker": 4},
+            restore_config=restore_config,
+            restore_hyperparameters=True,
+        )
+
+        assert agent.optimizer_steps == 450
+        assert agent.reference_update_tracker == 4
+
+    @pytest.mark.parametrize("restore_config", [True, False])
+    def test_resets_epoch_tracker_without_optimizer_steps(self, restore_config):
+        # Arrange
+        agent = _make_llm_agent(
+            use_separate_reference_adapter=True, reference_update_interval=1
+        )
+
+        # Act
+        agent._restore_checkpoint_attributes(
+            {"reference_update_tracker": 5},
+            restore_config=restore_config,
+            restore_hyperparameters=True,
+        )
+        agent.optimizer_steps = 1
         with patch.object(LLMAlgorithm, "_copy_adapter_tensors") as mock_copy:
-            agent.set_reference_policy(5)
-        mock_copy.assert_not_called()
-        assert agent.reference_update_tracker == 5
+            agent.set_reference_policy()
+
+        # Assert
+        assert agent.reference_update_tracker == 1
+        mock_copy.assert_called_once_with(
+            source_adapter="actor", target_adapter="reference"
+        )
 
 
 class TestLLMGetLogprobs:

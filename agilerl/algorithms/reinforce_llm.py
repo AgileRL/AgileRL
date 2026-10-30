@@ -120,6 +120,10 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
     :param use_separate_reference_adapter: Use a dedicated LoRA adapter for
         the frozen reference policy.
     :type use_separate_reference_adapter: bool
+    :param reference_update_interval: Optimizer steps between copies of the
+        actor adapter onto the reference. ``None`` (default) keeps the
+        reference fixed.
+    :type reference_update_interval: int | None, optional
     :param calc_position_embeddings: Calculate position embeddings explicitly.
     :type calc_position_embeddings: bool
     :param micro_batch_size_per_gpu: Micro-batch size for gradient accumulation.
@@ -251,6 +255,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         min_p: float = 0.0,
         offload_trainer_during_rollout: bool = True,
         use_separate_reference_adapter: bool = True,
+        reference_update_interval: int | None = None,
         calc_position_embeddings: bool = True,
         micro_batch_size_per_gpu: int | None = None,
         mini_batch_size: int | None = None,
@@ -296,6 +301,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
             offload_trainer_during_rollout=offload_trainer_during_rollout,
             lora_config=lora_config,
             use_separate_reference_adapter=use_separate_reference_adapter,
+            reference_update_interval=reference_update_interval,
             vllm_config=vllm_config,
             model_name=model_name,
             actor_network=actor_network,

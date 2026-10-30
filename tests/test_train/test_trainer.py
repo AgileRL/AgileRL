@@ -2351,7 +2351,7 @@ class TestLocalTrainerIntegration:
         reward_file = tmp_path / "reward.py"
         reward_file.write_text(
             "from agilerl.llm_envs.rubrics import reward_fn_to_rubric\n"
-            "def simple_reward(completion, answer, question, **kwargs):\n"
+            "def simple_reward(completion, answer, prompt, **kwargs):\n"
             "    return 1.0\n"
             "RUBRIC = reward_fn_to_rubric(simple_reward)\n"
         )

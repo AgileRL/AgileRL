@@ -308,10 +308,7 @@ def train_llm_rollout(
             iteration_steps = 0
             step_records: list[CompletionRecord] = []
             for agent_index, agent in enumerate(population.agents):
-                # Refresh the KL reference once per completed pass over the dataset
-                # rows; a non-dataset env keeps ``num_epochs == 0``, leaving the
-                # anchor at the initial policy.
-                agent.set_reference_policy(rollout_collector.num_epochs)
+                agent.set_reference_policy()
                 agent.init_training_step()
                 (
                     token_ids_list,

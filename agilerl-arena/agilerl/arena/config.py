@@ -28,8 +28,6 @@ class CommandConfig:
     upload_timeout: int
     org_key: str | None = None
     external_user_id: str | None = None
-    module_catalog_url: str | None = None
-    module_catalog_public_key: str | None = None
 
 
 def _resolve_root_command_config(ctx: click.Context) -> CommandConfig:
@@ -57,8 +55,6 @@ def _resolve_root_command_config(ctx: click.Context) -> CommandConfig:
         client_id=params.get("client_id"),
         request_timeout=params.get("request_timeout") or 30,
         upload_timeout=params.get("upload_timeout") or 300,
-        module_catalog_url=params.get("module_catalog_url"),
-        module_catalog_public_key=params.get("module_catalog_public_key"),
     )
 
 

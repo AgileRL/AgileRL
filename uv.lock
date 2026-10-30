@@ -338,7 +338,6 @@ name = "agilerl-arena"
 source = { editable = "agilerl-arena" }
 dependencies = [
     { name = "click" },
-    { name = "cryptography" },
     { name = "httpx" },
     { name = "lazy-loader" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-7-agilerl-cpu' and extra == 'extra-7-agilerl-llm') or (extra == 'extra-7-agilerl-cpu' and extra == 'extra-7-agilerl-vllm')" },
@@ -360,7 +359,6 @@ hub = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.3.0" },
-    { name = "cryptography", specifier = ">=42" },
     { name = "httpx", specifier = ">=0.27,<1" },
     { name = "huggingface-hub", marker = "extra == 'hub'", specifier = ">=0.30" },
     { name = "lazy-loader", specifier = ">=0.4" },

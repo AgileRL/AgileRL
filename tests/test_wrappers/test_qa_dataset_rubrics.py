@@ -57,22 +57,6 @@ def test_reward_fn_to_rubric_positional_call() -> None:
     assert env.rubric_components == ("fn",)
 
 
-def test_reward_fn_to_rubric_binds_by_name() -> None:
-    seen: list[tuple] = []
-
-    def fn(question, answer, completion):
-        seen.append((question, answer, completion))
-        return 0.25
-
-    rubric = reward_fn_to_rubric(fn)
-    rows = [{"question": "q", "answer": "a"}]
-    env = QADatasetEnv(rows, rubric=rubric)
-    env.reset(row_index=0)
-    obs = env.step(TextAction(message="done"))
-    assert obs.reward == 0.25
-    assert seen == [("q", "a", "done")]
-
-
 def test_qa_dataset_rejects_callable_rubric() -> None:
     with pytest.raises(TypeError, match="reward_fn_to_rubric"):
         QADatasetEnv(
@@ -84,7 +68,7 @@ def test_qa_dataset_rejects_callable_rubric() -> None:
 def test_reset_hides_labels() -> None:
     env = QADatasetEnv(
         [{"question": "q", "answer": "secret"}],
-        rubric=reward_fn_to_rubric(lambda completion, answer, question: 1.0),
+        rubric=reward_fn_to_rubric(lambda c, a, q: 1.0),
     )
     obs = env.reset(row_index=0)
     assert obs.answer is None
@@ -94,9 +78,7 @@ def test_reset_hides_labels() -> None:
 
 def test_reset_seed_pins_row_when_row_index_is_absent() -> None:
     rows = [{"question": f"q{i}", "answer": f"a{i}"} for i in range(4)]
-    env = QADatasetEnv(
-        rows, rubric=reward_fn_to_rubric(lambda completion, answer, question: 0.0)
-    )
+    env = QADatasetEnv(rows, rubric=reward_fn_to_rubric(lambda c, a, q: 0.0))
 
     first = env.reset(seed=6)
     second = env.reset(seed=6)
@@ -107,9 +89,7 @@ def test_reset_seed_pins_row_when_row_index_is_absent() -> None:
 
 def test_reset_row_index_wins_over_seed() -> None:
     rows = [{"question": f"q{i}", "answer": f"a{i}"} for i in range(4)]
-    env = QADatasetEnv(
-        rows, rubric=reward_fn_to_rubric(lambda completion, answer, question: 0.0)
-    )
+    env = QADatasetEnv(rows, rubric=reward_fn_to_rubric(lambda c, a, q: 0.0))
 
     obs = env.reset(seed=6, row_index=0)
 
@@ -118,9 +98,7 @@ def test_reset_row_index_wins_over_seed() -> None:
 
 def test_reset_row_index_out_of_range_raises() -> None:
     rows = [{"question": f"q{i}", "answer": f"a{i}"} for i in range(2)]
-    env = QADatasetEnv(
-        rows, rubric=reward_fn_to_rubric(lambda completion, answer, question: 0.0)
-    )
+    env = QADatasetEnv(rows, rubric=reward_fn_to_rubric(lambda c, a, q: 0.0))
 
     with pytest.raises(IndexError, match="out of range"):
         env.reset(row_index=2)
@@ -132,7 +110,7 @@ def test_eval_row_index_out_of_range_does_not_wrap() -> None:
     env = QADatasetEnv(
         train,
         test_dataset=test,
-        rubric=reward_fn_to_rubric(lambda completion, answer, question: 0.0),
+        rubric=reward_fn_to_rubric(lambda c, a, q: 0.0),
     )
 
     with pytest.raises(IndexError, match="out of range"):
@@ -226,7 +204,7 @@ def test_local_env_client_does_not_double_wrap_qa_dataset() -> None:
     """OpenEnv ``Environment`` instances are stored as-is on the client."""
     world = QADatasetEnv(
         [{"question": "q", "answer": "a"}],
-        rubric=reward_fn_to_rubric(lambda completion, answer, question: 1.0),
+        rubric=reward_fn_to_rubric(lambda c, a, q: 1.0),
     )
     client = InProcessEnvClient(world)
     assert client._backend is world
@@ -247,9 +225,7 @@ def test_json_safe_warns_on_unrecognised_type() -> None:
 
 
 def test_qa_dataset_empty_rows_raises() -> None:
-    env = QADatasetEnv(
-        [], rubric=reward_fn_to_rubric(lambda completion, answer, question: 0.0)
-    )
+    env = QADatasetEnv([], rubric=reward_fn_to_rubric(lambda c, a, q: 0.0))
     with pytest.raises(RuntimeError, match="no rows"):
         env.reset()
 
@@ -257,7 +233,7 @@ def test_qa_dataset_empty_rows_raises() -> None:
 def test_async_rubric_score_raises_type_error() -> None:
     env = QADatasetEnv(
         [{"question": "q", "answer": "a"}],
-        rubric=reward_fn_to_rubric(lambda completion, answer, question: 1.0),
+        rubric=reward_fn_to_rubric(lambda c, a, q: 1.0),
     )
     env.reset(row_index=0)
 

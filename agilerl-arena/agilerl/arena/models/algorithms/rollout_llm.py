@@ -21,6 +21,7 @@ from agilerl.arena.models.descriptions import (
     MIN_OUTPUT_TOKENS,
     MIN_P,
     MINI_BATCH,
+    REFERENCE_UPDATE_INTERVAL,
     REPETITION_PENALTY,
     TEMPERATURE,
     TOP_K,
@@ -98,6 +99,9 @@ class RolloutLLMSpec(LLMAlgorithmSpec):
     max_output_tokens: int | None = Field(default=None, description=MAX_OUTPUT_TOKENS)
     max_row_tokens: int | None = Field(default=None, ge=1, description=MAX_ROW_TOKENS)
     beta: float = Field(default=0.001, ge=0.0, le=1.0, description=BETA)
+    reference_update_interval: int | None = Field(
+        default=None, ge=1, description=REFERENCE_UPDATE_INTERVAL
+    )
     mini_batch_size: int | None = Field(default=None, ge=1, description=MINI_BATCH)
     micro_batch_size_per_gpu: int | None = Field(
         default=None, ge=1, description=MICRO_BATCH

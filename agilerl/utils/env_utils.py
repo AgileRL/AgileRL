@@ -94,7 +94,7 @@ def get_rubric_factory(rubric_name: str, file_path: str) -> Callable[[], Rubric]
         return lambda: reward_fn_to_rubric(obj)
     msg = (
         f"{rubric_name!r} in {file_path} must be a Rubric instance, Rubric "
-        f"subclass, or a callable of completion, answer, and question, "
+        f"subclass, or (completion, answer, question) -> float callable, "
         f"got {type(obj).__name__}."
     )
     raise TypeError(msg)
@@ -104,7 +104,7 @@ def get_rubric(rubric_name: str, file_path: str) -> Rubric:
     """Load one Rubric from a file, wrapping legacy reward callables.
 
     Accepts a ``Rubric`` instance, a ``Rubric`` subclass (instantiated here), or a
-    callable of ``completion``, ``answer``, and ``question`` (Arena / older manifests),
+    ``(completion, answer, question) -> float`` callable (Arena / older manifests),
     which is wrapped with :func:`~agilerl.llm_envs.rubrics.reward_fn_to_rubric`.
 
     :param rubric_name: Name of the symbol in ``file_path``.

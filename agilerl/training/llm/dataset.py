@@ -214,7 +214,7 @@ def train_llm_dataset(
                 break
             training_env = envs[agent_idx] if uses_env_fn else envs[0]
 
-            agent.set_reference_policy(training_env.num_epochs)
+            agent.set_reference_policy()
             agent.init_training_step()
 
             # ``reset`` returns the next collated batch; ``step`` does nothing.

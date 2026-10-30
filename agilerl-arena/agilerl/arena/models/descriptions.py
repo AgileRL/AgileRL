@@ -13,6 +13,10 @@ BETA = (
     "Weight on the KL penalty holding the policy near the reference "
     "model. 0 disables the penalty entirely."
 )
+REFERENCE_UPDATE_INTERVAL = (
+    "Optimizer steps between copies of the policy onto the reference "
+    "model the KL penalty holds it near. Unset keeps the reference fixed."
+)
 KL_CLAMP = (
     "Per-token bound on the K3 KL penalty. 10 is the policy about 2.6 nats "
     "below the reference on a token; tokens further below get no KL "

@@ -5159,7 +5159,7 @@ class TestGRPOSetReferencePolicy:
             micro_batch_size_per_gpu,
         )
         reference_update_tracker = 0
-        grpo.set_reference_policy(reference_update_tracker)
+        grpo.set_reference_policy()
         input_ids = torch.tensor([[i + 1 for i in range(input_size + max_tokens)]]).to(
             grpo.device,
         )
@@ -5172,7 +5172,9 @@ class TestGRPOSetReferencePolicy:
         ).logits
         assert grpo.reference_update_tracker == reference_update_tracker
         reference_update_tracker += 1
-        grpo.set_reference_policy(reference_update_tracker)
+        grpo.reference_update_interval = 1
+        grpo.optimizer_steps = 1
+        grpo.set_reference_policy()
 
         output_after = grpo.actor(
             input_ids=input_ids,
@@ -5257,7 +5259,9 @@ class TestGRPOSetReferencePolicy:
             if "actor" in name:
                 param.data *= 2
         assert not check_ref_adapater_is_same_as_actor_after_learning(grpo)
-        grpo.set_reference_policy(reference_update_tracker=1)
+        grpo.reference_update_interval = 1
+        grpo.optimizer_steps = 1
+        grpo.set_reference_policy()
         assert check_ref_adapater_is_same_as_actor_after_learning(grpo)
         grpo.clean_up()
 

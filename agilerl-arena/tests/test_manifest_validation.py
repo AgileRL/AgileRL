@@ -531,6 +531,28 @@ class TestNothingIsStrippedInTransit:
         )
         assert payload["algorithm"]["use_separate_reference_adapter"] is False
 
+    def test_reference_update_interval_survives(self) -> None:
+        payload = TrainingManifest.model_validate(
+            manifest(GRPO, algorithm={"reference_update_interval": 25})
+        ).to_payload()
+        assert payload["algorithm"]["reference_update_interval"] == 25
+
+    def test_reference_update_interval_defaults_to_unset(self) -> None:
+        validated = TrainingManifest.model_validate(manifest(GRPO))
+        assert validated.algorithm.reference_update_interval is None
+
+    def test_reference_update_interval_rejects_zero(self) -> None:
+        with pytest.raises(ValidationError, match="reference_update_interval"):
+            TrainingManifest.model_validate(
+                manifest(GRPO, algorithm={"reference_update_interval": 0})
+            )
+
+    def test_dpo_reference_update_interval(self) -> None:
+        assert DPOSpec().reference_update_interval is None
+        assert DPOSpec(reference_update_interval=25).reference_update_interval == 25
+        with pytest.raises(ValidationError, match="reference_update_interval"):
+            DPOSpec(reference_update_interval=0)
+
 
 class TestEnvironment:
     def test_every_environment_branch_can_be_versioned(self) -> None:

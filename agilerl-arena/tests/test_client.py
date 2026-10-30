@@ -1440,14 +1440,14 @@ class TestDeleteEnvironmentMultiVersion:
         api_key_client.list_environments = MagicMock(
             return_value={"MyEnv": {"v1": {"validated": True}}}
         )
-        api_key_client._request = MagicMock(return_value={"versions": ["v1"]})
+        api_key_client._request = MagicMock(return_value={"deleted": True})
         result = api_key_client.delete_environment(name="MyEnv", version="v1")
         api_key_client._request.assert_called_once_with(
             "DELETE",
             "/api/cli/v1/environments/delete",
             json={"name": "MyEnv", "version": "v1"},
         )
-        assert result == {"versions": ["v1"]}
+        assert result == {"deleted": True}
 
 
 class TestDuplicateEnvironmentVersion:
@@ -1501,34 +1501,6 @@ class TestExperimentMethods:
         assert call_kwargs["json"]["manifest"] == {"algorithm": "PPO"}
         assert call_kwargs["json"]["project"] == "proj"
         assert "files" not in call_kwargs
-
-    @patch("agilerl.arena.client.TrainingManifest.get_validated")
-    def test_submit_experiment_omits_unset_optional_fields(
-        self, mock_validated, api_key_client
-    ):
-        # The server rejects explicit nulls; unset optionals must be absent.
-        mock_validated.return_value.to_payload.return_value = {"algorithm": "PPO"}
-        api_key_client._open_stream = MagicMock(
-            return_value=_mock_ndjson_stream({"job_id": 3})
-        )
-
-        api_key_client.submit_experiment(manifest={"algorithm": "PPO"}, project="proj")
-
-        payload = api_key_client._open_stream.call_args[1]["json"]
-        assert payload == {"manifest": {"algorithm": "PPO"}, "project": "proj"}
-
-    @patch("agilerl.arena.client.TrainingManifest.get_validated")
-    def test_submit_experiment_requires_project(self, mock_validated, api_key_client):
-        mock_validated.return_value.to_payload.return_value = {"algorithm": "PPO"}
-        api_key_client._open_stream = MagicMock()
-
-        with (
-            patch.object(api_key_client, "get_default_project", return_value=None),
-            pytest.raises(ArenaConfigError, match="No project specified"),
-        ):
-            api_key_client.submit_experiment(manifest={"algorithm": "PPO"})
-
-        api_key_client._open_stream.assert_not_called()
 
     @patch("agilerl.arena.client.TrainingManifest.get_validated")
     def test_submit_experiment_with_reward_file(
@@ -1695,9 +1667,7 @@ class TestPreviewExperimentMetricsCsv:
 
 class TestListExperimentMetricNames:
     def test_basic_call(self, api_key_client):
-        api_key_client._request = MagicMock(
-            return_value=[{"display_name": "loss", "category": "training"}]
-        )
+        api_key_client._request = MagicMock(return_value=["loss", "reward"])
         with patch.object(api_key_client, "get_default_project", return_value=None):
             result = api_key_client.list_experiment_metric_names("exp1")
         api_key_client._request.assert_called_once_with(
@@ -1705,11 +1675,11 @@ class TestListExperimentMetricNames:
             "/api/cli/v1/experiments/metrics",
             params={"experiment_name": "exp1"},
         )
-        assert result == [{"display_name": "loss", "category": "training"}]
+        assert result == ["loss", "reward"]
 
     def test_with_project_and_details(self, api_key_client):
         api_key_client._request = MagicMock(
-            return_value={"metrics": [{"display_name": "a", "category": "training"}]}
+            return_value={"experiment_id": "123", "metrics": ["a"]}
         )
         result = api_key_client.list_experiment_metric_names(
             "exp1", project="proj1", details=True
@@ -1720,7 +1690,7 @@ class TestListExperimentMetricNames:
             "project": "proj1",
             "details": True,
         }
-        assert result == {"metrics": [{"display_name": "a", "category": "training"}]}
+        assert result == {"experiment_id": "123", "metrics": ["a"]}
 
 
 class TestListResources:
@@ -2236,23 +2206,10 @@ class TestGetCliCapabilities:
             with patch.object(api_key_client._http, "request", return_value=resp):
                 assert api_key_client._get_cli_capabilities(force_refresh=True) is None
 
-    def test_returns_none_when_auth_headers_fail(self, api_key_client):
-        api_key_client._cli_capabilities_cache = {"stale": True}
-
-        with patch.object(
-            api_key_client,
-            "_auth_headers",
-            side_effect=ArenaAuthError("not signed in"),
-        ):
-            result = api_key_client._get_cli_capabilities(force_refresh=True)
-
-        assert result is None
-        assert api_key_client._cli_capabilities_cache is None
-
 
 class TestValidateManifestInvoke:
     def test_rejects_non_string_path(self, api_key_client):
-        with pytest.raises(ArenaValidationError, match="invalid BYOC command"):
+        with pytest.raises(ArenaValidationError, match="invalid on-prem command"):
             api_key_client._validate_manifest_invoke(
                 {"path": 123, "method": "GET", "responseKind": "json"}
             )
@@ -2491,7 +2448,6 @@ class TestGetDefaultRunSpec:
         api_key_client.get_default_run_spec(
             "PPO",
             gym_env="Space Invaders",
-            gym_env_version="v1",
             gym_env_entrypoint="python3",
         )
 
@@ -2501,7 +2457,6 @@ class TestGetDefaultRunSpec:
             params={
                 "algorithm": "PPO",
                 "gymEnv": "Space Invaders",
-                "gymEnvVersion": "v1",
                 "gymEnvEntrypoint": "python3",
             },
         )

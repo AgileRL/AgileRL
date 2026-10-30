@@ -924,7 +924,7 @@ class TestDPOSetReferencePolicy:
             use_separate_reference_adapter=use_separate_reference_adapter,
         )
         reference_update_tracker = 0
-        dpo.set_reference_policy(reference_update_tracker)
+        dpo.set_reference_policy()
         input_ids = torch.tensor([[i + 1 for i in range(input_size + max_tokens)]]).to(
             dpo.device,
         )
@@ -935,7 +935,9 @@ class TestDPOSetReferencePolicy:
         ).logits
         assert dpo.reference_update_tracker == reference_update_tracker
         reference_update_tracker += 1
-        dpo.set_reference_policy(reference_update_tracker)
+        dpo.reference_update_interval = 1
+        dpo.optimizer_steps = 1
+        dpo.set_reference_policy()
         output_after = dpo.actor(
             input_ids=input_ids,
             attention_mask=attention_mask,
