@@ -38,6 +38,17 @@ TOP2_INDEX = torch.tensor(
         [0, 2],
     ]
 )
+# Every token on expert 2 alone; the other experts get no rows.
+ALL_TO_ONE_INDEX = torch.full((12, 1), 2)
+# Three distinct experts per token.
+TOP3_INDEX = torch.stack(
+    [
+        torch.arange(12) % NUM_EXPERTS,
+        (torch.arange(12) + 1) % NUM_EXPERTS,
+        (torch.arange(12) + 3) % NUM_EXPERTS,
+    ],
+    dim=-1,
+)
 SYNC_OPS = {"bincount", "equal", "_local_scalar_dense", "nonzero"}
 
 
@@ -135,12 +146,12 @@ def force_recompute(model, enabled):
             module.recompute = enabled
 
 
-def run_experts(model, hidden, top_k_weights):
+def run_experts(model, hidden, top_k_weights, top_k_index=TOP2_INDEX):
     """Forward and backward; return output, input grad, router-weight grad and LoRA grads."""
     model.zero_grad(set_to_none=True)
     rows = hidden.clone().requires_grad_(True)
     weights = top_k_weights.clone().requires_grad_(True)
-    out = model.experts(rows, TOP2_INDEX, weights)
+    out = model.experts(rows, top_k_index, weights)
     out.square().mean().backward()
     lora_grads = {
         name: param.grad.clone()
@@ -165,8 +176,17 @@ def raise_host_sync(*_args, **_kwargs):
     raise AssertionError(msg)
 
 
+def use_backend(request, monkeypatch, backend):
+    """Run expert GEMMs on the per-expert loop, ``torch.nn.functional.grouped_mm``, or reference expert kernels."""
+    if backend == "gmm":
+        monkeypatch.setattr(moe_gemm, "_use_grouped_mm", lambda _x: True)
+    if backend == "kernels":
+        return request.getfixturevalue("reference_expert_kernels")
+    return None
+
+
 class TestRoutedExpertsLocalForwardParity:
-    @pytest.mark.parametrize("use_grouped_mm", [False, True], ids=["loop", "gmm"])
+    @pytest.mark.parametrize("backend", ["loop", "gmm", "kernels"])
     @pytest.mark.parametrize(
         "chunk_bytes",
         [
@@ -179,12 +199,13 @@ class TestRoutedExpertsLocalForwardParity:
     @pytest.mark.parametrize(("experts_cls", "up_target"), EXPERTS)
     def test_matches_per_expert_reference(
         self,
+        request,
         monkeypatch,
         experts_cls,
         up_target,
         recompute,
         chunk_bytes,
-        use_grouped_mm,
+        backend,
     ):
         # Arrange
         reference = lora_block(experts_cls, up_target)
@@ -195,8 +216,7 @@ class TestRoutedExpertsLocalForwardParity:
         torch.manual_seed(1)
         hidden = torch.randn(TOP2_INDEX.shape[0], HIDDEN)
         top_k_weights = torch.rand(TOP2_INDEX.shape)
-        if use_grouped_mm:
-            monkeypatch.setattr(moe_gemm, "_use_grouped_mm", lambda _x: True)
+        use_backend(request, monkeypatch, backend)
 
         # Act
         expected = run_experts(reference, hidden, top_k_weights)
@@ -253,17 +273,18 @@ class TestRoutedExpertsLocalForwardChunks:
         # Assert
         assert planned == [expected_sizes]
 
+    @pytest.mark.parametrize("backend", ["gmm", "kernels"])
     @pytest.mark.parametrize("recompute", [False, True], ids=["graph", "recompute"])
     @pytest.mark.parametrize(("experts_cls", "up_target"), EXPERTS)
-    def test_grouped_mm_path_has_no_host_sync(
-        self, monkeypatch, experts_cls, up_target, recompute
+    def test_grouped_path_has_no_host_sync(
+        self, request, monkeypatch, experts_cls, up_target, recompute, backend
     ):
         # Arrange
         model = lora_block(experts_cls, up_target)
         upgrade_moe_param_wrappers(model)
         force_recompute(model, recompute)
         set_routed_experts_chunk_bytes(model, 160)
-        monkeypatch.setattr(moe_gemm, "_use_grouped_mm", lambda _x: True)
+        use_backend(request, monkeypatch, backend)
         hidden = torch.randn(TOP2_INDEX.shape[0], HIDDEN, requires_grad=True)
         top_k_weights = torch.rand(TOP2_INDEX.shape, requires_grad=True)
         recorder = OpRecorder()
@@ -324,3 +345,51 @@ class TestRoutedExpertsLoraRankAlignment:
         assert shapes == expected_shapes
         lora_a_rows = {shape[0] for name, shape in shapes.items() if "lora_A" in name}
         assert lora_a_rows == {NUM_EXPERTS * rank}
+
+
+class TestRoutedExpertsLocalForwardExpertKernels:
+    @pytest.mark.parametrize(
+        "top_k_index",
+        [
+            pytest.param(TOP2_INDEX, id="top2_empty_expert"),
+            pytest.param(ALL_TO_ONE_INDEX, id="all_to_one_expert"),
+            pytest.param(TOP3_INDEX, id="top3"),
+        ],
+    )
+    @pytest.mark.parametrize(
+        "recompute",
+        [pytest.param(False, id="graph"), pytest.param(True, id="recompute")],
+    )
+    @pytest.mark.parametrize(("experts_cls", "up_target"), EXPERTS)
+    def test_matches_per_expert_reference(
+        self,
+        reference_expert_kernels,
+        experts_cls,
+        up_target,
+        recompute,
+        top_k_index,
+    ):
+        # Arrange
+        reference = lora_block(experts_cls, up_target)
+        model = lora_block(experts_cls, up_target)
+        upgrade_moe_param_wrappers(model)
+        force_recompute(model, recompute)
+        set_routed_experts_chunk_bytes(model, 160)
+        torch.manual_seed(1)
+        hidden = torch.randn(top_k_index.shape[0], HIDDEN)
+        top_k_weights = torch.rand(top_k_index.shape)
+
+        # Act
+        expected = run_experts(reference, hidden, top_k_weights, top_k_index)
+        actual = run_experts(model, hidden, top_k_weights, top_k_index)
+
+        # Assert
+        # fp32 with sums of at most 36 products split differently across
+        # chunks and experts; only the accumulation order differs.
+        tolerance = {"rtol": 1e-5, "atol": 1e-6}
+        for got, want in zip(actual[:3], expected[:3], strict=True):
+            torch.testing.assert_close(got, want, **tolerance)
+        assert set(actual[3]) == set(expected[3])
+        for name, grad in expected[3].items():
+            torch.testing.assert_close(actual[3][name], grad, **tolerance)
+        assert reference_expert_kernels.used == {"matmul", "weight_grad", "scatter_add"}

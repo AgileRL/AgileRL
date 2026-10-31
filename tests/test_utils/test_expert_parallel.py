@@ -659,7 +659,8 @@ def _materialize_ep_worker(rank: int, world_size: int) -> None:
 def _materialize_dp_ep_worker(rank: int, world_size: int) -> None:
     ep = 2
     num_experts = 4
-    model = _tiny_moe_actor(num_experts)
+    # Frozen base: small frozen experts stay replicated across dp_mod_ep.
+    model = _tiny_moe_actor(num_experts).requires_grad_(False)
     for param in model.parameters():
         dist.broadcast(param.data, src=0)
     original_up = model.layers[0].experts.up_proj.detach().cpu().clone()
@@ -774,9 +775,11 @@ def _resume_slice_worker(rank: int, world_size: int) -> None:
     """Resume restores experts via the sliced write, dense params as before."""
     num_experts = 8
     # Above the FSDP persistence threshold so experts take the real
-    # wrapped path instead of staying replicated.
+    # wrapped path; the frozen dense weight below it stays replicated.
     torch.manual_seed(0)
-    model = _tiny_moe_actor(num_experts, hidden=256, intermediate=512)
+    model = _tiny_moe_actor(num_experts, hidden=256, intermediate=512).requires_grad_(
+        False
+    )
     for param in model.parameters():
         dist.broadcast(param.data, src=0)
     shapes = {name: tuple(param.shape) for name, param in model.named_parameters()}
@@ -941,7 +944,7 @@ def _sorted_parity_worker(rank: int, world_size: int) -> None:
     ref = _SortedExperts(num_experts=4, in_features=16, out_features=8).cuda()
     ref.forward = MethodType(grouped_linear, ref)
     ref_out = ref(global_inputs.cuda(), [16, 16, 16, 16])
-    # Materialize the upstream grad: torch._grouped_mm backward rejects
+    # Materialize the upstream grad: torch.nn.functional.grouped_mm backward rejects
     # the zero-stride expanded grad a bare sum() would feed it.
     (ref_out * global_upstream.cuda()).sum().backward()
     ref_grad = ref.weight.grad.clone()
@@ -972,7 +975,7 @@ class TestSortedExpertParallelParity:
 class _LoraExpertsBlock(nn.Module):
     """Packed-experts submodule holding the targeted parameters."""
 
-    def __init__(self, num_experts: int = 4, hidden: int = 8, intermediate: int = 6):
+    def __init__(self, num_experts: int = 4, hidden: int = 8, intermediate: int = 8):
         super().__init__()
         self.num_experts = num_experts
         self.gate_up_proj = nn.Parameter(
@@ -990,7 +993,7 @@ class _LoraExpertsBlock(nn.Module):
 class _LoraRoutedExperts(nn.Module):
     """Qwen3-MoE-convention packed experts for PEFT adapter tests."""
 
-    def __init__(self, num_experts: int = 4, hidden: int = 8, intermediate: int = 6):
+    def __init__(self, num_experts: int = 4, hidden: int = 8, intermediate: int = 8):
         super().__init__()
         # Parameters live nested, as in real models: PEFT rejects
         # target_parameters on the top-level module (cyclic module graph).
@@ -2122,6 +2125,7 @@ def _fsdp_gathered_frozen_worker(rank: int, world_size: int) -> None:
                 ep=ep,
                 param_dtype="float32",
                 reduce_dtype="float32",
+                checkpoint_every_n_blocks=1,
             ),
             mesh=mesh.hsdp,
             expert_mesh=mesh.dp_mod_ep,
@@ -2201,6 +2205,7 @@ def _recompute_routing_drift_worker(rank: int, world_size: int) -> None:
                 ep=ep,
                 param_dtype="float32",
                 reduce_dtype="float32",
+                checkpoint_every_n_blocks=1,
             ),
             mesh=mesh.hsdp,
             expert_mesh=mesh.dp_mod_ep,

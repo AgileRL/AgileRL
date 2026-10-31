@@ -10,6 +10,7 @@ from collections.abc import Sequence
 import torch
 import torch.nn as nn
 from peft.tuners.lora.layer import ParamWrapper
+from torch.distributed.tensor import DTensor
 
 from agilerl.architectures.gptoss import experts as gptoss_experts
 from agilerl.lora.moe.adapters import (
@@ -17,10 +18,38 @@ from agilerl.lora.moe.adapters import (
     split_lora_delta,
     token_adapter_ids,
 )
+from agilerl.lora.moe.grouped_gemm import group_offsets, grouped_matmul
 
 transposed_expert_params = gptoss_experts.gpt_oss_expert_params
 apply_transposed_experts_gate = gptoss_experts.apply_gpt_oss_gate
-expert_matmul_loop = gptoss_experts.expert_matmul_loop
+
+
+def expert_matmul(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    counts: torch.Tensor,
+    offs: torch.Tensor,
+) -> torch.Tensor:
+    """Per-expert ``x @ W[e] + b[e]`` over expert-sorted rows on the grouped expert GEMM.
+
+    :param x: ``[rows, in]`` expert-sorted rows.
+    :param weight: Stacked ``[experts, in, out]`` weight, or its FSDP DTensor.
+    :param bias: Stacked ``[experts, out]`` bias, or its FSDP DTensor.
+    :param counts: Rows per expert, on ``x``'s device.
+    :param offs: Grouped-GEMM offsets of ``counts``.
+    :return: ``[rows, out]`` projections.
+    :raises RuntimeError: When neither ``grouped_mm`` nor Triton runs the GEMM.
+    """
+    if isinstance(weight, DTensor):
+        weight = weight.to_local()
+    if isinstance(bias, DTensor):
+        bias = bias.to_local()
+    projected = grouped_matmul(x, weight, offs)
+    # The GEMMs save their inputs, not their output, so the bias adds in place.
+    return projected.add_(
+        torch.repeat_interleave(bias, counts, dim=0, output_size=x.shape[0])
+    )
 
 
 def transposed_experts_local_forward(
@@ -55,9 +84,9 @@ def transposed_experts_local_forward(
     if routing is not None and len(set(routing)) > 1:
         row_ids, id_map = token_adapter_ids(routing, hidden_states.shape[0], token_idx)
 
-    offs = torch.cumsum(counts, dim=0).to(torch.int32) if x.is_cuda else None
-    projected = expert_matmul_loop(
-        x, params.gate_up_proj, counts, params.gate_up_proj_bias
+    offs = group_offsets(counts, x.device)
+    projected = expert_matmul(
+        x, params.gate_up_proj, params.gate_up_proj_bias, counts, offs
     )
     for name in adapters.get("gate_up_proj", []):
         delta = split_lora_delta(
@@ -68,8 +97,8 @@ def transposed_experts_local_forward(
             delta = delta * mask
         projected = projected + delta.to(projected.dtype)
     intermediate = apply_transposed_experts_gate(projected, params.alpha, params.limit)
-    down = expert_matmul_loop(
-        intermediate, params.down_proj, counts, params.down_proj_bias
+    down = expert_matmul(
+        intermediate, params.down_proj, params.down_proj_bias, counts, offs
     )
     for name in adapters.get("down_proj", []):
         delta = split_lora_delta(

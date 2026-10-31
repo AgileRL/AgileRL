@@ -9,7 +9,7 @@ Pure CPU on a tiny real model in fp32.
 from __future__ import annotations
 
 import math
-from typing import Any, ClassVar
+from typing import Any
 
 import pytest
 import torch
@@ -17,16 +17,8 @@ import torch
 pytest.importorskip("transformers", reason="LLM tests require transformers.")
 pytest.importorskip("peft", reason="LLM tests require peft.")
 
-from agilerl import HAS_LIGER_KERNEL
 from agilerl.algorithms import grpo as grpo_module
-from tests.test_algorithms.test_llms.test_grpo_episode_loss_norm import (
-    KERNEL_NAME,
-    _ProbeFusedKernel,
-)
 from tests.test_algorithms.test_llms.test_grpo_old_logprobs import (
-    NUM_ROWS,
-    PROMPT_LEN,
-    _batch,
     _experiences,
     _make_grpo,
     _record_step_gradients,
@@ -39,8 +31,6 @@ NO_OFF_POLICY_CORRECTION: dict[str, Any] = {
     "off_policy_sequence_mask_threshold": None,
     "use_bias_correction_kl": False,
 }
-VLLM_IS_RATIO_ARG = 23
-BIAS_CORRECTION_KL_ARG = 25
 
 
 def _unit_normal_old_log_prob_inputs() -> tuple[
@@ -55,18 +45,6 @@ def _unit_normal_old_log_prob_inputs() -> tuple[
     mask[:, -3:] = False
     advantages = torch.arange(0, 10).unsqueeze(1).float()
     return log_probs, old, ref, mask, advantages
-
-
-class RecordingFusedKernel(_ProbeFusedKernel):
-    """Probe kernel that keeps the positional arguments of every call."""
-
-    calls: ClassVar[list[tuple[Any, ...]]] = []
-
-    @classmethod
-    def apply(cls, *args):
-        """Record the call, then run the probe loss."""
-        cls.calls.append(args)
-        return super().apply(*args)
 
 
 def _policy_gradient(
@@ -441,115 +419,6 @@ class TestGRPOComputePolicyLossBiasCorrectionKL:
         assert torch.allclose(
             grads[0], grads[1] * (k3 + dk3) / dk3, rtol=1e-5, atol=0.0
         )
-
-
-class TestGRPOFusedKernelLossOffPolicyMasks:
-    @pytest.fixture
-    def recording_kernel(self, monkeypatch: pytest.MonkeyPatch) -> type:
-        monkeypatch.setattr(grpo_module, "HAS_LIGER_KERNEL", True)
-        monkeypatch.setattr(RecordingFusedKernel, "calls", [])
-        monkeypatch.setattr(
-            grpo_module, KERNEL_NAME, RecordingFusedKernel, raising=False
-        )
-        return RecordingFusedKernel
-
-    @pytest.mark.skipif(not HAS_LIGER_KERNEL, reason="liger-kernel is Linux-only.")
-    def test_masked_tokens_reach_the_kernel_as_zero_weight(
-        self, recording_kernel: type
-    ) -> None:
-        # Arrange: the first action token of row 0 sits at ratio exp(-1).
-        agent = _make_grpo(
-            loss_norm="micro_batch",
-            loss_type="cispo",
-            liger_loss=True,
-            off_policy_token_mask_bounds=ICEPOP_BAND,
-            use_bias_correction_kl=True,
-        )
-        ids, mask = _batch()
-        _, policy, _ = agent._fused_forward_no_grad(
-            ids, NUM_ROWS, include_reference=False
-        )
-        old = policy.clone()
-        old[0, PROMPT_LEN - 1] += 1.0
-
-        # Act
-        agent._fused_kernel_loss(
-            ids, mask, torch.ones(NUM_ROWS, 1), old, torch.zeros_like(old)
-        )
-
-        # Assert
-        (args,) = recording_kernel.calls
-        expected = torch.ones(NUM_ROWS, int(mask.sum(dim=1).max()))
-        expected[0, 0] = 0.0
-        assert torch.equal(args[VLLM_IS_RATIO_ARG].reshape(expected.shape), expected)
-        assert args[BIAS_CORRECTION_KL_ARG] is True
-
-    @pytest.mark.skipif(not HAS_LIGER_KERNEL, reason="liger-kernel is Linux-only.")
-    def test_rows_without_sampling_log_probs_keep_full_weight(
-        self, recording_kernel: type
-    ) -> None:
-        # Arrange: row 0 drifts outside the band but has no sampling log-probs.
-        agent = _make_grpo(
-            loss_norm="micro_batch",
-            loss_type="cispo",
-            liger_loss=True,
-            off_policy_token_mask_bounds=ICEPOP_BAND,
-        )
-        ids, mask = _batch()
-        _, policy, _ = agent._fused_forward_no_grad(
-            ids, NUM_ROWS, include_reference=False
-        )
-        old = policy.clone()
-        old[0, PROMPT_LEN - 1] += 1.0
-        sampled_rows = torch.tensor([False] + [True] * (NUM_ROWS - 1))
-
-        # Act
-        agent._fused_kernel_loss(
-            ids,
-            mask,
-            torch.ones(NUM_ROWS, 1),
-            old,
-            torch.zeros_like(old),
-            sampled_rows=sampled_rows,
-        )
-
-        # Assert
-        (args,) = recording_kernel.calls
-        expected = torch.ones(NUM_ROWS, int(mask.sum(dim=1).max()))
-        assert torch.equal(args[VLLM_IS_RATIO_ARG].reshape(expected.shape), expected)
-
-    @pytest.mark.skipif(not HAS_LIGER_KERNEL, reason="liger-kernel is Linux-only.")
-    def test_unmasked_run_passes_no_token_weight(self, recording_kernel: type) -> None:
-        agent = _make_grpo(
-            loss_norm="micro_batch",
-            loss_type="cispo",
-            liger_loss=True,
-            **NO_OFF_POLICY_CORRECTION,
-        )
-        ids, mask = _batch()
-
-        agent._fused_kernel_loss(
-            ids, mask, torch.ones(NUM_ROWS, 1), None, torch.zeros(mask.shape)
-        )
-
-        (args,) = recording_kernel.calls
-        assert args[VLLM_IS_RATIO_ARG] is None
-        assert args[BIAS_CORRECTION_KL_ARG] is False
-
-    def test_trajectory_level_runs_the_standard_loss(
-        self, liger_kernel_installed: None
-    ) -> None:
-        # Act
-        agent = _make_grpo(
-            liger_loss=None,
-            loss_norm="micro_batch",
-            importance_sampling_level="trajectory",
-            vllm_importance_sampling_correction=False,
-            off_policy_token_mask_bounds=ICEPOP_BAND,
-        )
-
-        # Assert
-        assert agent.liger_loss is False
 
 
 class TestGRPOLearnOffPolicyMasks:

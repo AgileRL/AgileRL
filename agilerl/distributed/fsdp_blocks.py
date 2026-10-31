@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from typing import Any, cast
@@ -174,18 +175,26 @@ class UnforwardedFSDPUnits:
 
 
 def _persistent_params(module: nn.Module) -> set[nn.Parameter]:
-    """Unsharded parameters: ``numel`` below ``PARAM_PERSISTENCE_THRESHOLD``."""
+    """Unsharded parameters: frozen, ``numel`` below ``PARAM_PERSISTENCE_THRESHOLD``.
+
+    Trainable parameters always shard, so the mixed-precision policy runs
+    their fp32 master weights in ``param_dtype``.
+    """
     return {
         param
         for param in _owned_parameters(module)
-        if param.numel() < PARAM_PERSISTENCE_THRESHOLD
+        if not param.requires_grad and param.numel() < PARAM_PERSISTENCE_THRESHOLD
     }
 
 
-def _cast_params(params: Iterable[nn.Parameter], dtype: torch.dtype) -> None:
-    """Put unsharded parameters in the mixed-precision compute dtype."""
+def _cast_frozen_params(params: Iterable[nn.Parameter], dtype: torch.dtype) -> None:
+    """Put frozen unsharded parameters in the mixed-precision compute dtype.
+
+    Trainable ones outside FSDP (EP / TP shards) keep their stored dtype; their
+    kernels cast them to the activation dtype.
+    """
     for param in params:
-        if param.dtype != dtype:
+        if not param.requires_grad and param.dtype != dtype:
             param.data = param.data.to(dtype=dtype)
 
 
@@ -234,12 +243,8 @@ def _shard_unit(
     module: nn.Module,
     shard_kwargs: dict,
     extra_ignored: set[nn.Parameter] | None = None,
-    keep_dtype: set[nn.Parameter] | None = None,
 ) -> None:
-    """``fully_shard`` ``module``, leaving tiny owned parameters replicated.
-
-    :param keep_dtype: Ignored parameters whose stored dtype is kept.
-    """
+    """``fully_shard`` ``module``, leaving tiny frozen owned parameters replicated."""
     ignored = _persistent_params(module)
     owned = _owned_parameters(module)
     if extra_ignored:
@@ -248,7 +253,7 @@ def _shard_unit(
         mp_policy = shard_kwargs.get("mp_policy")
         param_dtype = getattr(mp_policy, "param_dtype", None)
         if param_dtype is not None:
-            _cast_params(ignored - (keep_dtype or set()), param_dtype)
+            _cast_frozen_params(ignored, param_dtype)
         shard_kwargs = dict(shard_kwargs)
         shard_kwargs["ignored_params"] = ignored
     fully_shard(module, **shard_kwargs)
@@ -258,7 +263,6 @@ def _shard_embed_and_lm_head(
     model: nn.Module,
     shard_kwargs: dict,
     extra_ignored: set[nn.Parameter] | None = None,
-    keep_dtype: set[nn.Parameter] | None = None,
 ) -> None:
     """Replicate token embeddings; shard an untied ``lm_head`` as its own unit.
 
@@ -282,19 +286,13 @@ def _shard_embed_and_lm_head(
         return
     head_kwargs = dict(shard_kwargs)
     head_kwargs["reshard_after_forward"] = False
-    _shard_unit(
-        lm_head,
-        head_kwargs,
-        extra_ignored=ignored,
-        keep_dtype=keep_dtype,
-    )
+    _shard_unit(lm_head, head_kwargs, extra_ignored=ignored)
 
 
 def _shard_ple_embeddings(
     model: nn.Module,
     shard_kwargs: dict,
     extra_ignored: set[nn.Parameter] | None = None,
-    keep_dtype: set[nn.Parameter] | None = None,
 ) -> None:
     """Shard packed per-layer embeddings as their own FSDP unit.
 
@@ -305,12 +303,7 @@ def _shard_ple_embeddings(
     ple = _ple_embed(_language_model(resolve_causal_lm(model)))
     if ple is None:
         return
-    _shard_unit(
-        ple,
-        shard_kwargs,
-        extra_ignored=extra_ignored,
-        keep_dtype=keep_dtype,
-    )
+    _shard_unit(ple, shard_kwargs, extra_ignored=extra_ignored)
 
 
 def _prefetch_chains(
@@ -441,6 +434,22 @@ def _block_checkpoint_contexts(save_router: bool) -> Callable[[], tuple[Any, Any
     return context_fn
 
 
+def _blocks_to_checkpoint(blocks: Sequence[nn.Module], config: FSDPConfig) -> set[int]:
+    """``id`` of every ``config.checkpoint_every_n_blocks``-th block, the ones activation checkpointing wraps."""
+    stride = config.checkpoint_every_n_blocks
+    if stride is None:
+        msg = (
+            "FSDPConfig.checkpoint_every_n_blocks is unset; the training-memory "
+            "search sets it before activation checkpointing wraps blocks"
+        )
+        raise ValueError(msg)
+    chosen = blocks[::stride]
+    logging.getLogger(__name__).info(
+        "Activation checkpointing wraps %d/%d blocks", len(chosen), len(blocks)
+    )
+    return {id(block) for block in chosen}
+
+
 def apply_fsdp2(
     model: nn.Module,
     config: FSDPConfig | None = None,
@@ -460,8 +469,9 @@ def apply_fsdp2(
     expert modules are sharded on ``expert_mesh`` when that is provided.
 
     Each transformer block is one FSDP unit. When ``gradient_checkpointing``
-    is on, every block is wrapped with ``checkpoint_wrapper`` before
-    ``fully_shard`` so the checkpoint boundary sits inside the FSDP unit. Blocks holding packed experts reuse their
+    is on, every ``config.checkpoint_every_n_blocks``-th block is wrapped with
+    ``checkpoint_wrapper`` before ``fully_shard`` so the checkpoint boundary
+    sits inside the FSDP unit. Blocks holding packed experts reuse their
     forward routing in the recompute; their listed routers
     (:data:`~agilerl.architectures.moe_router.ROUTER_FORWARDS`) get
     out-of-place top-k renormalization.
@@ -477,8 +487,9 @@ def apply_fsdp2(
     :param expert_mesh: Optional FSDP mesh for packed-expert modules
         (the leftover data-parallel axis). Ignored when ``None``.
     :type expert_mesh: DeviceMesh | None
-    :param gradient_checkpointing: Wrap every transformer block with
-        non-reentrant activation checkpointing before sharding.
+    :param gradient_checkpointing: Wrap the transformer blocks selected by
+        ``config.checkpoint_every_n_blocks`` with non-reentrant activation
+        checkpointing before sharding.
     :type gradient_checkpointing: bool
     :return: The sharded model (same object).
     :rtype: nn.Module
@@ -540,19 +551,21 @@ def apply_fsdp2(
         for name in getattr(module, "tp_replicated_params", ())
     )
     # TP params skip FSDP, so TP regions apply the mixed-precision policy.
-    tp_trainable: set[nn.Parameter] = set()
     if config.tp > 1:
-        tp_trainable = set_tp_compute_dtype(model, getattr(torch, config.param_dtype))
+        set_tp_compute_dtype(model, getattr(torch, config.param_dtype))
 
     blocks = [
         block
         for block in _transformer_blocks(model)
         if not is_packed_experts_module(block)
     ]
+    checkpointed = (
+        _blocks_to_checkpoint(blocks, config) if gradient_checkpointing else set()
+    )
     wrap_units: list[nn.Module] = []
     for block in blocks:
         unit = block
-        if gradient_checkpointing:
+        if id(block) in checkpointed:
             save_router = any(
                 is_packed_experts_module(module) for module in block.modules()
             )
@@ -567,29 +580,13 @@ def apply_fsdp2(
             _replace_child(model, block, unit)
         wrap_units.append(unit)
     for unit in wrap_units:
-        _shard_unit(
-            unit,
-            kwargs,
-            extra_ignored=expert_params,
-            keep_dtype=tp_trainable,
-        )
-    _shard_embed_and_lm_head(
-        model,
-        kwargs,
-        extra_ignored=expert_params,
-        keep_dtype=tp_trainable,
-    )
-    _shard_ple_embeddings(
-        model,
-        kwargs,
-        extra_ignored=expert_params,
-        keep_dtype=tp_trainable,
-    )
+        _shard_unit(unit, kwargs, extra_ignored=expert_params)
+    _shard_embed_and_lm_head(model, kwargs, extra_ignored=expert_params)
+    _shard_ple_embeddings(model, kwargs, extra_ignored=expert_params)
     _shard_unit(
         model,
         kwargs,
         extra_ignored=_embed_params(model) | expert_params,
-        keep_dtype=tp_trainable,
     )
     _set_prefetch(model, wrap_units)
     # PEFT ``generate`` delegates to ``base_model.generate`` and never enters

@@ -39,7 +39,9 @@ buffer as `estimate`. `--inference` is a dedicated serving GPU
 |---|---|
 | `specs.py` | `config.json` → geometry; settings and device schemas |
 | `manifest.py` | manifest + GPU → `RunConfig` |
-| `formulas.py` | parameter counts, KV, activations, tiles |
+| `formulas.py` | parameter counts, activations, tiles |
+| `fsdp_gather.py` | parameters FSDP gathers per block, side unit and prefetch window |
+| `kv_cache.py` | vLLM KV cache and hybrid Mamba state pages |
 | `estimator.py` | the two phase bars |
 | `trainer_residency.py` | frozen base weights and allocator slack on one training GPU |
 | `advice.py` | ranked setting changes when a bar is over budget |

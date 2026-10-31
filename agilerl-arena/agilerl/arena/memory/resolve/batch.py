@@ -1,20 +1,20 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
-"""Choose an omitted ``micro_batch_size_per_gpu`` from the training estimate."""
+"""Batch shapes and the micro-batch units the training-memory search tries."""
 
 from __future__ import annotations
 
-from agilerl.arena.memory.estimator import estimate_training
-from agilerl.arena.memory.specs import (
-    DeviceSpec,
-    ModelArch,
-    ModelSpec,
-    TrainingSettings,
-)
+from agilerl.arena.memory.specs import ModelArch, ModelSpec
 from agilerl.arena.models.algorithms.base import LLMAlgorithmSpec
 from agilerl.arena.models.algorithms.grpo import GRPOSpec
 from agilerl.arena.models.hpo import MutationSpec, mutation_ceiling
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
+
+# Mean row length as a share of the row budget (0.64 countdown, 0.56 Sudoku),
+# from Qwen3-4B LoRA on 8x A100-80.
+ROW_FILL = 0.6
+# Step between packed token budgets above the longest row.
+TOKEN_BUDGET_STEP = 1024
 
 
 def data_parallel_size(spec: LLMAlgorithmSpec, n_training_gpus: int) -> int:
@@ -126,19 +126,58 @@ def catalog_model(spec: LLMAlgorithmSpec) -> ModelSpec | None:
     )
 
 
-def _divisors_largest_first(n: int) -> list[int]:
-    """Positive divisors of ``n``, largest first."""
+def micro_batch_row_candidates(mini: int) -> list[int]:
+    """Row micro-batches that split a mini-batch into whole backward passes.
+
+    :param mini: Rows one optimizer step covers.
+    :return: Positive divisors of ``mini``, smallest first.
+    """
     found: list[int] = []
     root = 1
-    while root * root <= n:
-        if n % root == 0:
+    while root * root <= mini:
+        if mini % root == 0:
             found.append(root)
-            paired = n // root
+            paired = mini // root
             if paired != root:
                 found.append(paired)
         root += 1
-    found.sort(reverse=True)
-    return found
+    return sorted(found)
+
+
+def micro_batch_token_candidates(row_budget: int, mini: int) -> list[int]:
+    """Packed token budgets, smallest first.
+
+    :param row_budget: Tokens of the longest row; the smallest budget.
+    :param mini: Rows one optimizer step covers.
+    :return: The longest row, each multiple of :data:`TOKEN_BUDGET_STEP`
+        above it, and the whole mini-batch of longest rows.
+    """
+    mini_tokens = mini * row_budget
+    budgets = [
+        row_budget,
+        *range(
+            (row_budget // TOKEN_BUDGET_STEP + 1) * TOKEN_BUDGET_STEP,
+            mini_tokens,
+            TOKEN_BUDGET_STEP,
+        ),
+    ]
+    if mini_tokens > row_budget:
+        budgets.append(mini_tokens)
+    return budgets
+
+
+def rows_within_budget(mini: int, budget: int, row_budget: int) -> int:
+    """Largest row micro-batch that divides the mini-batch and fits a token budget.
+
+    :param mini: Rows one optimizer step covers.
+    :param budget: Tokens of one packed micro-batch.
+    :param row_budget: Tokens of the longest row.
+    :return: The row count, at least 1.
+    """
+    within = [
+        rows for rows in micro_batch_row_candidates(mini) if rows * row_budget <= budget
+    ]
+    return within[-1] if within else 1
 
 
 def per_rank_trajectories(
@@ -162,49 +201,19 @@ def per_rank_trajectories(
 
 
 def resolve_micro_batch_size_per_gpu(
-    spec: LLMAlgorithmSpec,
-    n_training_gpus: int,
-    device: DeviceSpec | None = None,
-    model: ModelSpec | None = None,
-    settings: TrainingSettings | None = None,
+    spec: LLMAlgorithmSpec, n_training_gpus: int
 ) -> int:
-    """Rows in one training forward on one rank.
+    """Rows in one training forward on one rank, before any memory search.
 
     :param spec: Validated LLM algorithm spec. Not written.
     :param n_training_gpus: Trainer ranks, ``training.training_gpus_per_agent``.
-    :param device: Training GPU. Without one, an omitted field is the
-        resolved mini-batch.
-    :param model: Geometry the search estimates when the spec's hub id is in
-        the catalog. Omitted, that catalog model is used. An id outside the
-        catalog returns the resolved mini-batch.
-    :param settings: Training settings the search prices. Required when a
-        device and a catalog id are both present.
-    :return: The explicit micro-batch, a divisor of the mini-batch that fits,
-        the resolved mini-batch when the search does not run, or 1 when every
-        divisor is over the device.
-    :raises ValueError: When a pinned mini-batch does not divide the rank.
+    :return: The set micro-batch, else the resolved mini-batch.
+    :raises ValueError: When a set mini-batch does not divide the rank.
     """
     configured = spec.micro_batch_size_per_gpu
     if configured is not None:
         return int(configured)
     _, per_rank = per_rank_trajectories(spec, n_training_gpus)
     mini = resolve_mini_batch_size(spec.mini_batch_size, per_rank)
-    # The omitted forward is the mini-batch: the largest count that divides it.
     require_batch_split(mini, mini, per_rank)
-    candidates = _divisors_largest_first(mini)
-    catalogued = catalog_model(spec)
-    if device is None or catalogued is None:
-        return mini
-    if settings is None:
-        msg = (
-            "resolve_micro_batch_size_per_gpu needs training settings "
-            "when a device is set"
-        )
-        raise ValueError(msg)
-    search_model = model if model is not None else catalogued
-    for micro in candidates:
-        trial = settings.model_copy(update={"micro_batch_size": micro})
-        breakdown = estimate_training(search_model, device, trial, orchestrated=True)
-        if breakdown.fits_with_buffer:
-            return micro
-    return 1
+    return mini

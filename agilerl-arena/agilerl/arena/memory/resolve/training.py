@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from collections.abc import Collection
 
-from agilerl.arena.memory.specs import Algorithm, LoraTargetScope, PackedMoeDispatch
+from agilerl.arena.memory.specs import LoraTargetScope, ModelArch, PackedMoeDispatch
 
 # Module names that mean an adapter touches attention projections only.
 ATTENTION_MODULES = frozenset(
@@ -57,13 +57,15 @@ def sampling_support_width(records_sampling_supports: bool, top_k: int) -> int:
     return max(top_k, 2) if records_sampling_supports else 0
 
 
-def support_scored_loss(algorithm: Algorithm, liger_loss: bool) -> bool:
-    """Whether the gradient pass scores supported tokens from their support rows.
+def liger_kernel_arch(arch: ModelArch, liger_layers: bool) -> ModelArch:
+    """Training geometry under the trainer's RMSNorm and gated-MLP modules.
 
-    :param algorithm: Objective, as :data:`~agilerl.arena.memory.specs.Algorithm`.
-    :param liger_loss: The update runs the fused Liger loss:
-        :func:`~agilerl.arena.memory.resolve.liger.liger_loss_blocker` is ``None``.
-    :return: ``True`` unless the loss scores the full vocabulary.
+    :param arch: Geometry from the checkpoint config, sized with Liger's layer
+        kernels on the model types Liger supports.
+    :param liger_layers: A trainer module runs a Liger layer kernel, which needs
+        liger-kernel installed and a supported model type.
+    :return: ``arch``, or the stock HF modules' saved tensors when none does.
     """
-    # PPO and REINFORCE's Liger loss scores the full vocabulary.
-    return not (algorithm in {"ppo", "reinforce"} and liger_loss)
+    if liger_layers:
+        return arch
+    return arch.model_copy(update={"fp32_norm_inputs": True, "stock_gated_mlp": True})

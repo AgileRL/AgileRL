@@ -1002,9 +1002,8 @@ class FSDPRuntime(BaseRuntime):
     ) -> OptimizerStep | None:
         """Accumulate, clip, and step.
 
-        FSDP2 reduce-scatters its own DTensors. Replicated params
-        (``ignored_params``, LoRA) and EP / TP shards outside FSDP need an
-        explicit all-reduce.
+        FSDP2 reduce-scatters its own DTensors. Trainable params outside
+        FSDP (EP / TP shards, TP-replicated rows) need an explicit all-reduce.
         """
         is_step_boundary = self._count_micro_batch(gradient_accumulation_steps)
 

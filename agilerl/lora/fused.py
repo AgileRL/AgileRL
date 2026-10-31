@@ -26,6 +26,7 @@ from weakref import WeakKeyDictionary
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from peft.tuners.lora.layer import LoraLayer, ParamWrapper
 
 from agilerl.utils.patching import library_shim
@@ -77,17 +78,91 @@ def _is_routing_managed(module: LoraLayer) -> bool:
     return _is_routed_layer(module) or _handles_own_routing(module)
 
 
-def _lora_delta(layer: LoraLayer, adapter: str, rows: torch.Tensor) -> torch.Tensor:
-    """One adapter's low-rank delta for a slice of input rows."""
-    lora_a = layer.lora_A[adapter]
-    # lora_A is an nn.ModuleDict, so its members' `.weight` resolves through
+def _has_stock_linear_base(layer: LoraLayer) -> bool:
+    """Whether *layer* wraps a base whose output the LoRA delta may overwrite.
+
+    On 2-D input a stock ``nn.Linear`` forward returns a fresh tensor whose
+    backward saves only the input and weight. Quantized (bitsandbytes) and
+    other custom base layers may return views autograd forbids editing.
+    """
+    return type(layer.base_layer).forward is nn.Linear.forward
+
+
+def _apply_lora_factor(
+    layer: LoraLayer, factor: nn.Module, x: torch.Tensor
+) -> torch.Tensor:
+    """One LoRA factor (``lora_A`` or ``lora_B``) applied to *x* in *x*'s dtype.
+
+    A linear factor casts its weight to *x*'s dtype in the forward, so fp32
+    adapters on a bf16 base multiply in bf16 while autograd still accumulates
+    fp32 weight gradients. FSDP's mixed-precision policy gives the same
+    compute dtype by casting the parameters. Other factors take PEFT's cast
+    of *x* to the weight dtype.
+
+    :param layer: LoRA layer holding the factor.
+    :param factor: The factor module.
+    :param x: Factor input.
+    :return: The factor output.
+    """
+    weight = factor.weight
+    assert isinstance(weight, torch.Tensor)
+    if not isinstance(factor, nn.Linear):
+        return factor(layer._cast_input_dtype(x, weight.dtype))
+    bias = None if factor.bias is None else factor.bias.to(x.dtype)
+    return F.linear(x, weight.to(x.dtype), bias)
+
+
+def _add_lora_delta(
+    layer: LoraLayer,
+    adapter: str,
+    base_rows: torch.Tensor,
+    rows: torch.Tensor,
+    in_place: bool,
+) -> torch.Tensor:
+    """``base_rows`` plus one adapter's low-rank delta for the matching input rows.
+
+    The delta runs in the dtype of the layer input (:func:`_apply_lora_factor`).
+    A bias-free linear ``lora_B`` whose output dtype matches ``base_rows`` runs
+    its matmul, ``scaling`` and the residual add as one ``addmm``.
+
+    :param layer: LoRA layer holding the adapter.
+    :param adapter: Adapter whose delta is added.
+    :param base_rows: Base-layer output for the rows.
+    :param rows: Layer input for the same rows.
+    :param in_place: Accumulate into the 2-D ``base_rows`` and return it.
+    :return: ``base_rows`` with the adapter delta added.
+    """
+    lora_b = layer.lora_B[adapter]
+    # lora_B is an nn.ModuleDict, so its members' `.weight` resolves through
     # nn.Module.__getattr__ as the loose Tensor | Module; narrow it to Tensor.
-    lora_a_weight = lora_a.weight
-    assert isinstance(lora_a_weight, torch.Tensor)
-    rows = layer.lora_dropout[adapter](
-        layer._cast_input_dtype(rows, lora_a_weight.dtype)
+    lora_b_weight = lora_b.weight
+    assert isinstance(lora_b_weight, torch.Tensor)
+    hidden = _apply_lora_factor(
+        layer, layer.lora_A[adapter], layer.lora_dropout[adapter](rows)
     )
-    return layer.lora_B[adapter](lora_a(rows)) * layer.scaling[adapter]
+    scaling = layer.scaling[adapter]
+    fusable = (
+        isinstance(lora_b, nn.Linear)
+        and lora_b.bias is None
+        and hidden.dtype == base_rows.dtype
+        and hidden.shape[:-1] == base_rows.shape[:-1]
+        and base_rows.shape[-1] == lora_b_weight.shape[0]
+    )
+    if not fusable:
+        delta = (_apply_lora_factor(layer, lora_b, hidden) * scaling).to(
+            base_rows.dtype
+        )
+        return base_rows.add_(delta) if in_place else base_rows + delta
+    weight = lora_b_weight.t().to(hidden.dtype)
+    if in_place:
+        return base_rows.addmm_(hidden, weight, alpha=scaling)
+    out = torch.addmm(
+        base_rows.reshape(-1, base_rows.shape[-1]),
+        hidden.reshape(-1, hidden.shape[-1]),
+        weight,
+        alpha=scaling,
+    )
+    return out.view(base_rows.shape)
 
 
 def _needs_peft_mixed_forward(layer: LoraLayer, routing: Sequence[str]) -> bool:
@@ -100,6 +175,86 @@ def _needs_peft_mixed_forward(layer: LoraLayer, routing: Sequence[str]) -> bool:
     embedding = getattr(layer, "lora_embedding_A", None) or {}
     variants = getattr(layer, "lora_variant", None) or {}
     return any(name in embedding or name in variants for name in set(routing))
+
+
+def _unrouted_fused_adapter(
+    layer: LoraLayer,
+    forward_args: tuple[Any, ...],
+    forward_kwargs: dict[str, Any],
+) -> str | None:
+    """The single active adapter an unrouted forward can run fused, or ``None`` to defer to PEFT.
+
+    The fused run reproduces PEFT's vanilla LoRA delta only on a stock linear
+    base without training-mode dropout, LoRA variants (DoRA, aLoRA), merged
+    weights or extra forward arguments.
+
+    :param layer: LoRA layer about to run.
+    :param forward_args: Extra positional arguments to the layer forward.
+    :param forward_kwargs: Keyword arguments to the layer forward.
+    :return: The adapter name, or ``None``.
+    """
+    if forward_args or forward_kwargs or layer.disable_adapters or layer.merged:
+        return None
+    if len(layer.active_adapters) != 1:
+        return None
+    name = layer.active_adapters[0]
+    if name not in layer.lora_A or name in layer.lora_variant:
+        return None
+    dropout = layer.lora_dropout[name]
+    if not isinstance(dropout, nn.Identity) and dropout.training:
+        return None
+    return name if _has_stock_linear_base(layer) else None
+
+
+def _single_run_forward(
+    layer: LoraLayer,
+    name: str,
+    x: torch.Tensor,
+    *forward_args: Any,
+    **forward_kwargs: Any,
+) -> torch.Tensor:
+    """Stock linear base over every row of *x* with adapter *name*'s delta added in place.
+
+    :param layer: LoRA layer with a stock ``nn.Linear`` base.
+    :param name: Adapter for every row, or ``"__base__"`` for none.
+    :param x: Layer input.
+    :param forward_args: Extra positional arguments to the base layer.
+    :param forward_kwargs: Keyword arguments to the base layer.
+    :return: The layer output.
+    """
+    # An in-place delta on a reshaped view makes autograd clone the gradient.
+    flat = x.reshape(-1, x.shape[-1])
+    out = layer.base_layer(flat, *forward_args, **forward_kwargs)
+    if name != "__base__" and name in layer.lora_A:
+        out = _add_lora_delta(layer, name, out, flat, True)
+    return out.view(*x.shape[:-1], out.shape[-1])
+
+
+def _routing_spans(routing: Sequence[str], n_rows: int) -> list[tuple[str, int]]:
+    """``(adapter, rows)`` for each contiguous run of *routing* over a layer input with *n_rows* leading rows.
+
+    :raises ValueError: If the runs cannot cover *n_rows*.
+    """
+    runs = [(name, sum(1 for _ in run)) for name, run in itertools.groupby(routing)]
+    # Layers that flatten (batch, seq, hidden) -> (batch * seq, hidden) before
+    # their linears (OPT's MLP, MoE experts) show seq rows per routed sample.
+    # The flatten is row-major, so each run just covers ``factor`` times as
+    # many contiguous rows. divmod graph-breaks torch.compile on a symbolic
+    # batch size.
+    factor = n_rows // len(routing)
+    remainder = n_rows % len(routing)
+    if not remainder:
+        return [(name, length * factor) for name, length in runs]
+    if len({length for _, length in runs}) == 1 and n_rows % len(runs) == 0:
+        # Vision-tower layers see image rows, not sample rows. Equal-length
+        # runs repeat the same samples, so each run owns an equal image share.
+        share = n_rows // len(runs)
+        return [(name, share) for name, _ in runs]
+    msg = (
+        f"Fused adapter routing covers {len(routing)} rows but the layer "
+        f"input's leading dimension is {n_rows}."
+    )
+    raise ValueError(msg)
 
 
 def _routed_forward(
@@ -116,52 +271,42 @@ def _routed_forward(
     layer once and add each adapter's delta to its slice — walking the
     contiguous runs with :func:`itertools.groupby`. ``"__base__"`` and
     adapters that don't wrap this layer leave their rows on the base output,
-    matching PEFT's mixed-batch behaviour. Falls back to the layer's ordinary
-    forward while routing is unset.
+    matching PEFT's mixed-batch behaviour. While routing is unset, a single
+    eligible active adapter runs fused and anything else runs the layer's
+    ordinary forward.
     """
     routing = ROUTING_STATE.get(layer)
     if routing is None:
-        return original_forward(layer, x, *forward_args, **forward_kwargs)
+        name = _unrouted_fused_adapter(layer, forward_args, forward_kwargs)
+        if name is None:
+            return original_forward(layer, x, *forward_args, **forward_kwargs)
+        return _single_run_forward(layer, name, x)
 
-    runs = [(name, sum(1 for _ in run)) for name, run in itertools.groupby(routing)]
-    # Layers that flatten (batch, seq, hidden) -> (batch * seq, hidden) before
-    # their linears (OPT's MLP, MoE experts) show seq rows per routed sample.
-    # The flatten is row-major, so each run just covers ``factor`` times as
-    # many contiguous rows. divmod graph-breaks torch.compile on a symbolic
-    # batch size.
-    factor = x.shape[0] // len(routing)
-    remainder = x.shape[0] % len(routing)
-    if not remainder:
-        spans = [(name, length * factor) for name, length in runs]
-    elif len({length for _, length in runs}) == 1 and x.shape[0] % len(runs) == 0:
-        # Vision-tower layers see image rows, not sample rows. Equal-length
-        # runs repeat the same samples, so each run owns an equal image share.
-        share = x.shape[0] // len(runs)
-        spans = [(name, share) for name, _ in runs]
-    else:
-        msg = (
-            f"Fused adapter routing covers {len(routing)} rows but the layer "
-            f"input's leading dimension is {x.shape[0]}."
-        )
-        raise ValueError(msg)
-
+    spans = _routing_spans(routing, x.shape[0])
     if _needs_peft_mixed_forward(layer, routing):
         names = [name for name, n in spans for _ in range(n)]
         return layer._mixed_batch_forward(
             x, *forward_args, adapter_names=names, **forward_kwargs
         )
 
-    base_out = layer.base_layer(x, *forward_args, **forward_kwargs)
+    # Slicing a single run would add a zero-fill and copy to backward.
+    whole = len(spans) == 1
+    if whole and _has_stock_linear_base(layer):
+        return _single_run_forward(
+            layer, spans[0][0], x, *forward_args, **forward_kwargs
+        )
 
+    base_out = layer.base_layer(x, *forward_args, **forward_kwargs)
     pieces = []
     start = 0
     for name, n in spans:
-        rows = base_out.narrow(0, start, n)
+        rows = base_out if whole else base_out.narrow(0, start, n)
         if name != "__base__" and name in layer.lora_A:
-            rows = rows + _lora_delta(layer, name, x.narrow(0, start, n)).to(rows.dtype)
+            lora_rows = x if whole else x.narrow(0, start, n)
+            rows = _add_lora_delta(layer, name, rows, lora_rows, False)
         pieces.append(rows)
         start += n
-    return pieces[0] if len(pieces) == 1 else torch.cat(pieces)
+    return pieces[0] if whole else torch.cat(pieces)
 
 
 def _param_wrapper_routed_forward(

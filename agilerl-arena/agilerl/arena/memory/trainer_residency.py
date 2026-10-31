@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import agilerl.arena.memory.formulas as formulas
+import agilerl.arena.memory.fsdp_gather as fsdp_gather
 from agilerl.arena.memory.specs import (
     DTYPE_BYTES,
     ModelArch,
@@ -31,7 +32,7 @@ def trainer_base_bytes(
     """
     full = formulas.weight_bytes(counts, settings.weight_dtype, model.variant("base"))
     fsdp = settings.fsdp
-    if fsdp is None or (shards <= 1 and not fsdp.cpu_offload):
+    if fsdp is None:
         return float(full)
     arch = model.arch
     token = min(formulas.token_embedding_params(arch), max(counts.total, 0))
@@ -43,12 +44,11 @@ def trainer_base_bytes(
         else 0
     )
     sharded_params = max(counts.total - token - tp_params - ep_params, 0)
-    gathered = formulas.fsdp_gathered_params(
+    gathered = fsdp_gather.fsdp_gathered_params(
         counts,
         arch,
         n_gpus=shards,
         reshard_after_forward=fsdp.reshard_after_forward,
-        cpu_offload=bool(fsdp.cpu_offload),
         tensor_parallel=fsdp.tp,
         expert_parallel=fsdp.ep,
     )
@@ -61,7 +61,7 @@ def trainer_base_bytes(
     # decoder backward, so they add only what they exceed activations by.
     side = 0
     if fsdp.reshard_after_forward:
-        side = min(formulas.fsdp_resharded_side_params(counts, arch), gathered)
+        side = min(fsdp_gather.fsdp_resharded_side_params(counts, arch), gathered)
     side_at_peak = max(side * byte - activations, 0.0)
     return token * byte + resident + (gathered - side) * byte + side_at_peak
 
@@ -92,7 +92,7 @@ def trainer_allocator_slack(
     )
     if fsdp is None or not sharded:
         return reserve, 0.0
-    pool = formulas.fsdp_gather_pool_params(
+    pool = fsdp_gather.fsdp_gather_pool_params(
         counts,
         arch,
         fsdp.ep,

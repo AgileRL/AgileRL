@@ -18,6 +18,7 @@ from agilerl.arena.models.descriptions import (
     MAX_OUTPUT_TOKENS,
     MAX_ROW_TOKENS,
     MICRO_BATCH,
+    MICRO_BATCH_TOKENS,
     MIN_OUTPUT_TOKENS,
     MIN_P,
     MINI_BATCH,
@@ -31,6 +32,21 @@ from agilerl.arena.models.descriptions import (
 )
 from agilerl.arena.models.env import LLMEnvType
 from agilerl.arena.models.networks import CosineLRScheduleConfig, VLLMConfig
+
+
+def drafting_rejected_sampling(min_p: float, logit_bias: bool) -> list[str]:
+    """Sampling parameters set on every rollout request that vLLM rejects on a drafting engine.
+
+    :param min_p: The algorithm's ``min_p``.
+    :param logit_bias: Rollout requests carry a ``logit_bias``.
+    :return: ``min_p`` and ``logit_bias`` where they apply; empty when the
+        engine can draft.
+    """
+    return [
+        name
+        for name, applies in (("min_p", min_p > 0.0), ("logit_bias", logit_bias))
+        if applies
+    ]
 
 
 def records_sampling_supports(
@@ -102,6 +118,9 @@ class RolloutLLMSpec(LLMAlgorithmSpec):
     micro_batch_size_per_gpu: int | None = Field(
         default=None, ge=1, description=MICRO_BATCH
     )
+    micro_batch_tokens_per_gpu: int | None = Field(
+        default=None, ge=1, description=MICRO_BATCH_TOKENS
+    )
     min_output_tokens: int | None = Field(
         default=None, ge=0, description=MIN_OUTPUT_TOKENS
     )
@@ -129,6 +148,36 @@ class RolloutLLMSpec(LLMAlgorithmSpec):
             self.constrain_answer_pattern,
         )
         return self
+
+    @model_validator(mode="after")
+    def _validate_speculative_min_p(self) -> Self:
+        self.check_speculative_sampling(False)
+        return self
+
+    def check_speculative_sampling(self, logit_bias: bool) -> None:
+        """Reject a ``speculative_config`` that vLLM cannot serve rollout requests with.
+
+        :param logit_bias: Rollout requests carry a ``logit_bias`` masking the
+            tokenizer's image token.
+        :raises ValueError: If ``vllm_engine_args.speculative_config`` drafts
+            and requests set ``min_p`` or ``logit_bias``.
+        """
+        if self.vllm_engine_args.get("speculative_config") is None:
+            return
+        rejected = drafting_rejected_sampling(self.min_p, logit_bias)
+        if not rejected:
+            return
+        msg = (
+            "vllm_engine_args.speculative_config drafts, and vLLM rejects every "
+            f"request that sets {' and '.join(rejected)} on a drafting engine"
+        )
+        if logit_bias:
+            msg += (
+                f"; {self.pretrained_model_name_or_path} rollouts mask the "
+                "tokenizer's image token with logit_bias"
+            )
+        msg += ". Set vllm_engine_args.speculative_config to null."
+        raise ValueError(msg)
 
     def _max_output_tokens(self) -> int | None:
         return self.max_output_tokens

@@ -32,6 +32,7 @@ and :func:`mixers_without_boundary_reset` lists mixers that would leak state.
 from __future__ import annotations
 
 import itertools
+import math
 import weakref
 from collections.abc import Callable, Sequence
 from typing import NamedTuple
@@ -59,6 +60,11 @@ class PackedBatch(NamedTuple):
     :param padded_seq_len: Original padded length ``T`` (so unpacking can
         rebuild the ``(B, T - 1)`` frame).
     :param lengths: Host copy of ``seq_lengths``.
+    :param real_index: ``(N,)`` index of each packed token in the flattened
+        ``(B * T)`` padded frame.
+    :param score_mask: ``(1, N - 1)`` bool packed next-token positions to score,
+        or ``None`` when packed without a score mask.
+    :param n_scored: Host count of ``score_mask``, or ``None``.
     """
 
     input_ids: torch.Tensor
@@ -69,11 +75,39 @@ class PackedBatch(NamedTuple):
     batch_size: int
     padded_seq_len: int
     lengths: tuple[int, ...]
+    real_index: torch.Tensor
+    score_mask: torch.Tensor | None = None
+    n_scored: int | None = None
+
+    def flash_attention_kwargs(self, copies: int) -> dict[str, torch.Tensor | int]:
+        """FlashAttention varlen kwargs of the packed row stacked *copies* times, with host-side max lengths.
+
+        The varlen kernel flattens the stacked rows into one sequence, so each
+        copy repeats the offsets shifted by the tokens of the copies before it.
+
+        :param copies: Times the packed row is stacked, one per routed adapter.
+        :type copies: int
+        :return: ``cu_seq_lens_q`` / ``cu_seq_lens_k`` over ``copies * N`` tokens
+            and the longest document length.
+        :rtype: dict[str, torch.Tensor | int]
+        """
+        n_tokens = self.input_ids.shape[1]
+        cu_seqlens = torch.cat(
+            [self.cu_seqlens[:-1] + copy * n_tokens for copy in range(copies)]
+            + [self.cu_seqlens[-1:] + (copies - 1) * n_tokens]
+        )
+        return {
+            "cu_seq_lens_q": cu_seqlens,
+            "cu_seq_lens_k": cu_seqlens,
+            "max_length_q": self.max_seqlen,
+            "max_length_k": self.max_seqlen,
+        }
 
 
 def pack_padded_batch(
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
+    score_mask: torch.Tensor | None = None,
 ) -> PackedBatch:
     """Flatten a padded ``(B, T)`` batch into a single padding-free row.
 
@@ -87,6 +121,10 @@ def pack_padded_batch(
     :type input_ids: torch.Tensor
     :param attention_mask: ``(B, T)`` mask; non-zero marks real tokens.
     :type attention_mask: torch.Tensor
+    :param score_mask: ``(B, T - 1)`` next-token positions to score, or ``None``.
+        Only predictions of a real token from a real token of the same row are
+        kept, so the packed mask never scores a cross-sequence prediction.
+    :type score_mask: torch.Tensor | None
     :return: A :class:`PackedBatch`.
     :rtype: PackedBatch
     """
@@ -98,8 +136,13 @@ def pack_padded_batch(
     mask = attention_mask.bool()
     batch_size, padded_seq_len = input_ids.shape
     seq_lengths = mask.sum(dim=1).to(torch.long)  # (B,)
-    # The only device sync; every size below derives from these host lengths.
-    lengths = tuple(seq_lengths.tolist())
+    counts = seq_lengths
+    if score_mask is not None:
+        score_mask = score_mask.to(mask.device).bool() & mask[:, 1:] & mask[:, :-1]
+        counts = torch.cat([seq_lengths, score_mask.sum().view(1)])
+    # The only device sync; every size below derives from these host counts.
+    host_counts = counts.tolist()
+    lengths = tuple(host_counts[:batch_size])
     n_tokens = sum(lengths)
 
     # (1, N), row-major over real tokens
@@ -123,7 +166,19 @@ def pack_padded_batch(
         batch_size=batch_size,
         padded_seq_len=padded_seq_len,
         lengths=lengths,
+        real_index=real,
+        score_mask=None if score_mask is None else _pack_frame(score_mask, real, 0),
+        n_scored=None if score_mask is None else host_counts[-1],
     )
+
+
+def _pack_frame(
+    frame: torch.Tensor, real_index: torch.Tensor, fill_value: float
+) -> torch.Tensor:
+    """Pack a ``(B, T - 1, ...)`` next-token frame onto the ``(1, N - 1, ...)`` packed predictions."""
+    tail = frame.new_full((frame.shape[0], 1, *frame.shape[2:]), fill_value)
+    rows = torch.cat([frame, tail], dim=1).flatten(0, 1)
+    return rows[real_index.to(rows.device)][:-1].unsqueeze(0)
 
 
 class PackedLayout(NamedTuple):
@@ -289,6 +344,189 @@ def mixers_without_boundary_reset(model: nn.Module) -> list[str]:
     )
 
 
+def triton_int_class(value: int) -> int:
+    """Triton's specialization of an integer kernel argument: 1, 16 (divisible by 16) or 0."""
+    if value == 1:
+        return 1
+    return 16 if value % 16 == 0 else 0
+
+
+class Mamba2ScanShape(NamedTuple):
+    """Mamba-2 mixer dimensions its chunked-scan kernel launches derive from."""
+
+    chunk_size: int
+    num_heads: int
+    n_groups: int
+    intermediate_size: int
+
+
+class GatedDeltaShape(NamedTuple):
+    """Gated delta-net dimensions its l2norm kernel launches derive from."""
+
+    num_v_heads: int
+    head_k_dim: int
+
+
+def mamba2_scan_launch_ints(
+    shape: Mamba2ScanShape, length: int, sm_count: int
+) -> tuple[int, ...]:
+    """Integer arguments ``mamba_split_conv1d_scan_combined`` derives from a packed *length*.
+
+    Chunk count; heads per program of the chunk-scan and chunk-state backward
+    kernels; rows per program of the gated RMSNorm backward. Each follows
+    mamba_ssm's launch heuristics.
+
+    :param shape: Dimensions of the Mamba-2 mixer.
+    :type shape: Mamba2ScanShape
+    :param length: Packed tokens.
+    :type length: int
+    :param sm_count: Streaming multiprocessors of the device.
+    :type sm_count: int
+    :return: The derived integers.
+    :rtype: tuple[int, ...]
+    """
+    chunks = math.ceil(length / shape.chunk_size)
+    heads_per_program = max(
+        min(
+            math.ceil(chunks * shape.num_heads / sm_count),
+            shape.num_heads // shape.n_groups,
+        ),
+        1,
+    )
+    group_size = shape.intermediate_size // shape.n_groups
+    norm_warps = min(max((1 << (group_size - 1).bit_length()) // 256, 1), 8)
+    norm_row_groups = math.ceil(sm_count * math.ceil(4 / norm_warps) / shape.n_groups)
+    return chunks, heads_per_program, math.ceil(length / norm_row_groups)
+
+
+def gated_delta_l2norm_blocks(shape: GatedDeltaShape, length: int) -> int:
+    """``NB`` of FLA's query/key l2norm kernels for a gated delta-net at a packed *length*.
+
+    FLA normalizes ``length * num_v_heads`` rows of ``head_k_dim`` features.
+    Up to 512 features it passes ``cdiv(rows, 65536)`` as a constexpr that is
+    also an autotune key, so each value compiles and autotunes the kernels.
+
+    :param shape: Dimensions of the gated delta-net.
+    :type shape: GatedDeltaShape
+    :param length: Packed tokens.
+    :type length: int
+    :return: ``NB``, or 0 when ``head_k_dim`` takes FLA's per-row kernel.
+    :rtype: int
+    """
+    if shape.head_k_dim > 512:
+        return 0
+    return math.ceil(length * shape.num_v_heads / (2048 * 32))
+
+
+def head_norm_shapes(model: nn.Module) -> list[tuple[int, int]]:
+    """``(heads, head_dim)`` of every per-head ``q_norm`` / ``k_norm`` in *model*.
+
+    Such a norm normalizes ``heads`` rows per token.
+
+    :param model: Model to scan.
+    :type model: nn.Module
+    :return: Distinct shapes, sorted.
+    :rtype: list[tuple[int, int]]
+    """
+    heads_by_norm = {"q_norm": "num_attention_heads", "k_norm": "num_key_value_heads"}
+    return sorted(
+        {
+            (
+                getattr(parent.config, heads_by_norm[name]),
+                norm.get_parameter("weight").shape[-1],
+            )
+            for parent in model.modules()
+            for name, norm in parent.named_children()
+            if name in heads_by_norm
+        }
+    )
+
+
+def packed_length_classes(
+    model: nn.Module, token_budget: int, center: int, sm_count: int
+) -> list[int]:
+    """Packed lengths that reach every length-specialized Triton kernel of a learn on *model*.
+
+    Triton compiles a kernel once per set of integer arguments equal to 1 or
+    divisible by 16, and once per constexpr value. Each kernel group below
+    derives such arguments from the packed length, and a learn compiles
+    whenever a micro-batch first hits a new key of a group:
+
+    - Liger RMSNorm over hidden states and Liger RoPE: ``length`` and the
+      backward rows per program, ``ceil(length / sm_count)``.
+    - Liger RMSNorm of each :func:`head_norm_shapes`: the same over
+      ``length * heads`` rows, and whether those rows reach the block kernel
+      (32768 rows when ``head_dim`` is at most 256).
+    - Mamba-2 mixers: ``length`` and :func:`mamba2_scan_launch_ints`.
+    - Gated delta-nets: :func:`gated_delta_l2norm_blocks`.
+
+    :param model: Model to scan.
+    :type model: nn.Module
+    :param token_budget: Longest packed row.
+    :type token_budget: int
+    :param center: Most likely packed length; autotuning runs at the first
+        length.
+    :type center: int
+    :param sm_count: Streaming multiprocessors of the device.
+    :type sm_count: int
+    :return: Of the lengths from 4 (two documents of two tokens) to
+        *token_budget*, nearest *center* first and the shorter on a tie, each
+        that reaches a group key no earlier length reached; empty when *model*
+        has no recurrent mixer.
+    :rtype: list[int]
+    """
+    mixers = [module for module in model.modules() if is_recurrent_mixer(module)]
+    if not mixers:
+        return []
+    # One entry per distinct shape; layers of a model share it.
+    scans = {
+        Mamba2ScanShape(*(getattr(module, name) for name in Mamba2ScanShape._fields))
+        for module in mixers
+        if all(hasattr(module, name) for name in Mamba2ScanShape._fields)
+    }
+    delta_nets = {
+        GatedDeltaShape(*(getattr(module, name) for name in GatedDeltaShape._fields))
+        for module in mixers
+        if all(hasattr(module, name) for name in GatedDeltaShape._fields)
+    }
+    head_norms = head_norm_shapes(model)
+
+    def norm_key(rows: int, width: int | None) -> tuple[int, ...]:
+        per_program = math.ceil(rows / sm_count)
+        block = width is not None and width <= 256 and rows >= 4096 * 8
+        return (triton_int_class(rows), triton_int_class(per_program), block)
+
+    def group_keys(length: int) -> set[tuple[int, tuple[int, ...]]]:
+        keys = [
+            norm_key(length, None),
+            *(norm_key(length * heads, width) for heads, width in head_norms),
+            *(
+                tuple(
+                    triton_int_class(value)
+                    for value in (
+                        length,
+                        *mamba2_scan_launch_ints(scan, length, sm_count),
+                    )
+                )
+                for scan in scans
+            ),
+            *((gated_delta_l2norm_blocks(net, length),) for net in delta_nets),
+        ]
+        return set(enumerate(keys))
+
+    lengths: list[int] = []
+    reached: set[tuple[int, tuple[int, ...]]] = set()
+    by_distance = sorted(
+        range(4, token_budget + 1), key=lambda length: (abs(length - center), length)
+    )
+    for length in by_distance:
+        keys = group_keys(length)
+        if not keys <= reached:
+            lengths.append(length)
+            reached |= keys
+    return lengths
+
+
 def packed_segment_ids(
     packed: PackedBatch,
     device: torch.device | str,
@@ -360,7 +598,7 @@ def _scatter_packed(
 
 def pack_next_token_frame(
     frame: torch.Tensor,
-    attention_mask: torch.Tensor,
+    packed: PackedBatch,
     fill_value: float,
 ) -> torch.Tensor:
     """Pack a padded ``(B, T - 1, ...)`` next-token frame onto the packed predictions.
@@ -368,22 +606,18 @@ def pack_next_token_frame(
     Packed position ``i`` predicts packed token ``i + 1``, so each row gains one
     trailing ``fill_value`` position before its real positions are taken in the
     order :func:`pack_padded_batch` takes tokens, and the final position, which
-    predicts nothing, is dropped.
+    predicts nothing, is dropped. No device sync.
 
     :param frame: ``(B, T - 1, ...)`` value per next-token prediction.
     :type frame: torch.Tensor
-    :param attention_mask: ``(B, T)`` mask; non-zero marks real tokens.
-    :type attention_mask: torch.Tensor
+    :param packed: The :class:`PackedBatch` of the frame's padded batch.
+    :type packed: PackedBatch
     :param fill_value: Value of each row's appended position.
     :type fill_value: float
     :return: ``(1, N - 1, ...)`` values aligned to the packed predictions.
     :rtype: torch.Tensor
     """
-    frame = frame.to(attention_mask.device)
-    tail = frame.new_full((frame.shape[0], 1, *frame.shape[2:]), fill_value)
-    rows = torch.cat([frame, tail], dim=1).flatten(0, 1)
-    real = attention_mask.bool().flatten().nonzero().squeeze(1)
-    return rows[real][:-1].unsqueeze(0)
+    return _pack_frame(frame.to(packed.input_ids.device), packed.real_index, fill_value)
 
 
 def unpack_logprobs(

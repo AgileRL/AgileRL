@@ -16,7 +16,7 @@ import torch.nn.functional as F
 from peft import LoraConfig, get_peft_model
 from torch import nn
 from torch.distributed.tensor import DTensor
-from torch.utils.checkpoint import CheckpointError, checkpoint
+from torch.utils.checkpoint import checkpoint
 from transformers import GptOssConfig, GptOssForCausalLM
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssTopKRouter
 
@@ -155,19 +155,27 @@ class TestBlockCheckpointContexts:
 
     def test_recomputed_router_reroutes_gpt_oss_tokens(self) -> None:
         # Arrange
+        reference = tiny_gpt_oss_mlp_with_lora()
         mlp = tiny_gpt_oss_mlp_with_lora()
         torch.manual_seed(2)
-        hidden = torch.randn(2, 6, HIDDEN, requires_grad=True)
+        hidden = torch.randn(2, 6, HIDDEN)
+        upstream = torch.randn(2, 6, HIDDEN)
+        reference_hidden = hidden.clone().requires_grad_()
+        (reference(reference_hidden)[0] * upstream).sum().backward()
+        hidden.requires_grad_()
+
+        # Act
         out, _scores = checkpoint(
             mlp,
             hidden,
             use_reentrant=False,
             context_fn=_block_checkpoint_contexts(False),
         )
+        (out * upstream).sum().backward()
 
-        # Act / Assert
-        with pytest.raises(CheckpointError, match="different metadata"):
-            out.sum().backward()
+        # Assert: the grouped GEMMs save routing-independent shapes, so the
+        # rerouted backward runs and its gradients leave the forward routing.
+        assert not torch.allclose(hidden.grad, reference_hidden.grad)
 
 
 class TestApplyFsdp2:
@@ -183,7 +191,9 @@ class TestApplyFsdp2:
 
         # Act
         apply_fsdp2(
-            model, FSDPConfig(param_dtype="float32"), gradient_checkpointing=True
+            model,
+            FSDPConfig(param_dtype="float32", checkpoint_every_n_blocks=1),
+            gradient_checkpointing=True,
         )
         (model(input_ids=input_ids).logits * upstream).sum().backward()
 

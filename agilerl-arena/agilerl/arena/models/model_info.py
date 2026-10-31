@@ -221,6 +221,15 @@ class ModelInfo(BaseModel):
         return self.text_lora_modules
 
     @property
+    def biases_image_token(self) -> bool:
+        """Rollout requests mask the tokenizer's image token with ``logit_bias``.
+
+        Every catalogued vision checkpoint's tokenizer holds an image token,
+        and no text-only one does.
+        """
+        return "vision" in self.modalities
+
+    @property
     def tower_lora_modules(self) -> frozenset[str]:
         """``tower_target_modules`` names: modules outside the language model."""
         if self.language_model_prefix is None:

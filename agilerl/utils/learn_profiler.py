@@ -127,12 +127,21 @@ class LearnProfiler:
                 torch.cuda.synchronize()
         path.parent.mkdir(parents=True, exist_ok=True)
         prof.export_chrome_trace(str(path))
+        # key_averages() recurses once per nested event, and with Python stacks
+        # every frame is an event, so a deep trainer stack exceeds the
+        # recursion limit.
+        summary = (
+            ""
+            if self.trace_with_stack
+            else "\n"
+            + prof.key_averages().table(sort_by="device_time_total", row_limit=30)
+        )
         logger.info(
-            "Wrote torch.profiler trace of learn call %d on rank %d to %s\n%s",
+            "Wrote torch.profiler trace of learn call %d on rank %d to %s%s",
             self.learn_calls,
             self.rank,
             path,
-            prof.key_averages().table(sort_by="device_time_total", row_limit=30),
+            summary,
         )
 
     def _dump_memory_snapshot(self, directory: Path) -> None:

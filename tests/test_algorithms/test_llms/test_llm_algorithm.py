@@ -307,6 +307,56 @@ class TestLLMAlgorithmSamplingMismatchMetrics:
         }
 
 
+class TestLLMAlgorithmAlignSamplingLogprobs:
+    """Per-row engine log-probs placed on the action frame."""
+
+    def test_places_matching_rows_and_keeps_old_elsewhere(self) -> None:
+        # Arrange
+        stub = SamplingMismatchStub()
+        action_masks = torch.tensor(
+            [
+                [False, True, True, False],
+                [True, True, True, True],
+                [False, False, True, False],
+                [True, False, False, True],
+                [True, True, False, False],
+            ]
+        )
+        old = torch.arange(20, dtype=torch.float32).reshape(5, 4)
+        # Rows: match, count mismatch, None, match; row 4 has no entry.
+        flat = [
+            torch.tensor([-0.5, -0.25], dtype=torch.float64),
+            torch.tensor([-0.3]),
+            None,
+            torch.tensor([-0.75, -1.5]),
+        ]
+
+        # Act
+        aligned, n_skipped = stub._align_sampling_logprobs(flat, action_masks, old)
+
+        # Assert
+        expected = old.clone()
+        expected[0, 1:3] = torch.tensor([-0.5, -0.25])
+        expected[3, [0, 3]] = torch.tensor([-0.75, -1.5])
+        assert n_skipped == 3
+        assert aligned.dtype == torch.float32
+        assert torch.equal(aligned, expected)
+        assert torch.equal(old, torch.arange(20, dtype=torch.float32).reshape(5, 4))
+
+    def test_all_rows_skipped_returns_old_copy(self) -> None:
+        stub = SamplingMismatchStub()
+        action_masks = torch.ones(2, 3, dtype=torch.bool)
+        old = torch.zeros(2, 3)
+
+        aligned, n_skipped = stub._align_sampling_logprobs(
+            [torch.tensor([-1.0]), None], action_masks, old
+        )
+
+        assert n_skipped == 2
+        assert torch.equal(aligned, old)
+        assert aligned is not old
+
+
 class TestLLMAlgorithmAlignedSamplingLogprobsAndMetrics:
     """Engine-vs-trainer mismatch metrics and the warning guard on them."""
 

@@ -1,6 +1,8 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -60,13 +62,6 @@ class TestRowChunkOffsets:
         assert sum(sizes) == total
 
 
-class TestOffsetCounts:
-    def test_returns_rows_per_group(self):
-        offs = torch.tensor([2, 2, 5], dtype=torch.int32)
-
-        assert moe_gemm.offset_counts(offs) == [2, 0, 3]
-
-
 class TestGroupedOperand:
     def test_returns_the_in_out_layout(self):
         weight = torch.randn(3, 4, 8)
@@ -95,19 +90,58 @@ class TestGroupedOperand:
         assert torch.equal(operand, local.transpose(-2, -1))
 
 
-class TestGroupedMatmul:
-    @pytest.mark.parametrize("use_grouped_mm", [False, True], ids=["loop", "gmm"])
-    def test_matches_per_expert_reference_with_empty_groups(
-        self, monkeypatch, use_grouped_mm
+class TestCountsList:
+    def test_device_counts_become_python_ints(self):
+        counts = moe_gemm.counts_list(torch.tensor([3, 0, 2]))
+
+        assert counts == [3, 0, 2]
+        assert all(type(count) is int for count in counts)
+
+
+@pytest.fixture
+def fresh_device_backends():
+    """Forget cached per-device backends before and after the test."""
+    moe_gemm.device_expert_backend.cache_clear()
+    yield
+    moe_gemm.device_expert_backend.cache_clear()
+
+
+class TestExpertKernels:
+    def test_cpu_rows_stay_on_torch_ops(self):
+        x = torch.randn(4, 8, dtype=torch.bfloat16)
+
+        assert moe_gemm.expert_kernels(x) is None
+
+    def test_triton_backend_takes_the_triton_kernels(
+        self, monkeypatch, fresh_device_backends
     ):
+        # Arrange: bf16 on an sm80 GPU runs the Triton kernels.
+        kernels = moe_gemm.ExpertKernels(None, None, None)
+        monkeypatch.setattr(moe_gemm, "HAS_TRITON", True)
+        monkeypatch.setattr(moe_gemm, "TRITON_EXPERT_KERNELS", kernels)
+        monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _index: (8, 0))
+        x = SimpleNamespace(
+            is_cuda=True, device=torch.device("cuda", 0), dtype=torch.bfloat16
+        )
+
+        # Act
+        chosen = moe_gemm.expert_kernels(x)
+
+        # Assert
+        assert chosen is kernels
+
+
+class TestGroupedMatmul:
+    @pytest.mark.parametrize("backend", ["gmm", "kernels"])
+    def test_matches_per_expert_reference_with_empty_groups(self, request, backend):
         # Arrange
         torch.manual_seed(0)
         counts = [2, 0, 3, 0]
         x = torch.randn(sum(counts), 8, requires_grad=True)
         weight = torch.randn(4, 8, 4, requires_grad=True)
         offs = torch.tensor([2, 2, 5, 5], dtype=torch.int32)
-        if use_grouped_mm:
-            monkeypatch.setattr(moe_gemm, "_use_grouped_mm", lambda _x: True)
+        if backend == "kernels":
+            request.getfixturevalue("reference_expert_kernels")
         expected = torch.cat(
             [rows @ weight[e] for e, rows in enumerate(x.split(counts))]
         )
@@ -123,6 +157,100 @@ class TestGroupedMatmul:
         for grad, expected_grad in zip(grads, expected_grads, strict=True):
             torch.testing.assert_close(grad, expected_grad, rtol=1e-5, atol=1e-6)
         assert torch.equal(grads[1][1], torch.zeros(8, 4))
+
+    def test_weight_follows_the_activation_dtype(self):
+        # Arrange
+        torch.manual_seed(0)
+        x = torch.randn(4, 8, dtype=torch.bfloat16)
+        weight = torch.randn(2, 8, 8)
+        offs = torch.tensor([1, 4], dtype=torch.int32)
+        expected = torch.cat(
+            [x[:1] @ weight[0].bfloat16(), x[1:] @ weight[1].bfloat16()]
+        )
+
+        # Act
+        out = moe_gemm.grouped_matmul(x, weight, offs)
+
+        # Assert
+        assert out.dtype == torch.bfloat16
+        torch.testing.assert_close(out, expected)
+
+    def test_unaligned_dims_off_cuda_raise(self):
+        # Arrange: 6 fp32 columns are 24 bytes, off the 16-byte boundary.
+        x = torch.randn(3, 6)
+        weight = torch.randn(2, 6, 4)
+        offs = torch.tensor([1, 3], dtype=torch.int32)
+
+        # Act / Assert
+        with pytest.raises(RuntimeError, match="MoE expert GEMMs in float32 on cpu"):
+            moe_gemm.grouped_matmul(x, weight, offs)
+
+    def test_frozen_weight_skips_the_weight_grad(self, reference_expert_kernels):
+        # Arrange
+        torch.manual_seed(0)
+        counts = [3, 0, 2]
+        x = torch.randn(sum(counts), 8, requires_grad=True)
+        weight = torch.randn(3, 8, 4)
+        offs = torch.tensor([3, 3, 5], dtype=torch.int32)
+        expected = torch.cat(
+            [rows @ weight[e] for e, rows in enumerate(x.split(counts))]
+        )
+        (expected_grad,) = torch.autograd.grad(expected.square().sum(), x)
+
+        # Act
+        out = moe_gemm.grouped_matmul(x, weight, offs)
+        (grad,) = torch.autograd.grad(out.square().sum(), x)
+
+        # Assert
+        # fp32 sums of 8 products; only the accumulation order differs.
+        torch.testing.assert_close(grad, expected_grad, rtol=1e-5, atol=1e-6)
+        assert reference_expert_kernels.used == {"matmul"}
+
+
+class TestUnalignedGemmKernels:
+    def test_cuda_with_triton_takes_the_triton_kernels(self, monkeypatch):
+        kernels = moe_gemm.ExpertKernels(None, None, None)
+        monkeypatch.setattr(moe_gemm, "TRITON_EXPERT_KERNELS", kernels)
+        x = SimpleNamespace(is_cuda=True)
+
+        assert moe_gemm.unaligned_gemm_kernels(x) is kernels
+
+    def test_cuda_without_triton_raises(self, monkeypatch):
+        monkeypatch.setattr(moe_gemm, "TRITON_EXPERT_KERNELS", None)
+        x = SimpleNamespace(
+            is_cuda=True, dtype=torch.bfloat16, device=torch.device("cuda", 0)
+        )
+
+        with pytest.raises(RuntimeError, match="in bfloat16 on cuda have no kernel"):
+            moe_gemm.unaligned_gemm_kernels(x)
+
+
+class TestGroupedLinear:
+    def test_kernels_match_per_expert_linear(self, reference_expert_kernels):
+        # Arrange
+        torch.manual_seed(0)
+        counts = [0, 4, 1]
+        x = torch.randn(sum(counts), 8, requires_grad=True)
+        weight = torch.randn(3, 4, 8, requires_grad=True)
+        expected = torch.cat(
+            [
+                rows @ weight[e].T
+                for e, rows in enumerate(x.split(counts))
+                if rows.shape[0]
+            ]
+        )
+        expected_grads = torch.autograd.grad(expected.square().sum(), (x, weight))
+
+        # Act
+        out = moe_gemm.grouped_linear(x, weight, counts)
+        grads = torch.autograd.grad(out.square().sum(), (x, weight))
+
+        # Assert
+        # fp32 sums of 8 products; only the accumulation order differs.
+        torch.testing.assert_close(out, expected, rtol=1e-5, atol=1e-6)
+        for grad, expected_grad in zip(grads, expected_grads, strict=True):
+            torch.testing.assert_close(grad, expected_grad, rtol=1e-5, atol=1e-6)
+        assert reference_expert_kernels.used == {"matmul", "weight_grad"}
 
 
 class TestPadLoraRank:
@@ -168,7 +296,8 @@ class TestPadLoraRank:
         assert padded_a is lora_a
         assert padded_b is lora_b
 
-    def test_keeps_factors_off_the_grouped_path(self):
+    def test_keeps_factors_off_the_grouped_path(self, monkeypatch):
+        monkeypatch.setattr(moe_gemm, "_use_grouped_mm", lambda _x: False)
         lora_a = torch.randn(3, 2, 16, dtype=torch.bfloat16)
         lora_b = torch.randn(3, 8, 2, dtype=torch.bfloat16)
 
@@ -176,3 +305,92 @@ class TestPadLoraRank:
 
         assert padded_a is lora_a
         assert padded_b is lora_b
+
+
+@pytest.mark.skipif(
+    not (torch.cuda.is_available() and moe_gemm.HAS_TRITON),
+    reason="Triton expert kernels need a CUDA device",
+)
+class TestGroupedMatmulTriton:
+    @pytest.mark.parametrize("rank", [1, 2, 3, 8, 16])
+    def test_lora_factors_match_per_expert_reference(self, monkeypatch, rank):
+        # Arrange
+        monkeypatch.setattr(moe_gemm, "expert_backend", lambda _x: "triton")
+        torch.manual_seed(0)
+        counts = [5, 0, 3, 9]
+        offs = torch.tensor([5, 5, 8, 17], dtype=torch.int32, device="cuda")
+        options = {"device": "cuda", "dtype": torch.bfloat16}
+        x = torch.randn(sum(counts), 64, **options, requires_grad=True)
+        lora_a = torch.randn(4, 64, rank, **options, requires_grad=True)
+        lora_b = torch.randn(4, rank, 32, **options, requires_grad=True)
+        expected = torch.cat(
+            [
+                (rows @ lora_a[e]) @ lora_b[e]
+                for e, rows in enumerate(x.split(counts))
+                if rows.shape[0]
+            ]
+        )
+        expected_grads = torch.autograd.grad(
+            expected.float().square().sum(), (x, lora_a, lora_b)
+        )
+
+        # Act
+        out = moe_gemm.grouped_matmul(
+            moe_gemm.grouped_matmul(x, lora_a, offs), lora_b, offs
+        )
+        grads = torch.autograd.grad(out.float().square().sum(), (x, lora_a, lora_b))
+
+        # Assert
+        # bf16 keeps 8 mantissa bits; both sides accumulate in fp32 but round
+        # sums of up to 64 products in a different order.
+        tolerance = {"rtol": 2e-2, "atol": 2e-2}
+        torch.testing.assert_close(out, expected, **tolerance)
+        for grad, expected_grad in zip(grads, expected_grads, strict=True):
+            torch.testing.assert_close(grad, expected_grad, **tolerance)
+
+    def test_unaligned_dims_run_on_triton(self):
+        # Arrange: 12 bf16 output columns are 24 bytes, off grouped_mm's
+        # 16-byte boundary on every backend.
+        torch.manual_seed(0)
+        counts = [3, 0, 5]
+        offs = torch.tensor([3, 3, 8], dtype=torch.int32, device="cuda")
+        options = {"device": "cuda", "dtype": torch.bfloat16}
+        x = torch.randn(sum(counts), 64, **options)
+        weight = torch.randn(3, 64, 12, **options)
+        expected = torch.cat(
+            [
+                rows @ weight[e]
+                for e, rows in enumerate(x.split(counts))
+                if rows.shape[0]
+            ]
+        )
+
+        # Act
+        out = moe_gemm.grouped_matmul(x, weight, offs)
+
+        # Assert
+        # bf16 sums of 64 products, rounded in a different order.
+        torch.testing.assert_close(out, expected, rtol=2e-2, atol=2e-2)
+
+    def test_zero_padded_rank_matches_the_unpadded_rank(self, monkeypatch):
+        # Arrange
+        monkeypatch.setattr(moe_gemm, "expert_backend", lambda _x: "triton")
+        torch.manual_seed(0)
+        offs = torch.tensor([4, 4, 11], dtype=torch.int32, device="cuda")
+        options = {"device": "cuda", "dtype": torch.bfloat16}
+        x = torch.randn(11, 64, **options)
+        lora_a = torch.randn(3, 64, 2, **options)
+        lora_b = torch.randn(3, 2, 32, **options)
+        padded_a = torch.nn.functional.pad(lora_a, (0, 6))
+        padded_b = torch.nn.functional.pad(lora_b, (0, 0, 0, 6))
+
+        # Act
+        unpadded = moe_gemm.grouped_matmul(
+            moe_gemm.grouped_matmul(x, lora_a, offs), lora_b, offs
+        )
+        padded = moe_gemm.grouped_matmul(
+            moe_gemm.grouped_matmul(x, padded_a, offs), padded_b, offs
+        )
+
+        # Assert: the zero rank columns add exact zeros.
+        assert torch.equal(padded, unpadded)

@@ -26,17 +26,13 @@ MiB = 1024**2
 # Default Mamba-2 chunked-scan chunk length.
 MAMBA_CHUNK_SIZE_DEFAULT = 256
 
-# Model types whose trainer RMSNorm is the stock HF module, which keeps an
-# fp32 copy of each norm input for backward. Gemma 4's norm upcasts with
-# ``hidden_states.float()`` under Liger too.
-FP32_RMS_NORM_MODEL_TYPES = frozenset({"granitemoe", "granitemoehybrid", "gemma4_text"})
+# Model types whose trainer RMSNorm keeps an fp32 copy of each norm input for
+# backward under Liger too: Gemma 4's norm upcasts with ``hidden_states.float()``.
+# Without Liger every model type does (:func:`liger_kernel_arch`).
+FP32_RMS_NORM_MODEL_TYPES = frozenset({"gemma4_text"})
 
 # Model types with a norm before and after both the attention and the MLP.
 SANDWICH_NORM_MODEL_TYPES = frozenset({"gemma4_text"})
-
-# Model types Liger has no SwiGLU kernel for. The stock gated MLP keeps the
-# activated gate for backward besides gate and up.
-STOCK_GATED_MLP_MODEL_TYPES = frozenset({"granitemoehybrid"})
 
 # Attention norms that upcast Q to fp32 inside the block (Qwen3/3.5 ``q_norm``).
 QK_NORM_MODEL_TYPES = frozenset(
@@ -49,9 +45,15 @@ CHUNKED_ROUTED_EXPERT_MODEL_TYPES = frozenset(
     {"nemotron_h", "nemotron_h_omni", "qwen3_moe"}
 )
 
+# Model types whose packed experts take the self-routing LoRA wrapper, which
+# recomputes the expert up-projection in backward outside a checkpointed block.
+ROUTED_EXPERT_RECOMPUTE_MODEL_TYPES = frozenset(
+    {"granitemoe", "granitemoehybrid", "nemotron_h", "nemotron_h_omni", "qwen3_moe"}
+)
+
 # Model types whose packed experts use gpt-oss's transposed layout
-# (``x @ W + b``, clamped interleaved SwiGLU). AgileRL runs them in a
-# per-expert loop and adds their split LoRA delta unchunked.
+# (``x @ W + b``, clamped interleaved SwiGLU). AgileRL runs them on the
+# grouped expert GEMMs and adds their split LoRA delta unchunked.
 TRANSPOSED_EXPERT_MODEL_TYPES = frozenset({"gpt_oss"})
 
 # Compute capability and model types where AgileRL skips the fused combined
@@ -487,10 +489,11 @@ def _decoder_fields(text_cfg: dict[str, Any]) -> dict[str, Any]:
         "tied_embeddings": bool(text_cfg.get("tie_word_embeddings", False)),
         "gated_mlp": gated,
         "fp32_norm_inputs": text_cfg.get("model_type") in FP32_RMS_NORM_MODEL_TYPES,
-        "stock_gated_mlp": text_cfg.get("model_type") in STOCK_GATED_MLP_MODEL_TYPES,
         "qk_norm": text_cfg.get("model_type") in QK_NORM_MODEL_TYPES,
         "chunked_routed_experts": text_cfg.get("model_type")
         in CHUNKED_ROUTED_EXPERT_MODEL_TYPES,
+        "routed_expert_recompute": text_cfg.get("model_type")
+        in ROUTED_EXPERT_RECOMPUTE_MODEL_TYPES,
         "transposed_experts": text_cfg.get("model_type")
         in TRANSPOSED_EXPERT_MODEL_TYPES,
         "unfused_mamba_scan_family": text_cfg.get("model_type")
@@ -512,11 +515,15 @@ def _moe_fields(text_cfg: dict[str, Any]) -> dict[str, Any]:
     n_experts = _first_int(
         text_cfg, "num_experts", "num_local_experts", "n_routed_experts"
     )
-    shared_inter = _first_int(
-        text_cfg,
+    shared_keys = [
         "moe_shared_expert_intermediate_size",
         "shared_expert_intermediate_size",
-    )
+    ]
+    # Granite's always-on MLP beside the routed experts; without routed
+    # experts it is the dense MLP.
+    if n_experts:
+        shared_keys.append("shared_intermediate_size")
+    shared_inter = _first_int(text_cfg, *shared_keys)
     # Qwen-MoE names one shared expert by its width alone.
     n_shared = int(text_cfg.get("n_shared_experts") or (1 if shared_inter else 0))
     return {
@@ -539,6 +546,16 @@ def _moe_fields(text_cfg: dict[str, Any]) -> dict[str, Any]:
         ),
         "shared_expert_intermediate_size": shared_inter or None,
     }
+
+
+def has_routed_experts(config: dict[str, Any]) -> bool:
+    """Whether a raw HF ``config.json`` describes an MoE model (:attr:`ModelArch.is_moe`).
+
+    Unwraps a nested ``text_config`` or ``llm_config``.
+    """
+    text_cfg = config.get("text_config") or config.get("llm_config") or config
+    n_experts = _moe_fields(text_cfg)["n_experts"]
+    return n_experts is not None and n_experts > 1
 
 
 def _layout_fields(
@@ -637,6 +654,9 @@ class ModelArch(BaseModel):
     chunked_routed_experts: bool = False
     # Packed experts use gpt-oss's transposed layout; see TRANSPOSED_EXPERT_MODEL_TYPES.
     transposed_experts: bool = False
+    # Expert LoRA outside a checkpointed block saves only the routed rows'
+    # inputs and indices and recomputes the up-projection in backward.
+    routed_expert_recompute: bool = False
     # vLLM serves this model's expert LoRA in the 3D fused-MoE layout.
     vllm_3d_moe_lora: bool = False
 
@@ -870,6 +890,13 @@ class DeviceSpec(BaseModel):
     compute_capability: tuple[int, int] | None = None
     # GPUs on this device's node. ``None`` puts every trainer rank on one node.
     gpus_per_node: int | None = Field(default=None, ge=1)
+    # Dense bf16 tensor-core peak and HBM bandwidth; ``None`` when unknown.
+    peak_bf16_flops: float | None = None
+    memory_bytes_per_second: float | None = None
+    # All-reduce bus bandwidth and small-message latency between GPUs of one
+    # node; ``None`` when unknown.
+    all_reduce_bytes_per_second: float | None = None
+    all_reduce_latency_seconds: float | None = None
 
     @property
     def context_bytes(self) -> int:
@@ -944,36 +971,31 @@ class TrainingSettings(BaseModel):
     # effective-weight copy. ``"materialized"``: PEFT builds ``W_eff``.
     packed_moe_dispatch: PackedMoeDispatch = "materialized"
     # KL coefficient. At ``beta=0`` the estimate drops the reference row;
-    # the warnings note that the fused pass still builds it.
+    # the warnings note that the LLMPPO / LLMREINFORCE fused pass still builds it.
     beta: float = 0.001
     # A frozen copy of the actor adapter used for reference logprobs.
     # ``False`` routes reference rows through the (immutable) base: one
     # adapter copy; the reference forward still runs.
     use_separate_reference_adapter: bool = True
     weight_dtype: WeightDtype = "bf16"
-    # Save backward-saved activations to pinned host RAM.
-    activation_offload: bool = False
     # ``True`` saves only block inputs and recomputes each block in backward.
     # ``False`` keeps every block's forward tensors until its backward.
-    gradient_checkpointing: bool = True
+    # ``None`` until resolve_training_memory picks it; the estimate needs it set.
+    gradient_checkpointing: bool | None = True
+    # Save backward-saved activations to pinned host RAM.
+    activation_offload: bool = False
     # Widest vLLM sampling support rollout records per token (``top_k``); 0
-    # records none. The no-grad pass scores those tokens from their support's
-    # lm_head rows.
+    # records none. The gradient and no-grad passes score those tokens from
+    # their support's lm_head rows.
     sampling_support_width: int = Field(default=0, ge=0)
-    # The gradient pass scores supported tokens from their support rows too.
-    # PPO and REINFORCE's Liger loss scores the full vocabulary.
-    support_scored_loss: bool = False
-    # The fused Liger loss chunks one whole row at a time, holding its
-    # ``(max_model_len, vocab)`` logits.
-    whole_sequence_loss: bool = False
-    # The fused Liger kernel keeps a weight-dtype grad of the whole lm_head.
-    # The sequence tile already includes it. The standard log-prob path does not.
-    liger_weight_grad: bool = True
     # Data-parallel trainer GPUs. The estimate is per GPU; this is the
     # shard group size.
     n_training_gpus: int = 1
     # None is flat data parallel: a full weight copy on each GPU.
     fsdp: FSDPConfig | None = None
+    # MiB of one routed-expert row chunk under DDP; FSDP reads
+    # ``fsdp.routed_expert_chunk_mib``. None is the 64 MiB default.
+    routed_expert_chunk_mib: int | None = Field(default=None, ge=1)
     # Completion rows per gradient forward and backward.
     micro_batch_size: int = Field(default=1, ge=1)
     # Images in each completion row, and the width and height the environment
@@ -989,8 +1011,12 @@ class TrainingSettings(BaseModel):
     checkpoint_optimizer: bool = False
     # Async rollout: the next rollout batch waits in host memory during learn.
     async_rollout: bool = False
-    # Gradient forward packs into one row. The estimate still prices padded rows.
+    # Gradient forward packs into one row. A packed micro-batch of full-length
+    # rows holds as many tokens as the padded one, so the estimate prices padded rows.
     sequence_packing: bool = False
+    # Packed micro-batches hold at most this many tokens; the estimate prices
+    # one packed row of this length. Requires ``sequence_packing``.
+    micro_batch_tokens: int | None = Field(default=None, ge=1)
 
     @property
     def data_parallel_gpus(self) -> int:
@@ -1032,7 +1058,8 @@ class TrainingSettings(BaseModel):
 
         SFT has none. DPO always has one (beta is the preference temperature).
         Elsewhere the reference supplies the KL term, so ``beta=0`` drops it
-        from the loss; the fused no-grad pass still builds the row.
+        from the loss; the LLMPPO / LLMREINFORCE fused no-grad pass still
+        builds the row.
         """
         if self.algorithm == "sft":
             return False
@@ -1071,19 +1098,26 @@ class TrainingSettings(BaseModel):
         return 2 if self.algorithm == "dpo" else 1
 
     @property
+    def checkpoint_every_n_blocks(self) -> int:
+        """Checkpoint stride. Flat data parallel checkpoints every block.
+
+        :raises ValueError: When FSDP checkpointing is on and the stride is unset.
+        """
+        if self.fsdp is None or not self.gradient_checkpointing:
+            return 1
+        stride = self.fsdp.checkpoint_every_n_blocks
+        if stride is None:
+            msg = (
+                "fsdp.checkpoint_every_n_blocks unset with gradient_checkpointing "
+                "on; resolve_training_memory picks it before the estimate."
+            )
+            raise ValueError(msg)
+        return stride
+
+    @property
     def grad_forward_rows(self) -> int:
         """Rows per gradient forward: the micro-batch, doubled for PPO's fused actor and critic rows."""
         return self.micro_batch_size * (2 if self.algorithm == "ppo" else 1)
-
-    @property
-    def lora_casts_recompute_only(self) -> bool:
-        """Whether PEFT fp32 input casts exist only in checkpoint recompute.
-
-        Non-SFT forwards disable the casts; recompute after that context
-        exits, so one block's casts are sized by the gradient row. SFT
-        keeps casts on the original forward.
-        """
-        return self.algorithm != "sft"
 
     @property
     def n_trained_adapters(self) -> int:
@@ -1118,17 +1152,20 @@ class TrainingSettings(BaseModel):
             raise ValueError(msg)
         return self
 
-    @model_validator(mode="before")
-    @classmethod
-    def _sft_drops_the_policy_head_grad(cls, data: object) -> object:
-        # SFT's fused cross-entropy skips a grad of the frozen lm_head.
-        if (
-            isinstance(data, dict)
-            and data.get("algorithm") == "sft"
-            and "liger_weight_grad" not in data
-        ):
-            return {**data, "liger_weight_grad": False}
-        return data
+    @model_validator(mode="after")
+    def _check_micro_batch_tokens(self) -> Self:
+        if self.micro_batch_tokens is None:
+            return self
+        if not self.sequence_packing:
+            msg = "micro_batch_tokens requires sequence_packing=True"
+            raise ValueError(msg)
+        if self.micro_batch_tokens < self.max_model_len:
+            msg = (
+                f"micro_batch_tokens ({self.micro_batch_tokens}) is below the "
+                f"longest row (max_model_len={self.max_model_len})"
+            )
+            raise ValueError(msg)
+        return self
 
 
 class GenerationSettings(BaseModel):
@@ -1165,6 +1202,19 @@ class GenerationSettings(BaseModel):
     # Worst-case concurrent requests, ``prompts_in_flight * group_size``.
     # ``None`` assumes the schedule limit (``max_num_seqs``) is saturated.
     concurrent_requests: int | None = None
+    # An async rollout episode can run more than one turn.
+    multi_turn: bool = False
+    # The rollout algorithm's ``min_p``.
+    min_p: float = 0.0
+    # Rollout requests carry a ``logit_bias`` masking the image token.
+    logit_bias: bool = False
+    # ``vllm_engine_args.speculative_config`` is set (``True``) or null
+    # (``False``); ``None`` takes the rollout engine's multi-turn default.
+    speculative_drafting: bool | None = None
+    # A Ray rollout engine serves generation and ``vllm_engine_args`` does not
+    # set ``lora_dual_stream: false``; it runs a dense model's LoRA layers on
+    # two CUDA streams (``VLLM_LORA_ENABLE_DUAL_STREAM``).
+    lora_dual_stream: bool = False
 
     @property
     def concurrency(self) -> int:

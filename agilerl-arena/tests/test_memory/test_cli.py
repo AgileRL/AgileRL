@@ -945,8 +945,8 @@ class TestSolveMain:
             kv = next(c for c in bar["components"] if c["key"] == "kv_cache")
             return kv["detail"]["worst_case_demand"]
 
-        assert total(plain_payload["training"]) == 1686160028
-        assert total(overridden_payload["training"]) == 1739861537
+        assert total(plain_payload["training"]) == 1685503671
+        assert total(overridden_payload["training"]) == 1706942751
         # The generation bar fills the utilization budget at either context.
         assert kv_demand(overridden_payload["generation"]) == 8 * kv_demand(
             plain_payload["generation"]
@@ -1308,6 +1308,12 @@ class TestMainResourceTier:
                 "name": "t4-2x",
                 "gpu_type": "Tesla T4",
                 "num_gpus": 2,
+                "price_per_node_hour": 0.5,
+            },
+            {
+                "name": "l4-2x",
+                "gpu_type": "NVIDIA L4",
+                "num_gpus": 2,
                 "price_per_node_hour": 1.0,
             },
             {
@@ -1323,7 +1329,8 @@ class TestMainResourceTier:
         out = capsys.readouterr().out
         assert code == EXIT_OVER_BUDGET
         assert "No resource tier fits this manifest:" in out
-        assert "  - t4-2x: generation over budget" in out
+        assert "  - t4-2x: Tesla T4 (SM75) cannot run LLM training" in out
+        assert "  - l4-2x: generation over budget" in out
         assert "  - l4-1x: 1 GPUs, the job needs 2" in out
 
     def test_json_lists_every_tier_when_none_fits(self, no_tier_fits_path, capsys):

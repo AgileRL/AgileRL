@@ -106,7 +106,8 @@ if HAS_LLM_DEPENDENCIES:
     )
     from transformers.modeling_utils import PreTrainedModel
 
-    from agilerl.lora.moe import grouped_mm_supported
+    from agilerl.lora.moe import device_expert_backend
+    from agilerl.lora.moe.layouts import is_packed_experts_module
     from agilerl.utils.hf_remote_code import load_remote_code, remote_code_lock
     from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 else:
@@ -134,6 +135,7 @@ LLM_RL_COMMON_METRIC_NAMES = (
     "loss",  # update-averaged objective
     "entropy",  # policy entropy proxy (mean negative logprob)
     "completion_length",  # mean token ids per trajectory
+    "micro_batches_per_step",  # mean micro-batches per optimizer step on this rank
     *ROW_PADDING_METRIC_NAMES,
 )
 
@@ -578,10 +580,8 @@ def normalize_prompt_batch(
 def needs_cross_rank_seq_padding(algo: object, *, world_size: int) -> bool:
     """Return whether ranks must sync completion seq lengths before ``learn()``.
 
-    Multi-rank Liger token-level losses chunk over ``B * (T - 1)`` and issue one
-    NCCL allreduce per chunk (DAPO/CISPO normaliser). FSDP2 full-shard (and any
-    collective-heavy DP path) also requires identical per-rank ``T`` so every
-    rank issues the same NCCL collectives.
+    FSDP2 full-shard (and any collective-heavy DP path) requires identical
+    per-rank ``T`` so every rank issues the same NCCL collectives.
 
     :param algo: LLM algorithm about to call ``learn``.
     :type algo: object
@@ -594,11 +594,7 @@ def needs_cross_rank_seq_padding(algo: object, *, world_size: int) -> bool:
         return False
     if getattr(algo, "fsdp_config", None) is not None:
         return True
-    if getattr(algo, "distributed", False):
-        return True
-    if not getattr(algo, "liger_loss", False):
-        return False
-    return getattr(algo, "importance_sampling_level", "token") == "token"
+    return bool(getattr(algo, "distributed", False))
 
 
 def pad_completion_batch_to_seq_len(
@@ -610,7 +606,7 @@ def pad_completion_batch_to_seq_len(
     """Right-pad stacked completions/masks to ``target_seq_len`` / ``target-1``.
 
     Pad positions use ``pad_token_id`` and ``False`` so they contribute nothing
-    to the masked CISPO/Liger objective.
+    to the masked CISPO objective.
 
     :param completion_ids: ``(B, T)`` token ids.
     :type completion_ids: torch.Tensor
@@ -701,8 +697,7 @@ def align_completion_batch_shapes_across_ranks(
     after pad so no rank enters sharded ``learn`` collectives while peers are
     still padding. Call immediately before ``learn()`` when
     :func:`needs_cross_rank_seq_padding` is true. Shorter ranks are right-padded
-    to the global max ``T`` so Liger token-level chunk collectives stay in
-    lockstep.
+    to the global max ``T`` so sharded collectives stay in lockstep.
 
     :param completion_ids: Per-sample or stacked token ids.
     :type completion_ids: list[torch.Tensor] | torch.Tensor
@@ -1687,6 +1682,13 @@ class AttnImplementationConfig(Protocol):
     _attn_implementation: str | None
 
 
+@runtime_checkable
+class VisionTowerConfig(Protocol):
+    """Hugging Face VL config describing its vision tower under ``vision_config``."""
+
+    vision_config: object
+
+
 def set_sub_model_attn_implementation(
     model: nn.Module,
     attn_implementation: str,
@@ -1731,6 +1733,18 @@ def language_model_attn_implementation(model: nn.Module) -> str | None:
     return language_config._attn_implementation
 
 
+def has_vision_tower(model: nn.Module) -> bool:
+    """Whether *model*'s config describes a vision tower.
+
+    :param model: Causal LM, VL model, or a PEFT / value-head wrapper of one.
+    :type model: nn.Module
+    :return: ``True`` when the config carries a ``vision_config``.
+    :rtype: bool
+    """
+    config = model.config
+    return isinstance(config, VisionTowerConfig) and config.vision_config is not None
+
+
 def report_model_kernels(model: nn.Module, attn_implementation: str) -> None:
     """Log the kernel each layer type uses on rank 0; raise if the language model ignores *attn_implementation*.
 
@@ -1765,10 +1779,12 @@ def report_model_kernels(model: nn.Module, attn_implementation: str) -> None:
         if fast_path is not None and namespace_name not in namespaces_seen:
             namespaces_seen.add(namespace_name)
             lines.append(f"mamba fast path {namespace_name}: {fast_path}")
-    if torch.cuda.is_available():
+    if torch.cuda.is_available() and any(
+        is_packed_experts_module(module) for module in model.modules()
+    ):
         dtype = next(model.parameters()).dtype
-        supported = grouped_mm_supported(torch.cuda.current_device(), dtype)
-        lines.append(f"grouped_mm {dtype}: {supported}")
+        backend = device_expert_backend(torch.cuda.current_device(), dtype)
+        lines.append(f"expert GEMM backend {dtype}: {backend}")
     language_attn = language_model_attn_implementation(model)
     if is_main_process():
         logger.debug("Model kernels:\n  %s", "\n  ".join(lines))
@@ -1778,6 +1794,8 @@ def report_model_kernels(model: nn.Module, attn_implementation: str) -> None:
             f"{attn_implementation!r} was requested"
         )
         raise RuntimeError(msg)
+    if is_main_process():
+        logger.info("Trainer attention backend: %s", language_attn)
 
 
 def create_model_from_name_or_path(
@@ -1816,6 +1834,8 @@ def create_model_from_name_or_path(
     for key, value in trainer.load_kwargs().items():
         model_config.setdefault(key, value)
     model_config["attn_implementation"] = attn_implementation
+    if is_main_process():
+        logger.info("Trainer attention backend: %s", attn_implementation)
     if attn_implementation == "flex_attention":
         patch_flex_attention_kernel_options()
     load_remote_code(
@@ -2341,7 +2361,7 @@ def clipped_is_surrogate(
 
     Thin composition of :func:`pool_log_ratio_by_level` (ratio + advantage
     pooling) and :func:`clipped_min_surrogate` (clip + min-surrogate). Shared by
-    the non-Liger PPO and REINFORCE paths. Operates only on ``(B, T)`` tensors
+    the PPO and REINFORCE losses. Operates only on ``(B, T)`` tensors
     (no vocab axis), so it is memory-bounded.
 
     :param token_log_ratio: ``(B, T)`` per-token ``log pi - log pi_old``.
@@ -2898,8 +2918,7 @@ def calculate_k3_kl(
     """Schulman k3 estimator of ``KL(policy || reference)`` from policy samples.
 
     ``exp(ref - policy) - (ref - policy) - 1`` — always-positive,
-    lower-variance than the naive log-difference. Same form as the Liger
-    fused kernel and TRL.
+    lower-variance than the naive log-difference. Same form as TRL.
     """
     diff = reference_log_probs - policy_log_probs
     return torch.exp(diff) - diff - 1.0

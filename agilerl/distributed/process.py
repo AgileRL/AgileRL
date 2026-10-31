@@ -189,6 +189,22 @@ def allreduce_sum_ints(values: Sequence[int]) -> list[int]:
     return sums.tolist()
 
 
+def allreduce_max_ints(values: Sequence[int]) -> list[int]:
+    """Take the max of each of ``values`` across ranks (``values`` locally).
+
+    :param values: This rank's values, the same count on every rank.
+    :type values: Sequence[int]
+    :return: Per-position maxima across ranks.
+    :rtype: list[int]
+    """
+    values = [int(value) for value in values]
+    if not is_distributed() or dist.get_world_size() == 1:
+        return values
+    maxima = torch.tensor(values, device=resolve_device(), dtype=torch.long)
+    dist.all_reduce(maxima, op=dist.ReduceOp.MAX)
+    return maxima.tolist()
+
+
 def any_rank(flag: bool) -> bool:
     """True if any data-parallel rank has ``flag`` set.
 

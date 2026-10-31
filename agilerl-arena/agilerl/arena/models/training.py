@@ -179,12 +179,16 @@ class LLMRolloutBufferSpec(BaseModel):
             "evicted. Counts generated groups, not RL transitions."
         ),
     )
-    max_rollout_version_lag: int | None = Field(
-        default=None,
+    # Groups up to two weight versions old stay learnable, so the trainer rarely
+    # waits on generation; the importance-ratio correction absorbs the gap.
+    max_rollout_version_lag: int = Field(
+        default=2,
         ge=0,
         description=(
             "Weight-sync versions a group may fall behind before it is dropped "
-            "as too off-policy. Unset keeps every queued group."
+            "as too off-policy: the sync to version v keeps groups generated at "
+            "version v - lag or later. 0 is strictly on-policy; the default 2 "
+            "also keeps groups started under the two previous weight versions."
         ),
     )
     drop_uninformative_groups: bool = Field(
@@ -436,7 +440,7 @@ class TrainingSpec(BaseModel):
             "learning on the same GPU, for local runs; 'async' moves "
             "generation onto dedicated rollout engines that run continuously. "
             "Arena runs every rollout LLM job async. "
-            "replay_buffer.max_rollout_version_lag, when set, bounds staleness."
+            "replay_buffer.max_rollout_version_lag bounds staleness."
         ),
     )
     rollout_batch_size: int | None = Field(
@@ -446,14 +450,20 @@ class TrainingSpec(BaseModel):
             "Rollout groups per cycle, in total across all of a member's "
             "rollout engines, rounded up to a multiple of the engine count; "
             "each engine runs an equal share. Must divide evenly by "
-            "training_gpus_per_agent so every learner shard gets data."
+            "training_gpus_per_agent so every learner shard gets data. Unset "
+            "is the algorithm's batch_size rounded up to a multiple of both "
+            "training_gpus_per_agent and the engine count, so the engines keep "
+            "one learn step of groups in flight."
         ),
     )
     rollout_engines_per_agent: int | Literal["auto"] = Field(
         default=0,
         description=(
             "Generation engines per population member, one GPU each. 'auto' "
-            "takes every GPU the trainers leave over."
+            "takes every GPU the trainers leave over. Unset under async "
+            "rollout with training_gpus_per_agent also unset, the trainer / "
+            "engine split is picked by the throughput model; unset otherwise "
+            "is 'auto'."
         ),
     )
     training_gpus_per_agent: int = Field(
@@ -462,20 +472,6 @@ class TrainingSpec(BaseModel):
         description=(
             "Data-parallel trainer GPUs per population member. The replay "
             "buffer shards rollouts across them."
-        ),
-    )
-    reuse_prefix_cache_across_syncs: bool = Field(
-        default=False,
-        description=(
-            "Keep the rollout engines' prefix cache across weight syncs under "
-            "async rollout, for windows of replay_buffer.max_rollout_version_lag "
-            "versions (K). A turn then reuses prefix KV computed under weights "
-            "up to K-1 versions older, like an in-flight weight update; the "
-            "sampling logprobs carry that mismatch to the off-policy "
-            "correction. Groups are stamped with their window's first version, "
-            "so the staleness fence and group replay age count the oldest "
-            "weights that KV can come from. Needs max_rollout_version_lag >= 1. "
-            "Off: every sync invalidates the cache."
         ),
     )
     weight_sync_interval: int | None = Field(
@@ -566,22 +562,29 @@ class TrainingSpec(BaseModel):
         if not self.async_rollout:
             return self
 
+        # Unset stays 0, which async runs read as ``auto``.
         engines = self.rollout_engines_per_agent
-        if engines != "auto" and int(engines) < 1:
+        if (
+            "rollout_engines_per_agent" in self.model_fields_set
+            and engines != "auto"
+            and int(engines) < 1
+        ):
             msg = (
                 "async rollout requires training.rollout_engines_per_agent >= 1 "
                 f"or 'auto'; got {engines}"
             )
             raise ValueError(msg)
 
-        if self.rollout_batch_size is None:
-            self.rollout_batch_size = 1
         if self.weight_sync_interval is None:
             self.weight_sync_interval = 1
 
         # The buffer deals each group to the emptiest learner shard, so a cycle
-        # fills every shard evenly only when the trainer count divides it.
-        if self.rollout_batch_size % self.training_gpus_per_agent:
+        # fills every shard evenly only when the trainer count divides it. The
+        # driver fills an unset size once it knows the GPU split.
+        if (
+            self.rollout_batch_size is not None
+            and self.rollout_batch_size % self.training_gpus_per_agent
+        ):
             msg = (
                 "async rollout requires training.rollout_batch_size to be a "
                 "multiple of training.training_gpus_per_agent so every "

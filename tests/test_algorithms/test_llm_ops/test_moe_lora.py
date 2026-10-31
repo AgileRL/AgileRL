@@ -21,6 +21,7 @@ from transformers.modeling_layers import GradientCheckpointingLayer
 
 from agilerl import HAS_LIGER_KERNEL
 from agilerl.arena.memory.formulas import DEFAULT_ROUTED_CHUNK_BYTES
+from agilerl.arena.memory.resolve.moe import expert_gemm_backend
 from agilerl.distributed import fsdp as dmod
 from agilerl.distributed import full_shape_views
 from agilerl.lora.fused import (
@@ -58,7 +59,7 @@ if HAS_LIGER_KERNEL:
 NUM_EXPERTS = 4
 TOP_K = 2
 HIDDEN = 8
-INTERMEDIATE = 6
+INTERMEDIATE = 8
 
 
 class _SortedExperts(nn.Module):
@@ -1091,9 +1092,10 @@ def test_transformers_integration_parity(build, expected_targets):
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="grouped-GEMM path is CUDA-only"
+    not (torch.cuda.is_available() and moe_gemm.HAS_TRITON),
+    reason="grouped_mm and Triton expert paths are CUDA-only",
 )
-def test_grouped_mm_fast_path_matches_loop_on_cuda():
+def test_grouped_mm_fast_path_matches_triton_on_cuda():
     torch.manual_seed(0)
     reference = inject_adapter_in_model(
         _lora_config(["experts.gate_up_proj", "experts.down_proj"]),
@@ -1108,22 +1110,23 @@ def test_grouped_mm_fast_path_matches_loop_on_cuda():
     )
     upgrade_moe_param_wrappers(reference)
     upgrade_moe_param_wrappers(fast)
-    reference.cuda()
-    fast.cuda()
+    reference.to("cuda", torch.bfloat16)
+    fast.to("cuda", torch.bfloat16)
 
-    x = torch.randn(64, HIDDEN, device="cuda")
-    fast_out = fast(x)
+    x = torch.randn(64, HIDDEN, device="cuda", dtype=torch.bfloat16)
     if not moe_gemm._use_grouped_mm(x):
-        pytest.skip("torch._grouped_mm unsupported on this GPU")
+        pytest.skip("grouped_mm unsupported on this GPU")
+    fast_out = fast(x)
     with pytest.MonkeyPatch.context() as mp:
-        # Force the loop path on the reference copy.
+        # The reference copy takes the Triton kernels.
         mp.setattr(moe_gemm, "_use_grouped_mm", lambda _x: False)
         ref_out = reference(x)
-    assert torch.allclose(ref_out, fast_out, atol=1e-5)
+        ref_out.float().square().mean().backward()
+    fast_out.float().square().mean().backward()
 
-    ref_out.square().mean().backward()
-    fast_out.square().mean().backward()
-    _assert_grad_parity(reference, fast, atol=1e-4)
+    # bf16 keeps 8 mantissa bits; the kernels round sums in a different order.
+    torch.testing.assert_close(ref_out, fast_out, rtol=2e-2, atol=2e-2)
+    _assert_grad_parity(reference, fast, atol=5e-2)
 
 
 def test_install_packed_expert_grouped_gemm_skips_dense():
@@ -1189,7 +1192,133 @@ def test_grouped_linear_densifies_dtensor_weight(monkeypatch):
     assert torch.allclose(out, ref)
 
 
-def _mock_cuda_torch(monkeypatch, grouped_mm):
+class ProbeCalls(list):
+    """``(device_index, dtype)`` of each grouped-mm probe call."""
+
+    def append_call(self, device_index: int, dtype: torch.dtype) -> None:
+        self.append((device_index, dtype))
+
+
+@pytest.fixture
+def cuda_capabilities(monkeypatch):
+    """Report a CUDA compute capability per device index, as Ray GPU nodes would."""
+
+    def install(capabilities: dict[int, tuple[int, int]], has_triton: bool) -> None:
+        monkeypatch.setattr(
+            torch.cuda, "get_device_capability", lambda index: capabilities[index]
+        )
+        monkeypatch.setattr(moe_gemm, "HAS_TRITON", has_triton)
+        monkeypatch.setattr(moe_gemm, "probe_grouped_mm", probed.append_call)
+        moe_gemm.device_expert_backend.cache_clear()
+
+    probed = ProbeCalls()
+    install.probed = probed
+    yield install
+    moe_gemm.device_expert_backend.cache_clear()
+
+
+class TestExpertBackend:
+    def test_reads_the_tensors_cuda_device(self, cuda_capabilities):
+        cuda_capabilities({0: (10, 0), 1: (8, 0)}, has_triton=True)
+        x = SimpleNamespace(
+            is_cuda=True, device=SimpleNamespace(index=0), dtype=torch.bfloat16
+        )
+
+        assert moe_gemm.expert_backend(x) == "grouped_mm"
+        assert moe_gemm._use_grouped_mm(x) is True
+
+    def test_missing_index_uses_current_device(self, cuda_capabilities, monkeypatch):
+        cuda_capabilities({0: (9, 0), 3: (8, 0)}, has_triton=True)
+        monkeypatch.setattr(torch.cuda, "current_device", lambda: 3)
+        x = SimpleNamespace(
+            is_cuda=True, device=SimpleNamespace(index=None), dtype=torch.float16
+        )
+
+        assert moe_gemm.expert_backend(x) == "triton"
+        assert moe_gemm._use_grouped_mm(x) is False
+
+    def test_cpu_tensor_takes_grouped_mm(self):
+        assert moe_gemm.expert_backend(torch.ones(2, 2)) == "grouped_mm"
+
+
+class TestDeviceExpertBackend:
+    @pytest.mark.parametrize(
+        ("capability", "dtype", "has_triton", "expected"),
+        [
+            ((9, 0), torch.bfloat16, False, "grouped_mm"),
+            ((9, 0), torch.bfloat16, True, "triton"),
+            ((10, 0), torch.bfloat16, True, "grouped_mm"),
+            ((8, 0), torch.bfloat16, True, "triton"),
+            ((9, 0), torch.float16, True, "triton"),
+        ],
+    )
+    def test_matches_the_estimator_rule(
+        self, cuda_capabilities, capability, dtype, has_triton, expected
+    ):
+        cuda_capabilities({0: capability}, has_triton)
+
+        backend = moe_gemm.device_expert_backend(0, dtype)
+
+        assert backend == expected
+        assert backend == expert_gemm_backend(
+            capability, str(dtype).removeprefix("torch."), has_triton
+        )
+
+    @pytest.mark.parametrize(
+        ("capability", "dtype", "has_triton"),
+        [
+            ((8, 0), torch.bfloat16, False),
+            ((7, 5), torch.float16, True),
+            ((9, 0), torch.float32, True),
+        ],
+    )
+    def test_cuda_device_without_a_kernel_raises(
+        self, cuda_capabilities, capability, dtype, has_triton
+    ):
+        cuda_capabilities({0: capability}, has_triton)
+
+        with pytest.raises(RuntimeError, match="MoE expert GEMMs have no kernel"):
+            moe_gemm.device_expert_backend(0, dtype)
+
+    def test_grouped_mm_runs_the_probe_once_per_device(self, cuda_capabilities):
+        cuda_capabilities({0: (10, 0), 1: (8, 0)}, has_triton=True)
+
+        moe_gemm.device_expert_backend(0, torch.bfloat16)
+        moe_gemm.device_expert_backend(0, torch.bfloat16)
+        moe_gemm.device_expert_backend(1, torch.bfloat16)
+
+        assert cuda_capabilities.probed == [(0, torch.bfloat16)]
+
+    def test_probe_failure_raises(self, cuda_capabilities, monkeypatch):
+        # Arrange
+        def failing_probe(_device_index, _dtype):
+            msg = "grouped_mm failed on SM 10.0"
+            raise RuntimeError(msg)
+
+        cuda_capabilities({0: (10, 0)}, has_triton=True)
+        monkeypatch.setattr(moe_gemm, "probe_grouped_mm", failing_probe)
+
+        # Act / Assert
+        with pytest.raises(RuntimeError, match=r"grouped_mm failed on SM 10\.0"):
+            moe_gemm.device_expert_backend(0, torch.bfloat16)
+
+    def test_grouped_mm_kernel_failure_raises(self, monkeypatch):
+        # Arrange
+        def missing_kernel(_x, _w, offs):
+            msg = "grouped_mm kernel unavailable"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(moe_gemm, "expert_backend", lambda _x: "grouped_mm")
+        monkeypatch.setattr(torch.nn.functional, "grouped_mm", missing_kernel)
+        x = torch.ones(4, 16, dtype=torch.bfloat16)
+        weight = torch.ones(2, 16, 16, dtype=torch.bfloat16)
+
+        # Act / Assert
+        with pytest.raises(RuntimeError, match="grouped_mm kernel unavailable"):
+            moe_gemm.grouped_linear(x, weight, [2, 2])
+
+
+def mock_cuda_torch(monkeypatch, grouped_mm) -> None:
     """Route the grouped-mm probe's CUDA tensor factory calls to CPU tensors."""
     real_randn = torch.randn
     real_tensor = torch.tensor
@@ -1202,46 +1331,17 @@ def _mock_cuda_torch(monkeypatch, grouped_mm):
 
     monkeypatch.setattr(torch, "randn", cpu_randn)
     monkeypatch.setattr(torch, "tensor", cpu_tensor)
-    monkeypatch.setattr(torch, "_grouped_mm", grouped_mm)
+    monkeypatch.setattr(torch.nn.functional, "grouped_mm", grouped_mm)
     monkeypatch.setattr(torch, "Generator", MagicMock())
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _index: (9, 0))
 
 
-def test_grouped_mm_probe_raises_without_op_where_required(monkeypatch):
-    monkeypatch.delattr(torch, "_grouped_mm", raising=False)
-    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _index: (9, 0))
-    moe_gemm.grouped_mm_supported.cache_clear()
-
-    with pytest.raises(
-        RuntimeError, match=r"torch\._grouped_mm failed on SM 9\.0: .* has no"
-    ):
-        moe_gemm.grouped_mm_supported(0, torch.bfloat16)
-
-
-def test_grouped_mm_probe_true_when_op_matches_reference(monkeypatch):
-    def fake_grouped_mm(x, w_t, offs):
-        bounds = [0, *offs.tolist()]
-        return torch.cat(
-            [x[start:end] @ w_t[i] for i, (start, end) in enumerate(pairwise(bounds))]
-        )
-
-    _mock_cuda_torch(monkeypatch, fake_grouped_mm)
-    moe_gemm.grouped_mm_supported.cache_clear()
-
-    assert moe_gemm.grouped_mm_supported(1, torch.bfloat16) is True
-
-
-def test_grouped_mm_probe_raises_when_op_mismatches(monkeypatch):
-    _mock_cuda_torch(
-        monkeypatch, lambda x, w_t, offs: torch.zeros(x.shape[0], w_t.shape[-1])
+def loop_grouped_mm(x, w_t, offs):
+    """Reference ``F.grouped_mm``: one matmul per offset group."""
+    bounds = [0, *offs.tolist()]
+    return torch.cat(
+        [x[start:end] @ w_t[i] for i, (start, end) in enumerate(pairwise(bounds))]
     )
-    moe_gemm.grouped_mm_supported.cache_clear()
-
-    with pytest.raises(
-        RuntimeError,
-        match=r"torch\._grouped_mm failed on SM 9\.0: output differs",
-    ):
-        moe_gemm.grouped_mm_supported(2, torch.bfloat16)
 
 
 def raise_grouped_mm(x, w_t, offs):
@@ -1249,65 +1349,55 @@ def raise_grouped_mm(x, w_t, offs):
     raise RuntimeError(msg)
 
 
-@pytest.mark.parametrize(
-    ("capability", "dtype"),
-    [((8, 0), torch.bfloat16), ((12, 0), torch.bfloat16), ((9, 0), torch.float32)],
-)
-def test_grouped_mm_probe_false_without_fused_kernel(monkeypatch, capability, dtype):
-    # A failing op proves these devices take the per-expert loop without probing.
-    _mock_cuda_torch(monkeypatch, raise_grouped_mm)
-    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _index: capability)
-    moe_gemm.grouped_mm_supported.cache_clear()
+class TestProbeGroupedMm:
+    def test_matching_op_passes(self, monkeypatch):
+        mock_cuda_torch(monkeypatch, loop_grouped_mm)
 
-    assert moe_gemm.grouped_mm_supported(3, dtype) is False
+        assert moe_gemm.probe_grouped_mm(1, torch.bfloat16) is None
 
+    def test_mismatching_op_raises(self, monkeypatch):
+        mock_cuda_torch(
+            monkeypatch,
+            lambda x, w_t, offs: torch.zeros(x.shape[0], w_t.shape[-1]),
+        )
 
-def test_grouped_mm_probe_raises_when_op_raises(monkeypatch):
-    _mock_cuda_torch(monkeypatch, raise_grouped_mm)
-    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _index: (10, 0))
-    moe_gemm.grouped_mm_supported.cache_clear()
+        with pytest.raises(
+            RuntimeError,
+            match=r"grouped_mm failed on SM 9\.0: output differs",
+        ):
+            moe_gemm.probe_grouped_mm(2, torch.bfloat16)
 
-    with pytest.raises(
-        RuntimeError, match=r"torch\._grouped_mm failed on SM 10\.0: no grouped mm"
-    ) as raised:
-        moe_gemm.grouped_mm_supported(3, torch.bfloat16)
+    def test_raising_op_raises_with_its_cause(self, monkeypatch):
+        mock_cuda_torch(monkeypatch, raise_grouped_mm)
 
-    assert str(raised.value.__cause__) == "no grouped mm"
+        with pytest.raises(
+            RuntimeError, match=r"grouped_mm failed on SM 9\.0: no grouped mm"
+        ) as raised:
+            moe_gemm.probe_grouped_mm(3, torch.bfloat16)
 
+        assert str(raised.value.__cause__) == "no grouped mm"
 
-def test_grouped_mm_probe_raises_when_backward_fails(monkeypatch):
-    def detached_grouped_mm(x, w_t, offs):
-        return loop_grouped_mm(x, w_t, offs).detach()
+    def test_failing_backward_raises(self, monkeypatch):
+        def detached_grouped_mm(x, w_t, offs):
+            return loop_grouped_mm(x, w_t, offs).detach()
 
-    _mock_cuda_torch(monkeypatch, detached_grouped_mm)
-    moe_gemm.grouped_mm_supported.cache_clear()
+        mock_cuda_torch(monkeypatch, detached_grouped_mm)
 
-    with pytest.raises(
-        RuntimeError, match=r"torch\._grouped_mm failed on SM 9\.0 in backward"
-    ):
-        moe_gemm.grouped_mm_supported(3, torch.bfloat16)
+        with pytest.raises(
+            RuntimeError, match=r"grouped_mm failed on SM 9\.0 in backward"
+        ):
+            moe_gemm.probe_grouped_mm(3, torch.bfloat16)
 
-
-def loop_grouped_mm(x, w_t, offs):
-    """Reference ``torch._grouped_mm``: one matmul per offset group."""
-    bounds = [0, *offs.tolist()]
-    return torch.cat(
-        [x[start:end] @ w_t[i] for i, (start, end) in enumerate(pairwise(bounds))]
-    )
-
-
-class TestGroupedMmSupported:
-    def test_first_probe_inside_checkpoint_backward_succeeds(self, monkeypatch):
+    def test_probe_inside_checkpoint_backward_passes(self, monkeypatch):
         # Arrange
         torch.manual_seed(0)
         linear = nn.Linear(4, 4)
         hidden = torch.randn(2, 4, requires_grad=True)
-        _mock_cuda_torch(monkeypatch, loop_grouped_mm)
-        moe_gemm.grouped_mm_supported.cache_clear()
+        mock_cuda_torch(monkeypatch, loop_grouped_mm)
         probe_results = []
 
         def block(h: torch.Tensor) -> torch.Tensor:
-            probe_results.append(moe_gemm.grouped_mm_supported(4, torch.bfloat16))
+            probe_results.append(moe_gemm.probe_grouped_mm(4, torch.bfloat16))
             return linear(h).relu()
 
         # Act
@@ -1315,45 +1405,14 @@ class TestGroupedMmSupported:
         out.sum().backward()
 
         # Assert
-        assert probe_results == [True, True]
+        assert probe_results == [None, None]
         assert hidden.grad is not None
 
-    def test_first_probe_under_no_grad_reports_supported(self, monkeypatch):
-        # Arrange
-        _mock_cuda_torch(monkeypatch, loop_grouped_mm)
-        moe_gemm.grouped_mm_supported.cache_clear()
+    def test_probe_under_no_grad_passes(self, monkeypatch):
+        mock_cuda_torch(monkeypatch, loop_grouped_mm)
 
-        # Act
         with torch.no_grad():
-            supported = moe_gemm.grouped_mm_supported(5, torch.bfloat16)
-
-        # Assert
-        assert supported is True
-
-
-def test_use_grouped_mm_consults_probe_for_cuda_tensor(monkeypatch):
-    x = MagicMock()
-    x.is_cuda = True
-    x.device.index = 0
-    x.dtype = torch.float32
-    probe = MagicMock(return_value=True)
-    monkeypatch.setattr(moe_gemm, "grouped_mm_supported", probe)
-
-    assert moe_gemm._use_grouped_mm(x) is True
-    probe.assert_called_once_with(0, torch.float32)
-
-
-def test_use_grouped_mm_missing_index_uses_current_device(monkeypatch):
-    x = MagicMock()
-    x.is_cuda = True
-    x.device.index = None
-    x.dtype = torch.float16
-    probe = MagicMock(return_value=False)
-    monkeypatch.setattr(moe_gemm, "grouped_mm_supported", probe)
-    monkeypatch.setattr(torch.cuda, "current_device", lambda: 3)
-
-    assert moe_gemm._use_grouped_mm(x) is False
-    probe.assert_called_once_with(3, torch.float16)
+            assert moe_gemm.probe_grouped_mm(5, torch.bfloat16) is None
 
 
 def test_counts_tensor_passes_tensors_through():
@@ -1418,12 +1477,12 @@ class TestRoutedExpertsLocalForwardLigerExperts:
 
 
 def test_grouped_linear_noncontiguous_weight_skips_empty_experts():
-    weight = torch.arange(3 * 4 * 5, dtype=torch.float32).reshape(3, 4, 5)
-    padded = torch.zeros(3, 4, 8)
-    padded[:, :, :5] = weight
-    view = padded[:, :, :5]
+    weight = torch.arange(3 * 4 * 8, dtype=torch.float32).reshape(3, 4, 8)
+    padded = torch.zeros(3, 4, 12)
+    padded[:, :, :8] = weight
+    view = padded[:, :, :8]
     assert not view.is_contiguous()
-    rows = torch.randn(4, 5)
+    rows = torch.randn(4, 8)
     counts = [0, 3, 1]
 
     out = moe_gemm.grouped_linear(rows, view, counts)
@@ -1464,7 +1523,7 @@ def test_grouped_linear_fast_path_keeps_plain_transpose(monkeypatch):
         return torch.zeros(4, 4)
 
     monkeypatch.setattr(moe_gemm, "_use_grouped_mm", lambda _x: True)
-    monkeypatch.setattr(torch, "_grouped_mm", fake_grouped_mm)
+    monkeypatch.setattr(torch.nn.functional, "grouped_mm", fake_grouped_mm)
 
     out = moe_gemm.grouped_linear(x, weight, [2, 2])
 
@@ -1485,7 +1544,7 @@ def test_grouped_linear_fast_path_copies_irregular_stride(monkeypatch):
         return torch.zeros(4, 4)
 
     monkeypatch.setattr(moe_gemm, "_use_grouped_mm", lambda _x: True)
-    monkeypatch.setattr(torch, "_grouped_mm", fake_grouped_mm)
+    monkeypatch.setattr(torch.nn.functional, "grouped_mm", fake_grouped_mm)
 
     moe_gemm.grouped_linear(x, weight, [2, 2])
 
@@ -1588,7 +1647,7 @@ def test_split_lora_delta_dtensor_fallback(monkeypatch):
 
 def test_split_lora_delta_stacked_layouts():
     torch.manual_seed(0)
-    experts, rank, hidden, out_dim = 2, 2, 8, 6
+    experts, rank, hidden, out_dim = 2, 2, 8, 8
     x = torch.randn(4, hidden)
 
     torch.manual_seed(1)
@@ -1617,7 +1676,7 @@ def test_split_lora_delta_stacked_layouts():
 
 def test_split_lora_delta_chunked_accumulate_matches_full():
     torch.manual_seed(0)
-    experts, rank, hidden, out_dim = 3, 2, 8, 6
+    experts, rank, hidden, out_dim = 3, 2, 8, 8
     counts = [5, 0, 7]
     total = sum(counts)
     x = torch.randn(total, hidden, requires_grad=True)
@@ -1885,12 +1944,11 @@ TOP2_INDEX = torch.tensor(
         [3, 0],
     ]
 )
-# 5 gated or 7 ungated expert rows per chunk.
+# 3 gated or 7 ungated expert rows per chunk.
 SMALL_CHUNK_BYTES = 240
 
 
 class TestRoutedExpertsChunkedLora:
-    @pytest.mark.parametrize("use_grouped_mm", [False, True], ids=["loop", "gmm"])
     @pytest.mark.parametrize(
         "top_k_index",
         [
@@ -1901,9 +1959,7 @@ class TestRoutedExpertsChunkedLora:
         ],
     )
     @pytest.mark.parametrize(("block_cls", "targets"), ROUTED_LORA_BLOCKS)
-    def test_multi_chunk_matches_peft_reference(
-        self, monkeypatch, block_cls, targets, top_k_index, use_grouped_mm
-    ):
+    def test_multi_chunk_matches_peft_reference(self, block_cls, targets, top_k_index):
         # Arrange
         reference, upgraded = _build_pair(block_cls, targets, r=4)
         torch.manual_seed(0)
@@ -1912,8 +1968,6 @@ class TestRoutedExpertsChunkedLora:
         ref_hidden = hidden.clone().requires_grad_(True)
         up_hidden = hidden.clone().requires_grad_(True)
         set_routed_experts_chunk_bytes(upgraded, SMALL_CHUNK_BYTES)
-        if use_grouped_mm:
-            monkeypatch.setattr(moe_gemm, "_use_grouped_mm", lambda _x: True)
 
         # Act
         ref_out = reference.experts(ref_hidden, top_k_index, top_k_weights)
@@ -2128,7 +2182,6 @@ def _saved_activation_bytes(model, run):
 
 
 class TestLoraExpertsFunction:
-    @pytest.mark.parametrize("use_grouped_mm", [False, True], ids=["loop", "gmm"])
     @pytest.mark.parametrize(
         "top_k_index",
         [
@@ -2138,16 +2191,12 @@ class TestLoraExpertsFunction:
         ],
     )
     @pytest.mark.parametrize(("block_cls", "targets", "act_fn"), RECOMPUTE_BLOCKS)
-    def test_matches_graph_path(
-        self, monkeypatch, block_cls, targets, act_fn, top_k_index, use_grouped_mm
-    ):
+    def test_matches_graph_path(self, block_cls, targets, act_fn, top_k_index):
         # Arrange
         model = _frozen_base_lora_block(block_cls, targets, act_fn)
         hidden = torch.randn(top_k_index.shape[0], HIDDEN)
         top_k_weights = torch.rand(top_k_index.shape)
         set_routed_experts_chunk_bytes(model, SMALL_CHUNK_BYTES)
-        if use_grouped_mm:
-            monkeypatch.setattr(moe_gemm, "_use_grouped_mm", lambda _x: True)
 
         # Act
         graph = _run_routed_experts(model, False, hidden, top_k_index, top_k_weights)
@@ -2410,7 +2459,7 @@ class TestScatterRows:
         source = torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
         index = torch.tensor([2, 0, 2])
 
-        out = moe_routed.ScatterRows.apply(base, index, source)
+        out = moe_routed.ScatterRows.apply(base, index, source, None)
 
         assert torch.equal(out, torch.tensor([[3.0, 4.0], [0.0, 0.0], [6.0, 8.0]]))
 
@@ -2421,21 +2470,40 @@ class TestScatterRows:
         index = torch.tensor([2, 0, 2, 3, 0])
 
         assert torch.autograd.gradcheck(
-            lambda b, s: moe_routed.ScatterRows.apply(b.clone(), index, s),
+            lambda b, s: moe_routed.ScatterRows.apply(b.clone(), index, s, None),
             (base, source),
+        )
+
+    def test_kernel_scatter_accumulates_fp32_and_returns_source_dtype_grad(self):
+        # Arrange
+        def scatter_add(out, index, rows, weights):
+            out.index_add_(0, index, rows.float())
+
+        kernels = moe_gemm.ExpertKernels(None, None, scatter_add)
+        base = torch.zeros(3, 2, requires_grad=True)
+        source = torch.tensor(
+            [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]],
+            dtype=torch.bfloat16,
+            requires_grad=True,
+        )
+        index = torch.tensor([2, 0, 2])
+
+        # Act
+        out = moe_routed.ScatterRows.apply(base.clone(), index, source, kernels)
+        out.backward(torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]))
+
+        # Assert
+        assert out.dtype == torch.float32
+        assert torch.equal(
+            out.detach(), torch.tensor([[3.0, 4.0], [0.0, 0.0], [6.0, 8.0]])
+        )
+        assert source.grad.dtype == torch.bfloat16
+        assert torch.equal(
+            source.grad.float(), torch.tensor([[5.0, 6.0], [1.0, 2.0], [5.0, 6.0]])
         )
 
 
 class TestGroupedGemmCoverage:
-    def test_probe_returns_false_when_the_op_disagrees_on_values(self, monkeypatch):
-        def wrong(x, w_t, offs):
-            return torch.zeros_like(x)
-
-        _mock_cuda_torch(monkeypatch, wrong)
-        moe_gemm.grouped_mm_supported.cache_clear()
-
-        assert moe_gemm.grouped_mm_supported(6, torch.float32) is False
-
     def test_operand_ready_rejects_a_matrix_that_is_not_3d(self):
         assert moe_gemm._grouped_mm_operand_ready(torch.ones(4, 4)) is False
 
@@ -2466,7 +2534,7 @@ class TestGroupedGemmCoverage:
         monkeypatch.setattr(moe_gemm, "_use_grouped_mm", lambda _x: True)
         monkeypatch.setattr(moe_gemm, "_grouped_mm_operand_ready", lambda _w: True)
         monkeypatch.setattr(
-            torch, "_grouped_mm", lambda rows, w, offs: torch.ones(4, 4)
+            torch.nn.functional, "grouped_mm", lambda rows, w, offs: torch.ones(4, 4)
         )
 
         out = moe_gemm.grouped_matmul(x, weight, offs)
@@ -2501,15 +2569,15 @@ class TestGroupedGemmCoverage:
 
     def test_add_grouped_linear_casts_a_chunk_to_the_destination_dtype(self):
         destination = torch.zeros(2, 4, dtype=torch.float16)
-        x = torch.ones(2, 5)
-        weight = torch.ones(1, 4, 5)
+        x = torch.ones(2, 8)
+        weight = torch.ones(1, 4, 8)
 
         moe_gemm.add_grouped_linear(
             destination, x, weight, [2], 1.0, DEFAULT_ROUTED_CHUNK_BYTES
         )
 
         assert destination.dtype == torch.float16
-        assert torch.allclose(destination.float(), torch.full((2, 4), 5.0))
+        assert torch.allclose(destination.float(), torch.full((2, 4), 8.0))
 
 
 def test_split_lora_delta_dtensor_fallback_adds_into_a_narrower_destination(
@@ -2594,10 +2662,10 @@ class TestRoutedExpertDtypeAndDTensor:
         lora = moe_adapters.ExpertLora(
             wrapper=wrapper,
             adapter="actor",
-            stacked=(torch.ones(1, 2, 4), torch.ones(1, 3, 2)),
+            stacked=(torch.ones(1, 4, 4), torch.ones(1, 4, 4)),
             row_id=None,
         )
-        destination = torch.zeros(2, 3, dtype=torch.float16)
+        destination = torch.zeros(2, 4, dtype=torch.float16)
         rows = torch.ones(2, 4)
 
         chunked = moe_routed.ChunkedLora(
@@ -2754,8 +2822,7 @@ class TestLoraExpertsRecomputeGuards:
 
 
 class TestLowRankDelta:
-    @pytest.mark.parametrize("use_grouped_mm", [False, True], ids=["loop", "gmm"])
-    def test_matches_per_expert_reference(self, monkeypatch, use_grouped_mm):
+    def test_matches_per_expert_reference(self):
         # Arrange
         torch.manual_seed(0)
         counts = [3, 0, 2, 3]
@@ -2764,8 +2831,6 @@ class TestLowRankDelta:
         lora_a = torch.randn(NUM_EXPERTS, 4, HIDDEN, requires_grad=True)
         lora_b = torch.randn(NUM_EXPERTS, INTERMEDIATE, 4, requires_grad=True)
         offs = moe_gemm.group_offsets(counts, rows.device)
-        if use_grouped_mm:
-            monkeypatch.setattr(moe_gemm, "_use_grouped_mm", lambda _x: True)
         expected = torch.cat(
             [
                 chunk @ lora_a[expert].T @ lora_b[expert].T * scaling
@@ -2785,3 +2850,78 @@ class TestLowRankDelta:
         torch.testing.assert_close(delta, expected, rtol=1e-5, atol=1e-5)
         for grad, expected_grad in zip(grads, expected_grads, strict=True):
             torch.testing.assert_close(grad, expected_grad, rtol=1e-5, atol=1e-5)
+
+
+def _freeze_base(block, dtype):
+    for name, param in block.named_parameters():
+        if "lora_" not in name:
+            param.data = param.data.to(dtype)
+            param.requires_grad_(False)
+    install_packed_expert_grouped_gemm(block)
+    patch_lora_for_fused_forward(block)
+    set_fused_adapter_routing(block, ["actor"] * 12)
+    return block
+
+
+@pytest.mark.parametrize(
+    "pair_factory", [_sorted_pair, _routed_pair, _ungated_pair, _transposed_pair]
+)
+class TestExpertLoraComputeDtype:
+    def test_expert_gemms_and_saved_activations_use_the_activation_dtype(
+        self, pair_factory
+    ):
+        # Arrange
+        block = _freeze_base(pair_factory()[1], torch.bfloat16)
+        x = torch.randn(12, HIDDEN, dtype=torch.bfloat16)
+        gemm_dtypes = set()
+        saved_float_dtypes = set()
+        grouped_mm = F.grouped_mm
+
+        def recording_grouped_mm(a, b, *args, **kwargs):
+            gemm_dtypes.add((a.dtype, b.dtype))
+            return grouped_mm(a, b, *args, **kwargs)
+
+        def record_saved(tensor):
+            if tensor.is_floating_point():
+                saved_float_dtypes.add(tensor.dtype)
+            return tensor
+
+        # Act
+        with (
+            patch.object(F, "grouped_mm", recording_grouped_mm),
+            torch.autograd.graph.saved_tensors_hooks(record_saved, lambda t: t),
+        ):
+            out = block(x)
+
+        # Assert
+        assert out.dtype == torch.bfloat16
+        assert gemm_dtypes == {(torch.bfloat16, torch.bfloat16)}
+        assert saved_float_dtypes == {torch.bfloat16}
+
+    def test_lora_grads_stay_fp32_and_match_an_fp32_reference(self, pair_factory):
+        # Arrange
+        upgraded = pair_factory()[1]
+        reference = _freeze_base(copy.deepcopy(upgraded), torch.float32)
+        mixed = _freeze_base(upgraded, torch.bfloat16)
+        x = torch.randn(12, HIDDEN)
+        probe = torch.randn(12, HIDDEN)
+
+        # Act
+        (reference(x) * probe).sum().backward()
+        (mixed(x.bfloat16()).float() * probe).sum().backward()
+
+        # Assert
+        ref_grads = {
+            n: p.grad for n, p in reference.named_parameters() if p.grad is not None
+        }
+        mixed_grads = {
+            n: p.grad for n, p in mixed.named_parameters() if p.grad is not None
+        }
+        assert set(mixed_grads) == set(ref_grads)
+        assert all("lora_" in name for name in mixed_grads)
+        for name, grad in mixed_grads.items():
+            assert grad.dtype == torch.float32, name
+            # bf16 rounds to 2**-8 (0.4%); input, base weight, LoRA factors and
+            # each GEMM output are rounded, so ~8 roundings bound the error.
+            error = (grad - ref_grads[name]).norm() / ref_grads[name].norm()
+            assert error < 3e-2, name

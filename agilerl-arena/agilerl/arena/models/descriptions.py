@@ -17,9 +17,7 @@ KL_CLAMP = (
     "Per-token bound on the K3 KL penalty. 10 is the policy about 2.6 nats "
     "below the reference on a token; tokens further below get no KL "
     "gradient, so one diverged token cannot set the step's gradient norm. "
-    "Tokens above the reference keep their KL pull. With the fused Liger "
-    "GRPO loss a residual gradient of about beta times one bf16 rounding "
-    "step of the log-prob remains. Unset removes the bound."
+    "Tokens above the reference keep their KL pull. Unset removes the bound."
 )
 MINI_BATCH = (
     "Trajectories one optimizer step covers, per rank. Must be a whole "
@@ -30,6 +28,20 @@ MICRO_BATCH = (
     "Trajectories per backward pass, per GPU. Affects only memory: it "
     "changes what fits, not what the run learns. Picked from the memory "
     "estimate as the largest that fits; manifests cannot set it."
+)
+MICRO_BATCH_TOKENS = (
+    "Tokens per packed backward pass, per GPU, when the forward packs "
+    "sequences. Rows fill each pass up to this many tokens; a longer row runs "
+    "alone. Affects only memory and speed, not what the run learns. Picked "
+    "from the memory estimate as the fastest budget that fits; manifests "
+    "cannot set it."
+)
+GRADIENT_CHECKPOINTING = (
+    "Recompute block activations during the backward pass instead of "
+    "storing them. Affects only memory and speed, not what the run learns. "
+    "Picked from the memory estimate together with the micro-batch and "
+    "fsdp.checkpoint_every_n_blocks, least recompute that fits; on when the "
+    "run has no estimate. Manifests cannot set it."
 )
 
 TAU = (

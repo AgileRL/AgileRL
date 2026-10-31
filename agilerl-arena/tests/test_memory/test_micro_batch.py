@@ -1,21 +1,26 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
-"""An omitted micro-batch is the largest divisor whose training estimate fits."""
-
-from types import SimpleNamespace
+"""Batch shapes, and the micro-batch the training-memory search picks for a manifest."""
 
 import pytest
 
+from agilerl.arena.memory.estimator import estimate_training
 from agilerl.arena.memory.manifest import (
     run_config_from_manifest,
+    training_memory_from_manifest,
     training_settings_from_manifest,
 )
 from agilerl.arena.memory.resolve.batch import (
+    catalog_model,
     engine_group_size,
     resolve_micro_batch_size_per_gpu,
     resolve_mini_batch_size,
 )
-from agilerl.arena.memory.specs import DeviceSpec, GiB, ModelArch, ModelSpec
+from agilerl.arena.memory.resolve.fsdp import (
+    TrainingMemoryPlan,
+    TrainingMemoryUnfitError,
+)
+from agilerl.arena.memory.specs import DeviceSpec, GiB
 from agilerl.arena.models.manifest import TrainingManifest
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 
@@ -54,18 +59,24 @@ def _manifest(micro: int | None = None, mini: int | None = None) -> dict:
     }
 
 
+def _llmppo_manifest() -> dict:
+    raw = _manifest()
+    raw["algorithm"]["name"] = "LLMPPO"
+    del raw["algorithm"]["group_size"]
+    raw["algorithm"]["batch_size"] = 16
+    raw["network"]["max_context_length"] = 512
+    raw["network"]["lora_config"] = {"lora_dropout": 0.05}
+    return raw
+
+
 def _device(total_gib: float) -> DeviceSpec:
     return DeviceSpec(total_bytes=int(total_gib * GiB), name="NVIDIA L4")
 
 
-def _resolve(manifest: TrainingManifest, device: DeviceSpec | None, model=None) -> int:
-    spec = manifest.algorithm
-    n_training_gpus = manifest.training.training_gpus_per_agent
-    settings = None
-    if device is not None:
-        settings = training_settings_from_manifest(manifest, micro_batch_size=1)
-    return resolve_micro_batch_size_per_gpu(
-        spec, n_training_gpus, device, model, settings
+def _plan(raw: dict, total_gib: float) -> TrainingMemoryPlan:
+    manifest = TrainingManifest.model_validate(raw)
+    return training_memory_from_manifest(
+        manifest, catalog_model(manifest.algorithm), _device(total_gib)
     )
 
 
@@ -101,70 +112,14 @@ class TestResolveMiniBatchSize:
 
 
 class TestResolveMicroBatchSizePerGpu:
-    def test_largest_divisor_is_kept_when_it_fits(self) -> None:
-        # Arrange: one rank holds 16 trajectories.
-        manifest = TrainingManifest.model_validate(_manifest())
-        device = _device(24)
-
-        # Act
-        chosen = _resolve(manifest, device)
-
-        # Assert
-        assert chosen == 16
-        assert manifest.algorithm.micro_batch_size_per_gpu is None
-
-    def test_wide_micro_batch_shrinks_to_one_that_fits(self) -> None:
-        # Arrange: unfiltered sampling scores the full vocabulary, so 16
-        # trajectories do not fit; 8 does.
-        raw = _manifest()
-        raw["algorithm"]["top_k"] = 0
-        manifest = TrainingManifest.model_validate(raw)
-        device = _device(4.31)
-
-        # Act
-        chosen = _resolve(manifest, device)
-
-        # Assert
-        assert chosen == 8
-        assert manifest.algorithm.micro_batch_size_per_gpu is None
-
-    def test_no_fitting_divisor_is_one(self) -> None:
-        # Arrange
-        manifest = TrainingManifest.model_validate(_manifest())
-        device = _device(1)
-
-        # Act
-        chosen = _resolve(manifest, device)
-
-        # Assert
-        assert chosen == 1
-        assert manifest.algorithm.micro_batch_size_per_gpu is None
-
-    def test_explicit_micro_batch_is_unchanged(self) -> None:
-        # Arrange
+    def test_set_micro_batch_is_kept(self) -> None:
         manifest = TrainingManifest.model_validate(_manifest(micro=2))
-        device = _device(1)
 
-        # Act
-        chosen = _resolve(manifest, device)
+        chosen = resolve_micro_batch_size_per_gpu(manifest.algorithm, 1)
 
-        # Assert
         assert chosen == 2
-        assert manifest.algorithm.micro_batch_size_per_gpu == 2
 
-    def test_pinned_mini_batch_caps_the_micro_batch(self) -> None:
-        # Arrange: mini 4 must stay a multiple of the micro-batch.
-        manifest = TrainingManifest.model_validate(_manifest(mini=4))
-        device = _device(24)
-
-        # Act
-        chosen = _resolve(manifest, device)
-
-        # Assert
-        assert chosen == 4
-        assert manifest.algorithm.micro_batch_size_per_gpu is None
-
-    def test_no_device_returns_the_rank_trajectory_count(self) -> None:
+    def test_unset_micro_batch_is_the_rank_trajectory_count(self) -> None:
         # Arrange: 16 prompts on 4 GPUs, 4 completions each.
         raw = _manifest()
         raw["algorithm"]["batch_size"] = 16
@@ -173,64 +128,22 @@ class TestResolveMicroBatchSizePerGpu:
         manifest = TrainingManifest.model_validate(raw)
 
         # Act
-        chosen = _resolve(manifest, None)
+        chosen = resolve_micro_batch_size_per_gpu(manifest.algorithm, 4)
 
         # Assert
         assert chosen == 16
         assert manifest.algorithm.micro_batch_size_per_gpu is None
 
-    def test_unknown_model_returns_the_rank_trajectory_count(self) -> None:
-        # Arrange
-        raw = _manifest()
-        raw["network"]["pretrained_model_name_or_path"] = "missing/not-a-model"
-        manifest = TrainingManifest.model_validate(raw)
+    def test_pinned_mini_batch_is_the_micro_batch(self) -> None:
+        manifest = TrainingManifest.model_validate(_manifest(mini=4))
 
-        # Act
-        chosen = _resolve(manifest, _device(24))
+        chosen = resolve_micro_batch_size_per_gpu(manifest.algorithm, 1)
 
-        # Assert
-        assert chosen == 16
-        assert manifest.algorithm.micro_batch_size_per_gpu is None
+        assert chosen == 4
 
-    def test_unknown_model_with_a_passed_spec_does_not_search(self) -> None:
-        # Arrange: a passed spec would fit; the id is outside the catalog.
-        raw = _manifest()
-        raw["network"]["pretrained_model_name_or_path"] = "missing/not-a-model"
-        manifest = TrainingManifest.model_validate(raw)
-        info = SUPPORTED_MODEL_INFO[HUB_ID]
-        supplied = ModelSpec(
-            model_id="missing/not-a-model",
-            arch=ModelArch.from_hf_config(info.config),
-            n_params=1,
-        )
+    def test_training_settings_without_a_device_use_the_rank_batch(self) -> None:
+        settings = training_settings_from_manifest(_manifest())
 
-        # Act
-        chosen = _resolve(manifest, _device(24), supplied)
-
-        # Assert
-        assert chosen == 16
-        assert manifest.algorithm.micro_batch_size_per_gpu is None
-
-    def test_device_without_settings_raises(self) -> None:
-        # Arrange
-        manifest = TrainingManifest.model_validate(_manifest())
-
-        # Act / Assert
-        with pytest.raises(ValueError, match="needs training settings"):
-            resolve_micro_batch_size_per_gpu(
-                manifest.algorithm,
-                manifest.training.training_gpus_per_agent,
-                _device(24),
-            )
-
-    def test_training_settings_without_a_device_uses_the_rank_batch(self) -> None:
-        # Arrange: the same manifest's fit is 16; the reader has no device.
-        raw = _manifest()
-
-        # Act
-        settings = training_settings_from_manifest(raw)
-
-        # Assert
         assert settings.micro_batch_size == 16
 
     def test_no_splitting_mini_batch_raises(self) -> None:
@@ -243,106 +156,175 @@ class TestResolveMicroBatchSizePerGpu:
 
         # Act / Assert
         with pytest.raises(ValueError, match="divisible by mini_batch_size"):
-            _resolve(manifest, _device(24))
+            resolve_micro_batch_size_per_gpu(manifest.algorithm, 2)
 
-        assert manifest.algorithm.micro_batch_size_per_gpu is None
 
-    def test_no_device_pinned_mini_is_the_micro_batch(self) -> None:
-        # Arrange: mini 4 divides 16 trajectories. The search does not run.
-        manifest = TrainingManifest.model_validate(_manifest(mini=4))
-
-        # Act
-        chosen = _resolve(manifest, None)
-
-        # Assert
-        assert chosen == 4
-        assert manifest.algorithm.micro_batch_size_per_gpu is None
-
-    def test_caller_model_is_what_the_search_estimates(self, monkeypatch) -> None:
-        # Arrange: catalog weights for this id do not carry n_params == 1.
-        manifest = TrainingManifest.model_validate(_manifest())
-        device = _device(24)
-        info = SUPPORTED_MODEL_INFO[HUB_ID]
-        supplied = ModelSpec(
-            model_id=HUB_ID,
-            arch=ModelArch.from_hf_config(info.config),
-            n_params=1,
-        )
-
-        def fits_supplied_model(model, _device, _settings, orchestrated=False):
-            return SimpleNamespace(
-                fits_with_buffer=model.n_params == 1 and orchestrated is True
-            )
-
-        monkeypatch.setattr(
-            "agilerl.arena.memory.resolve.batch.estimate_training",
-            fits_supplied_model,
-        )
-
-        # Act
-        chosen = _resolve(manifest, device, supplied)
-
-        # Assert
-        assert chosen == 16
-        assert manifest.algorithm.micro_batch_size_per_gpu is None
-
-    def test_unset_llmppo_picks_a_fused_micro_when_sixteen_rows_do_not_fit(
+class TestTrainingMemoryFromManifest:
+    def test_roomy_device_packs_the_whole_mini_batch_without_checkpointing(
         self,
     ) -> None:
-        # Arrange: 16 fused rows are over 5 GiB; 8 fit.
+        plan = _plan(_manifest(), 24)
+
+        assert plan.micro_batch_tokens_per_gpu == 16 * 128
+        assert plan.micro_batch_size_per_gpu == 16
+        assert plan.gradient_checkpointing is False
+
+    def test_tight_device_checkpoints_before_shrinking_the_micro_batch(self) -> None:
+        plan = _plan(_manifest(), 3.37)
+
+        assert plan.micro_batch_tokens_per_gpu == 16 * 128
+        assert plan.gradient_checkpointing is True
+
+    def test_full_vocabulary_scoring_shrinks_the_micro_batch(self) -> None:
+        # Arrange: unfiltered sampling scores the full vocabulary.
         raw = _manifest()
-        raw["algorithm"]["name"] = "LLMPPO"
-        del raw["algorithm"]["group_size"]
-        raw["algorithm"]["batch_size"] = 16
-        raw["network"]["max_context_length"] = 512
-        manifest = TrainingManifest.model_validate(raw)
-        device = _device(5)
-        model_config = SUPPORTED_MODEL_INFO[HUB_ID].config
+        raw["algorithm"]["top_k"] = 0
 
         # Act
-        chosen = _resolve(manifest, device)
-        config = run_config_from_manifest(
-            TrainingManifest.model_validate(raw), device, model_config
+        plan = _plan(raw, 3.37)
+
+        # Assert
+        assert plan.micro_batch_tokens_per_gpu == 1024
+        assert plan.micro_batch_size_per_gpu == 8
+        assert plan.gradient_checkpointing is True
+
+    def test_pinned_mini_batch_caps_the_micro_batch(self) -> None:
+        plan = _plan(_manifest(mini=4), 24)
+
+        assert plan.micro_batch_tokens_per_gpu == 4 * 128
+        assert plan.micro_batch_size_per_gpu == 4
+
+    def test_pinned_micro_batch_is_kept(self) -> None:
+        plan = _plan(_manifest(micro=2), 24)
+
+        assert plan.micro_batch_size_per_gpu == 2
+        assert plan.micro_batch_tokens_per_gpu == 2 * 128
+
+    def test_packed_budget_steps_by_1024_tokens_not_by_rows(self) -> None:
+        # Arrange: 1536-token rows, so a row multiple is not a 1024 multiple.
+        raw = _manifest()
+        raw["network"]["max_context_length"] = 1536
+
+        # Act
+        plan = _plan(raw, 3.8)
+
+        # Assert
+        assert plan.micro_batch_tokens_per_gpu == 10 * 1024
+        assert plan.micro_batch_size_per_gpu == 4
+
+    def test_tight_device_floors_at_the_longest_row(self) -> None:
+        raw = _manifest()
+        raw["network"]["max_context_length"] = 1536
+
+        plan = _plan(raw, 3.2)
+
+        assert plan.micro_batch_tokens_per_gpu == 1536
+        assert plan.micro_batch_size_per_gpu == 1
+
+    def test_llmppo_budget_prices_the_actor_and_critic_copies(self) -> None:
+        # Arrange: the same learn under GRPO, which packs one copy.
+        raw = _llmppo_manifest()
+        grpo = _llmppo_manifest()
+        grpo["algorithm"].update(name="GRPO", batch_size=4, group_size=4)
+
+        # Act
+        plan = _plan(raw, 5)
+        grpo_plan = _plan(grpo, 5)
+
+        # Assert
+        assert plan.micro_batch_tokens_per_gpu == 7 * 1024
+        assert grpo_plan.micro_batch_tokens_per_gpu == 8 * 1024
+        assert plan.gradient_checkpointing is True
+
+    def test_manifest_is_not_written(self) -> None:
+        manifest = TrainingManifest.model_validate(_manifest())
+
+        training_memory_from_manifest(
+            manifest, catalog_model(manifest.algorithm), _device(24)
         )
 
-        # Assert
-        assert chosen == 8
         assert manifest.algorithm.micro_batch_size_per_gpu is None
-        assert config.training.micro_batch_size == 8
-        assert config.training.grad_forward_rows == 16
+        assert manifest.algorithm.gradient_checkpointing is None
 
-    def test_unset_llmppo_skips_a_micro_outside_the_buffer(self) -> None:
-        # Arrange: 16 fused rows are inside 5.5 GiB and outside the buffer.
-        raw = _manifest()
-        raw["algorithm"]["name"] = "LLMPPO"
-        del raw["algorithm"]["group_size"]
-        raw["algorithm"]["batch_size"] = 16
-        raw["network"]["max_context_length"] = 512
-        manifest = TrainingManifest.model_validate(raw)
-        device = _device(5.5)
+    def test_raises_when_nothing_fits(self) -> None:
+        with pytest.raises(TrainingMemoryUnfitError, match="at the lightest settings"):
+            _plan(_manifest(), 2)
+
+
+class TestTrainingMemoryFromManifestFsdpChoice:
+    def test_roomy_single_gpu_trains_ddp(self) -> None:
+        plan = _plan(_manifest(), 24)
+
+        assert plan.fsdp is None
+
+    def test_omitted_fsdp_plans_like_an_empty_fsdp_block(self) -> None:
+        # Arrange: at 3 GiB the FSDP plan beats the DDP one on one L4.
+        searched = _manifest()
+        searched["algorithm"]["fsdp"] = {}
 
         # Act
-        chosen = _resolve(manifest, device)
+        omitted_plan = _plan(_manifest(), 3.0)
+        searched_plan = _plan(searched, 3.0)
 
         # Assert
-        assert chosen == 8
-        assert manifest.algorithm.micro_batch_size_per_gpu is None
+        assert omitted_plan.fsdp is not None
+        assert omitted_plan.fsdp == searched_plan.fsdp
+        assert (
+            omitted_plan.micro_batch_tokens_per_gpu,
+            omitted_plan.gradient_checkpointing,
+        ) == (
+            searched_plan.micro_batch_tokens_per_gpu,
+            searched_plan.gradient_checkpointing,
+        )
 
-    def test_run_config_measures_the_resolved_size(self) -> None:
+
+class TestRunConfigFromManifest:
+    def test_measures_the_resolved_plan(self) -> None:
         # Arrange
         raw = _manifest()
         raw["algorithm"]["top_k"] = 0
         caller = TrainingManifest.model_validate(raw)
-        device = _device(4.31)
         model_config = SUPPORTED_MODEL_INFO[HUB_ID].config
 
         # Act
-        config = run_config_from_manifest(caller, device, model_config)
-        copy = TrainingManifest.model_validate(raw)
-        chosen = _resolve(copy, device, config.model)
+        config = run_config_from_manifest(caller, _device(3.37), model_config)
 
         # Assert
-        assert config.training.micro_batch_size == chosen
-        assert chosen == 8
+        assert config.training.micro_batch_size == 8
+        assert config.training.micro_batch_tokens == 1024
+        assert config.training.gradient_checkpointing is True
         assert caller.algorithm.micro_batch_size_per_gpu is None
-        assert copy.algorithm.micro_batch_size_per_gpu is None
+
+    def test_omitted_fsdp_is_sized_at_the_planned_fsdp(self) -> None:
+        caller = TrainingManifest.model_validate(_manifest())
+        model_config = SUPPORTED_MODEL_INFO[HUB_ID].config
+
+        config = run_config_from_manifest(caller, _device(3.0), model_config)
+
+        assert config.training.fsdp == _plan(_manifest(), 3.0).fsdp
+        assert config.training.fsdp is not None
+        assert caller.algorithm.fsdp is None
+
+    def test_padded_llmppo_fuses_policy_and_value_rows(self) -> None:
+        config = run_config_from_manifest(
+            _llmppo_manifest(), _device(5), SUPPORTED_MODEL_INFO[HUB_ID].config
+        )
+
+        assert config.training.micro_batch_size == 8
+        assert config.training.grad_forward_rows == 16
+
+    def test_unfit_manifest_is_sized_at_the_lightest_plan(self) -> None:
+        # Arrange
+        model_config = SUPPORTED_MODEL_INFO[HUB_ID].config
+
+        # Act
+        config = run_config_from_manifest(_manifest(), _device(2), model_config)
+        breakdown = estimate_training(
+            config.model, config.train_device, config.training, orchestrated=True
+        )
+
+        # Assert
+        assert config.training.micro_batch_size == 1
+        assert config.training.micro_batch_tokens == 128
+        assert config.training.gradient_checkpointing is True
+        assert not breakdown.fits

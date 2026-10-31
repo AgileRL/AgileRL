@@ -20,7 +20,10 @@ from agilerl.algorithms.ppo_llm import PPO as LLMPPO
 from agilerl.distributed.fsdp import FSDPConfig
 from agilerl.utils.algo_utils import CosineLRScheduleConfig
 from tests.rank_launch import run_ranks
-from tests.test_algorithms.test_llms.segment_helpers import seed_lora_weights
+from tests.test_algorithms.test_llms.segment_helpers import (
+    RESOLVED_FSDP_MEMORY,
+    seed_lora_weights,
+)
 from tests.test_algorithms.test_llms.test_ppo_llm_passes import (
     learn_ragged_rows,
     learn_rows,
@@ -91,14 +94,15 @@ class TestPPOLearnCriticWarmup:
         # Act
         metrics = learn_ragged_rows(agent)
 
-        # Assert: each micro-batch packs into one critic row.
+        # Assert: the 2 x 12-token budget packs rows 0-2 (22 tokens), then
+        # row 3; each micro-batch is one critic row.
         after = role_weights(agent)
         assert not changed(before["actor"], after["actor"])
         assert changed(before["critic"], after["critic"])
         assert [f["adapters"] for f in forwards] == [{"critic"}] * 2
         assert [f["input_ids"].shape for f in forwards] == [
-            torch.Size([1, 14]),
-            torch.Size([1, 16]),
+            torch.Size([1, 22]),
+            torch.Size([1, 8]),
         ]
         assert metrics["padding_frac_after_packing"] == 0.0
         assert metrics["critic_warmup"] == 1.0
@@ -230,7 +234,7 @@ def make_fsdp_warmup_ppo() -> LLMPPO:
         mini_batch_size=2,
         micro_batch_size_per_gpu=1,
         wrap=True,
-        fsdp_config=FSDPConfig(optim_cpu_offload=False, param_dtype="float32"),
+        fsdp_config=FSDPConfig(param_dtype="float32", **RESOLVED_FSDP_MEMORY),
         critic_warmup_steps=2,
     )
 

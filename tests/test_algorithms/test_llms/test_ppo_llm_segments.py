@@ -33,7 +33,6 @@ from tests.test_algorithms.test_llms.llm_helpers import (
 )
 from tests.test_algorithms.test_llms.segment_helpers import (
     EPISODE_SEGMENTS,
-    MEAN_SEGMENT_ROW_ACTION_TOKENS,
     balanced_learn_worker,
     episode_sampling_logps,
     episode_sampling_supports,
@@ -45,7 +44,6 @@ from tests.test_algorithms.test_llms.segment_helpers import (
     record_step_gradients,
     rows_from_other_ranks,
     segment_experiences,
-    use_fake_liger_policy_loss,
 )
 
 PAD_TOKEN_ID = 63
@@ -82,9 +80,7 @@ def _make_ppo(**overrides: Any) -> LLMPPO:
         ),
         **overrides,
     }
-    agent = LLMPPO(**kwargs)
-    agent.liger_loss = False
-    return agent
+    return LLMPPO(**kwargs)
 
 
 def _experiences() -> tuple[list[torch.Tensor], list[torch.Tensor], torch.Tensor]:
@@ -175,22 +171,6 @@ class TestPPOLearnEpisodeSegments:
             )
         for key in ("loss", "pg_loss", "vf_loss", "kl", "entropy"):
             assert math.isfinite(padded_metrics[key]), key
-
-    def test_liger_metrics_leave_out_filler_micro_batches(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Arrange: the Liger kernel reports each micro-batch's action tokens as
-        # its KL; 6 real 1-row micro-batches pad to 8 for a simulated second rank.
-        agent = _make_ppo(micro_batch_size_per_gpu=1, mini_batch_size=4)
-        use_fake_liger_policy_loss(agent, monkeypatch, "agilerl.algorithms.ppo_llm")
-        pad_to_eight_rows(monkeypatch)
-
-        # Act
-        metrics = agent.learn(_experiences(), episode_segments=EPISODE_SEGMENTS)
-
-        # Assert
-        assert metrics["train_rows_padded"] == pytest.approx(8.0)
-        assert metrics["kl"] == pytest.approx(MEAN_SEGMENT_ROW_ACTION_TOKENS)
 
     def test_rows_from_other_ranks_train_to_the_same_gradient(
         self, monkeypatch: pytest.MonkeyPatch

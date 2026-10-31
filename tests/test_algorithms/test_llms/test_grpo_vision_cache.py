@@ -61,9 +61,7 @@ def make_vision_grpo(**overrides: Any) -> GRPO:
         ),
         **overrides,
     }
-    agent = GRPO(**kwargs)
-    agent.liger_loss = False
-    return agent
+    return GRPO(**kwargs)
 
 
 class TestGRPOLearnVisionCache:

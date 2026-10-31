@@ -74,13 +74,16 @@ API_VERSION = "agilerl.com/v1"
 # Algorithm fields the run picks from the memory estimate, fastest that fits.
 RESOLVED_MEMORY_FIELDS = (
     ("micro_batch_size_per_gpu",),
+    ("micro_batch_tokens_per_gpu",),
     ("gradient_checkpointing",),
     ("activation_offload",),
+    ("routed_expert_chunk_mib",),
     ("fsdp", "reshard_after_forward"),
     ("fsdp", "optim_cpu_offload"),
     ("fsdp", "routed_expert_chunk_mib"),
     ("fsdp", "activation_offload"),
     ("fsdp", "cpu_offload"),
+    ("fsdp", "checkpoint_every_n_blocks"),
 )
 
 
@@ -675,24 +678,6 @@ class TrainingManifest(BaseModel):
         raise ValueError(msg)
 
     @model_validator(mode="after")
-    def _check_prefix_cache_reuse(self) -> Self:
-        """Prefix cache reuse spans ``max_rollout_version_lag`` versions, so it needs a bound."""
-        if not self.training.reuse_prefix_cache_across_syncs:
-            return self
-        lag = (
-            self.replay_buffer.max_rollout_version_lag
-            if isinstance(self.replay_buffer, LLMRolloutBufferSpec)
-            else None
-        )
-        if lag is None or lag < 1:
-            msg = (
-                "training.reuse_prefix_cache_across_syncs requires an LLM "
-                f"replay_buffer with max_rollout_version_lag >= 1, got {lag}"
-            )
-            raise ValueError(msg)
-        return self
-
-    @model_validator(mode="after")
     def _check_group_replay(self) -> Self:
         """Group replay swaps a member of a group whose returns tie, so it needs groups."""
         if not (
@@ -736,6 +721,17 @@ class TrainingManifest(BaseModel):
         # Only supported ids have a model_type offline; the Ray driver checks the rest.
         if model is not None:
             self.algorithm.check_thinking_budget_parser(model.model_type)
+        return self
+
+    @model_validator(mode="after")
+    def _check_speculative_logit_bias(self) -> Self:
+        """vLLM rejects ``logit_bias`` requests on a drafting engine."""
+        if not isinstance(self.algorithm, RolloutLLMSpec):
+            return self
+        model = SUPPORTED_MODEL_INFO.get(self.algorithm.pretrained_model_name_or_path)
+        # Only supported ids are known offline; the rollout engine checks the rest.
+        if model is not None:
+            self.algorithm.check_speculative_sampling(model.biases_image_token)
         return self
 
     @field_serializer("network", mode="wrap")
@@ -857,6 +853,9 @@ class TrainingManifest(BaseModel):
                 "training_gpus_per_agent" not in self.training.model_fields_set
             ):
                 training.pop("training_gpus_per_agent", None)
+            # An unset engine count leaves the trainer / engine split to the driver.
+            if "rollout_engines_per_agent" not in self.training.model_fields_set:
+                training.pop("rollout_engines_per_agent", None)
         algorithm = payload.get("algorithm")
         if isinstance(algorithm, dict):
             if "num_envs" not in self.algorithm.model_fields_set:

@@ -3,14 +3,12 @@
 
 """Unit tests for GRPO's per-token bound on the K3 KL penalty (``kl_clamp``).
 
-Pure CPU on a tiny real model in fp32. The parity class runs the real Liger
-kernel, which is installed on Linux only.
+Pure CPU on a tiny real model in fp32.
 """
 
 from __future__ import annotations
 
 import math
-from typing import Any
 
 import pytest
 import torch
@@ -18,19 +16,11 @@ import torch
 pytest.importorskip("transformers", reason="LLM tests require transformers.")
 pytest.importorskip("peft", reason="LLM tests require peft.")
 
-from agilerl import HAS_LIGER_KERNEL
 from agilerl.algorithms import grpo as grpo_module
-from agilerl.algorithms.core.llm_ops.fused_logprobs import scored_position_index
 from agilerl.utils.llm_utils import calculate_k3_kl, masked_mean
-from tests.test_algorithms.test_llms.test_grpo_episode_loss_norm import KERNEL_NAME
-from tests.test_algorithms.test_llms.test_grpo_off_policy_masks import (
-    ICEPOP_BAND,
-    RecordingFusedKernel,
-)
+from tests.test_algorithms.test_llms.test_grpo_off_policy_masks import ICEPOP_BAND
 from tests.test_algorithms.test_llms.test_grpo_old_logprobs import (
-    NUM_ROWS,
     PROMPT_LEN,
-    _batch,
     _make_grpo,
 )
 
@@ -39,16 +29,6 @@ BETA = 0.05
 GAP = 11.0
 REFERENCE_ARG = 6
 FIRST_ACTION = PROMPT_LEN - 1
-
-
-class RecordingKlKernel(RecordingFusedKernel):
-    """Recording probe kernel with the ``[kl, clipfrac]`` aux of a KL coefficient."""
-
-    @classmethod
-    def apply(cls, *args):
-        """Record the call, run the probe loss and prepend a zero KL."""
-        loss, aux = super().apply(*args)
-        return loss, (torch.zeros(()), *aux)
 
 
 def _inputs() -> dict[str, torch.Tensor]:
@@ -353,101 +333,3 @@ class TestGRPOSummarizeUpdateKlClampFrac:
         )
 
         assert stats["kl_clamp_frac"] == 0.0
-
-
-@pytest.mark.skipif(not HAS_LIGER_KERNEL, reason="liger-kernel is Linux-only.")
-class TestGRPOFusedKernelLossKlClamp:
-    @pytest.fixture
-    def recording_kernel(self, monkeypatch: pytest.MonkeyPatch) -> type:
-        monkeypatch.setattr(grpo_module, "HAS_LIGER_KERNEL", True)
-        monkeypatch.setattr(RecordingFusedKernel, "calls", [])
-        monkeypatch.setattr(grpo_module, KERNEL_NAME, RecordingKlKernel, raising=False)
-        return RecordingFusedKernel
-
-    def test_clamped_and_dropped_tokens_reach_the_kernel_with_a_policy_reference(
-        self, recording_kernel: type
-    ) -> None:
-        # Arrange: row 0's first action token sits GAP nats below the
-        # reference; row 1's first action token is dropped by the band.
-        agent = _make_grpo(
-            loss_norm="micro_batch",
-            loss_type="cispo",
-            beta=BETA,
-            liger_loss=True,
-            off_policy_token_mask_bounds=ICEPOP_BAND,
-        )
-        ids, mask = _batch()
-        _, policy, _ = agent._fused_forward_no_grad(
-            ids, NUM_ROWS, include_reference=False
-        )
-        reference = policy + 0.3
-        reference[0, FIRST_ACTION] = policy[0, FIRST_ACTION] + GAP
-        old = policy.clone()
-        old[1, FIRST_ACTION] += 1.0
-
-        # Act
-        _loss, kl, _clipfrac, kernel_policy = agent._fused_kernel_loss(
-            ids, mask, torch.ones(NUM_ROWS, 1), old, reference
-        )
-
-        # Assert
-        (args,) = recording_kernel.calls
-        expected = reference.clone()
-        expected[0, FIRST_ACTION] = kernel_policy[0, FIRST_ACTION]
-        expected[1, FIRST_ACTION] = kernel_policy[1, FIRST_ACTION]
-        scored = mask.gather(1, scored_position_index(mask))
-        kernel_reference = args[REFERENCE_ARG].reshape(scored.shape)
-        assert torch.allclose(kernel_reference[scored], expected[mask])
-        unbounded = masked_mean(calculate_k3_kl(reference, kernel_policy), mask)
-        assert float(kl) == pytest.approx(float(unbounded), rel=1e-5)
-
-
-@pytest.mark.skipif(not HAS_LIGER_KERNEL, reason="liger-kernel is Linux-only.")
-class TestGRPOKlClampLigerParity:
-    @pytest.mark.parametrize("loss_type", ["grpo", "cispo"])
-    def test_fused_and_standard_paths_match(self, loss_type: str) -> None:
-        # Arrange: row 0's first action token sits GAP nats below the
-        # reference; row 1's first action token is dropped by the band.
-        ids, mask = _batch()
-        advantages = torch.tensor([[1.0], [-1.0], [0.5], [-0.5]])
-        results: list[dict[str, Any]] = []
-
-        # Act
-        for liger_loss in (False, True):
-            agent = _make_grpo(
-                loss_norm="micro_batch",
-                loss_type=loss_type,
-                beta=BETA,
-                liger_loss=liger_loss,
-                off_policy_token_mask_bounds=ICEPOP_BAND,
-            )
-            _, policy, _ = agent._fused_forward_no_grad(
-                ids, NUM_ROWS, include_reference=False
-            )
-            reference = policy + 0.3
-            reference[0, FIRST_ACTION] = policy[0, FIRST_ACTION] + GAP
-            old = policy.clone()
-            old[1, FIRST_ACTION] += 1.0
-            loss, kl, _clipfrac, _ = agent._objective_loss(
-                ids, mask, advantages, old, reference, None, None
-            )
-            loss.backward()
-            results.append(
-                {
-                    "loss": loss.detach(),
-                    "kl": kl.detach(),
-                    "grads": {
-                        name: param.grad.clone()
-                        for name, param in agent.actor.named_parameters()
-                        if param.grad is not None
-                    },
-                }
-            )
-
-        # Assert
-        standard, fused = results
-        assert torch.allclose(fused["loss"], standard["loss"], rtol=1e-5, atol=1e-6)
-        assert torch.allclose(fused["kl"], standard["kl"], rtol=1e-5, atol=1e-6)
-        assert fused["grads"].keys() == standard["grads"].keys()
-        for name, grad in standard["grads"].items():
-            assert torch.allclose(fused["grads"][name], grad, rtol=1e-4, atol=1e-6)

@@ -38,6 +38,9 @@ from agilerl.arena.memory.manifest import (
     lookup_gpu,
     run_config_from_manifest,
 )
+from agilerl.arena.memory.resolve.sequences import (
+    ROLLOUT_ENGINE_GPU_MEMORY_UTILIZATION,
+)
 from agilerl.arena.memory.resources import (
     TierCheck,
     check_tiers,
@@ -45,7 +48,6 @@ from agilerl.arena.memory.resources import (
     engines_per_member,
 )
 from agilerl.arena.memory.solver import (
-    INFERENCE_GPU_MEMORY_UTILIZATION,
     INFERENCE_MAX_NUM_SEQS,
     SOLVABLE_FIELDS,
     CannotSolve,
@@ -535,10 +537,13 @@ def main(
         )
 
     def build_config(
-        train_device: DeviceSpec, width: int | None, engines: int | None
+        laid_out: TrainingManifest,
+        train_device: DeviceSpec,
+        width: int | None,
+        engines: int | None,
     ) -> RunConfig:
         return run_config_from_manifest(
-            manifest,
+            laid_out,
             train_device,
             model_config,
             n_params=model_spec.n_params,
@@ -560,7 +565,7 @@ def main(
             width, engines = _allocation_layout(
                 manifest, num_gpus, gen_device or device
             )
-            config = build_config(device, width, engines)
+            config = build_config(manifest, device, width, engines)
     except KeyError as err:
         return _report_missing_key(err)
     except ValueError as err:
@@ -955,7 +960,7 @@ def _inference_config(
     model_config, model = _model_spec_from_checkpoint(resolved_id, config_path)
     settings = GenerationSettings.model_validate(
         {
-            "gpu_memory_utilization": INFERENCE_GPU_MEMORY_UTILIZATION,
+            "gpu_memory_utilization": ROLLOUT_ENGINE_GPU_MEMORY_UTILIZATION,
             "max_num_seqs": INFERENCE_MAX_NUM_SEQS,
             **overrides,
         }

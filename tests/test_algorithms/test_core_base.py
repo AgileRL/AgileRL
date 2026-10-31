@@ -102,15 +102,17 @@ from agilerl.algorithms.grpo import GRPO
 from agilerl.arena.memory.estimator import estimate_training
 from agilerl.arena.memory.formulas import MAX_UNDERPREDICTION
 from agilerl.arena.memory.manifest import ALGORITHM_NAMES
+from agilerl.arena.memory.resolve.fsdp import TrainingMemoryUnfitError
 from agilerl.arena.memory.specs import DeviceSpec
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.profiling import ProfilingConfig
 from agilerl.distributed import FSDPConfig
 from agilerl.distributed.expert_parallel import build_parallel_mesh
-from agilerl.distributed.runtime import DPRuntime, FSDPRuntime
+from agilerl.distributed.runtime import DPRuntime, FSDPRuntime, PrepareResult
 from agilerl.lora.fused import (
     patch_lora_for_fused_forward,
 )
+from agilerl.lora.moe import RoutedExpertsLoraWrapper
 from agilerl.modules import EvolvableMLP, ModuleDict
 from agilerl.typing import MultiAgentSetup
 from agilerl.utils.algo_utils import (
@@ -119,8 +121,10 @@ from agilerl.utils.algo_utils import (
     create_warmup_cosine_scheduler,
 )
 from agilerl.utils.learn_profiler import LearnProfiler
+from agilerl.utils.llm_packing import pack_padded_batch
 from agilerl.utils.llm_utils import adapt_lora_config_for_model, make_llm_optimizer
 from agilerl.utils.mutation_utils import target_activations
+from agilerl.utils.token_micro_batches import pack_rows_by_tokens
 from agilerl.wrappers.agent import RSNorm
 from tests.helper_functions import capture_grama_snapshot
 from tests.rank_launch import run_ranks
@@ -129,12 +133,18 @@ from tests.test_algorithms.test_base import (
     DummyRLAlgorithm,
     DummyRLAlgorithmNoPolicy,
 )
-from tests.test_algorithms.test_llms.llm_helpers import create_module
+from tests.test_algorithms.test_llms.llm_helpers import (
+    create_module,
+    create_tiny_qwen3,
+    right_padded_batch,
+)
+from tests.test_algorithms.test_llms.segment_helpers import RESOLVED_FSDP_MEMORY
 from tests.test_algorithms.test_llms.test_ppo_llm_passes import (
     make_ppo,
     patch_cuda_device,
     save_checkpoint_config,
 )
+from tests.test_utils.test_fsdp_routed_expert_chunks import tiny_hybrid_moe_with_lora
 
 pytest.importorskip("peft", reason="LLM checkpoint tests require peft.")
 pytest.importorskip("transformers", reason="LLM checkpoint tests require transformers.")
@@ -159,7 +169,11 @@ if HAS_LLM_DEPENDENCIES or TYPE_CHECKING:
         NemotronHForCausalLM,
         Qwen3Config,
         Qwen3ForCausalLM,
+        SiglipVisionConfig,
     )
+    from transformers.integrations.sdpa_attention import sdpa_attention_forward
+    from transformers.masking_utils import ALL_MASK_ATTENTION_FUNCTIONS, sdpa_mask
+    from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 _LLM_DEPS_SKIP = pytest.mark.skipif(
     not HAS_LLM_DEPENDENCIES,
@@ -1947,7 +1961,6 @@ def _make_llm_agent(
     agent.optimizer._single_optimizer.return_value = inner
     agent.lr_scheduler = None
     agent.colocated = False
-    agent.liger_loss = False
     agent.sequence_packing = False
     agent.max_output_tokens = None
     agent.max_model_len = 512
@@ -2218,25 +2231,18 @@ class TestLLMCloneHelpers:
 
 
 class TestAttachLoraAdaptersExperts:
-    def test_expert_lora_upgrades_wrappers_and_unifies_dtypes(self):
+    def test_expert_lora_upgrades_wrappers(self):
 
         agent = _make_llm_agent()
         agent.lora_config = LoraConfig(
             r=2, target_parameters=["experts.gate_up_proj"], lora_dropout=0.0
         )
         agent.selected_adapters = ["actor"]
-        agent.shard_runtime = FSDPRuntime(FSDPConfig())
         base_model = nn.Module()
         base_model.experts = nn.Module()
         base_model.experts.gate_up_proj = nn.Parameter(torch.ones(2, 2))
-        base_weight = nn.Parameter(torch.ones(2, 2))
-        lora_weight = nn.Parameter(torch.ones(2, 2, dtype=torch.float16))
         peft_model = SimpleNamespace(
             peft_config={"actor": MagicMock()},
-            named_parameters=lambda: [
-                ("base.weight", base_weight),
-                ("lora_A.weight", lora_weight),
-            ],
             add_adapter=MagicMock(),
             delete_adapter=MagicMock(),
         )
@@ -2260,7 +2266,36 @@ class TestAttachLoraAdaptersExperts:
 
         assert out is peft_model
         mock_upgrade.assert_called_once_with(peft_model)
-        assert lora_weight.dtype == torch.float32
+
+
+class TestLLMAlgorithmAttachLoraAdapters:
+    def test_fsdp_actor_trains_fp32_adapters_over_a_bf16_base(self):
+        # Arrange
+        with patch("agilerl.algorithms.core.base.init_distributed", return_value=True):
+            agent = _make_llm_agent(fsdp_config=FSDPConfig())
+        agent.lora_config = LoraConfig(r=2, target_modules=["proj"])
+        agent.selected_adapters = ("actor", "reference")
+        base_model = nn.ModuleDict({"proj": nn.Linear(8, 8)}).to(torch.bfloat16)
+
+        # Act
+        with (
+            patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False),
+            patch(
+                "agilerl.algorithms.core.base.adapt_lora_config_for_model",
+                side_effect=lambda model, cfg, **kw: cfg,
+            ),
+        ):
+            actor = agent._attach_lora_adapters(base_model)
+
+        # Assert
+        dtypes = {name: param.dtype for name, param in actor.named_parameters()}
+        adapter_dtypes = {
+            name.split(".")[-2]: dtype
+            for name, dtype in dtypes.items()
+            if "lora" in name
+        }
+        assert adapter_dtypes == {"actor": torch.float32, "reference": torch.float32}
+        assert dtypes["base_model.model.proj.base_layer.weight"] == torch.bfloat16
 
 
 def _tiny_gemma4_with_audio() -> Gemma4ForConditionalGeneration:
@@ -2467,11 +2502,7 @@ class TestLLMWrapModels:
         with patch("agilerl.algorithms.core.base.init_distributed", return_value=True):
             agent = _make_llm_agent(
                 fsdp_config=FSDPConfig(
-                    reshard_after_forward=True,
-                    routed_expert_chunk_mib=64,
-                    optim_cpu_offload=True,
-                    activation_offload=False,
-                    cpu_offload=False,
+                    **{**RESOLVED_FSDP_MEMORY, "optim_cpu_offload": True}
                 )
             )
         original_actor = agent.actor
@@ -2489,6 +2520,28 @@ class TestLLMWrapModels:
         )
         original_actor.gradient_checkpointing_enable.assert_not_called()
 
+    def test_wrap_models_trains_ddp_when_the_search_picks_it(self, caplog):
+        # Arrange
+        with patch("agilerl.algorithms.core.base.init_distributed", return_value=True):
+            agent = _make_llm_agent(fsdp_config=FSDPConfig())
+        original_actor = agent.actor
+
+        # Act
+        with (
+            patch.object(agent, "_resolve_fsdp_config", return_value=None),
+            caplog.at_level(logging.INFO, logger="agilerl.algorithms.core.base"),
+        ):
+            LLMAlgorithm.wrap_models(agent)
+
+        # Assert
+        assert isinstance(agent.shard_runtime, DPRuntime)
+        assert agent.fsdp_config is None
+        assert isinstance(agent.optimizer, OptimizerWrapper)
+        original_actor.gradient_checkpointing_enable.assert_called_once_with(
+            gradient_checkpointing_kwargs={"use_reentrant": False},
+        )
+        assert "Trainer runs DDP on 1 ranks" in caplog.text
+
     def test_wrap_models_plain(self):
         agent = _make_llm_agent()
         LLMAlgorithm.wrap_models(agent)
@@ -2504,6 +2557,59 @@ class TestLLMWrapModels:
             gradient_checkpointing_kwargs={"use_reentrant": False},
         )
 
+    def test_unset_checkpointing_is_on_off_cuda(self):
+        # Arrange
+        agent = _make_llm_agent()
+
+        # Act
+        LLMAlgorithm.wrap_models(agent)
+
+        # Assert
+        assert agent.gradient_checkpointing is True
+
+    def test_unset_checkpointing_is_on_for_a_model_outside_the_catalog(
+        self, monkeypatch
+    ):
+        # Arrange
+        agent = _make_llm_agent()
+        monkeypatch.setattr(agent, "device", "cuda:0")
+        agent.pretrained_model_name_or_path = "local/uncatalogued-model"
+        monkeypatch.setattr(
+            DPRuntime,
+            "prepare_actor",
+            lambda _self, actor, **_kwargs: PrepareResult(actor, MagicMock(), None),
+        )
+
+        # Act
+        LLMAlgorithm.wrap_models(agent)
+
+        # Assert
+        assert agent.gradient_checkpointing is True
+
+    def test_unset_checkpointing_on_cuda_takes_the_memory_search_pick(
+        self, monkeypatch
+    ):
+        # Arrange
+        agent = _make_llm_agent()
+        monkeypatch.setattr(agent, "device", "cuda:0")
+        agent.pretrained_model_name_or_path = "Qwen/Qwen2.5-0.5B-Instruct"
+        monkeypatch.setattr(
+            DPRuntime,
+            "prepare_actor",
+            lambda _self, actor, **_kwargs: PrepareResult(actor, MagicMock(), None),
+        )
+
+        # Act
+        with patch.object(
+            agent, "_search_training_memory", return_value=(False, None, 256)
+        ) as search:
+            LLMAlgorithm.wrap_models(agent)
+
+        # Assert
+        search.assert_called_once_with(None)
+        assert agent.gradient_checkpointing is False
+        assert agent.routed_expert_chunk_mib == 256
+
     def test_wrap_models_keeps_checkpointing_off_when_set(self):
         agent = _make_llm_agent()
         agent.gradient_checkpointing = False
@@ -2513,6 +2619,25 @@ class TestLLMWrapModels:
 
         assert agent.gradient_checkpointing is False
         original_actor.gradient_checkpointing_enable.assert_not_called()
+
+    def test_ddp_routed_experts_run_at_the_set_chunk(self):
+        # Arrange
+        agent = _make_llm_agent()
+        agent.actor = tiny_hybrid_moe_with_lora()
+        agent.gradient_checkpointing = False
+        agent.routed_expert_chunk_mib = 256
+
+        # Act
+        LLMAlgorithm.wrap_models(agent)
+
+        # Assert
+        wrappers = [
+            module
+            for module in agent.actor.modules()
+            if isinstance(module, RoutedExpertsLoraWrapper)
+        ]
+        assert wrappers
+        assert {wrapper.chunk_bytes for wrapper in wrappers} == {256 * 2**20}
 
     def test_wrap_models_checkpointing_uses_language_tower(self):
         agent = _make_llm_agent()
@@ -2531,7 +2656,9 @@ class TestLLMWrapModels:
 
     def test_wrap_models_rejects_ep_with_vllm_tensor_parallel(self):
         with patch("agilerl.algorithms.core.base.init_distributed", return_value=True):
-            agent = _make_llm_agent(fsdp_config=FSDPConfig(ep=2))
+            agent = _make_llm_agent(
+                fsdp_config=FSDPConfig(ep=2, **RESOLVED_FSDP_MEMORY)
+            )
         agent.vllm_config = VLLMConfig(tensor_parallel_size=2)
 
         with pytest.raises(ValueError, match="cannot be combined"):
@@ -2559,10 +2686,12 @@ def estimate_gib(
     )
     fsdp = FSDPConfig(
         ep=8,
+        checkpoint_every_n_blocks=1,
         reshard_after_forward=True,
         routed_expert_chunk_mib=chunk_mib,
         optim_cpu_offload=optim_cpu_offload,
         activation_offload=activation_offload,
+        cpu_offload=False,
     )
     device = DeviceSpec(total_bytes=2**50, name="test-gpu")
     estimate = estimate_training(
@@ -2586,10 +2715,53 @@ def patch_budget_gib(agent, monkeypatch, budget_gib: float) -> None:
     patch_cuda_device(agent, monkeypatch, int(budget_gib / 0.95 * 2**30))
 
 
+class TestLLMAlgorithmWindowLossScales:
+    def test_scales_to_the_window_unit_mean(self):
+        # Arrange: micro-batches of 4 and 2 units.
+        agent = make_ppo()
+        row_units = torch.tensor([1.0, 3.0, 2.0, 0.0])
+        window = [np.array([0, 1]), np.array([2, 3])]
+
+        # Act
+        scales = agent._window_loss_scales(row_units, window)
+
+        # Assert
+        torch.testing.assert_close(scales, torch.tensor([4.0, 2.0]) * 2 / 6)
+
+    def test_scales_divide_by_the_mean_window_units_over_ranks(self, monkeypatch):
+        # Arrange: this rank holds 6 units and the other rank 10, so the
+        # per-rank mean is 8.
+        agent = make_ppo()
+        row_units = torch.tensor([1.0, 3.0, 2.0, 0.0])
+        window = [np.array([0, 1]), np.array([2, 3])]
+        monkeypatch.setattr(torch.distributed, "is_available", lambda: True)
+        monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+        monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 2)
+        monkeypatch.setattr(
+            torch.distributed, "all_reduce", lambda total, op: total.add_(10.0)
+        )
+
+        # Act
+        scales = agent._window_loss_scales(row_units, window)
+
+        # Assert
+        torch.testing.assert_close(scales, torch.tensor([4.0, 2.0]) * 2 / 8)
+
+
+class TestLLMAlgorithmLossUnitsPerRow:
+    def test_trajectory_level_counts_one_unit_per_row_with_a_masked_position(self):
+        mask = torch.tensor([[1, 1, 0], [0, 0, 0], [0, 1, 0]])
+
+        units = LLMAlgorithm._loss_units_per_row(mask, None, "trajectory")
+
+        torch.testing.assert_close(units, torch.tensor([1.0, 0.0, 1.0]))
+
+
 class TestLLMAlgorithmResolveFsdpConfig:
     def test_set_values_are_kept(self, moe_ppo, monkeypatch):
         config = FSDPConfig(
             ep=8,
+            checkpoint_every_n_blocks=1,
             reshard_after_forward=False,
             routed_expert_chunk_mib=512,
             optim_cpu_offload=False,
@@ -2600,64 +2772,125 @@ class TestLLMAlgorithmResolveFsdpConfig:
 
         assert moe_ppo._resolve_fsdp_config(config) is config
 
-    @pytest.mark.parametrize(
-        ("cpu_offload", "optim_cpu_offload"), [(False, True), (True, False)]
-    )
-    def test_off_cuda_takes_the_smallest_chunk(
-        self, moe_ppo, cpu_offload, optim_cpu_offload
-    ):
-        resolved = moe_ppo._resolve_fsdp_config(FSDPConfig(cpu_offload=cpu_offload))
+    def test_trains_ddp_when_ddp_is_the_cheapest_plan(self, moe_ppo, monkeypatch):
+        # Arrange: without checkpointing only FSDP pays a frozen-base gather.
+        moe_ppo.gradient_checkpointing = False
+        patch_budget_gib(moe_ppo, monkeypatch, 2**20)
 
-        assert resolved.reshard_after_forward is True
-        assert resolved.routed_expert_chunk_mib == 64
-        assert resolved.optim_cpu_offload is optim_cpu_offload
+        # Act
+        resolved = moe_ppo._resolve_fsdp_config(FSDPConfig())
+
+        # Assert
+        assert resolved is None
+        assert moe_ppo.gradient_checkpointing is False
+
+    def test_shards_when_ddp_recompute_costs_more(self, moe_ppo, monkeypatch):
+        # Arrange: DDP checkpoints every block; FSDP may checkpoint fewer.
+        moe_ppo.gradient_checkpointing = True
+        patch_budget_gib(moe_ppo, monkeypatch, 2**20)
+
+        # Act
+        resolved = moe_ppo._resolve_fsdp_config(FSDPConfig())
+
+        # Assert
+        assert resolved is not None
+        assert resolved.checkpoint_every_n_blocks > 1
+
+    def test_off_cuda_unset_fields_raise(self, moe_ppo):
+        with pytest.raises(ValueError, match=r"fsdp\.reshard_after_forward.*CUDA"):
+            moe_ppo._resolve_fsdp_config(FSDPConfig(ep=8))
+
+    def test_off_cuda_unset_checkpointing_raises(self, moe_ppo):
+        # Arrange
+        moe_ppo.gradient_checkpointing = None
+        config = FSDPConfig(ep=8, **RESOLVED_FSDP_MEMORY)
+
+        # Act / Assert
+        with pytest.raises(
+            ValueError, match=r"^gradient_checkpointing unset; .* CUDA device"
+        ):
+            moe_ppo._resolve_fsdp_config(config)
+
+    def test_unset_stride_with_checkpointing_is_searched(self, moe_ppo, monkeypatch):
+        # Arrange
+        config = FSDPConfig(
+            ep=8,
+            reshard_after_forward=False,
+            routed_expert_chunk_mib=512,
+            optim_cpu_offload=False,
+            activation_offload=False,
+        )
+        moe_ppo.gradient_checkpointing = True
+        patch_budget_gib(moe_ppo, monkeypatch, 2**20)
+
+        # Act
+        resolved = moe_ppo._resolve_fsdp_config(config)
+
+        # Assert
+        assert moe_ppo.gradient_checkpointing is True
+        assert resolved.checkpoint_every_n_blocks == 4
+
+    def test_ample_budget_keeps_the_base_gathered_and_everything_on_gpu(
+        self, moe_ppo, monkeypatch
+    ):
+        patch_budget_gib(moe_ppo, monkeypatch, 2**20)
+
+        resolved = moe_ppo._resolve_fsdp_config(
+            FSDPConfig(ep=8, checkpoint_every_n_blocks=1)
+        )
+
+        assert resolved.reshard_after_forward is False
+        assert resolved.routed_expert_chunk_mib == 512
+        assert resolved.optim_cpu_offload is False
         assert resolved.activation_offload is False
+        assert resolved.ep == 8
 
-    @pytest.mark.parametrize(
-        ("fits", "exceeds", "expected"),
-        [
-            ((512, False), None, (512, False)),
-            ((512, True), (512, False), (512, True)),
-            ((128, True), (256, True), (128, True)),
-            (None, (64, True), (64, True)),
-        ],
-        ids=["gpu-optimizer", "offload-at-512", "offload-at-128", "nothing-fits"],
-    )
-    def test_unset_fields_follow_the_budget(
-        self, moe_ppo, monkeypatch, fits, exceeds, expected
+    def test_expert_chunk_shrinks_before_the_optimizer_moves(
+        self, moe_ppo, monkeypatch
     ):
-        # Arrange: the budget sits between the placement that fits and the one
-        # that does not, or 1 MiB past the one given. A GPU optimizer fits only
-        # with the underprediction buffer.
-        if exceeds is None:
-            budget = with_buffer_gib(estimate_gib(moe_ppo, *fits)) + 2**-10
-        elif fits is None:
-            budget = estimate_gib(moe_ppo, *exceeds) - 2**-10
-        else:
-            budget = (
-                estimate_gib(moe_ppo, *fits) + estimate_gib(moe_ppo, *exceeds)
-            ) / 2
+        # Arrange: a GPU optimizer fits with the buffer at 64 MiB, not at 512 MiB.
+        budget = with_buffer_gib(
+            (estimate_gib(moe_ppo, 64, False) + estimate_gib(moe_ppo, 512, False)) / 2
+        )
+        expected = next(
+            chunk
+            for chunk in (256, 128, 64)
+            if with_buffer_gib(estimate_gib(moe_ppo, chunk, False)) <= budget
+        )
         patch_budget_gib(moe_ppo, monkeypatch, budget)
 
         # Act
-        resolved = moe_ppo._resolve_fsdp_config(FSDPConfig(ep=8))
+        resolved = moe_ppo._resolve_fsdp_config(
+            FSDPConfig(ep=8, checkpoint_every_n_blocks=1)
+        )
 
         # Assert
         assert (resolved.routed_expert_chunk_mib, resolved.optim_cpu_offload) == (
-            expected
+            expected,
+            False,
         )
-        assert resolved.ep == 8
+        assert resolved.activation_offload is False
 
-    def test_gpu_optimizer_inside_the_buffer_is_offloaded(self, moe_ppo, monkeypatch):
-        # Arrange: a GPU optimizer fits the budget, but not with the buffer.
-        patch_budget_gib(moe_ppo, monkeypatch, estimate_gib(moe_ppo, 512, False) + 1)
+    def test_optimizer_moves_when_the_smallest_chunk_does_not_fit(
+        self, moe_ppo, monkeypatch
+    ):
+        # Arrange
+        gpu = estimate_gib(moe_ppo, 64, False)
+        offloaded = estimate_gib(moe_ppo, 64, True)
+        patch_budget_gib(moe_ppo, monkeypatch, with_buffer_gib((gpu + offloaded) / 2))
 
         # Act
-        resolved = moe_ppo._resolve_fsdp_config(FSDPConfig(ep=8))
+        resolved = moe_ppo._resolve_fsdp_config(
+            FSDPConfig(ep=8, checkpoint_every_n_blocks=1)
+        )
 
         # Assert
-        assert resolved.routed_expert_chunk_mib == 512
-        assert resolved.optim_cpu_offload is True
+        assert offloaded < gpu
+        assert (resolved.routed_expert_chunk_mib, resolved.optim_cpu_offload) == (
+            64,
+            True,
+        )
+        assert resolved.activation_offload is False
 
     def test_set_chunk_places_the_optimizer_at_that_chunk(self, moe_ppo, monkeypatch):
         # Arrange: a GPU optimizer fits with the buffer at 64 MiB but not at 128 MiB.
@@ -2666,7 +2899,7 @@ class TestLLMAlgorithmResolveFsdpConfig:
 
         # Act
         resolved = moe_ppo._resolve_fsdp_config(
-            FSDPConfig(ep=8, routed_expert_chunk_mib=64)
+            FSDPConfig(ep=8, checkpoint_every_n_blocks=1, routed_expert_chunk_mib=64)
         )
 
         # Assert
@@ -2675,29 +2908,33 @@ class TestLLMAlgorithmResolveFsdpConfig:
 
     def test_repeat_calls_pick_the_same_values(self, moe_ppo, monkeypatch):
         budget = estimate_gib(moe_ppo, 128, True) + estimate_gib(moe_ppo, 256, True)
-        patch_budget_gib(moe_ppo, monkeypatch, budget / 2)
+        patch_budget_gib(moe_ppo, monkeypatch, with_buffer_gib(budget / 2))
 
-        picks = [moe_ppo._resolve_fsdp_config(FSDPConfig(ep=8)) for _ in range(3)]
+        picks = [
+            moe_ppo._resolve_fsdp_config(FSDPConfig(ep=8, checkpoint_every_n_blocks=1))
+            for _ in range(3)
+        ]
 
         assert picks[0] == picks[1] == picks[2]
 
-    def test_logs_the_choice_peak_and_budget(self, moe_ppo, monkeypatch, caplog):
+    def test_logs_the_plan_peak_and_budget(self, moe_ppo, monkeypatch, caplog):
         # Arrange
-        peak = estimate_gib(moe_ppo, 512, False)
-        budget = with_buffer_gib(peak) + 1
-        patch_budget_gib(moe_ppo, monkeypatch, budget)
+        patch_budget_gib(moe_ppo, monkeypatch, 2**20)
 
         # Act
         with caplog.at_level(logging.INFO, logger="agilerl.algorithms.core.base"):
-            moe_ppo._resolve_fsdp_config(FSDPConfig(ep=8))
+            moe_ppo._resolve_fsdp_config(FSDPConfig(ep=8, checkpoint_every_n_blocks=1))
 
         # Assert
-        assert [record.levelno for record in caplog.records] == [logging.INFO]
-        assert (
-            "FSDP memory: reshard_after_forward=False, routed_expert_chunk_mib=512, "
-            "optim_cpu_offload=False, activation_offload=False, cpu_offload=False; "
-            f"estimated peak {peak:.2f} GiB, budget {budget:.2f} GiB"
-        ) == caplog.records[0].getMessage()
+        records = [
+            r for r in caplog.records if r.name == "agilerl.algorithms.core.base"
+        ]
+        assert [record.levelno for record in records] == [logging.INFO]
+        message = records[0].getMessage()
+        assert message.startswith("Training memory on test-gpu: ")
+        assert "fsdp.reshard_after_forward=False" in message
+        assert "fsdp.routed_expert_chunk_mib=512" in message
+        assert message.endswith(f"of {2**20:.2f} GiB")
 
     def test_offloads_activations_only_when_the_lightest_values_do_not_fit(
         self, moe_ppo, monkeypatch
@@ -2705,10 +2942,14 @@ class TestLLMAlgorithmResolveFsdpConfig:
         # Arrange
         lightest = estimate_gib(moe_ppo, 64, True)
         offloaded = estimate_gib(moe_ppo, 64, True, activation_offload=True)
-        patch_budget_gib(moe_ppo, monkeypatch, (lightest + offloaded) / 2)
+        patch_budget_gib(
+            moe_ppo, monkeypatch, with_buffer_gib((lightest + offloaded) / 2)
+        )
 
         # Act
-        resolved = moe_ppo._resolve_fsdp_config(FSDPConfig(ep=8))
+        resolved = moe_ppo._resolve_fsdp_config(
+            FSDPConfig(ep=8, checkpoint_every_n_blocks=1)
+        )
 
         # Assert
         assert offloaded < lightest
@@ -2718,194 +2959,84 @@ class TestLLMAlgorithmResolveFsdpConfig:
             True,
         )
 
-    def test_warns_when_no_choice_fits(self, moe_ppo, monkeypatch, caplog):
-        # Arrange
+    def test_lightest_plan_inside_the_buffer_is_kept(self, moe_ppo, monkeypatch):
+        # Arrange: the lightest plan fits the budget, but not with the buffer.
         peak = estimate_gib(moe_ppo, 64, True, activation_offload=True)
-        patch_budget_gib(moe_ppo, monkeypatch, peak - 1)
+        patch_budget_gib(moe_ppo, monkeypatch, (peak + with_buffer_gib(peak)) / 2)
 
         # Act
-        with caplog.at_level(logging.INFO, logger="agilerl.algorithms.core.base"):
-            resolved = moe_ppo._resolve_fsdp_config(FSDPConfig(ep=8))
+        resolved = moe_ppo._resolve_fsdp_config(
+            FSDPConfig(ep=8, checkpoint_every_n_blocks=1, cpu_offload=False)
+        )
 
         # Assert
+        assert resolved.reshard_after_forward is True
         assert resolved.activation_offload is True
         assert (resolved.routed_expert_chunk_mib, resolved.optim_cpu_offload) == (
             64,
             True,
         )
-        assert [record.levelno for record in caplog.records] == [logging.WARNING]
-        assert (
-            caplog.records[0]
-            .getMessage()
-            .endswith(
-                f"estimated peak {peak:.2f} GiB, budget {peak - 1:.2f} GiB (over budget)"
+
+    def test_raises_when_nothing_fits(self, moe_ppo, monkeypatch):
+        peak = estimate_gib(moe_ppo, 64, True, activation_offload=True)
+        patch_budget_gib(moe_ppo, monkeypatch, peak - 1)
+
+        with pytest.raises(TrainingMemoryUnfitError, match="at the lightest settings"):
+            moe_ppo._resolve_fsdp_config(
+                FSDPConfig(ep=8, checkpoint_every_n_blocks=1, cpu_offload=False)
             )
+
+    def test_other_ranks_take_rank_zero_plan(self, moe_ppo, monkeypatch):
+        # Arrange
+        monkeypatch.setattr(moe_ppo, "device", "cuda:1")
+        monkeypatch.setattr(core_base, "get_rank", lambda: 1)
+        picked = FSDPConfig(
+            ep=8,
+            checkpoint_every_n_blocks=2,
+            reshard_after_forward=True,
+            routed_expert_chunk_mib=64,
+            optim_cpu_offload=True,
+            activation_offload=False,
         )
-
-    def test_every_rank_takes_rank_zero_pick(self, moe_ppo, monkeypatch):
-        # Arrange: this rank's device fits a GPU optimizer at 512 MiB; rank 0's
-        # picked 64 MiB with the optimizer offloaded.
-        patch_budget_gib(
-            moe_ppo, monkeypatch, with_buffer_gib(estimate_gib(moe_ppo, 512, False)) + 1
-        )
-        sent = []
-
-        def broadcast_from_rank_zero(objects, src=0):
-            sent.append((list(objects), src))
-            return [True, 64, True, False, False]
-
         monkeypatch.setattr(
-            core_base, "broadcast_object_list", broadcast_from_rank_zero
+            core_base,
+            "broadcast_object_list",
+            lambda objects, src=0: [(True, picked, None), None],
         )
 
         # Act
         resolved = moe_ppo._resolve_fsdp_config(FSDPConfig(ep=8))
 
         # Assert
-        assert sent == [([False, 512, False, False, False], 0)]
-        assert (resolved.routed_expert_chunk_mib, resolved.optim_cpu_offload) == (
-            64,
-            True,
-        )
-        assert resolved.ep == 8
+        assert resolved == picked
+        assert moe_ppo.gradient_checkpointing is True
 
-
-def uncheckpointed_gib(agent) -> float:
-    """Data-parallel training estimate of ``agent`` without checkpointing, in GiB."""
-    model, settings = agent._training_estimate_inputs(
-        ALGORITHM_NAMES[agent.algo], agent.beta
-    )
-    device = DeviceSpec(total_bytes=2**50, name="test-gpu")
-    estimate = estimate_training(
-        model,
-        device,
-        settings.model_copy(update={"fsdp": None, "gradient_checkpointing": False}),
-        orchestrated=True,
-    )
-    return estimate.total_bytes / 2**30
-
-
-def name_by_catalog_id(agent, monkeypatch, model_id: str) -> None:
-    """Name ``agent``'s model ``model_id``; its Hub config read returns the saved checkpoint's."""
-    checkpoint = agent.pretrained_model_name_or_path
-    read_config = core_base.PretrainedConfig.get_config_dict
-    monkeypatch.setattr(
-        core_base,
-        "PretrainedConfig",
-        SimpleNamespace(
-            get_config_dict=lambda name: read_config(
-                checkpoint if name == model_id else name
-            )
-        ),
-    )
-    agent.pretrained_model_name_or_path = model_id
-
-
-@pytest.fixture
-def catalog_moe_ppo(moe_ppo, monkeypatch):
-    """``moe_ppo`` named by the Lightning 30B-A3B catalog id."""
-    name_by_catalog_id(
-        moe_ppo, monkeypatch, "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16"
-    )
-    return moe_ppo
-
-
-class TestLLMAlgorithmResolveGradientCheckpointing:
-    def test_off_when_the_step_fits_without_it(self, catalog_moe_ppo, monkeypatch):
-        patch_budget_gib(
-            catalog_moe_ppo,
-            monkeypatch,
-            with_buffer_gib(uncheckpointed_gib(catalog_moe_ppo)) + 1,
-        )
-
-        assert catalog_moe_ppo._resolve_gradient_checkpointing(None) is False
-
-    def test_on_when_the_step_needs_it(self, catalog_moe_ppo, monkeypatch):
-        patch_budget_gib(
-            catalog_moe_ppo, monkeypatch, uncheckpointed_gib(catalog_moe_ppo) - 1
-        )
-
-        assert catalog_moe_ppo._resolve_gradient_checkpointing(None) is True
-
-    def test_on_off_cuda(self, catalog_moe_ppo):
-        assert catalog_moe_ppo._resolve_gradient_checkpointing(None) is True
-
-    @pytest.mark.parametrize(
-        "config",
-        [None, {"model_type": "dummy", "hidden_size": 32, "num_hidden_layers": 1}],
-        ids=["no-checkpoint", "no-attention-fields"],
-    )
-    def test_on_for_a_model_outside_the_catalog(
-        self, moe_ppo, monkeypatch, tmp_path, config
+    @pytest.mark.parametrize(("budget_gib", "expected"), [(2**20, False), (400, True)])
+    def test_data_parallel_search_picks_checkpointing(
+        self, moe_ppo, monkeypatch, budget_gib, expected
     ):
-        # Arrange: a catalog model with this budget fits without checkpointing.
-        patch_budget_gib(
-            moe_ppo, monkeypatch, with_buffer_gib(uncheckpointed_gib(moe_ppo)) + 1
-        )
-        if config is None:
-            moe_ppo.pretrained_model_name_or_path = str(tmp_path / "missing")
-        else:
-            save_checkpoint_config(moe_ppo, tmp_path / "uncatalogued", config)
-
-        # Act
-        checkpointing = moe_ppo._resolve_gradient_checkpointing(None)
-
-        # Assert
-        assert checkpointing is True
-
-    def test_on_without_a_context_length(self, catalog_moe_ppo, monkeypatch):
         # Arrange
-        patch_budget_gib(
-            catalog_moe_ppo,
-            monkeypatch,
-            with_buffer_gib(uncheckpointed_gib(catalog_moe_ppo)) + 1,
-        )
-        monkeypatch.delattr(catalog_moe_ppo, "max_model_len")
+        moe_ppo.gradient_checkpointing = None
+        patch_budget_gib(moe_ppo, monkeypatch, budget_gib)
 
         # Act
-        checkpointing = catalog_moe_ppo._resolve_gradient_checkpointing(None)
+        picked = moe_ppo._search_training_memory(None)
 
         # Assert
-        assert checkpointing is True
+        assert picked == (expected, None, 512)
 
-    def test_on_with_a_vision_tower(self, moe_ppo, monkeypatch, tmp_path):
-        # Arrange: the text-only step fits without checkpointing.
-        patch_budget_gib(
-            moe_ppo, monkeypatch, with_buffer_gib(uncheckpointed_gib(moe_ppo)) + 1
-        )
-        vision = SUPPORTED_MODEL_INFO["Qwen/Qwen3.5-2B"]
-        save_checkpoint_config(moe_ppo, tmp_path / "vl", vision.config)
-        name_by_catalog_id(moe_ppo, monkeypatch, "Qwen/Qwen3.5-2B")
-
-        # Act
-        checkpointing = moe_ppo._resolve_gradient_checkpointing(None)
-
-        # Assert
-        assert checkpointing is True
-
-    def test_every_rank_takes_rank_zero_pick(self, catalog_moe_ppo, monkeypatch):
-        # Arrange: this rank fits without checkpointing; rank 0 did not.
-        patch_budget_gib(
-            catalog_moe_ppo,
-            monkeypatch,
-            with_buffer_gib(uncheckpointed_gib(catalog_moe_ppo)) + 1,
-        )
-        sent = []
-
-        def broadcast_from_rank_zero(objects, src=0):
-            sent.append((list(objects), src))
-            return [True]
-
+    def test_other_ranks_raise_rank_zero_failure(self, moe_ppo, monkeypatch):
+        # Arrange
+        monkeypatch.setattr(moe_ppo, "device", "cuda:1")
+        monkeypatch.setattr(core_base, "get_rank", lambda: 1)
+        reason = "Estimated training peak 90.00 GiB is over the 76.00 GiB usable"
         monkeypatch.setattr(
-            core_base, "broadcast_object_list", broadcast_from_rank_zero
+            core_base, "broadcast_object_list", lambda objects, src=0: [None, reason]
         )
 
-        # Act
-        checkpointing = catalog_moe_ppo._resolve_gradient_checkpointing(None)
-
-        # Assert
-        assert sent == [([False], 0)]
-        assert checkpointing is True
+        # Act / Assert
+        with pytest.raises(ValueError, match=reason):
+            moe_ppo._resolve_fsdp_config(FSDPConfig(ep=8))
 
 
 class TestLLMAlgorithmTrainingEstimateInputs:
@@ -2942,12 +3073,10 @@ class TestLLMAlgorithmTrainingEstimateInputs:
         assert settings.trajectories_per_update == 16
         assert settings.trajectories == moe_ppo.batch_size_per_process
 
-    def test_settings_carry_group_size_packing_and_liger(self, moe_ppo, monkeypatch):
+    def test_settings_carry_group_size_and_packing(self, moe_ppo, monkeypatch):
         # Arrange
         moe_ppo.configure_batch_size_per_process(4, None, None, group_size=2)
         monkeypatch.setattr(moe_ppo, "sequence_packing", True)
-        monkeypatch.setattr(moe_ppo, "liger_loss", True)
-        monkeypatch.setattr(moe_ppo, "vllm_importance_sampling_correction", False)
 
         # Act
         _, settings = moe_ppo._training_estimate_inputs(
@@ -2958,60 +3087,6 @@ class TestLLMAlgorithmTrainingEstimateInputs:
         assert settings.group_size == 2
         assert settings.trajectories_per_update == 8
         assert settings.sequence_packing is True
-        assert settings.support_scored_loss is False
-
-    @pytest.mark.parametrize(
-        ("level", "liger_loss", "whole_sequence"),
-        [
-            ("trajectory", True, True),
-            ("turn", True, True),
-            ("token", True, False),
-            ("auto", True, True),
-            ("trajectory", False, False),
-        ],
-    )
-    def test_whole_sequence_loss_follows_liger_and_level(
-        self, moe_ppo, monkeypatch, level, liger_loss, whole_sequence
-    ):
-        # Arrange
-        monkeypatch.setattr(moe_ppo, "importance_sampling_level", level)
-        monkeypatch.setattr(moe_ppo, "liger_loss", liger_loss)
-        monkeypatch.setattr(moe_ppo, "vllm_importance_sampling_correction", False)
-
-        # Act
-        _, settings = moe_ppo._training_estimate_inputs(
-            ALGORITHM_NAMES[moe_ppo.algo], 0.0
-        )
-
-        # Assert
-        assert settings.whole_sequence_loss is whole_sequence
-        assert settings.support_scored_loss is not liger_loss
-
-    @pytest.mark.parametrize("level", ["auto", "turn"])
-    @pytest.mark.parametrize(
-        ("colocated", "whole_sequence"),
-        [(True, False), (False, True)],
-        ids=["colocated-standard", "external-rollouts-fused"],
-    )
-    def test_reweighting_above_token_level_sizes_by_colocation(
-        self, moe_ppo, monkeypatch, level, colocated, whole_sequence
-    ):
-        # Arrange: colocated vLLM reweights every turn-level batch, so none runs
-        # the fused loss. Other rollouts may run either path, so they size as
-        # the larger fused loss.
-        monkeypatch.setattr(moe_ppo, "importance_sampling_level", level)
-        monkeypatch.setattr(moe_ppo, "liger_loss", True)
-        monkeypatch.setattr(moe_ppo, "vllm_importance_sampling_correction", True)
-        monkeypatch.setattr(moe_ppo, "colocated", colocated)
-
-        # Act
-        _, settings = moe_ppo._training_estimate_inputs(
-            ALGORITHM_NAMES[moe_ppo.algo], 0.0
-        )
-
-        # Assert
-        assert settings.whole_sequence_loss is whole_sequence
-        assert settings.support_scored_loss is not whole_sequence
 
     @pytest.mark.parametrize(("colocated", "width"), [(True, 20), (False, 0)])
     def test_colocated_supports_set_the_support_width(
@@ -3148,7 +3223,6 @@ def vwa_super_vl(monkeypatch, tmp_path):
     agent.configure_batch_size_per_process(16, 1, None, group_size=8)
     monkeypatch.setattr(agent, "fsdp_config", fsdp)
     monkeypatch.setattr(agent, "max_row_tokens", 24000 + 5120)
-    monkeypatch.setattr(agent, "liger_loss", False)
     monkeypatch.setattr(
         agent,
         "lora_config",
@@ -3202,7 +3276,11 @@ class TestLLMAlgorithmResolveFsdpConfigVwa:
         assert resolved.reshard_after_forward is True
         assert resolved.routed_expert_chunk_mib == 64
         assert resolved.optim_cpu_offload is True
-        assert [record.levelno for record in caplog.records] == [logging.INFO]
+        assert [
+            record.levelno
+            for record in caplog.records
+            if record.name == "agilerl.algorithms.core.base"
+        ] == [logging.INFO]
 
 
 class TestLLMAlgorithmTrainingDeviceSpec:
@@ -3446,11 +3524,11 @@ class TestLogprobsFromHiddenFused:
             F.log_softmax(logits, dim=-1)
             .gather(dim=-1, index=targets.unsqueeze(-1))
             .squeeze(-1)
-            .to(torch.bfloat16)
         )
         assert result.shape == (B, T)
-        assert result.dtype == torch.bfloat16
-        assert torch.equal(result, ref)
+        assert result.dtype == torch.float32
+        # Chunked logsumexp and log_softmax differ only in fp32 summation order.
+        torch.testing.assert_close(result, ref, atol=1e-5, rtol=0)
 
     def test_penalised_rollout_weights_reweight_to_the_trainer_policy(self) -> None:
         """vLLM draws from penalised logits; the trainer scores unpenalised ones
@@ -3520,7 +3598,8 @@ class TestLogprobsFromHiddenFused:
             temperature=0.5,
             chunk_rows=4,  # forces multiple chunks
         )
-        assert torch.equal(big, small)
+        # The fp32 GEMM's blocking, so its summation order, follows the chunk's row count.
+        torch.testing.assert_close(big, small, rtol=0, atol=1e-5)
 
     def test_no_bias_path_fp32(self) -> None:
         """``bias=None`` skips the add and still matches a stock
@@ -3761,78 +3840,32 @@ class _TinyPeftWrapper(torch.nn.Module):
 
 
 class TestLLMAlgorithmInitializeActors:
-    """``liger_loss`` resolves from liger-kernel, the config and the actor's final-logit softcap."""
+    """``_initialize_actors`` records the actor's final-logit softcap."""
 
-    def test_uncapped_model_runs_liger(self) -> None:
+    def test_uncapped_model_keeps_the_lm_head_in_lora(self) -> None:
         # Arrange
         agent = _make_llm_agent()
         actor = _TinyPeftWrapper(_TinyCausalLM(8, 4))
 
         # Act
-        with (
-            patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True),
-            patch.object(agent, "use_adapter"),
-            pytest.warns(UserWarning, match="Liger Loss used with LoRA"),
-        ):
+        with patch.object(agent, "use_adapter"):
             LLMAlgorithm._initialize_actors(agent, actor, add_adapters=False)
 
         # Assert
         assert agent.final_logit_softcap is None
-        assert agent.liger_loss is True
-        assert agent.lora_config.exclude_modules == ["lm_head"]
+        assert "lm_head" not in (agent.lora_config.exclude_modules or [])
 
-    def test_softcapped_model_keeps_liger_whose_loss_applies_the_cap(self) -> None:
+    def test_softcapped_model_records_its_softcap(self) -> None:
         # Arrange
         agent = _make_llm_agent()
         actor = _TinyPeftWrapper(_TinyCausalLM(8, 4, softcap=30.0))
 
         # Act
-        with (
-            patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True),
-            patch.object(agent, "use_adapter"),
-            pytest.warns(UserWarning, match="Liger Loss used with LoRA"),
-        ):
+        with patch.object(agent, "use_adapter"):
             LLMAlgorithm._initialize_actors(agent, actor, add_adapters=False)
 
         # Assert
         assert agent.final_logit_softcap == 30.0
-        assert agent.liger_loss is True
-
-    def test_softcapped_model_turns_liger_off_where_the_loss_drops_the_cap(
-        self,
-    ) -> None:
-        # Arrange
-        agent = _make_llm_agent()
-        agent.algo = "DPO"
-        lora_config = agent.lora_config
-        actor = _TinyPeftWrapper(_TinyCausalLM(8, 4, softcap=30.0))
-
-        # Act
-        with (
-            patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True),
-            patch.object(agent, "use_adapter"),
-        ):
-            LLMAlgorithm._initialize_actors(agent, actor, add_adapters=False)
-
-        # Assert
-        assert agent.final_logit_softcap == 30.0
-        assert agent.liger_loss is False
-        assert agent.lora_config is lora_config
-
-    def test_liger_stays_off_without_liger_kernel(self) -> None:
-        # Arrange
-        agent = _make_llm_agent()
-        actor = _TinyPeftWrapper(_TinyCausalLM(8, 4))
-
-        # Act
-        with (
-            patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False),
-            patch.object(agent, "use_adapter"),
-        ):
-            LLMAlgorithm._initialize_actors(agent, actor, add_adapters=False)
-
-        # Assert
-        assert agent.liger_loss is False
 
 
 class _TinyScanMixer(torch.nn.Module):
@@ -3861,6 +3894,7 @@ class TestLLMAlgorithmInitializeActorsSequencePacking:
         ("attn_implementation", "gradient_row_copies"),
         [
             ("flash_attention_2", 1),
+            ("flash_attention_2", 2),
             ("flex_attention", 1),
             ("flex_attention", 2),
         ],
@@ -3881,21 +3915,12 @@ class TestLLMAlgorithmInitializeActorsSequencePacking:
         assert agent.actor is actor
         assert agent.sequence_packing is True
 
-    @pytest.mark.parametrize(
-        ("attn_implementation", "gradient_row_copies"),
-        [
-            ("flash_attention_2", 2),
-            ("sdpa", 1),
-            ("eager", 1),
-        ],
-    )
+    @pytest.mark.parametrize("attn_implementation", ["sdpa", "eager"])
     def test_stays_padded_when_the_backend_cannot_pack(
-        self, attn_implementation: str, gradient_row_copies: int
+        self, attn_implementation: str
     ) -> None:
         # Arrange
-        agent, actor = _packing_agent_and_actor(
-            attn_implementation, gradient_row_copies
-        )
+        agent, actor = _packing_agent_and_actor(attn_implementation, 1)
 
         # Act
         with patch.object(agent, "use_adapter"):
@@ -3904,6 +3929,50 @@ class TestLLMAlgorithmInitializeActorsSequencePacking:
         # Assert
         assert agent.actor is actor
         assert agent.sequence_packing is False
+
+    def test_stacked_vision_language_rows_stay_padded_and_log_why(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # Arrange
+        agent, actor = _packing_agent_and_actor("flash_attention_2", 2)
+        actor.config.vision_config = SiglipVisionConfig()
+
+        # Act
+        with (
+            patch.object(agent, "use_adapter"),
+            caplog.at_level(logging.INFO, logger="agilerl.algorithms.core.base"),
+        ):
+            LLMAlgorithm._initialize_actors(agent, actor, add_adapters=False)
+
+        # Assert
+        assert agent.sequence_packing is False
+        assert [
+            r.getMessage()
+            for r in caplog.records
+            if r.getMessage().startswith("Sequence packing")
+        ] == [
+            (
+                "Sequence packing off: flash_attention_2 derives a vision-language "
+                "forward's packed offsets from one row; this forward stacks 2"
+            )
+        ]
+
+    def test_packing_logs_nothing(self, caplog: pytest.LogCaptureFixture) -> None:
+        # Arrange
+        agent, actor = _packing_agent_and_actor("flash_attention_2", 2)
+
+        # Act
+        with (
+            patch.object(agent, "use_adapter"),
+            caplog.at_level(logging.INFO, logger="agilerl.algorithms.core.base"),
+        ):
+            LLMAlgorithm._initialize_actors(agent, actor, add_adapters=False)
+
+        # Assert
+        assert agent.sequence_packing is True
+        assert not [
+            r for r in caplog.records if r.getMessage().startswith("Sequence packing")
+        ]
 
     def test_stays_padded_for_an_algorithm_without_packing(self) -> None:
         # Arrange
@@ -4056,6 +4125,276 @@ class TestLLMAlgorithmGetLogprobsMatchesModelLogits:
             .squeeze(-1)
         )
         assert torch.allclose(fused, reference, rtol=0, atol=1e-5)
+
+
+# Packed and padded attention differ only in fp32 summation order.
+PACKING_ATOL = 1e-5
+
+
+def _packing_qwen3_grpo() -> GRPO:
+    """Tiny fp32 Qwen3 GRPO on CPU whose actor adapter differs from the reference."""
+    # Liger's instance patches are Triton kernels; this model runs on CPU.
+    with patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False):
+        agent = GRPO(
+            actor_network=create_tiny_qwen3(),
+            pad_token_id=63,
+            pad_token="<pad>",
+            batch_size=2,
+            group_size=2,
+            beta=0.04,
+            max_output_tokens=4,
+            max_model_len=16,
+            gradient_checkpointing=False,
+            calc_position_embeddings=False,
+            device="cpu",
+            seed=7,
+            lora_config=LoraConfig(
+                r=2,
+                lora_alpha=4,
+                lora_dropout=0.0,
+                target_modules=["q_proj", "v_proj"],
+            ),
+        )
+    with torch.no_grad():
+        for name, param in agent.actor.named_parameters():
+            if "lora_B.actor" in name:
+                param.normal_(std=0.5)
+    return agent
+
+
+class TestLLMAlgorithmFusedForwardNoGradPacking:
+    """A packed no-grad pass scores every real position as the padded pass does."""
+
+    @pytest.mark.parametrize("scored", [False, True], ids=["all", "score_mask"])
+    def test_packed_reference_and_actor_match_padded(
+        self, monkeypatch: pytest.MonkeyPatch, scored: bool
+    ) -> None:
+        # Arrange: 3-row chunks of the 8 stacked reference/actor rows cross
+        # the adapter boundary.
+        agent = _packing_qwen3_grpo()
+        ids, mask = right_padded_batch([12, 9, 6, 11])
+        real = mask[:, 1:]
+        score_mask = real if scored else None
+        padded_ref, padded_actor, _ = agent._fused_forward_no_grad(
+            ids, 3, score_mask=score_mask
+        )
+        monkeypatch.setattr(agent, "_packing_mode", lambda: "varlen")
+
+        # Act
+        packed_ref, packed_actor, _ = agent._fused_forward_no_grad(
+            ids, 3, score_mask=score_mask
+        )
+
+        # Assert
+        assert not torch.allclose(padded_ref[real], padded_actor[real], atol=1e-2)
+        assert torch.allclose(packed_ref[real], padded_ref[real], atol=PACKING_ATOL)
+        assert torch.allclose(packed_actor[real], padded_actor[real], atol=PACKING_ATOL)
+        assert torch.equal(packed_actor[~real], torch.zeros_like(packed_actor[~real]))
+
+    def test_packed_critic_values_match_padded(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        agent = make_ppo()
+        ids, mask = right_padded_batch([12, 9, 6, 11])
+        padded_ref, padded_actor, padded_values = agent._fused_forward_no_grad(ids, 3)
+        monkeypatch.setattr(agent, "_packing_mode", lambda: "varlen")
+
+        # Act
+        packed_ref, packed_actor, packed_values = agent._fused_forward_no_grad(ids, 3)
+
+        # Assert: values compared where an action can sit, before each row's
+        # last real token.
+        real_targets = mask[:, 1:]
+        assert not torch.allclose(
+            padded_ref[real_targets], padded_actor[real_targets], atol=1e-2
+        )
+        assert torch.allclose(
+            packed_ref[real_targets], padded_ref[real_targets], atol=PACKING_ATOL
+        )
+        assert torch.allclose(
+            packed_actor[real_targets], padded_actor[real_targets], atol=PACKING_ATOL
+        )
+        assert torch.allclose(
+            packed_values[real_targets], padded_values[real_targets], atol=PACKING_ATOL
+        )
+
+    def test_packed_reference_logprobs_match_padded(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        agent = _packing_qwen3_grpo()
+        ids, mask = right_padded_batch([12, 9, 6, 11])
+        real = mask[:, 1:]
+        with torch.no_grad():
+            padded = agent._get_logprobs(
+                ids, 2, use_reference=True, eval_mode=True, attention_mask=mask
+            )
+        monkeypatch.setattr(agent, "_packing_mode", lambda: "varlen")
+
+        # Act
+        with torch.no_grad():
+            packed = agent._get_logprobs(
+                ids, 2, use_reference=True, eval_mode=True, attention_mask=mask
+            )
+
+        # Assert
+        assert torch.allclose(packed[real], padded[real], atol=PACKING_ATOL)
+
+    def test_packed_old_logprobs_match_the_packed_training_forward(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        agent = _packing_qwen3_grpo()
+        monkeypatch.setattr(agent, "_packing_mode", lambda: "varlen")
+        ids, mask = right_padded_batch([12, 9, 6, 11])
+        real = mask[:, 1:]
+
+        # Act
+        _, old, _ = agent._fused_forward_no_grad(ids, 4, include_reference=False)
+        current = agent._get_logprobs(ids, 4)
+
+        # Assert
+        assert current.requires_grad
+        assert torch.allclose(old[real], current.detach()[real], atol=PACKING_ATOL)
+
+
+RECORDING_ATTENTION = "agilerl_recording_sdpa"
+
+FLASH_VARLEN_KWARGS = ("cu_seq_lens_q", "cu_seq_lens_k", "max_length_q", "max_length_k")
+
+
+@pytest.fixture
+def recording_attention(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """SDPA registered as an attention backend that records each layer's varlen kwargs."""
+    calls: list[dict[str, Any]] = []
+
+    def attention(module, query, key, value, attention_mask, **kwargs):
+        calls.append({name: kwargs.get(name) for name in FLASH_VARLEN_KWARGS})
+        return sdpa_attention_forward(
+            module, query, key, value, attention_mask, **kwargs
+        )
+
+    monkeypatch.setitem(
+        ALL_ATTENTION_FUNCTIONS._global_mapping, RECORDING_ATTENTION, attention
+    )
+    monkeypatch.setitem(
+        ALL_MASK_ATTENTION_FUNCTIONS._global_mapping, RECORDING_ATTENTION, sdpa_mask
+    )
+    return calls
+
+
+def _counting_pack(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    """Record every packed batch the trainer builds."""
+    packs: list[Any] = []
+
+    def pack(*args: Any, **kwargs: Any) -> Any:
+        packs.append(pack_padded_batch(*args, **kwargs))
+        return packs[-1]
+
+    monkeypatch.setattr(core_base, "pack_padded_batch", pack)
+    return packs
+
+
+class TestLLMAlgorithmPackedForwardMetadata:
+    """A packed micro-batch syncs once and hands attention its varlen offsets."""
+
+    def test_varlen_layers_receive_host_offsets_and_logits_are_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch, recording_attention: list
+    ) -> None:
+        # Arrange: blockmask packs the same row without FlashAttention kwargs.
+        agent = _packing_qwen3_grpo()
+        agent.actor.config._attn_implementation = RECORDING_ATTENTION
+        ids, mask = right_padded_batch([12, 9, 6, 11])
+        score_mask = mask[:, 1:]
+        monkeypatch.setattr(agent, "_packing_mode", lambda: "blockmask")
+        with torch.no_grad():
+            without_offsets = agent._get_logprobs(ids, 4, score_mask=score_mask)
+        blockmask_calls = list(recording_attention)
+        recording_attention.clear()
+        monkeypatch.setattr(agent, "_packing_mode", lambda: "varlen")
+
+        # Act
+        with torch.no_grad():
+            with_offsets = agent._get_logprobs(ids, 4, score_mask=score_mask)
+
+        # Assert: SDPA ignores the offsets, so the logits match exactly; FA2
+        # parity needs a GPU.
+        assert torch.equal(with_offsets, without_offsets)
+        assert all(value is None for call in blockmask_calls for value in call.values())
+        assert len(recording_attention) == 2
+        for call in recording_attention:
+            assert call["cu_seq_lens_q"].dtype == torch.int32
+            assert call["cu_seq_lens_q"].tolist() == [0, 12, 21, 27, 38]
+            assert call["cu_seq_lens_k"] is call["cu_seq_lens_q"]
+            assert type(call["max_length_q"]) is int
+            assert call["max_length_q"] == call["max_length_k"] == 12
+
+    def test_gradient_pass_packs_once_per_micro_batch_and_scores_host_counts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        agent = _packing_qwen3_grpo()
+        monkeypatch.setattr(agent, "_packing_mode", lambda: "varlen")
+        ids, mask = right_padded_batch([12, 9, 6, 11])
+        score_mask = mask[:, 1:].clone()
+        score_mask[:, :3] = False
+        packs = _counting_pack(monkeypatch)
+
+        # Act
+        log_probs = agent._get_logprobs(ids, 2, score_mask=score_mask)
+
+        # Assert: actions are tokens 4.. of each row, so 8 + 5 and 2 + 7.
+        assert log_probs.requires_grad
+        assert [pack.lengths for pack in packs] == [(12, 9), (6, 11)]
+        assert [pack.n_scored for pack in packs] == [8 + 5, 2 + 7]
+        assert torch.equal(
+            log_probs[~score_mask], torch.zeros(int((~score_mask).sum()))
+        )
+
+    def test_no_grad_pass_packs_once_per_chunk(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange: reference and actor runs of 4 rows in 2-row chunks.
+        agent = _packing_qwen3_grpo()
+        monkeypatch.setattr(agent, "_packing_mode", lambda: "varlen")
+        ids, mask = right_padded_batch([12, 9, 6, 11])
+        packs = _counting_pack(monkeypatch)
+
+        # Act
+        agent._fused_forward_no_grad(ids, 2, score_mask=mask[:, 1:])
+
+        # Assert
+        assert [pack.lengths for pack in packs] == [(12, 9), (6, 11)] * 2
+        assert [pack.n_scored for pack in packs] == [11 + 8, 5 + 10] * 2
+
+    @pytest.mark.parametrize(
+        ("packing_mode", "pixel_values", "has_offsets"),
+        [
+            ("varlen", None, True),
+            ("varlen", torch.zeros(2, 3), False),
+            ("blockmask", None, False),
+        ],
+        ids=["varlen-text", "varlen-vision", "blockmask"],
+    )
+    def test_only_text_varlen_forwards_pass_offsets(
+        self, packing_mode: str, pixel_values: torch.Tensor | None, has_offsets: bool
+    ) -> None:
+        # Arrange
+        ids, mask = right_padded_batch([5, 3])
+        packed = pack_padded_batch(ids, mask)
+
+        # Act
+        model_kwargs = LLMAlgorithm._packed_model_kwargs(
+            packed, packing_mode, pixel_values
+        )
+
+        # Assert
+        assert model_kwargs["position_ids"].tolist() == [[0, 1, 2, 3, 4, 0, 1, 2]]
+        assert "attention_mask" not in model_kwargs
+        assert all(
+            (name in model_kwargs) is has_offsets for name in FLASH_VARLEN_KWARGS
+        )
 
 
 class TestFusedLinearLogprobsIntegration:
@@ -4722,18 +5061,6 @@ class TestLLMGetLmHead:
         assert callable(fused_fn)
         assert got_w is weight
         assert got_b is None
-
-    def test_liger_head_gather_yields_lm_head_tensors(self):
-        agent = _make_llm_agent()
-        weight = torch.randn(4, 2)
-        lm_head = MagicMock()
-        lm_head.weight = weight
-        lm_head.bias = None
-        agent._get_lm_head = MagicMock(return_value=lm_head)
-
-        with agent._liger_head_gather() as (w, b):
-            assert w is weight
-            assert b is None
 
 
 @pytest.fixture
@@ -6730,8 +7057,8 @@ class TestLLMInitializeActors:
         agent.lora_config = MagicMock()
         peft_actor = _make_mock_peft_actor()
 
-        # spec=[] prevents PeftModelProtocol match
-        base_model = MagicMock(spec=[], config=LlamaConfig())
+        # A spec without PEFT attributes prevents a PeftModelProtocol match.
+        base_model = MagicMock(spec=["modules"], config=LlamaConfig())
 
         with (
             patch(
@@ -6757,10 +7084,10 @@ class TestLLMInitializeActors:
         agent.pretrained_model_name_or_path = "mock-path"
         agent.lora_config = MagicMock()
         peft_actor = _make_mock_peft_actor()
-        # spec=[] so the created model doesn't duck-type as a PeftModel on
+        # A spec so the created model doesn't duck-type as a PeftModel on
         # Python <= 3.11 (a bare MagicMock satisfies any runtime protocol
         # there; 3.12+ uses getattr_static and is immune).
-        created_model = MagicMock(spec=[], config=LlamaConfig())
+        created_model = MagicMock(spec=["modules"], config=LlamaConfig())
 
         with (
             patch(
@@ -6813,7 +7140,9 @@ class TestLLMInitializeActors:
             patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False),
         ):
             LLMAlgorithm._initialize_actors(
-                agent, MagicMock(spec=[], config=LlamaConfig()), add_adapters=True
+                agent,
+                MagicMock(spec=["modules"], config=LlamaConfig()),
+                add_adapters=True,
             )
         peft_actor.add_adapter.assert_called_once_with(
             adapter_name="reference",
@@ -6912,7 +7241,7 @@ class TestLLMInitializeActors:
                     shard_group_size=2,
                     param_dtype="float32",
                     reduce_dtype="float32",
-                    optim_cpu_offload=False,
+                    **RESOLVED_FSDP_MEMORY,
                 ),
             ),
         ],
@@ -8321,6 +8650,7 @@ class TestLLMInitializeActorsStrayAdapter:
         base_model = torch.nn.Module()
         base_model.config = LlamaConfig()
         apply = MagicMock()
+        pin = MagicMock()
 
         with (
             patch(
@@ -8343,6 +8673,7 @@ class TestLLMInitializeActorsStrayAdapter:
                 apply,
                 create=True,
             ),
+            patch("agilerl.algorithms.core.base.pin_triton_rope", pin, create=True),
             patch.object(agent, "use_adapter"),
         ):
             LLMAlgorithm._initialize_actors(agent, base_model, add_adapters=True)
@@ -8350,6 +8681,43 @@ class TestLLMInitializeActorsStrayAdapter:
         apply.assert_called_once()
         assert apply.call_args.kwargs["fused_linear_cross_entropy"] is False
         assert apply.call_args.kwargs["model"] is base_model
+        pin.assert_called_once_with(base_model)
+
+    def test_initialize_actors_pins_triton_rope_when_liger_already_applied(self):
+        agent = _make_llm_agent()
+        agent.selected_adapters = ("actor",)
+        peft_actor = _make_mock_peft_actor()
+        peft_actor.peft_config = {"actor": MagicMock()}
+        base_model = torch.nn.Module()
+        base_model.config = LlamaConfig()
+        base_model._agilerl_liger_patched = True
+        apply = MagicMock()
+        pin = MagicMock()
+
+        with (
+            patch(
+                "agilerl.algorithms.core.base.adapt_lora_config_for_model",
+                side_effect=lambda _model, cfg, **kw: cfg,
+            ),
+            patch(
+                "agilerl.algorithms.core.base.get_peft_model", return_value=peft_actor
+            ),
+            patch(
+                "agilerl.algorithms.core.base.patch_lora_for_fused_forward", create=True
+            ),
+            patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True),
+            patch(
+                "agilerl.algorithms.core.base._apply_liger_kernel_to_instance",
+                apply,
+                create=True,
+            ),
+            patch("agilerl.algorithms.core.base.pin_triton_rope", pin, create=True),
+            patch.object(agent, "use_adapter"),
+        ):
+            LLMAlgorithm._initialize_actors(agent, base_model, add_adapters=True)
+
+        apply.assert_not_called()
+        pin.assert_called_once_with(base_model)
 
     def test_initialize_actors_unwraps_peft_inner_model_for_liger(self):
         agent = _make_llm_agent()
@@ -8411,12 +8779,14 @@ class TestLLMInitializeActorsStrayAdapter:
                 apply,
                 create=True,
             ),
+            patch("agilerl.algorithms.core.base.pin_triton_rope", create=True) as pin,
             patch.object(agent, "use_adapter"),
         ):
             LLMAlgorithm._initialize_actors(agent, Quantized(), add_adapters=True)
 
         apply.assert_called_once()
         assert apply.call_args.kwargs["model"] is peft_like.base_model.model
+        pin.assert_called_once_with(peft_like.base_model.model)
 
     def test_initialize_actors_installs_packed_expert_grouped_gemm(self):
         agent = _make_llm_agent()
@@ -8443,7 +8813,9 @@ class TestLLMInitializeActorsStrayAdapter:
             patch.object(agent, "use_adapter"),
         ):
             LLMAlgorithm._initialize_actors(
-                agent, MagicMock(spec=[], config=LlamaConfig()), add_adapters=True
+                agent,
+                MagicMock(spec=["modules"], config=LlamaConfig()),
+                add_adapters=True,
             )
 
         install.assert_called_once_with(peft_actor)
@@ -8747,10 +9119,11 @@ class TestLLMFusedForwardPaths:
             "agilerl.algorithms.core.base.unpack_logprobs",
             return_value=torch.zeros(B, T - 1),
         ):
-            log_probs = agent._fused_packed_forward(ids, mask)
+            log_probs = agent._fused_packed_forward(ids, mask, "varlen")
 
         assert log_probs.shape == (B, T - 1)
         assert actor.call_args.kwargs["input_ids"].shape == (1, B * T)
+        assert actor.call_args.kwargs["cu_seq_lens_q"].tolist() == [0, T, 2 * T]
 
 
 @_LLM_DEPS_SKIP
@@ -8821,6 +9194,154 @@ class TestLLMGetLogprobsPacked:
         # Assert
         assert len(seen_pixel_values) == 1
         assert torch.equal(seen_pixel_values[0], pixel_values)
+
+
+class _RecordingScanMixer(torch.nn.Module):
+    """Chunked-scan mixer stand-in that records each forward's length and grad mode."""
+
+    def __init__(self, hidden_size: int, chunk_size: int) -> None:
+        super().__init__()
+        self.A_log = torch.nn.Parameter(torch.zeros(hidden_size))
+        self.chunk_size = chunk_size
+        self.calls: list[tuple[int, bool]] = []
+
+    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+        self.calls.append((hidden.shape[1], torch.is_grad_enabled()))
+        return hidden * self.A_log.exp()
+
+
+class _TinyHybridLM(_TinyCausalLM):
+    """Tiny causal LM with one recurrent mixer; records documents per packed row."""
+
+    def __init__(self, vocab_size: int, hidden_size: int, chunk_size: int) -> None:
+        super().__init__(vocab_size, hidden_size)
+        self.mixer = _RecordingScanMixer(hidden_size, chunk_size)
+        self.documents: list[int] = []
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None = None,
+        position_ids: torch.Tensor | None = None,
+        **_: object,
+    ) -> SimpleNamespace:
+        self.documents.append(int((position_ids == 0).sum()))
+        return SimpleNamespace(
+            logits=self.lm_head(self.mixer(self.body(self.embed(input_ids))))
+        )
+
+
+def _warm_kernels_agent(inner: torch.nn.Module) -> LLMAlgorithm:
+    agent = _make_llm_agent(offload_trainer_during_rollout=False)
+    agent.sequence_packing = True
+    agent.calc_position_embeddings = False
+    agent.max_row_tokens = 16
+    agent.micro_batch_tokens_per_gpu = 64
+    actor = _TinyPeftWrapper(inner)
+    actor.config._attn_implementation = "flash_attention_2"
+    agent.actor = actor
+    agent.optimizer = torch.optim.SGD(actor.parameters(), lr=0.1)
+    agent.select_adapter = lambda _name: nullcontext()
+    return agent
+
+
+@_LLM_DEPS_SKIP
+class TestLLMAlgorithmPackedWarmupLengths:
+    def test_off_cuda_is_empty(self):
+        # Arrange
+        agent = _warm_kernels_agent(_TinyHybridLM(32, 8, chunk_size=4))
+
+        # Act
+        lengths = agent.packed_warmup_lengths()
+
+        # Assert
+        assert lengths == []
+
+    @pytest.mark.parametrize(
+        ("mini_batch_size", "expected"),
+        [
+            # 0.6 * 4 rows * 16 tokens fits one micro-batch of 39 tokens.
+            (4, [39, 32]),
+            # 0.6 * 16 rows * 16 tokens splits into 3 micro-batches of 52.
+            (16, [52, 48]),
+        ],
+    )
+    def test_starts_at_the_planned_micro_batch_length(
+        self, monkeypatch, mini_batch_size, expected
+    ):
+        # Arrange
+        agent = _warm_kernels_agent(_TinyHybridLM(32, 8, chunk_size=4))
+        agent.device = "cuda"
+        agent.mini_batch_size = mini_batch_size
+        monkeypatch.setattr(
+            torch.cuda,
+            "get_device_properties",
+            lambda _device: SimpleNamespace(multi_processor_count=132),
+        )
+
+        # Act
+        lengths = agent.packed_warmup_lengths()
+
+        # Assert
+        assert lengths == expected
+
+
+@_LLM_DEPS_SKIP
+class TestLLMAlgorithmWarmPackedKernels:
+    def test_runs_a_no_grad_and_a_gradient_forward_per_length(self):
+        # Arrange
+        inner = _TinyHybridLM(32, 8, chunk_size=4)
+        agent = _warm_kernels_agent(inner)
+
+        # Act
+        warmed = agent.warm_packed_kernels([64, 63, 5])
+
+        # Assert
+        assert warmed == 3
+        assert inner.mixer.calls == [
+            (length, grad) for length in (64, 63, 5) for grad in (False, True)
+        ]
+
+    def test_packs_at_least_two_documents(self):
+        # Arrange
+        inner = _TinyHybridLM(32, 8, chunk_size=4)
+        agent = _warm_kernels_agent(inner)
+
+        # Act
+        agent.warm_packed_kernels([4, 16, 33])
+
+        # Assert
+        assert inner.documents == [2, 2, 2, 2, 3, 3]
+
+    def test_stop_ends_the_warmup_and_returns_the_lengths_warmed(self):
+        # Arrange
+        inner = _TinyHybridLM(32, 8, chunk_size=4)
+        agent = _warm_kernels_agent(inner)
+        answers = iter([False, True])
+
+        # Act
+        warmed = agent.warm_packed_kernels([64, 63, 5], lambda: next(answers))
+
+        # Assert
+        assert warmed == 1
+        assert inner.mixer.calls == [(64, False), (64, True)]
+
+    def test_leaves_no_gradients_parameter_or_rng_changes(self):
+        # Arrange
+        inner = _TinyHybridLM(32, 8, chunk_size=4)
+        agent = _warm_kernels_agent(inner)
+        params_before = [p.detach().clone() for p in inner.parameters()]
+        rng_before = torch.get_rng_state()
+
+        # Act
+        agent.warm_packed_kernels([64, 48])
+
+        # Assert
+        assert all(p.grad is None for p in inner.parameters())
+        assert all(
+            torch.equal(before, after)
+            for before, after in zip(params_before, inner.parameters(), strict=True)
+        )
+        assert torch.equal(torch.get_rng_state(), rng_before)
 
 
 @_LLM_DEPS_SKIP
@@ -9841,3 +10362,96 @@ class TestGraMaCaptureUnderAccelerator:
                 network_id == key and network is sub_network
                 for network_id, network in result
             )
+
+
+def token_rows(lengths: list[int], width: int = 8) -> torch.Tensor:
+    """``(len(lengths), width)`` right-padded rows of ``lengths`` real tokens (pad 0)."""
+    ids = torch.zeros(len(lengths), width, dtype=torch.long)
+    for row, length in enumerate(lengths):
+        ids[row, :length] = 1
+    return ids
+
+
+def micro_batch_window_rows(windows: list[list[np.ndarray]]) -> list[list[list[int]]]:
+    return [[rows.tolist() for rows in window] for window in windows]
+
+
+# Two 4-row windows per rank. With a 16-token budget, rank 0 packs two
+# micro-batches into each window and rank 1 one into its first.
+RANK_ROW_LENGTHS = ([8, 8, 8, 8, 6, 6, 6, 6], [2, 2, 2, 2, 8, 8, 2, 2])
+
+
+def micro_batch_windows_rank(
+    rank: int, _world_size: int
+) -> tuple[list[int], list[list[list[int]]]]:
+    """Packed micro-batch counts per window on ``rank``, and its balanced windows."""
+    token_ids = token_rows(RANK_ROW_LENGTHS[rank])
+    row_tokens = (token_ids != 0).sum(-1).numpy()
+    order = np.arange(8)
+    packed_counts = [
+        len(pack_rows_by_tokens(order[start : start + 4], row_tokens, 16))
+        for start in (0, 4)
+    ]
+
+    windows = LLMAlgorithm._micro_batch_windows(
+        SimpleNamespace(pad_token_id=0), [order], 4, 4, token_ids, 16
+    )
+
+    return packed_counts, micro_batch_window_rows(windows[0])
+
+
+class TestLLMAlgorithmMicroBatchWindows:
+    def test_rows_split_into_micro_batches_of_the_row_count(self) -> None:
+        windows = LLMAlgorithm._micro_batch_windows(
+            SimpleNamespace(pad_token_id=0),
+            [np.array([3, 1, 0, 2])],
+            4,
+            2,
+            token_rows([8, 8, 8, 8]),
+            None,
+        )
+
+        assert micro_batch_window_rows(windows[0]) == [[[3, 1], [0, 2]]]
+
+    def test_rows_pack_in_order_up_to_the_token_budget(self) -> None:
+        windows = LLMAlgorithm._micro_batch_windows(
+            SimpleNamespace(pad_token_id=0),
+            [np.array([3, 1, 0, 2])],
+            4,
+            4,
+            token_rows([5, 8, 4, 3]),
+            9,
+        )
+
+        assert micro_batch_window_rows(windows[0]) == [[[3], [1], [0, 2]]]
+
+    @pytest.mark.multi_rank
+    def test_ranks_run_the_same_micro_batch_count_per_window(self) -> None:
+        # Act
+        (packed_0, windows_0), (packed_1, windows_1) = run_ranks(
+            micro_batch_windows_rank, 2
+        )
+
+        # Assert
+        assert packed_0 == [2, 2]
+        assert packed_1 == [1, 2]
+        assert windows_0 == [[[0, 1], [2, 3]], [[4, 5], [6, 7]]]
+        assert windows_1 == [[[0, 1], [2, 3]], [[4, 5], [6, 7]]]
+
+
+class TestLLMAlgorithmMicroBatchesPerStep:
+    def test_window_steps_are_reported_as_given(self) -> None:
+        windows = [[[np.array([0]), np.array([1])]]]
+
+        assert LLMAlgorithm._micro_batches_per_step(windows, 4) == 4.0
+
+    def test_each_window_without_steps_is_one_step(self) -> None:
+        # Arrange: two epochs of windows holding 3, 1 and 2 micro-batches.
+        rows = np.array([0])
+        windows = [[[rows, rows, rows], [rows]], [[rows, rows]]]
+
+        # Act
+        per_step = LLMAlgorithm._micro_batches_per_step(windows, None)
+
+        # Assert
+        assert per_step == 2.0

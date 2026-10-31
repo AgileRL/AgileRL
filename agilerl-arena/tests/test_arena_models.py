@@ -376,8 +376,13 @@ class TestLLMAlgorithmSpecValidators:
         with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
             GRPOSpec.model_validate({"group_size": 2, field: value})
 
-    def test_rollout_algorithms_support_sequence_packing(self) -> None:
+    def test_llm_algorithms_support_sequence_packing(self) -> None:
+        from agilerl.arena.models.algorithms.dpo import DPOSpec
+        from agilerl.arena.models.algorithms.sft import SFTSpec
+
         assert GRPOSpec.supports_sequence_packing is True
+        assert SFTSpec.supports_sequence_packing is True
+        assert DPOSpec.supports_sequence_packing is True
 
     def test_deepspeed_is_rejected(self) -> None:
         with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
@@ -418,7 +423,6 @@ class TestLLMAlgorithmSpecValidators:
             "prefetch_units",
             "backward_prefetch_units",
             "checkpoint_skip_layer_types",
-            "checkpoint_every_n_blocks",
             "wrap_every_n_blocks",
             "param_persistence_threshold",
             "defer_grad_sync",
@@ -486,6 +490,15 @@ class TestGRPOSpecOffPolicyCorrections:
         assert spec.use_bias_correction_kl is True
         assert spec.adv_norm == "mean_only"
         assert spec.top_p == 1.0
+
+    def test_kl_advantage_shaping_with_positive_beta_is_accepted(self) -> None:
+        spec = GRPOSpec(group_size=2, beta=0.001, use_kl_advantage_shaping=True)
+
+        assert spec.use_kl_advantage_shaping is True
+
+    def test_kl_advantage_shaping_with_zero_beta_raises(self) -> None:
+        with pytest.raises(ValidationError, match="needs beta > 0"):
+            GRPOSpec(group_size=2, beta=0.0, use_kl_advantage_shaping=True)
 
     def test_gspo_leaves_off_policy_masks_unset(self) -> None:
         spec = GSPOSpec(group_size=2)
@@ -617,16 +630,6 @@ class TestKlClampField:
 
 
 class TestDPOSFTAndRainbow:
-    def test_dpo_trains_padded(self) -> None:
-        from agilerl.arena.models.algorithms.dpo import DPOSpec
-
-        assert DPOSpec.supports_sequence_packing is False
-
-    def test_sft_trains_padded(self) -> None:
-        from agilerl.arena.models.algorithms.sft import SFTSpec
-
-        assert SFTSpec.supports_sequence_packing is False
-
     def test_sft_rejects_activation_offload(self) -> None:
         from agilerl.arena.models.algorithms.sft import SFTSpec
 
@@ -724,8 +727,15 @@ class TestTrainingSpec:
             rollout_engines_per_agent="auto",
             training_gpus_per_agent=1,
         )
-        assert spec.rollout_batch_size == 1
+        assert spec.rollout_batch_size is None  # the driver fills it
         assert spec.weight_sync_interval == 1
+
+    def test_async_rollout_leaves_omitted_counts_unset(self) -> None:
+        spec = TrainingSpec(rollout_mode="async")
+
+        assert spec.rollout_engines_per_agent == 0
+        assert spec.training_gpus_per_agent == 1
+        assert "rollout_engines_per_agent" not in spec.model_fields_set
 
     def test_async_rollout_rejects_zero_engines(self) -> None:
         with pytest.raises(ValidationError, match="rollout_engines_per_agent"):

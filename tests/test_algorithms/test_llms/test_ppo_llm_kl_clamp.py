@@ -3,8 +3,7 @@
 
 """Unit tests for LLMPPO's per-token bound on the K3 KL penalty (``kl_clamp``).
 
-Pure CPU on a tiny real model in fp32. The fused-path counterparts live in
-``tests/test_algorithms/test_llm_ops/test_fused_loss.py``.
+Pure CPU on a tiny real model in fp32.
 """
 
 from __future__ import annotations

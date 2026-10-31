@@ -25,6 +25,8 @@ from agilerl.lora.moe.adapters import (
     token_adapter_ids,
 )
 from agilerl.lora.moe.grouped_gemm import (
+    ExpertKernels,
+    expert_kernels,
     expert_row_counts,
     grouped_matmul,
     grouped_operand,
@@ -127,6 +129,7 @@ def _add_expert_loras(
 
 class ScatterRowsCtx(Protocol):
     saved_tensors: tuple[torch.Tensor, ...]
+    source_dtype: torch.dtype
 
     def save_for_backward(self, *tensors: torch.Tensor) -> None: ...
 
@@ -134,7 +137,7 @@ class ScatterRowsCtx(Protocol):
 
 
 class ScatterRows(torch.autograd.Function):
-    """Add source rows into a buffer."""
+    """Add source rows into an fp32 buffer, on ``kernels``' scatter when given."""
 
     @staticmethod
     def forward(
@@ -142,19 +145,25 @@ class ScatterRows(torch.autograd.Function):
         base: torch.Tensor,
         index: torch.Tensor,
         source: torch.Tensor,
+        kernels: ExpertKernels | None,
     ) -> torch.Tensor:
         ctx.save_for_backward(index)
+        ctx.source_dtype = source.dtype
         ctx.mark_dirty(base)
-        base.index_add_(0, index, source)
+        if kernels is None:
+            base.index_add_(0, index, source)
+        else:
+            kernels.scatter_add(base, index, source, None)
         return base
 
     @staticmethod
     def backward(
         ctx: ScatterRowsCtx, *grad_outputs: torch.Tensor
-    ) -> tuple[torch.Tensor, None, torch.Tensor]:
+    ) -> tuple[torch.Tensor, None, torch.Tensor, None]:
         (grad_out,) = grad_outputs
         (index,) = ctx.saved_tensors
-        return grad_out, None, grad_out.index_select(0, index)
+        grad_source = grad_out.index_select(0, index).to(ctx.source_dtype)
+        return grad_out, None, grad_source, None
 
 
 def _chunk_rows(
@@ -182,7 +191,9 @@ def _scatter_routed_expert_chunks(
     Expanded expert rows are ``top_k`` times the token count, so the full up
     and down activations do not fit beside the gathered hidden states.
     """
-    result = torch.zeros_like(hidden_states)
+    kernels = expert_kernels(x)
+    # Rows add in fp32; bf16 atomics are slow and lossy.
+    result = torch.zeros_like(hidden_states, dtype=torch.float32)
     max_rows = _chunk_rows(up_weight, down_weight, x.element_size(), chunk_bytes)
     sizes, offsets = row_chunk_offsets(routing.counts, x.shape[0], max_rows)
     up_operand = grouped_operand(up_weight)
@@ -206,10 +217,10 @@ def _scatter_routed_expert_chunks(
         _add_expert_loras(down, intermediate, down_chunked, chunk, offs)
         del intermediate
         down.mul_(weights)
-        if down.dtype != result.dtype:
+        if kernels is None:
             down = down.to(dtype=result.dtype)
-        result = ScatterRows.apply(result, index, down)
-    return result
+        result = ScatterRows.apply(result, index, down, kernels)
+    return result.to(hidden_states.dtype)
 
 
 def _recompute_routed_experts(

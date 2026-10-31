@@ -23,7 +23,8 @@ import torch.distributed as dist
 pytest.importorskip("transformers", reason="LLM tests require transformers.")
 pytest.importorskip("peft", reason="LLM tests require peft.")
 
-from agilerl.algorithms.grpo import GRPO, _liger_global_token_count
+from agilerl.algorithms.core.base import _global_sum
+from agilerl.algorithms.grpo import GRPO
 from agilerl.utils.segment_rows import split_episode_segments
 from agilerl.utils.vision_rows import VisionRows
 from tests.rank_launch import run_ranks
@@ -69,22 +70,22 @@ def _rollout_sampling_logps(agent: GRPO) -> list[torch.Tensor]:
     ]
 
 
-class TestLigerGlobalTokenCount:
+class TestGlobalSum:
     def test_sums_the_count_over_the_process_group(
         self, gloo_process_group: None
     ) -> None:
         mask = torch.tensor([[True, False, True], [True, True, False]])
 
-        assert _liger_global_token_count(mask).item() == 4.0
+        assert _global_sum(mask).item() == 4.0
 
 
 class TestGRPOSegmentRows:
-    def test_liger_token_loss_pads_rows_to_the_widest_rank(
+    def test_distributed_rows_pad_to_the_widest_rank(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Arrange: a simulated second rank's segment rows are 14 tokens wide.
         agent = _make_grpo()
-        agent.liger_loss = True
+        agent.distributed = True
         monkeypatch.setattr("agilerl.algorithms.core.base.get_world_size", lambda: 2)
         monkeypatch.setattr(
             "agilerl.algorithms.core.base.allreduce_minmax_int",
@@ -118,12 +119,10 @@ class TestGRPOReduceMaskedLoss:
         ]
         global_tokens = float(sum(int(mask.sum()) for mask in rank_masks))
         monkeypatch.setattr(
-            "agilerl.algorithms.grpo._liger_global_token_count",
+            "agilerl.algorithms.grpo._global_sum",
             lambda _mask: torch.tensor(global_tokens),
         )
-        monkeypatch.setattr(
-            "agilerl.algorithms.grpo._liger_normalizer_world_size", lambda: 2
-        )
+        monkeypatch.setattr("agilerl.algorithms.grpo._normalizer_world_size", lambda: 2)
 
         # Act: each backward divides by the accumulation steps; ranks average.
         rank_gradients = []
@@ -391,12 +390,11 @@ class TestGRPOLearnEpisodeSegments:
             ("grpo", "accumulation_window"),
         ],
     )
-    def test_token_normalized_liger_losses_are_accepted(
+    def test_token_normalized_losses_are_accepted(
         self, loss_type: str, loss_norm: str
     ) -> None:
         # Arrange
         agent = _make_grpo(loss_type=loss_type, loss_norm=loss_norm)
-        agent.liger_loss = True
 
         # Act
         result = agent._check_segments_supported(agent.importance_sampling_level)

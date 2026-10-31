@@ -31,7 +31,6 @@ class GRPOSpec(RolloutLLMSpec):
     group_size: int = Field(default=8, ge=1, description=GROUP_SIZE)
     lr: float = Field(default=5e-7, ge=0.0, description=LR)
     clip_coef: float = Field(default=0.2, ge=0.0, le=1.0, description=CLIP_COEF)
-
     adv_norm: Literal["mean_only", "mean_std"] = Field(
         default="mean_only",
         description=(
@@ -130,6 +129,14 @@ class GRPOSpec(RolloutLLMSpec):
             "torch.profiler trace of one micro-batch. Unset profiles nothing."
         ),
     )
+
+    @model_validator(mode="after")
+    def _kl_advantage_shaping_needs_beta(self) -> Self:
+        """KL shaping reads reference log-probs, which beta=0 never computes."""
+        if self.use_kl_advantage_shaping and self.beta == 0.0:
+            msg = "use_kl_advantage_shaping needs beta > 0"
+            raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def _gspo_leaves_off_policy_masks_unset(self) -> Self:

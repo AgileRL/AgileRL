@@ -5,16 +5,26 @@
 from __future__ import annotations
 
 import agilerl.arena.memory.formulas as formulas
+import agilerl.arena.memory.kv_cache as kv_cache
 import agilerl.arena.memory.vision as vision
 from agilerl.arena.memory.breakdown import MemoryComponent, PhaseBreakdown
+from agilerl.arena.memory.resolve.rollout import (
+    drafts_by_default,
+    runs_dual_stream_lora,
+)
 from agilerl.arena.memory.specs import (
     DTYPE_BYTES,
     DeviceSpec,
     GenerationSettings,
     GiB,
+    MiB,
     ModelArch,
     ModelSpec,
 )
+
+# The predicted KV pool can run up to ~0.44 GiB above the pool vLLM allocates,
+# so a predicted pool must clear the bytes it is relied on for by this much.
+KV_MARGIN_BYTES = 512 * MiB
 
 
 def engine_terms(
@@ -30,21 +40,20 @@ def engine_terms(
     act_bytes = DTYPE_BYTES[settings.weight_dtype]
     counts = formulas.param_counts(arch, model.n_params)
     variant = model.variant(settings.weight_variant)
-    batched_tokens = formulas.resolve_max_num_batched_tokens(
+    batched_tokens = kv_cache.resolve_max_num_batched_tokens(
         settings.max_num_seqs, settings.max_model_len, settings.max_num_batched_tokens
     )
     tp = settings.tensor_parallel_size
     # Sampler buffers: per-sequence fp32 logits and probs over the vocab.
     # Tensor parallel shards the lm_head, so each rank holds 1/tp of the vocab.
     sampler = 2 * settings.max_num_seqs * arch.vocab_size * 4 // tp
-    weight_elems = formulas.weight_bytes(counts, settings.weight_dtype, variant)
-    weight_byte = (
-        1.0
-        if settings.weight_quantization == "fp8"
-        else DTYPE_BYTES[settings.weight_dtype]
+    unsharded_weights = formulas.weight_bytes(counts, settings.weight_dtype, variant)
+    weights = int(
+        formulas.engine_weight_bytes(
+            counts, settings.weight_dtype, variant, settings.weight_quantization
+        )
+        / tp
     )
-    unsharded_weights = weight_elems / DTYPE_BYTES[settings.weight_dtype] * weight_byte
-    weights = int(unsharded_weights / tp)
     decoder_startup = (
         formulas.block_recompute_bytes(
             arch,
@@ -68,7 +77,13 @@ def engine_terms(
             model, settings, batched_tokens, decoder_startup
         )
         + compile_copy,
-        "cuda_graphs": formulas.CUDA_GRAPH_POOL_BYTES,
+        "cuda_graphs": formulas.CUDA_GRAPH_POOL_BYTES
+        + (formulas.SPECULATIVE_DRAFTING_BYTES if _engine_drafts(arch, settings) else 0)
+        + (
+            formulas.LORA_DUAL_STREAM_BYTES
+            if settings.lora_dual_stream and runs_dual_stream_lora(arch.is_moe)
+            else 0
+        ),
         # Engines serve one adapter (``max_loras=1``).
         "lora_slots": int(
             formulas.lora_param_count(arch, settings.max_lora_rank) * act_bytes / tp
@@ -82,7 +97,7 @@ def engine_terms(
         * act_bytes,
         "engine_runtime": int(formulas.ENGINE_RUNTIME_FRACTION * unsharded_weights),
         "kv_demand": _kv_demand_per_rank(arch, settings),
-        "mamba_state": formulas.mamba_state_bytes(
+        "mamba_state": kv_cache.mamba_state_bytes(
             arch,
             settings.max_num_seqs,
             state_dtype=settings.weight_dtype,
@@ -90,6 +105,20 @@ def engine_terms(
         ),
     }
     return terms, batched_tokens, sampler
+
+
+def _engine_drafts(arch: ModelArch, settings: GenerationSettings) -> bool:
+    """Whether the engine runs speculative decoding.
+
+    :param arch: Engine-side model architecture.
+    :param settings: Generation settings.
+    :return: The manifest's ``speculative_config`` choice, else the multi-turn default.
+    """
+    if settings.speculative_drafting is not None:
+        return settings.speculative_drafting
+    return drafts_by_default(
+        settings.multi_turn, arch.is_hybrid_ssm, settings.min_p, settings.logit_bias
+    )
 
 
 def _with_encoder_profile(
@@ -123,29 +152,29 @@ def _with_encoder_profile(
 
 def _kv_demand_per_rank(arch: ModelArch, settings: GenerationSettings) -> int:
     """KV bytes on one engine rank, replicating heads when TP exceeds them."""
-    if formulas.shares_hybrid_pool(arch):
-        return formulas.hybrid_kv_demand_bytes(
+    if kv_cache.shares_hybrid_pool(arch):
+        return kv_cache.hybrid_kv_demand_bytes(
             arch,
             settings.weight_dtype,
             settings.concurrency,
             settings.max_model_len,
             settings.tensor_parallel_size,
         )
-    batched_tokens = formulas.resolve_max_num_batched_tokens(
+    batched_tokens = kv_cache.resolve_max_num_batched_tokens(
         settings.max_num_seqs, settings.max_model_len, settings.max_num_batched_tokens
     )
-    demand = formulas.kv_cache_demand_bytes(
+    demand = kv_cache.kv_cache_demand_bytes(
         arch,
         settings.weight_dtype,
         settings.concurrency,
         settings.max_model_len,
-        formulas.VLLM_ASYNC_CONCURRENT_BATCHES * batched_tokens,
+        kv_cache.VLLM_ASYNC_CONCURRENT_BATCHES * batched_tokens,
     )
     if arch.n_kv_heads == 0:
         return demand
     return (
         demand
-        * formulas.kv_heads_per_rank(arch.n_kv_heads, settings.tensor_parallel_size)
+        * kv_cache.kv_heads_per_rank(arch.n_kv_heads, settings.tensor_parallel_size)
         // arch.n_kv_heads
     )
 
@@ -176,7 +205,7 @@ def generation_warnings(
             "gpu_memory_utilization; construction can peak above this bar."
         )
     if arch.is_hybrid_ssm:
-        block_size = formulas.aligned_kv_block_size(
+        block_size = kv_cache.aligned_kv_block_size(
             arch, settings.weight_dtype, settings.tensor_parallel_size
         )
         warnings.append(
@@ -294,13 +323,41 @@ def _generation_pools(
     startup_pool = max(budget - (non_kv - terms["mamba_state"]), 0)
     full_sequence = terms[
         "kv_demand"
-    ] // settings.concurrency + formulas.mamba_state_bytes(
+    ] // settings.concurrency + kv_cache.mamba_state_bytes(
         model.arch,
         1,
         state_dtype=settings.weight_dtype,
         tensor_parallel=settings.tensor_parallel_size,
     )
     return kv_pool, startup_pool, full_sequence
+
+
+def drop_engine_fast_paths(
+    model: ModelSpec, device: DeviceSpec, settings: GenerationSettings
+) -> GenerationSettings:
+    """Rollout engine settings with its memory-costly defaults off when they leave no KV.
+
+    Default n-gram drafting, dual-stream LoRA and the
+    :data:`~agilerl.arena.memory.kv_cache.ROLLOUT_ENGINE_MAX_NUM_BATCHED_TOKENS`
+    step each hold memory outside the KV pool. When the engine's start-up pool
+    cannot hold one full sequence plus :data:`KV_MARGIN_BYTES`, the defaults
+    the settings did not pin are turned off.
+
+    :param model: Engine-side model spec.
+    :param device: The engine's GPU.
+    :param settings: Rollout engine generation settings.
+    :return: ``settings`` when the engine starts with them, else the lean settings.
+    """
+    terms, _, _ = engine_terms(model, settings)
+    _, startup_pool, full_sequence = _generation_pools(model, settings, terms, device)
+    if startup_pool >= full_sequence + KV_MARGIN_BYTES:
+        return settings
+    update: dict[str, object] = {"lora_dual_stream": False}
+    if settings.speculative_drafting is None:
+        update["speculative_drafting"] = False
+    if settings.max_num_batched_tokens is None:
+        update["max_num_batched_tokens"] = kv_cache.VLLM_ENGINE_MAX_NUM_BATCHED_TOKENS
+    return settings.model_copy(update=update)
 
 
 def _kv_bar_components(
@@ -372,7 +429,7 @@ def _residency_bar_components(
             n_bytes=max(int(terms["mamba_state"]), 0),
             detail={
                 "recurrent_layers": arch.n_mamba_layers,
-                "state_blocks_per_seq": formulas.mamba_state_blocks_per_seq(arch),
+                "state_blocks_per_seq": kv_cache.mamba_state_blocks_per_seq(arch),
             },
             note=(
                 f"{arch.n_mamba_layers} recurrent layers against "

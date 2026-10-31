@@ -27,3 +27,4 @@ class SFTSpec(LLMAlgorithmSpec):
 
     env_type: ClassVar[LLMEnvType] = LLMEnvType.DATASET
     objective: ClassVar[str] = "sft"
+    supports_sequence_packing: ClassVar[bool] = True

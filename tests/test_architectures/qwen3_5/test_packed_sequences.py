@@ -443,6 +443,39 @@ class TestPatchQwenGdnPackedSequences:
         assert torch.equal(received["seq_idx"], seq_idx)
         assert PACKED_CU_SEQLENS not in received
 
+    def test_fla_varlen_forward_copies_offsets_over_caller_attention_offsets(
+        self, pristine_qwen_gdn_classes, monkeypatch
+    ):
+        # Arrange: the trainer passes FlashAttention offsets to every layer.
+        received = {}
+        monkeypatch.setattr(qwen_packed, "_varlen_kernels_ready", lambda: True)
+
+        def unpatched(
+            self, hidden_states, cache_params=None, attention_mask=None, **kwargs
+        ):
+            received.update(kwargs)
+            return hidden_states
+
+        Qwen3_5MoeGatedDeltaNet.forward = unpatched
+        patch_qwen_gdn_packed_sequences(mixer=MIXER_PATH, text_model=TEXT_MODEL_PATH)
+        mixer = Qwen3_5MoeGatedDeltaNet.__new__(Qwen3_5MoeGatedDeltaNet)
+        seq_idx = torch.tensor([[0, 0, 1, 1, 1]], dtype=torch.int32)
+        offsets = torch.tensor([0, 2, 5], dtype=torch.int32)
+        attention_offsets = offsets.clone()
+
+        # Act
+        mixer.forward(
+            torch.zeros(1, 5, 4),
+            seq_idx=seq_idx,
+            cu_seq_lens_q=attention_offsets,
+            **{PACKED_CU_SEQLENS: offsets},
+        )
+
+        # Assert
+        assert torch.equal(received["cu_seq_lens_q"], offsets)
+        assert received["cu_seq_lens_q"] is not offsets
+        assert received["cu_seq_lens_q"] is not attention_offsets
+
     def test_text_model_passes_offsets_spanning_every_packed_row(
         self, pristine_qwen_gdn_classes, monkeypatch
     ):

@@ -421,9 +421,7 @@ def _cpu_grpo(**kwargs):
         "device": "cpu",
     }
     defaults.update(kwargs)
-    agent = GRPO(**defaults)
-    agent.liger_loss = False
-    return agent
+    return GRPO(**defaults)
 
 
 class TestGRPOAdvantageGranularityContract:

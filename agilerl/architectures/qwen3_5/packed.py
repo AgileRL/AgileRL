@@ -156,9 +156,10 @@ def _install_packed_mixer(mixer_cls: type) -> None:
         if seq_idx is None:
             return forward(self, hidden_states, cache_params, attention_mask, **kwargs)
         if _varlen_kernels_ready():
-            if kwargs.get("cu_seq_lens_q") is None:
-                # A fresh tensor per call: FLA caches on its identity, and a
-                # cache hit in a checkpoint recompute skips ops the forward ran.
+            if cu_seqlens is not None:
+                # A fresh tensor per call, also over offsets the caller passed
+                # for FlashAttention: FLA caches on its identity, and a cache
+                # hit in a checkpoint recompute skips ops the forward ran.
                 kwargs["cu_seq_lens_q"] = cu_seqlens.clone()
             return forward(self, hidden_states, cache_params, attention_mask, **kwargs)
         kwargs = {

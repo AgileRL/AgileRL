@@ -8,10 +8,12 @@ SFT/DPO tests import these without pulling in ``test_grpo``'s vLLM
 """
 
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from typing import Any
 
 import torch
 from torch import nn
+from transformers import Qwen3Config, Qwen3ForCausalLM
 from transformers.configuration_utils import PretrainedConfig
 from transformers.generation.utils import GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
@@ -36,9 +38,11 @@ class DummyConfig(PretrainedConfig):
         self.vocab_size = vocab_size
 
 
+# A dataclass, as HF ``ModelOutput`` is, so FSDP2 finds ``logits`` and hooks
+# its pre-backward all-gather.
+@dataclass
 class DummyForwardOutput:
-    def __init__(self, logits):
-        self.logits = logits
+    logits: torch.Tensor
 
 
 class DummyMLPPreTrainedModel(PreTrainedModel, GenerationMixin):
@@ -166,6 +170,33 @@ def create_value_head_module(
     )
 
 
+def create_tiny_qwen3() -> Qwen3ForCausalLM:
+    """Seeded two-layer fp32 Qwen3 with real attention and a 64-token vocab."""
+    torch.manual_seed(0)
+    return Qwen3ForCausalLM(
+        Qwen3Config(
+            vocab_size=64,
+            hidden_size=32,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            head_dim=8,
+            intermediate_size=48,
+            max_position_embeddings=64,
+        )
+    )
+
+
+def right_padded_batch(
+    lengths: list[int], seq_len: int = 12, pad_token_id: int = 63
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Seeded random token rows of the given real lengths, right-padded with the pad id."""
+    generator = torch.Generator().manual_seed(1)
+    ids = torch.randint(0, pad_token_id, (len(lengths), seq_len), generator=generator)
+    mask = torch.arange(seq_len) < torch.tensor(lengths).unsqueeze(1)
+    return ids.masked_fill(~mask, pad_token_id), mask
+
+
 def scale_losses(
     loss_fn: Callable[..., Any], scales: Iterator[float]
 ) -> Callable[..., Any]:
@@ -219,3 +250,13 @@ def record_calls(
         return out
 
     return recorded, calls
+
+
+def score_every_token(agent: Any, monkeypatch: Any) -> None:
+    """Make ``agent._get_logprobs`` run the lm_head on every position, ignoring ``score_mask``."""
+    get_logprobs = agent._get_logprobs
+
+    def full_head(*args: Any, score_mask: Any = None, **kwargs: Any) -> torch.Tensor:
+        return get_logprobs(*args, **kwargs)
+
+    monkeypatch.setattr(agent, "_get_logprobs", full_head)

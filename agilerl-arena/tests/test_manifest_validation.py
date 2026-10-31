@@ -33,11 +33,18 @@ from agilerl.arena.models import (
     __version__,
     manifest_schema,
 )
-from agilerl.arena.models.algorithms import RolloutLLMSpec
+from agilerl.arena.models.algorithms import (
+    CISPOSpec,
+    GSPOSpec,
+    LLMPPOSpec,
+    LLMREINFORCESpec,
+    RolloutLLMSpec,
+)
 from agilerl.arena.models.algorithms.rollout_llm import records_sampling_supports
 from agilerl.arena.models.env import LLMEnvType
 from agilerl.arena.models.manifest import strips_multimodal_towers
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
+from agilerl.arena.models.networks import LoraConfigDict
 from agilerl.arena.models.schema import (
     LORA_CONFIG_REF,
     _inline_lora_config_inplace,
@@ -214,8 +221,10 @@ class TestResolvedMemoryFields:
         ("algorithm", "dotted"),
         [
             ({"micro_batch_size_per_gpu": 1}, "micro_batch_size_per_gpu"),
+            ({"micro_batch_tokens_per_gpu": 4096}, "micro_batch_tokens_per_gpu"),
             ({"gradient_checkpointing": False}, "gradient_checkpointing"),
             ({"activation_offload": True}, "activation_offload"),
+            ({"routed_expert_chunk_mib": 512}, "routed_expert_chunk_mib"),
             ({"fsdp": {"reshard_after_forward": True}}, "fsdp.reshard_after_forward"),
             ({"fsdp": {"optim_cpu_offload": True}}, "fsdp.optim_cpu_offload"),
             (
@@ -224,6 +233,10 @@ class TestResolvedMemoryFields:
             ),
             ({"fsdp": {"activation_offload": False}}, "fsdp.activation_offload"),
             ({"fsdp": {"cpu_offload": True}}, "fsdp.cpu_offload"),
+            (
+                {"fsdp": {"checkpoint_every_n_blocks": 2}},
+                "fsdp.checkpoint_every_n_blocks",
+            ),
         ],
     )
     def test_a_pinned_field_is_refused(self, algorithm: dict, dotted: str) -> None:
@@ -324,7 +337,7 @@ class TestResolution:
         validated = TrainingManifest.model_validate(GRPO)
         assert validated.training.rollout_mode == "colocated"
         assert validated.algorithm.vllm_config is not None
-        assert validated.algorithm.vllm_config.max_num_seqs == 16
+        assert validated.algorithm.vllm_config.max_num_seqs is None
         assert validated.algorithm.vllm_config.gpu_memory_utilization == 0.9
 
     def test_gym_num_envs_default_does_not_overwrite_ppo(self) -> None:
@@ -731,6 +744,67 @@ class TestRolloutLLMSpecSamplingSupport:
             TrainingManifest.model_validate(manifest(GRPO, algorithm=sampling))
 
 
+def speculative_manifest(model: str, speculative_config: object, **algorithm) -> dict:
+    """GRPO manifest for *model* with ``vllm_engine_args.speculative_config``."""
+    return manifest(
+        GRPO,
+        algorithm={
+            "vllm_engine_args": {"speculative_config": speculative_config},
+            **algorithm,
+        },
+        network={"pretrained_model_name_or_path": model},
+    )
+
+
+class TestRolloutLLMSpecCheckSpeculativeSampling:
+    def test_drafting_without_min_p_on_a_text_model_validates(self) -> None:
+        doc = speculative_manifest("Qwen/Qwen2.5-0.5B-Instruct", {"method": "ngram"})
+
+        validated = TrainingManifest.model_validate(doc)
+
+        assert validated.algorithm.vllm_engine_args["speculative_config"] == {
+            "method": "ngram"
+        }
+
+    def test_null_speculative_config_validates_with_min_p(self) -> None:
+        doc = speculative_manifest(
+            "Qwen/Qwen2.5-0.5B-Instruct", None, top_k=20, min_p=0.05
+        )
+
+        validated = TrainingManifest.model_validate(doc)
+
+        assert validated.algorithm.min_p == 0.05
+
+    def test_null_speculative_config_validates_on_a_vision_model(self) -> None:
+        doc = speculative_manifest("google/gemma-4-E4B-it", None)
+
+        validated = TrainingManifest.model_validate(doc)
+
+        assert validated.algorithm.vllm_engine_args["speculative_config"] is None
+
+    def test_drafting_with_min_p_is_rejected(self) -> None:
+        doc = speculative_manifest(
+            "Qwen/Qwen2.5-0.5B-Instruct", {"method": "ngram"}, top_k=20, min_p=0.05
+        )
+
+        with pytest.raises(
+            ValidationError,
+            match=r"vLLM rejects every request that sets min_p on a drafting engine\. "
+            r"Set vllm_engine_args\.speculative_config to null",
+        ):
+            TrainingManifest.model_validate(doc)
+
+    def test_drafting_on_a_vision_model_is_rejected(self) -> None:
+        doc = speculative_manifest("google/gemma-4-E4B-it", {"method": "ngram"})
+
+        with pytest.raises(
+            ValidationError,
+            match=r"sets logit_bias on a drafting engine; google/gemma-4-E4B-it "
+            r"rollouts mask the tokenizer's image token",
+        ):
+            TrainingManifest.model_validate(doc)
+
+
 class TestTrainingManifestMutatedSamplingSupport:
     def test_top_p_mutation_validates_with_a_reported_support(self) -> None:
         doc = manifest(
@@ -825,7 +899,7 @@ class TestStripMultimodalTowersResolution:
         # Assert
         assert payload["training"]["rollout_mode"] == "async"
         assert resolved_strip(doc) is True
-        assert payload["algorithm"]["vllm_config"]["max_num_seqs"] == 16
+        assert "max_num_seqs" not in payload["algorithm"]["vllm_config"]
         assert payload["algorithm"]["vllm_config"]["gpu_memory_utilization"] == 0.9
 
     def test_dataset_rollout_on_a_vl_model_strips_the_towers(self) -> None:
@@ -1092,46 +1166,80 @@ class TestGroupReplay:
         assert replay_buffer.group_replay_max_age == 10
 
 
-def prefix_cache_reuse_manifest(**replay_buffer: object) -> dict:
-    """An async GRPO manifest that reuses the prefix cache across weight syncs."""
-    doc = manifest(
+def async_grpo(batch_size: int, **training: object) -> dict:
+    """An async GRPO manifest with one rollout engine."""
+    return manifest(
         GRPO,
-        training={
-            "rollout_mode": "async",
-            "rollout_engines_per_agent": 1,
-            "reuse_prefix_cache_across_syncs": True,
-        },
+        algorithm={"batch_size": batch_size},
+        training={"rollout_mode": "async", "rollout_engines_per_agent": 1, **training},
+        replay_buffer={"kind": "llm"},
     )
-    doc["replay_buffer"] = {"kind": "llm", **replay_buffer}
-    return doc
 
 
-class TestPrefixCacheReuse:
-    def test_accepts_a_bounded_version_lag(self) -> None:
+class TestAsyncRolloutDefaults:
+    def test_rollout_batch_size_stays_unset_for_the_driver(self) -> None:
         validated = TrainingManifest.model_validate(
-            prefix_cache_reuse_manifest(max_rollout_version_lag=4)
+            async_grpo(64, training_gpus_per_agent=4)
         )
 
-        assert validated.training.reuse_prefix_cache_across_syncs is True
+        assert validated.training.rollout_batch_size is None
+
+    def test_payload_omits_split_and_cycle_the_author_left_unset(self) -> None:
+        doc = manifest(
+            GRPO,
+            algorithm={"batch_size": 8},
+            training={"rollout_mode": "async"},
+            replay_buffer={"kind": "llm"},
+        )
+
+        training = TrainingManifest.model_validate(doc).to_payload()["training"]
+
+        assert "training_gpus_per_agent" not in training
+        assert "rollout_engines_per_agent" not in training
+        assert "rollout_batch_size" not in training
+
+    def test_payload_keeps_split_and_cycle_the_author_set(self) -> None:
+        doc = async_grpo(
+            8,
+            training_gpus_per_agent=2,
+            rollout_engines_per_agent="auto",
+            rollout_batch_size=4,
+        )
+
+        training = TrainingManifest.model_validate(doc).to_payload()["training"]
+
+        assert training["training_gpus_per_agent"] == 2
+        assert training["rollout_engines_per_agent"] == "auto"
+        assert training["rollout_batch_size"] == 4
+
+    def test_explicit_rollout_batch_size_is_kept(self) -> None:
+        validated = TrainingManifest.model_validate(
+            async_grpo(64, training_gpus_per_agent=4, rollout_batch_size=16)
+        )
+
+        assert validated.training.rollout_batch_size == 16
+
+    def test_version_lag_defaults_to_two(self) -> None:
+        validated = TrainingManifest.model_validate(async_grpo(8))
+
         assert isinstance(validated.replay_buffer, LLMRolloutBufferSpec)
-        assert validated.replay_buffer.max_rollout_version_lag == 4
+        assert validated.replay_buffer.max_rollout_version_lag == 2
 
-    @pytest.mark.parametrize("replay_buffer", [{}, {"max_rollout_version_lag": 0}])
-    def test_rejects_an_unbounded_or_zero_version_lag(
-        self, replay_buffer: dict[str, object]
-    ) -> None:
-        with pytest.raises(ValidationError, match="max_rollout_version_lag >= 1"):
-            TrainingManifest.model_validate(
-                prefix_cache_reuse_manifest(**replay_buffer)
-            )
-
-    def test_off_by_default_without_a_version_lag(self) -> None:
-        doc = prefix_cache_reuse_manifest()
-        del doc["training"]["reuse_prefix_cache_across_syncs"]
+    def test_zero_version_lag_is_accepted_as_strict_on_policy(self) -> None:
+        doc = async_grpo(8)
+        doc["replay_buffer"] = {"kind": "llm", "max_rollout_version_lag": 0}
 
         validated = TrainingManifest.model_validate(doc)
 
-        assert validated.training.reuse_prefix_cache_across_syncs is False
+        assert isinstance(validated.replay_buffer, LLMRolloutBufferSpec)
+        assert validated.replay_buffer.max_rollout_version_lag == 0
+
+    def test_null_version_lag_is_rejected(self) -> None:
+        doc = async_grpo(8)
+        doc["replay_buffer"] = {"kind": "llm", "max_rollout_version_lag": None}
+
+        with pytest.raises(ValidationError, match="max_rollout_version_lag"):
+            TrainingManifest.model_validate(doc)
 
 
 class TestEpochDrivenTraining:
@@ -2141,7 +2249,7 @@ class TestSchema:
         assert properties["lora_r"]["default"] == 1
         assert properties["lora_r"]["title"] == "Rank"
         assert properties["lora_alpha"]["default"] == 32
-        assert properties["lora_dropout"]["default"] == 0.05
+        assert properties["lora_dropout"]["default"] == 0.0
 
         grpo = next(
             v
@@ -2541,3 +2649,62 @@ class TestThinkingBudgetParser:
         validated = TrainingManifest.model_validate(GRPO)
 
         assert validated.algorithm.thinking_token_budget is None
+
+
+class TestLoraDropoutResolution:
+    @pytest.mark.parametrize(
+        "spec_cls",
+        [GRPOSpec, GSPOSpec, CISPOSpec, LLMPPOSpec, LLMREINFORCESpec, SFTSpec, DPOSpec],
+    )
+    def test_llm_algorithms_default_to_no_dropout(self, spec_cls) -> None:
+        spec = spec_cls(lora_config={"lora_r": 8})
+
+        assert spec.lora_config.lora_dropout == 0.0
+
+    @pytest.mark.parametrize("spec_cls", [GRPOSpec, SFTSpec, DPOSpec])
+    def test_explicit_dropout_is_kept(self, spec_cls) -> None:
+        spec = spec_cls(lora_config=LoraConfigDict(lora_dropout=0.1))
+
+        assert spec.lora_config.lora_dropout == 0.1
+
+    def test_network_lora_lifted_onto_a_rollout_algorithm_has_no_dropout(self) -> None:
+        # Arrange
+        doc = manifest(
+            GRPO,
+            network={
+                "pretrained_model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
+                "max_context_length": 512,
+                "lora_config": {"lora_r": 8},
+            },
+        )
+
+        # Act
+        validated = TrainingManifest.model_validate(doc)
+
+        # Assert
+        assert validated.algorithm.lora_config.lora_dropout == 0.0
+        assert validated.to_payload()["network"]["lora_config"]["lora_dropout"] == 0.0
+
+    def test_network_lora_lifted_onto_sft_has_no_dropout(self) -> None:
+        doc = copy.deepcopy(GRPO)
+        doc["algorithm"] = {"name": "SFT"}
+        doc["environment"] = {"env_type": "dataset", "objective": "sft", "dataset": "d"}
+        doc["network"]["lora_config"] = {"lora_r": 8}
+
+        validated = TrainingManifest.model_validate(doc)
+
+        assert validated.algorithm.lora_config.lora_dropout == 0.0
+
+    def test_explicit_network_dropout_on_a_rollout_algorithm_is_kept(self) -> None:
+        doc = manifest(
+            GRPO,
+            network={
+                "pretrained_model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
+                "max_context_length": 512,
+                "lora_config": {"lora_dropout": 0.1},
+            },
+        )
+
+        validated = TrainingManifest.model_validate(doc)
+
+        assert validated.algorithm.lora_config.lora_dropout == 0.1

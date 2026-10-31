@@ -13,7 +13,6 @@ import sys
 from contextlib import nullcontext
 from functools import partial
 from typing import Any
-from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -31,7 +30,6 @@ from tests.rank_launch import run_ranks
 from tests.test_algorithms.test_llms.segment_helpers import (
     balanced_learn_worker,
     pad_to_eight_rows,
-    use_fake_liger_policy_loss,
 )
 from tests.test_algorithms.test_llms.vision_helpers import (
     IMAGE_COUNTS,
@@ -83,10 +81,7 @@ def make_vision_ppo(**overrides: Any) -> LLMPPO:
         ),
         **overrides,
     }
-    # The seeded multi-rank KL sits near fp32 overflow; LoRA keeps the
-    # lm_head as on a host without liger-kernel.
-    with patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False):
-        return LLMPPO(**kwargs)
+    return LLMPPO(**kwargs)
 
 
 class TestPPOFusedForwardNoGradVision:
@@ -117,17 +112,11 @@ class TestPPOFusedForwardNoGradVision:
 
 class TestPPOLearnVision:
     @pytest.mark.parametrize("segmented", [True, False], ids=["segments", "episodes"])
-    @pytest.mark.parametrize("liger", [False, True], ids=["standard", "liger"])
     def test_every_forward_gets_the_vision_rows_of_its_rows(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        segmented: bool,
-        liger: bool,
+        self, segmented: bool
     ) -> None:
         # Arrange
         agent = make_vision_ppo(importance_sampling_level="token")
-        if liger:
-            use_fake_liger_policy_loss(agent, monkeypatch, "agilerl.algorithms.ppo_llm")
         model = vision_model(agent)
         expected = expected_vision_rows(segmented)
 

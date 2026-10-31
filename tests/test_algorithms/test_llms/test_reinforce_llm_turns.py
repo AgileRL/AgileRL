@@ -8,6 +8,8 @@ Pure CPU on a tiny real model in fp32.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 import torch
 
@@ -16,50 +18,49 @@ pytest.importorskip("peft", reason="LLM tests require peft.")
 
 from peft import LoraConfig
 
-from agilerl import HAS_LIGER_KERNEL
 from agilerl.algorithms import reinforce_llm
 from agilerl.algorithms.reinforce_llm import REINFORCE
 from tests.test_algorithms.test_llms.llm_helpers import create_module, record_calls
-from tests.test_algorithms.test_llms.segment_helpers import record_step_gradients
+from tests.test_algorithms.test_llms.segment_helpers import (
+    record_step_gradients,
+)
 
 PAD_TOKEN_ID = 63
 VOCAB = 64
 
 
-def make_turn_reinforce(importance_sampling_level: str = "turn") -> REINFORCE:
-    """Tiny fp32 REINFORCE on CPU with 1-row micro-batches.
-
-    :param importance_sampling_level: Importance-sampling level of the update.
-    """
+def make_turn_reinforce(**overrides: Any) -> REINFORCE:
+    """Tiny fp32 REINFORCE on CPU with turn-level IS and 1-row micro-batches."""
     torch.manual_seed(0)
-    agent = REINFORCE(
-        actor_network=create_module(
+    kwargs: dict[str, Any] = {
+        "actor_network": create_module(
             input_size=6, max_tokens=4, vocab_size=VOCAB, device="cpu"
         ),
-        pad_token_id=PAD_TOKEN_ID,
-        pad_token="<pad>",
-        batch_size=4,
-        beta=0.01,
-        lr=1e-2,
-        max_output_tokens=4,
-        max_model_len=12,
-        micro_batch_size_per_gpu=1,
-        mini_batch_size=4,
-        update_epochs=1,
-        importance_sampling_level=importance_sampling_level,
-        wrap=False,
-        calc_position_embeddings=False,
-        device="cpu",
-        lora_config=LoraConfig(
+        "pad_token_id": PAD_TOKEN_ID,
+        "pad_token": "<pad>",
+        "batch_size": 4,
+        "beta": 0.01,
+        "lr": 1e-2,
+        "max_output_tokens": 4,
+        "max_model_len": 12,
+        "micro_batch_size_per_gpu": 1,
+        "mini_batch_size": 4,
+        "update_epochs": 1,
+        "importance_sampling_level": "turn",
+        "wrap": False,
+        "gradient_checkpointing": False,
+        "calc_position_embeddings": False,
+        "device": "cpu",
+        "lora_config": LoraConfig(
             r=4,
             lora_alpha=8,
             target_modules=["linear_1"],
             task_type="CAUSAL_LM",
             lora_dropout=0.0,
         ),
-    )
-    agent.liger_loss = False
-    return agent
+        **overrides,
+    }
+    return REINFORCE(**kwargs)
 
 
 def learn_uneven_turns(agent: REINFORCE) -> dict[str, float]:
@@ -75,44 +76,6 @@ def learn_uneven_turns(agent: REINFORCE) -> dict[str, float]:
     return agent.learn(
         (list(ids.split(1)), list(mask.split(1)), rewards), turn_ids=turn_ids
     )
-
-
-@pytest.mark.skipif(not HAS_LIGER_KERNEL, reason="liger-kernel is Linux-only.")
-class TestREINFORCELearnLigerLoss:
-    """The fused Liger loss pools turns and trajectories as the standard loss does."""
-
-    @pytest.mark.parametrize("is_level", ["turn", "trajectory"])
-    def test_loss_and_gradients_match_the_standard_learn(
-        self, monkeypatch: pytest.MonkeyPatch, is_level: str
-    ) -> None:
-        # Arrange
-        agents = {}
-        gradients = {}
-        for liger in (False, True):
-            agent = make_turn_reinforce(is_level)
-            agent.liger_loss = liger
-            gradients[liger] = record_step_gradients(agent, monkeypatch)
-            agents[liger] = agent
-        fused, fused_calls = record_calls(agents[True]._reinforce_loss_liger)
-        monkeypatch.setattr(agents[True], "_reinforce_loss_liger", fused)
-
-        # Act
-        metrics = {liger: learn_uneven_turns(agent) for liger, agent in agents.items()}
-
-        # Assert
-        assert len(fused_calls) == 4
-        for name in ("loss", "pg_loss", "kl"):
-            assert metrics[True][name] == pytest.approx(
-                metrics[False][name], rel=1e-5, abs=1e-6
-            ), name
-        for standard, fused_grads in zip(
-            gradients[False], gradients[True], strict=True
-        ):
-            assert standard.keys() == fused_grads.keys()
-            for name, grad in standard.items():
-                assert torch.allclose(fused_grads[name], grad, rtol=1e-5, atol=1e-6), (
-                    name
-                )
 
 
 class TestREINFORCELearnActionlessRows:
@@ -157,6 +120,72 @@ class TestREINFORCELearnTurnCount:
                 expected, _ = surrogate_fn(*args, **{**kwargs, "num_turns": None})
             assert torch.equal(pg_loss.detach(), expected)
         assert sorted(local_counts) == [1, 1, 2, 2]
+
+
+def learn_uneven_rows(agent: REINFORCE) -> dict[str, float]:
+    """One learn over rows of 8, 4, 6 and 3 real tokens; rows 0 and 2 take two turns."""
+    generator = torch.Generator().manual_seed(3)
+    ids = torch.randint(0, PAD_TOKEN_ID, (4, 8), generator=generator)
+    mask = torch.zeros(4, 7, dtype=torch.bool)
+    for row, length in enumerate([8, 4, 6, 3]):
+        ids[row, length:] = PAD_TOKEN_ID
+        mask[row, 1 : length - 1] = True
+    turn_ids = torch.where(mask, 0, -1)
+    turn_ids[0, 4:7] = 1
+    turn_ids[2, 3:5] = 1
+    rewards = torch.tensor([[1.0, 0.5], [0.0, 0.0], [0.5, -1.0], [-1.0, 0.0]])
+    return agent.learn(
+        (list(ids.split(1)), list(mask.split(1)), rewards), turn_ids=turn_ids
+    )
+
+
+class TestREINFORCELearnTokenBudget:
+    @pytest.mark.parametrize("level", ["token", "turn"])
+    def test_step_gradients_match_one_window_micro_batch(
+        self, monkeypatch: pytest.MonkeyPatch, level: str
+    ) -> None:
+        # Arrange: a 12-token budget splits the window into micro-batches of
+        # unequal tokens and turns; the reference runs the whole window as one.
+        window = make_turn_reinforce(
+            micro_batch_size_per_gpu=4, importance_sampling_level=level
+        )
+        budgeted = make_turn_reinforce(
+            micro_batch_size_per_gpu=4,
+            micro_batch_tokens_per_gpu=12,
+            importance_sampling_level=level,
+        )
+        monkeypatch.setattr(budgeted, "_packing_mode", lambda: "varlen")
+        forward_tokens: list[int] = []
+
+        def record(
+            _module: torch.nn.Module, _args: tuple[Any, ...], kwargs: dict[str, Any]
+        ) -> None:
+            if torch.is_grad_enabled():
+                forward_tokens.append(int((kwargs["input_ids"] != PAD_TOKEN_ID).sum()))
+
+        budgeted.actor.register_forward_pre_hook(record, with_kwargs=True)
+        window_steps = record_step_gradients(window, monkeypatch)
+        budgeted_steps = record_step_gradients(budgeted, monkeypatch)
+
+        # Act
+        window_metrics = learn_uneven_rows(window)
+        budgeted_metrics = learn_uneven_rows(budgeted)
+
+        # Assert
+        assert budgeted_metrics["micro_batches_per_step"] == len(forward_tokens)
+        assert window_metrics["micro_batches_per_step"] == 1.0
+        assert len(forward_tokens) >= 2
+        assert max(forward_tokens) <= 12
+        assert len(window_steps) == len(budgeted_steps) == 1
+        assert budgeted_steps[0].keys() == window_steps[0].keys()
+        for name, grad in window_steps[0].items():
+            torch.testing.assert_close(
+                budgeted_steps[0][name], grad, rtol=1e-5, atol=1e-6, msg=name
+            )
+
+    def test_budget_below_the_longest_row_is_refused(self) -> None:
+        with pytest.raises(ValueError, match=r"micro_batch_tokens_per_gpu \(11\)"):
+            make_turn_reinforce(micro_batch_tokens_per_gpu=11)
 
 
 def learn_three_turns(agent: REINFORCE, forced: bool) -> dict[str, float]:

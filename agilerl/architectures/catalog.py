@@ -6,11 +6,16 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import Any
 
 from transformers import AutoModelForImageTextToText
 from transformers.configuration_utils import PretrainedConfig
 
 from agilerl.architectures.gemma4 import install_gemma4_vision_patches
+from agilerl.architectures.granite import (
+    install_granite_hybrid_patches,
+    install_granite_moe_patches,
+)
 from agilerl.architectures.nemotron_h.mamba import install_mamba_patches
 from agilerl.architectures.qwen3_5.packed import install_qwen_gdn_patches
 from agilerl.architectures.qwen3_5.vision import install_qwen3_5_vl_patches
@@ -138,11 +143,23 @@ GPT_OSS_RUNTIME_CONFIG = ModelRuntimeConfig(
     reasoning_parser=REASONING_PARSERS["gpt_oss"],
 )
 
-# Families whose only catalog setting is the tool-call format.
-TOOL_CALL_TAG_RUNTIME_CONFIG = ModelRuntimeConfig(tool_call_parser="tool_call")
-GRANITE3_RUNTIME_CONFIG = ModelRuntimeConfig(tool_call_parser="granite3")
-QWEN3_RUNTIME_CONFIG = ModelRuntimeConfig(
-    tool_call_parser="tool_call", reasoning_parser=REASONING_PARSERS["qwen3"]
+# Dense-attention families decode fastest with FlashInfer on sm80 (A100);
+# checkpoints with Mamba layers opt out in sm80_attention_backend.
+DENSE_ATTENTION_VLLM_CONFIG = VllmRuntimeConfig(sm80_attention_backend="FLASHINFER")
+DENSE_TOOL_CALL_TAG_RUNTIME_CONFIG = ModelRuntimeConfig(
+    vllm=DENSE_ATTENTION_VLLM_CONFIG,
+    tool_call_parser="tool_call",
+)
+GRANITE3_RUNTIME_CONFIG = ModelRuntimeConfig(
+    vllm=DENSE_ATTENTION_VLLM_CONFIG,
+    patch=PatchRuntimeConfig(install=install_granite_moe_patches),
+    tool_call_parser="granite3",
+)
+GRANITE_HYBRID_RUNTIME_CONFIG = DENSE_TOOL_CALL_TAG_RUNTIME_CONFIG.model_copy(
+    update={"patch": PatchRuntimeConfig(install=install_granite_hybrid_patches)},
+)
+QWEN3_RUNTIME_CONFIG = DENSE_TOOL_CALL_TAG_RUNTIME_CONFIG.model_copy(
+    update={"reasoning_parser": REASONING_PARSERS["qwen3"]},
 )
 
 
@@ -170,11 +187,11 @@ QWEN3_5_RUNTIME_CONFIG = QWEN3_5_TEXT_RUNTIME_CONFIG.model_copy(
 )
 
 FAMILY_RUNTIME_CONFIGS: Mapping[str, ModelRuntimeConfig] = {
-    "qwen2": TOOL_CALL_TAG_RUNTIME_CONFIG,
+    "qwen2": DENSE_TOOL_CALL_TAG_RUNTIME_CONFIG,
     "qwen3": QWEN3_RUNTIME_CONFIG,
     "qwen3_moe": QWEN3_RUNTIME_CONFIG,
     "granitemoe": GRANITE3_RUNTIME_CONFIG,
-    "granitemoehybrid": TOOL_CALL_TAG_RUNTIME_CONFIG,
+    "granitemoehybrid": GRANITE_HYBRID_RUNTIME_CONFIG,
     "nemotron_h": NEMOTRON_H_RUNTIME_CONFIG,
     "nemotron_h_omni": NEMOTRON_H_OMNI_RUNTIME_CONFIG,
     "gemma3": GEMMA_SWA_RUNTIME_CONFIG,
@@ -189,16 +206,29 @@ FAMILY_RUNTIME_CONFIGS: Mapping[str, ModelRuntimeConfig] = {
 }
 
 
+def pretrained_config(model_name_or_path: str) -> dict[str, Any]:
+    """Return ``config.json`` contents from a checkpoint id or local path.
+
+    Supported ids read the bundled config instead of the Hub.
+
+    :param model_name_or_path: Hugging Face model id or local path.
+    :type model_name_or_path: str
+    :return: The checkpoint's top-level config.
+    :rtype: dict[str, Any]
+    """
+    entry = SUPPORTED_MODEL_INFO.get(model_name_or_path)
+    if entry is not None:
+        return entry.config
+    config_dict, _ = PretrainedConfig.get_config_dict(model_name_or_path)
+    return config_dict
+
+
 def pretrained_model_type(model_name_or_path: str) -> str:
     """Return Hugging Face ``model_type`` from a checkpoint id or local path.
 
     Supported ids read the bundled config instead of the Hub.
     """
-    entry = SUPPORTED_MODEL_INFO.get(model_name_or_path)
-    if entry is not None:
-        return entry.config["model_type"]
-    config_dict, _ = PretrainedConfig.get_config_dict(model_name_or_path)
-    return config_dict["model_type"]
+    return pretrained_config(model_name_or_path)["model_type"]
 
 
 def family_runtime(model_name_or_path: str) -> ModelRuntimeConfig:
@@ -207,6 +237,23 @@ def family_runtime(model_name_or_path: str) -> ModelRuntimeConfig:
         pretrained_model_type(model_name_or_path),
         ModelRuntimeConfig(),
     )
+
+
+def sm80_attention_backend(model_name_or_path: str) -> str | None:
+    """Return the async engine attention backend for this checkpoint on sm80 GPUs.
+
+    :param model_name_or_path: Hugging Face model id or local path.
+    :type model_name_or_path: str
+    :return: The family's ``sm80_attention_backend``, or ``None`` when unset or
+        the checkpoint has Mamba layers.
+    :rtype: str | None
+    """
+    config = pretrained_config(model_name_or_path)
+    # granitemoehybrid checkpoints range from attention-only to mostly Mamba.
+    if "mamba" in config.get("layer_types", ()):
+        return None
+    runtime = FAMILY_RUNTIME_CONFIGS.get(config["model_type"], ModelRuntimeConfig())
+    return runtime.vllm.sm80_attention_backend
 
 
 def trainer_model_class(model_name_or_path: str) -> TrainerModelClass:

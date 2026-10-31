@@ -1348,7 +1348,7 @@ class TestPackedMixerCudaFastPath:
                 raise AssertionError(message)
 
         Mixer.__module__ = "agilerl_test_packed_mixer"
-        mamba._install_packed_mixer(Mixer)
+        mamba.install_packed_mixer(Mixer)
         monkeypatch.setattr(mamba, "_packed_uses_fused_scan", lambda *_args: True)
         mixer = Mixer()
         mixer.train()
@@ -1372,6 +1372,61 @@ class TestPackedMixerCudaFastPath:
         assert out == "fused"
         assert seen["seq_idx"] is seq_idx
         assert entered == [True]
+
+    def test_packed_forward_off_the_default_stream_keeps_the_caller_stream(
+        self, monkeypatch
+    ):
+        fake_mod = ModuleType("agilerl_test_packed_mixer_caller_stream")
+        seen = {}
+
+        def split_scan(*_args, **kwargs):
+            seen.update(kwargs)
+            return "fused"
+
+        fake_mod.mamba2_split_conv1d_scan_combined = split_scan
+        monkeypatch.setitem(
+            sys.modules, "agilerl_test_packed_mixer_caller_stream", fake_mod
+        )
+
+        class Mixer(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.in_proj = torch.nn.Linear(2, 8)
+                self.conv1d = torch.nn.Conv1d(4, 4, 2)
+                self.dt_bias = torch.zeros(2)
+                self.A_log = torch.zeros(2)
+                self.D = torch.zeros(2)
+                self.chunk_size = 4
+                self.activation = "silu"
+                self.norm = SimpleNamespace(weight=torch.ones(4), variance_epsilon=1e-5)
+                self.out_proj = torch.nn.Linear(4, 2)
+                self.head_dim = 4
+                self.n_groups = 1
+                self.time_step_limit = None
+
+            def forward(
+                self, hidden_states, cache_params=None, attention_mask=None, **kwargs
+            ):
+                message = "packed fused path must not call forward"
+                raise AssertionError(message)
+
+        Mixer.__module__ = "agilerl_test_packed_mixer_caller_stream"
+        mamba.install_packed_mixer(Mixer, default_stream=False)
+        monkeypatch.setattr(mamba, "_packed_uses_fused_scan", lambda *_args: True)
+
+        def no_stream_switch(_stream):
+            message = "fused path must stay on the caller stream"
+            raise AssertionError(message)
+
+        monkeypatch.setattr(torch.cuda, "stream", no_stream_switch)
+        mixer = Mixer()
+        mixer.train()
+        seq_idx = torch.arange(6, dtype=torch.int32).reshape(2, 3)
+
+        out = mixer(torch.ones(2, 3, 2), seq_idx=seq_idx)
+
+        assert out == "fused"
+        assert seen["seq_idx"] is seq_idx
 
     @pytest.mark.parametrize("train_out_proj", [True, False])
     def test_packed_forward_without_fused_scan_runs_each_document(
@@ -1405,7 +1460,7 @@ class TestPackedMixerCudaFastPath:
                 return hidden_states * 2
 
         Mixer.__module__ = "agilerl_test_packed_mixer_fallback"
-        mamba._install_packed_mixer(Mixer)
+        mamba.install_packed_mixer(Mixer)
         monkeypatch.setattr(mamba, "_packed_uses_fused_scan", lambda *_args: True)
 
         class _StreamCtx:
@@ -1429,3 +1484,35 @@ class TestPackedMixerCudaFastPath:
         assert len(calls) == 2
         assert torch.equal(calls[0], hidden[:, :2])
         assert torch.equal(calls[1], hidden[:, 2:])
+
+
+def packed_row(is_cuda: bool) -> SimpleNamespace:
+    """Stand-in hidden states on a CUDA or CPU device."""
+    return SimpleNamespace(
+        is_cuda=is_cuda, device=torch.device("cuda" if is_cuda else "cpu")
+    )
+
+
+class TestPackedUsesFusedScan:
+    def test_cuda_row_without_a_cache_takes_the_fused_kernel(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Mixer train/eval mode is not an input: no-grad passes run the kernel too.
+        monkeypatch.setattr(mamba, "_ada_capability", lambda _device: False)
+
+        assert mamba._packed_uses_fused_scan(packed_row(True), None)
+
+    @pytest.mark.parametrize(
+        ("is_cuda", "cache_params"), [(False, None), (True, object())]
+    )
+    def test_cpu_or_cached_row_runs_each_document(
+        self, is_cuda: bool, cache_params: object | None
+    ) -> None:
+        assert not mamba._packed_uses_fused_scan(packed_row(is_cuda), cache_params)
+
+    def test_eager_scan_device_runs_each_document(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(mamba, "_ada_capability", lambda _device: True)
+
+        assert not mamba._packed_uses_fused_scan(packed_row(True), None)

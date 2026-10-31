@@ -27,7 +27,7 @@ def _softcapped_actor() -> DummyMLPPreTrainedModel:
     return DummyMLPPreTrainedModel(config=config, device="cpu")
 
 
-class TestGRPOSoftcapLigerLoss:
+class TestGRPOSoftcappedActor:
     @pytest.mark.parametrize(
         "overrides",
         [
@@ -43,23 +43,9 @@ class TestGRPOSoftcapLigerLoss:
             ),
         ],
     )
-    def test_softcapped_actor_runs_the_standard_loss(
-        self, monkeypatch: pytest.MonkeyPatch, overrides: dict[str, object]
+    def test_softcapped_actor_records_its_softcap(
+        self, overrides: dict[str, object]
     ) -> None:
-        # Arrange
-        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
-        # liger-kernel's Triton model patches are Linux/CUDA only.
-        monkeypatch.setattr(
-            "agilerl.algorithms.core.base._apply_liger_kernel_to_instance",
-            lambda model, fused_linear_cross_entropy: None,
-            raising=False,
-        )
+        agent = _make_grpo(actor_network=_softcapped_actor(), **overrides)
 
-        # Act
-        agent = _make_grpo(
-            liger_loss=None, actor_network=_softcapped_actor(), **overrides
-        )
-
-        # Assert
         assert agent.final_logit_softcap == SOFTCAP
-        assert agent.liger_loss is False

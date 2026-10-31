@@ -15,16 +15,12 @@ import pytest
 import torch
 from peft import LoraConfig
 
-from agilerl import HAS_LIGER_KERNEL
 from agilerl.algorithms import GRPO
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.components.llm_rollout_data import EpisodeSegments
 from agilerl.utils.segment_rows import SegmentRows
 from tests.test_algorithms.test_core_base import _LLM_DEPS_SKIP, _make_llm_agent
 from tests.test_algorithms.test_llms.llm_helpers import create_module
-from tests.test_algorithms.test_llms.test_grpo_episode_loss_norm import (
-    _ProbeFusedKernel,
-)
 from tests.test_algorithms.test_llms.vision_helpers import (
     IMAGE_TOKEN_ID,
     PAD_TOKEN_ID,
@@ -127,7 +123,7 @@ class TestFusedForwardPixelValues:
             "agilerl.algorithms.core.base.unpack_logprobs",
             return_value=torch.zeros(batch_size, seq_len - 1),
         ):
-            agent._fused_packed_forward(ids, mask, pixel_values=pixel_values)
+            agent._fused_packed_forward(ids, mask, "varlen", pixel_values=pixel_values)
 
         # Assert
         forwarded = actor.call_args.kwargs["pixel_values"]
@@ -267,132 +263,6 @@ class TestFusedForwardPixelValues:
         forwarded = captured[0]["pixel_values"]
         assert forwarded.shape[0] == batch_size
         assert torch.equal(forwarded, pixel_values)
-
-
-@_LLM_DEPS_SKIP
-@pytest.mark.skipif(not HAS_LIGER_KERNEL, reason="liger-kernel is Linux-only.")
-class TestFusedKernelLossPixelValues:
-    def test_fused_kernel_loss_moves_pixel_values_to_device(self) -> None:
-        # Arrange
-        grpo = _make_cpu_grpo_for_kernel_tests(loss_norm="micro_batch")
-        grpo.device = torch.device("cpu")
-        batch_size = 2
-        seq_len = 5
-        batch_ids = torch.randint(1, 32, (batch_size, seq_len))
-        action_mask = torch.ones(batch_size, seq_len - 1, dtype=torch.bool)
-        advantages = torch.zeros(batch_size)
-        old_log_probs = torch.zeros(batch_size, seq_len - 1)
-        reference_log_probs = torch.zeros(batch_size, seq_len - 1)
-        pixel_values = torch.randn(batch_size, 3, 4, 4)
-        hidden = torch.randn(batch_size, seq_len, 6)
-        captured: list[dict[str, torch.Tensor]] = []
-
-        def recording_forward(**kwargs: torch.Tensor) -> tuple[torch.Tensor]:
-            captured.append(dict(kwargs))
-            return (hidden,)
-
-        grpo.actor.forward = recording_forward
-        grpo._packing_mode = MagicMock(return_value=None)
-        grpo._get_lm_head = MagicMock(
-            return_value=torch.nn.Linear(6, 64, bias=False),
-        )
-        grpo._patch_lm_head_to_identity = MagicMock(return_value=nullcontext())
-        grpo._amp_ctx = MagicMock(return_value=nullcontext())
-        head = grpo._get_lm_head.return_value
-        grpo._liger_head_gather = MagicMock(
-            return_value=nullcontext((head.weight, head.bias))
-        )
-
-        # Act
-        with (
-            patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
-            patch(
-                "agilerl.algorithms.grpo.LigerFusedLinearGRPOFunction",
-                _ProbeFusedKernel,
-            ),
-            patch.object(_ProbeFusedKernel, "inputs", []) as kernel_inputs,
-        ):
-            grpo._fused_kernel_loss(
-                batch_ids,
-                action_mask,
-                advantages,
-                old_log_probs,
-                reference_log_probs,
-                pixel_values=pixel_values,
-            )
-
-        # Assert
-        forwarded = captured[0]["pixel_values"]
-        assert forwarded.device == grpo.device
-        assert torch.equal(forwarded, pixel_values)
-        [inputs] = kernel_inputs
-        assert inputs["num_items_in_batch"] == 1.0
-        assert torch.equal(inputs["_input"], hidden[:, : seq_len - 1].reshape(-1, 1, 6))
-
-    def test_fused_kernel_loss_packed_keeps_pixel_batch_size(self) -> None:
-        # Arrange
-        grpo = _make_cpu_grpo_for_kernel_tests(loss_norm="micro_batch")
-        grpo.device = torch.device("cpu")
-        batch_size = 2
-        seq_len = 6
-        batch_ids = torch.randint(1, 32, (batch_size, seq_len))
-        action_mask = torch.ones(batch_size, seq_len - 1, dtype=torch.bool)
-        advantages = torch.zeros(batch_size)
-        old_log_probs = torch.zeros(batch_size, seq_len - 1)
-        reference_log_probs = torch.zeros(batch_size, seq_len - 1)
-        pixel_values = torch.randn(batch_size, 3, 4, 4)
-        packed_hidden = torch.randn(1, seq_len, 6)
-        padded_hidden = torch.randn(batch_size, seq_len, 6)
-        captured: list[dict[str, torch.Tensor]] = []
-
-        def recording_forward(**kwargs: torch.Tensor) -> tuple[torch.Tensor]:
-            captured.append(dict(kwargs))
-            return (packed_hidden,)
-
-        grpo.actor.forward = recording_forward
-        grpo._packing_mode = MagicMock(return_value="varlen")
-        grpo._get_lm_head = MagicMock(
-            return_value=torch.nn.Linear(6, 64, bias=False),
-        )
-        grpo._patch_lm_head_to_identity = MagicMock(return_value=nullcontext())
-        grpo._amp_ctx = MagicMock(return_value=nullcontext())
-        head = grpo._get_lm_head.return_value
-        grpo._liger_head_gather = MagicMock(
-            return_value=nullcontext((head.weight, head.bias))
-        )
-
-        # Act
-        with (
-            patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
-            patch(
-                "agilerl.algorithms.core.base.unpack_hidden_states",
-                return_value=padded_hidden,
-            ),
-            patch(
-                "agilerl.algorithms.grpo.LigerFusedLinearGRPOFunction",
-                _ProbeFusedKernel,
-            ),
-            patch.object(_ProbeFusedKernel, "inputs", []) as kernel_inputs,
-        ):
-            grpo._fused_kernel_loss(
-                batch_ids,
-                action_mask,
-                advantages,
-                old_log_probs,
-                reference_log_probs,
-                pixel_values=pixel_values,
-            )
-
-        # Assert
-        forwarded = captured[0]["pixel_values"]
-        assert forwarded.shape[0] == batch_size
-        assert forwarded.device == grpo.device
-        assert torch.equal(forwarded, pixel_values)
-        [inputs] = kernel_inputs
-        assert inputs["num_items_in_batch"] == 1.0
-        assert torch.equal(
-            inputs["_input"], padded_hidden[:, : seq_len - 1].reshape(-1, 1, 6)
-        )
 
 
 @_LLM_DEPS_SKIP
