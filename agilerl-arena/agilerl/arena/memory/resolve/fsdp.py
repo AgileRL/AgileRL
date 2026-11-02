@@ -253,8 +253,8 @@ class TrainingMemoryUnfitError(ValueError):
         super().__init__(
             f"Estimated training peak {breakdown.total_bytes / GiB:.2f} GiB is over "
             f"the {breakdown.device_usable_bytes / GiB:.2f} GiB usable on one "
-            f"{device.name} at the lightest settings ({plan.describe()}). Add "
-            "training_gpus_per_agent, use a larger GPU, or shorten max_model_len."
+            f"{device.name} at the lightest settings ({plan.describe()}). Use "
+            "more or larger GPUs per agent, or shorten the context length."
         )
         self.plan = plan
 
