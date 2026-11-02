@@ -1814,7 +1814,9 @@ class TestBatchRolloutEnvPerEpisode:
         assert seen == [_mix_seed(12)] * 2 + [_mix_seed(13)] * 2
 
     def test_dataset_rows_are_group_contiguous(self) -> None:
-        vec_env = self._collector(env_factory=_RowRecordingEnv)
+        vec_env = self._collector(
+            env_factory=_RowRecordingEnv, adaptive_task_sampling=False
+        )
         for i in range(4):
             vec_env.reset_episode(f"ep{i}", logical_slot=i)
         rows = [env.row_calls[-1] for env in vec_env.envs]

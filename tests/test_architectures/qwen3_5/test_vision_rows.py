@@ -16,9 +16,11 @@ from agilerl.architectures.qwen3_5.vision import (
 )
 from agilerl.architectures.runtime import PatchRuntimeConfig
 from tests.test_architectures.qwen3_5.vision_helpers import (
+    END,
     GRID,
     IMAGE,
     PATCH_DIM,
+    START,
     flat_inputs,
     image_prompt,
     restored_qwen_vl_model,
@@ -184,6 +186,53 @@ class TestMropePositionIds:
         assert actual.shape == (4, 1, packed.shape[1])
         assert torch.equal(actual[0], positions)
         assert torch.equal(actual[1:, 0], torch.cat(expected_vision, dim=1))
+
+    def test_multi_row_mixed_grids_match_get_rope_index_per_document(self) -> None:
+        # Arrange
+        model = tiny_qwen_vl().model
+        tall, wide = [1, 8, 4], [1, 4, 8]
+
+        def image(grid: list[int]) -> list[int]:
+            return [IMAGE] * (grid[0] * grid[1] * grid[2] // 4)
+
+        rows = [
+            [
+                ([*image(tall), 7, 8], [tall]),
+                ([3, START, *image(wide), END, *image(tall), 9], [wide, tall]),
+            ],
+            [
+                ([10, 11, 12], []),
+                ([START, *image(wide), END], [wide]),
+                (list(range(13, 30)), []),
+            ],
+        ]
+        packed = torch.tensor([[t for doc, _ in row for t in doc] for row in rows])
+        positions = torch.stack(
+            [torch.cat([torch.arange(len(doc)) for doc, _ in row]) for row in rows]
+        )
+        grids = torch.tensor(
+            [g for row in rows for _, doc_grids in row for g in doc_grids]
+        )
+
+        # Act
+        actual = mrope_position_ids(model, packed, positions, grids)
+
+        # Assert
+        expected = []
+        for row in rows:
+            parts = []
+            for doc, doc_grids in row:
+                ids = torch.tensor([doc])
+                if not doc_grids:
+                    parts.append(torch.arange(len(doc)).expand(3, -1))
+                    continue
+                doc_positions, _ = model.get_rope_index(
+                    ids, (ids == IMAGE).int(), image_grid_thw=torch.tensor(doc_grids)
+                )
+                parts.append(doc_positions[:, 0])
+            expected.append(torch.cat(parts, dim=1))
+        assert torch.equal(actual[0], positions)
+        assert torch.equal(actual[1:], torch.stack(expected, dim=1))
 
     def test_image_positions_differ_from_text_positions(self) -> None:
         model = tiny_qwen_vl().model

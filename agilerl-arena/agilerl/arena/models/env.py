@@ -45,6 +45,7 @@ ENV_VAR_NAME_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]*$"
 ENV_POD_DEFAULT_CPUS = 0.01
 # A multi-GB env image cold-pulls in minutes.
 ENV_POD_READY_TIMEOUT_S = 600.0
+DEFAULT_ADAPTIVE_TASK_SAMPLING = True
 
 
 class EnvContainerSpec(BaseModel):
@@ -842,12 +843,12 @@ class LLMEnvSpec(EnvSpecBase):
         ),
     )
     adaptive_task_sampling: bool = Field(
-        default=False,
+        default=DEFAULT_ADAPTIVE_TASK_SAMPLING,
         description=(
             "Draw each group's task row in proportion to how often that row's "
             "recent groups had differing rewards, so tasks that keep giving tied "
-            "groups are drawn less (Ray async rollouts only). Unset keeps the "
-            "per-epoch shuffle."
+            "groups are drawn less (Ray async rollouts over task rows only). "
+            "false keeps the per-epoch shuffle."
         ),
     )
     task_family_field: str | None = Field(

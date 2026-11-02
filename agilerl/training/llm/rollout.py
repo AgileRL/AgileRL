@@ -275,6 +275,7 @@ def train_llm_rollout(
     # Rank-offset seed for procedural env reset(seed=...) uniqueness only. Dataset
     # rows are split by the TaskAssigner's contiguous per-rank shard instead.
     group_seed = int(pop[0].seed) + dp_rank * (1 << 31)
+    # This loop records no group outcomes, so rows keep the per-epoch shuffle.
     rollout_collector = RolloutCollector(
         env_factory,
         batch_size,
@@ -282,6 +283,7 @@ def train_llm_rollout(
         io_timeout_s=io_timeout_s,
         rank=dp_rank,
         world_size=data_increment,
+        adaptive_task_sampling=False,
     )
     test_env: RolloutHarness | None = None
     completion_logger = (

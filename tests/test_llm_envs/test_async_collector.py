@@ -411,13 +411,14 @@ class _RowClient(FakeEnvClient):
 
 class TestAsyncBatchCollectorAssignGroupTask:
     def test_concurrent_groups_draw_distinct_rows_shared_by_members(self) -> None:
-        # Arrange
+        # Arrange: the epoch shuffle deals each row once per cycle.
         client = _RowClient()
         inner = RolloutCollector(
             env_factory=_harness_factory(client, max_turns=2),
             batch_size=8,
             group_size=2,
             base_seed=0,
+            adaptive_task_sampling=False,
         )
         collector = AsyncBatchCollector(inner)
 

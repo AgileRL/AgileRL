@@ -822,6 +822,7 @@ def create_population(
                 # path (reuse as-is) rather than re-attaching adapters.
                 clone=idx != 0 and act is not None,
                 seed=INIT_HP.get("SEED", 42),
+                gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 use_kl_advantage_shaping=INIT_HP.get("USE_KL_ADVANTAGE_SHAPING", False),
                 adv_norm=INIT_HP.get("ADV_NORM", "mean_only"),
                 loss_type=INIT_HP.get("LOSS_TYPE", "grpo"),
@@ -898,6 +899,7 @@ def create_population(
                 actor_network=act,
                 clone=idx != 0 and act is not None,
                 seed=INIT_HP.get("SEED", 42),
+                gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
             )
             agent = SFT(**kw)
             population.append(agent)
@@ -945,6 +947,7 @@ def create_population(
                 actor_network=act,
                 clone=idx != 0 and act is not None,
                 seed=INIT_HP.get("SEED", 42),
+                gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
             )
             agent = DPO(**kw)
             population.append(agent)
@@ -1016,6 +1019,7 @@ def create_population(
                 actor_network=act,
                 clone=idx != 0 and act is not None,
                 seed=INIT_HP.get("SEED", 42),
+                gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 vllm_importance_sampling_correction=INIT_HP.get(
                     "VLLM_IMPORTANCE_SAMPLING_CORRECTION", True
                 ),
@@ -1090,6 +1094,7 @@ def create_population(
                 actor_network=act,
                 clone=idx != 0 and act is not None,
                 seed=INIT_HP.get("SEED", 42),
+                gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 vllm_importance_sampling_correction=INIT_HP.get(
                     "VLLM_IMPORTANCE_SAMPLING_CORRECTION", True
                 ),

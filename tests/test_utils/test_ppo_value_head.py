@@ -3,9 +3,13 @@
 
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 from torch import nn
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.fsdp import fully_shard
+from torch.distributed.tensor import DTensor
 from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
@@ -16,6 +20,7 @@ from agilerl.utils.ppo_value_head import (
     _pop_value_head_kwargs,
     _resolve_hidden_size,
 )
+from tests.rank_launch import run_ranks
 
 
 class DummyConfig(PretrainedConfig):
@@ -290,6 +295,41 @@ class TestAutoModelForCausalLMWithValueHeadPostInit:
         )
         assert torch.allclose(wrapped.v_head.summary.weight, target_w)
         assert torch.allclose(wrapped.v_head.summary.bias, target_b)
+
+    @pytest.mark.multi_rank
+    def test_loads_full_weights_into_an_fsdp_sharded_head(self):
+        # Act
+        reports = run_ranks(_post_init_sharded_worker, 2)
+
+        # Assert
+        for sharded, weight, bias in reports:
+            assert sharded
+            np.testing.assert_array_equal(weight, np.full((1, 4), 0.25))
+            np.testing.assert_array_equal(bias, np.full((1,), -0.5))
+
+
+def _post_init_sharded_worker(
+    _rank: int, _world_size: int
+) -> tuple[bool, np.ndarray, np.ndarray]:
+    """One rank: ``post_init`` full tensors into a ``fully_shard``-ed value head."""
+    wrapped = AutoModelForCausalLMWithValueHead(DummyPretrainedModel())
+    summary = wrapped.v_head.summary
+    fully_shard(summary, mesh=init_device_mesh("cpu", (2,)))
+
+    wrapped.post_init(
+        {
+            "v_head.summary.weight": torch.full((1, 4), 0.25),
+            "v_head.summary.bias": torch.full((1,), -0.5),
+        }
+    )
+
+    # NumPy arrays: a torch tensor sent to the parent shares memory that dies
+    # with this process before the parent reads it.
+    return (
+        isinstance(summary.weight, DTensor),
+        summary.weight.full_tensor().detach().numpy(),
+        summary.bias.full_tensor().detach().numpy(),
+    )
 
 
 class TestAutoModelForCausalLMWithValueHeadSavePretrained:

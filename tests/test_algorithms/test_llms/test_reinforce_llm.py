@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import gc
-import math
-import warnings
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -22,7 +20,6 @@ from transformers.modeling_utils import PreTrainedModel
 
 from agilerl.algorithms.core import ActionResult
 from agilerl.algorithms.reinforce_llm import REINFORCE
-from agilerl.arena.memory.resolve.chunk import resolve_chunk_rows
 from agilerl.distributed import FSDPConfig
 from agilerl.llm_envs import RolloutHarness
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig
@@ -162,12 +159,8 @@ def create_dummy_actor(input_size, max_tokens, vocab_size, device):
     return DummyCausalInner(cfg, device=device)
 
 
-def _cpu_llmreinforce(liger_loss=False, **kwargs):
-    """Small CPU REINFORCE for fast unit tests (PEFT dummy actor, single device).
-
-    :param liger_loss: Value to pin ``liger_loss`` to, or ``None`` to keep the
-        value resolved at init.
-    """
+def _cpu_llmreinforce(**kwargs):
+    """Small CPU REINFORCE for fast unit tests (PEFT dummy actor, single device)."""
     device = "cpu"
     vocab_size = 100
     input_size = 10
@@ -196,10 +189,7 @@ def _cpu_llmreinforce(liger_loss=False, **kwargs):
         "device": device,
     }
     defaults.update(kwargs)
-    agent = REINFORCE(**defaults)
-    if liger_loss is not None:
-        agent.liger_loss = liger_loss
-    return agent
+    return REINFORCE(**defaults)
 
 
 def generate_reinforce(
@@ -308,10 +298,7 @@ def generate_reinforce(
         "quantization_config": quantization_config,
         "temperature": temperature,
     }
-    agent = REINFORCE(**reinforce_kwargs)
-    # The unfused learn() path runs whether or not liger-kernel is installed.
-    agent.liger_loss = False
-    return agent
+    return REINFORCE(**reinforce_kwargs)
 
 
 @pytest.fixture
@@ -560,40 +547,6 @@ class TestREINFORCEInit:
         rf = _cpu_llmreinforce(advantage_granularity="turn")
         assert rf.advantage_granularity == "turn"
 
-    @pytest.mark.parametrize(
-        ("is_level", "correction", "colocated", "liger"),
-        [
-            ("token", True, True, True),
-            ("turn", False, True, True),
-            ("trajectory", False, True, True),
-            ("turn", True, True, False),
-            ("trajectory", True, True, False),
-            ("turn", True, False, True),
-            ("trajectory", True, False, True),
-        ],
-    )
-    def test_liger_follows_the_level_sampling_correction_and_colocation(
-        self, monkeypatch, is_level, correction, colocated, liger
-    ):
-        """Above token level the fused loss runs only when no batch must be reweighted.
-
-        Only colocated vLLM captures sampling log-probs for every batch.
-        """
-        # Arrange
-        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
-        rf = _cpu_llmreinforce(
-            liger_loss=None,
-            importance_sampling_level=is_level,
-            vllm_importance_sampling_correction=correction,
-        )
-        rf.colocated = colocated
-
-        # Act
-        rf._resolve_liger_loss(PretrainedConfig())
-
-        # Assert
-        assert rf.liger_loss is liger
-
     def test_init_clone_requires_pretrained_like_actor(self):
         with pytest.raises(AssertionError, match="PeftModelProtocol"):
             REINFORCE(
@@ -604,51 +557,6 @@ class TestREINFORCEInit:
                 clone=True,
                 wrap=False,
             )
-
-
-class TestREINFORCELigerLossLayout:
-    @pytest.mark.parametrize(
-        ("is_level", "liger_loss", "layout"),
-        [
-            ("turn", True, (True, True)),
-            ("trajectory", True, (True, True)),
-            ("token", True, (True, False)),
-            ("turn", False, (False, False)),
-        ],
-    )
-    def test_follows_liger_and_level(self, is_level, liger_loss, layout):
-        rf = _cpu_llmreinforce(
-            liger_loss=liger_loss,
-            importance_sampling_level=is_level,
-            vllm_importance_sampling_correction=False,
-        )
-
-        assert rf._liger_loss_layout() == layout
-
-    @pytest.mark.parametrize(
-        ("colocated", "liger_loss", "layout"),
-        [(True, False, (False, False)), (False, True, (True, True))],
-        ids=["colocated-standard", "external-rollouts-fused-whole-sequence"],
-    )
-    def test_turn_level_correction_sizes_by_colocation(
-        self, monkeypatch, colocated, liger_loss, layout
-    ):
-        # Arrange
-        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
-        rf = _cpu_llmreinforce(
-            liger_loss=None,
-            importance_sampling_level="turn",
-            vllm_importance_sampling_correction=True,
-        )
-        rf.colocated = colocated
-        rf._resolve_liger_loss(PretrainedConfig())
-
-        # Act
-        resolved_layout = rf._liger_loss_layout()
-
-        # Assert
-        assert rf.liger_loss is liger_loss
-        assert resolved_layout == layout
 
 
 class TestREINFORCEGetAction:
@@ -1241,270 +1149,6 @@ class TestREINFORCETest:
             assert rf.fitness[-1] == pytest.approx(float(out))
         finally:
             server.stop()
-
-
-class TestReinforceLossLiger:
-    """Cover ``_reinforce_loss_liger``. The autograd Function it wraps
-    requires ``liger-kernel`` but the wrapper (lm_head pre-hook capture →
-    Liger Function call → metric unpack) is testable on CPU via mocks.
-    """
-
-    def test_drives_actor_forward_and_unpacks_metrics(self) -> None:
-        """End-to-end with mocked Liger Function: actor pre-hook captures
-        hidden state, Function returns scalar loss + 4-tuple metrics.
-        """
-        rf = _cpu_llmreinforce(beta=0.01, clip_coef=0.2)
-        B, T = 2, 5
-        ids = torch.randint(1, 50, (B, T), dtype=torch.long)
-        mask = torch.ones(B, T - 1, dtype=torch.float32)
-        old_lp = torch.zeros(B, T - 1)
-        ref_lp = torch.zeros(B, T - 1)
-        adv = torch.randn(B, T - 1) * 0.1
-
-        fake_loss = torch.tensor(0.42, requires_grad=True)
-        fake_aux = (
-            torch.tensor(0.05),  # kl
-            torch.tensor(0.15),  # clipfrac
-            torch.tensor(0.25),  # pg_loss
-            torch.tensor(0.35),  # entropy
-        )
-
-        with patch(
-            "agilerl.algorithms.reinforce_llm.apply_fused_policy_loss"
-        ) as mock_fn:
-            mock_fn.return_value = (fake_loss, fake_aux)
-            loss, metrics = rf._reinforce_loss_liger(
-                ids,
-                mask,
-                old_lp,
-                ref_lp,
-                adv,
-                torch.zeros(B, T - 1, dtype=torch.long),
-                1,
-            )
-
-        mock_fn.assert_called_once()
-        # REINFORCE always passes beta=0 to Liger (KL is folded into the
-        # advantage upstream); kl is reported as a metric only.
-        # Find beta in the apply args — it's the 9th positional arg
-        # (input, weight, bias, ids, mask, advs, ref_lp, old_lp, beta, ...).
-        call_args = mock_fn.call_args.args
-        assert call_args[8] == 0.0  # beta
-
-        assert metrics["kl"] == pytest.approx(0.05)
-        assert metrics["clipfrac"] == pytest.approx(0.15)
-        assert metrics["pg_loss"] == pytest.approx(0.25)
-        assert metrics["entropy"] == pytest.approx(0.35)
-        assert loss is fake_loss
-
-    def test_token_mode_fuses_vllm_is_ratio(self) -> None:
-        """token-level IS with captured vLLM logprobs fuses the clamped
-        trainer/vLLM ratio into the kernel via the ``vllm_is_ratio`` kwarg.
-        """
-        rf = _cpu_llmreinforce(beta=0.0)
-        B, T = 2, 6
-        ids = torch.randint(1, 50, (B, T), dtype=torch.long)
-        mask = torch.ones(B, T - 1, dtype=torch.float32)
-        old_lp = torch.zeros(B, T - 1)
-        ref_lp = torch.zeros(B, T - 1)
-        adv = torch.randn(B, T - 1) * 0.1
-        sampling = old_lp - 0.5  # non-trivial trainer/vLLM mismatch
-        fake_aux = tuple(torch.tensor(0.0) for _ in range(4))
-        with patch(
-            "agilerl.algorithms.reinforce_llm.apply_fused_policy_loss"
-        ) as mock_fn:
-            mock_fn.return_value = (torch.tensor(0.5, requires_grad=True), fake_aux)
-            rf._reinforce_loss_liger(
-                ids,
-                mask,
-                old_lp,
-                ref_lp,
-                adv,
-                torch.zeros(B, T - 1, dtype=torch.long),
-                1,
-                sampling_log_probs=sampling,
-            )
-        ratio = mock_fn.call_args.kwargs["vllm_is_ratio"]
-        assert ratio is not None
-        assert torch.all(ratio <= rf.vllm_importance_sampling_cap)
-
-    def test_chunks_by_the_head_vocabulary(self) -> None:
-        rf = _cpu_llmreinforce()
-        B, T = 2, 5
-        ids = torch.randint(1, 50, (B, T), dtype=torch.long)
-        mask = torch.ones(B, T - 1, dtype=torch.float32)
-        old_lp = torch.zeros(B, T - 1)
-        ref_lp = torch.zeros(B, T - 1)
-        adv = torch.randn(B, T - 1) * 0.1
-        fake_aux = tuple(torch.tensor(0.0) for _ in range(4))
-
-        with patch(
-            "agilerl.algorithms.reinforce_llm.apply_fused_policy_loss"
-        ) as mock_apply:
-            mock_apply.return_value = (torch.tensor(0.4, requires_grad=True), fake_aux)
-            rf._reinforce_loss_liger(
-                ids,
-                mask,
-                old_lp,
-                ref_lp,
-                adv,
-                torch.zeros(B, T - 1, dtype=torch.long),
-                1,
-            )
-
-        chunk_size = mock_apply.call_args.kwargs["token_chunk_size"]
-        assert chunk_size == resolve_chunk_rows(100)
-
-
-class TestREINFORCELearnWithLiger:
-    """Cover the ``liger_loss`` branch inside REINFORCE ``learn()``. Stubs
-    ``_reinforce_loss_liger`` to a fake (loss, metrics) tuple so the test
-    stays CPU-only.
-    """
-
-    def test_learn_liger_loss_drives_reinforce_loss_liger(self):
-        rf = _cpu_llmreinforce(lr=0.05, update_epochs=1, liger_loss=True)
-
-        fake_loss = torch.tensor(0.3, requires_grad=True)
-        fake_metrics = {"kl": 0.05, "entropy": 0.15, "pg_loss": 0.25}
-        # Stub the inner loss fn — isolates the fused branch in learn()
-        # from the actor Liger forward.
-        rf._reinforce_loss_liger = MagicMock(return_value=(fake_loss, fake_metrics))
-
-        vocab = 100
-        inp, mtok = 10, 8
-        seq_len = inp + mtok
-        b = 1
-        completions = [torch.randint(0, vocab, (1, seq_len)) for _ in range(b)]
-        action_masks = [torch.ones(1, seq_len - 1, dtype=torch.bool) for _ in range(b)]
-        turn_ids = torch.tensor(
-            [[-1] * (inp - 1) + [0] * (mtok // 2) + [1] * (mtok - mtok // 2)],
-            dtype=torch.long,
-        )[:, : seq_len - 1]
-        rewards = torch.tensor([[0.5, -0.5]], dtype=torch.float32)
-
-        learn_out = rf.learn((completions, action_masks, rewards), turn_ids=turn_ids)
-
-        assert rf._reinforce_loss_liger.call_count >= 1
-        assert learn_out["loss"] == pytest.approx(0.3, rel=1e-6)
-        assert learn_out["kl"] == pytest.approx(0.05, rel=1e-6)
-        assert learn_out["pg_loss"] == pytest.approx(0.25, rel=1e-6)
-
-    def test_learn_liger_token_with_sampling_logps_uses_fused_kernel(self):
-        """token-level liger_loss=True + captured vLLM logprobs: the
-        correction is fused into the kernel (``vllm_is_ratio``), so learn()
-        keeps the fused path and threads ``sampling_log_probs`` through.
-        """
-        rf = _cpu_llmreinforce(lr=0.05, update_epochs=1, liger_loss=True)
-        assert rf.importance_sampling_level == "token"
-        rf._reinforce_loss_liger = MagicMock(
-            return_value=(
-                torch.tensor(0.5, requires_grad=True),
-                {"kl": 0.1, "entropy": 0.2, "pg_loss": 0.3},
-            )
-        )
-        rf._backward_pass = MagicMock(return_value=None)
-
-        vocab, inp, mtok = 100, 10, 8
-        seq_len = inp + mtok
-        completions = [torch.randint(0, vocab, (1, seq_len))]
-        action_masks = [torch.ones(1, seq_len - 1, dtype=torch.bool)]
-        turn_ids = torch.tensor(
-            [[-1] * (inp - 1) + [0] * (mtok // 2) + [1] * (mtok - mtok // 2)],
-            dtype=torch.long,
-        )[:, : seq_len - 1]
-        rewards = torch.tensor([[0.5, -0.5]], dtype=torch.float32)
-        n_act = int(action_masks[0].sum())
-        sampling_logps = [torch.full((n_act,), -3.0, dtype=torch.float32)]
-
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            rf.learn(
-                (completions, action_masks, rewards),
-                turn_ids=turn_ids,
-                sampling_logps=sampling_logps,
-            )
-        rf._reinforce_loss_liger.assert_called()
-        # sampling_log_probs threaded in after the turn ids and turn count.
-        assert rf._reinforce_loss_liger.call_args.args[7] is not None
-        assert not any(
-            "token-level importance sampling" in str(w.message) for w in caught
-        )
-
-    @pytest.mark.parametrize("correction", [False, True])
-    @pytest.mark.parametrize("sampling", [False, True], ids=["fused", "standard"])
-    def test_turn_level_falls_back_on_batches_with_sampling_logps(
-        self, monkeypatch, correction, sampling
-    ):
-        """A non-colocated turn-level run trains a batch with sampling log-probs unfused."""
-        # Arrange
-        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
-        rf = _cpu_llmreinforce(
-            lr=0.05,
-            update_epochs=1,
-            liger_loss=None,
-            importance_sampling_level="turn",
-            vllm_importance_sampling_correction=correction,
-        )
-        rf._reinforce_loss_liger = MagicMock(
-            return_value=(
-                torch.tensor(0.5, requires_grad=True),
-                {"kl": 0.1, "entropy": 0.2, "pg_loss": 0.3},
-            )
-        )
-
-        # Act
-        metrics = learn_two_turns(rf, sampling)
-
-        # Assert
-        assert rf.liger_loss is True
-        assert rf._reinforce_loss_liger.called is not sampling
-        assert math.isfinite(metrics["loss"])
-
-    def test_turn_level_raises_when_the_run_reweights_tokens(self):
-        # Arrange: a colocated run reads sampling log-probs on every batch.
-        rf = _cpu_llmreinforce(
-            lr=0.05,
-            update_epochs=1,
-            liger_loss=True,
-            importance_sampling_level="turn",
-            vllm_importance_sampling_correction=True,
-        )
-        rf.colocated = True
-        rf.vllm_config = VLLMConfig()
-        rf._reinforce_loss_liger = MagicMock()
-
-        # Act / Assert
-        with pytest.raises(
-            ValueError,
-            match="The fused Liger loss cannot serve this batch: the reinforce Liger "
-            "kernel weights tokens by vLLM sampling log-probs only at token-level "
-            "importance sampling, not 'turn'",
-        ):
-            learn_two_turns(rf, True)
-        rf._reinforce_loss_liger.assert_not_called()
-
-
-def learn_two_turns(rf: REINFORCE, sampling: bool) -> dict[str, float]:
-    """One learn over a two-turn trajectory, with vLLM sampling log-probs when ``sampling``."""
-    vocab, inp, mtok = 100, 10, 8
-    seq_len = inp + mtok
-    completions = [torch.randint(0, vocab, (1, seq_len))]
-    action_masks = [torch.ones(1, seq_len - 1, dtype=torch.bool)]
-    turn_ids = torch.tensor(
-        [[-1] * (inp - 1) + [0] * (mtok // 2) + [1] * (mtok - mtok // 2)],
-        dtype=torch.long,
-    )[:, : seq_len - 1]
-    rewards = torch.tensor([[0.5, -0.5]], dtype=torch.float32)
-    n_act = int(action_masks[0].sum())
-    sampling_logps = (
-        [torch.full((n_act,), -3.0, dtype=torch.float32)] if sampling else None
-    )
-    return rf.learn(
-        (completions, action_masks, rewards),
-        turn_ids=turn_ids,
-        sampling_logps=sampling_logps,
-    )
 
 
 class TestREINFORCEVllmISCorrection:

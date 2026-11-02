@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
+from agilerl.arena.models.env import DEFAULT_ADAPTIVE_TASK_SAMPLING
 from agilerl.components.llm_rollout_data import EpisodeSegments
 from agilerl.distributed.process import get_rank, get_world_size
 from agilerl.llm_envs.harness import RolloutHarness
@@ -62,7 +63,7 @@ class RolloutCollector:
         slot_acquire_timeout_s: float | None = 300.0,
         rank: int | None = None,
         world_size: int | None = None,
-        adaptive_task_sampling: bool = False,
+        adaptive_task_sampling: bool = DEFAULT_ADAPTIVE_TASK_SAMPLING,
         task_families: Sequence[str | None] | None = None,
         task_family_prior_strength: float = DEFAULT_FAMILY_PRIOR_STRENGTH,
     ) -> None:
@@ -86,7 +87,8 @@ class RolloutCollector:
             :func:`~agilerl.distributed.get_world_size`.
         :param adaptive_task_sampling: Draw each group's dataset row by its recent
             informative-group rate (see :meth:`record_group_outcome`) instead of
-            the epoch cycle.
+            the epoch cycle. Only a caller that records group outcomes gains
+            from it; without them every row keeps the same weight.
         :param task_families: Family key of every dataset row (``None`` for a row
             in no family); a row with few groups is weighted by its family's rate.
         :param task_family_prior_strength: Groups' worth of weight a family's rate

@@ -32,3 +32,4 @@ class DPOSpec(LLMAlgorithmSpec):
 
     env_type: ClassVar[LLMEnvType] = LLMEnvType.DATASET
     objective: ClassVar[str] = "preference"
+    supports_sequence_packing: ClassVar[bool] = True

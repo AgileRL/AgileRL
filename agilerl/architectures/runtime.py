@@ -36,6 +36,9 @@ class VllmRuntimeConfig(BaseModel):
     # vLLM >=0.32 keeps Mamba prefix-cache states only at each prompt's replay
     # boundary, so a later turn recomputes the previous reply.
     dense_mamba_prefix_cache: bool | None = Field(default=None)
+    # Async rollout engine attention_backend on compute capability 8.0 GPUs,
+    # where vLLM itself picks FLASH_ATTN.
+    sm80_attention_backend: str | None = Field(default=None, min_length=1)
 
     def engine_kwargs(self) -> dict[str, Any]:
         """Return the engine kwargs this family sets.
@@ -44,7 +47,8 @@ class VllmRuntimeConfig(BaseModel):
         :rtype: dict[str, Any]
         """
         kwargs = self.model_dump(
-            exclude_none=True, exclude={"dense_mamba_prefix_cache"}
+            exclude_none=True,
+            exclude={"dense_mamba_prefix_cache", "sm80_attention_backend"},
         )
         if self.dense_mamba_prefix_cache:
             kwargs["prefix_cache_retention_interval"] = None

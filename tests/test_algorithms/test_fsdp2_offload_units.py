@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
+from dataclasses import replace
 from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -41,6 +42,22 @@ cuda_required = pytest.mark.skipif(
 # ---------------------------------------------------------------------------
 
 
+def _resolved_fsdp(config: FSDPConfig) -> FSDPConfig:
+    """``config`` with unset memory fields and stride filled, as a launcher sets them."""
+    picks = {
+        "checkpoint_every_n_blocks": 1,
+        "reshard_after_forward": True,
+        "routed_expert_chunk_mib": 64,
+        "optim_cpu_offload": False,
+        "activation_offload": False,
+        "cpu_offload": False,
+    }
+    return replace(
+        config,
+        **{name: pick for name, pick in picks.items() if getattr(config, name) is None},
+    )
+
+
 def _make_wrap_stub(**overrides) -> MagicMock:
     """Minimal agent stub for ``LLMAlgorithm.wrap_models``."""
     agent = MagicMock()
@@ -50,6 +67,7 @@ def _make_wrap_stub(**overrides) -> MagicMock:
     agent.colocated = False
     agent.ep = 1
     agent.cp = 1
+    agent.gradient_checkpointing = True
     agent.cosine_lr_schedule_config = None
     agent.lr = 1e-4
     agent.optimizer = MagicMock()
@@ -63,6 +81,7 @@ def _make_wrap_stub(**overrides) -> MagicMock:
     agent._resolve_fsdp_config = MethodType(LLMAlgorithm._resolve_fsdp_config, agent)
     for k, v in overrides.items():
         setattr(agent, k, v)
+    agent.fsdp_config = _resolved_fsdp(agent.fsdp_config)
     return agent
 
 
@@ -1318,6 +1337,7 @@ class TestMaterializeFsdp2FromCpuState:
                 param_dtype="float32",
                 reduce_dtype="float32",
                 routed_expert_chunk_mib=64,
+                checkpoint_every_n_blocks=1,
             ),
             parallel_mesh=ParallelMesh(world=world, hsdp=world["shard"]),
             gradient_checkpointing=True,

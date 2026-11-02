@@ -6,12 +6,10 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
-from torch.distributed.tensor import DTensor
 
 
 @dataclass(frozen=True)
@@ -33,13 +31,6 @@ def _forward_param_names(module: nn.Module) -> list[str]:
     except (TypeError, ValueError):
         return []
     return [name for name in signature.parameters if name != "self"]
-
-
-def _counts_list(counts: Sequence[int] | torch.Tensor) -> list[int]:
-    """Per-expert row counts as a plain list."""
-    if isinstance(counts, torch.Tensor):
-        return [int(count) for count in counts.tolist()]
-    return [int(count) for count in counts]
 
 
 def gpt_oss_expert_params(module: nn.Module) -> GptOssExpertParams | None:
@@ -87,32 +78,6 @@ def gpt_oss_expert_params(module: nn.Module) -> GptOssExpertParams | None:
 def is_gpt_oss_experts_module(module: nn.Module) -> bool:
     """Whether *module* is a packed experts block in the GptOssExperts convention."""
     return gpt_oss_expert_params(module) is not None
-
-
-def _local_weight(weight: torch.Tensor) -> torch.Tensor:
-    """Dense view of an expert weight, including an FSDP DTensor shard."""
-    if isinstance(weight, DTensor):
-        return weight.to_local()
-    return weight
-
-
-def expert_matmul_loop(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    counts: Sequence[int] | torch.Tensor,
-    bias: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """Per-expert ``x @ W[+b]`` over expert-sorted rows with stacked ``[experts, in, out]`` weight."""
-    weight = _local_weight(weight)
-    if bias is not None:
-        bias = _local_weight(bias)
-    outputs = []
-    for expert, rows in enumerate(x.split(_counts_list(counts))):
-        projected = rows @ weight[expert]
-        if bias is not None:
-            projected = projected + bias[expert]
-        outputs.append(projected)
-    return torch.cat(outputs)
 
 
 def apply_gpt_oss_gate(

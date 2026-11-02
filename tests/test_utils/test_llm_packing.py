@@ -10,6 +10,8 @@ boundaries is a property of the FlashAttention-varlen backend and is
 validated on GPU.
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 from torch import nn
@@ -17,13 +19,20 @@ from torch import nn
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.utils.llm_packing import (
     RESETS_AT_DOCUMENT_BOUNDARY,
+    GatedDeltaShape,
+    Mamba2ScanShape,
     PackedBatch,
+    gated_delta_l2norm_blocks,
+    head_norm_shapes,
+    mamba2_scan_launch_ints,
     mixers_without_boundary_reset,
     pack_next_token_frame,
     pack_padded_batch,
     packed_layout,
+    packed_length_classes,
     packed_seq_idx,
     run_per_document,
+    triton_int_class,
     unpack_hidden_states,
     unpack_logprobs,
     unpack_values,
@@ -37,6 +46,11 @@ if HAS_LLM_DEPENDENCIES:
         LlavaConfig,
         LlavaForConditionalGeneration,
         Mamba2Config,
+        NemotronHConfig,
+        Qwen3_5TextConfig,
+    )
+    from transformers.modeling_flash_attention_utils import (
+        prepare_fa_kwargs_from_position_ids,
     )
 
 
@@ -95,6 +109,88 @@ class TestPackPaddedBatch:
             pack_padded_batch(ids[0], mask[0])  # (T,) — missing batch dim
         with pytest.raises(ValueError, match=r"expects \(B, T\) input_ids"):
             pack_padded_batch(ids.unsqueeze(0), mask.unsqueeze(0))  # (1, B, T)
+
+    def test_packed_row_never_exceeds_rows_times_row_budget(self):
+        # Arrange: the memory estimate prices micro_batch x max_model_len tokens.
+        torch.manual_seed(0)
+        micro, row_budget = 8, 64
+        short = torch.randint(1, row_budget + 1, (micro,)).tolist()
+        full = [row_budget] * micro
+        batches = [_make_batch(short), _make_batch(full)]
+
+        # Act
+        tokens = [
+            pack_padded_batch(ids, mask).input_ids.shape[1] for ids, mask in batches
+        ]
+
+        # Assert
+        assert tokens[0] == sum(short)
+        assert tokens[0] <= micro * row_budget
+        assert tokens[1] == micro * row_budget
+
+
+class TestPackPaddedBatchScoreMask:
+    def test_packs_within_row_predictions_and_counts_them_on_the_host(self):
+        # Arrange: row 0 is left-padded, row 1 right-padded.
+        ids = torch.tensor([[0, 5, 6, 7], [8, 9, 0, 0]])
+        mask = ids != 0
+        score_mask = torch.ones(2, 3, dtype=torch.bool)
+
+        # Act
+        packed = pack_padded_batch(ids, mask, score_mask)
+
+        # Assert: 5->6, 6->7 and 8->9 score; 7->8 crosses the row boundary.
+        assert packed.score_mask.tolist() == [[True, True, False, True]]
+        assert type(packed.n_scored) is int
+        assert packed.n_scored == 3
+
+    def test_without_a_score_mask_packs_none(self):
+        ids, mask = _make_batch([3, 2])
+
+        packed = pack_padded_batch(ids, mask)
+
+        assert packed.score_mask is None
+        assert packed.n_scored is None
+
+
+@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="needs transformers")
+class TestPackedBatchFlashAttentionKwargs:
+    def test_matches_what_flash_attention_derives_from_position_ids(self):
+        # Arrange
+        ids, mask = _make_batch([6, 3, 4])
+        packed = pack_padded_batch(ids, mask)
+        (cu_q, cu_k), (max_q, max_k) = prepare_fa_kwargs_from_position_ids(
+            packed.position_ids
+        )
+
+        # Act
+        kwargs = packed.flash_attention_kwargs(1)
+
+        # Assert: same offsets, with max lengths as host ints.
+        assert kwargs["cu_seq_lens_q"].dtype == torch.int32
+        assert torch.equal(kwargs["cu_seq_lens_q"], cu_q)
+        assert torch.equal(kwargs["cu_seq_lens_k"], cu_k)
+        assert type(kwargs["max_length_q"]) is int
+        assert kwargs["max_length_q"] == int(max_q) == 6
+        assert kwargs["max_length_k"] == int(max_k) == 6
+
+    def test_stacked_copies_span_every_row_of_the_flattened_batch(self):
+        # Arrange
+        ids, mask = _make_batch([6, 3, 4])
+        packed = pack_padded_batch(ids, mask)
+        (cu_q, _), (max_q, _) = prepare_fa_kwargs_from_position_ids(
+            packed.position_ids.repeat(2, 1)
+        )
+
+        # Act
+        kwargs = packed.flash_attention_kwargs(2)
+
+        # Assert: the actor copy's documents, then the critic copy's.
+        assert kwargs["cu_seq_lens_q"].tolist() == [0, 6, 9, 13, 19, 22, 26]
+        assert kwargs["cu_seq_lens_q"].dtype == torch.int32
+        assert torch.equal(kwargs["cu_seq_lens_q"], cu_q)
+        assert kwargs["cu_seq_lens_k"] is kwargs["cu_seq_lens_q"]
+        assert kwargs["max_length_q"] == kwargs["max_length_k"] == int(max_q) == 6
 
 
 class TestUnpackLogprobs:
@@ -191,9 +287,12 @@ class TestPackNextTokenFrame:
         # Arrange
         attention_mask = torch.tensor([[0, 1, 1, 1], [1, 1, 0, 0]])
         frame = torch.arange(2 * 3 * 2).reshape(2, 3, 2)
+        ids = torch.zeros_like(attention_mask)
 
         # Act
-        packed = pack_next_token_frame(frame, attention_mask, -1)
+        packed = pack_next_token_frame(
+            frame, pack_padded_batch(ids, attention_mask), -1
+        )
 
         # Assert
         # Row 0 holds tokens 1..3 (positions 1, 2, then its appended tail); row 1
@@ -208,9 +307,10 @@ class TestPackNextTokenFrame:
         attention_mask = torch.tensor([[1, 1, 1, 0], [1, 1, 0, 0]])
         next_token = ids[:, 1:].masked_fill(attention_mask[:, 1:] == 0, -1)
 
-        frame = pack_next_token_frame(next_token, attention_mask, -1)
+        packed = pack_padded_batch(ids, attention_mask)
+        frame = pack_next_token_frame(next_token, packed, -1)
 
-        packed_targets = pack_padded_batch(ids, attention_mask).input_ids[0, 1:]
+        packed_targets = packed.input_ids[0, 1:]
         assert packed_targets.tolist() == [6, 7, 8, 9]
         # The prediction across the row boundary takes the fill value.
         assert frame[0].tolist() == [6, 7, -1, 9]
@@ -388,6 +488,41 @@ def _tiny_mamba2_config():
         state_size=8,
         conv_kernel=4,
         chunk_size=4,
+    )
+
+
+def _tiny_qwen3_5_config():
+    return Qwen3_5TextConfig(
+        vocab_size=32,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        layer_types=["linear_attention", "full_attention"],
+        linear_num_value_heads=4,
+        linear_num_key_heads=2,
+        linear_key_head_dim=16,
+        linear_value_head_dim=16,
+    )
+
+
+def _tiny_nemotron_h_config():
+    return NemotronHConfig(
+        vocab_size=32,
+        hidden_size=32,
+        num_hidden_layers=2,
+        hybrid_override_pattern="M*",
+        mamba_num_heads=8,
+        mamba_head_dim=8,
+        n_groups=2,
+        ssm_state_size=8,
+        chunk_size=64,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=8,
+        intermediate_size=64,
     )
 
 
@@ -591,6 +726,227 @@ class TestMixersWithoutBoundaryReset:
         model = nn.Sequential(SymmetricConvMixer())
 
         assert mixers_without_boundary_reset(model) == []
+
+
+class Mamba2ScanMixer(ScanMixer):
+    """Scan mixer with the Mamba-2 chunked-scan dimensions."""
+
+    def __init__(
+        self, chunk_size: int, num_heads: int, n_groups: int, intermediate_size: int
+    ) -> None:
+        super().__init__()
+        self.chunk_size = chunk_size
+        self.num_heads = num_heads
+        self.n_groups = n_groups
+        self.intermediate_size = intermediate_size
+
+
+GRANITE_TINY_SCAN = Mamba2ScanShape(
+    chunk_size=256, num_heads=48, n_groups=1, intermediate_size=3072
+)
+
+
+def _granite_tiny_mixer() -> Mamba2ScanMixer:
+    return Mamba2ScanMixer(*GRANITE_TINY_SCAN)
+
+
+class TestTritonIntClass:
+    @pytest.mark.parametrize(
+        ("value", "expected"), [(1, 1), (16, 16), (4096, 16), (2, 0), (17, 0)]
+    )
+    def test_classifies_like_triton_specialization(self, value, expected):
+        assert triton_int_class(value) == expected
+
+
+class TestMamba2ScanLaunchInts:
+    def test_chunks_heads_per_program_and_norm_rows(self):
+        assert mamba2_scan_launch_ints(GRANITE_TINY_SCAN, 29696, 132) == (
+            116,
+            43,
+            225,
+        )
+
+    def test_heads_per_program_stops_at_heads_per_group(self):
+        chunks, heads_per_program, _ = mamba2_scan_launch_ints(
+            GRANITE_TINY_SCAN, 65536, 132
+        )
+
+        assert (chunks, heads_per_program) == (256, 48)
+
+    def test_grouped_norm_splits_rows_over_fewer_programs(self):
+        shape = Mamba2ScanShape(
+            chunk_size=128, num_heads=64, n_groups=8, intermediate_size=4096
+        )
+
+        assert mamba2_scan_launch_ints(shape, 1650, 132)[2] == 50
+
+
+class GatedDeltaMixer(ScanMixer):
+    """Scan mixer with the gated delta-net head dimensions."""
+
+    def __init__(self, num_v_heads: int, head_k_dim: int) -> None:
+        super().__init__()
+        self.num_v_heads = num_v_heads
+        self.head_k_dim = head_k_dim
+
+
+class HeadNormAttention(nn.Module):
+    """Attention with per-head query and key norms."""
+
+    def __init__(self, heads: int, kv_heads: int, head_dim: int) -> None:
+        super().__init__()
+        self.config = SimpleNamespace(
+            num_attention_heads=heads, num_key_value_heads=kv_heads
+        )
+        self.head_dim = head_dim
+        self.q_norm = nn.RMSNorm(head_dim)
+        self.k_norm = nn.RMSNorm(head_dim)
+
+
+class TestGatedDeltaL2normBlocks:
+    def test_one_block_per_65536_query_rows(self):
+        shape = GatedDeltaShape(num_v_heads=32, head_k_dim=128)
+
+        assert [
+            gated_delta_l2norm_blocks(shape, length) for length in (1, 2048, 2049)
+        ] == [1, 1, 2]
+
+    def test_wide_heads_take_the_per_row_kernel(self):
+        shape = GatedDeltaShape(num_v_heads=32, head_k_dim=768)
+
+        assert gated_delta_l2norm_blocks(shape, 65536) == 0
+
+
+class TestHeadNormShapes:
+    def test_heads_and_head_dim_of_each_distinct_norm(self):
+        model = nn.Sequential(
+            HeadNormAttention(16, 4, 256),
+            HeadNormAttention(16, 4, 256),
+            HeadNormAttention(8, 2, 128),
+        )
+
+        assert head_norm_shapes(model) == [(2, 128), (4, 256), (8, 128), (16, 256)]
+
+    def test_model_without_per_head_norms_has_none(self):
+        model = nn.Sequential(nn.Linear(4, 4), nn.RMSNorm(4))
+
+        assert head_norm_shapes(model) == []
+
+
+class TestPackedLengthClasses:
+    def test_center_first_then_nearest_length_of_each_class(self):
+        # Arrange
+        model = nn.Sequential(_granite_tiny_mixer(), _granite_tiny_mixer())
+
+        # Act
+        lengths = packed_length_classes(model, 29696, 20000, 132)
+
+        # Assert
+        assert lengths == [
+            *(20000, 19999, 20225, 20240, 20989, 19008, 21761, 21776),
+            *(10560, 10559, 4096, 4095, 512, 511, 256, 255, 132, 128),
+        ]
+
+    def test_center_at_the_budget_runs_longest_first(self):
+        model = nn.Sequential(GatedDeltaMixer(num_v_heads=32, head_k_dim=128))
+
+        lengths = packed_length_classes(model, 8000, 8000, 132)
+
+        assert lengths == [8000, 7999, 6336, 6335, 6144, 4096, 2048, 132, 128]
+
+    def test_every_kernel_group_key_up_to_the_budget_is_reached(self):
+        # Arrange
+        delta_net = GatedDeltaMixer(num_v_heads=32, head_k_dim=128)
+        model = nn.Sequential(
+            _granite_tiny_mixer(), delta_net, HeadNormAttention(16, 4, 256)
+        )
+
+        def norm(rows: int) -> tuple[int, int, bool]:
+            per_program = triton_int_class(-(-rows // 132))
+            return (triton_int_class(rows), per_program, rows >= 32768)
+
+        groups = [
+            lambda length: norm(length)[:2],
+            lambda length: norm(4 * length),
+            lambda length: norm(16 * length),
+            lambda length: tuple(
+                triton_int_class(value)
+                for value in (
+                    length,
+                    *mamba2_scan_launch_ints(GRANITE_TINY_SCAN, length, 132),
+                )
+            ),
+            lambda length: -(-32 * length // 65536),
+        ]
+
+        # Act
+        lengths = packed_length_classes(model, 12000, 5000, 132)
+
+        # Assert
+        for group in groups:
+            assert {group(length) for length in range(4, 12001)} == {
+                group(length) for length in lengths
+            }
+
+    def test_gated_delta_net_adds_the_nearest_length_of_each_l2norm_block(self):
+        model = nn.Sequential(GatedDeltaMixer(num_v_heads=32, head_k_dim=128))
+
+        lengths = packed_length_classes(model, 8000, 5000, 132)
+
+        assert lengths == [5000, 4992, 4224, 4223, 4096, 6145, 2048, 132, 128]
+
+    def test_per_head_norm_adds_the_first_length_on_the_block_kernel(self):
+        model = nn.Sequential(CausalConvMixer(), HeadNormAttention(16, 4, 256))
+
+        lengths = packed_length_classes(model, 2112, 1000, 132)
+
+        assert next(length for length in lengths if 16 * length >= 32768) == 2048
+
+    def test_mixers_without_a_chunked_scan_split_on_length_alone(self):
+        model = nn.Sequential(CausalConvMixer())
+
+        assert packed_length_classes(model, 100, 50, 132) == [50, 48]
+
+    @pytest.mark.skipif(
+        not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed"
+    )
+    def test_qwen3_5_hybrid_covers_its_delta_net_and_head_norms(self):
+        # Arrange
+        model = AutoModelForCausalLM.from_config(_tiny_qwen3_5_config())
+        stub = nn.Sequential(
+            GatedDeltaMixer(num_v_heads=4, head_k_dim=16), HeadNormAttention(4, 2, 16)
+        )
+
+        # Act
+        lengths = packed_length_classes(model, 40000, 20000, 132)
+
+        # Assert
+        assert head_norm_shapes(model) == [(2, 16), (4, 16)]
+        assert lengths == packed_length_classes(stub, 40000, 20000, 132)
+        assert 16384 in lengths
+
+    @pytest.mark.skipif(
+        not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed"
+    )
+    def test_nemotron_h_covers_its_mamba2_scan(self):
+        model = AutoModelForCausalLM.from_config(_tiny_nemotron_h_config())
+        stub = nn.Sequential(
+            Mamba2ScanMixer(
+                chunk_size=64, num_heads=8, n_groups=2, intermediate_size=64
+            )
+        )
+
+        assert packed_length_classes(model, 8000, 4000, 132) == packed_length_classes(
+            stub, 8000, 4000, 132
+        )
+
+    @pytest.mark.skipif(
+        not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed"
+    )
+    def test_attention_only_model_has_none(self):
+        model = AutoModelForCausalLM.from_config(_tiny_llama_config())
+
+        assert packed_length_classes(model, 4096, 2048, 132) == []
 
 
 class _PackingGateStub:

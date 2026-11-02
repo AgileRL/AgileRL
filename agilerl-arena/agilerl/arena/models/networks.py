@@ -18,7 +18,6 @@ from pydantic import (
 )
 from typing_extensions import Self
 
-from agilerl.arena.memory.resolve.sequences import OMITTED_GPU_MEMORY_UTILIZATION
 from agilerl.arena.models.descriptions import (
     ACTIVATION_CONV,
     CHANNEL_SIZE,
@@ -762,11 +761,15 @@ class LoraConfigDict(BaseModel):
         default="CAUSAL_LM", min_length=1, description="PEFT task type for the adapter."
     )
     lora_dropout: float = Field(
-        default=0.05,
+        default=0.0,
         ge=0.0,
         le=1.0,
         title="Dropout",
-        description="Dropout on the adapter. Must be 0 when target_parameters is set.",
+        description=(
+            "Dropout on the adapter. Must be 0 when target_parameters is set. "
+            "Rollout algorithms (GRPO, CISPO, GSPO, LLMPPO, LLMREINFORCE) "
+            "sample with vLLM, which applies no dropout."
+        ),
     )
 
     @field_serializer("target_modules")
@@ -814,14 +817,15 @@ class VLLMConfig(BaseModel):
             "is kept."
         ),
     )
-    gpu_memory_utilization: float = Field(
-        default=OMITTED_GPU_MEMORY_UTILIZATION,
+    gpu_memory_utilization: float | None = Field(
+        default=None,
         ge=0.0,
         le=1.0,
         description=(
             "Share of GPU memory vLLM reserves for weights and KV cache. When "
             "generation is colocated with training, this has to leave room for "
-            "the trainer."
+            "the trainer. Unset is 0.9 on a rollout engine, which has its GPUs "
+            "to itself, and 0.3 colocated."
         ),
     )
     max_num_seqs: int | None = Field(
@@ -830,9 +834,9 @@ class VLLMConfig(BaseModel):
         description=(
             "Sequences vLLM decodes concurrently. Set it to at least "
             "group_size so a GRPO group does not queue. Unset gives colocated "
-            "generation 8 and each rollout engine one sequence per episode it "
-            "runs at once (rollout_batch_size / rollout_engines_per_agent x "
-            "group_size)."
+            "generation 16 and each rollout engine one sequence per episode it "
+            "runs at once (rollout_batch_size / rollout_engines_per_agent, "
+            "rounded up, x group_size at its HPO ceiling)."
         ),
     )
     max_num_batched_tokens: int | None = Field(
@@ -851,7 +855,10 @@ class VLLMConfig(BaseModel):
     quantization: str | None = Field(
         default=None,
         min_length=1,
-        description="Quantization applied to the generation engine.",
+        description=(
+            "Quantization applied to the generation engine, e.g. fp8. Unset or "
+            "none serves unquantized weights."
+        ),
     )
     vllm_model_name_or_path: str | None = Field(
         default=None,
@@ -893,14 +900,14 @@ class VLLMConfig(BaseModel):
 def default_rollout_vllm_config() -> VLLMConfig:
     """The vLLM settings a rollout run gets when the manifest names none.
 
-    The 0.9 memory utilization relies on colocated generation sleeping between
-    calls.
+    Colocated generation shares the trainer's GPU, so it sleeps between calls;
+    sleeping is what affords the 0.9 memory utilization. ``max_num_seqs`` is
+    left unset, so each engine resolves it from the episodes it runs.
 
     :returns: The default engine config.
     :rtype: VLLMConfig
     """
     return VLLMConfig(
-        max_num_seqs=16,
         gpu_memory_utilization=0.9,
     )
 
@@ -909,9 +916,8 @@ def resolve_lora_defaults(lora: LoraConfigDict, hub_id: str) -> None:
     """Fill a LoRA config's catalog defaults in place.
 
     Unset ``target_parameters`` on a packed-MoE catalog model adapts every
-    expert path and sets ``lora_dropout`` to 0; ``[]`` adapts none. Set
-    expert paths with an unset ``lora_dropout`` also take 0. Untracked Hub
-    ids are left as they are.
+    expert path and sets ``lora_dropout`` to 0; ``[]`` adapts none. Untracked
+    Hub ids are left as they are.
 
     :param lora: The config to resolve.
     :type lora: LoraConfigDict
@@ -921,13 +927,9 @@ def resolve_lora_defaults(lora: LoraConfigDict, hub_id: str) -> None:
     entry = SUPPORTED_MODEL_INFO.get(hub_id)
     if entry is None or not entry.parameters:
         return
-    filled = lora.target_parameters is None
-    if filled:
+    if lora.target_parameters is None:
         lora.target_parameters = sorted(entry.parameters)
-    # PEFT parameter-level LoRA cannot apply dropout.
-    if lora.target_parameters and (
-        filled or "lora_dropout" not in lora.model_fields_set
-    ):
+        # PEFT parameter-level LoRA cannot apply dropout.
         lora.lora_dropout = 0.0
 
 

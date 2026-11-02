@@ -43,6 +43,8 @@ from transformers import (
     NemotronHForCausalLM,
     PretrainedConfig,
     PreTrainedModel,
+    Qwen3MoeConfig,
+    Qwen3MoeForCausalLM,
     SiglipVisionConfig,
     SiglipVisionModel,
 )
@@ -57,6 +59,8 @@ from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.distributed import fsdp as dmod
 from agilerl.distributed import gather_params
 from agilerl.llm_envs import DatasetEnv
+from agilerl.lora.moe import device_expert_backend
+from agilerl.lora.moe import grouped_gemm as moe_gemm
 from agilerl.utils import llm_utils as llm_utils_module
 from agilerl.utils.algo_utils import CosineLRScheduleConfig
 from agilerl.utils.llm_utils import (
@@ -89,6 +93,7 @@ from agilerl.utils.llm_utils import (
     gather_to_host,
     get_lora_params,
     get_model_name_or_path,
+    has_vision_tower,
     hf_completion_lengths,
     k3_kl_penalty_reference,
     language_model_attn_implementation,
@@ -1005,7 +1010,7 @@ def test_get_model_name_or_path_helpers():
 
 
 def test_k3_helper_matches_torch() -> None:
-    """K3 estimator helper is the same formula Liger ships."""
+    """K3 estimator helper matches the closed-form K3 formula."""
     torch.manual_seed(5)
     ref = torch.randn(3, 4) * 0.1
     policy = torch.randn(3, 4) * 0.1
@@ -1014,7 +1019,7 @@ def test_k3_helper_matches_torch() -> None:
     assert torch.allclose(calculate_k3_kl(ref, policy), expected)
 
 
-def test_k3_helper_matches_liger_direction() -> None:
+def test_k3_helper_uses_reference_first_order() -> None:
     """Reference-first order estimates KL(policy || reference), not the reverse."""
     ref = torch.tensor([-1.0, -1.0])
     policy = torch.tensor([-1.0, -2.0])
@@ -1177,6 +1182,11 @@ class TestMicroBatchMetrics:
 
         assert metrics.read() == []
         assert metrics.means() == {"loss": 0.0, "kl": 0.0}
+
+    def test_read_is_empty_before_any_micro_batch(self) -> None:
+        metrics = MicroBatchMetrics(("loss",))
+
+        assert metrics.read() == []
 
     def test_detaches_tensors_that_carry_gradients(self) -> None:
         weight = torch.tensor(2.0, requires_grad=True)
@@ -1348,7 +1358,7 @@ class TestPoolLogRatioByLevelBadReduction:
 
 
 class TestClippedIsSurrogate:
-    """The shared token/turn/sequence clipped surrogate used by the non-Liger
+    """The shared token/turn/sequence clipped surrogate used by the
     PPO and REINFORCE paths. token/turn/sequence are points on one
     ratio-pooling axis, so the level collapses cleanly at the limits.
     """
@@ -1489,7 +1499,7 @@ class TestCreateModelFromNameOrPathValueHead:
     """
 
     def test_add_value_head_calls_value_head_loader(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         from agilerl.utils import llm_utils as llm_utils_module
 
@@ -1510,11 +1520,14 @@ class TestCreateModelFromNameOrPathValueHead:
         )
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
         sentinel_model = nn.Identity()
-        with patch.object(
-            llm_utils_module.AutoModelForCausalLMWithValueHead,
-            "from_pretrained",
-            return_value=sentinel_model,
-        ) as mock_loader:
+        with (
+            patch.object(
+                llm_utils_module.AutoModelForCausalLMWithValueHead,
+                "from_pretrained",
+                return_value=sentinel_model,
+            ) as mock_loader,
+            caplog.at_level(logging.INFO, logger=llm_utils_module.__name__),
+        ):
             out = llm_utils_module.create_model_from_name_or_path(
                 "some/model",
                 "sdpa",
@@ -1522,6 +1535,9 @@ class TestCreateModelFromNameOrPathValueHead:
                 use_distributed=False,
             )
         assert out is sentinel_model
+        assert "Trainer attention backend: sdpa" in caplog.messages
+        # Default model_config is built when not supplied; verify the loader saw
+        # the model name plus the synthesized dtype/attn keys.
         call_kwargs = mock_loader.call_args.kwargs
         assert call_kwargs["pretrained_model_name_or_path"] == "some/model"
         assert call_kwargs["attn_implementation"] == "sdpa"
@@ -2546,6 +2562,18 @@ class TestLanguageModelAttnImplementation:
             language_model_attn_implementation(module)
 
 
+class TestHasVisionTower:
+    def test_vision_language_model_has_one(self):
+        assert has_vision_tower(tiny_vl_model("eager")) is True
+
+    def test_causal_lm_has_none(self):
+        model = LlamaForCausalLM._from_config(
+            tiny_llama_config(), attn_implementation="eager"
+        )
+
+        assert has_vision_tower(model) is False
+
+
 class TestReportModelKernels:
     def test_logs_attention_per_sub_model(self, caplog):
         # Arrange
@@ -2561,6 +2589,16 @@ class TestReportModelKernels:
         assert "attention language_model (LlamaForCausalLM): eager" in caplog.text
         assert "attention vision_model (SiglipVisionModel): eager" in caplog.text
         assert "mamba fast path" not in caplog.text
+
+    def test_logs_language_model_backend_at_info(self, caplog):
+        model = LlamaForCausalLM._from_config(
+            tiny_llama_config(), attn_implementation="eager"
+        )
+
+        with caplog.at_level(logging.INFO, logger=llm_utils_module.__name__):
+            report_model_kernels(model, "eager")
+
+        assert "Trainer attention backend: eager" in caplog.messages
 
     def test_logs_mamba_fast_path(self, caplog):
         # Arrange
@@ -2587,30 +2625,55 @@ class TestReportModelKernels:
         # Assert
         assert f"mamba fast path {mixer_namespace}: {fast_path}" in caplog.text
 
-    def test_logs_grouped_mm_probe_when_cuda_present(self, monkeypatch, caplog):
+    def test_logs_expert_gemm_backend_when_cuda_present(self, monkeypatch, caplog):
+        # Arrange
+        config = Qwen3MoeConfig(
+            vocab_size=32,
+            hidden_size=16,
+            intermediate_size=32,
+            moe_intermediate_size=16,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            num_key_value_heads=1,
+            head_dim=8,
+            num_experts=4,
+            num_experts_per_tok=2,
+        )
+        model = Qwen3MoeForCausalLM._from_config(
+            config, attn_implementation="eager", dtype=torch.bfloat16
+        )
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(torch.cuda, "current_device", lambda: 3)
+        monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _index: (10, 0))
+        monkeypatch.setattr(moe_gemm, "probe_grouped_mm", lambda *_args: None)
+        device_expert_backend.cache_clear()
+
+        # Act
+        with caplog.at_level(logging.DEBUG, logger=llm_utils_module.__name__):
+            report_model_kernels(model, "eager")
+        device_expert_backend.cache_clear()
+
+        # Assert
+        assert "expert GEMM backend torch.bfloat16: grouped_mm" in caplog.text
+
+    def test_omits_expert_gemm_backend_for_a_model_without_experts(
+        self, monkeypatch, caplog
+    ):
         # Arrange
         model = LlamaForCausalLM._from_config(
             tiny_llama_config(), attn_implementation="eager"
         )
-        probed = []
-
-        def probe(device_index, dtype):
-            probed.append((device_index, dtype))
-            return True
-
         monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-        monkeypatch.setattr(torch.cuda, "current_device", lambda: 3)
-        monkeypatch.setattr(llm_utils_module, "grouped_mm_supported", probe)
+        monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _index: (9, 0))
 
         # Act
         with caplog.at_level(logging.DEBUG, logger=llm_utils_module.__name__):
             report_model_kernels(model, "eager")
 
         # Assert
-        assert probed == [(3, torch.float32)]
-        assert "grouped_mm torch.float32: True" in caplog.text
+        assert "expert GEMM backend" not in caplog.text
 
-    def test_omits_grouped_mm_probe_without_cuda(self, monkeypatch, caplog):
+    def test_omits_expert_gemm_backend_without_cuda(self, monkeypatch, caplog):
         model = LlamaForCausalLM._from_config(
             tiny_llama_config(), attn_implementation="eager"
         )
@@ -2619,7 +2682,7 @@ class TestReportModelKernels:
         with caplog.at_level(logging.DEBUG, logger=llm_utils_module.__name__):
             report_model_kernels(model, "eager")
 
-        assert "grouped_mm" not in caplog.text
+        assert "expert GEMM backend" not in caplog.text
 
     def test_raises_when_language_model_ignores_request(self, monkeypatch):
         monkeypatch.setattr(LlamaPreTrainedModel, "_supports_flex_attn", False)
@@ -4131,46 +4194,23 @@ class TestCheckVllmLoraExportComplete:
             check_vllm_lora_export_complete(peft_model, "actor", live_state, exported)
 
 
-class TestCrossRankLigerAlign:
-    def test_needs_cross_rank_seq_padding_gates_on_liger_token_is(self):
+class TestCrossRankSeqPadding:
+    def test_needs_cross_rank_seq_padding_gates_on_fsdp_or_distributed(self):
+        assert llm_utils_module.needs_cross_rank_seq_padding(
+            SimpleNamespace(fsdp_config=object()),
+            world_size=2,
+        )
+        assert llm_utils_module.needs_cross_rank_seq_padding(
+            SimpleNamespace(distributed=True),
+            world_size=2,
+        )
         assert not llm_utils_module.needs_cross_rank_seq_padding(
-            SimpleNamespace(liger_loss=True, importance_sampling_level="token"),
+            SimpleNamespace(distributed=True),
             world_size=1,
         )
-        assert not llm_utils_module.needs_cross_rank_seq_padding(
-            SimpleNamespace(liger_loss=False, importance_sampling_level="token"),
-            world_size=2,
-        )
-        assert not llm_utils_module.needs_cross_rank_seq_padding(
-            SimpleNamespace(liger_loss=True, importance_sampling_level="trajectory"),
-            world_size=2,
-        )
-        # Missing attrs: liger_loss defaults False; IS level defaults "token".
         assert not llm_utils_module.needs_cross_rank_seq_padding(
             SimpleNamespace(),
             world_size=2,
-        )
-        assert llm_utils_module.needs_cross_rank_seq_padding(
-            SimpleNamespace(liger_loss=True, importance_sampling_level="token"),
-            world_size=2,
-        )
-        assert llm_utils_module.needs_cross_rank_seq_padding(
-            SimpleNamespace(liger_loss=True),  # default IS level is token
-            world_size=2,
-        )
-
-    def test_needs_cross_rank_seq_padding_gates_on_fsdp_or_distributed(self):
-        assert llm_utils_module.needs_cross_rank_seq_padding(
-            SimpleNamespace(fsdp_config=object(), liger_loss=False),
-            world_size=2,
-        )
-        assert llm_utils_module.needs_cross_rank_seq_padding(
-            SimpleNamespace(distributed=True, liger_loss=False),
-            world_size=2,
-        )
-        assert not llm_utils_module.needs_cross_rank_seq_padding(
-            SimpleNamespace(distributed=True, liger_loss=False),
-            world_size=1,
         )
 
     def test_pad_completion_batch_to_seq_len_happy_and_noop(self):

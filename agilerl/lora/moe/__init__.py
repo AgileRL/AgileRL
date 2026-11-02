@@ -19,7 +19,7 @@ subclasses, and ``model`` the whole-model passes.
 """
 
 from agilerl.lora.moe.adapters import resolve_adapters, split_lora_delta, wrapper_chain
-from agilerl.lora.moe.grouped_gemm import grouped_mm_supported
+from agilerl.lora.moe.grouped_gemm import device_expert_backend
 from agilerl.lora.moe.model import (
     bind_routed_experts_config,
     install_packed_expert_grouped_gemm,
@@ -44,7 +44,7 @@ __all__ = [
     "SortedExpertsLoraWrapper",
     "TransposedExpertsLoraWrapper",
     "bind_routed_experts_config",
-    "grouped_mm_supported",
+    "device_expert_backend",
     "install_packed_expert_grouped_gemm",
     "materializes_expert_lora",
     "moe_expert_target_parameters",

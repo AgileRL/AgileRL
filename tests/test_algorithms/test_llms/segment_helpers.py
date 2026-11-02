@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 import pytest
 import torch
+from torch.distributed.tensor import DTensor, distribute_tensor
 
 from agilerl.algorithms.core import LLMAlgorithm
 from agilerl.components.llm_rollout_data import EpisodeSegments
@@ -28,8 +29,15 @@ EPISODE_SEGMENTS = [
 ]
 REAL_LENGTHS = [10, 8, 8, 10]
 NUM_SEGMENT_ROWS = 6
-# 24 action tokens over the 6 segment rows.
-MEAN_SEGMENT_ROW_ACTION_TOKENS = 4.0
+# FSDP fields the training-memory search sets on CUDA; CPU ranks set them by hand.
+RESOLVED_FSDP_MEMORY = {
+    "checkpoint_every_n_blocks": 1,
+    "reshard_after_forward": True,
+    "routed_expert_chunk_mib": 64,
+    "optim_cpu_offload": False,
+    "activation_offload": False,
+    "cpu_offload": False,
+}
 
 
 def episode_batch(pad_token_id: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -90,28 +98,6 @@ def episode_sampling_supports(pad_token_id: int, width: int = 3) -> list[torch.T
     return supports
 
 
-def action_token_policy_loss(
-    policy_hidden: torch.Tensor,
-    _head_w: torch.Tensor,
-    _head_b: torch.Tensor | None,
-    _target_ids: torch.Tensor,
-    mask: torch.Tensor,
-    *_args: Any,
-    **_kwargs: Any,
-) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
-    """Liger fused policy loss stand-in: zero loss, ``kl`` = the micro-batch's action tokens."""
-    zero = torch.tensor(0.0)
-    return (policy_hidden * 0.0).sum(), (mask.sum().float(), zero, zero, zero, zero)
-
-
-def use_fake_liger_policy_loss(
-    agent: LLMAlgorithm, monkeypatch: pytest.MonkeyPatch, module: str
-) -> None:
-    """Train ``agent`` on the Liger path with :func:`action_token_policy_loss` as its kernel."""
-    monkeypatch.setattr(f"{module}.apply_fused_policy_loss", action_token_policy_loss)
-    agent.liger_loss = True
-
-
 def pad_to_eight_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     """Run as one of two ranks whose other rank has 8 segment rows.
 
@@ -130,6 +116,13 @@ def pad_to_eight_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def whole(tensor: torch.Tensor) -> torch.Tensor:
+    """``tensor`` on one process; all-gathers an FSDP-sharded DTensor."""
+    if isinstance(tensor, DTensor):
+        return tensor.full_tensor()
+    return tensor
+
+
 def record_step_gradients(
     agent: LLMAlgorithm, monkeypatch: pytest.MonkeyPatch
 ) -> list[dict[str, torch.Tensor]]:
@@ -140,7 +133,7 @@ def record_step_gradients(
     def recording_step(*args: Any, **kwargs: Any) -> None:
         recorded.append(
             {
-                name: param.grad.detach().clone()
+                name: whole(param.grad.detach()).clone()
                 for name, param in agent.actor.named_parameters()
                 if "lora_" in name and param.grad is not None
             }
@@ -153,7 +146,7 @@ def record_step_gradients(
 
 def lora_weights(agent: LLMAlgorithm) -> dict[str, torch.Tensor]:
     return {
-        name: param.detach().clone()
+        name: whole(param.detach()).clone()
         for name, param in agent.actor.named_parameters()
         if "lora_" in name
     }
@@ -165,7 +158,12 @@ def seed_lora_weights(agent: LLMAlgorithm) -> None:
     with torch.no_grad():
         for name, param in sorted(agent.actor.named_parameters()):
             if "lora_" in name:
-                param.copy_(torch.randn(param.shape, generator=generator))
+                value = torch.randn(param.shape, generator=generator)
+                if isinstance(param, DTensor):
+                    value = distribute_tensor(
+                        value, param.device_mesh, param.placements
+                    )
+                param.copy_(value)
 
 
 def rows_from_other_ranks(
@@ -258,7 +256,7 @@ def balanced_learn_worker(
         micro_batch_size_per_gpu=1,
         mini_batch_size=2,
         wrap=True,
-        fsdp_config=FSDPConfig(optim_cpu_offload=False, param_dtype="float32"),
+        fsdp_config=FSDPConfig(param_dtype="float32", **RESOLVED_FSDP_MEMORY),
     )
     seed_lora_weights(agent)
     steps = record_step_gradients(agent, pytest.MonkeyPatch())

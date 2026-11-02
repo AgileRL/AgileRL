@@ -1,19 +1,49 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
-"""Unset FSDP memory fields, and where full CPU offload runs."""
+"""The training-memory search: DDP or FSDP and speed rungs by modeled cost, then memory-only last resorts."""
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import replace
-from typing import TypeVar
+import logging
+import math
+from dataclasses import dataclass, replace
+from typing import Literal
 
 from agilerl.arena.memory.breakdown import PhaseBreakdown
-from agilerl.arena.memory.formulas import ROUTED_CHUNK_MIB_CHOICES
-from agilerl.arena.memory.specs import DeviceSpec, ModelSpec, TrainingSettings
-from agilerl.arena.models.fsdp import FSDPConfig
+from agilerl.arena.memory.estimator import estimate_training
+from agilerl.arena.memory.formulas import (
+    DEFAULT_ROUTED_CHUNK_BYTES,
+    ROUTED_CHUNK_MIB_CHOICES,
+    checkpointed_blocks,
+)
+from agilerl.arena.memory.resolve.batch import (
+    ROW_FILL,
+    micro_batch_row_candidates,
+    micro_batch_token_candidates,
+    rows_within_budget,
+)
+from agilerl.arena.memory.resolve.learn_costs import LearnCosts, learn_costs
+from agilerl.arena.memory.specs import (
+    DTYPE_BYTES,
+    DeviceSpec,
+    GiB,
+    MiB,
+    ModelArch,
+    ModelSpec,
+    TrainingSettings,
+)
+from agilerl.arena.models.algorithms.base import LLMAlgorithmSpec
+from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
+from agilerl.arena.models.fsdp import FSDP_MEMORY_FIELDS, FSDPConfig
 
-Choice = TypeVar("Choice", bool, int)
+logger = logging.getLogger(__name__)
+
+Residency = Literal["gathered", "reshard"]
+
+# Strides an unset fsdp.checkpoint_every_n_blocks may take, least recompute first.
+CHECKPOINT_STRIDES = (4, 2, 1)
+# Residencies, fewest all-gathers first.
+RESIDENCIES: tuple[Residency, ...] = ("gathered", "reshard")
 
 
 def cpu_offload_blocker(fsdp: FSDPConfig | None, async_rollout: bool) -> str | None:
@@ -32,173 +62,520 @@ def cpu_offload_blocker(fsdp: FSDPConfig | None, async_rollout: bool) -> str | N
     )
 
 
-def _pick(value: Choice | None, default: Choice) -> Choice:
-    """Return ``value``, or ``default`` when it is unset.
+def can_train_data_parallel(fsdp: FSDPConfig) -> bool:
+    """Whether a run configured for FSDP may train DDP instead, every rank holding the whole model.
 
-    :param value: Requested value, or ``None``.
-    :param default: Value used when ``value`` is ``None``.
-    :return: The chosen value.
-    """
-    return default if value is None else value
-
-
-def _lightest(fsdp: FSDPConfig) -> FSDPConfig:
-    """``fsdp`` with unset fields at their lightest, activation offload untouched.
+    Expert and tensor parallel split the model across ranks, and a set
+    memory field or stride is an FSDP setting the run keeps.
 
     :param fsdp: The run's FSDP config.
-    :return: Lightest config that keeps every set value.
+    :return: True when DDP is allowed.
     """
-    return replace(
-        fsdp,
-        reshard_after_forward=_pick(fsdp.reshard_after_forward, True),
-        routed_expert_chunk_mib=_pick(
-            fsdp.routed_expert_chunk_mib, ROUTED_CHUNK_MIB_CHOICES[-1]
-        ),
-        optim_cpu_offload=(
-            False if fsdp.cpu_offload else _pick(fsdp.optim_cpu_offload, True)
-        ),
-        cpu_offload=_pick(fsdp.cpu_offload, False),
+    return (
+        fsdp.ep == 1
+        and fsdp.tp == 1
+        and fsdp.checkpoint_every_n_blocks is None
+        and all(getattr(fsdp, name) is None for name in FSDP_MEMORY_FIELDS)
     )
 
 
-def _may_pick_cpu_offload(fsdp: FSDPConfig, settings: TrainingSettings) -> bool:
-    """Whether the search may turn on full CPU offload for this run.
+def gather_cost(residency: Residency | None, costs: LearnCosts) -> float:
+    """Frozen-base all-gather time of one micro-batch, in tokens of learn work.
 
-    CPUOffloadPolicy keeps parameters on CPU, which only colocated vLLM serves.
+    Gathered keeps forward's gather for backward, so it pays half of reshard.
 
-    :param fsdp: The run's FSDP config.
-    :param settings: Training settings.
-    :return: ``True`` when both offload fields are unset or off and vLLM is colocated.
+    :param residency: Where the frozen base lives, or ``None`` under DDP.
+    :param costs: Learn-time constants of the training GPU.
+    :return: Token-equivalents per micro-batch.
     """
-    return (
+    return {
+        None: 0.0,
+        "gathered": costs.reshard_gather_tokens / 2,
+        "reshard": costs.reshard_gather_tokens,
+    }[residency]
+
+
+def learn_cost(
+    n_layers: int,
+    gradient_checkpointing: bool,
+    every_n_blocks: int,
+    passes: int,
+    tokens: float,
+    residency: Residency | None,
+    costs: LearnCosts,
+    routed_chunks: int = 0,
+) -> float:
+    """Modeled time of one optimizer step, in tokens of uncheckpointed learn work.
+
+    DDP's gradient all-reduce and FSDP's reduce-scatter both run once per
+    step over the same trainable gradients, so gradient sync adds no term.
+
+    :param n_layers: Decoder blocks.
+    :param gradient_checkpointing: Activation checkpointing is on.
+    :param every_n_blocks: Checkpoint stride.
+    :param passes: Micro-batches per optimizer step.
+    :param tokens: Tokens the optimizer step trains on.
+    :param residency: Where the frozen base lives, or ``None`` under DDP.
+    :param costs: Learn-time constants of the training GPU.
+    :param routed_chunks: Routed-expert row chunks of one micro-batch, from
+        :func:`routed_chunks_per_pass`.
+    :return: Token-equivalents of work.
+    """
+    checkpointed = checkpointed_blocks(n_layers, gradient_checkpointing, every_n_blocks)
+    recompute = costs.recompute_cost * checkpointed / n_layers
+    per_pass = (
+        costs.micro_batch_overhead_tokens
+        + gather_cost(residency, costs)
+        + routed_chunks * costs.routed_chunk_tokens
+    )
+    return tokens * (1 + recompute) + passes * per_pass
+
+
+def routed_chunks_per_pass(
+    arch: ModelArch,
+    expert_lora: bool,
+    tokens: float,
+    act_bytes: float,
+    chunk_bytes: int,
+) -> int:
+    """Routed-expert row chunks one micro-batch runs, summed over MoE layers.
+
+    The self-routing expert-LoRA wrapper (``arch.routed_expert_recompute``)
+    splits each layer's routed rows into chunks whose widest row fits
+    ``chunk_bytes``.
+
+    :param arch: Model architecture.
+    :param expert_lora: Packed expert matrices carry LoRA.
+    :param tokens: Tokens in the micro-batch.
+    :param act_bytes: Bytes per activation element.
+    :param chunk_bytes: Widest ``[rows, features]`` activation of one chunk.
+    :return: Chunks over every MoE layer; zero off the chunked wrapper.
+    """
+    if not (expert_lora and arch.routed_expert_recompute):
+        return 0
+    inter = arch.expert_intermediate_size or arch.intermediate_size
+    row_bytes = max(arch.expert_width, inter) * act_bytes
+    routed_bytes = tokens * (arch.n_experts_per_tok or 1) * row_bytes
+    return arch.moe_layers * math.ceil(routed_bytes / chunk_bytes)
+
+
+@dataclass(frozen=True)
+class MemoryPins:
+    """Speed fields set before the search; ``None`` fields are searched.
+
+    The checkpoint stride and the FSDP memory fields are read from the
+    settings' ``fsdp``, and the DDP routed-expert chunk from the settings'
+    ``routed_expert_chunk_mib``, where ``None`` also means searched.
+    """
+
+    gradient_checkpointing: bool | None = None
+    micro_batch_size_per_gpu: int | None = None
+    micro_batch_tokens_per_gpu: int | None = None
+
+    @classmethod
+    def from_spec(cls, spec: LLMAlgorithmSpec) -> MemoryPins:
+        """Pins an algorithm spec carries.
+
+        :param spec: Validated LLM algorithm spec.
+        :return: The spec's checkpointing and micro-batch values.
+        """
+        return cls(
+            gradient_checkpointing=spec.gradient_checkpointing,
+            micro_batch_size_per_gpu=spec.micro_batch_size_per_gpu,
+            micro_batch_tokens_per_gpu=(
+                spec.micro_batch_tokens_per_gpu
+                if isinstance(spec, RolloutLLMSpec)
+                else None
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class TrainingMemoryPlan:
+    """Speed rungs and memory fields one trainer rank runs with."""
+
+    gradient_checkpointing: bool
+    checkpoint_every_n_blocks: int
+    micro_batch_size_per_gpu: int
+    # Tokens per packed micro-batch; ``None`` when micro-batches count rows.
+    micro_batch_tokens_per_gpu: int | None
+    # Every memory field set; ``None`` trains DDP.
+    fsdp: FSDPConfig | None
+    # Routed-expert row chunk under DDP; ``None`` under FSDP and on dense models.
+    routed_expert_chunk_mib: int | None
+    # Modeled step, and the tokens it trains, from :func:`learn_cost`.
+    cost: float
+    tokens: float
+    # The settings the plan was estimated at, and that estimate.
+    settings: TrainingSettings
+    breakdown: PhaseBreakdown
+
+    @property
+    def learn_cost_ratio(self) -> float:
+        """Modeled step over its trained tokens: 1 plus recompute and per-pass costs."""
+        return self.cost / self.tokens
+
+    def describe(self) -> str:
+        """Plain-English summary for logs and errors."""
+        if self.micro_batch_tokens_per_gpu is None:
+            unit = f"micro_batch_size_per_gpu={self.micro_batch_size_per_gpu}"
+        else:
+            unit = f"micro_batch_tokens_per_gpu={self.micro_batch_tokens_per_gpu}"
+        fsdp = self.fsdp
+        parts = [
+            "DDP" if fsdp is None else "FSDP",
+            unit,
+            f"gradient_checkpointing={self.gradient_checkpointing}",
+        ]
+        if self.routed_expert_chunk_mib is not None:
+            parts.append(f"routed_expert_chunk_mib={self.routed_expert_chunk_mib}")
+        if fsdp is not None:
+            parts += [
+                f"fsdp.checkpoint_every_n_blocks={fsdp.checkpoint_every_n_blocks}",
+                f"fsdp.reshard_after_forward={fsdp.reshard_after_forward}",
+                f"fsdp.routed_expert_chunk_mib={fsdp.routed_expert_chunk_mib}",
+                f"fsdp.optim_cpu_offload={fsdp.optim_cpu_offload}",
+                f"fsdp.activation_offload={fsdp.activation_offload}",
+                f"fsdp.cpu_offload={fsdp.cpu_offload}",
+            ]
+        return ", ".join(parts)
+
+
+class TrainingMemoryUnfitError(ValueError):
+    """Nothing fits one GPU, even at the lightest settings.
+
+    :param plan: The lightest plan, priced, for reporting how far over it is.
+    :param device: The training GPU.
+    """
+
+    def __init__(self, plan: TrainingMemoryPlan, device: DeviceSpec) -> None:
+        breakdown = plan.breakdown
+        super().__init__(
+            f"Estimated training peak {breakdown.total_bytes / GiB:.2f} GiB is over "
+            f"the {breakdown.device_usable_bytes / GiB:.2f} GiB usable on one "
+            f"{device.name} at the lightest settings ({plan.describe()}). Add "
+            "training_gpus_per_agent, use a larger GPU, or shorten max_model_len."
+        )
+        self.plan = plan
+
+
+def _recompute_candidates(
+    gradient_checkpointing: bool | None, stride: int | None, sharded: bool
+) -> list[tuple[bool, int]]:
+    """``(gradient_checkpointing, checkpoint_every_n_blocks)`` pairs, least recompute first.
+
+    Flat data parallel checkpoints every block or none.
+    """
+    if gradient_checkpointing is False:
+        return [(False, 1)]
+    if stride is not None:
+        strides: tuple[int, ...] = (stride,)
+    elif sharded:
+        strides = CHECKPOINT_STRIDES
+    else:
+        strides = (1,)
+    checkpointed = [(True, every) for every in strides]
+    return checkpointed if gradient_checkpointing else [(False, 1), *checkpointed]
+
+
+def _residency_candidates(fsdp: FSDPConfig) -> list[tuple[Residency, FSDPConfig]]:
+    """Frozen-base placements the set fields allow, fewest all-gathers first."""
+    return [
+        (residency, replace(fsdp, reshard_after_forward=residency == "reshard"))
+        for residency in RESIDENCIES
+        if fsdp.reshard_after_forward is None
+        or fsdp.reshard_after_forward == (residency == "reshard")
+    ]
+
+
+def _memory_rungs(
+    model: ModelSpec, settings: TrainingSettings, fsdp: FSDPConfig
+) -> list[tuple[str | None, FSDPConfig]]:
+    """FSDP memory-only fields, fastest first, then each last resort on top of the one before.
+
+    Last resorts, in order: a smaller routed-expert chunk (MoE only), the
+    optimizer on CPU, activation offload, then full CPU offload of parameters
+    and gradients. Full CPU offload turns optimizer offload off (the two are
+    exclusive) and needs colocated vLLM, as CPUOffloadPolicy keeps parameters
+    on CPU. Set fields never move.
+    """
+    current = replace(
+        fsdp,
+        routed_expert_chunk_mib=(
+            ROUTED_CHUNK_MIB_CHOICES[0]
+            if fsdp.routed_expert_chunk_mib is None
+            else fsdp.routed_expert_chunk_mib
+        ),
+        optim_cpu_offload=bool(fsdp.optim_cpu_offload),
+        activation_offload=bool(fsdp.activation_offload),
+        cpu_offload=bool(fsdp.cpu_offload),
+    )
+    rungs: list[tuple[str | None, FSDPConfig]] = [(None, current)]
+    if fsdp.routed_expert_chunk_mib is None and model.arch.is_moe:
+        for chunk in ROUTED_CHUNK_MIB_CHOICES[1:]:
+            current = replace(current, routed_expert_chunk_mib=chunk)
+            rungs.append((f"fsdp.routed_expert_chunk_mib={chunk}", current))
+    if fsdp.optim_cpu_offload is None and not fsdp.cpu_offload:
+        current = replace(current, optim_cpu_offload=True)
+        rungs.append(("fsdp.optim_cpu_offload=True", current))
+    if fsdp.activation_offload is None:
+        current = replace(current, activation_offload=True)
+        rungs.append(("fsdp.activation_offload=True", current))
+    if (
         fsdp.cpu_offload is None
         and not fsdp.optim_cpu_offload
         and settings.uses_generation_engine
         and not settings.async_rollout
-    )
+    ):
+        current = replace(current, cpu_offload=True, optim_cpu_offload=False)
+        rungs.append(("fsdp.cpu_offload=True", current))
+    return rungs
 
 
-def resolve_fsdp_memory(
-    model: ModelSpec | None,
-    device: DeviceSpec | None,
-    settings: TrainingSettings,
-    training_breakdown: Callable[
-        [ModelSpec, DeviceSpec, TrainingSettings, bool],
-        PhaseBreakdown,
-    ],
-    orchestrated: bool = False,
-    micro_batch_floor: int = 1,
-) -> FSDPConfig:
-    """FSDP config with unset memory fields set to the fastest choice that fits.
+def _micro_batch_units(
+    settings: TrainingSettings, pins: MemoryPins, mini_batch_rows: int
+) -> tuple[float, list[int]]:
+    """Tokens one optimizer step trains on one rank, and the micro-batch sizes to try.
 
-    The fastest run keeps parameters gathered after forward, activations on
-    the GPU, the optimizer on the GPU and the largest routed-expert chunk.
-    Speed is given up in this order: resharding after forward, a smaller
-    chunk, a smaller micro-batch (searched by the caller afterwards), the
-    optimizer to CPU, activation offload, then full CPU offload of parameters
-    and gradients. Activation offload keeps every other field at its
-    lightest. Full CPU offload keeps activation offload, turns optimizer
-    offload off (the two are exclusive), and needs colocated vLLM. The
-    optimizer, activation and full CPU offload choices are priced at
-    ``micro_batch_floor`` with every other field at its lightest; resharding
-    and the chunk at ``settings.micro_batch_size``.
-
-    :param model: Training-side model spec. Required when ``device`` is set.
-    :param device: Training GPU. ``None`` skips the estimate: unset fields take
-        the lightest choice except activation offload and full CPU offload,
-        which stay off.
-    :param settings: Training settings; ``fsdp`` must be set.
-    :param training_breakdown: Training-phase peak for one model, device, and
-        settings. Called when ``device`` is set.
-    :param orchestrated: Charge the per-process job overhead.
-    :param micro_batch_floor: Smallest micro-batch the run can drop to.
-        Activation offload turns on only when the lightest other choices are
-        over the GPU at this micro-batch; full CPU offload only when they are
-        still over it with activation offload on.
-    :return: Config with every memory field set. Set values are kept.
+    :param settings: Training settings; ``micro_batch_tokens`` set means the forward packs.
+    :param pins: Micro-batch values the search keeps.
+    :param mini_batch_rows: Rows one optimizer step covers on one rank.
+    :return: Mini-batch tokens and ascending micro-batch sizes, in tokens
+        when packed, else rows.
     """
+    row_budget = settings.max_model_len
+    if settings.micro_batch_tokens is None:
+        rows = (
+            [pins.micro_batch_size_per_gpu]
+            if pins.micro_batch_size_per_gpu is not None
+            else micro_batch_row_candidates(mini_batch_rows)
+        )
+        return float(mini_batch_rows * row_budget), rows
+    mini_tokens = mini_batch_rows * row_budget
+    if pins.micro_batch_tokens_per_gpu is not None:
+        # A micro-batch never packs more than the whole mini-batch.
+        units = [min(pins.micro_batch_tokens_per_gpu, mini_tokens)]
+    elif pins.micro_batch_size_per_gpu is not None:
+        units = [pins.micro_batch_size_per_gpu * row_budget]
+    else:
+        units = micro_batch_token_candidates(row_budget, mini_batch_rows)
+    return mini_tokens * ROW_FILL, units
+
+
+def _ddp_chunk_candidates(
+    model: ModelSpec, settings: TrainingSettings
+) -> tuple[int | None, ...]:
+    """Routed-expert chunk sizes DDP tries, largest first; ``None`` for dense models.
+
+    :param model: Training-side model spec.
+    :param settings: Training settings; a set ``routed_expert_chunk_mib`` is kept.
+    :return: Chunk sizes in MiB.
+    """
+    if settings.routed_expert_chunk_mib is not None:
+        return (settings.routed_expert_chunk_mib,)
+    if model.arch.is_moe:
+        return ROUTED_CHUNK_MIB_CHOICES
+    return (None,)
+
+
+def resolve_training_memory(
+    model: ModelSpec,
+    device: DeviceSpec,
+    settings: TrainingSettings,
+    pins: MemoryPins,
+    mini_batch_rows: int,
+) -> TrainingMemoryPlan:
+    """The fastest plan that fits: DDP or FSDP, its speed rungs, then FSDP memory-only last resorts.
+
+    Speed rungs are searched jointly and the fitting combination with the
+    lowest :func:`learn_cost` wins (ties go to less recompute, then fewer
+    gathers): the parallelism (DDP when the run's ``fsdp`` allows it, see
+    :func:`can_train_data_parallel`, or FSDP), the micro-batch (a token
+    budget when ``settings`` packs, else rows; the largest that fits),
+    checkpointing (off, every 4, 2 or 1 blocks; every block or none under
+    DDP), and under FSDP the frozen-base residency (gathered after forward,
+    or resharded). DDP holds the whole model on every GPU and gathers
+    nothing; it wins ties. Memory-only fields start at their fastest; when
+    neither mode has a speed combination that fits, the last resorts turn on
+    one at a time and the search reruns: a smaller routed-expert chunk under
+    DDP (MoE only), and :func:`_memory_rungs` under FSDP.
+    Fits means fits with the underprediction buffer; the lightest plan is
+    kept when it fits only without the buffer.
+
+    :param model: Training-side model spec.
+    :param device: Training GPU.
+    :param settings: Training settings. ``micro_batch_tokens`` set means the
+        forward packs; ``max_model_len`` is the longest row. ``fsdp`` unset
+        trains DDP; set ``fsdp`` memory fields and stride, and a set
+        ``routed_expert_chunk_mib``, are kept.
+    :param pins: Checkpointing and micro-batch values the search keeps. A
+        token budget above the mini-batch's longest rows is cut to them.
+    :param mini_batch_rows: Rows one optimizer step covers on one rank.
+    :return: The chosen plan, with every field set.
+    :raises TrainingMemoryUnfitError: When the lightest plan is over the GPU.
+    """
+    packed = settings.micro_batch_tokens is not None
+    row_budget = settings.max_model_len
     fsdp = settings.fsdp
-    if fsdp is None:
-        msg = "resolve_fsdp_memory needs settings.fsdp"
-        raise ValueError(msg)
+    n_layers = model.arch.n_layers
+    costs = learn_costs(device)
+    tokens, units = _micro_batch_units(settings, pins, mini_batch_rows)
+    recompute = _recompute_candidates(
+        pins.gradient_checkpointing,
+        None if fsdp is None else fsdp.checkpoint_every_n_blocks,
+        fsdp is not None,
+    )
+    ddp_chunks = _ddp_chunk_candidates(model, settings)
 
-    lightest = _lightest(fsdp)
-    cpu_offload = lightest.cpu_offload
-
-    if device is None:
-        return replace(
-            lightest, activation_offload=_pick(fsdp.activation_offload, False)
-        )
-
-    if model is None:
-        msg = "resolve_fsdp_memory needs a model when device is set"
-        raise ValueError(msg)
-
-    def estimate(trial: FSDPConfig, micro: int | None = None) -> PhaseBreakdown:
-        update: dict[str, object] = {
-            "fsdp": trial,
-            "activation_offload": bool(trial.activation_offload),
-        }
-        if micro is not None:
-            update["micro_batch_size"] = micro
-        return training_breakdown(
-            model, device, settings.model_copy(update=update), orchestrated
-        )
-
-    activation_offload = fsdp.activation_offload
-    if activation_offload is None:
-        activation_offload = not estimate(
-            replace(lightest, activation_offload=False), micro_batch_floor
-        ).fits
-    if activation_offload:
-        offloaded = replace(lightest, activation_offload=True)
-        if (
-            _may_pick_cpu_offload(fsdp, settings)
-            and not estimate(offloaded, micro_batch_floor).fits
-        ):
-            return replace(offloaded, cpu_offload=True, optim_cpu_offload=False)
-        return offloaded
-    offload = fsdp.optim_cpu_offload
-    if offload is None:
-        offload = (
-            not fsdp.cpu_offload
-            and not estimate(
-                replace(
-                    lightest,
-                    optim_cpu_offload=False,
-                    activation_offload=activation_offload,
+    def priced(
+        on: bool,
+        stride: int,
+        residency: Residency | None,
+        trial: FSDPConfig | None,
+        ddp_chunk: int | None,
+        unit: int,
+    ) -> TrainingMemoryPlan:
+        if packed:
+            rows = pins.micro_batch_size_per_gpu or rows_within_budget(
+                mini_batch_rows, unit, row_budget
+            )
+            budget: int | None = unit
+            passes = math.ceil(tokens / unit)
+        else:
+            rows, budget, passes = unit, None, mini_batch_rows // unit
+        if trial is not None:
+            trial = replace(trial, checkpoint_every_n_blocks=stride)
+        sized = settings.model_copy(
+            update={
+                "gradient_checkpointing": on,
+                "fsdp": trial,
+                "activation_offload": (
+                    settings.activation_offload
+                    if trial is None
+                    else bool(trial.activation_offload)
                 ),
-                micro_batch_floor,
-            ).fits_with_buffer
+                "micro_batch_size": rows,
+                "micro_batch_tokens": budget,
+                "routed_expert_chunk_mib": ddp_chunk,
+            }
         )
-    reshard = fsdp.reshard_after_forward
-    if reshard is None:
-        fastest = replace(
-            fsdp,
-            reshard_after_forward=False,
-            routed_expert_chunk_mib=_pick(
-                fsdp.routed_expert_chunk_mib, ROUTED_CHUNK_MIB_CHOICES[0]
+        chunk_mib = ddp_chunk if trial is None else trial.routed_expert_chunk_mib
+        chunks = routed_chunks_per_pass(
+            model.arch,
+            settings.lora_packed_target_matrices > 0,
+            tokens / passes,
+            DTYPE_BYTES[settings.weight_dtype],
+            DEFAULT_ROUTED_CHUNK_BYTES if chunk_mib is None else chunk_mib * MiB,
+        )
+        return TrainingMemoryPlan(
+            gradient_checkpointing=on,
+            checkpoint_every_n_blocks=stride,
+            micro_batch_size_per_gpu=rows,
+            micro_batch_tokens_per_gpu=budget,
+            fsdp=trial,
+            routed_expert_chunk_mib=ddp_chunk,
+            cost=learn_cost(
+                n_layers, on, stride, passes, tokens, residency, costs, chunks
             ),
-            optim_cpu_offload=offload,
-            activation_offload=activation_offload,
-            cpu_offload=cpu_offload,
-        )
-        reshard = not estimate(fastest).fits_with_buffer
-
-    def with_chunk(chunk: int) -> FSDPConfig:
-        return replace(
-            fsdp,
-            reshard_after_forward=reshard,
-            activation_offload=activation_offload,
-            routed_expert_chunk_mib=chunk,
-            optim_cpu_offload=offload,
-            cpu_offload=cpu_offload,
+            tokens=tokens,
+            settings=sized,
+            breakdown=estimate_training(model, device, sized, orchestrated=True),
         )
 
-    chunk = fsdp.routed_expert_chunk_mib
-    if chunk is None:
-        chunk = next(
-            (c for c in ROUTED_CHUNK_MIB_CHOICES if estimate(with_chunk(c)).fits),
-            ROUTED_CHUNK_MIB_CHOICES[-1],
+    def largest_fit(
+        on: bool,
+        stride: int,
+        residency: Residency | None,
+        trial: FSDPConfig | None,
+        ddp_chunk: int | None,
+    ) -> TrainingMemoryPlan | None:
+        # The estimate grows with the unit, so the largest fit is a bisection.
+        low, high = 0, len(units) - 1
+        best = None
+        while low <= high:
+            middle = (low + high) // 2
+            plan = priced(on, stride, residency, trial, ddp_chunk, units[middle])
+            if plan.breakdown.fits_with_buffer:
+                best, low = plan, middle + 1
+            else:
+                high = middle - 1
+        return best
+
+    def placements(
+        memory: FSDPConfig | None,
+    ) -> list[tuple[Residency | None, FSDPConfig | None]]:
+        if memory is None:
+            return [(None, None)]
+        return list(_residency_candidates(memory))
+
+    def floor(memory: FSDPConfig | None, ddp_chunk: int | None) -> TrainingMemoryPlan:
+        on, stride = recompute[-1]
+        residency, trial = placements(memory)[-1]
+        return priced(on, stride, residency, trial, ddp_chunk, units[0])
+
+    def cheapest(
+        strides: list[tuple[bool, int]],
+        memory: FSDPConfig | None,
+        ddp_chunk: int | None,
+    ) -> TrainingMemoryPlan | None:
+        fitting = [
+            plan
+            for on, stride in strides
+            for residency, trial in placements(memory)
+            if (plan := largest_fit(on, stride, residency, trial, ddp_chunk))
+            is not None
+        ]
+        return min(fitting, key=lambda plan: plan.cost, default=None)
+
+    def data_parallel(strides: list[tuple[bool, int]]) -> TrainingMemoryPlan | None:
+        for index, chunk in enumerate(ddp_chunks):
+            if index > 0:
+                logger.info(
+                    "Training memory: DDP turning on routed_expert_chunk_mib=%s; "
+                    "nothing fits one %s at %s",
+                    chunk,
+                    device.name,
+                    floor(None, ddp_chunks[index - 1]).describe(),
+                )
+            plan = cheapest(strides, None, chunk)
+            if plan is not None:
+                return plan
+        return None
+
+    if fsdp is None:
+        plan = data_parallel(recompute)
+        if plan is not None:
+            return plan
+        lightest = floor(None, ddp_chunks[-1])
+    else:
+        ddp = (
+            data_parallel(
+                _recompute_candidates(pins.gradient_checkpointing, None, False)
+            )
+            if can_train_data_parallel(fsdp)
+            else None
         )
-    return with_chunk(chunk)
+        rungs = _memory_rungs(model, settings, fsdp)
+        for index, (resort, memory) in enumerate(rungs):
+            if index > 0:
+                logger.info(
+                    "Training memory: turning on %s; nothing fits one %s at %s",
+                    resort,
+                    device.name,
+                    floor(rungs[index - 1][1], None).describe(),
+                )
+            plan = cheapest(recompute, memory, None)
+            # A fitting DDP plan beats every FSDP last resort.
+            if ddp is not None and (plan is None or ddp.cost <= plan.cost):
+                return ddp
+            if plan is not None:
+                return plan
+        lightest = floor(rungs[-1][1], None)
+    if lightest.breakdown.fits:
+        logger.info(
+            "Training memory: %s fits one %s only inside the underprediction buffer",
+            lightest.describe(),
+            device.name,
+        )
+        return lightest
+    raise TrainingMemoryUnfitError(lightest, device)

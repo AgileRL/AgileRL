@@ -25,7 +25,7 @@ import numpy as np
 import pytest
 import torch
 import torch.distributed as dist
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig, get_peft_model, inject_adapter_in_model
 from torch import nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     CheckpointWrapper,
@@ -68,6 +68,7 @@ from agilerl.distributed import (
     aggregate_metrics_across_gpus,
     aggregate_metrics_dict,
     all_ranks,
+    allreduce_max_ints,
     allreduce_minmax_int,
     allreduce_sum_ints,
     any_rank,
@@ -100,6 +101,7 @@ from agilerl.distributed import fsdp_blocks as bmod
 from agilerl.distributed import process as pmod
 from agilerl.distributed import runtime as rmod
 from agilerl.distributed.fsdp import (
+    canonical_fsdp_param_fqn,
     reshard_fsdp_modules,
     set_full_model_state_dict,
 )
@@ -759,6 +761,29 @@ class TestAllreduceSumInts:
 
         # Assert
         assert sums == [6, 4]
+
+
+class TestAllreduceMaxInts:
+    def test_identity_without_process_group(self):
+        assert allreduce_max_ints([3, 0, 2]) == [3, 0, 2]
+
+    def test_takes_the_max_of_each_value_across_ranks(self):
+        # Arrange — a peer holds [4, 1]
+        def fake_max(t: torch.Tensor, op: object) -> None:
+            assert op == dist.ReduceOp.MAX
+            t.copy_(torch.maximum(t, torch.tensor([4, 1])))
+
+        # Act
+        with (
+            patch("agilerl.distributed.process.is_distributed", return_value=True),
+            patch("agilerl.distributed.process.dist.get_world_size", return_value=2),
+            patch("agilerl.distributed.process.resolve_device", return_value="cpu"),
+            patch("agilerl.distributed.process.dist.all_reduce", side_effect=fake_max),
+        ):
+            maxima = allreduce_max_ints([2, 3])
+
+        # Assert
+        assert maxima == [4, 3]
 
 
 class TestAnyRank:
@@ -2221,16 +2246,22 @@ def _vision_language_actor(train_vision: bool = True) -> VisionLanguageActor:
     return actor
 
 
-def _prepare_fsdp_actor(actor: nn.Module) -> tuple[FSDPRuntime, PrepareResult]:
+def _prepare_fsdp_actor(
+    actor: nn.Module,
+    gradient_checkpointing: bool = False,
+    param_dtype: str = "bfloat16",
+    persistence_threshold: int = 0,
+) -> tuple[FSDPRuntime, PrepareResult]:
     # A reduce dtype distinct from the param dtype makes post-backward upcast
     # deferred grads, which reads each param's unsharded copy.
     runtime = FSDPRuntime(
         FSDPConfig(
             reshard_after_forward=True,
-            param_dtype="bfloat16",
+            param_dtype=param_dtype,
             reduce_dtype="float32",
             routed_expert_chunk_mib=64,
             optim_cpu_offload=False,
+            checkpoint_every_n_blocks=1,
         )
     )
     # FSDP's default mesh uses the process accelerator (MPS on macOS).
@@ -2242,7 +2273,10 @@ def _prepare_fsdp_actor(actor: nn.Module) -> tuple[FSDPRuntime, PrepareResult]:
             "agilerl.distributed.runtime.build_parallel_mesh",
             return_value=ParallelMesh(world=world, hsdp=world["shard"]),
         ),
-        patch("agilerl.distributed.fsdp_blocks.PARAM_PERSISTENCE_THRESHOLD", 0),
+        patch(
+            "agilerl.distributed.fsdp_blocks.PARAM_PERSISTENCE_THRESHOLD",
+            persistence_threshold,
+        ),
     ):
         result = runtime.prepare_actor(
             actor,
@@ -2252,6 +2286,7 @@ def _prepare_fsdp_actor(actor: nn.Module) -> tuple[FSDPRuntime, PrepareResult]:
             lr=1e-2,
             lr_critic=None,
             restore_adapter_trainability=lambda _: None,
+            gradient_checkpointing=gradient_checkpointing,
         )
     return runtime, result
 
@@ -2538,6 +2573,199 @@ class TestFSDPRuntimeBackward:
         assert torch.equal(actor.grad, torch.tensor([0.3, 0.4]))
         # rtol covers the 1e-6 epsilon in the clip coefficient
         assert torch.allclose(critic.grad, torch.tensor([0.6, 0.8]), rtol=1e-6, atol=0)
+
+
+def _full_params(model: nn.Module) -> dict[str, np.ndarray]:
+    return {
+        canonical_fsdp_param_fqn(name): (
+            param.full_tensor() if isinstance(param, DTensor) else param
+        )
+        .detach()
+        .float()
+        .numpy()
+        .copy()
+        for name, param in model.named_parameters()
+    }
+
+
+def _prepare_ddp_actor(actor: nn.Module) -> tuple[DPRuntime, PrepareResult]:
+    runtime = DPRuntime()
+    result = runtime.prepare_actor(
+        actor,
+        device="cpu",
+        colocated=False,
+        cosine_lr_schedule_config=None,
+        lr=1e-2,
+        lr_critic=None,
+        restore_adapter_trainability=lambda _: None,
+    )
+    return runtime, result
+
+
+def _step_and_capture(
+    runtime: DPRuntime | FSDPRuntime,
+    result: PrepareResult,
+    micro_batches: list[torch.Tensor],
+) -> dict[str, Any]:
+    """One accumulated step; the stepped grads, full params, and trainable dtypes."""
+    actor = result.actor
+    optimizer = result.optimizer._single_optimizer()
+    names = {
+        param: canonical_fsdp_param_fqn(name)
+        for name, param in actor.named_parameters()
+    }
+    stepped: dict[str, np.ndarray] = {}
+    grad_dtypes: set[str] = set()
+
+    def capture_grads(opt, _args, _kwargs):
+        for group in opt.param_groups:
+            for param in group["params"]:
+                if param.grad is not None:
+                    grad_dtypes.add(str(param.grad.dtype))
+                    stepped[names[param]] = full_grad(param).numpy().copy()
+
+    optimizer.register_step_pre_hook(capture_grads)
+    for x in micro_batches:
+        runtime.backward(
+            actor(x, True).float().sum(), result.optimizer, len(micro_batches), actor
+        )
+    trainable = [param for param in actor.parameters() if param.requires_grad]
+    return {
+        "grads": stepped,
+        "params": _full_params(actor),
+        "dtypes": {
+            "params": {str(param.dtype) for param in trainable},
+            "grads": grad_dtypes,
+            "adam": {
+                str(state.dtype)
+                for param in trainable
+                for key, state in optimizer.state[param].items()
+                if key != "step"
+            },
+            "frozen": {
+                str(param.dtype)
+                for param in actor.parameters()
+                if not param.requires_grad
+            },
+        },
+    }
+
+
+def _ddp_and_fsdp_step_worker(rank: int, world_size: int) -> dict[str, Any]:
+    """One accumulated step per runtime on this rank's batch, and the unsynced local grads."""
+    torch.manual_seed(1 + rank)
+    micro_batches = [torch.randn(4, 8) for _ in range(2)]
+    local = _vision_language_actor()
+    for x in micro_batches:
+        (local(x, True).sum() / len(micro_batches)).backward()
+    ddp, ddp_result = _prepare_ddp_actor(_vision_language_actor())
+    fsdp, fsdp_result = _prepare_fsdp_actor(
+        _vision_language_actor(), param_dtype="float32"
+    )
+    return {
+        "local": {
+            name: param.grad.numpy().copy()
+            for name, param in local.named_parameters()
+            if param.grad is not None
+        },
+        "ddp": _step_and_capture(ddp, ddp_result, micro_batches),
+        "fsdp": _step_and_capture(fsdp, fsdp_result, micro_batches),
+    }
+
+
+def _lora_over_bf16_base() -> VisionLanguageActor:
+    """PEFT LoRA in fp32 on every block projection; the rest frozen in bf16."""
+    torch.manual_seed(0)
+    actor = VisionLanguageActor()
+    # The optimizer trains every parameter named for actor LoRA.
+    for block in (*actor.visual, *actor.layers):
+        block.actor_lora = nn.Identity()
+    actor = inject_adapter_in_model(
+        LoraConfig(r=4, target_modules=["base", "proj"], init_lora_weights=False),
+        actor,
+        adapter_name="actor",
+    )
+    for name, param in actor.named_parameters():
+        trainable = ".lora_" in name
+        param.requires_grad_(trainable)
+        if not trainable:
+            param.data = param.data.to(torch.bfloat16)
+    return actor
+
+
+def _mixed_precision_step_worker(rank: int, world_size: int) -> dict[str, Any]:
+    """DDP and bf16-compute FSDP steps of fp32 LoRA over a bf16 base."""
+    torch.manual_seed(1 + rank)
+    micro_batches = [torch.randn(4, 8, dtype=torch.bfloat16) for _ in range(2)]
+    ddp, ddp_result = _prepare_ddp_actor(_lora_over_bf16_base())
+    fsdp, fsdp_result = _prepare_fsdp_actor(
+        _lora_over_bf16_base(),
+        param_dtype="bfloat16",
+        persistence_threshold=bmod.PARAM_PERSISTENCE_THRESHOLD,
+    )
+    return {
+        "ddp": _step_and_capture(ddp, ddp_result, micro_batches),
+        "fsdp": _step_and_capture(fsdp, fsdp_result, micro_batches),
+    }
+
+
+FP32_TRAINABLE_DTYPES = {
+    "params": {"torch.float32"},
+    "grads": {"torch.float32"},
+    "adam": {"torch.float32"},
+}
+
+
+class TestDataParallelMatchesFsdpGradients:
+    @pytest.mark.multi_rank
+    def test_ddp_and_fsdp_step_on_the_rank_mean_gradient(self):
+        # Act
+        results = run_ranks(_ddp_and_fsdp_step_worker, 2, timeout=120.0)
+
+        # Assert: fp32 on CPU, and halving a two-rank sum is exact.
+        lora = DECODER_LORA | VISION_LORA
+        expected = {
+            name: (results[0]["local"][name] + results[1]["local"][name]) / 2
+            for name in lora
+        }
+        for result in results:
+            for mode in ("ddp", "fsdp"):
+                grads = result[mode]["grads"]
+                assert grads.keys() == lora, mode
+                for name, grad in expected.items():
+                    assert np.array_equal(grads[name], grad), (mode, name)
+                dtypes = result[mode]["dtypes"]
+                assert {key: dtypes[key] for key in FP32_TRAINABLE_DTYPES} == (
+                    FP32_TRAINABLE_DTYPES
+                ), mode
+        for name, value in results[0]["ddp"]["params"].items():
+            assert np.array_equal(results[1]["ddp"]["params"][name], value), name
+            assert np.array_equal(results[0]["fsdp"]["params"][name], value), name
+
+    @pytest.mark.multi_rank
+    def test_fp32_lora_over_a_bf16_base_trains_in_fp32_on_both_paths(self):
+        # Act
+        results = run_ranks(_mixed_precision_step_worker, 2, timeout=120.0)
+
+        # Assert: FSDP runs LoRA in bf16 and DDP in fp32 from bf16 inputs.
+        # bf16 rounds each op to ~4e-3 relative; through four blocks the
+        # first vision block's grad measures 1.1e-2 off in norm.
+        for result in results:
+            ddp = result["ddp"]
+            fsdp = result["fsdp"]
+            for mode in ("ddp", "fsdp"):
+                dtypes = result[mode]["dtypes"]
+                assert {key: dtypes[key] for key in FP32_TRAINABLE_DTYPES} == (
+                    FP32_TRAINABLE_DTYPES
+                ), mode
+                assert dtypes["frozen"] == {"torch.bfloat16"}, mode
+            assert fsdp["grads"].keys() == ddp["grads"].keys()
+            assert len(ddp["grads"]) == 8
+            for name, grad in ddp["grads"].items():
+                diff = fsdp["grads"][name] - grad
+                assert np.linalg.norm(diff) / np.linalg.norm(grad) < 2e-2, name
+        for name, grad in results[0]["fsdp"]["grads"].items():
+            assert np.array_equal(results[1]["fsdp"]["grads"][name], grad), name
 
 
 class TestFSDPRuntimeBackwardGradSync:
@@ -2883,6 +3111,7 @@ class TestMaterializeFsdp2FromCpuStateBlocks:
         param_dtype="float32",
         reduce_dtype="float32",
         routed_expert_chunk_mib=64,
+        checkpoint_every_n_blocks=1,
     )
 
     @pytest.mark.parametrize(
@@ -2960,7 +3189,7 @@ class TestMaterializeFsdp2FromCpuStateBlocks:
 
 
 class TestApplyFsdp2:
-    per_block = FSDPConfig(reshard_after_forward=True)
+    per_block = FSDPConfig(reshard_after_forward=True, checkpoint_every_n_blocks=1)
 
     def test_shards_transformer_blocks_and_root(self, world_size_one):
         class Block(nn.Module):
@@ -3226,13 +3455,39 @@ class TestApplyFsdp2:
         assert sharded[1] is model.layers[1]
         assert captured_blocks == [model.layers[0], model.layers[1]]
 
+    def test_checkpoint_every_n_wraps_every_nth_block(self, world_size_one):
+        # Arrange
+        model = HybridStack(["mamba", "attention", "moe", "mamba", "moe"])
+        config = FSDPConfig(checkpoint_every_n_blocks=2)
+
+        # Act
+        with patch.object(bmod, "fully_shard", side_effect=lambda m, **_kw: m):
+            apply_fsdp2(model, config, gradient_checkpointing=True)
+
+        # Assert
+        wrapped = [isinstance(layer, CheckpointWrapper) for layer in model.layers]
+        assert wrapped == [True, False, True, False, True]
+
+    def test_unset_checkpoint_stride_raises(self, world_size_one):
+        model = HybridStack(["mamba", "attention", "moe"])
+
+        with (
+            patch.object(bmod, "fully_shard", side_effect=lambda m, **_kw: m),
+            pytest.raises(ValueError, match="checkpoint_every_n_blocks is unset"),
+        ):
+            apply_fsdp2(model, FSDPConfig(), gradient_checkpointing=True)
+
     def test_checkpoint_wraps_every_block_kind(self, world_size_one):
         # Arrange
         model = HybridStack(["mamba", "attention", "moe"])
 
         # Act
         with patch.object(bmod, "fully_shard", side_effect=lambda m, **_kw: m):
-            apply_fsdp2(model, FSDPConfig(), gradient_checkpointing=True)
+            apply_fsdp2(
+                model,
+                FSDPConfig(checkpoint_every_n_blocks=1),
+                gradient_checkpointing=True,
+            )
 
         # Assert
         assert checkpointed_kinds(model) == ["mamba", "attention", "moe"]
@@ -3252,7 +3507,7 @@ class TestApplyFsdp2:
         torch.manual_seed(0)
         reference = tiny_hybrid_lm()
         input_ids = torch.randint(0, reference.config.vocab_size, (2, 8))
-        fp32 = FSDPConfig(param_dtype="float32")
+        fp32 = FSDPConfig(param_dtype="float32", checkpoint_every_n_blocks=1)
         mesh = init_device_mesh("cpu", (1,))
         runs = {"none": False, "full": True}
 
@@ -3367,7 +3622,8 @@ class TestApplyFsdp2:
         assert model.layers[0] not in sharded
         assert model in sharded
 
-    def test_persists_params_below_threshold(self, world_size_one):
+    def test_persists_frozen_params_below_threshold(self, world_size_one):
+        # Arrange
         class Block(nn.Module):
             def __init__(self):
                 super().__init__()
@@ -3381,24 +3637,29 @@ class TestApplyFsdp2:
                 super().__init__()
                 self.layers = nn.ModuleList([Block()])
 
-        model = Model()
+        model = Model().requires_grad_(False)
         block = model.layers[0]
+        block.lin.bias.requires_grad_(True)
         seen: dict[int, dict] = {}
 
         def _record(module, **kwargs):
             seen[id(module)] = kwargs
             return module
 
+        # Act
         with patch.object(bmod, "fully_shard", side_effect=_record):
             apply_fsdp2(model, FSDPConfig())
 
+        # Assert: small trainable parameters shard like large ones.
         ignored = seen[id(block)]["ignored_params"]
         assert block.norm.weight in ignored
         assert block.norm.bias in ignored
-        assert block.lin.bias in ignored
+        assert block.lin.bias not in ignored
         assert block.lin.weight not in ignored
 
-    def test_casts_persisted_params_to_mixed_precision_dtype(self, world_size_one):
+    def test_casts_persisted_frozen_params_to_mixed_precision_dtype(
+        self, world_size_one
+    ):
         class Block(nn.Module):
             def __init__(self):
                 super().__init__()
@@ -3412,8 +3673,9 @@ class TestApplyFsdp2:
                 super().__init__()
                 self.layers = nn.ModuleList([Block()])
 
-        model = Model()
+        model = Model().requires_grad_(False)
         block = model.layers[0]
+        block.lin.bias.requires_grad_(True)
         assert block.norm.weight.dtype == torch.float32
 
         with patch.object(bmod, "fully_shard", side_effect=lambda m, **_kw: m):
@@ -3421,7 +3683,7 @@ class TestApplyFsdp2:
 
         assert block.norm.weight.dtype == torch.bfloat16
         assert block.norm.bias.dtype == torch.bfloat16
-        assert block.lin.bias.dtype == torch.bfloat16
+        assert block.lin.bias.dtype == torch.float32
         assert block.lin.weight.dtype == torch.float32
 
     def test_shards_root_only_without_no_split_metadata(self, world_size_one):
@@ -3764,7 +4026,9 @@ class TestApplyFsdp2GradientCheckpointing:
         # Before apply_fsdp2, so the reference runs the unpatched routers.
         expected_loss, expected_grads = loss_and_full_grads(reference, input_ids)
         dtype_name = str(dtype).removeprefix("torch.")
-        config = FSDPConfig(param_dtype=dtype_name, reduce_dtype=dtype_name)
+        config = FSDPConfig(
+            param_dtype=dtype_name, reduce_dtype=dtype_name, checkpoint_every_n_blocks=1
+        )
         apply_fsdp2(
             model,
             config,
