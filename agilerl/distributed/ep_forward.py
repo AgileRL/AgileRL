@@ -20,6 +20,7 @@ from typing import Any, NamedTuple
 
 import torch
 import torch.distributed as dist
+from peft.tuners.lora.layer import ParamWrapper
 from torch import nn
 from torch.distributed.tensor import DTensor
 from torch.func import functional_call
@@ -44,7 +45,7 @@ from agilerl.distributed.replicated_rows import (
     replicated_row_span,
 )
 from agilerl.lora.fused import ROUTING_STATE
-from agilerl.lora.moe.adapters import mixed_routing
+from agilerl.lora.moe.adapters import mixed_routing, wrapper_chain
 from agilerl.lora.moe.grouped_gemm import expert_row_counts
 from agilerl.lora.moe.layouts import (
     is_routed_experts_module,
@@ -464,15 +465,24 @@ def _routing_override(module: nn.Module, routing: list[str] | None) -> Iterator[
     if routing is None:
         yield
         return
-    previous = ROUTING_STATE.get(module)
-    ROUTING_STATE[module] = routing
+    # Chain members read their own routing state; a uniform local block
+    # would strand them on the global mixed routing.
+    targets = (
+        list(wrapper_chain(module).values())
+        if isinstance(module, ParamWrapper)
+        else [module]
+    )
+    previous = {target: ROUTING_STATE.get(target) for target in targets}
+    for target in targets:
+        ROUTING_STATE[target] = routing
     try:
         yield
     finally:
-        if previous is None:
-            ROUTING_STATE.pop(module, None)
-        else:
-            ROUTING_STATE[module] = previous
+        for target, prev in previous.items():
+            if prev is None:
+                ROUTING_STATE.pop(target, None)
+            else:
+                ROUTING_STATE[target] = prev
 
 
 def _run_local_experts(

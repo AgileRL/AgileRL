@@ -421,7 +421,6 @@ class BaseRuntime(ABC):
         self,
         actor: nn.Module,
         device: str | torch.device,
-        colocated: bool,
         cosine_lr_schedule_config: CosineLRScheduleConfig | None,
         lr: float,
         lr_critic: float | None,
@@ -434,8 +433,6 @@ class BaseRuntime(ABC):
         :type actor: nn.Module
         :param device: Training device.
         :type device: str | torch.device
-        :param colocated: Whether vLLM generation is colocated with training.
-        :type colocated: bool
         :param cosine_lr_schedule_config: Warmup-cosine schedule, or ``None`` for constant LR.
         :type cosine_lr_schedule_config: CosineLRScheduleConfig | None
         :param lr: Actor learning rate.
@@ -616,7 +613,6 @@ class DPRuntime(BaseRuntime):
         self,
         actor: nn.Module,
         device: str | torch.device,
-        colocated: bool,
         cosine_lr_schedule_config: CosineLRScheduleConfig | None,
         lr: float,
         lr_critic: float | None,
@@ -783,7 +779,6 @@ class FSDPRuntime(BaseRuntime):
         self,
         actor: nn.Module,
         device: str | torch.device,
-        colocated: bool,
         cosine_lr_schedule_config: CosineLRScheduleConfig | None,
         lr: float,
         lr_critic: float | None,
@@ -808,15 +803,6 @@ class FSDPRuntime(BaseRuntime):
                 "FSDPConfig.cpu_offload and optim_cpu_offload are mutually "
                 "exclusive: cpu_offload already moves optimizer states to "
                 "CPU. Set only one of them."
-            )
-            raise ValueError(msg)
-        if self.config.cpu_offload and not colocated:
-            msg = (
-                "FSDP2 full cpu_offload requires colocated vLLM generation "
-                "(vllm_config set). HuggingFace generate is not supported "
-                "with CPUOffloadPolicy because it assumes model params live "
-                "on the compute device. Set vllm_config or use "
-                "optim_cpu_offload instead (params stay on GPU)."
             )
             raise ValueError(msg)
 

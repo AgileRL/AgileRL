@@ -25,7 +25,7 @@ from agilerl.llm_envs.chat_formats import (
 )
 
 TC, TC_END, THINK_END = 9000, 9001, 9002
-GTC = 9100
+GTC, GEOT = 9100, 9101
 MSTART, MEND, MRESP_START, MRESP_END, MCHAN_END = 9200, 9201, 9202, 9203, 9204
 HSTART, HMSG, HCALL, HEND, HRET, HCHAN = 9300, 9301, 9302, 9303, 9304, 9305
 
@@ -69,7 +69,7 @@ class FakeTokenizer:
 
 
 TAG_TOKENS = {"<tool_call>": TC, "</tool_call>": TC_END, "</think>": THINK_END}
-GRANITE_TOKENS = {"<|tool_call|>": GTC}
+GRANITE_TOKENS = {"<|tool_call|>": GTC, "<|end_of_text|>": GEOT}
 GEMMA_TOKENS = {
     "<|tool_call>": MSTART,
     "<tool_call|>": MEND,
@@ -392,6 +392,16 @@ class TestGranite3Format:
 
         assert [call.name for call in calls] == ["a", "b"]
         assert all(call.status is ToolCallParseStatus.OK for call in calls)
+
+    def test_end_of_turn_token_ends_the_array(self) -> None:
+        parser = Granite3Format(FakeTokenizer(GRANITE_TOKENS))
+        ids = [*granite_block([{"name": "a", "arguments": {"x": 1}}]), GEOT]
+
+        _, calls = parser.extract_tool_calls(ids)
+
+        assert [(call.name, call.status) for call in calls] == [
+            ("a", ToolCallParseStatus.OK)
+        ]
 
     def test_no_tag_returns_empty(self) -> None:
         parser = Granite3Format(FakeTokenizer(GRANITE_TOKENS))
