@@ -78,15 +78,12 @@ NON_REASONING_MODEL_TYPES = frozenset({"granitemoe", "granitemoehybrid", "qwen2"
 # the end of reasoning at thinking_token_budget.
 PARSERS_WITHOUT_THINKING_BUDGET = frozenset({"openai_gptoss"})
 
-# Text ending the reasoning of each vLLM 0.32 reasoning parser a run may set: the
-# parser's ``reasoning_end_str``, or for gpt-oss the harmony final-channel header.
-REASONING_END_MARKERS: Mapping[str, str] = {
-    "deepseek_r1": "</think>",
-    "gemma4": "<channel|>",
-    "nemotron_v3": "</think>",
-    "openai_gptoss": "<|channel|>final<|message|>",
-    "qwen3": "</think>",
-}
+# vLLM 0.32 reasoning parsers a run may set. The model's tool-call parser owns
+# where reasoning ends in its tokens; the rollout engine checks at startup that
+# the vLLM parser's reasoning_end_str spells the same ids.
+KNOWN_REASONING_PARSERS = frozenset(
+    {"deepseek_r1", "gemma4", "nemotron_v3", "openai_gptoss", "qwen3"}
+)
 
 
 def enforces_thinking_budget(reasoning_parser: str | None) -> bool:

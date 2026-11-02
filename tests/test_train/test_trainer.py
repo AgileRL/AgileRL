@@ -1471,7 +1471,6 @@ class TestLLMGetTrainingKwargs:
         assert "num_epochs" not in kwargs
 
     def test_llm_kwargs_include_max_reward(self, grpo_spec):
-        from agilerl.models.env import LLMEnvSpec, LLMEnvType
 
         env_spec = LLMEnvSpec(
             env_type=LLMEnvType.DATASET,
@@ -1716,7 +1715,6 @@ class TestLLMLocalTrainer:
     # -- _make_env dispatches to LLMEnvSpec.make_dataset_env() --------------
 
     def test_make_env_dispatches_to_llm_env_spec(self, dpo_spec):
-        from agilerl.models.env import LLMEnvSpec, LLMEnvType
 
         mock_env = MagicMock()
         mock_llm_env_spec = MagicMock(spec=LLMEnvSpec)
@@ -1758,8 +1756,6 @@ class TestLLMLocalTrainer:
 
     def test_rollout_factory_gets_the_run_seed(self, grpo_spec):
         """A rollout env builds no env here; the factory carries the run seed."""
-        from agilerl.models.env import LLMEnvSpec, LLMEnvType
-
         mock_llm_env_spec = MagicMock(spec=LLMEnvSpec)
         mock_llm_env_spec.env_type = LLMEnvType.ROLLOUT
 
@@ -1793,43 +1789,6 @@ class TestLLMLocalTrainer:
         assert factory_kwargs["max_model_len"] == grpo_spec.max_model_len
         # The env itself is built per-trajectory by the factory, not here.
         assert trainer.env is None
-
-    @pytest.mark.parametrize(
-        ("vllm_engine_args", "reasoning_parser"),
-        [({"reasoning_parser": "gemma4"}, "gemma4"), ({}, None)],
-    )
-    def test_rollout_factory_gets_the_model_reasoning_parser(
-        self, vllm_engine_args: dict[str, str], reasoning_parser: str | None
-    ) -> None:
-        # Arrange
-        spec = _GRPOSpec(
-            group_size=4, vllm_engine_args=vllm_engine_args, **_LLM_COMMON_KWARGS
-        )
-        env_spec = MagicMock(spec=LLMEnvSpec)
-        env_spec.env_type = LLMEnvType.ROLLOUT
-        tokenizer = MagicMock(eos_token_id=0, pad_token_id=1, unk_token_id=None)
-
-        # Act
-        with (
-            patch(
-                "agilerl.training.trainer.AutoTokenizer", create=True
-            ) as mock_auto_tok,
-            patch(
-                "agilerl.training.trainer.create_population_from_spec",
-                return_value=[MagicMock()],
-            ),
-            patch(
-                "agilerl.training.trainer.make_rollout_env_factory",
-                return_value=(MagicMock(), 5),
-            ) as mock_factory,
-        ):
-            mock_auto_tok.from_pretrained.return_value = tokenizer
-            LocalTrainer(
-                algorithm=spec, environment=env_spec, training=self._training()
-            )
-
-        # Assert
-        assert mock_factory.call_args.kwargs["reasoning_parser"] == reasoning_parser
 
     # -- No replay buffer for LLM algorithms --------------------------------
 
@@ -2684,7 +2643,6 @@ class TestLocalTrainerToManifestLLM:
         import json
 
         from agilerl.arena.models.algorithms import DPOSpec
-        from agilerl.models.env import LLMEnvSpec
 
         mock_create_pop.return_value = [MagicMock()]
         mock_tokenizer = MagicMock()
@@ -2825,7 +2783,6 @@ class TestLocalTrainerRollout:
         return TrainingSpec(max_steps=100, evo_steps=10, pop_size=self.POP_SIZE)
 
     def test_construction_rollout(self, grpo_spec):
-        from agilerl.models.env import LLMEnvSpec, LLMEnvType
 
         mock_pop = [MagicMock()]
         mock_tokenizer = MagicMock()
@@ -2871,7 +2828,6 @@ class TestLocalTrainerRollout:
         assert trainer.train_fn is train_llm_rollout
 
     def test_train_delegates_rollout_kwargs(self, grpo_spec):
-        from agilerl.models.env import LLMEnvSpec, LLMEnvType
 
         mock_pop = [MagicMock()]
         mock_tokenizer = MagicMock(eos_token_id=0, eos_token="<eos>", pad_token_id=0)
@@ -2922,7 +2878,6 @@ class TestLocalTrainerRollout:
         assert "max_wall_seconds" not in call_kwargs
 
     def test_train_forwards_max_wall_seconds(self, grpo_spec):
-        from agilerl.models.env import LLMEnvSpec, LLMEnvType
 
         mock_pop = [MagicMock()]
         mock_tokenizer = MagicMock(eos_token_id=0, eos_token="<eos>", pad_token_id=0)
@@ -2988,8 +2943,6 @@ class TestMakeEnvBranches:
 
     def test_llm_rollout_returns_none(self):
         """ROLLOUT builds no env here; the factory builds one per trajectory."""
-        from agilerl.models.env import LLMEnvSpec, LLMEnvType
-
         trainer = LocalTrainer.__new__(LocalTrainer)
         trainer.env_spec = MagicMock(spec=LLMEnvSpec)
         trainer.env_spec.env_type = LLMEnvType.ROLLOUT
@@ -3000,8 +2953,6 @@ class TestMakeEnvBranches:
 
     def test_llm_dataset_calls_make_llm_env(self):
         """A dataset LLMEnvSpec passes algo fields into make_llm_env."""
-        from agilerl.models.env import LLMEnvSpec, LLMEnvType
-
         mock_env = MagicMock()
         trainer = LocalTrainer.__new__(LocalTrainer)
         trainer.env_spec = MagicMock(spec=LLMEnvSpec)
@@ -3833,18 +3784,4 @@ class TestMakeRolloutFactoryGuards:
             patch.object(LocalTrainer, "_make_env", return_value=None),
         ):
             with pytest.raises(TypeError, match="requires a tokenizer"):
-                LocalTrainer(GRPOSpec.model_construct(), self._rollout_spec())
-
-    def test_a_missing_model_gets_no_rollout_factory(self):
-        from agilerl.arena.models.algorithms import GRPOSpec
-
-        with (
-            patch.object(LocalTrainer, "_make_tokenizer", return_value=MagicMock()),
-            patch("agilerl.training.trainer.create_population_from_spec"),
-            patch("agilerl.training.trainer.build_replay_buffer_from_spec"),
-            patch.object(LocalTrainer, "_make_env", return_value=None),
-        ):
-            with pytest.raises(
-                TypeError, match="requires pretrained_model_name_or_path"
-            ):
                 LocalTrainer(GRPOSpec.model_construct(), self._rollout_spec())

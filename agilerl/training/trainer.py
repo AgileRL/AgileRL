@@ -21,14 +21,12 @@ from agilerl.algorithms.core.base import (
     MultiAgentAlgorithm,
     SingleAgentAlgorithm,
 )
-from agilerl.architectures.catalog import pretrained_model_type
 from agilerl.arena import ArenaClient
 from agilerl.arena.models import BanditEnvSpec as ArenaBanditEnvSpec
 from agilerl.arena.models import GymEnvSpec as ArenaEnvSpec
 from agilerl.arena.models import LLMEnvSpec as ArenaLLMEnvSpec
 from agilerl.arena.models import TrainingManifest as ArenaManifest
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
-from agilerl.arena.models.model_info import resolve_reasoning_parser
 from agilerl.builders import select_builder
 from agilerl.distributed import get_rank, get_world_size
 from agilerl.hpo.multi_frequency import MultiFrequencySelection
@@ -605,10 +603,6 @@ class LocalTrainer(Trainer):
         if self.tokenizer is None:
             msg = "Rollout LLM training requires a tokenizer."
             raise TypeError(msg)
-        model_name_or_path = self.algorithm_spec.pretrained_model_name_or_path
-        if model_name_or_path is None:
-            msg = "Rollout LLM training requires pretrained_model_name_or_path."
-            raise TypeError(msg)
         max_output_tokens = (
             self.algorithm_spec.max_output_tokens
             if isinstance(self.algorithm_spec, RolloutLLMSpec)
@@ -620,10 +614,6 @@ class LocalTrainer(Trainer):
             max_model_len=self.algorithm_spec.max_model_len,
             max_output_tokens=max_output_tokens,
             seed=self.algorithm_spec.seed,
-            reasoning_parser=resolve_reasoning_parser(
-                self.algorithm_spec.vllm_engine_args,
-                pretrained_model_type(model_name_or_path),
-            ),
         )
 
     @property
