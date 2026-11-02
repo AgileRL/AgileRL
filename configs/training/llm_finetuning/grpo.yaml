@@ -72,5 +72,4 @@ network:
             - k_proj
             - v_proj
             - o_proj
-        lora_dropout: 0.05
         task_type: CAUSAL_LM

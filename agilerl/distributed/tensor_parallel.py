@@ -424,7 +424,7 @@ def local_region_params(
     return params
 
 
-def set_tp_compute_dtype(model: nn.Module, dtype: torch.dtype) -> set[nn.Parameter]:
+def set_tp_compute_dtype(model: nn.Module, dtype: torch.dtype) -> None:
     """Run every tensor-parallel region with its parameters cast to ``dtype``.
 
     Trainable parameters keep their stored dtype, so their gradients and
@@ -434,16 +434,10 @@ def set_tp_compute_dtype(model: nn.Module, dtype: torch.dtype) -> set[nn.Paramet
     :type model: nn.Module
     :param dtype: Forward dtype, the FSDP ``param_dtype``.
     :type dtype: torch.dtype
-    :return: Trainable parameters of tensor-parallel modules.
-    :rtype: set[nn.Parameter]
     """
-    trainable: set[nn.Parameter] = set()
     for module in model.modules():
-        if not hasattr(module, "_tp_group"):
-            continue
-        object.__setattr__(module, "tp_compute_dtype", dtype)
-        trainable.update(param for param in module.parameters() if param.requires_grad)
-    return trainable
+        if hasattr(module, "_tp_group"):
+            object.__setattr__(module, "tp_compute_dtype", dtype)
 
 
 def _call_local_forward(

@@ -3,7 +3,6 @@
 
 import gc
 import math
-import warnings
 from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -22,7 +21,6 @@ from transformers.modeling_utils import PreTrainedModel
 
 from agilerl.algorithms.core import ActionResult
 from agilerl.algorithms.ppo_llm import PPO as LLMPPO
-from agilerl.arena.memory.resolve.chunk import resolve_chunk_rows
 from agilerl.distributed import FSDPConfig
 from agilerl.llm_envs import RolloutHarness
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig
@@ -163,12 +161,8 @@ def create_module(input_size, max_tokens, vocab_size, device):
     return AutoModelForCausalLMWithValueHead(inner)
 
 
-def _cpu_llmppo(liger_loss=False, **kwargs):
-    """Small CPU LLMPPO for fast unit tests (dummy actor + LoRA, single device).
-
-    :param liger_loss: Value to pin ``liger_loss`` to, or ``None`` to keep the
-        value resolved at init.
-    """
+def _cpu_llmppo(**kwargs):
+    """Small CPU LLMPPO for fast unit tests (dummy actor + LoRA, single device)."""
     device = "cpu"
     vocab_size = 100
     input_size = 10
@@ -200,10 +194,7 @@ def _cpu_llmppo(liger_loss=False, **kwargs):
         "device": device,
     }
     defaults.update(kwargs)
-    agent = LLMPPO(**defaults)
-    if liger_loss is not None:
-        agent.liger_loss = liger_loss
-    return agent
+    return LLMPPO(**defaults)
 
 
 def generate_ppo(
@@ -265,7 +256,7 @@ def generate_ppo(
         )
         vllm_config = None
 
-    agent = LLMPPO(
+    return LLMPPO(
         actor_network=actor if not from_name else None,
         model_name=pretrained_model_name_or_path if from_name else None,
         lr_actor=lr_actor,
@@ -290,8 +281,6 @@ def generate_ppo(
         micro_batch_size_per_gpu=micro_batch_size_per_gpu,
         offload_trainer_during_rollout=offload_trainer_during_rollout,
     )
-    agent.liger_loss = False
-    return agent
 
 
 @pytest.fixture
@@ -478,41 +467,6 @@ class TestPPOInit:
     def test_init_advantage_granularity_turn(self):
         ppo = _cpu_llmppo(advantage_granularity="turn")
         assert ppo.advantage_granularity == "turn"
-
-    @pytest.mark.parametrize(
-        ("is_level", "correction", "colocated", "liger_loss"),
-        [
-            ("token", True, True, True),
-            ("auto", True, True, True),
-            ("turn", False, True, True),
-            ("trajectory", False, True, True),
-            ("turn", True, True, False),
-            ("trajectory", True, True, False),
-            ("turn", True, False, True),
-            ("trajectory", True, False, True),
-        ],
-    )
-    def test_liger_follows_the_level_sampling_correction_and_colocation(
-        self, monkeypatch, is_level, correction, colocated, liger_loss
-    ):
-        """Above token level the PPO Liger kernel cannot weight tokens by vLLM log-probs.
-
-        Only colocated vLLM captures them for every batch.
-        """
-        # Arrange
-        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
-        ppo = _cpu_llmppo(
-            liger_loss=None,
-            importance_sampling_level=is_level,
-            vllm_importance_sampling_correction=correction,
-        )
-        ppo.colocated = colocated
-
-        # Act
-        ppo._resolve_liger_loss(PretrainedConfig())
-
-        # Assert
-        assert ppo.liger_loss is liger_loss
 
     def test_init_turn_value_reduction_must_be_valid(self):
         actor = create_module(10, 8, 100, "cpu")
@@ -1445,247 +1399,6 @@ class TestPPOTest:
             assert ppo.fitness[-1] == pytest.approx(float(out))
         finally:
             server.stop()
-
-
-class TestPPOPolicyLossLiger:
-    """Cover the fused-linear PPO policy loss ``_ppo_policy_loss_liger_from_hidden``. The
-    autograd Function it wraps requires ``liger-kernel``, but the wrapper
-    itself (build args → fused kernel over actor hidden states → unpack
-    metrics) is testable via a mocked Liger Function on CPU.
-    """
-
-    def test_token_mode_drives_the_actor_forward(self) -> None:
-        """End-to-end: with the Liger Function mocked, ``_ppo_policy_loss_liger_from_hidden``
-        scores actor hidden states and returns the kernel loss and metrics.
-        """
-        ppo = _cpu_llmppo(beta=0.01, clip_coef=0.2, vf_coef=0.5)
-        B, T = 2, 5
-        ids = torch.randint(1, 50, (B, T), dtype=torch.long)
-        mask = torch.ones(B, T - 1, dtype=torch.float32)
-        old_lp = torch.zeros(B, T - 1)
-        ref_lp = torch.zeros(B, T - 1)
-        adv = torch.randn(B, T - 1) * 0.1
-
-        # Mock the fused-loss entry point so we don't need liger-kernel
-        # installed. ``_ppo_policy_loss_liger_from_hidden`` calls ``apply_fused_policy_loss`` (which
-        # wraps ``LigerFusedLinearPolicyLossFunction.apply``), so patch the
-        # wrapper. Returns a scalar loss and the five metric scalars the wrapper
-        # unpacks.
-        fake_loss = torch.tensor(0.5, requires_grad=True)
-        fake_aux = (
-            torch.tensor(0.1),  # kl
-            torch.tensor(0.2),  # clipfrac
-            torch.tensor(0.3),  # pg_loss
-            torch.tensor(0.4),  # entropy
-            torch.tensor(0.05),  # kl_clamp_frac
-        )
-
-        with (
-            patch("agilerl.algorithms.ppo_llm.apply_fused_policy_loss") as mock_fn,
-        ):
-            mock_fn.return_value = (fake_loss, fake_aux)
-            hidden = ppo._actor_hidden_states(ids)
-            policy_loss, metrics = ppo._ppo_policy_loss_liger_from_hidden(
-                hidden,
-                ids,
-                mask,
-                old_lp,
-                ref_lp,
-                adv,
-                torch.zeros(B, T - 1, dtype=torch.long),
-                1,
-                "token",
-            )
-
-        # Fused-loss entry point called exactly once for the actor pass.
-        mock_fn.assert_called_once()
-        # Metric keys/values come from the (mocked) auxiliary tuple.
-        assert metrics == pytest.approx(
-            {
-                "kl": 0.1,
-                "clipfrac": 0.2,
-                "pg_loss": 0.3,
-                "entropy": 0.4,
-                "kl_clamp_frac": 0.05,
-            }
-        )
-        assert policy_loss is fake_loss
-
-    def test_token_mode_chunks_by_the_head_vocabulary(self) -> None:
-        ppo = _cpu_llmppo()
-        B, T = 2, 5
-        ids = torch.randint(1, 50, (B, T), dtype=torch.long)
-        mask = torch.ones(B, T - 1, dtype=torch.float32)
-        old_lp = torch.zeros(B, T - 1)
-        ref_lp = torch.zeros(B, T - 1)
-        adv = torch.randn(B, T - 1) * 0.1
-        fake_aux = tuple(torch.tensor(0.0) for _ in range(5))
-
-        with (
-            patch("agilerl.algorithms.ppo_llm.apply_fused_policy_loss") as mock_apply,
-        ):
-            mock_apply.return_value = (torch.tensor(0.5, requires_grad=True), fake_aux)
-            hidden = ppo._actor_hidden_states(ids)
-            ppo._ppo_policy_loss_liger_from_hidden(
-                hidden,
-                ids,
-                mask,
-                old_lp,
-                ref_lp,
-                adv,
-                torch.zeros(B, T - 1, dtype=torch.long),
-                1,
-                "token",
-            )
-
-        chunk_size = mock_apply.call_args.kwargs["token_chunk_size"]
-        assert chunk_size == resolve_chunk_rows(100)
-
-    def test_token_mode_fuses_vllm_is_ratio(self) -> None:
-        """token-level IS with captured vLLM logprobs fuses the clamped
-        trainer/vLLM ratio into the kernel via the ``vllm_is_ratio`` kwarg.
-        """
-        ppo = _cpu_llmppo(beta=0.0)
-        B, T = 2, 6
-        ids = torch.randint(1, 50, (B, T), dtype=torch.long)
-        mask = torch.ones(B, T - 1, dtype=torch.float32)
-        old_lp = torch.zeros(B, T - 1)
-        ref_lp = torch.zeros(B, T - 1)
-        adv = torch.randn(B, T - 1) * 0.1
-        sampling = old_lp - 0.5  # non-trivial trainer/vLLM mismatch
-        fake_aux = tuple(torch.tensor(0.0) for _ in range(5))
-        with (
-            patch("agilerl.algorithms.ppo_llm.apply_fused_policy_loss") as mock_fn,
-        ):
-            mock_fn.return_value = (torch.tensor(0.5, requires_grad=True), fake_aux)
-            hidden = ppo._actor_hidden_states(ids)
-            ppo._ppo_policy_loss_liger_from_hidden(
-                hidden,
-                ids,
-                mask,
-                old_lp,
-                ref_lp,
-                adv,
-                torch.zeros(B, T - 1, dtype=torch.long),
-                1,
-                "token",
-                sampling_log_probs=sampling,
-            )
-        ratio = mock_fn.call_args.kwargs["vllm_is_ratio"]
-        assert ratio is not None
-        assert torch.all(ratio <= ppo.vllm_importance_sampling_cap)
-
-
-class TestPPOLearnWithLiger:
-    """Cover the ``liger_loss`` branch inside ``learn()``.
-    The branch calls ``_ppo_policy_loss_liger_from_hidden`` once per minibatch, runs
-    its backward, then the critic pass, and accumulates the four ``aux``
-    metrics + ``vf_loss``. We stub ``_ppo_policy_loss_liger_from_hidden`` to a fake
-    (loss, metrics) tuple so the test stays CPU-only and doesn't require
-    ``liger-kernel``.
-    """
-
-    def test_learn_liger_loss_drives_ppo_policy_loss_liger(self, monkeypatch):
-        ppo = _cpu_llmppo(
-            lr_actor=0.05,
-            update_epochs=1,
-            liger_loss=True,
-            importance_sampling_level="token",
-        )
-
-        fake_loss = torch.tensor(0.42, requires_grad=True)
-        fake_metrics = {
-            "kl": 0.1,
-            "kl_clamp_frac": 0.0,
-            "entropy": 0.2,
-            "clipfrac": 0.3,
-            "pg_loss": 0.4,
-        }
-        # Stub the inner loss fn — keeps the test CPU-only and isolates
-        # the liger_loss branch in learn() from the actor/critic Liger forwards.
-        ppo._ppo_policy_loss_liger_from_hidden = MagicMock(
-            return_value=(fake_loss, fake_metrics)
-        )
-        # ``unset_fused_adapter_routing`` walks the actor — stub it.
-        monkeypatch.setattr(
-            "agilerl.algorithms.ppo_llm.unset_fused_adapter_routing",
-            lambda actor: None,
-        )
-
-        vocab = 100
-        inp, mtok = 10, 8
-        seq_len = inp + mtok
-        b = 1
-        completions = [torch.randint(0, vocab, (1, seq_len)) for _ in range(b)]
-        action_masks = [torch.ones(1, seq_len - 1, dtype=torch.bool) for _ in range(b)]
-        turn_ids = torch.tensor(
-            [[-1] * (inp - 1) + [0] * (mtok // 2) + [1] * (mtok - mtok // 2)],
-            dtype=torch.long,
-        )[:, : seq_len - 1]
-        rewards = torch.tensor([[0.5, -0.5]], dtype=torch.float32)
-
-        learn_out = ppo.learn((completions, action_masks, rewards), turn_ids=turn_ids)
-
-        # The Liger branch was actually exercised (not the fallback path).
-        assert ppo._ppo_policy_loss_liger_from_hidden.call_count >= 1
-        # Its scalars and the critic pass's value loss made it into the
-        # aggregated metrics.
-        assert learn_out["kl"] == pytest.approx(0.1, rel=1e-6)
-        assert learn_out["vf_loss"] > 0
-        assert learn_out["loss"] == pytest.approx(0.42 + learn_out["vf_loss"], rel=1e-6)
-
-    def test_learn_liger_token_with_sampling_logps_uses_fused_kernel(self, monkeypatch):
-        """token-level Liger + captured vLLM logprobs: the
-        correction is fused into the kernel (``vllm_is_ratio``), so learn()
-        keeps the fused path and threads ``sampling_log_probs`` through.
-        """
-        # Force token-level IS so the fused correction path is exercised
-        # (default turn_level_clip=True resolves multi-turn batches to "turn").
-        ppo = _cpu_llmppo(
-            lr_actor=0.05,
-            update_epochs=1,
-            liger_loss=True,
-            importance_sampling_level="token",
-        )
-        ppo._ppo_policy_loss_liger_from_hidden = MagicMock(
-            return_value=(
-                torch.tensor(0.5, requires_grad=True),
-                {
-                    "kl": 0.1,
-                    "kl_clamp_frac": 0.0,
-                    "entropy": 0.2,
-                    "clipfrac": 0.0,
-                    "pg_loss": 0.3,
-                },
-            )
-        )
-        ppo._backward_pass = MagicMock(return_value=None)
-
-        vocab, inp, mtok = 100, 10, 8
-        seq_len = inp + mtok
-        completions = [torch.randint(0, vocab, (1, seq_len))]
-        action_masks = [torch.ones(1, seq_len - 1, dtype=torch.bool)]
-        turn_ids = torch.tensor(
-            [[-1] * (inp - 1) + [0] * (mtok // 2) + [1] * (mtok - mtok // 2)],
-            dtype=torch.long,
-        )[:, : seq_len - 1]
-        rewards = torch.tensor([[0.5, -0.5]], dtype=torch.float32)
-        n_act = int(action_masks[0].sum())
-        sampling_logps = [torch.full((n_act,), -3.0, dtype=torch.float32)]
-
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            ppo.learn(
-                (completions, action_masks, rewards),
-                turn_ids=turn_ids,
-                sampling_logps=sampling_logps,
-            )
-        ppo._ppo_policy_loss_liger_from_hidden.assert_called()
-        # sampling_log_probs threaded in after the turn arguments.
-        assert ppo._ppo_policy_loss_liger_from_hidden.call_args.args[9] is not None
-        assert not any(
-            "token-level importance sampling" in str(w.message) for w in caught
-        )
 
 
 class TestPPOVllmISCorrection:

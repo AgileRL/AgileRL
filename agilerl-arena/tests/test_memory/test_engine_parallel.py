@@ -1,6 +1,6 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
-"""Omitted engine tensor parallel is chosen from the allocation."""
+"""Omitted engine tensor parallel and ``max_num_seqs`` are chosen from the allocation."""
 
 from __future__ import annotations
 
@@ -71,13 +71,13 @@ class TestResolveEngineTensorParallel:
         assert manifest.algorithm.vllm_config is not None
         assert manifest.algorithm.vllm_config.tensor_parallel_size == 2
 
-    @pytest.mark.parametrize(("context", "expected"), [(4096, 1), (5120, 2)])
+    @pytest.mark.parametrize(("context", "expected"), [(4096, 1), (4608, 2)])
     def test_a_width_must_clear_demand_by_the_kv_margin(
         self, context: int, expected: int
     ) -> None:
-        # Arrange: TP=1 predicts a 1.93 GiB attention pool on four leftover
-        # A100s. 16 sequences at 4096 tokens want 1.25 GiB; at 5120 they want
-        # 1.56 GiB, inside the pool but past vLLM's measured 1.49 GiB. 16
+        # Arrange: TP=1 predicts a 1.92 GiB attention pool on four leftover
+        # A100s. 16 sequences at 4096 tokens want 1.29 GiB; at 4608 they want
+        # 1.61 GiB, inside the pool but not by the 512 MiB margin. 16
         # prompts keep every engine at max_num_seqs.
         raw = _qwen_manifest()
         raw["network"]["max_context_length"] = context
@@ -182,7 +182,7 @@ class TestResolveEngineTensorParallel:
         vllm_config = manifest.algorithm.vllm_config
         assert vllm_config is not None
         assert vllm_config.gpu_memory_utilization == 0.9
-        assert vllm_config.max_num_seqs == 16
+        assert vllm_config.max_num_seqs is None
         assert vllm_config.tensor_parallel_size is None
         assert "tensor_parallel_size" not in vllm_config.model_fields_set
 
@@ -195,6 +195,66 @@ class TestResolveEngineTensorParallel:
         assert manifest.algorithm.vllm_config.tensor_parallel_size == 2
 
 
+def _qwen3_4b_manifest(
+    context: int = 1536,
+    trainers: int = 4,
+    engines: int = 4,
+    vllm_config: dict[str, int | float] | None = None,
+) -> dict:
+    """GRPO on Qwen3-4B: 64 prompts x 8, no rollout_batch_size or vllm_config."""
+    algorithm: dict[str, object] = {"name": "GRPO", "batch_size": 64, "group_size": 8}
+    if vllm_config is not None:
+        algorithm["vllm_config"] = vllm_config
+    return {
+        "algorithm": algorithm,
+        "environment": {"env_type": "rollout", "env_image": "env:latest"},
+        "network": {
+            "pretrained_model_name_or_path": "Qwen/Qwen3-4B",
+            "max_context_length": context,
+        },
+        "training": {
+            "rollout_mode": "async",
+            "rollout_engines_per_agent": engines,
+            "training_gpus_per_agent": trainers,
+        },
+        "replay_buffer": {"kind": "llm"},
+    }
+
+
+def _engine_max_num_seqs(raw: dict, engines: int) -> int:
+    manifest = TrainingManifest.model_validate(raw)
+    settings = generation_settings_from_manifest(
+        manifest, tensor_parallel_size=1, rollout_engines=engines
+    )
+    return settings.max_num_seqs
+
+
+class TestOmittedAsyncMaxNumSeqs:
+    def test_long_context_engine_runs_every_episode(self) -> None:
+        # 64 groups over 4 engines x group 8 at 16k tokens: 128 episodes per
+        # engine, more than one A100-80's KV pool holds at full length.
+        assert _engine_max_num_seqs(_qwen3_4b_manifest(context=16384), 4) == 128
+
+    def test_prompts_round_up_per_engine(self) -> None:
+        raw = _qwen3_4b_manifest(trainers=2, engines=4)
+        raw["training"]["rollout_batch_size"] = 6
+
+        assert _engine_max_num_seqs(raw, 4) == 2 * 8
+
+    def test_mutated_group_size_counts_at_its_ceiling(self) -> None:
+        raw = _qwen3_4b_manifest()
+        raw["mutation"] = {
+            "rl_hp_selection": {"group_size": {"min": 4, "max": 16}},
+        }
+
+        assert _engine_max_num_seqs(raw, 4) == 16 * 16
+
+    def test_explicit_max_num_seqs_is_kept(self) -> None:
+        raw = _qwen3_4b_manifest(context=16384, vllm_config={"max_num_seqs": 12})
+
+        assert _engine_max_num_seqs(raw, 4) == 12
+
+
 class TestDefaultRolloutVllmConfig:
     def test_leaves_tensor_parallel_size_unset(self) -> None:
         # Act
@@ -204,6 +264,14 @@ class TestDefaultRolloutVllmConfig:
         assert config.tensor_parallel_size is None
         assert "tensor_parallel_size" not in config.model_fields_set
         assert VLLMConfig().tensor_parallel_size is None
+
+    def test_leaves_max_num_seqs_unset(self) -> None:
+        # Act
+        config = default_rollout_vllm_config()
+
+        # Assert
+        assert config.max_num_seqs is None
+        assert "max_num_seqs" not in config.model_dump(exclude_none=True)
 
 
 class TestGenerationSettingsFromManifest:

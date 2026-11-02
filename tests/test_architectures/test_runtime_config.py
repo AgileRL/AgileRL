@@ -19,6 +19,7 @@ from agilerl.architectures.catalog import (
     family_runtime,
     nemotron_h_omni_vllm_hf_override,
     pretrained_model_type,
+    sm80_attention_backend,
     trainer_model_class,
 )
 from agilerl.architectures.nemotron_h.mamba import install_mamba_patches
@@ -249,6 +250,51 @@ class TestVllmRuntimeConfigEngineKwargs:
         kwargs = FAMILY_RUNTIME_CONFIGS[model_type].vllm.engine_kwargs()
 
         assert kwargs["prefix_cache_retention_interval"] is None
+
+    def test_sm80_attention_backend_is_not_an_engine_kwarg(self) -> None:
+        config = VllmRuntimeConfig(sm80_attention_backend="FLASHINFER")
+
+        assert config.engine_kwargs() == {}
+
+
+class TestSm80AttentionBackend:
+    @pytest.mark.parametrize(
+        "hub_id",
+        [
+            "Qwen/Qwen2.5-0.5B-Instruct",
+            "Qwen/Qwen3-4B",
+            "ibm-granite/granite-3.1-3b-a800m-instruct",
+            "ibm-granite/granite-4.0-micro",
+        ],
+    )
+    def test_dense_attention_checkpoints_take_flashinfer(self, hub_id: str) -> None:
+        assert sm80_attention_backend(hub_id) == "FLASHINFER"
+
+    def test_qwen3_moe_takes_flashinfer(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        stub_config_model_type(monkeypatch, "qwen3_moe")
+
+        assert sm80_attention_backend("Qwen/Qwen3-30B-A3B") == "FLASHINFER"
+
+    @pytest.mark.parametrize(
+        "hub_id",
+        [
+            "ibm-granite/granite-4.0-h-tiny",
+            "google/gemma-4-E4B-it",
+            "openai/gpt-oss-20b",
+            "Qwen/Qwen3.5-4B",
+            "Qwen/Qwen3.6-35B-A3B",
+            "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16",
+        ],
+    )
+    def test_other_checkpoints_leave_the_backend_unset(self, hub_id: str) -> None:
+        assert sm80_attention_backend(hub_id) is None
+
+    def test_unknown_family_leaves_the_backend_unset(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stub_config_model_type(monkeypatch, "llama")
+
+        assert sm80_attention_backend("meta/llama") is None
 
 
 class TestFamilyMaxNumBatchedTokens:

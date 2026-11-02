@@ -15,6 +15,14 @@ FSDP_DTYPE_NAMES = frozenset({"bfloat16", "float16", "float32", "float64"})
 PARAM_PERSISTENCE_THRESHOLD = 100_000
 # FSDP units all-gathered ahead of the running one, in forward and in backward.
 PREFETCH_UNITS = 1
+# Fields the training-memory search picks; ``None`` means not yet picked.
+FSDP_MEMORY_FIELDS = (
+    "reshard_after_forward",
+    "routed_expert_chunk_mib",
+    "optim_cpu_offload",
+    "activation_offload",
+    "cpu_offload",
+)
 
 
 @dataclass
@@ -75,6 +83,18 @@ class FSDPConfig:
         str,
         Field(description="Dtype for gradient reduce-scatter and all-reduce."),
     ] = "float32"
+    checkpoint_every_n_blocks: Annotated[
+        int | None,
+        Field(
+            ge=1,
+            description=(
+                "Checkpoint one in every n transformer blocks. 1 checkpoints "
+                "all of them. Picked from the memory estimate with "
+                "gradient_checkpointing; manifests cannot set it. Must be set "
+                "before training with gradient_checkpointing on."
+            ),
+        ),
+    ] = None
     ep: Annotated[
         int,
         Field(
@@ -152,6 +172,12 @@ class FSDPConfig:
     def __post_init__(self) -> None:
         self.param_dtype = _dtype_name(self.param_dtype)
         self.reduce_dtype = _dtype_name(self.reduce_dtype)
+        if (
+            self.checkpoint_every_n_blocks is not None
+            and self.checkpoint_every_n_blocks < 1
+        ):
+            msg = "FSDPConfig.checkpoint_every_n_blocks must be >= 1"
+            raise ValueError(msg)
         if self.ep < 1:
             msg = "FSDPConfig.ep must be >= 1"
             raise ValueError(msg)

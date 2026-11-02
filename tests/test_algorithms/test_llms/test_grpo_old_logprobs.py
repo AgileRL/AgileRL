@@ -48,12 +48,8 @@ def _stub_colocated_setup(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(GRPO, "_setup_actors", setup_without_vllm)
 
 
-def _make_grpo(liger_loss: bool | None = False, **overrides: Any) -> GRPO:
-    """Tiny fp32 GRPO on CPU: 2 prompts x 2 completions, one micro-batch of 2 rows.
-
-    :param liger_loss: Value to pin ``liger_loss`` to, or ``None`` to keep the
-        value resolved at init.
-    """
+def _make_grpo(**overrides: Any) -> GRPO:
+    """Tiny fp32 GRPO on CPU: 2 prompts x 2 completions, one micro-batch of 2 rows."""
     torch.manual_seed(0)
     kwargs: dict[str, Any] = {
         "actor_network": create_module(
@@ -83,10 +79,7 @@ def _make_grpo(liger_loss: bool | None = False, **overrides: Any) -> GRPO:
         ),
         **overrides,
     }
-    agent = GRPO(**kwargs)
-    if liger_loss is not None:
-        agent.liger_loss = liger_loss
-    return agent
+    return GRPO(**kwargs)
 
 
 def _batch() -> tuple[torch.Tensor, torch.Tensor]:
@@ -809,190 +802,6 @@ class TestLLMAlgorithmAlignSamplingSupports:
         assert frame.tolist() == [[[2, 7], [3, -1]], [[-1, -1], [-1, -1]]]
 
 
-UNWEIGHTED_TOKENS: dict[str, Any] = {
-    "vllm_importance_sampling_correction": False,
-    "off_policy_token_mask_bounds": None,
-    "off_policy_sequence_mask_threshold": None,
-}
-TRAJECTORY_OBJECTIVES = [
-    pytest.param({"loss_type": "gspo"}, id="gspo"),
-    pytest.param({"importance_sampling_level": "trajectory"}, id="grpo-trajectory"),
-]
-
-
-class TestGRPOObjectiveLoss:
-    """Which loss path a minibatch runs, with and without sampling supports."""
-
-    @staticmethod
-    def _liger_agent(
-        monkeypatch: pytest.MonkeyPatch, **overrides: Any
-    ) -> tuple[GRPO, tuple, list[int]]:
-        # liger-kernel is a CUDA extra; only the routing is under test.
-        agent = _make_grpo(
-            liger_loss=True,
-            **{"vllm_importance_sampling_correction": False, **overrides},
-        )
-        liger_result = tuple(torch.tensor(float(i)) for i in range(4))
-        liger_calls: list[int] = []
-
-        def liger_loss(*_args: Any, **_kwargs: Any) -> tuple:
-            liger_calls.append(1)
-            return liger_result
-
-        monkeypatch.setattr(agent, "_liger_loss", liger_loss)
-        return agent, liger_result, liger_calls
-
-    def test_a_batch_without_supports_runs_the_liger_kernel(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Arrange
-        agent, liger_result, _calls = self._liger_agent(monkeypatch)
-        ids, mask = _batch()
-        zeros = torch.zeros(mask.shape)
-
-        # Act
-        result = agent._objective_loss(
-            ids, mask, torch.zeros(NUM_ROWS, 1), zeros, zeros, None, None
-        )
-
-        # Assert
-        assert result is liger_result
-
-    def test_a_batch_with_supports_runs_the_standard_loss(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Arrange: a non-colocated engine reports supports per batch.
-        agent, _result, liger_calls = self._liger_agent(monkeypatch)
-        supports, sampling_logps = _supported_sampling(agent)
-
-        # Act
-        metrics = agent.learn(
-            _experiences(),
-            sampling_logps=sampling_logps,
-            sampling_supports=supports,
-        )
-
-        # Assert
-        assert not agent.colocated
-        assert liger_calls == []
-        assert math.isfinite(metrics["loss"])
-
-    @pytest.mark.parametrize("objective", TRAJECTORY_OBJECTIVES)
-    def test_a_trajectory_batch_runs_the_liger_kernel(
-        self, monkeypatch: pytest.MonkeyPatch, objective: dict[str, Any]
-    ) -> None:
-        # Arrange
-        agent, liger_result, _calls = self._liger_agent(
-            monkeypatch, **objective, **UNWEIGHTED_TOKENS
-        )
-        ids, mask = _batch()
-        zeros = torch.zeros(mask.shape)
-
-        # Act
-        result = agent._objective_loss(
-            ids, mask, torch.zeros(NUM_ROWS, 1), zeros, zeros, None, None
-        )
-
-        # Assert
-        assert agent.importance_sampling_level == "trajectory"
-        assert result is liger_result
-
-    @pytest.mark.parametrize("objective", TRAJECTORY_OBJECTIVES)
-    def test_a_trajectory_batch_with_sampling_log_probs_runs_the_standard_loss(
-        self, monkeypatch: pytest.MonkeyPatch, objective: dict[str, Any]
-    ) -> None:
-        # Arrange
-        agent, _result, liger_calls = self._liger_agent(
-            monkeypatch, loss_norm="micro_batch", **objective, **UNWEIGHTED_TOKENS
-        )
-        ids, mask = _batch()
-        zeros = torch.zeros(mask.shape)
-
-        # Act
-        loss, _kl, _clipfrac, _log_probs = agent._objective_loss(
-            ids, mask, torch.ones(NUM_ROWS, 1), zeros, zeros, None, zeros - 1.0
-        )
-
-        # Assert
-        assert liger_calls == []
-        assert torch.isfinite(loss)
-        assert loss.requires_grad
-
-
-class TestGRPOLigerLossProperty:
-    """``liger_loss`` resolves at init from liger-kernel and the configured objective."""
-
-    @pytest.mark.parametrize(
-        "overrides",
-        [
-            pytest.param({}, id="token-default-sampling"),
-            pytest.param({"loss_type": "gspo", **UNWEIGHTED_TOKENS}, id="gspo"),
-            pytest.param(
-                {"importance_sampling_level": "trajectory", **UNWEIGHTED_TOKENS},
-                id="grpo-trajectory",
-            ),
-        ],
-    )
-    def test_objective_with_a_kernel_runs_liger(
-        self, liger_kernel_installed: None, overrides: dict[str, Any]
-    ) -> None:
-        # Act
-        with pytest.warns(UserWarning, match="Liger Loss used with LoRA"):
-            agent = _make_grpo(liger_loss=None, **overrides)
-
-        # Assert
-        assert agent.liger_loss is True
-        assert agent.lora_config.exclude_modules == ["lm_head"]
-
-    @pytest.mark.parametrize(
-        "overrides",
-        [
-            pytest.param({"use_kl_advantage_shaping": True}, id="kl-shaping"),
-            pytest.param({"loss_type": "gspo"}, id="gspo-reweighted-tokens"),
-            pytest.param(
-                {
-                    "loss_type": "cispo",
-                    "importance_sampling_level": "trajectory",
-                    **UNWEIGHTED_TOKENS,
-                },
-                id="cispo-trajectory",
-            ),
-            pytest.param(
-                {"importance_sampling_level": "turn", **UNWEIGHTED_TOKENS},
-                id="grpo-turn",
-            ),
-            pytest.param(
-                {
-                    "importance_sampling_level": "trajectory",
-                    "advantage_granularity": "turn",
-                    **UNWEIGHTED_TOKENS,
-                },
-                id="grpo-trajectory-turn-advantages",
-            ),
-        ],
-    )
-    def test_objective_without_a_kernel_runs_the_standard_loss(
-        self, liger_kernel_installed: None, overrides: dict[str, Any]
-    ) -> None:
-        # Act
-        agent = _make_grpo(liger_loss=None, **overrides)
-
-        # Assert
-        assert agent.liger_loss is False
-
-    def test_liger_stays_off_without_liger_kernel(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Arrange
-        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False)
-
-        # Act
-        agent = _make_grpo(liger_loss=None)
-
-        # Assert
-        assert agent.liger_loss is False
-
-
 class TestGRPOLearnMetricKeys:
     """Every rank reports the same learn keys, whatever its sampling coverage."""
 
@@ -1152,6 +961,36 @@ def _trained_checkpoint(path: Path, **overrides: Any) -> GRPO:
     agent.reference_update_tracker = 3
     agent.save_checkpoint(str(path))
     return agent
+
+
+class TestGRPOLearnSequencePacking:
+    """A packed gradient forward trains exactly as the padded one."""
+
+    @pytest.mark.parametrize("loss_norm", ["accumulation_window", "micro_batch"])
+    def test_packed_learn_matches_padded(
+        self, monkeypatch: pytest.MonkeyPatch, loss_norm: str
+    ) -> None:
+        # Arrange: two micro-batches per step, odd rows padded.
+        padded = _make_grpo(loss_norm=loss_norm, mini_batch_size=4)
+        packed = _make_grpo(loss_norm=loss_norm, mini_batch_size=4)
+        monkeypatch.setattr(padded, "_packing_mode", lambda: None)
+        monkeypatch.setattr(packed, "_packing_mode", lambda: "varlen")
+        padded_steps = _record_step_gradients(padded, monkeypatch)
+        packed_steps = _record_step_gradients(packed, monkeypatch)
+
+        # Act
+        padded_metrics = padded.learn(
+            _experiences(), sampling_logps=_sampling_logps(padded)
+        )
+        packed_metrics = packed.learn(
+            _experiences(), sampling_logps=_sampling_logps(packed)
+        )
+
+        # Assert
+        assert padded_metrics["padding_frac_after_packing"] > 0.0
+        assert packed_metrics["padding_frac_after_packing"] == 0.0
+        assert packed_metrics["loss"] == pytest.approx(padded_metrics["loss"], abs=1e-6)
+        _assert_same_gradients(packed_steps, padded_steps)
 
 
 class TestGRPOLoadCheckpoint:

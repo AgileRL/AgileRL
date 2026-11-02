@@ -20,6 +20,7 @@ from agilerl.architectures.catalog import (
     FAMILY_RUNTIME_CONFIGS,
     family_runtime,
     pretrained_model_type,
+    sm80_attention_backend,
     trainer_model_class,
 )
 from agilerl.architectures.nemotron_h_omni import (
@@ -51,6 +52,7 @@ __all__ = [
     "install_family_patches",
     "pretrained_model_type",
     "register_nemotron_h_omni_native_loading",
+    "sm80_attention_backend",
     "trainer_model_class",
 ]
 

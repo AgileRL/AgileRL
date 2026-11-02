@@ -232,18 +232,22 @@ python-version = "3.13"
 include = ["agilerl", "agilerl/arena"]
 
 # Imports that only resolve on some platforms/extras: vllm is Linux-only and
-# conflicts with cpu. Box2D needs the box2d extra. GPU Linux (`--extra all`)
+# conflicts with cpu. Triton ships only with CUDA torch builds. Box2D needs the
+# box2d extra. GPU Linux (`--extra all`)
 # resolves vllm; GitHub-hosted CPU Linux (`--extra cpu --extra cpu-llm`) and
 # macOS/Windows cannot.
 [[tool.ty.overrides]]
 include = [
     "agilerl/algorithms/core/base.py",
-    "agilerl/algorithms/core/llm_ops/fused_loss.py",
+    "agilerl/architectures/granite_liger.py",
+    "agilerl/architectures/liger_rope.py",
     "agilerl/architectures/nemotron_h/liger.py",
     "agilerl/lora/moe/layouts.py",
     "agilerl/architectures/qwen3_5/causal_lm.py",
     "agilerl/architectures/vllm_language.py",
     "agilerl/algorithms/core/llm_ops/vllm_colocate.py",
+    "agilerl/lora/moe/layouts.py",
+    "agilerl/lora/moe/triton_kernels.py",
     "agilerl/algorithms/grpo.py",
     "agilerl/algorithms/sft.py",
     "agilerl/utils/llm_utils.py",
@@ -323,6 +327,9 @@ allow-star-arg-any = true
 "{benchmarking,demos,tutorials,scripts}/**" = ["ALL"]
 ".github/**" = [
     "INP001",        # standalone CI scripts, not a package
+]
+"agilerl/lora/moe/triton_kernels.py" = [
+    "ANN001", "ANN201", # Triton's JIT reads kernel parameter annotations as kernel types; non-Triton annotations fail to compile
 ]
 "scripts/**" = [
     "INP001",        # standalone scripts, not a package

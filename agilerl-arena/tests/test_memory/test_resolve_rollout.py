@@ -1,6 +1,6 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
-"""Which Ray runs generate on async rollout engines, and how many they start."""
+"""Which Ray runs generate on async rollout engines, how many they start, their cycle size and whether they draft."""
 
 from typing import Any
 
@@ -9,8 +9,11 @@ import pytest
 from agilerl.arena.memory.resolve.rollout import (
     apply_run_rollout_mode,
     async_rollout_algorithm,
+    default_rollout_batch_size,
+    drafts_by_default,
     rollout_engines_blocker,
     run_rollout_engines,
+    runs_dual_stream_lora,
 )
 from agilerl.arena.models.algorithms import (
     DPOSpec,
@@ -67,6 +70,17 @@ class TestRolloutEnginesBlocker:
         )
 
 
+class TestDefaultRolloutBatchSize:
+    def test_a_batch_every_trainer_and_engine_divides_is_kept(self) -> None:
+        assert default_rollout_batch_size(64, 4, 2) == 64
+
+    def test_rounds_up_to_the_trainer_count(self) -> None:
+        assert default_rollout_batch_size(6, 4, 1) == 8
+
+    def test_rounds_up_to_both_trainers_and_engines(self) -> None:
+        assert default_rollout_batch_size(10, 2, 3) == 12
+
+
 class TestApplyRunRolloutMode:
     def test_an_async_run_sets_async_and_auto_engines(self) -> None:
         # Arrange
@@ -101,3 +115,28 @@ class TestApplyRunRolloutMode:
 
         # Assert
         assert training == {"max_steps": 4}
+
+
+class TestDraftsByDefault:
+    def test_multi_turn_attention_only_engine_drafts(self) -> None:
+        assert drafts_by_default(True, False, 0.0, False) is True
+
+    def test_single_turn_engine_does_not_draft(self) -> None:
+        assert drafts_by_default(False, False, 0.0, False) is False
+
+    def test_hybrid_ssm_engine_does_not_draft(self) -> None:
+        assert drafts_by_default(True, True, 0.0, False) is False
+
+    def test_min_p_engine_does_not_draft(self) -> None:
+        assert drafts_by_default(True, False, 0.05, False) is False
+
+    def test_logit_bias_engine_does_not_draft(self) -> None:
+        assert drafts_by_default(True, False, 0.0, True) is False
+
+
+class TestRunsDualStreamLora:
+    def test_dense_engine_runs_two_lora_streams(self) -> None:
+        assert runs_dual_stream_lora(False) is True
+
+    def test_moe_engine_runs_one_lora_stream(self) -> None:
+        assert runs_dual_stream_lora(True) is False

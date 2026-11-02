@@ -1,27 +1,21 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for GRPO loss normalization and fused-path activation offload.
+"""Unit tests for GRPO loss normalization.
 
-Covers ``loss_norm="accumulation_window"`` on the standard and the fused Liger
-path, the ``num_items_in_batch`` plumbing the fused reduction needs, and
-``activation_offload`` reaching the fused training forward. Pure CPU: the fused
-kernel is a stand-in mirroring liger's signature and both of its reductions.
+Covers ``loss_norm="accumulation_window"`` and ``"micro_batch"`` on the GRPO
+loss reduction, on one rank and across ranks. Pure CPU.
 """
 
 from __future__ import annotations
 
 import inspect
 import warnings
-from contextlib import nullcontext
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import torch
 import torch.distributed as dist
-from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.tensor import Shard, distribute_tensor
 
 pytest.importorskip("transformers", reason="LLM tests require transformers.")
 pytest.importorskip("peft", reason="LLM tests require peft.")
@@ -31,201 +25,37 @@ import numpy as np
 from agilerl.algorithms import grpo as grpo_module
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.grpo import GRPO
-from agilerl.distributed import FSDPConfig
-from agilerl.distributed.runtime import FSDPRuntime
 from tests.rank_launch import run_ranks
 
 CLIP_MIN = 0.8
 CLIP_MAX = 1.2
 VOCAB = 5
 HIDDEN = 3
-KERNEL_NAME = "LigerFusedLinearGRPOFunction"
-TOKEN_COUNT_LOSS_TYPES = ("dapo", "cispo", "vespo")
-
-
-def _world_size() -> int:
-    """Ranks the fused kernel divides its token-count normalizer by."""
-    if torch.distributed.is_available() and torch.distributed.is_initialized():
-        return int(torch.distributed.get_world_size())
-    return 1
-
-
-class _FakeFusedKernel:
-    """Kernel stand-in mirroring liger's signature and both its normalizers."""
-
-    last_num_items: float | None = None
-    last_loss_type: str | None = None
-    last_args: tuple = ()
-
-    @classmethod
-    def forward(
-        cls,
-        ctx,
-        _input,
-        weight,
-        selected_token_ids,
-        attention_mask,
-        advantages,
-        bias=None,
-        ref_per_token_logps=None,
-        old_per_token_logps=None,
-        ref_input=None,
-        ref_weight=None,
-        ref_bias=None,
-        beta=0.04,
-        epsilon_low=0.2,
-        epsilon_high=0.2,
-        loss_type="dapo",
-        max_completion_length=None,
-        importance_sampling_level="token",
-        sapo_temperature_pos=1.0,
-        sapo_temperature_neg=1.05,
-        temperature=1.0,
-        compiled=True,
-        use_ref_model=True,
-        chunk_size=1,
-        vllm_is_ratio=None,
-        delta=None,
-        use_bias_correction_kl=False,
-        vespo_k_pos=2.0,
-        vespo_lambda_pos=3.0,
-        vespo_k_neg=3.0,
-        vespo_lambda_neg=2.0,
-        num_items_in_batch=None,
-    ):
-        """Per-token loss for the requested objective under its own reduction.
-
-        ``dapo``/``cispo``/``vespo`` divide by ``num_items_in_batch`` when it is
-        given and by their own micro-batch otherwise; ``grpo`` averages
-        per-sequence means and never reads the count.
-        """
-        cls.last_num_items = num_items_in_batch
-        cls.last_loss_type = loss_type
-        logits = _input.squeeze(1) @ weight.t()
-        if bias is not None:
-            logits = logits + bias
-        logits = logits / temperature
-        logps = torch.log_softmax(logits, dim=-1).gather(
-            1,
-            selected_token_ids.reshape(-1, 1),
-        )
-        old = logps.detach() if old_per_token_logps is None else old_per_token_logps
-        ratio = torch.exp(logps - old)
-        if loss_type == "cispo":
-            clamped = torch.clamp(ratio, None, epsilon_high).detach()
-            per_token_loss = -clamped * advantages.unsqueeze(1) * logps
-        else:
-            clamped = torch.clamp(ratio, 1 - epsilon_low, 1 + epsilon_high)
-            per_token_loss = -torch.min(
-                ratio * advantages.unsqueeze(1),
-                clamped * advantages.unsqueeze(1),
-            )
-        mask = attention_mask.to(logps.dtype)
-        masked = per_token_loss * mask
-        if loss_type in TOKEN_COUNT_LOSS_TYPES:
-            count = (
-                torch.as_tensor(float(num_items_in_batch))
-                if num_items_in_batch is not None
-                else mask.sum()
-            )
-            loss = masked.sum() / torch.clamp(count / _world_size(), min=1.0)
-        else:
-            per_row = masked.sum(-1) / mask.sum(-1).clamp(min=1.0)
-            loss = per_row.sum() / mask.shape[0]
-        return loss, (torch.zeros(()),)
-
-    @classmethod
-    def apply(cls, *args):
-        """Invoke ``forward`` the way ``torch.autograd.Function.apply`` does."""
-        cls.last_args = args
-        return cls.forward(None, *args)
-
-
-class _KernelWithoutTokenCount:
-    """Kernel stand-in whose signature cannot carry the token count."""
-
-    @classmethod
-    def forward(cls, ctx, _input):
-        """Accept the autograd context and nothing else."""
-        return _input
-
-
-class _KernelWithoutCtx:
-    """Kernel stand-in whose forward drops the autograd context."""
-
-    @classmethod
-    def forward(cls, _input, num_items_in_batch=None):
-        """Accept the input tensor without an autograd context."""
-        return _input, num_items_in_batch
-
-
-class _CallableActor:
-    """Actor stand-in returning the owner's fixed hidden states."""
-
-    def __init__(self, owner: _Stub) -> None:
-        self._owner = owner
-
-    def train(self) -> None:
-        """Match the training-mode call the fused path makes."""
-        return
-
-    def __call__(self, **_kwargs: Any):
-        """Return the hidden states in place of logits."""
-        return SimpleNamespace(logits=self._owner.hidden)
 
 
 class _Stub:
-    """Stand-in carrying the state the loss paths read, bound to GRPO's methods."""
+    """Stand-in carrying the state the loss reduction reads, bound to GRPO's methods."""
 
     def __init__(
         self,
-        *,
         loss_norm: str = "accumulation_window",
         loss_type: str = "cispo",
         accumulation_steps: int = 4,
         window_tokens: int | None = None,
-        activation_offload: bool = False,
         lm_head: torch.nn.Linear | None = None,
     ) -> None:
         self.device = torch.device("cpu")
         self.loss_norm = loss_norm
         self.loss_type = loss_type
-        self.importance_sampling_level = "token"
-        self.clip_coef_min = CLIP_MIN
-        self.clip_coef_max = CLIP_MAX
-        self.beta = 0.0
         self.temperature = 1.0
-        self.max_output_tokens = 32
-        self.pad_token_id = 0
-        self.calc_position_embeddings = False
-        self.use_kl_advantage_shaping = False
-        self.vllm_importance_sampling_cap = 2.0
-        self.off_policy_token_mask_bounds = None
-        self.off_policy_sequence_mask_threshold = None
-        self.use_bias_correction_kl = False
-        self.kl_clamp = 10.0
-        self.logit_bias: dict[int, float] | None = None
-        self.activation_offload = activation_offload
         self.gradient_accumulation_steps = accumulation_steps
         self._window_action_tokens = window_tokens
         self._segment_accumulation_steps = None
+        self._window_micro_batches = None
+        self._micro_batch_rows = None
         self.lm_head = lm_head or torch.nn.Linear(HIDDEN, VOCAB, bias=False)
-        self.hidden: torch.Tensor | None = None
-        self.actor: Any = _CallableActor(self)
 
     _resolve_loss_norm = GRPO._resolve_loss_norm
-    _activation_offload_ctx = GRPO._activation_offload_ctx
-    _actor_hidden_states = GRPO._actor_hidden_states
-    _apply_kl_advantage_shaping = GRPO._apply_kl_advantage_shaping
-    _clipped_units = GRPO._clipped_units
-    _compute_policy_loss = GRPO._compute_policy_loss
-    _fused_kernel_loss = GRPO._fused_kernel_loss
-    _gradient_forward_inputs = GRPO._gradient_forward_inputs
-    _liger_loss = GRPO._liger_loss
-    _log_importance_weights = GRPO._log_importance_weights
-    _logit_bias_vector = GRPO._logit_bias_vector
-    _masks_off_policy_tokens = GRPO._masks_off_policy_tokens
-    _logprobs_from_hidden_fused = staticmethod(GRPO._logprobs_from_hidden_fused)
     _record_global_window_action_tokens = GRPO._record_global_window_action_tokens
     _reduce_masked_loss = GRPO._reduce_masked_loss
     _resolve_loss_window = GRPO._resolve_loss_window
@@ -233,58 +63,6 @@ class _Stub:
     _warn_if_micro_batches_straddle_optimizer_steps = (
         GRPO._warn_if_micro_batches_straddle_optimizer_steps
     )
-
-    def _get_lm_head(self) -> torch.nn.Linear:
-        return self.lm_head
-
-    def _packing_mode(self) -> None:
-        return None
-
-    def _patch_lm_head_to_identity(self):
-        return nullcontext()
-
-    def select_adapter(self, _name: str):
-        return nullcontext()
-
-    def _amp_ctx(self):
-        return nullcontext()
-
-    def _liger_head_gather(self):
-        return nullcontext((self.lm_head.weight, self.lm_head.bias))
-
-
-class _SaveOnCpuSpy:
-    """Stand-in for ``torch.autograd.graph.save_on_cpu`` recording its use."""
-
-    def __init__(self, real: Any) -> None:
-        self._real = real
-        self.pin_memory_flags: list[bool] = []
-        self.depth = 0
-        self.max_depth = 0
-
-    def __call__(self, **kwargs: Any):
-        """Build a depth-recording wrapper around the real offload context."""
-        self.pin_memory_flags.append(bool(kwargs.get("pin_memory", False)))
-        return _SpyContext(self, self._real(**kwargs))
-
-
-class _SpyContext:
-    """Offload context recording how deep the wrapped work sits inside it."""
-
-    def __init__(self, spy: _SaveOnCpuSpy, inner: Any) -> None:
-        self._spy = spy
-        self._inner = inner
-
-    def __enter__(self):
-        """Enter the real context and record the depth."""
-        self._spy.depth += 1
-        self._spy.max_depth = max(self._spy.max_depth, self._spy.depth)
-        return self._inner.__enter__()
-
-    def __exit__(self, *exc_info: object):
-        """Leave the real context and record the depth."""
-        self._spy.depth -= 1
-        return self._inner.__exit__(*exc_info)
 
 
 def _mask_of_lengths(lengths: list[int], width: int) -> torch.Tensor:
@@ -335,35 +113,12 @@ def _token_log_probs(
     )[..., 0]
 
 
-def _fused_inputs(lengths: list[int], width: int, seed: int):
-    """Hidden states, token ids and an action mask for a fused-path call."""
+def _head_inputs(lengths: list[int], width: int, seed: int):
+    """Hidden states, token ids and an action mask for one micro-batch."""
     generator = torch.Generator().manual_seed(seed)
     hidden = torch.randn(len(lengths), width + 1, HIDDEN, generator=generator)
     batch_ids = torch.randint(1, VOCAB, (len(lengths), width + 1), generator=generator)
     return hidden, batch_ids, _mask_of_lengths(lengths, width)
-
-
-@pytest.fixture(autouse=True)
-def _reset_kernel_spy(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Hand the shared kernel spy and AgileRL's module globals back untouched."""
-    monkeypatch.setattr(_FakeFusedKernel, "last_num_items", None)
-    monkeypatch.setattr(_FakeFusedKernel, "last_loss_type", None)
-    monkeypatch.setattr(_FakeFusedKernel, "last_args", ())
-    monkeypatch.setattr(grpo_module, "HAS_LIGER_KERNEL", grpo_module.HAS_LIGER_KERNEL)
-    monkeypatch.setattr(
-        grpo_module,
-        KERNEL_NAME,
-        getattr(grpo_module, KERNEL_NAME, None),
-        raising=False,
-    )
-
-
-@pytest.fixture
-def fused_kernel(monkeypatch: pytest.MonkeyPatch) -> type[_FakeFusedKernel]:
-    """Install the fused-kernel stand-in behind AgileRL's kernel name."""
-    monkeypatch.setattr(grpo_module, "HAS_LIGER_KERNEL", True)
-    monkeypatch.setattr(grpo_module, KERNEL_NAME, _FakeFusedKernel, raising=False)
-    return _FakeFusedKernel
 
 
 class TestGRPOLossNormConfig:
@@ -640,536 +395,31 @@ class TestGRPORecordGlobalWindowActionTokens:
         assert algo._window_action_tokens.item() == 1.0
 
 
-class TestFusedKernelNormalizer:
-    """``num_items_in_batch`` plumbing into the fused kernel's reduction."""
-
-    def test_defaults_bridge_the_gap_to_the_token_count(
-        self,
-        fused_kernel: type[_FakeFusedKernel],
-    ) -> None:
-        required = (torch.zeros(1), torch.zeros(1), torch.zeros(1), torch.ones(1), None)
-        args = grpo_module._liger_args_with_normalizer(required, 512.0)
-        names = [
-            parameter.name
-            for parameter in list(
-                inspect.signature(fused_kernel.forward).parameters.values(),
-            )[1:]
-        ]
-        assert len(args) == names.index("num_items_in_batch") + 1
-        assert args[-1] == 512.0
-        assert args[names.index("use_bias_correction_kl")] is False
-        assert args[names.index("loss_type")] == "dapo"
-
-    def test_a_kernel_without_the_token_count_is_rejected(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setattr(
-            grpo_module,
-            KERNEL_NAME,
-            _KernelWithoutTokenCount,
-            raising=False,
-        )
-        with pytest.raises(RuntimeError, match="does not accept 'num_items_in_batch'"):
-            grpo_module._liger_args_with_normalizer((torch.zeros(1),), 8.0)
-
-    def test_a_kernel_without_the_autograd_context_is_rejected(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setattr(grpo_module, KERNEL_NAME, _KernelWithoutCtx, raising=False)
-        with pytest.raises(RuntimeError, match="must start with the autograd"):
-            grpo_module._liger_args_with_normalizer((torch.zeros(1),), 8.0)
-
-    def test_a_missing_required_argument_is_rejected(
-        self,
-        fused_kernel: type[_FakeFusedKernel],
-    ) -> None:
-        with pytest.raises(RuntimeError, match="'weight' precedes"):
-            grpo_module._liger_args_with_normalizer((torch.zeros(1),), 8.0)
-
-
-class TestFusedWindowNormalization:
-    """The fused path under ``loss_norm="accumulation_window"``."""
-
-    @staticmethod
-    def _run(
-        loss_type: str,
-        objective: str,
-        seed: int,
-        steps: int = 4,
-        lengths: tuple[int, ...] = (5, 9),
-        width: int = 16,
-        loss_norm: str = "accumulation_window",
-        window_tokens: int | None = None,
-    ):
-        hidden, batch_ids, mask = _fused_inputs(list(lengths), width, seed)
-        if window_tokens is None:
-            window_tokens = sum(lengths) * 2
-        advantages = torch.tensor([[0.4], [-0.9]])
-        algo = _Stub(
-            loss_norm=loss_norm,
-            loss_type=loss_type,
-            accumulation_steps=steps,
-            window_tokens=window_tokens,
-        )
-        algo.hidden = hidden
-        log_probs = _token_log_probs(algo, hidden, batch_ids, width)
-        spread = torch.linspace(0.0, 0.3, steps=log_probs.numel()).reshape(
-            log_probs.shape,
-        )
-        old_log_probs = (log_probs - spread).detach()
-
-        fused_loss, _, _, _ = algo._liger_loss(
-            batch_ids,
-            mask,
-            advantages,
-            old_log_probs,
-            None,
-        )
-        eager_loss, _, _ = algo._compute_policy_loss(
-            mask,
-            _token_log_probs(algo, hidden, batch_ids, width),
-            old_log_probs,
-            log_probs.detach(),
-            advantages,
-            None,
-            level="token",
-            objective=objective,
-        )
-        ratio = torch.exp(log_probs.detach() - old_log_probs)
-        if objective == "cispo":
-            per_token = -(ratio.clamp(max=CLIP_MAX) * advantages * log_probs.detach())
-        else:
-            clipped = ratio.clamp(CLIP_MIN, CLIP_MAX)
-            per_token = -torch.min(ratio * advantages, clipped * advantages)
-        return SimpleNamespace(
-            fused=fused_loss,
-            eager=eager_loss,
-            masked_sum=float((per_token * mask).sum()),
-            per_sequence_mean=float(_micro_batch_reduce(per_token, mask).mean()),
-            window_tokens=window_tokens,
-            steps=steps,
-            min_ratio=float(ratio.min()),
-        )
-
-    def test_the_min_clip_objective_reaches_the_token_count_reduction(
-        self,
-        fused_kernel: type[_FakeFusedKernel],
-    ) -> None:
-        result = self._run("grpo", "grpo", seed=11)
-        expected = result.steps * result.masked_sum / result.window_tokens
-        assert fused_kernel.last_loss_type == "dapo"
-        assert result.fused.item() == pytest.approx(expected, rel=1e-5)
-        assert result.eager.item() == pytest.approx(expected, rel=1e-5)
-
-    def test_cispo_keeps_its_objective_and_gains_the_window(
-        self,
-        fused_kernel: type[_FakeFusedKernel],
-    ) -> None:
-        result = self._run("cispo", "cispo", seed=3)
-        # Ratios stay above the lower clamp the fused CISPO does not apply, so
-        # the two objectives coincide.
-        assert result.min_ratio >= CLIP_MIN
-        expected = result.steps * result.masked_sum / result.window_tokens
-        assert fused_kernel.last_loss_type == "cispo"
-        assert result.fused.item() == pytest.approx(expected, rel=1e-5)
-        assert result.eager.item() == pytest.approx(expected, rel=1e-5)
-
-    @pytest.mark.parametrize(
-        ("loss_type", "objective"),
-        [("grpo", "grpo"), ("cispo", "cispo")],
-    )
-    def test_a_single_step_window_is_the_micro_batch(
-        self,
-        fused_kernel: type[_FakeFusedKernel],
-        loss_type: str,
-        objective: str,
-    ) -> None:
-        result = self._run(
-            loss_type, objective, seed=13, steps=1, lengths=(5, 9), window_tokens=14
-        )
-        assert result.fused.item() == pytest.approx(
-            result.masked_sum / 14.0,
-            rel=1e-5,
-        )
-
-    @pytest.mark.parametrize(
-        ("loss_type", "objective"),
-        [("grpo", "grpo"), ("cispo", "cispo")],
-    )
-    def test_micro_batch_is_the_mean_of_per_sequence_means(
-        self,
-        fused_kernel: type[_FakeFusedKernel],
-        loss_type: str,
-        objective: str,
-    ) -> None:
-        result = self._run(loss_type, objective, seed=7, loss_norm="micro_batch")
-
-        assert result.min_ratio >= CLIP_MIN
-        assert result.fused.item() == pytest.approx(result.per_sequence_mean, rel=1e-5)
-        assert result.eager.item() == pytest.approx(result.per_sequence_mean, rel=1e-5)
-
-    def test_window_without_action_tokens_gives_zero_loss(
-        self,
-        fused_kernel: type[_FakeFusedKernel],
-    ) -> None:
-        # Arrange: a window of padding rows only.
-        hidden, batch_ids, mask = _fused_inputs([0, 0], 16, seed=5)
-        algo = _Stub(loss_type="cispo", accumulation_steps=4)
-        algo._record_global_window_action_tokens(mask, np.arange(2))
-        algo.hidden = hidden
-
-        # Act
-        loss, _, _, _ = algo._liger_loss(
-            batch_ids, mask, torch.tensor([[0.4], [-0.9]]), torch.zeros(2, 16), None
-        )
-
-        # Assert
-        assert loss.item() == 0.0
-
-
-class TestFusedActivationOffload:
-    """``activation_offload`` reaches the fused training forward."""
-
-    @staticmethod
-    def _call(
-        algo: _Stub,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        hidden, batch_ids, mask = _fused_inputs([5, 9], 16, seed=17)
-        algo.hidden = hidden
-        return algo._liger_loss(
-            batch_ids,
-            mask,
-            torch.tensor([[0.4], [-0.9]]),
-            torch.zeros(2, 16),
-            None,
-        )
-
-    @pytest.fixture
-    def spy(self, monkeypatch: pytest.MonkeyPatch) -> _SaveOnCpuSpy:
-        """Record every entry into ``torch.autograd.graph.save_on_cpu``."""
-        spy = _SaveOnCpuSpy(torch.autograd.graph.save_on_cpu)
-        monkeypatch.setattr(torch.autograd.graph, "save_on_cpu", spy)
-        return spy
-
-    def test_the_fused_loss_runs_inside_the_offload_context(
-        self,
-        fused_kernel: type[_FakeFusedKernel],
-        spy: _SaveOnCpuSpy,
-    ) -> None:
-        algo = _Stub(activation_offload=True, window_tokens=28)
-        self._call(algo)
-        assert spy.pin_memory_flags == [True]
-        assert spy.max_depth == 1
-        assert spy.depth == 0
-
-    def test_the_context_is_inert_when_the_flag_is_off(
-        self,
-        fused_kernel: type[_FakeFusedKernel],
-        spy: _SaveOnCpuSpy,
-    ) -> None:
-        algo = _Stub(activation_offload=False, window_tokens=28)
-        self._call(algo)
-        assert spy.pin_memory_flags == []
-
-    def test_the_context_is_inert_without_grad(
-        self,
-        fused_kernel: type[_FakeFusedKernel],
-        spy: _SaveOnCpuSpy,
-    ) -> None:
-        algo = _Stub(activation_offload=True, window_tokens=28)
-        with torch.no_grad():
-            self._call(algo)
-        assert spy.pin_memory_flags == []
-
-    def test_offload_composes_with_the_window_scaling(
-        self,
-        fused_kernel: type[_FakeFusedKernel],
-        spy: _SaveOnCpuSpy,
-    ) -> None:
-        offloaded = _Stub(activation_offload=True, window_tokens=28)
-        plain = _Stub(
-            activation_offload=False,
-            window_tokens=28,
-            lm_head=offloaded.lm_head,
-        )
-        offloaded_loss, _, _, _ = self._call(offloaded)
-        plain_loss, _, _, _ = self._call(plain)
-        assert spy.pin_memory_flags == [True]
-        assert offloaded_loss.item() == plain_loss.item()
+class TestActivationOffloadContext:
+    """GRPO takes ``activation_offload`` from the shared LLM algorithm."""
 
     def test_the_context_comes_from_the_algorithm_hierarchy(self) -> None:
         assert GRPO._activation_offload_ctx is LLMAlgorithm._activation_offload_ctx
         assert "activation_offload" not in inspect.signature(GRPO.__init__).parameters
 
 
-class TestFusedKernelPolicyLogProbs:
-    def test_matches_eager_log_softmax_on_action_tokens(
-        self,
-        fused_kernel: type[_FakeFusedKernel],
-    ) -> None:
-        # Arrange
-        torch.manual_seed(0)
-        algo = _Stub(window_tokens=14)
-        hidden, batch_ids, mask = _fused_inputs([5, 9], 16, seed=23)
-        algo.hidden = hidden
-
-        # Act
-        _, _, _, log_probs = algo._liger_loss(
-            batch_ids,
-            mask,
-            torch.tensor([[0.4], [-0.9]]),
-            torch.zeros(2, 16),
-            None,
-        )
-
-        # Assert
-        logits = hidden[:, :-1] @ algo.lm_head.weight.T
-        expected = torch.log_softmax(logits.float(), dim=-1).gather(
-            -1, batch_ids[:, 1:].unsqueeze(-1)
-        )
-        keep = mask.bool()
-        assert log_probs.shape == mask.shape
-        assert not log_probs.requires_grad
-        assert torch.allclose(log_probs[keep], expected.squeeze(-1)[keep], atol=1e-5)
-        assert torch.equal(log_probs[~keep], torch.zeros_like(log_probs[~keep]))
-
-
-class TestFusedKernelScoredPositions:
-    """The fused kernel scores only action positions and keeps the full-frame loss."""
-
-    @pytest.mark.parametrize("loss_type", ["grpo", "cispo"])
-    def test_micro_batch_loss_matches_the_full_frame_reduction(
-        self,
-        fused_kernel: type[_FakeFusedKernel],
-        loss_type: str,
-    ) -> None:
-        # Arrange
-        width = 16
-        hidden, batch_ids, mask = _fused_inputs([5, 9], width, seed=29)
-        advantages = torch.tensor([[0.4], [-0.9]])
-        algo = _Stub(loss_norm="micro_batch", loss_type=loss_type)
-        algo.hidden = hidden
-        log_probs = _token_log_probs(algo, hidden, batch_ids, width).detach()
-        spread = torch.linspace(0.0, 0.1, steps=log_probs.numel()).reshape(
-            log_probs.shape
-        )
-        old_log_probs = log_probs - spread
-
-        # Act
-        loss, _, _, _ = algo._liger_loss(
-            batch_ids, mask, advantages, old_log_probs, None
-        )
-
-        # Assert: the mean over rows of each row's mean over its own tokens.
-        ratio = torch.exp(log_probs - old_log_probs)
-        if loss_type == "cispo":
-            per_token = -(ratio.clamp(max=CLIP_MAX) * advantages * log_probs)
-        else:
-            clipped = ratio.clamp(CLIP_MIN, CLIP_MAX)
-            per_token = -torch.min(ratio * advantages, clipped * advantages)
-        expected = _micro_batch_reduce(per_token, mask).mean()
-        assert torch.allclose(loss, expected, atol=1e-6)
-
-    @pytest.mark.parametrize("loss_type", ["grpo", "cispo"])
-    def test_missing_old_log_probs_match_the_detached_policy(
-        self,
-        fused_kernel: type[_FakeFusedKernel],
-        loss_type: str,
-    ) -> None:
-        # Arrange
-        width = 16
-        hidden, batch_ids, mask = _fused_inputs([5, 9], width, seed=31)
-        advantages = torch.tensor([[0.4], [-0.9]])
-        explicit = _Stub(loss_norm="micro_batch", loss_type=loss_type)
-        implicit = _Stub(
-            loss_norm="micro_batch",
-            loss_type=loss_type,
-            lm_head=torch.nn.Linear(HIDDEN, VOCAB, bias=False),
-        )
-        implicit.lm_head.load_state_dict(explicit.lm_head.state_dict())
-        explicit.hidden = hidden
-        implicit.hidden = hidden
-        old_log_probs = _token_log_probs(explicit, hidden, batch_ids, width).detach()
-
-        # Act
-        explicit_loss, _, _, explicit_log_probs = explicit._liger_loss(
-            batch_ids, mask, advantages, old_log_probs, None
-        )
-        explicit_loss.backward()
-        implicit_loss, _, _, implicit_log_probs = implicit._liger_loss(
-            batch_ids, mask, advantages, None, None
-        )
-        implicit_loss.backward()
-
-        # Assert
-        assert torch.allclose(implicit_loss, explicit_loss, atol=1e-6)
-        assert torch.allclose(
-            implicit.lm_head.weight.grad, explicit.lm_head.weight.grad, atol=1e-6
-        )
-        assert torch.allclose(implicit_log_probs, explicit_log_probs, atol=1e-6)
-
-    def test_logit_bias_reaches_the_loss_and_the_log_probs(
-        self,
-        fused_kernel: type[_FakeFusedKernel],
-    ) -> None:
-        # Arrange
-        width = 16
-        hidden, batch_ids, mask = _fused_inputs([5, 9], width, seed=37)
-        advantages = torch.tensor([[0.4], [-0.9]])
-        algo = _Stub(loss_norm="micro_batch", loss_type="cispo")
-        algo.hidden = hidden
-        algo.logit_bias = {1: -100.0, 3: 2.0}
-        logit_bias = torch.zeros(VOCAB)
-        logit_bias[[1, 3]] = torch.tensor([-100.0, 2.0])
-        logits = algo.lm_head(hidden[:, :width]) + logit_bias
-        log_probs = (
-            torch.log_softmax(logits, dim=-1)
-            .gather(2, batch_ids[:, 1:].unsqueeze(-1))[..., 0]
-            .detach()
-        )
-        spread = torch.linspace(0.0, 0.1, steps=log_probs.numel()).reshape(
-            log_probs.shape
-        )
-        old_log_probs = log_probs - spread
-
-        # Act
-        loss, _, _, fused_log_probs = algo._liger_loss(
-            batch_ids, mask, advantages, old_log_probs, None
-        )
-
-        # Assert
-        ratio = torch.exp(log_probs - old_log_probs)
-        per_token = -(ratio.clamp(max=CLIP_MAX) * advantages * log_probs)
-        expected = _micro_batch_reduce(per_token, mask).mean()
-        keep = mask.bool()
-        assert torch.allclose(loss, expected, atol=1e-6)
-        assert torch.allclose(fused_log_probs[keep], log_probs[keep], atol=1e-5)
-
-
-class TestLigerNormalizerWorldSize:
+class TestNormalizerWorldSize:
     def test_returns_one_when_distributed_inactive(self, monkeypatch) -> None:
         monkeypatch.setattr(torch.distributed, "is_available", lambda: True)
         monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
 
-        assert grpo_module._liger_normalizer_world_size() == 1
+        assert grpo_module._normalizer_world_size() == 1
 
     def test_uses_process_group_world_size(self, monkeypatch) -> None:
         monkeypatch.setattr(torch.distributed, "is_available", lambda: True)
         monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
         monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 4)
 
-        assert grpo_module._liger_normalizer_world_size() == 4
+        assert grpo_module._normalizer_world_size() == 4
 
 
-RANK_ACTION_LENGTHS = ([0], [3], [9, 4])
-"""Per-rank action lengths: no action rows, one row chunk, nine row chunks."""
 RANK_WIDTH = 16
 RANK_TIMEOUT_S = 120
-
-
-class _ChunkedCispoKernel(_FakeFusedKernel):
-    """CISPO kernel stand-in that chunks rows and normalizes like liger 0.8.1.
-
-    Each row chunk slices the head weight per vocab block, and without
-    ``num_items_in_batch`` each row chunk all-reduces the action-token count.
-    """
-
-    @classmethod
-    def apply(cls, *args):
-        """Run the chunked forward from positional kernel arguments."""
-        bound = inspect.signature(cls.forward).bind(None, *args).arguments
-        weight = bound["weight"]
-        mask = bound["attention_mask"].to(weight.dtype)
-        num_items = bound.get("num_items_in_batch")
-        n_chunks = max(1, bound["_input"].shape[0] // bound["chunk_size"])
-        chunks = zip(
-            torch.chunk(bound["_input"], n_chunks),
-            torch.chunk(bound["selected_token_ids"], n_chunks),
-            torch.chunk(mask, n_chunks),
-            torch.chunk(bound["advantages"], n_chunks),
-            torch.chunk(bound["old_per_token_logps"], n_chunks),
-            strict=True,
-        )
-        loss = torch.zeros(())
-        for hidden, targets, mask_chunk, adv, old in chunks:
-            logits = torch.cat(
-                [
-                    hidden.squeeze(1) @ weight[start : start + 2].t()
-                    for start in range(0, weight.shape[0], 2)
-                ],
-                dim=-1,
-            )
-            logps = torch.log_softmax(logits, dim=-1).gather(1, targets)
-            ratio = torch.exp(logps - old).clamp(max=bound["epsilon_high"]).detach()
-            per_token = -ratio * adv.unsqueeze(1) * logps
-            if num_items is None:
-                count = mask.sum()
-                dist.all_reduce(count)
-            else:
-                count = torch.as_tensor(float(num_items))
-            normalizer = torch.clamp(count / dist.get_world_size(), min=1.0)
-            loss = loss + (per_token * mask_chunk).sum() / normalizer
-        return loss, (torch.zeros(()),)
-
-
-class _ShardedHeadStub(_Stub):
-    """Stub whose head is gathered through the FSDP2 runtime."""
-
-    def _liger_head_gather(self):
-        return FSDPRuntime(FSDPConfig()).gather_layer(self.lm_head, device=self.device)
-
-
-def _sharded_head_cispo_rank(rank: int, world_size: int) -> None:
-    """One rank of the fused CISPO loss with a vocab-sharded frozen head."""
-    grpo_module.HAS_LIGER_KERNEL = True
-    grpo_module.LigerFusedLinearGRPOFunction = _ChunkedCispoKernel
-    torch.manual_seed(0)
-    dense_head = torch.nn.Linear(HIDDEN, VOCAB, bias=False).requires_grad_(False)
-    sharded_head = torch.nn.Linear(HIDDEN, VOCAB, bias=False)
-    sharded_head.weight = torch.nn.Parameter(
-        distribute_tensor(
-            dense_head.weight.clone(),
-            init_device_mesh("cpu", (world_size,)),
-            [Shard(0)],
-        ),
-        requires_grad=False,
-    )
-    lengths = RANK_ACTION_LENGTHS[rank]
-    hidden, batch_ids, mask = _fused_inputs(lengths, RANK_WIDTH, seed=rank)
-    hidden.requires_grad_(True)
-    advantages = torch.linspace(-0.9, 0.7, len(lengths)).unsqueeze(-1)
-    reference = _Stub(loss_norm="micro_batch", lm_head=dense_head)
-    log_probs = _token_log_probs(reference, hidden, batch_ids, RANK_WIDTH)
-    spread = torch.linspace(0.0, 0.1, log_probs.numel()).reshape(log_probs.shape)
-    old_log_probs = (log_probs - spread).detach()
-    algo = _ShardedHeadStub(
-        loss_norm="micro_batch", loss_type="cispo", lm_head=sharded_head
-    )
-    algo.hidden = hidden
-
-    loss, _, _, _ = algo._liger_loss(batch_ids, mask, advantages, old_log_probs, None)
-    loss.backward()
-
-    ratio = torch.exp(log_probs.detach() - old_log_probs).clamp(max=CLIP_MAX)
-    per_token = -(ratio * advantages * log_probs)
-    expected = _micro_batch_reduce(per_token, mask).mean()
-    fused_hidden_grad = hidden.grad.clone()
-    hidden.grad = None
-    expected.backward()
-    assert torch.allclose(loss, expected, atol=1e-6), (rank, loss, expected)
-    assert torch.allclose(fused_hidden_grad, hidden.grad, atol=1e-6), rank
-
-
-@pytest.mark.multi_rank
-class TestFusedKernelCollectivesAcrossRanks:
-    """Ranks with different action-row counts complete the sharded-head gather."""
-
-    def test_uneven_row_chunks_complete_and_match_the_dense_reference(self) -> None:
-        run_ranks(
-            _sharded_head_cispo_rank, len(RANK_ACTION_LENGTHS), timeout=RANK_TIMEOUT_S
-        )
 
 
 WINDOW_RANK_LENGTHS = {
@@ -1181,15 +431,13 @@ WINDOW_RANK_LENGTHS = {
 
 def _window_micro_batch(rank: int, step: int, lengths: list[int]):
     """Hidden states, token ids, action mask and advantages of one micro-batch."""
-    hidden, batch_ids, mask = _fused_inputs(lengths, RANK_WIDTH, seed=10 * rank + step)
+    hidden, batch_ids, mask = _head_inputs(lengths, RANK_WIDTH, seed=10 * rank + step)
     advantages = torch.linspace(-0.8, 0.6, len(lengths)).unsqueeze(-1) + rank
     return hidden, batch_ids, mask, advantages
 
 
 def _window_token_mean_rank(rank: int, world_size: int, scenario: str) -> None:
-    """One rank of an accumulation window on the standard and the fused path."""
-    grpo_module.HAS_LIGER_KERNEL = True
-    grpo_module.LigerFusedLinearGRPOFunction = _FakeFusedKernel
+    """One rank of an accumulation window on the GRPO loss reduction."""
     windows = WINDOW_RANK_LENGTHS[scenario]
     union = [
         _window_micro_batch(other, step, lengths)
@@ -1203,36 +451,25 @@ def _window_token_mean_rank(rank: int, world_size: int, scenario: str) -> None:
     steps = len(own)
     torch.manual_seed(0)
     initial_head = torch.nn.Linear(HIDDEN, VOCAB, bias=False)
-    heads = {}
-    for path in ("standard", "fused", "union"):
-        heads[path] = torch.nn.Linear(HIDDEN, VOCAB, bias=False)
-        heads[path].load_state_dict(initial_head.state_dict())
-    standard = _Stub(loss_type="cispo", accumulation_steps=steps)
-    standard.lm_head = heads["standard"]
-    fused = _Stub(loss_type="cispo", accumulation_steps=steps)
-    fused.lm_head = heads["fused"]
+    union_head = torch.nn.Linear(HIDDEN, VOCAB, bias=False)
+    union_head.load_state_dict(initial_head.state_dict())
+    algo = _Stub(loss_type="cispo", accumulation_steps=steps, lm_head=initial_head)
     window_mask = torch.cat([mask for _, _, mask, _ in own])
-    window_rows = np.arange(window_mask.shape[0])
-    standard._record_global_window_action_tokens(window_mask, window_rows)
-    fused._record_global_window_action_tokens(window_mask, window_rows)
+    algo._record_global_window_action_tokens(
+        window_mask, np.arange(window_mask.shape[0])
+    )
 
     losses = []
     for hidden, batch_ids, mask, advantages in own:
-        log_probs = _token_log_probs(standard, hidden, batch_ids, RANK_WIDTH)
-        standard_loss = standard._reduce_masked_loss(
-            -advantages * log_probs, mask
-        ).mean()
-        (standard_loss / steps).backward()
-        fused.hidden = hidden
-        fused_loss, _, _, _ = fused._liger_loss(batch_ids, mask, advantages, None, None)
-        (fused_loss / steps).backward()
-        losses += [standard_loss.detach(), fused_loss.detach()]
-    for path in ("standard", "fused"):
-        grad = heads[path].weight.grad
-        dist.all_reduce(grad, op=dist.ReduceOp.SUM)
-        grad /= world_size
+        log_probs = _token_log_probs(algo, hidden, batch_ids, RANK_WIDTH)
+        loss = algo._reduce_masked_loss(-advantages * log_probs, mask).mean()
+        (loss / steps).backward()
+        losses.append(loss.detach())
+    grad = initial_head.weight.grad
+    dist.all_reduce(grad, op=dist.ReduceOp.SUM)
+    grad /= world_size
 
-    reference = _Stub(loss_norm="micro_batch", lm_head=heads["union"])
+    reference = _Stub(loss_norm="micro_batch", lm_head=union_head)
     union_sum = torch.zeros(())
     union_tokens = 0.0
     for hidden, batch_ids, mask, advantages in union:
@@ -1240,16 +477,10 @@ def _window_token_mean_rank(rank: int, world_size: int, scenario: str) -> None:
         union_sum = union_sum + (-advantages * log_probs * mask).sum()
         union_tokens += float(mask.sum())
     (union_sum / max(union_tokens, 1.0)).backward()
-    expected = heads["union"].weight.grad
+    expected = union_head.weight.grad
 
     assert all(torch.isfinite(loss) for loss in losses), (rank, losses)
-    for path in ("standard", "fused"):
-        assert torch.allclose(heads[path].weight.grad, expected, atol=1e-6), (
-            rank,
-            path,
-            heads[path].weight.grad,
-            expected,
-        )
+    assert torch.allclose(grad, expected, atol=1e-6), (rank, grad, expected)
     if union_tokens == 0.0:
         assert all(loss.item() == 0.0 for loss in losses), (rank, losses)
 

@@ -1768,6 +1768,7 @@ def test_batch_rollout_env_exposes_num_epochs() -> None:
         ),
         batch_size=2,
         group_size=1,
+        adaptive_task_sampling=False,
     )
     assert batch.num_epochs == 0
     batch.reset(seed=0)  # consumes the full 2-row epoch

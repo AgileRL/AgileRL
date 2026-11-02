@@ -4,15 +4,13 @@
 """Unit tests for GRPO ``loss_norm="episode"``.
 
 Each test reads the per-token gradient weight the update gives the policy
-term, through a probe tensor standing in for the policy log-probs (standard
-path) or hidden states (fused path). Pure CPU on a tiny real model in fp32.
+term, through a probe tensor standing in for the policy log-probs. Pure CPU
+on a tiny real model in fp32.
 """
 
 from __future__ import annotations
 
-import inspect
-import math
-from typing import Any, ClassVar
+from typing import Any
 
 import numpy as np
 import pytest
@@ -30,93 +28,19 @@ from tests.test_algorithms.test_llms.segment_helpers import (
 )
 from tests.test_algorithms.test_llms.test_grpo_old_logprobs import (
     PAD_TOKEN_ID,
-    VOCAB,
     _make_grpo,
 )
 
-KERNEL_NAME = "LigerFusedLinearGRPOFunction"
 ADVANTAGE = 0.5
 """Magnitude of every episode's advantage under ``adv_norm="mean_only"``."""
 EPISODE_ACTION_TOKENS = [6, 6, 4, 8]
 """Action tokens of each ``EPISODE_SEGMENTS`` episode, over all its segment rows."""
 
 
-class _ProbeFusedKernel:
-    """Fused-kernel stand-in whose per-token policy loss is ``-advantage * hidden[0]``.
-
-    Reduces like liger: token-count loss types divide by ``num_items_in_batch``
-    over the world size, ``grpo`` averages per-row means.
-    """
-
-    loss_types: ClassVar[list[str]] = []
-    inputs: ClassVar[list[dict[str, Any]]] = []
-
-    @classmethod
-    def forward(
-        cls,
-        ctx,
-        _input,
-        weight,
-        selected_token_ids,
-        attention_mask,
-        advantages,
-        bias=None,
-        ref_per_token_logps=None,
-        old_per_token_logps=None,
-        ref_input=None,
-        ref_weight=None,
-        ref_bias=None,
-        beta=0.04,
-        epsilon_low=0.2,
-        epsilon_high=0.2,
-        loss_type="dapo",
-        max_completion_length=None,
-        importance_sampling_level="token",
-        sapo_temperature_pos=1.0,
-        sapo_temperature_neg=1.05,
-        temperature=1.0,
-        compiled=True,
-        use_ref_model=True,
-        chunk_size=1,
-        vllm_is_ratio=None,
-        delta=None,
-        use_bias_correction_kl=False,
-        vespo_k_pos=2.0,
-        vespo_lambda_pos=3.0,
-        vespo_k_neg=3.0,
-        vespo_lambda_neg=2.0,
-        num_items_in_batch=None,
-    ):
-        """Linear per-token loss in the probe under the requested reduction."""
-        cls.loss_types.append(loss_type)
-        mask = attention_mask.to(_input.dtype)
-        masked = -advantages.unsqueeze(1) * _input[..., 0] * mask
-        if loss_type in {"dapo", "cispo"}:
-            count = (
-                torch.as_tensor(float(num_items_in_batch))
-                if num_items_in_batch is not None
-                else mask.sum()
-            )
-            loss = masked.sum() / torch.clamp(count, min=1.0)
-        else:
-            loss = (masked.sum(-1) / mask.sum(-1).clamp(min=1.0)).mean()
-        return loss, (torch.zeros(()),)
-
-    @classmethod
-    def apply(cls, *args):
-        """Record the named inputs, then invoke ``forward`` the way ``torch.autograd.Function.apply`` does."""
-        bound = inspect.signature(cls.forward).bind(None, *args)
-        bound.apply_defaults()
-        cls.inputs.append(dict(bound.arguments))
-        return cls.forward(None, *args)
-
-
 def _probe_policy_weights(
     agent: GRPO,
     monkeypatch: pytest.MonkeyPatch,
     episode_segments: list[EpisodeSegments | None] | None,
-    *,
-    fused: bool,
 ) -> tuple[torch.Tensor, np.ndarray, torch.Tensor]:
     """Per-token policy-term weights one ``learn`` gives each training row.
 
@@ -129,9 +53,7 @@ def _probe_policy_weights(
     def tracking_loss(minibatch_idxs, token_ids, action_mask, *args, **kwargs):
         if "probe" not in state:
             rows, width = int(token_ids.shape[0]), int(token_ids.shape[1])
-            hidden_dim = int(agent._get_lm_head().weight.shape[1])
-            shape = (rows, width, hidden_dim) if fused else (rows, width - 1)
-            state["probe"] = torch.zeros(shape, requires_grad=True)
+            state["probe"] = torch.zeros((rows, width - 1), requires_grad=True)
             state["mask"] = action_mask
         state["rows"] = torch.as_tensor(minibatch_idxs)
         return original_loss(minibatch_idxs, token_ids, action_mask, *args, **kwargs)
@@ -155,30 +77,18 @@ def _probe_policy_weights(
     monkeypatch.setattr(agent, "_learn_start_log_probs", zero_learn_start_log_probs)
     monkeypatch.setattr(agent, "_backward_pass", accumulate)
     monkeypatch.setattr(agent, "_balanced_segment_rows", recording_segment_rows)
-    if fused:
-        agent.liger_loss = True
-        monkeypatch.setattr(_ProbeFusedKernel, "loss_types", [])
-        monkeypatch.setattr(_ProbeFusedKernel, "inputs", [])
-        monkeypatch.setattr(grpo_module, KERNEL_NAME, _ProbeFusedKernel, raising=False)
-        monkeypatch.setattr(
-            agent,
-            "_actor_hidden_states",
-            lambda _ids, _pixel_values=None: state["probe"][state["rows"]],
-        )
-    else:
-        monkeypatch.setattr(
-            agent,
-            "_get_logprobs",
-            lambda *_args, **_kwargs: state["probe"][state["rows"]],
-        )
+    monkeypatch.setattr(
+        agent,
+        "_get_logprobs",
+        lambda *_args, **_kwargs: state["probe"][state["rows"]],
+    )
 
     agent.learn(segment_experiences(PAD_TOKEN_ID), episode_segments=episode_segments)
 
     grad = state["probe"].grad
     assert grad is not None
-    per_token = grad[..., : state["mask"].shape[1], 0] if fused else grad
-    row_episodes = state.get("row_episodes", np.arange(per_token.shape[0]))
-    return per_token.abs() / ADVANTAGE, row_episodes, state["mask"]
+    row_episodes = state.get("row_episodes", np.arange(grad.shape[0]))
+    return grad.abs() / ADVANTAGE, row_episodes, state["mask"]
 
 
 def _episode_totals(weights: torch.Tensor, row_episodes: np.ndarray) -> list[float]:
@@ -197,10 +107,9 @@ def _make_episode_grpo(**overrides: Any) -> GRPO:
 class TestGRPOEpisodeLossNormLearn:
     """``learn`` gives each episode of a window the same total policy weight."""
 
-    @pytest.mark.parametrize("fused", [False, True], ids=["standard", "liger"])
     @pytest.mark.parametrize("loss_type", ["cispo", "grpo"])
     def test_segment_rows_across_micro_batches_weigh_each_episode_equally(
-        self, monkeypatch: pytest.MonkeyPatch, fused: bool, loss_type: str
+        self, monkeypatch: pytest.MonkeyPatch, loss_type: str
     ) -> None:
         # Arrange: 4 episodes of 6, 6, 4 and 8 action tokens split into 6
         # segment rows, one window of three 2-row micro-batches.
@@ -208,7 +117,7 @@ class TestGRPOEpisodeLossNormLearn:
 
         # Act
         weights, row_episodes, mask = _probe_policy_weights(
-            agent, monkeypatch, EPISODE_SEGMENTS, fused=fused
+            agent, monkeypatch, EPISODE_SEGMENTS
         )
 
         # Assert
@@ -221,35 +130,28 @@ class TestGRPOEpisodeLossNormLearn:
                 episode_weights, torch.full_like(episode_weights, 1 / (4 * tokens))
             )
         assert torch.all(weights[~mask.bool()] == 0.0)
-        if fused:
-            expected_type = "cispo" if loss_type == "cispo" else "dapo"
-            assert set(_ProbeFusedKernel.loss_types) == {expected_type}
 
-    @pytest.mark.parametrize("fused", [False, True], ids=["standard", "liger"])
     def test_unsegmented_rows_across_micro_batches_weigh_each_episode_equally(
-        self, monkeypatch: pytest.MonkeyPatch, fused: bool
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Arrange: the same 4 episodes as one row each, two 2-row micro-batches.
         agent = _make_episode_grpo(loss_norm="episode")
 
         # Act
-        weights, row_episodes, _mask = _probe_policy_weights(
-            agent, monkeypatch, None, fused=fused
-        )
+        weights, row_episodes, _mask = _probe_policy_weights(agent, monkeypatch, None)
 
         # Assert
         assert _episode_totals(weights, row_episodes) == pytest.approx([0.25] * 4)
 
-    @pytest.mark.parametrize("fused", [False, True], ids=["standard", "liger"])
     def test_accumulation_window_keeps_weighing_episodes_by_length(
-        self, monkeypatch: pytest.MonkeyPatch, fused: bool
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Arrange
         agent = _make_episode_grpo(loss_norm="accumulation_window")
 
         # Act
         weights, row_episodes, _mask = _probe_policy_weights(
-            agent, monkeypatch, EPISODE_SEGMENTS, fused=fused
+            agent, monkeypatch, EPISODE_SEGMENTS
         )
 
         # Assert: every action token of the window weighs 1 / 24.
@@ -261,39 +163,23 @@ class TestGRPOEpisodeLossNormLearn:
     def test_the_vwa_launch_config_weighs_tokens_exactly(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Arrange: CISPO, loss_norm="episode", Liger, one row per micro-batch,
-        # kl_clamp 10. The zero probe makes the policy uniform, so each action
-        # token's K3 against the zero reference is 64 - ln(64) - 1 > 10.
+        # Arrange: CISPO, loss_norm="episode", one row per micro-batch,
+        # kl_clamp 10.
         agent = _make_episode_grpo(
             loss_norm="episode", micro_batch_size_per_gpu=1, beta=0.05, kl_clamp=10.0
         )
-        uniform_log_prob = -math.log(VOCAB)
-
         # Act
         weights, row_episodes, mask = _probe_policy_weights(
-            agent, monkeypatch, EPISODE_SEGMENTS, fused=True
+            agent, monkeypatch, EPISODE_SEGMENTS
         )
 
-        # Assert: the kernel divides by the world size alone and every action
-        # token's reference is clamped to the policy log-prob.
-        assert len(_ProbeFusedKernel.inputs) == 6
-        for inputs in _ProbeFusedKernel.inputs:
-            action_tokens = inputs["attention_mask"] > 0
-            assert inputs["num_items_in_batch"] == 1.0
-            assert torch.allclose(
-                inputs["ref_per_token_logps"][action_tokens],
-                torch.full((int(action_tokens.sum()),), uniform_log_prob),
-                rtol=0.0,
-                atol=1e-6,
-            )
-        # Bit-exact fp32 1 / (episodes * episode_tokens).
+        # Assert: bit-exact fp32 1 / (episodes * episode_tokens).
         for episode, tokens in enumerate(EPISODE_ACTION_TOKENS):
             rows = torch.as_tensor(row_episodes == episode)
             episode_weights = weights[rows][mask[rows].bool()]
             assert torch.equal(
                 episode_weights, torch.full_like(episode_weights, 1 / (4 * tokens))
             )
-        assert set(_ProbeFusedKernel.loss_types) == {"cispo"}
 
     def test_episode_mode_records_the_window_token_share(
         self, monkeypatch: pytest.MonkeyPatch
@@ -302,7 +188,7 @@ class TestGRPOEpisodeLossNormLearn:
         agent = _make_episode_grpo(loss_norm="episode")
 
         # Act
-        _probe_policy_weights(agent, monkeypatch, EPISODE_SEGMENTS, fused=False)
+        _probe_policy_weights(agent, monkeypatch, EPISODE_SEGMENTS)
 
         # Assert
         assert agent._window_action_tokens == pytest.approx(
@@ -381,7 +267,7 @@ class TestGRPOEpisodeBalancedAdvantages:
         monkeypatch.setattr(torch.distributed, "is_available", lambda: True)
         monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
         monkeypatch.setattr(torch.distributed, "all_reduce", add_other_rank)
-        monkeypatch.setattr(grpo_module, "_liger_normalizer_world_size", lambda: 2)
+        monkeypatch.setattr(grpo_module, "_normalizer_world_size", lambda: 2)
 
         # Act
         weights = self._window_weights(agent, mask, np.array([0, 1]), np.array([0, 1]))

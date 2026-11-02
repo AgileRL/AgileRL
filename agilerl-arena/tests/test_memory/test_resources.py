@@ -11,17 +11,22 @@ import pytest
 from agilerl.arena.memory.estimator import MemoryComponent, PhaseBreakdown, RunEstimate
 from agilerl.arena.memory.formulas import MAX_UNDERPREDICTION
 from agilerl.arena.memory.manifest import lookup_gpu, run_config_from_manifest
+from agilerl.arena.memory.resolve.batch import catalog_model
 from agilerl.arena.memory.resolve.engine import resolve_engine_tensor_parallel
+from agilerl.arena.memory.resolve.split import resolve_run_memory
 from agilerl.arena.memory.resources import (
     check_tiers,
     engine_width,
     engines_per_member,
     gpus_required,
+    searches_gpu_split,
+    with_run_gpu_split,
 )
 from agilerl.arena.models.manifest import TrainingManifest
 from tests.test_memory.test_cli import (
     MANIFEST,
     NO_TIER_FITS,
+    OVERSIZE,
     SFT_MANIFEST,
     TINY_CONFIG,
 )
@@ -50,10 +55,33 @@ def unset_width(base):
     return doc
 
 
-def builder(manifest):
+def unset_split(base):
+    doc = copy.deepcopy(base)
+    doc["training"] = {
+        key: value
+        for key, value in doc["training"].items()
+        if key != "rollout_engines_per_agent"
+    }
+    return doc
+
+
+def with_model(base, model):
+    doc = copy.deepcopy(base)
+    doc["network"] = {**doc["network"], "pretrained_model_name_or_path": model}
+    return doc
+
+
+def moe_unset_layout():
+    """Qwen3.6-35B-A3B at 32k tokens with the split and engine width omitted."""
+    doc = unset_split(unset_width(with_model(MANIFEST, "Qwen/Qwen3.6-35B-A3B")))
+    doc["network"]["max_context_length"] = 32768
+    return doc
+
+
+def builder():
     model_config = json.loads(Path(TINY_CONFIG).read_text())
-    return lambda device, width, engines: run_config_from_manifest(
-        manifest,
+    return lambda laid_out, device, width, engines: run_config_from_manifest(
+        laid_out,
         device,
         model_config,
         tensor_parallel_size=width,
@@ -113,6 +141,17 @@ class TestEngineWidth:
         assert width == resolve_engine_tensor_parallel(submitted, 4, device, 4)
         assert manifest.algorithm.vllm_config.tensor_parallel_size is None
 
+    def test_unset_width_stays_on_one_node(self):
+        # Arrange: 8 GPUs over 8 single-GPU nodes.
+        manifest = TrainingManifest.model_validate(unset_width(MANIFEST))
+        device = lookup_gpu("NVIDIA L4").device_spec()
+
+        # Act
+        width = engine_width(manifest, 8, device, gpus_per_node=1)
+
+        # Assert
+        assert width == 1
+
     def test_width_the_resolver_leaves_unset_starts_at_one(self):
         manifest = TrainingManifest.model_validate(unset_width(MANIFEST))
 
@@ -148,7 +187,165 @@ class TestEnginesPerMember:
             engines_per_member(manifest, 2, tensor_parallel_size=1)
 
 
+class TestSearchesGpuSplit:
+    def test_async_run_with_neither_count_searches(self):
+        manifest = TrainingManifest.model_validate(unset_split(MANIFEST))
+
+        assert searches_gpu_split(manifest)
+
+    @pytest.mark.parametrize(
+        "pinned",
+        [{"rollout_engines_per_agent": 2}, {"training_gpus_per_agent": 1}],
+    )
+    def test_either_count_pins_the_split(self, pinned):
+        manifest = manifest_with(unset_split(MANIFEST), **pinned)
+
+        assert not searches_gpu_split(manifest)
+
+    def test_engineless_algorithm_does_not_search(self):
+        manifest = TrainingManifest.model_validate(SFT_MANIFEST)
+
+        assert not searches_gpu_split(manifest)
+
+
+class TestWithRunGpuSplit:
+    def test_writes_the_split_the_run_memory_search_picks(self):
+        # Arrange
+        manifest = TrainingManifest.model_validate(unset_split(MANIFEST))
+        device = lookup_gpu("NVIDIA L4").device_spec()
+        expected = resolve_run_memory(
+            manifest, catalog_model(manifest.algorithm), device, 8
+        ).split
+
+        # Act
+        laid_out = with_run_gpu_split(manifest, 8, device)
+
+        # Assert
+        assert expected is not None
+        assert laid_out.training.training_gpus_per_agent == expected.trainers
+        assert laid_out.training.rollout_engines_per_agent == expected.engines
+        assert laid_out.training.rollout_batch_size == expected.rollout_batch_size
+        assert manifest.training.rollout_batch_size is None
+        assert "rollout_engines_per_agent" not in manifest.training.model_fields_set
+
+    def test_omitted_width_is_picked_with_the_split(self):
+        # Arrange: one H100 holds Qwen3.6-35B-A3B's weights with no KV room.
+        manifest = TrainingManifest.model_validate(moe_unset_layout())
+        device = lookup_gpu("H100-80").device_spec()
+
+        # Act
+        laid_out = with_run_gpu_split(manifest, 8, device)
+
+        # Assert
+        assert laid_out.algorithm.vllm_config.tensor_parallel_size == 2
+        assert laid_out.training.training_gpus_per_agent == 2
+        assert laid_out.training.rollout_engines_per_agent == 3
+        assert laid_out.training.rollout_batch_size == 6
+        assert manifest.algorithm.vllm_config.tensor_parallel_size is None
+
+    def test_no_fitting_split_raises(self):
+        # Arrange: Qwen3.8-27B LoRA training is over one L4.
+        manifest = TrainingManifest.model_validate(
+            unset_split(with_model(OVERSIZE, "Qwen/Qwen3.8-27B"))
+        )
+        device = lookup_gpu("NVIDIA L4").device_spec()
+
+        # Act / Assert
+        with pytest.raises(ValueError, match="No trainer / rollout-engine split of 2"):
+            with_run_gpu_split(manifest, 2, device)
+
+    def test_model_outside_the_catalogue_raises(self):
+        # Arrange
+        manifest = TrainingManifest.model_validate(
+            unset_split(with_model(MANIFEST, "local/uncatalogued-model"))
+        )
+        device = lookup_gpu("NVIDIA L4").device_spec()
+
+        # Act / Assert
+        with pytest.raises(
+            ValueError,
+            match="'local/uncatalogued-model' is not in the memory estimator catalogue",
+        ):
+            with_run_gpu_split(manifest, 8, device)
+
+
 class TestCheckTiers:
+    def test_omitted_split_is_sized_at_the_split_the_run_picks(self):
+        # Arrange
+        manifest = TrainingManifest.model_validate(unset_split(MANIFEST))
+        device = lookup_gpu("NVIDIA L4").device_spec()
+        expected = with_run_gpu_split(manifest, 8, device)
+        sized = []
+        build = builder()
+
+        def recording_build(laid_out, train_device, width, engines):
+            sized.append((laid_out, engines))
+            return build(laid_out, train_device, width, engines)
+
+        # Act
+        (check,) = check_tiers(
+            [tier("l4-8x", "NVIDIA L4", 8, 8.0)], manifest, recording_build
+        )
+
+        # Assert
+        ((laid_out, engines),) = sized
+        assert check.fits
+        assert (
+            laid_out.training.training_gpus_per_agent,
+            laid_out.training.rollout_batch_size,
+            engines,
+        ) == (
+            expected.training.training_gpus_per_agent,
+            expected.training.rollout_batch_size,
+            expected.training.rollout_engines_per_agent,
+        )
+
+    def test_omitted_width_is_sized_at_the_width_the_split_picks(self):
+        # Arrange
+        manifest = TrainingManifest.model_validate(moe_unset_layout())
+        widths = []
+        build = builder()
+
+        def recording_build(laid_out, train_device, width, engines):
+            widths.append((width, engines))
+            return build(laid_out, train_device, width, engines)
+
+        # Act
+        check_tiers(
+            [tier("h100-8x", "NVIDIA H100 80GB HBM3", 8, 30.0)],
+            manifest,
+            recording_build,
+        )
+
+        # Assert
+        assert widths == [(2, 3)]
+
+    def test_no_fitting_split_keeps_the_search_reason(self):
+        manifest = TrainingManifest.model_validate(
+            unset_split(with_model(OVERSIZE, "Qwen/Qwen3.8-27B"))
+        )
+
+        (check,) = check_tiers(
+            [tier("l4-2x", "NVIDIA L4", 2, 1.0)], manifest, builder()
+        )
+
+        assert not check.fits
+        assert check.reason.startswith("No trainer / rollout-engine split of 2")
+        assert check.estimate is not None
+
+    @pytest.mark.parametrize(
+        ("gpu_type", "label"), [("Tesla T4", "SM75"), ("Tesla V100", "SM70")]
+    )
+    def test_a_gpu_below_sm80_is_ruled_out_as_unsupported(self, gpu_type, label):
+        manifest = TrainingManifest.model_validate(unset_split(MANIFEST))
+
+        (check,) = check_tiers([tier("old-2x", gpu_type, 2, 1.0)], manifest, builder())
+
+        assert not check.fits
+        assert f"({label}) cannot run LLM training" in check.reason
+        assert check.config is None
+        assert check.estimate is None
+
     def test_orders_by_price_and_rules_out_unusable_tiers(self):
         # Arrange
         manifest = TrainingManifest.model_validate(MANIFEST)
@@ -161,7 +358,7 @@ class TestCheckTiers:
         ]
 
         # Act
-        checks = check_tiers(tiers, manifest, builder(manifest))
+        checks = check_tiers(tiers, manifest, builder())
 
         # Assert
         assert [c.tier["name"] for c in checks] == [
@@ -186,7 +383,7 @@ class TestCheckTiers:
         manifest = TrainingManifest.model_validate(doc)
         tiers = [tier("l4-4x", "NVIDIA L4", 4, 4.0)]
 
-        (check,) = check_tiers(tiers, manifest, builder(manifest))
+        (check,) = check_tiers(tiers, manifest, builder())
 
         assert not check.fits
         assert check.reason == "4 GPUs, the job needs 5"
@@ -199,7 +396,7 @@ class TestCheckTiers:
         tiers = [tier("l4-5x", "NVIDIA L4", 5, 5.0)]
 
         # Act
-        (check,) = check_tiers(tiers, manifest, builder(manifest))
+        (check,) = check_tiers(tiers, manifest, builder())
 
         # Assert
         assert check.config.generation.tensor_parallel_size == 1
@@ -207,9 +404,9 @@ class TestCheckTiers:
 
     def test_a_tier_whose_gpu_is_too_small_is_over_budget(self):
         manifest = TrainingManifest.model_validate(NO_TIER_FITS)
-        tiers = [tier("t4-2x", "Tesla T4", 2, 1.0)]
+        tiers = [tier("l4-2x", "NVIDIA L4", 2, 1.0)]
 
-        (check,) = check_tiers(tiers, manifest, builder(manifest))
+        (check,) = check_tiers(tiers, manifest, builder())
 
         assert not check.fits
         assert check.reason is not None
@@ -247,7 +444,7 @@ class TestCheckTiers:
 
         # Act
         (check,) = check_tiers(
-            [tier("l4-2x", "NVIDIA L4", 2, 2.0)], manifest, builder(manifest)
+            [tier("l4-2x", "NVIDIA L4", 2, 2.0)], manifest, builder()
         )
 
         # Assert
@@ -259,6 +456,6 @@ class TestCheckTiers:
     def test_no_fitting_tier_leaves_no_fit(self, tiers):
         manifest = TrainingManifest.model_validate(MANIFEST)
 
-        checks = check_tiers(tiers, manifest, builder(manifest))
+        checks = check_tiers(tiers, manifest, builder())
 
         assert not any(c.fits for c in checks)

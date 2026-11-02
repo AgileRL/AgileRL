@@ -7,7 +7,7 @@ Training batches keep ``pixel_values`` as ``(N, h, w, patch_dim)`` rows. The
 native forward reads flat patches with ``image_grid_thw`` and
 ``mm_token_type_ids``, and skips M-RoPE whenever ``position_ids`` are given.
 The patch unfolds the rows and, for given 2-D ``position_ids``, builds
-``[text, t, h, w]`` positions one packed document at a time. The text row
+``[text, t, h, w]`` positions for every packed document at once. The text row
 keeps document isolation and the GatedDeltaNet ``seq_idx`` the packed
 forward derives from it.
 """
@@ -15,7 +15,6 @@ forward derives from it.
 from __future__ import annotations
 
 import functools
-import itertools
 import logging
 from typing import TYPE_CHECKING, Any, cast
 
@@ -28,7 +27,11 @@ from agilerl.architectures.runtime import PatchRuntimeConfig
 from agilerl.utils.patching import class_is_patched
 
 if TYPE_CHECKING:
+    from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5VisionConfig
     from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5Model
+    from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import (
+        Qwen3_5MoeVisionConfig,
+    )
     from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeModel
 
 logger = logging.getLogger(__name__)
@@ -57,41 +60,57 @@ def mrope_position_ids(
     """``(4, B, L)`` text and M-RoPE positions of packed or padded rows.
 
     Each document restarts its ``position_ids`` at 0 and takes the image grids
-    of its image-token runs in row order.
+    of its image-token runs in row order. Documents with an image match
+    ``get_rope_index`` on that document alone; text-only documents keep
+    ``position_ids``. No host sync.
 
-    :param model: The ``Qwen3_5Model`` whose ``get_rope_index`` lays out images.
+    :param model: The ``Qwen3_5Model`` whose config holds the image token and merge size.
     :param input_ids: ``(B, L)`` token ids.
     :param position_ids: ``(B, L)`` text positions.
     :param image_grid_thw: ``(N, 3)`` grid of every image in the batch, in order.
     :return: Text positions stacked on the temporal, height and width rows.
     """
-    image_token_id = model.config.image_token_id
-    grids = iter(image_grid_thw)
-    rows = []
-    for row_ids, row_positions in zip(input_ids, position_ids, strict=True):
-        starts = torch.nonzero(row_positions == 0).flatten().tolist()
-        bounds = sorted({0, *starts, len(row_ids)})
-        parts = []
-        for start, end in itertools.pairwise(bounds):
-            doc_ids = row_ids[start:end]
-            doc_types = (doc_ids == image_token_id).int()
-            images = int(doc_types[0]) + int(
-                ((doc_types[1:] == 1) & (doc_types[:-1] == 0)).sum()
-            )
-            if images == 0:
-                parts.append(row_positions[start:end].expand(3, -1))
-                continue
-            # torch ops type their results as Tensor, never LongTensor.
-            doc_grids = cast(
-                "torch.LongTensor",
-                torch.stack([next(grids) for _ in range(images)]),
-            )
-            doc_positions, _ = model.get_rope_index(
-                doc_ids[None], doc_types[None], image_grid_thw=doc_grids
-            )
-            parts.append(doc_positions[:, 0])
-        rows.append(torch.cat(parts, dim=1))
-    return torch.cat([position_ids[None], torch.stack(rows, dim=1)])
+    # The config builds this sub-config on init; the union types its input.
+    vision = cast(
+        "Qwen3_5VisionConfig | Qwen3_5MoeVisionConfig", model.config.vision_config
+    )
+    merge = vision.spatial_merge_size
+    flat_positions = position_ids.flatten()
+    index = torch.arange(flat_positions.numel(), device=flat_positions.device)
+    doc_start = (index % position_ids.shape[1] == 0) | (flat_positions == 0)
+    is_image = input_ids.flatten() == model.config.image_token_id
+    after_image = F.pad(is_image[:-1], (1, 0))
+    run_start = is_image & (doc_start | ~after_image)
+    doc_first = torch.where(doc_start, index, 0).cummax(0).values
+    run_first = torch.where(run_start, index, 0).cummax(0).values
+
+    # Text lanes read image 0's grid; ``torch.where`` drops them below.
+    grid = image_grid_thw[(run_start.cumsum(0) - 1).clamp(min=0)]
+    grid_t, grid_h, grid_w = grid[:, 0], grid[:, 1] // merge, grid[:, 2] // merge
+    # An image advances the position by its longer side, not by its token count.
+    extra = torch.where(
+        run_start, torch.maximum(grid_h, grid_w) - grid_t * grid_h * grid_w, 0
+    )
+    extra_total = extra.cumsum(0)
+    shift = extra_total - (extra_total[doc_first] - extra[doc_first])
+    shift = shift - torch.where(is_image, extra[run_first], 0)
+
+    doc_id = doc_start.cumsum(0) - 1
+    doc_images = torch.zeros_like(index).index_add_(0, doc_id, is_image.long())
+    text = torch.where(
+        doc_images[doc_id] > 0, index - doc_first + shift, flat_positions
+    )
+    base = run_first - doc_first + shift
+    local = index - run_first
+    vision = torch.stack(
+        [
+            base + local // (grid_h * grid_w),
+            base + local // grid_w % grid_h,
+            base + local % grid_w,
+        ]
+    )
+    mrope = torch.where(is_image, vision, text).view(3, *position_ids.shape)
+    return torch.cat([position_ids[None], mrope])
 
 
 def _install_vision_rows(model_cls: type) -> None:

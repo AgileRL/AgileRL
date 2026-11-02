@@ -10,7 +10,7 @@ see :ref:`distributed_training`.
 Data parallel (no sharding)
 ---------------------------
 
-``torchrun`` on an unchanged script is data parallel. Do not pass
+``torchrun`` on an unchanged script is data parallel (DDP). Do not pass
 ``fsdp_config``. Each rank loads a full copy of the actor; LoRA gradients are
 averaged across ranks at the optimizer step.
 
@@ -94,7 +94,8 @@ manifest and pick a multi-GPU resource from ``arena resources list``:
 
     algorithm:
       name: GRPO
-      fsdp: true               # or a dict of FSDPConfig fields; omit for data parallel
+      # fsdp is optional: the run trains DDP when it fits one GPU and is no
+      # slower, else FSDP. Set fsdp.ep or fsdp.tp to shard experts or layers.
 
     training:
       rollout_batch_size: 8        # multiple of training_gpus_per_agent
@@ -117,12 +118,18 @@ Construct with :class:`~agilerl.distributed.FSDPConfig`. Defaults are the
 usual production settings for LoRA / QLoRA.
 
 ``reshard_after_forward``, ``optim_cpu_offload``, ``routed_expert_chunk_mib``,
-``activation_offload`` and ``cpu_offload`` are memory-vs-speed settings. Leave
-them unset: the algorithm picks the fastest combination the memory estimate
-fits on the device. It gives up speed in this order: reshard after forward, a
-smaller expert chunk, a smaller micro-batch, the optimizer to CPU, activation
-offload, then full CPU offload (colocated vLLM only). A training manifest
-rejects them.
+``activation_offload`` and ``cpu_offload`` are memory-vs-speed settings.
+Leave them unset: the algorithm picks the fastest combination the memory
+estimate fits on the device. With ``ep=1`` and ``tp=1`` it trains the
+faster plan that fits: DDP when the whole model, adapters and optimizer
+state fit one GPU with an equal-or-cheaper plan, else FSDP. FSDP can win
+while DDP fits, for example by checkpointing every 4th block where DDP
+checkpoints every block. The start-up log names the mode (``DDP`` or
+``FSDP``). Sharded, it gives up speed in this order: reshard after forward,
+a smaller expert chunk, a smaller micro-batch, the optimizer to CPU,
+activation offload, then full CPU offload (colocated vLLM only). On Ray the
+driver also picks ``checkpoint_every_n_blocks`` with the
+activation-checkpointing choice. A training manifest rejects all of them.
 
 .. list-table::
    :widths: 28 14 58
@@ -148,6 +155,10 @@ rejects them.
      - picked
      - Move saved activations to host memory during the training forward.
        Spends host RAM and PCIe time.
+   * - ``checkpoint_every_n_blocks``
+     - picked
+     - Checkpoint every n-th transformer block when activation checkpointing
+       is on; the other blocks keep their activations.
    * - ``cpu_offload``
      - picked
      - Offload sharded parameters and gradients to CPU

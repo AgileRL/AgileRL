@@ -479,6 +479,25 @@ class TestModelInfoModalitiesProperty:
             ModelInfo.model_validate({"hub_id": "org/x", "modalities": ["vision"]})
 
 
+class TestModelInfoBiasesImageTokenProperty:
+    @pytest.mark.parametrize(
+        "hub_id",
+        [
+            "Qwen/Qwen3.5-0.8B",
+            "google/gemma-4-E4B-it",
+            "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
+        ],
+    )
+    def test_vision_entries_bias_the_image_token(self, hub_id: str) -> None:
+        assert SUPPORTED_MODEL_INFO[hub_id].biases_image_token is True
+
+    @pytest.mark.parametrize(
+        "hub_id", ["Qwen/Qwen3-4B", "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"]
+    )
+    def test_text_entries_do_not(self, hub_id: str) -> None:
+        assert SUPPORTED_MODEL_INFO[hub_id].biases_image_token is False
+
+
 class TestFinetuningNetworkSpecLoraTargets:
     def test_valid_targets_pass(self) -> None:
         spec = finetuning_network(
@@ -629,7 +648,7 @@ class TestFinetuningNetworkSpecExpertDefault:
 
         assert spec.lora_config is not None
         assert spec.lora_config.target_parameters == []
-        assert spec.lora_config.lora_dropout == 0.05
+        assert spec.lora_config.lora_dropout == 0.0
 
     def test_explicit_dropout_is_zeroed_when_experts_auto_filled(self) -> None:
         spec = FinetuningNetworkSpec.model_validate(
@@ -765,12 +784,12 @@ class TestResolveLoraDefaults:
     def test_leaves_explicit_dense_and_untracked_configs(
         self, hub_id: str, target_parameters: list[str] | None
     ) -> None:
-        lora = LoraConfigDict(target_parameters=target_parameters)
+        lora = LoraConfigDict(target_parameters=target_parameters, lora_dropout=0.1)
 
         resolve_lora_defaults(lora, hub_id)
 
         assert lora.target_parameters == target_parameters
-        assert lora.lora_dropout == 0.05
+        assert lora.lora_dropout == 0.1
 
     def test_explicit_expert_paths_with_unset_dropout_take_zero(self) -> None:
         lora = LoraConfigDict(target_parameters=["mlp.experts.down_proj"])

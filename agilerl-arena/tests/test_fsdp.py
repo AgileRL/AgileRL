@@ -38,6 +38,11 @@ class TestFSDPConfig:
     @pytest.mark.parametrize(
         ("field", "value", "match"),
         [
+            (
+                "checkpoint_every_n_blocks",
+                0,
+                "FSDPConfig.checkpoint_every_n_blocks must be >= 1",
+            ),
             ("ep", 0, "FSDPConfig.ep must be >= 1"),
             ("ep_token_blocks", 0, "FSDPConfig.ep_token_blocks must be >= 1"),
             (
@@ -69,6 +74,7 @@ class TestFSDPConfig:
         assert config.routed_expert_chunk_mib is None
         assert config.optim_cpu_offload is None
         assert config.cpu_offload is None
+        assert config.checkpoint_every_n_blocks is None
 
     def test_memory_fields_keep_set_values(self) -> None:
         config = FSDPConfig(
@@ -123,3 +129,4 @@ class TestFSDPJsonSchema:
         assert properties["ep"]["minimum"] == 1
         assert properties["ep_token_blocks"]["minimum"] == 1
         assert properties["tp"]["minimum"] == 1
+        assert properties["checkpoint_every_n_blocks"]["anyOf"][0]["minimum"] == 1
