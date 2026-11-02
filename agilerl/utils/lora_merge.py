@@ -43,6 +43,7 @@ from agilerl.distributed import (
     materialize_dtensors,
     raise_on_any_rank,
 )
+from agilerl.distributed.fsdp import canonical_fsdp_param_fqn
 from agilerl.lora.moe.adapters import wrapper_chain
 from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 
@@ -473,9 +474,10 @@ def _collect_export_specs(
     specs: list[ExportItem] = []
     seen: set[str] = set()
 
-    for module_name, module in pretrained.named_modules():
+    for live_name, module in pretrained.named_modules():
         if not isinstance(module, LoraLayer):
             continue
+        module_name = canonical_fsdp_param_fqn(live_name)
         if isinstance(module, ParamWrapper):
             if id(module) not in inner_links:
                 specs.extend(_param_wrapper_specs(module_name, module, adapter_name))
@@ -498,12 +500,14 @@ def _collect_export_specs(
             )
             seen.add(hf_bias)
 
-    for name, tensor in _parameters_and_buffers(pretrained):
-        if name in tied or name in seen:
-            continue
+    for live_name, tensor in _parameters_and_buffers(pretrained):
         if any(
-            name == prefix or name.startswith(f"{prefix}.") for prefix in lora_prefixes
+            live_name == prefix or live_name.startswith(f"{prefix}.")
+            for prefix in lora_prefixes
         ):
+            continue
+        name = canonical_fsdp_param_fqn(live_name)
+        if name in tied or name in seen:
             continue
         if (
             weight_store is not None
@@ -539,9 +543,13 @@ def _param_wrapper_specs(
 def _parameters_and_buffers(
     module: nn.Module,
 ) -> Iterable[tuple[str, torch.Tensor]]:
-    """Yield parameters then buffers in Hugging Face ``state_dict`` order."""
+    """Yield parameters then persistent buffers, the tensors ``state_dict`` holds."""
     yield from module.named_parameters()
-    yield from module.named_buffers()
+    for owner_name, owner in module.named_modules():
+        prefix = f"{owner_name}." if owner_name else ""
+        for name, buffer in owner.named_buffers(recurse=False):
+            if name not in owner._non_persistent_buffers_set:
+                yield f"{prefix}{name}", buffer
 
 
 def _full_shape(tensor: torch.Tensor) -> tuple[int, ...]:

@@ -19,6 +19,9 @@ import pytest
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+    checkpoint_wrapper,
+)
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor
 
@@ -1652,6 +1655,46 @@ class TestExportMergedPretrainedQwen3Moe:
         assert "model.layers.1.mlp.experts.gate_up_proj" in weights
         assert all("lora" not in key and "base_layer" not in key for key in weights)
         reloaded = AutoModelForCausalLM.from_pretrained(tmp_path / "merged")
+        assert torch.allclose(
+            live_logits,
+            _peft_logits(reloaded, input_ids),
+            atol=MOE_LOGIT_ATOL,
+            rtol=LOGIT_RTOL,
+        )
+
+    def test_checkpoint_wrapped_layers_export_base_state_dict_keys(
+        self, tmp_path: Path
+    ) -> None:
+        # Arrange
+        torch.manual_seed(0)
+        base = _tiny_qwen3_moe()
+        lora = LoraConfig(
+            r=4,
+            lora_alpha=8,
+            target_modules=["q_proj", "v_proj"],
+            target_parameters=moe_expert_target_parameters(base),
+            lora_dropout=0.0,
+            init_lora_weights=False,
+            task_type="CAUSAL_LM",
+        )
+        peft_model = get_peft_model(copy.deepcopy(base), lora, adapter_name="actor")
+        upgrade_moe_param_wrappers(peft_model)
+        layers = peft_model.get_base_model().model.layers
+        for index, layer in enumerate(layers):
+            layers[index] = checkpoint_wrapper(layer)
+        input_ids = torch.randint(0, 64, (2, 10))
+        live_logits = _peft_logits(peft_model, input_ids)
+
+        # Act
+        export_merged_pretrained(
+            tmp_path / "merged", model=peft_model, torch_dtype=torch.float32
+        )
+
+        # Assert
+        weights = load_file(tmp_path / "merged" / "model.safetensors")
+        assert set(weights) == set(base.state_dict())
+        reloaded = _tiny_qwen3_moe()
+        reloaded.load_state_dict(weights)
         assert torch.allclose(
             live_logits,
             _peft_logits(reloaded, input_ids),
