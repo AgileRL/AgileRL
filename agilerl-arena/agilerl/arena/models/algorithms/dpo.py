@@ -10,7 +10,7 @@ from typing import ClassVar
 from pydantic import Field
 
 from agilerl.arena.models.algorithms.base import LLMAlgorithmSpec
-from agilerl.arena.models.descriptions import BETA, LR
+from agilerl.arena.models.descriptions import BETA, LR, REFERENCE_UPDATE_INTERVAL
 from agilerl.arena.models.env import LLMEnvType
 from agilerl.arena.models.registry import register
 
@@ -21,6 +21,9 @@ class DPOSpec(LLMAlgorithmSpec):
 
     lr: float = Field(default=0.000005, ge=0.0, description=LR)
     beta: float = Field(default=0.1, ge=0.0, le=1.0, description=BETA)
+    reference_update_interval: int | None = Field(
+        default=None, ge=1, description=REFERENCE_UPDATE_INTERVAL
+    )
     nll_alpha: float = Field(
         default=1.0,
         ge=0.0,

@@ -99,6 +99,10 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         are obtained by disabling the actor adapter at inference time.
         Defaults to True.
     :type use_separate_reference_adapter: bool, optional
+    :param reference_update_interval: Optimizer steps between copies of the
+        actor adapter onto the reference. ``None`` (default) keeps the
+        reference fixed.
+    :type reference_update_interval: int | None, optional
     :param quantization_config: Optional ``transformers.BitsAndBytesConfig`` for
         loading the base model in 4-/8-bit (QLoRA). ``lm_head`` is kept
         unquantized so the fused-linear-logprob path stays numerically exact.
@@ -145,6 +149,7 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         clone: bool = False,
         seed: int = 42,
         use_separate_reference_adapter: bool = True,
+        reference_update_interval: int | None = None,
         quantization_config: BitsAndBytesConfig | None = None,
         lora_tower_target_modules: list[str] | None = None,
         max_model_len: int = 1024,
@@ -175,15 +180,15 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
             name="DPO",
             gradient_checkpointing=gradient_checkpointing,
             use_separate_reference_adapter=use_separate_reference_adapter,
+            reference_update_interval=reference_update_interval,
             quantization_config=quantization_config,
             lora_tower_target_modules=lora_tower_target_modules,
             routed_expert_chunk_mib=routed_expert_chunk_mib,
         )
         self.beta = beta
         self.nll_alpha = nll_alpha
-        self.temperature = (
-            1  # Temperature for logits calculation, DPO does not use temperature
-        )
+        # DPO does not use temperature for the logits.
+        self.temperature = 1
         self.update_epochs = update_epochs
         self.max_model_len = max_model_len
 
@@ -194,10 +199,8 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
             self.wrap_models()
 
         # Register metrics to keep track of during training
-        self.metrics.register("loss")
-        self.metrics.register("chosen_reward")
-        self.metrics.register("rejected_reward")
-        self.metrics.register("reward_margin")
+        for name in ("loss", "chosen_reward", "rejected_reward", "reward_margin"):
+            self.metrics.register(name)
 
     def get_action(
         self,
