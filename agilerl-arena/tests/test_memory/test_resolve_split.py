@@ -87,6 +87,13 @@ def _countdown_manifest(batch_size: int = 60) -> dict:
     }
 
 
+def _oversize_countdown_manifest(batch_size: int) -> dict:
+    """Countdown on Qwen3.8-27B LoRA; its training fits L4s at 6 trainers, not 1 to 5."""
+    raw = _countdown_manifest(batch_size)
+    raw["network"]["pretrained_model_name_or_path"] = "Qwen/Qwen3.8-27B"
+    return raw
+
+
 def _sudoku_manifest() -> dict:
     """Multi-turn CISPO on an env, shaped like speed benchmark B."""
     return {
@@ -331,10 +338,181 @@ class TestResolveRunMemorySplit:
         # Assert
         assert split.trainers + split.engines <= 8
 
-    def test_no_split_raises(self) -> None:
+    def test_no_room_for_a_trainer_beside_an_engine_raises(self) -> None:
         # Act / Assert
-        with pytest.raises(ValueError, match="No trainer / rollout-engine split"):
+        with pytest.raises(
+            ValueError,
+            match=(
+                r"^No trainer / rollout-engine split of 1 NVIDIA A100-SXM4-80GB "
+                r"GPUs fits this run: a trainer and a rollout engine do not both "
+                r"fit\. Use more or larger GPUs per agent \(a bigger resource tier "
+                r"or a smaller population size\), or shorten the context length\.$"
+            ),
+        ):
             _plan(_sudoku_manifest(), gpus=1)
+
+    def test_training_over_memory_at_every_trainer_count_raises(self) -> None:
+        # Arrange: 9 GPUs with one TP4 engine leave at most 5 trainers.
+        raw = _oversize_countdown_manifest(60)
+
+        # Act / Assert
+        with pytest.raises(
+            ValueError,
+            match=(
+                r"^No trainer / rollout-engine split of 9 NVIDIA L4 GPUs fits this "
+                r"run: training does not fit in memory at any trainer count\. "
+                r"Use more or larger GPUs per agent \(a bigger resource tier or "
+                r"a smaller population size\), or shorten the context length\.$"
+            ),
+        ):
+            _plan(raw, gpus=9, engine_width=4, device=_device("L4"))
+
+    @pytest.mark.parametrize(
+        ("fsdp", "batch_size"),
+        [({"tp": 2}, 60), ({"shard_group_size": 4}, 64)],
+        ids=["tensor-parallel", "shard-group"],
+    )
+    def test_training_over_memory_at_the_largest_fsdp_count_raises(
+        self, fsdp: dict, batch_size: int
+    ) -> None:
+        # Arrange: 9 GPUs with one TP4 engine leave at most 5 trainers. The
+        # FSDP width skips 5; the largest legal count shards and is over memory.
+        raw = _oversize_countdown_manifest(batch_size)
+        raw["algorithm"]["fsdp"] = fsdp
+
+        # Act / Assert
+        with pytest.raises(
+            ValueError,
+            match=(
+                r"^No trainer / rollout-engine split of 9 NVIDIA L4 GPUs fits this "
+                r"run: training does not fit in memory at any trainer count\. "
+                r"Use more or larger GPUs per agent \(a bigger resource tier or "
+                r"a smaller population size\), or shorten the context length\.$"
+            ),
+        ):
+            _plan(raw, gpus=9, engine_width=4, device=_device("L4"))
+
+    def test_batch_no_trainer_count_that_fits_divides_raises(self) -> None:
+        # Arrange: only 6 trainers fit, and 64 groups do not split over 6.
+        raw = _oversize_countdown_manifest(64)
+
+        # Act / Assert
+        with pytest.raises(
+            ValueError,
+            match=(
+                r"^No trainer / rollout-engine split of 10 NVIDIA L4 GPUs fits this "
+                r"run: batch size 64 does not divide evenly across any trainer "
+                r"count that fits in memory\. Use a batch size divisible by more "
+                r"trainer counts, such as a power of two\.$"
+            ),
+        ):
+            _plan(raw, gpus=10, engine_width=4, device=_device("L4"))
+
+    def test_pinned_rollout_batch_no_trainer_count_that_fits_divides_raises(
+        self,
+    ) -> None:
+        # Arrange: only 6 trainers fit; 60 groups split over 6, a pinned
+        # 64-group cycle does not.
+        raw = _oversize_countdown_manifest(60)
+        raw["training"]["rollout_batch_size"] = 64
+
+        # Act / Assert
+        with pytest.raises(
+            ValueError,
+            match=(
+                r"run: rollout batch size 64 does not divide evenly across any "
+                r"trainer count that fits in memory\. Use a rollout batch size "
+                r"divisible by more trainer counts, such as a power of two, or "
+                r"leave it unset\.$"
+            ),
+        ):
+            _plan(raw, gpus=10, engine_width=4, device=_device("L4"))
+
+    @pytest.mark.parametrize(
+        ("fsdp", "need"),
+        [
+            ({"tp": 8}, "FSDP tensor parallel needs"),
+            ({"ep": 8}, "FSDP expert parallel needs"),
+            ({"shard_group_size": 8}, "FSDP shard group needs"),
+            (
+                {"tp": 8, "shard_group_size": 8},
+                "FSDP tensor parallel and shard group need",
+            ),
+            (
+                {"tp": 8, "ep": 8, "shard_group_size": 8},
+                "FSDP tensor parallel, expert parallel, and shard group need",
+            ),
+        ],
+        ids=[
+            "tensor-parallel",
+            "expert-parallel",
+            "shard-group",
+            "tensor-and-shard",
+            "all-three",
+        ],
+    )
+    def test_fsdp_width_wider_than_the_trainers_raises(
+        self, fsdp: dict, need: str
+    ) -> None:
+        # Arrange: one engine leaves 7 of 8 GPUs, under an FSDP width of 8.
+        raw = _sudoku_manifest()
+        raw["algorithm"]["fsdp"] = fsdp
+
+        # Act / Assert
+        with pytest.raises(
+            ValueError,
+            match=(
+                rf"run: {need} a multiple of 8 "
+                r"trainer GPUs, and at most 7 fit beside a rollout engine\. Use "
+                r"more GPUs per agent \(a bigger resource tier or a smaller "
+                r"population size\)\.$"
+            ),
+        ):
+            _plan(raw, gpus=8)
+
+    @pytest.mark.parametrize(
+        ("pins", "cause"),
+        [
+            (
+                {"micro_batch_size_per_gpu": 7},
+                (
+                    r"run: micro_batch_size_per_gpu 7 does not divide the per-rank "
+                    r"batch at any trainer count that shards the batch\. Use a "
+                    r"micro_batch_size_per_gpu that divides those ranks, or leave it "
+                    r"unset\.$"
+                ),
+            ),
+            (
+                {"mini_batch_size": 7},
+                (
+                    r"run: mini_batch_size 7 does not divide the per-rank batch at "
+                    r"any trainer count that shards the batch\. Use a "
+                    r"mini_batch_size that divides those ranks, or leave it unset\.$"
+                ),
+            ),
+            (
+                {"micro_batch_size_per_gpu": 7, "mini_batch_size": 7},
+                (
+                    r"run: micro_batch_size_per_gpu 7 and mini_batch_size 7 do not "
+                    r"divide the per-rank batch at any trainer count that shards "
+                    r"the batch\. Use values that divide those ranks, or leave them "
+                    r"unset\.$"
+                ),
+            ),
+        ],
+        ids=["micro-batch", "mini-batch", "micro-and-mini"],
+    )
+    def test_per_rank_pin_no_trainer_count_that_shards_divides_raises(
+        self, pins: dict, cause: str
+    ) -> None:
+        # Arrange: batch 12 shards 1, 2, 3, 4, and 6 trainers; 7 divides none
+        # of those per-rank trajectory counts.
+        raw = _sudoku_manifest()
+        raw["algorithm"].update(pins)
+
+        # Act / Assert
+        with pytest.raises(ValueError, match=cause):
+            _plan(raw, gpus=8)
 
     def test_algorithm_without_rollouts_raises(self) -> None:
         # Arrange

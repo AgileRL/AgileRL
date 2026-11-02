@@ -45,7 +45,6 @@ def test_max_prompt_tokens_for_model_len() -> None:
 
 
 class _ChrTokenizer:
-    name_or_path = "chr"
     pad_token_id = 0
     pad_token = "<pad>"
     unk_token_id = None

@@ -49,7 +49,7 @@ NEMOTRON_H_RUNTIME_CONFIG = ModelRuntimeConfig(
         "agilerl.architectures.nemotron_h.tensor_parallel:"
         "NEMOTRON_H_TENSOR_PARALLEL_PLAN"
     ),
-    chat_format="tool_call",
+    tool_call_parser="tool_call",
 )
 
 
@@ -107,14 +107,14 @@ GEMMA_SWA_RUNTIME_CONFIG = ModelRuntimeConfig(
 
 GEMMA4_TEXT_RUNTIME_CONFIG = GEMMA_SWA_TEXT_RUNTIME_CONFIG.model_copy(
     update={
-        "chat_format": "gemma4",
+        "tool_call_parser": "gemma4",
         "reasoning_parser": REASONING_PARSERS["gemma4_text"],
     },
 )
 
 GEMMA4_RUNTIME_CONFIG = GEMMA_SWA_RUNTIME_CONFIG.model_copy(
     update={
-        "chat_format": "gemma4",
+        "tool_call_parser": "gemma4",
         "reasoning_parser": REASONING_PARSERS["gemma4"],
         "patch": PatchRuntimeConfig(install=install_gemma4_vision_patches),
         # vLLM swaps every tower linear for a LoRA layer and keeps HF names;
@@ -139,7 +139,7 @@ GEMMA4_RUNTIME_CONFIG = GEMMA_SWA_RUNTIME_CONFIG.model_copy(
 )
 
 GPT_OSS_RUNTIME_CONFIG = ModelRuntimeConfig(
-    chat_format="harmony",
+    tool_call_parser="harmony",
     reasoning_parser=REASONING_PARSERS["gpt_oss"],
 )
 
@@ -148,12 +148,12 @@ GPT_OSS_RUNTIME_CONFIG = ModelRuntimeConfig(
 DENSE_ATTENTION_VLLM_CONFIG = VllmRuntimeConfig(sm80_attention_backend="FLASHINFER")
 DENSE_TOOL_CALL_TAG_RUNTIME_CONFIG = ModelRuntimeConfig(
     vllm=DENSE_ATTENTION_VLLM_CONFIG,
-    chat_format="tool_call",
+    tool_call_parser="tool_call",
 )
 GRANITE3_RUNTIME_CONFIG = ModelRuntimeConfig(
     vllm=DENSE_ATTENTION_VLLM_CONFIG,
     patch=PatchRuntimeConfig(install=install_granite_moe_patches),
-    chat_format="granite3",
+    tool_call_parser="granite3",
 )
 GRANITE_HYBRID_RUNTIME_CONFIG = DENSE_TOOL_CALL_TAG_RUNTIME_CONFIG.model_copy(
     update={"patch": PatchRuntimeConfig(install=install_granite_hybrid_patches)},
@@ -171,7 +171,7 @@ QWEN3_5_TEXT_RUNTIME_CONFIG = ModelRuntimeConfig(
         dense_mamba_prefix_cache=True,
     ),
     patch=PatchRuntimeConfig(install=install_qwen_gdn_patches),
-    chat_format="tool_call",
+    tool_call_parser="tool_call",
     reasoning_parser=REASONING_PARSERS["qwen3_5_text"],
 )
 

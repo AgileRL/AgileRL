@@ -156,8 +156,15 @@ class SplitWorkload(BaseModel):
     trainer_multiple: int = 1
     # Trainer ranks per data shard (FSDP tp).
     trainer_tensor_parallel: int = 1
+    # FSDP expert-parallel degree; 1 is no expert split.
+    trainer_expert_parallel: int = 1
+    # FSDP shard-group width; 1 does not constrain the trainer count.
+    trainer_shard_group: int = 1
     # Trajectories per data shard must be a multiple of this (pinned micro/mini).
     per_rank_multiple: int = 1
+    # Pinned micro/mini that set ``per_rank_multiple``.
+    micro_batch_size_per_gpu: int | None = None
+    mini_batch_size: int | None = None
     # Rollout-engine weight format.
     weight_quantization: Literal["none", "fp8"] = "none"
     # The rollout algorithm's ``min_p``.
@@ -702,9 +709,8 @@ def split_workload_from_manifest(manifest: TrainingManifest) -> SplitWorkload:
     vllm = spec.vllm_config
     fsdp = spec.fsdp
     fsdp_tp = 1 if fsdp is None else fsdp.tp
-    trainer_multiple = (
-        1 if fsdp is None else math.lcm(fsdp.tp, fsdp.ep, fsdp.shard_group_size or 1)
-    )
+    fsdp_ep = 1 if fsdp is None else fsdp.ep
+    fsdp_shard = 1 if fsdp is None else (fsdp.shard_group_size or 1)
     pinned_rows = [
         size
         for size in (spec.micro_batch_size_per_gpu, spec.mini_batch_size)
@@ -724,9 +730,13 @@ def split_workload_from_manifest(manifest: TrainingManifest) -> SplitWorkload:
         gpu_memory_utilization=resolve_gpu_memory_utilization(
             None if vllm is None else vllm.gpu_memory_utilization, colocated=False
         ),
-        trainer_multiple=trainer_multiple,
+        trainer_multiple=math.lcm(fsdp_tp, fsdp_ep, fsdp_shard),
         trainer_tensor_parallel=fsdp_tp,
+        trainer_expert_parallel=fsdp_ep,
+        trainer_shard_group=fsdp_shard,
         per_rank_multiple=math.lcm(*pinned_rows) if pinned_rows else 1,
+        micro_batch_size_per_gpu=spec.micro_batch_size_per_gpu,
+        mini_batch_size=spec.mini_batch_size,
         weight_quantization=engine_weight_quantization(
             None if vllm is None else vllm.quantization
         ),
@@ -830,6 +840,113 @@ def choose_engine_width(splits: list[GpuSplit]) -> GpuSplit | None:
     )
 
 
+def _fsdp_width_need(workload: SplitWorkload) -> str:
+    """``FSDP <dimensions> need(s)`` for the degrees that set ``trainer_multiple``."""
+    names = [
+        label
+        for label, width in (
+            ("tensor parallel", workload.trainer_tensor_parallel),
+            ("expert parallel", workload.trainer_expert_parallel),
+            ("shard group", workload.trainer_shard_group),
+        )
+        if width > 1
+    ]
+    if len(names) == 1:
+        return f"FSDP {names[0]} needs"
+    if len(names) == 2:
+        return f"FSDP {names[0]} and {names[1]} need"
+    return f"FSDP {names[0]}, {names[1]}, and {names[2]} need"
+
+
+def _per_rank_pin_reason(workload: SplitWorkload) -> str:
+    """Why a pinned micro-batch or mini-batch blocked every sharded trainer count."""
+    pins = [
+        (name, size)
+        for name, size in (
+            ("micro_batch_size_per_gpu", workload.micro_batch_size_per_gpu),
+            ("mini_batch_size", workload.mini_batch_size),
+        )
+        if size is not None
+    ]
+    name, size = pins[0]
+    if len(pins) == 1:
+        return (
+            f"{name} {size} does not divide the per-rank batch at any trainer "
+            "count that shards the batch. Use a "
+            f"{name} that divides those ranks, or leave it unset."
+        )
+    other_name, other_size = pins[1]
+    return (
+        f"{name} {size} and {other_name} {other_size} do not divide the "
+        "per-rank batch at any trainer count that shards the batch. Use values "
+        "that divide those ranks, or leave them unset."
+    )
+
+
+def _no_split_reason(
+    workload: SplitWorkload,
+    trainer_counts: range,
+    plans: dict[int, TrainingMemoryPlan | None],
+) -> str:
+    """Why the split search found nothing, and what the run can change.
+
+    :param workload: The member's learn step and rollout cycle.
+    :param trainer_counts: Every trainer count a split could keep.
+    :param plans: The trainer counts that shard the batch, each ``None``
+        because no training-memory plan fits it.
+    :return: The cause and its fix, in plain English.
+    """
+    more_gpus = (
+        "Use more or larger GPUs per agent (a bigger resource tier or a "
+        "smaller population size)"
+    )
+    if not trainer_counts:
+        return (
+            "a trainer and a rollout engine do not both fit. "
+            f"{more_gpus}, or shorten the context length."
+        )
+    multiple = workload.trainer_multiple
+    # More trainers lower per-GPU training memory, so the largest FSDP-legal
+    # count not fitting means none of those counts fit.
+    fsdp_counts = [trainers for trainers in trainer_counts if trainers % multiple == 0]
+    if fsdp_counts and fsdp_counts[-1] in plans:
+        return (
+            "training does not fit in memory at any trainer count. "
+            f"{more_gpus}, or shorten the context length."
+        )
+    if not fsdp_counts:
+        return (
+            f"{_fsdp_width_need(workload)} a multiple of {multiple} "
+            f"trainer GPUs, and at most {trainer_counts[-1]} fit beside a "
+            "rollout engine. Use more GPUs per agent (a bigger resource tier "
+            "or a smaller population size)."
+        )
+    unpinned = workload.model_copy(update={"rollout_batch_size": None})
+    if any(
+        trainers not in plans
+        and _cycle_rollout_batch_size(unpinned, trainers, 1, 1) is not None
+        for trainers in trainer_counts
+    ):
+        return (
+            f"rollout batch size {workload.rollout_batch_size} does not divide "
+            "evenly across any trainer count that fits in memory. Use a rollout "
+            "batch size divisible by more trainer counts, such as a power of "
+            "two, or leave it unset."
+        )
+    row_free = workload.model_copy(update={"per_rank_multiple": 1})
+    if any(
+        _cycle_rollout_batch_size(workload, trainers, 1, 1) is None
+        and _cycle_rollout_batch_size(row_free, trainers, 1, 1) is not None
+        for trainers in trainer_counts
+    ):
+        return _per_rank_pin_reason(workload)
+    return (
+        f"batch size {workload.batch_size} does not divide evenly across any "
+        "trainer count that fits in memory. Use a batch size divisible by more "
+        "trainer counts, such as a power of two."
+    )
+
+
 @dataclass(frozen=True)
 class RunMemoryPlan:
     """The GPU split and trainer memory plan a run starts with."""
@@ -911,11 +1028,13 @@ def resolve_run_memory(
         ]
         split = choose_engine_width(splits)
         if split is None:
+            trainer_counts = range(
+                1, member_gpus - min(engine_widths, default=member_gpus) + 1
+            )
             msg = (
                 f"No trainer / rollout-engine split of {member_gpus} "
-                f"{device.name} GPUs fits this run. Set "
-                "training.training_gpus_per_agent and "
-                "training.rollout_engines_per_agent."
+                f"{device.name} GPUs fits this run: "
+                f"{_no_split_reason(workload, trainer_counts, plans)}"
             )
             raise ValueError(msg)
         chosen.training.training_gpus_per_agent = split.trainers

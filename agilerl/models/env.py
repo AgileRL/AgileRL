@@ -24,6 +24,7 @@ from agilerl.arena.models.env import (
     LLMEnvType,
     OfflineEnvSpec,
 )
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.data.parquet import (
     is_local_parquet_dataset,
     load_parquet_dataset,
@@ -31,6 +32,7 @@ from agilerl.data.parquet import (
 )
 from agilerl.llm_envs import DatasetEnv, RolloutHarness
 from agilerl.llm_envs.env_packages import ensure_importable
+from agilerl.llm_envs.reasoning import reasoning_end_marker, tokenizer_reasoning_end_ids
 from agilerl.protocols import BanditEnvProtocol, TextEnvProtocol
 from agilerl.typing import EnvFactory, WrapperSpec
 from agilerl.utils.env_utils import (
@@ -453,6 +455,7 @@ def make_rollout_env_factory(
     max_model_len: int | None = None,
     max_output_tokens: int | None = None,
     seed: int | None = None,
+    reasoning_parser: str | None = None,
 ) -> tuple[Callable[[], RolloutHarness], int]:
     """Build a factory that creates fresh :class:`RolloutHarness` instances.
 
@@ -476,6 +479,10 @@ def make_rollout_env_factory(
     :type max_output_tokens: int | None
     :param seed: Seed for a dataset-backed rollout's train/test split.
     :type seed: int | None
+    :param reasoning_parser: The model's vLLM reasoning parser; each harness
+        sends the env only the text after its end marker. ``None`` splits on
+        ``</think>``.
+    :type reasoning_parser: str | None
     :returns: A zero-argument callable that creates a ``RolloutHarness``, and
         the rollout's turn budget.
     :rtype: tuple[Callable[[], RolloutHarness], int]
@@ -509,20 +516,18 @@ def make_rollout_env_factory(
     harness_kwargs: dict[str, Any] = {
         "max_model_len": max_model_len,
         "chat_template_kwargs": dict(spec.chat_template_kwargs),
+        "reasoning_end_ids": tokenizer_reasoning_end_ids(
+            tokenizer, reasoning_end_marker(reasoning_parser)
+        ),
         "include_reasoning": spec.sends_reasoning,
     }
     if spec.min_reward is not None:
         harness_kwargs["min_reward"] = spec.min_reward
     model_id = tokenizer.name_or_path
-    if isinstance(model_id, str) and model_id:
-        # A tokenizer-only folder or an offline custom id has no config.json;
-        # the harness then detects the format from the vocab.
-        try:
-            chat_format = family_runtime(model_id).chat_format
-        except OSError:
-            chat_format = None
-        if chat_format is not None:
-            harness_kwargs["chat_format"] = chat_format
+    if isinstance(model_id, str) and model_id in SUPPORTED_MODEL_INFO:
+        parser = family_runtime(model_id).tool_call_parser
+        if parser is not None:
+            harness_kwargs["tool_call_parser"] = parser
     if spec.dataset_backed_rollout:
         return _make_dataset_rollout_factory(spec, tokenizer, harness_kwargs, seed=seed)
     if spec.env_url is not None:
@@ -601,7 +606,7 @@ def _make_dataset_rollout_factory(
             # ``prompt_builder`` already rendered the chat template.
             apply_chat_template=False,
             max_model_len=harness_kwargs["max_model_len"],
-            chat_format=harness_kwargs.get("chat_format"),
+            reasoning_end_ids=harness_kwargs["reasoning_end_ids"],
             include_reasoning=harness_kwargs["include_reasoning"],
         )
 

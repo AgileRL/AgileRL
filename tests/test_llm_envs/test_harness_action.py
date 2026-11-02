@@ -3,14 +3,11 @@
 
 """Text after the first think close, and where the system prompt sits."""
 
-import re
-
 import pytest
 import torch
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
-from agilerl.llm_envs.chat_formats import action_span
-from agilerl.llm_envs.harness import RolloutHarness
+from agilerl.llm_envs.harness import RolloutHarness, action_span
 from tests import TINY_LLM_FIXTURE_PATH
 from tests.helpers.rollout_doubles import FakeEnvClient, MiniTokenizer
 
@@ -102,19 +99,9 @@ class PieceTokenizer(RecordingTokenizer):
     def get_vocab(self) -> dict[str, int]:
         return {piece: token_id for token_id, piece in self.pieces.items()}
 
-    def convert_tokens_to_ids(self, token: str) -> int | None:
-        return self.get_vocab().get(token)
-
     def encode(self, text: str, **kwargs: object) -> list[int]:
         vocab = self.get_vocab()
-        pieces = sorted(vocab, key=len, reverse=True)
-        ids: list[int] = []
-        for part in re.split(f"({'|'.join(map(re.escape, pieces))})", text):
-            if part in vocab:
-                ids.append(vocab[part])
-            elif part:
-                ids.extend(super().encode(part, **kwargs))
-        return ids
+        return [vocab[text]] if text in vocab else super().encode(text, **kwargs)
 
 
 GEMMA_CHANNEL_OPEN = 100
@@ -122,14 +109,7 @@ GEMMA_CHANNEL_CLOSE = 101
 QWEN_THINK_CLOSE = 151668
 REASONING_ID = 10
 ACTION_ID = 11
-GEMMA_TOOL_PIECES = {
-    102: "<|tool_call>",
-    103: "<tool_call|>",
-    104: "<|tool_response>",
-    105: "<tool_response|>",
-}
 GEMMA_TOKENIZER_PIECES = {
-    **GEMMA_TOOL_PIECES,
     GEMMA_CHANNEL_OPEN: "<|channel>",
     GEMMA_CHANNEL_CLOSE: "<channel|>",
     REASONING_ID: "thought\nthe lamp is $5",
@@ -147,9 +127,7 @@ HARMONY_END = 200007
 HARMONY_START = 200006
 HARMONY_ANALYSIS = 20
 HARMONY_ASSISTANT = 21
-HARMONY_CALL = 200012
 HARMONY_TOKENIZER_PIECES = {
-    HARMONY_CALL: "<|call|>",
     HARMONY_CHANNEL: "<|channel|>",
     HARMONY_FINAL: "final",
     HARMONY_MESSAGE: "<|message|>",
@@ -174,7 +152,7 @@ def step_once(
     tokenizer: RecordingTokenizer,
     gen_ids: list[int],
     processor: object = None,
-    chat_format: str | None = None,
+    reasoning_end_ids: tuple[int, ...] | None = None,
     include_reasoning: bool = False,
 ) -> tuple[list[str], str]:
     """Step one generation and return the env's actions and the restarted prompt."""
@@ -186,7 +164,7 @@ def step_once(
         apply_chat_template=False,
         segment_prompt_tokens=2,
         action_processor=processor,
-        chat_format=chat_format,
+        reasoning_end_ids=reasoning_end_ids,
         include_reasoning=include_reasoning,
     )
     harness.reset()
@@ -227,14 +205,16 @@ class TestRolloutHarnessReasoningEnd:
         gen_ids = [GEMMA_CHANNEL_OPEN, REASONING_ID, GEMMA_CHANNEL_CLOSE, ACTION_ID]
 
         # Act
-        actions, prompt = step_once(tokenizer, gen_ids, chat_format="gemma4")
+        actions, prompt = step_once(
+            tokenizer, gen_ids, reasoning_end_ids=(GEMMA_CHANNEL_CLOSE,)
+        )
 
         # Assert
         assert actions == ["click('12')"]
         assert "1. click('12')" in prompt
         assert "the lamp is $5" not in prompt
 
-    def test_plain_text_think_close_splits_without_a_chat_format(self) -> None:
+    def test_think_close_is_resolved_from_the_tokenizer_by_default(self) -> None:
         # Arrange
         tokenizer = PieceTokenizer(QWEN_TOKENIZER_PIECES, frozenset())
 
@@ -273,7 +253,9 @@ class TestRolloutHarnessReasoningEnd:
         ]
 
         # Act
-        actions, prompt = step_once(tokenizer, gen_ids, chat_format="harmony")
+        actions, prompt = step_once(
+            tokenizer, gen_ids, reasoning_end_ids=HARMONY_FINAL_HEADER
+        )
 
         # Assert
         assert actions == ["click('12')"]
@@ -304,7 +286,7 @@ class TestRolloutHarnessIncludeReasoning:
         actions, prompt = step_once(
             tokenizer,
             gen_ids,
-            chat_format="gemma4",
+            reasoning_end_ids=(GEMMA_CHANNEL_CLOSE,),
             include_reasoning=True,
         )
 
@@ -330,7 +312,7 @@ class TestRolloutHarnessIncludeReasoning:
         actions, _prompt = step_once(
             tokenizer,
             [GEMMA_CHANNEL_OPEN, REASONING_ID, GEMMA_CHANNEL_CLOSE, ACTION_ID],
-            chat_format="gemma4",
+            reasoning_end_ids=(GEMMA_CHANNEL_CLOSE,),
         )
 
         assert actions == ["click('12')"]
