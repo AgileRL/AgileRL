@@ -233,6 +233,10 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         created when ``beta`` is 0 and ``hp_config`` does not mutate it, since
         nothing reads the reference then. Defaults to True.
     :type use_separate_reference_adapter: bool, optional
+    :param reference_update_interval: Optimizer steps between copies of the
+        actor adapter onto the reference. ``None`` (default) keeps the
+        reference fixed.
+    :type reference_update_interval: int | None, optional
     :param whiten_advantages: If ``True``, whiten token-level advantages over
         valid action positions, defaults to False.
     :type whiten_advantages: bool, optional
@@ -415,6 +419,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         importance_sampling_level: Literal["token", "turn", "trajectory"] | None = None,
         advantage_granularity: Literal["auto", "trajectory", "turn"] = "auto",
         use_separate_reference_adapter: bool = True,
+        reference_update_interval: int | None = None,
         whiten_advantages: bool = False,
         adv_clip_range: float | None = None,
         filter_zero_adv: bool = False,
@@ -465,6 +470,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             lora_config=lora_config,
             use_separate_reference_adapter=use_separate_reference_adapter
             and reads_reference,
+            reference_update_interval=reference_update_interval,
             vllm_config=vllm_config,
             model_name=model_name,
             actor_network=actor_network,

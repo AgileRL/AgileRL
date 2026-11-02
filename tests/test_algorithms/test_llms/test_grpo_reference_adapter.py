@@ -72,11 +72,12 @@ class TestGRPOReferenceAdapter:
         assert "reference" in grpo.actor.peft_config
 
     def test_reference_update_without_a_kl_penalty_does_not_warn(self) -> None:
-        grpo = _make_grpo(beta=0.0)
+        grpo = _make_grpo(beta=0.0, reference_update_interval=1)
+        grpo.optimizer_steps = 1
 
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            grpo.set_reference_policy(1)
+            grpo.set_reference_policy()
 
         assert grpo.reference_update_tracker == 1
 

@@ -2907,6 +2907,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         disabled; since base weights are immutable, that reference stays the
         initial policy for the whole run.
     :type use_separate_reference_adapter: bool
+    :param reference_update_interval: Optimizer steps between copies of the
+        actor adapter onto ``reference``. ``None`` (default) keeps the
+        reference fixed.
+    :type reference_update_interval: int | None
     :param lr_critic: Critic/value-head learning rate. If ``None``, ``lr_actor`` is used.
     :type lr_critic: float | None, optional
     :param use_value_head: Whether to use a separate value head.
@@ -3045,6 +3049,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         pad_token: str,
         lora_config: LoraConfig | None,
         use_separate_reference_adapter: bool = False,
+        reference_update_interval: int | None = None,
         lr_critic: float | None = None,
         use_value_head: bool = False,
         vllm_config: VLLMConfig | None = None,
@@ -3150,7 +3155,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self._pixel_staging = PinnedStaging()
         self._vision_language_module: PreTrainedModel | None = None
         self.final_logit_softcap: float | None = None
-        self.reference_update_tracker = 0  # Updated every time the reference policy is updated which is updated each time we pass through the train dataset
+        # optimizer_steps // reference_update_interval at the last reference copy.
+        self.reference_update_tracker = 0
+        self.optimizer_steps = 0
         self.calc_position_embeddings = calc_position_embeddings
         self.pad_token_id = pad_token_id
         self.pad_token = pad_token
@@ -3221,6 +3228,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         )
         self.wrap = wrap
         self.use_separate_reference_adapter = use_separate_reference_adapter
+        if reference_update_interval is not None and reference_update_interval < 1:
+            msg = f"reference_update_interval must be >= 1 or None, got {reference_update_interval}."
+            raise ValueError(msg)
+        self.reference_update_interval = reference_update_interval
         if vllm_importance_sampling_cap <= 0:
             msg = "vllm_importance_sampling_cap must be > 0."
             raise ValueError(msg)
@@ -3534,7 +3545,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :type overwrite_critic_adapter: bool
         :param restore_config: If ``False``, keep this instance's algorithm
             settings and restore only training state: step count, scores,
-            fitness, ``reference_update_tracker``, ``rng`` and, with
+            fitness, ``reference_update_tracker``, ``optimizer_steps``, ``rng`` and, with
             ``restore_hyperparameters``, the registry's mutable
             hyperparameters.
         :type restore_config: bool
@@ -3767,12 +3778,17 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :param restore_hyperparameters: See :meth:`load_checkpoint`.
         :type restore_hyperparameters: bool
         """
+        # A checkpoint without optimizer_steps counts reference copies in dataset
+        # epochs, which the optimizer-step schedule cannot compare against.
+        if "optimizer_steps" not in checkpoint:
+            checkpoint = {**checkpoint, "reference_update_tracker": 0}
         if not restore_config:
             training_state = {
                 "steps",
                 "scores",
                 "fitness",
                 "reference_update_tracker",
+                "optimizer_steps",
                 "rng",
                 *self.hp_config.names(),
             }
@@ -4289,8 +4305,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         if self.lr_scheduler is not None:
             self.lr_scheduler.step()
 
-    def set_reference_policy(self, reference_update_tracker: int) -> None:
-        """Update the reference policy when the tracker advances past the stored value.
+    def set_reference_policy(self) -> None:
+        """Copy the actor adapter onto ``reference`` every ``reference_update_interval`` optimizer steps.
+
+        Does nothing when ``reference_update_interval`` is ``None``.
 
         Base weights are immutable in AgileRL's LoRA-only training: with
         ``use_separate_reference_adapter=True`` the actor adapter is copied onto
@@ -4298,12 +4316,11 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         model with adapters disabled) cannot move, so the update request is
         acknowledged with a one-time warning and the KL anchor stays the initial
         policy.
-
-        :param reference_update_tracker: The reference policy update tracker
-        :type reference_update_tracker: int
         """
-        assert reference_update_tracker >= self.reference_update_tracker, (
-            "Reference policy update tracker should be greater than or equal to the current reference policy update tracker."
+        if self.reference_update_interval is None:
+            return
+        reference_update_tracker = (
+            self.optimizer_steps // self.reference_update_interval
         )
         if reference_update_tracker > self.reference_update_tracker:
             if self.use_separate_reference_adapter:
@@ -4322,7 +4339,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                     category=UserWarning,
                 )
                 self._frozen_reference_warned = True
-            self.reference_update_tracker += 1
+            self.reference_update_tracker = reference_update_tracker
 
     def use_adapter(self, adapter_name: str) -> None:
         """Switch the active PEFT adapter, handling all side-effects.
@@ -6712,7 +6729,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :rtype: OptimizerStep | None
         """
         with self._amp_ctx():
-            return self.shard_runtime.backward(
+            step = self.shard_runtime.backward(
                 loss,
                 self.optimizer,
                 (
@@ -6724,6 +6741,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 self.max_grad_norm,
                 clip_groups=clip_groups,
             )
+        if step is not None:
+            self.optimizer_steps += 1
+        return step
 
     def _stack_rollout_batch(
         self, experiences: LLMRolloutExperiences, turn_ids: torch.Tensor | None
