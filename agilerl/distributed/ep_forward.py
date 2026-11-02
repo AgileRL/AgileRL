@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 import torch
 import torch.distributed as dist
+from peft.tuners.lora.layer import ParamWrapper
 from torch import nn
 from torch.distributed.tensor import DTensor
 from torch.func import functional_call
@@ -45,14 +46,13 @@ from agilerl.distributed.replicated_rows import (
     replicated_row_span,
 )
 from agilerl.lora.fused import ROUTING_STATE
-from agilerl.lora.moe.adapters import mixed_routing
+from agilerl.lora.moe.adapters import mixed_routing, wrapper_chain
 from agilerl.lora.moe.grouped_gemm import expert_row_counts
 from agilerl.lora.moe.layouts import (
     is_routed_experts_module,
     is_sorted_experts_module,
     routed_projection_names,
 )
-from agilerl.lora.moe.routed import ROUTED_EXPERT_CHUNK_BYTES
 
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from agilerl.lora.moe.wrappers import RoutedExpertsLoraWrapper
@@ -468,15 +468,24 @@ def _routing_override(module: nn.Module, routing: list[str] | None) -> Iterator[
     if routing is None:
         yield
         return
-    previous = ROUTING_STATE.get(module)
-    ROUTING_STATE[module] = routing
+    # Chain members read their own routing state; a uniform local block
+    # would strand them on the global mixed routing.
+    targets = (
+        list(wrapper_chain(module).values())
+        if isinstance(module, ParamWrapper)
+        else [module]
+    )
+    previous = {target: ROUTING_STATE.get(target) for target in targets}
+    for target in targets:
+        ROUTING_STATE[target] = routing
     try:
         yield
     finally:
-        if previous is None:
-            ROUTING_STATE.pop(module, None)
-        else:
-            ROUTING_STATE[module] = previous
+        for target, prev in previous.items():
+            if prev is None:
+                ROUTING_STATE.pop(target, None)
+            else:
+                ROUTING_STATE[target] = prev
 
 
 def _run_local_experts(
@@ -658,12 +667,16 @@ def _route_replicated_span(
 
 
 def _install_routed_ep_forward(
-    module: nn.Module, token_blocks: int, tp_group: dist.ProcessGroup | None
+    module: nn.Module,
+    token_blocks: int,
+    chunk_bytes: int,
+    tp_group: dist.ProcessGroup | None,
 ) -> None:
     """Dispatch → local experts → combine, in ``token_blocks`` token blocks.
 
     :param module: Routed experts module, or its outer LoRA wrapper.
     :param token_blocks: Token blocks per call; see :func:`_routed_ep_blocks`.
+    :param chunk_bytes: Widest fp32 combine chunk.
     :param tp_group: Ranks holding the same tokens, or ``None``. Each routes
         only its :func:`replicated_row_span` and the outputs are all-gathered.
     """
@@ -705,11 +718,6 @@ def _install_routed_ep_forward(
             )
         )
         comm = _comm_stream(comm_streams, hidden_states) if token_blocks > 1 else None
-        chunk_bytes = (
-            self.chunk_bytes
-            if isinstance(self, RoutedExpertsLoraWrapper)
-            else ROUTED_EXPERT_CHUNK_BYTES
-        )
         run_blocks = partial(
             _routed_ep_blocks,
             self,
@@ -803,10 +811,13 @@ def _install_sorted_ep_forward(
 
 
 def install_ep_forward(
-    module: nn.Module, token_blocks: int, tp_group: dist.ProcessGroup | None
+    module: nn.Module,
+    token_blocks: int,
+    chunk_bytes: int,
+    tp_group: dist.ProcessGroup | None,
 ) -> None:
     experts = _base_experts(module)
     if is_routed_experts_module(experts):
-        _install_routed_ep_forward(module, token_blocks, tp_group)
+        _install_routed_ep_forward(module, token_blocks, chunk_bytes, tp_group)
     elif is_sorted_experts_module(experts):
         _install_sorted_ep_forward(module, tp_group)

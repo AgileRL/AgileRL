@@ -16,10 +16,13 @@ from agilerl.arena.models.model_info import (
     ARCH_HYBRID,
     ARCH_HYBRID_MOE,
     ARCH_MOE,
+    NON_REASONING_MODEL_TYPES,
+    REASONING_PARSERS,
     STATUS_DEPRECATED,
     STATUS_LIVE,
     SUPPORTED_MODEL_INFO,
     ModelInfo,
+    resolve_reasoning_parser,
     supported_path,
 )
 from agilerl.arena.models.networks import (
@@ -287,12 +290,22 @@ MODELS_WITHOUT_PACKED_EXPERTS = (
 class TestModelInfoSupportsExpertParallelProperty:
     @pytest.mark.parametrize(
         "hub_id",
-        [hub_id for hub_id, _count in PACKED_EXPERT_COUNTS],
+        [
+            hub_id
+            for hub_id, _count in PACKED_EXPERT_COUNTS
+            if hub_id != "openai/gpt-oss-20b"
+        ],
     )
     def test_packed_expert_models(self, hub_id: str) -> None:
         entry = SUPPORTED_MODEL_INFO[hub_id]
 
         assert entry.supports_expert_parallel is True
+
+    def test_transposed_gpt_oss_experts_do_not_shard(self) -> None:
+        entry = SUPPORTED_MODEL_INFO["openai/gpt-oss-20b"]
+
+        assert entry.supports_expert_parallel is False
+        assert entry.num_routed_experts == 32
 
     @pytest.mark.parametrize("hub_id", MODELS_WITHOUT_PACKED_EXPERTS)
     def test_models_without_packed_experts(self, hub_id: str) -> None:
@@ -301,7 +314,7 @@ class TestModelInfoSupportsExpertParallelProperty:
         assert entry.supports_expert_parallel is False
 
     def test_serializes_in_model_dump(self) -> None:
-        dumped = SUPPORTED_MODEL_INFO["openai/gpt-oss-20b"].model_dump(mode="json")
+        dumped = SUPPORTED_MODEL_INFO["Qwen/Qwen3.6-35B-A3B"].model_dump(mode="json")
 
         assert dumped["supports_expert_parallel"] is True
 
@@ -312,7 +325,6 @@ class TestModelInfoNumRoutedExpertsProperty:
         entry = SUPPORTED_MODEL_INFO[hub_id]
 
         assert entry.num_routed_experts == expert_count
-        assert entry.supports_expert_parallel is True
 
     @pytest.mark.parametrize("hub_id", MODELS_WITHOUT_PACKED_EXPERTS)
     def test_models_without_packed_experts(self, hub_id: str) -> None:
@@ -476,6 +488,25 @@ class TestModelInfoModalitiesProperty:
             ModelInfo.model_validate({"hub_id": "org/x", "modalities": ["vision"]})
 
 
+class TestModelInfoBiasesImageTokenProperty:
+    @pytest.mark.parametrize(
+        "hub_id",
+        [
+            "Qwen/Qwen3.5-0.8B",
+            "google/gemma-4-E4B-it",
+            "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
+        ],
+    )
+    def test_vision_entries_bias_the_image_token(self, hub_id: str) -> None:
+        assert SUPPORTED_MODEL_INFO[hub_id].biases_image_token is True
+
+    @pytest.mark.parametrize(
+        "hub_id", ["Qwen/Qwen3-4B", "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"]
+    )
+    def test_text_entries_do_not(self, hub_id: str) -> None:
+        assert SUPPORTED_MODEL_INFO[hub_id].biases_image_token is False
+
+
 class TestFinetuningNetworkSpecLoraTargets:
     def test_valid_targets_pass(self) -> None:
         spec = finetuning_network(
@@ -626,7 +657,7 @@ class TestFinetuningNetworkSpecExpertDefault:
 
         assert spec.lora_config is not None
         assert spec.lora_config.target_parameters == []
-        assert spec.lora_config.lora_dropout == 0.05
+        assert spec.lora_config.lora_dropout == 0.0
 
     def test_explicit_dropout_is_zeroed_when_experts_auto_filled(self) -> None:
         spec = FinetuningNetworkSpec.model_validate(
@@ -640,6 +671,19 @@ class TestFinetuningNetworkSpecExpertDefault:
         assert spec.lora_config is not None
         assert spec.lora_config.target_parameters is not None
         assert spec.lora_config.lora_dropout == 0.0
+
+    def test_explicit_parameters_with_nonzero_dropout_raise(self) -> None:
+        with pytest.raises(ValidationError, match="lora_dropout must be 0"):
+            FinetuningNetworkSpec.model_validate(
+                {
+                    "pretrained_model_name_or_path": "openai/gpt-oss-20b",
+                    "max_context_length": 512,
+                    "lora_config": {
+                        "target_parameters": ["mlp.experts.gate_up_proj"],
+                        "lora_dropout": 0.1,
+                    },
+                }
+            )
 
     def test_dense_model_stays_without_parameters(self) -> None:
         spec = finetuning_network("Qwen/Qwen3-4B")
@@ -742,7 +786,6 @@ class TestResolveLoraDefaults:
         ("hub_id", "target_parameters"),
         [
             ("Qwen/Qwen3.6-35B-A3B", []),
-            ("Qwen/Qwen3.6-35B-A3B", ["mlp.experts.down_proj"]),
             ("Qwen/Qwen3.5-2B", None),
             ("org/untracked", None),
         ],
@@ -750,9 +793,73 @@ class TestResolveLoraDefaults:
     def test_leaves_explicit_dense_and_untracked_configs(
         self, hub_id: str, target_parameters: list[str] | None
     ) -> None:
-        lora = LoraConfigDict(target_parameters=target_parameters)
+        lora = LoraConfigDict(target_parameters=target_parameters, lora_dropout=0.1)
 
         resolve_lora_defaults(lora, hub_id)
 
         assert lora.target_parameters == target_parameters
-        assert lora.lora_dropout == 0.05
+        assert lora.lora_dropout == 0.1
+
+    def test_explicit_expert_paths_with_unset_dropout_take_zero(self) -> None:
+        lora = LoraConfigDict(target_parameters=["mlp.experts.down_proj"])
+
+        resolve_lora_defaults(lora, "Qwen/Qwen3.6-35B-A3B")
+
+        assert lora.target_parameters == ["mlp.experts.down_proj"]
+        assert lora.lora_dropout == 0.0
+
+
+class TestResolveReasoningParser:
+    def test_every_supported_model_resolves_to_its_family_parser(self) -> None:
+        expected = {
+            "Qwen/Qwen2.5-0.5B-Instruct": None,
+            "Qwen/Qwen3-1.7B": "qwen3",
+            "Qwen/Qwen3-4B": "qwen3",
+            "Qwen/Qwen3.5-0.8B": "qwen3",
+            "Qwen/Qwen3.5-2B": "qwen3",
+            "Qwen/Qwen3.5-4B": "qwen3",
+            "Qwen/Qwen3.5-9B": "qwen3",
+            "Qwen/Qwen3.6-35B-A3B": "qwen3",
+            "Qwen/Qwen3.8-27B": "qwen3",
+            "ibm-granite/granite-4.0-micro": None,
+            "ibm-granite/granite-4.0-micro-base": None,
+            "ibm-granite/granite-4.0-h-tiny": None,
+            "ibm-granite/granite-3.1-3b-a800m-instruct": None,
+            "google/gemma-4-E4B-it": "gemma4",
+            "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16": "nemotron_v3",
+            "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16": "nemotron_v3",
+            "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16": "nemotron_v3",
+            "openai/gpt-oss-20b": "openai_gptoss",
+        }
+
+        resolved = {
+            hub_id: resolve_reasoning_parser({}, info.model_type)
+            for hub_id, info in SUPPORTED_MODEL_INFO.items()
+        }
+
+        assert resolved == expected
+
+    def test_every_supported_model_has_a_reasoning_decision(self) -> None:
+        undecided = {
+            hub_id: info.config["model_type"]
+            for hub_id, info in SUPPORTED_MODEL_INFO.items()
+            if info.config["model_type"] not in REASONING_PARSERS
+            and info.config["model_type"] not in NON_REASONING_MODEL_TYPES
+        }
+
+        assert undecided == {}
+
+    def test_no_model_type_is_both_reasoning_and_non_reasoning(self) -> None:
+        assert set(REASONING_PARSERS) & NON_REASONING_MODEL_TYPES == set()
+
+    def test_manifest_parser_wins_over_the_family_parser(self) -> None:
+        assert (
+            resolve_reasoning_parser({"reasoning_parser": "deepseek_r1"}, "gemma4")
+            == "deepseek_r1"
+        )
+
+    def test_manifest_parser_applies_to_an_unknown_model_type(self) -> None:
+        assert resolve_reasoning_parser({"reasoning_parser": "qwen3"}, None) == "qwen3"
+
+    def test_unknown_model_type_without_a_manifest_parser_has_none(self) -> None:
+        assert resolve_reasoning_parser({}, None) is None

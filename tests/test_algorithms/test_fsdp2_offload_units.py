@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
+from dataclasses import replace
 from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -16,7 +17,7 @@ from peft import LoraConfig, get_peft_model
 from safetensors.torch import save_file
 from torch import nn
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.tensor import Replicate, Shard
+from torch.distributed.tensor import DTensor, Replicate, Shard
 from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, Qwen3Config
 
 from agilerl.algorithms.core.base import LLMAlgorithm
@@ -29,6 +30,7 @@ from agilerl.distributed import (
     materialize_fsdp2_from_cpu_state,
 )
 from agilerl.distributed.expert_parallel import ParallelMesh
+from agilerl.distributed.fsdp import _move_ignored_to_device
 from agilerl.distributed.runtime import DPRuntime, FSDPRuntime
 
 cuda_required = pytest.mark.skipif(
@@ -41,16 +43,31 @@ cuda_required = pytest.mark.skipif(
 # ---------------------------------------------------------------------------
 
 
+def _resolved_fsdp(config: FSDPConfig) -> FSDPConfig:
+    """``config`` with unset memory fields and stride filled, as a launcher sets them."""
+    picks = {
+        "checkpoint_every_n_blocks": 1,
+        "reshard_after_forward": True,
+        "routed_expert_chunk_mib": 64,
+        "optim_cpu_offload": False,
+        "activation_offload": False,
+        "cpu_offload": False,
+    }
+    return replace(
+        config,
+        **{name: pick for name, pick in picks.items() if getattr(config, name) is None},
+    )
+
+
 def _make_wrap_stub(**overrides) -> MagicMock:
     """Minimal agent stub for ``LLMAlgorithm.wrap_models``."""
     agent = MagicMock()
     agent.actor = nn.Linear(2, 2)
     agent.distributed = True
     agent.fsdp_config = FSDPConfig()
-    agent.colocated = False
     agent.ep = 1
     agent.cp = 1
-    agent.gradient_checkpointing = False
+    agent.gradient_checkpointing = True
     agent.cosine_lr_schedule_config = None
     agent.lr = 1e-4
     agent.optimizer = MagicMock()
@@ -60,10 +77,22 @@ def _make_wrap_stub(**overrides) -> MagicMock:
     agent.lr_critic = None
     agent.device = "cpu"
     agent.lr_scheduler = None
+    agent.gradient_checkpointing = True
     agent._resolve_fsdp_config = MethodType(LLMAlgorithm._resolve_fsdp_config, agent)
     for k, v in overrides.items():
         setattr(agent, k, v)
+    agent.fsdp_config = _resolved_fsdp(agent.fsdp_config)
     return agent
+
+
+class TestLLMAlgorithmGenerateWithHF:
+    def test_raises_under_fsdp_cpu_offload(self):
+        agent = SimpleNamespace(
+            fsdp_config=FSDPConfig(cpu_offload=True, optim_cpu_offload=False)
+        )
+
+        with pytest.raises(ValueError, match="does not support FSDP2 cpu_offload"):
+            LLMAlgorithm._generate_with_hf(agent, prompts=[])
 
 
 class TestLLMWrapModelsOffloadValidation:
@@ -73,29 +102,16 @@ class TestLLMWrapModelsOffloadValidation:
         # Arrange
         agent = _make_wrap_stub(
             fsdp_config=FSDPConfig(cpu_offload=True, optim_cpu_offload=True),
-            colocated=True,
         )
 
         # Act / Assert
         with pytest.raises(ValueError, match="mutually exclusive"):
             LLMAlgorithm.wrap_models(agent)
 
-    def test_wrap_raises_when_cpu_offload_without_vllm(self):
+    def test_wrap_accepts_cpu_offload(self):
         # Arrange
         agent = _make_wrap_stub(
             fsdp_config=FSDPConfig(cpu_offload=True, optim_cpu_offload=False),
-            colocated=False,
-        )
-
-        # Act / Assert
-        with pytest.raises(ValueError, match="requires colocated vLLM"):
-            LLMAlgorithm.wrap_models(agent)
-
-    def test_wrap_accepts_cpu_offload_with_vllm(self):
-        # Arrange
-        agent = _make_wrap_stub(
-            fsdp_config=FSDPConfig(cpu_offload=True, optim_cpu_offload=False),
-            colocated=True,
         )
 
         # Act
@@ -112,7 +128,6 @@ class TestLLMWrapModelsOffloadValidation:
         # Arrange
         agent = _make_wrap_stub(
             fsdp_config=FSDPConfig(optim_cpu_offload=True),
-            colocated=False,
         )
 
         # Act
@@ -127,9 +142,7 @@ class TestLLMWrapModelsOffloadValidation:
 
     def test_wrap_does_not_wrap_optimizer_when_no_offload(self):
         # Arrange
-        agent = _make_wrap_stub(
-            fsdp_config=FSDPConfig(optim_cpu_offload=False), colocated=False
-        )
+        agent = _make_wrap_stub(fsdp_config=FSDPConfig(optim_cpu_offload=False))
 
         # Act
         with patch(
@@ -169,9 +182,7 @@ class TestUntiedLmHeadNoReshard:
             return module
 
         with patch("agilerl.distributed.fsdp_blocks.fully_shard", side_effect=_record):
-            _shard_embed_and_lm_head(
-                model, {"reshard_after_forward": True}, persistence_threshold=0
-            )
+            _shard_embed_and_lm_head(model, {"reshard_after_forward": True})
 
         modules = [module for module, _ in seen]
         assert model.lm_head in modules
@@ -320,6 +331,7 @@ def _make_actor_agent(shard_runtime=None, device="cuda:0"):
     agent = MagicMock()
     agent.colocated = False
     agent.device = device
+    agent.fsdp_config = FSDPConfig()
     agent.shard_runtime = shard_runtime or DPRuntime()
     agent.hf_generate_chunk_size = 1
     agent.group_size = 1
@@ -738,7 +750,13 @@ class TestFsdpResidencyGuards:
     def test_wrap_uses_materialize_helper(self):
         agent = _make_wrap_stub(
             device="cuda:0",
-            fsdp_config=FSDPConfig(routed_expert_chunk_mib=64, optim_cpu_offload=True),
+            fsdp_config=FSDPConfig(
+                reshard_after_forward=True,
+                routed_expert_chunk_mib=64,
+                optim_cpu_offload=True,
+                activation_offload=False,
+                cpu_offload=False,
+            ),
         )
         with patch(
             "agilerl.distributed.runtime.materialize_fsdp2_from_cpu_state",
@@ -750,7 +768,7 @@ class TestFsdpResidencyGuards:
             "cuda:0",
             agent.fsdp_config,
             parallel_mesh=None,
-            gradient_checkpointing=False,
+            gradient_checkpointing=True,
         )
 
     def test_fsdp_clone_uses_cpu_state_path(self):
@@ -1314,6 +1332,7 @@ class TestMaterializeFsdp2FromCpuState:
                 param_dtype="float32",
                 reduce_dtype="float32",
                 routed_expert_chunk_mib=64,
+                checkpoint_every_n_blocks=1,
             ),
             parallel_mesh=ParallelMesh(world=world, hsdp=world["shard"]),
             gradient_checkpointing=True,
@@ -2836,3 +2855,36 @@ def _make_llm_agent_for_ckpt() -> MagicMock:
     agent.actor = actor
     agent.shard_runtime = FSDPRuntime(FSDPConfig())
     return agent
+
+
+class TestMoveIgnoredToDevice:
+    @cuda_required
+    def test_moves_dense_params_and_buffers_to_cuda(self) -> None:
+        module = nn.Linear(2, 2)
+        module.register_buffer("mask", torch.ones(2))
+
+        _move_ignored_to_device(module, torch.device("cuda"))
+
+        assert all(param.is_cuda for param in module.parameters())
+        assert all(buffer.is_cuda for buffer in module.buffers())
+
+    @cuda_required
+    def test_tied_weights_stay_tied(self) -> None:
+        embed = nn.Embedding(4, 2)
+        head = nn.Linear(2, 4, bias=False)
+        head.weight = embed.weight
+        model = nn.ModuleDict({"embed": embed, "head": head})
+
+        _move_ignored_to_device(model, torch.device("cuda"))
+
+        assert model["head"].weight is model["embed"].weight
+        assert model["embed"].weight.is_cuda
+
+    def test_leaves_dtensors_alone(self) -> None:
+        module = nn.Linear(2, 2)
+        dtensor = MagicMock(spec=DTensor)
+        module._parameters["w"] = dtensor
+
+        _move_ignored_to_device(module, torch.device("cpu"))
+
+        assert module._parameters["w"] is dtensor

@@ -27,11 +27,11 @@ def encoder_profile_items(
     :param max_num_seqs: The engine's concurrent sequences.
     :param max_model_len: The engine's context length.
     :param max_images_per_prompt: ``limit_mm_per_prompt["image"]``; ``None``
-        takes vLLM's default for an unset modality.
+        takes vLLM's default for an unset modality, 0 disables images.
     :return: Images in the profile batch; 0 without a profile image.
     """
     tokens = arch.vision_profile_patches // arch.vision_spatial_merge_size**2
-    if not tokens:
+    if not tokens or max_images_per_prompt == 0:
         return 0
     # vLLM allows 999 items of a modality the config leaves unset.
     limit = 999 if max_images_per_prompt is None else max_images_per_prompt

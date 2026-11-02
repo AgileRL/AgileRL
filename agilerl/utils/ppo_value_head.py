@@ -17,6 +17,7 @@ import torch.nn as nn
 from transformers import GenerationConfig, PreTrainedModel
 
 from agilerl.architectures import trainer_model_class
+from agilerl.distributed.fsdp import set_full_model_state_dict
 
 if TYPE_CHECKING:
     from transformers.generation.utils import GenerateOutput
@@ -219,13 +220,16 @@ class AutoModelForCausalLMWithValueHead(nn.Module):
         return generate_fn(*args, **kwargs)
 
     def post_init(self, state_dict: dict[str, Any]) -> None:
-        """Load ``v_head.*`` tensors from a checkpoint dict (non-strict)."""
+        """Load full ``v_head.*`` tensors from a checkpoint dict (non-strict).
+
+        The trainable head is an FSDP2 DTensor shard on a sharded actor.
+        """
         v_sd = {}
         for key in list(state_dict.keys()):
             if key.startswith("v_head."):
                 v_sd[key[len("v_head.") :]] = state_dict[key]
         if v_sd:
-            self.v_head.load_state_dict(v_sd, strict=False)
+            set_full_model_state_dict(self.v_head, v_sd)
 
     def save_pretrained(self, *args: Any, **kwargs: Any) -> None:
         """Save wrapped model while handling value-head state for PEFT and non-PEFT paths."""

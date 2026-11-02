@@ -1768,6 +1768,7 @@ def test_batch_rollout_env_exposes_num_epochs() -> None:
         ),
         batch_size=2,
         group_size=1,
+        adaptive_task_sampling=False,
     )
     assert batch.num_epochs == 0
     batch.reset(seed=0)  # consumes the full 2-row epoch
@@ -2210,7 +2211,7 @@ def test_server_hosts_qa_dataset_environment_as_is() -> None:
     """OpenEnv ``Environment`` subclasses are hosted without ``OpenEnvWrapper``."""
     world = QADatasetEnv(
         [{"question": "q", "answer": "a"}],
-        rubric=reward_fn_to_rubric(lambda c, a, q: 1.0),
+        rubric=reward_fn_to_rubric(lambda completion, answer, question: 1.0),
     )
     with OpenEnvServer(world) as server:
         client = RemoteEnvClient(server.base_url)

@@ -24,7 +24,6 @@ from agilerl.arena.models.env import (
     LLMEnvType,
     OfflineEnvSpec,
 )
-from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.data.parquet import (
     is_local_parquet_dataset,
     load_parquet_dataset,
@@ -510,14 +509,20 @@ def make_rollout_env_factory(
     harness_kwargs: dict[str, Any] = {
         "max_model_len": max_model_len,
         "chat_template_kwargs": dict(spec.chat_template_kwargs),
+        "include_reasoning": spec.sends_reasoning,
     }
     if spec.min_reward is not None:
         harness_kwargs["min_reward"] = spec.min_reward
     model_id = tokenizer.name_or_path
-    if isinstance(model_id, str) and model_id in SUPPORTED_MODEL_INFO:
-        parser = family_runtime(model_id).tool_call_parser
-        if parser is not None:
-            harness_kwargs["tool_call_parser"] = parser
+    if isinstance(model_id, str) and model_id:
+        # A tokenizer-only folder or an offline custom id has no config.json;
+        # the harness then detects the format from the vocab.
+        try:
+            chat_format = family_runtime(model_id).chat_format
+        except OSError:
+            chat_format = None
+        if chat_format is not None:
+            harness_kwargs["chat_format"] = chat_format
     if spec.dataset_backed_rollout:
         return _make_dataset_rollout_factory(spec, tokenizer, harness_kwargs, seed=seed)
     if spec.env_url is not None:
@@ -596,6 +601,8 @@ def _make_dataset_rollout_factory(
             # ``prompt_builder`` already rendered the chat template.
             apply_chat_template=False,
             max_model_len=harness_kwargs["max_model_len"],
+            chat_format=harness_kwargs.get("chat_format"),
+            include_reasoning=harness_kwargs["include_reasoning"],
         )
 
     # A dataset-backed rollout is single-turn; the contract pins max_turns to 1.

@@ -45,6 +45,7 @@ def test_max_prompt_tokens_for_model_len() -> None:
 
 
 class _ChrTokenizer:
+    name_or_path = "chr"
     pad_token_id = 0
     pad_token = "<pad>"
     unk_token_id = None
@@ -676,7 +677,7 @@ class TestRolloutEnvFromDataset:
         """With no ``prompt_builder`` the prompt is ``str(question)`` verbatim."""
         env = RolloutHarness.from_dataset(
             self._ROWS,
-            reward_fn_to_rubric(lambda c, a, q: 0.0),
+            reward_fn_to_rubric(lambda completion, answer, question: 0.0),
             _ChrTokenizer(),
             apply_chat_template=False,
         )
@@ -686,7 +687,7 @@ class TestRolloutEnvFromDataset:
         with pytest.raises(TypeError, match="single-turn"):
             RolloutHarness.from_dataset(
                 self._ROWS,
-                reward_fn_to_rubric(lambda c, a, q: 0.0),
+                reward_fn_to_rubric(lambda completion, answer, question: 0.0),
                 _ChrTokenizer(),
                 max_turns=2,
             )
@@ -1814,7 +1815,9 @@ class TestBatchRolloutEnvPerEpisode:
         assert seen == [_mix_seed(12)] * 2 + [_mix_seed(13)] * 2
 
     def test_dataset_rows_are_group_contiguous(self) -> None:
-        vec_env = self._collector(env_factory=_RowRecordingEnv)
+        vec_env = self._collector(
+            env_factory=_RowRecordingEnv, adaptive_task_sampling=False
+        )
         for i in range(4):
             vec_env.reset_episode(f"ep{i}", logical_slot=i)
         rows = [env.row_calls[-1] for env in vec_env.envs]

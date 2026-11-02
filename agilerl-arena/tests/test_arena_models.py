@@ -366,17 +366,23 @@ class TestLLMAlgorithmSpecValidators:
         with pytest.raises(ValidationError, match="requires max_output_tokens"):
             DPOSpec(thinking_token_budget=8)
 
-    def test_sequence_packing_requires_packed_attention(self) -> None:
-        with pytest.raises(ValidationError, match="use_sequence_packing requires"):
-            GRPOSpec(group_size=2, use_sequence_packing=True)
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [("use_sequence_packing", True), ("attn_implementation", "sdpa")],
+    )
+    def test_packing_and_attention_backend_are_not_options(
+        self, field: str, value: object
+    ) -> None:
+        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+            GRPOSpec.model_validate({"group_size": 2, field: value})
 
-    def test_sequence_packing_with_flash_attention(self) -> None:
-        spec = GRPOSpec(
-            group_size=2,
-            use_sequence_packing=True,
-            attn_implementation="flash_attention_2",
-        )
-        assert spec.use_sequence_packing is True
+    def test_llm_algorithms_support_sequence_packing(self) -> None:
+        from agilerl.arena.models.algorithms.dpo import DPOSpec
+        from agilerl.arena.models.algorithms.sft import SFTSpec
+
+        assert GRPOSpec.supports_sequence_packing is True
+        assert SFTSpec.supports_sequence_packing is True
+        assert DPOSpec.supports_sequence_packing is True
 
     def test_deepspeed_is_rejected(self) -> None:
         with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
@@ -411,8 +417,23 @@ class TestLLMAlgorithmSpecValidators:
         spec = GRPOSpec(group_size=2, fsdp=None)
         assert spec.fsdp is None
 
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "prefetch_units",
+            "backward_prefetch_units",
+            "checkpoint_skip_layer_types",
+            "wrap_every_n_blocks",
+            "param_persistence_threshold",
+            "defer_grad_sync",
+        ],
+    )
+    def test_fsdp_tuning_keys_are_rejected(self, field: str) -> None:
+        with pytest.raises(ValidationError, match="Unknown fsdp keys"):
+            GRPOSpec(group_size=2, fsdp={field: 1})
+
     def test_fsdp_config_passes_through(self) -> None:
-        config = FSDPConfig(wrap_every_n_blocks=2)
+        config = FSDPConfig(ep=2)
         spec = GRPOSpec(group_size=2, fsdp=config)
         assert spec.fsdp == config
 
@@ -470,6 +491,15 @@ class TestGRPOSpecOffPolicyCorrections:
         assert spec.adv_norm == "mean_only"
         assert spec.top_p == 1.0
 
+    def test_kl_advantage_shaping_with_positive_beta_is_accepted(self) -> None:
+        spec = GRPOSpec(group_size=2, beta=0.001, use_kl_advantage_shaping=True)
+
+        assert spec.use_kl_advantage_shaping is True
+
+    def test_kl_advantage_shaping_with_zero_beta_raises(self) -> None:
+        with pytest.raises(ValidationError, match="needs beta > 0"):
+            GRPOSpec(group_size=2, beta=0.0, use_kl_advantage_shaping=True)
+
     def test_gspo_leaves_off_policy_masks_unset(self) -> None:
         spec = GSPOSpec(group_size=2)
 
@@ -491,12 +521,18 @@ class TestGRPOSpecOffPolicyCorrections:
             )
 
     @pytest.mark.parametrize("spec_cls", [GRPOSpec, CISPOSpec, GSPOSpec])
-    def test_old_logprobs_source_is_unset_by_default(
-        self, spec_cls: type[GRPOSpec]
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("old_logprobs_source", "trainer"),
+            ("vllm_importance_sampling_correction", False),
+        ],
+    )
+    def test_sampling_logprob_options_are_not_fields(
+        self, spec_cls: type[GRPOSpec], field: str, value: object
     ) -> None:
-        spec = spec_cls(group_size=2)
-
-        assert spec.old_logprobs_source is None
+        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+            spec_cls.model_validate({"group_size": 2, field: value})
 
     def test_yaml_null_and_false_turn_them_off(self) -> None:
         spec = GRPOSpec.model_validate(
@@ -594,23 +630,6 @@ class TestKlClampField:
 
 
 class TestDPOSFTAndRainbow:
-    def test_dpo_rejects_sequence_packing(self) -> None:
-        from agilerl.arena.models.algorithms.dpo import DPOSpec
-
-        assert DPOSpec().use_sequence_packing is False
-        with pytest.raises(
-            ValidationError, match="does not accept use_sequence_packing"
-        ):
-            DPOSpec(use_sequence_packing=True)
-
-    def test_sft_rejects_sequence_packing(self) -> None:
-        from agilerl.arena.models.algorithms.sft import SFTSpec
-
-        with pytest.raises(
-            ValidationError, match="does not accept use_sequence_packing"
-        ):
-            SFTSpec(use_sequence_packing=True)
-
     def test_sft_rejects_activation_offload(self) -> None:
         from agilerl.arena.models.algorithms.sft import SFTSpec
 
@@ -708,9 +727,15 @@ class TestTrainingSpec:
             rollout_engines_per_agent="auto",
             training_gpus_per_agent=1,
         )
-        assert spec.weight_sync_backend == "nccl"
-        assert spec.rollout_batch_size == 1
+        assert spec.rollout_batch_size is None  # the driver fills it
         assert spec.weight_sync_interval == 1
+
+    def test_async_rollout_leaves_omitted_counts_unset(self) -> None:
+        spec = TrainingSpec(rollout_mode="async")
+
+        assert spec.rollout_engines_per_agent == 0
+        assert spec.training_gpus_per_agent == 1
+        assert "rollout_engines_per_agent" not in spec.model_fields_set
 
     def test_async_rollout_rejects_zero_engines(self) -> None:
         with pytest.raises(ValidationError, match="rollout_engines_per_agent"):
@@ -1259,6 +1284,16 @@ class TestLLMEnvSpecTaskFamilyField:
         assert spec.task_family_field is None
         assert spec.task_family_prior_strength == 1.0
 
+    def test_adaptive_sampling_is_on_by_default(self) -> None:
+        spec = LLMEnvSpec(
+            env_type="rollout",
+            env_url="http://env",
+            max_turns=10,
+            task_family_field="template_key",
+        )
+
+        assert spec.adaptive_task_sampling is True
+
     def test_rejects_a_family_field_without_adaptive_sampling(self) -> None:
         with pytest.raises(
             ValidationError,
@@ -1268,6 +1303,7 @@ class TestLLMEnvSpecTaskFamilyField:
                 env_type="rollout",
                 env_url="http://env",
                 max_turns=10,
+                adaptive_task_sampling=False,
                 task_family_field="template_key",
             )
 
@@ -1464,12 +1500,11 @@ class TestHpoHelpers:
             resolve_selection_brackets(8, 2, None, 1, 0, 1, 1)
 
     def test_mutation_ceiling(self) -> None:
-        from types import SimpleNamespace
-
         from agilerl.arena.models.hpo import (
             MutationSpec,
             RLHyperparameter,
             mutation_ceiling,
+            no_op_mutation_probabilities,
         )
 
         assert mutation_ceiling(None, "lr", 3) == 3
@@ -1480,7 +1515,11 @@ class TestHpoHelpers:
             }
         )
         assert mutation_ceiling(spec, "learn_step", 3) == 10
-        assert mutation_ceiling(SimpleNamespace(rl_hp_selection="nope"), "lr", 3) == 3
+        assert mutation_ceiling(spec, "learn_step", 16) == 16
+        frozen = spec.model_copy(
+            update={"probabilities": no_op_mutation_probabilities()}
+        )
+        assert mutation_ceiling(frozen, "learn_step", 3) == 3
 
 
 class TestReplayBufferParse:
@@ -1538,3 +1577,104 @@ class TestPydanticModelsForbidExtra:
 
         assert missing == wire_subset
         assert all(extra_by_name[name] == "ignore" for name in wire_subset)
+
+
+class TestLLMAlgorithmSpecCheckThinkingBudgetParser:
+    @pytest.mark.parametrize(
+        ("model_type", "vllm_engine_args"),
+        [
+            ("gemma4", {}),
+            ("qwen3", {}),
+            ("nemotron_h", {}),
+            ("llama", {"reasoning_parser": "deepseek_r1"}),
+        ],
+    )
+    def test_accepts_a_budget_with_reasoning_tokens(
+        self, model_type: str, vllm_engine_args: dict[str, str]
+    ) -> None:
+        spec = GRPOSpec(
+            group_size=2,
+            max_output_tokens=32,
+            thinking_token_budget=8,
+            vllm_engine_args=vllm_engine_args,
+        )
+
+        spec.check_thinking_budget_parser(model_type)
+
+    def test_accepts_no_budget_without_a_parser(self) -> None:
+        GRPOSpec(group_size=2).check_thinking_budget_parser("gpt_oss")
+
+    def test_rejects_a_budget_for_a_model_without_a_parser(self) -> None:
+        spec = GRPOSpec(
+            group_size=2,
+            max_output_tokens=32,
+            thinking_token_budget=8,
+            pretrained_model_name_or_path="Qwen/Qwen2.5-0.5B-Instruct",
+        )
+
+        with pytest.raises(
+            ValueError,
+            match=(
+                r"^thinking_token_budget=8 needs a vLLM reasoning parser with "
+                r"reasoning start and end tokens, and Qwen/Qwen2\.5-0\.5B-Instruct "
+                r"has none\. Unset thinking_token_budget, or set "
+                r"algorithm\.vllm_engine_args\.reasoning_parser to one that has "
+                r"them: deepseek_r1, gemma4, nemotron_v3, qwen3\.$"
+            ),
+        ):
+            spec.check_thinking_budget_parser("qwen2")
+
+    def test_rejects_a_budget_for_gpt_oss_whose_parser_cannot_enforce_it(
+        self,
+    ) -> None:
+        spec = GRPOSpec(
+            group_size=2,
+            max_output_tokens=32,
+            thinking_token_budget=8,
+            pretrained_model_name_or_path="openai/gpt-oss-20b",
+        )
+
+        with pytest.raises(
+            ValueError, match=r"and reasoning parser openai_gptoss has none\."
+        ):
+            spec.check_thinking_budget_parser("gpt_oss")
+
+    def test_rejects_a_manifest_parser_without_reasoning_tokens(self) -> None:
+        spec = GRPOSpec(
+            group_size=2,
+            max_output_tokens=32,
+            thinking_token_budget=8,
+            vllm_engine_args={"reasoning_parser": "openai_gptoss"},
+        )
+
+        with pytest.raises(
+            ValueError, match=r"and reasoning parser openai_gptoss has none\."
+        ):
+            spec.check_thinking_budget_parser("gpt_oss")
+
+
+class TestLLMEnvSpecSendsReasoningProperty:
+    def test_reward_file_rollout_sends_the_reasoning(self) -> None:
+        spec = LLMEnvSpec(
+            env_type="rollout",
+            dataset="rows",
+            rubric_file_path="rubric.py",
+            prompt_template={"user_0": "{q}"},
+        )
+
+        assert spec.sends_reasoning is True
+
+    def test_env_url_rollout_sends_only_the_action(self) -> None:
+        spec = LLMEnvSpec(env_type="rollout", env_url="http://env", max_turns=1)
+
+        assert spec.sends_reasoning is False
+
+    def test_include_reasoning_overrides_the_default(self) -> None:
+        spec = LLMEnvSpec(
+            env_type="rollout",
+            env_url="http://env",
+            max_turns=1,
+            include_reasoning=True,
+        )
+
+        assert spec.sends_reasoning is True

@@ -739,7 +739,10 @@ def test_batch_rollout_env_shuffle_is_group_consistent_full_permutation():
     # batch_size * resets spans two full epochs of the 6-row dataset.
     batch_size, group_size = 3, 2
     vec = RolloutCollector(
-        env_factory=_factory, batch_size=batch_size, group_size=group_size
+        env_factory=_factory,
+        batch_size=batch_size,
+        group_size=group_size,
+        adaptive_task_sampling=False,
     )
     per_reset_rows = _collect_batch_rows(vec, num_resets=4, seed=7)
 
@@ -752,14 +755,20 @@ def test_batch_rollout_env_shuffle_is_group_consistent_full_permutation():
 
     # Same seed reproduces the same row sequence.
     vec_again = RolloutCollector(
-        env_factory=_factory, batch_size=batch_size, group_size=group_size
+        env_factory=_factory,
+        batch_size=batch_size,
+        group_size=group_size,
+        adaptive_task_sampling=False,
     )
     again = _collect_batch_rows(vec_again, num_resets=4, seed=7)
     assert again == per_reset_rows
 
     # A different seed yields a different ordering.
     vec_other = RolloutCollector(
-        env_factory=_factory, batch_size=batch_size, group_size=group_size
+        env_factory=_factory,
+        batch_size=batch_size,
+        group_size=group_size,
+        adaptive_task_sampling=False,
     )
     other = _collect_batch_rows(vec_other, num_resets=4, seed=8)
     assert other != per_reset_rows

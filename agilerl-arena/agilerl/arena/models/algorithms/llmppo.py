@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import ClassVar, Literal
 
 from pydantic import AliasChoices, Field
 
@@ -101,10 +101,6 @@ class LLMPPOSpec(RolloutLLMSpec):
             "or the value at the turn's final token."
         ),
     )
-    fuse_actor_critic_pass: bool | None = Field(
-        default=None,
-        description=(
-            "Run the actor and critic in one forward/backward per micro-batch. "
-            "None fuses when the fused pass's memory estimate fits the GPU."
-        ),
-    )
+
+    # One gradient forward stacks the actor and critic rows.
+    gradient_row_copies: ClassVar[int] = 2

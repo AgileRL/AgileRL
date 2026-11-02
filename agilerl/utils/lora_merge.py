@@ -18,7 +18,15 @@ import torch
 from accelerate import init_empty_weights
 from huggingface_hub.serialization import split_torch_state_dict_into_shards
 from peft import PeftConfig, PeftModel, get_peft_model
-from peft.tuners.lora.layer import Conv1d, Conv2d, Conv3d, Embedding, Linear, LoraLayer
+from peft.tuners.lora.layer import (
+    Conv1d,
+    Conv2d,
+    Conv3d,
+    Embedding,
+    Linear,
+    LoraLayer,
+    ParamWrapper,
+)
 from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 from torch import nn
@@ -35,6 +43,8 @@ from agilerl.distributed import (
     materialize_dtensors,
     raise_on_any_rank,
 )
+from agilerl.distributed.fsdp import canonical_fsdp_param_fqn
+from agilerl.lora.moe.adapters import wrapper_chain
 from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 
 DEFAULT_MAX_SHARD_SIZE = "5GB"
@@ -68,7 +78,17 @@ class ModuleLoraMerged:
     reference: torch.Tensor
 
 
-ExportItem = ModuleCopy | ModuleLoraMerged
+@dataclass(frozen=True)
+class ParamLoraMerged:
+    """One ``ParamWrapper``-targeted parameter (e.g. packed experts) whose LoRA is merged."""
+
+    hf_name: str
+    wrapper: ParamWrapper
+    adapter_name: str
+    reference: torch.Tensor
+
+
+ExportItem = ModuleCopy | ModuleLoraMerged | ParamLoraMerged
 
 
 class BaseWeightStore:
@@ -433,18 +453,6 @@ def _export_live_model(
             write_merged_completeness_files(output_path)
 
 
-def _tied_weight_names(pretrained: PreTrainedModel) -> set[str]:
-    """HF names that share storage with another parameter and must not be written."""
-    tied = pretrained._tied_weights_keys
-    if tied is None:
-        return set()
-    if isinstance(tied, dict):
-        return {str(key) for key in tied}
-    if isinstance(tied, str):
-        return {tied}
-    return {str(name) for name in tied}
-
-
 def _collect_export_specs(
     pretrained: PreTrainedModel,
     adapter_name: str,
@@ -456,12 +464,23 @@ def _collect_export_specs(
         for name, module in pretrained.named_modules()
         if isinstance(module, LoraLayer)
     )
-    tied = _tied_weight_names(pretrained)
+    inner_links = {
+        id(module.base_layer)
+        for module in pretrained.modules()
+        if isinstance(module, ParamWrapper)
+    }
+    # Respects ``tie_word_embeddings``: an untied model keeps its ``lm_head``.
+    tied = set(pretrained.all_tied_weights_keys)
     specs: list[ExportItem] = []
     seen: set[str] = set()
 
-    for module_name, module in pretrained.named_modules():
+    for live_name, module in pretrained.named_modules():
         if not isinstance(module, LoraLayer):
+            continue
+        module_name = canonical_fsdp_param_fqn(live_name)
+        if isinstance(module, ParamWrapper):
+            if id(module) not in inner_links:
+                specs.extend(_param_wrapper_specs(module_name, module, adapter_name))
             continue
         layer = _peft_lora_module(module)
         hf_weight = f"{module_name}.weight" if module_name else "weight"
@@ -481,12 +500,14 @@ def _collect_export_specs(
             )
             seen.add(hf_bias)
 
-    for name, tensor in _parameters_and_buffers(pretrained):
-        if name in tied or name in seen:
-            continue
+    for live_name, tensor in _parameters_and_buffers(pretrained):
         if any(
-            name == prefix or name.startswith(f"{prefix}.") for prefix in lora_prefixes
+            live_name == prefix or live_name.startswith(f"{prefix}.")
+            for prefix in lora_prefixes
         ):
+            continue
+        name = canonical_fsdp_param_fqn(live_name)
+        if name in tied or name in seen:
             continue
         if (
             weight_store is not None
@@ -499,12 +520,36 @@ def _collect_export_specs(
     return specs
 
 
+def _param_wrapper_specs(
+    module_name: str, wrapper: ParamWrapper, adapter_name: str
+) -> list[ParamLoraMerged | ModuleCopy]:
+    """Specs for every tensor of the module a (nested) ``ParamWrapper`` chain wraps.
+
+    Wrapped parameters merge their own link's LoRA; the rest (e.g. expert
+    biases) copy unchanged. Names drop the chain's ``base_layer`` segments.
+    """
+    links = wrapper_chain(wrapper)
+    prefix = f"{module_name}." if module_name else ""
+    specs: list[ParamLoraMerged | ModuleCopy] = []
+    for name, tensor in _parameters_and_buffers(wrapper.get_base_layer()):
+        link = links.get(name)
+        if link is None:
+            specs.append(ModuleCopy(f"{prefix}{name}", tensor))
+        else:
+            specs.append(ParamLoraMerged(f"{prefix}{name}", link, adapter_name, tensor))
+    return specs
+
+
 def _parameters_and_buffers(
     module: nn.Module,
 ) -> Iterable[tuple[str, torch.Tensor]]:
-    """Yield parameters then buffers in Hugging Face ``state_dict`` order."""
+    """Yield parameters then persistent buffers, the tensors ``state_dict`` holds."""
     yield from module.named_parameters()
-    yield from module.named_buffers()
+    for owner_name, owner in module.named_modules():
+        prefix = f"{owner_name}." if owner_name else ""
+        for name, buffer in owner.named_buffers(recurse=False):
+            if name not in owner._non_persistent_buffers_set:
+                yield f"{prefix}{name}", buffer
 
 
 def _full_shape(tensor: torch.Tensor) -> tuple[int, ...]:
@@ -583,7 +628,8 @@ def _adapter_on_layer(
 
 
 def _delta_weight(
-    layer: Linear | Embedding | Conv1d | Conv2d | Conv3d, adapter_name: str
+    layer: Linear | Embedding | Conv1d | Conv2d | Conv3d | ParamWrapper,
+    adapter_name: str,
 ) -> torch.Tensor:
     """LoRA delta for ``adapter_name``.
 
@@ -644,6 +690,43 @@ def _merged_weight_and_bias(
         else:
             bias = bias_tensor.detach()
     return weight, bias
+
+
+def _param_gather_params(
+    wrapper: ParamWrapper, adapter_name: str
+) -> list[torch.Tensor]:
+    """The wrapped parameter and this link's LoRA factors for ``adapter_name``."""
+    params = [wrapper.get_param()]
+    if adapter_name in wrapper.lora_A:
+        params.extend(wrapper.lora_A[adapter_name].parameters())
+        params.extend(wrapper.lora_B[adapter_name].parameters())
+    return params
+
+
+def _merged_param(wrapper: ParamWrapper, adapter_name: str) -> torch.Tensor:
+    """Fold LoRA into the gathered wrapped parameter; do not write the module."""
+    base = _dense_local(wrapper.get_param()).detach()
+    if adapter_name not in wrapper.lora_A:
+        return base
+    delta = _dense_local(_delta_weight(wrapper, adapter_name))
+    return base + delta.to(dtype=base.dtype)
+
+
+@contextmanager
+def _param_from_store(
+    spec: ParamLoraMerged, weight_store: BaseWeightStore | None
+) -> Generator[None, None, None]:
+    """Temporarily place the checkpoint tensor on a meta wrapped parameter."""
+    base_layer = spec.wrapper.get_base_layer()
+    name = spec.wrapper.parameter_name
+    if weight_store is None or base_layer.get_parameter(name).device.type != "meta":
+        yield
+        return
+    previous = _replace_tensor(base_layer, name, weight_store.load(spec.hf_name))
+    try:
+        yield
+    finally:
+        setattr(base_layer, name, previous)
 
 
 def _dense_local(tensor: torch.Tensor) -> torch.Tensor:
@@ -745,6 +828,18 @@ def _materialize_shard(
                     raise RuntimeError(msg)
                 if keep_tensors:
                     shard[hf_name] = _copy_to_cpu(dense, torch_dtype)
+            continue
+
+        if isinstance(spec, ParamLoraMerged):
+            wrapper = spec.wrapper
+            with gather_params(
+                wrapper, _param_gather_params(wrapper, spec.adapter_name)
+            ):
+                with _param_from_store(spec, weight_store):
+                    merged = _merged_param(wrapper, spec.adapter_name)
+                    if keep_tensors:
+                        shard[hf_name] = _copy_to_cpu(merged, torch_dtype)
+                    del merged
             continue
 
         layer_id = id(spec.layer)

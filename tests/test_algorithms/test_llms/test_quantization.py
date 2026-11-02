@@ -11,8 +11,7 @@ and verify quantization actually happened. Validates that:
     ``quantization_config``) into transformers' ``from_pretrained`` while
     still applying the flash/sdpa + dtype defaults.
   * `build_bnb_quantization_config` resolves YAML-friendly presets / dicts.
-  * `_prepare_llm_algo_kwargs` wires ``INIT_HP['QUANTIZATION']`` and
-    ``INIT_HP['ACTIVATION_OFFLOAD']`` through.
+  * `_prepare_llm_algo_kwargs` wires ``INIT_HP['QUANTIZATION']`` through.
   * `LLMAlgorithm._activation_offload_ctx` gates ``save_on_cpu`` correctly.
   * `LLMAlgorithm` adds ``lm_head`` to ``llm_int8_skip_modules`` when a fused
     log-prob path is active.
@@ -47,7 +46,6 @@ from transformers import BitsAndBytesConfig
 
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.reinforce_llm import REINFORCE
-from agilerl.arena.memory.resolve.lora import resolve_lora_rank_ceiling
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import (
     _json_safe_value,
@@ -61,7 +59,6 @@ from agilerl.utils.llm_utils import (
     offload_colocated_trainer_from_gpu,
     peft_target_key_matches,
     remap_peft_lora_key_for_vllm,
-    resolve_attn_implementation,
     resolve_vllm_max_num_batched_tokens,
 )
 from agilerl.utils.utils import _prepare_llm_algo_kwargs
@@ -91,14 +88,12 @@ class TestCreateModelFromNameOrPath:
             side_effect=_fake_from_pretrained,
         ):
             create_model_from_name_or_path(
-                "dummy/path", model_config={"quantization_config": cfg}
+                "dummy/path", "sdpa", model_config={"quantization_config": cfg}
             )
 
         assert captured.get("quantization_config") is cfg
 
     def test_quant_config_keeps_attn_and_dtype(self):
-        # A model_config carrying a quantization_config must still get the
-        # default attn backend and dtype.
         cfg = BitsAndBytesConfig(load_in_4bit=True)
         captured = {}
 
@@ -111,32 +106,12 @@ class TestCreateModelFromNameOrPath:
             side_effect=_fake_from_pretrained,
         ):
             create_model_from_name_or_path(
-                "dummy/path", model_config={"quantization_config": cfg}
+                "dummy/path", "sdpa", model_config={"quantization_config": cfg}
             )
 
-        assert captured.get("attn_implementation") == resolve_attn_implementation(
-            None, model_name_or_path="dummy/path"
-        )
+        assert captured.get("attn_implementation") == "sdpa"
         assert "torch_dtype" in captured
         assert captured.get("quantization_config") is cfg
-
-    def test_explicit_model_config_values_win(self):
-        # setdefault semantics: a caller-supplied attn_implementation is kept.
-        captured = {}
-
-        def _fake_from_pretrained(**kwargs):
-            captured.update(kwargs)
-            return mock.MagicMock()
-
-        with mock.patch(
-            "transformers.AutoModelForCausalLM.from_pretrained",
-            side_effect=_fake_from_pretrained,
-        ):
-            create_model_from_name_or_path(
-                "dummy/path", model_config={"attn_implementation": "eager"}
-            )
-
-        assert captured.get("attn_implementation") == "eager"
 
     def test_none_quantization_does_not_inject_key(self):
         captured = {}
@@ -149,7 +124,7 @@ class TestCreateModelFromNameOrPath:
             "transformers.AutoModelForCausalLM.from_pretrained",
             side_effect=_fake_from_pretrained,
         ):
-            create_model_from_name_or_path("dummy/path")
+            create_model_from_name_or_path("dummy/path", "sdpa")
 
         assert "quantization_config" not in captured
 
@@ -167,6 +142,7 @@ class TestCreateModelFromNameOrPath:
         ):
             create_model_from_name_or_path(
                 "dummy/path",
+                "sdpa",
                 add_value_head=True,
                 model_config={"quantization_config": cfg},
             )
@@ -255,20 +231,6 @@ class TestInitHpQuantizationWiring:
         )
         assert merged["quantization_config"] is explicit
 
-    def test_activation_offload_resolved_from_init_hp(self):
-        merged = self._prepare({}, {"ACTIVATION_OFFLOAD": True})
-        assert merged["activation_offload"] is True
-
-    def test_activation_offload_absent_leaves_kwargs_clean(self):
-        merged = self._prepare({}, {})
-        assert "activation_offload" not in merged
-
-    def test_explicit_activation_offload_kwarg_wins(self):
-        merged = self._prepare(
-            {"activation_offload": False}, {"ACTIVATION_OFFLOAD": True}
-        )
-        assert merged["activation_offload"] is False
-
 
 class TestActivationOffloadContext:
     """`LLMAlgorithm._activation_offload_ctx` gates ``save_on_cpu``.
@@ -307,19 +269,13 @@ class TestVLLMConfigDefaults:
         cfg = VLLMConfig()
         assert cfg.quantization is None
         assert cfg.vllm_model_name_or_path is None
-        assert cfg.max_lora_rank == 16
-        assert cfg.max_loras == 1
         assert cfg.kv_cache_dtype is None
 
-    def test_lora_fields_can_be_set(self):
+    def test_quantized_engine_fields_can_be_set(self):
         cfg = VLLMConfig(
-            max_lora_rank=32,
-            max_loras=2,
             vllm_model_name_or_path="TheBloke/Llama-2-7B-AWQ",
             quantization="awq",
         )
-        assert cfg.max_lora_rank == 32
-        assert cfg.max_loras == 2
         assert cfg.vllm_model_name_or_path == "TheBloke/Llama-2-7B-AWQ"
         assert cfg.quantization == "awq"
 
@@ -406,12 +362,6 @@ class TestRemapPeftLoraKeyForVllm:
         assert remap_peft_lora_key_for_vllm(key) == key
 
 
-class TestResolveLoraRankCeiling:
-    def test_takes_max_of_config_and_trainer(self):
-        assert resolve_lora_rank_ceiling(16, 32) == 32
-        assert resolve_lora_rank_ceiling(64, 16) == 64
-
-
 class TestConfigureVllmKwargs:
     """Verify build_vllm_llm_init_kwargs wires VLLMConfig into LLM()."""
 
@@ -429,7 +379,7 @@ class TestConfigureVllmKwargs:
         )
         assert kwargs["model"] == "trainer/model"
         assert kwargs["enable_lora"] is True
-        assert kwargs["max_lora_rank"] == 16
+        assert kwargs["max_lora_rank"] == 8
         assert kwargs["max_loras"] == 1
         assert "quantization" not in kwargs
         # Default kv_cache_dtype is None -> the builder omits the key entirely.
@@ -446,8 +396,6 @@ class TestConfigureVllmKwargs:
         cfg = VLLMConfig(
             quantization="awq",
             vllm_model_name_or_path="TheBloke/Llama-2-7B-AWQ",
-            max_lora_rank=32,
-            max_loras=4,
         )
         kwargs = build_vllm_llm_init_kwargs(
             cfg,
@@ -458,8 +406,8 @@ class TestConfigureVllmKwargs:
         assert kwargs["model"] == "TheBloke/Llama-2-7B-AWQ"
         assert kwargs["quantization"] == "awq"
         assert kwargs["enable_lora"] is True
-        assert kwargs["max_lora_rank"] == 32
-        assert kwargs["max_loras"] == 4
+        assert kwargs["max_lora_rank"] == 16
+        assert kwargs["max_loras"] == 1
 
     def test_vllm_model_fallback_to_trainer_model(self):
         cfg = VLLMConfig(quantization=None)
@@ -471,13 +419,12 @@ class TestConfigureVllmKwargs:
         assert kwargs["model"] == "Qwen/Qwen2.5-0.5B-Instruct"
         assert kwargs["enable_lora"] is True
 
-    def test_trainer_rank_bumps_max_lora_rank(self):
-        cfg = VLLMConfig(max_lora_rank=8)
+    def test_max_lora_rank_rounds_the_trainer_rank_up(self):
         kwargs = build_vllm_llm_init_kwargs(
-            cfg,
+            VLLMConfig(),
             trainer_model_name_or_path="m",
             max_model_len=512,
-            lora_rank=32,
+            lora_rank=20,
         )
         assert kwargs["max_lora_rank"] == 32
 
@@ -834,6 +781,7 @@ class TestQuantizedModelLoadOnGpu:
     def _load(preset):
         return create_model_from_name_or_path(
             TINY_LLM_FIXTURE_PATH,
+            "sdpa",
             model_config={"quantization_config": build_bnb_quantization_config(preset)},
         )
 
@@ -901,7 +849,6 @@ class TestReinforceQuantizedInit:
             micro_batch_size_per_gpu=1,
             max_output_tokens=8,
             max_model_len=32,
-            use_liger_loss=False,
         )
 
         # __init__ forces lm_head into the bnb skip list (fused logprob paths

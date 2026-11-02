@@ -19,7 +19,6 @@ from typing import (
     Protocol,
     TypeGuard,
     TypeVar,
-    get_args,
     overload,
     runtime_checkable,
 )
@@ -40,12 +39,10 @@ from torch.optim.lr_scheduler import LambdaLR
 from typing_extensions import TypeVarTuple, Unpack
 
 from agilerl import HAS_LLM_DEPENDENCIES
-from agilerl.arena.memory.resolve.lora import OMITTED_MAX_LORA_RANK
 from agilerl.arena.memory.resolve.sequences import (
     COLOCATED_MAX_NUM_SEQS,
     OMITTED_GPU_MEMORY_UTILIZATION,
 )
-from agilerl.arena.models.networks import VllmModality
 from agilerl.modules.base import EvolvableModule, ModuleDict
 from agilerl.modules.custom_components import NoisyLinear
 from agilerl.protocols import (
@@ -2138,13 +2135,6 @@ class VLLMConfig:
         for training.  Cannot be used with agent populations on a single device,
         defaults to False.
     :type sleep_mode: bool, optional
-    :param sleep_mode_level: Sleep level passed to ``llm.sleep(level=...)`` when
-        ``sleep_mode`` is enabled. ``1`` backs the base weights up to CPU and
-        drops the KV cache; ``2`` discards the weights entirely, so it is only
-        safe when new base weights are pushed into vLLM after every wake. The
-        colocated LoRA-only sync never re-pushes the base, so it requires
-        level 1. Defaults to 1.
-    :type sleep_mode_level: int, optional
     :param dtype: Model weight dtype passed to the vLLM ``LLM`` constructor
         (e.g. ``"bfloat16"``, ``"float16"``).  ``None`` lets vLLM choose,
         defaults to None.
@@ -2174,12 +2164,6 @@ class VLLMConfig:
     :param frequency_penalty: Penalise tokens proportionally to how often they have
         appeared so far.  Passed to ``SamplingParams``, defaults to 0.0 (disabled).
     :type frequency_penalty: float, optional
-    :param max_lora_rank: Maximum LoRA rank passed to the vLLM ``LLM`` constructor.
-        Should be at least the trainer's ``lora_config.r``.  Defaults to 16.
-    :type max_lora_rank: int, optional
-    :param max_loras: Maximum number of LoRA adapters vLLM can hold concurrently.
-        Defaults to 1 (actor rollout only).
-    :type max_loras: int, optional
     :param kv_cache_memory_bytes: Manually pin KV cache size in bytes instead of
         letting vLLM auto-size from ``gpu_memory_utilization``.  When set, vLLM
         uses this exact value for the KV cache and skips the auto-sizing path
@@ -2202,11 +2186,6 @@ class VLLMConfig:
         on the tiny test fixture; production deployments running a single
         vLLM should leave it unset.  Defaults to None.
     :type kv_cache_memory_bytes: int | None, optional
-    :param strip_multimodal_towers: Skip building and loading a multimodal
-        base's towers in vLLM. ``True`` serves the language model only; a list
-        names the modalities to drop (``image``, ``video``, ``audio``).
-        Defaults to ``False``.
-    :type strip_multimodal_towers: bool | list[VllmModality], optional
     :param limit_mm_per_prompt: Most items of each modality one prompt may
         carry, e.g. ``{"image": 4, "video": 0}``. ``None`` keeps vLLM's limit.
     :type limit_mm_per_prompt: dict[str, int] | None, optional
@@ -2226,16 +2205,11 @@ class VLLMConfig:
     gpu_memory_utilization: float = OMITTED_GPU_MEMORY_UTILIZATION
     max_num_seqs: int = COLOCATED_MAX_NUM_SEQS
     max_num_batched_tokens: int | None = None
-    enforce_eager: bool | None = None
     sleep_mode: bool = False
-    sleep_mode_level: int = 1
     dtype: str | None = None
     quantization: str | None = None
     vllm_model_name_or_path: str | None = None
     kv_cache_dtype: str | None = None
-    max_lora_rank: int = OMITTED_MAX_LORA_RANK
-    max_loras: int = 1
-    strip_multimodal_towers: bool | list[VllmModality] = False
     stop_sequences: list[str] | None = None
     presence_penalty: float = 0.0
     frequency_penalty: float = 0.0
@@ -2246,21 +2220,6 @@ class VLLMConfig:
     lora_staging_dir: str | None = None
 
     def __post_init__(self) -> None:
-        if self.sleep_mode_level not in (1, 2):
-            msg = (
-                "vllm sleep_mode_level must be either 1 or 2, got "
-                f"{self.sleep_mode_level}."
-            )
-            raise ValueError(msg)
-        if isinstance(self.strip_multimodal_towers, list):
-            unknown = set(self.strip_multimodal_towers) - set(get_args(VllmModality))
-            if unknown:
-                msg = (
-                    f"strip_multimodal_towers names unknown modalities "
-                    f"{sorted(unknown)}; use {list(get_args(VllmModality))}"
-                )
-                raise ValueError(msg)
-
         # sleep_mode toggles the native vLLM sleep/wake cycle (base backed up to
         # host RAM, KV freed) between rollout and training for a single colocated
         # agent; it is not usable with a population on one device.

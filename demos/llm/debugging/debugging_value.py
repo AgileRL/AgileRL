@@ -185,7 +185,6 @@ def main(cfg: dict) -> None:
         model_name=None,
         actor_network=actor_network,
         lora_config=lora_config_from_dict(lora),
-        micro_batch_size_per_gpu=int(dbg["micro_batch_size_per_gpu"]),
         pad_token_id=tokenizer.pad_token_id,
         pad_token=tokenizer.pad_token,
         use_separate_reference_adapter=True,
@@ -230,7 +229,7 @@ def main(cfg: dict) -> None:
     prompts, _ = env.step(init_ids)
 
     for step in range(num_steps):
-        agent.set_reference_policy(env.num_epochs)
+        agent.set_reference_policy()
         rollout = agent.get_action(prompts)
         token_ids, action_masks = rollout.token_ids, rollout.action_masks
         next_prompts, rewards = env.step(token_ids)

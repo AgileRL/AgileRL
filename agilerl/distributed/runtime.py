@@ -421,7 +421,6 @@ class BaseRuntime(ABC):
         self,
         actor: nn.Module,
         device: str | torch.device,
-        colocated: bool,
         cosine_lr_schedule_config: CosineLRScheduleConfig | None,
         lr: float,
         lr_critic: float | None,
@@ -434,8 +433,6 @@ class BaseRuntime(ABC):
         :type actor: nn.Module
         :param device: Training device.
         :type device: str | torch.device
-        :param colocated: Whether vLLM generation is colocated with training.
-        :type colocated: bool
         :param cosine_lr_schedule_config: Warmup-cosine schedule, or ``None`` for constant LR.
         :type cosine_lr_schedule_config: CosineLRScheduleConfig | None
         :param lr: Actor learning rate.
@@ -616,7 +613,6 @@ class DPRuntime(BaseRuntime):
         self,
         actor: nn.Module,
         device: str | torch.device,
-        colocated: bool,
         cosine_lr_schedule_config: CosineLRScheduleConfig | None,
         lr: float,
         lr_critic: float | None,
@@ -648,7 +644,9 @@ class DPRuntime(BaseRuntime):
                 gradient_checkpointing_kwargs={"use_reentrant": False}
             )
 
-        optimizer = make_llm_optimizer(placed, lr, lr_critic)
+        optimizer = make_llm_optimizer(
+            placed, lr, lr_critic, fused=target.type == "cuda"
+        )
         return PrepareResult(
             actor=placed,
             optimizer=optimizer,
@@ -781,7 +779,6 @@ class FSDPRuntime(BaseRuntime):
         self,
         actor: nn.Module,
         device: str | torch.device,
-        colocated: bool,
         cosine_lr_schedule_config: CosineLRScheduleConfig | None,
         lr: float,
         lr_critic: float | None,
@@ -794,26 +791,18 @@ class FSDPRuntime(BaseRuntime):
             make_llm_scheduler,
         )
 
-        if self.config.optim_cpu_offload is None:
-            msg = (
-                "FSDPConfig.optim_cpu_offload is unset. LLMAlgorithm.wrap_models "
-                "resolves it from the memory estimate; pass True or False here."
-            )
-            raise ValueError(msg)
+        for name in ("reshard_after_forward", "optim_cpu_offload"):
+            if getattr(self.config, name) is None:
+                msg = (
+                    f"FSDPConfig.{name} is unset. LLMAlgorithm.wrap_models "
+                    "resolves it from the memory estimate; pass True or False here."
+                )
+                raise ValueError(msg)
         if self.config.cpu_offload and self.config.optim_cpu_offload:
             msg = (
                 "FSDPConfig.cpu_offload and optim_cpu_offload are mutually "
                 "exclusive: cpu_offload already moves optimizer states to "
                 "CPU. Set only one of them."
-            )
-            raise ValueError(msg)
-        if self.config.cpu_offload and not colocated:
-            msg = (
-                "FSDP2 full cpu_offload requires colocated vLLM generation "
-                "(vllm_config set). HuggingFace generate is not supported "
-                "with CPUOffloadPolicy because it assumes model params live "
-                "on the compute device. Set vllm_config or use "
-                "optim_cpu_offload instead (params stay on GPU)."
             )
             raise ValueError(msg)
 
@@ -999,22 +988,21 @@ class FSDPRuntime(BaseRuntime):
     ) -> OptimizerStep | None:
         """Accumulate, clip, and step.
 
-        FSDP2 reduce-scatters its own DTensors. Replicated params
-        (``ignored_params``, LoRA) and EP / TP shards outside FSDP need an
-        explicit all-reduce.
+        FSDP2 reduce-scatters its own DTensors. Trainable params outside
+        FSDP (EP / TP shards, TP-replicated rows) need an explicit all-reduce.
         """
         is_step_boundary = self._count_micro_batch(gradient_accumulation_steps)
 
-        if self.config.defer_grad_sync:
-            if not isinstance(actor, FSDPModule):
-                msg = "defer_grad_sync requires an FSDP2-sharded actor"
-                raise TypeError(msg)
-            actor.set_requires_gradient_sync(is_step_boundary, recurse=True)
-            # A sync-disabled post-backward reads each param's unsharded copy,
-            # which FSDP2 builds on a unit's first forward. A unit that has not
-            # run forward has no grads to defer, so its sync stays on.
-            for unit in self.unforwarded_units:
-                unit.set_requires_gradient_sync(True, recurse=False)
+        if not isinstance(actor, FSDPModule):
+            msg = "FSDPRuntime.backward requires an FSDP2-sharded actor"
+            raise TypeError(msg)
+        # Reduce-scatter only on the last micro-batch of an optimizer step.
+        actor.set_requires_gradient_sync(is_step_boundary, recurse=True)
+        # A sync-disabled post-backward reads each param's unsharded copy,
+        # which FSDP2 builds on a unit's first forward. A unit that has not
+        # run forward has no grads to defer, so its sync stays on.
+        for unit in self.unforwarded_units:
+            unit.set_requires_gradient_sync(True, recurse=False)
 
         if gradient_accumulation_steps > 1:
             loss = loss / gradient_accumulation_steps

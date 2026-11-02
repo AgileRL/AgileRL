@@ -18,14 +18,11 @@ algorithm:
     temperature: 1.0
     importance_sampling_level: turn
     max_output_tokens: 1024
-    use_liger_loss: false
     quantization: none
-    activation_offload: false
     vllm_config:
         tensor_parallel_size: 1
         gpu_memory_utilization: 0.3
         max_num_seqs: 8
-        sleep_mode: true
 
 environment:
     env_type: rollout

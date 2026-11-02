@@ -54,6 +54,67 @@ ModelModality = Literal["text", "vision"]
 VLLM_LORA_RANKS = (1, 8, 16, 32, 64, 128, 256, 320, 512)
 # vLLM fused MoE LoRA rejects ranks above this.
 FUSED_MOE_LORA_MAX_RANK = 128
+# Trainer expert parallel shards routed and sorted expert stacks only;
+# gpt-oss stores its experts transposed, with per-expert biases.
+EXPERT_PARALLEL_UNSUPPORTED_MODEL_TYPES = frozenset({"gpt_oss"})
+
+# vLLM 0.32 reasoning parser per Hugging Face model_type of a thinking model.
+# vLLM enforces thinking_token_budget by forcing the parser's reasoning-end token.
+REASONING_PARSERS: Mapping[str, str] = {
+    "gemma4": "gemma4",
+    "gemma4_text": "gemma4",
+    "gpt_oss": "openai_gptoss",
+    "nemotron_h": "nemotron_v3",
+    "nemotron_h_omni": "nemotron_v3",
+    "qwen3": "qwen3",
+    "qwen3_moe": "qwen3",
+    "qwen3_5": "qwen3",
+    "qwen3_5_moe": "qwen3",
+    "qwen3_5_moe_text": "qwen3",
+    "qwen3_5_text": "qwen3",
+}
+
+# Hugging Face model_types of supported models that do not reason by default.
+NON_REASONING_MODEL_TYPES = frozenset({"granitemoe", "granitemoehybrid", "qwen2"})
+
+# vLLM 0.32 reasoning parsers with no reasoning_end_str, so vLLM cannot force
+# the end of reasoning at thinking_token_budget.
+PARSERS_WITHOUT_THINKING_BUDGET = frozenset({"openai_gptoss"})
+
+# vLLM 0.32 reasoning parsers a run may set. The model's tool-call parser owns
+# where reasoning ends in its tokens; the rollout engine checks at startup that
+# the vLLM parser's reasoning_end_str spells the same ids.
+KNOWN_REASONING_PARSERS = frozenset(
+    {"deepseek_r1", "gemma4", "nemotron_v3", "openai_gptoss", "qwen3"}
+)
+
+
+def enforces_thinking_budget(reasoning_parser: str | None) -> bool:
+    """Return whether vLLM can enforce ``thinking_token_budget`` with this parser.
+
+    :param reasoning_parser: The run's vLLM reasoning parser, or ``None``.
+    :return: ``True`` when the parser has a reasoning-end string vLLM can force.
+    """
+    return (
+        reasoning_parser is not None
+        and reasoning_parser not in PARSERS_WITHOUT_THINKING_BUDGET
+    )
+
+
+def resolve_reasoning_parser(
+    vllm_engine_args: Mapping[str, Any], model_type: str | None
+) -> str | None:
+    """Return the vLLM reasoning parser a run's rollout engine can enable.
+
+    :param vllm_engine_args: The algorithm's ``vllm_engine_args``.
+    :param model_type: Hugging Face ``model_type`` of the checkpoint, or ``None``
+        when it is not known offline.
+    :return: The manifest's ``reasoning_parser``, else the family's, else ``None``.
+    """
+    explicit = vllm_engine_args.get("reasoning_parser")
+    if explicit or model_type is None:
+        return explicit
+    return REASONING_PARSERS.get(model_type)
 
 
 def supported_path(hub_id: str) -> Traversable:
@@ -160,6 +221,15 @@ class ModelInfo(BaseModel):
         return self.text_lora_modules
 
     @property
+    def biases_image_token(self) -> bool:
+        """Rollout requests mask the tokenizer's image token with ``logit_bias``.
+
+        Every catalogued vision checkpoint's tokenizer holds an image token,
+        and no text-only one does.
+        """
+        return "vision" in self.modalities
+
+    @property
     def tower_lora_modules(self) -> frozenset[str]:
         """``tower_target_modules`` names: modules outside the language model."""
         if self.language_model_prefix is None:
@@ -183,8 +253,11 @@ class ModelInfo(BaseModel):
     @computed_field
     @property
     def supports_expert_parallel(self) -> bool:
-        """True when the model has packed expert modules."""
-        return bool(self.parameters)
+        """True when the model has packed experts the trainer can shard over EP."""
+        return (
+            bool(self.parameters)
+            and self.model_type not in EXPERT_PARALLEL_UNSUPPORTED_MODEL_TYPES
+        )
 
     @computed_field
     @property

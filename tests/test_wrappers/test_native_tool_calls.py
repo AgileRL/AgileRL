@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import re
 from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Any
@@ -14,14 +15,14 @@ import pytest
 import torch
 
 from agilerl.llm_envs import RolloutHarness
+from agilerl.llm_envs.chat_formats import (
+    ParsedToolCall,
+    ToolCallParseStatus,
+    ToolCallTagFormat,
+)
 from agilerl.llm_envs.harness import TOOL_CALL_ERROR_INFO_KEY, TOOL_CALLS_INFO_KEY
 from agilerl.llm_envs.openenv import InProcessEnvClient, RemoteEnvClient
 from agilerl.llm_envs.openenv_server import OpenEnvServer, TextObservation
-from agilerl.llm_envs.tool_parsers import (
-    ParsedToolCall,
-    ToolCallParseStatus,
-    ToolCallTagParser,
-)
 
 pytest.importorskip("fastmcp")
 
@@ -127,6 +128,61 @@ class GemmaTemplateTokenizer(TagTokenizer):
         )
         if add_generation_prompt:
             rendered += "<model>"
+        if tokenize:
+            return self.encode(rendered)
+        return rendered
+
+
+HARMONY_TAGS = {
+    "<|start|>": 9300,
+    "<|message|>": 9301,
+    "<|call|>": 9302,
+    "<|end|>": 9303,
+    "<|return|>": 9304,
+    "<|channel|>": 9305,
+}
+HARMONY_TAG_RE = re.compile("|".join(re.escape(tag) for tag in HARMONY_TAGS))
+
+
+class HarmonyTemplateTokenizer(TagTokenizer):
+    """gpt-oss tags as special IDs plus a template that rejects a bare tool message, like the real one."""
+
+    @property
+    def all_special_ids(self) -> list[int]:
+        return list(HARMONY_TAGS.values())
+
+    def convert_tokens_to_ids(self, token: str) -> int | None:
+        return HARMONY_TAGS.get(token)
+
+    def encode(self, text: str, **_: Any) -> list[int]:
+        ids: list[int] = []
+        position = 0
+        for match in HARMONY_TAG_RE.finditer(text):
+            ids += [ord(c) for c in text[position : match.start()]]
+            ids.append(HARMONY_TAGS[match.group()])
+            position = match.end()
+        return ids + [ord(c) for c in text[position:]]
+
+    def decode(self, ids: list[int], **_: Any) -> str:
+        reverse = {value: key for key, value in HARMONY_TAGS.items()}
+        return "".join(reverse.get(i, chr(i)) for i in ids)
+
+    def apply_chat_template(
+        self,
+        messages: list[dict[str, str]],
+        add_generation_prompt: bool = False,
+        tokenize: bool = False,
+        **_: Any,
+    ) -> str | list[int]:
+        if any(message["role"] == "tool" for message in messages):
+            msg = "Message has tool role, but there was no previous assistant message with a tool call!"
+            raise ValueError(msg)
+        rendered = "".join(
+            f"<|start|>{message['role']}<|message|>{message['content']}<|end|>"
+            for message in messages
+        )
+        if add_generation_prompt:
+            rendered += "<|start|>assistant"
         if tokenize:
             return self.encode(rendered)
         return rendered
@@ -333,12 +389,12 @@ def _transcript_text(harness: RolloutHarness) -> str:
 
 
 class TestHarnessToolDetection:
-    def test_detects_parser_from_tokenizer(self) -> None:
+    def test_detects_the_chat_format_from_the_tokenizer(self) -> None:
         harness = RolloutHarness(
             RecordingClient(), TagTokenizer(), max_turns=1, apply_chat_template=False
         )
         try:
-            assert harness._tool_parser is not None
+            assert harness._chat_format is not None
         finally:
             harness.close()
 
@@ -352,49 +408,49 @@ class TestHarnessToolDetection:
         try:
             harness.reset()
 
-            assert harness._tool_parser is None
+            assert harness._chat_format is None
         finally:
             harness.close()
 
-    def test_tool_env_without_parser_fails_at_reset(self) -> None:
+    def test_tool_env_without_a_chat_format_fails_at_reset(self) -> None:
         harness = RolloutHarness(
             RecordingClient(), PlainTokenizer(), max_turns=1, apply_chat_template=False
         )
         try:
-            with pytest.raises(ValueError, match=r"no parser .* matches"):
+            with pytest.raises(ValueError, match=r"no chat format .* matches"):
                 harness.reset()
         finally:
             harness.close()
 
-    def test_named_parser_is_used(self) -> None:
+    def test_named_chat_format_is_used(self) -> None:
         harness = RolloutHarness(
             RecordingClient(),
             TagTokenizer(),
             max_turns=1,
             apply_chat_template=False,
-            tool_call_parser="tool_call",
+            chat_format="tool_call",
         )
         try:
-            assert isinstance(harness._tool_parser, ToolCallTagParser)
+            assert isinstance(harness._chat_format, ToolCallTagFormat)
         finally:
             harness.close()
 
-    def test_unknown_parser_name_raises(self) -> None:
-        with pytest.raises(ValueError, match="Unknown tool_parser 'llama'"):
+    def test_unknown_chat_format_name_raises(self) -> None:
+        with pytest.raises(ValueError, match="Unknown chat_format 'llama'"):
             RolloutHarness(
                 RecordingClient(),
                 TagTokenizer(),
                 apply_chat_template=False,
-                tool_call_parser="llama",
+                chat_format="llama",
             )
 
-    def test_named_parser_needs_its_tokens_in_the_vocab(self) -> None:
+    def test_named_chat_format_needs_its_tokens_in_the_vocab(self) -> None:
         with pytest.raises(ValueError, match="tokenizer vocab"):
             RolloutHarness(
                 RecordingClient(),
                 PlainTokenizer(),
                 apply_chat_template=False,
-                tool_call_parser="tool_call",
+                chat_format="tool_call",
             )
 
 
@@ -665,6 +721,66 @@ class TestGemmaToolResponses:
             harness.close()
 
 
+class TestHarmonyToolResponses:
+    def test_tool_result_follows_the_call_without_a_template_frame(self) -> None:
+        # Arrange
+        client = RecordingClient()
+        tokenizer = HarmonyTemplateTokenizer()
+        harness = RolloutHarness(client, tokenizer, max_turns=2)
+        try:
+            prompt, _ = harness.reset()
+            gen = tokenizer.encode(
+                "<|channel|>analysis<|message|>Add them.<|end|>"
+                "<|start|>assistant to=functions.add<|channel|>commentary json"
+                '<|message|>{"a": 1}<|call|>'
+            )
+
+            # Act
+            harness.step(torch.cat([prompt["input_ids"], torch.tensor([gen])], dim=1))
+
+            # Assert
+            assert [action.name for action in client.actions] == ["add"]
+            assert _transcript_text(harness).endswith(
+                '{"a": 1}<|call|>'
+                "<|start|>functions.add to=assistant<|channel|>commentary"
+                '<|message|>"result 1"<|end|><|start|>assistant'
+            )
+        finally:
+            harness.close()
+
+
+class TestHarmonyFeedbackTerminator:
+    def test_user_feedback_after_a_return_drops_the_frame_end(self) -> None:
+        tokenizer = HarmonyTemplateTokenizer()
+        harness = RolloutHarness(RecordingClient(takes_tool_calls=False), tokenizer)
+        try:
+            # Act
+            ids = harness._text_feedback_ids(
+                [{"role": "user", "content": "again"}], HARMONY_TAGS["<|return|>"]
+            )
+
+            # Assert
+            assert tokenizer.decode(ids[0].tolist()) == (
+                "<|start|>user<|message|>again<|end|><|start|>assistant"
+            )
+        finally:
+            harness.close()
+
+    def test_truncated_turn_keeps_the_frame_end(self) -> None:
+        tokenizer = HarmonyTemplateTokenizer()
+        harness = RolloutHarness(RecordingClient(takes_tool_calls=False), tokenizer)
+        try:
+            # Act
+            ids = harness._text_feedback_ids(
+                [{"role": "user", "content": "again"}], ord("x")
+            )
+
+            # Assert
+            assert tokenizer.decode(ids[0].tolist()).startswith("<|end|><|start|>user")
+        finally:
+            harness.close()
+
+
 class TestRemoteToolSteps:
     def test_sends_parsed_call_as_call_tool_action(self) -> None:
         client, session = _stub_remote()
@@ -845,7 +961,7 @@ class TestInProcessToolBackend:
 
 
 class TestNativeToolsEndToEnd:
-    def test_mcp_env_without_parser_fails_at_reset(self) -> None:
+    def test_mcp_env_without_a_chat_format_fails_at_reset(self) -> None:
         harness = RolloutHarness.local(
             CalculatorMCPEnv(),
             PlainTokenizer(),

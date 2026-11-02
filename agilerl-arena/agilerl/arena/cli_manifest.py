@@ -4,8 +4,8 @@
 """Generic machinery for building Click commands from a server manifest node.
 
 Turns a manifest command/group tree (from ``GET /api/cli/v1/capabilities``) into
-runnable :class:`click.Command` objects. The on-prem capability gating that drives
-*which* manifest gets loaded lives in :mod:`agilerl.arena.on_prem.group`.
+runnable :class:`click.Command` objects. The BYOC capability gating that drives
+*which* manifest gets loaded lives in :mod:`agilerl.arena.byoc.group`.
 """
 
 from __future__ import annotations
@@ -76,6 +76,22 @@ def pythonize_manifest_param_name(name: str) -> str:
     s1 = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", name)
     s2 = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", s1)
     return s2.lower()
+
+
+def write_text_atomic(dest: Path, text: str, *, force: bool = False) -> None:
+    """Write *text* to *dest* via a temp file and ``os.replace``.
+
+    :param dest: The destination file path (``~`` is expanded, path resolved).
+    :type dest: Path
+    :param text: The text to write (UTF-8).
+    :type text: str
+    :param force: If ``True``, overwrite an existing file.
+    :type force: bool
+    :returns: None
+    :rtype: None
+    :raises click.ClickException: If *dest* exists and *force* is ``False``.
+    """
+    write_binary_atomic(dest, text.encode("utf-8"), force=force)
 
 
 def write_binary_atomic(dest: Path, data: bytes, *, force: bool = False) -> None:
@@ -210,10 +226,10 @@ def _manifest_spec_to_click_option(spec: ManifestParamSpec) -> Callable[[Any], A
     :raises ArenaValidationError: If the declared option type is unsupported.
     """
     if spec["type"] not in ALLOWED_OPTION_TYPES:
-        msg = f"Unsupported on-prem option type {spec['type']!r}"
+        msg = f"Unsupported BYOC option type {spec['type']!r}"
         raise ArenaValidationError(
             msg,
-            cli_hint="Upgrade agilerl — the server sent an on-prem "
+            cli_hint="Upgrade agilerl — the server sent a BYOC "
             "configuration this version can't use.",
         )
     for rule in OPTION_RULES:

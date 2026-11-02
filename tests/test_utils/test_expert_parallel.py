@@ -27,6 +27,7 @@ import pytest
 import torch
 import torch.distributed as dist
 from peft import LoraConfig, inject_adapter_in_model
+from peft.tuners.lora.layer import ParamWrapper
 from safetensors.torch import save_file
 from torch import nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
@@ -39,7 +40,7 @@ from torch.utils.checkpoint import checkpoint, noop_context_fn
 from transformers import NemotronHConfig, PretrainedConfig
 from transformers.models.nemotron_h.modeling_nemotron_h import NemotronHMLP
 
-from agilerl.distributed import FSDPConfig, ep_forward, expert_parallel
+from agilerl.distributed import FSDPConfig, ep_forward, expert_parallel, fsdp_blocks
 from agilerl.distributed import fsdp as fsdp_mod
 from agilerl.distributed.ep_forward import (
     _call_with_local_params,
@@ -103,7 +104,6 @@ from agilerl.lora.moe import (
     install_packed_expert_grouped_gemm,
     routed_experts_local_forward,
     set_routed_experts_chunk_bytes,
-    set_routed_experts_recompute,
     upgrade_moe_param_wrappers,
 )
 from agilerl.lora.moe import wrappers as moe_wrappers
@@ -630,7 +630,7 @@ def _materialize_ep_worker(rank: int, world_size: int) -> None:
 
     ep_mesh, captured = _materialize_and_capture_meshes(
         model,
-        FSDPConfig(ep=world_size, wrap_every_n_blocks=1, routed_expert_chunk_mib=64),
+        FSDPConfig(ep=world_size, routed_expert_chunk_mib=64),
     )
     assert ep_mesh.leftover_dp == 1
     assert tuple(ep_mesh.world.mesh_dim_names) == ("replicate", "shard")
@@ -660,14 +660,15 @@ def _materialize_ep_worker(rank: int, world_size: int) -> None:
 def _materialize_dp_ep_worker(rank: int, world_size: int) -> None:
     ep = 2
     num_experts = 4
-    model = _tiny_moe_actor(num_experts)
+    # Frozen base: small frozen experts stay replicated across dp_mod_ep.
+    model = _tiny_moe_actor(num_experts).requires_grad_(False)
     for param in model.parameters():
         dist.broadcast(param.data, src=0)
     original_up = model.layers[0].experts.up_proj.detach().cpu().clone()
     original_down = model.layers[0].experts.down_proj.detach().cpu().clone()
 
     ep_mesh, captured = _materialize_and_capture_meshes(
-        model, FSDPConfig(ep=ep, wrap_every_n_blocks=1, routed_expert_chunk_mib=64)
+        model, FSDPConfig(ep=ep, routed_expert_chunk_mib=64)
     )
     assert ep_mesh.leftover_dp == world_size // ep
     assert captured["mesh"] is ep_mesh.hsdp
@@ -703,15 +704,14 @@ def _materialize_meta_safetensors_dp_ep_worker(rank: int, world_size: int) -> No
         model.config = PretrainedConfig()
         model.config.name_or_path = tmp
         model.to_empty(device="meta")
-        mesh = _materialize(
-            model,
-            FSDPConfig(
-                ep=ep,
-                wrap_every_n_blocks=1,
-                param_persistence_threshold=0,
-                routed_expert_chunk_mib=64,
-            ),
-        )
+        with patch.object(fsdp_blocks, "PARAM_PERSISTENCE_THRESHOLD", 0):
+            mesh = _materialize(
+                model,
+                FSDPConfig(
+                    ep=ep,
+                    routed_expert_chunk_mib=64,
+                ),
+            )
         assert mesh is not None
         leftover_dp = mesh.leftover_dp
         assert leftover_dp == world_size // ep
@@ -754,9 +754,7 @@ def _check_expert_dim0_world_sharded(rank: int, world_size: int, ep: int) -> Non
     model = _tiny_moe_actor(num_experts, hidden=256, intermediate=512)
     for param in model.parameters():
         dist.broadcast(param.data, src=0)
-    _materialize(
-        model, FSDPConfig(ep=ep, wrap_every_n_blocks=1, routed_expert_chunk_mib=64)
-    )
+    _materialize(model, FSDPConfig(ep=ep, routed_expert_chunk_mib=64))
     for _name, module in iter_packed_expert_modules(model):
         for param in module.parameters(recurse=False):
             assert isinstance(param, DTensor), type(param)
@@ -778,15 +776,15 @@ def _resume_slice_worker(rank: int, world_size: int) -> None:
     """Resume restores experts via the sliced write, dense params as before."""
     num_experts = 8
     # Above the FSDP persistence threshold so experts take the real
-    # wrapped path instead of staying replicated.
+    # wrapped path; the frozen dense weight below it stays replicated.
     torch.manual_seed(0)
-    model = _tiny_moe_actor(num_experts, hidden=256, intermediate=512)
+    model = _tiny_moe_actor(num_experts, hidden=256, intermediate=512).requires_grad_(
+        False
+    )
     for param in model.parameters():
         dist.broadcast(param.data, src=0)
     shapes = {name: tuple(param.shape) for name, param in model.named_parameters()}
-    _materialize(
-        model, FSDPConfig(ep=2, wrap_every_n_blocks=1, routed_expert_chunk_mib=64)
-    )
+    _materialize(model, FSDPConfig(ep=2, routed_expert_chunk_mib=64))
     state = {
         name: torch.full(
             shapes[name], 7.0 if "experts" in name else 3.0, dtype=torch.float32
@@ -866,7 +864,7 @@ def _dp_gt_one_slice_worker(rank: int, world_size: int) -> None:
     ):
         _materialize(
             model,
-            FSDPConfig(ep=2, wrap_every_n_blocks=1, routed_expert_chunk_mib=64),
+            FSDPConfig(ep=2, routed_expert_chunk_mib=64),
         )
     experts = {
         id(param)
@@ -947,7 +945,7 @@ def _sorted_parity_worker(rank: int, world_size: int) -> None:
     ref = _SortedExperts(num_experts=4, in_features=16, out_features=8).cuda()
     ref.forward = MethodType(grouped_linear, ref)
     ref_out = ref(global_inputs.cuda(), [16, 16, 16, 16])
-    # Materialize the upstream grad: torch._grouped_mm backward rejects
+    # Materialize the upstream grad: torch.nn.functional.grouped_mm backward rejects
     # the zero-stride expanded grad a bare sum() would feed it.
     (ref_out * global_upstream.cuda()).sum().backward()
     ref_grad = ref.weight.grad.clone()
@@ -978,7 +976,7 @@ class TestSortedExpertParallelParity:
 class _LoraExpertsBlock(nn.Module):
     """Packed-experts submodule holding the targeted parameters."""
 
-    def __init__(self, num_experts: int = 4, hidden: int = 8, intermediate: int = 6):
+    def __init__(self, num_experts: int = 4, hidden: int = 8, intermediate: int = 8):
         super().__init__()
         self.num_experts = num_experts
         self.gate_up_proj = nn.Parameter(
@@ -996,7 +994,7 @@ class _LoraExpertsBlock(nn.Module):
 class _LoraRoutedExperts(nn.Module):
     """Qwen3-MoE-convention packed experts for PEFT adapter tests."""
 
-    def __init__(self, num_experts: int = 4, hidden: int = 8, intermediate: int = 6):
+    def __init__(self, num_experts: int = 4, hidden: int = 8, intermediate: int = 8):
         super().__init__()
         # Parameters live nested, as in real models: PEFT rejects
         # target_parameters on the top-level module (cyclic module graph).
@@ -1144,15 +1142,16 @@ def _ep_lora_fsdp_worker(rank: int, world_size: int) -> None:
     before = {id(param) for param in model.parameters() if isinstance(param, DTensor)}
     assert before, "expected EP-sharded base and adapter params"
     expert_mesh = None if mesh.leftover_dp == 1 else mesh.dp_mod_ep
-    apply_fsdp2(
-        model,
-        # Zero threshold: every parameter is managed, so stray EP
-        # DTensors reach fully_shard (production adapters exceed the
-        # default persistence threshold too).
-        FSDPConfig(ep=ep, wrap_every_n_blocks=1, param_persistence_threshold=0),
-        mesh=mesh.hsdp,
-        expert_mesh=expert_mesh,
-    )
+    with patch.object(fsdp_blocks, "PARAM_PERSISTENCE_THRESHOLD", 0):
+        apply_fsdp2(
+            model,
+            # Zero threshold: every parameter is managed, so stray EP
+            # DTensors reach fully_shard (production adapters exceed the
+            # persistence threshold too).
+            FSDPConfig(ep=ep),
+            mesh=mesh.hsdp,
+            expert_mesh=expert_mesh,
+        )
     if mesh.leftover_dp == 1:
         after = {
             id(param)
@@ -1256,12 +1255,13 @@ def _dp_ep_packed_rows_worker(rank: int, world_size: int) -> None:
     applied = apply_expert_parallel(model, mesh.ep)
     assert applied == 1, f"applied={applied}"
     expert_mesh = None if dp == 1 else mesh.dp_mod_ep
-    apply_fsdp2(
-        model,
-        FSDPConfig(ep=ep, wrap_every_n_blocks=1, param_persistence_threshold=0),
-        mesh=mesh.hsdp,
-        expert_mesh=expert_mesh,
-    )
+    with patch.object(fsdp_blocks, "PARAM_PERSISTENCE_THRESHOLD", 0):
+        apply_fsdp2(
+            model,
+            FSDPConfig(ep=ep),
+            mesh=mesh.hsdp,
+            expert_mesh=expert_mesh,
+        )
     expected_expert = (0, 2, 1, 3)[rank]
     assert expected_expert == _ep_block_dp_half_expert(rank, ep, num_experts, dp)
     found = False
@@ -1677,6 +1677,13 @@ def _run_routed(
     return out.detach(), hidden.grad, weights.grad
 
 
+def _force_recompute(model: nn.Module, enabled: bool) -> None:
+    """Pin every routed-experts LoRA wrapper to the recompute or full-graph path."""
+    for module in model.modules():
+        if isinstance(module, moe_wrappers.RoutedExpertsLoraWrapper):
+            module.recompute = enabled
+
+
 def _local_lora_grads(model: nn.Module) -> dict[str, torch.Tensor]:
     return {
         name: expert_local_tensor(param.grad)
@@ -1887,7 +1894,7 @@ def _row_chunks_worker(rank: int, world_size: int) -> None:
         for recompute in (False, True):
             model = copy.deepcopy(base)
             assert apply_expert_parallel(model, mesh.ep) == 1
-            set_routed_experts_recompute(model, recompute)
+            _force_recompute(model, recompute)
             set_routed_experts_chunk_bytes(model, 1)
             outputs = _run_routed(
                 model, hidden[rows], index[rows], weights[rows], upstream[rows]
@@ -2112,19 +2119,19 @@ def _fsdp_gathered_frozen_worker(rank: int, world_size: int) -> None:
     (reference(ref_hidden, top_k_index, top_k_weights) * upstream).sum().backward()
 
     assert apply_expert_parallel(model, mesh.ep) == 1
-    apply_fsdp2(
-        model,
-        FSDPConfig(
-            ep=ep,
-            wrap_every_n_blocks=1,
-            param_persistence_threshold=0,
-            param_dtype="float32",
-            reduce_dtype="float32",
-        ),
-        mesh=mesh.hsdp,
-        expert_mesh=mesh.dp_mod_ep,
-        gradient_checkpointing=True,
-    )
+    with patch.object(fsdp_blocks, "PARAM_PERSISTENCE_THRESHOLD", 0):
+        apply_fsdp2(
+            model,
+            FSDPConfig(
+                ep=ep,
+                param_dtype="float32",
+                reduce_dtype="float32",
+                checkpoint_every_n_blocks=1,
+            ),
+            mesh=mesh.hsdp,
+            expert_mesh=mesh.dp_mod_ep,
+            gradient_checkpointing=True,
+        )
     experts = next(
         module for module in model.modules() if "gate_up_proj" in module._parameters
     )
@@ -2192,19 +2199,19 @@ def _recompute_routing_drift_worker(rank: int, world_size: int) -> None:
     (reference(ref_hidden) * upstream).sum().backward()
 
     assert apply_expert_parallel(model, mesh.ep) == 1
-    fsdp_mod.apply_fsdp2(
-        model,
-        FSDPConfig(
-            ep=ep,
-            wrap_every_n_blocks=1,
-            param_persistence_threshold=0,
-            param_dtype="float32",
-            reduce_dtype="float32",
-        ),
-        mesh=mesh.hsdp,
-        expert_mesh=mesh.dp_mod_ep,
-        gradient_checkpointing=True,
-    )
+    with patch.object(fsdp_blocks, "PARAM_PERSISTENCE_THRESHOLD", 0):
+        fsdp_mod.apply_fsdp2(
+            model,
+            FSDPConfig(
+                ep=ep,
+                param_dtype="float32",
+                reduce_dtype="float32",
+                checkpoint_every_n_blocks=1,
+            ),
+            mesh=mesh.hsdp,
+            expert_mesh=mesh.dp_mod_ep,
+            gradient_checkpointing=True,
+        )
     ep_hidden = hidden.clone().requires_grad_(True)
     (model(ep_hidden) * upstream).sum().backward()
 
@@ -2319,8 +2326,6 @@ def _hsdp_ep_step_worker(
         ep=ep,
         tp=tp,
         shard_group_size=shard_group_size,
-        wrap_every_n_blocks=1,
-        param_persistence_threshold=0,
         param_dtype="float32",
         reduce_dtype="float32",
         routed_expert_chunk_mib=64,
@@ -2333,7 +2338,8 @@ def _hsdp_ep_step_worker(
         device_type="cpu",
     )
     assert mesh is not None
-    materialize_fsdp2_from_cpu_state(model, "cpu", config, parallel_mesh=mesh)
+    with patch.object(fsdp_blocks, "PARAM_PERSISTENCE_THRESHOLD", 0):
+        materialize_fsdp2_from_cpu_state(model, "cpu", config, parallel_mesh=mesh)
     runtime = FSDPRuntime(config)
     runtime.parallel_mesh = mesh
     trainable = [param for param in model.parameters() if param.requires_grad]
@@ -2419,8 +2425,6 @@ def _ep_adamw_step(model: nn.Module, fused: bool) -> list[nn.Parameter]:
     """Run one FSDPRuntime AdamW step on ``model``; return its trainable params."""
     config = FSDPConfig(
         ep=2,
-        wrap_every_n_blocks=1,
-        param_persistence_threshold=0,
         param_dtype="float32",
         reduce_dtype="float32",
         routed_expert_chunk_mib=64,
@@ -2428,7 +2432,8 @@ def _ep_adamw_step(model: nn.Module, fused: bool) -> list[nn.Parameter]:
     mesh = build_parallel_mesh(
         world_size=dist.get_world_size(), ep=2, device_type="cpu"
     )
-    materialize_fsdp2_from_cpu_state(model, "cpu", config, parallel_mesh=mesh)
+    with patch.object(fsdp_blocks, "PARAM_PERSISTENCE_THRESHOLD", 0):
+        materialize_fsdp2_from_cpu_state(model, "cpu", config, parallel_mesh=mesh)
     runtime = FSDPRuntime(config)
     runtime.parallel_mesh = mesh
     optimizer = make_llm_optimizer(model, lr=0.1, lr_critic=None, fused=fused)
@@ -2506,13 +2511,14 @@ def _shard_group_spans_world_worker(rank: int, world_size: int) -> None:
     original = model.layers[0].lin.weight.detach().clone()
     config = FSDPConfig(
         shard_group_size=world_size,
-        wrap_every_n_blocks=1,
-        param_persistence_threshold=0,
         routed_expert_chunk_mib=64,
     )
 
     # fully_shard's default mesh follows the host accelerator (MPS on macOS).
-    with patch("torch._C._get_accelerator", return_value=torch.device("cpu")):
+    with (
+        patch("torch._C._get_accelerator", return_value=torch.device("cpu")),
+        patch.object(fsdp_blocks, "PARAM_PERSISTENCE_THRESHOLD", 0),
+    ):
         mesh = _materialize(model, config)
 
     weight = model.layers[0].lin.weight
@@ -2820,6 +2826,25 @@ class TestRoutingOverride:
 
         assert module not in ROUTING_STATE
 
+    def test_override_covers_the_wrapper_chain(self) -> None:
+        # Arrange: outer wrapper over a member holding stale mixed routing.
+        member = MagicMock(spec=ParamWrapper)
+        member.parameter_name = "down_proj"
+        member.base_layer = MagicMock()
+        outer = MagicMock(spec=ParamWrapper)
+        outer.parameter_name = "gate_up_proj"
+        outer.base_layer = member
+        ROUTING_STATE[member] = ["actor", "critic"]
+
+        # Act
+        with _routing_override(outer, ["actor"]):
+            # Assert
+            assert ROUTING_STATE[outer] == ["actor"]
+            assert ROUTING_STATE[member] == ["actor"]
+
+        assert outer not in ROUTING_STATE
+        assert ROUTING_STATE[member] == ["actor", "critic"]
+
 
 class TestRunLocalExperts:
     def test_empty_rows_keep_trainable_params_in_the_graph(self):
@@ -2870,7 +2895,7 @@ class TestInstallEpForwardIdempotent:
         module = nn.Linear(2, 2)
         object.__setattr__(module, "_agilerl_ep_forward", True)
 
-        _install_routed_ep_forward(module, token_blocks=1, tp_group=None)
+        _install_routed_ep_forward(module, token_blocks=1, chunk_bytes=1, tp_group=None)
 
         assert "forward" not in module.__dict__
 
@@ -2947,6 +2972,21 @@ class TestMaterializeNeedsMesh:
             materialize_fsdp2_from_cpu_state(
                 nn.Linear(2, 2), "cpu", FSDPConfig(ep=2), parallel_mesh=None
             )
+
+
+class TestMaterializeCpuOffloadWithExpertsOutsideFsdp:
+    def test_ep_spanning_the_shard_group_raises_and_keeps_the_weights(self):
+        # Arrange: one rank per shard group holds each expert, so experts skip FSDP.
+        model = nn.Linear(2, 2)
+        weight = model.weight.detach().clone()
+        mesh = MagicMock(spec=ParallelMesh, leftover_dp=1)
+
+        # Act / Assert
+        with pytest.raises(ValueError, match="experts out of FSDP"):
+            materialize_fsdp2_from_cpu_state(
+                model, "cpu", FSDPConfig(ep=2, cpu_offload=True), parallel_mesh=mesh
+            )
+        assert torch.equal(model.weight, weight)
 
 
 class TestMaterializeNeedsChunkSize:
@@ -3033,7 +3073,9 @@ class TestEpForwardBypassesWhenDegreeIsOne:
         weights = torch.ones(2, 1)
         expected = experts(hidden, index, weights)
 
-        _install_routed_ep_forward(experts, token_blocks=1, tp_group=None)
+        _install_routed_ep_forward(
+            experts, token_blocks=1, chunk_bytes=1, tp_group=None
+        )
         out = experts(hidden, index, weights)
 
         assert torch.equal(out, expected)

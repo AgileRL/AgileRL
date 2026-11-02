@@ -105,3 +105,14 @@ class TestGRPOLearnNonFiniteLoss:
             pytest.raises(ValueError, match="Loss is not finite"),
         ):
             agent.learn(_experiences())
+
+
+class TestGRPOInitKLAdvantageShaping:
+    def test_positive_beta_is_accepted(self) -> None:
+        agent = _make_grpo(beta=0.001, use_kl_advantage_shaping=True)
+
+        assert agent.use_kl_advantage_shaping is True
+
+    def test_zero_beta_raises(self) -> None:
+        with pytest.raises(ValueError, match="use_kl_advantage_shaping needs beta > 0"):
+            _make_grpo(beta=0.0, use_kl_advantage_shaping=True)

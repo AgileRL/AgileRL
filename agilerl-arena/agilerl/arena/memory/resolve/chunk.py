@@ -1,6 +1,6 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
-"""Omitted fused-logprob chunk rows."""
+"""Fused-logprob chunk rows."""
 
 from __future__ import annotations
 
@@ -11,14 +11,11 @@ FUSED_CHUNK_ROWS_MAX = 4096
 FUSED_LOGIT_TILE_BYTES = 256 * 1024 * 1024
 
 
-def resolve_chunk_rows(vocab_size: int, explicit: int | None = None) -> int:
+def resolve_chunk_rows(vocab_size: int) -> int:
     """Fused-logprob chunk rows for a 256 MiB fp32 logit tile.
 
     :param vocab_size: ``lm_head`` width.
-    :param explicit: Set row count. Returned as given.
-    :return: ``explicit``, or the tile size clamped to 128..4096.
+    :return: The tile size clamped to 128..4096.
     """
-    if explicit is not None:
-        return explicit
     rows = FUSED_LOGIT_TILE_BYTES // max(1, vocab_size * 4)
     return max(FUSED_CHUNK_ROWS_MIN, min(FUSED_CHUNK_ROWS_MAX, rows))

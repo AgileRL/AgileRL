@@ -21,17 +21,22 @@ from pydantic import (
 from pydantic.json_schema import WithJsonSchema
 from typing_extensions import Self
 
-from agilerl.arena.models.descriptions import BETA, MICRO_BATCH, MINI_BATCH
+from agilerl.arena.models.descriptions import (
+    BETA,
+    GRADIENT_CHECKPOINTING,
+    MICRO_BATCH,
+    MINI_BATCH,
+)
 from agilerl.arena.models.env import LLMEnvType
 from agilerl.arena.models.fsdp import FSDPConfig
 from agilerl.arena.models.hpo import RLHyperparameter
+from agilerl.arena.models.model_info import (
+    KNOWN_REASONING_PARSERS,
+    enforces_thinking_budget,
+    resolve_reasoning_parser,
+)
 from agilerl.arena.models.networks import LoraConfigDict, NetworkSpec
 from agilerl.arena.models.registry import AgentType
-
-# Attention backends that build a padding-free (packed) forward. A dense backend
-# builds an O(N^2) block-diagonal mask over the packed row instead, so packing
-# under one is silently a padded forward.
-PACKING_ATTN_IMPLEMENTATIONS = frozenset({"flash_attention_2", "flex_attention"})
 
 FSDP_KNOWN_FIELDS = frozenset(field.name for field in fields(FSDPConfig))
 FSDP_JSON_SCHEMA = {
@@ -242,41 +247,6 @@ class LLMAlgorithmSpec(AlgorithmSpec):
             "models that build their own."
         ),
     )
-    gradient_checkpointing: bool = Field(
-        default=True,
-        description=(
-            "Recompute activations during the backward pass instead of storing "
-            "them: much less memory, roughly 30% slower."
-        ),
-    )
-    use_liger_loss: bool = Field(
-        default=True,
-        description=(
-            "Use the fused Liger loss kernel. Cuts memory on long sequences; "
-            "requires liger-kernel, which is Linux-only."
-        ),
-    )
-    use_liger_kernel: bool | None = Field(
-        default=None,
-        description=(
-            "Apply Liger's fused layer kernels to the model. Unset lets the "
-            "trainer decide from the model architecture."
-        ),
-    )
-    use_mamba_kernels: bool | None = Field(
-        default=None,
-        description=(
-            "Use fused Mamba kernels for state-space models. Unset lets the "
-            "trainer decide from the model architecture."
-        ),
-    )
-    cast_logprobs_to_fp32: bool = Field(
-        default=True,
-        description=(
-            "Accumulate log-probabilities in fp32. Guards against the ratio "
-            "underflowing in bf16 training."
-        ),
-    )
     seed: int = Field(
         default=42,
         description="Seed for sampling, data order and initialization.",
@@ -289,58 +259,13 @@ class LLMAlgorithmSpec(AlgorithmSpec):
             "'nf4', or BitsAndBytesConfig keyword arguments."
         ),
     )
-    activation_offload: bool = Field(
-        default=False,
-        description=(
-            "Offload activations to host memory between forward and backward. "
-            "Saves GPU memory at the cost of PCIe traffic."
-        ),
-    )
-    moe_lora_recompute: bool | None = Field(
-        default=None,
-        description=(
-            "For LoRA on frozen mixture-of-experts weights, keep only the expert "
-            "input rows for backward and recompute the expert up-projection "
-            "there. Much less activation memory for a little extra compute. "
-            "Unset recomputes only in layers without gradient checkpointing, "
-            "which already rerun the forward in backward."
-        ),
-    )
-    use_sequence_packing: bool = Field(
-        default=False,
-        description=(
-            "Pack several short sequences into one batch row so padding stops "
-            "wasting compute."
-        ),
-    )
-    chunk_rows: int | None = Field(
-        default=None,
-        ge=1,
-        description=(
-            "Rows per chunk when the loss is computed in slices. Lower values "
-            "cut peak memory on long sequences."
-        ),
-    )
-    attn_implementation: str | None = Field(
-        default=None,
-        description=(
-            "Attention backend passed to transformers, e.g. 'sdpa', 'eager' or "
-            "'flash_attention_2'. Unset lets the trainer choose."
-        ),
-    )
-
     micro_batch_size_per_gpu: int | None = Field(
         default=None, ge=1, description=MICRO_BATCH
     )
-    mini_batch_size: int | None = Field(default=None, ge=1, description=MINI_BATCH)
-    hf_generate_chunk_size: int | None = Field(
-        default=None,
-        ge=1,
-        description=(
-            "Sequences generated per call when generating through transformers "
-            "rather than vLLM."
-        ),
+    gradient_checkpointing: bool | None = Field(
+        default=None, description=GRADIENT_CHECKPOINTING
     )
+    mini_batch_size: int | None = Field(default=None, ge=1, description=MINI_BATCH)
 
     thinking_token_budget: int | None = Field(
         default=None,
@@ -368,8 +293,21 @@ class LLMAlgorithmSpec(AlgorithmSpec):
     fsdp: Annotated[FSDPConfig | None, WithJsonSchema(FSDP_JSON_SCHEMA)] = Field(
         default=None,
         description=(
-            "FSDP2 shard config. True or {} enables defaults; omit for flat "
-            "data parallel."
+            "FSDP2 shard config. Omitted, true or {}: the run trains the "
+            "faster plan that fits, DDP when the model fits one GPU with an "
+            "equal-or-cheaper plan, else FSDP. Setting ep or tp above 1 "
+            "keeps FSDP."
+        ),
+    )
+    routed_expert_chunk_mib: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "MiB of the widest activation of one routed-expert row chunk "
+            "under DDP; FSDP runs use fsdp.routed_expert_chunk_mib. Picked "
+            "from the memory estimate; manifests cannot set it. None on a "
+            "MoE model picks the largest of 512/256/128/64 whose estimated "
+            "training peak fits; unpicked, the trainer uses 64."
         ),
     )
     vllm_engine_args: dict[str, Any] = Field(
@@ -412,6 +350,10 @@ class LLMAlgorithmSpec(AlgorithmSpec):
     default_evo_steps: ClassVar[int] = 20
     hpo_ranges: ClassVar[dict[str, RLHyperparameter]] = LLM_HPO_RANGES
     env_type: ClassVar[LLMEnvType]
+    # Times one gradient forward stacks the batch along rows.
+    gradient_row_copies: ClassVar[int] = 1
+    # The gradient forward packs its sequences when the attention backend can.
+    supports_sequence_packing: ClassVar[bool] = False
 
     @field_validator("fsdp", mode="before")
     @classmethod
@@ -455,6 +397,20 @@ class LLMAlgorithmSpec(AlgorithmSpec):
             raise ValueError(msg) from err
         return value
 
+    @field_validator("vllm_engine_args")
+    @classmethod
+    def _validate_reasoning_parser(cls, value: dict[str, Any]) -> dict[str, Any]:
+        """Only reasoning parsers checked against the model's format parser may be set."""
+        parser = value.get("reasoning_parser")
+        if parser is None or parser in KNOWN_REASONING_PARSERS:
+            return value
+        known = ", ".join(sorted(KNOWN_REASONING_PARSERS))
+        msg = (
+            f"vllm_engine_args.reasoning_parser={parser!r} is not a supported "
+            f"reasoning parser; set one of {known}"
+        )
+        raise ValueError(msg)
+
     @model_validator(mode="after")
     def _validate_answer_continuation(self) -> Self:
         """The continuation's grammar is built from constrain_answer_pattern."""
@@ -492,22 +448,30 @@ class LLMAlgorithmSpec(AlgorithmSpec):
             raise ValueError(msg)
         return self
 
-    @model_validator(mode="after")
-    def _validate_use_sequence_packing(self) -> Self:
-        """Packing needs an attention backend that builds the packed forward."""
-        if (
-            self.use_sequence_packing
-            and self.attn_implementation not in PACKING_ATTN_IMPLEMENTATIONS
-        ):
-            msg = (
-                "use_sequence_packing requires attn_implementation in "
-                f"{sorted(PACKING_ATTN_IMPLEMENTATIONS)}, got "
-                f"{self.attn_implementation!r}: a dense backend builds an O(N^2) "
-                "block-diagonal mask over the packed row, so the packed forward "
-                "is silently dropped in favour of the padded one"
-            )
-            raise ValueError(msg)
-        return self
+    def check_thinking_budget_parser(self, model_type: str) -> None:
+        """Reject a thinking budget with no vLLM reasoning start/end tokens to enforce it.
+
+        :param model_type: Hugging Face ``model_type`` of the checkpoint.
+        :raises ValueError: If a budget is set and the reasoning parser is missing
+            or has no reasoning start/end tokens.
+        """
+        budget = self.thinking_token_budget
+        parser = resolve_reasoning_parser(self.vllm_engine_args, model_type)
+        if budget is None or enforces_thinking_budget(parser):
+            return
+        lacking = (
+            f"reasoning parser {parser}"
+            if parser
+            else self.pretrained_model_name_or_path
+        )
+        budget_parsers = filter(enforces_thinking_budget, KNOWN_REASONING_PARSERS)
+        msg = (
+            f"thinking_token_budget={budget} needs a vLLM reasoning parser with "
+            f"reasoning start and end tokens, and {lacking} has none. Unset "
+            "thinking_token_budget, or set algorithm.vllm_engine_args.reasoning_parser "
+            f"to one that has them: {', '.join(sorted(budget_parsers))}."
+        )
+        raise ValueError(msg)
 
     @model_validator(mode="after")
     def _validate_mini_batch_size(self) -> Self:

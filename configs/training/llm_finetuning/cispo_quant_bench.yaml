@@ -19,19 +19,12 @@ algorithm:
     adv_norm: mean_only
     filter_zero_adv: true
     max_output_tokens: 2768
-    use_liger_loss: true
     loss_norm: accumulation_window
-    use_sequence_packing: true
-    vllm_importance_sampling_correction: true
-    attn_implementation: flex_attention
     quantization: nf4
-    activation_offload: true
-    chunk_rows: 128
     vllm_config:
         tensor_parallel_size: 1
         gpu_memory_utilization: 0.3
         max_num_seqs: 8
-        sleep_mode: true
 
 environment:
     env_type: rollout

@@ -25,7 +25,7 @@ from transformers.models.nemotron_h.modeling_nemotron_h import (
     NemotronHMoE,
 )
 
-from agilerl.distributed import FSDPConfig
+from agilerl.distributed import FSDPConfig, fsdp_blocks
 from agilerl.distributed import tensor_parallel as tp_mod
 from agilerl.distributed.expert_parallel import build_parallel_mesh
 from agilerl.distributed.fsdp import (
@@ -287,16 +287,15 @@ def _shared_kv_load_worker(rank: int, world_size: int, checkpoint_dir: str) -> N
     dist.broadcast(source, src=0)
     config = FSDPConfig(
         tp=world_size,
-        wrap_every_n_blocks=1,
-        param_persistence_threshold=0,
         param_dtype="float32",
         routed_expert_chunk_mib=64,
     )
 
     # Act
-    materialize_fsdp2_from_cpu_state(
-        model, "cpu", config, parallel_mesh=_tp_mesh(world_size, world_size)
-    )
+    with patch.object(fsdp_blocks, "PARAM_PERSISTENCE_THRESHOLD", 0):
+        materialize_fsdp2_from_cpu_state(
+            model, "cpu", config, parallel_mesh=_tp_mesh(world_size, world_size)
+        )
 
     # Assert
     loaded = model.layers[0].attn
@@ -322,17 +321,16 @@ def _mixed_precision_worker(rank: int, world_size: int) -> None:
         param.requires_grad_("lora_" in name)
     mesh = _tp_mesh(world_size, tp)
     apply_tensor_parallel(model, mesh.tp)
-    apply_fsdp2(
-        model,
-        FSDPConfig(
-            tp=tp,
-            wrap_every_n_blocks=1,
-            param_persistence_threshold=0,
-            param_dtype="bfloat16",
-            reduce_dtype="float32",
-        ),
-        mesh=mesh.hsdp,
-    )
+    with patch.object(fsdp_blocks, "PARAM_PERSISTENCE_THRESHOLD", 0):
+        apply_fsdp2(
+            model,
+            FSDPConfig(
+                tp=tp,
+                param_dtype="bfloat16",
+                reduce_dtype="float32",
+            ),
+            mesh=mesh.hsdp,
+        )
     forward_dtypes: list[torch.dtype] = []
     for name, module in attn.named_modules():
         if ".lora_" in name and isinstance(module, nn.Linear):
@@ -681,11 +679,12 @@ def _fsdp_worker(rank: int, world_size: int) -> None:
     if not before:
         msg = "expected attention DTensors on the tp mesh"
         raise AssertionError(msg)
-    apply_fsdp2(
-        model,
-        FSDPConfig(tp=tp, wrap_every_n_blocks=1, param_persistence_threshold=0),
-        mesh=mesh.hsdp,
-    )
+    with patch.object(fsdp_blocks, "PARAM_PERSISTENCE_THRESHOLD", 0):
+        apply_fsdp2(
+            model,
+            FSDPConfig(tp=tp),
+            mesh=mesh.hsdp,
+        )
     after = {
         id(param)
         for param in model.parameters()
@@ -713,11 +712,12 @@ def _lm_head_fsdp_worker(rank: int, world_size: int) -> None:
     if not isinstance(weight, DTensor) or weight.device_mesh is not mesh.tp:
         msg = "lm_head.weight must be on the tp mesh before FSDP"
         raise AssertionError(msg)
-    apply_fsdp2(
-        head,
-        FSDPConfig(tp=tp, wrap_every_n_blocks=1, param_persistence_threshold=0),
-        mesh=mesh.hsdp,
-    )
+    with patch.object(fsdp_blocks, "PARAM_PERSISTENCE_THRESHOLD", 0):
+        apply_fsdp2(
+            head,
+            FSDPConfig(tp=tp),
+            mesh=mesh.hsdp,
+        )
     weight = head.lm_head.weight
     if not isinstance(weight, DTensor) or weight.device_mesh is not mesh.tp:
         msg = "lm_head.weight must stay on the tp mesh"

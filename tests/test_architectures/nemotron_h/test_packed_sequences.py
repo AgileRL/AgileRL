@@ -9,7 +9,6 @@ log-prob equals the padded (one document per row) forward.
 """
 
 import itertools
-import logging
 
 import pytest
 import torch
@@ -418,17 +417,16 @@ class TestPatchNemotronMambaPackedSequences:
         assert modeling_nemotron_h.NemotronHBlock.forward is block_forward
         assert getattr(NemotronHMamba2Mixer, RESETS_AT_DOCUMENT_BOUNDARY) is True
 
-    def test_absent_block_module_warns_and_leaves_the_mixer_unmarked(
-        self, pristine_nemotron_classes, caplog
+    def test_absent_block_module_raises_and_leaves_the_mixer_unmarked(
+        self, pristine_nemotron_classes
     ):
         # Act
-        with caplog.at_level(logging.WARNING):
+        with pytest.raises(ModuleNotFoundError, match="agilerl_missing_module"):
             patch_nemotron_mamba_packed_sequences(
                 mixer=MIXER_PATH, block="agilerl_missing_module.Block"
             )
 
         # Assert
-        assert "packed rows are not supported" in caplog.text
         assert RESETS_AT_DOCUMENT_BOUNDARY not in vars(NemotronHMamba2Mixer)
 
 

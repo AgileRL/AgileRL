@@ -37,7 +37,6 @@ class VllmRuntimeConfig(BaseModel):
 
     mamba_cache_mode: str | None = Field(default=None, min_length=1)
     max_num_batched_tokens: int | None = Field(default=None, ge=1)
-    reasoning_parser: str | None = Field(default=None, min_length=1)
     enable_prefix_caching: bool | None = Field(default=None)
     trust_remote_code: bool | None = Field(default=None)
     hf_overrides: dict[str, object] | Callable[[object], object] | None = Field(
@@ -46,6 +45,9 @@ class VllmRuntimeConfig(BaseModel):
     # vLLM >=0.32 keeps Mamba prefix-cache states only at each prompt's replay
     # boundary, so a later turn recomputes the previous reply.
     dense_mamba_prefix_cache: bool | None = Field(default=None)
+    # Async rollout engine attention_backend on compute capability 8.0 GPUs,
+    # where vLLM itself picks FLASH_ATTN.
+    sm80_attention_backend: str | None = Field(default=None, min_length=1)
 
     def engine_kwargs(self) -> dict[str, Any]:
         """Return the engine kwargs this family sets.
@@ -54,7 +56,8 @@ class VllmRuntimeConfig(BaseModel):
         :rtype: dict[str, Any]
         """
         kwargs = self.model_dump(
-            exclude_none=True, exclude={"dense_mamba_prefix_cache"}
+            exclude_none=True,
+            exclude={"dense_mamba_prefix_cache", "sm80_attention_backend"},
         )
         if self.dense_mamba_prefix_cache:
             kwargs["prefix_cache_retention_interval"] = None
@@ -74,18 +77,15 @@ class TrainerRuntimeConfig(BaseModel):
 
     # VL checkpoints build their full VL class so towers load, frozen.
     model_class: TrainerModelClass = AutoModelForCausalLM
-    attn_implementation: str | None = Field(default=None, min_length=1)
     trust_remote_code: bool | None = Field(default=None)
 
     def load_kwargs(self) -> dict[str, object]:
-        """Return the ``from_pretrained`` kwargs this family sets, without the attention backend.
+        """Return the ``from_pretrained`` kwargs this family sets.
 
         :return: ``trust_remote_code`` when set.
         :rtype: dict[str, object]
         """
-        return self.model_dump(
-            exclude_none=True, exclude={"model_class", "attn_implementation"}
-        )
+        return self.model_dump(exclude_none=True, exclude={"model_class"})
 
 
 class MambaPatchConfig(BaseModel):
@@ -153,5 +153,9 @@ class ModelRuntimeConfig(BaseModel):
         default_factory=dict
     )
     tensor_parallel_plan: str | None = Field(default=None, min_length=1)
-    # A name in agilerl.llm_envs.tool_parsers.TOOL_PARSERS; None detects from the vocab.
-    tool_call_parser: str | None = Field(default=None, min_length=1)
+    # A name in agilerl.llm_envs.chat_formats.CHAT_FORMATS; None detects from the vocab.
+    chat_format: str | None = Field(default=None, min_length=1)
+    # vLLM reasoning parser of a thinking family. Only the Ray rollout engine
+    # enables it, for a thinking budget or answer grammar; otherwise its
+    # reasoning_config makes every GPU step wait on the last step's tokens.
+    reasoning_parser: str | None = Field(default=None, min_length=1)

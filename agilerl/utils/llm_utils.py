@@ -50,7 +50,12 @@ from agilerl.architectures.vllm_language import (
     apply_tower_connector_lora_engine_kwargs,
     nested_language_config,
 )
-from agilerl.arena.memory.resolve.lora import resolve_lora_rank_ceiling
+from agilerl.arena.memory.resolve.attention import (
+    FAMILY_ATTN_IMPLEMENTATIONS,
+    KERNEL_RULE_MODEL_TYPES,
+    resolve_attn_implementation,
+)
+from agilerl.arena.memory.resolve.lora import resolve_max_lora_rank
 from agilerl.distributed.fsdp import CPUOffloadOptimizer, canonical_fsdp_param_fqn
 from agilerl.distributed.process import (
     allreduce_minmax_int,
@@ -101,7 +106,8 @@ if HAS_LLM_DEPENDENCIES:
     )
     from transformers.modeling_utils import PreTrainedModel
 
-    from agilerl.lora.moe import grouped_mm_supported
+    from agilerl.lora.moe import device_expert_backend
+    from agilerl.lora.moe.layouts import is_packed_experts_module
     from agilerl.utils.hf_remote_code import load_remote_code, remote_code_lock
     from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 else:
@@ -129,6 +135,7 @@ LLM_RL_COMMON_METRIC_NAMES = (
     "loss",  # update-averaged objective
     "entropy",  # policy entropy proxy (mean negative logprob)
     "completion_length",  # mean token ids per trajectory
+    "micro_batches_per_step",  # mean micro-batches per optimizer step on this rank
     *ROW_PADDING_METRIC_NAMES,
 )
 
@@ -573,10 +580,8 @@ def normalize_prompt_batch(
 def needs_cross_rank_seq_padding(algo: object, *, world_size: int) -> bool:
     """Return whether ranks must sync completion seq lengths before ``learn()``.
 
-    Multi-rank Liger token-level losses chunk over ``B * (T - 1)`` and issue one
-    NCCL allreduce per chunk (DAPO/CISPO normaliser). FSDP2 full-shard (and any
-    collective-heavy DP path) also requires identical per-rank ``T`` so every
-    rank issues the same NCCL collectives.
+    FSDP2 full-shard (and any collective-heavy DP path) requires identical
+    per-rank ``T`` so every rank issues the same NCCL collectives.
 
     :param algo: LLM algorithm about to call ``learn``.
     :type algo: object
@@ -589,11 +594,7 @@ def needs_cross_rank_seq_padding(algo: object, *, world_size: int) -> bool:
         return False
     if getattr(algo, "fsdp_config", None) is not None:
         return True
-    if getattr(algo, "distributed", False):
-        return True
-    if not getattr(algo, "use_liger_loss", False):
-        return False
-    return getattr(algo, "importance_sampling_level", "token") == "token"
+    return bool(getattr(algo, "distributed", False))
 
 
 def pad_completion_batch_to_seq_len(
@@ -605,7 +606,7 @@ def pad_completion_batch_to_seq_len(
     """Right-pad stacked completions/masks to ``target_seq_len`` / ``target-1``.
 
     Pad positions use ``pad_token_id`` and ``False`` so they contribute nothing
-    to the masked CISPO/Liger objective.
+    to the masked CISPO objective.
 
     :param completion_ids: ``(B, T)`` token ids.
     :type completion_ids: torch.Tensor
@@ -696,8 +697,7 @@ def align_completion_batch_shapes_across_ranks(
     after pad so no rank enters sharded ``learn`` collectives while peers are
     still padding. Call immediately before ``learn()`` when
     :func:`needs_cross_rank_seq_padding` is true. Shorter ranks are right-padded
-    to the global max ``T`` so Liger token-level chunk collectives stay in
-    lockstep.
+    to the global max ``T`` so sharded collectives stay in lockstep.
 
     :param completion_ids: Per-sample or stacked token ids.
     :type completion_ids: list[torch.Tensor] | torch.Tensor
@@ -1628,42 +1628,51 @@ def format_colocated_vllm_oom_hint(
     return "\n".join(lines)
 
 
-def resolve_attn_implementation(
-    requested: str | None = None,
-    model_name_or_path: str | None = None,
-) -> str:
-    """Pick the trainer attention backend.
+def trainer_attn_implementation(model_name_or_path: str, cuda: bool) -> str:
+    """Pick the attention backend the trainer loads a checkpoint with.
 
-    Order: ``ATTN_IMPLEMENTATION`` / ``AGILERL_ATTN_IMPLEMENTATION`` → family
-    trainer default for ``model_name_or_path`` (Gemma SWA / gpt-oss
-    ``flex_attention``) → explicit ``requested`` → ``flash_attention_2`` if
-    ``flash_attn`` is installed, else ``sdpa``. Family defaults beat YAML /
-    spec values; env still overrides the catalog.
+    ``ATTN_IMPLEMENTATION`` or ``AGILERL_ATTN_IMPLEMENTATION`` in the
+    environment overrides the rule for an operator. Otherwise
+    :func:`~agilerl.arena.memory.resolve.attention.resolve_attn_implementation`
+    decides from the model family and the device.
 
-    :param requested: Explicit choice from the caller. ``None`` / ``"auto"``
-        continue to the flash/sdpa fallback when env and family are unset.
-    :type requested: str | None
-    :param model_name_or_path: Checkpoint id used to look up family trainer
-        defaults.
-    :type model_name_or_path: str | None
-    :return: The attention implementation string for ``from_pretrained`` /
-        ``from_config``.
+    :param model_name_or_path: Checkpoint id or local path.
+    :type model_name_or_path: str
+    :param cuda: The trainer runs on a CUDA device.
+    :type cuda: bool
+    :return: The attention implementation for ``from_pretrained`` / ``from_config``.
     :rtype: str
+    :raises ImportError: The rule picks ``flash_attention_2`` on CUDA and
+        ``flash_attn`` is not installed.
     """
-    env_attn = os.environ.get("ATTN_IMPLEMENTATION") or os.environ.get(
+    override = os.environ.get("ATTN_IMPLEMENTATION") or os.environ.get(
         "AGILERL_ATTN_IMPLEMENTATION"
     )
-    if env_attn and env_attn != "auto":
-        return env_attn.strip()
-    if model_name_or_path is not None:
-        family_attn = family_runtime(model_name_or_path).trainer.attn_implementation
-        if family_attn is not None and family_attn != "auto":
-            return family_attn
-    if requested is not None and requested != "auto":
-        return requested
-    if importlib.util.find_spec("flash_attn") is not None:
-        return "flash_attention_2"
-    return "sdpa"
+    if override:
+        return override.strip()
+    model_type = pretrained_model_type(model_name_or_path)
+    attn_implementation = resolve_attn_implementation(model_type, cuda)
+    if (
+        cuda
+        and attn_implementation == "flash_attention_2"
+        and importlib.util.find_spec("flash_attn") is None
+    ):
+        msg = (
+            f"flash_attn is required on CUDA for model_type '{model_type}'. "
+            "Install it: pip install flash-attn --no-build-isolation"
+        )
+        raise ImportError(msg)
+    if (
+        model_type not in FAMILY_ATTN_IMPLEMENTATIONS
+        and model_type not in KERNEL_RULE_MODEL_TYPES
+    ):
+        logger.warning(
+            "No attention backend is registered for model_type %r; loading with %s. "
+            "Check the family trains correctly with it, or set ATTN_IMPLEMENTATION.",
+            model_type,
+            attn_implementation,
+        )
+    return attn_implementation
 
 
 @runtime_checkable
@@ -1671,6 +1680,13 @@ class AttnImplementationConfig(Protocol):
     """Hugging Face config carrying the attention backend its layers dispatch on."""
 
     _attn_implementation: str | None
+
+
+@runtime_checkable
+class VisionTowerConfig(Protocol):
+    """Hugging Face VL config describing its vision tower under ``vision_config``."""
+
+    vision_config: object
 
 
 def set_sub_model_attn_implementation(
@@ -1717,6 +1733,18 @@ def language_model_attn_implementation(model: nn.Module) -> str | None:
     return language_config._attn_implementation
 
 
+def has_vision_tower(model: nn.Module) -> bool:
+    """Whether *model*'s config describes a vision tower.
+
+    :param model: Causal LM, VL model, or a PEFT / value-head wrapper of one.
+    :type model: nn.Module
+    :return: ``True`` when the config carries a ``vision_config``.
+    :rtype: bool
+    """
+    config = model.config
+    return isinstance(config, VisionTowerConfig) and config.vision_config is not None
+
+
 def report_model_kernels(model: nn.Module, attn_implementation: str) -> None:
     """Log the kernel each layer type uses on rank 0; raise if the language model ignores *attn_implementation*.
 
@@ -1751,10 +1779,12 @@ def report_model_kernels(model: nn.Module, attn_implementation: str) -> None:
         if fast_path is not None and namespace_name not in namespaces_seen:
             namespaces_seen.add(namespace_name)
             lines.append(f"mamba fast path {namespace_name}: {fast_path}")
-    if torch.cuda.is_available():
+    if torch.cuda.is_available() and any(
+        is_packed_experts_module(module) for module in model.modules()
+    ):
         dtype = next(model.parameters()).dtype
-        supported = grouped_mm_supported(torch.cuda.current_device(), dtype)
-        lines.append(f"grouped_mm {dtype}: {supported}")
+        backend = device_expert_backend(torch.cuda.current_device(), dtype)
+        lines.append(f"expert GEMM backend {dtype}: {backend}")
     language_attn = language_model_attn_implementation(model)
     if is_main_process():
         logger.debug("Model kernels:\n  %s", "\n  ".join(lines))
@@ -1764,10 +1794,13 @@ def report_model_kernels(model: nn.Module, attn_implementation: str) -> None:
             f"{attn_implementation!r} was requested"
         )
         raise RuntimeError(msg)
+    if is_main_process():
+        logger.info("Trainer attention backend: %s", language_attn)
 
 
 def create_model_from_name_or_path(
     model_name_or_path: str,
+    attn_implementation: str,
     model_config: dict[str, Any] | None = None,
     add_value_head: bool = False,
     use_distributed: bool = False,
@@ -1776,11 +1809,12 @@ def create_model_from_name_or_path(
 
     :param model_name_or_path: The name or path of the model to create.
     :type model_name_or_path: str
+    :param attn_implementation: Attention backend to load with, as
+        :func:`trainer_attn_implementation`.
+    :type attn_implementation: str
     :param model_config: Extra keyword arguments forwarded to ``from_pretrained``
-        (e.g. a ``quantization_config``). ``torch_dtype`` fills if absent, then
-        ``attn_implementation`` is resolved (env, family trainer default,
-        explicit value, then flash/sdpa). Other family trainer keys fill
-        via ``setdefault``.
+        (e.g. a ``quantization_config``). ``torch_dtype`` fills if absent;
+        family trainer keys fill via ``setdefault``.
     :type model_config: dict[str, Any ] | None
     :param add_value_head: Flag to indicate if a value head should be added to the model, defaults to False
     :type add_value_head: bool, optional
@@ -1799,11 +1833,10 @@ def create_model_from_name_or_path(
     trainer = family_runtime(model_name_or_path).trainer
     for key, value in trainer.load_kwargs().items():
         model_config.setdefault(key, value)
-    model_config["attn_implementation"] = resolve_attn_implementation(
-        model_config.get("attn_implementation"),
-        model_name_or_path=model_name_or_path,
-    )
-    if model_config["attn_implementation"] == "flex_attention":
+    model_config["attn_implementation"] = attn_implementation
+    if is_main_process():
+        logger.info("Trainer attention backend: %s", attn_implementation)
+    if attn_implementation == "flex_attention":
         patch_flex_attention_kernel_options()
     load_remote_code(
         model_name_or_path,
@@ -2093,6 +2126,26 @@ def baseline_free_turn_cells(turn_mask: torch.Tensor, group_size: int) -> torch.
     return turn_mask & lone
 
 
+def tied_reward_groups(
+    grouped: torch.Tensor, played: torch.Tensor | None = None
+) -> torch.Tensor:
+    """Mark groups whose rewards are all equal, which float rounding leaves off-centre.
+
+    :param grouped: ``[groups, group_size, ...]`` rewards, members on dim 1.
+    :type grouped: torch.Tensor
+    :param played: Boolean mask like ``grouped`` of the members that count, or
+        ``None`` for every member.
+    :type played: torch.Tensor | None
+    :return: Boolean ``[groups, 1, ...]`` mask of tied groups.
+    :rtype: torch.Tensor
+    """
+    high, low = grouped, grouped
+    if played is not None:
+        high = grouped.masked_fill(~played, float("-inf"))
+        low = grouped.masked_fill(~played, float("inf"))
+    return high.amax(dim=1, keepdim=True) == low.amin(dim=1, keepdim=True)
+
+
 def batch_is_single_turn(turn_ids: torch.Tensor | None) -> bool:
     """True when every sample has at most one turn, or ``turn_ids`` is missing.
 
@@ -2328,7 +2381,7 @@ def clipped_is_surrogate(
 
     Thin composition of :func:`pool_log_ratio_by_level` (ratio + advantage
     pooling) and :func:`clipped_min_surrogate` (clip + min-surrogate). Shared by
-    the non-Liger PPO and REINFORCE paths. Operates only on ``(B, T)`` tensors
+    the PPO and REINFORCE losses. Operates only on ``(B, T)`` tensors
     (no vocab axis), so it is memory-bounded.
 
     :param token_log_ratio: ``(B, T)`` per-token ``log pi - log pi_old``.
@@ -2885,8 +2938,7 @@ def calculate_k3_kl(
     """Schulman k3 estimator of ``KL(policy || reference)`` from policy samples.
 
     ``exp(ref - policy) - (ref - policy) - 1`` — always-positive,
-    lower-variance than the naive log-difference. Same form as the Liger
-    fused kernel and TRL.
+    lower-variance than the naive log-difference. Same form as TRL.
     """
     diff = reference_log_probs - policy_log_probs
     return torch.exp(diff) - diff - 1.0
@@ -3050,6 +3102,7 @@ def build_vllm_llm_init_kwargs(
     process_index: int = 0,
     lora_rank: int | None = None,
     tower_lora_target_modules: Collection[str] | None = None,
+    strip_multimodal_towers: bool = False,
 ) -> dict[str, Any]:
     """Build kwargs for ``vllm.LLM`` from :class:`~agilerl.utils.algo_utils.VLLMConfig`.
 
@@ -3065,6 +3118,8 @@ def build_vllm_llm_init_kwargs(
     :type lora_rank: int | None
     :param tower_lora_target_modules: ``lora_config.tower_target_modules``; enables tower LoRA.
     :type tower_lora_target_modules: Collection[str] | None
+    :param strip_multimodal_towers: Whether the engine skips the model's towers.
+    :type strip_multimodal_towers: bool
     :return: Keyword arguments for ``vllm.LLM``.
     :rtype: dict[str, Any]
     """
@@ -3116,19 +3171,11 @@ def build_vllm_llm_init_kwargs(
         kwargs["kv_cache_memory_bytes"] = vllm_config.kv_cache_memory_bytes
     if vllm_config.limit_mm_per_prompt is not None:
         kwargs["limit_mm_per_prompt"] = vllm_config.limit_mm_per_prompt
-    if getattr(vllm_config, "enforce_eager", None) is not None:
-        # Force vLLM to skip CUDA-graph capture. Saves the ~2 GiB CUDA-graph
-        # private pool (useful for colocated trainer/rollout setups with a
-        # tight GPU budget) at the cost of slightly slower per-step decode.
-        kwargs["enforce_eager"] = vllm_config.enforce_eager
     # Colocated vLLM always serves LoRA: the trainer shares vLLM's base and syncs
     # only the adapter per rollout.
     kwargs["enable_lora"] = True
-    kwargs["max_lora_rank"] = resolve_lora_rank_ceiling(
-        vllm_config.max_lora_rank,
-        int(lora_rank or 0),
-    )
-    kwargs["max_loras"] = vllm_config.max_loras
+    kwargs["max_lora_rank"] = resolve_max_lora_rank(int(lora_rank or 0))
+    kwargs["max_loras"] = 1
     for key, value in family_vllm_kwargs.items():
         kwargs.setdefault(key, value)
     if runtime is not None:
@@ -3136,11 +3183,11 @@ def build_vllm_llm_init_kwargs(
             kwargs.setdefault("trust_remote_code", runtime.trainer.trust_remote_code)
         apply_multimodal_engine_kwargs(
             kwargs,
-            strip_multimodal_towers=vllm_config.strip_multimodal_towers,
+            strip_multimodal_towers=strip_multimodal_towers,
         )
         apply_tower_connector_lora_engine_kwargs(
             kwargs,
-            strip_multimodal_towers=vllm_config.strip_multimodal_towers,
+            strip_multimodal_towers=strip_multimodal_towers,
             runtime=runtime,
             tower_target_modules=tower_lora_target_modules,
         )

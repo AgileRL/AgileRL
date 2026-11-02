@@ -29,7 +29,6 @@ from tests.rank_launch import run_ranks
 from tests.test_algorithms.test_llms.segment_helpers import (
     balanced_learn_worker,
     pad_to_eight_rows,
-    use_fake_liger_policy_loss,
 )
 from tests.test_algorithms.test_llms.vision_helpers import (
     IMAGE_COUNTS,
@@ -67,10 +66,8 @@ def make_vision_reinforce(**overrides: Any) -> REINFORCE:
         "mini_batch_size": 4,
         "update_epochs": 1,
         "wrap": False,
-        "gradient_checkpointing": False,
         "calc_position_embeddings": False,
         "device": "cpu",
-        "use_liger_loss": False,
         "lora_config": LoraConfig(
             r=4,
             lora_alpha=8,
@@ -85,16 +82,11 @@ def make_vision_reinforce(**overrides: Any) -> REINFORCE:
 
 class TestREINFORCELearnVision:
     @pytest.mark.parametrize("segmented", [True, False], ids=["segments", "episodes"])
-    @pytest.mark.parametrize("liger", [False, True], ids=["standard", "liger"])
     def test_every_forward_gets_the_vision_rows_of_its_rows(
-        self, monkeypatch: pytest.MonkeyPatch, segmented: bool, liger: bool
+        self, segmented: bool
     ) -> None:
         # Arrange
         agent = make_vision_reinforce()
-        if liger:
-            use_fake_liger_policy_loss(
-                agent, monkeypatch, "agilerl.algorithms.reinforce_llm"
-            )
         model = vision_model(agent)
         expected = expected_vision_rows(segmented)
 

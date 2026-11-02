@@ -45,6 +45,7 @@ ENV_VAR_NAME_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]*$"
 ENV_POD_DEFAULT_CPUS = 0.01
 # A multi-GB env image cold-pulls in minutes.
 ENV_POD_READY_TIMEOUT_S = 600.0
+DEFAULT_ADAPTIVE_TASK_SAMPLING = True
 
 
 class EnvContainerSpec(BaseModel):
@@ -627,6 +628,15 @@ class LLMEnvSpec(EnvSpecBase):
             "malformed or missing, which never reaches the env. Unset scores 0."
         ),
     )
+    include_reasoning: bool | None = Field(
+        default=None,
+        description=(
+            "Send the env or reward function each turn's reasoning with its "
+            "markers, not only the text after the reasoning ends. Unset sends "
+            "it to a reward file over dataset rows and not to an env that "
+            "runs the action."
+        ),
+    )
     train_test_split: float | None = Field(
         default=None,
         ge=0.0,
@@ -833,12 +843,12 @@ class LLMEnvSpec(EnvSpecBase):
         ),
     )
     adaptive_task_sampling: bool = Field(
-        default=False,
+        default=DEFAULT_ADAPTIVE_TASK_SAMPLING,
         description=(
             "Draw each group's task row in proportion to how often that row's "
             "recent groups had differing rewards, so tasks that keep giving tied "
-            "groups are drawn less (Ray async rollouts only). Unset keeps the "
-            "per-epoch shuffle."
+            "groups are drawn less (Ray async rollouts over task rows only). "
+            "false keeps the per-epoch shuffle."
         ),
     )
     task_family_field: str | None = Field(
@@ -975,6 +985,13 @@ class LLMEnvSpec(EnvSpecBase):
     def dataset_backed_rollout(self) -> bool:
         """Whether this rollout env serves labelled rows scored by a rubric."""
         return self.env_type == "rollout" and self._named_dataset() is not None
+
+    @property
+    def sends_reasoning(self) -> bool:
+        """Whether each turn's reasoning reaches the env or reward function."""
+        if self.include_reasoning is not None:
+            return self.include_reasoning
+        return self.dataset_backed_rollout
 
     @property
     def text_only(self) -> bool:

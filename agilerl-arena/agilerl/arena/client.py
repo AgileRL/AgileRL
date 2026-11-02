@@ -37,6 +37,10 @@ from agilerl.arena.inference.cache import (
     normalized_deployment_name,
     save_binding,
 )
+from agilerl.arena.memory.manifest import (
+    explicit_colocated_rollout,
+    validated_run_manifest,
+)
 from agilerl.arena.models import LLMAlgorithmSpec, TrainingManifest
 from agilerl.arena.models.model_info import (
     STATUS_DEPRECATED,
@@ -57,7 +61,9 @@ from agilerl.arena.utils import (
 
 logger = logging.getLogger(__name__)
 
-DATASET_CATEGORIES = frozenset({"sft", "preference", "reasoning"})
+DATASET_CATEGORIES = frozenset(
+    {"sft", "preference", "reasoning", "tabular", "non-tabular"}
+)
 PARQUET_CONTENT_TYPE = "application/vnd.apache.parquet"
 CSV_CONTENT_TYPE = "text/csv"
 
@@ -82,9 +88,9 @@ ManifestParamSpec = TypedDict(
 
 
 class ManifestInvoke(TypedDict, total=False):
-    """The fixed call descriptor for an on-prem command (method, path, params).
+    """The fixed call descriptor for a BYOC command (method, path, params).
 
-    Used both for the hardcoded invokes in ``agilerl.arena.on_prem.endpoints``
+    Used both for the hardcoded invokes in ``agilerl.arena.byoc.endpoints``
     and for command nodes parsed from the server capabilities manifest.
     """
 
@@ -109,6 +115,21 @@ class _TokenStore:
     def clear(self) -> None:
         self.access_token = None
         self.refresh_token = None
+
+
+def _pause_for_rate_limit(response: httpx.Response) -> None:
+    """Wait for the Arena ``Retry-After`` delay before sending the request again."""
+    raw = response.headers.get("Retry-After")
+    try:
+        wait = int(raw)
+    except (TypeError, ValueError):
+        wait = 1
+    if wait < 1:
+        wait = 1
+    elif wait > 60:
+        wait = 60
+    logger.warning("Arena rate limit reached; retrying in %s seconds.", wait)
+    time.sleep(wait)
 
 
 def _check_writable_target(path: Path) -> None:
@@ -163,7 +184,7 @@ class ArenaClient:
     :type external_user_id: str | None
     :param request_timeout: Default timeout in seconds for API requests.
     :type request_timeout: int
-    :param upload_timeout: Timeout in seconds for file-upload requests.
+    :param upload_timeout: Timeout in seconds for file uploads and cluster register.
     :type upload_timeout: int
     :param verbose: Whether to enable verbose logging.
     :type verbose: bool
@@ -177,9 +198,18 @@ class ArenaClient:
 
     _CAPABILITIES_PATH: ClassVar[str] = "/api/cli/v1/capabilities"
     _CAPABILITIES_TIMEOUT_SECS: ClassVar[float] = 5.0
-    _MANIFEST_ALLOWED_PATH_PREFIX: ClassVar[str] = "/api/cli/v1/on-prem"
+    _MANIFEST_ALLOWED_PATH_PREFIX: ClassVar[str] = "/api/cli/v1/byoc"
     _MANIFEST_ALLOWED_METHODS: ClassVar[frozenset[str]] = frozenset(
         {"GET", "POST", "PATCH", "DELETE"}
+    )
+    # These wait on Arena to mint tokens, Helm values, or a zip bundle.
+    _MANIFEST_LONG_REQUEST_PATHS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "/api/cli/v1/byoc/clusters/register",
+            "/api/cli/v1/byoc/clusters/rotate-token",
+            "/api/cli/v1/byoc/clusters/install-package",
+            "/api/cli/v1/byoc/classes/deployment-setup",
+        }
     )
 
     _ERROR_MAP: ClassVar[dict[str, type[ArenaAPIError]]] = {
@@ -388,7 +418,7 @@ class ArenaClient:
 
         Includes account fields such as email and name. When the Arena server
         exposes them, the payload may also contain entitlement flags (e.g.
-        enterprise / on-prem access) relevant to CLI feature gating.
+        enterprise / BYOC access) relevant to CLI feature gating.
         """
         return self._request("GET", "/api/users/current")
 
@@ -639,8 +669,8 @@ class ArenaClient:
         result: dict[str, Any] = self._request(
             "DELETE", "/api/cli/v1/environments/delete", json=payload
         )
-        deleted_version = result.get("version", version)
-        msg_suffix = f":{deleted_version}" if version else ""
+        deleted = result.get("versions") or ([version] if version else [])
+        msg_suffix = f":{', '.join(str(v) for v in deleted)}" if deleted else ""
         logger.info("Environment %s%s deleted successfully.", name, msg_suffix)
         return result
 
@@ -686,25 +716,16 @@ class ArenaClient:
     def list_datasets(
         self,
         *,
-        name: str | None = None,
         search: str | None = None,
     ) -> list[dict[str, Any]]:
         """List datasets or search HuggingFace datasets.
 
-        :param name: Filter by registered dataset name.
-        :type name: str | None
         :param search: HuggingFace dataset search query.
         :type search: str | None
         :returns: List of datasets or search results from Arena.
         :rtype: list[dict[str, Any]]
         """
-        params: dict[str, str] | None = None
-        if name is not None or search is not None:
-            params = {}
-            if name is not None:
-                params["name"] = name
-            if search is not None:
-                params["search"] = search
+        params = {"search": search} if search is not None else None
         result = self._request("GET", "/api/cli/v1/datasets", params=params)
         if not isinstance(result, list):
             return result
@@ -718,7 +739,7 @@ class ArenaClient:
 
         :param name: Dataset name.
         :type name: str
-        :returns: ``exists``, optional ``id``, and ``datasetType`` when present.
+        :returns: ``exists``, and ``datasetType`` when the name is registered.
         :rtype: dict[str, bool | str]
         """
         return self._request(
@@ -749,7 +770,7 @@ class ArenaClient:
         :param name: Dataset name.
         :type name: str
         :param category: Dataset category (``reasoning``, ``preference``,
-            or ``sft``).
+            ``sft``, ``tabular``, or ``non-tabular``).
         :type category: str
         :param column_mapping: Column mapping as a JSON string or dict.
         :type column_mapping: str | dict[str, Any]
@@ -1025,7 +1046,7 @@ class ArenaClient:
         """List HuggingFace models in the Arena catalog.
 
         :returns: Catalog rows including ``model_name``, ``num_params``,
-            ``lora_info``, and ``max_context_length``.
+            ``lora_info``, ``max_context_length``, ``lora_ranks``, and ``enabled``.
         :rtype: list[dict[str, Any]]
         """
         return self._request("GET", "/api/cli/v1/models")
@@ -1035,8 +1056,8 @@ class ArenaClient:
 
         :param model_name: HuggingFace model id as stored in the catalog.
         :type model_name: str
-        :returns: ``modules``, ``parameters``, ``lora_info``, ``num_params``, and
-            ``max_context_length``.
+        :returns: ``modules``, ``parameters``, ``lora_info``, ``num_params``,
+            ``max_context_length``, and ``lora_ranks``.
         :rtype: dict[str, Any]
         """
         return self._request(
@@ -1054,6 +1075,7 @@ class ArenaClient:
         algorithm: str,
         *,
         gym_env: str | None = None,
+        gym_env_version: str | None = None,
         gym_env_entrypoint: str | None = None,
         dataset_name: str | None = None,
         field: str | None = None,
@@ -1067,6 +1089,9 @@ class ArenaClient:
         :type algorithm: str
         :param gym_env: Gym environment display name.
         :type gym_env: str | None
+        :param gym_env_version: Gym environment version. Required with
+            ``gym_env_entrypoint`` (``v1`` and ``1`` are both accepted).
+        :type gym_env_version: str | None
         :param gym_env_entrypoint: Gym entrypoint.
         :type gym_env_entrypoint: str | None
         :param dataset_name: Dataset name.
@@ -1083,6 +1108,7 @@ class ArenaClient:
         params: dict[str, Any] = {"algorithm": algorithm}
         optional = {
             "gymEnv": gym_env,
+            "gymEnvVersion": gym_env_version,
             "gymEnvEntrypoint": gym_env_entrypoint,
             "datasetName": dataset_name,
             "field": field,
@@ -1131,8 +1157,16 @@ class ArenaClient:
         """
         training_manifest = TrainingManifest.get_validated(manifest, mode="python")
         self._check_model_status(training_manifest)
+        self._check_rollout_mode(training_manifest)
         validated = training_manifest.to_payload()
         resolved_project = self._resolve_project(project)
+        if not resolved_project:
+            msg = "No project specified."
+            raise ArenaConfigError(
+                msg,
+                sdk_hint="Pass a project name or set a default with ArenaClient.set_default_project().",
+                cli_hint="Use --project or set a default with 'arena projects set-default <name>'.",
+            )
 
         if reward_file is not None:
             files = self._build_submit_experiment_multipart(
@@ -1154,13 +1188,21 @@ class ArenaClient:
             finally:
                 self._close_upload_files(files)
 
-        payload: dict[str, Any] = {
-            "manifest": validated,
-            "resource_id": resource_id,
-            "num_nodes": num_nodes,
-            "project": resolved_project,
-            "experiment_name": experiment_name,
-        }
+        # The server rejects explicit nulls: project and resource_id are
+        # non-nullable, and the num_nodes default only applies when the key is
+        # absent.
+        payload: dict[str, Any] = {"manifest": validated, "project": resolved_project}
+        payload.update(
+            {
+                key: value
+                for key, value in (
+                    ("resource_id", resource_id),
+                    ("num_nodes", num_nodes),
+                    ("experiment_name", experiment_name),
+                )
+                if value is not None
+            }
+        )
         return self._open_stream(
             "POST",
             "/api/cli/v1/experiments/jobs/submit",
@@ -1183,6 +1225,17 @@ class ArenaClient:
             raise ArenaValidationError(msg)
         if entry.status == STATUS_DEPRECATED:
             logger.warning("Model %s is deprecated and will be removed.", hub_id)
+
+    @staticmethod
+    def _check_rollout_mode(manifest: TrainingManifest) -> None:
+        """Reject a rollout LLM job that cannot run async, as Arena runs it."""
+        if explicit_colocated_rollout(manifest):
+            msg = (
+                "rollout_mode: colocated runs only locally; Arena runs rollout "
+                "LLM jobs async. Set rollout_mode: async or drop the key."
+            )
+            raise ArenaValidationError(msg)
+        validated_run_manifest(manifest)
 
     @staticmethod
     def _build_submit_experiment_multipart(
@@ -1311,8 +1364,8 @@ class ArenaClient:
         *,
         project: str | None = None,
         details: bool = False,
-    ) -> list[str] | dict[str, Any]:
-        r"""List metric column names recorded for an experiment (JSON).
+    ) -> list[dict[str, Any]] | dict[str, Any]:
+        r"""List metric catalog rows recorded for an experiment (JSON).
 
         For a **CSV preview** with ``--metric`` / ``--preview-rows``-style filters,
         use :meth:`preview_experiment_metrics_csv`.
@@ -1321,10 +1374,11 @@ class ArenaClient:
         :type experiment_name: str
         :param project: Optional exact project name in the current org.
         :type project: str | None
-        :param details: When True, the API returns ``{\"experiment_id\", \"metrics\"}``.
+        :param details: When True, the API returns ``{\"metrics\": […catalog…]}``.
         :type details: bool
-        :returns: Sorted unique metric names, or that object when ``details`` is True.
-        :rtype: list[str] | dict[str, Any]
+        :returns: Catalog rows ``{display_name, category}``, or that object when
+            ``details`` is True.
+        :rtype: list[dict[str, Any]] | dict[str, Any]
         """
         resolved_project = self._resolve_project(project)
         params: dict[str, Any] = {"experiment_name": experiment_name}
@@ -1881,6 +1935,7 @@ class ArenaClient:
         stream: bool = False,
         timeout: int | None = None,
         _retried: bool = False,
+        _rate_limit_attempts: int = 0,
         **kwargs: Any,
     ) -> httpx.Response:
         """Send an HTTP request with auth injection, 401-retry, and error handling.
@@ -1992,6 +2047,21 @@ class ArenaClient:
                 msg,
                 sdk_hint="Please run client.login() again.",
                 cli_hint="Please run 'arena login' to re-authenticate.",
+            )
+
+        if resp.status_code == 429 and _rate_limit_attempts < 5:
+            self._read_response_body(resp, stream=stream)
+            _pause_for_rate_limit(resp)
+            self._rewind_upload_files(kwargs.get("files"))
+            return self._send(
+                method,
+                path,
+                stream=stream,
+                timeout=timeout,
+                _retried=_retried,
+                _rate_limit_attempts=_rate_limit_attempts + 1,
+                headers=request_headers,
+                **kwargs,
             )
 
         # Handle non-success responses.
@@ -2112,7 +2182,7 @@ class ArenaClient:
             self._cli_capabilities_cache = None
             return None
 
-        if resp.status_code == 404:
+        if resp.status_code in (404, 401, 403):
             self._cli_capabilities_cache = None
             return None
 
@@ -2161,17 +2231,17 @@ class ArenaClient:
         """
         path = invoke["path"]
         if not isinstance(path, str):
-            msg = "The Arena server sent an invalid on-prem command."
+            msg = "The Arena server sent an invalid BYOC command."
             raise ArenaValidationError(
                 msg,
-                cli_hint="Upgrade agilerl — the server sent an on-prem "
+                cli_hint="Upgrade agilerl — the server sent a BYOC "
                 "configuration this version can't use.",
             )
         if not path.startswith(self._MANIFEST_ALLOWED_PATH_PREFIX):
-            msg = "This on-prem command isn't permitted by the CLI."
+            msg = "This BYOC command isn't permitted by the CLI."
             raise ArenaValidationError(msg)
         if ".." in path.split("/"):
-            msg = "The Arena server sent an invalid on-prem command path."
+            msg = "The Arena server sent an invalid BYOC command path."
             raise ArenaValidationError(msg)
 
         method = str(invoke["method"]).upper()
@@ -2246,7 +2316,7 @@ class ArenaClient:
         if body_needed and body_obj is None:
             body_obj = {}
 
-        # Hardcoded invokes (e.g. on-prem install) pass a full payload without
+        # Hardcoded invokes (e.g. BYOC cluster register) pass a full payload without
         # manifest param specs — route by HTTP method.
         if not params_list and parsed_args:
             if method == "GET":
@@ -2261,7 +2331,7 @@ class ArenaClient:
         invoke: ManifestInvoke,
         parsed_args: Mapping[str, Any],
     ) -> Any:  # noqa: ANN401 -- JSON body (heterogeneous) or a binary (bytes, str|None, str|None) tuple; callers destructure the tuple branch, so a union return would force casts
-        """Dispatch an on-prem command using already-parsed CLI kwargs.
+        """Dispatch a BYOC command using already-parsed CLI kwargs.
 
         Returns decoded JSON for ``responseKind == "json"`` invokes, or a
         ``(bytes, content_type, content_disposition)`` tuple for ``"binary"``
@@ -2281,6 +2351,8 @@ class ArenaClient:
             req_kw["params"] = query
         if body_obj is not None:
             req_kw["json"] = body_obj
+        if path in self._MANIFEST_LONG_REQUEST_PATHS:
+            req_kw["timeout"] = max(self._request_timeout, self._upload_timeout)
 
         if response_kind == "binary":
             return self._request_raw(method, path, **req_kw)

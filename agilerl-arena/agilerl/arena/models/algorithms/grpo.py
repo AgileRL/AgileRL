@@ -31,7 +31,6 @@ class GRPOSpec(RolloutLLMSpec):
     group_size: int = Field(default=8, ge=1, description=GROUP_SIZE)
     lr: float = Field(default=5e-7, ge=0.0, description=LR)
     clip_coef: float = Field(default=0.2, ge=0.0, le=1.0, description=CLIP_COEF)
-
     adv_norm: Literal["mean_only", "mean_std"] = Field(
         default="mean_only",
         description=(
@@ -91,19 +90,6 @@ class GRPOSpec(RolloutLLMSpec):
             "outweigh short ones."
         ),
     )
-    old_logprobs_source: Literal["trainer", "rollout"] | None = Field(
-        default=None,
-        description=(
-            "Old policy for the clipped ratio. Unset uses 'trainer' when "
-            "generation is colocated in the trainer process, and 'rollout' "
-            "when a separate engine sampled the tokens. 'rollout' uses the "
-            "inference engine's sampling log-probs and runs the extra forward "
-            "only for completions missing some of them, e.g. after env "
-            "truncation. 'trainer' scores the learn-start policy, skipping "
-            "the extra forward for micro-batches before the first optimizer "
-            "step."
-        ),
-    )
     off_policy_token_mask_bounds: tuple[float, float] | None = Field(
         default=(0.5, 5.0),
         description=(
@@ -143,6 +129,14 @@ class GRPOSpec(RolloutLLMSpec):
             "torch.profiler trace of one micro-batch. Unset profiles nothing."
         ),
     )
+
+    @model_validator(mode="after")
+    def _kl_advantage_shaping_needs_beta(self) -> Self:
+        """KL shaping reads reference log-probs, which beta=0 never computes."""
+        if self.use_kl_advantage_shaping and self.beta == 0.0:
+            msg = "use_kl_advantage_shaping needs beta > 0"
+            raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def _gspo_leaves_off_policy_masks_unset(self) -> Self:

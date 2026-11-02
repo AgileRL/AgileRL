@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from agilerl.arena.memory import formulas
+from agilerl.arena.memory import kv_cache
 from agilerl.arena.memory.estimator import (
     estimate_generation,
     estimate_run,
@@ -75,34 +75,23 @@ class TestArchitecturalContextLimit:
 
 class TestSolveInference:
     def test_max_model_len_is_the_last_value_that_serves(self, model, device):
-        pool = 256 * 1024 * 1024
-        settings = GenerationSettings(
-            gpu_memory_utilization=0.9,
-            max_num_seqs=8,
-            kv_cache_memory_bytes=pool,
-        )
+        settings = GenerationSettings(gpu_memory_utilization=0.07, max_num_seqs=8)
         result = solve_inference(
             inference_run_config(model, device, settings), "max_model_len", hi=32768
         )
-        per_token = formulas.kv_cache_bytes_per_token(model.arch, "bf16")
-        expected = (int(pool // (8 * per_token)) // 16) * 16
-        assert result.value == expected
+        assert result.value % 16 == 0
         assert result.limited_by == "memory"
         assert generation_can_serve(result.estimate.generation)
 
         over = estimate_generation(
             model,
             device,
-            settings.model_copy(update={"max_model_len": expected + 16}),
+            settings.model_copy(update={"max_model_len": result.value + 16}),
         )
         assert not generation_can_serve(over)
 
     def test_max_num_seqs_grows_until_the_pool_is_full(self, model, device):
-        settings = GenerationSettings(
-            gpu_memory_utilization=0.9,
-            max_model_len=2048,
-            kv_cache_memory_bytes=256 * 1024 * 1024,
-        )
+        settings = GenerationSettings(gpu_memory_utilization=0.07, max_model_len=2048)
         result = solve_inference(
             inference_run_config(model, device, settings), "max_num_seqs", hi=64
         )
@@ -111,7 +100,7 @@ class TestSolveInference:
             device,
             settings.model_copy(update={"max_num_seqs": result.value + 1}),
         )
-        assert result.value == 10
+        assert result.value == 6
         assert result.limited_by == "memory"
         assert generation_can_serve(result.estimate.generation)
         assert not generation_can_serve(over)
@@ -119,9 +108,7 @@ class TestSolveInference:
     def test_higher_concurrency_shortens_max_model_len(self, model, device):
         def solved(seqs: int) -> int:
             settings = GenerationSettings(
-                gpu_memory_utilization=0.9,
-                max_num_seqs=seqs,
-                kv_cache_memory_bytes=256 * 1024 * 1024,
+                gpu_memory_utilization=0.07, max_num_seqs=seqs
             )
             return solve_inference(
                 inference_run_config(model, device, settings),
@@ -129,8 +116,8 @@ class TestSolveInference:
                 hi=32768,
             ).value
 
-        assert solved(4) == 5456
-        assert solved(8) == 2720
+        assert solved(4) == 3504
+        assert solved(8) == 1696
 
     def test_tiny_model_on_l4_hits_the_rope_cap(self, device):
         tiny = ModelSpec(model_id="tiny", arch=ModelArch.from_hf_config(TINY_CONFIG))
@@ -304,12 +291,12 @@ class TestSolveWithoutAnEngine:
         result = solve(config, "max_model_len", hi=32768)
         over = estimate_run(
             lockstep_max_model_len(
-                result.config, result.value + formulas.KV_BLOCK_SIZE_DEFAULT
+                result.config, result.value + kv_cache.KV_BLOCK_SIZE_DEFAULT
             )
         )
 
         # Assert
-        assert result.value == 432
+        assert result.value == 12352
         assert result.limited_by == "memory"
         assert result.estimate.training.fits_with_buffer
         assert over.training.fits
@@ -348,14 +335,14 @@ class TestSolveRebuild:
         # Act
         held = solve(base, "max_model_len", hi=32768)
         rebuilt = solve(base, "max_model_len", hi=32768, rebuild=rebuild)
-        over = estimate_run(at(rebuilt.value + formulas.KV_BLOCK_SIZE_DEFAULT, 1))
+        over = estimate_run(at(rebuilt.value + kv_cache.KV_BLOCK_SIZE_DEFAULT, 1))
 
         # Assert
-        assert held.value == 48
-        assert rebuilt.value == 432
+        assert held.value == 1536
+        assert rebuilt.value == 12352
         assert rebuilt.limited_by == "memory"
         assert rebuilt.config.training.micro_batch_size == 1
-        assert rebuilt.config.training.max_model_len == 432
+        assert rebuilt.config.training.max_model_len == 12352
         assert not over.training.fits_with_buffer
 
 
@@ -371,7 +358,7 @@ class TestBareSolveOnAnInferenceConfig:
         dedicated = solve_inference(config, "max_model_len", hi=32768)
 
         # Assert
-        assert bare.value == 3456
+        assert bare.value == 16800
         assert bare.limited_by == "memory"
         assert bare.estimate.training.fits_with_buffer
         assert dedicated.value == 32768
@@ -379,7 +366,7 @@ class TestBareSolveOnAnInferenceConfig:
         assert dedicated.value > bare.value
         over = estimate_run(
             lockstep_max_model_len(
-                bare.config, bare.value + formulas.KV_BLOCK_SIZE_DEFAULT
+                bare.config, bare.value + kv_cache.KV_BLOCK_SIZE_DEFAULT
             )
         )
         assert over.training.fits

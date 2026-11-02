@@ -43,16 +43,6 @@ def _file_uploads(files) -> list[tuple]:
 
 
 class TestListDatasets:
-    def test_list_by_name(self, api_key_client):
-        api_key_client._request = MagicMock(return_value=[{"name": "my-data"}])
-        result = api_key_client.list_datasets(name="my-data")
-        api_key_client._request.assert_called_once_with(
-            "GET",
-            "/api/cli/v1/datasets",
-            params={"name": "my-data"},
-        )
-        assert result == [{"name": "my-data", "hf_dataset_id": None}]
-
     def test_search(self, api_key_client):
         api_key_client._request = MagicMock(return_value=[{"hf_dataset_id": "hf/foo"}])
         result = api_key_client.list_datasets(search="countdown")
@@ -84,7 +74,6 @@ class TestListDatasets:
         api_key_client._request = MagicMock(
             return_value=[
                 {
-                    "id": 1,
                     "category": "sft",
                     "name": "my-data",
                     "hf_dataset_id": "org/ds",
@@ -92,7 +81,7 @@ class TestListDatasets:
             ],
         )
         result = api_key_client.list_datasets()
-        assert list(result[0].keys()) == ["name", "hf_dataset_id", "id", "category"]
+        assert list(result[0].keys()) == ["name", "hf_dataset_id", "category"]
         assert result[0]["hf_dataset_id"] == "org/ds"
 
 
@@ -101,7 +90,6 @@ class TestDatasetExists:
         api_key_client._request = MagicMock(
             return_value={
                 "exists": True,
-                "id": 7,
                 "datasetType": "reasoning",
             }
         )
@@ -112,7 +100,7 @@ class TestDatasetExists:
             params={"name": "my-dataset"},
         )
         assert result["exists"] is True
-        assert result["id"] == 7
+        assert result["datasetType"] == "reasoning"
 
 
 class TestCreateDataset:
@@ -316,15 +304,18 @@ class TestCreateDataset:
                 column_mapping={},
             )
 
-    def test_create_tabular_category_raises(self, api_key_client):
-        api_key_client._request = MagicMock()
-        with pytest.raises(ArenaValidationError, match="Invalid dataset category"):
-            api_key_client.create_dataset(
-                name="ds1",
-                category="tabular",
-                column_mapping={"feature": "x", "target": "y"},
-            )
-        api_key_client._request.assert_not_called()
+    def test_create_tabular_category_accepted(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"name": "ds1"})
+
+        result = api_key_client.create_dataset(
+            name="ds1",
+            category="tabular",
+            column_mapping={"feature": "x", "target": "y"},
+        )
+
+        assert result == {"name": "ds1"}
+        files = api_key_client._request.call_args[1]["files"]
+        assert _multipart_text(files, "category") == "tabular"
 
     def test_nested_hf_folder_uses_inner_config_names(self, api_key_client, tmp_path):
         main = tmp_path / "gsm8k" / "main" / "train.parquet"

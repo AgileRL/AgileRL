@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import copy
 import gc
 import hashlib
 import json
@@ -16,7 +17,13 @@ from unittest.mock import patch
 
 import pytest
 import torch
+import torch.nn.functional as F
 from torch import nn
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+    checkpoint_wrapper,
+)
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.tensor import DTensor
 
 pytest.importorskip("peft")
 pytest.importorskip("transformers")
@@ -24,18 +31,31 @@ pytest.importorskip("safetensors")
 
 from peft import LoraConfig, get_peft_model
 from peft.tuners.lora.layer import Linear as PeftLoraLinear
-from peft.tuners.lora.layer import LoraLayer
+from peft.tuners.lora.layer import LoraLayer, ParamWrapper
 from safetensors.torch import load_file, save_file
 from transformers import (
     AutoModelForCausalLM,
     AutoModelForImageTextToText,
+    GenerationMixin,
     GPT2Config,
     GPT2LMHeadModel,
     OPTConfig,
     OPTForCausalLM,
+    PretrainedConfig,
+    PreTrainedModel,
     Qwen3_5Config,
+    Qwen3MoeConfig,
+    Qwen3MoeForCausalLM,
 )
 
+from agilerl.distributed.expert_parallel import apply_expert_parallel
+from agilerl.lora.moe import (
+    RoutedExpertsLoraWrapper,
+    SortedExpertsLoraWrapper,
+    TransposedExpertsLoraWrapper,
+    moe_expert_target_parameters,
+    upgrade_moe_param_wrappers,
+)
 from agilerl.utils import lora_merge as lora_merge_mod
 from agilerl.utils.llm_utils import adapt_lora_config_for_model
 from agilerl.utils.lora_merge import (
@@ -1179,35 +1199,533 @@ class TestExportMergedPretrainedDistributedFailure:
 
 
 class TestExportMergedPretrainedTiedKeys:
-    def test_list_and_string_tied_keys_are_skipped(self, tmp_path: Path) -> None:
+    def test_tied_lm_head_is_skipped(self, tmp_path: Path) -> None:
         peft_model = _tiny_peft()
-        base = peft_model.get_base_model()
-        base._tied_weights_keys = ["transformer.wpe.weight"]
 
         export_merged_pretrained(
-            tmp_path / "list",
-            model=peft_model,
-            torch_dtype=torch.float32,
+            tmp_path / "merged", model=peft_model, torch_dtype=torch.float32
         )
-        listed = load_file(tmp_path / "list" / "model.safetensors")
-        assert "transformer.wpe.weight" not in listed
 
-        base._tied_weights_keys = "transformer.wpe.weight"
-        export_merged_pretrained(
-            tmp_path / "string",
-            model=peft_model,
-            torch_dtype=torch.float32,
-        )
-        named = load_file(tmp_path / "string" / "model.safetensors")
-        assert "transformer.wpe.weight" not in named
+        weights = load_file(tmp_path / "merged" / "model.safetensors")
+        assert "lm_head.weight" not in weights
+        assert "transformer.wte.weight" in weights
 
-        base._tied_weights_keys = None
+    def test_tied_target_held_as_separate_parameter_is_skipped(
+        self, tmp_path: Path
+    ) -> None:
+        # ``to_empty`` leaves a tied head as its own Parameter until re-tied.
+        peft_model = _tiny_peft()
+        head = peft_model.get_base_model().lm_head
+        head.weight = nn.Parameter(head.weight.detach().clone())
+
         export_merged_pretrained(
-            tmp_path / "none",
+            tmp_path / "merged", model=peft_model, torch_dtype=torch.float32
+        )
+
+        weights = load_file(tmp_path / "merged" / "model.safetensors")
+        assert "lm_head.weight" not in weights
+        assert "transformer.wte.weight" in weights
+
+    def test_untied_lm_head_is_written(self, tmp_path: Path) -> None:
+        # Arrange
+        torch.manual_seed(0)
+        base = _tiny_gpt2()
+        base.config.tie_word_embeddings = False
+        untied = GPT2LMHeadModel(base.config)
+        peft_model = get_peft_model(untied, _lora_config(), adapter_name="actor")
+        input_ids = torch.randint(0, 32, (2, 8))
+
+        # Act
+        export_merged_pretrained(
+            tmp_path / "merged", model=peft_model, torch_dtype=torch.float32
+        )
+
+        # Assert
+        weights = load_file(tmp_path / "merged" / "model.safetensors")
+        assert "lm_head.weight" in weights
+        assert torch.equal(weights["lm_head.weight"], untied.lm_head.weight)
+        reloaded = AutoModelForCausalLM.from_pretrained(tmp_path / "merged")
+        assert torch.allclose(
+            _peft_logits(peft_model, input_ids),
+            _peft_logits(reloaded, input_ids),
+            atol=LOGIT_ATOL,
+            rtol=LOGIT_RTOL,
+        )
+
+
+MOE_VOCAB = 32
+MOE_HIDDEN = 8
+MOE_INTERMEDIATE = 8
+NUM_EXPERTS = 4
+TOP_K = 2
+
+
+class RoutedExperts(nn.Module):
+    """Self-routing packed experts: gated ``gate_up_proj`` (Qwen3-MoE) or ungated ``up_proj`` (NemotronH)."""
+
+    def __init__(self, gated: bool) -> None:
+        super().__init__()
+        self.num_experts = NUM_EXPERTS
+        self.gated = gated
+        up_rows = 2 * MOE_INTERMEDIATE if gated else MOE_INTERMEDIATE
+        self.register_parameter(
+            "gate_up_proj" if gated else "up_proj",
+            nn.Parameter(torch.randn(NUM_EXPERTS, up_rows, MOE_HIDDEN) * 0.1),
+        )
+        self.down_proj = nn.Parameter(
+            torch.randn(NUM_EXPERTS, MOE_HIDDEN, MOE_INTERMEDIATE) * 0.1
+        )
+        self.act_fn = F.silu
+
+    def forward(self, hidden_states, top_k_index, top_k_weights):
+        up_weight = self.gate_up_proj if self.gated else self.up_proj
+        out = torch.zeros_like(hidden_states)
+        for expert in range(self.num_experts):
+            token_idx, slot = torch.where(top_k_index == expert)
+            projected = F.linear(hidden_states[token_idx], up_weight[expert])
+            if self.gated:
+                gate, up = projected.chunk(2, dim=-1)
+                inner = self.act_fn(gate) * up
+            else:
+                inner = self.act_fn(projected)
+            rows = F.linear(inner, self.down_proj[expert])
+            out.index_add_(0, token_idx, rows * top_k_weights[token_idx, slot, None])
+        return out
+
+
+class TransposedExperts(nn.Module):
+    """Packed ``x @ W[e] + b[e]`` experts with ``[E, in, out]`` weights (GPT-OSS layout)."""
+
+    is_transposed = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.num_experts = NUM_EXPERTS
+        self.gate_up_proj = nn.Parameter(
+            torch.randn(NUM_EXPERTS, MOE_HIDDEN, 2 * MOE_INTERMEDIATE) * 0.1
+        )
+        self.gate_up_proj_bias = nn.Parameter(
+            torch.randn(NUM_EXPERTS, 2 * MOE_INTERMEDIATE) * 0.1
+        )
+        self.down_proj = nn.Parameter(
+            torch.randn(NUM_EXPERTS, MOE_INTERMEDIATE, MOE_HIDDEN) * 0.1
+        )
+        self.down_proj_bias = nn.Parameter(torch.randn(NUM_EXPERTS, MOE_HIDDEN) * 0.1)
+        self.alpha = 1.702
+        self.limit = 7.0
+
+    def forward(self, hidden_states, router_indices=None, routing_weights=None):
+        out = torch.zeros_like(hidden_states)
+        for expert in range(self.num_experts):
+            token_idx, slot = torch.where(router_indices == expert)
+            gate_up = (
+                hidden_states[token_idx] @ self.gate_up_proj[expert]
+                + self.gate_up_proj_bias[expert]
+            )
+            gate = gate_up[..., ::2].clamp(max=self.limit)
+            up = gate_up[..., 1::2].clamp(min=-self.limit, max=self.limit)
+            inner = (up + 1) * (gate * torch.sigmoid(gate * self.alpha))
+            rows = inner @ self.down_proj[expert] + self.down_proj_bias[expert]
+            out.index_add_(0, token_idx, rows * routing_weights[token_idx, slot, None])
+        return out
+
+
+class SortedExperts(nn.Module):
+    """Grouped linear over expert-sorted rows, ``weight`` ``[E, out, in]`` (GraniteMoe ``ParallelExperts``)."""
+
+    def __init__(self, input_size: int, output_size: int) -> None:
+        super().__init__()
+        self.num_experts = NUM_EXPERTS
+        self.weight = nn.Parameter(
+            torch.randn(NUM_EXPERTS, output_size, input_size) * 0.1
+        )
+
+    def forward(self, inputs, expert_size):
+        rows = inputs.split(expert_size, dim=0)
+        return torch.cat(
+            [F.linear(rows[e], self.weight[e]) for e in range(self.num_experts)]
+        )
+
+
+class RoutedMoeBlock(nn.Module):
+    """Top-k router feeding a self-routing packed-experts module."""
+
+    def __init__(self, experts: nn.Module) -> None:
+        super().__init__()
+        self.router = nn.Linear(MOE_HIDDEN, NUM_EXPERTS, bias=False)
+        self.experts = experts
+
+    def forward(self, hidden_states):
+        probs = torch.softmax(self.router(hidden_states), dim=-1)
+        top_k_weights, top_k_index = probs.topk(TOP_K, dim=-1)
+        return self.experts(hidden_states, top_k_index, top_k_weights)
+
+
+class SortedMoeBlock(nn.Module):
+    """Top-k router, then grouped ``input_linear`` / ``output_linear`` over sorted rows."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.router = nn.Linear(MOE_HIDDEN, NUM_EXPERTS, bias=False)
+        self.input_linear = SortedExperts(MOE_HIDDEN, 2 * MOE_INTERMEDIATE)
+        self.output_linear = SortedExperts(MOE_INTERMEDIATE, MOE_HIDDEN)
+
+    def forward(self, hidden_states):
+        probs = torch.softmax(self.router(hidden_states), dim=-1)
+        top_k_weights, top_k_index = probs.topk(TOP_K, dim=-1)
+        order = top_k_index.flatten().argsort(stable=True)
+        token_idx = order // TOP_K
+        expert_size = torch.bincount(
+            top_k_index.flatten(), minlength=NUM_EXPERTS
+        ).tolist()
+        gate, up = self.input_linear(hidden_states[token_idx], expert_size).chunk(
+            2, dim=-1
+        )
+        rows = self.output_linear(F.silu(gate) * up, expert_size)
+        rows = rows * top_k_weights.flatten()[order, None]
+        return torch.zeros_like(hidden_states).index_add(0, token_idx, rows)
+
+
+class TinyMoeConfig(PretrainedConfig):
+    model_type = "tiny_moe_lora_merge"
+
+    def __init__(self, layout: str = "routed_gated", **kwargs: Any) -> None:
+        self.layout = layout
+        super().__init__(tie_word_embeddings=False, **kwargs)
+
+
+class TinyMoeForCausalLM(PreTrainedModel, GenerationMixin):
+    """One packed-MoE residual block between an embedding and an LM head."""
+
+    config_class = TinyMoeConfig
+
+    def __init__(self, config: TinyMoeConfig) -> None:
+        super().__init__(config)
+        self.embed_tokens = nn.Embedding(MOE_VOCAB, MOE_HIDDEN)
+        blocks = {
+            "routed_gated": lambda: RoutedMoeBlock(RoutedExperts(gated=True)),
+            "routed_ungated": lambda: RoutedMoeBlock(RoutedExperts(gated=False)),
+            "transposed": lambda: RoutedMoeBlock(TransposedExperts()),
+            "sorted": SortedMoeBlock,
+        }
+        self.mlp = blocks[config.layout]()
+        self.lm_head = nn.Linear(MOE_HIDDEN, MOE_VOCAB, bias=False)
+        self.post_init()
+
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        hidden = self.embed_tokens(input_ids).reshape(-1, MOE_HIDDEN)
+        return self.lm_head(hidden + self.mlp(hidden))
+
+
+# Merged model runs one GEMM per expert projection where the split-LoRA
+# wrapper runs three; float32 reassociation stays far below this.
+MOE_LOGIT_ATOL = 1e-5
+EXPERT_LAYOUTS = [
+    pytest.param("routed_gated", RoutedExpertsLoraWrapper, id="routed_gated"),
+    pytest.param("routed_ungated", RoutedExpertsLoraWrapper, id="routed_ungated"),
+    pytest.param("transposed", TransposedExpertsLoraWrapper, id="transposed"),
+    pytest.param("sorted", SortedExpertsLoraWrapper, id="sorted"),
+]
+
+
+def _expert_lora_model(
+    layout: str, target_parameters: list[str] | None = None
+) -> tuple[TinyMoeForCausalLM, nn.Module]:
+    """Base model and a split-LoRA PEFT copy (``lm_head`` plus packed experts), upgraded as the trainer does."""
+    torch.manual_seed(0)
+    base = TinyMoeForCausalLM(TinyMoeConfig(layout=layout))
+    lora = LoraConfig(
+        r=2,
+        lora_alpha=4,
+        target_modules=["lm_head"],
+        target_parameters=target_parameters or moe_expert_target_parameters(base),
+        lora_dropout=0.0,
+        init_lora_weights=False,
+    )
+    peft_model = get_peft_model(copy.deepcopy(base), lora, adapter_name="actor")
+    upgrade_moe_param_wrappers(peft_model)
+    return base, peft_model
+
+
+def _moe_logits(model: nn.Module, input_ids: torch.Tensor) -> torch.Tensor:
+    """Eval-mode logits of a tiny MoE model or its PEFT wrapper."""
+    model.eval()
+    with torch.no_grad():
+        return model(input_ids=input_ids)
+
+
+def _load_tiny_moe(config: TinyMoeConfig, merged: Path) -> TinyMoeForCausalLM:
+    """Strictly load an export: every model tensor present, nothing extra."""
+    model = TinyMoeForCausalLM(config)
+    model.load_state_dict(load_file(merged / "model.safetensors"))
+    return model
+
+
+class TestExportMergedPretrainedExpertLora:
+    @pytest.mark.parametrize(("layout", "wrapper_cls"), EXPERT_LAYOUTS)
+    def test_merged_forward_matches_split_lora_forward(
+        self, tmp_path: Path, layout: str, wrapper_cls: type
+    ) -> None:
+        # Arrange
+        base, peft_model = _expert_lora_model(layout)
+        input_ids = torch.randint(0, MOE_VOCAB, (2, 6))
+        live_logits = _moe_logits(peft_model, input_ids)
+        before = _snapshot_tensors(peft_model)
+
+        # Act
+        export_merged_pretrained(
+            tmp_path / "merged", model=peft_model, torch_dtype=torch.float32
+        )
+
+        # Assert
+        assert any(type(module) is wrapper_cls for module in peft_model.modules())
+        merged = _load_tiny_moe(base.config, tmp_path / "merged")
+        assert torch.allclose(
+            live_logits, _moe_logits(merged, input_ids), atol=MOE_LOGIT_ATOL
+        )
+        assert not torch.allclose(live_logits, _moe_logits(base, input_ids), atol=1e-2)
+        for name in moe_expert_target_parameters(base):
+            assert not torch.allclose(
+                merged.get_parameter(name), base.get_parameter(name)
+            ), name
+        _assert_unmutated(peft_model, before)
+
+    def test_untargeted_expert_tensors_copy_unchanged(self, tmp_path: Path) -> None:
+        # Arrange
+        base, peft_model = _expert_lora_model(
+            "transposed", target_parameters=["mlp.experts.down_proj"]
+        )
+        input_ids = torch.randint(0, MOE_VOCAB, (2, 6))
+        live_logits = _moe_logits(peft_model, input_ids)
+
+        # Act
+        export_merged_pretrained(
+            tmp_path / "merged", model=peft_model, torch_dtype=torch.float32
+        )
+
+        # Assert
+        weights = load_file(tmp_path / "merged" / "model.safetensors")
+        experts = base.mlp.experts
+        for name in ("gate_up_proj", "gate_up_proj_bias", "down_proj_bias"):
+            assert torch.equal(weights[f"mlp.experts.{name}"], getattr(experts, name))
+        assert not torch.allclose(weights["mlp.experts.down_proj"], experts.down_proj)
+        merged = _load_tiny_moe(base.config, tmp_path / "merged")
+        assert torch.allclose(
+            live_logits, _moe_logits(merged, input_ids), atol=MOE_LOGIT_ATOL
+        )
+
+    def test_copies_experts_when_wrapper_lacks_named_adapter(
+        self, tmp_path: Path
+    ) -> None:
+        # Arrange
+        base, peft_model = _expert_lora_model("routed_gated")
+        peft_model.add_adapter(
+            "critic",
+            LoraConfig(
+                r=2,
+                lora_alpha=4,
+                target_modules=["lm_head"],
+                lora_dropout=0.0,
+                init_lora_weights=False,
+            ),
+        )
+        peft_model.set_adapter("critic")
+        input_ids = torch.randint(0, MOE_VOCAB, (2, 6))
+        critic_logits = _moe_logits(peft_model, input_ids)
+
+        # Act
+        export_merged_pretrained(
+            tmp_path / "merged",
             model=peft_model,
+            adapter_name="critic",
             torch_dtype=torch.float32,
         )
-        assert (tmp_path / "none" / "model.safetensors").exists()
+
+        # Assert
+        weights = load_file(tmp_path / "merged" / "model.safetensors")
+        for name in ("gate_up_proj", "down_proj"):
+            assert torch.equal(
+                weights[f"mlp.experts.{name}"], getattr(base.mlp.experts, name)
+            )
+        merged = _load_tiny_moe(base.config, tmp_path / "merged")
+        assert torch.allclose(
+            critic_logits, _moe_logits(merged, input_ids), atol=MOE_LOGIT_ATOL
+        )
+
+    @pytest.mark.parametrize("layout", ["routed_gated", "routed_ungated", "sorted"])
+    def test_gathers_expert_parallel_dtensors(
+        self, tmp_path: Path, gloo_process_group: None, layout: str
+    ) -> None:
+        # Arrange
+        base, peft_model = _expert_lora_model(layout)
+        input_ids = torch.randint(0, MOE_VOCAB, (2, 6))
+        live_logits = _moe_logits(peft_model, input_ids)
+        ep_mesh = init_device_mesh("cpu", (1,), mesh_dim_names=("ep",))
+        apply_expert_parallel(peft_model, ep_mesh)
+        wrappers = [
+            module
+            for module in peft_model.modules()
+            if isinstance(module, ParamWrapper)
+        ]
+        lora_b = wrappers[0].lora_B["actor"].weight
+
+        # Act
+        export_merged_pretrained(
+            tmp_path / "merged", model=peft_model, torch_dtype=torch.float32
+        )
+
+        # Assert
+        assert isinstance(lora_b, DTensor)
+        assert lora_b.ndim == 3
+        assert all(isinstance(w.get_param(), DTensor) for w in wrappers)
+        assert all(isinstance(w.lora_A["actor"].weight, DTensor) for w in wrappers)
+        merged = _load_tiny_moe(base.config, tmp_path / "merged")
+        assert torch.allclose(
+            live_logits, _moe_logits(merged, input_ids), atol=MOE_LOGIT_ATOL
+        )
+
+
+def _tiny_qwen3_moe() -> Qwen3MoeForCausalLM:
+    """CPU Qwen3-MoE with packed ``mlp.experts`` and an untied ``lm_head``."""
+    config = Qwen3MoeConfig(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=32,
+        moe_intermediate_size=16,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        num_experts=4,
+        num_experts_per_tok=2,
+        decoder_sparse_step=1,
+        max_position_embeddings=64,
+        head_dim=16,
+    )
+    return Qwen3MoeForCausalLM(config).float()
+
+
+def _save_packed_checkpoint(model: PreTrainedModel, path: Path) -> None:
+    """Write in-memory tensor names (packed experts), as Qwen3.5/3.6-MoE checkpoints store them."""
+    path.mkdir(parents=True)
+    state = {name: tensor.contiguous() for name, tensor in model.state_dict().items()}
+    save_file(state, str(path / "model.safetensors"), metadata={"format": "pt"})
+    model.config.save_pretrained(path)
+
+
+class TestExportMergedPretrainedQwen3Moe:
+    @pytest.mark.parametrize("shape", ["live", "replay"])
+    def test_attention_and_expert_lora_reload_matches_adapter(
+        self, tmp_path: Path, shape: str
+    ) -> None:
+        # Arrange
+        torch.manual_seed(0)
+        base = _tiny_qwen3_moe()
+        _save_packed_checkpoint(base, tmp_path / "base")
+        lora = LoraConfig(
+            r=4,
+            lora_alpha=8,
+            target_modules=["q_proj", "v_proj"],
+            target_parameters=moe_expert_target_parameters(base),
+            lora_dropout=0.0,
+            init_lora_weights=False,
+            task_type="CAUSAL_LM",
+        )
+        peft_model = get_peft_model(copy.deepcopy(base), lora, adapter_name="actor")
+        assert upgrade_moe_param_wrappers(peft_model) == 2
+        peft_model.save_pretrained(tmp_path / "ckpt")
+        input_ids = torch.randint(0, 64, (2, 10))
+        live_logits = _peft_logits(peft_model, input_ids)
+
+        # Act
+        if shape == "live":
+            export_merged_pretrained(
+                tmp_path / "merged", model=peft_model, torch_dtype=torch.float32
+            )
+        else:
+            export_merged_pretrained(
+                tmp_path / "merged",
+                adapter_path=tmp_path / "ckpt" / "actor",
+                base_model_name_or_path=tmp_path / "base",
+                torch_dtype=torch.float32,
+            )
+
+        # Assert
+        weights = load_file(tmp_path / "merged" / "model.safetensors")
+        assert "lm_head.weight" in weights
+        assert "model.layers.1.mlp.experts.gate_up_proj" in weights
+        assert all("lora" not in key and "base_layer" not in key for key in weights)
+        reloaded = AutoModelForCausalLM.from_pretrained(tmp_path / "merged")
+        assert torch.allclose(
+            live_logits,
+            _peft_logits(reloaded, input_ids),
+            atol=MOE_LOGIT_ATOL,
+            rtol=LOGIT_RTOL,
+        )
+
+    def test_checkpoint_wrapped_layers_export_base_state_dict_keys(
+        self, tmp_path: Path
+    ) -> None:
+        # Arrange
+        torch.manual_seed(0)
+        base = _tiny_qwen3_moe()
+        lora = LoraConfig(
+            r=4,
+            lora_alpha=8,
+            target_modules=["q_proj", "v_proj"],
+            target_parameters=moe_expert_target_parameters(base),
+            lora_dropout=0.0,
+            init_lora_weights=False,
+            task_type="CAUSAL_LM",
+        )
+        peft_model = get_peft_model(copy.deepcopy(base), lora, adapter_name="actor")
+        upgrade_moe_param_wrappers(peft_model)
+        layers = peft_model.get_base_model().model.layers
+        for index, layer in enumerate(layers):
+            layers[index] = checkpoint_wrapper(layer)
+        input_ids = torch.randint(0, 64, (2, 10))
+        live_logits = _peft_logits(peft_model, input_ids)
+
+        # Act
+        export_merged_pretrained(
+            tmp_path / "merged", model=peft_model, torch_dtype=torch.float32
+        )
+
+        # Assert
+        weights = load_file(tmp_path / "merged" / "model.safetensors")
+        assert set(weights) == set(base.state_dict())
+        reloaded = _tiny_qwen3_moe()
+        reloaded.load_state_dict(weights)
+        assert torch.allclose(
+            live_logits,
+            _peft_logits(reloaded, input_ids),
+            atol=MOE_LOGIT_ATOL,
+            rtol=LOGIT_RTOL,
+        )
+
+    def test_replay_without_packed_expert_keys_raises(self, tmp_path: Path) -> None:
+        torch.manual_seed(0)
+        base = _tiny_qwen3_moe()
+        # save_pretrained writes per-expert names, not the packed parameter.
+        base.save_pretrained(tmp_path / "base")
+        lora = LoraConfig(
+            r=4,
+            lora_alpha=8,
+            target_modules=[],
+            target_parameters=moe_expert_target_parameters(base),
+            lora_dropout=0.0,
+            init_lora_weights=False,
+            task_type="CAUSAL_LM",
+        )
+        get_peft_model(base, lora, adapter_name="actor").save_pretrained(
+            tmp_path / "ckpt"
+        )
+
+        with pytest.raises(MergedExportError, match="has no tensor"):
+            export_merged_pretrained(
+                tmp_path / "merged",
+                adapter_path=tmp_path / "ckpt" / "actor",
+                base_model_name_or_path=tmp_path / "base",
+            )
 
 
 def _tensor_nbytes(tensor: torch.Tensor) -> int:

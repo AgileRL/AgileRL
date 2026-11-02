@@ -28,7 +28,7 @@ from agilerl.architectures.nemotron_h.tensor_parallel import (
     permuted_local_from_full,
     realign_mamba_permuted_shards,
 )
-from agilerl.distributed import FSDPConfig
+from agilerl.distributed import FSDPConfig, fsdp_blocks
 from agilerl.distributed.expert_parallel import build_parallel_mesh
 from agilerl.distributed.fsdp import materialize_dtensors
 from agilerl.distributed.fsdp_blocks import apply_fsdp2
@@ -323,11 +323,12 @@ def _fsdp_worker(rank: int, world_size: int) -> None:
         if isinstance(param, DTensor) and param.device_mesh is mesh.tp
     }
     assert before, "expected mamba DTensors on the tp mesh"
-    apply_fsdp2(
-        model,
-        FSDPConfig(tp=tp, wrap_every_n_blocks=1, param_persistence_threshold=0),
-        mesh=mesh.hsdp,
-    )
+    with patch.object(fsdp_blocks, "PARAM_PERSISTENCE_THRESHOLD", 0):
+        apply_fsdp2(
+            model,
+            FSDPConfig(tp=tp),
+            mesh=mesh.hsdp,
+        )
     after = {
         id(param)
         for param in model.parameters()

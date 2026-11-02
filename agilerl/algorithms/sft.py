@@ -9,7 +9,6 @@ import numpy as np
 import numpy.typing as npt
 import torch
 
-from agilerl import HAS_LIGER_KERNEL
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.distributed import (
@@ -23,6 +22,7 @@ from agilerl.typing import (
     ObservationType,
     SFTPrompts,
 )
+from agilerl.utils.llm_packing import pack_next_token_frame
 from agilerl.utils.llm_utils import (
     MicroBatchMetrics,
     is_sft_prompts,
@@ -33,11 +33,6 @@ if TYPE_CHECKING:
     from transformers import BitsAndBytesConfig, PreTrainedModel
 
     from agilerl.llm_envs import DatasetEnv
-
-if HAS_LIGER_KERNEL or TYPE_CHECKING:
-    from liger_kernel.transformers.fused_linear_cross_entropy import (
-        LigerFusedLinearCrossEntropyLoss,
-    )
 
 
 class SFT(LLMAlgorithm[SFTPrompts]):
@@ -90,6 +85,10 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         ``gradient_accumulation_steps`` is derived as
         ``mini_batch_size / micro_batch_size_per_gpu``.
     :type mini_batch_size: int | None, optional
+    :param gradient_checkpointing: Recompute block activations in the backward
+        pass. ``None`` lets the training-memory search pick it on CUDA for a
+        catalog model; elsewhere it is on.
+    :type gradient_checkpointing: bool | None, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param lora_config: LoRA config; when supplied the base model is wrapped with
@@ -105,19 +104,6 @@ class SFT(LLMAlgorithm[SFTPrompts]):
     :type clone: bool, optional
     :param seed: Random seed, defaults to 42
     :type seed: int, optional
-    :param gradient_checkpointing: Use gradient checkpointing to trade compute for
-        memory, defaults to True
-    :type gradient_checkpointing: bool, optional
-    :param use_liger_loss: Use the Liger fused-linear cross-entropy kernel,
-        defaults to ``True`` (requires ``liger-kernel``; warns and falls back
-        otherwise). Both this and the standard path are memory-bounded — the
-        full ``(B, L, V)`` logits are never materialized — so this is mainly a
-        speed/kernel choice. The Liger kernel auto-sizes its own chunk; the
-        standard path's chunk is set by ``chunk_rows``.
-    :type use_liger_loss: bool, optional
-    :param chunk_rows: Primary chunk-size knob for fused logit tiles. On SFT's
-        standard path this controls the fused-logprob chunk rows directly.
-    :type chunk_rows: int | None, optional
     :param use_separate_reference_adapter: Also create a ``reference`` LoRA adapter
         alongside ``actor``. SFT does not itself use a reference policy, so this
         defaults to ``False``; enable it when you plan to save an SFT checkpoint
@@ -128,23 +114,21 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         loading the base model in 4-/8-bit (QLoRA). ``lm_head`` is kept
         unquantized so the fused-linear-logprob path stays numerically exact.
     :type quantization_config: BitsAndBytesConfig | None, optional
-    :param activation_offload: When ``True``, run the training forward inside
-        ``torch.autograd.graph.save_on_cpu`` so tensors saved for backward live
-        in pinned host RAM instead of GPU memory. Trades PCIe bandwidth for GPU
-        memory (the win grows with sequence length); a no-op during rollout /
-        reference forwards.
-    :type activation_offload: bool, optional
-    :param moe_lora_recompute: Recompute routed-expert LoRA activations in
-        backward on frozen packed base weights. ``None`` (default) recomputes
-        only outside activation-checkpointed blocks.
-    :type moe_lora_recompute: bool | None, optional
     :param lora_tower_target_modules: Tower and connector modules of a VL model
         to adapt as well. ``lora_config.target_modules`` always land on the
         language model only. Defaults to None.
     :type lora_tower_target_modules: list[str] | None, optional
+    :param max_model_len: Longest training row (prompt plus response) the
+        training-memory search sizes for, defaults to 1024.
+    :type max_model_len: int, optional
+    :param routed_expert_chunk_mib: MiB of the widest activation of one
+        routed-expert row chunk under DDP; FSDP reads
+        ``fsdp_config.routed_expert_chunk_mib``. ``None`` lets the
+        training-memory search pick it when it runs, else keeps 64.
+    :type routed_expert_chunk_mib: int | None, optional
     """
 
-    _liger_applies_logit_softcap = True
+    supports_sequence_packing = True
 
     def __init__(
         self,
@@ -162,20 +146,18 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         calc_position_embeddings: bool = True,
         micro_batch_size_per_gpu: int | None = None,
         mini_batch_size: int | None = None,
+        gradient_checkpointing: bool | None = None,
         device: str | torch.device | None = None,
         lora_config: LoraConfig | None = None,
         fsdp_config: FSDPConfig | None = None,
         wrap: bool = True,
         clone: bool = False,
         seed: int = 42,
-        gradient_checkpointing: bool = True,
-        use_liger_loss: bool = True,
-        chunk_rows: int | None = None,
         use_separate_reference_adapter: bool = False,
         quantization_config: BitsAndBytesConfig | None = None,
-        activation_offload: bool = False,
-        moe_lora_recompute: bool | None = None,
         lora_tower_target_modules: list[str] | None = None,
+        max_model_len: int = 1024,
+        routed_expert_chunk_mib: int | None = None,
     ) -> None:
         resolved_device = resolve_device(device)
         super().__init__(
@@ -188,8 +170,6 @@ class SFT(LLMAlgorithm[SFTPrompts]):
             seed=seed,
             pad_token_id=pad_token_id,
             pad_token=pad_token,
-            use_liger_loss=use_liger_loss,
-            chunk_rows=chunk_rows,
             lora_config=lora_config,
             use_separate_reference_adapter=use_separate_reference_adapter,
             model_name=model_name,
@@ -205,12 +185,12 @@ class SFT(LLMAlgorithm[SFTPrompts]):
             name="SFT",
             gradient_checkpointing=gradient_checkpointing,
             quantization_config=quantization_config,
-            activation_offload=activation_offload,
-            moe_lora_recompute=moe_lora_recompute,
             lora_tower_target_modules=lora_tower_target_modules,
+            routed_expert_chunk_mib=routed_expert_chunk_mib,
         )
         self.temperature = 0
         self.update_epochs = update_epochs
+        self.max_model_len = max_model_len
 
         self._initialize_actors(actor_network, not clone)
         self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
@@ -349,50 +329,32 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         """
         self.actor.train(mode=training)
 
-        model_kwargs: dict[str, Any] = {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "use_cache": False,
-        }
-        if self.calc_position_embeddings:
-            model_kwargs["position_ids"] = self._position_ids_from_mask(attention_mask)
+        model_kwargs, packed = self._gradient_forward_inputs(
+            input_ids, attention_mask=attention_mask
+        )
+        if packed is not None:
+            labels = pack_next_token_frame(labels, packed, -100)
 
         # Run the transformer with the lm_head patched to identity so
         # ``.logits`` is the final hidden state, then compute the loss from the
         # hidden states + lm_head weight without ever materializing the full logits tensor.
         with self._patch_lm_head_to_identity():
             # FSDP2 all-gather hooks run on ``Module.__call__``.
-            hidden = self.actor(**model_kwargs).logits  # [B, L, H]
-        shift_hidden = hidden[:, :-1, :].contiguous()  # [B, L-1, H]
+            hidden = self.actor(**model_kwargs).logits  # [B, L, H]; [1, N, H] packed
+        # The head runs on response tokens only.
+        scored = labels != -100
+        scored_hidden = hidden[:, :-1][scored]  # [M, H]
+        scored_labels = labels[scored]  # [M]
 
-        if self.use_liger_loss:
-            # Liger fused-linear CE: loss computed in bounded ``(chunk, V)`` tiles.
-            flat_hidden = shift_hidden.view(-1, shift_hidden.size(-1))
-            with self._liger_head_gather() as (head_w, head_b):
-                head_w = head_w.to(dtype=flat_hidden.dtype)
-                if head_b is not None:
-                    head_b = head_b.to(dtype=flat_hidden.dtype)
-                loss = LigerFusedLinearCrossEntropyLoss(
-                    ignore_index=-100, softcap=self.final_logit_softcap
-                )(head_w, flat_hidden, labels.view(-1), head_b)
-
-        else:
-            # Standard path, also token-chunked: per-token target logprobs via the
-            # fused-linear-logprob kernel (bounded to ``(chunk_rows, V)``)
-            fused_fn, head_w, head_b = self._fused_logprob_fn_and_head()
-            ignore = labels == -100
-            logps = fused_fn(
-                shift_hidden,
-                head_w,
-                head_b,
-                labels.masked_fill(ignore, 0),  # safe gather index; masked out below
-                temperature=1.0,
-                cast_to_fp32=self.cast_logprobs_to_fp32,
-                chunk_rows=self.chunk_rows,
-            )  # [B, L-1]
-            token_mask = (~ignore).to(logps.dtype)
-            loss = -(logps * token_mask).sum() / token_mask.sum().clamp_min(1.0)
-        return loss
+        fused_fn, head_w, head_b = self._fused_logprob_fn_and_head()
+        logps = fused_fn(
+            scored_hidden.unsqueeze(0),
+            head_w,
+            head_b,
+            scored_labels.unsqueeze(0),
+            temperature=1.0,
+        )  # [1, M]
+        return -logps.sum() / max(scored_labels.numel(), 1)
 
     def test(
         self,

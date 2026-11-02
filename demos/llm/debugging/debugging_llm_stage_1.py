@@ -130,8 +130,6 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
         agent_kw["calc_position_embeddings"] = bool(
             agent_dbg["calc_position_embeddings"]
         )
-    if agent_dbg.get("torch_compiler") is not None:
-        agent_kw["torch_compiler"] = agent_dbg["torch_compiler"]
 
     torch.manual_seed(seed)
     tokenizer = TinyDigitTokenizer()

@@ -17,6 +17,7 @@ import click
 import yaml
 
 from agilerl.arena import console
+from agilerl.arena.byoc import ArenaRootGroup, register_byoc_manifest_group
 from agilerl.arena.cli_manifest import handle_help_option
 from agilerl.arena.client import DATASET_CATEGORIES, MEMORY_SCOPES, MemoryScope
 from agilerl.arena.config import CommandConfig, arena_client
@@ -33,7 +34,6 @@ from agilerl.arena.memory.cli import memory_group
 from agilerl.arena.models import verdict as manifest_verdict
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.schema import manifest_schema
-from agilerl.arena.on_prem import ArenaRootGroup, register_on_prem_manifest_group
 from agilerl.arena.output import (
     emit_csv_preview,
     emit_result,
@@ -93,7 +93,17 @@ ClickDecorated = TypeVar("ClickDecorated", bound=Callable[..., Any] | click.Comm
     type=click.IntRange(1),
     default=300,
     show_default=True,
-    help="Timeout in seconds for file upload requests.",
+    help="Timeout in seconds for file uploads and cluster register.",
+)
+@click.option(
+    "--module-catalog-url",
+    default=None,
+    help="Base URL of the signed Terraform module catalog.",
+)
+@click.option(
+    "--module-catalog-public-key",
+    default=None,
+    help="Ed25519 public key PEM used to verify the module catalog.",
 )
 @click.option(
     "-h",
@@ -116,6 +126,8 @@ def main(
     client_id: str | None,
     request_timeout: int,
     upload_timeout: int,
+    module_catalog_url: str | None,
+    module_catalog_public_key: str | None,
 ) -> None:
     """Arena CLI - Interact with the Arena RLOps platform directly from the command-line."""
     ctx.obj = CommandConfig(
@@ -128,6 +140,8 @@ def main(
         client_id=client_id,
         request_timeout=request_timeout,
         upload_timeout=upload_timeout,
+        module_catalog_url=module_catalog_url,
+        module_catalog_public_key=module_catalog_public_key,
     )
 
 
@@ -1395,9 +1409,9 @@ def load_cli_plugins(group: click.Group) -> None:
         plugin.load()(group)
 
 
-register_on_prem_manifest_group(main)
 main.add_command(memory_group)
 load_cli_plugins(main)
+register_byoc_manifest_group(main)
 
 
 if __name__ == "__main__":

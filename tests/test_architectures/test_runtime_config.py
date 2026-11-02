@@ -23,6 +23,7 @@ from agilerl.architectures.catalog import (
     family_runtime,
     nemotron_h_omni_vllm_hf_override,
     pretrained_model_type,
+    sm80_attention_backend,
     trainer_model_class,
 )
 from agilerl.architectures.nemotron_h.mamba import install_mamba_patches
@@ -31,13 +32,12 @@ from agilerl.architectures.nemotron_h.tensor_parallel import (
 )
 from agilerl.architectures.runtime import ModelRuntimeConfig, VllmRuntimeConfig
 from agilerl.arena.memory.manifest import FAMILY_MAX_NUM_BATCHED_TOKENS
-from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
-from agilerl.llm_envs.tool_parsers import TOOL_PARSERS
+from agilerl.arena.models.model_info import REASONING_PARSERS, SUPPORTED_MODEL_INFO
+from agilerl.llm_envs.chat_formats import CHAT_FORMATS
 
 NEMOTRON_VLLM_KWARGS = {
     "mamba_cache_mode": "align",
     "max_num_batched_tokens": 8192,
-    "reasoning_parser": "nemotron_v3",
     "enable_prefix_caching": True,
     "prefix_cache_retention_interval": None,
 }
@@ -137,7 +137,6 @@ class TestFamilyRuntimeConfigs:
         config = FAMILY_RUNTIME_CONFIGS["nemotron_h"]
         assert config.vllm.engine_kwargs() == NEMOTRON_VLLM_KWARGS
         assert config.trainer.load_kwargs() == {}
-        assert config.trainer.attn_implementation == "flash_attention_2"
         assert config.patch.install is install_mamba_patches
 
     def test_no_family_loads_checkpoint_code(self) -> None:
@@ -153,19 +152,6 @@ class TestFamilyRuntimeConfigs:
     def test_nemotron_h_enables_prefix_caching(self) -> None:
         assert FAMILY_RUNTIME_CONFIGS["nemotron_h"].vllm.enable_prefix_caching is True
 
-    @pytest.mark.parametrize("model_type", SWA_MODEL_TYPES)
-    def test_swa_lookup(self, model_type: str) -> None:
-        assert (
-            FAMILY_RUNTIME_CONFIGS[model_type].trainer.attn_implementation
-            == "flex_attention"
-        )
-
-    def test_gpt_oss_lookup(self) -> None:
-        assert (
-            FAMILY_RUNTIME_CONFIGS["gpt_oss"].trainer.attn_implementation
-            == "flex_attention"
-        )
-
     def test_qwen3_5_lookup(self) -> None:
         runtime = FAMILY_RUNTIME_CONFIGS["qwen3_5"]
         assert runtime.vllm.mamba_cache_mode == "align"
@@ -176,15 +162,45 @@ class TestFamilyRuntimeConfigs:
             "linear_fc2",
         }
 
-    @pytest.mark.parametrize(
-        "model_type", ["qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"]
-    )
-    def test_qwen3_5_families_name_a_reasoning_parser(self, model_type: str) -> None:
+    def test_catalog_reasoning_parser_matches_model_info(self) -> None:
+        catalog = {
+            model_type: runtime.reasoning_parser
+            for model_type, runtime in FAMILY_RUNTIME_CONFIGS.items()
+            if runtime.reasoning_parser is not None
+        }
+
+        assert catalog == REASONING_PARSERS
+
+    def test_every_supported_reasoning_model_names_its_parser(self) -> None:
+        parsers = {
+            info.config["model_type"]: FAMILY_RUNTIME_CONFIGS[
+                info.config["model_type"]
+            ].reasoning_parser
+            for info in SUPPORTED_MODEL_INFO.values()
+        }
+
+        assert parsers == {
+            "gemma4": "gemma4",
+            "gpt_oss": "openai_gptoss",
+            "granitemoe": None,
+            "granitemoehybrid": None,
+            "nemotron_h": "nemotron_v3",
+            "nemotron_h_omni": "nemotron_v3",
+            "qwen2": None,
+            "qwen3": "qwen3",
+            "qwen3_5": "qwen3",
+            "qwen3_5_moe": "qwen3",
+        }
+
+    @pytest.mark.parametrize("model_type", sorted(REASONING_PARSERS))
+    def test_reasoning_parser_is_not_a_family_engine_kwarg(
+        self, model_type: str
+    ) -> None:
         kwargs = FAMILY_RUNTIME_CONFIGS[model_type].vllm.engine_kwargs()
 
-        assert kwargs["reasoning_parser"] == "qwen3"
+        assert "reasoning_parser" not in kwargs
 
-    def test_every_supported_model_names_a_registered_tool_call_parser(
+    def test_every_supported_model_names_a_registered_chat_format(
         self,
     ) -> None:
         model_types = {
@@ -192,11 +208,11 @@ class TestFamilyRuntimeConfigs:
         }
 
         parsers = {
-            model_type: FAMILY_RUNTIME_CONFIGS[model_type].tool_call_parser
+            model_type: FAMILY_RUNTIME_CONFIGS[model_type].chat_format
             for model_type in model_types
         }
 
-        assert all(name in TOOL_PARSERS for name in parsers.values()), parsers
+        assert all(name in CHAT_FORMATS for name in parsers.values()), parsers
 
     def test_catalog_excludes_gemma_and_gemma2(self) -> None:
         assert "gemma" not in FAMILY_RUNTIME_CONFIGS
@@ -229,8 +245,8 @@ class TestVllmRuntimeConfigEngineKwargs:
         }
 
     def test_unset_fields_add_no_kwargs(self) -> None:
-        assert VllmRuntimeConfig(reasoning_parser="qwen3").engine_kwargs() == {
-            "reasoning_parser": "qwen3"
+        assert VllmRuntimeConfig(mamba_cache_mode="align").engine_kwargs() == {
+            "mamba_cache_mode": "align"
         }
 
     @pytest.mark.parametrize("model_type", ["nemotron_h", "qwen3_5"])
@@ -238,6 +254,51 @@ class TestVllmRuntimeConfigEngineKwargs:
         kwargs = FAMILY_RUNTIME_CONFIGS[model_type].vllm.engine_kwargs()
 
         assert kwargs["prefix_cache_retention_interval"] is None
+
+    def test_sm80_attention_backend_is_not_an_engine_kwarg(self) -> None:
+        config = VllmRuntimeConfig(sm80_attention_backend="FLASHINFER")
+
+        assert config.engine_kwargs() == {}
+
+
+class TestSm80AttentionBackend:
+    @pytest.mark.parametrize(
+        "hub_id",
+        [
+            "Qwen/Qwen2.5-0.5B-Instruct",
+            "Qwen/Qwen3-4B",
+            "ibm-granite/granite-3.1-3b-a800m-instruct",
+            "ibm-granite/granite-4.0-micro",
+        ],
+    )
+    def test_dense_attention_checkpoints_take_flashinfer(self, hub_id: str) -> None:
+        assert sm80_attention_backend(hub_id) == "FLASHINFER"
+
+    def test_qwen3_moe_takes_flashinfer(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        stub_config_model_type(monkeypatch, "qwen3_moe")
+
+        assert sm80_attention_backend("Qwen/Qwen3-30B-A3B") == "FLASHINFER"
+
+    @pytest.mark.parametrize(
+        "hub_id",
+        [
+            "ibm-granite/granite-4.0-h-tiny",
+            "google/gemma-4-E4B-it",
+            "openai/gpt-oss-20b",
+            "Qwen/Qwen3.5-4B",
+            "Qwen/Qwen3.6-35B-A3B",
+            "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16",
+        ],
+    )
+    def test_other_checkpoints_leave_the_backend_unset(self, hub_id: str) -> None:
+        assert sm80_attention_backend(hub_id) is None
+
+    def test_unknown_family_leaves_the_backend_unset(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stub_config_model_type(monkeypatch, "llama")
+
+        assert sm80_attention_backend("meta/llama") is None
 
 
 class TestFamilyMaxNumBatchedTokens:

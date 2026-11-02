@@ -20,11 +20,15 @@ from agilerl.algorithms.ppo_llm import PPO as LLMPPO
 from agilerl.distributed.fsdp import FSDPConfig
 from agilerl.utils.algo_utils import CosineLRScheduleConfig
 from tests.rank_launch import run_ranks
-from tests.test_algorithms.test_llms.segment_helpers import seed_lora_weights
+from tests.test_algorithms.test_llms.segment_helpers import (
+    RESOLVED_FSDP_MEMORY,
+    seed_lora_weights,
+)
 from tests.test_algorithms.test_llms.test_ppo_llm_passes import (
-    FUSE_MODES,
+    learn_ragged_rows,
     learn_rows,
     make_ppo,
+    record_grad_forwards,
 )
 
 
@@ -50,11 +54,16 @@ def changed(before: dict[str, torch.Tensor], after: dict[str, torch.Tensor]) -> 
 
 
 class TestPPOLearnCriticWarmup:
-    @FUSE_MODES
-    def test_warmup_step_updates_only_the_critic(self, fuse: bool) -> None:
-        # Arrange
-        agent = make_warmup_ppo(fuse_actor_critic_pass=fuse, critic_warmup_steps=1)
+    def test_warmup_step_updates_only_the_critic(self) -> None:
+        # Arrange: an actor LR where AdamW's weight decay alone would move the weights.
+        agent = make_warmup_ppo(critic_warmup_steps=1, lr_actor=1e-2)
         before = role_weights(agent)
+        actor_params = [
+            param
+            for name, param in agent.actor.named_parameters()
+            if name in before["actor"]
+        ]
+        forwards = record_grad_forwards(agent)
 
         # Act
         metrics = learn_rows(agent)
@@ -63,15 +72,45 @@ class TestPPOLearnCriticWarmup:
         after = role_weights(agent)
         assert before["actor"]
         assert not changed(before["actor"], after["actor"])
+        assert not any(
+            param in agent.optimizer.optimizer.state for param in actor_params
+        )
         assert changed(before["critic"], after["critic"])
+        assert [f["adapters"] for f in forwards] == [{"critic"}] * 2
+        assert [f["input_ids"].shape[0] for f in forwards] == [2, 2]
         assert metrics["critic_warmup"] == 1.0
         assert metrics["pg_loss"] == 0.0
         assert agent.critic_warmup_steps_done == 1
 
-    @FUSE_MODES
-    def test_policy_updates_once_warmup_steps_are_done(self, fuse: bool) -> None:
+    def test_packed_warmup_step_updates_only_the_critic(self) -> None:
         # Arrange
-        agent = make_warmup_ppo(fuse_actor_critic_pass=fuse, critic_warmup_steps=2)
+        agent = make_warmup_ppo(
+            critic_warmup_steps=1,
+            attn_implementation="flex_attention",
+        )
+        before = role_weights(agent)
+        forwards = record_grad_forwards(agent)
+
+        # Act
+        metrics = learn_ragged_rows(agent)
+
+        # Assert: the 2 x 12-token budget deals rows 0 and 3 (16 tokens), then
+        # rows 2 and 1 (14 tokens); each micro-batch is one critic row.
+        after = role_weights(agent)
+        assert not changed(before["actor"], after["actor"])
+        assert changed(before["critic"], after["critic"])
+        assert [f["adapters"] for f in forwards] == [{"critic"}] * 2
+        assert [f["input_ids"].shape for f in forwards] == [
+            torch.Size([1, 16]),
+            torch.Size([1, 14]),
+        ]
+        assert metrics["padding_frac_after_packing"] == 0.0
+        assert metrics["critic_warmup"] == 1.0
+        assert math.isfinite(metrics["vf_loss"])
+
+    def test_policy_updates_once_warmup_steps_are_done(self) -> None:
+        # Arrange
+        agent = make_warmup_ppo(critic_warmup_steps=2)
         learn_rows(agent)
         learn_rows(agent)
         before = role_weights(agent)
@@ -140,7 +179,6 @@ def _data_parallel_warmup_worker(rank: int, world_size: int) -> None:
         batch_size=4 * world_size,
         mini_batch_size=4,
         micro_batch_size_per_gpu=2,
-        fuse_actor_critic_pass=False,
         critic_warmup_steps=1,
     )
     before = role_weights(agent)
@@ -196,7 +234,7 @@ def make_fsdp_warmup_ppo() -> LLMPPO:
         mini_batch_size=2,
         micro_batch_size_per_gpu=1,
         wrap=True,
-        fsdp_config=FSDPConfig(optim_cpu_offload=False, param_dtype="float32"),
+        fsdp_config=FSDPConfig(param_dtype="float32", **RESOLVED_FSDP_MEMORY),
         critic_warmup_steps=2,
     )
 

@@ -32,8 +32,12 @@ from pydantic import (
 )
 from typing_extensions import Self
 
+from agilerl.arena.memory.resolve.fsdp import cpu_offload_blocker
+from agilerl.arena.memory.resolve.rollout import (
+    async_rollout_algorithm,
+    rollout_engines_blocker,
+)
 from agilerl.arena.models.algorithms.base import AlgoSpec, LLMAlgorithmSpec
-from agilerl.arena.models.algorithms.grpo import GRPOSpec
 from agilerl.arena.models.algorithms.ppo import PPOSpec
 from agilerl.arena.models.algorithms.rollout_llm import (
     RolloutLLMSpec,
@@ -65,6 +69,65 @@ from agilerl.arena.models.training import (
 )
 
 API_VERSION = "agilerl.com/v1"
+
+# Algorithm fields the run picks from the memory estimate, fastest that fits.
+RESOLVED_MEMORY_FIELDS = (
+    ("micro_batch_size_per_gpu",),
+    ("micro_batch_tokens_per_gpu",),
+    ("gradient_checkpointing",),
+    ("activation_offload",),
+    ("routed_expert_chunk_mib",),
+    ("fsdp", "reshard_after_forward"),
+    ("fsdp", "optim_cpu_offload"),
+    ("fsdp", "routed_expert_chunk_mib"),
+    ("fsdp", "activation_offload"),
+    ("fsdp", "cpu_offload"),
+    ("fsdp", "checkpoint_every_n_blocks"),
+)
+
+
+def reject_resolved_memory_fields(manifest: dict[str, Any]) -> None:
+    """Raise when a raw manifest sets a field the run picks from the memory estimate.
+
+    :param manifest: Raw manifest document, as written.
+    :raises ValueError: Naming every such field the algorithm section sets.
+    """
+    algorithm = manifest.get("algorithm")
+    if not isinstance(algorithm, dict):
+        return
+    pinned = []
+    for path in RESOLVED_MEMORY_FIELDS:
+        section = algorithm.get(path[0]) if len(path) > 1 else algorithm
+        if isinstance(section, dict) and path[-1] in section:
+            pinned.append("algorithm." + ".".join(path))
+    if pinned:
+        msg = (
+            f"{', '.join(pinned)} cannot be set: the run picks the fastest "
+            "value that fits from the memory estimate. Remove it from the manifest."
+        )
+        raise ValueError(msg)
+
+
+def strips_multimodal_towers(algorithm: LLMAlgorithmSpec, text_only: bool) -> bool:
+    """Whether the vLLM engine skips the model's vision and audio towers.
+
+    True for a vision-language catalog model whose environment sends text only
+    (modality text, or dataset rows), unless tower LoRA trains the towers.
+
+    :param algorithm: The run's LLM algorithm spec.
+    :param text_only: Whether the environment never sends images.
+    :return: Whether the engine serves the language model only.
+    """
+    if not text_only:
+        return False
+    hub_id = algorithm.pretrained_model_name_or_path
+    model = SUPPORTED_MODEL_INFO.get(hub_id) if hub_id is not None else None
+    lora = algorithm.lora_config
+    return (
+        model is not None
+        and "vision" in model.modalities
+        and not (lora is not None and lora.tower_target_modules)
+    )
 
 
 def _copy_when_unset(
@@ -558,74 +621,6 @@ class TrainingManifest(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _strip_towers_for_text_only_envs(self) -> Self:
-        """Strip a VL model's engine towers when the env never sends images."""
-        if not (
-            isinstance(self.algorithm, RolloutLLMSpec)
-            and isinstance(self.environment, LLMEnvSpec)
-            and self.environment.text_only
-            and self.algorithm.vllm_config is not None
-            and "strip_multimodal_towers"
-            not in self.algorithm.vllm_config.model_fields_set
-        ):
-            return self
-        hub_id = self.algorithm.pretrained_model_name_or_path
-        model = SUPPORTED_MODEL_INFO.get(hub_id) if hub_id is not None else None
-        lora = self.algorithm.lora_config
-        # Tower LoRA trains the towers, so the engine must keep them.
-        if (
-            model is not None
-            and "vision" in model.modalities
-            and not (lora is not None and lora.tower_target_modules)
-        ):
-            self.algorithm.vllm_config.strip_multimodal_towers = True
-        return self
-
-    @model_validator(mode="after")
-    def _check_tower_lora_served(self) -> Self:
-        """Tower LoRA trains modules that a stripped engine never builds."""
-        if not isinstance(self.algorithm, RolloutLLMSpec):
-            return self
-        lora = self.algorithm.lora_config
-        vllm_config = self.algorithm.vllm_config
-        if (
-            lora is not None
-            and lora.tower_target_modules
-            and vllm_config is not None
-            and vllm_config.strip_multimodal_towers is True
-        ):
-            msg = (
-                "lora_config.tower_target_modules needs the towers served; set "
-                "vllm_config.strip_multimodal_towers to false"
-            )
-            raise ValueError(msg)
-        return self
-
-    @model_validator(mode="after")
-    def _check_image_tower_served(self) -> Self:
-        """An env that sends images needs the engine's image tower."""
-        if not (
-            isinstance(self.algorithm, RolloutLLMSpec)
-            and isinstance(self.environment, LLMEnvSpec)
-            and self.algorithm.vllm_config is not None
-        ):
-            return self
-        env = self.environment
-        towers = self.algorithm.vllm_config.strip_multimodal_towers
-        sends_images = (
-            env.modality == "vision" or env.screenshot_field or env.goal_images_field
-        )
-        if sends_images and (
-            towers is True or (isinstance(towers, list) and "image" in towers)
-        ):
-            msg = (
-                "the environment sends images, so the engine needs its image "
-                "tower; set vllm_config.strip_multimodal_towers to false"
-            )
-            raise ValueError(msg)
-        return self
-
-    @model_validator(mode="after")
     def _check_async_rollout_buffer(self) -> Self:
         """Async rollout queues generated groups, so it needs the LLM buffer."""
         if not self.training.async_rollout:
@@ -638,6 +633,31 @@ class TrainingManifest(BaseModel):
             )
             msg = f"Async rollout requires an LLMRolloutBufferSpec, got {got}"
             raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _check_rollout_engines(self) -> Self:
+        """Only algorithms that generate their own rollouts start rollout engines."""
+        blocker = rollout_engines_blocker(
+            async_rollout_algorithm(type(self.algorithm)),
+            self.training.rollout_engines_per_agent,
+        )
+        if blocker is not None:
+            raise ValueError(blocker)
+        return self
+
+    @model_validator(mode="after")
+    def _check_cpu_offload_colocated(self) -> Self:
+        """Full FSDP CPU offload cannot run beside async rollout engines."""
+        if not isinstance(self.algorithm, LLMAlgorithmSpec):
+            return self
+        blocker = cpu_offload_blocker(
+            self.algorithm.fsdp,
+            async_rollout_algorithm(type(self.algorithm))
+            and self.training.async_rollout,
+        )
+        if blocker is not None:
+            raise ValueError(blocker)
         return self
 
     @model_validator(mode="after")
@@ -657,43 +677,6 @@ class TrainingManifest(BaseModel):
         raise ValueError(msg)
 
     @model_validator(mode="after")
-    def _check_prefix_cache_reuse(self) -> Self:
-        """Prefix cache reuse spans ``max_rollout_version_lag`` versions, so it needs a bound."""
-        if not self.training.reuse_prefix_cache_across_syncs:
-            return self
-        lag = (
-            self.replay_buffer.max_rollout_version_lag
-            if isinstance(self.replay_buffer, LLMRolloutBufferSpec)
-            else None
-        )
-        if lag is None or lag < 1:
-            msg = (
-                "training.reuse_prefix_cache_across_syncs requires an LLM "
-                f"replay_buffer with max_rollout_version_lag >= 1, got {lag}"
-            )
-            raise ValueError(msg)
-        return self
-
-    @model_validator(mode="after")
-    def _check_group_replay(self) -> Self:
-        """Group replay swaps a member of a group whose returns tie, so it needs groups."""
-        if not (
-            isinstance(self.replay_buffer, LLMRolloutBufferSpec)
-            and self.replay_buffer.group_replay_max_age > 0
-        ):
-            return self
-        # A single-completion group always ties, so every completion would be replaced.
-        if not (
-            isinstance(self.algorithm, GRPOSpec) and self.algorithm.group_size >= 2
-        ):
-            msg = (
-                "replay_buffer.group_replay_max_age > 0 requires a GRPO-family "
-                f"algorithm with group_size >= 2, got {self.algorithm.name}"
-            )
-            raise ValueError(msg)
-        return self
-
-    @model_validator(mode="after")
     def _check_pretrained_model_resolved(self) -> Self:
         """An LLM run has to name a model, from the algorithm or network section."""
         if (
@@ -707,6 +690,28 @@ class TrainingManifest(BaseModel):
                 "sections."
             )
             raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _check_thinking_budget_parser(self) -> Self:
+        """vLLM enforces thinking_token_budget only through a reasoning parser."""
+        if not isinstance(self.algorithm, LLMAlgorithmSpec):
+            return self
+        model = SUPPORTED_MODEL_INFO.get(self.algorithm.pretrained_model_name_or_path)
+        # Only supported ids have a model_type offline; the Ray driver checks the rest.
+        if model is not None:
+            self.algorithm.check_thinking_budget_parser(model.model_type)
+        return self
+
+    @model_validator(mode="after")
+    def _check_speculative_logit_bias(self) -> Self:
+        """vLLM rejects ``logit_bias`` requests on a drafting engine."""
+        if not isinstance(self.algorithm, RolloutLLMSpec):
+            return self
+        model = SUPPORTED_MODEL_INFO.get(self.algorithm.pretrained_model_name_or_path)
+        # Only supported ids are known offline; the rollout engine checks the rest.
+        if model is not None:
+            self.algorithm.check_speculative_sampling(model.biases_image_token)
         return self
 
     @field_serializer("network", mode="wrap")
@@ -779,8 +784,12 @@ class TrainingManifest(BaseModel):
         :type mode: Literal["json", "python"]
         :returns: The submission payload or the validated manifest.
         :rtype: dict[str, Any] | TrainingManifest
+        :raises ValueError: When the manifest sets a field in
+            :data:`RESOLVED_MEMORY_FIELDS`.
         """
-        validated = cls.model_validate(cls.load(manifest))
+        raw = cls.load(manifest)
+        reject_resolved_memory_fields(raw)
+        validated = cls.model_validate(raw)
         return validated if mode == "python" else validated.to_payload()
 
     def to_payload(self) -> dict[str, Any]:
@@ -824,6 +833,9 @@ class TrainingManifest(BaseModel):
                 "training_gpus_per_agent" not in self.training.model_fields_set
             ):
                 training.pop("training_gpus_per_agent", None)
+            # An unset engine count leaves the trainer / engine split to the driver.
+            if "rollout_engines_per_agent" not in self.training.model_fields_set:
+                training.pop("rollout_engines_per_agent", None)
         algorithm = payload.get("algorithm")
         if isinstance(algorithm, dict):
             if "num_envs" not in self.algorithm.model_fields_set:

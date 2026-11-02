@@ -76,25 +76,8 @@ def _training_candidates(
                 _update("training", trajectories_per_update=halved),
             )
         )
-    if t.micro_batch_size > 1:
-        candidates.append(
-            (
-                f"Set micro_batch_size_per_gpu to 1 ({t.micro_batch_size} -> 1)",
-                _update("training", micro_batch_size=1),
-            )
-        )
     if t.max_model_len > 512:
         candidates.append(_shorter_context_candidate(t.max_model_len))
-    if not t.activation_offload:
-        candidates.append(
-            (
-                (
-                    "Offload backward-saved activations to host RAM "
-                    "(activation_offload=True)"
-                ),
-                _update("training", activation_offload=True),
-            )
-        )
     if t.lora_rank > 8:
         candidates.append(
             (
@@ -132,16 +115,9 @@ def _generation_candidates(
             (
                 (
                     "Skip the multimodal towers in the engine "
-                    "(strip_multimodal_towers=True; text-only envs)"
+                    "(environment.modality text; text-only envs)"
                 ),
                 _update("generation", weight_variant=stripped),
-            )
-        )
-    if not g.enforce_eager:
-        candidates.append(
-            (
-                "Skip CUDA-graph capture (enforce_eager=True; costs decode throughput)",
-                _update("generation", enforce_eager=True),
             )
         )
     if g.max_num_seqs > 1:

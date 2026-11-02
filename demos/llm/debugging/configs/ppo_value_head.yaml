@@ -19,7 +19,6 @@ DEBUG:
     log_interval: 1
     max_context_length: 128
     max_output_tokens: 1
-    micro_batch_size_per_gpu: 8
     min_output_tokens: 1
     num_train_steps: 200
     tolerance: 0.15

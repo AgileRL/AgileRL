@@ -21,7 +21,8 @@ from agilerl.arena.memory.estimator import (
     estimate_run,
     generation_can_serve,
 )
-from agilerl.arena.memory.formulas import KV_BLOCK_SIZE_DEFAULT
+from agilerl.arena.memory.kv_cache import KV_BLOCK_SIZE_DEFAULT
+from agilerl.arena.memory.resolve.sequences import ROLLOUT_ENGINE_GPU_MEMORY_UTILIZATION
 from agilerl.arena.memory.specs import (
     DeviceSpec,
     GenerationSettings,
@@ -32,9 +33,6 @@ from agilerl.arena.memory.specs import (
 LimitReason = Literal["memory", "bound"]
 SyncTarget = tuple[PhaseName, str]
 
-# vLLM's own default. Dedicated inference has the card to itself, so the
-# engine may take nearly all of it.
-INFERENCE_GPU_MEMORY_UTILIZATION = 0.9
 # Concurrent sequences a dedicated serving GPU is sized for when the caller does not
 # say. ``1`` gives the longest single-request context; raise this to trade
 # context for throughput.
@@ -127,7 +125,7 @@ def inference_run_config(
         settings
         if settings is not None
         else GenerationSettings(
-            gpu_memory_utilization=INFERENCE_GPU_MEMORY_UTILIZATION,
+            gpu_memory_utilization=ROLLOUT_ENGINE_GPU_MEMORY_UTILIZATION,
             max_num_seqs=INFERENCE_MAX_NUM_SEQS,
         )
     )

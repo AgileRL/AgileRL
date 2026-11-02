@@ -16,7 +16,6 @@ from agilerl.arena.memory.estimator import (
     estimate_training,
     generation_can_serve,
 )
-from agilerl.arena.memory.resolve.fsdp import resolve_fsdp_memory
 from agilerl.arena.memory.solver import (
     SOLVABLE_FIELDS,
     CannotSolve,
@@ -56,7 +55,6 @@ __all__ = [
     "estimate_training",
     "generation_can_serve",
     "inference_run_config",
-    "resolve_fsdp_memory",
     "solve",
     "solve_inference",
 ]

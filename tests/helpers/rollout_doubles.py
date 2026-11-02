@@ -257,7 +257,7 @@ def bare_rollout_env() -> RolloutHarness:
     w._segment_prompt_tokens = None  # __init__ default, read by the feedback path
     w._segment_max_images = None  # __init__ default, read by the feedback path
     w._restart_keep_turns = 0  # __init__ default, read by the feedback path
-    w._tool_parser = None  # __init__ default, read by the step phases
+    w._chat_format = None  # __init__ default, read by the step phases
     w._takes_tool_calls = None  # __init__ default, read by the step phases
     w._min_reward = 0.0  # __init__ default, read by the step phases
     w._pending_tool_calls = []  # __init__ default, read by the step phases
@@ -269,6 +269,7 @@ def bare_rollout_env() -> RolloutHarness:
     w._multimodal_turn = None
     w._episode_pixel_values = None
     w._image_placeholder_id = None  # __init__ default for a text-only harness
+    w._reasoning_end_ids = ()  # read by the step phases; empty sends the whole generation
     # These tests drive the ChatML fallback deliberately, so they opt out of strict.
     w._strict_chat_template_boundary = False
     return w

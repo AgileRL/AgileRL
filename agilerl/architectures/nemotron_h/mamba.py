@@ -5,15 +5,16 @@
 
 Every patch installs once at the class level and is idempotent. The mixer
 class is resolved from a dotted path when a patch runs, not when this module
-is imported: an absent target is a no-op with a warning, and a present class
-with the wrong shape raises.
+is imported: an absent target or a present class with the wrong shape raises.
 """
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import logging
 import sys
+from importlib import import_module
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
@@ -21,13 +22,14 @@ import torch.utils.checkpoint
 from torch.distributed.tensor import DTensor
 
 from agilerl.architectures.runtime import PatchRuntimeConfig
+from agilerl.arena.memory.resolve.mamba import mamba_scan_is_unfused
 from agilerl.utils.llm_packing import (
     RESETS_AT_DOCUMENT_BOUNDARY,
     packed_layout,
     packed_seq_idx,
     run_per_document,
 )
-from agilerl.utils.patching import class_is_patched, library_shim, try_import
+from agilerl.utils.patching import class_is_patched, library_shim
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -39,6 +41,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "install_mamba_patches",
+    "install_packed_mixer",
     "patch_nemotron_mamba_fused_path",
     "patch_nemotron_mamba_packed_sequences",
     "patch_nemotron_mamba_stream_ordering",
@@ -68,21 +71,19 @@ FUSED_COMBINED_NAMES = (
 )
 
 
-def _resolve_mixer_class(mixer: str) -> type | None:
-    """Resolve the mixer class at ``mixer``, or None when its module is absent.
+def _resolve_mixer_class(mixer: str) -> type:
+    """Resolve the mixer class at ``mixer``.
 
     :param mixer: Dotted path ``module.Class``.
     :type mixer: str
-    :return: The mixer class, or None.
-    :rtype: type | None
+    :return: The mixer class.
+    :rtype: type
     """
     module_path, sep, class_name = mixer.rpartition(".")
     if not sep or not module_path or not class_name:
         message = f"[mamba] invalid mixer path {mixer!r}"
         raise RuntimeError(message)
-    module = try_import(module_path)
-    if module is None:
-        return None
+    module = import_module(module_path)
     mixer_cls = getattr(module, class_name, None)
     if mixer_cls is None:
         message = f"[mamba] {module_path} is present but missing {class_name}"
@@ -112,7 +113,7 @@ def _ada_capability(device: torch.device) -> bool:
     """Whether SSM kernels on this device return NaN."""
     if device.type != "cuda":
         return False
-    return torch.cuda.get_device_capability(device) == (8, 9)
+    return mamba_scan_is_unfused(torch.cuda.get_device_capability(device))
 
 
 def _forward_calls_rmsnorm(forward: object) -> bool:
@@ -567,13 +568,6 @@ def patch_nemotron_mamba_fused_path(
         return
 
     mixer_cls = _resolve_mixer_class(mixer)
-    if mixer_cls is None:
-        logger.warning(
-            "[mamba-fused-path] %s unavailable; forward left unpatched",
-            mixer.rpartition(".")[2],
-        )
-        return
-
     _install_fused_scan(mixer_cls)
 
     if model is None:
@@ -708,12 +702,6 @@ def patch_nemotron_mamba_stream_ordering(
         return
 
     mixer_cls = _resolve_mixer_class(mixer)
-    if mixer_cls is None:
-        logger.warning(
-            "[mamba-stream] %s unavailable; forward left unpatched",
-            mixer.rpartition(".")[2],
-        )
-        return
     _patch_stream_class(mixer_cls)
     if model is None:
         return
@@ -829,22 +817,34 @@ def _fused_split_scan(
 
 
 def _packed_uses_fused_scan(
-    mixer: torch.nn.Module,
     hidden_states: torch.Tensor,
     cache_params: object | None,
 ) -> bool:
-    """Whether a packed row takes the fused kernel (CUDA, training, no cache)."""
-    module: Any = mixer
+    """Whether a packed row takes the fused kernel (CUDA, no cache, not :func:`mamba_scan_is_unfused`).
+
+    Eval-mode no-grad passes take it too, so their log-probs come from the
+    kernel the gradient pass runs and each layer scans the row once.
+    """
     return (
-        module.training
-        and cache_params is None
+        cache_params is None
         and hidden_states.is_cuda
         and not torch.compiler.is_compiling()
+        and not _ada_capability(hidden_states.device)
     )
 
 
-def _install_packed_mixer(mixer_cls: type) -> None:
-    """Give this mixer's forward a ``seq_idx`` argument that resets state per document."""
+def install_packed_mixer(mixer_cls: type, default_stream: bool = True) -> None:
+    """Give this Mamba2 mixer's forward a ``seq_idx`` argument that resets state per document.
+
+    :param mixer_cls: Mixer class with the ``in_proj`` / ``conv1d`` / gated
+        ``norm`` / ``out_proj`` layout :func:`_fused_split_scan` reads.
+    :type mixer_cls: type
+    :param default_stream: Run the fused kernel on the default CUDA stream, for
+        mixers whose stream-ordering patch orders that stream against the caller.
+    :type default_stream: bool
+    :return: None
+    :rtype: None
+    """
     cls: Any = mixer_cls
     forward = cls.__dict__["forward"]
     # Live module dict: the fused-path patch wraps the kernel global later,
@@ -863,8 +863,13 @@ def _install_packed_mixer(mixer_cls: type) -> None:
         if seq_idx is None:
             return forward(self, hidden_states, cache_params, attention_mask, **kwargs)
         mixer: Any = self
-        if _packed_uses_fused_scan(mixer, hidden_states, cache_params):
-            with torch.cuda.stream(torch.cuda.default_stream(hidden_states.device)):
+        if _packed_uses_fused_scan(hidden_states, cache_params):
+            stream = (
+                torch.cuda.stream(torch.cuda.default_stream(hidden_states.device))
+                if default_stream
+                else contextlib.nullcontext()
+            )
+            with stream:
                 fused = _fused_split_scan(
                     mixer,
                     kernels["mamba2_split_conv1d_scan_combined"],
@@ -966,15 +971,9 @@ def patch_nemotron_mamba_packed_sequences(mixer: str, block: str) -> None:
     """
     mixer_cls = _resolve_mixer_class(mixer)
     block_cls = _resolve_mixer_class(block)
-    if mixer_cls is None or block_cls is None:
-        logger.warning(
-            "[mamba-packed] %s unavailable; packed rows are not supported",
-            mixer.rpartition(".")[2],
-        )
-        return
     if class_is_patched(mixer_cls, RESETS_AT_DOCUMENT_BOUNDARY):
         return
-    _install_packed_mixer(mixer_cls)
+    install_packed_mixer(mixer_cls)
     _install_packed_block(block_cls, mixer_cls)
     setattr(mixer_cls, RESETS_AT_DOCUMENT_BOUNDARY, True)
     logger.debug(
