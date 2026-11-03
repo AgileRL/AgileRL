@@ -130,7 +130,9 @@ class LoraExpertsFunction(torch.autograd.Function):
             projected = grouped_matmul(rows, up_operand, offs)
             for delta in _adapter_deltas(rows, operands[:n_up], up_masks, chunk, offs):
                 projected.add_(delta)
-            intermediate = expert_activation(projected, config.act_fn, config.gated)
+            intermediate = expert_activation(
+                projected, config.act_fn, config.gated, kernels
+            )
             out = grouped_matmul(intermediate, down_operand, offs)
             for delta in _adapter_deltas(
                 intermediate, operands[n_up:], down_masks, chunk, offs
@@ -217,7 +219,9 @@ class LoraExpertsFunction(torch.autograd.Function):
                     rows, leaves[:n_up], up_masks, chunk, offs
                 ):
                     projected.add_(delta)
-                intermediate = expert_activation(projected, config.act_fn, config.gated)
+                intermediate = expert_activation(
+                    projected, config.act_fn, config.gated, kernels
+                )
                 down_delta = _sum_deltas(
                     _adapter_deltas(
                         intermediate, leaves[n_up:], down_masks, chunk, offs

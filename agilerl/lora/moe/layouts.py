@@ -7,17 +7,19 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.autograd.function import once_differentiable
 
 from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
 from agilerl.architectures.gptoss import experts as gptoss_experts
+from agilerl.lora.moe.grouped_gemm import ExpertKernels
 
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
-    from transformers.activations import get_activation
+    from transformers.activations import SiLUActivation, get_activation
 
 if HAS_LIGER_KERNEL:
     from liger_kernel.transformers.swiglu import LigerExperts
@@ -115,12 +117,49 @@ def routed_experts_act_fn(
     return resolved
 
 
+def is_silu(act_fn: Callable[[torch.Tensor], torch.Tensor]) -> bool:
+    """Whether *act_fn* is SiLU."""
+    return act_fn is F.silu or isinstance(act_fn, (nn.SiLU, SiLUActivation))
+
+
+class SwiGLUCtx(Protocol):
+    saved_tensors: tuple[torch.Tensor, ...]
+    kernels: ExpertKernels
+
+    def save_for_backward(self, *tensors: torch.Tensor) -> None: ...
+
+
+class SwiGLU(torch.autograd.Function):
+    """``silu(gate) * up`` of a packed ``[gate | up]`` projection on ``kernels``; saves only the projection."""
+
+    @staticmethod
+    def forward(
+        ctx: SwiGLUCtx, projected: torch.Tensor, kernels: ExpertKernels
+    ) -> torch.Tensor:
+        ctx.save_for_backward(projected)
+        ctx.kernels = kernels
+        return kernels.swiglu(projected)
+
+    @staticmethod
+    @once_differentiable
+    def backward(ctx: SwiGLUCtx, grad: torch.Tensor) -> tuple[torch.Tensor, None]:
+        (projected,) = ctx.saved_tensors
+        return ctx.kernels.swiglu_backward(grad, projected), None
+
+
 def expert_activation(
     projected: torch.Tensor,
     act_fn: Callable[[torch.Tensor], torch.Tensor],
     gated: bool,
+    kernels: ExpertKernels | None,
 ) -> torch.Tensor:
-    """``act(gate) * up`` for a gated up-projection, else ``act(up)``."""
+    """``act(gate) * up`` for a gated up-projection, else ``act(up)``.
+
+    :param kernels: Expert kernels that run a gated SiLU as one fused
+        :class:`SwiGLU`, or ``None`` for torch ops.
+    """
+    if gated and kernels is not None and is_silu(act_fn):
+        return SwiGLU.apply(projected, kernels)
     if gated:
         gate, up = projected.chunk(2, dim=-1)
         return act_fn(gate) * up

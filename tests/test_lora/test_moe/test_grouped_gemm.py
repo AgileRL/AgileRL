@@ -116,7 +116,7 @@ class TestExpertKernels:
         self, monkeypatch, fresh_device_backends
     ):
         # Arrange: bf16 on an sm80 GPU runs the Triton kernels.
-        kernels = moe_gemm.ExpertKernels(None, None, None)
+        kernels = moe_gemm.ExpertKernels(None, None, None, None, None, None)
         monkeypatch.setattr(moe_gemm, "HAS_TRITON", True)
         monkeypatch.setattr(moe_gemm, "TRITON_EXPERT_KERNELS", kernels)
         monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _index: (8, 0))
@@ -207,9 +207,71 @@ class TestGroupedMatmul:
         assert reference_expert_kernels.used == {"matmul"}
 
 
+class TestGroupedLoraMatmul:
+    def test_matches_base_plus_low_rank_per_expert(self, reference_expert_kernels):
+        # Arrange
+        torch.manual_seed(0)
+        counts = [3, 0, 2, 4]
+        x = torch.randn(sum(counts), 8, requires_grad=True)
+        weight = torch.randn(4, 8, 8)
+        lora_a = torch.randn(4, 8, 4, requires_grad=True)
+        lora_b = torch.randn(4, 4, 8, requires_grad=True)
+        offs = torch.tensor([3, 3, 5, 9], dtype=torch.int32)
+        leaves = (x, lora_a, lora_b)
+        expected = torch.cat(
+            [
+                rows @ weight[e] + rows @ lora_a[e] @ lora_b[e]
+                for e, rows in enumerate(x.split(counts))
+            ]
+        )
+        expected_grads = torch.autograd.grad(expected.square().sum(), leaves)
+
+        # Act
+        out = moe_gemm.grouped_lora_matmul(
+            x, weight, lora_a, lora_b, offs, reference_expert_kernels.kernels
+        )
+        grads = torch.autograd.grad(out.square().sum(), leaves)
+
+        # Assert
+        # fp32 sums over K=8 and rank 4; only the accumulation order differs.
+        torch.testing.assert_close(out, expected, rtol=1e-5, atol=1e-5)
+        for grad, expected_grad in zip(grads, expected_grads, strict=True):
+            torch.testing.assert_close(grad, expected_grad, rtol=1e-5, atol=1e-5)
+        assert torch.equal(grads[1][1], torch.zeros(8, 4))
+        assert torch.equal(grads[2][1], torch.zeros(4, 8))
+        assert reference_expert_kernels.used == {"matmul", "lora_matmul", "weight_grad"}
+
+    def test_trainable_weight_gets_its_grad(self, reference_expert_kernels):
+        # Arrange
+        torch.manual_seed(0)
+        counts = [2, 3]
+        x = torch.randn(sum(counts), 4)
+        weight = torch.randn(2, 4, 4, requires_grad=True)
+        lora_a = torch.randn(2, 4, 4)
+        lora_b = torch.randn(2, 4, 4)
+        offs = torch.tensor([2, 5], dtype=torch.int32)
+        expected = torch.cat(
+            [
+                rows @ weight[e] + rows @ lora_a[e] @ lora_b[e]
+                for e, rows in enumerate(x.split(counts))
+            ]
+        )
+        (expected_grad,) = torch.autograd.grad(expected.square().sum(), weight)
+
+        # Act
+        out = moe_gemm.grouped_lora_matmul(
+            x, weight, lora_a, lora_b, offs, reference_expert_kernels.kernels
+        )
+        (grad,) = torch.autograd.grad(out.square().sum(), weight)
+
+        # Assert
+        # fp32 sums over K=4 and rank 4; only the accumulation order differs.
+        torch.testing.assert_close(grad, expected_grad, rtol=1e-5, atol=1e-5)
+
+
 class TestUnalignedGemmKernels:
     def test_cuda_with_triton_takes_the_triton_kernels(self, monkeypatch):
-        kernels = moe_gemm.ExpertKernels(None, None, None)
+        kernels = moe_gemm.ExpertKernels(None, None, None, None, None, None)
         monkeypatch.setattr(moe_gemm, "TRITON_EXPERT_KERNELS", kernels)
         x = SimpleNamespace(is_cuda=True)
 

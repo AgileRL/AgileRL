@@ -11,7 +11,8 @@ which GDN already applies, so its pad tokens never become documents.
 causal-conv1d takes ``seq_idx`` per row; FLA's varlen scan takes one row, so
 packed rows reach it flattened, with ``cu_seq_lens_q`` spanning every row.
 When the fused kernels are absent, each document is run on its own: the torch
-GDN fallback ignores ``cu_seqlens``.
+GDN fallback ignores ``cu_seqlens``. FLA scans also take the grouped q/k heads
+as they are.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 from torch import nn
 
+from agilerl.architectures.qwen3_5.gated_norm import install_fused_gated_norm
 from agilerl.architectures.runtime import PatchRuntimeConfig
 from agilerl.utils.llm_packing import (
     RESETS_AT_DOCUMENT_BOUNDARY,
@@ -40,9 +42,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "GROUPED_QK_HEADS",
     "PACKED_CU_SEQLENS",
     "VARLEN_SCAN",
     "install_qwen_gdn_patches",
+    "patch_qwen_gdn_grouped_heads",
     "patch_qwen_gdn_packed_sequences",
     "resolve_class",
 ]
@@ -53,6 +57,9 @@ VARLEN_SCAN = "torch_chunk_gated_delta_rule"
 # Decoder-layer kwarg carrying the flattened document offsets to GDN. Not
 # ``cu_seq_lens_q``: FlashAttention layers of the same model would consume it.
 PACKED_CU_SEQLENS = "agilerl_packed_cu_seqlens"
+
+# Marks a GDN mixer class whose forward passes grouped q/k heads to the scans.
+GROUPED_QK_HEADS = "agilerl_grouped_qk_heads"
 
 PACKED_TARGETS = (
     (
@@ -260,6 +267,37 @@ def patch_qwen_gdn_packed_sequences(mixer: str, text_model: str) -> None:
     )
 
 
+def patch_qwen_gdn_grouped_heads(mixer: str) -> None:
+    """Pass FLA's GDN scans the grouped q/k heads instead of q/k repeated to every value head.
+
+    FLA maps value head ``i`` to key head ``i // (num_v_heads // num_k_heads)``,
+    the head ``repeat_interleave`` copies into it, and sums the repeated q/k
+    gradients inside its backward. The PyTorch fallback scans need the repeat.
+
+    :param mixer: Dotted path of the GatedDeltaNet class.
+    """
+    mixer_cls = resolve_class(mixer)
+    if mixer_cls is None or class_is_patched(mixer_cls, GROUPED_QK_HEADS):
+        return
+    cls: Any = mixer_cls
+    forward = cls.__dict__["forward"]
+
+    @functools.wraps(forward)
+    def grouped_heads_forward(self: nn.Module, *args: Any, **kwargs: Any) -> object:
+        if not _varlen_kernels_ready():
+            return forward(self, *args, **kwargs)
+        num_k_heads = self.num_k_heads
+        # HF repeats q/k heads before the scan only while num_k_heads < num_v_heads.
+        self.num_k_heads = self.num_v_heads
+        try:
+            return forward(self, *args, **kwargs)
+        finally:
+            self.num_k_heads = num_k_heads
+
+    cls.forward = grouped_heads_forward
+    setattr(mixer_cls, GROUPED_QK_HEADS, True)
+
+
 def _require_gdn_fast_path() -> None:
     """Fail GPU Qwen GDN setup when fused conv/scan kernels are missing."""
     if not torch.cuda.is_available():
@@ -282,7 +320,7 @@ def install_qwen_gdn_patches(
     _patch: PatchRuntimeConfig,
     _model: object | None = None,
 ) -> None:
-    """Install GDN packed-sequence patches for Qwen3.5 / Qwen3.6 families.
+    """Install GDN packed-sequence and fused gated-norm patches for Qwen3.5 / Qwen3.6 families.
 
     :param _patch: Catalog patch config.
     :param _model: Already-built model, or None; the class-level patches cover it.
@@ -290,3 +328,5 @@ def install_qwen_gdn_patches(
     _require_gdn_fast_path()
     for mixer, text_model in PACKED_TARGETS:
         patch_qwen_gdn_packed_sequences(mixer, text_model)
+        patch_qwen_gdn_grouped_heads(mixer)
+    install_fused_gated_norm()

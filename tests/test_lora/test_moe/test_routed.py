@@ -392,4 +392,58 @@ class TestRoutedExpertsLocalForwardExpertKernels:
         assert set(actual[3]) == set(expected[3])
         for name, grad in expected[3].items():
             torch.testing.assert_close(actual[3][name], grad, **tolerance)
-        assert reference_expert_kernels.used == {"matmul", "weight_grad", "scatter_add"}
+        # The graph path adds the low-rank product in the base GEMM and scales
+        # rows in the scatter; the recompute path adds and scales in torch.
+        # Both run a gated SiLU on the fused SwiGLU.
+        expected_kernels = (
+            {"matmul", "weight_grad", "scatter_add"}
+            if recompute
+            else {
+                "matmul",
+                "lora_matmul",
+                "weight_grad",
+                "scatter_add",
+                "gather_scaled_rows",
+            }
+        )
+        if experts_cls is GatedExperts:
+            expected_kernels |= {"swiglu", "swiglu_backward"}
+        assert reference_expert_kernels.used == expected_kernels
+
+
+class TestScatterScaledRows:
+    def test_scales_rows_into_fp32_with_source_dtype_grads(
+        self, reference_expert_kernels
+    ):
+        # Arrange
+        base = torch.zeros(3, 2, requires_grad=True)
+        source = torch.tensor(
+            [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]],
+            dtype=torch.bfloat16,
+            requires_grad=True,
+        )
+        weights = torch.tensor(
+            [[0.5], [2.0], [1.0]], dtype=torch.bfloat16, requires_grad=True
+        )
+        index = torch.tensor([2, 0, 2])
+
+        # Act
+        out = moe_routed.ScatterScaledRows.apply(
+            base.clone(), index, source, weights, reference_expert_kernels.kernels
+        )
+        out.backward(torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]))
+
+        # Assert
+        assert out.dtype == torch.float32
+        assert torch.equal(
+            out.detach(), torch.tensor([[6.0, 8.0], [0.0, 0.0], [5.5, 7.0]])
+        )
+        assert torch.equal(
+            base.grad, torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+        )
+        assert source.grad.dtype == torch.bfloat16
+        assert torch.equal(
+            source.grad.float(), torch.tensor([[2.5, 3.0], [2.0, 4.0], [5.0, 6.0]])
+        )
+        assert weights.grad.dtype == torch.bfloat16
+        assert torch.equal(weights.grad.float(), torch.tensor([[17.0], [11.0], [61.0]]))

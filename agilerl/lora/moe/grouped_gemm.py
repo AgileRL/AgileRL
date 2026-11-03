@@ -106,8 +106,18 @@ def _use_grouped_mm(x: torch.Tensor) -> bool:
 class ExpertKernels:
     """Kernels over expert-sorted rows that read the group offsets on device."""
 
-    # ``(x [rows, in], weight [experts, in, out], offs) -> [rows, out]``
-    matmul: Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]
+    # ``(x [rows, in], weight [experts, in, out], offs, lora) -> [rows, out]``;
+    # ``lora`` is ``None`` or ``(xa [rows, r], b [experts, r, out])``, whose
+    # ``xa @ b[e]`` adds into the same accumulator.
+    matmul: Callable[
+        [
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            tuple[torch.Tensor, torch.Tensor] | None,
+        ],
+        torch.Tensor,
+    ]
     # ``(x [rows, in], grad [rows, out], offs) -> [experts, in, out]``
     weight_grad: Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]
     # ``(out fp32 [tokens, h], index, rows [rows, h], weights [rows, 1] | None)``
@@ -115,6 +125,17 @@ class ExpertKernels:
     scatter_add: Callable[
         [torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None], None
     ]
+    # ``(grad fp32 [tokens, h], index, rows [rows, h], weights [rows, 1])``
+    # ``-> (weights * grad[index], fp32 row sums of grad[index] * rows)``:
+    # the backward of a weighted ``scatter_add``.
+    gather_scaled_rows: Callable[
+        [torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+        tuple[torch.Tensor, torch.Tensor],
+    ]
+    # ``(projected [rows, 2 * inter]) -> silu(gate) * up`` over ``[gate | up]``.
+    swiglu: Callable[[torch.Tensor], torch.Tensor]
+    # ``(grad [rows, inter], projected) -> grad of projected``.
+    swiglu_backward: Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 
 
 TRITON_EXPERT_KERNELS = (
@@ -122,6 +143,9 @@ TRITON_EXPERT_KERNELS = (
         triton_kernels.grouped_matmul,
         triton_kernels.grouped_weight_grad,
         triton_kernels.scatter_add_rows,
+        triton_kernels.gather_scaled_rows,
+        triton_kernels.swiglu,
+        triton_kernels.swiglu_backward,
     )
     if HAS_TRITON
     else None
@@ -175,7 +199,7 @@ class GroupedMatmul(torch.autograd.Function):
             x if needs_weight else None, weight if needs_x else None, offs
         )
         ctx.kernels = kernels
-        return kernels.matmul(x, weight, offs)
+        return kernels.matmul(x, weight, offs, None)
 
     @staticmethod
     @once_differentiable
@@ -187,10 +211,65 @@ class GroupedMatmul(torch.autograd.Function):
         grad_x = (
             None
             if weight is None
-            else ctx.kernels.matmul(grad, weight.transpose(-2, -1), offs)
+            else ctx.kernels.matmul(grad, weight.transpose(-2, -1), offs, None)
         )
         grad_weight = None if x is None else ctx.kernels.weight_grad(x, grad, offs)
         return grad_x, grad_weight, None, None
+
+
+class GroupedLoraMatmulCtx(Protocol):
+    saved_tensors: tuple[torch.Tensor, ...]
+    needs_input_grad: tuple[bool, ...]
+    kernels: ExpertKernels
+
+    def save_for_backward(self, *tensors: torch.Tensor) -> None: ...
+
+
+class GroupedLoraMatmul(torch.autograd.Function):
+    """Per-expert ``rows @ weight[e] + rows @ a[e] @ b[e]``; each pass adds the low-rank product in the base GEMM's accumulator."""
+
+    @staticmethod
+    def forward(
+        ctx: GroupedLoraMatmulCtx,
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        lora_a: torch.Tensor,
+        lora_b: torch.Tensor,
+        offs: torch.Tensor,
+        kernels: ExpertKernels,
+    ) -> torch.Tensor:
+        xa = kernels.matmul(x, lora_a, offs, None)
+        ctx.save_for_backward(x, xa, weight, lora_a, lora_b, offs)
+        ctx.kernels = kernels
+        return kernels.matmul(x, weight, offs, (xa, lora_b))
+
+    @staticmethod
+    @once_differentiable
+    def backward(
+        ctx: GroupedLoraMatmulCtx, grad: torch.Tensor
+    ) -> tuple[torch.Tensor | None, ...]:
+        x, xa, weight, lora_a, lora_b, offs = ctx.saved_tensors
+        needs_x, needs_weight, needs_a, needs_b = ctx.needs_input_grad[:4]
+        kernels = ctx.kernels
+        grad_xa = kernels.matmul(grad, lora_b.transpose(-2, -1), offs, None)
+        grad_x = (
+            kernels.matmul(
+                grad,
+                weight.transpose(-2, -1),
+                offs,
+                (grad_xa, lora_a.transpose(-2, -1)),
+            )
+            if needs_x
+            else None
+        )
+        return (
+            grad_x,
+            kernels.weight_grad(x, grad, offs) if needs_weight else None,
+            kernels.weight_grad(x, grad_xa, offs) if needs_a else None,
+            kernels.weight_grad(xa, grad, offs) if needs_b else None,
+            None,
+            None,
+        )
 
 
 def counts_list(counts: Sequence[int] | torch.Tensor) -> list[int]:
@@ -353,6 +432,31 @@ def grouped_matmul(
             weight = weight.contiguous()
         return F.grouped_mm(x, weight, offs=offs)
     return GroupedMatmul.apply(x, weight, offs, unaligned_gemm_kernels(x))
+
+
+def grouped_lora_matmul(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    lora_a: torch.Tensor,
+    lora_b: torch.Tensor,
+    offs: torch.Tensor,
+    kernels: ExpertKernels,
+) -> torch.Tensor:
+    """Per-expert ``rows @ weight[e] + rows @ lora_a[e] @ lora_b[e]`` on ``kernels``.
+
+    :param weight: Stacked ``[experts, in, out]`` base weight.
+    :param lora_a: ``[experts, in, r]`` operand, scaling folded in.
+    :param lora_b: ``[experts, r, out]`` operand.
+    :param offs: Cumulative row offsets, one per expert.
+    """
+    return GroupedLoraMatmul.apply(
+        x,
+        weight.to(x.dtype),
+        lora_a.to(x.dtype),
+        lora_b.to(x.dtype),
+        offs,
+        kernels,
+    )
 
 
 def iter_expert_row_chunks(
