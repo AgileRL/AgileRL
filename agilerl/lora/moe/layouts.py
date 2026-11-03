@@ -7,14 +7,17 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers.activations import get_activation
 
-from agilerl import HAS_LIGER_KERNEL
+from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
 from agilerl.architectures.gptoss import experts as gptoss_experts
+
+if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
+    from transformers.activations import get_activation
 
 if HAS_LIGER_KERNEL:
     from liger_kernel.transformers.swiglu import LigerExperts

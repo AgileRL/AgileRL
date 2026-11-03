@@ -6,12 +6,13 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
-from peft.tuners.lora.layer import ParamWrapper
 from torch.distributed.tensor import DTensor
 
+from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.architectures.gptoss import experts as gptoss_experts
 from agilerl.lora.moe.adapters import (
     resolve_adapters,
@@ -19,6 +20,9 @@ from agilerl.lora.moe.adapters import (
     token_adapter_ids,
 )
 from agilerl.lora.moe.grouped_gemm import group_offsets, grouped_matmul
+
+if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
+    from peft.tuners.lora.layer import ParamWrapper
 
 transposed_expert_params = gptoss_experts.gpt_oss_expert_params
 apply_transposed_experts_gate = gptoss_experts.apply_gpt_oss_gate
