@@ -109,6 +109,19 @@ def parse_commit_message(message: str) -> SpokeCommit | None:
     )
 
 
+def commits_from_git_log(raw: str) -> list[SpokeCommit]:
+    """Parse `git log --first-parent --format='%B%x1e'` records."""
+    parsed: list[SpokeCommit] = []
+    for record in raw.split("\x1e"):
+        message = record.strip("\n")
+        if not message.strip():
+            continue
+        entry = parse_commit_message(message)
+        if entry is not None:
+            parsed.append(entry)
+    return parsed
+
+
 def commits_from_compare(payload: dict[str, object]) -> list[SpokeCommit]:
     """Read GitHub compare JSON, a {commits: [...]} wrapper, or one commit object."""
     if isinstance(payload.get("commits"), list):
@@ -233,25 +246,35 @@ def build_release(
 
 
 def main(argv: list[str] | None = None) -> None:
-    """Read GitHub compare JSON on stdin; write title and notes files."""
+    """Read compare JSON or first-parent git log on stdin; write title and notes files."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tag", required=True)
     parser.add_argument("--previous-tag", default="")
     parser.add_argument("--repo", default="AgileRL/AgileRL")
     parser.add_argument("--title-file", required=True)
     parser.add_argument("--notes-file", required=True)
+    parser.add_argument(
+        "--from-git-log",
+        action="store_true",
+        help="Read first-parent git log records from stdin",
+    )
     args = parser.parse_args(argv)
     raw = sys.stdin.read()
-    payload: object = json.loads(raw) if raw.strip() else {"commits": []}
-    if not isinstance(payload, dict):
-        print("error: compare JSON must be an object", file=sys.stderr)
-        raise SystemExit(1)
-    title, body = build_release(
-        payload,
-        tag=args.tag,
-        previous_tag=args.previous_tag,
-        repo=args.repo,
-    )
+    if args.from_git_log:
+        commits = commits_from_git_log(raw)
+        title = release_title(args.tag, commits)
+        body = release_body(args.tag, args.previous_tag, commits, repo=args.repo)
+    else:
+        payload: object = json.loads(raw) if raw.strip() else {"commits": []}
+        if not isinstance(payload, dict):
+            print("error: compare JSON must be an object", file=sys.stderr)
+            raise SystemExit(1)
+        title, body = build_release(
+            payload,
+            tag=args.tag,
+            previous_tag=args.previous_tag,
+            repo=args.repo,
+        )
     with Path(args.title_file).open("w", encoding="utf-8") as handle:
         handle.write(title)
     with Path(args.notes_file).open("w", encoding="utf-8") as handle:
