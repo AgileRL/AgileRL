@@ -230,9 +230,6 @@ class InProcessEnvClient:
     @property
     def rubric_components(self) -> tuple[str, ...]:
         """Leaf rubric names for component metrics (empty when none)."""
-        components = getattr(self._backend, "rubric_components", None)
-        if components is not None:
-            return tuple(components)
         return tuple(getattr(self._backend.state, "rubric_components", None) or ())
 
 

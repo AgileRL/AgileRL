@@ -214,6 +214,54 @@ each message at 300 seconds by default (``0`` disables the bound).
 Walkthrough: :ref:`remote_env_server_tutorial` — host a coding env on one
 machine and train on a GPU box.
 
+Scoring any env with a rubric
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``rubric_file_path`` works with every source above, not only dataset rows. The
+rubric scores every turn and its score replaces the env's reward for that turn.
+Without one, the env's own reward is used.
+
+A rubric is an OpenEnv ``Rubric`` called with a
+:class:`~agilerl.llm_envs.rubrics.TurnAction` (``message`` the env got after
+``action_processor``, ``completion`` with reasoning, parsed ``tool_calls``) and a
+:class:`~agilerl.llm_envs.rubrics.TurnObservation` (``env_reward``,
+``env_ran``, ``done``, ``prompt``, ``question`` / ``answer`` when the env sends
+them). :class:`~agilerl.llm_envs.rubrics.EnvReward` brings the env's reward in as
+the ``env`` component; combine it with OpenEnv's ``WeightedSum``, ``Gate`` or
+``Sequential``:
+
+.. code-block:: python
+
+   from openenv.core.rubrics.base import Rubric
+   from openenv.core.rubrics.containers import WeightedSum
+
+   from agilerl.llm_envs.rubrics import EnvReward
+
+
+   class Concise(Rubric):
+       component_name = "concise"
+
+       def forward(self, action, observation) -> float:
+           return 1.0 if len(action.message) < 200 else 0.0
+
+
+   class RUBRIC(WeightedSum):
+       def __init__(self) -> None:
+           super().__init__([EnvReward(), Concise()], weights=[0.8, 0.2])
+
+.. code-block:: yaml
+
+   environment:
+       env_type: rollout
+       entrypoint: guess_env.py:GuessEnv
+       rubric_file_path: reward.py
+       rubric_name: RUBRIC
+       max_turns: 3
+
+A turn rejected for a malformed tool call reaches the rubric with
+``env_ran=False`` and ``env_reward`` set to ``min_reward``. Each leaf is logged as
+``reward_<name>``.
+
 Supervised (SFT / DPO)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -288,10 +336,11 @@ These are the names this package reads:
      - Rename source columns (e.g. ``nums: question``).
    * - ``rubric_file_path``
      - ``None``
-     - Reward / rubric file for a dataset-backed rollout. Alias:
+     - Reward / rubric file scoring every turn. Required for a dataset-backed
+       rollout; on an env it replaces the env's reward. Alias:
        ``reward_file_path``.
    * - ``rubric_name``
-     - ``None``
+     - ``reward_fn``
      - Symbol in that file. Alias: ``reward_fn_name``.
    * - ``prompt_template``
      - ``None``

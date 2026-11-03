@@ -36,8 +36,10 @@ class PhaseBreakdown(BaseModel):
     device_usable_bytes: int
     warnings: tuple[str, ...] = ()
     # Host RAM one training process holds beside the device peak. Not part
-    # of ``total_bytes`` or ``fits``.
+    # of ``total_bytes``.
     host: tuple[MemoryComponent, ...] = ()
+    # Host RAM one training process may hold; ``None`` skips the host check.
+    host_usable_bytes: int | None = None
 
     @property
     def total_bytes(self) -> int:
@@ -48,9 +50,24 @@ class PhaseBreakdown(BaseModel):
         return sum(c.n_bytes for c in self.host)
 
     @property
+    def host_fits(self) -> bool:
+        """The host components fit the process's share of host RAM, when it is known."""
+        return (
+            self.host_usable_bytes is None
+            or self.host_total_bytes <= self.host_usable_bytes
+        )
+
+    @property
+    def host_fits_with_buffer(self) -> bool:
+        """Host fit leaves the underprediction share free, when a budget is known."""
+        return self.host_usable_bytes is None or formulas.recommendation_fits(
+            self.host_total_bytes, self.host_usable_bytes
+        )
+
+    @property
     def fits(self) -> bool:
-        """The peak is inside the card, and vLLM's start-up pool holds one full sequence."""
-        if self.total_bytes > self.device_usable_bytes:
+        """The peak is inside the card and host RAM, and vLLM's start-up pool holds one full sequence."""
+        if self.total_bytes > self.device_usable_bytes or not self.host_fits:
             return False
         kv = next((c for c in self.components if c.key == "kv_cache"), None)
         return (
@@ -62,7 +79,9 @@ class PhaseBreakdown(BaseModel):
         """Training fit leaves the underprediction share free; generation does not."""
         if self.phase != "training":
             return self.fits
-        return formulas.recommendation_fits(self.total_bytes, self.device_usable_bytes)
+        return self.host_fits_with_buffer and formulas.recommendation_fits(
+            self.total_bytes, self.device_usable_bytes
+        )
 
     @property
     def headroom_bytes(self) -> int:

@@ -1147,7 +1147,7 @@ class ArenaClient:
         :type project: str | None
         :param experiment_name: The name of the experiment to submit.
         :type experiment_name: str | None
-        :param reward_file: Python reward module for reasoning dataset jobs.
+        :param reward_file: Python rubric or reward module scoring a rollout job.
             When set, the request is sent as ``multipart/form-data``.
         :type reward_file: str | os.PathLike[str] | bytes | None
         :param completion: Optional model completion for reward validation.

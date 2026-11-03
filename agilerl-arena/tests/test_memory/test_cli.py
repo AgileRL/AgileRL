@@ -22,6 +22,7 @@ import yaml
 from click.testing import CliRunner
 
 from agilerl.arena.cli import main as arena_main
+from agilerl.arena.exceptions import ArenaAuthError
 from agilerl.arena.memory.cli import (
     BAR_WIDTH,
     EXIT_OK,
@@ -37,6 +38,7 @@ from agilerl.arena.memory.cli import (
 from agilerl.arena.memory.specs import ModelArch
 from agilerl.arena.models.manifest import TrainingManifest
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
+from agilerl.arena.output import handle_error
 
 
 def run_solve(field: str, manifest_path: str | None = None, **kwargs: Any) -> int:
@@ -1394,3 +1396,30 @@ class TestMainResourceTier:
         # Assert
         assert result.exit_code == EXIT_OK, result.output
         assert "Cheapest resource tier that fits: l4-2x" in result.output
+
+    def test_arena_command_without_a_login_says_tiers_need_one(
+        self, manifest_path, monkeypatch
+    ):
+        # Arrange
+        def list_resources():
+            msg = "Client has not been authenticated with Arena."
+            raise ArenaAuthError(msg)
+
+        @contextmanager
+        def fake_client(_config):
+            try:
+                yield types.SimpleNamespace(list_resources=list_resources)
+            except Exception as exc:
+                handle_error(exc)
+
+        monkeypatch.setattr("agilerl.arena.memory.cli.arena_client", fake_client)
+
+        # Act
+        result = CliRunner().invoke(
+            arena_main, ["memory", "estimate", manifest_path, "--no-color"]
+        )
+
+        # Assert
+        assert result.exit_code == 1
+        assert "Picking a resource tier needs an Arena login" in result.output
+        assert "--gpu" in result.output

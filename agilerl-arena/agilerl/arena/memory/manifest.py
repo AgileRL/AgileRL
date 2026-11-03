@@ -16,6 +16,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict
 
 from agilerl.arena.memory.estimator import RunEstimate, estimate_run
+from agilerl.arena.memory.formulas import host_bytes_per_gpu
 from agilerl.arena.memory.generation import drop_engine_fast_paths
 from agilerl.arena.memory.resolve.attention import resolve_attn_implementation
 from agilerl.arena.memory.resolve.batch import (
@@ -277,8 +278,9 @@ def device_spec_from_resource_class(
 ) -> DeviceSpec:
     """The device one GPU of a resource-class dict provides.
 
-    The estimate is per GPU, so ``num_gpus`` is ignored; data-parallel
-    sharding comes from ``training_gpus_per_agent``.
+    The estimate is per GPU; data-parallel sharding comes from
+    ``training_gpus_per_agent``. A tier's ``ram_gb`` (GiB per node) and
+    ``num_gpus`` set each GPU's host RAM share.
 
     :param resource_class: The tier dict, e.g.
         ``{"name": "a100-1x", "gpu_type": "NVIDIA A100", "num_gpus": 1, ...}``.
@@ -287,6 +289,23 @@ def device_spec_from_resource_class(
     :raises ValueError: A CPU-only tier, or an unknown ``gpu_type`` with no
         ``gpu_memory_gib`` override.
     """
+    spec = _gpu_device_spec(resource_class, gpu_memory_gib)
+    ram_gib = resource_class.get("ram_gb")
+    if ram_gib is None:
+        return spec
+    return spec.model_copy(
+        update={
+            "host_bytes_per_gpu": host_bytes_per_gpu(
+                int(ram_gib * GiB), int(resource_class["num_gpus"])
+            )
+        }
+    )
+
+
+def _gpu_device_spec(
+    resource_class: dict[str, Any], gpu_memory_gib: float | None
+) -> DeviceSpec:
+    """The GPU of a resource-class dict, before its host RAM share."""
     gpu_type = str(resource_class.get("gpu_type") or "")
     if not gpu_type and gpu_memory_gib is None:
         msg = (

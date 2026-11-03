@@ -636,6 +636,53 @@ class TestResolveTrainingMemoryLastResorts:
             resolve_floor(moe_floor_settings(), usable)
         assert not raised.value.plan.breakdown.fits
 
+    def test_host_limit_checkpoints_under_activation_offload(self):
+        # Arrange: only activation offload fits the GPU; uncheckpointed it pins
+        # every block's saved tensors on host.
+        device = budget_device(buffered(moe_peak(64, True, activation_offload=True)))
+        pins = MemoryPins(micro_batch_size_per_gpu=1)
+        unlimited = resolve_training_memory(
+            MOE_MODEL, device, moe_floor_settings(), pins, 1
+        )
+        # Point estimate equals the share: host_fits, not host_fits_with_buffer.
+        limit = unlimited.breakdown.host_total_bytes
+
+        # Act
+        plan = resolve_training_memory(
+            MOE_MODEL,
+            device.model_copy(update={"host_bytes_per_gpu": limit}),
+            moe_floor_settings(),
+            pins,
+            1,
+        )
+
+        # Assert
+        assert unlimited.fsdp.activation_offload is True
+        assert unlimited.gradient_checkpointing is False
+        assert plan.fsdp.activation_offload is True
+        assert plan.gradient_checkpointing is True
+        assert plan.breakdown.host_fits_with_buffer
+
+    def test_raises_when_host_ram_is_over(self):
+        # Arrange
+        device = budget_device(
+            buffered(moe_peak(64, True, activation_offload=True))
+        ).model_copy(update={"host_bytes_per_gpu": 0})
+
+        # Act / Assert
+        with pytest.raises(
+            TrainingMemoryUnfitError,
+            match=r"Estimated host RAM .* Add host RAM, or shorten the context",
+        ) as raised:
+            resolve_training_memory(
+                MOE_MODEL,
+                device,
+                moe_floor_settings(),
+                MemoryPins(micro_batch_size_per_gpu=1),
+                1,
+            )
+        assert "more or larger GPUs" not in str(raised.value)
+
     def test_full_cpu_offload_never_offloads_the_optimizer_again(self):
         # Act
         plan = resolve_floor(moe_floor_settings(cpu_offload=True), 80 * GiB)

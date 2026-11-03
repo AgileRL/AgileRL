@@ -64,7 +64,6 @@ from agilerl.llm_envs.openenv_server import (
     resolve_env,
 )
 from agilerl.llm_envs.qa_dataset import QADatasetEnv
-from agilerl.llm_envs.rubrics import reward_fn_to_rubric
 from tests.helpers.rollout_doubles import FakeEnvClient, MiniTokenizer
 
 
@@ -2209,17 +2208,14 @@ def test_reset_retries_once_when_the_server_closed_an_idle_session() -> None:
 
 def test_server_hosts_qa_dataset_environment_as_is() -> None:
     """OpenEnv ``Environment`` subclasses are hosted without ``OpenEnvWrapper``."""
-    world = QADatasetEnv(
-        [{"question": "q", "answer": "a"}],
-        rubric=reward_fn_to_rubric(lambda completion, answer, question: 1.0),
-    )
+    world = QADatasetEnv([{"question": "q", "answer": "a"}])
     with OpenEnvServer(world) as server:
         client = RemoteEnvClient(server.base_url)
         assert client.reset(row_index=0)[0]["prompt"] == "q"
-        _obs, reward, terminated, _truncated, _info = client.step("done")
-        assert reward == 1.0
+        obs, reward, terminated, _truncated, _info = client.step("done")
+        assert reward == 0.0
         assert terminated is True
-        assert client.rubric_components == ("fn",)
+        assert (obs["question"], obs["answer"]) == ("q", "a")
 
 
 def test_reset_reraises_application_errors_without_redial() -> None:
