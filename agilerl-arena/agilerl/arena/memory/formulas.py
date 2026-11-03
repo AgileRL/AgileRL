@@ -834,6 +834,15 @@ def mamba_block_bytes(
     return int(total)
 
 
+def gated_delta_qk_width(arch: ModelArch) -> int:
+    """Per-token width of the gated-delta-net query (or key): key heads x key head dim.
+
+    The conv channels are ``[q | k | v]``, so this is what is left of
+    :attr:`ModelArch.mamba_conv_dim` after the value heads, halved.
+    """
+    return (arch.mamba_conv_dim - arch.mamba_n_heads * arch.mamba_d_head) // 2
+
+
 def gated_delta_block_bytes(
     arch: ModelArch,
     rows: int,
@@ -853,14 +862,20 @@ def gated_delta_block_bytes(
     if not (arch.n_mamba_layers and arch.mamba_gated_delta):
         return 0
     heads = arch.mamba_n_heads
+    qk = gated_delta_qk_width(arch)
     key = heads * arch.mamba_d_state
     value = heads * arch.mamba_d_head
     state = heads * arch.mamba_d_state * arch.mamba_d_head / GATED_DELTA_CHUNK
-    # Per token: conv1d output, contiguous q/k/v at the value-head count,
+    # Per token: conv1d output, contiguous q/k at the key-head count and v,
     # l2-normed q and k, gate z, WY w and u, updated values, output, the
     # intra-chunk matrix, and one (d_state, d_head) state per head per chunk.
     width = (
-        arch.mamba_conv_dim + 5 * key + 5 * value + heads * GATED_DELTA_CHUNK + state
+        arch.mamba_conv_dim
+        + 4 * qk
+        + key
+        + 5 * value
+        + heads * GATED_DELTA_CHUNK
+        + state
     )
     # A checkpointed backward also keeps the in_proj_qkv output and its gate.
     if backward:
@@ -885,13 +900,17 @@ def gated_delta_saved_bytes(
     if not (arch.n_mamba_layers and arch.mamba_gated_delta):
         return 0
     heads = arch.mamba_n_heads
-    key = heads * arch.mamba_d_state
     value = heads * arch.mamba_d_head
-    # Per token: in_proj_qkv output, l2-normed q and k at the value-head
-    # count, contiguous v, the intra-chunk matrix, and the gated RMSNorm's
-    # scaled input and output plus its fp32 input, gate and SiLU.
-    width = arch.mamba_conv_dim + 2 * key + 3 * value + heads * GATED_DELTA_CHUNK
-    return int(rows * seq_len * (width * act_bytes + 3 * value * 4))
+    # Per token: in_proj_qkv output, l2-normed q and k at the key-head
+    # count, contiguous v, the intra-chunk matrix, and fla's fused gated
+    # RMSNorm's input, gate and output plus one fp32 rstd per head.
+    width = (
+        arch.mamba_conv_dim
+        + 2 * gated_delta_qk_width(arch)
+        + 4 * value
+        + heads * GATED_DELTA_CHUNK
+    )
+    return int(rows * seq_len * (width * act_bytes + heads * 4))
 
 
 def _block_mlp_recompute(

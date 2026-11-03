@@ -2459,7 +2459,7 @@ class TestScatterRows:
         source = torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
         index = torch.tensor([2, 0, 2])
 
-        out = moe_routed.ScatterRows.apply(base, index, source, None)
+        out = moe_routed.ScatterRows.apply(base, index, source)
 
         assert torch.equal(out, torch.tensor([[3.0, 4.0], [0.0, 0.0], [6.0, 8.0]]))
 
@@ -2470,36 +2470,8 @@ class TestScatterRows:
         index = torch.tensor([2, 0, 2, 3, 0])
 
         assert torch.autograd.gradcheck(
-            lambda b, s: moe_routed.ScatterRows.apply(b.clone(), index, s, None),
+            lambda b, s: moe_routed.ScatterRows.apply(b.clone(), index, s),
             (base, source),
-        )
-
-    def test_kernel_scatter_accumulates_fp32_and_returns_source_dtype_grad(self):
-        # Arrange
-        def scatter_add(out, index, rows, weights):
-            out.index_add_(0, index, rows.float())
-
-        kernels = moe_gemm.ExpertKernels(None, None, scatter_add)
-        base = torch.zeros(3, 2, requires_grad=True)
-        source = torch.tensor(
-            [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]],
-            dtype=torch.bfloat16,
-            requires_grad=True,
-        )
-        index = torch.tensor([2, 0, 2])
-
-        # Act
-        out = moe_routed.ScatterRows.apply(base.clone(), index, source, kernels)
-        out.backward(torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]))
-
-        # Assert
-        assert out.dtype == torch.float32
-        assert torch.equal(
-            out.detach(), torch.tensor([[3.0, 4.0], [0.0, 0.0], [6.0, 8.0]])
-        )
-        assert source.grad.dtype == torch.bfloat16
-        assert torch.equal(
-            source.grad.float(), torch.tensor([[5.0, 6.0], [1.0, 2.0], [5.0, 6.0]])
         )
 
 

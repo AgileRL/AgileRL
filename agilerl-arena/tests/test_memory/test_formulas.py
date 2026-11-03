@@ -1220,18 +1220,31 @@ class TestGatedDeltaBlockBytes:
         assert formulas.gated_delta_saved_bytes(mamba2, 1, 16384, 2.0) == 0
         assert formulas.gated_delta_saved_bytes(QWEN_05B, 1, 16384, 2.0) == 0
 
+    def test_forward_charges_q_and_k_at_the_key_head_count(self):
+        # Qwen3.6-35B-A3B: 16 key heads, 32 value heads, so q/k are half as wide as v.
+        arch = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["Qwen/Qwen3.6-35B-A3B"].config
+        )
+
+        forward = formulas.gated_delta_block_bytes(arch, 1, 1024, 2.0)
+
+        assert formulas.gated_delta_qk_width(arch) == 2048
+        assert (
+            forward == 1024 * (8192 + 4 * 2048 + 4096 + 5 * 4096 + 32 * 64 + 8192) * 2
+        )
+        assert forward == 100 * MiB
+
     def test_saved_set_matches_the_recompute_snapshot(self):
-        # Qwen3.6-35B-A3B FSDP 32k: 3.375 GiB of GDN tensors live in the MoE backward.
+        # Qwen3.6-35B-A3B FSDP 32k: GDN tensors live in the MoE backward with
+        # fla's fused gated RMSNorm and the l2-normed q and k at the key-head count.
         arch = ModelArch.from_hf_config(
             SUPPORTED_MODEL_INFO["Qwen/Qwen3.6-35B-A3B"].config
         )
 
         saved = formulas.gated_delta_saved_bytes(arch, 1, 32768, 2.0)
 
-        assert saved == 32768 * (
-            (8192 + 2 * 4096 + 3 * 4096 + 32 * 64) * 2 + 3 * 4096 * 4
-        )
-        assert saved == 3456 * MiB
+        assert saved == 32768 * ((8192 + 2 * 2048 + 4 * 4096 + 32 * 64) * 2 + 32 * 4)
+        assert saved == 1924 * MiB
 
     def test_forward_peaks_in_the_recurrent_sub_layer(self):
         # Arrange
@@ -1262,7 +1275,7 @@ class TestGatedDeltaBlockBytes:
         )
 
         # Assert: two residual copies, the gated MLP's four tensors, the GDN's saved set.
-        assert backward == tokens * (2 * 1024 + 4 * 3584) * 2 + 928 * MiB
+        assert backward == tokens * (2 * 1024 + 4 * 3584) * 2 + 800 * MiB
         assert backward == mamba
         assert mlp == tokens * (2 * 1024 + 4 * 3584) * 2
 
@@ -1281,7 +1294,7 @@ class TestGatedDeltaBlockBytes:
 
         # Assert: residual copies, the GDN's saved set, the shared expert, routed experts.
         assert routed == 3072 * MiB
-        assert mamba == tokens * (2 * 2048 + 4 * 512) * 2 + 3456 * MiB + routed
+        assert mamba == tokens * (2 * 2048 + 4 * 512) * 2 + 1924 * MiB + routed
 
     def test_backward_keeps_the_kernel_peak_when_the_mlp_is_narrow(self):
         # Arrange

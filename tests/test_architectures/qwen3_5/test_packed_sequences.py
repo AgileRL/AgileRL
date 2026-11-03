@@ -29,9 +29,11 @@ from agilerl.architectures import install_family_patches
 from agilerl.architectures.moe_router import patch_moe_routers
 from agilerl.architectures.qwen3_5 import packed as qwen_packed
 from agilerl.architectures.qwen3_5.packed import (
+    GROUPED_QK_HEADS,
     PACKED_CU_SEQLENS,
     VARLEN_SCAN,
     install_qwen_gdn_patches,
+    patch_qwen_gdn_grouped_heads,
     patch_qwen_gdn_packed_sequences,
 )
 from agilerl.architectures.runtime import PatchRuntimeConfig
@@ -580,6 +582,137 @@ class TestPatchQwenGdnPackedSequences:
             )
 
 
+def _recording_scan(heads: list[int], grouped: bool):
+    """The current GDN scan, recording the q heads it gets; ``grouped`` repeats them first, as FLA maps them."""
+    scan = getattr(modeling_qwen3_5_moe, VARLEN_SCAN)
+
+    def recording_scan(query, key, value, g, beta, **kwargs):
+        heads.append(query.shape[2])
+        if grouped:
+            groups = value.shape[2] // query.shape[2]
+            query = query.repeat_interleave(groups, dim=2)
+            key = key.repeat_interleave(groups, dim=2)
+        return scan(query, key, value, g=g, beta=beta, **kwargs)
+
+    return recording_scan
+
+
+@pytest.mark.usefixtures("torch_kernels")
+class TestPatchQwenGdnGroupedHeads:
+    def test_fused_scan_gets_grouped_heads_and_matches_repeated_heads(
+        self, pristine_qwen_gdn_classes, monkeypatch
+    ):
+        # Arrange
+        model = _tiny_qwen_moe().train()
+        ids, positions = _rows("full")
+        expected_logits, expected_grads = _logits_and_grads(model, ids, positions)
+        heads = []
+        monkeypatch.setattr(
+            modeling_qwen3_5_moe, VARLEN_SCAN, _recording_scan(heads, grouped=True)
+        )
+        monkeypatch.setattr(qwen_packed, "_varlen_kernels_ready", lambda: True)
+        patch_qwen_gdn_grouped_heads(MIXER_PATH)
+
+        # Act
+        logits, grads = _logits_and_grads(model, ids, positions)
+
+        # Assert
+        # Two GDN layers with 2 key heads for 4 value heads.
+        assert heads == [2, 2]
+        # The same ops on the same values, only the repeat moved into the scan.
+        torch.testing.assert_close(logits, expected_logits, rtol=0, atol=0)
+        for grad, expected in zip(grads, expected_grads, strict=True):
+            torch.testing.assert_close(grad, expected, rtol=0, atol=0)
+        mixers = [m for m in model.modules() if isinstance(m, Qwen3_5MoeGatedDeltaNet)]
+        assert [mixer.num_k_heads for mixer in mixers] == [2, 2]
+
+    def test_pytorch_scans_get_repeated_heads(
+        self, pristine_qwen_gdn_classes, monkeypatch
+    ):
+        # Arrange
+        model = _tiny_qwen_moe().eval()
+        ids, positions = _rows("full")
+        heads = []
+        monkeypatch.setattr(
+            modeling_qwen3_5_moe, VARLEN_SCAN, _recording_scan(heads, grouped=False)
+        )
+        monkeypatch.setattr(qwen_packed, "_varlen_kernels_ready", lambda: False)
+        patch_qwen_gdn_grouped_heads(MIXER_PATH)
+
+        # Act
+        with torch.no_grad():
+            model(input_ids=ids, position_ids=positions, use_cache=False)
+
+        # Assert
+        assert heads == [4, 4]
+
+    def test_failed_forward_restores_num_k_heads(
+        self, pristine_qwen_gdn_classes, monkeypatch
+    ):
+        # Arrange
+        model = _tiny_qwen_moe().eval()
+        ids, positions = _rows("full")
+
+        def failing_scan(*_args, **_kwargs):
+            msg = "scan failed"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(modeling_qwen3_5_moe, VARLEN_SCAN, failing_scan)
+        monkeypatch.setattr(qwen_packed, "_varlen_kernels_ready", lambda: True)
+        patch_qwen_gdn_grouped_heads(MIXER_PATH)
+
+        # Act
+        with pytest.raises(RuntimeError, match="scan failed"), torch.no_grad():
+            model(input_ids=ids, position_ids=positions, use_cache=False)
+
+        # Assert
+        mixers = [m for m in model.modules() if isinstance(m, Qwen3_5MoeGatedDeltaNet)]
+        assert [mixer.num_k_heads for mixer in mixers] == [2, 2]
+
+    def test_apply_is_idempotent(self, pristine_qwen_gdn_classes):
+        # Arrange
+        patch_qwen_gdn_grouped_heads(MIXER_PATH)
+        forward = Qwen3_5MoeGatedDeltaNet.forward
+
+        # Act
+        patch_qwen_gdn_grouped_heads(MIXER_PATH)
+
+        # Assert
+        assert Qwen3_5MoeGatedDeltaNet.forward is forward
+        assert getattr(Qwen3_5MoeGatedDeltaNet, GROUPED_QK_HEADS) is True
+
+
+class TestVarlenKernelsReady:
+    @pytest.mark.parametrize(
+        ("installed", "expected"),
+        [
+            ({"fla", "causal_conv1d"}, True),
+            ({"fla"}, False),
+            ({"causal_conv1d"}, False),
+        ],
+    )
+    def test_needs_fla_and_causal_conv1d(self, monkeypatch, installed, expected):
+        # Arrange
+        real = importlib.util.find_spec
+
+        def find_spec(name: str, package: str | None = None):
+            if name in {"fla", "causal_conv1d"}:
+                return (
+                    importlib.machinery.ModuleSpec(name, None)
+                    if name in installed
+                    else None
+                )
+            return real(name, package)
+
+        monkeypatch.setattr(importlib.util, "find_spec", find_spec)
+
+        # Act
+        ready = qwen_packed._varlen_kernels_ready()
+
+        # Assert
+        assert ready is expected
+
+
 class TestInstallQwenGdnPatches:
     def test_gpu_without_fla_raises(self, monkeypatch) -> None:
         monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
@@ -611,6 +744,7 @@ class TestInstallQwenGdnPatches:
         install_qwen_gdn_patches(PatchRuntimeConfig())
 
         assert getattr(Qwen3_5MoeGatedDeltaNet, RESETS_AT_DOCUMENT_BOUNDARY) is True
+        assert getattr(Qwen3_5MoeGatedDeltaNet, GROUPED_QK_HEADS) is True
 
     def test_cpu_without_fla_installs_packed_patches(
         self, monkeypatch, pristine_qwen_gdn_classes

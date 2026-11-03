@@ -837,12 +837,12 @@ class TestSolveMain:
             engine = json.loads(capsys.readouterr().out)["engine"]
             verdicts.append((verdict, engine["tensor_parallel_size"]))
 
-        # Assert: the cutoff is the run's at TP=2, past the TP=1 KV limit.
+        # Assert: the cutoff is the run's at TP=4, past the TP=2 KV limit.
         assert code == EXIT_OK
         assert payload["limited_by"] == "memory"
-        assert payload["engine"]["tensor_parallel_size"] == 2
+        assert payload["engine"]["tensor_parallel_size"] == 4
         assert payload["value"] > 32768
-        assert verdicts == [(EXIT_OK, 2), (EXIT_OVER_BUDGET, 2)]
+        assert verdicts == [(EXIT_OK, 4), (EXIT_OVER_BUDGET, 4)]
 
     def test_unset_width_without_num_gpus_is_a_usage_error(self, tmp_path, capsys):
         path = write_manifest(tmp_path, UNSET_WIDTH_MOE, "moe.yaml")
