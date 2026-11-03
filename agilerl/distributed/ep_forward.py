@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 import torch
 import torch.distributed as dist
-from peft.tuners.lora.layer import ParamWrapper
 from torch import nn
 from torch.distributed.tensor import DTensor
 from torch.func import functional_call
@@ -55,6 +54,8 @@ from agilerl.lora.moe.layouts import (
 )
 
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
+    from peft.tuners.lora.layer import ParamWrapper
+
     from agilerl.lora.moe.wrappers import RoutedExpertsLoraWrapper
 
 
