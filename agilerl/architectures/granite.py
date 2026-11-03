@@ -23,13 +23,15 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 import torch
-from transformers.masking_utils import create_causal_mask
 
-from agilerl import HAS_LIGER_KERNEL
+from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
 from agilerl.architectures.nemotron_h.mamba import install_packed_mixer
 from agilerl.architectures.runtime import PatchRuntimeConfig
 from agilerl.utils.llm_packing import RESETS_AT_DOCUMENT_BOUNDARY, packed_layout
 from agilerl.utils.patching import class_is_patched, library_shim, try_import
+
+if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
+    from transformers.masking_utils import create_causal_mask
 
 if TYPE_CHECKING:
     from peft import PeftModel
