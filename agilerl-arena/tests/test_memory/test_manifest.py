@@ -1029,6 +1029,18 @@ class TestDeviceFromResourceClass:
         with pytest.raises(ValueError, match="no GPU"):
             device_spec_from_resource_class({"name": "cpu-only", "gpu_type": None})
 
+    def test_tier_ram_less_the_node_reserve_splits_over_its_gpus(self):
+        tier = {"name": "l4-4x", "gpu_type": "nvidia-l4", "num_gpus": 4, "ram_gb": 165}
+
+        device = device_spec_from_resource_class(tier)
+
+        assert device.host_bytes_per_gpu == (165 - 8) * 1024**3 // 4
+
+    def test_tier_without_ram_skips_the_host_check(self):
+        tier = {"name": "l4-1x", "gpu_type": "NVIDIA L4", "num_gpus": 1}
+
+        assert device_spec_from_resource_class(tier).host_bytes_per_gpu is None
+
 
 class TestUnsupportedGpuReason:
     @pytest.mark.parametrize(

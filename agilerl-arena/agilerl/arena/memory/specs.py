@@ -897,6 +897,10 @@ class DeviceSpec(BaseModel):
     # node; ``None`` when unknown.
     all_reduce_bytes_per_second: float | None = None
     all_reduce_latency_seconds: float | None = None
+    # Host RAM one GPU's process may hold, from
+    # :func:`~agilerl.arena.memory.formulas.host_bytes_per_gpu`; ``None`` skips
+    # the host check.
+    host_bytes_per_gpu: int | None = Field(default=None, ge=0)
 
     @property
     def context_bytes(self) -> int:

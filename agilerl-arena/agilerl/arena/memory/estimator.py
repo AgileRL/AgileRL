@@ -47,6 +47,7 @@ from agilerl.arena.memory.specs import (
     TrainingSettings,
 )
 from agilerl.arena.memory.trainer_residency import (
+    fsdp_cpu_offload_host_bytes,
     trainer_allocator_slack,
     trainer_base_bytes,
 )
@@ -351,6 +352,7 @@ class ActivationPeak:
     nograd_peak: float
     optimizer_peak: float
     saved: float
+    offloaded: float
     router_topk: float
     recompute: float
     split_lora: float
@@ -541,6 +543,8 @@ class ActivationTerms:
     """Checkpoint, logit, and no-grad bytes inside one training step."""
 
     saved: float
+    # Saved tensors activation offload moves to pinned host RAM.
+    offloaded: float
     router_topk: float
     recompute: float
     split_lora: float
@@ -666,11 +670,10 @@ def _saved_activation_bytes(
     checkpointed = formulas.training_checkpointed_blocks(arch, settings)
     # A checkpointed block keeps its input; any other block keeps its forward's
     # saved tensors.
-    saved = int(
+    return int(
         checkpointed * live_rows * seq_len * arch.hidden_size * act_bytes
         + (arch.n_layers - checkpointed) * block_saved * settings.grad_graph_rows
     )
-    return 0 if settings.activation_offload else saved
 
 
 def _nograd_pass_bytes(
@@ -712,7 +715,7 @@ def _activation_terms(
     tp = training_tensor_parallel(arch, fsdp)
     routed_split = 1 if fsdp is None or fsdp.ep <= 1 else fsdp.tp
     casts_apply = adapters.compute_bytes > act_bytes
-    saved = _saved_activation_bytes(
+    stored = _saved_activation_bytes(
         arch,
         settings,
         act_bytes,
@@ -747,7 +750,8 @@ def _activation_terms(
         arch, settings, adapters, act_bytes, live_rows
     )
     return ActivationTerms(
-        saved=saved,
+        saved=0 if settings.activation_offload else stored,
+        offloaded=stored if settings.activation_offload else 0,
         router_topk=router_topk,
         recompute=recompute,
         split_lora=split_lora,
@@ -907,6 +911,7 @@ def activation_peak(
         nograd_peak=instant.nograd_peak,
         optimizer_peak=instant.optimizer_peak,
         saved=terms.saved,
+        offloaded=terms.offloaded,
         router_topk=terms.router_topk,
         recompute=terms.recompute,
         split_lora=terms.split_lora,
@@ -1009,6 +1014,33 @@ def training_host_components(
             n_bytes=int(prefetched),
             detail={"images": images, "patches_per_image": rows * cols},
             note="The next update's tokens, masks and fp32 pixels while this one learns.",
+        ),
+    )
+
+
+def _process_host_components(
+    offloaded_activations: float,
+    offloaded_params: float,
+) -> tuple[MemoryComponent, ...]:
+    """The trainer process's runtime and the tensors it offloads."""
+    return (
+        MemoryComponent(
+            key="trainer_process",
+            label="Trainer process",
+            n_bytes=formulas.TRAINER_PROCESS_HOST_BYTES,
+            note="Python, torch and the CUDA runtime.",
+        ),
+        MemoryComponent(
+            key="activation_offload",
+            label="Offloaded activations (pinned)",
+            n_bytes=int(offloaded_activations),
+            note="Tensors one micro-batch's forward saves for backward.",
+        ),
+        MemoryComponent(
+            key="parameter_offload",
+            label="Offloaded FSDP shard (pinned)",
+            n_bytes=int(offloaded_params),
+            note="Sharded parameters CPUOffloadPolicy keeps on host.",
         ),
     )
 
@@ -1278,6 +1310,7 @@ def training_breakdown(
         grouped_gemm_bytes=grouped_gemm_bytes,
     )
     base = trainer_base_bytes(model, settings, counts, shards, peak.activations)
+    offloaded_params = fsdp_cpu_offload_host_bytes(model, settings, counts, shards)
     # Held per-update tensors: completions, masks, old/ref/sampling logprobs,
     # advantages.
     rollout = 6 * settings.trajectories * seq_len * 4
@@ -1314,5 +1347,7 @@ def training_breakdown(
         device_total_bytes=device.total_bytes,
         device_usable_bytes=device.usable_bytes,
         warnings=tuple(warnings),
-        host=training_host_components(arch, settings, adapters, rollout, act_bytes),
+        host=_process_host_components(peak.offloaded, offloaded_params)
+        + training_host_components(arch, settings, adapters, rollout, act_bytes),
+        host_usable_bytes=device.host_bytes_per_gpu,
     )

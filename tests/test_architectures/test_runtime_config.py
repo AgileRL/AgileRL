@@ -32,6 +32,7 @@ from agilerl.architectures.nemotron_h.tensor_parallel import (
 )
 from agilerl.architectures.runtime import ModelRuntimeConfig, VllmRuntimeConfig
 from agilerl.arena.memory.manifest import FAMILY_MAX_NUM_BATCHED_TOKENS
+from agilerl.arena.memory.specs import TENSOR_PARALLEL_MODEL_TYPES
 from agilerl.arena.models.model_info import REASONING_PARSERS, SUPPORTED_MODEL_INFO
 from agilerl.llm_envs.chat_formats import CHAT_FORMATS
 
@@ -313,6 +314,15 @@ class TestFamilyMaxNumBatchedTokens:
 
 
 class TestFamilyTensorParallelPlans:
+    def test_arena_estimator_matches_the_catalog(self) -> None:
+        catalog = frozenset(
+            family
+            for family, runtime in FAMILY_RUNTIME_CONFIGS.items()
+            if runtime.tensor_parallel_plan is not None
+        )
+
+        assert catalog == TENSOR_PARALLEL_MODEL_TYPES
+
     def test_resolves_shared_nemotron_h_plan_once(self) -> None:
         plans = family_tensor_parallel_plans()
 

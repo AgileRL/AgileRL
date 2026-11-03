@@ -2402,6 +2402,110 @@ class TestTrainingHostBreakdown:
 
         assert host(breakdown, "optimizer_offload").n_bytes == 0
 
+    def test_every_trainer_process_holds_its_runtime(self, model, device):
+        breakdown = estimate_training(model, device, TrainingSettings())
+
+        assert (
+            host(breakdown, "trainer_process").n_bytes
+            == formulas.TRAINER_PROCESS_HOST_BYTES
+        )
+
+    def test_activation_offload_pins_the_saved_tensors(self, model, device):
+        # Arrange
+        on_device = estimate_training(
+            model, device, TrainingSettings(activation_offload=False)
+        )
+
+        # Act
+        offloaded = estimate_training(
+            model, device, TrainingSettings(activation_offload=True)
+        )
+
+        # Assert
+        saved = component(on_device, "activations").detail["checkpoint_boundaries"]
+        assert saved > 0
+        assert host(offloaded, "activation_offload").n_bytes == saved
+        assert host(on_device, "activation_offload").n_bytes == 0
+
+    def test_cpu_offload_pins_the_fsdp_shard(self, model, device):
+        # Arrange
+        shared = {
+            "reshard_after_forward": True,
+            "activation_offload": False,
+            "routed_expert_chunk_mib": 64,
+            "optim_cpu_offload": False,
+        }
+        on_gpu = estimate_training(
+            model,
+            device,
+            TrainingSettings(
+                fsdp=fsdp_config(cpu_offload=False, **shared),
+                n_training_gpus=4,
+            ),
+        )
+
+        # Act
+        offloaded = estimate_training(
+            model,
+            device,
+            TrainingSettings(
+                fsdp=fsdp_config(cpu_offload=True, **shared),
+                n_training_gpus=4,
+            ),
+        )
+
+        # Assert
+        shard = (
+            component(on_gpu, "base_weights").n_bytes
+            - component(offloaded, "base_weights").n_bytes
+        )
+        assert shard > 0
+        assert host(offloaded, "parameter_offload").n_bytes == shard
+        assert host(on_gpu, "parameter_offload").n_bytes == 0
+        assert host(offloaded, "optimizer_offload").n_bytes == 0
+
+    def test_host_over_the_rank_share_does_not_fit(self, model, device):
+        # Arrange
+        settings = TrainingSettings(activation_offload=True)
+        host_bytes = estimate_training(model, device, settings).host_total_bytes
+        buffered = int(host_bytes / (1 - formulas.MAX_UNDERPREDICTION)) + 1
+
+        # Act
+        roomy = estimate_training(
+            model,
+            device.model_copy(update={"host_bytes_per_gpu": buffered}),
+            settings,
+        )
+        at_estimate = estimate_training(
+            model,
+            device.model_copy(update={"host_bytes_per_gpu": host_bytes}),
+            settings,
+        )
+        tight = estimate_training(
+            model,
+            device.model_copy(update={"host_bytes_per_gpu": host_bytes - 1}),
+            settings,
+        )
+
+        # Assert
+        assert roomy.fits_with_buffer
+        assert at_estimate.host_fits
+        assert at_estimate.fits
+        assert not at_estimate.host_fits_with_buffer
+        assert not at_estimate.fits_with_buffer
+        assert not tight.host_fits
+        assert not tight.fits
+        assert not tight.fits_with_buffer
+
+    def test_unknown_host_ram_is_not_checked(self, model, device):
+        breakdown = estimate_training(
+            model, device, TrainingSettings(activation_offload=True)
+        )
+
+        assert breakdown.host_usable_bytes is None
+        assert breakdown.host_fits
+        assert breakdown.host_fits_with_buffer
+
     def test_vision_cache_holds_each_image_tower_output(self, device):
         # Arrange: Qwen3.5, 8 rows x 2 screenshots of 44 x 80 patches.
         arch = ModelArch.from_hf_config(

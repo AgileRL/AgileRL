@@ -250,12 +250,22 @@ class TrainingMemoryUnfitError(ValueError):
 
     def __init__(self, plan: TrainingMemoryPlan, device: DeviceSpec) -> None:
         breakdown = plan.breakdown
-        super().__init__(
-            f"Estimated training peak {breakdown.total_bytes / GiB:.2f} GiB is over "
-            f"the {breakdown.device_usable_bytes / GiB:.2f} GiB usable on one "
-            f"{device.name} at the lightest settings ({plan.describe()}). Use "
-            "more or larger GPUs per agent, or shorten the context length."
-        )
+        host_usable = breakdown.host_usable_bytes
+        if host_usable is None or breakdown.host_fits_with_buffer:
+            over = (
+                f"Estimated training peak {breakdown.total_bytes / GiB:.2f} GiB is "
+                f"over the {breakdown.device_usable_bytes / GiB:.2f} GiB usable on "
+                f"one {device.name}"
+            )
+            hint = "Use more or larger GPUs per agent, or shorten the context length."
+        else:
+            over = (
+                f"Estimated host RAM {breakdown.host_total_bytes / GiB:.2f} GiB per "
+                f"trainer is over its {host_usable / GiB:.2f} GiB "
+                "share of the node"
+            )
+            hint = "Add host RAM, or shorten the context length."
+        super().__init__(f"{over} at the lightest settings ({plan.describe()}). {hint}")
         self.plan = plan
 
 
