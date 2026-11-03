@@ -7,6 +7,7 @@ import pytest
 from agilerl.arena.memory import formulas, fsdp_gather
 from agilerl.arena.memory.specs import ModelArch, ModelSpec, TrainingSettings
 from agilerl.arena.memory.trainer_residency import (
+    fsdp_cpu_offload_host_bytes,
     trainer_allocator_slack,
     trainer_base_bytes,
 )
@@ -50,6 +51,39 @@ class TestTrainerBaseBytes:
         base = trainer_base_bytes(model, settings, counts, 4, TORCH_SIDE)
 
         assert base < counts.total * 2
+
+
+class TestFsdpCpuOffloadHostBytes:
+    def test_cpu_offload_matches_the_resident_shard(self):
+        # Arrange
+        model = ModelSpec(model_id="qwen-0.5b", arch=QWEN_05B)
+        counts = formulas.param_counts(QWEN_05B)
+        off = TrainingSettings(
+            fsdp=FSDPConfig(reshard_after_forward=True, cpu_offload=True),
+            n_training_gpus=4,
+        )
+        on = TrainingSettings(
+            fsdp=FSDPConfig(reshard_after_forward=True, cpu_offload=False),
+            n_training_gpus=4,
+        )
+
+        # Act
+        host = fsdp_cpu_offload_host_bytes(model, off, counts, 4)
+        gpu_delta = trainer_base_bytes(
+            model, on, counts, 4, TORCH_SIDE
+        ) - trainer_base_bytes(model, off, counts, 4, TORCH_SIDE)
+
+        # Assert
+        assert host == gpu_delta
+        assert host > 0
+        assert fsdp_cpu_offload_host_bytes(model, on, counts, 4) == 0.0
+
+    def test_ddp_pins_nothing(self):
+        model = ModelSpec(model_id="qwen-0.5b", arch=QWEN_05B)
+        counts = formulas.param_counts(QWEN_05B)
+        settings = TrainingSettings(fsdp=None, n_training_gpus=4)
+
+        assert fsdp_cpu_offload_host_bytes(model, settings, counts, 4) == 0.0
 
 
 class TestTrainerAllocatorSlack:

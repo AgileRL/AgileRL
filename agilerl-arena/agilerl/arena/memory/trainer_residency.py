@@ -12,6 +12,7 @@ from agilerl.arena.memory.specs import (
     ModelSpec,
     TrainingSettings,
 )
+from agilerl.arena.models.fsdp import FSDPConfig
 
 
 def trainer_base_bytes(
@@ -35,15 +36,9 @@ def trainer_base_bytes(
     if fsdp is None:
         return float(full)
     arch = model.arch
-    token = min(formulas.token_embedding_params(arch), max(counts.total, 0))
-    tp_params = 0 if fsdp.tp <= 1 else formulas.tensor_parallel_params(counts, arch)
-    # Experts on an EP group that fills the shard group skip FSDP.
-    ep_params = (
-        arch.moe_layers * formulas.routed_expert_params_per_layer(arch)
-        if fsdp.ep > 1 and fsdp.ep >= shards
-        else 0
+    token, tp_params, ep_params, sharded_params = _fsdp_base_groups(
+        arch, counts, fsdp, shards
     )
-    sharded_params = max(counts.total - token - tp_params - ep_params, 0)
     gathered = fsdp_gather.fsdp_gathered_params(
         counts,
         arch,
@@ -64,6 +59,46 @@ def trainer_base_bytes(
         side = min(fsdp_gather.fsdp_resharded_side_params(counts, arch), gathered)
     side_at_peak = max(side * byte - activations, 0.0)
     return token * byte + resident + (gathered - side) * byte + side_at_peak
+
+
+def fsdp_cpu_offload_host_bytes(
+    model: ModelSpec,
+    settings: TrainingSettings,
+    counts: formulas.ParamCounts,
+    shards: int,
+) -> float:
+    """FSDP parameter shard pinned on host when cpu_offload is on.
+
+    :param model: Training-side model spec.
+    :param settings: Training settings (dtype, FSDP).
+    :param counts: Analytic parameter split.
+    :param shards: GPUs one weight copy is sharded across.
+    :return: Host bytes of the offloaded shard, or 0.
+    """
+    fsdp = settings.fsdp
+    if fsdp is None or not fsdp.cpu_offload:
+        return 0.0
+    _, _, _, sharded_params = _fsdp_base_groups(model.arch, counts, fsdp, shards)
+    return sharded_params * DTYPE_BYTES[settings.weight_dtype] / shards
+
+
+def _fsdp_base_groups(
+    arch: ModelArch,
+    counts: formulas.ParamCounts,
+    fsdp: FSDPConfig,
+    shards: int,
+) -> tuple[int, int, int, int]:
+    """Token, tensor-parallel, FSDP-free expert, and FSDP-sharded parameter counts."""
+    token = min(formulas.token_embedding_params(arch), max(counts.total, 0))
+    tp_params = 0 if fsdp.tp <= 1 else formulas.tensor_parallel_params(counts, arch)
+    # Experts on an EP group that fills the shard group skip FSDP.
+    ep_params = (
+        arch.moe_layers * formulas.routed_expert_params_per_layer(arch)
+        if fsdp.ep > 1 and fsdp.ep >= shards
+        else 0
+    )
+    sharded_params = max(counts.total - token - tp_params - ep_params, 0)
+    return token, tp_params, ep_params, sharded_params
 
 
 def trainer_allocator_slack(

@@ -29,6 +29,7 @@ from rich.table import Table
 from rich.text import Text
 
 from agilerl.arena.config import CommandConfig, arena_client
+from agilerl.arena.exceptions import ArenaAuthError
 from agilerl.arena.memory.advice import advise
 from agilerl.arena.memory.estimator import PhaseBreakdown, estimate_run
 from agilerl.arena.memory.formulas import MAX_UNDERPREDICTION
@@ -444,7 +445,16 @@ def memory_estimate(
     command_config = ctx.find_object(CommandConfig)
     if gpu is None and device_gb is None and command_config is not None:
         with arena_client(command_config) as client:
-            tiers = list(client.list_resources()["tiers"].values())
+            try:
+                tiers = list(client.list_resources()["tiers"].values())
+            except ArenaAuthError as err:
+                msg = (
+                    "Picking a resource tier needs an Arena login; the tier sets "
+                    "the GPU and each GPU's host RAM share. Run 'arena login', or "
+                    "pass --gpu or --device-gb to size one GPU without a host RAM "
+                    "check."
+                )
+                raise ArenaAuthError(msg) from err
     sys.exit(
         main(
             manifest_path,
@@ -492,8 +502,9 @@ def main(
         return EXIT_USAGE
     if device is None and tiers is None:
         print(
-            "Pass --gpu or --device-gb, or run `arena memory estimate` logged in "
-            "to pick a resource tier.",
+            "Pass --gpu or --device-gb, or run `arena login` then "
+            "`arena memory estimate` to pick a resource tier and check its "
+            "host RAM.",
             file=sys.stderr,
         )
         return EXIT_USAGE

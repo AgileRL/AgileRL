@@ -15,6 +15,7 @@ from agilerl.arena.memory.resolve.chunk import resolve_chunk_rows
 from agilerl.arena.memory.specs import (
     DTYPE_BYTES,
     BlockKind,
+    GiB,
     LoraTargetScope,
     MiB,
     ModelArch,
@@ -93,11 +94,26 @@ ALLOCATOR_RESERVE_FRACTION_FSDP_MIXED_SIZES = 0.064
 # Largest share by which a measured peak has exceeded the estimate. A GPU
 # recommendation keeps this share of usable memory free.
 MAX_UNDERPREDICTION = 0.089
+# Host RAM a node keeps for the raylet, Ray's object store and env hosts.
+NODE_HOST_RESERVE_BYTES = 8 * GiB
+# Host RAM of one trainer process outside its learn buffers: Python, torch and
+# the CUDA runtime. Measured at about 5 GiB on L4 trainers.
+TRAINER_PROCESS_HOST_BYTES = 6 * GiB
 
 
 def recommendation_fits(predicted_bytes: int, usable_bytes: int) -> bool:
     """Whether a predicted peak still fits after the underprediction buffer."""
     return predicted_bytes <= int(usable_bytes * (1 - MAX_UNDERPREDICTION))
+
+
+def host_bytes_per_gpu(node_bytes: int, gpus_per_node: int) -> int:
+    """Host RAM one GPU's process may hold: the node's RAM less its reserve, split over its GPUs.
+
+    :param node_bytes: Host RAM one node gives the job.
+    :param gpus_per_node: GPUs on that node.
+    :return: Bytes per GPU, never negative.
+    """
+    return max(node_bytes - NODE_HOST_RESERVE_BYTES, 0) // gpus_per_node
 
 
 def allocator_reserve_bytes(

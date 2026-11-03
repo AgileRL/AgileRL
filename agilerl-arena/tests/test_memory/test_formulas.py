@@ -87,6 +87,14 @@ DECODER_TINY = {
 }
 
 
+class TestHostBytesPerGpu:
+    def test_node_ram_less_the_reserve_splits_evenly(self):
+        assert formulas.host_bytes_per_gpu(165 * GiB, 4) == 157 * GiB // 4
+
+    def test_node_under_the_reserve_leaves_nothing(self):
+        assert formulas.host_bytes_per_gpu(4 * GiB, 1) == 0
+
+
 class TestParamCounts:
     def test_matches_published_total(self):
         counts = formulas.param_counts(QWEN_05B)
