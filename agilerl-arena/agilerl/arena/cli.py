@@ -693,8 +693,8 @@ def experiment() -> None:
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     default=None,
     help=(
-        "Python reward function for reasoning dataset jobs (multipart submit). "
-        "Required when the manifest targets a reasoning dataset."
+        "Python rubric or reward function scoring a rollout job (multipart "
+        "submit). Required when the manifest targets a reasoning dataset."
     ),
 )
 @click.option(

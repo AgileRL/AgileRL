@@ -3,26 +3,73 @@
 
 """AgileRL rubric helpers on top of OpenEnv's ``Rubric`` API.
 
-The simple path is one reward function wrapped with :func:`reward_fn_to_rubric`.
-Component-level metrics come from composing OpenEnv ``Rubric``s (child attributes
-auto-register); AgileRL does not add its own aggregation containers.
+A rubric scores every turn of any rollout env: the harness calls it with a
+:class:`TurnAction` and :class:`TurnObservation`, and its score replaces
+the env's reward for that turn. The simple path is one reward function wrapped
+with :func:`reward_fn_to_rubric`; :class:`EnvReward` brings the env's own reward
+in as a component. Component-level metrics come from composing OpenEnv
+``Rubric``s (child attributes auto-register); AgileRL does not add its own
+aggregation containers.
 """
 
 from __future__ import annotations
 
 import re
-from typing import Protocol
+from dataclasses import dataclass, field
+from typing import Any, Protocol
 
 from openenv.core.rubrics.base import Rubric
 
+from agilerl.llm_envs.chat_formats import ParsedToolCall
 
-class RubricAction(Protocol):
+
+@dataclass
+class TurnAction:
+    """One policy turn, as the rubric sees it.
+
+    :param message: Text the env received after ``action_processor``:
+        post-reasoning, or the whole turn under ``include_reasoning``. A
+        tool-call turn keeps the decoded text; the env received the parsed
+        calls.
+    :param completion: The whole turn, reasoning and its markers included.
+    :param tool_calls: Tool calls parsed from the turn; empty on a text env.
+    """
+
     message: str
+    completion: str
+    tool_calls: list[ParsedToolCall] = field(default_factory=list)
 
 
-class RubricObservation(Protocol):
-    answer: object
-    question: object
+@dataclass
+class TurnObservation:
+    """What the env did with one turn.
+
+    :param env_reward: The env's summed reward for the turn, or ``min_reward``
+        when the turn never reached the env.
+    :param env_ran: Whether the env stepped; ``False`` for a turn rejected for
+        a malformed or missing tool call.
+    :param done: Whether this is the episode's last turn: terminated, truncated,
+        or the turn budget spent.
+    :param turn_index: Zero-based turn number in the episode.
+    :param prompt: The episode's first prompt text.
+    :param question: The env observation's ``question`` field, else ``None``.
+    :param answer: The env observation's ``answer`` field, else ``None``.
+    :param payload: The env's last observation fields, or ``None`` when the
+        env did not step.
+    :param env_info: The env's merged step info.
+    :param metadata: Written by rubric hooks (``rubric_scores``).
+    """
+
+    env_reward: float
+    env_ran: bool
+    done: bool
+    turn_index: int
+    prompt: str
+    question: Any = None
+    answer: Any = None
+    payload: Any = None
+    env_info: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class RewardFn(Protocol):
@@ -32,9 +79,8 @@ class RewardFn(Protocol):
 COMPONENT_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*")
 
 # Attribute stamped on a rubric node holding the component names it already has a
-# hook for. A rubric tree is shared across every slot's env, so each slot's
-# register_component_hooks call reaches the same nodes; without this they would
-# accumulate one duplicate hook per slot.
+# hook for. register_component_hooks is idempotent so a second call on the same
+# node does not add a duplicate hook.
 HOOKED_COMPONENTS_ATTR = "_agilerl_hooked_components"
 
 
@@ -91,7 +137,7 @@ class RewardFnRubric(Rubric):
         self._fn = fn
         self.component_name = name or _identifier_or(getattr(fn, "__name__", ""), "fn")
 
-    def forward(self, action: RubricAction, observation: RubricObservation) -> float:
+    def forward(self, action: TurnAction, observation: TurnObservation) -> float:
         return float(
             self._fn(
                 completion=action.message,
@@ -101,6 +147,15 @@ class RewardFnRubric(Rubric):
         )
 
 
+class EnvReward(Rubric):
+    """The env's own reward for the turn, reported as the ``env`` component."""
+
+    component_name = "env"
+
+    def forward(self, action: TurnAction, observation: TurnObservation) -> float:
+        return float(observation.env_reward)
+
+
 def register_component_hooks(rubric: Rubric | None) -> tuple[str, ...]:
     """Register leaf forward hooks that write into ``observation.metadata``.
 
@@ -108,7 +163,7 @@ def register_component_hooks(rubric: Rubric | None) -> tuple[str, ...]:
     ``observation.metadata["rubric_scores"][name]`` for that call. Returns the
     ordered leaf names (empty when ``rubric`` is ``None``). Registration is
     idempotent per node: the hook writes into whichever observation it is handed
-    and holds no per-env state, so one is all a shared rubric tree ever needs.
+    and holds no per-env state.
     """
     if rubric is None:
         return ()

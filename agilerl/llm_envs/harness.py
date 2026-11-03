@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import inspect
 import uuid
 import warnings
 from collections import deque
@@ -201,6 +202,7 @@ class RolloutHarness(RestartPromptMixin):
         chat_format: str | None = None,
         min_reward: float = 0.0,
         include_reasoning: bool = False,
+        rubric: Rubric | None = None,
     ) -> None:
         """Drive a text env at the token level over ``env_client`` (a URL or a client object).
 
@@ -300,6 +302,10 @@ class RolloutHarness(RestartPromptMixin):
             ``None`` picks the format whose tokens are in the tokenizer vocab.
         :param min_reward: Lowest reward the env gives. Scores a turn whose tool
             calls are malformed or missing, which never reaches the env.
+        :param rubric: OpenEnv ``Rubric`` scoring every turn, called with a
+            :class:`~agilerl.llm_envs.rubrics.TurnAction` and
+            :class:`~agilerl.llm_envs.rubrics.TurnObservation`; its score
+            replaces the env's reward. ``None`` keeps the env's reward.
         :param include_reasoning: Send the env the whole turn, reasoning and its
             markers included, with end-of-turn tokens dropped. The restart
             history still lists only the post-reasoning action.
@@ -372,6 +378,17 @@ class RolloutHarness(RestartPromptMixin):
         )
         self.tokenizer = tokenizer
         self._include_reasoning = include_reasoning
+        self._rubric = rubric
+        self._rubric_components: tuple[str, ...] = ()
+        if rubric is not None:
+            from agilerl.llm_envs.rubrics import (  # optional extra: llm
+                _require_rubric,
+                register_component_hooks,
+            )
+
+            self._rubric_components = register_component_hooks(_require_rubric(rubric))
+        # This turn's whole decoded text, reasoning included; only kept for a rubric.
+        self._turn_completion = ""
         self._init_tool_calling(tokenizer, chat_format, min_reward)
         self.apply_chat_template = apply_chat_template
         self.chat_template_kwargs: dict[str, Any] = dict(chat_template_kwargs or {})
@@ -555,9 +572,10 @@ class RolloutHarness(RestartPromptMixin):
     ) -> RolloutHarness:
         """Build a single-turn ``RolloutHarness`` from (question, answer) rows and a rubric.
 
-        Rows + rubric are served in-process as a single-turn
+        Rows are served in-process as a single-turn
         :class:`~agilerl.llm_envs.qa_dataset.QADatasetEnv` (``max_turns`` fixed
-        to 1); ``test_dataset`` rows are served under :meth:`eval_mode`. Wrap a
+        to 1) and the harness scores each completion with ``rubric``;
+        ``test_dataset`` rows are served under :meth:`eval_mode`. Wrap a
         callable of ``completion``, ``answer``, and ``question`` with
         :func:`~agilerl.llm_envs.rubrics.reward_fn_to_rubric` first.
 
@@ -573,20 +591,18 @@ class RolloutHarness(RestartPromptMixin):
         :rtype: RolloutHarness
         """
         from agilerl.llm_envs.qa_dataset import QADatasetEnv  # optional extra: llm
-        from agilerl.llm_envs.rubrics import _require_rubric  # optional extra: llm
 
         if "max_turns" in kwargs:
             msg = "from_dataset builds a single-turn env; max_turns is fixed to 1"
             raise TypeError(msg)
         env = QADatasetEnv(
             dataset,
-            rubric=_require_rubric(rubric),
             test_dataset=test_dataset,
             prompt_builder=prompt_builder,
             question_column=question_column,
             answer_column=answer_column,
         )
-        return cls.local(env, tokenizer, max_turns=1, **kwargs)
+        return cls.local(env, tokenizer, max_turns=1, rubric=rubric, **kwargs)
 
     def _adopt_system_prompt(self, info: Mapping[str, Any]) -> None:
         """Take a system prompt from reset metadata when the harness has none."""
@@ -990,7 +1006,9 @@ class RolloutHarness(RestartPromptMixin):
 
     @property
     def rubric_components(self) -> tuple[str, ...]:
-        """Leaf rubric names for component metrics (empty when none)."""
+        """Leaf rubric names for component metrics: the harness rubric's, else the env's."""
+        if self._rubric is not None:
+            return self._rubric_components
         return tuple(self._env_client.rubric_components)
 
     @contextmanager
@@ -1135,6 +1153,8 @@ class RolloutHarness(RestartPromptMixin):
         self.turn_boundaries = []
         self.turn_rewards = []
         self.rubric_score_sums = {}
+        if self._rubric is not None:
+            self._rubric.reset()
         self._turn_idx = 0
         self._prompt_text = obs_text
         self._transcript = None
@@ -1215,6 +1235,7 @@ class RolloutHarness(RestartPromptMixin):
             self._gen_ids = gen_ids
             self._record_action(action)
             self._parse_tool_calls(gen_ids.tolist())
+            self._record_completion(gen_ids.tolist())
             return self._env_text(gen_ids.tolist(), action)
         full_ids = self.full_ids
         if full_ids is None:
@@ -1234,7 +1255,15 @@ class RolloutHarness(RestartPromptMixin):
         self._gen_ids = gen_ids
         self._record_action(action)
         self._parse_tool_calls(gen_ids.tolist())
+        self._record_completion(gen_ids.tolist())
         return self._env_text(gen_ids.tolist(), action)
+
+    def _record_completion(self, gen_ids: list[int]) -> None:
+        """Keep this turn's whole text, reasoning included, for the rubric."""
+        if self._rubric is not None:
+            self._turn_completion = reasoning_trace_text(
+                gen_ids, self._special_ids(), self._decode
+            )
 
     def _env_text(self, gen_ids: list[int], action: str) -> str:
         """Text the env receives: the whole turn under ``include_reasoning``, else the action."""
@@ -1333,11 +1362,13 @@ class RolloutHarness(RestartPromptMixin):
 
         Queued tool calls run in order, one env step each; a queued parse error
         scores ``min_reward`` with no env I/O; otherwise ``action`` is the one
-        action. The queue empties here, so no tool runs twice.
+        action. The queue empties here, so no tool runs twice. A rubric then
+        scores the turn, in place of the env's reward.
         """
         error, self._pending_tool_error = self._pending_tool_error, None
+        calls, self._pending_tool_calls = self._pending_tool_calls, []
         if error is not None:
-            return EnvStepResult(
+            result = EnvStepResult(
                 messages=[
                     {
                         "role": "tool",
@@ -1357,14 +1388,79 @@ class RolloutHarness(RestartPromptMixin):
                 action_error=None,
                 older_obs_text=None,
             )
-        calls, self._pending_tool_calls = self._pending_tool_calls, []
-        result = self._step_env_actions([*calls] or [self._processed_action(action)])
-        if self._takes_tool_calls:
-            result.info[TOOL_CALLS_INFO_KEY] = len(result.messages) if calls else 0
-        return result
+            payload = None
+            message = action
+        else:
+            env_actions: list[object] = []
+            if calls:
+                message = action
+                env_actions.extend(calls)
+            else:
+                message = self._processed_action(action)
+                env_actions.append(message)
+            result, payload = self._step_env_actions(env_actions)
+            if self._takes_tool_calls:
+                result.info[TOOL_CALLS_INFO_KEY] = len(result.messages) if calls else 0
+        rubric = self._rubric
+        if rubric is None:
+            return result
+        return self._score_turn(rubric, result, message, calls, payload, error is None)
 
-    def _step_env_actions(self, actions: list[object]) -> EnvStepResult:
-        """Run each action as one env step until the episode ends."""
+    def _score_turn(
+        self,
+        rubric: Rubric,
+        result: EnvStepResult,
+        message: str,
+        calls: list[ParsedToolCall],
+        payload: object | None,
+        env_ran: bool,
+    ) -> EnvStepResult:
+        """Score one turn with the rubric; its score and leaf scores replace the env's.
+
+        :raises TypeError: If the rubric's ``forward`` is async.
+        """
+        from agilerl.llm_envs.rubrics import (  # optional extra: llm
+            TurnAction,
+            TurnObservation,
+        )
+
+        fields = payload if is_str_keyed_dict(payload) else {}
+        action = TurnAction(
+            message=message, completion=self._turn_completion, tool_calls=calls
+        )
+        observation = TurnObservation(
+            env_reward=result.reward,
+            env_ran=env_ran,
+            done=(
+                result.terminated
+                or result.truncated
+                or self._turn_idx + 1 >= self.max_turns
+            ),
+            turn_index=self._turn_idx,
+            prompt=self._prompt_text,
+            question=fields.get("question"),
+            answer=fields.get("answer"),
+            payload=payload,
+            env_info=result.info,
+        )
+        score = rubric(action, observation)
+        if inspect.iscoroutine(score):
+            score.close()
+            msg = "Async rubrics are not supported; make the rubric's forward synchronous."
+            raise TypeError(msg)
+        info = dict(result.info)
+        info.pop("rubric_scores", None)
+        if observation.metadata.get("rubric_scores"):
+            info["rubric_scores"] = observation.metadata["rubric_scores"]
+        return result._replace(reward=float(score), info=info)
+
+    def _step_env_actions(
+        self, actions: list[object]
+    ) -> tuple[EnvStepResult, object | None]:
+        """Run each action as one env step until the episode ends.
+
+        :return: The turn's result and the last step's observation payload.
+        """
         messages: list[dict[str, str]] = []
         image: object | None = None
         turn_reward = 0.0
@@ -1372,6 +1468,7 @@ class RolloutHarness(RestartPromptMixin):
         info: dict[str, Any] = {}
         rubric_scores: dict[str, float] = {}
         action_error = older_obs_text = None
+        payload: object | None = None
         for action in actions:
             payload, reward, terminated, truncated, step_info = self._env_client.step(
                 action
@@ -1417,7 +1514,7 @@ class RolloutHarness(RestartPromptMixin):
             info=info,
             action_error=action_error,
             older_obs_text=older_obs_text,
-        )
+        ), payload
 
     def _step_apply(
         self, env_result: EnvStepResult

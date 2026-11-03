@@ -23,6 +23,7 @@ from agilerl.llm_envs.chat_formats import (
 from agilerl.llm_envs.harness import TOOL_CALL_ERROR_INFO_KEY, TOOL_CALLS_INFO_KEY
 from agilerl.llm_envs.openenv import InProcessEnvClient, RemoteEnvClient
 from agilerl.llm_envs.openenv_server import OpenEnvServer, TextObservation
+from agilerl.llm_envs.rubrics import TurnAction, TurnObservation
 
 pytest.importorskip("fastmcp")
 
@@ -30,6 +31,7 @@ from fastmcp import FastMCP
 from openenv.core.env_server.mcp_environment import MCPEnvironment
 from openenv.core.env_server.mcp_types import CallToolAction
 from openenv.core.env_server.types import Observation, State
+from openenv.core.rubrics.base import Rubric
 
 TC, TC_END, THINK_END = 9000, 9001, 9002
 MSTART, MEND, MRESP_START, MRESP_END = 9200, 9201, 9202, 9203
@@ -302,6 +304,19 @@ class TextEnv:
         return "feedback", 0.0, False, False, {}
 
 
+class RecordingRubric(Rubric):
+    """Rubric double recording each turn it scores."""
+
+    def __init__(self, score: float) -> None:
+        super().__init__()
+        self.score = score
+        self.calls: list[tuple[TurnAction, TurnObservation]] = []
+
+    def forward(self, action: TurnAction, observation: TurnObservation) -> float:
+        self.calls.append((action, observation))
+        return self.score
+
+
 class RecordingClient:
     """Env client double recording the actions it receives.
 
@@ -525,6 +540,80 @@ class TestHarnessToolSteps:
             # Assert
             assert reward == -1.0
             assert harness.turn_rewards == [-1.0]
+        finally:
+            harness.close()
+
+    def test_rubric_scores_a_rejected_turn_without_the_env(self) -> None:
+        # Arrange
+        client = RecordingClient()
+        rubric = RecordingRubric(score=0.5)
+        harness = RolloutHarness(
+            client,
+            TagTokenizer(),
+            max_turns=2,
+            apply_chat_template=False,
+            min_reward=-1.0,
+            rubric=rubric,
+        )
+        bad = [TC] + [ord(c) for c in "{bad}"] + [TC_END]
+
+        try:
+            # Act
+            reward, _, _ = _step_with_ids(harness, bad)
+
+            # Assert
+            assert client.actions == []
+            (action, observation) = rubric.calls[0]
+            assert observation.env_ran is False
+            assert observation.env_reward == -1.0
+            assert action.tool_calls == []
+            assert reward == 0.5
+        finally:
+            harness.close()
+
+    def test_rubric_sees_the_parsed_tool_calls(self) -> None:
+        client = RecordingClient(reward=1.0)
+        rubric = RecordingRubric(score=0.5)
+        harness = RolloutHarness(
+            client,
+            TagTokenizer(),
+            max_turns=2,
+            apply_chat_template=False,
+            rubric=rubric,
+        )
+
+        try:
+            _step_with_ids(harness, call_ids("add", {"a": 2}))
+
+            (action, observation) = rubric.calls[0]
+            assert [(c.name, c.arguments) for c in action.tool_calls] == [
+                ("add", {"a": 2})
+            ]
+            assert observation.env_ran is True
+            assert observation.env_reward == 1.0
+        finally:
+            harness.close()
+
+    def test_rubric_message_skips_action_processor_on_a_tool_call_turn(self) -> None:
+        client = RecordingClient(reward=1.0)
+        rubric = RecordingRubric(score=0.5)
+        harness = RolloutHarness(
+            client,
+            TagTokenizer(),
+            max_turns=2,
+            apply_chat_template=False,
+            rubric=rubric,
+            action_processor=lambda text: f"quoted({text})",
+        )
+
+        try:
+            _step_with_ids(harness, call_ids("add", {"a": 2}))
+
+            (action, _) = rubric.calls[0]
+            assert "quoted(" not in action.message
+            assert [(c.name, c.arguments) for c in action.tool_calls] == [
+                ("add", {"a": 2})
+            ]
         finally:
             harness.close()
 

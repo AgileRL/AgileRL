@@ -90,19 +90,28 @@ class TestGetRubricFactory:
         factory = env_utils.get_rubric_factory("reward", str(rubric_file))
         assert factory() is not factory()
 
-    def test_module_level_instance_is_shared(self, tmp_path):
-        """An author's own singleton rubric is handed back as-is, not copied."""
+    def test_module_level_instance_is_copied_per_call(self, tmp_path):
+        """Each call gets its own copy, including nested WeightedSum children."""
         rubric_file = tmp_path / "singleton.py"
         rubric_file.write_text(
             "from openenv.core.rubrics.base import Rubric\n"
-            "class Single(Rubric):\n"
+            "from openenv.core.rubrics.containers import WeightedSum\n"
+            "class Leaf(Rubric):\n"
+            "    def __init__(self):\n"
+            "        super().__init__()\n"
+            "        self.n = 0\n"
             "    def forward(self, action, observation):\n"
-            "        return 1.0\n"
-            "RUBRIC = Single()\n",
+            "        self.n += 1\n"
+            "        return float(self.n)\n"
+            "RUBRIC = WeightedSum([Leaf()], weights=[1.0])\n",
             encoding="utf-8",
         )
         factory = env_utils.get_rubric_factory("RUBRIC", str(rubric_file))
-        assert factory() is factory()
+        first, second = factory(), factory()
+        assert first is not second
+        assert next(iter(first.children())) is not next(iter(second.children()))
+        first.last_score = 1.0
+        assert second.last_score is None
 
 
 class TestGetRubric:

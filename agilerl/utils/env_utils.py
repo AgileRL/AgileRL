@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable, Mapping, Sequence
+from copy import deepcopy
 from importlib import import_module
 from importlib import util as importlib_util
 from pathlib import Path
@@ -51,9 +52,9 @@ def get_rubric_factory(rubric_name: str, file_path: str) -> Callable[[], Rubric]
 
     The module is executed once, here, so its import-time cost and side effects
     are paid once however many rubrics the caller goes on to build. A ``Rubric``
-    subclass or a reward callable yields a fresh rubric per call, which is what
-    lets concurrently-stepped envs each own their scorer; a module-level
-    ``Rubric`` instance is the author's own single object and is returned as-is.
+    subclass, a reward callable, or a module-level ``Rubric`` instance each
+    yields a fresh rubric per call, so concurrently-stepped envs each own
+    their scorer.
 
     :param rubric_name: Name of the symbol in ``file_path``.
     :param file_path: Path to the Python module defining the rubric or reward fn.
@@ -87,7 +88,7 @@ def get_rubric_factory(rubric_name: str, file_path: str) -> Callable[[], Rubric]
     from agilerl.llm_envs.rubrics import reward_fn_to_rubric  # optional extra: llm
 
     if isinstance(obj, Rubric):
-        return lambda: obj
+        return lambda: deepcopy(obj)
     if isinstance(obj, type) and issubclass(obj, Rubric):
         return obj
     if callable(obj):

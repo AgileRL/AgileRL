@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from functools import cache, partial
 from importlib import import_module
 from itertools import count
 from pathlib import Path
@@ -48,6 +49,7 @@ from agilerl.wrappers.learning import BanditEnv
 
 if TYPE_CHECKING:
     from datasets import Dataset
+    from openenv.core.rubrics.base import Rubric
     from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 __all__ = [
@@ -530,6 +532,28 @@ def make_rollout_env_factory(
     return _make_entrypoint_rollout_factory(spec, tokenizer, harness_kwargs)
 
 
+def _rubric_factory(spec: LLMEnvSpec) -> Callable[[], Rubric] | None:
+    """One rubric per harness from ``rubric_file_path``; ``None`` when the spec names none.
+
+    The rubric file is read on the first call, so building env factories stays
+    free of I/O. Each harness gets its own rubric: the collector steps its slots
+    on concurrent threads, and a rubric carries scoring state.
+    """
+    if spec.rubric_file_path is None:
+        return None
+    if spec.rubric_name is None:
+        msg = "rubric_name is required with rubric_file_path"
+        raise ValueError(msg)
+    load = cache(
+        partial(
+            get_rubric_factory,
+            rubric_name=spec.rubric_name,
+            file_path=spec.rubric_file_path,
+        )
+    )
+    return lambda: load()()
+
+
 def _http_timeout_s(spec: LLMEnvSpec) -> float | None:
     """Per-message ``env_url`` timeout: manifest value, 300 s default, ``0`` unbounds."""
     if spec.request_timeout_s is None:
@@ -552,14 +576,11 @@ def _make_dataset_rollout_factory(
 
     def _resolve() -> dict[str, Any]:
         if not resolved:
-            if (
-                spec.prompt_template is None
-                or spec.rubric_name is None
-                or spec.rubric_file_path is None
-            ):
+            make_rubric = _rubric_factory(spec)
+            if make_rubric is None or spec.prompt_template is None:
                 msg = (
-                    "rubric_name, rubric_file_path, and prompt_template "
-                    "are required for dataset-backed rollout environments"
+                    "rubric_file_path and prompt_template are required for "
+                    "dataset-backed rollout environments"
                 )
                 raise ValueError(msg)
 
@@ -581,10 +602,7 @@ def _make_dataset_rollout_factory(
                 train_ds=train_ds,
                 test_ds=test_ds,
                 prompt_builder=_prompt_builder,
-                rubric_factory=get_rubric_factory(
-                    rubric_name=spec.rubric_name,
-                    file_path=spec.rubric_file_path,
-                ),
+                make_rubric=make_rubric,
             )
         return resolved
 
@@ -592,9 +610,7 @@ def _make_dataset_rollout_factory(
         parts = _resolve()
         return RolloutHarness.from_dataset(
             parts["train_ds"],
-            # One rubric per env: the collector steps its slots on
-            # concurrent threads, and a rubric carries scoring state.
-            parts["rubric_factory"](),
+            parts["make_rubric"](),
             tokenizer,
             test_dataset=parts["test_ds"],
             prompt_builder=parts["prompt_builder"],
@@ -644,6 +660,7 @@ def _make_url_rollout_factory(
     }
     if isinstance(action_field, str):
         remote_client_kwargs["action_field"] = action_field
+    make_rubric = _rubric_factory(spec)
 
     def _url_factory() -> RolloutHarness:
         # The server's max_concurrent_envs must cover batch*group + the eval env.
@@ -661,6 +678,7 @@ def _make_url_rollout_factory(
             apply_chat_template=True,
             screenshot_field=spec.screenshot_field,
             goal_images_field=spec.goal_images_field,
+            rubric=None if make_rubric is None else make_rubric(),
             **harness_kwargs,
         )
 
@@ -726,12 +744,14 @@ def _make_entrypoint_rollout_factory(
         local_harness_kwargs["goal_images_field"] = spec.goal_images_field
     if spec.answer_tool is not None:
         local_harness_kwargs["answer_tool"] = spec.answer_tool
+    make_rubric = _rubric_factory(spec)
 
     def _env_factory() -> RolloutHarness:
         return RolloutHarness.local(
             _make_raw_env(),
             tokenizer,
             max_turns=max_turns,
+            rubric=None if make_rubric is None else make_rubric(),
             **local_harness_kwargs,
         )
 

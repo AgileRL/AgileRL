@@ -608,7 +608,9 @@ class LLMEnvSpec(EnvSpecBase):
         validation_alias=AliasChoices("rubric_file_path", "reward_file_path"),
         description=(
             "Path to the Python module holding the rubric (or reward function) "
-            "that scores a rollout over dataset rows."
+            "that scores every turn. Required for a rollout over dataset rows; "
+            "on an env, its score replaces the env's reward, which it can "
+            "read as an input."
         ),
     )
     rubric_name: str | None = Field(
@@ -634,7 +636,8 @@ class LLMEnvSpec(EnvSpecBase):
             "Send the env or reward function each turn's reasoning with its "
             "markers, not only the text after the reasoning ends. Unset sends "
             "it to a reward file over dataset rows and not to an env that "
-            "runs the action."
+            "runs the action. A Rubric class reads the whole turn from "
+            "TurnAction.completion either way."
         ),
     )
     train_test_split: float | None = Field(
@@ -1150,11 +1153,6 @@ class LLMEnvSpec(EnvSpecBase):
                 msg = "A dataset-backed rollout environment is single-turn; max_turns must be 1."
                 raise ValueError(msg)
             self.max_turns = 1
-        elif self.rubric_file_path is not None:
-            msg = (
-                "rubric_file_path is not supported for env-backed rollout environments."
-            )
-            raise ValueError(msg)
         return self
 
     @model_validator(mode="after")
@@ -1258,6 +1256,8 @@ class LLMEnvSpec(EnvSpecBase):
                 self.train_test_split = 0.9
             if self.env_type == "rollout" and self.rubric_name is None:
                 self.rubric_name = "reward_fn"
+        if self.rubric_file_path is not None and self.rubric_name is None:
+            self.rubric_name = "reward_fn"
         if self.env_type == "dataset" and self.response_column is None:
             self.response_column = "response"
         if self.env_type == "rollout":

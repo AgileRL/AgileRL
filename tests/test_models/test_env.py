@@ -9,10 +9,12 @@ import numpy as np
 import pandas as pd
 import pytest
 import torch
+from openenv.core.rubrics.base import Rubric
 from pydantic import ValidationError
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 import agilerl.llm_envs  # noqa: F401
+from agilerl.llm_envs.rubrics import TurnAction, TurnObservation
 from agilerl.models.env import (
     BanditEnvSpec,
     GymEnvSpec,
@@ -1399,14 +1401,119 @@ class TestLLMEnvSpecRollout:
                 max_turns=4,
             )
 
-    def test_env_backed_rollout_rejects_rubric_file_path(self):
-        with pytest.raises(ValueError, match="not supported for env-backed"):
-            LLMEnvSpec(
-                env_type=LLMEnvType.ROLLOUT,
-                entrypoint="my_mod:make",
-                rubric_file_path="r.py",
-                max_turns=5,
-            )
+    def test_env_backed_rollout_accepts_rubric_file_path(self):
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            entrypoint="my_mod:make",
+            rubric_file_path="r.py",
+            max_turns=5,
+        )
+
+        assert spec.rubric_file_path == "r.py"
+        assert spec.rubric_name == "reward_fn"
+
+    def test_entrypoint_factory_gives_each_harness_its_own_rubric(self, tmp_path):
+        # Arrange
+        reward_file = tmp_path / "reward.py"
+        reward_file.write_text(
+            "def reward_fn(completion, answer, question):\n    return 0.5\n"
+        )
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.pad_token_id = 0
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            entrypoint="my_mod:MyEnv",
+            rubric_file_path=str(reward_file),
+            max_turns=2,
+        )
+        mock_rollout_cls = MagicMock()
+
+        # Act
+        with (
+            patch(
+                "agilerl.utils.env_utils.resolve_entrypoint_target",
+                return_value=MagicMock(),
+            ),
+            patch("agilerl.models.env.RolloutHarness", mock_rollout_cls),
+        ):
+            factory, _max_turns = make_rollout_env_factory(spec, mock_tokenizer)
+            factory()
+            factory()
+
+        # Assert
+        first, second = (
+            call.kwargs["rubric"] for call in mock_rollout_cls.local.call_args_list
+        )
+        assert first is not second
+        action = TurnAction(message="x", completion="x")
+        observation = TurnObservation(
+            env_reward=1.0, env_ran=True, done=True, turn_index=0, prompt="p"
+        )
+        assert first(action, observation) == 0.5
+
+    def test_entrypoint_factory_copies_a_module_level_rubric(self, tmp_path):
+        # Arrange
+        reward_file = tmp_path / "reward.py"
+        reward_file.write_text(
+            "from openenv.core.rubrics.base import Rubric\n"
+            "class Leaf(Rubric):\n"
+            "    def forward(self, action, observation):\n"
+            "        return 0.5\n"
+            "RUBRIC = Leaf()\n"
+        )
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.pad_token_id = 0
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            entrypoint="my_mod:MyEnv",
+            rubric_file_path=str(reward_file),
+            rubric_name="RUBRIC",
+            max_turns=2,
+        )
+        mock_rollout_cls = MagicMock()
+
+        # Act
+        with (
+            patch(
+                "agilerl.utils.env_utils.resolve_entrypoint_target",
+                return_value=MagicMock(),
+            ),
+            patch("agilerl.models.env.RolloutHarness", mock_rollout_cls),
+        ):
+            factory, _max_turns = make_rollout_env_factory(spec, mock_tokenizer)
+            factory()
+            factory()
+
+        # Assert
+        first, second = (
+            call.kwargs["rubric"] for call in mock_rollout_cls.local.call_args_list
+        )
+        assert first is not second
+        first.last_score = 1.0
+        assert second.last_score is None
+
+    def test_url_factory_passes_the_rubric(self, tmp_path):
+        reward_file = tmp_path / "reward.py"
+        reward_file.write_text(
+            "def reward_fn(completion, answer, question):\n    return 0.5\n"
+        )
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.pad_token_id = 0
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            env_url="http://env-host:8000",
+            rubric_file_path=str(reward_file),
+            max_turns=1,
+        )
+        mock_rollout_cls = MagicMock()
+
+        with (
+            patch("agilerl.models.env.RolloutHarness", mock_rollout_cls),
+            patch("agilerl.llm_envs.openenv.RemoteEnvClient"),
+        ):
+            make_rollout_env_factory(spec, mock_tokenizer)[0]()
+
+        assert isinstance(mock_rollout_cls.call_args.kwargs["rubric"], Rubric)
 
     def test_env_config_rejected_for_dataset_backed_rollout(self):
         with pytest.raises(ValueError, match="no env to configure"):
@@ -1570,6 +1677,7 @@ class TestLLMEnvSpecRollout:
             strict_chat_template_boundary=True,
             screenshot_field=None,
             goal_images_field=None,
+            rubric=None,
         )
         mock_rollout_cls.local.assert_not_called()
 
@@ -1631,6 +1739,7 @@ class TestLLMEnvSpecRollout:
             max_model_len=512,
             include_reasoning=False,
             strict_chat_template_boundary=True,
+            rubric=None,
         )
 
     def test_entrypoint_factory_forwards_answer_tool(self):
@@ -1965,9 +2074,26 @@ class TestDatasetBackedRolloutRewardFields:
         factory, _max_turns = make_rollout_env_factory(spec, mock_tokenizer)
         with pytest.raises(
             ValueError,
-            match="rubric_name, rubric_file_path, and prompt_template",
+            match="rubric_file_path and prompt_template are required",
         ):
             factory()
+
+
+class TestRubricFactoryGuard:
+    def test_a_rubric_file_without_a_name_raises(self):
+        # model_construct skips the validator that defaults rubric_name.
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.pad_token_id = 0
+        spec = LLMEnvSpec.model_construct(
+            env_type=LLMEnvType.ROLLOUT,
+            entrypoint="my_mod:MyEnv",
+            rubric_file_path="reward.py",
+            rubric_name=None,
+            max_turns=1,
+        )
+
+        with pytest.raises(ValueError, match="rubric_name is required"):
+            make_rollout_env_factory(spec, mock_tokenizer)
 
 
 class TestRequireDatasets:
