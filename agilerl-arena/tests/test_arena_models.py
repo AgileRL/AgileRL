@@ -33,6 +33,7 @@ from agilerl.arena.models.env import (
     EnvHostVolume,
     EnvServiceSpec,
     GymEnvSpec,
+    JudgeSpec,
     LLMEnvSpec,
     LLMEnvType,
 )
@@ -51,6 +52,39 @@ def _manifest(**sections) -> dict:
     }
     data.update(sections)
     return data
+
+
+class TestJudgeSpec:
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"model": "m", "base_url": "http://judge:8000"},
+            {"model": "m", "base_url": "https://judge/"},
+            {"model": "m", "base_url": "https://openrouter.ai/api/v1"},
+            {"model": "m", "api_key_env": "JUDGE_KEY"},
+            {"provider": "anthropic", "model": "m", "api_key_env": "JUDGE_KEY"},
+        ],
+    )
+    def test_accepts_a_reachable_endpoint(self, kwargs: dict[str, str]) -> None:
+        assert JudgeSpec(**kwargs).model == "m"
+
+    def test_a_hosted_api_needs_a_key_variable(self) -> None:
+        with pytest.raises(ValidationError, match="needs api_key_env"):
+            JudgeSpec(model="m")
+
+    @pytest.mark.parametrize("base_url", ["judge:8000", "ftp://judge", "http://"])
+    def test_a_base_url_must_be_an_http_url(self, base_url: str) -> None:
+        with pytest.raises(ValidationError, match="http\\(s\\) URL"):
+            JudgeSpec(model="m", base_url=base_url)
+
+    def test_an_anthropic_judge_rejects_a_temperature(self) -> None:
+        with pytest.raises(ValidationError, match="no temperature"):
+            JudgeSpec(
+                provider="anthropic",
+                model="m",
+                api_key_env="JUDGE_KEY",
+                temperature=0.7,
+            )
 
 
 class TestGymEnvSpec:

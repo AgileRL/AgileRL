@@ -16,7 +16,7 @@ from __future__ import annotations
 import datetime
 import os
 import random
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from contextlib import ContextDecorator
 from typing import Any
 
@@ -248,7 +248,7 @@ def aggregate_metrics_across_gpus(
 
 
 def aggregate_metrics_dict(
-    metrics: dict[str, torch.Tensor | np.ndarray | float],
+    metrics: Mapping[str, torch.Tensor | np.ndarray | float],
     excluded: Collection[str] = (),
     maximized: Collection[str] = (),
 ) -> dict[str, float]:
@@ -258,7 +258,7 @@ def aggregate_metrics_dict(
     each metric is its local mean.
 
     :param metrics: Metric values on this rank, by name.
-    :type metrics: dict[str, torch.Tensor | np.ndarray | float]
+    :type metrics: Mapping[str, torch.Tensor | np.ndarray | float]
     :param excluded: Metrics this rank leaves out of their cross-rank mean. A
         metric every rank excludes averages to NaN.
     :type excluded: Collection[str]

@@ -537,7 +537,8 @@ def _rubric_factory(spec: LLMEnvSpec) -> Callable[[], Rubric] | None:
 
     The rubric file is read on the first call, so building env factories stays
     free of I/O. Each harness gets its own rubric: the collector steps its slots
-    on concurrent threads, and a rubric carries scoring state.
+    on concurrent threads, and a rubric carries scoring state. Every rubric
+    shares the process's one client for ``spec.judge``.
     """
     if spec.rubric_file_path is None:
         return None
@@ -549,6 +550,7 @@ def _rubric_factory(spec: LLMEnvSpec) -> Callable[[], Rubric] | None:
             get_rubric_factory,
             rubric_name=spec.rubric_name,
             file_path=spec.rubric_file_path,
+            judge_spec=spec.judge,
         )
     )
     return lambda: load()()
@@ -570,50 +572,41 @@ def _make_dataset_rollout_factory(
 ) -> tuple[Callable[[], RolloutHarness], int]:
     """Factory serving labelled dataset rows scored by a rubric, in-process."""
     chat_template_kwargs = harness_kwargs["chat_template_kwargs"]
+
     # The rubric file and the dataset are read once, on the first env
     # build, so constructing the factory stays free of I/O.
-    resolved: dict[str, Any] = {}
+    @cache
+    def _resolve() -> tuple[Any, Any, Callable[[Mapping[str, Any]], str], Any]:
+        make_rubric = _rubric_factory(spec)
+        if make_rubric is None or spec.prompt_template is None:
+            msg = (
+                "rubric_file_path and prompt_template are required for "
+                "dataset-backed rollout environments"
+            )
+            raise ValueError(msg)
 
-    def _resolve() -> dict[str, Any]:
-        if not resolved:
-            make_rubric = _rubric_factory(spec)
-            if make_rubric is None or spec.prompt_template is None:
-                msg = (
-                    "rubric_file_path and prompt_template are required for "
-                    "dataset-backed rollout environments"
-                )
-                raise ValueError(msg)
+        conversation = make_conversation_template(prompt_template=spec.prompt_template)
 
-            conversation = make_conversation_template(
-                prompt_template=spec.prompt_template
+        def _prompt_builder(row: Mapping[str, Any]) -> str:
+            """Render the manifest's chat template for one dataset row."""
+            return render_chat_template(
+                conversation,
+                tokenizer,
+                chat_template_kwargs=chat_template_kwargs,
+                **row,
             )
 
-            def _prompt_builder(row: Mapping[str, Any]) -> str:
-                """Render the manifest's chat template for one dataset row."""
-                return render_chat_template(
-                    conversation,
-                    tokenizer,
-                    chat_template_kwargs=chat_template_kwargs,
-                    **row,
-                )
-
-            train_ds, test_ds = _load_llm_dataset(spec, seed=seed)
-            resolved.update(
-                train_ds=train_ds,
-                test_ds=test_ds,
-                prompt_builder=_prompt_builder,
-                make_rubric=make_rubric,
-            )
-        return resolved
+        train_ds, test_ds = _load_llm_dataset(spec, seed=seed)
+        return train_ds, test_ds, _prompt_builder, make_rubric
 
     def _dataset_factory() -> RolloutHarness:
-        parts = _resolve()
+        train_ds, test_ds, prompt_builder, make_rubric = _resolve()
         return RolloutHarness.from_dataset(
-            parts["train_ds"],
-            parts["make_rubric"](),
+            train_ds,
+            make_rubric(),
             tokenizer,
-            test_dataset=parts["test_ds"],
-            prompt_builder=parts["prompt_builder"],
+            test_dataset=test_ds,
+            prompt_builder=prompt_builder,
             # ``prompt_builder`` already rendered the chat template.
             apply_chat_template=False,
             max_model_len=harness_kwargs["max_model_len"],

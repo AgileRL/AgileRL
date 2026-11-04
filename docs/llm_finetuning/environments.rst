@@ -262,6 +262,64 @@ A turn rejected for a malformed tool call reaches the rubric with
 ``env_ran=False`` and ``env_reward`` set to ``min_reward``. Each leaf is logged as
 ``reward_<name>``.
 
+An LLM judge
+~~~~~~~~~~~~
+
+:class:`~agilerl.llm_envs.rubrics.LLMJudgeRubric` scores an episode against
+criteria you write. Set ``judge`` next to ``rubric_file_path``; a ``Rubric`` class
+whose ``__init__`` takes ``judge`` is built with the run's shared client:
+
+.. code-block:: python
+
+   from openenv.core.rubrics.containers import WeightedSum
+
+   from agilerl.llm_envs.rubrics import EnvReward, LLMJudgeRubric
+
+
+   class RUBRIC(WeightedSum):
+       def __init__(self, judge) -> None:
+           super().__init__(
+               [EnvReward(), LLMJudgeRubric(judge, "The reply is correct and polite.")],
+               weights=[0.7, 0.3],
+           )
+
+.. code-block:: yaml
+
+   environment:
+       env_type: rollout
+       entrypoint: guess_env.py:GuessEnv
+       rubric_file_path: reward.py
+       rubric_name: RUBRIC
+       judge:
+           provider: openai          # or anthropic (needs the anthropic package)
+           model: gpt-4.1-mini
+           api_key_env: OPENAI_API_KEY   # the variable's name, never the key
+           max_concurrency: 16
+
+- ``base_url`` points the judge at any OpenAI-compatible endpoint with
+  ``provider: openai``: a router or cheaper host (OpenRouter, Together, Groq) or
+  self-hosted vLLM. A URL with a path is used as given
+  (``https://openrouter.ai/api/v1``); a bare host (``http://judge:8000``) gets
+  ``/v1``. Leave ``api_key_env`` unset when the endpoint needs no key.
+- The judge reads the prompt, each turn's text after its reasoning, and the env's
+  replies. ``LLMJudgeRubric(..., include_reasoning=True)`` also shows it the
+  reasoning. Scoring reasoning trains the model to write reasoning the judge
+  likes, so leave it off unless that is the goal.
+- It scores the episode's last turn, earlier turns 0; ``every_turn=True`` judges
+  each turn.
+- The provider SDK retries rate limits, server errors and timed-out attempts;
+  ``timeout_s`` bounds each attempt. A call that still fails stops the run. A
+  verdict without a readable ``{"score": ...}`` scores 0.
+- On dataset rows, the judge reads the row's question and is shown its answer as
+  ``REFERENCE ANSWER``, so criteria can compare against it.
+- Anthropic judges take no ``temperature``: setting one is rejected.
+- Two judges in one rubric need distinct names, ``LLMJudgeRubric(..., name=...)``:
+  each leaf reports one ``reward_<name>`` metric, and a repeated name is an error.
+- ``reward_<name>`` counts an episode a ``Sequential`` or ``Gate`` kept from that
+  leaf as 0.
+- Training logs ``judge_calls``, ``judge_parse_failure_rate`` and
+  ``judge_mean_latency_s``.
+
 Supervised (SFT / DPO)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -342,6 +400,11 @@ These are the names this package reads:
    * - ``rubric_name``
      - ``reward_fn``
      - Symbol in that file. Alias: ``reward_fn_name``.
+   * - ``judge``
+     - ``None``
+     - LLM judge handed to the rubric: ``provider``, ``model``, ``base_url``,
+       ``api_key_env``, ``max_concurrency``, ``timeout_s``, ``temperature``,
+       ``max_tokens``. Needs ``rubric_file_path``.
    * - ``prompt_template``
      - ``None``
      - Chat-template pieces rendered into the prompt on reset.

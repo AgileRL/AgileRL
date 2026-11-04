@@ -1374,6 +1374,7 @@ class TestFeedbackTerminatorDedupe:
         w._max_model_len = None
         w._turn_idx = 0
         w.turn_rewards = []
+        w.rubric_score_sums = {}
         w.turn_boundaries = []
         # Frame whose prefix begins with the terminator (chr(7) encodes to id 7).
         w._boundary_parts = {("user",): ("\x07U:", ":A")}
@@ -1524,7 +1525,7 @@ class TestBatchRolloutEnvHelpers:
         vec.rubric_component_names = ("fmt", "correct", "missing")
         means = vec.get_rubric_score_means()
         assert means["fmt"] == 2.0
-        assert means["correct"] == 2.0
+        assert means["correct"] == 1.0  # e1 was kept from it: counts as 0
         assert means["missing"] != means["missing"]  # NaN
 
 
