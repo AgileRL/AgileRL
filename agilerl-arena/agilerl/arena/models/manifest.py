@@ -836,6 +836,9 @@ class TrainingManifest(BaseModel):
             # An unset engine count leaves the trainer / engine split to the driver.
             if "rollout_engines_per_agent" not in self.training.model_fields_set:
                 training.pop("rollout_engines_per_agent", None)
+            # An unset step cap dumps the default million, which parsers treat as authored.
+            if "max_steps" not in self.training.model_fields_set:
+                training.pop("max_steps", None)
         algorithm = payload.get("algorithm")
         if isinstance(algorithm, dict):
             if "num_envs" not in self.algorithm.model_fields_set:

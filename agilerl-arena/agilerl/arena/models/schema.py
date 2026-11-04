@@ -283,7 +283,12 @@ def training_schema_conditionals() -> list[dict[str, Any]]:
         },
         {
             "if": dataset_backed_grpo_rollout_if(),
-            "then": training_then({"num_epochs": {"default": 1}}),
+            "then": training_then(
+                {
+                    "num_epochs": {"default": 1},
+                    "max_steps": {"default": None},
+                }
+            ),
         },
         {
             "if": environment_env_image_if(),

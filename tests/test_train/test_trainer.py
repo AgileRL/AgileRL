@@ -1882,7 +1882,6 @@ class TestLLMLocalTrainer:
                 algorithm=dpo_spec,
                 environment=env_spec,
                 training=TrainingSpec(
-                    max_steps=1_000_000,
                     evo_steps=10,
                     pop_size=self.POP_SIZE,
                     num_epochs=3,

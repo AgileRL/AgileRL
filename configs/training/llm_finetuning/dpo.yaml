@@ -15,7 +15,6 @@ environment:
     dataset: HumanLLMs/Human-Like-DPO-Dataset
 
 training:
-    max_steps: 100000
     evo_steps: 10
     pop_size: 4
     eval_loop: 1

@@ -73,6 +73,22 @@ class TestTrainingAndReplayAliases:
 
 
 class TestTrainingSpecValidators:
+    def test_rejects_num_epochs_together_with_max_steps(self) -> None:
+        with pytest.raises(ValueError, match="are both set; set one"):
+            TrainingSpec(max_steps=50, num_epochs=1)
+
+    def test_accepts_num_epochs_without_max_steps(self) -> None:
+        spec = TrainingSpec(num_epochs=3)
+
+        assert spec.num_epochs == 3
+        assert "max_steps" not in spec.model_fields_set
+
+    def test_accepts_max_steps_without_num_epochs(self) -> None:
+        spec = TrainingSpec(max_steps=50)
+
+        assert spec.max_steps == 50
+        assert spec.num_epochs is None
+
     def test_rejects_evo_steps_above_max_steps(self) -> None:
         with pytest.raises(
             ValueError, match=r"evo_steps .* must be less than or equal to max_steps"
