@@ -101,20 +101,27 @@ def engine_terms(
         + (formulas.SPECULATIVE_DRAFTING_BYTES if _engine_drafts(arch, settings) else 0)
         + (
             formulas.LORA_DUAL_STREAM_BYTES
-            if settings.lora_dual_stream and runs_dual_stream_lora(arch.is_moe)
+            if settings.enable_lora
+            and settings.lora_dual_stream
+            and runs_dual_stream_lora(arch.is_moe)
             else 0
         ),
         # Engines serve one adapter (``max_loras=1``).
-        "lora_slots": int(
-            formulas.lora_param_count(arch, settings.max_lora_rank) * act_bytes / tp
-        )
-        + formulas.engine_expert_lora_param_count(
-            arch,
-            settings.max_lora_rank,
-            tp,
-            packed_3d=arch.vllm_3d_moe_lora or settings.lora_packed_target_matrices > 0,
-        )
-        * act_bytes,
+        "lora_slots": (
+            int(
+                formulas.lora_param_count(arch, settings.max_lora_rank) * act_bytes / tp
+            )
+            + formulas.engine_expert_lora_param_count(
+                arch,
+                settings.max_lora_rank,
+                tp,
+                packed_3d=arch.vllm_3d_moe_lora
+                or settings.lora_packed_target_matrices > 0,
+            )
+            * act_bytes
+            if settings.enable_lora
+            else 0
+        ),
         "engine_runtime": int(formulas.ENGINE_RUNTIME_FRACTION * unsharded_weights),
         "step_buffers": engine_step_buffer_bytes(arch, batched_tokens, act_bytes),
         "kv_demand": _kv_demand_per_rank(arch, settings),

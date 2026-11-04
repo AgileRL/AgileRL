@@ -32,7 +32,10 @@ KV, and LoRA terms still come from the parsed decoder.
 field: a linear scan up from the minimum to the first fit, then bisection
 for the top of that fitting run. Training uses the same underprediction
 buffer as `estimate`. `--inference` is a dedicated serving GPU
-(utilization 0.9, 8 sequences, no trainer residual). Invertible fields:
+(utilization 0.9, 8 sequences, no trainer residual, a merged model with no
+LoRA slot); `--quantization fp8`
+sizes vLLM online fp8 weights (`APP_VLLM_QUANTIZATION`) and needs a GPU
+with native fp8 (compute capability 8.9+: L4, L40S, H100). Invertible fields:
 `max_model_len`, `max_num_seqs`.
 
 | module | role |

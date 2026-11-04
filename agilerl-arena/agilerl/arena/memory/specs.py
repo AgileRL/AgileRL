@@ -1190,6 +1190,8 @@ class GenerationSettings(BaseModel):
     max_num_batched_tokens: int | None = None
     # ``limit_mm_per_prompt["image"]``. ``None`` takes vLLM's unset-modality limit.
     max_images_per_prompt: int | None = None
+    # vLLM ``enable_lora``. Off for a merged model: no adapter slot, no LoRA streams.
+    enable_lora: bool = True
     max_lora_rank: int = OMITTED_MAX_LORA_RANK
     # Adapter ``target_parameters`` on packed experts. Any switches the
     # engine to vLLM's 3D fused-MoE LoRA layout, as AgileRL patches the
