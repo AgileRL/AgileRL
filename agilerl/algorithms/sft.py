@@ -329,7 +329,7 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         # Run the transformer with the lm_head patched to identity so
         # ``.logits`` is the final hidden state, then compute the loss from the
         # hidden states + lm_head weight without ever materializing the full logits tensor.
-        with self._patch_lm_head_to_identity():
+        with self._patch_lm_head_to_identity(), self._activation_offload_ctx():
             # FSDP2 all-gather hooks run on ``Module.__call__``.
             hidden = self.actor(**model_kwargs).logits  # [B, L, H]; [1, N, H] packed
         # The head runs on response tokens only.
