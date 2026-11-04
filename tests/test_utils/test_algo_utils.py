@@ -15,6 +15,7 @@ import numpy as np
 import pytest
 import torch
 from gymnasium import spaces
+from tensordict import TensorDict
 from torch import nn
 
 import agilerl.utils.algo_utils as algo_utils
@@ -69,6 +70,7 @@ from agilerl.utils.algo_utils import (
     share_encoder_parameters,
     stack_and_pad_experiences,
     stack_experiences,
+    to_agent_tensors,
     transpose_image_observation,
     transpose_image_space,
     vectorize_experiences_by_agent,
@@ -967,8 +969,6 @@ class TestObsToTensor:
 
     def test_obs_to_tensor_tensordict(self):
         """obs_to_tensor with TensorDict."""
-        from tensordict import TensorDict
-
         td = TensorDict({"obs": torch.ones(5)}, batch_size=[])
         result = obs_to_tensor(td, "cpu")
         assert isinstance(result, TensorDict)
@@ -984,6 +984,31 @@ class TestObsToTensor:
     def test_raises_for_unsupported_observation_type(self):
         with pytest.raises(TypeError, match="Unrecognized type of observation"):
             algo_utils.obs_to_tensor({1, 2}, device="cpu")
+
+
+class TestToAgentTensors:
+    def test_moves_leaves_onto_target_device(self):
+        td = TensorDict(
+            {"a": torch.zeros(2, 3), "b": torch.ones(2, 1)},
+            batch_size=[2],
+        )
+
+        out = to_agent_tensors(td, "cpu")
+
+        assert set(out) == {"a", "b"}
+        assert out["a"].device == torch.device("cpu")
+        assert out["b"].shape == (2, 1)
+
+    def test_reuses_leaves_when_already_on_device(self):
+        td = TensorDict(
+            {"a": torch.zeros(2, 3)},
+            batch_size=[2],
+            device="cpu",
+        )
+
+        out = to_agent_tensors(td, "cpu")
+
+        assert out["a"] is td["a"]
 
 
 class TestMaybeAddBatchDim:
@@ -1127,8 +1152,6 @@ def test_make_safe_deepcopies():
 
 class TestIsVectorizedExperiences:
     def test_tensordict_experiences_use_batch_ndim(self):
-        from tensordict import TensorDict
-
         # A TensorDict's ndim counts batch dims, so (num_steps, num_envs) is
         # vectorized while a single leading dim is not.
         vectorized = TensorDict({"a": torch.ones((10, 4, 5))}, batch_size=[10, 4])
@@ -1218,6 +1241,32 @@ def test_share_encoder_parameters():
 
     with pytest.raises(AssertionError):
         share_encoder_parameters(policy, not_evolvable)
+
+
+class TestShareEncoderParameters:
+    def test_borrowed_encoder_holds_detached_tensors(self):
+        torch.manual_seed(0)
+        policy = MockEvolvableNetwork()
+        other = MockEvolvableNetwork()
+        observation = torch.randn(4, 10)
+
+        share_encoder_parameters(policy, other)
+
+        assert not list(other.encoder.parameters())
+        leaves = [
+            value
+            for module in other.encoder.modules()
+            for value in vars(module).values()
+            if isinstance(value, torch.Tensor)
+        ]
+        assert leaves
+        for leaf in leaves:
+            assert not leaf.requires_grad
+            assert leaf.grad_fn is None
+        torch.testing.assert_close(
+            other.encoder(observation),
+            policy.encoder(observation),
+        )
 
 
 def test_isroutine():
@@ -1412,8 +1461,6 @@ class TestPreprocessObservations:
 
     def test_preprocess_tuple_observation_tensordict(self):
         """TensorDict converted to tuple, then preprocessed."""
-        from tensordict import TensorDict
-
         tuple_space = spaces.Tuple((spaces.Box(0, 1, (2,)), spaces.Box(0, 1, (3,))))
         td = TensorDict({"0": torch.ones(2), "1": torch.ones(3)}, batch_size=[])
         result = preprocess_observation(tuple_space, td, "cpu")
@@ -1518,6 +1565,18 @@ class TestGetExperiencesSamples:
         assert torch.equal(sampled[0], torch.tensor([1, 3]))
         assert torch.equal(sampled[1], torch.tensor([4, 6]))
 
+    def test_samples_tensordict_experiences(self):
+        idx = np.array([0, 2])
+        exp = TensorDict(
+            {"a": torch.tensor([[1.0], [2.0], [3.0]])},
+            batch_size=[3],
+        )
+
+        sampled = get_experiences_samples(idx, exp)[0]
+
+        assert isinstance(sampled, TensorDict)
+        assert torch.equal(sampled["a"], torch.tensor([[1.0], [3.0]]))
+
 
 class TestStackExperiences:
     def test_stack_experiences(self):
@@ -1574,6 +1633,9 @@ class TestStackExperiences:
         exps = [torch.ones(5), torch.zeros(5), torch.ones(5) * 0.5]
         stacked = stack_experiences(exps)
         assert stacked[0].shape == (3, 5)
+        assert torch.equal(stacked[0][0], torch.ones(5))
+        assert torch.equal(stacked[0][1], torch.zeros(5))
+        assert torch.equal(stacked[0][2], torch.ones(5) * 0.5)
 
     def test_stack_experiences_unsupported_type(self):
         """TypeError for unsupported experience element type."""
@@ -1604,6 +1666,36 @@ class TestStackExperiences:
         assert isinstance(stacked[0][0], np.ndarray)
         assert stacked[0][0].shape == (2, 3)
         assert stacked[0][1].shape == (2, 2)
+
+    def test_stack_experiences_tensordict(self):
+        stacked = stack_experiences(
+            [
+                TensorDict({"a": torch.ones(3)}, batch_size=[]),
+                TensorDict({"a": torch.zeros(3)}, batch_size=[]),
+            ]
+        )
+
+        assert isinstance(stacked[0], TensorDict)
+        assert stacked[0]["a"].shape == (2, 3)
+        assert torch.equal(stacked[0]["a"][0], torch.ones(3))
+        assert torch.equal(stacked[0]["a"][1], torch.zeros(3))
+
+    def test_stack_experiences_mixed_tensordict_raises(self):
+        """Mixed TensorDict and dict input raises AssertionError."""
+        mixed = [
+            TensorDict({"a": torch.ones(3)}, batch_size=[]),
+            {"a": np.zeros(3)},
+        ]
+
+        with pytest.raises(AssertionError):
+            stack_experiences(mixed)
+
+    def test_stack_experiences_mixed_tensor_raises(self):
+        """Mixed Tensor and non-Tensor input raises AssertionError."""
+        mixed = [torch.ones(3), np.ones(3)]
+
+        with pytest.raises(AssertionError):
+            stack_experiences(mixed)
 
 
 class TestFlattenExperiences:
@@ -1647,6 +1739,7 @@ class TestFlattenExperiences:
         (flat,) = flatten_experiences(np_exp)
         assert isinstance(flat, np.ndarray)
         assert flat.shape == (50, 8)
+        assert np.array_equal(flat, np.ones((50, 8)))
 
     def test_flattens_short_arrays_and_tuple_inputs(self):
         arr = np.array([[1.0, 2.0]], dtype=np.float32)
@@ -1658,6 +1751,41 @@ class TestFlattenExperiences:
         assert flat_arr.shape == (2, 1)
         assert isinstance(flat_tup, tuple)
         assert len(flat_tup) == 2
+
+    def test_flattens_tensordict_leaves(self):
+        exp = TensorDict(
+            {"a": torch.ones(5, 10, 3), "b": torch.zeros(5, 10, 2)},
+            batch_size=[5, 10],
+        )
+
+        (flattened,) = flatten_experiences(exp)
+
+        assert isinstance(flattened, TensorDict)
+        assert flattened["a"].shape == (50, 3)
+        assert flattened["b"].shape == (50, 2)
+        assert torch.equal(flattened["a"], torch.ones(50, 3))
+        assert torch.equal(flattened["b"], torch.zeros(50, 2))
+
+    def test_flatten_batch_zero_returns_independent_copy(self):
+        exp = TensorDict({"a": torch.tensor([1.0, 2.0])}, batch_size=[])
+
+        (flattened,) = flatten_experiences(exp)
+
+        assert flattened is not exp
+        flattened["a"] = torch.tensor([9.0, 8.0])
+
+        assert torch.equal(exp["a"], torch.tensor([1.0, 2.0]))
+
+    def test_flattens_single_batch_tensordict(self):
+        """A one-batch TensorDict flattens back to that batch."""
+        values = torch.arange(12, dtype=torch.float32).reshape(4, 3)
+        exp = TensorDict({"a": values}, batch_size=[4])
+
+        (flattened,) = flatten_experiences(exp)
+
+        assert isinstance(flattened, TensorDict)
+        assert flattened.batch_size == torch.Size([4])
+        assert torch.equal(flattened["a"], values)
 
 
 class TestStackAndPadExperiences:
@@ -2196,8 +2324,6 @@ def test_is_peft_model():
 
 def test_obs_to_tensor_tensordict():
     """obs_to_tensor with TensorDict."""
-    from tensordict import TensorDict
-
     td = TensorDict({"obs": torch.ones(5)}, batch_size=[])
     result = obs_to_tensor(td, "cpu")
     assert isinstance(result, TensorDict)
@@ -2478,6 +2604,8 @@ class TestConcatenateAndReshapeHelpers:
         out_tuple = algo_utils.concatenate_tensors(tuple_tensors)
         assert isinstance(out_tuple, tuple)
         assert len(out_tuple) == 2
+        assert torch.equal(out_tuple[0], torch.tensor([[1.0], [3.0]]))
+        assert torch.equal(out_tuple[1], torch.tensor([[2.0], [4.0]]))
 
     def test_reshape_from_space_handles_dict_and_tuple(self):
         d_space = spaces.Dict({"x": spaces.Box(-1, 1, shape=(2,), dtype=np.float32)})
@@ -2502,6 +2630,21 @@ class TestConcatenateAndReshapeHelpers:
         tensors = [torch.ones(2, 4), torch.zeros(3, 4)]
         result = concatenate_tensors(tensors)
         assert result.shape == (5, 4)
+        assert torch.equal(result[:2], torch.ones(2, 4))
+        assert torch.equal(result[2:], torch.zeros(3, 4))
+
+    def test_concatenate_tensors_tensordict(self):
+        result = concatenate_tensors(
+            [
+                TensorDict({"a": torch.ones(2, 3)}, batch_size=[2]),
+                TensorDict({"a": torch.zeros(3, 3)}, batch_size=[3]),
+            ]
+        )
+
+        assert isinstance(result, TensorDict)
+        assert result["a"].shape == (5, 3)
+        assert torch.equal(result["a"][:2], torch.ones(2, 3))
+        assert torch.equal(result["a"][2:], torch.zeros(3, 3))
 
     def test_reshape_from_space_squeeze(self):
         """reshape_from_space squeeze dims."""

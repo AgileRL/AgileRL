@@ -134,12 +134,18 @@ class TestToTensordict:
         assert "tuple_obs_0" in td
         assert "tuple_obs_1" in td
         assert td["tuple_obs_1"].dtype == torch.float32
+        assert torch.equal(td["tuple_obs_0"], torch.tensor([1.0, 2.0]))
+        assert torch.equal(td["tuple_obs_1"], torch.tensor(3.0))
 
     def test_to_tensordict_dict(self):
         td = to_tensordict({"a": np.array([1.0]), "b": torch.tensor([2.0])})
         assert "a" in td
         assert "b" in td
         assert td.dtype == torch.float32
+        assert td["a"].dtype == torch.float32
+        assert td["b"].dtype == torch.float32
+        assert torch.equal(td["a"], torch.tensor([1.0]))
+        assert torch.equal(td["b"], torch.tensor([2.0]))
 
     def test_to_tensordict_dict_invalid_value_raises(self):
         with pytest.raises(TypeError):
@@ -150,6 +156,13 @@ class TestToTensordict:
         td = to_tensordict({"a": np.array([1.0, 2.0])}, dtype=torch.float64)
         recast = to_tensordict(td, dtype=torch.float32)
         assert recast["a"].dtype == torch.float32
+
+    def test_to_tensordict_matching_dtype_returns_same_object(self):
+        td = to_tensordict({"a": np.array([1.0, 2.0])})
+
+        assert to_tensordict(td, dtype=torch.float32) is td
+        assert td["a"].dtype == torch.float32
+        assert torch.equal(td["a"], torch.tensor([1.0, 2.0]))
 
     def test_to_tensordict_unconvertible_type_raises(self):
         """A value that is not a TensorDict, tuple, or dict raises TypeError."""
@@ -177,6 +190,13 @@ class TestToTorchTensor:
         x = torch.tensor([1.0], dtype=torch.float64)
         t = to_torch_tensor(x)
         assert t.dtype == torch.float32
+
+    def test_to_torch_tensor_matching_dtype_returns_same_object(self):
+        x = torch.tensor([1.0], dtype=torch.float32)
+
+        assert to_torch_tensor(x, dtype=torch.float32) is x
+        assert x.dtype == torch.float32
+        assert torch.equal(x, torch.tensor([1.0]))
 
     def test_to_torch_tensor_other_converts(self):
         t = to_torch_tensor([1, 2, 3])
