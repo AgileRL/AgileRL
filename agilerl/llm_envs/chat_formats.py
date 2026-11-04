@@ -22,7 +22,7 @@ import enum
 import json
 import re
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -121,6 +121,14 @@ class ChatFormat(ABC):
         """
         return None
 
+    def format_tool_calls(self, _calls: list[dict[str, Any]], /) -> str | None:
+        """Assistant text for structured tool calls, or ``None`` when the chat template renders them.
+
+        :param _calls: The turn's ``{"name", "arguments"}`` calls.
+        :return: The turn's content, or ``None``.
+        """
+        return None
+
     def closes_turn(self, sampled_id: int, frame_id: int) -> bool:
         """Whether a turn that ended in ``sampled_id`` already holds the frame's leading ``frame_id``.
 
@@ -136,8 +144,11 @@ class ChatFormat(ABC):
         ids: dict[str, int] = {}
         for token in (*cls.REQUIRED_TOKENS, *cls.OPTIONAL_TOKENS):
             token_id = tokenizer.convert_tokens_to_ids(token)
-            # Hugging Face maps a token missing from the vocab to the unk ID.
-            if isinstance(token_id, int) and token_id != tokenizer.unk_token_id:
+            # Hugging Face maps a token missing from the vocab to the unk ID,
+            # which Granite also gives its own <|end_of_text|>.
+            if isinstance(token_id, int) and (
+                token_id != tokenizer.unk_token_id or token == tokenizer.unk_token
+            ):
                 ids[token] = token_id
         return ids
 
@@ -261,6 +272,13 @@ class Granite3Format(ChatFormat):
         except json.JSONDecodeError:
             return token_ids, [_failed(raw, span, ToolCallParseStatus.INVALID_JSON)]
         return token_ids[:tag], [_call_from_object(raw, item, span) for item in payload]
+
+    def format_tool_calls(self, calls: list[dict[str, Any]], /) -> str | None:
+        """``<|tool_call|>`` then the calls as a JSON array.
+
+        The template writes no structured ``tool_calls``; its system prompt asks for this form.
+        """
+        return self.CALL_START + json.dumps(calls)
 
 
 class Gemma4Format(ChatFormat):
@@ -393,17 +411,23 @@ class HarmonyFormat(ChatFormat):
         ids = token_ids if returned == -1 else token_ids[:returned]
         calls: list[ParsedToolCall] = []
         content_end = len(ids)
-        index = _find(ids, start_id)
+        # The generation prompt opens the first block, so its header may start at 0.
+        index = 0 if ids else -1
         while index != -1:
-            message_at = _find(ids, message_id, index + 1)
+            header_start = index + 1 if ids[index] == start_id else index
+            message_at = _find(ids, message_id, header_start)
             if message_at == -1:
                 break
+            next_start = _find(ids, start_id, header_start)
+            if next_start != -1 and next_start < message_at:
+                index = next_start
+                continue
             stops = [_find(ids, stop, message_at + 1) for stop in stop_ids]
             body_end = min((s for s in stops if s != -1), default=len(ids))
             closed = body_end < len(ids) and ids[body_end] != start_id
             next_index = body_end + 1 if closed else body_end
             match = HARMONY_RECIPIENT_RE.search(
-                self._decode(ids[index + 1 : message_at])
+                self._decode(ids[header_start:message_at])
             )
             if match and match.group(1).startswith(HARMONY_FUNCTION_PREFIX):
                 content_end = min(content_end, index)
@@ -464,6 +488,27 @@ def resolve_chat_format(
     if name is None:
         return detect_chat_format(tokenizer)
     return get_chat_format(name, tokenizer)
+
+
+def frame_repeats_terminator(
+    last_id: int,
+    frame_id: int,
+    special_ids: Collection[int],
+    chat_format: ChatFormat | None,
+) -> bool:
+    """Whether a feedback frame's first token repeats the transcript's end-of-turn token.
+
+    :param last_id: Last token of the transcript.
+    :param frame_id: First token of the feedback frame.
+    :param special_ids: The tokenizer's special-token ids.
+    :param chat_format: The model family's chat format, or ``None``.
+    :return: ``True`` when the frame's first token should be dropped.
+    """
+    if last_id not in special_ids:
+        return False
+    if chat_format is None:
+        return last_id == frame_id
+    return chat_format.closes_turn(last_id, frame_id)
 
 
 def action_text(

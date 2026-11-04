@@ -216,11 +216,9 @@ def _sft_batch():
     """Minimal collated SFT batch that satisfies is_sft_prompts."""
     ids = torch.ones(1, 4, dtype=torch.long)
     return {
-        "prompt": ["prompt"],
-        "prompt_lengths": [4],
-        "response": ["response"],
         "input_ids": ids,
         "attention_mask": ids,
+        "loss_mask": ids.bool(),
     }
 
 

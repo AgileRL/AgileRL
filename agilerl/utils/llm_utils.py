@@ -2759,7 +2759,8 @@ def sample_eval_prompts(
     Columns are resolved automatically per gym type:
 
     * :class:`SFTGym` — ``chosen`` is ``env.response_column``; ``rejected``
-      is ``None`` (SFT has no negative example).
+      is ``None`` (SFT has no negative example). A ``messages`` row gives its
+      rendered text up to the first assistant turn and that turn.
     * :class:`PreferenceGym` — ``chosen`` and ``rejected`` map to the
       dataset's ``"chosen"`` / ``"rejected"`` columns.
     * Any other gym — both are ``None``.
@@ -2780,6 +2781,16 @@ def sample_eval_prompts(
         msg = "env.test_dataloader.dataset is required"
         raise TypeError(msg)
     indices = random.Random(seed).sample(range(len(dataset)), min(n, len(dataset)))
+
+    if "messages" in getattr(dataset, "features", ()):
+        # Deferred: agilerl.llm_envs imports this module.
+        from agilerl.llm_envs.dataset_env import sft_eval_sample
+
+        tokenizer = getattr(env, "tokenizer", None)
+        if tokenizer is None:
+            msg = "env.tokenizer is required to render messages rows"
+            raise TypeError(msg)
+        return [(*sft_eval_sample(tokenizer, dataset[i]), None) for i in indices]
 
     chosen_col: str | None = None
     rejected_col: str | None = None
@@ -3626,7 +3637,7 @@ def is_preference_prompts(batch: Mapping[str, object]) -> TypeGuard[PreferencePr
 
 
 def is_sft_prompts(batch: Mapping[str, object]) -> TypeGuard[SFTPrompts]:
-    """Check whether a collated batch carries the prompt/response pair SFT needs.
+    """Check whether a collated batch carries the token ids and loss mask SFT needs.
 
     :param batch: A batch collated by an ``objective="sft"`` ``DatasetEnv``.
     :type batch: Mapping[str, object]
@@ -3634,5 +3645,5 @@ def is_sft_prompts(batch: Mapping[str, object]) -> TypeGuard[SFTPrompts]:
     :rtype: TypeGuard[SFTPrompts]
     """
     return isinstance(batch.get("input_ids"), torch.Tensor) and isinstance(
-        batch.get("response"), list
+        batch.get("loss_mask"), torch.Tensor
     )

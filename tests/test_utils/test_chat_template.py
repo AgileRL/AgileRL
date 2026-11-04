@@ -8,13 +8,17 @@ from __future__ import annotations
 from typing import ClassVar
 
 from jinja2 import Template
+from tokenizers import AddedToken
+from transformers import AutoTokenizer
 
 from agilerl.utils.chat_template import (
     DEFAULT_CHAT_TEMPLATE,
     ensure_chat_template_kwargs_injected,
     inject_chat_template_kwargs,
     resolve_chat_template_kwargs,
+    special_token_ids,
 )
+from tests import TINY_LLM_FIXTURE_PATH
 
 
 class _RecordingTokenizer:
@@ -166,3 +170,27 @@ class TestDefaultChatTemplate:
         )
 
         assert rendered == "User: hi\n\nAssistant: yo\n\nAssistant: "
+
+
+class TestSpecialTokenIds:
+    def test_counts_added_special_tokens_missing_from_all_special_ids(self) -> None:
+        # Arrange: Harmony-style turn markers are special added tokens only.
+        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+        tokenizer.add_tokens([AddedToken("<|end|>", special=True)])
+        end_id = tokenizer.convert_tokens_to_ids("<|end|>")
+
+        # Act
+        ids = special_token_ids(tokenizer)
+
+        # Assert
+        assert end_id not in tokenizer.all_special_ids
+        assert end_id in ids
+        assert set(tokenizer.all_special_ids) <= ids
+
+    def test_ordinary_added_tokens_are_not_special(self) -> None:
+        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+        tokenizer.add_tokens([AddedToken("<plain>", special=False)])
+
+        assert tokenizer.convert_tokens_to_ids("<plain>") not in special_token_ids(
+            tokenizer
+        )

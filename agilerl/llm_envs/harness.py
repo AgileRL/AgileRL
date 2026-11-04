@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import inspect
-import uuid
 import warnings
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -25,6 +24,7 @@ from agilerl.llm_envs.chat_formats import (
     ParsedToolCall,
     ToolCallParseStatus,
     action_text,
+    frame_repeats_terminator,
     resolve_chat_format,
 )
 from agilerl.llm_envs.env_sources import is_url, spec_to_factory
@@ -46,6 +46,7 @@ from agilerl.llm_envs.reasoning import reasoning_trace_text
 from agilerl.llm_envs.restart_prompt import KeptTurn, RestartPromptMixin
 from agilerl.protocols import EnvClientProtocol, TextEnvProtocol
 from agilerl.utils.algo_utils import is_str_keyed_dict
+from agilerl.utils.chat_template import feedback_frame_parts
 from agilerl.utils.env_utils import construct_entrypoint_env
 from agilerl.utils.llm_utils import max_prompt_tokens_for_model_len
 
@@ -866,15 +867,14 @@ class RolloutHarness(RestartPromptMixin):
         # The transcript keeps the sampled end-of-turn token (it is trained),
         # so drop the boundary frame's duplicate terminator when both are
         # present; a turn truncated at max_tokens still gets the frame's one.
-        if feedback_ids.shape[1] <= 1 or last_token_id not in self._special_ids():
-            return feedback_ids
-        frame_id = int(feedback_ids[0, 0])
-        closed = (
-            last_token_id == frame_id
-            if self._chat_format is None
-            else self._chat_format.closes_turn(last_token_id, frame_id)
-        )
-        return feedback_ids[:, 1:] if closed else feedback_ids
+        if feedback_ids.shape[1] > 1 and frame_repeats_terminator(
+            last_token_id,
+            int(feedback_ids[0, 0]),
+            self._special_ids(),
+            self._chat_format,
+        ):
+            return feedback_ids[:, 1:]
+        return feedback_ids
 
     def _special_ids(self) -> frozenset[int]:
         """The tokenizer's special-token id set (cached; empty when undeclared)."""
@@ -887,58 +887,19 @@ class RolloutHarness(RestartPromptMixin):
     def _feedback_boundary_parts(
         self, roles: tuple[str, ...]
     ) -> tuple[str, ...] | None:
-        """Cached frame the chat template wraps a feedback turn's messages in.
+        """Cached :func:`feedback_frame_parts` for this harness's render kwargs.
 
-        One part before each message plus a closing suffix: ``(prefix, suffix)``
-        for one message. Sliced at uuid4 placeholders (render verbatim, can't
-        collide); the dummy user message satisfies strict-alternation templates.
         ``None`` -> ChatML fallback.
 
         :param roles: Chat role of each observation message being framed.
         """
-        if roles in self._boundary_parts:
-            return self._boundary_parts[roles]
-        self._boundary_parts[roles] = None
-        assistant_ph = uuid.uuid4().hex
-        feedback_phs = [uuid.uuid4().hex for _ in roles]
-        messages = [
-            {"role": "user", "content": "."},
-            {"role": "assistant", "content": assistant_ph},
-            *(
-                {"role": role, "content": placeholder}
-                for role, placeholder in zip(roles, feedback_phs, strict=True)
-            ),
-        ]
-        chat_template_kwargs = dict(self.chat_template_kwargs)
-        if self.tools is not None:
-            chat_template_kwargs["tools"] = self.tools
-        try:
-            rendered = self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-                **chat_template_kwargs,
+        if roles not in self._boundary_parts:
+            chat_template_kwargs = dict(self.chat_template_kwargs)
+            if self.tools is not None:
+                chat_template_kwargs["tools"] = self.tools
+            self._boundary_parts[roles] = feedback_frame_parts(
+                self.tokenizer, roles, chat_template_kwargs
             )
-        except Exception:
-            return None
-        if not isinstance(rendered, str):
-            return None
-
-        cursor = rendered.rfind(assistant_ph)
-        if cursor < 0:
-            return None
-        cursor += len(assistant_ph)
-        parts: list[str] = []
-        for placeholder in feedback_phs:
-            start = rendered.find(placeholder, cursor)
-            if start < 0:
-                return None
-            parts.append(rendered[cursor:start])
-            cursor = start + len(placeholder)
-        parts.append(rendered[cursor:])
-        if not parts[0] or not parts[-1]:
-            return None
-        self._boundary_parts[roles] = tuple(parts)
         return self._boundary_parts[roles]
 
     def _chat_template_boundary_ids(
