@@ -375,13 +375,17 @@ def _routed_counts(send: torch.Tensor, exchange: TokenExchange) -> RoutedCounts:
     """
     scope = ROUTED_COUNTS_SCOPE.get()
     if scope is not None and scope.replay:
+        if scope.position >= len(scope.calls):
+            msg = "Recompute routed tokens differently from the checkpointed forward"
+            raise RuntimeError(msg)
         recorded = scope.calls[scope.position]
         scope.position += 1
-        # Checked on device, so the recompute issues no host sync.
-        torch._assert_async(
-            torch.eq(send, recorded.send).all(),
-            "Recompute routed tokens differently from the checkpointed forward",
-        )
+        # CUDA `.tolist()` is a host `_to_copy`. SAC saves those in order.
+        with _disable_current_modes():
+            send_lists = send.tolist()
+        if send_lists != recorded.send_lists:
+            msg = "Recompute routed tokens differently from the checkpointed forward"
+            raise RuntimeError(msg)
         return recorded
     # Hidden from dispatch modes: the recompute replays these counts without
     # the exchange or copy, and selective checkpointing indexes every op call.
@@ -391,9 +395,6 @@ def _routed_counts(send: torch.Tensor, exchange: TokenExchange) -> RoutedCounts:
     counts = RoutedCounts(send, received, send_lists, received_lists)
     if scope is not None:
         scope.calls.append(counts)
-        # SAC replays forward-recorded ops during recompute; run the replay
-        # assert's comparison here too so it resolves there.
-        torch._assert_async(torch.eq(send, send).all(), "unreachable")
     return counts
 
 

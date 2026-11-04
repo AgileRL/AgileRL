@@ -18,7 +18,12 @@ from torch.utils.checkpoint import CheckpointPolicy, checkpoint
 from transformers import NemotronHConfig, NemotronHForCausalLM
 
 from agilerl.distributed import FSDPConfig, init_distributed
-from agilerl.distributed.ep_forward import TokenExchange, _routed_counts
+from agilerl.distributed.ep_forward import (
+    RoutedCounts,
+    RoutedCountsScope,
+    TokenExchange,
+    _routed_counts,
+)
 from agilerl.distributed.fsdp import materialize_fsdp2_from_cpu_state
 from agilerl.distributed.fsdp_blocks import (
     _block_checkpoint_contexts,
@@ -171,6 +176,30 @@ class TestBlockCheckpointContexts:
 
         # Assert
         assert torch.equal(weight.grad, expected)
+
+
+class TestRoutedCounts:
+    @pytest.mark.usefixtures("world_size_one")
+    def test_replay_with_no_recorded_calls_raises(self) -> None:
+        # Arrange
+        exchange = TokenExchange(dist.group.WORLD, 1, 1, None, 1 << 20)
+        scope = RoutedCountsScope([], replay=True)
+
+        # Act / Assert
+        with scope, pytest.raises(RuntimeError, match="Recompute routed tokens"):
+            _routed_counts(torch.tensor([[2, 3]]), exchange)
+
+    @pytest.mark.usefixtures("world_size_one")
+    def test_replay_with_different_routing_raises(self) -> None:
+        # Arrange
+        exchange = TokenExchange(dist.group.WORLD, 1, 1, None, 1 << 20)
+        send = torch.tensor([[2, 3]])
+        recorded = RoutedCounts(send, send, [[2, 3]], [[2, 3]])
+        scope = RoutedCountsScope([recorded], replay=True)
+
+        # Act / Assert
+        with scope, pytest.raises(RuntimeError, match="Recompute routed tokens"):
+            _routed_counts(torch.tensor([[9, 9]]), exchange)
 
 
 class TestMaterializeFsdp2FromCpuStateRoutedExpertChunks:

@@ -29,21 +29,19 @@ def to_tensordict(
     :return: TensorDict, whether the data was a tuple or not.
     """
     if isinstance(data, TensorDict):
+        if data.dtype == dtype:
+            return data
         return data.to(dtype=dtype)
 
     if isinstance(data, tuple):
-        td = TensorDict()
-        for i, el in enumerate(data):
-            td[f"tuple_obs_{i}"] = to_torch_tensor(el, dtype)
-
-        return td
+        return TensorDict(
+            {f"tuple_obs_{i}": to_torch_tensor(el, dtype) for i, el in enumerate(data)}
+        )
 
     if is_str_keyed_dict(data):
-        td = TensorDict()
-        for key, value in data.items():
-            td[key] = to_torch_tensor(value, dtype)
-
-        return td
+        return TensorDict(
+            {key: to_torch_tensor(value, dtype) for key, value in data.items()}
+        )
 
     msg = f"Cannot convert data of type {type(data)} to a TensorDict."
     raise TypeError(msg)
@@ -60,11 +58,12 @@ def to_torch_tensor(
     :type dtype: torch.dtype, optional
     :return: Torch tensor.
     """
+    if isinstance(data, torch.Tensor):
+        if data.dtype == dtype:
+            return data
+        return data.to(dtype=dtype)
     if isinstance(data, (np.ndarray, Number, bool)):
         return torch.tensor(data, dtype=dtype)
-    if isinstance(data, torch.Tensor):
-        return data.to(dtype=dtype)
-    # Handle any other types by attempting to convert to tensor
     return torch.tensor(data, dtype=dtype)
 
 
