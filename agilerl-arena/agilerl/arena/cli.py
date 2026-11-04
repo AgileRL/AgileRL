@@ -35,9 +35,12 @@ from agilerl.arena.models import verdict as manifest_verdict
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.schema import manifest_schema
 from agilerl.arena.output import (
+    JSON_OUTPUT_META_KEY,
     emit_csv_preview,
+    emit_json_result,
     emit_result,
     emit_session_transcript,
+    json_output_enabled,
     select_row,
     supports_interactive_selection,
 )
@@ -53,6 +56,18 @@ ClickDecorated = TypeVar("ClickDecorated", bound=Callable[..., Any] | click.Comm
 @click.group(
     cls=ArenaRootGroup,
     add_help_option=False,
+    context_settings={"show_default": True},
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    envvar="ARENA_JSON",
+    help=(
+        "Print each result as one JSON document on stdout, with every field. "
+        "Progress, logs and errors go to stderr. Commands that stream text "
+        "(agent run/generate, sessions) stay as text."
+    ),
 )
 @click.option(
     "--api-key",
@@ -117,6 +132,7 @@ ClickDecorated = TypeVar("ClickDecorated", bound=Callable[..., Any] | click.Comm
 @click.pass_context
 def main(
     ctx: click.Context,
+    as_json: bool,
     api_key: str | None,
     org_key: str | None,
     external_user_id: str | None,
@@ -130,6 +146,7 @@ def main(
     module_catalog_public_key: str | None,
 ) -> None:
     """Arena CLI - Interact with the Arena RLOps platform directly from the command-line."""
+    ctx.meta[JSON_OUTPUT_META_KEY] = as_json
     ctx.obj = CommandConfig(
         api_key=api_key,
         org_key=org_key,
@@ -206,7 +223,7 @@ def manifest_validate(manifest: str, payload: bool, as_json: bool) -> None:
         sys.exit(manifest_verdict.EXIT_FAILED)
 
     result = manifest_verdict.verdict(document)
-    if as_json:
+    if as_json or json_output_enabled():
         click.echo(json.dumps(result))
         return
     if not result["ok"]:
@@ -214,10 +231,67 @@ def manifest_validate(manifest: str, payload: bool, as_json: bool) -> None:
             where = f"{error['path']}: " if error["path"] else ""
             click.echo(f"{where}{error['message']}", err=True)
         sys.exit(manifest_verdict.EXIT_INVALID)
+    for warning in result["warnings"]:
+        click.echo(f"warning: {warning}", err=True)
     if payload:
         click.echo(json.dumps(result["payload"], indent=2))
     else:
         click.echo(f"{manifest}: valid ({result['payload']['algorithm']['name']})")
+
+
+@manifest_group.command("template")
+@click.argument("algorithm")
+@click.option("--model", default=None, help="Catalog model id for an LLM algorithm.")
+@click.option("--dataset", default=None, help="Dataset name to fill in.")
+@click.option("--gym-env", default=None, help="Gym environment name to fill in.")
+@click.option(
+    "--gym-env-version",
+    default=None,
+    help="Gym environment version; required with --gym-env-entrypoint.",
+)
+@click.option("--gym-env-entrypoint", default=None, help="Gym entrypoint to fill in.")
+@click.option(
+    "--section",
+    type=click.Choice(
+        [
+            "algorithm",
+            "environment",
+            "mutation",
+            "network",
+            "replay_buffer",
+            "tournament_selection",
+            "training",
+        ]
+    ),
+    default=None,
+    help="Print one section instead of the whole manifest.",
+)
+@click.pass_obj
+def manifest_template(
+    config: CommandConfig,
+    algorithm: str,
+    model: str | None,
+    dataset: str | None,
+    gym_env: str | None,
+    gym_env_version: str | None,
+    gym_env_entrypoint: str | None,
+    section: str | None,
+) -> None:
+    """Print Arena's default manifest for ALGORITHM as YAML, ready to edit."""
+    with arena_client(config) as client:
+        spec = client.get_default_run_spec(
+            algorithm,
+            gym_env=gym_env,
+            gym_env_version=gym_env_version,
+            gym_env_entrypoint=gym_env_entrypoint,
+            dataset_name=dataset,
+            field=section,
+            pretrained_model_name_or_path=model,
+        )
+    if json_output_enabled():
+        emit_json_result(spec)
+    else:
+        click.echo(yaml.safe_dump(spec, sort_keys=False), nl=False)
 
 
 @manifest_group.command("schema")
@@ -239,6 +313,9 @@ def user_profile(
     """Get current authenticated user profile."""
     with arena_client(config) as client:
         user = client.get_current_user()
+        if json_output_enabled():
+            emit_json_result(user)
+            return
         click.echo(f"User: {user.get('first_name', '')} {user.get('last_name', '')}")
         click.echo(f"Email: {user.get('email', '')}")
 
@@ -266,19 +343,21 @@ def resources_list(config: CommandConfig) -> None:
         data = client.list_resources()
         tiers = data.get("tiers", {})
         sorted_tiers = sorted(tiers.values(), key=lambda t: t["price_per_node_hour"])
-        rows = [
-            {
-                "Resource ID": tier["name"],
-                "GPUs": f"{tier['num_gpus']}x {tier['gpu_type']}"
-                if tier.get("gpu_type")
-                else "—",
-                "CPUs": tier["num_cpus"],
-                "RAM (GB)": tier["ram_gb"],
-                "credits/node-hour": f"{tier['price_per_node_hour']:.2f}",
-            }
-            for tier in sorted_tiers
-        ]
-        emit_result(rows)
+        emit_result(
+            sorted_tiers,
+            display=lambda tiers: [
+                {
+                    "Resource ID": tier["name"],
+                    "GPUs": f"{tier['num_gpus']}x {tier['gpu_type']}"
+                    if tier.get("gpu_type")
+                    else "—",
+                    "CPUs": tier["num_cpus"],
+                    "RAM (GB)": tier["ram_gb"],
+                    "credits/node-hour": f"{tier['price_per_node_hour']:.2f}",
+                }
+                for tier in tiers
+            ],
+        )
 
 
 @main.group("env")
@@ -397,7 +476,7 @@ def env_validate(
     inferred from --source.
     """
     with arena_client(config) as client:
-        client.validate_environment(
+        result = client.validate_environment(
             name=name,
             version=version,
             source=source,
@@ -409,6 +488,7 @@ def env_validate(
             language_based=language_based,
             do_rollouts=do_rollouts,
         )
+    emit_json_result(result)
 
 
 _PROFILE_METRIC_LABELS: dict[str, str] = {
@@ -630,9 +710,13 @@ def models_group() -> None:
 @models_group.command("list")
 @click.pass_obj
 def models_list(config: CommandConfig) -> None:
-    """List HuggingFace models in the Arena catalog."""
+    """List HuggingFace models in the Arena catalog.
+
+    LoRA modules and ranks for one model: ``arena models info MODEL_NAME``.
+    """
     with arena_client(config) as client:
-        emit_result(client.list_models())
+        rows = client.list_models()
+    emit_result(rows, display=lambda rows: [_model_summary_row(row) for row in rows])
 
 
 @models_group.command("supported")
@@ -718,7 +802,7 @@ def experiment_submit(
 ) -> None:
     """Submit an experiment from a manifest."""
     with arena_client(config) as client:
-        client.submit_experiment(
+        result = client.submit_experiment(
             manifest=manifest,
             resource_id=resource_id,
             num_nodes=num_nodes,
@@ -727,6 +811,7 @@ def experiment_submit(
             reward_file=reward_file,
             completion=completion,
         )
+    emit_json_result(result)
 
 
 @experiment.command("list")
@@ -739,7 +824,13 @@ def experiment_submit(
 def experiment_list(config: CommandConfig, project: str | None) -> None:
     """List experiments in a project."""
     with arena_client(config) as client:
-        emit_result(client.list_experiments(project=project))
+        rows = client.list_experiments(project=project)
+    emit_result(
+        rows,
+        empty_message=(
+            "No experiments yet. Submit one with: arena experiments submit <manifest>"
+        ),
+    )
 
 
 @experiment.command("resume")
@@ -787,7 +878,11 @@ def experiment_checkpoints(
     """List checkpoints for an experiment."""
     with arena_client(config) as client:
         rows = client.list_checkpoints(experiment_name=experiment_name)
-        emit_result(_format_checkpoint_rows_for_display(rows))
+    emit_result(
+        rows,
+        display=_format_checkpoint_rows_for_display,
+        empty_message=f"No checkpoints for {experiment_name}.",
+    )
 
 
 @experiment.command("metrics")
@@ -856,6 +951,19 @@ def _redact_agent_rows_for_display(
             copy_row["spec"] = spec_copy
         out.append(copy_row)
     return out
+
+
+def _model_summary_row(row: dict[str, Any]) -> dict[str, Any]:
+    """One catalog row reduced to the columns that fit a terminal table."""
+    num_params = row.get("num_params")
+    return {
+        "model": row["model_name"],
+        "params": f"{num_params / 1e9:.2f}B" if num_params else "—",
+        "max_context": row.get("max_context_length") or "—",
+        "status": "disabled"
+        if row.get("enabled") is False
+        else row.get("status") or "—",
+    }
 
 
 def _format_checkpoint_rows_for_display(
@@ -977,7 +1085,15 @@ def agent_list(
             experiment_name=experiment_name,
             project_name=project_name,
         )
-        emit_result(_redact_agent_rows_for_display(rows))
+    filtered = name or experiment_name or project_name
+    emit_result(
+        _redact_agent_rows_for_display(rows),
+        empty_message=(
+            "No deployed agents match those filters."
+            if filtered
+            else "No deployed agents. Deploy one with: arena agent deploy <experiment>"
+        ),
+    )
 
 
 @agent_cli.command("deploy")
@@ -1008,11 +1124,12 @@ def agent_deploy(
     only takes effect on the first deploy.
     """
     with arena_client(config) as client:
-        client.deploy_agent(
+        result = client.deploy_agent(
             experiment_name=experiment_name,
             checkpoint=checkpoint,
             memory_scope=memory_scope,
         )
+    emit_json_result(result)
 
 
 @agent_cli.command("run")
@@ -1151,12 +1268,10 @@ def agent_sessions_list(
             }
             for session in agent.list_sessions()
         ]
-        if not rows:
-            console.print(f"No chat sessions on {deployment} yet.")
-            return
         emit_result(
             rows,
             columns=["Current", *SESSION_COLUMNS],
+            empty_message=f"No chat sessions on {deployment} yet.",
         )
 
 
@@ -1388,7 +1503,9 @@ def projects_get_default(config: CommandConfig) -> None:
     """Show the current default project."""
     with arena_client(config) as client:
         project = client.get_default_project()
-    if project:
+    if json_output_enabled():
+        emit_json_result({"project": project})
+    elif project:
         click.echo(project)
     else:
         click.echo("No default project set. Use 'arena projects set-default <name>'.")

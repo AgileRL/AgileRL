@@ -278,6 +278,15 @@ class ModelInfo(BaseModel):
 
     @computed_field
     @property
+    def status_notice(self) -> str | None:
+        """What a user of this model should know about its release status."""
+        if self.status == STATUS_PREVIEW:
+            return f"Model {self.hub_id} is in preview and cannot be submitted yet."
+        if self.status == STATUS_DEPRECATED:
+            return f"Model {self.hub_id} is deprecated and will be removed."
+        return None
+
+    @property
     def num_params(self) -> int | None:
         """Total parameters; None when the config cannot be built offline."""
         return self.inspected["num_params"]

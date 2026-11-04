@@ -68,6 +68,8 @@ from agilerl.arena.memory.specs import (
 )
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
 from agilerl.arena.models.manifest import TrainingManifest
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
+from agilerl.arena.output import json_output_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +80,9 @@ EXIT_USAGE = 2
 # Multi-token-prediction heads some checkpoints ship (Nemotron 3.5); the
 # trainer does not load them.
 MTP_TENSOR_PREFIX = "mtp."
+
+
+PACKED_TENSOR_DTYPES = frozenset({"U8", "I8"})
 
 
 def checkpoint_param_count(model_id: str, arch: ModelArch) -> int | None:
@@ -91,17 +96,14 @@ def checkpoint_param_count(model_id: str, arch: ModelArch) -> int | None:
     try:
         # Optional hub extra.
         from huggingface_hub import get_safetensors_metadata
-        from huggingface_hub.errors import (
-            NotASafetensorsRepoError,
-            SafetensorsParsingError,
-        )
     except ImportError:
         return None
 
     try:
         metadata = get_safetensors_metadata(model_id)
-    except (OSError, NotASafetensorsRepoError, SafetensorsParsingError) as err:
-        # An expired HF token or a gated repo also lands here.
+    except Exception as err:
+        # Best effort: connection error types depend on the hub version's HTTP
+        # client. An expired HF token or a gated repo also lands here.
         logger.warning(
             "Could not read %s's safetensors metadata (%s); using the analytic "
             "parameter count. Check HF_TOKEN if the repo is gated.",
@@ -109,12 +111,16 @@ def checkpoint_param_count(model_id: str, arch: ModelArch) -> int | None:
             err,
         )
         return None
-    total = sum(
-        tensor.parameter_count
+    tensors = [
+        tensor
         for file in metadata.files_metadata.values()
         for name, tensor in file.tensors.items()
         if not name.startswith(MTP_TENSOR_PREFIX)
-    )
+    ]
+    # Packed weights (gpt-oss's MXFP4 experts) count bytes, not parameters.
+    if any(tensor.dtype in PACKED_TENSOR_DTYPES for tensor in tensors):
+        return None
+    total = sum(tensor.parameter_count for tensor in tensors)
     if not total:
         return None
     if arch.tied_embeddings and "lm_head.weight" in metadata.weight_map:
@@ -122,8 +128,16 @@ def checkpoint_param_count(model_id: str, arch: ModelArch) -> int | None:
     return int(total)
 
 
+def _catalog_or_checkpoint_param_count(model_id: str, arch: ModelArch) -> int | None:
+    """The catalog's resident parameter count, or the Hub's when the catalog has none."""
+    info = SUPPORTED_MODEL_INFO.get(model_id)
+    if info is not None and info.num_params is not None:
+        return info.num_params
+    return checkpoint_param_count(model_id, arch)
+
+
 def _load_model_config(model_id: str, config_path: str | None) -> dict[str, Any]:
-    """The checkpoint's raw ``config.json``: ``--config``, a local checkpoint, or the Hub.
+    """The checkpoint's raw ``config.json``: ``--config``, a local checkpoint, the catalog, or the Hub.
 
     The estimator reads raw keys; transformers' ``NemotronHConfig.to_dict()``
     omits ``num_hidden_layers``, which it derives from ``layers_block_type``.
@@ -133,6 +147,9 @@ def _load_model_config(model_id: str, config_path: str | None) -> dict[str, Any]
     local = Path(model_id) / "config.json"
     if local.is_file():
         return json.loads(local.read_text())
+    info = SUPPORTED_MODEL_INFO.get(model_id)
+    if info is not None:
+        return info.config
     try:
         # Optional ``hub`` extra.
         from huggingface_hub import hf_hub_download
@@ -298,7 +315,9 @@ def _model_spec_from_checkpoint(
     model_config = _load_model_config(model_id, config_path)
     arch = ModelArch.from_hf_config(model_config)
     n_params = (
-        None if config_path is not None else checkpoint_param_count(model_id, arch)
+        None
+        if config_path is not None
+        else _catalog_or_checkpoint_param_count(model_id, arch)
     )
     return model_config, ModelSpec(model_id=model_id, arch=arch, n_params=n_params)
 
@@ -465,7 +484,7 @@ def memory_estimate(
             gen_device_gb=gen_device_gb,
             num_gpus=num_gpus,
             config_path=config_path,
-            as_json=as_json,
+            as_json=as_json or json_output_enabled(),
             no_color=no_color,
         )
     )

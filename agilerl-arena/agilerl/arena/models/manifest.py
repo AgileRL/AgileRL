@@ -61,7 +61,7 @@ from agilerl.arena.models.networks import (
     network_arch_is_resolvable,
     normalize_manifest_network,
 )
-from agilerl.arena.models.registry import MANIFEST_REGISTRY
+from agilerl.arena.models.registry import MANIFEST_REGISTRY, did_you_mean
 from agilerl.arena.models.training import (
     BufferSpec,
     LLMRolloutBufferSpec,
@@ -198,6 +198,11 @@ class DeferredNetworkSpec(BaseModel):
     )
 
 
+def _registered_algorithms() -> str:
+    """The sentence listing every registered algorithm once."""
+    return f"Registered: {', '.join(MANIFEST_REGISTRY.alias_groups())}."
+
+
 def _resolve_algorithm(data: object) -> object:
     """Dispatch the algorithm section to its registered spec class via ``name``."""
     if isinstance(data, BaseModel):
@@ -214,7 +219,7 @@ def _resolve_algorithm(data: object) -> object:
     if name is None:
         msg = (
             "The algorithm section must include a 'name' field naming a registered "
-            f"algorithm. Registered: {', '.join(MANIFEST_REGISTRY.names())}."
+            f"algorithm. {_registered_algorithms()}"
         )
         raise ValueError(msg)
     try:
@@ -223,8 +228,9 @@ def _resolve_algorithm(data: object) -> object:
         # Surface an unknown name as a validation error like any other bad
         # field, rather than a KeyError a caller cannot tell from a crash.
         msg = (
-            f"'name' is not a registered algorithm: {name!r}. "
-            f"Registered: {', '.join(MANIFEST_REGISTRY.names())}."
+            f"'name' is not a registered algorithm: {name!r}."
+            f"{did_you_mean(str(name), MANIFEST_REGISTRY.names())} "
+            f"{_registered_algorithms()}"
         )
         raise ValueError(msg) from err
 
