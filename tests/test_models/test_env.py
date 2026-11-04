@@ -659,7 +659,7 @@ class TestLLMEnvSpec:
             factory()
 
         mock_get_rubric_factory.assert_called_once_with(
-            rubric_name="reward_fn", file_path="reward.py"
+            rubric_name="reward_fn", file_path="reward.py", judge_spec=None
         )
         mock_conv_tmpl.assert_called_once()
         mock_rollout_cls.from_dataset.assert_called_once()
@@ -1411,6 +1411,39 @@ class TestLLMEnvSpecRollout:
 
         assert spec.rubric_file_path == "r.py"
         assert spec.rubric_name == "reward_fn"
+
+    def test_judge_parses_with_defaults(self):
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            entrypoint="my_mod:make",
+            rubric_file_path="r.py",
+            judge={"model": "gpt-4.1-mini", "api_key_env": "OPENAI_API_KEY"},
+            max_turns=5,
+        )
+
+        assert spec.judge is not None
+        assert spec.judge.provider == "openai"
+        assert spec.judge.api_key_env == "OPENAI_API_KEY"
+        assert spec.judge.max_concurrency == 16
+
+    def test_judge_requires_a_rubric_file(self):
+        with pytest.raises(ValueError, match="set rubric_file_path"):
+            LLMEnvSpec(
+                env_type=LLMEnvType.ROLLOUT,
+                entrypoint="my_mod:make",
+                judge={"model": "gpt-4.1-mini", "api_key_env": "OPENAI_API_KEY"},
+                max_turns=5,
+            )
+
+    def test_judge_api_key_env_is_a_variable_name(self):
+        with pytest.raises(ValueError, match="api_key_env"):
+            LLMEnvSpec(
+                env_type=LLMEnvType.ROLLOUT,
+                entrypoint="my_mod:make",
+                rubric_file_path="r.py",
+                judge={"model": "m", "api_key_env": "sk-live 123"},
+                max_turns=5,
+            )
 
     def test_entrypoint_factory_gives_each_harness_its_own_rubric(self, tmp_path):
         # Arrange

@@ -231,17 +231,18 @@ class RolloutCollector:
     def get_rubric_score_means(self) -> dict[str, float]:
         """Mean per-episode component sums over the frozen component key set.
 
-        A component missing from every episode reports ``nan`` rather than ``0``,
-        so a never-scored criterion is not logged as a zero reward.
+        An episode a container's short-circuit kept from a component counts as 0
+        for it. A component missing from every episode reports ``nan`` rather than
+        ``0``, so a never-scored criterion is not logged as a zero reward.
         """
         means: dict[str, float] = {}
         for name in self.rubric_component_names:
-            values = [
-                env.rubric_score_sums[name]
-                for env in self._window_envs()
-                if name in env.rubric_score_sums
-            ]
-            means[name] = sum(values) / len(values) if values else float("nan")
+            scored = [env for env in self._window_envs() if env.rubric_score_sums]
+            if any(name in env.rubric_score_sums for env in scored):
+                total = sum(env.rubric_score_sums.get(name, 0.0) for env in scored)
+                means[name] = total / len(scored)
+            else:
+                means[name] = float("nan")
         return means
 
     def step(
@@ -298,8 +299,22 @@ class RolloutCollector:
             envs=active,
         )
         # Phase 3 (sequential — tokenizer): apply each result to its own env.
-        for env, result in zip(active, results, strict=False):
+        steps = [
             env._step_apply(result)
+            for env, result in zip(active, results, strict=False)
+        ]
+        # Phase 4 (concurrent, not bound by io_timeout_s): rubrics score the turns.
+        unscored = [
+            (env, step, turn)
+            for env, step in zip(active, steps, strict=False)
+            if (turn := env._take_unscored_turn()) is not None
+        ]
+        if unscored:
+            scores = self.io_executor.map(
+                lambda item: item[0]._score_turn(item[2]), unscored
+            )
+            for (env, step, _turn), final in zip(unscored, scores, strict=True):
+                env._apply_turn_score(step, final)
         return self._get_prompts()
 
     def _replace_timed_out_slots(self, hung: list[RolloutHarness]) -> None:
@@ -785,8 +800,8 @@ class RolloutCollector:
     ) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
         """Advance one episode a turn: decode, round-trip its env, apply the result.
 
-        Thread-safe; only the env round-trip runs outside the tokenizer lock, so
-        interleaved episodes overlap on I/O and stay serial on tokenizer work.
+        Thread-safe; only the env round-trip and rubric scoring run outside the
+        tokenizer lock, so interleaved episodes overlap on I/O and stay serial on tokenizer work.
 
         :param episode_id: The episode to step (from a prior :meth:`reset_episode`).
         :param token_ids: This turn's ``prompt + generation`` tensor.
@@ -810,7 +825,14 @@ class RolloutCollector:
         env_result = env._step_env(gen_text)
         with self._tokenizer_lock:
             self._require_current(episode_id, slot, activation)
-            return env._step_apply(env_result)
+            step = env._step_apply(env_result)
+            turn = env._take_unscored_turn()
+        if turn is None:
+            return step
+        final = env._score_turn(turn)
+        with self._tokenizer_lock:
+            self._require_current(episode_id, slot, activation)
+            return env._apply_turn_score(step, final)
 
     def episode_image_calls(self, episode_id: str) -> list[ImageProcessorCall]:
         """Processor calls behind one active episode's ``pixel_values``.

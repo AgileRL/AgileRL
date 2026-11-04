@@ -177,12 +177,8 @@ class TestEnvReward:
         assert observation.metadata["rubric_scores"] == {"env": 0.75}
 
 
-def test_register_component_hooks_none_and_empty_name() -> None:
-    assert register_component_hooks(None) == ()
-
+def test_register_component_hooks_names_a_bare_leaf_from_its_class() -> None:
     class _OddName(Rubric):
-        component_name = 123  # non-str forces the snake_case fallback
-
         def forward(self, action, observation) -> float:
             del action, observation
             return 1.0
@@ -190,18 +186,8 @@ def test_register_component_hooks_none_and_empty_name() -> None:
     assert register_component_hooks(_OddName()) == ("odd_name",)
 
 
-def test_register_component_hooks_is_idempotent_on_a_shared_rubric() -> None:
-    """A rubric shared by N envs gets one hook per leaf, not N."""
-    rubric = reward_fn_to_rubric(lambda completion, answer, question: 1.0, "acc")
-
-    names = [register_component_hooks(rubric) for _ in range(5)]
-
-    assert names == [("acc",)] * 5
-    assert len(rubric._forward_hooks) == 1
-
-
 def test_shared_rubric_scores_each_observation_once() -> None:
-    """The single hook still stamps every observation it is handed."""
+    """Repeat registration still stamps each observation's one score."""
     rubric = reward_fn_to_rubric(lambda completion, answer, question: 0.5, "acc")
     for _ in range(3):
         register_component_hooks(rubric)

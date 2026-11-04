@@ -9,7 +9,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from agilerl.arena.models.env import JudgeSpec
+from agilerl.llm_envs import judge as judge_module
 from agilerl.utils import env_utils
+
+LOCAL_JUDGE = JudgeSpec(model="m", base_url="http://judge:8000")
 
 
 class TestEscapeNonFormatBraces:
@@ -113,12 +117,61 @@ class TestGetRubricFactory:
         first.last_score = 1.0
         assert second.last_score is None
 
+    def test_a_judge_is_handed_to_the_rubric_class(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(judge_module, "JUDGE_CLIENTS", {})
+        rubric_file = tmp_path / "judged.py"
+        rubric_file.write_text(
+            "from openenv.core.rubrics.base import Rubric\n"
+            "class Judged(Rubric):\n"
+            "    def __init__(self, judge):\n"
+            "        super().__init__()\n"
+            "        self.judge = judge\n"
+            "    def forward(self, action, observation):\n"
+            "        return 1.0\n",
+            encoding="utf-8",
+        )
 
-class TestGetRubric:
+        factory = env_utils.get_rubric_factory("Judged", str(rubric_file), LOCAL_JUDGE)
+
+        first, second = factory(), factory()
+        assert first is not second
+        assert first.judge is judge_module.JUDGE_CLIENTS[LOCAL_JUDGE]
+        assert second.judge is first.judge
+
+    def test_an_uncopyable_rubric_instance_raises_at_load(self, tmp_path):
+        rubric_file = tmp_path / "held.py"
+        rubric_file.write_text(
+            "import threading\n"
+            "from openenv.core.rubrics.base import Rubric\n"
+            "class Held(Rubric):\n"
+            "    def __init__(self):\n"
+            "        super().__init__()\n"
+            "        self.lock = threading.Lock()\n"
+            "    def forward(self, action, observation):\n"
+            "        return 1.0\n"
+            "RUBRIC = Held()\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(TypeError, match="cannot be copied"):
+            env_utils.get_rubric_factory("RUBRIC", str(rubric_file))
+
+    def test_a_judge_with_a_reward_callable_raises(self, tmp_path):
+        rubric_file = tmp_path / "reward.py"
+        rubric_file.write_text(
+            "def reward(completion, answer, question):\n    return 1.0\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(TypeError, match="__init__ takes judge"):
+            env_utils.get_rubric_factory("reward", str(rubric_file), LOCAL_JUDGE)
+
+
+class TestGetRubricFactoryLoading:
     def test_missing_file_raises(self, tmp_path):
         missing = tmp_path / "missing.py"
         with pytest.raises(ValueError, match="not found"):
-            env_utils.get_rubric("rubric", str(missing))
+            env_utils.get_rubric_factory("rubric", str(missing))()
 
     def test_import_error_wrapped(self, tmp_path):
         bad_file = tmp_path / "bad.py"
@@ -126,7 +179,7 @@ class TestGetRubric:
             "raise RuntimeError('intentional import failure')\n", encoding="utf-8"
         )
         with pytest.raises(ValueError, match="Error importing rubric"):
-            env_utils.get_rubric("rubric", str(bad_file))
+            env_utils.get_rubric_factory("rubric", str(bad_file))()
 
     def test_spec_none_raises(self, tmp_path):
         rubric_file = tmp_path / "rubric.py"
@@ -135,8 +188,8 @@ class TestGetRubric:
             "agilerl.utils.env_utils.importlib_util.spec_from_file_location",
             return_value=None,
         ):
-            with pytest.raises(ValueError, match="Could not create spec"):
-                env_utils.get_rubric("rubric", str(rubric_file))
+            with pytest.raises(ValueError, match="Could not load module"):
+                env_utils.get_rubric_factory("rubric", str(rubric_file))()
 
     def test_loads_rubric_instance(self, tmp_path):
         rubric_file = tmp_path / "rubric.py"
@@ -146,7 +199,7 @@ class TestGetRubric:
             "RUBRIC = reward_fn_to_rubric(my_reward)\n",
             encoding="utf-8",
         )
-        rubric = env_utils.get_rubric("RUBRIC", str(rubric_file))
+        rubric = env_utils.get_rubric_factory("RUBRIC", str(rubric_file))()
         from openenv.core.rubrics.base import Rubric
 
         assert isinstance(rubric, Rubric)
@@ -160,7 +213,7 @@ class TestGetRubric:
             "        return 1.0\n",
             encoding="utf-8",
         )
-        rubric = env_utils.get_rubric("MyRubric", str(rubric_file))
+        rubric = env_utils.get_rubric_factory("MyRubric", str(rubric_file))()
         from openenv.core.rubrics.base import Rubric
 
         assert isinstance(rubric, Rubric)
@@ -174,7 +227,7 @@ class TestGetRubric:
             "    return 1.0 if completion else 0.0\n",
             encoding="utf-8",
         )
-        rubric = env_utils.get_rubric("combined_rewards", str(reward_file))
+        rubric = env_utils.get_rubric_factory("combined_rewards", str(reward_file))()
         from openenv.core.rubrics.base import Rubric
 
         from agilerl.llm_envs.rubrics import RewardFnRubric
@@ -203,7 +256,7 @@ class TestGetRubric:
             ")\n",
             encoding="utf-8",
         )
-        rubric = env_utils.get_rubric("reward", str(reward_file))
+        rubric = env_utils.get_rubric_factory("reward", str(reward_file))()
         from openenv.core.rubrics import WeightedSum
 
         from agilerl.llm_envs.rubrics import RewardFnRubric
@@ -216,7 +269,7 @@ class TestGetRubric:
         rubric_file = tmp_path / "not_rubric.py"
         rubric_file.write_text("NOT_A_RUBRIC = 42\n", encoding="utf-8")
         with pytest.raises(TypeError, match="must be a Rubric"):
-            env_utils.get_rubric("NOT_A_RUBRIC", str(rubric_file))
+            env_utils.get_rubric_factory("NOT_A_RUBRIC", str(rubric_file))()
 
     def test_spec_without_loader_raises(self, tmp_path):
         reward_file = tmp_path / "reward.py"
@@ -225,7 +278,7 @@ class TestGetRubric:
             "agilerl.utils.env_utils.importlib_util.spec_from_file_location",
             return_value=MagicMock(loader=None),
         ):
-            with pytest.raises(ValueError, match="Could not create spec"):
+            with pytest.raises(ValueError, match="Could not load module"):
                 env_utils.get_rubric_factory("reward", str(reward_file))
 
 
