@@ -600,6 +600,20 @@ class TestSampleEvalPrompts:
         assert {rows[0][0], rows[1][0]} == {"p0", "p1"}
         assert all(r[2] is None for r in rows)
 
+    def test_sample_eval_prompts_preference_env_with_default_response_column(self):
+        """A preference ``DatasetEnv`` carries the default ``response_column`` too."""
+        from types import SimpleNamespace
+
+        ds = Datasets.from_dict(
+            {"prompt": ["p0"], "chosen": ["c0"], "rejected": ["x0"]},
+        )
+        env = SimpleNamespace(
+            response_column="response",
+            test_dataloader=SimpleNamespace(dataset=ds),
+        )
+
+        assert sample_eval_prompts(env, n=1, seed=0) == [("p0", "c0", "x0")]
+
     def test_sample_eval_prompts_messages_rows_without_prompt_columns(self):
         """A ``messages`` row samples its rendered context and first assistant turn."""
         from types import SimpleNamespace

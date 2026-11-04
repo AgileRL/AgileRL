@@ -1,11 +1,12 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Sampled prompt / completion / reward records from LLM rollout batches.
+"""Sampled prompt / completion records from LLM training.
 
-Records are decoded from the trainer's token tensors, so any loop holding
-``token_ids``, ``action_masks`` and ``rewards`` can log them. Writers decide
-where records go; a ring buffer keeps the latest ones for a failure dump.
+Rollout records are decoded from the trainer's token tensors, so any loop holding
+``token_ids``, ``action_masks`` and ``rewards`` can log them. Dataset records pair
+held-out rows with completions generated elsewhere. Writers decide where records
+go; a ring buffer keeps the latest ones for a failure dump.
 """
 
 from __future__ import annotations
@@ -23,8 +24,15 @@ from typing import TYPE_CHECKING
 import torch
 import wandb
 
+from agilerl.llm_envs.chat_formats import detect_chat_format
+from agilerl.llm_envs.dataset_env import encode_sft_row
+from agilerl.utils.chat_template import inject_chat_template_kwargs
+from agilerl.utils.llm_utils import sample_eval_prompts
+
 if TYPE_CHECKING:
     from transformers.tokenization_utils_base import PreTrainedTokenizerBase
+
+    from agilerl.llm_envs import DatasetEnv
 
 __all__ = [
     "CompletionLogger",
@@ -32,9 +40,12 @@ __all__ = [
     "CompletionRecord",
     "CompletionWriter",
     "ConsoleCompletionWriter",
+    "DatasetPrompt",
     "JsonlCompletionWriter",
     "WandbCompletionWriter",
     "build_completion_record",
+    "dataset_completion_record",
+    "select_dataset_prompts",
     "truncate_middle",
 ]
 
@@ -77,30 +88,52 @@ class CompletionRecord:
     """One sampled trajectory: its prompt, completion and episode reward.
 
     ``completion`` runs from the first policy token to the end of the episode,
-    so a multi-turn record includes the env's feedback turns.
+    so a multi-turn record includes the env's feedback turns. A dataset record has
+    no ``reward``; it carries the row's ``reference`` and, for DPO, ``rejected``.
+    ``base_model`` marks a completion from the model without the trained adapter.
     """
 
     step: int
     agent_index: int
     group_index: int
     sample_index: int
-    reward: float
+    reward: float | None
     num_turns: int
     completion_tokens: int
     prompt: str
     completion: str
+    reference: str | None = None
+    rejected: str | None = None
+    base_model: bool = False
 
     def render(self) -> str:
-        """Readable header line, prompt and completion."""
+        """Readable header line, prompt, completion and any dataset answers."""
+        reward = "n/a" if self.reward is None else f"{self.reward:.4g}"
         header = (
             f"step {self.step} | agent {self.agent_index} | group {self.group_index} "
-            f"| sample {self.sample_index} | reward {self.reward:.4g} "
+            f"| sample {self.sample_index} | reward {reward} "
             f"| turns {self.num_turns} | completion tokens {self.completion_tokens}"
         )
-        return (
+        rendered = (
             f"{header}\n--- prompt ---\n{self.prompt}\n"
-            f"--- completion ---\n{self.completion}"
+            f"--- {'base model completion' if self.base_model else 'completion'} ---\n"
+            f"{self.completion}"
         )
+        if self.reference is not None:
+            rendered += f"\n--- reference ---\n{self.reference}"
+        if self.rejected is not None:
+            rendered += f"\n--- rejected ---\n{self.rejected}"
+        return rendered
+
+
+@dataclass(frozen=True)
+class DatasetPrompt:
+    """One held-out row a dataset algorithm's completion is generated for."""
+
+    prompt_ids: list[int]
+    prompt: str
+    reference: str | None
+    rejected: str | None
 
 
 def truncate_middle(text: str, max_chars: int) -> str:
@@ -113,9 +146,13 @@ def truncate_middle(text: str, max_chars: int) -> str:
     return f"{text[:head]}\n<LOG TRUNCATED: {dropped} chars>\n{text[-tail:]}"
 
 
-def _decode_str(tokenizer: PreTrainedTokenizerBase, token_ids: list[int]) -> str:
+def _decode_str(
+    tokenizer: PreTrainedTokenizerBase,
+    token_ids: list[int],
+    skip_special_tokens: bool = True,
+) -> str:
     """Decode one flat id sequence to a string."""
-    decoded = tokenizer.decode(token_ids, skip_special_tokens=True)
+    decoded = tokenizer.decode(token_ids, skip_special_tokens=skip_special_tokens)
     if not isinstance(decoded, str):
         msg = "tokenizer.decode must return a string"
         raise TypeError(msg)
@@ -168,6 +205,124 @@ def build_completion_record(
         completion_tokens=int(mask.sum()),
         prompt=truncate_middle(prompt, max_chars),
         completion=truncate_middle(completion, max_chars),
+    )
+
+
+def select_dataset_prompts(
+    env: DatasetEnv,
+    num_prompts: int,
+    max_prompt_tokens: int,
+    seed: int = 0,
+) -> list[DatasetPrompt]:
+    """Pick held-out rows short enough to leave room for a completion.
+
+    :param env: Dataset env with the held-out split.
+    :param num_prompts: Most rows to return.
+    :param max_prompt_tokens: Longest prompt to keep, in tokens.
+    :param seed: Seed for the row sample.
+    :return: The selected rows; fewer than ``num_prompts`` when too few fit.
+    """
+    dataset = env.test_dataset
+    # Preference rows keep the raw prompt tokens. SFT uses the transcript prefix.
+    if "chosen" not in dataset.column_names:
+        return _select_sft_prompts(env, num_prompts, max_prompt_tokens, seed)
+    selected: list[DatasetPrompt] = []
+    for prompt, chosen, rejected in sample_eval_prompts(
+        env, n=4 * num_prompts, seed=seed
+    ):
+        prompt_ids = env.tokenizer(prompt)["input_ids"]
+        if len(prompt_ids) <= max_prompt_tokens:
+            selected.append(DatasetPrompt(prompt_ids, prompt, chosen, rejected))
+    return selected[:num_prompts]
+
+
+def _select_sft_prompts(
+    env: DatasetEnv,
+    num_prompts: int,
+    max_prompt_tokens: int,
+    seed: int,
+) -> list[DatasetPrompt]:
+    """Held-out SFT rows, with prompt ids taken from the training transcript."""
+    dataset = env.test_dataset
+    sample_size = min(4 * num_prompts, len(dataset))
+    indices = random.Random(seed).sample(range(len(dataset)), sample_size)
+    tokenizer = inject_chat_template_kwargs(env.tokenizer, env.chat_template_kwargs)
+    chat_format = detect_chat_format(tokenizer)
+    selected: list[DatasetPrompt] = []
+    for index in indices:
+        item = dataset[index]
+        ids, mask = encode_sft_row(tokenizer, item, env.response_column, chat_format)
+        prompt_len = mask.index(True)
+        if prompt_len > max_prompt_tokens:
+            continue
+        prompt_ids = ids[:prompt_len]
+        selected.append(
+            DatasetPrompt(
+                prompt_ids,
+                _decode_str(tokenizer, prompt_ids, skip_special_tokens=False),
+                _sft_reference(tokenizer, item, ids, mask, env.response_column),
+                None,
+            )
+        )
+    return selected[:num_prompts]
+
+
+def _sft_reference(
+    tokenizer: PreTrainedTokenizerBase,
+    item: dict[str, str | list[dict[str, str]] | None],
+    ids: list[int],
+    mask: list[bool],
+    response_column: str,
+) -> str:
+    """The row's reference: its response text, or the first assistant turn."""
+    if "messages" not in item:
+        reference = item[response_column]
+        if isinstance(reference, str):
+            return reference
+    start = mask.index(True)
+    end = next((pos for pos in range(start, len(mask)) if not mask[pos]), len(mask))
+    return _decode_str(tokenizer, ids[start:end])
+
+
+def dataset_completion_record(
+    row: DatasetPrompt,
+    completion: str,
+    completion_tokens: int,
+    step: int,
+    agent_index: int,
+    group_index: int,
+    max_chars: int,
+    base_model: bool = False,
+) -> CompletionRecord:
+    """Build the record for one held-out row and its generated completion.
+
+    :param row: The held-out row.
+    :param completion: Generated text.
+    :param completion_tokens: Tokens generated.
+    :param step: Training step the adapter reached.
+    :param agent_index: Population member the adapter belongs to.
+    :param group_index: Position of the row among the sampled rows.
+    :param max_chars: Character cap per text field.
+    :param base_model: Whether the completion came from the model without its adapter.
+    :return: The record.
+    """
+    return CompletionRecord(
+        step=step,
+        agent_index=agent_index,
+        group_index=group_index,
+        sample_index=0,
+        reward=None,
+        num_turns=1,
+        completion_tokens=completion_tokens,
+        prompt=truncate_middle(row.prompt, max_chars),
+        completion=truncate_middle(completion, max_chars),
+        reference=None
+        if row.reference is None
+        else truncate_middle(row.reference, max_chars),
+        rejected=None
+        if row.rejected is None
+        else truncate_middle(row.rejected, max_chars),
+        base_model=base_model,
     )
 
 

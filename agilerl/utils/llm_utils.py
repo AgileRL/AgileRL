@@ -2795,11 +2795,12 @@ def sample_eval_prompts(
     chosen_col: str | None = None
     rejected_col: str | None = None
     response_column = getattr(env, "response_column", None)
-    if isinstance(response_column, str):
-        chosen_col = response_column
-    elif "chosen" in getattr(dataset, "features", ()):
+    # A preference DatasetEnv also carries the default ``response_column``.
+    if "chosen" in getattr(dataset, "features", ()):
         chosen_col = "chosen"
         rejected_col = "rejected"
+    elif isinstance(response_column, str):
+        chosen_col = response_column
 
     return [
         (
