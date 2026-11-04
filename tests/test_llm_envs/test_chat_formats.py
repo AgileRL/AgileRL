@@ -378,7 +378,31 @@ class TestToolCallTagFormatXml:
         assert calls[0].status is ToolCallParseStatus.OK
 
 
+class UnkEndOfTextTokenizer(FakeTokenizer):
+    """Granite's vocab: ``<|end_of_text|>`` is also the unk token."""
+
+    unk_token = "<|end_of_text|>"
+    unk_token_id = GEOT
+
+
 class TestGranite3Format:
+    def test_end_of_text_that_is_the_unk_token_still_ends_the_array(self) -> None:
+        parser = Granite3Format(UnkEndOfTextTokenizer(GRANITE_TOKENS))
+        ids = [*granite_block([{"name": "a", "arguments": {"x": 1}}]), GEOT]
+
+        _, calls = parser.extract_tool_calls(ids)
+
+        assert [(call.name, call.status) for call in calls] == [
+            ("a", ToolCallParseStatus.OK)
+        ]
+
+    def test_formats_calls_as_one_tagged_json_array(self) -> None:
+        parser = Granite3Format(FakeTokenizer(GRANITE_TOKENS))
+
+        text = parser.format_tool_calls([{"name": "a", "arguments": {"x": 1}}])
+
+        assert text == '<|tool_call|>[{"name": "a", "arguments": {"x": 1}}]'
+
     def test_parses_array_of_calls(self) -> None:
         parser = Granite3Format(FakeTokenizer(GRANITE_TOKENS))
         ids = granite_block(
@@ -738,6 +762,24 @@ class TestHarmonyFormat:
         assert calls[0].name == "add"
         assert calls[0].arguments == {"a": 2}
         assert calls[0].status is ToolCallParseStatus.OK
+
+    def test_parses_a_call_in_the_block_the_generation_prompt_opened(self) -> None:
+        parser = HarmonyFormat(FakeTokenizer(HARMONY_TOKENS))
+        ids = harmony_block(" to=functions.add", '{"a": 2}', HCALL)[1:]
+
+        content, calls = parser.extract_tool_calls(ids)
+
+        assert content == []
+        assert [(call.name, call.arguments) for call in calls] == [("add", {"a": 2})]
+
+    def test_answer_in_the_opened_block_is_content(self) -> None:
+        parser = HarmonyFormat(FakeTokenizer(HARMONY_TOKENS))
+        ids = [HCHAN, *chars("final"), HMSG, *chars("4"), HRET]
+
+        content, calls = parser.extract_tool_calls(ids)
+
+        assert calls == []
+        assert content == ids[:-1]
 
     def test_ignores_non_function_channels(self) -> None:
         parser = HarmonyFormat(FakeTokenizer(HARMONY_TOKENS))

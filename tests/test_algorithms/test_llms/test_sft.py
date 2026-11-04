@@ -834,7 +834,7 @@ class TestSFTLearnPhaseTimings:
                 0, 99, (4, 6), generator=torch.Generator().manual_seed(0)
             ),
             "attention_mask": torch.ones(4, 6, dtype=torch.long),
-            "prompt_lengths": [2, 2, 2, 2],
+            "loss_mask": torch.arange(6).expand(4, 6) >= 2,
         }
 
         # Act
@@ -872,14 +872,14 @@ def make_cpu_sft() -> SFT:
     )
 
 
-def random_sft_batch() -> dict[str, torch.Tensor | list[int]]:
+def random_sft_batch() -> dict[str, torch.Tensor]:
     """Four six-token examples with two-token prompts."""
     return {
         "input_ids": torch.randint(
             0, 99, (4, 6), generator=torch.Generator().manual_seed(0)
         ),
         "attention_mask": torch.ones(4, 6, dtype=torch.long),
-        "prompt_lengths": [2, 2, 2, 2],
+        "loss_mask": torch.arange(6).expand(4, 6) >= 2,
     }
 
 

@@ -600,6 +600,45 @@ class TestSampleEvalPrompts:
         assert {rows[0][0], rows[1][0]} == {"p0", "p1"}
         assert all(r[2] is None for r in rows)
 
+    def test_sample_eval_prompts_messages_rows_without_prompt_columns(self):
+        """A ``messages`` row samples its rendered context and first assistant turn."""
+        from types import SimpleNamespace
+
+        # Arrange
+        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+        user = {"role": "user", "content": "Hi"}
+        ds = Datasets.from_dict(
+            {"messages": [[user, {"role": "assistant", "content": "Hello"}]]}
+        )
+        env = SimpleNamespace(
+            response_column="response",
+            tokenizer=tokenizer,
+            test_dataloader=SimpleNamespace(dataset=ds),
+        )
+
+        # Act
+        rows = sample_eval_prompts(env, n=1, seed=0)
+
+        # Assert
+        assert rows == [
+            (
+                tokenizer.apply_chat_template(
+                    [user], tokenize=False, add_generation_prompt=True
+                ),
+                "Hello",
+                None,
+            )
+        ]
+
+    def test_sample_eval_prompts_messages_rows_need_a_tokenizer(self):
+        from types import SimpleNamespace
+
+        ds = Datasets.from_dict({"messages": [[{"role": "user", "content": "Hi"}]]})
+        env = SimpleNamespace(test_dataloader=SimpleNamespace(dataset=ds))
+
+        with pytest.raises(TypeError, match=r"env\.tokenizer is required"):
+            sample_eval_prompts(env, n=1, seed=0)
+
     def test_sample_eval_prompts_preference_style_chosen_rejected(self):
         """Covers PreferenceGym-style datasets with ``chosen`` / ``rejected`` columns."""
         from types import SimpleNamespace

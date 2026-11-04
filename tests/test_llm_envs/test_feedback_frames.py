@@ -17,9 +17,15 @@ from huggingface_hub import get_token, snapshot_download
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from agilerl.architectures import family_runtime
-from agilerl.llm_envs.chat_formats import HarmonyFormat, action_text
+from agilerl.llm_envs.chat_formats import (
+    HarmonyFormat,
+    action_text,
+    resolve_chat_format,
+)
+from agilerl.llm_envs.dataset_env import encode_chat_transcript
 from agilerl.llm_envs.harness import RolloutHarness
 from tests.helpers.rollout_doubles import FakeEnvClient
+from tests.helpers.transcripts import assistant_runs
 
 # Tokenizer files come from the Hub, and Gemma 4 is gated. CI runs these on the
 # Linux CPU shard, which has HF_TOKEN and a Hub cache.
@@ -237,6 +243,33 @@ class TestRolloutHarnessTextFeedbackIds:
             match=f"could not render a '{role}' feedback turn.*Label the observation",
         ):
             harness._text_feedback_ids([feedback], tokenizer.eos_token_id)
+
+
+class TestEncodeChatTranscriptMatchesTheRollout:
+    @pytest.mark.parametrize("model_id", list(MODEL_REVISIONS))
+    def test_tool_turn_ends_at_the_stop_token_and_the_result_is_the_harness_frame(
+        self, model_id: str
+    ) -> None:
+        # Arrange
+        tokenizer, path = load_tokenizer(model_id)
+        messages = [
+            *conversation(model_id, ("tool",)),
+            {"role": "assistant", "content": "5"},
+        ]
+        chat_format = resolve_chat_format(
+            tokenizer, family_runtime(model_id).chat_format
+        )
+
+        # Act
+        ids, mask = encode_chat_transcript(tokenizer, messages, None, chat_format)
+
+        # Assert
+        (_, call_end), (answer_start, _) = assistant_runs(mask)
+        assert ids[call_end - 1] in turn_end_ids(tokenizer, path)
+        frame = harness_for(tokenizer, model_id)._text_feedback_ids(
+            messages[2:3], ids[call_end - 1]
+        )
+        assert ids[call_end:answer_start] == frame[0].tolist()
 
 
 class TestActionText:

@@ -104,11 +104,10 @@ class PreferencePrompts(TypedDict):
 
 
 class SFTPrompts(TypedDict):
-    prompt: list[str]
-    prompt_lengths: list[int]
-    response: list[str]
     input_ids: torch.Tensor
     attention_mask: torch.Tensor
+    # True at the tokens the loss trains on.
+    loss_mask: torch.Tensor
 
 
 class CheckpointInfo(TypedDict):

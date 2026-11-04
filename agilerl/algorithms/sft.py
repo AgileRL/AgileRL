@@ -39,8 +39,8 @@ class SFT(LLMAlgorithm[SFTPrompts]):
     """Supervised Fine-Tuning (SFT) algorithm.
 
     Trains an LLM via token-level cross-entropy loss computed exclusively on the
-    response tokens of each ``(prompt, response)`` pair.  The dataset should
-    simply contain a prompt and a target response — no rejected/negative
+    response tokens of each ``(prompt, response)`` pair, or on the assistant
+    turns of each multi-turn ``messages`` conversation. No rejected/negative
     responses are needed or used.
 
     This is typically the *first* stage of a two-step alignment pipeline:
@@ -218,15 +218,14 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         experiences: SFTPrompts,
         training: bool = True,
     ) -> dict[str, float]:
-        """Update model parameters using cross-entropy loss on response tokens.
+        """Update model parameters using cross-entropy loss on the masked tokens.
 
-        The loss is computed only on response tokens; prompt tokens and padding
-        are masked out via ``ignore_index=-100``.
+        The loss is computed only where ``loss_mask`` is set (response or
+        assistant tokens); every other token is masked out via ``ignore_index=-100``.
 
-        :param experiences: Dict with keys ``input_ids`` (prompt + response token
-            IDs), ``attention_mask``, and ``prompt_lengths`` (number of prompt
-            tokens per sample) as produced by a ``objective="sft"``
-            :class:`~agilerl.llm_envs.DatasetEnv`.
+        :param experiences: Dict with keys ``input_ids``, ``attention_mask`` and
+            ``loss_mask`` (``[B, L]``, true at trained tokens) as produced by a
+            ``objective="sft"`` :class:`~agilerl.llm_envs.DatasetEnv`.
         :type experiences: SFTPrompts
         :param training: When ``False`` the backward pass is skipped (eval mode).
         :type training: bool
@@ -241,17 +240,9 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         assert input_ids.shape[1] == attention_mask.shape[1], (
             "All tensors must have the same max length"
         )
-        max_length = input_ids.shape[1]
-        prompt_lengths = experiences["prompt_lengths"]
-        # Build the response mask on CPU (same device as dataloader tensors).
-        prompt_masks = LLMAlgorithm._create_prompt_masks(
-            prompt_lengths, max_length=max_length
-        )  # CPU tensor
-        # Mask has to be shifted by 1 as output log probs dims are 1 shorter than input ids as first token is used to predict the first log prob
-        response_mask = (prompt_masks * attention_mask.cpu())[:, 1:]  # [B, L-1], CPU
-        # Create labels for CE loss
+        # Shifted by 1: position t predicts token t + 1.
         labels = torch.where(
-            response_mask.bool(), input_ids[:, 1:].cpu(), -100
+            experiences["loss_mask"][:, 1:].bool().cpu(), input_ids[:, 1:].cpu(), -100
         )  # [B, L-1]
 
         num_samples = input_ids.shape[0]
