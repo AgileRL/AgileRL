@@ -575,7 +575,7 @@ class TestPzEnvSpecNonCallable:
 
         spec = GymEnvSpec(name="fake_pz_module")
         mock_module = MagicMock(spec=[])  # no parallel_env attr
-        with patch("agilerl.models.env.import_module", return_value=mock_module):
+        with patch("agilerl.utils.env_utils.import_module", return_value=mock_module):
             with pytest.raises(AttributeError, match="has no 'parallel_env'"):
                 make_single_env(spec, multi_agent=True)
 
@@ -586,7 +586,7 @@ class TestPzEnvSpecNonCallable:
         spec = GymEnvSpec(name="fake_pz_module")
         mock_module = MagicMock(spec=[])
         with (
-            patch("agilerl.models.env.import_module", return_value=mock_module),
+            patch("agilerl.utils.env_utils.import_module", return_value=mock_module),
             patch("agilerl.models.env.make_multi_agent_vect_envs") as mock_vect,
         ):
             mock_vect.side_effect = lambda env, **kw: env()

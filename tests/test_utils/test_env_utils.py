@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import sys
+from importlib import import_module
+from types import ModuleType
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -14,6 +17,59 @@ from agilerl.llm_envs import judge as judge_module
 from agilerl.utils import env_utils
 
 LOCAL_JUDGE = JudgeSpec(model="m", base_url="http://judge:8000")
+
+
+class TestLoadPettingzooParallelEnv:
+    def test_retired_cooperative_pong_v5_returns_v6_factory(self):
+        loaded = env_utils.load_pettingzoo_parallel_env(
+            "pettingzoo.butterfly.cooperative_pong_v5",
+        )
+
+        v6 = import_module("pettingzoo.butterfly.cooperative_pong_v6")
+        assert loaded is v6.parallel_env
+
+    def test_installed_v5_module_is_not_replaced(self, monkeypatch):
+        # Arrange
+        module_name = "pettingzoo.butterfly.cooperative_pong_v5"
+        installed = ModuleType(module_name)
+        installed.parallel_env = object()
+        monkeypatch.setitem(sys.modules, module_name, installed)
+
+        # Act
+        loaded = env_utils.load_pettingzoo_parallel_env(module_name)
+
+        # Assert
+        assert loaded is installed.parallel_env
+
+    def test_missing_module_without_alias_raises(self):
+        with pytest.raises(
+            ModuleNotFoundError,
+            match=r"pettingzoo\.butterfly\.not_a_real_env_v0",
+        ):
+            env_utils.load_pettingzoo_parallel_env(
+                "pettingzoo.butterfly.not_a_real_env_v0",
+            )
+
+    def test_missing_dependency_is_not_replaced(self, monkeypatch):
+        # Arrange
+        def broken_import(module_name: str):
+            message = "No module named 'pygame' while importing " + module_name
+            raise ModuleNotFoundError(message, name="pygame")
+
+        monkeypatch.setattr(env_utils, "import_module", broken_import)
+
+        # Act / Assert
+        with pytest.raises(ModuleNotFoundError, match="pygame"):
+            env_utils.load_pettingzoo_parallel_env(
+                "pettingzoo.butterfly.cooperative_pong_v5",
+            )
+
+    def test_module_without_parallel_env_raises(self, monkeypatch):
+        module = ModuleType("pettingzoo.butterfly.missing_parallel_v1")
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+
+        with pytest.raises(AttributeError, match="has no 'parallel_env'"):
+            env_utils.load_pettingzoo_parallel_env(module.__name__)
 
 
 class TestEscapeNonFormatBraces:

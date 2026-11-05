@@ -28,6 +28,34 @@ if TYPE_CHECKING:
 GymEnvType = AsyncVectorEnv | SyncVectorEnv
 PzEnvType = ParallelEnv | AsyncPettingZooVecEnv
 
+
+def load_pettingzoo_parallel_env(name: str) -> Callable[..., ParallelEnv]:
+    """Import a PettingZoo env module and return its ``parallel_env`` factory.
+
+    :param name: PettingZoo module path.
+    :type name: str
+    :return: That module's ``parallel_env`` factory.
+    :rtype: Callable[..., ParallelEnv]
+    """
+    # 1.23.1-1.25.0 still ships cooperative_pong_v5; 1.26+ does not.
+    module_aliases = {
+        "pettingzoo.butterfly.cooperative_pong_v5": (
+            "pettingzoo.butterfly.cooperative_pong_v6"
+        ),
+    }
+    try:
+        module = import_module(name)
+    except ModuleNotFoundError as exc:
+        alias = module_aliases.get(name)
+        if alias is None or exc.name != name:
+            raise
+        module = import_module(alias)
+    if not hasattr(module, "parallel_env"):
+        msg = f"PettingZoo module '{name}' has no 'parallel_env' constructor."
+        raise AttributeError(msg)
+    return module.parallel_env
+
+
 # Single envs, vectorized gym envs, and PettingZoo parallel / vec envs.
 # Wrappers duck-type as the env they wrap, so wrapping preserves EnvT.
 EnvT = TypeVar("EnvT", bound=gym.Env | GymEnvType | PzEnvType)

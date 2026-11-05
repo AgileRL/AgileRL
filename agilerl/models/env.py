@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from functools import cache, partial
-from importlib import import_module
 from itertools import count
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -39,6 +38,7 @@ from agilerl.utils.env_utils import (
     apply_wrappers,
     construct_entrypoint_env,
     get_rubric_factory,
+    load_pettingzoo_parallel_env,
     make_conversation_template,
     resolve_entrypoint_target,
 )
@@ -159,11 +159,8 @@ def _make_single_pz_env(spec: GymEnvSpec) -> ParallelEnv:
             cfg,
             spec.env_wrappers,
         )()
-    module = import_module(spec.name)
-    if not hasattr(module, "parallel_env"):
-        msg = f"PettingZoo module '{spec.name}' has no 'parallel_env' constructor."
-        raise AttributeError(msg)
-    env = module.parallel_env(**cfg)
+    parallel_env = load_pettingzoo_parallel_env(spec.name)
+    env = parallel_env(**cfg)
     return apply_wrappers(env, spec.env_wrappers, path=spec.path)
 
 
@@ -229,11 +226,7 @@ def make_pz_env(
     else:
 
         def make_one() -> ParallelEnv:
-            module = import_module(spec.name)
-            if not hasattr(module, "parallel_env"):
-                msg = f"PettingZoo module '{spec.name}' has no 'parallel_env' constructor."
-                raise AttributeError(msg)
-            env = module.parallel_env(**cfg)
+            env = load_pettingzoo_parallel_env(spec.name)(**cfg)
             return apply_wrappers(env, resolved, path=spec.path)
 
     return make_multi_agent_vect_envs(
