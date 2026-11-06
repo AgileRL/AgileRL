@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import fields
 from typing import Annotated, Any, ClassVar
 
@@ -15,6 +16,7 @@ from pydantic import (
     ConfigDict,
     Field,
     TypeAdapter,
+    field_serializer,
     field_validator,
     model_validator,
 )
@@ -28,7 +30,12 @@ from agilerl.arena.models.descriptions import (
     MINI_BATCH,
 )
 from agilerl.arena.models.env import LLMEnvType
-from agilerl.arena.models.fsdp import FSDPConfig
+from agilerl.arena.models.fsdp import (
+    PARALLEL_LAYOUT_FIELDS,
+    FSDPConfig,
+    parallel_layout_pins,
+    record_parallel_pins,
+)
 from agilerl.arena.models.hpo import RLHyperparameter
 from agilerl.arena.models.model_info import (
     KNOWN_REASONING_PARSERS,
@@ -362,7 +369,7 @@ class LLMAlgorithmSpec(AlgorithmSpec):
         if value is None:
             return None
         if value is True or value == {}:
-            return FSDPConfig()
+            return record_parallel_pins(FSDPConfig(), ())
         if isinstance(value, FSDPConfig):
             return value
         if isinstance(value, dict):
@@ -373,9 +380,23 @@ class LLMAlgorithmSpec(AlgorithmSpec):
                     f"valid keys are {sorted(FSDP_KNOWN_FIELDS)}"
                 )
                 raise ValueError(msg)
-            return FSDPConfig(**value)
+            return record_parallel_pins(FSDPConfig(**value), value)
         msg = "fsdp must be null, true, a dict, or FSDPConfig"
         raise TypeError(msg)
+
+    @field_serializer("fsdp", mode="wrap")
+    def _serialize_fsdp(
+        self, value: FSDPConfig | None, handler: Callable[[object], object]
+    ) -> object:
+        """Dump only the ``tp``, ``ep`` and ``shard_group_size`` the manifest set.
+
+        A re-validated dump then searches the same layout fields.
+        """
+        dumped = handler(value)
+        if value is not None and isinstance(dumped, dict):
+            for name in PARALLEL_LAYOUT_FIELDS - parallel_layout_pins(value):
+                dumped.pop(name, None)
+        return dumped
 
     @field_validator("constrain_answer_pattern")
     @classmethod

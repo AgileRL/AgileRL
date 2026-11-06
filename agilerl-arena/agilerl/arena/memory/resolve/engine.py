@@ -6,7 +6,8 @@ from __future__ import annotations
 
 from typing import Literal
 
-from agilerl.arena.memory.estimator import estimate_generation, generation_can_serve
+from agilerl.arena.memory.breakdown import PhaseBreakdown
+from agilerl.arena.memory.estimator import estimate_generation
 from agilerl.arena.memory.generation import KV_MARGIN_BYTES, drop_engine_fast_paths
 from agilerl.arena.memory.kv_cache import VLLM_ENGINE_MAX_NUM_BATCHED_TOKENS
 from agilerl.arena.memory.manifest import (
@@ -89,7 +90,11 @@ def _resident_sequences(
     width: int,
     engines: int,
 ) -> int:
-    """Sequences ``engines`` engines of ``width`` GPUs keep resident; 0 when none fits."""
+    """Sequences ``engines`` engines of ``width`` GPUs keep resident; 0 when none fits.
+
+    A pinned ``max_num_seqs`` counts the share of it the KV pool holds; the
+    rest queue (:func:`queue_warning`).
+    """
     vllm = manifest.algorithm.vllm_config
     try:
         trial = generation_settings_from_manifest(
@@ -97,9 +102,9 @@ def _resident_sequences(
         )
         if "max_num_seqs" in vllm.model_fields_set:
             breakdown = estimate_generation(model, device, trial)
-            if not generation_can_serve(breakdown, KV_MARGIN_BYTES):
+            if not breakdown.fits:
                 return 0
-            return engines * trial.max_num_seqs
+            return engines * sequences_held(breakdown, trial.max_num_seqs)
         run = RunConfig(
             model=model,
             train_device=device,
@@ -120,26 +125,73 @@ def _resident_sequences(
     return engines * solved.value
 
 
+def sequences_held(breakdown: PhaseBreakdown, requested: int) -> int:
+    """How many of ``requested`` sequences this generation bar can keep resident.
+
+    :param breakdown: Generation-phase breakdown.
+    :param requested: Sequences the engine was asked to hold.
+    :return: ``requested`` when the KV pool covers them, otherwise the share
+        of them the pool can hold.
+    """
+    kv = next((c for c in breakdown.components if c.key == "kv_cache"), None)
+    if kv is None or requested < 1:
+        return requested
+    demand = kv.detail["worst_case_demand"]
+    usable = max(kv.detail["pool"] - KV_MARGIN_BYTES, 0)
+    if demand <= 0 or demand <= usable:
+        return requested
+    return int(requested * usable / demand)
+
+
+def queue_warning(breakdown: PhaseBreakdown, requested: int, width: int) -> str | None:
+    """Warn when an engine of ``width`` GPUs holds fewer than the requested sequences.
+
+    :param breakdown: Generation-phase breakdown at ``width``.
+    :param requested: Sequences the engine was asked to hold.
+    :param width: Engine tensor-parallel width.
+    :return: The warning, or ``None`` when every sequence fits.
+    """
+    held = sequences_held(breakdown, requested)
+    if held >= requested:
+        return None
+    return (
+        f"tensor_parallel_size={width} holds {held} of {requested} sequences; "
+        "generation may queue"
+    )
+
+
 def servable_engine_widths(
-    manifest: TrainingManifest, device: DeviceSpec, max_width: int
+    manifest: TrainingManifest,
+    device: DeviceSpec,
+    max_width: int,
+    cache: dict[tuple, bool] | None = None,
 ) -> list[int]:
     """Engine widths up to ``max_width`` that vLLM can shard and one engine keeps a sequence resident at.
 
     :param manifest: Validated rollout manifest of a catalogued model.
     :param device: The rollout engine's GPU.
     :param max_width: Widest engine to try.
+    :param cache: Widths already checked for this manifest's engine.
     :return: Those widths, ascending.
     """
     hub_id = manifest.algorithm.pretrained_model_name_or_path
     model = _engine_model(hub_id, SUPPORTED_MODEL_INFO[hub_id])
     arch = model.arch
+    checked = {} if cache is None else cache
+
+    def serves(width: int) -> bool:
+        key = (device.name, device.total_bytes, width)
+        if key not in checked:
+            checked[key] = _resident_sequences(manifest, model, device, width, 1) > 0
+        return checked[key]
+
     # vLLM splits attention heads evenly; KV heads split or replicate evenly.
     return [
         width
         for width in range(1, max_width + 1)
         if arch.n_heads % width == 0
         and (arch.n_kv_heads % width == 0 or width % arch.n_kv_heads == 0)
-        and _resident_sequences(manifest, model, device, width, 1) > 0
+        and serves(width)
     ]
 
 
@@ -151,6 +203,7 @@ def resolve_engine_tensor_parallel(
 ) -> int | None:
     """Assign the omitted engine width that keeps the most sequences resident.
 
+    A width that holds every requested sequence beats one that queues.
     Sized at the manifest's trainer count; a searched GPU split picks its
     width in :func:`~agilerl.arena.memory.resolve.split.resolve_run_memory`.
 
@@ -184,15 +237,18 @@ def resolve_engine_tensor_parallel(
         return None
 
     model = _engine_model(hub_id, info)
-    best: tuple[int, int, int] | None = None
+    # A pinned sequence count that fits beats a higher count that queues.
+    requested = vllm.max_num_seqs if "max_num_seqs" in vllm.model_fields_set else None
+    best: tuple[bool, int, int, int] | None = None
     for width, engines in candidates:
         score = _resident_sequences(manifest, model, device, width, engines)
-        rank = (score, engines, width)
+        serves = requested is not None and score == engines * requested
+        rank = (serves, score, engines, width)
         if score > 0 and (best is None or rank > best):
             best = rank
     if best is None:
         return None
-    chosen = best[2]
+    chosen = best[3]
     vllm.tensor_parallel_size = chosen
     return chosen
 

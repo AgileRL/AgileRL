@@ -667,14 +667,38 @@ def experiment() -> None:
 @click.option(
     "--resource-id",
     type=str,
-    default="arena-medium",
-    help="Arena cluster type to submit the experiment to.",
+    default=None,
+    help=(
+        "Arena cluster type to submit the experiment to. Omit every resource "
+        "flag to let Arena pick the cheapest fit."
+    ),
 )
 @click.option(
     "--num-nodes",
     type=int,
-    default=2,
-    help="Number of nodes to use for the experiment.",
+    default=None,
+    help=(
+        "Number of nodes to use for the experiment. Omit every resource flag "
+        "to let Arena pick the cheapest fit."
+    ),
+)
+@click.option(
+    "--num-gpus",
+    type=click.IntRange(min=1),
+    default=None,
+    help=(
+        "Total GPUs. Arena uses the fewest nodes. Not combinable with "
+        "--resource-id or --num-nodes."
+    ),
+)
+@click.option(
+    "--gpu-type",
+    type=str,
+    default=None,
+    help=(
+        "Short GPU name such as h100-80, b200 or l4. Not combinable with "
+        "--resource-id or --num-nodes."
+    ),
 )
 @click.option(
     "--project",
@@ -711,6 +735,8 @@ def experiment_submit(
     manifest: Path,
     resource_id: str | None,
     num_nodes: int | None,
+    num_gpus: int | None,
+    gpu_type: str | None,
     project: str | None,
     experiment_name: str | None,
     reward_file: Path | None,
@@ -722,6 +748,8 @@ def experiment_submit(
             manifest=manifest,
             resource_id=resource_id,
             num_nodes=num_nodes,
+            num_gpus=num_gpus,
+            gpu_type=gpu_type,
             project=project,
             experiment_name=experiment_name,
             reward_file=reward_file,

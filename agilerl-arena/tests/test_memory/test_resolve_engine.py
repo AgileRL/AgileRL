@@ -4,6 +4,7 @@
 
 import copy
 
+from agilerl.arena.memory.breakdown import MemoryComponent, PhaseBreakdown
 from agilerl.arena.memory.estimator import estimate_generation
 from agilerl.arena.memory.generation import KV_MARGIN_BYTES
 from agilerl.arena.memory.manifest import (
@@ -13,8 +14,10 @@ from agilerl.arena.memory.manifest import (
     validated_run_manifest,
 )
 from agilerl.arena.memory.resolve.engine import (
+    queue_warning,
     resolve_engine_fast_path,
     resolve_rollout_engines_per_agent,
+    sequences_held,
     servable_engine_widths,
 )
 from agilerl.arena.memory.specs import ModelArch, ModelSpec
@@ -299,3 +302,62 @@ class TestServableEngineWidths:
 
         # Assert
         assert widths == [1]
+
+    def test_records_each_width_it_checks_in_the_cache(self) -> None:
+        # Arrange
+        manifest = rollout_manifest("Qwen/Qwen3.6-35B-A3B", 32768)
+        l40s = lookup_gpu("L40S").device_spec()
+        cache: dict = {}
+
+        # Act
+        widths = servable_engine_widths(manifest, l40s, 4, cache)
+
+        # Assert
+        assert widths == [2, 4]
+        key = (l40s.name, l40s.total_bytes)
+        assert cache == {(*key, 1): False, (*key, 2): True, (*key, 4): True}
+
+    def test_reads_a_width_from_the_cache(self) -> None:
+        # Arrange: width 2 serves on L40S; the cache says it does not.
+        manifest = rollout_manifest("Qwen/Qwen3.6-35B-A3B", 32768)
+        l40s = lookup_gpu("L40S").device_spec()
+        cache = {(l40s.name, l40s.total_bytes, 2): False}
+
+        # Act
+        widths = servable_engine_widths(manifest, l40s, 4, cache)
+
+        # Assert
+        assert widths == [4]
+
+
+def kv_bar(pool: int, demand: int) -> PhaseBreakdown:
+    """A generation bar whose KV pool holds ``pool`` bytes against ``demand``."""
+    return PhaseBreakdown(
+        phase="generation",
+        components=(
+            MemoryComponent(
+                key="kv_cache",
+                label="KV cache pool",
+                n_bytes=pool,
+                detail={"pool": pool, "worst_case_demand": demand},
+            ),
+        ),
+        device_total_bytes=pool * 4,
+        device_usable_bytes=pool * 4,
+    )
+
+
+class TestQueueWarning:
+    def test_names_how_many_sequences_fit(self):
+        bar = kv_bar(5 * KV_MARGIN_BYTES, 16 * KV_MARGIN_BYTES)
+
+        assert sequences_held(bar, 8) == 2
+        assert queue_warning(bar, 8, 4) == (
+            "tensor_parallel_size=4 holds 2 of 8 sequences; generation may queue"
+        )
+
+    def test_is_silent_when_every_sequence_fits(self):
+        bar = kv_bar(5 * KV_MARGIN_BYTES, 4 * KV_MARGIN_BYTES)
+
+        assert sequences_held(bar, 8) == 8
+        assert queue_warning(bar, 8, 1) is None

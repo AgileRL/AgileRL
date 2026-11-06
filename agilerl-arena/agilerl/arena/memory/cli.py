@@ -47,6 +47,7 @@ from agilerl.arena.memory.resources import (
     check_tiers,
     engine_width,
     engines_per_member,
+    note_queued_sequences,
 )
 from agilerl.arena.memory.solver import (
     INFERENCE_MAX_NUM_SEQS,
@@ -583,15 +584,26 @@ def main(
         print(str(err), file=sys.stderr)
         return EXIT_USAGE
 
-    estimate = estimate_run(config)
+    # The tier search already attached the queue warning to its estimate.
+    estimate = (
+        chosen.estimate
+        if chosen is not None and chosen.estimate is not None
+        else note_queued_sequences(estimate_run(config), config)
+    )
     if as_json:
         payload = estimate.model_dump(by_alias=True)
         payload["fits"] = estimate.fits_with_buffer
         payload["engine"] = _engine_payload(config)
         payload["advice"] = [a.model_dump() for a in advise(config)]
+        parallelism = _parallelism_payload(config)
+        if parallelism is not None:
+            payload["parallelism"] = parallelism
         if chosen is not None:
             payload["resource"] = chosen.tier
+            payload["num_nodes"] = chosen.num_nodes
             payload["tiers"] = _tier_rows(checks)
+            payload["training_gpus_per_agent"] = chosen.trainers
+            payload["rollout_engines_per_agent"] = chosen.engines
         print(json.dumps(payload, indent=2))
         return EXIT_OK if estimate.fits_with_buffer else EXIT_OVER_BUDGET
 
@@ -602,7 +614,7 @@ def main(
         console.print(
             Text.assemble(
                 ("Cheapest resource tier that fits: ", "bold"),
-                (_describe_tier(chosen.tier), "green"),
+                (_describe_choice(chosen), "green"),
             )
         )
     console.print(
@@ -610,6 +622,16 @@ def main(
             ("Memory estimate", "bold"), f"{glyphs.separator}{config.model.model_id}"
         )
     )
+    parallelism = _parallelism_payload(config)
+    if parallelism is not None:
+        console.print(
+            Text(
+                "Training parallelism: "
+                f"tp={parallelism['tp']}, ep={parallelism['ep']}, "
+                f"shard_group_size={parallelism['shard_group_size']}",
+                style="dim",
+            )
+        )
     if config.training.uses_generation_engine:
         generation = config.generation
         console.print(
@@ -630,6 +652,18 @@ def main(
     return EXIT_OK if estimate.fits_with_buffer else EXIT_OVER_BUDGET
 
 
+def _parallelism_payload(config: RunConfig) -> dict[str, int | None] | None:
+    """The locked training layout, or ``None`` for flat data parallel."""
+    fsdp = config.training.fsdp
+    if fsdp is None:
+        return None
+    return {
+        "tp": fsdp.tp,
+        "ep": fsdp.ep,
+        "shard_group_size": fsdp.shard_group_size,
+    }
+
+
 def _engine_payload(config: RunConfig) -> dict[str, int] | None:
     """The rollout engine's resolved width and sequences; ``None`` without one."""
     if not config.training.uses_generation_engine:
@@ -647,16 +681,31 @@ def _describe_tier(tier: dict[str, Any]) -> str:
     )
 
 
+def _describe_choice(check: TierCheck) -> str:
+    """The tier, and the node count when the job takes more than one."""
+    described = _describe_tier(check.tier)
+    if check.num_nodes == 1:
+        return described
+    return f"{check.num_nodes} nodes of {described}"
+
+
 def _tier_rows(checks: list[TierCheck]) -> list[dict[str, Any]]:
-    return [
-        {
+    rows = []
+    for check in checks:
+        row: dict[str, Any] = {
             "name": check.tier["name"],
             "price_per_node_hour": check.tier["price_per_node_hour"],
             "fits": check.fits,
             "reason": check.reason,
+            "num_nodes": check.num_nodes,
         }
-        for check in checks
-    ]
+        if check.fits and check.config is not None:
+            row["parallelism"] = _parallelism_payload(check.config)
+            row["trainers"] = check.trainers
+            row["engines"] = check.engines
+            row["engine_tensor_parallel"] = check.engine_tensor_parallel
+        rows.append(row)
+    return rows
 
 
 def _report_no_tier(checks: list[TierCheck], as_json: bool) -> int:

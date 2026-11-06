@@ -35,6 +35,7 @@ from agilerl.arena.memory.resolve.split import (
     TIED_DROP_GENERATION_FACTOR,
     GpuSplit,
     RunMemoryPlan,
+    SearchCache,
     SplitWorkload,
     active_matmul_params,
     choose_engine_width,
@@ -324,6 +325,29 @@ class TestResolveRunMemorySplit:
         # Assert
         assert (12 // split.trainers * 8) % 16 == 0
 
+    def test_a_model_that_fits_keeps_degree_one(self) -> None:
+        # Act
+        plan = _plan(_countdown_manifest())
+
+        # Assert
+        fsdp = plan.training.fsdp
+        assert fsdp is None or (fsdp.tp, fsdp.ep, fsdp.shard_group_size) == (
+            1,
+            1,
+            None,
+        )
+
+    def test_a_pinned_shard_group_limits_trainers_to_its_multiples(self) -> None:
+        # Arrange
+        raw = _countdown_manifest()
+        raw["algorithm"]["fsdp"] = {"shard_group_size": 2}
+
+        # Act
+        split = _split(raw)
+
+        # Assert
+        assert split.trainers % 2 == 0
+
     def test_two_gpus_give_one_trainer_one_engine(self) -> None:
         # Act
         split = _split(_sudoku_manifest(), gpus=2)
@@ -391,6 +415,27 @@ class TestResolveRunMemorySplit:
             ),
         ):
             _plan(raw, gpus=9, engine_width=4, device=_device("L4"))
+
+    def test_no_split_with_a_searched_engine_width_and_a_shared_cache_raises(
+        self,
+    ) -> None:
+        # Arrange: the engine width is searched, so the cache also holds widths.
+        raw = _oversize_countdown_manifest(60)
+        raw["algorithm"]["vllm_config"] = {}
+        manifest = validated_run_manifest(TrainingManifest.model_validate(raw))
+
+        # Act / Assert
+        with pytest.raises(
+            ValueError,
+            match=r"^No trainer / rollout-engine split of 9 NVIDIA L4 GPUs fits this run",
+        ):
+            resolve_run_memory(
+                manifest,
+                catalog_model(manifest.algorithm),
+                _device("L4"),
+                9,
+                SearchCache(),
+            )
 
     def test_batch_no_trainer_count_that_fits_divides_raises(self) -> None:
         # Arrange: only 6 trainers fit, and 64 groups do not split over 6.
@@ -1172,6 +1217,26 @@ class TestResolveRunMemory:
         assert ddp is not None
         assert ddp.breakdown.fits_with_buffer
         assert plan.training.fsdp is None
+
+    def test_shared_cache_keeps_each_host_budget(self) -> None:
+        # Arrange: one GPU and node size, two host shares. Host 0 cannot
+        # hold a trainer process; an unset share skips the host check.
+        # Five GPUs leave at most four trainers, and 64 divides that count.
+        manifest = _manifest(_countdown_manifest(64))
+        model = catalog_model(manifest.algorithm)
+        gpu = _device("A100-80").model_copy(update={"gpus_per_node": 8})
+        tight = gpu.model_copy(update={"host_bytes_per_gpu": 0})
+        roomy = gpu.model_copy(update={"host_bytes_per_gpu": None})
+        cache = SearchCache()
+
+        # Act / Assert: a tight host must not poison a roomy one, or the reverse.
+        with pytest.raises(ValueError, match="training does not fit in memory"):
+            resolve_run_memory(manifest, model, tight, 5, cache)
+        plan = resolve_run_memory(manifest, model, roomy, 5, cache)
+
+        assert plan.training.breakdown.fits_with_buffer
+        with pytest.raises(ValueError, match="training does not fit in memory"):
+            resolve_run_memory(manifest, model, tight, 5, cache)
 
     def test_pinned_counts_skip_the_split_search(self) -> None:
         # Arrange

@@ -12,6 +12,7 @@ import pytest
 
 from agilerl.arena.memory import formulas
 from agilerl.arena.memory.estimator import estimate_training
+from agilerl.arena.memory.resolve import fsdp as fsdp_module
 from agilerl.arena.memory.resolve.batch import ROW_FILL, micro_batch_row_candidates
 from agilerl.arena.memory.resolve.fsdp import (
     RESIDENCIES,
@@ -635,6 +636,33 @@ class TestResolveTrainingMemoryLastResorts:
         ) as raised:
             resolve_floor(moe_floor_settings(), usable)
         assert not raised.value.plan.breakdown.fits
+
+    def test_rungs_whose_lightest_plan_is_over_are_not_searched(
+        self, caplog, monkeypatch
+    ):
+        # Arrange: nothing fits; the micro-batch and checkpointing are open.
+        usable = moe_peak(64, True, activation_offload=True) // 2
+        priced = []
+        real = fsdp_module.estimate_training
+
+        def spy(*args, **kwargs):
+            priced.append(args)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(fsdp_module, "estimate_training", spy)
+
+        # Act
+        with caplog.at_level(logging.INFO), pytest.raises(TrainingMemoryUnfitError):
+            resolve_training_memory(
+                MOE_MODEL, budget_device(usable), moe_floor_settings(), MemoryPins(), 64
+            )
+
+        # Assert: each rung prices its lightest plan and the logged floor only.
+        rungs = 1 + sum(
+            message.startswith("Training memory: turning on")
+            for message in caplog.messages
+        )
+        assert len(priced) <= 2 * rungs
 
     def test_host_limit_checkpoints_under_activation_offload(self):
         # Arrange: only activation offload fits the GPU; uncheckpointed it pins

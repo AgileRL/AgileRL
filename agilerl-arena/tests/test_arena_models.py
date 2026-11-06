@@ -37,7 +37,11 @@ from agilerl.arena.models.env import (
     LLMEnvSpec,
     LLMEnvType,
 )
-from agilerl.arena.models.fsdp import FSDPConfig
+from agilerl.arena.models.fsdp import (
+    PARALLEL_LAYOUT_FIELDS,
+    FSDPConfig,
+    parallel_layout_pins,
+)
 from agilerl.arena.models.manifest import _resolve_algorithm
 from agilerl.arena.models.networks import VLLMConfig
 from agilerl.arena.models.registry import AlgorithmRegistry, register
@@ -466,6 +470,33 @@ class TestLLMAlgorithmSpecValidators:
     def test_fsdp_none_stays_none(self) -> None:
         spec = GRPOSpec(group_size=2, fsdp=None)
         assert spec.fsdp is None
+
+    @pytest.mark.parametrize(
+        ("fsdp", "pinned"),
+        [
+            ({}, frozenset()),
+            (True, frozenset()),
+            ({"tp": 2}, frozenset({"tp"})),
+            ({"ep": 1, "cpu_offload": False}, frozenset({"ep"})),
+            ({"shard_group_size": 4}, frozenset({"shard_group_size"})),
+        ],
+    )
+    def test_a_dumped_fsdp_keeps_its_layout_pins(
+        self, fsdp: object, pinned: frozenset[str]
+    ) -> None:
+        # Arrange
+        spec = GRPOSpec(group_size=2, fsdp=fsdp)
+
+        # Act
+        reloaded = GRPOSpec.model_validate(spec.model_dump(mode="json"))
+
+        # Assert
+        assert reloaded.fsdp is not None
+        assert parallel_layout_pins(reloaded.fsdp) == pinned
+        assert reloaded.fsdp == spec.fsdp
+
+    def test_a_config_built_in_python_pins_every_layout_field(self) -> None:
+        assert parallel_layout_pins(FSDPConfig(tp=2)) == PARALLEL_LAYOUT_FIELDS
 
     @pytest.mark.parametrize(
         "field",

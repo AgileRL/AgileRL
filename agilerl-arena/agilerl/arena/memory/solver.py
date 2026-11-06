@@ -18,7 +18,9 @@ from pydantic import BaseModel, ConfigDict
 from agilerl.arena.memory.breakdown import PhaseName
 from agilerl.arena.memory.estimator import (
     RunEstimate,
+    estimate_generation,
     estimate_run,
+    estimate_training,
     generation_can_serve,
 )
 from agilerl.arena.memory.kv_cache import KV_BLOCK_SIZE_DEFAULT
@@ -196,41 +198,32 @@ def solve(
             "the model is larger than the card at the other settings given."
         )
         raise CannotSolve(msg)
-    first, first_config, first_estimate = found
 
     solved = candidate(aligned_hi)
-    ok, estimate = _fits(solved, spec, checked, kv_margin_bytes)
-    if ok:
-        return SolveResult(
-            field=field,
-            value=aligned_hi,
-            limited_by="bound",
-            bound=bound,
-            config=solved,
-            estimate=estimate,
-            unchecked_over_budget=_unchecked(estimate, checked),
-        )
+    if _fits(solved, spec, checked, kv_margin_bytes):
+        best, best_config, limited_by = aligned_hi, solved, "bound"
+    else:
+        best, best_config = found
+        limited_by = "memory"
+        low, high = best, aligned_hi
+        while low <= high:
+            mid = _align_down((low + high) // 2, spec.align)
+            trial = candidate(mid)
+            if _fits(trial, spec, checked, kv_margin_bytes):
+                best, best_config = mid, trial
+                low = mid + spec.align
+            else:
+                high = mid - spec.align
 
-    best, best_config, best_estimate = first, first_config, first_estimate
-    low, high = first, aligned_hi
-    while low <= high:
-        mid = _align_down((low + high) // 2, spec.align)
-        trial = candidate(mid)
-        ok, estimate = _fits(trial, spec, checked, kv_margin_bytes)
-        if ok:
-            best, best_config, best_estimate = mid, trial, estimate
-            low = mid + spec.align
-        else:
-            high = mid - spec.align
-
+    estimate = estimate_run(best_config)
     return SolveResult(
         field=field,
         value=best,
-        limited_by="memory",
+        limited_by=limited_by,
         bound=bound,
         config=best_config,
-        estimate=best_estimate,
-        unchecked_over_budget=_unchecked(best_estimate, checked),
+        estimate=estimate,
+        unchecked_over_budget=_unchecked(estimate, checked),
     )
 
 
@@ -268,14 +261,13 @@ def _first_fit(
     phases: tuple[PhaseName, ...],
     aligned_hi: int,
     kv_margin_bytes: int,
-) -> tuple[int, RunConfig, RunEstimate] | None:
+) -> tuple[int, RunConfig] | None:
     """Lowest fitting value, scanning up from the minimum in align steps."""
     value = spec.lo
     while value <= aligned_hi:
         trial = candidate(value)
-        ok, estimate = _fits(trial, spec, phases, kv_margin_bytes)
-        if ok:
-            return value, trial, estimate
+        if _fits(trial, spec, phases, kv_margin_bytes):
+            return value, trial
         value += spec.align
     return None
 
@@ -295,16 +287,29 @@ def _fits(
     spec: FieldSpec,
     phases: tuple[PhaseName, ...],
     kv_margin_bytes: int,
-) -> tuple[bool, RunEstimate]:
-    estimate = estimate_run(config)
+) -> bool:
+    """Whether ``config`` fits the checked phases; unchecked phases are not priced."""
     for name in phases:
-        breakdown = estimate.generation if name == "generation" else estimate.training
+        if name == "generation":
+            breakdown = estimate_generation(
+                config.model,
+                config.gen_device,
+                config.generation,
+                orchestrated=config.orchestrated,
+            )
+        else:
+            breakdown = estimate_training(
+                config.model,
+                config.train_device,
+                config.training,
+                orchestrated=config.orchestrated,
+            )
         if spec.require_kv_headroom and name == "generation":
             if not generation_can_serve(breakdown, kv_margin_bytes):
-                return False, estimate
+                return False
         elif not breakdown.fits_with_buffer:
-            return False, estimate
-    return True, estimate
+            return False
+    return True
 
 
 def _align_down(value: int, align: int) -> int:

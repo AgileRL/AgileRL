@@ -231,6 +231,9 @@ class TrainingMemoryPlan:
             parts.append(f"routed_expert_chunk_mib={self.routed_expert_chunk_mib}")
         if fsdp is not None:
             parts += [
+                f"fsdp.tp={fsdp.tp}",
+                f"fsdp.ep={fsdp.ep}",
+                f"fsdp.shard_group_size={fsdp.shard_group_size}",
                 f"fsdp.checkpoint_every_n_blocks={fsdp.checkpoint_every_n_blocks}",
                 f"fsdp.reshard_after_forward={fsdp.reshard_after_forward}",
                 f"fsdp.routed_expert_chunk_mib={fsdp.routed_expert_chunk_mib}",
@@ -528,6 +531,13 @@ def resolve_training_memory(
         memory: FSDPConfig | None,
         ddp_chunk: int | None,
     ) -> TrainingMemoryPlan | None:
+        # The most recompute and the lightest residency at the smallest unit
+        # is this rung's lightest plan; nothing else fits when it does not.
+        on, stride = strides[-1]
+        residency, trial = placements(memory)[-1]
+        lightest = priced(on, stride, residency, trial, ddp_chunk, units[0])
+        if not lightest.breakdown.fits_with_buffer:
+            return None
         fitting = [
             plan
             for on, stride in strides

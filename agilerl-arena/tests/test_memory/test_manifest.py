@@ -29,7 +29,7 @@ from agilerl.arena.memory.manifest import (
     run_config_from_manifest as _run_config_from_manifest,
 )
 from agilerl.arena.memory.specs import DeviceSpec, GiB, ModelArch
-from agilerl.arena.models.fsdp import FSDPConfig
+from agilerl.arena.models.fsdp import FSDPConfig, parallel_layout_pins
 from agilerl.arena.models.manifest import TrainingManifest
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 
@@ -1122,6 +1122,25 @@ class TestValidatedRunManifest:
 
         with pytest.raises(ValidationError, match=r"fsdp\.cpu_offload needs colocated"):
             validated_run_manifest(doc)
+
+    @pytest.mark.parametrize(
+        ("fsdp", "pinned"),
+        [({}, frozenset()), ({"ep": 2}, frozenset({"ep"}))],
+    )
+    def test_an_async_run_keeps_the_layout_fields_it_searches(
+        self, fsdp: dict, pinned: frozenset[str]
+    ):
+        # Arrange
+        doc = TrainingManifest.model_validate(
+            manifest(algorithm={"fsdp": fsdp}, **ASYNC_ROLLOUT)
+        )
+
+        # Act
+        run = validated_run_manifest(doc)
+
+        # Assert
+        assert run is not doc
+        assert parallel_layout_pins(run.algorithm.fsdp) == pinned
 
 
 class TestRunConfig:

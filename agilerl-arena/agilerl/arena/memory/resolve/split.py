@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
@@ -37,6 +37,7 @@ from agilerl.arena.memory.manifest import (
 )
 from agilerl.arena.memory.resolve.batch import (
     KV_POOL_FILL,
+    TrainerSplitError,
     rollout_group_size,
 )
 from agilerl.arena.memory.resolve.decode_costs import (
@@ -50,6 +51,12 @@ from agilerl.arena.memory.resolve.fsdp import (
     TrainingMemoryUnfitError,
 )
 from agilerl.arena.memory.resolve.learn_costs import learn_costs
+from agilerl.arena.memory.resolve.parallel import (
+    manifest_at_layout,
+    manifest_fsdp,
+    parallel_layouts,
+    trains_expert_parallel,
+)
 from agilerl.arena.memory.resolve.rollout import (
     default_rollout_batch_size,
     drafts_by_default,
@@ -956,16 +963,65 @@ class RunMemoryPlan:
     training: TrainingMemoryPlan
 
 
+@dataclass
+class SearchCache:
+    """Plans and engine widths one search reuses across layouts, node counts and tiers."""
+
+    # Keyed by :func:`_layout_plans_key`, then trainer count; ``None`` when it cannot run.
+    plans: dict[tuple, dict[int, TrainingMemoryPlan | None]] = field(
+        default_factory=dict
+    )
+    # Keyed by GPU and engine width: whether one engine holds a sequence.
+    servable_widths: dict[tuple, bool] = field(default_factory=dict)
+
+
+def _layout_plans_key(device: DeviceSpec, placed: TrainingManifest) -> tuple:
+    """The GPU, node size, host RAM share and layout one set of trainer plans is priced at."""
+    fsdp = placed.algorithm.fsdp
+    return (
+        device.name,
+        device.total_bytes,
+        device.gpus_per_node,
+        device.host_bytes_per_gpu,
+        fsdp.tp,
+        fsdp.ep,
+        fsdp.shard_group_size,
+    )
+
+
+def _cached_training_plan(
+    cache: SearchCache,
+    placed: TrainingManifest,
+    model: ModelSpec,
+    device: DeviceSpec,
+    trainers: int,
+) -> TrainingMemoryPlan | None:
+    """The plan for this trainer count at ``placed``'s layout, or ``None`` when it cannot run."""
+    plans = cache.plans.setdefault(_layout_plans_key(device, placed), {})
+    if trainers not in plans:
+        trial = placed.model_copy(deep=True)
+        trial.training.training_gpus_per_agent = trainers
+        try:
+            plans[trainers] = training_memory_from_manifest(trial, model, device)
+        except (TrainingMemoryUnfitError, TrainerSplitError):
+            plans[trainers] = None
+    return plans[trainers]
+
+
 def resolve_run_memory(
     manifest: TrainingManifest,
     model: ModelSpec,
     device: DeviceSpec,
     member_gpus: int | None,
-    gpus_per_node: int | None = None,
+    search_cache: SearchCache | None = None,
 ) -> RunMemoryPlan:
-    """Choose the GPU split, then the trainer memory plan.
+    """Choose the training layout and GPU split, then the trainer memory plan.
 
-    Each candidate trainer count is priced with its own
+    Layouts are tried from least parallel to most (:func:`parallel_layouts`),
+    each with its own split search; the first with a split that fits with the
+    underprediction buffer wins, else the first that fits at all. The layout
+    stays fixed across a search's trainer counts, so more trainers never buy
+    more parallelism. Each candidate trainer count is priced with its own
     :func:`training_memory_from_manifest` plan, so the split weighs learn
     time at the speed rungs that fit that many trainers. A searched split
     with the engine width omitted is searched at every width one engine can
@@ -974,11 +1030,12 @@ def resolve_run_memory(
 
     :param manifest: Validated run manifest. Not written.
     :param model: Training-side catalog model.
-    :param device: One GPU of the allocation.
+    :param device: One GPU of the allocation. Its ``gpus_per_node`` keeps an
+        engine and a parallel group on one node; ``None`` puts the member's
+        GPUs on one node.
     :param member_gpus: GPUs one member owns, to search the split; ``None``
         keeps the manifest's trainer and engine counts.
-    :param gpus_per_node: GPUs on one node; an engine stays on one node.
-        ``None`` puts the member's GPUs on one node.
+    :param search_cache: Plans and widths already priced for this manifest.
     :return: The plan.
     :raises ValueError: When the GPU cannot run LLM training, or the split is
         searched and none fits.
@@ -987,60 +1044,95 @@ def resolve_run_memory(
     unsupported = unsupported_gpu_reason(device)
     if unsupported is not None:
         raise ValueError(unsupported)
-    chosen = manifest.model_copy(deep=True)
-    split = None
-    plans: dict[int, TrainingMemoryPlan | None] = {}
-    if member_gpus is not None:
-        spec = manifest.algorithm
-        if not isinstance(spec, RolloutLLMSpec) or spec.vllm_config is None:
-            msg = f"{spec.name} does not generate rollouts; it has no GPU split"
-            raise TypeError(msg)
-        pinned_width = spec.vllm_config.tensor_parallel_size
-        if pinned_width is None:
-            widest = min(member_gpus - 1, gpus_per_node or member_gpus)
-            engine_widths = servable_engine_widths(manifest, device, widest)
-        else:
-            engine_widths = [pinned_width]
+    if member_gpus is None:
+        return RunMemoryPlan(
+            split=None, training=training_memory_from_manifest(manifest, model, device)
+        )
+    spec = manifest.algorithm
+    if not isinstance(spec, RolloutLLMSpec) or spec.vllm_config is None:
+        msg = f"{spec.name} does not generate rollouts; it has no GPU split"
+        raise TypeError(msg)
+    cache = SearchCache() if search_cache is None else search_cache
+    node = device.gpus_per_node
+    pinned_width = spec.vllm_config.tensor_parallel_size
+    if pinned_width is None:
+        widest = min(member_gpus - 1, node or member_gpus)
+        engine_widths = servable_engine_widths(
+            manifest, device, widest, cache.servable_widths
+        )
+    else:
+        engine_widths = [pinned_width]
+    layouts = parallel_layouts(
+        model.arch,
+        max(member_gpus - min(engine_widths, default=1), 1),
+        node,
+        manifest_fsdp(manifest),
+        trains_expert_parallel(manifest),
+        ranks_fixed=False,
+    )
+    bare: RunMemoryPlan | None = None
+    placed = manifest
+    for layout in layouts:
+        placed = manifest_at_layout(manifest, layout)
+        buffered = _split_at_layout(
+            placed, model, device, member_gpus, engine_widths, cache, True
+        )
+        if buffered is not None:
+            return buffered
+        if bare is None:
+            bare = _split_at_layout(
+                placed, model, device, member_gpus, engine_widths, cache, False
+            )
+    if bare is not None:
+        return bare
+    last_plans = (
+        cache.plans.get(_layout_plans_key(device, placed), {}) if layouts else {}
+    )
+    trainer_counts = range(1, member_gpus - min(engine_widths, default=member_gpus) + 1)
+    msg = (
+        f"No trainer / rollout-engine split of {member_gpus} "
+        f"{device.name} GPUs fits this run: "
+        f"{_no_split_reason(split_workload_from_manifest(placed), trainer_counts, last_plans)}"
+    )
+    raise ValueError(msg)
 
-        def learn_cost_ratio(trainers: int) -> float | None:
-            if trainers not in plans:
-                trial = manifest.model_copy(deep=True)
-                trial.training.training_gpus_per_agent = trainers
-                try:
-                    plans[trainers] = training_memory_from_manifest(
-                        trial, model, device
-                    )
-                except TrainingMemoryUnfitError:
-                    plans[trainers] = None
-            plan = plans[trainers]
-            return None if plan is None else plan.learn_cost_ratio
 
-        workload = split_workload_from_manifest(manifest)
-        splits = [
-            found
-            for width in engine_widths
-            if (
-                found := choose_gpu_split(
-                    model, device, workload, member_gpus, width, learn_cost_ratio
-                )
+def _split_at_layout(
+    placed: TrainingManifest,
+    model: ModelSpec,
+    device: DeviceSpec,
+    member_gpus: int,
+    engine_widths: list[int],
+    cache: SearchCache,
+    require_buffer: bool,
+) -> RunMemoryPlan | None:
+    """The fastest split at the layout pinned on ``placed``, or ``None`` when none fits.
+
+    :param placed: The manifest with its layout pinned by :func:`manifest_at_layout`.
+    :param cache: Plans already priced for this search.
+    :param require_buffer: Only take trainer counts whose plan fits with the buffer.
+    """
+    accepted: dict[int, TrainingMemoryPlan] = {}
+
+    def learn_cost_ratio(trainers: int) -> float | None:
+        plan = _cached_training_plan(cache, placed, model, device, trainers)
+        if plan is None or (require_buffer and not plan.breakdown.fits_with_buffer):
+            return None
+        accepted[trainers] = plan
+        return plan.learn_cost_ratio
+
+    workload = split_workload_from_manifest(placed)
+    splits = [
+        found
+        for width in engine_widths
+        if (
+            found := choose_gpu_split(
+                model, device, workload, member_gpus, width, learn_cost_ratio
             )
-            is not None
-        ]
-        split = choose_engine_width(splits)
-        if split is None:
-            trainer_counts = range(
-                1, member_gpus - min(engine_widths, default=member_gpus) + 1
-            )
-            msg = (
-                f"No trainer / rollout-engine split of {member_gpus} "
-                f"{device.name} GPUs fits this run: "
-                f"{_no_split_reason(workload, trainer_counts, plans)}"
-            )
-            raise ValueError(msg)
-        chosen.training.training_gpus_per_agent = split.trainers
-        chosen.training.rollout_engines_per_agent = split.engines
-        chosen.training.rollout_batch_size = split.rollout_batch_size
-    training = plans.get(chosen.training.training_gpus_per_agent)
-    if training is None:
-        training = training_memory_from_manifest(chosen, model, device)
-    return RunMemoryPlan(split=split, training=training)
+        )
+        is not None
+    ]
+    split = choose_engine_width(splits)
+    if split is None:
+        return None
+    return RunMemoryPlan(split=split, training=accepted[split.trainers])

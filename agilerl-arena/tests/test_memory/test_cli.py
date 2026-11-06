@@ -35,6 +35,8 @@ from agilerl.arena.memory.cli import (
     memory_group,
     solve_main,
 )
+from agilerl.arena.memory.estimator import MemoryComponent, PhaseBreakdown, RunEstimate
+from agilerl.arena.memory.generation import KV_MARGIN_BYTES
 from agilerl.arena.memory.specs import ModelArch
 from agilerl.arena.models.manifest import TrainingManifest
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
@@ -1249,8 +1251,8 @@ class TestMainResourceTier:
         assert code == EXIT_OK
         assert "Cheapest resource tier that fits: l4-2x" in out
 
-    def test_unset_width_on_a_tier_without_room_for_an_engine(self, tmp_path, capsys):
-        # Arrange: the run starts a width-1 engine, which one GPU cannot host.
+    def test_unset_width_uses_a_second_node_for_the_engine(self, tmp_path, capsys):
+        # Arrange: one GPU cannot host a trainer and an engine. Two 1-GPU nodes can.
         doc = copy.deepcopy(MANIFEST)
         del doc["algorithm"]["vllm_config"]["tensor_parallel_size"]
         path = tmp_path / "unset.yaml"
@@ -1261,6 +1263,7 @@ class TestMainResourceTier:
                 "gpu_type": "NVIDIA L4",
                 "num_gpus": 1,
                 "price_per_node_hour": 1.0,
+                "node_counts": [1, 2],
             }
         ]
 
@@ -1269,8 +1272,8 @@ class TestMainResourceTier:
 
         # Assert
         out = capsys.readouterr().out
-        assert code == EXIT_OVER_BUDGET
-        assert "l4-1x: 1 GPUs, the job needs 2" in out
+        assert code == EXIT_OK
+        assert "2 nodes of l4-1x" in out
 
     def test_num_gpus_with_a_tier_search_is_a_usage_error(self, manifest_path, capsys):
         code = main(manifest_path, tiers=TIERS, config_path=TINY_CONFIG, num_gpus=2)
@@ -1278,7 +1281,9 @@ class TestMainResourceTier:
         assert code == EXIT_USAGE
         assert "--num-gpus needs --gpu or --device-gb" in capsys.readouterr().err
 
-    def test_tensor_parallel_engine_needs_a_gpu_per_rank(self, tmp_path, capsys):
+    def test_tensor_parallel_engine_wider_than_a_node_is_ruled_out(
+        self, tmp_path, capsys
+    ):
         doc = copy.deepcopy(MANIFEST)
         doc["algorithm"]["vllm_config"]["tensor_parallel_size"] = 4
         path = tmp_path / "tp.yaml"
@@ -1288,7 +1293,79 @@ class TestMainResourceTier:
 
         out = capsys.readouterr().out
         assert code == EXIT_OVER_BUDGET
-        assert "the job needs 5" in out
+        assert "l4-2x: engine tensor_parallel_size 4 exceeds 2 GPUs on one node" in out
+
+    @pytest.fixture
+    def queued_estimate(self, monkeypatch):
+        """Every estimate holds 2 of 8 sequences; only a queue check adds the warning."""
+        pool = 5 * KV_MARGIN_BYTES
+        queued = RunEstimate(
+            training=PhaseBreakdown(
+                phase="training",
+                components=(
+                    MemoryComponent(key="weights", label="Weights", n_bytes=1),
+                ),
+                device_total_bytes=10_000,
+                device_usable_bytes=10_000,
+            ),
+            generation=PhaseBreakdown(
+                phase="generation",
+                components=(
+                    MemoryComponent(
+                        key="kv_cache",
+                        label="KV cache pool",
+                        n_bytes=pool,
+                        detail={
+                            "pool": pool,
+                            "worst_case_demand": 16 * KV_MARGIN_BYTES,
+                            "startup_pool": pool,
+                            "full_sequence_bytes": 1,
+                        },
+                    ),
+                ),
+                device_total_bytes=pool * 4,
+                device_usable_bytes=pool * 4,
+            ),
+        )
+        monkeypatch.setattr(
+            "agilerl.arena.memory.resources.estimate_run", lambda _config: queued
+        )
+        monkeypatch.setattr(
+            "agilerl.arena.memory.cli.estimate_run", lambda _config: queued
+        )
+
+    @pytest.mark.usefixtures("queued_estimate")
+    def test_tier_search_report_keeps_the_queue_warning(self, manifest_path, capsys):
+        # Act
+        code = main(manifest_path, tiers=TIERS, config_path=TINY_CONFIG, no_color=True)
+
+        # Assert
+        assert code == EXIT_OK
+        assert "generation may queue" in capsys.readouterr().out
+
+    @pytest.mark.usefixtures("queued_estimate")
+    def test_tier_search_json_keeps_the_queue_warning(self, manifest_path, capsys):
+        # Act
+        code = main(manifest_path, tiers=TIERS, config_path=TINY_CONFIG, as_json=True)
+
+        # Assert
+        payload = json.loads(capsys.readouterr().out)
+        assert code == EXIT_OK
+        assert any(
+            "generation may queue" in warning
+            for warning in payload["generation"]["warnings"]
+        )
+
+    @pytest.mark.usefixtures("queued_estimate")
+    def test_one_gpu_report_attaches_the_queue_warning(self, manifest_path, capsys):
+        # Act
+        code = main(
+            manifest_path, config_path=TINY_CONFIG, gpu="NVIDIA L4", no_color=True
+        )
+
+        # Assert
+        assert code == EXIT_OK
+        assert "generation may queue" in capsys.readouterr().out
 
     def test_json_names_the_tier_and_every_verdict(self, manifest_path, capsys):
         code = main(manifest_path, tiers=TIERS, config_path=TINY_CONFIG, as_json=True)

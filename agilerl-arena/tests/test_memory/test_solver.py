@@ -7,7 +7,9 @@ from pathlib import Path
 
 import pytest
 
+from agilerl.arena.memory import estimator as estimator_module
 from agilerl.arena.memory import kv_cache
+from agilerl.arena.memory import solver as solver_module
 from agilerl.arena.memory.estimator import (
     estimate_generation,
     estimate_run,
@@ -104,6 +106,31 @@ class TestSolveInference:
         assert result.limited_by == "memory"
         assert generation_can_serve(result.estimate.generation)
         assert not generation_can_serve(over)
+
+    def test_generation_search_does_not_price_training(
+        self, model, device, monkeypatch
+    ):
+        # Arrange
+        settings = GenerationSettings(gpu_memory_utilization=0.07, max_model_len=2048)
+        priced = []
+        real = estimator_module.estimate_training
+
+        def spy(*args, **kwargs):
+            priced.append(args)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(solver_module, "estimate_training", spy)
+        monkeypatch.setattr(estimator_module, "estimate_training", spy)
+
+        # Act
+        result = solve_inference(
+            inference_run_config(model, device, settings), "max_num_seqs", hi=64
+        )
+
+        # Assert: one training bar, for the returned estimate.
+        assert result.value == 6
+        assert result.estimate.training.phase == "training"
+        assert len(priced) == 1
 
     def test_higher_concurrency_shortens_max_model_len(self, model, device):
         def solved(seqs: int) -> int:

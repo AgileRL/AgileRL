@@ -1129,6 +1129,8 @@ class ArenaClient:
         *,
         resource_id: str | int | None = None,
         num_nodes: int | None = None,
+        num_gpus: int | None = None,
+        gpu_type: str | None = None,
         project: str | None = None,
         experiment_name: str | None = None,
         reward_file: str | os.PathLike[str] | bytes | None = None,
@@ -1143,6 +1145,12 @@ class ArenaClient:
         :type resource_id: str | int | None
         :param num_nodes: The number of nodes to use for training.
         :type num_nodes: int | None
+        :param num_gpus: Total GPUs for the job. Arena uses the fewest nodes.
+            Cannot be combined with ``resource_id`` or ``num_nodes``.
+        :type num_gpus: int | None
+        :param gpu_type: Short GPU name such as ``h100-80``, ``b200`` or ``l4``.
+            Cannot be combined with ``resource_id`` or ``num_nodes``.
+        :type gpu_type: str | None
         :param project: The project to submit the experiment to.
         :type project: str | None
         :param experiment_name: The name of the experiment to submit.
@@ -1154,7 +1162,10 @@ class ArenaClient:
             When omitted, the server uses the reference answer from the first
             dataset row.
         :type completion: str | None
+        :raises ArenaValidationError: When GPU fields are combined with a node
+            choice, or ``num_gpus`` is below 1.
         """
+        self._check_resource_request(resource_id, num_nodes, num_gpus, gpu_type)
         training_manifest = TrainingManifest.get_validated(manifest, mode="python")
         self._check_model_status(training_manifest)
         self._check_rollout_mode(training_manifest)
@@ -1174,6 +1185,8 @@ class ArenaClient:
                 project=resolved_project,
                 resource_id=resource_id,
                 num_nodes=num_nodes,
+                num_gpus=num_gpus,
+                gpu_type=gpu_type,
                 experiment_name=experiment_name,
                 reward_file=reward_file,
                 completion=completion,
@@ -1189,8 +1202,8 @@ class ArenaClient:
                 self._close_upload_files(files)
 
         # The server rejects explicit nulls: project and resource_id are
-        # non-nullable, and the num_nodes default only applies when the key is
-        # absent.
+        # non-nullable, and the resource defaults (num_nodes, num_gpus,
+        # gpu_type) only apply when the key is absent.
         payload: dict[str, Any] = {"manifest": validated, "project": resolved_project}
         payload.update(
             {
@@ -1198,6 +1211,8 @@ class ArenaClient:
                 for key, value in (
                     ("resource_id", resource_id),
                     ("num_nodes", num_nodes),
+                    ("num_gpus", num_gpus),
+                    ("gpu_type", gpu_type),
                     ("experiment_name", experiment_name),
                 )
                 if value is not None
@@ -1209,6 +1224,26 @@ class ArenaClient:
             json=payload,
             timeout=self._upload_timeout,
         ).collect()
+
+    @staticmethod
+    def _check_resource_request(
+        resource_id: str | int | None,
+        num_nodes: int | None,
+        num_gpus: int | None,
+        gpu_type: str | None,
+    ) -> None:
+        """Reject a GPU request below 1 GPU or combined with a node choice."""
+        if num_gpus is not None and num_gpus < 1:
+            msg = "num_gpus must be at least 1."
+            raise ArenaValidationError(msg)
+        if (num_gpus is not None or gpu_type is not None) and (
+            resource_id is not None or num_nodes is not None
+        ):
+            msg = (
+                "num_gpus and gpu_type cannot be combined with "
+                "resource_id or num_nodes."
+            )
+            raise ArenaValidationError(msg)
 
     @staticmethod
     def _check_model_status(manifest: TrainingManifest) -> None:
@@ -1244,6 +1279,8 @@ class ArenaClient:
         project: str | None,
         resource_id: str | int | None,
         num_nodes: int | None,
+        num_gpus: int | None,
+        gpu_type: str | None,
         experiment_name: str | None,
         reward_file: str | os.PathLike[str] | bytes | None,
         completion: str | None,
@@ -1254,6 +1291,8 @@ class ArenaClient:
             "project": project,
             "resource_id": str(resource_id) if resource_id is not None else None,
             "num_nodes": str(num_nodes) if num_nodes is not None else None,
+            "num_gpus": str(num_gpus) if num_gpus is not None else None,
+            "gpu_type": gpu_type,
             "experiment_name": experiment_name,
             "completion": completion,
         }

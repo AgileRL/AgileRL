@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Annotated, ClassVar
 
@@ -23,6 +24,8 @@ FSDP_MEMORY_FIELDS = (
     "activation_offload",
     "cpu_offload",
 )
+# Parallel degrees a manifest can pin. Absent from a built config, all three stay.
+PARALLEL_LAYOUT_FIELDS = frozenset({"tp", "ep", "shard_group_size"})
 
 
 @dataclass
@@ -204,6 +207,31 @@ class FSDPConfig:
                         f"must be divisible by {name}={degree}"
                     )
                     raise ValueError(msg)
+
+
+def parallel_layout_pins(config: FSDPConfig) -> frozenset[str]:
+    """``tp``, ``ep``, and ``shard_group_size`` the manifest set on ``config``.
+
+    A config built in Python, with no manifest pins recorded, keeps all three.
+
+    :param config: FSDP config.
+    :return: The pinned field names.
+    """
+    recorded = getattr(config, "_parallel_pins", None)
+    if recorded is None:
+        return PARALLEL_LAYOUT_FIELDS
+    return frozenset(recorded)
+
+
+def record_parallel_pins(config: FSDPConfig, names: Iterable[str]) -> FSDPConfig:
+    """Remember which parallel fields ``names`` set. Returns ``config``.
+
+    :param config: FSDP config, updated in place.
+    :param names: Field names the manifest passed.
+    :return: ``config``.
+    """
+    config._parallel_pins = frozenset(names) & PARALLEL_LAYOUT_FIELDS
+    return config
 
 
 def _dtype_name(value: object) -> str:
