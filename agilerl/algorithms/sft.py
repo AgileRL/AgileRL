@@ -22,7 +22,6 @@ from agilerl.typing import (
     ObservationType,
     SFTPrompts,
 )
-from agilerl.utils.llm_packing import pack_next_token_frame
 from agilerl.utils.llm_utils import (
     MicroBatchMetrics,
     is_sft_prompts,
@@ -320,32 +319,28 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         """
         self.actor.train(mode=training)
 
-        model_kwargs, packed = self._gradient_forward_inputs(
-            input_ids, attention_mask=attention_mask
-        )
-        if packed is not None:
-            labels = pack_next_token_frame(labels, packed, -100)
-
-        # Run the transformer with the lm_head patched to identity so
-        # ``.logits`` is the final hidden state, then compute the loss from the
-        # hidden states + lm_head weight without ever materializing the full logits tensor.
-        with self._patch_lm_head_to_identity():
-            # FSDP2 all-gather hooks run on ``Module.__call__``.
-            hidden = self.actor(**model_kwargs).logits  # [B, L, H]; [1, N, H] packed
-        # The head runs on response tokens only.
-        scored = labels != -100
-        scored_hidden = hidden[:, :-1][scored]  # [M, H]
-        scored_labels = labels[scored]  # [M]
-
-        fused_fn, head_w, head_b = self._fused_logprob_fn_and_head()
-        logps = fused_fn(
-            scored_hidden.unsqueeze(0),
-            head_w,
-            head_b,
-            scored_labels.unsqueeze(0),
-            temperature=1.0,
-        )  # [1, M]
-        return -logps.sum() / max(scored_labels.numel(), 1)
+        n_scored = (labels != -100).sum()
+        with self.sequence_layout.prepare_forward(input_ids, attention_mask) as fwd:
+            labels = fwd.labels(labels, -100)
+            # Run the transformer with the lm_head patched to identity so
+            # ``.logits`` is the final hidden state, then compute the loss from the
+            # hidden states + lm_head weight without ever materializing the full logits tensor.
+            with self._patch_lm_head_to_identity(), self._activation_offload_ctx():
+                # FSDP2 all-gather hooks run on ``Module.__call__``.
+                hidden = fwd.scoring_hidden(self.actor(**fwd.kwargs).logits)
+            # The head runs on this forward's response tokens only.
+            scored = labels != -100
+            fused_fn, head_w, head_b = self._fused_logprob_fn_and_head()
+            logps = fused_fn(
+                hidden[scored].unsqueeze(0),
+                head_w,
+                head_b,
+                labels[scored].unsqueeze(0),
+                temperature=1.0,
+            )  # [1, M]
+            per_token = logps.new_zeros(labels.shape).masked_scatter(scored, logps[0])
+            log_probs = fwd.restore(per_token, "logprobs")
+        return -log_probs.sum() / n_scored.clamp(min=1)
 
     def test(
         self,

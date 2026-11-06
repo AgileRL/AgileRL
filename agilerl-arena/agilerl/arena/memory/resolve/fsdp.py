@@ -10,11 +10,12 @@ from dataclasses import dataclass, replace
 from typing import Literal
 
 from agilerl.arena.memory.breakdown import PhaseBreakdown
-from agilerl.arena.memory.estimator import estimate_training
+from agilerl.arena.memory.estimator import estimate_training, training_tensor_parallel
 from agilerl.arena.memory.formulas import (
     DEFAULT_ROUTED_CHUNK_BYTES,
     ROUTED_CHUNK_MIB_CHOICES,
     checkpointed_blocks,
+    moe_collectives_saveable,
 )
 from agilerl.arena.memory.resolve.batch import (
     ROW_FILL,
@@ -65,8 +66,9 @@ def cpu_offload_blocker(fsdp: FSDPConfig | None, async_rollout: bool) -> str | N
 def can_train_data_parallel(fsdp: FSDPConfig) -> bool:
     """Whether a run configured for FSDP may train DDP instead, every rank holding the whole model.
 
-    Expert and tensor parallel split the model across ranks, and a set
-    memory field or stride is an FSDP setting the run keeps.
+    Expert and tensor parallel split the model across ranks, context parallel
+    runs on the FSDP mesh, and a set memory field or stride is an FSDP setting
+    the run keeps.
 
     :param fsdp: The run's FSDP config.
     :return: True when DDP is allowed.
@@ -74,6 +76,7 @@ def can_train_data_parallel(fsdp: FSDPConfig) -> bool:
     return (
         fsdp.ep == 1
         and fsdp.tp == 1
+        and fsdp.cp == 1
         and fsdp.checkpoint_every_n_blocks is None
         and all(getattr(fsdp, name) is None for name in FSDP_MEMORY_FIELDS)
     )
@@ -203,6 +206,8 @@ class TrainingMemoryPlan:
     fsdp: FSDPConfig | None
     # Routed-expert row chunk under DDP; ``None`` under FSDP and on dense models.
     routed_expert_chunk_mib: int | None
+    # ``fsdp.save_moe_collectives`` has collectives to save on this model.
+    moe_collectives_saveable: bool
     # Modeled step, and the tokens it trains, from :func:`learn_cost`.
     cost: float
     tokens: float
@@ -238,6 +243,10 @@ class TrainingMemoryPlan:
                 f"fsdp.activation_offload={fsdp.activation_offload}",
                 f"fsdp.cpu_offload={fsdp.cpu_offload}",
             ]
+            if fsdp.tp > 1:
+                parts.append(f"fsdp.shard_frozen_tp={fsdp.shard_frozen_tp}")
+            if self.gradient_checkpointing and self.moe_collectives_saveable:
+                parts.append(f"fsdp.save_moe_collectives={fsdp.save_moe_collectives}")
         return ", ".join(parts)
 
 
@@ -303,12 +312,17 @@ def _memory_rungs(
 ) -> list[tuple[str | None, FSDPConfig]]:
     """FSDP memory-only fields, fastest first, then each last resort on top of the one before.
 
-    Last resorts, in order: a smaller routed-expert chunk (MoE only), the
-    optimizer on CPU, activation offload, then full CPU offload of parameters
-    and gradients. Full CPU offload turns optimizer offload off (the two are
-    exclusive) and needs colocated vLLM, as CPUOffloadPolicy keeps parameters
-    on CPU. Set fields never move.
+    Last resorts, in order: recomputing the MoE collectives checkpointing
+    would save (MoE with expert parallel or a MoE tensor-parallel plan only),
+    FSDP-sharding frozen tensor-parallel weights (``tp > 1`` only), a smaller
+    routed-expert chunk (MoE only), the optimizer on CPU, activation offload,
+    then full CPU offload of parameters and gradients. Full CPU offload turns
+    optimizer offload off (the two are exclusive) and needs colocated vLLM,
+    as CPUOffloadPolicy keeps parameters on CPU. Set fields never move.
     """
+    saveable = fsdp.save_moe_collectives is None and moe_collectives_saveable(
+        model.arch, fsdp.ep, training_tensor_parallel(model.arch, fsdp)
+    )
     current = replace(
         fsdp,
         routed_expert_chunk_mib=(
@@ -319,8 +333,16 @@ def _memory_rungs(
         optim_cpu_offload=bool(fsdp.optim_cpu_offload),
         activation_offload=bool(fsdp.activation_offload),
         cpu_offload=bool(fsdp.cpu_offload),
+        shard_frozen_tp=bool(fsdp.shard_frozen_tp),
+        save_moe_collectives=True if saveable else fsdp.save_moe_collectives,
     )
     rungs: list[tuple[str | None, FSDPConfig]] = [(None, current)]
+    if saveable:
+        current = replace(current, save_moe_collectives=False)
+        rungs.append(("fsdp.save_moe_collectives=False", current))
+    if fsdp.shard_frozen_tp is None and fsdp.tp > 1:
+        current = replace(current, shard_frozen_tp=True)
+        rungs.append(("fsdp.shard_frozen_tp=True", current))
     if fsdp.routed_expert_chunk_mib is None and model.arch.is_moe:
         for chunk in ROUTED_CHUNK_MIB_CHOICES[1:]:
             current = replace(current, routed_expert_chunk_mib=chunk)
@@ -484,6 +506,10 @@ def resolve_training_memory(
             micro_batch_tokens_per_gpu=budget,
             fsdp=trial,
             routed_expert_chunk_mib=ddp_chunk,
+            moe_collectives_saveable=trial is not None
+            and moe_collectives_saveable(
+                model.arch, trial.ep, training_tensor_parallel(model.arch, trial)
+            ),
             cost=learn_cost(
                 n_layers, on, stride, passes, tokens, residency, costs, chunks
             ),

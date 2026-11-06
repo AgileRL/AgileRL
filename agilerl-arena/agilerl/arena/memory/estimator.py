@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pydantic import BaseModel, ConfigDict
 
 import agilerl.arena.memory.formulas as formulas
+import agilerl.arena.memory.lora_formulas as lora_formulas
 import agilerl.arena.memory.vision as vision
 from agilerl.arena.memory.breakdown import MemoryComponent, PhaseBreakdown
 from agilerl.arena.memory.formulas import geometry_gap_warning
@@ -29,7 +30,7 @@ from agilerl.arena.memory.lora_placement import (
     lora_tensor_placement,
     split_moe_lora_recompute_bytes,
 )
-from agilerl.arena.memory.nccl import TP_RUNTIME_BYTES, trainer_nccl_bytes
+from agilerl.arena.memory.nccl import trainer_nccl_bytes
 from agilerl.arena.memory.resolve.mamba import mamba_scan_is_unfused
 from agilerl.arena.memory.resolve.moe import (
     expert_gemm_backend,
@@ -90,9 +91,16 @@ def estimate_training(
         memory field set.
     :param orchestrated: Charge the per-process job overhead.
     :return: Stacked-bar breakdown for the training phase.
-    :raises ValueError: When checkpointing or an FSDP memory field is unset.
+    :raises ValueError: When checkpointing or an FSDP memory field is unset,
+        or when an MoE model sets ``ep < tp``.
     """
     fsdp = settings.fsdp
+    if fsdp is not None and fsdp.ep < fsdp.tp and model.arch.is_moe:
+        msg = (
+            f"FSDPConfig(ep={fsdp.ep}, tp={fsdp.tp}): MoE models need "
+            "ep >= tp, since tensor parallel does not split routed experts."
+        )
+        raise ValueError(msg)
     unset = (
         []
         if settings.gradient_checkpointing is not None
@@ -250,6 +258,23 @@ def _resident_bytes(
     return kept * kept_bytes + split * split_bytes / divisor
 
 
+def _fsdp_lora_placement(
+    arch: ModelArch, settings: TrainingSettings, fsdp: FSDPConfig, packed: int
+) -> tuple[int, int, int]:
+    """One adapter's elements on one FSDP rank: all of them, then (replicated, sharded).
+
+    :param packed: Packed-expert LoRA matrices FSDP shards with the dense weights.
+    """
+    tp = training_tensor_parallel(arch, fsdp)
+    rank, scope = settings.lora_rank, settings.lora_target_scope
+    tower = settings.tower_lora_targets
+    per_rank, _ = lora_tensor_placement(arch, rank, scope, packed, None, tp, tower)
+    repl, shard = lora_tensor_placement(
+        arch, rank, scope, packed, PARAM_PERSISTENCE_THRESHOLD, tp, tower
+    )
+    return per_rank, repl, shard
+
+
 def adapter_state(
     arch: ModelArch, settings: TrainingSettings, shards: int
 ) -> AdapterState:
@@ -260,22 +285,29 @@ def adapter_state(
     every trainable parameter and runs it in ``param_dtype``. The frozen
     reference keeps FSDP's persistence split: small matrices replicated in
     ``param_dtype``, the rest sharded in fp32. Expert LoRA under EP splits
-    across the EP group only, outside FSDP.
+    across the EP group only, outside FSDP. Tensor parallel keeps ``1/tp``
+    of every LoRA factor its plan splits on each rank. Tower LoRA adds the
+    tower and connector adapters its targets name to every resident adapter.
 
     :param arch: Decoder geometry.
     :param settings: Training settings (rank, scope, FSDP).
-    :param shards: GPUs one weight copy is sharded across; 1 means no FSDP shard.
+    :param shards: GPUs one dense weight copy is sharded across; 1 means no FSDP shard.
     :return: Adapter-state bytes on one GPU.
     """
     fsdp = settings.fsdp
     ep = 1 if fsdp is None else fsdp.ep
     rank = settings.lora_rank
     packed = settings.lora_packed_target_matrices
-    expert_lora = formulas.packed_lora_param_count(arch, rank, packed) if ep > 1 else 0
+    expert_lora = (
+        lora_formulas.packed_lora_param_count(arch, rank, packed) if ep > 1 else 0
+    )
     dense_packed = 0 if ep > 1 else packed
-    per_adapter = formulas.lora_param_count(
+    per_adapter = lora_formulas.lora_param_count(
         arch, rank, settings.lora_target_scope
-    ) + formulas.packed_lora_param_count(arch, rank, dense_packed)
+    ) + lora_formulas.packed_lora_param_count(arch, rank, dense_packed)
+    per_adapter += lora_formulas.tower_lora_param_count(
+        arch, rank, settings.tower_lora_targets
+    )
     n_trained = settings.n_trained_adapters
     n_frozen = settings.n_resident_adapters - n_trained
     head = arch.hidden_size + 1 if settings.uses_critic else 0
@@ -291,14 +323,10 @@ def adapter_state(
     else:
         compute_bytes = FSDP_PARAM_BYTES[fsdp.param_dtype]
         frozen_repl_bytes = compute_bytes
-        trained_repl, trained_shard = 0, trained
-        repl, shard = lora_tensor_placement(
-            arch,
-            rank,
-            settings.lora_target_scope,
-            dense_packed,
-            PARAM_PERSISTENCE_THRESHOLD,
+        per_rank_adapter, repl, shard = _fsdp_lora_placement(
+            arch, settings, fsdp, dense_packed
         )
+        trained_repl, trained_shard = 0, per_rank_adapter * n_trained + head
         frozen_repl, frozen_shard = repl * n_frozen, shard * n_frozen
         if shards > 1 and settings.trajectories > 1 and not offload:
             # FSDP2 accumulates held unsharded grads in the reduce dtype.
@@ -354,6 +382,7 @@ class ActivationPeak:
     saved: float
     offloaded: float
     router_topk: float
+    saved_collectives: float
     recompute: float
     split_lora: float
     routed_chunks: float
@@ -546,11 +575,18 @@ class ActivationTerms:
     # Saved tensors activation offload moves to pinned host RAM.
     offloaded: float
     router_topk: float
+    # Collective outputs every checkpointed MoE block saves, and the share the
+    # backward peak adds beside the block in backward, whose own saved outputs
+    # are its exchange buffers.
+    saved_collectives: float
+    backward_collectives: float
     recompute: float
     split_lora: float
     routed_chunks: float
     ep_exchange: float
     loss_hidden: float
+    # Final hidden state the block backward holds; a CP rank's shard of loss_hidden.
+    block_hidden: float
     lora_casts: float
     lora_dropout: float
     logits: float
@@ -609,7 +645,9 @@ def _vision_activation_terms(
     )
     # Balancing sends one row to and receives one row from each peer per round.
     balance_pixels = (
-        2 * (settings.shard_gpus - 1) * row_pixels if settings.segmented_rows else 0
+        2 * (settings.shard_group_gpus - 1) * row_pixels
+        if settings.segmented_rows
+        else 0
     )
     return tower_lora, nograd_pixels, balance_pixels
 
@@ -627,7 +665,45 @@ def _logit_terms(
     return logits + tp_head_gather, nograd_logits + tp_head_gather, tp_head_gather
 
 
-def _saved_activation_bytes(
+def _fsdp_saved_moe_terms(
+    arch: ModelArch,
+    settings: TrainingSettings,
+    act_bytes: float,
+    block_seq: int,
+    live_rows: int,
+    tp: int,
+    routed_split: int,
+) -> tuple[int, int, int]:
+    """Router top-k FSDP's checkpoint cache stores, and saved MoE collective outputs.
+
+    :return: Router top-k bytes, collective outputs every checkpointed MoE
+        block saves, and the share the backward peak adds beside the block
+        in backward.
+    """
+    fsdp = settings.fsdp
+    if fsdp is None:
+        return 0, 0, 0
+    # FSDP selective checkpointing stores aten.topk in its cache.
+    router_topk = formulas.saved_router_topk_bytes(arch, live_rows, block_seq)
+    moe_blocks = formulas.checkpointed_moe_blocks(arch, settings)
+    if not (moe_blocks and fsdp.save_moe_collectives):
+        return router_topk, 0, 0
+    saved = moe_blocks * formulas.saved_moe_collective_bytes(
+        arch, live_rows, block_seq, act_bytes, fsdp.ep, routed_split, tp
+    )
+    in_backward = formulas.saved_moe_collective_bytes(
+        arch,
+        settings.grad_forward_rows,
+        block_seq,
+        act_bytes,
+        fsdp.ep,
+        routed_split,
+        tp,
+    )
+    return router_topk, saved, saved - in_backward
+
+
+def _saved_terms(
     arch: ModelArch,
     settings: TrainingSettings,
     act_bytes: float,
@@ -637,8 +713,12 @@ def _saved_activation_bytes(
     tp: int,
     routed_split: int,
     casts_apply: bool,
-) -> int:
-    """Forward tensors every block keeps for backward: checkpoint inputs or saved tensors."""
+) -> tuple[int, int, int, int]:
+    """Forward tensors every block keeps for backward, then :func:`_fsdp_saved_moe_terms`.
+
+    :return: Checkpoint inputs or saved block tensors, router top-k bytes,
+        saved MoE collective outputs, and their backward-peak share.
+    """
     if formulas.prices_stored_tensors(arch):
         block_saved = formulas.stored_block_bytes(
             arch,
@@ -670,13 +750,16 @@ def _saved_activation_bytes(
     checkpointed = formulas.training_checkpointed_blocks(arch, settings)
     # A checkpointed block keeps its input; any other block keeps its forward's
     # saved tensors.
-    return int(
+    stored = int(
         checkpointed * live_rows * seq_len * arch.hidden_size * act_bytes
         + (arch.n_layers - checkpointed) * block_saved * settings.grad_graph_rows
     )
+    return stored, *_fsdp_saved_moe_terms(
+        arch, settings, act_bytes, seq_len, live_rows, tp, routed_split
+    )
 
 
-def _nograd_pass_bytes(
+def _nograd_pass_terms(
     arch: ModelArch,
     settings: TrainingSettings,
     act_bytes: float,
@@ -684,12 +767,13 @@ def _nograd_pass_bytes(
     unfused_mamba_scan: bool,
     tp: int,
     routed_split: int,
-) -> int:
-    """Block transients of the no-grad forward, or 0 when the run has none."""
+) -> tuple[int, float]:
+    """No-grad forward block transients (0 without the pass), and its final hidden state."""
+    hidden = settings.micro_batch_size * seq_len * arch.hidden_size * act_bytes
     if not settings.has_nograd_pass:
-        return 0
+        return 0, hidden
     # The fused pass splits the stacked adapter rows into micro-batch forwards.
-    return formulas.nograd_forward_bytes(
+    block = formulas.nograd_forward_bytes(
         arch,
         settings.micro_batch_size,
         seq_len,
@@ -698,6 +782,7 @@ def _nograd_pass_bytes(
         tensor_parallel=tp,
         routed_split=routed_split,
     )
+    return block, hidden
 
 
 def _activation_terms(
@@ -710,31 +795,35 @@ def _activation_terms(
     unfused_mamba_scan: bool = False,
     grouped_gemm_bytes: int | None = None,
 ) -> ActivationTerms:
-    """Checkpoint boundaries, block recompute, logits, and the no-grad pass."""
+    """Checkpoint boundaries, block recompute, logits, and the no-grad pass.
+
+    :param seq_len: Full sequence length. Context-parallel ranks run their
+        blocks and the head on a ``1 / cp`` shard of the padded action frame
+        and gather only the fp32 per-token outputs.
+    """
     fsdp = settings.fsdp
     tp = training_tensor_parallel(arch, fsdp)
+    cp = 1 if fsdp is None else fsdp.cp
+    block_seq = formulas.context_parallel_shard_len(arch, seq_len, cp)
+    block_hidden = live_rows * block_seq * arch.hidden_size * act_bytes
     routed_split = 1 if fsdp is None or fsdp.ep <= 1 else fsdp.tp
     casts_apply = adapters.compute_bytes > act_bytes
-    stored = _saved_activation_bytes(
+    stored, router_topk, saved_collectives, backward_collectives = _saved_terms(
         arch,
         settings,
         act_bytes,
-        seq_len,
+        block_seq,
         live_rows,
         unfused_mamba_scan,
         tp,
         routed_split,
         casts_apply,
     )
-    # FSDP selective checkpointing stores aten.topk in its cache.
-    router_topk = 0
-    if settings.fsdp is not None:
-        router_topk = formulas.saved_router_topk_bytes(arch, live_rows, seq_len)
     recompute, lora_casts, lora_dropout, split_lora, routed_chunks, ep_exchange = (
         block_backward_terms(
             arch,
             settings,
-            seq_len,
+            block_seq,
             act_bytes,
             adapters.compute_bytes,
             unfused_mamba_scan,
@@ -742,10 +831,9 @@ def _activation_terms(
         )
     )
     logits, nograd_logits, tp_head_gather = _logit_terms(arch, settings, act_bytes)
-    nograd_pass = _nograd_pass_bytes(
-        arch, settings, act_bytes, seq_len, unfused_mamba_scan, tp, routed_split
+    nograd_pass, nograd_hidden = _nograd_pass_terms(
+        arch, settings, act_bytes, block_seq, unfused_mamba_scan, tp, routed_split
     )
-    nograd_hidden = settings.micro_batch_size * seq_len * arch.hidden_size * act_bytes
     tower_lora, nograd_pixels, balance_pixels = _vision_activation_terms(
         arch, settings, adapters, act_bytes, live_rows
     )
@@ -753,11 +841,14 @@ def _activation_terms(
         saved=0 if settings.activation_offload else stored,
         offloaded=stored if settings.activation_offload else 0,
         router_topk=router_topk,
+        saved_collectives=saved_collectives,
+        backward_collectives=backward_collectives,
         recompute=recompute,
         split_lora=split_lora,
         routed_chunks=routed_chunks,
         ep_exchange=ep_exchange,
-        loss_hidden=live_rows * seq_len * arch.hidden_size * act_bytes,
+        loss_hidden=block_hidden + (live_rows * seq_len * 4 if cp > 1 else 0),
+        block_hidden=block_hidden,
         lora_casts=lora_casts,
         lora_dropout=lora_dropout,
         logits=logits,
@@ -768,7 +859,7 @@ def _activation_terms(
         nograd_pixels=nograd_pixels,
         balance_pixels=balance_pixels,
         loss_lora_casts=(
-            stored_lora_cast_bytes(arch, settings, seq_len, tp) if casts_apply else 0
+            stored_lora_cast_bytes(arch, settings, block_seq, tp) if casts_apply else 0
         ),
         tower_lora=tower_lora,
     )
@@ -788,8 +879,9 @@ def _binding_instant(
         grads
         + terms.saved
         + terms.router_topk
+        + terms.backward_collectives
         + terms.recompute
-        + terms.loss_hidden
+        + terms.block_hidden
         + terms.lora_casts
         + terms.lora_dropout
         + terms.split_lora
@@ -801,6 +893,7 @@ def _binding_instant(
         grads
         + terms.saved
         + terms.router_topk
+        + terms.saved_collectives
         + terms.loss_hidden
         + terms.loss_lora_casts
         + terms.tower_lora
@@ -853,7 +946,9 @@ def tensor_parallel_head_gather_bytes(
     arch: ModelArch, settings: TrainingSettings, act_bytes: float
 ) -> int:
     """Dense copy of a tensor-parallel lm_head the logprob loop gathers, or 0."""
-    if arch.tied_embeddings or settings.fsdp is None or settings.fsdp.tp <= 1:
+    if settings.fsdp is None or settings.fsdp.tp <= 1:
+        return 0
+    if arch.tied_embeddings and not arch.tensor_parallel_tied_embedding:
         return 0
     return int(arch.vocab_size * arch.hidden_size * act_bytes)
 
@@ -913,6 +1008,7 @@ def activation_peak(
         saved=terms.saved,
         offloaded=terms.offloaded,
         router_topk=terms.router_topk,
+        saved_collectives=terms.saved_collectives,
         recompute=terms.recompute,
         split_lora=terms.split_lora,
         routed_chunks=terms.routed_chunks,
@@ -1090,6 +1186,7 @@ def _activation_workspace_components(
                 "optimizer_peak": int(peak.optimizer_peak),
                 "checkpoint_boundaries": int(peak.saved),
                 "saved_router_topk": int(peak.router_topk),
+                "saved_moe_collectives": int(peak.saved_collectives),
                 "block_recompute": int(peak.recompute),
                 "split_moe_lora": int(peak.split_lora),
                 "routed_expert_chunks": int(peak.routed_chunks),
@@ -1137,7 +1234,6 @@ def _runtime_components(
     device: DeviceSpec,
     rollout: int,
     settings: TrainingSettings,
-    shards: int,
     orchestrated: bool,
     reserve: float,
     gather_pool: float,
@@ -1145,9 +1241,10 @@ def _runtime_components(
     """Adam state, process overhead, and caching-allocator slack."""
     context_bytes = device.context_bytes
     job_overhead = formulas.JOB_OVERHEAD_BYTES if orchestrated else 0
-    lib_overhead = formulas.TRAINER_LIB_OVERHEAD_BYTES if shards == 1 else 0
+    multi_rank = settings.shard_group_gpus > 1
+    lib_overhead = 0 if multi_rank else formulas.TRAINER_LIB_OVERHEAD_BYTES
     distributed_overhead = (
-        trainer_distributed_bytes(device, settings, shards) if shards > 1 else 0
+        trainer_distributed_bytes(device, settings) if multi_rank else 0
     )
     overhead = (
         context_bytes + rollout + job_overhead + lib_overhead + distributed_overhead
@@ -1197,7 +1294,7 @@ def _lora_send_buffer_component(
 ) -> MemoryComponent:
     """The main rank's registered NIXL buffer the rollout engines READ the adapter from."""
     n_bytes = (
-        formulas.lora_sync_buffer_bytes(
+        lora_formulas.lora_sync_buffer_bytes(
             arch,
             settings.lora_rank,
             settings.lora_target_scope,
@@ -1226,7 +1323,14 @@ def _training_kernels(
     :return: Whether Mamba layers run HF's unfused path, and the element size
         of the routed-expert LoRA grouped GEMM, or ``None`` without one.
     """
-    unfused_mamba_scan = (
+    # Context-parallel Mamba-2 mixers run their head shard on the unfused path.
+    context_parallel_mamba = (
+        settings.fsdp is not None
+        and settings.fsdp.cp > 1
+        and arch.n_mamba_layers > 0
+        and not arch.mamba_gated_delta
+    )
+    unfused_mamba_scan = context_parallel_mamba or (
         arch.unfused_mamba_scan_family
         and device.compute_capability is not None
         and mamba_scan_is_unfused(device.compute_capability)
@@ -1251,24 +1355,18 @@ def _training_kernels(
     return unfused_mamba_scan, grouped_gemm_bytes
 
 
-def trainer_distributed_bytes(
-    device: DeviceSpec, settings: TrainingSettings, shards: int
-) -> int:
-    """NCCL buffers and the tensor-parallel runtime on one rank of a multi-rank trainer.
-
-    :param shards: GPUs one weight copy is sharded across.
-    """
+def trainer_distributed_bytes(device: DeviceSpec, settings: TrainingSettings) -> int:
+    """NCCL buffers on one rank of a multi-rank trainer."""
     fsdp = settings.fsdp
-    tp = 1 if fsdp is None else fsdp.tp
-    nccl = trainer_nccl_bytes(
+    return trainer_nccl_bytes(
         device.nccl_group_bytes,
         settings.n_training_gpus,
-        shards,
+        settings.shard_group_gpus,
         1 if fsdp is None else fsdp.ep,
-        tp,
+        1 if fsdp is None else fsdp.tp,
         device.gpus_per_node,
+        1 if fsdp is None else fsdp.cp,
     )
-    return nccl + (TP_RUNTIME_BYTES if tp > 1 else 0)
 
 
 def training_breakdown(
@@ -1291,7 +1389,7 @@ def training_breakdown(
     act_bytes = DTYPE_BYTES[settings.weight_dtype]
     seq_len = settings.max_model_len
     warnings = training_warnings(counts, settings)
-    shards = settings.shard_gpus
+    shards = settings.dense_fsdp_gpus
     adapters = adapter_state(arch, settings, shards)
     unfused_mamba_scan, grouped_gemm_bytes = _training_kernels(arch, settings, device)
     # A token-budget micro-batch is one packed row of the budget.
@@ -1334,7 +1432,6 @@ def training_breakdown(
             device,
             rollout,
             settings,
-            shards,
             orchestrated,
             reserve,
             gather_pool,

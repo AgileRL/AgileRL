@@ -39,16 +39,27 @@ from transformers import (
     GenerationMixin,
     GPT2Config,
     GPT2LMHeadModel,
+    GraniteMoeHybridConfig,
+    GraniteMoeHybridForCausalLM,
+    NemotronHConfig,
+    NemotronHForCausalLM,
     OPTConfig,
     OPTForCausalLM,
     PretrainedConfig,
     PreTrainedModel,
     Qwen3_5Config,
+    Qwen3_5ForCausalLM,
+    Qwen3_5TextConfig,
     Qwen3MoeConfig,
     Qwen3MoeForCausalLM,
 )
 
+from agilerl.distributed import build_parallel_mesh, gather_params
 from agilerl.distributed.expert_parallel import apply_expert_parallel
+from agilerl.distributed.tensor_parallel import (
+    apply_tensor_parallel,
+    tensor_parallel_row_orders,
+)
 from agilerl.lora.moe import (
     RoutedExpertsLoraWrapper,
     SortedExpertsLoraWrapper,
@@ -57,7 +68,15 @@ from agilerl.lora.moe import (
     upgrade_moe_param_wrappers,
 )
 from agilerl.utils import lora_merge as lora_merge_mod
-from agilerl.utils.llm_utils import adapt_lora_config_for_model
+from agilerl.utils.llm_utils import (
+    adapt_lora_config_for_model,
+    directory_opener,
+    get_lora_params,
+    load_lora_adapters,
+    snapshot_lora_adapters,
+    vllm_lora_state_dict,
+    write_lora_adapters,
+)
 from agilerl.utils.lora_merge import (
     ARENA_ARTIFACT_MANIFEST_FILENAME,
     MERGED_COMPLETE_MARKER,
@@ -68,6 +87,7 @@ from agilerl.utils.lora_merge import (
     write_merged_completeness_files,
 )
 from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
+from tests.rank_launch import run_ranks
 
 # Reloaded float32 logits vs live PEFT; merge is an affine add of the LoRA delta.
 LOGIT_ATOL = 1e-5
@@ -393,6 +413,7 @@ class TestExportMergedPretrainedLive:
             shard = lora_merge_mod._materialize_shard(
                 [spec],
                 ["w"],
+                {},
                 torch_dtype=torch.float32,
                 keep_tensors=True,
             )
@@ -406,6 +427,7 @@ class TestExportMergedPretrainedLive:
         shard = lora_merge_mod._materialize_shard(
             [spec],
             ["w"],
+            {},
             torch_dtype=torch.float32,
             keep_tensors=False,
         )
@@ -802,6 +824,7 @@ class TestExportMergedPretrainedReplay:
             lora_merge_mod._materialize_shard(
                 [spec],
                 ["w"],
+                {},
                 torch_dtype=torch.float32,
                 keep_tensors=True,
             )
@@ -926,6 +949,7 @@ class TestExportMergedPretrainedFailures:
                 lora_merge_mod._materialize_shard(
                     [spec],
                     ["w"],
+                    {},
                     torch_dtype=torch.float32,
                     keep_tensors=True,
                 )
@@ -1251,6 +1275,192 @@ class TestExportMergedPretrainedTiedKeys:
             atol=LOGIT_ATOL,
             rtol=LOGIT_RTOL,
         )
+
+
+def _tiny_qwen3_5_gdn_lm() -> PreTrainedModel:
+    """Qwen3.5 text LM with one Gated DeltaNet and one attention layer."""
+    config = Qwen3_5TextConfig(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=4,
+        linear_num_key_heads=2,
+        linear_num_value_heads=4,
+        linear_key_head_dim=4,
+        linear_value_head_dim=4,
+        linear_conv_kernel_dim=4,
+        layer_types=["linear_attention", "full_attention"],
+    )
+    return Qwen3_5ForCausalLM(config)
+
+
+def _tiny_nemotron_h_lm() -> PreTrainedModel:
+    """NemotronH LM with one Mamba2, one attention and one MLP layer."""
+    config = NemotronHConfig(
+        vocab_size=32,
+        hidden_size=16,
+        layers_block_type=["mamba", "attention", "mlp"],
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        head_dim=8,
+        intermediate_size=16,
+        use_mamba_kernels=False,
+        ssm_state_size=4,
+        mamba_num_heads=4,
+        mamba_head_dim=4,
+        n_groups=2,
+        conv_kernel=2,
+        chunk_size=8,
+        use_bias=True,
+        use_conv_bias=True,
+        use_cache=False,
+    )
+    return NemotronHForCausalLM(config)
+
+
+def _tiny_granitemoehybrid_lm() -> PreTrainedModel:
+    """Granite 4 LM with one Mamba2 layer (one SSM group) and one attention layer."""
+    config = GraniteMoeHybridConfig(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=8,
+        shared_intermediate_size=8,
+        num_hidden_layers=2,
+        layer_types=["linear_attention", "full_attention"],
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        num_local_experts=0,
+        position_embedding_type="nope",
+        mamba_n_heads=8,
+        mamba_d_head=4,
+        mamba_n_groups=1,
+        mamba_d_state=4,
+        mamba_d_conv=4,
+        mamba_chunk_size=4,
+        tie_word_embeddings=True,
+        pad_token_id=0,
+    )
+    return GraniteMoeHybridForCausalLM(config)
+
+
+# PEFT refuses LoRA on the Mamba2 out_proj and conv1d.
+TP_EXPORT_MODELS = {
+    "qwen3_5": (_tiny_qwen3_5_gdn_lm, "all-linear"),
+    "nemotron_h": (
+        _tiny_nemotron_h_lm,
+        ["in_proj", "q_proj", "k_proj", "v_proj", "o_proj", "up_proj", "down_proj"],
+    ),
+    "granitemoehybrid": (
+        _tiny_granitemoehybrid_lm,
+        [
+            "in_proj",
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "input_linear",
+            "output_linear",
+        ],
+    ),
+}
+
+
+def _tp_export_peft_model(family: str) -> nn.Module:
+    build, targets = TP_EXPORT_MODELS[family]
+    return get_peft_model(
+        build().float(),
+        LoraConfig(
+            r=2,
+            lora_alpha=4,
+            target_modules=targets,
+            lora_dropout=0.0,
+            init_lora_weights=False,
+        ),
+        adapter_name="actor",
+    )
+
+
+def _tp_export_worker(rank: int, world_size: int, family: str, out_dir: str) -> int:
+    """Export a tp-sharded and an unsharded copy of one seeded PEFT model."""
+    torch.manual_seed(0)
+    model = _tp_export_peft_model(family)
+    reference = copy.deepcopy(model)
+    mesh = build_parallel_mesh(world_size=world_size, tp=world_size, device_type="cpu")
+    assert mesh is not None
+    apply_tensor_parallel(model, mesh.tp)
+
+    export_merged_pretrained(f"{out_dir}/tp", model=model, torch_dtype=torch.float32)
+    export_merged_pretrained(
+        f"{out_dir}/reference", model=reference, torch_dtype=torch.float32
+    )
+
+    return len(tensor_parallel_row_orders(model))
+
+
+@pytest.mark.multi_rank
+class TestExportMergedPretrainedTensorParallel:
+    @pytest.mark.parametrize("family", sorted(TP_EXPORT_MODELS))
+    def test_writes_the_unsharded_merge(self, tmp_path: Path, family: str) -> None:
+        # Act
+        permuted = run_ranks(_tp_export_worker, 2, family, str(tmp_path))
+
+        # Assert
+        assert permuted[0] > 0
+        written = load_file(tmp_path / "tp" / "model.safetensors")
+        expected = load_file(tmp_path / "reference" / "model.safetensors")
+        assert written.keys() == expected.keys()
+        for name, tensor in expected.items():
+            assert torch.equal(written[name], tensor), name
+
+
+def _assert_same_tensors(
+    actual: dict[str, torch.Tensor], expected: dict[str, torch.Tensor]
+) -> None:
+    assert actual.keys() == expected.keys()
+    for name, tensor in expected.items():
+        assert torch.equal(actual[name], tensor), name
+
+
+def _tp_adapter_worker(rank: int, world_size: int, family: str, out_dir: str) -> None:
+    """LoRA-only exports of a tp-sharded model equal the unsharded model's."""
+    # Arrange
+    torch.manual_seed(0)
+    model = _tp_export_peft_model(family)
+    reference = copy.deepcopy(model)
+    torch.manual_seed(1)
+    resumed = _tp_export_peft_model(family)
+    mesh = build_parallel_mesh(world_size=world_size, tp=world_size, device_type="cpu")
+    assert mesh is not None
+    apply_tensor_parallel(model, mesh.tp)
+    apply_tensor_parallel(resumed, mesh.tp)
+    saved_dir = f"{out_dir}/rank{rank}"
+    expected = snapshot_lora_adapters(reference, ["actor"]).adapters["actor"]
+
+    # Act
+    snapshot = snapshot_lora_adapters(model, ["actor"])
+    with gather_params(model, get_lora_params(model)):
+        exported = vllm_lora_state_dict(model, "actor")
+    write_lora_adapters(snapshot, directory_opener(saved_dir))
+    load_lora_adapters(resumed, saved_dir, "actor")
+    reloaded = snapshot_lora_adapters(resumed, ["actor"]).adapters["actor"]
+
+    # Assert
+    assert any(".lora_B." in name for name in tensor_parallel_row_orders(model))
+    _assert_same_tensors(snapshot.adapters["actor"], expected)
+    _assert_same_tensors(exported, vllm_lora_state_dict(reference, "actor"))
+    _assert_same_tensors(reloaded, expected)
+
+
+@pytest.mark.multi_rank
+class TestLoraAdapterExportTensorParallel:
+    @pytest.mark.parametrize("family", sorted(TP_EXPORT_MODELS))
+    def test_adapter_exports_match_the_unsharded_model(
+        self, tmp_path: Path, family: str
+    ) -> None:
+        run_ranks(_tp_adapter_worker, 2, family, str(tmp_path))
 
 
 MOE_VOCAB = 32

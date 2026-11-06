@@ -335,19 +335,21 @@ class raise_on_any_rank(ContextDecorator):
         return False
 
 
-def sync_grads(params: Sequence[nn.Parameter]) -> None:
+def sync_grads(params: Sequence[nn.Parameter], cp: int = 1) -> None:
     """Average gradients across data-parallel ranks.
 
     One coalesced all-reduce of every ``.grad`` in ``params`` (SUM, then
-    divide by world size so Gloo works). See :func:`all_reduce_grads` for
-    params without a grad. No-op on a single device.
+    divide by world size / ``cp`` so Gloo works). See :func:`all_reduce_grads`
+    for params without a grad. No-op on a single device.
 
     :param params: Optimizer parameters whose ``.grad`` should be averaged.
+    :param cp: Context-parallel degree. CP ranks hold slices of one
+        sequence's grad, so they sum rather than average.
     """
     if not params or not is_distributed() or dist.get_world_size() == 1:
         return
 
-    all_reduce_grads(params, divisor=dist.get_world_size())
+    all_reduce_grads(params, divisor=dist.get_world_size() // cp)
 
 
 def all_reduce_grads(

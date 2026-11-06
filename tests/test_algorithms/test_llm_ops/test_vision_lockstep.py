@@ -21,6 +21,7 @@ from agilerl.algorithms.core.llm_ops.vision_lockstep import (
     vision_language_module,
     vision_lockstep,
 )
+from agilerl.architectures.catalog import FAMILY_RUNTIME_CONFIGS
 from agilerl.architectures.gemma4 import install_gemma4_vision_patches
 from agilerl.architectures.qwen3_5.vision import install_qwen3_5_vl_patches
 from agilerl.architectures.runtime import PatchRuntimeConfig
@@ -39,6 +40,7 @@ from tests.test_architectures.qwen3_5.vision_helpers import (
 )
 from tests.torch_kernels import use_torch_kernels
 
+QWEN_VL_PATCH = FAMILY_RUNTIME_CONFIGS["qwen3_5"].patch
 TEXT_IDS = torch.tensor([[3, 4, 5, 6, 7, 8, 9, 10]])
 IMAGE_IDS = torch.tensor([image_prompt([3], images=1)])
 
@@ -76,7 +78,7 @@ class TensorVisionModel(nn.Module):
 def qwen_vl(torch_kernels):
     """Tiny Qwen3.5 VL model with vision-row patches and a tower run log."""
     with restored_qwen_vl_model():
-        install_qwen3_5_vl_patches(PatchRuntimeConfig())
+        install_qwen3_5_vl_patches(QWEN_VL_PATCH)
         model = tiny_qwen_vl()
         yield model, count_tower_runs(model)
 
@@ -85,7 +87,7 @@ def qwen_vl(torch_kernels):
 def frozen_qwen_vl(torch_kernels):
     """Tiny Qwen3.5 VL model whose frozen tower reuses a feature cache."""
     with restored_qwen_vl_model():
-        install_qwen3_5_vl_patches(PatchRuntimeConfig())
+        install_qwen3_5_vl_patches(QWEN_VL_PATCH)
         model = tiny_qwen_vl()
         model.model.visual.requires_grad_(False)
         cache = VisionFeatureCache()
@@ -104,7 +106,7 @@ def another_rank_runs_the_tower(monkeypatch):
 def mixed_rank_worker(rank: int, world_size: int) -> bool:
     """Shard the tiny VL model, give only rank 0 an image, and train one step."""
     use_torch_kernels(pytest.MonkeyPatch())
-    install_qwen3_5_vl_patches(PatchRuntimeConfig())
+    install_qwen3_5_vl_patches(QWEN_VL_PATCH)
     model = tiny_qwen_vl().train()
     with patch.object(fsdp_blocks, "PARAM_PERSISTENCE_THRESHOLD", 0):
         apply_fsdp2(
@@ -157,7 +159,7 @@ def mixed_rank_gemma4_worker(rank: int, world_size: int) -> bool:
 def cached_mixed_rank_worker(rank: int, world_size: int) -> tuple[int, bool]:
     """Shard a frozen-tower VL model, give only rank 0 an image, and forward it twice in one step."""
     use_torch_kernels(pytest.MonkeyPatch())
-    install_qwen3_5_vl_patches(PatchRuntimeConfig())
+    install_qwen3_5_vl_patches(QWEN_VL_PATCH)
     model = tiny_qwen_vl().train()
     model.model.visual.requires_grad_(False)
     with patch.object(fsdp_blocks, "PARAM_PERSISTENCE_THRESHOLD", 0):
@@ -237,7 +239,7 @@ def planned_mixed_rank_worker(
     """Shard a frozen-tower VL model and plan two passes over rank 0's two images."""
     monkeypatch = pytest.MonkeyPatch()
     use_torch_kernels(monkeypatch)
-    install_qwen3_5_vl_patches(PatchRuntimeConfig())
+    install_qwen3_5_vl_patches(QWEN_VL_PATCH)
     model = tiny_qwen_vl().train()
     model.model.visual.requires_grad_(False)
     with patch.object(fsdp_blocks, "PARAM_PERSISTENCE_THRESHOLD", 0):

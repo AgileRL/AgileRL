@@ -21,7 +21,7 @@ fused-logprob, PPO value-head, and fused-loss paths); all are differentiable.
    Packing only saves memory on a backend where the block-diagonal mask stays
    sparse: FlashAttention-2 varlen or FlexAttention. Dense backends (SDPA/eager)
    would materialize an ``O(N^2)`` mask, so callers must gate packing on a
-   supported backend; see :meth:`LLMAlgorithm._packing_mode`.
+   supported backend; see :meth:`LLMAlgorithm._sequence_layout_type`.
 
 Recurrent mixers (Mamba scan and causal conv1d) carry state from token to
 token, so a packed row is only correct when they reset at each document start.
@@ -108,6 +108,7 @@ def pack_padded_batch(
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
     score_mask: torch.Tensor | None = None,
+    host_counts: list[int] | None = None,
 ) -> PackedBatch:
     """Flatten a padded ``(B, T)`` batch into a single padding-free row.
 
@@ -125,6 +126,10 @@ def pack_padded_batch(
         Only predictions of a real token from a real token of the same row are
         kept, so the packed mask never scores a cross-sequence prediction.
     :type score_mask: torch.Tensor | None
+    :param host_counts: Real tokens of each row, then the kept scored
+        positions when *score_mask* is given; ``None`` reads them from the
+        device.
+    :type host_counts: list[int] | None
     :return: A :class:`PackedBatch`.
     :rtype: PackedBatch
     """
@@ -136,12 +141,14 @@ def pack_padded_batch(
     mask = attention_mask.bool()
     batch_size, padded_seq_len = input_ids.shape
     seq_lengths = mask.sum(dim=1).to(torch.long)  # (B,)
-    counts = seq_lengths
     if score_mask is not None:
         score_mask = score_mask.to(mask.device).bool() & mask[:, 1:] & mask[:, :-1]
-        counts = torch.cat([seq_lengths, score_mask.sum().view(1)])
-    # The only device sync; every size below derives from these host counts.
-    host_counts = counts.tolist()
+    if host_counts is None:
+        counts = seq_lengths
+        if score_mask is not None:
+            counts = torch.cat([seq_lengths, score_mask.sum().view(1)])
+        # The only device sync; every size below derives from these host counts.
+        host_counts = counts.tolist()
     lengths = tuple(host_counts[:batch_size])
     n_tokens = sum(lengths)
 

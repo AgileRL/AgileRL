@@ -23,12 +23,11 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import FSDPModule, share_comm_ctx
 from torch.distributed.tensor import DTensor, distribute_tensor
 from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
-from torch.distributed.tensor.placement_types import Shard
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.arena.models.fsdp import FSDPConfig
+from agilerl.distributed.context_parallel import apply_mixer_context_parallel
 from agilerl.distributed.expert_parallel import (
-    ParallelMesh,
     apply_expert_parallel,
     assert_packed_experts_ep_sharded,
     iter_packed_expert_modules,
@@ -46,6 +45,7 @@ from agilerl.distributed.fsdp_meta import (
     renamed_checkpoint_keys,
     restore_after_to_empty,
 )
+from agilerl.distributed.mesh import MeshAxisName, ParallelMesh
 from agilerl.distributed.process import get_world_size
 from agilerl.distributed.tensor_parallel import (
     apply_tensor_parallel,
@@ -622,26 +622,18 @@ def global_shard_slices(
     placements: tuple[Any, ...],
     device_mesh: DeviceMesh,
 ) -> tuple[slice, ...]:
-    """Per-dimension slices for this rank's shard of a logical tensor."""
-    slices: list[slice] = [slice(0, int(size)) for size in global_shape]
-    coordinate = device_mesh.get_coordinate()
-    for mesh_dim, placement in enumerate(placements):
-        if not isinstance(placement, Shard):
-            continue
-        shard_dim = placement.dim
-        num_chunks = device_mesh.size(mesh_dim=mesh_dim)
-        if coordinate is None:
-            rank_at_mesh = device_mesh.get_local_rank(mesh_dim=mesh_dim)
-        else:
-            rank_at_mesh = int(coordinate[mesh_dim])
-        dim_size = int(global_shape[shard_dim])
-        local_size, offset = Shard.local_shard_size_and_offset(
-            dim_size, num_chunks, rank_at_mesh
-        )
-        start = int(offset)
-        end = start + int(local_size)
-        slices[shard_dim] = slice(start, end)
-    return tuple(slices)
+    """Per-dimension slices for this rank's shard of a logical tensor.
+
+    Handles ``_StridedShard`` (FSDP over TP); each rank's piece is one
+    contiguous block per dim.
+    """
+    local_shape, offset = compute_local_shape_and_global_offset(
+        tuple(int(size) for size in global_shape), device_mesh, placements
+    )
+    return tuple(
+        slice(start, start + size)
+        for start, size in zip(offset, local_shape, strict=True)
+    )
 
 
 def _stable_generator_seed(name: str) -> int:
@@ -1049,15 +1041,32 @@ def _move_ignored_to_device(model: nn.Module, device: str | torch.device) -> Non
     """Move non-FSDP-managed params and buffers to the compute device.
 
     With ``cpu_offload`` everything materializes on CPU, but FSDP only
-    gathers managed (DTensor) parameters. Ignored ones (embeddings, tiny
-    replicated params) and buffers would stay on CPU and fail the first
-    forward against CUDA inputs. Each tensor keeps its identity, so tied
-    weights stay tied.
+    gathers the parameters it manages. Ignored ones (embeddings, tiny
+    replicated params, TP-only DTensors such as resident frozen TP shards)
+    and buffers would stay on CPU and fail the first forward against CUDA
+    inputs. Each tensor keeps its identity, so tied weights stay tied.
     """
     compute = torch.device(device)
     for tensor in [*model.parameters(), *model.buffers()]:
         if not isinstance(tensor, DTensor):
             tensor.data = tensor.data.to(compute)
+    for param in model.parameters():
+        if not isinstance(param, DTensor) or param.device_mesh.mesh_dim_names != (
+            MeshAxisName.TP,
+        ):
+            continue
+        # ``.data`` assignment relabels a DTensor but leaves its local shard.
+        moved = DTensor.from_local(
+            param.to_local().detach().to(compute),
+            param.device_mesh,
+            param.placements,
+            run_check=False,
+            shape=param.shape,
+            stride=param.stride(),
+        )
+        torch.utils.swap_tensors(
+            param, nn.Parameter(moved, requires_grad=param.requires_grad)
+        )
 
 
 def materialize_fsdp2_from_cpu_state(
@@ -1099,11 +1108,20 @@ def materialize_fsdp2_from_cpu_state(
             f"shard_group_size={config.shard_group_size}) needs a ParallelMesh"
         )
         raise ValueError(msg)
+    # TP plans leave routed experts to EP. Without EP, FSDP splits experts over
+    # only shard group / (cp * tp) ranks: tp times the expert memory per GPU.
+    # ep >= tp is TorchTitan's rule for MoE meshes.
+    if config.ep < config.tp and iter_packed_expert_modules(model):
+        msg = (
+            f"FSDPConfig(ep={config.ep}, tp={config.tp}): MoE models need "
+            "ep >= tp, since tensor parallel does not split routed experts."
+        )
+        raise ValueError(msg)
     if (
         config.cpu_offload
         and config.ep > 1
         and parallel_mesh is not None
-        and parallel_mesh.leftover_dp == 1
+        and parallel_mesh.edp_shard is None
     ):
         msg = (
             f"FSDPConfig.cpu_offload with ep={config.ep} spanning the whole shard "
@@ -1132,7 +1150,7 @@ def materialize_fsdp2_from_cpu_state(
         raise ValueError(msg)
     model.to_empty(device="meta")
     set_routed_experts_chunk_bytes(model, config.routed_expert_chunk_mib * 1024 * 1024)
-    mesh = None if parallel_mesh is None else parallel_mesh.hsdp
+    mesh = None if parallel_mesh is None else parallel_mesh.dp_shard
     ep_mesh = None if parallel_mesh is None else parallel_mesh.ep
     tp_mesh = None if parallel_mesh is None or config.tp <= 1 else parallel_mesh.tp
     expert_mesh = None
@@ -1154,11 +1172,14 @@ def materialize_fsdp2_from_cpu_state(
                 "expert modules."
             )
             raise RuntimeError(msg)
-        experts_skip_fsdp = parallel_mesh.leftover_dp == 1
-        if not experts_skip_fsdp:
-            expert_mesh = parallel_mesh.dp_mod_ep
+        experts_skip_fsdp = parallel_mesh.edp_shard is None
+        expert_mesh = parallel_mesh.edp_shard
     if config.tp > 1:
         apply_tensor_parallel(model, tp_mesh)
+    if config.cp > 1:
+        apply_mixer_context_parallel(
+            model, None if parallel_mesh is None else parallel_mesh.cp
+        )
     apply_fsdp2(
         model,
         config,

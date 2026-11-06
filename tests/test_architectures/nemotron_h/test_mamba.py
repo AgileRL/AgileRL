@@ -287,7 +287,7 @@ class TestNemotronMambaFusedPath:
         assert first.training
         assert torch.equal(second(value), value + 1)
 
-    def test_open_time_step_limit_is_clamped_for_the_fused_scan(self, monkeypatch):
+    def test_fused_scan_passes_time_step_limit_through(self, monkeypatch):
         events = []
         mixer_cls = _make_fused_path_mixer_class(events)
         monkeypatch.setattr(
@@ -345,7 +345,7 @@ class TestNemotronMambaFusedPath:
         patch_nemotron_mamba_fused_path(mixer=MIXER, model=FakeModel([mixer, tight]))
 
         assert torch.equal(mixer(value), value + 1)
-        assert mixer.seen == (0.001, 0.1)
+        assert mixer.seen == (0.0, float("inf"))
         assert mixer.time_step_limit == (0.0, float("inf"))
         assert mixer.training
         assert torch.equal(tight(value), value + 1)
@@ -435,6 +435,8 @@ class TestNemotronMambaFusedPath:
 
         module = ModuleType("agilerl_tests_gather_skip_mamba")
         module.mamba_chunk_scan_combined = kernel
+        module.mamba2_chunk_scan = kernel
+        module.mamba2_split_conv1d_scan_combined = kernel
         module.causal_conv1d_fn = None
         monkeypatch.setitem(sys.modules, module.__name__, module)
 
@@ -452,6 +454,12 @@ class TestNemotronMambaFusedPath:
         mamba._gather_ssm_kernel_parameters(Mixer)
 
         assert module.mamba_chunk_scan_combined is wrapped
+        assert module.mamba2_chunk_scan is not kernel
+        assert module.mamba2_split_conv1d_scan_combined is not kernel
+        assert getattr(module.mamba2_chunk_scan, mamba.KERNEL_FULL_TENSOR_FLAG)
+        assert getattr(
+            module.mamba2_split_conv1d_scan_combined, mamba.KERNEL_FULL_TENSOR_FLAG
+        )
         assert module.causal_conv1d_fn is None
 
     def test_gather_wraps_kernels_without_a_dict(self, monkeypatch):
@@ -508,166 +516,33 @@ class TestNemotronMambaFusedPath:
         assert state == "state"
         assert state_again == "state"
 
-    def test_ada_fused_combined_kernel_returns_none(self, monkeypatch):
+    def test_ada_fused_combined_kernel_runs_in_fp32(self, monkeypatch):
         # Arrange
         monkeypatch.setattr(mamba, "_ada_capability", lambda _device: True)
-        calls = []
+        seen = []
 
-        def kernel(zxbcdt: torch.Tensor, **_kwargs: object) -> str:
-            calls.append(zxbcdt)
-            return "ran"
+        def kernel(zxbcdt: torch.Tensor, **_kwargs: object) -> torch.Tensor:
+            seen.append(zxbcdt.dtype)
+            return zxbcdt + 1
 
-        fused = mamba._call_kernel_with_full_tensors(kernel, fused_combined=True)
-        split = mamba._call_kernel_with_full_tensors(kernel)
-        zxbcdt = torch.ones(2)
+        module = ModuleType("fake_new_shape_mamba")
+        module.mamba2_split_conv1d_scan_combined = kernel
+
+        class Mixer:
+            pass
+
+        Mixer.__module__ = module.__name__
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+        mamba._gather_ssm_kernel_parameters(Mixer)
+        zxbcdt = torch.ones(2, dtype=torch.bfloat16)
 
         # Act
-        fused_out = fused(zxbcdt, chunk_size=4)
-        split_out = split(zxbcdt, chunk_size=4)
+        out = module.mamba2_split_conv1d_scan_combined(zxbcdt, chunk_size=4)
 
         # Assert
-        assert fused_out is None
-        assert split_out == "ran"
-        assert len(calls) == 1
-
-    def test_ada_gpu_uses_torch_forward(self, monkeypatch):
-        events = []
-        mixer_cls = _make_fused_path_mixer_class(events)
-        monkeypatch.setattr(mamba, "_resolve_mixer_class", lambda _mixer: mixer_cls)
-        monkeypatch.setattr(mamba, "_ada_ssm_gpu", lambda _module: True)
-
-        class Mixer(torch.nn.Module):
-            def __init__(self) -> None:
-                super().__init__()
-                _nemotron_mamba_scan_fields(self)
-                self.use_mem_eff_path = False
-                self.time_step_limit = (0.0, float("inf"))
-                self.time_step_min = 0.001
-                self.time_step_max = 0.1
-                self.seen = None
-
-            def torch_forward(self, value: torch.Tensor) -> torch.Tensor:
-                self.seen = self.time_step_limit
-                return value + 3
-
-            def forward(self, value: torch.Tensor) -> torch.Tensor:
-                raise AssertionError(value)
-
-        Mixer.__name__ = "Mixer"
-        mixer = Mixer()
-        value = torch.ones(2)
-
-        patch_nemotron_mamba_fused_path(mixer=MIXER, model=FakeModel([mixer]))
-
-        assert torch.equal(mixer(value), value + 3)
-        assert mixer.seen == (0.001, 0.1)
-        assert mixer.time_step_limit == (0.0, float("inf"))
-
-    def test_ada_torch_forward_zeros_padding(self, monkeypatch):
-        mixer_cls = _make_fused_path_mixer_class([])
-        monkeypatch.setattr(mamba, "_resolve_mixer_class", lambda _mixer: mixer_cls)
-        monkeypatch.setattr(mamba, "_ada_ssm_gpu", lambda _module: True)
-        seen: list[torch.Tensor] = []
-
-        class Mixer(torch.nn.Module):
-            def __init__(self) -> None:
-                super().__init__()
-                _nemotron_mamba_scan_fields(self)
-                self.use_mem_eff_path = False
-                self.time_step_limit = (0.001, 0.1)
-                self.time_step_min = 0.001
-                self.time_step_max = 0.1
-
-            def torch_forward(self, hidden=None, *args, **kwargs):
-                if isinstance(hidden, torch.Tensor):
-                    seen.append(hidden.detach().clone())
-                return hidden
-
-            def forward(self, *args, **kwargs):
-                raise AssertionError(args)
-
-        Mixer.__name__ = "Mixer"
-        mixer = Mixer()
-        hidden = torch.tensor([[[1.0, 2.0], [3.0, 4.0]]])
-        mask = torch.tensor([[1.0, 0.0]])
-
-        patch_nemotron_mamba_fused_path(mixer=MIXER, model=FakeModel([mixer]))
-
-        mixer(hidden, None, None, mask)
-        mixer(hidden_states=hidden, attention_mask=mask)
-        mixer(hidden, None, None, torch.zeros(1, 1, 1, 2))
-        mixer(hidden, None, None, torch.ones(1, 3))
-        mixer(None)
-        mixer()
-
-        assert torch.equal(seen[0], torch.tensor([[[1.0, 2.0], [0.0, 0.0]]]))
-        assert torch.equal(seen[1], seen[0])
-        assert torch.equal(seen[2], hidden)
-        assert torch.equal(seen[3], hidden)
-
-    def test_ada_torch_forward_keeps_a_parameter_gradient(self, monkeypatch):
-        mixer_cls = _make_fused_path_mixer_class([])
-        monkeypatch.setattr(mamba, "_resolve_mixer_class", lambda _mixer: mixer_cls)
-        monkeypatch.setattr(mamba, "_ada_ssm_gpu", lambda _module: True)
-
-        class Mixer(torch.nn.Module):
-            def __init__(self) -> None:
-                super().__init__()
-                _nemotron_mamba_scan_fields(self)
-                self.weight = torch.nn.Parameter(torch.ones(2))
-                self.use_mem_eff_path = False
-                self.time_step_limit = (0.001, 0.1)
-                self.time_step_min = 0.001
-                self.time_step_max = 0.1
-
-            def torch_forward(self, hidden, *args, **kwargs):
-                return hidden * self.weight
-
-            def forward(self, *args, **kwargs):
-                raise AssertionError(args)
-
-        Mixer.__name__ = "Mixer"
-        mixer = Mixer()
-
-        patch_nemotron_mamba_fused_path(mixer=MIXER, model=FakeModel([mixer]))
-
-        loss = mixer(torch.ones(2)).sum()
-        loss.backward()
-
-        assert mixer.weight.grad is not None
-        assert torch.equal(mixer.weight.grad, torch.ones(2))
-
-    def test_ada_torch_forward_shrinks_the_scan_chunk(self, monkeypatch):
-        mixer_cls = _make_fused_path_mixer_class([])
-        monkeypatch.setattr(mamba, "_resolve_mixer_class", lambda _mixer: mixer_cls)
-        monkeypatch.setattr(mamba, "_ada_ssm_gpu", lambda _module: True)
-        seen: list[int] = []
-
-        class Mixer(torch.nn.Module):
-            def __init__(self) -> None:
-                super().__init__()
-                _nemotron_mamba_scan_fields(self)
-                self.use_mem_eff_path = False
-                self.time_step_limit = (0.001, 0.1)
-                self.time_step_min = 0.001
-                self.time_step_max = 0.1
-
-            def torch_forward(self, hidden, *args, **kwargs):
-                seen.append(self.chunk_size)
-                return hidden
-
-            def forward(self, *args, **kwargs):
-                raise AssertionError(args)
-
-        Mixer.__name__ = "Mixer"
-        mixer = Mixer()
-
-        patch_nemotron_mamba_fused_path(mixer=MIXER, model=FakeModel([mixer]))
-        hidden = torch.ones(2, 3)
-
-        assert torch.equal(mixer(hidden), hidden)
-        assert seen == [mamba.EAGER_SCAN_CHUNK]
-        assert mixer.chunk_size == 256
+        assert seen == [torch.float32]
+        assert out.dtype == torch.bfloat16
+        assert torch.equal(out, zxbcdt + 1)
 
     def test_ada_gpu_runs_gated_rms_in_pytorch(self, monkeypatch):
         mixer_cls = _make_fused_path_mixer_class([])
@@ -711,15 +586,6 @@ class TestNemotronMambaFusedPath:
 
         assert torch.isfinite(output).all()
         assert torch.allclose(output, expected)
-
-    def test_ada_ssm_gpu_matches_compute_capability(self, monkeypatch):
-        cpu_mixer = torch.nn.Module()
-        _nemotron_mamba_scan_fields(cpu_mixer)
-        assert not mamba._ada_ssm_gpu(cpu_mixer)
-        monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _device: (8, 9))
-        assert mamba._ada_capability(torch.device("cuda"))
-        monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _device: (9, 0))
-        assert not mamba._ada_capability(torch.device("cuda"))
 
     def test_model_sweep_patches_a_same_name_mixer_that_sets_the_attribute(
         self, monkeypatch
@@ -1249,6 +1115,35 @@ class TestInstallMambaPatches:
         mamba.install_mamba_patches(PatchRuntimeConfig(), model=object())
 
         assert seen == []
+
+    def test_skips_the_packed_wrap_unless_sequence_packing_is_on(self, monkeypatch):
+        seen: list[str] = []
+        actor = torch.nn.Module()
+        block = "transformers.models.nemotron_h.modeling_nemotron_h.NemotronHBlock"
+        monkeypatch.setattr(
+            mamba,
+            "patch_nemotron_mamba_packed_sequences",
+            lambda *, mixer, block: seen.append("packed"),
+        )
+        monkeypatch.setattr(
+            mamba,
+            "patch_nemotron_mamba_fused_path",
+            lambda *, mixer, model=None: seen.append("fused"),
+        )
+        monkeypatch.setattr(
+            mamba,
+            "patch_nemotron_mamba_stream_ordering",
+            lambda *, mixer, model=None: seen.append("stream"),
+        )
+        config = PatchRuntimeConfig(mamba=MambaPatchConfig(mixer=MIXER, block=block))
+
+        mamba.install_mamba_patches(config, model=actor)
+
+        assert seen == ["fused", "stream"]
+
+        mamba.install_mamba_patches(config, model=actor, use_sequence_packing=True)
+
+        assert seen == ["fused", "stream", "packed", "fused", "stream"]
 
 
 class TestSdpaFullyMaskedRows:

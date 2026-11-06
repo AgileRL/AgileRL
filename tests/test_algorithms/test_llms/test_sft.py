@@ -17,21 +17,29 @@ from peft import LoraConfig
 from transformers import AutoTokenizer
 
 from agilerl.algorithms.core.base import EvolvableAlgorithm, OptimizerWrapper
+from agilerl.algorithms.core.sequence_layout import ContextParallelSequence
 from agilerl.algorithms.sft import SFT
 from agilerl.arena.models.fsdp import FSDP_MEMORY_FIELDS
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
-from agilerl.distributed import FSDPConfig, resolve_device
+from agilerl.distributed import FSDPConfig, FSDPRuntime, resolve_device
+from agilerl.distributed.mesh import ParallelMesh
 from agilerl.llm_envs import DatasetEnv
+from agilerl.utils.llm_packing import pack_next_token_frame
 from agilerl.utils.llm_utils import LEARN_PHASE_METRIC_NAMES
 from tests import TINY_LLM_FIXTURE_PATH
 from tests.test_algorithms.test_llms.llm_helpers import (
+    LAYOUTS,
     create_module,
     create_tiny_qwen3,
+    hand_laid_inputs,
     optimizer_state,
     record_outputs,
     right_padded_batch,
     scale_losses,
+    take_grads,
     trainable_weights,
+    use_layout,
+    use_packed,
 )
 from tests.test_algorithms.test_llms.test_ppo_llm_passes import (
     patch_cuda_device,
@@ -595,6 +603,8 @@ class TestSFTSaveLoadCheckpoint:
                         getattr(new_sft, attr).is_sharded
                         == getattr(sft, attr).is_sharded
                     )
+                elif attr == "sequence_layout":
+                    assert type(getattr(new_sft, attr)) is type(getattr(sft, attr))
                 elif attr == "learn_profiler":
                     assert new_sft.learn_profiler is own_profiler
                 elif attr == "lora_config":
@@ -723,6 +733,35 @@ class TestSFTGetLogprobs:
         )
         log_probs = sft._get_logprobs(ids=ids, batch_size=1)
         assert log_probs.shape == (ids.shape[0], ids.shape[1] - 1)
+        sft.clean_up()
+
+    @pytest.mark.usefixtures("gloo_process_group")
+    def test_context_parallel_logprobs_match_padded(self) -> None:
+        # Arrange
+        sft = make_qwen3_sft()
+        # SFT never samples, so it keeps temperature 0; log-probs divide by it.
+        sft.temperature = 1.0
+        ids, mask, _ = packing_sft_batch()
+        with torch.no_grad():
+            padded = sft._get_logprobs(ids=ids, batch_size=2, attention_mask=mask)
+        sft.sequence_layout = ContextParallelSequence(
+            pad_token_id=sft.pad_token_id,
+            cp=1,
+            group=torch.distributed.group.WORLD,
+            rank=0,
+            round_to=8,
+        )
+
+        # Act
+        with torch.no_grad():
+            cp = sft._get_logprobs(ids=ids, batch_size=2, attention_mask=mask)
+
+        # Assert: CP drops its round_to pad back to the input frame.
+        assert cp.shape == (4, 11)
+        scored = mask[:, 1:].bool()
+        torch.testing.assert_close(
+            cp[scored], padded[scored], atol=PACKING_ATOL, rtol=0
+        )
         sft.clean_up()
 
 
@@ -1093,9 +1132,7 @@ class TestSFTSFTLoss:
         torch.testing.assert_close(loss, expected, atol=PACKING_ATOL, rtol=0)
         sft.clean_up()
 
-    def test_packed_loss_and_grads_match_padded(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_packed_loss_and_grads_match_padded(self) -> None:
         # Arrange
         sft = make_qwen3_sft()
         ids, mask, labels = packing_sft_batch()
@@ -1107,7 +1144,7 @@ class TestSFTSFTLoss:
         padded_loss = sft._sft_loss(ids, mask, labels, training=True)
         padded_loss.backward()
         padded_grads = lora_grads(sft)
-        monkeypatch.setattr(sft, "_packing_mode", lambda: "varlen")
+        use_packed(sft, True)
 
         # Act
         packed_loss = sft._sft_loss(ids, mask, labels, training=True)
@@ -1120,4 +1157,124 @@ class TestSFTSFTLoss:
         assert padded_grads
         for packed, padded in zip(packed_grads, padded_grads, strict=True):
             torch.testing.assert_close(packed, padded, atol=PACKING_ATOL, rtol=0)
+        sft.clean_up()
+
+    @pytest.mark.usefixtures("gloo_process_group")
+    def test_context_parallel_loss_and_grads_match_padded(self) -> None:
+        # Arrange
+        sft = make_qwen3_sft()
+        ids, mask, labels = packing_sft_batch()
+        forward_shapes = []
+        sft.actor.register_forward_pre_hook(
+            lambda _m, _a, kwargs: forward_shapes.append(kwargs["input_ids"].shape),
+            with_kwargs=True,
+        )
+        padded_loss = sft._sft_loss(ids, mask, labels, training=True)
+        padded_loss.backward()
+        padded_grads = lora_grads(sft)
+        sft.sequence_layout = ContextParallelSequence(
+            pad_token_id=sft.pad_token_id,
+            cp=1,
+            group=torch.distributed.group.WORLD,
+            rank=0,
+            round_to=8,
+        )
+
+        # Act
+        cp_loss = sft._sft_loss(ids, mask, labels, training=True)
+        cp_loss.backward()
+        cp_grads = lora_grads(sft)
+
+        # Assert: CP pads the 11 action tokens to a multiple of round_to=8.
+        assert forward_shapes == [torch.Size([4, 12]), torch.Size([4, 16])]
+        torch.testing.assert_close(cp_loss, padded_loss, atol=PACKING_ATOL, rtol=0)
+        assert padded_grads
+        for cp_grad, padded in zip(cp_grads, padded_grads, strict=True):
+            torch.testing.assert_close(cp_grad, padded, atol=PACKING_ATOL, rtol=0)
+        sft.clean_up()
+
+
+def hand_laid_sft_loss(
+    sft: SFT, layout: str, ids: torch.Tensor, mask: torch.Tensor, labels: torch.Tensor
+) -> torch.Tensor:
+    """Token-mean response cross-entropy of one hand-laid forward of *layout*."""
+    kwargs, packed, aligned_ids, _ = hand_laid_inputs(sft, layout, ids, mask)
+    with sft._patch_lm_head_to_identity():
+        hidden = sft.actor(**kwargs).logits
+    if packed is not None:
+        labels = pack_next_token_frame(labels, packed, -100)
+    elif layout == "cp":
+        hidden = torch.cat([hidden, hidden.new_zeros(hidden[:, :1].shape)], dim=1)
+        labels = F.pad(labels, (0, aligned_ids.shape[1] - ids.shape[1]), value=-100)
+    scored = labels != -100
+    fused_fn, head_w, head_b = sft._fused_logprob_fn_and_head()
+    log_probs = fused_fn(
+        hidden[:, :-1][scored].unsqueeze(0),
+        head_w,
+        head_b,
+        labels[scored].unsqueeze(0),
+        temperature=1.0,
+    )
+    return -log_probs.sum() / scored.sum()
+
+
+@pytest.mark.usefixtures("gloo_process_group")
+class TestSFTSFTLossLayouts:
+    """Each layout's SFT loss is one hand-laid forward of the same kind."""
+
+    @pytest.mark.parametrize("training", [False, True], ids=["eval", "train"])
+    @pytest.mark.parametrize("layout", LAYOUTS)
+    def test_matches_the_hand_laid_forward(self, layout: str, training: bool) -> None:
+        # Arrange: two trailing columns are padding in every row.
+        sft = make_qwen3_sft()
+        use_layout(sft, layout)
+        ids, mask = right_padded_batch([12, 9, 6, 11], seq_len=14)
+        prompt_masks = SFT._create_prompt_masks([3, 2, 4, 2], max_length=14)
+        labels = torch.where((prompt_masks.bool() & mask)[:, 1:], ids[:, 1:], -100)
+        mask = mask.long()
+        with torch.set_grad_enabled(training):
+            sft.actor.train(mode=training)
+            expected = hand_laid_sft_loss(sft, layout, ids, mask, labels)
+        if training:
+            expected.backward()
+        expected_grads = take_grads(sft.actor)
+
+        # Act
+        with torch.set_grad_enabled(training):
+            loss = sft._sft_loss(ids, mask, labels, training=training)
+        if training:
+            loss.backward()
+        grads = take_grads(sft.actor)
+
+        # Assert: the layouts run different matmul shapes and sum orders than
+        # the hand-laid forward, so fp32 results differ by rounding per BLAS backend.
+        torch.testing.assert_close(loss, expected, atol=1e-6, rtol=1e-6)
+        assert bool(grads) is training
+        assert grads.keys() == expected_grads.keys()
+        for name, grad in grads.items():
+            torch.testing.assert_close(
+                grad, expected_grads[name], atol=1e-6, rtol=1e-6, msg=name
+            )
+        sft.clean_up()
+
+
+class TestSFTBuildSequenceLayout:
+    @pytest.mark.usefixtures("gloo_process_group")
+    def test_cp_config_shards_over_the_runtime_cp_group(self) -> None:
+        # Arrange
+        sft = make_qwen3_sft()
+        world = torch.distributed.group.WORLD
+        sft.fsdp_config = FSDPConfig(cp=2)
+        runtime = FSDPRuntime(sft.fsdp_config)
+        runtime.parallel_mesh = ParallelMesh(
+            dp_shard=mock.MagicMock(), cp=mock.MagicMock(get_group=lambda: world)
+        )
+        sft.shard_runtime = runtime
+
+        # Act
+        layout = sft._build_sequence_layout()
+
+        # Assert
+        assert isinstance(layout, ContextParallelSequence)
+        assert (layout.cp, layout.group, layout.rank) == (2, world, 0)
         sft.clean_up()

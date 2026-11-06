@@ -11,6 +11,8 @@ check.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -33,9 +35,18 @@ from transformers.models.granitemoehybrid.configuration_granitemoehybrid import 
 )
 
 import agilerl.architectures.granite_liger as granite_liger
-from agilerl.architectures import granite
+from agilerl.architectures import granitemoe
+from agilerl.architectures.granitemoehybrid import packed as granite_hybrid_packed
 
 GRANITE_MODEL_TYPES = ("granitemoe", "granitemoehybrid")
+FAMILY_INSTALLERS = (
+    pytest.param(granitemoe, granitemoe.install_granite_moe_patches, id="granitemoe"),
+    pytest.param(
+        granite_hybrid_packed,
+        granite_hybrid_packed.install_granite_hybrid_patches,
+        id="granitemoehybrid",
+    ),
+)
 
 
 @pytest.fixture
@@ -53,11 +64,14 @@ def restored_granite_modeling(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-def liger_registry(monkeypatch: pytest.MonkeyPatch) -> dict:
+def liger_registry() -> Iterator[dict]:
     """Liger's apply map without Granite entries; restored afterwards."""
+    saved = dict(MODEL_TYPE_TO_APPLY_LIGER_FN)
     for model_type in GRANITE_MODEL_TYPES:
-        monkeypatch.delitem(MODEL_TYPE_TO_APPLY_LIGER_FN, model_type, raising=False)
-    return MODEL_TYPE_TO_APPLY_LIGER_FN
+        MODEL_TYPE_TO_APPLY_LIGER_FN.pop(model_type, None)
+    yield MODEL_TYPE_TO_APPLY_LIGER_FN
+    MODEL_TYPE_TO_APPLY_LIGER_FN.clear()
+    MODEL_TYPE_TO_APPLY_LIGER_FN.update(saved)
 
 
 def _tiny_granite_hybrid(
@@ -148,21 +162,32 @@ class TestRegisterGraniteLiger:
         # Assert
         assert liger_registry["granitemoe"] is native
 
-    def test_family_installers_register_the_appliers(self, liger_registry) -> None:
+    @pytest.mark.parametrize(
+        "install",
+        [
+            granitemoe.install_granite_moe_patches,
+            granite_hybrid_packed.install_granite_hybrid_patches,
+        ],
+        ids=GRANITE_MODEL_TYPES,
+    )
+    def test_family_installers_register_the_appliers(
+        self, liger_registry, install
+    ) -> None:
         # Act
-        granite.install_granite_moe_patches(None)
+        install(None)
 
         # Assert
         assert set(GRANITE_MODEL_TYPES) <= set(liger_registry)
 
+    @pytest.mark.parametrize(("module", "install"), FAMILY_INSTALLERS)
     def test_installers_skip_registration_without_liger(
-        self, liger_registry, monkeypatch
+        self, liger_registry, monkeypatch, module, install
     ) -> None:
         # Arrange
-        monkeypatch.setattr(granite, "HAS_LIGER_KERNEL", False)
+        monkeypatch.setattr(module, "HAS_LIGER_KERNEL", False)
 
         # Act
-        granite.install_granite_moe_patches(None)
+        install(None)
 
         # Assert
         assert set(GRANITE_MODEL_TYPES).isdisjoint(liger_registry)

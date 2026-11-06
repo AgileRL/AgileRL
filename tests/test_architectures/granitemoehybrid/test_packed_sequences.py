@@ -1,7 +1,7 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Granite patches: packed rows through a tiny GraniteMoeHybrid on CPU match the padded batch."""
+"""GraniteMoeHybrid patches: packed rows through a tiny model on CPU match the padded batch."""
 
 from __future__ import annotations
 
@@ -23,8 +23,15 @@ from transformers.models.granitemoehybrid.modeling_granitemoehybrid import (
     GraniteMoeHybridModel,
 )
 
-from agilerl.architectures import granite, install_family_patches
-from agilerl.architectures.granite import patch_granite_hybrid_packed_sequences
+from agilerl.algorithms.core.sequence_layout import (
+    PaddedSequence,
+    position_ids_from_mask,
+)
+from agilerl.architectures import install_family_patches
+from agilerl.architectures.granitemoehybrid import packed as granite_packed
+from agilerl.architectures.granitemoehybrid.packed import (
+    patch_granite_hybrid_packed_sequences,
+)
 from agilerl.utils.llm_packing import (
     RESETS_AT_DOCUMENT_BOUNDARY,
     mixers_without_boundary_reset,
@@ -252,6 +259,38 @@ class TestPatchGraniteHybridPackedSequences:
         # Assert
         torch.testing.assert_close(stacked, one.repeat(2, 1), atol=self.ATOL, rtol=0)
 
+    @pytest.mark.parametrize("attn_implementation", ["sdpa", VARLEN_ATTENTION])
+    def test_unmasked_padded_layout_forward_is_not_read_as_packed(
+        self, pristine_granite_hybrid_classes, varlen_attention, attn_implementation
+    ) -> None:
+        # Arrange
+        model = _tiny_granite_hybrid(attn_implementation).eval()
+        install_family_patches(model.config.model_type, model)
+        ids, mask = _right_padded_documents()
+        real_hidden = mask[:, :-1]
+
+        # Act
+        with (
+            torch.no_grad(),
+            PaddedSequence(calc_position_embeddings=True).prepare_forward(
+                ids, mask.long()
+            ) as fwd,
+        ):
+            unmasked = _token_logprobs(model, fwd.kwargs["input_ids"])
+            masked = _token_logprobs(
+                model,
+                ids,
+                attention_mask=mask.long(),
+                position_ids=position_ids_from_mask(mask.long()),
+            )
+
+        # Assert
+        assert set(fwd.kwargs) == {"input_ids", "use_cache"}
+        torch.testing.assert_close(
+            unmasked[real_hidden], masked[real_hidden], atol=self.ATOL, rtol=0
+        )
+        assert all(offsets is None for offsets in varlen_attention)
+
     def test_unpatched_model_leaks_across_documents(
         self, pristine_granite_hybrid_classes
     ) -> None:
@@ -317,11 +356,11 @@ class TestPatchGraniteHybridPackedSequences:
     ) -> None:
         # Arrange
         monkeypatch.setattr(
-            granite, "GRANITE_HYBRID_MODELING", "agilerl_missing_module"
+            granite_packed, "GRANITE_HYBRID_MODELING", "agilerl_missing_module"
         )
 
         # Act
-        with caplog.at_level(logging.WARNING, logger=granite.__name__):
+        with caplog.at_level(logging.WARNING, logger=granite_packed.__name__):
             patch_granite_hybrid_packed_sequences()
 
         # Assert

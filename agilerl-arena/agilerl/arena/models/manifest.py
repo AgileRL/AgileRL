@@ -82,6 +82,8 @@ RESOLVED_MEMORY_FIELDS = (
     ("fsdp", "routed_expert_chunk_mib"),
     ("fsdp", "activation_offload"),
     ("fsdp", "cpu_offload"),
+    ("fsdp", "shard_frozen_tp"),
+    ("fsdp", "save_moe_collectives"),
     ("fsdp", "checkpoint_every_n_blocks"),
 )
 
@@ -713,6 +715,27 @@ class TrainingManifest(BaseModel):
         if model is not None:
             self.algorithm.check_speculative_sampling(model.biases_image_token)
         return self
+
+    @model_validator(mode="after")
+    def _check_expert_parallel_covers_tensor_parallel(self) -> Self:
+        """MoE models need ep >= tp; tensor parallel leaves routed experts whole."""
+        if not isinstance(self.algorithm, LLMAlgorithmSpec):
+            return self
+        fsdp = self.algorithm.fsdp
+        if fsdp is None or fsdp.ep >= fsdp.tp:
+            return self
+        model = SUPPORTED_MODEL_INFO.get(self.algorithm.pretrained_model_name_or_path)
+        # Only supported ids are known offline; the trainer checks the rest.
+        if model is None or not model.supports_expert_parallel:
+            return self
+        # Without EP, experts sit on tp times fewer FSDP ranks, so each GPU
+        # holds tp times the expert memory. The trainer raises this at startup too.
+        msg = (
+            f"algorithm.fsdp.ep={fsdp.ep} is below tp={fsdp.tp}: "
+            f"{model.hub_id} is a mixture-of-experts model, and tensor parallel "
+            "does not split routed experts. Set ep >= tp."
+        )
+        raise ValueError(msg)
 
     @field_serializer("network", mode="wrap")
     def _serialize_network(

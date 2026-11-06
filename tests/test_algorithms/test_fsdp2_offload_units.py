@@ -17,7 +17,7 @@ from peft import LoraConfig, get_peft_model
 from safetensors.torch import save_file
 from torch import nn
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.tensor import DTensor, Replicate, Shard
+from torch.distributed.tensor import DTensor, Shard, distribute_tensor
 from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, Qwen3Config
 
 from agilerl.algorithms.core.base import LLMAlgorithm
@@ -29,8 +29,8 @@ from agilerl.distributed import (
     FSDPConfig,
     materialize_fsdp2_from_cpu_state,
 )
-from agilerl.distributed.expert_parallel import ParallelMesh
 from agilerl.distributed.fsdp import _move_ignored_to_device
+from agilerl.distributed.mesh import MeshAxisName, ParallelMesh
 from agilerl.distributed.runtime import DPRuntime, FSDPRuntime
 
 cuda_required = pytest.mark.skipif(
@@ -158,9 +158,8 @@ class TestLLMWrapModelsOffloadValidation:
 class TestUntiedLmHeadNoReshard:
     """Untied ``lm_head`` is its own FSDP unit and stays gathered after forward."""
 
-    def test_untied_lm_head_fully_shard_disables_reshard_after_forward(self):
-        from agilerl.distributed.fsdp_blocks import _shard_embed_and_lm_head
-
+    @staticmethod
+    def _causal_lm() -> nn.Module:
         class LanguageModel(nn.Module):
             def __init__(self):
                 super().__init__()
@@ -174,7 +173,12 @@ class TestUntiedLmHeadNoReshard:
                 self.model = LanguageModel()
                 self.lm_head = nn.Linear(2, 4, bias=False)
 
-        model = CausalLM()
+        return CausalLM()
+
+    def test_untied_lm_head_fully_shard_disables_reshard_after_forward(self):
+        from agilerl.distributed.fsdp_blocks import _shard_embed_and_lm_head
+
+        model = self._causal_lm()
         seen: list[tuple[nn.Module, dict]] = []
 
         def _record(module, **kwargs):
@@ -190,6 +194,20 @@ class TestUntiedLmHeadNoReshard:
         assert model.model.norm not in modules
         head_kwargs = next(kwargs for module, kwargs in seen if module is model.lm_head)
         assert head_kwargs["reshard_after_forward"] is False
+
+    def test_lm_head_already_ignored_is_not_sharded(self):
+        from agilerl.distributed.fsdp_blocks import _shard_embed_and_lm_head
+
+        model = self._causal_lm()
+
+        with patch("agilerl.distributed.fsdp_blocks.fully_shard") as fully_shard:
+            _shard_embed_and_lm_head(
+                model,
+                {"reshard_after_forward": True},
+                extra_ignored=set(model.lm_head.parameters()),
+            )
+
+        assert fully_shard.call_args_list == []
 
 
 # ---------------------------------------------------------------------------
@@ -217,46 +235,31 @@ class TestGatherLayer:
             assert w is weight
             assert b is bias
 
-    def test_materializes_when_fsdp_without_cpu_offload(self):
-        # Arrange — plain tensors: materialize is a no-op identity
+    def test_yields_dense_weights_unchanged_when_fsdp(self):
+        # Arrange
         weight = torch.randn(4, 8)
         bias = torch.randn(4)
         layer = _linear_like(weight, bias)
         runtime = FSDPRuntime(FSDPConfig(cpu_offload=False))
         hidden = torch.randn(2, 8)
-        called = []
-
-        def tracking_materialize(*tensors):
-            called.append(tensors)
-            return _fake_materialize(tensors)
 
         # Act
-        with patch(
-            "agilerl.distributed.runtime.materialize_dtensors",
-            side_effect=tracking_materialize,
-        ):
-            with runtime.gather_layer(layer, device=hidden.device) as (w, b):
-                # Assert
-                assert w is weight
-                assert b is bias
-        assert called == [(weight, bias)]
+        with runtime.gather_layer(layer, device=hidden.device) as (w, b):
+            # Assert
+            assert w is weight
+            assert b is bias
 
-    def test_materializes_and_moves_weight_to_device_under_cpu_offload(self):
-        # Arrange — weight on CPU, target a (possibly same) compute device
-        cpu_weight = torch.randn(4, 8)
-        cpu_bias = torch.randn(4)
-        layer = _linear_like(cpu_weight, cpu_bias)
+    def test_yields_weights_on_device_under_cpu_offload(self):
+        # Arrange
+        layer = _linear_like(torch.randn(4, 8), torch.randn(4))
         runtime = FSDPRuntime(FSDPConfig(cpu_offload=True, optim_cpu_offload=False))
         device = torch.device("cpu")
 
-        # Act — patch materialize_dtensors to yield the plain CPU tensors
-        with patch(
-            "agilerl.distributed.runtime.materialize_dtensors",
-            side_effect=lambda *tensors: _fake_materialize(tensors),
-        ):
-            with runtime.gather_layer(layer, device=device) as (w, b):
-                assert w.device == device
-                assert b.device == device
+        # Act
+        with runtime.gather_layer(layer, device=device) as (w, b):
+            # Assert
+            assert w.device == device
+            assert b.device == device
 
     def test_no_move_when_weight_already_on_device(self):
         # Arrange — weight already on the target device
@@ -274,14 +277,9 @@ class TestGatherLayer:
         device = torch.device("cpu")
 
         # Act
-        with (
-            patch(
-                "agilerl.distributed.runtime.materialize_dtensors",
-                side_effect=lambda *tensors: _fake_materialize(tensors),
-            ),
-            patch("torch.Tensor.to", tracking_to),
-        ):
+        with patch("torch.Tensor.to", tracking_to):
             with runtime.gather_layer(layer, device=device) as (_w, _b):
+                # Assert
                 assert len(move_calls) == 0
 
     def test_handles_none_bias(self):
@@ -292,26 +290,10 @@ class TestGatherLayer:
         device = torch.device("cpu")
 
         # Act
-        with patch(
-            "agilerl.distributed.runtime.materialize_dtensors",
-            side_effect=lambda *tensors: _fake_materialize(tensors),
-        ):
-            with runtime.gather_layer(layer, device=device) as (w, b):
-                assert w.device == device
-                assert b is None
-
-
-def _fake_materialize(tensors):
-    """Context manager simulating ``materialize_dtensors``: yields the
-    input tensors as-is (already plain CPU tensors in tests).
-    """
-    from contextlib import contextmanager
-
-    @contextmanager
-    def _ctx():
-        yield list(tensors)
-
-    return _ctx()
+        with runtime.gather_layer(layer, device=device) as (w, b):
+            # Assert
+            assert w.device == device
+            assert b is None
 
 
 # ---------------------------------------------------------------------------
@@ -839,56 +821,6 @@ class TestCloneLlmRejectsFsdp:
 
 
 class TestFsdpSafetensorsShardHelpers:
-    def test_global_shard_slices_match_torch_chunk_divisible(self):
-        from torch.distributed.tensor.placement_types import Shard
-
-        from agilerl.distributed.fsdp import global_shard_slices
-
-        global_shape = (8, 4)
-        placements = (Shard(0),)
-        tensor = torch.arange(32).reshape(8, 4)
-        mesh = MagicMock()
-        mesh.size.return_value = 4
-        for rank in range(4):
-            mesh.get_coordinate.return_value = (rank,)
-            slices = global_shard_slices(global_shape, placements, mesh)
-            expected = torch.chunk(tensor, 4, dim=0)[rank]
-            assert torch.equal(tensor[slices], expected)
-
-    def test_global_shard_slices_match_torch_chunk_remainder(self):
-        from torch.distributed.tensor.placement_types import Shard
-
-        from agilerl.distributed.fsdp import global_shard_slices
-
-        global_shape = (10,)
-        placements = (Shard(0),)
-        tensor = torch.arange(10)
-        mesh = MagicMock()
-        mesh.size.return_value = 3
-        chunks = list(torch.chunk(tensor, 3, dim=0))
-        for rank in range(3):
-            mesh.get_coordinate.return_value = (rank,)
-            slices = global_shard_slices(global_shape, placements, mesh)
-            assert torch.equal(tensor[slices], chunks[rank])
-
-    def test_global_shard_slices_two_dimensional_shard(self):
-        from torch.distributed.tensor.placement_types import Shard
-
-        from agilerl.distributed.fsdp import global_shard_slices
-
-        global_shape = (6, 4)
-        placements = (Shard(0), Shard(1))
-        tensor = torch.arange(24).reshape(6, 4)
-        mesh = MagicMock()
-        mesh.size.return_value = 2
-        for row_rank in range(2):
-            for col_rank in range(2):
-                mesh.get_coordinate.return_value = (row_rank, col_rank)
-                slices = global_shard_slices(global_shape, placements, mesh)
-                row_piece = torch.chunk(tensor, 2, dim=0)[row_rank]
-                expected = torch.chunk(row_piece, 2, dim=1)[col_rank]
-                assert torch.equal(tensor[slices], expected)
-
     def test_copy_safetensors_local_slice_with_dtype_cast(self, tmp_path):
         from safetensors import safe_open
         from safetensors.torch import save_file
@@ -1322,7 +1254,7 @@ class TestMaterializeFsdp2FromCpuState:
         lora = LoraConfig(r=4, target_modules=["q_proj", "v_proj"])
         model = get_peft_model(meta, lora, adapter_name="actor")
         ids = torch.randint(0, 64, (2, 6))
-        world = init_device_mesh("cpu", (1, 1), mesh_dim_names=("replicate", "shard"))
+        dp_shard = init_device_mesh("cpu", (1,), mesh_dim_names=("dp_shard",))
 
         # Act
         materialize_fsdp2_from_cpu_state(
@@ -1334,7 +1266,7 @@ class TestMaterializeFsdp2FromCpuState:
                 routed_expert_chunk_mib=64,
                 checkpoint_every_n_blocks=1,
             ),
-            parallel_mesh=ParallelMesh(world=world, hsdp=world["shard"]),
+            parallel_mesh=ParallelMesh(dp_shard=dp_shard),
             gradient_checkpointing=True,
         )
         logits = model(input_ids=ids).logits
@@ -1480,15 +1412,14 @@ class TestLoraConfigsEquivalent:
 
 
 class _CoordMesh:
-    """Device mesh stand-in whose coordinate is unset."""
+    """Device mesh stand-in for rank 0 of a 2-rank mesh."""
 
-    def get_coordinate(self) -> None:
-        return None
+    shape = (2,)
 
-    def size(self, mesh_dim: int) -> int:
-        return 2
+    def _is_current_rank_part_of_mesh(self) -> bool:
+        return True
 
-    def get_local_rank(self, mesh_dim: int) -> int:
+    def _sym_get_coordinate(self, mesh_dim: int) -> int:
         return 0
 
 
@@ -1916,14 +1847,6 @@ class TestSafetensorsShardKeys:
             "language_model.model.embeddings.weight",
             "language_model.backbone.embeddings.weight",
         )
-
-    def test_shard_slices_when_mesh_coordinate_is_unset(self):
-        from agilerl.distributed.fsdp import global_shard_slices
-
-        slices = global_shard_slices((4, 2), (Replicate(), Shard(0)), _CoordMesh())
-
-        assert slices[0] == slice(0, 2)
-        assert slices[1] == slice(0, 2)
 
     def test_local_dest_of_a_dtensor(self, monkeypatch: pytest.MonkeyPatch):
         from agilerl.distributed import fsdp as fsdp_mod
@@ -2561,23 +2484,13 @@ class TestSafetensorsShardKeys:
             _load_sharded_weights_from_safetensors(Root())
 
     def test_stacks_indexed_expert_weights_on_a_dtensor(
-        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch, gloo_process_group
     ):
         from agilerl.distributed import fsdp as fsdp_mod
 
         class FakeDTensor(nn.Parameter):
             def to_local(self) -> torch.Tensor:
                 return self.data
-
-        class OneChunkMesh:
-            def get_coordinate(self) -> None:
-                return None
-
-            def size(self, mesh_dim: int) -> int:
-                return 1
-
-            def get_local_rank(self, mesh_dim: int) -> int:
-                return 0
 
         monkeypatch.setattr(fsdp_mod, "DTensor", FakeDTensor)
         first = torch.arange(4, dtype=torch.float32).reshape(2, 2)
@@ -2602,7 +2515,7 @@ class TestSafetensorsShardKeys:
 
         model = Root()
         model.block.experts.up_proj.placements = (Shard(0),)
-        model.block.experts.up_proj.device_mesh = OneChunkMesh()
+        model.block.experts.up_proj.device_mesh = init_device_mesh("cpu", (1,))
 
         fsdp_mod._load_sharded_weights_from_safetensors(model)
 
@@ -2610,7 +2523,9 @@ class TestSafetensorsShardKeys:
             model.block.experts.up_proj.data, torch.stack([first, second])
         )
 
-    def test_loads_a_dtensor_shard(self, tmp_path, monkeypatch: pytest.MonkeyPatch):
+    def test_loads_a_dtensor_shard(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch, gloo_process_group
+    ):
         from agilerl.distributed import fsdp as fsdp_mod
 
         class FakeDTensor(nn.Parameter):
@@ -2620,16 +2535,6 @@ class TestSafetensorsShardKeys:
         monkeypatch.setattr(fsdp_mod, "DTensor", FakeDTensor)
         full = torch.arange(8, dtype=torch.float32).reshape(4, 2)
         save_file({"weight": full}, str(tmp_path / "model.safetensors"))
-
-        class OneChunkMesh:
-            def get_coordinate(self) -> None:
-                return None
-
-            def size(self, mesh_dim: int) -> int:
-                return 1
-
-            def get_local_rank(self, mesh_dim: int) -> int:
-                return 0
 
         class Tiny(nn.Module):
             def __init__(self) -> None:
@@ -2641,7 +2546,7 @@ class TestSafetensorsShardKeys:
 
         model = Tiny()
         model.weight.placements = (Shard(0),)
-        model.weight.device_mesh = OneChunkMesh()
+        model.weight.device_mesh = init_device_mesh("cpu", (1,))
 
         fsdp_mod._load_sharded_weights_from_safetensors(model)
 
@@ -2888,3 +2793,27 @@ class TestMoveIgnoredToDevice:
         _move_ignored_to_device(module, torch.device("cpu"))
 
         assert module._parameters["w"] is dtensor
+
+    def test_moves_tp_only_dtensor_keeping_identity_and_layout(
+        self, gloo_process_group
+    ) -> None:
+        # Arrange
+        mesh = init_device_mesh("cpu", (1,), mesh_dim_names=(MeshAxisName.TP,))
+        module = nn.Linear(2, 4, bias=False)
+        module.weight = nn.Parameter(
+            distribute_tensor(module.weight.detach(), mesh, [Shard(0)]),
+            requires_grad=False,
+        )
+        weight = module.weight
+
+        # Act
+        _move_ignored_to_device(module, torch.device("meta"))
+
+        # Assert
+        assert module.weight is weight
+        assert isinstance(weight, DTensor)
+        assert weight.to_local().device == torch.device("meta")
+        assert weight.device_mesh is mesh
+        assert weight.placements == (Shard(0),)
+        assert weight.shape == (4, 2)
+        assert not weight.requires_grad

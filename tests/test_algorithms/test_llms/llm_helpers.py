@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
+import torch.distributed as dist
+import torch.nn.functional as F
 from torch import nn
 from transformers import Qwen3Config, Qwen3ForCausalLM
 from transformers.configuration_utils import PretrainedConfig
@@ -20,7 +22,173 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 
 from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
+from agilerl.algorithms.core.sequence_layout import (
+    ContextParallelSequence,
+    PackedSequence,
+    position_ids_from_mask,
+)
+from agilerl.distributed.context_parallel.sequence import pad_right_for_cp
+from agilerl.utils.llm_packing import (
+    PackedBatch,
+    pack_next_token_frame,
+    pack_padded_batch,
+    unpack_logprobs,
+)
 from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
+
+LAYOUTS = ("padded", "packed", "cp")
+# Multiple the one-rank context-parallel layout pads its action frame to.
+CP_ROUND_TO = 8
+
+
+def use_packed(agent: Any, varlen: bool) -> None:
+    """Pack *agent*'s actor forwards, with FlashAttention varlen offsets when *varlen*."""
+    agent.sequence_packing = True
+    agent.sequence_layout = PackedSequence(
+        varlen=varlen,
+    )
+
+
+def use_layout(agent: Any, kind: str) -> None:
+    """Run *agent*'s actor forwards padded, packed, or context-parallel on one gloo rank."""
+    if kind == "packed":
+        use_packed(agent, False)
+    elif kind == "cp":
+        agent.sequence_layout = ContextParallelSequence(
+            pad_token_id=agent.pad_token_id,
+            cp=1,
+            group=dist.group.WORLD,
+            rank=0,
+            round_to=CP_ROUND_TO,
+        )
+
+
+def real_columns(mask: torch.Tensor) -> int:
+    """Columns up to and including the last real token of any row."""
+    return int(mask.any(dim=0).nonzero().max()) + 1
+
+
+def hand_laid_inputs(
+    agent: Any, kind: str, ids: torch.Tensor, mask: torch.Tensor, copies: int = 1
+) -> tuple[dict[str, Any], PackedBatch | None, torch.Tensor, torch.Tensor]:
+    """Actor kwargs of *kind* built from the packing and CP primitives.
+
+    :return: ``(kwargs, packed, ids, mask)``; ``ids`` and ``mask`` are cut to
+        the real width and CP-aligned under ``"cp"``, and ``packed`` is ``None``
+        unless packed.
+    """
+    if kind == "packed":
+        packed = pack_padded_batch(ids, mask)
+        kwargs = {
+            "input_ids": packed.input_ids.repeat(copies, 1),
+            "position_ids": packed.position_ids.repeat(copies, 1),
+            "use_cache": False,
+        }
+        return kwargs, packed, ids, mask
+    if kind == "cp":
+        real_width = real_columns(mask)
+        ids, mask = pad_right_for_cp(
+            ids[:, :real_width], CP_ROUND_TO, agent.pad_token_id, mask[:, :real_width]
+        )
+        ids, mask = ids.repeat(copies, 1), mask.repeat(copies, 1)
+        kwargs = {
+            "input_ids": ids[:, :-1],
+            "position_ids": position_ids_from_mask(mask)[:, :-1],
+            "attention_mask": mask[:, :-1],
+            "use_cache": False,
+        }
+        return kwargs, None, ids, mask
+    ids, mask = ids.repeat(copies, 1), mask.repeat(copies, 1)
+    kwargs = {"input_ids": ids, "attention_mask": mask, "use_cache": False}
+    if agent.calc_position_embeddings:
+        kwargs["position_ids"] = position_ids_from_mask(mask)
+    return kwargs, None, ids, mask
+
+
+def hand_laid_logprobs(
+    agent: Any,
+    kind: str,
+    ids: torch.Tensor,
+    mask: torch.Tensor,
+    score_mask: torch.Tensor | None = None,
+    support_ids: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """``(B, T - 1)`` log-probs of one unsplit forward of *kind*, scored on its own frame."""
+    kwargs, _, _, _ = hand_laid_inputs(agent, kind, ids, mask)
+    hidden, _ = agent._forward_hidden_and_value(kwargs)
+    return score_hand_laid_hidden(
+        agent, kind, hidden, ids, mask, score_mask, support_ids
+    )
+
+
+def score_hand_laid_hidden(
+    agent: Any,
+    kind: str,
+    hidden: torch.Tensor,
+    ids: torch.Tensor,
+    mask: torch.Tensor,
+    score_mask: torch.Tensor | None = None,
+    support_ids: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """``(B, T - 1)`` log-probs of a hand-laid *kind* forward's hidden states of ``(B, T)`` ``ids``."""
+    width = ids.shape[1]
+    fused_fn, head_w, head_b = agent._fused_logprob_fn_and_head()
+    if kind == "packed":
+        packed = pack_padded_batch(ids, mask, score_mask)
+        log_probs = agent._score_hidden(
+            fused_fn,
+            hidden[:, :-1],
+            head_w,
+            head_b,
+            packed.input_ids[:, 1:],
+            packed.score_mask,
+            None
+            if support_ids is None
+            else pack_next_token_frame(support_ids, packed, -1),
+            packed.n_scored,
+        )
+        return unpack_logprobs(log_probs, packed)
+    if kind == "cp":
+        real_width = real_columns(mask)
+        hidden = torch.cat([hidden, hidden.new_zeros(hidden[:, :1].shape)], dim=1)
+        ids, score_mask, support_ids = pad_right_for_cp(
+            ids[:, :real_width],
+            CP_ROUND_TO,
+            agent.pad_token_id,
+            None if score_mask is None else score_mask[:, : real_width - 1],
+            None if support_ids is None else support_ids[:, : real_width - 1],
+        )
+    log_probs = agent._score_hidden(
+        fused_fn, hidden[:, :-1], head_w, head_b, ids[:, 1:], score_mask, support_ids
+    )
+    log_probs = log_probs[:, : width - 1]
+    return F.pad(log_probs, (0, width - 1 - log_probs.shape[1]))
+
+
+def layout_batch(
+    seq_len: int = 14,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Rows of 12, 9, 6 and 11 tokens with two all-pad trailing columns.
+
+    :return: ``(ids, mask, score_mask, support_ids)``; the score mask skips a
+        two-token prompt and each 3-token support holds its target.
+    """
+    ids, mask = right_padded_batch([12, 9, 6, 11], seq_len=seq_len)
+    score_mask = mask[:, 1:] & (torch.arange(seq_len - 1) >= 2)
+    generator = torch.Generator().manual_seed(5)
+    support_ids = torch.randint(0, 63, (4, seq_len - 1, 3), generator=generator)
+    support_ids[..., 0] = ids[:, 1:]
+    return ids, mask.long(), score_mask, support_ids
+
+
+def take_grads(model: nn.Module) -> dict[str, torch.Tensor]:
+    """Clone and clear every parameter gradient."""
+    grads = {}
+    for name, param in model.named_parameters():
+        if param.grad is not None:
+            grads[name] = param.grad.clone()
+            param.grad = None
+    return grads
 
 
 class DummyConfig(PretrainedConfig):

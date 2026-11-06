@@ -35,25 +35,34 @@ from transformers import AttentionInterface
 from transformers.masking_utils import AttentionMaskInterface, flash_attention_mask
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
+from agilerl.algorithms.core.sequence_layout import ContextParallelSequence
 from agilerl.algorithms.ppo_llm import PPO as LLMPPO
 from agilerl.distributed.fsdp import FSDPConfig
 from agilerl.lora.fused import (
     ROUTING_STATE,
     get_cached_lora_layers,
+    set_fused_adapter_routing,
     unset_fused_adapter_routing,
 )
+from agilerl.utils.llm_packing import unpack_values
 from agilerl.utils.llm_utils import attention_mask_from_padded_ids
 from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 from tests.rank_launch import run_ranks
 from tests.test_algorithms.test_llms.llm_helpers import (
+    LAYOUTS,
     DummyConfig,
     DummyHiddenStatesModel,
     create_tiny_qwen3,
+    hand_laid_inputs,
     optimizer_state,
     record_calls,
     record_outputs,
     scale_losses,
+    score_hand_laid_hidden,
+    take_grads,
     trainable_weights,
+    use_layout,
+    use_packed,
 )
 from tests.test_algorithms.test_llms.segment_helpers import (
     RESOLVED_FSDP_MEMORY,
@@ -251,7 +260,7 @@ class TestPPOCriticValues:
         batch = micro_batch()
 
         # Act
-        _, critic_values = agent._actor_critic_hidden_states(batch["ids"])
+        _, critic_values = agent._actor_critic_pass(batch["ids"], batch["mask"])
         value_loss(agent, critic_values, batch, "token").backward()
         unset_fused_adapter_routing(agent.actor)
 
@@ -265,9 +274,7 @@ class TestPPOCriticValues:
         assert any(grad.abs().sum() > 0 for grad in critic)
         assert all(torch.count_nonzero(grad) == 0 for grad in actor)
 
-    def test_gradient_checkpointing_leaves_the_critic_gradient_unchanged(
-        self,
-    ) -> None:
+    def test_gradient_checkpointing_leaves_the_critic_gradient_unchanged(self) -> None:
         # Arrange
         eager = make_ppo()
         recomputed = make_ppo(model_cls=CheckpointedHiddenStatesModel)
@@ -275,7 +282,7 @@ class TestPPOCriticValues:
 
         # Act
         for agent in (eager, recomputed):
-            _, values = agent._actor_critic_hidden_states(batch["ids"])
+            _, values = agent._actor_critic_pass(batch["ids"], batch["mask"])
             value_loss(agent, values, batch, "token").backward()
             unset_fused_adapter_routing(agent.actor)
 
@@ -293,20 +300,18 @@ class TestPPOCriticValues:
             assert torch.equal(recomputed_grads[name], grad), name
 
 
-class TestLLMPPOActorLogProbsFromHidden:
+class TestLLMPPOActorCriticPass:
     def test_scored_tokens_match_the_full_head(self) -> None:
         # Arrange
         agent = make_ppo()
         batch = micro_batch()
-        hidden, _ = agent._actor_critic_hidden_states(batch["ids"])
-        fused_fn, _, _ = agent._fused_logprob_fn_and_head()
-        head_w, head_b = agent._get_lm_head().weight, None
-        full = agent._fused_chunk_logprobs(
-            hidden, batch["ids"], fused_fn, head_w, head_b
+        full, _ = agent._actor_critic_pass(
+            batch["ids"], torch.ones_like(batch["mask"], dtype=torch.bool)
         )
+        unset_fused_adapter_routing(agent.actor)
 
         # Act
-        scored = agent._actor_log_probs_from_hidden(hidden, batch["ids"], batch["mask"])
+        scored, _ = agent._actor_critic_pass(batch["ids"], batch["mask"])
 
         # Assert
         mask = batch["mask"].bool()
@@ -332,6 +337,9 @@ class TestPPOFusedPassMatchesDoubledForward:
             if model_cls is CheckpointedHiddenStatesModel:
                 pytest.skip("vision model has no checkpointed variant")
             reference = make_vision_ppo()
+            # The vision model runs eagerly, so its per-adapter vision
+            # micro-batches never recompute.
+            reference.gradient_checkpointing = False
             fused = make_vision_ppo()
             batch, pixel_values, counts = vision_micro_batch()
         else:
@@ -349,15 +357,12 @@ class TestPPOFusedPassMatchesDoubledForward:
         reference_loss.backward()
         unset_fused_adapter_routing(reference.actor)
 
-        hidden, fused_values = fused._actor_critic_hidden_states(
-            batch["ids"], pixel_values
+        fused_log_probs, fused_values = fused._actor_critic_pass(
+            batch["ids"], batch["mask"], None, pixel_values
         )
-        fused_loss = policy_loss(
-            fused,
-            fused._actor_log_probs_from_hidden(hidden, batch["ids"], batch["mask"]),
-            batch,
-            mode,
-        ) + value_loss(fused, fused_values, batch, mode)
+        fused_loss = policy_loss(fused, fused_log_probs, batch, mode) + value_loss(
+            fused, fused_values, batch, mode
+        )
         fused_loss.backward()
         unset_fused_adapter_routing(fused.actor)
 
@@ -373,14 +378,12 @@ class TestPPOFusedPassMatchesDoubledForward:
                 fused_grads[name], grad, rtol=RTOL, atol=ATOL, msg=name
             )
 
-    def test_blockmask_packing_matches_the_padded_pass(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_blockmask_packing_matches_the_padded_pass(self) -> None:
         # Arrange: the dummy model is per-token, so packing changes no real
         # token's hidden state.
         padded = make_ppo()
         packed = make_ppo()
-        monkeypatch.setattr(packed, "_packing_mode", lambda: "blockmask")
+        use_packed(packed, False)
         forwards = record_grad_forwards(packed)
         batch = micro_batch()
         real_tokens = int((batch["ids"] != PAD_TOKEN_ID).sum())
@@ -388,10 +391,10 @@ class TestPPOFusedPassMatchesDoubledForward:
         # Act
         losses = []
         for agent in (padded, packed):
-            hidden, values = agent._actor_critic_hidden_states(batch["ids"])
+            log_probs, values = agent._actor_critic_pass(batch["ids"], batch["mask"])
             loss = policy_loss(
                 agent,
-                agent._actor_log_probs_from_hidden(hidden, batch["ids"], batch["mask"]),
+                log_probs,
                 batch,
                 "turn",
             ) + value_loss(agent, values, batch, "turn")
@@ -527,23 +530,22 @@ class TestPPOFusedPassVarlenPacking:
     def test_losses_and_gradients_match_the_padded_pass(
         self,
         mode: str,
-        monkeypatch: pytest.MonkeyPatch,
         varlen_attention: list[torch.Tensor | None],
     ) -> None:
         # Arrange
         padded = make_qwen3_ppo("sdpa")
         packed = make_qwen3_ppo(VARLEN_ATTENTION)
-        monkeypatch.setattr(packed, "_packing_mode", lambda: "varlen")
+        use_packed(packed, True)
         forwards = record_grad_forwards(packed)
         batch = varied_micro_batch(VARIED_LENGTHS)
 
         # Act
         losses = []
         for agent in (padded, packed):
-            hidden, values = agent._actor_critic_hidden_states(batch["ids"])
+            log_probs, values = agent._actor_critic_pass(batch["ids"], batch["mask"])
             loss = policy_loss(
                 agent,
-                agent._actor_log_probs_from_hidden(hidden, batch["ids"], batch["mask"]),
+                log_probs,
                 batch,
                 mode,
             ) + value_loss(agent, values, batch, mode)
@@ -571,37 +573,159 @@ class TestPPOFusedPassVarlenPacking:
                 packed_grads[name], grad, rtol=RTOL, atol=ATTENTION_ATOL, msg=name
             )
 
-    def test_each_copy_runs_under_its_own_adapter(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        varlen_attention: list[torch.Tensor | None],
-    ) -> None:
-        # Arrange: single-adapter packed forwards of the same rows.
-        agent = make_qwen3_ppo(VARLEN_ATTENTION)
-        monkeypatch.setattr(agent, "_packing_mode", lambda: "varlen")
-        batch = varied_micro_batch(VARIED_LENGTHS)
-        real = attention_mask_from_padded_ids(batch["ids"], PAD_TOKEN_ID).bool()
-        with torch.no_grad():
-            actor_hidden = agent._actor_hidden_states(batch["ids"])
-            unset_fused_adapter_routing(agent.actor)
-            critic_values = agent._critic_values(batch["ids"])
-            unset_fused_adapter_routing(agent.actor)
 
-            # Act
-            fused_hidden, fused_values = agent._actor_critic_hidden_states(batch["ids"])
-            unset_fused_adapter_routing(agent.actor)
+class TestPPOContextParallelPasses:
+    """A one-rank context-parallel layout reproduces the padded passes at real tokens."""
 
-        # Assert: the first copy's tokens took the actor delta, the second's
-        # the critic delta.
-        torch.testing.assert_close(
-            fused_hidden[real], actor_hidden[real], rtol=RTOL, atol=ATOL
+    @pytest.mark.usefixtures("gloo_process_group")
+    @pytest.mark.parametrize("vision", [False, True], ids=["text", "vision"])
+    def test_passes_match_the_padded_layout(self, vision: bool) -> None:
+        # Arrange
+        if vision:
+            agent = make_vision_ppo()
+            batch, pixel_values, counts = vision_micro_batch()
+        else:
+            agent = make_qwen3_ppo("sdpa")
+            batch, pixel_values, counts = varied_micro_batch(VARIED_LENGTHS), None, None
+        ids = batch["ids"]
+
+        def passes() -> list[torch.Tensor]:
+            actor_log_probs, values = agent._actor_critic_pass(
+                ids, batch["mask"].bool(), None, pixel_values
+            )
+            unset_fused_adapter_routing(agent.actor)
+            critic = agent._critic_values(ids, pixel_values)
+            unset_fused_adapter_routing(agent.actor)
+            with torch.no_grad():
+                log_probs, fused_values = doubled_forward(
+                    agent, ids, pixel_values, counts
+                )
+            return [actor_log_probs, values, critic, log_probs, fused_values]
+
+        padded = passes()
+        agent.sequence_layout = ContextParallelSequence(
+            pad_token_id=agent.pad_token_id,
+            cp=1,
+            group=dist.group.WORLD,
+            rank=0,
+            round_to=8,
         )
-        torch.testing.assert_close(
-            fused_values[real[:, 1:]],
-            critic_values[real[:, 1:]],
-            rtol=RTOL,
-            atol=ATOL,
+
+        # Act
+        cp = passes()
+
+        # Assert
+        real = attention_mask_from_padded_ids(ids, agent.pad_token_id).bool()
+        for cp_out, padded_out in zip(cp, padded, strict=True):
+            assert cp_out.shape == padded_out.shape
+            torch.testing.assert_close(
+                cp_out[real[:, 1:]],
+                padded_out[real[:, 1:]],
+                rtol=RTOL,
+                atol=ATTENTION_ATOL,
+            )
+
+
+def hand_laid_actor_critic(
+    agent: LLMPPO,
+    layout: str,
+    ids: torch.Tensor,
+    adapters: list[str],
+    score_mask: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """``(B, T - 1)`` first-adapter log-probs and last-adapter values of one forward."""
+    width = ids.shape[1]
+    mask = attention_mask_from_padded_ids(ids, agent.pad_token_id)
+    kwargs, packed, _, _ = hand_laid_inputs(agent, layout, ids, mask, len(adapters))
+    rows = kwargs["input_ids"].shape[0] // len(adapters)
+    set_fused_adapter_routing(
+        agent.actor, [adapter for adapter in adapters for _ in range(rows)]
+    )
+    agent.actor.train()
+    hidden, values = agent._forward_hidden_and_value(kwargs)
+    log_probs = score_hand_laid_hidden(
+        agent, layout, hidden[:rows], ids, mask, score_mask
+    )
+    values = values[-rows:]
+    if packed is not None:
+        return log_probs, unpack_values(values, packed)
+    if layout == "cp":
+        values = values[:, : width - 1]
+        return log_probs, F.pad(values, (0, width - 1 - values.shape[1]))
+    return log_probs, values[:, :-1]
+
+
+@pytest.mark.usefixtures("gloo_process_group")
+class TestPPOPassLayouts:
+    """Each layout's PPO gradient passes are one hand-laid forward of the same kind."""
+
+    @pytest.mark.parametrize("layout", LAYOUTS)
+    def test_actor_critic_pass_matches_the_hand_laid_forward(self, layout: str) -> None:
+        # Arrange
+        agent = make_qwen3_ppo("sdpa")
+        use_layout(agent, layout)
+        batch = varied_micro_batch(VARIED_LENGTHS, seq_len=14)
+        ids, score_mask = batch["ids"], batch["mask"].bool()
+        real = attention_mask_from_padded_ids(ids, PAD_TOKEN_ID).bool()[:, 1:]
+        generator = torch.Generator().manual_seed(4)
+        log_prob_weights = torch.randn(real.shape, generator=generator)
+        value_weights = torch.randn(real.shape, generator=generator)
+
+        def loss(log_probs: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
+            return (log_probs * log_prob_weights)[real].sum() + (
+                values * value_weights
+            )[real].sum()
+
+        expected_log_probs, expected_values = hand_laid_actor_critic(
+            agent, layout, ids, ["actor", "critic"], score_mask
         )
+        loss(expected_log_probs, expected_values).backward()
+        unset_fused_adapter_routing(agent.actor)
+        expected_grads = take_grads(agent.actor)
+
+        # Act
+        log_probs, values = agent._actor_critic_pass(ids, score_mask)
+        loss(log_probs, values).backward()
+        unset_fused_adapter_routing(agent.actor)
+        grads = take_grads(agent.actor)
+
+        # Assert
+        assert log_probs.shape == expected_log_probs.shape
+        assert values.shape == expected_values.shape
+        assert torch.equal(log_probs, expected_log_probs)
+        assert torch.equal(values[real], expected_values[real])
+        assert any("actor" in name for name in grads)
+        assert any("critic" in name for name in grads)
+        assert grads.keys() == expected_grads.keys()
+        for name, grad in grads.items():
+            assert torch.equal(grad, expected_grads[name]), name
+
+    @pytest.mark.parametrize("layout", LAYOUTS)
+    def test_critic_pass_matches_the_hand_laid_forward(self, layout: str) -> None:
+        # Arrange
+        agent = make_qwen3_ppo("sdpa")
+        use_layout(agent, layout)
+        ids = varied_micro_batch(VARIED_LENGTHS, seq_len=14)["ids"]
+        real = attention_mask_from_padded_ids(ids, PAD_TOKEN_ID).bool()[:, 1:]
+        weights = torch.randn(real.shape, generator=torch.Generator().manual_seed(4))
+        _, expected = hand_laid_actor_critic(agent, layout, ids, ["critic"])
+        (expected * weights)[real].sum().backward()
+        unset_fused_adapter_routing(agent.actor)
+        expected_grads = take_grads(agent.actor)
+
+        # Act
+        values = agent._critic_values(ids)
+        (values * weights)[real].sum().backward()
+        unset_fused_adapter_routing(agent.actor)
+        grads = take_grads(agent.actor)
+
+        # Assert
+        assert values.shape == expected.shape
+        assert torch.equal(values[real], expected[real])
+        assert grads
+        assert grads.keys() == expected_grads.keys()
+        for name, grad in grads.items():
+            assert torch.equal(grad, expected_grads[name]), name
 
 
 def learn_rows(agent: LLMPPO, rows: slice = slice(0, 4)) -> dict[str, float]:
@@ -946,7 +1070,7 @@ class TestPPOLearnTokenBudget:
             micro_batch_tokens_per_gpu=12,
             whiten_advantages=False,
         )
-        monkeypatch.setattr(budgeted, "_packing_mode", lambda: "varlen")
+        use_packed(budgeted, True)
         forwards = record_grad_forwards(budgeted)
         window_steps = record_step_gradients(window, monkeypatch)
         budgeted_steps = record_step_gradients(budgeted, monkeypatch)
@@ -1442,9 +1566,7 @@ class TestPPOLearnFusedActorCriticForward:
 
 
 class TestPPOUseAdapter:
-    def test_critic_adapter_stays_trainable_after_parameters_are_replaced(
-        self,
-    ) -> None:
+    def test_critic_adapter_stays_trainable_after_parameters_are_replaced(self) -> None:
         # Arrange: FSDP2 materialization swaps every parameter object.
         agent = make_ppo()
         agent.use_adapter("actor")

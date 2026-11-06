@@ -3,13 +3,16 @@
 
 """Deal segment rows out across data-parallel ranks so each runs about the same rows.
 
-Ranks run their micro-batches in lockstep, so a micro-batch takes as long as
-the longest row any rank runs in it. Balanced ranks run the same number of
-rows, and every rank's i-th row is about as long as every other rank's.
+A tensor- or context-parallel replica keeps one assignment: those ranks hold
+the same rows. Ranks run their micro-batches in lockstep, so a micro-batch
+takes as long as the longest row any rank runs in it. Balanced ranks run the
+same number of rows, and every rank's i-th row is about as long as every
+other rank's.
 """
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -49,6 +52,7 @@ class RankRows:
     :param pixel_shape: Shape of one vision row, or ``None`` in a text batch.
     :param pixel_dtype: Dtype of the vision rows, or ``None`` in a text batch.
     :param has_supports: Whether the rows carry sampling supports.
+    :param token_hash: Hash of the training rows' token ids and action masks.
     """
 
     costs: list[int]
@@ -66,6 +70,7 @@ class RankRows:
     pixel_shape: tuple[int, ...] | None
     pixel_dtype: torch.dtype | None
     has_supports: bool
+    token_hash: str
 
     @property
     def first_value_part(self) -> int:
@@ -181,19 +186,77 @@ def balanced_row_plan(
     return plan
 
 
+def _replica_row_plan(
+    row_costs: Sequence[Sequence[int]],
+    shard_group_size: int | None,
+    replica_size: int,
+) -> list[list[tuple[int, int]]]:
+    """Rows each rank runs. Every rank in a replica gets the leader's rows.
+
+    Only each replica's first rank contributes rows. The plan sources those
+    leader ranks, so the other ranks of the replica receive the same rows.
+
+    :param row_costs: Tokens of each training row, per rank.
+    :param shard_group_size: Ranks per lockstep group; ``None`` is the world.
+    :param replica_size: Consecutive ranks that hold one batch.
+    :return: Per destination rank, its rows as ``(source rank, source row)``.
+    :raises ValueError: If ``replica_size`` does not divide the world or the
+        shard group.
+    """
+    world_size = len(row_costs)
+    if world_size % replica_size != 0:
+        msg = f"replica size ({replica_size}) must divide the world ({world_size})"
+        raise ValueError(msg)
+    shard = world_size if shard_group_size is None else shard_group_size
+    if shard % replica_size != 0:
+        msg = f"replica size ({replica_size}) must divide the shard group ({shard})"
+        raise ValueError(msg)
+    dp_plan = balanced_row_plan(
+        [row_costs[rank] for rank in range(0, world_size, replica_size)],
+        shard // replica_size,
+    )
+    plan: list[list[tuple[int, int]]] = []
+    for assignment in dp_plan:
+        leader_rows = [(source * replica_size, row) for source, row in assignment]
+        plan.extend(list(leader_rows) for _ in range(replica_size))
+    return plan
+
+
+def _require_shared_replica_rows(layouts: list[RankRows], replica_size: int) -> None:
+    """Raise when a replica's ranks do not hold the same rows.
+
+    :param layouts: Every rank's layout.
+    :param replica_size: Consecutive ranks that hold one batch.
+    :raises ValueError: If a replica member's layout differs from its leader.
+    """
+    for start in range(0, len(layouts), replica_size):
+        leader = layouts[start]
+        for offset, member in enumerate(
+            layouts[start + 1 : start + replica_size], start=1
+        ):
+            if member != leader:
+                msg = (
+                    f"Ranks {start}..{start + replica_size - 1} must hold the same "
+                    f"segment rows; rank {start + offset} differs."
+                )
+                raise ValueError(msg)
+
+
 def balance_rows_across_ranks(
     rows: SegmentRows,
     train_rows: npt.NDArray[np.intp],
     row_values: Sequence[tuple[torch.Tensor, float]],
     pad_token_id: int,
     shard_group_size: int | None,
+    replica_size: int = 1,
 ) -> tuple[SegmentRows, list[torch.Tensor]] | None:
     """Deal every rank's training rows out so each rank runs about the same rows.
 
     A row trains on whichever rank receives it, with its own values (its
     episode's advantages, returns, log-probs, ...). Rows outside
     ``train_rows`` are dropped. Rows run in :func:`balanced_row_plan` order,
-    and ``row_episodes`` numbers episodes across ranks, rank by rank.
+    and ``row_episodes`` numbers episodes across ranks, rank by rank. Ranks
+    in one replica receive one assignment, taken from that replica's first rank.
 
     :param rows: This rank's split rows, before filler rows.
     :param train_rows: Rows that survive the advantage filter.
@@ -203,9 +266,13 @@ def balance_rows_across_ranks(
     :param pad_token_id: Token id that pads rows to a common width.
     :param shard_group_size: Ranks per FSDP weight-shard group, which run in
         lockstep; ``None`` is the world.
+    :param replica_size: Consecutive ranks that hold one batch (``tp * cp``).
+        ``1`` plans every rank on its own.
     :return: The rows this rank runs with each of their ``row_values``, or
-        ``None`` on one process or when there are fewer training rows than ranks.
-    :raises ValueError: If ranks disagree on which row fields they carry.
+        ``None`` on one process or when there are fewer training rows than
+        data-parallel ranks.
+    :raises ValueError: If ranks disagree on which row fields they carry, or
+        a replica's ranks hold different rows.
     """
     if not is_distributed() or dist.get_world_size() == 1:
         return None
@@ -214,8 +281,6 @@ def balance_rows_across_ranks(
     local = _rank_rows(rows, train_rows, values, pad_token_id)
     layouts: list[RankRows] = [local] * world_size
     dist.all_gather_object(layouts, local)
-    if sum(len(layout.costs) for layout in layouts) < world_size:
-        return None
     fields = {
         (
             layout.value_shapes,
@@ -229,9 +294,17 @@ def balance_rows_across_ranks(
     if len(fields) > 1:
         msg = f"Ranks carry different segment row fields: {sorted(map(str, fields))}."
         raise ValueError(msg)
-    plan = balanced_row_plan(
+    if replica_size > 1:
+        _require_shared_replica_rows(layouts, replica_size)
+    if (
+        sum(len(layouts[leader].costs) for leader in range(0, world_size, replica_size))
+        < world_size // replica_size
+    ):
+        return None
+    plan = _replica_row_plan(
         [layout.costs for layout in layouts],
-        world_size if shard_group_size is None else shard_group_size,
+        shard_group_size,
+        replica_size,
     )
     local_parts = _local_parts(rows, train_rows, values, local)
     received = _exchange_parts(
@@ -304,7 +377,22 @@ def _rank_rows(
         pixel_shape=tuple(pixels.shape[1:]) if pixels is not None else None,
         pixel_dtype=pixels.dtype if pixels is not None else None,
         has_supports=supports is not None,
+        token_hash=_token_hash(rows, train_rows),
     )
+
+
+def _token_hash(rows: SegmentRows, train_rows: npt.NDArray[np.intp]) -> str:
+    """Hash the training rows' token ids and action masks.
+
+    :param rows: This rank's split rows.
+    :param train_rows: Rows that survive the advantage filter.
+    :return: SHA-256 hex digest.
+    """
+    digest = hashlib.sha256()
+    for tensor in (rows.token_ids[train_rows], rows.action_masks[train_rows]):
+        array = np.ascontiguousarray(tensor.detach().cpu().numpy())
+        digest.update(array.tobytes())
+    return digest.hexdigest()
 
 
 def _local_parts(

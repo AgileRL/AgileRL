@@ -19,7 +19,11 @@ from agilerl.lora.moe.adapters import (
     split_lora_delta,
     token_adapter_ids,
 )
-from agilerl.lora.moe.grouped_gemm import group_offsets, grouped_matmul
+from agilerl.lora.moe.grouped_gemm import (
+    expert_row_counts,
+    group_offsets,
+    grouped_matmul,
+)
 
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from peft.tuners.lora.layer import ParamWrapper
@@ -79,7 +83,7 @@ def transposed_experts_local_forward(
     top_k = router_indices.shape[-1]
     flat_experts = router_indices.reshape(-1)
     order = torch.argsort(flat_experts, stable=True)
-    counts = torch.bincount(flat_experts, minlength=local_e)
+    counts = expert_row_counts(flat_experts, local_e)
     token_idx = torch.div(order, top_k, rounding_mode="floor")
     x = hidden_states[token_idx]
     routed_weights = routing_weights.reshape(-1)[order].unsqueeze(-1)

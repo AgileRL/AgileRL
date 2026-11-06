@@ -10,6 +10,9 @@ from typing import Protocol
 
 import torch
 import torch.distributed as dist
+import torch.distributed._functional_collectives as funcol
+
+from agilerl.distributed.expert_parallel.dispatch import SAVED_COLLECTIVE_SCOPE
 
 
 def replicated_row_span(n_rows: int, group: dist.ProcessGroup) -> tuple[int, int]:
@@ -28,8 +31,14 @@ def _all_gather_row_spans(
     width = max(stop - start for start, stop in spans)
     padded = part.new_zeros((width, *part.shape[1:]))
     padded[: part.shape[0]] = part
-    pieces = [torch.empty_like(padded) for _ in range(size)]
-    dist.all_gather(pieces, padded, group=group)
+    if SAVED_COLLECTIVE_SCOPE.depth:
+        gathered = torch.ops._c10d_functional.all_gather_into_tensor(
+            padded, size, group.group_name
+        )
+        pieces = funcol.wait_tensor(gathered).split(width)
+    else:
+        pieces = [torch.empty_like(padded) for _ in range(size)]
+        dist.all_gather(pieces, padded, group=group)
     return torch.cat(
         [
             piece[: stop - start]

@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 import torch
 import torch.distributed as dist
-from torch import nn
+from torch import _assert_async, nn
 from torch.distributed.tensor import DTensor
 from torch.func import functional_call
 
@@ -29,7 +29,7 @@ from torch.utils._python_dispatch import _disable_current_modes
 from typing_extensions import Self
 
 from agilerl import HAS_LLM_DEPENDENCIES
-from agilerl.distributed.ep_dispatch import (
+from agilerl.distributed.expert_parallel.dispatch import (
     TokenDispatchState,
     all_to_all_single_autograd,
     dispatch_state,
@@ -38,11 +38,14 @@ from agilerl.distributed.ep_dispatch import (
     token_dispatch,
     unpermute_from_local_expert_major,
 )
-from agilerl.distributed.ep_sharding import expert_local_tensor, module_ep_degree
-from agilerl.distributed.replicated_rows import (
+from agilerl.distributed.expert_parallel.rows import (
     GatherReplicatedRows,
     SliceReplicatedRows,
     replicated_row_span,
+)
+from agilerl.distributed.expert_parallel.sharding import (
+    expert_local_tensor,
+    module_ep_degree,
 )
 from agilerl.lora.fused import ROUTING_STATE
 from agilerl.lora.moe.adapters import mixed_routing, wrapper_chain
@@ -50,8 +53,10 @@ from agilerl.lora.moe.grouped_gemm import expert_row_counts
 from agilerl.lora.moe.layouts import (
     is_routed_experts_module,
     is_sorted_experts_module,
+    is_transposed_experts_module,
     routed_projection_names,
 )
+from agilerl.lora.moe.transposed import transposed_experts_local_forward
 
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from peft.tuners.lora.layer import ParamWrapper
@@ -155,7 +160,7 @@ def _ep_param_grad_hook(param: nn.Parameter) -> Callable[[torch.Tensor], None]:
     return hook
 
 
-def _local_param_dict(
+def local_param_dict(
     module: nn.Module, gathered: bool = False
 ) -> dict[str, torch.Tensor]:
     """Plain-tensor views of a module's params for the EP-blind local kernel.
@@ -193,7 +198,7 @@ def _call_with_local_params(
     *args: Any,
     **kwargs: Any,
 ) -> torch.Tensor:
-    """Run ``original`` as ``module.forward`` on ``params`` from :func:`_local_param_dict`."""
+    """Run ``original`` as ``module.forward`` on ``params`` from :func:`local_param_dict`."""
     saved = module.forward
     # Module.__call__ does not inject self into ``forward``; keep the bound method.
     module.forward = original
@@ -380,12 +385,12 @@ def _routed_counts(send: torch.Tensor, exchange: TokenExchange) -> RoutedCounts:
             raise RuntimeError(msg)
         recorded = scope.calls[scope.position]
         scope.position += 1
-        # CUDA `.tolist()` is a host `_to_copy`. SAC saves those in order.
+        # Checked on device: a host copy here would stall every recompute.
         with _disable_current_modes():
-            send_lists = send.tolist()
-        if send_lists != recorded.send_lists:
-            msg = "Recompute routed tokens differently from the checkpointed forward"
-            raise RuntimeError(msg)
+            _assert_async(
+                (send == recorded.send).all(),
+                "Recompute routed tokens differently from the checkpointed forward",
+            )
         return recorded
     # Hidden from dispatch modes: the recompute replays these counts without
     # the exchange or copy, and selective checkpointing indexes every op call.
@@ -406,6 +411,8 @@ def _base_experts(module: nn.Module) -> nn.Module:
 
 def _routed_up_weight(module: nn.Module) -> torch.Tensor:
     experts = _base_experts(module)
+    if is_transposed_experts_module(experts):
+        return experts.get_parameter("gate_up_proj")
     projections = routed_projection_names(experts)
     if projections is None:
         msg = "Routed experts module does not match a supported packed layout."
@@ -582,7 +589,7 @@ def _routed_ep_blocks(
         )
         counts = _routed_counts(send, exchange)
         experts = LocalExperts(
-            module, inner, _local_param_dict(module, gathered), expert_kwargs
+            module, inner, local_param_dict(module, gathered), expert_kwargs
         )
         token_ids = None if adapter_ids is None else adapter_ids.ids
         names = [] if adapter_ids is None else adapter_ids.names
@@ -684,7 +691,13 @@ def _install_routed_ep_forward(
     """
     if getattr(module, "_agilerl_ep_forward", False):
         return
-    inner = module.forward
+    # HF's experts forward sizes its groups from the global num_experts, not
+    # the local EP shard.
+    inner = (
+        partial(transposed_experts_local_forward, module)
+        if is_transposed_experts_module(module)
+        else module.forward
+    )
     # Local rows reach the kernel one expert per row, in expert order.
     expert_kwargs: dict[str, Any] = (
         {"already_grouped": True}
@@ -774,7 +787,7 @@ def _install_sorted_ep_forward(
                 ep_degree=ep_degree,
                 num_local_experts=local_e,
             )
-            params = _local_param_dict(self, gathered=gathered)
+            params = local_param_dict(self, gathered=gathered)
             return token_combine(
                 _call_with_local_params(self, inner, params, local_rows, local_counts),
                 state,
@@ -819,7 +832,8 @@ def install_ep_forward(
     tp_group: dist.ProcessGroup | None,
 ) -> None:
     experts = _base_experts(module)
-    if is_routed_experts_module(experts):
+    # Transposed experts take (hidden_states, router_indices, routing_weights) like routed ones.
+    if is_routed_experts_module(experts) or is_transposed_experts_module(experts):
         _install_routed_ep_forward(module, token_blocks, chunk_bytes, tp_group)
     elif is_sorted_experts_module(experts):
         _install_sorted_ep_forward(module, tp_group)

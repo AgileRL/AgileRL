@@ -124,9 +124,14 @@ def whole(tensor: torch.Tensor) -> torch.Tensor:
 
 
 def record_step_gradients(
-    agent: LLMAlgorithm, monkeypatch: pytest.MonkeyPatch
+    agent: LLMAlgorithm,
+    monkeypatch: pytest.MonkeyPatch,
+    name_parts: tuple[str, ...] = ("lora_",),
 ) -> list[dict[str, torch.Tensor]]:
-    """LoRA gradients the optimizer sees at each step of ``agent``."""
+    """Gradients the optimizer sees at each step of ``agent``.
+
+    :param name_parts: Record params whose names contain any of these.
+    """
     recorded: list[dict[str, torch.Tensor]] = []
     optimizer_step = agent.optimizer.step
 
@@ -135,7 +140,7 @@ def record_step_gradients(
             {
                 name: whole(param.grad.detach()).clone()
                 for name, param in agent.actor.named_parameters()
-                if "lora_" in name and param.grad is not None
+                if any(part in name for part in name_parts) and param.grad is not None
             }
         )
         optimizer_step(*args, **kwargs)
@@ -172,6 +177,7 @@ def rows_from_other_ranks(
     row_values: Sequence[tuple[torch.Tensor, float]],
     _pad_token_id: int,
     _shard_group_size: int | None,
+    _replica_size: int = 1,
 ) -> tuple[SegmentRows, list[torch.Tensor]]:
     """Training rows reversed under new episode numbers, as a cross-rank deal returns them."""
     order = train_rows[::-1].copy()

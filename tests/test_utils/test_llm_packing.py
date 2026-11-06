@@ -17,6 +17,13 @@ import torch
 from torch import nn
 
 from agilerl import HAS_LLM_DEPENDENCIES
+from agilerl.algorithms.core.sequence_layout import (
+    ContextParallelSequence,
+    PackedContextParallelSequence,
+    PackedSequence,
+    PaddedSequence,
+)
+from agilerl.distributed.fsdp import FSDPConfig
 from agilerl.utils.llm_packing import (
     RESETS_AT_DOCUMENT_BOUNDARY,
     GatedDeltaShape,
@@ -950,14 +957,18 @@ class TestPackedLengthClasses:
 
 
 class _PackingGateStub:
-    """Minimal stand-in to exercise LLMAlgorithm's packing gate in isolation."""
+    """Minimal stand-in to exercise LLMAlgorithm's layout choice in isolation."""
 
     from agilerl.algorithms.core.base import LLMAlgorithm
 
-    _packing_mode = LLMAlgorithm._packing_mode
+    _build_sequence_layout = LLMAlgorithm._build_sequence_layout
+    _sequence_layout_type = LLMAlgorithm._sequence_layout_type
 
     def __init__(self, sequence_packing, attn_impl):
         self.sequence_packing = sequence_packing
+        self.fsdp_config = None
+        self.pad_token_id = 0
+        self.calc_position_embeddings = False
         self.actor = AutoModelForCausalLM.from_config(
             _tiny_llama_config(), attn_implementation="eager"
         )
@@ -988,23 +999,52 @@ class TestSequencePackingGate:
         stub.actor.config.text_config._attn_implementation = "flash_attention_2"
 
         # Act
-        mode = stub._packing_mode()
+        layout = stub._build_sequence_layout()
 
         # Assert
         assert stub.actor.config._attn_implementation == "sdpa"
-        assert mode == "varlen"
+        assert layout.varlen
 
-    def test_disabled_when_init_does_not_pack(self):
+    def test_padded_when_init_does_not_pack(self):
         stub = _PackingGateStub(False, "flash_attention_2")
-        assert stub._packing_mode() is None
+        assert type(stub._build_sequence_layout()) is PaddedSequence
 
     def test_fa2_uses_varlen(self):
         stub = _PackingGateStub(True, "flash_attention_2")
-        assert stub._packing_mode() == "varlen"
+        layout = stub._build_sequence_layout()
+        assert type(layout) is PackedSequence
+        assert layout.varlen
 
     def test_flex_uses_blockmask(self):
         stub = _PackingGateStub(True, "flex_attention")
-        assert stub._packing_mode() == "blockmask"
+        layout = stub._build_sequence_layout()
+        assert type(layout) is PackedSequence
+        assert not layout.varlen
+
+    @pytest.mark.parametrize(
+        ("packing", "expected_type", "budget"),
+        [
+            (True, PackedContextParallelSequence, 64),
+            (False, ContextParallelSequence, None),
+        ],
+    )
+    def test_context_parallel_type_needs_no_cp_group(
+        self, packing: bool, expected_type: type, budget: int | None
+    ):
+        # Arrange
+        stub = _PackingGateStub(packing, "flash_attention_2")
+        stub.fsdp_config = FSDPConfig(cp=2)
+
+        # Act
+        layout_type = stub._sequence_layout_type()
+
+        # Assert
+        assert layout_type is expected_type
+        assert layout_type.micro_batch_token_budget(4, 16) == budget
+
+    def test_packed_type_budgets_tokens(self):
+        stub = _PackingGateStub(True, "flash_attention_2")
+        assert stub._sequence_layout_type().micro_batch_token_budget(4, 16) == 64
 
 
 class TestPackedSegmentIds:

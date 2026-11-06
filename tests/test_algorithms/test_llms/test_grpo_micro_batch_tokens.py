@@ -17,6 +17,7 @@ pytest.importorskip("transformers", reason="LLM tests require transformers.")
 pytest.importorskip("peft", reason="LLM tests require peft.")
 
 from agilerl.algorithms.grpo import GRPO
+from tests.test_algorithms.test_llms.llm_helpers import use_packed
 from tests.test_algorithms.test_llms.segment_helpers import record_step_gradients
 from tests.test_algorithms.test_llms.test_grpo_old_logprobs import (
     PAD_TOKEN_ID,
@@ -60,12 +61,12 @@ def learn_uneven_rows(
     )
 
 
-def make_budgeted_grpo(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> GRPO:
+def make_budgeted_grpo(**overrides: Any) -> GRPO:
     """GRPO packing varlen micro-batches of at most 12 tokens."""
     agent = _make_grpo(
         micro_batch_size_per_gpu=4, micro_batch_tokens_per_gpu=12, **overrides
     )
-    monkeypatch.setattr(agent, "_packing_mode", lambda: "varlen")
+    use_packed(agent, True)
     return agent
 
 
@@ -95,7 +96,7 @@ class TestGRPOLearnTokenBudget:
         budgeted = _make_grpo(
             micro_batch_size_per_gpu=4, micro_batch_tokens_per_gpu=12, **loss
         )
-        monkeypatch.setattr(budgeted, "_packing_mode", lambda: "varlen")
+        use_packed(budgeted, True)
         forward_tokens = record_forward_tokens(budgeted)
         window_steps = record_step_gradients(window, monkeypatch)
         budgeted_steps = record_step_gradients(budgeted, monkeypatch)
@@ -125,7 +126,7 @@ class TestGRPOLearnTokenBudget:
     ) -> None:
         # Arrange: the unbudgeted window runs every row in one micro-batch.
         window = _make_grpo(micro_batch_size_per_gpu=4, **loss)
-        budgeted = make_budgeted_grpo(monkeypatch, **loss)
+        budgeted = make_budgeted_grpo(**loss)
         forward_tokens = record_forward_tokens(budgeted)
         window_steps = record_step_gradients(window, monkeypatch)
         budgeted_steps = record_step_gradients(budgeted, monkeypatch)
@@ -152,7 +153,7 @@ class TestGRPOLearnTokenBudget:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Arrange
-        agent = make_budgeted_grpo(monkeypatch)
+        agent = make_budgeted_grpo()
         forward_tokens = record_forward_tokens(agent)
         steps = record_step_gradients(agent, monkeypatch)
 
@@ -171,7 +172,7 @@ class TestGRPOLearnTokenBudget:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Arrange
-        agent = make_budgeted_grpo(monkeypatch, beta=0.1)
+        agent = make_budgeted_grpo(beta=0.1)
         forward_tokens = record_forward_tokens(agent)
 
         # Act
@@ -184,7 +185,7 @@ class TestGRPOLearnTokenBudget:
     def test_a_fully_filtered_batch_skips_every_row(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        agent = make_budgeted_grpo(monkeypatch, filter_zero_adv=True)
+        agent = make_budgeted_grpo(filter_zero_adv=True)
 
         with pytest.warns(UserWarning, match="All samples were filtered"):
             metrics = learn_uneven_rows(agent, (0.5, 0.5, 1.0, 1.0))
@@ -192,7 +193,7 @@ class TestGRPOLearnTokenBudget:
         assert metrics["trained_row_tokens"] == []
 
     def test_logged_loss_is_the_mean_window_loss_whatever_the_micro_batch_counts(
-        self, monkeypatch: pytest.MonkeyPatch
+        self,
     ) -> None:
         # Arrange: one group of four in two-row windows. Row 3 sits at the
         # group mean, so the trained rows deal into windows [0] and [2, 1].
@@ -207,8 +208,8 @@ class TestGRPOLearnTokenBudget:
         }
         window = _make_grpo(micro_batch_tokens_per_gpu=32, **shape)
         budgeted = _make_grpo(micro_batch_tokens_per_gpu=8, **shape)
-        monkeypatch.setattr(window, "_packing_mode", lambda: "varlen")
-        monkeypatch.setattr(budgeted, "_packing_mode", lambda: "varlen")
+        use_packed(window, True)
+        use_packed(budgeted, True)
         window_tokens = record_forward_tokens(window)
         forward_tokens = record_forward_tokens(budgeted)
         rewards = (1.0, 0.0, 0.2, 0.4)
@@ -230,7 +231,7 @@ class TestGRPOLearnTokenBudget:
     ) -> None:
         # Arrange: no row has sampling log-probs, so every trained row needs
         # learn-start log-probs from the no-grad forward.
-        agent = make_budgeted_grpo(monkeypatch, old_logprobs_source="rollout")
+        agent = make_budgeted_grpo(old_logprobs_source="rollout")
         no_grad_tokens = record_forward_tokens(agent, grad=False)
 
         # Act
@@ -245,7 +246,7 @@ class TestGRPOLearnTokenBudget:
         # Arrange: rows 0 and 1 score their own old log-probs in the first
         # micro-batch. Rows 2 and 3 carry sampling log-probs of the wrong
         # length, which the mismatch metrics count only on trained rows.
-        agent = make_budgeted_grpo(monkeypatch, old_logprobs_source="trainer")
+        agent = make_budgeted_grpo(old_logprobs_source="trainer")
         no_grad_tokens = record_forward_tokens(agent, grad=False)
         sampling_logps = [
             torch.full((6,), -1.0),
@@ -264,9 +265,7 @@ class TestGRPOLearnTokenBudget:
         assert metrics["trained_row_tokens"] == [8, 4]
         assert metrics["vllm_is_rows_skipped"] == 0.0
 
-    def test_filtered_rows_run_no_forward_and_leave_the_trained_rows(
-        self,
-    ) -> None:
+    def test_filtered_rows_run_no_forward_and_leave_the_trained_rows(self) -> None:
         # Arrange: one process drops the zero-advantage rows without a budget.
         agent = _make_grpo(
             micro_batch_size_per_gpu=4,

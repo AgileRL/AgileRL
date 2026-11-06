@@ -44,6 +44,10 @@ from agilerl.distributed import (
     raise_on_any_rank,
 )
 from agilerl.distributed.fsdp import canonical_fsdp_param_fqn
+from agilerl.distributed.tensor_parallel import (
+    tensor_parallel_row_orders,
+    tensor_rows_in_order,
+)
 from agilerl.lora.moe.adapters import wrapper_chain
 from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 
@@ -405,6 +409,10 @@ def _export_live_model(
         raise TypeError(msg)
     specs = _collect_export_specs(pretrained, adapter_name, weight_store)
     shard_plan = _plan_shards(specs, max_shard_size)
+    hf_row_orders = {
+        id(model.get_parameter(fqn)): torch.argsort(order)
+        for fqn, order in tensor_parallel_row_orders(model).items()
+    }
     output_path = Path(output_dir)
     is_main = is_main_process()
 
@@ -419,6 +427,7 @@ def _export_live_model(
             shard_tensors = _materialize_shard(
                 specs,
                 hf_names,
+                hf_row_orders,
                 torch_dtype=torch_dtype,
                 keep_tensors=is_main,
                 weight_store=weight_store,
@@ -662,19 +671,26 @@ def _delta_weight(
 def _merged_weight_and_bias(
     layer: Linear | Embedding | Conv1d | Conv2d | Conv3d,
     adapter_name: str,
+    weight_order: torch.Tensor | None,
+    bias_order: torch.Tensor | None,
+    delta_order: torch.Tensor | None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    """Fold LoRA into the gathered base weight and bias; do not write the module."""
+    """Fold LoRA into the gathered base weight and bias, in HF row order; do not write the module."""
     base_layer = _as_lora_base(layer)
-    base_weight = _dense_local(base_layer.weight).detach()
+    base_weight = tensor_rows_in_order(
+        _dense_local(base_layer.weight).detach(), weight_order
+    )
     if _adapter_on_layer(layer, adapter_name):
-        delta = _dense_local(_delta_weight(layer, adapter_name))
+        delta = tensor_rows_in_order(
+            _dense_local(_delta_weight(layer, adapter_name)), delta_order
+        )
         weight = base_weight + delta.to(dtype=base_weight.dtype)
     else:
         weight = base_weight
     bias_tensor = _base_bias(base_layer)
     bias: torch.Tensor | None = None
     if bias_tensor is not None:
-        bias_tensor = _dense_local(bias_tensor)
+        bias_tensor = tensor_rows_in_order(_dense_local(bias_tensor), bias_order)
         if adapter_name in layer.lora_B:
             lora_b_mod = layer.lora_B[adapter_name]
             if isinstance(lora_b_mod, nn.Linear) and isinstance(
@@ -703,9 +719,11 @@ def _param_gather_params(
     return params
 
 
-def _merged_param(wrapper: ParamWrapper, adapter_name: str) -> torch.Tensor:
-    """Fold LoRA into the gathered wrapped parameter; do not write the module."""
-    base = _dense_local(wrapper.get_param()).detach()
+def _merged_param(
+    wrapper: ParamWrapper, adapter_name: str, order: torch.Tensor | None
+) -> torch.Tensor:
+    """Fold LoRA into the gathered wrapped parameter, in HF row order; do not write the module."""
+    base = tensor_rows_in_order(_dense_local(wrapper.get_param()).detach(), order)
     if adapter_name not in wrapper.lora_A:
         return base
     delta = _dense_local(_delta_weight(wrapper, adapter_name))
@@ -794,9 +812,35 @@ def _base_layer_from_store(
             setattr(module, attr, previous)
 
 
+def _copied_tensor(
+    spec: ModuleCopy,
+    hf_row_orders: dict[int, torch.Tensor],
+    torch_dtype: torch.dtype,
+    keep_tensors: bool,
+    weight_store: BaseWeightStore | None,
+) -> torch.Tensor | None:
+    """Gather one non-LoRA tensor in HF row order; the CPU copy, or ``None`` when not kept."""
+    source = spec.tensor
+    if source.device.type == "meta":
+        if weight_store is None:
+            msg = f"Cannot copy meta tensor {spec.hf_name} without a weight store"
+            raise RuntimeError(msg)
+        source = weight_store.load(spec.hf_name)
+    with materialize_dtensors(source) as gathered:
+        dense = gathered[0]
+        if dense is None:
+            msg = f"gathered tensor for {spec.hf_name} is missing"
+            raise RuntimeError(msg)
+        if not keep_tensors:
+            return None
+        dense = tensor_rows_in_order(dense, hf_row_orders.get(id(spec.tensor)))
+        return _copy_to_cpu(dense, torch_dtype)
+
+
 def _materialize_shard(
     specs: Sequence[ExportItem],
     hf_names: Sequence[str],
+    hf_row_orders: dict[int, torch.Tensor],
     *,
     torch_dtype: torch.dtype,
     keep_tensors: bool,
@@ -806,6 +850,8 @@ def _materialize_shard(
 
     Each ``gather_params`` unshards that FSDP unit, rank 0 copies to CPU, then
     the context restores DTensor shards so the rest of the model stays sharded.
+    ``hf_row_orders`` maps ``id`` of a TP-permuted parameter to the rows that
+    put its gathered value in HF order.
     """
     by_name = {spec.hf_name: spec for spec in specs}
     shard: dict[str, torch.Tensor] = {}
@@ -815,28 +861,21 @@ def _materialize_shard(
     for hf_name in hf_names:
         spec = by_name[hf_name]
         if isinstance(spec, ModuleCopy):
-            source = spec.tensor
-            if source.device.type == "meta":
-                if weight_store is None:
-                    msg = f"Cannot copy meta tensor {hf_name} without a weight store"
-                    raise RuntimeError(msg)
-                source = weight_store.load(hf_name)
-            with materialize_dtensors(source) as gathered:
-                dense = gathered[0]
-                if dense is None:
-                    msg = f"gathered tensor for {hf_name} is missing"
-                    raise RuntimeError(msg)
-                if keep_tensors:
-                    shard[hf_name] = _copy_to_cpu(dense, torch_dtype)
+            copied = _copied_tensor(
+                spec, hf_row_orders, torch_dtype, keep_tensors, weight_store
+            )
+            if copied is not None:
+                shard[hf_name] = copied
             continue
 
         if isinstance(spec, ParamLoraMerged):
             wrapper = spec.wrapper
+            order = hf_row_orders.get(id(spec.reference))
             with gather_params(
                 wrapper, _param_gather_params(wrapper, spec.adapter_name)
             ):
                 with _param_from_store(spec, weight_store):
-                    merged = _merged_param(wrapper, spec.adapter_name)
+                    merged = _merged_param(wrapper, spec.adapter_name, order)
                     if keep_tensors:
                         shard[hf_name] = _copy_to_cpu(merged, torch_dtype)
                     del merged
@@ -844,11 +883,24 @@ def _materialize_shard(
 
         layer_id = id(spec.layer)
         if layer_id not in gathered_layers:
+            base_layer = _as_lora_base(spec.layer)
+            weight_order = hf_row_orders.get(id(base_layer.weight))
+            bias_order = hf_row_orders.get(id(_base_bias(base_layer)))
+            lora_b = spec.layer.lora_B
+            delta_order = (
+                hf_row_orders.get(id(lora_b[spec.adapter_name].weight))
+                if spec.adapter_name in lora_b
+                else None
+            )
             layer_params = _layer_gather_params(spec.layer)
             with gather_params(spec.layer, layer_params):
                 with _base_layer_from_store(spec.layer, spec, weight_store):
                     weight, bias = _merged_weight_and_bias(
-                        spec.layer, spec.adapter_name
+                        spec.layer,
+                        spec.adapter_name,
+                        weight_order,
+                        bias_order,
+                        delta_order,
                     )
                     if keep_tensors:
                         merged_cpu[layer_id] = (

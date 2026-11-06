@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import agilerl.arena.memory.formulas as formulas
 import agilerl.arena.memory.kv_cache as kv_cache
+import agilerl.arena.memory.lora_formulas as lora_formulas
 import agilerl.arena.memory.vision as vision
 from agilerl.arena.memory.breakdown import MemoryComponent, PhaseBreakdown
 from agilerl.arena.memory.resolve.rollout import (
@@ -106,9 +107,11 @@ def engine_terms(
         ),
         # Engines serve one adapter (``max_loras=1``).
         "lora_slots": int(
-            formulas.lora_param_count(arch, settings.max_lora_rank) * act_bytes / tp
+            lora_formulas.lora_param_count(arch, settings.max_lora_rank)
+            * act_bytes
+            / tp
         )
-        + formulas.engine_expert_lora_param_count(
+        + lora_formulas.engine_expert_lora_param_count(
             arch,
             settings.max_lora_rank,
             tp,
@@ -496,7 +499,7 @@ def _lora_receive_buffer_component(
     n_bytes = (
         0
         if settings.lora_sync_scope is None
-        else formulas.lora_sync_buffer_bytes(
+        else lora_formulas.lora_sync_buffer_bytes(
             arch,
             settings.max_lora_rank,
             settings.lora_sync_scope,

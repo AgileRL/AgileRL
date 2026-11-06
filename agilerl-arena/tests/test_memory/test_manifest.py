@@ -435,6 +435,34 @@ class TestTrainingSettings:
 
         assert settings.sequence_packing is True
 
+    def test_context_parallel_packs_under_flash_attention_2(self):
+        settings = training_settings_from_manifest(
+            manifest(
+                algorithm={"fsdp": {"cp": 2}},
+                training={"training_gpus_per_agent": 2},
+            )
+        )
+
+        assert settings.sequence_packing is True
+        assert settings.micro_batch_tokens == settings.max_model_len
+
+    @pytest.mark.parametrize(
+        "model",
+        ["ibm-granite/granite-4.0-h-tiny", "google/gemma-4-E4B-it"],
+        ids=["recurrent-mixers", "flex-attention"],
+    )
+    def test_context_parallel_trains_padded(self, model: str):
+        settings = training_settings_from_manifest(
+            manifest(
+                network={"pretrained_model_name_or_path": model},
+                algorithm={"fsdp": {"cp": 2}},
+                training={"training_gpus_per_agent": 2},
+            )
+        )
+
+        assert settings.sequence_packing is False
+        assert settings.micro_batch_tokens is None
+
 
 def llmppo(**algorithm: object) -> dict:
     """An LLMPPO manifest on the single-turn GRPO base."""
@@ -515,9 +543,12 @@ class TestImageInputs:
         }
 
         settings = training_settings_from_manifest(trained)
+        text = training_settings_from_manifest(screenshots())
 
+        assert settings.tower_lora_targets == frozenset({"qkv"})
         assert settings.vision_tower_lora
-        assert not training_settings_from_manifest(screenshots()).vision_tower_lora
+        assert text.tower_lora_targets == frozenset()
+        assert not text.vision_tower_lora
 
     def test_text_environment_has_no_images(self):
         settings = training_settings_from_manifest(GRPO)
@@ -1640,7 +1671,9 @@ class TestMicroBatchRows:
             )
 
     def test_tensor_parallel_must_divide_the_trainer_world(self):
-        with pytest.raises(ValueError, match="divisible by tp"):
+        with pytest.raises(
+            ValueError, match=r"divisible by the tp \* cp replica size \(3 \* 1 = 3\)"
+        ):
             training_settings_from_manifest(
                 manifest(
                     algorithm={"fsdp": {"tp": 3}},

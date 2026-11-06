@@ -368,17 +368,19 @@ class TestResolveRunMemorySplit:
             _plan(raw, gpus=9, engine_width=4, device=_device("L4"))
 
     @pytest.mark.parametrize(
-        ("fsdp", "batch_size"),
-        [({"tp": 2}, 60), ({"shard_group_size": 4}, 64)],
+        ("fsdp", "batch_size", "lora_r"),
+        [({"tp": 2}, 60, 32), ({"shard_group_size": 4}, 64, 16)],
         ids=["tensor-parallel", "shard-group"],
     )
     def test_training_over_memory_at_the_largest_fsdp_count_raises(
-        self, fsdp: dict, batch_size: int
+        self, fsdp: dict, batch_size: int, lora_r: int
     ) -> None:
         # Arrange: 9 GPUs with one TP4 engine leave at most 5 trainers. The
         # FSDP width skips 5; the largest legal count shards and is over memory.
+        # TP splits the adapters, so the TP case needs rank 32 to stay over.
         raw = _oversize_countdown_manifest(batch_size)
         raw["algorithm"]["fsdp"] = fsdp
+        raw["network"]["lora_config"]["lora_r"] = lora_r
 
         # Act / Assert
         with pytest.raises(

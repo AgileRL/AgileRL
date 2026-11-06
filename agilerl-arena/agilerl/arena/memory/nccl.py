@@ -4,8 +4,6 @@
 
 from __future__ import annotations
 
-from agilerl.arena.memory.specs import MiB
-
 # NCCL bytes as fractions of the device's 4-rank on-node group bytes, with
 # NCCL cuMem off. A group whose ranks share a node holds NVLink buffers that
 # grow with its size; a group across nodes holds few socket buffers. Each
@@ -16,8 +14,6 @@ NCCL_CROSS_NODE_FRACTION = 0.06
 # on one node and across nodes.
 NCCL_ALL_TO_ALL_ON_NODE_FRACTION = 1.1
 NCCL_ALL_TO_ALL_CROSS_NODE_FRACTION = 0.54
-# Non-torch memory a tensor-parallel trainer holds beyond its process groups.
-TP_RUNTIME_BYTES = 512 * MiB
 
 
 def nccl_on_node_fraction(group_size: int) -> float:
@@ -36,6 +32,7 @@ def trainer_nccl_bytes(
     expert_parallel: int = 1,
     tensor_parallel: int = 1,
     gpus_per_node: int | None = None,
+    context_parallel: int = 1,
 ) -> int:
     """NCCL buffers on one trainer rank, summed over the process groups it joins.
 
@@ -44,10 +41,13 @@ def trainer_nccl_bytes(
     rank per shard). EP and TP each add their own group of consecutive ranks,
     plus the group of ranks holding the same shard when that is more than one
     rank (two groups under HSDP: the split and its flattened replicas). EP's
-    own group also holds all-to-all buffers.
+    own group also holds all-to-all buffers. CP adds its own group and the
+    ``dp_shard_cp`` group FSDP shards over; under TP that second mesh also
+    builds a TP group, and the TP replicas become their own flattened group.
 
     :param group_bytes: The device's 4-rank on-node group bytes.
     :param gpus_per_node: GPUs on one node; ``None`` keeps every rank on one node.
+    :param context_parallel: Context-parallel degree.
     """
     node = n_gpus if gpus_per_node is None else gpus_per_node
 
@@ -77,4 +77,11 @@ def trainer_nccl_bytes(
             fraction += group(outer, shard_gpus)
             if replicate > 1:
                 fraction += group(outer * replicate, n_gpus)
+    if context_parallel > 1:
+        dense_shard = shard_gpus // tensor_parallel
+        fraction += group(context_parallel, context_parallel)
+        fraction += group(dense_shard, shard_gpus)
+        if tensor_parallel > 1:
+            fraction += group(tensor_parallel, tensor_parallel)
+            fraction += group(dense_shard, shard_gpus)
     return int(group_bytes * fraction)

@@ -159,17 +159,18 @@ class TestFSDPGatherPoolParams:
 
         assert pool == 2 * block
 
-    def test_tensor_parallel_plan_leaves_only_norms_to_gather(self):
+    def test_tensor_parallel_plan_gathers_linears_at_one_over_tp(self):
         arch = QWEN_05B.model_copy(update={"tensor_parallel_plan": True})
         counts = formulas.param_counts(arch)
         norms_per_layer = counts.norms // arch.n_layers
+        block = fsdp_gather.largest_block_params(counts, arch)
 
         on_mesh = fsdp_gather.fsdp_gather_pool_params(counts, arch, 1, 4, 2)
         off_mesh = fsdp_gather.fsdp_gather_pool_params(counts, arch, 1, 4)
 
         assert not arch.layer_kinds
-        assert on_mesh == 2 * norms_per_layer
-        assert off_mesh == 2 * fsdp_gather.largest_block_params(counts, arch)
+        assert on_mesh == 2 * (norms_per_layer + (block - norms_per_layer) // 2)
+        assert off_mesh == 2 * block
 
     def test_per_layer_embeddings_pool_beside_the_first_unit(self):
         # Arrange

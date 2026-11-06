@@ -20,7 +20,11 @@ from peft import LoraConfig
 
 from agilerl.algorithms import reinforce_llm
 from agilerl.algorithms.reinforce_llm import REINFORCE
-from tests.test_algorithms.test_llms.llm_helpers import create_module, record_calls
+from tests.test_algorithms.test_llms.llm_helpers import (
+    create_module,
+    record_calls,
+    use_packed,
+)
 from tests.test_algorithms.test_llms.segment_helpers import (
     record_step_gradients,
 )
@@ -154,7 +158,7 @@ class TestREINFORCELearnTokenBudget:
             micro_batch_tokens_per_gpu=12,
             importance_sampling_level=level,
         )
-        monkeypatch.setattr(budgeted, "_packing_mode", lambda: "varlen")
+        use_packed(budgeted, True)
         forward_tokens: list[int] = []
 
         def record(

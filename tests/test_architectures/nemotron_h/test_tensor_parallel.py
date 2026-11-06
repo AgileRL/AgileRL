@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import copy
 import os
+from types import SimpleNamespace
 from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
@@ -25,15 +26,19 @@ from agilerl.architectures.nemotron_h.mamba import _full_parameter_tensor
 from agilerl.architectures.nemotron_h.tensor_parallel import (
     apply_mamba_tensor_parallel,
     mark_mamba_tp_params,
-    permuted_local_from_full,
     realign_mamba_permuted_shards,
 )
-from agilerl.distributed import FSDPConfig, fsdp_blocks
-from agilerl.distributed.expert_parallel import build_parallel_mesh
+from agilerl.distributed import FSDPConfig, build_parallel_mesh, fsdp_blocks
 from agilerl.distributed.fsdp import materialize_dtensors
 from agilerl.distributed.fsdp_blocks import apply_fsdp2
-from agilerl.distributed.tensor_parallel import SharedSeedDropout
+from agilerl.distributed.tensor_parallel import (
+    SharedSeedDropout,
+    clear_gathered_rows,
+    sum_tp_partial_grads,
+    tensor_rows_in_order,
+)
 from agilerl.utils.llm_utils import get_lora_named_params
+from tests.parallel_helpers import broadcast_module
 from tests.rank_launch import run_ranks
 
 _DIST_ENV = ("RANK", "LOCAL_RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT")
@@ -80,11 +85,6 @@ def _mixer(
     return NemotronHMamba2Mixer(config, layer_idx=0)
 
 
-def _broadcast_module(module: nn.Module) -> None:
-    for param in module.parameters():
-        dist.broadcast(param.data, src=0)
-
-
 def _assert_close(actual: torch.Tensor, expected: torch.Tensor, label: str) -> None:
     if not torch.allclose(actual, expected, atol=1e-5, rtol=1e-5):
         diff = (actual - expected).abs().max().item()
@@ -109,12 +109,16 @@ def _local_expected_grad(
     permuted = {
         "in_proj.base_layer.weight": "in_proj",
         "in_proj.base_layer.bias": "in_proj",
+        "in_proj.lora_B.default.weight": "in_proj",
         "conv1d.weight": "conv",
         "conv1d.bias": "conv",
     }
     kind = permuted.get(name)
     if kind is not None:
-        return permuted_local_from_full(full, mixer, kind, param.device_mesh)
+        order = mamba_tp._row_order(
+            *mamba_tp._mixer_dims(mixer), int(param.device_mesh.size()), kind
+        )
+        full = full.index_select(0, order)
     local = distribute_tensor(
         full, param.device_mesh, param.placements, src_data_rank=None
     )
@@ -125,7 +129,7 @@ def _parity_worker(rank: int, world_size: int) -> None:
     # Arrange
     torch.manual_seed(0)
     mixer = _lora_mixer()
-    _broadcast_module(mixer)
+    broadcast_module(mixer)
     reference = copy.deepcopy(mixer)
     source = torch.randn(2, 4, mixer.hidden_size)
     probe = torch.randn(2, 4, mixer.hidden_size)
@@ -142,8 +146,13 @@ def _parity_worker(rank: int, world_size: int) -> None:
     actual = mixer(tp_input)
     (expected * probe).sum().backward()
     (actual * probe).sum().backward()
+    sum_tp_partial_grads(mixer, mesh.tp.get_group())
 
     # Assert
+    lora_b = mixer.in_proj.lora_B["default"].weight
+    assert isinstance(lora_b, DTensor)
+    assert lora_b.device_mesh == mesh.tp
+    assert lora_b.placements == (Shard(0),)
     _assert_close(actual, expected, "output")
     _assert_close(tp_input.grad, ref_input.grad, "input grad")
     reference_params = dict(reference.named_parameters())
@@ -165,7 +174,7 @@ def _lora_export_worker(rank: int, world_size: int) -> None:
         for name, param in mixer.named_parameters():
             if "lora_" in name:
                 param.normal_(std=0.5)
-    _broadcast_module(mixer)
+    broadcast_module(mixer)
     reference = copy.deepcopy(mixer)
     source = torch.randn(2, 4, mixer.hidden_size)
     probe = torch.randn(2, 4, mixer.hidden_size)
@@ -176,19 +185,27 @@ def _lora_export_worker(rank: int, world_size: int) -> None:
     apply_mamba_tensor_parallel(mixer, mesh.tp)
 
     # Act
+    (reference(source) * probe).sum().backward()
+    (mixer(source) * probe).sum().backward()
+    sum_tp_partial_grads(mixer, mesh.tp.get_group())
     for module in (reference, mixer):
-        (module(source) * probe).sum().backward()
         with torch.no_grad():
             for param in module.parameters():
                 if param.grad is not None:
                     param.sub_(0.1 * param.grad)
     named = get_lora_named_params(mixer)
+    orders = mamba_tp.mamba_row_orders(mixer)
     with materialize_dtensors(*[param for _, param in named]) as dense:
-        exported = dict(zip([name for name, _ in named], dense, strict=True))
+        exported = {
+            name: tensor_rows_in_order(tensor, torch.argsort(orders[name]))
+            if name in orders
+            else tensor
+            for (name, _), tensor in zip(named, dense, strict=True)
+        }
 
     # Assert
     reference_params = dict(reference.named_parameters())
-    assert "in_proj.lora_B.default.weight" in exported
+    assert "in_proj.lora_B.default.weight" in orders
     for name, tensor in exported.items():
         _assert_close(tensor, reference_params[name].detach(), name)
 
@@ -233,7 +250,7 @@ def _realign_worker(rank: int, world_size: int) -> None:
     torch.manual_seed(0)
     tp = 2
     mixer = _mixer(num_heads=4, n_groups=2)
-    _broadcast_module(mixer)
+    broadcast_module(mixer)
     reference = copy.deepcopy(mixer)
     in_full = mixer.in_proj.weight.detach().clone()
     in_bias_full = mixer.in_proj.bias.detach().clone()
@@ -293,6 +310,76 @@ def _groups_worker(rank: int, world_size: int) -> None:
         apply_mamba_tensor_parallel(mixer, mesh.tp)
 
 
+def _shared_group_mixers(
+    world_size: int,
+) -> tuple[NemotronHMamba2Mixer, NemotronHMamba2Mixer, torch.Tensor]:
+    """A one-group LoRA mixer sharded over TP, its unsharded copy, and an input."""
+    torch.manual_seed(0)
+    mixer = _mixer(num_heads=4, n_groups=1)
+    inject_adapter_in_model(LoraConfig(r=2, target_modules=["in_proj"]), mixer)
+    with torch.no_grad():
+        for name, param in mixer.named_parameters():
+            if "lora_" in name:
+                param.normal_(std=0.5)
+    broadcast_module(mixer)
+    reference = copy.deepcopy(mixer)
+    source = torch.randn(2, 4, mixer.hidden_size)
+    dist.broadcast(source, src=0)
+    mesh = build_parallel_mesh(world_size=world_size, tp=2, device_type="cpu")
+    assert mesh is not None
+    mamba_tp.shard_mamba_mixer(mixer, mesh.tp, int(mixer.intermediate_size))
+    return mixer, reference, source
+
+
+def _frozen_rows_cache_worker(rank: int, world_size: int) -> None:
+    # Arrange
+    mixer, reference, source = _shared_group_mixers(world_size)
+    expected = reference(source)
+
+    # Act
+    first = mixer(source)
+    cached = dict(mixer.tp_frozen_rows)
+    second = mixer(source)
+
+    # Assert
+    _assert_close(first, expected, "first output")
+    assert torch.equal(second, first)
+    assert set(cached) == {
+        "in_proj.base_layer.weight",
+        "in_proj.base_layer.bias",
+        "conv1d.weight",
+        "conv1d.bias",
+    }
+    for name, rows in cached.items():
+        assert mixer.tp_frozen_rows[name] is rows, name
+    clear_gathered_rows(mixer)
+    assert "tp_frozen_rows" not in mixer.__dict__
+
+
+def _trainable_rows_worker(rank: int, world_size: int) -> None:
+    # Arrange
+    mixer, reference, source = _shared_group_mixers(world_size)
+    mixer.requires_grad_(True)
+    reference.requires_grad_(True)
+
+    # Act
+    actual = mixer(source)
+    expected = reference(source)
+
+    # Assert
+    _assert_close(actual, expected, "output")
+    assert "tp_frozen_rows" not in mixer.__dict__
+
+
+@pytest.mark.multi_rank
+class TestShardMambaMixerSharedGroups:
+    def test_frozen_rows_gather_once(self):
+        run_ranks(_frozen_rows_cache_worker)
+
+    def test_trainable_rows_gather_every_forward(self):
+        run_ranks(_trainable_rows_worker)
+
+
 class MambaBlock(nn.Module):
     def __init__(self, mixer: NemotronHMamba2Mixer) -> None:
         super().__init__()
@@ -313,34 +400,41 @@ def _fsdp_worker(rank: int, world_size: int) -> None:
     tp = 2
     mixer = _mixer(num_heads=4, n_groups=2)
     model = MambaStack(mixer)
-    _broadcast_module(model)
+    broadcast_module(model)
     mesh = build_parallel_mesh(world_size=world_size, tp=tp, device_type="cpu")
     assert mesh is not None
     assert apply_mamba_tensor_parallel(model, mesh.tp) == 1
-    before = {
-        id(param)
-        for param in model.parameters()
+    full = {name: param.numel() for name, param in model.named_parameters()}
+    tp_sharded = {
+        name
+        for name, param in model.named_parameters()
         if isinstance(param, DTensor) and param.device_mesh is mesh.tp
     }
-    assert before, "expected mamba DTensors on the tp mesh"
+    assert tp_sharded, "expected mamba DTensors on the tp mesh"
+
     with patch.object(fsdp_blocks, "PARAM_PERSISTENCE_THRESHOLD", 0):
         apply_fsdp2(
             model,
             FSDPConfig(tp=tp),
-            mesh=mesh.hsdp,
+            mesh=mesh.dp_shard,
         )
-    after = {
-        id(param)
-        for param in model.parameters()
-        if isinstance(param, DTensor) and param.device_mesh is mesh.tp
-    }
-    assert after == before, "mamba DTensors must stay on the tp mesh"
+
+    for name in sorted(tp_sharded):
+        param = model.get_parameter(name)
+        assert isinstance(param, DTensor), name
+        assert param.device_mesh.mesh_dim_names == ("dp_shard", "tp"), name
+        held = torch.tensor(param.to_local().numel())
+        dist.all_reduce(held)
+        copies = tp if param.placements[-1].is_replicate() else 1
+        assert int(held) == full[name] * copies, name
     bias = model.layers[0].mixer.out_proj.bias
-    assert not isinstance(bias, DTensor)
+    assert isinstance(bias, DTensor)
+    assert bias.device_mesh.mesh_dim_names == ("dp_shard", "tp")
+    assert bias.placements[-1].is_replicate()
     assert bias.shape[0] == mixer.hidden_size
     lin = model.layers[0].lin.weight
     assert isinstance(lin, DTensor)
-    assert lin.device_mesh is not mesh.tp
+    assert lin.device_mesh.mesh_dim_names == ("dp_shard",)
 
 
 @pytest.mark.multi_rank
@@ -364,43 +458,34 @@ class TestApplyMambaTensorParallel:
     def test_n_groups_not_divisible_by_ep_raises(self):
         run_ranks(_groups_worker)
 
-    def test_fsdp_leaves_mamba_dtensors_on_tp_mesh(self):
-        run_ranks(_fsdp_worker)
+    def test_fsdp_shards_mamba_tp_weights_over_dp_shard(self):
+        run_ranks(_fsdp_worker, 4)
 
 
 class TestMambaTensorParallelGuards:
-    def test_base_linear_reads_a_base_layer_attribute(self):
-        class Wrap(nn.Module):
+    def test_vision_head_count_raises_without_heads(self):
+        with pytest.raises(ValueError, match="has no num_heads"):
+            mamba_tp._vision_head_count(nn.Linear(2, 2))
+
+    def test_shard_vision_attention_rejects_query_rows_that_do_not_divide(self):
+        class Attn(nn.Module):
             def __init__(self):
                 super().__init__()
-                self.base_layer = nn.Linear(2, 3)
+                self.query = nn.Linear(4, 6)
 
-        wrap = Wrap()
+        attn = Attn()
+        attn.__dict__["num_heads"] = 4
+        with pytest.raises(ValueError, match="must be divisible by num_heads"):
+            mamba_tp._shard_vision_attention(attn, MagicMock())
 
-        assert mamba_tp._base_linear(wrap) is wrap.base_layer
+    def test_shard_latent_returns_false_when_projections_are_not_linear(self):
+        class Latent(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.fc1_latent_proj = nn.Identity()
+                self.fc2_latent_proj = nn.Identity()
 
-    def test_shard_reordered_dim0_returns_when_the_param_is_already_a_dtensor(self):
-        module = nn.Linear(4, 2, bias=False)
-        with patch(
-            "agilerl.architectures.nemotron_h.tensor_parallel.DTensor", nn.Parameter
-        ):
-            mamba_tp._shard_reordered_dim0(
-                module, "weight", torch.arange(4), MagicMock()
-            )
-
-    def test_shard_reordered_dim0_rejects_a_row_count_mismatch(self):
-        module = nn.Linear(4, 2, bias=False)
-        with pytest.raises(ValueError, match="dim 0 is"):
-            mamba_tp._shard_reordered_dim0(
-                module, "weight", torch.arange(3), MagicMock()
-            )
-
-    def test_shard_dim0_returns_when_the_param_is_already_a_dtensor(self):
-        module = nn.Linear(4, 2, bias=False)
-        with patch(
-            "agilerl.architectures.nemotron_h.tensor_parallel.DTensor", nn.Parameter
-        ):
-            mamba_tp._shard_dim0(module, "weight", MagicMock())
+        assert mamba_tp._shard_latent(Latent(), MagicMock()) is False
 
     def test_install_mamba_tp_forward_is_idempotent(self):
         mixer = _mixer(num_heads=4, n_groups=2)
@@ -411,22 +496,43 @@ class TestMambaTensorParallelGuards:
 
         assert mixer.forward is original
 
-    def test_mamba_tp_forward_falls_back_when_tp_is_one(self):
+    def test_mamba_tp_forward_calls_a_replaced_inner(self):
+        # Arrange
         mixer = _mixer(num_heads=4, n_groups=2)
-        called = []
-
-        def original(*_args, **_kwargs):
-            called.append(True)
-            return torch.ones(1, 2, mixer.config.hidden_size)
-
-        mixer.forward = original
+        mixer.out_proj.bias = None
         mamba_tp._install_mamba_tp_forward(mixer)
-        object.__setattr__(mixer, "_tp_degree", 1)
+        object.__setattr__(mixer, "_tp_degree", 2)
+        object.__setattr__(mixer, "_tp_group", MagicMock(spec=dist.ProcessGroup))
+        seen: list[torch.Size] = []
+        reduced = torch.zeros(1, 2, mixer.config.hidden_size)
 
-        out = mixer(torch.ones(1, 2, mixer.config.hidden_size))
+        def replacement(hidden: torch.Tensor, *_args: object, **_kwargs: object):
+            seen.append(hidden.shape)
+            return reduced
 
-        assert called == [True]
-        assert out.shape[-1] == mixer.config.hidden_size
+        object.__setattr__(mixer, "_mamba_inner_forward", replacement)
+
+        # Act
+        with (
+            patch(
+                "agilerl.architectures.nemotron_h.tensor_parallel.copy_input_to_region",
+                side_effect=lambda args, kwargs, _group: (args, kwargs),
+            ),
+            patch(
+                "agilerl.architectures.nemotron_h.tensor_parallel._call_local_forward",
+                side_effect=lambda _mixer, inner, args, kwargs: inner(*args, **kwargs),
+            ),
+            patch.object(
+                mamba_tp.ReduceFromTPRegion,
+                "apply",
+                side_effect=lambda tensor, _group: tensor,
+            ),
+        ):
+            out = mixer(torch.ones(1, 2, mixer.config.hidden_size))
+
+        # Assert
+        assert seen == [torch.Size((1, 2, mixer.config.hidden_size))]
+        assert out is reduced
 
     def test_mamba_tp_forward_returns_the_reduce_when_out_proj_has_no_bias(self):
         mixer = _mixer(num_heads=4, n_groups=2)
@@ -467,54 +573,49 @@ class TestMambaTensorParallelGuards:
         with patch(
             "agilerl.architectures.nemotron_h.tensor_parallel.DTensor", nn.Parameter
         ):
-            mamba_tp._shard_mixer(mixer, mesh)
+            mamba_tp.shard_mamba_mixer(
+                mixer, mesh, mixer.intermediate_size // mixer.n_groups
+            )
 
         assert getattr(mixer, "_agilerl_mamba_tp", False)
 
-    def test_iter_permuted_mamba_params_skips_unrelated_and_foreign_meshes(self):
-        mixer = _mixer(num_heads=4, n_groups=2)
-        object.__setattr__(mixer, "_tp_degree", 2)
-        object.__setattr__(mixer, "_tp_mesh", object())
-        other = MagicMock()
-        other.device_mesh = object()
-        with (
-            patch(
-                "agilerl.architectures.nemotron_h.tensor_parallel.DTensor",
-                MagicMock,
-            ),
-            patch.object(
-                type(mixer),
-                "named_parameters",
-                return_value=[("stray.weight", other), ("in_proj.weight", other)],
-            ),
+    def test_shard_mixer_rejects_groups_and_tp_that_do_not_divide(self):
+        mixer = _mixer(num_heads=6, n_groups=2)
+        mesh = MagicMock()
+        mesh.size.return_value = 3
+
+        with pytest.raises(
+            ValueError, match=r"n_groups \(2\) and tp \(3\) must divide one another"
         ):
-            found = mamba_tp.iter_permuted_mamba_params(mixer)
+            mamba_tp.shard_mamba_mixer(
+                mixer, mesh, mixer.intermediate_size // mixer.n_groups
+            )
 
-        assert found == []
-
-    def test_iter_permuted_mamba_params_skips_params_outside_the_mixer(self):
-        mixer = _mixer(num_heads=4, n_groups=2)
+    def test_iter_permuted_mamba_params_lists_in_proj_its_lora_b_and_conv(self):
+        # Arrange
+        mixer = _lora_mixer()
         object.__setattr__(mixer, "_tp_degree", 2)
-        object.__setattr__(mixer, "_tp_mesh", object())
         parent = nn.Module()
         parent.mixer = mixer
         parent.stray = nn.Linear(2, 2)
-        other = MagicMock()
-        other.device_mesh = object()
-        with (
-            patch(
-                "agilerl.architectures.nemotron_h.tensor_parallel.DTensor",
-                MagicMock,
-            ),
-            patch.object(
-                type(parent),
-                "named_parameters",
-                return_value=[("stray.weight", other), ("mixer.in_proj.weight", other)],
-            ),
-        ):
-            found = mamba_tp.iter_permuted_mamba_params(parent)
 
-        assert found == []
+        # Act
+        found = mamba_tp.iter_permuted_mamba_params(parent)
+
+        # Assert
+        assert all(owner is mixer for _, owner, _ in found)
+        assert {fqn: kind for fqn, _, kind in found} == {
+            "mixer.in_proj.base_layer.weight": "in_proj",
+            "mixer.in_proj.base_layer.bias": "in_proj",
+            "mixer.in_proj.lora_B.default.weight": "in_proj",
+            "mixer.conv1d.weight": "conv",
+            "mixer.conv1d.bias": "conv",
+        }
+
+    def test_iter_permuted_mamba_params_skips_unsharded_mixers(self):
+        mixer = _lora_mixer()
+
+        assert mamba_tp.iter_permuted_mamba_params(mixer) == []
 
     def test_mark_mamba_tp_params_skips_mixers_without_a_tp_mesh(self):
         mixer = _mixer(num_heads=4, n_groups=2)
@@ -529,11 +630,10 @@ class TestMambaTensorParallelGuards:
 
     def test_mark_mamba_tp_params_marks_dtensors_on_the_tp_mesh(self):
         mixer = _mixer(num_heads=4, n_groups=2)
-        mesh = object()
-        object.__setattr__(mixer, "_tp_mesh", mesh)
+        object.__setattr__(mixer, "_tp_mesh", object())
         object.__setattr__(mixer, "_tp_degree", 2)
         param = MagicMock()
-        param.device_mesh = mesh
+        param.device_mesh = SimpleNamespace(mesh_dim_names=("dp_shard", "tp"))
         marked = []
         with (
             patch(

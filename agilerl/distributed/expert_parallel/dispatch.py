@@ -5,11 +5,51 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from typing import Protocol
 
 import torch
 import torch.distributed as dist
+import torch.distributed._functional_collectives as funcol
+from torch import nn
+
+
+class SavedCollectiveScope(threading.local):
+    """Depth of packed-expert forwards whose collectives selective checkpointing saves.
+
+    Inside it, token all-to-alls and tensor-parallel reduces and gathers run as
+    functional collectives, the ops the checkpoint policy can save.
+    """
+
+    def __init__(self) -> None:
+        self.depth = 0
+        # Depths that :func:`keep_collectives_eager` modules set aside.
+        self.paused: list[int] = []
+
+
+SAVED_COLLECTIVE_SCOPE = SavedCollectiveScope()
+
+
+def _pause_saved_collectives(_module: nn.Module, _args: tuple[object, ...]) -> None:
+    SAVED_COLLECTIVE_SCOPE.paused.append(SAVED_COLLECTIVE_SCOPE.depth)
+    SAVED_COLLECTIVE_SCOPE.depth = 0
+
+
+def _resume_saved_collectives(
+    _module: nn.Module, _args: tuple[object, ...], _output: object
+) -> None:
+    SAVED_COLLECTIVE_SCOPE.depth = SAVED_COLLECTIVE_SCOPE.paused.pop()
+
+
+def keep_collectives_eager(module: nn.Module) -> None:
+    """Run ``module``'s collectives eager and unsaved inside :data:`SAVED_COLLECTIVE_SCOPE`.
+
+    For a module the block recompute never reaches, such as a trailing shared
+    expert whose output only feeds an add: a saved output would never be read.
+    """
+    module.register_forward_pre_hook(_pause_saved_collectives)
+    module.register_forward_hook(_resume_saved_collectives, always_call=True)
 
 
 @dataclass
@@ -93,6 +133,11 @@ def all_to_all_single_autograd(
     group: dist.ProcessGroup,
 ) -> torch.Tensor:
     """Autograd-aware variable-split all-to-all over ``group``."""
+    if SAVED_COLLECTIVE_SCOPE.depth:
+        output = torch.ops._c10d_functional.all_to_all_single(
+            input.contiguous(), output_splits, input_splits, group.group_name
+        )
+        return funcol.wait_tensor(output)
     return AllToAllVar.apply(input, output_splits, input_splits, group)
 
 

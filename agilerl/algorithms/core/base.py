@@ -27,7 +27,7 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
 from functools import partial
 from importlib.metadata import version
-from itertools import accumulate, chain, groupby, pairwise
+from itertools import chain
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -44,7 +44,6 @@ import dill
 import numpy as np
 import numpy.typing as npt
 import torch
-import torch.nn.functional as F
 from accelerate import Accelerator
 from gymnasium import spaces
 from tensordict import TensorDict
@@ -73,6 +72,14 @@ from agilerl.algorithms.core.registry import (
     NetworkGroup,
     OptimizerConfig,
     OptimizerFactory,
+)
+from agilerl.algorithms.core.sequence_layout import (
+    ContextParallelSequence,
+    HostMasks,
+    PackedContextParallelSequence,
+    PackedSequence,
+    PaddedSequence,
+    SequenceLayout,
 )
 from agilerl.architectures import (
     FAMILY_RUNTIME_CONFIGS,
@@ -137,6 +144,8 @@ from agilerl.distributed import (
     resolve_device,
     set_seed,
 )
+from agilerl.distributed.context_parallel.gdn import wraps_gdn_context_parallel
+from agilerl.distributed.context_parallel.sequence import CP_SCAN_CHUNK
 from agilerl.distributed.runtime import OptimizerStep
 from agilerl.llm_envs import RolloutHarness
 from agilerl.metrics import AgentMetrics, MultiAgentMetrics
@@ -209,14 +218,9 @@ from agilerl.utils.evolvable_networks import (
 )
 from agilerl.utils.learn_profiler import LearnProfiler
 from agilerl.utils.llm_packing import (
-    PackedBatch,
+    is_recurrent_mixer,
     mixers_without_boundary_reset,
-    pack_next_token_frame,
-    pack_padded_batch,
     packed_length_classes,
-    unpack_hidden_states,
-    unpack_logprobs,
-    unpack_values,
 )
 from agilerl.utils.mutation_utils import target_activations
 from agilerl.utils.phase_timer import PhaseTimer
@@ -224,9 +228,7 @@ from agilerl.utils.sampling_supports import extract_vllm_sampling_supports
 from agilerl.utils.token_micro_batches import (
     balance_windows,
     fill_micro_batches,
-    pack_rows_by_tokens,
     pack_rows_evenly,
-    split_micro_batches,
 )
 from agilerl.utils.torch_utils import release_device_memory
 from agilerl.utils.vision_rows import (
@@ -3164,6 +3166,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self.optimizer_steps = 0
         self.calc_position_embeddings = calc_position_embeddings
         self.pad_token_id = pad_token_id
+        self.sequence_layout: SequenceLayout = PaddedSequence(
+            calc_position_embeddings=calc_position_embeddings,
+        )
         self.pad_token = pad_token
         self.pretrained_model_name_or_path = (
             model_name
@@ -3175,6 +3180,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         install_family_patches(
             getattr(getattr(actor_network, "config", None), "model_type", None),
             model=actor_network,
+            use_sequence_packing=self._packed_wraps_apply(),
         )
         if quantization_config is not None:
             # The fused log-prob head runs the lm_head matmul outside the
@@ -3472,6 +3478,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         checkpoint_dict.pop("llm", None)
         checkpoint_dict.pop("tp_group", None)
         checkpoint_dict.pop("shard_runtime", None)
+        checkpoint_dict.pop("sequence_layout", None)
         checkpoint_dict["network_info"]["optimizers"].pop("optimizer_state_dict", None)
         # Round trip through the checkpoint serializer so no live attribute
         # (scores, fitness, rng, ...) is shared with the snapshot.
@@ -3813,6 +3820,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             "device",
             # Holds this process's DeviceMesh; a saved one names rank 0's groups.
             "shard_runtime",
+            "sequence_layout",
         }
         for attr, value in checkpoint.items():
             if attr in skip_attrs:
@@ -3858,6 +3866,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         assert self.actor is not None, (
             "Actor is set to None, please check that the actor is defined."
         )
+        self._check_cp_strips_vision_towers()
         if self.gradient_checkpointing is None and (
             torch.device(self.device).type != "cuda"
             or self.pretrained_model_name_or_path not in SUPPORTED_MODEL_INFO
@@ -3914,6 +3923,64 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             set_routed_experts_chunk_bytes(
                 self.actor, self.routed_expert_chunk_mib * MiB
             )
+        self.sequence_layout = self._build_sequence_layout()
+
+    def _check_cp_strips_vision_towers(self) -> None:
+        """Raise when context parallel runs a vision-language actor whose engine keeps its towers."""
+        if (
+            self.fsdp_config is not None
+            and self.fsdp_config.cp > 1
+            and has_vision_tower(self.actor)
+            and not self.rollout_strip_multimodal_towers
+        ):
+            msg = (
+                f"cp={self.fsdp_config.cp} on a vision-language model needs a "
+                "text-only environment and no tower LoRA, so the engine strips "
+                "its towers"
+            )
+            raise ValueError(msg)
+
+    def _sequence_layout_type(self) -> type[SequenceLayout]:
+        """Padded, packed, or (packed) context-parallel layout class for this run."""
+        if self.fsdp_config is not None and self.fsdp_config.cp > 1:
+            if self.sequence_packing:
+                return PackedContextParallelSequence
+            return ContextParallelSequence
+        if self.sequence_packing:
+            return PackedSequence
+        return PaddedSequence
+
+    def _build_sequence_layout(self) -> SequenceLayout:
+        """Build the :meth:`_sequence_layout_type` layout; needs ``prepare_actor``'s CP group."""
+        layout_type = self._sequence_layout_type()
+        if issubclass(layout_type, ContextParallelSequence):
+            # A cp > 1 config always runs on FSDPRuntime.
+            group = cast("FSDPRuntime", self.shard_runtime).cp_group
+            return layout_type(
+                pad_token_id=self.pad_token_id,
+                cp=cast("FSDPConfig", self.fsdp_config).cp,
+                group=group,
+                rank=torch.distributed.get_rank(group),
+                round_to=self._context_parallel_round_to(),
+            )
+        if layout_type is PackedSequence:
+            return PackedSequence(
+                varlen=language_model_attn_implementation(self.actor)
+                == "flash_attention_2",
+            )
+        return PaddedSequence(calc_position_embeddings=self.calc_position_embeddings)
+
+    def _context_parallel_round_to(self) -> int:
+        """Multiple the context-parallel action frame pads to.
+
+        Gated DeltaNet scans need whole chunks on every rank. FlexAttention
+        widths round to whole 128-token blocks so few distinct block masks build.
+        """
+        cp = cast("FSDPConfig", self.fsdp_config).cp
+        round_to = cp * CP_SCAN_CHUNK if wraps_gdn_context_parallel(self.actor) else cp
+        if language_model_attn_implementation(self.actor) == "flex_attention":
+            round_to = math.lcm(round_to, 128)
+        return round_to
 
     def clean_up(self) -> None:
         """Clean up the algorithm."""
@@ -4115,7 +4182,13 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             and self.vllm_config is not None
             and self.vllm_config.sleep_mode
         )
-        exclude = ("actor", "shard_runtime", "optimizer", "lr_scheduler")
+        exclude = (
+            "actor",
+            "shard_runtime",
+            "sequence_layout",
+            "optimizer",
+            "lr_scheduler",
+        )
         original_llm = None
         if self.colocated:
             original_llm = self.llm
@@ -4382,22 +4455,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             yield
         finally:
             self.use_adapter("actor")
-
-    @staticmethod
-    def _position_ids_from_mask(mask: torch.Tensor) -> torch.Tensor:
-        """Left-padding-safe ``position_ids`` from an attention mask.
-
-        Cumulative real-token count minus one, with padded positions pinned to
-        ``1`` so the rotary embedding sees a valid (ignored) index.
-
-        :param mask: ``(B, T)`` attention mask (1 = real token, 0 = pad).
-        :type mask: torch.Tensor
-        :return: ``(B, T)`` position ids in ``long``.
-        :rtype: torch.Tensor
-        """
-        position_ids = mask.long().cumsum(dim=-1) - 1
-        position_ids.masked_fill_(mask=(mask == 0), value=1)
-        return position_ids
 
     def _fused_logprob_fn_and_head(
         self,
@@ -5042,18 +5099,29 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                     model_config=model_config,
                     add_value_head=self.use_value_head,
                     use_distributed=self.distributed,
+                    use_sequence_packing=self._packed_wraps_apply(),
                 )
 
+            cp = 1 if self.fsdp_config is None else self.fsdp_config.cp
+            # CP mixers carry recurrent state across ranks, not documents.
+            recurrent_state_leaks = bool(mixers_without_boundary_reset(base_model)) or (
+                cp > 1 and any(map(is_recurrent_mixer, base_model.modules()))
+            )
             packing_blocker = sequence_packing_blocker(
                 self.supports_sequence_packing,
                 language_model_attn_implementation(base_model),
                 self.gradient_row_copies,
-                bool(mixers_without_boundary_reset(base_model)),
+                recurrent_state_leaks,
                 has_vision_tower(base_model),
+                cast("PretrainedConfig", base_model.config).model_type,
             )
             if packing_blocker is not None:
                 logger.info("Sequence packing off: %s", packing_blocker)
-            self.sequence_packing = packing_blocker is None
+            # Ulysses attends within published document offsets on FlashAttention-2 only.
+            self.sequence_packing = packing_blocker is None and (
+                cp == 1
+                or language_model_attn_implementation(base_model) == "flash_attention_2"
+            )
             self.final_logit_softcap = getattr(
                 nested_language_config(base_model.config),
                 "final_logit_softcapping",
@@ -5141,24 +5209,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         else:
             yield
 
-    def _fused_chunk_hidden_and_value(
-        self,
-        chunk_ids: torch.Tensor,
-        chunk_mask: torch.Tensor | None,
-        chunk_pos: torch.Tensor | None,
-        chunk_pixel_values: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Forward one fused chunk; return last hidden state and optional values."""
-        model_kwargs: dict = {"input_ids": chunk_ids, "use_cache": False}
-        # Prefer position_ids over mask when precomputed.
-        if chunk_pos is not None:
-            model_kwargs["position_ids"] = chunk_pos
-        elif chunk_mask is not None:
-            model_kwargs["attention_mask"] = chunk_mask
-        if chunk_pixel_values is not None:
-            model_kwargs["pixel_values"] = chunk_pixel_values
-        return self._forward_hidden_and_value(model_kwargs)
-
     def _forward_hidden_and_value(
         self, model_kwargs: dict[str, Any]
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
@@ -5177,147 +5227,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             value = None
         del output
         return hidden, value
-
-    def _gradient_forward_inputs(
-        self,
-        batch_ids: torch.Tensor,
-        pixel_values: torch.Tensor | None = None,
-        copies: int = 1,
-        attention_mask: torch.Tensor | None = None,
-    ) -> tuple[dict[str, Any], PackedBatch | None]:
-        """Model kwargs of a gradient forward, packed on a varlen / block-sparse backend.
-
-        :param batch_ids: ``(B, T)`` right-padded token ids on ``self.device``.
-        :type batch_ids: torch.Tensor
-        :param pixel_values: Vision rows of the batch for a VL forward, or ``None``.
-        :type pixel_values: torch.Tensor | None
-        :param copies: Times the batch is stacked along rows, one per routed adapter.
-        :type copies: int
-        :param attention_mask: ``(B, T)`` mask of real tokens, or ``None`` to mask
-            the trailing pad run of each row.
-        :type attention_mask: torch.Tensor | None
-        :return: ``(model_kwargs, packed)``; ``packed`` is ``None`` for a padded forward.
-        :rtype: tuple[dict[str, Any], PackedBatch | None]
-        """
-        if attention_mask is None:
-            attention_mask = attention_mask_from_padded_ids(
-                batch_ids, self.pad_token_id
-            )
-        attention_mask = attention_mask.long()
-        packing_mode = self._packing_mode()
-        rows = batch_ids.shape[0]
-        fused_pixel_values = self._repeat_pixel_values_for_fused_rows(
-            pixel_values, copies * rows, rows
-        )
-        if packing_mode is not None:
-            packed = pack_padded_batch(batch_ids, attention_mask)
-            model_kwargs = self._packed_model_kwargs(
-                packed, packing_mode, fused_pixel_values, copies
-            )
-            return model_kwargs, packed
-        attention_mask = attention_mask.repeat(copies, 1)
-        model_kwargs = {
-            "input_ids": batch_ids.repeat(copies, 1),
-            "attention_mask": attention_mask,
-            "use_cache": False,
-        }
-        if self.calc_position_embeddings:
-            model_kwargs["position_ids"] = self._position_ids_from_mask(attention_mask)
-        if fused_pixel_values is not None:
-            model_kwargs["pixel_values"] = fused_pixel_values
-        return model_kwargs, None
-
-    @staticmethod
-    def _packed_model_kwargs(
-        packed: PackedBatch,
-        packing_mode: str,
-        pixel_values: torch.Tensor | None = None,
-        copies: int = 1,
-    ) -> dict[str, Any]:
-        """Model kwargs of a packed forward over *copies* stacked packed rows.
-
-        Per-sequence ``position_ids`` and no mask: transformers detects the
-        packed format and keeps sequences attention-isolated per layer. On
-        FlashAttention-2 the varlen offsets and host max lengths go in too, so
-        no layer derives them from ``position_ids`` with a device sync. The
-        varlen kernel flattens the stacked rows into one sequence, so the
-        offsets span every copy and each copy's documents stay isolated.
-
-        :param packed: Packed batch from :func:`pack_padded_batch`.
-        :type packed: PackedBatch
-        :param packing_mode: :meth:`_packing_mode` of the forward.
-        :type packing_mode: str
-        :param pixel_values: Vision rows of the forward, or ``None`` for text.
-        :type pixel_values: torch.Tensor | None
-        :param copies: Times the packed row is stacked, one per routed adapter.
-        :type copies: int
-        :return: Model kwargs.
-        :rtype: dict[str, Any]
-        """
-        model_kwargs: dict[str, Any] = {
-            "input_ids": packed.input_ids.repeat(copies, 1),
-            "position_ids": packed.position_ids.repeat(copies, 1),
-            "use_cache": False,
-        }
-        if pixel_values is not None:
-            model_kwargs["pixel_values"] = pixel_values
-        # Vision towers pass their own varlen offsets to the same attention
-        # kwargs, so a VL forward lets the text layers derive theirs.
-        elif packing_mode == "varlen":
-            model_kwargs.update(packed.flash_attention_kwargs(copies))
-        return model_kwargs
-
-    def _actor_hidden_states(
-        self,
-        batch_ids: torch.Tensor,
-        pixel_values: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Gradient-bearing actor forward that returns last hidden states, not logits.
-
-        On a varlen / block-sparse backend (:meth:`_packing_mode`) the forward
-        runs on one padding-free packed row and the hidden states are scattered
-        back onto the padded frame, with pad positions zeroed.
-
-        :param batch_ids: ``(B, T)`` right-padded token ids on ``self.device``.
-        :type batch_ids: torch.Tensor
-        :param pixel_values: Vision rows of the batch for a VL forward, or ``None``.
-        :type pixel_values: torch.Tensor | None
-        :return: ``(B, T, H)`` actor hidden states.
-        :rtype: torch.Tensor
-        """
-        model_kwargs, packed = self._gradient_forward_inputs(batch_ids, pixel_values)
-        with (
-            self._patch_lm_head_to_identity(),
-            self.select_adapter("actor"),
-            self._amp_ctx(),
-        ):
-            self.actor.train()
-            output = self.actor(**model_kwargs)
-        hidden = output[0] if isinstance(output, tuple) else output.logits
-        if packed is not None:
-            hidden = unpack_hidden_states(hidden, packed)
-        return hidden
-
-    def _fused_chunk_logprobs(
-        self,
-        hidden: torch.Tensor,
-        target_ids: torch.Tensor,
-        fused_fn: Callable,
-        head_w: torch.Tensor,
-        head_b: torch.Tensor | None,
-        score_mask: torch.Tensor | None = None,
-        support_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Score shifted hidden states to ``(B, S-1)`` logprobs."""
-        return self._score_hidden(
-            fused_fn,
-            hidden[:, :-1],
-            head_w,
-            head_b,
-            target_ids[:, 1:],
-            score_mask,
-            support_ids,
-        )
 
     def _score_hidden(
         self,
@@ -5383,34 +5292,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         )
         return picked.new_zeros(target_ids.shape).index_put((rows, cols), picked[0])
 
-    def _repeat_pixel_values_for_fused_rows(
-        self,
-        pixel_values: torch.Tensor | None,
-        fused_rows: int,
-        sample_rows: int,
-    ) -> torch.Tensor | None:
-        """Repeat per-sample vision tensors across fused adapter rows."""
-        if pixel_values is None:
-            return None
-        if fused_rows == sample_rows:
-            return pixel_values
-        if fused_rows % sample_rows != 0:
-            msg = (
-                f"pixel_values batch {sample_rows} cannot align to "
-                f"{fused_rows} fused rows"
-            )
-            raise ValueError(msg)
-        repeat = fused_rows // sample_rows
-        if not any(pixel_values.stride()):
-            # Every element aliases one value, so a view repeats it without a copy.
-            return pixel_values[:1].expand(
-                repeat * pixel_values.shape[0], *pixel_values.shape[1:]
-            )
-        return pixel_values.repeat(
-            repeat,
-            *([1] * (pixel_values.ndim - 1)),
-        )
-
     def _pixel_values_for_fused_slice(
         self,
         pixel_values: torch.Tensor,
@@ -5454,128 +5335,50 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self,
         chunk_ids: torch.Tensor,
         chunk_mask: torch.Tensor,
-        chunk_pos: torch.Tensor | None,
         routing: list[str],
         fused_fn: Callable,
         head_w: torch.Tensor,
         head_b: torch.Tensor | None,
+        chunk_host_masks: HostMasks,
         chunk_pixel_values: torch.Tensor | None = None,
         chunk_score_mask: torch.Tensor | None = None,
         chunk_support_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Route, forward, and score one fused micro-batch.
+        """Route, forward, and score one fused micro-batch on the layout's frame.
 
-        Without grad, columns that are padding in every row are cut before the
-        forward and scored as zero; causal attention keeps earlier positions
-        exact.
-        """
-        set_fused_adapter_routing(self.actor, routing)
-        orig_seq_len = int(chunk_ids.shape[1])
-        if not torch.is_grad_enabled():
-            seq_len = int(chunk_mask.any(dim=0).nonzero().max()) + 1
-            chunk_ids = chunk_ids[:, :seq_len]
-            chunk_mask = chunk_mask[:, :seq_len]
-            if chunk_pos is not None:
-                chunk_pos = chunk_pos[:, :seq_len]
-            if chunk_score_mask is not None:
-                chunk_score_mask = chunk_score_mask[:, : seq_len - 1]
-            if chunk_support_ids is not None:
-                chunk_support_ids = chunk_support_ids[:, : seq_len - 1]
-        trailing_pad = orig_seq_len - int(chunk_ids.shape[1])
-        hidden, value = self._fused_chunk_hidden_and_value(
-            chunk_ids,
-            chunk_mask,
-            chunk_pos,
-            chunk_pixel_values,
-        )
-        chunk_lp = self._fused_chunk_logprobs(
-            hidden,
-            chunk_ids,
-            fused_fn,
-            head_w,
-            head_b,
-            chunk_score_mask,
-            chunk_support_ids,
-        )
-        del hidden
-        chunk_v = (
-            value[:, : chunk_ids.shape[1] - 1]
-            if (self.use_value_head and value is not None)
-            else None
-        )
-        if trailing_pad:
-            chunk_lp = F.pad(chunk_lp, (0, trailing_pad))
-            if chunk_v is not None:
-                chunk_v = F.pad(chunk_v, (0, trailing_pad))
-        return chunk_lp, chunk_v
-
-    def _run_packed_fused_chunk(
-        self,
-        chunk_ids: torch.Tensor,
-        chunk_mask: torch.Tensor,
-        adapter: str,
-        packing_mode: str,
-        fused_fn: Callable,
-        head_w: torch.Tensor,
-        head_b: torch.Tensor | None,
-        chunk_pixel_values: torch.Tensor | None = None,
-        chunk_score_mask: torch.Tensor | None = None,
-        chunk_support_ids: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Forward and score one single-adapter micro-batch as one padding-free packed row.
-
-        Log-probs and values land on the padded ``(B, T - 1)`` frame with pad
-        positions zero, as the packed gradient forward returns them. Packing
-        is the micro-batch's one host sync.
-
-        :param chunk_ids: ``(B, T)`` token ids.
-        :type chunk_ids: torch.Tensor
-        :param chunk_mask: ``(B, T)`` mask; non-zero marks real tokens.
-        :type chunk_mask: torch.Tensor
-        :param adapter: Adapter every row routes to.
-        :type adapter: str
-        :param packing_mode: :meth:`_packing_mode` of the forward.
-        :type packing_mode: str
-        :param fused_fn: Fused log-prob function from :meth:`_fused_logprob_fn_and_head`.
-        :type fused_fn: Callable
-        :param head_w: ``(V, H)`` lm_head weight.
-        :type head_w: torch.Tensor
-        :param head_b: ``(V,)`` lm_head bias or ``None``.
-        :type head_b: torch.Tensor | None
-        :param chunk_pixel_values: Vision rows of the chunk, or ``None``.
-        :type chunk_pixel_values: torch.Tensor | None
-        :param chunk_score_mask: ``(B, T - 1)`` positions to score, or ``None`` for all.
-        :type chunk_score_mask: torch.Tensor | None
-        :param chunk_support_ids: ``(B, T - 1, K)`` sampling support, or ``None``.
-        :type chunk_support_ids: torch.Tensor | None
         :return: ``(log_probs, values)``, each ``(B, T - 1)``; values ``None``
             without a value head.
-        :rtype: tuple[torch.Tensor, torch.Tensor | None]
         """
-        set_fused_adapter_routing(self.actor, [adapter])
-        packed = pack_padded_batch(chunk_ids, chunk_mask, chunk_score_mask)
-        hidden, value = self._forward_hidden_and_value(
-            self._packed_model_kwargs(packed, packing_mode, chunk_pixel_values)
-        )
-        packed_lp = self._score_hidden(
-            fused_fn,
-            hidden[:, :-1],
-            head_w,
-            head_b,
-            packed.input_ids[:, 1:],
-            packed.score_mask,
-            None
-            if chunk_support_ids is None
-            else pack_next_token_frame(chunk_support_ids, packed, -1),
-            packed.n_scored,
-        )
-        del hidden
-        chunk_v = (
-            unpack_values(value, packed)
-            if (self.use_value_head and value is not None)
-            else None
-        )
-        return unpack_logprobs(packed_lp, packed), chunk_v
+        with self.sequence_layout.prepare_forward(
+            chunk_ids,
+            chunk_mask,
+            chunk_score_mask,
+            chunk_support_ids,
+            chunk_pixel_values,
+            host_masks=chunk_host_masks,
+        ) as fwd:
+            # A packed span is one adapter run on one row.
+            set_fused_adapter_routing(
+                self.actor, routing[: fwd.kwargs["input_ids"].shape[0]]
+            )
+            hidden, value = self._forward_hidden_and_value(fwd.kwargs)
+            chunk_lp = self._score_hidden(
+                fused_fn,
+                fwd.scoring_hidden(hidden),
+                head_w,
+                head_b,
+                fwd.targets,
+                fwd.score_mask,
+                fwd.support_ids,
+                fwd.n_scored,
+            )
+            del hidden
+            chunk_v = (
+                fwd.restore(value, "values")
+                if (self.use_value_head and value is not None)
+                else None
+            )
+            return fwd.restore(chunk_lp, "logprobs"), chunk_v
 
     def _assemble_fused_chunks(
         self,
@@ -5608,61 +5411,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 del chunk_v
         assert logprobs_out is not None
         return logprobs_out, values_out
-
-    @staticmethod
-    def _fused_chunks(
-        total: int, routing: list[str], batch_size: int | None, split_adapter_runs: bool
-    ) -> list[tuple[int, int]]:
-        """Fused rows of each :meth:`_fused_model_pass` forward, in run order.
-
-        :param total: Fused rows.
-        :param routing: Adapter of each fused row.
-        :param batch_size: Rows per forward, or ``None`` for one forward per run.
-        :param split_adapter_runs: Whether each forward stays within one adapter run.
-        :return: ``(start, end)`` of each forward.
-        """
-        if batch_size is None and not split_adapter_runs:
-            return [(0, total)]
-        # Vision-tower LoRA layers see image rows, and a packed row routes a
-        # single adapter, so those chunks hold rows of one adapter only.
-        runs = (
-            [len(list(run)) for _, run in groupby(routing)]
-            if split_adapter_runs
-            else [total]
-        )
-        chunks: list[tuple[int, int]] = []
-        for run_start, run_end in pairwise([0, *accumulate(runs)]):
-            step = batch_size or run_end - run_start
-            chunks += [
-                (start, min(start + step, run_end))
-                for start in range(run_start, run_end, step)
-            ]
-        return chunks
-
-    @staticmethod
-    def _fused_token_chunks(
-        routing: list[str], row_tokens: npt.NDArray[np.int64], token_budget: int
-    ) -> list[tuple[int, int]]:
-        """Packed :meth:`_fused_model_pass` forwards of at most ``token_budget`` tokens, in run order.
-
-        Each forward stays within one adapter run. Ranks split their largest
-        forwards until every rank runs the same number.
-
-        :param routing: Adapter of each fused row.
-        :param row_tokens: Real tokens of each fused row.
-        :param token_budget: Most tokens per forward; a longer row runs alone.
-        :return: ``(start, end)`` of each forward.
-        """
-        chunks: list[npt.NDArray[np.intp]] = []
-        for run_start, run_end in pairwise(
-            [0, *accumulate(len(list(run)) for _, run in groupby(routing))]
-        ):
-            chunks += pack_rows_by_tokens(
-                np.arange(run_start, run_end), row_tokens, token_budget
-            )
-        (count,) = allreduce_max_ints([len(chunks)])
-        chunks = split_micro_batches(chunks, row_tokens, count)
-        return [(int(rows[0]), int(rows[-1]) + 1) for rows in chunks]
 
     def _fused_vision_slice(
         self,
@@ -5762,12 +5510,13 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Run the model on a fused batch with per-sample adapter routing.
 
-        When *batch_size* is ``None`` the full batch is one forward (needed
-        for gradient-checkpoint recomputation). Otherwise micro-batch under
-        ``no_grad``. Fused LoRA routes adapters per row, so a micro-batch may
-        mix adapters; with *pixel_values*, or packing a no-grad pass
-        (:meth:`_packing_mode`), each micro-batch stays within one adapter run
-        and a packed one runs as a single padding-free row.
+        When *batch_size* is ``None`` the batch runs as one forward per adapter
+        run the layout keeps apart, else in micro-batches under ``no_grad``.
+        Fused LoRA routes adapters per row, so a micro-batch may mix adapters
+        unless :meth:`SequenceLayout.micro_batch_spans` keeps it to one
+        adapter run (vision rows, packed rows). Gradient checkpointing
+        recomputes under the routing set last, so a checkpointed gradient
+        pass split into micro-batches raises unless it routes one adapter.
 
         :param score_mask: ``(B, seq_len - 1)`` positions whose log-probs are
             needed, or ``None`` to score every position.
@@ -5787,7 +5536,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :type support_ids: torch.Tensor | None
         :param token_budget: Most tokens per packed forward, in place of
             *batch_size* rows; every rank runs the same number of forwards.
-            Ignored when the pass does not pack.
+            Ignored when the layout does not pack.
         :type token_budget: int | None
         :return: ``(log_probs, values)``; log_probs is ``(B, seq_len - 1)``.
         :rtype: tuple[torch.Tensor, torch.Tensor | None]
@@ -5796,23 +5545,23 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         # lm_head gemm then full_tensor()s a stale buffer.
         reshard_fsdp_modules(self.actor)
         total = fused_ids.shape[0]
-        seq_len_out = fused_ids.shape[1] - 1
-        packing_mode = None if torch.is_grad_enabled() else self._packing_mode()
-        packed = packing_mode is not None
-        position_ids = None
-        if self.calc_position_embeddings and not packed:
-            position_ids = self._position_ids_from_mask(fused_mask)
-        if packed and token_budget is not None:
-            chunks = self._fused_token_chunks(
-                routing, fused_mask.sum(-1).cpu().numpy(), token_budget
+        # One device sync sizes every micro-batch of the pass.
+        host_masks = HostMasks.read(fused_mask, score_mask)
+        chunks = self.sequence_layout.micro_batch_spans(
+            fused_mask, routing, batch_size, token_budget, pixel_values is not None
+        )
+        if (
+            torch.is_grad_enabled()
+            and self.gradient_checkpointing
+            and len(chunks) > 1
+            and len(set(routing)) > 1
+        ):
+            msg = (
+                "A checkpointed gradient pass over several micro-batches must "
+                f"route one adapter, got {sorted(set(routing))}: backward "
+                "recomputes every micro-batch under the last one's routing"
             )
-        else:
-            chunks = self._fused_chunks(
-                total,
-                routing,
-                batch_size,
-                split_adapter_runs=pixel_values is not None or packed,
-            )
+            raise RuntimeError(msg)
         vision_slice = partial(
             self._fused_vision_slice,
             total=total,
@@ -5858,146 +5607,24 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             ) -> tuple[torch.Tensor, torch.Tensor | None]:
                 keys = chunk_keys[(start, end)]
                 with nullcontext() if keys is None else self._vision_cache.images(keys):
-                    scoring = (
+                    return self._run_fused_chunk(
+                        fused_ids[start:end],
+                        fused_mask[start:end],
+                        routing[start:end],
                         fused_fn,
                         head_w,
                         head_b,
+                        host_masks.rows(start, end),
                         None if device_pixels is None else next(device_pixels),
                         score_mask[start:end] if score_mask is not None else None,
                         support_ids[start:end] if support_ids is not None else None,
                     )
-                    if packing_mode is not None:
-                        return self._run_packed_fused_chunk(
-                            fused_ids[start:end],
-                            fused_mask[start:end],
-                            routing[start],
-                            packing_mode,
-                            *scoring,
-                        )
-                    return self._run_fused_chunk(
-                        fused_ids[start:end],
-                        fused_mask[start:end],
-                        position_ids[start:end] if position_ids is not None else None,
-                        routing[start:end],
-                        *scoring,
-                    )
 
             if len(chunks) == 1:
                 return _run_chunk(0, total)
-            return self._assemble_fused_chunks(chunks, total, seq_len_out, _run_chunk)
-
-    def _fused_forward(
-        self,
-        ids: torch.Tensor,
-        attention_mask: torch.Tensor | None = None,
-        pixel_values: torch.Tensor | None = None,
-        support_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Gradient-bearing actor log-probs, every row routed to the actor adapter.
-
-        .. note::
-
-           The routing is **not** cleared here — it must remain active until
-           after ``backward()`` completes (for gradient checkpoint
-           recomputation).  Callers must call
-           ``unset_fused_adapter_routing`` after the backward pass.
-
-           Callers are responsible for ensuring the model is in training
-           mode and adapter trainability is restored before entering the
-           minibatch loop (see ``learn()`` in ``ppo_llm.py``).
-
-        :param ids: Token IDs ``(B, seq_len)``.
-        :type ids: torch.Tensor
-        :param attention_mask: Optional attention mask matching *ids*.
-        :type attention_mask: torch.Tensor | None, optional
-        :param pixel_values: Vision rows of *ids*, or ``None`` for text.
-        :type pixel_values: torch.Tensor | None
-        :param support_ids: ``(B, seq_len - 1, K)`` sampling support per
-            position (:meth:`_score_hidden`), or ``None``.
-        :type support_ids: torch.Tensor | None
-        :return: Actor log-probs ``(B, seq_len - 1)``.
-        :rtype: torch.Tensor
-        """
-        if attention_mask is None:
-            attention_mask = attention_mask_from_padded_ids(ids, self.pad_token_id)
-
-        # A no-grad pass packs inside _fused_model_pass.
-        packing_mode = self._packing_mode() if torch.is_grad_enabled() else None
-        if packing_mode is not None:
-            return self._fused_packed_forward(
-                ids, attention_mask, packing_mode, pixel_values, support_ids
+            return self._assemble_fused_chunks(
+                chunks, total, fused_ids.shape[1] - 1, _run_chunk
             )
-
-        log_probs, _ = self._fused_model_pass(
-            ids,
-            attention_mask,
-            ["actor"] * ids.shape[0],
-            pixel_values=pixel_values,
-            support_ids=support_ids,
-        )
-        return log_probs
-
-    def _fused_packed_forward(
-        self,
-        ids: torch.Tensor,
-        attention_mask: torch.Tensor,
-        packing_mode: str,
-        pixel_values: torch.Tensor | None = None,
-        support_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Padding-free packed variant of the gradient :meth:`_fused_forward`.
-
-        The ``(B, T)`` batch is packed into one padding-free row with
-        per-segment ``position_ids`` (``attention_mask=None``), so transformers
-        builds a block-diagonal varlen / blockmask forward — no cross-sequence
-        attention, sliding windows preserved (see :meth:`_packing_mode`). The
-        actor routing is *not* cleared here — see the :meth:`_fused_forward`
-        note.
-
-        :param ids: Token IDs ``(B, seq_len)``.
-        :type ids: torch.Tensor
-        :param attention_mask: Mask matching *ids* (non-zero marks real tokens).
-        :type attention_mask: torch.Tensor
-        :param packing_mode: :meth:`_packing_mode` of the forward.
-        :type packing_mode: str
-        :param pixel_values: Vision rows of *ids*, or ``None`` for text.
-        :type pixel_values: torch.Tensor | None
-        :param support_ids: ``(B, seq_len - 1, K)`` sampling support per
-            position (:meth:`_score_hidden`), or ``None``.
-        :type support_ids: torch.Tensor | None
-        :return: Actor log-probs ``(B, seq_len - 1)``.
-        :rtype: torch.Tensor
-        """
-        packed = pack_padded_batch(ids, attention_mask)
-        set_fused_adapter_routing(self.actor, ["actor"])
-
-        fused_fn, head_w, head_b = self._fused_logprob_fn_and_head()
-        forward_kwargs = self._packed_model_kwargs(packed, packing_mode, pixel_values)
-        with (
-            self._patch_lm_head_to_identity(),
-            self._amp_ctx(),
-            self._activation_offload_ctx(),
-        ):
-            # FSDP2 all-gather hooks run on ``Module.__call__``.
-            output = self.actor(**forward_kwargs)
-        hidden = output[0] if isinstance(output, tuple) else output.logits
-
-        # The fused matmul consumes the (1, N, H) hidden + (1, N-1) next-token
-        # targets exactly as the padded path does; unpack scatters back to the
-        # (B, T-1) frame and drops the cross-segment boundary prediction.
-        packed_lp = fused_fn(
-            hidden[:, :-1],
-            head_w,
-            head_b,
-            packed.input_ids[:, 1:],
-            temperature=self.temperature,
-            support_ids=(
-                None
-                if support_ids is None
-                else pack_next_token_frame(support_ids, packed, -1)
-            ),
-        )
-        return unpack_logprobs(packed_lp, packed)
 
     def _fused_forward_no_grad(
         self,
@@ -6130,31 +5757,17 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
         return ref_logprobs, actor_logprobs, critic_values
 
-    def _packing_mode(self) -> str | None:
-        """Resolve how (if at all) to pack the forward, given the backend.
+    def _packed_wraps_apply(self) -> bool:
+        """Whether family mixers take their packed-row wraps before the model loads.
 
-        Packing passes the model only per-sequence ``position_ids`` (no mask);
-        transformers detects the packed format and AND-composes a block-diagonal
-        constraint onto each layer's native (causal / sliding-window) mask. We
-        only gate on backends where that composed mask stays sparse:
+        The wraps mark each mixer as resetting at document boundaries, which
+        :func:`sequence_packing_blocker` reads after load. Context-parallel
+        shards never pack and would read their ``position_ids`` as packed rows.
 
-        * ``"varlen"`` — FlashAttention-2 turns the packed ``position_ids`` into
-          ``cu_seqlens`` (+ per-layer ``window_size``); no mask is materialized.
-          Memory/throughput-optimal and handles dynamic shapes with no recompile.
-        * ``"blockmask"`` — FlexAttention builds a sparse block-diagonal
-          ``BlockMask`` (active tiles + compiled ``mask_mod``, windowed on
-          sliding layers). Needs no ``flash_attn`` build. Dynamo marks the
-          length dynamic on the second packed length; later lengths reuse it.
-
-        Both preserve sliding-window attention per layer, so packing is correct
-        for SWA models (e.g. gemma), not just full-attention ones. Init packs
-        only when :func:`sequence_packing_blocker` passes. Returns ``None``
-        when packing is off.
+        :return: ``True`` unless ``cp > 1``.
+        :rtype: bool
         """
-        if not self.sequence_packing:
-            return None
-        impl = language_model_attn_implementation(self.actor)
-        return "varlen" if impl == "flash_attention_2" else "blockmask"
+        return self.fsdp_config is None or self.fsdp_config.cp == 1
 
     def _get_logprobs(
         self,
@@ -6195,19 +5808,11 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 # Preference batches already carry an attention mask; generation
                 # rollouts should supply one too.
                 attention_mask = attention_mask_from_padded_ids(ids, self.pad_token_id)
-
-            if self.calc_position_embeddings:
-                position_ids = self._position_ids_from_mask(attention_mask)
-
-            fused_fn, _head_w, _head_b = self._fused_logprob_fn_and_head()
-            packing_mode = self._packing_mode()
-
-            # Split the sample into batches
+            fused_fn, _, _ = self._fused_logprob_fn_and_head()
+            host_masks = HostMasks.read(attention_mask, score_mask)
             log_probs = []
             for batch in range(0, num_samples, batch_size):
                 end_idx = min((batch + batch_size), num_samples)
-                batch_ids = ids[batch:end_idx, :]
-                batch_attention_mask = attention_mask[batch:end_idx, :]
                 # A chunk spanning the whole batch keeps every image tile.
                 batch_pixel_values = (
                     pixel_values
@@ -6216,80 +5821,30 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                         pixel_values, batch, end_idx, num_samples
                     )
                 )
-
-                batch_score_mask = (
-                    score_mask[batch:end_idx] if score_mask is not None else None
-                )
-                batch_support_ids = (
-                    support_ids[batch:end_idx] if support_ids is not None else None
-                )
-                packed = None
-                if packing_mode is not None:
-                    packed = pack_padded_batch(
-                        batch_ids, batch_attention_mask, batch_score_mask
-                    )
-                    batch_model_kwargs = self._packed_model_kwargs(
-                        packed, packing_mode, batch_pixel_values
-                    )
-                else:
-                    batch_model_kwargs = {
-                        "input_ids": batch_ids,
-                        "attention_mask": batch_attention_mask,
-                        "use_cache": False,
-                    }
-                    if self.calc_position_embeddings:
-                        batch_model_kwargs["position_ids"] = position_ids[
-                            batch:end_idx, :
-                        ]
-                    if batch_pixel_values is not None:
-                        batch_model_kwargs["pixel_values"] = batch_pixel_values
-
-                with (
-                    self._patch_lm_head_to_identity(),
-                    self._amp_ctx(),
-                    self._activation_offload_ctx(),
-                ):
-                    # FSDP2 all-gather hooks run on ``Module.__call__``.
-                    output = self.actor(**batch_model_kwargs)
-                first = output[0] if isinstance(output, tuple) else output.logits
-
-                if packed is not None:
+                with self.sequence_layout.prepare_forward(
+                    ids[batch:end_idx],
+                    attention_mask[batch:end_idx],
+                    score_mask[batch:end_idx] if score_mask is not None else None,
+                    support_ids[batch:end_idx] if support_ids is not None else None,
+                    batch_pixel_values,
+                    host_masks=host_masks.rows(batch, end_idx),
+                ) as fwd:
+                    hidden, _ = self._forward_hidden_and_value(fwd.kwargs)
                     with self.shard_runtime.gather_layer(
-                        self._get_lm_head(), device=first.device
-                    ) as (head_w, head_b):
-                        packed_lp = self._score_hidden(
-                            fused_fn,
-                            first[:, :-1],
-                            head_w,
-                            head_b,
-                            packed.input_ids[:, 1:],
-                            packed.score_mask,
-                            None
-                            if batch_support_ids is None
-                            else pack_next_token_frame(batch_support_ids, packed, -1),
-                            packed.n_scored,
-                        )
-                    # Map back to the dense (mb, T-1) frame so the loss path is
-                    # unchanged; cross-segment boundary predictions are dropped.
-                    # unpack_logprobs reshapes the packed logprobs internally.
-                    log_prob = unpack_logprobs(packed_lp, packed)
-                else:
-                    with self.shard_runtime.gather_layer(
-                        self._get_lm_head(), device=first.device
+                        self._get_lm_head(), device=hidden.device
                     ) as (head_w, head_b):
                         log_prob = self._score_hidden(
                             fused_fn,
-                            first[:, :-1],
+                            fwd.scoring_hidden(hidden),
                             head_w,
                             head_b,
-                            batch_ids[:, 1:],
-                            batch_score_mask,
-                            batch_support_ids,
+                            fwd.targets,
+                            fwd.score_mask,
+                            fwd.support_ids,
+                            fwd.n_scored,
                         )
-
-                first = None
-                batch_model_kwargs = None
-                log_probs.append(log_prob)
+                    del hidden
+                    log_probs.append(fwd.restore(log_prob, "logprobs"))
             return torch.cat(log_probs, dim=0)
 
     def _raise_if_loss_not_finite_on_any_rank(self, loss: torch.Tensor) -> None:
@@ -6404,18 +5959,19 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     def _micro_batch_token_budget(self) -> int | None:
         """Tokens per learn micro-batch on one rank, or ``None`` when micro-batches count rows.
 
-        Packed forwards size micro-batches by tokens: ``micro_batch_tokens_per_gpu``,
-        else ``micro_batch_size_per_gpu`` rows of :meth:`_row_token_budget` tokens.
-        Padded forwards count ``micro_batch_size_per_gpu`` rows.
+        A layout with a token budget (:meth:`SequenceLayout.micro_batch_token_budget`)
+        sizes micro-batches by ``micro_batch_tokens_per_gpu``, else by
+        ``micro_batch_size_per_gpu`` rows of :meth:`_row_token_budget` tokens.
 
         :return: Token budget, or ``None``.
         :rtype: int | None
         """
-        if self._packing_mode() is None:
-            return None
-        if self.micro_batch_tokens_per_gpu is not None:
-            return self.micro_batch_tokens_per_gpu
-        return self.micro_batch_size_per_gpu * self._row_token_budget()
+        budget = self._sequence_layout_type().micro_batch_token_budget(
+            self.micro_batch_size_per_gpu, self._row_token_budget()
+        )
+        if budget is None or self.micro_batch_tokens_per_gpu is None:
+            return budget
+        return self.micro_batch_tokens_per_gpu
 
     def packed_warmup_lengths(self) -> list[int]:
         """Packed lengths that reach every length-specialized Triton kernel a learn can hit.
@@ -6911,7 +6467,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         # Anchored VL regex still names the original language-model modules.
         if isinstance(target_modules, str) and target_modules != "all-linear":
             target_modules = lora_target_module_names(target_modules)
-        n_training_gpus = self.shard_runtime.data_parallel_world(get_world_size())
+        world_size = get_world_size()
+        n_training_gpus = world_size
+        dp_size = self.shard_runtime.data_parallel_world(world_size)
         records_supports = self._config_records_sampling_supports()
         # Images, segments, checkpoint snapshots and async rollout are not
         # known before the first batch; they size as absent.
@@ -6919,7 +6477,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         settings = TrainingSettings(
             algorithm=algorithm,
             group_size=self.group_size,
-            trajectories_per_update=self.batch_size_per_process * n_training_gpus,
+            trajectories_per_update=self.batch_size_per_process * dp_size,
             max_model_len=self._row_token_budget(),
             micro_batch_size=self.micro_batch_size_per_gpu,
             micro_batch_tokens=self._micro_batch_token_budget(),
@@ -6945,7 +6503,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             images_per_row=0,
             image_width=0,
             image_height=0,
-            vision_tower_lora=bool(self.lora_tower_target_modules),
+            tower_lora_targets=frozenset(self.lora_tower_target_modules or ()),
             segmented_rows=False,
             checkpoint_optimizer=False,
             async_rollout=False,
@@ -7211,7 +6769,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         """Deal split rows out so each rank in a lockstep group trains about the same rows.
 
         See :func:`~agilerl.utils.segment_balance.balance_rows_across_ranks`;
-        on one process, or with fewer training rows than ranks, the rows stay put.
+        on one process, or with fewer training rows than data-parallel ranks,
+        the rows stay put.
 
         :param rows: Split rows, before filler rows.
         :type rows: SegmentRows
@@ -7223,12 +6782,15 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :return: The rows this rank trains, which of them train, and their values.
         :rtype: tuple[SegmentRows, npt.NDArray[np.intp], list[torch.Tensor]]
         """
+        # Ranks in one tp * cp replica share a batch, so they keep one assignment.
+        fsdp = self.fsdp_config
         balanced = balance_rows_across_ranks(
             rows,
             train_rows,
             row_values,
             self.pad_token_id,
-            None if self.fsdp_config is None else self.fsdp_config.shard_group_size,
+            None if fsdp is None else fsdp.shard_group_size,
+            1 if fsdp is None else fsdp.tp * fsdp.cp,
         )
         if balanced is None:
             return rows, train_rows, [value for value, _ in row_values]
@@ -7441,8 +7003,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             token_ids[real_rows], self.pad_token_id
         )
         padding_frac = 1.0 - float(real_tokens.float().mean().item())
-        # The gradient forward on a packed row runs real tokens only.
-        packed = self._packing_mode() is not None
+        packed = self.sequence_layout.skips_padding
         return {
             "padding_frac_before_packing": padding_frac,
             "padding_frac_after_packing": 0.0 if packed else padding_frac,

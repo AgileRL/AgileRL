@@ -13,10 +13,11 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, distribute_module, distribute_tensor
 from torch.distributed.tensor.placement_types import Shard
 
-from agilerl.distributed.ep_mesh import validate_ep_degree
+from agilerl.distributed.mesh import validate_ep_degree
 from agilerl.lora.moe.layouts import (
-    is_routed_experts_module,
+    is_packed_experts_module,
     is_sorted_experts_module,
+    is_transposed_experts_module,
     routed_projection_names,
 )
 
@@ -36,6 +37,8 @@ def packed_expert_counts(model: nn.Module) -> list[int]:
             counts.append(int(up.shape[0]))
         elif is_sorted_experts_module(module):
             counts.append(int(cast("torch.Tensor", module.weight).shape[0]))
+        elif is_transposed_experts_module(module):
+            counts.append(int(cast("torch.Tensor", module.gate_up_proj).shape[0]))
     return counts
 
 
@@ -117,10 +120,10 @@ def module_ep_degree(module: nn.Module) -> int:
 
 
 def iter_packed_expert_modules(model: nn.Module) -> list[tuple[str, nn.Module]]:
-    """Named modules that match the sorted or routed packed-expert layouts."""
+    """Named modules that match the sorted, routed, or transposed packed-expert layouts."""
     found: list[tuple[str, nn.Module]] = []
     for name, module in model.named_modules():
-        if is_sorted_experts_module(module) or is_routed_experts_module(module):
+        if is_packed_experts_module(module):
             found.append((name, module))
     return found
 

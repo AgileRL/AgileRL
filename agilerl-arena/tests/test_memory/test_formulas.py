@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from agilerl.arena.memory import formulas, fsdp_gather, kv_cache
+from agilerl.arena.memory import formulas, fsdp_gather, kv_cache, lora_formulas
 from agilerl.arena.memory.lora_placement import (
     lora_tensor_placement,
     split_moe_lora_recompute_bytes,
@@ -95,6 +95,19 @@ class TestHostBytesPerGpu:
         assert formulas.host_bytes_per_gpu(4 * GiB, 1) == 0
 
 
+class TestAttentionOutputGateParams:
+    def test_biased_gate_counts_weight_and_bias_rows(self):
+        # Arrange
+        gated = QWEN_05B.model_copy(update={"attention_output_gate": True})
+        counts = replace(formulas.param_counts(gated), unattributed=10**9)
+
+        # Act
+        params = formulas.attention_output_gate_params(counts, gated)
+
+        # Assert: 24 layers * 14 heads * 64 head_dim rows, by 896 inputs plus a bias.
+        assert params == 24 * 14 * 64 * 896 + 24 * 14 * 64
+
+
 class TestParamCounts:
     def test_matches_published_total(self):
         counts = formulas.param_counts(QWEN_05B)
@@ -137,6 +150,28 @@ class TestParamCounts:
         exact = formulas.param_counts(QWEN_05B, analytic.total - 5_000)
         assert exact.unattributed == -5_000
         assert exact.total == analytic.total - 5_000
+
+
+class TestContextParallelShardLen:
+    def test_attention_only_pads_the_action_frame_to_cp(self):
+        assert formulas.context_parallel_shard_len(QWEN_05B, 4100, 4) == 1025
+
+    def test_gated_delta_net_pads_to_scan_chunks_per_rank(self):
+        arch = ModelArch.from_hf_config(QWEN35_08B.config)
+
+        # 4099 action tokens pad to 33 chunks of 2 * 64.
+        assert formulas.context_parallel_shard_len(arch, 4100, 2) == 33 * 64
+
+    def test_flex_attention_pads_to_whole_blocks(self):
+        arch = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["openai/gpt-oss-20b"].config
+        )
+
+        assert arch.flex_attention
+        assert formulas.context_parallel_shard_len(arch, 4100, 4) == 33 * 128 // 4
+
+    def test_one_rank_runs_the_whole_row(self):
+        assert formulas.context_parallel_shard_len(QWEN_05B, 4100, 1) == 4100
 
 
 class TestModelArchFromHfConfig:
@@ -545,6 +580,24 @@ class TestGraniteSharedMlp:
         assert GRANITE_MICRO.intermediate_size == 8192
 
 
+class TestMambaSharedGroupRowsParams:
+    def test_one_group_over_tp_keeps_every_b_c_row(self):
+        # 36 layers x 2 x 128 state rows x (1536 hidden + 4 conv taps + 1 bias).
+        assert formulas.mamba_shared_group_rows_params(GRANITE_H_TINY, 2) == (
+            36 * 256 * 1541
+        )
+
+    def test_groups_that_split_over_tp_keep_nothing(self):
+        nemotron = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"].config
+        )
+
+        assert formulas.mamba_shared_group_rows_params(nemotron, 2) == 0
+
+    def test_no_tensor_parallel_keeps_nothing(self):
+        assert formulas.mamba_shared_group_rows_params(GRANITE_H_TINY, 1) == 0
+
+
 class TestMambaSavedWidth:
     def test_fused_kernel_keeps_in_proj_and_scan_outputs(self):
         # 48 heads x 64 = 3072 inner, conv dim 3328.
@@ -671,10 +724,10 @@ class TestLoraParamCount:
         # q: 8->8, k: 8->4, v: 8->4, o: 8->8, gate: 8->16, up: 8->16, down: 16->8
         rank = 2
         expected = rank * ((8 + 8) + (8 + 4) + (8 + 4) + (8 + 8) + 3 * (8 + 16))
-        assert formulas.lora_param_count(arch, rank) == expected
+        assert lora_formulas.lora_param_count(arch, rank) == expected
         # Attention-only scope drops the MLP terms.
         attn_only = rank * ((8 + 8) + (8 + 4) + (8 + 4) + (8 + 8))
-        assert formulas.lora_param_count(arch, rank, "attention-only") == attn_only
+        assert lora_formulas.lora_param_count(arch, rank, "attention-only") == attn_only
 
     def test_follows_hybrid_layer_mix(self):
         # Arrange
@@ -701,8 +754,8 @@ class TestLoraParamCount:
         )
 
         # Act
-        attn_only = formulas.lora_param_count(nemotron, rank, "attention-only")
-        all_linear = formulas.lora_param_count(nemotron, rank)
+        attn_only = lora_formulas.lora_param_count(nemotron, rank, "attention-only")
+        all_linear = lora_formulas.lora_param_count(nemotron, rank)
 
         # Assert: attention adapters on the 4 attention layers.
         assert attn_only == rank * attn * 4
@@ -727,22 +780,142 @@ class TestLoraParamCount:
                 "layer_types": ["sliding_attention"] * 28 + ["full_attention"] * 7,
             }
         )
-        # Arrange: sliding-width attention term and the layer-averaged width.
-        h, dh = arch.hidden_size, arch.head_dim
-        q_dim, kv_dim = arch.n_heads * dh, arch.n_kv_heads * dh
-        attn = (h + q_dim) + 2 * (h + kv_dim) + (q_dim + h)
-        scaled = int(attn * arch.mean_qkv_dim / (q_dim + 2 * kv_dim))
+        rank = 4
 
         # Act
-        rank = 4
-        mixed = formulas.lora_param_count(arch, rank, "attention-only")
-        sliding = formulas.lora_param_count(
+        mixed = lora_formulas.lora_param_count(arch, rank, "attention-only")
+        sliding = lora_formulas.lora_param_count(
             arch.model_copy(update={"global_head_dim": None}), rank, "attention-only"
         )
 
-        # Assert: full-attention layers adapt the wider head.
-        assert mixed == rank * scaled * arch.attention_layers
-        assert mixed > sliding
+        # Assert: 28 sliding layers at q 2048 / kv 256, 7 full at q 4096 / kv 512.
+        assert mixed == rank * (28 * 10752 + 7 * 15360)
+        assert sliding == rank * 35 * 10752
+
+    def test_gemma4_e4b_matches_its_inspected_language_linears(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(GEMMA4_E4B.config)
+
+        # Act
+        all_linear = lora_formulas.lora_param_count(arch, 1)
+        attention = lora_formulas.lora_param_count(arch, 1, "attention-only")
+
+        # Assert: 18 KV-shared layers (15 sliding, 3 full) have no k/v; the
+        # per-layer-input gate, projection and model projection add 249,856.
+        assert attention == 567_296
+        assert all_linear == 2_429_952
+
+    def test_qwen36_shared_expert_adds_gated_mlp_adapters(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(QWEN36.config)
+        no_shared = arch.model_copy(update={"n_shared_experts": 0})
+
+        # Act
+        shared = lora_formulas.lora_param_count(
+            arch, 16
+        ) - lora_formulas.lora_param_count(no_shared, 16)
+
+        # Assert: 40 layers of gate/up 2048->512 and down 512->2048.
+        assert shared == 16 * 40 * 3 * (2048 + 512)
+
+    def test_granite_h_tiny_matches_its_inspected_linears(self):
+        # Arrange
+        no_shared = GRANITE_H_TINY.model_copy(update={"n_shared_experts": 0})
+
+        # Act
+        total = lora_formulas.lora_param_count(GRANITE_H_TINY, 1)
+        shared = total - lora_formulas.lora_param_count(no_shared, 1)
+
+        # Assert: shared_mlp input_linear 1536->2048 and output_linear 1024->1536.
+        assert shared == 40 * ((1536 + 2048) + (1024 + 1536))
+        assert total == 740_032
+
+    def test_qwen36_matches_its_inspected_language_linears(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(QWEN36.config)
+        ungated = arch.model_copy(update={"attention_output_gate": False})
+
+        # Act
+        total = lora_formulas.lora_param_count(arch, 1)
+        gate = lora_formulas.lora_param_count(
+            arch, 1, "attention-only"
+        ) - lora_formulas.lora_param_count(ungated, 1, "attention-only")
+
+        # Assert: q_proj 2048->8192 carries the output gate on 10 attention
+        # layers; 30 GDN layers wrap in_proj_qkv 2048->8192, in_proj_z
+        # 2048->4096, in_proj_b/a 2048->32 and out_proj 4096->2048.
+        assert gate == 10 * 4096
+        assert total == 1_322_880
+
+    def test_granite_micro_fuses_its_dense_gate_up(self):
+        # Act
+        total = lora_formulas.lora_param_count(GRANITE_MICRO, 1)
+
+        # Assert: 40 layers of q/o 2560<->2560, k/v 2560->512, input_linear
+        # 2560->16384 and output_linear 8192->2560.
+        assert total == 40 * (10240 + 6144 + (2560 + 16384) + (8192 + 2560))
+        assert total == 1_843_200
+
+
+class TestTowerLoraParamCount:
+    def test_qwen36_tower_and_merger(self):
+        arch = ModelArch.from_hf_config(QWEN36.config)
+
+        # 27 blocks of qkv 1152->3456 and fc1/fc2 1152<->4304, merger 4608->4608->2048.
+        assert lora_formulas.tower_lora_param_count(arch, 1, QWEN_TOWER_TARGETS) == (
+            434_912
+        )
+
+    def test_qwen36_charges_only_the_named_targets(self):
+        arch = ModelArch.from_hf_config(QWEN36.config)
+
+        # 27 blocks of qkv 1152->3456.
+        assert lora_formulas.tower_lora_param_count(arch, 1, {"qkv"}) == 124_416
+
+    def test_gemma4_e4b_vision_and_audio_towers(self):
+        arch = ModelArch.from_hf_config(GEMMA4_E4B.config)
+
+        # Vision: 16 blocks of q/k/v/o 768 and gate/up/down 768<->3072, patch
+        # 768->768, 768->2560 (287,488). Audio: 12 conformer layers of two
+        # 1024<->4096 feed-forwards, light conv 1024->2048 and 1024->1024,
+        # q/k/v/post and relative_k 1024->1024, subsample 1024->1024, output
+        # 1024->1536 and embedder 1536->2560 (438,784).
+        assert lora_formulas.tower_lora_param_count(arch, 1, GEMMA4_TOWER_TARGETS) == (
+            287_488 + 438_784
+        )
+
+    def test_gemma4_e4b_audio_only_targets_skip_the_vision_tower(self):
+        arch = ModelArch.from_hf_config(GEMMA4_E4B.config)
+
+        # Act
+        audio = lora_formulas.tower_lora_param_count(
+            arch, 1, {"relative_k_proj", "input_proj_linear", "output_proj"}
+        )
+
+        # Assert: 12 relative_k 1024->1024, subsample 1024->1024, output 1024->1536.
+        assert audio == 12 * 2048 + 2048 + 2560
+
+    def test_gemma4_without_an_audio_tower_charges_only_vision(self):
+        arch = ModelArch.from_hf_config({**GEMMA4_E4B.config, "audio_config": None})
+
+        # Vision tower only (287,488); the audio terms drop out.
+        assert lora_formulas.tower_lora_param_count(arch, 1, GEMMA4_TOWER_TARGETS) == (
+            287_488
+        )
+
+    def test_super_vl_encoder_patch_embedders_and_projector(self):
+        arch = ModelArch.from_hf_config(SUPER_VL.config)
+
+        # 32 blocks of q/k/v/o 1280 and fc1/fc2 1280<->5120, patch 768->1280,
+        # video patch 1536->1280, projector 5120->20480->4096.
+        assert lora_formulas.tower_lora_param_count(arch, 1, RADIO_TOWER_TARGETS) == (
+            792_320
+        )
+
+    def test_text_model_has_no_tower_adapters(self):
+        assert (
+            lora_formulas.tower_lora_param_count(QWEN_05B, 16, QWEN_TOWER_TARGETS) == 0
+        )
 
 
 class TestResolveChunkRows:
@@ -1114,6 +1287,97 @@ class TestSavedRouterTopkBytes:
         assert formulas.saved_router_topk_bytes(QWEN_05B, 1, 16384) == 0
 
 
+class TestMoeCollectivesSaveable:
+    def test_expert_parallel_moe_is_saveable(self):
+        arch = ModelArch.from_hf_config(GRANITE_MOE)
+
+        assert formulas.moe_collectives_saveable(arch, 2, 1)
+        assert not formulas.moe_collectives_saveable(arch, 1, 2)
+
+    def test_tensor_parallel_needs_a_saved_shared_expert_or_latent(self):
+        qwen = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["Qwen/Qwen3.6-35B-A3B"].config
+        )
+        latent = ModelArch.from_hf_config({**NEMOTRON_H_MOE, "moe_latent_size": 1024})
+        trailing = ModelArch.from_hf_config(NEMOTRON_H_MOE)
+        beside = ModelArch.from_hf_config(
+            {**GRANITE_MOE, "shared_intermediate_size": 1024}
+        )
+
+        assert formulas.moe_collectives_saveable(qwen, 1, 2)
+        assert not formulas.moe_collectives_saveable(qwen, 1, 1)
+        assert formulas.moe_collectives_saveable(latent, 1, 2)
+        assert not formulas.moe_collectives_saveable(trailing, 1, 2)
+        assert not formulas.moe_collectives_saveable(beside, 1, 2)
+
+    def test_dense_model_is_not_saveable(self):
+        assert not formulas.moe_collectives_saveable(QWEN_05B, 2, 2)
+
+
+class TestSavedMoeCollectiveBytes:
+    def test_expert_parallel_saves_dispatched_and_combined_rows(self):
+        arch = ModelArch.from_hf_config(NEMOTRON_H_MOE)
+
+        saved = formulas.saved_moe_collective_bytes(arch, 1, 16384, 2.0, 8, 1, 1)
+
+        # 16k tokens x top-6 routed rows, dispatched and combined, at hidden 2688.
+        assert saved == 2 * 16384 * 6 * 2688 * 2
+        assert saved == 1008 * MiB
+
+    def test_tensor_parallel_adds_row_gather_and_skips_trailing_shared_expert(self):
+        arch = ModelArch.from_hf_config(NEMOTRON_H_MOE)
+
+        saved = formulas.saved_moe_collective_bytes(arch, 1, 16384, 2.0, 2, 2, 2)
+
+        # Half the routed rows each way and both ranks' 8k-row spans. The
+        # recompute stops before the trailing shared expert's reduce.
+        assert not arch.shared_expert_reduce_saved
+        assert saved == (2 * 16384 * 6 // 2 + 2 * 8192) * 2688 * 2
+        assert saved == 588 * MiB
+
+    def test_gated_shared_expert_saves_its_reduce(self):
+        arch = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["Qwen/Qwen3.6-35B-A3B"].config
+        )
+
+        saved = formulas.saved_moe_collective_bytes(arch, 1, 16384, 2.0, 1, 1, 2)
+
+        # The sigmoid gate reads the shared expert's 16k-token reduce at hidden 2048.
+        assert arch.shared_expert_reduce_saved
+        assert saved == 16384 * 2048 * 2
+        assert saved == 64 * MiB
+
+    def test_latent_moe_saves_both_latent_projection_collectives(self):
+        arch = ModelArch.from_hf_config({**NEMOTRON_H_MOE, "moe_latent_size": 1024})
+
+        saved = formulas.saved_moe_collective_bytes(arch, 1, 16384, 2.0, 1, 1, 2)
+        routed = formulas.saved_moe_collective_bytes(arch, 1, 16384, 2.0, 2, 1, 1)
+
+        # Latent input gather and hidden output reduce.
+        assert saved == 16384 * (1024 + 2688) * 2
+        # Routed rows travel at the latent width.
+        assert routed == 2 * 16384 * 6 * 1024 * 2
+
+    def test_shared_mlp_beside_the_experts_saves_nothing(self):
+        arch = ModelArch.from_hf_config(
+            {**GRANITE_MOE, "shared_intermediate_size": 1024}
+        )
+
+        saved = formulas.saved_moe_collective_bytes(arch, 1, 16384, 2.0, 1, 1, 2)
+
+        assert arch.n_shared_experts == 1
+        assert not arch.shared_expert_reduce_saved
+        assert saved == 0
+
+    def test_dense_model_and_unsplit_moe_save_nothing(self):
+        arch = ModelArch.from_hf_config(NEMOTRON_H_MOE)
+
+        assert (
+            formulas.saved_moe_collective_bytes(QWEN_05B, 1, 16384, 2.0, 2, 2, 2) == 0
+        )
+        assert formulas.saved_moe_collective_bytes(arch, 1, 16384, 2.0, 1, 1, 1) == 0
+
+
 # Nemotron 3 Nano 4B Mamba-2 geometry. At one rank's 16k-token FSDP backward
 # peak a torch allocator snapshot held 3.63 GiB in one Mamba layer's scan.
 NEMOTRON_NANO_MAMBA = {
@@ -1245,6 +1509,47 @@ class TestGatedDeltaBlockBytes:
 
         assert saved == 32768 * ((8192 + 2 * 2048 + 4 * 4096 + 32 * 64) * 2 + 32 * 4)
         assert saved == 1924 * MiB
+
+    def test_tensor_parallel_keeps_each_ranks_heads(self):
+        # Arrange: Qwen3.6-35B-A3B at tp=2 keeps 8 key and 16 value heads per rank.
+        arch = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["Qwen/Qwen3.6-35B-A3B"].config
+        )
+
+        # Act
+        forward = formulas.gated_delta_block_bytes(arch, 1, 1024, 2.0, False, 2)
+        saved = formulas.gated_delta_saved_bytes(arch, 1, 32768, 2.0, 2)
+
+        # Assert
+        assert formulas.gated_delta_qk_width(arch, 2) == 1024
+        assert (
+            forward == 1024 * (4096 + 4 * 1024 + 2048 + 5 * 2048 + 16 * 64 + 4096) * 2
+        )
+        assert forward == 50 * MiB
+        assert saved == 32768 * ((4096 + 2 * 1024 + 4 * 2048 + 16 * 64) * 2 + 16 * 4)
+
+    def test_tensor_parallel_that_does_not_split_the_heads_keeps_them_whole(self):
+        arch = ModelArch.from_hf_config(QWEN35_08B.config)
+
+        split = formulas.gated_delta_block_bytes(arch, 1, 1024, 2.0, True, 3)
+
+        assert split == formulas.gated_delta_block_bytes(arch, 1, 1024, 2.0, True)
+
+    def test_block_recompute_sizes_the_recurrent_layer_per_rank(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(QWEN35_08B.config)
+        tokens = 16384
+
+        # Act
+        forward = formulas.block_recompute_bytes(
+            arch, 1, tokens, 2.0, layer="mamba", tensor_parallel=2
+        )
+
+        # Assert
+        assert forward == tokens * 4 * 1024 * 2 + 496 * MiB
+        assert forward == tokens * 4 * 1024 * 2 + formulas.gated_delta_block_bytes(
+            arch, 1, tokens, 2.0, tensor_parallel=2
+        )
 
     def test_forward_peaks_in_the_recurrent_sub_layer(self):
         # Arrange
@@ -1774,7 +2079,7 @@ class TestTensorParallelWidths:
         )
         assert narrowed < full
 
-    def test_without_a_plan_only_an_untied_head_leaves_the_fsdp_gather(self):
+    def test_without_a_plan_an_untied_head_gathers_one_over_tp(self):
         arch = QWEN_05B.model_copy(update={"tied_embeddings": False})
         counts = formulas.param_counts(arch)
         kwargs = {
@@ -1788,13 +2093,14 @@ class TestTensorParallelWidths:
         )
 
         assert formulas.tensor_parallel_params(counts, arch) == counts.lm_head
-        assert narrowed == full - counts.lm_head
+        assert narrowed == full - counts.lm_head // 2
 
-    def test_gather_stream_spans_two_moe_layers_of_a_tp_planned_hybrid(self):
-        # Arrange: Lightning TP 2 on A100 held two MoE all-gathers at once.
+    def test_tp_planned_hybrid_gathers_its_tp_layers_at_one_over_tp(self):
+        # Arrange
         arch = ModelArch.from_hf_config(NEMOTRON_H_MOE)
         counts = formulas.param_counts(arch)
         moe_layer = fsdp_gather.layer_params(arch, "moe")
+        mamba_layer = fsdp_gather.layer_params(arch, "mamba")
 
         # Act
         allocated = fsdp_gather.prefetch_window_params(counts, arch, 2, 2)
@@ -1802,10 +2108,11 @@ class TestTensorParallelWidths:
             counts, arch, 1, 4, tensor_parallel=2
         )
 
-        # Assert
+        # Assert: the widest window is a MoE layer beside half a Mamba layer;
+        # the untied head's half beside the last MoE unit sets the pool.
         assert arch.tensor_parallel_plan
-        assert allocated == moe_layer
-        assert pool == 2 * moe_layer
+        assert allocated == moe_layer + mamba_layer // 2
+        assert pool == counts.lm_head // 2 + moe_layer
 
 
 class TestLoraTensorPlacement:
@@ -1813,7 +2120,7 @@ class TestLoraTensorPlacement:
         replicated, sharded = lora_tensor_placement(QWEN_05B, 16, "all-linear", 0, None)
 
         assert sharded == 0
-        assert replicated == formulas.lora_param_count(QWEN_05B, 16)
+        assert replicated == lora_formulas.lora_param_count(QWEN_05B, 16)
 
     def test_wide_mlp_matrices_cross_the_persistence_threshold(self):
         arch = ModelArch(
@@ -1828,18 +2135,20 @@ class TestLoraTensorPlacement:
         replicated, sharded = lora_tensor_placement(arch, 16, "all-linear", 0, 100_000)
 
         assert sharded == 3 * 16 * 11008
-        assert replicated + sharded == formulas.lora_param_count(arch, 16)
+        assert replicated + sharded == lora_formulas.lora_param_count(arch, 16)
         attention_only, attention_sharded = lora_tensor_placement(
             arch, 16, "attention-only", 0, 100_000
         )
         assert attention_sharded == 0
-        assert attention_only == formulas.lora_param_count(arch, 16, "attention-only")
+        assert attention_only == lora_formulas.lora_param_count(
+            arch, 16, "attention-only"
+        )
 
     def test_threshold_zero_shards_every_tensor(self):
         replicated, sharded = lora_tensor_placement(QWEN_05B, 16, "all-linear", 0, 0)
 
         assert replicated == 0
-        assert sharded == formulas.lora_param_count(QWEN_05B, 16)
+        assert sharded == lora_formulas.lora_param_count(QWEN_05B, 16)
 
     def test_zero_rank_is_empty(self):
         replicated, sharded = lora_tensor_placement(QWEN_05B, 0, "all-linear", 0, None)
@@ -1867,6 +2176,190 @@ class TestLoraTensorPlacement:
 
         assert gated_shard == ungated_shard == 0
         assert gated_repl - ungated_repl == rank * (64 + 128)
+
+    def test_tensor_parallel_splits_column_lora_b_and_row_lora_a(self):
+        # Arrange
+        arch = ModelArch(
+            n_layers=1,
+            hidden_size=64,
+            intermediate_size=128,
+            n_heads=4,
+            n_kv_heads=2,
+            head_dim=16,
+            vocab_size=32,
+        )
+        rank = 4
+        # Halved: q/k/v and gate/up B, o and down A.
+        split = rank * (64 + 2 * 32 + 64 + 2 * 128 + 128)
+
+        # Act
+        replicated, sharded = lora_tensor_placement(
+            arch, rank, "all-linear", 0, None, 2
+        )
+
+        # Assert
+        assert sharded == 0
+        assert replicated == lora_formulas.lora_param_count(arch, rank) - split // 2
+
+    def test_tensor_parallel_keeps_indivisible_kv_lora_b_whole(self):
+        # Arrange
+        arch = ModelArch(
+            n_layers=1,
+            hidden_size=64,
+            intermediate_size=128,
+            n_heads=4,
+            n_kv_heads=1,
+            head_dim=16,
+            vocab_size=32,
+        )
+        rank = 4
+
+        # Act
+        replicated, _ = lora_tensor_placement(arch, rank, "attention-only", 0, None, 2)
+
+        # Assert: only q B and o A halve.
+        expected = lora_formulas.lora_param_count(arch, rank, "attention-only")
+        assert replicated == expected - rank * (64 + 64) // 2
+
+    def test_tensor_parallel_splits_recurrent_projections(self):
+        # Arrange
+        arch = ModelArch(
+            n_layers=2,
+            hidden_size=64,
+            intermediate_size=128,
+            n_heads=4,
+            n_kv_heads=2,
+            head_dim=16,
+            vocab_size=32,
+            n_attention_layers=0,
+            n_mlp_layers=0,
+            n_mamba_layers=2,
+            mamba_n_heads=4,
+            mamba_d_head=16,
+            mamba_conv_dim=96,
+        )
+        rank = 4
+        # in_proj B rows: d_inner + conv_dim + n_heads; out_proj A: d_inner.
+        split = 2 * rank * ((64 + 96 + 4) + 64)
+
+        # Act
+        replicated, _ = lora_tensor_placement(arch, rank, "all-linear", 0, None, 2)
+
+        # Assert
+        assert replicated == lora_formulas.lora_param_count(arch, rank) - split // 2
+
+    def test_tensor_parallel_bins_by_the_global_matrix(self):
+        # Arrange
+        arch = ModelArch(
+            n_layers=1,
+            hidden_size=4096,
+            intermediate_size=11008,
+            n_heads=32,
+            n_kv_heads=8,
+            head_dim=128,
+            vocab_size=128,
+        )
+
+        # Act
+        _, sharded = lora_tensor_placement(arch, 16, "all-linear", 0, 100_000, 2)
+
+        # Assert: each MLP factor on ``inter`` is 176k globally, 88k per rank.
+        assert sharded == 3 * 16 * 11008 // 2
+
+    def test_tensor_parallel_splits_gemma4_wide_heads(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(GEMMA4_E4B.config)
+
+        # Act
+        whole, _ = lora_tensor_placement(arch, 16, "attention-only", 0, None, 1)
+        split, _ = lora_tensor_placement(arch, 16, "attention-only", 0, None, 2)
+
+        # Assert: half of q/k/v B and o A on both head widths.
+        assert whole == 16 * 567_296
+        assert split == 16 * (567_296 - 229_376 // 2)
+
+    @pytest.mark.parametrize(
+        ("tp", "expected"), [(1, 16 * 40 * 7680), (2, 16 * 40 * (7680 - 1536 // 2))]
+    )
+    def test_qwen36_shared_expert_splits_like_its_mlp(self, tp, expected):
+        # Arrange
+        arch = ModelArch.from_hf_config(QWEN36.config)
+        no_shared = arch.model_copy(update={"n_shared_experts": 0})
+
+        # Act
+        with_shared, _ = lora_tensor_placement(arch, 16, "all-linear", 0, None, tp)
+        without, _ = lora_tensor_placement(no_shared, 16, "all-linear", 0, None, tp)
+
+        # Assert: gate/up B and down A halve under tp=2.
+        assert with_shared - without == expected
+
+    @pytest.mark.parametrize(
+        ("tp", "expected"), [(1, 16 * 40 * 6144), (2, 16 * 40 * (6144 - 3072 // 2))]
+    )
+    def test_granite_shared_mlp_splits_input_b_and_output_a(self, tp, expected):
+        # Arrange
+        no_shared = GRANITE_H_TINY.model_copy(update={"n_shared_experts": 0})
+
+        # Act
+        with_shared, _ = lora_tensor_placement(
+            GRANITE_H_TINY, 16, "all-linear", 0, None, tp
+        )
+        without, _ = lora_tensor_placement(no_shared, 16, "all-linear", 0, None, tp)
+
+        # Assert
+        assert with_shared - without == expected
+
+    @pytest.mark.parametrize(
+        ("tp", "expected"), [(1, 16 * 434_912), (2, 16 * (434_912 - 334_944 // 2))]
+    )
+    def test_qwen36_vision_tower_splits_qkv_b_and_fc_factors(self, tp, expected):
+        # Arrange
+        arch = ModelArch.from_hf_config(QWEN36.config)
+
+        # Act
+        tower, _ = lora_tensor_placement(
+            arch, 16, "all-linear", 0, None, tp, QWEN_TOWER_TARGETS
+        )
+        text, _ = lora_tensor_placement(arch, 16, "all-linear", 0, None, tp)
+
+        # Assert: qkv and fc1 B, fc2 A on 27 blocks and the merger halve.
+        assert tower - text == expected
+
+    def test_gemma4_towers_stay_whole_under_tensor_parallel(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(GEMMA4_E4B.config)
+
+        # Act
+        tower, _ = lora_tensor_placement(
+            arch, 16, "all-linear", 0, None, 2, GEMMA4_TOWER_TARGETS
+        )
+        text, _ = lora_tensor_placement(arch, 16, "all-linear", 0, None, 2)
+
+        # Assert
+        assert tower - text == 16 * 726_272
+
+    @pytest.mark.parametrize(("tp", "per_rank"), [(1, 1_322_880), (2, 978_880)])
+    def test_qwen36_splits_gated_q_and_gdn_projections(self, tp, per_rank):
+        # Arrange
+        arch = ModelArch.from_hf_config(QWEN36.config)
+
+        # Act
+        replicated, _ = lora_tensor_placement(arch, 1, "all-linear", 0, None, tp)
+
+        # Assert: at tp=2 each rank keeps half of q/k/v B, o A, every GDN
+        # in_proj B and out_proj A, and the shared expert's gate/up B and down A.
+        assert replicated == per_rank
+
+    def test_granite_micro_splits_fused_input_b_and_output_a(self):
+        # Act
+        replicated, _ = lora_tensor_placement(
+            GRANITE_MICRO, 1, "all-linear", 0, None, 2
+        )
+
+        # Assert: per layer q 3840, k/v 2 x 2816, o 3840, input_linear
+        # 2560 + 8192 and output_linear 4096 + 2560.
+        assert replicated == 40 * (3840 + 5632 + 3840 + 10752 + 6656)
+        assert replicated == 1_228_800
 
 
 class TestSplitMoeLoraRecomputeBytes:
@@ -2140,6 +2633,32 @@ QWEN36 = SUPPORTED_MODEL_INFO["Qwen/Qwen3.6-35B-A3B"]
 GEMMA4_E4B = SUPPORTED_MODEL_INFO["google/gemma-4-E4B-it"]
 QWEN35_08B = SUPPORTED_MODEL_INFO["Qwen/Qwen3.5-0.8B"]
 GEMMA4_E4B = SUPPORTED_MODEL_INFO["google/gemma-4-E4B-it"]
+# Each family's full ``tower_connector_lora_targets``.
+QWEN_TOWER_TARGETS = frozenset({"qkv", "linear_fc1", "linear_fc2"})
+GEMMA4_TOWER_TARGETS = frozenset(
+    {
+        "linear",
+        "input_proj",
+        "embedding_projection",
+        "input_proj_linear",
+        "output_proj",
+        "relative_k_proj",
+    }
+)
+RADIO_TOWER_TARGETS = frozenset(
+    {
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "fc1",
+        "fc2",
+        "patch_projection",
+        "video_patch_projection",
+        "linear_1",
+        "linear_2",
+    }
+)
 
 
 class TestLatentMoe:
@@ -2338,24 +2857,32 @@ class TestPackedExpertLoraPlacement:
 
         # Assert
         assert repl == base_repl
-        assert shard - base_shard == formulas.packed_lora_param_count(MOE_TINY, 4, 2)
+        assert shard - base_shard == lora_formulas.packed_lora_param_count(
+            MOE_TINY, 4, 2
+        )
 
 
 class TestEngineExpertLoraParamCount:
     def test_3d_layout_packs_gate_and_up_into_one_slice(self):
         # 2 layers * 4 experts * rank 8 * (2 * 16 hidden + 3 * 32 inter)
-        assert formulas.engine_expert_lora_param_count(MOE_TINY, 8, 1, True) == 8192
+        assert (
+            lora_formulas.engine_expert_lora_param_count(MOE_TINY, 8, 1, True) == 8192
+        )
 
     def test_2d_gated_layout_keeps_a_slice_per_projection(self):
         # 2 * 4 * 8 * (2 * 16 + 16 + 3 * 32)
-        assert formulas.engine_expert_lora_param_count(MOE_TINY, 8, 1, False) == 9216
+        assert (
+            lora_formulas.engine_expert_lora_param_count(MOE_TINY, 8, 1, False) == 9216
+        )
 
     def test_tensor_parallel_shards_only_the_intermediate_dimension(self):
         # 2 * 4 * 8 * (2 * 16 + 3 * 16)
-        assert formulas.engine_expert_lora_param_count(MOE_TINY, 8, 2, True) == 5120
+        assert (
+            lora_formulas.engine_expert_lora_param_count(MOE_TINY, 8, 2, True) == 5120
+        )
 
     def test_dense_model_has_no_expert_stacks(self):
-        assert formulas.engine_expert_lora_param_count(QWEN_05B, 8, 1, False) == 0
+        assert lora_formulas.engine_expert_lora_param_count(QWEN_05B, 8, 1, False) == 0
 
 
 class TestRoutedExpertParamsPerLayer:
@@ -2391,6 +2918,20 @@ class TestTrainerNcclBytes:
         self, n_gpus, shard, ep, tp, gpus_per_node, fraction
     ):
         nccl = trainer_nccl_bytes(self.GROUP, n_gpus, shard, ep, tp, gpus_per_node)
+
+        assert nccl == pytest.approx(fraction * self.GROUP, abs=1)
+
+    @pytest.mark.parametrize(
+        ("cp", "tp", "fraction"),
+        [
+            (2, 1, 1.14 + 0.65 + 1.0),  # CP and the dp_shard_cp group
+            (4, 1, 1.14 + 1.0 + 1.0),
+            # TP and its replicas, CP, dp_shard_cp, and the CP mesh's TP and replicas.
+            (2, 2, 1.14 + 0.65 + 0.65 + 0.65 + 0.65 + 0.65 + 0.65),
+        ],
+    )
+    def test_context_parallel_adds_its_mesh_groups(self, cp, tp, fraction):
+        nccl = trainer_nccl_bytes(self.GROUP, 4, 4, 1, tp, None, cp)
 
         assert nccl == pytest.approx(fraction * self.GROUP, abs=1)
 
@@ -2452,3 +2993,28 @@ class TestTrainingCheckpointedBlocks:
 
         with pytest.raises(ValueError, match="checkpoint_every_n_blocks unset"):
             formulas.training_checkpointed_blocks(QWEN_05B, settings)
+
+
+class TestCheckpointedMoeBlocks:
+    @pytest.mark.parametrize(("every_n", "expected"), [(1, 3), (2, 1), (3, 2)])
+    def test_block_exclusive_stack_counts_checkpointed_moe_layers(
+        self, every_n: int, expected: int
+    ) -> None:
+        arch = ModelArch.from_hf_config(NEMOTRON_H_MOE)
+        settings = TrainingSettings(fsdp=FSDPConfig(checkpoint_every_n_blocks=every_n))
+
+        assert formulas.checkpointed_moe_blocks(arch, settings) == expected
+
+    def test_every_block_moe_counts_every_checkpointed_block(self) -> None:
+        arch = ModelArch.from_hf_config(GRANITE_MOE)
+        settings = TrainingSettings(fsdp=FSDPConfig(checkpoint_every_n_blocks=2))
+
+        assert formulas.checkpointed_moe_blocks(arch, settings) == 16
+
+    def test_dense_model_and_checkpointing_off_count_none(self) -> None:
+        arch = ModelArch.from_hf_config(NEMOTRON_H_MOE)
+        settings = TrainingSettings(fsdp=FSDPConfig(checkpoint_every_n_blocks=1))
+        off = settings.model_copy(update={"gradient_checkpointing": False})
+
+        assert formulas.checkpointed_moe_blocks(QWEN_05B, settings) == 0
+        assert formulas.checkpointed_moe_blocks(arch, off) == 0

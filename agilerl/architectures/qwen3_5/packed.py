@@ -18,7 +18,6 @@ as they are.
 from __future__ import annotations
 
 import functools
-import importlib.util
 import logging
 import sys
 from collections.abc import Callable
@@ -27,6 +26,11 @@ from typing import TYPE_CHECKING, Any
 import torch
 from torch import nn
 
+from agilerl.architectures.qwen3_5.gated_delta_net import (
+    GdnKernel,
+    apply_gdn_conv_clone,
+    gdn_kernel_import_errors,
+)
 from agilerl.architectures.qwen3_5.gated_norm import install_fused_gated_norm
 from agilerl.architectures.runtime import PatchRuntimeConfig
 from agilerl.utils.llm_packing import (
@@ -61,14 +65,11 @@ PACKED_CU_SEQLENS = "agilerl_packed_cu_seqlens"
 # Marks a GDN mixer class whose forward passes grouped q/k heads to the scans.
 GROUPED_QK_HEADS = "agilerl_grouped_qk_heads"
 
-PACKED_TARGETS = (
-    (
-        "transformers.models.qwen3_5_moe.modeling_qwen3_5_moe.Qwen3_5MoeGatedDeltaNet",
-        "transformers.models.qwen3_5_moe.modeling_qwen3_5_moe.Qwen3_5MoeTextModel",
-    ),
-    (
-        "transformers.models.qwen3_5.modeling_qwen3_5.Qwen3_5GatedDeltaNet",
-        "transformers.models.qwen3_5.modeling_qwen3_5.Qwen3_5TextModel",
+# The fused conv and scan transformers swaps in for its GDN torch kernels.
+PACKED_GDN_KERNELS = (
+    GdnKernel("causal_conv1d", "causal_conv1d_fn", "causal-conv1d"),
+    GdnKernel(
+        "fla.ops.gated_delta_rule", "chunk_gated_delta_rule", "flash-linear-attention"
     ),
 )
 
@@ -139,10 +140,7 @@ def _varlen_kernels_ready() -> bool:
     transformers resolves the GDN conv and scan to causal-conv1d and FLA when
     those packages import; its PyTorch fallbacks drop ``seq_idx`` / ``cu_seqlens``.
     """
-    return (
-        importlib.util.find_spec("causal_conv1d") is not None
-        and importlib.util.find_spec("fla") is not None
-    )
+    return not gdn_kernel_import_errors(PACKED_GDN_KERNELS)
 
 
 def _install_packed_mixer(mixer_cls: type) -> None:
@@ -302,31 +300,34 @@ def _require_gdn_fast_path() -> None:
     """Fail GPU Qwen GDN setup when fused conv/scan kernels are missing."""
     if not torch.cuda.is_available():
         return
-    missing = [
-        package
-        for module, package in (
-            ("fla", "flash-linear-attention"),
-            ("causal_conv1d", "causal-conv1d"),
-        )
-        if importlib.util.find_spec(module) is None
-    ]
-    if not missing:
-        return
-    raise RuntimeError("Qwen GatedDeltaNet needs " + " and ".join(missing) + " on GPU")
+    errors = gdn_kernel_import_errors(PACKED_GDN_KERNELS)
+    if errors:
+        msg = "Qwen GatedDeltaNet needs " + " and ".join(errors) + " on GPU"
+        raise RuntimeError(msg)
 
 
 @library_shim("transformers", "==5.19.*")
 def install_qwen_gdn_patches(
-    _patch: PatchRuntimeConfig,
-    _model: object | None = None,
+    patch: PatchRuntimeConfig,
+    model: object | None = None,
+    use_sequence_packing: bool = False,
 ) -> None:
-    """Install GDN packed-sequence and fused gated-norm patches for Qwen3.5 / Qwen3.6 families.
+    """Install the catalog GDN patches and the fused gated norm for Qwen3.5 / Qwen3.6 families.
 
-    :param _patch: Catalog patch config.
-    :param _model: Already-built model, or None; the class-level patches cover it.
+    :param patch: Catalog patch config.
+    :param model: Already-built model, or None; the class-level patches cover it.
+    :param use_sequence_packing: Install the packed-sequence wrap.
+    :type use_sequence_packing: bool, optional
     """
     _require_gdn_fast_path()
-    for mixer, text_model in PACKED_TARGETS:
-        patch_qwen_gdn_packed_sequences(mixer, text_model)
-        patch_qwen_gdn_grouped_heads(mixer)
+    gdn = patch.gdn
+    if gdn is None:
+        msg = "Qwen Gated DeltaNet patches need a catalog gdn config"
+        raise ValueError(msg)
+    for entry in gdn.mixers:
+        if use_sequence_packing:
+            patch_qwen_gdn_packed_sequences(entry.mixer, entry.text_model)
+        patch_qwen_gdn_grouped_heads(entry.mixer)
     install_fused_gated_norm()
+    if isinstance(model, nn.Module) and gdn.clone_conv_output:
+        apply_gdn_conv_clone(model, tuple(entry.mixer for entry in gdn.mixers))

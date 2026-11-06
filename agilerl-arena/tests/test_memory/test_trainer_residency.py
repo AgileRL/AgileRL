@@ -12,6 +12,7 @@ from agilerl.arena.memory.trainer_residency import (
     trainer_base_bytes,
 )
 from agilerl.arena.models.fsdp import FSDPConfig
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 
 QWEN_05B = ModelArch(
     n_layers=24,
@@ -51,6 +52,26 @@ class TestTrainerBaseBytes:
         base = trainer_base_bytes(model, settings, counts, 4, TORCH_SIDE)
 
         assert base < counts.total * 2
+
+    def test_shared_mamba_groups_keep_their_gathered_rows(self):
+        # Arrange
+        granite = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["ibm-granite/granite-4.0-h-tiny"].config
+        )
+        split = granite.model_copy(update={"mamba_n_groups": 2})
+        counts = formulas.param_counts(granite)
+        settings = TrainingSettings(fsdp=FSDPConfig(tp=2), n_training_gpus=4)
+
+        # Act
+        shared = trainer_base_bytes(
+            ModelSpec(model_id="granite", arch=granite), settings, counts, 2, 0.0
+        )
+        unshared = trainer_base_bytes(
+            ModelSpec(model_id="granite", arch=split), settings, counts, 2, 0.0
+        )
+
+        # Assert: bf16 B/C rows of one group, 2 x 128 state rows x (1536 + 4 + 1).
+        assert shared - unshared == 36 * 256 * 1541 * 2
 
 
 class TestFsdpCpuOffloadHostBytes:

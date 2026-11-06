@@ -90,11 +90,13 @@ def vision_filler_features(self: Gemma4Model, device: torch.device) -> object:
 def install_gemma4_vision_patches(
     _patch: PatchRuntimeConfig,
     _model: object | None = None,
+    _use_sequence_packing: bool = False,
 ) -> None:
     """Let ``Gemma4Model.get_image_features`` take one patch-grid row per image.
 
     :param _patch: Catalog patch config.
     :param _model: Already-built model, or None; the class-level patch covers it.
+    :param _use_sequence_packing: Unused; the vision patch does not depend on packing.
     """
     modeling = try_import(GEMMA4_MODELING)
     if modeling is None:

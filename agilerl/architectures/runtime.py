@@ -9,6 +9,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+import torch
 from pydantic import BaseModel, ConfigDict, Field
 from torch import nn
 from torch.distributed.device_mesh import DeviceMesh
@@ -93,8 +94,8 @@ class MambaPatchConfig(BaseModel):
 
     ``mixer`` and ``block`` are dotted paths resolved when the patch runs; the
     transformers classes may be absent at import time. ``block`` is the decoder
-    block that calls ``mixer``; when set, packed rows reset the mixer's scan and
-    conv state at every document boundary.
+    block that calls ``mixer``. When sequence packing is on, packed rows reset
+    the mixer's scan and conv state at every document boundary.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -103,6 +104,35 @@ class MambaPatchConfig(BaseModel):
     block: str | None = Field(default=None, min_length=1)
     fused_path: bool = True
     stream_ordering: bool = True
+
+
+class GdnMixerConfig(BaseModel):
+    """One GatedDeltaNet mixer and the text model whose decoder layers call it.
+
+    ``mixer`` and ``text_model`` are dotted paths resolved when the patch runs;
+    the transformers classes may be absent at import time. When sequence
+    packing is on, packed rows reset the mixer's conv and scan state at every
+    document boundary.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    mixer: str = Field(min_length=1)
+    text_model: str = Field(min_length=1)
+
+
+class GdnPatchConfig(BaseModel):
+    """GatedDeltaNet mixer patches that vary by Hugging Face ``model_type``.
+
+    ``mixers`` lists each GatedDeltaNet class this family defines.
+    ``clone_conv_output`` clones ``causal_conv1d_fn`` output so in-place FLA
+    views do not alias a tensor selective activation checkpoint saved.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    mixers: tuple[GdnMixerConfig, ...] = Field(min_length=1)
+    clone_conv_output: bool = True
 
 
 class PatchRuntimeConfig(BaseModel):
@@ -115,6 +145,28 @@ class PatchRuntimeConfig(BaseModel):
 
     install: Callable[..., object] | None = None
     mamba: MambaPatchConfig | None = Field(default=None)
+    gdn: GdnPatchConfig | None = Field(default=None)
+
+
+def no_restore(_model: nn.Module, _tp_mesh: DeviceMesh) -> None:
+    """Leave shards that load in checkpoint row order as they are.
+
+    :param _model: Model sharded by a family plan.
+    :type _model: nn.Module
+    :param _tp_mesh: Tensor-parallel mesh.
+    :type _tp_mesh: DeviceMesh
+    """
+
+
+def no_row_orders(_model: nn.Module) -> dict[str, torch.Tensor]:
+    """Report no parameter stored in a per-rank row order.
+
+    :param _model: Model sharded by a family plan.
+    :type _model: nn.Module
+    :return: An empty map.
+    :rtype: dict[str, torch.Tensor]
+    """
+    return {}
 
 
 @dataclass(frozen=True)
@@ -122,19 +174,34 @@ class TensorParallelPlan:
     """Tensor-parallel hooks for the module classes one family defines.
 
     ``shard`` runs before FSDP wraps the model and returns how many modules it
-    sharded. ``restore`` runs once weights are loaded into the shards. Both
-    leave modules of other families untouched.
+    sharded. ``restore`` runs once weights are loaded into the shards.
+    ``row_orders`` maps each parameter stored in a per-rank row order to the
+    source row of each stored dim-0 row. All three leave modules of other
+    families untouched. A family whose shards keep checkpoint row order uses
+    the default ``restore`` and ``row_orders``.
     """
 
     shard: Callable[[nn.Module, DeviceMesh], int]
-    restore: Callable[[nn.Module, DeviceMesh], None]
+    restore: Callable[[nn.Module, DeviceMesh], None] = no_restore
+    row_orders: Callable[[nn.Module], dict[str, torch.Tensor]] = no_row_orders
+
+
+@dataclass(frozen=True)
+class ContextParallelPlan:
+    """Context-parallel mixer wrap for the module classes one family defines.
+
+    ``wrap`` runs before FSDP wraps the model and returns how many mixers it
+    wrapped. Modules of other families stay untouched.
+    """
+
+    wrap: Callable[[nn.Module, DeviceMesh], int]
 
 
 class ModelRuntimeConfig(BaseModel):
-    """Per-``model_type`` runtime settings for vLLM, trainer, patches, and TP.
+    """Per-``model_type`` runtime settings for vLLM, trainer, patches, TP, and CP.
 
-    ``tensor_parallel_plan`` is a ``module:attribute`` path to a
-    :class:`TensorParallelPlan`, resolved when sharding runs: plan modules
+    ``tensor_parallel_plan`` and ``context_parallel_plan`` are
+    ``module:attribute`` paths, resolved when wrap/shard runs: plan modules
     import :mod:`agilerl.distributed`, which imports this package.
     """
 
@@ -153,6 +220,7 @@ class ModelRuntimeConfig(BaseModel):
         default_factory=dict
     )
     tensor_parallel_plan: str | None = Field(default=None, min_length=1)
+    context_parallel_plan: str | None = Field(default=None, min_length=1)
     # A name in agilerl.llm_envs.chat_formats.CHAT_FORMATS; None detects from the vocab.
     chat_format: str | None = Field(default=None, min_length=1)
     # vLLM reasoning parser of a thinking family. Only the Ray rollout engine

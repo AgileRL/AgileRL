@@ -6,11 +6,13 @@
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from typing import Any, cast
 
 import torch
+import torch.distributed as dist
 from torch import nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     CheckpointImpl,
@@ -38,12 +40,14 @@ from agilerl.arena.models.fsdp import (
     PREFETCH_UNITS,
     FSDPConfig,
 )
+from agilerl.distributed.context_parallel.ulysses import ulysses_checkpoint_context_fn
 from agilerl.distributed.expert_parallel import (
+    SAVED_COLLECTIVE_SCOPE,
     iter_packed_expert_modules,
     routed_counts_contexts,
 )
+from agilerl.distributed.mesh import MeshAxisName
 from agilerl.distributed.process import is_distributed
-from agilerl.distributed.tensor_parallel import set_tp_compute_dtype
 from agilerl.lora.moe.layouts import is_packed_experts_module
 from agilerl.utils.patching import library_shim
 
@@ -190,11 +194,17 @@ def _persistent_params(module: nn.Module) -> set[nn.Parameter]:
 def _cast_frozen_params(params: Iterable[nn.Parameter], dtype: torch.dtype) -> None:
     """Put frozen unsharded parameters in the mixed-precision compute dtype.
 
-    Trainable ones outside FSDP (EP / TP shards) keep their stored dtype; their
+    Trainable ones outside FSDP (EP shards) keep their stored dtype; their
     kernels cast them to the activation dtype.
     """
     for param in params:
-        if not param.requires_grad and param.dtype != dtype:
+        if param.requires_grad or param.dtype == dtype:
+            continue
+        if isinstance(param, DTensor):
+            # ``.data`` assignment relabels a DTensor but leaves its local shard.
+            cast_param = nn.Parameter(param.detach().to(dtype), param.requires_grad)
+            torch.utils.swap_tensors(param, cast_param)
+        else:
             param.data = param.data.to(dtype=dtype)
 
 
@@ -269,8 +279,8 @@ def _shard_embed_and_lm_head(
     Embeddings stay dense on every rank. An untied head is sharded alone
     with ``reshard_after_forward=False`` so the last all-gather stays live
     into the unembedding. Tied embeddings skip the head unit so tying
-    stays intact. A head whose parameters are already on the expert-parallel
-    mesh stays there.
+    stays intact. A head whose parameters all stay outside FSDP (on the
+    expert-parallel mesh, or resident frozen TP shards) gets no unit.
     """
     causal = resolve_causal_lm(model)
     config = getattr(causal, "config", None)
@@ -379,6 +389,44 @@ def _set_prefetch(model: nn.Module, block_units: Sequence[nn.Module]) -> None:
 # Resolved once: the routing policy runs on every op of a routed block.
 TOPK_OP = torch.ops.aten.topk
 TO_COPY_OP = torch.ops.aten._to_copy
+# Expert-parallel token all-to-alls and tensor-parallel reduces and gathers.
+COLLECTIVE_OPS = frozenset(
+    {
+        torch.ops._c10d_functional.all_to_all_single,
+        torch.ops._c10d_functional.all_reduce,
+        torch.ops._c10d_functional.all_gather_into_tensor,
+        torch.ops._c10d_functional.wait_tensor,
+    }
+)
+
+
+class ExpertScope(threading.local):
+    """Depth of packed-expert child forwards running on this thread."""
+
+    depth = 0
+
+
+EXPERT_SCOPE = ExpertScope()
+
+
+def _enter_expert_scope(_module: nn.Module, _args: tuple[Any, ...]) -> None:
+    EXPERT_SCOPE.depth += 1
+
+
+def _exit_expert_scope(
+    _module: nn.Module, _args: tuple[Any, ...], _output: object
+) -> None:
+    EXPERT_SCOPE.depth -= 1
+
+
+def _enter_saved_collective_scope(_module: nn.Module, _args: tuple[Any, ...]) -> None:
+    SAVED_COLLECTIVE_SCOPE.depth += 1
+
+
+def _exit_saved_collective_scope(
+    _module: nn.Module, _args: tuple[Any, ...], _output: object
+) -> None:
+    SAVED_COLLECTIVE_SCOPE.depth -= 1
 
 
 def _save_routing_policy(
@@ -387,15 +435,19 @@ def _save_routing_policy(
     *_args: Any,
     **kwargs: Any,
 ) -> CheckpointPolicy:
-    """Keep router ``topk`` and device-to-host copies from forward; recompute the rest.
+    """Inside a packed-expert child, keep ``topk`` and device-to-host copies; recompute the rest.
 
     A recomputed router can pick other experts, which changes dispatch shapes
     and the all-to-all splits every expert-parallel peer expects. Saved host
     copies spare the recompute a host sync each.
 
     Saved outputs replay in forward order per op, so a saved op must run the
-    same number of times in the recompute.
+    same number of times in the recompute. Mixers outside the experts (Gated
+    DeltaNet under context parallel) can skip host copies on recompute, so
+    their ops are never saved.
     """
+    if not EXPERT_SCOPE.depth:
+        return CheckpointPolicy.PREFER_RECOMPUTE
     packet = op.overloadpacket
     if packet is TOPK_OP:
         return CheckpointPolicy.MUST_SAVE
@@ -407,6 +459,22 @@ def _save_routing_policy(
     return CheckpointPolicy.PREFER_RECOMPUTE
 
 
+def _save_routing_and_collectives_policy(
+    context: SelectiveCheckpointContext,
+    op: torch._ops.OpOverload,
+    *args: Any,
+    **kwargs: Any,
+) -> CheckpointPolicy:
+    """:func:`_save_routing_policy`, plus every functional collective inside a packed-expert child.
+
+    The recompute then skips the token all-to-alls and tensor-parallel
+    reduces and gathers of the experts.
+    """
+    if EXPERT_SCOPE.depth and op.overloadpacket in COLLECTIVE_OPS:
+        return CheckpointPolicy.MUST_SAVE
+    return _save_routing_policy(context, op, *args, **kwargs)
+
+
 @contextmanager
 def _together(*cms: Any) -> Iterator[None]:
     with ExitStack() as stack:
@@ -416,20 +484,36 @@ def _together(*cms: Any) -> Iterator[None]:
 
 
 @library_shim("torch", "==2.13.*")
-def _block_checkpoint_contexts(save_router: bool) -> Callable[[], tuple[Any, Any]]:
-    """EP count replay, plus router topk save on packed-expert blocks."""
+def _block_checkpoint_contexts(
+    save_router: bool, ulysses: bool = False, save_collectives: bool = False
+) -> Callable[[], tuple[Any, Any]]:
+    """EP count replay, router topk save, and Ulysses params on recompute.
+
+    :param save_collectives: With ``save_router``, also save the experts'
+        functional collectives.
+    """
+    policy = (
+        _save_routing_and_collectives_policy
+        if save_collectives
+        else _save_routing_policy
+    )
 
     def context_fn() -> tuple[Any, Any]:
+        forwards: list[Any] = []
+        recomputes: list[Any] = []
+        if ulysses:
+            ulysses_fwd, ulysses_recompute = ulysses_checkpoint_context_fn()
+            forwards.append(ulysses_fwd)
+            recomputes.append(ulysses_recompute)
         routing_fwd, routing_recompute = routed_counts_contexts()
-        if not save_router:
-            return routing_fwd, routing_recompute
-        save_fwd, save_recompute = create_selective_checkpoint_contexts(
-            _save_routing_policy
-        )
-        return (
-            _together(save_fwd, routing_fwd),
-            _together(save_recompute, routing_recompute),
-        )
+        if save_router:
+            save_fwd, save_recompute = create_selective_checkpoint_contexts(policy)
+            forwards.extend((save_fwd, routing_fwd))
+            recomputes.extend((save_recompute, routing_recompute))
+        else:
+            forwards.append(routing_fwd)
+            recomputes.append(routing_recompute)
+        return _together(*forwards), _together(*recomputes)
 
     return context_fn
 
@@ -450,6 +534,46 @@ def _blocks_to_checkpoint(blocks: Sequence[nn.Module], config: FSDPConfig) -> se
     return {id(block) for block in chosen}
 
 
+def _has_packed_experts(module: nn.Module) -> bool:
+    """Whether ``module`` holds a packed-experts layer."""
+    return any(is_packed_experts_module(child) for child in module.modules())
+
+
+def _checkpoint_wrap(
+    module: nn.Module, save_router: bool, ulysses: bool, save_collectives: bool
+) -> nn.Module:
+    """Non-reentrant activation checkpoint around ``module``."""
+    return checkpoint_wrapper(
+        module,
+        checkpoint_impl=CheckpointImpl.NO_REENTRANT,
+        preserve_rng_state=False,
+        context_fn=_block_checkpoint_contexts(save_router, ulysses, save_collectives),
+    )
+
+
+def _checkpoint_block(block: nn.Module, config: FSDPConfig) -> nn.Module:
+    """Wrap ``block``; an expert block saves routing ops from its expert children.
+
+    With ``config.save_moe_collectives`` those children also run and save
+    their collectives as functional collectives.
+    """
+    ulysses = config.cp > 1
+    if not _has_packed_experts(block):
+        return _checkpoint_wrap(block, False, ulysses, False)
+    save_collectives = bool(config.save_moe_collectives)
+    patch_moe_routers(block)
+    for child in block.children():
+        if _has_packed_experts(child):
+            child.register_forward_pre_hook(_enter_expert_scope)
+            child.register_forward_hook(_exit_expert_scope, always_call=True)
+            if save_collectives:
+                child.register_forward_pre_hook(_enter_saved_collective_scope)
+                child.register_forward_hook(
+                    _exit_saved_collective_scope, always_call=True
+                )
+    return _checkpoint_wrap(block, True, ulysses, save_collectives)
+
+
 def apply_fsdp2(
     model: nn.Module,
     config: FSDPConfig | None = None,
@@ -457,7 +581,7 @@ def apply_fsdp2(
     expert_mesh: DeviceMesh | None = None,
     gradient_checkpointing: bool = False,
 ) -> nn.Module:
-    """Shard ``model`` with FSDP2: blocks, PLE, embed/(untied) lm_head, root, prefetch.
+    """Shard ``model`` with FSDP2: experts, blocks, embed / untied lm_head, PLE, root, prefetch.
 
     Parameters become DTensors in place, so any optimizer must be (re)built
     after this call. Callers must not pass a dense full-model replica on
@@ -493,6 +617,7 @@ def apply_fsdp2(
     :type gradient_checkpointing: bool
     :return: The sharded model (same object).
     :rtype: nn.Module
+    :raises ValueError: If ``config.cp > 1`` and ``mesh`` is ``None``.
     """
     if not is_distributed():
         msg = (
@@ -514,46 +639,47 @@ def apply_fsdp2(
     if mesh is not None:
         kwargs["mesh"] = mesh
 
+    # PreMulSum, which applies a custom divide factor, is NCCL-only.
+    force_sum = dist.get_backend() == "gloo"
     packed_experts = [expert for _name, expert in iter_packed_expert_modules(model)]
     # fully_shard on the EP group densifies packed experts to full-E.
     skip_expert_fsdp = False
     if config.ep > 1 and expert_mesh is None:
         skip_expert_fsdp = True
     elif expert_mesh is not None:
-        size_fn = getattr(expert_mesh, "size", None)
-        skip_expert_fsdp = callable(size_fn) and int(expert_mesh.size()) <= 1
+        skip_expert_fsdp = int(expert_mesh.size()) <= 1
         if not skip_expert_fsdp:
             expert_kwargs = dict(kwargs)
             expert_kwargs["mesh"] = expert_mesh
             # Packed experts take leftover-dp FSDP. LoRA parameters stay EP-only.
             # An EP owner's grad already sums its EP group, so the FSDP
-            # reduce divides by the full world. PreMulSum is NCCL-only;
-            # force SUM so the custom factor also works on gloo.
+            # reduce (over dp_replicate too under HSDP) divides by world / cp;
+            # CP ranks hold slices of one sequence and sum.
             for expert in packed_experts:
                 _shard_unit(expert, expert_kwargs)
                 unit = cast("FSDPModule", expert)
-                unit.set_gradient_divide_factor(expert_mesh.size() * config.ep)
-                unit.set_force_sum_reduction_for_comms(True)
-    expert_params: set[nn.Parameter] = set()
+                unit.set_gradient_divide_factor(
+                    expert_mesh.size() * config.ep // config.cp
+                )
+                unit.set_force_sum_reduction_for_comms(force_sum)
+    fsdp_ignored: set[nn.Parameter] = set()
     if skip_expert_fsdp:
         for expert in packed_experts:
-            expert_params.update(expert.parameters())
-    # EP / TP shards (including LoRA on PEFT wrapper links outside the packed
-    # modules) are DTensors on their own mesh. No non-expert unit may manage
-    # them: fully_shard would treat that mesh as TP and fail concatenating it
-    # with its own. TP-replicated copies hold rows each TP rank reads in full.
-    expert_params.update(
-        param for param in model.parameters() if isinstance(param, DTensor)
+            fsdp_ignored.update(expert.parameters())
+    # EP shards (including LoRA on PEFT wrapper links outside the packed
+    # modules) are DTensors on the sparse mesh, which fully_shard cannot
+    # concatenate with the dense FSDP mesh. TP shards share its root and
+    # shard over dp_shard x cp like any dense weight, except frozen ones
+    # ``config.frozen_tp_resident`` keeps resident at 1/tp with no gathers.
+    fsdp_ignored.update(
+        param
+        for param in model.parameters()
+        if isinstance(param, DTensor)
+        and (
+            param.device_mesh.mesh_dim_names != (MeshAxisName.TP,)
+            or (config.frozen_tp_resident and not param.requires_grad)
+        )
     )
-    expert_params.update(
-        module.get_parameter(name)
-        for module in model.modules()
-        for name in getattr(module, "tp_replicated_params", ())
-    )
-    # TP params skip FSDP, so TP regions apply the mixed-precision policy.
-    if config.tp > 1:
-        set_tp_compute_dtype(model, getattr(torch, config.param_dtype))
-
     blocks = [
         block
         for block in _transformer_blocks(model)
@@ -566,28 +692,29 @@ def apply_fsdp2(
     for block in blocks:
         unit = block
         if id(block) in checkpointed:
-            save_router = any(
-                is_packed_experts_module(module) for module in block.modules()
-            )
-            if save_router:
-                patch_moe_routers(block)
-            unit = checkpoint_wrapper(
-                block,
-                checkpoint_impl=CheckpointImpl.NO_REENTRANT,
-                preserve_rng_state=False,
-                context_fn=_block_checkpoint_contexts(save_router),
-            )
+            unit = _checkpoint_block(block, config)
             _replace_child(model, block, unit)
         wrap_units.append(unit)
     for unit in wrap_units:
-        _shard_unit(unit, kwargs, extra_ignored=expert_params)
-    _shard_embed_and_lm_head(model, kwargs, extra_ignored=expert_params)
-    _shard_ple_embeddings(model, kwargs, extra_ignored=expert_params)
+        _shard_unit(unit, kwargs, extra_ignored=fsdp_ignored)
+    _shard_embed_and_lm_head(model, kwargs, extra_ignored=fsdp_ignored)
+    _shard_ple_embeddings(model, kwargs, extra_ignored=fsdp_ignored)
     _shard_unit(
         model,
         kwargs,
-        extra_ignored=_embed_params(model) | expert_params,
+        extra_ignored=_embed_params(model) | fsdp_ignored,
     )
+    if config.cp > 1:
+        if mesh is None:
+            msg = f"FSDPConfig.cp={config.cp} needs an FSDP device mesh"
+            raise ValueError(msg)
+        # Dense units reduce over dp_shard x cp. CP ranks hold slices of one
+        # data shard's grad and sum, so divide by data parallel only.
+        expert_ids = {id(expert) for expert in packed_experts}
+        for module in model.modules():
+            if isinstance(module, FSDPModule) and id(module) not in expert_ids:
+                module.set_gradient_divide_factor(mesh.size() // config.cp)
+                module.set_force_sum_reduction_for_comms(force_sum)
     _set_prefetch(model, wrap_units)
     # PEFT ``generate`` delegates to ``base_model.generate`` and never enters
     # the FSDP-rooted ``forward``, so remaining root shards stay DTensors

@@ -32,7 +32,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 )
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.fsdp import FSDPModule
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import DTensor, Shard, distribute_tensor
 from torch.nn.utils import clip_grad_norm_
 from transformers import (
     AutoModelForCausalLM,
@@ -42,6 +42,7 @@ from transformers import (
     MiniMaxConfig,
     MixtralConfig,
     OlmoeConfig,
+    PretrainedConfig,
     Qwen2MoeConfig,
     Qwen3MoeConfig,
     Qwen4ExpTextConfig,
@@ -76,6 +77,7 @@ from agilerl.distributed import (
     apply_fsdp2,
     barrier,
     broadcast_object_list,
+    build_parallel_mesh,
     distributed_env_present,
     ep_data_parallel_size,
     full_shape_views,
@@ -118,6 +120,7 @@ from agilerl.distributed.runtime import (
     clip_param_group_grad_norm_,
     clip_param_groups,
 )
+from agilerl.distributed.tensor_parallel import shard_tied_embeddings
 from agilerl.utils.algo_utils import CosineLRScheduleConfig
 from agilerl.utils.llm_utils import save_lora_adapters
 from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
@@ -1487,6 +1490,58 @@ class TestGatherModelState:
         assert options.full_state_dict is True
         assert options.cpu_offload is True
 
+    def test_fsdp2_writes_permuted_rows_in_checkpoint_order(self):
+        # Arrange
+        stored = torch.tensor([[2.0, 2.0], [0.0, 0.0], [1.0, 1.0]])
+        runtime = FSDPRuntime(FSDPConfig())
+
+        # Act
+        with (
+            patch(
+                "agilerl.distributed.runtime.get_model_state_dict",
+                return_value={"weight": stored},
+            ),
+            patch(
+                "agilerl.distributed.runtime.tensor_parallel_row_orders",
+                return_value={"weight": torch.tensor([2, 0, 1])},
+            ),
+        ):
+            out = runtime.export_model_state(nn.Linear(2, 3))
+
+        # Assert
+        expected = torch.tensor([[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]])
+        assert torch.equal(out["weight"], expected)
+
+    def test_fsdp2_skips_reorder_on_ranks_without_state(self):
+        runtime = FSDPRuntime(FSDPConfig())
+
+        with (
+            patch("agilerl.distributed.runtime.get_model_state_dict", return_value={}),
+            patch(
+                "agilerl.distributed.runtime.tensor_parallel_row_orders",
+                return_value={"weight": torch.tensor([1, 0])},
+            ),
+        ):
+            out = runtime.export_model_state(nn.Linear(2, 2))
+
+        assert out == {}
+
+    def test_fsdp2_row_order_without_a_state_key_raises(self):
+        runtime = FSDPRuntime(FSDPConfig())
+
+        with (
+            patch(
+                "agilerl.distributed.runtime.get_model_state_dict",
+                return_value={"weight": torch.zeros(2, 2)},
+            ),
+            patch(
+                "agilerl.distributed.runtime.tensor_parallel_row_orders",
+                return_value={"layers.0.qkv.weight": torch.tensor([1, 0])},
+            ),
+            pytest.raises(KeyError, match=r"layers\.0\.qkv\.weight"),
+        ):
+            runtime.export_model_state(nn.Linear(2, 2))
+
 
 class TestExportOptimizerState:
     def test_rejects_list_shaped_state(self):
@@ -1751,6 +1806,74 @@ class TestFSDPRuntimeImportOptimizerState:
             self._import(nn.Linear(2, 2), inner, {})
 
 
+def _gather_layer_grad_worker(rank: int, world_size: int, cp: int) -> np.ndarray:
+    """This rank's head grad after scoring its own input through ``gather_layer``."""
+    mesh = init_device_mesh("cpu", (world_size,), mesh_dim_names=("dp_shard_cp",))
+    layer = nn.Linear(2, 4)
+    layer.weight = nn.Parameter(
+        distribute_tensor(torch.arange(8.0).reshape(4, 2), mesh, [Shard(0)])
+    )
+    layer.bias = nn.Parameter(distribute_tensor(torch.zeros(4), mesh, [Shard(0)]))
+    hidden = torch.full((3, 2), float(rank + 1))
+
+    with FSDPRuntime(FSDPConfig(cp=cp)).gather_layer(layer, "cpu") as (w, b):
+        (hidden @ w.T + b).square().sum().backward()
+
+    # Tensors cross the rank pipe as shared fds that close when the rank exits.
+    return layer.weight.grad.full_tensor().numpy()
+
+
+def _dense_head_grad(rank: int) -> torch.Tensor:
+    weight = torch.arange(8.0).reshape(4, 2).requires_grad_()
+    hidden = torch.full((3, 2), float(rank + 1))
+    (hidden @ weight.T).square().sum().backward()
+    return weight.grad
+
+
+class TiedCausalLM(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        torch.manual_seed(0)
+        self.embed_tokens = nn.Embedding(8, 4)
+        self.lm_head = nn.Linear(4, 8, bias=False)
+        self.lm_head.weight = self.embed_tokens.weight
+        self.config = SimpleNamespace(tie_word_embeddings=True)
+
+    def get_input_embeddings(self) -> nn.Module:
+        return self.embed_tokens
+
+
+def _tied_tokens() -> torch.Tensor:
+    return torch.randint(0, 8, (9,), generator=torch.Generator().manual_seed(1))
+
+
+def _tied_sequence_loss(
+    model: TiedCausalLM, tokens: torch.Tensor, runtime: FSDPRuntime
+) -> torch.Tensor:
+    """Summed next-token loss of ``tokens``, scored through ``gather_layer``."""
+    hidden = model.embed_tokens(tokens[:-1])
+    with runtime.gather_layer(model.lm_head, "cpu") as (w, _):
+        logits = hidden @ w.T
+    return nn.functional.cross_entropy(logits, tokens[1:], reduction="sum")
+
+
+def _tied_embedding_tp_cp_worker(
+    rank: int, world_size: int
+) -> tuple[float, np.ndarray]:
+    """This rank's loss and synced tied-embedding grad at tp=2, cp=2."""
+    mesh = build_parallel_mesh(world_size=world_size, tp=2, cp=2, device_type="cpu")
+    model = TiedCausalLM()
+    shard_tied_embeddings(model, mesh.tp)
+    shard = mesh.cp.get_local_rank()
+    tokens = _tied_tokens()[shard * 4 : shard * 4 + 5]
+
+    loss = _tied_sequence_loss(model, tokens, FSDPRuntime(FSDPConfig(cp=2)))
+    loss.backward()
+    mesh.sync_grads([model.embed_tokens.weight], torch.float32)
+
+    return loss.item(), model.embed_tokens.weight.grad.full_tensor().numpy()
+
+
 class TestGatherLayer:
     def test_moves_gathered_weights_to_target_device(self):
         layer = nn.Linear(2, 2)
@@ -1759,6 +1882,44 @@ class TestGatherLayer:
             assert w.device.type == "meta"
             assert b is not None
             assert b.device.type == "meta"
+
+    @pytest.mark.multi_rank
+    @pytest.mark.parametrize(("cp", "scale"), [(1, 0.5), (2, 1.0)])
+    def test_sharded_head_grad_sums_over_cp_and_averages_over_data_parallel(
+        self, cp: int, scale: float
+    ):
+        # Arrange: each rank scores a different input.
+        expected = scale * (_dense_head_grad(0) + _dense_head_grad(1))
+
+        # Act
+        grads = run_ranks(_gather_layer_grad_worker, 2, cp)
+
+        # Assert
+        for grad in grads:
+            torch.testing.assert_close(
+                torch.from_numpy(grad), expected, atol=0.0, rtol=0.0
+            )
+
+    @pytest.mark.multi_rank
+    def test_tp_tied_embedding_grad_at_cp2_matches_one_rank(self):
+        # Arrange: CP ranks score one sequence's two halves; TP ranks share tokens.
+        model = TiedCausalLM()
+        reference_loss = _tied_sequence_loss(
+            model, _tied_tokens(), FSDPRuntime(FSDPConfig())
+        )
+        reference_loss.backward()
+
+        # Act
+        reports = run_ranks(_tied_embedding_tp_cp_worker, 4)
+
+        # Assert: fp32 on 8 tokens differs only in summation order, a few ulps.
+        # Both TP ranks of a CP shard report that shard's loss.
+        tp_loss_sum = sum(loss for loss, _ in reports) / 2
+        assert tp_loss_sum == pytest.approx(reference_loss.item(), rel=1e-6)
+        for _, grad in reports:
+            assert torch.allclose(
+                torch.from_numpy(grad), model.embed_tokens.weight.grad, atol=1e-6
+            )
 
 
 class TestCopyAdapterTensors:
@@ -1968,6 +2129,120 @@ class TestFSDPPrepareActorOffload:
 
         # Assert
         assert result.optimizer is not None
+
+
+class CausalActor(nn.Module):
+    """Config plus a frozen LM head, the parts CP setup reads off an actor."""
+
+    def __init__(self, config: PretrainedConfig) -> None:
+        super().__init__()
+        self.config = config
+        self.lm_head = nn.Linear(2, 2).requires_grad_(False)
+
+    def get_output_embeddings(self) -> nn.Module:
+        return self.lm_head
+
+
+class TestFSDPPrepareActorContextParallel:
+    @staticmethod
+    def _actor(heads: int, kv_heads: int, backend: str) -> CausalActor:
+        return CausalActor(
+            PretrainedConfig(
+                num_attention_heads=heads,
+                num_key_value_heads=kv_heads,
+                attn_implementation=backend,
+            )
+        )
+
+    @staticmethod
+    def _prepare(actor: nn.Module, tp: int = 1, cp: int = 2) -> None:
+        with patch(
+            "agilerl.distributed.runtime.build_parallel_mesh",
+            side_effect=RuntimeError("validation passed"),
+        ):
+            FSDPRuntime(
+                FSDPConfig(
+                    tp=tp, cp=cp, reshard_after_forward=True, optim_cpu_offload=False
+                )
+            ).prepare_actor(
+                actor,
+                device="cpu",
+                cosine_lr_schedule_config=None,
+                lr=1e-4,
+                lr_critic=None,
+                restore_adapter_trainability=MagicMock(),
+            )
+
+    def test_frozen_lm_head_passes_validation(self) -> None:
+        with pytest.raises(RuntimeError, match="validation passed"):
+            self._prepare(self._actor(8, 8, "flash_attention_2"))
+
+    def test_rejects_heads_per_tp_rank_that_do_not_divide_cp(self) -> None:
+        with pytest.raises(ValueError, match="num_attention_heads"):
+            self._prepare(self._actor(24, 8, "flash_attention_2"), tp=4, cp=4)
+
+    def test_heads_per_tp_rank_that_divide_cp_pass(self) -> None:
+        with pytest.raises(RuntimeError, match="validation passed"):
+            self._prepare(self._actor(32, 8, "flash_attention_2"), tp=2, cp=2)
+
+    def test_rejects_kv_heads_per_tp_rank_that_do_not_split_over_cp(self) -> None:
+        # 12 KV heads split over cp=4, but each tp=2 rank holds 6.
+        with pytest.raises(ValueError, match="num_key_value_heads"):
+            self._prepare(self._actor(24, 12, "flash_attention_2"), tp=2, cp=4)
+
+    def test_rejects_non_flash_attention_backend(self) -> None:
+        with pytest.raises(ValueError, match="flash_attention_2"):
+            FSDPRuntime(
+                FSDPConfig(cp=2, reshard_after_forward=True, optim_cpu_offload=False)
+            ).prepare_actor(
+                self._actor(8, 8, "sdpa"),
+                device="cpu",
+                cosine_lr_schedule_config=None,
+                lr=1e-4,
+                lr_critic=None,
+                restore_adapter_trainability=MagicMock(),
+            )
+
+    def test_rejects_heads_that_do_not_divide_cp(self) -> None:
+        with pytest.raises(ValueError, match="num_attention_heads"):
+            FSDPRuntime(
+                FSDPConfig(cp=2, reshard_after_forward=True, optim_cpu_offload=False)
+            ).prepare_actor(
+                self._actor(7, 7, "flash_attention_2"),
+                device="cpu",
+                cosine_lr_schedule_config=None,
+                lr=1e-4,
+                lr_critic=None,
+                restore_adapter_trainability=MagicMock(),
+            )
+
+    def test_flash_attention_actor_needs_flash_attn_for_ulysses(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        monkeypatch.setitem(sys.modules, "flash_attn", None)
+        actor = self._actor(8, 8, "flash_attention_2")
+        mesh = ParallelMesh(dp_shard=MagicMock(), cp=MagicMock())
+
+        # Act / Assert
+        with (
+            patch("agilerl.distributed.runtime.build_parallel_mesh", return_value=mesh),
+            patch(
+                "agilerl.distributed.runtime.materialize_fsdp2_from_cpu_state",
+                return_value=actor,
+            ),
+            pytest.raises(ImportError, match="Context parallel needs the flash_attn"),
+        ):
+            FSDPRuntime(
+                FSDPConfig(cp=2, reshard_after_forward=True, optim_cpu_offload=False)
+            ).prepare_actor(
+                actor,
+                device="cpu",
+                cosine_lr_schedule_config=None,
+                lr=1e-4,
+                lr_critic=None,
+                restore_adapter_trainability=MagicMock(),
+            )
 
 
 class _LoraActor(nn.Module):
@@ -2267,12 +2542,14 @@ def _prepare_fsdp_actor(
     )
     # FSDP's default mesh uses the process accelerator (MPS on macOS).
     world = init_device_mesh(
-        "cpu", (1, dist.get_world_size()), mesh_dim_names=("replicate", "shard")
+        "cpu",
+        (1, dist.get_world_size()),
+        mesh_dim_names=("dp_replicate", "dp_shard"),
     )
     with (
         patch(
             "agilerl.distributed.runtime.build_parallel_mesh",
-            return_value=ParallelMesh(world=world, hsdp=world["shard"]),
+            return_value=ParallelMesh(dp_shard=world["dp_shard"]),
         ),
         patch(
             "agilerl.distributed.fsdp_blocks.PARAM_PERSISTENCE_THRESHOLD",
@@ -2488,13 +2765,13 @@ class TestFSDPRuntimeBackward:
         runtime = FSDPRuntime(FSDPConfig())
         synced: list[list[nn.Parameter]] = []
 
-        def capture(params):
-            synced.append(list(params))
+        def capture(params, cp):
+            synced.append((list(params), cp))
 
         monkeypatch.setattr("agilerl.distributed.runtime.sync_grads", capture)
         runtime.backward(MagicMock(), optimizer, 1, actor=MagicMock(spec=FSDPModule))
 
-        assert synced == [[replicated]]
+        assert synced == [([replicated], 1)]
         optimizer.step.assert_called_once()
 
     def test_does_not_sync_before_step_boundary(self, monkeypatch):
@@ -3096,8 +3373,8 @@ def tiny_gated_delta_lm() -> Qwen3_5MoeForCausalLM:
 
 def cpu_parallel_mesh() -> ParallelMesh:
     # FSDP's default mesh uses the process accelerator (MPS on macOS).
-    world = init_device_mesh("cpu", (1, 1), mesh_dim_names=("replicate", "shard"))
-    return ParallelMesh(world=world, hsdp=world["shard"])
+    world = init_device_mesh("cpu", (1, 1), mesh_dim_names=("dp_replicate", "dp_shard"))
+    return ParallelMesh(dp_shard=world["dp_shard"])
 
 
 def full_grad(param: torch.Tensor) -> torch.Tensor:
@@ -3388,7 +3665,7 @@ class TestApplyFsdp2:
                     reduce_dtype="float32",
                     routed_expert_chunk_mib=64,
                 ),
-                parallel_mesh=ParallelMesh(world=world, hsdp=world["shard"]),
+                parallel_mesh=ParallelMesh(dp_shard=world["shard"]),
             )
 
         language = model.get_base_model().model
@@ -3500,6 +3777,104 @@ class TestApplyFsdp2:
             apply_fsdp2(model, FSDPConfig())
 
         assert checkpointed_kinds(model) == []
+
+    def test_qwen_expert_decoder_checkpoints_whole_block(self, world_size_one):
+        from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+            CheckpointWrapper,
+        )
+
+        class PackedExperts(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.gate_up_proj = nn.Parameter(torch.randn(2, 4, 2))
+                self.down_proj = nn.Parameter(torch.randn(2, 2, 2))
+                self.act_fn = nn.SiLU()
+
+            def forward(self, hidden_states, top_k_index, top_k_weights):
+                return hidden_states
+
+        class Moe(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.experts = PackedExperts()
+
+        class Decoder(nn.Module):
+            def __init__(self, block_type: str, **children: nn.Module):
+                super().__init__()
+                self.block_type = block_type
+                for name, child in children.items():
+                    setattr(self, name, child)
+
+        class Model(nn.Module):
+            _no_split_modules: ClassVar = ["Decoder"]
+
+            def __init__(self):
+                super().__init__()
+                self.config = SimpleNamespace(model_type="qwen3_5")
+                self.layers = nn.ModuleList(
+                    [
+                        Decoder(
+                            "linear_attention",
+                            linear_attn=nn.Linear(2, 2),
+                            mlp=Moe(),
+                        ),
+                        Decoder(
+                            "full_attention",
+                            self_attn=nn.Linear(2, 2),
+                            mlp=Moe(),
+                        ),
+                    ]
+                )
+
+        model = Model()
+
+        with patch.object(bmod, "fully_shard", side_effect=lambda m, **_kw: m):
+            apply_fsdp2(
+                model,
+                FSDPConfig(checkpoint_every_n_blocks=1),
+                gradient_checkpointing=True,
+            )
+
+        linear, full = model.layers
+        assert isinstance(linear, CheckpointWrapper)
+        assert not isinstance(linear.linear_attn, CheckpointWrapper)
+        assert not isinstance(linear.mlp, CheckpointWrapper)
+        assert isinstance(full, CheckpointWrapper)
+        assert not isinstance(full.self_attn, CheckpointWrapper)
+        assert not isinstance(full.mlp, CheckpointWrapper)
+
+    def test_qwen_catalog_checkpoints_dense_decoder_whole(self, world_size_one):
+        from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+            CheckpointWrapper,
+        )
+
+        class Decoder(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.linear_attn = nn.Linear(2, 2)
+                self.mlp = nn.Linear(2, 2)
+
+        class Model(nn.Module):
+            _no_split_modules: ClassVar = ["Decoder"]
+
+            def __init__(self):
+                super().__init__()
+                self.config = SimpleNamespace(model_type="qwen3_5")
+                self.layers = nn.ModuleList([Decoder()])
+
+        model = Model()
+
+        with patch.object(bmod, "fully_shard", side_effect=lambda m, **_kw: m):
+            apply_fsdp2(
+                model,
+                FSDPConfig(checkpoint_every_n_blocks=1),
+                gradient_checkpointing=True,
+            )
+
+        (layer,) = model.layers
+        assert isinstance(layer, CheckpointWrapper)
+        assert not isinstance(layer.linear_attn, CheckpointWrapper)
+        assert not isinstance(layer.mlp, CheckpointWrapper)
 
     def test_checkpoint_keeps_hybrid_model_gradients(self, world_size_one):
         # Arrange
@@ -4087,6 +4462,28 @@ class TestInitRopeBuffers:
             @staticmethod
             def compute_default_rope_parameters(_config, device=None):
                 return torch.arange(4, dtype=torch.float32, device=device), 1.0
+
+        module = RotaryEmbedding()
+        root = nn.Sequential(module)
+
+        init_rope_buffers(root)
+
+        expected = torch.arange(4, dtype=torch.float32)
+        assert torch.equal(module.inv_freq, expected)
+        assert torch.equal(module.original_inv_freq, expected)
+
+    def test_fills_buffers_when_rope_takes_config_only(self):
+        class RotaryEmbedding(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.rope_type = "default"
+                self.config = SimpleNamespace()
+                self.register_buffer("inv_freq", torch.zeros(4))
+                self.register_buffer("original_inv_freq", torch.zeros(4))
+
+            @staticmethod
+            def compute_default_rope_parameters(_config, **_kwargs):
+                return torch.arange(4, dtype=torch.float32), 1.0
 
         module = RotaryEmbedding()
         root = nn.Sequential(module)
@@ -4777,14 +5174,15 @@ class TestValidateActorEp:
         with pytest.raises(ValueError, match="expert count 3 is not divisible"):
             validate_actor_ep(model, 2, world_size=4)
 
-    def test_rejects_gpt_oss_as_model_info_reports(self) -> None:
+    def test_accepts_gpt_oss_as_model_info_reports(self) -> None:
         # Arrange: transposed, biased experts with an even expert count.
         model = AutoModelForCausalLM.from_config(MOE_CONFIGS["gpt_oss"]())
 
-        # Act / Assert
-        with pytest.raises(ValueError, match="packed-expert"):
-            validate_actor_ep(model, 2, world_size=2)
-        assert not SUPPORTED_MODEL_INFO["openai/gpt-oss-20b"].supports_expert_parallel
+        # Act
+        validate_actor_ep(model, 2, world_size=2)
+
+        # Assert
+        assert SUPPORTED_MODEL_INFO["openai/gpt-oss-20b"].supports_expert_parallel
 
 
 class TestValidateEpDegree:

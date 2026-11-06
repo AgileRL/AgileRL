@@ -5,20 +5,21 @@
 import pytest
 from pydantic import ValidationError
 
-from agilerl.arena.memory import formulas, fsdp_gather, kv_cache, vision
+from agilerl.arena.memory import formulas, fsdp_gather, kv_cache, lora_formulas, vision
 from agilerl.arena.memory.advice import advise
 from agilerl.arena.memory.estimator import (
+    adapter_state,
     estimate_generation,
     estimate_run,
     estimate_training,
     generation_can_serve,
+    tensor_parallel_head_gather_bytes,
 )
 from agilerl.arena.memory.lora_placement import (
     lora_tensor_placement,
     split_moe_lora_recompute_bytes,
 )
 from agilerl.arena.memory.nccl import (
-    TP_RUNTIME_BYTES,
     nccl_on_node_fraction,
     trainer_nccl_bytes,
 )
@@ -34,6 +35,7 @@ from agilerl.arena.memory.specs import (
     TrainingSettings,
     WeightVariant,
 )
+from agilerl.arena.memory.trainer_residency import trainer_base_bytes
 from agilerl.arena.models.fsdp import FSDPConfig
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from tests.test_memory.test_formulas import (
@@ -41,7 +43,9 @@ from tests.test_memory.test_formulas import (
     MOE_TINY,
     NEMOTRON_H_MOE,
     NEMOTRON_NANO_MAMBA,
+    QWEN35_08B,
     QWEN_05B,
+    QWEN_TOWER_TARGETS,
     SUPER_VL,
 )
 
@@ -134,7 +138,7 @@ class TestEstimateTraining:
         with_buffer = estimate_training(model, device, rollout)
 
         # Assert: the bf16 policy adapter, outside the allocator reserve.
-        adapter = formulas.lora_param_count(model.arch, 16, "attention-only")
+        adapter = lora_formulas.lora_param_count(model.arch, 16, "attention-only")
         assert component(with_buffer, "lora_send_buffer").n_bytes == 2 * adapter
         assert (
             component(with_buffer, "allocator_reserve").n_bytes
@@ -249,7 +253,9 @@ class TestEstimateTraining:
             model, device, train.model_copy(update={"lora_packed_target_matrices": 0})
         )
 
-        packed_params = formulas.packed_lora_param_count(MOE_TINY, train.lora_rank, 2)
+        packed_params = lora_formulas.packed_lora_param_count(
+            MOE_TINY, train.lora_rank, 2
+        )
         assert (
             component(packed, "adapters").n_bytes
             - component(linear_only, "adapters").n_bytes
@@ -316,6 +322,40 @@ class TestEstimateTraining:
 
         assert empty.total == 0
         assert formulas.geometry_gap_warning(empty) is None
+
+    def test_moe_with_ep_covering_tp_is_estimated(self, device):
+        # Arrange
+        model = ModelSpec(model_id="moe-test", arch=MOE_TINY)
+        settings = TrainingSettings(n_training_gpus=4, fsdp=fsdp_config(ep=2, tp=2))
+
+        # Act
+        breakdown = estimate_training(model, device, settings)
+
+        # Assert
+        assert breakdown.total_bytes > 0
+
+    def test_dense_model_with_tp_above_ep_is_estimated(self, model, device):
+        # Arrange
+        settings = TrainingSettings(n_training_gpus=4, fsdp=fsdp_config(tp=2))
+
+        # Act
+        breakdown = estimate_training(model, device, settings)
+
+        # Assert
+        assert breakdown.total_bytes > 0
+
+    def test_moe_with_ep_below_tp_raises(self, device):
+        # Arrange
+        model = ModelSpec(model_id="moe-test", arch=MOE_TINY)
+        settings = TrainingSettings(n_training_gpus=4, fsdp=fsdp_config(tp=2))
+
+        # Act / Assert
+        with pytest.raises(
+            ValueError,
+            match=r"FSDPConfig\(ep=1, tp=2\): MoE models need ep >= tp, since "
+            r"tensor parallel does not split routed experts\.",
+        ):
+            estimate_training(model, device, settings)
 
 
 class TestEstimateGeneration:
@@ -578,7 +618,7 @@ class TestEstimateGeneration:
     def test_moe_engine_charges_fused_expert_lora_stacks(self, device):
         # Arrange
         moe = ModelSpec(model_id="moe-test", arch=MOE_TINY)
-        dense_rank = formulas.lora_param_count(MOE_TINY, 16)
+        dense_rank = lora_formulas.lora_param_count(MOE_TINY, 16)
         settings = GenerationSettings(max_lora_rank=16)
         packed = settings.model_copy(update={"lora_packed_target_matrices": 2})
 
@@ -587,8 +627,8 @@ class TestEstimateGeneration:
         layout_3d = estimate_generation(moe, device, packed)
 
         # Assert
-        stacks_2d = formulas.engine_expert_lora_param_count(MOE_TINY, 16, 1, False)
-        stacks_3d = formulas.engine_expert_lora_param_count(MOE_TINY, 16, 1, True)
+        stacks_2d = lora_formulas.engine_expert_lora_param_count(MOE_TINY, 16, 1, False)
+        stacks_3d = lora_formulas.engine_expert_lora_param_count(MOE_TINY, 16, 1, True)
         assert component(layout_2d, "lora_slots").n_bytes == 2 * (
             dense_rank + stacks_2d
         )
@@ -612,9 +652,9 @@ class TestEstimateGeneration:
         with_buffer = estimate_generation(moe, device, rollout)
 
         # Assert: every TP rank receives the unsharded bf16 adapter.
-        adapter = formulas.lora_param_count(
+        adapter = lora_formulas.lora_param_count(
             MOE_TINY, 16
-        ) + formulas.packed_lora_param_count(MOE_TINY, 16, 2)
+        ) + lora_formulas.packed_lora_param_count(MOE_TINY, 16, 2)
         assert component(without, "lora_receive_buffer").n_bytes == 0
         assert component(with_buffer, "lora_receive_buffer").n_bytes == 2 * adapter
         assert (
@@ -635,9 +675,9 @@ class TestEstimateGeneration:
         breakdown = estimate_generation(declared, device, settings)
 
         # Assert
-        stacks_3d = formulas.engine_expert_lora_param_count(MOE_TINY, 16, 1, True)
+        stacks_3d = lora_formulas.engine_expert_lora_param_count(MOE_TINY, 16, 1, True)
         assert component(breakdown, "lora_slots").n_bytes == 2 * (
-            formulas.lora_param_count(MOE_TINY, 16) + stacks_3d
+            lora_formulas.lora_param_count(MOE_TINY, 16) + stacks_3d
         )
         assert ModelArch.from_hf_config(
             SUPPORTED_MODEL_INFO["Qwen/Qwen3.6-35B-A3B"].config
@@ -1001,7 +1041,7 @@ class TestDistributedTerms:
             component(single, "base_weights").n_bytes
         )
         assert component(group, "grads").n_bytes == component(single, "grads").n_bytes
-        trained = formulas.lora_param_count(model.arch, 16)
+        trained = lora_formulas.lora_param_count(model.arch, 16)
         assert component(single, "optimizer_state").n_bytes == trained * 8
         assert component(group, "optimizer_state").n_bytes == trained * 8
         assert any(w.startswith("DDP over 4 GPUs") for w in group.warnings)
@@ -1014,7 +1054,7 @@ class TestDistributedTerms:
         self, model, device
     ):
         # Arrange
-        trained = formulas.lora_param_count(model.arch, 16)
+        trained = lora_formulas.lora_param_count(model.arch, 16)
         replicated, sharded_params = lora_tensor_placement(
             model.arch, 16, "all-linear", 0, 100_000
         )
@@ -1304,7 +1344,7 @@ class TestDistributedTerms:
                 )
             ),
         )
-        trained = formulas.lora_param_count(model.arch, 16)
+        trained = lora_formulas.lora_param_count(model.arch, 16)
 
         assert component(offloaded, "optimizer_state").n_bytes == 0
         # Two fp32 moments per adapter parameter.
@@ -1542,8 +1582,8 @@ class TestDistributedTrainerOverhead:
             model, device, TrainingSettings(fsdp=fsdp_config(tp=2), **common)
         )
 
-        # Assert: HSDP adds its shard and replicate groups; TP adds its group,
-        # the TP-replica group and the TP runtime, even without a TP plan.
+        # Assert: HSDP adds its shard and replicate groups; TP adds its group
+        # and the TP-replica group, even without a TP plan.
         def nccl(breakdown):
             return component(breakdown, "overhead").detail[
                 "distributed_trainer_overhead"
@@ -1551,9 +1591,7 @@ class TestDistributedTrainerOverhead:
 
         two_rank_groups = int(group * 2 * nccl_on_node_fraction(2))
         assert nccl(hsdp) - nccl(fsdp) == pytest.approx(two_rank_groups, abs=1)
-        assert nccl(tensor_parallel) - nccl(fsdp) == pytest.approx(
-            two_rank_groups + TP_RUNTIME_BYTES, abs=1
-        )
+        assert nccl(tensor_parallel) == nccl(hsdp)
 
     def test_ranks_across_nodes_hold_less_nccl_than_one_node(self, model, device):
         # Arrange
@@ -1811,6 +1849,27 @@ class TestActivationPeakSegmentBalancePeak:
             image_width=1280,
             image_height=2048,
             segmented_rows=True,
+        )
+
+        # Act
+        detail = component(estimate_training(model, device, settings), "activations")
+
+        # Assert
+        assert detail.detail["segment_balance_peak"] == 2 * 3 * 4 * 60 * MiB
+
+    def test_tensor_parallel_peers_count_in_the_shard_group(self, device):
+        # Arrange: tp=2 on 4 GPUs leaves dp_shard=2, but every rank exchanges rows.
+        arch = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["Qwen/Qwen3.5-0.8B"].config
+        )
+        model = ModelSpec(model_id="Qwen/Qwen3.5-0.8B", arch=arch)
+        settings = TrainingSettings(
+            n_training_gpus=4,
+            images_per_row=4,
+            image_width=1280,
+            image_height=2048,
+            segmented_rows=True,
+            fsdp=fsdp_config(tp=2),
         )
 
         # Act
@@ -2141,6 +2200,26 @@ class TestUnfusedMambaScan:
             < estimate_training(nano, ada, long).total_bytes
         )
 
+    def test_context_parallel_mamba_runs_the_unfused_backward(self, device):
+        # Arrange
+        falcon = ModelSpec(model_id="falcon", arch=ModelArch.from_hf_config(FALCON_H1))
+
+        def activations(cp: int, max_model_len: int) -> int:
+            settings = TrainingSettings(
+                n_training_gpus=4,
+                max_model_len=max_model_len,
+                fsdp=pinned_fsdp(cp=cp),
+            )
+            breakdown = estimate_training(falcon, device, settings)
+            return component(breakdown, "activations").n_bytes
+
+        # Act
+        sharded = activations(2, 16384)
+        half_context = activations(1, 8192)
+
+        # Assert
+        assert sharded > half_context
+
 
 # MoE and attention only, so the routed-expert block sets the backward peak.
 MOE_MODEL = ModelSpec(
@@ -2321,11 +2400,66 @@ class TestSavedRouterTopkTerm:
         assert component(dense, "activations").detail["saved_router_topk"] == 0
 
 
+class TestSavedMoeCollectivesTerm:
+    # One MoE block's dispatched and combined rows: 16k tokens x top-6 at
+    # hidden 2688, bf16.
+    PER_BLOCK = 2 * 16384 * 6 * 2688 * 2
+
+    def test_saving_charges_every_checkpointed_moe_block(self, device):
+        # Arrange
+        saving = moe_settings(optim_cpu_offload=True, save_moe_collectives=True)
+        recomputing = moe_settings(optim_cpu_offload=True, save_moe_collectives=False)
+
+        # Act
+        saved = component(estimate_training(MOE_MODEL, device, saving), "activations")
+        plain = component(
+            estimate_training(MOE_MODEL, device, recomputing), "activations"
+        )
+
+        # Assert: both MoE blocks hold theirs at the loss; the block in
+        # backward reuses its own as its exchange buffers.
+        assert saved.detail["saved_moe_collectives"] == 2 * self.PER_BLOCK
+        assert saved.detail["loss_peak"] - plain.detail["loss_peak"] == (
+            2 * self.PER_BLOCK
+        )
+        assert saved.detail["backward_peak"] - plain.detail["backward_peak"] == (
+            self.PER_BLOCK
+        )
+
+    @pytest.mark.parametrize("save_moe_collectives", [None, False])
+    def test_recomputing_charges_nothing(self, device, save_moe_collectives):
+        settings = moe_settings(
+            optim_cpu_offload=True, save_moe_collectives=save_moe_collectives
+        )
+
+        breakdown = estimate_training(MOE_MODEL, device, settings)
+
+        assert component(breakdown, "activations").detail["saved_moe_collectives"] == 0
+
+    def test_checkpointing_off_charges_nothing(self, device):
+        settings = moe_settings(
+            optim_cpu_offload=True, save_moe_collectives=True
+        ).model_copy(update={"gradient_checkpointing": False})
+
+        breakdown = estimate_training(MOE_MODEL, device, settings)
+
+        assert component(breakdown, "activations").detail["saved_moe_collectives"] == 0
+
+    def test_data_parallel_and_dense_training_charge_nothing(self, model, device):
+        data_parallel = TrainingSettings(max_model_len=16384, n_training_gpus=8)
+
+        moe = estimate_training(MOE_MODEL, device, data_parallel)
+        dense = estimate_training(model, device, TrainingSettings())
+
+        assert component(moe, "activations").detail["saved_moe_collectives"] == 0
+        assert component(dense, "activations").detail["saved_moe_collectives"] == 0
+
+
 class TestOptimizerPlacement:
     def test_data_parallel_keeps_adam_resident_and_steps_fused(self, model, device):
         breakdown = estimate_training(model, device, TrainingSettings())
 
-        trained = formulas.lora_param_count(model.arch, 16)
+        trained = lora_formulas.lora_param_count(model.arch, 16)
         optimizer = component(breakdown, "optimizer_state")
         assert optimizer.n_bytes == trained * 8
         assert optimizer.detail == {"step_bytes": trained * 8}
@@ -2346,7 +2480,7 @@ class TestOptimizerPlacement:
             ),
         )
 
-        trained = formulas.lora_param_count(model.arch, 16)
+        trained = lora_formulas.lora_param_count(model.arch, 16)
         optimizer = component(breakdown, "optimizer_state")
         assert optimizer.n_bytes == trained * 8
         assert optimizer.detail == {"step_bytes": trained * 8}
@@ -2565,7 +2699,7 @@ class TestTrainingHostBreakdown:
         frozen = TrainingSettings(
             images_per_row=2, image_width=1280, image_height=2048, lora_dropout=0.05
         )
-        trained = frozen.model_copy(update={"vision_tower_lora": True})
+        trained = frozen.model_copy(update={"tower_lora_targets": QWEN_TOWER_TARGETS})
 
         # Act
         frozen_bar = estimate_training(vision_model, device, frozen)
@@ -2576,14 +2710,19 @@ class TestTrainingHostBreakdown:
         trained_detail = component(trained_bar, "activations").detail
         assert host(trained_bar, "vision_feature_cache").n_bytes == 0
         assert host(frozen_bar, "vision_feature_cache").n_bytes > 0
-        # bf16 adapter compute: 480 MiB of tower tensors plus 90 MiB of merger dropout.
+        # bf16 adapter compute: 480 MiB of tower tensors plus 90 MiB of merger
+        # dropout, beside the fp32 grads of 2,228,224 rank-16 tower adapters.
+        tower_grads = 2_228_224 * 4
         assert frozen_detail["vision_tower_lora"] == 0
         assert trained_detail["vision_tower_lora"] == 570 * MiB
         assert (
             trained_detail["backward_peak"] - frozen_detail["backward_peak"]
-            == 570 * MiB
+            == 570 * MiB + tower_grads
         )
-        assert trained_detail["loss_peak"] - frozen_detail["loss_peak"] == 570 * MiB
+        assert (
+            trained_detail["loss_peak"] - frozen_detail["loss_peak"]
+            == 570 * MiB + tower_grads
+        )
 
     def test_catalog_vision_family_charges_no_feature_cache(self, device):
         # Arrange
@@ -2634,7 +2773,7 @@ class TestTrainingHostBreakdown:
         self, model, device
     ):
         # Arrange
-        trained = formulas.lora_param_count(model.arch, 16)
+        trained = lora_formulas.lora_param_count(model.arch, 16)
 
         # Act
         weights_only = estimate_training(model, device, TrainingSettings())
@@ -2695,7 +2834,7 @@ class TestDDPTerms:
         # FSDP holds unsharded fp32 grads across micro-batches, as DDP does.
         assert component(sharded, "grads").n_bytes == component(ddp, "grads").n_bytes
         assert component(ddp, "grads").n_bytes == (
-            formulas.lora_param_count(model.arch, 16) * 4
+            lora_formulas.lora_param_count(model.arch, 16) * 4
         )
         assert component(ddp, "allocator_reserve").detail["all_gather_pool"] == 0
         assert component(sharded, "allocator_reserve").detail["all_gather_pool"] > 0
@@ -2738,7 +2877,7 @@ def training_gpu(name: str, cuda_bytes: int) -> DeviceSpec:
 # The measured Super-VL steps stored expert LoRA weights and grads in bf16;
 # fp32 storage adds two bytes each per EP-local element to every peak.
 SUPER_VL_FP32_LORA_GIB = (
-    formulas.packed_lora_param_count(SUPER_VL_MODEL.arch, 8, 2) / 8 * 2 * 2 / GiB
+    lora_formulas.packed_lora_param_count(SUPER_VL_MODEL.arch, 8, 2) / 8 * 2 * 2 / GiB
 )
 
 
@@ -2981,16 +3120,21 @@ class TestSuperVlVwaEstimate:
         assert not breakdown.fits
 
 
-class TestTrainingSettingsShardGpusProperty:
+class TestTrainingSettingsShardGroupGpusProperty:
     def test_shard_group_caps_the_shard_count(self):
         settings = super_vl_cispo(29120, 16)
 
-        assert settings.shard_gpus == 8
+        assert settings.shard_group_gpus == 8
 
     def test_without_a_shard_group_every_training_gpu_shards(self):
         settings = TrainingSettings(n_training_gpus=16, fsdp=fsdp_config(ep=8))
 
-        assert settings.shard_gpus == 16
+        assert settings.shard_group_gpus == 16
+
+    def test_tensor_parallel_keeps_the_whole_shard_group(self):
+        settings = TrainingSettings(n_training_gpus=8, fsdp=FSDPConfig(tp=2))
+
+        assert settings.shard_group_gpus == 8
 
     def test_replicated_groups_shard_weights_like_one_group(self):
         # Arrange
@@ -3017,10 +3161,246 @@ def pinned_fsdp(**fields: object) -> FSDPConfig:
     return fsdp_config(reshard_after_forward=True, routed_expert_chunk_mib=64, **fields)
 
 
-class TestTrainingTensorParallel:
-    def test_linears_are_resident_at_one_over_tp_and_the_head_is_gathered_for_logits(
+class TestTrainingSettingsDenseFsdpGpusProperty:
+    def test_tensor_parallel_divides_the_dense_fsdp_group(self):
+        settings = TrainingSettings(n_training_gpus=8, fsdp=FSDPConfig(tp=2))
+
+        assert settings.dense_fsdp_gpus == 4
+
+    def test_context_parallel_shards_dense_weights_too(self):
+        settings = TrainingSettings(n_training_gpus=8, fsdp=FSDPConfig(cp=2))
+
+        assert settings.dense_fsdp_gpus == 8
+
+    def test_cp_and_tp_leave_dp_shard_times_cp(self):
+        settings = TrainingSettings(n_training_gpus=8, fsdp=FSDPConfig(cp=2, tp=2))
+
+        assert settings.dense_fsdp_gpus == 4
+
+    def test_without_fsdp_every_training_gpu_counts(self):
+        settings = TrainingSettings(n_training_gpus=4)
+
+        assert settings.dense_fsdp_gpus == 4
+
+
+class TestTrainingSettingsExpertShardGpusProperty:
+    def test_experts_follow_the_dense_group_without_expert_parallel(self):
+        settings = TrainingSettings(n_training_gpus=8, fsdp=FSDPConfig(cp=2, tp=2))
+
+        assert settings.expert_shard_gpus == 4
+
+    def test_expert_parallel_with_tensor_parallel_uses_the_shard_group(self):
+        settings = TrainingSettings(n_training_gpus=8, fsdp=FSDPConfig(ep=4, tp=2))
+
+        assert settings.dense_fsdp_gpus == 4
+        assert settings.expert_shard_gpus == 8
+
+    def test_hsdp_caps_the_expert_group(self):
+        settings = TrainingSettings(
+            n_training_gpus=16, fsdp=FSDPConfig(ep=4, tp=2, shard_group_size=8)
+        )
+
+        assert settings.expert_shard_gpus == 8
+
+
+class TestTrainingExpertShards:
+    def test_expert_resident_bytes_follow_ep_times_leftover(self, device):
+        # Arrange: 8-GPU shard group, dense dp_shard * cp = 4. ep=4 leaves two
+        # FSDP ranks per expert block; ep=8 fills the shard group.
+        common = {"n_training_gpus": 8, "max_model_len": 1024, "algorithm": "sft"}
+        leftover_settings = TrainingSettings(fsdp=pinned_fsdp(ep=4, tp=2), **common)
+        filled_settings = TrainingSettings(fsdp=pinned_fsdp(ep=8, tp=2), **common)
+        routed = formulas.routed_expert_params_per_layer(MOE_MODEL.arch)
+
+        # Act
+        leftover = estimate_training(MOE_MODEL, device, leftover_settings)
+        filled = estimate_training(MOE_MODEL, device, filled_settings)
+
+        # Assert: both split resident experts over all 8 ranks; leftover FSDP
+        # only adds one gathered layer of its local experts.
+        assert component(leftover, "base_weights").n_bytes == pytest.approx(
+            component(filled, "base_weights").n_bytes + routed // 4 * 2, abs=8
+        )
+
+    def test_offloaded_shard_splits_dense_over_dp_shard_and_experts_over_the_group(
         self, device
     ):
+        # Arrange: dense FSDP over 8 / tp = 4 ranks; experts over ep=4 times
+        # two leftover FSDP ranks.
+        settings = TrainingSettings(
+            algorithm="sft",
+            n_training_gpus=8,
+            max_model_len=1024,
+            fsdp=pinned_fsdp(ep=4, tp=2, cpu_offload=True),
+        )
+        arch = MOE_MODEL.arch
+        counts = formulas.param_counts(arch, MOE_MODEL.n_params)
+        token = formulas.token_embedding_params(arch)
+        tp_params = formulas.tensor_parallel_params(counts, arch)
+        routed = arch.moe_layers * formulas.routed_expert_params_per_layer(arch)
+        dense = counts.total - token - tp_params - routed + tp_params // 2
+        expected = dense * 2 / 4 + routed * 2 / 8
+
+        # Act
+        breakdown = estimate_training(MOE_MODEL, device, settings)
+
+        # Assert
+        offloaded = next(c for c in breakdown.host if c.key == "parameter_offload")
+        assert offloaded.n_bytes == pytest.approx(expected, abs=1)
+
+    def test_packed_adapter_bytes_follow_the_ep_group(self, device):
+        # Arrange: same dense group in both; only the EP width changes.
+        common = {
+            "n_training_gpus": 8,
+            "max_model_len": 1024,
+            "algorithm": "sft",
+            "lora_packed_target_matrices": 2,
+        }
+        ep4_settings = TrainingSettings(fsdp=pinned_fsdp(ep=4, tp=2), **common)
+        ep8_settings = TrainingSettings(fsdp=pinned_fsdp(ep=8, tp=2), **common)
+        expert_lora = lora_formulas.packed_lora_param_count(MOE_MODEL.arch, 16, 2)
+
+        # Act
+        ep4 = estimate_training(MOE_MODEL, device, ep4_settings)
+        ep8 = estimate_training(MOE_MODEL, device, ep8_settings)
+
+        # Assert: SFT's one trained fp32 adapter splits over ep only, not the
+        # 8-rank shard group.
+        assert ep4_settings.n_resident_adapters == 1
+        gap = component(ep4, "adapters").n_bytes - component(ep8, "adapters").n_bytes
+        assert gap == pytest.approx(
+            expert_lora * formulas.ADAPTER_BYTES_PER_PARAM * (1 / 4 - 1 / 8), abs=1
+        )
+
+    def test_context_parallel_shards_dense_weights_over_dp_shard_times_cp(
+        self, model, device
+    ):
+        # Arrange
+        common = {"n_training_gpus": 4, "max_model_len": 128}
+
+        # Act
+        plain = estimate_training(
+            model, device, TrainingSettings(fsdp=pinned_fsdp(), **common)
+        )
+        context = estimate_training(
+            model, device, TrainingSettings(fsdp=pinned_fsdp(cp=2), **common)
+        )
+
+        # Assert: dp_shard is 2, but FSDP still shards over all 4 ranks.
+        assert component(context, "base_weights").n_bytes == (
+            component(plain, "base_weights").n_bytes
+        )
+
+
+class TestTrainingContextParallel:
+    @staticmethod
+    def breakdown(model, device, cp: int, max_model_len: int):
+        settings = TrainingSettings(
+            n_training_gpus=4, max_model_len=max_model_len, fsdp=pinned_fsdp(cp=cp)
+        )
+        return estimate_training(model, device, settings)
+
+    def test_block_terms_follow_the_sequence_shard(self, model, device):
+        # Act
+        full = component(self.breakdown(model, device, 1, 4096), "activations")
+        sharded = component(self.breakdown(model, device, 2, 4096), "activations")
+        half = component(self.breakdown(model, device, 1, 2048), "activations")
+
+        # Assert
+        for key in ("checkpoint_boundaries", "block_recompute"):
+            assert sharded.detail[key] < full.detail[key]
+            assert sharded.detail[key] == half.detail[key]
+
+    @pytest.mark.parametrize(
+        ("flex_attention", "shard_len"), [(False, 2050), (True, 2112)]
+    )
+    def test_block_terms_run_on_the_padded_shard(
+        self, model, device, flex_attention, shard_len
+    ):
+        # Arrange: 4099 action tokens pad to 4100 on cp=2, or to 33 flex blocks.
+        arch = model.arch.model_copy(update={"flex_attention": flex_attention})
+        model = model.model_copy(update={"arch": arch})
+
+        # Act
+        sharded = component(self.breakdown(model, device, 2, 4100), "activations")
+        shard = component(self.breakdown(model, device, 1, shard_len), "activations")
+
+        # Assert
+        for key in ("checkpoint_boundaries", "block_recompute"):
+            assert sharded.detail[key] == shard.detail[key]
+
+    def test_loss_path_runs_on_the_local_shard(self, model, device):
+        # Act
+        plain = self.breakdown(model, device, 1, 4096)
+        sharded = self.breakdown(model, device, 2, 4096)
+
+        # Assert: a 2048-token bf16 hidden shard plus 4096 gathered fp32 outputs.
+        h = model.arch.hidden_size
+        assert component(sharded, "activations").detail["loss_hidden_state"] == (
+            2048 * h * 2 + 4096 * 4
+        )
+        assert (
+            component(sharded, "logits_workspace").n_bytes
+            == component(plain, "logits_workspace").n_bytes
+        )
+
+    @pytest.mark.parametrize(
+        ("model_id", "shard_len"),
+        [("Qwen/Qwen3.5-0.8B", 1024 // 4), ("Qwen/Qwen3-1.7B", 1000 // 4)],
+    )
+    def test_loss_path_prices_the_rounded_shard(self, device, model_id, shard_len):
+        # Arrange: 999 action tokens pad to 1024 on GDN (4 * 64), else to 1000.
+        arch = ModelArch.from_hf_config(SUPPORTED_MODEL_INFO[model_id].config)
+        model = ModelSpec(model_id=model_id, arch=arch)
+
+        # Act
+        sharded = self.breakdown(model, device, 4, 1000)
+
+        # Assert
+        assert component(sharded, "activations").detail["loss_hidden_state"] == (
+            shard_len * arch.hidden_size * 2 + 1000 * 4
+        )
+
+    def test_loss_peak_adds_only_the_gathered_per_token_outputs(self, model, device):
+        # Act
+        sharded = component(self.breakdown(model, device, 2, 4096), "activations")
+        half = component(self.breakdown(model, device, 1, 2048), "activations")
+
+        # Assert
+        assert sharded.detail["loss_peak"] - half.detail["loss_peak"] == 4096 * 4
+
+    def test_backward_peak_holds_the_hidden_state_shard(self, model, device):
+        # Act
+        sharded = component(self.breakdown(model, device, 2, 4096), "activations")
+        half = component(self.breakdown(model, device, 1, 2048), "activations")
+
+        # Assert
+        assert sharded.detail["backward_peak"] == half.detail["backward_peak"]
+
+    def test_context_parallel_charges_its_process_groups(self, model, device):
+        # Arrange
+        def distributed(cp: int) -> int:
+            settings = TrainingSettings(
+                n_training_gpus=4, max_model_len=128, fsdp=pinned_fsdp(cp=cp)
+            )
+            breakdown = estimate_training(model, device, settings)
+            return component(breakdown, "overhead").detail[
+                "distributed_trainer_overhead"
+            ]
+
+        # Act
+        plain = distributed(1)
+        context = distributed(2)
+
+        # Assert
+        group = device.nccl_group_bytes
+        assert context - plain == trainer_nccl_bytes(
+            group, 4, 4, 1, 1, None, 2
+        ) - trainer_nccl_bytes(group, 4, 4)
+
+
+class TestTrainingTensorParallel:
+    def test_tp_shrinks_the_gather_and_the_head_is_gathered_for_logits(self, device):
         # Arrange
         model = ModelSpec(
             model_id="nano", arch=ModelArch.from_hf_config(NEMOTRON_NANO_MAMBA)
@@ -3035,10 +3415,11 @@ class TestTrainingTensorParallel:
             model, device, TrainingSettings(fsdp=pinned_fsdp(tp=2), **common)
         )
 
-        # Assert
+        # Assert: TP linears still shard 4 ways (tp x dp_shard); each unit
+        # gathers 1/tp of them.
         assert (
             component(parallel, "base_weights").n_bytes
-            > component(plain, "base_weights").n_bytes
+            < component(plain, "base_weights").n_bytes
         )
         assert (
             component(parallel, "activations").detail["block_recompute"]
@@ -3057,37 +3438,103 @@ class TestTrainingTensorParallel:
         )
         assert not any("not sized" in note for note in parallel.warnings)
 
-    def test_family_without_a_plan_prices_weights_and_activations_as_fsdp(
+    @staticmethod
+    def nano_breakdown(device, shard_frozen_tp: bool, **fsdp: object):
+        model = ModelSpec(
+            model_id="nano", arch=ModelArch.from_hf_config(NEMOTRON_NANO_MAMBA)
+        )
+        settings = TrainingSettings(
+            n_training_gpus=4,
+            max_model_len=128,
+            fsdp=fsdp_config(tp=2, shard_frozen_tp=shard_frozen_tp, **fsdp),
+        )
+        return estimate_training(model, device, settings)
+
+    def test_unresharded_sharded_frozen_tp_holds_its_shard_beside_the_gather(
+        self, device
+    ):
+        # Arrange: 4 GPUs at tp=2 leave dp_shard=2.
+        arch = ModelArch.from_hf_config(NEMOTRON_NANO_MAMBA)
+        tp_local = formulas.tensor_parallel_params(formulas.param_counts(arch), arch)
+        tp_local //= 2
+
+        # Act
+        sharded = self.nano_breakdown(device, True)
+        resident = self.nano_breakdown(device, False)
+
+        # Assert: both hold every TP weight's 1/tp gathered; sharding adds its
+        # 1/dp_shard bf16 shard on top.
+        assert tp_local == 2_115_562_960
+        assert component(sharded, "base_weights").n_bytes - component(
+            resident, "base_weights"
+        ).n_bytes == pytest.approx(tp_local * 2 / 2, abs=1)
+
+    def test_resident_frozen_tp_leaves_nothing_in_the_gather_pool(self, device):
+        # Arrange
+        arch = ModelArch.from_hf_config(NEMOTRON_NANO_MAMBA)
+        counts = formulas.param_counts(arch)
+        head_and_last_mlp = (
+            counts.lm_head + fsdp_gather.layer_params(arch, "mlp")
+        ) // 2
+
+        # Act
+        sharded = self.nano_breakdown(device, True, reshard_after_forward=True)
+        resident = self.nano_breakdown(device, False, reshard_after_forward=True)
+
+        # Assert: every decoder layer and the untied head are on the TP mesh.
+        pool = "all_gather_pool"
+        assert component(sharded, "allocator_reserve").detail[pool] == (
+            head_and_last_mlp * 2
+        )
+        assert component(resident, "allocator_reserve").detail[pool] == 0
+
+    def test_resident_frozen_tp_stays_on_gpu_under_cpu_offload(self, device):
+        # Arrange
+        arch = ModelArch.from_hf_config(NEMOTRON_NANO_MAMBA)
+        tp_local = formulas.tensor_parallel_params(formulas.param_counts(arch), arch)
+        tp_local //= 2
+
+        # Act
+        sharded = self.nano_breakdown(
+            device, True, reshard_after_forward=True, cpu_offload=True
+        )
+        resident = self.nano_breakdown(
+            device, False, reshard_after_forward=True, cpu_offload=True
+        )
+
+        # Assert: the resident 1/tp leaves the host shard for the GPU.
+        def host(breakdown):
+            return next(
+                c for c in breakdown.host if c.key == "parameter_offload"
+            ).n_bytes
+
+        assert host(sharded) - host(resident) == pytest.approx(tp_local * 2 / 2, abs=1)
+        assert component(resident, "base_weights").n_bytes >= tp_local * 2
+
+    def test_family_without_a_plan_prices_weights_as_fsdp_over_dp_shard(
         self, model, device
     ):
         # Arrange
-        common = {
-            "n_training_gpus": 4,
-            "max_model_len": 128,
-            "fsdp": fsdp_config(
-                reshard_after_forward=True,
-                activation_offload=False,
-                routed_expert_chunk_mib=64,
-                optim_cpu_offload=False,
-            ),
+        fsdp = {
+            "reshard_after_forward": True,
+            "activation_offload": False,
+            "routed_expert_chunk_mib": 64,
+            "optim_cpu_offload": False,
         }
 
         # Act
-        plain = estimate_training(model, device, TrainingSettings(**common))
+        plain = estimate_training(
+            model,
+            device,
+            TrainingSettings(
+                n_training_gpus=2, max_model_len=128, fsdp=fsdp_config(**fsdp)
+            ),
+        )
         parallel = estimate_training(
             model,
             device,
             TrainingSettings(
-                **{
-                    **common,
-                    "fsdp": fsdp_config(
-                        reshard_after_forward=True,
-                        activation_offload=False,
-                        tp=2,
-                        routed_expert_chunk_mib=64,
-                        optim_cpu_offload=False,
-                    ),
-                }
+                n_training_gpus=4, max_model_len=128, fsdp=fsdp_config(tp=2, **fsdp)
             ),
         )
 
@@ -3106,18 +3553,24 @@ class TestTrainingTensorParallel:
         arch = QWEN_05B.model_copy(update={"tied_embeddings": False})
         model = ModelSpec(model_id="untied", arch=arch)
         head_bytes = formulas.param_counts(arch).lm_head * 2
-        common = {"n_training_gpus": 4, "max_model_len": 128}
 
         # Act
         plain = estimate_training(
-            model, device, TrainingSettings(fsdp=fsdp_config(), **common)
+            model,
+            device,
+            TrainingSettings(n_training_gpus=2, max_model_len=128, fsdp=fsdp_config()),
         )
         parallel = estimate_training(
-            model, device, TrainingSettings(fsdp=fsdp_config(tp=2), **common)
+            model,
+            device,
+            TrainingSettings(
+                n_training_gpus=4, max_model_len=128, fsdp=fsdp_config(tp=2)
+            ),
         )
 
-        # Assert: the head leaves its 1/4 FSDP shard and full gather for a 1/2 TP
-        # shard, and the logprob loop gathers it to a dense copy at the loss.
+        # Assert: the head's 1/2 FSDP shard becomes 1/4 (tp x dp_shard) and its
+        # full gather becomes half, and the logprob loop gathers it to a dense
+        # copy at the loss.
         assert component(parallel, "base_weights").n_bytes == pytest.approx(
             component(plain, "base_weights").n_bytes - 0.75 * head_bytes, abs=1
         )
@@ -3139,6 +3592,21 @@ class TestTrainingTensorParallel:
 
         assert settings.data_parallel_gpus == 2
         assert settings.trajectories == 64
+
+    @pytest.mark.parametrize(
+        ("cp", "data_parallel_gpus", "trajectories"), [(1, 4, 32), (2, 2, 64)]
+    )
+    def test_context_parallel_ranks_share_a_batch_shard(
+        self, cp, data_parallel_gpus, trajectories
+    ):
+        settings = TrainingSettings(
+            n_training_gpus=8,
+            trajectories_per_update=128,
+            fsdp=fsdp_config(tp=2, cp=cp),
+        )
+
+        assert settings.data_parallel_gpus == data_parallel_gpus
+        assert settings.trajectories == trajectories
 
 
 class TestTrainingExpertParallel:
@@ -3186,7 +3654,7 @@ class TestTrainingExpertParallel:
             "algorithm": "sft",
             "lora_packed_target_matrices": 2,
         }
-        expert_lora = formulas.packed_lora_param_count(MOE_MODEL.arch, 16, 2)
+        expert_lora = lora_formulas.packed_lora_param_count(MOE_MODEL.arch, 16, 2)
 
         # Act
         ep8 = estimate_training(
@@ -3590,3 +4058,350 @@ class TestEstimateTrainingResolvedFields:
             r"fsdp\.activation_offload, fsdp\.cpu_offload unset",
         ):
             estimate_training(model, device, settings)
+
+
+def catalog_model(model_id: str) -> ModelSpec:
+    """Spec for a model in the Arena catalog, with its checkpoint total."""
+    info = SUPPORTED_MODEL_INFO[model_id]
+    return ModelSpec(
+        model_id=model_id,
+        arch=ModelArch.from_hf_config(info.config),
+        n_params=info.num_params,
+    )
+
+
+def base_weight_bytes(spec: ModelSpec, settings: TrainingSettings) -> float:
+    """Base weights on one GPU with no activations overlapping the side-unit gathers."""
+    counts = formulas.param_counts(spec.arch, spec.n_params)
+    return trainer_base_bytes(spec, settings, counts, settings.dense_fsdp_gpus, 0.0)
+
+
+def catalog_base_weights(
+    spec: ModelSpec, gpus: int, cp: int = 1, tp: int = 1, ep: int = 1
+) -> float:
+    settings = TrainingSettings(
+        n_training_gpus=gpus,
+        max_model_len=128,
+        fsdp=pinned_fsdp(cp=cp, tp=tp, ep=ep),
+    )
+    return base_weight_bytes(spec, settings)
+
+
+def without_tied_split(spec: ModelSpec) -> ModelSpec:
+    arch = spec.arch.model_copy(update={"tensor_parallel_tied_embedding": False})
+    return spec.model_copy(update={"arch": arch})
+
+
+class TestQwen35TensorParallelBaseWeights:
+    def test_sharded_bytes_fall_when_tp_or_cp_rises(self):
+        # Arrange
+        model = catalog_model("Qwen/Qwen3.8-27B")
+
+        # Act
+        plain = catalog_base_weights(model, 2)
+        tensor = catalog_base_weights(model, 4, tp=2)
+        context = catalog_base_weights(model, 4, cp=2)
+        both = catalog_base_weights(model, 8, cp=2, tp=2)
+
+        # Assert
+        assert model.arch.tensor_parallel_plan
+        assert model.arch.attention_output_gate
+        assert tensor < plain
+        assert context < plain
+        assert both < tensor
+        assert both < context
+
+    def test_output_gate_rows_are_on_the_tensor_parallel_mesh(self):
+        # Arrange
+        model = catalog_model("Qwen/Qwen3.8-27B")
+        arch = model.arch
+        counts = formulas.param_counts(arch, model.n_params)
+        gate = arch.attention_layers * arch.n_heads * arch.head_dim * arch.hidden_size
+
+        # Act
+        on_tp_mesh = formulas.tensor_parallel_params(counts, arch)
+        ungated = formulas.tensor_parallel_params(
+            counts, arch.model_copy(update={"attention_output_gate": False})
+        )
+
+        # Assert
+        assert on_tp_mesh - ungated == gate
+
+
+class TestQwen35MoeTensorParallelBaseWeights:
+    def test_sharded_bytes_fall_with_tp_and_ep_and_hold_with_cp(self):
+        # Arrange
+        model = catalog_model("Qwen/Qwen3.6-35B-A3B")
+
+        # Act
+        no_tensor = catalog_base_weights(model, 8, cp=2, ep=2)
+        tensor = catalog_base_weights(model, 8, cp=2, tp=2, ep=2)
+        no_expert = catalog_base_weights(model, 8, cp=2, tp=2)
+        no_context = catalog_base_weights(model, 8, tp=2, ep=2)
+
+        # Assert
+        assert model.arch.tensor_parallel_plan
+        assert tensor < no_tensor
+        assert tensor < no_expert
+        assert no_context == tensor
+
+
+class TestGptOssTensorParallelBaseWeights:
+    def test_sharded_bytes_fall_with_tp_and_ep_and_hold_with_cp(self):
+        # Arrange
+        model = catalog_model("openai/gpt-oss-20b")
+
+        # Act
+        no_tensor = catalog_base_weights(model, 8, cp=2, ep=2)
+        tensor = catalog_base_weights(model, 8, cp=2, tp=2, ep=2)
+        wider_tensor = catalog_base_weights(model, 8, cp=2, tp=4, ep=2)
+        no_expert = catalog_base_weights(model, 8, cp=2, tp=2)
+        no_context = catalog_base_weights(model, 8, tp=2, ep=2)
+
+        # Assert
+        assert model.arch.tensor_parallel_plan
+        assert tensor < no_tensor
+        assert wider_tensor < tensor
+        assert tensor < no_expert
+        assert no_context == tensor
+
+
+class TestQwenDenseTensorParallelBaseWeights:
+    @pytest.mark.parametrize(
+        "model_id", ["Qwen/Qwen2.5-0.5B-Instruct", "Qwen/Qwen3-1.7B", "Qwen/Qwen3-4B"]
+    )
+    def test_sharded_bytes_fall_with_tp_and_hold_with_cp(self, model_id):
+        # Arrange
+        model = catalog_model(model_id)
+
+        # Act
+        no_tensor = catalog_base_weights(model, 8, cp=2)
+        tensor = catalog_base_weights(model, 8, cp=2, tp=2)
+        wider_tensor = catalog_base_weights(model, 8, cp=2, tp=4)
+        no_context = catalog_base_weights(model, 8, tp=2)
+
+        # Assert
+        assert model.arch.tensor_parallel_plan
+        assert tensor < no_tensor
+        assert wider_tensor < tensor
+        assert no_context == tensor
+
+
+class TestGemma4TensorParallelBaseWeights:
+    def test_sharded_bytes_fall_with_tp_and_hold_with_cp(self):
+        # Arrange
+        model = catalog_model("google/gemma-4-E4B-it")
+        token = formulas.token_embedding_params(model.arch)
+
+        # Act
+        no_tensor = catalog_base_weights(model, 4, cp=2)
+        tensor = catalog_base_weights(model, 8, cp=2, tp=2)
+        wider_tensor = catalog_base_weights(model, 16, cp=2, tp=4)
+        no_context = catalog_base_weights(model, 8, tp=2)
+        fixed_world = [
+            catalog_base_weights(model, 8, cp=2),
+            tensor,
+            catalog_base_weights(model, 8, tp=4),
+        ]
+        whole_embedding = catalog_base_weights(without_tied_split(model), 8, cp=2, tp=2)
+
+        # Assert
+        assert model.arch.tensor_parallel_plan
+        assert model.arch.tensor_parallel_tied_embedding
+        assert tensor < no_tensor
+        assert wider_tensor < tensor
+        assert no_context == tensor
+        # The per-layer and tied token embeddings are on the TP mesh, so at a
+        # fixed world each tp step holds less.
+        assert fixed_world == sorted(fixed_world, reverse=True)
+        assert len(set(fixed_world)) == 3
+        # tp=2 holds half of the bf16 tied embedding.
+        assert whole_embedding - tensor == pytest.approx(token * 2 / 2)
+
+    def test_per_layer_embedding_is_on_the_tensor_parallel_mesh(self):
+        # Arrange
+        model = catalog_model("google/gemma-4-E4B-it")
+        arch = model.arch
+        counts = formulas.param_counts(arch, model.n_params)
+        per_layer = counts.embedding - formulas.token_embedding_params(arch)
+
+        # Act
+        on_tp_mesh = formulas.tensor_parallel_params(counts, arch)
+
+        # Assert
+        assert per_layer > 0
+        assert on_tp_mesh == (counts.attention + counts.mlp + counts.mamba + per_layer)
+
+
+class TestGraniteMoeTensorParallelBaseWeights:
+    def test_sharded_bytes_fall_with_tp_and_hold_with_cp(self):
+        # Arrange
+        model = catalog_model("ibm-granite/granite-3.1-3b-a800m-instruct")
+        token = formulas.token_embedding_params(model.arch)
+
+        # Act
+        no_tensor = catalog_base_weights(model, 8, cp=2, ep=4)
+        tensor = catalog_base_weights(model, 8, cp=2, tp=2, ep=4)
+        wider_tensor = catalog_base_weights(model, 8, tp=4, ep=4)
+        no_context = catalog_base_weights(model, 8, tp=2, ep=4)
+        whole_embedding = catalog_base_weights(
+            without_tied_split(model), 8, cp=2, tp=2, ep=4
+        )
+
+        # Assert
+        assert model.arch.tensor_parallel_plan
+        assert model.arch.tensor_parallel_tied_embedding
+        assert tensor < no_tensor
+        assert wider_tensor < tensor
+        assert no_context == tensor
+        # tp=2 holds half of the bf16 tied embedding.
+        assert whole_embedding - tensor == pytest.approx(token * 2 / 2)
+
+
+class TestGraniteMoeHybridTensorParallelBaseWeights:
+    @pytest.mark.parametrize(
+        ("model_id", "ep"),
+        [("ibm-granite/granite-4.0-micro", 1), ("ibm-granite/granite-4.0-h-tiny", 4)],
+    )
+    def test_sharded_bytes_fall_with_tp_and_hold_with_cp(self, model_id, ep):
+        # Arrange
+        model = catalog_model(model_id)
+        token = formulas.token_embedding_params(model.arch)
+
+        # Act
+        no_tensor = catalog_base_weights(model, 4, cp=2, ep=ep)
+        tensor = catalog_base_weights(model, 8, cp=2, tp=2, ep=ep)
+        wider_tensor = catalog_base_weights(model, 16, cp=2, tp=4, ep=ep)
+        no_context = catalog_base_weights(model, 8, tp=2, ep=ep)
+        whole_embedding = catalog_base_weights(
+            without_tied_split(model), 8, cp=2, tp=2, ep=ep
+        )
+
+        # Assert
+        assert model.arch.tensor_parallel_plan
+        assert model.arch.tensor_parallel_tied_embedding
+        assert tensor < no_tensor
+        assert wider_tensor < tensor
+        assert no_context == tensor
+        # tp=2 holds half of the bf16 tied embedding.
+        assert whole_embedding - tensor == pytest.approx(token * 2 / 2)
+
+    @pytest.mark.parametrize(
+        ("model_id", "expected"),
+        [
+            # Attention and the dense MLP.
+            ("ibm-granite/granite-4.0-micro", 629_145_600 + 2_516_582_400),
+            # Attention and the Mamba2 mixers. The shared MLP is not in the
+            # parsed geometry, so it stays in the unattributed FSDP remainder.
+            ("ibm-granite/granite-4.0-h-tiny", 25_165_824 + 527_132_736),
+        ],
+    )
+    def test_tensor_parallel_params_cover_attention_mamba_and_dense_mlp(
+        self, model_id, expected
+    ):
+        # Arrange
+        model = catalog_model(model_id)
+        counts = formulas.param_counts(model.arch, model.n_params)
+
+        # Act
+        on_tp_mesh = formulas.tensor_parallel_params(counts, model.arch)
+
+        # Assert
+        assert on_tp_mesh == expected
+
+
+class TestTensorParallelHeadGatherBytes:
+    @pytest.mark.parametrize(
+        "model_id",
+        ["google/gemma-4-E4B-it", "ibm-granite/granite-3.1-3b-a800m-instruct"],
+    )
+    def test_split_tied_head_gathers_a_dense_copy_for_logprobs(self, model_id):
+        # Arrange
+        arch = catalog_model(model_id).arch
+        settings = TrainingSettings(
+            n_training_gpus=8, max_model_len=128, fsdp=pinned_fsdp(cp=2, tp=2)
+        )
+
+        # Act
+        split = tensor_parallel_head_gather_bytes(arch, settings, 2)
+        whole = tensor_parallel_head_gather_bytes(
+            arch.model_copy(update={"tensor_parallel_tied_embedding": False}),
+            settings,
+            2,
+        )
+
+        # Assert
+        assert split == arch.vocab_size * arch.hidden_size * 2
+        assert whole == 0
+
+
+class TestAdapterState:
+    def test_tensor_parallel_keeps_split_lora_factors_once_per_tp(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(QWEN35_08B.config)
+        assert arch.tensor_parallel_plan
+        dp = TrainingSettings(n_training_gpus=2, fsdp=fsdp_config(tp=1))
+        tp = TrainingSettings(n_training_gpus=2, fsdp=fsdp_config(tp=2))
+        per_rank, _ = lora_tensor_placement(
+            arch, tp.lora_rank, tp.lora_target_scope, 0, None, 2
+        )
+        full = lora_formulas.lora_param_count(arch, tp.lora_rank, tp.lora_target_scope)
+        saved = (full - per_rank) * tp.n_trained_adapters
+        stored = formulas.ADAPTER_BYTES_PER_PARAM
+
+        # Act
+        unsplit = adapter_state(arch, dp, 1)
+        tp_split = adapter_state(arch, tp, 1)
+
+        # Assert
+        assert saved > 0
+        assert unsplit.grads - tp_split.grads == saved * stored
+        assert unsplit.adam - tp_split.adam == (
+            formulas.ADAM_MOMENTS_PER_PARAM * saved * stored
+        )
+        assert tp_split.trained_params == unsplit.trained_params
+
+    @pytest.mark.parametrize(("tp", "per_rank"), [(1, 6_958_592), (2, 4_279_040)])
+    def test_tower_lora_trains_and_steps_the_tower_adapters(self, tp, per_rank):
+        # Arrange
+        arch = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["Qwen/Qwen3.6-35B-A3B"].config
+        )
+        text = TrainingSettings(n_training_gpus=tp, fsdp=fsdp_config(tp=tp))
+        tower = text.model_copy(update={"tower_lora_targets": QWEN_TOWER_TARGETS})
+
+        # Act
+        text_state = adapter_state(arch, text, 1)
+        tower_state = adapter_state(arch, tower, 1)
+
+        # Assert: rank-16 tower adapters, 434,912 x 16 in full, fp32 on each rank.
+        assert tower_state.grads - text_state.grads == per_rank * 4
+        assert tower_state.adam - text_state.adam == 2 * per_rank * 4
+        assert tower_state.trained_params - text_state.trained_params == 6_958_592
+
+    def test_tower_lora_trains_only_the_named_targets(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["Qwen/Qwen3.6-35B-A3B"].config
+        )
+        text = TrainingSettings()
+        qkv_only = text.model_copy(update={"tower_lora_targets": frozenset({"qkv"})})
+
+        # Act
+        text_state = adapter_state(arch, text, 1)
+        qkv_state = adapter_state(arch, qkv_only, 1)
+
+        # Assert: rank-16 qkv adapters on 27 blocks, 124,416 x 16.
+        assert qkv_state.trained_params - text_state.trained_params == 1_990_656
+
+    def test_text_model_ignores_tower_lora(self):
+        # Arrange
+        text = TrainingSettings()
+        tower = text.model_copy(update={"tower_lora_targets": QWEN_TOWER_TARGETS})
+
+        # Act
+        text_state = adapter_state(QWEN_05B, text, 1)
+        tower_state = adapter_state(QWEN_05B, tower, 1)
+
+        # Assert
+        assert tower_state == text_state

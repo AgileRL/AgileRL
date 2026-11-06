@@ -48,6 +48,8 @@ from transformers import (
     SiglipVisionConfig,
     SiglipVisionModel,
 )
+from transformers.integrations.flex_attention import flex_attention_forward
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 from agilerl.architectures import trainer_model_class
 from agilerl.architectures.catalog import nemotron_h_omni_vllm_hf_override
@@ -58,6 +60,7 @@ from agilerl.architectures.flex_attention import (
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.distributed import fsdp as dmod
 from agilerl.distributed import gather_params
+from agilerl.distributed.context_parallel import substitute_hf_ulysses_attn
 from agilerl.llm_envs import DatasetEnv
 from agilerl.lora.moe import device_expert_backend
 from agilerl.lora.moe import grouped_gemm as moe_gemm
@@ -2749,6 +2752,9 @@ class _RegisterOnlyRegistry:
     def __init__(self):
         self.registered = {}
 
+    def __getitem__(self, key):
+        return self.registered[key]
+
     def __setitem__(self, key, value):
         msg = "immutable registry"
         raise TypeError(msg)
@@ -2769,12 +2775,19 @@ class TestPatchFlexAttentionKernelOptions:
             calls.append(kwargs)
             return "flex-out"
 
-        if already_patched:
-            fake_flex_attention_forward._agilerl_kernel_opts_patched = True
+        def patched_flex(*_args, **_kwargs):
+            return "patched-out"
+
+        patched_flex._agilerl_kernel_opts_patched = True
+        registered = patched_flex if already_patched else fake_flex_attention_forward
+        if registry is None:
+            registry = {"flex_attention": registered}
+        else:
+            registry.register("flex_attention", registered)
         flex_mod = types.ModuleType("transformers.integrations.flex_attention")
         flex_mod.flex_attention_forward = fake_flex_attention_forward
         modeling_mod = types.ModuleType("transformers.modeling_utils")
-        modeling_mod.ALL_ATTENTION_FUNCTIONS = registry if registry is not None else {}
+        modeling_mod.ALL_ATTENTION_FUNCTIONS = registry
         monkeypatch.setitem(
             sys.modules, "transformers.integrations.flex_attention", flex_mod
         )
@@ -2795,8 +2808,42 @@ class TestPatchFlexAttentionKernelOptions:
 
     def test_double_patch_guard_skips_reinstall(self, monkeypatch):
         registry, _ = self._install_fake_flex(monkeypatch, already_patched=True)
+        patched = registry["flex_attention"]
         patch_flex_attention_kernel_options()
-        assert registry == {}
+        assert registry["flex_attention"] is patched
+
+    def test_second_patch_keeps_the_first_wrapper(self, monkeypatch):
+        # Arrange
+        registry, _ = self._install_fake_flex(monkeypatch)
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+        patch_flex_attention_kernel_options()
+        first = registry["flex_attention"]
+
+        # Act
+        patch_flex_attention_kernel_options()
+
+        # Assert
+        assert registry["flex_attention"] is first
+
+    @pytest.mark.usefixtures("gloo_process_group")
+    def test_second_patch_keeps_a_ulysses_wrapper_registered_over_the_first(
+        self, monkeypatch
+    ):
+        # Arrange
+        monkeypatch.setitem(
+            ALL_ATTENTION_FUNCTIONS, "flex_attention", flex_attention_forward
+        )
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+        patch_flex_attention_kernel_options()
+        substitute_hf_ulysses_attn(torch.distributed.group.WORLD, "flex_attention")
+        ulysses_wrapper = ALL_ATTENTION_FUNCTIONS["flex_attention"]
+
+        # Act
+        patch_flex_attention_kernel_options()
+
+        # Assert
+        assert ulysses_wrapper._agilerl_ulysses is True
+        assert ALL_ATTENTION_FUNCTIONS["flex_attention"] is ulysses_wrapper
 
     @staticmethod
     def _query(seq_len_q):
@@ -3970,9 +4017,9 @@ class TestSavePeftAdapterForVllmRollout:
         return calls
 
     def _peft_model(self):
-        return SimpleNamespace(
-            peft_config={"actor": self._FakePeftConfig()}, named_parameters=list
-        )
+        model = nn.Module()
+        model.peft_config = {"actor": self._FakePeftConfig()}
+        return model
 
     def test_requires_llm_dependencies(self, monkeypatch, tmp_path):
         monkeypatch.setattr(llm_utils_module, "HAS_LLM_DEPENDENCIES", False)
@@ -4027,6 +4074,7 @@ class TestSavePeftAdapterForVllmRollout:
         model = SimpleNamespace(
             peft_config={"actor": self._FakePeftConfig()},
             named_parameters=lambda: [(key, shard)],
+            named_modules=list,
         )
 
         save_peft_adapter_for_vllm_rollout(

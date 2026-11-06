@@ -22,21 +22,23 @@ TOKEN_BUDGET_STEP = 1024
 
 
 def data_parallel_size(spec: LLMAlgorithmSpec, n_training_gpus: int) -> int:
-    """Trainer world folded by tensor-parallel degree.
+    """Trainer world folded by tensor-parallel and context-parallel degree.
 
     :param spec: Validated LLM algorithm spec.
     :param n_training_gpus: Trainer ranks, ``training.training_gpus_per_agent``.
     :return: Data-parallel ranks.
-    :raises ValueError: When ``fsdp.tp`` does not divide the trainer world.
+    :raises ValueError: When ``fsdp.tp * fsdp.cp`` does not divide the trainer world.
     """
     tp = 1 if spec.fsdp is None else spec.fsdp.tp
-    if n_training_gpus % tp != 0:
+    cp = 1 if spec.fsdp is None else spec.fsdp.cp
+    fold = tp * cp
+    if n_training_gpus % fold != 0:
         msg = (
-            f"world_size ({n_training_gpus}) must be divisible by tp ({tp}) "
-            "for Tensor Parallel."
+            f"world_size ({n_training_gpus}) must be divisible by the tp * cp "
+            f"replica size ({tp} * {cp} = {fold})"
         )
         raise ValueError(msg)
-    return n_training_gpus // tp
+    return n_training_gpus // fold
 
 
 def rollout_group_size(spec: LLMAlgorithmSpec) -> int:

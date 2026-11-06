@@ -6,8 +6,10 @@
 from __future__ import annotations
 
 import importlib
+from unittest.mock import MagicMock
 
 import pytest
+import torch
 from pydantic import ValidationError
 from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 from transformers.configuration_utils import PretrainedConfig
@@ -16,7 +18,10 @@ from transformers.models.nemotron_h_omni.configuration_nemotron_h_omni import (
 )
 
 import agilerl
-from agilerl.architectures import family_tensor_parallel_plans
+from agilerl.architectures import (
+    family_context_parallel_plans,
+    family_tensor_parallel_plans,
+)
 from agilerl.architectures import runtime as runtime_module
 from agilerl.architectures.catalog import (
     FAMILY_RUNTIME_CONFIGS,
@@ -26,11 +31,32 @@ from agilerl.architectures.catalog import (
     sm80_attention_backend,
     trainer_model_class,
 )
+from agilerl.architectures.gemma4.tensor_parallel import GEMMA4_TENSOR_PARALLEL_PLAN
+from agilerl.architectures.gptoss.tensor_parallel import GPT_OSS_TENSOR_PARALLEL_PLAN
+from agilerl.architectures.granitemoe.tensor_parallel import (
+    GRANITEMOE_TENSOR_PARALLEL_PLAN,
+)
+from agilerl.architectures.granitemoehybrid.context_parallel import (
+    GRANITEMOEHYBRID_CONTEXT_PARALLEL_PLAN,
+)
+from agilerl.architectures.granitemoehybrid.tensor_parallel import (
+    GRANITEMOEHYBRID_TENSOR_PARALLEL_PLAN,
+)
+from agilerl.architectures.nemotron_h.context_parallel import (
+    NEMOTRON_H_CONTEXT_PARALLEL_PLAN,
+)
 from agilerl.architectures.nemotron_h.mamba import install_mamba_patches
 from agilerl.architectures.nemotron_h.tensor_parallel import (
     NEMOTRON_H_TENSOR_PARALLEL_PLAN,
 )
-from agilerl.architectures.runtime import ModelRuntimeConfig, VllmRuntimeConfig
+from agilerl.architectures.qwen3.tensor_parallel import QWEN3_TENSOR_PARALLEL_PLAN
+from agilerl.architectures.qwen3_5.context_parallel import QWEN3_5_CONTEXT_PARALLEL_PLAN
+from agilerl.architectures.qwen3_5.tensor_parallel import QWEN3_5_TENSOR_PARALLEL_PLAN
+from agilerl.architectures.runtime import (
+    ModelRuntimeConfig,
+    TensorParallelPlan,
+    VllmRuntimeConfig,
+)
 from agilerl.arena.memory.manifest import FAMILY_MAX_NUM_BATCHED_TOKENS
 from agilerl.arena.memory.specs import TENSOR_PARALLEL_MODEL_TYPES
 from agilerl.arena.models.model_info import REASONING_PARSERS, SUPPORTED_MODEL_INFO
@@ -162,6 +188,26 @@ class TestFamilyRuntimeConfigs:
             "linear_fc1",
             "linear_fc2",
         }
+        assert runtime.patch.gdn is not None
+        assert runtime.patch.gdn.clone_conv_output is True
+        assert tuple(
+            (entry.mixer, entry.text_model) for entry in runtime.patch.gdn.mixers
+        ) == (
+            (
+                (
+                    "transformers.models.qwen3_5_moe.modeling_qwen3_5_moe."
+                    "Qwen3_5MoeGatedDeltaNet"
+                ),
+                (
+                    "transformers.models.qwen3_5_moe.modeling_qwen3_5_moe."
+                    "Qwen3_5MoeTextModel"
+                ),
+            ),
+            (
+                "transformers.models.qwen3_5.modeling_qwen3_5.Qwen3_5GatedDeltaNet",
+                "transformers.models.qwen3_5.modeling_qwen3_5.Qwen3_5TextModel",
+            ),
+        )
 
     def test_catalog_reasoning_parser_matches_model_info(self) -> None:
         catalog = {
@@ -326,7 +372,15 @@ class TestFamilyTensorParallelPlans:
     def test_resolves_shared_nemotron_h_plan_once(self) -> None:
         plans = family_tensor_parallel_plans()
 
-        assert plans == [NEMOTRON_H_TENSOR_PARALLEL_PLAN]
+        assert plans == [
+            QWEN3_TENSOR_PARALLEL_PLAN,
+            GRANITEMOE_TENSOR_PARALLEL_PLAN,
+            GRANITEMOEHYBRID_TENSOR_PARALLEL_PLAN,
+            NEMOTRON_H_TENSOR_PARALLEL_PLAN,
+            GEMMA4_TENSOR_PARALLEL_PLAN,
+            GPT_OSS_TENSOR_PARALLEL_PLAN,
+            QWEN3_5_TENSOR_PARALLEL_PLAN,
+        ]
 
     def test_missing_plan_module_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setitem(
@@ -337,6 +391,41 @@ class TestFamilyTensorParallelPlans:
 
         with pytest.raises(ModuleNotFoundError, match=r"agilerl\.no_such_module"):
             family_tensor_parallel_plans()
+
+
+class TestTensorParallelPlanDefaults:
+    def test_restore_and_row_orders_default_to_no_ops(self) -> None:
+        plan = TensorParallelPlan(shard=lambda _model, _mesh: 0)
+        model = torch.nn.Linear(2, 2)
+        weight = model.weight.detach().clone()
+
+        restored = plan.restore(model, MagicMock())
+        orders = plan.row_orders(model)
+
+        assert restored is None
+        assert orders == {}
+        assert torch.equal(model.weight, weight)
+
+
+class TestFamilyContextParallelPlans:
+    def test_resolves_granitemoehybrid_nemotron_h_and_qwen3_5_plans(self) -> None:
+        plans = family_context_parallel_plans()
+
+        assert plans == [
+            GRANITEMOEHYBRID_CONTEXT_PARALLEL_PLAN,
+            NEMOTRON_H_CONTEXT_PARALLEL_PLAN,
+            QWEN3_5_CONTEXT_PARALLEL_PLAN,
+        ]
+
+    def test_missing_plan_module_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setitem(
+            FAMILY_RUNTIME_CONFIGS,
+            "missing_family",
+            ModelRuntimeConfig(context_parallel_plan="agilerl.no_such_module:PLAN"),
+        )
+
+        with pytest.raises(ModuleNotFoundError, match=r"agilerl\.no_such_module"):
+            family_context_parallel_plans()
 
 
 class TestFamilyRuntime:
@@ -457,6 +546,8 @@ class TestPretrainedModelType:
 class TestRuntimeConfigsForbidExtra:
     def test_unknown_fields_are_rejected(self) -> None:
         from agilerl.architectures.runtime import (
+            GdnMixerConfig,
+            GdnPatchConfig,
             MambaPatchConfig,
             ModelRuntimeConfig,
             PatchRuntimeConfig,
@@ -468,6 +559,11 @@ class TestRuntimeConfigsForbidExtra:
             (VllmRuntimeConfig, {}),
             (TrainerRuntimeConfig, {}),
             (MambaPatchConfig, {"mixer": "agilerl.architectures.nemotron_h.mamba"}),
+            (GdnMixerConfig, {"mixer": "pkg.GatedDeltaNet", "text_model": "pkg.Text"}),
+            (
+                GdnPatchConfig,
+                {"mixers": [{"mixer": "pkg.GatedDeltaNet", "text_model": "pkg.Text"}]},
+            ),
             (PatchRuntimeConfig, {}),
             (ModelRuntimeConfig, {}),
         )

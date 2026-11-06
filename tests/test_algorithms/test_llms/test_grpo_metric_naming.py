@@ -24,6 +24,7 @@ pytest.importorskip("peft", reason="LLM tests require peft.")
 
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.core.llm_ops.frozen_vision import VisionFeatureCache
+from agilerl.algorithms.core.sequence_layout import PackedSequence, PaddedSequence
 from agilerl.algorithms.grpo import GRPO
 from agilerl.utils.learn_profiler import LearnProfiler
 from agilerl.utils.llm_utils import LEARN_PHASES
@@ -102,7 +103,9 @@ class _Stub:
         self.learn_profiler = LearnProfiler(
             None, rank=0, world_size=1, shard_group_size=None
         )
-        self.packing_mode: str | None = None
+        self.fsdp_config = None
+        self.sequence_packing = False
+        self.sequence_layout = PaddedSequence(calc_position_embeddings=False)
         self.rng = np.random.default_rng(0)
         self.old_logprobs_source = "trainer"
         self.lr_scheduler = None
@@ -131,6 +134,7 @@ class _Stub:
     _learn_phase_seconds = LLMAlgorithm._learn_phase_seconds
     _learn_vision_rows = LLMAlgorithm._learn_vision_rows
     _micro_batch_token_budget = LLMAlgorithm._micro_batch_token_budget
+    _sequence_layout_type = LLMAlgorithm._sequence_layout_type
     _micro_batch_windows = LLMAlgorithm._micro_batch_windows
     _micro_batches_per_step = staticmethod(LLMAlgorithm._micro_batches_per_step)
     _row_token_budget = LLMAlgorithm._row_token_budget
@@ -166,10 +170,6 @@ class _Stub:
 
     def _prepare_vllm_for_training(self) -> None:
         return
-
-    def _packing_mode(self) -> str | None:
-        """Packing mode of the gradient forward."""
-        return self.packing_mode
 
     def trainer_offload_context(self):
         """Match the context ``learn`` wraps its body in."""
@@ -513,7 +513,8 @@ class TestLearnPaddingStats:
     def test_packed_forward_runs_without_padding(self) -> None:
         # Arrange
         algo = _Stub()
-        algo.packing_mode = "varlen"
+        algo.sequence_packing = True
+        algo.sequence_layout = PackedSequence(varlen=True)
 
         # Act
         metrics = algo.learn(_ragged_experiences())

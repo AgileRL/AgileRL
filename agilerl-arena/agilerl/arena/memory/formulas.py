@@ -8,6 +8,7 @@ Every function is a pure function of the specs in
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, replace
 from typing import Literal
 
@@ -205,20 +206,65 @@ def tp_local(n: int, tp: int) -> int:
     return n // tp
 
 
+def mamba_shared_group_rows_params(arch: ModelArch, tp: int) -> int:
+    """Frozen Mamba-2 B/C rows each TP rank gathers once and keeps resident.
+
+    Only when ``n_groups`` does not divide ``tp``: the ``in_proj`` and
+    ``conv1d`` rows of every group, ``2 * n_groups * d_state`` per layer.
+    """
+    if (
+        tp <= 1
+        or not arch.tensor_parallel_plan
+        or arch.mamba_gated_delta
+        or arch.mamba_n_groups % tp == 0
+    ):
+        return 0
+    rows = 2 * arch.mamba_n_groups * arch.mamba_d_state
+    return arch.n_mamba_layers * rows * (arch.hidden_size + arch.mamba_d_conv + 1)
+
+
+def context_parallel_shard_len(arch: ModelArch, seq_len: int, cp: int) -> int:
+    """Tokens one context-parallel rank runs of a ``seq_len``-token row.
+
+    The trainer pads the ``seq_len - 1`` action frame to a multiple of ``cp``:
+    of ``cp`` scan chunks on gated-delta-net and of whole blocks on FlexAttention.
+    """
+    if cp == 1:
+        return seq_len
+    gated_delta = arch.mamba_gated_delta and arch.n_mamba_layers > 0
+    round_to = cp * GATED_DELTA_CHUNK if gated_delta else cp
+    if arch.flex_attention:
+        round_to = math.lcm(round_to, FLEX_BLOCK_SIZE)
+    return -(-(seq_len - 1) // round_to) * round_to // cp
+
+
 def tensor_parallel_params(counts: ParamCounts, arch: ModelArch) -> int:
     """Parameters placed on the tensor-parallel mesh.
 
-    FSDP ignores these DTensors. An untied ``lm_head`` is in the set for every
-    family; attention, dense MLP, and Mamba only for families with a training
-    TP plan. Norms, token embeddings, the MoE router, and packed experts stay
-    on the FSDP mesh.
+    Each rank keeps 1/tp, which FSDP then shards over ``dp_shard * cp`` and
+    gathers per unit. An untied ``lm_head`` is in the set for every
+    family; attention, dense MLP, Mamba, and per-layer embeddings only for
+    families with a training TP plan. Norms, token embeddings, the MoE
+    router, and packed experts stay on the FSDP mesh.
     """
     head = 0 if arch.tied_embeddings else counts.lm_head
     if not arch.tensor_parallel_plan:
         return head
     _, router = moe_params_per_layer(arch)
     dense_mlp = counts.mlp - arch.moe_layers * router
-    return counts.attention + dense_mlp + counts.mamba + head
+    gate = attention_output_gate_params(counts, arch)
+    per_layer_embed = max(counts.embedding - token_embedding_params(arch), 0)
+    return counts.attention + dense_mlp + counts.mamba + head + gate + per_layer_embed
+
+
+def attention_output_gate_params(counts: ParamCounts, arch: ModelArch) -> int:
+    """Output-gate rows of ``q_proj``, which the parameter split leaves unattributed."""
+    if not arch.attention_output_gate:
+        return 0
+    gate = arch.attention_layers * arch.n_heads * arch.head_dim * arch.hidden_size
+    if arch.attn_bias:
+        gate += arch.attention_layers * arch.n_heads * arch.head_dim
+    return min(gate, max(counts.unattributed, 0))
 
 
 def qkv_width_per_rank(arch: ModelArch, tp: int) -> int:
@@ -331,104 +377,6 @@ def param_counts(arch: ModelArch, n_params: int | None = None) -> ParamCounts:
     if n_params is None:
         return counts
     return replace(counts, unattributed=n_params - counts.total)
-
-
-def lora_param_count(
-    arch: ModelArch, rank: int, scope: LoraTargetScope = "all-linear"
-) -> int:
-    """LoRA adapter parameters for the given rank and target scope.
-
-    ``all-linear`` wraps every decoder ``nn.Linear``: attention q/k/v/o,
-    dense MLP matrices, and Mamba in/out projections. The embedding and
-    ``lm_head`` stay unwrapped. Each wrapped ``(out, in)`` linear adds
-    ``rank * (in + out)``. Charged on the same layer subsets as
-    :func:`param_counts`. Fused MoE experts live outside ``nn.Linear``,
-    so a routed stack adds an MLP term only for its dense MLP blocks.
-    """
-    h, dh = arch.hidden_size, arch.head_dim
-    q_dim = arch.n_heads * dh
-    kv_dim = arch.n_kv_heads * dh
-    attn = (h + q_dim) + 2 * (h + kv_dim) + (q_dim + h)
-    if arch.global_head_dim and arch.global_head_dim != dh:
-        # Full-attention layers adapt a wider head; scale the attention
-        # adapters by the layer-averaged width.
-        attn = int(attn * arch.mean_qkv_dim / (q_dim + 2 * kv_dim))
-    total = attn * arch.attention_layers
-    if scope != "all-linear":
-        return rank * total
-    mlp_matrices = 3 if arch.gated_mlp else 2
-    total += arch.mlp_layers * mlp_matrices * (h + arch.intermediate_size)
-    if arch.n_mamba_layers:
-        d_inner = arch.mamba_n_heads * arch.mamba_d_head
-        in_proj = h + d_inner + arch.mamba_conv_dim + arch.mamba_n_heads
-        out_proj = d_inner + h
-        total += arch.n_mamba_layers * (in_proj + out_proj)
-    return rank * total
-
-
-def packed_lora_param_count(arch: ModelArch, rank: int, n_matrices: int) -> int:
-    """Adapter parameters for PEFT ``target_parameters`` on packed experts.
-
-    A packed ``(n_experts, out, in)`` Parameter has no ``nn.Linear`` to wrap,
-    so PEFT decomposes it per expert: every targeted matrix adds
-    ``n_experts * rank * (in + out)`` on each MoE layer.
-    """
-    n_experts = arch.n_experts
-    if not n_matrices or n_experts is None or n_experts <= 1:
-        return 0
-    expert_inter = arch.expert_intermediate_size or arch.intermediate_size
-    per_matrix = n_experts * rank * (arch.expert_width + expert_inter)
-    return int(arch.moe_layers * n_matrices * per_matrix)
-
-
-def lora_sync_buffer_bytes(
-    arch: ModelArch,
-    rank: int,
-    scope: LoraTargetScope,
-    n_packed_matrices: int,
-    dtype_bytes: float,
-) -> int:
-    """Bytes of one unsharded policy adapter in a NIXL weight-sync buffer.
-
-    :param arch: Model architecture.
-    :param rank: LoRA rank.
-    :param scope: Adapter target scope.
-    :param n_packed_matrices: PEFT ``target_parameters`` on packed experts.
-    :param dtype_bytes: Bytes per element of the engines' LoRA dtype.
-    :return: Buffer bytes.
-    """
-    params = lora_param_count(arch, rank, scope) + packed_lora_param_count(
-        arch, rank, n_packed_matrices
-    )
-    return int(params * dtype_bytes)
-
-
-def engine_expert_lora_param_count(
-    arch: ModelArch, rank: int, tensor_parallel: int, packed_3d: bool
-) -> int:
-    """Per-rank parameters of one vLLM fused-MoE LoRA slot.
-
-    :param arch: Model architecture.
-    :param rank: Engine LoRA rank.
-    :param tensor_parallel: Engine tensor-parallel width.
-    :param packed_3d: The engine uses the 3D expert layout.
-    :return: Slot parameters on one rank; 0 for a dense model.
-    """
-    n_experts = arch.n_experts
-    if n_experts is None or n_experts <= 1:
-        return 0
-    h = arch.expert_width
-    # vLLM wraps every fused-MoE layer once LoRA is on, whatever the adapter
-    # targets: w13 and w2 A/B stacks over all experts, intermediate dim TP-sharded.
-    inter = (arch.expert_intermediate_size or arch.intermediate_size) // tensor_parallel
-    # The 3D layout packs gate and up into one w13 slice; the 2D layout keeps
-    # one slice each when the MLP is gated.
-    if packed_3d:
-        per_expert = 2 * h + 3 * inter
-    else:
-        slices = 2 if arch.gated_mlp else 1
-        per_expert = slices * h + h + (slices + 1) * inter
-    return int(arch.moe_layers * n_experts * rank * per_expert)
 
 
 def weight_bytes(
@@ -716,6 +664,83 @@ def saved_router_topk_bytes(arch: ModelArch, rows: int, seq_len: int) -> int:
     return int(routed * arch.moe_layers * slot_bytes)
 
 
+def moe_collectives_saveable(
+    arch: ModelArch, expert_parallel: int, tensor_parallel: int
+) -> bool:
+    """Whether a checkpointed MoE block runs collectives ``fsdp.save_moe_collectives`` saves.
+
+    :param expert_parallel: Expert-parallel degree.
+    :param tensor_parallel: Degree the family's tensor-parallel plan shards by.
+    :return: True under expert parallel, or under a tensor-parallel plan
+        that shards a saved shared expert or latent projections inside the MoE.
+    """
+    if not arch.is_moe:
+        return False
+    if expert_parallel > 1:
+        return True
+    return tensor_parallel > 1 and (
+        arch.shared_expert_reduce_saved or bool(arch.moe_latent_size)
+    )
+
+
+def saved_moe_collective_bytes(
+    arch: ModelArch,
+    rows: int,
+    seq_len: int,
+    act_bytes: float,
+    expert_parallel: int,
+    routed_split: int,
+    tensor_parallel: int,
+) -> int:
+    """Collective outputs one checkpointed MoE block saves for its backward.
+
+    Selective checkpointing keeps the collectives the MoE child's recompute
+    reaches, so it reuses them instead of communicating. Expert
+    parallel saves the dispatched and the combined rows, ``tokens x top_k /
+    routed_split`` each at :attr:`ModelArch.expert_width`. A routed split
+    saves the all-gather of every rank's padded row span. A tensor-parallel
+    plan saves the shared expert's all-reduce when
+    :attr:`ModelArch.shared_expert_reduce_saved`, and on a latent MoE the
+    gathered input projection and the reduced output projection.
+
+    :param expert_parallel: Expert-parallel degree.
+    :param routed_split: Tensor-parallel ranks that split each token's routing.
+    :param tensor_parallel: Degree the family's tensor-parallel plan shards by.
+    :return: Bytes per checkpointed MoE block.
+    """
+    if not arch.is_moe:
+        return 0
+    tokens = rows * seq_len
+    width = arch.expert_width
+    elements = 0
+    if expert_parallel > 1:
+        routed = tokens * (arch.n_experts_per_tok or 1) // routed_split
+        elements += 2 * routed * width
+        if routed_split > 1:
+            elements += routed_split * -(-tokens // routed_split) * width
+    if tensor_parallel > 1:
+        if arch.shared_expert_reduce_saved:
+            elements += tokens * arch.hidden_size
+        if arch.moe_latent_size:
+            elements += tokens * (arch.moe_latent_size + arch.hidden_size)
+    return int(elements * act_bytes)
+
+
+def checkpointed_moe_blocks(arch: ModelArch, settings: TrainingSettings) -> int:
+    """MoE blocks among the blocks the trainer checkpoints.
+
+    :param arch: Model architecture.
+    :param settings: Training settings with checkpointing resolved.
+    :return: Checkpointed MoE blocks.
+    """
+    if not arch.is_moe or settings.gradient_checkpointing is not True:
+        return 0
+    if not arch.layer_kinds:
+        return training_checkpointed_blocks(arch, settings)
+    stride = settings.checkpoint_every_n_blocks
+    return sum(1 for kind in arch.layer_kinds[::stride] if kind == "moe")
+
+
 def ep_exchange_bytes(
     arch: ModelArch,
     rows: int,
@@ -834,13 +859,22 @@ def mamba_block_bytes(
     return int(total)
 
 
-def gated_delta_qk_width(arch: ModelArch) -> int:
-    """Per-token width of the gated-delta-net query (or key): key heads x key head dim.
+def gated_delta_conv_dim(arch: ModelArch, tensor_parallel: int = 1) -> int:
+    """Conv channels of one rank's gated-delta-net heads; tensor parallel splits every head group."""
+    heads = tp_local(arch.mamba_n_heads, tensor_parallel)
+    return arch.mamba_conv_dim * heads // arch.mamba_n_heads
 
-    The conv channels are ``[q | k | v]``, so this is what is left of
-    :attr:`ModelArch.mamba_conv_dim` after the value heads, halved.
+
+def gated_delta_qk_width(arch: ModelArch, tensor_parallel: int = 1) -> int:
+    """Per-token width of one rank's gated-delta-net query (or key): key heads x key head dim.
+
+    The conv channels are ``[q | k | v]``, so this is what is left of the
+    rank's conv channels after its value heads, halved.
     """
-    return (arch.mamba_conv_dim - arch.mamba_n_heads * arch.mamba_d_head) // 2
+    heads = tp_local(arch.mamba_n_heads, tensor_parallel)
+    return (
+        gated_delta_conv_dim(arch, tensor_parallel) - heads * arch.mamba_d_head
+    ) // 2
 
 
 def gated_delta_block_bytes(
@@ -849,6 +883,7 @@ def gated_delta_block_bytes(
     seq_len: int,
     act_bytes: float,
     backward: bool = False,
+    tensor_parallel: int = 1,
 ) -> int:
     """Live tensors of one gated-delta-net layer's fla chunk kernel in the trainer.
 
@@ -857,29 +892,24 @@ def gated_delta_block_bytes(
     :param seq_len: Tokens per sequence.
     :param act_bytes: Bytes per activation element.
     :param backward: Whether the layer runs a checkpointed backward.
+    :param tensor_parallel: Degree the mixer's heads are split by.
     :return: Peak bytes of the kernel's tensors; zero without gated-delta layers.
     """
     if not (arch.n_mamba_layers and arch.mamba_gated_delta):
         return 0
-    heads = arch.mamba_n_heads
-    qk = gated_delta_qk_width(arch)
+    heads = tp_local(arch.mamba_n_heads, tensor_parallel)
+    conv_dim = gated_delta_conv_dim(arch, tensor_parallel)
+    qk = gated_delta_qk_width(arch, tensor_parallel)
     key = heads * arch.mamba_d_state
     value = heads * arch.mamba_d_head
     state = heads * arch.mamba_d_state * arch.mamba_d_head / GATED_DELTA_CHUNK
     # Per token: conv1d output, contiguous q/k at the key-head count and v,
     # l2-normed q and k, gate z, WY w and u, updated values, output, the
     # intra-chunk matrix, and one (d_state, d_head) state per head per chunk.
-    width = (
-        arch.mamba_conv_dim
-        + 4 * qk
-        + key
-        + 5 * value
-        + heads * GATED_DELTA_CHUNK
-        + state
-    )
+    width = conv_dim + 4 * qk + key + 5 * value + heads * GATED_DELTA_CHUNK + state
     # A checkpointed backward also keeps the in_proj_qkv output and its gate.
     if backward:
-        width += arch.mamba_conv_dim + value
+        width += conv_dim + value
     return int(rows * seq_len * width * act_bytes)
 
 
@@ -888,6 +918,7 @@ def gated_delta_saved_bytes(
     rows: int,
     seq_len: int,
     act_bytes: float,
+    tensor_parallel: int = 1,
 ) -> int:
     """Tensors a recomputed gated-delta-net layer keeps for its own backward.
 
@@ -895,18 +926,19 @@ def gated_delta_saved_bytes(
     :param rows: Sequences in the micro-batch.
     :param seq_len: Tokens per sequence.
     :param act_bytes: Bytes per activation element.
+    :param tensor_parallel: Degree the mixer's heads are split by.
     :return: Saved bytes; zero without gated-delta layers.
     """
     if not (arch.n_mamba_layers and arch.mamba_gated_delta):
         return 0
-    heads = arch.mamba_n_heads
+    heads = tp_local(arch.mamba_n_heads, tensor_parallel)
     value = heads * arch.mamba_d_head
     # Per token: in_proj_qkv output, l2-normed q and k at the key-head
     # count, contiguous v, the intra-chunk matrix, and fla's fused gated
     # RMSNorm's input, gate and output plus one fp32 rstd per head.
     width = (
-        arch.mamba_conv_dim
-        + 2 * gated_delta_qk_width(arch)
+        gated_delta_conv_dim(arch, tensor_parallel)
+        + 2 * gated_delta_qk_width(arch, tensor_parallel)
         + 4 * value
         + heads * GATED_DELTA_CHUNK
     )
@@ -1024,7 +1056,7 @@ def block_recompute_bytes(
         return int(tokens * (4 * h + qkv_dim + mlp + ple) * act_bytes)
     if arch.mamba_gated_delta:
         mamba = tokens * residual * act_bytes + gated_delta_block_bytes(
-            arch, rows, seq_len, act_bytes, backward
+            arch, rows, seq_len, act_bytes, backward, tensor_parallel
         )
     else:
         mamba = mamba_block_bytes(
@@ -1060,7 +1092,9 @@ def block_recompute_bytes(
             by_layer["attention"] += ffn
             mamba_saved = (
                 tokens * residual * act_bytes
-                + gated_delta_saved_bytes(arch, rows, seq_len, act_bytes)
+                + gated_delta_saved_bytes(
+                    arch, rows, seq_len, act_bytes, tensor_parallel
+                )
                 + norm_input
             )
             by_layer["mamba"] = max(by_layer["mamba"], mamba_saved + ffn)
@@ -1301,6 +1335,9 @@ UNFUSED_MAMBA_SCAN_BYTES = 28
 
 # Chunk length of fla's chunked gated-delta-rule kernel.
 GATED_DELTA_CHUNK = 64
+
+# FlexAttention block size; context-parallel widths on flex round to it.
+FLEX_BLOCK_SIZE = 128
 
 # Per-process job overhead charged when ``orchestrated`` is set.
 JOB_OVERHEAD_BYTES = 50 * MiB

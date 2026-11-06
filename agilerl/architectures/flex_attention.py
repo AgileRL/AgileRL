@@ -81,7 +81,8 @@ def patch_flex_attention_kernel_options(options: dict[str, Any] | None = None) -
     except Exception:
         return
     patched_flag = "_agilerl_kernel_opts_patched"
-    if getattr(flex_attention_forward, patched_flag, False):
+    # Wrappers registered over this patch (Ulysses CP) carry the flag too.
+    if getattr(ALL_ATTENTION_FUNCTIONS["flex_attention"], patched_flag, False):
         return
 
     # Small blocks exist only to fit pre-SM90 SRAM; Hopper keeps the

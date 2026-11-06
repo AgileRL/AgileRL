@@ -63,6 +63,10 @@ from agilerl.distributed.process import (
     is_main_process,
     resolve_device,
 )
+from agilerl.distributed.tensor_parallel import (
+    tensor_parallel_row_orders,
+    tensor_rows_in_order,
+)
 from agilerl.protocols import GenerationConfigProtocol
 from agilerl.typing import (
     JSONValue,
@@ -787,6 +791,7 @@ def get_lora_params(model: nn.Module) -> list[torch.Tensor]:
 def gather_to_host(
     named_tensors: Iterable[tuple[str, torch.Tensor]],
     keep: bool,
+    row_orders: Mapping[str, torch.Tensor] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Gather each tensor in full and copy it into a new host tensor.
 
@@ -798,6 +803,8 @@ def gather_to_host(
     :type named_tensors: Iterable[tuple[str, torch.Tensor]]
     :param keep: Whether this rank keeps the host copies.
     :type keep: bool
+    :param row_orders: Dim-0 row index applied to the gathered tensor, by name.
+    :type row_orders: Mapping[str, torch.Tensor] | None
     :return: Host copies by name; empty when ``keep`` is false.
     :rtype: dict[str, torch.Tensor]
     """
@@ -810,6 +817,8 @@ def gather_to_host(
         full = value.full_tensor() if isinstance(value, DTensor) else value
         if not keep:
             continue
+        if row_orders is not None:
+            full = tensor_rows_in_order(full, row_orders.get(name))
         on_cuda = full.device.type == "cuda"
         buffer = torch.empty(full.shape, dtype=full.dtype, pin_memory=on_cuda)
         buffer.copy_(full, non_blocking=on_cuda)
@@ -916,6 +925,27 @@ class LoraAdapterSnapshot:
     value_head: dict[str, torch.Tensor] = field(default_factory=dict)
 
 
+def adapter_hf_row_orders(
+    peft_model: nn.Module, adapter_name: str
+) -> dict[str, torch.Tensor]:
+    """Rows that put each tensor-parallel-permuted LoRA tensor back in Hugging Face order.
+
+    :param peft_model: PEFT model holding the adapter.
+    :type peft_model: nn.Module
+    :param adapter_name: Adapter to export.
+    :type adapter_name: str
+    :return: Row index by adapter state key (adapter segment and wrapper
+        segments stripped, as :func:`snapshot_lora_adapters` keys it).
+    :rtype: dict[str, torch.Tensor]
+    """
+    segment = f".{adapter_name}."
+    return {
+        canonical_fsdp_param_fqn(fqn.replace(segment, ".")): torch.argsort(order)
+        for fqn, order in tensor_parallel_row_orders(peft_model).items()
+        if segment in fqn
+    }
+
+
 def snapshot_lora_adapters(
     model: nn.Module,
     selected_adapters: Sequence[str],
@@ -959,6 +989,7 @@ def snapshot_lora_adapters(
                 for key, value in raw_state.items()
             ),
             keep=is_main,
+            row_orders=adapter_hf_row_orders(peft_model, adapter_name),
         )
         if not is_main:
             continue
@@ -1065,6 +1096,7 @@ def load_lora_adapters(
     adapter_path = Path(path) / adapter_name / "adapter_model.safetensors"
     adapter_state = safe_load_file(str(adapter_path), device=str(device))
 
+    row_orders = tensor_parallel_row_orders(model)
     missing: list[str] = []
     with torch.no_grad():
         for name, param in model.named_parameters():
@@ -1081,7 +1113,9 @@ def load_lora_adapters(
                 missing.append(loaded_key)
                 continue
 
-            full_tensor = adapter_state[loaded_key].to(device)
+            full_tensor = tensor_rows_in_order(
+                adapter_state[loaded_key].to(device), row_orders.get(name)
+            )
 
             if isinstance(param, DTensor):
                 # FSDP2 DTensor: scatter the full tensor onto the mesh
@@ -1804,6 +1838,7 @@ def create_model_from_name_or_path(
     model_config: dict[str, Any] | None = None,
     add_value_head: bool = False,
     use_distributed: bool = False,
+    use_sequence_packing: bool = False,
 ) -> PreTrainedModel:
     """Create a model from a name or path.
 
@@ -1821,12 +1856,17 @@ def create_model_from_name_or_path(
     :param use_distributed: Whether the model is created for a distributed
         run, defaults to False
     :type use_distributed: bool, optional
+    :param use_sequence_packing: Install packed-sequence mixer wraps.
+    :type use_sequence_packing: bool, optional
     :return: The created model.
     :rtype: PreTrainedModel
     """
     # Class-level family patches wrap mixer ``__init__`` and must run
     # before ``from_pretrained``.
-    install_family_patches(pretrained_model_type(model_name_or_path))
+    install_family_patches(
+        pretrained_model_type(model_name_or_path),
+        use_sequence_packing=use_sequence_packing,
+    )
 
     model_config = dict(model_config) if model_config else {}
     model_config.setdefault("torch_dtype", torch.bfloat16)
@@ -3452,7 +3492,15 @@ def vllm_lora_state_dict(
         )
         raise ValueError(msg)
     check_vllm_lora_export_complete(peft_model, adapter_name, live_state, state)
-    return state
+    hf_orders = {
+        id(raw[name]): order
+        for name, order in adapter_hf_row_orders(peft_model, adapter_name).items()
+        if name in raw
+    }
+    return {
+        key: tensor_rows_in_order(tensor, hf_orders.get(id(tensor)))
+        for key, tensor in state.items()
+    }
 
 
 def save_peft_adapter_for_vllm_rollout(

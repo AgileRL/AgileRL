@@ -9,7 +9,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Generator
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 import torch
 from torch import nn
@@ -18,16 +18,20 @@ from torch.distributed.checkpoint.state_dict import (
     get_model_state_dict,
     get_optimizer_state_dict,
 )
+from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import FSDPModule
-from torch.distributed.tensor import DTensor, distribute_tensor
+from torch.distributed.tensor import DTensor, Partial, Replicate, distribute_tensor
 from torch.nn.utils import clip_grad_norm_
 from torch.optim.lr_scheduler import LambdaLR
 
+from agilerl.distributed.context_parallel import (
+    attention_head_counts,
+    model_attention_backend,
+    substitute_hf_ulysses_attn,
+    validate_cp_heads,
+)
 from agilerl.distributed.expert_parallel import (
-    ParallelMesh,
-    build_parallel_mesh,
     iter_packed_expert_modules,
-    tp_data_parallel_size,
     validate_actor_ep,
 )
 from agilerl.distributed.fsdp import (
@@ -36,15 +40,27 @@ from agilerl.distributed.fsdp import (
     _ep_expert_live_keys,
     _scatter_ep_expert_slices,
     canonical_fsdp_param_fqn,
-    materialize_dtensors,
     materialize_fsdp2_from_cpu_state,
     set_full_model_state_dict,
 )
 from agilerl.distributed.fsdp_blocks import UnforwardedFSDPUnits
+from agilerl.distributed.mesh import (
+    MeshAxisName,
+    ParallelMesh,
+    build_parallel_mesh,
+    tp_data_parallel_size,
+)
 from agilerl.distributed.process import (
     get_world_size,
     raise_on_any_rank,
     sync_grads,
+)
+from agilerl.distributed.tensor_parallel import (
+    clear_gathered_rows,
+    kv_row_span,
+    sum_tp_partial_grads,
+    tensor_parallel_row_orders,
+    tensor_rows_in_order,
 )
 from agilerl.utils.phase_timer import PhaseTimer
 
@@ -124,6 +140,35 @@ def gradient_checkpointing_module(model: nn.Module) -> GradientCheckpointable:
     raise TypeError(msg)
 
 
+def _full_scoring_tensor(tensor: torch.Tensor, cp: int) -> torch.Tensor:
+    """Gather a head ``DTensor`` whose grad sums over CP and averages over data parallel.
+
+    Each data-parallel and CP rank scores its own tokens, so the backward
+    reduce-scatters the per-rank grads. TP ranks share tokens and keep
+    their own slice. A head on a TP-only mesh (a tied embedding) keeps its
+    local grad unscaled; ``ParallelMesh.sync_grads`` reduces it.
+
+    :param tensor: Head weight or bias.
+    :param cp: Context-parallel degree.
+    :return: The dense tensor.
+    """
+    if not isinstance(tensor, DTensor):
+        return tensor
+    names = tensor.device_mesh.mesh_dim_names or ()
+    grad_placements = [
+        Replicate() if name == MeshAxisName.TP else Partial() for name in names
+    ]
+    full = tensor.full_tensor(grad_placements=grad_placements)
+    if full.requires_grad and any(name != MeshAxisName.TP for name in names):
+        data_ranks = 1
+        for name, size in zip(names, tensor.device_mesh.shape, strict=True):
+            if name != MeshAxisName.TP:
+                data_ranks *= size
+        # Gloo has no AVG reduce: scale, then the reduce-scatter sums.
+        full.register_hook(lambda grad: grad * (cp / data_ranks))
+    return full
+
+
 def _host_copy(value: object) -> object:
     """Copy every tensor in a nested dict / list / tuple to a new CPU tensor."""
     if isinstance(value, torch.Tensor):
@@ -172,6 +217,35 @@ def _optimizer_state_as_dict(optimizer: OptimizerWrapper) -> dict[str, Any]:
         msg = "optimizer.state_dict() must return a dict"
         raise TypeError(msg)
     return {key: _host_copy(value) for key, value in state.items()}
+
+
+def _checkpoint_row_orders(
+    model: nn.Module, to_checkpoint: bool
+) -> dict[str, torch.Tensor]:
+    """Row orders that move permuted TP rows to or from checkpoint row order."""
+    orders: dict[str, torch.Tensor] = {}
+    for fqn, order in tensor_parallel_row_orders(model).items():
+        orders[canonical_fsdp_param_fqn(fqn)] = (
+            torch.argsort(order) if to_checkpoint else order
+        )
+    return orders
+
+
+def _rows_in_order(value: object, order: torch.Tensor | None) -> object:
+    if not isinstance(value, torch.Tensor):
+        return value
+    return tensor_rows_in_order(value, order)
+
+
+def _param_state_in_order(
+    state: dict[str, Any], orders: dict[str, torch.Tensor]
+) -> dict[str, Any]:
+    return {
+        fqn: {
+            key: _rows_in_order(value, orders.get(fqn)) for key, value in saved.items()
+        }
+        for fqn, saved in state.items()
+    }
 
 
 def _place_param_optimizer_state(
@@ -765,14 +839,23 @@ class FSDPRuntime(BaseRuntime):
         self.unforwarded_units = UnforwardedFSDPUnits([])
 
     def data_parallel_world(self, process_world_size: int) -> int:
-        return tp_data_parallel_size(process_world_size, self.config.tp)
+        return tp_data_parallel_size(
+            process_world_size, self.config.tp * self.config.cp
+        )
 
     def data_parallel_rank(self, process_rank: int) -> int:
-        return process_rank // self.config.tp
+        return process_rank // (self.config.tp * self.config.cp)
 
     @property
     def is_sharded(self) -> bool:
         return True
+
+    @property
+    def cp_group(self) -> torch.distributed.ProcessGroup:
+        """Context-parallel process group, built by ``prepare_actor`` when ``cp > 1``."""
+        # build_parallel_mesh always builds a cp axis for cp > 1.
+        mesh = cast("ParallelMesh", self.parallel_mesh)
+        return cast("DeviceMesh", mesh.cp).get_group()
 
     @raise_on_any_rank()
     def prepare_actor(
@@ -809,9 +892,12 @@ class FSDPRuntime(BaseRuntime):
         restore_adapter_trainability(["actor", "critic"])
         if self.config.ep > 1:
             validate_actor_ep(actor, self.config.ep, get_world_size())
+        if self.config.cp > 1:
+            self._validate_context_parallel_actor(actor)
         self.parallel_mesh = build_parallel_mesh(
             ep=self.config.ep,
             tp=self.config.tp,
+            cp=self.config.cp,
             shard_group_size=self.config.shard_group_size,
             device_type=torch.device(device).type,
         )
@@ -823,6 +909,8 @@ class FSDPRuntime(BaseRuntime):
             gradient_checkpointing=gradient_checkpointing,
         )
         self.unforwarded_units = UnforwardedFSDPUnits(wrapped.modules())
+        if self.config.cp > 1:
+            self._install_ulysses_attention(actor)
 
         # Fused AdamW steps CPU-offloaded state slower than the default kernel.
         on_gpu = torch.device(device).type == "cuda" and not (
@@ -841,22 +929,65 @@ class FSDPRuntime(BaseRuntime):
             lr_scheduler=make_llm_scheduler(optimizer, cosine_lr_schedule_config),
         )
 
+    def _validate_context_parallel_actor(self, actor: nn.Module) -> None:
+        """Fail unless each TP rank's heads split over ``cp``.
+
+        Also fail unless the attention backend is one Ulysses patches.
+
+        :param actor: The unwrapped actor.
+        """
+        heads, kv_heads = attention_head_counts(actor)
+        kv = heads if kv_heads is None else kv_heads
+        tp = self.config.tp
+        # Each TP rank runs Ulysses over its own query heads and key/value span.
+        for tp_rank in range(tp):
+            kv_start, kv_stop = kv_row_span(heads, kv, 1, tp, tp_rank)
+            validate_cp_heads(heads // tp, kv_stop - kv_start, self.config.cp)
+        backend = model_attention_backend(actor)
+        if backend not in ("flash_attention_2", "flex_attention"):
+            msg = (
+                f"cp={self.config.cp} requires the actor's attention backend "
+                "to be 'flash_attention_2' or 'flex_attention', got "
+                f"{backend!r}: the Ulysses substitution patches those forwards."
+            )
+            raise ValueError(msg)
+
+    def _install_ulysses_attention(self, actor: nn.Module) -> None:
+        """Route the actor's attention through the Ulysses all-to-all on the CP group.
+
+        :param actor: The actor whose attention backend is patched.
+        """
+        substitute_hf_ulysses_attn(
+            self.cp_group, cast("str", model_attention_backend(actor))
+        )
+
     @raise_on_any_rank()
     def export_model_state(self, model: nn.Module) -> dict[str, Any]:
-        return get_model_state_dict(
+        state: dict[str, Any] = get_model_state_dict(
             model,
             options=StateDictOptions(full_state_dict=True, cpu_offload=True),
         )
+        # cpu_offload gives every rank but 0 an empty full state dict.
+        if not state:
+            return state
+        for key, order in _checkpoint_row_orders(model, to_checkpoint=True).items():
+            state[key] = tensor_rows_in_order(state[key], order)
+        return state
 
     @raise_on_any_rank()
     def import_model_state(
         self, model: nn.Module, state: dict[str, Any], strict: bool = False
     ) -> None:
+        orders = _checkpoint_row_orders(model, to_checkpoint=False)
+        state = {
+            key: _rows_in_order(value, orders.get(key)) for key, value in state.items()
+        }
         packed = list(iter_packed_expert_modules(model))
         expert_keys = _ep_expert_live_keys(model, packed) if packed else frozenset()
         if expert_keys:
             _scatter_ep_expert_slices(model, state, expert_keys)
         set_full_model_state_dict(model, state, strict=strict, skip=expert_keys)
+        clear_gathered_rows(model)
 
     @raise_on_any_rank()
     def export_optimizer_state(
@@ -874,7 +1005,11 @@ class FSDPRuntime(BaseRuntime):
             inner_optimizer,
             options=StateDictOptions(full_state_dict=True, cpu_offload=True),
         )
-        return _detach_from_optimizer(state, inner_optimizer)
+        state = _detach_from_optimizer(state, inner_optimizer)
+        if "state" in state:
+            orders = _checkpoint_row_orders(actor, to_checkpoint=True)
+            state["state"] = _param_state_in_order(state["state"], orders)
+        return state
 
     @raise_on_any_rank()
     def import_optimizer_state(
@@ -895,7 +1030,10 @@ class FSDPRuntime(BaseRuntime):
             param: canonical_fsdp_param_fqn(name)
             for name, param in actor.named_parameters()
         }
-        saved_state = optimizer_state.get("state", {})
+        saved_state = _param_state_in_order(
+            optimizer_state.get("state", {}),
+            _checkpoint_row_orders(actor, to_checkpoint=False),
+        )
         saved_params = {
             fqn
             for group in optimizer_state.get("param_groups", [])
@@ -934,12 +1072,17 @@ class FSDPRuntime(BaseRuntime):
         device: torch.device | str,
     ) -> Generator[tuple[torch.Tensor, torch.Tensor | None], None, None]:
         target = torch.device(device)
-        with materialize_dtensors(layer.weight, layer.bias) as (w, b):
-            if w.device != target:
-                w = w.to(target, non_blocking=True)
-            if b is not None and b.device != target:
-                b = b.to(target, non_blocking=True)
-            yield w, b
+        w = _full_scoring_tensor(layer.weight, self.config.cp)
+        b = (
+            None
+            if layer.bias is None
+            else _full_scoring_tensor(layer.bias, self.config.cp)
+        )
+        if w.device != target:
+            w = w.to(target, non_blocking=True)
+        if b is not None and b.device != target:
+            b = b.to(target, non_blocking=True)
+        yield w, b
 
     @raise_on_any_rank()
     def copy_adapter_tensors(
@@ -988,8 +1131,11 @@ class FSDPRuntime(BaseRuntime):
     ) -> OptimizerStep | None:
         """Accumulate, clip, and step.
 
-        FSDP2 reduce-scatters its own DTensors. Trainable params outside
-        FSDP (EP / TP shards, TP-replicated rows) need an explicit all-reduce.
+        FSDP2 reduce-scatters its own DTensors, TP shards on the 2-D mesh
+        included. Plain params FSDP ignores sum over CP and average over data
+        parallel. :meth:`ParallelMesh.sync_grads` all-reduces EP and TP-only
+        shards over their replicas. Replicated params inside TP regions first
+        sum their per-rank grad shares over TP (:func:`sum_tp_partial_grads`).
         """
         is_step_boundary = self._count_micro_batch(gradient_accumulation_steps)
 
@@ -1013,11 +1159,15 @@ class FSDPRuntime(BaseRuntime):
 
         inner = optimizer._single_optimizer()
         params = [param for group in inner.param_groups for param in group["params"]]
-        sync_grads([param for param in params if not isinstance(param, DTensor)])
+        reduce_dtype = getattr(torch, self.config.reduce_dtype)
+        if self.parallel_mesh is not None and self.parallel_mesh.tp is not None:
+            sum_tp_partial_grads(actor, self.parallel_mesh.tp.get_group(), reduce_dtype)
+        sync_grads(
+            [param for param in params if not isinstance(param, DTensor)],
+            self.config.cp,
+        )
         if self.parallel_mesh is not None:
-            self.parallel_mesh.sync_grads(
-                params, getattr(torch, self.config.reduce_dtype)
-            )
+            self.parallel_mesh.sync_grads(params, reduce_dtype)
         self.phase_timer.mark("grad_sync")
         group_grad_norms, clip_coefs = clip_param_groups(
             inner.param_groups,

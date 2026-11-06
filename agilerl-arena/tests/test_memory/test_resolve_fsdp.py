@@ -28,6 +28,7 @@ from agilerl.arena.memory.specs import (
     DeviceSpec,
     GiB,
     MiB,
+    ModelArch,
     ModelSpec,
     TrainingSettings,
 )
@@ -44,7 +45,7 @@ from tests.test_memory.test_estimator import (
     super_vl_cispo,
     training_gpu,
 )
-from tests.test_memory.test_formulas import QWEN_05B
+from tests.test_memory.test_formulas import NEMOTRON_NANO_MAMBA, QWEN_05B
 
 DENSE_MODEL = ModelSpec(model_id="Qwen/Qwen2.5-0.5B-Instruct", arch=QWEN_05B)
 
@@ -586,12 +587,14 @@ class TestResolveTrainingMemoryLastResorts:
             if record.getMessage().startswith("Training memory: turning on")
         ]
         assert turned_on == [
+            "fsdp.save_moe_collectives=False",
             "fsdp.routed_expert_chunk_mib=256",
             "fsdp.routed_expert_chunk_mib=128",
             "fsdp.routed_expert_chunk_mib=64",
             "fsdp.optim_cpu_offload=True",
             "fsdp.activation_offload=True",
         ]
+        assert plan.fsdp.save_moe_collectives is False
         assert plan.fsdp.routed_expert_chunk_mib == 64
         assert plan.fsdp.optim_cpu_offload is True
         assert plan.fsdp.activation_offload is True
@@ -719,6 +722,190 @@ class TestResolveTrainingMemoryLastResorts:
         assert plans[0] == plans[1] == plans[2]
 
 
+NANO_MODEL = ModelSpec(
+    model_id="nano", arch=ModelArch.from_hf_config(NEMOTRON_NANO_MAMBA)
+)
+
+
+def tp_settings(**fsdp: object) -> TrainingSettings:
+    """Nemotron Nano LoRA GRPO at tp=2 on 4 GPUs, rows padded to 4096 tokens."""
+    return TrainingSettings(
+        max_model_len=4096,
+        micro_batch_size=1,
+        n_training_gpus=4,
+        fsdp=FSDPConfig(tp=2, checkpoint_every_n_blocks=1, **fsdp),
+    )
+
+
+def tp_peak(shard_frozen_tp: bool) -> int:
+    """Resharded tp=2 floor peak, one checkpointed row, as the search prices it."""
+    fsdp = replace(
+        tp_settings().fsdp,
+        reshard_after_forward=True,
+        routed_expert_chunk_mib=512,
+        optim_cpu_offload=False,
+        activation_offload=False,
+        cpu_offload=False,
+        shard_frozen_tp=shard_frozen_tp,
+    )
+    return estimate_training(
+        NANO_MODEL,
+        budget_device(80 * GiB),
+        tp_settings().model_copy(update={"fsdp": fsdp, "gradient_checkpointing": True}),
+        orchestrated=True,
+    ).total_bytes
+
+
+def resolve_tp_floor(settings: TrainingSettings, usable: int) -> TrainingMemoryPlan:
+    """The tp=2 plan for one checkpointed row."""
+    return resolve_training_memory(
+        NANO_MODEL,
+        budget_device(usable),
+        settings,
+        MemoryPins(gradient_checkpointing=True, micro_batch_size_per_gpu=1),
+        1,
+    )
+
+
+class TestResolveTrainingMemoryFrozenTensorParallel:
+    def test_keeps_frozen_tp_resident_when_it_fits(self):
+        # Act
+        plan = resolve_tp_floor(tp_settings(), 80 * GiB)
+
+        # Assert
+        assert plan.fsdp.shard_frozen_tp is False
+        assert plan.fsdp.optim_cpu_offload is False
+        assert "fsdp.shard_frozen_tp=False" in plan.describe()
+
+    def test_shards_frozen_tp_first_when_resident_does_not_fit(self, caplog):
+        # Arrange: the sharded floor fits with the buffer, the resident one does not.
+        usable = buffered(tp_peak(True))
+        assert usable < buffered(tp_peak(False))
+
+        # Act
+        with caplog.at_level(logging.INFO):
+            plan = resolve_tp_floor(tp_settings(), usable)
+
+        # Assert
+        turned_on = [
+            record.args[0]
+            for record in caplog.records
+            if record.getMessage().startswith("Training memory: turning on")
+        ]
+        assert turned_on == ["fsdp.shard_frozen_tp=True"]
+        assert plan.fsdp.shard_frozen_tp is True
+        assert plan.fsdp.optim_cpu_offload is False
+        assert plan.breakdown.fits_with_buffer
+
+    def test_set_value_is_kept(self):
+        # Act
+        plan = resolve_tp_floor(tp_settings(shard_frozen_tp=True), 80 * GiB)
+
+        # Assert
+        assert plan.fsdp.shard_frozen_tp is True
+
+    def test_without_tp_the_plan_does_not_describe_it(self):
+        # Act
+        plan = resolve_floor(dense_settings(), 80 * GiB)
+
+        # Assert
+        assert "shard_frozen_tp" not in plan.describe()
+
+
+def moe_save_peak(save_moe_collectives: bool, **fsdp: object) -> int:
+    """Resharded MoE floor peak at the fastest other memory fields, as the search prices it."""
+    settings = moe_floor_settings(
+        reshard_after_forward=True,
+        routed_expert_chunk_mib=512,
+        optim_cpu_offload=False,
+        activation_offload=False,
+        cpu_offload=False,
+        save_moe_collectives=save_moe_collectives,
+        **fsdp,
+    )
+    return estimate_training(
+        MOE_MODEL, budget_device(80 * GiB), settings, orchestrated=True
+    ).total_bytes
+
+
+def turned_on(caplog: pytest.LogCaptureFixture) -> list[object]:
+    """Last resorts the search logged turning on, in order."""
+    return [
+        record.args[0]
+        for record in caplog.records
+        if record.getMessage().startswith("Training memory: turning on")
+    ]
+
+
+class TestResolveTrainingMemorySaveMoeCollectives:
+    def test_saves_collectives_when_it_fits(self):
+        # Act
+        plan = resolve_floor(moe_floor_settings(), 80 * GiB)
+
+        # Assert
+        assert plan.fsdp.save_moe_collectives is True
+        assert plan.fsdp.routed_expert_chunk_mib == 512
+        assert plan.fsdp.optim_cpu_offload is False
+        assert "fsdp.save_moe_collectives=True" in plan.describe()
+
+    def test_recomputes_collectives_first_when_saving_does_not_fit(self, caplog):
+        # Arrange: the floor fits with the buffer only without the saved collectives.
+        usable = buffered(moe_save_peak(False))
+        assert usable < buffered(moe_save_peak(True))
+
+        # Act
+        with caplog.at_level(logging.INFO):
+            plan = resolve_floor(moe_floor_settings(), usable)
+
+        # Assert
+        assert turned_on(caplog) == ["fsdp.save_moe_collectives=False"]
+        assert plan.fsdp.save_moe_collectives is False
+        assert plan.fsdp.routed_expert_chunk_mib == 512
+        assert plan.breakdown.fits_with_buffer
+
+    def test_drops_the_save_before_sharding_frozen_tp(self, caplog):
+        # Arrange: at tp=2 the resident floor does not fit even without the save.
+        usable = buffered(moe_save_peak(False, tp=2, shard_frozen_tp=False)) - 1
+
+        # Act
+        with caplog.at_level(logging.INFO):
+            plan = resolve_floor(moe_floor_settings(tp=2), usable)
+
+        # Assert
+        assert turned_on(caplog)[:2] == [
+            "fsdp.save_moe_collectives=False",
+            "fsdp.shard_frozen_tp=True",
+        ]
+        assert plan.fsdp.save_moe_collectives is False
+        assert plan.breakdown.fits_with_buffer
+
+    def test_set_value_is_kept(self, caplog):
+        # Arrange: saving does not fit the floor.
+        usable = buffered(moe_save_peak(False))
+
+        # Act
+        with caplog.at_level(logging.INFO):
+            kept_on = resolve_floor(
+                moe_floor_settings(save_moe_collectives=True), usable
+            )
+        kept_off = resolve_floor(
+            moe_floor_settings(save_moe_collectives=False), 80 * GiB
+        )
+
+        # Assert
+        assert kept_on.fsdp.save_moe_collectives is True
+        assert "fsdp.save_moe_collectives=False" not in turned_on(caplog)
+        assert kept_off.fsdp.save_moe_collectives is False
+
+    def test_dense_model_leaves_it_unset_and_undescribed(self):
+        # Act
+        plan = resolve_floor(dense_settings(), 80 * GiB)
+
+        # Assert
+        assert plan.fsdp.save_moe_collectives is None
+        assert "save_moe_collectives" not in plan.describe()
+
+
 def fsdp_only(settings: TrainingSettings) -> TrainingSettings:
     """``settings`` with a set field that keeps the search on FSDP; a dense model ignores the chunk."""
     return settings.model_copy(
@@ -780,6 +967,20 @@ class TestResolveTrainingMemoryDataParallel:
         assert plan.breakdown.fits_with_buffer
         assert plan.cost < sharded.cost
         assert plan.describe().startswith("DDP, ")
+
+    def test_context_parallel_stays_on_fsdp_when_ddp_is_cheapest(self):
+        # Arrange: the DDP-cheapest setup above, with the run asking for cp=2.
+        settings = dense_settings(4, cp=2)
+        pins = MemoryPins(gradient_checkpointing=False, micro_batch_size_per_gpu=1)
+        device = budget_device(80 * GiB)
+
+        # Act
+        plan = resolve_training_memory(DENSE_MODEL, device, settings, pins, 4)
+
+        # Assert
+        assert plan.fsdp is not None
+        assert plan.fsdp.cp == 2
+        assert plan.describe().startswith("FSDP, ")
 
     def test_shards_when_ddp_needs_heavier_recompute_that_costs_more(self):
         # Arrange: one checkpointed 4096-token row. DDP checkpoints every

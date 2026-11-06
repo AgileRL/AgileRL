@@ -289,23 +289,12 @@ MODELS_WITHOUT_PACKED_EXPERTS = (
 
 class TestModelInfoSupportsExpertParallelProperty:
     @pytest.mark.parametrize(
-        "hub_id",
-        [
-            hub_id
-            for hub_id, _count in PACKED_EXPERT_COUNTS
-            if hub_id != "openai/gpt-oss-20b"
-        ],
+        "hub_id", [hub_id for hub_id, _count in PACKED_EXPERT_COUNTS]
     )
     def test_packed_expert_models(self, hub_id: str) -> None:
         entry = SUPPORTED_MODEL_INFO[hub_id]
 
         assert entry.supports_expert_parallel is True
-
-    def test_transposed_gpt_oss_experts_do_not_shard(self) -> None:
-        entry = SUPPORTED_MODEL_INFO["openai/gpt-oss-20b"]
-
-        assert entry.supports_expert_parallel is False
-        assert entry.num_routed_experts == 32
 
     @pytest.mark.parametrize("hub_id", MODELS_WITHOUT_PACKED_EXPERTS)
     def test_models_without_packed_experts(self, hub_id: str) -> None:

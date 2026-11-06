@@ -16,7 +16,10 @@ class TestSequencePackingBlocker:
     )
     def test_one_row_packs_on_a_sparse_backend(self, attn_implementation: str) -> None:
         assert (
-            sequence_packing_blocker(True, attn_implementation, 1, False, False) is None
+            sequence_packing_blocker(
+                True, attn_implementation, 1, False, False, "qwen3"
+            )
+            is None
         )
 
     @pytest.mark.parametrize(
@@ -24,7 +27,10 @@ class TestSequencePackingBlocker:
     )
     def test_text_model_packs_stacked_rows(self, attn_implementation: str) -> None:
         assert (
-            sequence_packing_blocker(True, attn_implementation, 2, False, False) is None
+            sequence_packing_blocker(
+                True, attn_implementation, 2, False, False, "qwen3"
+            )
+            is None
         )
 
     @pytest.mark.parametrize(
@@ -35,13 +41,28 @@ class TestSequencePackingBlocker:
         self, attn_implementation: str, row_copies: int
     ) -> None:
         assert (
-            sequence_packing_blocker(True, attn_implementation, row_copies, False, True)
+            sequence_packing_blocker(
+                True, attn_implementation, row_copies, False, True, "gemma4"
+            )
+            is None
+        )
+
+    @pytest.mark.parametrize("model_type", ["gpt_oss", "granitemoehybrid"])
+    def test_position_blind_mask_packs_on_flash_attention_2(
+        self, model_type: str
+    ) -> None:
+        assert (
+            sequence_packing_blocker(
+                True, "flash_attention_2", 1, False, False, model_type
+            )
             is None
         )
 
     def test_padded_algorithm_does_not_pack(self) -> None:
         # Act
-        reason = sequence_packing_blocker(False, "flash_attention_2", 1, False, False)
+        reason = sequence_packing_blocker(
+            False, "flash_attention_2", 1, False, False, "qwen3"
+        )
 
         # Assert
         assert reason == "this algorithm's gradient forward is padded"
@@ -50,7 +71,9 @@ class TestSequencePackingBlocker:
         self,
     ) -> None:
         # Act
-        reason = sequence_packing_blocker(True, "flash_attention_2", 2, False, True)
+        reason = sequence_packing_blocker(
+            True, "flash_attention_2", 2, False, True, "qwen3_5"
+        )
 
         # Assert
         assert reason == (
@@ -61,7 +84,9 @@ class TestSequencePackingBlocker:
     @pytest.mark.parametrize("attn_implementation", ["sdpa", "eager", None])
     def test_dense_backend_does_not_pack(self, attn_implementation: str | None) -> None:
         # Act
-        reason = sequence_packing_blocker(True, attn_implementation, 1, False, False)
+        reason = sequence_packing_blocker(
+            True, attn_implementation, 1, False, False, "qwen3"
+        )
 
         # Assert
         assert reason == (
@@ -69,9 +94,26 @@ class TestSequencePackingBlocker:
             "block-sparse path"
         )
 
+    @pytest.mark.parametrize("model_type", ["gpt_oss", "granitemoehybrid"])
+    def test_position_blind_mask_does_not_pack_on_flex_attention(
+        self, model_type: str
+    ) -> None:
+        # Act
+        reason = sequence_packing_blocker(
+            True, "flex_attention", 1, False, False, model_type
+        )
+
+        # Assert
+        assert reason == (
+            f"{model_type} builds its flex attention masks without position_ids, "
+            "so packed documents would attend to each other"
+        )
+
     def test_leaking_recurrent_state_does_not_pack(self) -> None:
         # Act
-        reason = sequence_packing_blocker(True, "flash_attention_2", 1, True, False)
+        reason = sequence_packing_blocker(
+            True, "flash_attention_2", 1, True, False, "jamba"
+        )
 
         # Assert
         assert reason == "recurrent mixers do not reset at packed document boundaries"

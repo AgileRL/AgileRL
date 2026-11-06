@@ -21,6 +21,9 @@ BOUNDARY_RESET_MODEL_TYPES = frozenset(
         "qwen3_5_moe_text",
     }
 )
+# Model types whose decoder builds attention masks without ``position_ids``. A
+# flex packed forward isolates documents only through that mask.
+POSITION_BLIND_MASK_MODEL_TYPES = frozenset({"gpt_oss", "granitemoehybrid"})
 
 
 def leaks_recurrent_state(model_type: str | None, has_recurrent_layers: bool) -> bool:
@@ -39,6 +42,7 @@ def sequence_packing_blocker(
     row_copies: int,
     recurrent_state_leaks: bool,
     vision_language: bool,
+    model_type: str | None,
 ) -> str | None:
     """Why the gradient forward cannot pack its sequences, or ``None`` when it packs.
 
@@ -49,6 +53,7 @@ def sequence_packing_blocker(
     :param recurrent_state_leaks: A recurrent mixer would carry state across
         packed documents, as :func:`leaks_recurrent_state`.
     :param vision_language: The model has a vision tower.
+    :param model_type: Hugging Face ``model_type`` of the language model.
     :return: A short reason, or ``None`` when packing applies.
     """
     if not supports_sequence_packing:
@@ -57,6 +62,14 @@ def sequence_packing_blocker(
         return (
             f"attn_implementation {attn_implementation!r} has no varlen or "
             "block-sparse path"
+        )
+    if (
+        attn_implementation == "flex_attention"
+        and model_type in POSITION_BLIND_MASK_MODEL_TYPES
+    ):
+        return (
+            f"{model_type} builds its flex attention masks without position_ids, "
+            "so packed documents would attend to each other"
         )
     # Text forwards hand FlashAttention-2 offsets spanning every stacked row.
     # A vision-language forward leaves its text layers to derive them from

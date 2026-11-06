@@ -26,10 +26,11 @@ pytest.importorskip("peft", reason="LLM tests require peft.")
 from peft import LoraConfig
 
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
+from agilerl.algorithms.core.sequence_layout import PaddedSequence
 from agilerl.algorithms.grpo import GRPO
 from agilerl.utils.algo_utils import VLLMConfig
 from tests.rank_launch import run_ranks
-from tests.test_algorithms.test_llms.llm_helpers import create_module
+from tests.test_algorithms.test_llms.llm_helpers import create_module, use_packed
 
 PAD_TOKEN_ID = 63
 VOCAB = 64
@@ -732,13 +733,14 @@ class TestGRPOLearnSamplingSupports:
         # Assert
         _assert_same_gradients(rollout_steps, trainer_steps)
 
-    @pytest.mark.parametrize("packing_mode", [None, "varlen"])
+    @pytest.mark.parametrize("packed", [False, True])
     def test_scored_logprobs_are_normalized_over_the_support(
-        self, monkeypatch: pytest.MonkeyPatch, packing_mode: str | None
+        self, packed: bool
     ) -> None:
         # Arrange
         agent = _make_grpo()
-        monkeypatch.setattr(agent, "_packing_mode", lambda: packing_mode)
+        if packed:
+            use_packed(agent, False)
         ids, mask = _batch()
         supports, expected = _supported_sampling(agent)
         support_ids = GRPO._align_sampling_supports(supports, ids, mask)
@@ -865,13 +867,16 @@ class TestGRPORolloutActorRows:
 class TestScoredLogProbs:
     """Log-probs scored only at ``score_mask`` match full scoring there."""
 
-    @pytest.mark.parametrize("packing_mode", [None, "varlen"])
-    def test_training_forward_matches_full_scoring(
-        self, monkeypatch: pytest.MonkeyPatch, packing_mode: str | None
-    ) -> None:
+    @pytest.mark.parametrize("packed", [False, True])
+    def test_training_forward_matches_full_scoring(self, packed: bool) -> None:
         # Arrange
         agent = _make_grpo()
-        monkeypatch.setattr(agent, "_packing_mode", lambda: packing_mode)
+        if not packed:
+            agent.sequence_layout = PaddedSequence(
+                calc_position_embeddings=agent.calc_position_embeddings,
+            )
+        else:
+            use_packed(agent, False)
         ids, mask = _batch()
 
         # Act
@@ -973,8 +978,7 @@ class TestGRPOLearnSequencePacking:
         # Arrange: two micro-batches per step, odd rows padded.
         padded = _make_grpo(loss_norm=loss_norm, mini_batch_size=4)
         packed = _make_grpo(loss_norm=loss_norm, mini_batch_size=4)
-        monkeypatch.setattr(padded, "_packing_mode", lambda: None)
-        monkeypatch.setattr(packed, "_packing_mode", lambda: "varlen")
+        use_packed(packed, True)
         padded_steps = _record_step_gradients(padded, monkeypatch)
         packed_steps = _record_step_gradients(packed, monkeypatch)
 

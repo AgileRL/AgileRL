@@ -78,6 +78,7 @@ from torch.optim.lr_scheduler import StepLR
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import DQN, IPPO, PPO
 from agilerl.algorithms.core import base as core_base
+from agilerl.algorithms.core import sequence_layout
 from agilerl.algorithms.core.base import (
     EvolvableAlgorithm,
     LLMAlgorithm,
@@ -107,11 +108,12 @@ from agilerl.arena.memory.resolve.fsdp import TrainingMemoryUnfitError
 from agilerl.arena.memory.specs import DeviceSpec
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.profiling import ProfilingConfig
-from agilerl.distributed import FSDPConfig
-from agilerl.distributed.expert_parallel import build_parallel_mesh
+from agilerl.distributed import FSDPConfig, build_parallel_mesh
 from agilerl.distributed.runtime import DPRuntime, FSDPRuntime, PrepareResult
 from agilerl.lora.fused import (
     patch_lora_for_fused_forward,
+    set_fused_adapter_routing,
+    unset_fused_adapter_routing,
 )
 from agilerl.lora.moe import RoutedExpertsLoraWrapper
 from agilerl.modules import EvolvableMLP, ModuleDict
@@ -134,9 +136,15 @@ from tests.test_algorithms.test_base import (
     DummyRLAlgorithmNoPolicy,
 )
 from tests.test_algorithms.test_llms.llm_helpers import (
+    LAYOUTS,
     create_module,
     create_tiny_qwen3,
+    hand_laid_logprobs,
+    layout_batch,
     right_padded_batch,
+    take_grads,
+    use_layout,
+    use_packed,
 )
 from tests.test_algorithms.test_llms.segment_helpers import RESOLVED_FSDP_MEMORY
 from tests.test_algorithms.test_llms.test_ppo_llm_passes import (
@@ -167,6 +175,7 @@ if HAS_LLM_DEPENDENCIES or TYPE_CHECKING:
         LlamaConfig,
         NemotronHConfig,
         NemotronHForCausalLM,
+        Qwen3_5Config,
         Qwen3Config,
         Qwen3ForCausalLM,
         SiglipVisionConfig,
@@ -446,9 +455,7 @@ class TestLLMAlgorithmPlannedChunkImages:
 
         assert planned == [[], []]
 
-    def test_unkeyed_chunks_plan_unkeyed_images_only_where_they_have_rows(
-        self,
-    ) -> None:
+    def test_unkeyed_chunks_plan_unkeyed_images_only_where_they_have_rows(self) -> None:
         chunk_keys = {(0, 1): None, (1, 2): None}
 
         planned = LLMAlgorithm._planned_chunk_images(
@@ -3073,6 +3080,19 @@ class TestLLMAlgorithmTrainingEstimateInputs:
 
         assert settings.max_model_len == 4096
 
+    def test_settings_carry_the_tower_lora_targets(self, moe_ppo, monkeypatch):
+        # Arrange
+        monkeypatch.setattr(moe_ppo, "lora_tower_target_modules", ["qkv", "linear_fc1"])
+
+        # Act
+        _, settings = moe_ppo._training_estimate_inputs(
+            ALGORITHM_NAMES[moe_ppo.algo], 0.0
+        )
+
+        # Assert
+        assert settings.tower_lora_targets == frozenset({"qkv", "linear_fc1"})
+        assert settings.vision_tower_lora
+
     def test_update_rows_are_every_rank_s_rows(self, moe_ppo, monkeypatch):
         # Arrange: 8 prompts x 2 completions over 4 data-parallel ranks.
         monkeypatch.setattr(core_base, "get_world_size", lambda: 4)
@@ -3187,6 +3207,20 @@ class TestLLMAlgorithmTrainingEstimateInputs:
 
         assert model.arch.fp32_norm_inputs is False
         assert model.arch.stock_gated_mlp is False
+
+    def test_cp_keeps_world_gpus_and_folds_only_update_rows(self, moe_ppo, monkeypatch):
+        monkeypatch.setattr(core_base, "get_world_size", lambda: 4)
+        monkeypatch.setattr(moe_ppo, "shard_runtime", FSDPRuntime(FSDPConfig(cp=2)))
+        moe_ppo.configure_batch_size_per_process(8, None, None, group_size=2)
+        moe_ppo.fsdp_config = FSDPConfig(cp=2)
+
+        _, settings = moe_ppo._training_estimate_inputs(
+            ALGORITHM_NAMES[moe_ppo.algo], 0.0
+        )
+
+        assert settings.n_training_gpus == 4
+        assert settings.data_parallel_gpus == 2
+        assert settings.trajectories_per_update == 16
 
 
 def _vision_language_actor() -> nn.Module:
@@ -4197,9 +4231,7 @@ class TestLLMAlgorithmFusedForwardNoGradPacking:
     """A packed no-grad pass scores every real position as the padded pass does."""
 
     @pytest.mark.parametrize("scored", [False, True], ids=["all", "score_mask"])
-    def test_packed_reference_and_actor_match_padded(
-        self, monkeypatch: pytest.MonkeyPatch, scored: bool
-    ) -> None:
+    def test_packed_reference_and_actor_match_padded(self, scored: bool) -> None:
         # Arrange: 3-row chunks of the 8 stacked reference/actor rows cross
         # the adapter boundary.
         agent = _packing_qwen3_grpo()
@@ -4209,7 +4241,7 @@ class TestLLMAlgorithmFusedForwardNoGradPacking:
         padded_ref, padded_actor, _ = agent._fused_forward_no_grad(
             ids, 3, score_mask=score_mask
         )
-        monkeypatch.setattr(agent, "_packing_mode", lambda: "varlen")
+        use_packed(agent, True)
 
         # Act
         packed_ref, packed_actor, _ = agent._fused_forward_no_grad(
@@ -4222,14 +4254,12 @@ class TestLLMAlgorithmFusedForwardNoGradPacking:
         assert torch.allclose(packed_actor[real], padded_actor[real], atol=PACKING_ATOL)
         assert torch.equal(packed_actor[~real], torch.zeros_like(packed_actor[~real]))
 
-    def test_packed_critic_values_match_padded(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_packed_critic_values_match_padded(self) -> None:
         # Arrange
         agent = make_ppo()
         ids, mask = right_padded_batch([12, 9, 6, 11])
         padded_ref, padded_actor, padded_values = agent._fused_forward_no_grad(ids, 3)
-        monkeypatch.setattr(agent, "_packing_mode", lambda: "varlen")
+        use_packed(agent, True)
 
         # Act
         packed_ref, packed_actor, packed_values = agent._fused_forward_no_grad(ids, 3)
@@ -4250,9 +4280,7 @@ class TestLLMAlgorithmFusedForwardNoGradPacking:
             packed_values[real_targets], padded_values[real_targets], atol=PACKING_ATOL
         )
 
-    def test_packed_reference_logprobs_match_padded(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_packed_reference_logprobs_match_padded(self) -> None:
         # Arrange
         agent = _packing_qwen3_grpo()
         ids, mask = right_padded_batch([12, 9, 6, 11])
@@ -4261,7 +4289,7 @@ class TestLLMAlgorithmFusedForwardNoGradPacking:
             padded = agent._get_logprobs(
                 ids, 2, use_reference=True, eval_mode=True, attention_mask=mask
             )
-        monkeypatch.setattr(agent, "_packing_mode", lambda: "varlen")
+        use_packed(agent, True)
 
         # Act
         with torch.no_grad():
@@ -4272,12 +4300,10 @@ class TestLLMAlgorithmFusedForwardNoGradPacking:
         # Assert
         assert torch.allclose(packed[real], padded[real], atol=PACKING_ATOL)
 
-    def test_packed_old_logprobs_match_the_packed_training_forward(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_packed_old_logprobs_match_the_packed_training_forward(self) -> None:
         # Arrange
         agent = _packing_qwen3_grpo()
-        monkeypatch.setattr(agent, "_packing_mode", lambda: "varlen")
+        use_packed(agent, True)
         ids, mask = right_padded_batch([12, 9, 6, 11])
         real = mask[:, 1:]
 
@@ -4288,6 +4314,154 @@ class TestLLMAlgorithmFusedForwardNoGradPacking:
         # Assert
         assert current.requires_grad
         assert torch.allclose(old[real], current.detach()[real], atol=PACKING_ATOL)
+
+
+@pytest.mark.usefixtures("gloo_process_group")
+class TestLLMAlgorithmGetLogprobsLayouts:
+    """Each layout's ``_get_logprobs`` is one hand-laid forward of the same kind."""
+
+    @pytest.mark.parametrize("support", [False, True], ids=["vocab", "support"])
+    @pytest.mark.parametrize("scored", [False, True], ids=["all", "score_mask"])
+    @pytest.mark.parametrize("grad", [False, True], ids=["no_grad", "grad"])
+    @pytest.mark.parametrize("layout", LAYOUTS)
+    def test_matches_the_hand_laid_forward(
+        self,
+        layout: str,
+        grad: bool,
+        scored: bool,
+        support: bool,
+    ) -> None:
+        # Arrange
+        agent = _packing_qwen3_grpo()
+        use_layout(agent, layout)
+        ids, mask, score_mask, support_ids = layout_batch()
+        score_mask = score_mask if scored else None
+        support_ids = support_ids if support else None
+        keep = mask[:, 1:].bool() if score_mask is None else score_mask
+        weights = torch.randn(keep.shape, generator=torch.Generator().manual_seed(2))
+        with torch.set_grad_enabled(grad), agent.select_adapter("actor"):
+            agent.actor.train()
+            expected = hand_laid_logprobs(
+                agent, layout, ids, mask, score_mask, support_ids
+            )
+        if grad:
+            (expected * weights * keep).sum().backward()
+        expected_grads = take_grads(agent.actor)
+
+        # Act
+        with torch.set_grad_enabled(grad):
+            log_probs = agent._get_logprobs(
+                ids,
+                4,
+                attention_mask=mask,
+                score_mask=score_mask,
+                support_ids=support_ids,
+            )
+        if grad:
+            (log_probs * weights * keep).sum().backward()
+        grads = take_grads(agent.actor)
+
+        # Assert
+        assert log_probs.shape == expected.shape
+        assert torch.equal(log_probs[keep], expected[keep])
+        assert grads.keys() == expected_grads.keys()
+        assert bool(grads) is grad
+        for name, grad_tensor in grads.items():
+            assert torch.equal(grad_tensor, expected_grads[name]), name
+
+
+@pytest.mark.usefixtures("gloo_process_group")
+class TestLLMAlgorithmFusedForwardLayouts:
+    """The gradient fused forward is one hand-laid actor forward of the layout's kind."""
+
+    @pytest.mark.parametrize("support", [False, True], ids=["vocab", "support"])
+    @pytest.mark.parametrize("positions", [False, True], ids=["mask", "positions"])
+    @pytest.mark.parametrize("layout", LAYOUTS)
+    def test_matches_the_hand_laid_forward(
+        self,
+        layout: str,
+        positions: bool,
+        support: bool,
+    ) -> None:
+        # Arrange
+        agent = _packing_qwen3_grpo()
+        agent.calc_position_embeddings = positions
+        agent.sequence_layout.calc_position_embeddings = positions
+        use_layout(agent, layout)
+        ids, mask, _, support_ids = layout_batch()
+        support_ids = support_ids if support else None
+        real = mask[:, 1:].bool()
+        weights = torch.randn(real.shape, generator=torch.Generator().manual_seed(2))
+        set_fused_adapter_routing(agent.actor, ["actor"])
+        expected = hand_laid_logprobs(agent, layout, ids, mask, None, support_ids)
+        (expected * weights * real).sum().backward()
+        unset_fused_adapter_routing(agent.actor)
+        expected_grads = take_grads(agent.actor)
+
+        # Act
+        log_probs, _ = agent._fused_model_pass(
+            ids, mask, ["actor"] * ids.shape[0], support_ids=support_ids
+        )
+        (log_probs * weights * real).sum().backward()
+        unset_fused_adapter_routing(agent.actor)
+        grads = take_grads(agent.actor)
+
+        # Assert
+        assert log_probs.shape == expected.shape
+        assert torch.equal(log_probs[real], expected[real])
+        assert grads
+        assert grads.keys() == expected_grads.keys()
+        for name, grad in grads.items():
+            assert torch.equal(grad, expected_grads[name]), name
+
+
+@pytest.mark.usefixtures("gloo_process_group")
+class TestLLMAlgorithmFusedForwardNoGradLayouts:
+    """Each adapter run of the no-grad pass is one hand-laid forward under that adapter."""
+
+    @pytest.mark.parametrize("support", [False, True], ids=["vocab", "support"])
+    @pytest.mark.parametrize("scored", [False, True], ids=["all", "score_mask"])
+    @pytest.mark.parametrize("layout", LAYOUTS)
+    def test_reference_and_actor_rows_match_their_adapter(
+        self,
+        layout: str,
+        scored: bool,
+        support: bool,
+    ) -> None:
+        # Arrange: 4-row micro-batches line up with the 4-row adapter runs.
+        agent = _packing_qwen3_grpo()
+        use_layout(agent, layout)
+        ids, mask, score_mask, support_ids = layout_batch()
+        score_mask = score_mask if scored else None
+        support_ids = support_ids if support else None
+        keep = mask[:, 1:].bool() if score_mask is None else score_mask
+        expected = {}
+        with torch.no_grad():
+            agent.actor.eval()
+            for adapter in ("__base__", "actor"):
+                set_fused_adapter_routing(agent.actor, [adapter])
+                expected[adapter] = hand_laid_logprobs(
+                    agent, layout, ids, mask, score_mask, support_ids
+                )
+            unset_fused_adapter_routing(agent.actor)
+
+        # Act
+        reference, actor, _ = agent._fused_forward_no_grad(
+            ids,
+            4,
+            attention_mask=mask,
+            score_mask=score_mask,
+            support_ids=support_ids,
+        )
+
+        # Assert: Windows CPU GEMMs are not bitwise reproducible across calls.
+        assert not torch.equal(expected["__base__"][keep], expected["actor"][keep])
+        assert torch.allclose(
+            reference[keep], expected["__base__"][keep], rtol=0, atol=PACKING_ATOL
+        )
+        assert torch.allclose(
+            actor[keep], expected["actor"][keep], rtol=0, atol=PACKING_ATOL
+        )
 
 
 RECORDING_ATTENTION = "agilerl_recording_sdpa"
@@ -4323,7 +4497,7 @@ def _counting_pack(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
         packs.append(pack_padded_batch(*args, **kwargs))
         return packs[-1]
 
-    monkeypatch.setattr(core_base, "pack_padded_batch", pack)
+    monkeypatch.setattr(sequence_layout, "pack_padded_batch", pack)
     return packs
 
 
@@ -4331,19 +4505,19 @@ class TestLLMAlgorithmPackedForwardMetadata:
     """A packed micro-batch syncs once and hands attention its varlen offsets."""
 
     def test_varlen_layers_receive_host_offsets_and_logits_are_unchanged(
-        self, monkeypatch: pytest.MonkeyPatch, recording_attention: list
+        self, recording_attention: list
     ) -> None:
         # Arrange: blockmask packs the same row without FlashAttention kwargs.
         agent = _packing_qwen3_grpo()
         agent.actor.config._attn_implementation = RECORDING_ATTENTION
         ids, mask = right_padded_batch([12, 9, 6, 11])
         score_mask = mask[:, 1:]
-        monkeypatch.setattr(agent, "_packing_mode", lambda: "blockmask")
+        use_packed(agent, False)
         with torch.no_grad():
             without_offsets = agent._get_logprobs(ids, 4, score_mask=score_mask)
         blockmask_calls = list(recording_attention)
         recording_attention.clear()
-        monkeypatch.setattr(agent, "_packing_mode", lambda: "varlen")
+        use_packed(agent, True)
 
         # Act
         with torch.no_grad():
@@ -4366,7 +4540,7 @@ class TestLLMAlgorithmPackedForwardMetadata:
     ) -> None:
         # Arrange
         agent = _packing_qwen3_grpo()
-        monkeypatch.setattr(agent, "_packing_mode", lambda: "varlen")
+        use_packed(agent, True)
         ids, mask = right_padded_batch([12, 9, 6, 11])
         score_mask = mask[:, 1:].clone()
         score_mask[:, :3] = False
@@ -4388,7 +4562,7 @@ class TestLLMAlgorithmPackedForwardMetadata:
     ) -> None:
         # Arrange: reference and actor runs of 4 rows in 2-row chunks.
         agent = _packing_qwen3_grpo()
-        monkeypatch.setattr(agent, "_packing_mode", lambda: "varlen")
+        use_packed(agent, True)
         ids, mask = right_padded_batch([12, 9, 6, 11])
         packs = _counting_pack(monkeypatch)
 
@@ -4398,34 +4572,6 @@ class TestLLMAlgorithmPackedForwardMetadata:
         # Assert
         assert [pack.lengths for pack in packs] == [(12, 9), (6, 11)] * 2
         assert [pack.n_scored for pack in packs] == [11 + 8, 5 + 10] * 2
-
-    @pytest.mark.parametrize(
-        ("packing_mode", "pixel_values", "has_offsets"),
-        [
-            ("varlen", None, True),
-            ("varlen", torch.zeros(2, 3), False),
-            ("blockmask", None, False),
-        ],
-        ids=["varlen-text", "varlen-vision", "blockmask"],
-    )
-    def test_only_text_varlen_forwards_pass_offsets(
-        self, packing_mode: str, pixel_values: torch.Tensor | None, has_offsets: bool
-    ) -> None:
-        # Arrange
-        ids, mask = right_padded_batch([5, 3])
-        packed = pack_padded_batch(ids, mask)
-
-        # Act
-        model_kwargs = LLMAlgorithm._packed_model_kwargs(
-            packed, packing_mode, pixel_values
-        )
-
-        # Assert
-        assert model_kwargs["position_ids"].tolist() == [[0, 1, 2, 3, 4, 0, 1, 2]]
-        assert "attention_mask" not in model_kwargs
-        assert all(
-            (name in model_kwargs) is has_offsets for name in FLASH_VARLEN_KWARGS
-        )
 
 
 class TestFusedLinearLogprobsIntegration:
@@ -4636,18 +4782,18 @@ class TestFusedLinearLogprobsIntegration:
         fused_mask = torch.ones_like(fused_ids)
         routing = ["__base__"] * B + ["actor"] * B
         hidden_calls: list[int] = []
-        orig_hidden = agent._fused_chunk_hidden_and_value
+        orig_hidden = agent._forward_hidden_and_value
 
-        def counting_hidden(chunk_ids, chunk_mask, chunk_pos, chunk_pixel_values=None):
-            hidden_calls.append(int(chunk_ids.shape[0]))
-            return orig_hidden(chunk_ids, chunk_mask, chunk_pos, chunk_pixel_values)
+        def counting_hidden(model_kwargs):
+            hidden_calls.append(int(model_kwargs["input_ids"].shape[0]))
+            return orig_hidden(model_kwargs)
 
         with (
             patch(
                 "agilerl.algorithms.core.base.set_fused_adapter_routing",
                 lambda *_a, **_kw: None,
             ),
-            patch.object(agent, "_fused_chunk_hidden_and_value", counting_hidden),
+            patch.object(agent, "_forward_hidden_and_value", counting_hidden),
             torch.no_grad(),
         ):
             log_probs, _ = agent._fused_model_pass(
@@ -4694,11 +4840,11 @@ class TestFusedLinearLogprobsIntegration:
         fused_mask[1, :3] = 1
         fused_ids[fused_mask == 0] = agent.pad_token_id
         forward_lengths: list[int] = []
-        orig_hidden = agent._fused_chunk_hidden_and_value
+        orig_hidden = agent._forward_hidden_and_value
 
-        def recording_hidden(chunk_ids, chunk_mask, chunk_pos, chunk_pixel_values=None):
-            forward_lengths.append(int(chunk_ids.shape[1]))
-            return orig_hidden(chunk_ids, chunk_mask, chunk_pos, chunk_pixel_values)
+        def recording_hidden(model_kwargs):
+            forward_lengths.append(int(model_kwargs["input_ids"].shape[1]))
+            return orig_hidden(model_kwargs)
 
         # Act
         with (
@@ -4706,7 +4852,7 @@ class TestFusedLinearLogprobsIntegration:
                 "agilerl.algorithms.core.base.set_fused_adapter_routing",
                 lambda *_a, **_kw: None,
             ),
-            patch.object(agent, "_fused_chunk_hidden_and_value", recording_hidden),
+            patch.object(agent, "_forward_hidden_and_value", recording_hidden),
             torch.no_grad(),
         ):
             log_probs, _ = agent._fused_model_pass(
@@ -4719,10 +4865,17 @@ class TestFusedLinearLogprobsIntegration:
                 .squeeze(-1)
             )
 
-        # Assert
+        # Assert: cut columns and positions whose hidden state is padding are zero.
+        real_hidden = fused_mask[:, :4].bool()
         assert forward_lengths == [5]
         assert log_probs.shape == (B, T - 1)
-        assert torch.allclose(log_probs[:, :4], reference[:, :4], rtol=1e-5, atol=1e-6)
+        assert torch.allclose(
+            log_probs[:, :4][real_hidden],
+            reference[:, :4][real_hidden],
+            rtol=1e-5,
+            atol=1e-6,
+        )
+        assert not log_probs[:, :4][~real_hidden].any()
         assert torch.equal(log_probs[:, 4:], torch.zeros(B, 2))
 
     def test_grad_pass_keeps_the_padded_width(self) -> None:
@@ -4734,11 +4887,11 @@ class TestFusedLinearLogprobsIntegration:
         fused_mask = torch.ones_like(fused_ids)
         fused_mask[:, 4:] = 0
         forward_lengths: list[int] = []
-        orig_hidden = agent._fused_chunk_hidden_and_value
+        orig_hidden = agent._forward_hidden_and_value
 
-        def recording_hidden(chunk_ids, chunk_mask, chunk_pos, chunk_pixel_values=None):
-            forward_lengths.append(int(chunk_ids.shape[1]))
-            return orig_hidden(chunk_ids, chunk_mask, chunk_pos, chunk_pixel_values)
+        def recording_hidden(model_kwargs):
+            forward_lengths.append(int(model_kwargs["input_ids"].shape[1]))
+            return orig_hidden(model_kwargs)
 
         # Act
         with (
@@ -4746,7 +4899,7 @@ class TestFusedLinearLogprobsIntegration:
                 "agilerl.algorithms.core.base.set_fused_adapter_routing",
                 lambda *_a, **_kw: None,
             ),
-            patch.object(agent, "_fused_chunk_hidden_and_value", recording_hidden),
+            patch.object(agent, "_forward_hidden_and_value", recording_hidden),
         ):
             log_probs, _ = agent._fused_model_pass(fused_ids, fused_mask, ["actor"] * B)
 
@@ -6091,14 +6244,6 @@ class TestLLMInitMiscPaths:
             _make_llm_agent()
         mock_set_seed.assert_called()
 
-    def test_repeat_pixel_values_returns_same_tensor_or_rejects_misaligned_rows(self):
-        agent = _make_llm_agent()
-        pixels = torch.ones(2, 1, 2, 2)
-
-        assert agent._repeat_pixel_values_for_fused_rows(pixels, 2, 2) is pixels
-        with pytest.raises(ValueError, match="cannot align"):
-            agent._repeat_pixel_values_for_fused_rows(pixels, 3, 2)
-
 
 class TestLLMGenerateWithVllmColocate:
     def test_raises_when_sampling_params_none(self):
@@ -7216,6 +7361,7 @@ class TestLLMInitializeActors:
             model_config={"device_map": "cpu"},
             add_value_head=False,
             use_distributed=False,
+            use_sequence_packing=True,
         )
 
     def test_initialize_actors_user_peft_raises(self):
@@ -9109,27 +9255,6 @@ class TestLLMInitializeActorsExpertLoraGuards:
 
 @_LLM_DEPS_SKIP
 class TestLLMFusedForwardPaths:
-    @pytest.mark.parametrize("use_value_head", [False, True])
-    def test_fused_forward_routes_one_actor_row_per_sample(self, use_value_head):
-        # Arrange
-        agent = _make_llm_agent()
-        agent.use_value_head = use_value_head
-        B, T, V, _H = 2, 5, 32, 8
-        ids = torch.randint(1, V, (B, T))
-        agent._packing_mode = MagicMock(return_value=None)
-        agent._fused_model_pass = MagicMock(
-            return_value=(torch.full((B, T - 1), 2.0), torch.zeros(B, T - 1))
-        )
-
-        # Act
-        log_probs = agent._fused_forward(ids)
-
-        # Assert
-        assert torch.equal(log_probs, torch.full((B, T - 1), 2.0))
-        fused_ids, _mask, routing = agent._fused_model_pass.call_args.args
-        assert torch.equal(fused_ids, ids)
-        assert routing == ["actor"] * B
-
     def test_fused_forward_no_grad_respects_microbatch_size(self):
         agent = _make_llm_agent()
         agent.use_value_head = False
@@ -9172,64 +9297,101 @@ class TestLLMFusedForwardPaths:
         assert torch.isnan(ref_logprobs).all()
         assert values is None
 
-    @pytest.mark.parametrize("attn", ["flash_attention_2", "flex_attention"])
-    def test_fused_forward_uses_packed_path_when_enabled(self, attn):
+    @pytest.mark.parametrize("varlen", [True, False], ids=["varlen", "blockmask"])
+    def test_get_logprobs_packs_the_batch_into_one_row(self, varlen):
         # Arrange
-        agent = _make_llm_agent()
-        agent.use_value_head = True
-        agent.sequence_packing = True
-        agent.actor.config._attn_implementation = attn
-        B, T = 2, 5
-        ids = torch.randint(1, 32, (B, T))
-        expected = torch.zeros(B, T - 1)
-
-        # Act
-        with (
-            patch.object(
-                agent, "_fused_packed_forward", return_value=expected
-            ) as packed_fwd,
-            torch.enable_grad(),
-        ):
-            log_probs = agent._fused_forward(ids)
-
-        # Assert
-        packed_fwd.assert_called_once()
-        assert log_probs is expected
-
-    def test_fused_packed_forward_object_output(self):
-
+        torch.manual_seed(0)
+        B, T, H, V = 2, 6, 8, 32
         agent = _make_llm_agent()
         agent.use_value_head = False
         agent.temperature = 1.0
-        B, T, H, V = 2, 6, 8, 32
+        agent.pad_token_id = 0
+        inner = _TinyCausalLM(V, H)
+        seen_kwargs = []
+        forward = inner.forward
+
+        def recording_forward(*args, **kwargs):
+            seen_kwargs.append(kwargs)
+            return forward(*args, **kwargs)
+
+        inner.forward = recording_forward
+        agent.actor = _TinyPeftWrapper(inner)
+        agent.select_adapter = lambda _name: nullcontext()
+        use_packed(agent, varlen)
         ids = torch.randint(1, V, (B, T))
-        mask = torch.ones_like(ids)
+        ids[1, 4:] = agent.pad_token_id
 
-        hidden = torch.randn(1, T, H)
-        actor = MagicMock()
-        actor.forward = MagicMock(return_value=SimpleNamespace(logits=hidden))
-        agent.actor = actor
-        mock_fused_fn = MagicMock(return_value=torch.zeros(1, T - 1))
-        agent._fused_logprob_fn_and_head = MagicMock(
-            return_value=(
-                mock_fused_fn,
-                torch.randn(V, H),
-                None,
-            )
-        )
-        agent._patch_lm_head_to_identity = MagicMock(return_value=nullcontext())
-        agent._amp_ctx = MagicMock(return_value=nullcontext())
-        agent._activation_offload_ctx = MagicMock(return_value=nullcontext())
+        # Act
+        with torch.enable_grad():
+            log_probs = agent._get_logprobs(ids, B)
 
-        with patch(
-            "agilerl.algorithms.core.base.unpack_logprobs",
-            return_value=torch.zeros(B, T - 1),
-        ):
-            log_probs = agent._fused_packed_forward(ids, mask, "varlen")
-
+        # Assert
         assert log_probs.shape == (B, T - 1)
-        assert actor.call_args.kwargs["input_ids"].shape == (1, B * T)
-        assert actor.call_args.kwargs["cu_seq_lens_q"].tolist() == [0, T, 2 * T]
+        assert torch.equal(log_probs[1, 3:], torch.zeros(2))
+        assert len(seen_kwargs) == 1
+        assert seen_kwargs[0]["input_ids"].shape == (1, T + 4)
+        if varlen:
+            assert seen_kwargs[0]["cu_seq_lens_q"].tolist() == [0, T, T + 4]
+        else:
+            assert "cu_seq_lens_q" not in seen_kwargs[0]
+
+
+def _micro_batched_fused_agent(gradient_checkpointing: bool) -> LLMAlgorithm:
+    """CPU agent whose fused pass scores every position as zero."""
+    agent = _make_llm_agent()
+    agent.use_value_head = False
+    agent.gradient_checkpointing = gradient_checkpointing
+    agent._fused_logprob_fn_and_head = MagicMock(
+        return_value=(
+            lambda hidden, *_args, **_kwargs: hidden.new_zeros(hidden.shape[:2]),
+            torch.randn(32, 8),
+            None,
+        )
+    )
+    return agent
+
+
+@_LLM_DEPS_SKIP
+class TestLLMAlgorithmFusedModelPassAdapterRuns:
+    def test_checkpointed_one_adapter_micro_batches_run(self) -> None:
+        # Arrange
+        agent = _micro_batched_fused_agent(gradient_checkpointing=True)
+        ids = torch.randint(1, 32, (2, 5))
+
+        # Act
+        with torch.enable_grad():
+            log_probs, _ = agent._fused_model_pass(
+                ids, torch.ones_like(ids), ["actor", "actor"], batch_size=1
+            )
+
+        # Assert
+        assert log_probs.shape == (2, 4)
+
+    def test_mixed_adapters_run_without_checkpointing(self) -> None:
+        # Arrange
+        agent = _micro_batched_fused_agent(gradient_checkpointing=False)
+        ids = torch.randint(1, 32, (2, 5))
+
+        # Act
+        with torch.enable_grad():
+            log_probs, _ = agent._fused_model_pass(
+                ids, torch.ones_like(ids), ["__base__", "actor"], batch_size=1
+            )
+
+        # Assert
+        assert log_probs.shape == (2, 4)
+
+    def test_checkpointed_mixed_adapter_micro_batches_raise(self) -> None:
+        agent = _micro_batched_fused_agent(gradient_checkpointing=True)
+        ids = torch.randint(1, 32, (2, 5))
+
+        with (
+            torch.enable_grad(),
+            pytest.raises(RuntimeError, match="one adapter"),
+        ):
+            agent._fused_model_pass(
+                ids, torch.ones_like(ids), ["__base__", "actor"], batch_size=1
+            )
 
 
 @_LLM_DEPS_SKIP
@@ -9238,10 +9400,10 @@ class TestLLMGetLogprobsPacked:
         torch.manual_seed(0)
         B, T, H, V = 2, 6, 8, 32
         agent = _make_llm_agent()
-        agent.sequence_packing = True
         agent.calc_position_embeddings = False
         agent.temperature = 1.0
         agent.pad_token_id = 0
+        use_packed(agent, True)
 
         actor = _TinyPeftWrapper(_TinyCausalLM(V, H))
         actor.config._attn_implementation = "flash_attention_2"
@@ -9266,10 +9428,10 @@ class TestLLMGetLogprobsPacked:
         torch.manual_seed(0)
         B, T, H, V = 2, 6, 8, 32
         agent = _make_llm_agent()
-        agent.sequence_packing = True
         agent.calc_position_embeddings = False
         agent.temperature = 1.0
         agent.pad_token_id = 0
+        use_packed(agent, True)
         inner = _TinyCausalLM(V, H)
         seen_pixel_values = []
         forward = inner.forward
@@ -9338,8 +9500,8 @@ class _TinyHybridLM(_TinyCausalLM):
 
 def _warm_kernels_agent(inner: torch.nn.Module) -> LLMAlgorithm:
     agent = _make_llm_agent(offload_trainer_during_rollout=False)
-    agent.sequence_packing = True
     agent.calc_position_embeddings = False
+    use_packed(agent, True)
     agent.max_row_tokens = 16
     agent.micro_batch_tokens_per_gpu = 64
     actor = _TinyPeftWrapper(inner)
@@ -9835,6 +9997,44 @@ class TestLLMAlgorithmInitQuantizationConfig:
         assert agent.model_config["trust_remote_code"] is True
         # lm_head is force-skipped so the fused lm_head matmul stays exact.
         assert quantization_config.llm_int8_skip_modules == ["lm_head"]
+
+
+@_LLM_DEPS_SKIP
+class TestLLMAlgorithmContextParallelGuards:
+    def test_wrap_models_rejects_vision_language_with_cp(self) -> None:
+        actor = _make_mock_peft_actor()
+        actor.get_base_model = lambda: actor
+        actor.config = SimpleNamespace(vision_config=object())
+        agent = _make_llm_agent(actor_network=actor)
+        agent.fsdp_config = FSDPConfig(cp=2, optim_cpu_offload=False)
+
+        with pytest.raises(ValueError, match="engine strips its towers"):
+            agent.wrap_models()
+
+    def test_wrap_models_passes_vision_language_cp_when_engine_strips_towers(
+        self,
+    ) -> None:
+        actor = _make_mock_peft_actor()
+        actor.get_base_model = lambda: actor
+        actor.get_output_embeddings = lambda: None
+        actor.config = Qwen3_5Config(
+            text_config={"num_attention_heads": 4, "num_key_value_heads": 2}
+        )
+        agent = _make_llm_agent(actor_network=actor)
+        agent.fsdp_config = FSDPConfig(
+            cp=2,
+            reshard_after_forward=True,
+            routed_expert_chunk_mib=1,
+            optim_cpu_offload=False,
+            activation_offload=False,
+            cpu_offload=False,
+            checkpoint_every_n_blocks=1,
+        )
+        agent.rollout_strip_multimodal_towers = True
+
+        # The next CP check after the VL guard reads the attention backend.
+        with pytest.raises(ValueError, match="attention backend"):
+            agent.wrap_models()
 
 
 def _lora_wrapped_actor(dtype=torch.float32, lora_dtype=None):
@@ -10534,9 +10734,7 @@ class TestLLMAlgorithmMicroBatchWindows:
 
         assert micro_batch_window_rows(windows[0]) == [[[3, 1], [0, 2]]]
 
-    def test_rows_deal_over_the_fewest_micro_batches_of_the_token_budget(
-        self,
-    ) -> None:
+    def test_rows_deal_over_the_fewest_micro_batches_of_the_token_budget(self) -> None:
         windows = LLMAlgorithm._micro_batch_windows(
             SimpleNamespace(pad_token_id=0),
             [np.array([3, 1, 0, 2])],

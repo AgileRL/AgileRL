@@ -406,20 +406,26 @@ def trainer_packs_sequences(spec: LLMAlgorithmSpec) -> bool:
     resolves with no family backend and no recurrent layers or vision tower.
 
     :param spec: Validated LLM algorithm spec.
-    :return: ``True`` when :func:`sequence_packing_blocker` passes.
+    :return: ``True`` when :func:`sequence_packing_blocker` passes and either
+        ``fsdp.cp`` is 1 or attention runs on FlashAttention-2.
     """
     entry = SUPPORTED_MODEL_INFO.get(spec.pretrained_model_name_or_path or "")
     model_type = None if entry is None else entry.config["model_type"]
     arch = None if entry is None else ModelArch.from_hf_config(entry.config)
+    hybrid = arch is not None and arch.is_hybrid_ssm
+    cp = 1 if spec.fsdp is None else spec.fsdp.cp
     attn_implementation = resolve_attn_implementation(model_type, cuda=True)
     blocker = sequence_packing_blocker(
         spec.supports_sequence_packing,
         attn_implementation,
         spec.gradient_row_copies,
-        leaks_recurrent_state(model_type, arch is not None and arch.is_hybrid_ssm),
+        # CP mixers carry recurrent state across ranks, not documents.
+        leaks_recurrent_state(model_type, hybrid) or (cp > 1 and hybrid),
         arch is not None and arch.vision_n_layers > 0,
+        model_type,
     )
-    return blocker is None
+    # Ulysses attends within published document offsets on FlashAttention-2 only.
+    return blocker is None and (cp == 1 or attn_implementation == "flash_attention_2")
 
 
 def _weight_dtype(value: str | None) -> WeightDtype:
@@ -808,7 +814,7 @@ def training_settings_from_spec(
         images_per_row=images_per_row,
         image_width=image_width,
         image_height=image_height,
-        vision_tower_lora=bool(lora.tower_target_modules),
+        tower_lora_targets=frozenset(lora.tower_target_modules or ()),
         segmented_rows=segmented_rows,
         checkpoint_optimizer=checkpoint_optimizer,
         async_rollout=async_rollout,

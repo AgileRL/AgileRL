@@ -217,6 +217,21 @@ class TestResolvedMemoryFields:
         assert validated.algorithm.micro_batch_size_per_gpu == 2
         assert validated.algorithm.fsdp.reshard_after_forward is False
 
+    def test_picked_shard_frozen_tp_validates_on_the_model(self) -> None:
+        doc = manifest(GRPO, algorithm={"fsdp": {"tp": 2, "shard_frozen_tp": False}})
+
+        validated = TrainingManifest.model_validate(doc)
+
+        assert validated.algorithm.fsdp.shard_frozen_tp is False
+        assert validated.algorithm.fsdp.frozen_tp_resident is True
+
+    def test_picked_save_moe_collectives_validates_on_the_model(self) -> None:
+        doc = manifest(GRPO, algorithm={"fsdp": {"save_moe_collectives": True}})
+
+        validated = TrainingManifest.model_validate(doc)
+
+        assert validated.algorithm.fsdp.save_moe_collectives is True
+
     @pytest.mark.parametrize(
         ("algorithm", "dotted"),
         [
@@ -233,6 +248,8 @@ class TestResolvedMemoryFields:
             ),
             ({"fsdp": {"activation_offload": False}}, "fsdp.activation_offload"),
             ({"fsdp": {"cpu_offload": True}}, "fsdp.cpu_offload"),
+            ({"fsdp": {"shard_frozen_tp": False}}, "fsdp.shard_frozen_tp"),
+            ({"fsdp": {"save_moe_collectives": True}}, "fsdp.save_moe_collectives"),
             (
                 {"fsdp": {"checkpoint_every_n_blocks": 2}},
                 "fsdp.checkpoint_every_n_blocks",
@@ -2784,6 +2801,52 @@ class TestThinkingBudgetParser:
         validated = TrainingManifest.model_validate(GRPO)
 
         assert validated.algorithm.thinking_token_budget is None
+
+
+def parallel_manifest(model: str, tp: int, ep: int) -> dict:
+    """GRPO manifest for *model* with the given tensor and expert parallel sizes."""
+    return manifest(
+        GRPO,
+        algorithm={"fsdp": {"tp": tp, "ep": ep}},
+        network={"pretrained_model_name_or_path": model},
+    )
+
+
+class TestExpertParallelCoversTensorParallel:
+    @pytest.mark.parametrize(("tp", "ep"), [(2, 2), (2, 4), (1, 2)])
+    def test_accepts_ep_at_or_above_tp_for_a_moe_model(self, tp: int, ep: int) -> None:
+        validated = TrainingManifest.model_validate(
+            parallel_manifest("openai/gpt-oss-20b", tp, ep)
+        )
+
+        assert (validated.algorithm.fsdp.tp, validated.algorithm.fsdp.ep) == (tp, ep)
+
+    def test_accepts_tp_without_ep_for_a_dense_model(self) -> None:
+        validated = TrainingManifest.model_validate(
+            parallel_manifest("Qwen/Qwen3-4B", 2, 1)
+        )
+
+        assert validated.algorithm.fsdp.tp == 2
+
+    def test_rejects_ep_below_tp_for_a_moe_model(self) -> None:
+        with pytest.raises(
+            ValidationError,
+            match=(
+                r"algorithm\.fsdp\.ep=1 is below tp=2: openai/gpt-oss-20b is a "
+                r"mixture-of-experts model, and tensor parallel does not split "
+                r"routed experts\. Set ep >= tp\."
+            ),
+        ):
+            TrainingManifest.model_validate(
+                parallel_manifest("openai/gpt-oss-20b", 2, 1)
+            )
+
+    def test_leaves_an_unsupported_model_to_the_trainer(self) -> None:
+        validated = TrainingManifest.model_validate(
+            parallel_manifest("org/untracked", 2, 1)
+        )
+
+        assert validated.algorithm.fsdp.tp == 2
 
 
 class TestLoraDropoutResolution:
