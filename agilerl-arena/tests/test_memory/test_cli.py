@@ -194,6 +194,14 @@ def moe_config_path(tmp_path):
     return str(path)
 
 
+@pytest.fixture
+def qwen3_4b_config_path(tmp_path):
+    path = tmp_path / "qwen3-4b" / "config.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps(SUPPORTED_MODEL_INFO["Qwen/Qwen3-4B"].config))
+    return str(path)
+
+
 def write_manifest(tmp_path, doc, name, max_context_length=None):
     doc = copy.deepcopy(doc)
     if max_context_length is not None:
@@ -881,6 +889,31 @@ class TestSolveMain:
         assert "training" not in payload
         assert payload["generation"]["components"]
 
+    def test_inference_fp8_quantization_fits_a_longer_context(
+        self, qwen3_4b_config_path, capsys
+    ):
+        # Arrange
+        request = {
+            "inference": True,
+            "gpu": "NVIDIA L4",
+            "model_id": "Qwen/Qwen3-4B",
+            "config_path": qwen3_4b_config_path,
+            "as_json": True,
+        }
+
+        # Act
+        bf16_code = run_solve("max_model_len", **request)
+        bf16 = json.loads(capsys.readouterr().out)
+        fp8_code = run_solve("max_model_len", quantization="fp8", **request)
+        fp8 = json.loads(capsys.readouterr().out)
+
+        # Assert: half-size engine weights leave more of the card for KV cache.
+        assert bf16_code == EXIT_OK
+        assert fp8_code == EXIT_OK
+        assert bf16["limited_by"] == "memory"
+        assert fp8["limited_by"] == "memory"
+        assert fp8["value"] > bf16["value"]
+
     def test_from_manifest(self, manifest_path, capsys):
         code = run_solve(
             "max_model_len",
@@ -1291,6 +1324,84 @@ class TestMemorySolveCommand:
         # Assert
         assert result.exit_code == EXIT_OK
         assert "Solved max_model_len = 32768" in result.output
+
+    def test_quantization_with_a_training_manifest_is_a_usage_error(
+        self, manifest_path
+    ):
+        # Act
+        result = CliRunner().invoke(
+            memory_group,
+            [
+                "solve",
+                "max_model_len",
+                manifest_path,
+                "--gpu",
+                "NVIDIA L4",
+                "--config",
+                TINY_CONFIG,
+                "--quantization",
+                "fp8",
+            ],
+        )
+
+        # Assert
+        assert result.exit_code == EXIT_USAGE
+        assert (
+            "--quantization applies to --inference; training manifests set "
+            "vllm_config.quantization." in result.stderr
+        )
+
+    def test_fp8_on_a100_is_a_usage_error(self):
+        # Act
+        result = CliRunner().invoke(
+            memory_group,
+            [
+                "solve",
+                "max_model_len",
+                "--inference",
+                "--gpu",
+                "A100-80GB",
+                "--model",
+                "tiny",
+                "--config",
+                TINY_CONFIG,
+                "--quantization",
+                "fp8",
+            ],
+        )
+
+        # Assert
+        assert result.exit_code == EXIT_USAGE
+        assert (
+            "--quantization fp8 needs a GPU with native fp8 (compute capability "
+            "8.9+); NVIDIA A100-SXM4-80GB is 8.0." in result.stderr
+        )
+
+    def test_fp8_with_device_gb_is_a_usage_error(self):
+        # Act
+        result = CliRunner().invoke(
+            memory_group,
+            [
+                "solve",
+                "max_model_len",
+                "--inference",
+                "--device-gb",
+                "24",
+                "--model",
+                "tiny",
+                "--config",
+                TINY_CONFIG,
+                "--quantization",
+                "fp8",
+            ],
+        )
+
+        # Assert
+        assert result.exit_code == EXIT_USAGE
+        assert (
+            "--quantization fp8 needs a catalogued --gpu with native fp8 "
+            "(compute capability 8.9+)." in result.stderr
+        )
 
 
 TIERS = [

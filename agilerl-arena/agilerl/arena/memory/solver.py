@@ -119,7 +119,8 @@ def inference_run_config(
     """A dedicated serving GPU: generation only, no job overhead.
 
     Training settings stay at defaults and are ignored — inference has no
-    trainer on the card.
+    trainer on the card. The server merges the adapter into the base weights,
+    so the engine runs with LoRA off.
     """
     generation = (
         settings
@@ -133,7 +134,7 @@ def inference_run_config(
         model=model,
         train_device=device,
         gen_device=device,
-        generation=generation,
+        generation=generation.model_copy(update={"merged_lora_sync": True}),
     )
 
 

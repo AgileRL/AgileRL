@@ -1386,8 +1386,8 @@ class GenerationSettings(BaseModel):
     # set ``lora_dual_stream: false``; it runs a dense model's LoRA layers on
     # two CUDA streams (``VLLM_LORA_ENABLE_DUAL_STREAM``).
     lora_dual_stream: bool = False
-    # A Ray rollout engine receives merged weights and runs with LoRA off: no
-    # adapter slots or LoRA streams, and its NIXL buffer on every GPU holds
+    # The engine serves merged weights with LoRA off: no adapter slots or LoRA
+    # streams. With ``lora_sync_scope`` set, its NIXL buffer on every GPU holds
     # one round of merged weights.
     merged_lora_sync: bool = False
 
