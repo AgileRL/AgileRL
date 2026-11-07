@@ -12,6 +12,7 @@ import math
 from dataclasses import dataclass, replace
 from typing import Literal
 
+from agilerl.arena.memory import lora_formulas
 from agilerl.arena.memory.resolve.chunk import resolve_chunk_rows
 from agilerl.arena.memory.specs import (
     DTYPE_BYTES,
@@ -377,6 +378,42 @@ def param_counts(arch: ModelArch, n_params: int | None = None) -> ParamCounts:
     if n_params is None:
         return counts
     return replace(counts, unattributed=n_params - counts.total)
+
+
+def merged_lora_sync_bytes(
+    arch: ModelArch,
+    scope: LoraTargetScope,
+    n_packed_matrices: int,
+    dtype_bytes: float,
+) -> tuple[int, int]:
+    """Bytes of the merged weights a merged-LoRA sync pushes, and of the largest one.
+
+    The pushed weights are the linears
+    :func:`~agilerl.arena.memory.lora_formulas.decoder_lora_linears` lists,
+    without biases. Packed experts are pushed whole: ``gate_up_proj`` and
+    ``down_proj`` are two targeted parameters, and one target is charged
+    as ``gate_up_proj``, the larger.
+
+    :param arch: Model architecture.
+    :param scope: Adapter target scope.
+    :param n_packed_matrices: PEFT ``target_parameters`` on packed experts.
+    :param dtype_bytes: Bytes per element of the engines' weight dtype.
+    :return: Total bytes, and bytes of the largest pushed tensor.
+    """
+    sizes = [
+        (linear.in_features * linear.out_features, linear.count)
+        for linear in lora_formulas.decoder_lora_linears(arch, scope)
+    ]
+    if n_packed_matrices and arch.n_experts and arch.n_experts > 1:
+        expert_inter = arch.expert_intermediate_size or arch.intermediate_size
+        down = arch.n_experts * arch.expert_width * expert_inter
+        gate_up = (2 if arch.gated_mlp else 1) * down
+        sizes.append((gate_up, arch.moe_layers))
+        if n_packed_matrices > 1:
+            sizes.append((down, arch.moe_layers))
+    total = sum(size * count for size, count in sizes if count)
+    largest = max((size for size, count in sizes if count), default=0)
+    return int(total * dtype_bytes), int(largest * dtype_bytes)
 
 
 def weight_bytes(

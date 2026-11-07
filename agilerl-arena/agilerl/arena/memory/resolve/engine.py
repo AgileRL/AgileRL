@@ -88,12 +88,16 @@ def _resident_sequences(
     device: DeviceSpec,
     width: int,
     engines: int,
+    adapter_sync: bool = False,
 ) -> int:
     """Sequences ``engines`` engines of ``width`` GPUs keep resident; 0 when none fits."""
     vllm = manifest.algorithm.vllm_config
     try:
         trial = generation_settings_from_manifest(
-            manifest, tensor_parallel_size=width, rollout_engines=engines
+            manifest,
+            tensor_parallel_size=width,
+            rollout_engines=engines,
+            adapter_sync=adapter_sync,
         )
         if "max_num_seqs" in vllm.model_fields_set:
             breakdown = estimate_generation(model, device, trial)
@@ -148,6 +152,7 @@ def resolve_engine_tensor_parallel(
     total_gpus: int,
     device: DeviceSpec,
     gpus_per_node: int | None = None,
+    adapter_sync: bool = False,
 ) -> int | None:
     """Assign the omitted engine width that keeps the most sequences resident.
 
@@ -158,6 +163,8 @@ def resolve_engine_tensor_parallel(
     :param total_gpus: GPUs in the allocation.
     :param device: One GPU of that allocation.
     :param gpus_per_node: GPUs on one node. Defaults to ``total_gpus``.
+    :param adapter_sync: Weight sync pushes the adapter even where the engines
+        could serve merged weights, so each engine holds a LoRA slot.
     :return: The assigned width, or None when the manifest is left unchanged.
     """
     spec = manifest.algorithm
@@ -186,7 +193,9 @@ def resolve_engine_tensor_parallel(
     model = _engine_model(hub_id, info)
     best: tuple[int, int, int] | None = None
     for width, engines in candidates:
-        score = _resident_sequences(manifest, model, device, width, engines)
+        score = _resident_sequences(
+            manifest, model, device, width, engines, adapter_sync
+        )
         rank = (score, engines, width)
         if score > 0 and (best is None or rank > best):
             best = rank
@@ -198,7 +207,7 @@ def resolve_engine_tensor_parallel(
 
 
 def resolve_engine_fast_path(
-    manifest: TrainingManifest, device: DeviceSpec
+    manifest: TrainingManifest, device: DeviceSpec, adapter_sync: bool = False
 ) -> RolloutLLMSpec | None:
     """Pin off the engine defaults :func:`drop_engine_fast_paths` turns off on ``device``.
 
@@ -208,6 +217,8 @@ def resolve_engine_fast_path(
 
     :param manifest: Validated async rollout manifest.
     :param device: The rollout engine's GPU.
+    :param adapter_sync: Weight sync pushes the adapter even where the engines
+        could serve merged weights.
     :return: The rewritten algorithm spec, or None when the manifest is left unchanged.
     """
     spec = manifest.algorithm
@@ -218,7 +229,7 @@ def resolve_engine_fast_path(
     info = SUPPORTED_MODEL_INFO.get(hub_id) if hub_id is not None else None
     if info is None or vllm.tensor_parallel_size is None:
         return None
-    settings = generation_settings_from_manifest(manifest)
+    settings = generation_settings_from_manifest(manifest, adapter_sync=adapter_sync)
     lean = drop_engine_fast_paths(_engine_model(hub_id, info), device, settings)
     if lean == settings:
         return None

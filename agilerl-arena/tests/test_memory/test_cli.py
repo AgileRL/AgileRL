@@ -141,6 +141,39 @@ UNSET_WIDTH_MOE = {
     "replay_buffer": {"kind": "llm", "name": "async_llm", "memory_size": 256},
 }
 
+#: Qwen3-4B GRPO at 4 trainers and 4 engines; a 5.25 GiB GPU fits only adapter-sync trainers.
+KEPT_COUNTDOWN = {
+    "algorithm": {
+        "name": "GRPO",
+        "batch_size": 64,
+        "group_size": 8,
+        "max_output_tokens": 1024,
+        "fsdp": {},
+    },
+    "environment": {
+        "env_type": "rollout",
+        "dataset": "dataset.json",
+        "rubric_file_path": "countdown_reward.py",
+        "prompt_template": {
+            "system_prompt": "Answer in <answer> </answer> tags.",
+            "user_prompt": "Make {answer} from {question}.",
+        },
+        "max_reward": 2.0,
+    },
+    "network": {
+        "pretrained_model_name_or_path": "Qwen/Qwen3-4B",
+        "max_context_length": 1536,
+        "lora_config": {"lora_r": 16, "lora_alpha": 32},
+    },
+    "training": {
+        "rollout_mode": "async",
+        "training_gpus_per_agent": 4,
+        "rollout_engines_per_agent": 4,
+        "pop_size": 1,
+    },
+    "replay_buffer": {"kind": "llm", "drop_uninformative_groups": False},
+}
+
 #: SFT trains without a rollout engine.
 SFT_MANIFEST = {
     "algorithm": {"name": "SFT"},
@@ -430,6 +463,61 @@ class TestMain:
         payload = json.loads(capsys.readouterr().out)
         assert code == EXIT_OK
         assert payload["engine"] == {"tensor_parallel_size": width, "max_num_seqs": 16}
+
+    @pytest.mark.parametrize(
+        ("device_gb", "send_buffer"),
+        [(None, "Merged weight send buffer"), (5.25, "LoRA send buffer")],
+    )
+    def test_num_gpus_prices_the_weight_sync_the_run_picks(
+        self, tmp_path, capsys, device_gb, send_buffer
+    ):
+        # Arrange
+        path = write_manifest(tmp_path, KEPT_COUNTDOWN, "countdown.yaml")
+        config_path = tmp_path / "qwen3" / "config.json"
+        config_path.parent.mkdir()
+        config_path.write_text(json.dumps(SUPPORTED_MODEL_INFO["Qwen/Qwen3-4B"].config))
+
+        # Act
+        main(
+            path,
+            config_path=str(config_path),
+            gpu="NVIDIA L4",
+            device_gb=device_gb,
+            num_gpus=8,
+            as_json=True,
+        )
+
+        # Assert
+        components = json.loads(capsys.readouterr().out)["training"]["components"]
+        labels = {component["key"]: component["label"] for component in components}
+        assert labels["lora_send_buffer"] == send_buffer
+
+    @pytest.mark.parametrize("device_gb", [None, 8], ids=["split_fits", "no_split"])
+    def test_searched_split_prices_merged_sync(self, tmp_path, capsys, device_gb):
+        # Arrange: no counts set, so the split is searched; on 8 GiB none fits
+        # and the manifest's own counts are priced, still merged first.
+        doc = copy.deepcopy(KEPT_COUNTDOWN)
+        del doc["training"]["training_gpus_per_agent"]
+        del doc["training"]["rollout_engines_per_agent"]
+        path = write_manifest(tmp_path, doc, "countdown.yaml")
+        config_path = tmp_path / "qwen3" / "config.json"
+        config_path.parent.mkdir()
+        config_path.write_text(json.dumps(SUPPORTED_MODEL_INFO["Qwen/Qwen3-4B"].config))
+
+        # Act
+        main(
+            path,
+            config_path=str(config_path),
+            gpu="NVIDIA L4",
+            device_gb=device_gb,
+            num_gpus=8,
+            as_json=True,
+        )
+
+        # Assert
+        components = json.loads(capsys.readouterr().out)["training"]["components"]
+        labels = {component["key"]: component["label"] for component in components}
+        assert labels["lora_send_buffer"] == "Merged weight send buffer"
 
     def test_unset_width_without_num_gpus_is_a_usage_error(self, tmp_path, capsys):
         path = write_manifest(tmp_path, UNSET_WIDTH_MOE, "moe.yaml")
@@ -837,12 +925,13 @@ class TestSolveMain:
             engine = json.loads(capsys.readouterr().out)["engine"]
             verdicts.append((verdict, engine["tensor_parallel_size"]))
 
-        # Assert: the cutoff is the run's at TP=4, past the TP=2 KV limit.
+        # Assert: merged-sync engines hold no LoRA, so the cutoff is the
+        # run's at TP=2, past the TP=1 KV limit.
         assert code == EXIT_OK
         assert payload["limited_by"] == "memory"
-        assert payload["engine"]["tensor_parallel_size"] == 4
+        assert payload["engine"]["tensor_parallel_size"] == 2
         assert payload["value"] > 32768
-        assert verdicts == [(EXIT_OK, 4), (EXIT_OVER_BUDGET, 4)]
+        assert verdicts == [(EXIT_OK, 2), (EXIT_OVER_BUDGET, 2)]
 
     def test_unset_width_without_num_gpus_is_a_usage_error(self, tmp_path, capsys):
         path = write_manifest(tmp_path, UNSET_WIDTH_MOE, "moe.yaml")
@@ -947,8 +1036,8 @@ class TestSolveMain:
             kv = next(c for c in bar["components"] if c["key"] == "kv_cache")
             return kv["detail"]["worst_case_demand"]
 
-        assert total(plain_payload["training"]) == 1685538487
-        assert total(overridden_payload["training"]) == 1706977567
+        assert total(plain_payload["training"]) == 1685585591
+        assert total(overridden_payload["training"]) == 1705295425
         # The generation bar fills the utilization budget at either context.
         assert kv_demand(overridden_payload["generation"]) == 8 * kv_demand(
             plain_payload["generation"]

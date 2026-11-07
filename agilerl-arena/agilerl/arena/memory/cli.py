@@ -42,11 +42,15 @@ from agilerl.arena.memory.manifest import (
 from agilerl.arena.memory.resolve.sequences import (
     ROLLOUT_ENGINE_GPU_MEMORY_UTILIZATION,
 )
+from agilerl.arena.memory.resolve.split import kept_split_merged_lora_sync
 from agilerl.arena.memory.resources import (
     TierCheck,
     check_tiers,
     engine_width,
     engines_per_member,
+    searches_gpu_split,
+    tier_sync_link,
+    with_run_gpu_split,
 )
 from agilerl.arena.memory.solver import (
     INFERENCE_MAX_NUM_SEQS,
@@ -337,16 +341,47 @@ def _resolve_device(
     return None
 
 
+def _planned_merged_lora_sync(
+    manifest: TrainingManifest,
+    model: ModelSpec,
+    device: DeviceSpec,
+    num_gpus: int | None,
+) -> bool:
+    """Whether weight sync pushes merged weights on ``num_gpus`` GPUs of one node, as :func:`check_tiers` picks it.
+
+    Without ``num_gpus`` no link is known: merged sync where the engines can serve it.
+    """
+    if num_gpus is None:
+        return True
+    sync_link = tier_sync_link(num_gpus, None)
+    if searches_gpu_split(manifest):
+        try:
+            _, merged = with_run_gpu_split(manifest, num_gpus, device, None, sync_link)
+        except ValueError:
+            # No split fits: check_tiers sizes the manifest's own counts.
+            pass
+        else:
+            return merged
+    return kept_split_merged_lora_sync(
+        manifest, model, device, num_gpus, None, sync_link
+    )
+
+
 def _allocation_layout(
-    manifest: TrainingManifest, num_gpus: int | None, device: DeviceSpec
+    manifest: TrainingManifest,
+    num_gpus: int | None,
+    device: DeviceSpec,
+    adapter_sync: bool,
 ) -> tuple[int | None, int | None]:
     """Engine width and engines per member the run starts on ``num_gpus``; ``None`` reads the manifest.
 
+    :param adapter_sync: Weight sync pushes the adapter even where the engines
+        could serve merged weights.
     :raises ValueError: The run picks them from a GPU count and ``num_gpus``
         is unset, or the node has too few GPUs.
     """
     if num_gpus is not None:
-        width = engine_width(manifest, num_gpus, device)
+        width = engine_width(manifest, num_gpus, device, None, adapter_sync)
         return width, engines_per_member(manifest, num_gpus, width)
     spec = manifest.algorithm
     if not isinstance(spec, RolloutLLMSpec) or spec.vllm_config is None:
@@ -552,6 +587,7 @@ def main(
         train_device: DeviceSpec,
         width: int | None,
         engines: int | None,
+        adapter_sync: bool,
     ) -> RunConfig:
         return run_config_from_manifest(
             laid_out,
@@ -561,22 +597,24 @@ def main(
             gen_device=gen_device,
             tensor_parallel_size=width,
             rollout_engines=engines,
+            adapter_sync=adapter_sync,
         )
 
     chosen: TierCheck | None = None
     checks: list[TierCheck] = []
     try:
         if device is None:
-            checks = check_tiers(tiers or [], manifest, build_config)
+            checks = check_tiers(tiers or [], manifest, model_spec, build_config)
             chosen = next((check for check in checks if check.fits), None)
             if chosen is None or chosen.config is None:
                 return _report_no_tier(checks, as_json)
             config = chosen.config
         else:
+            merged = _planned_merged_lora_sync(manifest, model_spec, device, num_gpus)
             width, engines = _allocation_layout(
-                manifest, num_gpus, gen_device or device
+                manifest, num_gpus, gen_device or device, not merged
             )
-            config = build_config(manifest, device, width, engines)
+            config = build_config(manifest, device, width, engines, not merged)
     except KeyError as err:
         return _report_missing_key(err)
     except ValueError as err:
@@ -1013,7 +1051,7 @@ def _manifest_config(
                 setattr(trial_spec, key, setting)
             elif vllm is not None:
                 setattr(vllm, key, setting)
-        width, engines = _allocation_layout(trial, num_gpus, engine_device)
+        width, engines = _allocation_layout(trial, num_gpus, engine_device, False)
         return run_config_from_manifest(
             trial,
             device,

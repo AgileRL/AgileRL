@@ -1,20 +1,27 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
-"""Which Ray runs generate on async rollout engines, how many they start, their cycle size and whether they draft."""
+"""Which Ray runs generate on async rollout engines, how many they start, their cycle size, whether they draft and how they sync LoRA."""
 
 from typing import Any
 
 import pytest
 
 from agilerl.arena.memory.resolve.rollout import (
+    MERGED_SYNC_BUCKET_BYTES,
+    MULTI_TURN_SPECULATIVE_CONFIG,
     apply_run_rollout_mode,
     async_rollout_algorithm,
+    checkpoint_quantized,
     default_rollout_batch_size,
     drafts_by_default,
+    drafts_with_mtp,
+    merged_lora_sync_eligible,
+    merged_sync_bucket_bytes,
     rollout_engines_blocker,
     run_rollout_engines,
     runs_dual_stream_lora,
 )
+from agilerl.arena.memory.specs import GiB, MiB
 from agilerl.arena.models.algorithms import (
     DPOSpec,
     DQNSpec,
@@ -24,6 +31,18 @@ from agilerl.arena.models.algorithms import (
     SFTSpec,
 )
 from agilerl.arena.models.algorithms.base import AlgorithmSpec
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
+
+# quantization_config of openai/gpt-oss-20b on the Hub.
+GPT_OSS_MXFP4 = {
+    "modules_to_not_convert": [
+        "model.layers.*.self_attn",
+        "model.layers.*.mlp.router",
+        "model.embed_tokens",
+        "lm_head",
+    ],
+    "quant_method": "mxfp4",
+}
 
 
 class TestAsyncRolloutAlgorithm:
@@ -140,3 +159,87 @@ class TestRunsDualStreamLora:
 
     def test_moe_engine_runs_one_lora_stream(self) -> None:
         assert runs_dual_stream_lora(True) is False
+
+
+class TestMergedLoraSyncEligible:
+    @pytest.mark.parametrize("quantization", [None, "none", "None"])
+    def test_unquantized_engine_takes_merged_weights(
+        self, quantization: str | None
+    ) -> None:
+        assert merged_lora_sync_eligible(quantization, False, False, False) is True
+
+    def test_quantized_engine_keeps_serving_the_adapter(self) -> None:
+        assert merged_lora_sync_eligible("fp8", False, False, False) is False
+
+    def test_quantized_checkpoint_keeps_serving_the_adapter(self) -> None:
+        assert merged_lora_sync_eligible(None, True, False, False) is False
+
+    def test_tower_lora_keeps_serving_the_adapter(self) -> None:
+        assert merged_lora_sync_eligible(None, False, True, False) is False
+
+    def test_mtp_drafting_keeps_serving_the_adapter(self) -> None:
+        assert merged_lora_sync_eligible(None, False, False, True) is False
+
+
+class TestCheckpointQuantized:
+    def test_catalogued_bf16_checkpoint_is_unquantized(self) -> None:
+        config = SUPPORTED_MODEL_INFO["openai/gpt-oss-20b"].config
+
+        assert checkpoint_quantized(config) is False
+
+    def test_hub_mxfp4_checkpoint_is_quantized(self) -> None:
+        config = {
+            **SUPPORTED_MODEL_INFO["openai/gpt-oss-20b"].config,
+            "quantization_config": GPT_OSS_MXFP4,
+        }
+
+        assert checkpoint_quantized(config) is True
+
+    def test_compressed_tensors_checkpoint_is_quantized(self) -> None:
+        config = {"compression_config": {"quant_method": "compressed-tensors"}}
+
+        assert checkpoint_quantized(config) is True
+
+    def test_multimodal_text_config_quantization_counts(self) -> None:
+        config = {"text_config": {"quantization_config": {"quant_method": "fp8"}}}
+
+        assert checkpoint_quantized(config) is True
+
+    def test_null_quantization_config_is_unquantized(self) -> None:
+        assert checkpoint_quantized({"quantization_config": None}) is False
+
+
+class TestDraftsWithMtp:
+    @pytest.mark.parametrize("method", ["mtp", "qwen3_5_mtp", "deepseek_mtp"])
+    def test_mtp_methods_draft_with_mtp(self, method: str) -> None:
+        assert drafts_with_mtp({"method": method, "num_speculative_tokens": 1}) is True
+
+    @pytest.mark.parametrize("method", [None, "draft_model"])
+    def test_draft_model_left_to_vllm_counts_as_mtp(self, method: str | None) -> None:
+        config = {
+            "method": method,
+            "model": "org/Model-MTP-Draft",
+            "num_speculative_tokens": 1,
+        }
+
+        assert drafts_with_mtp(config) is True
+
+    def test_ngram_drafting_is_not_mtp(self) -> None:
+        assert drafts_with_mtp(MULTI_TURN_SPECULATIVE_CONFIG) is False
+
+    def test_ngram_model_without_method_is_not_mtp(self) -> None:
+        assert drafts_with_mtp({"model": "ngram", "num_speculative_tokens": 4}) is False
+
+    def test_no_drafting_is_not_mtp(self) -> None:
+        assert drafts_with_mtp(None) is False
+
+
+class TestMergedSyncBucketBytes:
+    def test_small_tensors_stream_in_default_rounds(self) -> None:
+        assert merged_sync_bucket_bytes(64 * GiB, 4 * MiB) == MERGED_SYNC_BUCKET_BYTES
+
+    def test_a_tensor_over_one_round_sizes_the_buffer(self) -> None:
+        assert merged_sync_bucket_bytes(64 * GiB, GiB) == GiB
+
+    def test_buffer_never_exceeds_the_merged_weights(self) -> None:
+        assert merged_sync_bucket_bytes(100 * MiB, 10 * MiB) == 100 * MiB
