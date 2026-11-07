@@ -862,6 +862,8 @@ class TrainingManifest(BaseModel):
             # An unset step cap dumps the default million, which parsers treat as authored.
             if "max_steps" not in self.training.model_fields_set:
                 training.pop("max_steps", None)
+            if "weight_sync" not in self.training.model_fields_set:
+                training.pop("weight_sync", None)
         algorithm = payload.get("algorithm")
         if isinstance(algorithm, dict):
             if "num_envs" not in self.algorithm.model_fields_set:
@@ -877,6 +879,12 @@ class TrainingManifest(BaseModel):
                     and "tensor_parallel_size" not in vllm_config.model_fields_set
                 ):
                     vllm_payload.pop("tensor_parallel_size", None)
+        if (
+            isinstance(self.network, FinetuningNetworkSpec)
+            and "lora_config" in self.network.model_fields_set
+            and self.network.lora_config is None
+        ):
+            payload.setdefault("network", {})["lora_config"] = None
         environment = payload.get("environment")
         if isinstance(environment, dict):
             if environment.get("screenshot_field") is None:
