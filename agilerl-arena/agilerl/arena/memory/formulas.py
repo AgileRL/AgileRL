@@ -379,6 +379,63 @@ def param_counts(arch: ModelArch, n_params: int | None = None) -> ParamCounts:
     return replace(counts, unattributed=n_params - counts.total)
 
 
+def merged_lora_sync_bytes(
+    arch: ModelArch,
+    scope: LoraTargetScope,
+    n_packed_matrices: int,
+    dtype_bytes: float,
+) -> tuple[int, int]:
+    """Bytes of the merged weights a merged-LoRA sync pushes, and of the largest one.
+
+    The adapter's linears are the weights
+    :func:`~agilerl.arena.memory.lora_formulas.lora_param_count` wraps,
+    plus shared experts under ``all-linear``. Packed experts are pushed
+    whole: a gated stack's ``gate_up_proj`` and ``down_proj`` are two
+    targeted parameters.
+
+    :param arch: Model architecture.
+    :param scope: Adapter target scope.
+    :param n_packed_matrices: PEFT ``target_parameters`` on packed experts.
+    :param dtype_bytes: Bytes per element of the engines' weight dtype.
+    :return: Total bytes, and bytes of the largest pushed tensor.
+    """
+    h = arch.hidden_size
+    total = arch.attention_layers * attention_params_per_layer(arch)
+    largest = h * arch.n_heads * max(arch.head_dim, arch.global_head_dim or 0)
+    if scope == "all-linear":
+        mlp_matrices = 3 if arch.gated_mlp else 2
+        total += arch.mlp_layers * mlp_params_per_layer(arch)
+        if arch.mlp_layers:
+            largest = max(
+                largest, int(h * arch.intermediate_size * arch.mlp_width_factor)
+            )
+        if arch.n_shared_experts:
+            shared_inter = (
+                arch.shared_expert_intermediate_size
+                or arch.expert_intermediate_size
+                or arch.intermediate_size
+            )
+            total += arch.moe_layers * (
+                arch.n_shared_experts * mlp_matrices * h * shared_inter
+            )
+        if arch.n_mamba_layers:
+            d_inner = arch.mamba_n_heads * arch.mamba_d_head
+            # Gated delta nets split the Mamba-2 dt head projection into b and a.
+            head_projections = 2 if arch.mamba_gated_delta else 1
+            in_proj = h * (
+                d_inner + arch.mamba_conv_dim + head_projections * arch.mamba_n_heads
+            )
+            total += arch.n_mamba_layers * (in_proj + d_inner * h)
+    if n_packed_matrices:
+        experts = routed_expert_params_per_layer(arch)
+        total += arch.moe_layers * experts * min(n_packed_matrices, 2) // 2
+        if arch.n_experts and arch.n_experts > 1:
+            expert_inter = arch.expert_intermediate_size or arch.intermediate_size
+            gate_up = (2 if arch.gated_mlp else 1) * expert_inter
+            largest = max(largest, arch.n_experts * arch.expert_width * gate_up)
+    return int(total * dtype_bytes), int(largest * dtype_bytes)
+
+
 def weight_bytes(
     counts: ParamCounts,
     dtype: WeightDtype,

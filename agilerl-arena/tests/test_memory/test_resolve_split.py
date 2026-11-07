@@ -18,6 +18,10 @@ from agilerl.arena.memory.manifest import (
     validated_run_manifest,
 )
 from agilerl.arena.memory.resolve.batch import catalog_model
+from agilerl.arena.memory.resolve.decode_costs import (
+    MERGED_DECODE_SPEEDUP,
+    MERGED_MOE_PREFILL_SPEEDUP,
+)
 from agilerl.arena.memory.resolve.fsdp import (
     TrainingMemoryPlan,
     TrainingMemoryUnfitError,
@@ -41,12 +45,14 @@ from agilerl.arena.memory.resolve.split import (
     choose_gpu_split,
     engine_prefill_rate,
     engine_steps,
+    merged_lora_sync_candidates,
     resident_sequences,
     resolve_run_memory,
     split_workload_from_manifest,
     tensor_parallel_seconds,
     uncached_prefill_tokens,
 )
+from agilerl.arena.memory.resolve.weight_sync import SyncLink
 from agilerl.arena.memory.specs import DeviceSpec, ModelArch, ModelSpec
 from agilerl.arena.models.manifest import TrainingManifest
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
@@ -739,7 +745,12 @@ class TestChooseGpuSplit:
         # Arrange: 8191 prompt tokens (8192 in whole KV blocks) and one decoded
         # per episode, 128 episodes per engine; its decode steps are under 0.5%
         # of the prefill.
-        workload = _workload(_countdown_manifest(64), row_tokens=8192, decode_tokens=1)
+        workload = _workload(
+            _countdown_manifest(64),
+            row_tokens=8192,
+            decode_tokens=1,
+            merged_lora_sync=False,
+        )
         arch = _catalog_spec("Qwen/Qwen3-4B").arch
 
         # Act
@@ -748,6 +759,40 @@ class TestChooseGpuSplit:
         # Assert
         rate = 0.4 * 312e12 / (2 * active_matmul_params(arch))
         assert split.generation_seconds == pytest.approx(128 * 8192 / rate, rel=5e-3)
+
+    def test_merged_prompt_heavy_generation_runs_at_the_merged_dense_prefill_rate(
+        self,
+    ) -> None:
+        # Arrange: the prompt-heavy cycle above on engines with LoRA off.
+        workload = _workload(
+            _countdown_manifest(64),
+            row_tokens=8192,
+            decode_tokens=1,
+            merged_lora_sync=True,
+        )
+        arch = _catalog_spec("Qwen/Qwen3-4B").arch
+
+        # Act
+        split = _learn_bound_split(workload, 4)
+
+        # Assert
+        rate = MERGED_DECODE_SPEEDUP * 0.4 * 312e12 / (2 * active_matmul_params(arch))
+        assert split.generation_seconds == pytest.approx(128 * 8192 / rate, rel=5e-3)
+
+    def test_merged_engine_decodes_at_the_merged_speedup(self) -> None:
+        # Arrange: every row token is decoded, so the cycle has no prompt to prefill.
+        lora = _workload(_countdown_manifest(64), merged_lora_sync=False)
+        lora = lora.model_copy(update={"decode_tokens": lora.row_tokens})
+        merged = lora.model_copy(update={"merged_lora_sync": True})
+
+        # Act
+        lora_split = _learn_bound_split(lora, 4)
+        merged_split = _learn_bound_split(merged, 4)
+
+        # Assert
+        assert merged_split.generation_seconds == pytest.approx(
+            lora_split.generation_seconds / MERGED_DECODE_SPEEDUP, rel=1e-12
+        )
 
     def test_engine_without_room_for_one_sequence_never_finishes(self) -> None:
         # Arrange: 5% of an A100-80 is under Qwen3-4B's bf16 weights.
@@ -762,7 +807,7 @@ class TestChooseGpuSplit:
     def test_trainer_counts_off_the_trainer_multiple_are_skipped(self) -> None:
         # Arrange
         model = catalog_model(_manifest(_countdown_manifest()).algorithm)
-        any_count = _workload(_countdown_manifest(120))
+        any_count = _workload(_countdown_manifest(120), merged_lora_sync=False)
         even = any_count.model_copy(update={"trainer_multiple": 2})
 
         # Act
@@ -791,7 +836,12 @@ class TestChooseGpuSplit:
         # Arrange: 8191 prompt tokens (8192 in whole KV blocks) and one decoded
         # per episode, 256 episodes on each of two TP2 engines; its decode
         # steps are under 0.5% of the prefill.
-        workload = _workload(_countdown_manifest(64), row_tokens=8192, decode_tokens=1)
+        workload = _workload(
+            _countdown_manifest(64),
+            row_tokens=8192,
+            decode_tokens=1,
+            merged_lora_sync=False,
+        )
         model = _catalog_spec("Qwen/Qwen3-4B")
         device = _device()
 
@@ -852,7 +902,9 @@ class TestChooseGpuSplit:
         # Arrange: 64 groups put 512 episodes on each TP2 engine, which keeps
         # 157 resident; 24 groups put 192. Neither cycle's KV pool has room
         # for a step above 8192.
-        held = _awm_workload(2).model_copy(update={"rollout_batch_size": 24})
+        held = _awm_workload(2).model_copy(
+            update={"rollout_batch_size": 24, "merged_lora_sync": False}
+        )
         oversubscribed = held.model_copy(update={"rollout_batch_size": 64})
 
         # Act
@@ -1107,7 +1159,9 @@ class TestEnginePrefillRate:
         assert device.peak_bf16_flops is not None
 
         # Act
-        rate = engine_prefill_rate(model, device, device.peak_bf16_flops, width, step)
+        rate = engine_prefill_rate(
+            model, device, device.peak_bf16_flops, width, step, False
+        )
 
         # Assert
         compute = (
@@ -1117,6 +1171,24 @@ class TestEnginePrefillRate:
         assert rate == pytest.approx(
             width / (compute + width * all_reduce / step), rel=1e-12
         )
+
+    def test_merged_moe_engine_computes_at_the_merged_prefill_speedup(self) -> None:
+        # Arrange
+        model = _awm_model()
+        device = _device("H100-80")
+        assert device.peak_bf16_flops is not None
+
+        # Act
+        rate = engine_prefill_rate(model, device, device.peak_bf16_flops, 2, 8192, True)
+
+        # Assert
+        compute = (
+            2
+            * active_matmul_params(model.arch)
+            / (0.18 * MERGED_MOE_PREFILL_SPEEDUP * device.peak_bf16_flops)
+        )
+        all_reduce = tensor_parallel_seconds(model, device, 2, 8192)
+        assert rate == pytest.approx(2 / (compute + 2 * all_reduce / 8192), rel=1e-12)
 
 
 class TestResolveRunMemory:
@@ -1643,6 +1715,201 @@ class TestResolveRunMemoryEngineWidth:
         assert (split.trainers, split.engines) == (4, 2)
         assert split.rollout_batch_size == 16
         assert split.max_num_batched_tokens == 32768
+
+
+def _plan_over(
+    raw: dict, device_name: str, sync_link: SyncLink | None, member_gpus: int | None = 8
+) -> RunMemoryPlan:
+    manifest = validated_run_manifest(TrainingManifest.model_validate(raw))
+    return resolve_run_memory(
+        manifest,
+        catalog_model(manifest.algorithm),
+        _device(device_name),
+        member_gpus,
+        8,
+        sync_link,
+    )
+
+
+class TestMergedLoraSyncCandidates:
+    def test_a_known_link_prices_both_modes(self) -> None:
+        # Arrange
+        manifest = _manifest(_sudoku_manifest())
+
+        # Act
+        modes = merged_lora_sync_candidates(manifest, "cuda_ipc")
+
+        # Assert
+        assert modes == (True, False)
+
+    def test_unknown_link_syncs_merged_weights(self) -> None:
+        # Arrange
+        manifest = _manifest(_sudoku_manifest())
+
+        # Act
+        modes = merged_lora_sync_candidates(manifest, None)
+
+        # Assert
+        assert modes == (True,)
+
+    def test_quantized_engine_syncs_the_adapter(self) -> None:
+        # Arrange
+        raw = _sudoku_manifest()
+        manifest = _manifest(raw)
+        manifest.algorithm.vllm_config.quantization = "fp8"
+
+        # Act
+        modes = merged_lora_sync_candidates(manifest, "cuda_ipc")
+
+        # Assert
+        assert modes == (False,)
+
+    def test_mtp_drafting_engine_syncs_the_adapter(self) -> None:
+        # Arrange
+        raw = _sudoku_manifest()
+        raw["algorithm"]["vllm_engine_args"] = {
+            "speculative_config": {"method": "qwen3_5_mtp", "num_speculative_tokens": 1}
+        }
+        manifest = _manifest(raw)
+
+        # Act
+        modes = merged_lora_sync_candidates(manifest, "cuda_ipc")
+
+        # Assert
+        assert modes == (False,)
+
+
+class TestGpuSplitSyncedStepSecondsProperty:
+    def test_merged_sync_pauses_generation_too(self) -> None:
+        # Arrange
+        split = GpuSplit(
+            trainers=4,
+            engines=4,
+            engine_width=1,
+            rollout_batch_size=64,
+            learn_seconds=10.0,
+            generation_seconds=12.0,
+            sync_seconds=2.0,
+            merged_lora_sync=True,
+        )
+
+        # Act
+        seconds = split.synced_step_seconds
+
+        # Assert
+        assert seconds == 14.0
+
+    def test_adapter_sync_overlaps_generation(self) -> None:
+        # Arrange
+        split = GpuSplit(
+            trainers=4,
+            engines=4,
+            engine_width=1,
+            rollout_batch_size=64,
+            learn_seconds=10.0,
+            generation_seconds=12.0,
+            sync_seconds=1.0,
+        )
+
+        # Act
+        seconds = split.synced_step_seconds
+
+        # Assert
+        assert seconds == 12.0
+        assert split.step_seconds == 12.0
+
+
+class TestResolveRunMemoryWeightSync:
+    def test_nvlink_syncs_merged_weights_on_a_generation_bound_run(self) -> None:
+        # Act: Sudoku on 8x A100 ran 29% faster per step with merged sync.
+        plan = _plan_over(_sudoku_manifest(), "A100-80", "cuda_ipc")
+
+        # Assert
+        assert plan.merged_lora_sync is True
+        assert plan.split is not None
+        assert plan.split.merged_lora_sync
+        assert plan.split.sync_seconds > 1.0
+
+    def test_tcp_syncs_the_adapter(self) -> None:
+        # Act: merged Qwen3-4B weights take over a minute per sync at 0.4 GB/s.
+        plan = _plan_over(_sudoku_manifest(), "A100-80", "tcp")
+
+        # Assert
+        assert plan.merged_lora_sync is False
+        assert plan.split is not None
+        assert not plan.split.merged_lora_sync
+        assert plan.training.settings.merged_lora_sync is False
+
+    def test_nvlink_syncs_merged_weights_on_a_trainer_bound_run(self) -> None:
+        # Act: countdown on 8x H100 is priced 6.7% slower merged and ran 1.6% faster.
+        plan = _plan_over(_countdown_manifest(64), "H100-80", "cuda_ipc")
+
+        # Assert
+        assert plan.merged_lora_sync is True
+
+    def test_rdma_syncs_the_adapter_when_the_sync_outweighs_the_gain(self) -> None:
+        # Act: 7.27 GB to each engine over one 100 Gb/s NIC costs more than
+        # the generation merged engines save on countdown.
+        plan = _plan_over(_countdown_manifest(64), "H100-80", "rdma")
+
+        # Assert
+        assert plan.merged_lora_sync is False
+        assert plan.split is not None
+        assert not plan.split.merged_lora_sync
+
+    def test_merged_is_kept_within_the_tie_share(self) -> None:
+        # Act: AWM on 8x H100 is priced learn-bound and ran 7% faster merged.
+        plan = _plan_over(_awm_manifest(), "H100-80", "cuda_ipc")
+
+        # Assert
+        assert plan.merged_lora_sync is True
+        assert plan.split is not None
+        assert (plan.split.trainers, plan.split.engines) == (4, 2)
+
+    def test_mtp_drafting_syncs_the_adapter(self) -> None:
+        # Arrange: merged sync does not update MTP draft weights.
+        raw = _sudoku_manifest()
+        raw["algorithm"]["vllm_engine_args"] = {
+            "speculative_config": {"method": "mtp", "num_speculative_tokens": 1}
+        }
+
+        # Act
+        plan = _plan_over(raw, "A100-80", "cuda_ipc")
+
+        # Assert
+        assert plan.merged_lora_sync is False
+        assert plan.split is not None
+        assert not plan.split.merged_lora_sync
+        assert plan.training.settings.merged_lora_sync is False
+
+    def test_unknown_link_syncs_merged_weights_unpriced(self) -> None:
+        # Act
+        plan = _plan_over(_sudoku_manifest(), "A100-80", None)
+
+        # Assert
+        assert plan.merged_lora_sync is True
+        assert plan.split is not None
+        assert plan.split.sync_seconds == 0.0
+
+    @pytest.mark.parametrize(
+        ("sync_link", "merged"),
+        [("cuda_ipc", True), ("rdma", True), ("tcp", False)],
+    )
+    def test_kept_counts_sync_merged_weights_unless_the_link_is_tcp(
+        self, sync_link: SyncLink, merged: bool
+    ) -> None:
+        # Arrange
+        raw = _sudoku_manifest()
+        raw["training"]["training_gpus_per_agent"] = 4
+        raw["training"]["rollout_engines_per_agent"] = 4
+        raw["algorithm"]["vllm_config"] = {"tensor_parallel_size": 1}
+
+        # Act
+        plan = _plan_over(raw, "A100-80", sync_link, member_gpus=None)
+
+        # Assert
+        assert plan.split is None
+        assert plan.merged_lora_sync is merged
 
 
 class TestGpuCataloguePeakFigures:

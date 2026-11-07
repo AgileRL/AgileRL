@@ -837,12 +837,13 @@ class TestSolveMain:
             engine = json.loads(capsys.readouterr().out)["engine"]
             verdicts.append((verdict, engine["tensor_parallel_size"]))
 
-        # Assert: the cutoff is the run's at TP=4, past the TP=2 KV limit.
+        # Assert: merged-sync engines hold no LoRA, so the cutoff is the
+        # run's at TP=2, past the TP=1 KV limit.
         assert code == EXIT_OK
         assert payload["limited_by"] == "memory"
-        assert payload["engine"]["tensor_parallel_size"] == 4
+        assert payload["engine"]["tensor_parallel_size"] == 2
         assert payload["value"] > 32768
-        assert verdicts == [(EXIT_OK, 4), (EXIT_OVER_BUDGET, 4)]
+        assert verdicts == [(EXIT_OK, 2), (EXIT_OVER_BUDGET, 2)]
 
     def test_unset_width_without_num_gpus_is_a_usage_error(self, tmp_path, capsys):
         path = write_manifest(tmp_path, UNSET_WIDTH_MOE, "moe.yaml")
@@ -947,8 +948,8 @@ class TestSolveMain:
             kv = next(c for c in bar["components"] if c["key"] == "kv_cache")
             return kv["detail"]["worst_case_demand"]
 
-        assert total(plain_payload["training"]) == 1685538487
-        assert total(overridden_payload["training"]) == 1706977567
+        assert total(plain_payload["training"]) == 1685544631
+        assert total(overridden_payload["training"]) == 1705254465
         # The generation bar fills the utilization budget at either context.
         assert kv_demand(overridden_payload["generation"]) == 8 * kv_demand(
             plain_payload["generation"]

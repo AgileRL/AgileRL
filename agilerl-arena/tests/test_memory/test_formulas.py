@@ -3018,3 +3018,57 @@ class TestCheckpointedMoeBlocks:
 
         assert formulas.checkpointed_moe_blocks(QWEN_05B, settings) == 0
         assert formulas.checkpointed_moe_blocks(arch, off) == 0
+
+
+class TestMergedLoraSyncBytes:
+    def test_attention_scope_pushes_the_attention_projections(self):
+        # Act
+        total, largest = formulas.merged_lora_sync_bytes(
+            QWEN_05B, "attention-only", 0, 2
+        )
+
+        # Assert: q/o 896x896 and k/v 896x128 with q/k/v bias, on 24 layers.
+        assert total == 2 * 24 * (2 * 896 * 896 + 2 * 896 * 128 + 896 + 2 * 128)
+        assert largest == 2 * 896 * 896
+
+    def test_all_linear_scope_adds_the_mlp(self):
+        # Arrange
+        attention, _ = formulas.merged_lora_sync_bytes(QWEN_05B, "attention-only", 0, 2)
+
+        # Act
+        total, largest = formulas.merged_lora_sync_bytes(QWEN_05B, "all-linear", 0, 2)
+
+        # Assert: gate, up and down 896x4864 on 24 layers.
+        assert total == attention + 2 * 24 * 3 * 896 * 4864
+        assert largest == 2 * 896 * 4864
+
+    def test_packed_experts_push_whole_stacks(self):
+        # Arrange
+        unpacked, _ = formulas.merged_lora_sync_bytes(MOE_TINY, "all-linear", 0, 2)
+
+        # Act
+        total, largest = formulas.merged_lora_sync_bytes(MOE_TINY, "all-linear", 2, 2)
+
+        # Assert: 4 experts of gate, up and down 16x32 on 2 layers; the
+        # gate_up stack is the largest tensor.
+        assert total == unpacked + 2 * 2 * 4 * 3 * 16 * 32
+        assert largest == 2 * 4 * 2 * 32 * 16
+
+    def test_qwen36_pushes_its_gated_delta_projections(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["Qwen/Qwen3.6-35B-A3B"].config
+        )
+        attention, _ = formulas.merged_lora_sync_bytes(arch, "attention-only", 0, 2)
+
+        # Act
+        total, largest = formulas.merged_lora_sync_bytes(arch, "all-linear", 2, 2)
+
+        # Assert: 30 GDN layers project 2048 to qkv (8192), z (4096) and b, a
+        # (32 each), and 4096 back; shared experts are 3 of 2048x512 on 40
+        # layers. The 256-expert 2048x1024 gate_up stack is the largest.
+        gdn = 30 * (2048 * (8192 + 4096 + 2 * 32) + 4096 * 2048)
+        shared = 40 * 3 * 2048 * 512
+        routed = 40 * 256 * 3 * 2048 * 512
+        assert total == attention + 2 * (gdn + shared + routed)
+        assert largest == 2 * 256 * 1024 * 2048

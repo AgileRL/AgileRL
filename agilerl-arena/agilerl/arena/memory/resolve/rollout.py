@@ -1,6 +1,6 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
-"""Whether a Ray run generates on async rollout engines, how many it starts, its cycle size, whether it drafts and its LoRA streams."""
+"""Whether a Ray run generates on async rollout engines, how many it starts, its cycle size, whether it drafts, how it syncs LoRA and its LoRA streams."""
 
 from __future__ import annotations
 
@@ -118,6 +118,54 @@ def drafts_by_default(
         and not hybrid_ssm
         and not drafting_rejected_sampling(min_p, logit_bias)
     )
+
+
+MERGED_SYNC_BUCKET_BYTES = 256 << 20
+"""Bytes of merged weights one merged-sync transfer round moves, unless one tensor is larger."""
+
+
+def drafts_with_mtp(speculative_config: dict[str, Any] | None) -> bool:
+    """Whether a vLLM ``speculative_config`` drafts with the model's MTP layers.
+
+    :param speculative_config: ``vllm_engine_args.speculative_config``.
+    :return: ``True`` for method ``mtp`` or a model-specific ``*_mtp`` method.
+    """
+    if speculative_config is None:
+        return False
+    method = speculative_config.get("method") or ""
+    return method == "mtp" or method.endswith("_mtp")
+
+
+def merged_lora_sync_eligible(
+    quantization: str | None, tower_lora: bool, mtp_drafting: bool
+) -> bool:
+    """Whether a rollout engine can serve merged LoRA weights with LoRA off.
+
+    Every rollout engine serves one policy, so it can hold that policy's
+    merged weights. vLLM quantizes weights at load, so a quantized engine
+    cannot take merged bf16 tensors and keeps serving the adapter. vLLM keys
+    cached vision-encoder outputs by LoRA name only, so an engine with tower
+    LoRA keeps serving the adapter too. Merged sync does not update MTP draft
+    weights, so an engine that drafts with MTP keeps serving the adapter.
+
+    :param quantization: ``vllm_config.quantization``.
+    :param tower_lora: Whether the adapter targets vision-tower modules.
+    :param mtp_drafting: :func:`drafts_with_mtp` of the engine's ``speculative_config``.
+    :return: ``True`` for an unquantized engine without tower LoRA or MTP drafting.
+    """
+    unquantized = quantization is None or quantization.lower() == "none"
+    return unquantized and not tower_lora and not mtp_drafting
+
+
+def merged_sync_bucket_bytes(total_bytes: int, largest_tensor_bytes: int) -> int:
+    """Bytes of the NIXL buffer that streams merged weights, one round at a time.
+
+    :param total_bytes: Merged bytes of every tensor the adapter touches.
+    :param largest_tensor_bytes: Merged bytes of the largest of them.
+    :return: :data:`MERGED_SYNC_BUCKET_BYTES`, or the largest tensor when it
+        is larger, and never more than ``total_bytes``.
+    """
+    return min(total_bytes, max(MERGED_SYNC_BUCKET_BYTES, largest_tensor_bytes))
 
 
 def runs_dual_stream_lora(moe: bool) -> bool:

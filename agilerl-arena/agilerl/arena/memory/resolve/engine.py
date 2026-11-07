@@ -198,7 +198,7 @@ def resolve_engine_tensor_parallel(
 
 
 def resolve_engine_fast_path(
-    manifest: TrainingManifest, device: DeviceSpec
+    manifest: TrainingManifest, device: DeviceSpec, adapter_sync: bool = False
 ) -> RolloutLLMSpec | None:
     """Pin off the engine defaults :func:`drop_engine_fast_paths` turns off on ``device``.
 
@@ -208,6 +208,8 @@ def resolve_engine_fast_path(
 
     :param manifest: Validated async rollout manifest.
     :param device: The rollout engine's GPU.
+    :param adapter_sync: Weight sync pushes the adapter even where the engines
+        could serve merged weights.
     :return: The rewritten algorithm spec, or None when the manifest is left unchanged.
     """
     spec = manifest.algorithm
@@ -218,7 +220,7 @@ def resolve_engine_fast_path(
     info = SUPPORTED_MODEL_INFO.get(hub_id) if hub_id is not None else None
     if info is None or vllm.tensor_parallel_size is None:
         return None
-    settings = generation_settings_from_manifest(manifest)
+    settings = generation_settings_from_manifest(manifest, adapter_sync=adapter_sync)
     lean = drop_engine_fast_paths(_engine_model(hub_id, info), device, settings)
     if lean == settings:
         return None

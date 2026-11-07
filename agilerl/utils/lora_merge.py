@@ -37,6 +37,7 @@ from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME, SAFE_WEIGHTS_NAME, cached_file
 
 from agilerl.architectures import trainer_model_class
+from agilerl.arena.memory.formulas import DEFAULT_ROUTED_CHUNK_BYTES
 from agilerl.distributed import (
     gather_params,
     is_main_process,
@@ -917,3 +918,118 @@ def _materialize_shard(
             shard[hf_name] = bias
 
     return shard
+
+
+MergedSyncSpec = ModuleLoraMerged | ParamLoraMerged
+
+
+def merged_sync_specs(model: nn.Module, adapter_name: str) -> list[MergedSyncSpec]:
+    """Weights ``adapter_name`` changes, under Hugging Face checkpoint names, in module order.
+
+    Biases are left out: the adapters train no LoRA bias.
+
+    :param model: PEFT-wrapped causal LM, or a value-head wrapper around one.
+    :param adapter_name: Adapter whose merged weights are pushed.
+    :return: One spec per adapted weight or packed-expert parameter.
+    :raises ValueError: If the adapter is missing or adapts no weight.
+    """
+    peft_model = _as_peft_model(model)
+    if adapter_name not in peft_model.peft_config:
+        msg = f"Adapter {adapter_name!r} is not on the PEFT model"
+        raise ValueError(msg)
+    pretrained = peft_model.get_base_model()
+    if not isinstance(pretrained, PreTrainedModel):
+        msg = f"Merged sync requires a transformers model, got {type(pretrained).__name__}"
+        raise TypeError(msg)
+    specs: list[MergedSyncSpec] = []
+    for spec in _collect_export_specs(pretrained, adapter_name):
+        if isinstance(spec, ParamLoraMerged) and adapter_name in spec.wrapper.lora_A:
+            specs.append(spec)
+        elif (
+            isinstance(spec, ModuleLoraMerged)
+            and spec.part == "weight"
+            and _adapter_on_layer(spec.layer, adapter_name)
+        ):
+            specs.append(spec)
+    if not specs:
+        msg = f"Adapter {adapter_name!r} adapts no weight"
+        raise ValueError(msg)
+    return specs
+
+
+@torch.no_grad()
+def write_merged_weight(spec: MergedSyncSpec, destination: torch.Tensor | None) -> None:
+    """Gather one adapted module and write ``W + scale * B @ A`` into ``destination``.
+
+    The merge runs in fp32 and casts once to ``destination``'s dtype. Every
+    rank calls this for the same specs in the same order; a rank passing
+    ``None`` only joins the gather.
+
+    :param spec: Spec from :func:`merged_sync_specs`.
+    :param destination: Tensor of the weight's full shape, or ``None``.
+    """
+    if isinstance(spec, ParamLoraMerged):
+        wrapper = spec.wrapper
+        with gather_params(wrapper, _param_gather_params(wrapper, spec.adapter_name)):
+            if destination is not None:
+                _write_merged_param(wrapper, spec.adapter_name, destination)
+        return
+    layer = spec.layer
+    with gather_params(layer, _layer_gather_params(layer)):
+        if destination is None:
+            return
+        base = _dense_local(_as_lora_base(layer).weight)
+        with _fp32_lora_factors(layer, spec.adapter_name):
+            destination.copy_(base.float() + layer.get_delta_weight(spec.adapter_name))
+
+
+@contextmanager
+def _fp32_lora_factors(
+    layer: Linear | Embedding | Conv1d | Conv2d | Conv3d, adapter_name: str
+) -> Generator[None, None, None]:
+    """Hold ``adapter_name``'s LoRA factors on ``layer`` in fp32, restoring their storage after."""
+    factors = [
+        param
+        for name, param in layer.named_parameters()
+        if name.startswith("lora_") and adapter_name in name.split(".")
+    ]
+    saved = [param.data for param in factors]
+    for param in factors:
+        param.data = _dense_local(param.data).float()
+    try:
+        yield
+    finally:
+        for param, data in zip(factors, saved, strict=True):
+            param.data = data
+
+
+def _write_merged_param(
+    wrapper: ParamWrapper, adapter_name: str, destination: torch.Tensor
+) -> None:
+    """Merge a gathered packed-expert parameter in fp32, a bounded chunk of experts at a time."""
+    base = _dense_local(wrapper.get_param())
+    weight_a = _dense_local(wrapper.lora_A[adapter_name].get_parameter("weight"))
+    weight_b = _dense_local(wrapper.lora_B[adapter_name].get_parameter("weight"))
+    scaling = wrapper.scaling[adapter_name]
+    n_experts = wrapper.num_experts
+    if n_experts == 1:
+        delta = weight_b.float() @ weight_a.float()
+        destination.copy_(base.float() + delta * scaling)
+        return
+    # PEFT's stacked layouts: A is [E*r, in] or [E, r, in]; B is [out, E*r] or [out, r, E].
+    weight_a = weight_a.reshape(n_experts, -1, weight_a.shape[-1])
+    weight_b = weight_b.reshape(weight_b.shape[0], -1, n_experts)
+    equation = (
+        "o r e, e r i -> e o i"
+        if wrapper._did_swap_in_out_features
+        else "o r e, e r i -> e i o"
+    )
+    chunk = max(1, DEFAULT_ROUTED_CHUNK_BYTES // (base[0].numel() * 4))
+    for start in range(0, n_experts, chunk):
+        stop = min(start + chunk, n_experts)
+        delta = torch.einsum(
+            equation,
+            weight_b[:, :, start:stop].float(),
+            weight_a[start:stop].float(),
+        )
+        destination[start:stop].copy_(base[start:stop].float() + delta * scaling)

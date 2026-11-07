@@ -46,6 +46,8 @@ from agilerl.arena.memory.resolve.rollout import (
     apply_run_rollout_mode,
     async_rollout_algorithm,
     default_rollout_batch_size,
+    drafts_with_mtp,
+    merged_lora_sync_eligible,
     run_rollout_engines,
 )
 from agilerl.arena.memory.resolve.sequences import (
@@ -479,6 +481,21 @@ def speculative_drafting(spec: LLMAlgorithmSpec) -> bool | None:
     return spec.vllm_engine_args["speculative_config"] is not None
 
 
+def can_sync_merged_lora(spec: LLMAlgorithmSpec) -> bool:
+    """Whether the spec's rollout engines can serve merged LoRA weights (:func:`merged_lora_sync_eligible`).
+
+    :param spec: LLM algorithm spec.
+    :return: ``False`` for a spec without rollout engines.
+    """
+    if not isinstance(spec, RolloutLLMSpec):
+        return False
+    return merged_lora_sync_eligible(
+        None if spec.vllm_config is None else spec.vllm_config.quantization,
+        bool(_lora_config(spec).tower_target_modules),
+        drafts_with_mtp(spec.vllm_engine_args.get("speculative_config")),
+    )
+
+
 def rollout_logit_bias(spec: LLMAlgorithmSpec) -> bool:
     """Whether rollout requests carry a ``logit_bias`` masking the image token.
 
@@ -742,6 +759,7 @@ def training_settings_from_spec(
     images: tuple[int, int, int] = (0, 0, 0),
     segmented_rows: bool = False,
     mutates_beta: bool = False,
+    adapter_sync: bool = False,
 ) -> TrainingSettings:
     """Trainer-side settings for one algorithm spec.
 
@@ -754,6 +772,8 @@ def training_settings_from_spec(
     :param images: ``(images_per_row, width, height)`` from :func:`image_inputs`.
     :param segmented_rows: Episodes train as segment rows.
     :param mutates_beta: HPO mutates ``beta``.
+    :param adapter_sync: Async weight sync pushes the adapter even where the
+        engines could serve merged weights.
     :return: Training settings.
     :raises ValueError: Quantization.
     """
@@ -818,12 +838,16 @@ def training_settings_from_spec(
         segmented_rows=segmented_rows,
         checkpoint_optimizer=checkpoint_optimizer,
         async_rollout=async_rollout,
+        merged_lora_sync=async_rollout
+        and not adapter_sync
+        and can_sync_merged_lora(spec),
     )
 
 
 def training_settings_from_manifest(
     manifest: TrainingManifest | str | Path | dict[str, Any],
     micro_batch_size: int | None = None,
+    adapter_sync: bool = False,
 ) -> TrainingSettings:
     """Trainer-side settings, read as the trainer reads the manifest.
 
@@ -833,6 +857,8 @@ def training_settings_from_manifest(
     :param manifest: Training manifest.
     :param micro_batch_size: Rows in one forward. ``None`` resolves an omitted
         field without a device.
+    :param adapter_sync: Async weight sync pushes the adapter even where the
+        engines could serve merged weights.
     :return: Training settings.
     """
     manifest = _validated(manifest)
@@ -858,11 +884,15 @@ def training_settings_from_manifest(
         ),
         mutates_beta=manifest.mutation is not None
         and "beta" in manifest.mutation.rl_hp_selection,
+        adapter_sync=adapter_sync,
     )
 
 
 def training_memory_from_manifest(
-    manifest: TrainingManifest, model: ModelSpec, device: DeviceSpec
+    manifest: TrainingManifest,
+    model: ModelSpec,
+    device: DeviceSpec,
+    adapter_sync: bool = False,
 ) -> TrainingMemoryPlan:
     """The training-memory plan one trainer rank of the manifest runs with.
 
@@ -871,6 +901,8 @@ def training_memory_from_manifest(
     :param manifest: Validated manifest; ``training_gpus_per_agent`` is the trainer count.
     :param model: Training-side model spec.
     :param device: Training GPU.
+    :param adapter_sync: Async weight sync pushes the adapter even where the
+        engines could serve merged weights.
     :return: The plan :func:`resolve_training_memory` picks.
     :raises TrainingMemoryUnfitError: When nothing fits one GPU.
     """
@@ -879,7 +911,9 @@ def training_memory_from_manifest(
     mini = resolve_mini_batch_size(spec.mini_batch_size, per_rank)
     pins = MemoryPins.from_spec(spec)
     require_batch_split(mini, pins.micro_batch_size_per_gpu or mini, per_rank)
-    settings = training_settings_from_manifest(manifest, micro_batch_size=1)
+    settings = training_settings_from_manifest(
+        manifest, micro_batch_size=1, adapter_sync=adapter_sync
+    )
     if spec.fsdp is None:
         settings = settings.model_copy(update={"fsdp": FSDPConfig()})
     return resolve_training_memory(model, device, settings, pins, mini)
@@ -903,6 +937,7 @@ def generation_settings_from_manifest(
     manifest: TrainingManifest | str | Path | dict[str, Any],
     tensor_parallel_size: int | None = None,
     rollout_engines: int | None = None,
+    adapter_sync: bool = False,
 ) -> GenerationSettings:
     """The engine-side settings the manifest's vLLM config pins down.
 
@@ -911,6 +946,8 @@ def generation_settings_from_manifest(
         manifest leaves the width unset.
     :param rollout_engines: Engines per member the allocation starts, which
         split the job batch. ``None`` reads the manifest.
+    :param adapter_sync: Async weight sync pushes the adapter even where the
+        engines could serve merged weights.
     :return: Generation settings for the estimator.
     """
     manifest = _validated(manifest)
@@ -966,6 +1003,9 @@ def generation_settings_from_manifest(
         "speculative_drafting": speculative_drafting(spec),
         "lora_dual_stream": async_rollout(manifest)
         and spec.vllm_engine_args.get("lora_dual_stream") is not False,
+        "merged_lora_sync": async_rollout(manifest)
+        and not adapter_sync
+        and can_sync_merged_lora(spec),
     }
     if width is not None:
         settings["tensor_parallel_size"] = width

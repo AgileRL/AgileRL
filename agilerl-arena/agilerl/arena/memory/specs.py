@@ -1208,6 +1208,9 @@ class TrainingSettings(BaseModel):
     # Async rollout: the next rollout batch waits in host memory during learn,
     # and the main rank holds the policy adapter's NIXL send buffer.
     async_rollout: bool = False
+    # Async weight sync pushes merged weights: the main rank's NIXL send
+    # buffer holds one round of merged weights, not the adapter.
+    merged_lora_sync: bool = False
     # Gradient forward packs into one row. A packed micro-batch of full-length
     # rows holds as many tokens as the padded one, so the estimate prices padded rows.
     sequence_packing: bool = False
@@ -1442,6 +1445,10 @@ class GenerationSettings(BaseModel):
     # set ``lora_dual_stream: false``; it runs a dense model's LoRA layers on
     # two CUDA streams (``VLLM_LORA_ENABLE_DUAL_STREAM``).
     lora_dual_stream: bool = False
+    # A Ray rollout engine receives merged weights and runs with LoRA off: no
+    # adapter slots or LoRA streams, and its NIXL buffer on every GPU holds
+    # one round of merged weights.
+    merged_lora_sync: bool = False
 
     @property
     def concurrency(self) -> int:

@@ -49,7 +49,11 @@ from transformers import (
     PreTrainedModel,
     Qwen3_5Config,
     Qwen3_5ForCausalLM,
+    Qwen3_5MoeForCausalLM,
+    Qwen3_5MoeTextConfig,
     Qwen3_5TextConfig,
+    Qwen3Config,
+    Qwen3ForCausalLM,
     Qwen3MoeConfig,
     Qwen3MoeForCausalLM,
 )
@@ -83,8 +87,11 @@ from agilerl.utils.lora_merge import (
     BaseWeightStore,
     MergedExportError,
     ModuleCopy,
+    ParamLoraMerged,
     export_merged_pretrained,
+    merged_sync_specs,
     write_merged_completeness_files,
+    write_merged_weight,
 )
 from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 from tests.rank_launch import run_ranks
@@ -2409,4 +2416,310 @@ class TestExportMergedPretrainedGPU:
             _peft_logits(reloaded, input_ids),
             atol=LOGIT_ATOL,
             rtol=LOGIT_RTOL,
+        )
+
+
+# The sync merge and PEFT's merge run the same fp32 ops in a different order.
+FP32_MERGE_ATOL = 1e-6
+FP32_MERGE_RTOL = 1e-6
+DENSE_TARGETS = [
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj",
+]
+GDN_TARGETS = [
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "in_proj_qkv",
+    "in_proj_z",
+    "in_proj_b",
+    "in_proj_a",
+    "out_proj",
+]
+
+
+def _tiny_qwen3() -> Qwen3ForCausalLM:
+    """CPU dense Qwen3 with two decoder layers."""
+    config = Qwen3Config(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=48,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=16,
+        max_position_embeddings=64,
+    )
+    return Qwen3ForCausalLM(config)
+
+
+def _tiny_qwen3_5_moe() -> Qwen3_5MoeForCausalLM:
+    """CPU Qwen3.5-MoE: one gated-delta layer, one full-attention layer, packed experts."""
+    config = Qwen3_5MoeTextConfig(
+        vocab_size=64,
+        hidden_size=32,
+        num_hidden_layers=2,
+        layer_types=["linear_attention", "full_attention"],
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=16,
+        linear_num_key_heads=2,
+        linear_num_value_heads=2,
+        linear_key_head_dim=16,
+        linear_value_head_dim=16,
+        num_experts=4,
+        num_experts_per_tok=2,
+        moe_intermediate_size=16,
+        shared_expert_intermediate_size=16,
+        max_position_embeddings=64,
+    )
+    return Qwen3_5MoeForCausalLM(config)
+
+
+def _sync_lora(
+    target_modules: list[str], target_parameters: list[str] | None = None
+) -> LoraConfig:
+    return LoraConfig(
+        r=4,
+        lora_alpha=8,
+        target_modules=target_modules,
+        target_parameters=target_parameters,
+        lora_dropout=0.0,
+        init_lora_weights=False,
+        task_type="CAUSAL_LM",
+    )
+
+
+def _merged_sync_state(
+    peft_model: nn.Module, dtype: torch.dtype
+) -> dict[str, torch.Tensor]:
+    """Every merged weight the sync pushes, written at ``dtype``."""
+    state = {}
+    for spec in merged_sync_specs(peft_model, "actor"):
+        destination = torch.empty(spec.reference.shape, dtype=dtype)
+        write_merged_weight(spec, destination)
+        state[spec.hf_name] = destination
+    return state
+
+
+def _dense_peft(dtype: torch.dtype) -> nn.Module:
+    torch.manual_seed(0)
+    return get_peft_model(
+        _tiny_qwen3().to(dtype), _sync_lora(DENSE_TARGETS), adapter_name="actor"
+    )
+
+
+def _two_dimensional_parameter_peft() -> nn.Module:
+    """One 2-D parameter targeted directly, which PEFT counts as a single expert."""
+    torch.manual_seed(0)
+    return get_peft_model(
+        _tiny_qwen3(),
+        LoraConfig(
+            r=4,
+            lora_alpha=8,
+            target_modules=[],
+            target_parameters=["model.layers.0.self_attn.q_proj.weight"],
+            lora_dropout=0.0,
+            init_lora_weights=False,
+            task_type="CAUSAL_LM",
+        ),
+        adapter_name="actor",
+    )
+
+
+def _gdn_moe_peft() -> nn.Module:
+    torch.manual_seed(0)
+    base = _tiny_qwen3_5_moe()
+    return get_peft_model(
+        base,
+        _sync_lora(GDN_TARGETS, moe_expert_target_parameters(base)),
+        adapter_name="actor",
+    )
+
+
+class TestMergedSyncSpecs:
+    def test_dense_model_names_every_adapted_linear_weight(self) -> None:
+        # Act
+        names = [
+            spec.hf_name
+            for spec in merged_sync_specs(_dense_peft(torch.float32), "actor")
+        ]
+
+        # Assert
+        expected = [
+            f"model.layers.{layer}.{module}.weight"
+            for layer in range(2)
+            for module in (
+                "self_attn.q_proj",
+                "self_attn.k_proj",
+                "self_attn.v_proj",
+                "self_attn.o_proj",
+                "mlp.gate_proj",
+                "mlp.up_proj",
+                "mlp.down_proj",
+            )
+        ]
+        assert names == expected
+
+    def test_gated_delta_moe_model_names_projections_and_packed_experts(self) -> None:
+        # Act
+        names = {spec.hf_name for spec in merged_sync_specs(_gdn_moe_peft(), "actor")}
+
+        # Assert: checkpoint names, which vLLM's loader packs into
+        # in_proj_qkvz / in_proj_ba / qkv_proj and its fused experts.
+        gdn = [
+            f"model.layers.0.linear_attn.{name}.weight"
+            for name in (
+                "in_proj_qkv",
+                "in_proj_z",
+                "in_proj_b",
+                "in_proj_a",
+                "out_proj",
+            )
+        ]
+        attention = [
+            f"model.layers.1.self_attn.{name}.weight"
+            for name in ("q_proj", "k_proj", "v_proj", "o_proj")
+        ]
+        experts = [
+            f"model.layers.{layer}.mlp.experts.{name}"
+            for layer in range(2)
+            for name in ("gate_up_proj", "down_proj")
+        ]
+        assert names == {*gdn, *attention, *experts}
+
+    def test_missing_adapter_raises(self) -> None:
+        with pytest.raises(
+            ValueError, match="Adapter 'critic' is not on the PEFT model"
+        ):
+            merged_sync_specs(_dense_peft(torch.float32), "critic")
+
+    def test_adapter_on_no_layer_raises(self) -> None:
+        # Arrange: strip the adapter's LoRA from every layer.
+        peft_model = _dense_peft(torch.float32)
+        for module in peft_model.modules():
+            if isinstance(module, LoraLayer) and "actor" in module.lora_A:
+                del module.lora_A["actor"]
+
+        # Act / Assert
+        with pytest.raises(ValueError, match="Adapter 'actor' adapts no weight"):
+            merged_sync_specs(peft_model, "actor")
+
+    def test_non_pretrained_base_raises(self) -> None:
+        peft_model = _dense_peft(torch.float32)
+        peft_model.get_base_model = lambda: nn.Linear(2, 2)
+
+        with pytest.raises(
+            TypeError, match="Merged sync requires a transformers model"
+        ):
+            merged_sync_specs(peft_model, "actor")
+
+
+class TestWriteMergedWeight:
+    def test_dense_merge_matches_peft_merge_and_unload(self) -> None:
+        # Arrange
+        peft_model = _dense_peft(torch.float32)
+        reference = copy.deepcopy(peft_model).merge_and_unload().state_dict()
+
+        # Act
+        merged = _merged_sync_state(peft_model, torch.float32)
+
+        # Assert
+        assert merged
+        for name, tensor in merged.items():
+            assert torch.allclose(
+                tensor, reference[name], atol=FP32_MERGE_ATOL, rtol=FP32_MERGE_RTOL
+            ), name
+
+    def test_gated_delta_moe_merge_matches_peft_merge_and_unload(self) -> None:
+        # Arrange: training upgrades the expert wrappers; PEFT merges plain ones.
+        peft_model = _gdn_moe_peft()
+        reference = copy.deepcopy(peft_model).merge_and_unload().state_dict()
+        assert upgrade_moe_param_wrappers(peft_model) == 2
+
+        # Act
+        merged = _merged_sync_state(peft_model, torch.float32)
+
+        # Assert
+        assert "model.layers.1.mlp.experts.gate_up_proj" in merged
+        for name, tensor in merged.items():
+            assert torch.allclose(
+                tensor, reference[name], atol=FP32_MERGE_ATOL, rtol=FP32_MERGE_RTOL
+            ), name
+
+    def test_expert_chunks_merge_like_one_pass(self) -> None:
+        # Arrange: a one-byte chunk budget merges one expert at a time.
+        peft_model = _gdn_moe_peft()
+        whole = _merged_sync_state(peft_model, torch.float32)
+
+        # Act
+        with patch.object(lora_merge_mod, "DEFAULT_ROUTED_CHUNK_BYTES", 1):
+            chunked = _merged_sync_state(peft_model, torch.float32)
+
+        # Assert
+        for name, tensor in whole.items():
+            assert torch.equal(chunked[name], tensor), name
+
+    def test_bf16_merge_rounds_once_from_fp32(self) -> None:
+        # Arrange: a bf16 base with PEFT's fp32 adapter.
+        peft_model = _dense_peft(torch.bfloat16)
+        upcast = copy.deepcopy(peft_model).float()
+        fp32_reference = upcast.merge_and_unload().state_dict()
+
+        # Act
+        merged = _merged_sync_state(peft_model, torch.bfloat16)
+
+        # Assert: the fp32 merge of bf16 factors, rounded to bf16 once.
+        for name, tensor in merged.items():
+            assert torch.equal(tensor, fp32_reference[name].to(torch.bfloat16)), name
+
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+    def test_merge_leaves_the_trainer_weights_unchanged(
+        self, dtype: torch.dtype
+    ) -> None:
+        # Arrange
+        peft_model = _gdn_moe_peft().to(dtype)
+        before = _snapshot_tensors(peft_model)
+
+        # Act
+        _merged_sync_state(peft_model, dtype)
+
+        # Assert
+        _assert_unmutated(peft_model, before)
+
+    def test_none_destination_joins_the_module_gather(self) -> None:
+        # Arrange: a rank that only joins the gather passes no destination.
+        peft_model = _dense_peft(torch.float32)
+        before = _snapshot_tensors(peft_model)
+        spec = next(iter(merged_sync_specs(peft_model, "actor")))
+
+        # Act
+        write_merged_weight(spec, None)
+
+        # Assert
+        _assert_unmutated(peft_model, before)
+
+    def test_two_dimensional_parameter_merges_as_one_expert(self) -> None:
+        # Arrange: a 2-D parameter is one expert, so the merge is one matmul.
+        peft_model = _two_dimensional_parameter_peft()
+        reference = copy.deepcopy(peft_model).merge_and_unload().state_dict()
+        specs = merged_sync_specs(peft_model, "actor")
+
+        # Act
+        merged = _merged_sync_state(peft_model, torch.float32)
+
+        # Assert
+        assert len(specs) == 1
+        assert isinstance(specs[0], ParamLoraMerged)
+        assert specs[0].wrapper.num_experts == 1
+        name = "model.layers.0.self_attn.q_proj.weight"
+        assert set(merged) == {name}
+        assert torch.allclose(
+            merged[name], reference[name], atol=FP32_MERGE_ATOL, rtol=FP32_MERGE_RTOL
         )

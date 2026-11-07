@@ -374,6 +374,18 @@ class TestTrainingSettings:
 
         assert settings.async_rollout is True
 
+    @pytest.mark.parametrize(
+        ("quantization", "expected"), [(None, True), ("fp8", False)]
+    )
+    def test_main_rank_sends_merged_weights_to_unquantized_engines(
+        self, quantization, expected
+    ):
+        doc = manifest(algorithm={"vllm_config": {"quantization": quantization}})
+
+        settings = training_settings_from_manifest(doc)
+
+        assert settings.merged_lora_sync is expected
+
     def test_a_classic_rl_manifest_is_refused(self):
         with pytest.raises(ValueError, match="LLM fine-tuning"):
             training_settings_from_manifest(DQN)
@@ -549,6 +561,20 @@ class TestImageInputs:
         assert settings.vision_tower_lora
         assert text.tower_lora_targets == frozenset()
         assert not text.vision_tower_lora
+
+    def test_tower_lora_keeps_adapter_sync(self):
+        trained = screenshots()
+        trained["network"]["lora_config"] = {
+            "target_modules": ["q_proj"],
+            "tower_target_modules": ["qkv"],
+        }
+
+        training = training_settings_from_manifest(trained)
+        generation = generation_settings_from_manifest(trained)
+
+        assert training.merged_lora_sync is False
+        assert generation.merged_lora_sync is False
+        assert training_settings_from_manifest(screenshots()).merged_lora_sync
 
     def test_text_environment_has_no_images(self):
         settings = training_settings_from_manifest(GRPO)
@@ -797,6 +823,20 @@ class TestGenerationSettings:
 
         assert rollout.lora_sync_scope == "attention-only"
         assert sft.lora_sync_scope is None
+
+    @pytest.mark.parametrize(
+        ("quantization", "expected"), [(None, True), ("fp8", False)]
+    )
+    def test_unquantized_rollout_engines_take_merged_weights(
+        self, quantization, expected
+    ):
+        doc = manifest(
+            algorithm={"vllm_config": {"quantization": quantization}}, **ASYNC_ROLLOUT
+        )
+
+        settings = generation_settings_from_manifest(doc)
+
+        assert settings.merged_lora_sync is expected
 
     def test_engine_args_turn_dual_stream_lora_off(self):
         doc = manifest(
