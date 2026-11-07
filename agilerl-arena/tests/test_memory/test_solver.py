@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from agilerl.arena.memory import kv_cache
+from agilerl.arena.memory import formulas, kv_cache, lora_formulas
 from agilerl.arena.memory.estimator import (
     estimate_generation,
     estimate_run,
@@ -32,7 +32,8 @@ from agilerl.arena.memory.specs import (
     RunConfig,
     TrainingSettings,
 )
-from tests.test_memory.test_formulas import QWEN_05B
+from tests.test_memory.test_estimator import component
+from tests.test_memory.test_formulas import MOE_TINY, QWEN_05B
 
 ASSETS = Path(__file__).parent / "assets"
 TINY_CONFIG = json.loads((ASSETS / "tiny_llm" / "config.json").read_text())
@@ -86,7 +87,9 @@ class TestSolveInference:
         over = estimate_generation(
             model,
             device,
-            settings.model_copy(update={"max_model_len": result.value + 16}),
+            result.config.generation.model_copy(
+                update={"max_model_len": result.value + 16}
+            ),
         )
         assert not generation_can_serve(over)
 
@@ -98,9 +101,11 @@ class TestSolveInference:
         over = estimate_generation(
             model,
             device,
-            settings.model_copy(update={"max_num_seqs": result.value + 1}),
+            result.config.generation.model_copy(
+                update={"max_num_seqs": result.value + 1}
+            ),
         )
-        assert result.value == 6
+        assert result.value == 7
         assert result.limited_by == "memory"
         assert generation_can_serve(result.estimate.generation)
         assert not generation_can_serve(over)
@@ -116,8 +121,8 @@ class TestSolveInference:
                 hi=32768,
             ).value
 
-        assert solved(4) == 3504
-        assert solved(8) == 1696
+        assert solved(4) == 3856
+        assert solved(8) == 1872
 
     def test_tiny_model_on_l4_hits_the_rope_cap(self, device):
         tiny = ModelSpec(model_id="tiny", arch=ModelArch.from_hf_config(TINY_CONFIG))
@@ -175,6 +180,57 @@ class TestSolveInference:
         # Act + Assert
         with pytest.raises(ValueError, match="Unknown field"):
             solve_inference(config, "learning_rate")
+
+
+class TestInferenceRunConfig:
+    def test_inference_engine_holds_no_lora_slot_or_dual_stream(self, model, device):
+        # Arrange
+        settings = GenerationSettings(lora_dual_stream=True)
+        training = RunConfig(
+            model=model, train_device=device, gen_device=device, generation=settings
+        )
+
+        # Act
+        served = estimate_run(inference_run_config(model, device, settings))
+        trained = estimate_run(training)
+
+        # Assert
+        slot = 2 * lora_formulas.engine_lora_param_count(QWEN_05B, 16)
+        assert component(served.generation, "lora_slots").n_bytes == 0
+        assert component(trained.generation, "lora_slots").n_bytes == slot
+        assert (
+            component(served.generation, "cuda_graphs").n_bytes
+            == formulas.CUDA_GRAPH_POOL_BYTES
+        )
+        assert (
+            component(trained.generation, "cuda_graphs").n_bytes
+            == formulas.CUDA_GRAPH_POOL_BYTES + formulas.LORA_DUAL_STREAM_BYTES
+        )
+        assert (
+            component(served.generation, "kv_cache").detail["pool"]
+            == component(trained.generation, "kv_cache").detail["pool"]
+            + slot
+            + formulas.LORA_DUAL_STREAM_BYTES
+        )
+
+    def test_moe_inference_drops_the_expert_lora_stacks(self, device):
+        # Arrange
+        moe = ModelSpec(model_id="moe-test", arch=MOE_TINY)
+        settings = GenerationSettings()
+        training = RunConfig(
+            model=moe, train_device=device, gen_device=device, generation=settings
+        )
+
+        # Act
+        served = estimate_run(inference_run_config(moe, device, settings))
+        trained = estimate_run(training)
+
+        # Assert
+        stacks = lora_formulas.engine_expert_lora_param_count(MOE_TINY, 16, 1, False)
+        assert component(served.generation, "lora_slots").n_bytes == 0
+        assert component(trained.generation, "lora_slots").n_bytes == 2 * (
+            lora_formulas.engine_lora_param_count(MOE_TINY, 16) + stacks
+        )
 
 
 class TestSolve:

@@ -272,6 +272,20 @@ def write_merged_completeness_files(output_dir: str | Path) -> None:
     (output_path / MERGED_COMPLETE_MARKER).write_text("1", encoding="utf-8")
 
 
+def merged_export_is_complete(merged_dir: str | Path) -> bool:
+    """Return whether ``merged_dir`` has ``.complete`` and a non-empty ``hf_merged`` manifest.
+
+    :param merged_dir: Directory written by :func:`export_merged_pretrained`.
+    :return: True when the export finished.
+    """
+    merged = Path(merged_dir)
+    manifest_path = merged / ARENA_ARTIFACT_MANIFEST_FILENAME
+    if not (merged / MERGED_COMPLETE_MARKER).is_file() or not manifest_path.is_file():
+        return False
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    return payload["format"] == HF_MERGED_FORMAT and len(payload["files"]) > 0
+
+
 def _load_replay_peft(
     adapter_path: str | Path,
     base_model_name_or_path: str | Path,

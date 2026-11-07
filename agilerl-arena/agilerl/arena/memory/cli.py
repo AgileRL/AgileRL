@@ -18,7 +18,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import click
 import yaml
@@ -729,6 +729,7 @@ class SolveRequest:
     max_num_seqs: int | None = None
     gpu_memory_utilization: float | None = None
     max_model_len: int | None = None
+    quantization: Literal["fp8"] | None = None
     hi: int | None = None
     as_json: bool = False
     no_color: bool = False
@@ -809,6 +810,15 @@ class SolveRequest:
     help="Context cap when solving a different setting.",
 )
 @click.option(
+    "--quantization",
+    type=click.Choice(["fp8"]),
+    default=None,
+    help=(
+        "Serving weight quantization (APP_VLLM_QUANTIZATION). --inference only; "
+        "needs a GPU with native fp8 (compute capability 8.9+)."
+    ),
+)
+@click.option(
     "--hi",
     type=int,
     default=None,
@@ -857,7 +867,7 @@ def solve_main(request: SolveRequest) -> int:
         print("Pass --gpu or --device-gb (see --help).", file=sys.stderr)
         return EXIT_USAGE
     overrides = _solve_overrides(request)
-    usage_error = _solve_usage_error(request, gen_device, overrides)
+    usage_error = _solve_usage_error(request, device, gen_device, overrides)
     if usage_error is not None:
         print(usage_error, file=sys.stderr)
         return EXIT_USAGE
@@ -914,12 +924,14 @@ def _solve_overrides(request: SolveRequest) -> dict[str, object]:
         "max_num_seqs": request.max_num_seqs,
         "gpu_memory_utilization": request.gpu_memory_utilization,
         "max_model_len": request.max_model_len,
+        "weight_quantization": request.quantization,
     }
     return {key: value for key, value in flags.items() if value is not None}
 
 
 def _solve_usage_error(
     request: SolveRequest,
+    device: DeviceSpec,
     gen_device: DeviceSpec | None,
     overrides: dict[str, object],
 ) -> str | None:
@@ -933,6 +945,23 @@ def _solve_usage_error(
         return "--inference sizes one GPU; drop --gen-gpu/--gen-device-gb."
     if inference and request.num_gpus is not None:
         return "--inference sizes one GPU; drop --num-gpus."
+    if not inference and request.quantization is not None:
+        return (
+            "--quantization applies to --inference; training manifests set "
+            "vllm_config.quantization."
+        )
+    if request.quantization == "fp8":
+        capability = device.compute_capability
+        if capability is None:
+            return (
+                "--quantization fp8 needs a catalogued --gpu with native fp8 "
+                "(compute capability 8.9+)."
+            )
+        if capability < (8, 9):
+            return (
+                "--quantization fp8 needs a GPU with native fp8 (compute "
+                f"capability 8.9+); {device.name} is {capability[0]}.{capability[1]}."
+            )
     if request.field in overrides:
         flag = request.field.replace("_", "-")
         return f"--{flag} is the setting being solved; drop it."

@@ -90,6 +90,7 @@ from agilerl.utils.lora_merge import (
     ModuleCopy,
     ParamLoraMerged,
     export_merged_pretrained,
+    merged_export_is_complete,
     merged_sync_specs,
     write_merged_completeness_files,
     write_merged_weight,
@@ -573,6 +574,35 @@ class TestWriteMergedCompletenessFiles:
         keys = [entry["key"] for entry in payload["files"]]
         assert keys == ["config.json", "tokenizer/tokenizer.json"]
         assert (merged / "adapter_config.json").is_file()
+
+
+class TestMergedExportIsComplete:
+    def test_true_after_completeness_files(self, tmp_path: Path) -> None:
+        merged = tmp_path / "merged"
+        merged.mkdir()
+        (merged / "config.json").write_text("{}", encoding="utf-8")
+        write_merged_completeness_files(merged)
+
+        assert merged_export_is_complete(merged) is True
+
+    def test_false_for_missing_dir(self, tmp_path: Path) -> None:
+        assert merged_export_is_complete(tmp_path / "merged") is False
+
+    def test_false_without_marker(self, tmp_path: Path) -> None:
+        merged = tmp_path / "merged"
+        merged.mkdir()
+        (merged / "config.json").write_text("{}", encoding="utf-8")
+        write_merged_completeness_files(merged)
+        (merged / MERGED_COMPLETE_MARKER).unlink()
+
+        assert merged_export_is_complete(merged) is False
+
+    def test_false_when_manifest_lists_no_files(self, tmp_path: Path) -> None:
+        merged = tmp_path / "merged"
+        merged.mkdir()
+        write_merged_completeness_files(merged)
+
+        assert merged_export_is_complete(merged) is False
 
 
 class TestExportMergedPretrainedReplay:

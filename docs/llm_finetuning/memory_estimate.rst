@@ -30,7 +30,11 @@ Two commands:
        --model Qwen/Qwen2.5-7B-Instruct
 
 ``--inference`` is a dedicated serving GPU (utilization 0.9, 8 sequences, no
-trainer residual). ``--max-num-seqs 1`` is the longest single-request context.
+trainer residual, a merged model with no LoRA slot). ``--max-num-seqs 1`` is
+the longest single-request context.
+``--quantization fp8`` sizes vLLM online fp8 weights, the server's
+``APP_VLLM_QUANTIZATION=fp8``. It needs a GPU with native fp8 (compute
+capability 8.9+: L4, L40S, H100).
 Without ``--inference``, pass a training manifest and the solve is that run.
 
 Invertible fields: ``max_model_len``, ``max_num_seqs``.
