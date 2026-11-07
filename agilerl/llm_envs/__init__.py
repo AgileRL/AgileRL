@@ -12,7 +12,9 @@ here so ``import agilerl.llm_envs`` works without that extra.
 from agilerl.llm_envs.async_collector import AsyncBatchCollector
 from agilerl.llm_envs.chat_formats import (
     ChatFormat,
+    DsmlFormat,
     Gemma4Format,
+    Glm47Format,
     Granite3Format,
     HarmonyFormat,
     ParsedToolCall,
@@ -34,8 +36,10 @@ __all__ = [
     "AsyncBatchCollector",
     "ChatFormat",
     "DatasetEnv",
+    "DsmlFormat",
     "EnvResponse",
     "Gemma4Format",
+    "Glm47Format",
     "Granite3Format",
     "HarmonyFormat",
     "ParsedToolCall",

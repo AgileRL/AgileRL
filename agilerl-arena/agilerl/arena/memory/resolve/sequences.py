@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import math
 
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
+
 # Sequences a colocated engine decodes when ``vllm_config`` sets none.
 COLOCATED_MAX_NUM_SEQS = 16
 # Share of the card an omitted ``gpu_memory_utilization`` reserves when
@@ -26,18 +28,35 @@ def prompts_per_engine(rollout_batch_size: int, n_engines: int) -> int:
     return math.ceil(rollout_batch_size / n_engines)
 
 
-def resolve_gpu_memory_utilization(configured: float | None, colocated: bool) -> float:
+def rollout_engine_gpu_memory_utilization(hub_id: str | None) -> float:
+    """Share of the card a rollout engine reserves when ``vllm_config`` omits it.
+
+    :param hub_id: Manifest ``pretrained_model_name_or_path``, or ``None``.
+    :return: The catalogue's ``rollout_gpu_memory_utilization`` for that id,
+        else :data:`ROLLOUT_ENGINE_GPU_MEMORY_UTILIZATION`.
+    """
+    info = SUPPORTED_MODEL_INFO.get(hub_id or "")
+    if info is None or info.rollout_gpu_memory_utilization is None:
+        return ROLLOUT_ENGINE_GPU_MEMORY_UTILIZATION
+    return info.rollout_gpu_memory_utilization
+
+
+def resolve_gpu_memory_utilization(
+    configured: float | None, colocated: bool, hub_id: str | None
+) -> float:
     """Share of the card one vLLM engine reserves.
 
     :param configured: Manifest ``gpu_memory_utilization``. A set value is kept.
     :param colocated: Generation shares the trainer GPU.
-    :return: The set value, else 0.3 colocated and 0.9 on a rollout engine.
+    :param hub_id: Manifest ``pretrained_model_name_or_path``, or ``None``.
+    :return: The set value, else 0.3 colocated and
+        :func:`rollout_engine_gpu_memory_utilization` on a rollout engine.
     """
     if configured is not None:
         return configured
     if colocated:
         return OMITTED_GPU_MEMORY_UTILIZATION
-    return ROLLOUT_ENGINE_GPU_MEMORY_UTILIZATION
+    return rollout_engine_gpu_memory_utilization(hub_id)
 
 
 def resolve_max_num_seqs(

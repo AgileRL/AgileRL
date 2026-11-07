@@ -8,6 +8,7 @@ from agilerl.arena.memory import formulas, fsdp_gather
 from agilerl.arena.memory.specs import ModelArch, ModelSpec, TrainingSettings
 from agilerl.arena.memory.trainer_residency import (
     fsdp_cpu_offload_host_bytes,
+    fsdp_forward_gather_bytes,
     trainer_allocator_slack,
     trainer_base_bytes,
 )
@@ -105,6 +106,56 @@ class TestFsdpCpuOffloadHostBytes:
         settings = TrainingSettings(fsdp=None, n_training_gpus=4)
 
         assert fsdp_cpu_offload_host_bytes(model, settings, counts, 4) == 0.0
+
+
+class TestFsdpForwardGatherBytes:
+    def test_resharded_forward_retains_one_bf16_block(self):
+        counts = formulas.param_counts(QWEN_05B)
+        settings = TrainingSettings(
+            fsdp=FSDPConfig(reshard_after_forward=True, cpu_offload=False),
+            n_training_gpus=4,
+        )
+        block = fsdp_gather.largest_block_params(counts, QWEN_05B)
+
+        retained, staging = fsdp_forward_gather_bytes(QWEN_05B, settings, counts, 4)
+
+        assert (retained, staging) == (block * 2, 0.0)
+
+    def test_cpu_offload_stages_the_block_shard_on_the_gpu(self):
+        counts = formulas.param_counts(QWEN_05B)
+        settings = TrainingSettings(
+            fsdp=FSDPConfig(reshard_after_forward=True, cpu_offload=True),
+            n_training_gpus=4,
+        )
+        block = fsdp_gather.largest_block_params(counts, QWEN_05B)
+
+        retained, staging = fsdp_forward_gather_bytes(QWEN_05B, settings, counts, 4)
+
+        assert (retained, staging) == (block * 2, block * 2 / 4)
+
+    def test_resident_frozen_tp_shards_leave_the_retained_output(self):
+        # Arrange
+        arch = QWEN_05B.model_copy(update={"tensor_parallel_plan": True})
+        counts = formulas.param_counts(arch)
+        settings = TrainingSettings(
+            fsdp=FSDPConfig(tp=2, shard_frozen_tp=False, cpu_offload=True),
+            n_training_gpus=4,
+        )
+
+        # Act
+        retained, staging = fsdp_forward_gather_bytes(arch, settings, counts, 2)
+
+        # Assert: only the 1829 per-layer norm elements gather, in bf16.
+        assert settings.fsdp.frozen_tp_resident
+        assert (retained, staging) == (1829 * 2, 1829 * 2 / 2)
+
+    def test_ddp_and_one_gpu_gather_nothing(self):
+        counts = formulas.param_counts(QWEN_05B)
+        ddp = TrainingSettings(fsdp=None, n_training_gpus=4)
+        single = TrainingSettings(fsdp=FSDPConfig(cpu_offload=True))
+
+        assert fsdp_forward_gather_bytes(QWEN_05B, ddp, counts, 4) == (0.0, 0.0)
+        assert fsdp_forward_gather_bytes(QWEN_05B, single, counts, 1) == (0.0, 0.0)
 
 
 class TestTrainerAllocatorSlack:

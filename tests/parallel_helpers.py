@@ -20,7 +20,12 @@ from peft import LoraConfig, inject_adapter_in_model
 from torch import nn
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor
-from torch.nn.attention.flex_attention import BlockMask, create_mask
+from torch.nn.attention.flex_attention import (
+    AuxOutput,
+    AuxRequest,
+    BlockMask,
+    create_mask,
+)
 from torch.utils._python_dispatch import TorchDispatchMode
 
 from agilerl.distributed import (
@@ -369,3 +374,27 @@ def cpu_flex_attention(
         scores = torch.cat([scores, sinks], dim=-1)
     probs = torch.softmax(scores, dim=-1)[..., : key.shape[-2]]
     return (probs @ value).transpose(1, 2).contiguous(), None
+
+
+def dense_flex_attention(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    block_mask: BlockMask,
+    scale: float,
+    return_aux: AuxRequest | None = None,
+    **_flex_options: Any,
+) -> torch.Tensor | tuple[torch.Tensor, AuxOutput]:
+    """``compile_friendly_flex_attention`` as dense math over the BlockMask; CPU flex has no backward."""
+    batch, heads, q_len, _ = query.shape
+    allowed = create_mask(
+        block_mask.mask_mod, batch, 1, q_len, key.shape[-2], query.device
+    )
+    key = key.repeat_interleave(heads // key.shape[1], dim=1)
+    value = value.repeat_interleave(heads // value.shape[1], dim=1)
+    scores = (query @ key.transpose(-1, -2)) * scale
+    scores = scores.masked_fill(~allowed, float("-inf"))
+    output = torch.softmax(scores, dim=-1) @ value
+    if return_aux is None:
+        return output
+    return output, AuxOutput(lse=torch.logsumexp(scores, dim=-1))

@@ -18,7 +18,10 @@ from pydantic import BaseModel, ConfigDict
 from agilerl.arena.memory.estimator import RunEstimate, estimate_run
 from agilerl.arena.memory.formulas import host_bytes_per_gpu
 from agilerl.arena.memory.generation import drop_engine_fast_paths
-from agilerl.arena.memory.resolve.attention import resolve_attn_implementation
+from agilerl.arena.memory.resolve.attention import (
+    context_parallel_blocker,
+    resolve_attn_implementation,
+)
 from agilerl.arena.memory.resolve.batch import (
     catalog_model,
     engine_group_size,
@@ -857,7 +860,8 @@ def training_settings_from_manifest(
     """Trainer-side settings, read as the trainer reads the manifest.
 
     Settings the estimator cannot size (quantization) and settings the run cannot start (full FSDP CPU offload beside async rollout
-    engines) raise ``ValueError``.
+    engines, context parallel on an attention backend without a
+    context-parallel path) raise ``ValueError``.
 
     :param manifest: Training manifest.
     :param micro_batch_size: Rows in one forward. ``None`` resolves an omitted
@@ -871,6 +875,15 @@ def training_settings_from_manifest(
     n_training_gpus = manifest.training.training_gpus_per_agent
     _reject_trainer_quantization(spec.quantization)
     blocker = cpu_offload_blocker(spec.fsdp, async_rollout(manifest))
+    if blocker is not None:
+        raise ValueError(blocker)
+    entry = SUPPORTED_MODEL_INFO.get(spec.pretrained_model_name_or_path or "")
+    model_type = None if entry is None else entry.config["model_type"]
+    blocker = context_parallel_blocker(
+        resolve_attn_implementation(model_type, cuda=True),
+        1 if spec.fsdp is None else spec.fsdp.cp,
+        model_type,
+    )
     if blocker is not None:
         raise ValueError(blocker)
     if micro_batch_size is None:
@@ -972,7 +985,9 @@ def generation_settings_from_manifest(
         raise ValueError(msg)
     settings: dict[str, Any] = {
         "gpu_memory_utilization": resolve_gpu_memory_utilization(
-            vllm.gpu_memory_utilization, not async_rollout(manifest)
+            vllm.gpu_memory_utilization,
+            not async_rollout(manifest),
+            spec.pretrained_model_name_or_path,
         ),
         "max_num_seqs": _max_num_seqs(manifest, spec, vllm, rollout_engines),
         "max_model_len": spec.max_model_len,

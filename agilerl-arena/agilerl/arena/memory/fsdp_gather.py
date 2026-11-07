@@ -12,7 +12,9 @@ from agilerl.arena.memory.formulas import (
     mlp_params_per_layer,
     moe_params_per_layer,
     routed_expert_params_per_layer,
+    shared_expert_params_per_layer,
     tensor_parallel_params,
+    tensor_parallel_whole_params,
     token_embedding_params,
 )
 from agilerl.arena.memory.specs import LayerKind, ModelArch
@@ -31,6 +33,20 @@ def block_moe_params_per_layer(arch: ModelArch, expert_parallel: int = 1) -> int
     return experts + router
 
 
+def _mixed_ffn_block_params(
+    counts: ParamCounts, arch: ModelArch, expert_parallel: int
+) -> tuple[float, float]:
+    """Dense-MLP and MoE-block parameters of one mixed-stack layer."""
+    # counts.mlp holds every router; one of them stays on the MoE block.
+    _, router = moe_params_per_layer(arch)
+    n_layers = max(arch.n_layers, 1)
+    moe = counts.moe_experts
+    if expert_parallel > 1:
+        moe -= arch.moe_layers * routed_expert_params_per_layer(arch)
+    dense = (counts.mlp - arch.moe_layers * router) / (n_layers - arch.moe_layers)
+    return dense, moe / arch.moe_layers + router
+
+
 def largest_block_params(
     counts: ParamCounts, arch: ModelArch, expert_parallel: int = 1
 ) -> int:
@@ -45,11 +61,15 @@ def largest_block_params(
                 mamba_params_per_layer(arch),
             )
         )
-    body = counts.attention + counts.mlp + counts.moe_experts + counts.norms
-    body += counts.mamba
+    moe = counts.moe_experts
     if expert_parallel > 1:
-        body -= arch.moe_layers * routed_expert_params_per_layer(arch)
-    return int(body / max(arch.n_layers, 1))
+        moe -= arch.moe_layers * routed_expert_params_per_layer(arch)
+    n_layers = max(arch.n_layers, 1)
+    shared = counts.attention + counts.norms + counts.mamba
+    if 0 < arch.moe_layers < n_layers:
+        dense_mlp, moe_block = _mixed_ffn_block_params(counts, arch, expert_parallel)
+        return int(shared / n_layers + max(dense_mlp, moe_block))
+    return int((shared + counts.mlp + moe) / n_layers)
 
 
 def layer_params(arch: ModelArch, kind: LayerKind, expert_parallel: int = 1) -> int:
@@ -76,6 +96,37 @@ def tp_gathered_params(
     return 0 if frozen_tp_resident else params // tensor_parallel
 
 
+def _moe_sets_largest_block(
+    counts: ParamCounts, arch: ModelArch, expert_parallel: int
+) -> bool:
+    """Whether :func:`largest_block_params` of a uniform stack is an MoE layer."""
+    n_layers = max(arch.n_layers, 1)
+    if not 0 < arch.moe_layers < n_layers:
+        return arch.moe_layers > 0
+    dense_mlp, moe_block = _mixed_ffn_block_params(counts, arch, expert_parallel)
+    return moe_block >= dense_mlp
+
+
+def _whole_block_params(
+    counts: ParamCounts,
+    arch: ModelArch,
+    moe_per_layer: int,
+    tensor_parallel: int,
+    expert_parallel: int,
+) -> int:
+    """Parameters the widest uniform-stack block gathers whole under a family TP plan.
+
+    Norms and :func:`tensor_parallel_whole_params` averaged over the blocks,
+    plus every MoE parameter other than shared experts when an MoE layer is
+    the widest block; every other block linear is on the TP mesh.
+    """
+    stack_whole = counts.norms + tensor_parallel_whole_params(arch, tensor_parallel)
+    whole = stack_whole / max(arch.n_layers, 1)
+    if _moe_sets_largest_block(counts, arch, expert_parallel):
+        whole += moe_per_layer - shared_expert_params_per_layer(arch)
+    return int(whole)
+
+
 def prefetch_window_params(
     counts: ParamCounts,
     arch: ModelArch,
@@ -96,9 +147,13 @@ def prefetch_window_params(
     if not arch.layer_kinds:
         block = largest_block_params(counts, arch, expert_parallel)
         if linears_on_tp:
-            # A uniform stack's linears are on the TP mesh. Norms and MoE gather whole.
-            moe = arch.moe_layers * block_moe_params_per_layer(arch, expert_parallel)
-            whole = int((counts.norms + moe) / max(arch.n_layers, 1))
+            whole = _whole_block_params(
+                counts,
+                arch,
+                block_moe_params_per_layer(arch, expert_parallel),
+                tensor_parallel,
+                expert_parallel,
+            )
             block = whole + tp_gathered_params(
                 max(block - whole, 0), tensor_parallel, frozen_tp_resident
             )
@@ -152,7 +207,11 @@ def fsdp_gathered_params(
         so they gather nothing.
     """
     token = min(token_embedding_params(arch), max(counts.total, 0))
-    tp_params = 0 if tensor_parallel <= 1 else tensor_parallel_params(counts, arch)
+    tp_params = (
+        0
+        if tensor_parallel <= 1
+        else tensor_parallel_params(counts, arch, tensor_parallel)
+    )
     sharded = max(counts.total - token - tp_params, 0) + tp_gathered_params(
         tp_params, tensor_parallel, frozen_tp_resident
     )
@@ -174,6 +233,39 @@ def fsdp_gathered_params(
     return min(sharded, window + head + extra_embed + root) + expert_layer
 
 
+def fsdp_retained_gather_params(
+    counts: ParamCounts,
+    arch: ModelArch,
+    n_gpus: int,
+    tensor_parallel: int = 1,
+    expert_parallel: int = 1,
+    expert_gpus: int | None = None,
+    frozen_tp_resident: bool = False,
+) -> int:
+    """Elements of the all-gather output a decoder forward keeps beside the gathered units.
+
+    FSDP2's forward ``wait_for_unshard`` holds each unit's all-gather output
+    in ``all_gather_state`` until the next unit's wait, so the running unit
+    is live twice beside its prefetched neighbour.
+
+    :param n_gpus: GPUs one dense weight copy is FSDP-sharded across.
+    :param expert_gpus: GPUs packed experts are sharded across (EP times
+        leftover FSDP); ``None`` when that is ``n_gpus``.
+    :param frozen_tp_resident: Frozen TP shards stay resident outside FSDP,
+        so they gather nothing.
+    :return: Elements of the widest decoder unit's all-gather output.
+    """
+    block = prefetch_window_params(
+        counts, arch, 1, tensor_parallel, expert_parallel, frozen_tp_resident
+    )
+    expert_layer = 0
+    if expert_parallel > 1 and (
+        (n_gpus if expert_gpus is None else expert_gpus) > expert_parallel
+    ):
+        expert_layer = routed_expert_params_per_layer(arch) // expert_parallel
+    return max(block, expert_layer)
+
+
 def _side_units(
     counts: ParamCounts,
     arch: ModelArch,
@@ -184,8 +276,8 @@ def _side_units(
 
     The root unit holds tower parameters outside the encoder blocks and
     parameters no group accounts for. An untied head on the TP mesh gathers
-    1/tp, as do per-layer embeddings under a family TP plan; neither gathers
-    when frozen TP shards stay resident.
+    1/tp, as do per-layer embeddings and planned tower linears under a
+    family TP plan; none of them gathers when frozen TP shards stay resident.
     """
     head = (
         0
@@ -199,6 +291,12 @@ def _side_units(
         unattributed -= attention_output_gate_params(counts, arch)
         extra_embed = tp_gathered_params(
             extra_embed, tensor_parallel, frozen_tp_resident
+        )
+        root_tp = max(
+            arch.tensor_parallel_tower_params - arch.multimodal_tower_block_params, 0
+        )
+        tower_root -= root_tp - tp_gathered_params(
+            root_tp, tensor_parallel, frozen_tp_resident
         )
     return head, extra_embed, tower_root + unattributed
 
@@ -263,9 +361,8 @@ def fsdp_gather_pool_params(
     else:
         block = largest_block_params(counts, arch)
         if linears_on_tp:
-            whole = int(
-                (counts.norms + arch.moe_layers * sum(moe_params_per_layer(arch)))
-                / max(arch.n_layers, 1)
+            whole = _whole_block_params(
+                counts, arch, sum(moe_params_per_layer(arch)), tensor_parallel, 1
             )
             block = whole + tp_gathered_params(
                 max(block - whole, 0), tensor_parallel, frozen_tp_resident

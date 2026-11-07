@@ -132,10 +132,11 @@ class ExpertKernels:
         [torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
         tuple[torch.Tensor, torch.Tensor],
     ]
-    # ``(projected [rows, 2 * inter]) -> silu(gate) * up`` over ``[gate | up]``.
-    swiglu: Callable[[torch.Tensor], torch.Tensor]
-    # ``(grad [rows, inter], projected) -> grad of projected``.
-    swiglu_backward: Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
+    # ``(projected [rows, 2 * inter], limit) -> silu(gate) * up`` over
+    # ``[gate | up]``; a ``limit`` clamps gate to at most it and up to ``±limit``.
+    swiglu: Callable[[torch.Tensor, float | None], torch.Tensor]
+    # ``(grad [rows, inter], projected, limit) -> grad of projected``.
+    swiglu_backward: Callable[[torch.Tensor, torch.Tensor, float | None], torch.Tensor]
 
 
 TRITON_EXPERT_KERNELS = (

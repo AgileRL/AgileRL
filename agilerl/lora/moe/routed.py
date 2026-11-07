@@ -37,6 +37,7 @@ from agilerl.lora.moe.grouped_gemm import (
 from agilerl.lora.moe.layouts import (
     expert_activation,
     routed_experts_act_fn,
+    routed_experts_gate,
     routed_projection_names,
 )
 from agilerl.lora.moe.recompute import LoraExpertsConfig, LoraExpertsFunction
@@ -232,6 +233,7 @@ def _scatter_routed_expert_chunks(
     down_weight: torch.Tensor,
     act_fn: Callable[[torch.Tensor], torch.Tensor],
     gated: bool,
+    apply_gate: Callable[[torch.Tensor], torch.Tensor] | None,
     routing: RoutedRows,
     up_loras: Sequence[ExpertLora],
     down_loras: Sequence[ExpertLora],
@@ -263,7 +265,7 @@ def _scatter_routed_expert_chunks(
         projected = _project_expert_rows(
             rows, up_operand, up_chunked, chunk, offs, kernels
         )
-        intermediate = expert_activation(projected, act_fn, gated, kernels)
+        intermediate = expert_activation(projected, act_fn, gated, kernels, apply_gate)
         del projected
         down = _project_expert_rows(
             intermediate, down_operand, down_chunked, chunk, offs, kernels
@@ -283,6 +285,7 @@ def _recompute_routed_experts(
     down_weight: torch.Tensor,
     act_fn: Callable[[torch.Tensor], torch.Tensor],
     gated: bool,
+    apply_gate: Callable[[torch.Tensor], torch.Tensor] | None,
     routing: RoutedRows,
     up_loras: Sequence[ExpertLora],
     down_loras: Sequence[ExpertLora],
@@ -302,6 +305,7 @@ def _recompute_routed_experts(
     config = LoraExpertsConfig(
         act_fn,
         gated,
+        apply_gate,
         tuple(sizes),
         tuple(lora.row_id for lora in up_loras),
         tuple(lora.row_id for lora in down_loras),
@@ -356,6 +360,7 @@ def routed_experts_local_forward(
     up_weight = getattr(experts, up_name)
     down_weight = experts.down_proj
     act_fn = routed_experts_act_fn(experts)
+    apply_gate = routed_experts_gate(experts)
     assert isinstance(up_weight, torch.Tensor)
     assert isinstance(down_weight, torch.Tensor)
 
@@ -416,6 +421,7 @@ def routed_experts_local_forward(
             down_weight,
             act_fn,
             gated,
+            apply_gate,
             routed_rows,
             up_loras,
             down_loras,
@@ -429,6 +435,7 @@ def routed_experts_local_forward(
         down_weight,
         act_fn,
         gated,
+        apply_gate,
         routed_rows,
         up_loras,
         down_loras,

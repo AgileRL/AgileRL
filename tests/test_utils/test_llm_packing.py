@@ -15,6 +15,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 from torch import nn
+from torch.nn.attention.flex_attention import (
+    BlockMask,
+    create_block_mask,
+    flex_attention,
+)
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core.sequence_layout import (
@@ -840,6 +845,23 @@ class TestHeadNormShapes:
         assert head_norm_shapes(model) == []
 
 
+def packed_document_mask(length: int) -> BlockMask:
+    """Causal block mask over three packed documents of a *length*-token row."""
+    documents = torch.arange(length) * 3 // length
+
+    def mask_mod(_batch, _head, q_idx, kv_idx):
+        return (kv_idx <= q_idx) & (documents[q_idx] == documents[kv_idx])
+
+    return create_block_mask(mask_mod, None, None, length, length, device="cpu")
+
+
+@pytest.fixture
+def fresh_compile_cache():
+    torch.compiler.reset()
+    yield
+    torch.compiler.reset()
+
+
 class TestPackedLengthClasses:
     def test_center_first_then_nearest_length_of_each_class(self):
         # Arrange
@@ -954,6 +976,66 @@ class TestPackedLengthClasses:
         model = AutoModelForCausalLM.from_config(_tiny_llama_config())
 
         assert packed_length_classes(model, 4096, 2048, 132) == []
+
+    def test_flex_attention_adds_dynamic_length_block_count_and_short_query(self):
+        model = nn.Sequential(nn.Linear(4, 4))
+
+        lengths = packed_length_classes(model, 300, 200, 132, True)
+
+        # 199 makes the length dynamic, 257 the block count; 128 is one block
+        # and 127 a short query.
+        assert lengths == [200, 199, 192, 257, 132, 128, 127]
+
+    def test_flex_attention_centered_on_short_queries_adds_long_lengths(self):
+        model = nn.Sequential(nn.Linear(4, 4))
+
+        lengths = packed_length_classes(model, 200, 100, 132, True)
+
+        assert lengths == [100, 99, 96, 128, 129, 133, 144]
+
+    def test_flex_attention_extends_a_hybrid_with_block_count_and_short_query(
+        self,
+    ):
+        # Arrange
+        model = nn.Sequential(_granite_tiny_mixer(), _granite_tiny_mixer())
+        hybrid = packed_length_classes(model, 29696, 20000, 132)
+
+        # Act
+        lengths = packed_length_classes(model, 29696, 20000, 132, True)
+
+        # Assert
+        # 20000 and 19999 share 157 blocks; 19968 has 156.
+        assert lengths == [*hybrid[:2], 19968, *hybrid[2:], 127]
+
+    def test_flex_attention_lengths_leave_no_compile_for_other_lengths(
+        self, fresh_compile_cache
+    ):
+        # Arrange
+        graphs: list[torch.fx.GraphModule] = []
+
+        def counting_backend(graph, _inputs):
+            graphs.append(graph)
+            return graph.forward
+
+        compiled_flex = torch.compile(flex_attention, backend=counting_backend)
+
+        def attend(length: int) -> None:
+            query = torch.randn(1, 2, length, 16)
+            compiled_flex(query, query, query, block_mask=packed_document_mask(length))
+
+        for length in packed_length_classes(nn.Sequential(), 300, 200, 132, True):
+            attend(length)
+        warmed_graphs = len(graphs)
+
+        # Act
+        for length in (300, 263, 150, 128, 90, 17):
+            attend(length)
+
+        # Assert
+        # Static 200, dynamic length, dynamic block count, one block; the
+        # short-query split is an inductor guard this eager backend skips.
+        assert warmed_graphs == 4
+        assert len(graphs) == warmed_graphs
 
 
 class _PackingGateStub:

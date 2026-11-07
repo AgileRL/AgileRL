@@ -15,6 +15,7 @@ from agilerl.distributed.context_parallel import (
     all_to_all_hidden_to_seq,
     all_to_all_seq_to_hidden,
     gather_for_cp,
+    gather_sequence_for_cp,
     pad_right_for_cp,
     shard_for_cp,
     validate_cp_degree,
@@ -199,3 +200,64 @@ def _gather_and_mixer_roundtrip_worker(rank: int, world_size: int) -> None:
 class TestCpCollectives:
     def test_gather_and_mixer_all_to_all_roundtrip(self) -> None:
         run_ranks(_gather_and_mixer_roundtrip_worker)
+
+
+def _sequence_shard(global_rank: int) -> torch.Tensor:
+    return torch.arange(12, dtype=torch.float32).reshape(1, 2, 3, 2) + 100 * global_rank
+
+
+def _upstream_grad(global_rank: int) -> torch.Tensor:
+    return torch.arange(24, dtype=torch.float32).reshape(1, 2, 6, 2) * (global_rank + 1)
+
+
+def _gather_sequence_on_subgroups_worker(rank: int, world_size: int) -> None:
+    # Arrange
+    pairs = [[0, 1], [2, 3]]
+    groups = [dist.new_group(pair) for pair in pairs]
+    pair = pairs[rank // 2]
+    group = groups[rank // 2]
+    shard = _sequence_shard(rank).requires_grad_(True)
+
+    # Act
+    gathered = gather_sequence_for_cp(shard, group, 2)
+    (gathered * _upstream_grad(rank)).sum().backward()
+
+    # Assert
+    expected = torch.cat([_sequence_shard(peer) for peer in pair], dim=2)
+    assert torch.equal(gathered, expected)
+    own = pair.index(rank)
+    expected_grad = sum(
+        _upstream_grad(peer).chunk(len(pair), dim=2)[own] for peer in pair
+    )
+    assert shard.grad is not None
+    assert torch.equal(shard.grad, expected_grad)
+
+
+def _gather_sequence_on_world_worker(rank: int, world_size: int) -> None:
+    # Arrange
+    group = dist.group.WORLD
+    shard = _sequence_shard(rank).requires_grad_(True)
+    upstream = [
+        torch.arange(48, dtype=torch.float32).reshape(1, 8, 3, 2) * (peer + 1)
+        for peer in range(world_size)
+    ]
+
+    # Act
+    gathered = gather_sequence_for_cp(shard, group, 1)
+    (gathered * upstream[rank]).sum().backward()
+
+    # Assert
+    expected = torch.cat([_sequence_shard(peer) for peer in range(world_size)], dim=1)
+    assert torch.equal(gathered, expected)
+    expected_grad = sum(grad.chunk(world_size, dim=1)[rank] for grad in upstream)
+    assert shard.grad is not None
+    assert torch.equal(shard.grad, expected_grad)
+
+
+@pytest.mark.multi_rank
+class TestGatherSequenceForCp:
+    def test_gathers_shards_and_sums_every_ranks_gradient_on_subgroups(self) -> None:
+        run_ranks(_gather_sequence_on_subgroups_worker, 4)
+
+    def test_sums_four_ranks_gradients_on_the_sequence_dim(self) -> None:
+        run_ranks(_gather_sequence_on_world_worker, 4)

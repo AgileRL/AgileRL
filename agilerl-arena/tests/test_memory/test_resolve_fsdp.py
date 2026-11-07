@@ -18,6 +18,7 @@ from agilerl.arena.memory.resolve.fsdp import (
     MemoryPins,
     TrainingMemoryPlan,
     TrainingMemoryUnfitError,
+    cpu_offload_blocker,
     gather_cost,
     learn_cost,
     resolve_training_memory,
@@ -134,6 +135,26 @@ def dense_peak(settings: TrainingSettings, sharded: bool) -> int:
 def buffered(peak: int) -> int:
     """Smallest budget that holds ``peak`` with the underprediction buffer."""
     return int(peak / (1 - formulas.MAX_UNDERPREDICTION)) + 1
+
+
+class TestCpuOffloadBlocker:
+    def test_colocated_rollout_serves_full_cpu_offload(self) -> None:
+        assert cpu_offload_blocker(FSDPConfig(cpu_offload=True), False) is None
+
+    def test_async_rollout_rejects_full_cpu_offload(self) -> None:
+        reason = cpu_offload_blocker(FSDPConfig(cpu_offload=True), True)
+
+        assert reason is not None
+        assert reason.startswith("fsdp.cpu_offload needs colocated")
+
+    def test_expert_parallel_rejects_full_cpu_offload(self) -> None:
+        reason = cpu_offload_blocker(FSDPConfig(cpu_offload=True, ep=2), False)
+
+        assert reason is not None
+        assert reason.startswith("fsdp.cpu_offload does not support fsdp.ep=2")
+
+    def test_expert_parallel_without_cpu_offload_is_served(self) -> None:
+        assert cpu_offload_blocker(FSDPConfig(ep=2), True) is None
 
 
 class TestGatherCost:
@@ -720,6 +741,42 @@ class TestResolveTrainingMemoryLastResorts:
 
         # Assert
         assert plans[0] == plans[1] == plans[2]
+
+    @pytest.mark.parametrize(
+        ("ep", "turns_on_cpu_offload"),
+        [(1, True), (8, False)],
+        ids=["no_expert_parallel", "expert_parallel"],
+    )
+    def test_full_cpu_offload_is_the_colocated_last_resort_only_without_ep(
+        self, caplog, ep, turns_on_cpu_offload
+    ):
+        # Arrange
+        settings = moe_floor_settings()
+        settings = settings.model_copy(
+            update={"algorithm": "grpo", "fsdp": replace(settings.fsdp, ep=ep)}
+        )
+
+        # Act
+        with (
+            caplog.at_level(logging.INFO),
+            pytest.raises(TrainingMemoryUnfitError) as raised,
+        ):
+            resolve_training_memory(
+                MOE_MODEL,
+                budget_device(GiB),
+                settings,
+                MemoryPins(gradient_checkpointing=True, micro_batch_size_per_gpu=1),
+                1,
+            )
+
+        # Assert
+        turned_on = [
+            record.args[0]
+            for record in caplog.records
+            if record.getMessage().startswith("Training memory: turning on")
+        ]
+        assert ("fsdp.cpu_offload=True" in turned_on) is turns_on_cpu_offload
+        assert bool(raised.value.plan.fsdp.cpu_offload) is turns_on_cpu_offload
 
 
 NANO_MODEL = ModelSpec(

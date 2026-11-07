@@ -18,13 +18,21 @@ from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.arena.models.networks import VllmModality
 
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
-    from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
+    from transformers import (
+        AutoConfig,
+        AutoModelForCausalLM,
+        AutoModelForImageTextToText,
+        PretrainedConfig,
+    )
 
     TrainerModelClass = type[AutoModelForCausalLM] | type[AutoModelForImageTextToText]
+    TrainerConfigClass = type[AutoConfig] | type[PretrainedConfig]
 else:
+    AutoConfig = None
     AutoModelForCausalLM = None
     AutoModelForImageTextToText = None
     TrainerModelClass = Any
+    TrainerConfigClass = Any
 
 
 class VllmRuntimeConfig(BaseModel):
@@ -68,16 +76,18 @@ class VllmRuntimeConfig(BaseModel):
 class TrainerRuntimeConfig(BaseModel):
     """Trainer load settings that vary by Hugging Face ``model_type``.
 
-    ``model_class`` is the auto class every trainer load builds. The other
-    fields are ``from_pretrained`` kwargs; unset ones stay ``None`` so callers
-    can ``setdefault`` into an existing model-config dict without overwriting
-    user values with empties.
+    ``model_class`` is the auto class every trainer load builds and
+    ``config_class`` reads the checkpoint config. The other fields are
+    ``from_pretrained`` kwargs; unset ones stay ``None`` so callers can
+    ``setdefault`` into an existing model-config dict without overwriting user
+    values with empties.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
     # VL checkpoints build their full VL class so towers load, frozen.
     model_class: TrainerModelClass = AutoModelForCausalLM
+    config_class: TrainerConfigClass = AutoConfig
     trust_remote_code: bool | None = Field(default=None)
 
     def load_kwargs(self) -> dict[str, object]:
@@ -86,7 +96,9 @@ class TrainerRuntimeConfig(BaseModel):
         :return: ``trust_remote_code`` when set.
         :rtype: dict[str, object]
         """
-        return self.model_dump(exclude_none=True, exclude={"model_class"})
+        return self.model_dump(
+            exclude_none=True, exclude={"model_class", "config_class"}
+        )
 
 
 class MambaPatchConfig(BaseModel):
@@ -219,6 +231,9 @@ class ModelRuntimeConfig(BaseModel):
     tower_modalities: Mapping[str, frozenset[VllmModality]] = Field(
         default_factory=dict
     )
+    # PEFT exclude_modules suffixes the actor adapter never wraps, whatever
+    # lora_config.target_modules names.
+    lora_exclude_modules: frozenset[str] = frozenset()
     tensor_parallel_plan: str | None = Field(default=None, min_length=1)
     context_parallel_plan: str | None = Field(default=None, min_length=1)
     # A name in agilerl.llm_envs.chat_formats.CHAT_FORMATS; None detects from the vocab.

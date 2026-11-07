@@ -41,6 +41,7 @@ from agilerl.distributed.context_parallel.gdn import (
     _fla_build_cp_context,
     _fla_causal_conv1d,
     _fla_chunk_gated_delta_rule,
+    _fla_chunk_kda,
     install_gdn_context_parallel,
     wraps_gdn_context_parallel,
 )
@@ -1210,6 +1211,73 @@ class TestInstallGdnContextParallel:
         assert scan_out == "stock-scan"
         assert seen == ["conv", "scan"]
 
+    def test_kimi_delta_attention_module_kernels_receive_cp_context(
+        self, monkeypatch
+    ) -> None:
+        # Arrange
+        module = types.ModuleType("kda_modeling_mod")
+
+        def causal_conv1d_fn(*_args: object, **_kwargs: object) -> None:
+            msg = "original conv"
+            raise AssertionError(msg)
+
+        def chunk_kimi_delta_attention(*_args: object, **_kwargs: object) -> None:
+            msg = "original scan"
+            raise AssertionError(msg)
+
+        module.causal_conv1d_fn = causal_conv1d_fn
+        module.chunk_kimi_delta_attention = chunk_kimi_delta_attention
+        monkeypatch.setitem(sys.modules, "kda_modeling_mod", module)
+
+        class Mixer(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.conv_kernel_size = 4
+
+        Mixer.__module__ = "kda_modeling_mod"
+        seen: list[tuple[object, object]] = []
+
+        def fla_kda(*args: object, **kwargs: object) -> tuple[object, None]:
+            seen.append((kwargs["cp_context"], kwargs["chunk_size"]))
+            return args[0], None
+
+        def fla_gdn(*_args: object, **_kwargs: object) -> None:
+            msg = "gated delta rule scan"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(
+            "agilerl.distributed.context_parallel.gdn._fla_chunk_kda", fla_kda
+        )
+        monkeypatch.setattr(
+            "agilerl.distributed.context_parallel.gdn._fla_chunk_gated_delta_rule",
+            fla_gdn,
+        )
+        monkeypatch.setattr(
+            "agilerl.distributed.context_parallel.gdn._fla_build_cp_context",
+            lambda *_args, **_kwargs: "ctx",
+        )
+        _fake_fla_module(monkeypatch, "fla.ops.cp", build_cp_context=lambda *_a: "ctx")
+        _fake_fla_module(monkeypatch, "fla.ops.kda", chunk_kda=fla_kda)
+        # 160 tokens over two ranks leave 80-token pieces: KDA has no 16 chunk.
+        cases = (([0, 128], 64), ([0, 192], 32), ([0, 160], 64))
+        query = torch.zeros(1, 2, 1, 2)
+
+        # Act
+        assert install_gdn_context_parallel(Mixer(), _cp_mesh()) is True
+        try:
+            for bounds, _chunk in cases:
+                publish_varlen_offsets(torch.tensor(bounds, dtype=torch.int32))
+                output, _state = module.chunk_kimi_delta_attention(
+                    query, query, query, g=query, beta=query
+                )
+                assert output is query
+        finally:
+            clear_ulysses_params()
+
+        # Assert
+        assert seen == [("ctx", chunk) for _bounds, chunk in cases]
+        assert getattr(module.causal_conv1d_fn, "_agilerl_gdn_cp_kernel", False) is True
+
 
 def _fake_fla_module(monkeypatch, name: str, **attrs: object) -> None:
     module = types.ModuleType(name)
@@ -1329,6 +1397,20 @@ class TestFlaChunkGatedDeltaRule:
         result = _fla_chunk_gated_delta_rule("q", "k", cp_context="ctx")
 
         assert result == (("q", "k"), {"cp_context": "ctx"})
+
+
+class TestFlaChunkKda:
+    def test_passes_arguments_through(self, monkeypatch) -> None:
+        def chunk_kda(
+            *args: object, **kwargs: object
+        ) -> tuple[tuple[object, ...], dict[str, object]]:
+            return args, kwargs
+
+        _fake_fla_module(monkeypatch, "fla.ops.kda", chunk_kda=chunk_kda)
+
+        result = _fla_chunk_kda("q", "k", cp_context="ctx", chunk_size=32)
+
+        assert result == (("q", "k"), {"cp_context": "ctx", "chunk_size": 32})
 
 
 class _LoraInProj(nn.Module):
@@ -1772,8 +1854,14 @@ class TestCatalogIsolation:
         # Assert
         assert result.returncode == 0, result.stderr
 
-    def test_family_context_parallel_plans_return_every_mixer_family(self) -> None:
+    def test_family_context_parallel_plans_return_every_family(self) -> None:
         from agilerl.architectures import family_context_parallel_plans
+        from agilerl.architectures.deepseek_v4.context_parallel import (
+            DEEPSEEK_V4_CONTEXT_PARALLEL_PLAN,
+        )
+        from agilerl.architectures.glm5_next.context_parallel import (
+            GLM5_NEXT_CONTEXT_PARALLEL_PLAN,
+        )
         from agilerl.architectures.granitemoehybrid.context_parallel import (
             GRANITEMOEHYBRID_CONTEXT_PARALLEL_PLAN,
         )
@@ -1785,7 +1873,9 @@ class TestCatalogIsolation:
         )
 
         assert family_context_parallel_plans() == [
+            DEEPSEEK_V4_CONTEXT_PARALLEL_PLAN,
             GRANITEMOEHYBRID_CONTEXT_PARALLEL_PLAN,
             NEMOTRON_H_CONTEXT_PARALLEL_PLAN,
+            GLM5_NEXT_CONTEXT_PARALLEL_PLAN,
             QWEN3_5_CONTEXT_PARALLEL_PLAN,
         ]

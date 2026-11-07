@@ -27,6 +27,8 @@ class LoraExpertsConfig:
 
     act_fn: Callable[[torch.Tensor], torch.Tensor]
     gated: bool
+    # The family's own gate on the packed projection, ``None`` for ``act_fn``.
+    apply_gate: Callable[[torch.Tensor], torch.Tensor] | None
     # Rows per chunk of the expert-sorted rows.
     sizes: tuple[int, ...]
     # Mixed-routing row id of each up / down adapter, ``None`` when unrouted.
@@ -131,7 +133,7 @@ class LoraExpertsFunction(torch.autograd.Function):
             for delta in _adapter_deltas(rows, operands[:n_up], up_masks, chunk, offs):
                 projected.add_(delta)
             intermediate = expert_activation(
-                projected, config.act_fn, config.gated, kernels
+                projected, config.act_fn, config.gated, kernels, config.apply_gate
             )
             out = grouped_matmul(intermediate, down_operand, offs)
             for delta in _adapter_deltas(
@@ -220,7 +222,11 @@ class LoraExpertsFunction(torch.autograd.Function):
                 ):
                     projected.add_(delta)
                 intermediate = expert_activation(
-                    projected, config.act_fn, config.gated, kernels
+                    projected,
+                    config.act_fn,
+                    config.gated,
+                    kernels,
+                    config.apply_gate,
                 )
                 down_delta = _sum_deltas(
                     _adapter_deltas(

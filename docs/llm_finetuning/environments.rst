@@ -551,11 +551,11 @@ once per call, in order, within the turn. The turn's reward is the sum of those
 steps. Tool schemas are discovered over ``list_tools`` and rendered into
 prompts through the chat template.
 
-Chat formats cover the Qwen, Hermes, Granite, Nemotron, Gemma 4, and GPT-OSS
-model families. The same format also says where the model's reasoning ends, so
-the env acts only on the answer. Name one with ``chat_format`` on
-``RolloutHarness``; unset, the harness picks the format whose tokens are in the
-tokenizer vocab. An MCP env with a tokenizer no format matches fails at the
+Chat formats cover the Qwen, Hermes, Granite, Nemotron, Gemma 4, GPT-OSS, GLM,
+and DeepSeek-V4 model families. The same format also says where the model's
+reasoning ends, so the env acts only on the answer. Name one with
+``chat_format`` on ``RolloutHarness``; unset, the harness picks the format whose
+tokens are in the tokenizer vocab. An MCP env with a tokenizer no format matches fails at the
 first reset.
 
 A turn with no tool call is a prose answer. ``answer_tool="<tool_name>"`` on

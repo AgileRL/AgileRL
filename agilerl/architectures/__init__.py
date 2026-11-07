@@ -20,11 +20,13 @@ from typing import TYPE_CHECKING
 
 from agilerl.architectures.catalog import (
     FAMILY_RUNTIME_CONFIGS,
+    family_chat_template,
     family_runtime,
     pretrained_model_type,
     sm80_attention_backend,
     trainer_model_class,
 )
+from agilerl.architectures.mimo_v2 import register_mimo_v2_native_loading
 from agilerl.architectures.nemotron_h_omni import (
     register_nemotron_h_omni_native_loading,
 )
@@ -55,11 +57,13 @@ __all__ = [
     "TensorParallelPlan",
     "TrainerRuntimeConfig",
     "VllmRuntimeConfig",
+    "family_chat_template",
     "family_context_parallel_plans",
     "family_runtime",
     "family_tensor_parallel_plans",
     "install_family_patches",
     "pretrained_model_type",
+    "register_mimo_v2_native_loading",
     "register_nemotron_h_omni_native_loading",
     "sm80_attention_backend",
     "trainer_model_class",

@@ -7,8 +7,10 @@ from __future__ import annotations
 import math
 from typing import Literal
 
-from agilerl.arena.memory.formulas import merged_lora_sync_bytes
-from agilerl.arena.memory.lora_formulas import lora_sync_buffer_bytes
+from agilerl.arena.memory.lora_formulas import (
+    lora_sync_buffer_bytes,
+    merged_lora_sync_bytes,
+)
 from agilerl.arena.memory.resolve.rollout import merged_sync_bucket_bytes
 from agilerl.arena.memory.specs import DTYPE_BYTES, LoraTargetScope, ModelSpec
 

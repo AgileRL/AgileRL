@@ -40,6 +40,7 @@ buffer as `estimate`. `--inference` is a dedicated serving GPU
 | `specs.py` | `config.json` → geometry; settings and device schemas |
 | `manifest.py` | manifest + GPU → `RunConfig` |
 | `formulas.py` | parameter counts, activations, tiles |
+| `block_activations.py` | one decoder block's recompute, no-grad and stored activations |
 | `fsdp_gather.py` | parameters FSDP gathers per block, side unit and prefetch window |
 | `kv_cache.py` | vLLM KV cache and hybrid Mamba state pages |
 | `estimator.py` | the two phase bars |

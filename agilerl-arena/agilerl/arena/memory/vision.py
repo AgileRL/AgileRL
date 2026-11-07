@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import math
 
-from agilerl.arena.memory.specs import ModelArch
+from agilerl.arena.memory.specs import ModelArch, TrainingSettings
 
 
 def encoder_profile_items(
@@ -193,6 +193,14 @@ def pinned_block_bytes(n_bytes: int) -> int:
     :return: Reserved bytes.
     """
     return 1 << (n_bytes - 1).bit_length()
+
+
+def vision_row_staging_bytes(settings: TrainingSettings, image_pixels: float) -> float:
+    """Two pinned buffers, each grown to the largest no-grad chunk's vision rows."""
+    if not (settings.images_per_update and settings.has_nograd_pass):
+        return 0
+    chunk = settings.micro_batch_size * settings.images_per_row * image_pixels
+    return 2 * pinned_block_bytes(chunk)
 
 
 def vision_tower_lora_bytes(

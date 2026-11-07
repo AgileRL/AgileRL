@@ -11,8 +11,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
+from agilerl.arena.memory.block_activations import block_recompute_bytes
 from agilerl.arena.memory.formulas import (
-    block_recompute_bytes,
     engine_weight_bytes,
     param_counts,
     weight_bytes,
@@ -326,12 +326,16 @@ def _engine_weight_bytes(
 ) -> tuple[float, float]:
     """Engine weight bytes, and the bf16 bytes a decode step takes as long to read.
 
-    fp8 weights are sized by :func:`engine_weight_bytes` and read at
-    :func:`decode_costs`'s measured speedup.
+    fp8 and pre-quantized checkpoint weights are sized by
+    :func:`engine_weight_bytes` and read at :func:`decode_costs`'s measured
+    fp8 speedup.
     """
     counts = param_counts(model.arch, model.n_params)
     weights = weight_bytes(counts, model.checkpoint_dtype, WeightVariant())
-    if workload.weight_quantization == "none":
+    if (
+        workload.weight_quantization == "none"
+        and model.arch.checkpoint_quantization is None
+    ):
         return weights, weights
     costs = decode_costs(device)
     speedup = (
@@ -340,7 +344,11 @@ def _engine_weight_bytes(
         else costs.fp8_weight_read_speedup
     )
     stored = engine_weight_bytes(
-        counts, model.checkpoint_dtype, WeightVariant(), workload.weight_quantization
+        model.arch,
+        counts,
+        model.checkpoint_dtype,
+        WeightVariant(),
+        workload.weight_quantization,
     )
     return stored, weights / speedup
 
@@ -885,7 +893,9 @@ def split_workload_from_manifest(
         rollout_batch_size=manifest.training.rollout_batch_size,
         max_num_seqs=None if vllm is None else vllm.max_num_seqs,
         gpu_memory_utilization=resolve_gpu_memory_utilization(
-            None if vllm is None else vllm.gpu_memory_utilization, colocated=False
+            None if vllm is None else vllm.gpu_memory_utilization,
+            colocated=False,
+            hub_id=spec.pretrained_model_name_or_path,
         ),
         trainer_multiple=math.lcm(fsdp_tp, fsdp_ep, fsdp_shard),
         trainer_tensor_parallel=fsdp_tp,

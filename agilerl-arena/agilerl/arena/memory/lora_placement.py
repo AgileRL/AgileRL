@@ -119,13 +119,18 @@ def lora_tensor_placement(
     if packed_matrices and n_experts is not None and n_experts > 1:
         expert_inter = arch.expert_intermediate_size or arch.intermediate_size
         # PEFT stacks every expert's factor into one ``[E * r, features]`` tensor.
-        replicated, sharded = _add_lora_pair(
-            replicated,
-            sharded,
-            arch.expert_width,
-            expert_inter,
-            rank * n_experts,
-            arch.moe_layers * packed_matrices,
-            threshold,
-        )
+        # A gated stack's fused ``gate_up_proj`` is ``2 * inter`` wide.
+        widths = [expert_inter] * packed_matrices
+        if arch.gated_mlp:
+            widths[0] = 2 * expert_inter
+        for width in widths:
+            replicated, sharded = _add_lora_pair(
+                replicated,
+                sharded,
+                arch.expert_width,
+                width,
+                rank * n_experts,
+                arch.moe_layers,
+                threshold,
+            )
     return replicated, sharded

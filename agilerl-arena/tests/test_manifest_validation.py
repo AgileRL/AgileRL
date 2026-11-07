@@ -2753,7 +2753,8 @@ class TestThinkingBudgetParser:
                 r"reasoning start and end tokens, and "
                 rf"{re.escape(model)} has none\. Unset thinking_token_budget, or "
                 r"set algorithm\.vllm_engine_args\.reasoning_parser to one that "
-                r"has them: deepseek_r1, gemma4, nemotron_v3, qwen3\."
+                r"has them: deepseek_r1, deepseek_v4, gemma4, glm47, mimo, "
+                r"nemotron_v3, qwen3\."
             ),
         ):
             TrainingManifest.model_validate(thinking_budget_manifest(model))

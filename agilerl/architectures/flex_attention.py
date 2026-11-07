@@ -50,6 +50,41 @@ def flex_decode_kernel_options(
 
 
 @library_shim("torch", "==2.13.*")
+def large_head_dim_kernel_options(
+    qk_head_dim: int, v_head_dim: int, element_size: int, shared_memory: int
+) -> dict[str, int]:
+    """Flex attention Triton tiles for head dims over 256 that fit one thread block.
+
+    Torch's default tiles for these head dims overflow shared memory on A100
+    and H100, and their fp32 accumulators exceed 255 registers per thread.
+
+    :param qk_head_dim: Query and key head dim.
+    :param v_head_dim: Value head dim.
+    :param element_size: Bytes per query element.
+    :param shared_memory: Opt-in shared memory per thread block, in bytes.
+    :return: Forward and backward ``kernel_options``.
+    """
+    row_bytes = (qk_head_dim + v_head_dim) * element_size
+    query_tile_bytes = 64 * qk_head_dim * element_size
+    # num_stages pipelined tiles plus the tile held across the loop, with 1/8 spare for layout scratch.
+    budget = shared_memory * 7 // 8
+    forward_block_n = 32 if 2 * 32 * row_bytes + query_tile_bytes <= budget else 16
+    backward_stages = 3 if (3 * 16 + 32) * row_bytes <= budget else 2
+    return {
+        "BLOCK_M": 64,
+        "BLOCK_N": forward_block_n,
+        "fwd_num_stages": 2,
+        "fwd_num_warps": 8,
+        "BLOCK_M1": 16,
+        "BLOCK_N1": 32,
+        "BLOCK_M2": 32,
+        "BLOCK_N2": 16,
+        "bwd_num_stages": backward_stages,
+        "bwd_num_warps": 8,
+    }
+
+
+@library_shim("torch", "==2.13.*")
 @library_shim("transformers", "==5.19.*")
 def patch_flex_attention_kernel_options(options: dict[str, Any] | None = None) -> None:
     """Inject SRAM-safe Triton ``kernel_options`` into transformers' flex-attn path.

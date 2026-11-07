@@ -9,11 +9,14 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from agilerl import HAS_LLM_DEPENDENCIES
+from agilerl.architectures.deepseek_v4 import install_deepseek_v4_patches
 from agilerl.architectures.gemma4 import install_gemma4_vision_patches
+from agilerl.architectures.glm5_next import install_glm5_next_patches
 from agilerl.architectures.granitemoe import install_granite_moe_patches
 from agilerl.architectures.granitemoehybrid.packed import (
     install_granite_hybrid_patches,
 )
+from agilerl.architectures.mimo_v2 import MiMoV2Config, install_mimo_v2_native_training
 from agilerl.architectures.nemotron_h.mamba import install_mamba_patches
 from agilerl.architectures.qwen3_5.packed import install_qwen_gdn_patches
 from agilerl.architectures.qwen3_5.vision import install_qwen3_5_vl_patches
@@ -28,7 +31,11 @@ from agilerl.architectures.runtime import (
     TrainerRuntimeConfig,
     VllmRuntimeConfig,
 )
-from agilerl.arena.models.model_info import REASONING_PARSERS, SUPPORTED_MODEL_INFO
+from agilerl.arena.models.model_info import (
+    LORA_EXCLUDED_MODULES,
+    REASONING_PARSERS,
+    SUPPORTED_MODEL_INFO,
+)
 from agilerl.utils.patching import library_shim
 
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
@@ -264,7 +271,62 @@ QWEN3_5_RUNTIME_CONFIG = QWEN3_5_TEXT_RUNTIME_CONFIG.model_copy(
     },
 )
 
+DEEPSEEK_V4_RUNTIME_CONFIG = ModelRuntimeConfig(
+    chat_format="dsml",
+    reasoning_parser=REASONING_PARSERS["deepseek_v4"],
+    lora_exclude_modules=LORA_EXCLUDED_MODULES["deepseek_v4"],
+    patch=PatchRuntimeConfig(install=install_deepseek_v4_patches),
+    tensor_parallel_plan=(
+        "agilerl.architectures.deepseek_v4.tensor_parallel:"
+        "DEEPSEEK_V4_TENSOR_PARALLEL_PLAN"
+    ),
+    context_parallel_plan=(
+        "agilerl.architectures.deepseek_v4.context_parallel:"
+        "DEEPSEEK_V4_CONTEXT_PARALLEL_PLAN"
+    ),
+)
+
+GLM5_NEXT_TEXT_RUNTIME_CONFIG = ModelRuntimeConfig(
+    chat_format="glm47",
+    reasoning_parser=REASONING_PARSERS["glm5_next_text"],
+    lora_exclude_modules=LORA_EXCLUDED_MODULES["glm5_next_text"],
+    patch=PatchRuntimeConfig(install=install_glm5_next_patches),
+    tensor_parallel_plan=(
+        "agilerl.architectures.glm5_next.tensor_parallel:GLM5_NEXT_TENSOR_PARALLEL_PLAN"
+    ),
+    context_parallel_plan=(
+        "agilerl.architectures.glm5_next.context_parallel:"
+        "GLM5_NEXT_CONTEXT_PARALLEL_PLAN"
+    ),
+)
+
+GLM5_NEXT_RUNTIME_CONFIG = GLM5_NEXT_TEXT_RUNTIME_CONFIG.model_copy(
+    update={
+        "trainer": TrainerRuntimeConfig(model_class=AutoModelForImageTextToText),
+        # The patch embedding ``proj`` is a Conv3d that vLLM serves without LoRA.
+        "tower_connector_lora_targets": frozenset(
+            {"qkv", "gate_proj", "up_proj", "down_proj"}
+        ),
+        "tower_modalities": {"visual": frozenset({"image", "video"})},
+    },
+)
+
+MIMO_V2_RUNTIME_CONFIG = ModelRuntimeConfig(
+    # The Hub auto_map names repo code: vLLM parses it, the trainer loads the
+    # config with the native class.
+    vllm=VllmRuntimeConfig(trust_remote_code=True),
+    trainer=TrainerRuntimeConfig(trust_remote_code=False, config_class=MiMoV2Config),
+    patch=PatchRuntimeConfig(install=install_mimo_v2_native_training),
+    tensor_parallel_plan=(
+        "agilerl.architectures.mimo_v2.tensor_parallel:MIMO_V2_TENSOR_PARALLEL_PLAN"
+    ),
+    chat_format="tool_call",
+    reasoning_parser=REASONING_PARSERS["mimo_v2"],
+    lora_exclude_modules=LORA_EXCLUDED_MODULES["mimo_v2"],
+)
+
 FAMILY_RUNTIME_CONFIGS: Mapping[str, ModelRuntimeConfig] = {
+    "deepseek_v4": DEEPSEEK_V4_RUNTIME_CONFIG,
     "qwen2": QWEN2_RUNTIME_CONFIG,
     "qwen3": QWEN3_RUNTIME_CONFIG,
     "qwen3_moe": QWEN3_MOE_RUNTIME_CONFIG,
@@ -276,7 +338,10 @@ FAMILY_RUNTIME_CONFIGS: Mapping[str, ModelRuntimeConfig] = {
     "gemma3_text": GEMMA_SWA_TEXT_RUNTIME_CONFIG,
     "gemma4": GEMMA4_RUNTIME_CONFIG,
     "gemma4_text": GEMMA4_TEXT_RUNTIME_CONFIG,
+    "glm5_next": GLM5_NEXT_RUNTIME_CONFIG,
+    "glm5_next_text": GLM5_NEXT_TEXT_RUNTIME_CONFIG,
     "gpt_oss": GPT_OSS_RUNTIME_CONFIG,
+    "mimo_v2": MIMO_V2_RUNTIME_CONFIG,
     "qwen3_5": QWEN3_5_RUNTIME_CONFIG,
     "qwen3_5_text": QWEN3_5_TEXT_RUNTIME_CONFIG,
     "qwen3_5_moe": QWEN3_5_RUNTIME_CONFIG,
@@ -343,3 +408,21 @@ def trainer_model_class(model_name_or_path: str) -> TrainerModelClass:
     :rtype: TrainerModelClass
     """
     return family_runtime(model_name_or_path).trainer.model_class
+
+
+def family_chat_template(model_name_or_path: str) -> str | None:
+    """Return the family chat format's template for a tokenizer that ships none.
+
+    :param model_name_or_path: Hugging Face model id or local path.
+    :type model_name_or_path: str
+    :return: The Jinja template, or ``None`` when the format has none.
+    :rtype: str | None
+    """
+    # Import cycle: agilerl.llm_envs imports agilerl.utils.llm_utils, which
+    # imports this package.
+    from agilerl.llm_envs.chat_formats import CHAT_FORMATS
+
+    chat_format = family_runtime(model_name_or_path).chat_format
+    if chat_format is None:
+        return None
+    return CHAT_FORMATS[chat_format].CHAT_TEMPLATE

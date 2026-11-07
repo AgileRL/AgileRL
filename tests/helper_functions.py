@@ -2,11 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib
+import importlib.util
 import random
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from numbers import Number
+from types import ModuleType
 from typing import Any
 
 import numpy as np
@@ -16,6 +18,7 @@ from gymnasium import spaces
 from tensordict import TensorDict
 from torch import nn
 
+import agilerl
 import agilerl.utils.algo_utils as algo_utils
 from agilerl.architectures.moe_router import (
     ROUTER_FORWARDS,
@@ -61,6 +64,26 @@ def restore_moe_routers() -> Iterator[None]:
             router.forward = forward
             if ROUTER_RENORM_OUT_OF_PLACE in vars(router):
                 delattr(router, ROUTER_RENORM_OUT_OF_PLACE)
+
+
+def load_without_llm_dependencies(
+    module: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> ModuleType:
+    """Run ``module``'s source into a new module object with ``HAS_LLM_DEPENDENCIES`` False.
+
+    The imported module keeps its functions, so identity checks elsewhere hold.
+
+    :param module: Imported module to re-execute.
+    :param monkeypatch: Patches ``agilerl.HAS_LLM_DEPENDENCIES`` for the test.
+    :return: The new module.
+    """
+    monkeypatch.setattr(agilerl, "HAS_LLM_DEPENDENCIES", False)
+    spec = importlib.util.spec_from_file_location(module.__name__, module.__file__)
+    assert spec is not None
+    assert spec.loader is not None
+    fresh = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fresh)
+    return fresh
 
 
 skip_torch_compile_on_windows_cpu = pytest.mark.skipif(

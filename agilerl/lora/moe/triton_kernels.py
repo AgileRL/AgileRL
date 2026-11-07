@@ -350,16 +350,25 @@ def swiglu_kernel(
     out_ptr,
     M,
     N,
+    limit,
+    CLAMP: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
-    """``out = silu(gate) * up`` in fp32 over contiguous ``projected = [gate | up]`` of ``[M, 2N]``."""
+    """``out = silu(gate) * up`` in fp32 over contiguous ``projected = [gate | up]`` of ``[M, 2N]``.
+
+    With ``CLAMP``, ``gate`` is first clamped to at most ``limit`` and ``up``
+    to ``[-limit, limit]``.
+    """
     rows = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
     cols = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
     mask = (rows < M)[:, None] & (cols < N)[None, :]
     gate_ptrs = projected_ptr + rows[:, None].to(tl.int64) * 2 * N + cols[None, :]
     gate = tl.load(gate_ptrs, mask=mask, other=0.0).to(tl.float32)
     up = tl.load(gate_ptrs + N, mask=mask, other=0.0).to(tl.float32)
+    if CLAMP:
+        gate = tl.minimum(gate, limit)
+        up = tl.minimum(tl.maximum(up, -limit), limit)
     out = gate * tl.sigmoid(gate) * up
     tl.store(
         out_ptr + rows[:, None].to(tl.int64) * N + cols[None, :],
@@ -376,10 +385,17 @@ def swiglu_backward_kernel(
     grad_projected_ptr,
     M,
     N,
+    limit,
+    CLAMP: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
-    """``[grad * up * silu'(gate) | grad * silu(gate)]`` in fp32 into contiguous ``grad_projected``."""
+    """``[grad * up * silu'(gate) | grad * silu(gate)]`` in fp32 into contiguous ``grad_projected``.
+
+    With ``CLAMP``, the gradient of :func:`swiglu_kernel`'s clamps: it passes
+    where ``gate <= limit`` and ``-limit <= up <= limit``, bounds included,
+    as ``torch.clamp`` does, and is zero elsewhere.
+    """
     rows = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
     cols = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
     mask = (rows < M)[:, None] & (cols < N)[None, :]
@@ -389,9 +405,17 @@ def swiglu_backward_kernel(
     ).to(tl.float32)
     gate = tl.load(projected_ptr + packed, mask=mask, other=0.0).to(tl.float32)
     up = tl.load(projected_ptr + packed + N, mask=mask, other=0.0).to(tl.float32)
+    if CLAMP:
+        gate_passes = gate <= limit
+        up_passes = (up >= -limit) & (up <= limit)
+        gate = tl.minimum(gate, limit)
+        up = tl.minimum(tl.maximum(up, -limit), limit)
     sigmoid = tl.sigmoid(gate)
     grad_gate = grad * up * sigmoid * (1.0 + gate * (1.0 - sigmoid))
     grad_up = grad * gate * sigmoid
+    if CLAMP:
+        grad_gate = tl.where(gate_passes, grad_gate, 0.0)
+        grad_up = tl.where(up_passes, grad_up, 0.0)
     dtype = grad_projected_ptr.dtype.element_ty
     tl.store(grad_projected_ptr + packed, grad_gate.to(dtype), mask=mask)
     tl.store(grad_projected_ptr + packed + N, grad_up.to(dtype), mask=mask)
@@ -406,22 +430,32 @@ def swiglu_grid(rows: int, inter: int) -> Callable[[dict[str, int]], tuple[int, 
     return grid
 
 
-def swiglu(projected: torch.Tensor) -> torch.Tensor:
-    """``silu(gate) * up`` of a ``[rows, 2 * inter]`` projection ``[gate | up]``, in its dtype."""
+def swiglu(projected: torch.Tensor, limit: float | None) -> torch.Tensor:
+    """``silu(gate) * up`` of a ``[rows, 2 * inter]`` projection ``[gate | up]``, in its dtype.
+
+    :param projected: ``[rows, 2 * inter]`` packed ``[gate | up]``.
+    :param limit: ``swiglu_limit``: clamp ``gate`` to at most it and ``up``
+        to ``[-limit, limit]`` first, or ``None`` for no clamp.
+    """
     projected = projected.contiguous()
     rows, inter = projected.shape[0], projected.shape[1] // 2
     out = projected.new_empty((rows, inter))
     if rows == 0:
         return out
-    swiglu_kernel[swiglu_grid(rows, inter)](projected, out, rows, inter)
+    swiglu_kernel[swiglu_grid(rows, inter)](
+        projected, out, rows, inter, 0.0 if limit is None else limit, limit is not None
+    )
     return out
 
 
-def swiglu_backward(grad: torch.Tensor, projected: torch.Tensor) -> torch.Tensor:
+def swiglu_backward(
+    grad: torch.Tensor, projected: torch.Tensor, limit: float | None
+) -> torch.Tensor:
     """Gradient of :func:`swiglu` w.r.t. ``projected``, in ``projected``'s dtype.
 
     :param grad: ``[rows, inter]`` gradient of the SwiGLU output.
     :param projected: The ``[rows, 2 * inter]`` forward input.
+    :param limit: The forward's ``swiglu_limit``, or ``None``.
     """
     grad = grad.contiguous()
     projected = projected.contiguous()
@@ -430,7 +464,13 @@ def swiglu_backward(grad: torch.Tensor, projected: torch.Tensor) -> torch.Tensor
     if rows == 0:
         return grad_projected
     swiglu_backward_kernel[swiglu_grid(rows, inter)](
-        grad, projected, grad_projected, rows, inter
+        grad,
+        projected,
+        grad_projected,
+        rows,
+        inter,
+        0.0 if limit is None else limit,
+        limit is not None,
     )
     return grad_projected
 

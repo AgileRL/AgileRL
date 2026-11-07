@@ -39,6 +39,7 @@ from agilerl.components.replay_buffer import MultiStepReplayBuffer, ReplayBuffer
 from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.llm_envs.chat_formats import DsmlFormat
 from agilerl.models import (
     MANIFEST_REGISTRY,
     DDPGSpec,
@@ -1938,6 +1939,47 @@ class TestLLMLocalTrainer:
             tokenizer = trainer._make_tokenizer()
 
         assert tokenizer.chat_template == DEFAULT_CHAT_TEMPLATE
+
+    def test_make_tokenizer_attaches_the_family_chat_template(self):
+        trainer = LocalTrainer.__new__(LocalTrainer)
+        trainer.algorithm_spec = _DPOSpec(
+            **{
+                **_LLM_COMMON_KWARGS,
+                "pretrained_model_name_or_path": "deepseek-ai/DeepSeek-V4-Flash-0731",
+            }
+        )
+        mock_tokenizer = MagicMock(
+            chat_template=None,
+            eos_token_id=0,
+            eos_token="<eos>",
+            pad_token_id=None,
+            unk_token_id=None,
+        )
+        with (
+            patch(
+                "agilerl.training.trainer.AutoTokenizer", create=True
+            ) as mock_auto_tok,
+            patch(
+                "agilerl.training.trainer.load_pad_token_configs",
+                return_value=(None, None),
+            ),
+        ):
+            mock_auto_tok.from_pretrained.return_value = mock_tokenizer
+            tokenizer = trainer._make_tokenizer()
+
+        assert tokenizer.chat_template == DsmlFormat.CHAT_TEMPLATE
+
+    def test_make_tokenizer_without_a_model_path_raises(self):
+        trainer = LocalTrainer.__new__(LocalTrainer)
+        trainer.algorithm_spec = _DPOSpec(
+            **{**_LLM_COMMON_KWARGS, "pretrained_model_name_or_path": None}
+        )
+
+        with (
+            patch("agilerl.training.trainer.AutoTokenizer", create=True),
+            pytest.raises(ValueError, match="has no pretrained_model_name_or_path"),
+        ):
+            trainer._make_tokenizer()
 
     def test_make_tokenizer_keeps_an_existing_chat_template(self, dpo_spec):
         trainer = LocalTrainer.__new__(LocalTrainer)

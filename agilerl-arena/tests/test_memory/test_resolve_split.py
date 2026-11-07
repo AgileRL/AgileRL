@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 
 import pytest
@@ -58,8 +59,9 @@ from agilerl.arena.memory.resolve.split import (
 )
 from agilerl.arena.memory.resolve.weight_sync import SyncLink, merged_sync_seconds
 from agilerl.arena.memory.specs import DeviceSpec, ModelArch, ModelSpec
+from agilerl.arena.models import model_info
 from agilerl.arena.models.manifest import TrainingManifest
-from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO, supported_path
 
 
 def _countdown_manifest(batch_size: int = 60) -> dict:
@@ -378,15 +380,15 @@ class TestResolveRunMemorySplit:
             _plan(raw, gpus=9, engine_width=4, device=_device("L4"))
 
     @pytest.mark.parametrize(
-        ("fsdp", "batch_size", "lora_r"),
-        [({"tp": 2}, 60, 32), ({"shard_group_size": 4}, 64, 16)],
+        ("fsdp", "batch_size", "lora_r", "gpus"),
+        [({"tp": 2}, 60, 32, 7), ({"shard_group_size": 4}, 64, 16, 9)],
         ids=["tensor-parallel", "shard-group"],
     )
     def test_training_over_memory_at_the_largest_fsdp_count_raises(
-        self, fsdp: dict, batch_size: int, lora_r: int
+        self, fsdp: dict, batch_size: int, lora_r: int, gpus: int
     ) -> None:
-        # Arrange: 9 GPUs with one TP4 engine leave at most 5 trainers. The
-        # FSDP width skips 5; the largest legal count shards and is over memory.
+        # Arrange: one TP4 engine leaves at most gpus - 4 trainers, an odd count
+        # the FSDP width skips; the largest legal count shards and is over memory.
         # TP splits the adapters, so the TP case needs rank 32 to stay over.
         raw = _oversize_countdown_manifest(batch_size)
         raw["algorithm"]["fsdp"] = fsdp
@@ -396,13 +398,13 @@ class TestResolveRunMemorySplit:
         with pytest.raises(
             ValueError,
             match=(
-                r"^No trainer / rollout-engine split of 9 NVIDIA L4 GPUs fits this "
-                r"run: training does not fit in memory at any trainer count\. "
+                rf"^No trainer / rollout-engine split of {gpus} NVIDIA L4 GPUs fits "
+                r"this run: training does not fit in memory at any trainer count\. "
                 r"Use more or larger GPUs per agent \(a bigger resource tier or "
                 r"a smaller population size\), or shorten the context length\.$"
             ),
         ):
-            _plan(raw, gpus=9, engine_width=4, device=_device("L4"))
+            _plan(raw, gpus=gpus, engine_width=4, device=_device("L4"))
 
     def test_batch_no_trainer_count_that_fits_divides_raises(self) -> None:
         # Arrange: only 6 trainers fit, and 64 groups do not split over 6.
@@ -2269,6 +2271,86 @@ class TestResolveRunMemoryWeightSync:
         assert plan.merged_lora_sync is False
         assert plan.training.settings.merged_lora_sync is False
         assert plan.training.breakdown.fits
+
+
+PREQUANTIZED_EXPERT_LORA_MODELS = [
+    "deepseek-ai/DeepSeek-V4-Flash-0731",
+    "zai-org/GLM-5.3-Flash",
+    "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+]
+
+
+def _prequantized_manifest(
+    hub_id: str, vllm_config: dict | None = None
+) -> TrainingManifest:
+    """CISPO LoRA on a pre-quantized MoE checkpoint, experts sharded over 8 trainers.
+
+    :param hub_id: Catalogued pre-quantized checkpoint.
+    :param vllm_config: Engine config; empty when ``None``.
+    :return: Validated run manifest.
+    """
+    raw = _countdown_at(4096, vllm_config or {})
+    raw["network"]["pretrained_model_name_or_path"] = hub_id
+    raw["algorithm"].update(name="CISPO", batch_size=32, fsdp={"ep": 8})
+    return validated_run_manifest(TrainingManifest.model_validate(raw))
+
+
+class TestResolveRunMemoryPrequantizedCheckpoint:
+    @pytest.mark.parametrize("hub_id", PREQUANTIZED_EXPERT_LORA_MODELS)
+    def test_three_h100_nodes_serve_one_tp8_engine(self, hub_id: str) -> None:
+        # Arrange
+        manifest = _prequantized_manifest(hub_id)
+
+        # Act
+        plan = resolve_run_memory(
+            manifest, catalog_model(manifest.algorithm), _device("H100-80"), 24, 8
+        )
+
+        # Assert
+        assert plan.split is not None
+        assert (plan.split.trainers, plan.split.engines) == (16, 1)
+        assert plan.split.engine_width == 8
+        assert plan.merged_lora_sync is False
+
+    @pytest.mark.parametrize("hub_id", PREQUANTIZED_EXPERT_LORA_MODELS)
+    def test_vllm_default_budget_leaves_no_room_for_the_received_adapter(
+        self, hub_id: str
+    ) -> None:
+        # Arrange: a 0.9 budget plus the received adapter and its expert copy
+        # outgrow one H100.
+        manifest = _prequantized_manifest(
+            hub_id, vllm_config={"gpu_memory_utilization": 0.9}
+        )
+
+        # Act / Assert
+        with pytest.raises(
+            ValueError, match="a trainer and a rollout engine do not both fit"
+        ):
+            resolve_run_memory(
+                manifest, catalog_model(manifest.algorithm), _device("H100-80"), 24, 8
+            )
+
+    @pytest.mark.parametrize(
+        "hub_id", ["deepseek-ai/DeepSeek-V4-Flash-0731", "zai-org/GLM-5.3-Flash"]
+    )
+    def test_bf16_sized_engine_leaves_no_split(
+        self, hub_id: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        bundled = json.loads(supported_path(hub_id).read_text(encoding="utf-8"))
+        del bundled["config"]["quantization_config"]
+        monkeypatch.setattr(
+            model_info, "_bundled", lambda name: {hub_id: bundled}[name]
+        )
+        manifest = _prequantized_manifest(hub_id)
+
+        # Act / Assert
+        with pytest.raises(
+            ValueError, match="a trainer and a rollout engine do not both fit"
+        ):
+            resolve_run_memory(
+                manifest, catalog_model(manifest.algorithm), _device("H100-80"), 24, 8
+            )
 
 
 class TestGpuCataloguePeakFigures:

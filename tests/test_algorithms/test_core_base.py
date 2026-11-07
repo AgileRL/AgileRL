@@ -9552,6 +9552,25 @@ class TestLLMAlgorithmPackedWarmupLengths:
         # Assert
         assert lengths == expected
 
+    def test_flex_attention_actor_without_mixers_warms_flex_compiles(self, monkeypatch):
+        # Arrange
+        agent = _warm_kernels_agent(_TinyCausalLM(32, 8))
+        agent.actor.config._attn_implementation = "flex_attention"
+        agent.device = "cuda"
+        agent.mini_batch_size = 4
+        monkeypatch.setattr(
+            torch.cuda,
+            "get_device_properties",
+            lambda _device: SimpleNamespace(multi_processor_count=132),
+        )
+
+        # Act
+        lengths = agent.packed_warmup_lengths()
+
+        # Assert
+        # 38 recompiles flex with a dynamic length; 32 is a new Triton class.
+        assert lengths == [39, 38, 32]
+
 
 @_LLM_DEPS_SKIP
 class TestLLMAlgorithmWarmPackedKernels:
@@ -10033,7 +10052,9 @@ class TestLLMAlgorithmContextParallelGuards:
         agent.rollout_strip_multimodal_towers = True
 
         # The next CP check after the VL guard reads the attention backend.
-        with pytest.raises(ValueError, match="attention backend"):
+        with pytest.raises(
+            ValueError, match="needs flash_attention_2 or flex_attention"
+        ):
             agent.wrap_models()
 
 

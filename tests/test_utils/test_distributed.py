@@ -47,6 +47,12 @@ from transformers import (
     Qwen3MoeConfig,
     Qwen4ExpTextConfig,
 )
+from transformers.models.deepseek_v4.configuration_deepseek_v4 import (
+    DeepseekV4Config,
+)
+from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
+    DeepseekV4RotaryEmbedding,
+)
 from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 from transformers.models.gemma4.modeling_gemma4 import (
     Gemma4ForCausalLM,
@@ -4548,6 +4554,34 @@ class TestInitRopeBuffers:
 
         # Assert
         assert expected["full_attention_inv_freq"].shape == (16,)
+        for name in names:
+            assert torch.equal(getattr(module, name), expected[name]), name
+
+    def test_fills_per_rope_type_inv_freq(self):
+        # Arrange
+        config = DeepseekV4Config(
+            hidden_size=64,
+            num_attention_heads=4,
+            head_dim=32,
+            qk_rope_head_dim=8,
+            num_hidden_layers=3,
+            compress_ratios=[0, 4, 128],
+        )
+        module = DeepseekV4RotaryEmbedding(config)
+        names = [
+            f"{rope_type}_{kind}"
+            for rope_type in ("main", "compress")
+            for kind in ("inv_freq", "original_inv_freq")
+        ]
+        expected = {name: getattr(module, name).clone() for name in names}
+        for name in names:
+            getattr(module, name).zero_()
+
+        # Act
+        init_rope_buffers(nn.Sequential(module))
+
+        # Assert
+        assert not torch.equal(expected["main_inv_freq"], expected["compress_inv_freq"])
         for name in names:
             assert torch.equal(getattr(module, name), expected[name]), name
 

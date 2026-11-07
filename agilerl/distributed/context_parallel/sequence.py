@@ -27,6 +27,13 @@ class GatherCpCtx(Protocol):
     shard_len: int
 
 
+class GatherSequenceCtx(Protocol):
+    """Autograd ctx for :class:`GatherSequenceForCp`."""
+
+    group: dist.ProcessGroup
+    seq_dim: int
+
+
 # Gated DeltaNet's context-parallel summary matches the full sequence when
 # each rank's slice is a whole number of these chunks.
 CP_SCAN_CHUNK = 64
@@ -181,10 +188,58 @@ def gather_for_cp(data: torch.Tensor, cp_group: dist.ProcessGroup) -> torch.Tens
     return GatherForCp.apply(data, cp_group)
 
 
+class GatherSequenceForCp(torch.autograd.Function):
+    """All-gather sequence shards on ``seq_dim``; backward sums every rank's gradient of this rank's shard."""
+
+    @staticmethod
+    def forward(
+        ctx: GatherSequenceCtx,
+        data: torch.Tensor,
+        group: dist.ProcessGroup,
+        seq_dim: int,
+    ) -> torch.Tensor:
+        ctx.group = group
+        ctx.seq_dim = seq_dim
+        data = data.contiguous()
+        shards = [torch.empty_like(data) for _ in range(dist.get_world_size(group))]
+        dist.all_gather(shards, data, group=group)
+        return torch.cat(shards, dim=seq_dim)
+
+    @staticmethod
+    def backward(
+        ctx: GatherSequenceCtx, *grad_outputs: torch.Tensor
+    ) -> tuple[torch.Tensor, None, None]:
+        (grad_output,) = grad_outputs
+        world = dist.get_world_size(ctx.group)
+        pieces = torch.stack(grad_output.chunk(world, dim=ctx.seq_dim))
+        shard_grad = torch.empty_like(pieces[0])
+        # Gloo takes only the concatenated input layout.
+        dist.reduce_scatter_single(shard_grad, pieces.flatten(0, 1), group=ctx.group)
+        return shard_grad, None, None
+
+
+def gather_sequence_for_cp(
+    data: torch.Tensor, cp_group: dist.ProcessGroup, seq_dim: int = 1
+) -> torch.Tensor:
+    """Differentiable all-gather of even sequence shards for a downstream that differs per rank.
+
+    :func:`gather_for_cp` suits a loss every rank computes identically; here
+    each rank's own queries read the gathered keys, so every rank's gradient
+    of a shard reaches its owner.
+
+    :param data: This rank's sequence shard.
+    :param cp_group: Context-parallel process group; shards are in rank order.
+    :param seq_dim: Sequence dimension of ``data``.
+    :return: The whole sequence, shards concatenated on ``seq_dim``.
+    """
+    return cast("torch.Tensor", GatherSequenceForCp.apply(data, cp_group, seq_dim))
+
+
 def gather_for_cp_wo_grad(
     data: torch.Tensor, cp_size: int, cp_group: dist.ProcessGroup
 ) -> torch.Tensor:
     """Non-differentiable all-gather of per-rank slices, concatenated on dim 1."""
+    data = data.contiguous()
     gathered = [torch.empty_like(data) for _ in range(cp_size)]
     dist.all_gather(gathered, data, group=cp_group)
     return torch.cat(gathered, dim=1)

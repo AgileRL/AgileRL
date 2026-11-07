@@ -42,12 +42,17 @@ jobs:
                   path: /tmp/hf-cache
                   key: hf-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
                   restore-keys: hf-${{ matrix.python-version }}-
+            - name: Hash CPU vector ISA
+              id: cpu-isa
+              # Inductor's cache key omits the CPU ISA, but cached C++ kernels are
+              # tiled for the host that generated them. Runners mix AVX2 and AVX-512.
+              run: echo "hash=$(grep -m1 '^flags' /proc/cpuinfo | tr ' ' '\n' | grep -E '^(avx|amx|fma|f16c)' | sort | sha256sum | cut -c1-12)" >> "$GITHUB_OUTPUT"
             - name: Cache torch inductor compilations
               uses: actions/cache@v4
               with:
                   path: /tmp/inductor-cache
-                  key: inductor-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
-                  restore-keys: inductor-${{ matrix.python-version }}-
+                  key: inductor-${{ matrix.python-version }}-${{ steps.cpu-isa.outputs.hash }}-${{ hashFiles('pyproject.toml') }}
+                  restore-keys: inductor-${{ matrix.python-version }}-${{ steps.cpu-isa.outputs.hash }}-
             - name: Restore CPU test durations
               uses: actions/cache/restore@v4
               with:
@@ -130,12 +135,17 @@ jobs:
                   path: /tmp/hf-cache
                   key: hf-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
                   restore-keys: hf-${{ matrix.python-version }}-
+            - name: Hash CPU vector ISA
+              id: cpu-isa
+              # Inductor's cache key omits the CPU ISA, but cached C++ kernels are
+              # tiled for the host that generated them.
+              run: echo "hash=$(grep -m1 '^flags' /proc/cpuinfo | tr ' ' '\n' | grep -E '^(avx|amx|fma|f16c)' | sort | sha256sum | cut -c1-12)" >> "$GITHUB_OUTPUT"
             - name: Cache torch inductor compilations
               uses: actions/cache@v4
               with:
                   path: /tmp/inductor-cache
-                  key: inductor-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
-                  restore-keys: inductor-${{ matrix.python-version }}-
+                  key: inductor-${{ matrix.python-version }}-${{ steps.cpu-isa.outputs.hash }}-${{ hashFiles('pyproject.toml') }}
+                  restore-keys: inductor-${{ matrix.python-version }}-${{ steps.cpu-isa.outputs.hash }}-
             - name: Restore GPU test durations
               uses: actions/cache/restore@v4
               with:
