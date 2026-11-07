@@ -37,6 +37,7 @@ from agilerl.arena.memory.resolve.moe import (
     grouped_gemm_supported,
     padded_expert_lora_rank,
 )
+from agilerl.arena.memory.resolve.rollout import merged_sync_bucket_bytes
 from agilerl.arena.memory.specs import (
     DTYPE_BYTES,
     BlockKind,
@@ -1292,14 +1293,31 @@ def _runtime_components(
 def _lora_send_buffer_component(
     arch: ModelArch, settings: TrainingSettings
 ) -> MemoryComponent:
-    """The main rank's registered NIXL buffer the rollout engines READ the adapter from."""
+    """The main rank's registered NIXL buffer the rollout engines READ the adapter, or two rounds of merged weights, from."""
+    dtype_bytes = DTYPE_BYTES[settings.weight_dtype]
+    if settings.async_rollout and settings.merged_lora_sync:
+        # Double-buffered: the trainer packs one round while the engines READ the other.
+        return MemoryComponent(
+            key="lora_send_buffer",
+            label="Merged weight send buffer",
+            n_bytes=2
+            * merged_sync_bucket_bytes(
+                *formulas.merged_lora_sync_bytes(
+                    arch,
+                    settings.lora_target_scope,
+                    settings.lora_packed_target_matrices,
+                    dtype_bytes,
+                )
+            ),
+            note="Main rank only: two rounds of merged weights at the engines' dtype, outside the caching allocator.",
+        )
     n_bytes = (
         lora_formulas.lora_sync_buffer_bytes(
             arch,
             settings.lora_rank,
             settings.lora_target_scope,
             settings.lora_packed_target_matrices,
-            DTYPE_BYTES[settings.weight_dtype],
+            dtype_bytes,
         )
         if settings.async_rollout
         else 0

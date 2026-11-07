@@ -21,8 +21,12 @@ from agilerl.arena.memory.resolve.engine import (
     resolve_engine_tensor_parallel,
     resolve_rollout_engines_per_agent,
 )
-from agilerl.arena.memory.resolve.split import resolve_run_memory
-from agilerl.arena.memory.specs import DeviceSpec, RunConfig
+from agilerl.arena.memory.resolve.split import (
+    kept_split_merged_lora_sync,
+    resolve_run_memory,
+)
+from agilerl.arena.memory.resolve.weight_sync import SyncLink
+from agilerl.arena.memory.specs import DeviceSpec, ModelSpec, RunConfig
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
 from agilerl.arena.models.manifest import TrainingManifest
 
@@ -63,11 +67,24 @@ def gpus_required(manifest: TrainingManifest, tensor_parallel_size: int = 1) -> 
     return training.pop_size * per_member
 
 
+def tier_sync_link(num_gpus: int, gpus_per_node: int | None) -> SyncLink | None:
+    """Link a tier's engines read synced weights over: CUDA IPC on one node, else unknown.
+
+    :param num_gpus: GPUs in the allocation.
+    :param gpus_per_node: GPUs on one node; ``None`` puts all ``num_gpus`` on one node.
+    :return: ``cuda_ipc``, or ``None`` when the allocation spans nodes.
+    """
+    if gpus_per_node is None or num_gpus <= gpus_per_node:
+        return "cuda_ipc"
+    return None
+
+
 def engine_width(
     manifest: TrainingManifest,
     num_gpus: int,
     device: DeviceSpec,
     gpus_per_node: int | None = None,
+    adapter_sync: bool = False,
 ) -> int:
     """GPUs per rollout engine the run starts on ``num_gpus``.
 
@@ -76,6 +93,8 @@ def engine_width(
     :param device: One of those GPUs.
     :param gpus_per_node: GPUs on one node; an engine stays on one node.
         ``None`` puts all ``num_gpus`` on one node.
+    :param adapter_sync: Weight sync pushes the adapter even where the engines
+        could serve merged weights.
     :return: Engine tensor-parallel width.
     """
     spec = manifest.algorithm
@@ -85,7 +104,12 @@ def engine_width(
         return spec.vllm_config.tensor_parallel_size
     # An omitted width goes through the run's resolver; unresolved starts at 1.
     trial = manifest.model_copy(deep=True)
-    return resolve_engine_tensor_parallel(trial, num_gpus, device, gpus_per_node) or 1
+    return (
+        resolve_engine_tensor_parallel(
+            trial, num_gpus, device, gpus_per_node, adapter_sync
+        )
+        or 1
+    )
 
 
 def engines_per_member(
@@ -125,7 +149,8 @@ def with_run_gpu_split(
     num_gpus: int,
     device: DeviceSpec,
     gpus_per_node: int | None = None,
-) -> TrainingManifest:
+    sync_link: SyncLink | None = None,
+) -> tuple[TrainingManifest, bool]:
     """The manifest with the trainers, engines, engine width and rollout batch the run picks on ``num_gpus``.
 
     Runs :func:`resolve_run_memory`'s throughput search, as the Ray driver
@@ -136,8 +161,11 @@ def with_run_gpu_split(
     :param device: One of those GPUs.
     :param gpus_per_node: GPUs on one node; an engine stays on one node.
         ``None`` puts all ``num_gpus`` on one node.
+    :param sync_link: Link the engines read synced weights over; ``None``
+        leaves sync unpriced.
     :return: A copy with the split written into ``training`` and the width
-        into ``vllm_config.tensor_parallel_size``.
+        into ``vllm_config.tensor_parallel_size``, and whether weight sync
+        pushes merged weights.
     :raises ValueError: When the model is not in the catalogue or no split fits.
     """
     sized = manifest.model_copy(deep=True)
@@ -146,35 +174,46 @@ def with_run_gpu_split(
     if model is None:
         msg = f"{spec.pretrained_model_name_or_path!r} is not in the memory estimator catalogue"
         raise ValueError(msg)
-    split = resolve_run_memory(
-        sized, model, device, num_gpus // sized.training.pop_size, gpus_per_node
-    ).split
+    plan = resolve_run_memory(
+        sized,
+        model,
+        device,
+        num_gpus // sized.training.pop_size,
+        gpus_per_node,
+        sync_link,
+    )
+    split = plan.split
     if split is not None:
         sized.training.training_gpus_per_agent = split.trainers
         sized.training.rollout_engines_per_agent = split.engines
         sized.training.rollout_batch_size = split.rollout_batch_size
         if isinstance(spec, RolloutLLMSpec) and spec.vllm_config is not None:
             spec.vllm_config.tensor_parallel_size = split.engine_width
-    return sized
+    return sized, plan.merged_lora_sync
 
 
 def check_tiers(
     tiers: Iterable[dict[str, Any]],
     manifest: TrainingManifest,
-    build_config: Callable[[TrainingManifest, DeviceSpec, int, int], RunConfig],
+    model: ModelSpec,
+    build_config: Callable[[TrainingManifest, DeviceSpec, int, int, bool], RunConfig],
 ) -> list[TierCheck]:
     """Every tier's verdict, cheapest first.
 
     An async manifest that sets neither GPU count is sized at the split the
     run picks on each tier (:func:`with_run_gpu_split`). When no split fits,
     the tier is sized at the manifest's counts and keeps the search's reason.
+    Each tier syncs weights in the mode the run picks over
+    :func:`tier_sync_link`; kept counts take
+    :func:`kept_split_merged_lora_sync`.
 
     :param tiers: Resource tiers as ``arena resources list`` returns them. A
         tier's ``gpus_per_node``, when set, keeps each engine on one node.
     :param manifest: Validated training manifest, for the GPU layout.
+    :param model: Training-side model, to price kept counts' weight sync.
     :param build_config: The run config of the manifest as laid out on a
         tier, on one GPU of it, at the engine width and engines per member
-        that tier starts.
+        that tier starts, and whether weight sync pushes the adapter.
     """
     checks = []
     for tier in sorted(tiers, key=lambda t: t["price_per_node_hour"]):
@@ -192,20 +231,30 @@ def check_tiers(
             continue
         num_gpus = int(tier["num_gpus"])
         gpus_per_node = tier.get("gpus_per_node")
-        laid_out = manifest
+        sync_link = tier_sync_link(num_gpus, gpus_per_node)
+        searched = None
         split_reason = None
         if searches_gpu_split(manifest):
             try:
-                laid_out = with_run_gpu_split(manifest, num_gpus, device, gpus_per_node)
+                searched = with_run_gpu_split(
+                    manifest, num_gpus, device, gpus_per_node, sync_link
+                )
             except ValueError as err:
                 split_reason = str(err)
-        width = engine_width(laid_out, num_gpus, device, gpus_per_node)
+        if searched is None:
+            laid_out = manifest
+            merged = kept_split_merged_lora_sync(
+                manifest, model, device, num_gpus, gpus_per_node, sync_link
+            )
+        else:
+            laid_out, merged = searched
+        width = engine_width(laid_out, num_gpus, device, gpus_per_node, not merged)
         needed = gpus_required(laid_out, width)
         if num_gpus < needed:
             checks.append(TierCheck(tier, f"{num_gpus} GPUs, the job needs {needed}"))
             continue
         engines = engines_per_member(laid_out, num_gpus, width)
-        config = build_config(laid_out, device, width, engines)
+        config = build_config(laid_out, device, width, engines, not merged)
         estimate = estimate_run(config)
         over = [
             phase.phase

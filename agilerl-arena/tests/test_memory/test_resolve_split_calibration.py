@@ -629,7 +629,11 @@ def _predicted_split(case: CalibrationCase, measured_lengths: bool) -> GpuSplit:
     device = gpu.device_spec()
     model = catalog_model(manifest.algorithm)
     ratio = training_memory_from_manifest(manifest, model, device).learn_cost_ratio
-    update: dict = {"max_num_batched_tokens": case.max_num_batched_tokens}
+    # Every case ran its engines with LoRA on.
+    update: dict = {
+        "max_num_batched_tokens": case.max_num_batched_tokens,
+        "merged_lora_sync": False,
+    }
     if measured_lengths:
         update |= {
             "row_tokens": case.row_tokens,

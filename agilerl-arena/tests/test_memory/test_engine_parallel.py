@@ -71,13 +71,13 @@ class TestResolveEngineTensorParallel:
         assert manifest.algorithm.vllm_config is not None
         assert manifest.algorithm.vllm_config.tensor_parallel_size == 2
 
-    @pytest.mark.parametrize(("context", "expected"), [(4096, 1), (4608, 2)])
+    @pytest.mark.parametrize(("context", "expected"), [(9216, 1), (9728, 2)])
     def test_a_width_must_clear_demand_by_the_kv_margin(
         self, context: int, expected: int
     ) -> None:
-        # Arrange: TP=1 predicts a 1.92 GiB attention pool on four leftover
-        # A100s. 16 sequences at 4096 tokens want 1.29 GiB; at 4608 they want
-        # 1.61 GiB, inside the pool but not by the 512 MiB margin. 16
+        # Arrange: TP=1 predicts a 3.66 GiB attention pool on four leftover
+        # A100s. 16 sequences at 9216 tokens want 2.90 GiB; at 9728 they want
+        # 3.22 GiB, inside the pool but not by the 512 MiB margin. 16
         # prompts keep every engine at max_num_seqs.
         raw = _qwen_manifest()
         raw["network"]["max_context_length"] = context
@@ -123,13 +123,16 @@ class TestResolveEngineTensorParallel:
         assert resolve_engine_tensor_parallel(manifest, 8, _a100(), 8) is None
 
     def test_stripped_towers_still_resolve(self) -> None:
+        # Arrange: without the vision tower one A100 holds 16 sequences at 32k.
         raw = _qwen_manifest()
         raw["environment"]["modality"] = "text"
         manifest = TrainingManifest.model_validate(raw)
 
+        # Act
         width = resolve_engine_tensor_parallel(manifest, 8, _a100(), 8)
 
-        assert width == 2
+        # Assert
+        assert width == 1
 
     def test_no_width_that_can_serve_returns_none(self) -> None:
         manifest = TrainingManifest.model_validate(_qwen_manifest())

@@ -20,8 +20,10 @@ from agilerl.arena.memory.resources import (
     engines_per_member,
     gpus_required,
     searches_gpu_split,
+    tier_sync_link,
     with_run_gpu_split,
 )
+from agilerl.arena.memory.specs import ModelArch, ModelSpec
 from agilerl.arena.models.manifest import TrainingManifest
 from tests.test_memory.test_cli import (
     MANIFEST,
@@ -78,14 +80,22 @@ def moe_unset_layout():
     return doc
 
 
+def tiny_model():
+    arch = ModelArch.from_hf_config(json.loads(Path(TINY_CONFIG).read_text()))
+    return ModelSpec(model_id="tiny", arch=arch)
+
+
 def builder():
     model_config = json.loads(Path(TINY_CONFIG).read_text())
-    return lambda laid_out, device, width, engines: run_config_from_manifest(
-        laid_out,
-        device,
-        model_config,
-        tensor_parallel_size=width,
-        rollout_engines=engines,
+    return lambda laid_out, device, width, engines, adapter_sync: (
+        run_config_from_manifest(
+            laid_out,
+            device,
+            model_config,
+            tensor_parallel_size=width,
+            rollout_engines=engines,
+            adapter_sync=adapter_sync,
+        )
     )
 
 
@@ -187,6 +197,15 @@ class TestEnginesPerMember:
             engines_per_member(manifest, 2, tensor_parallel_size=1)
 
 
+class TestTierSyncLink:
+    @pytest.mark.parametrize("gpus_per_node", [None, 8])
+    def test_one_node_syncs_over_cuda_ipc(self, gpus_per_node):
+        assert tier_sync_link(8, gpus_per_node) == "cuda_ipc"
+
+    def test_allocation_across_nodes_has_no_known_link(self):
+        assert tier_sync_link(16, 8) is None
+
+
 class TestSearchesGpuSplit:
     def test_async_run_with_neither_count_searches(self):
         manifest = TrainingManifest.model_validate(unset_split(MANIFEST))
@@ -218,7 +237,7 @@ class TestWithRunGpuSplit:
         ).split
 
         # Act
-        laid_out = with_run_gpu_split(manifest, 8, device)
+        laid_out, _ = with_run_gpu_split(manifest, 8, device)
 
         # Assert
         assert expected is not None
@@ -234,7 +253,7 @@ class TestWithRunGpuSplit:
         device = lookup_gpu("H100-80").device_spec()
 
         # Act
-        laid_out = with_run_gpu_split(manifest, 8, device)
+        laid_out, _ = with_run_gpu_split(manifest, 8, device)
 
         # Assert
         assert laid_out.algorithm.vllm_config.tensor_parallel_size == 2
@@ -274,17 +293,20 @@ class TestCheckTiers:
         # Arrange
         manifest = TrainingManifest.model_validate(unset_split(MANIFEST))
         device = lookup_gpu("NVIDIA L4").device_spec()
-        expected = with_run_gpu_split(manifest, 8, device)
+        expected, _ = with_run_gpu_split(manifest, 8, device, sync_link="cuda_ipc")
         sized = []
         build = builder()
 
-        def recording_build(laid_out, train_device, width, engines):
+        def recording_build(laid_out, train_device, width, engines, adapter_sync):
             sized.append((laid_out, engines))
-            return build(laid_out, train_device, width, engines)
+            return build(laid_out, train_device, width, engines, adapter_sync)
 
         # Act
         (check,) = check_tiers(
-            [tier("l4-8x", "NVIDIA L4", 8, 8.0)], manifest, recording_build
+            [tier("l4-8x", "NVIDIA L4", 8, 8.0)],
+            manifest,
+            tiny_model(),
+            recording_build,
         )
 
         # Assert
@@ -306,14 +328,15 @@ class TestCheckTiers:
         widths = []
         build = builder()
 
-        def recording_build(laid_out, train_device, width, engines):
+        def recording_build(laid_out, train_device, width, engines, adapter_sync):
             widths.append((width, engines))
-            return build(laid_out, train_device, width, engines)
+            return build(laid_out, train_device, width, engines, adapter_sync)
 
         # Act
         check_tiers(
             [tier("h100-8x", "NVIDIA H100 80GB HBM3", 8, 30.0)],
             manifest,
+            tiny_model(),
             recording_build,
         )
 
@@ -326,7 +349,7 @@ class TestCheckTiers:
         )
 
         (check,) = check_tiers(
-            [tier("l4-2x", "NVIDIA L4", 2, 1.0)], manifest, builder()
+            [tier("l4-2x", "NVIDIA L4", 2, 1.0)], manifest, tiny_model(), builder()
         )
 
         assert not check.fits
@@ -339,7 +362,9 @@ class TestCheckTiers:
     def test_a_gpu_below_sm80_is_ruled_out_as_unsupported(self, gpu_type, label):
         manifest = TrainingManifest.model_validate(unset_split(MANIFEST))
 
-        (check,) = check_tiers([tier("old-2x", gpu_type, 2, 1.0)], manifest, builder())
+        (check,) = check_tiers(
+            [tier("old-2x", gpu_type, 2, 1.0)], manifest, tiny_model(), builder()
+        )
 
         assert not check.fits
         assert f"({label}) cannot run LLM training" in check.reason
@@ -358,7 +383,7 @@ class TestCheckTiers:
         ]
 
         # Act
-        checks = check_tiers(tiers, manifest, builder())
+        checks = check_tiers(tiers, manifest, tiny_model(), builder())
 
         # Assert
         assert [c.tier["name"] for c in checks] == [
@@ -383,7 +408,7 @@ class TestCheckTiers:
         manifest = TrainingManifest.model_validate(doc)
         tiers = [tier("l4-4x", "NVIDIA L4", 4, 4.0)]
 
-        (check,) = check_tiers(tiers, manifest, builder())
+        (check,) = check_tiers(tiers, manifest, tiny_model(), builder())
 
         assert not check.fits
         assert check.reason == "4 GPUs, the job needs 5"
@@ -396,7 +421,7 @@ class TestCheckTiers:
         tiers = [tier("l4-5x", "NVIDIA L4", 5, 5.0)]
 
         # Act
-        (check,) = check_tiers(tiers, manifest, builder())
+        (check,) = check_tiers(tiers, manifest, tiny_model(), builder())
 
         # Assert
         assert check.config.generation.tensor_parallel_size == 1
@@ -406,7 +431,7 @@ class TestCheckTiers:
         manifest = TrainingManifest.model_validate(NO_TIER_FITS)
         tiers = [tier("l4-2x", "NVIDIA L4", 2, 1.0)]
 
-        (check,) = check_tiers(tiers, manifest, builder())
+        (check,) = check_tiers(tiers, manifest, tiny_model(), builder())
 
         assert not check.fits
         assert check.reason is not None
@@ -444,7 +469,7 @@ class TestCheckTiers:
 
         # Act
         (check,) = check_tiers(
-            [tier("l4-2x", "NVIDIA L4", 2, 2.0)], manifest, builder()
+            [tier("l4-2x", "NVIDIA L4", 2, 2.0)], manifest, tiny_model(), builder()
         )
 
         # Assert
@@ -456,6 +481,6 @@ class TestCheckTiers:
     def test_no_fitting_tier_leaves_no_fit(self, tiers):
         manifest = TrainingManifest.model_validate(MANIFEST)
 
-        checks = check_tiers(tiers, manifest, builder())
+        checks = check_tiers(tiers, manifest, tiny_model(), builder())
 
         assert not any(c.fits for c in checks)

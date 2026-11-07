@@ -15,6 +15,7 @@ from agilerl.arena.memory.estimator import (
     generation_can_serve,
     tensor_parallel_head_gather_bytes,
 )
+from agilerl.arena.memory.generation import engine_terms
 from agilerl.arena.memory.lora_placement import (
     lora_tensor_placement,
     split_moe_lora_recompute_bytes,
@@ -24,6 +25,7 @@ from agilerl.arena.memory.nccl import (
     trainer_nccl_bytes,
 )
 from agilerl.arena.memory.resolve.chunk import resolve_chunk_rows
+from agilerl.arena.memory.resolve.rollout import MERGED_SYNC_BUCKET_BYTES
 from agilerl.arena.memory.specs import (
     DeviceSpec,
     GenerationSettings,
@@ -127,6 +129,25 @@ class TestEstimateTraining:
         # Chunked loss: workspace is two fp32 (chunk_rows, vocab) tiles and no
         # head copy, so it stays under 512 MiB.
         assert component(breakdown, "logits_workspace").n_bytes <= 512 * MiB
+
+    def test_merged_sync_holds_two_rounds_of_merged_weights(self, model, device):
+        # Arrange
+        lora = TrainingSettings(async_rollout=True)
+        merged = lora.model_copy(update={"merged_lora_sync": True})
+
+        # Act
+        lora_breakdown = estimate_training(model, device, lora)
+        merged_breakdown = estimate_training(model, device, merged)
+
+        # Assert: 0.72 GB of merged all-linear weights stream in 256 MiB rounds,
+        # double-buffered on the trainer.
+        assert component(lora_breakdown, "lora_send_buffer").n_bytes == 2 * (
+            lora_formulas.lora_param_count(model.arch, 16)
+        )
+        assert (
+            component(merged_breakdown, "lora_send_buffer").n_bytes
+            == 2 * MERGED_SYNC_BUCKET_BYTES
+        )
 
     def test_async_rollout_holds_the_adapter_send_buffer(self, model, device):
         # Arrange
@@ -638,6 +659,28 @@ class TestEstimateGeneration:
         assert component(layout_3d, "kv_cache").n_bytes - component(
             layout_2d, "kv_cache"
         ).n_bytes == 2 * (stacks_2d - stacks_3d)
+
+    def test_merged_engine_holds_one_merged_round_and_no_adapter(self, model, device):
+        # Arrange
+        lora = GenerationSettings(
+            max_lora_rank=16, lora_sync_scope="attention-only", lora_dual_stream=True
+        )
+        merged = lora.model_copy(update={"merged_lora_sync": True})
+
+        # Act
+        lora_breakdown = estimate_generation(model, device, lora)
+        merged_breakdown = estimate_generation(model, device, merged)
+        lora_terms, _, _ = engine_terms(model, lora)
+        merged_terms, _, _ = engine_terms(model, merged)
+
+        # Assert: attention weights are under one round, so the buffer holds them all.
+        attention, _ = formulas.merged_lora_sync_bytes(QWEN_05B, "attention-only", 0, 2)
+        assert component(lora_breakdown, "lora_slots").n_bytes > 0
+        assert component(merged_breakdown, "lora_slots").n_bytes == 0
+        assert component(merged_breakdown, "lora_receive_buffer").n_bytes == attention
+        assert merged_terms["cuda_graphs"] == (
+            lora_terms["cuda_graphs"] - formulas.LORA_DUAL_STREAM_BYTES
+        )
 
     def test_rollout_engine_holds_the_whole_adapter_outside_the_budget(self, device):
         # Arrange

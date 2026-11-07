@@ -4,11 +4,14 @@
 
 import copy
 import json
+from functools import cached_property
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
 
+from agilerl.arena.memory import lora_formulas
 from agilerl.arena.memory.estimator import estimate_run, estimate_training
 from agilerl.arena.memory.manifest import (
     check_fp8_moe_backend_for_device,
@@ -28,10 +31,10 @@ from agilerl.arena.memory.manifest import (
 from agilerl.arena.memory.manifest import (
     run_config_from_manifest as _run_config_from_manifest,
 )
-from agilerl.arena.memory.specs import DeviceSpec, GiB, ModelArch
+from agilerl.arena.memory.specs import DTYPE_BYTES, DeviceSpec, GiB, ModelArch
 from agilerl.arena.models.fsdp import FSDPConfig
 from agilerl.arena.models.manifest import TrainingManifest
-from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO, ModelInfo
 
 TINY_CONFIG = json.loads(
     (Path(__file__).parent / "assets" / "tiny_llm" / "config.json").read_text()
@@ -58,6 +61,29 @@ GRPO = {
 }
 
 ENGINE = {"vllm_config": {"gpu_memory_utilization": 0.85}}
+
+GPT_OSS = "openai/gpt-oss-20b"
+GPT_OSS_BF16_CONFIG = SUPPORTED_MODEL_INFO[GPT_OSS].config
+
+
+class HubGptOss(ModelInfo):
+    """gpt-oss-20b as the Hub ships it, with MXFP4 expert weights."""
+
+    @cached_property
+    def config(self) -> dict[str, Any]:
+        return {
+            **GPT_OSS_BF16_CONFIG,
+            "quantization_config": {
+                "modules_to_not_convert": [
+                    "model.layers.*.self_attn",
+                    "model.layers.*.mlp.router",
+                    "model.embed_tokens",
+                    "lm_head",
+                ],
+                "quant_method": "mxfp4",
+            },
+        }
+
 
 ASYNC_ROLLOUT = {
     "training": {"rollout_mode": "async", "rollout_engines_per_agent": 1},
@@ -374,6 +400,18 @@ class TestTrainingSettings:
 
         assert settings.async_rollout is True
 
+    @pytest.mark.parametrize(
+        ("quantization", "expected"), [(None, True), ("fp8", False)]
+    )
+    def test_main_rank_sends_merged_weights_to_unquantized_engines(
+        self, quantization, expected
+    ):
+        doc = manifest(algorithm={"vllm_config": {"quantization": quantization}})
+
+        settings = training_settings_from_manifest(doc)
+
+        assert settings.merged_lora_sync is expected
+
     def test_a_classic_rl_manifest_is_refused(self):
         with pytest.raises(ValueError, match="LLM fine-tuning"):
             training_settings_from_manifest(DQN)
@@ -549,6 +587,20 @@ class TestImageInputs:
         assert settings.vision_tower_lora
         assert text.tower_lora_targets == frozenset()
         assert not text.vision_tower_lora
+
+    def test_tower_lora_keeps_adapter_sync(self):
+        trained = screenshots()
+        trained["network"]["lora_config"] = {
+            "target_modules": ["q_proj"],
+            "tower_target_modules": ["qkv"],
+        }
+
+        training = training_settings_from_manifest(trained)
+        generation = generation_settings_from_manifest(trained)
+
+        assert training.merged_lora_sync is False
+        assert generation.merged_lora_sync is False
+        assert training_settings_from_manifest(screenshots()).merged_lora_sync
 
     def test_text_environment_has_no_images(self):
         settings = training_settings_from_manifest(GRPO)
@@ -797,6 +849,43 @@ class TestGenerationSettings:
 
         assert rollout.lora_sync_scope == "attention-only"
         assert sft.lora_sync_scope is None
+
+    @pytest.mark.parametrize(
+        ("quantization", "expected"), [(None, True), ("fp8", False)]
+    )
+    def test_unquantized_rollout_engines_take_merged_weights(
+        self, quantization, expected
+    ):
+        doc = manifest(
+            algorithm={"vllm_config": {"quantization": quantization}}, **ASYNC_ROLLOUT
+        )
+
+        settings = generation_settings_from_manifest(doc)
+
+        assert settings.merged_lora_sync is expected
+
+    def test_quantized_checkpoint_keeps_serving_the_adapter(self, monkeypatch):
+        # Arrange
+        doc = manifest(
+            network={"pretrained_model_name_or_path": GPT_OSS}, **ASYNC_ROLLOUT
+        )
+        bf16 = generation_settings_from_manifest(doc)
+        monkeypatch.setitem(
+            SUPPORTED_MODEL_INFO,
+            GPT_OSS,
+            HubGptOss.model_validate(
+                SUPPORTED_MODEL_INFO[GPT_OSS].model_dump(
+                    include=set(ModelInfo.model_fields)
+                )
+            ),
+        )
+
+        # Act
+        mxfp4 = generation_settings_from_manifest(doc)
+
+        # Assert
+        assert bf16.merged_lora_sync is True
+        assert mxfp4.merged_lora_sync is False
 
     def test_engine_args_turn_dual_stream_lora_off(self):
         doc = manifest(
@@ -1155,7 +1244,37 @@ class TestValidatedRunManifest:
             validated_run_manifest(doc)
 
 
+def generation_bytes(config, key):
+    breakdown = estimate_run(config).generation
+    return next(c.n_bytes for c in breakdown.components if c.key == key)
+
+
 class TestRunConfig:
+    def test_adapter_sync_prices_the_engine_lora_slot_and_adapter_buffer(self):
+        # Arrange: the run picks adapter sync, as it does over TCP.
+        doc = manifest(**ASYNC_ROLLOUT)
+        device = device_spec_from_resource_class(A100_TIER)
+
+        # Act
+        merged = run_config_from_manifest(doc, device, TINY_CONFIG)
+        adapter = run_config_from_manifest(doc, device, TINY_CONFIG, adapter_sync=True)
+
+        # Assert
+        settings = adapter.generation
+        adapter_bytes = lora_formulas.lora_sync_buffer_bytes(
+            adapter.model.arch,
+            settings.max_lora_rank,
+            settings.lora_sync_scope,
+            settings.lora_packed_target_matrices,
+            DTYPE_BYTES[settings.weight_dtype],
+        )
+        assert merged.generation.merged_lora_sync is True
+        assert adapter.generation.merged_lora_sync is False
+        assert adapter.training.merged_lora_sync is False
+        assert generation_bytes(merged, "lora_slots") == 0
+        assert generation_bytes(adapter, "lora_slots") > 0
+        assert generation_bytes(adapter, "lora_receive_buffer") == adapter_bytes
+
     def test_unset_rollout_mode_is_sized_async(self):
         config = run_config_from_manifest(
             GRPO, device_spec_from_resource_class(L4_TIER), TINY_CONFIG

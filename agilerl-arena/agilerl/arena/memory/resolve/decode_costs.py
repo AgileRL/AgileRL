@@ -22,6 +22,15 @@ MOE_ENGINE_PREFILL_FLOPS_EFFICIENCY: dict[int, dict[int, float]] = {
 # prefills a dense LoRA model at about 40% of peak bf16.
 DENSE_ENGINE_PREFILL_FLOPS_EFFICIENCY = 0.4
 
+# Generation speed of an engine serving merged weights with LoRA off, over the
+# LoRA engine the efficiencies above and the split's decode bandwidth are
+# fitted to. Qwen3.6-35B-A3B prefills 2.1x faster with LoRA off (vLLM 0.32).
+# vLLM loses 23.9% to 47% throughput to all-linear LoRA on dense models
+# (SqueezeBits); decode, and dense prefill, take the low end. Unmeasured on
+# AgileRL engines beyond the MoE prefill.
+MERGED_MOE_PREFILL_SPEEDUP = 2.1
+MERGED_DECODE_SPEEDUP = 1 / (1 - 0.239)
+
 
 @dataclass(frozen=True)
 class DecodeCosts:

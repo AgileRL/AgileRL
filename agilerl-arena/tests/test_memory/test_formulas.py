@@ -3018,3 +3018,122 @@ class TestCheckpointedMoeBlocks:
 
         assert formulas.checkpointed_moe_blocks(QWEN_05B, settings) == 0
         assert formulas.checkpointed_moe_blocks(arch, off) == 0
+
+
+class TestMergedLoraSyncBytes:
+    def test_attention_scope_pushes_the_attention_projections(self):
+        # Act
+        total, largest = formulas.merged_lora_sync_bytes(
+            QWEN_05B, "attention-only", 0, 2
+        )
+
+        # Assert: q/o 896x896 and k/v 896x128 on 24 layers, without biases.
+        assert total == 2 * 24 * (2 * 896 * 896 + 2 * 896 * 128)
+        assert largest == 2 * 896 * 896
+
+    def test_all_linear_scope_adds_the_mlp(self):
+        # Arrange
+        attention, _ = formulas.merged_lora_sync_bytes(QWEN_05B, "attention-only", 0, 2)
+
+        # Act
+        total, largest = formulas.merged_lora_sync_bytes(QWEN_05B, "all-linear", 0, 2)
+
+        # Assert: gate, up and down 896x4864 on 24 layers.
+        assert total == attention + 2 * 24 * 3 * 896 * 4864
+        assert largest == 2 * 896 * 4864
+
+    def test_packed_experts_push_whole_stacks(self):
+        # Arrange
+        unpacked, _ = formulas.merged_lora_sync_bytes(MOE_TINY, "all-linear", 0, 2)
+
+        # Act
+        total, largest = formulas.merged_lora_sync_bytes(MOE_TINY, "all-linear", 2, 2)
+
+        # Assert: 4 experts of gate, up and down 16x32 on 2 layers; the
+        # gate_up stack is the largest tensor.
+        assert total == unpacked + 2 * 2 * 4 * 3 * 16 * 32
+        assert largest == 2 * 4 * 2 * 32 * 16
+
+    def test_one_packed_target_on_a_gated_mlp_pushes_gate_up(self):
+        # Arrange
+        unpacked, _ = formulas.merged_lora_sync_bytes(MOE_TINY, "all-linear", 0, 2)
+
+        # Act
+        total, largest = formulas.merged_lora_sync_bytes(MOE_TINY, "all-linear", 1, 2)
+
+        # Assert: gate_up is 2 of the 3 expert matrices: 4 experts of 16x64
+        # on 2 layers.
+        assert total == unpacked + 2 * 2 * 4 * 2 * 16 * 32
+        assert largest == 2 * 4 * 2 * 32 * 16
+
+    def test_qwen35_output_gate_doubles_the_query_rows(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(QWEN35_08B.config)
+
+        # Act
+        total, largest = formulas.merged_lora_sync_bytes(arch, "attention-only", 0, 2)
+
+        # Assert: 6 attention layers; gated q_proj 1024x4096, k/v 1024x512,
+        # o_proj 2048x1024.
+        assert total == 2 * 6 * (1024 * 4096 + 2 * 1024 * 512 + 2048 * 1024)
+        assert largest == 2 * 1024 * 4096
+
+    def test_gemma4_skips_shared_kv_and_pushes_per_layer_inputs(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(GEMMA4_E4B.config)
+
+        # Act
+        total, largest = formulas.merged_lora_sync_bytes(arch, "all-linear", 0, 2)
+
+        # Assert: 35 sliding layers of head dim 256 and 7 full of 512; 18 of
+        # the 42 layers share k/v, leaving 20 sliding and 4 full with k/v.
+        # Gate, up and down 2560x10240 on 42 layers. Per-layer inputs are a
+        # 2560x256 gate and 256x2560 projection per layer, plus the model's
+        # 2560x10752 projection, the largest tensor.
+        attention = (
+            35 * (2560 * 2048 + 2048 * 2560)
+            + 2 * 20 * 2560 * 512
+            + 7 * (2560 * 4096 + 4096 * 2560)
+            + 2 * 4 * 2560 * 1024
+        )
+        mlp = 42 * 3 * 2560 * 10240
+        per_layer_inputs = 42 * 2 * 2560 * 256 + 2560 * 42 * 256
+        assert total == 2 * (attention + mlp + per_layer_inputs)
+        assert largest == 2 * 2560 * 42 * 256
+
+    def test_nemotron_h_pushes_the_mamba_projections(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"].config
+        )
+
+        # Act
+        total, largest = formulas.merged_lora_sync_bytes(arch, "all-linear", 0, 2)
+
+        # Assert: 4 attention layers (q/o 3136x5120, k/v 3136x1024), 17
+        # ungated MLPs (up and down 3136x12544) and 21 Mamba-2 mixers whose
+        # in_proj 3136x17504 (x 7680, conv 9728, dt 96) is the largest tensor.
+        attention = 4 * 2 * 3136 * 5120 + 8 * 3136 * 1024
+        mlp = 17 * 2 * 3136 * 12544
+        mamba = 21 * (3136 * (7680 + 9728 + 96) + 7680 * 3136)
+        assert total == 2 * (attention + mlp + mamba)
+        assert largest == 2 * 3136 * 17504
+
+    def test_qwen36_pushes_its_gated_delta_projections(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["Qwen/Qwen3.6-35B-A3B"].config
+        )
+        attention, _ = formulas.merged_lora_sync_bytes(arch, "attention-only", 0, 2)
+
+        # Act
+        total, largest = formulas.merged_lora_sync_bytes(arch, "all-linear", 2, 2)
+
+        # Assert: 30 GDN layers project 2048 to qkv (8192), z (4096) and b, a
+        # (32 each), and 4096 back; shared experts are 3 of 2048x512 on 40
+        # layers. The 256-expert 2048x1024 gate_up stack is the largest.
+        gdn = 30 * (2048 * (8192 + 4096 + 2 * 32) + 4096 * 2048)
+        shared = 40 * 3 * 2048 * 512
+        routed = 40 * 256 * 3 * 2048 * 512
+        assert total == attention + 2 * (gdn + shared + routed)
+        assert largest == 2 * 256 * 1024 * 2048

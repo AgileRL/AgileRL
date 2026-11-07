@@ -14,6 +14,7 @@ from agilerl.arena.memory.manifest import (
 )
 from agilerl.arena.memory.resolve.engine import (
     resolve_engine_fast_path,
+    resolve_engine_tensor_parallel,
     resolve_rollout_engines_per_agent,
     servable_engine_widths,
 )
@@ -263,6 +264,69 @@ def rollout_manifest(hub_id: str, context: int) -> TrainingManifest:
             }
         )
     )
+
+
+def qwen35_9b_kept_trainers() -> TrainingManifest:
+    """Two-turn CISPO on Qwen3.5-9B with two trainers, auto engines and the width omitted."""
+    return validated_run_manifest(
+        TrainingManifest.model_validate(
+            {
+                "algorithm": {
+                    "name": "CISPO",
+                    "batch_size": 4,
+                    "group_size": 4,
+                    "max_output_tokens": 256,
+                    "vllm_config": {"gpu_memory_utilization": 0.9},
+                },
+                "environment": {
+                    "env_type": "rollout",
+                    "env_image": "env:latest",
+                    "modality": "text",
+                    "max_turns": 2,
+                },
+                "network": {
+                    "pretrained_model_name_or_path": "Qwen/Qwen3.5-9B",
+                    "max_context_length": 2048,
+                    "lora_config": {"lora_r": 16, "lora_alpha": 32},
+                },
+                "training": {
+                    "max_steps": 10,
+                    "rollout_mode": "async",
+                    "pop_size": 1,
+                    "training_gpus_per_agent": 2,
+                    "rollout_batch_size": 4,
+                },
+                "replay_buffer": {"kind": "llm"},
+            }
+        )
+    )
+
+
+class TestResolveEngineTensorParallel:
+    def test_merged_sync_keeps_one_gpu_engines(self) -> None:
+        # Arrange: two trainers leave four L4s for engines.
+        manifest = qwen35_9b_kept_trainers()
+        l4 = lookup_gpu("L4").device_spec()
+
+        # Act
+        width = resolve_engine_tensor_parallel(manifest, 6, l4, 6)
+
+        # Assert
+        assert width == 1
+        assert manifest.algorithm.vllm_config.tensor_parallel_size == 1
+
+    def test_adapter_sync_prices_the_engine_lora_slot(self) -> None:
+        # Arrange: the LoRA slot leaves four TP1 engines fewer resident
+        # sequences than two TP2 engines.
+        manifest = qwen35_9b_kept_trainers()
+        l4 = lookup_gpu("L4").device_spec()
+
+        # Act
+        width = resolve_engine_tensor_parallel(manifest, 6, l4, 6, adapter_sync=True)
+
+        # Assert
+        assert width == 2
+        assert manifest.algorithm.vllm_config.tensor_parallel_size == 2
 
 
 class TestServableEngineWidths:
