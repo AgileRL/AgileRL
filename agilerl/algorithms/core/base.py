@@ -5974,13 +5974,13 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         return self.micro_batch_tokens_per_gpu
 
     def packed_warmup_lengths(self) -> list[int]:
-        """Packed lengths that reach every length-specialized Triton kernel a learn can hit.
+        """Packed lengths that reach every length-specialized kernel a learn can hit.
 
         :return: :func:`packed_length_classes` of the actor at the
             micro-batch token budget, nearest first to the planner's expected
             micro-batch: :data:`ROW_FILL` of a mini-batch of full rows, split
             evenly over the micro-batches the budget needs. Empty off CUDA,
-            without packing, or without recurrent mixers.
+            without packing, or without recurrent mixers or flex attention.
         :rtype: list[int]
         """
         token_budget = self._micro_batch_token_budget()
@@ -5994,6 +5994,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             token_budget,
             math.ceil(mini_batch_tokens / passes),
             torch.cuda.get_device_properties(device).multi_processor_count,
+            language_model_attn_implementation(self.actor) == "flex_attention",
         )
 
     def warm_packed_kernels(

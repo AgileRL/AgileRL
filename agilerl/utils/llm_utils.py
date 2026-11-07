@@ -40,6 +40,7 @@ from torch.optim.lr_scheduler import LambdaLR
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.architectures import (
+    FAMILY_RUNTIME_CONFIGS,
     family_runtime,
     install_family_patches,
     pretrained_model_type,
@@ -57,6 +58,10 @@ from agilerl.arena.memory.resolve.attention import (
 )
 from agilerl.arena.memory.resolve.lora import resolve_max_lora_rank
 from agilerl.distributed.fsdp import CPUOffloadOptimizer, canonical_fsdp_param_fqn
+from agilerl.distributed.fsdp_meta import (
+    checkpoint_quantization_config,
+    dequantizing_quantization_config,
+)
 from agilerl.distributed.process import (
     allreduce_minmax_int,
     barrier,
@@ -104,9 +109,9 @@ if HAS_LLM_DEPENDENCIES:
     from safetensors.torch import load_file as safe_load_file
     from safetensors.torch import save_file
     from transformers import (
-        AutoConfig,
         BitsAndBytesConfig,
         GenerationConfig,
+        PretrainedConfig,
     )
     from transformers.modeling_utils import PreTrainedModel
 
@@ -442,13 +447,12 @@ def load_pad_token_configs(
     if not HAS_LLM_DEPENDENCIES or not model_name_or_path:
         return None, None
 
-    trust_remote_code = (
-        family_runtime(model_name_or_path).trainer.trust_remote_code is True
-    )
+    trainer = family_runtime(model_name_or_path).trainer
+    trust_remote_code = trainer.trust_remote_code is True
     # A checkpoint can omit config.json or generation_config.json.
     try:
         with remote_code_lock(trust_remote_code):
-            model_config = AutoConfig.from_pretrained(
+            model_config = trainer.config_class.from_pretrained(
                 model_name_or_path,
                 trust_remote_code=trust_remote_code,
             )
@@ -1475,6 +1479,32 @@ def _adapt_mamba_lora_config(model: nn.Module, lora_config: LoraConfig) -> LoraC
     return _clone_lora_config(lora_config, **updates)
 
 
+def _exclude_family_lora_modules(
+    model: nn.Module, lora_config: LoraConfig
+) -> LoraConfig:
+    """Add the family's ``lora_exclude_modules`` to ``exclude_modules``.
+
+    :raises ValueError: If ``exclude_modules`` is a regex and the family
+        excludes modules.
+    """
+    model_type = getattr(getattr(model, "config", None), "model_type", None)
+    runtime = FAMILY_RUNTIME_CONFIGS.get(model_type)
+    if runtime is None or not runtime.lora_exclude_modules:
+        return lora_config
+    if isinstance(lora_config.exclude_modules, str):
+        msg = (
+            f"exclude_modules regex {lora_config.exclude_modules!r} cannot take "
+            f"the {model_type} exclusions; pass a list of module names"
+        )
+        raise ValueError(msg)
+    existing = list(lora_config.exclude_modules or [])
+    missing = sorted(runtime.lora_exclude_modules - set(existing))
+    if not missing:
+        return lora_config
+    logger.info("Excluded %s modules %s from LoRA", model_type, missing)
+    return _clone_lora_config(lora_config, exclude_modules=existing + missing)
+
+
 def adapt_lora_config_for_model(
     model: nn.Module,
     lora_config: LoraConfig,
@@ -1490,6 +1520,8 @@ def adapt_lora_config_for_model(
 
     On Mamba-family ``model_type`` values, ``out_proj`` and ``conv1d`` are excluded
     from LoRA inject (PEFT 0.20+ forbids wrapping those fused-kernel modules).
+    A family's ``lora_exclude_modules`` join ``exclude_modules`` for every
+    ``target_modules`` form.
 
     Packed-expert ``target_parameters`` force ``lora_dropout=0``; PEFT cannot
     factor dropout out of the parameter-level low-rank product.
@@ -1510,6 +1542,7 @@ def adapt_lora_config_for_model(
     """
     lora_config = _zero_lora_dropout_for_target_parameters(lora_config)
     lora_config = _adapt_mamba_lora_config(model, lora_config)
+    lora_config = _exclude_family_lora_modules(model, lora_config)
     prefix = language_model_prefix(model)
     tower_names = sorted(set(tower_target_modules or ()))
     if prefix is None:
@@ -1849,7 +1882,9 @@ def create_model_from_name_or_path(
     :type attn_implementation: str
     :param model_config: Extra keyword arguments forwarded to ``from_pretrained``
         (e.g. a ``quantization_config``). ``torch_dtype`` fills if absent;
-        family trainer keys fill via ``setdefault``.
+        family trainer keys fill via ``setdefault``. Without a
+        ``quantization_config``, an FP8 / MXFP4 checkpoint dequantizes to
+        ``torch_dtype``.
     :type model_config: dict[str, Any ] | None
     :param add_value_head: Flag to indicate if a value head should be added to the model, defaults to False
     :type add_value_head: bool, optional
@@ -1860,6 +1895,8 @@ def create_model_from_name_or_path(
     :type use_sequence_packing: bool, optional
     :return: The created model.
     :rtype: PreTrainedModel
+    :raises ValueError: If the checkpoint is quantized in a format that does
+        not dequantize on load.
     """
     # Class-level family patches wrap mixer ``__init__`` and must run
     # before ``from_pretrained``.
@@ -1873,6 +1910,14 @@ def create_model_from_name_or_path(
     trainer = family_runtime(model_name_or_path).trainer
     for key, value in trainer.load_kwargs().items():
         model_config.setdefault(key, value)
+    if "quantization_config" not in model_config:
+        checkpoint_config, _ = PretrainedConfig.get_config_dict(model_name_or_path)
+        quantization_config = checkpoint_quantization_config(checkpoint_config)
+        if quantization_config is not None:
+            # SM 8.9+ GPUs otherwise keep FP8 weights and swap in FP8Linear.
+            model_config["quantization_config"] = dequantizing_quantization_config(
+                quantization_config
+            )
     model_config["attn_implementation"] = attn_implementation
     if is_main_process():
         logger.info("Trainer attention backend: %s", attn_implementation)

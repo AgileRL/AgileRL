@@ -1,7 +1,7 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Context-parallel Gated DeltaNet mixers.
+"""Context-parallel Gated DeltaNet and Kimi Delta Attention mixers.
 
 The sequence stays sharded. Conv and scan take a flash-linear-attention
 context built from the full-sequence ``cu_seqlens``.
@@ -30,6 +30,17 @@ GDN_CP_FLAG = "_agilerl_gdn_cp"
 GDN_CP_KERNEL_FLAG = "_agilerl_gdn_cp_kernel"
 CONV_KERNEL_NAME = "causal_conv1d_fn"
 MODULE_SCAN_KERNEL_NAME = "torch_chunk_gated_delta_rule"
+KDA_SCAN_KERNEL_NAME = "chunk_kimi_delta_attention"
+# flash-linear-attention chunk sizes each modeling-module scan accepts, largest first.
+SCAN_CHUNK_SIZES = {
+    MODULE_SCAN_KERNEL_NAME: (CP_SCAN_CHUNK, CP_SCAN_CHUNK // 2, CP_SCAN_CHUNK // 4),
+    KDA_SCAN_KERNEL_NAME: (CP_SCAN_CHUNK, CP_SCAN_CHUNK // 2),
+}
+# The flash-linear-attention module and function that run each scan.
+FLA_SCAN_KERNELS = {
+    MODULE_SCAN_KERNEL_NAME: ("fla.ops.gated_delta_rule", "chunk_gated_delta_rule"),
+    KDA_SCAN_KERNEL_NAME: ("fla.ops.kda", "chunk_kda"),
+}
 
 
 def _fla_build_cp_context(
@@ -105,18 +116,25 @@ def _scan_cu_seqlens(batch: int) -> tuple[torch.Tensor, tuple[int, ...]]:
 
 
 def _gdn_cp_context(
-    group: dist.ProcessGroup, conv_kernel_size: int, world: int, batch: int
+    group: dist.ProcessGroup,
+    conv_kernel_size: int,
+    world: int,
+    batch: int,
+    chunk_sizes: tuple[int, ...],
 ) -> GdnCpContext:
     """Context of the published offsets, built by the first GDN layer of the micro-batch."""
-    contexts = cast("dict[tuple[int, int], GdnCpContext]", ULYSSES_PARAMS["contexts"])
-    key = (conv_kernel_size, batch)
+    contexts = cast(
+        "dict[tuple[int, int, tuple[int, ...]], GdnCpContext]",
+        ULYSSES_PARAMS["contexts"],
+    )
+    key = (conv_kernel_size, batch, chunk_sizes)
     if key not in contexts:
         cu_seqlens, host = _scan_cu_seqlens(batch)
         contexts[key] = GdnCpContext(
             _fla_build_cp_context(
                 cu_seqlens, group, conv1d_kernel_size=conv_kernel_size
             ),
-            _gdn_chunk_size(host, world),
+            _gdn_chunk_size(host, world, chunk_sizes),
         )
     return contexts[key]
 
@@ -142,14 +160,16 @@ def _boundary_lengths(bounds: tuple[int, ...], world: int) -> list[int]:
     return lengths
 
 
-def _gdn_chunk_size(bounds: tuple[int, ...], world: int) -> int:
-    """Largest of 64, 32, and 16 that divides every rank-boundary piece."""
+def _gdn_chunk_size(
+    bounds: tuple[int, ...], world: int, chunk_sizes: tuple[int, ...]
+) -> int:
+    """Largest of ``chunk_sizes`` that divides every rank-boundary piece."""
     # FLA's CP state summary matches a full sequence of whole chunks.
     lengths = _boundary_lengths(bounds, world)
-    for chunk in (CP_SCAN_CHUNK, CP_SCAN_CHUNK // 2, CP_SCAN_CHUNK // 4):
+    for chunk in chunk_sizes:
         if lengths and all(length % chunk == 0 for length in lengths):
             return chunk
-    return 64
+    return chunk_sizes[0]
 
 
 def _conv_arguments(
@@ -197,6 +217,21 @@ def _fla_chunk_gated_delta_rule(*args: object, **kwargs: object) -> object:
     return chunk_gated_delta_rule(*args, **kwargs)
 
 
+def _fla_chunk_kda(*args: object, **kwargs: object) -> object:
+    """Run flash-linear-attention's Kimi Delta Attention scan."""
+    # flash-linear-attention is an optional extra.
+    from fla.ops.kda import chunk_kda
+
+    return chunk_kda(*args, **kwargs)
+
+
+def _fla_module_scan(name: str) -> Callable[..., object]:
+    """FLA scan that replaces modeling-module kernel ``name``."""
+    if name == KDA_SCAN_KERNEL_NAME:
+        return _fla_chunk_kda
+    return _fla_chunk_gated_delta_rule
+
+
 def _cp_conv_forward(
     hidden: torch.Tensor,
     weight: torch.Tensor | None,
@@ -230,12 +265,13 @@ def _cp_scan_forward(
     group: dist.ProcessGroup,
     conv_kernel_size: int,
     world: int,
+    chunk_sizes: tuple[int, ...],
     args: tuple[object, ...],
     kwargs: dict[str, object],
 ) -> object:
     query = cast("torch.Tensor", args[0] if args else kwargs["q"])
     batch = int(query.shape[0])
-    context = _gdn_cp_context(group, conv_kernel_size, world, batch)
+    context = _gdn_cp_context(group, conv_kernel_size, world, batch, chunk_sizes)
     scan_kwargs = {
         **kwargs,
         "cp_context": context.fla,
@@ -270,22 +306,21 @@ def _install_gdn_module_kernels(
     """Patch modeling-module conv and scan. HF calls those, not mixer attributes."""
     module = sys.modules[type(mixer).__module__]
     conv = getattr(module, CONV_KERNEL_NAME, None)
-    scan = getattr(module, MODULE_SCAN_KERNEL_NAME, None)
-    if conv is None or scan is None:
+    scan_name = next((name for name in SCAN_CHUNK_SIZES if hasattr(module, name)), None)
+    if conv is None or scan_name is None:
         msg = (
             "Gated DeltaNet context parallel requires causal_conv1d_fn and "
-            "torch_chunk_gated_delta_rule"
+            "torch_chunk_gated_delta_rule or chunk_kimi_delta_attention"
         )
         raise RuntimeError(msg)
+    scan = getattr(module, scan_name)
+    chunk_sizes = SCAN_CHUNK_SIZES[scan_name]
+    fla_module, fla_function = FLA_SCAN_KERNELS[scan_name]
     # The torch fallbacks ignore cp_context, so each shard would scan from zero state.
     errors = gdn_kernel_import_errors(
         (
             GdnKernel("fla.ops.cp", "build_cp_context", "flash-linear-attention"),
-            GdnKernel(
-                "fla.ops.gated_delta_rule",
-                "chunk_gated_delta_rule",
-                "flash-linear-attention",
-            ),
+            GdnKernel(fla_module, fla_function, "flash-linear-attention"),
         )
     )
     if errors:
@@ -299,26 +334,35 @@ def _install_gdn_module_kernels(
         if "cu_seqlens" not in ULYSSES_PARAMS:
             return conv(*args, **kwargs)
         hidden, weight, bias, activation = _conv_arguments(args, kwargs)
-        context = _gdn_cp_context(group, kernel, world, int(hidden.shape[0]))
+        context = _gdn_cp_context(
+            group, kernel, world, int(hidden.shape[0]), chunk_sizes
+        )
         return _cp_conv_forward(hidden, weight, bias, activation, context.fla)
 
     def cp_scan(*args: object, **kwargs: object) -> object:
         if "cu_seqlens" not in ULYSSES_PARAMS:
             return scan(*args, **kwargs)
         return _cp_scan_forward(
-            _fla_chunk_gated_delta_rule, group, kernel, world, args, kwargs
+            _fla_module_scan(scan_name),
+            group,
+            kernel,
+            world,
+            chunk_sizes,
+            args,
+            kwargs,
         )
 
     setattr(cp_conv, GDN_CP_KERNEL_FLAG, True)
     setattr(cp_scan, GDN_CP_KERNEL_FLAG, True)
     setattr(module, CONV_KERNEL_NAME, cp_conv)
-    setattr(module, MODULE_SCAN_KERNEL_NAME, cp_scan)
+    setattr(module, scan_name, cp_scan)
 
 
 def install_gdn_context_parallel(mixer: nn.Module, cp_mesh: DeviceMesh) -> bool:
-    """Keep Gated DeltaNet on the sequence shard and pass FLA ``cp_context``.
+    """Keep a delta-rule mixer on the sequence shard and pass FLA ``cp_context``.
 
-    :param mixer: GatedDeltaNet module whose modeling module holds the kernels.
+    :param mixer: Gated DeltaNet or Kimi Delta Attention module whose modeling
+        module holds the kernels.
     :param cp_mesh: Context-parallel mesh. Size is the CP degree.
     :return: True when this call wrapped ``mixer``.
     """

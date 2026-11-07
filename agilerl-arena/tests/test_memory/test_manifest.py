@@ -31,6 +31,7 @@ from agilerl.arena.memory.manifest import (
 from agilerl.arena.memory.manifest import (
     run_config_from_manifest as _run_config_from_manifest,
 )
+from agilerl.arena.memory.resolve.attention import FAMILY_ATTN_IMPLEMENTATIONS
 from agilerl.arena.memory.specs import DTYPE_BYTES, DeviceSpec, GiB, ModelArch
 from agilerl.arena.models.fsdp import FSDPConfig
 from agilerl.arena.models.manifest import TrainingManifest
@@ -215,6 +216,45 @@ class TestTrainingSettings:
             training_settings_from_manifest(
                 manifest(algorithm={"fsdp": {"cpu_offload": True}})
             )
+
+    def test_context_parallel_on_an_sdpa_family_is_refused(self, monkeypatch):
+        monkeypatch.setitem(FAMILY_ATTN_IMPLEMENTATIONS, "qwen2", "sdpa")
+
+        with pytest.raises(
+            ValueError,
+            match=r"fsdp\.cp=2 needs flash_attention_2 or flex_attention attention; "
+            r"this model trains with sdpa",
+        ):
+            training_settings_from_manifest(
+                manifest(
+                    algorithm={"fsdp": {"cp": 2}},
+                    training={"training_gpus_per_agent": 2},
+                )
+            )
+
+    def test_context_parallel_on_deepseek_v4_is_sized(self):
+        settings = training_settings_from_manifest(
+            manifest(
+                algorithm={"fsdp": {"cp": 2}},
+                network={
+                    "pretrained_model_name_or_path": "deepseek-ai/DeepSeek-V4-Flash-0731"
+                },
+                training={"training_gpus_per_agent": 2},
+            )
+        )
+
+        assert settings.fsdp.cp == 2
+
+    def test_context_parallel_on_glm5_next_sdpa_is_sized(self):
+        settings = training_settings_from_manifest(
+            manifest(
+                algorithm={"fsdp": {"cp": 2}},
+                network={"pretrained_model_name_or_path": "zai-org/GLM-5.3-Flash"},
+                training={"training_gpus_per_agent": 2},
+            )
+        )
+
+        assert settings.fsdp.cp == 2
 
     def test_optimizer_cpu_offload_is_sized(self):
         settings = training_settings_from_manifest(
@@ -761,6 +801,27 @@ class TestGenerationSettings:
 
         # Assert
         assert settings.gpu_memory_utilization == 0.9
+
+    @pytest.mark.parametrize(
+        ("vllm_config", "expected"),
+        [({}, 0.85), ({"gpu_memory_utilization": 0.9}, 0.9)],
+    )
+    def test_catalogue_rollout_share_fills_an_omitted_memory_share(
+        self, vllm_config, expected
+    ):
+        # Arrange
+        doc = manifest(
+            algorithm={"vllm_config": {"max_num_seqs": 8, **vllm_config}},
+            network={
+                "pretrained_model_name_or_path": "deepseek-ai/DeepSeek-V4-Flash-0731"
+            },
+        )
+
+        # Act
+        settings = generation_settings_from_manifest(doc)
+
+        # Assert
+        assert settings.gpu_memory_utilization == expected
 
     def test_fp32_engine_dtype(self):
         settings = generation_settings_from_manifest(

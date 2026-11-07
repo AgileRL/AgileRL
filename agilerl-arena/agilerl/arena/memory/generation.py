@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import agilerl.arena.memory.block_activations as block_activations
 import agilerl.arena.memory.formulas as formulas
 import agilerl.arena.memory.kv_cache as kv_cache
 import agilerl.arena.memory.lora_formulas as lora_formulas
@@ -72,12 +73,12 @@ def engine_terms(
     unsharded_weights = formulas.weight_bytes(counts, settings.weight_dtype, variant)
     weights = int(
         formulas.engine_weight_bytes(
-            counts, settings.weight_dtype, variant, settings.weight_quantization
+            arch, counts, settings.weight_dtype, variant, settings.weight_quantization
         )
         / tp
     )
     decoder_startup = (
-        formulas.block_recompute_bytes(
+        block_activations.block_recompute_bytes(
             arch,
             1,
             batched_tokens,
@@ -110,7 +111,10 @@ def engine_terms(
             else 0
         ),
         "lora_slots": _lora_slot_bytes(arch, settings, act_bytes, tp),
-        "engine_runtime": int(formulas.ENGINE_RUNTIME_FRACTION * unsharded_weights),
+        "engine_runtime": min(
+            int(formulas.ENGINE_RUNTIME_FRACTION * unsharded_weights),
+            formulas.ENGINE_RUNTIME_MAX_BYTES,
+        ),
         "step_buffers": engine_step_buffer_bytes(arch, batched_tokens, act_bytes),
         "kv_demand": _kv_demand_per_rank(arch, settings),
         "mamba_state": kv_cache.mamba_state_bytes(
@@ -139,7 +143,7 @@ def _lora_slot_bytes(
     # Engines serve one adapter (``max_loras=1``).
     return (
         int(
-            lora_formulas.lora_param_count(arch, settings.max_lora_rank)
+            lora_formulas.engine_lora_param_count(arch, settings.max_lora_rank)
             * act_bytes
             / tp
         )
@@ -319,7 +323,7 @@ def estimate_generation(
         model,
         settings,
         batched_tokens,
-        formulas.block_recompute_bytes(
+        block_activations.block_recompute_bytes(
             model.arch,
             1,
             runtime_tokens,
@@ -342,7 +346,10 @@ def estimate_generation(
             sampler,
         )
         + _residency_bar_components(model, device, terms, job_overhead)
-        + (_lora_receive_buffer_component(model.arch, settings),),
+        + (
+            _lora_receive_buffer_component(model.arch, settings),
+            _expert_lora_copy_component(model.arch, settings),
+        ),
         device_total_bytes=device.total_bytes,
         device_usable_bytes=device.generation_usable_bytes,
         warnings=tuple(warnings),
@@ -529,7 +536,7 @@ def _lora_receive_buffer_component(
             key="lora_receive_buffer",
             label="Merged weight receive buffer",
             n_bytes=merged_sync_bucket_bytes(
-                *formulas.merged_lora_sync_bytes(
+                *lora_formulas.merged_lora_sync_bytes(
                     arch,
                     settings.lora_sync_scope,
                     settings.lora_packed_target_matrices,
@@ -549,6 +556,36 @@ def _lora_receive_buffer_component(
             dtype_bytes,
         ),
         note=note,
+    )
+
+
+def _expert_lora_copy_component(
+    arch: ModelArch, settings: GenerationSettings
+) -> MemoryComponent:
+    """The expert ``lora_B`` copies vLLM keeps of the adapter read into the receive buffer.
+
+    :param arch: Engine-side model architecture.
+    :param settings: Generation settings.
+    :return: 0 bytes unless a rollout engine receives a packed-expert adapter.
+    """
+    receives_experts = (
+        settings.lora_sync_scope is not None
+        and not settings.merged_lora_sync
+        and settings.lora_packed_target_matrices > 0
+    )
+    params = (
+        lora_formulas.received_expert_lora_b_param_count(arch, settings.max_lora_rank)
+        if receives_experts
+        else 0
+    )
+    return MemoryComponent(
+        key="expert_lora_copy",
+        label="Expert LoRA copy",
+        n_bytes=int(params * DTYPE_BYTES[settings.weight_dtype]),
+        note=(
+            "vLLM re-lays the received expert lora_B per expert and keeps that "
+            "copy while the adapter is loaded, outside gpu_memory_utilization."
+        ),
     )
 
 

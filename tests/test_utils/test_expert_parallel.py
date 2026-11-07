@@ -3118,15 +3118,20 @@ class TestMaterializeNeedsEpCoveringTp:
         assert torch.equal(model.up_proj, weight)
 
 
-class TestMaterializeCpuOffloadWithExpertsOutsideFsdp:
-    def test_ep_spanning_the_shard_group_raises_and_keeps_the_weights(self):
-        # Arrange: one rank per shard group holds each expert, so experts skip FSDP.
+class TestMaterializeCpuOffloadWithExpertParallel:
+    @pytest.mark.parametrize(
+        "edp_shard",
+        [None, MagicMock(spec=DeviceMesh)],
+        ids=["ep_spans_shard_group", "ep_inside_shard_group"],
+    )
+    def test_raises_and_keeps_the_weights(self, edp_shard):
+        # Arrange
         model = nn.Linear(2, 2)
         weight = model.weight.detach().clone()
-        mesh = ParallelMesh(dp_shard=MagicMock(spec=DeviceMesh), edp_shard=None)
+        mesh = ParallelMesh(dp_shard=MagicMock(spec=DeviceMesh), edp_shard=edp_shard)
 
         # Act / Assert
-        with pytest.raises(ValueError, match="experts out of FSDP"):
+        with pytest.raises(ValueError, match="cpu_offload does not support ep=2"):
             materialize_fsdp2_from_cpu_state(
                 model, "cpu", FSDPConfig(ep=2, cpu_offload=True), parallel_mesh=mesh
             )

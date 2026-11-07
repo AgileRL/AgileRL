@@ -76,6 +76,39 @@ def trainer_base_bytes(
     )
 
 
+def fsdp_forward_gather_bytes(
+    arch: ModelArch,
+    settings: TrainingSettings,
+    counts: formulas.ParamCounts,
+    shards: int,
+) -> tuple[float, float]:
+    """Retained all-gather output and cpu-offload staging live in a decoder forward.
+
+    :param arch: Training-side architecture.
+    :param settings: Training settings (dtype, FSDP).
+    :param counts: Analytic parameter split.
+    :param shards: GPUs one dense weight copy is sharded across.
+    :return: Retained all-gather output bytes and host-to-device staging bytes.
+    """
+    fsdp = settings.fsdp
+    if fsdp is None or shards <= 1:
+        return 0.0, 0.0
+    byte = DTYPE_BYTES[settings.weight_dtype]
+    retained = fsdp_gather.fsdp_retained_gather_params(
+        counts,
+        arch,
+        n_gpus=shards,
+        tensor_parallel=fsdp.tp,
+        expert_parallel=fsdp.ep,
+        expert_gpus=settings.expert_shard_gpus,
+        frozen_tp_resident=fsdp.frozen_tp_resident,
+    )
+    # CPUOffloadPolicy copies the prefetched unit's shard to the GPU before
+    # its all-gather (FSDPParam.all_gather_inputs).
+    staging = retained * byte / shards if fsdp.cpu_offload else 0.0
+    return retained * byte, staging
+
+
 def fsdp_cpu_offload_host_bytes(
     model: ModelSpec,
     settings: TrainingSettings,
@@ -111,7 +144,9 @@ def _fsdp_base_groups(
     share like any dense weight, unless frozen TP shards stay resident.
     """
     token = min(formulas.token_embedding_params(arch), max(counts.total, 0))
-    tp_params = 0 if fsdp.tp <= 1 else formulas.tensor_parallel_params(counts, arch)
+    tp_params = (
+        0 if fsdp.tp <= 1 else formulas.tensor_parallel_params(counts, arch, fsdp.tp)
+    )
     routed = (
         arch.moe_layers * formulas.routed_expert_params_per_layer(arch)
         if fsdp.ep > 1

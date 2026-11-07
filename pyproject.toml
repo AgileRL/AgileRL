@@ -240,9 +240,11 @@ include = ["agilerl", "agilerl/arena"]
 [[tool.ty.overrides]]
 include = [
     "agilerl/algorithms/core/base.py",
+    "agilerl/architectures/glm5_next/liger.py",
     "agilerl/architectures/granite_liger.py",
     "agilerl/architectures/liger_rope.py",
     "agilerl/architectures/nemotron_h/liger.py",
+    "agilerl/architectures/mimo_v2/liger.py",
     "agilerl/lora/moe/layouts.py",
     "agilerl/architectures/qwen3_5/causal_lm.py",
     "agilerl/architectures/vllm_language.py",

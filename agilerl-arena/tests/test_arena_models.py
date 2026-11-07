@@ -1669,7 +1669,8 @@ class TestLLMAlgorithmSpecCheckThinkingBudgetParser:
                 r"reasoning start and end tokens, and Qwen/Qwen2\.5-0\.5B-Instruct "
                 r"has none\. Unset thinking_token_budget, or set "
                 r"algorithm\.vllm_engine_args\.reasoning_parser to one that has "
-                r"them: deepseek_r1, gemma4, nemotron_v3, qwen3\.$"
+                r"them: deepseek_r1, deepseek_v4, gemma4, glm47, mimo, nemotron_v3, "
+                r"qwen3\.$"
             ),
         ):
             spec.check_thinking_budget_parser("qwen2")

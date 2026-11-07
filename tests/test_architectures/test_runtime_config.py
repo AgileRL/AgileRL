@@ -11,7 +11,9 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 from pydantic import ValidationError
-from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.tensor import DTensor
+from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForImageTextToText
 from transformers.configuration_utils import PretrainedConfig
 from transformers.models.nemotron_h_omni.configuration_nemotron_h_omni import (
     NemotronH_Omni_Reasoning_V3_Config,
@@ -25,13 +27,26 @@ from agilerl.architectures import (
 from agilerl.architectures import runtime as runtime_module
 from agilerl.architectures.catalog import (
     FAMILY_RUNTIME_CONFIGS,
+    family_chat_template,
     family_runtime,
     nemotron_h_omni_vllm_hf_override,
     pretrained_model_type,
     sm80_attention_backend,
     trainer_model_class,
 )
+from agilerl.architectures.deepseek_v4.context_parallel import (
+    DEEPSEEK_V4_CONTEXT_PARALLEL_PLAN,
+)
+from agilerl.architectures.deepseek_v4.tensor_parallel import (
+    DEEPSEEK_V4_TENSOR_PARALLEL_PLAN,
+)
 from agilerl.architectures.gemma4.tensor_parallel import GEMMA4_TENSOR_PARALLEL_PLAN
+from agilerl.architectures.glm5_next.context_parallel import (
+    GLM5_NEXT_CONTEXT_PARALLEL_PLAN,
+)
+from agilerl.architectures.glm5_next.tensor_parallel import (
+    GLM5_NEXT_TENSOR_PARALLEL_PLAN,
+)
 from agilerl.architectures.gptoss.tensor_parallel import GPT_OSS_TENSOR_PARALLEL_PLAN
 from agilerl.architectures.granitemoe.tensor_parallel import (
     GRANITEMOE_TENSOR_PARALLEL_PLAN,
@@ -42,6 +57,12 @@ from agilerl.architectures.granitemoehybrid.context_parallel import (
 from agilerl.architectures.granitemoehybrid.tensor_parallel import (
     GRANITEMOEHYBRID_TENSOR_PARALLEL_PLAN,
 )
+from agilerl.architectures.mimo_v2 import (
+    MiMoV2Config,
+    install_mimo_v2_native_training,
+    register_mimo_v2_native_loading,
+)
+from agilerl.architectures.mimo_v2.tensor_parallel import MIMO_V2_TENSOR_PARALLEL_PLAN
 from agilerl.architectures.nemotron_h.context_parallel import (
     NEMOTRON_H_CONTEXT_PARALLEL_PLAN,
 )
@@ -57,10 +78,17 @@ from agilerl.architectures.runtime import (
     TensorParallelPlan,
     VllmRuntimeConfig,
 )
+from agilerl.arena.memory import formulas
 from agilerl.arena.memory.manifest import FAMILY_MAX_NUM_BATCHED_TOKENS
-from agilerl.arena.memory.specs import TENSOR_PARALLEL_MODEL_TYPES
-from agilerl.arena.models.model_info import REASONING_PARSERS, SUPPORTED_MODEL_INFO
-from agilerl.llm_envs.chat_formats import CHAT_FORMATS
+from agilerl.arena.memory.specs import TENSOR_PARALLEL_MODEL_TYPES, ModelArch
+from agilerl.arena.models.model_info import (
+    LORA_EXCLUDED_MODULES,
+    REASONING_PARSERS,
+    SUPPORTED_MODEL_INFO,
+)
+from agilerl.distributed.tensor_parallel import apply_tensor_parallel
+from agilerl.llm_envs.chat_formats import CHAT_FORMATS, DsmlFormat
+from tests.rank_launch import run_ranks
 
 NEMOTRON_VLLM_KWARGS = {
     "mamba_cache_mode": "align",
@@ -70,6 +98,56 @@ NEMOTRON_VLLM_KWARGS = {
 }
 
 SWA_MODEL_TYPES = ("gemma3", "gemma3_text", "gemma4", "gemma4_text")
+
+TENSOR_PARALLEL_SPLIT_CASES = [
+    ("deepseek-ai/DeepSeek-V4-Flash-0731", 2),
+    ("deepseek-ai/DeepSeek-V4-Flash-0731", 4),
+    ("zai-org/GLM-5.3-Flash", 2),
+    ("zai-org/GLM-5.3-Flash", 4),
+    ("XiaomiMiMo/MiMo-V2.6-Flash-RL", 2),
+    ("XiaomiMiMo/MiMo-V2.6-Flash-RL", 4),
+    # 14 query heads: the plan rejects tp=4.
+    ("Qwen/Qwen2.5-0.5B-Instruct", 2),
+    ("Qwen/Qwen3.5-0.8B", 2),
+    ("Qwen/Qwen3.5-0.8B", 4),
+    ("Qwen/Qwen3.5-2B", 2),
+    ("Qwen/Qwen3.5-2B", 4),
+    ("Qwen/Qwen3.6-35B-A3B", 2),
+    ("Qwen/Qwen3.6-35B-A3B", 4),
+    ("google/gemma-4-E4B-it", 2),
+    ("google/gemma-4-E4B-it", 4),
+    ("ibm-granite/granite-4.0-h-tiny", 2),
+    ("ibm-granite/granite-4.0-h-tiny", 4),
+    ("nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16", 2),
+    ("nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16", 4),
+]
+
+
+def tensor_parallel_split_worker(
+    _rank: int, world_size: int, model_id: str
+) -> tuple[int, int]:
+    """Full and per-rank elements of the meta model's parameters the family TP plan splits."""
+    register_mimo_v2_native_loading()
+    hf_config = dict(SUPPORTED_MODEL_INFO[model_id].config)
+    trainer = FAMILY_RUNTIME_CONFIGS[hf_config["model_type"]].trainer
+    if trainer.config_class is AutoConfig:
+        config = AutoConfig.for_model(**hf_config)
+    else:
+        config = trainer.config_class.from_dict(hf_config)
+    with torch.device("meta"):
+        model = trainer.model_class.from_config(config)
+    apply_tensor_parallel(
+        model, init_device_mesh("cpu", (world_size,), mesh_dim_names=("tp",))
+    )
+    split = [
+        param
+        for param in model.parameters()
+        if isinstance(param, DTensor) and param.to_local().numel() < param.numel()
+    ]
+    return (
+        sum(param.numel() for param in split),
+        sum(param.to_local().numel() for param in split),
+    )
 
 
 def stub_config_model_type(monkeypatch: pytest.MonkeyPatch, model_type: str) -> None:
@@ -88,6 +166,7 @@ def stub_config_model_type(monkeypatch: pytest.MonkeyPatch, model_type: str) -> 
 class TestFamilyRuntimeConfigs:
     def test_catalog_keys(self) -> None:
         assert set(FAMILY_RUNTIME_CONFIGS) == {
+            "deepseek_v4",
             "qwen2",
             "qwen3",
             "qwen3_moe",
@@ -99,12 +178,38 @@ class TestFamilyRuntimeConfigs:
             "gemma3_text",
             "gemma4",
             "gemma4_text",
+            "glm5_next",
+            "glm5_next_text",
             "gpt_oss",
+            "mimo_v2",
             "qwen3_5",
             "qwen3_5_text",
             "qwen3_5_moe",
             "qwen3_5_moe_text",
         }
+
+    def test_mimo_v2_loads_the_native_class_with_its_flex_patch(self) -> None:
+        mimo = FAMILY_RUNTIME_CONFIGS["mimo_v2"]
+
+        assert mimo.trainer.load_kwargs() == {"trust_remote_code": False}
+        assert mimo.trainer.model_class is AutoModelForCausalLM
+        assert mimo.trainer.config_class is MiMoV2Config
+        assert mimo.vllm.engine_kwargs() == {"trust_remote_code": True}
+        assert mimo.patch.install is install_mimo_v2_native_training
+        assert mimo.chat_format == "tool_call"
+        assert mimo.reasoning_parser == "mimo"
+
+    def test_lora_exclude_modules_match_the_arena_table(self) -> None:
+        excluded = {
+            model_type: runtime.lora_exclude_modules
+            for model_type, runtime in FAMILY_RUNTIME_CONFIGS.items()
+            if runtime.lora_exclude_modules
+        }
+
+        assert excluded == LORA_EXCLUDED_MODULES
+        assert {"indexer.wk", "f_a_proj", "g_a_proj"} <= excluded["glm5_next"]
+        assert "o_a_proj" in excluded["deepseek_v4"]
+        assert excluded["mimo_v2"] == {"q_proj", "k_proj", "v_proj"}
 
     def test_nemotron_h_omni_keeps_nemotron_h_runtime_and_sets_the_vllm_architecture(
         self,
@@ -141,7 +246,7 @@ class TestFamilyRuntimeConfigs:
 
     @pytest.mark.parametrize(
         "model_type",
-        ["qwen3_5", "qwen3_5_moe", "gemma3", "gemma4", "nemotron_h_omni"],
+        ["qwen3_5", "qwen3_5_moe", "gemma3", "gemma4", "glm5_next", "nemotron_h_omni"],
     )
     def test_vl_families_train_their_vl_class(self, model_type: str) -> None:
         trainer = FAMILY_RUNTIME_CONFIGS[model_type].trainer
@@ -152,7 +257,14 @@ class TestFamilyRuntimeConfigs:
         "model_type",
         sorted(
             set(FAMILY_RUNTIME_CONFIGS)
-            - {"qwen3_5", "qwen3_5_moe", "gemma3", "gemma4", "nemotron_h_omni"}
+            - {
+                "qwen3_5",
+                "qwen3_5_moe",
+                "gemma3",
+                "gemma4",
+                "glm5_next",
+                "nemotron_h_omni",
+            }
         ),
     )
     def test_text_families_train_a_causal_lm(self, model_type: str) -> None:
@@ -172,9 +284,14 @@ class TestFamilyRuntimeConfigs:
         assert omni.trainer.load_kwargs() == {"trust_remote_code": False}
         assert all(
             runtime.trainer.trust_remote_code is not True
-            and runtime.vllm.trust_remote_code is not True
             for runtime in FAMILY_RUNTIME_CONFIGS.values()
         )
+        # vLLM has no mimo_v2 config class; it parses the Hub config code.
+        assert {
+            model_type
+            for model_type, runtime in FAMILY_RUNTIME_CONFIGS.items()
+            if runtime.vllm.trust_remote_code is True
+        } == {"mimo_v2"}
 
     def test_nemotron_h_enables_prefix_caching(self) -> None:
         assert FAMILY_RUNTIME_CONFIGS["nemotron_h"].vllm.enable_prefix_caching is True
@@ -227,10 +344,13 @@ class TestFamilyRuntimeConfigs:
         }
 
         assert parsers == {
+            "deepseek_v4": "deepseek_v4",
             "gemma4": "gemma4",
+            "glm5_next": "glm47",
             "gpt_oss": "openai_gptoss",
             "granitemoe": None,
             "granitemoehybrid": None,
+            "mimo_v2": "mimo",
             "nemotron_h": "nemotron_v3",
             "nemotron_h_omni": "nemotron_v3",
             "qwen2": None,
@@ -369,16 +489,50 @@ class TestFamilyTensorParallelPlans:
 
         assert catalog == TENSOR_PARALLEL_MODEL_TYPES
 
+    @pytest.mark.multi_rank
+    @pytest.mark.parametrize(
+        ("model_id", "tensor_parallel"), TENSOR_PARALLEL_SPLIT_CASES
+    )
+    def test_arena_tensor_parallel_params_match_the_applied_plan(
+        self, model_id: str, tensor_parallel: int
+    ) -> None:
+        # Arrange
+        info = SUPPORTED_MODEL_INFO[model_id]
+        arch = ModelArch.from_hf_config(info.config)
+        expected = formulas.tensor_parallel_params(
+            formulas.param_counts(arch, info.num_params), arch, tensor_parallel
+        )
+        if arch.tensor_parallel_tied_embedding:
+            expected += formulas.token_embedding_params(arch)
+
+        # Act
+        splits = run_ranks(
+            tensor_parallel_split_worker, tensor_parallel, model_id, timeout=600
+        )
+
+        # Assert
+        assert [full for full, _ in splits] == [expected] * tensor_parallel
+        assert sum(local for _, local in splits) == expected
+
+    def test_tensor_parallel_plan_rejects_indivisible_query_heads(self) -> None:
+        with pytest.raises(
+            AssertionError, match=r"\(14\) must be divisible by tp \(4\)"
+        ):
+            run_ranks(tensor_parallel_split_worker, 4, "Qwen/Qwen2.5-0.5B-Instruct")
+
     def test_resolves_shared_nemotron_h_plan_once(self) -> None:
         plans = family_tensor_parallel_plans()
 
         assert plans == [
+            DEEPSEEK_V4_TENSOR_PARALLEL_PLAN,
             QWEN3_TENSOR_PARALLEL_PLAN,
             GRANITEMOE_TENSOR_PARALLEL_PLAN,
             GRANITEMOEHYBRID_TENSOR_PARALLEL_PLAN,
             NEMOTRON_H_TENSOR_PARALLEL_PLAN,
             GEMMA4_TENSOR_PARALLEL_PLAN,
+            GLM5_NEXT_TENSOR_PARALLEL_PLAN,
             GPT_OSS_TENSOR_PARALLEL_PLAN,
+            MIMO_V2_TENSOR_PARALLEL_PLAN,
             QWEN3_5_TENSOR_PARALLEL_PLAN,
         ]
 
@@ -408,12 +562,14 @@ class TestTensorParallelPlanDefaults:
 
 
 class TestFamilyContextParallelPlans:
-    def test_resolves_granitemoehybrid_nemotron_h_and_qwen3_5_plans(self) -> None:
+    def test_resolves_every_family_plan_in_catalog_order(self) -> None:
         plans = family_context_parallel_plans()
 
         assert plans == [
+            DEEPSEEK_V4_CONTEXT_PARALLEL_PLAN,
             GRANITEMOEHYBRID_CONTEXT_PARALLEL_PLAN,
             NEMOTRON_H_CONTEXT_PARALLEL_PLAN,
+            GLM5_NEXT_CONTEXT_PARALLEL_PLAN,
             QWEN3_5_CONTEXT_PARALLEL_PLAN,
         ]
 
@@ -459,6 +615,7 @@ class TestFamilyRuntime:
         assert config.vllm.engine_kwargs() == {}
         assert config.trainer.load_kwargs() == {}
         assert config.trainer.model_class is AutoModelForCausalLM
+        assert config.trainer.config_class is AutoConfig
         assert config.patch.install is None
 
     def test_missing_config_json_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -585,6 +742,9 @@ class TestTrainerModelClass:
             ),
             ("nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16", AutoModelForCausalLM),
             ("openai/gpt-oss-20b", AutoModelForCausalLM),
+            ("zai-org/GLM-5.3-Flash", AutoModelForImageTextToText),
+            ("deepseek-ai/DeepSeek-V4-Flash-0731", AutoModelForCausalLM),
+            ("XiaomiMiMo/MiMo-V2.6-Flash-RL", AutoModelForCausalLM),
         ],
     )
     def test_supported_ids_resolve_their_trainer_class(
@@ -598,6 +758,31 @@ class TestTrainerModelClass:
         stub_config_model_type(monkeypatch, "llama")
 
         assert trainer_model_class("some/model") is AutoModelForCausalLM
+
+
+class TestFamilyChatTemplate:
+    def test_deepseek_v4_resolves_the_dsml_template(self) -> None:
+        template = family_chat_template("deepseek-ai/DeepSeek-V4-Flash-0731")
+
+        assert template == DsmlFormat.CHAT_TEMPLATE
+
+    def test_family_with_a_tokenizer_template_returns_none(self) -> None:
+        assert family_chat_template("zai-org/GLM-5.3-Flash") is None
+
+    def test_unknown_family_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        stub_config_model_type(monkeypatch, "llama")
+
+        assert family_chat_template("some/model") is None
+
+    def test_only_dsml_families_carry_a_template(self) -> None:
+        families = {
+            model_type
+            for model_type, runtime in FAMILY_RUNTIME_CONFIGS.items()
+            if runtime.chat_format is not None
+            and CHAT_FORMATS[runtime.chat_format].CHAT_TEMPLATE is not None
+        }
+
+        assert families == {"deepseek_v4"}
 
 
 class TestNemotronHOmniVllmHfOverride:

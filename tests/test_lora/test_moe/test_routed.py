@@ -7,13 +7,20 @@ import torch.nn.functional as F
 from peft import LoraConfig, inject_adapter_in_model
 from torch import nn
 from torch.utils._python_dispatch import TorchDispatchMode
+from transformers import DeepseekV4Config, Glm5NextTextConfig, MiMoV2FlashConfig
+from transformers.models.deepseek_v4.modeling_deepseek_v4 import DeepseekV4Experts
+from transformers.models.glm5_next.modeling_glm5_next import Glm5NextTextExperts
+from transformers.models.mimo_v2_flash.modeling_mimo_v2_flash import (
+    MiMoV2FlashExperts,
+)
 
 from agilerl.lora.moe import grouped_gemm as moe_gemm
-from agilerl.lora.moe import routed as moe_routed
 from agilerl.lora.moe import (
+    install_packed_expert_grouped_gemm,
     set_routed_experts_chunk_bytes,
     upgrade_moe_param_wrappers,
 )
+from agilerl.lora.moe import routed as moe_routed
 from agilerl.lora.moe.wrappers import RoutedExpertsLoraWrapper
 
 NUM_EXPERTS = 4
@@ -120,6 +127,63 @@ EXPERTS = [
     pytest.param(GatedExperts, "experts.gate_up_proj", id="gated_silu"),
     pytest.param(UngatedExperts, "experts.up_proj", id="ungated_relu2"),
 ]
+
+SWIGLU_LIMIT = 10.0
+# Unit-variance gate_up weights on 5x hidden rows give gate and up a standard
+# deviation near 14, so many entries fall outside ``[-limit, limit]``.
+HF_HIDDEN_SCALE = 5.0
+
+
+def init_hf_experts(experts):
+    """HF experts allocate empty weights; fill them from the current seed."""
+    with torch.no_grad():
+        experts.gate_up_proj.normal_()
+        experts.down_proj.normal_(std=0.1)
+    return experts
+
+
+def deepseek_v4_experts():
+    config = DeepseekV4Config(
+        hidden_size=HIDDEN,
+        intermediate_size=INTERMEDIATE,
+        num_local_experts=NUM_EXPERTS,
+        swiglu_limit=SWIGLU_LIMIT,
+    )
+    return init_hf_experts(DeepseekV4Experts(config))
+
+
+def glm5_next_experts():
+    config = Glm5NextTextConfig(
+        hidden_size=HIDDEN,
+        moe_intermediate_size=INTERMEDIATE,
+        num_local_experts=NUM_EXPERTS,
+        swiglu_limit=SWIGLU_LIMIT,
+    )
+    return init_hf_experts(Glm5NextTextExperts(config))
+
+
+def mimo_v2_flash_experts():
+    config = MiMoV2FlashConfig(
+        hidden_size=HIDDEN,
+        moe_intermediate_size=INTERMEDIATE,
+        num_local_experts=NUM_EXPERTS,
+    )
+    return init_hf_experts(MiMoV2FlashExperts(config))
+
+
+CLAMPED_HF_EXPERTS = [
+    pytest.param(deepseek_v4_experts, id="deepseek_v4"),
+    pytest.param(glm5_next_experts, id="glm5_next"),
+]
+
+
+def assert_clamp_active(experts, hidden, top_k_index=TOP2_INDEX):
+    """Some routed gate entries pass ``limit`` and some up entries pass ``±limit``."""
+    projected = torch.einsum("th,eoh->teo", hidden, experts.gate_up_proj.detach())
+    routed = projected[torch.arange(hidden.shape[0]).unsqueeze(-1), top_k_index]
+    gate, up = routed.chunk(2, dim=-1)
+    assert (gate > SWIGLU_LIMIT).any()
+    assert (up.abs() > SWIGLU_LIMIT).any()
 
 
 def lora_block(experts_cls, up_target, rank=RANK):
@@ -409,6 +473,112 @@ class TestRoutedExpertsLocalForwardExpertKernels:
         if experts_cls is GatedExperts:
             expected_kernels |= {"swiglu", "swiglu_backward"}
         assert reference_expert_kernels.used == expected_kernels
+
+
+class TestRoutedExpertsLocalForwardHfGate:
+    @pytest.mark.parametrize("backend", ["loop", "gmm", "kernels"])
+    @pytest.mark.parametrize("recompute", [False, True], ids=["graph", "recompute"])
+    @pytest.mark.parametrize("make_experts", CLAMPED_HF_EXPERTS)
+    def test_clamped_lora_experts_match_the_hf_forward_and_backward(
+        self, request, monkeypatch, make_experts, recompute, backend
+    ):
+        # Arrange
+        reference = lora_block(make_experts, "experts.gate_up_proj")
+        model = lora_block(make_experts, "experts.gate_up_proj")
+        upgrade_moe_param_wrappers(model)
+        force_recompute(model, recompute)
+        set_routed_experts_chunk_bytes(model, 160)
+        torch.manual_seed(1)
+        hidden = torch.randn(TOP2_INDEX.shape[0], HIDDEN) * HF_HIDDEN_SCALE
+        top_k_weights = torch.rand(TOP2_INDEX.shape)
+        kernels = use_backend(request, monkeypatch, backend)
+
+        # Act
+        expected = run_experts(reference, hidden, top_k_weights)
+        actual = run_experts(model, hidden, top_k_weights)
+
+        # Assert
+        assert_clamp_active(reference.experts.get_base_layer(), hidden)
+        # fp32 sums of at most 16 products in a different order with terms near
+        # 1e2 (ulp 7.6e-6); entries that cancel toward zero keep that absolute error.
+        tolerance = {"rtol": 1e-5, "atol": 1e-4}
+        for got, want in zip(actual[:3], expected[:3], strict=True):
+            torch.testing.assert_close(got, want, **tolerance)
+        assert set(actual[3]) == set(expected[3])
+        assert len(actual[3]) == 4
+        for name, grad in expected[3].items():
+            torch.testing.assert_close(actual[3][name], grad, **tolerance)
+        if kernels is not None:
+            assert {"clamped_swiglu", "clamped_swiglu_backward"} <= kernels.used
+            assert not kernels.used & {"swiglu", "swiglu_backward"}
+
+    @pytest.mark.parametrize("backend", ["loop", "gmm", "kernels"])
+    @pytest.mark.parametrize("make_experts", CLAMPED_HF_EXPERTS)
+    def test_clamped_base_experts_match_the_hf_forward_and_backward(
+        self, request, monkeypatch, make_experts, backend
+    ):
+        # Arrange
+        torch.manual_seed(0)
+        reference = make_experts()
+        torch.manual_seed(0)
+        patched = make_experts()
+        install_packed_expert_grouped_gemm(patched)
+        torch.manual_seed(1)
+        hidden = torch.randn(TOP2_INDEX.shape[0], HIDDEN) * HF_HIDDEN_SCALE
+        top_k_weights = torch.rand(TOP2_INDEX.shape)
+        use_backend(request, monkeypatch, backend)
+
+        def run(experts):
+            experts.zero_grad(set_to_none=True)
+            rows = hidden.clone().requires_grad_(True)
+            weights = top_k_weights.clone().requires_grad_(True)
+            out = experts(rows, TOP2_INDEX, weights)
+            out.square().mean().backward()
+            return (
+                out.detach(),
+                rows.grad,
+                weights.grad,
+                experts.gate_up_proj.grad,
+                experts.down_proj.grad,
+            )
+
+        # Act
+        expected = run(reference)
+        actual = run(patched)
+
+        # Assert
+        assert_clamp_active(reference, hidden)
+        # fp32 sums of at most 16 products in a different order.
+        for got, want in zip(actual, expected, strict=True):
+            torch.testing.assert_close(got, want, rtol=1e-5, atol=1e-5)
+
+    @pytest.mark.parametrize("recompute", [False, True], ids=["graph", "recompute"])
+    def test_default_gate_family_stays_on_the_fused_swiglu(
+        self, reference_expert_kernels, recompute
+    ):
+        # Arrange
+        reference = lora_block(mimo_v2_flash_experts, "experts.gate_up_proj")
+        model = lora_block(mimo_v2_flash_experts, "experts.gate_up_proj")
+        upgrade_moe_param_wrappers(model)
+        force_recompute(model, recompute)
+        set_routed_experts_chunk_bytes(model, 160)
+        torch.manual_seed(1)
+        hidden = torch.randn(TOP2_INDEX.shape[0], HIDDEN)
+        top_k_weights = torch.rand(TOP2_INDEX.shape)
+
+        # Act
+        expected = run_experts(reference, hidden, top_k_weights)
+        actual = run_experts(model, hidden, top_k_weights)
+
+        # Assert
+        # fp32 sums of at most 16 products in a different order, and the fused
+        # SwiGLU backward's closed form against autograd's; a few ulps on ~1e1.
+        tolerance = {"rtol": 1e-5, "atol": 1e-5}
+        for got, want in zip(actual[:3], expected[:3], strict=True):
+            torch.testing.assert_close(got, want, **tolerance)
+        for name, grad in expected[3].items():
+            torch.testing.assert_close(actual[3][name], grad, **tolerance)
+        assert {"swiglu", "swiglu_backward"} <= reference_expert_kernels.used
 
 
 class TestScatterScaledRows:

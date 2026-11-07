@@ -54,7 +54,16 @@ def cpu_offload_blocker(fsdp: FSDPConfig | None, async_rollout: bool) -> str | N
     :param async_rollout: vLLM generates on rollout engines outside the trainer.
     :return: A short reason, or ``None`` when full CPU offload is off or served.
     """
-    if fsdp is None or not fsdp.cpu_offload or not async_rollout:
+    if fsdp is None or not fsdp.cpu_offload:
+        return None
+    if fsdp.ep > 1:
+        return (
+            f"fsdp.cpu_offload does not support fsdp.ep={fsdp.ep}: expert LoRA "
+            "adapters, and the experts when ep spans the shard group, stay "
+            "outside FSDP on the EP mesh, so they would stay on CPU. Use "
+            "fsdp.optim_cpu_offload instead."
+        )
+    if not async_rollout:
         return None
     return (
         "fsdp.cpu_offload needs colocated vLLM generation: FSDP2's "
@@ -356,6 +365,7 @@ def _memory_rungs(
     if (
         fsdp.cpu_offload is None
         and not fsdp.optim_cpu_offload
+        and current.ep == 1
         and settings.uses_generation_engine
         and not settings.async_rollout
     ):

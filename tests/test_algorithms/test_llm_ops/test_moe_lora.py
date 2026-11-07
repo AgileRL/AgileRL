@@ -2705,6 +2705,7 @@ class TestRoutedExpertDtypeAndDTensor:
             down_weight,
             act_fn=torch.nn.functional.silu,
             gated=False,
+            apply_gate=None,
             routing=routing,
             up_loras=(),
             down_loras=(),
@@ -2740,6 +2741,7 @@ class TestRoutedExpertDtypeAndDTensor:
             FakeDTensor(torch.ones(1, 4, 4)),
             act_fn=lambda t: t,
             gated=False,
+            apply_gate=None,
             routing=routing,
             up_loras=(),
             down_loras=(),
@@ -2762,6 +2764,7 @@ class TestLoraExpertsRecomputeGuards:
         config = LoraExpertsConfig(
             act_fn=lambda t: t,
             gated=False,
+            apply_gate=None,
             sizes=(1,),
             up_row_ids=(),
             down_row_ids=(),
@@ -2795,6 +2798,7 @@ class TestLoraExpertsRecomputeGuards:
         config = LoraExpertsConfig(
             act_fn=lambda t: t,
             gated=False,
+            apply_gate=None,
             sizes=(1,),
             up_row_ids=(),
             down_row_ids=(),

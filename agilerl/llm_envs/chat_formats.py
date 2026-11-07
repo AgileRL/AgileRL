@@ -10,10 +10,12 @@ ends, how tool results render back to the model, and which sampled token
 already closes a turn. Detection picks the first registered format whose
 required tokens are all in the tokenizer vocab.
 
+- :class:`Glm47Format`: GLM-4.7, GLM-5
 - :class:`ToolCallTagFormat`: Qwen, Hermes, Granite 4, Nemotron
 - :class:`Granite3Format`: Granite 3
 - :class:`Gemma4Format`: Gemma 4
 - :class:`HarmonyFormat`: GPT-OSS
+- :class:`DsmlFormat`: DeepSeek-V4
 """
 
 from __future__ import annotations
@@ -39,7 +41,9 @@ if TYPE_CHECKING:
 __all__ = [
     "CHAT_FORMATS",
     "ChatFormat",
+    "DsmlFormat",
     "Gemma4Format",
+    "Glm47Format",
     "Granite3Format",
     "HarmonyFormat",
     "ParsedToolCall",
@@ -57,6 +61,136 @@ XML_FUNCTION_RE = re.compile(r"<function=([^>]+)>")
 XML_PARAMETER_RE = re.compile(r"<parameter=([^>]+)>\n?(.*?)\n?</parameter>", re.DOTALL)
 HARMONY_RECIPIENT_RE = re.compile(r"to=([^\s<]+)")
 HARMONY_FUNCTION_PREFIX = "functions."
+DSML = "\uff5cDSML\uff5c"
+# Block names vLLM's DeepSeek-V4 parser accepts; ``tool_calls`` is the one the encoder writes.
+DSML_BLOCK_RE = re.compile(r"(?:tool_calls|toolcalls|tool)>")
+DSML_INVOKE_RE = re.compile(
+    rf'<{DSML}invoke\s+name="([^"]*)"\s*>(.*?)</{DSML}invoke>', re.DOTALL
+)
+DSML_PARAMETER_RE = re.compile(
+    rf'<{DSML}parameter\s+name="([^"]+)"(?:\s+string="([^"]*)")?\s*>'
+    rf"(.*?)(?:</{DSML}parameter>|(?=<{DSML}parameter\s+name=))",
+    re.DOTALL,
+)
+DSML_TOOLS_PROMPT_HEAD = f"""## Tools
+
+You have access to a set of tools to help answer the user's question. You can invoke tools by writing a "<{DSML}tool_calls>" block like the following:
+
+<{DSML}tool_calls>
+<{DSML}invoke name="$TOOL_NAME">
+<{DSML}parameter name="$PARAMETER_NAME" string="true|false">$PARAMETER_VALUE</{DSML}parameter>
+...
+</{DSML}invoke>
+<{DSML}invoke name="$TOOL_NAME2">
+...
+</{DSML}invoke>
+</{DSML}tool_calls>
+
+String parameters should be specified as is and set `string="true"`. For all other types (numbers, booleans, arrays, objects), pass the value in JSON format and set `string="false"`.
+
+If thinking_mode is enabled (triggered by <think>), you MUST output your complete reasoning inside <think>...</think> BEFORE any tool calls or final response.
+
+Otherwise, output directly after </think> with tool calls or final response.
+
+### Available Tool Schemas
+
+"""
+DSML_TOOLS_PROMPT_TAIL = """
+
+You MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls.
+"""
+DSML_REASONING_EFFORT_PROMPTS = {
+    "high": (
+        "Reasoning Effort: Absolute maximum with no shortcuts permitted.\n"
+        "You MUST be very thorough in your thinking and comprehensively decompose the problem to resolve the root cause, rigorously stress-testing your logic against all potential paths, edge cases, and adversarial scenarios.\n"
+        "Explicitly write out your entire deliberation process, documenting every intermediate step, considered alternative, and rejected hypothesis to ensure absolutely no assumption is left unchecked.\n\n"
+    ),
+    "max": (
+        "Reasoning Effort: Beyond maximum — exhaustive, relentless, and uncompromising.\n"
+        "You MUST reason with the utmost depth and rigor, leaving absolutely nothing to chance: exhaustively decompose the problem into its most fundamental components, trace every causal chain to its root, and resolve the underlying cause rather than any surface symptom.\n"
+        "Do not stop reasoning until you have independently verified the solution from multiple angles and are certain that no assumption remains unchecked and no error remains undiscovered.\n\n"
+    ),
+}
+# The DeepSeek-V4 encoder as a Jinja chat template. Consecutive user and tool
+# messages merge into one user turn; earlier turns keep their reasoning only
+# when tools are set. Thinking defaults on and effort to ``high``, as vLLM serves it.
+DSML_CHAT_TEMPLATE = (
+    r"""{%- set dsml = '\uff5cDSML\uff5c' -%}
+{%- if thinking is defined or enable_thinking is defined -%}
+{%- set thinking_on = (thinking is defined and thinking) or (enable_thinking is defined and enable_thinking) -%}
+{%- else -%}
+{%- set thinking_on = true -%}
+{%- endif -%}
+{%- set effort = reasoning_effort if reasoning_effort is defined and reasoning_effort is string else none -%}
+{%- if effort == 'none' -%}
+{%- set thinking_on = false -%}
+{%- elif effort in ['low', 'minimal', 'medium'] -%}
+{%- set effort = 'low' -%}
+{%- elif effort != 'max' and (effort is not none or thinking_on) -%}
+{%- set effort = 'high' -%}
+{%- endif -%}
+{%- set effort_prompts = """
+    + json.dumps(DSML_REASONING_EFFORT_PROMPTS)
+    + r""" -%}
+{%- set has_tools = tools is defined and tools -%}
+{%- set ns = namespace(system_idx=-1, last_user=-1) -%}
+{%- for m in messages -%}
+{%- if m.role == 'system' and ns.system_idx == -1 -%}{%- set ns.system_idx = loop.index0 -%}{%- endif -%}
+{%- if m.role in ['user', 'tool'] -%}{%- set ns.last_user = loop.index0 -%}{%- endif -%}
+{%- endfor -%}
+{%- macro render_tools() -%}
+{{- '\n\n' + """
+    + json.dumps(DSML_TOOLS_PROMPT_HEAD)
+    + r""" -}}
+{%- for tool in tools -%}
+{%- if not loop.first -%}{{- '\n' -}}{%- endif -%}
+{{- (tool['function'] if 'function' in tool else tool) | tojson -}}
+{%- endfor -%}
+{{- """
+    + json.dumps(DSML_TOOLS_PROMPT_TAIL)
+    + r""" -}}
+{%- endmacro -%}
+{{- '<\uff5cbegin▁of▁sentence\uff5c>' -}}
+{%- if thinking_on and effort in effort_prompts -%}{{- effort_prompts[effort] -}}{%- endif -%}
+{%- if has_tools and ns.system_idx == -1 -%}{{- render_tools() -}}{%- endif -%}
+{%- for m in messages -%}
+{%- if m.role == 'system' -%}
+{{- m.content or '' -}}
+{%- if has_tools and loop.index0 == ns.system_idx -%}{{- render_tools() -}}{%- endif -%}
+{%- elif m.role in ['user', 'tool'] -%}
+{%- if not loop.first and loop.previtem.role in ['user', 'tool'] -%}{{- '\n\n' -}}{%- else -%}{{- '<\uff5cUser\uff5c>' -}}{%- endif -%}
+{%- if m.role == 'tool' -%}{{- '<tool_result>' + (m.content or '') + '</tool_result>' -}}{%- else -%}{{- m.content or '' -}}{%- endif -%}
+{%- if (loop.last and add_generation_prompt) or (not loop.last and loop.nextitem.role == 'assistant') -%}
+{{- '<\uff5cAssistant\uff5c>' -}}
+{%- if thinking_on and (has_tools or loop.index0 >= ns.last_user) -%}{{- '<think>' -}}{%- else -%}{{- '</think>' -}}{%- endif -%}
+{%- endif -%}
+{%- elif m.role == 'assistant' -%}
+{%- if thinking_on and (has_tools or loop.index0 > ns.last_user) -%}{{- (m.reasoning_content or '') + '</think>' -}}{%- endif -%}
+{{- m.content or '' -}}
+{%- if m.tool_calls -%}
+{{- '\n\n<' + dsml + 'tool_calls>\n' -}}
+{%- for tool_call in m.tool_calls -%}
+{%- set call = tool_call['function'] if 'function' in tool_call else tool_call -%}
+{%- if not loop.first -%}{{- '\n' -}}{%- endif -%}
+{{- '<' + dsml + 'invoke name="' + call.name + '">\n' -}}
+{%- for key, value in call.arguments.items() -%}
+{%- if not loop.first -%}{{- '\n' -}}{%- endif -%}
+{%- if value is string -%}
+{{- '<' + dsml + 'parameter name="' + key + '" string="true">' + value + '</' + dsml + 'parameter>' -}}
+{%- else -%}
+{{- '<' + dsml + 'parameter name="' + key + '" string="false">' + (value | tojson) + '</' + dsml + 'parameter>' -}}
+{%- endif -%}
+{%- endfor -%}
+{{- '\n</' + dsml + 'invoke>' -}}
+{%- endfor -%}
+{{- '\n</' + dsml + 'tool_calls>' -}}
+{%- endif -%}
+{{- '<\uff5cend▁of▁sentence\uff5c>' -}}
+{%- else -%}
+{{- raise_exception('DeepSeek-V4 prompts take system, user, tool and assistant messages, not ' + m.role) -}}
+{%- endif -%}
+{%- endfor -%}"""
+)
 
 
 class ToolCallParseStatus(str, enum.Enum):
@@ -90,6 +224,8 @@ class ChatFormat(ABC):
     REQUIRED_TOKENS: ClassVar[tuple[str, ...]]
     OPTIONAL_TOKENS: ClassVar[tuple[str, ...]] = ()
     REASONING_END: ClassVar[str | None] = None
+    # Jinja template for a family whose tokenizer ships none.
+    CHAT_TEMPLATE: ClassVar[str | None] = None
 
     def __init__(self, tokenizer: PreTrainedTokenizerBase) -> None:
         """Resolve this format's delimiter IDs in ``tokenizer``."""
@@ -163,15 +299,15 @@ class ChatFormat(ABC):
         :return: Content IDs and one entry per call block, malformed ones included.
         """
 
-    def _decode(self, token_ids: list[int]) -> str:
-        """Decode IDs to stripped text, keeping special tokens inside the segment."""
+    def _decode(self, token_ids: list[int], strip: bool = True) -> str:
+        """Decode IDs to text, keeping special tokens inside the segment."""
         if not token_ids:
             return ""
         text = self._tokenizer.decode(token_ids, skip_special_tokens=False)
         if not isinstance(text, str):
             msg = "decode() of one sequence returns str"
             raise TypeError(msg)
-        return text.strip()
+        return text.strip() if strip else text
 
     def _tagged_calls(
         self,
@@ -199,6 +335,89 @@ class ChatFormat(ABC):
             calls.append(parse_body(body, (index, close + 1)))
             index = _find(token_ids, start_id, close + 1)
         return token_ids[:first], calls
+
+
+class Glm47Format(ChatFormat):
+    """``<tool_call>name<arg_key>k</arg_key><arg_value>v</arg_value>...</tool_call>`` blocks.
+
+    Every arg tag is its own special token, so a body splits at token IDs.
+    Values are raw text: strings verbatim, other types as JSON, coerced to the
+    tool schema. Blocks inside the thinking trace are skipped.
+    """
+
+    CALL_START = "<tool_call>"
+    CALL_END = "</tool_call>"
+    KEY_START = "<arg_key>"
+    KEY_END = "</arg_key>"
+    VALUE_START = "<arg_value>"
+    VALUE_END = "</arg_value>"
+    REASONING_END = REASONING_END_MARKER
+    REQUIRED_TOKENS: ClassVar[tuple[str, ...]] = (
+        CALL_START,
+        CALL_END,
+        KEY_START,
+        KEY_END,
+        VALUE_START,
+        VALUE_END,
+    )
+    OPTIONAL_TOKENS: ClassVar[tuple[str, ...]] = (REASONING_END_MARKER,)
+
+    def extract_tool_calls(
+        self, token_ids: list[int], tools: list[Any] | None = None, /
+    ) -> tuple[list[int], list[ParsedToolCall]]:
+        """Parse tool blocks after any thinking trace."""
+        params = _param_schemas(tools)
+
+        def parse_body(raw: str, span: tuple[int, int]) -> ParsedToolCall:
+            body_ids = token_ids[span[0] + 1 : span[1] - 1]
+            return self._parsed_call(raw, body_ids, span, params)
+
+        return self._tagged_calls(
+            token_ids,
+            self.CALL_START,
+            self.CALL_END,
+            parse_body,
+            self.answer_start(token_ids),
+        )
+
+    def _parsed_call(
+        self,
+        raw: str,
+        body_ids: list[int],
+        span: tuple[int, int],
+        params: dict[str, dict[str, dict[str, Any]]],
+    ) -> ParsedToolCall:
+        """One body: the name, then key/value tag pairs."""
+        key_start, key_end, value_start, value_end = (
+            self._ids[tag]
+            for tag in (self.KEY_START, self.KEY_END, self.VALUE_START, self.VALUE_END)
+        )
+        index = _find(body_ids, key_start)
+        name = self._decode(body_ids if index == -1 else body_ids[:index])
+        if not name:
+            return _failed(raw, span, ToolCallParseStatus.MISSING_NAME)
+        schemas = params.get(name, {})
+        arguments: dict[str, Any] = {}
+        any_invalid = False
+        while index != -1:
+            key_close = _find(body_ids, key_end, index + 1)
+            value_open = _find(body_ids, value_start, key_close + 1)
+            value_close = _find(body_ids, value_end, value_open + 1)
+            if -1 in (key_close, value_open, value_close) or self._decode(
+                body_ids[key_close + 1 : value_open]
+            ):
+                return _failed(raw, span, ToolCallParseStatus.MALFORMED_STRUCTURE, name)
+            key = self._decode(body_ids[index + 1 : key_close])
+            text = self._decode(body_ids[value_open + 1 : value_close], strip=False)
+            arguments[key], invalid = _coerce_xml_value(text, schemas.get(key))
+            any_invalid = any_invalid or invalid
+            index = _find(body_ids, key_start, value_close + 1)
+        status = (
+            ToolCallParseStatus.INVALID_JSON if any_invalid else ToolCallParseStatus.OK
+        )
+        return ParsedToolCall(
+            raw=raw, name=name, arguments=arguments, token_span=span, status=status
+        )
 
 
 class ToolCallTagFormat(ChatFormat):
@@ -440,11 +659,80 @@ class HarmonyFormat(ChatFormat):
         return ids[:content_end], calls
 
 
+class DsmlFormat(ChatFormat):
+    """DSML ``tool_calls`` blocks of ``invoke`` elements (DeepSeek-V4).
+
+    Tags span several tokens around the one :data:`DSML` special token, so a
+    block tag is that token with ``<`` or ``</`` before it and a block name
+    after it. Each ``parameter`` says whether its value is a string; other
+    values are JSON. Tool results return as ``<tool_result>`` user turns. The
+    tokenizer ships no chat template; :attr:`CHAT_TEMPLATE` renders the encoder's.
+    """
+
+    CHAT_TEMPLATE = DSML_CHAT_TEMPLATE
+    REASONING_END = REASONING_END_MARKER
+    REQUIRED_TOKENS: ClassVar[tuple[str, ...]] = (DSML,)
+    OPTIONAL_TOKENS: ClassVar[tuple[str, ...]] = (REASONING_END_MARKER,)
+
+    def extract_tool_calls(
+        self, token_ids: list[int], tools: list[Any] | None = None, /
+    ) -> tuple[list[int], list[ParsedToolCall]]:
+        """Parse DSML blocks after any thinking trace."""
+        params = _param_schemas(tools)
+        first = self._block_tag(token_ids, "<", self.answer_start(token_ids))
+        if first == -1:
+            return token_ids, []
+        calls: list[ParsedToolCall] = []
+        start = first
+        while start != -1:
+            close = self._block_tag(token_ids, "</", start + 1)
+            if close == -1:
+                raw = self._decode(token_ids[start:])
+                span = (start, len(token_ids))
+                calls.append(_failed(raw, span, ToolCallParseStatus.UNCLOSED_BLOCK))
+                break
+            end = self._tag_end(token_ids, close)
+            calls.extend(
+                _parsed_dsml_calls(
+                    self._decode(token_ids[start:end]), (start, end), params
+                )
+            )
+            start = self._block_tag(token_ids, "<", end)
+        return token_ids[:first], calls
+
+    def _block_tag(self, token_ids: list[int], opener: str, start: int) -> int:
+        """Index of the first ``opener`` block tag's leading token at or after ``start``, or ``-1``."""
+        dsml_id = self._ids[DSML]
+        at = _find(token_ids, dsml_id, start + 1)
+        while at != -1:
+            following = _find(token_ids, dsml_id, at + 1)
+            after = self._decode(
+                token_ids[at + 1 : None if following == -1 else following]
+            )
+            if DSML_BLOCK_RE.match(after):
+                # The opener may itself span tokens, e.g. ``<`` then ``/``.
+                for lead in range(at - 1, max(start, at - len(opener)) - 1, -1):
+                    if self._decode(token_ids[lead:at], strip=False).endswith(opener):
+                        return lead
+            at = following
+        return -1
+
+    def _tag_end(self, token_ids: list[int], start: int) -> int:
+        """Index just past the first token after ``start`` holding ``>``."""
+        for index in range(start + 1, len(token_ids)):
+            if ">" in self._decode(token_ids[index : index + 1]):
+                return index + 1
+        return len(token_ids)
+
+
 CHAT_FORMATS: dict[str, type[ChatFormat]] = {
+    # Ahead of tool_call: the GLM vocab also holds <tool_call>.
+    "glm47": Glm47Format,
     "tool_call": ToolCallTagFormat,
     "granite3": Granite3Format,
     "gemma4": Gemma4Format,
     "harmony": HarmonyFormat,
+    "dsml": DsmlFormat,
 }
 
 
@@ -621,6 +909,43 @@ def _parsed_xml_call(
     return ParsedToolCall(
         raw=raw, name=name, arguments=arguments, token_span=span, status=status
     )
+
+
+def _parsed_dsml_calls(
+    raw: str,
+    span: tuple[int, int],
+    params: dict[str, dict[str, dict[str, Any]]],
+) -> list[ParsedToolCall]:
+    """Every ``invoke`` in one DSML block, sharing its span; a block with none is malformed."""
+    calls: list[ParsedToolCall] = []
+    for invoke in DSML_INVOKE_RE.finditer(raw):
+        call_raw, name, body = invoke.group(0), invoke.group(1).strip(), invoke.group(2)
+        if not name:
+            calls.append(_failed(call_raw, span, ToolCallParseStatus.MISSING_NAME))
+            continue
+        schemas = params.get(name, {})
+        arguments: dict[str, Any] = {}
+        any_invalid = False
+        for parameter in DSML_PARAMETER_RE.finditer(body):
+            key, is_string, text = parameter.groups()
+            if is_string == "true":
+                arguments[key] = text
+                continue
+            arguments[key], invalid = _coerce_xml_value(text, schemas.get(key))
+            any_invalid = any_invalid or invalid
+        status = (
+            ToolCallParseStatus.INVALID_JSON if any_invalid else ToolCallParseStatus.OK
+        )
+        calls.append(
+            ParsedToolCall(
+                raw=call_raw,
+                name=name,
+                arguments=arguments,
+                token_span=span,
+                status=status,
+            )
+        )
+    return calls or [_failed(raw, span, ToolCallParseStatus.MALFORMED_STRUCTURE)]
 
 
 def _coerce_xml_value(text: str, schema: dict[str, Any] | None) -> tuple[Any, bool]:

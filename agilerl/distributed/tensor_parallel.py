@@ -898,14 +898,16 @@ def shard_attention_projections(
     k_proj: nn.Module | None,
     v_proj: nn.Module | None,
     o_proj: nn.Module,
+    v_head_dim: int | None = None,
 ) -> None:
     _validate_gqa(num_q, num_kv, int(mesh.size()))
     _remember_heads(module, num_q, num_kv)
     shard_column(q_proj, mesh)
+    value_dim = head_dim if v_head_dim is None else v_head_dim
     # A layer that reads another layer's keys and values has no k/v projection.
-    for linear in (k_proj, v_proj):
+    for linear, dim in ((k_proj, head_dim), (v_proj, value_dim)):
         if linear is not None:
-            _shard_kv(linear, mesh, num_q, num_kv, head_dim)
+            _shard_kv(linear, mesh, num_q, num_kv, dim)
     bias = shard_row(o_proj, mesh)
     stash_tp(module, mesh)
     _install_block_forward(module, o_proj if bias is not None else None)

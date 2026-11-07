@@ -24,12 +24,17 @@ from torch.distributed.tensor import DTensor, Partial, Replicate, distribute_ten
 from torch.nn.utils import clip_grad_norm_
 from torch.optim.lr_scheduler import LambdaLR
 
+from agilerl.arena.memory.resolve.attention import (
+    CONTEXT_PARALLEL_ATTN_IMPLEMENTATIONS,
+    context_parallel_blocker,
+)
 from agilerl.distributed.context_parallel import (
     attention_head_counts,
     model_attention_backend,
     substitute_hf_ulysses_attn,
     validate_cp_heads,
 )
+from agilerl.distributed.context_parallel.ulysses import model_config
 from agilerl.distributed.expert_parallel import (
     iter_packed_expert_modules,
     validate_actor_ep,
@@ -932,7 +937,7 @@ class FSDPRuntime(BaseRuntime):
     def _validate_context_parallel_actor(self, actor: nn.Module) -> None:
         """Fail unless each TP rank's heads split over ``cp``.
 
-        Also fail unless the attention backend is one Ulysses patches.
+        Also fail unless the model or attention backend has a context-parallel path.
 
         :param actor: The unwrapped actor.
         """
@@ -943,23 +948,24 @@ class FSDPRuntime(BaseRuntime):
         for tp_rank in range(tp):
             kv_start, kv_stop = kv_row_span(heads, kv, 1, tp, tp_rank)
             validate_cp_heads(heads // tp, kv_stop - kv_start, self.config.cp)
-        backend = model_attention_backend(actor)
-        if backend not in ("flash_attention_2", "flex_attention"):
-            msg = (
-                f"cp={self.config.cp} requires the actor's attention backend "
-                "to be 'flash_attention_2' or 'flex_attention', got "
-                f"{backend!r}: the Ulysses substitution patches those forwards."
-            )
-            raise ValueError(msg)
+        config = model_config(actor)
+        blocker = context_parallel_blocker(
+            str(model_attention_backend(actor)),
+            self.config.cp,
+            None if config is None else config.model_type,
+        )
+        if blocker is not None:
+            raise ValueError(blocker)
 
     def _install_ulysses_attention(self, actor: nn.Module) -> None:
         """Route the actor's attention through the Ulysses all-to-all on the CP group.
 
         :param actor: The actor whose attention backend is patched.
         """
-        substitute_hf_ulysses_attn(
-            self.cp_group, cast("str", model_attention_backend(actor))
-        )
+        backend = cast("str", model_attention_backend(actor))
+        # Other backends pass validation only on models whose plan gathers the keys.
+        if backend in CONTEXT_PARALLEL_ATTN_IMPLEMENTATIONS:
+            substitute_hf_ulysses_attn(self.cp_group, backend)
 
     @raise_on_any_rank()
     def export_model_state(self, model: nn.Module) -> dict[str, Any]:

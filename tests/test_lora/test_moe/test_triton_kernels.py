@@ -16,6 +16,8 @@ BF16_TOLERANCE = {"rtol": 4e-3, "atol": 1e-3}
 # The interpreter runs the kernels in numpy fp32; only the summation order
 # differs from torch's.
 FP32_TOLERANCE = {"rtol": 1e-5, "atol": 1e-5}
+# DeepSeek-V4-Flash and GLM-5.3-Flash ``swiglu_limit``.
+SWIGLU_LIMIT = 10.0
 
 
 def per_expert_matmul(x, weight, counts):
@@ -351,6 +353,28 @@ def swiglu_grad_reference(grad, projected):
     return projected.grad
 
 
+def clamped_swiglu_reference(projected):
+    """DeepSeek-V4 / GLM-5.3 experts gate: gate clamped above, up on both sides."""
+    gate, up = projected.float().chunk(2, dim=-1)
+    gate = gate.clamp(max=SWIGLU_LIMIT)
+    up = up.clamp(min=-SWIGLU_LIMIT, max=SWIGLU_LIMIT)
+    return torch.nn.functional.silu(gate) * up
+
+
+def clamped_swiglu_grad_reference(grad, projected):
+    projected = projected.float().requires_grad_(True)
+    clamped_swiglu_reference(projected).backward(grad.float())
+    return projected.grad
+
+
+def clamped_inputs(rows, inter, device, dtype):
+    """``[gate | up]`` mostly past ``±limit``, with columns exactly on ``limit`` and ``-limit``."""
+    projected = torch.randn(rows, 2 * inter, device=device) * 3 * SWIGLU_LIMIT
+    projected[:, ::7] = SWIGLU_LIMIT
+    projected[:, 3::11] = -SWIGLU_LIMIT
+    return projected.to(dtype)
+
+
 class TestSwiglu:
     @pytest.mark.gpu
     @pytest.mark.parametrize(
@@ -366,7 +390,7 @@ class TestSwiglu:
         projected = torch.randn(rows, 2 * inter, device="cuda", dtype=torch.bfloat16)
 
         # Act
-        out = triton_kernels.swiglu(projected)
+        out = triton_kernels.swiglu(projected, None)
 
         # Assert
         assert out.dtype == torch.bfloat16
@@ -382,14 +406,51 @@ class TestSwiglu:
         projected = torch.randn(70, 80)
 
         # Act
-        out = triton_kernels.swiglu(projected)
+        out = triton_kernels.swiglu(projected, None)
 
         # Assert
         torch.testing.assert_close(out, swiglu_reference(projected), **FP32_TOLERANCE)
 
+    @pytest.mark.gpu
+    @pytest.mark.parametrize(
+        ("rows", "inter"),
+        [
+            pytest.param(4099, 512, id="partial_row_tile"),
+            pytest.param(37, 600, id="partial_column_tile"),
+        ],
+    )
+    def test_limit_matches_clamped_silu_gate_times_up(self, rows, inter):
+        # Arrange
+        torch.manual_seed(0)
+        projected = clamped_inputs(rows, inter, "cuda", torch.bfloat16)
+
+        # Act
+        out = triton_kernels.swiglu(projected, SWIGLU_LIMIT)
+
+        # Assert
+        assert out.dtype == torch.bfloat16
+        torch.testing.assert_close(
+            out.float(), clamped_swiglu_reference(projected), **BF16_TOLERANCE
+        )
+
+    @spawn_new_process_for_each_test
+    @pytest.mark.usefixtures("triton_interpreter")
+    def test_interpreted_limit_matches_clamped_silu_gate_times_up(self):
+        # Arrange
+        torch.manual_seed(0)
+        projected = clamped_inputs(70, 40, "cpu", torch.float32)
+
+        # Act
+        out = triton_kernels.swiglu(projected, SWIGLU_LIMIT)
+
+        # Assert
+        torch.testing.assert_close(
+            out, clamped_swiglu_reference(projected), **FP32_TOLERANCE
+        )
+
     def test_no_rows_returns_empty_output(self):
         # Act
-        out = triton_kernels.swiglu(torch.empty(0, 1024))
+        out = triton_kernels.swiglu(torch.empty(0, 1024), None)
 
         # Assert
         assert out.shape == (0, 512)
@@ -411,7 +472,7 @@ class TestSwigluBackward:
         grad = torch.randn(rows, inter, device="cuda", dtype=torch.bfloat16)
 
         # Act
-        grad_projected = triton_kernels.swiglu_backward(grad, projected)
+        grad_projected = triton_kernels.swiglu_backward(grad, projected, None)
 
         # Assert
         assert grad_projected.dtype == torch.bfloat16
@@ -430,17 +491,61 @@ class TestSwigluBackward:
         grad = torch.randn(70, 40)
 
         # Act
-        grad_projected = triton_kernels.swiglu_backward(grad, projected)
+        grad_projected = triton_kernels.swiglu_backward(grad, projected, None)
 
         # Assert
         torch.testing.assert_close(
             grad_projected, swiglu_grad_reference(grad, projected), **FP32_TOLERANCE
         )
 
+    @pytest.mark.gpu
+    @pytest.mark.parametrize(
+        ("rows", "inter"),
+        [
+            pytest.param(4099, 512, id="partial_row_tile"),
+            pytest.param(37, 600, id="partial_column_tile"),
+        ],
+    )
+    def test_limit_matches_autograd_of_clamped_silu_gate_times_up(self, rows, inter):
+        # Arrange
+        torch.manual_seed(0)
+        projected = clamped_inputs(rows, inter, "cuda", torch.bfloat16)
+        grad = torch.randn(rows, inter, device="cuda", dtype=torch.bfloat16)
+
+        # Act
+        grad_projected = triton_kernels.swiglu_backward(grad, projected, SWIGLU_LIMIT)
+
+        # Assert
+        assert grad_projected.dtype == torch.bfloat16
+        torch.testing.assert_close(
+            grad_projected.float(),
+            clamped_swiglu_grad_reference(grad, projected),
+            **BF16_TOLERANCE,
+        )
+
+    @spawn_new_process_for_each_test
+    @pytest.mark.usefixtures("triton_interpreter")
+    def test_interpreted_limit_matches_autograd_of_clamped_silu_gate_times_up(self):
+        # Arrange
+        torch.manual_seed(0)
+        projected = clamped_inputs(70, 40, "cpu", torch.float32)
+        grad = torch.randn(70, 40)
+
+        # Act
+        grad_projected = triton_kernels.swiglu_backward(grad, projected, SWIGLU_LIMIT)
+
+        # Assert
+        # Entries on ``±limit`` pass their gradient, as ``torch.clamp`` does.
+        torch.testing.assert_close(
+            grad_projected,
+            clamped_swiglu_grad_reference(grad, projected),
+            **FP32_TOLERANCE,
+        )
+
     def test_no_rows_returns_empty_grad(self):
         # Act
         grad_projected = triton_kernels.swiglu_backward(
-            torch.empty(0, 512), torch.empty(0, 1024)
+            torch.empty(0, 512), torch.empty(0, 1024), None
         )
 
         # Assert

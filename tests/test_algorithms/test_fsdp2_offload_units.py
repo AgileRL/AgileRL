@@ -19,6 +19,7 @@ from torch import nn
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor, Shard, distribute_tensor
 from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, Qwen3Config
+from transformers.conversion_mapping import Concatenate, WeightConverter
 
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.grpo import GRPO
@@ -29,7 +30,10 @@ from agilerl.distributed import (
     FSDPConfig,
     materialize_fsdp2_from_cpu_state,
 )
-from agilerl.distributed.fsdp import _move_ignored_to_device
+from agilerl.distributed.fsdp import (
+    _load_sharded_weights_from_safetensors,
+    _move_ignored_to_device,
+)
 from agilerl.distributed.mesh import MeshAxisName, ParallelMesh
 from agilerl.distributed.runtime import DPRuntime, FSDPRuntime
 
@@ -924,7 +928,7 @@ class TestFsdpSafetensorsShardHelpers:
         from safetensors.torch import save_file
         from transformers import GPT2Config, GPT2LMHeadModel
 
-        from agilerl.distributed.fsdp import _resolve_checkpoint_source
+        from agilerl.distributed.fsdp_meta import resolve_checkpoint_source
 
         save_file({"w": torch.zeros(1)}, str(tmp_path / "model.safetensors"))
         causal = GPT2LMHeadModel(
@@ -937,7 +941,7 @@ class TestFsdpSafetensorsShardHelpers:
         shell = nn.Module()
         shell.base_model = causal
 
-        assert _resolve_checkpoint_source(shell) == str(tmp_path)
+        assert resolve_checkpoint_source(shell) == str(tmp_path)
 
     def test_tied_weight_target_missing_from_checkpoint_skips(self, tmp_path):
 
@@ -1183,7 +1187,7 @@ class TestMaterializeFsdp2FromCpuState:
 
         with (
             patch(
-                "agilerl.distributed.fsdp.cached_file",
+                "agilerl.distributed.fsdp_meta.cached_file",
                 side_effect=fake_cached_file,
             ),
             patch(
@@ -1843,9 +1847,19 @@ class TestSafetensorsShardKeys:
     def test_language_body_alias_uses_backbone_key(self):
         from agilerl.distributed.fsdp import checkpoint_key_candidates
 
-        assert checkpoint_key_candidates("language_model.model.embeddings.weight") == (
+        assert checkpoint_key_candidates(
+            "language_model.model.embeddings.weight", ""
+        ) == (
             "language_model.model.embeddings.weight",
             "language_model.backbone.embeddings.weight",
+        )
+
+    def test_checkpoint_without_base_model_prefix_is_a_candidate(self):
+        from agilerl.distributed.fsdp import checkpoint_key_candidates
+
+        assert checkpoint_key_candidates("model.embed_tokens.weight", "model") == (
+            "model.embed_tokens.weight",
+            "embed_tokens.weight",
         )
 
     def test_local_dest_of_a_dtensor(self, monkeypatch: pytest.MonkeyPatch):
@@ -1907,7 +1921,7 @@ class TestSafetensorsShardKeys:
     def test_empty_config_path_is_not_a_checkpoint(self):
         from transformers import PretrainedConfig
 
-        from agilerl.distributed.fsdp import _checkpoint_source_from_config
+        from agilerl.distributed.fsdp_meta import _checkpoint_source_from_config
 
         assert (
             _checkpoint_source_from_config(PretrainedConfig(tie_word_embeddings=False))
@@ -1917,7 +1931,7 @@ class TestSafetensorsShardKeys:
     def test_index_file_is_a_checkpoint_source(self, tmp_path):
         from transformers import PretrainedConfig
 
-        from agilerl.distributed.fsdp import _checkpoint_source_from_config
+        from agilerl.distributed.fsdp_meta import _checkpoint_source_from_config
 
         (tmp_path / "model.safetensors.index.json").write_text(
             '{"weight_map": {}}', encoding="utf-8"
@@ -1930,7 +1944,7 @@ class TestSafetensorsShardKeys:
     def test_missing_weight_files_are_not_a_checkpoint(self, tmp_path):
         from transformers import PretrainedConfig
 
-        from agilerl.distributed.fsdp import _checkpoint_source_from_config
+        from agilerl.distributed.fsdp_meta import _checkpoint_source_from_config
 
         (tmp_path / "config.json").write_text("{}", encoding="utf-8")
 
@@ -1942,7 +1956,7 @@ class TestSafetensorsShardKeys:
         )
 
     def test_unwraps_pretrained_base_and_inner_model(self):
-        from agilerl.distributed.fsdp import _next_unwrap_module
+        from agilerl.distributed.fsdp_meta import _next_unwrap_module
 
         inner = nn.Linear(2, 2)
         pretrained = nn.Linear(2, 2)
@@ -1969,13 +1983,13 @@ class TestSafetensorsShardKeys:
         assert _next_unwrap_module(nn.Linear(2, 2)) is None
 
     def test_resolve_raises_without_a_checkpoint(self):
-        from agilerl.distributed.fsdp import _resolve_checkpoint_source
+        from agilerl.distributed.fsdp_meta import resolve_checkpoint_source
 
         with pytest.raises(RuntimeError, match="FSDP shard load requires"):
-            _resolve_checkpoint_source(nn.Linear(2, 2))
+            resolve_checkpoint_source(nn.Linear(2, 2))
 
     def test_index_maps_each_key_to_its_shard(self, tmp_path):
-        from agilerl.distributed.fsdp import _build_safetensors_key_files
+        from agilerl.distributed.fsdp_meta import build_safetensors_key_files
 
         shard = tmp_path / "model-00001-of-00001.safetensors"
         save_file({"weight": torch.ones(2)}, str(shard))
@@ -1984,12 +1998,12 @@ class TestSafetensorsShardKeys:
             encoding="utf-8",
         )
 
-        key_files = _build_safetensors_key_files(str(tmp_path))
+        key_files = build_safetensors_key_files(str(tmp_path))
 
         assert key_files == {"weight": str(shard)}
 
     def test_index_missing_shard_raises(self, tmp_path):
-        from agilerl.distributed.fsdp import _build_safetensors_key_files
+        from agilerl.distributed.fsdp_meta import build_safetensors_key_files
 
         (tmp_path / "model.safetensors.index.json").write_text(
             json.dumps({"weight_map": {"weight": "missing.safetensors"}}),
@@ -1997,13 +2011,13 @@ class TestSafetensorsShardKeys:
         )
 
         with pytest.raises(RuntimeError, match="missing shard"):
-            _build_safetensors_key_files(str(tmp_path))
+            build_safetensors_key_files(str(tmp_path))
 
     def test_directory_without_weights_raises(self, tmp_path):
-        from agilerl.distributed.fsdp import _build_safetensors_key_files
+        from agilerl.distributed.fsdp_meta import build_safetensors_key_files
 
         with pytest.raises(RuntimeError, match=r"model\.safetensors"):
-            _build_safetensors_key_files(str(tmp_path))
+            build_safetensors_key_files(str(tmp_path))
 
     def test_loads_backbone_alias_lora_tied_weight_and_buffer(self, tmp_path):
         from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
@@ -2078,7 +2092,7 @@ class TestSafetensorsShardKeys:
 
         assert torch.equal(model.language_model.weight.detach(), expected)
         assert torch.equal(model.vision_model.weight, torch.ones(2, 2))
-        assert "copied 0 vision_model parameters" in caplog.text
+        assert "copied 0 parameters outside language_model" in caplog.text
         assert "first vision_model.weight" in caplog.text
 
     def test_loads_converted_checkpoint_keys_including_a_split_source(
@@ -2182,7 +2196,52 @@ class TestSafetensorsShardKeys:
         assert torch.equal(qkv.query.weight.detach(), query)
         assert torch.equal(qkv.key.weight.detach(), key)
         assert torch.equal(qkv.value.weight.detach(), value)
-        assert "copied 4 vision_model parameters" in caplog.text
+        assert "copied 4 parameters outside language_model" in caplog.text
+        assert "first none" in caplog.text
+
+    def test_counts_a_fused_parameter_outside_the_language_tower(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        # Arrange
+        query = torch.arange(4, dtype=torch.float32).reshape(2, 2)
+        key = query + 10
+        save_file(
+            {
+                "language_model.weight": torch.zeros(2, 2),
+                "vision_model.q.weight": query,
+                "vision_model.k.weight": key,
+            },
+            str(tmp_path / "model.safetensors"),
+        )
+
+        class Root(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.language_model = nn.Linear(2, 2, bias=False)
+                self.vision_model = nn.ModuleDict({"qk": nn.Linear(2, 4, bias=False)})
+                self.config = PretrainedConfig(
+                    tie_word_embeddings=False, name_or_path=str(tmp_path)
+                )
+
+        fuse_qk = WeightConverter(
+            source_patterns=["q.weight", "k.weight"],
+            target_patterns="qk.weight",
+            operations=[Concatenate(dim=0)],
+        )
+        monkeypatch.setattr(
+            "agilerl.distributed.fsdp._checkpoint_transform_groups",
+            lambda _model: [("", [fuse_qk])],
+        )
+        model = Root()
+
+        # Act
+        with caplog.at_level("INFO", logger="agilerl.distributed.fsdp"):
+            _load_sharded_weights_from_safetensors(model)
+
+        # Assert
+        fused = model.vision_model["qk"].weight.detach()
+        assert torch.equal(fused, torch.cat([query, key], dim=0))
+        assert "copied 1 parameters outside language_model" in caplog.text
         assert "first none" in caplog.text
 
     def test_loads_keys_from_a_child_module_conversion(self, tmp_path):
@@ -2343,7 +2402,7 @@ class TestSafetensorsShardKeys:
             model.vision_model.layer_scale1.lambda1.detach(), torch.ones(2)
         )
         assert torch.equal(model.vision_model.extra.detach(), torch.ones(2))
-        assert "copied 0 vision_model parameters" in caplog.text
+        assert "copied 0 parameters outside language_model" in caplog.text
         assert "first vision_model.extra" in caplog.text
 
     def test_plain_module_has_no_weight_transforms(self) -> None:

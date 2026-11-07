@@ -10,9 +10,17 @@ import re
 from typing import Any
 
 import pytest
+from jinja2.exceptions import TemplateError
+from transformers.utils.chat_template_utils import render_jinja_template
 
 from agilerl.llm_envs.chat_formats import (
+    DSML,
+    DSML_REASONING_EFFORT_PROMPTS,
+    DSML_TOOLS_PROMPT_HEAD,
+    DSML_TOOLS_PROMPT_TAIL,
+    DsmlFormat,
     Gemma4Format,
+    Glm47Format,
     Granite3Format,
     HarmonyFormat,
     ParsedToolCall,
@@ -28,6 +36,11 @@ TC, TC_END, THINK_END = 9000, 9001, 9002
 GTC, GEOT = 9100, 9101
 MSTART, MEND, MRESP_START, MRESP_END, MCHAN_END = 9200, 9201, 9202, 9203, 9204
 HSTART, HMSG, HCALL, HEND, HRET, HCHAN = 9300, 9301, 9302, 9303, 9304, 9305
+GKEY, GKEY_END, GVALUE, GVALUE_END = 9400, 9401, 9402, 9403
+DSML_ID, DEOS = 9500, 9501
+USER, ASSISTANT = "<\uff5cUser\uff5c>", "<\uff5cAssistant\uff5c>"
+DSML_BOS = "<\uff5cbegin▁of▁sentence\uff5c>"
+DSML_EOS = "<\uff5cend▁of▁sentence\uff5c>"
 
 _PARAM_CLOSE = "</" + "parameter>"
 
@@ -85,6 +98,29 @@ HARMONY_TOKENS = {
     "<|return|>": HRET,
     "<|channel|>": HCHAN,
 }
+GLM_TOKENS = {
+    **TAG_TOKENS,
+    "<arg_key>": GKEY,
+    "</arg_key>": GKEY_END,
+    "<arg_value>": GVALUE,
+    "</arg_value>": GVALUE_END,
+}
+DSML_TOKENS = {DSML: DSML_ID, "</think>": THINK_END, DSML_EOS: DEOS}
+WEATHER_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "city": {"type": "string"},
+                    "days": {"type": "integer"},
+                },
+            },
+        },
+    }
+]
 
 
 def chars(text: str) -> list[int]:
@@ -125,6 +161,46 @@ def gemma_block(name: str, args: str) -> list[int]:
 def harmony_block(header: str, body: str, closer: int) -> list[int]:
     """One Harmony message block as IDs."""
     return [HSTART, *chars(header), HMSG, *chars(body), closer]
+
+
+def glm_ids(text: str) -> list[int]:
+    """GLM text as IDs, each tag one token."""
+    return FakeTokenizer(GLM_TOKENS).encode(text)
+
+
+def dsml_invoke(name: str, params: list[tuple[str, str, str]]) -> str:
+    """One DSML invoke; each param is ``(key, string flag, value)``."""
+    lines = [
+        f'<{DSML}parameter name="{key}" string="{flag}">{value}</{DSML}parameter>'
+        for key, flag, value in params
+    ]
+    return f'<{DSML}invoke name="{name}">\n' + "\n".join(lines) + f"\n</{DSML}invoke>"
+
+
+def dsml_block(*invokes: str) -> str:
+    """One DSML tool-call block."""
+    return f"<{DSML}tool_calls>\n" + "\n".join(invokes) + f"\n</{DSML}tool_calls>"
+
+
+def dsml_ids(text: str) -> list[int]:
+    """DeepSeek-V4 text as IDs: :data:`DSML` is one token, the rest of each tag is chars."""
+    return FakeTokenizer(DSML_TOKENS).encode(text)
+
+
+def render_dsml(
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None = None,
+    **kwargs: Any,
+) -> str:
+    """Render ``messages`` through the DeepSeek-V4 chat template with the generation prompt."""
+    rendered, _ = render_jinja_template(
+        conversations=[messages],
+        tools=tools,
+        chat_template=DsmlFormat.CHAT_TEMPLATE,
+        add_generation_prompt=True,
+        **kwargs,
+    )
+    return rendered[0]
 
 
 class TestToolCallTagFormatJson:
@@ -884,6 +960,397 @@ class TestHarmonyFormat:
             HarmonyFormat(FakeTokenizer({}))
 
 
+class TestGlm47Format:
+    def test_parses_args_typed_by_the_schema(self) -> None:
+        parser = Glm47Format(FakeTokenizer(GLM_TOKENS))
+        ids = glm_ids(
+            "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Paris</arg_value>"
+            "<arg_key>days</arg_key><arg_value>3</arg_value></tool_call>"
+        )
+
+        _, calls = parser.extract_tool_calls(ids, WEATHER_TOOLS)
+
+        assert len(calls) == 1
+        assert calls[0].name == "get_weather"
+        assert calls[0].arguments == {"city": "Paris", "days": 3}
+        assert calls[0].token_span == (0, len(ids))
+        assert calls[0].status is ToolCallParseStatus.OK
+
+    def test_returns_content_before_first_call(self) -> None:
+        parser = Glm47Format(FakeTokenizer(GLM_TOKENS))
+        ids = glm_ids("plan</think>hi<tool_call>ping</tool_call>")
+
+        content, calls = parser.extract_tool_calls(ids)
+
+        assert content == glm_ids("plan</think>hi")
+        assert [(call.name, call.arguments) for call in calls] == [("ping", {})]
+
+    def test_parses_several_calls_with_json_values(self) -> None:
+        parser = Glm47Format(FakeTokenizer(GLM_TOKENS))
+        ids = glm_ids(
+            '<tool_call>a<arg_key>o</arg_key><arg_value>{"k": [1]}</arg_value></tool_call>'
+            "<tool_call>b<arg_key>n</arg_key> <arg_value>null</arg_value></tool_call>"
+        )
+
+        _, calls = parser.extract_tool_calls(ids)
+
+        assert [(call.name, call.arguments) for call in calls] == [
+            ("a", {"o": {"k": [1]}}),
+            ("b", {"n": None}),
+        ]
+        assert all(call.status is ToolCallParseStatus.OK for call in calls)
+
+    def test_string_value_keeps_its_whitespace(self) -> None:
+        parser = Glm47Format(FakeTokenizer(GLM_TOKENS))
+        ids = glm_ids(
+            "<tool_call>get_weather<arg_key>city</arg_key>"
+            "<arg_value> New York\n</arg_value></tool_call>"
+        )
+
+        _, calls = parser.extract_tool_calls(ids, WEATHER_TOOLS)
+
+        assert calls[0].arguments == {"city": " New York\n"}
+
+    def test_tag_text_in_a_value_does_not_end_it(self) -> None:
+        parser = Glm47Format(FakeTokenizer(GLM_TOKENS))
+        ids = [
+            *glm_ids("<tool_call>get_weather<arg_key>city</arg_key><arg_value>"),
+            *chars("a</arg_value>b"),
+            *glm_ids("</arg_value></tool_call>"),
+        ]
+
+        _, calls = parser.extract_tool_calls(ids, WEATHER_TOOLS)
+
+        assert calls[0].arguments == {"city": "a</arg_value>b"}
+        assert calls[0].status is ToolCallParseStatus.OK
+
+    def test_think_drafts_are_skipped(self) -> None:
+        parser = Glm47Format(FakeTokenizer(GLM_TOKENS))
+        ids = glm_ids("<tool_call>draft</tool_call></think><tool_call>real</tool_call>")
+
+        _, calls = parser.extract_tool_calls(ids)
+
+        assert [call.name for call in calls] == ["real"]
+
+    def test_schema_violation_reports_invalid(self) -> None:
+        parser = Glm47Format(FakeTokenizer(GLM_TOKENS))
+        ids = glm_ids(
+            "<tool_call>get_weather<arg_key>days</arg_key>"
+            "<arg_value>soon</arg_value></tool_call>"
+        )
+
+        _, calls = parser.extract_tool_calls(ids, WEATHER_TOOLS)
+
+        assert calls[0].arguments == {"days": "soon"}
+        assert calls[0].status is ToolCallParseStatus.INVALID_JSON
+
+    def test_missing_name_reports_status(self) -> None:
+        parser = Glm47Format(FakeTokenizer(GLM_TOKENS))
+        ids = glm_ids(
+            "<tool_call><arg_key>a</arg_key><arg_value>1</arg_value></tool_call>"
+        )
+
+        _, calls = parser.extract_tool_calls(ids)
+
+        assert calls[0].status is ToolCallParseStatus.MISSING_NAME
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "f<arg_key>a</arg_key></tool_call>",
+            "f<arg_key>a</arg_key>x<arg_value>1</arg_value></tool_call>",
+            "f<arg_key>a<arg_value>1</arg_value></tool_call>",
+        ],
+    )
+    def test_broken_pair_reports_malformed(self, body: str) -> None:
+        parser = Glm47Format(FakeTokenizer(GLM_TOKENS))
+
+        _, calls = parser.extract_tool_calls(glm_ids(f"<tool_call>{body}"))
+
+        assert calls[0].name == "f"
+        assert calls[0].status is ToolCallParseStatus.MALFORMED_STRUCTURE
+
+    def test_unclosed_block_reports_status(self) -> None:
+        parser = Glm47Format(FakeTokenizer(GLM_TOKENS))
+        ids = glm_ids("<tool_call>f<arg_key>a</arg_key><arg_value>1</arg_value>")
+
+        _, calls = parser.extract_tool_calls(ids)
+
+        assert calls[0].status is ToolCallParseStatus.UNCLOSED_BLOCK
+
+    def test_missing_tag_vocab_raises(self) -> None:
+        with pytest.raises(ValueError, match="<arg_key>"):
+            Glm47Format(FakeTokenizer(TAG_TOKENS))
+
+
+class TestDsmlFormat:
+    def test_parses_typed_parameters(self) -> None:
+        parser = DsmlFormat(FakeTokenizer(DSML_TOKENS))
+        block = dsml_ids(
+            dsml_block(
+                dsml_invoke(
+                    "get_weather",
+                    [
+                        ("city", "true", "Paris"),
+                        ("days", "false", "3"),
+                        ("opts", "false", '{"u": ["c", 1]}'),
+                    ],
+                )
+            )
+        )
+
+        _, calls = parser.extract_tool_calls([*block, DEOS])
+
+        assert len(calls) == 1
+        assert calls[0].name == "get_weather"
+        assert calls[0].arguments == {
+            "city": "Paris",
+            "days": 3,
+            "opts": {"u": ["c", 1]},
+        }
+        assert calls[0].token_span == (0, len(block))
+        assert calls[0].status is ToolCallParseStatus.OK
+
+    def test_returns_content_before_the_block(self) -> None:
+        parser = DsmlFormat(FakeTokenizer(DSML_TOKENS))
+        ids = dsml_ids(
+            "plan</think>Checking.\n\n" + dsml_block(dsml_invoke("ping", []))
+        )
+
+        content, calls = parser.extract_tool_calls(ids)
+
+        assert content == dsml_ids("plan</think>Checking.\n\n")
+        assert [(call.name, call.arguments) for call in calls] == [("ping", {})]
+
+    def test_invokes_in_one_block_share_its_span(self) -> None:
+        parser = DsmlFormat(FakeTokenizer(DSML_TOKENS))
+        ids = dsml_ids(
+            dsml_block(
+                dsml_invoke("a", [("x", "false", "1")]),
+                dsml_invoke("b", [("y", "true", "two")]),
+            )
+        )
+
+        _, calls = parser.extract_tool_calls(ids)
+
+        assert [(call.name, call.arguments) for call in calls] == [
+            ("a", {"x": 1}),
+            ("b", {"y": "two"}),
+        ]
+        assert {call.token_span for call in calls} == {(0, len(ids))}
+
+    def test_parameter_without_string_flag_follows_the_schema(self) -> None:
+        parser = DsmlFormat(FakeTokenizer(DSML_TOKENS))
+        invoke = (
+            f'<{DSML}invoke name="get_weather">\n'
+            f'<{DSML}parameter name="city">true</{DSML}parameter>\n'
+            f'<{DSML}parameter name="days">2</{DSML}parameter>\n'
+            f"</{DSML}invoke>"
+        )
+
+        _, calls = parser.extract_tool_calls(
+            dsml_ids(dsml_block(invoke)), WEATHER_TOOLS
+        )
+
+        assert calls[0].arguments == {"city": "true", "days": 2}
+
+    def test_unclosed_parameter_ends_at_the_next_one(self) -> None:
+        parser = DsmlFormat(FakeTokenizer(DSML_TOKENS))
+        invoke = (
+            f'<{DSML}invoke name="f">\n'
+            f'<{DSML}parameter name="a" string="true">x\n'
+            f'<{DSML}parameter name="b" string="false">1</{DSML}parameter>\n'
+            f"</{DSML}invoke>"
+        )
+
+        _, calls = parser.extract_tool_calls(dsml_ids(dsml_block(invoke)))
+
+        assert calls[0].arguments == {"a": "x\n", "b": 1}
+
+    def test_think_drafts_are_skipped(self) -> None:
+        parser = DsmlFormat(FakeTokenizer(DSML_TOKENS))
+        ids = dsml_ids(
+            dsml_block(dsml_invoke("draft", []))
+            + "</think>"
+            + dsml_block(dsml_invoke("real", []))
+        )
+
+        _, calls = parser.extract_tool_calls(ids)
+
+        assert [call.name for call in calls] == ["real"]
+
+    def test_tag_text_without_the_dsml_token_does_not_parse(self) -> None:
+        parser = DsmlFormat(FakeTokenizer(DSML_TOKENS))
+        ids = chars(dsml_block(dsml_invoke("f", [])))
+
+        content, calls = parser.extract_tool_calls(ids)
+
+        assert (content, calls) == (ids, [])
+
+    def test_invoke_outside_a_block_does_not_parse(self) -> None:
+        parser = DsmlFormat(FakeTokenizer(DSML_TOKENS))
+        ids = dsml_ids(dsml_invoke("f", []))
+
+        _, calls = parser.extract_tool_calls(ids)
+
+        assert calls == []
+
+    def test_unclosed_block_reports_status(self) -> None:
+        parser = DsmlFormat(FakeTokenizer(DSML_TOKENS))
+        ids = dsml_ids(f"<{DSML}tool_calls>\n" + dsml_invoke("f", []))
+
+        _, calls = parser.extract_tool_calls(ids)
+
+        assert len(calls) == 1
+        assert calls[0].status is ToolCallParseStatus.UNCLOSED_BLOCK
+
+    def test_block_without_invoke_reports_malformed(self) -> None:
+        parser = DsmlFormat(FakeTokenizer(DSML_TOKENS))
+
+        _, calls = parser.extract_tool_calls(dsml_ids(dsml_block("call f")))
+
+        assert calls[0].status is ToolCallParseStatus.MALFORMED_STRUCTURE
+
+    def test_empty_name_reports_status(self) -> None:
+        parser = DsmlFormat(FakeTokenizer(DSML_TOKENS))
+
+        _, calls = parser.extract_tool_calls(dsml_ids(dsml_block(dsml_invoke("", []))))
+
+        assert calls[0].status is ToolCallParseStatus.MISSING_NAME
+
+    def test_non_json_value_reports_invalid(self) -> None:
+        parser = DsmlFormat(FakeTokenizer(DSML_TOKENS))
+        ids = dsml_ids(dsml_block(dsml_invoke("f", [("a", "false", "abc")])))
+
+        _, calls = parser.extract_tool_calls(ids)
+
+        assert calls[0].arguments == {"a": "abc"}
+        assert calls[0].status is ToolCallParseStatus.INVALID_JSON
+
+    def test_missing_tag_vocab_raises(self) -> None:
+        with pytest.raises(ValueError, match="DSML"):
+            DsmlFormat(FakeTokenizer(TAG_TOKENS))
+
+    def test_tag_end_without_a_closing_bracket_is_the_output_end(self) -> None:
+        parser = DsmlFormat(FakeTokenizer(DSML_TOKENS))
+        ids = dsml_ids(f"</{DSML}tool_calls")
+
+        end = parser._tag_end(ids, 0)
+
+        assert end == len(ids)
+
+
+class TestDsmlFormatChatTemplate:
+    def test_renders_a_tool_call_and_its_result(self) -> None:
+        # Arrange
+        messages = [
+            {"role": "system", "content": "Be brief."},
+            {"role": "user", "content": "Weather?"},
+            {
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": "need tool",
+                "tool_calls": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": {"city": "Paris", "days": 2},
+                        },
+                    }
+                ],
+            },
+            {"role": "tool", "content": "sunny"},
+        ]
+
+        # Act
+        rendered = render_dsml(messages, WEATHER_TOOLS, reasoning_effort="low")
+
+        # Assert
+        schema = json.dumps(WEATHER_TOOLS[0]["function"], ensure_ascii=False)
+        assert rendered == (
+            f"{DSML_BOS}Be brief.\n\n{DSML_TOOLS_PROMPT_HEAD}{schema}{DSML_TOOLS_PROMPT_TAIL}"
+            f"{USER}Weather?{ASSISTANT}<think>need tool</think>\n\n"
+            + dsml_block(
+                dsml_invoke(
+                    "get_weather", [("city", "true", "Paris"), ("days", "false", "2")]
+                )
+            )
+            + f"{DSML_EOS}{USER}<tool_result>sunny</tool_result>{ASSISTANT}<think>"
+        )
+
+    def test_rendered_call_parses_back(self) -> None:
+        tokenizer = FakeTokenizer(DSML_TOKENS)
+        arguments = {"city": "Paris", "days": 2}
+        call = {
+            "type": "function",
+            "function": {"name": "get_weather", "arguments": arguments},
+        }
+        rendered = render_dsml(
+            [
+                {"role": "user", "content": "Weather?"},
+                {"role": "assistant", "content": "", "tool_calls": [call]},
+            ],
+            WEATHER_TOOLS,
+        )
+        turn = rendered[
+            rendered.rindex(f"{ASSISTANT}<think>") + len(f"{ASSISTANT}<think>") :
+        ]
+
+        _, calls = DsmlFormat(tokenizer).extract_tool_calls(
+            tokenizer.encode(turn), WEATHER_TOOLS
+        )
+
+        assert [(c.name, c.arguments, c.status) for c in calls] == [
+            ("get_weather", arguments, ToolCallParseStatus.OK)
+        ]
+
+    def test_without_tools_drops_earlier_reasoning(self) -> None:
+        messages = [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello", "reasoning_content": "greet"},
+            {"role": "user", "content": "capital?"},
+        ]
+
+        rendered = render_dsml(messages)
+
+        assert rendered == (
+            f"{DSML_BOS}{DSML_REASONING_EFFORT_PROMPTS['high']}"
+            f"{USER}hi{ASSISTANT}</think>hello{DSML_EOS}"
+            f"{USER}capital?{ASSISTANT}<think>"
+        )
+
+    def test_tools_without_a_system_message_lead_the_prompt(self) -> None:
+        rendered = render_dsml(
+            [{"role": "user", "content": "hi"}], WEATHER_TOOLS, reasoning_effort="max"
+        )
+
+        assert rendered.startswith(
+            f"{DSML_BOS}{DSML_REASONING_EFFORT_PROMPTS['max']}\n\n{DSML_TOOLS_PROMPT_HEAD}"
+        )
+        assert rendered.endswith(f"{DSML_TOOLS_PROMPT_TAIL}{USER}hi{ASSISTANT}<think>")
+
+    def test_consecutive_tool_results_share_one_user_turn(self) -> None:
+        messages = [
+            {"role": "user", "content": "go"},
+            {"role": "assistant", "content": "ok"},
+            {"role": "tool", "content": "a"},
+            {"role": "tool", "content": "b"},
+        ]
+
+        rendered = render_dsml(messages, thinking=False)
+
+        assert rendered == (
+            f"{DSML_BOS}{USER}go{ASSISTANT}</think>ok{DSML_EOS}"
+            f"{USER}<tool_result>a</tool_result>\n\n<tool_result>b</tool_result>"
+            f"{ASSISTANT}</think>"
+        )
+
+    def test_unsupported_role_raises(self) -> None:
+        with pytest.raises(TemplateError, match="not developer"):
+            render_dsml([{"role": "developer", "content": "x"}])
+
+
 class TestDecodeGuard:
     def test_non_string_decode_raises(self) -> None:
         class BytesTokenizer(FakeTokenizer):
@@ -909,6 +1376,10 @@ class TestDetectChatFormat:
         assert isinstance(
             detect_chat_format(FakeTokenizer(HARMONY_TOKENS)), HarmonyFormat
         )
+        assert isinstance(detect_chat_format(FakeTokenizer(DSML_TOKENS)), DsmlFormat)
+
+    def test_glm_vocab_picks_glm_over_the_tag_format(self) -> None:
+        assert isinstance(detect_chat_format(FakeTokenizer(GLM_TOKENS)), Glm47Format)
 
     def test_returns_none_without_tags(self) -> None:
         assert detect_chat_format(FakeTokenizer({})) is None
@@ -935,6 +1406,12 @@ class TestGetChatFormat:
         assert isinstance(
             get_chat_format("harmony", FakeTokenizer(HARMONY_TOKENS)),
             HarmonyFormat,
+        )
+        assert isinstance(
+            get_chat_format("glm47", FakeTokenizer(GLM_TOKENS)), Glm47Format
+        )
+        assert isinstance(
+            get_chat_format("dsml", FakeTokenizer(DSML_TOKENS)), DsmlFormat
         )
 
     def test_unknown_name_lists_available(self) -> None:

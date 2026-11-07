@@ -8,12 +8,19 @@ from pathlib import Path
 
 import pytest
 
-from agilerl.arena.memory import formulas, fsdp_gather, kv_cache, lora_formulas
+from agilerl.arena.memory import (
+    block_activations,
+    formulas,
+    fsdp_gather,
+    kv_cache,
+    lora_formulas,
+)
 from agilerl.arena.memory.lora_placement import (
     lora_tensor_placement,
     split_moe_lora_recompute_bytes,
 )
 from agilerl.arena.memory.nccl import nccl_on_node_fraction, trainer_nccl_bytes
+from agilerl.arena.memory.resolve.attention import FAMILY_ATTN_IMPLEMENTATIONS
 from agilerl.arena.memory.resolve.chunk import resolve_chunk_rows
 from agilerl.arena.memory.specs import (
     GiB,
@@ -27,6 +34,11 @@ from agilerl.arena.models.fsdp import FSDPConfig
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 
 ASSETS = Path(__file__).parent / "assets"
+
+DSV4_FLASH = "deepseek-ai/DeepSeek-V4-Flash-0731"
+GLM_FLASH = "zai-org/GLM-5.3-Flash"
+MIMO_FLASH = "XiaomiMiMo/MiMo-V2.6-Flash-RL"
+PREQUANTIZED_CHECKPOINTS = (DSV4_FLASH, GLM_FLASH, MIMO_FLASH)
 
 # Qwen2.5-0.5B-Instruct geometry (published config.json values).
 QWEN_05B = ModelArch(
@@ -84,6 +96,81 @@ DECODER_TINY = {
     "head_dim": 16,
     "vocab_size": 256,
     "tie_word_embeddings": True,
+}
+
+# GLM-5.3-Flash shape: KDA and MLA layers alternate, a dense first FFN, a DSA
+# indexer on each MLA layer, and two hyper-connection streams.
+GLM_TINY = {
+    "model_type": "glm5_next_text",
+    "num_hidden_layers": 4,
+    "hidden_size": 64,
+    "intermediate_size": 96,
+    "num_attention_heads": 4,
+    "num_key_value_heads": 4,
+    "vocab_size": 256,
+    "q_lora_rank": 32,
+    "kv_lora_rank": 16,
+    "qk_nope_head_dim": 8,
+    "qk_rope_head_dim": 0,
+    "v_head_dim": 8,
+    "layer_types": ["linear_attention", "deepseek_sparse_attention"] * 2,
+    "mlp_layer_types": ["dense", "sparse", "sparse", "sparse"],
+    "n_routed_experts": 4,
+    "num_experts_per_tok": 2,
+    "moe_intermediate_size": 16,
+    "n_shared_experts": 1,
+    "index_n_heads": 2,
+    "index_head_dim": 8,
+    "indexer_types": ["full"] * 4,
+    "hc_mult": 2,
+    "linear_attn_config": {"num_heads": 2, "head_dim": 8, "short_conv_kernel_size": 4},
+}
+# DeepSeek-V4-Flash shape: shared-KV MQA with a low-rank query, a grouped
+# output, one sliding, one CSA and one HCA layer (the fourth ratio is MTP's).
+DSV4_TINY = {
+    "model_type": "deepseek_v4",
+    "num_hidden_layers": 3,
+    "hidden_size": 64,
+    "num_attention_heads": 4,
+    "num_key_value_heads": 1,
+    "head_dim": 16,
+    "qk_rope_head_dim": 4,
+    "q_lora_rank": 32,
+    "o_groups": 2,
+    "o_lora_rank": 8,
+    "vocab_size": 256,
+    "n_routed_experts": 4,
+    "num_experts_per_tok": 2,
+    "moe_intermediate_size": 16,
+    "n_shared_experts": 1,
+    "index_n_heads": 2,
+    "index_head_dim": 8,
+    "hc_mult": 2,
+    "sliding_window": 8,
+    "compress_ratios": [0, 4, 128, 0],
+}
+# MiMo-V2-Flash shape: a dense full-attention layer 0 with one KV head, two
+# MoE sliding-window layers with two, values narrower than keys, and a vision
+# tower the text-only classes drop.
+MIMO_TINY = {
+    "model_type": "mimo_v2",
+    "num_hidden_layers": 3,
+    "hidden_size": 64,
+    "intermediate_size": 96,
+    "num_attention_heads": 4,
+    "num_key_value_heads": 1,
+    "swa_num_key_value_heads": 2,
+    "head_dim": 16,
+    "v_head_dim": 8,
+    "hybrid_layer_pattern": [0, 1, 1],
+    "moe_layer_freq": [0, 1, 1],
+    "sliding_window": 8,
+    "n_routed_experts": 4,
+    "num_experts_per_tok": 2,
+    "moe_intermediate_size": 16,
+    "n_shared_experts": None,
+    "vocab_size": 256,
+    "vision_config": {"depth": 2, "hidden_size": 32, "num_heads": 2},
 }
 
 
@@ -150,6 +237,76 @@ class TestParamCounts:
         exact = formulas.param_counts(QWEN_05B, analytic.total - 5_000)
         assert exact.unattributed == -5_000
         assert exact.total == analytic.total - 5_000
+
+    def test_mla_and_kda_mix_matches_the_hf_build(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(GLM_TINY)
+
+        # Act
+        counts = formulas.param_counts(arch)
+
+        # Assert: an MLA layer holds q_a 64x32, q_b 32x32, kv_a 64x16, kv_b
+        # 16x64, o 32x64 and two latent norms (7216); its indexer wq_b 32x16,
+        # weights 64x2, wk and key-pool gate 64x8 each, LayerNorm 2x8 (1680).
+        assert counts.attention == 2 * (7216 + 1680)
+        # A KDA layer: q/k/v 64x16, gates 64x8 + 8x16 twice, beta 64x2, o
+        # 16x64, conv 48x4, dt bias 16, A_log 2, output norm 8.
+        assert counts.mamba == 2 * 5722
+        # One dense FFN layer; three MoE layers with a router each.
+        assert counts.mlp == 3 * 64 * 96 + 3 * 4 * 64
+        assert counts.moe_experts == 3 * (4 * 3 * 64 * 16 + 3 * 64 * 16)
+        # Two norms per layer, the final norm, and two hyper-connection
+        # mixers per layer of an (8, 128) weight, 8 biases and 3 scales.
+        assert counts.norms == 4 * 2 * 64 + 64 + 4 * 2 * (8 * 128 + 8 + 3)
+        # The HF build adds the indexer's (4, 8) key-pool position table per layer.
+        assert counts.total == 136_204 - 2 * 32
+
+    def test_compressed_attention_matches_the_hf_build(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(DSV4_TINY)
+
+        # Act
+        counts = formulas.param_counts(arch)
+
+        # Assert: per layer q_a 64x32, q_b 32x64, kv 64x16, grouped o_a
+        # 2x(32->8), o_b 16x64, two norms and four sinks (6708); a CSA
+        # compressor (4240), an HCA compressor (4112), and the CSA layer's
+        # indexer (2760).
+        assert counts.attention == 3 * 6708 + 4240 + 4112 + 2760
+        assert counts.mlp == 3 * 4 * 64
+        assert counts.norms == 3 * 2 * 64 + 64 + 3 * 2 * (8 * 128 + 8 + 3)
+        # The HF build adds the hyper-connection head.
+        assert counts.total == 117_769 - (2 * 128 + 2 + 1)
+
+    def test_single_stream_adds_no_hyper_connection_params(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(GLM_TINY)
+        single = arch.model_copy(update={"hc_mult": 1})
+
+        # Act
+        delta = formulas.param_counts(arch).norms - formulas.param_counts(single).norms
+
+        # Assert
+        assert delta == 4 * 2 * (8 * 128 + 8 + 3)
+
+    def test_per_layer_kv_heads_and_narrow_values_match_the_hf_build(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(MIMO_TINY)
+
+        # Act
+        counts = formulas.param_counts(arch)
+
+        # Assert: q 64x64, k 64x16, v 64x8 and o 32x64 on the full layer;
+        # k 64x32 and v 64x16 on each sliding layer.
+        assert counts.attention == (4096 + 1024 + 512 + 2048) + 2 * (
+            4096 + 2048 + 1024 + 2048
+        )
+        # One dense FFN layer; two MoE layers with a router each.
+        assert counts.mlp == 3 * 64 * 96 + 2 * 4 * 64
+        assert counts.moe_experts == 2 * 4 * 3 * 64 * 16
+        assert counts.multimodal_towers == 0
+        # The native build adds one sink logit per head on each sliding layer.
+        assert counts.total == 102_856 - 2 * 4
 
 
 class TestContextParallelShardLen:
@@ -232,6 +389,24 @@ class TestModelArchFromHfConfig:
         assert renamed_arch.layer_kinds == ("mamba", "moe", "attention")
         assert renamed_arch.layer_kinds == hub_arch.layer_kinds
         assert renamed_arch.attention_layers == hub_arch.attention_layers == 1
+
+    @pytest.mark.parametrize(
+        ("model_type", "eager"),
+        [
+            ("eager_family", True),
+            ("deepseek_v4", False),
+            ("glm5_next", False),
+            ("qwen3", False),
+        ],
+    )
+    def test_eager_attention_follows_the_family_backend(
+        self, monkeypatch, model_type, eager
+    ):
+        monkeypatch.setitem(FAMILY_ATTN_IMPLEMENTATIONS, "eager_family", "eager")
+
+        arch = ModelArch.from_hf_config({**DECODER_TINY, "model_type": model_type})
+
+        assert arch.eager_attention is eager
 
     def test_tiny_llm_asset(self):
         config = json.loads((ASSETS / "tiny_llm" / "config.json").read_text())
@@ -486,6 +661,149 @@ class TestModelArchFromHfConfig:
         assert empty.multimodal_tower_params == 0
         assert towered.multimodal_tower_params == 2 * per_layer + 16 * 128
 
+    def test_mla_caches_one_latent_head(self):
+        arch = ModelArch.from_hf_config(GLM_TINY)
+
+        assert (arch.n_kv_heads, arch.head_dim, arch.kv_lora_rank) == (1, 8, 16)
+        assert (arch.attention_layers, arch.n_mamba_layers) == (2, 2)
+        assert arch.mamba_kda
+        assert arch.n_indexed_layers == 2
+
+    def test_dense_mlp_layer_types_leave_the_rest_routed(self):
+        arch = ModelArch.from_hf_config(GLM_TINY)
+
+        assert (arch.dense_ffn_layers, arch.mlp_layers, arch.moe_layers) == (1, 1, 3)
+
+    def test_first_k_dense_replace_and_moe_layer_freq_pick_dense_layers(self):
+        # Arrange: layers 0 and 1 come before the first MoE layer; of the
+        # rest, only even layers route experts.
+        config = {
+            **DECODER_TINY,
+            "num_hidden_layers": 6,
+            "n_routed_experts": 4,
+            "num_experts_per_tok": 2,
+            "first_k_dense_replace": 2,
+            "moe_layer_freq": 2,
+        }
+
+        # Act
+        arch = ModelArch.from_hf_config(config)
+
+        # Assert
+        assert (arch.dense_ffn_layers, arch.mlp_layers, arch.moe_layers) == (4, 4, 2)
+
+    def test_compress_ratios_count_csa_and_hca_layers_of_the_stack(self):
+        arch = ModelArch.from_hf_config(DSV4_TINY)
+
+        assert (arch.n_csa_layers, arch.n_hca_layers, arch.n_indexed_layers) == (
+            1,
+            1,
+            1,
+        )
+        assert arch.shared_kv
+        assert arch.sliding_window_layer_fraction == 1.0
+
+    def test_unknown_compress_ratio_raises(self):
+        config = {**DSV4_TINY, "compress_ratios": [0, 8, 4]}
+
+        with pytest.raises(
+            ValueError, match=r"compress_ratios has unknown entries \[8\]"
+        ):
+            ModelArch.from_hf_config(config)
+
+    def test_hybrid_layer_pattern_sizes_sliding_and_full_kv_heads(self):
+        arch = ModelArch.from_hf_config(MIMO_TINY)
+
+        assert (arch.n_kv_heads, arch.global_n_kv_heads) == (2, 1)
+        assert arch.sliding_window_layer_fraction == pytest.approx(2 / 3)
+        assert arch.mean_kv_heads == pytest.approx(5 / 3)
+
+    def test_per_layer_moe_layer_freq_marks_dense_layers(self):
+        arch = ModelArch.from_hf_config(MIMO_TINY)
+
+        assert (arch.dense_ffn_layers, arch.mlp_layers, arch.moe_layers) == (1, 1, 2)
+
+    def test_text_only_family_counts_no_tower(self):
+        arch = ModelArch.from_hf_config(MIMO_TINY)
+        towered = ModelArch.from_hf_config({**MIMO_TINY, "model_type": "qwen3"})
+
+        assert (arch.multimodal_tower_params, arch.vision_hidden_size) == (0, 0)
+        assert towered.multimodal_tower_params > 0
+
+    def test_ue8m0_fp8_with_fp4_experts_stores_scales_per_block(self):
+        config = SUPPORTED_MODEL_INFO[DSV4_FLASH].config
+
+        stored = ModelArch.from_hf_config(config).checkpoint_quantization
+
+        assert stored is not None
+        assert stored.linear_bytes == 1 + 1 / (128 * 128)
+        assert stored.expert_bytes == 0.5 + 1 / 32
+        assert stored.unquantized_attention == frozenset()
+        assert stored.unquantized_mixer == frozenset()
+
+    def test_fp32_scaled_fp8_keeps_unconverted_mla_and_kda_modules(self):
+        # Arrange
+        config = SUPPORTED_MODEL_INFO[GLM_FLASH].config
+
+        # Act
+        stored = ModelArch.from_hf_config(config).checkpoint_quantization
+
+        # Assert
+        assert stored is not None
+        assert stored.linear_bytes == stored.expert_bytes == 1 + 4 / (128 * 128)
+        assert "kv_b_proj" in stored.unquantized_attention
+        assert "o_proj" not in stored.unquantized_attention
+        assert set(formulas.KDA_LINEAR_NAMES) <= stored.unquantized_mixer
+
+    def test_mxfp4_experts_keep_the_unconverted_output_projection(self):
+        config = SUPPORTED_MODEL_INFO[MIMO_FLASH].config
+
+        stored = ModelArch.from_hf_config(config).checkpoint_quantization
+
+        assert stored is not None
+        assert stored.linear_bytes == 1 + 4 / (128 * 128)
+        assert stored.expert_bytes == 0.5 + 1 / 32
+        assert stored.unquantized_attention == frozenset({"o_proj"})
+
+    def test_only_prequantized_catalog_checkpoints_carry_quantization(self):
+        quantized = {
+            hub_id
+            for hub_id, info in SUPPORTED_MODEL_INFO.items()
+            if ModelArch.from_hf_config(info.config).checkpoint_quantization is not None
+        }
+
+        assert quantized == set(PREQUANTIZED_CHECKPOINTS)
+
+    def test_per_tensor_fp8_stores_one_byte(self):
+        config = {**DSV4_TINY, "quantization_config": {"quant_method": "fp8"}}
+
+        stored = ModelArch.from_hf_config(config).checkpoint_quantization
+
+        assert stored is not None
+        assert stored.linear_bytes == stored.expert_bytes == 1.0
+
+    def test_non_fp8_quant_method_is_unparsed(self):
+        config = {**DSV4_TINY, "quantization_config": {"quant_method": "mxfp4"}}
+
+        assert ModelArch.from_hf_config(config).checkpoint_quantization is None
+
+    def test_unconverted_modules_on_draft_layers_are_skipped(self):
+        # Arrange
+        draft_layer = DSV4_TINY["num_hidden_layers"]
+        quant = {
+            "quant_method": "fp8",
+            "modules_to_not_convert": [f"model.layers.{draft_layer}.self_attn.wo_a"],
+        }
+
+        # Act
+        stored = ModelArch.from_hf_config(
+            {**DSV4_TINY, "quantization_config": quant}
+        ).checkpoint_quantization
+
+        # Assert
+        assert stored is not None
+        assert stored.unquantized_attention == frozenset()
+
 
 class TestHasRoutedExperts:
     @pytest.mark.parametrize(
@@ -527,6 +845,14 @@ class TestModelArchProperties:
 
     def test_mean_qkv_dim_without_a_wider_global_head_is_the_head_width(self):
         assert QWEN_05B.mean_qkv_dim == (14 + 2 * 2) * 64
+
+    def test_mean_qkv_dim_under_mla_expands_keys_and_values_per_head(self):
+        arch = QWEN_05B.model_copy(update={"kv_lora_rank": 512})
+
+        assert arch.mean_qkv_dim == 14 * (2 * 64 + 64)
+
+    def test_mean_kv_heads_without_global_kv_heads_is_n_kv_heads(self):
+        assert QWEN_05B.mean_kv_heads == 2
 
     def test_moe_layers_follows_n_moe_layers(self):
         arch = MOE_TINY.model_copy(update={"n_moe_layers": 1})
@@ -601,19 +927,19 @@ class TestMambaSharedGroupRowsParams:
 class TestMambaSavedWidth:
     def test_fused_kernel_keeps_in_proj_and_scan_outputs(self):
         # 48 heads x 64 = 3072 inner, conv dim 3328.
-        assert formulas.mamba_saved_width(GRANITE_H_TINY, lora=False) == (
+        assert block_activations.mamba_saved_width(GRANITE_H_TINY, lora=False) == (
             2 * 3072 + 3328 + 48
         )
 
     def test_lora_adds_the_in_proj_and_out_proj_inputs(self):
-        frozen = formulas.mamba_saved_width(GRANITE_H_TINY, lora=False)
+        frozen = block_activations.mamba_saved_width(GRANITE_H_TINY, lora=False)
 
-        assert formulas.mamba_saved_width(GRANITE_H_TINY, lora=True) == (
+        assert block_activations.mamba_saved_width(GRANITE_H_TINY, lora=True) == (
             frozen + 1536 + 3072
         )
 
     def test_models_without_mamba_save_nothing(self):
-        assert formulas.mamba_saved_width(QWEN_05B, lora=True) == 0
+        assert block_activations.mamba_saved_width(QWEN_05B, lora=True) == 0
 
 
 class TestStoredBlockBytes:
@@ -625,8 +951,10 @@ class TestStoredBlockBytes:
         tokens = 4096
 
         # Act
-        lora = formulas.stored_block_bytes(arch, 1, tokens, 2.0, True, False)
-        frozen = formulas.stored_block_bytes(arch, 1, tokens, 2.0, False, False)
+        lora = block_activations.stored_block_bytes(arch, 1, tokens, 2.0, True, False)
+        frozen = block_activations.stored_block_bytes(
+            arch, 1, tokens, 2.0, False, False
+        )
 
         # Assert
         held_by_frozen = slots * (2 * inter + arch.expert_width) * 2
@@ -637,8 +965,8 @@ class TestStoredBlockBytes:
     def test_bytes_scale_with_tokens(self):
         arch = ModelArch.from_hf_config(GRANITE_MOE)
 
-        one = formulas.stored_block_bytes(arch, 1, 2048, 2.0, True, False)
-        four = formulas.stored_block_bytes(arch, 4, 2048, 2.0, True, False)
+        one = block_activations.stored_block_bytes(arch, 1, 2048, 2.0, True, False)
+        four = block_activations.stored_block_bytes(arch, 4, 2048, 2.0, True, False)
 
         assert four == pytest.approx(4 * one, abs=4)
 
@@ -649,10 +977,16 @@ class TestStoredBlockBytes:
         row_bytes = arch.n_experts_per_tok * arch.expert_width * 2
 
         # Act
-        local = formulas.stored_block_bytes(arch, 1, tokens, 2.0, True, False)
-        lora_ep = formulas.stored_block_bytes(arch, 1, tokens, 2.0, True, False, 2)
-        frozen_ep = formulas.stored_block_bytes(arch, 1, tokens, 2.0, False, False, 2)
-        frozen = formulas.stored_block_bytes(arch, 1, tokens, 2.0, False, False)
+        local = block_activations.stored_block_bytes(arch, 1, tokens, 2.0, True, False)
+        lora_ep = block_activations.stored_block_bytes(
+            arch, 1, tokens, 2.0, True, False, 2
+        )
+        frozen_ep = block_activations.stored_block_bytes(
+            arch, 1, tokens, 2.0, False, False, 2
+        )
+        frozen = block_activations.stored_block_bytes(
+            arch, 1, tokens, 2.0, False, False
+        )
 
         # Assert
         assert lora_ep - local == pytest.approx(tokens * 4 * row_bytes, abs=1)
@@ -662,11 +996,13 @@ class TestStoredBlockBytes:
         # Arrange
         arch = ModelArch.from_hf_config(GRANITE_MOE)
         tokens = 4096
-        local = formulas.stored_block_bytes(arch, 1, tokens, 2.0, True, False)
+        local = block_activations.stored_block_bytes(arch, 1, tokens, 2.0, True, False)
 
         # Act
-        ep = formulas.stored_block_bytes(arch, 1, tokens, 2.0, True, False, 2)
-        ep_tp = formulas.stored_block_bytes(arch, 1, tokens, 2.0, True, False, 2, 2)
+        ep = block_activations.stored_block_bytes(arch, 1, tokens, 2.0, True, False, 2)
+        ep_tp = block_activations.stored_block_bytes(
+            arch, 1, tokens, 2.0, True, False, 2, 2
+        )
 
         # Assert
         assert ep_tp - local == pytest.approx((ep - local) / 2, abs=1)
@@ -677,8 +1013,10 @@ class TestStoredBlockBytes:
         lora_width = 1536 + 3072
 
         # Act
-        lora = formulas.stored_block_bytes(GRANITE_H_TINY, 1, tokens, 2.0, True, True)
-        frozen = formulas.stored_block_bytes(
+        lora = block_activations.stored_block_bytes(
+            GRANITE_H_TINY, 1, tokens, 2.0, True, True
+        )
+        frozen = block_activations.stored_block_bytes(
             GRANITE_H_TINY, 1, tokens, 2.0, True, False
         )
 
@@ -693,21 +1031,25 @@ class TestStoredBlockBytes:
         q_dim = arch.n_heads * arch.head_dim
 
         # Act
-        plain = formulas.stored_block_bytes(arch, 1, tokens, 2.0, True, False)
-        with_norm = formulas.stored_block_bytes(normed, 1, tokens, 2.0, True, False)
+        plain = block_activations.stored_block_bytes(arch, 1, tokens, 2.0, True, False)
+        with_norm = block_activations.stored_block_bytes(
+            normed, 1, tokens, 2.0, True, False
+        )
 
         # Assert: every Granite MoE layer holds attention.
         assert arch.attention_layers == arch.n_layers
         assert with_norm - plain == pytest.approx(tokens * q_dim * 4, abs=1)
 
     def test_prices_recomputing_moe_stacks_only(self):
-        assert formulas.prices_stored_tensors(ModelArch.from_hf_config(GRANITE_MOE))
-        assert formulas.prices_stored_tensors(GRANITE_H_TINY)
-        assert not formulas.prices_stored_tensors(
+        assert block_activations.prices_stored_tensors(
+            ModelArch.from_hf_config(GRANITE_MOE)
+        )
+        assert block_activations.prices_stored_tensors(GRANITE_H_TINY)
+        assert not block_activations.prices_stored_tensors(
             ModelArch.from_hf_config(NEMOTRON_H_MOE)
         )
-        assert not formulas.prices_stored_tensors(QWEN_05B)
-        assert not formulas.prices_stored_tensors(GRANITE_MICRO)
+        assert not block_activations.prices_stored_tensors(QWEN_05B)
+        assert not block_activations.prices_stored_tensors(GRANITE_MICRO)
 
 
 class TestLoraParamCount:
@@ -917,6 +1259,72 @@ class TestTowerLoraParamCount:
             lora_formulas.tower_lora_param_count(QWEN_05B, 16, QWEN_TOWER_TARGETS) == 0
         )
 
+    def test_mla_and_kda_skip_the_excluded_gate_projections(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(GLM_TINY)
+        # q_a, q_b, kv_a, kv_b, o per MLA layer.
+        mla = (64 + 32) + (32 + 32) + (64 + 16) + (16 + 64) + (32 + 64)
+        # q, k, v, f_b, beta, g_b, o per KDA layer.
+        kda = 3 * (64 + 16) + 2 * (8 + 16) + (64 + 2) + (16 + 64)
+        # gate, up and down of the shared expert per MoE layer.
+        shared = 3 * (64 + 16)
+        # f_a and g_a per KDA layer.
+        excluded = 2 * (64 + 8)
+
+        # Act
+        attn_only = lora_formulas.lora_param_count(arch, 1, "attention-only")
+        all_linear = lora_formulas.lora_param_count(arch, 1)
+        engine = lora_formulas.engine_lora_param_count(arch, 1)
+
+        # Assert
+        assert attn_only == 2 * mla
+        assert all_linear == 2 * mla + 3 * (64 + 96) + 3 * shared + 2 * kda
+        assert engine == all_linear + 2 * excluded
+
+    def test_grouped_output_wraps_only_the_mixing_linear(self):
+        arch = ModelArch.from_hf_config(DSV4_TINY)
+
+        # q_a, q_b, the shared kv, o_b, and the shared expert's gate, up and
+        # down per layer.
+        expected = 3 * ((64 + 32) + (32 + 64) + (64 + 16) + (16 + 64) + 3 * (64 + 16))
+        assert lora_formulas.lora_param_count(arch, 1) == expected
+
+    def test_values_and_kv_heads_take_each_layer_width(self):
+        # Arrange: the adapter wraps o_proj only; the engine wraps q, k, v too.
+        arch = ModelArch.from_hf_config(MIMO_TINY)
+        full = (64 + 64) + (64 + 16) + (64 + 8) + (32 + 64)
+        sliding = (64 + 64) + (64 + 32) + (64 + 16) + (32 + 64)
+        output = 32 + 64
+
+        # Act
+        attn_only = lora_formulas.lora_param_count(arch, 1, "attention-only")
+        all_linear = lora_formulas.lora_param_count(arch, 1)
+        engine = lora_formulas.engine_lora_param_count(arch, 1)
+
+        # Assert
+        assert attn_only == 3 * output
+        assert all_linear == 3 * output + 3 * (64 + 96)
+        assert engine == full + 2 * sliding + 3 * (64 + 96)
+
+    @pytest.mark.parametrize(
+        "config", [{**DECODER_TINY, "model_type": "qwen3"}, NEMOTRON_H]
+    )
+    def test_engine_count_matches_the_adapter_without_exclusions(self, config):
+        arch = ModelArch.from_hf_config(config)
+
+        assert arch.lora_excluded_modules == frozenset()
+        assert lora_formulas.engine_lora_param_count(arch, 16) == (
+            lora_formulas.lora_param_count(arch, 16)
+        )
+
+    def test_unwrapped_deepseek_v4_exclusions_leave_the_count_unchanged(self):
+        arch = ModelArch.from_hf_config(DSV4_TINY)
+
+        assert "o_a_proj" in arch.lora_excluded_modules
+        assert lora_formulas.engine_lora_param_count(arch, 1) == (
+            lora_formulas.lora_param_count(arch, 1)
+        )
+
 
 class TestResolveChunkRows:
     def test_targets_256mib_logit_tile(self):
@@ -1044,6 +1452,30 @@ class TestKvCacheBytesPerToken:
             8 * 8192 * 2 * storing * 1 * 2 * 512
         )
 
+    def test_mla_stores_the_latent_and_indexer_keys(self):
+        arch = ModelArch.from_hf_config(GLM_TINY)
+
+        # Two MLA layers cache a 16-wide latent and 8-wide indexer keys.
+        assert kv_cache.kv_cache_bytes_per_token(arch, "bf16") == 2 * (16 + 8) * 2
+
+    def test_compressed_layers_add_their_entries_to_every_window(self):
+        arch = ModelArch.from_hf_config(DSV4_TINY)
+
+        # One shared 16-wide KV per layer, one CSA entry per 4 tokens, one
+        # HCA entry per 128, and CSA-rate 8-wide indexer keys.
+        expected = (3 * 16 + 16 / 4 + 16 / 128 + 8 / 4) * 2
+        assert kv_cache.kv_cache_bytes_per_token(arch, "bf16") == expected
+
+    def test_values_cache_at_their_own_width(self):
+        arch = ModelArch.from_hf_config(MIMO_TINY)
+
+        # A 16-wide key and 8-wide value per KV head: one head on the full
+        # layer, two on each sliding layer.
+        expected = (1 * (16 + 8) + 2 * 2 * (16 + 8)) * 2
+        assert kv_cache.kv_cache_bytes_per_token(arch, "bf16") == pytest.approx(
+            expected
+        )
+
 
 class TestKvCacheDemandBytes:
     def test_sliding_window_caps_growth(self):
@@ -1065,6 +1497,19 @@ class TestKvCacheDemandBytes:
         assert held == full * 265 * 16 // 16384
         # A 2048-token sequence caps the window at 128 blocks, plus one.
         assert capped == full * 129 * 16 // 16384
+
+    def test_compressed_entries_grow_past_the_window(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(DSV4_TINY)
+
+        # Act
+        demand = kv_cache.kv_cache_demand_bytes(arch, "bf16", 2, 1024, 0)
+
+        # Assert: a 7-token window holds one block plus one in each of three
+        # layers; compressed entries and indexer keys cover all 1024 tokens.
+        window = 2 * 3 * 16 * 2 * 32
+        compressed = 2 * 1024 * (16 / 4 + 16 / 128 + 8 / 4) * 2
+        assert demand == window + compressed
 
 
 class TestWeightBytes:
@@ -1093,7 +1538,9 @@ class TestEngineWeightBytes:
     def test_unquantized_matches_weight_bytes(self):
         counts = formulas.param_counts(QWEN_05B)
 
-        stored = formulas.engine_weight_bytes(counts, "bf16", WeightVariant(), "none")
+        stored = formulas.engine_weight_bytes(
+            QWEN_05B, counts, "bf16", WeightVariant(), "none"
+        )
 
         assert stored == formulas.weight_bytes(counts, "bf16", WeightVariant())
 
@@ -1103,7 +1550,9 @@ class TestEngineWeightBytes:
         linear = counts.attention + counts.mlp + counts.moe_experts + counts.mamba
 
         # Act
-        stored = formulas.engine_weight_bytes(counts, "bf16", WeightVariant(), "fp8")
+        stored = formulas.engine_weight_bytes(
+            QWEN_05B, counts, "bf16", WeightVariant(), "fp8"
+        )
 
         # Assert
         assert stored == (counts.total - linear) * 2 + linear
@@ -1116,10 +1565,90 @@ class TestEngineWeightBytes:
         base = replace(counts, moe_experts=0, mamba=0)
 
         delta = formulas.engine_weight_bytes(
-            counts, "bf16", WeightVariant(), "fp8"
-        ) - formulas.engine_weight_bytes(base, "bf16", WeightVariant(), "fp8")
+            QWEN_05B, counts, "bf16", WeightVariant(), "fp8"
+        ) - formulas.engine_weight_bytes(QWEN_05B, base, "bf16", WeightVariant(), "fp8")
 
         assert delta == 1_500_000
+
+    # Hub safetensors bytes less the MTP draft layers vLLM leaves unloaded and
+    # the towers the engine variant strips, over TP 8.
+    @pytest.mark.parametrize(
+        ("hub_id", "gib_per_gpu"),
+        [(DSV4_FLASH, 18.17), (GLM_FLASH, 37.22), (MIMO_FLASH, 19.81)],
+    )
+    def test_prequantized_checkpoint_matches_its_stored_bytes(
+        self, hub_id, gib_per_gpu
+    ):
+        # Arrange
+        info = SUPPORTED_MODEL_INFO[hub_id]
+        arch = ModelArch.from_hf_config(info.config)
+        counts = formulas.param_counts(arch, info.inspected["num_params"])
+        engine = WeightVariant(name="engine", stripped_multimodal=True)
+
+        # Act
+        stored = formulas.engine_weight_bytes(arch, counts, "bf16", engine, "none")
+
+        # Assert
+        assert stored / 8 / GiB == pytest.approx(gib_per_gpu, rel=0.02)
+
+    @pytest.mark.parametrize("hub_id", PREQUANTIZED_CHECKPOINTS)
+    def test_online_fp8_leaves_a_prequantized_checkpoint_as_stored(self, hub_id):
+        info = SUPPORTED_MODEL_INFO[hub_id]
+        arch = ModelArch.from_hf_config(info.config)
+        counts = formulas.param_counts(arch, info.inspected["num_params"])
+
+        stored = formulas.engine_weight_bytes(
+            arch, counts, "bf16", WeightVariant(), "none"
+        )
+
+        assert stored == formulas.engine_weight_bytes(
+            arch, counts, "bf16", WeightVariant(), "fp8"
+        )
+
+    @pytest.mark.parametrize("hub_id", [GLM_FLASH, MIMO_FLASH])
+    def test_unconverted_modules_stay_at_checkpoint_dtype(self, hub_id):
+        # Arrange
+        info = SUPPORTED_MODEL_INFO[hub_id]
+        arch = ModelArch.from_hf_config(info.config)
+        counts = formulas.param_counts(arch, info.inspected["num_params"])
+        stored = arch.checkpoint_quantization
+        assert stored is not None
+        all_converted = arch.model_copy(
+            update={
+                "checkpoint_quantization": stored.model_copy(
+                    update={
+                        "unquantized_attention": frozenset(),
+                        "unquantized_mixer": frozenset(),
+                    }
+                )
+            }
+        )
+
+        # Act
+        kept = formulas.engine_weight_bytes(
+            arch, counts, "bf16", WeightVariant(), "none"
+        )
+        converted = formulas.engine_weight_bytes(
+            all_converted, counts, "bf16", WeightVariant(), "none"
+        )
+
+        # Assert
+        assert kept > converted
+
+    @pytest.mark.parametrize(
+        "hub_id",
+        [h for h in SUPPORTED_MODEL_INFO if h not in PREQUANTIZED_CHECKPOINTS],
+    )
+    def test_bf16_checkpoint_serves_its_full_weights(self, hub_id):
+        info = SUPPORTED_MODEL_INFO[hub_id]
+        arch = ModelArch.from_hf_config(info.config)
+        counts = formulas.param_counts(arch, info.inspected["num_params"])
+
+        stored = formulas.engine_weight_bytes(
+            arch, counts, "bf16", WeightVariant(), "none"
+        )
+
+        assert stored == formulas.weight_bytes(counts, "bf16", WeightVariant())
 
 
 # Granite 3.1 3B-A800M geometry; the byte counts below are the live tensors a
@@ -1253,8 +1782,10 @@ class TestRoutedExpertBytes:
 
     def test_engine_forward_uses_active_expert_width(self):
         arch = ModelArch.from_hf_config(GRANITE_MOE)
-        engine = formulas.block_recompute_bytes(arch, 1, 1024, 2.0, engine_forward=True)
-        trainer = formulas.block_recompute_bytes(arch, 1, 1024, 2.0)
+        engine = block_activations.block_recompute_bytes(
+            arch, 1, 1024, 2.0, engine_forward=True
+        )
+        trainer = block_activations.block_recompute_bytes(arch, 1, 1024, 2.0)
 
         assert engine != trainer
         assert engine > 0
@@ -1403,7 +1934,9 @@ class TestMambaBlockBytes:
     def test_backward_matches_the_scan_snapshot(self):
         arch = ModelArch.from_hf_config(NEMOTRON_NANO_MAMBA)
 
-        backward = formulas.mamba_block_bytes(arch, 1, 16384, 2.0, backward=True)
+        backward = block_activations.mamba_block_bytes(
+            arch, 1, 16384, 2.0, backward=True
+        )
 
         assert arch.mamba_chunk_size == 256
         assert backward == pytest.approx(3.63 * GiB, rel=0.03)
@@ -1411,38 +1944,47 @@ class TestMambaBlockBytes:
     def test_forward_is_smaller_and_attention_only_is_zero(self):
         arch = ModelArch.from_hf_config(NEMOTRON_NANO_MAMBA)
 
-        forward = formulas.mamba_block_bytes(arch, 1, 16384, 2.0)
-        backward = formulas.mamba_block_bytes(arch, 1, 16384, 2.0, backward=True)
+        forward = block_activations.mamba_block_bytes(arch, 1, 16384, 2.0)
+        backward = block_activations.mamba_block_bytes(
+            arch, 1, 16384, 2.0, backward=True
+        )
 
         assert 0 < forward < backward
-        assert formulas.mamba_block_bytes(QWEN_05B, 1, 16384, 2.0) == 0
+        assert block_activations.mamba_block_bytes(QWEN_05B, 1, 16384, 2.0) == 0
 
     def test_unfused_scan_adds_backward_bytes_per_inner_channel(self):
         arch = ModelArch.from_hf_config(NEMOTRON_NANO_MAMBA)
         d_inner = arch.mamba_n_heads * arch.mamba_d_head
 
-        fused = formulas.mamba_block_bytes(arch, 1, 16384, 2.0, backward=True)
-        unfused = formulas.mamba_block_bytes(
+        fused = block_activations.mamba_block_bytes(arch, 1, 16384, 2.0, backward=True)
+        unfused = block_activations.mamba_block_bytes(
             arch, 1, 16384, 2.0, backward=True, unfused_scan=True
         )
-        forward = formulas.mamba_block_bytes(arch, 1, 16384, 2.0, unfused_scan=True)
+        forward = block_activations.mamba_block_bytes(
+            arch, 1, 16384, 2.0, unfused_scan=True
+        )
 
-        assert unfused - fused == 16384 * d_inner * formulas.UNFUSED_MAMBA_SCAN_BYTES
-        assert forward == formulas.mamba_block_bytes(arch, 1, 16384, 2.0)
+        assert (
+            unfused - fused
+            == 16384 * d_inner * block_activations.UNFUSED_MAMBA_SCAN_BYTES
+        )
+        assert forward == block_activations.mamba_block_bytes(arch, 1, 16384, 2.0)
 
     def test_block_exclusive_recompute_is_the_widest_layer(self):
         arch = ModelArch.from_hf_config(NEMOTRON_NANO_MAMBA)
 
         per_layer = {
-            kind: formulas.block_recompute_bytes(
+            kind: block_activations.block_recompute_bytes(
                 arch, 1, 16384, 2.0, backward=True, layer=kind
             )
             for kind in formulas.block_kinds(arch)
         }
-        widest = formulas.block_recompute_bytes(arch, 1, 16384, 2.0, backward=True)
+        widest = block_activations.block_recompute_bytes(
+            arch, 1, 16384, 2.0, backward=True
+        )
 
         assert set(per_layer) == {"attention", "ffn", "mamba"}
-        assert per_layer["mamba"] == formulas.mamba_block_bytes(
+        assert per_layer["mamba"] == block_activations.mamba_block_bytes(
             arch, 1, 16384, 2.0, backward=True
         )
         assert widest == max(per_layer.values())
@@ -1451,10 +1993,12 @@ class TestMambaBlockBytes:
         falcon = ModelArch.from_hf_config(FALCON_H1)
         dense = falcon.model_copy(update={"n_mamba_layers": 0})
 
-        with_scan = formulas.block_recompute_bytes(falcon, 1, 1024, 2.0)
-        without = formulas.block_recompute_bytes(dense, 1, 1024, 2.0)
+        with_scan = block_activations.block_recompute_bytes(falcon, 1, 1024, 2.0)
+        without = block_activations.block_recompute_bytes(dense, 1, 1024, 2.0)
 
-        assert with_scan - without == formulas.mamba_block_bytes(falcon, 1, 1024, 2.0)
+        assert with_scan - without == block_activations.mamba_block_bytes(
+            falcon, 1, 1024, 2.0
+        )
         assert not falcon.mamba_gated_delta
 
 
@@ -1463,7 +2007,7 @@ class TestGatedDeltaBlockBytes:
         # Qwen3.5-0.8B no-grad forward at 16k: 31744 bf16 elements per token.
         arch = ModelArch.from_hf_config(QWEN35_08B.config)
 
-        forward = formulas.gated_delta_block_bytes(arch, 1, 16384, 2.0)
+        forward = block_activations.gated_delta_block_bytes(arch, 1, 16384, 2.0)
 
         assert forward == 16384 * 31744 * 2
         assert forward == 992 * MiB
@@ -1471,18 +2015,20 @@ class TestGatedDeltaBlockBytes:
     def test_backward_adds_the_in_proj_output_and_gate(self):
         arch = ModelArch.from_hf_config(QWEN35_08B.config)
 
-        forward = formulas.gated_delta_block_bytes(arch, 2, 4096, 2.0)
-        backward = formulas.gated_delta_block_bytes(arch, 2, 4096, 2.0, backward=True)
+        forward = block_activations.gated_delta_block_bytes(arch, 2, 4096, 2.0)
+        backward = block_activations.gated_delta_block_bytes(
+            arch, 2, 4096, 2.0, backward=True
+        )
 
         assert backward - forward == 2 * 4096 * (6144 + 2048) * 2
 
     def test_mamba2_and_attention_only_stacks_are_zero(self):
         mamba2 = ModelArch.from_hf_config(NEMOTRON_NANO_MAMBA)
 
-        assert formulas.gated_delta_block_bytes(mamba2, 1, 16384, 2.0) == 0
-        assert formulas.gated_delta_block_bytes(QWEN_05B, 1, 16384, 2.0) == 0
-        assert formulas.gated_delta_saved_bytes(mamba2, 1, 16384, 2.0) == 0
-        assert formulas.gated_delta_saved_bytes(QWEN_05B, 1, 16384, 2.0) == 0
+        assert block_activations.gated_delta_block_bytes(mamba2, 1, 16384, 2.0) == 0
+        assert block_activations.gated_delta_block_bytes(QWEN_05B, 1, 16384, 2.0) == 0
+        assert block_activations.gated_delta_saved_bytes(mamba2, 1, 16384, 2.0) == 0
+        assert block_activations.gated_delta_saved_bytes(QWEN_05B, 1, 16384, 2.0) == 0
 
     def test_forward_charges_q_and_k_at_the_key_head_count(self):
         # Qwen3.6-35B-A3B: 16 key heads, 32 value heads, so q/k are half as wide as v.
@@ -1490,9 +2036,9 @@ class TestGatedDeltaBlockBytes:
             SUPPORTED_MODEL_INFO["Qwen/Qwen3.6-35B-A3B"].config
         )
 
-        forward = formulas.gated_delta_block_bytes(arch, 1, 1024, 2.0)
+        forward = block_activations.gated_delta_block_bytes(arch, 1, 1024, 2.0)
 
-        assert formulas.gated_delta_qk_width(arch) == 2048
+        assert block_activations.gated_delta_qk_width(arch) == 2048
         assert (
             forward == 1024 * (8192 + 4 * 2048 + 4096 + 5 * 4096 + 32 * 64 + 8192) * 2
         )
@@ -1505,7 +2051,7 @@ class TestGatedDeltaBlockBytes:
             SUPPORTED_MODEL_INFO["Qwen/Qwen3.6-35B-A3B"].config
         )
 
-        saved = formulas.gated_delta_saved_bytes(arch, 1, 32768, 2.0)
+        saved = block_activations.gated_delta_saved_bytes(arch, 1, 32768, 2.0)
 
         assert saved == 32768 * ((8192 + 2 * 2048 + 4 * 4096 + 32 * 64) * 2 + 32 * 4)
         assert saved == 1924 * MiB
@@ -1517,11 +2063,13 @@ class TestGatedDeltaBlockBytes:
         )
 
         # Act
-        forward = formulas.gated_delta_block_bytes(arch, 1, 1024, 2.0, False, 2)
-        saved = formulas.gated_delta_saved_bytes(arch, 1, 32768, 2.0, 2)
+        forward = block_activations.gated_delta_block_bytes(
+            arch, 1, 1024, 2.0, False, 2
+        )
+        saved = block_activations.gated_delta_saved_bytes(arch, 1, 32768, 2.0, 2)
 
         # Assert
-        assert formulas.gated_delta_qk_width(arch, 2) == 1024
+        assert block_activations.gated_delta_qk_width(arch, 2) == 1024
         assert (
             forward == 1024 * (4096 + 4 * 1024 + 2048 + 5 * 2048 + 16 * 64 + 4096) * 2
         )
@@ -1531,9 +2079,11 @@ class TestGatedDeltaBlockBytes:
     def test_tensor_parallel_that_does_not_split_the_heads_keeps_them_whole(self):
         arch = ModelArch.from_hf_config(QWEN35_08B.config)
 
-        split = formulas.gated_delta_block_bytes(arch, 1, 1024, 2.0, True, 3)
+        split = block_activations.gated_delta_block_bytes(arch, 1, 1024, 2.0, True, 3)
 
-        assert split == formulas.gated_delta_block_bytes(arch, 1, 1024, 2.0, True)
+        assert split == block_activations.gated_delta_block_bytes(
+            arch, 1, 1024, 2.0, True
+        )
 
     def test_block_recompute_sizes_the_recurrent_layer_per_rank(self):
         # Arrange
@@ -1541,14 +2091,18 @@ class TestGatedDeltaBlockBytes:
         tokens = 16384
 
         # Act
-        forward = formulas.block_recompute_bytes(
+        forward = block_activations.block_recompute_bytes(
             arch, 1, tokens, 2.0, layer="mamba", tensor_parallel=2
         )
 
         # Assert
         assert forward == tokens * 4 * 1024 * 2 + 496 * MiB
-        assert forward == tokens * 4 * 1024 * 2 + formulas.gated_delta_block_bytes(
-            arch, 1, tokens, 2.0, tensor_parallel=2
+        assert (
+            forward
+            == tokens * 4 * 1024 * 2
+            + block_activations.gated_delta_block_bytes(
+                arch, 1, tokens, 2.0, tensor_parallel=2
+            )
         )
 
     def test_forward_peaks_in_the_recurrent_sub_layer(self):
@@ -1557,8 +2111,8 @@ class TestGatedDeltaBlockBytes:
         tokens = 16384
 
         # Act
-        forward = formulas.block_recompute_bytes(arch, 1, tokens, 2.0)
-        nograd = formulas.nograd_forward_bytes(arch, 1, tokens, 2.0)
+        forward = block_activations.block_recompute_bytes(arch, 1, tokens, 2.0)
+        nograd = block_activations.nograd_forward_bytes(arch, 1, tokens, 2.0)
 
         # Assert
         assert forward == tokens * 4 * 1024 * 2 + 992 * MiB
@@ -1571,11 +2125,13 @@ class TestGatedDeltaBlockBytes:
         tokens = 16384
 
         # Act
-        backward = formulas.block_recompute_bytes(arch, 1, tokens, 2.0, backward=True)
-        mamba = formulas.block_recompute_bytes(
+        backward = block_activations.block_recompute_bytes(
+            arch, 1, tokens, 2.0, backward=True
+        )
+        mamba = block_activations.block_recompute_bytes(
             arch, 1, tokens, 2.0, backward=True, layer="mamba"
         )
-        mlp = formulas.block_recompute_bytes(
+        mlp = block_activations.block_recompute_bytes(
             arch, 1, tokens, 2.0, backward=True, layer="ffn"
         )
 
@@ -1593,7 +2149,7 @@ class TestGatedDeltaBlockBytes:
         routed = formulas.routed_expert_bytes(arch, 1, tokens, 2.0, backward=True)
 
         # Act
-        mamba = formulas.block_recompute_bytes(
+        mamba = block_activations.block_recompute_bytes(
             arch, 1, tokens, 2.0, backward=True, layer="mamba"
         )
 
@@ -1609,7 +2165,7 @@ class TestGatedDeltaBlockBytes:
         tokens = 16384
 
         # Act
-        mamba = formulas.block_recompute_bytes(
+        mamba = block_activations.block_recompute_bytes(
             arch, 1, tokens, 2.0, backward=True, layer="mamba"
         )
 
@@ -1622,7 +2178,9 @@ class TestGatedDeltaBlockBytes:
         )
         tokens = 16384
 
-        backward = formulas.block_recompute_bytes(arch, 1, tokens, 2.0, backward=True)
+        backward = block_activations.block_recompute_bytes(
+            arch, 1, tokens, 2.0, backward=True
+        )
 
         assert backward == tokens * 2 * 1024 * 2 + 1248 * MiB
 
@@ -1638,8 +2196,12 @@ class TestGatedDeltaBlockBytes:
 
 class TestBlockRecomputeBackwardPeak:
     def test_rows_scale_the_block_linearly(self):
-        one = formulas.block_recompute_bytes(QWEN_05B, 1, 1024, 2.0, backward=True)
-        four = formulas.block_recompute_bytes(QWEN_05B, 4, 1024, 2.0, backward=True)
+        one = block_activations.block_recompute_bytes(
+            QWEN_05B, 1, 1024, 2.0, backward=True
+        )
+        four = block_activations.block_recompute_bytes(
+            QWEN_05B, 4, 1024, 2.0, backward=True
+        )
 
         assert four == 4 * one
 
@@ -1649,7 +2211,9 @@ class TestBlockRecomputeBackwardPeak:
         arch = QWEN_05B
 
         # Act
-        backward = formulas.block_recompute_bytes(arch, 1, seq_len, 2.0, backward=True)
+        backward = block_activations.block_recompute_bytes(
+            arch, 1, seq_len, 2.0, backward=True
+        )
 
         # Assert: gate, up, fused SwiGLU output, and one gradient.
         assert (
@@ -1663,8 +2227,10 @@ class TestBlockRecomputeBackwardPeak:
         seq_len = 1024
         arch = QWEN_05B.model_copy(update={"gated_mlp": False})
 
-        forward = formulas.block_recompute_bytes(arch, 1, seq_len, 2.0)
-        backward = formulas.block_recompute_bytes(arch, 1, seq_len, 2.0, backward=True)
+        forward = block_activations.block_recompute_bytes(arch, 1, seq_len, 2.0)
+        backward = block_activations.block_recompute_bytes(
+            arch, 1, seq_len, 2.0, backward=True
+        )
 
         assert (
             forward
@@ -1683,7 +2249,7 @@ class TestBlockRecomputeBackwardPeak:
         seq_len = 16384
         arch = QWEN_05B
 
-        forward = formulas.block_recompute_bytes(arch, 1, seq_len, 2.0)
+        forward = block_activations.block_recompute_bytes(arch, 1, seq_len, 2.0)
 
         assert (
             forward
@@ -1697,12 +2263,33 @@ class TestBlockRecomputeBackwardPeak:
         arch = ModelArch.from_hf_config(QWEN3_4B)
         without = arch.model_copy(update={"qk_norm": False})
 
-        backward = formulas.block_recompute_bytes(arch, 1, seq_len, 2.0, backward=True)
-        base = formulas.block_recompute_bytes(without, 1, seq_len, 2.0, backward=True)
+        backward = block_activations.block_recompute_bytes(
+            arch, 1, seq_len, 2.0, backward=True
+        )
+        base = block_activations.block_recompute_bytes(
+            without, 1, seq_len, 2.0, backward=True
+        )
 
         assert arch.qk_norm
         assert not without.qk_norm
         assert backward - base == seq_len * arch.n_heads * arch.head_dim * 4
+
+    def test_deepseek_v4_backward_adds_one_fp32_query_per_rank(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(SUPPORTED_MODEL_INFO[DSV4_FLASH].config)
+        without = arch.model_copy(update={"qk_norm": False})
+
+        # Act
+        backward = block_activations.block_recompute_bytes(
+            arch, 1, 4096, 2.0, backward=True, tensor_parallel=4
+        )
+        base = block_activations.block_recompute_bytes(
+            without, 1, 4096, 2.0, backward=True, tensor_parallel=4
+        )
+
+        # Assert: q_b_norm upcasts 16 of 64 512-wide query heads per tp4 rank.
+        assert arch.qk_norm
+        assert backward - base == 4096 * 16 * 512 * 4
 
     def test_qwen2_has_no_query_key_norm(self):
         qwen2 = dict(QWEN3_4B)
@@ -1724,8 +2311,12 @@ class TestBlockRecomputeNormInputs:
         granite = fused.model_copy(update={"fp32_norm_inputs": True})
 
         # Act
-        stock = formulas.block_recompute_bytes(granite, 1, 65536, 2.0, backward=True)
-        liger = formulas.block_recompute_bytes(fused, 1, 65536, 2.0, backward=True)
+        stock = block_activations.block_recompute_bytes(
+            granite, 1, 65536, 2.0, backward=True
+        )
+        liger = block_activations.block_recompute_bytes(
+            fused, 1, 65536, 2.0, backward=True
+        )
 
         # Assert: a 64k-token stock-norm Granite MoE snapshot held two 0.375 GiB fp32 copies.
         assert stock - liger == 2 * 65536 * 1536 * 4
@@ -1738,9 +2329,9 @@ class TestBlockRecomputeNormInputs:
         assert not fused.fp32_norm_inputs
         assert not ModelArch.from_hf_config(QWEN3_4B).fp32_norm_inputs
         assert not ModelArch.from_hf_config(NEMOTRON_NANO_MAMBA).fp32_norm_inputs
-        assert formulas.block_recompute_bytes(
+        assert block_activations.block_recompute_bytes(
             granite, 1, 1024, 2.0
-        ) == formulas.block_recompute_bytes(fused, 1, 1024, 2.0)
+        ) == block_activations.block_recompute_bytes(fused, 1, 1024, 2.0)
 
     def test_block_exclusive_layer_keeps_one_norm_input(self):
         # A non-gated MLP keeps the stock MLP term out of the difference.
@@ -1750,10 +2341,10 @@ class TestBlockRecomputeNormInputs:
         stock = nano.model_copy(update={"fp32_norm_inputs": True})
 
         added = {
-            kind: formulas.block_recompute_bytes(
+            kind: block_activations.block_recompute_bytes(
                 stock, 1, 4096, 2.0, backward=True, layer=kind
             )
-            - formulas.block_recompute_bytes(
+            - block_activations.block_recompute_bytes(
                 nano, 1, 4096, 2.0, backward=True, layer=kind
             )
             for kind in formulas.block_kinds(nano)
@@ -1767,13 +2358,289 @@ class TestBlockRecomputeNormInputs:
         fused = gemma.model_copy(update={"fp32_norm_inputs": False})
 
         # Act
-        stock = formulas.block_recompute_bytes(gemma, 1, 16384, 2.0, backward=True)
-        liger = formulas.block_recompute_bytes(fused, 1, 16384, 2.0, backward=True)
+        stock = block_activations.block_recompute_bytes(
+            gemma, 1, 16384, 2.0, backward=True
+        )
+        liger = block_activations.block_recompute_bytes(
+            fused, 1, 16384, 2.0, backward=True
+        )
 
         # Assert: four sandwich norms and the per-layer-input norm.
         assert gemma.fp32_norm_inputs
         assert gemma.norms_per_block == 5
         assert stock - liger == 5 * 16384 * 2560 * 4
+
+
+class TestBlockRecomputeEagerScores:
+    @pytest.mark.parametrize("backward", [True, False])
+    def test_eager_attention_holds_three_score_tensors(self, backward):
+        # Arrange
+        eager = QWEN_05B.model_copy(update={"eager_attention": True})
+
+        # Act
+        with_scores = block_activations.block_recompute_bytes(
+            eager, 2, 4096, 2.0, backward=backward
+        )
+        tiled = block_activations.block_recompute_bytes(
+            QWEN_05B, 2, 4096, 2.0, backward=backward
+        )
+
+        # Assert: 3 copies of 2 rows x 14 heads x 4096 x 4096 bf16 scores.
+        assert with_scores - tiled == 3 * 2 * 14 * 4096 * 4096 * 2
+
+    def test_only_the_attention_sub_layer_pays(self):
+        # Arrange
+        nano = ModelArch.from_hf_config(NEMOTRON_NANO_MAMBA)
+        eager = nano.model_copy(update={"eager_attention": True})
+
+        # Act
+        added = {
+            kind: block_activations.block_recompute_bytes(
+                eager, 1, 2048, 2.0, backward=True, layer=kind
+            )
+            - block_activations.block_recompute_bytes(
+                nano, 1, 2048, 2.0, backward=True, layer=kind
+            )
+            for kind in formulas.block_kinds(nano)
+        }
+
+        # Assert
+        assert added == {"attention": 3 * 40 * 2048 * 2048 * 2, "ffn": 0, "mamba": 0}
+
+    def test_engine_forward_pays_nothing(self):
+        eager = QWEN_05B.model_copy(update={"eager_attention": True})
+
+        assert block_activations.block_recompute_bytes(
+            eager, 1, 4096, 2.0, engine_forward=True
+        ) == block_activations.block_recompute_bytes(
+            QWEN_05B, 1, 4096, 2.0, engine_forward=True
+        )
+
+
+class TestCompressedEntryBytes:
+    def test_entries_past_topk_hold_a_mask_byte_and_head_scores(self):
+        arch = ModelArch.from_hf_config({**DSV4_TINY, "index_topk": 128})
+
+        n_bytes = block_activations.compressed_entry_bytes(arch, 1, 1024, 1024)
+
+        # 256 entries per query: a bool mask, and fp32 scores of 2 indexer
+        # heads plus their sum.
+        assert n_bytes == 1024 * 256 * (1 + 3 * 4)
+
+    def test_topk_covering_every_entry_holds_nothing_per_query(self):
+        arch = ModelArch.from_hf_config({**DSV4_TINY, "index_topk": 512})
+
+        assert block_activations.compressed_entry_bytes(arch, 2, 1024, 1024) == 0
+
+    def test_long_documents_score_queries_in_capped_chunks(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(SUPPORTED_MODEL_INFO[DSV4_FLASH].config)
+
+        # Act
+        n_bytes = block_activations.compressed_entry_bytes(arch, 1, 65536, 65536)
+
+        # Assert: 16384 entries; 2^28 scores cover 256 queries of 64 heads,
+        # each with the fp32 head sum.
+        assert n_bytes == 65536 * 16384 + 256 * 16384 * 65 * 4
+
+    def test_packed_documents_score_one_document_but_mask_the_whole_row(self):
+        arch = ModelArch.from_hf_config({**DSV4_TINY, "index_topk": 128})
+
+        n_bytes = block_activations.compressed_entry_bytes(arch, 1, 1536, 768)
+
+        # A bool per query and each of the row's 384 entries; one 768-token
+        # document's 192 entries scored at once.
+        assert n_bytes == 1536 * 384 + 768 * 192 * 3 * 4
+
+    def test_packed_documents_within_topk_hold_nothing_past_a_long_row(self):
+        arch = ModelArch.from_hf_config({**DSV4_TINY, "index_topk": 256})
+
+        assert block_activations.compressed_entry_bytes(arch, 1, 1536, 768) == 0
+
+    def test_model_without_csa_layers_pays_nothing(self):
+        assert block_activations.compressed_entry_bytes(QWEN_05B, 1, 4096, 4096) == 0
+
+    def test_context_parallel_queries_score_every_shards_entries(self):
+        arch = ModelArch.from_hf_config({**DSV4_TINY, "index_topk": 128})
+
+        n_bytes = block_activations.compressed_entry_bytes(arch, 1, 512, 256, 2)
+
+        # 512 local queries over the 256 entries of the whole 1024 tokens,
+        # which context parallel treats as one document.
+        assert n_bytes == 512 * 256 * (1 + 3 * 4)
+
+
+class TestContextParallelKeyBytes:
+    def test_deepseek_v4_gathers_sliding_kv_entries_and_indexer_keys(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(SUPPORTED_MODEL_INFO[DSV4_FLASH].config)
+        # Sliding KV 512 and CSA entries 512 / 4, three copies; indexer keys
+        # 128 / 4. The last 7 tokens of each shard's CSA KV and gate
+        # projections 2048 and indexer projections 4 * 128.
+        keys = 512 + 128
+        boundary = 2 * 7 * (2048 + 512)
+
+        # Act
+        forward = block_activations.context_parallel_key_bytes(
+            arch, 2, 4096, 2.0, context_parallel=2
+        )
+        backward = block_activations.context_parallel_key_bytes(
+            arch, 2, 4096, 2.0, backward=True, context_parallel=2
+        )
+
+        # Assert
+        assert forward == 2 * (4096 * (3 * keys + 32) + boundary) * 2
+        assert backward == 2 * (4096 * (3 * keys + 2 * 32) + boundary) * 2
+
+    def test_deepseek_v4_skips_the_indexer_when_topk_keeps_every_entry(self):
+        arch = ModelArch.from_hf_config(SUPPORTED_MODEL_INFO[DSV4_FLASH].config)
+
+        n_bytes = block_activations.context_parallel_key_bytes(
+            arch, 1, 2048, 2.0, context_parallel=2
+        )
+
+        assert n_bytes == (2048 * 3 * (512 + 128) + 2 * 7 * 2048) * 2
+
+    def test_hca_gathers_boundary_tokens_only_when_a_window_straddles_shards(self):
+        # Arrange
+        hca = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO[DSV4_FLASH].config
+        ).model_copy(update={"n_csa_layers": 0})
+        keys = 512 + 512 / 128
+
+        # Act
+        aligned = block_activations.context_parallel_key_bytes(
+            hca, 1, 4096, 2.0, context_parallel=2
+        )
+        straddling = block_activations.context_parallel_key_bytes(
+            hca, 1, 2000, 2.0, context_parallel=2
+        )
+
+        # Assert: 2048-token shards end on a 128-token window; 1000-token
+        # shards send their last 127 tokens of KV and gate projections 1024.
+        assert aligned == 4096 * 3 * keys * 2
+        assert straddling == (2000 * 3 * keys + 2 * 127 * 1024) * 2
+
+    def test_glm_gathers_the_latent_and_expands_local_heads(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(SUPPORTED_MODEL_INFO[GLM_FLASH].config)
+        # Latent 512; 64 / 2 heads of key 256 and value 256.
+        with_grad = 512 + 32 * (256 + 256)
+
+        # Act
+        forward = block_activations.context_parallel_key_bytes(
+            arch, 1, 8192, 2.0, tensor_parallel=2
+        )
+        backward = block_activations.context_parallel_key_bytes(
+            arch, 1, 8192, 2.0, tensor_parallel=2, backward=True, context_parallel=2
+        )
+
+        # Assert
+        # Packed no-grad indexer keys: key, gate and validity.
+        assert forward == 8192 * (with_grad + 2 * 128 + 1) * 2
+        # Each tensor and its gradient, the reduce-scatter's stacked latent, and
+        # the half of it this rank receives.
+        assert backward == 8192 * (2 * with_grad + 512 + 512 / 2) * 2
+
+    def test_uncompressed_key_gather_holds_the_whole_sequence_kv(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO[DSV4_FLASH].config
+        ).model_copy(update={"n_csa_layers": 0, "n_hca_layers": 0})
+
+        # Act
+        forward = block_activations.context_parallel_key_bytes(
+            arch, 1, 4096, 2.0, context_parallel=2
+        )
+        backward = block_activations.context_parallel_key_bytes(
+            arch, 1, 4096, 2.0, backward=True, context_parallel=2
+        )
+
+        # Assert: one 512-wide KV head; the backward holds four copies.
+        assert forward == 4096 * 512 * 2
+        assert backward == 4096 * 4 * 512 * 2
+
+    def test_ulysses_family_pays_nothing(self):
+        arch = ModelArch.from_hf_config(SUPPORTED_MODEL_INFO[MIMO_FLASH].config)
+
+        assert block_activations.context_parallel_key_bytes(arch, 1, 8192, 2.0) == 0
+
+
+class TestPooledIndexBytes:
+    def test_local_queries_score_the_pools_of_every_shard(self):
+        arch = ModelArch.from_hf_config(SUPPORTED_MODEL_INFO[GLM_FLASH].config)
+
+        n_bytes = block_activations.pooled_index_bytes(arch, 2, 1024, 2)
+
+        # 2048 keys in 512 pools: three fp32 scores per indexer head and pool,
+        # plus a visibility byte per key.
+        assert n_bytes == 2 * 1024 * (3 * 32 * 512 * 4 + 2048)
+
+    def test_top_k_mask_holds_one_bool_per_key(self):
+        # Arrange
+        glm = ModelArch.from_hf_config(SUPPORTED_MODEL_INFO[GLM_FLASH].config)
+        narrow = glm.model_copy(update={"index_n_heads": 1, "index_kpool": 64})
+
+        # Act
+        n_bytes = block_activations.pooled_index_bytes(narrow, 1, 2048)
+
+        # Assert: 32 pools of one head's three fp32 scores, and the bool mask
+        # over 2048 keys.
+        assert n_bytes == 2048 * (3 * 32 * 4 + 2048)
+
+    def test_family_without_kpool_pays_nothing(self):
+        arch = ModelArch.from_hf_config(SUPPORTED_MODEL_INFO[DSV4_FLASH].config)
+
+        assert block_activations.pooled_index_bytes(arch, 1, 4096, 2) == 0
+
+
+class TestBlockRecomputeContextParallel:
+    def test_key_gather_block_adds_the_whole_sequence_key_side(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(SUPPORTED_MODEL_INFO[GLM_FLASH].config)
+        ulysses = arch.model_copy(update={"context_parallel_key_gather": False})
+        local_kv = formulas.qkv_width_per_rank(arch, 1) - arch.n_heads * arch.head_dim
+
+        # Act
+        gathered = block_activations.block_recompute_bytes(
+            arch, 1, 2048, 2.0, layer="attention", context_parallel=2
+        )
+        local = block_activations.block_recompute_bytes(
+            ulysses, 1, 2048, 2.0, layer="attention", context_parallel=2
+        )
+
+        # Assert
+        assert gathered - local == block_activations.context_parallel_key_bytes(
+            arch, 1, 4096, 2.0
+        ) - (2048 * local_kv * 2)
+
+
+class TestBlockRecomputeCompressedEntries:
+    @pytest.mark.parametrize("backward", [True, False])
+    def test_block_holds_the_indexer_selection_of_its_documents(self, backward):
+        # Arrange
+        arch = ModelArch.from_hf_config({**DSV4_TINY, "index_topk": 128})
+        without_csa = arch.model_copy(update={"n_csa_layers": 0})
+
+        # Act
+        with_entries = block_activations.block_recompute_bytes(
+            arch, 1, 1536, 2.0, backward=backward, document_len=768
+        )
+        without_entries = block_activations.block_recompute_bytes(
+            without_csa, 1, 1536, 2.0, backward=backward, document_len=768
+        )
+
+        # Assert
+        assert with_entries - without_entries == 1536 * 384 + 768 * 192 * 3 * 4
+
+    def test_document_len_defaults_to_the_sequence(self):
+        arch = ModelArch.from_hf_config({**DSV4_TINY, "index_topk": 512})
+
+        assert block_activations.block_recompute_bytes(
+            arch, 1, 1024, 2.0, backward=True
+        ) == block_activations.block_recompute_bytes(
+            arch, 1, 1024, 2.0, backward=True, document_len=1024
+        )
 
 
 class TestBlockRecomputeStockGatedMlp:
@@ -1785,8 +2652,12 @@ class TestBlockRecomputeStockGatedMlp:
         granite = fused.model_copy(update={"stock_gated_mlp": True})
 
         # Act
-        stock = formulas.block_recompute_bytes(granite, 1, 32768, 2.0, backward=True)
-        liger = formulas.block_recompute_bytes(fused, 1, 32768, 2.0, backward=True)
+        stock = block_activations.block_recompute_bytes(
+            granite, 1, 32768, 2.0, backward=True
+        )
+        liger = block_activations.block_recompute_bytes(
+            fused, 1, 32768, 2.0, backward=True
+        )
 
         # Assert: a 32k-token stock-MLP granite-4.0-micro snapshot held a 0.5 GiB SiLU output.
         assert stock - liger == 32768 * 8192 * 2
@@ -1800,9 +2671,115 @@ class TestBlockRecomputeStockGatedMlp:
 
         assert not fused.stock_gated_mlp
         assert not ModelArch.from_hf_config(QWEN3_4B).stock_gated_mlp
-        assert formulas.block_recompute_bytes(
+        assert block_activations.block_recompute_bytes(
             granite, 1, 1024, 2.0
-        ) == formulas.block_recompute_bytes(fused, 1, 1024, 2.0)
+        ) == block_activations.block_recompute_bytes(fused, 1, 1024, 2.0)
+
+
+class TestBlockRecomputeEngineHyperConnections:
+    def test_engine_forward_carries_the_streams_and_their_fp32_mix(self):
+        # Arrange
+        streams = QWEN_05B.model_copy(update={"hc_mult": 4})
+
+        # Act
+        mixed = block_activations.block_recompute_bytes(
+            streams, 1, 8192, 2.0, engine_forward=True
+        )
+        plain = block_activations.block_recompute_bytes(
+            QWEN_05B, 1, 8192, 2.0, engine_forward=True
+        )
+
+        # Assert: 3 extra streams in and out in bf16, 4 streams in fp32.
+        h = QWEN_05B.hidden_size
+        assert mixed - plain == 8192 * (2 * 3 * h * 2 + 4 * h * 4)
+
+    def test_training_forward_ignores_the_engine_mix(self):
+        streams = QWEN_05B.model_copy(update={"hc_mult": 4})
+
+        assert block_activations.block_recompute_bytes(
+            streams, 1, 1024, 2.0
+        ) == block_activations.block_recompute_bytes(QWEN_05B, 1, 1024, 2.0)
+
+
+class TestBlockRecomputeTrainerHyperConnections:
+    def test_backward_keeps_every_stream(self):
+        # Arrange
+        streams = QWEN_05B.model_copy(update={"hc_mult": 4})
+
+        # Act
+        mixed = block_activations.block_recompute_bytes(
+            streams, 1, 8192, 2.0, backward=True
+        )
+        plain = block_activations.block_recompute_bytes(
+            QWEN_05B, 1, 8192, 2.0, backward=True
+        )
+
+        # Assert: 3 extra bf16 streams in the input and mid-block residuals;
+        # the mixer's fp32 copy fits under the block's other transients.
+        h = QWEN_05B.hidden_size
+        assert mixed - plain == 8192 * (2 * 3 * h * 2)
+
+    def test_wide_streams_peak_in_the_mixer_backward(self):
+        # Arrange
+        streams = QWEN_05B.model_copy(update={"hc_mult": 16})
+
+        # Act
+        block = block_activations.block_recompute_bytes(
+            streams, 1, 8192, 2.0, backward=True
+        )
+
+        # Assert: both bf16 residuals of 16 streams, and the mixer's fp32
+        # copy of all 16.
+        h = QWEN_05B.hidden_size
+        assert block == 8192 * (2 * 16 * h * 2 + 16 * h * 4)
+
+    def test_sublayer_backward_holds_no_fp32_mix_beside_the_ffn(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(GLM_TINY)
+        single = arch.model_copy(update={"hc_mult": 1})
+
+        # Act
+        mixed = block_activations.block_recompute_bytes(
+            arch, 1, 1024, 2.0, backward=True, layer="ffn"
+        )
+        plain = block_activations.block_recompute_bytes(
+            single, 1, 1024, 2.0, backward=True, layer="ffn"
+        )
+
+        # Assert: one extra 64-wide bf16 stream in both residuals.
+        assert arch.sublayer_transients
+        assert mixed - plain == 1024 * (2 * 64 * 2)
+
+    def test_wide_sublayer_streams_peak_in_the_mixer_backward(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(GLM_TINY).model_copy(update={"hc_mult": 8})
+
+        # Act
+        ffn = block_activations.block_recompute_bytes(
+            arch, 1, 1024, 2.0, backward=True, layer="ffn"
+        )
+
+        # Assert: both bf16 residuals of 8 64-wide streams, and the mixer's
+        # fp32 copy of all 8.
+        assert ffn == 1024 * (2 * 512 * 2 + 512 * 4)
+
+    def test_deepseek_v4_flash_block_at_tp4(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(SUPPORTED_MODEL_INFO[DSV4_FLASH].config)
+        plain = arch.model_copy(update={"hc_mult": 1, "qk_norm": False})
+
+        # Act
+        block = block_activations.block_recompute_bytes(
+            arch, 1, 4096, 2.0, backward=True, tensor_parallel=4, document_len=768
+        )
+        base = block_activations.block_recompute_bytes(
+            plain, 1, 4096, 2.0, backward=True, tensor_parallel=4, document_len=768
+        )
+
+        # Assert: 4096 packed tokens hold 3 extra 4096-wide bf16 streams twice
+        # and 16 fp32 512-wide query heads.
+        assert block - base == 4096 * (2 * 3 * 4096 * 2 + 16 * 512 * 4)
+        assert block - base == 0.3125 * GiB
 
 
 class TestLoraDropoutBytes:
@@ -1825,6 +2802,14 @@ class TestLoraDropoutBytes:
         attention = formulas.lora_dropout_bytes(arch, 1, 1024, 2.0, "attention-only")
 
         assert attention == 1024 * (3 * 2560 + 32 * 128) * 3
+
+    def test_excluded_qkv_keep_no_dropped_inputs(self):
+        arch = ModelArch.from_hf_config(MIMO_TINY)
+
+        attention = formulas.lora_dropout_bytes(arch, 1, 1024, 2.0, "attention-only")
+
+        # o_proj alone reads the four 16-wide heads.
+        assert attention == 1024 * 4 * 16 * 3
 
     def test_block_exclusive_stack_charges_its_widest_layer(self):
         # Nemotron-H: one mixer or MLP per layer; the MLP layer is widest.
@@ -1849,6 +2834,24 @@ class TestLoraDropoutBytes:
         assert not arch.block_exclusive_layers
         assert dropout == 16384 * (attention + mlp + mamba) * 5
         assert dropout - 16384 * (attention + mlp) * 5 == 16384 * mamba * 5
+
+    def test_low_rank_attention_and_kda_read_their_own_linears(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(GLM_TINY)
+        # q_a, q_b, kv_a, kv_b and o inputs per MLA layer.
+        mla = 64 + 32 + 64 + 16 + 32
+        # q, k, v, f_b, beta, g_b and o inputs per KDA layer; f_a and g_a
+        # stay unwrapped.
+        kda = 3 * 64 + 8 + 64 + 8 + 16
+        mlp = 2 * 64 + 96
+
+        # Act
+        attention = formulas.lora_dropout_bytes(arch, 1, 1024, 2.0, layer="attention")
+        mamba = formulas.lora_dropout_bytes(arch, 1, 1024, 2.0, layer="mamba")
+
+        # Assert: each mixer also charges the MLP beside it.
+        assert attention == 1024 * (mla + mlp) * 3
+        assert mamba == 1024 * (kda + mlp) * 3
 
 
 class TestAllocatorReserveBytes:
@@ -1945,6 +2948,18 @@ class TestHybridKvDemandBytes:
 
         assert one_token == one_block == 2 * 4 * page
         assert past_block == 2 * one_block
+
+    def test_indexer_keys_grow_with_every_token(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(GLM_TINY)
+        unindexed = arch.model_copy(update={"n_indexed_layers": 0})
+
+        # Act
+        indexed = kv_cache.hybrid_kv_demand_bytes(arch, "bf16", 2, 1024)
+        paged = kv_cache.hybrid_kv_demand_bytes(unindexed, "bf16", 2, 1024)
+
+        # Assert: two sequences of 1024 tokens, two layers of 8-wide keys.
+        assert indexed - paged == 2 * 1024 * 2 * 8 * 2
 
     def test_tensor_parallel_shrinks_the_page(self):
         arch = ModelArch.from_hf_config(NEMOTRON_H)
@@ -2055,6 +3070,14 @@ class TestTensorParallelWidths:
         # Query halves. The single KV head is copied onto both ranks.
         assert local == full - replicated_kv.n_heads * replicated_kv.head_dim // 2
 
+    def test_ulysses_replicates_kv_heads_up_to_the_cp_degree(self):
+        # Two KV heads split one per TP rank; Ulysses cp=2 copies it to two.
+        q = QWEN_05B.n_heads // 2 * QWEN_05B.head_dim
+        kv_head = 2 * QWEN_05B.head_dim
+
+        assert formulas.qkv_width_per_rank(QWEN_05B, 2, 2) == q + 2 * kv_head
+        assert formulas.qkv_width_per_rank(QWEN_05B, 1, 2) == QWEN_05B.peak_qkv_dim
+
     def test_qkv_width_uses_the_wider_global_head_dim(self):
         arch = QWEN_05B.model_copy(update={"global_head_dim": 128})
 
@@ -2074,7 +3097,7 @@ class TestTensorParallelWidths:
             counts, arch, tensor_parallel=2, **kwargs
         )
 
-        assert formulas.tensor_parallel_params(counts, arch) == (
+        assert formulas.tensor_parallel_params(counts, arch, 2) == (
             counts.attention + counts.mlp
         )
         assert narrowed < full
@@ -2092,7 +3115,7 @@ class TestTensorParallelWidths:
             counts, arch, tensor_parallel=2, **kwargs
         )
 
-        assert formulas.tensor_parallel_params(counts, arch) == counts.lm_head
+        assert formulas.tensor_parallel_params(counts, arch, 2) == counts.lm_head
         assert narrowed == full - counts.lm_head // 2
 
     def test_tp_planned_hybrid_gathers_its_tp_layers_at_one_over_tp(self):
@@ -2361,6 +3384,50 @@ class TestLoraTensorPlacement:
         assert replicated == 40 * (3840 + 5632 + 3840 + 10752 + 6656)
         assert replicated == 1_228_800
 
+    def test_low_rank_attention_and_kda_place_their_own_linears(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(GLM_TINY)
+
+        # Act
+        replicated, sharded = lora_tensor_placement(arch, 4, "all-linear", 0, 100)
+
+        # Assert: factors under 25 features stay replicated. Per MLA layer
+        # the kv_a output and kv_b input (16 each); per KDA layer the 16-wide
+        # q/k/v/o and gate-up factors, the f_b and g_b inputs and beta's 2;
+        # per MoE layer the shared expert's 16-wide gate, up and down factors.
+        assert replicated == 4 * (2 * 32 + 2 * (16 * 6 + 8 * 2 + 2) + 3 * 3 * 16)
+        assert replicated + sharded == lora_formulas.lora_param_count(arch, 4)
+
+    @pytest.mark.parametrize(("tp", "per_rank"), [(1, 2900), (2, 2458)])
+    def test_glm_splits_mla_up_projections_and_kda_heads(self, tp, per_rank):
+        # Arrange
+        arch = ModelArch.from_hf_config(GLM_TINY)
+
+        # Act
+        replicated, _ = lora_tensor_placement(arch, 1, "all-linear", 0, None, tp)
+
+        # Assert: two MLA layers of q_a 96, q_b 32 + 32/tp, kv_a 80,
+        # kv_b 16 + 64/tp and o 32/tp + 64; two KDA layers of q/k/v
+        # 3 x (64 + 16/tp), f_b and g_b 2 x (8 + 16/tp), beta 64 + 2/tp and
+        # o 16/tp + 64; the dense MLP and three shared experts split gate/up
+        # B and down A.
+        assert replicated == per_rank
+
+    @pytest.mark.parametrize(("tp", "per_rank"), [(1, 1776), (2, 1584)])
+    def test_deepseek_v4_splits_q_b_and_o_b_but_keeps_the_single_kv_head(
+        self, tp, per_rank
+    ):
+        # Arrange
+        arch = ModelArch.from_hf_config(DSV4_TINY)
+
+        # Act
+        replicated, _ = lora_tensor_placement(arch, 1, "all-linear", 0, None, tp)
+
+        # Assert: three layers of q_a 96, q_b 32 + 64/tp, kv 80, o_b
+        # 16/tp + 64 and a shared expert splitting gate/up B and down A
+        # (16 each); the one KV head stays whole.
+        assert replicated == per_rank
+
 
 class TestSplitMoeLoraRecomputeBytes:
     def test_keeps_only_the_rank_wide_down_projection_per_matrix(self):
@@ -2452,6 +3519,22 @@ class TestLoraLinears:
 
         assert linears["mamba"] == []
         assert linears["ffn"] == []
+
+    def test_mla_and_kda_split_their_heads_over_tensor_parallel(self):
+        arch = ModelArch.from_hf_config(GLM_TINY)
+
+        linears = formulas.lora_linears(arch, tensor_parallel=2)
+
+        # Two of four query heads; the latents and low-rank gates stay whole.
+        assert linears["attention"] == [
+            (64, 32),
+            (32, 16),
+            (64, 16),
+            (16, 32),
+            (16, 64),
+        ]
+        # f_a and g_a carry no adapter.
+        assert linears["mamba"] == [(64, 8)] * 3 + [(8, 8), (64, 1), (8, 8), (8, 64)]
 
 
 class TestLoraInputCastBytes:
@@ -2592,7 +3675,7 @@ class TestMeanBlockRecomputeBytes:
         seq_len = 1024
         arch = QWEN_05B
 
-        mean = formulas.mean_block_recompute_bytes(arch, 1, seq_len, 2.0)
+        mean = block_activations.mean_block_recompute_bytes(arch, 1, seq_len, 2.0)
 
         assert (
             mean
@@ -2606,26 +3689,30 @@ class TestMeanBlockRecomputeBytes:
         arch = MAMBA_HYBRID_TINY
 
         def peak(layer):
-            return formulas.block_recompute_bytes(
+            return block_activations.block_recompute_bytes(
                 arch, 2, 512, 2.0, backward=True, layer=layer
             )
 
         # Act
-        mean = formulas.mean_block_recompute_bytes(arch, 2, 512, 2.0)
+        mean = block_activations.mean_block_recompute_bytes(arch, 2, 512, 2.0)
 
         # Assert
         assert arch.sublayer_transients
         assert peak("attention") < peak("mamba")
         assert mean == (1 * peak("attention") + 3 * peak("mamba")) // 4
-        assert mean < formulas.block_recompute_bytes(arch, 2, 512, 2.0, backward=True)
+        assert mean < block_activations.block_recompute_bytes(
+            arch, 2, 512, 2.0, backward=True
+        )
 
     def test_block_exclusive_stack_takes_the_widest_block(self):
         arch = ModelArch.from_hf_config(NEMOTRON_H)
 
-        mean = formulas.mean_block_recompute_bytes(arch, 1, 4096, 2.0)
+        mean = block_activations.mean_block_recompute_bytes(arch, 1, 4096, 2.0)
 
         assert arch.block_exclusive_layers
-        assert mean == formulas.block_recompute_bytes(arch, 1, 4096, 2.0, backward=True)
+        assert mean == block_activations.block_recompute_bytes(
+            arch, 1, 4096, 2.0, backward=True
+        )
 
 
 SUPER_VL = SUPPORTED_MODEL_INFO["nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16"]
@@ -2861,6 +3948,38 @@ class TestPackedExpertLoraPlacement:
             MOE_TINY, 4, 2
         )
 
+    def test_gated_fused_gate_up_factor_is_twice_the_intermediate_wide(self):
+        # Arrange: the stacked [E * r, 2 * inter] gate_up factor (1024) crosses
+        # the threshold; the [E * r, inter] down factor (512) does not.
+        threshold = 600
+
+        # Act
+        base_repl, base_shard = lora_tensor_placement(
+            MOE_TINY, 4, "attention-only", 0, threshold
+        )
+        repl, shard = lora_tensor_placement(MOE_TINY, 4, "attention-only", 2, threshold)
+
+        # Assert
+        assert MOE_TINY.gated_mlp
+        assert shard - base_shard == 2 * 16 * 2 * 32
+        assert repl - base_repl == 2 * 16 * (16 + 16 + 32)
+
+
+class TestPackedLoraParamCount:
+    def test_gated_stack_counts_the_fused_gate_up_width(self):
+        # 2 layers * 4 experts * rank 4 * (2 * (16 hidden + 32 inter) + 32)
+        assert MOE_TINY.moe_layers == 2
+        assert lora_formulas.packed_lora_param_count(MOE_TINY, 4, 2) == 4096
+
+    def test_ungated_stack_counts_one_intermediate_width_per_matrix(self):
+        ungated = MOE_TINY.model_copy(update={"gated_mlp": False})
+
+        # 2 layers * 4 experts * rank 4 * 2 * (16 hidden + 32 inter)
+        assert lora_formulas.packed_lora_param_count(ungated, 4, 2) == 3072
+
+    def test_no_packed_targets_add_nothing(self):
+        assert lora_formulas.packed_lora_param_count(MOE_TINY, 4, 0) == 0
+
 
 class TestEngineExpertLoraParamCount:
     def test_3d_layout_packs_gate_and_up_into_one_slice(self):
@@ -2883,6 +4002,21 @@ class TestEngineExpertLoraParamCount:
 
     def test_dense_model_has_no_expert_stacks(self):
         assert lora_formulas.engine_expert_lora_param_count(QWEN_05B, 8, 1, False) == 0
+
+
+class TestReceivedExpertLoraBParamCount:
+    def test_gated_experts_copy_gate_up_and_down_lora_b(self):
+        # 2 layers * 4 experts * rank 8 * (2 * 32 inter + 16 hidden)
+        assert lora_formulas.received_expert_lora_b_param_count(MOE_TINY, 8) == 5120
+
+    def test_ungated_experts_copy_one_up_projection(self):
+        ungated = MOE_TINY.model_copy(update={"gated_mlp": False})
+
+        # 2 * 4 * 8 * (32 + 16)
+        assert lora_formulas.received_expert_lora_b_param_count(ungated, 8) == 3072
+
+    def test_dense_model_copies_nothing(self):
+        assert lora_formulas.received_expert_lora_b_param_count(QWEN_05B, 8) == 0
 
 
 class TestRoutedExpertParamsPerLayer:
@@ -3023,7 +4157,7 @@ class TestCheckpointedMoeBlocks:
 class TestMergedLoraSyncBytes:
     def test_attention_scope_pushes_the_attention_projections(self):
         # Act
-        total, largest = formulas.merged_lora_sync_bytes(
+        total, largest = lora_formulas.merged_lora_sync_bytes(
             QWEN_05B, "attention-only", 0, 2
         )
 
@@ -3033,10 +4167,14 @@ class TestMergedLoraSyncBytes:
 
     def test_all_linear_scope_adds_the_mlp(self):
         # Arrange
-        attention, _ = formulas.merged_lora_sync_bytes(QWEN_05B, "attention-only", 0, 2)
+        attention, _ = lora_formulas.merged_lora_sync_bytes(
+            QWEN_05B, "attention-only", 0, 2
+        )
 
         # Act
-        total, largest = formulas.merged_lora_sync_bytes(QWEN_05B, "all-linear", 0, 2)
+        total, largest = lora_formulas.merged_lora_sync_bytes(
+            QWEN_05B, "all-linear", 0, 2
+        )
 
         # Assert: gate, up and down 896x4864 on 24 layers.
         assert total == attention + 2 * 24 * 3 * 896 * 4864
@@ -3044,10 +4182,12 @@ class TestMergedLoraSyncBytes:
 
     def test_packed_experts_push_whole_stacks(self):
         # Arrange
-        unpacked, _ = formulas.merged_lora_sync_bytes(MOE_TINY, "all-linear", 0, 2)
+        unpacked, _ = lora_formulas.merged_lora_sync_bytes(MOE_TINY, "all-linear", 0, 2)
 
         # Act
-        total, largest = formulas.merged_lora_sync_bytes(MOE_TINY, "all-linear", 2, 2)
+        total, largest = lora_formulas.merged_lora_sync_bytes(
+            MOE_TINY, "all-linear", 2, 2
+        )
 
         # Assert: 4 experts of gate, up and down 16x32 on 2 layers; the
         # gate_up stack is the largest tensor.
@@ -3056,10 +4196,12 @@ class TestMergedLoraSyncBytes:
 
     def test_one_packed_target_on_a_gated_mlp_pushes_gate_up(self):
         # Arrange
-        unpacked, _ = formulas.merged_lora_sync_bytes(MOE_TINY, "all-linear", 0, 2)
+        unpacked, _ = lora_formulas.merged_lora_sync_bytes(MOE_TINY, "all-linear", 0, 2)
 
         # Act
-        total, largest = formulas.merged_lora_sync_bytes(MOE_TINY, "all-linear", 1, 2)
+        total, largest = lora_formulas.merged_lora_sync_bytes(
+            MOE_TINY, "all-linear", 1, 2
+        )
 
         # Assert: gate_up is 2 of the 3 expert matrices: 4 experts of 16x64
         # on 2 layers.
@@ -3071,7 +4213,9 @@ class TestMergedLoraSyncBytes:
         arch = ModelArch.from_hf_config(QWEN35_08B.config)
 
         # Act
-        total, largest = formulas.merged_lora_sync_bytes(arch, "attention-only", 0, 2)
+        total, largest = lora_formulas.merged_lora_sync_bytes(
+            arch, "attention-only", 0, 2
+        )
 
         # Assert: 6 attention layers; gated q_proj 1024x4096, k/v 1024x512,
         # o_proj 2048x1024.
@@ -3083,7 +4227,7 @@ class TestMergedLoraSyncBytes:
         arch = ModelArch.from_hf_config(GEMMA4_E4B.config)
 
         # Act
-        total, largest = formulas.merged_lora_sync_bytes(arch, "all-linear", 0, 2)
+        total, largest = lora_formulas.merged_lora_sync_bytes(arch, "all-linear", 0, 2)
 
         # Assert: 35 sliding layers of head dim 256 and 7 full of 512; 18 of
         # the 42 layers share k/v, leaving 20 sliding and 4 full with k/v.
@@ -3108,7 +4252,7 @@ class TestMergedLoraSyncBytes:
         )
 
         # Act
-        total, largest = formulas.merged_lora_sync_bytes(arch, "all-linear", 0, 2)
+        total, largest = lora_formulas.merged_lora_sync_bytes(arch, "all-linear", 0, 2)
 
         # Assert: 4 attention layers (q/o 3136x5120, k/v 3136x1024), 17
         # ungated MLPs (up and down 3136x12544) and 21 Mamba-2 mixers whose
@@ -3124,10 +4268,12 @@ class TestMergedLoraSyncBytes:
         arch = ModelArch.from_hf_config(
             SUPPORTED_MODEL_INFO["Qwen/Qwen3.6-35B-A3B"].config
         )
-        attention, _ = formulas.merged_lora_sync_bytes(arch, "attention-only", 0, 2)
+        attention, _ = lora_formulas.merged_lora_sync_bytes(
+            arch, "attention-only", 0, 2
+        )
 
         # Act
-        total, largest = formulas.merged_lora_sync_bytes(arch, "all-linear", 2, 2)
+        total, largest = lora_formulas.merged_lora_sync_bytes(arch, "all-linear", 2, 2)
 
         # Assert: 30 GDN layers project 2048 to qkv (8192), z (4096) and b, a
         # (32 each), and 4096 back; shared experts are 3 of 2048x512 on 40

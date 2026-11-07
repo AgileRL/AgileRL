@@ -47,17 +47,28 @@ class ReferenceExpertKernels:
         grad_rows = (gathered * weights.float()).to(rows.dtype)
         return grad_rows, (gathered * rows.float()).sum(-1, keepdim=True)
 
-    def swiglu(self, projected):
-        self.used.add("swiglu")
+    def swiglu(self, projected, limit):
+        self.used.add("swiglu" if limit is None else "clamped_swiglu")
         gate, up = projected.chunk(2, dim=-1)
+        if limit is not None:
+            gate, up = gate.clamp(max=limit), up.clamp(-limit, limit)
         return F.silu(gate) * up
 
-    def swiglu_backward(self, grad, projected):
-        self.used.add("swiglu_backward")
+    def swiglu_backward(self, grad, projected, limit):
+        """Closed form of the Triton kernel, masking the gradient outside the clamp bounds."""
+        self.used.add("swiglu_backward" if limit is None else "clamped_swiglu_backward")
         gate, up = projected.chunk(2, dim=-1)
+        if limit is not None:
+            grad_gate_mask = gate <= limit
+            grad_up_mask = (up >= -limit) & (up <= limit)
+            gate, up = gate.clamp(max=limit), up.clamp(-limit, limit)
         sigmoid = torch.sigmoid(gate)
         grad_gate = grad * up * sigmoid * (1 + gate * (1 - sigmoid))
-        return torch.cat([grad_gate, grad * gate * sigmoid], dim=-1)
+        grad_up = grad * gate * sigmoid
+        if limit is not None:
+            grad_gate = torch.where(grad_gate_mask, grad_gate, 0.0)
+            grad_up = torch.where(grad_up_mask, grad_up, 0.0)
+        return torch.cat([grad_gate, grad_up], dim=-1)
 
 
 @pytest.fixture

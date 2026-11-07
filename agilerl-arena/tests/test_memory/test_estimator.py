@@ -5,10 +5,18 @@
 import pytest
 from pydantic import ValidationError
 
-from agilerl.arena.memory import formulas, fsdp_gather, kv_cache, lora_formulas, vision
+from agilerl.arena.memory import (
+    block_activations,
+    formulas,
+    fsdp_gather,
+    kv_cache,
+    lora_formulas,
+    vision,
+)
 from agilerl.arena.memory.advice import advise
 from agilerl.arena.memory.estimator import (
     adapter_state,
+    block_backward_terms,
     estimate_generation,
     estimate_run,
     estimate_training,
@@ -491,7 +499,9 @@ class TestEstimateGeneration:
         counts = formulas.param_counts(model.arch, model.n_params)
         saved = formulas.weight_bytes(
             counts, "bf16", WeightVariant()
-        ) - formulas.engine_weight_bytes(counts, "bf16", WeightVariant(), "fp8")
+        ) - formulas.engine_weight_bytes(
+            model.arch, counts, "bf16", WeightVariant(), "fp8"
+        )
 
         # Act
         bf16 = estimate_generation(model, device, base)
@@ -674,7 +684,9 @@ class TestEstimateGeneration:
         merged_terms, _, _ = engine_terms(model, merged)
 
         # Assert: attention weights are under one round, so the buffer holds them all.
-        attention, _ = formulas.merged_lora_sync_bytes(QWEN_05B, "attention-only", 0, 2)
+        attention, _ = lora_formulas.merged_lora_sync_bytes(
+            QWEN_05B, "attention-only", 0, 2
+        )
         assert component(lora_breakdown, "lora_slots").n_bytes > 0
         assert component(merged_breakdown, "lora_slots").n_bytes == 0
         assert component(merged_breakdown, "lora_receive_buffer").n_bytes == attention
@@ -700,11 +712,62 @@ class TestEstimateGeneration:
         ) + lora_formulas.packed_lora_param_count(MOE_TINY, 16, 2)
         assert component(without, "lora_receive_buffer").n_bytes == 0
         assert component(with_buffer, "lora_receive_buffer").n_bytes == 2 * adapter
+        copy = 2 * lora_formulas.received_expert_lora_b_param_count(MOE_TINY, 16)
         assert (
             component(with_buffer, "kv_cache").n_bytes
             == component(without, "kv_cache").n_bytes
         )
-        assert with_buffer.total_bytes == without.total_bytes + 2 * adapter
+        assert with_buffer.total_bytes == without.total_bytes + 2 * adapter + copy
+
+    def test_rollout_engine_keeps_a_copy_of_the_received_expert_lora_b(self, device):
+        # Arrange
+        moe = ModelSpec(model_id="moe-test", arch=MOE_TINY)
+        rollout = GenerationSettings(
+            max_lora_rank=16,
+            lora_packed_target_matrices=2,
+            lora_sync_scope="all-linear",
+            tensor_parallel_size=2,
+        )
+        wider = rollout.model_copy(update={"tensor_parallel_size": 4})
+        in_trainer = rollout.model_copy(update={"lora_sync_scope": None})
+
+        # Act
+        breakdown = estimate_generation(moe, device, rollout)
+        wider_breakdown = estimate_generation(moe, device, wider)
+        trainer_breakdown = estimate_generation(moe, device, in_trainer)
+
+        # Assert: 2 layers * 4 experts * rank 16 * (2 * 32 + 16), bf16, unsharded.
+        assert component(breakdown, "expert_lora_copy").n_bytes == 2 * 10240
+        assert component(wider_breakdown, "expert_lora_copy").n_bytes == 2 * 10240
+        assert (
+            component(breakdown, "kv_cache").n_bytes
+            == component(trainer_breakdown, "kv_cache").n_bytes
+        )
+
+    @pytest.mark.parametrize(
+        "update",
+        [
+            {"lora_sync_scope": None},
+            {"lora_packed_target_matrices": 0},
+            {"merged_lora_sync": True},
+        ],
+    )
+    def test_engine_without_a_received_expert_adapter_keeps_no_copy(
+        self, device, update
+    ):
+        # Arrange
+        moe = ModelSpec(model_id="moe-test", arch=MOE_TINY)
+        rollout = GenerationSettings(
+            max_lora_rank=16,
+            lora_packed_target_matrices=2,
+            lora_sync_scope="all-linear",
+        )
+
+        # Act
+        breakdown = estimate_generation(moe, device, rollout.model_copy(update=update))
+
+        # Assert
+        assert component(breakdown, "expert_lora_copy").n_bytes == 0
 
     def test_model_declaring_3d_expert_weights_uses_the_3d_layout(self, device):
         # Arrange
@@ -749,6 +812,21 @@ class TestEstimateGeneration:
         assert tp1.detail["engine_runtime"] == tp2.detail["engine_runtime"]
         assert tp1.detail["engine_runtime"] / GiB == pytest.approx(2.4, abs=0.1)
         assert tp1.n_bytes == (a100.context_bytes + tp1.detail["engine_runtime"])
+
+    def test_engine_runtime_stops_at_its_ceiling(self):
+        # Arrange
+        counts = formulas.param_counts(SUPER_VL_MODEL.arch, SUPER_VL_MODEL.n_params)
+        share = formulas.ENGINE_RUNTIME_FRACTION * formulas.weight_bytes(
+            counts, "bf16", WeightVariant()
+        )
+        settings = GenerationSettings(tensor_parallel_size=8)
+
+        # Act
+        terms, _, _ = engine_terms(SUPER_VL_MODEL, settings)
+
+        # Assert
+        assert share > formulas.ENGINE_RUNTIME_MAX_BYTES
+        assert terms["engine_runtime"] == formulas.ENGINE_RUNTIME_MAX_BYTES
 
     @pytest.mark.parametrize(
         ("tensor_parallel_size", "batched_tokens", "measured_pool_gib"),
@@ -992,6 +1070,7 @@ class TestEstimateRun:
             "lora_slots",
             "overhead",
             "lora_receive_buffer",
+            "expert_lora_copy",
         ]
 
     def test_serializes_with_bytes_alias(self, model, device):
@@ -1362,6 +1441,28 @@ class TestDistributedTerms:
             (replicated + sharded_params) * 2, abs=1
         )
 
+    def test_cpu_offload_keeps_held_grads_on_the_gpu(self, device):
+        model = ModelSpec(model_id="wide", arch=WIDE)
+        settings = TrainingSettings(
+            fsdp=fsdp_config(
+                reshard_after_forward=True,
+                cpu_offload=True,
+                routed_expert_chunk_mib=64,
+            ),
+            n_training_gpus=4,
+            lora_rank=16,
+            group_size=8,
+        )
+        replicated, sharded_params = lora_tensor_placement(
+            WIDE, 16, "all-linear", 0, 100_000
+        )
+
+        held = estimate_training(model, device, settings)
+
+        assert component(held, "activations").detail["backward_grads"] == pytest.approx(
+            (replicated + sharded_params) * 4, abs=1
+        )
+
     def test_optim_cpu_offload_charges_adam_only_at_the_step(self, model, device):
         offloaded = estimate_training(
             model,
@@ -1518,7 +1619,7 @@ class TestDistributedTerms:
 
         detail = component(estimate_training(model, device, settings), "activations")
 
-        assert detail.detail["block_recompute"] == formulas.mamba_block_bytes(
+        assert detail.detail["block_recompute"] == block_activations.mamba_block_bytes(
             arch, 1, 16384, 2.0, backward=True
         )
         assert detail.detail["lora_dropout"] == formulas.lora_dropout_bytes(
@@ -1803,7 +1904,7 @@ class TestActivationPeakNogradPeak:
         detail = component(estimate_training(model, device, settings), "activations")
 
         # Assert
-        assert detail.detail["nograd_peak"] == formulas.nograd_forward_bytes(
+        assert detail.detail["nograd_peak"] == block_activations.nograd_forward_bytes(
             arch, 1, 32768, 2.0
         )
 
@@ -1975,7 +2076,7 @@ class TestFusedActorCriticPass:
         detail = component(bar, "activations").detail
         assert detail["checkpoint_boundaries"] == 2 * seq_len * h * n_layers * 2
         assert detail["loss_hidden_state"] == 2 * seq_len * h * 2
-        assert detail["block_recompute"] == formulas.block_recompute_bytes(
+        assert detail["block_recompute"] == block_activations.block_recompute_bytes(
             QWEN_05B, 2, seq_len, 2.0, backward=True
         )
         assert detail["lora_fp32_input_casts"] == 0
@@ -2367,7 +2468,7 @@ class TestRoutedChunkTerm:
 
         # Assert
         detail = component(breakdown, "activations").detail
-        assert detail["block_recompute"] == formulas.block_recompute_bytes(
+        assert detail["block_recompute"] == block_activations.block_recompute_bytes(
             qwen36.arch, 1, 16384, 2.0, backward=True, layer="mamba"
         )
         assert detail["routed_expert_chunks"] == formulas.routed_chunk_bytes(
@@ -3121,6 +3222,59 @@ class TestGraniteCalibration:
         assert not breakdown.fits
 
 
+class TestGlmFlashCpuOffloadCalibration:
+    """GLM-5.3-Flash CISPO learn step on 8x H100 80GB, FSDP cpu_offload, EP 1.
+
+    Two 512-token rows per rank, expert LoRA r16, every block checkpointed.
+    Measured per GPU: 57.26 GiB allocated, 72.82 GiB reserved, 76.17 GiB
+    device.
+    """
+
+    @pytest.fixture
+    def breakdown(self):
+        settings = TrainingSettings(
+            algorithm="cispo",
+            group_size=2,
+            trajectories_per_update=16,
+            max_model_len=512,
+            lora_rank=16,
+            lora_packed_target_matrices=2,
+            packed_moe_dispatch="contracted",
+            beta=0.0,
+            use_separate_reference_adapter=False,
+            n_training_gpus=8,
+            checkpoint_optimizer=True,
+            micro_batch_size=1,
+            fsdp=pinned_fsdp(cpu_offload=True),
+        )
+        h100 = training_gpu("NVIDIA H100 80GB HBM3", H100_80GB_CUDA_BYTES)
+        return estimate_training(catalog_model("zai-org/GLM-5.3-Flash"), h100, settings)
+
+    def test_live_reserved_and_device_bytes_track_the_measured_step(self, breakdown):
+        # Arrange
+        live_keys = ("base_weights", "adapters", "grads", "activations")
+        live_keys += ("logits_workspace", "optimizer_state")
+
+        # Act
+        live = sum(component(breakdown, key).n_bytes for key in live_keys)
+        reserved = live + component(breakdown, "allocator_reserve").n_bytes
+
+        # Assert
+        assert live / GiB == pytest.approx(57.26, rel=0.05)
+        assert reserved / GiB == pytest.approx(72.82, rel=0.05)
+        assert breakdown.total_bytes / GiB == pytest.approx(76.17, rel=0.05)
+
+    def test_forward_with_the_retained_all_gather_output_binds(self, breakdown):
+        activations = component(breakdown, "activations")
+        grads = activations.detail["backward_grads"]
+
+        assert activations.detail["forward_all_gather"] > 0
+        assert activations.n_bytes == pytest.approx(
+            activations.detail["forward_peak"] - grads, abs=1
+        )
+        assert activations.n_bytes > activations.detail["loss_peak"]
+
+
 class TestSuperVlVwaEstimate:
     """VWA launch shape: 16 trainer GPUs, rows up to 24,000 + 5,120 tokens."""
 
@@ -3279,7 +3433,7 @@ class TestTrainingExpertShards:
         arch = MOE_MODEL.arch
         counts = formulas.param_counts(arch, MOE_MODEL.n_params)
         token = formulas.token_embedding_params(arch)
-        tp_params = formulas.tensor_parallel_params(counts, arch)
+        tp_params = formulas.tensor_parallel_params(counts, arch, 2)
         routed = arch.moe_layers * formulas.routed_expert_params_per_layer(arch)
         dense = counts.total - token - tp_params - routed + tp_params // 2
         expected = dense * 2 / 4 + routed * 2 / 8
@@ -3498,7 +3652,7 @@ class TestTrainingTensorParallel:
     ):
         # Arrange: 4 GPUs at tp=2 leave dp_shard=2.
         arch = ModelArch.from_hf_config(NEMOTRON_NANO_MAMBA)
-        tp_local = formulas.tensor_parallel_params(formulas.param_counts(arch), arch)
+        tp_local = formulas.tensor_parallel_params(formulas.param_counts(arch), arch, 2)
         tp_local //= 2
 
         # Act
@@ -3534,7 +3688,7 @@ class TestTrainingTensorParallel:
     def test_resident_frozen_tp_stays_on_gpu_under_cpu_offload(self, device):
         # Arrange
         arch = ModelArch.from_hf_config(NEMOTRON_NANO_MAMBA)
-        tp_local = formulas.tensor_parallel_params(formulas.param_counts(arch), arch)
+        tp_local = formulas.tensor_parallel_params(formulas.param_counts(arch), arch, 2)
         tp_local //= 2
 
         # Act
@@ -3752,7 +3906,10 @@ class TestFp8TensorParallelEngine:
         # This model has 2 KV heads, so TP 4 keeps one head on each rank.
         counts = formulas.param_counts(model.arch, model.n_params)
         assert component(sharded, "weights").n_bytes == int(
-            formulas.engine_weight_bytes(counts, "bf16", WeightVariant(), "fp8") / 4
+            formulas.engine_weight_bytes(
+                model.arch, counts, "bf16", WeightVariant(), "fp8"
+            )
+            / 4
         )
         assert component(sharded, "weights").n_bytes * 8 > (
             component(full, "weights").n_bytes
@@ -3783,7 +3940,10 @@ class TestFp8TensorParallelEngine:
         # Assert
         counts = formulas.param_counts(SUPER_VL_MODEL.arch, SUPER_VL_MODEL.n_params)
         assert component(sharded, "weights").n_bytes == int(
-            formulas.engine_weight_bytes(counts, "bf16", WeightVariant(), "fp8") / 4
+            formulas.engine_weight_bytes(
+                SUPER_VL_MODEL.arch, counts, "bf16", WeightVariant(), "fp8"
+            )
+            / 4
         )
         assert (
             component(sharded, "kv_cache").detail["worst_case_demand"] * 2
@@ -3842,7 +4002,9 @@ class TestCheckpointStride:
         tokens = 4 * 1024
         act_bytes = 2
         boundary = tokens * arch.hidden_size * act_bytes
-        block = formulas.block_recompute_bytes(arch, 4, 1024, act_bytes, backward=True)
+        block = block_activations.block_recompute_bytes(
+            arch, 4, 1024, act_bytes, backward=True
+        )
 
         # Act
         saved = self._activations(model, device, True, 4).detail[
@@ -3859,7 +4021,7 @@ class TestCheckpointStride:
     ):
         # Arrange
         arch = model.arch
-        block = formulas.block_recompute_bytes(arch, 4, 1024, 2, backward=True)
+        block = block_activations.block_recompute_bytes(arch, 4, 1024, 2, backward=True)
 
         # Act
         saved = self._activations(model, device, False, 1).detail[
@@ -3875,7 +4037,7 @@ class TestCheckpointStride:
     def test_attention_only_stored_blocks_drop_the_down_proj_input(self, model, device):
         # Arrange
         arch = model.arch
-        block = formulas.block_recompute_bytes(arch, 4, 1024, 2, backward=True)
+        block = block_activations.block_recompute_bytes(arch, 4, 1024, 2, backward=True)
         settings = TrainingSettings(
             micro_batch_size=4,
             max_model_len=1024,
@@ -3912,7 +4074,7 @@ class TestCheckpointStride:
     ):
         # Arrange
         arch = model.arch
-        block = formulas.block_recompute_bytes(arch, 4, 1024, 2, backward=True)
+        block = block_activations.block_recompute_bytes(arch, 4, 1024, 2, backward=True)
         dropped = formulas.lora_only_stored_input_bytes(arch, 4, 1024, 2)
 
         # Act
@@ -4162,9 +4324,9 @@ class TestQwen35TensorParallelBaseWeights:
         gate = arch.attention_layers * arch.n_heads * arch.head_dim * arch.hidden_size
 
         # Act
-        on_tp_mesh = formulas.tensor_parallel_params(counts, arch)
+        on_tp_mesh = formulas.tensor_parallel_params(counts, arch, 2)
         ungated = formulas.tensor_parallel_params(
-            counts, arch.model_copy(update={"attention_output_gate": False})
+            counts, arch.model_copy(update={"attention_output_gate": False}), 2
         )
 
         # Assert
@@ -4269,7 +4431,7 @@ class TestGemma4TensorParallelBaseWeights:
         per_layer = counts.embedding - formulas.token_embedding_params(arch)
 
         # Act
-        on_tp_mesh = formulas.tensor_parallel_params(counts, arch)
+        on_tp_mesh = formulas.tensor_parallel_params(counts, arch, 2)
 
         # Assert
         assert per_layer > 0
@@ -4334,9 +4496,8 @@ class TestGraniteMoeHybridTensorParallelBaseWeights:
         [
             # Attention and the dense MLP.
             ("ibm-granite/granite-4.0-micro", 629_145_600 + 2_516_582_400),
-            # Attention and the Mamba2 mixers. The shared MLP is not in the
-            # parsed geometry, so it stays in the unattributed FSDP remainder.
-            ("ibm-granite/granite-4.0-h-tiny", 25_165_824 + 527_132_736),
+            # Attention, the Mamba2 mixers and the shared MLP.
+            ("ibm-granite/granite-4.0-h-tiny", 25_165_824 + 527_132_736 + 188_743_680),
         ],
     )
     def test_tensor_parallel_params_cover_attention_mamba_and_dense_mlp(
@@ -4347,10 +4508,130 @@ class TestGraniteMoeHybridTensorParallelBaseWeights:
         counts = formulas.param_counts(model.arch, model.n_params)
 
         # Act
-        on_tp_mesh = formulas.tensor_parallel_params(counts, model.arch)
+        on_tp_mesh = formulas.tensor_parallel_params(counts, model.arch, 2)
 
         # Assert
         assert on_tp_mesh == expected
+
+
+SPARSE_MOE_TP_MODEL_IDS = [
+    "deepseek-ai/DeepSeek-V4-Flash-0731",
+    "zai-org/GLM-5.3-Flash",
+    "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+]
+
+
+class TestSparseMoeTensorParallelBaseWeights:
+    @pytest.mark.parametrize("model_id", SPARSE_MOE_TP_MODEL_IDS)
+    def test_sharded_bytes_fall_as_tp_rises(self, model_id):
+        # Arrange
+        model = catalog_model(model_id)
+        unplanned = model.model_copy(
+            update={
+                "arch": model.arch.model_copy(update={"tensor_parallel_plan": False})
+            }
+        )
+
+        # Act
+        plain = catalog_base_weights(model, 4, ep=4)
+        tensor = catalog_base_weights(model, 8, tp=2, ep=4)
+        wider_tensor = catalog_base_weights(model, 16, tp=4, ep=4)
+        without_plan = catalog_base_weights(unplanned, 16, tp=4, ep=4)
+
+        # Assert
+        assert model.arch.tensor_parallel_plan
+        assert wider_tensor < tensor < plain
+        assert wider_tensor < without_plan
+
+    @pytest.mark.parametrize("model_id", SPARSE_MOE_TP_MODEL_IDS)
+    def test_sharded_bytes_fall_as_ep_rises(self, model_id):
+        # Arrange
+        model = catalog_model(model_id)
+
+        # Act
+        by_ep = [catalog_base_weights(model, 16, tp=2, ep=ep) for ep in (1, 2, 4, 8)]
+
+        # Assert
+        assert by_ep == sorted(by_ep, reverse=True)
+        assert len(set(by_ep)) == 4
+
+    @pytest.mark.parametrize("model_id", SPARSE_MOE_TP_MODEL_IDS)
+    def test_sharded_bytes_hold_as_cp_rises(self, model_id):
+        # Arrange
+        model = catalog_model(model_id)
+
+        # Act
+        by_cp = [catalog_base_weights(model, 16, cp=cp, tp=2, ep=8) for cp in (1, 2, 4)]
+
+        # Assert
+        assert len(set(by_cp)) == 1
+
+    @pytest.mark.parametrize(
+        ("model_id", "expected"),
+        [
+            # Low-rank q up-projection, grouped output, sinks, shared experts, head.
+            ("deepseek-ai/DeepSeek-V4-Flash-0731", 5_940_185_792),
+            # KDA and DSA mixers, dense MLP, shared experts, head, vision linears.
+            ("zai-org/GLM-5.3-Flash", 8_519_903_360),
+            # Attention, sliding-window sinks, dense MLP, head.
+            ("XiaomiMiMo/MiMo-V2.6-Flash-RL", 5_308_942_784),
+        ],
+    )
+    def test_tensor_parallel_params_match_the_family_plan(self, model_id, expected):
+        # Arrange
+        model = catalog_model(model_id)
+        counts = formulas.param_counts(model.arch, model.n_params)
+
+        # Act
+        on_tp_mesh = [
+            formulas.tensor_parallel_params(counts, model.arch, tp) for tp in (2, 4)
+        ]
+
+        # Assert
+        assert on_tp_mesh == [expected, expected]
+
+
+def catalog_block_recompute(spec: ModelSpec, cp: int) -> float:
+    """Checkpointed block recompute of one 8192-token row on 16 H100s, ep=16."""
+    settings = TrainingSettings(
+        n_training_gpus=16,
+        max_model_len=8192,
+        micro_batch_size=1,
+        fsdp=pinned_fsdp(cp=cp, ep=16),
+    )
+    breakdown = estimate_training(
+        spec, training_gpu("NVIDIA H100 80GB HBM3", 80 * GiB), settings
+    )
+    return component(breakdown, "activations").detail["block_recompute"]
+
+
+class TestSparseMoeContextParallelActivations:
+    @pytest.mark.parametrize(
+        "model_id",
+        ["deepseek-ai/DeepSeek-V4-Flash-0731", "zai-org/GLM-5.3-Flash"],
+    )
+    def test_key_gather_recompute_falls_slower_than_the_shard(self, model_id):
+        # Arrange
+        model = catalog_model(model_id)
+
+        # Act
+        one, two, four = (catalog_block_recompute(model, cp) for cp in (1, 2, 4))
+
+        # Assert: every rank holds the whole sequence's key side.
+        assert one > two > four
+        assert two > one / 2
+        assert four > one / 4
+
+    def test_ulysses_recompute_follows_the_shard(self):
+        # Arrange
+        model = catalog_model("XiaomiMiMo/MiMo-V2.6-Flash-RL")
+
+        # Act
+        one, two, four = (catalog_block_recompute(model, cp) for cp in (1, 2, 4))
+
+        # Assert: eight sliding KV heads cover cp=4, so nothing is replicated.
+        assert two == pytest.approx(one / 2, rel=1e-6)
+        assert four == pytest.approx(one / 4, rel=1e-6)
 
 
 class TestTensorParallelHeadGatherBytes:
@@ -4448,3 +4729,72 @@ class TestAdapterState:
 
         # Assert
         assert tower_state == text_state
+
+
+class TestTrainingHyperConnections:
+    def test_checkpointed_blocks_keep_every_residual_stream(self, device):
+        # Arrange
+        streams = QWEN_05B.model_copy(update={"hc_mult": 4})
+        settings = TrainingSettings(max_model_len=1024)
+
+        # Act
+        breakdown = estimate_training(
+            ModelSpec(model_id="qwen", arch=streams), device, settings
+        )
+
+        # Assert: 24 checkpointed block inputs of four 896-wide bf16 streams.
+        saved = component(breakdown, "activations").detail["checkpoint_boundaries"]
+        assert saved == 24 * 1024 * 4 * 896 * 2
+
+
+class TestTrainingPrequantizedCheckpoint:
+    @pytest.mark.parametrize(
+        "hub_id",
+        [
+            "deepseek-ai/DeepSeek-V4-Flash-0731",
+            "zai-org/GLM-5.3-Flash",
+            "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+        ],
+    )
+    def test_trainer_sizes_the_dequantized_checkpoint(self, hub_id):
+        # Arrange
+        spec = catalog_model(hub_id)
+        dequantized = spec.model_copy(
+            update={
+                "arch": spec.arch.model_copy(update={"checkpoint_quantization": None})
+            }
+        )
+        settings = TrainingSettings(
+            algorithm="grpo",
+            max_model_len=4096,
+            lora_rank=16,
+            n_training_gpus=16,
+            fsdp=fsdp_config(ep=8),
+        )
+        h100 = DeviceSpec(total_bytes=80 * GiB, name="H100-80")
+
+        # Act
+        stored = estimate_training(spec, h100, settings)
+        bf16 = estimate_training(dequantized, h100, settings)
+
+        # Assert
+        assert spec.arch.checkpoint_quantization is not None
+        assert stored.total_bytes > 0
+        assert stored == bf16
+
+
+class TestBlockBackwardTermsCompressedEntries:
+    def test_max_model_len_bounds_each_packed_documents_entries(self):
+        # Arrange
+        arch = catalog_model("deepseek-ai/DeepSeek-V4-Flash-0731").arch
+        short = TrainingSettings(max_model_len=2048, micro_batch_size=1)
+        long = TrainingSettings(max_model_len=4096, micro_batch_size=1)
+
+        # Act
+        short_recompute = block_backward_terms(arch, short, 4096, 2.0, 2.0)[0]
+        long_recompute = block_backward_terms(arch, long, 4096, 2.0, 2.0)[0]
+
+        # Assert: 2048-token documents keep all 512 CSA entries under top-k; a
+        # 4096-token one scores 1024 entries, a mask byte and 64 heads' fp32
+        # scores plus their sum each.
+        assert long_recompute - short_recompute == 4096 * 1024 * (1 + 65 * 4)

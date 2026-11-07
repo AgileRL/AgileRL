@@ -9,14 +9,17 @@ Every function is a pure function of the specs in
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Literal
 
-from agilerl.arena.memory import lora_formulas
 from agilerl.arena.memory.resolve.chunk import resolve_chunk_rows
 from agilerl.arena.memory.specs import (
+    CSA_COMPRESS_RATIO,
     DTYPE_BYTES,
+    HCA_COMPRESS_RATIO,
     BlockKind,
+    CheckpointQuantization,
     GiB,
     LoraTargetScope,
     MiB,
@@ -43,6 +46,11 @@ LORA_DUAL_STREAM_BYTES = 768 * MiB
 # gpu_memory_utilization budget and every rank holds it whole: it does not
 # shrink with TP or fp8 weights.
 ENGINE_RUNTIME_FRACTION = 0.036
+# Ceiling on that share. vLLM 0.32 logs 2.31-2.49 GiB non-torch for
+# Qwen3.6-35B-A3B, the largest fitted model, and 0.86-1.93 GiB for
+# DeepSeek-V4-Flash, GLM-5.3-Flash and MiMo-V2.6-Flash at 530-585 GiB of bf16
+# weights (H100, TP 4-8).
+ENGINE_RUNTIME_MAX_BYTES = 2560 * MiB
 # Bytes per LoRA parameter under flat data parallel. PEFT
 # ``autocast_adapter_dtype=True`` stores adapters and their gradients in
 # fp32. AdamW keeps two moments per parameter in the parameter's dtype.
@@ -71,7 +79,8 @@ EP_EXCHANGE_BUFFERS = 4
 # saved tensors at every budget.
 RECOMPUTED_CHUNK_LIVE_MULTIPLE = 7
 
-# Share of a block's checkpointed-backward peak (:func:`block_recompute_bytes`)
+# Share of a block's checkpointed-backward peak
+# (:func:`~agilerl.arena.memory.block_activations.block_recompute_bytes`)
 # that a block left out of checkpointing keeps from its forward: the backward
 # peak also holds a gradient that only the block in backward carries. Qwen3-4B
 # LoRA r16 on A100 80GB (FA2 packed, 12k and 15k-token budgets, frozen base
@@ -239,23 +248,71 @@ def context_parallel_shard_len(arch: ModelArch, seq_len: int, cp: int) -> int:
     return -(-(seq_len - 1) // round_to) * round_to // cp
 
 
-def tensor_parallel_params(counts: ParamCounts, arch: ModelArch) -> int:
+def tensor_parallel_params(
+    counts: ParamCounts, arch: ModelArch, tensor_parallel: int
+) -> int:
     """Parameters placed on the tensor-parallel mesh.
 
     Each rank keeps 1/tp, which FSDP then shards over ``dp_shard * cp`` and
     gathers per unit. An untied ``lm_head`` is in the set for every
-    family; attention, dense MLP, Mamba, and per-layer embeddings only for
-    families with a training TP plan. Norms, token embeddings, the MoE
-    router, and packed experts stay on the FSDP mesh.
+    family; attention, dense MLP, shared experts, Mamba, per-layer
+    embeddings and planned tower linears only for families with a training
+    TP plan, less :func:`tensor_parallel_whole_params`. Norms, token
+    embeddings, the MoE router, and packed experts stay on the FSDP mesh.
     """
     head = 0 if arch.tied_embeddings else counts.lm_head
     if not arch.tensor_parallel_plan:
         return head
     _, router = moe_params_per_layer(arch)
     dense_mlp = counts.mlp - arch.moe_layers * router
+    shared = arch.moe_layers * shared_expert_params_per_layer(arch)
     gate = attention_output_gate_params(counts, arch)
     per_layer_embed = max(counts.embedding - token_embedding_params(arch), 0)
-    return counts.attention + dense_mlp + counts.mamba + head + gate + per_layer_embed
+    mixers = (
+        counts.attention
+        + counts.mamba
+        - tensor_parallel_whole_params(arch, tensor_parallel)
+    )
+    return (
+        mixers
+        + dense_mlp
+        + shared
+        + head
+        + gate
+        + per_layer_embed
+        + arch.tensor_parallel_tower_params
+    )
+
+
+def tensor_parallel_whole_params(arch: ModelArch, tensor_parallel: int) -> int:
+    """Attention and KDA parameters a family TP plan keeps whole on every rank.
+
+    The low-rank query and MLA KV down-projections with their norms, the KV
+    compressors and indexers, key/value heads that do not divide ``tp``,
+    KDA's low-rank forget and output gate down-projections, and each
+    gated-delta mixer's per-head output norm.
+    """
+    h = arch.hidden_size
+    per_layer = arch.q_lora_rank * (h + 1) if arch.q_lora_rank else 0
+    if arch.kv_lora_rank:
+        per_layer += h * (arch.kv_lora_rank + arch.qk_rope_head_dim)
+        per_layer += arch.kv_lora_rank
+    elif arch.low_rank_attention:
+        if arch.n_kv_heads % tensor_parallel:
+            kv = arch.n_kv_heads * arch.head_dim
+            per_layer += h * kv * (1 if arch.shared_kv else 2)
+            per_layer += kv if arch.shared_kv else 0
+    whole = arch.attention_layers * per_layer + attention_extra_params(arch)
+    if not arch.low_rank_attention:
+        for kind in attention_layer_kinds(arch):
+            if kind.kv_heads % tensor_parallel:
+                width = kind.kv_heads * (kind.head_dim + kind.v_head_dim)
+                whole += kind.kv_layers * width * (h + int(arch.attn_bias))
+    if arch.mamba_kda:
+        whole += arch.n_mamba_layers * 2 * h * arch.mamba_d_head
+    if arch.mamba_gated_delta:
+        whole += arch.n_mamba_layers * arch.mamba_d_head
+    return whole
 
 
 def attention_output_gate_params(counts: ParamCounts, arch: ModelArch) -> int:
@@ -268,41 +325,244 @@ def attention_output_gate_params(counts: ParamCounts, arch: ModelArch) -> int:
     return min(gate, max(counts.unattributed, 0))
 
 
-def qkv_width_per_rank(arch: ModelArch, tp: int) -> int:
+def qkv_width_per_rank(arch: ModelArch, tp: int, context_parallel: int = 1) -> int:
     """q+k+v elements one tensor-parallel rank materialises.
 
     Query heads always split. Key/value heads split only when they divide
-    ``tp``; otherwise every rank keeps them.
+    ``tp``; otherwise every rank keeps them. Ulysses context parallel
+    replicates a rank's key/value heads up to ``context_parallel`` when it
+    holds fewer. MLA expands keys and values per query head.
     """
+    if arch.kv_lora_rank:
+        v_dim = arch.v_head_dim or arch.head_dim
+        return tp_local(arch.n_heads, tp) * (2 * arch.head_dim + v_dim)
     head = arch.head_dim
     if arch.global_head_dim and arch.global_head_dim > head:
         head = arch.global_head_dim
     q = tp_local(arch.n_heads, tp) * head
-    kv_heads = tp_local(arch.n_kv_heads, tp)
-    return q + 2 * kv_heads * head
+    kv_heads = max(tp_local(arch.n_kv_heads, tp), context_parallel)
+    return q + kv_heads * (head + (arch.v_head_dim or head))
+
+
+def attention_linears(
+    arch: ModelArch, tensor_parallel: int = 1
+) -> list[tuple[int, int]]:
+    """``(in_features, out_features)`` of one attention block's ``nn.Linear`` layers, in forward order.
+
+    MLA projects keys and values from a shared latent plus one rope key.
+    A grouped low-rank output's per-group projection returns one output per
+    group, which a LoRA delta cannot match, so only the group-mixing linear
+    is listed.
+    """
+    h = arch.hidden_size
+    heads = tp_local(arch.n_heads, tensor_parallel)
+    if not arch.low_rank_attention:
+        head_dim = max(arch.head_dim, arch.global_head_dim or 0)
+        v_dim = arch.v_head_dim or head_dim
+        kv_heads = tp_local(arch.n_kv_heads, tensor_parallel)
+        return [
+            (h, heads * head_dim),
+            (h, kv_heads * head_dim),
+            (h, kv_heads * v_dim),
+            (heads * v_dim, h),
+        ]
+    q_out = heads * arch.head_dim
+    v_dim = arch.v_head_dim or arch.head_dim
+    query = [(h, q_out)]
+    if arch.q_lora_rank:
+        query = [(h, arch.q_lora_rank), (arch.q_lora_rank, q_out)]
+    if arch.kv_lora_rank:
+        nope = arch.head_dim - arch.qk_rope_head_dim
+        kv = [
+            (h, arch.kv_lora_rank + arch.qk_rope_head_dim),
+            (arch.kv_lora_rank, heads * (nope + v_dim)),
+        ]
+    else:
+        kv_out = tp_local(arch.n_kv_heads, tensor_parallel) * arch.head_dim
+        kv = [(h, kv_out)] * (1 if arch.shared_kv else 2)
+    out = [(heads * v_dim, h)]
+    if arch.o_groups:
+        out = [(tp_local(arch.o_groups, tensor_parallel) * arch.o_lora_rank, h)]
+    return query + kv + out
+
+
+def attention_linear_names(arch: ModelArch) -> list[str]:
+    """PEFT module names of :func:`attention_linears`, in the same order."""
+    if not arch.low_rank_attention:
+        return ["q_proj", "k_proj", "v_proj", "o_proj"]
+    query = ["q_a_proj", "q_b_proj"] if arch.q_lora_rank else ["q_proj"]
+    if arch.kv_lora_rank:
+        kv = ["kv_a_proj_with_mqa", "kv_b_proj"]
+    else:
+        kv = ["kv_proj"] if arch.shared_kv else ["k_proj", "v_proj"]
+    return query + kv + ["o_b_proj" if arch.o_groups else "o_proj"]
+
+
+def kv_compressor_params(hidden: int, width: int, rate: int, overlap: int) -> int:
+    """Parameters of one DeepSeek-V4 KV compressor: KV and gate projections, position bias, norm.
+
+    :param overlap: Windows each compressed entry reads; projections widen by it.
+    """
+    return 2 * hidden * overlap * width + rate * overlap * width + width
+
+
+def attention_extra_params(arch: ModelArch) -> int:
+    """KV-compressor and sparse-attention indexer parameters over the whole stack."""
+    h = arch.hidden_size
+    # CSA entries read two overlapping windows; HCA entries one.
+    csa = kv_compressor_params(h, arch.head_dim, CSA_COMPRESS_RATIO, 2)
+    hca = kv_compressor_params(h, arch.head_dim, HCA_COMPRESS_RATIO, 1)
+    total = arch.n_csa_layers * csa + arch.n_hca_layers * hca
+    if not arch.n_indexed_layers:
+        return total
+    ihd = arch.index_head_dim
+    queries = arch.q_lora_rank * arch.index_n_heads * ihd + h * arch.index_n_heads
+    if arch.n_csa_layers:
+        keys = kv_compressor_params(h, ihd, CSA_COMPRESS_RATIO, 2)
+    else:
+        # Key projection, key-pool gate, and a LayerNorm weight and bias.
+        keys = 2 * h * ihd + 2 * ihd
+    return total + arch.n_indexed_layers * (queries + keys)
+
+
+def hyper_connection_params(arch: ModelArch) -> int:
+    """Pre- and post-block mixing parameters of hyper-connections over the whole stack."""
+    m = arch.hc_mult
+    if m <= 1:
+        return 0
+    mix = (2 + m) * m
+    # Each mixer: a (mix, m * hidden) weight, a bias per output, three scales.
+    per_mixer = mix * m * arch.hidden_size + mix + 3
+    return arch.n_layers * 2 * per_mixer
 
 
 def attention_params_per_layer(arch: ModelArch) -> int:
     """q/k/v/o parameters of one attention block."""
-    h, dh = arch.hidden_size, arch.head_dim
-    q_dim = arch.n_heads * dh
-    kv_dim = arch.n_kv_heads * dh
-    attn_per_layer = h * q_dim + 2 * h * kv_dim + q_dim * h
-    if arch.attn_bias:
-        attn_per_layer += q_dim + 2 * kv_dim
-    if arch.global_head_dim and arch.global_head_dim != dh:
-        # Full-attention layers project to a wider head; scale the whole
-        # attention block by the layer-averaged width.
-        attn_per_layer = int(attn_per_layer * arch.mean_qkv_dim / (q_dim + 2 * kv_dim))
-    return attn_per_layer
+    if arch.low_rank_attention:
+        params = sum(i * o for i, o in attention_linears(arch))
+        # RMSNorms on the query latent and the KV latent or shared KV.
+        params += arch.q_lora_rank + arch.kv_lora_rank
+        if arch.shared_kv:
+            params += arch.n_kv_heads * arch.head_dim
+        if arch.o_groups:
+            params += (
+                arch.o_lora_rank * arch.n_heads * (arch.v_head_dim or arch.head_dim)
+            )
+        return params
+    return int(standard_attention_params(arch) / max(arch.attention_layers, 1))
+
+
+@dataclass(frozen=True)
+class AttentionLayerKind:
+    """Standard attention layers that share one head geometry."""
+
+    layers: int
+    # Layers with their own k/v projections; KV-shared layers have none.
+    kv_layers: int
+    kv_heads: int
+    head_dim: int
+    v_head_dim: int
+
+
+def attention_layer_kinds(
+    arch: ModelArch,
+) -> tuple[AttentionLayerKind, AttentionLayerKind]:
+    """Sliding-window and full-attention layers of a standard attention stack."""
+    f = arch.sliding_window_layer_fraction if arch.sliding_window else 0.0
+    sliding = round(f * arch.attention_layers)
+    full = arch.attention_layers - sliding
+    shared_full = arch.kv_shared_full_layers
+    full_dim = arch.global_head_dim or arch.head_dim
+    return (
+        AttentionLayerKind(
+            layers=sliding,
+            kv_layers=sliding - (arch.n_kv_shared_layers - shared_full),
+            kv_heads=arch.n_kv_heads,
+            head_dim=arch.head_dim,
+            v_head_dim=arch.v_head_dim or arch.head_dim,
+        ),
+        AttentionLayerKind(
+            layers=full,
+            kv_layers=full - shared_full,
+            kv_heads=arch.global_n_kv_heads or arch.n_kv_heads,
+            head_dim=full_dim,
+            v_head_dim=arch.v_head_dim or full_dim,
+        ),
+    )
+
+
+def standard_attention_params(arch: ModelArch) -> int:
+    """q/k/v/o parameters of every layer of a standard (not low-rank) attention stack."""
+    h = arch.hidden_size
+    bias = int(arch.attn_bias)
+    return sum(
+        kind.layers * arch.n_heads * (kind.head_dim * (h + bias) + kind.v_head_dim * h)
+        + kind.kv_layers
+        * kind.kv_heads
+        * (kind.head_dim + kind.v_head_dim)
+        * (h + bias)
+        for kind in attention_layer_kinds(arch)
+    )
+
+
+def adapter_linears(
+    names: Sequence[str],
+    linears: list[tuple[int, int]],
+    excluded: frozenset[str],
+) -> list[tuple[int, int]]:
+    """The ``linears`` whose PEFT module ``names`` are not in ``excluded``."""
+    return [
+        linear
+        for name, linear in zip(names, linears, strict=True)
+        if name not in excluded
+    ]
+
+
+def kda_linears(arch: ModelArch, tensor_parallel: int = 1) -> list[tuple[int, int]]:
+    """``(in_features, out_features)`` of one KDA mixer's ``nn.Linear`` layers, in forward order.
+
+    q, k and v; the low-rank forget gate; beta; the low-rank output gate; o.
+    """
+    h, dim = arch.hidden_size, arch.mamba_d_head
+    heads = tp_local(arch.mamba_n_heads, tensor_parallel)
+    width = heads * dim
+    gate = [(h, dim), (dim, width)]
+    return [(h, width)] * 3 + gate + [(h, heads)] + gate + [(width, h)]
+
+
+# PEFT module names of :func:`kda_linears`, in the same order.
+KDA_LINEAR_NAMES = (
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "f_a_proj",
+    "f_b_proj",
+    "b_proj",
+    "g_a_proj",
+    "g_b_proj",
+    "o_proj",
+)
 
 
 def mamba_params_per_layer(arch: ModelArch) -> int:
     """Parameters of one Mamba-2 mixer, from the same geometry as its state."""
     if not arch.n_mamba_layers:
         return 0
+    if arch.mamba_kda:
+        width = arch.mamba_n_heads * arch.mamba_d_head
+        linears = sum(i * o for i, o in kda_linears(arch))
+        # Bias-free conv, dt bias, A_log, and the per-head output norm.
+        conv = arch.mamba_conv_dim * arch.mamba_d_conv
+        return linears + conv + width + arch.mamba_n_heads + arch.mamba_d_head
     h = arch.hidden_size
     d_inner = arch.mamba_n_heads * arch.mamba_d_head
+    if arch.mamba_gated_delta:
+        # z, qkv, beta and decay projections; a bias-free conv; dt bias,
+        # A_log, and the per-head output norm.
+        in_proj = h * (d_inner + arch.mamba_conv_dim + 2 * arch.mamba_n_heads)
+        conv = arch.mamba_conv_dim * arch.mamba_d_conv
+        heads = 2 * arch.mamba_n_heads
+        return in_proj + d_inner * h + conv + heads + arch.mamba_d_head
     in_proj = h * (d_inner + arch.mamba_conv_dim + arch.mamba_n_heads)
     out_proj = d_inner * h
     conv = arch.mamba_conv_dim * (arch.mamba_d_conv + 1)
@@ -327,6 +587,19 @@ def routed_expert_params_per_layer(arch: ModelArch) -> int:
     return n_experts * mlp_matrices * arch.expert_width * expert_inter
 
 
+def shared_expert_params_per_layer(arch: ModelArch) -> int:
+    """Always-on shared-expert MLP parameters of one MoE block."""
+    if not arch.is_moe:
+        return 0
+    mlp_matrices = 3 if arch.gated_mlp else 2
+    shared_inter = (
+        arch.shared_expert_intermediate_size
+        or arch.expert_intermediate_size
+        or arch.intermediate_size
+    )
+    return arch.n_shared_experts * mlp_matrices * arch.hidden_size * shared_inter
+
+
 def moe_params_per_layer(arch: ModelArch) -> tuple[int, int]:
     """(expert parameters, router parameters) of one MoE block.
 
@@ -336,11 +609,8 @@ def moe_params_per_layer(arch: ModelArch) -> tuple[int, int]:
     if n_experts is None or n_experts <= 1:
         return 0, 0
     h = arch.hidden_size
-    mlp_matrices = 3 if arch.gated_mlp else 2
-    expert_inter = arch.expert_intermediate_size or arch.intermediate_size
-    shared_inter = arch.shared_expert_intermediate_size or expert_inter
     experts = routed_expert_params_per_layer(arch)
-    experts += arch.n_shared_experts * mlp_matrices * h * shared_inter
+    experts += shared_expert_params_per_layer(arch)
     if arch.moe_latent_size:
         experts += 2 * h * arch.moe_latent_size
     return experts, h * n_experts
@@ -364,11 +634,17 @@ def param_counts(arch: ModelArch, n_params: int | None = None) -> ParamCounts:
     # Per-layer embeddings: one vector per layer per vocabulary entry.
     embedding += arch.per_layer_input_vocab * arch.n_layers * arch.per_layer_input_dim
     lm_head = 0 if arch.tied_embeddings else arch.vocab_size * h
-    norms = arch.n_layers * 2 * h + h
+    norms = arch.n_layers * 2 * h + h + hyper_connection_params(arch)
     counts = ParamCounts(
         embedding=embedding,
         lm_head=lm_head,
-        attention=arch.attention_layers * attention_params_per_layer(arch),
+        attention=(
+            arch.attention_layers * attention_params_per_layer(arch)
+            if arch.low_rank_attention
+            else standard_attention_params(arch)
+        )
+        + attention_extra_params(arch)
+        + arch.attention_sink_layers * arch.n_heads,
         mlp=arch.mlp_layers * mlp_per_layer + arch.moe_layers * router_per_layer,
         norms=norms,
         multimodal_towers=arch.multimodal_tower_params,
@@ -378,42 +654,6 @@ def param_counts(arch: ModelArch, n_params: int | None = None) -> ParamCounts:
     if n_params is None:
         return counts
     return replace(counts, unattributed=n_params - counts.total)
-
-
-def merged_lora_sync_bytes(
-    arch: ModelArch,
-    scope: LoraTargetScope,
-    n_packed_matrices: int,
-    dtype_bytes: float,
-) -> tuple[int, int]:
-    """Bytes of the merged weights a merged-LoRA sync pushes, and of the largest one.
-
-    The pushed weights are the linears
-    :func:`~agilerl.arena.memory.lora_formulas.decoder_lora_linears` lists,
-    without biases. Packed experts are pushed whole: ``gate_up_proj`` and
-    ``down_proj`` are two targeted parameters, and one target is charged
-    as ``gate_up_proj``, the larger.
-
-    :param arch: Model architecture.
-    :param scope: Adapter target scope.
-    :param n_packed_matrices: PEFT ``target_parameters`` on packed experts.
-    :param dtype_bytes: Bytes per element of the engines' weight dtype.
-    :return: Total bytes, and bytes of the largest pushed tensor.
-    """
-    sizes = [
-        (linear.in_features * linear.out_features, linear.count)
-        for linear in lora_formulas.decoder_lora_linears(arch, scope)
-    ]
-    if n_packed_matrices and arch.n_experts and arch.n_experts > 1:
-        expert_inter = arch.expert_intermediate_size or arch.intermediate_size
-        down = arch.n_experts * arch.expert_width * expert_inter
-        gate_up = (2 if arch.gated_mlp else 1) * down
-        sizes.append((gate_up, arch.moe_layers))
-        if n_packed_matrices > 1:
-            sizes.append((down, arch.moe_layers))
-    total = sum(size * count for size, count in sizes if count)
-    largest = max((size for size, count in sizes if count), default=0)
-    return int(total * dtype_bytes), int(largest * dtype_bytes)
 
 
 def weight_bytes(
@@ -430,7 +670,50 @@ def weight_bytes(
     return int((counts.total - counts.multimodal_towers + towers) * DTYPE_BYTES[dtype])
 
 
+def checkpoint_quantized_params(
+    arch: ModelArch, counts: ParamCounts, stored: CheckpointQuantization
+) -> tuple[int, int]:
+    """(linear, routed-expert) parameters a pre-quantized checkpoint stores quantized.
+
+    Linears are the attention and recurrent-mixer projections the checkpoint
+    does not list as unconverted, DeepSeek-V4's per-group output projection,
+    the dense MLPs, and the shared experts. KV compressors, indexers, the
+    router, norms, embeddings, the LM head and multimodal towers count at the
+    checkpoint dtype.
+    """
+    routed = arch.moe_layers * routed_expert_params_per_layer(arch)
+    attention = sum(
+        i * o
+        for i, o in adapter_linears(
+            attention_linear_names(arch),
+            attention_linears(arch),
+            stored.unquantized_attention,
+        )
+    )
+    if arch.o_groups:
+        attention += (
+            arch.o_lora_rank * arch.n_heads * (arch.v_head_dim or arch.head_dim)
+        )
+    mixer = 0
+    if arch.mamba_kda:
+        mixer = sum(
+            i * o
+            for i, o in adapter_linears(
+                KDA_LINEAR_NAMES, kda_linears(arch), stored.unquantized_mixer
+            )
+        )
+    linears = (
+        arch.attention_layers * attention
+        + arch.n_mamba_layers * mixer
+        + arch.mlp_layers * mlp_params_per_layer(arch)
+        + counts.moe_experts
+        - routed
+    )
+    return linears, routed
+
+
 def engine_weight_bytes(
+    arch: ModelArch,
     counts: ParamCounts,
     dtype: WeightDtype,
     variant: WeightVariant,
@@ -438,10 +721,21 @@ def engine_weight_bytes(
 ) -> int:
     """Base-weight bytes of one unsharded vLLM engine copy.
 
-    vLLM's online fp8 stores linear, expert and Mamba projection weights at one
-    byte. Embeddings, the LM head, norms and multimodal towers stay at ``dtype``.
+    vLLM serves a pre-quantized checkpoint as stored
+    (:func:`checkpoint_quantized_params`), whatever ``quantization`` says.
+    Otherwise its online fp8 stores linear, expert and Mamba projection
+    weights at one byte. Embeddings, the LM head, norms and multimodal towers
+    stay at ``dtype``.
     """
     full = weight_bytes(counts, dtype, variant)
+    stored = arch.checkpoint_quantization
+    if stored is not None:
+        linears, experts = checkpoint_quantized_params(arch, counts, stored)
+        return int(
+            full
+            - linears * (DTYPE_BYTES[dtype] - stored.linear_bytes)
+            - experts * (DTYPE_BYTES[dtype] - stored.expert_bytes)
+        )
     if quantization == "none":
         return full
     quantized = counts.attention + counts.mlp + counts.moe_experts + counts.mamba
@@ -509,11 +803,13 @@ def lora_linears(
     :return: Linears of the attention, FFN and recurrent kinds; empty when unwrapped.
     """
     h = arch.hidden_size
-    head_dim = max(arch.head_dim, arch.global_head_dim or 0)
-    head_out = tp_local(arch.n_heads, tensor_parallel) * head_dim
-    kv_out = tp_local(arch.n_kv_heads, tensor_parallel) * head_dim
+    excluded = arch.lora_excluded_modules
     linears: dict[BlockKind, list[tuple[int, int]]] = {
-        "attention": [(h, head_out), (h, kv_out), (h, kv_out), (head_out, h)],
+        "attention": adapter_linears(
+            attention_linear_names(arch),
+            attention_linears(arch, tensor_parallel),
+            excluded,
+        ),
         "ffn": [],
         "mamba": [],
     }
@@ -522,7 +818,11 @@ def lora_linears(
     if arch.mlp_layers:
         inter = tp_local(int(arch.intermediate_size * width_factor), tensor_parallel)
         linears["ffn"] = [(h, inter)] * (2 if arch.gated_mlp else 1) + [(inter, h)]
-    if arch.n_mamba_layers:
+    if arch.mamba_kda:
+        linears["mamba"] = adapter_linears(
+            KDA_LINEAR_NAMES, kda_linears(arch, tensor_parallel), excluded
+        )
+    elif arch.n_mamba_layers:
         heads_out = arch.mamba_n_heads * arch.mamba_d_head
         # Gated-delta-net LoRA wraps four residual-stream in_proj linears and
         # out_proj; Mamba-2 LoRA wraps in_proj only.
@@ -850,484 +1150,6 @@ def routed_chunk_bytes(
     return int(fractional * ROUTED_CHUNK_LIVE_FRACTION + whole)
 
 
-def mamba_block_bytes(
-    arch: ModelArch,
-    rows: int,
-    seq_len: int,
-    act_bytes: float,
-    backward: bool = False,
-    unfused_scan: bool = False,
-    tensor_parallel: int = 1,
-) -> int:
-    """Live tensors of one Mamba-2 layer's chunked scan in the trainer.
-
-    Per token: the ``in_proj`` output, the conv1d output, the gated scan
-    input and an fp32 copy of the residual stream. Per chunk: the fp32 SSM
-    state ``(heads, d_head, d_state)`` and the ``chunk x chunk`` CB matrix
-    per group. A checkpointed backward adds the gated-norm gradient, fp32
-    gradients of the ``in_proj`` output and the residual, and two more
-    state buffers.
-
-    ``unfused_scan`` adds the backward of HF's unfused path (separate conv,
-    chunk scan, gated norm and output projection, the SSM inputs upcast to
-    fp32), :data:`UNFUSED_MAMBA_SCAN_BYTES` per token per inner channel.
-    """
-    if not arch.n_mamba_layers:
-        return 0
-    tokens = rows * seq_len
-    heads = tp_local(arch.mamba_n_heads, tensor_parallel)
-    groups = tp_local(arch.mamba_n_groups, tensor_parallel)
-    d_inner = heads * arch.mamba_d_head
-    conv_dim = arch.mamba_conv_dim
-    if heads != arch.mamba_n_heads and arch.mamba_n_heads:
-        conv_dim = arch.mamba_conv_dim * heads // arch.mamba_n_heads
-    in_proj_out = d_inner + conv_dim + heads
-    chunks = rows * -(-seq_len // arch.mamba_chunk_size)
-    state = chunks * heads * arch.mamba_d_head * arch.mamba_d_state * 4
-    cb = chunks * groups * arch.mamba_chunk_size**2 * 4
-    per_token = (in_proj_out + arch.mamba_conv_dim + d_inner) * act_bytes
-    per_token += arch.hidden_size * 4
-    total = tokens * per_token + state + cb
-    if backward:
-        per_token_grads = d_inner * act_bytes + (in_proj_out + arch.hidden_size) * 4
-        total += tokens * per_token_grads + 2 * state
-    if unfused_scan and backward:
-        total += tokens * d_inner * UNFUSED_MAMBA_SCAN_BYTES
-    return int(total)
-
-
-def gated_delta_conv_dim(arch: ModelArch, tensor_parallel: int = 1) -> int:
-    """Conv channels of one rank's gated-delta-net heads; tensor parallel splits every head group."""
-    heads = tp_local(arch.mamba_n_heads, tensor_parallel)
-    return arch.mamba_conv_dim * heads // arch.mamba_n_heads
-
-
-def gated_delta_qk_width(arch: ModelArch, tensor_parallel: int = 1) -> int:
-    """Per-token width of one rank's gated-delta-net query (or key): key heads x key head dim.
-
-    The conv channels are ``[q | k | v]``, so this is what is left of the
-    rank's conv channels after its value heads, halved.
-    """
-    heads = tp_local(arch.mamba_n_heads, tensor_parallel)
-    return (
-        gated_delta_conv_dim(arch, tensor_parallel) - heads * arch.mamba_d_head
-    ) // 2
-
-
-def gated_delta_block_bytes(
-    arch: ModelArch,
-    rows: int,
-    seq_len: int,
-    act_bytes: float,
-    backward: bool = False,
-    tensor_parallel: int = 1,
-) -> int:
-    """Live tensors of one gated-delta-net layer's fla chunk kernel in the trainer.
-
-    :param arch: Model architecture.
-    :param rows: Sequences in the micro-batch.
-    :param seq_len: Tokens per sequence.
-    :param act_bytes: Bytes per activation element.
-    :param backward: Whether the layer runs a checkpointed backward.
-    :param tensor_parallel: Degree the mixer's heads are split by.
-    :return: Peak bytes of the kernel's tensors; zero without gated-delta layers.
-    """
-    if not (arch.n_mamba_layers and arch.mamba_gated_delta):
-        return 0
-    heads = tp_local(arch.mamba_n_heads, tensor_parallel)
-    conv_dim = gated_delta_conv_dim(arch, tensor_parallel)
-    qk = gated_delta_qk_width(arch, tensor_parallel)
-    key = heads * arch.mamba_d_state
-    value = heads * arch.mamba_d_head
-    state = heads * arch.mamba_d_state * arch.mamba_d_head / GATED_DELTA_CHUNK
-    # Per token: conv1d output, contiguous q/k at the key-head count and v,
-    # l2-normed q and k, gate z, WY w and u, updated values, output, the
-    # intra-chunk matrix, and one (d_state, d_head) state per head per chunk.
-    width = conv_dim + 4 * qk + key + 5 * value + heads * GATED_DELTA_CHUNK + state
-    # A checkpointed backward also keeps the in_proj_qkv output and its gate.
-    if backward:
-        width += conv_dim + value
-    return int(rows * seq_len * width * act_bytes)
-
-
-def gated_delta_saved_bytes(
-    arch: ModelArch,
-    rows: int,
-    seq_len: int,
-    act_bytes: float,
-    tensor_parallel: int = 1,
-) -> int:
-    """Tensors a recomputed gated-delta-net layer keeps for its own backward.
-
-    :param arch: Model architecture.
-    :param rows: Sequences in the micro-batch.
-    :param seq_len: Tokens per sequence.
-    :param act_bytes: Bytes per activation element.
-    :param tensor_parallel: Degree the mixer's heads are split by.
-    :return: Saved bytes; zero without gated-delta layers.
-    """
-    if not (arch.n_mamba_layers and arch.mamba_gated_delta):
-        return 0
-    heads = tp_local(arch.mamba_n_heads, tensor_parallel)
-    value = heads * arch.mamba_d_head
-    # Per token: in_proj_qkv output, l2-normed q and k at the key-head
-    # count, contiguous v, the intra-chunk matrix, and fla's fused gated
-    # RMSNorm's input, gate and output plus one fp32 rstd per head.
-    width = (
-        gated_delta_conv_dim(arch, tensor_parallel)
-        + 2 * gated_delta_qk_width(arch, tensor_parallel)
-        + 4 * value
-        + heads * GATED_DELTA_CHUNK
-    )
-    return int(rows * seq_len * (width * act_bytes + heads * 4))
-
-
-def _block_mlp_recompute(
-    arch: ModelArch,
-    rows: int,
-    seq_len: int,
-    act_bytes: float,
-    backward: bool,
-    engine_forward: bool,
-    tensor_parallel: int,
-    routed_split: int = 1,
-) -> tuple[int, int]:
-    """Per-token MLP width and routed-expert bytes of one block recompute.
-
-    :param routed_split: Ranks that share one sequence's routed tokens
-        (TP ranks under expert parallel).
-    :return: ``(mlp_width, routed_bytes)``. ``mlp_width`` is elements per
-        token. ``routed_bytes`` is the grouped-GEMM workspace; zero on the
-        engine path and on dense models.
-    """
-    mlp_matrices = 3 if arch.gated_mlp else 2
-    routed = 0
-    if arch.is_moe:
-        inter = arch.expert_intermediate_size or arch.intermediate_size
-        shared_inter = arch.shared_expert_intermediate_size or inter
-        # The always-on shared expert runs at its own (possibly wider) width.
-        active_width = arch.n_shared_experts * shared_inter
-        if engine_forward:
-            active_width += (arch.n_experts_per_tok or 1) * inter
-        else:
-            routed = routed_expert_bytes(
-                arch, rows, -(-seq_len // routed_split), act_bytes, backward
-            )
-    else:
-        active_width = tp_local(
-            int(arch.intermediate_size * arch.peak_mlp_width_factor), tensor_parallel
-        )
-    # Gated backward: gate, up, fused output, and one gradient, plus the
-    # activated gate when the MLP is not fused.
-    mlp_count = mlp_matrices
-    if backward and arch.gated_mlp:
-        mlp_count += 2 if arch.stock_gated_mlp else 1
-    mlp = mlp_count * active_width
-    if backward and not arch.gated_mlp:
-        # Activation plus its gradient for each of the two matrices.
-        mlp *= 2
-    return mlp, routed
-
-
-def block_recompute_bytes(
-    arch: ModelArch,
-    rows: int,
-    seq_len: int,
-    act_bytes: float,
-    backward: bool = False,
-    engine_forward: bool = False,
-    layer: BlockKind | None = None,
-    unfused_mamba_scan: bool = False,
-    tensor_parallel: int = 1,
-    routed_split: int = 1,
-) -> int:
-    """Peak transient activations of one transformer block.
-
-    The forward peak holds four residual copies, qkv, and the MLP outputs.
-    A checkpointed backward holds two residual copies, qkv, and the gated
-    MLP: gate, up, the fused output, and one gradient. A Q/K-norm model
-    (``arch.qk_norm``) also holds one fp32 copy of Q. Flash-style backends
-    tile the score matrix. A stock RMSNorm (``arch.fp32_norm_inputs``)
-    keeps an fp32 copy of each norm input on the backward.
-
-    In the trainer, routed experts run the grouped-GEMM path
-    (:func:`routed_expert_bytes`), Mamba mixers their chunked scan
-    (:func:`mamba_block_bytes`) and gated-delta-net mixers the fla chunk
-    kernel (:func:`gated_delta_block_bytes`). When
-    :attr:`ModelArch.sublayer_transients` holds, a block peaks in one
-    attention, FFN or recurrent sub-layer: ``layer`` picks one, else the
-    widest counts; otherwise a block holds all of them. On a stack whose
-    layers carry an FFN beside the mixer, a checkpointed backward charges
-    the mixer's saved tensors and that FFN together; a gated-delta-net
-    layer peaks at the larger of that and its kernel's own backward
-    (:func:`gated_delta_saved_bytes`).
-    ``engine_forward=True`` sizes routed experts as the active FFN width
-    (vLLM's in-kernel routing).
-    """
-    h = arch.hidden_size
-    # One block's transient peaks at the widest block: checkpointed
-    # recompute and the engine's layer-at-a-time forward run block by block.
-    # The residual stays full width. Query/MLP/Mamba projections narrow on
-    # the training mesh; the engine path sizes its own tensor parallel.
-    residual = (2 if backward else 4) * h
-    qkv_dim = (
-        arch.peak_qkv_dim
-        if engine_forward
-        else qkv_width_per_rank(arch, tensor_parallel)
-    )
-    mlp, routed = _block_mlp_recompute(
-        arch,
-        rows,
-        seq_len,
-        act_bytes,
-        backward,
-        engine_forward,
-        1 if engine_forward else tensor_parallel,
-        routed_split,
-    )
-    ple = arch.n_layers * arch.per_layer_input_dim
-    if backward:
-        ple *= 2
-    tokens = rows * seq_len
-    if engine_forward:
-        return int(tokens * (4 * h + qkv_dim + mlp + ple) * act_bytes)
-    if arch.mamba_gated_delta:
-        mamba = tokens * residual * act_bytes + gated_delta_block_bytes(
-            arch, rows, seq_len, act_bytes, backward, tensor_parallel
-        )
-    else:
-        mamba = mamba_block_bytes(
-            arch,
-            rows,
-            seq_len,
-            act_bytes,
-            backward,
-            unfused_scan=unfused_mamba_scan,
-            tensor_parallel=1 if engine_forward else tensor_parallel,
-        )
-    # fp32 RMSNorm inputs saved for backward, one per norm in the block.
-    norm_input = tokens * h * 4 if backward and arch.fp32_norm_inputs else 0
-    q_heads = (
-        arch.n_heads if engine_forward else tp_local(arch.n_heads, tensor_parallel)
-    )
-    q_norm = tokens * q_heads * arch.head_dim * 4 if backward and arch.qk_norm else 0
-
-    def sublayer_peak() -> int:
-        ffn = tokens * (mlp + ple) * act_bytes + routed + norm_input
-        # Both recurrent terms hold the layer's residual copy.
-        by_layer = {
-            "attention": tokens * (residual + qkv_dim) * act_bytes
-            + norm_input
-            + q_norm,
-            "ffn": tokens * residual * act_bytes + ffn,
-            "mamba": mamba + norm_input,
-        }
-        if backward and not arch.block_exclusive_layers:
-            # Recompute rebuilds the whole layer, so the mixer's saved
-            # tensors stay live through the backward of the FFN beside it.
-            # The recurrent kernel's own backward runs once the FFN's are freed.
-            by_layer["attention"] += ffn
-            mamba_saved = (
-                tokens * residual * act_bytes
-                + gated_delta_saved_bytes(
-                    arch, rows, seq_len, act_bytes, tensor_parallel
-                )
-                + norm_input
-            )
-            by_layer["mamba"] = max(by_layer["mamba"], mamba_saved + ffn)
-        if layer is not None:
-            return int(by_layer[layer])
-        return int(max(by_layer.values()))
-
-    if arch.sublayer_transients:
-        return sublayer_peak()
-    return int(
-        tokens * (residual + qkv_dim + mlp + ple) * act_bytes
-        + routed
-        + mamba
-        + arch.norms_per_block * norm_input
-        + q_norm
-    )
-
-
-def mean_block_recompute_bytes(
-    arch: ModelArch,
-    rows: int,
-    seq_len: int,
-    act_bytes: float,
-    unfused_mamba_scan: bool = False,
-    tensor_parallel: int = 1,
-    routed_split: int = 1,
-) -> int:
-    """Checkpointed-backward peak of one block, averaged over the stack's layers.
-
-    Each uncheckpointed layer keeps its own mixer's tensors, so a stack whose
-    every layer runs one mixer beside its FFN weights the attention and
-    recurrent :func:`block_recompute_bytes` by their layer counts: Qwen3.5
-    LoRA on A100 80GB, GC off and every second or fourth block checkpointed,
-    16k-32k packed tokens. Other stacks take the widest block.
-
-    :param arch: Model architecture.
-    :param rows: Sequences in the micro-batch.
-    :param seq_len: Tokens per sequence.
-    :param act_bytes: Bytes per activation element.
-    :param unfused_mamba_scan: Mamba layers run HF's unfused path.
-    :param tensor_parallel: Degree the decoder layers are sharded by.
-    :param routed_split: Ranks that share one sequence's routed tokens.
-    :return: Mean bytes of one block.
-    """
-
-    def peak(layer: BlockKind | None) -> int:
-        return block_recompute_bytes(
-            arch,
-            rows,
-            seq_len,
-            act_bytes,
-            backward=True,
-            layer=layer,
-            unfused_mamba_scan=unfused_mamba_scan,
-            tensor_parallel=tensor_parallel,
-            routed_split=routed_split,
-        )
-
-    if not arch.sublayer_transients or arch.block_exclusive_layers:
-        return peak(None)
-    return int(
-        (
-            arch.attention_layers * peak("attention")
-            + arch.n_mamba_layers * peak("mamba")
-        )
-        / arch.n_layers
-    )
-
-
-def prices_stored_tensors(arch: ModelArch) -> bool:
-    """Whether :func:`stored_block_bytes` prices this model's uncheckpointed blocks.
-
-    :param arch: Model architecture.
-    :return: True for a MoE stack whose every layer holds a mixer and the
-        experts, on the self-routing expert LoRA path.
-    """
-    return (
-        arch.is_moe
-        and arch.routed_expert_recompute
-        and not arch.block_exclusive_layers
-        and not arch.mamba_gated_delta
-    )
-
-
-def stored_block_bytes(
-    arch: ModelArch,
-    rows: int,
-    seq_len: int,
-    act_bytes: float,
-    expert_lora: bool,
-    mamba_lora: bool,
-    expert_parallel: int = 1,
-    routed_split: int = 1,
-) -> int:
-    """Tensors one uncheckpointed block keeps for its backward, averaged over layer kinds.
-
-    Per token: each RMSNorm's input (fp32 under the stock module) and the
-    normed rows the experts read. An attention layer adds the normed rows its
-    LoRA reads, q, k, v and the attention output. A Mamba-2 layer adds the
-    fused kernel's ``in_proj`` and scan outputs, and with LoRA on ``in_proj``
-    and ``out_proj`` their inputs. The router keeps an fp32 score and an
-    int64 index per routed slot. Expert LoRA recomputes the experts in
-    backward and keeps another score and index per slot; frozen experts keep
-    gate, up and the expert output. A shared expert keeps gate and up, plus
-    the activated gate under the stock MLP. Expert parallel keeps one
-    ``expert_width`` row per routed slot for the combine's router-weight
-    product, and with expert LoRA four: the received rows the recompute
-    reads, the combine rows, and two more the measured peaks show.
-
-    :param arch: Model architecture; :func:`prices_stored_tensors` holds.
-    :param rows: Sequences in the micro-batch.
-    :param seq_len: Tokens per sequence.
-    :param act_bytes: Bytes per activation element.
-    :param expert_lora: Packed expert matrices carry LoRA.
-    :param mamba_lora: Mamba ``in_proj`` and ``out_proj`` carry LoRA.
-    :param expert_parallel: Expert-parallel degree.
-    :param routed_split: Ranks that share one sequence's routed tokens
-        (TP ranks under expert parallel).
-    :return: Mean saved bytes of one block.
-    """
-    h = arch.hidden_size
-    tokens = rows * seq_len
-    norm_bytes = DTYPE_BYTES["fp32"] if arch.fp32_norm_inputs else act_bytes
-    per_token = arch.norms_per_block * h * norm_bytes + h * act_bytes
-    slots = arch.n_experts_per_tok or 1
-    slot_bytes = DTYPE_BYTES["fp32"] + 8
-    inter = arch.expert_intermediate_size or arch.intermediate_size
-    if expert_lora:
-        per_token += 2 * slots * slot_bytes
-    else:
-        per_token += slots * (slot_bytes + (2 * inter + arch.expert_width) * act_bytes)
-    if expert_parallel > 1:
-        # granite-3.1-3b-a800m GRPO LoRA, ep=2, GC off, 2x A100 80GB: peaks
-        # grow 3.70 GiB per 1k packed tokens at 8k-16k, 3.9 rows per slot
-        # above the same model without expert parallel.
-        ep_rows = 4 if expert_lora else 1
-        per_token += ep_rows * slots * arch.expert_width * act_bytes / routed_split
-    shared_inter = arch.shared_expert_intermediate_size or inter
-    shared_matrices = 3 if arch.stock_gated_mlp else 2
-    per_token += arch.n_shared_experts * shared_matrices * shared_inter * act_bytes
-    q_dim = arch.n_heads * arch.head_dim
-    attention = (h + arch.peak_qkv_dim + q_dim) * act_bytes
-    if arch.qk_norm:
-        attention += q_dim * DTYPE_BYTES["fp32"]
-    mamba = mamba_saved_width(arch, mamba_lora) * act_bytes
-    mixers = arch.attention_layers * attention + arch.n_mamba_layers * mamba
-    return int(tokens * (per_token + mixers / arch.n_layers))
-
-
-def mamba_saved_width(arch: ModelArch, lora: bool) -> int:
-    """Elements per token one Mamba-2 layer on the fused split-scan kernel saves for backward.
-
-    The kernel keeps its ``in_proj`` output and its scan output. LoRA on
-    ``in_proj`` and ``out_proj`` adds their inputs: the normed hidden rows and
-    the gated-norm output.
-
-    :param arch: Model architecture.
-    :param lora: ``in_proj`` and ``out_proj`` carry LoRA.
-    :return: Saved elements per token; zero without Mamba layers.
-    """
-    if not arch.n_mamba_layers:
-        return 0
-    d_inner = arch.mamba_n_heads * arch.mamba_d_head
-    width = 2 * d_inner + arch.mamba_conv_dim + arch.mamba_n_heads
-    if lora:
-        width += arch.hidden_size + d_inner
-    return width
-
-
-def nograd_forward_bytes(
-    arch: ModelArch,
-    rows: int,
-    seq_len: int,
-    act_bytes: float,
-    unfused_mamba_scan: bool = False,
-    tensor_parallel: int = 1,
-    routed_split: int = 1,
-) -> int:
-    """Peak transient memory of the fused no-grad logprob forward.
-
-    Nothing is saved for backward: one block's transients plus the
-    full-sequence hidden state handed to the fused logprob kernel.
-    """
-    block = block_recompute_bytes(
-        arch,
-        rows,
-        seq_len,
-        act_bytes,
-        unfused_mamba_scan=unfused_mamba_scan,
-        tensor_parallel=tensor_parallel,
-        routed_split=routed_split,
-    )
-    hidden_out = rows * seq_len * arch.hidden_size * act_bytes
-    return int(block + hidden_out)
-
-
 def support_rows_bytes(
     arch: ModelArch, chunk_rows: int, width: int, act_bytes: float
 ) -> int:
@@ -1365,11 +1187,6 @@ def logit_terms(
     return logit_rows * arch.vocab_size * 8, logit_rows * arch.vocab_size * 4
 
 
-# Extra backward bytes per token per Mamba inner channel when the mixer runs
-# HF's unfused path: separate conv, chunk scan, gated norm and output
-# projection, with the SSM inputs upcast to fp32.
-UNFUSED_MAMBA_SCAN_BYTES = 28
-
 # Chunk length of fla's chunked gated-delta-rule kernel.
 GATED_DELTA_CHUNK = 64
 
@@ -1382,6 +1199,30 @@ JOB_OVERHEAD_BYTES = 50 * MiB
 # Non-torch device memory a one-rank trainer holds beyond the CUDA context
 # and job overhead. Multi-rank trainers charge :func:`agilerl.arena.memory.nccl.trainer_nccl_bytes`.
 TRAINER_LIB_OVERHEAD_BYTES = 436 * MiB
+
+
+def _lora_dropout_mixer_width(
+    arch: ModelArch, excluded: frozenset[str], tensor_parallel: int
+) -> int:
+    """Input elements per token of one recurrent mixer's all-linear LoRA linears.
+
+    :param excluded: Linear names LoRA leaves unwrapped.
+    :param tensor_parallel: Degree the mixer's heads are split by.
+    :return: Summed adapter input widths; zero without recurrent layers.
+    """
+    if arch.mamba_kda:
+        kda = adapter_linears(
+            KDA_LINEAR_NAMES, kda_linears(arch, tensor_parallel), excluded
+        )
+        return sum(i for i, _ in kda)
+    if not arch.n_mamba_layers:
+        return 0
+    # Gated-delta-net LoRA wraps four residual-stream in_proj linears and
+    # out_proj; Mamba-2 LoRA wraps in_proj only.
+    h = arch.hidden_size
+    return (
+        4 * h + arch.mamba_n_heads * arch.mamba_d_head if arch.mamba_gated_delta else h
+    )
 
 
 def lora_dropout_bytes(
@@ -1406,26 +1247,31 @@ def lora_dropout_bytes(
     adds that MLP. A parallel mixer stack charges all three in one block.
     """
     h = arch.hidden_size
+    excluded = arch.lora_excluded_modules
     # q/k/v read the residual stream, o reads the concatenated heads.
     head_out = tp_local(
         arch.n_heads * max(arch.head_dim, arch.global_head_dim or 0), tensor_parallel
     )
-    attention = 3 * h + head_out
+    inputs = {"q_proj": h, "k_proj": h, "v_proj": h, "o_proj": head_out}
+    attention = sum(width for name, width in inputs.items() if name not in excluded)
+    if arch.low_rank_attention:
+        wrapped = adapter_linears(
+            attention_linear_names(arch),
+            attention_linears(arch, tensor_parallel),
+            excluded,
+        )
+        attention = sum(i for i, _ in wrapped)
     mlp = 0
     if scope == "all-linear" and arch.mlp_layers:
         inter = tp_local(
             int(arch.intermediate_size * arch.peak_mlp_width_factor), tensor_parallel
         )
         mlp = (2 * h if arch.gated_mlp else h) + inter
-    mamba = 0
-    if scope == "all-linear" and arch.n_mamba_layers:
-        # Gated-delta-net LoRA wraps four residual-stream in_proj linears and
-        # out_proj; Mamba-2 LoRA wraps in_proj only.
-        mamba = (
-            4 * h + arch.mamba_n_heads * arch.mamba_d_head
-            if arch.mamba_gated_delta
-            else h
-        )
+    mamba = (
+        _lora_dropout_mixer_width(arch, excluded, tensor_parallel)
+        if scope == "all-linear"
+        else 0
+    )
     if layer is not None:
         width = {"attention": attention, "ffn": mlp, "mamba": mamba}[layer]
         if layer != "ffn" and not arch.block_exclusive_layers:

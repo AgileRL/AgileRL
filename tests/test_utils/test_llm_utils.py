@@ -7,6 +7,7 @@ import logging
 import math
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import types
@@ -51,12 +52,14 @@ from transformers import (
 from transformers.integrations.flex_attention import flex_attention_forward
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
-from agilerl.architectures import trainer_model_class
+from agilerl.architectures import install_family_patches, trainer_model_class
 from agilerl.architectures.catalog import nemotron_h_omni_vllm_hf_override
 from agilerl.architectures.flex_attention import (
     flex_decode_kernel_options,
     patch_flex_attention_kernel_options,
 )
+from agilerl.architectures.mimo_v2.config import MiMoV2Config
+from agilerl.architectures.runtime import TrainerRuntimeConfig
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.distributed import fsdp as dmod
 from agilerl.distributed import gather_params
@@ -139,6 +142,15 @@ from agilerl.utils.llm_utils import (
     write_safetensors,
 )
 from tests import TINY_LLM_FIXTURE_PATH
+from tests.helper_functions import skip_torch_compile_on_windows_cpu
+from tests.test_distributed.quantized_checkpoints import (
+    INPUT_IDS,
+    QuantizedCheckpoint,
+    reference_model,
+    tiny_dsv4_config,
+    write_dsv4_checkpoint,
+    write_glm_checkpoint,
+)
 
 DUMMY_CONVERSATION_TEMPLATE = [
     {
@@ -2139,7 +2151,13 @@ class TestAdaptLoraConfigForSupportedVlModels:
     def test_covers_every_transformers_vl_family(self):
         families = {SUPPORTED_MODEL_INFO[h].model_type for h in VL_SUPPORTED_MODEL_IDS}
 
-        assert families == {"gemma4", "nemotron_h_omni", "qwen3_5", "qwen3_5_moe"}
+        assert families == {
+            "gemma4",
+            "glm5_next",
+            "nemotron_h_omni",
+            "qwen3_5",
+            "qwen3_5_moe",
+        }
 
     @pytest.mark.parametrize("target_modules", ["default", "all-linear"])
     @pytest.mark.parametrize("hub_id", VL_SUPPORTED_MODEL_IDS)
@@ -2277,6 +2295,167 @@ class TestAdaptLoraConfigForModelMamba:
         )
 
         assert adapt_lora_config_for_model(_MambaLikeModel(), cfg) is cfg
+
+
+def _meta_supported_model(hub_id: str) -> nn.Module:
+    """Full-size meta build of a ``SUPPORTED_MODEL_INFO`` entry."""
+    entry = SUPPORTED_MODEL_INFO[hub_id]
+    config_dict = json.loads(json.dumps(entry.config), object_hook=_decode_config_float)
+    if entry.model_type == "mimo_v2":
+        install_family_patches("mimo_v2")
+        config = MiMoV2Config.from_dict(config_dict)
+    else:
+        config = AutoConfig.for_model(**config_dict)
+    with torch.device("meta"):
+        return trainer_model_class(hub_id).from_config(config)
+
+
+def _adapter_module_patterns(hub_id: str, target_modules: str | list[str]) -> set[str]:
+    """Language-model module paths, layer index as ``N``, that get a LoRA adapter."""
+    model = _meta_supported_model(hub_id)
+    adapted = adapt_lora_config_for_model(
+        model, LoraConfig(r=8, target_modules=target_modules)
+    )
+    peft_model = get_peft_model(model, adapted)
+    return {
+        re.sub(r"\.\d+\.", ".N.", name.removeprefix("base_model.model.")).rsplit(
+            ".lora_A", 1
+        )[0]
+        for name, _ in peft_model.named_parameters()
+        if ".lora_A." in name and ".visual." not in name
+    }
+
+
+class TestAdaptLoraConfigForModelFamilyExclusions:
+    def test_all_linear_skips_deepseek_v4_compressor_and_grouped_output(self):
+        adapters = _adapter_module_patterns(
+            "deepseek-ai/DeepSeek-V4-Flash-0731", "all-linear"
+        )
+
+        assert adapters == {
+            "model.layers.N.self_attn.q_a_proj",
+            "model.layers.N.self_attn.q_b_proj",
+            "model.layers.N.self_attn.kv_proj",
+            "model.layers.N.self_attn.o_b_proj",
+            "model.layers.N.mlp.shared_experts.gate_proj",
+            "model.layers.N.mlp.shared_experts.up_proj",
+            "model.layers.N.mlp.shared_experts.down_proj",
+        }
+
+    def test_all_linear_skips_glm5_next_indexer_and_replicated_gates(self):
+        adapters = _adapter_module_patterns("zai-org/GLM-5.3-Flash", "all-linear")
+
+        layer = "model.language_model.layers.N"
+        excluded = (
+            "indexer.wk",
+            "indexer.wq_b",
+            "weights_proj",
+            "f_a_proj",
+            "g_a_proj",
+        )
+        assert not any(name.endswith(excluded) for name in adapters)
+        assert {
+            f"{layer}.self_attn.q_proj",
+            f"{layer}.self_attn.b_proj",
+            f"{layer}.self_attn.g_b_proj",
+            f"{layer}.self_attn.forget_gate.f_b_proj",
+            f"{layer}.self_attn.q_a_proj",
+            f"{layer}.self_attn.kv_b_proj",
+            f"{layer}.mlp.down_proj",
+        } <= adapters
+
+    def test_all_linear_skips_mimo_v2_qkv(self):
+        adapters = _adapter_module_patterns(
+            "XiaomiMiMo/MiMo-V2.6-Flash-RL", "all-linear"
+        )
+
+        assert adapters == {
+            "model.layers.N.self_attn.o_proj",
+            "model.layers.N.mlp.gate_proj",
+            "model.layers.N.mlp.up_proj",
+            "model.layers.N.mlp.down_proj",
+        }
+
+    @pytest.mark.parametrize(
+        ("hub_id", "target_modules", "expected"),
+        [
+            (
+                "deepseek-ai/DeepSeek-V4-Flash-0731",
+                ["kv_proj", "gate_proj", "o_a_proj"],
+                {
+                    "model.layers.N.self_attn.kv_proj",
+                    "model.layers.N.mlp.shared_experts.gate_proj",
+                },
+            ),
+            (
+                "zai-org/GLM-5.3-Flash",
+                ["f_a_proj", "f_b_proj", "wk"],
+                {"model.language_model.layers.N.self_attn.forget_gate.f_b_proj"},
+            ),
+            (
+                "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+                ["q_proj", "o_proj"],
+                {"model.layers.N.self_attn.o_proj"},
+            ),
+        ],
+    )
+    def test_named_targets_skip_excluded_modules(
+        self, hub_id: str, target_modules: list[str], expected: set[str]
+    ):
+        assert _adapter_module_patterns(hub_id, target_modules) == expected
+
+    def test_regex_targets_skip_excluded_modules(self):
+        adapters = _adapter_module_patterns(
+            "deepseek-ai/DeepSeek-V4-Flash-0731", r".*self_attn\..*kv_proj"
+        )
+
+        assert adapters == {"model.layers.N.self_attn.kv_proj"}
+
+    def test_only_excluded_targets_raise(self):
+        model = _meta_supported_model("XiaomiMiMo/MiMo-V2.6-Flash-RL")
+        adapted = adapt_lora_config_for_model(
+            model, LoraConfig(r=8, target_modules=["q_proj", "k_proj", "v_proj"])
+        )
+
+        with pytest.raises(ValueError, match="No modules were targeted"):
+            get_peft_model(model, adapted)
+
+    def test_user_exclusions_are_kept(self):
+        # Arrange
+        model = _PlainLinearModel()
+        model.config = SimpleNamespace(model_type="mimo_v2")
+        cfg = _PlainLoraConfig(target_modules=["o_proj"], exclude_modules=["gate_proj"])
+
+        # Act
+        adapted = adapt_lora_config_for_model(model, cfg)
+
+        # Assert
+        assert adapted.exclude_modules == ["gate_proj", "k_proj", "q_proj", "v_proj"]
+        assert cfg.exclude_modules == ["gate_proj"]
+
+    def test_regex_user_exclusions_raise(self):
+        model = _PlainLinearModel()
+        model.config = SimpleNamespace(model_type="mimo_v2")
+        cfg = _PlainLoraConfig(target_modules=["o_proj"], exclude_modules=r".*gate")
+
+        with pytest.raises(ValueError, match="cannot take the mimo_v2 exclusions"):
+            adapt_lora_config_for_model(model, cfg)
+
+    def test_already_excluded_family_modules_is_identity(self):
+        model = _PlainLinearModel()
+        model.config = SimpleNamespace(model_type="mimo_v2")
+        cfg = _PlainLoraConfig(
+            target_modules=["o_proj"], exclude_modules=["q_proj", "k_proj", "v_proj"]
+        )
+
+        assert adapt_lora_config_for_model(model, cfg) is cfg
+
+    def test_family_without_exclusions_is_unchanged(self):
+        model = _PlainLinearModel()
+        model.config = SimpleNamespace(model_type="qwen3")
+        cfg = _PlainLoraConfig(target_modules="all-linear")
+
+        assert adapt_lora_config_for_model(model, cfg) is cfg
 
 
 class TestLoraTargetModuleNames:
@@ -2418,6 +2597,30 @@ class TestTrainerAttnImplementation:
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
 
         assert trainer_attn_implementation("google/gemma", True) == "flex_attention"
+
+    @pytest.mark.parametrize(
+        ("model_type", "expected"),
+        [
+            ("deepseek_v4", "flex_attention"),
+            ("glm5_next", "sdpa"),
+            ("glm5_next_text", "sdpa"),
+        ],
+    )
+    def test_pinned_backend_on_cuda_needs_no_flash_attn(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        model_type: str,
+        expected: str,
+    ) -> None:
+        self.stub_model_type(monkeypatch, model_type)
+        monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+
+        with caplog.at_level(logging.WARNING, logger="agilerl.utils.llm_utils"):
+            attn = trainer_attn_implementation("org/model", True)
+
+        assert attn == expected
+        assert "No attention backend" not in caplog.text
 
     @pytest.mark.parametrize("model_type", ["qwen3", "nemotron_h"])
     def test_raises_on_cuda_without_flash_attn(
@@ -3184,6 +3387,68 @@ class TestCreateModelFromNameOrPathDefaults:
         create_model_from_name_or_path("nvidia/Nemotron-H-8B", "flash_attention_2")
         assert order == ["install", "from_pretrained"]
         assert captured["name"] == "nvidia/Nemotron-H-8B"
+
+
+@pytest.fixture(
+    scope="module",
+    params=[write_dsv4_checkpoint, write_glm_checkpoint],
+    ids=["deepseek_v4", "glm5_next"],
+)
+def quantized_checkpoint(
+    request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory
+) -> QuantizedCheckpoint:
+    return request.param(tmp_path_factory.mktemp("quantized"))
+
+
+class TestCreateModelFromNameOrPathQuantizedCheckpoint:
+    def test_sm90_gpu_loads_dequantized_weights(
+        self, quantized_checkpoint, monkeypatch
+    ):
+        # Arrange
+        # SM 9.0 keeps FP8 weights unless the load dequantizes them.
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *_: (9, 0))
+
+        # Act
+        model = create_model_from_name_or_path(
+            str(quantized_checkpoint.directory),
+            "eager",
+            model_config={"device_map": "cpu"},
+        )
+
+        # Assert
+        state = model.state_dict()
+        assert state.keys() == quantized_checkpoint.reference.keys()
+        for name, expected in quantized_checkpoint.reference.items():
+            assert state[name].dtype in (torch.bfloat16, torch.float32, expected.dtype)
+            assert torch.equal(state[name], expected.to(state[name].dtype)), name
+
+    @skip_torch_compile_on_windows_cpu
+    def test_bf16_logits_match_reference_model(self, quantized_checkpoint):
+        # Arrange
+        model = create_model_from_name_or_path(
+            str(quantized_checkpoint.directory), "eager"
+        ).eval()
+        expected_model = reference_model(quantized_checkpoint, model)
+
+        # Act
+        with torch.no_grad():
+            logits = model(input_ids=INPUT_IDS).logits
+            expected = expected_model(input_ids=INPUT_IDS).logits
+
+        # Assert
+        # Same bf16 weights, buffers and CPU kernels on both sides.
+        assert torch.equal(logits, expected)
+
+    def test_unsupported_quantization_raises(self, tmp_path):
+        # Arrange
+        config = tiny_dsv4_config()
+        config["quantization_config"] = {"quant_method": "awq", "bits": 4}
+        (tmp_path / "config.json").write_text(json.dumps(config), encoding="utf-8")
+
+        # Act / Assert
+        with pytest.raises(ValueError, match="Cannot train on AwqConfig checkpoints"):
+            create_model_from_name_or_path(str(tmp_path), "eager")
 
 
 class TestBatchIsSingleTurn:
@@ -4769,7 +5034,7 @@ class TestResolvePadTokenId:
         monkeypatch.setattr(
             "agilerl.utils.llm_utils.family_runtime",
             lambda path: SimpleNamespace(
-                trainer=SimpleNamespace(trust_remote_code=True)
+                trainer=TrainerRuntimeConfig(trust_remote_code=True)
             ),
         )
         monkeypatch.setattr(
@@ -4797,7 +5062,7 @@ class TestResolvePadTokenId:
         monkeypatch.setattr(
             "agilerl.utils.llm_utils.family_runtime",
             lambda path: SimpleNamespace(
-                trainer=SimpleNamespace(trust_remote_code=False)
+                trainer=TrainerRuntimeConfig(trust_remote_code=False)
             ),
         )
         monkeypatch.setattr(
@@ -4834,7 +5099,7 @@ class TestResolvePadTokenId:
         monkeypatch.setattr(
             "agilerl.utils.llm_utils.family_runtime",
             lambda _path: SimpleNamespace(
-                trainer=SimpleNamespace(trust_remote_code=False)
+                trainer=TrainerRuntimeConfig(trust_remote_code=False)
             ),
         )
 
@@ -4842,14 +5107,47 @@ class TestResolvePadTokenId:
             msg = "config.json"
             raise OSError(msg)
 
-        monkeypatch.setattr(
-            "agilerl.utils.llm_utils.AutoConfig.from_pretrained", missing
-        )
+        monkeypatch.setattr("transformers.AutoConfig.from_pretrained", missing)
         monkeypatch.setattr(
             "agilerl.utils.llm_utils.GenerationConfig.from_pretrained", missing
         )
 
         assert llm_utils_module.load_pad_token_configs("org/model") == (None, None)
+
+    def test_load_pad_token_configs_reads_unregistered_mimo_v2_checkpoint(
+        self, tmp_path: Path
+    ) -> None:
+        # Arrange
+        raw = SUPPORTED_MODEL_INFO["XiaomiMiMo/MiMo-V2.6-Flash-RL"].config
+        (tmp_path / "config.json").write_text(
+            json.dumps(
+                {
+                    **raw,
+                    "auto_map": {
+                        "AutoConfig": "configuration_mimo_v2.MiMoV2Config",
+                    },
+                }
+            )
+        )
+        # A fresh interpreter: the mimo_v2 test conftest registers the config in this one.
+        script = (
+            "import sys\n"
+            "from transformers.models.auto.configuration_auto import CONFIG_MAPPING\n"
+            "from agilerl.utils.llm_utils import load_pad_token_configs\n"
+            "model_config, _ = load_pad_token_configs(sys.argv[1])\n"
+            "print('mimo_v2' in CONFIG_MAPPING, model_config.pad_token_id)\n"
+        )
+
+        # Act
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(tmp_path)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        # Assert
+        assert result.stdout.strip().splitlines()[-1] == "False 151643"
 
 
 class TestNormalizePromptBatch:
