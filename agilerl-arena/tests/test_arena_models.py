@@ -37,7 +37,11 @@ from agilerl.arena.models.env import (
     LLMEnvSpec,
     LLMEnvType,
 )
-from agilerl.arena.models.fsdp import FSDPConfig
+from agilerl.arena.models.fsdp import (
+    PARALLEL_LAYOUT_FIELDS,
+    FSDPConfig,
+    parallel_layout_pins,
+)
 from agilerl.arena.models.manifest import _resolve_algorithm
 from agilerl.arena.models.networks import VLLMConfig
 from agilerl.arena.models.registry import AlgorithmRegistry, register
@@ -463,9 +467,72 @@ class TestLLMAlgorithmSpecValidators:
         with pytest.raises(ValidationError, match="Unknown fsdp keys"):
             GRPOSpec(group_size=2, fsdp={"not_a_field": True})
 
+    def test_fsdp_parallel_pins_is_not_a_manifest_key(self) -> None:
+        with pytest.raises(
+            ValidationError, match="Unknown fsdp keys \\['parallel_pins'\\]"
+        ):
+            GRPOSpec(group_size=2, fsdp={"parallel_pins": ["tp"]})
+
     def test_fsdp_none_stays_none(self) -> None:
         spec = GRPOSpec(group_size=2, fsdp=None)
         assert spec.fsdp is None
+
+    @pytest.mark.parametrize(
+        ("fsdp", "pinned"),
+        [
+            ({}, frozenset()),
+            (True, frozenset()),
+            ({"tp": 2}, frozenset({"tp"})),
+            ({"ep": 1, "cpu_offload": False}, frozenset({"ep"})),
+            ({"shard_group_size": 4}, frozenset({"shard_group_size"})),
+            ({"cp": 2}, frozenset({"cp"})),
+        ],
+    )
+    def test_a_dumped_fsdp_keeps_its_layout_pins(
+        self, fsdp: object, pinned: frozenset[str]
+    ) -> None:
+        # Arrange
+        spec = GRPOSpec(group_size=2, fsdp=fsdp)
+
+        # Act
+        reloaded = GRPOSpec.model_validate(spec.model_dump(mode="json"))
+
+        # Assert
+        assert reloaded.fsdp is not None
+        assert parallel_layout_pins(reloaded.fsdp) == pinned
+        assert reloaded.fsdp == spec.fsdp
+
+    def test_a_dumped_fsdp_has_no_pin_key(self) -> None:
+        spec = GRPOSpec(group_size=2, fsdp={"tp": 2, "cpu_offload": False})
+
+        dumped = spec.model_dump(mode="json")
+
+        assert dumped["fsdp"] == {
+            "reshard_after_forward": None,
+            "cpu_offload": False,
+            "optim_cpu_offload": None,
+            "param_dtype": "bfloat16",
+            "reduce_dtype": "float32",
+            "checkpoint_every_n_blocks": None,
+            "ep_token_blocks": 1,
+            "routed_expert_chunk_mib": None,
+            "activation_offload": None,
+            "tp": 2,
+            "shard_frozen_tp": None,
+            "save_moe_collectives": None,
+            "cp_style": "ulysses",
+        }
+
+    def test_a_deep_copied_spec_keeps_its_layout_pins(self) -> None:
+        spec = GRPOSpec(group_size=2, fsdp={"ep": 2})
+
+        copied = spec.model_copy(deep=True)
+
+        assert copied.fsdp is not None
+        assert parallel_layout_pins(copied.fsdp) == frozenset({"ep"})
+
+    def test_a_config_built_in_python_pins_every_layout_field(self) -> None:
+        assert parallel_layout_pins(FSDPConfig(tp=2)) == PARALLEL_LAYOUT_FIELDS
 
     @pytest.mark.parametrize(
         "field",

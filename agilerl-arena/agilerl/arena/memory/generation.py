@@ -407,6 +407,15 @@ def drop_engine_fast_paths(
     _, startup_pool, full_sequence = _generation_pools(model, settings, terms, device)
     if startup_pool >= full_sequence + KV_MARGIN_BYTES:
         return settings
+    return lean_engine_settings(settings)
+
+
+def lean_engine_settings(settings: GenerationSettings) -> GenerationSettings:
+    """``settings`` with the memory-costly engine defaults it does not pin turned off.
+
+    :param settings: Rollout engine generation settings.
+    :return: The lean settings.
+    """
     update: dict[str, object] = {"lora_dual_stream": False}
     if settings.speculative_drafting is None:
         update["speculative_drafting"] = False

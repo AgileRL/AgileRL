@@ -5,10 +5,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Iterable
+from dataclasses import dataclass, field
 from typing import Annotated, ClassVar, Literal
 
 from pydantic import ConfigDict, Field
+from pydantic.json_schema import SkipJsonSchema
 
 FSDP_DTYPE_NAMES = frozenset({"bfloat16", "float16", "float32", "float64"})
 # Parameters with fewer elements stay unsharded on every rank.
@@ -23,6 +25,8 @@ FSDP_MEMORY_FIELDS = (
     "activation_offload",
     "cpu_offload",
 )
+# Parallel degrees a manifest can pin. Absent from a built config, all of them stay.
+PARALLEL_LAYOUT_FIELDS = frozenset({"tp", "ep", "cp", "shard_group_size"})
 
 
 @dataclass
@@ -221,6 +225,10 @@ class FSDPConfig:
             ),
         ),
     ] = None
+    # Parallel fields the manifest set; None pins all of them. Not a manifest key.
+    parallel_pins: Annotated[
+        SkipJsonSchema[frozenset[str] | None], Field(exclude=True)
+    ] = field(default=None, repr=False, compare=False)
 
     @property
     def frozen_tp_resident(self) -> bool:
@@ -274,6 +282,30 @@ class FSDPConfig:
                         f"must be divisible by {name}={degree}"
                     )
                     raise ValueError(msg)
+
+
+def parallel_layout_pins(config: FSDPConfig) -> frozenset[str]:
+    """``tp``, ``ep``, ``cp``, and ``shard_group_size`` the manifest set on ``config``.
+
+    A config built in Python, with no manifest pins recorded, keeps all of them.
+
+    :param config: FSDP config.
+    :return: The pinned field names.
+    """
+    if config.parallel_pins is None:
+        return PARALLEL_LAYOUT_FIELDS
+    return config.parallel_pins
+
+
+def record_parallel_pins(config: FSDPConfig, names: Iterable[str]) -> FSDPConfig:
+    """Remember which parallel fields ``names`` set. Returns ``config``.
+
+    :param config: FSDP config, updated in place.
+    :param names: Field names the manifest passed.
+    :return: ``config``.
+    """
+    config.parallel_pins = frozenset(names) & PARALLEL_LAYOUT_FIELDS
+    return config
 
 
 def _dtype_name(value: object) -> str:

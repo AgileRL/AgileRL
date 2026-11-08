@@ -71,16 +71,11 @@ class TestResolveEngineTensorParallel:
         assert manifest.algorithm.vllm_config is not None
         assert manifest.algorithm.vllm_config.tensor_parallel_size == 2
 
-    @pytest.mark.parametrize(("context", "expected"), [(9216, 1), (9728, 2)])
-    def test_a_width_must_clear_demand_by_the_kv_margin(
-        self, context: int, expected: int
-    ) -> None:
-        # Arrange: TP=1 predicts a 3.66 GiB attention pool on four leftover
-        # A100s. 16 sequences at 9216 tokens want 2.90 GiB; at 9728 they want
-        # 3.22 GiB, inside the pool but not by the 512 MiB margin. 16
-        # prompts keep every engine at max_num_seqs.
+    def test_more_engines_win_when_every_width_holds_the_sequences(self) -> None:
+        # Arrange: at 9216 tokens every width holds all 16 sequences, and
+        # four TP=1 engines hold more of them than two TP=2 engines.
         raw = _qwen_manifest()
-        raw["network"]["max_context_length"] = context
+        raw["network"]["max_context_length"] = 9216
         raw["training"]["rollout_batch_size"] = 16
         manifest = TrainingManifest.model_validate(raw)
 
@@ -88,7 +83,21 @@ class TestResolveEngineTensorParallel:
         width = resolve_engine_tensor_parallel(manifest, 8, _a100(), 8)
 
         # Assert
-        assert width == expected
+        assert width == 1
+
+    def test_a_width_that_holds_every_sequence_beats_one_that_queues(self) -> None:
+        # Arrange: at 9728 tokens four TP=1 engines hold 60 of 64 sequences
+        # and queue the rest; two TP=2 engines hold all 32.
+        raw = _qwen_manifest()
+        raw["network"]["max_context_length"] = 9728
+        raw["training"]["rollout_batch_size"] = 16
+        manifest = TrainingManifest.model_validate(raw)
+
+        # Act
+        width = resolve_engine_tensor_parallel(manifest, 8, _a100(), 8)
+
+        # Assert
+        assert width == 2
 
     @pytest.mark.parametrize("width", [1, 4])
     def test_explicit_width_is_left_unchanged(self, width: int) -> None:

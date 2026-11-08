@@ -3,8 +3,8 @@
 """Invert one memory setting: the largest value that still fits, given the rest.
 
 Scan up from the minimum to the first fit, then bisect for the top of that
-run. Generation context is not monotonic (the resident bar dips while the
-engine is underfilled), so plain bisection can miss.
+run. A rebuilt config can widen the engine or drop its fast paths at a larger
+value, so a generation miss can clear and plain bisection can miss.
 """
 
 from __future__ import annotations
@@ -18,9 +18,12 @@ from pydantic import BaseModel, ConfigDict
 from agilerl.arena.memory.breakdown import PhaseName
 from agilerl.arena.memory.estimator import (
     RunEstimate,
+    estimate_generation,
     estimate_run,
+    estimate_training,
     generation_can_serve,
 )
+from agilerl.arena.memory.generation import lean_engine_settings
 from agilerl.arena.memory.kv_cache import KV_BLOCK_SIZE_DEFAULT
 from agilerl.arena.memory.resolve.sequences import ROLLOUT_ENGINE_GPU_MEMORY_UTILIZATION
 from agilerl.arena.memory.specs import (
@@ -158,6 +161,7 @@ def solve(
     phases: tuple[PhaseName, ...] | None = None,
     kv_margin_bytes: int = 0,
     rebuild: Callable[[int], RunConfig] | None = None,
+    widest_engine_width: int | None = None,
 ) -> SolveResult:
     """Largest value of ``field`` at which ``config`` still fits.
 
@@ -170,6 +174,9 @@ def solve(
     :param rebuild: Config at a candidate value, for settings resolved from
         it (a manifest's omitted micro-batch or engine width). ``None`` holds
         them at ``config``.
+    :param widest_engine_width: Widest engine ``rebuild`` gives at any value,
+        when it keeps the engine count and every setting but the weight-sync
+        mode and engine fast paths. ``None`` when it can change them.
     :raises CannotSolve: No value fits; a ``ValueError`` subclass.
     """
     if field not in SOLVABLE_FIELDS:
@@ -190,48 +197,34 @@ def solve(
         return _apply(base, spec, value)
 
     # Generation fits() has one valley, so scan to the first fit, then bisect.
-    found = _first_fit(candidate, spec, checked, aligned_hi, kv_margin_bytes)
+    found = _first_fit(
+        candidate, spec, checked, aligned_hi, kv_margin_bytes, widest_engine_width
+    )
     if found is None:
         msg = (
             f"no {field} value up to {bound} fits on this device; "
             "the model is larger than the card at the other settings given."
         )
         raise CannotSolve(msg)
-    first, first_config, first_estimate = found
 
     solved = candidate(aligned_hi)
-    ok, estimate = _fits(solved, spec, checked, kv_margin_bytes)
-    if ok:
-        return SolveResult(
-            field=field,
-            value=aligned_hi,
-            limited_by="bound",
-            bound=bound,
-            config=solved,
-            estimate=estimate,
-            unchecked_over_budget=_unchecked(estimate, checked),
+    if _fits(solved, spec, checked, kv_margin_bytes):
+        best, best_config, limited_by = aligned_hi, solved, "bound"
+    else:
+        best, best_config = _top_of_run(
+            candidate, spec, checked, found, aligned_hi, kv_margin_bytes
         )
+        limited_by = "memory"
 
-    best, best_config, best_estimate = first, first_config, first_estimate
-    low, high = first, aligned_hi
-    while low <= high:
-        mid = _align_down((low + high) // 2, spec.align)
-        trial = candidate(mid)
-        ok, estimate = _fits(trial, spec, checked, kv_margin_bytes)
-        if ok:
-            best, best_config, best_estimate = mid, trial, estimate
-            low = mid + spec.align
-        else:
-            high = mid - spec.align
-
+    estimate = estimate_run(best_config)
     return SolveResult(
         field=field,
         value=best,
-        limited_by="memory",
+        limited_by=limited_by,
         bound=bound,
         config=best_config,
-        estimate=best_estimate,
-        unchecked_over_budget=_unchecked(best_estimate, checked),
+        estimate=estimate,
+        unchecked_over_budget=_unchecked(estimate, checked),
     )
 
 
@@ -269,16 +262,90 @@ def _first_fit(
     phases: tuple[PhaseName, ...],
     aligned_hi: int,
     kv_margin_bytes: int,
-) -> tuple[int, RunConfig, RunEstimate] | None:
-    """Lowest fitting value, scanning up from the minimum in align steps."""
+    widest_engine_width: int | None,
+) -> tuple[int, RunConfig] | None:
+    """Lowest fitting value, scanning up from the minimum in align steps.
+
+    Training memory only grows with the field, so the scan stops at the
+    first value training does not fit. A generation miss can clear at a
+    larger value, where the rebuilt engine is wider or drops its fast paths;
+    the scan stops at one :func:`_generation_stays_over` rules that out for.
+    """
     value = spec.lo
     while value <= aligned_hi:
         trial = candidate(value)
-        ok, estimate = _fits(trial, spec, phases, kv_margin_bytes)
-        if ok:
-            return value, trial, estimate
+        failing = _failing_phase(trial, spec, phases, kv_margin_bytes)
+        if failing is None:
+            return value, trial
+        if failing == "training" or _generation_stays_over(
+            trial, spec, kv_margin_bytes, widest_engine_width
+        ):
+            return None
         value += spec.align
     return None
+
+
+def _top_of_run(
+    candidate: Callable[[int], RunConfig],
+    spec: FieldSpec,
+    phases: tuple[PhaseName, ...],
+    found: tuple[int, RunConfig],
+    aligned_hi: int,
+    kv_margin_bytes: int,
+) -> tuple[int, RunConfig]:
+    """Bisect from the first fit ``found`` up to ``aligned_hi`` for the largest fitting value."""
+    best, best_config = found
+    low, high = best, aligned_hi
+    while low <= high:
+        mid = _align_down((low + high) // 2, spec.align)
+        trial = candidate(mid)
+        if _fits(trial, spec, phases, kv_margin_bytes):
+            best, best_config = mid, trial
+            low = mid + spec.align
+        else:
+            high = mid - spec.align
+    return best, best_config
+
+
+def _generation_stays_over(
+    config: RunConfig,
+    spec: FieldSpec,
+    kv_margin_bytes: int,
+    widest_engine_width: int | None,
+) -> bool:
+    """Whether a generation miss at ``config`` holds at every larger value.
+
+    At a fixed engine width and count, the lean settings in either weight-sync
+    mode are the least memory a rebuild gives the engine, and at fixed
+    settings generation memory only grows with the field.
+
+    :param config: A candidate whose generation does not fit.
+    :param spec: The field being solved.
+    :param kv_margin_bytes: KV pool bytes worst-case demand must leave free.
+    :param widest_engine_width: Widest engine the rebuild gives; ``None`` when it can change.
+    :return: True when the lean engine misses in both modes.
+    """
+    generation = config.generation
+    if (
+        widest_engine_width is None
+        or generation.tensor_parallel_size < widest_engine_width
+    ):
+        return False
+    lean = lean_engine_settings(generation)
+    return all(
+        _failing_phase(
+            config.model_copy(
+                update={
+                    "generation": lean.model_copy(update={"merged_lora_sync": merged})
+                }
+            ),
+            spec,
+            ("generation",),
+            kv_margin_bytes,
+        )
+        is not None
+        for merged in (True, False)
+    )
 
 
 def _unchecked(
@@ -296,16 +363,39 @@ def _fits(
     spec: FieldSpec,
     phases: tuple[PhaseName, ...],
     kv_margin_bytes: int,
-) -> tuple[bool, RunEstimate]:
-    estimate = estimate_run(config)
+) -> bool:
+    """Whether ``config`` fits the checked phases; unchecked phases are not priced."""
+    return _failing_phase(config, spec, phases, kv_margin_bytes) is None
+
+
+def _failing_phase(
+    config: RunConfig,
+    spec: FieldSpec,
+    phases: tuple[PhaseName, ...],
+    kv_margin_bytes: int,
+) -> PhaseName | None:
+    """The first checked phase ``config`` does not fit, in ``phases`` order; ``None`` when all fit."""
     for name in phases:
-        breakdown = estimate.generation if name == "generation" else estimate.training
+        if name == "generation":
+            breakdown = estimate_generation(
+                config.model,
+                config.gen_device,
+                config.generation,
+                orchestrated=config.orchestrated,
+            )
+        else:
+            breakdown = estimate_training(
+                config.model,
+                config.train_device,
+                config.training,
+                orchestrated=config.orchestrated,
+            )
         if spec.require_kv_headroom and name == "generation":
             if not generation_can_serve(breakdown, kv_margin_bytes):
-                return False, estimate
+                return name
         elif not breakdown.fits_with_buffer:
-            return False, estimate
-    return True, estimate
+            return name
+    return None
 
 
 def _align_down(value: int, align: int) -> int:

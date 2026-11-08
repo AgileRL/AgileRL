@@ -714,8 +714,10 @@ class TestExperimentSubmitCommand:
         assert result.exit_code == 0
         mock_client.submit_experiment.assert_called_once_with(
             manifest=manifest,
-            resource_id="arena-medium",
-            num_nodes=2,
+            resource_id=None,
+            num_nodes=None,
+            num_gpus=None,
+            gpu_type=None,
             project=None,
             experiment_name=None,
             reward_file=None,
@@ -754,11 +756,54 @@ class TestExperimentSubmitCommand:
             manifest=manifest,
             resource_id="arena-large",
             num_nodes=4,
+            num_gpus=None,
+            gpu_type=None,
             project="proj1",
             experiment_name="my-exp",
             reward_file=reward,
             completion="test output",
         )
+
+    def test_submit_gpu_flags(self, runner, mock_client, tmp_path):
+        manifest = tmp_path / "m.yaml"
+        manifest.write_text("x: 1")
+        mock_client.submit_experiment.return_value = {"id": "exp-789"}
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main,
+                [
+                    "experiments",
+                    "submit",
+                    str(manifest),
+                    "--num-gpus",
+                    "8",
+                    "--gpu-type",
+                    "h100-80",
+                ],
+            )
+        assert result.exit_code == 0
+        mock_client.submit_experiment.assert_called_once_with(
+            manifest=manifest,
+            resource_id=None,
+            num_nodes=None,
+            num_gpus=8,
+            gpu_type="h100-80",
+            project=None,
+            experiment_name=None,
+            reward_file=None,
+            completion=None,
+        )
+
+    def test_submit_rejects_zero_gpus(self, runner, mock_client, tmp_path):
+        manifest = tmp_path / "m.yaml"
+        manifest.write_text("x: 1")
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main, ["experiments", "submit", str(manifest), "--num-gpus", "0"]
+            )
+        assert result.exit_code == 2
+        assert "Invalid value" in result.output
+        mock_client.submit_experiment.assert_not_called()
 
     def test_submit_missing_manifest(self, runner, mock_client):
         with _patched_arena_client(mock_client):
