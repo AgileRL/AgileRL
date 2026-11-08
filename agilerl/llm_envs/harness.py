@@ -10,6 +10,7 @@ import warnings
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
@@ -51,6 +52,7 @@ from agilerl.utils.env_utils import construct_entrypoint_env
 from agilerl.utils.llm_utils import max_prompt_tokens_for_model_len
 
 __all__ = [
+    "EPISODE_TOOLS_INFO_KEY",
     "PROMPT_LIMIT_INFO_KEY",
     "TOOL_CALLS_INFO_KEY",
     "TOOL_CALL_ERROR_INFO_KEY",
@@ -63,6 +65,9 @@ __all__ = [
 ACTION_HISTORY_MAX_CHARS = 300
 # Set ``True`` in a step's info when the episode ends because no prompt fits the prompt limit.
 PROMPT_LIMIT_INFO_KEY = "prompt_limit"
+# Reset info key for an env whose tools depend on the episode: OpenAI function
+# schemas the harness renders and parses against for that episode only.
+EPISODE_TOOLS_INFO_KEY = "episode_tools"
 # On a tool-call env, every step's info holds the valid calls the turn ran
 # (prose sent to ``answer_tool`` counts 0) and flags a turn rejected for a
 # malformed or missing call. Text envs set neither.
@@ -415,9 +420,12 @@ class RolloutHarness(RestartPromptMixin):
         self._init_tool_calling(tokenizer, chat_format, min_reward)
         self.apply_chat_template = apply_chat_template
         self.chat_template_kwargs: dict[str, Any] = dict(chat_template_kwargs or {})
-        # Tool schemas fetched lazily on first use (see :attr:`tools`).
-        self._tools: list[Any] | None = None
+        # The env's tool schemas, fetched lazily on first use (see :attr:`tools`),
+        # and the current episode's from reset info, which win while set.
+        self._env_tools: list[Any] | None = None
         self._tools_known = False
+        self._episode_tools: list[Any] | None = None
+        self._tools_template_checked = False
         self._max_model_len = max_model_len
         self._max_output_tokens = max_output_tokens
         self.full_ids: torch.Tensor | None = None
@@ -436,8 +444,9 @@ class RolloutHarness(RestartPromptMixin):
         self._goal_images: list[Image.Image] = []
         self._last_full_prompt_token_len: int | None = None
         # Cached chat-template frame around a feedback turn, per sequence of
-        # observation roles (rendered once each): a tool result and a user
-        # message get different frames, and so do one and two tool results.
+        # observation roles (rendered once each with the current tools): a tool
+        # result and a user message get different frames, and so do one and two
+        # tool results.
         self._boundary_parts: dict[tuple[str, ...], tuple[str, ...] | None] = {}
         self._system_prompt = system_prompt or None
         self._repeat_system_prompt = repeat_system_prompt
@@ -544,8 +553,9 @@ class RolloutHarness(RestartPromptMixin):
         :param spec: A URL, an env constructor callable, or an entrypoint /
             registry id.
         :param env_config: Kwargs for the factory / constructor (ignored for a
-            URL, except ``system_prompt``). ``system_prompt`` is set on the built
-            env and passed to the harness so the chat template renders it.
+            URL, except ``system_prompt`` and ``action_field``). ``system_prompt``
+            is set on the built env and passed to the harness so the chat
+            template renders it; ``action_field`` goes to the harness.
         :param tokenizer: Tokenizer for the token-level loop.
         :param max_turns: Generation turns per episode.
         :param factory: Optional ``module:attr`` builder that receives ``spec``.
@@ -559,6 +569,9 @@ class RolloutHarness(RestartPromptMixin):
         # manifest naming a prompt for a registry env means. The harness reads
         # that attribute (or an explicit kwarg) so the chat template renders it.
         system_prompt = config.pop("system_prompt", None)
+        # An action_field here names the harness's action field, not a factory
+        # kwarg; an explicit action_field kwarg wins.
+        kwargs.setdefault("action_field", config.pop("action_field", "message"))
         if isinstance(spec, str) and is_url(spec):
             if "system_prompt" not in kwargs:
                 kwargs["system_prompt"] = system_prompt
@@ -961,26 +974,48 @@ class RolloutHarness(RestartPromptMixin):
 
     @property
     def tools(self) -> list[Any] | None:
-        """Tool schemas the env advertises (``None`` when none); fetched once and cached."""
+        """Tool schemas for this episode (``None`` when none): its reset tools, else the env's, fetched once."""
         if not self._tools_known:
-            self._tools = self._env_client.tools or None
+            self._env_tools = self._env_client.tools or None
             self._tools_known = True
-            if self._tools and self.apply_chat_template:
-                template = getattr(self.tokenizer, "chat_template", None)
-                if template and "tools" not in template:
-                    warnings.warn(
-                        f"The env advertises {len(self._tools)} tool(s) but the "
-                        "tokenizer's chat template never references 'tools'; the "
-                        "schemas will not be rendered into any prompt.",
-                        stacklevel=2,
-                    )
-        return self._tools
+            self._warn_if_template_skips_tools(self._env_tools)
+        if self._episode_tools is None:
+            return self._env_tools
+        return self._episode_tools or None
 
     @tools.setter
     def tools(self, value: list[Any] | None) -> None:
-        """Override the advertised tool schemas (``None`` / ``[]`` -> no ``tools=``)."""
-        self._tools = value or None
+        """Override the env's tool schemas (``None`` / ``[]`` -> no ``tools=``) until a reset sends episode tools."""
+        self._env_tools = value or None
         self._tools_known = True
+        self._episode_tools = None
+        self._boundary_parts = {}
+
+    def _use_episode_tools(self, episode_tools: list[Any] | None) -> None:
+        """Render and parse this episode against ``episode_tools``; ``None`` uses the env's tools.
+
+        :param episode_tools: The reset info's tool schemas, or ``None`` when it sent none.
+        """
+        previous = self.tools
+        self._episode_tools = episode_tools
+        tools = self.tools
+        if tools != previous:
+            self._boundary_parts.clear()
+        self._warn_if_template_skips_tools(tools)
+
+    def _warn_if_template_skips_tools(self, tools: list[Any] | None) -> None:
+        """Warn once per harness, on the first non-empty ``tools``, if the chat template never renders tools."""
+        if not tools or self._tools_template_checked:
+            return
+        self._tools_template_checked = True
+        template = getattr(self.tokenizer, "chat_template", None)
+        if self.apply_chat_template and template and "tools" not in template:
+            warnings.warn(
+                f"The env advertises {len(tools)} tool(s) but the "
+                "tokenizer's chat template never references 'tools'; the "
+                "schemas will not be rendered into any prompt.",
+                stacklevel=3,
+            )
 
     @property
     def dataset_size(self) -> int:
@@ -1048,6 +1083,7 @@ class RolloutHarness(RestartPromptMixin):
                 )
                 raise ValueError(msg)
         payload, info = self._env_client.reset(seed=seed, row_index=row_index)
+        self._use_episode_tools(info.pop(EPISODE_TOOLS_INFO_KEY, None))
         obs_text, image = observation_text_and_image(
             payload, screenshot_field=self._screenshot_field
         )
@@ -1265,7 +1301,8 @@ class RolloutHarness(RestartPromptMixin):
         Text envs queue nothing and get the post-reasoning text. A turn with no
         call is prose for the env's ``answer_tool`` answer tool, or an error when
         no ``answer_tool`` is named. One malformed call fails the whole turn, so
-        no call runs.
+        no call runs. Each queued call carries the whole turn, so an env that
+        answers a turn's calls together sees all of them on the first step.
         """
         self._pending_tool_calls = []
         self._pending_tool_error = None
@@ -1281,7 +1318,11 @@ class RolloutHarness(RestartPromptMixin):
                 f"{TOOL_CALL_ERRORS[bad.status]} No calls ran; emit valid tool calls."
             )
             return
-        self._pending_tool_calls = calls
+        turn = tuple(calls)
+        self._pending_tool_calls = [
+            replace(call, turn=turn, turn_index=index)
+            for index, call in enumerate(calls)
+        ]
 
     def _reject_image_placeholder_ids(self, gen_ids: torch.Tensor) -> None:
         """Fail a turn whose sampled ids hold the image placeholder id.

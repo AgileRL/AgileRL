@@ -944,6 +944,25 @@ class TestRolloutEnvFromSpec:
         assert "input_ids" in obs
         env.close()
 
+    def test_env_config_action_field_names_the_steps_field(self) -> None:
+        """An ``env_config`` action_field names the action field, not a constructor kwarg."""
+        # Arrange
+        code_env = _CodeEnv()
+        harness = RolloutHarness.from_spec(
+            lambda: code_env,
+            {"action_field": "code"},
+            MiniTokenizer(),
+            apply_chat_template=False,
+        )
+        harness.reset()
+
+        # Act
+        harness.step(torch.tensor([[1, 2, 3, 4]], dtype=torch.long))
+
+        # Assert
+        assert code_env.received[0].code == "go"
+        harness.close()
+
 
 # --- TaskAssigner: one task per GRPO group ----------------------------------
 class TestTaskAssigner:
