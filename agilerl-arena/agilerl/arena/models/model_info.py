@@ -343,6 +343,7 @@ class ModelInfo(BaseModel):
             return f"Model {self.hub_id} is deprecated and will be removed."
         return None
 
+    @computed_field
     @property
     def num_params(self) -> int | None:
         """Total parameters; None when the config cannot be built offline."""
