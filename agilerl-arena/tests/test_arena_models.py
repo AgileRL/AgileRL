@@ -46,7 +46,13 @@ from agilerl.arena.models.manifest import _resolve_algorithm
 from agilerl.arena.models.networks import VLLMConfig
 from agilerl.arena.models.registry import AlgorithmRegistry, register
 from agilerl.arena.models.schema import _package_version
-from agilerl.arena.models.verdict import errors, loc_to_path, read_manifest, verdict
+from agilerl.arena.models.verdict import (
+    errors,
+    loc_to_path,
+    model_warnings,
+    read_manifest,
+    verdict,
+)
 
 
 def _manifest(**sections) -> dict:
@@ -788,6 +794,13 @@ class TestVerdict:
         failed = verdict(_manifest(algorithm={"name": "NOPE"}))
         assert failed["ok"] is False
         assert failed["errors"]
+
+    def test_model_warnings_when_the_algorithm_names_no_model(self) -> None:
+        manifest = TrainingManifest.model_construct(
+            algorithm=GRPOSpec.model_construct(pretrained_model_name_or_path=None),
+        )
+
+        assert model_warnings(manifest) == []
 
 
 class TestSchemaPackageVersion:

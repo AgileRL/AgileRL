@@ -43,7 +43,6 @@ from agilerl.arena.memory.manifest import (
 )
 from agilerl.arena.models import LLMAlgorithmSpec, TrainingManifest
 from agilerl.arena.models.model_info import (
-    STATUS_DEPRECATED,
     STATUS_PREVIEW,
     SUPPORTED_MODEL_INFO,
 )
@@ -1253,13 +1252,12 @@ class ArenaClient:
             return
         hub_id = algorithm.pretrained_model_name_or_path
         entry = SUPPORTED_MODEL_INFO.get(hub_id) if hub_id else None
-        if entry is None:
+        notice = entry.status_notice if entry else None
+        if entry is None or notice is None:
             return
         if entry.status == STATUS_PREVIEW:
-            msg = f"Model {hub_id} is in preview and cannot be submitted yet."
-            raise ArenaValidationError(msg)
-        if entry.status == STATUS_DEPRECATED:
-            logger.warning("Model %s is deprecated and will be removed.", hub_id)
+            raise ArenaValidationError(notice)
+        logger.warning(notice)
 
     @staticmethod
     def _check_rollout_mode(manifest: TrainingManifest) -> None:

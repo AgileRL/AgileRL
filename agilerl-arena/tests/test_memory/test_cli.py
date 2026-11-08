@@ -30,6 +30,7 @@ from agilerl.arena.memory.cli import (
     EXIT_USAGE,
     SolveRequest,
     _load_model_config,
+    _model_spec_from_checkpoint,
     checkpoint_param_count,
     main,
     memory_group,
@@ -261,6 +262,19 @@ class TestPinnedMemoryFields:
         )
 
 
+@pytest.fixture
+def without_huggingface_hub(monkeypatch):
+    real_import = builtins.__import__
+
+    def block_hub(name, *args, **kwargs):
+        if name == "huggingface_hub" or name.startswith("huggingface_hub."):
+            msg = "no hub"
+            raise ImportError(msg)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", block_hub)
+
+
 def _fake_hub(monkeypatch, get_safetensors_metadata):
     module = types.ModuleType("huggingface_hub")
     module.get_safetensors_metadata = get_safetensors_metadata
@@ -276,7 +290,7 @@ def _fake_hub(monkeypatch, get_safetensors_metadata):
 def _metadata(tensors: dict[str, int]):
     """Safetensors metadata for one file holding ``tensors`` (name -> parameter count)."""
     infos = {
-        name: types.SimpleNamespace(parameter_count=count)
+        name: types.SimpleNamespace(parameter_count=count, dtype="BF16")
         for name, count in tensors.items()
     }
     return types.SimpleNamespace(
@@ -387,17 +401,29 @@ class TestCheckpointParamCount:
         _fake_hub(monkeypatch, lambda _m: _metadata({}))
         assert checkpoint_param_count("whatever", TIED) is None
 
-    def test_without_huggingface_hub_there_is_no_count(self, monkeypatch):
-        real_import = builtins.__import__
+    def test_packed_weights_have_no_usable_count(self, monkeypatch):
+        metadata = _metadata({"model.embed_tokens.weight": EMBED})
+        packed = types.SimpleNamespace(parameter_count=BODY, dtype="U8")
+        tensors = metadata.files_metadata["model.safetensors"].tensors
+        tensors["model.layers.0.mlp.experts.down_proj_blocks"] = packed
+        _fake_hub(monkeypatch, lambda _m: metadata)
 
-        def block_hub(name, *args, **kwargs):
-            if name == "huggingface_hub" or name.startswith("huggingface_hub."):
-                msg = "no hub"
-                raise ImportError(msg)
-            return real_import(name, *args, **kwargs)
+        assert checkpoint_param_count("org/packed-model", TIED) is None
 
-        monkeypatch.setattr(builtins, "__import__", block_hub)
+    def test_unreachable_hub_falls_back_to_the_analytic_count(self, monkeypatch):
+        class ConnectError(Exception):
+            """Hub HTTP clients raise connection errors that are not ``OSError``."""
 
+        def refuse(_model_id):
+            msg = "connection refused"
+            raise ConnectError(msg)
+
+        _fake_hub(monkeypatch, refuse)
+
+        assert checkpoint_param_count("org/model", TIED) is None
+
+    @pytest.mark.usefixtures("without_huggingface_hub")
+    def test_without_huggingface_hub_there_is_no_count(self):
         assert checkpoint_param_count("org/model", TIED) is None
 
 
@@ -424,19 +450,35 @@ class TestLoadModelConfig:
         with pytest.raises(ValueError, match="could not fetch the config"):
             _load_model_config(str(tmp_path / "absent"), config_path=None)
 
-    def test_without_huggingface_hub_a_hub_id_needs_a_config_file(self, monkeypatch):
-        real_import = builtins.__import__
+    def test_catalog_count_counts_values_where_the_hub_counts_bytes(self, monkeypatch):
+        def no_hub(_model_id):
+            pytest.fail("a catalog model with a count does not call the Hub")
 
-        def block_hub(name, *args, **kwargs):
-            if name == "huggingface_hub" or name.startswith("huggingface_hub."):
-                msg = "no hub"
-                raise ImportError(msg)
-            return real_import(name, *args, **kwargs)
+        _fake_hub(monkeypatch, no_hub)
 
-        monkeypatch.setattr(builtins, "__import__", block_hub)
+        _, model = _model_spec_from_checkpoint("openai/gpt-oss-20b", None)
 
+        assert model.n_params == 20_914_757_184
+
+    def test_catalog_model_without_a_count_asks_the_hub(self, monkeypatch):
+        _fake_hub(monkeypatch, lambda _m: _metadata({"model.layers": BODY}))
+        hub_id = "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16"
+        assert SUPPORTED_MODEL_INFO[hub_id].num_params is None
+
+        _, model = _model_spec_from_checkpoint(hub_id, None)
+
+        assert model.n_params == BODY
+
+    @pytest.mark.usefixtures("without_huggingface_hub")
+    def test_catalog_model_uses_the_bundled_config_without_the_hub(self):
+        config = _load_model_config("Qwen/Qwen3.5-0.8B", config_path=None)
+
+        assert config == SUPPORTED_MODEL_INFO["Qwen/Qwen3.5-0.8B"].config
+
+    @pytest.mark.usefixtures("without_huggingface_hub")
+    def test_without_huggingface_hub_a_hub_id_needs_a_config_file(self):
         with pytest.raises(ValueError, match="huggingface_hub is not installed"):
-            _load_model_config("Qwen/Qwen2.5-0.5B-Instruct", config_path=None)
+            _load_model_config("org/not-in-the-catalog", config_path=None)
 
 
 class TestMain:
