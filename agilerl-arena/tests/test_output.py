@@ -6,8 +6,11 @@
 from __future__ import annotations
 
 import contextlib
+import io
+import json
 import os
 import signal
+import subprocess
 import sys
 import time
 from unittest.mock import MagicMock, patch
@@ -19,6 +22,7 @@ from rich.console import Console
 from agilerl.arena import output as output_module
 from agilerl.arena.exceptions import (
     ArenaAPIError,
+    ArenaError,
     ArenaTrainingError,
     ArenaValidationError,
 )
@@ -404,6 +408,88 @@ class TestLooksLikeEnvironmentCatalog:
 # ---------------------------------------------------------------------------
 # emit_result dispatch
 # ---------------------------------------------------------------------------
+class TestEmitResultJson:
+    def _run(self, *emit_args, **emit_kwargs):
+        ctx = click.Context(click.Command("arena"))
+        ctx.meta[output_module.JSON_OUTPUT_META_KEY] = True
+        with ctx:
+            emit_result(*emit_args, **emit_kwargs)
+
+    def test_prints_the_raw_result_and_skips_display(self, capsys):
+        self._run([{"a": 1}], display=lambda _rows: pytest.fail("not for JSON"))
+
+        assert capsys.readouterr().out == '[{"a": 1}]\n'
+
+    def test_empty_result_stays_json(self, capsys):
+        self._run({}, empty_message="nothing")
+
+        assert capsys.readouterr().out == "{}\n"
+
+    def test_handle_error_writes_json_to_stderr(self, capsys):
+        ctx = click.Context(click.Command("arena"))
+        ctx.meta[output_module.JSON_OUTPUT_META_KEY] = True
+
+        with ctx, pytest.raises(click.exceptions.Exit):
+            handle_error(ArenaError("boom"))
+
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert json.loads(captured.err) == {"error": "boom", "type": "ArenaError"}
+
+    def test_stream_renderer_keeps_stdout_clean(self):
+        ctx = click.Context(click.Command("arena"))
+        ctx.meta[output_module.JSON_OUTPUT_META_KEY] = True
+
+        with ctx:
+            renderer = output_module.StreamRichRenderer()
+
+        assert renderer._console is output_module.error_console
+
+
+class TestEmitResultEmpty:
+    @pytest.mark.parametrize("empty", [[], {}])
+    def test_default_message_replaces_the_header_only_table(self, empty, monkeypatch):
+        console = Console(record=True, file=io.StringIO())
+        monkeypatch.setattr(output_module, "console", console)
+
+        emit_result(empty, columns=["Name"])
+
+        assert console.export_text().strip() == "No results."
+
+    def test_message_is_not_markup_and_does_not_wrap(self, monkeypatch):
+        console = Console(record=True, file=io.StringIO(), width=20)
+        monkeypatch.setattr(output_module, "console", console)
+        message = "No checkpoints for a-long-name[abc]."
+
+        emit_result([], empty_message=message)
+
+        assert console.export_text().strip() == message
+
+
+class TestPipedTables:
+    def test_cells_are_not_truncated_when_piped(self, monkeypatch):
+        console = Console(record=True, file=io.StringIO(), width=80)
+        monkeypatch.setattr(output_module, "console", console)
+        long_value = "x" * 300
+
+        emit_result([{"name": long_value}])
+
+        assert long_value in console.export_text()
+
+    def test_logs_go_to_stderr(self):
+        code = (
+            "import logging, agilerl.arena._console; "
+            "logging.getLogger('agilerl.arena').warning('hello')"
+        )
+
+        result = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, check=True
+        )
+
+        assert result.stdout == ""
+        assert "hello" in result.stderr
+
+
 class TestEmitResult:
     @patch("agilerl.arena.output._print_rich")
     def test_dict_renders_key_value_table(self, mock_print):

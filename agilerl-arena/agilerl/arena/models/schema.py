@@ -429,13 +429,9 @@ def algorithm_schema() -> tuple[dict[str, Any], dict[str, Any]]:
     :returns: The section schema and the definitions it references.
     :rtype: tuple[dict[str, Any], dict[str, Any]]
     """
-    names_by_class: dict[type[AlgoSpec], list[str]] = {}
-    for name, spec_cls in MANIFEST_REGISTRY.items():
-        names_by_class.setdefault(spec_cls, []).append(name)
-
     variants: list[dict[str, Any]] = []
     defs: dict[str, Any] = {}
-    for spec_cls, names in names_by_class.items():
+    for spec_cls, names in MANIFEST_REGISTRY.names_by_class().items():
         schema = _algorithm_variant_schema(spec_cls, names)
         variant_defs = schema.pop("$defs", {})
         defs.update(variant_defs)

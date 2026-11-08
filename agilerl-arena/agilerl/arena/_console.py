@@ -22,7 +22,9 @@ _logger = logging.getLogger("agilerl.arena")
 if not _logger.handlers:
     _logger.setLevel(logging.INFO)
     _logger.addHandler(
-        RichHandler(show_time=False, show_path=False, markup=True, console=console)
+        RichHandler(
+            show_time=False, show_path=False, markup=True, console=error_console
+        )
     )
     _logger.propagate = False
 
