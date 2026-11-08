@@ -1210,6 +1210,8 @@ class TestModelsSupportedCommand:
             == "live"
         )
         assert qwen["max_context_length"] == 40960
+        assert qwen["num_params"] == 4_022_468_096
+        assert models["openai/gpt-oss-20b"]["num_params"] == 20_914_757_184
         assert qwen["lora_ranks"] == [1, 8, 16, 32, 64, 128, 256, 320, 512]
         assert "_gram_estimate" in qwen["lora_info"]
         assert qwen["supports_expert_parallel"] is False
