@@ -1559,6 +1559,45 @@ class TestExperimentMethods:
         assert payload == {"manifest": {"algorithm": "PPO"}, "project": "proj"}
 
     @patch("agilerl.arena.client.TrainingManifest.get_validated")
+    def test_submit_experiment_sends_gpu_request(self, mock_validated, api_key_client):
+        mock_validated.return_value.to_payload.return_value = {"algorithm": "GRPO"}
+        api_key_client._open_stream = MagicMock(
+            return_value=_mock_ndjson_stream({"job_id": 4})
+        )
+
+        api_key_client.submit_experiment(
+            manifest={"algorithm": "GRPO"},
+            num_gpus=8,
+            gpu_type="h100-80",
+            project="proj",
+        )
+
+        payload = api_key_client._open_stream.call_args[1]["json"]
+        assert payload == {
+            "manifest": {"algorithm": "GRPO"},
+            "project": "proj",
+            "num_gpus": 8,
+            "gpu_type": "h100-80",
+        }
+
+    @pytest.mark.parametrize(
+        "extra",
+        [{"resource_id": "arena-medium"}, {"num_nodes": 2}, {"num_gpus": 0}],
+    )
+    def test_submit_experiment_rejects_a_bad_gpu_request(self, api_key_client, extra):
+        api_key_client._open_stream = MagicMock()
+
+        with pytest.raises(ArenaValidationError, match="num_gpus"):
+            api_key_client.submit_experiment(
+                manifest={"algorithm": "GRPO"},
+                gpu_type="h100-80",
+                project="proj",
+                **extra,
+            )
+
+        api_key_client._open_stream.assert_not_called()
+
+    @patch("agilerl.arena.client.TrainingManifest.get_validated")
     def test_submit_experiment_requires_project(self, mock_validated, api_key_client):
         mock_validated.return_value.to_payload.return_value = {"algorithm": "PPO"}
         api_key_client._open_stream = MagicMock()
@@ -1605,9 +1644,34 @@ class TestExperimentMethods:
         assert files["project"] == (None, "proj")
         assert files["resource_id"] == (None, "arena-medium")
         assert files["num_nodes"] == (None, "2")
+        assert "num_gpus" not in files
+        assert "gpu_type" not in files
         assert files["experiment_name"] == (None, "exp-reasoning")
         assert files["completion"] == (None, "wrong answer")
         assert files["reward_file"][0] == "reward.py"
+
+    @patch("agilerl.arena.client.TrainingManifest.get_validated")
+    def test_submit_experiment_with_reward_file_sends_gpu_request(
+        self, mock_validated, api_key_client
+    ):
+        mock_validated.return_value.to_payload.return_value = {"algorithm": "GRPO"}
+        api_key_client._open_stream = MagicMock(
+            return_value=_mock_ndjson_stream({"job_id": 5})
+        )
+
+        api_key_client.submit_experiment(
+            manifest={"algorithm": "GRPO"},
+            num_gpus=4,
+            gpu_type="b200",
+            project="proj",
+            reward_file=b"def reward(q, a, c):\n    return 1.0\n",
+        )
+
+        files = api_key_client._open_stream.call_args[1]["files"]
+        assert files["num_gpus"] == (None, "4")
+        assert files["gpu_type"] == (None, "b200")
+        assert "resource_id" not in files
+        assert "num_nodes" not in files
 
     @pytest.mark.parametrize(
         ("hub_id", "warned"),

@@ -5,13 +5,19 @@
 
 from __future__ import annotations
 
-from dataclasses import fields
+import copy
+from dataclasses import fields, replace
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from agilerl.arena.models.algorithms.base import FSDP_JSON_SCHEMA
-from agilerl.arena.models.fsdp import FSDPConfig
+from agilerl.arena.models.fsdp import (
+    PARALLEL_LAYOUT_FIELDS,
+    FSDPConfig,
+    parallel_layout_pins,
+    record_parallel_pins,
+)
 
 
 class TestFSDPConfig:
@@ -163,6 +169,52 @@ class TestFSDPConfigFrozenTpResidentProperty:
         assert config.frozen_tp_resident is resident
 
 
+class TestParallelLayoutPins:
+    def test_returns_the_recorded_fields(self) -> None:
+        config = record_parallel_pins(FSDPConfig(tp=2), {"tp", "cpu_offload"})
+
+        assert parallel_layout_pins(config) == frozenset({"tp"})
+
+    def test_a_config_with_no_recorded_pins_pins_every_field(self) -> None:
+        assert parallel_layout_pins(FSDPConfig()) == PARALLEL_LAYOUT_FIELDS
+
+    def test_pins_survive_dataclass_replace(self) -> None:
+        # Arrange
+        config = record_parallel_pins(FSDPConfig(ep=2), {"ep"})
+
+        # Act
+        replaced = replace(config, reshard_after_forward=True)
+
+        # Assert
+        assert replaced.reshard_after_forward is True
+        assert parallel_layout_pins(replaced) == frozenset({"ep"})
+
+    def test_pins_survive_deepcopy(self) -> None:
+        config = record_parallel_pins(FSDPConfig(), ())
+
+        assert parallel_layout_pins(copy.deepcopy(config)) == frozenset()
+
+    def test_pins_leave_equality_and_repr_alone(self) -> None:
+        # Arrange
+        config = FSDPConfig(tp=2)
+
+        # Act
+        recorded = record_parallel_pins(FSDPConfig(tp=2), ())
+
+        # Assert
+        assert recorded == config
+        assert repr(recorded) == repr(config)
+        assert "parallel_pins" not in repr(recorded)
+
+    def test_pins_are_not_serialized(self) -> None:
+        config = record_parallel_pins(FSDPConfig(tp=2), {"tp"})
+
+        dumped = TypeAdapter(FSDPConfig).dump_python(config)
+
+        assert "parallel_pins" not in dumped
+        assert dumped["tp"] == 2
+
+
 class TestFSDPJsonSchema:
     def test_every_field_has_a_description(self) -> None:
         # Arrange
@@ -172,7 +224,9 @@ class TestFSDPJsonSchema:
         properties = object_schema["properties"]
 
         # Assert
-        assert set(properties) == {field.name for field in fields(FSDPConfig)}
+        assert set(properties) == {field.name for field in fields(FSDPConfig)} - {
+            "parallel_pins"
+        }
         assert all(prop.get("description") for prop in properties.values())
         assert object_schema["additionalProperties"] is False
 

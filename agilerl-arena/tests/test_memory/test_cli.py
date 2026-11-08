@@ -35,6 +35,8 @@ from agilerl.arena.memory.cli import (
     memory_group,
     solve_main,
 )
+from agilerl.arena.memory.estimator import MemoryComponent, PhaseBreakdown, RunEstimate
+from agilerl.arena.memory.generation import KV_MARGIN_BYTES
 from agilerl.arena.memory.specs import ModelArch
 from agilerl.arena.models.manifest import TrainingManifest
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
@@ -479,8 +481,10 @@ class TestMain:
     def test_num_gpus_prices_the_weight_sync_the_run_picks(
         self, tmp_path, capsys, device_gb, send_buffer
     ):
-        # Arrange
-        path = write_manifest(tmp_path, KEPT_COUNTDOWN, "countdown.yaml")
+        # Arrange: at TP 1 the merged send buffer puts the trainers over 5.25 GiB.
+        doc = copy.deepcopy(KEPT_COUNTDOWN)
+        doc["algorithm"]["fsdp"] = {"tp": 1}
+        path = write_manifest(tmp_path, doc, "countdown.yaml")
         config_path = tmp_path / "qwen3" / "config.json"
         config_path.parent.mkdir()
         config_path.write_text(json.dumps(SUPPORTED_MODEL_INFO["Qwen/Qwen3-4B"].config))
@@ -526,6 +530,48 @@ class TestMain:
         components = json.loads(capsys.readouterr().out)["training"]["components"]
         labels = {component["key"]: component["label"] for component in components}
         assert labels["lora_send_buffer"] == "Merged weight send buffer"
+
+    def test_num_gpus_prices_the_layout_the_tier_search_picks(self, tmp_path, capsys):
+        # Arrange: Qwen3.5-9B with no counts or width searches its split on 4 L4s.
+        doc = copy.deepcopy(UNSET_WIDTH_MOE)
+        doc["network"]["pretrained_model_name_or_path"] = "Qwen/Qwen3.5-9B"
+        del doc["training"]["training_gpus_per_agent"]
+        del doc["training"]["rollout_engines_per_agent"]
+        path = write_manifest(tmp_path, doc, "nine_b.yaml")
+        config_path = tmp_path / "qwen3.5" / "config.json"
+        config_path.parent.mkdir()
+        config_path.write_text(
+            json.dumps(SUPPORTED_MODEL_INFO["Qwen/Qwen3.5-9B"].config)
+        )
+        tier = {
+            "name": "l4-4x",
+            "gpu_type": "NVIDIA L4",
+            "num_gpus": 4,
+            "price_per_node_hour": 4.0,
+        }
+
+        # Act
+        sized_code = main(
+            path,
+            config_path=str(config_path),
+            gpu="NVIDIA L4",
+            num_gpus=4,
+            as_json=True,
+        )
+        sized = json.loads(capsys.readouterr().out)
+        main(path, config_path=str(config_path), tiers=[tier], as_json=True)
+        tiered = json.loads(capsys.readouterr().out)
+
+        # Assert
+        assert sized_code == EXIT_OK
+        assert sized["fits"] is True
+        assert (
+            tiered["training_gpus_per_agent"],
+            tiered["rollout_engines_per_agent"],
+        ) == (2, 1)
+        assert sized["engine"] == {"tensor_parallel_size": 2, "max_num_seqs": 16}
+        for key in ("engine", "parallelism", "training", "generation"):
+            assert sized[key] == tiered[key]
 
     def test_unset_width_without_num_gpus_is_a_usage_error(self, tmp_path, capsys):
         path = write_manifest(tmp_path, UNSET_WIDTH_MOE, "moe.yaml")
@@ -598,6 +644,39 @@ class TestMain:
         payload = json.loads(capsys.readouterr().out)
         assert code == EXIT_OK
         assert payload["fits"] is True
+
+    def test_json_reports_the_pinned_parallel_layout(self, tmp_path, capsys):
+        # Arrange
+        doc = copy.deepcopy(MANIFEST)
+        doc["algorithm"]["fsdp"] = {"cp": 2}
+        doc["training"]["training_gpus_per_agent"] = 2
+        path = write_manifest(tmp_path, doc, "cp.yaml")
+
+        # Act
+        code = main(path, config_path=TINY_CONFIG, device_gb=24, as_json=True)
+
+        # Assert
+        payload = json.loads(capsys.readouterr().out)
+        assert code == EXIT_OK
+        assert payload["parallelism"] == {
+            "tp": 1,
+            "ep": 1,
+            "cp": 2,
+            "shard_group_size": None,
+        }
+
+    def test_text_reports_the_pinned_parallel_layout(self, tmp_path, capsys):
+        doc = copy.deepcopy(MANIFEST)
+        doc["algorithm"]["fsdp"] = {"cp": 2}
+        doc["training"]["training_gpus_per_agent"] = 2
+        path = write_manifest(tmp_path, doc, "cp.yaml")
+
+        main(path, config_path=TINY_CONFIG, device_gb=24)
+
+        assert (
+            "Training parallelism: tp=1, ep=1, cp=2, shard_group_size=None"
+            in capsys.readouterr().out
+        )
 
     def test_over_budget_blocks_and_prints_fixes(self, oversize_path, capsys, caplog):
         with caplog.at_level(logging.INFO):
@@ -930,8 +1009,10 @@ class TestSolveMain:
     def test_unset_width_is_resolved_at_each_candidate_context(
         self, tmp_path, moe_config_path, capsys
     ):
-        # Arrange
-        path = write_manifest(tmp_path, UNSET_WIDTH_MOE, "moe.yaml")
+        # Arrange: tensor and context parallel off, so training memory caps the context.
+        doc = copy.deepcopy(UNSET_WIDTH_MOE)
+        doc["algorithm"]["fsdp"] = {"tp": 1, "cp": 1}
+        path = write_manifest(tmp_path, doc, "moe.yaml")
 
         # Act
         code = run_solve(
@@ -945,9 +1026,7 @@ class TestSolveMain:
         payload = json.loads(capsys.readouterr().out)
         verdicts = []
         for context in (payload["value"], payload["value"] + 16):
-            submitted = write_manifest(
-                tmp_path, UNSET_WIDTH_MOE, f"at-{context}.yaml", context
-            )
+            submitted = write_manifest(tmp_path, doc, f"at-{context}.yaml", context)
             verdict = main(
                 submitted,
                 config_path=moe_config_path,
@@ -958,13 +1037,16 @@ class TestSolveMain:
             engine = json.loads(capsys.readouterr().out)["engine"]
             verdicts.append((verdict, engine["tensor_parallel_size"]))
 
-        # Assert: merged-sync engines hold no LoRA, so the cutoff is the
-        # run's at TP=2, past the TP=1 KV limit.
+        # Assert: near the cap merged-sync trainers fit only inside the
+        # underprediction buffer, so the run syncs the adapter. Adapter-sync
+        # training caps the context, and its engines' LoRA slot needs TP=4 to
+        # hold all their sequences. The estimate agrees at and past the cap;
+        # past it no mode fits, so the run keeps merged sync at TP=2.
         assert code == EXIT_OK
         assert payload["limited_by"] == "memory"
-        assert payload["engine"]["tensor_parallel_size"] == 2
+        assert payload["engine"]["tensor_parallel_size"] == 4
         assert payload["value"] > 32768
-        assert verdicts == [(EXIT_OK, 2), (EXIT_OVER_BUDGET, 2)]
+        assert verdicts == [(EXIT_OK, 4), (EXIT_OVER_BUDGET, 2)]
 
     def test_unset_width_without_num_gpus_is_a_usage_error(self, tmp_path, capsys):
         path = write_manifest(tmp_path, UNSET_WIDTH_MOE, "moe.yaml")
@@ -1449,8 +1531,8 @@ class TestMainResourceTier:
         assert code == EXIT_OK
         assert "Cheapest resource tier that fits: l4-2x" in out
 
-    def test_unset_width_on_a_tier_without_room_for_an_engine(self, tmp_path, capsys):
-        # Arrange: the run starts a width-1 engine, which one GPU cannot host.
+    def test_unset_width_uses_a_second_node_for_the_engine(self, tmp_path, capsys):
+        # Arrange: one GPU cannot host a trainer and an engine. Two 1-GPU nodes can.
         doc = copy.deepcopy(MANIFEST)
         del doc["algorithm"]["vllm_config"]["tensor_parallel_size"]
         path = tmp_path / "unset.yaml"
@@ -1461,6 +1543,7 @@ class TestMainResourceTier:
                 "gpu_type": "NVIDIA L4",
                 "num_gpus": 1,
                 "price_per_node_hour": 1.0,
+                "node_counts": [1, 2],
             }
         ]
 
@@ -1469,8 +1552,8 @@ class TestMainResourceTier:
 
         # Assert
         out = capsys.readouterr().out
-        assert code == EXIT_OVER_BUDGET
-        assert "l4-1x: 1 GPUs, the job needs 2" in out
+        assert code == EXIT_OK
+        assert "2 nodes of l4-1x" in out
 
     def test_num_gpus_with_a_tier_search_is_a_usage_error(self, manifest_path, capsys):
         code = main(manifest_path, tiers=TIERS, config_path=TINY_CONFIG, num_gpus=2)
@@ -1478,7 +1561,9 @@ class TestMainResourceTier:
         assert code == EXIT_USAGE
         assert "--num-gpus needs --gpu or --device-gb" in capsys.readouterr().err
 
-    def test_tensor_parallel_engine_needs_a_gpu_per_rank(self, tmp_path, capsys):
+    def test_tensor_parallel_engine_wider_than_a_node_is_ruled_out(
+        self, tmp_path, capsys
+    ):
         doc = copy.deepcopy(MANIFEST)
         doc["algorithm"]["vllm_config"]["tensor_parallel_size"] = 4
         path = tmp_path / "tp.yaml"
@@ -1488,7 +1573,79 @@ class TestMainResourceTier:
 
         out = capsys.readouterr().out
         assert code == EXIT_OVER_BUDGET
-        assert "the job needs 5" in out
+        assert "l4-2x: engine tensor_parallel_size 4 exceeds 2 GPUs on one node" in out
+
+    @pytest.fixture
+    def queued_estimate(self, monkeypatch):
+        """Every estimate holds 2 of 8 sequences; only a queue check adds the warning."""
+        pool = 5 * KV_MARGIN_BYTES
+        queued = RunEstimate(
+            training=PhaseBreakdown(
+                phase="training",
+                components=(
+                    MemoryComponent(key="weights", label="Weights", n_bytes=1),
+                ),
+                device_total_bytes=10_000,
+                device_usable_bytes=10_000,
+            ),
+            generation=PhaseBreakdown(
+                phase="generation",
+                components=(
+                    MemoryComponent(
+                        key="kv_cache",
+                        label="KV cache pool",
+                        n_bytes=pool,
+                        detail={
+                            "pool": pool,
+                            "worst_case_demand": 16 * KV_MARGIN_BYTES,
+                            "startup_pool": pool,
+                            "full_sequence_bytes": 1,
+                        },
+                    ),
+                ),
+                device_total_bytes=pool * 4,
+                device_usable_bytes=pool * 4,
+            ),
+        )
+        monkeypatch.setattr(
+            "agilerl.arena.memory.resources.estimate_run", lambda _config: queued
+        )
+        monkeypatch.setattr(
+            "agilerl.arena.memory.cli.estimate_run", lambda _config: queued
+        )
+
+    @pytest.mark.usefixtures("queued_estimate")
+    def test_tier_search_report_keeps_the_queue_warning(self, manifest_path, capsys):
+        # Act
+        code = main(manifest_path, tiers=TIERS, config_path=TINY_CONFIG, no_color=True)
+
+        # Assert
+        assert code == EXIT_OK
+        assert "generation may queue" in capsys.readouterr().out
+
+    @pytest.mark.usefixtures("queued_estimate")
+    def test_tier_search_json_keeps_the_queue_warning(self, manifest_path, capsys):
+        # Act
+        code = main(manifest_path, tiers=TIERS, config_path=TINY_CONFIG, as_json=True)
+
+        # Assert
+        payload = json.loads(capsys.readouterr().out)
+        assert code == EXIT_OK
+        assert any(
+            "generation may queue" in warning
+            for warning in payload["generation"]["warnings"]
+        )
+
+    @pytest.mark.usefixtures("queued_estimate")
+    def test_one_gpu_report_attaches_the_queue_warning(self, manifest_path, capsys):
+        # Act
+        code = main(
+            manifest_path, config_path=TINY_CONFIG, gpu="NVIDIA L4", no_color=True
+        )
+
+        # Assert
+        assert code == EXIT_OK
+        assert "generation may queue" in capsys.readouterr().out
 
     def test_json_names_the_tier_and_every_verdict(self, manifest_path, capsys):
         code = main(manifest_path, tiers=TIERS, config_path=TINY_CONFIG, as_json=True)

@@ -45,6 +45,14 @@ from agilerl.arena.memory.resolve.packing import (
     leaks_recurrent_state,
     sequence_packing_blocker,
 )
+from agilerl.arena.memory.resolve.parallel import (
+    first_fitting_plan,
+    manifest_at_layout,
+    manifest_fsdp,
+    parallel_layouts,
+    trains_context_parallel,
+    trains_expert_parallel,
+)
 from agilerl.arena.memory.resolve.rollout import (
     apply_run_rollout_mode,
     async_rollout_algorithm,
@@ -83,7 +91,6 @@ from agilerl.arena.models.algorithms.rollout_llm import (
     records_sampling_supports,
 )
 from agilerl.arena.models.env import LLMEnvSpec
-from agilerl.arena.models.fsdp import FSDPConfig
 from agilerl.arena.models.manifest import TrainingManifest, strips_multimodal_towers
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.networks import LoraConfigDict, VLLMConfig
@@ -914,16 +921,55 @@ def training_memory_from_manifest(
 ) -> TrainingMemoryPlan:
     """The training-memory plan one trainer rank of the manifest runs with.
 
-    An omitted ``fsdp`` searches DDP and FSDP like ``fsdp: {}``.
+    Layouts are tried from least parallel to most and the first that fits is
+    kept (:func:`parallel_layouts`); a ``tp``, ``ep``, ``cp`` or
+    ``shard_group_size`` the manifest sets stays. An omitted ``fsdp``
+    searches like ``fsdp: {}``.
 
     :param manifest: Validated manifest; ``training_gpus_per_agent`` is the trainer count.
     :param model: Training-side model spec.
-    :param device: Training GPU.
+    :param device: Training GPU; its ``gpus_per_node`` bounds the shard group.
     :param adapter_sync: Async weight sync pushes the adapter even where the
         engines could serve merged weights.
-    :return: The plan :func:`resolve_training_memory` picks.
+    :return: The plan :func:`resolve_training_memory` picks at that layout.
     :raises TrainingMemoryUnfitError: When nothing fits one GPU.
+    :raises TrainerSplitError: When no layout splits across the trainer ranks.
     """
+    layouts = parallel_layouts(
+        model.arch,
+        manifest.training.training_gpus_per_agent,
+        device.gpus_per_node,
+        manifest_fsdp(manifest),
+        trains_expert_parallel(manifest),
+        trains_context_parallel(manifest),
+    )
+    return first_fitting_plan(
+        layouts,
+        lambda layout: _layout_plan(
+            manifest_at_layout(manifest, layout), model, device, adapter_sync
+        ),
+    )
+
+
+def training_plan_model(manifest: TrainingManifest, model: ModelSpec) -> ModelSpec:
+    """The model the run searches its trainer plan on: the catalog entry, else ``model``.
+
+    :param manifest: Validated manifest.
+    :param model: Training-side model from the checkpoint.
+    :return: The model.
+    """
+    spec = manifest.algorithm
+    catalogued = catalog_model(spec) if isinstance(spec, LLMAlgorithmSpec) else None
+    return catalogued or model
+
+
+def _layout_plan(
+    manifest: TrainingManifest,
+    model: ModelSpec,
+    device: DeviceSpec,
+    adapter_sync: bool,
+) -> TrainingMemoryPlan:
+    """The plan at the manifest's own ``fsdp`` layout: DDP or FSDP and its speed rungs."""
     spec = llm_spec(manifest)
     _, per_rank = per_rank_trajectories(spec, manifest.training.training_gpus_per_agent)
     mini = resolve_mini_batch_size(spec.mini_batch_size, per_rank)
@@ -932,8 +978,6 @@ def training_memory_from_manifest(
     settings = training_settings_from_manifest(
         manifest, micro_batch_size=1, adapter_sync=adapter_sync
     )
-    if spec.fsdp is None:
-        settings = settings.model_copy(update={"fsdp": FSDPConfig()})
     return resolve_training_memory(model, device, settings, pins, mini)
 
 
@@ -1136,7 +1180,7 @@ def run_config_from_manifest(
     model = _model_spec(spec, model_config, n_params)
     try:
         plan = training_memory_from_manifest(
-            manifest, catalog_model(spec) or model, device, adapter_sync
+            manifest, training_plan_model(manifest, model), device, adapter_sync
         )
     except TrainingMemoryUnfitError as unfit:
         # Sized at the lightest settings so the estimate shows how far over it is.

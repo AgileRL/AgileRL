@@ -21,13 +21,17 @@ KV_POOL_FILL = 0.85
 TOKEN_BUDGET_STEP = 1024
 
 
+class TrainerSplitError(ValueError):
+    """The batch or a parallel group does not split across the trainer ranks."""
+
+
 def data_parallel_size(spec: LLMAlgorithmSpec, n_training_gpus: int) -> int:
     """Trainer world folded by tensor-parallel and context-parallel degree.
 
     :param spec: Validated LLM algorithm spec.
     :param n_training_gpus: Trainer ranks, ``training.training_gpus_per_agent``.
     :return: Data-parallel ranks.
-    :raises ValueError: When ``fsdp.tp * fsdp.cp`` does not divide the trainer world.
+    :raises TrainerSplitError: When ``fsdp.tp * fsdp.cp`` does not divide the trainer world.
     """
     tp = 1 if spec.fsdp is None else spec.fsdp.tp
     cp = 1 if spec.fsdp is None else spec.fsdp.cp
@@ -37,7 +41,7 @@ def data_parallel_size(spec: LLMAlgorithmSpec, n_training_gpus: int) -> int:
             f"world_size ({n_training_gpus}) must be divisible by the tp * cp "
             f"replica size ({tp} * {cp} = {fold})"
         )
-        raise ValueError(msg)
+        raise TrainerSplitError(msg)
     return n_training_gpus // fold
 
 
@@ -92,7 +96,7 @@ def require_batch_split(mini: int, micro: int, per_rank: int) -> None:
     :param mini: Trajectories one optimizer step covers.
     :param micro: Rows in one forward on one rank.
     :param per_rank: Trajectories that rank holds.
-    :raises ValueError: When ``mini`` does not divide ``per_rank``, or
+    :raises TrainerSplitError: When ``mini`` does not divide ``per_rank``, or
         ``micro`` does not divide ``mini``.
     """
     if mini < 1 or per_rank % mini != 0:
@@ -101,7 +105,7 @@ def require_batch_split(mini: int, micro: int, per_rank: int) -> None:
             f"divisible by mini_batch_size ({mini}): a rank "
             "must split into whole optimizer steps."
         )
-        raise ValueError(msg)
+        raise TrainerSplitError(msg)
     if micro < 1 or mini % micro != 0:
         msg = (
             f"mini_batch_size ({mini}) must be divisible by "
@@ -110,7 +114,7 @@ def require_batch_split(mini: int, micro: int, per_rank: int) -> None:
             "micro_batch_size_per_gpu must be a whole number of backward "
             "passes."
         )
-        raise ValueError(msg)
+        raise TrainerSplitError(msg)
 
 
 def catalog_model(spec: LLMAlgorithmSpec) -> ModelSpec | None:
@@ -194,7 +198,7 @@ def per_rank_trajectories(
     :param spec: Validated LLM algorithm spec.
     :param n_training_gpus: Trainer ranks, ``training.training_gpus_per_agent``.
     :return: ``(data_parallel_size, trajectories)``.
-    :raises ValueError: When the batch does not split across those ranks.
+    :raises TrainerSplitError: When the batch does not split across those ranks.
     """
     dp = data_parallel_size(spec, n_training_gpus)
     if spec.batch_size % dp != 0:
@@ -202,7 +206,7 @@ def per_rank_trajectories(
             f"Batch size ({spec.batch_size}) must be divisible by the data-parallel "
             f"size ({dp})."
         )
-        raise ValueError(msg)
+        raise TrainerSplitError(msg)
     return dp, omitted_micro_batch_size(spec, n_training_gpus)
 
 
@@ -214,7 +218,7 @@ def resolve_micro_batch_size_per_gpu(
     :param spec: Validated LLM algorithm spec. Not written.
     :param n_training_gpus: Trainer ranks, ``training.training_gpus_per_agent``.
     :return: The set micro-batch, else the resolved mini-batch.
-    :raises ValueError: When a set mini-batch does not divide the rank.
+    :raises TrainerSplitError: When a set mini-batch does not divide the rank.
     """
     configured = spec.micro_batch_size_per_gpu
     if configured is not None:
