@@ -61,7 +61,7 @@ jobs:
                   restore-keys: linux-cpu-durations-
             - name: Install dependencies
               run: |
-                  uv sync --locked --group dev --extra box2d --extra cpu-llm --extra cpu
+                  uv sync --locked --group dev --extra box2d --extra cpu-llm --extra cpu --extra verifiers
                   echo "$UV_PROJECT_ENVIRONMENT/bin" >> $GITHUB_PATH
             - name: Run CPU shard
               env:
@@ -158,10 +158,29 @@ jobs:
                   echo "$UV_PROJECT_ENVIRONMENT/bin" >> $GITHUB_PATH
             - name: Install flash-attn
               # The trainer raises without flash_attn on CUDA. The wheel must match uv.lock's torch (2.13, CUDA 13).
+              # GitHub releases 504 when several HTTP/2 streams fetch this wheel.
               run: |
+                  set -euo pipefail
                   py="cp$(echo '${{ matrix.python-version }}' | tr -d .)"
-                  uv pip install --python "$UV_PROJECT_ENVIRONMENT" \
-                    "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.47/flash_attn-2.8.3%2Bcu130torch2.13-${py}-${py}-linux_x86_64.whl"
+                  url="https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.47/flash_attn-2.8.3%2Bcu130torch2.13-${py}-${py}-linux_x86_64.whl"
+                  export UV_CONCURRENT_DOWNLOADS=1
+                  export UV_HTTP_RETRIES=10
+                  for attempt in 1 2 3 4 5; do
+                    set +e
+                    output="$(uv pip install --python "$UV_PROJECT_ENVIRONMENT" "$url" 2>&1)"
+                    status=$?
+                    set -e
+                    printf '%s\n' "$output"
+                    if [[ "$status" -eq 0 ]]; then
+                      break
+                    fi
+                    if [[ "$attempt" -eq 5 ]] || ! grep -q -F -e 'server error (5' -e 'http2 error' <<<"$output"; then
+                      exit "$status"
+                    fi
+                    delay=$((2 ** (attempt - 1)))
+                    echo "flash-attn install attempt $attempt hit a transient fetch error; retrying in ${delay}s" >&2
+                    sleep "$delay"
+                  done
                   python -c "import flash_attn"
             - name: Run GPU shard
               run: |
