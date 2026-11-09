@@ -12,6 +12,7 @@ check.
 from __future__ import annotations
 
 import copy
+from collections.abc import Iterator
 
 import pytest
 import torch
@@ -50,6 +51,16 @@ def restored_mimo_modeling(monkeypatch: pytest.MonkeyPatch) -> None:
         "MiMoV2FlashRMSNorm",
         modeling_mimo_v2_flash.MiMoV2FlashRMSNorm,
     )
+
+
+@pytest.fixture
+def full_fp32_cuda_matmul() -> Iterator[None]:
+    """Turn off TF32, which an earlier algorithm test in the same worker may have turned on."""
+    # Same setter as configure_tf32_precision, so the process never mixes TF32 APIs.
+    precision = torch.get_float32_matmul_precision()
+    torch.set_float32_matmul_precision("highest")
+    yield
+    torch.set_float32_matmul_precision(precision)
 
 
 @pytest.fixture
@@ -246,7 +257,7 @@ class TestApplyLigerKernelToMimoV2:
 
 
 @pytest.mark.gpu
-@pytest.mark.usefixtures("restored_mimo_modeling")
+@pytest.mark.usefixtures("restored_mimo_modeling", "full_fp32_cuda_matmul")
 class TestApplyLigerKernelToMimoV2OnCuda:
     def test_matches_stock_outputs_and_gradients(self, native_config) -> None:
         # Arrange

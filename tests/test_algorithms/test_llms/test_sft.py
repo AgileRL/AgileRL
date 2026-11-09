@@ -4,6 +4,7 @@
 import copy
 import gc
 import tempfile
+from contextlib import contextmanager
 from unittest import mock
 
 import numpy as np
@@ -920,6 +921,37 @@ def random_sft_batch() -> dict[str, torch.Tensor]:
         "attention_mask": torch.ones(4, 6, dtype=torch.long),
         "loss_mask": torch.arange(6).expand(4, 6) >= 2,
     }
+
+
+class TestSFTLearnActivationOffload:
+    @pytest.mark.parametrize("offload", [True, False])
+    def test_gradient_forward_saves_activations_to_the_offload_device(
+        self, offload: bool, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        sft = make_cpu_sft()
+        sft.activation_offload = offload
+        saved_tensor_counts = []
+
+        # save_on_cpu pins memory, which needs a GPU; count what it would offload.
+        @contextmanager
+        def counting_save_on_cpu(pin_memory: bool = False):
+            def pack(tensor: torch.Tensor) -> torch.Tensor:
+                saved_tensor_counts.append(tensor.numel())
+                return tensor
+
+            with torch.autograd.graph.saved_tensors_hooks(pack, lambda t: t):
+                yield
+
+        monkeypatch.setattr(torch.autograd.graph, "save_on_cpu", counting_save_on_cpu)
+
+        # Act
+        metrics = sft.learn(random_sft_batch())
+
+        # Assert
+        assert np.isfinite(metrics["loss"])
+        assert bool(saved_tensor_counts) is offload
+        sft.clean_up()
 
 
 class TestSFTLearnMetrics:
