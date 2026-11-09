@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from itertools import product
@@ -327,21 +328,27 @@ def manifest_at_layout(
 ) -> TrainingManifest:
     """A copy of ``manifest`` with ``layout`` written onto ``fsdp`` and pinned.
 
+    Only the manifest, its ``algorithm`` and ``fsdp`` are copied. The other
+    sections are ``manifest``'s own objects, so a caller copies before
+    writing them.
+
     :param manifest: Validated LLM manifest. Not written.
     :param layout: Tensor, expert, and context parallel, and the shard group.
     :return: The copy; its layout search tries ``layout`` alone.
     """
-    trial = manifest.model_copy(deep=True)
-    spec = trial.algorithm
+    spec = manifest.algorithm
     if not isinstance(spec, LLMAlgorithmSpec):
         msg = f"{spec.name} has no training layout"
         raise TypeError(msg)
-    fsdp = spec.fsdp or FSDPConfig()
+    fsdp = FSDPConfig() if spec.fsdp is None else copy.copy(spec.fsdp)
     fsdp.tp = layout.tp
     fsdp.ep = layout.ep
     fsdp.cp = layout.cp
     fsdp.shard_group_size = layout.shard_group_size
-    spec.fsdp = record_parallel_pins(fsdp, PARALLEL_LAYOUT_FIELDS)
+    trial_spec = spec.model_copy()
+    trial_spec.fsdp = record_parallel_pins(fsdp, PARALLEL_LAYOUT_FIELDS)
+    trial = manifest.model_copy()
+    trial.algorithm = trial_spec
     return trial
 
 

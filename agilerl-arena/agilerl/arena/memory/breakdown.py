@@ -86,3 +86,21 @@ class PhaseBreakdown(BaseModel):
     @property
     def headroom_bytes(self) -> int:
         return self.device_usable_bytes - self.total_bytes
+
+    def detached(self) -> PhaseBreakdown:
+        """A copy whose components hold their own ``detail`` dicts.
+
+        Every other field is immutable, so writes to the copy leave ``self`` as it is.
+        """
+        return self.model_copy(
+            update={
+                "components": tuple(
+                    part.model_copy(update={"detail": dict(part.detail)})
+                    for part in self.components
+                ),
+                "host": tuple(
+                    part.model_copy(update={"detail": dict(part.detail)})
+                    for part in self.host
+                ),
+            }
+        )

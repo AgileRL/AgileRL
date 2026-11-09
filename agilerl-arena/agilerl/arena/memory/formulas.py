@@ -11,6 +11,7 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
+from functools import lru_cache
 from typing import Literal
 
 from agilerl.arena.memory.resolve.chunk import resolve_chunk_rows
@@ -616,6 +617,7 @@ def moe_params_per_layer(arch: ModelArch) -> tuple[int, int]:
     return experts, h * n_experts
 
 
+@lru_cache(maxsize=256)
 def param_counts(arch: ModelArch, n_params: int | None = None) -> ParamCounts:
     """Analytic parameter counts from the architecture geometry.
 

@@ -629,6 +629,25 @@ def _cycle_step(
     )
 
 
+def _trainers_shard_batch(workload: SplitWorkload, trainers: int) -> bool:
+    """Whether ``trainers`` ranks shard the batch, its per-rank rows and a pinned rollout batch."""
+    if trainers % workload.trainer_multiple:
+        return False
+    shards = trainers // (
+        workload.trainer_tensor_parallel * workload.trainer_context_parallel
+    )
+    if workload.batch_size % shards:
+        return False
+    if (
+        workload.batch_size // shards * workload.group_size
+    ) % workload.per_rank_multiple:
+        return False
+    return (
+        workload.rollout_batch_size is None
+        or workload.rollout_batch_size % trainers == 0
+    )
+
+
 def _cycle_rollout_batch_size(
     workload: SplitWorkload, trainers: int, engines: int, resident: int
 ) -> int | None:
@@ -638,23 +657,10 @@ def _cycle_rollout_batch_size(
     engines' ``resident`` sequences hold, so episodes keep their cached prefix
     between turns, and at least ``lcm(trainers, engines)``.
     """
-    if trainers % workload.trainer_multiple:
-        return None
-    shards = trainers // (
-        workload.trainer_tensor_parallel * workload.trainer_context_parallel
-    )
-    if workload.batch_size % shards:
-        return None
-    if (
-        workload.batch_size // shards * workload.group_size
-    ) % workload.per_rank_multiple:
+    if not _trainers_shard_batch(workload, trainers):
         return None
     if workload.rollout_batch_size is not None:
-        return (
-            None
-            if workload.rollout_batch_size % trainers
-            else workload.rollout_batch_size
-        )
+        return workload.rollout_batch_size
     groups = default_rollout_batch_size(workload.batch_size, trainers, engines)
     if workload.turns == 1:
         return groups
@@ -691,6 +697,95 @@ def _sync_seconds(
     )
 
 
+def _split_pricer(
+    model: ModelSpec,
+    device: DeviceSpec,
+    workload: SplitWorkload,
+    engine_width: int,
+    learn_cost_ratio: Callable[[int], float | None],
+) -> Callable[[int, int], GpuSplit | None]:
+    """:func:`price_gpu_split` at one engine width, as a function of trainers and engines.
+
+    Engine residents and learn GPU-seconds do not depend on the counts, so
+    they are computed once here. Each trainer count's learn cost ratio, each
+    engine count's sync and each cycle's generation seconds are computed once
+    per pricer.
+
+    :raises ValueError: When the device has no peak bf16 or bandwidth figure.
+    """
+    peak_flops = device.peak_bf16_flops
+    bandwidth = device.memory_bytes_per_second
+    if peak_flops is None or bandwidth is None:
+        msg = (
+            f"{device.name or 'This GPU'} has no peak bf16 or memory bandwidth "
+            "figure in the GPU catalogue, so the trainer / rollout-engine split "
+            "cannot be priced. Set training.training_gpus_per_agent and "
+            "training.rollout_engines_per_agent."
+        )
+        raise ValueError(msg)
+    residents = {
+        step: resident_sequences(model, device, workload, engine_width, step)
+        for step in engine_steps(model, workload)
+    }
+    fallback = next(iter(residents))
+    learn_gpu_seconds = _learn_gpu_seconds(model, device, peak_flops, workload)
+    ratios: dict[int, float | None] = {}
+    syncs: dict[int, float] = {}
+    # (engines, rollout_batch_size) -> (step, seconds of one cycle)
+    cycles: dict[tuple[int, int], tuple[int, float]] = {}
+
+    def price(trainers: int, engines: int) -> GpuSplit | None:
+        rollout_batch_size = _cycle_rollout_batch_size(
+            workload, trainers, engines, residents[fallback]
+        )
+        if rollout_batch_size is None:
+            return None
+        if trainers not in ratios:
+            ratios[trainers] = learn_cost_ratio(trainers)
+        ratio = ratios[trainers]
+        if ratio is None:
+            return None
+        cycle = (engines, rollout_batch_size)
+        if cycle not in cycles:
+            step = _cycle_step(
+                model, workload, engines, engine_width, rollout_batch_size, residents
+            )
+            cycles[cycle] = (
+                step,
+                _generation_seconds(
+                    model,
+                    device,
+                    peak_flops,
+                    bandwidth,
+                    workload,
+                    engines,
+                    engine_width,
+                    rollout_batch_size,
+                    residents[step],
+                    step,
+                ),
+            )
+        step, cycle_seconds = cycles[cycle]
+        if engines not in syncs:
+            syncs[engines] = _sync_seconds(model, workload, engines, engine_width)
+        cycles_per_step = (
+            workload.batch_size * workload.generated_per_trained / rollout_batch_size
+        )
+        return GpuSplit(
+            trainers=trainers,
+            engines=engines,
+            engine_width=engine_width,
+            rollout_batch_size=rollout_batch_size,
+            learn_seconds=learn_gpu_seconds * ratio / trainers,
+            generation_seconds=cycles_per_step * cycle_seconds,
+            max_num_batched_tokens=None if step == fallback else step,
+            sync_seconds=syncs[engines],
+            merged_lora_sync=workload.merged_lora_sync,
+        )
+
+    return price
+
+
 def price_gpu_split(
     model: ModelSpec,
     device: DeviceSpec,
@@ -719,59 +814,8 @@ def price_gpu_split(
         batch or no plan fits it.
     :raises ValueError: When the device has no peak bf16 or bandwidth figure.
     """
-    peak_flops = device.peak_bf16_flops
-    bandwidth = device.memory_bytes_per_second
-    if peak_flops is None or bandwidth is None:
-        msg = (
-            f"{device.name or 'This GPU'} has no peak bf16 or memory bandwidth "
-            "figure in the GPU catalogue, so the trainer / rollout-engine split "
-            "cannot be priced. Set training.training_gpus_per_agent and "
-            "training.rollout_engines_per_agent."
-        )
-        raise ValueError(msg)
-    residents = {
-        step: resident_sequences(model, device, workload, engine_width, step)
-        for step in engine_steps(model, workload)
-    }
-    fallback = next(iter(residents))
-    rollout_batch_size = _cycle_rollout_batch_size(
-        workload, trainers, engines, residents[fallback]
-    )
-    if rollout_batch_size is None:
-        return None
-    ratio = learn_cost_ratio(trainers)
-    if ratio is None:
-        return None
-    step = _cycle_step(
-        model, workload, engines, engine_width, rollout_batch_size, residents
-    )
-    cycles_per_step = (
-        workload.batch_size * workload.generated_per_trained / rollout_batch_size
-    )
-    learn_gpu_seconds = _learn_gpu_seconds(model, device, peak_flops, workload)
-    return GpuSplit(
-        trainers=trainers,
-        engines=engines,
-        engine_width=engine_width,
-        rollout_batch_size=rollout_batch_size,
-        learn_seconds=learn_gpu_seconds * ratio / trainers,
-        generation_seconds=cycles_per_step
-        * _generation_seconds(
-            model,
-            device,
-            peak_flops,
-            bandwidth,
-            workload,
-            engines,
-            engine_width,
-            rollout_batch_size,
-            residents[step],
-            step,
-        ),
-        max_num_batched_tokens=None if step == fallback else step,
-        sync_seconds=_sync_seconds(model, workload, engines, engine_width),
-        merged_lora_sync=workload.merged_lora_sync,
-    )
+    price = _split_pricer(model, device, workload, engine_width, learn_cost_ratio)
+    return price(trainers, engines)
 
 
 def fullest_split_within(splits: list[GpuSplit], share: float) -> GpuSplit:
@@ -815,22 +859,20 @@ def choose_gpu_split(
     :return: The chosen split, or None when no split fits.
     :raises ValueError: When the device has no peak bf16 or bandwidth figure.
     """
+    if gpus <= engine_width:
+        return None
+    price = _split_pricer(model, device, workload, engine_width, learn_cost_ratio)
+    sharding = [
+        trainers
+        for trainers in range(1, gpus - engine_width + 1)
+        if _trainers_shard_batch(workload, trainers)
+    ]
     splits = [
         split
         for engines in range(1, (gpus - 1) // engine_width + 1)
-        for trainers in range(1, gpus - engines * engine_width + 1)
-        if (
-            split := price_gpu_split(
-                model,
-                device,
-                workload,
-                trainers,
-                engines,
-                engine_width,
-                learn_cost_ratio,
-            )
-        )
-        is not None
+        for trainers in sharding
+        if trainers <= gpus - engines * engine_width
+        and (split := price(trainers, engines)) is not None
     ]
     if not splits:
         return None
@@ -945,7 +987,7 @@ def _expected_lengths(
 def _reasons(manifest: TrainingManifest, spec: RolloutLLMSpec) -> bool:
     """Whether rollouts reason: the model has a reasoning parser and thinking is not turned off."""
     info = SUPPORTED_MODEL_INFO.get(spec.pretrained_model_name_or_path or "")
-    model_type = None if info is None else info.config["model_type"]
+    model_type = None if info is None else info.model_type
     env = manifest.environment
     template = env.chat_template_kwargs if isinstance(env, LLMEnvSpec) else {}
     return (

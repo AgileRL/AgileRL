@@ -14,9 +14,10 @@ those.
 from __future__ import annotations
 
 import json
+import pickle
 import sys
 from collections.abc import Mapping
-from functools import cached_property
+from functools import cached_property, lru_cache
 from importlib.resources import files
 from typing import Any, Literal
 
@@ -166,6 +167,12 @@ def _bundled(hub_id: str) -> dict[str, Any]:
     return json.loads(supported_path(hub_id).read_text(encoding="utf-8"))
 
 
+@lru_cache(maxsize=64)
+def _pickled_config(hub_id: str) -> bytes:
+    """``config`` of the bundled file for ``hub_id``, parsed once and pickled."""
+    return pickle.dumps(_bundled(hub_id)["config"], pickle.HIGHEST_PROTOCOL)
+
+
 class ModelInfo(BaseModel):
     """Static info for one supported Hub id."""
 
@@ -238,12 +245,12 @@ class ModelInfo(BaseModel):
 
     @property
     def config(self) -> dict[str, Any]:
-        """Raw ``config.json`` this id trains from, parsed anew on each access.
+        """Raw ``config.json`` this id trains from, a new copy on each access.
 
         Hugging Face config classes rewrite the sub-config dicts they are built
         from, so callers must not share one dict.
         """
-        return _bundled(self.hub_id)["config"]
+        return pickle.loads(_pickled_config(self.hub_id))
 
     @cached_property
     def inspected(self) -> dict[str, Any]:
@@ -390,7 +397,7 @@ class ModelInfo(BaseModel):
         }
 
     @computed_field
-    @property
+    @cached_property
     def model_type(self) -> str:
         """Hugging Face ``model_type``."""
         return self.config["model_type"]

@@ -12,6 +12,7 @@ schema-version bump.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from functools import lru_cache
 
 from pydantic import BaseModel, ConfigDict
 
@@ -47,6 +48,7 @@ from agilerl.arena.memory.specs import (
     ModelSpec,
     RunConfig,
     TrainingSettings,
+    TrainingSettingsKey,
 )
 from agilerl.arena.memory.trainer_residency import (
     fsdp_cpu_offload_host_bytes,
@@ -1408,8 +1410,22 @@ def training_breakdown(
     :param settings: Training settings. When ``fsdp`` is set, its chunk size
         and optimizer placement are set.
     :param orchestrated: Charge the per-process job overhead.
-    :return: Stacked-bar breakdown for the training phase.
+    :return: Stacked-bar breakdown for the training phase, the caller's own copy.
     """
+    return _cached_training_breakdown(
+        model, device, TrainingSettingsKey.of(settings), orchestrated
+    ).detached()
+
+
+@lru_cache(maxsize=256)
+def _cached_training_breakdown(
+    model: ModelSpec,
+    device: DeviceSpec,
+    key: TrainingSettingsKey,
+    orchestrated: bool,
+) -> PhaseBreakdown:
+    """:func:`training_breakdown`, computed once per model, device, settings and overhead."""
+    settings = key.settings
     arch = model.arch
     counts = formulas.param_counts(arch, model.n_params)
     act_bytes = DTYPE_BYTES[settings.weight_dtype]

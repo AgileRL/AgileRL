@@ -39,6 +39,7 @@ from agilerl.arena.memory.resolve.split import (
     engine_prefill_rate,
     engine_steps,
     fullest_split_within,
+    price_gpu_split,
     resident_sequences,
     split_workload_from_manifest,
     tensor_parallel_seconds,
@@ -556,6 +557,127 @@ class TestChooseGpuSplit:
         assert oversubscribed_split.generation_seconds == pytest.approx(
             451.79, rel=1e-3
         )
+
+    @pytest.mark.parametrize(
+        ("raw", "device_name", "engine_width", "expected"),
+        [
+            (_countdown_manifest(64), "A100-80", 1, (4, 4, 64, None)),
+            (_sudoku_manifest(), "H100-80", 1, (3, 5, 15, None)),
+            (_awm_manifest(), "H100-80", 2, (4, 2, 16, 32768)),
+        ],
+        ids=["single-turn", "multi-turn", "moe-multi-turn"],
+    )
+    def test_chosen_split_prices_as_its_counts_alone(
+        self,
+        raw: dict,
+        device_name: str,
+        engine_width: int,
+        expected: tuple[int, int, int, int | None],
+    ) -> None:
+        # Arrange: learn cost grows with the trainer count; no plan fits 7.
+        manifest = _manifest(raw, engine_width)
+        model = catalog_model(manifest.algorithm)
+        device = _device(device_name)
+        workload = split_workload_from_manifest(manifest)
+
+        def learn_cost_ratio(trainers: int) -> float | None:
+            return None if trainers == 7 else 1 + trainers / 10
+
+        # Act
+        chosen = choose_gpu_split(
+            model, device, workload, 8, engine_width, learn_cost_ratio
+        )
+
+        # Assert
+        assert chosen is not None
+        assert (
+            chosen.trainers,
+            chosen.engines,
+            chosen.rollout_batch_size,
+            chosen.max_num_batched_tokens,
+        ) == expected
+        assert chosen == price_gpu_split(
+            model,
+            device,
+            workload,
+            chosen.trainers,
+            chosen.engines,
+            engine_width,
+            learn_cost_ratio,
+        )
+
+    @pytest.mark.parametrize(
+        ("raw", "device_name", "engine_width"),
+        [
+            (_countdown_manifest(64), "A100-80", 1),
+            (_countdown_manifest(60), "H100-80", 2),
+            (_sudoku_manifest(), "H100-80", 1),
+            (_awm_manifest(), "H100-80", 2),
+        ],
+        ids=["single-turn", "single-turn-tp2", "multi-turn", "moe-multi-turn"],
+    )
+    def test_chosen_split_matches_pricing_every_count_alone(
+        self, raw: dict, device_name: str, engine_width: int
+    ) -> None:
+        # Arrange: no plan fits 7 trainers; some counts do not shard the batch.
+        manifest = _manifest(raw, engine_width)
+        model = catalog_model(manifest.algorithm)
+        device = _device(device_name)
+        workload = split_workload_from_manifest(manifest)
+
+        def learn_cost_ratio(trainers: int) -> float | None:
+            return None if trainers == 7 else 1 + trainers / 10
+
+        priced = [
+            split
+            for engines in range(1, 7 // engine_width + 1)
+            for trainers in range(1, 8 - engines * engine_width + 1)
+            if (
+                split := price_gpu_split(
+                    model,
+                    device,
+                    workload,
+                    trainers,
+                    engines,
+                    engine_width,
+                    learn_cost_ratio,
+                )
+            )
+            is not None
+        ]
+        priced.sort(key=lambda split: (split.synced_step_seconds, split.engines))
+
+        # Act
+        chosen = choose_gpu_split(
+            model, device, workload, 8, engine_width, learn_cost_ratio
+        )
+
+        # Assert
+        assert chosen == fullest_split_within(priced, IDLE_GPU_TIE_SHARE)
+
+    def test_no_trainer_beside_one_engine_needs_no_device_figures(self) -> None:
+        # Arrange
+        device = DeviceSpec(total_bytes=80 * 1024**3, name="Exotic GPU")
+        model = catalog_model(_manifest(_countdown_manifest()).algorithm)
+        workload = _workload(_countdown_manifest())
+
+        # Act
+        split = choose_gpu_split(model, device, workload, 2, 2, lambda _: 1.0)
+
+        # Assert
+        assert split is None
+
+    def test_device_without_figures_cannot_be_searched(self) -> None:
+        # Arrange
+        device = DeviceSpec(total_bytes=80 * 1024**3, name="Exotic GPU")
+        model = catalog_model(_manifest(_countdown_manifest()).algorithm)
+        workload = _workload(_countdown_manifest())
+
+        # Act / Assert
+        with pytest.raises(
+            ValueError, match="Exotic GPU has no peak bf16 or memory bandwidth"
+        ):
+            choose_gpu_split(model, device, workload, 3, 2, lambda _: 1.0)
 
 
 def _awm_workload(engine_width: int) -> SplitWorkload:

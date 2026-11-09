@@ -14,6 +14,7 @@ from agilerl.arena.memory.manifest import (
     validated_run_manifest,
 )
 from agilerl.arena.memory.resolve.engine import (
+    _engine_model,
     queue_warning,
     resolve_engine_fast_path,
     resolve_engine_tensor_parallel,
@@ -78,6 +79,16 @@ def gemma_model() -> ModelSpec:
         n_params=info.inspected["num_params"],
         variants=MANIFEST_WEIGHT_VARIANTS,
     )
+
+
+class TestEngineModel:
+    def test_matches_a_model_built_from_the_bundled_config(self):
+        # Act
+        served = _engine_model(GEMMA_4_E4B)
+
+        # Assert
+        assert served == gemma_model()
+        assert _engine_model(GEMMA_4_E4B) == served
 
 
 class TestResolveEngineFastPath:

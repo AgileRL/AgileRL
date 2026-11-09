@@ -196,6 +196,20 @@ class TestAttentionOutputGateParams:
 
 
 class TestParamCounts:
+    def test_repeat_and_equal_arch_match_a_fresh_count(self):
+        # Arrange
+        rebuilt = ModelArch.model_validate(QWEN_05B.model_dump())
+
+        # Act
+        first = formulas.param_counts(QWEN_05B, 494_032_768)
+        again = formulas.param_counts(rebuilt, 494_032_768)
+        formulas.param_counts.cache_clear()
+        fresh = formulas.param_counts(QWEN_05B, 494_032_768)
+
+        # Assert
+        assert first == again == fresh
+        assert formulas.param_counts(QWEN_05B) == replace(fresh, unattributed=0)
+
     def test_matches_published_total(self):
         counts = formulas.param_counts(QWEN_05B)
         # Qwen2.5-0.5B has ~494M parameters.

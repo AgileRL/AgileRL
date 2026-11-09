@@ -830,6 +830,26 @@ class TestMergedLoraSyncCandidates:
         # Assert
         assert modes == (False,)
 
+    def test_replaced_catalogue_entry_is_read_afresh(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        manifest = _manifest(_sudoku_manifest())
+        hub_id = manifest.algorithm.pretrained_model_name_or_path
+        unquantized = merged_lora_sync_candidates(manifest)
+        monkeypatch.setitem(
+            model_info.SUPPORTED_MODEL_INFO,
+            hub_id,
+            model_info.SUPPORTED_MODEL_INFO[PREQUANTIZED_EXPERT_LORA_MODELS[0]],
+        )
+
+        # Act
+        modes = merged_lora_sync_candidates(manifest)
+
+        # Assert
+        assert unquantized == (True, False)
+        assert modes == (False,)
+
 
 def _l4_with(gib: float) -> DeviceSpec:
     """An L4 resized to ``gib`` GiB, so one sync mode's trainers fit and the other's do not."""
