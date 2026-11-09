@@ -547,7 +547,6 @@ SUPPORTED_MODEL_INFO: Mapping[str, ModelInfo] = {
         ModelInfo(
             hub_id="zai-org/GLM-5.3-Flash",
             architecture=ARCH_HYBRID_MOE,
-            status=STATUS_PREVIEW,
             modalities=("text", "vision"),
             language_model_prefix=VL_LANGUAGE_MODEL_PREFIX,
             text_lora_modules=GLM5_NEXT_TEXT_LORA_MODULES,
@@ -556,13 +555,11 @@ SUPPORTED_MODEL_INFO: Mapping[str, ModelInfo] = {
         ModelInfo(
             hub_id="deepseek-ai/DeepSeek-V4-Flash-0731",
             architecture=ARCH_MOE,
-            status=STATUS_PREVIEW,
             rollout_gpu_memory_utilization=EXPERT_LORA_ROLLOUT_GPU_MEMORY_UTILIZATION,
         ),
         ModelInfo(
             hub_id="XiaomiMiMo/MiMo-V2.6-Flash-RL",
             architecture=ARCH_MOE,
-            status=STATUS_PREVIEW,
             rollout_gpu_memory_utilization=EXPERT_LORA_ROLLOUT_GPU_MEMORY_UTILIZATION,
         ),
     )
