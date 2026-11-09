@@ -30,6 +30,7 @@ from agilerl.arena.byoc.cluster_register import (
     _install_charts_from_arena_package,
     _parse_byte_size,
     _registered_cluster_name,
+    _registered_scope,
     _same_byte_size,
     ensure_resource_class,
     run_cluster_register,
@@ -1654,7 +1655,7 @@ nebius:
 
         assert result.exit_code == 0, result.output
         gateway.assert_called_once()
-        assert gateway.call_args.args[1] == kubeconfig.resolve()
+        assert gateway.call_args.args[0].kubeconfig_path == kubeconfig.resolve()
         assert register.call_args.kwargs["gateway_api_parent_refs"] == refs
 
     def test_install_fetches_cluster_kubeconfig_when_the_file_is_missing(
@@ -2110,6 +2111,44 @@ class TestRegisteredClusterName:
             _registered_cluster_name({"cluster": {"name": " stored "}}, "requested")
             == "stored"
         )
+
+
+class TestRegisteredScope:
+    def test_missing_cluster_has_no_scope(self) -> None:
+        assert _registered_scope({}) is None
+        assert _registered_scope({"cluster": None}) is None
+
+    def test_blank_scope_is_unset(self) -> None:
+        assert _registered_scope({"cluster": {"byocScope": "  "}}) is None
+        assert _registered_scope({"cluster": {"byoc_scope": "\t"}}) is None
+
+    def test_prints_the_registered_scope(
+        self,
+        mock_client: MagicMock,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        bundle = {
+            **LAB_BUNDLE,
+            "cluster": {**LAB_BUNDLE["cluster"], "byocScope": "platform"},
+        }
+
+        with (
+            patch.object(ByocApi, "enable"),
+            patch.object(ByocApi, "register_cluster", return_value=bundle),
+            patch(
+                "agilerl.arena.byoc.cluster_register._install_charts_from_arena_package"
+            ),
+        ):
+            run_cluster_register(
+                mock_client,
+                name="lab-cluster",
+                output_dir=tmp_path,
+                skip_enable=True,
+                force=False,
+            )
+
+        assert "Scope: platform" in capsys.readouterr().out
 
 
 class TestInstallChartsFromArenaPackage:

@@ -18,6 +18,7 @@ import yaml
 
 from agilerl.arena import console
 from agilerl.arena.byoc import ArenaRootGroup, register_byoc_manifest_group
+from agilerl.arena.cli_agent import register_deployment_commands
 from agilerl.arena.cli_datasets import datasets_group
 from agilerl.arena.cli_manifest import handle_help_option
 from agilerl.arena.client import MEMORY_SCOPES, MemoryScope
@@ -511,15 +512,24 @@ def _format_profile_metrics(raw: dict[str, float]) -> dict[str, str]:
 @env.command("profile")
 @click.argument("name")
 @click.option("--version", default=None, show_default=True)
+@click.option(
+    "--multi-agent/--single-agent",
+    "multi_agent",
+    default=None,
+    help="Override the stored multi-agent flag. Omit it to use the saved value.",
+)
 @click.pass_obj
 def env_profile(
     config: CommandConfig,
     name: str,
     version: str | None,
+    multi_agent: bool | None,
 ) -> None:
     """Profile a validated environment in Arena and get its resource requirements."""
     with arena_client(config) as client:
-        result = client.profile_environment(name=name, version=version)
+        result = client.profile_environment(
+            name=name, version=version, multi_agent=multi_agent
+        )
         if result:
             emit_result(
                 _format_profile_metrics(result),
@@ -679,6 +689,11 @@ def experiment() -> None:
         "answer from the first dataset row when omitted."
     ),
 )
+@click.option(
+    "--idempotency-key",
+    default=None,
+    help="Reuse this key to replay the same submit instead of starting another job.",
+)
 @click.pass_obj
 def experiment_submit(
     config: CommandConfig,
@@ -691,6 +706,7 @@ def experiment_submit(
     experiment_name: str | None,
     reward_file: Path | None,
     completion: str | None,
+    idempotency_key: str | None,
 ) -> None:
     """Submit an experiment from a manifest."""
     with arena_client(config) as client:
@@ -704,6 +720,7 @@ def experiment_submit(
             experiment_name=experiment_name,
             reward_file=reward_file,
             completion=completion,
+            idempotency_key=idempotency_key,
         )
     emit_json_result(result)
 
@@ -735,17 +752,39 @@ def experiment_list(config: CommandConfig, project: str | None) -> None:
     required=True,
     help="Maximum training steps for the resumed run.",
 )
+@click.option(
+    "--checkpoint",
+    default=None,
+    help="Checkpoint to resume from. Omit it to use the best checkpoint.",
+)
+@click.option(
+    "--new-name",
+    default=None,
+    help="Name for the resumed experiment.",
+)
+@click.option(
+    "--project",
+    default=None,
+    help="Project, when the experiment name exists in more than one.",
+)
 @click.pass_obj
 def experiment_resume(
     config: CommandConfig,
     experiment_name: str,
     max_steps: int,
+    checkpoint: str | None,
+    new_name: str | None,
+    project: str | None,
 ) -> None:
     """Resume an experiment by name."""
     with arena_client(config) as client:
         emit_result(
             client.resume_experiment(
-                experiment_name=experiment_name, max_steps=max_steps
+                experiment_name=experiment_name,
+                max_steps=max_steps,
+                checkpoint=checkpoint,
+                new_name=new_name,
+                project=project,
             )
         )
 
@@ -1024,6 +1063,9 @@ def agent_deploy(
             memory_scope=memory_scope,
         )
     emit_json_result(result)
+
+
+register_deployment_commands(agent_cli)
 
 
 @agent_cli.command("run")

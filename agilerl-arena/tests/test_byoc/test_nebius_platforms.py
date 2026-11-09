@@ -28,6 +28,7 @@ from agilerl.arena.byoc.provisioning.providers.nebius.platforms import (
     insert_worker_blocks,
     list_capacity_advice,
     list_gpu_presets,
+    list_registerable_gpu_presets,
     newest_cuda_drivers_preset,
     node_group_ids,
     parse_gpu_presets,
@@ -44,6 +45,7 @@ from agilerl.arena.byoc.provisioning.providers.nebius.spec import (
 from agilerl.arena.byoc.provisioning.spec import ClusterSpec, load_cluster_spec
 from agilerl.arena.byoc.provisioning.terraform import ClusterOutputs
 from agilerl.arena.config import CommandConfig
+from agilerl.arena.exceptions import ArenaAPIError
 
 H100 = GpuPreset(
     platform="gpu-h100-sxm",
@@ -60,6 +62,14 @@ H100_8 = GpuPreset(
     vcpu_count=128,
     memory_gib=1600,
     vram_gib=80,
+)
+GB300 = GpuPreset(
+    platform="gpu-gb300",
+    preset="4gpu-112vcpu-800gb",
+    gpu_count=4,
+    vcpu_count=112,
+    memory_gib=800,
+    vram_gib=279,
 )
 RTX = GpuPreset(
     platform="gpu-rtx6000-a",
@@ -256,6 +266,132 @@ class TestListGpuPresets:
                 vram_gib=80,
             )
         ]
+
+
+def _project(name: str, project_id: str, region: str) -> dict[str, object]:
+    return {
+        "metadata": {"id": project_id, "name": name},
+        "status": {"region": region},
+    }
+
+
+def _platform(name: str, preset: str) -> dict[str, object]:
+    return {
+        "metadata": {"name": name},
+        "spec": {
+            "gpu_memory_gibibytes": 80,
+            "presets": [
+                {
+                    "name": preset,
+                    "resources": {
+                        "gpu_count": 1,
+                        "vcpu_count": 16,
+                        "memory_gibibytes": 200,
+                    },
+                }
+            ],
+        },
+    }
+
+
+def _register_spec(name: str, placement: str) -> ClusterSpec:
+    return ClusterSpec.model_validate(
+        {
+            "provider": "nebius",
+            "name": name,
+            "values": {"placement": placement},
+            "terraform_state": {"bucket": "test-tfstate"},
+            "arena": {
+                "storage": {
+                    "bucket": "bucket",
+                    "endpoint": "https://storage.example.com",
+                },
+                "inference": {"domain": "inference.example.com"},
+            },
+            "nebius": {
+                "tenant_id": "tenant",
+                "project_id": "project-home",
+                "storage_project_id": "storage-project",
+                "subnet_id": "subnet",
+                "object_storage": {"size_gib": 1024},
+            },
+        }
+    )
+
+
+class TestListRegisterableGpuPresets:
+    def test_ephemeral_lists_this_clusters_region_projects(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        projects = [
+            _project("default-project-uk-south1", "project-default", "uk-south1"),
+            _project("nebius-local-uk-south1", "project-local", "uk-south1"),
+            _project("arena-nebius", "project-home", "eu-north1"),
+            _project("arena-nebius-eu-north1", "project-north", "eu-north1"),
+            _project("arena-nebius-uk-south1", "project-uk", "uk-south1"),
+        ]
+        catalogs = {
+            "project-default": [_platform("gpu-gb300", "4gpu-112vcpu-800gb")],
+            "project-local": [_platform("gpu-rtx6000-a", "1gpu-16vcpu-200gb")],
+            "project-home": [_platform("gpu-l40s-d", "1gpu-16vcpu-96gb")],
+            "project-north": [_platform("gpu-h100-sxm", "1gpu-16vcpu-200gb")],
+            "project-uk": [
+                _platform("gpu-h100-sxm", "1gpu-16vcpu-200gb"),
+                _platform("gpu-b300-sxm", "1gpu-24vcpu-346gb"),
+            ],
+        }
+        parents: list[str] = []
+
+        def fake(args: list[str], **_kwargs: object) -> list[dict[str, object]]:
+            if args[:4] == ["iam", "project", "list", "--parent-id"]:
+                return projects
+            if args[:4] == ["compute", "platform", "list", "--parent-id"]:
+                parent = args[4]
+                parents.append(parent)
+                return catalogs[parent]
+            raise AssertionError(args)
+
+        monkeypatch.setattr(
+            "agilerl.arena.byoc.provisioning.providers.nebius.platforms._nebius_list_items",
+            fake,
+        )
+        monkeypatch.setattr(
+            "agilerl.arena.byoc.provisioning.providers.nebius.ephemeral._nebius_list_items",
+            fake,
+        )
+
+        presets = list_registerable_gpu_presets(
+            _register_spec("arena-nebius", "ephemeral"),
+            "project-home",
+        )
+
+        assert parents == ["project-north", "project-uk"]
+        assert {(preset.platform, preset.preset) for preset in presets} == {
+            ("gpu-h100-sxm", "1gpu-16vcpu-200gb"),
+            ("gpu-b300-sxm", "1gpu-24vcpu-346gb"),
+        }
+
+    def test_in_cluster_lists_only_the_home_project(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: list[list[str]] = []
+
+        def fake(args: list[str], **_kwargs: object) -> list[dict[str, object]]:
+            seen.append(args)
+            return [H100_PLATFORM]
+
+        monkeypatch.setattr(
+            "agilerl.arena.byoc.provisioning.providers.nebius.platforms._nebius_list_items",
+            fake,
+        )
+
+        presets = list_registerable_gpu_presets(
+            _register_spec("arena-nebius", "in-cluster"),
+            "project-1",
+        )
+
+        assert seen == [["compute", "platform", "list", "--parent-id", "project-1"]]
+        assert [preset.platform for preset in presets] == ["gpu-h100-sxm"]
 
 
 class TestCudaDriversPreset:
@@ -736,7 +872,7 @@ class TestRegisterClassesCommand:
                 return_value=provisioner,
             ),
             patch(
-                "agilerl.arena.byoc.commands.list_gpu_presets",
+                "agilerl.arena.byoc.commands.list_registerable_gpu_presets",
                 return_value=[H100, RTX],
             ),
             patch(
@@ -771,7 +907,7 @@ class TestRegisterClassesCommand:
         compute = created["metadata"]["computeResource"]
         assert compute["numCpus"] == 16
         assert compute["numGpus"] == 1
-        assert compute["memoryBytes"] == "200 GB"
+        assert compute["memoryBytes"] == "200 GiB"
         assert created["description"] == (
             "NVIDIA® RTX PRO™ 6000 1 GPU - 16 CPUs - 200 GB RAM."
         )
@@ -833,7 +969,7 @@ class TestRegisterClassesCommand:
                 return_value=MagicMock(),
             ),
             patch(
-                "agilerl.arena.byoc.commands.list_gpu_presets",
+                "agilerl.arena.byoc.commands.list_registerable_gpu_presets",
                 return_value=[RTX],
             ),
             patch(
@@ -953,8 +1089,10 @@ class TestRegisterClassesCommand:
                 side_effect=recover,
             ),
             patch(
-                "agilerl.arena.byoc.commands.list_gpu_presets",
-                side_effect=lambda project_id: listed.append(project_id) or [RTX],
+                "agilerl.arena.byoc.commands.list_registerable_gpu_presets",
+                side_effect=lambda _spec, project_id: (
+                    listed.append(project_id) or [RTX]
+                ),
             ),
         ):
             result = CliRunner().invoke(
@@ -999,7 +1137,7 @@ class TestRegisterClassesCommand:
                 return_value=provisioner,
             ),
             patch(
-                "agilerl.arena.byoc.commands.list_gpu_presets",
+                "agilerl.arena.byoc.commands.list_registerable_gpu_presets",
                 return_value=[H100, RTX],
             ),
             patch(
@@ -1064,7 +1202,7 @@ class TestRegisterClassesCommand:
                 return_value=provisioner,
             ),
             patch(
-                "agilerl.arena.byoc.commands.list_gpu_presets",
+                "agilerl.arena.byoc.commands.list_registerable_gpu_presets",
                 return_value=[H100, H100_8],
             ),
             patch("agilerl.arena.byoc.commands.cuda_drivers_preset") as drivers,
@@ -1093,7 +1231,7 @@ class TestRegisterClassesCommand:
         }
         compute = created["metadata"]["computeResource"]
         assert compute["numCpus"] == 16
-        assert compute["memoryBytes"] == "200 GB"
+        assert compute["memoryBytes"] == "200 GiB"
         assert created["description"] == ("NVIDIA® H100 1 GPU - 16 CPUs - 200 GB RAM.")
 
     def test_all_registers_every_preset_and_skips_an_existing_class(
@@ -1123,7 +1261,7 @@ class TestRegisterClassesCommand:
                 return_value=provisioner,
             ),
             patch(
-                "agilerl.arena.byoc.commands.list_gpu_presets",
+                "agilerl.arena.byoc.commands.list_registerable_gpu_presets",
                 return_value=[H100, H100_8],
             ),
             patch(
@@ -1143,14 +1281,14 @@ class TestRegisterClassesCommand:
         assert updated["name"] == "test-workers"
         assert updated["num_nodes"] == 4
         assert updated["metadata"]["computeResource"]["numCpus"] == 16
-        assert updated["metadata"]["computeResource"]["memoryBytes"] == "200 GB"
+        assert updated["metadata"]["computeResource"]["memoryBytes"] == "200 GiB"
         assert updated["description"] == ("NVIDIA® H100 1 GPU - 16 CPUs - 200 GB RAM.")
         created = api.create_class.call_args.kwargs
         assert created["name"] == "test-gpu-h100-sxm-8gpu-128vcpu-1600gb"
         compute = created["metadata"]["computeResource"]
         assert compute["numCpus"] == 128
         assert compute["numGpus"] == 8
-        assert compute["memoryBytes"] == "1600 GB"
+        assert compute["memoryBytes"] == "1600 GiB"
         assert compute["gpu"]["type"] == "gpu-h100-sxm"
         assert compute["gpu"]["count"] == 8
         assert created["node_selector"] == {
@@ -1162,6 +1300,117 @@ class TestRegisterClassesCommand:
         assert [
             worker.preset for worker in load_cluster_spec(path).nebius_cloud().workers
         ] == ["1gpu-16vcpu-200gb"]
+
+    def test_skips_an_unknown_platform_and_registers_the_rest(
+        self,
+        command_config: CommandConfig,
+        tmp_path: Path,
+        client_context: Callable[[MagicMock], MagicMock],
+    ) -> None:
+        path = _spec(tmp_path)
+        api = MagicMock()
+        api.find_cluster.return_value = {"name": "test"}
+        api.find_class.return_value = None
+
+        def create_class(**kwargs: object) -> dict[str, str]:
+            name = kwargs["name"]
+            if not isinstance(name, str):
+                msg = "class name"
+                raise AssertionError(msg)
+            if name.startswith("test-gpu-gb300"):
+                detail = "unknown Nebius platform gpu-gb300"
+                raise ArenaAPIError(detail, status_code=400)
+            return {"name": name}
+
+        api.create_class.side_effect = create_class
+        provisioner = MagicMock()
+
+        with (
+            patch(
+                "agilerl.arena.byoc.commands.arena_client",
+                return_value=client_context(MagicMock()),
+            ),
+            patch("agilerl.arena.byoc.commands.ByocApi", return_value=api),
+            patch(
+                "agilerl.arena.byoc.commands.ClusterProvisioner",
+                return_value=provisioner,
+            ),
+            patch(
+                "agilerl.arena.byoc.commands.list_registerable_gpu_presets",
+                return_value=[GB300, H100],
+            ),
+            patch(
+                "agilerl.arena.byoc.commands.list_capacity_advice",
+                return_value=[],
+            ),
+            patch(
+                "agilerl.arena.byoc.commands.cuda_drivers_preset",
+                return_value="cuda13.0",
+            ),
+        ):
+            result = CliRunner().invoke(
+                build_cluster_register_classes_command(),
+                ["--spec", str(path), "--all", "--yes"],
+                obj=command_config,
+            )
+
+        assert result.exit_code == 0, result.output
+        assert (
+            "Skipped resource class 'test-gpu-gb300-4gpu-112vcpu-800gb': "
+            "unknown Nebius platform gpu-gb300"
+        ) in result.output
+        created = [call.kwargs["name"] for call in api.create_class.call_args_list]
+        assert created == [
+            "test-workers",
+            "test-gpu-gb300-4gpu-112vcpu-800gb",
+        ]
+        assert "Created resource class 'test-workers'" in result.output
+
+    def test_still_stops_on_another_api_error(
+        self,
+        command_config: CommandConfig,
+        tmp_path: Path,
+        client_context: Callable[[MagicMock], MagicMock],
+    ) -> None:
+        path = _spec(tmp_path)
+        api = MagicMock()
+        api.find_cluster.return_value = {"name": "test"}
+        api.find_class.return_value = None
+        api.create_class.side_effect = ArenaAPIError(
+            "cluster is disabled",
+            status_code=400,
+        )
+        provisioner = MagicMock()
+
+        with (
+            patch(
+                "agilerl.arena.byoc.commands.arena_client",
+                return_value=client_context(MagicMock()),
+            ),
+            patch("agilerl.arena.byoc.commands.ByocApi", return_value=api),
+            patch(
+                "agilerl.arena.byoc.commands.ClusterProvisioner",
+                return_value=provisioner,
+            ),
+            patch(
+                "agilerl.arena.byoc.commands.list_registerable_gpu_presets",
+                return_value=[GB300, H100],
+            ),
+            patch(
+                "agilerl.arena.byoc.commands.list_capacity_advice",
+                return_value=[],
+            ),
+        ):
+            result = CliRunner().invoke(
+                build_cluster_register_classes_command(),
+                ["--spec", str(path), "--all", "--yes"],
+                obj=command_config,
+            )
+
+        assert result.exit_code != 0
+        assert result.exception is not None
+        assert "cluster is disabled" in str(result.exception)
+        assert api.create_class.call_count == 1
 
     def test_reads_project_id_from_terraform_when_the_spec_omits_it(
         self,
@@ -1196,7 +1445,7 @@ class TestRegisterClassesCommand:
                 return_value=provisioner,
             ),
             patch(
-                "agilerl.arena.byoc.commands.list_gpu_presets",
+                "agilerl.arena.byoc.commands.list_registerable_gpu_presets",
                 return_value=[H100],
             ) as listed,
         ):
@@ -1213,7 +1462,7 @@ class TestRegisterClassesCommand:
             )
 
         assert result.exit_code == 0, result.output
-        assert listed.call_args.args[0] == "project-created"
+        assert listed.call_args.args[1] == "project-created"
         provisioner.provision.assert_not_called()
         assert provisioner.status.call_count == 1
 
@@ -1245,7 +1494,7 @@ class TestRegisterClassesCommand:
                 return_value=provisioner,
             ),
             patch(
-                "agilerl.arena.byoc.commands.list_gpu_presets",
+                "agilerl.arena.byoc.commands.list_registerable_gpu_presets",
                 return_value=[H100],
             ),
         ):
@@ -1300,7 +1549,7 @@ class TestRegisterClassesCommand:
                 return_value=provisioner,
             ),
             patch(
-                "agilerl.arena.byoc.commands.list_gpu_presets",
+                "agilerl.arena.byoc.commands.list_registerable_gpu_presets",
                 return_value=[H100],
             ),
         ):
@@ -1357,7 +1606,7 @@ class TestRegisterClassesCommand:
                 return_value=provisioner,
             ),
             patch(
-                "agilerl.arena.byoc.commands.list_gpu_presets",
+                "agilerl.arena.byoc.commands.list_registerable_gpu_presets",
                 return_value=[H100],
             ),
         ):
@@ -1400,7 +1649,9 @@ class TestRegisterClassesCommand:
                 "agilerl.arena.byoc.commands.ClusterProvisioner",
                 return_value=provisioner,
             ),
-            patch("agilerl.arena.byoc.commands.list_gpu_presets") as listed,
+            patch(
+                "agilerl.arena.byoc.commands.list_registerable_gpu_presets"
+            ) as listed,
         ):
             result = CliRunner().invoke(
                 build_cluster_register_classes_command(),
@@ -1436,7 +1687,7 @@ class TestRegisterClassesCommand:
                 return_value=provisioner,
             ),
             patch(
-                "agilerl.arena.byoc.commands.list_gpu_presets",
+                "agilerl.arena.byoc.commands.list_registerable_gpu_presets",
                 return_value=[H100, H100_8],
             ),
             patch(
@@ -1475,7 +1726,7 @@ class TestRegisterClassesCommand:
             ),
             patch("agilerl.arena.byoc.commands.ByocApi", return_value=api),
             patch(
-                "agilerl.arena.byoc.commands.list_gpu_presets",
+                "agilerl.arena.byoc.commands.list_registerable_gpu_presets",
                 return_value=[H100],
             ),
         ):

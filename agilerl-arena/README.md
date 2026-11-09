@@ -133,9 +133,13 @@ Use the deployment URL from `arena agent list`.
 
 ## BYOC cluster registration
 
-Register a customer Kubernetes cluster against Arena (enterprise BYOC v1) and
+Register a Kubernetes cluster against Arena (enterprise BYOC) and
 write Helm values files locally. Re-running with the same cluster name updates
 the existing registration (upsert) instead of creating a duplicate.
+`--byoc-scope` is `customer` (the default when omitted) or `platform`.
+A platform cluster shares the Arena catalog and bucket and needs a platform
+admin. Choosing platform uses ephemeral placement unless `--placement`
+is set, or the spec already sets both scope and placement.
 
 ```bash
 arena cluster register --name my-cluster \

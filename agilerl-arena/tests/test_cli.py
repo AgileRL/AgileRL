@@ -80,6 +80,8 @@ def mock_client() -> MagicMock:
             "download_experiment_metrics",
             "preview_experiment_metrics_csv",
             "deploy_agent",
+            "update_inference_deployment",
+            "delete_inference_deployment",
             "list_inference_deployments",
             "_ensure_inference_binding",
             "open_inference_agent",
@@ -822,7 +824,16 @@ class TestEnvProfileCommand:
             result = runner.invoke(main, ["env", "profile", "my-env"])
         assert result.exit_code == 0
         mock_client.profile_environment.assert_called_once_with(
-            name="my-env", version=None
+            name="my-env", version=None, multi_agent=None
+        )
+
+    def test_profile_multi_agent(self, runner, mock_client):
+        mock_client.profile_environment.return_value = {"steps_per_second": 1.0}
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["env", "profile", "my-env", "--multi-agent"])
+        assert result.exit_code == 0
+        mock_client.profile_environment.assert_called_once_with(
+            name="my-env", version=None, multi_agent=True
         )
 
     def test_profile_none_result(self, runner, mock_client):
@@ -911,6 +922,7 @@ class TestExperimentSubmitCommand:
             experiment_name=None,
             reward_file=None,
             completion=None,
+            idempotency_key=None,
         )
 
     def test_submit_all_options(self, runner, mock_client, tmp_path):
@@ -951,6 +963,26 @@ class TestExperimentSubmitCommand:
             experiment_name="my-exp",
             reward_file=reward,
             completion="test output",
+            idempotency_key=None,
+        )
+
+    def test_submit_idempotency_key(self, runner, mock_client, tmp_path):
+        manifest = tmp_path / "manifest.yaml"
+        manifest.write_text("experiment: test")
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main,
+                [
+                    "experiments",
+                    "submit",
+                    str(manifest),
+                    "--idempotency-key",
+                    "run-1",
+                ],
+            )
+        assert result.exit_code == 0
+        assert (
+            mock_client.submit_experiment.call_args.kwargs["idempotency_key"] == "run-1"
         )
 
     def test_submit_gpu_flags(self, runner, mock_client, tmp_path):
@@ -981,6 +1013,7 @@ class TestExperimentSubmitCommand:
             experiment_name=None,
             reward_file=None,
             completion=None,
+            idempotency_key=None,
         )
 
     def test_submit_rejects_zero_gpus(self, runner, mock_client, tmp_path):
@@ -1384,7 +1417,39 @@ class TestExperimentResumeCommand:
             )
         assert result.exit_code == 0
         mock_client.resume_experiment.assert_called_once_with(
-            experiment_name="my-exp", max_steps=1000
+            experiment_name="my-exp",
+            max_steps=1000,
+            checkpoint=None,
+            new_name=None,
+            project=None,
+        )
+
+    def test_resume_optional_fields(self, runner, mock_client):
+        mock_client.resume_experiment.return_value = {"resumed": True}
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main,
+                [
+                    "experiments",
+                    "resume",
+                    "my-exp",
+                    "--max-steps",
+                    "1000",
+                    "--checkpoint",
+                    "500",
+                    "--new-name",
+                    "my-exp-2",
+                    "--project",
+                    "proj",
+                ],
+            )
+        assert result.exit_code == 0
+        mock_client.resume_experiment.assert_called_once_with(
+            experiment_name="my-exp",
+            max_steps=1000,
+            checkpoint="500",
+            new_name="my-exp-2",
+            project="proj",
         )
 
     def test_resume_missing_max_steps(self, runner, mock_client):
@@ -1659,6 +1724,51 @@ class TestAgentDeployCommand:
             )
         assert result.exit_code != 0
         mock_client.deploy_agent.assert_not_called()
+
+
+class TestAgentUpdateCommand:
+    def test_update(self, runner, mock_client):
+        mock_client.update_inference_deployment.return_value = {"name": "agent-2"}
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main,
+                [
+                    "agent",
+                    "update",
+                    "agent-1",
+                    "--new-name",
+                    "agent-2",
+                    "--disabled",
+                    "--experiment-name",
+                    "exp1",
+                ],
+            )
+        assert result.exit_code == 0
+        mock_client.update_inference_deployment.assert_called_once_with(
+            "agent-1",
+            new_name="agent-2",
+            description=None,
+            enabled=False,
+            experiment_name="exp1",
+            project_name=None,
+        )
+
+
+class TestAgentDeleteCommand:
+    def test_delete_confirmed(self, runner, mock_client):
+        mock_client.delete_inference_deployment.return_value = {"success": True}
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["agent", "delete", "agent-1", "--yes"])
+        assert result.exit_code == 0
+        mock_client.delete_inference_deployment.assert_called_once_with(
+            "agent-1", experiment_name=None, project_name=None
+        )
+
+    def test_delete_aborted(self, runner, mock_client):
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["agent", "delete", "agent-1"], input="n\n")
+        assert result.exit_code == 0
+        mock_client.delete_inference_deployment.assert_not_called()
 
 
 class TestAgentRunCommand:

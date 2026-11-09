@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -52,6 +53,7 @@ from agilerl.arena.byoc.provisioning.inference import (
     resolve_inference_hostname_template,
 )
 from agilerl.arena.byoc.provisioning.kubectl import require_kubectl
+from agilerl.arena.byoc.provisioning.providers.base import CreatedProjectsQuery
 from agilerl.arena.byoc.provisioning.providers.nebius.kubeconfig import (
     build_kubeconfig_argv,
     build_nebius_kubeconfig_argv,
@@ -87,6 +89,7 @@ from agilerl.arena.byoc.provisioning.providers.nebius.terraform import (
     _credentials_from_fields,
     _delete_nebius_resource,
     _ensure_state_access_key,
+    _ensure_state_bucket_limit,
     _find_named_resource,
     _get_by_name,
     _member_id,
@@ -96,15 +99,21 @@ from agilerl.arena.byoc.provisioning.providers.nebius.terraform import (
     _payload_items,
     _resource_id,
     _resource_name,
+    _run_nebius,
     _run_nebius_json,
+    _spec_int,
     _storage_access_key_id,
     delete_cluster_terraform_state,
     delete_nebius_project,
+    delete_project_compute_disks,
+    delete_project_storage_buckets,
     delete_terraform_state_bucket,
     delete_tfstate_iam,
     ensure_terraform_state_bucket,
     experiment_storage_import_ids,
     load_terraform_state_credentials,
+    nebius_project_exists,
+    nebius_project_name,
     nebius_region_from_endpoint,
     read_terraform_state_credentials,
     storage_project_id,
@@ -121,11 +130,13 @@ from agilerl.arena.byoc.provisioning.spec import (
     ArenaGatewaySpec,
     ArenaStorageSpec,
     ClusterSpec,
+    ClusterValuesSpec,
     api_placement,
     apply_cluster_spec_overrides,
     load_cluster_spec,
     placement_values,
     render_default_cluster_spec,
+    stored_cluster_values,
     write_default_cluster_spec,
 )
 from agilerl.arena.byoc.provisioning.storage import (
@@ -136,6 +147,7 @@ from agilerl.arena.byoc.provisioning.terraform import (
     ClusterOutputs,
     TerraformRunner,
     absolute_path,
+    configured_backend_type,
     local_terraform_state_has_resources,
     terraform_address_matches,
 )
@@ -326,6 +338,16 @@ def _set_nebius_auth_env(
     nebius_cli = tmp_path / "nebius"
     nebius_cli.write_text("#!/bin/sh\n", encoding="utf-8")
     nebius_cli.chmod(0o755)
+    if sys.platform == "win32":
+        # CreateProcess cannot run this shell script. Exit 0 means the project and state bucket exist.
+        monkeypatch.setattr(
+            "agilerl.arena.byoc.provisioning.providers.nebius.provider.nebius_project_exists",
+            lambda _project_id: True,
+        )
+        monkeypatch.setattr(
+            "agilerl.arena.byoc.provisioning.providers.nebius.provider.terraform_state_bucket_exists",
+            lambda _spec: True,
+        )
     monkeypatch.setenv("AUTHKEY_PRIVATE_PATH", str(key_path))
     monkeypatch.setenv("AUTHKEY_PUBLIC_ID", "publickey-1")
     monkeypatch.setenv("SA_ID", "serviceaccount-1")
@@ -523,6 +545,17 @@ class TestNebiusResourceSelection:
         assert spec.nebius.storage_project_id is None
         assert spec.terraform_values()["project_id"] == ""
         assert spec.terraform_values()["storage_project_id"] == ""
+
+    def test_storage_region_follows_the_storage_endpoint(self) -> None:
+        spec = _nebius_spec(
+            region="uk-south1",
+            storage_endpoint="https://storage.eu-north1.nebius.cloud",
+        )
+
+        values = spec.terraform_values()
+
+        assert values["region"] == "uk-south1"
+        assert values["storage_region"] == "eu-north1"
 
     def test_passes_explicit_storage_project(self) -> None:
         spec = _nebius_spec(storage_project_id=" project-storage ")
@@ -910,11 +943,53 @@ class TestNebiusProviderAuthentication:
             "create": False,
             "prompt": None,
         }
-        assert ensure_bucket.call_args.args[0].nebius.project_id is None
-        assert (
-            ensure_bucket.call_args.args[0].nebius.storage_project_id
-            == "storage-project"
+
+    def test_prepare_keeps_an_initialized_s3_backend(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _, nebius_cli = _set_nebius_auth_env(monkeypatch, tmp_path)
+        monkeypatch.setenv("NEBIUS_CLI", str(nebius_cli))
+        runner = MagicMock()
+        work_dir = tmp_path / "work"
+        backend_state = work_dir / ".terraform" / "terraform.tfstate"
+        backend_state.parent.mkdir(parents=True)
+        backend_state.write_text(
+            json.dumps({"backend": {"type": "s3", "config": {}}}),
+            encoding="utf-8",
         )
+        runner.prepare.return_value = work_dir
+        runner.state_list.return_value = (
+            "nebius_iam_v2_project.arena",
+            "nebius_iam_v2_project.storage",
+        )
+        runner.terraform_output.side_effect = _terraform_project_output
+        spec = _nebius_spec(
+            project_id=None,
+            storage_project_id=None,
+            subnet_id=None,
+            region="eu-north1",
+        )
+        credentials = TerraformStateCredentials("AKIA-existing", "existing-secret")
+
+        with (
+            patch(
+                "agilerl.arena.byoc.provisioning.providers.nebius.provider.read_terraform_state_credentials",
+                return_value=credentials,
+            ),
+            patch(
+                "agilerl.arena.byoc.provisioning.providers.nebius.provider.ensure_terraform_state_bucket",
+            ) as ensure_bucket,
+        ):
+            prepared, _ = ClusterProvisioner(runner=runner)._prepare(
+                spec, tmp_path / "state"
+            )
+
+        assert prepared.nebius.project_id == "project-created"
+        assert prepared.nebius.storage_project_id == "storage-project-created"
+        runner.initialize.assert_called_once()
+        runner.initialize_without_backend.assert_not_called()
+        runner.apply_targets.assert_not_called()
+        ensure_bucket.assert_not_called()
 
     def test_prepare_bootstraps_only_projects_missing_from_remote_state(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -1926,9 +2001,9 @@ class TestWorkers:
         }
         assert classes[1].metadata["computeResource"]["numGpus"] == 2
         assert classes[1].metadata["computeResource"]["gramPerGpu"] == 48
-        assert classes[0].metadata["computeResource"]["memoryBytes"] == "200 GB"
+        assert classes[0].metadata["computeResource"]["memoryBytes"] == "200 GiB"
         assert classes[0].description == ("NVIDIA® H100 1 GPU - 16 CPUs - 200 GB RAM.")
-        assert classes[1].metadata["computeResource"]["memoryBytes"] == "200 GB"
+        assert classes[1].metadata["computeResource"]["memoryBytes"] == "200 GiB"
         assert classes[1].description == (
             "NVIDIA® L40S AMD 2 GPUs - 32 CPUs - 200 GB RAM."
         )
@@ -2003,6 +2078,70 @@ def test_cluster_spec_defaults_placement_to_in_cluster(tmp_path: Path) -> None:
     write_spec(spec_path)
 
     assert load_cluster_spec(spec_path).values.placement == "in-cluster"
+
+
+def test_cluster_spec_platform_scope_defaults_placement_to_ephemeral(
+    tmp_path: Path,
+) -> None:
+    """Omitted placement on a platform cluster is ephemeral."""
+    spec_path = tmp_path / "cluster.yaml"
+    write_spec(spec_path)
+    spec_path.write_text(
+        spec_path.read_text(encoding="utf-8") + "values:\n  byoc_scope: platform\n",
+        encoding="utf-8",
+    )
+
+    spec = load_cluster_spec(spec_path)
+
+    assert spec.values.byoc_scope == "platform"
+    assert spec.values.placement == "ephemeral"
+
+
+def test_cluster_spec_platform_scope_keeps_explicit_placement(tmp_path: Path) -> None:
+    """An explicit placement stays when the spec sets platform scope."""
+    spec_path = tmp_path / "cluster.yaml"
+    write_spec(spec_path)
+    spec_path.write_text(
+        spec_path.read_text(encoding="utf-8")
+        + "values:\n  byoc_scope: platform\n  placement: in-cluster\n",
+        encoding="utf-8",
+    )
+
+    spec = load_cluster_spec(spec_path)
+
+    assert spec.values.byoc_scope == "platform"
+    assert spec.values.placement == "in-cluster"
+
+
+def test_cluster_spec_cli_scope_uses_ephemeral_when_placement_omitted(
+    tmp_path: Path,
+) -> None:
+    """--byoc-scope platform uses ephemeral placement when none was set."""
+    spec_path = tmp_path / "cluster.yaml"
+    write_spec(spec_path)
+
+    spec = apply_cluster_spec_overrides(
+        load_cluster_spec(spec_path),
+        byoc_scope="platform",
+    )
+
+    assert spec.values.byoc_scope == "platform"
+    assert spec.values.placement == "ephemeral"
+
+
+def test_cluster_spec_cli_scope_keeps_explicit_placement(tmp_path: Path) -> None:
+    """--placement wins over the platform default."""
+    spec_path = tmp_path / "cluster.yaml"
+    write_spec(spec_path)
+
+    spec = apply_cluster_spec_overrides(
+        load_cluster_spec(spec_path),
+        byoc_scope="platform",
+        placement="in-cluster",
+    )
+
+    assert spec.values.byoc_scope == "platform"
+    assert spec.values.placement == "in-cluster"
 
 
 def test_cluster_spec_accepts_ephemeral_placement(tmp_path: Path) -> None:
@@ -2607,7 +2746,7 @@ def test_provision_register_and_install_uses_spec_install_storage(
                 "computeResource": {
                     "numCpus": 16,
                     "numGpus": 1,
-                    "memoryBytes": "64 GB",
+                    "memoryBytes": "64 GiB",
                     "gramPerGpu": 48,
                     "machineType": "1gpu-16vcpu-64gb",
                     "spot": False,
@@ -2856,6 +2995,9 @@ class TestClusterProvisionerDestroy:
                 "agilerl.arena.byoc.provisioning.providers.nebius.provider.delete_terraform_state_bucket"
             ) as delete_bucket,
             patch(
+                "agilerl.arena.byoc.provisioning.providers.nebius.provider.delete_project_compute_disks"
+            ) as delete_disks,
+            patch(
                 "agilerl.arena.byoc.provisioning.providers.nebius.provider.delete_nebius_project"
             ) as delete_project,
         ):
@@ -2869,6 +3011,7 @@ class TestClusterProvisionerDestroy:
             NEBIUS_COMPUTE_PROJECT_RESOURCE,
             NEBIUS_STORAGE_PROJECT_RESOURCE,
         )
+        delete_disks.assert_called_once_with("project-created")
         delete_project.assert_called_once_with("project-created")
         delete_bucket.assert_not_called()
 
@@ -2901,6 +3044,12 @@ class TestClusterProvisionerDestroy:
                 "agilerl.arena.byoc.provisioning.providers.nebius.provider.delete_terraform_state_bucket"
             ) as delete_bucket,
             patch(
+                "agilerl.arena.byoc.provisioning.providers.nebius.provider.delete_project_compute_disks"
+            ) as delete_disks,
+            patch(
+                "agilerl.arena.byoc.provisioning.providers.nebius.provider.delete_project_storage_buckets"
+            ) as delete_buckets,
+            patch(
                 "agilerl.arena.byoc.provisioning.providers.nebius.provider.delete_nebius_project"
             ) as delete_project,
         ):
@@ -2917,6 +3066,8 @@ class TestClusterProvisionerDestroy:
             delete_bucket.call_args.args[0].nebius.storage_project_id
             == "storage-project-created"
         )
+        delete_disks.assert_called_once_with("project-created")
+        delete_buckets.assert_called_once_with("storage-project-created")
         assert [call.args[0] for call in delete_project.call_args_list] == [
             "project-created",
             "storage-project-created",
@@ -2963,6 +3114,14 @@ class TestClusterProvisionerDestroy:
                 side_effect=lambda _spec: order.append("bucket"),
             ),
             patch(
+                "agilerl.arena.byoc.provisioning.providers.nebius.provider.delete_project_compute_disks",
+                side_effect=lambda project_id: order.append(f"disks:{project_id}"),
+            ),
+            patch(
+                "agilerl.arena.byoc.provisioning.providers.nebius.provider.delete_project_storage_buckets",
+                side_effect=lambda project_id: order.append(f"buckets:{project_id}"),
+            ),
+            patch(
                 "agilerl.arena.byoc.provisioning.providers.nebius.provider.delete_nebius_project",
                 side_effect=lambda project_id: order.append(project_id),
             ),
@@ -2973,10 +3132,12 @@ class TestClusterProvisionerDestroy:
 
         # Assert
         assert order == [
+            "disks:project-created",
             "project-created",
             "iam",
             "regions",
             "bucket",
+            "buckets:storage-project-created",
             "storage-project-created",
         ]
         assert runner.destroy.call_args.kwargs["exclude"] == (
@@ -3033,6 +3194,14 @@ class TestClusterProvisionerDestroy:
                 side_effect=lambda _spec: order.append("bucket"),
             ),
             patch(
+                "agilerl.arena.byoc.provisioning.providers.nebius.provider.delete_project_compute_disks",
+                side_effect=lambda project_id: order.append(f"disks:{project_id}"),
+            ),
+            patch(
+                "agilerl.arena.byoc.provisioning.providers.nebius.provider.delete_project_storage_buckets",
+                side_effect=lambda project_id: order.append(f"buckets:{project_id}"),
+            ),
+            patch(
                 "agilerl.arena.byoc.provisioning.providers.nebius.provider.delete_nebius_project",
                 side_effect=lambda project_id: order.append(project_id),
             ),
@@ -3044,10 +3213,12 @@ class TestClusterProvisionerDestroy:
             )
 
         assert order == [
+            "disks:project",
             "project",
             "iam",
             "regions",
             "bucket",
+            "buckets:storage-project",
             "storage-project",
         ]
 
@@ -3086,6 +3257,213 @@ class TestClusterProvisionerDestroy:
             )
 
         assert seen == [True]
+
+    def test_delete_all_finishes_when_the_state_bucket_is_gone(
+        self, tmp_path: Path
+    ) -> None:
+        # Arrange
+        runner = MagicMock()
+        spec = _nebius_spec(
+            project_id=None,
+            storage_project_id="storage-project-created",
+            subnet_id=None,
+            region="eu-north1",
+        )
+
+        # Act
+        with (
+            patch.object(NEBIUS, "remote_state_available", return_value=False),
+            patch.object(NEBIUS, "finish_destroy") as finish,
+        ):
+            ClusterProvisioner(runner=runner).destroy(
+                spec,
+                state_dir=tmp_path / "state",
+                delete_all=True,
+                created_projects=(True, True),
+            )
+
+        # Assert
+        runner.destroy.assert_not_called()
+        finish.assert_called_once_with(
+            spec,
+            delete_compute_project=True,
+            delete_storage_project=True,
+            delete_all=True,
+            state_dir=tmp_path / "state",
+        )
+
+    def test_delete_all_by_name_finishes_when_the_state_bucket_is_gone(
+        self, tmp_path: Path
+    ) -> None:
+        # Arrange
+        runner = MagicMock()
+        spec = _nebius_spec()
+
+        def project_name(project_id: str) -> str:
+            return {"project": "test", "storage-project": "test-storage"}[project_id]
+
+        # Act
+        with (
+            patch.object(NEBIUS, "remote_state_available", return_value=False),
+            patch(
+                "agilerl.arena.byoc.provisioning.providers.nebius.provider.nebius_project_name",
+                side_effect=project_name,
+            ),
+            patch.object(NEBIUS, "finish_destroy") as finish,
+        ):
+            ClusterProvisioner(runner=runner).destroy(
+                spec,
+                state_dir=tmp_path / "state",
+                delete_all=True,
+            )
+
+        # Assert
+        runner.initialize.assert_not_called()
+        runner.destroy.assert_not_called()
+        finish.assert_called_once_with(
+            spec,
+            delete_compute_project=True,
+            delete_storage_project=True,
+            delete_all=True,
+            state_dir=tmp_path / "state",
+        )
+
+    def test_delete_all_by_name_keeps_a_customer_project_when_state_is_gone(
+        self, tmp_path: Path
+    ) -> None:
+        runner = MagicMock()
+        spec = _nebius_spec()
+
+        with (
+            patch.object(NEBIUS, "remote_state_available", return_value=False),
+            patch(
+                "agilerl.arena.byoc.provisioning.providers.nebius.provider.nebius_project_name",
+                return_value="customer-project",
+            ),
+            patch.object(NEBIUS, "finish_destroy") as finish,
+        ):
+            ClusterProvisioner(runner=runner).destroy(
+                spec,
+                state_dir=tmp_path / "state",
+                delete_all=True,
+            )
+
+        runner.initialize.assert_not_called()
+        finish.assert_called_once_with(
+            spec,
+            delete_compute_project=False,
+            delete_storage_project=False,
+            delete_all=True,
+            state_dir=tmp_path / "state",
+        )
+
+    def test_delete_all_by_name_uses_local_state_when_the_bucket_is_gone(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # Arrange
+        nebius_cli = tmp_path / "nebius"
+        nebius_cli.write_text("#!/bin/sh\n", encoding="utf-8")
+        nebius_cli.chmod(0o755)
+        monkeypatch.setenv("NEBIUS_CLI", str(nebius_cli))
+        monkeypatch.delenv("SA_ID", raising=False)
+        monkeypatch.setattr(
+            "agilerl.arena.byoc.provisioning.providers.nebius.provider.terraform_state_bucket_exists",
+            lambda _spec: False,
+        )
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        (state_dir / "terraform.tfstate").write_text(
+            json.dumps(
+                {
+                    "resources": [
+                        {
+                            "mode": "managed",
+                            "type": "nebius_iam_v2_project",
+                            "name": "arena",
+                        },
+                        {
+                            "mode": "managed",
+                            "type": "nebius_iam_v2_project",
+                            "name": "storage",
+                        },
+                        {
+                            "mode": "managed",
+                            "type": "nebius_mk8s_v1_cluster",
+                            "name": "arena",
+                        },
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        work_dir = tmp_path / "work"
+        runner = MagicMock()
+        runner.prepare.return_value = work_dir
+        runner.state_list.return_value = (
+            NEBIUS_COMPUTE_PROJECT_RESOURCE,
+            NEBIUS_STORAGE_PROJECT_RESOURCE,
+            "nebius_mk8s_v1_cluster.arena",
+        )
+        spec = _nebius_spec()
+
+        # Act
+        with patch.object(NEBIUS, "finish_destroy") as finish:
+            ClusterProvisioner(runner=runner).destroy(
+                spec,
+                state_dir=state_dir,
+                delete_all=True,
+            )
+
+        # Assert
+        runner.initialize.assert_not_called()
+        runner.initialize_without_backend.assert_called_once_with(work_dir)
+        runner.destroy.assert_called_once()
+        assert (work_dir / "provider.tf").is_file()
+        finish.assert_called_once_with(
+            spec,
+            delete_compute_project=True,
+            delete_storage_project=True,
+            delete_all=True,
+            state_dir=state_dir,
+        )
+
+    def test_created_projects_skips_name_lookup_when_state_lists_them(self) -> None:
+        spec = _nebius_spec()
+
+        with patch(
+            "agilerl.arena.byoc.provisioning.providers.nebius.provider.nebius_project_name"
+        ) as project_name:
+            created = NEBIUS.created_projects(
+                CreatedProjectsQuery(
+                    spec,
+                    (
+                        NEBIUS_COMPUTE_PROJECT_RESOURCE,
+                        NEBIUS_STORAGE_PROJECT_RESOURCE,
+                    ),
+                    state_missing=True,
+                )
+            )
+
+        assert created == (True, True)
+        project_name.assert_not_called()
+
+    def test_created_projects_skips_name_lookup_when_ids_were_omitted(self) -> None:
+        spec = _nebius_spec(
+            project_id=None,
+            storage_project_id=None,
+            subnet_id=None,
+            region="eu-north1",
+        )
+
+        with patch(
+            "agilerl.arena.byoc.provisioning.providers.nebius.provider.nebius_project_name"
+        ) as project_name:
+            created = NEBIUS.created_projects(
+                CreatedProjectsQuery(spec, state_missing=True)
+            )
+
+        assert created == (True, True)
+        project_name.assert_not_called()
 
 
 class TestDeleteTerraformStateBucket:
@@ -3198,6 +3576,306 @@ class TestDeleteTfstateIam:
         assert not any("delete" in call.args[0] for call in run.call_args_list)
 
 
+class TestNebiusProjectExists:
+    def test_returns_true_for_an_active_project(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _, nebius_cli = _set_nebius_auth_env(monkeypatch, tmp_path)
+        monkeypatch.setenv("NEBIUS_CLI", str(nebius_cli))
+        run = MagicMock(return_value=MagicMock(returncode=0, stdout="{}", stderr=""))
+
+        assert nebius_project_exists("project-1", run=run) is True
+        assert run.call_args.args[0][1:7] == [
+            "iam",
+            "v2",
+            "project",
+            "get",
+            "--id",
+            "project-1",
+        ]
+
+    def test_returns_false_when_the_project_is_gone(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _, nebius_cli = _set_nebius_auth_env(monkeypatch, tmp_path)
+        monkeypatch.setenv("NEBIUS_CLI", str(nebius_cli))
+        run = MagicMock(
+            return_value=MagicMock(
+                returncode=13,
+                stdout="",
+                stderr="rpc error: code = NotFound desc = entity not found",
+            )
+        )
+
+        assert nebius_project_exists("project-1", run=run) is False
+
+    def test_raises_on_other_errors(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _, nebius_cli = _set_nebius_auth_env(monkeypatch, tmp_path)
+        monkeypatch.setenv("NEBIUS_CLI", str(nebius_cli))
+        run = MagicMock(
+            return_value=MagicMock(
+                returncode=1, stdout="", stderr="code = PermissionDenied"
+            )
+        )
+
+        with pytest.raises(click.ClickException, match="PermissionDenied"):
+            nebius_project_exists("project-1", run=run)
+
+
+class TestNebiusProjectName:
+    def test_returns_the_project_name(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _, nebius_cli = _set_nebius_auth_env(monkeypatch, tmp_path)
+        monkeypatch.setenv("NEBIUS_CLI", str(nebius_cli))
+        run = MagicMock(
+            return_value=MagicMock(
+                returncode=0,
+                stdout=json.dumps({"metadata": {"name": "test"}}),
+                stderr="",
+            )
+        )
+
+        assert nebius_project_name("project-1", run=run) == "test"
+        assert run.call_args.args[0][1:7] == [
+            "iam",
+            "v2",
+            "project",
+            "get",
+            "--id",
+            "project-1",
+        ]
+
+    def test_returns_none_when_the_project_is_gone(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _, nebius_cli = _set_nebius_auth_env(monkeypatch, tmp_path)
+        monkeypatch.setenv("NEBIUS_CLI", str(nebius_cli))
+        run = MagicMock(
+            return_value=MagicMock(
+                returncode=13,
+                stdout="",
+                stderr="rpc error: code = NotFound desc = entity not found",
+            )
+        )
+
+        assert nebius_project_name("project-1", run=run) is None
+
+    def test_raises_on_other_errors(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _, nebius_cli = _set_nebius_auth_env(monkeypatch, tmp_path)
+        monkeypatch.setenv("NEBIUS_CLI", str(nebius_cli))
+        run = MagicMock(
+            return_value=MagicMock(
+                returncode=1, stdout="", stderr="code = PermissionDenied"
+            )
+        )
+
+        with pytest.raises(click.ClickException, match="PermissionDenied"):
+            nebius_project_name("project-1", run=run)
+
+    def test_raises_when_the_payload_is_not_an_object(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _, nebius_cli = _set_nebius_auth_env(monkeypatch, tmp_path)
+        monkeypatch.setenv("NEBIUS_CLI", str(nebius_cli))
+        run = MagicMock(return_value=MagicMock(returncode=0, stdout="[]", stderr=""))
+
+        with pytest.raises(click.ClickException, match="invalid JSON"):
+            nebius_project_name("project-1", run=run)
+
+    def test_raises_when_the_payload_is_not_json(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _, nebius_cli = _set_nebius_auth_env(monkeypatch, tmp_path)
+        monkeypatch.setenv("NEBIUS_CLI", str(nebius_cli))
+        run = MagicMock(
+            return_value=MagicMock(returncode=0, stdout="not-json", stderr="")
+        )
+
+        with pytest.raises(click.ClickException, match="invalid JSON"):
+            nebius_project_name("project-1", run=run)
+
+
+class TestDeleteProjectStorageBuckets:
+    def test_schedules_an_active_bucket_then_purges_it(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # Arrange
+        _, nebius_cli = _set_nebius_auth_env(monkeypatch, tmp_path)
+        monkeypatch.setenv("NEBIUS_CLI", str(nebius_cli))
+        calls: list[list[str]] = []
+
+        def run(argv: list[str], **_kwargs: object) -> MagicMock:
+            calls.append(argv)
+            args = argv[1:]
+            if args[:3] == ["storage", "bucket", "list"]:
+                body = {
+                    "items": [
+                        {
+                            "metadata": {"id": "storagebucket-1"},
+                            "status": {"state": "ACTIVE"},
+                        }
+                    ]
+                }
+                return MagicMock(returncode=0, stdout=json.dumps(body), stderr="")
+            if args[:3] == ["storage", "bucket", "delete"]:
+                return MagicMock(returncode=0, stdout="{}", stderr="")
+            if args[:3] == ["storage", "bucket", "purge"]:
+                return MagicMock(returncode=0, stdout="{}", stderr="")
+            return MagicMock(returncode=1, stdout="", stderr="unexpected")
+
+        # Act
+        delete_project_storage_buckets("storage-project", run=run)
+
+        # Assert
+        assert [argv[1:6] for argv in calls] == [
+            ["storage", "bucket", "list", "--parent-id", "storage-project"],
+            ["storage", "bucket", "delete", "--id", "storagebucket-1"],
+            ["storage", "bucket", "purge", "--id", "storagebucket-1"],
+        ]
+        assert calls[1][calls[1].index("--ttl") + 1] == "0s"
+
+    def test_purges_a_bucket_already_scheduled_for_deletion(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _, nebius_cli = _set_nebius_auth_env(monkeypatch, tmp_path)
+        monkeypatch.setenv("NEBIUS_CLI", str(nebius_cli))
+        calls: list[list[str]] = []
+
+        def run(argv: list[str], **_kwargs: object) -> MagicMock:
+            calls.append(argv)
+            if argv[1:4] == ["storage", "bucket", "list"]:
+                body = {
+                    "items": [
+                        {
+                            "metadata": {"id": "storagebucket-1"},
+                            "status": {"state": "SCHEDULED_FOR_DELETION"},
+                        }
+                    ]
+                }
+                return MagicMock(returncode=0, stdout=json.dumps(body), stderr="")
+            return MagicMock(returncode=0, stdout="{}", stderr="")
+
+        delete_project_storage_buckets("storage-project", run=run)
+
+        assert [argv[1:4] for argv in calls] == [
+            ["storage", "bucket", "list"],
+            ["storage", "bucket", "purge"],
+        ]
+
+    def test_skips_delete_when_the_project_has_no_buckets(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _, nebius_cli = _set_nebius_auth_env(monkeypatch, tmp_path)
+        monkeypatch.setenv("NEBIUS_CLI", str(nebius_cli))
+        run = MagicMock(return_value=MagicMock(returncode=0, stdout="{}", stderr=""))
+
+        delete_project_storage_buckets("storage-project", run=run)
+
+        assert run.call_count == 1
+        assert run.call_args.args[0][1:4] == ["storage", "bucket", "list"]
+
+
+class TestDeleteProjectComputeDisks:
+    def test_deletes_each_disk_in_the_project(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # Arrange
+        _, nebius_cli = _set_nebius_auth_env(monkeypatch, tmp_path)
+        monkeypatch.setenv("NEBIUS_CLI", str(nebius_cli))
+        calls: list[list[str]] = []
+
+        def run(argv: list[str], **_kwargs: object) -> MagicMock:
+            calls.append(argv)
+            args = argv[1:]
+            if args[:3] == ["compute", "disk", "list"]:
+                body = {
+                    "items": [
+                        {"metadata": {"id": "computedisk-1", "name": "pvc-a"}},
+                        {"metadata": {"id": "computedisk-2", "name": "pvc-b"}},
+                    ]
+                }
+                return MagicMock(returncode=0, stdout=json.dumps(body), stderr="")
+            if args[:3] == ["compute", "disk", "delete"]:
+                return MagicMock(returncode=0, stdout="{}", stderr="")
+            return MagicMock(returncode=1, stdout="", stderr="unexpected")
+
+        # Act
+        delete_project_compute_disks("project-created", run=run)
+
+        # Assert
+        assert [argv[1:] for argv in calls] == [
+            [
+                "compute",
+                "disk",
+                "list",
+                "--parent-id",
+                "project-created",
+                "--page-size",
+                "100",
+                "--format",
+                "json",
+            ],
+            [
+                "compute",
+                "disk",
+                "delete",
+                "--id",
+                "computedisk-1",
+                "--format",
+                "json",
+            ],
+            [
+                "compute",
+                "disk",
+                "delete",
+                "--id",
+                "computedisk-2",
+                "--format",
+                "json",
+            ],
+        ]
+
+    def test_skips_delete_when_the_project_has_no_disks(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _, nebius_cli = _set_nebius_auth_env(monkeypatch, tmp_path)
+        monkeypatch.setenv("NEBIUS_CLI", str(nebius_cli))
+        run = MagicMock(return_value=MagicMock(returncode=0, stdout="{}", stderr=""))
+
+        delete_project_compute_disks("project-created", run=run)
+
+        assert run.call_args.args[0][1:4] == ["compute", "disk", "list"]
+        assert not any(
+            call.args[0][1:4] == ["compute", "disk", "delete"]
+            for call in run.call_args_list
+        )
+
+    def test_raises_when_disk_delete_fails(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _, nebius_cli = _set_nebius_auth_env(monkeypatch, tmp_path)
+        monkeypatch.setenv("NEBIUS_CLI", str(nebius_cli))
+
+        def run(argv: list[str], **_kwargs: object) -> MagicMock:
+            args = argv[1:]
+            if args[:3] == ["compute", "disk", "list"]:
+                body = {"items": [{"metadata": {"id": "computedisk-1"}}]}
+                return MagicMock(returncode=0, stdout=json.dumps(body), stderr="")
+            return MagicMock(
+                returncode=1,
+                stdout="",
+                stderr="disk cannot be deleted because it is attached",
+            )
+
+        with pytest.raises(click.ClickException, match="computedisk-1"):
+            delete_project_compute_disks("project-created", run=run)
+
+
 class TestDeleteNebiusProject:
     def test_deletes_the_project_by_id(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -3232,6 +3910,19 @@ class TestDeleteNebiusProject:
 
         with pytest.raises(click.ClickException, match="ProjectDeletionNotSafe"):
             delete_nebius_project("project-created", run=run)
+
+    def test_ignores_a_project_that_is_already_gone(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _, nebius_cli = _set_nebius_auth_env(monkeypatch, tmp_path)
+        monkeypatch.setenv("NEBIUS_CLI", str(nebius_cli))
+        run = MagicMock(
+            return_value=MagicMock(
+                returncode=1, stdout="", stderr="rpc error: code = NotFound"
+            )
+        )
+
+        delete_nebius_project("project-created", run=run)
 
 
 class TestNebiusObjectStorageResources:
@@ -3320,6 +4011,7 @@ class TestNebiusProjectSplit:
 
         assert 'count     = var.storage_project_id == "" ? 1 : 0' in block
         assert "parent_id = var.tenant_id" in block
+        assert "region    = local.storage_region" in block
 
     def test_module_outputs_both_project_ids(self) -> None:
         outputs = (_nebius_module_dir() / "outputs.tf").read_text(encoding="utf-8")
@@ -4033,11 +4725,13 @@ class TestTerraformStateBucket:
         _, nebius_cli = _set_nebius_auth_env(monkeypatch, tmp_path)
         monkeypatch.setenv("NEBIUS_CLI", str(nebius_cli))
 
+        run = MagicMock(side_effect=_state_bucket_run(existing={}))
+
         env = ensure_terraform_state_bucket(
             _nebius_spec(),
             state_dir=tmp_path / "terraform",
             create=True,
-            run=MagicMock(side_effect=_state_bucket_run(existing={})),
+            run=run,
         )
 
         assert env == {
@@ -4048,6 +4742,132 @@ class TestTerraformStateBucket:
             (tmp_path / "tfstate-credentials.json").read_text(encoding="utf-8")
         )
         assert creds["aws_access_key_id"] == "AKIA-created"
+        created = [
+            call.args[0] for call in run.call_args_list if "create" in call.args[0]
+        ]
+        bucket_create = next(
+            argv for argv in created if argv[1:4] == ["storage", "bucket", "create"]
+        )
+        assert bucket_create[bucket_create.index("--max-size-bytes") + 1] == str(
+            1024 * 1024 * 1024
+        )
+        quota_create = next(
+            argv
+            for argv in created
+            if argv[1:4] == ["quotas", "quota-allowance", "create"]
+        )
+        assert (
+            quota_create[quota_create.index("--name") + 1]
+            == "storage.bucket.size.standard"
+        )
+        assert quota_create[quota_create.index("--region") + 1] == "eu-north1"
+        assert quota_create[quota_create.index("--limit") + 1] == str(
+            1025 * 1024 * 1024 * 1024
+        )
+
+    def test_ensure_leaves_a_sufficient_storage_quota(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _, nebius_cli = _set_nebius_auth_env(monkeypatch, tmp_path)
+        monkeypatch.setenv("NEBIUS_CLI", str(nebius_cli))
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIA-existing")
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "existing-secret")
+        calls: list[list[str]] = []
+
+        def run(argv: list[str], **_kwargs: object) -> MagicMock:
+            calls.append(argv)
+            if argv[1:4] == ["quotas", "quota-allowance", "get-by-name"]:
+                return MagicMock(
+                    returncode=0,
+                    stdout=json.dumps({"spec": {"limit": "999999999999999"}}),
+                    stderr="",
+                )
+            return MagicMock(returncode=0, stdout="{}", stderr="")
+
+        ensure_terraform_state_bucket(
+            _nebius_spec(), state_dir=tmp_path / "state", run=run
+        )
+
+        assert not any(
+            argv[1:4] == ["quotas", "quota-allowance", "create"] for argv in calls
+        )
+
+    def test_ensure_updates_a_zero_state_bucket_limit(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _, nebius_cli = _set_nebius_auth_env(monkeypatch, tmp_path)
+        monkeypatch.setenv("NEBIUS_CLI", str(nebius_cli))
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIA-existing")
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "existing-secret")
+        calls: list[list[str]] = []
+
+        def run(argv: list[str], **_kwargs: object) -> MagicMock:
+            calls.append(argv)
+            if argv[1:4] == ["storage", "bucket", "get-by-name"]:
+                return MagicMock(
+                    returncode=0,
+                    stdout=json.dumps(
+                        {
+                            "metadata": {"id": "bucket-1"},
+                            "spec": {"max_size_bytes": 0},
+                        }
+                    ),
+                    stderr="",
+                )
+            if argv[1:4] == ["quotas", "quota-allowance", "get-by-name"]:
+                return MagicMock(returncode=1, stdout="", stderr="NOT_FOUND")
+            return MagicMock(returncode=0, stdout="{}", stderr="")
+
+        ensure_terraform_state_bucket(
+            _nebius_spec(), state_dir=tmp_path / "state", run=run
+        )
+
+        update = next(
+            argv for argv in calls if argv[1:4] == ["storage", "bucket", "update"]
+        )
+        assert update[update.index("--id") + 1] == "bucket-1"
+        assert update[update.index("--max-size-bytes") + 1] == str(1024 * 1024 * 1024)
+
+    def test_state_bucket_limit_skips_a_missing_bucket(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _, nebius_cli = _set_nebius_auth_env(monkeypatch, tmp_path)
+        monkeypatch.setenv("NEBIUS_CLI", str(nebius_cli))
+        run = MagicMock(
+            return_value=MagicMock(returncode=1, stdout="", stderr="NOT_FOUND")
+        )
+
+        _ensure_state_bucket_limit(_nebius_spec(), run)
+
+        assert not any("update" in call.args[0] for call in run.call_args_list)
+
+    def test_spec_int_rejects_a_non_numeric_value(self) -> None:
+        assert _spec_int({"spec": {"max_size_bytes": "nope"}}, "max_size_bytes") is None
+        assert _spec_int({"spec": {"max_size_bytes": True}}, "max_size_bytes") is None
+
+    def test_ensure_stops_when_the_tenant_storage_quota_is_zero(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _, nebius_cli = _set_nebius_auth_env(monkeypatch, tmp_path)
+        monkeypatch.setenv("NEBIUS_CLI", str(nebius_cli))
+
+        def run(argv: list[str], **_kwargs: object) -> MagicMock:
+            if argv[1:4] == ["quotas", "quota-allowance", "get-by-name"]:
+                parent_id = argv[argv.index("--parent-id") + 1]
+                limit = "0" if parent_id == "tenant" else "999999999999999"
+                return MagicMock(
+                    returncode=0,
+                    stdout=json.dumps({"spec": {"limit": limit}}),
+                    stderr="",
+                )
+            return MagicMock(returncode=0, stdout="{}", stderr="")
+
+        with pytest.raises(click.ClickException, match="tenant standard storage quota"):
+            ensure_terraform_state_bucket(
+                _nebius_spec(storage_endpoint="https://storage.uk-south1.nebius.cloud"),
+                state_dir=tmp_path / "state",
+                run=run,
+            )
 
     def test_ensure_reuses_iam_left_by_a_failed_attempt(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -4099,6 +4919,12 @@ class TestTerraformStateBucket:
         monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
 
         def run_side_effect(argv: list[str], **_kwargs: object) -> MagicMock:
+            if argv[1:4] == ["quotas", "quota-allowance", "get-by-name"]:
+                return MagicMock(
+                    returncode=0,
+                    stdout=json.dumps({"spec": {"limit": "999999999999999"}}),
+                    stderr="",
+                )
             if argv[1:4] == ["storage", "bucket", "get-by-name"]:
                 return MagicMock(returncode=0, stdout="{}", stderr="")
             if argv[1:4] == ["iam", "service-account", "get-by-name"]:
@@ -4159,6 +4985,12 @@ class TestTerraformStateBucket:
         monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
 
         def run_side_effect(argv: list[str], **_kwargs: object) -> MagicMock:
+            if argv[1:4] == ["quotas", "quota-allowance", "get-by-name"]:
+                return MagicMock(
+                    returncode=0,
+                    stdout=json.dumps({"spec": {"limit": "999999999999999"}}),
+                    stderr="",
+                )
             if argv[1:4] == ["storage", "bucket", "get-by-name"]:
                 return MagicMock(returncode=0, stdout="{}", stderr="")
             return MagicMock(returncode=1, stdout="", stderr="NOT_FOUND")
@@ -4830,6 +5662,41 @@ class TestAbsolutePath:
             resolved = absolute_path(Path("work"))
 
         assert resolved == (tmp_path / "work").resolve()
+
+    def test_reads_the_initialized_backend(self, tmp_path: Path) -> None:
+        state = tmp_path / ".terraform" / "terraform.tfstate"
+        state.parent.mkdir()
+        state.write_text(
+            json.dumps({"backend": {"type": "s3"}}),
+            encoding="utf-8",
+        )
+
+        assert configured_backend_type(tmp_path) == "s3"
+
+    def test_ignores_a_backend_that_is_not_an_object(self, tmp_path: Path) -> None:
+        state = tmp_path / ".terraform" / "terraform.tfstate"
+        state.parent.mkdir()
+        state.write_text("[]", encoding="utf-8")
+
+        assert configured_backend_type(tmp_path) is None
+
+        state.write_text(json.dumps({"backend": "local"}), encoding="utf-8")
+
+        assert configured_backend_type(tmp_path) is None
+
+    def test_ignores_an_empty_backend_type(self, tmp_path: Path) -> None:
+        state = tmp_path / ".terraform" / "terraform.tfstate"
+        state.parent.mkdir()
+        state.write_text(
+            json.dumps({"backend": {"type": ""}}),
+            encoding="utf-8",
+        )
+
+        assert configured_backend_type(tmp_path) is None
+
+        state.write_text(json.dumps({"backend": {}}), encoding="utf-8")
+
+        assert configured_backend_type(tmp_path) is None
 
     def test_reraises_when_cwd_and_pwd_are_gone(
         self, monkeypatch: pytest.MonkeyPatch
@@ -5520,6 +6387,18 @@ class TestTerraformStateHelpers:
         with pytest.raises(click.ClickException, match="invalid JSON"):
             _run_nebius_json(["storage", "bucket", "list"], run=run)
 
+    def test_run_nebius_reports_a_failed_command(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _, nebius_cli = _set_nebius_auth_env(monkeypatch, tmp_path)
+        monkeypatch.setenv("NEBIUS_CLI", str(nebius_cli))
+        run = MagicMock(
+            return_value=MagicMock(returncode=1, stdout="", stderr="denied")
+        )
+
+        with pytest.raises(click.ClickException, match="denied"):
+            _run_nebius(["storage", "bucket", "update"], run=run, check=True)
+
     def test_get_by_name_requires_an_object(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -5746,6 +6625,24 @@ class TestClusterSpecErrors:
     def test_rejects_unknown_placement(self) -> None:
         with pytest.raises(ValueError, match="placement"):
             ClusterSpec.model_validate(_spec_payload(values={"placement": "spot"}))
+
+    def test_rejects_unknown_byoc_scope(self) -> None:
+        with pytest.raises(ValueError, match="byoc_scope"):
+            ClusterSpec.model_validate(_spec_payload(values={"byoc_scope": "shared"}))
+
+    def test_blank_byoc_scope_is_unset(self) -> None:
+        spec = ClusterSpec.model_validate(_spec_payload(values={"byoc_scope": "  "}))
+
+        assert spec.values.byoc_scope is None
+        assert spec.values.placement == "in-cluster"
+
+    def test_values_validator_ignores_a_non_mapping(self) -> None:
+        with pytest.raises(ValueError, match="valid dictionary"):
+            ClusterValuesSpec.model_validate(None)
+
+    def test_rejects_invalid_byoc_scope_override(self) -> None:
+        with pytest.raises(ValueError, match="byoc_scope must be customer or platform"):
+            apply_cluster_spec_overrides(_nebius_spec(), byoc_scope="shared")
 
     def test_rejects_invalid_placement_override(self) -> None:
         with pytest.raises(
@@ -6043,6 +6940,31 @@ class TestClusterSpecErrors:
 
         assert spec.values.placement == expected
 
+    def test_on_prem_row_keeps_platform_scope(self) -> None:
+        spec = cluster_spec_from_on_prem_row(
+            {
+                "name": "arena-nebius",
+                "placement": "byoc_ephemeral",
+                "byoc_scope": "platform",
+                "storage_bucket": "arena-data",
+                "storage_endpoint": "https://storage.example.com",
+                "domain": "inference.example.com",
+                "byoc_provider": {
+                    "provider": "nebius",
+                    "config": {
+                        "tenant_id": "tenant-1",
+                        "project_id": "project-1",
+                        "storage_project_id": "storage-project-1",
+                        "terraform_state": {"bucket": "state"},
+                        "object_storage_size_gib": 1024,
+                    },
+                },
+            }
+        )
+
+        assert spec.values.byoc_scope == "platform"
+        assert spec.values.placement == "ephemeral"
+
 
 class TestClusterSpecValidators:
     def test_storage_rejects_a_blank_endpoint(self) -> None:
@@ -6123,6 +7045,11 @@ class TestClusterSpecValidators:
         assert placement_values({"placement": "byoc_ephemeral"}) == {
             "placement": "ephemeral"
         }
+        assert stored_cluster_values({"byocScope": "platform"}) == {
+            "byoc_scope": "platform"
+        }
+        with pytest.raises(ValueError, match="customer or platform"):
+            stored_cluster_values({"byoc_scope": "shared"})
 
 
 class TestNebiusProviderCoverage:
@@ -6168,6 +7095,45 @@ class TestNebiusProviderCoverage:
                 delete_all=False,
                 state_dir=tmp_path,
             )
+
+    def test_finish_destroy_skips_a_compute_project_that_is_gone(
+        self, tmp_path: Path
+    ) -> None:
+        # Arrange
+        spec = _nebius_spec(project_id="project-gone")
+        deleted: list[str] = []
+        prefix = "agilerl.arena.byoc.provisioning.providers.nebius.provider"
+
+        # Act
+        with (
+            patch(
+                f"{prefix}.nebius_project_exists",
+                side_effect=lambda project_id: project_id != "project-gone",
+            ),
+            patch(
+                f"{prefix}.delete_project_compute_disks",
+                side_effect=lambda project_id: deleted.append(f"disks:{project_id}"),
+            ),
+            patch(
+                f"{prefix}.delete_project_storage_buckets",
+                side_effect=lambda project_id: deleted.append(f"buckets:{project_id}"),
+            ),
+            patch(
+                f"{prefix}.delete_nebius_project",
+                side_effect=deleted.append,
+            ),
+            patch(f"{prefix}.delete_terraform_state_bucket"),
+        ):
+            NEBIUS.finish_destroy(
+                spec,
+                delete_compute_project=True,
+                delete_storage_project=True,
+                delete_all=False,
+                state_dir=tmp_path,
+            )
+
+        # Assert
+        assert deleted == ["buckets:storage-project", "storage-project"]
 
     def test_delete_terraform_state_delegates(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

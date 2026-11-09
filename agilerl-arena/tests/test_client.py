@@ -1246,6 +1246,12 @@ class TestCliV1EndpointPaths:
             timeout=api_key_client._upload_timeout,
         )
 
+    def test_profile_environment_sends_multi_agent(self, api_key_client):
+        mock_stream = _mock_ndjson_stream()
+        api_key_client._open_stream = MagicMock(return_value=mock_stream)
+        api_key_client.profile_environment(name="MyEnv", multi_agent=True)
+        assert api_key_client._open_stream.call_args[1]["json"]["multi_agent"] is True
+
     @patch("builtins.input", return_value="y")
     def test_delete_environment_uses_cli_v1_path(self, mock_input, api_key_client):
         api_key_client.list_environments = MagicMock(
@@ -1541,6 +1547,7 @@ class TestExperimentMethods:
         call_kwargs = api_key_client._open_stream.call_args[1]
         assert call_kwargs["json"]["manifest"] == {"algorithm": "PPO"}
         assert call_kwargs["json"]["project"] == "proj"
+        assert call_kwargs["json"]["resource_id"] == "2"
         assert "files" not in call_kwargs
 
     @patch("agilerl.arena.client.TrainingManifest.get_validated")
@@ -1557,6 +1564,7 @@ class TestExperimentMethods:
 
         payload = api_key_client._open_stream.call_args[1]["json"]
         assert payload == {"manifest": {"algorithm": "PPO"}, "project": "proj"}
+        assert api_key_client._open_stream.call_args[1]["headers"] == {}
 
     @patch("agilerl.arena.client.TrainingManifest.get_validated")
     def test_submit_experiment_sends_gpu_request(self, mock_validated, api_key_client):
@@ -1673,6 +1681,42 @@ class TestExperimentMethods:
         assert "resource_id" not in files
         assert "num_nodes" not in files
 
+    @patch("agilerl.arena.client.TrainingManifest.get_validated")
+    def test_submit_experiment_sends_idempotency_key(
+        self, mock_validated, api_key_client
+    ):
+        mock_validated.return_value.to_payload.return_value = {"algorithm": "PPO"}
+        api_key_client._open_stream = MagicMock(
+            return_value=_mock_ndjson_stream({"job_id": 4})
+        )
+
+        api_key_client.submit_experiment(
+            manifest={"algorithm": "PPO"},
+            project="proj",
+            idempotency_key=" user-1:run ",
+        )
+
+        assert api_key_client._open_stream.call_args[1]["headers"] == {
+            "Idempotency-Key": "user-1:run"
+        }
+
+    @patch("agilerl.arena.client.TrainingManifest.get_validated")
+    def test_submit_experiment_omits_a_blank_idempotency_key(
+        self, mock_validated, api_key_client
+    ):
+        mock_validated.return_value.to_payload.return_value = {"algorithm": "PPO"}
+        api_key_client._open_stream = MagicMock(
+            return_value=_mock_ndjson_stream({"job_id": 4})
+        )
+
+        api_key_client.submit_experiment(
+            manifest={"algorithm": "PPO"},
+            project="proj",
+            idempotency_key="  ",
+        )
+
+        assert api_key_client._open_stream.call_args[1]["headers"] == {}
+
     @pytest.mark.parametrize(
         ("hub_id", "warned"),
         [
@@ -1756,6 +1800,27 @@ class TestExperimentMethods:
             json={"experiment_name": "exp1", "max_steps": 1000},
         )
         assert result == {"resumed": True}
+
+    def test_resume_experiment_sends_optional_fields(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"resumed": True})
+        api_key_client.resume_experiment(
+            "exp1",
+            max_steps=1000,
+            checkpoint="500",
+            new_name="exp1-again",
+            project="proj",
+        )
+        api_key_client._request.assert_called_once_with(
+            "POST",
+            "/api/cli/v1/experiments/jobs/resume",
+            json={
+                "experiment_name": "exp1",
+                "max_steps": 1000,
+                "checkpoint": "500",
+                "new_name": "exp1-again",
+                "project": "proj",
+            },
+        )
 
     def test_list_checkpoints(self, api_key_client):
         api_key_client._request = MagicMock(return_value=[{"step": 100}])
@@ -2001,6 +2066,66 @@ class TestInferenceDeployments:
         api_key_client._request = MagicMock(return_value={"deployed": True})
         api_key_client.deploy_agent("exp1")
         assert "memoryScope" not in api_key_client._request.call_args[1]["json"]
+
+    def test_update_inference_deployment(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"name": "agent-2"})
+        result = api_key_client.update_inference_deployment(
+            "agent-1",
+            new_name="agent-2",
+            enabled=False,
+            experiment_name="exp1",
+        )
+        assert result == {"name": "agent-2"}
+        api_key_client._request.assert_called_once_with(
+            "PATCH",
+            "/api/cli/v1/inference/deployments",
+            json={
+                "name": "agent-1",
+                "experimentName": "exp1",
+                "new_name": "agent-2",
+                "enabled": False,
+            },
+        )
+
+    def test_update_inference_deployment_sends_description(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"name": "agent-1"})
+
+        result = api_key_client.update_inference_deployment(
+            "agent-1", description="serving"
+        )
+
+        assert result == {"name": "agent-1"}
+        assert api_key_client._request.call_args.kwargs["json"]["description"] == (
+            "serving"
+        )
+
+    def test_update_inference_deployment_requires_a_name(self, api_key_client):
+        api_key_client._request = MagicMock()
+
+        with pytest.raises(ArenaAPIError, match="deployment name is required"):
+            api_key_client.update_inference_deployment("  ", new_name="agent-2")
+
+        api_key_client._request.assert_not_called()
+
+    def test_delete_inference_deployment(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"success": True})
+        result = api_key_client.delete_inference_deployment(
+            "agent-1", project_name="proj"
+        )
+        assert result == {"success": True}
+        api_key_client._request.assert_called_once_with(
+            "DELETE",
+            "/api/cli/v1/inference/deployments",
+            params={"name": "agent-1", "projectName": "proj"},
+        )
+
+    def test_delete_inference_deployment_requires_a_name(self, api_key_client):
+        api_key_client._request = MagicMock()
+
+        with pytest.raises(ArenaAPIError, match="deployment name is required"):
+            api_key_client.delete_inference_deployment("  ")
+
+        api_key_client._request.assert_not_called()
 
     def test_deploy_agent_rejects_unknown_memory_scope(self, api_key_client):
         api_key_client._request = MagicMock(return_value={"deployed": True})
