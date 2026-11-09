@@ -24,14 +24,18 @@ KL_CLAMP = (
     "Tokens above the reference keep their KL pull. Unset removes the bound."
 )
 MINI_BATCH = (
-    "Trajectories one optimizer step covers, per rank. Must be a whole "
-    "number of micro-batches. This is a learning-cadence decision, not "
-    "a memory one: it sets how often the policy moves."
+    "Trajectories one optimizer step covers, per rank. Must divide the "
+    "rank's trajectories and hold a whole number of micro-batches. Unset "
+    "uses every trajectory that rank holds, then the micro-batch is "
+    "auto-resolved. Pin only for learning cadence, not memory: it sets "
+    "how often the policy moves."
 )
 MICRO_BATCH = (
-    "Trajectories per backward pass, per GPU. Affects only memory: it "
-    "changes what fits, not what the run learns. Picked from the memory "
-    "estimate as the largest that fits; manifests cannot set it."
+    "Trajectories per backward pass, per GPU. Affects only memory and "
+    "speed, not what the run learns. Picked with the parallelism and "
+    "checkpointing as the fastest plan that fits; the row micro-batch is "
+    "the largest divisor of the mini-batch that fits in that plan. "
+    "Manifests cannot set it."
 )
 MICRO_BATCH_TOKENS = (
     "Tokens per packed backward pass, per GPU, when the forward packs "
@@ -43,9 +47,10 @@ MICRO_BATCH_TOKENS = (
 GRADIENT_CHECKPOINTING = (
     "Recompute block activations during the backward pass instead of "
     "storing them. Affects only memory and speed, not what the run learns. "
-    "Picked from the memory estimate together with the micro-batch and "
-    "fsdp.checkpoint_every_n_blocks, least recompute that fits; on when the "
-    "run has no estimate. Manifests cannot set it."
+    "Picked from the memory estimate together with the micro-batch, the "
+    "parallelism and fsdp.checkpoint_every_n_blocks as the fastest plan "
+    "that fits; ties go to less recompute. On when the run has no "
+    "estimate. Manifests cannot set it."
 )
 
 TAU = (

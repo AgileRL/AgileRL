@@ -125,10 +125,7 @@ class AlgorithmSpec(BaseModel):
     batch_size: int = Field(
         default=64,
         ge=1,
-        description=(
-            "Transitions sampled per learn step. For the LLM algorithms this is "
-            "prompts per step, and the rollout batch is batch_size x group_size."
-        ),
+        description="Transitions sampled per learn step.",
     )
 
     off_policy: ClassVar[bool] = False
@@ -228,7 +225,10 @@ class LLMAlgorithmSpec(AlgorithmSpec):
         default=16,
         ge=1,
         description=(
-            "Prompts sampled per step; the rollout batch is batch_size x group_size."
+            "Prompts sampled per step; the rollout batch is batch_size x "
+            "group_size. Each trainer rank holds batch_size / dp x "
+            "group_size trajectories, with dp folding in tensor and context "
+            "parallel; batch_size must be divisible by dp."
         ),
     )
     beta: float = Field(default=0.001, ge=0.0, le=1.0, description=BETA)
