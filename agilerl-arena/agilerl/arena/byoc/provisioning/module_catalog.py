@@ -439,7 +439,10 @@ def check_module(module_dir: Path, manifest: ModuleManifest) -> None:
     digest = module_digest(module_dir, manifest.files)
     if digest != manifest.digest:
         _fail(
-            f"Module {manifest.name} {manifest.version} digest is {digest}, manifest says {manifest.digest}."
+            f"Module {manifest.name} {manifest.version} files hash to {digest}, "
+            f"but manifest.json says {manifest.digest}. "
+            f"If you edited the module, set manifest.json digest to {digest}. "
+            "Otherwise reinstall arena and do not apply this module."
         )
 
 

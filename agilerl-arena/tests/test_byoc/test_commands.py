@@ -723,7 +723,7 @@ class TestGpuResourceClasses:
 
         compute = classes[0].metadata["computeResource"]
         assert compute["numCpus"] == 4
-        assert compute["memoryBytes"] == "16 GB"
+        assert compute["memoryBytes"] == "16 GiB"
 
     def test_keeps_a_one_vcpu_preset(self) -> None:
         spec = _nebius_spec(workers=[{"name": "gpu", "preset": "1gpu-1vcpu-1gb"}])
@@ -732,7 +732,7 @@ class TestGpuResourceClasses:
 
         compute = classes[0].metadata["computeResource"]
         assert compute["numCpus"] == 1
-        assert compute["memoryBytes"] == "1 GB"
+        assert compute["memoryBytes"] == "1 GiB"
 
 
 class TestRegistrationValuesFromSpec:
@@ -937,6 +937,17 @@ class TestRegistrationValuesFromSpecJson:
         assert overridden.values.placement == "ephemeral"
         assert overridden_registration["placement"] == "ephemeral"
 
+    def test_platform_scope_defaults_placement_when_omitted(self) -> None:
+        spec, registration = _registration_values_from_spec(
+            _nebius_spec(),
+            byoc_scope="platform",
+        )
+
+        assert spec.values.byoc_scope == "platform"
+        assert spec.values.placement == "ephemeral"
+        assert registration["byoc_scope"] == "platform"
+        assert registration["placement"] == "ephemeral"
+
     def test_name_only_register_defaults_placement(self) -> None:
         fields = _register_runtime_fields(
             None,
@@ -948,6 +959,20 @@ class TestRegistrationValuesFromSpecJson:
         )
 
         assert fields["placement"] == "in-cluster"
+
+    def test_name_only_platform_register_defaults_placement(self) -> None:
+        fields = _register_runtime_fields(
+            None,
+            {
+                "placement": None,
+                "byoc_scope": "platform",
+                "domain": None,
+                "gateway_api_parent_refs": None,
+            },
+        )
+
+        assert fields["placement"] == "ephemeral"
+        assert fields["byoc_scope"] == "platform"
 
 
 class TestKubeconfigEnvironmentUnset:
@@ -1415,7 +1440,7 @@ class TestRegisterGpuResourceClasses:
                 return_value=runner,
             ),
             patch(
-                "agilerl.arena.byoc.commands.list_gpu_presets",
+                "agilerl.arena.byoc.commands.list_registerable_gpu_presets",
                 return_value=[],
             ),
         ):
@@ -1433,6 +1458,46 @@ class TestRegisterGpuResourceClasses:
                     module_version=None,
                     register_node_group=False,
                 )
+
+    def test_rejects_an_empty_preset_list_for_an_ephemeral_cluster(
+        self, command_config: CommandConfig, tmp_path: Path
+    ) -> None:
+        api = MagicMock()
+        api.find_cluster.return_value = {"name": "test"}
+        spec = _nebius_spec().model_copy(
+            update={
+                "values": _nebius_spec().values.model_copy(
+                    update={"placement": "ephemeral"}
+                )
+            }
+        )
+
+        with (
+            patch(
+                "agilerl.arena.byoc.commands._cluster_provisioner",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "agilerl.arena.byoc.commands.list_registerable_gpu_presets",
+                return_value=[],
+            ),
+            pytest.raises(
+                click.ClickException, match="No GPU presets in region projects"
+            ),
+        ):
+            _register_gpu_resource_classes(
+                command_config,
+                api,
+                spec,
+                tmp_path / "cluster.yaml",
+                tmp_path / "terraform",
+                tmp_path / "out",
+                register_all=True,
+                requested_presets=(),
+                yes=True,
+                module_version=None,
+                register_node_group=False,
+            )
 
 
 class TestSelectedWorkerNames:

@@ -29,6 +29,8 @@ locals {
     ? var.subnet_id
     : one(nebius_vpc_v1_subnet.arena[*].id)
   )
+  # Buckets are reachable only at storage.<region>.nebius.cloud.
+  storage_region = var.storage_region != "" ? var.storage_region : var.region
   cluster_service_account_id = (
     var.service_account_id != ""
     ? var.service_account_id
@@ -50,7 +52,7 @@ resource "nebius_iam_v2_project" "storage" {
   count     = var.storage_project_id == "" ? 1 : 0
   parent_id = var.tenant_id
   name      = "${var.cluster_name}-storage"
-  region    = var.region
+  region    = local.storage_region
 }
 
 resource "nebius_vpc_v1_network" "arena" {
