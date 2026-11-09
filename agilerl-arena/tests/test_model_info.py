@@ -20,7 +20,6 @@ from agilerl.arena.models.model_info import (
     REASONING_PARSERS,
     STATUS_DEPRECATED,
     STATUS_LIVE,
-    STATUS_PREVIEW,
     SUPPORTED_MODEL_INFO,
     ModelInfo,
     resolve_reasoning_parser,
@@ -445,17 +444,10 @@ class TestModelInfoStatus:
             "ibm-granite/granite-4.0-h-tiny",
             "ibm-granite/granite-3.1-3b-a800m-instruct",
         }
-        preview = {
-            "zai-org/GLM-5.3-Flash",
-            "deepseek-ai/DeepSeek-V4-Flash-0731",
-            "XiaomiMiMo/MiMo-V2.6-Flash-RL",
-        }
 
         for hub_id, status in statuses.items():
             if hub_id in deprecated:
                 assert status == STATUS_DEPRECATED, hub_id
-            elif hub_id in preview:
-                assert status == STATUS_PREVIEW, hub_id
             else:
                 assert status == STATUS_LIVE, hub_id
 
