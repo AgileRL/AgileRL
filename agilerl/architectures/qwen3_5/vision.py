@@ -192,15 +192,12 @@ def patch_qwen_vision_rows(model: str) -> None:
 def install_qwen3_5_vl_patches(
     patch: PatchRuntimeConfig,
     model: object | None = None,
-    use_sequence_packing: bool = False,
 ) -> None:
     """Install the Qwen3.5 / Qwen3.6 GDN and vision-row patches.
 
     :param patch: Catalog patch config.
     :param model: Already-built model the patches also apply to, or None.
-    :param use_sequence_packing: Install the packed-sequence GDN wrap.
-    :type use_sequence_packing: bool, optional
     """
-    install_qwen_gdn_patches(patch, model, use_sequence_packing)
+    install_qwen_gdn_patches(patch, model)
     for target in VISION_ROW_TARGETS:
         patch_qwen_vision_rows(target)

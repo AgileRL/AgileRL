@@ -7,14 +7,13 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import Protocol
 
 import torch
 import torch.nn as nn
-from torch.autograd.function import once_differentiable
+from peft.tuners.lora.layer import ParamWrapper
 from torch.distributed.tensor import DTensor
 
-from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.arena.memory.formulas import DEFAULT_ROUTED_CHUNK_BYTES
 from agilerl.lora.moe.adapters import (
     ExpertLora,
@@ -29,7 +28,6 @@ from agilerl.lora.moe.grouped_gemm import (
     ExpertKernels,
     expert_kernels,
     expert_row_counts,
-    grouped_lora_matmul,
     grouped_matmul,
     grouped_operand,
     row_chunk_offsets,
@@ -37,13 +35,9 @@ from agilerl.lora.moe.grouped_gemm import (
 from agilerl.lora.moe.layouts import (
     expert_activation,
     routed_experts_act_fn,
-    routed_experts_gate,
     routed_projection_names,
 )
 from agilerl.lora.moe.recompute import LoraExpertsConfig, LoraExpertsFunction
-
-if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
-    from peft.tuners.lora.layer import ParamWrapper
 
 
 @dataclass(frozen=True)
@@ -133,31 +127,9 @@ def _add_expert_loras(
         destination.add_(delta)
 
 
-def _project_expert_rows(
-    rows: torch.Tensor,
-    operand: torch.Tensor,
-    loras: Sequence[ChunkedLora],
-    chunk: int,
-    offs: torch.Tensor,
-    kernels: ExpertKernels | None,
-) -> torch.Tensor:
-    """Base projection plus every adapter's delta for one chunk of expert-sorted rows.
-
-    One unmasked stacked adapter on ``kernels`` adds its low-rank product in
-    the base GEMM's accumulator; anything else adds each delta afterwards.
-    """
-    if kernels is not None and len(loras) == 1:
-        (chunked,) = loras
-        if chunked.operands is not None and chunked.masks is None:
-            return grouped_lora_matmul(rows, operand, *chunked.operands, offs, kernels)
-    projected = grouped_matmul(rows, operand, offs)
-    _add_expert_loras(projected, rows, loras, chunk, offs)
-    return projected
-
-
 class ScatterRowsCtx(Protocol):
     saved_tensors: tuple[torch.Tensor, ...]
-    kernels: ExpertKernels
+    source_dtype: torch.dtype
 
     def save_for_backward(self, *tensors: torch.Tensor) -> None: ...
 
@@ -165,7 +137,7 @@ class ScatterRowsCtx(Protocol):
 
 
 class ScatterRows(torch.autograd.Function):
-    """Add source rows into a buffer of the same dtype with ``index_add_``."""
+    """Add source rows into an fp32 buffer, on ``kernels``' scatter when given."""
 
     @staticmethod
     def forward(
@@ -173,49 +145,25 @@ class ScatterRows(torch.autograd.Function):
         base: torch.Tensor,
         index: torch.Tensor,
         source: torch.Tensor,
+        kernels: ExpertKernels | None,
     ) -> torch.Tensor:
         ctx.save_for_backward(index)
+        ctx.source_dtype = source.dtype
         ctx.mark_dirty(base)
-        base.index_add_(0, index, source)
+        if kernels is None:
+            base.index_add_(0, index, source)
+        else:
+            kernels.scatter_add(base, index, source, None)
         return base
 
     @staticmethod
     def backward(
         ctx: ScatterRowsCtx, *grad_outputs: torch.Tensor
-    ) -> tuple[torch.Tensor, None, torch.Tensor]:
+    ) -> tuple[torch.Tensor, None, torch.Tensor, None]:
         (grad_out,) = grad_outputs
         (index,) = ctx.saved_tensors
-        return grad_out, None, grad_out.index_select(0, index)
-
-
-class ScatterScaledRows(torch.autograd.Function):
-    """Add ``weights * source`` rows into an fp32 buffer on ``kernels``' scatter."""
-
-    @staticmethod
-    def forward(
-        ctx: ScatterRowsCtx,
-        base: torch.Tensor,
-        index: torch.Tensor,
-        source: torch.Tensor,
-        weights: torch.Tensor,
-        kernels: ExpertKernels,
-    ) -> torch.Tensor:
-        ctx.save_for_backward(index, source, weights)
-        ctx.kernels = kernels
-        ctx.mark_dirty(base)
-        kernels.scatter_add(base, index, source, weights)
-        return base
-
-    @staticmethod
-    @once_differentiable
-    def backward(
-        ctx: ScatterRowsCtx, grad_out: torch.Tensor
-    ) -> tuple[torch.Tensor, None, torch.Tensor, torch.Tensor, None]:
-        index, source, weights = ctx.saved_tensors
-        grad_source, grad_weights = ctx.kernels.gather_scaled_rows(
-            grad_out, index, source, weights
-        )
-        return grad_out, None, grad_source, grad_weights.to(weights.dtype), None
+        grad_source = grad_out.index_select(0, index).to(ctx.source_dtype)
+        return grad_out, None, grad_source, None
 
 
 def _chunk_rows(
@@ -233,7 +181,6 @@ def _scatter_routed_expert_chunks(
     down_weight: torch.Tensor,
     act_fn: Callable[[torch.Tensor], torch.Tensor],
     gated: bool,
-    apply_gate: Callable[[torch.Tensor], torch.Tensor] | None,
     routing: RoutedRows,
     up_loras: Sequence[ExpertLora],
     down_loras: Sequence[ExpertLora],
@@ -262,20 +209,17 @@ def _scatter_routed_expert_chunks(
         strict=True,
     )
     for chunk, (rows, weights, index, offs) in enumerate(chunks):
-        projected = _project_expert_rows(
-            rows, up_operand, up_chunked, chunk, offs, kernels
-        )
-        intermediate = expert_activation(projected, act_fn, gated, kernels, apply_gate)
+        projected = grouped_matmul(rows, up_operand, offs)
+        _add_expert_loras(projected, rows, up_chunked, chunk, offs)
+        intermediate = expert_activation(projected, act_fn, gated)
         del projected
-        down = _project_expert_rows(
-            intermediate, down_operand, down_chunked, chunk, offs, kernels
-        )
+        down = grouped_matmul(intermediate, down_operand, offs)
+        _add_expert_loras(down, intermediate, down_chunked, chunk, offs)
         del intermediate
+        down.mul_(weights)
         if kernels is None:
-            down.mul_(weights)
-            result = ScatterRows.apply(result, index, down.to(dtype=result.dtype))
-        else:
-            result = ScatterScaledRows.apply(result, index, down, weights, kernels)
+            down = down.to(dtype=result.dtype)
+        result = ScatterRows.apply(result, index, down, kernels)
     return result.to(hidden_states.dtype)
 
 
@@ -285,7 +229,6 @@ def _recompute_routed_experts(
     down_weight: torch.Tensor,
     act_fn: Callable[[torch.Tensor], torch.Tensor],
     gated: bool,
-    apply_gate: Callable[[torch.Tensor], torch.Tensor] | None,
     routing: RoutedRows,
     up_loras: Sequence[ExpertLora],
     down_loras: Sequence[ExpertLora],
@@ -305,7 +248,6 @@ def _recompute_routed_experts(
     config = LoraExpertsConfig(
         act_fn,
         gated,
-        apply_gate,
         tuple(sizes),
         tuple(lora.row_id for lora in up_loras),
         tuple(lora.row_id for lora in down_loras),
@@ -360,7 +302,6 @@ def routed_experts_local_forward(
     up_weight = getattr(experts, up_name)
     down_weight = experts.down_proj
     act_fn = routed_experts_act_fn(experts)
-    apply_gate = routed_experts_gate(experts)
     assert isinstance(up_weight, torch.Tensor)
     assert isinstance(down_weight, torch.Tensor)
 
@@ -421,7 +362,6 @@ def routed_experts_local_forward(
             down_weight,
             act_fn,
             gated,
-            apply_gate,
             routed_rows,
             up_loras,
             down_loras,
@@ -435,7 +375,6 @@ def routed_experts_local_forward(
         down_weight,
         act_fn,
         gated,
-        apply_gate,
         routed_rows,
         up_loras,
         down_loras,

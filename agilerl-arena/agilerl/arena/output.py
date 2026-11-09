@@ -9,7 +9,6 @@ import json
 import logging
 import os
 import sys
-from collections.abc import Callable
 from dataclasses import dataclass
 from functools import singledispatch
 from typing import Any
@@ -41,86 +40,30 @@ else:
 
 logger = logging.getLogger(__name__)
 
-# ``ctx.meta`` key set by the root ``--json`` flag.
-JSON_OUTPUT_META_KEY = "agilerl.arena.json_output"
-# Rich's default of 80 columns would truncate table cells when piped.
-PIPED_TABLE_WIDTH = 100_000
-
-
-def json_output_enabled() -> bool:
-    """Whether the running command was asked for JSON with the root ``--json`` flag.
-
-    :returns: ``True`` inside a command run with ``--json`` or ``ARENA_JSON``.
-    :rtype: bool
-    """
-    ctx = click.get_current_context(silent=True)
-    return ctx is not None and bool(ctx.meta.get(JSON_OUTPUT_META_KEY))
-
-
-def emit_json_result(result: object) -> None:
-    """Print *result* as one JSON document on stdout when ``--json`` is on.
-
-    For commands whose human output is a progress stream rather than the result.
-
-    :param result: The result to emit.
-    :type result: object
-    """
-    if json_output_enabled():
-        click.echo(json.dumps(result, default=str))
-
 
 def _print_rich(renderable: object, *, is_error: bool = False) -> None:
-    target = error_console if is_error else console
-    if not target.is_terminal:
-        target.width = PIPED_TABLE_WIDTH
-    target.print(renderable)
-
-
-def emit_result(
-    result: object,
-    is_error: bool = False,
-    columns: list[str] | None = None,
-    display: Callable[[Any], Any] | None = None,
-    empty_message: str = "No results.",
-) -> None:
-    """Emit *result* as JSON under ``--json``, otherwise as a Rich table.
-
-    :param result: The result to emit.
-    :type result: Any
-    :param is_error: Whether to print the result as an error.
-    :type is_error: bool
-    :param columns: The columns to display in the table. If None, all columns will be displayed.
-    :type columns: list[str] | None
-    :param display: Reshapes *result* for the table only; JSON keeps every field.
-    :type display: Callable[[Any], Any] | None
-    :param empty_message: Printed instead of a table when *result* is empty.
-    :type empty_message: str
-    :returns: None
-    """
-    if json_output_enabled():
-        click.echo(json.dumps(result, default=str), err=is_error)
+    if is_error:
+        error_console.print(renderable)
         return
-    if isinstance(result, (dict, list)) and not result:
-        target = error_console if is_error else console
-        # The message can hold user-supplied names that are not Rich markup.
-        target.print(empty_message, markup=False, highlight=False, soft_wrap=True)
-        return
-    _emit_table(
-        display(result) if display else result, is_error=is_error, columns=columns
-    )
+    console.print(renderable)
 
 
 @singledispatch
-def _emit_table(
+def emit_result(
     result: object,
     *,
     is_error: bool = False,
     columns: list[str] | None = None,
 ) -> None:
-    """Print *result* as a Rich table, dispatching on its runtime type.
+    """Emit *result* to the terminal as a Rich table.
 
-    :param result: A dict (key/value table or environment catalog), a list
-        (table of dicts or simple value list), or anything else (``str()``).
+    Dispatches on the runtime type of *result*:
+
+    * ``dict`` — key/value table (or environment catalog if the shape matches).
+    * ``list`` — table of dicts or simple value list.
+    * anything else — ``str()`` fallback.
+
+    :param result: The result to emit.
     :type result: Any
     :param is_error: Whether to print the result as an error.
     :type is_error: bool
@@ -131,7 +74,7 @@ def _emit_table(
     _print_rich(str(result), is_error=is_error)
 
 
-@_emit_table.register(dict)
+@emit_result.register(dict)
 def _emit_result_dict(
     result: dict, *, is_error: bool = False, columns: list[str] | None = None
 ) -> None:
@@ -141,7 +84,7 @@ def _emit_result_dict(
     _emit_key_value_table(result, is_error=is_error, columns=columns)
 
 
-@_emit_table.register(list)
+@emit_result.register(list)
 def _emit_result_list(
     result: list, *, is_error: bool = False, columns: list[str] | None = None
 ) -> None:
@@ -441,11 +384,7 @@ def handle_error(exc: Exception) -> None:
     :raises click.exceptions.Exit: If the exception is an :class:`ArenaError`.
     """
     if isinstance(exc, ArenaError):
-        if json_output_enabled():
-            error = {"error": str(exc), "type": type(exc).__name__}
-            click.echo(json.dumps(error), err=True)
-        else:
-            error_console.print(f"[red bold]Error:[/red bold] {exc}")
+        error_console.print(f"[red bold]Error:[/red bold] {exc}")
         raise click.exceptions.Exit(1) from exc
     raise exc
 
@@ -467,8 +406,7 @@ class StreamRichRenderer:
         is_error: bool = False,
         error_cls: type[ArenaAPIError] = ArenaAPIError,
     ) -> None:
-        # stdout stays one JSON document under ``--json``.
-        self._console = error_console if is_error or json_output_enabled() else console
+        self._console = error_console if is_error else console
         self._rows: list[StreamRow] = []
         self._live: Live | None = None
         self._error_cls = error_cls

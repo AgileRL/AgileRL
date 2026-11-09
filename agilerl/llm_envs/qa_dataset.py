@@ -1,18 +1,21 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Dataset-backed single-turn text environment; the harness rubric scores it."""
+"""Dataset-backed single-turn text environment scored by an OpenEnv rubric."""
 
 from __future__ import annotations
 
+import inspect
 import warnings
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import numpy as np
 from openenv.core.env_server.interfaces import Environment
+from openenv.core.rubrics.base import Rubric
 
 from agilerl.llm_envs.openenv_server import TextObservation, TextState
+from agilerl.llm_envs.rubrics import _require_rubric, register_component_hooks
 
 
 def _json_safe(value: object) -> object:
@@ -41,13 +44,14 @@ def _json_safe(value: object) -> object:
 
 
 class QADatasetEnv(Environment):
-    """Serve (question, answer) rows as single-turn prompts.
+    """Serve (question, answer) rows as single-turn prompts, scored by a rubric.
 
     ``reset`` returns the prompt with labels unset. The terminal ``step``
     observation keeps that same ``prompt`` and adds ``question`` / ``answer``
-    so the harness rubric can score (including when ``prompt_builder`` differs
-    from the raw question); the policy never sees labels at reset. The env
-    itself gives no reward.
+    so rubrics can score (including when ``prompt_builder`` differs from the
+    raw question); the policy never sees labels at reset. ``metadata_columns``
+    copies those row values into the reset observation's metadata, which the
+    rollout reads as reset info and the policy never sees.
     """
 
     SUPPORTS_CONCURRENT_SESSIONS = True
@@ -56,17 +60,21 @@ class QADatasetEnv(Environment):
         self,
         dataset: Sequence[Mapping[str, Any]],
         *,
+        rubric: Rubric,
         test_dataset: Sequence[Mapping[str, Any]] | None = None,
         prompt_builder: Callable[[Mapping[str, Any]], str] | None = None,
         question_column: str = "question",
         answer_column: str = "answer",
+        metadata_columns: Sequence[str] = (),
     ) -> None:
-        super().__init__()
+        super().__init__(rubric=_require_rubric(rubric))
+        self._components = register_component_hooks(self.rubric)
         self._train = dataset
         self._test = test_dataset
         self._prompt_builder = prompt_builder
         self._question_column = question_column
         self._answer_column = answer_column
+        self._metadata_columns = tuple(metadata_columns)
         self._cursor = 0
         self._split = ""
         self._prompt: str = ""
@@ -76,11 +84,17 @@ class QADatasetEnv(Environment):
         self._step_count = 0
 
     @property
+    def rubric_components(self) -> tuple[str, ...]:
+        """Leaf rubric names reported in ``metadata["rubric_scores"]``."""
+        return self._components
+
+    @property
     def state(self) -> TextState:
         return TextState(
             episode_id=self._episode_id,
             step_count=self._step_count,
             dataset_size=len(self._train),
+            rubric_components=list(self._components),
         )
 
     def _next_index(
@@ -126,7 +140,13 @@ class QADatasetEnv(Environment):
             if self._prompt_builder is not None
             else str(self._question)
         )
-        return TextObservation(prompt=self._prompt, done=False)
+        return TextObservation(
+            prompt=self._prompt,
+            done=False,
+            metadata={
+                column: _json_safe(row[column]) for column in self._metadata_columns
+            },
+        )
 
     def step(
         self,
@@ -134,11 +154,17 @@ class QADatasetEnv(Environment):
         timeout_s: float | None = None,
         **kwargs: Any,
     ) -> TextObservation:
-        self._step_count += 1
-        return TextObservation(
+        obs = TextObservation(
             prompt=self._prompt,
             done=True,
-            reward=0.0,
             question=self._question,
             answer=self._answer,
         )
+        score = self._apply_rubric(action, obs)
+        if inspect.iscoroutine(score):
+            score.close()
+            msg = "async rubrics require step_async; see OpenEnv docs"
+            raise TypeError(msg)
+        obs.reward = float(score)
+        self._step_count += 1
+        return obs

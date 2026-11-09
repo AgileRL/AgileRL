@@ -10,19 +10,15 @@ from __future__ import annotations
 
 import re
 import warnings
-from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
+from agilerl.arena.memory.breakdown import PhaseBreakdown
 from agilerl.arena.memory.estimator import RunEstimate, estimate_run
-from agilerl.arena.memory.formulas import host_bytes_per_gpu
-from agilerl.arena.memory.generation import drop_engine_fast_paths
-from agilerl.arena.memory.resolve.attention import (
-    context_parallel_blocker,
-    resolve_attn_implementation,
-)
+from agilerl.arena.memory.generation import drop_engine_fast_paths, estimate_generation
+from agilerl.arena.memory.resolve.attention import resolve_attn_implementation
 from agilerl.arena.memory.resolve.batch import (
     catalog_model,
     engine_group_size,
@@ -46,21 +42,10 @@ from agilerl.arena.memory.resolve.packing import (
     leaks_recurrent_state,
     sequence_packing_blocker,
 )
-from agilerl.arena.memory.resolve.parallel import (
-    first_fitting_plan,
-    manifest_at_layout,
-    manifest_fsdp,
-    parallel_layouts,
-    trains_context_parallel,
-    trains_expert_parallel,
-)
 from agilerl.arena.memory.resolve.rollout import (
     apply_run_rollout_mode,
     async_rollout_algorithm,
-    checkpoint_quantized,
     default_rollout_batch_size,
-    drafts_with_mtp,
-    merged_lora_sync_eligible,
     run_rollout_engines,
 )
 from agilerl.arena.memory.resolve.sequences import (
@@ -87,13 +72,20 @@ from agilerl.arena.memory.specs import (
 )
 from agilerl.arena.models.algorithms.base import LLMAlgorithmSpec
 from agilerl.arena.models.algorithms.grpo import GRPOSpec
+from agilerl.arena.models.algorithms.opd import distillation_teacher
 from agilerl.arena.models.algorithms.rollout_llm import (
     RolloutLLMSpec,
     records_sampling_supports,
 )
+from agilerl.arena.models.distillation import (
+    DistillationTeacherConfig,
+    DistillationTeacherModel,
+    teacher_deployments,
+)
 from agilerl.arena.models.env import LLMEnvSpec
+from agilerl.arena.models.fsdp import FSDPConfig
 from agilerl.arena.models.manifest import TrainingManifest, strips_multimodal_towers
-from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO, ModelInfo
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.networks import LoraConfigDict, VLLMConfig
 
 # The engine variant drops the multimodal towers; a model without towers sizes it as base.
@@ -292,9 +284,8 @@ def device_spec_from_resource_class(
 ) -> DeviceSpec:
     """The device one GPU of a resource-class dict provides.
 
-    The estimate is per GPU; data-parallel sharding comes from
-    ``training_gpus_per_agent``. A tier's ``ram_gb`` (GiB per node) and
-    ``num_gpus`` set each GPU's host RAM share.
+    The estimate is per GPU, so ``num_gpus`` is ignored; data-parallel
+    sharding comes from ``training_gpus_per_agent``.
 
     :param resource_class: The tier dict, e.g.
         ``{"name": "a100-1x", "gpu_type": "NVIDIA A100", "num_gpus": 1, ...}``.
@@ -303,23 +294,6 @@ def device_spec_from_resource_class(
     :raises ValueError: A CPU-only tier, or an unknown ``gpu_type`` with no
         ``gpu_memory_gib`` override.
     """
-    spec = _gpu_device_spec(resource_class, gpu_memory_gib)
-    ram_gib = resource_class.get("ram_gb")
-    if ram_gib is None:
-        return spec
-    return spec.model_copy(
-        update={
-            "host_bytes_per_gpu": host_bytes_per_gpu(
-                int(ram_gib * GiB), int(resource_class["num_gpus"])
-            )
-        }
-    )
-
-
-def _gpu_device_spec(
-    resource_class: dict[str, Any], gpu_memory_gib: float | None
-) -> DeviceSpec:
-    """The GPU of a resource-class dict, before its host RAM share."""
     gpu_type = str(resource_class.get("gpu_type") or "")
     if not gpu_type and gpu_memory_gib is None:
         msg = (
@@ -420,27 +394,20 @@ def trainer_packs_sequences(spec: LLMAlgorithmSpec) -> bool:
     resolves with no family backend and no recurrent layers or vision tower.
 
     :param spec: Validated LLM algorithm spec.
-    :return: ``True`` when :func:`sequence_packing_blocker` passes and either
-        ``fsdp.cp`` is 1 or attention runs on FlashAttention-2.
+    :return: ``True`` when :func:`sequence_packing_blocker` passes.
     """
     entry = SUPPORTED_MODEL_INFO.get(spec.pretrained_model_name_or_path or "")
-    model_type = None if entry is None else entry.model_type
-    catalogued = catalog_model(spec)
-    arch = None if catalogued is None else catalogued.arch
-    hybrid = arch is not None and arch.is_hybrid_ssm
-    cp = 1 if spec.fsdp is None else spec.fsdp.cp
+    model_type = None if entry is None else entry.config["model_type"]
+    arch = None if entry is None else ModelArch.from_hf_config(entry.config)
     attn_implementation = resolve_attn_implementation(model_type, cuda=True)
     blocker = sequence_packing_blocker(
         spec.supports_sequence_packing,
         attn_implementation,
         spec.gradient_row_copies,
-        # CP mixers carry recurrent state across ranks, not documents.
-        leaks_recurrent_state(model_type, hybrid) or (cp > 1 and hybrid),
+        leaks_recurrent_state(model_type, arch is not None and arch.is_hybrid_ssm),
         arch is not None and arch.vision_n_layers > 0,
-        model_type,
     )
-    # Ulysses attends within published document offsets on FlashAttention-2 only.
-    return blocker is None and (cp == 1 or attn_implementation == "flash_attention_2")
+    return blocker is None
 
 
 def _weight_dtype(value: str | None) -> WeightDtype:
@@ -492,31 +459,6 @@ def speculative_drafting(spec: LLMAlgorithmSpec) -> bool | None:
     if "speculative_config" not in spec.vllm_engine_args:
         return None
     return spec.vllm_engine_args["speculative_config"] is not None
-
-
-@lru_cache(maxsize=len(SUPPORTED_MODEL_INFO))
-def _catalog_checkpoint_quantized(info: ModelInfo) -> bool:
-    """:func:`checkpoint_quantized` of a catalogue entry's ``config.json``."""
-    return checkpoint_quantized(info.config)
-
-
-def can_sync_merged_lora(spec: LLMAlgorithmSpec) -> bool:
-    """Whether the spec's rollout engines can serve merged LoRA weights (:func:`merged_lora_sync_eligible`).
-
-    The checkpoint's quantization comes from the catalogue's ``config.json``.
-
-    :param spec: LLM algorithm spec.
-    :return: ``False`` for a spec without rollout engines.
-    """
-    if not isinstance(spec, RolloutLLMSpec):
-        return False
-    info = SUPPORTED_MODEL_INFO.get(spec.pretrained_model_name_or_path or "")
-    return merged_lora_sync_eligible(
-        None if spec.vllm_config is None else spec.vllm_config.quantization,
-        info is not None and _catalog_checkpoint_quantized(info),
-        bool(_lora_config(spec).tower_target_modules),
-        drafts_with_mtp(spec.vllm_engine_args.get("speculative_config")),
-    )
 
 
 def rollout_logit_bias(spec: LLMAlgorithmSpec) -> bool:
@@ -711,7 +653,7 @@ def manifest_max_num_batched_tokens(
     info = SUPPORTED_MODEL_INFO.get(spec.pretrained_model_name_or_path)
     if info is None:
         return None
-    return FAMILY_MAX_NUM_BATCHED_TOKENS.get(info.model_type)
+    return FAMILY_MAX_NUM_BATCHED_TOKENS.get(info.config["model_type"])
 
 
 def _resolve_vllm(spec: LLMAlgorithmSpec) -> VLLMConfig:
@@ -782,7 +724,6 @@ def training_settings_from_spec(
     images: tuple[int, int, int] = (0, 0, 0),
     segmented_rows: bool = False,
     mutates_beta: bool = False,
-    adapter_sync: bool = False,
 ) -> TrainingSettings:
     """Trainer-side settings for one algorithm spec.
 
@@ -795,8 +736,6 @@ def training_settings_from_spec(
     :param images: ``(images_per_row, width, height)`` from :func:`image_inputs`.
     :param segmented_rows: Episodes train as segment rows.
     :param mutates_beta: HPO mutates ``beta``.
-    :param adapter_sync: Async weight sync pushes the adapter even where the
-        engines could serve merged weights.
     :return: Training settings.
     :raises ValueError: Quantization.
     """
@@ -857,32 +796,25 @@ def training_settings_from_spec(
         images_per_row=images_per_row,
         image_width=image_width,
         image_height=image_height,
-        tower_lora_targets=frozenset(lora.tower_target_modules or ()),
+        vision_tower_lora=bool(lora.tower_target_modules),
         segmented_rows=segmented_rows,
         checkpoint_optimizer=checkpoint_optimizer,
         async_rollout=async_rollout,
-        merged_lora_sync=async_rollout
-        and not adapter_sync
-        and can_sync_merged_lora(spec),
     )
 
 
 def training_settings_from_manifest(
     manifest: TrainingManifest | str | Path | dict[str, Any],
     micro_batch_size: int | None = None,
-    adapter_sync: bool = False,
 ) -> TrainingSettings:
     """Trainer-side settings, read as the trainer reads the manifest.
 
     Settings the estimator cannot size (quantization) and settings the run cannot start (full FSDP CPU offload beside async rollout
-    engines, context parallel on an attention backend without a
-    context-parallel path) raise ``ValueError``.
+    engines) raise ``ValueError``.
 
     :param manifest: Training manifest.
     :param micro_batch_size: Rows in one forward. ``None`` resolves an omitted
         field without a device.
-    :param adapter_sync: Async weight sync pushes the adapter even where the
-        engines could serve merged weights.
     :return: Training settings.
     """
     manifest = _validated(manifest)
@@ -890,15 +822,6 @@ def training_settings_from_manifest(
     n_training_gpus = manifest.training.training_gpus_per_agent
     _reject_trainer_quantization(spec.quantization)
     blocker = cpu_offload_blocker(spec.fsdp, async_rollout(manifest))
-    if blocker is not None:
-        raise ValueError(blocker)
-    entry = SUPPORTED_MODEL_INFO.get(spec.pretrained_model_name_or_path or "")
-    model_type = None if entry is None else entry.model_type
-    blocker = context_parallel_blocker(
-        resolve_attn_implementation(model_type, cuda=True),
-        1 if spec.fsdp is None else spec.fsdp.cp,
-        model_type,
-    )
     if blocker is not None:
         raise ValueError(blocker)
     if micro_batch_size is None:
@@ -917,75 +840,30 @@ def training_settings_from_manifest(
         ),
         mutates_beta=manifest.mutation is not None
         and "beta" in manifest.mutation.rl_hp_selection,
-        adapter_sync=adapter_sync,
     )
 
 
 def training_memory_from_manifest(
-    manifest: TrainingManifest,
-    model: ModelSpec,
-    device: DeviceSpec,
-    adapter_sync: bool = False,
+    manifest: TrainingManifest, model: ModelSpec, device: DeviceSpec
 ) -> TrainingMemoryPlan:
     """The training-memory plan one trainer rank of the manifest runs with.
 
-    Layouts are tried from least parallel to most and the first that fits is
-    kept (:func:`parallel_layouts`); a ``tp``, ``ep``, ``cp`` or
-    ``shard_group_size`` the manifest sets stays. An omitted ``fsdp``
-    searches like ``fsdp: {}``.
+    An omitted ``fsdp`` searches DDP and FSDP like ``fsdp: {}``.
 
     :param manifest: Validated manifest; ``training_gpus_per_agent`` is the trainer count.
     :param model: Training-side model spec.
-    :param device: Training GPU; its ``gpus_per_node`` bounds the shard group.
-    :param adapter_sync: Async weight sync pushes the adapter even where the
-        engines could serve merged weights.
-    :return: The plan :func:`resolve_training_memory` picks at that layout.
+    :param device: Training GPU.
+    :return: The plan :func:`resolve_training_memory` picks.
     :raises TrainingMemoryUnfitError: When nothing fits one GPU.
-    :raises TrainerSplitError: When no layout splits across the trainer ranks.
     """
-    layouts = parallel_layouts(
-        model.arch,
-        manifest.training.training_gpus_per_agent,
-        device.gpus_per_node,
-        manifest_fsdp(manifest),
-        trains_expert_parallel(manifest),
-        trains_context_parallel(manifest),
-    )
-    return first_fitting_plan(
-        layouts,
-        lambda layout: _layout_plan(
-            manifest_at_layout(manifest, layout), model, device, adapter_sync
-        ),
-    )
-
-
-def training_plan_model(manifest: TrainingManifest, model: ModelSpec) -> ModelSpec:
-    """The model the run searches its trainer plan on: the catalog entry, else ``model``.
-
-    :param manifest: Validated manifest.
-    :param model: Training-side model from the checkpoint.
-    :return: The model.
-    """
-    spec = manifest.algorithm
-    catalogued = catalog_model(spec) if isinstance(spec, LLMAlgorithmSpec) else None
-    return catalogued or model
-
-
-def _layout_plan(
-    manifest: TrainingManifest,
-    model: ModelSpec,
-    device: DeviceSpec,
-    adapter_sync: bool,
-) -> TrainingMemoryPlan:
-    """The plan at the manifest's own ``fsdp`` layout: DDP or FSDP and its speed rungs."""
     spec = llm_spec(manifest)
     _, per_rank = per_rank_trajectories(spec, manifest.training.training_gpus_per_agent)
     mini = resolve_mini_batch_size(spec.mini_batch_size, per_rank)
     pins = MemoryPins.from_spec(spec)
     require_batch_split(mini, pins.micro_batch_size_per_gpu or mini, per_rank)
-    settings = training_settings_from_manifest(
-        manifest, micro_batch_size=1, adapter_sync=adapter_sync
-    )
+    settings = training_settings_from_manifest(manifest, micro_batch_size=1)
+    if spec.fsdp is None:
+        settings = settings.model_copy(update={"fsdp": FSDPConfig()})
     return resolve_training_memory(model, device, settings, pins, mini)
 
 
@@ -1007,7 +885,6 @@ def generation_settings_from_manifest(
     manifest: TrainingManifest | str | Path | dict[str, Any],
     tensor_parallel_size: int | None = None,
     rollout_engines: int | None = None,
-    adapter_sync: bool = False,
 ) -> GenerationSettings:
     """The engine-side settings the manifest's vLLM config pins down.
 
@@ -1016,8 +893,6 @@ def generation_settings_from_manifest(
         manifest leaves the width unset.
     :param rollout_engines: Engines per member the allocation starts, which
         split the job batch. ``None`` reads the manifest.
-    :param adapter_sync: Async weight sync pushes the adapter even where the
-        engines could serve merged weights.
     :return: Generation settings for the estimator.
     """
     manifest = _validated(manifest)
@@ -1035,14 +910,19 @@ def generation_settings_from_manifest(
     if width is None and isinstance(spec, RolloutLLMSpec):
         msg = "tensor_parallel_size is unset; pass the width to size."
         raise ValueError(msg)
+    teacher = distillation_teacher(spec)
+    student_scores_prompts = teacher is not None and not teacher.separate_model
     settings: dict[str, Any] = {
         "gpu_memory_utilization": resolve_gpu_memory_utilization(
-            vllm.gpu_memory_utilization,
-            not async_rollout(manifest),
-            spec.pretrained_model_name_or_path,
+            vllm.gpu_memory_utilization, not async_rollout(manifest)
         ),
         "max_num_seqs": _max_num_seqs(manifest, spec, vllm, rollout_engines),
-        "max_model_len": spec.max_model_len,
+        # A self-distillation teacher scores its reference ahead of a full episode.
+        "max_model_len": spec.max_model_len
+        + (0 if teacher is None else teacher.rollout_engine_context_tokens),
+        "scores_prompt_logprobs": student_scores_prompts,
+        "reserves_prompt_logprobs": student_scores_prompts
+        and vllm.gpu_memory_utilization is None,
         "max_num_batched_tokens": manifest_max_num_batched_tokens(spec, vllm),
         "max_images_per_prompt": (vllm.limit_mm_per_prompt or {}).get("image"),
         "max_lora_rank": resolve_max_lora_rank(lora.lora_r),
@@ -1075,18 +955,96 @@ def generation_settings_from_manifest(
         "speculative_drafting": speculative_drafting(spec),
         "lora_dual_stream": async_rollout(manifest)
         and spec.vllm_engine_args.get("lora_dual_stream") is not False,
-        "merged_lora_sync": async_rollout(manifest)
-        and not adapter_sync
-        and can_sync_merged_lora(spec),
     }
     if width is not None:
         settings["tensor_parallel_size"] = width
     return GenerationSettings(**settings)
 
 
+def estimate_teacher_generation(
+    manifest: TrainingManifest,
+    device: DeviceSpec,
+    rollout_engines: int | None = None,
+) -> PhaseBreakdown | None:
+    """Peak memory of a separate teacher model's vLLM engine.
+
+    Sizes the base weights, so a vision teacher whose towers the engine skips
+    reads high. Several teachers return the one that misses its GPU, or the
+    largest peak when every teacher fits.
+
+    :param manifest: Validated training manifest.
+    :param device: The GPU type the teacher engine runs on.
+    :param rollout_engines: Engines per member the allocation starts, each with
+        one teacher. ``None`` reads the manifest.
+    :return: The teacher engine's breakdown, or ``None`` when no separate model scores.
+    """
+    spec = manifest.algorithm
+    teacher = distillation_teacher(spec) if isinstance(spec, LLMAlgorithmSpec) else None
+    models = [] if teacher is None else teacher_deployments(teacher)
+    if teacher is None or not models:
+        return None
+    worst: PhaseBreakdown | None = None
+    for model in models:
+        estimate = _estimate_one_teacher(
+            manifest, device, rollout_engines, teacher, model
+        )
+        if worst is None or _tighter_teacher(estimate, worst):
+            worst = estimate
+    return worst
+
+
+def _tighter_teacher(candidate: PhaseBreakdown, current: PhaseBreakdown) -> bool:
+    """Whether ``candidate`` is the teacher estimate the fit check should see."""
+    if candidate.fits_with_buffer != current.fits_with_buffer:
+        return not candidate.fits_with_buffer
+    return candidate.total_bytes > current.total_bytes
+
+
+def _estimate_one_teacher(
+    manifest: TrainingManifest,
+    device: DeviceSpec,
+    rollout_engines: int | None,
+    teacher: DistillationTeacherConfig,
+    model: DistillationTeacherModel,
+) -> PhaseBreakdown:
+    """Peak memory of one frozen teacher engine."""
+    algo = manifest.algorithm
+    if not isinstance(algo, LLMAlgorithmSpec):
+        msg = "a teacher engine needs an LLM algorithm"
+        raise TypeError(msg)
+    hub_id = model.pretrained_model_name_or_path
+    info = SUPPORTED_MODEL_INFO[hub_id]
+    vllm = model.vllm_config
+    counted = info.inspected["num_params"]
+    sized = ModelSpec(
+        model_id=hub_id,
+        arch=ModelArch.from_hf_config(info.config),
+        n_params=counted if isinstance(counted, int) else None,
+    )
+    settings = GenerationSettings(
+        gpu_memory_utilization=resolve_gpu_memory_utilization(
+            vllm.gpu_memory_utilization, False
+        ),
+        max_num_seqs=_max_num_seqs(manifest, algo, vllm, rollout_engines),
+        max_model_len=algo.max_model_len + teacher.context_tokens,
+        scores_prompt_logprobs=True,
+        reserves_prompt_logprobs=vllm.gpu_memory_utilization is None,
+        max_num_batched_tokens=(
+            vllm.max_num_batched_tokens
+            or FAMILY_MAX_NUM_BATCHED_TOKENS.get(info.config["model_type"])
+        ),
+        weight_dtype=_weight_dtype(vllm.dtype),
+        weight_quantization=engine_weight_quantization(vllm.quantization),
+        tensor_parallel_size=model.gpus,
+        concurrent_requests=_async_engine_prompts(manifest, rollout_engines)
+        * engine_group_size(algo, manifest.mutation),
+    )
+    return estimate_generation(sized, device, settings, orchestrated=True)
+
+
 def _model_spec(
     spec: LLMAlgorithmSpec,
-    arch: ModelArch,
+    model_config: dict[str, Any],
     n_params: int | None,
 ) -> ModelSpec:
     model_id = spec.pretrained_model_name_or_path
@@ -1095,7 +1053,7 @@ def _model_spec(
         raise ValueError(msg)
     return ModelSpec(
         model_id=model_id,
-        arch=arch,
+        arch=ModelArch.from_hf_config(model_config),
         n_params=n_params,
         variants=MANIFEST_WEIGHT_VARIANTS,
     )
@@ -1103,7 +1061,7 @@ def _model_spec(
 
 def _engine_served_manifest(
     manifest: TrainingManifest,
-    arch: ModelArch,
+    model_config: dict[str, Any],
     tensor_parallel_size: int | None,
 ) -> TrainingManifest:
     """The manifest as the rollout engine serves it.
@@ -1118,7 +1076,7 @@ def _engine_served_manifest(
     if width is None or not marlin_pads_non_gated_experts(
         spec.vllm_config.quantization,
         spec.vllm_engine_args.get("moe_backend"),
-        arch,
+        ModelArch.from_hf_config(model_config),
         width,
         bool(spec.vllm_engine_args.get("enable_expert_parallel")),
     ):
@@ -1141,7 +1099,6 @@ def run_config_from_manifest(
     gen_device: DeviceSpec | None = None,
     tensor_parallel_size: int | None = None,
     rollout_engines: int | None = None,
-    adapter_sync: bool = False,
 ) -> RunConfig:
     """Assemble the estimator's input from the three things a caller holds.
 
@@ -1158,8 +1115,6 @@ def run_config_from_manifest(
         manifest leaves the width unset.
     :param rollout_engines: Engines per member the allocation starts.
         ``None`` reads the manifest, which pins the count.
-    :param adapter_sync: Async weight sync pushes the adapter even where the
-        engines could serve merged weights, as the run picks it.
     """
     manifest = _validated(manifest)
     if explicit_colocated_rollout(manifest):
@@ -1168,8 +1123,7 @@ def run_config_from_manifest(
             "this estimator sizes async rollout only."
         )
         raise ValueError(msg)
-    arch = ModelArch.from_hf_config(model_config)
-    manifest = _engine_served_manifest(manifest, arch, tensor_parallel_size)
+    manifest = _engine_served_manifest(manifest, model_config, tensor_parallel_size)
     spec = llm_spec(manifest)
     if isinstance(spec, RolloutLLMSpec):
         gpu = lookup_gpu((gen_device or device).name or "")
@@ -1178,7 +1132,7 @@ def run_config_from_manifest(
             check_fp8_moe_backend_for_device(
                 vllm.quantization,
                 spec.vllm_engine_args.get("moe_backend"),
-                arch.is_moe,
+                ModelArch.from_hf_config(model_config).is_moe,
                 gpu.cc_major,
                 gpu.cc_minor,
             )
@@ -1186,10 +1140,10 @@ def run_config_from_manifest(
     # The run picks them on the catalog model, so the search does too.
     manifest = manifest.model_copy(deep=True)
     spec = llm_spec(manifest)
-    model = _model_spec(spec, arch, n_params)
+    model = _model_spec(spec, model_config, n_params)
     try:
         plan = training_memory_from_manifest(
-            manifest, training_plan_model(manifest, model), device, adapter_sync
+            manifest, catalog_model(spec) or model, device
         )
     except TrainingMemoryUnfitError as unfit:
         # Sized at the lightest settings so the estimate shows how far over it is.
@@ -1197,12 +1151,11 @@ def run_config_from_manifest(
     apply_training_memory(spec, plan)
     _, per_rank = per_rank_trajectories(spec, manifest.training.training_gpus_per_agent)
     spec.mini_batch_size = resolve_mini_batch_size(spec.mini_batch_size, per_rank)
-    training = training_settings_from_manifest(manifest, adapter_sync=adapter_sync)
+    training = training_settings_from_manifest(manifest)
     generation = generation_settings_from_manifest(
         manifest,
         tensor_parallel_size=tensor_parallel_size,
         rollout_engines=rollout_engines,
-        adapter_sync=adapter_sync,
     )
     if async_rollout(manifest):
         generation = drop_engine_fast_paths(model, gen_device or device, generation)
@@ -1224,14 +1177,11 @@ def estimate_manifest(
     n_params: int | None = None,
     gen_device: DeviceSpec | None = None,
     tensor_parallel_size: int | None = None,
-    adapter_sync: bool = False,
 ) -> RunEstimate:
     """Estimate both phase peaks straight from the manifest.
 
     :param tensor_parallel_size: Engine width to size. Required when a rollout
         manifest leaves the width unset.
-    :param adapter_sync: Async weight sync pushes the adapter even where the
-        engines could serve merged weights, as the run picks it.
     """
     return estimate_run(
         run_config_from_manifest(
@@ -1241,6 +1191,5 @@ def estimate_manifest(
             n_params=n_params,
             gen_device=gen_device,
             tensor_parallel_size=tensor_parallel_size,
-            adapter_sync=adapter_sync,
         )
     )

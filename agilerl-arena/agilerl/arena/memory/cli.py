@@ -18,7 +18,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import click
 import yaml
@@ -29,7 +29,6 @@ from rich.table import Table
 from rich.text import Text
 
 from agilerl.arena.config import CommandConfig, arena_client
-from agilerl.arena.exceptions import ArenaAuthError
 from agilerl.arena.memory.advice import advise
 from agilerl.arena.memory.estimator import PhaseBreakdown, estimate_run
 from agilerl.arena.memory.formulas import MAX_UNDERPREDICTION
@@ -38,9 +37,7 @@ from agilerl.arena.memory.manifest import (
     llm_spec,
     lookup_gpu,
     run_config_from_manifest,
-    training_plan_model,
 )
-from agilerl.arena.memory.resolve.run import SearchCache, kept_merged_lora_sync
 from agilerl.arena.memory.resolve.sequences import (
     ROLLOUT_ENGINE_GPU_MEMORY_UTILIZATION,
 )
@@ -49,10 +46,6 @@ from agilerl.arena.memory.resources import (
     check_tiers,
     engine_width,
     engines_per_member,
-    note_queued_sequences,
-    searches_gpu_split,
-    split_manifest,
-    tier_sync_link,
 )
 from agilerl.arena.memory.solver import (
     INFERENCE_MAX_NUM_SEQS,
@@ -74,8 +67,6 @@ from agilerl.arena.memory.specs import (
 )
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
 from agilerl.arena.models.manifest import TrainingManifest
-from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
-from agilerl.arena.output import json_output_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -86,9 +77,6 @@ EXIT_USAGE = 2
 # Multi-token-prediction heads some checkpoints ship (Nemotron 3.5); the
 # trainer does not load them.
 MTP_TENSOR_PREFIX = "mtp."
-
-
-PACKED_TENSOR_DTYPES = frozenset({"U8", "I8"})
 
 
 def checkpoint_param_count(model_id: str, arch: ModelArch) -> int | None:
@@ -102,14 +90,17 @@ def checkpoint_param_count(model_id: str, arch: ModelArch) -> int | None:
     try:
         # Optional hub extra.
         from huggingface_hub import get_safetensors_metadata
+        from huggingface_hub.errors import (
+            NotASafetensorsRepoError,
+            SafetensorsParsingError,
+        )
     except ImportError:
         return None
 
     try:
         metadata = get_safetensors_metadata(model_id)
-    except Exception as err:
-        # Best effort: connection error types depend on the hub version's HTTP
-        # client. An expired HF token or a gated repo also lands here.
+    except (OSError, NotASafetensorsRepoError, SafetensorsParsingError) as err:
+        # An expired HF token or a gated repo also lands here.
         logger.warning(
             "Could not read %s's safetensors metadata (%s); using the analytic "
             "parameter count. Check HF_TOKEN if the repo is gated.",
@@ -117,16 +108,12 @@ def checkpoint_param_count(model_id: str, arch: ModelArch) -> int | None:
             err,
         )
         return None
-    tensors = [
-        tensor
+    total = sum(
+        tensor.parameter_count
         for file in metadata.files_metadata.values()
         for name, tensor in file.tensors.items()
         if not name.startswith(MTP_TENSOR_PREFIX)
-    ]
-    # Packed weights (gpt-oss's MXFP4 experts) count bytes, not parameters.
-    if any(tensor.dtype in PACKED_TENSOR_DTYPES for tensor in tensors):
-        return None
-    total = sum(tensor.parameter_count for tensor in tensors)
+    )
     if not total:
         return None
     if arch.tied_embeddings and "lm_head.weight" in metadata.weight_map:
@@ -134,16 +121,8 @@ def checkpoint_param_count(model_id: str, arch: ModelArch) -> int | None:
     return int(total)
 
 
-def _catalog_or_checkpoint_param_count(model_id: str, arch: ModelArch) -> int | None:
-    """The catalog's resident parameter count, or the Hub's when the catalog has none."""
-    info = SUPPORTED_MODEL_INFO.get(model_id)
-    if info is not None and info.num_params is not None:
-        return info.num_params
-    return checkpoint_param_count(model_id, arch)
-
-
 def _load_model_config(model_id: str, config_path: str | None) -> dict[str, Any]:
-    """The checkpoint's raw ``config.json``: ``--config``, a local checkpoint, the catalog, or the Hub.
+    """The checkpoint's raw ``config.json``: ``--config``, a local checkpoint, or the Hub.
 
     The estimator reads raw keys; transformers' ``NemotronHConfig.to_dict()``
     omits ``num_hidden_layers``, which it derives from ``layers_block_type``.
@@ -153,9 +132,6 @@ def _load_model_config(model_id: str, config_path: str | None) -> dict[str, Any]
     local = Path(model_id) / "config.json"
     if local.is_file():
         return json.loads(local.read_text())
-    info = SUPPORTED_MODEL_INFO.get(model_id)
-    if info is not None:
-        return info.config
     try:
         # Optional ``hub`` extra.
         from huggingface_hub import hf_hub_download
@@ -321,9 +297,7 @@ def _model_spec_from_checkpoint(
     model_config = _load_model_config(model_id, config_path)
     arch = ModelArch.from_hf_config(model_config)
     n_params = (
-        None
-        if config_path is not None
-        else _catalog_or_checkpoint_param_count(model_id, arch)
+        None if config_path is not None else checkpoint_param_count(model_id, arch)
     )
     return model_config, ModelSpec(model_id=model_id, arch=arch, n_params=n_params)
 
@@ -362,58 +336,16 @@ def _resolve_device(
     return None
 
 
-def _planned_layout(
-    manifest: TrainingManifest,
-    model: ModelSpec,
-    device: DeviceSpec,
-    num_gpus: int | None,
-) -> tuple[TrainingManifest, bool]:
-    """The manifest as the run lays it out on ``num_gpus`` GPUs of one node, and whether weight sync pushes merged weights, as :func:`check_tiers` picks them.
-
-    A searched split that fits writes its counts, engine width and layout
-    (:func:`split_manifest`); otherwise the manifest's own counts are kept.
-    Without ``num_gpus`` no link is known: merged sync where the engines can
-    serve it.
-    """
-    if num_gpus is None:
-        return manifest, True
-    sync_link = tier_sync_link(num_gpus, None)
-    if searches_gpu_split(manifest):
-        try:
-            laid_out, plan = split_manifest(
-                manifest, num_gpus, device, sync_link=sync_link
-            )
-        except ValueError:
-            # No split fits: check_tiers sizes the manifest's own counts.
-            pass
-        else:
-            return laid_out, plan.merged_lora_sync
-    merged = kept_merged_lora_sync(
-        manifest,
-        training_plan_model(manifest, model),
-        device,
-        num_gpus,
-        sync_link,
-        SearchCache(),
-    )
-    return manifest, merged
-
-
 def _allocation_layout(
-    manifest: TrainingManifest,
-    num_gpus: int | None,
-    device: DeviceSpec,
-    adapter_sync: bool,
+    manifest: TrainingManifest, num_gpus: int | None, device: DeviceSpec
 ) -> tuple[int | None, int | None]:
     """Engine width and engines per member the run starts on ``num_gpus``; ``None`` reads the manifest.
 
-    :param adapter_sync: Weight sync pushes the adapter even where the engines
-        could serve merged weights.
     :raises ValueError: The run picks them from a GPU count and ``num_gpus``
         is unset, or the node has too few GPUs.
     """
     if num_gpus is not None:
-        width = engine_width(manifest, num_gpus, device, None, adapter_sync)
+        width = engine_width(manifest, num_gpus, device)
         return width, engines_per_member(manifest, num_gpus, width)
     spec = manifest.algorithm
     if not isinstance(spec, RolloutLLMSpec) or spec.vllm_config is None:
@@ -432,40 +364,6 @@ def _allocation_layout(
         )
         raise ValueError(msg)
     return None, None
-
-
-def _sized_run_config(
-    manifest: TrainingManifest,
-    model_config: dict[str, Any],
-    model: ModelSpec,
-    device: DeviceSpec,
-    gen_device: DeviceSpec | None,
-    num_gpus: int | None,
-) -> RunConfig:
-    """The run config on ``num_gpus`` GPUs of ``device``, at the split, weight-sync mode, engine width and engines the run picks there.
-
-    :param manifest: Validated training manifest.
-    :param model_config: The checkpoint's ``config.json``.
-    :param model: Training-side model, with the checkpoint's parameter count.
-    :param gen_device: Rollout-engine GPU; ``None`` is ``device``.
-    :param num_gpus: GPUs on the node; ``None`` reads the engine layout from the manifest.
-    :raises ValueError: The run picks its engine layout from a GPU count and
-        ``num_gpus`` is unset, or the node has too few GPUs.
-    """
-    laid_out, merged = _planned_layout(manifest, model, device, num_gpus)
-    width, engines = _allocation_layout(
-        laid_out, num_gpus, gen_device or device, not merged
-    )
-    return run_config_from_manifest(
-        laid_out,
-        device,
-        model_config,
-        n_params=model.n_params,
-        gen_device=gen_device,
-        tensor_parallel_size=width,
-        rollout_engines=engines,
-        adapter_sync=not merged,
-    )
 
 
 @click.group("memory")
@@ -546,16 +444,7 @@ def memory_estimate(
     command_config = ctx.find_object(CommandConfig)
     if gpu is None and device_gb is None and command_config is not None:
         with arena_client(command_config) as client:
-            try:
-                tiers = list(client.list_resources()["tiers"].values())
-            except ArenaAuthError as err:
-                msg = (
-                    "Picking a resource tier needs an Arena login; the tier sets "
-                    "the GPU and each GPU's host RAM share. Run 'arena login', or "
-                    "pass --gpu or --device-gb to size one GPU without a host RAM "
-                    "check."
-                )
-                raise ArenaAuthError(msg) from err
+            tiers = list(client.list_resources()["tiers"].values())
     sys.exit(
         main(
             manifest_path,
@@ -566,7 +455,7 @@ def memory_estimate(
             gen_device_gb=gen_device_gb,
             num_gpus=num_gpus,
             config_path=config_path,
-            as_json=as_json or json_output_enabled(),
+            as_json=as_json,
             no_color=no_color,
         )
     )
@@ -603,9 +492,8 @@ def main(
         return EXIT_USAGE
     if device is None and tiers is None:
         print(
-            "Pass --gpu or --device-gb, or run `arena login` then "
-            "`arena memory estimate` to pick a resource tier and check its "
-            "host RAM.",
+            "Pass --gpu or --device-gb, or run `arena memory estimate` logged in "
+            "to pick a resource tier.",
             file=sys.stderr,
         )
         return EXIT_USAGE
@@ -653,7 +541,6 @@ def main(
         train_device: DeviceSpec,
         width: int | None,
         engines: int | None,
-        adapter_sync: bool,
     ) -> RunConfig:
         return run_config_from_manifest(
             laid_out,
@@ -663,48 +550,37 @@ def main(
             gen_device=gen_device,
             tensor_parallel_size=width,
             rollout_engines=engines,
-            adapter_sync=adapter_sync,
         )
 
     chosen: TierCheck | None = None
     checks: list[TierCheck] = []
     try:
         if device is None:
-            checks = check_tiers(tiers or [], manifest, model_spec, build_config)
+            checks = check_tiers(tiers or [], manifest, build_config)
             chosen = next((check for check in checks if check.fits), None)
             if chosen is None or chosen.config is None:
                 return _report_no_tier(checks, as_json)
             config = chosen.config
         else:
-            config = _sized_run_config(
-                manifest, model_config, model_spec, device, gen_device, num_gpus
+            width, engines = _allocation_layout(
+                manifest, num_gpus, gen_device or device
             )
+            config = build_config(manifest, device, width, engines)
     except KeyError as err:
         return _report_missing_key(err)
     except ValueError as err:
         print(str(err), file=sys.stderr)
         return EXIT_USAGE
 
-    # The tier search already attached the queue warning to its estimate.
-    estimate = (
-        chosen.estimate
-        if chosen is not None and chosen.estimate is not None
-        else note_queued_sequences(estimate_run(config), config)
-    )
+    estimate = estimate_run(config)
     if as_json:
         payload = estimate.model_dump(by_alias=True)
         payload["fits"] = estimate.fits_with_buffer
         payload["engine"] = _engine_payload(config)
         payload["advice"] = [a.model_dump() for a in advise(config)]
-        parallelism = _parallelism_payload(config)
-        if parallelism is not None:
-            payload["parallelism"] = parallelism
         if chosen is not None:
             payload["resource"] = chosen.tier
-            payload["num_nodes"] = chosen.num_nodes
             payload["tiers"] = _tier_rows(checks)
-            payload["training_gpus_per_agent"] = chosen.trainers
-            payload["rollout_engines_per_agent"] = chosen.engines
         print(json.dumps(payload, indent=2))
         return EXIT_OK if estimate.fits_with_buffer else EXIT_OVER_BUDGET
 
@@ -715,7 +591,7 @@ def main(
         console.print(
             Text.assemble(
                 ("Cheapest resource tier that fits: ", "bold"),
-                (_describe_choice(chosen), "green"),
+                (_describe_tier(chosen.tier), "green"),
             )
         )
     console.print(
@@ -723,16 +599,6 @@ def main(
             ("Memory estimate", "bold"), f"{glyphs.separator}{config.model.model_id}"
         )
     )
-    parallelism = _parallelism_payload(config)
-    if parallelism is not None:
-        console.print(
-            Text(
-                "Training parallelism: "
-                f"tp={parallelism['tp']}, ep={parallelism['ep']}, cp={parallelism['cp']}, "
-                f"shard_group_size={parallelism['shard_group_size']}",
-                style="dim",
-            )
-        )
     if config.training.uses_generation_engine:
         generation = config.generation
         console.print(
@@ -753,19 +619,6 @@ def main(
     return EXIT_OK if estimate.fits_with_buffer else EXIT_OVER_BUDGET
 
 
-def _parallelism_payload(config: RunConfig) -> dict[str, int | None] | None:
-    """The locked training layout, or ``None`` for flat data parallel."""
-    fsdp = config.training.fsdp
-    if fsdp is None:
-        return None
-    return {
-        "tp": fsdp.tp,
-        "ep": fsdp.ep,
-        "cp": fsdp.cp,
-        "shard_group_size": fsdp.shard_group_size,
-    }
-
-
 def _engine_payload(config: RunConfig) -> dict[str, int] | None:
     """The rollout engine's resolved width and sequences; ``None`` without one."""
     if not config.training.uses_generation_engine:
@@ -783,31 +636,16 @@ def _describe_tier(tier: dict[str, Any]) -> str:
     )
 
 
-def _describe_choice(check: TierCheck) -> str:
-    """The tier, and the node count when the job takes more than one."""
-    described = _describe_tier(check.tier)
-    if check.num_nodes == 1:
-        return described
-    return f"{check.num_nodes} nodes of {described}"
-
-
 def _tier_rows(checks: list[TierCheck]) -> list[dict[str, Any]]:
-    rows = []
-    for check in checks:
-        row: dict[str, Any] = {
+    return [
+        {
             "name": check.tier["name"],
             "price_per_node_hour": check.tier["price_per_node_hour"],
             "fits": check.fits,
             "reason": check.reason,
-            "num_nodes": check.num_nodes,
         }
-        if check.fits and check.config is not None:
-            row["parallelism"] = _parallelism_payload(check.config)
-            row["trainers"] = check.trainers
-            row["engines"] = check.engines
-            row["engine_tensor_parallel"] = check.engine_tensor_parallel
-        rows.append(row)
-    return rows
+        for check in checks
+    ]
 
 
 def _report_no_tier(checks: list[TierCheck], as_json: bool) -> int:
@@ -842,7 +680,6 @@ class SolveRequest:
     max_num_seqs: int | None = None
     gpu_memory_utilization: float | None = None
     max_model_len: int | None = None
-    quantization: Literal["fp8"] | None = None
     hi: int | None = None
     as_json: bool = False
     no_color: bool = False
@@ -923,15 +760,6 @@ class SolveRequest:
     help="Context cap when solving a different setting.",
 )
 @click.option(
-    "--quantization",
-    type=click.Choice(["fp8"]),
-    default=None,
-    help=(
-        "Serving weight quantization (APP_VLLM_QUANTIZATION). --inference only; "
-        "needs a GPU with native fp8 (compute capability 8.9+)."
-    ),
-)
-@click.option(
     "--hi",
     type=int,
     default=None,
@@ -980,13 +808,12 @@ def solve_main(request: SolveRequest) -> int:
         print("Pass --gpu or --device-gb (see --help).", file=sys.stderr)
         return EXIT_USAGE
     overrides = _solve_overrides(request)
-    usage_error = _solve_usage_error(request, device, gen_device, overrides)
+    usage_error = _solve_usage_error(request, gen_device, overrides)
     if usage_error is not None:
         print(usage_error, file=sys.stderr)
         return EXIT_USAGE
 
     rebuild: Callable[[int], RunConfig] | None = None
-    widest: int | None = None
     try:
         # Past the usage checks, no manifest means --inference.
         if request.manifest_path is None:
@@ -997,7 +824,7 @@ def solve_main(request: SolveRequest) -> int:
                 overrides=overrides,
             )
         else:
-            build, arch_limit, widest = _manifest_config(
+            build, arch_limit = _manifest_config(
                 request.manifest_path,
                 device,
                 field,
@@ -1021,9 +848,7 @@ def solve_main(request: SolveRequest) -> int:
         if inference:
             result = solve_inference(config, field, hi=bound)
         else:
-            result = solve(
-                config, field, hi=bound, rebuild=rebuild, widest_engine_width=widest
-            )
+            result = solve(config, field, hi=bound, rebuild=rebuild)
     except CannotSolve as err:
         print(str(err), file=sys.stderr)
         return EXIT_OVER_BUDGET
@@ -1040,14 +865,12 @@ def _solve_overrides(request: SolveRequest) -> dict[str, object]:
         "max_num_seqs": request.max_num_seqs,
         "gpu_memory_utilization": request.gpu_memory_utilization,
         "max_model_len": request.max_model_len,
-        "weight_quantization": request.quantization,
     }
     return {key: value for key, value in flags.items() if value is not None}
 
 
 def _solve_usage_error(
     request: SolveRequest,
-    device: DeviceSpec,
     gen_device: DeviceSpec | None,
     overrides: dict[str, object],
 ) -> str | None:
@@ -1061,23 +884,6 @@ def _solve_usage_error(
         return "--inference sizes one GPU; drop --gen-gpu/--gen-device-gb."
     if inference and request.num_gpus is not None:
         return "--inference sizes one GPU; drop --num-gpus."
-    if not inference and request.quantization is not None:
-        return (
-            "--quantization applies to --inference; training manifests set "
-            "vllm_config.quantization."
-        )
-    if request.quantization == "fp8":
-        capability = device.compute_capability
-        if capability is None:
-            return (
-                "--quantization fp8 needs a catalogued --gpu with native fp8 "
-                "(compute capability 8.9+)."
-            )
-        if capability < (8, 9):
-            return (
-                "--quantization fp8 needs a GPU with native fp8 (compute "
-                f"capability 8.9+); {device.name} is {capability[0]}.{capability[1]}."
-            )
     if request.field in overrides:
         flag = request.field.replace("_", "-")
         return f"--{flag} is the setting being solved; drop it."
@@ -1173,12 +979,8 @@ def _manifest_config(
     gen_device: DeviceSpec | None,
     num_gpus: int | None,
     overrides: dict[str, object],
-) -> tuple[Callable[[int | None], RunConfig], int, int | None]:
-    """A run config builder at a value of ``field`` (``None``: the manifest's), the RoPE cap, and the engine width it keeps.
-
-    :return: The builder, the cap, and the pinned engine width when every
-        value keeps it and the engine count; ``None`` when a value can change them.
-    """
+) -> tuple[Callable[[int | None], RunConfig], int]:
+    """A run config builder at a value of ``field`` (``None``: the manifest's), and the RoPE cap."""
     manifest = TrainingManifest.get_validated(manifest_path, mode="python")
     spec = llm_spec(manifest)
     resolved_id = spec.pretrained_model_name_or_path
@@ -1186,12 +988,7 @@ def _manifest_config(
         msg = "manifest names no pretrained model."
         raise ValueError(msg)
     model_config, model_spec = _model_spec_from_checkpoint(resolved_id, config_path)
-    engine = spec.vllm_config if isinstance(spec, RolloutLLMSpec) else None
-    kept_width = (
-        None
-        if engine is None or (num_gpus is not None and searches_gpu_split(manifest))
-        else engine.tensor_parallel_size
-    )
+    engine_device = gen_device or device
 
     def build(value: int | None) -> RunConfig:
         trial = manifest.model_copy(deep=True)
@@ -1205,8 +1002,15 @@ def _manifest_config(
                 setattr(trial_spec, key, setting)
             elif vllm is not None:
                 setattr(vllm, key, setting)
-        return _sized_run_config(
-            trial, model_config, model_spec, device, gen_device, num_gpus
+        width, engines = _allocation_layout(trial, num_gpus, engine_device)
+        return run_config_from_manifest(
+            trial,
+            device,
+            model_config,
+            n_params=model_spec.n_params,
+            gen_device=gen_device,
+            tensor_parallel_size=width,
+            rollout_engines=engines,
         )
 
-    return build, architectural_context_limit(model_config), kept_width
+    return build, architectural_context_limit(model_config)

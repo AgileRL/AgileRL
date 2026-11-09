@@ -15,20 +15,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 from torch import nn
-from torch.nn.attention.flex_attention import (
-    BlockMask,
-    create_block_mask,
-    flex_attention,
-)
 
 from agilerl import HAS_LLM_DEPENDENCIES
-from agilerl.algorithms.core.sequence_layout import (
-    ContextParallelSequence,
-    PackedContextParallelSequence,
-    PackedSequence,
-    PaddedSequence,
-)
-from agilerl.distributed.fsdp import FSDPConfig
 from agilerl.utils.llm_packing import (
     RESETS_AT_DOCUMENT_BOUNDARY,
     GatedDeltaShape,
@@ -845,23 +833,6 @@ class TestHeadNormShapes:
         assert head_norm_shapes(model) == []
 
 
-def packed_document_mask(length: int) -> BlockMask:
-    """Causal block mask over three packed documents of a *length*-token row."""
-    documents = torch.arange(length) * 3 // length
-
-    def mask_mod(_batch, _head, q_idx, kv_idx):
-        return (kv_idx <= q_idx) & (documents[q_idx] == documents[kv_idx])
-
-    return create_block_mask(mask_mod, None, None, length, length, device="cpu")
-
-
-@pytest.fixture
-def fresh_compile_cache():
-    torch.compiler.reset()
-    yield
-    torch.compiler.reset()
-
-
 class TestPackedLengthClasses:
     def test_center_first_then_nearest_length_of_each_class(self):
         # Arrange
@@ -977,80 +948,16 @@ class TestPackedLengthClasses:
 
         assert packed_length_classes(model, 4096, 2048, 132) == []
 
-    def test_flex_attention_adds_dynamic_length_block_count_and_short_query(self):
-        model = nn.Sequential(nn.Linear(4, 4))
-
-        lengths = packed_length_classes(model, 300, 200, 132, True)
-
-        # 199 makes the length dynamic, 257 the block count; 128 is one block
-        # and 127 a short query.
-        assert lengths == [200, 199, 192, 257, 132, 128, 127]
-
-    def test_flex_attention_centered_on_short_queries_adds_long_lengths(self):
-        model = nn.Sequential(nn.Linear(4, 4))
-
-        lengths = packed_length_classes(model, 200, 100, 132, True)
-
-        assert lengths == [100, 99, 96, 128, 129, 133, 144]
-
-    def test_flex_attention_extends_a_hybrid_with_block_count_and_short_query(
-        self,
-    ):
-        # Arrange
-        model = nn.Sequential(_granite_tiny_mixer(), _granite_tiny_mixer())
-        hybrid = packed_length_classes(model, 29696, 20000, 132)
-
-        # Act
-        lengths = packed_length_classes(model, 29696, 20000, 132, True)
-
-        # Assert
-        # 20000 and 19999 share 157 blocks; 19968 has 156.
-        assert lengths == [*hybrid[:2], 19968, *hybrid[2:], 127]
-
-    def test_flex_attention_lengths_leave_no_compile_for_other_lengths(
-        self, fresh_compile_cache
-    ):
-        # Arrange
-        graphs: list[torch.fx.GraphModule] = []
-
-        def counting_backend(graph, _inputs):
-            graphs.append(graph)
-            return graph.forward
-
-        compiled_flex = torch.compile(flex_attention, backend=counting_backend)
-
-        def attend(length: int) -> None:
-            query = torch.randn(1, 2, length, 16)
-            compiled_flex(query, query, query, block_mask=packed_document_mask(length))
-
-        for length in packed_length_classes(nn.Sequential(), 300, 200, 132, True):
-            attend(length)
-        warmed_graphs = len(graphs)
-
-        # Act
-        for length in (300, 263, 150, 128, 90, 17):
-            attend(length)
-
-        # Assert
-        # Static 200, dynamic length, dynamic block count, one block; the
-        # short-query split is an inductor guard this eager backend skips.
-        assert warmed_graphs == 4
-        assert len(graphs) == warmed_graphs
-
 
 class _PackingGateStub:
-    """Minimal stand-in to exercise LLMAlgorithm's layout choice in isolation."""
+    """Minimal stand-in to exercise LLMAlgorithm's packing gate in isolation."""
 
     from agilerl.algorithms.core.base import LLMAlgorithm
 
-    _build_sequence_layout = LLMAlgorithm._build_sequence_layout
-    _sequence_layout_type = LLMAlgorithm._sequence_layout_type
+    _packing_mode = LLMAlgorithm._packing_mode
 
     def __init__(self, sequence_packing, attn_impl):
         self.sequence_packing = sequence_packing
-        self.fsdp_config = None
-        self.pad_token_id = 0
-        self.calc_position_embeddings = False
         self.actor = AutoModelForCausalLM.from_config(
             _tiny_llama_config(), attn_implementation="eager"
         )
@@ -1081,52 +988,23 @@ class TestSequencePackingGate:
         stub.actor.config.text_config._attn_implementation = "flash_attention_2"
 
         # Act
-        layout = stub._build_sequence_layout()
+        mode = stub._packing_mode()
 
         # Assert
         assert stub.actor.config._attn_implementation == "sdpa"
-        assert layout.varlen
+        assert mode == "varlen"
 
-    def test_padded_when_init_does_not_pack(self):
+    def test_disabled_when_init_does_not_pack(self):
         stub = _PackingGateStub(False, "flash_attention_2")
-        assert type(stub._build_sequence_layout()) is PaddedSequence
+        assert stub._packing_mode() is None
 
     def test_fa2_uses_varlen(self):
         stub = _PackingGateStub(True, "flash_attention_2")
-        layout = stub._build_sequence_layout()
-        assert type(layout) is PackedSequence
-        assert layout.varlen
+        assert stub._packing_mode() == "varlen"
 
     def test_flex_uses_blockmask(self):
         stub = _PackingGateStub(True, "flex_attention")
-        layout = stub._build_sequence_layout()
-        assert type(layout) is PackedSequence
-        assert not layout.varlen
-
-    @pytest.mark.parametrize(
-        ("packing", "expected_type", "budget"),
-        [
-            (True, PackedContextParallelSequence, 64),
-            (False, ContextParallelSequence, None),
-        ],
-    )
-    def test_context_parallel_type_needs_no_cp_group(
-        self, packing: bool, expected_type: type, budget: int | None
-    ):
-        # Arrange
-        stub = _PackingGateStub(packing, "flash_attention_2")
-        stub.fsdp_config = FSDPConfig(cp=2)
-
-        # Act
-        layout_type = stub._sequence_layout_type()
-
-        # Assert
-        assert layout_type is expected_type
-        assert layout_type.micro_batch_token_budget(4, 16) == budget
-
-    def test_packed_type_budgets_tokens(self):
-        stub = _PackingGateStub(True, "flash_attention_2")
-        assert stub._sequence_layout_type().micro_batch_token_budget(4, 16) == 64
+        assert stub._packing_mode() == "blockmask"
 
 
 class TestPackedSegmentIds:

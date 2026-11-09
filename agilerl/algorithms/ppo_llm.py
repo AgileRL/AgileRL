@@ -40,13 +40,13 @@ from agilerl.utils.algo_utils import (
     VLLMConfig,
     get_experiences_samples,
 )
+from agilerl.utils.llm_packing import unpack_hidden_states, unpack_values
 from agilerl.utils.llm_utils import (
     LLM_RL_COMMON_METRIC_NAMES,
     PPO_METRIC_NAMES,
     VLLM_IS_METRIC_NAMES,
     BitsAndBytesConfig,
     MicroBatchMetrics,
-    attention_mask_from_padded_ids,
     calculate_k3_kl,
     clipped_is_surrogate,
     k3_kl_penalty_reference,
@@ -878,15 +878,16 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                             0.0,
                         )
                     else:
-                        log_probs, values = self._actor_critic_pass(
-                            batch_ids,
-                            batch_action_mask,
-                            batch_support_ids,
-                            batch_pixel_values,
-                            batch_keys,
+                        actor_hidden, values = self._actor_critic_hidden_states(
+                            batch_ids, batch_pixel_values, batch_keys
                         )
                         policy_loss, metrics = self._ppo_policy_loss(
-                            log_probs,
+                            self._actor_log_probs_from_hidden(
+                                actor_hidden,
+                                batch_ids,
+                                batch_action_mask,
+                                batch_support_ids,
+                            ),
                             *policy_inputs,
                             term_scales=(
                                 None if pg_scale is None else (pg_scale, kl_scale)
@@ -1262,76 +1263,53 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         )
         self.critic_warmup_steps_done = checkpoint.get("critic_warmup_steps_done", 0)
 
-    def _actor_critic_pass(
+    def _actor_critic_hidden_states(
         self,
         batch_ids: torch.Tensor,
-        score_mask: torch.Tensor,
-        support_ids: torch.Tensor | None = None,
         pixel_values: torch.Tensor | None = None,
         image_keys: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Gradient-bearing actor log-probs and critic values of one micro-batch from one forward.
+        """Gradient-bearing forward of one micro-batch's actor and critic rows together.
 
         The batch runs once per adapter in a single forward with ``lm_head``
-        identity-patched, then the actor rows are scored where ``score_mask``
-        is set. The routing stays set until the caller unsets it after
-        ``backward()``, so gradient checkpointing recomputes each row under
-        its own adapter. With packing on, the batch packs once and the packed
-        row runs per adapter.
+        identity-patched. The routing stays set until the caller unsets it
+        after ``backward()``, so gradient checkpointing recomputes each row
+        under its own adapter. With packing on, the batch packs once and the
+        packed row runs per adapter.
 
         :param batch_ids: ``(B, T)`` right-padded token ids.
         :type batch_ids: torch.Tensor
-        :param score_mask: ``(B, T - 1)`` positions the lm_head scores.
-        :type score_mask: torch.Tensor
-        :param support_ids: ``(B, T - 1, K)`` sampling support per position, or ``None``.
-        :type support_ids: torch.Tensor | None
         :param pixel_values: Vision rows of the batch, or ``None`` for text.
         :type pixel_values: torch.Tensor | None
         :param image_keys: Vision feature cache key of each vision row, or
             ``None`` to run the tower uncached.
         :type image_keys: torch.Tensor | None
-        :return: ``(B, T - 1)`` actor log-probs, zero outside ``score_mask``,
-            and ``(B, T - 1)`` critic values.
+        :return: ``(B, T, H)`` actor hidden states and ``(B, T - 1)`` critic values.
         :rtype: tuple[torch.Tensor, torch.Tensor]
         """
-        mask = attention_mask_from_padded_ids(batch_ids, self.pad_token_id)
-        fused_fn, _, _ = self._fused_logprob_fn_and_head()
-        with self.sequence_layout.prepare_forward(
-            batch_ids,
-            mask,
-            score_mask,
-            support_ids,
-            pixel_values=pixel_values,
-            copies=2,
-        ) as fwd:
-            rows = fwd.kwargs["input_ids"].shape[0] // 2
-            set_fused_adapter_routing(self.actor, ["actor"] * rows + ["critic"] * rows)
-            with (
-                self._vision_cache.images(
-                    None if image_keys is None else torch.cat([image_keys, image_keys])
-                ),
-                self._patch_lm_head_to_identity(),
-                self._amp_ctx(),
-                self._activation_offload_ctx(),
-            ):
-                self.actor.train()
-                hidden, _, values = self.actor(**fwd.kwargs)
-            with self.shard_runtime.gather_layer(
-                self._get_lm_head(), device=batch_ids.device
-            ) as (head_w, head_b):
-                log_probs = self._score_hidden(
-                    fused_fn,
-                    fwd.scoring_hidden(hidden[:rows]),
-                    head_w,
-                    head_b,
-                    fwd.targets,
-                    fwd.score_mask,
-                    fwd.support_ids,
-                    fwd.n_scored,
+        model_kwargs, packed = self._gradient_forward_inputs(
+            batch_ids, pixel_values, copies=2
+        )
+        rows = 1 if packed is not None else batch_ids.shape[0]
+        set_fused_adapter_routing(self.actor, ["actor"] * rows + ["critic"] * rows)
+        sample_rows = int(batch_ids.shape[0])
+        with (
+            self._vision_cache.images(
+                self._repeat_pixel_values_for_fused_rows(
+                    image_keys, 2 * sample_rows, sample_rows
                 )
-            return fwd.restore(log_probs, "logprobs"), fwd.restore(
-                values[rows:], "values"
+            ),
+            self._patch_lm_head_to_identity(),
+            self._amp_ctx(),
+            self._activation_offload_ctx(),
+        ):
+            self.actor.train()
+            hidden, _, values = self.actor(**model_kwargs)
+        if packed is not None:
+            return unpack_hidden_states(hidden[:1], packed), unpack_values(
+                values[1], packed
             )
+        return hidden[:rows], values[rows:, :-1]
 
     def _critic_values(
         self,
@@ -1355,20 +1333,53 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         :return: ``(B, T - 1)`` per-token values.
         :rtype: torch.Tensor
         """
-        mask = attention_mask_from_padded_ids(batch_ids, self.pad_token_id)
-        with self.sequence_layout.prepare_forward(
-            batch_ids, mask, pixel_values=pixel_values
-        ) as fwd:
-            set_fused_adapter_routing(self.actor, ["critic"])
-            with (
-                self._vision_cache.images(image_keys),
-                self._patch_lm_head_to_identity(),
-                self._amp_ctx(),
-                self._activation_offload_ctx(),
-            ):
-                self.actor.train()
-                _, _, values = self.actor(**fwd.kwargs)
-            return fwd.restore(values, "values")
+        model_kwargs, packed = self._gradient_forward_inputs(batch_ids, pixel_values)
+        set_fused_adapter_routing(self.actor, ["critic"])
+        with (
+            self._vision_cache.images(image_keys),
+            self._patch_lm_head_to_identity(),
+            self._amp_ctx(),
+            self._activation_offload_ctx(),
+        ):
+            self.actor.train()
+            _, _, values = self.actor(**model_kwargs)
+        if packed is not None:
+            return unpack_values(values[0], packed)
+        return values[:, :-1]
+
+    def _actor_log_probs_from_hidden(
+        self,
+        actor_hidden: torch.Tensor,
+        batch_ids: torch.Tensor,
+        score_mask: torch.Tensor,
+        support_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Gradient-bearing actor log-probs scored from the actor rows' hidden states.
+
+        :param actor_hidden: ``(B, T, H)`` actor last hidden states.
+        :type actor_hidden: torch.Tensor
+        :param batch_ids: ``(B, T)`` token ids the hidden states were run on.
+        :type batch_ids: torch.Tensor
+        :param score_mask: ``(B, T - 1)`` positions the lm_head scores.
+        :type score_mask: torch.Tensor
+        :param support_ids: ``(B, T - 1, K)`` sampling support per position, or ``None``.
+        :type support_ids: torch.Tensor | None
+        :return: ``(B, T - 1)`` per-token log-probs, zero outside ``score_mask``.
+        :rtype: torch.Tensor
+        """
+        fused_fn, _, _ = self._fused_logprob_fn_and_head()
+        with self.shard_runtime.gather_layer(
+            self._get_lm_head(), device=batch_ids.device
+        ) as (head_w, head_b):
+            return self._fused_chunk_logprobs(
+                actor_hidden,
+                batch_ids,
+                fused_fn,
+                head_w,
+                head_b,
+                score_mask,
+                support_ids,
+            )
 
     def _actor_critic_grad_norms(self, step: OptimizerStep) -> dict[str, float]:
         """Split one optimizer step's gradient norms by actor and critic param groups.

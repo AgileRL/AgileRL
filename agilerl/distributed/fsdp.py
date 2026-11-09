@@ -7,12 +7,13 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import logging
 import re
 from collections.abc import Callable, Generator, Iterable, Sequence
-from concurrent.futures import Future
 from contextlib import _GeneratorContextManager, contextmanager
-from typing import TYPE_CHECKING, Any, Protocol, cast, overload
+from pathlib import Path
+from typing import Any, Protocol, cast, overload
 
 import torch
 import torch.nn.init as init
@@ -22,11 +23,15 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import FSDPModule, share_comm_ctx
 from torch.distributed.tensor import DTensor, distribute_tensor
 from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
+from torch.distributed.tensor.placement_types import Shard
+from transformers import PretrainedConfig, PreTrainedModel
+from transformers.conversion_mapping import get_checkpoint_conversion_mapping
+from transformers.core_model_loading import WeightTransform
+from transformers.utils import SAFE_WEIGHTS_INDEX_NAME, SAFE_WEIGHTS_NAME, cached_file
 
-from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.arena.models.fsdp import FSDPConfig
-from agilerl.distributed.context_parallel import apply_mixer_context_parallel
 from agilerl.distributed.expert_parallel import (
+    ParallelMesh,
     apply_expert_parallel,
     assert_packed_experts_ep_sharded,
     iter_packed_expert_modules,
@@ -37,21 +42,13 @@ from agilerl.distributed.fsdp_blocks import (
     resolve_causal_lm,
 )
 from agilerl.distributed.fsdp_meta import (
-    ConverterRoute,
     ModelWithTiedWeightKeys,
-    build_safetensors_key_files,
-    checkpoint_quantization_config,
-    converter_checkpoint_routes,
-    dequantizing_transform_groups,
     init_embed_scale_buffers,
     init_rope_buffers,
     match_checkpoint_key,
-    module_pretrained_config,
     renamed_checkpoint_keys,
-    resolve_checkpoint_source,
     restore_after_to_empty,
 )
-from agilerl.distributed.mesh import MeshAxisName, ParallelMesh
 from agilerl.distributed.process import get_world_size
 from agilerl.distributed.tensor_parallel import (
     apply_tensor_parallel,
@@ -59,12 +56,17 @@ from agilerl.distributed.tensor_parallel import (
 )
 from agilerl.lora.moe import set_routed_experts_chunk_bytes
 
-if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
-    from transformers import PretrainedConfig, PreTrainedModel
-    from transformers.conversion_mapping import get_checkpoint_conversion_mapping
-    from transformers.core_model_loading import MergeModulelist, WeightTransform
-
 WRAPPER_FQN_PARTS = frozenset({"_checkpoint_wrapped_module", "_fsdp_wrapped_module"})
+
+
+def _module_pretrained_config(module: nn.Module) -> PretrainedConfig | None:
+    """Return a Hugging Face config carried by *module*, when present."""
+    if isinstance(module, PreTrainedModel):
+        return module.config
+    module_config = vars(module).get("config")
+    if isinstance(module_config, PretrainedConfig):
+        return module_config
+    return None
 
 
 def canonical_fsdp_param_fqn(name: str) -> str:
@@ -451,30 +453,17 @@ def checkpoint_key_for_parameter(live_name: str) -> str:
     return _without_base_layer_modules(name)
 
 
-def checkpoint_key_candidates(
-    live_name: str, base_model_prefix: str
-) -> tuple[str, ...]:
+def checkpoint_key_candidates(live_name: str) -> tuple[str, ...]:
     """Safetensors keys that may store this parameter.
 
     A checkpoint may name the language body ``backbone`` while the module
-    built from config names that body ``model``, and may omit the causal LM's
-    ``base_model_prefix``.
-
-    :param live_name: Parameter or buffer name from the live module.
-    :type live_name: str
-    :param base_model_prefix: The causal LM's ``base_model_prefix``, or ``""``.
-    :type base_model_prefix: str
-    :return: Candidate keys, the direct mapping first.
-    :rtype: tuple[str, ...]
+    built from config names that body ``model``.
     """
     key = checkpoint_key_for_parameter(live_name)
-    candidates = [key]
     alias = key.replace("language_model.model.", "language_model.backbone.", 1)
-    if alias != key:
-        candidates.append(alias)
-    if base_model_prefix and key.startswith(f"{base_model_prefix}."):
-        candidates.append(key.removeprefix(f"{base_model_prefix}."))
-    return tuple(candidates)
+    if alias == key:
+        return (key,)
+    return (key, alias)
 
 
 def _checkpoint_transform_groups(
@@ -483,11 +472,10 @@ def _checkpoint_transform_groups(
     """Conversions registered for a module class or model type, under that module path.
 
     Longer paths come first so a nested module's mapping wins over its parent.
-    A quantized checkpoint also gets the quantizer's dequantize conversions.
     """
     groups: list[tuple[str, list[WeightTransform]]] = []
     for name, module in model.named_modules():
-        config = module_pretrained_config(module)
+        config = _module_pretrained_config(module)
         if config is None:
             continue
         model_type = config.model_type
@@ -499,13 +487,7 @@ def _checkpoint_transform_groups(
         prefix = checkpoint_key_for_parameter(name) if name else ""
         groups.append((prefix, list(conversions)))
     groups.sort(key=lambda item: len(item[0]), reverse=True)
-    causal_config = module_pretrained_config(resolve_causal_lm(model))
-    if causal_config is None:
-        return groups
-    quantization_config = checkpoint_quantization_config(causal_config.to_dict())
-    if quantization_config is None:
-        return groups
-    return dequantizing_transform_groups(groups, quantization_config)
+    return groups
 
 
 def _shift_slices_for_split(
@@ -567,116 +549,6 @@ def _packed_checkpoint_keys(
     return None
 
 
-def _resolve_packed_keys(
-    candidates: tuple[str, ...],
-    key_files: dict[str, str],
-    renamed_keys: dict[str, str],
-) -> list[str] | None:
-    """Indexed weights that stack into this packed parameter, directly or after renames."""
-    packed = _packed_checkpoint_keys(candidates, key_files)
-    if packed is not None:
-        return packed
-    renamed_packed = _packed_checkpoint_keys(candidates, renamed_keys)
-    if renamed_packed is None:
-        return None
-    return [renamed_keys[key] for key in renamed_packed]
-
-
-def _route_reads_more_keys(
-    route: ConverterRoute,
-    checkpoint_key: str | None,
-    candidates: tuple[str, ...],
-    key_files: dict[str, str],
-    renamed_keys: dict[str, str],
-) -> bool:
-    """Whether the converter reads stored keys a slice copy of this parameter would skip."""
-    if checkpoint_key is not None:
-        copied = {checkpoint_key}
-    else:
-        copied = set(_resolve_packed_keys(candidates, key_files, renamed_keys) or ())
-    return not {key for _, key in route.sources} <= copied
-
-
-def _load_converter_route(
-    route: ConverterRoute,
-    key_files: dict[str, str],
-    config: PretrainedConfig | None,
-    copies: list[tuple[str, tuple[slice, ...], torch.Tensor, int]],
-) -> None:
-    """Run one checkpoint converter on this rank's sources and copy each target's shard.
-
-    :param route: Converter and the stored keys it reads.
-    :type route: ConverterRoute
-    :param key_files: Stored checkpoint key to safetensors path.
-    :type key_files: dict[str, str]
-    :param config: Config the converter operations read.
-    :type config: PretrainedConfig | None
-    :param copies: Per target: converted name, global slices, local destination
-        and global dim-0 size.
-    :type copies: list[tuple[str, tuple[slice, ...], torch.Tensor, int]]
-    """
-    sources = route.sources
-    if any(isinstance(op, MergeModulelist) for op in route.converter.operations):
-        # One source per expert per pattern, stacked on dim 0: read this rank's experts only.
-        ((target, index_slices, dest, global_dim0),) = copies
-        experts = index_slices[0]
-        keys_by_pattern: dict[str, list[str]] = {}
-        for pattern, key in sources:
-            keys_by_pattern.setdefault(pattern, []).append(key)
-        sources = [
-            (pattern, key)
-            for pattern, keys in keys_by_pattern.items()
-            for key in keys[experts]
-        ]
-        local_experts = slice(0, experts.stop - experts.start)
-        copies = [(target, (local_experts, *index_slices[1:]), dest, global_dim0)]
-    keys_by_path: dict[str, list[str]] = {}
-    for _, key in sources:
-        keys_by_path.setdefault(key_files[key], []).append(key)
-    tensors: dict[str, torch.Tensor] = {}
-    for path, path_keys in keys_by_path.items():
-        with safe_open(path, framework="pt", device="cpu") as handle:
-            tensors.update((key, handle.get_tensor(key)) for key in path_keys)
-    converter = copy.deepcopy(route.converter)
-    for pattern, key in sources:
-        loaded: Future[torch.Tensor] = Future()
-        loaded.set_result(tensors.pop(key))
-        converter.add_tensor(route.target, key, pattern, loaded)
-    converted = converter.convert(route.target, config=config)
-    for target, index_slices, dest, global_dim0 in copies:
-        tensor = converted[target]
-        tensor = tensor[0] if isinstance(tensor, list) else tensor
-        source = _take_local_expert_rows(tensor[index_slices], dest, global_dim0)
-        _copy_checkpoint_tensor(dest, source, target)
-
-
-def _copy_checkpoint_tensor(
-    dest: torch.Tensor, source: torch.Tensor, checkpoint_key: str
-) -> None:
-    """Cast a stored tensor into a parameter or buffer.
-
-    :param dest: Local destination tensor.
-    :type dest: torch.Tensor
-    :param source: Tensor read from the checkpoint or produced by a converter.
-    :type source: torch.Tensor
-    :param checkpoint_key: Key named in the error.
-    :type checkpoint_key: str
-    :raises RuntimeError: If ``source`` holds 1-byte FP8 / FP4 codes for a
-        wider float destination, which a cast would load without their scales.
-    """
-    if (
-        dest.is_floating_point()
-        and dest.element_size() > 1
-        and source.element_size() == 1
-    ):
-        msg = (
-            f"Checkpoint tensor {checkpoint_key!r} is {source.dtype} with no "
-            "dequantize route; the checkpoint config needs its quantization_config"
-        )
-        raise RuntimeError(msg)
-    dest.copy_(source.to(device=dest.device, dtype=dest.dtype))
-
-
 def _take_local_expert_rows(
     source: torch.Tensor,
     dest: torch.Tensor,
@@ -735,7 +607,7 @@ def _copy_indexed_weights(
             f"destination shape {tuple(dest.shape)}"
         )
         raise RuntimeError(msg)
-    _copy_checkpoint_tensor(dest, source, keys[0])
+    dest.copy_(source.to(device=dest.device, dtype=dest.dtype))
 
 
 def global_shard_slices(
@@ -743,18 +615,26 @@ def global_shard_slices(
     placements: tuple[Any, ...],
     device_mesh: DeviceMesh,
 ) -> tuple[slice, ...]:
-    """Per-dimension slices for this rank's shard of a logical tensor.
-
-    Handles ``_StridedShard`` (FSDP over TP); each rank's piece is one
-    contiguous block per dim.
-    """
-    local_shape, offset = compute_local_shape_and_global_offset(
-        tuple(int(size) for size in global_shape), device_mesh, placements
-    )
-    return tuple(
-        slice(start, start + size)
-        for start, size in zip(offset, local_shape, strict=True)
-    )
+    """Per-dimension slices for this rank's shard of a logical tensor."""
+    slices: list[slice] = [slice(0, int(size)) for size in global_shape]
+    coordinate = device_mesh.get_coordinate()
+    for mesh_dim, placement in enumerate(placements):
+        if not isinstance(placement, Shard):
+            continue
+        shard_dim = placement.dim
+        num_chunks = device_mesh.size(mesh_dim=mesh_dim)
+        if coordinate is None:
+            rank_at_mesh = device_mesh.get_local_rank(mesh_dim=mesh_dim)
+        else:
+            rank_at_mesh = int(coordinate[mesh_dim])
+        dim_size = int(global_shape[shard_dim])
+        local_size, offset = Shard.local_shard_size_and_offset(
+            dim_size, num_chunks, rank_at_mesh
+        )
+        start = int(offset)
+        end = start + int(local_size)
+        slices[shard_dim] = slice(start, end)
+    return tuple(slices)
 
 
 def _stable_generator_seed(name: str) -> int:
@@ -838,7 +718,66 @@ def _copy_safetensors_slice(
     source = handle.get_slice(checkpoint_key)[index_slices]
     if global_dim0 is not None:
         source = _take_local_expert_rows(source, dest, global_dim0)
-    _copy_checkpoint_tensor(dest, source, checkpoint_key)
+    dest.copy_(source.to(device=dest.device, dtype=dest.dtype))
+
+
+def _checkpoint_source_from_config(config: PretrainedConfig) -> str | None:
+    raw_path = config.name_or_path
+    if not raw_path:
+        return None
+    source = str(raw_path)
+    index_file = cached_file(
+        source,
+        SAFE_WEIGHTS_INDEX_NAME,
+        _raise_exceptions_for_missing_entries=False,
+    )
+    if index_file is not None:
+        return source
+    weights_file = cached_file(
+        source,
+        SAFE_WEIGHTS_NAME,
+        _raise_exceptions_for_missing_entries=False,
+    )
+    if weights_file is not None:
+        return source
+    return None
+
+
+def _next_unwrap_module(module: nn.Module) -> nn.Module | None:
+    pretrained = getattr(module, "pretrained_model", None)
+    if isinstance(pretrained, nn.Module):
+        return pretrained
+    get_base = getattr(module, "get_base_model", None)
+    if callable(get_base):
+        base = get_base()
+        if isinstance(base, nn.Module):
+            return base
+    wrapped = getattr(module, "base_model", None)
+    if isinstance(wrapped, nn.Module):
+        return wrapped
+    inner = getattr(module, "model", None)
+    if isinstance(inner, nn.Module) and inner is not module:
+        return inner
+    return None
+
+
+def _resolve_checkpoint_source(model: nn.Module) -> str:
+    current: nn.Module | None = model
+    visited: set[int] = set()
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        config = _module_pretrained_config(current)
+        if config is not None:
+            source = _checkpoint_source_from_config(config)
+            if source is not None:
+                return source
+        current = _next_unwrap_module(current)
+    msg = (
+        "FSDP shard load requires a module config whose name_or_path resolves to "
+        f"{SAFE_WEIGHTS_NAME} or "
+        f"{SAFE_WEIGHTS_INDEX_NAME} (local directory or Hugging Face Hub id)"
+    )
+    raise RuntimeError(msg)
 
 
 def _tied_weight_checkpoint_targets(model: nn.Module) -> set[str]:
@@ -860,7 +799,7 @@ def _candidate_is_tied_head(
     if any(key in tied_targets for key in candidates):
         return True
     causal = resolve_causal_lm(model)
-    config = module_pretrained_config(causal)
+    config = _module_pretrained_config(causal)
     if config is None or not config.tie_word_embeddings:
         return False
     return any(
@@ -868,6 +807,49 @@ def _candidate_is_tied_head(
         or key.endswith((".lm_head.weight", ".embed_out.weight"))
         for key in candidates
     )
+
+
+def _build_safetensors_key_files(model_path: str) -> dict[str, str]:
+    index_file = cached_file(
+        model_path,
+        SAFE_WEIGHTS_INDEX_NAME,
+        _raise_exceptions_for_missing_entries=False,
+    )
+    if index_file is not None:
+        weight_map = json.loads(Path(index_file).read_text(encoding="utf-8"))[
+            "weight_map"
+        ]
+        key_files: dict[str, str] = {}
+        shard_paths: dict[str, str] = {}
+        for key, filename in weight_map.items():
+            if filename not in shard_paths:
+                shard = cached_file(
+                    model_path,
+                    filename,
+                    _raise_exceptions_for_missing_entries=False,
+                )
+                if shard is None:
+                    msg = (
+                        f"FSDP shard load missing shard {filename!r} "
+                        f"for checkpoint {model_path!r}"
+                    )
+                    raise RuntimeError(msg)
+                shard_paths[filename] = shard
+            key_files[key] = shard_paths[filename]
+        return key_files
+    weights_file = cached_file(
+        model_path,
+        SAFE_WEIGHTS_NAME,
+        _raise_exceptions_for_missing_entries=False,
+    )
+    if weights_file is None:
+        msg = (
+            f"FSDP shard load requires {SAFE_WEIGHTS_NAME} or "
+            f"{SAFE_WEIGHTS_INDEX_NAME} at checkpoint {model_path!r}"
+        )
+        raise RuntimeError(msg)
+    with safe_open(weights_file, framework="pt") as handle:
+        return dict.fromkeys(handle.keys(), weights_file)
 
 
 def _initialize_ignored_missing_parameter(model: nn.Module, live_name: str) -> bool:
@@ -910,17 +892,12 @@ def _initialize_ignored_missing_parameter(model: nn.Module, live_name: str) -> b
 
 def _load_sharded_weights_from_safetensors(model: nn.Module) -> None:
     """Copy each rank's parameter shards from on-disk safetensors."""
-    model_path = resolve_checkpoint_source(model)
-    key_files = build_safetensors_key_files(model_path)
+    model_path = _resolve_checkpoint_source(model)
+    key_files = _build_safetensors_key_files(model_path)
     tied_targets = _tied_weight_checkpoint_targets(model)
     transform_groups = _checkpoint_transform_groups(model)
     renamed_keys = renamed_checkpoint_keys(key_files, transform_groups)
-    converter_routes = converter_checkpoint_routes(key_files, transform_groups)
-    causal = resolve_causal_lm(model)
-    base_model_prefix = (
-        causal.base_model_prefix if isinstance(causal, PreTrainedModel) else ""
-    )
-    copied_outside_language = 0
+    vision_parameters_copied = 0
     unmatched_outside_language: list[str] = []
     # Parameters outside language_model stay empty when no checkpoint key matches.
     has_language_tower = any(
@@ -932,47 +909,13 @@ def _load_sharded_weights_from_safetensors(model: nn.Module) -> None:
     indexed: list[
         tuple[list[str], tuple[int, ...], tuple[slice, ...] | None, torch.Tensor]
     ] = []
-    routed: dict[
-        int,
-        tuple[ConverterRoute, list[tuple[str, tuple[slice, ...], torch.Tensor, int]]],
-    ] = {}
     with torch.no_grad():
         for live_name, param in model.named_parameters():
             canonical = canonical_fsdp_param_fqn(live_name)
-            candidates = checkpoint_key_candidates(live_name, base_model_prefix)
+            candidates = checkpoint_key_candidates(live_name)
             checkpoint_key, split_index = match_checkpoint_key(
                 candidates, key_files, renamed_keys, transform_groups
             )
-            outside_language = (
-                has_language_tower and "language_model." not in candidates[0]
-            )
-            target = next((key for key in candidates if key in converter_routes), None)
-            if target is not None and _route_reads_more_keys(
-                converter_routes[target],
-                checkpoint_key,
-                candidates,
-                key_files,
-                renamed_keys,
-            ):
-                route = converter_routes[target]
-                route_slices = (
-                    global_shard_slices(
-                        param.shape, param.placements, param.device_mesh
-                    )
-                    if isinstance(param, DTensor)
-                    else tuple(slice(0, int(size)) for size in param.shape)
-                )
-                routed.setdefault(id(route), (route, []))[1].append(
-                    (
-                        target,
-                        route_slices,
-                        _parameter_dest_local(param),
-                        int(param.shape[0]),
-                    )
-                )
-                if outside_language:
-                    copied_outside_language += 1
-                continue
             if checkpoint_key is not None:
                 path = key_files[checkpoint_key]
                 if isinstance(param, DTensor):
@@ -997,8 +940,8 @@ def _load_sharded_weights_from_safetensors(model: nn.Module) -> None:
                         int(param.shape[0]),
                     )
                 )
-                if outside_language:
-                    copied_outside_language += 1
+                if "vision_model." in canonical:
+                    vision_parameters_copied += 1
                 continue
             if _is_lora_parameter_name(live_name):
                 mesh = param.device_mesh if isinstance(param, DTensor) else None
@@ -1024,12 +967,16 @@ def _load_sharded_weights_from_safetensors(model: nn.Module) -> None:
                     mesh,
                 )
                 continue
-            if outside_language:
+            if has_language_tower and "language_model." not in candidates[0]:
                 if _initialize_ignored_missing_parameter(model, live_name):
                     continue
                 unmatched_outside_language.append(canonical)
                 continue
-            packed = _resolve_packed_keys(candidates, key_files, renamed_keys)
+            packed = _packed_checkpoint_keys(candidates, key_files)
+            if packed is None:
+                renamed_packed = _packed_checkpoint_keys(candidates, renamed_keys)
+                if renamed_packed is not None:
+                    packed = [renamed_keys[key] for key in renamed_packed]
             if packed is not None:
                 global_shape = tuple(int(size) for size in param.shape)
                 slices = (
@@ -1050,7 +997,7 @@ def _load_sharded_weights_from_safetensors(model: nn.Module) -> None:
             raise RuntimeError(msg)
         for live_name, buf in model.named_buffers():
             checkpoint_key, _ = match_checkpoint_key(
-                checkpoint_key_candidates(live_name, base_model_prefix),
+                checkpoint_key_candidates(live_name),
                 key_files,
                 renamed_keys,
                 transform_groups,
@@ -1067,9 +1014,8 @@ def _load_sharded_weights_from_safetensors(model: nn.Module) -> None:
                     path
                 ]:
                     if index_slices is None:
-                        _copy_checkpoint_tensor(
-                            dest, handle.get_tensor(checkpoint_key), checkpoint_key
-                        )
+                        full = handle.get_tensor(checkpoint_key)
+                        dest.copy_(full.to(device=dest.device, dtype=dest.dtype))
                     else:
                         _copy_safetensors_slice(
                             handle,
@@ -1080,17 +1026,13 @@ def _load_sharded_weights_from_safetensors(model: nn.Module) -> None:
                         )
         for keys, global_shape, slices, dest in indexed:
             _copy_indexed_weights(key_files, keys, global_shape, slices, dest)
-        if routed:
-            route_config = module_pretrained_config(resolve_causal_lm(model))
-            for route, copies in routed.values():
-                _load_converter_route(route, key_files, route_config, copies)
     first_unmatched = (
         unmatched_outside_language[0] if unmatched_outside_language else "none"
     )
     logging.getLogger(__name__).info(
-        "FSDP safetensors load copied %d parameters outside language_model; "
-        "%d had no checkpoint key (first %s)",
-        copied_outside_language,
+        "FSDP safetensors load copied %d vision_model parameters; "
+        "%d parameters outside language_model had no checkpoint key (first %s)",
+        vision_parameters_copied,
         len(unmatched_outside_language),
         first_unmatched,
     )
@@ -1100,32 +1042,15 @@ def _move_ignored_to_device(model: nn.Module, device: str | torch.device) -> Non
     """Move non-FSDP-managed params and buffers to the compute device.
 
     With ``cpu_offload`` everything materializes on CPU, but FSDP only
-    gathers the parameters it manages. Ignored ones (embeddings, tiny
-    replicated params, TP-only DTensors such as resident frozen TP shards)
-    and buffers would stay on CPU and fail the first forward against CUDA
-    inputs. Each tensor keeps its identity, so tied weights stay tied.
+    gathers managed (DTensor) parameters. Ignored ones (embeddings, tiny
+    replicated params) and buffers would stay on CPU and fail the first
+    forward against CUDA inputs. Each tensor keeps its identity, so tied
+    weights stay tied.
     """
     compute = torch.device(device)
     for tensor in [*model.parameters(), *model.buffers()]:
         if not isinstance(tensor, DTensor):
             tensor.data = tensor.data.to(compute)
-    for param in model.parameters():
-        if not isinstance(param, DTensor) or param.device_mesh.mesh_dim_names != (
-            MeshAxisName.TP,
-        ):
-            continue
-        # ``.data`` assignment relabels a DTensor but leaves its local shard.
-        moved = DTensor.from_local(
-            param.to_local().detach().to(compute),
-            param.device_mesh,
-            param.placements,
-            run_check=False,
-            shape=param.shape,
-            stride=param.stride(),
-        )
-        torch.utils.swap_tensors(
-            param, nn.Parameter(moved, requires_grad=param.requires_grad)
-        )
 
 
 def materialize_fsdp2_from_cpu_state(
@@ -1159,9 +1084,6 @@ def materialize_fsdp2_from_cpu_state(
     :type gradient_checkpointing: bool
     :return: The sharded model (same object).
     :rtype: nn.Module
-    :raises ValueError: If EP, TP or HSDP has no ``parallel_mesh``,
-        ``config.cpu_offload`` is set with ``config.ep > 1``, or
-        ``routed_expert_chunk_mib`` is unset.
     """
     hsdp = config.shard_group_size not in (None, get_world_size())
     if parallel_mesh is None and (config.ep > 1 or config.tp > 1 or hsdp):
@@ -1170,20 +1092,15 @@ def materialize_fsdp2_from_cpu_state(
             f"shard_group_size={config.shard_group_size}) needs a ParallelMesh"
         )
         raise ValueError(msg)
-    # TP plans leave routed experts to EP. Without EP, FSDP splits experts over
-    # only shard group / (cp * tp) ranks: tp times the expert memory per GPU.
-    # ep >= tp is TorchTitan's rule for MoE meshes.
-    if config.ep < config.tp and iter_packed_expert_modules(model):
+    if (
+        config.cpu_offload
+        and config.ep > 1
+        and parallel_mesh is not None
+        and parallel_mesh.leftover_dp == 1
+    ):
         msg = (
-            f"FSDPConfig(ep={config.ep}, tp={config.tp}): MoE models need "
-            "ep >= tp, since tensor parallel does not split routed experts."
-        )
-        raise ValueError(msg)
-    if config.cpu_offload and config.ep > 1:
-        msg = (
-            f"FSDPConfig.cpu_offload does not support ep={config.ep}: expert LoRA "
-            "adapters, and the experts when ep spans the shard group, stay "
-            "outside FSDP on the EP mesh, so they would stay on CPU. Use "
+            f"FSDPConfig.cpu_offload with ep={config.ep} spanning the whole shard "
+            "group keeps experts out of FSDP, so they would stay on CPU. Use "
             "optim_cpu_offload instead."
         )
         raise ValueError(msg)
@@ -1208,7 +1125,7 @@ def materialize_fsdp2_from_cpu_state(
         raise ValueError(msg)
     model.to_empty(device="meta")
     set_routed_experts_chunk_bytes(model, config.routed_expert_chunk_mib * 1024 * 1024)
-    mesh = None if parallel_mesh is None else parallel_mesh.dp_shard
+    mesh = None if parallel_mesh is None else parallel_mesh.hsdp
     ep_mesh = None if parallel_mesh is None else parallel_mesh.ep
     tp_mesh = None if parallel_mesh is None or config.tp <= 1 else parallel_mesh.tp
     expert_mesh = None
@@ -1230,14 +1147,11 @@ def materialize_fsdp2_from_cpu_state(
                 "expert modules."
             )
             raise RuntimeError(msg)
-        experts_skip_fsdp = parallel_mesh.edp_shard is None
-        expert_mesh = parallel_mesh.edp_shard
+        experts_skip_fsdp = parallel_mesh.leftover_dp == 1
+        if not experts_skip_fsdp:
+            expert_mesh = parallel_mesh.dp_mod_ep
     if config.tp > 1:
         apply_tensor_parallel(model, tp_mesh)
-    if config.cp > 1:
-        apply_mixer_context_parallel(
-            model, None if parallel_mesh is None else parallel_mesh.cp
-        )
     apply_fsdp2(
         model,
         config,

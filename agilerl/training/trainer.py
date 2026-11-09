@@ -21,7 +21,6 @@ from agilerl.algorithms.core.base import (
     MultiAgentAlgorithm,
     SingleAgentAlgorithm,
 )
-from agilerl.architectures import family_chat_template
 from agilerl.arena import ArenaClient
 from agilerl.arena.models import BanditEnvSpec as ArenaBanditEnvSpec
 from agilerl.arena.models import GymEnvSpec as ArenaEnvSpec
@@ -816,7 +815,6 @@ class LocalTrainer(Trainer):
         :returns: The tokenizer.
         :rtype: PreTrainedTokenizerBase
         :raises ImportError: If the LLM dependencies are not installed.
-        :raises ValueError: If the spec names no pretrained model.
         """
         if AutoTokenizer is None:
             msg = "LLM dependencies are not installed. Please install them using: pip install agilerl[llm]"
@@ -825,21 +823,19 @@ class LocalTrainer(Trainer):
         if not isinstance(self.algorithm_spec, LLMAlgorithmSpec):
             msg = f"{type(self.algorithm_spec).__name__} is not an LLMAlgorithmSpec."
             raise TypeError(msg)
-        model_path = self.algorithm_spec.pretrained_model_name_or_path
-        if model_path is None:
-            msg = f"{type(self.algorithm_spec).__name__} has no pretrained_model_name_or_path."
-            raise ValueError(msg)
-        tokenizer = AutoTokenizer.from_pretrained(model_path)
+        tokenizer = AutoTokenizer.from_pretrained(
+            self.algorithm_spec.pretrained_model_name_or_path
+        )
         if tokenizer is None:
             msg = "AutoTokenizer.from_pretrained returned None."
             raise TypeError(msg)
 
         if tokenizer.chat_template is None:
-            tokenizer.chat_template = (
-                family_chat_template(model_path) or DEFAULT_CHAT_TEMPLATE
-            )
+            tokenizer.chat_template = DEFAULT_CHAT_TEMPLATE
 
-        model_config, generation_config = load_pad_token_configs(model_path)
+        model_config, generation_config = load_pad_token_configs(
+            self.algorithm_spec.pretrained_model_name_or_path
+        )
         pad_token_id, pad_source = resolve_pad_token_id(
             tokenizer,
             model_config=model_config,

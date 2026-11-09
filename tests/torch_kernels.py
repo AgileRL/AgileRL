@@ -5,20 +5,16 @@
 
 transformers binds the causal-conv1d, FLA and mamba-ssm kernels when it imports
 these modules, if those packages are installed, and the kernels take CUDA tensors only.
-The Qwen GDN patches bind FLA's fused gated RMSNorm whenever it imports.
 """
 
 from __future__ import annotations
 
 import inspect
-import sys
 
 import pytest
 from transformers.models.nemotron_h import modeling_nemotron_h
 from transformers.models.qwen3_5 import modeling_qwen3_5
 from transformers.models.qwen3_5_moe import modeling_qwen3_5_moe
-
-from agilerl.architectures.qwen3_5 import packed as qwen_packed
 
 GDN_KERNELS = (
     "causal_conv1d_fn",
@@ -41,12 +37,7 @@ KERNEL_GLOBALS = {
 
 
 def use_torch_kernels(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Point each kernel global at its PyTorch fallback and keep HF's eager gated norm.
-
-    The Qwen GDN patches then also see the kernels as absent.
-    """
+    """Point each kernel global at the PyTorch function its kernel wrapper falls back to."""
     for module, names in KERNEL_GLOBALS.items():
         for name in names:
             monkeypatch.setattr(module, name, inspect.unwrap(getattr(module, name)))
-    monkeypatch.setitem(sys.modules, "fla.modules.fused_norm_gate", None)
-    monkeypatch.setattr(qwen_packed, "_varlen_kernels_ready", lambda: False)

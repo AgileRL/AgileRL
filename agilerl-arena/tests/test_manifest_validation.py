@@ -217,21 +217,6 @@ class TestResolvedMemoryFields:
         assert validated.algorithm.micro_batch_size_per_gpu == 2
         assert validated.algorithm.fsdp.reshard_after_forward is False
 
-    def test_picked_shard_frozen_tp_validates_on_the_model(self) -> None:
-        doc = manifest(GRPO, algorithm={"fsdp": {"tp": 2, "shard_frozen_tp": False}})
-
-        validated = TrainingManifest.model_validate(doc)
-
-        assert validated.algorithm.fsdp.shard_frozen_tp is False
-        assert validated.algorithm.fsdp.frozen_tp_resident is True
-
-    def test_picked_save_moe_collectives_validates_on_the_model(self) -> None:
-        doc = manifest(GRPO, algorithm={"fsdp": {"save_moe_collectives": True}})
-
-        validated = TrainingManifest.model_validate(doc)
-
-        assert validated.algorithm.fsdp.save_moe_collectives is True
-
     @pytest.mark.parametrize(
         ("algorithm", "dotted"),
         [
@@ -248,8 +233,6 @@ class TestResolvedMemoryFields:
             ),
             ({"fsdp": {"activation_offload": False}}, "fsdp.activation_offload"),
             ({"fsdp": {"cpu_offload": True}}, "fsdp.cpu_offload"),
-            ({"fsdp": {"shard_frozen_tp": False}}, "fsdp.shard_frozen_tp"),
-            ({"fsdp": {"save_moe_collectives": True}}, "fsdp.save_moe_collectives"),
             (
                 {"fsdp": {"checkpoint_every_n_blocks": 2}},
                 "fsdp.checkpoint_every_n_blocks",
@@ -1307,92 +1290,10 @@ class TestAsyncRolloutDefaults:
 class TestEpochDrivenTraining:
     """A run may state its schedule in epochs; the trainer converts to steps."""
 
-    @pytest.mark.parametrize(
-        ("name", "objective"),
-        [("SFT", "sft"), ("DPO", "preference")],
-    )
-    def test_dataset_llm_rejects_num_epochs_and_max_steps(
-        self, name: str, objective: str
-    ) -> None:
-        doc = copy.deepcopy(GRPO)
-        doc["algorithm"] = {"name": name}
-        doc["environment"] = {
-            "env_type": "dataset",
-            "objective": objective,
-            "dataset": "d",
-        }
-        doc["training"] = {"num_epochs": 1, "max_steps": 50}
-
-        with pytest.raises(ValidationError, match="are both set; set one"):
-            TrainingManifest.model_validate(doc)
-
-    @pytest.mark.parametrize(
-        ("name", "objective"),
-        [("SFT", "sft"), ("DPO", "preference")],
-    )
-    def test_dataset_llm_accepts_only_num_epochs(
-        self, name: str, objective: str
-    ) -> None:
-        doc = copy.deepcopy(GRPO)
-        doc["algorithm"] = {"name": name}
-        doc["environment"] = {
-            "env_type": "dataset",
-            "objective": objective,
-            "dataset": "d",
-        }
-        doc["training"] = {"num_epochs": 1}
-
-        validated = TrainingManifest.model_validate(doc)
-        payload = validated.to_payload()
-
-        assert validated.training.num_epochs == 1
-        assert "max_steps" not in validated.training.model_fields_set
-        assert "max_steps" not in payload["training"]
-        TrainingManifest.model_validate(payload)
-
-    @pytest.mark.parametrize(
-        ("name", "objective"),
-        [("SFT", "sft"), ("DPO", "preference")],
-    )
-    def test_dataset_llm_accepts_only_max_steps(
-        self, name: str, objective: str
-    ) -> None:
-        doc = copy.deepcopy(GRPO)
-        doc["algorithm"] = {"name": name}
-        doc["environment"] = {
-            "env_type": "dataset",
-            "objective": objective,
-            "dataset": "d",
-        }
-        doc["training"] = {"max_steps": 50}
-
-        validated = TrainingManifest.model_validate(doc)
-        payload = validated.to_payload()
-
-        assert validated.training.max_steps == 50
-        assert validated.training.num_epochs is None
-        assert payload["training"]["max_steps"] == 50
-        TrainingManifest.model_validate(payload)
-
-    def test_dataset_backed_grpo_epoch_only_payload_round_trips(self) -> None:
-        doc = copy.deepcopy(GRPO)
-        doc["training"] = {"num_epochs": 1}
-
-        payload = TrainingManifest.model_validate(doc).to_payload()
-
-        assert "max_steps" not in payload["training"]
-        TrainingManifest.model_validate(payload)
-
-    def test_grpo_rejects_num_epochs_and_max_steps(self) -> None:
-        with pytest.raises(ValidationError, match="are both set; set one"):
-            TrainingManifest.model_validate(manifest(GRPO, training={"num_epochs": 1}))
-
     def test_accepts_num_epochs_with_evo_epochs(self) -> None:
-        doc = copy.deepcopy(DQN)
-        doc["training"] = {"num_epochs": 4, "evo_epochs": 1, "pop_size": 2}
-
-        validated = TrainingManifest.model_validate(doc)
-
+        validated = TrainingManifest.model_validate(
+            manifest(DQN, training={"num_epochs": 4, "evo_epochs": 1})
+        )
         assert validated.training.num_epochs == 4
         assert validated.training.evo_epochs == 1
 
@@ -1405,11 +1306,9 @@ class TestEpochDrivenTraining:
     def test_evo_steps_is_not_defaulted_alongside_evo_epochs(self) -> None:
         # Two intervals in one payload would contradict each other; the trainer
         # computes evo_steps from evo_epochs once it knows the dataset size.
-        doc = copy.deepcopy(DQN)
-        doc["training"] = {"num_epochs": 4, "evo_epochs": 1, "pop_size": 2}
-
-        validated = TrainingManifest.model_validate(doc)
-
+        validated = TrainingManifest.model_validate(
+            manifest(DQN, training={"num_epochs": 4, "evo_epochs": 1})
+        )
         assert validated.training.evo_steps is None
 
     def test_a_step_driven_run_still_gets_its_evo_steps_default(self) -> None:
@@ -2097,12 +1996,7 @@ class TestSchema:
             and c.get("then")
             == {
                 "properties": {
-                    "training": {
-                        "properties": {
-                            "num_epochs": {"default": 1},
-                            "max_steps": {"default": None},
-                        }
-                    }
+                    "training": {"properties": {"num_epochs": {"default": 1}}}
                 }
             }
         )
@@ -2119,7 +2013,6 @@ class TestSchema:
         }
         applied = self._applied_training_defaults(dataset_rollout)
         assert applied["num_epochs"] == 1
-        assert applied["max_steps"] is None
         assert applied["evo_steps"] == 20
 
         generative_rollout = {
@@ -2753,8 +2646,7 @@ class TestThinkingBudgetParser:
                 r"reasoning start and end tokens, and "
                 rf"{re.escape(model)} has none\. Unset thinking_token_budget, or "
                 r"set algorithm\.vllm_engine_args\.reasoning_parser to one that "
-                r"has them: deepseek_r1, deepseek_v4, gemma4, glm47, mimo, "
-                r"nemotron_v3, qwen3\."
+                r"has them: deepseek_r1, gemma4, nemotron_v3, qwen3\."
             ),
         ):
             TrainingManifest.model_validate(thinking_budget_manifest(model))
@@ -2802,52 +2694,6 @@ class TestThinkingBudgetParser:
         validated = TrainingManifest.model_validate(GRPO)
 
         assert validated.algorithm.thinking_token_budget is None
-
-
-def parallel_manifest(model: str, tp: int, ep: int) -> dict:
-    """GRPO manifest for *model* with the given tensor and expert parallel sizes."""
-    return manifest(
-        GRPO,
-        algorithm={"fsdp": {"tp": tp, "ep": ep}},
-        network={"pretrained_model_name_or_path": model},
-    )
-
-
-class TestExpertParallelCoversTensorParallel:
-    @pytest.mark.parametrize(("tp", "ep"), [(2, 2), (2, 4), (1, 2)])
-    def test_accepts_ep_at_or_above_tp_for_a_moe_model(self, tp: int, ep: int) -> None:
-        validated = TrainingManifest.model_validate(
-            parallel_manifest("openai/gpt-oss-20b", tp, ep)
-        )
-
-        assert (validated.algorithm.fsdp.tp, validated.algorithm.fsdp.ep) == (tp, ep)
-
-    def test_accepts_tp_without_ep_for_a_dense_model(self) -> None:
-        validated = TrainingManifest.model_validate(
-            parallel_manifest("Qwen/Qwen3-4B", 2, 1)
-        )
-
-        assert validated.algorithm.fsdp.tp == 2
-
-    def test_rejects_ep_below_tp_for_a_moe_model(self) -> None:
-        with pytest.raises(
-            ValidationError,
-            match=(
-                r"algorithm\.fsdp\.ep=1 is below tp=2: openai/gpt-oss-20b is a "
-                r"mixture-of-experts model, and tensor parallel does not split "
-                r"routed experts\. Set ep >= tp\."
-            ),
-        ):
-            TrainingManifest.model_validate(
-                parallel_manifest("openai/gpt-oss-20b", 2, 1)
-            )
-
-    def test_leaves_an_unsupported_model_to_the_trainer(self) -> None:
-        validated = TrainingManifest.model_validate(
-            parallel_manifest("org/untracked", 2, 1)
-        )
-
-        assert validated.algorithm.fsdp.tp == 2
 
 
 class TestLoraDropoutResolution:

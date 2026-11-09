@@ -33,22 +33,36 @@ from torch import nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper,
 )
-from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
+from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor, distribute_tensor
 from torch.distributed.tensor.placement_types import Replicate, Shard
 from torch.utils.checkpoint import checkpoint, noop_context_fn
 from transformers import NemotronHConfig, PretrainedConfig
 from transformers.models.nemotron_h.modeling_nemotron_h import NemotronHMLP
 
-from agilerl.distributed import (
-    FSDPConfig,
-    ParallelMesh,
-    build_parallel_mesh,
-    fsdp_blocks,
-)
+from agilerl.distributed import FSDPConfig, ep_forward, expert_parallel, fsdp_blocks
 from agilerl.distributed import fsdp as fsdp_mod
+from agilerl.distributed.ep_forward import (
+    _call_with_local_params,
+    _comm_stream,
+    _gathered_expert_block,
+    _hand_over,
+    _install_routed_ep_forward,
+    _install_sorted_ep_forward,
+    _local_param_dict,
+    _on_comm_stream,
+    _route_replicated_span,
+    _routed_up_weight,
+    _routing_override,
+    _run_local_experts,
+    _sorted_weight,
+    _token_adapter_ids,
+    _wait_for,
+)
+from agilerl.distributed.ep_mesh import _split_shard_axis
 from agilerl.distributed.expert_parallel import (
     LocalExperts,
+    ParallelMesh,
     TokenAdapterIds,
     TokenDispatchState,
     _chain_links,
@@ -57,6 +71,7 @@ from agilerl.distributed.expert_parallel import (
     _shard_wrapper_adapters,
     apply_expert_parallel,
     assert_packed_experts_ep_sharded,
+    build_parallel_mesh,
     expert_local_tensor,
     expert_param_bytes_local,
     iter_packed_expert_modules,
@@ -68,24 +83,7 @@ from agilerl.distributed.expert_parallel import (
     shard_experts_on_ep,
     token_combine,
     token_dispatch,
-)
-from agilerl.distributed.expert_parallel import forward as ep_forward
-from agilerl.distributed.expert_parallel.forward import (
-    _call_with_local_params,
-    _comm_stream,
-    _gathered_expert_block,
-    _hand_over,
-    _install_routed_ep_forward,
-    _install_sorted_ep_forward,
-    _on_comm_stream,
-    _route_replicated_span,
-    _routed_up_weight,
-    _routing_override,
-    _run_local_experts,
-    _sorted_weight,
-    _token_adapter_ids,
-    _wait_for,
-    local_param_dict,
+    tp_data_parallel_size,
 )
 from agilerl.distributed.fsdp import (
     _copy_indexed_weights,
@@ -111,7 +109,6 @@ from agilerl.lora.moe import (
 from agilerl.lora.moe import wrappers as moe_wrappers
 from agilerl.lora.moe.grouped_gemm import grouped_linear
 from agilerl.utils.llm_utils import make_llm_optimizer
-from tests.parallel_helpers import CollectiveRecorder, plain
 from tests.rank_launch import run_ranks
 
 _DIST_ENV = ("RANK", "LOCAL_RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT")
@@ -261,11 +258,13 @@ def _shard_worker(rank: int, world_size: int) -> None:
     num_experts = 4
     mesh = build_parallel_mesh(world_size=world_size, ep=ep, device_type="cpu")
     assert mesh is not None
-    assert mesh.edp_shard is None
+    assert mesh.leftover_dp == 1
+    assert tuple(mesh.world.mesh_dim_names) == ("replicate", "shard")
     assert mesh.ep.size() == ep
     assert mesh.ep.ndim == 1
-    assert mesh.dp_shard.size() == world_size
-    assert mesh.dp_shard is not mesh.ep
+    assert mesh.dp_mod_ep is None
+    assert mesh.hsdp.size() == mesh.world.size()
+    assert mesh.hsdp is not mesh.ep
 
     module = _PackedExperts(num_experts, out_features=3, in_features=2)
     for param in module.parameters():
@@ -295,6 +294,88 @@ class TestExpertShardPlacement:
 
     def test_reshard_slices_densified_full_e_replica(self):
         run_ranks(_densify_reshard_worker)
+
+
+def _dp_ep_mesh_worker(rank: int, world_size: int) -> None:
+    ep = 2
+    leftover_dp = world_size // ep
+    mesh = build_parallel_mesh(world_size=world_size, ep=ep, device_type="cpu")
+
+    assert mesh is not None
+    assert mesh.leftover_dp == leftover_dp
+    assert tuple(mesh.world.mesh_dim_names) == ("replicate", "shard")
+    assert mesh.ep.size() == ep
+    assert mesh.dp_mod_ep.size() == leftover_dp
+    assert mesh.ep_replicas.size() == leftover_dp
+    assert mesh.fsdp_experts.mesh_dim_names == ("dp", "ep")
+    assert mesh.fsdp_experts.size() == world_size
+    assert mesh.hsdp.size() == mesh.world.size()
+    assert mesh.hsdp.ndim == 1
+    assert mesh.hsdp is not mesh.ep
+    assert mesh.tp is None
+    assert mesh.tp_replicas is None
+
+
+def _size_one_dp_mesh_worker(rank: int, world_size: int) -> None:
+    ep = world_size
+    mesh = build_parallel_mesh(world_size=world_size, ep=ep, device_type="cpu")
+
+    assert mesh is not None
+    assert mesh.leftover_dp == 1
+    assert tuple(mesh.world.mesh_dim_names) == ("replicate", "shard")
+    assert mesh.ep.size() == ep
+    assert mesh.ep.mesh_dim_names == ("ep",)
+    assert mesh.dp_mod_ep is None
+    assert mesh.fsdp_experts is None
+    assert mesh.ep_replicas.size() == 1
+    assert mesh.hsdp.size() == mesh.world.size()
+    assert mesh.hsdp.ndim == 1
+    assert mesh.hsdp != mesh.ep
+    assert mesh.tp is None
+    assert mesh.tp_replicas is None
+
+
+@pytest.mark.multi_rank
+class TestBuildParallelMesh:
+    def test_ep_spanning_shard_group_builds_no_dp_mesh(self):
+        run_ranks(_size_one_dp_mesh_worker)
+
+    def test_leftover_dp_gt_one_names_dp_and_ep(self):
+        run_ranks(_dp_ep_mesh_worker, 4)
+
+    def test_tensor_parallel_only_builds_no_ep_views(self):
+        run_ranks(_tp_only_mesh_worker, 4)
+
+    def test_hsdp_only_builds_no_ep_or_tp_views(self):
+        run_ranks(_hsdp_only_mesh_worker, 4)
+
+
+def _tp_only_mesh_worker(rank: int, world_size: int) -> None:
+
+    mesh = build_parallel_mesh(world_size=world_size, tp=2, device_type="cpu")
+
+    assert mesh is not None
+    assert mesh.tp.size() == 2
+    assert mesh.tp_replicas.size() == world_size // 2
+    assert mesh.ep is None
+    assert mesh.dp_mod_ep is None
+    assert mesh.ep_replicas is None
+    assert mesh.fsdp_experts is None
+
+
+def _hsdp_only_mesh_worker(rank: int, world_size: int) -> None:
+
+    mesh = build_parallel_mesh(
+        world_size=world_size, shard_group_size=2, device_type="cpu"
+    )
+
+    assert mesh is not None
+    assert mesh.hsdp.mesh_dim_names == ("replicate", "shard")
+    assert mesh.leftover_dp == 2
+    assert mesh.ep is None
+    assert mesh.ep_replicas is None
+    assert mesh.tp is None
+    assert mesh.tp_replicas is None
 
 
 def _densify_reshard_worker(rank: int, world_size: int) -> None:
@@ -457,7 +538,7 @@ class TestCallWithLocalParams:
         expected = module(hidden, index, weights)
 
         out = _call_with_local_params(
-            module, module.forward, local_param_dict(module), hidden, index, weights
+            module, module.forward, _local_param_dict(module), hidden, index, weights
         )
 
         assert torch.equal(out, expected)
@@ -551,9 +632,10 @@ def _materialize_ep_worker(rank: int, world_size: int) -> None:
         model,
         FSDPConfig(ep=world_size, routed_expert_chunk_mib=64),
     )
-    assert ep_mesh.edp_shard is None
-    assert ep_mesh.dp_shard.size() == world_size
-    assert captured["mesh"] is ep_mesh.dp_shard
+    assert ep_mesh.leftover_dp == 1
+    assert tuple(ep_mesh.world.mesh_dim_names) == ("replicate", "shard")
+    assert ep_mesh.hsdp.size() == ep_mesh.world.size()
+    assert captured["mesh"] is ep_mesh.hsdp
     assert captured["expert_mesh"] is None
     assert captured["mesh"] is not ep_mesh.ep
 
@@ -562,13 +644,8 @@ def _materialize_ep_worker(rank: int, world_size: int) -> None:
     local_e = num_experts // world_size
     assert isinstance(experts.up_proj, DTensor), type(experts.up_proj)
     assert local.shape[0] == local_e, tuple(local.shape)
-    assert torch.equal(
-        experts.up_proj.full_tensor().cpu(), original_up.to(experts.up_proj.dtype)
-    )
-    assert torch.equal(
-        experts.down_proj.full_tensor().cpu(),
-        original_down.to(experts.down_proj.dtype),
-    )
+    assert torch.allclose(experts.up_proj.full_tensor().cpu(), original_up)
+    assert torch.allclose(experts.down_proj.full_tensor().cpu(), original_down)
     assert (
         expert_param_bytes_local(experts)
         == (
@@ -593,10 +670,9 @@ def _materialize_dp_ep_worker(rank: int, world_size: int) -> None:
     ep_mesh, captured = _materialize_and_capture_meshes(
         model, FSDPConfig(ep=ep, routed_expert_chunk_mib=64)
     )
-    assert ep_mesh.edp_shard is not None
-    assert ep_mesh.edp_shard.size() == world_size // ep
-    assert captured["mesh"] is ep_mesh.dp_shard
-    assert captured["expert_mesh"] is ep_mesh.edp_shard
+    assert ep_mesh.leftover_dp == world_size // ep
+    assert captured["mesh"] is ep_mesh.hsdp
+    assert captured["expert_mesh"] is ep_mesh.dp_mod_ep
     assert captured["mesh"] is not ep_mesh.ep
 
     experts = model.layers[0].experts
@@ -604,13 +680,8 @@ def _materialize_dp_ep_worker(rank: int, world_size: int) -> None:
     local_e = num_experts // ep
     assert isinstance(experts.up_proj, DTensor), type(experts.up_proj)
     assert local.shape[0] == local_e, tuple(local.shape)
-    assert torch.equal(
-        experts.up_proj.full_tensor().cpu(), original_up.to(experts.up_proj.dtype)
-    )
-    assert torch.equal(
-        experts.down_proj.full_tensor().cpu(),
-        original_down.to(experts.down_proj.dtype),
-    )
+    assert torch.allclose(experts.up_proj.full_tensor().cpu(), original_up)
+    assert torch.allclose(experts.down_proj.full_tensor().cpu(), original_down)
 
 
 def _materialize_meta_safetensors_dp_ep_worker(rank: int, world_size: int) -> None:
@@ -642,7 +713,7 @@ def _materialize_meta_safetensors_dp_ep_worker(rank: int, world_size: int) -> No
                 ),
             )
         assert mesh is not None
-        leftover_dp = 1 if mesh.edp_shard is None else int(mesh.edp_shard.size())
+        leftover_dp = mesh.leftover_dp
         assert leftover_dp == world_size // ep
         local = expert_local_tensor(model.layers[0].experts.up_proj)
         local_e = num_experts // (ep * leftover_dp)
@@ -662,7 +733,7 @@ class TestMaterializeExpertParallel:
     def test_materialize_keeps_local_expert_count_at_e_over_ep(self):
         run_ranks(_materialize_ep_worker)
 
-    def test_materialize_uses_dp_shard_and_edp_shard_when_leftover_dp_gt_one(self):
+    def test_materialize_uses_hsdp_and_dp_mod_ep_when_leftover_dp_gt_one(self):
         run_ranks(_materialize_dp_ep_worker, 4)
 
     def test_dp_gt_one_experts_restore_via_sliced_write(self):
@@ -690,82 +761,6 @@ def _check_expert_dim0_world_sharded(rank: int, world_size: int, ep: int) -> Non
             assert param.shape[0] == num_experts, tuple(param.shape)
             local = expert_local_tensor(param)
             assert local.shape[0] == num_experts // world_size, tuple(local.shape)
-
-
-class RoutedBlock(nn.Module):
-    def __init__(self, hidden: int):
-        super().__init__()
-        self.lin = nn.Linear(hidden, hidden)
-        self.experts = _RoutedExperts(num_experts=4, hidden=hidden, intermediate=8)
-        install_packed_expert_grouped_gemm(self.experts)
-
-    def forward(self, hidden_states, top_k_index, top_k_weights):
-        return self.experts(self.lin(hidden_states), top_k_index, top_k_weights)
-
-
-class RoutedMoe(nn.Module):
-    _no_split_modules: ClassVar = ["RoutedBlock"]
-
-    def __init__(self, hidden: int):
-        super().__init__()
-        self.layers = nn.ModuleList([RoutedBlock(hidden)])
-
-    def forward(self, hidden_states, top_k_index, top_k_weights):
-        return self.layers[0](hidden_states, top_k_index, top_k_weights)
-
-
-def _hsdp_expert_step_worker(rank: int, world_size: int) -> None:
-    # Arrange
-    hidden, rows = 4, 6
-    torch.manual_seed(1)
-    global_hidden = torch.randn(world_size * rows, hidden)
-    global_weights, global_index = torch.softmax(
-        torch.randn(world_size * rows, 4), dim=-1
-    ).topk(2, dim=-1)
-    torch.manual_seed(0)
-    model = RoutedMoe(hidden)
-    reference = copy.deepcopy(model)
-    with patch.object(fsdp_blocks, "PARAM_PERSISTENCE_THRESHOLD", 0):
-        mesh = _materialize(
-            model,
-            FSDPConfig(
-                ep=2,
-                shard_group_size=4,
-                param_dtype="float32",
-                reduce_dtype="float32",
-                routed_expert_chunk_mib=64,
-            ),
-        )
-    assert mesh is not None
-    assert mesh.edp_shard is not None
-    assert mesh.edp_shard.mesh_dim_names == ("dp_replicate", "edp_shard")
-    span = slice(rank * rows, (rank + 1) * rows)
-    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
-    reference_optimizer = torch.optim.SGD(reference.parameters(), lr=0.1)
-
-    # Act
-    model(
-        global_hidden[span], global_index[span], global_weights[span]
-    ).sum().backward()
-    mesh.sync_grads(list(model.parameters()), torch.float32)
-    optimizer.step()
-    # Every rank's loss is a sum over its rows; data-parallel grads average.
-    (
-        reference(global_hidden, global_index, global_weights).sum() / world_size
-    ).backward()
-    reference_optimizer.step()
-
-    # Assert
-    # Float32 sums over 8 ranks in a different order than one rank's matmul.
-    for name, param in model.named_parameters():
-        expected = reference.get_parameter(name)
-        assert torch.allclose(param.full_tensor(), expected, atol=1e-6, rtol=1e-5), name
-
-
-@pytest.mark.multi_rank
-class TestHsdpExpertParallelStep:
-    def test_trainable_experts_step_matches_single_rank_reference(self):
-        run_ranks(_hsdp_expert_step_worker, 8)
 
 
 @pytest.mark.multi_rank
@@ -1067,13 +1062,13 @@ def _lora_chain_worker(rank: int, world_size: int) -> None:
     for frozen in (True, False):
         toy = Toy(frozen)
         assert isinstance(toy.weight, DTensor), type(toy.weight).__name__
-        params = local_param_dict(toy)
+        params = _local_param_dict(toy)
         assert params["weight"].requires_grad is (not frozen), (
             frozen,
             params["weight"].requires_grad,
         )
         out = _call_with_local_params(
-            toy, toy.forward, local_param_dict(toy), torch.randn(3, 8)
+            toy, toy.forward, _local_param_dict(toy), torch.randn(3, 8)
         )
         if frozen:
             assert not out.requires_grad, "frozen fwd needs no grad"
@@ -1146,7 +1141,7 @@ def _ep_lora_fsdp_worker(rank: int, world_size: int) -> None:
     assert applied == 1, f"applied={applied}"
     before = {id(param) for param in model.parameters() if isinstance(param, DTensor)}
     assert before, "expected EP-sharded base and adapter params"
-    expert_mesh = mesh.edp_shard
+    expert_mesh = None if mesh.leftover_dp == 1 else mesh.dp_mod_ep
     with patch.object(fsdp_blocks, "PARAM_PERSISTENCE_THRESHOLD", 0):
         apply_fsdp2(
             model,
@@ -1154,10 +1149,10 @@ def _ep_lora_fsdp_worker(rank: int, world_size: int) -> None:
             # DTensors reach fully_shard (production adapters exceed the
             # persistence threshold too).
             FSDPConfig(ep=ep),
-            mesh=mesh.dp_shard,
+            mesh=mesh.hsdp,
             expert_mesh=expert_mesh,
         )
-    if mesh.edp_shard is None:
+    if mesh.leftover_dp == 1:
         after = {
             id(param)
             for param in model.parameters()
@@ -1175,9 +1170,8 @@ def _ep_lora_fsdp_worker(rank: int, world_size: int) -> None:
             local = expert_local_tensor(param)
             unsharded_dim0 = unsharded_lora_a[name]
             ep_local = unsharded_dim0 // ep
-            leftover_dp = 1 if mesh.edp_shard is None else int(mesh.edp_shard.size())
-            world_local = unsharded_dim0 // (ep * leftover_dp)
-            assert ep_local != world_local, (unsharded_dim0, ep, leftover_dp)
+            world_local = unsharded_dim0 // (ep * mesh.leftover_dp)
+            assert ep_local != world_local, (unsharded_dim0, ep, mesh.leftover_dp)
             assert local.shape[0] == ep_local, (
                 name,
                 tuple(local.shape),
@@ -1252,7 +1246,7 @@ def _dp_ep_packed_rows_worker(rank: int, world_size: int) -> None:
     num_experts = 4
     mesh = build_parallel_mesh(world_size=world_size, ep=ep, device_type="cpu")
     assert mesh is not None, "no mesh"
-    dp = 1 if mesh.edp_shard is None else int(mesh.edp_shard.size())
+    dp = mesh.leftover_dp
     assert dp == world_size // ep
     local_e = num_experts // (ep * dp)
     model = _arange_packed_moe(num_experts)
@@ -1260,12 +1254,12 @@ def _dp_ep_packed_rows_worker(rank: int, world_size: int) -> None:
         dist.broadcast(param.data, src=0)
     applied = apply_expert_parallel(model, mesh.ep)
     assert applied == 1, f"applied={applied}"
-    expert_mesh = mesh.edp_shard
+    expert_mesh = None if dp == 1 else mesh.dp_mod_ep
     with patch.object(fsdp_blocks, "PARAM_PERSISTENCE_THRESHOLD", 0):
         apply_fsdp2(
             model,
             FSDPConfig(ep=ep),
-            mesh=mesh.dp_shard,
+            mesh=mesh.hsdp,
             expert_mesh=expert_mesh,
         )
     expected_expert = (0, 2, 1, 3)[rank]
@@ -1522,8 +1516,8 @@ def _local_param_dict_worker(rank: int, world_size: int) -> None:
     up_ptr = module.up_proj.to_local().data_ptr()
     down_ptr = module.down_proj.to_local().data_ptr()
 
-    views = local_param_dict(module)
-    copies = local_param_dict(module, gathered=True)
+    views = _local_param_dict(module)
+    copies = _local_param_dict(module, gathered=True)
 
     assert views["up_proj"].data_ptr() == up_ptr
     assert not views["up_proj"].requires_grad
@@ -2112,8 +2106,7 @@ def _fsdp_gathered_frozen_worker(rank: int, world_size: int) -> None:
     ep = 2
     mesh = build_parallel_mesh(world_size=world_size, ep=ep, device_type="cpu")
     assert mesh is not None
-    assert mesh.edp_shard is not None
-    assert mesh.edp_shard.size() == 2
+    assert mesh.leftover_dp == 2
     model = _ForwardLoraMoeModel(_lora_routed_model(("actor",)))
     for param in model.parameters():
         dist.broadcast(param.data, src=0)
@@ -2135,8 +2128,8 @@ def _fsdp_gathered_frozen_worker(rank: int, world_size: int) -> None:
                 reduce_dtype="float32",
                 checkpoint_every_n_blocks=1,
             ),
-            mesh=mesh.dp_shard,
-            expert_mesh=mesh.edp_shard,
+            mesh=mesh.hsdp,
+            expert_mesh=mesh.dp_mod_ep,
             gradient_checkpointing=True,
         )
     experts = next(
@@ -2157,16 +2150,18 @@ class TestFsdpGatheredFrozenExperts:
         run_ranks(_fsdp_gathered_frozen_worker, 4)
 
 
-class _DriftingRouterMlp(nn.Module):
-    """Router and experts in one child, as in HF MoE blocks; routing drifts to experts 0 and 1 on the second call."""
+class _DriftingRouterBlock(nn.Module):
+    """Routes inside the block; values drift to experts 0 and 1 on the second call."""
 
     def __init__(self, moe: nn.Module):
         super().__init__()
+        self.lin = nn.Linear(8, 8)
         self.router = nn.Linear(8, 4, bias=False)
         self.moe = moe
         self.calls = 0
 
-    def forward(self, hidden):
+    def forward(self, hidden_states):
+        hidden = self.lin(hidden_states)
         logits = self.router(hidden)
         # Same ops in forward and recompute; only the values drift, forcing
         # experts 0 and 1 on the second call (checkpoint recompute). SAC
@@ -2175,16 +2170,6 @@ class _DriftingRouterMlp(nn.Module):
         self.calls += 1
         top_k_logits, top_k_index = logits.topk(2, -1)
         return self.moe(hidden, top_k_index, torch.softmax(top_k_logits, -1))
-
-
-class _DriftingRouterBlock(nn.Module):
-    def __init__(self, moe: nn.Module):
-        super().__init__()
-        self.lin = nn.Linear(8, 8)
-        self.mlp = _DriftingRouterMlp(moe)
-
-    def forward(self, hidden_states):
-        return self.mlp(self.lin(hidden_states))
 
 
 class _DriftingRouterMoeModel(nn.Module):
@@ -2223,8 +2208,8 @@ def _recompute_routing_drift_worker(rank: int, world_size: int) -> None:
                 reduce_dtype="float32",
                 checkpoint_every_n_blocks=1,
             ),
-            mesh=mesh.dp_shard,
-            expert_mesh=mesh.edp_shard,
+            mesh=mesh.hsdp,
+            expert_mesh=mesh.dp_mod_ep,
             gradient_checkpointing=True,
         )
     ep_hidden = hidden.clone().requires_grad_(True)
@@ -2237,136 +2222,6 @@ def _recompute_routing_drift_worker(rank: int, world_size: int) -> None:
 class TestFsdpCheckpointRoutingRecompute:
     def test_recompute_reuses_forward_routing(self):
         run_ranks(_recompute_routing_drift_worker, 4)
-
-
-class _RouterMlp(nn.Module):
-    """Router and routed experts in one child, as in HF MoE blocks."""
-
-    def __init__(self, moe: nn.Module):
-        super().__init__()
-        self.router = nn.Linear(8, 4, bias=False)
-        self.moe = moe
-
-    def forward(self, hidden):
-        top_k_logits, top_k_index = self.router(hidden).topk(2, -1)
-        return self.moe(hidden, top_k_index, torch.softmax(top_k_logits, -1))
-
-
-class _RouterBlock(nn.Module):
-    def __init__(self, moe: nn.Module):
-        super().__init__()
-        self.lin = nn.Linear(8, 8)
-        self.mlp = _RouterMlp(moe)
-
-    def forward(self, hidden_states):
-        return self.mlp(self.lin(hidden_states))
-
-
-class _RouterMoeModel(nn.Module):
-    _no_split_modules: ClassVar = ["_RouterBlock"]
-
-    def __init__(self, moe: nn.Module):
-        super().__init__()
-        self.layers = nn.ModuleList([_RouterBlock(moe)])
-
-    def forward(self, hidden_states):
-        return self.layers[0](hidden_states)
-
-
-def _checkpointed_collectives_worker(rank: int, world_size: int, ep: int) -> None:
-    """Checkpointed MoE blocks match the uncheckpointed one; saving collectives spares the recompute its all-to-alls."""
-    # Arrange
-    mesh = build_parallel_mesh(world_size=world_size, ep=ep, device_type="cpu")
-    assert mesh is not None
-    base = _RouterMoeModel(_lora_routed_model(("actor",)))
-    for param in base.parameters():
-        dist.broadcast(param.data, src=0)
-    torch.manual_seed(rank + 3)
-    # Micro-batches of different lengths route different all-to-all splits.
-    batches = [(torch.randn(tokens, 8), torch.randn(tokens, 8)) for tokens in (6, 11)]
-
-    # Act
-    results = {}
-    for checkpointed, save in ((False, None), (True, False), (True, True)):
-        model = copy.deepcopy(base)
-        assert apply_expert_parallel(model, mesh.ep, token_blocks=3) == 1
-        with patch.object(fsdp_blocks, "PARAM_PERSISTENCE_THRESHOLD", 0):
-            apply_fsdp2(
-                model,
-                FSDPConfig(
-                    ep=ep,
-                    param_dtype="float32",
-                    reduce_dtype="float32",
-                    checkpoint_every_n_blocks=1,
-                    save_moe_collectives=save,
-                ),
-                mesh=mesh.dp_shard,
-                expert_mesh=mesh.edp_shard,
-                gradient_checkpointing=checkpointed,
-            )
-        outputs, hidden_grads, forwards, backwards = [], [], [], []
-        for hidden, upstream in batches:
-            leaf = hidden.clone().requires_grad_(True)
-            with CollectiveRecorder() as forward:
-                out = model(leaf)
-            with CollectiveRecorder() as backward:
-                (out * upstream).sum().backward()
-            outputs.append(out.detach())
-            hidden_grads.append(leaf.grad)
-            forwards.append(forward)
-            backwards.append(backward)
-        grads = {
-            plain(name): param.grad.to_local()
-            for name, param in model.named_parameters()
-            if param.grad is not None
-        }
-        results[checkpointed, save] = (
-            outputs,
-            hidden_grads,
-            grads,
-            forwards,
-            backwards,
-        )
-
-    # Assert
-    plain_outputs, plain_hidden_grads, plain_grads, plain_forwards, plain_backwards = (
-        results[False, None]
-    )
-    for key in ((True, False), (True, True)):
-        outputs, hidden_grads, grads, _, _ = results[key]
-        for got, expected in zip(outputs, plain_outputs, strict=True):
-            assert torch.equal(got, expected), key
-        for got, expected in zip(hidden_grads, plain_hidden_grads, strict=True):
-            assert torch.equal(got, expected), key
-        assert grads.keys() == plain_grads.keys()
-        assert grads
-        for name, grad in grads.items():
-            assert torch.equal(grad, plain_grads[name]), (key, name)
-    # Each of 3 token blocks dispatches and combines: 6 all-to-alls each way.
-    for forward, backward in zip(plain_forwards, plain_backwards, strict=True):
-        assert forward.kinds == ["all_to_all"] * 6
-        assert backward.kinds == ["all_to_all"] * 6
-    _, _, _, saved_forwards, saved_backwards = results[True, True]
-    for forward, backward in zip(saved_forwards, saved_backwards, strict=True):
-        assert all(functional for _, functional, _, _ in forward.calls)
-        assert backward.kinds == ["all_to_all"] * 6
-    # Off, the forward stays eager and the recompute repeats every all-to-all.
-    _, _, _, recomputed_forwards, recomputed_backwards = results[True, False]
-    for forward, backward in zip(
-        recomputed_forwards, recomputed_backwards, strict=True
-    ):
-        assert not any(functional for _, functional, _, _ in forward.calls)
-        assert not any(functional for _, functional, _, _ in backward.calls)
-        assert backward.kinds == ["all_to_all"] * 12
-
-
-@pytest.mark.multi_rank
-class TestFsdpCheckpointSaveMoeCollectives:
-    @pytest.mark.parametrize(("world_size", "ep"), [(2, 2), (4, 2), (4, 4)])
-    def test_grads_match_and_only_the_saving_recompute_skips_all_to_alls(
-        self, world_size: int, ep: int
-    ):
-        run_ranks(_checkpointed_collectives_worker, world_size, ep)
 
 
 class _HsdpMoeBlock(nn.Module):
@@ -2415,19 +2270,14 @@ def _spans_shard_groups(mesh: Any, dim: int, shard_group_size: int) -> bool:
 
 
 def _replica_group(param: torch.Tensor, mesh: ParallelMesh) -> Any:
-    """Ranks that hold the same local values of ``param``, or ``None``."""
+    """Ranks that hold the same local values of ``param``."""
     if not isinstance(param, DTensor):
         return dist.group.WORLD
     if param.device_mesh is mesh.ep:
         return mesh.ep_replicas.get_group()
     if param.device_mesh is mesh.tp:
         return mesh.tp_replicas.get_group()
-    names = param.device_mesh.mesh_dim_names
-    if mesh.tp is not None and "tp" not in names:
-        return mesh.tp.get_group()
-    if "dp_replicate" in names:
-        return param.device_mesh["dp_replicate"].get_group()
-    return None
+    return mesh.world["replicate"].get_group()
 
 
 def _hsdp_ep_step_worker(
@@ -2436,9 +2286,8 @@ def _hsdp_ep_step_worker(
     tp: int,
     shard_group_size: int = 2,
     train_base_experts: bool = False,
-    cp: int = 1,
 ) -> None:
-    """One FSDPRuntime step on HSDP + EP (+ TP, CP) matches a dense SGD step."""
+    """One FSDPRuntime step on HSDP + EP (+ TP) matches a dense SGD step."""
     # Arrange
     ep, rows_per_shard = 2, 6
     model = _HsdpMoeModel(_lora_routed_model(("actor",)))
@@ -2456,16 +2305,13 @@ def _hsdp_ep_step_worker(
         dist.broadcast(param.data, src=0)
     reference = copy.deepcopy(model)
     initial = {name: param.detach().clone() for name, param in model.named_parameters()}
-    batch_shards = world_size // (cp * tp)
+    batch_shards = world_size // tp
     torch.manual_seed(1)
     tokens = batch_shards * rows_per_shard
     hidden = torch.randn(tokens, 8)
     weights, index = torch.softmax(torch.randn(tokens, 4), -1).topk(2, -1)
     upstream = torch.randn(tokens, 8)
-    # Each CP rank backprops its slice of its data shard's loss.
-    cp_rows = rows_per_shard // cp
-    start = (rank // tp) * cp_rows
-    rows = slice(start, start + cp_rows)
+    rows = slice((rank // tp) * rows_per_shard, (rank // tp + 1) * rows_per_shard)
 
     ref_out = reference(hidden, index, weights)
     ref_loss = (ref_out * upstream).sum() / tokens
@@ -2479,7 +2325,6 @@ def _hsdp_ep_step_worker(
     config = FSDPConfig(
         ep=ep,
         tp=tp,
-        cp=cp,
         shard_group_size=shard_group_size,
         param_dtype="float32",
         reduce_dtype="float32",
@@ -2489,7 +2334,6 @@ def _hsdp_ep_step_worker(
         world_size=world_size,
         ep=ep,
         tp=tp,
-        cp=cp,
         shard_group_size=shard_group_size,
         device_type="cpu",
     )
@@ -2524,9 +2368,8 @@ def _hsdp_ep_step_worker(
     assert torch.allclose(out, ref_out[rows], rtol=1e-5, atol=1e-6)
     shard_losses = loss.detach().clone()
     dist.all_reduce(shard_losses)
-    assert torch.allclose(shard_losses / (world_size // cp), ref_loss, rtol=1e-5)
-    leftover_dp = 1 if mesh.edp_shard is None else int(mesh.edp_shard.size())
-    assert leftover_dp == shard_group_size // ep
+    assert torch.allclose(shard_losses / world_size, ref_loss, rtol=1e-5)
+    assert mesh.leftover_dp == shard_group_size // ep
     checked = 0
     for name, param in model.named_parameters():
         value = _full_value(param.detach())
@@ -2543,8 +2386,6 @@ def _hsdp_ep_step_worker(
         assert torch.allclose(value, target, rtol=1e-5, atol=1e-6), name
         local = param.to_local() if isinstance(param, DTensor) else param
         group = _replica_group(param, mesh)
-        if group is None:
-            continue
         gathered = [torch.empty_like(local) for _ in range(dist.get_world_size(group))]
         dist.all_gather(gathered, local.detach().contiguous(), group=group)
         assert all(torch.equal(copy_, gathered[0]) for copy_ in gathered), name
@@ -2557,8 +2398,7 @@ def _hsdp_ep_step_worker(
     if tp > 1:
         up = model.layers[0].mlp.up_proj.weight
         assert isinstance(up, DTensor)
-        assert up.device_mesh.mesh_dim_names[-1] == "tp"
-        assert up.to_local().numel() * shard_group_size == up.numel()
+        assert up.device_mesh is mesh.tp
 
 
 @pytest.mark.multi_rank
@@ -2578,43 +2418,6 @@ class TestFSDPRuntimeBackwardHsdpExpertParallel:
                 train_base_experts=True,
             ),
             4,
-        )
-
-    def test_context_parallel_slices_sum_into_dense_step(self):
-        run_ranks(partial(_hsdp_ep_step_worker, tp=1, cp=2), 4)
-
-    def test_context_parallel_on_fsdp_sharded_experts_matches_dense_step(self):
-        run_ranks(
-            partial(
-                _hsdp_ep_step_worker,
-                tp=1,
-                shard_group_size=4,
-                train_base_experts=True,
-                cp=2,
-            ),
-            4,
-        )
-
-    def test_context_parallel_with_tensor_parallel_matches_dense_step(self):
-        run_ranks(
-            partial(
-                _hsdp_ep_step_worker,
-                tp=2,
-                shard_group_size=4,
-                cp=2,
-            ),
-            4,
-        )
-
-    def test_ep_tp_cp_over_two_data_shards_matches_dense_step(self):
-        run_ranks(
-            partial(
-                _hsdp_ep_step_worker,
-                tp=2,
-                shard_group_size=8,
-                cp=2,
-            ),
-            8,
         )
 
 
@@ -2729,6 +2532,87 @@ def _shard_group_spans_world_worker(rank: int, world_size: int) -> None:
 class TestMaterializeShardGroupSpanningWorld:
     def test_plain_fsdp_over_world(self):
         run_ranks(_shard_group_spans_world_worker)
+
+
+class TestTpDataParallelSize:
+    def test_rejects_tp_below_one(self):
+        with pytest.raises(ValueError, match="tp must be >= 1"):
+            tp_data_parallel_size(4, 0)
+
+
+class TestFoldWorld:
+    def test_rejects_non_positive_world_size(self):
+        with pytest.raises(ValueError, match="world_size must be >= 1"):
+            expert_parallel.ep_data_parallel_size(0, 1)
+
+
+class TestBuildParallelMeshGuards:
+    def test_requires_an_initialised_process_group(self):
+        with pytest.raises(RuntimeError, match="initialised process group"):
+            build_parallel_mesh(world_size=2, ep=2, device_type="cpu")
+
+
+class TestBuildParallelMeshShardGroup:
+    def test_rejects_shard_group_that_does_not_divide_world(self):
+        with (
+            patch.object(dist, "is_available", return_value=True),
+            patch.object(dist, "is_initialized", return_value=True),
+        ):
+            with pytest.raises(ValueError, match="divisible by shard_group_size"):
+                build_parallel_mesh(world_size=4, shard_group_size=3, device_type="cpu")
+
+
+class TestBuildParallelMeshDefaultDevice:
+    def test_infers_cpu_when_device_type_is_omitted(self, monkeypatch):
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+        fake_world = MagicMock()
+        fake_world.__getitem__.return_value = MagicMock()
+        inner, replicas = MagicMock(), MagicMock()
+        with (
+            patch.object(dist, "is_available", return_value=True),
+            patch.object(dist, "is_initialized", return_value=True),
+            patch(
+                "agilerl.distributed.ep_mesh.init_device_mesh",
+                return_value=fake_world,
+            ) as init_mesh,
+            patch(
+                "agilerl.distributed.ep_mesh._split_shard_axis",
+                return_value=(inner, None, replicas),
+            ),
+        ):
+            mesh = build_parallel_mesh(world_size=2, ep=2)
+
+        init_mesh.assert_called_once_with(
+            "cpu", (1, 2), mesh_dim_names=("replicate", "shard")
+        )
+        assert mesh is not None
+        assert mesh.ep is inner
+
+
+class TestSplitShardAxis:
+    def test_flattens_replicas_when_replicate_is_above_one(self):
+        world = MagicMock()
+        world.size.return_value = 2
+        inner = object()
+        outer_mesh = MagicMock()
+        replicas = object()
+        outer_mesh._flatten.return_value = replicas
+        split = MagicMock()
+        split.__getitem__.side_effect = lambda key: {
+            "ep": inner,
+            ("replicate", "dp"): outer_mesh,
+        }[key]
+        world._unflatten.return_value = split
+
+        got_inner, got_outer, got_replicas = _split_shard_axis(
+            world, 2, 2, ("dp", "ep")
+        )
+
+        world._unflatten.assert_called_once_with(1, (2, 2), ("dp", "ep"))
+        outer_mesh._flatten.assert_called_once_with("ep_replicas")
+        assert got_inner is inner
+        assert got_outer is outer_mesh
+        assert got_replicas is replicas
 
 
 class TestShardExpertsOnEp:
@@ -3090,48 +2974,15 @@ class TestMaterializeNeedsMesh:
             )
 
 
-class TestMaterializeNeedsEpCoveringTp:
-    def test_moe_with_ep_below_tp_raises_and_keeps_the_weights(self):
-        # Arrange
-        class PackedExperts(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.up_proj = nn.Parameter(torch.ones(4, 8, 4))
-                self.down_proj = nn.Parameter(torch.ones(4, 4, 8))
-                self.act_fn = nn.SiLU()
-
-            def forward(self, hidden_states, top_k_index, top_k_weights):
-                return hidden_states
-
-        model = PackedExperts()
-        weight = model.up_proj.detach().clone()
-        mesh = ParallelMesh(dp_shard=MagicMock(spec=DeviceMesh), edp_shard=None)
-
-        # Act / Assert
-        with pytest.raises(
-            ValueError,
-            match=r"FSDPConfig\(ep=1, tp=2\): MoE models need ep >= tp",
-        ):
-            materialize_fsdp2_from_cpu_state(
-                model, "cpu", FSDPConfig(tp=2), parallel_mesh=mesh
-            )
-        assert torch.equal(model.up_proj, weight)
-
-
-class TestMaterializeCpuOffloadWithExpertParallel:
-    @pytest.mark.parametrize(
-        "edp_shard",
-        [None, MagicMock(spec=DeviceMesh)],
-        ids=["ep_spans_shard_group", "ep_inside_shard_group"],
-    )
-    def test_raises_and_keeps_the_weights(self, edp_shard):
-        # Arrange
+class TestMaterializeCpuOffloadWithExpertsOutsideFsdp:
+    def test_ep_spanning_the_shard_group_raises_and_keeps_the_weights(self):
+        # Arrange: one rank per shard group holds each expert, so experts skip FSDP.
         model = nn.Linear(2, 2)
         weight = model.weight.detach().clone()
-        mesh = ParallelMesh(dp_shard=MagicMock(spec=DeviceMesh), edp_shard=edp_shard)
+        mesh = MagicMock(spec=ParallelMesh, leftover_dp=1)
 
         # Act / Assert
-        with pytest.raises(ValueError, match="cpu_offload does not support ep=2"):
+        with pytest.raises(ValueError, match="experts out of FSDP"):
             materialize_fsdp2_from_cpu_state(
                 model, "cpu", FSDPConfig(ep=2, cpu_offload=True), parallel_mesh=mesh
             )
@@ -3172,15 +3023,15 @@ class TestRouteReplicatedSpanAdapterIds:
         ids = TokenAdapterIds(["actor", "critic"], torch.tensor([0, 1]))
         with (
             patch(
-                "agilerl.distributed.expert_parallel.forward.replicated_row_span",
+                "agilerl.distributed.ep_forward.replicated_row_span",
                 return_value=(0, 1),
             ),
             patch(
-                "agilerl.distributed.expert_parallel.forward.SliceReplicatedRows",
+                "agilerl.distributed.ep_forward.SliceReplicatedRows",
                 _Fn,
             ),
             patch(
-                "agilerl.distributed.expert_parallel.forward.GatherReplicatedRows",
+                "agilerl.distributed.ep_forward.GatherReplicatedRows",
                 _Fn,
             ),
         ):
@@ -3201,10 +3052,9 @@ class TestRouteReplicatedSpanAdapterIds:
 class TestMaterializeEpWithoutPackedExperts:
     def test_ep_on_a_dense_model_raises(self):
         mesh = MagicMock()
-        mesh.dp_shard = None
+        mesh.hsdp = None
         mesh.ep = MagicMock()
         mesh.tp = None
-        mesh.edp_shard = None
 
         with pytest.raises(RuntimeError, match="no packed"):
             materialize_fsdp2_from_cpu_state(
@@ -3282,18 +3132,18 @@ class TestSortedEpForwardListCounts:
         object.__setattr__(module, "_ep_group", object())
         with (
             patch(
-                "agilerl.distributed.expert_parallel.forward.module_ep_degree",
+                "agilerl.distributed.ep_forward.module_ep_degree",
                 return_value=2,
             ),
             patch(
-                "agilerl.distributed.expert_parallel.forward.token_dispatch",
+                "agilerl.distributed.ep_forward.token_dispatch",
                 side_effect=_dispatch,
             ),
             patch(
-                "agilerl.distributed.expert_parallel.forward._gathered_expert_block",
+                "agilerl.distributed.ep_forward._gathered_expert_block",
             ) as gathered,
             patch(
-                "agilerl.distributed.expert_parallel.forward.token_combine",
+                "agilerl.distributed.ep_forward.token_combine",
                 side_effect=lambda rows, _state: rows,
             ),
         ):

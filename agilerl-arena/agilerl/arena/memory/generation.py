@@ -4,15 +4,12 @@
 
 from __future__ import annotations
 
-import agilerl.arena.memory.block_activations as block_activations
 import agilerl.arena.memory.formulas as formulas
 import agilerl.arena.memory.kv_cache as kv_cache
-import agilerl.arena.memory.lora_formulas as lora_formulas
 import agilerl.arena.memory.vision as vision
 from agilerl.arena.memory.breakdown import MemoryComponent, PhaseBreakdown
 from agilerl.arena.memory.resolve.rollout import (
     drafts_by_default,
-    merged_sync_bucket_bytes,
     runs_dual_stream_lora,
 )
 from agilerl.arena.memory.specs import (
@@ -73,12 +70,12 @@ def engine_terms(
     unsharded_weights = formulas.weight_bytes(counts, settings.weight_dtype, variant)
     weights = int(
         formulas.engine_weight_bytes(
-            arch, counts, settings.weight_dtype, variant, settings.weight_quantization
+            counts, settings.weight_dtype, variant, settings.weight_quantization
         )
         / tp
     )
     decoder_startup = (
-        block_activations.block_recompute_bytes(
+        formulas.block_recompute_bytes(
             arch,
             1,
             batched_tokens,
@@ -94,7 +91,6 @@ def engine_terms(
         * act_bytes
         / tp
     )
-    serves_lora = not settings.merged_lora_sync
     terms = {
         "weights": weights,
         "startup_peak": _with_encoder_profile(
@@ -105,16 +101,21 @@ def engine_terms(
         + (formulas.SPECULATIVE_DRAFTING_BYTES if _engine_drafts(arch, settings) else 0)
         + (
             formulas.LORA_DUAL_STREAM_BYTES
-            if serves_lora
-            and settings.lora_dual_stream
-            and runs_dual_stream_lora(arch.is_moe)
+            if settings.lora_dual_stream and runs_dual_stream_lora(arch.is_moe)
             else 0
         ),
-        "lora_slots": _lora_slot_bytes(arch, settings, act_bytes, tp),
-        "engine_runtime": min(
-            int(formulas.ENGINE_RUNTIME_FRACTION * unsharded_weights),
-            formulas.ENGINE_RUNTIME_MAX_BYTES,
-        ),
+        # Engines serve one adapter (``max_loras=1``).
+        "lora_slots": int(
+            formulas.lora_param_count(arch, settings.max_lora_rank) * act_bytes / tp
+        )
+        + formulas.engine_expert_lora_param_count(
+            arch,
+            settings.max_lora_rank,
+            tp,
+            packed_3d=arch.vllm_3d_moe_lora or settings.lora_packed_target_matrices > 0,
+        )
+        * act_bytes,
+        "engine_runtime": int(formulas.ENGINE_RUNTIME_FRACTION * unsharded_weights),
         "step_buffers": engine_step_buffer_bytes(arch, batched_tokens, act_bytes),
         "kv_demand": _kv_demand_per_rank(arch, settings),
         "mamba_state": kv_cache.mamba_state_bytes(
@@ -125,36 +126,6 @@ def engine_terms(
         ),
     }
     return terms, batched_tokens, sampler
-
-
-def _lora_slot_bytes(
-    arch: ModelArch, settings: GenerationSettings, act_bytes: float, tp: int
-) -> float:
-    """LoRA adapter slot bytes on one engine rank.
-
-    :param arch: Engine-side model architecture.
-    :param settings: Generation settings.
-    :param act_bytes: Bytes per activation element.
-    :param tp: Engine tensor parallel size.
-    :return: 0 when weight sync pushes merged weights.
-    """
-    if settings.merged_lora_sync:
-        return 0
-    # Engines serve one adapter (``max_loras=1``).
-    return (
-        int(
-            lora_formulas.engine_lora_param_count(arch, settings.max_lora_rank)
-            * act_bytes
-            / tp
-        )
-        + lora_formulas.engine_expert_lora_param_count(
-            arch,
-            settings.max_lora_rank,
-            tp,
-            packed_3d=arch.vllm_3d_moe_lora or settings.lora_packed_target_matrices > 0,
-        )
-        * act_bytes
-    )
 
 
 def _engine_drafts(arch: ModelArch, settings: GenerationSettings) -> bool:
@@ -323,7 +294,7 @@ def estimate_generation(
         model,
         settings,
         batched_tokens,
-        block_activations.block_recompute_bytes(
+        formulas.block_recompute_bytes(
             model.arch,
             1,
             runtime_tokens,
@@ -332,6 +303,8 @@ def estimate_generation(
         )
         + sampler,
     )
+    if settings.scores_prompt_logprobs:
+        runtime_activation += formulas.prompt_logprob_bytes(model.arch)
     return PhaseBreakdown(
         phase="generation",
         components=_kv_bar_components(
@@ -346,10 +319,7 @@ def estimate_generation(
             sampler,
         )
         + _residency_bar_components(model, device, terms, job_overhead)
-        + (
-            _lora_receive_buffer_component(model.arch, settings),
-            _expert_lora_copy_component(model.arch, settings),
-        ),
+        + (_lora_receive_buffer_component(model.arch, settings),),
         device_total_bytes=device.total_bytes,
         device_usable_bytes=device.generation_usable_bytes,
         warnings=tuple(warnings),
@@ -364,6 +334,8 @@ def _generation_pools(
 ) -> tuple[int, int, int]:
     """KV pool, start-up pool, and one-sequence demand of the engine bar."""
     budget = int(settings.gpu_memory_utilization * device.total_bytes)
+    if settings.reserves_prompt_logprobs:
+        budget -= formulas.prompt_logprob_bytes(model.arch)
     non_kv = (
         terms["weights"]
         + terms["startup_peak"]
@@ -407,15 +379,6 @@ def drop_engine_fast_paths(
     _, startup_pool, full_sequence = _generation_pools(model, settings, terms, device)
     if startup_pool >= full_sequence + KV_MARGIN_BYTES:
         return settings
-    return lean_engine_settings(settings)
-
-
-def lean_engine_settings(settings: GenerationSettings) -> GenerationSettings:
-    """``settings`` with the memory-costly engine defaults it does not pin turned off.
-
-    :param settings: Rollout engine generation settings.
-    :return: The lean settings.
-    """
     update: dict[str, object] = {"lora_dual_stream": False}
     if settings.speculative_drafting is None:
         update["speculative_drafting"] = False
@@ -533,68 +496,23 @@ def _residency_bar_components(
 def _lora_receive_buffer_component(
     arch: ModelArch, settings: GenerationSettings
 ) -> MemoryComponent:
-    """The NIXL buffer each rollout-engine GPU READs the trainer adapter, or one round of merged weights, into."""
-    note = "Allocated after vLLM sizes the KV pool, outside gpu_memory_utilization."
-    if settings.lora_sync_scope is None:
-        return MemoryComponent(
-            key="lora_receive_buffer", label="LoRA receive buffer", n_bytes=0, note=note
-        )
-    dtype_bytes = DTYPE_BYTES[settings.weight_dtype]
-    if settings.merged_lora_sync:
-        return MemoryComponent(
-            key="lora_receive_buffer",
-            label="Merged weight receive buffer",
-            n_bytes=merged_sync_bucket_bytes(
-                *lora_formulas.merged_lora_sync_bytes(
-                    arch,
-                    settings.lora_sync_scope,
-                    settings.lora_packed_target_matrices,
-                    dtype_bytes,
-                )
-            ),
-            note=note,
-        )
-    return MemoryComponent(
-        key="lora_receive_buffer",
-        label="LoRA receive buffer",
-        n_bytes=lora_formulas.lora_sync_buffer_bytes(
+    """The NIXL buffer each rollout-engine GPU READs the whole trainer adapter into."""
+    n_bytes = (
+        0
+        if settings.lora_sync_scope is None
+        else formulas.lora_sync_buffer_bytes(
             arch,
             settings.max_lora_rank,
             settings.lora_sync_scope,
             settings.lora_packed_target_matrices,
-            dtype_bytes,
-        ),
-        note=note,
-    )
-
-
-def _expert_lora_copy_component(
-    arch: ModelArch, settings: GenerationSettings
-) -> MemoryComponent:
-    """The expert ``lora_B`` copies vLLM keeps of the adapter read into the receive buffer.
-
-    :param arch: Engine-side model architecture.
-    :param settings: Generation settings.
-    :return: 0 bytes unless a rollout engine receives a packed-expert adapter.
-    """
-    receives_experts = (
-        settings.lora_sync_scope is not None
-        and not settings.merged_lora_sync
-        and settings.lora_packed_target_matrices > 0
-    )
-    params = (
-        lora_formulas.received_expert_lora_b_param_count(arch, settings.max_lora_rank)
-        if receives_experts
-        else 0
+            DTYPE_BYTES[settings.weight_dtype],
+        )
     )
     return MemoryComponent(
-        key="expert_lora_copy",
-        label="Expert LoRA copy",
-        n_bytes=int(params * DTYPE_BYTES[settings.weight_dtype]),
-        note=(
-            "vLLM re-lays the received expert lora_B per expert and keeps that "
-            "copy while the adapter is loaded, outside gpu_memory_utilization."
-        ),
+        key="lora_receive_buffer",
+        label="LoRA receive buffer",
+        n_bytes=n_bytes,
+        note="Allocated after vLLM sizes the KV pool, outside gpu_memory_utilization.",
     )
 
 

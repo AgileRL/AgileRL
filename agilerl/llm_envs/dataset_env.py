@@ -12,21 +12,18 @@ rows are ``(prompt, response)`` pairs or multi-turn ``messages`` with optional
 from __future__ import annotations
 
 import json
-import os
 import warnings
-from collections.abc import Callable, Collection
+from collections.abc import Callable
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
-from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
 
 from agilerl.llm_envs.chat_formats import (
     ChatFormat,
     ToolCallParseStatus,
     detect_chat_format,
-    frame_repeats_terminator,
 )
 from agilerl.utils.chat_template import (
     feedback_frame_parts,
@@ -44,18 +41,6 @@ if TYPE_CHECKING:
         ["DatasetEnv", "PreTrainedTokenizerBase"],
         Callable[[list[dict[str, Any]]], dict[str, Any]],
     ]
-
-TURN_OPENER = {"role": "user", "content": "."}
-
-
-def sft_required_columns(columns: Collection[str], response_column: str) -> set[str]:
-    """Columns an SFT split needs: ``messages``, else a prompt and a response.
-
-    :param columns: Columns the dataset has.
-    :param response_column: Column holding the response of a ``prompt`` row.
-    :return: The required column names.
-    """
-    return {"messages"} if "messages" in columns else {"prompt", response_column}
 
 
 class DatasetEnv:
@@ -112,14 +97,10 @@ class DatasetEnv:
             required_columns = {"prompt", "chosen", "rejected"}
             collate_builder: CollateBuilder = preference_collate_builder
         elif objective == "sft":
-            if tokenizer.pad_token_id is None:
-                msg = (
-                    "SFT pads its batches with tokenizer.pad_token_id, but this "
-                    "tokenizer has no pad token. Set one before building the env."
-                )
-                raise ValueError(msg)
-            required_columns = sft_required_columns(
-                train_dataset.features, response_column
+            required_columns = (
+                {"messages"}
+                if "messages" in train_dataset.features
+                else {"prompt", response_column}
             )
             collate_builder = sft_collate_builder
         else:
@@ -288,8 +269,6 @@ class DatasetEnv:
     ) -> Dataset:
         """Drop rows where ``prompt_len > max_context_length - min_completion_length``; warns if any."""
         dataset_type = "dataset" if dataset_type is None else dataset_type
-        if self.objective == "sft":
-            return self._select_trainable_sft_rows(dataset, dataset_type)
         if (
             self.max_context_length is None
             or "prompt" not in dataset.features
@@ -309,76 +288,6 @@ class DatasetEnv:
                 stacklevel=2,
             )
         return filtered_dataset
-
-    def _select_trainable_sft_rows(
-        self, dataset: Dataset, dataset_type: str
-    ) -> Dataset:
-        """Keep the rows that encode to a transcript whose first assistant turn fits; warns if any are dropped.
-
-        :param dataset: Split to check.
-        :param dataset_type: Name of the split, for messages.
-        :return: The split without the dropped rows.
-        :raises ValueError: If no row is left.
-        """
-        chat_format = detect_chat_format(self.tokenizer)
-        kept: list[int] = []
-        too_long = 0
-        errors: list[str] = []
-        for index, item in enumerate(dataset):
-            # One malformed row must not stop a run; all of them failing raises below.
-            try:
-                ids, mask = encode_sft_row(
-                    self.tokenizer, item, self.response_column, chat_format
-                )
-            except Exception as error:
-                errors.append(f"{type(error).__name__}: {error}")
-                continue
-            if self._fit_to_context(ids, mask) is None:
-                too_long += 1
-            else:
-                kept.append(index)
-        if not kept:
-            msg = (
-                f"No valid samples in the {dataset_type}. First error: {errors[0]}"
-                if errors
-                else f"No samples left in the {dataset_type} after filtering by the max context length constraint, use a larger max context length."
-            )
-            raise ValueError(msg)
-        if errors:
-            warnings.warn(
-                f"{len(errors)} invalid samples were dropped from the {dataset_type}. First error: {errors[0]}",
-                stacklevel=2,
-            )
-        if too_long:
-            warnings.warn(
-                f"{too_long} samples were filtered out of the {dataset_type} due to the max context length constraint.",
-                stacklevel=2,
-            )
-        return dataset if len(kept) == len(dataset) else dataset.select(kept)
-
-    def _fit_to_context(
-        self, ids: list[int], mask: list[bool]
-    ) -> tuple[list[int], list[bool]] | None:
-        """Transcript cut to its last complete assistant turn within the context length.
-
-        A cut inside a turn would train a partial tool call with no stop token.
-
-        :param ids: Transcript token ids.
-        :param mask: Whether each id is an assistant token.
-        :return: The cut transcript, or ``None`` when its prompt leaves less than
-            ``min_completion_length`` or its first assistant turn does not fit.
-        """
-        if self.max_context_length is None:
-            return ids, mask
-        prompt_length = mask.index(True)
-        if prompt_length > self.max_context_length - self.min_completion_length:
-            return None
-        if len(ids) <= self.max_context_length:
-            return ids, mask
-        for end in range(self.max_context_length, prompt_length, -1):
-            if mask[end - 1] and not mask[end]:
-                return ids[:end], mask[:end]
-        return None
 
 
 def _prompt_lengths(
@@ -464,88 +373,23 @@ def preference_collate_builder(
 def chat_messages(value: str | list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Normalize one row's OpenAI-style ``messages`` for a chat template.
 
-    Accepts a JSON string or a list. Drops ``None`` fields and decodes string
-    tool-call arguments, which HF chat templates expect as a dict. A list is
-    Arrow data, which fills every struct key at every depth, so ``None`` is also
-    dropped inside its struct arguments; nulls in JSON text are real and kept.
+    Accepts a JSON string or a list. Drops ``None`` fields (Arrow fills every
+    struct key on every message) and decodes string tool-call arguments, which
+    HF chat templates expect as a dict.
 
     :param value: The row's ``messages`` value.
     :return: Messages ready for ``apply_chat_template``.
-    :raises ValueError: If the row or a call's arguments are not valid JSON, or
-        a call's arguments are not an object.
     """
-    from_arrow = not isinstance(value, str)
-    raw = (
-        _parsed_json(value, "The messages column") if isinstance(value, str) else value
-    )
+    raw = json.loads(value) if isinstance(value, str) else value
     messages = []
     for raw_message in raw:
         message = {key: item for key, item in raw_message.items() if item is not None}
         if "tool_calls" in message:
             message["tool_calls"] = [
-                _decoded_tool_call(call, from_arrow) for call in message["tool_calls"]
+                _decoded_tool_call(call) for call in message["tool_calls"]
             ]
         messages.append(message)
     return messages
-
-
-def sft_tools(item: dict[str, Any]) -> list[dict[str, Any]] | None:
-    """One SFT row's tool schemas, without the ``None`` keys Arrow fills into struct schemas.
-
-    :param item: Dataset row.
-    :return: Tool schemas for the chat template, or ``None`` when the row has none.
-    :raises ValueError: If a string ``tools`` value is not valid JSON.
-    """
-    tools = item.get("tools")
-    if isinstance(tools, str):
-        return _parsed_json(tools, "The tools column")
-    return _without_none_keys(tools)
-
-
-def encode_sft_row(
-    tokenizer: PreTrainedTokenizerBase,
-    item: dict[str, Any],
-    response_column: str,
-    chat_format: ChatFormat | None,
-) -> tuple[list[int], list[bool]]:
-    """Token ids and assistant mask of one SFT row, see :func:`encode_chat_transcript`.
-
-    :param tokenizer: Tokenizer whose chat template renders the conversation.
-    :param item: Dataset row.
-    :param response_column: Column holding the response of a ``prompt`` row.
-    :param chat_format: The model family's chat format.
-    :return: Token ids and, per id, whether it is an assistant token.
-    """
-    return encode_chat_transcript(
-        tokenizer, sft_messages(item, response_column), sft_tools(item), chat_format
-    )
-
-
-def sft_eval_sample(
-    tokenizer: PreTrainedTokenizerBase, item: dict[str, Any]
-) -> tuple[str, str]:
-    """A ``messages`` row's text up to its first assistant turn, and that turn's text.
-
-    :param tokenizer: Tokenizer whose chat template renders the conversation.
-    :param item: Dataset row with a ``messages`` column.
-    :return: Prompt text with special tokens, and the turn without them.
-    """
-    ids, mask = encode_chat_transcript(
-        tokenizer,
-        chat_messages(item["messages"]),
-        sft_tools(item),
-        detect_chat_format(tokenizer),
-    )
-    start = mask.index(True)
-    end = next((pos for pos in range(start, len(mask)) if not mask[pos]), len(mask))
-    prompt, turn = (
-        tokenizer.decode(ids[:start]),
-        tokenizer.decode(ids[start:end], skip_special_tokens=True),
-    )
-    if not isinstance(prompt, str) or not isinstance(turn, str):
-        msg = "tokenizer.decode must return a string"
-        raise TypeError(msg)
-    return prompt, turn
 
 
 def sft_messages(item: dict[str, Any], response_column: str) -> list[dict[str, Any]]:
@@ -573,45 +417,14 @@ def _as_messages(value: str | list[dict[str, Any]], role: str) -> list[dict[str,
     return chat_messages(value)
 
 
-def _parsed_json(text: str, label: str) -> Any:  # noqa: ANN401 -- any JSON value
-    """Decode JSON ``text``, naming ``label`` in the error."""
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError as error:
-        msg = f"{label} is not valid JSON ({error}): {text[:200]!r}"
-        raise ValueError(msg) from error
-
-
-def _without_none_keys(value: Any) -> Any:  # noqa: ANN401 -- any nested Arrow value
-    """``value`` without ``None`` dict entries at any depth; ``None`` list items are data."""
-    if isinstance(value, dict):
-        return {
-            key: _without_none_keys(item)
-            for key, item in value.items()
-            if item is not None
-        }
-    if isinstance(value, list):
-        return [_without_none_keys(item) for item in value]
-    return value
-
-
-def _decoded_tool_call(call: dict[str, Any], from_arrow: bool) -> dict[str, Any]:
-    """Tool call without ``None`` fields, with its arguments decoded to an object."""
+def _decoded_tool_call(call: dict[str, Any]) -> dict[str, Any]:
+    """Tool call without ``None`` fields, with JSON-string arguments decoded."""
     call = {key: item for key, item in call.items() if item is not None}
     if "function" in call:
-        return {**call, "function": _decoded_tool_call(call["function"], from_arrow)}
-    if "arguments" not in call:
-        return call
-    arguments = call["arguments"]
-    label = f"The arguments of tool call {call.get('name')!r}"
-    if isinstance(arguments, str):
-        arguments = _parsed_json(arguments, label)
-    elif from_arrow:
-        arguments = _without_none_keys(arguments)
-    if not isinstance(arguments, dict):
-        msg = f"{label} must be an object, got {type(arguments).__name__}."
-        raise ValueError(msg)
-    return {**call, "arguments": arguments}
+        return {**call, "function": _decoded_tool_call(call["function"])}
+    if isinstance(call.get("arguments"), str):
+        return {**call, "arguments": json.loads(call["arguments"])}
+    return call
 
 
 def encode_chat_transcript(
@@ -658,7 +471,6 @@ def encode_chat_transcript(
     ids = tokenizer.encode(prompt, add_special_tokens=False)
     mask = [False] * len(ids)
     special_ids = special_token_ids(tokenizer)
-    scaffold = _turn_scaffold(tokenizer, render_kwargs, special_ids)
     previous = None
     for idx in assistant_indices:
         if previous is not None:
@@ -669,19 +481,16 @@ def encode_chat_transcript(
                 msg = f"Messages {previous} and {idx} are back-to-back assistant turns."
                 raise ValueError(msg)
             feedback = _feedback_ids(tokenizer, between, render_kwargs, chat_format)
-            if len(feedback) > 1 and frame_repeats_terminator(
-                ids[-1], feedback[0], special_ids, chat_format
-            ):
+            closed = (
+                feedback[0] == ids[-1]
+                if chat_format is None
+                else chat_format.closes_turn(ids[-1], feedback[0])
+            )
+            if len(feedback) > 1 and ids[-1] in special_ids and closed:
                 feedback = feedback[1:]
             ids += feedback
             mask += [False] * len(feedback)
-        turn = _assistant_turn_ids(
-            tokenizer,
-            _written_tool_calls(messages[idx], chat_format),
-            render_kwargs,
-            special_ids,
-            scaffold,
-        )
+        turn = _assistant_turn_ids(tokenizer, messages[idx], render_kwargs, special_ids)
         _check_tool_calls_parse(messages[idx], turn, tools, chat_format)
         ids += turn
         mask += [True] * len(turn)
@@ -703,24 +512,9 @@ def _render(
         **render_kwargs,
     )
     if not isinstance(rendered, str):
-        msg = f"apply_chat_template returned {type(rendered).__name__}, expected str."
+        msg = "apply_chat_template(tokenize=False) must return str"
         raise TypeError(msg)
     return rendered
-
-
-def _turn_scaffold(
-    tokenizer: PreTrainedTokenizerBase,
-    render_kwargs: dict[str, Any],
-    special_ids: set[int],
-) -> tuple[str, int]:
-    """Generation prompt after :data:`TURN_OPENER`, and its text length through the last special token."""
-    prompt = _render(tokenizer, [TURN_OPENER], True, render_kwargs)
-    prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
-    last_special = max(
-        (pos for pos, token in enumerate(prompt_ids) if token in special_ids),
-        default=-1,
-    )
-    return prompt, len(tokenizer.decode(prompt_ids[: last_special + 1]))
 
 
 def _assistant_turn_ids(
@@ -728,56 +522,24 @@ def _assistant_turn_ids(
     message: dict[str, Any],
     render_kwargs: dict[str, Any],
     special_ids: set[int],
-    scaffold: tuple[str, int],
 ) -> list[int]:
-    """Ids the model samples for one assistant turn, through its end-of-turn token.
-
-    A re-render may drop text the generation prompt prefills after its last
-    special token (a ``<think>`` opener), so the turn starts where the two renders part.
-    """
-    prompt, header = scaffold
-    rendered = _render(tokenizer, [TURN_OPENER, message], False, render_kwargs)
-    shared = len(os.path.commonprefix([prompt, rendered]))
-    if shared < header:
+    """Ids the model samples for one assistant turn, through its end-of-turn token."""
+    opener = {"role": "user", "content": "."}
+    prompt = _render(tokenizer, [opener], True, render_kwargs)
+    rendered = _render(tokenizer, [opener, message], False, render_kwargs)
+    if not rendered.startswith(prompt):
         msg = (
             "The chat template renders an assistant turn that does not extend "
             "its generation prompt, so the turn's sampled tokens cannot be cut out."
         )
         raise ValueError(msg)
-    turn = tokenizer.encode(rendered[shared:], add_special_tokens=False)
+    turn = tokenizer.encode(rendered[len(prompt) :], add_special_tokens=False)
     last_special = max(
         (pos for pos, token in enumerate(turn) if token in special_ids), default=None
     )
     if last_special is None:
         return [*turn, tokenizer.eos_token_id]
     return turn[: last_special + 1]
-
-
-def _written_tool_calls(
-    message: dict[str, Any], chat_format: ChatFormat | None
-) -> dict[str, Any]:
-    """``message`` with its tool calls in its content when the chat format writes them."""
-    calls = [call.get("function", call) for call in message.get("tool_calls", [])]
-    if chat_format is None or not calls:
-        return message
-    if not all(call.get("name") for call in calls):
-        msg = f"An assistant tool call has no name: {calls}."
-        raise ValueError(msg)
-    text = chat_format.format_tool_calls(
-        [
-            {"name": call["name"], "arguments": call.get("arguments", {})}
-            for call in calls
-        ]
-    )
-    if text is None:
-        return message
-    content = message.get("content") or ""
-    if not isinstance(content, str):
-        msg = f"An assistant tool-call turn needs string content, got {type(content).__name__}."
-        raise ValueError(msg)
-    written = {key: value for key, value in message.items() if key != "tool_calls"}
-    written["content"] = content + text
-    return written
 
 
 def _check_tool_calls_parse(
@@ -819,54 +581,17 @@ def _check_tool_calls_parse(
 def _named_tool_results(
     assistant: dict[str, Any], messages: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    """``messages`` with each unnamed tool result named after the call it answers.
-
-    A result answers the call its ``tool_call_id`` names; one with neither an id
-    nor a name answers the next call no other result answers. Ids are ignored
-    when the assistant's calls have none.
-
-    :param assistant: The assistant turn the results follow.
-    :param messages: The messages between that turn and the next.
-    :return: The messages with tool results named.
-    :raises ValueError: If a ``tool_call_id`` matches none of the turn's calls.
-    """
-    calls = [
-        (call.get("id"), call.get("function", call).get("name"))
+    """``messages`` with each unnamed tool result named after the call it answers, in order."""
+    names = iter(
+        call.get("function", call).get("name")
         for call in assistant.get("tool_calls", [])
+    )
+    return [
+        {**message, "name": next(names, None)}
+        if message["role"] == "tool" and not message.get("name")
+        else message
+        for message in messages
     ]
-    name_by_id = {call_id: name for call_id, name in calls if call_id is not None}
-    unanswered = list(calls)
-    for message in messages:
-        if message["role"] != "tool":
-            continue
-        call_id = message.get("tool_call_id") if name_by_id else None
-        if call_id is not None and call_id not in name_by_id:
-            msg = f"Tool result tool_call_id {call_id!r} is not one of the calls {list(name_by_id)}."
-            raise ValueError(msg)
-        answered = next(
-            (
-                call
-                for call in unanswered
-                if (
-                    call[0] == call_id
-                    if call_id is not None
-                    else call[1] == message.get("name")
-                )
-            ),
-            None,
-        )
-        if answered is not None:
-            unanswered.remove(answered)
-    next_names = iter(name for _, name in unanswered)
-    named = []
-    for message in messages:
-        if message["role"] != "tool" or message.get("name"):
-            named.append(message)
-            continue
-        call_id = message.get("tool_call_id") if name_by_id else None
-        name = name_by_id[call_id] if call_id is not None else next(next_names, None)
-        named.append({**message, "name": name})
-    return named
 
 
 def _feedback_ids(
@@ -876,13 +601,6 @@ def _feedback_ids(
     chat_format: ChatFormat | None,
 ) -> list[int]:
     """Ids of the non-assistant messages between two assistant turns."""
-    for message in messages:
-        if not isinstance(message.get("content"), str):
-            msg = (
-                f"A {message['role']} message between assistant turns needs string "
-                f"content, got {type(message.get('content')).__name__}."
-            )
-            raise ValueError(msg)
     in_turn = None if chat_format is None else chat_format.format_tool_results(messages)
     if in_turn is not None:
         return tokenizer.encode(in_turn, add_special_tokens=False)
@@ -907,32 +625,32 @@ def sft_collate_builder(
     chat_format = detect_chat_format(tokenizer)
 
     def collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
-        """Encode each conversation, cut to the context length and right-pad."""
+        """Encode each conversation, truncate to the context length and right-pad."""
         rows = []
         for item in batch:
-            ids, mask = encode_sft_row(
-                tokenizer, item, env.response_column, chat_format
+            tools = item.get("tools")
+            ids, mask = encode_chat_transcript(
+                tokenizer,
+                sft_messages(item, env.response_column),
+                json.loads(tools) if isinstance(tools, str) else tools,
+                chat_format,
             )
-            fitted = env._fit_to_context(ids, mask)
-            if fitted is None:
-                msg = (
-                    f"A {len(ids)}-token conversation has no complete assistant "
-                    f"turn within max_context_length={env.max_context_length}."
-                )
-                raise ValueError(msg)
-            rows.append(fitted)
-        id_rows = [torch.tensor(ids, dtype=torch.long) for ids, _ in rows]
+            if env.max_context_length is not None:
+                ids = ids[: env.max_context_length]
+                mask = mask[: env.max_context_length]
+            rows.append((ids, mask))
+        width = max(len(ids) for ids, _ in rows)
+        input_ids = torch.full((len(rows), width), tokenizer.pad_token_id)
+        attention_mask = torch.zeros((len(rows), width), dtype=torch.long)
+        loss_mask = torch.zeros((len(rows), width), dtype=torch.bool)
+        for row, (ids, mask) in enumerate(rows):
+            input_ids[row, : len(ids)] = torch.tensor(ids)
+            attention_mask[row, : len(ids)] = 1
+            loss_mask[row, : len(ids)] = torch.tensor(mask)
         return {
-            "input_ids": pad_sequence(
-                id_rows, batch_first=True, padding_value=tokenizer.pad_token_id
-            ),
-            "attention_mask": pad_sequence(
-                [torch.ones_like(row) for row in id_rows], batch_first=True
-            ),
-            "loss_mask": pad_sequence(
-                [torch.tensor(mask, dtype=torch.bool) for _, mask in rows],
-                batch_first=True,
-            ),
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "loss_mask": loss_mask,
         }
 
     return collate_fn

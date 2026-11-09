@@ -19,7 +19,6 @@ from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import GRPO
 from agilerl.distributed import (
     aggregate_metrics_across_gpus,
-    aggregate_metrics_dict,
     all_ranks,
     allreduce_minmax_int,
     any_rank,
@@ -57,7 +56,6 @@ from agilerl.utils.utils import (
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from agilerl.algorithms import LLMPPO, LLMREINFORCE
     from agilerl.llm_envs import RolloutCollector, RolloutHarness
-    from agilerl.llm_envs.judge import drain_judge_stats
     from agilerl.rollouts.on_policy import collate_llm_rollouts, collect_rollouts_llm
 
 if TYPE_CHECKING:
@@ -426,14 +424,16 @@ def train_llm_rollout(
                         if is_main_process():
                             agent.metrics.log("accuracy", agg_accuracy)
 
-                    rollout_metrics = {
-                        f"reward_{name}": mean_value
-                        for name, mean_value in rollout_collector.get_rubric_score_means().items()
-                    }
-                    rollout_metrics.update(drain_judge_stats())
-                    for metric, agg in aggregate_metrics_dict(rollout_metrics).items():
+                    for (
+                        name,
+                        mean_value,
+                    ) in rollout_collector.get_rubric_score_means().items():
+                        metric = f"reward_{name}"
                         if metric not in agent.metrics.additional_metrics:
                             agent.metrics.register(metric)
+                        agg = aggregate_metrics_across_gpus(
+                            mean_score.new_tensor(mean_value)
+                        )
                         if is_main_process():
                             agent.metrics.log(metric, agg)
 

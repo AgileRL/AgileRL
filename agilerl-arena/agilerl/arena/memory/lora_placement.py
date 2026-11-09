@@ -4,15 +4,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection
-
-from agilerl.arena.memory.lora_formulas import decoder_lora_linears, tower_lora_linears
-from agilerl.arena.memory.specs import (
-    LoraLinear,
-    LoraTargetScope,
-    ModelArch,
-    PackedMoeDispatch,
-)
+from agilerl.arena.memory.formulas import lora_param_count, packed_lora_param_count
+from agilerl.arena.memory.specs import LoraTargetScope, ModelArch, PackedMoeDispatch
 
 
 def split_moe_lora_recompute_bytes(
@@ -54,38 +47,12 @@ def _add_lora_pair(
     rank: int,
     copies: int,
     threshold: int | None,
-    in_tp: int = 1,
-    out_tp: int = 1,
 ) -> tuple[int, int]:
-    """Add both factors of one wrapped linear into the replicated/sharded totals.
-
-    ``in_tp`` / ``out_tp`` divide LoRA A / LoRA B when tensor parallel splits
-    them. FSDP bins each factor by its global size.
-    """
-    for features, tp in ((in_features, in_tp), (out_features, out_tp)):
+    """Add both factors of one wrapped linear into the replicated/sharded totals."""
+    for features in (in_features, out_features):
         kept, split = _bin_lora_numel(rank * features, threshold)
-        replicated += kept // tp * copies
-        sharded += split // tp * copies
-    return replicated, sharded
-
-
-def _linear_lora_placement(
-    linears: list[LoraLinear], rank: int, threshold: int | None, tp: int
-) -> tuple[int, int]:
-    """(replicated, sharded) elements of every wrapped factor on one TP rank."""
-    replicated, sharded = 0, 0
-    for linear in linears:
-        replicated, sharded = _add_lora_pair(
-            replicated,
-            sharded,
-            linear.in_features,
-            linear.out_features,
-            rank,
-            linear.count,
-            threshold,
-            in_tp=tp if linear.split == "in" else 1,
-            out_tp=tp if linear.split == "out" else 1,
-        )
+        replicated += kept * copies
+        sharded += split * copies
     return replicated, sharded
 
 
@@ -95,42 +62,77 @@ def lora_tensor_placement(
     scope: LoraTargetScope,
     packed_matrices: int,
     threshold: int | None,
-    tensor_parallel: int = 1,
-    tower_targets: Collection[str] = (),
 ) -> tuple[int, int]:
-    """(replicated elements, sharded elements) for one LoRA adapter on one rank.
+    """(replicated elements, sharded elements) for one LoRA adapter.
 
     ``threshold`` is FSDP's parameter persistence threshold: a matrix with
     fewer elements stays replicated. ``None`` is flat data parallel, so
-    every tensor is replicated. ``tensor_parallel`` is the degree the
-    trainer's plan shards by: each rank keeps ``1/tp`` of the LoRA factor
-    :func:`decoder_lora_linears` and :attr:`ModelArch.tower_lora_linears`
-    mark split. ``tower_targets`` adds the tower and connector adapters
-    those module names wrap. At ``tensor_parallel=1`` the two counts sum to
-    :func:`lora_param_count`, :func:`packed_lora_param_count` and
-    :func:`tower_lora_param_count`.
+    every tensor is replicated. The two counts sum to
+    :func:`lora_param_count` plus :func:`packed_lora_param_count`.
     """
-    linears = decoder_lora_linears(arch, scope, tensor_parallel)
-    linears += tower_lora_linears(arch, tower_targets)
-    replicated, sharded = _linear_lora_placement(
-        linears, rank, threshold, tensor_parallel
+    h = arch.hidden_size
+    q_dim = arch.n_heads * arch.head_dim
+    kv_dim = arch.n_kv_heads * arch.head_dim
+    replicated, sharded = _add_lora_pair(
+        0, 0, h, q_dim, rank, arch.attention_layers, threshold
     )
+    replicated, sharded = _add_lora_pair(
+        replicated, sharded, h, kv_dim, rank, arch.attention_layers, threshold
+    )
+    replicated, sharded = _add_lora_pair(
+        replicated, sharded, h, kv_dim, rank, arch.attention_layers, threshold
+    )
+    replicated, sharded = _add_lora_pair(
+        replicated, sharded, q_dim, h, rank, arch.attention_layers, threshold
+    )
+    if scope == "all-linear":
+        inter = arch.intermediate_size
+        if arch.gated_mlp:
+            replicated, sharded = _add_lora_pair(
+                replicated, sharded, h, inter, rank, arch.mlp_layers, threshold
+            )
+            replicated, sharded = _add_lora_pair(
+                replicated, sharded, h, inter, rank, arch.mlp_layers, threshold
+            )
+        else:
+            replicated, sharded = _add_lora_pair(
+                replicated, sharded, h, inter, rank, arch.mlp_layers, threshold
+            )
+        replicated, sharded = _add_lora_pair(
+            replicated, sharded, inter, h, rank, arch.mlp_layers, threshold
+        )
+        if arch.n_mamba_layers:
+            d_inner = arch.mamba_n_heads * arch.mamba_d_head
+            in_out = d_inner + arch.mamba_conv_dim + arch.mamba_n_heads
+            replicated, sharded = _add_lora_pair(
+                replicated,
+                sharded,
+                h,
+                in_out,
+                rank,
+                arch.n_mamba_layers,
+                threshold,
+            )
+            replicated, sharded = _add_lora_pair(
+                replicated, sharded, d_inner, h, rank, arch.n_mamba_layers, threshold
+            )
     n_experts = arch.n_experts
     if packed_matrices and n_experts is not None and n_experts > 1:
         expert_inter = arch.expert_intermediate_size or arch.intermediate_size
         # PEFT stacks every expert's factor into one ``[E * r, features]`` tensor.
-        # A gated stack's fused ``gate_up_proj`` is ``2 * inter`` wide.
-        widths = [expert_inter] * packed_matrices
-        if arch.gated_mlp:
-            widths[0] = 2 * expert_inter
-        for width in widths:
-            replicated, sharded = _add_lora_pair(
-                replicated,
-                sharded,
-                arch.expert_width,
-                width,
-                rank * n_experts,
-                arch.moe_layers,
-                threshold,
-            )
+        replicated, sharded = _add_lora_pair(
+            replicated,
+            sharded,
+            arch.expert_width,
+            expert_inter,
+            rank * n_experts,
+            arch.moe_layers * packed_matrices,
+            threshold,
+        )
+    target = lora_param_count(arch, rank, scope) + packed_lora_param_count(
+        arch, rank, packed_matrices
+    )
+    # ``global_head_dim`` scales the attention total in ``lora_param_count``;
+    # the residual counts as replicated so both totals match.
+    replicated += target - (replicated + sharded)
     return replicated, sharded

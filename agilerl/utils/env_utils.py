@@ -3,10 +3,8 @@
 
 from __future__ import annotations
 
-import inspect
 import os
 from collections.abc import Callable, Mapping, Sequence
-from copy import deepcopy
 from importlib import import_module
 from importlib import util as importlib_util
 from pathlib import Path
@@ -22,8 +20,6 @@ from agilerl.vector import AsyncPettingZooVecEnv
 
 if TYPE_CHECKING:
     from openenv.core.rubrics.base import Rubric
-
-    from agilerl.arena.models.env import JudgeSpec
 
 GymEnvType = AsyncVectorEnv | SyncVectorEnv
 PzEnvType = ParallelEnv | AsyncPettingZooVecEnv
@@ -50,33 +46,37 @@ def make_conversation_template(prompt_template: dict[str, str]) -> list[dict[str
     ]
 
 
-def get_rubric_factory(
-    rubric_name: str, file_path: str, judge_spec: JudgeSpec | None = None
-) -> Callable[[], Rubric]:
+def get_rubric_factory(rubric_name: str, file_path: str) -> Callable[[], Rubric]:
     """Load a rubric symbol once and return a factory building rubrics from it.
 
     The module is executed once, here, so its import-time cost and side effects
     are paid once however many rubrics the caller goes on to build. A ``Rubric``
-    subclass, a reward callable, or a module-level ``Rubric`` instance each
-    yields a fresh rubric per call, so concurrently-stepped envs each own
-    their scorer. With ``judge_spec``, the symbol must be a ``Rubric`` subclass
-    whose ``__init__`` takes ``judge``; each rubric is built with the process's
-    shared client for that spec.
+    subclass or a reward callable yields a fresh rubric per call, which is what
+    lets concurrently-stepped envs each own their scorer; a module-level
+    ``Rubric`` instance is the author's own single object and is returned as-is.
 
     :param rubric_name: Name of the symbol in ``file_path``.
     :param file_path: Path to the Python module defining the rubric or reward fn.
-    :param judge_spec: The judge handed to the rubric, or ``None``.
     :returns: A zero-argument callable returning an OpenEnv ``Rubric``.
     :rtype: Callable[[], Rubric]
-    :raises TypeError: If the symbol is not a Rubric, Rubric subclass, or
-        callable, or a judge is set and the symbol does not take one.
+    :raises TypeError: If the symbol is not a Rubric, Rubric subclass, or callable.
     """
     file_path_obj = Path(file_path)
     if not file_path_obj.exists():
         msg = f"{file_path} not found"
         raise ValueError(msg)
     try:
-        rubric_module = _load_module_from_path(file_path, file_path_obj.resolve())
+        abs_file_path = file_path_obj.resolve()
+        module_name = file_path_obj.stem
+        spec = importlib_util.spec_from_file_location(
+            module_name,
+            str(abs_file_path),
+        )
+        if spec is None or spec.loader is None:
+            msg = f"Could not create spec for {abs_file_path}"
+            raise ValueError(msg)
+        rubric_module = importlib_util.module_from_spec(spec)
+        spec.loader.exec_module(rubric_module)
         obj = getattr(rubric_module, rubric_name)
     except Exception as e:
         msg = f"Error importing rubric {rubric_name} from {file_path}: {e}"
@@ -84,33 +84,10 @@ def get_rubric_factory(
 
     from openenv.core.rubrics.base import Rubric  # optional extra: llm
 
-    from agilerl.llm_envs.judge import shared_judge_client  # optional extra: llm
     from agilerl.llm_envs.rubrics import reward_fn_to_rubric  # optional extra: llm
 
-    if judge_spec is not None:
-        if not (
-            isinstance(obj, type)
-            and issubclass(obj, Rubric)
-            and "judge" in inspect.signature(obj).parameters
-        ):
-            msg = (
-                f"A judge is set, so {rubric_name!r} in {file_path} must be a "
-                "Rubric subclass whose __init__ takes judge."
-            )
-            raise TypeError(msg)
-        judge = shared_judge_client(judge_spec)
-        return lambda: obj(judge=judge)
     if isinstance(obj, Rubric):
-        try:
-            deepcopy(obj)
-        except TypeError as e:
-            msg = (
-                f"{rubric_name!r} in {file_path} is a Rubric instance that cannot be "
-                "copied per env slot, likely because it holds a client. Make it a "
-                "Rubric class; a judge client goes in through __init__(judge)."
-            )
-            raise TypeError(msg) from e
-        return lambda: deepcopy(obj)
+        return lambda: obj
     if isinstance(obj, type) and issubclass(obj, Rubric):
         return obj
     if callable(obj):
@@ -121,6 +98,21 @@ def get_rubric_factory(
         f"got {type(obj).__name__}."
     )
     raise TypeError(msg)
+
+
+def get_rubric(rubric_name: str, file_path: str) -> Rubric:
+    """Load one Rubric from a file, wrapping legacy reward callables.
+
+    Accepts a ``Rubric`` instance, a ``Rubric`` subclass (instantiated here), or a
+    callable of ``completion``, ``answer``, and ``question`` (Arena / older manifests),
+    which is wrapped with :func:`~agilerl.llm_envs.rubrics.reward_fn_to_rubric`.
+
+    :param rubric_name: Name of the symbol in ``file_path``.
+    :param file_path: Path to the Python module defining the rubric or reward fn.
+    :returns: An OpenEnv ``Rubric`` instance.
+    :raises TypeError: If the symbol is not a Rubric, Rubric subclass, or callable.
+    """
+    return get_rubric_factory(rubric_name, file_path)()
 
 
 def escape_non_format_braces(

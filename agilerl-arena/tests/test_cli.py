@@ -13,7 +13,6 @@ from unittest.mock import MagicMock, patch
 
 import click
 import pytest
-import yaml
 from click.testing import CliRunner
 
 from agilerl.arena.cli import (
@@ -27,16 +26,7 @@ from agilerl.arena.config import CommandConfig, build_client
 from agilerl.arena.exceptions import ArenaAPIError
 from agilerl.arena.inference import SessionDetail, SessionInfo, SessionMessage
 from agilerl.arena.inference.cache import load_active_session, save_active_session
-from agilerl.arena.models.model_info import STATUS_PREVIEW, SUPPORTED_MODEL_INFO
-
-
-def _llm_manifest(model: str) -> str:
-    return (
-        "algorithm: {name: GRPO}\n"
-        "environment: {env_type: rollout, entrypoint: 'envs:MyEnv'}\n"
-        f"network: {{pretrained_model_name_or_path: {model}, "
-        "max_context_length: 1024}\n"
-    )
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 
 
 @pytest.fixture
@@ -58,7 +48,6 @@ def mock_agent(mock_client) -> MagicMock:
 def mock_client() -> MagicMock:
     return MagicMock(
         spec_set=[
-            "get_default_run_spec",
             "close",
             "login",
             "logout",
@@ -365,169 +354,6 @@ class TestManifestCommands:
         assert result.exit_code == 1
         assert "not a registered algorithm" in result.output
 
-    def test_validate_lists_algorithm_aliases_once(self, runner):
-        result = runner.invoke(
-            main,
-            ["manifest", "validate", "-"],
-            input="algorithm: {name: NOPE}\nenvironment: {name: CartPole-v1}\n",
-        )
-
-        assert "Recurrent PPO / RecurrentPPO" in result.output
-        assert ", RecurrentPPO," not in result.output
-
-    def test_validate_suggests_the_closest_algorithm(self, runner):
-        result = runner.invoke(
-            main,
-            ["manifest", "validate", "-"],
-            input="algorithm: {name: grp0}\nenvironment: {name: CartPole-v1}\n",
-        )
-
-        assert result.exit_code == 1
-        assert "Did you mean GRPO?" in result.output
-
-    @pytest.mark.parametrize(
-        ("model", "warning"),
-        [
-            (
-                "Qwen/Qwen3.5-0.9B",
-                (
-                    "warning: Model Qwen/Qwen3.5-0.9B is not in the Arena supported "
-                    "model catalog; see 'arena models supported'. "
-                    "Did you mean Qwen/Qwen3.5-0.8B?"
-                ),
-            ),
-            (
-                "Qwen/Qwen3-4B",
-                "warning: Model Qwen/Qwen3-4B is deprecated and will be removed.",
-            ),
-        ],
-    )
-    def test_validate_warns_about_the_model_without_failing(
-        self, runner, model, warning
-    ):
-        result = runner.invoke(
-            main, ["manifest", "validate", "-"], input=_llm_manifest(model)
-        )
-
-        assert result.exit_code == 0
-        assert warning in " ".join(result.output.split())
-        assert "valid (GRPO)" in result.output
-
-    def test_validate_warns_about_a_preview_model(self, runner, monkeypatch):
-        hub_id = "Qwen/Qwen3.5-0.8B"
-        monkeypatch.setitem(
-            SUPPORTED_MODEL_INFO,
-            hub_id,
-            SUPPORTED_MODEL_INFO[hub_id].model_copy(update={"status": STATUS_PREVIEW}),
-        )
-
-        result = runner.invoke(
-            main, ["manifest", "validate", "-"], input=_llm_manifest(hub_id)
-        )
-
-        assert result.exit_code == 0
-        assert f"warning: Model {hub_id} is in preview" in result.output
-
-    @pytest.mark.parametrize(
-        "manifest",
-        [
-            _llm_manifest("Qwen/Qwen3.5-0.8B"),
-            _llm_manifest("./checkpoints/mine"),
-            _llm_manifest("/mnt/checkpoints/mine"),
-            "algorithm: {name: DQN}\nenvironment: {name: CartPole-v1}\n",
-        ],
-        ids=["live", "relative-path", "absolute-path", "not-llm"],
-    )
-    def test_validate_json_has_no_warning_to_report(self, runner, manifest):
-        result = runner.invoke(
-            main, ["manifest", "validate", "-", "--json"], input=manifest
-        )
-
-        assert result.exit_code == 0
-        verdict = json.loads(result.output)
-        assert verdict["ok"] is True
-        assert verdict["warnings"] == []
-
-    def test_validate_json_accepts_a_relative_checkout(
-        self, runner, tmp_path, monkeypatch
-    ):
-        checkout = tmp_path / "ckpt"
-        checkout.mkdir()
-        (checkout / "config.json").write_text("{}", encoding="utf-8")
-        monkeypatch.chdir(tmp_path)
-
-        result = runner.invoke(
-            main,
-            ["manifest", "validate", "-", "--json"],
-            input=_llm_manifest("ckpt"),
-        )
-
-        assert result.exit_code == 0
-        verdict = json.loads(result.output)
-        assert verdict["ok"] is True
-        assert verdict["warnings"] == []
-
-    def test_validate_does_not_suggest_a_hub_id_for_a_local_checkout(
-        self, runner, tmp_path, monkeypatch
-    ):
-        checkout = tmp_path / "models" / "Qwen" / "Qwen3.5-0.8B"
-        checkout.mkdir(parents=True)
-        (checkout / "config.json").write_text("{}", encoding="utf-8")
-        monkeypatch.chdir(tmp_path)
-        model = "models/Qwen/Qwen3.5-0.8B"
-
-        result = runner.invoke(
-            main, ["manifest", "validate", "-"], input=_llm_manifest(model)
-        )
-
-        assert result.exit_code == 0
-        assert "not in the Arena supported model catalog" not in result.output
-        assert "Did you mean" not in result.output
-        assert "valid (GRPO)" in result.output
-
-    def test_validate_warns_when_a_relative_checkout_is_missing(
-        self, runner, tmp_path, monkeypatch
-    ):
-        monkeypatch.chdir(tmp_path)
-
-        result = runner.invoke(
-            main, ["manifest", "validate", "-"], input=_llm_manifest("ckpt")
-        )
-
-        assert result.exit_code == 0
-        assert "Model ckpt is not in the Arena supported model catalog" in result.output
-
-    def test_validate_json_reports_model_warnings(self, runner):
-        result = runner.invoke(
-            main,
-            ["manifest", "validate", "-", "--json"],
-            input=_llm_manifest("Qwen/Qwen3-4B"),
-        )
-
-        assert json.loads(result.output)["warnings"] == [
-            "Model Qwen/Qwen3-4B is deprecated and will be removed."
-        ]
-
-    def test_validate_json_invalid_verdict_has_the_same_keys(self, runner):
-        result = runner.invoke(
-            main,
-            ["manifest", "validate", "-", "--json"],
-            input="algorithm: {name: NOPE}\nenvironment: {name: CartPole-v1}\n",
-        )
-
-        verdict = json.loads(result.output)
-        assert verdict["ok"] is False
-        assert verdict["warnings"] == []
-
-    def test_root_json_flag_applies_to_validate(self, runner):
-        result = runner.invoke(
-            main,
-            ["--json", "manifest", "validate", "-"],
-            input=_llm_manifest("Qwen/Qwen3.5-0.8B"),
-        )
-
-        assert json.loads(result.output)["ok"] is True
-
     def test_validate_payload_prints_resolved_manifest(self, runner, tmp_path):
         path = tmp_path / "dqn.yaml"
         path.write_text(
@@ -608,21 +434,6 @@ class TestUserCommands:
         assert result.exit_code == 0
         assert "Jane Doe" in result.output
         assert "jane@example.com" in result.output
-
-    def test_user_profile_json(self, runner, mock_client):
-        user = {
-            "first_name": "Jane",
-            "last_name": "Doe",
-            "email": "jane@example.com",
-        }
-        mock_client.get_current_user.return_value = user
-
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(main, ["--json", "user", "profile"])
-
-        assert result.exit_code == 0
-        assert json.loads(result.output) == user
-        assert "Jane Doe" not in result.output
 
     def test_user_credits(self, runner, mock_client):
         mock_client.get_user_credits.return_value = {"credits": 1000}
@@ -903,10 +714,8 @@ class TestExperimentSubmitCommand:
         assert result.exit_code == 0
         mock_client.submit_experiment.assert_called_once_with(
             manifest=manifest,
-            resource_id=None,
-            num_nodes=None,
-            num_gpus=None,
-            gpu_type=None,
+            resource_id="arena-medium",
+            num_nodes=2,
             project=None,
             experiment_name=None,
             reward_file=None,
@@ -945,111 +754,16 @@ class TestExperimentSubmitCommand:
             manifest=manifest,
             resource_id="arena-large",
             num_nodes=4,
-            num_gpus=None,
-            gpu_type=None,
             project="proj1",
             experiment_name="my-exp",
             reward_file=reward,
             completion="test output",
         )
 
-    def test_submit_gpu_flags(self, runner, mock_client, tmp_path):
-        manifest = tmp_path / "m.yaml"
-        manifest.write_text("x: 1")
-        mock_client.submit_experiment.return_value = {"id": "exp-789"}
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(
-                main,
-                [
-                    "experiments",
-                    "submit",
-                    str(manifest),
-                    "--num-gpus",
-                    "8",
-                    "--gpu-type",
-                    "h100-80",
-                ],
-            )
-        assert result.exit_code == 0
-        mock_client.submit_experiment.assert_called_once_with(
-            manifest=manifest,
-            resource_id=None,
-            num_nodes=None,
-            num_gpus=8,
-            gpu_type="h100-80",
-            project=None,
-            experiment_name=None,
-            reward_file=None,
-            completion=None,
-        )
-
-    def test_submit_rejects_zero_gpus(self, runner, mock_client, tmp_path):
-        manifest = tmp_path / "m.yaml"
-        manifest.write_text("x: 1")
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(
-                main, ["experiments", "submit", str(manifest), "--num-gpus", "0"]
-            )
-        assert result.exit_code == 2
-        assert "Invalid value" in result.output
-        mock_client.submit_experiment.assert_not_called()
-
     def test_submit_missing_manifest(self, runner, mock_client):
         with _patched_arena_client(mock_client):
             result = runner.invoke(main, ["experiments", "submit"])
         assert result.exit_code != 0
-
-    def test_help_shows_resource_and_node_defaults(self, runner):
-        result = runner.invoke(main, ["experiments", "submit", "--help"])
-
-        help_text = " ".join(result.output.split())
-        assert result.exit_code == 0
-        assert "--resource-id" in help_text
-        assert "--num-nodes" in help_text
-        assert "--num-gpus" in help_text
-        assert "--gpu-type" in help_text
-        assert (
-            "Omit every resource flag to let Arena pick the cheapest fit." in help_text
-        )
-
-    def test_root_json_prints_the_submit_result(self, runner, mock_client, tmp_path):
-        manifest = tmp_path / "m.yaml"
-        manifest.write_text("algorithm: {name: DQN}\n")
-        mock_client.submit_experiment.return_value = {"job_id": 3}
-
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(
-                main, ["--json", "experiments", "submit", str(manifest)]
-            )
-
-        assert result.exit_code == 0
-        assert json.loads(result.output) == {"job_id": 3}
-
-    def test_arena_json_env_var_turns_json_on(self, runner, mock_client, tmp_path):
-        manifest = tmp_path / "m.yaml"
-        manifest.write_text("algorithm: {name: DQN}\n")
-        mock_client.submit_experiment.return_value = {"job_id": 3}
-
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(
-                main,
-                ["experiments", "submit", str(manifest)],
-                env={"ARENA_JSON": "1"},
-            )
-
-        assert json.loads(result.output) == {"job_id": 3}
-
-    def test_without_json_submit_prints_no_result_document(
-        self, runner, mock_client, tmp_path
-    ):
-        manifest = tmp_path / "m.yaml"
-        manifest.write_text("algorithm: {name: DQN}\n")
-        mock_client.submit_experiment.return_value = {"job_id": 3}
-
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(main, ["experiments", "submit", str(manifest)])
-
-        assert "job_id" not in result.output
 
 
 class TestDatasetsListCommand:
@@ -1112,87 +826,6 @@ class TestModelsListCommand:
         mock_client.list_models.assert_called_once_with()
         assert "ibm-granite/granite-3.3-2b-instruct" in result.output
 
-    def test_list_shows_summary_columns_not_lora_detail(self, runner, mock_client):
-        mock_client.list_models.return_value = [
-            {
-                "model_name": "Qwen/Qwen3.5-0.8B",
-                "architecture": "hybrid",
-                "num_params": 852_985_920,
-                "lora_info": {"q_proj": [{"in_features": 1024}]},
-                "lora_ranks": [1, 8, 16],
-                "max_context_length": 262144,
-                "status": "live",
-                "modalities": ["text", "vision"],
-            }
-        ]
-
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(main, ["models", "list"])
-
-        assert result.exit_code == 0
-        assert "Qwen/Qwen3.5-0.8B" in result.output
-        assert "0.85B" in result.output
-        assert "lora_info" not in result.output
-        assert "in_features" not in result.output
-
-    def test_list_marks_disabled_and_unknown_values(self, runner, mock_client):
-        mock_client.list_models.return_value = [
-            {"model_name": "org/off", "enabled": False, "status": "live"},
-            {"model_name": "org/bare"},
-        ]
-
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(main, ["models", "list"])
-
-        assert result.exit_code == 0
-        assert "disabled" in result.output
-        assert "None" not in result.output
-
-    def test_root_json_keeps_every_field(self, runner, mock_client):
-        rows = [{"model_name": "org/a", "lora_info": {"q_proj": []}, "enabled": True}]
-        mock_client.list_models.return_value = rows
-
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(main, ["--json", "models", "list"])
-
-        assert json.loads(result.output) == rows
-
-
-class TestManifestTemplateCommand:
-    def test_prints_yaml_that_round_trips(self, runner, mock_client):
-        spec = {"algorithm": {"name": "GRPO"}, "training": {"max_steps": 100}}
-        mock_client.get_default_run_spec.return_value = spec
-
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(
-                main,
-                ["manifest", "template", "GRPO", "--model", "Qwen/Qwen3.5-0.8B"],
-            )
-
-        assert result.exit_code == 0
-        assert yaml.safe_load(result.output) == spec
-        assert list(yaml.safe_load(result.output)) == ["algorithm", "training"]
-
-    def test_root_json_prints_json(self, runner, mock_client):
-        spec = {"name": "GRPO"}
-        mock_client.get_default_run_spec.return_value = spec
-
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(
-                main,
-                ["--json", "manifest", "template", "GRPO", "--section", "algorithm"],
-            )
-
-        assert json.loads(result.output) == spec
-
-    def test_rejects_an_unknown_section(self, runner):
-        result = runner.invoke(
-            main, ["manifest", "template", "GRPO", "--section", "nope"]
-        )
-
-        assert result.exit_code == 2
-        assert "Invalid value for '--section'" in result.output
-
 
 class TestModelsSupportedCommand:
     def test_prints_every_supported_model_without_a_server(self, runner) -> None:
@@ -1210,8 +843,6 @@ class TestModelsSupportedCommand:
             == "live"
         )
         assert qwen["max_context_length"] == 40960
-        assert qwen["num_params"] == 4_022_468_096
-        assert models["openai/gpt-oss-20b"]["num_params"] == 20_914_757_184
         assert qwen["lora_ranks"] == [1, 8, 16, 32, 64, 128, 256, 320, 512]
         assert "_gram_estimate" in qwen["lora_info"]
         assert qwen["supports_expert_parallel"] is False
@@ -1353,15 +984,6 @@ class TestExperimentListCommand:
         assert result.exit_code == 0
         mock_client.list_experiments.assert_called_once_with(project="proj1")
 
-    def test_empty_project_points_to_submit(self, runner, mock_client):
-        mock_client.list_experiments.return_value = []
-
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(main, ["experiments", "list", "--project", "proj1"])
-
-        assert result.exit_code == 0
-        assert "arena experiments submit" in result.output
-
     def test_list_missing_project(self, runner, mock_client):
         from agilerl.arena.exceptions import ArenaConfigError
 
@@ -1409,34 +1031,6 @@ class TestExperimentCheckpointsCommand:
             result = runner.invoke(main, ["experiments", "checkpoints", "my-exp"])
         assert result.exit_code == 0
         mock_client.list_checkpoints.assert_called_once_with(experiment_name="my-exp")
-
-    def test_no_checkpoints_says_so(self, runner, mock_client):
-        mock_client.list_checkpoints.return_value = []
-
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(main, ["experiments", "checkpoints", "my-exp"])
-
-        assert result.exit_code == 0
-        assert "No checkpoints for my-exp." in result.output
-        assert "Value" not in result.output
-
-    def test_no_checkpoints_keeps_brackets_in_the_name(self, runner, mock_client):
-        mock_client.list_checkpoints.return_value = []
-
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(main, ["experiments", "checkpoints", "run[abc]"])
-
-        assert "No checkpoints for run[abc]." in result.output
-
-    def test_root_json_empty_is_an_empty_list(self, runner, mock_client):
-        mock_client.list_checkpoints.return_value = []
-
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(
-                main, ["--json", "experiments", "checkpoints", "my-exp"]
-            )
-
-        assert json.loads(result.output) == []
 
     def test_checkpoints_orders_steps_first_and_rounds_size(self, runner, mock_client):
         mock_client.list_checkpoints.return_value = [
@@ -1557,27 +1151,6 @@ class TestAgentListCommand:
         mock_client.list_inference_deployments.assert_called_once_with(
             name=None, experiment_name=None, project_name=None
         )
-
-    def test_no_agents_points_to_deploy(self, runner, mock_client):
-        mock_client.list_inference_deployments.return_value = []
-
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(main, ["agent", "list"])
-
-        assert result.exit_code == 0
-        assert "arena agent deploy" in result.output
-        assert "Value" not in result.output
-
-    def test_no_match_for_a_filter_does_not_suggest_deploying(
-        self, runner, mock_client
-    ):
-        mock_client.list_inference_deployments.return_value = []
-
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(main, ["agent", "list", "--name", "typo"])
-
-        assert "No deployed agents match those filters." in result.output
-        assert "arena agent deploy" not in result.output
 
     def test_list_with_filters(self, runner, mock_client):
         mock_client.list_inference_deployments.return_value = []
@@ -2115,15 +1688,6 @@ class TestProjectsDefaultCommand:
             result = runner.invoke(main, ["projects", "get-default"])
         assert result.exit_code == 0
         assert "No default project set" in result.output
-
-    def test_get_default_json(self, runner, mock_client):
-        mock_client.get_default_project.return_value = "my-proj"
-
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(main, ["--json", "projects", "get-default"])
-
-        assert result.exit_code == 0
-        assert json.loads(result.output) == {"project": "my-proj"}
 
 
 class TestRedactAgentRows:

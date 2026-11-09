@@ -150,9 +150,6 @@ class RolloutEnvDoubleMixin:
         full_completion, sampling_logps = self._pending_step
         return self.step(full_completion, sampling_logps=sampling_logps)
 
-    def _take_unscored_turn(self) -> None:
-        return None
-
 
 class MiniTokenizer:
     """Minimal tokenizer for the non-chat-template token path."""

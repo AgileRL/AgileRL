@@ -21,11 +21,7 @@ from transformers import GptOssConfig, GptOssForCausalLM
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssTopKRouter
 
 from agilerl.distributed import FSDPConfig, init_distributed
-from agilerl.distributed.fsdp_blocks import (
-    _block_checkpoint_contexts,
-    _checkpoint_block,
-    apply_fsdp2,
-)
+from agilerl.distributed.fsdp_blocks import _block_checkpoint_contexts, apply_fsdp2
 from agilerl.lora.moe import upgrade_moe_param_wrappers
 
 VOCAB = 64
@@ -100,17 +96,6 @@ def tiny_gpt_oss_mlp_with_lora() -> nn.Module:
     return tiny_gpt_oss_with_lora().get_submodule("base_model.model.model.layers.0.mlp")
 
 
-class MlpBlock(nn.Module):
-    """Decoder-block stand-in whose only child is a MoE MLP."""
-
-    def __init__(self, mlp: nn.Module) -> None:
-        super().__init__()
-        self.mlp = mlp
-
-    def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.mlp(hidden_states)
-
-
 def trainable_grads(module: nn.Module) -> dict[str, torch.Tensor]:
     """Full gradient of each trainable parameter, keyed by its unwrapped name."""
     return {
@@ -150,13 +135,14 @@ class TestBlockCheckpointContexts:
         reference_hidden = hidden.clone().requires_grad_()
         (reference(reference_hidden)[0] * upstream).sum().backward()
         hidden.requires_grad_()
-        block = _checkpoint_block(
-            MlpBlock(mlp),
-            FSDPConfig(param_dtype="float32", checkpoint_every_n_blocks=1),
-        )
 
         # Act
-        out, _scores = block(hidden)
+        out, _scores = checkpoint(
+            mlp,
+            hidden,
+            use_reentrant=False,
+            context_fn=_block_checkpoint_contexts(True),
+        )
         (out * upstream).sum().backward()
 
         # Assert
@@ -217,12 +203,3 @@ class TestApplyFsdp2:
         assert grads.keys() == expected.keys()
         for name, grad in grads.items():
             assert torch.equal(grad, expected[name]), name
-
-    @pytest.mark.usefixtures("world_size_one")
-    def test_context_parallel_without_a_mesh_raises(self) -> None:
-        with pytest.raises(
-            ValueError, match=r"FSDPConfig\.cp=2 needs an FSDP device mesh"
-        ):
-            apply_fsdp2(
-                tiny_gpt_oss_with_lora(), FSDPConfig(param_dtype="float32", cp=2)
-            )

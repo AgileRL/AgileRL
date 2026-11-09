@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable
 from difflib import get_close_matches
 from pathlib import Path
@@ -38,11 +39,13 @@ from agilerl.arena.memory.resolve.rollout import (
     rollout_engines_blocker,
 )
 from agilerl.arena.models.algorithms.base import AlgoSpec, LLMAlgorithmSpec
+from agilerl.arena.models.algorithms.opd import OPDSpec
 from agilerl.arena.models.algorithms.ppo import PPOSpec
 from agilerl.arena.models.algorithms.rollout_llm import (
     RolloutLLMSpec,
     records_sampling_supports,
 )
+from agilerl.arena.models.distillation import teacher_pool_problems
 from agilerl.arena.models.env import EnvSpec, LLMEnvSpec
 from agilerl.arena.models.hpo import (
     MultiFrequencySelectionSpec,
@@ -61,7 +64,7 @@ from agilerl.arena.models.networks import (
     network_arch_is_resolvable,
     normalize_manifest_network,
 )
-from agilerl.arena.models.registry import MANIFEST_REGISTRY, did_you_mean
+from agilerl.arena.models.registry import MANIFEST_REGISTRY
 from agilerl.arena.models.training import (
     BufferSpec,
     LLMRolloutBufferSpec,
@@ -82,8 +85,6 @@ RESOLVED_MEMORY_FIELDS = (
     ("fsdp", "routed_expert_chunk_mib"),
     ("fsdp", "activation_offload"),
     ("fsdp", "cpu_offload"),
-    ("fsdp", "shard_frozen_tp"),
-    ("fsdp", "save_moe_collectives"),
     ("fsdp", "checkpoint_every_n_blocks"),
 )
 
@@ -200,11 +201,6 @@ class DeferredNetworkSpec(BaseModel):
     )
 
 
-def _registered_algorithms() -> str:
-    """The sentence listing every registered algorithm once."""
-    return f"Registered: {', '.join(MANIFEST_REGISTRY.alias_groups())}."
-
-
 def _resolve_algorithm(data: object) -> object:
     """Dispatch the algorithm section to its registered spec class via ``name``."""
     if isinstance(data, BaseModel):
@@ -221,7 +217,7 @@ def _resolve_algorithm(data: object) -> object:
     if name is None:
         msg = (
             "The algorithm section must include a 'name' field naming a registered "
-            f"algorithm. {_registered_algorithms()}"
+            f"algorithm. Registered: {', '.join(MANIFEST_REGISTRY.names())}."
         )
         raise ValueError(msg)
     try:
@@ -230,9 +226,8 @@ def _resolve_algorithm(data: object) -> object:
         # Surface an unknown name as a validation error like any other bad
         # field, rather than a KeyError a caller cannot tell from a crash.
         msg = (
-            f"'name' is not a registered algorithm: {name!r}."
-            f"{did_you_mean(str(name), MANIFEST_REGISTRY.names())} "
-            f"{_registered_algorithms()}"
+            f"'name' is not a registered algorithm: {name!r}. "
+            f"Registered: {', '.join(MANIFEST_REGISTRY.names())}."
         )
         raise ValueError(msg) from err
 
@@ -685,6 +680,89 @@ class TrainingManifest(BaseModel):
         raise ValueError(msg)
 
     @model_validator(mode="after")
+    def _check_distillation_teacher(self) -> Self:
+        """The teacher rescores each rollout's text, so the env must be text-only."""
+        if not isinstance(self.algorithm, OPDSpec):
+            return self
+        if not (
+            isinstance(self.environment, LLMEnvSpec) and self.environment.text_only
+        ):
+            msg = (
+                "algorithm.teacher rescores each rollout's text, so the "
+                "environment must be a text-only LLM rollout env (modality text "
+                "or a dataset-backed rollout)."
+            )
+            raise ValueError(msg)
+        teacher = self.algorithm.teacher
+        if teacher.teachers:
+            vllm = self.algorithm.vllm_config
+            problems = teacher_pool_problems(
+                teacher,
+                self.algorithm.pretrained_model_name_or_path,
+                colocated=not self.training.async_rollout,
+                layout_written=(
+                    vllm is not None
+                    and vllm.tensor_parallel_size is not None
+                    and bool(
+                        {"training_gpus_per_agent", "rollout_engines_per_agent"}
+                        & self.training.model_fields_set
+                    )
+                ),
+            )
+            if problems:
+                msg = "Multi-teacher OPD: " + "; ".join(problems)
+                raise ValueError(msg)
+            student_id = self.algorithm.pretrained_model_name_or_path
+            only = teacher.teachers[0].model.pretrained_model_name_or_path
+            if len(teacher.teachers) == 1 and only == student_id:
+                warnings.warn(
+                    "OPD has one teacher and it is the student's own checkpoint, "
+                    "so distillation adds cost and does not merge domains.",
+                    UserWarning,
+                    stacklevel=1,
+                )
+            return self
+        model = teacher.model
+        if model is None:
+            return self
+        teacher_info = SUPPORTED_MODEL_INFO.get(model.pretrained_model_name_or_path)
+        if teacher_info is None:
+            msg = (
+                f"algorithm.teacher.model {model.pretrained_model_name_or_path!r} is "
+                "not in the model catalog, so its engine memory cannot be sized."
+            )
+            raise ValueError(msg)
+        student_id = self.algorithm.pretrained_model_name_or_path
+        student_info = SUPPORTED_MODEL_INFO.get(student_id) if student_id else None
+        if (
+            student_info is not None
+            and student_info.vocab_size != teacher_info.vocab_size
+        ):
+            msg = (
+                "algorithm.teacher.model scores the student's token ids, so both "
+                f"need one vocabulary; {student_id} has {student_info.vocab_size} "
+                f"tokens and {model.pretrained_model_name_or_path} has "
+                f"{teacher_info.vocab_size}."
+            )
+            raise ValueError(msg)
+        vllm = self.algorithm.vllm_config
+        if (
+            vllm is None
+            or vllm.tensor_parallel_size is None
+            or not {"training_gpus_per_agent", "rollout_engines_per_agent"}
+            & self.training.model_fields_set
+        ):
+            msg = (
+                "algorithm.teacher.model needs its GPU layout written out, since "
+                "the automatic GPU split does not count teacher engines. Set "
+                "algorithm.vllm_config.tensor_parallel_size and "
+                "training.training_gpus_per_agent or "
+                "training.rollout_engines_per_agent."
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
     def _check_pretrained_model_resolved(self) -> Self:
         """An LLM run has to name a model, from the algorithm or network section."""
         if (
@@ -721,27 +799,6 @@ class TrainingManifest(BaseModel):
         if model is not None:
             self.algorithm.check_speculative_sampling(model.biases_image_token)
         return self
-
-    @model_validator(mode="after")
-    def _check_expert_parallel_covers_tensor_parallel(self) -> Self:
-        """MoE models need ep >= tp; tensor parallel leaves routed experts whole."""
-        if not isinstance(self.algorithm, LLMAlgorithmSpec):
-            return self
-        fsdp = self.algorithm.fsdp
-        if fsdp is None or fsdp.ep >= fsdp.tp:
-            return self
-        model = SUPPORTED_MODEL_INFO.get(self.algorithm.pretrained_model_name_or_path)
-        # Only supported ids are known offline; the trainer checks the rest.
-        if model is None or not model.supports_expert_parallel:
-            return self
-        # Without EP, experts sit on tp times fewer FSDP ranks, so each GPU
-        # holds tp times the expert memory. The trainer raises this at startup too.
-        msg = (
-            f"algorithm.fsdp.ep={fsdp.ep} is below tp={fsdp.tp}: "
-            f"{model.hub_id} is a mixture-of-experts model, and tensor parallel "
-            "does not split routed experts. Set ep >= tp."
-        )
-        raise ValueError(msg)
 
     @field_serializer("network", mode="wrap")
     def _serialize_network(
@@ -865,9 +922,6 @@ class TrainingManifest(BaseModel):
             # An unset engine count leaves the trainer / engine split to the driver.
             if "rollout_engines_per_agent" not in self.training.model_fields_set:
                 training.pop("rollout_engines_per_agent", None)
-            # An unset step cap dumps the default million, which parsers treat as authored.
-            if "max_steps" not in self.training.model_fields_set:
-                training.pop("max_steps", None)
         algorithm = payload.get("algorithm")
         if isinstance(algorithm, dict):
             if "num_envs" not in self.algorithm.model_fields_set:

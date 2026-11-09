@@ -4,7 +4,6 @@
 
 import copy
 
-from agilerl.arena.memory.breakdown import MemoryComponent, PhaseBreakdown
 from agilerl.arena.memory.estimator import estimate_generation
 from agilerl.arena.memory.generation import KV_MARGIN_BYTES
 from agilerl.arena.memory.manifest import (
@@ -14,12 +13,8 @@ from agilerl.arena.memory.manifest import (
     validated_run_manifest,
 )
 from agilerl.arena.memory.resolve.engine import (
-    _engine_model,
-    queue_warning,
     resolve_engine_fast_path,
-    resolve_engine_tensor_parallel,
     resolve_rollout_engines_per_agent,
-    sequences_held,
     servable_engine_widths,
 )
 from agilerl.arena.memory.specs import ModelArch, ModelSpec
@@ -79,16 +74,6 @@ def gemma_model() -> ModelSpec:
         n_params=info.inspected["num_params"],
         variants=MANIFEST_WEIGHT_VARIANTS,
     )
-
-
-class TestEngineModel:
-    def test_matches_a_model_built_from_the_bundled_config(self):
-        # Act
-        served = _engine_model(GEMMA_4_E4B)
-
-        # Assert
-        assert served == gemma_model()
-        assert _engine_model(GEMMA_4_E4B) == served
 
 
 class TestResolveEngineFastPath:
@@ -280,69 +265,6 @@ def rollout_manifest(hub_id: str, context: int) -> TrainingManifest:
     )
 
 
-def qwen35_9b_kept_trainers() -> TrainingManifest:
-    """Two-turn CISPO on Qwen3.5-9B with two trainers, auto engines and the width omitted."""
-    return validated_run_manifest(
-        TrainingManifest.model_validate(
-            {
-                "algorithm": {
-                    "name": "CISPO",
-                    "batch_size": 4,
-                    "group_size": 4,
-                    "max_output_tokens": 256,
-                    "vllm_config": {"gpu_memory_utilization": 0.9},
-                },
-                "environment": {
-                    "env_type": "rollout",
-                    "env_image": "env:latest",
-                    "modality": "text",
-                    "max_turns": 2,
-                },
-                "network": {
-                    "pretrained_model_name_or_path": "Qwen/Qwen3.5-9B",
-                    "max_context_length": 2048,
-                    "lora_config": {"lora_r": 16, "lora_alpha": 32},
-                },
-                "training": {
-                    "max_steps": 10,
-                    "rollout_mode": "async",
-                    "pop_size": 1,
-                    "training_gpus_per_agent": 2,
-                    "rollout_batch_size": 4,
-                },
-                "replay_buffer": {"kind": "llm"},
-            }
-        )
-    )
-
-
-class TestResolveEngineTensorParallel:
-    def test_merged_sync_keeps_one_gpu_engines(self) -> None:
-        # Arrange: two trainers leave four L4s for engines.
-        manifest = qwen35_9b_kept_trainers()
-        l4 = lookup_gpu("L4").device_spec()
-
-        # Act
-        width = resolve_engine_tensor_parallel(manifest, 6, l4, 6)
-
-        # Assert
-        assert width == 1
-        assert manifest.algorithm.vllm_config.tensor_parallel_size == 1
-
-    def test_adapter_sync_prices_the_engine_lora_slot(self) -> None:
-        # Arrange: the LoRA slot leaves four TP1 engines fewer resident
-        # sequences than two TP2 engines.
-        manifest = qwen35_9b_kept_trainers()
-        l4 = lookup_gpu("L4").device_spec()
-
-        # Act
-        width = resolve_engine_tensor_parallel(manifest, 6, l4, 6, adapter_sync=True)
-
-        # Assert
-        assert width == 2
-        assert manifest.algorithm.vllm_config.tensor_parallel_size == 2
-
-
 class TestServableEngineWidths:
     def test_moe_model_skips_widths_without_room_or_an_even_head_split(self) -> None:
         # Arrange: Qwen3.6-35B-A3B's weights fill one 48 GB L40S, and its
@@ -377,62 +299,3 @@ class TestServableEngineWidths:
 
         # Assert
         assert widths == [1]
-
-    def test_records_each_width_it_checks_in_the_cache(self) -> None:
-        # Arrange
-        manifest = rollout_manifest("Qwen/Qwen3.6-35B-A3B", 32768)
-        l40s = lookup_gpu("L40S").device_spec()
-        cache: dict = {}
-
-        # Act
-        widths = servable_engine_widths(manifest, l40s, 4, cache)
-
-        # Assert
-        assert widths == [2, 4]
-        key = (l40s.name, l40s.total_bytes)
-        assert cache == {(*key, 1): False, (*key, 2): True, (*key, 4): True}
-
-    def test_reads_a_width_from_the_cache(self) -> None:
-        # Arrange: width 2 serves on L40S; the cache says it does not.
-        manifest = rollout_manifest("Qwen/Qwen3.6-35B-A3B", 32768)
-        l40s = lookup_gpu("L40S").device_spec()
-        cache = {(l40s.name, l40s.total_bytes, 2): False}
-
-        # Act
-        widths = servable_engine_widths(manifest, l40s, 4, cache)
-
-        # Assert
-        assert widths == [4]
-
-
-def kv_bar(pool: int, demand: int) -> PhaseBreakdown:
-    """A generation bar whose KV pool holds ``pool`` bytes against ``demand``."""
-    return PhaseBreakdown(
-        phase="generation",
-        components=(
-            MemoryComponent(
-                key="kv_cache",
-                label="KV cache pool",
-                n_bytes=pool,
-                detail={"pool": pool, "worst_case_demand": demand},
-            ),
-        ),
-        device_total_bytes=pool * 4,
-        device_usable_bytes=pool * 4,
-    )
-
-
-class TestQueueWarning:
-    def test_names_how_many_sequences_fit(self):
-        bar = kv_bar(5 * KV_MARGIN_BYTES, 16 * KV_MARGIN_BYTES)
-
-        assert sequences_held(bar, 8) == 2
-        assert queue_warning(bar, 8, 4) == (
-            "tensor_parallel_size=4 holds 2 of 8 sequences; generation may queue"
-        )
-
-    def test_is_silent_when_every_sequence_fits(self):
-        bar = kv_bar(5 * KV_MARGIN_BYTES, 4 * KV_MARGIN_BYTES)
-
-        assert sequences_held(bar, 8) == 8
-        assert queue_warning(bar, 8, 1) is None

@@ -4,8 +4,6 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
-
 from agilerl.arena.memory.specs import ModelArch, ModelSpec
 from agilerl.arena.models.algorithms.base import LLMAlgorithmSpec
 from agilerl.arena.models.algorithms.grpo import GRPOSpec
@@ -23,28 +21,22 @@ KV_POOL_FILL = 0.85
 TOKEN_BUDGET_STEP = 1024
 
 
-class TrainerSplitError(ValueError):
-    """The batch or a parallel group does not split across the trainer ranks."""
-
-
 def data_parallel_size(spec: LLMAlgorithmSpec, n_training_gpus: int) -> int:
-    """Trainer world folded by tensor-parallel and context-parallel degree.
+    """Trainer world folded by tensor-parallel degree.
 
     :param spec: Validated LLM algorithm spec.
     :param n_training_gpus: Trainer ranks, ``training.training_gpus_per_agent``.
     :return: Data-parallel ranks.
-    :raises TrainerSplitError: When ``fsdp.tp * fsdp.cp`` does not divide the trainer world.
+    :raises ValueError: When ``fsdp.tp`` does not divide the trainer world.
     """
     tp = 1 if spec.fsdp is None else spec.fsdp.tp
-    cp = 1 if spec.fsdp is None else spec.fsdp.cp
-    fold = tp * cp
-    if n_training_gpus % fold != 0:
+    if n_training_gpus % tp != 0:
         msg = (
-            f"world_size ({n_training_gpus}) must be divisible by the tp * cp "
-            f"replica size ({tp} * {cp} = {fold})"
+            f"world_size ({n_training_gpus}) must be divisible by tp ({tp}) "
+            "for Tensor Parallel."
         )
-        raise TrainerSplitError(msg)
-    return n_training_gpus // fold
+        raise ValueError(msg)
+    return n_training_gpus // tp
 
 
 def rollout_group_size(spec: LLMAlgorithmSpec) -> int:
@@ -98,7 +90,7 @@ def require_batch_split(mini: int, micro: int, per_rank: int) -> None:
     :param mini: Trajectories one optimizer step covers.
     :param micro: Rows in one forward on one rank.
     :param per_rank: Trajectories that rank holds.
-    :raises TrainerSplitError: When ``mini`` does not divide ``per_rank``, or
+    :raises ValueError: When ``mini`` does not divide ``per_rank``, or
         ``micro`` does not divide ``mini``.
     """
     if mini < 1 or per_rank % mini != 0:
@@ -107,7 +99,7 @@ def require_batch_split(mini: int, micro: int, per_rank: int) -> None:
             f"divisible by mini_batch_size ({mini}): a rank "
             "must split into whole optimizer steps."
         )
-        raise TrainerSplitError(msg)
+        raise ValueError(msg)
     if micro < 1 or mini % micro != 0:
         msg = (
             f"mini_batch_size ({mini}) must be divisible by "
@@ -116,7 +108,7 @@ def require_batch_split(mini: int, micro: int, per_rank: int) -> None:
             "micro_batch_size_per_gpu must be a whole number of backward "
             "passes."
         )
-        raise TrainerSplitError(msg)
+        raise ValueError(msg)
 
 
 def catalog_model(spec: LLMAlgorithmSpec) -> ModelSpec | None:
@@ -126,19 +118,9 @@ def catalog_model(spec: LLMAlgorithmSpec) -> ModelSpec | None:
     :return: The spec's catalog model.
     """
     hub_id = spec.pretrained_model_name_or_path
-    if hub_id is None or hub_id not in SUPPORTED_MODEL_INFO:
+    info = SUPPORTED_MODEL_INFO.get(hub_id) if hub_id is not None else None
+    if info is None or hub_id is None:
         return None
-    return catalog_model_spec(hub_id)
-
-
-@lru_cache(maxsize=len(SUPPORTED_MODEL_INFO))
-def catalog_model_spec(hub_id: str) -> ModelSpec:
-    """Training model of a catalogued Hub id, built once per id.
-
-    :param hub_id: Key of :data:`SUPPORTED_MODEL_INFO`.
-    :return: The id's model from its bundled config and parameter count.
-    """
-    info = SUPPORTED_MODEL_INFO[hub_id]
     counted = info.inspected["num_params"]
     n_params = counted if isinstance(counted, int) else None
     return ModelSpec(
@@ -210,7 +192,7 @@ def per_rank_trajectories(
     :param spec: Validated LLM algorithm spec.
     :param n_training_gpus: Trainer ranks, ``training.training_gpus_per_agent``.
     :return: ``(data_parallel_size, trajectories)``.
-    :raises TrainerSplitError: When the batch does not split across those ranks.
+    :raises ValueError: When the batch does not split across those ranks.
     """
     dp = data_parallel_size(spec, n_training_gpus)
     if spec.batch_size % dp != 0:
@@ -218,7 +200,7 @@ def per_rank_trajectories(
             f"Batch size ({spec.batch_size}) must be divisible by the data-parallel "
             f"size ({dp})."
         )
-        raise TrainerSplitError(msg)
+        raise ValueError(msg)
     return dp, omitted_micro_batch_size(spec, n_training_gpus)
 
 
@@ -230,7 +212,7 @@ def resolve_micro_batch_size_per_gpu(
     :param spec: Validated LLM algorithm spec. Not written.
     :param n_training_gpus: Trainer ranks, ``training.training_gpus_per_agent``.
     :return: The set micro-batch, else the resolved mini-batch.
-    :raises TrainerSplitError: When a set mini-batch does not divide the rank.
+    :raises ValueError: When a set mini-batch does not divide the rank.
     """
     configured = spec.micro_batch_size_per_gpu
     if configured is not None:

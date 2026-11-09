@@ -16,22 +16,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from agilerl.arena.auth import ArenaOAuth2
-from agilerl.arena.memory import estimator, formulas, fsdp_gather, manifest
-from agilerl.arena.memory.resolve import batch, engine, fsdp
-from agilerl.arena.models import model_info
-
-# Bounded memo caches of the memory planner. Each assumes the bundled configs,
-# the catalog and module constants stay fixed for the process.
-PLANNER_CACHES = (
-    model_info._pickled_config,
-    batch.catalog_model_spec,
-    engine._engine_model,
-    formulas.param_counts,
-    fsdp_gather.prefetch_window_params,
-    estimator._cached_training_breakdown,
-    fsdp._cached_training_memory,
-    manifest._catalog_checkpoint_quantized,
-)
 
 
 @pytest.fixture(autouse=True)
@@ -55,20 +39,6 @@ def _detach_arena_rich_handler() -> None:
     finally:
         arena_logger.handlers = saved_handlers
         arena_logger.propagate = saved_propagate
-
-
-@pytest.fixture(autouse=True)
-def empty_planner_caches():
-    """Start and end each test with empty planner caches.
-
-    Tests patch bundled configs, catalog entries and module constants, which
-    the cache keys do not cover.
-    """
-    for cache in PLANNER_CACHES:
-        cache.cache_clear()
-    yield
-    for cache in PLANNER_CACHES:
-        cache.cache_clear()
 
 
 @pytest.fixture(autouse=True)

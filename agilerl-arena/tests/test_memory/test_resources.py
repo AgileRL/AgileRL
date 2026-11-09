@@ -8,29 +8,31 @@ from pathlib import Path
 
 import pytest
 
-from agilerl.arena.memory import resources as resources_module
 from agilerl.arena.memory.estimator import MemoryComponent, PhaseBreakdown, RunEstimate
 from agilerl.arena.memory.formulas import MAX_UNDERPREDICTION
 from agilerl.arena.memory.manifest import (
-    device_spec_from_resource_class,
+    estimate_teacher_generation,
     lookup_gpu,
     run_config_from_manifest,
 )
 from agilerl.arena.memory.resolve.batch import catalog_model
 from agilerl.arena.memory.resolve.engine import resolve_engine_tensor_parallel
-from agilerl.arena.memory.resolve.parallel import ParallelLayout
-from agilerl.arena.memory.resolve.run import SearchCache, resolve_run_memory
+from agilerl.arena.memory.resolve.split import resolve_run_memory
 from agilerl.arena.memory.resources import (
     check_tiers,
     engine_width,
     engines_per_member,
     gpus_required,
     searches_gpu_split,
-    split_manifest,
-    tier_sync_link,
+    with_run_gpu_split,
 )
-from agilerl.arena.memory.specs import ModelArch, ModelSpec
+from agilerl.arena.models.distillation import (
+    DistillationTeacherConfig,
+    DistillationTeacherModel,
+    DistillationTeacherRoute,
+)
 from agilerl.arena.models.manifest import TrainingManifest
+from agilerl.arena.models.networks import VLLMConfig
 from tests.test_memory.test_cli import (
     MANIFEST,
     NO_TIER_FITS,
@@ -55,6 +57,47 @@ def manifest_with(base, **training):
     return TrainingManifest.model_validate(
         {**base, "training": {**base["training"], **training}}
     )
+
+
+def teacher_manifest(teacher="Qwen/Qwen3.8-27B", teacher_width=1, **training):
+    """OPD on Qwen3.5-2B with a separate teacher model, one trainer and two engines."""
+    return TrainingManifest.model_validate(
+        {
+            "algorithm": {
+                "name": "OPD",
+                "batch_size": 2,
+                "vllm_config": {"tensor_parallel_size": 1},
+                "teacher": {
+                    "model": {
+                        "pretrained_model_name_or_path": teacher,
+                        "vllm_config": {"tensor_parallel_size": teacher_width},
+                    }
+                },
+            },
+            "environment": {
+                "env_type": "rollout",
+                "dataset": "openai/gsm8k",
+                "reward_file_path": "reward.py",
+                "prompt_template": {"user_0": "{question}"},
+            },
+            "network": {
+                "pretrained_model_name_or_path": "Qwen/Qwen3.5-2B",
+                "max_context_length": 512,
+            },
+            "training": {
+                "max_steps": 100,
+                "pop_size": 1,
+                "training_gpus_per_agent": 1,
+                "rollout_engines_per_agent": 2,
+                "rollout_batch_size": 4,
+                **training,
+            },
+        }
+    )
+
+
+def component(breakdown, key):
+    return next(part for part in breakdown.components if part.key == key)
 
 
 def unset_width(base):
@@ -86,64 +129,15 @@ def moe_unset_layout():
     return doc
 
 
-def tiny_model():
-    arch = ModelArch.from_hf_config(json.loads(Path(TINY_CONFIG).read_text()))
-    return ModelSpec(model_id="tiny", arch=arch)
-
-
 def builder():
     model_config = json.loads(Path(TINY_CONFIG).read_text())
-    return lambda laid_out, device, width, engines, adapter_sync: (
-        run_config_from_manifest(
-            laid_out,
-            device,
-            model_config,
-            tensor_parallel_size=width,
-            rollout_engines=engines,
-            adapter_sync=adapter_sync,
-        )
+    return lambda laid_out, device, width, engines: run_config_from_manifest(
+        laid_out,
+        device,
+        model_config,
+        tensor_parallel_size=width,
+        rollout_engines=engines,
     )
-
-
-@pytest.fixture
-def priced(monkeypatch):
-    """``(tier name, node count)`` of every allocation the tier search prices."""
-    calls = []
-    real = resources_module._price
-
-    def spy(tier, manifest, model, build_config, layout, num_nodes, cache):
-        calls.append((tier["name"], num_nodes))
-        return real(tier, manifest, model, build_config, layout, num_nodes, cache)
-
-    monkeypatch.setattr(resources_module, "_price", spy)
-    return calls
-
-
-@pytest.fixture
-def built_layouts():
-    """A builder that records ``(gpus per node, tp, ep, cp)`` for every allocation it sizes."""
-    seen = set()
-
-    def build(laid_out, device, width, engines, adapter_sync):
-        fsdp = laid_out.algorithm.fsdp
-        seen.add((device.gpus_per_node, fsdp.tp, fsdp.ep, fsdp.cp))
-        return builder()(laid_out, device, width, engines, adapter_sync)
-
-    return build, seen
-
-
-@pytest.fixture
-def built_split():
-    """A builder that records ``(tp, ep, cp, trainers)`` for every allocation it sizes."""
-    seen = set()
-
-    def build(laid_out, device, width, engines, adapter_sync):
-        fsdp = laid_out.algorithm.fsdp
-        trainers = laid_out.training.training_gpus_per_agent
-        seen.add((fsdp.tp, fsdp.ep, fsdp.cp, trainers))
-        return builder()(laid_out, device, width, engines, adapter_sync)
-
-    return build, seen
 
 
 class TestGpusRequired:
@@ -173,6 +167,105 @@ class TestGpusRequired:
         )
 
         assert gpus_required(manifest, tensor_parallel_size=4) == 2 + 2 * 4
+
+    def test_each_engine_counts_its_teacher_models_gpus(self):
+        manifest = teacher_manifest(teacher_width=3)
+
+        assert gpus_required(manifest, tensor_parallel_size=2) == 1 + 2 * (2 + 3)
+
+    def test_a_pool_counts_each_distinct_checkpoint(self) -> None:
+        # Arrange
+        math = DistillationTeacherModel(
+            pretrained_model_name_or_path="Qwen/Qwen3-4B",
+            vllm_config=VLLMConfig(tensor_parallel_size=2),
+        )
+        code = DistillationTeacherModel(pretrained_model_name_or_path="Qwen/Qwen3-1.7B")
+        pool = DistillationTeacherConfig(
+            teachers=[
+                DistillationTeacherRoute(name="math", model=math, domains=["math"]),
+                DistillationTeacherRoute(name="code", model=code, domains=["code"]),
+            ],
+            default_teacher="math",
+        )
+        shared = pool.model_copy(
+            update={
+                "teachers": [
+                    pool.teachers[0],
+                    pool.teachers[1].model_copy(update={"model": math}),
+                ]
+            }
+        )
+        base = teacher_manifest()
+
+        # Act
+        two = gpus_required(
+            base.model_copy(
+                update={
+                    "algorithm": base.algorithm.model_copy(update={"teacher": pool})
+                }
+            ),
+            tensor_parallel_size=2,
+        )
+        one = gpus_required(
+            base.model_copy(
+                update={
+                    "algorithm": base.algorithm.model_copy(update={"teacher": shared})
+                }
+            ),
+            tensor_parallel_size=2,
+        )
+
+        # Assert
+        assert two == 1 + 2 * (2 + 2 + 1)
+        assert one == 1 + 2 * (2 + 2)
+
+
+class TestEnginesPerMemberWithTeacher:
+    def test_auto_engines_leave_room_for_each_teacher(self):
+        manifest = teacher_manifest(teacher_width=2, rollout_engines_per_agent="auto")
+
+        assert engines_per_member(manifest, 7, tensor_parallel_size=1) == 2
+
+
+class TestEstimateTeacherGeneration:
+    def test_is_none_without_a_teacher_model(self):
+        device = lookup_gpu("NVIDIA A100-SXM4-80GB").device_spec()
+
+        estimate = estimate_teacher_generation(
+            manifest_with(MANIFEST, rollout_engines_per_agent=1), device
+        )
+
+        assert estimate is None
+
+    def test_a_larger_teacher_needs_more_of_its_gpu(self):
+        # Arrange
+        device = lookup_gpu("NVIDIA A100-SXM4-80GB").device_spec()
+        small = teacher_manifest(teacher="Qwen/Qwen3.5-2B")
+        large = teacher_manifest(teacher="Qwen/Qwen3.8-27B")
+
+        # Act
+        small_estimate = estimate_teacher_generation(small, device)
+        large_estimate = estimate_teacher_generation(large, device)
+
+        # Assert
+        small_weights = component(small_estimate, "weights").n_bytes
+        large_weights = component(large_estimate, "weights").n_bytes
+        assert large_weights > 5 * small_weights
+
+    def test_sharding_the_teacher_lowers_each_gpus_weights(self):
+        # Arrange
+        device = lookup_gpu("NVIDIA A100-SXM4-80GB").device_spec()
+
+        # Act
+        one = estimate_teacher_generation(
+            teacher_manifest(teacher="Qwen/Qwen3.8-27B"), device
+        )
+        two = estimate_teacher_generation(
+            teacher_manifest(teacher="Qwen/Qwen3.8-27B", teacher_width=2), device
+        )
+
+        # Assert
+        assert component(two, "weights").n_bytes < component(one, "weights").n_bytes
 
 
 class TestEngineWidth:
@@ -244,15 +337,6 @@ class TestEnginesPerMember:
             engines_per_member(manifest, 2, tensor_parallel_size=1)
 
 
-class TestTierSyncLink:
-    @pytest.mark.parametrize("gpus_per_node", [None, 8])
-    def test_one_node_syncs_over_cuda_ipc(self, gpus_per_node):
-        assert tier_sync_link(8, gpus_per_node) == "cuda_ipc"
-
-    def test_allocation_across_nodes_has_no_known_link(self):
-        assert tier_sync_link(16, 8) is None
-
-
 class TestSearchesGpuSplit:
     def test_async_run_with_neither_count_searches(self):
         manifest = TrainingManifest.model_validate(unset_split(MANIFEST))
@@ -274,7 +358,7 @@ class TestSearchesGpuSplit:
         assert not searches_gpu_split(manifest)
 
 
-class TestSplitManifest:
+class TestWithRunGpuSplit:
     def test_writes_the_split_the_run_memory_search_picks(self):
         # Arrange
         manifest = TrainingManifest.model_validate(unset_split(MANIFEST))
@@ -284,7 +368,7 @@ class TestSplitManifest:
         ).split
 
         # Act
-        laid_out, _plan = split_manifest(manifest, 8, device)
+        laid_out = with_run_gpu_split(manifest, 8, device)
 
         # Assert
         assert expected is not None
@@ -300,7 +384,7 @@ class TestSplitManifest:
         device = lookup_gpu("H100-80").device_spec()
 
         # Act
-        laid_out, _plan = split_manifest(manifest, 8, device)
+        laid_out = with_run_gpu_split(manifest, 8, device)
 
         # Assert
         assert laid_out.algorithm.vllm_config.tensor_parallel_size == 2
@@ -318,7 +402,7 @@ class TestSplitManifest:
 
         # Act / Assert
         with pytest.raises(ValueError, match="No trainer / rollout-engine split of 2"):
-            split_manifest(manifest, 2, device)
+            with_run_gpu_split(manifest, 2, device)
 
     def test_model_outside_the_catalogue_raises(self):
         # Arrange
@@ -332,7 +416,7 @@ class TestSplitManifest:
             ValueError,
             match="'local/uncatalogued-model' is not in the memory estimator catalogue",
         ):
-            split_manifest(manifest, 8, device)
+            with_run_gpu_split(manifest, 8, device)
 
 
 class TestCheckTiers:
@@ -340,20 +424,17 @@ class TestCheckTiers:
         # Arrange
         manifest = TrainingManifest.model_validate(unset_split(MANIFEST))
         device = lookup_gpu("NVIDIA L4").device_spec()
-        expected, _plan = split_manifest(manifest, 8, device, sync_link="cuda_ipc")
+        expected = with_run_gpu_split(manifest, 8, device)
         sized = []
         build = builder()
 
-        def recording_build(laid_out, train_device, width, engines, adapter_sync):
+        def recording_build(laid_out, train_device, width, engines):
             sized.append((laid_out, engines))
-            return build(laid_out, train_device, width, engines, adapter_sync)
+            return build(laid_out, train_device, width, engines)
 
         # Act
         (check,) = check_tiers(
-            [tier("l4-8x", "NVIDIA L4", 8, 8.0)],
-            manifest,
-            tiny_model(),
-            recording_build,
+            [tier("l4-8x", "NVIDIA L4", 8, 8.0)], manifest, recording_build
         )
 
         # Assert
@@ -375,15 +456,14 @@ class TestCheckTiers:
         widths = []
         build = builder()
 
-        def recording_build(laid_out, train_device, width, engines, adapter_sync):
+        def recording_build(laid_out, train_device, width, engines):
             widths.append((width, engines))
-            return build(laid_out, train_device, width, engines, adapter_sync)
+            return build(laid_out, train_device, width, engines)
 
         # Act
         check_tiers(
             [tier("h100-8x", "NVIDIA H100 80GB HBM3", 8, 30.0)],
             manifest,
-            tiny_model(),
             recording_build,
         )
 
@@ -396,7 +476,7 @@ class TestCheckTiers:
         )
 
         (check,) = check_tiers(
-            [tier("l4-2x", "NVIDIA L4", 2, 1.0)], manifest, tiny_model(), builder()
+            [tier("l4-2x", "NVIDIA L4", 2, 1.0)], manifest, builder()
         )
 
         assert not check.fits
@@ -409,9 +489,7 @@ class TestCheckTiers:
     def test_a_gpu_below_sm80_is_ruled_out_as_unsupported(self, gpu_type, label):
         manifest = TrainingManifest.model_validate(unset_split(MANIFEST))
 
-        (check,) = check_tiers(
-            [tier("old-2x", gpu_type, 2, 1.0)], manifest, tiny_model(), builder()
-        )
+        (check,) = check_tiers([tier("old-2x", gpu_type, 2, 1.0)], manifest, builder())
 
         assert not check.fits
         assert f"({label}) cannot run LLM training" in check.reason
@@ -430,7 +508,7 @@ class TestCheckTiers:
         ]
 
         # Act
-        checks = check_tiers(tiers, manifest, tiny_model(), builder())
+        checks = check_tiers(tiers, manifest, builder())
 
         # Assert
         assert [c.tier["name"] for c in checks] == [
@@ -449,65 +527,16 @@ class TestCheckTiers:
         assert checks[3].config.train_device.name == "NVIDIA L4"
         assert checks[3].estimate.fits
 
-    def test_tensor_parallel_engine_takes_a_second_node(self):
-        # One 4-GPU node cannot hold a trainer and a width-4 engine. Two can.
+    def test_tensor_parallel_engine_needs_a_gpu_per_rank(self):
         doc = copy.deepcopy(MANIFEST)
         doc["algorithm"]["vllm_config"]["tensor_parallel_size"] = 4
         manifest = TrainingManifest.model_validate(doc)
-        tiers = [{**tier("l4-4x", "NVIDIA L4", 4, 4.0), "node_counts": [1, 2]}]
+        tiers = [tier("l4-4x", "NVIDIA L4", 4, 4.0)]
 
-        (check,) = check_tiers(tiers, manifest, tiny_model(), builder())
-
-        assert check.fits
-        assert check.num_nodes == 2
-        assert check.engine_tensor_parallel == 4
-
-    def test_a_tier_listing_node_counts_is_only_tried_at_those(self):
-        doc = copy.deepcopy(MANIFEST)
-        doc["algorithm"]["vllm_config"]["tensor_parallel_size"] = 4
-        manifest = TrainingManifest.model_validate(doc)
-        tiers = [{**tier("l4-4x", "NVIDIA L4", 4, 4.0), "node_counts": [1]}]
-
-        (check,) = check_tiers(tiers, manifest, tiny_model(), builder())
+        (check,) = check_tiers(tiers, manifest, builder())
 
         assert not check.fits
         assert check.reason == "4 GPUs, the job needs 5"
-
-    def test_a_tier_without_node_counts_is_its_num_gpus(self):
-        doc = copy.deepcopy(MANIFEST)
-        doc["algorithm"]["vllm_config"]["tensor_parallel_size"] = 4
-        manifest = TrainingManifest.model_validate(doc)
-        tiers = [{**tier("l4-4x", "NVIDIA L4", 8, 4.0), "gpus_per_node": 4}]
-
-        (check,) = check_tiers(tiers, manifest, tiny_model(), builder())
-
-        assert check.fits
-        assert check.num_nodes == 2
-
-    def test_num_gpus_over_part_of_a_node_is_the_allocation(self):
-        # Arrange: 6 GPUs on 4-GPU nodes hold one trainer and five engines.
-        manifest = manifest_with(MANIFEST, rollout_engines_per_agent=5)
-        tiers = [{**tier("l4-6x", "NVIDIA L4", 6, 4.0), "gpus_per_node": 4}]
-
-        # Act
-        (check,) = check_tiers(tiers, manifest, tiny_model(), builder())
-
-        # Assert
-        assert check.fits
-        assert check.num_nodes == 2
-        assert check.engines == 5
-
-    def test_num_gpus_under_one_node_is_the_allocation(self):
-        # Arrange: 2 GPUs of a 4-GPU node cannot hold one trainer and two engines.
-        manifest = manifest_with(MANIFEST, rollout_engines_per_agent=2)
-        tiers = [{**tier("l4-2x", "NVIDIA L4", 2, 2.0), "gpus_per_node": 4}]
-
-        # Act
-        (check,) = check_tiers(tiers, manifest, tiny_model(), builder())
-
-        # Assert
-        assert not check.fits
-        assert check.reason == "2 GPUs, the job needs 3"
 
     def test_auto_engines_size_the_sequences_the_tier_splits(self):
         # Arrange: 8 prompts of group 4 over the four engines 5 GPUs leave.
@@ -517,7 +546,7 @@ class TestCheckTiers:
         tiers = [tier("l4-5x", "NVIDIA L4", 5, 5.0)]
 
         # Act
-        (check,) = check_tiers(tiers, manifest, tiny_model(), builder())
+        (check,) = check_tiers(tiers, manifest, builder())
 
         # Assert
         assert check.config.generation.tensor_parallel_size == 1
@@ -527,7 +556,7 @@ class TestCheckTiers:
         manifest = TrainingManifest.model_validate(NO_TIER_FITS)
         tiers = [tier("l4-2x", "NVIDIA L4", 2, 1.0)]
 
-        (check,) = check_tiers(tiers, manifest, tiny_model(), builder())
+        (check,) = check_tiers(tiers, manifest, builder())
 
         assert not check.fits
         assert check.reason is not None
@@ -565,7 +594,7 @@ class TestCheckTiers:
 
         # Act
         (check,) = check_tiers(
-            [tier("l4-2x", "NVIDIA L4", 2, 2.0)], manifest, tiny_model(), builder()
+            [tier("l4-2x", "NVIDIA L4", 2, 2.0)], manifest, builder()
         )
 
         # Assert
@@ -577,658 +606,6 @@ class TestCheckTiers:
     def test_no_fitting_tier_leaves_no_fit(self, tiers):
         manifest = TrainingManifest.model_validate(MANIFEST)
 
-        checks = check_tiers(tiers, manifest, tiny_model(), builder())
+        checks = check_tiers(tiers, manifest, builder())
 
         assert not any(c.fits for c in checks)
-
-    def test_locks_the_least_parallel_layout_once_a_tier_fits(self, monkeypatch):
-        # Arrange: a MoE, so expert parallel is legal; only A100 fits.
-        manifest = TrainingManifest.model_validate(
-            {
-                **with_model(MANIFEST, "ibm-granite/granite-3.1-3b-a800m-instruct"),
-                "training": {**MANIFEST["training"], "training_gpus_per_agent": 2},
-            }
-        )
-        assert catalog_model(manifest.algorithm).arch.is_moe
-        monkeypatch.setattr(
-            "agilerl.arena.memory.resources.estimate_run",
-            lambda config: flat_estimate(
-                1_000, 10_000 if "A100" in config.train_device.name else 100
-            ),
-        )
-        layouts = []
-
-        def build(laid_out, device, width, engines, adapter_sync):
-            fsdp = laid_out.algorithm.fsdp
-            layouts.append((fsdp.tp, fsdp.ep))
-            return builder()(laid_out, device, width, engines, adapter_sync)
-
-        tiers = [
-            tier("l4-1x", "NVIDIA L4", 1, 1.0),
-            tier("l4-4x", "NVIDIA L4", 4, 2.0),
-            tier("a100-4x", "NVIDIA A100-SXM4-80GB", 4, 8.0),
-            tier("a100-8x", "NVIDIA A100-SXM4-80GB", 8, 16.0),
-        ]
-
-        # Act
-        checks = check_tiers(tiers, manifest, tiny_model(), build)
-
-        # Assert
-        by_name = {check.tier["name"]: check for check in checks}
-        assert by_name["l4-1x"].reason == "1 GPUs, the job needs 3"
-        assert by_name["l4-4x"].reason == "training over budget"
-        assert by_name["a100-4x"].fits
-        assert by_name["a100-4x"].num_nodes == 1
-        assert by_name["a100-4x"].layout == ParallelLayout()
-        assert by_name["a100-8x"].fits
-        assert by_name["a100-8x"].layout == ParallelLayout()
-        assert set(layouts) == {(1, 1)}
-
-    def test_uses_more_nodes_before_more_parallelism(self, monkeypatch):
-        # Arrange: 2 trainers and 2 engines need 4 GPUs; a 2-GPU node is short.
-        manifest = TrainingManifest.model_validate(
-            {
-                **with_model(MANIFEST, "ibm-granite/granite-3.1-3b-a800m-instruct"),
-                "training": {
-                    **MANIFEST["training"],
-                    "training_gpus_per_agent": 2,
-                    "rollout_engines_per_agent": 2,
-                },
-            }
-        )
-        monkeypatch.setattr(
-            "agilerl.arena.memory.resources.estimate_run",
-            lambda _config: flat_estimate(1, 10_000),
-        )
-        tiers = [
-            {**tier("l4-2x", "NVIDIA L4", 2, 1.0), "node_counts": [1, 2]},
-            {**tier("a100-2x", "NVIDIA A100-SXM4-80GB", 2, 9.0), "node_counts": [1, 2]},
-        ]
-
-        # Act
-        checks = check_tiers(tiers, manifest, tiny_model(), builder())
-
-        # Assert
-        by_name = {check.tier["name"]: check for check in checks}
-        assert by_name["l4-2x"].fits
-        assert by_name["l4-2x"].num_nodes == 2
-        assert by_name["l4-2x"].layout == ParallelLayout()
-        assert by_name["a100-2x"].fits
-        assert by_name["a100-2x"].num_nodes == 2
-
-    def test_a_smaller_tier_than_the_lock_keeps_its_failure(self, monkeypatch):
-        # Arrange: only the 8-GPU A100 node fits; the 4-GPU one is not re-tried.
-        manifest = TrainingManifest.model_validate(MANIFEST)
-        monkeypatch.setattr(
-            "agilerl.arena.memory.resources.estimate_run",
-            lambda config: flat_estimate(
-                1_000, 10_000 if config.train_device.gpus_per_node == 8 else 100
-            ),
-        )
-        tiers = [
-            {**tier("a100-8x", "NVIDIA A100-SXM4-80GB", 8, 16.0), "node_counts": [1]},
-            {**tier("a100-4x", "NVIDIA A100-SXM4-80GB", 4, 8.0), "node_counts": [1]},
-        ]
-
-        # Act
-        checks = check_tiers(tiers, manifest, tiny_model(), builder())
-
-        # Assert
-        assert [c.tier["name"] for c in checks] == ["a100-4x", "a100-8x"]
-        assert checks[0].reason == "training over budget"
-        assert checks[1].fits
-
-    def test_a_low_host_miss_does_not_drop_a_roomier_tier(self, monkeypatch):
-        # Arrange: 2 trainers and 2 engines need 4 GPUs, so one 1-GPU node is
-        # short and the search prices the largest count next. The cheap
-        # tier's host share is ram_gb / num_gpus and misses; the dearer
-        # tier has more host RAM per GPU.
-        manifest = TrainingManifest.model_validate(
-            {
-                **with_model(MANIFEST, "ibm-granite/granite-3.1-3b-a800m-instruct"),
-                "training": {
-                    **MANIFEST["training"],
-                    "training_gpus_per_agent": 2,
-                    "rollout_engines_per_agent": 2,
-                },
-            }
-        )
-        low = {
-            **tier("l4-low", "NVIDIA L4", 2, 1.0),
-            "gpus_per_node": 1,
-            "ram_gb": 32,
-            "node_counts": [1, 2, 4],
-        }
-        high = {
-            **tier("l4-high", "NVIDIA L4", 1, 3.0),
-            "gpus_per_node": 1,
-            "ram_gb": 256,
-            "node_counts": [1, 2, 4],
-        }
-        low_host = device_spec_from_resource_class(low).host_bytes_per_gpu
-
-        def estimate(config):
-            if config.train_device.host_bytes_per_gpu == low_host:
-                return flat_estimate(10**15, 100)
-            return flat_estimate(1, 10_000)
-
-        monkeypatch.setattr(resources_module, "estimate_run", estimate)
-
-        # Act
-        checks = check_tiers([low, high], manifest, tiny_model(), builder())
-
-        # Assert
-        by_name = {check.tier["name"]: check for check in checks}
-        assert by_name["l4-high"].fits
-        assert by_name["l4-high"].num_nodes == 4
-        assert not by_name["l4-low"].fits
-
-    def test_a_roomier_miss_still_skips_a_tighter_same_gpu_tier(
-        self, monkeypatch, priced
-    ):
-        # Arrange
-        manifest = manifest_with(
-            MANIFEST, training_gpus_per_agent=4, rollout_engines_per_agent=1
-        )
-        monkeypatch.setattr(
-            resources_module, "estimate_run", lambda _config: flat_estimate(10**15, 100)
-        )
-        rich = {
-            **tier("l4-rich", "NVIDIA L4", 4, 1.0),
-            "gpus_per_node": 2,
-            "ram_gb": 256,
-            "node_counts": [1, 2, 4],
-        }
-        poor = {
-            **tier("l4-poor", "NVIDIA L4", 2, 2.0),
-            "gpus_per_node": 2,
-            "ram_gb": 32,
-            "node_counts": [1, 2, 4],
-        }
-
-        # Act
-        check_tiers([rich, poor], manifest, tiny_model(), builder())
-
-        # Assert
-        assert ("l4-rich", 4) in priced
-        assert ("l4-poor", 1) in priced
-        assert all(num_nodes == 1 for name, num_nodes in priced if name == "l4-poor")
-
-    def test_no_host_budget_covers_only_another_uncapped_tier(
-        self, monkeypatch, priced
-    ):
-        # Arrange: omitted ram_gb skips the host check. A miss with no host
-        # cap still skips another uncapped tier; a capped miss does not.
-        manifest = manifest_with(
-            MANIFEST, training_gpus_per_agent=4, rollout_engines_per_agent=1
-        )
-        monkeypatch.setattr(
-            resources_module, "estimate_run", lambda _config: flat_estimate(10**15, 100)
-        )
-
-        def node_tier(name, price, ram_gb):
-            row = {
-                **tier(name, "NVIDIA L4", 4, price),
-                "gpus_per_node": 2,
-                "node_counts": [1, 2, 4],
-            }
-            if ram_gb is None:
-                row.pop("ram_gb")
-            else:
-                row["ram_gb"] = ram_gb
-            return row
-
-        # Act
-        check_tiers(
-            [node_tier("open-a", 1.0, None), node_tier("open-b", 2.0, None)],
-            manifest,
-            tiny_model(),
-            builder(),
-        )
-        uncapped = list(priced)
-        priced.clear()
-        check_tiers(
-            [node_tier("capped", 1.0, 64), node_tier("open", 2.0, None)],
-            manifest,
-            tiny_model(),
-            builder(),
-        )
-
-        # Assert
-        assert ("open-a", 4) in uncapped
-        assert ("open-b", 1) in uncapped
-        assert all(num_nodes == 1 for name, num_nodes in uncapped if name == "open-b")
-        assert ("open", 4) in priced
-
-    def test_a_layout_that_fails_at_the_most_nodes_is_not_priced_at_fewer(
-        self, monkeypatch, priced
-    ):
-        # Arrange
-        manifest = TrainingManifest.model_validate(MANIFEST)
-        monkeypatch.setattr(
-            "agilerl.arena.memory.resources.estimate_run",
-            lambda _config: flat_estimate(10**15, 100),
-        )
-        tiers = [{**tier("l4-4x", "NVIDIA L4", 4, 1.0), "node_counts": [1, 2, 4, 8]}]
-
-        # Act
-        check_tiers(tiers, manifest, tiny_model(), builder())
-
-        # Assert
-        assert {num_nodes for _, num_nodes in priced} == {1, 8}
-
-    def test_a_tier_skipped_after_a_same_gpu_miss_keeps_that_reason(self, monkeypatch):
-        # Arrange: the cheap tier misses at 1 node and at its most, 8. The
-        # dear tier offers no fewer than 4 nodes, so it is never priced.
-        manifest = manifest_with(
-            MANIFEST, training_gpus_per_agent=2, rollout_engines_per_agent=1
-        )
-        monkeypatch.setattr(
-            resources_module, "estimate_run", lambda _config: flat_estimate(10**15, 100)
-        )
-        rich = {
-            **tier("l4-rich", "NVIDIA L4", 2, 1.0),
-            "ram_gb": 256,
-            "node_counts": [1, 2, 8],
-        }
-        poor = {**tier("l4-poor", "NVIDIA L4", 2, 2.0), "node_counts": [4, 8]}
-
-        # Act
-        checks = check_tiers([rich, poor], manifest, tiny_model(), builder())
-
-        # Assert
-        skipped = next(check for check in checks if check.tier["name"] == "l4-poor")
-        assert skipped.reason == "training over budget"
-        assert skipped.num_nodes == 8
-        assert skipped.config is None
-
-    def test_a_tier_the_lock_leaves_unpriced_says_why(self, monkeypatch):
-        # Arrange: the cheaper A100 node fits first. The L4 has less memory;
-        # the B200 only comes in pairs of nodes.
-        manifest = TrainingManifest.model_validate(MANIFEST)
-        monkeypatch.setattr(
-            resources_module, "estimate_run", lambda _config: flat_estimate(1, 10_000)
-        )
-        tiers = [
-            tier("a100-8x", "NVIDIA A100-SXM4-80GB", 8, 1.0),
-            tier("l4-8x", "NVIDIA L4", 8, 2.0),
-            {**tier("b200-8x", "NVIDIA B200", 8, 3.0), "node_counts": [2]},
-        ]
-
-        # Act
-        checks = check_tiers(tiers, manifest, tiny_model(), builder())
-
-        # Assert
-        by_name = {check.tier["name"]: check for check in checks}
-        assert by_name["a100-8x"].fits
-        assert by_name["l4-8x"].reason == (
-            "fewer GPUs per node or less memory per GPU than a100-8x"
-        )
-        assert by_name["b200-8x"].reason == "no 1-node option, where a100-8x fits"
-        assert by_name["b200-8x"].config is None
-
-    def test_an_uncatalogued_model_is_priced_as_written(self, monkeypatch):
-        # Arrange
-        manifest = TrainingManifest.model_validate(
-            with_model(MANIFEST, "local/uncatalogued-model")
-        )
-        monkeypatch.setattr(
-            resources_module, "estimate_run", lambda _config: flat_estimate(1, 10_000)
-        )
-
-        # Act
-        (check,) = check_tiers(
-            [tier("l4-4x", "NVIDIA L4", 4, 1.0)], manifest, tiny_model(), builder()
-        )
-
-        # Assert
-        assert check.fits
-        assert check.layout is None
-
-    def test_a_pinned_shard_group_is_kept(self, monkeypatch):
-        # Arrange: 2 trainers and 1 engine need 3 GPUs, so two 2-GPU nodes.
-        doc = copy.deepcopy(MANIFEST)
-        doc["algorithm"]["fsdp"] = {"shard_group_size": 2}
-        manifest = manifest_with(
-            doc, training_gpus_per_agent=2, rollout_engines_per_agent=1
-        )
-        monkeypatch.setattr(
-            resources_module, "estimate_run", lambda _config: flat_estimate(1, 10_000)
-        )
-        tiers = [{**tier("l4-2x", "NVIDIA L4", 2, 1.0), "node_counts": [1, 2, 4]}]
-
-        # Act
-        (check,) = check_tiers(tiers, manifest, tiny_model(), builder())
-
-        # Assert
-        assert check.fits
-        assert check.num_nodes == 2
-        assert check.layout == ParallelLayout(shard_group_size=2)
-
-    def test_searched_layouts_stay_within_the_widest_node(self, monkeypatch):
-        # Arrange: nothing fits, so every layout is priced; two 8-GPU nodes
-        # give the split up to 15 trainers.
-        manifest = TrainingManifest.model_validate(
-            unset_split(unset_width(with_model(MANIFEST, "Qwen/Qwen3.6-35B-A3B")))
-        )
-        monkeypatch.setattr(
-            resources_module, "estimate_run", lambda _config: flat_estimate(10**15, 100)
-        )
-        layouts = set()
-
-        def build(laid_out, device, width, engines, adapter_sync):
-            fsdp = laid_out.algorithm.fsdp
-            layouts.add((fsdp.tp, fsdp.ep, fsdp.cp))
-            return builder()(laid_out, device, width, engines, adapter_sync)
-
-        tiers = [
-            {
-                **tier("h100-8x", "NVIDIA H100 80GB HBM3", 8, 1.0),
-                "gpus_per_node": 8,
-                "node_counts": [1, 2],
-            }
-        ]
-
-        # Act
-        check_tiers(tiers, manifest, tiny_model(), build)
-
-        # Assert
-        assert (1, 8, 1) in layouts
-        assert (1, 1, 8) in layouts
-        assert max(ep for _, ep, _ in layouts) == 8
-        assert max(tp * cp for tp, _, cp in layouts) == 8
-
-    def test_a_tier_prices_only_searched_layouts_on_its_nodes(
-        self, monkeypatch, built_layouts
-    ):
-        # Arrange: nothing fits, so every layout is priced. Two 8-GPU nodes
-        # hold groups of 8; two 4-GPU nodes hold groups that divide 4.
-        manifest = TrainingManifest.model_validate(
-            unset_split(unset_width(with_model(MANIFEST, "Qwen/Qwen3.6-35B-A3B")))
-        )
-        monkeypatch.setattr(
-            resources_module, "estimate_run", lambda _config: flat_estimate(10**15, 100)
-        )
-        build, seen = built_layouts
-        tiers = [
-            {
-                **tier("h100-4x", "NVIDIA H100 80GB HBM3", 4, 1.0),
-                "node_counts": [2],
-            },
-            {
-                **tier("h100-8x", "NVIDIA H100 80GB HBM3", 8, 2.0),
-                "node_counts": [2],
-            },
-        ]
-
-        # Act
-        check_tiers(tiers, manifest, tiny_model(), build)
-
-        # Assert
-        on_four = {(tp, ep, cp) for node, tp, ep, cp in seen if node == 4}
-        on_eight = {(tp, ep, cp) for node, tp, ep, cp in seen if node == 8}
-        assert {ep for _, ep, _ in on_four} == {1, 2, 4}
-        assert {tp * cp for tp, _, cp in on_four} == {1, 2, 4}
-        assert (1, 8, 1) in on_eight
-        assert (1, 1, 8) in on_eight
-
-    def test_kept_trainers_over_two_nodes_price_no_straddling_group(
-        self, monkeypatch, built_layouts
-    ):
-        # Arrange: 10 trainers on two 8-GPU nodes. ep=5 and ep=10 split the
-        # 40 experts and the trainers, but a group of 5 or 10 crosses a node.
-        manifest = manifest_with(
-            with_model(MANIFEST, "ibm-granite/granite-3.1-3b-a800m-instruct"),
-            training_gpus_per_agent=10,
-            rollout_engines_per_agent=1,
-        )
-        monkeypatch.setattr(
-            resources_module, "estimate_run", lambda _config: flat_estimate(10**15, 100)
-        )
-        build, seen = built_layouts
-        tiers = [{**tier("l4-8x", "NVIDIA L4", 8, 1.0), "node_counts": [2]}]
-
-        # Act
-        (check,) = check_tiers(tiers, manifest, tiny_model(), build)
-
-        # Assert
-        assert not check.fits
-        assert {ep for _, _, ep, _ in seen} == {1, 2}
-        assert {tp * cp for _, tp, _, cp in seen} == {1, 2}
-
-    @pytest.mark.parametrize(
-        ("model", "trainers", "ep", "node_gpus", "num_nodes"),
-        [
-            ("Qwen/Qwen3.6-35B-A3B", 8, 8, 4, 4),
-            ("ibm-granite/granite-3.1-3b-a800m-instruct", 10, 5, 8, 2),
-        ],
-        ids=["wider-than-node", "straddles-nodes"],
-    )
-    def test_a_pinned_layout_off_the_tier_nodes_is_priced_as_written(
-        self, model, trainers, ep, node_gpus, num_nodes
-    ):
-        # Arrange: the batch splits over the trainers.
-        doc = with_model(MANIFEST, model)
-        doc["algorithm"]["fsdp"] = {"ep": ep}
-        doc["algorithm"]["batch_size"] = trainers
-        manifest = manifest_with(
-            doc, training_gpus_per_agent=trainers, rollout_engines_per_agent=1
-        )
-        tiers = [
-            {
-                **tier("node-tier", "NVIDIA H100 80GB HBM3", node_gpus, 1.0),
-                "node_counts": [1, 2, 4],
-            }
-        ]
-
-        # Act
-        (check,) = check_tiers(tiers, manifest, tiny_model(), builder())
-
-        # Assert
-        assert check.fits
-        assert check.layout == ParallelLayout(ep=ep)
-        assert check.num_nodes == num_nodes
-        assert check.trainers == trainers
-
-    def test_a_pinned_layout_off_the_nodes_is_priced_under_an_open_count(self):
-        # Arrange: up to 15 trainers on two 8-GPU nodes; pinned ep=5 groups
-        # straddle the nodes past 8 of them.
-        doc = unset_split(
-            with_model(MANIFEST, "ibm-granite/granite-3.1-3b-a800m-instruct")
-        )
-        doc["algorithm"]["fsdp"] = {"ep": 5}
-        doc["algorithm"]["batch_size"] = 40
-        manifest = TrainingManifest.model_validate(doc)
-        tiers = [
-            {**tier("h100-8x", "NVIDIA H100 80GB HBM3", 8, 1.0), "node_counts": [2]}
-        ]
-
-        # Act
-        (check,) = check_tiers(tiers, manifest, tiny_model(), builder())
-
-        # Assert
-        assert check.fits
-        assert check.layout == ParallelLayout(ep=5)
-        assert check.trainers == 5
-        assert check.engines == 7
-
-    def test_an_open_count_prices_searched_groups_on_one_node(
-        self, monkeypatch, built_split
-    ):
-        # Arrange: nothing fits, so every layout is priced. Up to 15 trainers
-        # on two 8-GPU nodes; ep=5 sits on one node at 5 trainers only.
-        doc = unset_split(
-            with_model(MANIFEST, "ibm-granite/granite-3.1-3b-a800m-instruct")
-        )
-        doc["algorithm"]["batch_size"] = 40
-        manifest = TrainingManifest.model_validate(doc)
-        monkeypatch.setattr(
-            resources_module, "estimate_run", lambda _config: flat_estimate(10**15, 100)
-        )
-        build, seen = built_split
-        tiers = [
-            {**tier("h100-8x", "NVIDIA H100 80GB HBM3", 8, 1.0), "node_counts": [2]}
-        ]
-
-        # Act
-        check_tiers(tiers, manifest, tiny_model(), build)
-
-        # Assert
-        assert (1, 5, 1, 5) in seen
-        assert all(
-            8 % ep == 0 and 8 % (tp * cp) == 0
-            for tp, ep, cp, trainers in seen
-            if trainers > 8
-        )
-
-    def test_a_pinned_layout_the_trainers_cannot_split_is_priced_as_written(self):
-        # Arrange: tp=2 does not divide 3 trainers.
-        doc = copy.deepcopy(MANIFEST)
-        doc["algorithm"]["fsdp"] = {"tp": 2}
-        manifest = manifest_with(
-            doc, training_gpus_per_agent=3, rollout_engines_per_agent=1
-        )
-
-        # Act
-        (check,) = check_tiers(
-            [tier("l4-4x", "NVIDIA L4", 4, 1.0)], manifest, tiny_model(), builder()
-        )
-
-        # Assert
-        assert not check.fits
-        assert check.reason == "No training layout can run on this model"
-        assert check.layout is None
-
-    def test_an_engineless_algorithm_fits_its_trainers_alone(self):
-        manifest = TrainingManifest.model_validate(SFT_MANIFEST)
-
-        (check,) = check_tiers(
-            [tier("l4-1x", "NVIDIA L4", 1, 1.0)], manifest, tiny_model(), builder()
-        )
-
-        assert check.fits
-        assert check.trainers == 1
-        assert check.engines == 0
-
-    def test_a_split_with_no_room_keeps_the_gpu_count_reason(self):
-        # Arrange: one GPU holds no trainer and engine split, nor the
-        # manifest's own trainer and engine.
-        manifest = TrainingManifest.model_validate(unset_split(MANIFEST))
-
-        # Act
-        (check,) = check_tiers(
-            [tier("l4-1x", "NVIDIA L4", 1, 1.0)], manifest, tiny_model(), builder()
-        )
-
-        # Assert
-        assert not check.fits
-        assert check.reason == "1 GPUs, the job needs 2"
-        assert check.config is None
-
-    def test_unset_counts_split_the_gpus_at_the_least_parallel_layout(self):
-        manifest = TrainingManifest.model_validate(unset_split(MANIFEST))
-        assert searches_gpu_split(manifest)
-
-        (check,) = check_tiers(
-            [tier("l4-2x", "NVIDIA L4", 2, 2.0)], manifest, tiny_model(), builder()
-        )
-
-        assert check.fits
-        assert check.num_nodes == 1
-        assert check.layout == ParallelLayout()
-        assert check.trainers == 1
-        assert check.engines == 1
-        assert check.engine_tensor_parallel == 1
-
-    def test_a_shared_search_cache_gives_the_same_verdicts(self):
-        # Arrange
-        manifest = TrainingManifest.model_validate(unset_split(MANIFEST))
-        calls = [
-            [{**tier("l4-2x", "NVIDIA L4", 2, 2.0), "node_counts": [count]}]
-            for count in (1, 2)
-        ]
-
-        def verdicts(checks):
-            return [
-                (
-                    c.fits,
-                    c.reason,
-                    c.num_nodes,
-                    c.trainers,
-                    c.engines,
-                    c.engine_tensor_parallel,
-                    c.step_seconds,
-                )
-                for c in checks
-            ]
-
-        # Act
-        separate = [
-            verdicts(check_tiers(t, manifest, tiny_model(), builder())) for t in calls
-        ]
-        cache = SearchCache()
-        shared = [
-            verdicts(check_tiers(t, manifest, tiny_model(), builder(), cache))
-            for t in calls
-        ]
-
-        # Assert
-        assert cache.plans
-        assert shared == separate
-
-    def test_h100_80gb_is_priced_at_an_a100_80gb_lock(self, monkeypatch):
-        # Arrange: H100 80GB shows a little less CUDA memory than A100 80GB.
-        manifest = TrainingManifest.model_validate(MANIFEST)
-        monkeypatch.setattr(
-            resources_module, "estimate_run", lambda _config: flat_estimate(1, 10_000)
-        )
-        tiers = [
-            tier("a100-8x", "NVIDIA A100-SXM4-80GB", 8, 16.0),
-            tier("h100-8x", "NVIDIA H100 80GB HBM3", 8, 32.0),
-        ]
-        a100, h100 = (device_spec_from_resource_class(t) for t in tiers)
-        assert h100.total_bytes < a100.total_bytes
-
-        # Act
-        checks = check_tiers(tiers, manifest, tiny_model(), builder())
-
-        # Assert
-        assert [check.tier["name"] for check in checks] == ["a100-8x", "h100-8x"]
-        assert checks[1].fits
-        assert checks[1].config is not None
-        assert checks[1].layout == checks[0].layout
-
-
-class TestSearchSteps:
-    def test_hsdp_at_the_node_size_is_one_step(self):
-        # Arrange: up to 15 trainers on two 8-GPU nodes.
-        manifest = TrainingManifest.model_validate(unset_split(MANIFEST))
-        tiers = [{**tier("l4-8x", "NVIDIA L4", 8, 1.0), "node_counts": [1, 2]}]
-
-        # Act
-        steps = resources_module._search_steps(manifest, tiers)
-
-        # Assert
-        assert steps == [
-            ParallelLayout(),
-            "hsdp",
-            ParallelLayout(cp=2),
-            ParallelLayout(tp=2),
-        ]
-
-
-def flat_estimate(peak: int, usable: int) -> RunEstimate:
-    """A run whose training peak is ``peak`` bytes on a ``usable`` card, with an empty generation bar."""
-    training = PhaseBreakdown(
-        phase="training",
-        components=(MemoryComponent(key="weights", label="Weights", n_bytes=peak),),
-        device_total_bytes=usable,
-        device_usable_bytes=usable,
-    )
-    generation = PhaseBreakdown(
-        phase="generation",
-        components=(),
-        device_total_bytes=usable,
-        device_usable_bytes=usable,
-    )
-    return RunEstimate(training=training, generation=generation)

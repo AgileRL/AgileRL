@@ -20,9 +20,6 @@ from transformers.models.flex_olmo.modeling_flex_olmo import FlexOlmoTopKRouter
 from transformers.models.gemma4.modeling_gemma4 import Gemma4TextRouter
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssTopKRouter
 from transformers.models.mellum.modeling_mellum import MellumTopKRouter
-from transformers.models.mimo_v2_flash.modeling_mimo_v2_flash import (
-    MiMoV2FlashTopkRouter,
-)
 from transformers.models.minimax.modeling_minimax import MiniMaxTopKRouter
 from transformers.models.mixtral.modeling_mixtral import MixtralTopKRouter
 from transformers.models.olmoe.modeling_olmoe import OlmoeTopKRouter
@@ -58,7 +55,6 @@ OPTIONAL_RENORM_CLASSES = (
     Qwen3NextTopKRouter,
     Qwen3OmniMoeThinkerTextTopKRouter,
     Qwen3OmniMoeTalkerTextTopKRouter,
-    MiMoV2FlashTopkRouter,
 )
 
 ROUTER_CLASSES = (
@@ -69,11 +65,6 @@ ROUTER_CLASSES = (
     Qwen3_5MoeTopKRouter,
     Qwen3VLMoeTextTopKRouter,
     Gemma4TextRouter,
-)
-
-# MiMo-V2-Flash renormalizes the gathered scores in place, not a topk output.
-IN_PLACE_TOPK_RENORM_CLASSES = tuple(
-    cls for cls in ROUTER_CLASSES if cls is not MiMoV2FlashTopkRouter
 )
 
 # Captured at collection, before any test patches a class.
@@ -101,9 +92,6 @@ def make_router(cls: type, norm_topk_prob: bool, dtype: torch.dtype) -> nn.Modul
         top_k_experts=3,
         norm_topk_prob=norm_topk_prob,
         rms_norm_eps=1e-6,
-        n_group=2,
-        topk_group=1,
-        routed_scaling_factor=2.5,
     )
     router = cls(config)
     torch.manual_seed(0)
@@ -181,9 +169,7 @@ class TestRouterForwards:
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
-@pytest.mark.parametrize(
-    "cls", IN_PLACE_TOPK_RENORM_CLASSES, ids=lambda cls: cls.__name__
-)
+@pytest.mark.parametrize("cls", ROUTER_CLASSES, ids=lambda cls: cls.__name__)
 class TestTransformersRouterForwards:
     def test_in_place_renormalization_fails_recompute(self, cls, dtype):
         router = make_router(cls, True, dtype)

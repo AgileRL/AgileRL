@@ -33,26 +33,15 @@ from agilerl.arena.models.env import (
     EnvHostVolume,
     EnvServiceSpec,
     GymEnvSpec,
-    JudgeSpec,
     LLMEnvSpec,
     LLMEnvType,
 )
-from agilerl.arena.models.fsdp import (
-    PARALLEL_LAYOUT_FIELDS,
-    FSDPConfig,
-    parallel_layout_pins,
-)
+from agilerl.arena.models.fsdp import FSDPConfig
 from agilerl.arena.models.manifest import _resolve_algorithm
 from agilerl.arena.models.networks import VLLMConfig
 from agilerl.arena.models.registry import AlgorithmRegistry, register
 from agilerl.arena.models.schema import _package_version
-from agilerl.arena.models.verdict import (
-    errors,
-    loc_to_path,
-    model_warnings,
-    read_manifest,
-    verdict,
-)
+from agilerl.arena.models.verdict import errors, loc_to_path, read_manifest, verdict
 
 
 def _manifest(**sections) -> dict:
@@ -62,39 +51,6 @@ def _manifest(**sections) -> dict:
     }
     data.update(sections)
     return data
-
-
-class TestJudgeSpec:
-    @pytest.mark.parametrize(
-        "kwargs",
-        [
-            {"model": "m", "base_url": "http://judge:8000"},
-            {"model": "m", "base_url": "https://judge/"},
-            {"model": "m", "base_url": "https://openrouter.ai/api/v1"},
-            {"model": "m", "api_key_env": "JUDGE_KEY"},
-            {"provider": "anthropic", "model": "m", "api_key_env": "JUDGE_KEY"},
-        ],
-    )
-    def test_accepts_a_reachable_endpoint(self, kwargs: dict[str, str]) -> None:
-        assert JudgeSpec(**kwargs).model == "m"
-
-    def test_a_hosted_api_needs_a_key_variable(self) -> None:
-        with pytest.raises(ValidationError, match="needs api_key_env"):
-            JudgeSpec(model="m")
-
-    @pytest.mark.parametrize("base_url", ["judge:8000", "ftp://judge", "http://"])
-    def test_a_base_url_must_be_an_http_url(self, base_url: str) -> None:
-        with pytest.raises(ValidationError, match="http\\(s\\) URL"):
-            JudgeSpec(model="m", base_url=base_url)
-
-    def test_an_anthropic_judge_rejects_a_temperature(self) -> None:
-        with pytest.raises(ValidationError, match="no temperature"):
-            JudgeSpec(
-                provider="anthropic",
-                model="m",
-                api_key_env="JUDGE_KEY",
-                temperature=0.7,
-            )
 
 
 class TestGymEnvSpec:
@@ -117,22 +73,6 @@ class TestTrainingAndReplayAliases:
 
 
 class TestTrainingSpecValidators:
-    def test_rejects_num_epochs_together_with_max_steps(self) -> None:
-        with pytest.raises(ValueError, match="are both set; set one"):
-            TrainingSpec(max_steps=50, num_epochs=1)
-
-    def test_accepts_num_epochs_without_max_steps(self) -> None:
-        spec = TrainingSpec(num_epochs=3)
-
-        assert spec.num_epochs == 3
-        assert "max_steps" not in spec.model_fields_set
-
-    def test_accepts_max_steps_without_num_epochs(self) -> None:
-        spec = TrainingSpec(max_steps=50)
-
-        assert spec.max_steps == 50
-        assert spec.num_epochs is None
-
     def test_rejects_evo_steps_above_max_steps(self) -> None:
         with pytest.raises(
             ValueError, match=r"evo_steps .* must be less than or equal to max_steps"
@@ -473,72 +413,9 @@ class TestLLMAlgorithmSpecValidators:
         with pytest.raises(ValidationError, match="Unknown fsdp keys"):
             GRPOSpec(group_size=2, fsdp={"not_a_field": True})
 
-    def test_fsdp_parallel_pins_is_not_a_manifest_key(self) -> None:
-        with pytest.raises(
-            ValidationError, match="Unknown fsdp keys \\['parallel_pins'\\]"
-        ):
-            GRPOSpec(group_size=2, fsdp={"parallel_pins": ["tp"]})
-
     def test_fsdp_none_stays_none(self) -> None:
         spec = GRPOSpec(group_size=2, fsdp=None)
         assert spec.fsdp is None
-
-    @pytest.mark.parametrize(
-        ("fsdp", "pinned"),
-        [
-            ({}, frozenset()),
-            (True, frozenset()),
-            ({"tp": 2}, frozenset({"tp"})),
-            ({"ep": 1, "cpu_offload": False}, frozenset({"ep"})),
-            ({"shard_group_size": 4}, frozenset({"shard_group_size"})),
-            ({"cp": 2}, frozenset({"cp"})),
-        ],
-    )
-    def test_a_dumped_fsdp_keeps_its_layout_pins(
-        self, fsdp: object, pinned: frozenset[str]
-    ) -> None:
-        # Arrange
-        spec = GRPOSpec(group_size=2, fsdp=fsdp)
-
-        # Act
-        reloaded = GRPOSpec.model_validate(spec.model_dump(mode="json"))
-
-        # Assert
-        assert reloaded.fsdp is not None
-        assert parallel_layout_pins(reloaded.fsdp) == pinned
-        assert reloaded.fsdp == spec.fsdp
-
-    def test_a_dumped_fsdp_has_no_pin_key(self) -> None:
-        spec = GRPOSpec(group_size=2, fsdp={"tp": 2, "cpu_offload": False})
-
-        dumped = spec.model_dump(mode="json")
-
-        assert dumped["fsdp"] == {
-            "reshard_after_forward": None,
-            "cpu_offload": False,
-            "optim_cpu_offload": None,
-            "param_dtype": "bfloat16",
-            "reduce_dtype": "float32",
-            "checkpoint_every_n_blocks": None,
-            "ep_token_blocks": 1,
-            "routed_expert_chunk_mib": None,
-            "activation_offload": None,
-            "tp": 2,
-            "shard_frozen_tp": None,
-            "save_moe_collectives": None,
-            "cp_style": "ulysses",
-        }
-
-    def test_a_deep_copied_spec_keeps_its_layout_pins(self) -> None:
-        spec = GRPOSpec(group_size=2, fsdp={"ep": 2})
-
-        copied = spec.model_copy(deep=True)
-
-        assert copied.fsdp is not None
-        assert parallel_layout_pins(copied.fsdp) == frozenset({"ep"})
-
-    def test_a_config_built_in_python_pins_every_layout_field(self) -> None:
-        assert parallel_layout_pins(FSDPConfig(tp=2)) == PARALLEL_LAYOUT_FIELDS
 
     @pytest.mark.parametrize(
         "field",
@@ -794,13 +671,6 @@ class TestVerdict:
         failed = verdict(_manifest(algorithm={"name": "NOPE"}))
         assert failed["ok"] is False
         assert failed["errors"]
-
-    def test_model_warnings_when_the_algorithm_names_no_model(self) -> None:
-        manifest = TrainingManifest.model_construct(
-            algorithm=GRPOSpec.model_construct(pretrained_model_name_or_path=None),
-        )
-
-        assert model_warnings(manifest) == []
 
 
 class TestSchemaPackageVersion:
@@ -1749,8 +1619,7 @@ class TestLLMAlgorithmSpecCheckThinkingBudgetParser:
                 r"reasoning start and end tokens, and Qwen/Qwen2\.5-0\.5B-Instruct "
                 r"has none\. Unset thinking_token_budget, or set "
                 r"algorithm\.vllm_engine_args\.reasoning_parser to one that has "
-                r"them: deepseek_r1, deepseek_v4, gemma4, glm47, mimo, nemotron_v3, "
-                r"qwen3\.$"
+                r"them: deepseek_r1, gemma4, nemotron_v3, qwen3\.$"
             ),
         ):
             spec.check_thinking_budget_parser("qwen2")

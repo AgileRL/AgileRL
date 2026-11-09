@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """FSDP gather-count tests: golden numbers on known geometries."""
 
-import pytest
-
 from agilerl.arena.memory import formulas, fsdp_gather
 from agilerl.arena.memory.specs import GiB, ModelArch
 from tests.test_memory.test_formulas import (
@@ -124,49 +122,6 @@ class TestFSDPGatheredParams:
         assert gathered == experts + router + mamba + counts.lm_head
 
 
-class TestPrefetchWindowParams:
-    @pytest.mark.parametrize(
-        ("arch", "live_units", "tensor_parallel", "expert_parallel", "resident"),
-        [
-            (QWEN_05B, 2, 1, 1, False),
-            (ModelArch.from_hf_config(NEMOTRON_H_MOE), 2, 1, 4, False),
-            (ModelArch.from_hf_config(GEMMA4_E4B.config), 3, 2, 1, True),
-        ],
-        ids=["dense", "hybrid-moe-ep", "tensor-parallel"],
-    )
-    def test_repeat_matches_a_fresh_window(
-        self, arch, live_units, tensor_parallel, expert_parallel, resident
-    ):
-        # Arrange
-        counts = formulas.param_counts(arch)
-        args = (counts, arch, live_units, tensor_parallel, expert_parallel, resident)
-
-        # Act
-        first = fsdp_gather.prefetch_window_params(*args)
-        again = fsdp_gather.prefetch_window_params(*args)
-        fsdp_gather.prefetch_window_params.cache_clear()
-        fresh = fsdp_gather.prefetch_window_params(*args)
-
-        # Assert
-        assert first == again == fresh
-
-    def test_tensor_parallel_dense_first_stack_gathers_moe_experts_whole(self):
-        # Arrange
-        arch = MOE_TINY.model_copy(
-            update={"n_layers": 4, "dense_ffn_layers": 1, "tensor_parallel_plan": True}
-        )
-        counts = formulas.param_counts(arch)
-
-        # Act
-        window = fsdp_gather.prefetch_window_params(counts, arch, 2, 2)
-
-        # Assert: each MoE block keeps its norms (36), routed experts (6144)
-        # and router (64) whole; the attention linears (1024) gather at 1/2.
-        assert (arch.moe_layers, arch.mlp_layers) == (3, 1)
-        assert fsdp_gather.largest_block_params(counts, arch) == 7268
-        assert window == 2 * (36 + 6144 + 64 + 1024 // 2) == 13512
-
-
 class TestFSDPReshardedSideParams:
     def test_tied_dense_model_has_no_side_unit(self):
         counts = formulas.param_counts(QWEN_05B)
@@ -204,18 +159,17 @@ class TestFSDPGatherPoolParams:
 
         assert pool == 2 * block
 
-    def test_tensor_parallel_plan_gathers_linears_at_one_over_tp(self):
+    def test_tensor_parallel_plan_leaves_only_norms_to_gather(self):
         arch = QWEN_05B.model_copy(update={"tensor_parallel_plan": True})
         counts = formulas.param_counts(arch)
         norms_per_layer = counts.norms // arch.n_layers
-        block = fsdp_gather.largest_block_params(counts, arch)
 
         on_mesh = fsdp_gather.fsdp_gather_pool_params(counts, arch, 1, 4, 2)
         off_mesh = fsdp_gather.fsdp_gather_pool_params(counts, arch, 1, 4)
 
         assert not arch.layer_kinds
-        assert on_mesh == 2 * (norms_per_layer + (block - norms_per_layer) // 2)
-        assert off_mesh == 2 * block
+        assert on_mesh == 2 * norms_per_layer
+        assert off_mesh == 2 * fsdp_gather.largest_block_params(counts, arch)
 
     def test_per_layer_embeddings_pool_beside_the_first_unit(self):
         # Arrange
@@ -265,20 +219,6 @@ class TestFSDPGatherPoolParams:
         assert ep_only == counts.lm_head + unit_without_routed == 372_621_312
         assert ep_with_dp == ep_only + routed // 8 == 532_267_008
 
-    def test_tensor_parallel_dense_first_stack_pools_moe_experts_whole(self):
-        # Arrange
-        arch = MOE_TINY.model_copy(
-            update={"n_layers": 4, "dense_ffn_layers": 1, "tensor_parallel_plan": True}
-        )
-        counts = formulas.param_counts(arch)
-
-        # Act
-        pool = fsdp_gather.fsdp_gather_pool_params(counts, arch, 1, 4, 2)
-
-        # Assert: two MoE blocks of whole norms, routed experts and router
-        # (36 + 6144 + 64) plus half of the attention linears (1024).
-        assert pool == 2 * (36 + 6144 + 64 + 1024 // 2) == 13512
-
 
 class TestLargestBlockParams:
     def test_expert_parallel_leaves_the_routed_experts_out_of_the_block(self):
@@ -294,92 +234,6 @@ class TestLargestBlockParams:
         assert not MOE_TINY.block_exclusive_layers
         assert routed > 0
         assert parallel == local - routed
-
-    def test_dense_first_stack_sizes_the_block_by_its_moe_layers(self):
-        # Arrange
-        arch = MOE_TINY.model_copy(update={"n_layers": 4, "dense_ffn_layers": 1})
-        counts = formulas.param_counts(arch)
-        _, router = formulas.moe_params_per_layer(arch)
-        shared = (counts.attention + counts.norms) // 4
-        uniform = (
-            counts.attention + counts.norms + counts.mlp + counts.moe_experts
-        ) // 4
-
-        # Act
-        block = fsdp_gather.largest_block_params(counts, arch)
-
-        # Assert
-        assert (arch.moe_layers, arch.mlp_layers) == (3, 1)
-        assert block == shared + counts.moe_experts // 3 + router == 7268
-        assert block > uniform
-
-    def test_expert_parallel_hybrid_keeps_routers_off_the_dense_mlp(self):
-        # Arrange: three MoE layers and one dense MLP. counts.mlp holds the
-        # dense MLP plus every router.
-        arch = MOE_TINY.model_copy(update={"n_layers": 4, "dense_ffn_layers": 1})
-        counts = formulas.param_counts(arch)
-        _, router = formulas.moe_params_per_layer(arch)
-        per_layer = (counts.attention + counts.norms) // 4
-        dense = formulas.mlp_params_per_layer(arch)
-
-        # Act
-        parallel = fsdp_gather.largest_block_params(counts, arch, expert_parallel=2)
-
-        # Assert: expert parallel leaves the routed experts, so the dense MLP
-        # is wider than one router. The other routers stay off this block.
-        assert counts.mlp == dense + arch.moe_layers * router
-        assert parallel == per_layer + dense == 2596
-        assert parallel < per_layer + counts.mlp
-
-
-class TestFSDPRetainedGatherParams:
-    def test_dense_expert_placement_retains_the_widest_block(self):
-        counts = formulas.param_counts(MOE_TINY)
-
-        retained = fsdp_gather.fsdp_retained_gather_params(counts, MOE_TINY, 4)
-
-        assert retained == fsdp_gather.largest_block_params(counts, MOE_TINY) == 7272
-
-    def test_leftover_ranks_retain_one_layer_of_local_experts(self):
-        # Arrange
-        counts = formulas.param_counts(MOE_TINY)
-        routed = formulas.routed_expert_params_per_layer(MOE_TINY)
-        block = fsdp_gather.largest_block_params(counts, MOE_TINY, expert_parallel=2)
-
-        # Act
-        retained = fsdp_gather.fsdp_retained_gather_params(
-            counts, MOE_TINY, 4, expert_parallel=2
-        )
-
-        # Assert: half the routed experts outweigh the block's shared parameters.
-        assert routed // 2 > block
-        assert retained == routed // 2 == 3072
-
-    def test_ep_filling_the_shard_group_retains_the_block_without_experts(self):
-        counts = formulas.param_counts(MOE_TINY)
-        block = fsdp_gather.largest_block_params(counts, MOE_TINY, expert_parallel=4)
-
-        retained = fsdp_gather.fsdp_retained_gather_params(
-            counts, MOE_TINY, 4, expert_parallel=4
-        )
-
-        assert retained == block == 1128
-
-    def test_resident_frozen_tp_shards_retain_only_the_whole_params(self):
-        # Arrange
-        arch = QWEN_05B.model_copy(update={"tensor_parallel_plan": True})
-        counts = formulas.param_counts(arch)
-
-        # Act
-        sharded = fsdp_gather.fsdp_retained_gather_params(counts, arch, 4, 2)
-        resident = fsdp_gather.fsdp_retained_gather_params(
-            counts, arch, 4, 2, frozen_tp_resident=True
-        )
-
-        # Assert: 24 layers share 24 x 2 x 896 + 896 norm elements; the TP
-        # linears add their half only when FSDP shards them.
-        assert resident == 1829
-        assert sharded == 7_457_125
 
 
 class TestFSDPGatheredParamsExpertParallel:

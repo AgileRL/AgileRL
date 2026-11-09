@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import copy
 import logging
 import math
 from dataclasses import replace
@@ -13,14 +12,12 @@ import pytest
 
 from agilerl.arena.memory import formulas
 from agilerl.arena.memory.estimator import estimate_training
-from agilerl.arena.memory.resolve import fsdp as fsdp_module
 from agilerl.arena.memory.resolve.batch import ROW_FILL, micro_batch_row_candidates
 from agilerl.arena.memory.resolve.fsdp import (
     RESIDENCIES,
     MemoryPins,
     TrainingMemoryPlan,
     TrainingMemoryUnfitError,
-    cpu_offload_blocker,
     gather_cost,
     learn_cost,
     resolve_training_memory,
@@ -31,7 +28,6 @@ from agilerl.arena.memory.specs import (
     DeviceSpec,
     GiB,
     MiB,
-    ModelArch,
     ModelSpec,
     TrainingSettings,
 )
@@ -48,7 +44,7 @@ from tests.test_memory.test_estimator import (
     super_vl_cispo,
     training_gpu,
 )
-from tests.test_memory.test_formulas import NEMOTRON_NANO_MAMBA, QWEN_05B
+from tests.test_memory.test_formulas import QWEN_05B
 
 DENSE_MODEL = ModelSpec(model_id="Qwen/Qwen2.5-0.5B-Instruct", arch=QWEN_05B)
 
@@ -137,26 +133,6 @@ def dense_peak(settings: TrainingSettings, sharded: bool) -> int:
 def buffered(peak: int) -> int:
     """Smallest budget that holds ``peak`` with the underprediction buffer."""
     return int(peak / (1 - formulas.MAX_UNDERPREDICTION)) + 1
-
-
-class TestCpuOffloadBlocker:
-    def test_colocated_rollout_serves_full_cpu_offload(self) -> None:
-        assert cpu_offload_blocker(FSDPConfig(cpu_offload=True), False) is None
-
-    def test_async_rollout_rejects_full_cpu_offload(self) -> None:
-        reason = cpu_offload_blocker(FSDPConfig(cpu_offload=True), True)
-
-        assert reason is not None
-        assert reason.startswith("fsdp.cpu_offload needs colocated")
-
-    def test_expert_parallel_rejects_full_cpu_offload(self) -> None:
-        reason = cpu_offload_blocker(FSDPConfig(cpu_offload=True, ep=2), False)
-
-        assert reason is not None
-        assert reason.startswith("fsdp.cpu_offload does not support fsdp.ep=2")
-
-    def test_expert_parallel_without_cpu_offload_is_served(self) -> None:
-        assert cpu_offload_blocker(FSDPConfig(ep=2), True) is None
 
 
 class TestGatherCost:
@@ -546,82 +522,6 @@ class TestResolveTrainingMemory:
         assert plan.micro_batch_tokens_per_gpu == 4096
 
 
-class TestResolveTrainingMemoryRepeats:
-    def test_repeat_matches_the_first_plan(self):
-        # Arrange
-        first = resolve_training_memory(
-            DENSE_MODEL,
-            budget_device(80 * GiB),
-            fsdp_only(dense_settings()),
-            MemoryPins(),
-            16,
-        )
-
-        # Act
-        again = resolve_training_memory(
-            DENSE_MODEL,
-            budget_device(80 * GiB),
-            fsdp_only(dense_settings()),
-            MemoryPins(),
-            16,
-        )
-
-        # Assert
-        assert again == first
-        assert again.fsdp is not first.fsdp
-
-    def test_writes_to_a_returned_plan_stay_local(self):
-        # Arrange
-        args = (
-            DENSE_MODEL,
-            budget_device(80 * GiB),
-            fsdp_only(dense_settings()),
-            MemoryPins(),
-            16,
-        )
-        returned = resolve_training_memory(*args)
-        expected = copy.deepcopy(returned)
-
-        # Act
-        returned.fsdp.reshard_after_forward = not returned.fsdp.reshard_after_forward
-        returned.settings.fsdp.checkpoint_every_n_blocks = 99
-        for part in returned.breakdown.components:
-            part.detail["written"] = 1
-
-        # Assert
-        assert resolve_training_memory(*args) == expected
-
-    def test_settings_written_after_a_call_are_searched_anew(self):
-        # Arrange
-        settings = fsdp_only(dense_settings())
-        args = (DENSE_MODEL, budget_device(80 * GiB))
-        unpinned = resolve_training_memory(*args, settings, MemoryPins(), 16)
-
-        # Act
-        settings.fsdp.reshard_after_forward = True
-        plan = resolve_training_memory(*args, settings, MemoryPins(), 16)
-
-        # Assert
-        assert unpinned.fsdp.reshard_after_forward is False
-        assert plan.fsdp.reshard_after_forward is True
-
-    def test_unfit_search_raises_on_every_call(self):
-        # Arrange
-        settings = moe_floor_settings()
-        with pytest.raises(TrainingMemoryUnfitError) as first:
-            resolve_floor(settings, GiB)
-        first.value.plan.fsdp.cpu_offload = not first.value.plan.fsdp.cpu_offload
-
-        # Act
-        with pytest.raises(TrainingMemoryUnfitError) as again:
-            resolve_floor(settings, GiB)
-
-        # Assert
-        assert again.value is not first.value
-        assert str(again.value) == str(first.value)
-        assert again.value.plan.fsdp.cpu_offload != first.value.plan.fsdp.cpu_offload
-
-
 class TestResolveTrainingMemoryLastResorts:
     def test_ample_budget_turns_on_none(self, caplog):
         # Act
@@ -686,34 +586,15 @@ class TestResolveTrainingMemoryLastResorts:
             if record.getMessage().startswith("Training memory: turning on")
         ]
         assert turned_on == [
-            "fsdp.save_moe_collectives=False",
             "fsdp.routed_expert_chunk_mib=256",
             "fsdp.routed_expert_chunk_mib=128",
             "fsdp.routed_expert_chunk_mib=64",
             "fsdp.optim_cpu_offload=True",
             "fsdp.activation_offload=True",
         ]
-        assert plan.fsdp.save_moe_collectives is False
         assert plan.fsdp.routed_expert_chunk_mib == 64
         assert plan.fsdp.optim_cpu_offload is True
         assert plan.fsdp.activation_offload is True
-
-    def test_repeat_search_logs_again(self, caplog):
-        # Arrange: the lightest floor fits the card but not with the buffer.
-        usable = moe_peak(64, True, activation_offload=True)
-        with caplog.at_level(logging.INFO):
-            resolve_floor(moe_floor_settings(), usable)
-        first = list(caplog.messages)
-        caplog.clear()
-
-        # Act
-        with caplog.at_level(logging.INFO):
-            resolve_floor(moe_floor_settings(), usable)
-
-        # Assert
-        assert caplog.messages == first
-        assert sum("turning on" in message for message in first) == 6
-        assert "only inside the underprediction buffer" in first[-1]
 
     def test_activation_offload_is_priced_at_the_micro_batch_floor(self):
         # Arrange: one row fits without activation offload; four rows do not.
@@ -755,80 +636,6 @@ class TestResolveTrainingMemoryLastResorts:
             resolve_floor(moe_floor_settings(), usable)
         assert not raised.value.plan.breakdown.fits
 
-    def test_rungs_whose_lightest_plan_is_over_are_not_searched(
-        self, caplog, monkeypatch
-    ):
-        # Arrange: nothing fits; the micro-batch and checkpointing are open.
-        usable = moe_peak(64, True, activation_offload=True) // 2
-        priced = []
-        real = fsdp_module.estimate_training
-
-        def spy(*args, **kwargs):
-            priced.append(args)
-            return real(*args, **kwargs)
-
-        monkeypatch.setattr(fsdp_module, "estimate_training", spy)
-
-        # Act
-        with caplog.at_level(logging.INFO), pytest.raises(TrainingMemoryUnfitError):
-            resolve_training_memory(
-                MOE_MODEL, budget_device(usable), moe_floor_settings(), MemoryPins(), 64
-            )
-
-        # Assert: each rung prices its lightest plan and the logged floor only.
-        rungs = 1 + sum(
-            message.startswith("Training memory: turning on")
-            for message in caplog.messages
-        )
-        assert len(priced) <= 2 * rungs
-
-    def test_host_limit_checkpoints_under_activation_offload(self):
-        # Arrange: only activation offload fits the GPU; uncheckpointed it pins
-        # every block's saved tensors on host.
-        device = budget_device(buffered(moe_peak(64, True, activation_offload=True)))
-        pins = MemoryPins(micro_batch_size_per_gpu=1)
-        unlimited = resolve_training_memory(
-            MOE_MODEL, device, moe_floor_settings(), pins, 1
-        )
-        # Point estimate equals the share: host_fits, not host_fits_with_buffer.
-        limit = unlimited.breakdown.host_total_bytes
-
-        # Act
-        plan = resolve_training_memory(
-            MOE_MODEL,
-            device.model_copy(update={"host_bytes_per_gpu": limit}),
-            moe_floor_settings(),
-            pins,
-            1,
-        )
-
-        # Assert
-        assert unlimited.fsdp.activation_offload is True
-        assert unlimited.gradient_checkpointing is False
-        assert plan.fsdp.activation_offload is True
-        assert plan.gradient_checkpointing is True
-        assert plan.breakdown.host_fits_with_buffer
-
-    def test_raises_when_host_ram_is_over(self):
-        # Arrange
-        device = budget_device(
-            buffered(moe_peak(64, True, activation_offload=True))
-        ).model_copy(update={"host_bytes_per_gpu": 0})
-
-        # Act / Assert
-        with pytest.raises(
-            TrainingMemoryUnfitError,
-            match=r"Estimated host RAM .* Add host RAM, or shorten the context",
-        ) as raised:
-            resolve_training_memory(
-                MOE_MODEL,
-                device,
-                moe_floor_settings(),
-                MemoryPins(micro_batch_size_per_gpu=1),
-                1,
-            )
-        assert "more or larger GPUs" not in str(raised.value)
-
     def test_full_cpu_offload_never_offloads_the_optimizer_again(self):
         # Act
         plan = resolve_floor(moe_floor_settings(cpu_offload=True), 80 * GiB)
@@ -863,226 +670,6 @@ class TestResolveTrainingMemoryLastResorts:
 
         # Assert
         assert plans[0] == plans[1] == plans[2]
-
-    @pytest.mark.parametrize(
-        ("ep", "turns_on_cpu_offload"),
-        [(1, True), (8, False)],
-        ids=["no_expert_parallel", "expert_parallel"],
-    )
-    def test_full_cpu_offload_is_the_colocated_last_resort_only_without_ep(
-        self, caplog, ep, turns_on_cpu_offload
-    ):
-        # Arrange
-        settings = moe_floor_settings()
-        settings = settings.model_copy(
-            update={"algorithm": "grpo", "fsdp": replace(settings.fsdp, ep=ep)}
-        )
-
-        # Act
-        with (
-            caplog.at_level(logging.INFO),
-            pytest.raises(TrainingMemoryUnfitError) as raised,
-        ):
-            resolve_training_memory(
-                MOE_MODEL,
-                budget_device(GiB),
-                settings,
-                MemoryPins(gradient_checkpointing=True, micro_batch_size_per_gpu=1),
-                1,
-            )
-
-        # Assert
-        turned_on = [
-            record.args[0]
-            for record in caplog.records
-            if record.getMessage().startswith("Training memory: turning on")
-        ]
-        assert ("fsdp.cpu_offload=True" in turned_on) is turns_on_cpu_offload
-        assert bool(raised.value.plan.fsdp.cpu_offload) is turns_on_cpu_offload
-
-
-NANO_MODEL = ModelSpec(
-    model_id="nano", arch=ModelArch.from_hf_config(NEMOTRON_NANO_MAMBA)
-)
-
-
-def tp_settings(**fsdp: object) -> TrainingSettings:
-    """Nemotron Nano LoRA GRPO at tp=2 on 4 GPUs, rows padded to 4096 tokens."""
-    return TrainingSettings(
-        max_model_len=4096,
-        micro_batch_size=1,
-        n_training_gpus=4,
-        fsdp=FSDPConfig(tp=2, checkpoint_every_n_blocks=1, **fsdp),
-    )
-
-
-def tp_peak(shard_frozen_tp: bool) -> int:
-    """Resharded tp=2 floor peak, one checkpointed row, as the search prices it."""
-    fsdp = replace(
-        tp_settings().fsdp,
-        reshard_after_forward=True,
-        routed_expert_chunk_mib=512,
-        optim_cpu_offload=False,
-        activation_offload=False,
-        cpu_offload=False,
-        shard_frozen_tp=shard_frozen_tp,
-    )
-    return estimate_training(
-        NANO_MODEL,
-        budget_device(80 * GiB),
-        tp_settings().model_copy(update={"fsdp": fsdp, "gradient_checkpointing": True}),
-        orchestrated=True,
-    ).total_bytes
-
-
-def resolve_tp_floor(settings: TrainingSettings, usable: int) -> TrainingMemoryPlan:
-    """The tp=2 plan for one checkpointed row."""
-    return resolve_training_memory(
-        NANO_MODEL,
-        budget_device(usable),
-        settings,
-        MemoryPins(gradient_checkpointing=True, micro_batch_size_per_gpu=1),
-        1,
-    )
-
-
-class TestResolveTrainingMemoryFrozenTensorParallel:
-    def test_keeps_frozen_tp_resident_when_it_fits(self):
-        # Act
-        plan = resolve_tp_floor(tp_settings(), 80 * GiB)
-
-        # Assert
-        assert plan.fsdp.shard_frozen_tp is False
-        assert plan.fsdp.optim_cpu_offload is False
-        assert "fsdp.shard_frozen_tp=False" in plan.describe()
-
-    def test_shards_frozen_tp_first_when_resident_does_not_fit(self, caplog):
-        # Arrange: the sharded floor fits with the buffer, the resident one does not.
-        usable = buffered(tp_peak(True))
-        assert usable < buffered(tp_peak(False))
-
-        # Act
-        with caplog.at_level(logging.INFO):
-            plan = resolve_tp_floor(tp_settings(), usable)
-
-        # Assert
-        turned_on = [
-            record.args[0]
-            for record in caplog.records
-            if record.getMessage().startswith("Training memory: turning on")
-        ]
-        assert turned_on == ["fsdp.shard_frozen_tp=True"]
-        assert plan.fsdp.shard_frozen_tp is True
-        assert plan.fsdp.optim_cpu_offload is False
-        assert plan.breakdown.fits_with_buffer
-
-    def test_set_value_is_kept(self):
-        # Act
-        plan = resolve_tp_floor(tp_settings(shard_frozen_tp=True), 80 * GiB)
-
-        # Assert
-        assert plan.fsdp.shard_frozen_tp is True
-
-    def test_without_tp_the_plan_does_not_describe_it(self):
-        # Act
-        plan = resolve_floor(dense_settings(), 80 * GiB)
-
-        # Assert
-        assert "shard_frozen_tp" not in plan.describe()
-
-
-def moe_save_peak(save_moe_collectives: bool, **fsdp: object) -> int:
-    """Resharded MoE floor peak at the fastest other memory fields, as the search prices it."""
-    settings = moe_floor_settings(
-        reshard_after_forward=True,
-        routed_expert_chunk_mib=512,
-        optim_cpu_offload=False,
-        activation_offload=False,
-        cpu_offload=False,
-        save_moe_collectives=save_moe_collectives,
-        **fsdp,
-    )
-    return estimate_training(
-        MOE_MODEL, budget_device(80 * GiB), settings, orchestrated=True
-    ).total_bytes
-
-
-def turned_on(caplog: pytest.LogCaptureFixture) -> list[object]:
-    """Last resorts the search logged turning on, in order."""
-    return [
-        record.args[0]
-        for record in caplog.records
-        if record.getMessage().startswith("Training memory: turning on")
-    ]
-
-
-class TestResolveTrainingMemorySaveMoeCollectives:
-    def test_saves_collectives_when_it_fits(self):
-        # Act
-        plan = resolve_floor(moe_floor_settings(), 80 * GiB)
-
-        # Assert
-        assert plan.fsdp.save_moe_collectives is True
-        assert plan.fsdp.routed_expert_chunk_mib == 512
-        assert plan.fsdp.optim_cpu_offload is False
-        assert "fsdp.save_moe_collectives=True" in plan.describe()
-
-    def test_recomputes_collectives_first_when_saving_does_not_fit(self, caplog):
-        # Arrange: the floor fits with the buffer only without the saved collectives.
-        usable = buffered(moe_save_peak(False))
-        assert usable < buffered(moe_save_peak(True))
-
-        # Act
-        with caplog.at_level(logging.INFO):
-            plan = resolve_floor(moe_floor_settings(), usable)
-
-        # Assert
-        assert turned_on(caplog) == ["fsdp.save_moe_collectives=False"]
-        assert plan.fsdp.save_moe_collectives is False
-        assert plan.fsdp.routed_expert_chunk_mib == 512
-        assert plan.breakdown.fits_with_buffer
-
-    def test_drops_the_save_before_sharding_frozen_tp(self, caplog):
-        # Arrange: at tp=2 the resident floor does not fit even without the save.
-        usable = buffered(moe_save_peak(False, tp=2, shard_frozen_tp=False)) - 1
-
-        # Act
-        with caplog.at_level(logging.INFO):
-            plan = resolve_floor(moe_floor_settings(tp=2), usable)
-
-        # Assert
-        assert turned_on(caplog)[:2] == [
-            "fsdp.save_moe_collectives=False",
-            "fsdp.shard_frozen_tp=True",
-        ]
-        assert plan.fsdp.save_moe_collectives is False
-        assert plan.breakdown.fits_with_buffer
-
-    def test_set_value_is_kept(self, caplog):
-        # Arrange: saving does not fit the floor.
-        usable = buffered(moe_save_peak(False))
-
-        # Act
-        with caplog.at_level(logging.INFO):
-            kept_on = resolve_floor(
-                moe_floor_settings(save_moe_collectives=True), usable
-            )
-        kept_off = resolve_floor(
-            moe_floor_settings(save_moe_collectives=False), 80 * GiB
-        )
-
-        # Assert
-        assert kept_on.fsdp.save_moe_collectives is True
-        assert "fsdp.save_moe_collectives=False" not in turned_on(caplog)
-        assert kept_off.fsdp.save_moe_collectives is False
-
-    def test_dense_model_leaves_it_unset_and_undescribed(self):
-        # Act
-        plan = resolve_floor(dense_settings(), 80 * GiB)
-
-        # Assert
-        assert plan.fsdp.save_moe_collectives is None
-        assert "save_moe_collectives" not in plan.describe()
 
 
 def fsdp_only(settings: TrainingSettings) -> TrainingSettings:
@@ -1146,20 +733,6 @@ class TestResolveTrainingMemoryDataParallel:
         assert plan.breakdown.fits_with_buffer
         assert plan.cost < sharded.cost
         assert plan.describe().startswith("DDP, ")
-
-    def test_context_parallel_stays_on_fsdp_when_ddp_is_cheapest(self):
-        # Arrange: the DDP-cheapest setup above, with the run asking for cp=2.
-        settings = dense_settings(4, cp=2)
-        pins = MemoryPins(gradient_checkpointing=False, micro_batch_size_per_gpu=1)
-        device = budget_device(80 * GiB)
-
-        # Act
-        plan = resolve_training_memory(DENSE_MODEL, device, settings, pins, 4)
-
-        # Assert
-        assert plan.fsdp is not None
-        assert plan.fsdp.cp == 2
-        assert plan.describe().startswith("FSDP, ")
 
     def test_shards_when_ddp_needs_heavier_recompute_that_costs_more(self):
         # Arrange: one checkpointed 4096-token row. DDP checkpoints every

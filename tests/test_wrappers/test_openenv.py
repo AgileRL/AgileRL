@@ -64,6 +64,7 @@ from agilerl.llm_envs.openenv_server import (
     resolve_env,
 )
 from agilerl.llm_envs.qa_dataset import QADatasetEnv
+from agilerl.llm_envs.rubrics import reward_fn_to_rubric
 from tests.helpers.rollout_doubles import FakeEnvClient, MiniTokenizer
 
 
@@ -199,6 +200,18 @@ class TestRemoteEnvClientReset:
         # Assert
         assert payload == {"prompt": "Cancel order 42.", "error": error}
         assert info == {}
+
+    def test_observation_metadata_becomes_the_reset_info(self) -> None:
+        client = _session_client(
+            reset_observation={
+                "prompt": "Cancel order 42.",
+                "metadata": {"reference_trace": "cancel_order(42)"},
+            }
+        )
+
+        _payload, info = client.reset(row_index=0)
+
+        assert info == {"reference_trace": "cancel_order(42)"}
 
     def test_raises_when_the_observation_reports_an_error(self) -> None:
         # Arrange
@@ -943,25 +956,6 @@ class TestRolloutEnvFromSpec:
         obs, _ = env.reset(row_index=0)
         assert "input_ids" in obs
         env.close()
-
-    def test_env_config_action_field_names_the_steps_field(self) -> None:
-        """An ``env_config`` action_field names the action field, not a constructor kwarg."""
-        # Arrange
-        code_env = _CodeEnv()
-        harness = RolloutHarness.from_spec(
-            lambda: code_env,
-            {"action_field": "code"},
-            MiniTokenizer(),
-            apply_chat_template=False,
-        )
-        harness.reset()
-
-        # Act
-        harness.step(torch.tensor([[1, 2, 3, 4]], dtype=torch.long))
-
-        # Assert
-        assert code_env.received[0].code == "go"
-        harness.close()
 
 
 # --- TaskAssigner: one task per GRPO group ----------------------------------
@@ -2227,14 +2221,17 @@ def test_reset_retries_once_when_the_server_closed_an_idle_session() -> None:
 
 def test_server_hosts_qa_dataset_environment_as_is() -> None:
     """OpenEnv ``Environment`` subclasses are hosted without ``OpenEnvWrapper``."""
-    world = QADatasetEnv([{"question": "q", "answer": "a"}])
+    world = QADatasetEnv(
+        [{"question": "q", "answer": "a"}],
+        rubric=reward_fn_to_rubric(lambda completion, answer, question: 1.0),
+    )
     with OpenEnvServer(world) as server:
         client = RemoteEnvClient(server.base_url)
         assert client.reset(row_index=0)[0]["prompt"] == "q"
-        obs, reward, terminated, _truncated, _info = client.step("done")
-        assert reward == 0.0
+        _obs, reward, terminated, _truncated, _info = client.step("done")
+        assert reward == 1.0
         assert terminated is True
-        assert (obs["question"], obs["answer"]) == ("q", "a")
+        assert client.rubric_components == ("fn",)
 
 
 def test_reset_reraises_application_errors_without_redial() -> None:

@@ -26,24 +26,6 @@ def _read_row(data: TensorDict, index: int) -> TensorDict:
     return row
 
 
-def maybe_to_device(data: TensorDict, device: str | torch.device) -> TensorDict:
-    """Return ``data`` if it is already on ``device``, otherwise a copy on ``device``.
-
-    :param data: TensorDict whose leaves should live on ``device``
-    :type data: TensorDict
-    :param device: Target device
-    :type device: str | torch.device
-    :return: ``data`` unchanged, or a copy on ``device``
-    :rtype: TensorDict
-    """
-    # TensorDict.to() returns self only when data.device matches. Unlocked
-    # TensorDicts (device is None) clone; add() then mutates the copy.
-    target = torch.device(device)
-    if data.device == target:
-        return data
-    return data.to(target, non_blocking=True)
-
-
 class ReplayBuffer:
     """A circular replay buffer for off-policy learning using a TensorDict as storage.
 
@@ -96,10 +78,10 @@ class ReplayBuffer:
     def _normalize_dims(data: TensorDict, n: int) -> TensorDict:
         """Give every scalar ``(batch,)`` leaf a trailing feature dim ``(batch, 1)``.
 
-        Applies to tensor leaves at any depth, so one call covers flat,
-        dict-observation, and nested multi-agent layouts. Higher-dimensional
-        leaves (e.g. images) are left untouched. Returns a new TensorDict so
-        the caller is not reshaped.
+        Recurses in place into nested tensor collections, so a single
+        implementation handles flat, dict-observation, and nested multi-agent
+        (``field -> agent_id -> tensor``) layouts uniformly at any depth -
+        higher-dimensional leaves (e.g. images) are left untouched.
 
         :param data: Data to normalize
         :type data: TensorDict
@@ -108,15 +90,14 @@ class ReplayBuffer:
         :return: Normalized data
         :rtype: TensorDict
         """
+        for key, item in data.items():
+            if isinstance(item, TensorDict):
+                # Nested collections in buffer storage are TensorDicts
+                ReplayBuffer._normalize_dims(item, n)
+            elif item.ndim == 1:
+                data[key] = item.reshape(n, 1)
 
-        def reshape_scalar(item: torch.Tensor) -> torch.Tensor:
-            if item.ndim == 1:
-                return item.reshape(n, 1)
-            return item
-
-        normalized = data.apply(reshape_scalar)
-        assert isinstance(normalized, TensorDict)
-        return normalized
+        return data
 
     def _init(self, data: TensorDict) -> TensorDict:
         """Initialize the buffer given the passed data. For each key,
@@ -129,7 +110,7 @@ class ReplayBuffer:
         :rtype: TensorDict
         """
         self._storage = (
-            _read_row(data, 0).expand(self.max_size, *data.shape[1:]).clone()
+            _read_row(data, 0).expand((self.max_size, *data.shape[1:])).clone()
         )
         self._storage.zero_()
         self.initialized = True
@@ -144,7 +125,7 @@ class ReplayBuffer:
         :rtype: TensorDict | None
         """
         # Initialize storage
-        data = maybe_to_device(data, self.device)
+        data = data.to(self.device)
         _n_transitions = data.shape[0]
 
         # Ensure all tensors in data have proper dimensions beyond batch dimension
@@ -276,7 +257,7 @@ class MultiStepReplayBuffer(ReplayBuffer):
         :rtype: TensorDict | None
         """
         # Add to n-step buffer
-        data = maybe_to_device(data, self.device)
+        data = data.to(self.device)
         self.n_step_buffer.append(data)
 
         # If buffer is not full yet, don't process n-step return

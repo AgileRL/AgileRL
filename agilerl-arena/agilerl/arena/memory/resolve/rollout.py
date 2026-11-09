@@ -1,6 +1,6 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
-"""Whether a Ray run generates on async rollout engines, how many it starts, its cycle size, whether it drafts, how it syncs LoRA and its LoRA streams."""
+"""Whether a Ray run generates on async rollout engines, how many it starts, its cycle size, whether it drafts and its LoRA streams."""
 
 from __future__ import annotations
 
@@ -118,87 +118,6 @@ def drafts_by_default(
         and not hybrid_ssm
         and not drafting_rejected_sampling(min_p, logit_bias)
     )
-
-
-MERGED_SYNC_BUCKET_BYTES = 256 << 20
-"""Bytes of merged weights one merged-sync transfer round moves, unless one tensor is larger."""
-
-
-def drafts_with_mtp(speculative_config: dict[str, Any] | None) -> bool:
-    """Whether a vLLM ``speculative_config`` can draft with MTP layers.
-
-    vLLM 0.32 detects the method from a draft ``model``'s config when
-    ``method`` is omitted or ``draft_model``, and picks ``mtp`` for an MTP
-    draft config, so such a config counts as MTP.
-
-    :param speculative_config: ``vllm_engine_args.speculative_config``.
-    :return: ``True`` for method ``mtp``, a model-specific ``*_mtp`` method,
-        or a draft ``model`` other than n-gram with the method left to vLLM.
-    """
-    if speculative_config is None:
-        return False
-    method = speculative_config.get("method") or ""
-    if method in ("", "draft_model"):
-        return speculative_config.get("model") not in (None, "ngram", "[ngram]")
-    return method == "mtp" or method.endswith("_mtp")
-
-
-def checkpoint_quantized(config: dict[str, Any]) -> bool:
-    """Whether vLLM loads a checkpoint with this ``config.json`` as quantized weights.
-
-    vLLM 0.32 reads ``quantization_config``, or compressed-tensors'
-    ``compression_config``, from the config or its ``text_config``.
-
-    :param config: The checkpoint's raw ``config.json``.
-    :return: ``True`` when either section carries one of those keys.
-    """
-    sections = (config, config.get("text_config") or {})
-    return any(
-        section.get(key) is not None
-        for section in sections
-        for key in ("quantization_config", "compression_config")
-    )
-
-
-def merged_lora_sync_eligible(
-    quantization: str | None,
-    quantized_checkpoint: bool,
-    tower_lora: bool,
-    mtp_drafting: bool,
-) -> bool:
-    """Whether a rollout engine can serve merged LoRA weights with LoRA off.
-
-    Every rollout engine serves one policy, so it can hold that policy's
-    merged weights. vLLM quantizes weights at load, both for the
-    ``quantization`` engine argument and for a checkpoint that ships a
-    quantization config, so such an engine cannot take merged bf16 tensors
-    and keeps serving the adapter. vLLM keys cached vision-encoder outputs by
-    LoRA name only, so an engine with tower LoRA keeps serving the adapter
-    too. Merged sync does not update MTP draft weights, so an engine that
-    drafts with MTP keeps serving the adapter.
-
-    :param quantization: ``vllm_config.quantization``.
-    :param quantized_checkpoint: :func:`checkpoint_quantized` of the engine's checkpoint.
-    :param tower_lora: Whether the adapter targets vision-tower modules.
-    :param mtp_drafting: :func:`drafts_with_mtp` of the engine's ``speculative_config``.
-    :return: ``True`` for an unquantized engine on an unquantized checkpoint,
-        without tower LoRA or MTP drafting.
-    """
-    unquantized = quantization is None or quantization.lower() == "none"
-    return (
-        unquantized and not quantized_checkpoint and not tower_lora and not mtp_drafting
-    )
-
-
-def merged_sync_bucket_bytes(total_bytes: int, largest_tensor_bytes: int) -> int:
-    """Bytes of the NIXL buffer that streams merged weights, one round at a time.
-
-    :param total_bytes: Merged bytes of every tensor the adapter touches.
-    :param largest_tensor_bytes: Merged bytes of the largest of them.
-    :return: :data:`MERGED_SYNC_BUCKET_BYTES`, or the largest tensor when it
-        is larger, and never more than ``total_bytes``.
-    """
-    return min(total_bytes, max(MERGED_SYNC_BUCKET_BYTES, largest_tensor_bytes))
 
 
 def runs_dual_stream_lora(moe: bool) -> bool:

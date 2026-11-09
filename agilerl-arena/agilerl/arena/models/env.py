@@ -8,7 +8,6 @@ from __future__ import annotations
 from enum import Enum
 from pathlib import PurePosixPath
 from typing import Annotated, Any, Literal
-from urllib.parse import urlsplit
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Self
@@ -190,71 +189,6 @@ class EnvHostVolume(BaseModel):
                 f"Host volume {self.name!r}: mount_path {self.mount_path!r} is in "
                 "/dev/shm, the containers' shared-memory mount; pick another path."
             )
-            raise ValueError(msg)
-        return self
-
-
-class JudgeSpec(BaseModel):
-    """The LLM a rubric's judge calls: provider, model, endpoint and limits."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    provider: Literal["openai", "anthropic"] = Field(
-        default="openai",
-        description=(
-            "API the judge speaks. openai covers any OpenAI-compatible endpoint: "
-            "OpenRouter, Together, Groq or self-hosted vLLM, through base_url."
-        ),
-    )
-    model: str = Field(min_length=1, description="Judge model id.")
-    base_url: str | None = Field(
-        default=None,
-        description=(
-            "http(s) endpoint. A URL with a path is the API root, used as given "
-            "(https://openrouter.ai/api/v1); a bare host gets the client's default "
-            "path. Unset uses the provider's hosted API, which needs api_key_env."
-        ),
-    )
-    api_key_env: str | None = Field(
-        default=None,
-        pattern=ENV_VAR_NAME_PATTERN,
-        description=(
-            "Name of the environment variable holding the API key; never the key "
-            "itself. Unset sends no key (a local endpoint)."
-        ),
-    )
-    max_concurrency: int = Field(
-        default=16, ge=1, description="Judge requests in flight per process."
-    )
-    timeout_s: float = Field(
-        default=120.0,
-        gt=0.0,
-        description="Seconds one request attempt may take; the provider SDK retries it.",
-    )
-    temperature: float = Field(
-        default=0.0,
-        ge=0.0,
-        description="Judge sampling temperature. Anthropic judges take none: leave it unset.",
-    )
-    max_tokens: int = Field(default=512, ge=1, description="Verdict token budget.")
-
-    @model_validator(mode="after")
-    def _check_endpoint(self) -> Self:
-        if self.base_url is None:
-            if self.api_key_env is None:
-                msg = f"The hosted {self.provider} API needs api_key_env."
-                raise ValueError(msg)
-        else:
-            url = urlsplit(self.base_url)
-            if url.scheme not in ("http", "https") or not url.hostname:
-                msg = f"judge base_url must be an http(s) URL, got {self.base_url!r}."
-                raise ValueError(msg)
-        return self
-
-    @model_validator(mode="after")
-    def _check_temperature(self) -> Self:
-        if self.provider == "anthropic" and self.temperature != 0.0:
-            msg = "Anthropic judges take no temperature; leave it unset."
             raise ValueError(msg)
         return self
 
@@ -654,7 +588,8 @@ class LLMEnvSpec(EnvSpecBase):
         default=None,
         description=(
             "Maps your dataset's column names onto the ones the run expects "
-            "(question, answer). Unset assumes they already match."
+            "(question, answer; prompt, target, or multi-turn messages and "
+            "tools for SFT). Unset assumes they already match."
         ),
     )
     response_column: str | None = Field(
@@ -674,9 +609,7 @@ class LLMEnvSpec(EnvSpecBase):
         validation_alias=AliasChoices("rubric_file_path", "reward_file_path"),
         description=(
             "Path to the Python module holding the rubric (or reward function) "
-            "that scores every turn. Required for a rollout over dataset rows; "
-            "on an env, its score replaces the env's reward, which it can "
-            "read as an input."
+            "that scores a rollout over dataset rows."
         ),
     )
     rubric_name: str | None = Field(
@@ -684,13 +617,6 @@ class LLMEnvSpec(EnvSpecBase):
         min_length=1,
         validation_alias=AliasChoices("rubric_name", "reward_fn_name"),
         description="Name of the rubric (or reward callable) to import from that module.",
-    )
-    judge: JudgeSpec | None = Field(
-        default=None,
-        description=(
-            "LLM judge handed to the rubric: a Rubric class whose __init__ takes "
-            "judge is built with it. Needs rubric_file_path."
-        ),
     )
     max_reward: float | None = Field(
         default=None,
@@ -709,8 +635,7 @@ class LLMEnvSpec(EnvSpecBase):
             "Send the env or reward function each turn's reasoning with its "
             "markers, not only the text after the reasoning ends. Unset sends "
             "it to a reward file over dataset rows and not to an env that "
-            "runs the action. A Rubric class reads the whole turn from "
-            "TurnAction.completion either way."
+            "runs the action."
         ),
     )
     train_test_split: float | None = Field(
@@ -1226,6 +1151,11 @@ class LLMEnvSpec(EnvSpecBase):
                 msg = "A dataset-backed rollout environment is single-turn; max_turns must be 1."
                 raise ValueError(msg)
             self.max_turns = 1
+        elif self.rubric_file_path is not None:
+            msg = (
+                "rubric_file_path is not supported for env-backed rollout environments."
+            )
+            raise ValueError(msg)
         return self
 
     @model_validator(mode="after")
@@ -1323,21 +1253,12 @@ class LLMEnvSpec(EnvSpecBase):
         return self
 
     @model_validator(mode="after")
-    def _check_judge(self) -> Self:
-        if self.judge is not None and self.rubric_file_path is None:
-            msg = "judge is handed to a rubric; set rubric_file_path to a Rubric that takes it."
-            raise ValueError(msg)
-        return self
-
-    @model_validator(mode="after")
     def _apply_conditional_defaults(self) -> Self:
         if self._dataset_identity_backed():
             if self.train_test_split is None:
                 self.train_test_split = 0.9
             if self.env_type == "rollout" and self.rubric_name is None:
                 self.rubric_name = "reward_fn"
-        if self.rubric_file_path is not None and self.rubric_name is None:
-            self.rubric_name = "reward_fn"
         if self.env_type == "dataset" and self.response_column is None:
             self.response_column = "response"
         if self.env_type == "rollout":

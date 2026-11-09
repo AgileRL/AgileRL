@@ -170,7 +170,7 @@ class TestTrainingMemoryFromManifest:
         assert plan.gradient_checkpointing is False
 
     def test_tight_device_checkpoints_before_shrinking_the_micro_batch(self) -> None:
-        plan = _plan(_manifest(), 3.93)
+        plan = _plan(_manifest(), 3.37)
 
         assert plan.micro_batch_tokens_per_gpu == 16 * 128
         assert plan.gradient_checkpointing is True
@@ -181,7 +181,7 @@ class TestTrainingMemoryFromManifest:
         raw["algorithm"]["top_k"] = 0
 
         # Act
-        plan = _plan(raw, 3.93)
+        plan = _plan(raw, 3.37)
 
         # Assert
         assert plan.micro_batch_tokens_per_gpu == 1024
@@ -206,7 +206,7 @@ class TestTrainingMemoryFromManifest:
         raw["network"]["max_context_length"] = 1536
 
         # Act
-        plan = _plan(raw, 4.32)
+        plan = _plan(raw, 3.8)
 
         # Assert
         assert plan.micro_batch_tokens_per_gpu == 10 * 1024
@@ -216,7 +216,7 @@ class TestTrainingMemoryFromManifest:
         raw = _manifest()
         raw["network"]["max_context_length"] = 1536
 
-        plan = _plan(raw, 3.52)
+        plan = _plan(raw, 3.25)
 
         assert plan.micro_batch_tokens_per_gpu == 1536
         assert plan.micro_batch_size_per_gpu == 1
@@ -228,8 +228,8 @@ class TestTrainingMemoryFromManifest:
         grpo["algorithm"].update(name="GRPO", batch_size=4, group_size=4)
 
         # Act
-        plan = _plan(raw, 5.47)
-        grpo_plan = _plan(grpo, 5.47)
+        plan = _plan(raw, 5)
+        grpo_plan = _plan(grpo, 5)
 
         # Assert
         assert plan.micro_batch_tokens_per_gpu == 7 * 1024
@@ -258,13 +258,13 @@ class TestTrainingMemoryFromManifestFsdpChoice:
         assert plan.fsdp is None
 
     def test_omitted_fsdp_plans_like_an_empty_fsdp_block(self) -> None:
-        # Arrange: at 3.47 GiB the FSDP plan beats the DDP one on one L4.
+        # Arrange: at 3 GiB the FSDP plan beats the DDP one on one L4.
         searched = _manifest()
         searched["algorithm"]["fsdp"] = {}
 
         # Act
-        omitted_plan = _plan(_manifest(), 3.47)
-        searched_plan = _plan(searched, 3.47)
+        omitted_plan = _plan(_manifest(), 3.0)
+        searched_plan = _plan(searched, 3.0)
 
         # Assert
         assert omitted_plan.fsdp is not None
@@ -287,7 +287,7 @@ class TestRunConfigFromManifest:
         model_config = SUPPORTED_MODEL_INFO[HUB_ID].config
 
         # Act
-        config = run_config_from_manifest(caller, _device(3.93), model_config)
+        config = run_config_from_manifest(caller, _device(3.37), model_config)
 
         # Assert
         assert config.training.micro_batch_size == 8
@@ -299,9 +299,9 @@ class TestRunConfigFromManifest:
         caller = TrainingManifest.model_validate(_manifest())
         model_config = SUPPORTED_MODEL_INFO[HUB_ID].config
 
-        config = run_config_from_manifest(caller, _device(3.47), model_config)
+        config = run_config_from_manifest(caller, _device(3.0), model_config)
 
-        assert config.training.fsdp == _plan(_manifest(), 3.47).fsdp
+        assert config.training.fsdp == _plan(_manifest(), 3.0).fsdp
         assert config.training.fsdp is not None
         assert caller.algorithm.fsdp is None
 

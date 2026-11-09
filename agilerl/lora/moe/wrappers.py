@@ -183,6 +183,8 @@ class TransposedExpertsLoraWrapper(ParamWrapper):
             adapters = {
                 name: resolve_adapters(wrapper) for name, wrapper in chain.items()
             }
+        if not any(adapters.values()):
+            return experts(hidden_states, router_indices, routing_weights)
         if not is_transposed_experts_module(experts):
             return ParamWrapper.forward(
                 self, hidden_states, router_indices, routing_weights

@@ -14,10 +14,9 @@ those.
 from __future__ import annotations
 
 import json
-import pickle
 import sys
 from collections.abc import Mapping
-from functools import cached_property, lru_cache
+from functools import cached_property
 from importlib.resources import files
 from typing import Any, Literal
 
@@ -55,17 +54,16 @@ ModelModality = Literal["text", "vision"]
 VLLM_LORA_RANKS = (1, 8, 16, 32, 64, 128, 256, 320, 512)
 # vLLM fused MoE LoRA rejects ranks above this.
 FUSED_MOE_LORA_MAX_RANK = 128
+# Trainer expert parallel shards routed and sorted expert stacks only;
+# gpt-oss stores its experts transposed, with per-expert biases.
+EXPERT_PARALLEL_UNSUPPORTED_MODEL_TYPES = frozenset({"gpt_oss"})
 
 # vLLM 0.32 reasoning parser per Hugging Face model_type of a thinking model.
 # vLLM enforces thinking_token_budget by forcing the parser's reasoning-end token.
 REASONING_PARSERS: Mapping[str, str] = {
-    "deepseek_v4": "deepseek_v4",
     "gemma4": "gemma4",
     "gemma4_text": "gemma4",
-    "glm5_next": "glm47",
-    "glm5_next_text": "glm47",
     "gpt_oss": "openai_gptoss",
-    "mimo_v2": "mimo",
     "nemotron_h": "nemotron_v3",
     "nemotron_h_omni": "nemotron_v3",
     "qwen3": "qwen3",
@@ -74,35 +72,6 @@ REASONING_PARSERS: Mapping[str, str] = {
     "qwen3_5_moe": "qwen3",
     "qwen3_5_moe_text": "qwen3",
     "qwen3_5_text": "qwen3",
-}
-
-# The DSA indexer only picks top-k keys, so the loss sends it no gradient. vLLM
-# replicates f_a_proj and g_a_proj across TP ranks but shards their LoRA, so
-# only rank 0 applies it.
-GLM5_NEXT_LORA_EXCLUDED_MODULES = frozenset(
-    {"indexer.wk", "indexer.wq_b", "indexer.weights_proj", "f_a_proj", "g_a_proj"}
-)
-
-# PEFT exclude_modules per Hugging Face model_type: module-path suffixes that
-# get no LoRA whatever target_modules names.
-LORA_EXCLUDED_MODULES: Mapping[str, frozenset[str]] = {
-    # vLLM runs the KV compressor and its indexer as raw matmuls that skip
-    # LoRA. o_a_proj is a grouped linear; PEFT's delta mismatches its groups.
-    "deepseek_v4": frozenset(
-        {
-            "o_a_proj",
-            "compressor.kv_proj",
-            "compressor.gate_proj",
-            "compressor.indexer.kv_proj",
-            "compressor.indexer.gate_proj",
-            "compressor.indexer.q_b_proj",
-            "compressor.indexer.scorer.weights_proj",
-        }
-    ),
-    "glm5_next": GLM5_NEXT_LORA_EXCLUDED_MODULES,
-    "glm5_next_text": GLM5_NEXT_LORA_EXCLUDED_MODULES,
-    # vLLM 0.32 sizes the V slice of the fused qkv LoRA with the QK head size.
-    "mimo_v2": frozenset({"q_proj", "k_proj", "v_proj"}),
 }
 
 # Hugging Face model_types of supported models that do not reason by default.
@@ -116,16 +85,7 @@ PARSERS_WITHOUT_THINKING_BUDGET = frozenset({"openai_gptoss"})
 # where reasoning ends in its tokens; the rollout engine checks at startup that
 # the vLLM parser's reasoning_end_str spells the same ids.
 KNOWN_REASONING_PARSERS = frozenset(
-    {
-        "deepseek_r1",
-        "deepseek_v4",
-        "gemma4",
-        "glm47",
-        "mimo",
-        "nemotron_v3",
-        "openai_gptoss",
-        "qwen3",
-    }
+    {"deepseek_r1", "gemma4", "nemotron_v3", "openai_gptoss", "qwen3"}
 )
 
 
@@ -167,12 +127,6 @@ def _bundled(hub_id: str) -> dict[str, Any]:
     return json.loads(supported_path(hub_id).read_text(encoding="utf-8"))
 
 
-@lru_cache(maxsize=64)
-def _pickled_config(hub_id: str) -> bytes:
-    """``config`` of the bundled file for ``hub_id``, parsed once and pickled."""
-    return pickle.dumps(_bundled(hub_id)["config"], pickle.HIGHEST_PROTOCOL)
-
-
 class ModelInfo(BaseModel):
     """Static info for one supported Hub id."""
 
@@ -210,16 +164,6 @@ class ModelInfo(BaseModel):
             "only. Text-only checkpoints default to every module."
         ),
     )
-    rollout_gpu_memory_utilization: float | None = Field(
-        default=None,
-        gt=0,
-        le=1,
-        description=(
-            "Rollout-engine gpu_memory_utilization when vllm_config omits it, for "
-            "models whose vLLM allocations outside that budget overflow the card "
-            "at vLLM's 0.9. None keeps 0.9."
-        ),
-    )
 
     @model_validator(mode="after")
     def _vl_entries_name_text_modules(self) -> Self:
@@ -243,14 +187,10 @@ class ModelInfo(BaseModel):
             raise ValueError(msg)
         return value
 
-    @property
+    @cached_property
     def config(self) -> dict[str, Any]:
-        """Raw ``config.json`` this id trains from, a new copy on each access.
-
-        Hugging Face config classes rewrite the sub-config dicts they are built
-        from, so callers must not share one dict.
-        """
-        return pickle.loads(_pickled_config(self.hub_id))
+        """Raw ``config.json`` this id trains from."""
+        return _bundled(self.hub_id)["config"]
 
     @cached_property
     def inspected(self) -> dict[str, Any]:
@@ -269,15 +209,8 @@ class ModelInfo(BaseModel):
     @computed_field
     @property
     def modules(self) -> frozenset[str]:
-        """Valid ``target_modules`` names: keys with a module not in ``LORA_EXCLUDED_MODULES``."""
-        return frozenset(
-            key
-            for key in self._target_keys("module")
-            if any(
-                not self._is_excluded(key, entry)
-                for entry in self.inspected["lora_info"][key]
-            )
-        )
+        """Valid ``target_modules`` names."""
+        return self._target_keys("module")
 
     @computed_field
     @property
@@ -321,7 +254,10 @@ class ModelInfo(BaseModel):
     @property
     def supports_expert_parallel(self) -> bool:
         """True when the model has packed experts the trainer can shard over EP."""
-        return bool(self.parameters)
+        return (
+            bool(self.parameters)
+            and self.model_type not in EXPERT_PARALLEL_UNSUPPORTED_MODEL_TYPES
+        )
 
     @computed_field
     @property
@@ -342,16 +278,6 @@ class ModelInfo(BaseModel):
 
     @computed_field
     @property
-    def status_notice(self) -> str | None:
-        """What a user of this model should know about its release status."""
-        if self.status == STATUS_PREVIEW:
-            return f"Model {self.hub_id} is in preview and cannot be submitted yet."
-        if self.status == STATUS_DEPRECATED:
-            return f"Model {self.hub_id} is deprecated and will be removed."
-        return None
-
-    @computed_field
-    @property
     def num_params(self) -> int | None:
         """Total parameters; None when the config cannot be built offline."""
         return self.inspected["num_params"]
@@ -365,10 +291,7 @@ class ModelInfo(BaseModel):
         the model has packed experts.
         """
         entries = [
-            entry
-            for key, group in self.inspected["lora_info"].items()
-            for entry in group
-            if not self._is_excluded(key, entry)
+            entry for group in self.inspected["lora_info"].values() for entry in group
         ]
         dims = [
             entry[field]
@@ -397,7 +320,7 @@ class ModelInfo(BaseModel):
         }
 
     @computed_field
-    @cached_property
+    @property
     def model_type(self) -> str:
         """Hugging Face ``model_type``."""
         return self.config["model_type"]
@@ -439,13 +362,6 @@ class ModelInfo(BaseModel):
     def _serialize_sorted(self, value: frozenset[str] | None) -> list[str] | None:
         return None if value is None else sorted(value)
 
-    def _is_excluded(self, key: str, entry: Mapping[str, Any]) -> bool:
-        excluded = tuple(
-            f".{name}" for name in LORA_EXCLUDED_MODULES.get(self.model_type, ())
-        )
-        leaf = key.rsplit(".", 1)[-1]
-        return f"{entry.get('scope', '')}.{leaf}".endswith(excluded)
-
     def _target_keys(self, kind: str) -> frozenset[str]:
         return frozenset(
             key
@@ -474,16 +390,6 @@ NEMOTRON_H_TEXT_LORA_MODULES = ATTENTION_LORA_MODULES | {
     "up_proj",
     "down_proj",
 }
-# KDA linear attention plus MLA, less GLM5_NEXT_LORA_EXCLUDED_MODULES.
-GLM5_NEXT_TEXT_LORA_MODULES = (
-    ATTENTION_LORA_MODULES
-    | GATED_MLP_LORA_MODULES
-    | {"b_proj", "f_b_proj", "g_b_proj"}
-    | {"q_a_proj", "q_b_proj", "kv_a_proj_with_mqa", "kv_b_proj"}
-)
-# vLLM keeps an unsharded expert-LoRA lora_B copy and the NIXL receive buffer
-# outside the budget; on an H100-80 engine that leaves room for 0.85, not 0.9.
-EXPERT_LORA_ROLLOUT_GPU_MEMORY_UTILIZATION = 0.85
 
 
 def qwen3_5_vl(hub_id: str, architecture: ModelArchitecture) -> ModelInfo:
@@ -544,23 +450,5 @@ SUPPORTED_MODEL_INFO: Mapping[str, ModelInfo] = {
             text_lora_modules=NEMOTRON_H_TEXT_LORA_MODULES,
         ),
         ModelInfo(hub_id="openai/gpt-oss-20b", architecture=ARCH_MOE),
-        ModelInfo(
-            hub_id="zai-org/GLM-5.3-Flash",
-            architecture=ARCH_HYBRID_MOE,
-            modalities=("text", "vision"),
-            language_model_prefix=VL_LANGUAGE_MODEL_PREFIX,
-            text_lora_modules=GLM5_NEXT_TEXT_LORA_MODULES,
-            rollout_gpu_memory_utilization=EXPERT_LORA_ROLLOUT_GPU_MEMORY_UTILIZATION,
-        ),
-        ModelInfo(
-            hub_id="deepseek-ai/DeepSeek-V4-Flash-0731",
-            architecture=ARCH_MOE,
-            rollout_gpu_memory_utilization=EXPERT_LORA_ROLLOUT_GPU_MEMORY_UTILIZATION,
-        ),
-        ModelInfo(
-            hub_id="XiaomiMiMo/MiMo-V2.6-Flash-RL",
-            architecture=ARCH_MOE,
-            rollout_gpu_memory_utilization=EXPERT_LORA_ROLLOUT_GPU_MEMORY_UTILIZATION,
-        ),
     )
 }

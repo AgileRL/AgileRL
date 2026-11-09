@@ -37,7 +37,6 @@ from tests.test_algorithms.test_llms.llm_helpers import (
     scale_losses,
     score_every_token,
     trainable_weights,
-    use_packed,
 )
 from tests.test_algorithms.test_llms.test_ppo_llm_passes import (
     patch_cuda_device,
@@ -691,8 +690,6 @@ class TestDPOSaveLoadCheckpoint:
                         getattr(new_dpo, attr).is_sharded
                         == getattr(dpo, attr).is_sharded
                     )
-                elif attr == "sequence_layout":
-                    assert type(getattr(new_dpo, attr)) is type(getattr(dpo, attr))
                 elif attr == "learn_profiler":
                     assert new_dpo.learn_profiler is own_profiler
                 elif not isinstance(getattr(dpo, attr), torch.Tensor):
@@ -1190,14 +1187,16 @@ def standard_dpo_loss_and_grads(
 
 
 class TestDPODPOLoss:
-    def test_packed_standard_loss_and_grads_match_padded(self) -> None:
+    def test_packed_standard_loss_and_grads_match_padded(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         # Arrange
         dpo = make_qwen3_dpo()
         batch = packing_preference_batch()
         padded_loss, padded_reward, padded_grads = standard_dpo_loss_and_grads(
             dpo, batch
         )
-        use_packed(dpo, True)
+        monkeypatch.setattr(dpo, "_packing_mode", lambda: "varlen")
         shapes = record_forward_shapes(dpo)
 
         # Act

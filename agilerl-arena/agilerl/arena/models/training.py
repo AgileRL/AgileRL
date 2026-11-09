@@ -535,16 +535,6 @@ class TrainingSpec(BaseModel):
 
     @model_validator(mode="after")
     def _validate_training_parameters(self) -> Self:
-        if (
-            self.num_epochs is not None
-            and "num_epochs" in self.model_fields_set
-            and "max_steps" in self.model_fields_set
-        ):
-            msg = (
-                "training.num_epochs and training.max_steps are both set; set one: "
-                "num_epochs for an epoch-driven run, max_steps for a step-driven run."
-            )
-            raise ValueError(msg)
         if self.evo_steps is not None and self.evo_steps > self.max_steps:
             msg = f"evo_steps ({self.evo_steps}) must be less than or equal to max_steps ({self.max_steps})."
             raise ValueError(msg)

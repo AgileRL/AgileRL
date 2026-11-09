@@ -21,7 +21,7 @@ fused-logprob, PPO value-head, and fused-loss paths); all are differentiable.
    Packing only saves memory on a backend where the block-diagonal mask stays
    sparse: FlashAttention-2 varlen or FlexAttention. Dense backends (SDPA/eager)
    would materialize an ``O(N^2)`` mask, so callers must gate packing on a
-   supported backend; see :meth:`LLMAlgorithm._sequence_layout_type`.
+   supported backend; see :meth:`LLMAlgorithm._packing_mode`.
 
 Recurrent mixers (Mamba scan and causal conv1d) carry state from token to
 token, so a packed row is only correct when they reset at each document start.
@@ -44,10 +44,6 @@ from torch import nn
 # Class attribute set to True on a mixer whose forward resets its recurrent
 # state at every packed-document boundary.
 RESETS_AT_DOCUMENT_BOUNDARY = "agilerl_resets_at_document_boundary"
-# Inductor lowers flex attention over fewer queries to its decode kernel.
-FLEX_DECODE_QUERY_LENGTH = 128
-# Default ``BLOCK_SIZE`` of torch's ``create_block_mask``.
-FLEX_BLOCK_SIZE = 128
 
 
 class PackedBatch(NamedTuple):
@@ -112,7 +108,6 @@ def pack_padded_batch(
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
     score_mask: torch.Tensor | None = None,
-    host_counts: list[int] | None = None,
 ) -> PackedBatch:
     """Flatten a padded ``(B, T)`` batch into a single padding-free row.
 
@@ -130,10 +125,6 @@ def pack_padded_batch(
         Only predictions of a real token from a real token of the same row are
         kept, so the packed mask never scores a cross-sequence prediction.
     :type score_mask: torch.Tensor | None
-    :param host_counts: Real tokens of each row, then the kept scored
-        positions when *score_mask* is given; ``None`` reads them from the
-        device.
-    :type host_counts: list[int] | None
     :return: A :class:`PackedBatch`.
     :rtype: PackedBatch
     """
@@ -145,14 +136,12 @@ def pack_padded_batch(
     mask = attention_mask.bool()
     batch_size, padded_seq_len = input_ids.shape
     seq_lengths = mask.sum(dim=1).to(torch.long)  # (B,)
+    counts = seq_lengths
     if score_mask is not None:
         score_mask = score_mask.to(mask.device).bool() & mask[:, 1:] & mask[:, :-1]
-    if host_counts is None:
-        counts = seq_lengths
-        if score_mask is not None:
-            counts = torch.cat([seq_lengths, score_mask.sum().view(1)])
-        # The only device sync; every size below derives from these host counts.
-        host_counts = counts.tolist()
+        counts = torch.cat([seq_lengths, score_mask.sum().view(1)])
+    # The only device sync; every size below derives from these host counts.
+    host_counts = counts.tolist()
     lengths = tuple(host_counts[:batch_size])
     n_tokens = sum(lengths)
 
@@ -454,13 +443,9 @@ def head_norm_shapes(model: nn.Module) -> list[tuple[int, int]]:
 
 
 def packed_length_classes(
-    model: nn.Module,
-    token_budget: int,
-    center: int,
-    sm_count: int,
-    flex_attention: bool = False,
+    model: nn.Module, token_budget: int, center: int, sm_count: int
 ) -> list[int]:
-    """Packed lengths that reach every length-specialized kernel of a learn on *model*.
+    """Packed lengths that reach every length-specialized Triton kernel of a learn on *model*.
 
     Triton compiles a kernel once per set of integer arguments equal to 1 or
     divisible by 16, and once per constexpr value. Each kernel group below
@@ -475,13 +460,6 @@ def packed_length_classes(
     - Mamba-2 mixers: ``length`` and :func:`mamba2_scan_launch_ints`.
     - Gated delta-nets: :func:`gated_delta_l2norm_blocks`.
 
-    Dynamo compiles flex attention and its block mask static at the first
-    length. Each later compile makes dynamic every size seen at more than one
-    value: the length, and the mask's block count
-    ``ceil(length / FLEX_BLOCK_SIZE)`` unless it is 1, which stays
-    specialized. Queries shorter than :data:`FLEX_DECODE_QUERY_LENGTH` compile
-    apart. On *flex_attention* the lengths also cover those compiles.
-
     :param model: Model to scan.
     :type model: nn.Module
     :param token_budget: Longest packed row.
@@ -491,16 +469,14 @@ def packed_length_classes(
     :type center: int
     :param sm_count: Streaming multiprocessors of the device.
     :type sm_count: int
-    :param flex_attention: *model* attends with flex attention.
-    :type flex_attention: bool
     :return: Of the lengths from 4 (two documents of two tokens) to
         *token_budget*, nearest *center* first and the shorter on a tie, each
-        that reaches a group key or flex compile no earlier length reached;
-        empty when *model* has neither a recurrent mixer nor flex attention.
+        that reaches a group key no earlier length reached; empty when *model*
+        has no recurrent mixer.
     :rtype: list[int]
     """
     mixers = [module for module in model.modules() if is_recurrent_mixer(module)]
-    if not mixers and not flex_attention:
+    if not mixers:
         return []
     # One entry per distinct shape; layers of a model share it.
     scans = {
@@ -538,38 +514,6 @@ def packed_length_classes(
         ]
         return set(enumerate(keys))
 
-    # Flex compiles as (length, block count, short query); None is a dynamic size.
-    flex_compiles: list[tuple[int | None, int | None, bool]] = []
-    flex_lengths: set[int] = set()
-    flex_blocks: set[int] = set()
-
-    def flex_compile(length: int) -> tuple[int, bool]:
-        return (
-            math.ceil(length / FLEX_BLOCK_SIZE),
-            length < FLEX_DECODE_QUERY_LENGTH,
-        )
-
-    def flex_covers(length: int) -> bool:
-        blocks, short_query = flex_compile(length)
-        return any(
-            compiled_short == short_query
-            and compiled_length in (None, length)
-            and (blocks > 1 if compiled_blocks is None else compiled_blocks == blocks)
-            for compiled_length, compiled_blocks, compiled_short in flex_compiles
-        )
-
-    def record_flex_compile(length: int) -> None:
-        blocks, short_query = flex_compile(length)
-        flex_lengths.add(length)
-        flex_blocks.add(blocks)
-        flex_compiles.append(
-            (
-                None if len(flex_lengths) > 1 else length,
-                None if len(flex_blocks) > 1 and blocks > 1 else blocks,
-                short_query,
-            )
-        )
-
     lengths: list[int] = []
     reached: set[tuple[int, tuple[int, ...]]] = set()
     by_distance = sorted(
@@ -577,10 +521,7 @@ def packed_length_classes(
     )
     for length in by_distance:
         keys = group_keys(length)
-        compiles_flex = flex_attention and not flex_covers(length)
-        if compiles_flex or not keys <= reached:
-            if compiles_flex:
-                record_flex_compile(length)
+        if not keys <= reached:
             lengths.append(length)
             reached |= keys
     return lengths

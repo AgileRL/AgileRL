@@ -37,7 +37,6 @@ from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME, SAFE_WEIGHTS_NAME, cached_file
 
 from agilerl.architectures import trainer_model_class
-from agilerl.arena.memory.formulas import DEFAULT_ROUTED_CHUNK_BYTES
 from agilerl.distributed import (
     gather_params,
     is_main_process,
@@ -45,10 +44,6 @@ from agilerl.distributed import (
     raise_on_any_rank,
 )
 from agilerl.distributed.fsdp import canonical_fsdp_param_fqn
-from agilerl.distributed.tensor_parallel import (
-    tensor_parallel_row_orders,
-    tensor_rows_in_order,
-)
 from agilerl.lora.moe.adapters import wrapper_chain
 from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 
@@ -272,20 +267,6 @@ def write_merged_completeness_files(output_dir: str | Path) -> None:
     (output_path / MERGED_COMPLETE_MARKER).write_text("1", encoding="utf-8")
 
 
-def merged_export_is_complete(merged_dir: str | Path) -> bool:
-    """Return whether ``merged_dir`` has ``.complete`` and a non-empty ``hf_merged`` manifest.
-
-    :param merged_dir: Directory written by :func:`export_merged_pretrained`.
-    :return: True when the export finished.
-    """
-    merged = Path(merged_dir)
-    manifest_path = merged / ARENA_ARTIFACT_MANIFEST_FILENAME
-    if not (merged / MERGED_COMPLETE_MARKER).is_file() or not manifest_path.is_file():
-        return False
-    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    return payload["format"] == HF_MERGED_FORMAT and len(payload["files"]) > 0
-
-
 def _load_replay_peft(
     adapter_path: str | Path,
     base_model_name_or_path: str | Path,
@@ -424,10 +405,6 @@ def _export_live_model(
         raise TypeError(msg)
     specs = _collect_export_specs(pretrained, adapter_name, weight_store)
     shard_plan = _plan_shards(specs, max_shard_size)
-    hf_row_orders = {
-        id(model.get_parameter(fqn)): torch.argsort(order)
-        for fqn, order in tensor_parallel_row_orders(model).items()
-    }
     output_path = Path(output_dir)
     is_main = is_main_process()
 
@@ -442,7 +419,6 @@ def _export_live_model(
             shard_tensors = _materialize_shard(
                 specs,
                 hf_names,
-                hf_row_orders,
                 torch_dtype=torch_dtype,
                 keep_tensors=is_main,
                 weight_store=weight_store,
@@ -686,26 +662,19 @@ def _delta_weight(
 def _merged_weight_and_bias(
     layer: Linear | Embedding | Conv1d | Conv2d | Conv3d,
     adapter_name: str,
-    weight_order: torch.Tensor | None,
-    bias_order: torch.Tensor | None,
-    delta_order: torch.Tensor | None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    """Fold LoRA into the gathered base weight and bias, in HF row order; do not write the module."""
+    """Fold LoRA into the gathered base weight and bias; do not write the module."""
     base_layer = _as_lora_base(layer)
-    base_weight = tensor_rows_in_order(
-        _dense_local(base_layer.weight).detach(), weight_order
-    )
+    base_weight = _dense_local(base_layer.weight).detach()
     if _adapter_on_layer(layer, adapter_name):
-        delta = tensor_rows_in_order(
-            _dense_local(_delta_weight(layer, adapter_name)), delta_order
-        )
+        delta = _dense_local(_delta_weight(layer, adapter_name))
         weight = base_weight + delta.to(dtype=base_weight.dtype)
     else:
         weight = base_weight
     bias_tensor = _base_bias(base_layer)
     bias: torch.Tensor | None = None
     if bias_tensor is not None:
-        bias_tensor = tensor_rows_in_order(_dense_local(bias_tensor), bias_order)
+        bias_tensor = _dense_local(bias_tensor)
         if adapter_name in layer.lora_B:
             lora_b_mod = layer.lora_B[adapter_name]
             if isinstance(lora_b_mod, nn.Linear) and isinstance(
@@ -734,11 +703,9 @@ def _param_gather_params(
     return params
 
 
-def _merged_param(
-    wrapper: ParamWrapper, adapter_name: str, order: torch.Tensor | None
-) -> torch.Tensor:
-    """Fold LoRA into the gathered wrapped parameter, in HF row order; do not write the module."""
-    base = tensor_rows_in_order(_dense_local(wrapper.get_param()).detach(), order)
+def _merged_param(wrapper: ParamWrapper, adapter_name: str) -> torch.Tensor:
+    """Fold LoRA into the gathered wrapped parameter; do not write the module."""
+    base = _dense_local(wrapper.get_param()).detach()
     if adapter_name not in wrapper.lora_A:
         return base
     delta = _dense_local(_delta_weight(wrapper, adapter_name))
@@ -827,35 +794,9 @@ def _base_layer_from_store(
             setattr(module, attr, previous)
 
 
-def _copied_tensor(
-    spec: ModuleCopy,
-    hf_row_orders: dict[int, torch.Tensor],
-    torch_dtype: torch.dtype,
-    keep_tensors: bool,
-    weight_store: BaseWeightStore | None,
-) -> torch.Tensor | None:
-    """Gather one non-LoRA tensor in HF row order; the CPU copy, or ``None`` when not kept."""
-    source = spec.tensor
-    if source.device.type == "meta":
-        if weight_store is None:
-            msg = f"Cannot copy meta tensor {spec.hf_name} without a weight store"
-            raise RuntimeError(msg)
-        source = weight_store.load(spec.hf_name)
-    with materialize_dtensors(source) as gathered:
-        dense = gathered[0]
-        if dense is None:
-            msg = f"gathered tensor for {spec.hf_name} is missing"
-            raise RuntimeError(msg)
-        if not keep_tensors:
-            return None
-        dense = tensor_rows_in_order(dense, hf_row_orders.get(id(spec.tensor)))
-        return _copy_to_cpu(dense, torch_dtype)
-
-
 def _materialize_shard(
     specs: Sequence[ExportItem],
     hf_names: Sequence[str],
-    hf_row_orders: dict[int, torch.Tensor],
     *,
     torch_dtype: torch.dtype,
     keep_tensors: bool,
@@ -865,8 +806,6 @@ def _materialize_shard(
 
     Each ``gather_params`` unshards that FSDP unit, rank 0 copies to CPU, then
     the context restores DTensor shards so the rest of the model stays sharded.
-    ``hf_row_orders`` maps ``id`` of a TP-permuted parameter to the rows that
-    put its gathered value in HF order.
     """
     by_name = {spec.hf_name: spec for spec in specs}
     shard: dict[str, torch.Tensor] = {}
@@ -876,21 +815,28 @@ def _materialize_shard(
     for hf_name in hf_names:
         spec = by_name[hf_name]
         if isinstance(spec, ModuleCopy):
-            copied = _copied_tensor(
-                spec, hf_row_orders, torch_dtype, keep_tensors, weight_store
-            )
-            if copied is not None:
-                shard[hf_name] = copied
+            source = spec.tensor
+            if source.device.type == "meta":
+                if weight_store is None:
+                    msg = f"Cannot copy meta tensor {hf_name} without a weight store"
+                    raise RuntimeError(msg)
+                source = weight_store.load(hf_name)
+            with materialize_dtensors(source) as gathered:
+                dense = gathered[0]
+                if dense is None:
+                    msg = f"gathered tensor for {hf_name} is missing"
+                    raise RuntimeError(msg)
+                if keep_tensors:
+                    shard[hf_name] = _copy_to_cpu(dense, torch_dtype)
             continue
 
         if isinstance(spec, ParamLoraMerged):
             wrapper = spec.wrapper
-            order = hf_row_orders.get(id(spec.reference))
             with gather_params(
                 wrapper, _param_gather_params(wrapper, spec.adapter_name)
             ):
                 with _param_from_store(spec, weight_store):
-                    merged = _merged_param(wrapper, spec.adapter_name, order)
+                    merged = _merged_param(wrapper, spec.adapter_name)
                     if keep_tensors:
                         shard[hf_name] = _copy_to_cpu(merged, torch_dtype)
                     del merged
@@ -898,24 +844,11 @@ def _materialize_shard(
 
         layer_id = id(spec.layer)
         if layer_id not in gathered_layers:
-            base_layer = _as_lora_base(spec.layer)
-            weight_order = hf_row_orders.get(id(base_layer.weight))
-            bias_order = hf_row_orders.get(id(_base_bias(base_layer)))
-            lora_b = spec.layer.lora_B
-            delta_order = (
-                hf_row_orders.get(id(lora_b[spec.adapter_name].weight))
-                if spec.adapter_name in lora_b
-                else None
-            )
             layer_params = _layer_gather_params(spec.layer)
             with gather_params(spec.layer, layer_params):
                 with _base_layer_from_store(spec.layer, spec, weight_store):
                     weight, bias = _merged_weight_and_bias(
-                        spec.layer,
-                        spec.adapter_name,
-                        weight_order,
-                        bias_order,
-                        delta_order,
+                        spec.layer, spec.adapter_name
                     )
                     if keep_tensors:
                         merged_cpu[layer_id] = (
@@ -932,206 +865,3 @@ def _materialize_shard(
             shard[hf_name] = bias
 
     return shard
-
-
-@dataclass(frozen=True)
-class MergedSyncSpec:
-    """One weight merged sync pushes, with the rows that put its merge in Hugging Face order.
-
-    ``weight_order`` reorders the gathered base rows and ``delta_order`` the
-    gathered LoRA B rows; ``None`` keeps the stored order.
-    """
-
-    item: ModuleLoraMerged | ParamLoraMerged
-    weight_order: torch.Tensor | None
-    delta_order: torch.Tensor | None
-
-
-def merged_sync_specs(model: nn.Module, adapter_name: str) -> list[MergedSyncSpec]:
-    """Weights ``adapter_name`` changes, under Hugging Face checkpoint names, in module order.
-
-    Biases are left out: the adapters train no LoRA bias. Row orders of
-    tensor-parallel-permuted weights sit on their parameter's device.
-
-    :param model: PEFT-wrapped causal LM, or a value-head wrapper around one.
-    :param adapter_name: Adapter whose merged weights are pushed.
-    :return: One spec per adapted weight or packed-expert parameter.
-    :raises ValueError: If the adapter is missing, adapts no weight, or is DoRA.
-    """
-    peft_model = _as_peft_model(model)
-    if adapter_name not in peft_model.peft_config:
-        msg = f"Adapter {adapter_name!r} is not on the PEFT model"
-        raise ValueError(msg)
-    pretrained = peft_model.get_base_model()
-    if not isinstance(pretrained, PreTrainedModel):
-        msg = f"Merged sync requires a transformers model, got {type(pretrained).__name__}"
-        raise TypeError(msg)
-    hf_row_orders: dict[int, torch.Tensor] = {}
-    for fqn, order in tensor_parallel_row_orders(peft_model).items():
-        param = peft_model.get_parameter(fqn)
-        hf_row_orders[id(param)] = torch.argsort(order).to(param.device)
-    specs: list[MergedSyncSpec] = []
-    for item in _collect_export_specs(pretrained, adapter_name):
-        if isinstance(item, ParamLoraMerged) and adapter_name in item.wrapper.lora_A:
-            # Tensor-parallel plans permute rows of linear layers only.
-            specs.append(MergedSyncSpec(item, None, None))
-        elif (
-            isinstance(item, ModuleLoraMerged)
-            and item.part == "weight"
-            and _adapter_on_layer(item.layer, adapter_name)
-        ):
-            # The merge pushes W + scale * B @ A, without DoRA's magnitude.
-            if item.layer.use_dora.get(adapter_name):
-                msg = f"Merged sync does not support DoRA adapters ({item.hf_name})"
-                raise ValueError(msg)
-            lora_b = item.layer.lora_B
-            delta_order = (
-                hf_row_orders.get(id(lora_b[adapter_name].weight))
-                if adapter_name in lora_b
-                else None
-            )
-            specs.append(
-                MergedSyncSpec(item, hf_row_orders.get(id(item.reference)), delta_order)
-            )
-    if not specs:
-        msg = f"Adapter {adapter_name!r} adapts no weight"
-        raise ValueError(msg)
-    return specs
-
-
-@torch.no_grad()
-def write_merged_weight(
-    spec: MergedSyncSpec, destination: torch.Tensor | None
-) -> Exception | None:
-    """Gather one adapted module and write ``W + scale * B @ A`` into ``destination``.
-
-    The merge runs in one fp32 buffer, in Hugging Face row order, and casts
-    once to ``destination``'s dtype. Only the base weight and this adapter's
-    LoRA factors are gathered. Every rank calls this for the same specs in the
-    same order; a rank passing ``None`` only joins the gather. A failed gather
-    raises; a merge failing after it is returned, so the caller can still join
-    the gathers that follow.
-
-    :param spec: Spec from :func:`merged_sync_specs`.
-    :param destination: Tensor of the weight's full shape, or ``None``.
-    :return: The error the merge raised, or ``None``.
-    """
-    item = spec.item
-    if isinstance(item, ParamLoraMerged):
-        gathered = gather_params(
-            item.wrapper, _param_gather_params(item.wrapper, item.adapter_name)
-        )
-    else:
-        gathered = gather_params(
-            item.layer,
-            [
-                _as_lora_base(item.layer).weight,
-                *_adapter_factors(item.layer, item.adapter_name),
-            ],
-        )
-    with gathered:
-        if destination is None:
-            return None
-        try:
-            _write_gathered_merge(spec, destination)
-        except Exception as exc:
-            return exc
-    return None
-
-
-def _write_gathered_merge(spec: MergedSyncSpec, destination: torch.Tensor) -> None:
-    """Write the merge of one gathered module into ``destination``."""
-    item = spec.item
-    if isinstance(item, ParamLoraMerged):
-        _write_merged_param(item.wrapper, item.adapter_name, destination)
-        return
-    layer = item.layer
-    adapter_name = item.adapter_name
-    base = tensor_rows_in_order(
-        _dense_local(_as_lora_base(layer).weight), spec.weight_order
-    )
-    if type(layer) is Linear and adapter_name not in layer.lora_variant:
-        _write_merged_linear(layer, adapter_name, base, spec.delta_order, destination)
-        return
-    with _fp32_lora_factors(layer, adapter_name):
-        delta = tensor_rows_in_order(
-            layer.get_delta_weight(adapter_name), spec.delta_order
-        )
-    destination.copy_(base.float() + delta)
-
-
-def _adapter_factors(
-    layer: Linear | Embedding | Conv1d | Conv2d | Conv3d, adapter_name: str
-) -> list[nn.Parameter]:
-    """``adapter_name``'s LoRA parameters on ``layer``."""
-    return [
-        param
-        for name, param in layer.named_parameters()
-        if name.startswith("lora_") and adapter_name in name.split(".")
-    ]
-
-
-def _write_merged_linear(
-    layer: Linear,
-    adapter_name: str,
-    base: torch.Tensor,
-    delta_order: torch.Tensor | None,
-    destination: torch.Tensor,
-) -> None:
-    """Accumulate ``scale * B @ A`` onto an fp32 copy of the gathered base, then write it."""
-    weight_a = _dense_local(layer.get_parameter(f"lora_A.{adapter_name}.weight"))
-    weight_b = _dense_local(layer.get_parameter(f"lora_B.{adapter_name}.weight"))
-    weight_a = weight_a.float()
-    weight_b = tensor_rows_in_order(weight_b, delta_order).float()
-    merged = base.to(torch.float32, copy=True)
-    # A fan-in-fan-out base stores [in, out]; accumulate through its transpose.
-    target = merged.T if layer.fan_in_fan_out else merged
-    target.addmm_(weight_b, weight_a, alpha=layer.scaling[adapter_name])
-    destination.copy_(merged)
-
-
-@contextmanager
-def _fp32_lora_factors(
-    layer: Linear | Embedding | Conv1d | Conv2d | Conv3d, adapter_name: str
-) -> Generator[None, None, None]:
-    """Hold ``adapter_name``'s LoRA factors on ``layer`` in fp32, restoring their storage after."""
-    factors = _adapter_factors(layer, adapter_name)
-    saved = [param.data for param in factors]
-    for param in factors:
-        param.data = _dense_local(param.data).float()
-    try:
-        yield
-    finally:
-        for param, data in zip(factors, saved, strict=True):
-            param.data = data
-
-
-def _write_merged_param(
-    wrapper: ParamWrapper, adapter_name: str, destination: torch.Tensor
-) -> None:
-    """Merge a gathered packed-expert parameter in fp32, a bounded chunk of experts at a time."""
-    base = _dense_local(wrapper.get_param())
-    weight_a = _dense_local(wrapper.lora_A[adapter_name].get_parameter("weight"))
-    weight_b = _dense_local(wrapper.lora_B[adapter_name].get_parameter("weight"))
-    scaling = wrapper.scaling[adapter_name]
-    n_experts = wrapper.num_experts
-    if n_experts == 1:
-        merged = base.to(torch.float32, copy=True)
-        merged.addmm_(weight_b.float(), weight_a.float(), alpha=scaling)
-        destination.copy_(merged)
-        return
-    # PEFT's stacked layouts: A is [E*r, in] or [E, r, in]; B is [out, E*r] or [out, r, E].
-    weight_a = weight_a.reshape(n_experts, -1, weight_a.shape[-1])
-    weight_b = weight_b.reshape(weight_b.shape[0], -1, n_experts).permute(2, 0, 1)
-    out_major = wrapper._did_swap_in_out_features
-    chunk = max(1, DEFAULT_ROUTED_CHUNK_BYTES // (base[0].numel() * 4))
-    for start in range(0, n_experts, chunk):
-        stop = min(start + chunk, n_experts)
-        expert_a = weight_a[start:stop].float()
-        expert_b = weight_b[start:stop].float()
-        merged = base[start:stop].to(torch.float32, copy=True)
-        if out_major:
-            merged.baddbmm_(expert_b, expert_a, alpha=scaling)
-        else:
-            merged.baddbmm_(expert_a.mT, expert_b.mT, alpha=scaling)
-        destination[start:stop].copy_(merged)

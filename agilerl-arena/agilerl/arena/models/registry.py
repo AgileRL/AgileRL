@@ -6,8 +6,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterable
-from difflib import get_close_matches
+from collections.abc import Callable
 from enum import Enum
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -17,21 +16,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 AlgoSpecT = TypeVar("AlgoSpecT", bound="AlgoSpec")
-
-
-def did_you_mean(name: str, candidates: Iterable[str]) -> str:
-    """Return a `` Did you mean X?`` sentence for the closest candidate, or ``""``.
-
-    :param name: The unrecognised name.
-    :type name: str
-    :param candidates: The valid names.
-    :type candidates: Iterable[str]
-    :returns: The sentence with a leading space, or an empty string.
-    :rtype: str
-    """
-    by_lower = {candidate.lower(): candidate for candidate in candidates}
-    matches = get_close_matches(name.lower(), by_lower, n=1)
-    return f" Did you mean {by_lower[matches[0]]}?" if matches else ""
 
 
 class AgentType(Enum):
@@ -76,7 +60,7 @@ class AlgorithmRegistry:
         try:
             return self._entries[name]
         except KeyError as err:
-            supported = ", ".join(self.alias_groups())
+            supported = ", ".join(sorted(self._entries))
             msg = f"No registry entry for algorithm {name!r}. Registered: {supported}"
             raise KeyError(msg) from err
 
@@ -99,25 +83,6 @@ class AlgorithmRegistry:
         :rtype: list[str]
         """
         return sorted(self._entries)
-
-    def names_by_class(self) -> dict[type[AlgoSpec], list[str]]:
-        """Return each spec class with the sorted names registered for it.
-
-        :returns: Spec classes in order of their first name.
-        :rtype: dict[type[AlgoSpec], list[str]]
-        """
-        groups: dict[type[AlgoSpec], list[str]] = {}
-        for name, spec_cls in self.items():
-            groups.setdefault(spec_cls, []).append(name)
-        return groups
-
-    def alias_groups(self) -> list[str]:
-        """Return one entry per spec class, its names joined by `` / ``.
-
-        :returns: Entries such as ``"Rainbow DQN / RainbowDQN"``.
-        :rtype: list[str]
-        """
-        return [" / ".join(names) for names in self.names_by_class().values()]
 
     def items(self) -> list[tuple[str, type[AlgoSpec]]]:
         """Return every ``(name, spec class)`` pair, sorted by name.

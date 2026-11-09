@@ -214,112 +214,6 @@ each message at 300 seconds by default (``0`` disables the bound).
 Walkthrough: :ref:`remote_env_server_tutorial` — host a coding env on one
 machine and train on a GPU box.
 
-Scoring any env with a rubric
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-``rubric_file_path`` works with every source above, not only dataset rows. The
-rubric scores every turn and its score replaces the env's reward for that turn.
-Without one, the env's own reward is used.
-
-A rubric is an OpenEnv ``Rubric`` called with a
-:class:`~agilerl.llm_envs.rubrics.TurnAction` (``message`` the env got after
-``action_processor``, ``completion`` with reasoning, parsed ``tool_calls``) and a
-:class:`~agilerl.llm_envs.rubrics.TurnObservation` (``env_reward``,
-``env_ran``, ``done``, ``prompt``, ``question`` / ``answer`` when the env sends
-them). :class:`~agilerl.llm_envs.rubrics.EnvReward` brings the env's reward in as
-the ``env`` component; combine it with OpenEnv's ``WeightedSum``, ``Gate`` or
-``Sequential``:
-
-.. code-block:: python
-
-   from openenv.core.rubrics.base import Rubric
-   from openenv.core.rubrics.containers import WeightedSum
-
-   from agilerl.llm_envs.rubrics import EnvReward
-
-
-   class Concise(Rubric):
-       component_name = "concise"
-
-       def forward(self, action, observation) -> float:
-           return 1.0 if len(action.message) < 200 else 0.0
-
-
-   class RUBRIC(WeightedSum):
-       def __init__(self) -> None:
-           super().__init__([EnvReward(), Concise()], weights=[0.8, 0.2])
-
-.. code-block:: yaml
-
-   environment:
-       env_type: rollout
-       entrypoint: guess_env.py:GuessEnv
-       rubric_file_path: reward.py
-       rubric_name: RUBRIC
-       max_turns: 3
-
-A turn rejected for a malformed tool call reaches the rubric with
-``env_ran=False`` and ``env_reward`` set to ``min_reward``. Each leaf is logged as
-``reward_<name>``.
-
-An LLM judge
-~~~~~~~~~~~~
-
-:class:`~agilerl.llm_envs.rubrics.LLMJudgeRubric` scores an episode against
-criteria you write. Set ``judge`` next to ``rubric_file_path``; a ``Rubric`` class
-whose ``__init__`` takes ``judge`` is built with the run's shared client:
-
-.. code-block:: python
-
-   from openenv.core.rubrics.containers import WeightedSum
-
-   from agilerl.llm_envs.rubrics import EnvReward, LLMJudgeRubric
-
-
-   class RUBRIC(WeightedSum):
-       def __init__(self, judge) -> None:
-           super().__init__(
-               [EnvReward(), LLMJudgeRubric(judge, "The reply is correct and polite.")],
-               weights=[0.7, 0.3],
-           )
-
-.. code-block:: yaml
-
-   environment:
-       env_type: rollout
-       entrypoint: guess_env.py:GuessEnv
-       rubric_file_path: reward.py
-       rubric_name: RUBRIC
-       judge:
-           provider: openai          # or anthropic (needs the anthropic package)
-           model: gpt-4.1-mini
-           api_key_env: OPENAI_API_KEY   # the variable's name, never the key
-           max_concurrency: 16
-
-- ``base_url`` points the judge at any OpenAI-compatible endpoint with
-  ``provider: openai``: a router or cheaper host (OpenRouter, Together, Groq) or
-  self-hosted vLLM. A URL with a path is used as given
-  (``https://openrouter.ai/api/v1``); a bare host (``http://judge:8000``) gets
-  ``/v1``. Leave ``api_key_env`` unset when the endpoint needs no key.
-- The judge reads the prompt, each turn's text after its reasoning, and the env's
-  replies. ``LLMJudgeRubric(..., include_reasoning=True)`` also shows it the
-  reasoning. Scoring reasoning trains the model to write reasoning the judge
-  likes, so leave it off unless that is the goal.
-- It scores the episode's last turn, earlier turns 0; ``every_turn=True`` judges
-  each turn.
-- The provider SDK retries rate limits, server errors and timed-out attempts;
-  ``timeout_s`` bounds each attempt. A call that still fails stops the run. A
-  verdict without a readable ``{"score": ...}`` scores 0.
-- On dataset rows, the judge reads the row's question and is shown its answer as
-  ``REFERENCE ANSWER``, so criteria can compare against it.
-- Anthropic judges take no ``temperature``: setting one is rejected.
-- Two judges in one rubric need distinct names, ``LLMJudgeRubric(..., name=...)``:
-  each leaf reports one ``reward_<name>`` metric, and a repeated name is an error.
-- ``reward_<name>`` counts an episode a ``Sequential`` or ``Gate`` kept from that
-  leaf as 0.
-- Training logs ``judge_calls``, ``judge_parse_failure_rate`` and
-  ``judge_mean_latency_s``.
-
 Supervised (SFT / DPO)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -394,17 +288,11 @@ These are the names this package reads:
      - Rename source columns (e.g. ``nums: question``).
    * - ``rubric_file_path``
      - ``None``
-     - Reward / rubric file scoring every turn. Required for a dataset-backed
-       rollout; on an env it replaces the env's reward. Alias:
+     - Reward / rubric file for a dataset-backed rollout. Alias:
        ``reward_file_path``.
    * - ``rubric_name``
-     - ``reward_fn``
-     - Symbol in that file. Alias: ``reward_fn_name``.
-   * - ``judge``
      - ``None``
-     - LLM judge handed to the rubric: ``provider``, ``model``, ``base_url``,
-       ``api_key_env``, ``max_concurrency``, ``timeout_s``, ``temperature``,
-       ``max_tokens``. Needs ``rubric_file_path``.
+     - Symbol in that file. Alias: ``reward_fn_name``.
    * - ``prompt_template``
      - ``None``
      - Chat-template pieces rendered into the prompt on reset.
@@ -551,11 +439,11 @@ once per call, in order, within the turn. The turn's reward is the sum of those
 steps. Tool schemas are discovered over ``list_tools`` and rendered into
 prompts through the chat template.
 
-Chat formats cover the Qwen, Hermes, Granite, Nemotron, Gemma 4, GPT-OSS, GLM,
-and DeepSeek-V4 model families. The same format also says where the model's
-reasoning ends, so the env acts only on the answer. Name one with
-``chat_format`` on ``RolloutHarness``; unset, the harness picks the format whose
-tokens are in the tokenizer vocab. An MCP env with a tokenizer no format matches fails at the
+Chat formats cover the Qwen, Hermes, Granite, Nemotron, Gemma 4, and GPT-OSS
+model families. The same format also says where the model's reasoning ends, so
+the env acts only on the answer. Name one with ``chat_format`` on
+``RolloutHarness``; unset, the harness picks the format whose tokens are in the
+tokenizer vocab. An MCP env with a tokenizer no format matches fails at the
 first reset.
 
 A turn with no tool call is a prose answer. ``answer_tool="<tool_name>"`` on
@@ -566,48 +454,6 @@ error to retry. A malformed call runs nothing: the model gets a tool error,
 and the turn scores ``min_reward`` (``0`` unless the manifest sets it). Rules
 about which tools may run, in what order, and how an answer scores belong to
 the env, behind its tools.
-
-An env whose tools change per episode returns them from ``reset`` in the info
-under ``episode_tools`` (OpenAI function schemas); the harness renders and
-parses that episode against them, and ``[]`` gives the episode no tools. A
-reset without the key uses the env's listed tools. Each call the harness steps
-carries its whole turn on ``CallToolAction.metadata`` (``turn_tool_calls`` and
-``turn_tool_call_index``), so an env that must see a turn's calls together
-gets them on the turn's first step.
-
-Prime Intellect Hub (verifiers) envs
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-``agilerl.llm_envs.verifiers_env:make`` serves a `verifiers
-<https://github.com/PrimeIntellect-ai/verifiers>`_ v1 env (``pip install
-agilerl[verifiers]``). The entrypoint is the taskset id; ``env_config`` is the
-verifiers env config, plus ``num_tasks`` to serve only the first tasks
-(required for an infinite taskset). verifiers tasksets have no held-out split,
-so an evaluation reset serves the same tasks as training. A taskset whose
-tasks bring tools is served as an MCP env with ``episode_tools``; give it
-``answer_tool: verifiers_reply`` so a turn without a call reaches verifiers as
-the model's reply. ``verifiers_reply`` reads its one argument whatever its
-name, so ``action_field`` is optional:
-
-.. code-block:: yaml
-
-   environment:
-       env_type: rollout
-       factory: agilerl.llm_envs.verifiers_env:make
-       entrypoint: bfcl-v3
-       env_packages:
-           uv: [verifiers==0.4.1.dev63, "bfcl-v3 @ git+https://..."]
-       env_config:
-           taskset:
-               test_categories: [simple_python, parallel, multi_turn_base]
-           agent:
-               harness: {id: "null"}
-       answer_tool: verifiers_reply
-       max_turns: 6
-
-Tasks that deny network access or run in a container need a sandbox runtime
-under ``agent.runtime``: verifiers' ``docker`` or ``prime`` runtime, or your own
-backend as ``type: custom`` with its ``import_path``.
 
 Lifecycle
 ---------

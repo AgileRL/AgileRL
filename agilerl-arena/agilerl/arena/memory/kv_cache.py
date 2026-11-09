@@ -8,30 +8,7 @@ Every function is a pure function of the specs in
 
 from __future__ import annotations
 
-from agilerl.arena.memory.specs import (
-    CSA_COMPRESS_RATIO,
-    DTYPE_BYTES,
-    HCA_COMPRESS_RATIO,
-    ModelArch,
-    WeightDtype,
-)
-
-
-def kv_entries_per_head(arch: ModelArch) -> int:
-    """Tensors cached per KV head: key and value, or one under MLA or a shared KV."""
-    return 1 if arch.kv_lora_rank or arch.shared_kv else 2
-
-
-def compressed_kv_dim(arch: ModelArch) -> float:
-    """Cached elements per token beyond the per-layer KV: compressed entries and indexer keys.
-
-    DeepSeek-V4 indexer keys compress at the CSA rate.
-    """
-    compressed = arch.n_csa_layers / CSA_COMPRESS_RATIO
-    compressed += arch.n_hca_layers / HCA_COMPRESS_RATIO
-    index_rate = CSA_COMPRESS_RATIO if arch.n_csa_layers else 1
-    indexer = arch.n_indexed_layers * arch.index_head_dim / index_rate
-    return arch.n_kv_heads * arch.head_dim * compressed + indexer
+from agilerl.arena.memory.specs import DTYPE_BYTES, ModelArch, WeightDtype
 
 
 def kv_heads_per_rank(n_kv_heads: int, tensor_parallel: int) -> int:
@@ -52,35 +29,13 @@ def kv_layer_head_dims(arch: ModelArch) -> tuple[float, int, int]:
     """(windowed layer fraction, sliding head dim, full-attention head dim).
 
     Full-attention layers may store a wider head. With no sliding window
-    every storing layer uses the full-attention width. MLA stores its latent
-    beside the shared rope key.
+    every storing layer uses the full-attention width.
     """
     window_dim = arch.head_dim
     full_dim = arch.global_head_dim or arch.head_dim
-    if arch.kv_lora_rank:
-        window_dim = full_dim = arch.kv_lora_rank + arch.qk_rope_head_dim
     if arch.sliding_window is None:
         return 0.0, window_dim, full_dim
     return arch.sliding_window_layer_fraction, window_dim, full_dim
-
-
-def kv_layer_widths(arch: ModelArch) -> tuple[float, int, int]:
-    """(windowed layer fraction, sliding-layer and full-attention-layer cached elements per token).
-
-    Each layer caches a key and a value per KV head, the value at
-    :attr:`ModelArch.v_head_dim` when set; MLA and a shared KV cache one
-    entry. Full-attention layers use :attr:`ModelArch.global_n_kv_heads`
-    when set.
-    """
-    windowed, window_dim, full_dim = kv_layer_head_dims(arch)
-    full_heads = arch.global_n_kv_heads or arch.n_kv_heads
-    if kv_entries_per_head(arch) == 1:
-        return windowed, arch.n_kv_heads * window_dim, full_heads * full_dim
-    return (
-        windowed,
-        arch.n_kv_heads * (window_dim + (arch.v_head_dim or window_dim)),
-        full_heads * (full_dim + (arch.v_head_dim or full_dim)),
-    )
 
 
 def kv_cache_bytes_per_token(arch: ModelArch, weight_dtype: WeightDtype) -> float:
@@ -90,16 +45,14 @@ def kv_cache_bytes_per_token(arch: ModelArch, weight_dtype: WeightDtype) -> floa
     Hybrid Mamba layers contribute recurrent state only, constant in
     context length and counted by :func:`mamba_state_bytes`.
 
-    Storing layers are charged at their own widths (:func:`kv_layer_widths`):
-    sliding layers at :attr:`ModelArch.head_dim`, full-attention layers at
-    :attr:`ModelArch.global_head_dim` when that is wider. Compressed KV
-    entries and indexer keys add :func:`compressed_kv_dim`.
+    Storing layers are charged at their own head width: sliding layers at
+    :attr:`ModelArch.head_dim`, full-attention layers at
+    :attr:`ModelArch.global_head_dim` when that is wider.
     """
     kv_bytes = DTYPE_BYTES[weight_dtype]
-    windowed, window_width, full_width = kv_layer_widths(arch)
-    mean_width = windowed * window_width + (1.0 - windowed) * full_width
-    layer_kv = kv_storing_layers(arch) * mean_width
-    return (layer_kv + compressed_kv_dim(arch)) * kv_bytes
+    windowed, window_dim, full_dim = kv_layer_head_dims(arch)
+    mean_head_dim = windowed * window_dim + (1.0 - windowed) * full_dim
+    return 2 * kv_storing_layers(arch) * arch.n_kv_heads * mean_head_dim * kv_bytes
 
 
 # vLLM's default KV block size.
@@ -148,8 +101,7 @@ def attention_token_bytes(
     """K + V bytes one full-attention layer stores per token on one vLLM rank."""
     _, _, full_dim = kv_layer_head_dims(arch)
     heads = kv_heads_per_rank(arch.n_kv_heads, tensor_parallel)
-    entries = kv_entries_per_head(arch)
-    return int(entries * heads * full_dim * DTYPE_BYTES[weight_dtype])
+    return int(2 * heads * full_dim * DTYPE_BYTES[weight_dtype])
 
 
 def aligned_kv_block_size(
@@ -280,17 +232,12 @@ def hybrid_kv_demand_bytes(
     """Attention KV one rank of a hybrid pool holds for every sequence at ``seq_len``.
 
     Each sequence takes whole blocks of :func:`aligned_kv_block_size` tokens
-    from every attention group of :func:`hybrid_kv_groups`. Indexer keys
-    add :func:`compressed_kv_dim` per token.
+    from every attention group of :func:`hybrid_kv_groups`.
     """
     block = aligned_kv_block_size(arch, weight_dtype, tensor_parallel)
     size, attention_groups, _ = hybrid_kv_groups(arch)
     page = hybrid_page_bytes(arch, weight_dtype, tensor_parallel)
-    compressed = seq_len * compressed_kv_dim(arch) * DTYPE_BYTES[weight_dtype]
-    return int(
-        concurrency
-        * (attention_groups * size * -(-seq_len // block) * page + compressed)
-    )
+    return int(concurrency * attention_groups * size * -(-seq_len // block) * page)
 
 
 def kv_cache_demand_bytes(
@@ -304,29 +251,23 @@ def kv_cache_demand_bytes(
 
     Sliding-window layers hold, per sequence, the window less one token plus
     the scheduler's in-flight tokens, in whole blocks plus one, at the sliding
-    sliding width; full-attention layers keep the full sequence at the full
-    width (:func:`kv_layer_widths`). Compressed KV entries and indexer keys
-    (:func:`compressed_kv_dim`) grow with the full sequence.
+    head width; full-attention layers keep the full sequence at
+    :attr:`ModelArch.global_head_dim`.
 
     :param in_flight_tokens: Tokens scheduled but not yet freed, vLLM's
         ``max_in_flight_tokens``.
     """
     kv_bytes = DTYPE_BYTES[weight_dtype]
-    layer_kv = kv_storing_layers(arch) * kv_bytes
-    compressed = concurrency * seq_len * compressed_kv_dim(arch) * kv_bytes
-    windowed, window_width, full_width = kv_layer_widths(arch)
+    layer_kv = 2 * kv_storing_layers(arch) * arch.n_kv_heads * kv_bytes
+    windowed, window_dim, full_dim = kv_layer_head_dims(arch)
     if arch.sliding_window is None:
-        return int(concurrency * seq_len * layer_kv * full_width + compressed)
+        return int(concurrency * seq_len * layer_kv * full_dim)
     held = min(arch.sliding_window - 1 + in_flight_tokens, seq_len)
     window_len = (-(-held // KV_BLOCK_SIZE_DEFAULT) + 1) * KV_BLOCK_SIZE_DEFAULT
     return int(
         concurrency
         * layer_kv
-        * (
-            windowed * window_len * window_width
-            + (1.0 - windowed) * seq_len * full_width
-        )
-        + compressed
+        * (windowed * window_len * window_dim + (1.0 - windowed) * seq_len * full_dim)
     )
 
 

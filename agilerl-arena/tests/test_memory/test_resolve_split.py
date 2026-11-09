@@ -13,16 +13,18 @@ from agilerl.arena.memory.manifest import (
     GPU_CATALOGUE,
     GpuInfo,
     lookup_gpu,
+    training_memory_from_manifest,
     unsupported_gpu_reason,
     validated_run_manifest,
 )
 from agilerl.arena.memory.resolve.batch import catalog_model
-from agilerl.arena.memory.resolve.decode_costs import (
-    MERGED_DECODE_SPEEDUP,
-    MERGED_MOE_PREFILL_SPEEDUP,
+from agilerl.arena.memory.resolve.fsdp import (
+    TrainingMemoryPlan,
+    TrainingMemoryUnfitError,
+    learn_cost,
 )
+from agilerl.arena.memory.resolve.learn_costs import learn_costs
 from agilerl.arena.memory.resolve.split import (
-    IDLE_GPU_TIE_SHARE,
     MULTI_TURN_ROW_FILL,
     MULTI_TURN_TURN_DECODE_TOKENS,
     MULTI_TURN_TURN_SHARE,
@@ -32,20 +34,19 @@ from agilerl.arena.memory.resolve.split import (
     SINGLE_TURN_REASONING_DECODE_SHARE,
     TIED_DROP_GENERATION_FACTOR,
     GpuSplit,
+    RunMemoryPlan,
     SplitWorkload,
     active_matmul_params,
     choose_engine_width,
     choose_gpu_split,
     engine_prefill_rate,
     engine_steps,
-    fullest_split_within,
-    price_gpu_split,
     resident_sequences,
+    resolve_run_memory,
     split_workload_from_manifest,
     tensor_parallel_seconds,
     uncached_prefill_tokens,
 )
-from agilerl.arena.memory.resolve.weight_sync import merged_sync_seconds
 from agilerl.arena.memory.specs import DeviceSpec, ModelArch, ModelSpec
 from agilerl.arena.models.manifest import TrainingManifest
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
@@ -84,6 +85,13 @@ def _countdown_manifest(batch_size: int = 60) -> dict:
         # The throughput fits trained every generated group.
         "replay_buffer": {"kind": "llm", "drop_uninformative_groups": False},
     }
+
+
+def _oversize_countdown_manifest(batch_size: int) -> dict:
+    """Countdown on Qwen3.8-27B LoRA; its training fits L4s at 6 trainers, not 1 to 5."""
+    raw = _countdown_manifest(batch_size)
+    raw["network"]["pretrained_model_name_or_path"] = "Qwen/Qwen3.8-27B"
+    return raw
 
 
 def _sudoku_manifest() -> dict:
@@ -174,6 +182,392 @@ def _manifest(raw: dict, engine_width: int = 1) -> TrainingManifest:
     return validated_run_manifest(TrainingManifest.model_validate(raw))
 
 
+def _plan(
+    raw: dict,
+    gpus: int | None = 8,
+    engine_width: int = 1,
+    device: DeviceSpec | None = None,
+) -> RunMemoryPlan:
+    manifest = _manifest(raw, engine_width)
+    return resolve_run_memory(
+        manifest, catalog_model(manifest.algorithm), device or _device(), gpus
+    )
+
+
+def _split(raw: dict, **kwargs: object) -> GpuSplit:
+    split = _plan(raw, **kwargs).split
+    assert split is not None
+    return split
+
+
+def _training_plan(
+    manifest: TrainingManifest, trainers: int, device: DeviceSpec
+) -> TrainingMemoryPlan | None:
+    trial = manifest.model_copy(deep=True)
+    trial.training.training_gpus_per_agent = trainers
+    try:
+        return training_memory_from_manifest(
+            trial, catalog_model(trial.algorithm), device
+        )
+    except TrainingMemoryUnfitError:
+        return None
+
+
+def _forced_split(
+    raw: dict, trainers: int, gpus: int, engine_width: int = 1
+) -> GpuSplit | None:
+    """The fastest split of ``gpus`` that keeps exactly ``trainers`` trainers."""
+    manifest = _manifest(raw, engine_width)
+    device = _device()
+    plan = _training_plan(manifest, trainers, device)
+    if plan is None:
+        return None
+    return choose_gpu_split(
+        catalog_model(manifest.algorithm),
+        device,
+        split_workload_from_manifest(manifest),
+        gpus,
+        engine_width,
+        lambda count: plan.learn_cost_ratio if count == trainers else None,
+    )
+
+
+SEARCHED_SPLITS = [
+    (_countdown_manifest(), 8, 1),
+    (_countdown_manifest(batch_size=64), 8, 1),
+    (_sudoku_manifest(), 8, 1),
+    (_sudoku_manifest(), 8, 2),
+    (_countdown_manifest(), 4, 1),
+    (_countdown_manifest(batch_size=64), 4, 1),
+    (_sudoku_manifest(), 4, 1),
+]
+SEARCHED_SPLIT_IDS = [
+    "countdown-b60-8",
+    "countdown-b64-8",
+    "sudoku-8",
+    "sudoku-tp2-8",
+    "countdown-b60-4",
+    "countdown-b64-4",
+    "sudoku-4",
+]
+
+
+class TestResolveRunMemorySplit:
+    @pytest.mark.parametrize(
+        ("raw", "gpus", "engine_width"), SEARCHED_SPLITS, ids=SEARCHED_SPLIT_IDS
+    )
+    def test_split_fits_the_gpus_and_shards_the_batch_evenly(
+        self, raw: dict, gpus: int, engine_width: int
+    ) -> None:
+        # Act
+        plan = _plan(raw, gpus=gpus, engine_width=engine_width)
+
+        # Assert
+        split = plan.split
+        assert split is not None
+        batch_size = raw["algorithm"]["batch_size"]
+        cycle = math.lcm(split.trainers, split.engines)
+        assert split.trainers + split.engines * engine_width <= gpus
+        assert batch_size % split.trainers == 0
+        assert split.rollout_batch_size % cycle == 0
+        assert cycle <= split.rollout_batch_size < batch_size + cycle
+        assert plan.training.settings.n_training_gpus == split.trainers
+        assert plan.training.breakdown.fits_with_buffer
+
+    @pytest.mark.parametrize(
+        ("raw", "gpus", "engine_width"), SEARCHED_SPLITS, ids=SEARCHED_SPLIT_IDS
+    )
+    def test_split_is_no_slower_than_any_other_trainer_count(
+        self, raw: dict, gpus: int, engine_width: int
+    ) -> None:
+        # Arrange
+        batch_size = raw["algorithm"]["batch_size"]
+        dividing = [
+            trainers
+            for trainers in range(1, gpus - engine_width + 1)
+            if batch_size % trainers == 0
+        ]
+        forced = [_forced_split(raw, n, gpus, engine_width) for n in dividing]
+        others = [other for other in forced if other is not None]
+
+        # Act
+        split = _split(raw, gpus=gpus, engine_width=engine_width)
+
+        # Assert
+        assert len(others) > 1
+        assert all(split.step_seconds <= other.step_seconds for other in others)
+        assert split.step_seconds < max(other.step_seconds for other in others)
+
+    def test_pinned_rollout_batch_size_limits_trainers_to_its_divisors(
+        self,
+    ) -> None:
+        # Arrange
+        raw = _countdown_manifest()
+        raw["training"]["rollout_batch_size"] = 64
+
+        # Act
+        split = _split(raw)
+
+        # Assert
+        assert 64 % split.trainers == 0
+        assert split.rollout_batch_size == 64
+
+    def test_pinned_micro_batch_must_divide_each_rank_share(self) -> None:
+        # Arrange: 12 groups of 8 over 4 ranks is 24 trajectories, not a
+        # multiple of 16.
+        raw = _sudoku_manifest()
+        raw["algorithm"]["micro_batch_size_per_gpu"] = 16
+
+        # Act
+        split = _split(raw)
+
+        # Assert
+        assert (12 // split.trainers * 8) % 16 == 0
+
+    def test_two_gpus_give_one_trainer_one_engine(self) -> None:
+        # Act
+        split = _split(_sudoku_manifest(), gpus=2)
+
+        # Assert
+        assert (split.trainers, split.engines) == (1, 1)
+
+    def test_a10g_gpus_get_a_split(self) -> None:
+        # Act
+        split = _split(_sudoku_manifest(), gpus=8, device=_device("A10G"))
+
+        # Assert
+        assert split.trainers + split.engines <= 8
+
+    def test_no_room_for_a_trainer_beside_an_engine_raises(self) -> None:
+        # Act / Assert
+        with pytest.raises(
+            ValueError,
+            match=(
+                r"^No trainer / rollout-engine split of 1 NVIDIA A100-SXM4-80GB "
+                r"GPUs fits this run: a trainer and a rollout engine do not both "
+                r"fit\. Use more or larger GPUs per agent \(a bigger resource tier "
+                r"or a smaller population size\), or shorten the context length\.$"
+            ),
+        ):
+            _plan(_sudoku_manifest(), gpus=1)
+
+    def test_training_over_memory_at_every_trainer_count_raises(self) -> None:
+        # Arrange: 9 GPUs with one TP4 engine leave at most 5 trainers.
+        raw = _oversize_countdown_manifest(60)
+
+        # Act / Assert
+        with pytest.raises(
+            ValueError,
+            match=(
+                r"^No trainer / rollout-engine split of 9 NVIDIA L4 GPUs fits this "
+                r"run: training does not fit in memory at any trainer count\. "
+                r"Use more or larger GPUs per agent \(a bigger resource tier or "
+                r"a smaller population size\), or shorten the context length\.$"
+            ),
+        ):
+            _plan(raw, gpus=9, engine_width=4, device=_device("L4"))
+
+    @pytest.mark.parametrize(
+        ("fsdp", "batch_size"),
+        [({"tp": 2}, 60), ({"shard_group_size": 4}, 64)],
+        ids=["tensor-parallel", "shard-group"],
+    )
+    def test_training_over_memory_at_the_largest_fsdp_count_raises(
+        self, fsdp: dict, batch_size: int
+    ) -> None:
+        # Arrange: 9 GPUs with one TP4 engine leave at most 5 trainers. The
+        # FSDP width skips 5; the largest legal count shards and is over memory.
+        raw = _oversize_countdown_manifest(batch_size)
+        raw["algorithm"]["fsdp"] = fsdp
+
+        # Act / Assert
+        with pytest.raises(
+            ValueError,
+            match=(
+                r"^No trainer / rollout-engine split of 9 NVIDIA L4 GPUs fits this "
+                r"run: training does not fit in memory at any trainer count\. "
+                r"Use more or larger GPUs per agent \(a bigger resource tier or "
+                r"a smaller population size\), or shorten the context length\.$"
+            ),
+        ):
+            _plan(raw, gpus=9, engine_width=4, device=_device("L4"))
+
+    def test_batch_no_trainer_count_that_fits_divides_raises(self) -> None:
+        # Arrange: only 6 trainers fit, and 64 groups do not split over 6.
+        raw = _oversize_countdown_manifest(64)
+
+        # Act / Assert
+        with pytest.raises(
+            ValueError,
+            match=(
+                r"^No trainer / rollout-engine split of 10 NVIDIA L4 GPUs fits this "
+                r"run: batch size 64 does not divide evenly across any trainer "
+                r"count that fits in memory\. Use a batch size divisible by more "
+                r"trainer counts, such as a power of two\.$"
+            ),
+        ):
+            _plan(raw, gpus=10, engine_width=4, device=_device("L4"))
+
+    def test_pinned_rollout_batch_no_trainer_count_that_fits_divides_raises(
+        self,
+    ) -> None:
+        # Arrange: only 6 trainers fit; 60 groups split over 6, a pinned
+        # 64-group cycle does not.
+        raw = _oversize_countdown_manifest(60)
+        raw["training"]["rollout_batch_size"] = 64
+
+        # Act / Assert
+        with pytest.raises(
+            ValueError,
+            match=(
+                r"run: rollout batch size 64 does not divide evenly across any "
+                r"trainer count that fits in memory\. Use a rollout batch size "
+                r"divisible by more trainer counts, such as a power of two, or "
+                r"leave it unset\.$"
+            ),
+        ):
+            _plan(raw, gpus=10, engine_width=4, device=_device("L4"))
+
+    @pytest.mark.parametrize(
+        ("fsdp", "need"),
+        [
+            ({"tp": 8}, "FSDP tensor parallel needs"),
+            ({"ep": 8}, "FSDP expert parallel needs"),
+            ({"shard_group_size": 8}, "FSDP shard group needs"),
+            (
+                {"tp": 8, "shard_group_size": 8},
+                "FSDP tensor parallel and shard group need",
+            ),
+            (
+                {"tp": 8, "ep": 8, "shard_group_size": 8},
+                "FSDP tensor parallel, expert parallel, and shard group need",
+            ),
+        ],
+        ids=[
+            "tensor-parallel",
+            "expert-parallel",
+            "shard-group",
+            "tensor-and-shard",
+            "all-three",
+        ],
+    )
+    def test_fsdp_width_wider_than_the_trainers_raises(
+        self, fsdp: dict, need: str
+    ) -> None:
+        # Arrange: one engine leaves 7 of 8 GPUs, under an FSDP width of 8.
+        raw = _sudoku_manifest()
+        raw["algorithm"]["fsdp"] = fsdp
+
+        # Act / Assert
+        with pytest.raises(
+            ValueError,
+            match=(
+                rf"run: {need} a multiple of 8 "
+                r"trainer GPUs, and at most 7 fit beside a rollout engine\. Use "
+                r"more GPUs per agent \(a bigger resource tier or a smaller "
+                r"population size\)\.$"
+            ),
+        ):
+            _plan(raw, gpus=8)
+
+    @pytest.mark.parametrize(
+        ("pins", "cause"),
+        [
+            (
+                {"micro_batch_size_per_gpu": 7},
+                (
+                    r"run: micro_batch_size_per_gpu 7 does not divide the per-rank "
+                    r"batch at any trainer count that shards the batch\. Use a "
+                    r"micro_batch_size_per_gpu that divides those ranks, or leave it "
+                    r"unset\.$"
+                ),
+            ),
+            (
+                {"mini_batch_size": 7},
+                (
+                    r"run: mini_batch_size 7 does not divide the per-rank batch at "
+                    r"any trainer count that shards the batch\. Use a "
+                    r"mini_batch_size that divides those ranks, or leave it unset\.$"
+                ),
+            ),
+            (
+                {"micro_batch_size_per_gpu": 7, "mini_batch_size": 7},
+                (
+                    r"run: micro_batch_size_per_gpu 7 and mini_batch_size 7 do not "
+                    r"divide the per-rank batch at any trainer count that shards "
+                    r"the batch\. Use values that divide those ranks, or leave them "
+                    r"unset\.$"
+                ),
+            ),
+        ],
+        ids=["micro-batch", "mini-batch", "micro-and-mini"],
+    )
+    def test_per_rank_pin_no_trainer_count_that_shards_divides_raises(
+        self, pins: dict, cause: str
+    ) -> None:
+        # Arrange: batch 12 shards 1, 2, 3, 4, and 6 trainers; 7 divides none
+        # of those per-rank trajectory counts.
+        raw = _sudoku_manifest()
+        raw["algorithm"].update(pins)
+
+        # Act / Assert
+        with pytest.raises(ValueError, match=cause):
+            _plan(raw, gpus=8)
+
+    def test_algorithm_without_rollouts_raises(self) -> None:
+        # Arrange
+        manifest = _sft_manifest()
+
+        # Act / Assert
+        with pytest.raises(TypeError, match="SFT does not generate rollouts"):
+            resolve_run_memory(
+                manifest, catalog_model(manifest.algorithm), _device(), 8
+            )
+
+    @pytest.mark.parametrize("gpus", [2, None], ids=["searched", "pinned"])
+    def test_gpu_below_sm80_raises_unsupported(self, gpus: int | None) -> None:
+        # Arrange
+        raw = _sudoku_manifest()
+        if gpus is None:
+            raw["training"]["training_gpus_per_agent"] = 1
+            raw["training"]["rollout_engines_per_agent"] = 1
+
+        # Act / Assert
+        with pytest.raises(
+            ValueError, match=r"Tesla T4 \(SM75\) cannot run LLM training"
+        ):
+            _plan(raw, gpus=gpus, device=_device("T4"))
+
+    def test_gpu_without_peak_figures_raises_a_catalogue_error(self) -> None:
+        # Arrange
+        device = DeviceSpec(total_bytes=80 * 1024**3, name="Exotic GPU")
+
+        # Act / Assert
+        with pytest.raises(
+            ValueError, match="Exotic GPU has no peak bf16 or memory bandwidth"
+        ):
+            _plan(_sudoku_manifest(), gpus=8, device=device)
+
+    def test_trainer_counts_nothing_fits_are_skipped(self) -> None:
+        # Arrange: Qwen3.8-27B LoRA is over one L4 at some trainer counts.
+        raw = _countdown_manifest(60)
+        raw["network"]["pretrained_model_name_or_path"] = "Qwen/Qwen3.8-27B"
+        manifest = _manifest(raw, engine_width=4)
+        unfit = [
+            trainers
+            for trainers in range(1, 10 - 4 + 1)
+            if _training_plan(manifest, trainers, _device("L4")) is None
+        ]
+
+        # Act
+        split = _split(raw, gpus=10, engine_width=4, device=_device("L4"))
+
+        # Assert
+        assert unfit
+        assert split.trainers not in unfit
+        assert split.trainers + split.engines * 4 <= 10
+
+
 def _workload(raw: dict, **updates: object) -> SplitWorkload:
     return split_workload_from_manifest(_manifest(raw)).model_copy(update=updates)
 
@@ -213,31 +607,6 @@ class TestChooseGpuSplit:
         assert single.rollout_batch_size == double.rollout_batch_size == 64
         assert double.generation_seconds == pytest.approx(
             2 * single.generation_seconds, rel=1e-12
-        )
-
-    def test_merged_sync_over_tcp_takes_fewer_engines(self) -> None:
-        # Arrange: merged Qwen3-4B weights reach each engine at 0.4 GB/s.
-        model = catalog_model(_manifest(_sudoku_manifest()).algorithm)
-        unpriced = _workload(_sudoku_manifest(), merged_lora_sync=True)
-        over_tcp = unpriced.model_copy(update={"sync_link": "tcp"})
-
-        # Act
-        by_step = choose_gpu_split(model, _device(), unpriced, 8, 1, lambda _: 1.0)
-        by_synced_step = choose_gpu_split(
-            model, _device(), over_tcp, 8, 1, lambda _: 1.0
-        )
-
-        # Assert: four engines generate faster but take twice the sync.
-        assert by_step is not None
-        assert by_synced_step is not None
-        assert (by_step.trainers, by_step.engines) == (4, 4)
-        assert (by_synced_step.trainers, by_synced_step.engines) == (6, 2)
-        assert by_synced_step.step_seconds > by_step.step_seconds
-        four_engine_sync = merged_sync_seconds(
-            model, unpriced.lora_target_scope, 0, 4, 1, True, "tcp"
-        )
-        assert (
-            by_synced_step.synced_step_seconds < by_step.step_seconds + four_engine_sync
         )
 
     def test_dropped_tied_groups_lengthen_generation_per_trained_step(self) -> None:
@@ -368,12 +737,7 @@ class TestChooseGpuSplit:
         # Arrange: 8191 prompt tokens (8192 in whole KV blocks) and one decoded
         # per episode, 128 episodes per engine; its decode steps are under 0.5%
         # of the prefill.
-        workload = _workload(
-            _countdown_manifest(64),
-            row_tokens=8192,
-            decode_tokens=1,
-            merged_lora_sync=False,
-        )
+        workload = _workload(_countdown_manifest(64), row_tokens=8192, decode_tokens=1)
         arch = _catalog_spec("Qwen/Qwen3-4B").arch
 
         # Act
@@ -382,40 +746,6 @@ class TestChooseGpuSplit:
         # Assert
         rate = 0.4 * 312e12 / (2 * active_matmul_params(arch))
         assert split.generation_seconds == pytest.approx(128 * 8192 / rate, rel=5e-3)
-
-    def test_merged_prompt_heavy_generation_runs_at_the_merged_dense_prefill_rate(
-        self,
-    ) -> None:
-        # Arrange: the prompt-heavy cycle above on engines with LoRA off.
-        workload = _workload(
-            _countdown_manifest(64),
-            row_tokens=8192,
-            decode_tokens=1,
-            merged_lora_sync=True,
-        )
-        arch = _catalog_spec("Qwen/Qwen3-4B").arch
-
-        # Act
-        split = _learn_bound_split(workload, 4)
-
-        # Assert
-        rate = MERGED_DECODE_SPEEDUP * 0.4 * 312e12 / (2 * active_matmul_params(arch))
-        assert split.generation_seconds == pytest.approx(128 * 8192 / rate, rel=5e-3)
-
-    def test_merged_engine_decodes_at_the_merged_speedup(self) -> None:
-        # Arrange: every row token is decoded, so the cycle has no prompt to prefill.
-        lora = _workload(_countdown_manifest(64), merged_lora_sync=False)
-        lora = lora.model_copy(update={"decode_tokens": lora.row_tokens})
-        merged = lora.model_copy(update={"merged_lora_sync": True})
-
-        # Act
-        lora_split = _learn_bound_split(lora, 4)
-        merged_split = _learn_bound_split(merged, 4)
-
-        # Assert
-        assert merged_split.generation_seconds == pytest.approx(
-            lora_split.generation_seconds / MERGED_DECODE_SPEEDUP, rel=1e-12
-        )
 
     def test_engine_without_room_for_one_sequence_never_finishes(self) -> None:
         # Arrange: 5% of an A100-80 is under Qwen3-4B's bf16 weights.
@@ -430,7 +760,7 @@ class TestChooseGpuSplit:
     def test_trainer_counts_off_the_trainer_multiple_are_skipped(self) -> None:
         # Arrange
         model = catalog_model(_manifest(_countdown_manifest()).algorithm)
-        any_count = _workload(_countdown_manifest(120), merged_lora_sync=False)
+        any_count = _workload(_countdown_manifest(120))
         even = any_count.model_copy(update={"trainer_multiple": 2})
 
         # Act
@@ -442,22 +772,6 @@ class TestChooseGpuSplit:
         assert even_split is not None
         assert any_split.trainers == 5
         assert even_split.trainers == 4
-
-    def test_a_tensor_context_group_shares_one_data_shard(self) -> None:
-        # Arrange: tp 2 x cp 2 puts 4 trainers on one shard, so 3 groups split
-        # over 4 trainers (one shard) and not over 8 (two shards).
-        raw = _countdown_manifest(3)
-        raw["algorithm"]["fsdp"] = {"tp": 2, "cp": 2}
-        model = catalog_model(_manifest(raw).algorithm)
-        workload = _workload(raw)
-
-        # Act
-        split = choose_gpu_split(model, _device(), workload, 9, 1, lambda _: 1.0)
-
-        # Assert
-        assert workload.trainer_multiple == 4
-        assert split is not None
-        assert split.trainers == 4
 
     def test_single_turn_generation_ignores_drafting(self) -> None:
         # Arrange
@@ -475,12 +789,7 @@ class TestChooseGpuSplit:
         # Arrange: 8191 prompt tokens (8192 in whole KV blocks) and one decoded
         # per episode, 256 episodes on each of two TP2 engines; its decode
         # steps are under 0.5% of the prefill.
-        workload = _workload(
-            _countdown_manifest(64),
-            row_tokens=8192,
-            decode_tokens=1,
-            merged_lora_sync=False,
-        )
+        workload = _workload(_countdown_manifest(64), row_tokens=8192, decode_tokens=1)
         model = _catalog_spec("Qwen/Qwen3-4B")
         device = _device()
 
@@ -541,9 +850,7 @@ class TestChooseGpuSplit:
         # Arrange: 64 groups put 512 episodes on each TP2 engine, which keeps
         # 157 resident; 24 groups put 192. Neither cycle's KV pool has room
         # for a step above 8192.
-        held = _awm_workload(2).model_copy(
-            update={"rollout_batch_size": 24, "merged_lora_sync": False}
-        )
+        held = _awm_workload(2).model_copy(update={"rollout_batch_size": 24})
         oversubscribed = held.model_copy(update={"rollout_batch_size": 64})
 
         # Act
@@ -557,127 +864,6 @@ class TestChooseGpuSplit:
         assert oversubscribed_split.generation_seconds == pytest.approx(
             451.79, rel=1e-3
         )
-
-    @pytest.mark.parametrize(
-        ("raw", "device_name", "engine_width", "expected"),
-        [
-            (_countdown_manifest(64), "A100-80", 1, (4, 4, 64, None)),
-            (_sudoku_manifest(), "H100-80", 1, (3, 5, 15, None)),
-            (_awm_manifest(), "H100-80", 2, (4, 2, 16, 32768)),
-        ],
-        ids=["single-turn", "multi-turn", "moe-multi-turn"],
-    )
-    def test_chosen_split_prices_as_its_counts_alone(
-        self,
-        raw: dict,
-        device_name: str,
-        engine_width: int,
-        expected: tuple[int, int, int, int | None],
-    ) -> None:
-        # Arrange: learn cost grows with the trainer count; no plan fits 7.
-        manifest = _manifest(raw, engine_width)
-        model = catalog_model(manifest.algorithm)
-        device = _device(device_name)
-        workload = split_workload_from_manifest(manifest)
-
-        def learn_cost_ratio(trainers: int) -> float | None:
-            return None if trainers == 7 else 1 + trainers / 10
-
-        # Act
-        chosen = choose_gpu_split(
-            model, device, workload, 8, engine_width, learn_cost_ratio
-        )
-
-        # Assert
-        assert chosen is not None
-        assert (
-            chosen.trainers,
-            chosen.engines,
-            chosen.rollout_batch_size,
-            chosen.max_num_batched_tokens,
-        ) == expected
-        assert chosen == price_gpu_split(
-            model,
-            device,
-            workload,
-            chosen.trainers,
-            chosen.engines,
-            engine_width,
-            learn_cost_ratio,
-        )
-
-    @pytest.mark.parametrize(
-        ("raw", "device_name", "engine_width"),
-        [
-            (_countdown_manifest(64), "A100-80", 1),
-            (_countdown_manifest(60), "H100-80", 2),
-            (_sudoku_manifest(), "H100-80", 1),
-            (_awm_manifest(), "H100-80", 2),
-        ],
-        ids=["single-turn", "single-turn-tp2", "multi-turn", "moe-multi-turn"],
-    )
-    def test_chosen_split_matches_pricing_every_count_alone(
-        self, raw: dict, device_name: str, engine_width: int
-    ) -> None:
-        # Arrange: no plan fits 7 trainers; some counts do not shard the batch.
-        manifest = _manifest(raw, engine_width)
-        model = catalog_model(manifest.algorithm)
-        device = _device(device_name)
-        workload = split_workload_from_manifest(manifest)
-
-        def learn_cost_ratio(trainers: int) -> float | None:
-            return None if trainers == 7 else 1 + trainers / 10
-
-        priced = [
-            split
-            for engines in range(1, 7 // engine_width + 1)
-            for trainers in range(1, 8 - engines * engine_width + 1)
-            if (
-                split := price_gpu_split(
-                    model,
-                    device,
-                    workload,
-                    trainers,
-                    engines,
-                    engine_width,
-                    learn_cost_ratio,
-                )
-            )
-            is not None
-        ]
-        priced.sort(key=lambda split: (split.synced_step_seconds, split.engines))
-
-        # Act
-        chosen = choose_gpu_split(
-            model, device, workload, 8, engine_width, learn_cost_ratio
-        )
-
-        # Assert
-        assert chosen == fullest_split_within(priced, IDLE_GPU_TIE_SHARE)
-
-    def test_no_trainer_beside_one_engine_needs_no_device_figures(self) -> None:
-        # Arrange
-        device = DeviceSpec(total_bytes=80 * 1024**3, name="Exotic GPU")
-        model = catalog_model(_manifest(_countdown_manifest()).algorithm)
-        workload = _workload(_countdown_manifest())
-
-        # Act
-        split = choose_gpu_split(model, device, workload, 2, 2, lambda _: 1.0)
-
-        # Assert
-        assert split is None
-
-    def test_device_without_figures_cannot_be_searched(self) -> None:
-        # Arrange
-        device = DeviceSpec(total_bytes=80 * 1024**3, name="Exotic GPU")
-        model = catalog_model(_manifest(_countdown_manifest()).algorithm)
-        workload = _workload(_countdown_manifest())
-
-        # Act / Assert
-        with pytest.raises(
-            ValueError, match="Exotic GPU has no peak bf16 or memory bandwidth"
-        ):
-            choose_gpu_split(model, device, workload, 3, 2, lambda _: 1.0)
 
 
 def _awm_workload(engine_width: int) -> SplitWorkload:
@@ -919,9 +1105,7 @@ class TestEnginePrefillRate:
         assert device.peak_bf16_flops is not None
 
         # Act
-        rate = engine_prefill_rate(
-            model, device, device.peak_bf16_flops, width, step, False
-        )
+        rate = engine_prefill_rate(model, device, device.peak_bf16_flops, width, step)
 
         # Assert
         compute = (
@@ -932,23 +1116,93 @@ class TestEnginePrefillRate:
             width / (compute + width * all_reduce / step), rel=1e-12
         )
 
-    def test_merged_moe_engine_computes_at_the_merged_prefill_speedup(self) -> None:
+
+class TestResolveRunMemory:
+    @pytest.mark.parametrize(
+        ("raw", "device_name"),
+        [
+            (_countdown_manifest(64), "A100-80"),
+            (_countdown_manifest(60), "A100-80"),
+            (_sudoku_manifest(), "A100-80"),
+            (_countdown_manifest(64), "L4"),
+            (_countdown_manifest(60), "L4"),
+            (_sudoku_manifest(), "L4"),
+        ],
+        ids=["a-b64-a100", "a-b60-a100", "b-a100", "a-b64-l4", "a-b60-l4", "b-l4"],
+    )
+    def test_benchmark_plan_fits_and_beats_the_slowest_rungs(
+        self, raw: dict, device_name: str
+    ) -> None:
         # Arrange
-        model = _awm_model()
-        device = _device("H100-80")
-        assert device.peak_bf16_flops is not None
+        device = _device(device_name)
 
         # Act
-        rate = engine_prefill_rate(model, device, device.peak_bf16_flops, 2, 8192, True)
+        plan = _plan(raw, device=device)
 
         # Assert
-        compute = (
-            2
-            * active_matmul_params(model.arch)
-            / (0.18 * MERGED_MOE_PREFILL_SPEEDUP * device.peak_bf16_flops)
+        training = plan.training
+        rows = training.settings.trajectories_per_update // (
+            training.settings.n_training_gpus
         )
-        all_reduce = tensor_parallel_seconds(model, device, 2, 8192)
-        assert rate == pytest.approx(2 / (compute + 2 * all_reduce / 8192), rel=1e-12)
+        slowest = learn_cost(
+            catalog_model(_manifest(raw).algorithm).arch.n_layers,
+            True,
+            1,
+            rows,
+            training.tokens,
+            "reshard",
+            learn_costs(device),
+        )
+        assert training.breakdown.fits_with_buffer
+        assert training.cost < slowest
+
+    @pytest.mark.parametrize("device_name", ["A100-80", "L4"])
+    def test_trains_ddp_when_a_ddp_plan_fits(self, device_name: str) -> None:
+        # Arrange
+        device = _device(device_name)
+        ddp_raw = _countdown_manifest(64)
+        del ddp_raw["algorithm"]["fsdp"]
+
+        # Act
+        plan = _plan(_countdown_manifest(64), device=device)
+
+        # Assert
+        trainers = plan.training.settings.n_training_gpus
+        ddp = _training_plan(_manifest(ddp_raw), trainers, device)
+        assert ddp is not None
+        assert ddp.breakdown.fits_with_buffer
+        assert plan.training.fsdp is None
+
+    def test_pinned_counts_skip_the_split_search(self) -> None:
+        # Arrange
+        raw = _countdown_manifest(64)
+        raw["training"]["training_gpus_per_agent"] = 2
+        raw["training"]["rollout_engines_per_agent"] = 2
+        manifest = _manifest(raw)
+
+        # Act
+        plan = resolve_run_memory(
+            manifest, catalog_model(manifest.algorithm), _device(), None
+        )
+
+        # Assert
+        assert plan.split is None
+        assert plan.training.settings.n_training_gpus == 2
+        assert manifest.training.training_gpus_per_agent == 2
+        assert manifest.algorithm.micro_batch_size_per_gpu is None
+
+    def test_drafting_moves_multi_turn_gpus_to_training(self) -> None:
+        # Arrange
+        plain_raw = _sudoku_manifest()
+        plain_raw["algorithm"]["vllm_engine_args"] = {"speculative_config": None}
+
+        # Act
+        drafted = _split(_sudoku_manifest(), device=_device("H100-80"))
+        plain = _split(plain_raw, device=_device("H100-80"))
+
+        # Assert
+        assert drafted.trainers > plain.trainers
+        assert drafted.step_seconds < plain.step_seconds
 
 
 class TestSplitWorkloadFromManifest:
@@ -1203,87 +1457,12 @@ class TestChooseEngineWidth:
         assert chosen is not None
         assert chosen.engine_width == 2
 
-    def test_weight_sync_counts_toward_the_step(self) -> None:
-        # Arrange: TP1 generates faster, but its merged sync to four engines
-        # takes 4 s against TP2's 0.5 s.
-        tp1 = _width_split(1, 10.0).model_copy(
-            update={"sync_seconds": 4.0, "merged_lora_sync": True}
-        )
-        tp2 = _width_split(2, 12.0).model_copy(
-            update={"sync_seconds": 0.5, "merged_lora_sync": True}
-        )
-
-        # Act
-        chosen = choose_engine_width([tp1, tp2])
-
-        # Assert
-        assert chosen is not None
-        assert chosen.engine_width == 2
-
-    def test_tied_width_that_uses_every_gpu_beats_a_narrower_one(self) -> None:
-        # Arrange: three TP1 engines leave a GPU idle; two TP2 engines use it.
-        tp1 = _width_split(1, 10.0).model_copy(update={"engines": 3})
-        tp2 = _width_split(2, 10.5)
-
-        # Act
-        chosen = choose_engine_width([tp1, tp2])
-
-        # Assert
-        assert chosen is not None
-        assert chosen.engine_width == 2
-
     def test_no_splits_choose_nothing(self) -> None:
         # Act
         chosen = choose_engine_width([])
 
         # Assert
         assert chosen is None
-
-
-def _split_on(engines: int, synced_step_seconds: float) -> GpuSplit:
-    return GpuSplit(
-        trainers=4,
-        engines=engines,
-        engine_width=2,
-        rollout_batch_size=16,
-        learn_seconds=synced_step_seconds,
-        generation_seconds=1.0,
-    )
-
-
-class TestFullestSplitWithin:
-    def test_split_using_every_gpu_wins_within_the_share(self) -> None:
-        # Arrange: one TP2 engine leaves 2 of 8 GPUs idle for a 0.5% faster step.
-        idle = _split_on(1, 820.7)
-        full = _split_on(2, 824.8)
-
-        # Act
-        chosen = fullest_split_within([idle, full], IDLE_GPU_TIE_SHARE)
-
-        # Assert
-        assert chosen is full
-
-    def test_idle_split_wins_past_the_share(self) -> None:
-        # Arrange
-        idle = _split_on(1, 800.0)
-        full = _split_on(2, 800.0 * (1 + IDLE_GPU_TIE_SHARE) + 1.0)
-
-        # Act
-        chosen = fullest_split_within([full, idle], IDLE_GPU_TIE_SHARE)
-
-        # Assert
-        assert chosen is idle
-
-    def test_earliest_split_wins_among_the_fullest(self) -> None:
-        # Arrange
-        first = _split_on(2, 10.1)
-        second = _split_on(2, 10.0)
-
-        # Act
-        chosen = fullest_split_within([first, second], IDLE_GPU_TIE_SHARE)
-
-        # Assert
-        assert chosen is first
 
 
 def _catalog_spec(hub_id: str) -> ModelSpec:
@@ -1420,44 +1599,48 @@ class TestUncachedPrefillTokens:
         assert tokens == 0
 
 
-class TestGpuSplitSyncedStepSecondsProperty:
-    def test_merged_sync_pauses_generation_too(self) -> None:
-        # Arrange
-        split = GpuSplit(
-            trainers=4,
-            engines=4,
-            engine_width=1,
-            rollout_batch_size=64,
-            learn_seconds=10.0,
-            generation_seconds=12.0,
-            sync_seconds=2.0,
-            merged_lora_sync=True,
-        )
+def _countdown_at(context: int, vllm_config: dict) -> dict:
+    raw = _countdown_manifest(batch_size=64)
+    raw["network"]["max_context_length"] = context
+    raw["algorithm"]["vllm_config"] = vllm_config
+    return raw
 
+
+def _searched_split(raw: dict, device_name: str) -> GpuSplit:
+    manifest = validated_run_manifest(TrainingManifest.model_validate(raw))
+    plan = resolve_run_memory(
+        manifest, catalog_model(manifest.algorithm), _device(device_name), 8
+    )
+    assert plan.split is not None
+    return plan.split
+
+
+class TestResolveRunMemoryEngineWidth:
+    @pytest.mark.parametrize("device_name", ["A100-80", "H100-80"])
+    @pytest.mark.parametrize("context", [1536, 4096])
+    def test_single_turn_small_dense_model_stays_one_gpu(
+        self, context: int, device_name: str
+    ) -> None:
         # Act
-        seconds = split.synced_step_seconds
+        split = _searched_split(_countdown_at(context, {}), device_name)
 
         # Assert
-        assert seconds == 14.0
+        assert split.engine_width == 1
+        assert (split.trainers, split.engines) == (4, 4)
 
-    def test_adapter_sync_overlaps_generation(self) -> None:
-        # Arrange
-        split = GpuSplit(
-            trainers=4,
-            engines=4,
-            engine_width=1,
-            rollout_batch_size=64,
-            learn_seconds=10.0,
-            generation_seconds=12.0,
-            sync_seconds=1.0,
-        )
+    def test_multi_turn_moe_model_takes_two_tp2_engines(self) -> None:
+        # Arrange: TP2 and TP4 steps are within ENGINE_WIDTH_TIE_SHARE; the
+        # tie goes to TP2.
+        raw = _awm_manifest()
 
         # Act
-        seconds = split.synced_step_seconds
+        split = _searched_split(raw, "H100-80")
 
         # Assert
-        assert seconds == 12.0
-        assert split.step_seconds == 12.0
+        assert split.engine_width == 2
+        assert (split.trainers, split.engines) == (4, 2)
+        assert split.rollout_batch_size == 16
+        assert split.max_num_batched_tokens == 32768
 
 
 class TestGpuCataloguePeakFigures:

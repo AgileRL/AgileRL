@@ -1891,36 +1891,6 @@ class TestTransposedExpertsLocalForward:
 
         assert torch.allclose(direct, via_wrapper)
 
-    @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-    def test_counts_rows_per_expert_without_a_host_sync(self) -> None:
-        # Arrange
-        reference, upgraded = _transposed_pair()
-        # sm80 expert GEMMs run in bf16 only.
-        wrapper = upgraded.experts.to("cuda", torch.bfloat16)
-        experts = wrapper.get_base_layer()
-        torch.manual_seed(0)
-        hidden = torch.randn(4, HIDDEN, device="cuda", dtype=torch.bfloat16)
-        indices = torch.randint(0, NUM_EXPERTS, (4, TOP_K), device="cuda")
-        weights = torch.full((4, TOP_K), 0.5, device="cuda", dtype=torch.bfloat16)
-        chain = moe_adapters.wrapper_chain(wrapper)
-        expected = reference.experts.to("cuda", torch.bfloat16)(
-            hidden, indices, weights
-        )
-        torch.cuda.synchronize()
-
-        # Act
-        torch.cuda.set_sync_debug_mode("error")
-        try:
-            out = transposed_experts_local_forward(
-                experts, hidden, indices, weights, chain=chain
-            )
-        finally:
-            torch.cuda.set_sync_debug_mode("default")
-
-        # Assert
-        # bf16 grouped GEMM against per-expert matmuls: a few bf16 roundings apart.
-        assert torch.allclose(out, expected, atol=2e-2, rtol=2e-2)
-
 
 class TestTransposedExpertsLoraWrapperForward:
     def test_delegates_on_extra_args(self) -> None:
@@ -2489,7 +2459,7 @@ class TestScatterRows:
         source = torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
         index = torch.tensor([2, 0, 2])
 
-        out = moe_routed.ScatterRows.apply(base, index, source)
+        out = moe_routed.ScatterRows.apply(base, index, source, None)
 
         assert torch.equal(out, torch.tensor([[3.0, 4.0], [0.0, 0.0], [6.0, 8.0]]))
 
@@ -2500,8 +2470,36 @@ class TestScatterRows:
         index = torch.tensor([2, 0, 2, 3, 0])
 
         assert torch.autograd.gradcheck(
-            lambda b, s: moe_routed.ScatterRows.apply(b.clone(), index, s),
+            lambda b, s: moe_routed.ScatterRows.apply(b.clone(), index, s, None),
             (base, source),
+        )
+
+    def test_kernel_scatter_accumulates_fp32_and_returns_source_dtype_grad(self):
+        # Arrange
+        def scatter_add(out, index, rows, weights):
+            out.index_add_(0, index, rows.float())
+
+        kernels = moe_gemm.ExpertKernels(None, None, scatter_add)
+        base = torch.zeros(3, 2, requires_grad=True)
+        source = torch.tensor(
+            [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]],
+            dtype=torch.bfloat16,
+            requires_grad=True,
+        )
+        index = torch.tensor([2, 0, 2])
+
+        # Act
+        out = moe_routed.ScatterRows.apply(base.clone(), index, source, kernels)
+        out.backward(torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]))
+
+        # Assert
+        assert out.dtype == torch.float32
+        assert torch.equal(
+            out.detach(), torch.tensor([[3.0, 4.0], [0.0, 0.0], [6.0, 8.0]])
+        )
+        assert source.grad.dtype == torch.bfloat16
+        assert torch.equal(
+            source.grad.float(), torch.tensor([[5.0, 6.0], [1.0, 2.0], [5.0, 6.0]])
         )
 
 
@@ -2705,7 +2703,6 @@ class TestRoutedExpertDtypeAndDTensor:
             down_weight,
             act_fn=torch.nn.functional.silu,
             gated=False,
-            apply_gate=None,
             routing=routing,
             up_loras=(),
             down_loras=(),
@@ -2741,7 +2738,6 @@ class TestRoutedExpertDtypeAndDTensor:
             FakeDTensor(torch.ones(1, 4, 4)),
             act_fn=lambda t: t,
             gated=False,
-            apply_gate=None,
             routing=routing,
             up_loras=(),
             down_loras=(),
@@ -2764,7 +2760,6 @@ class TestLoraExpertsRecomputeGuards:
         config = LoraExpertsConfig(
             act_fn=lambda t: t,
             gated=False,
-            apply_gate=None,
             sizes=(1,),
             up_row_ids=(),
             down_row_ids=(),
@@ -2798,7 +2793,6 @@ class TestLoraExpertsRecomputeGuards:
         config = LoraExpertsConfig(
             act_fn=lambda t: t,
             gated=False,
-            apply_gate=None,
             sizes=(1,),
             up_row_ids=(),
             down_row_ids=(),

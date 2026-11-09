@@ -26,11 +26,10 @@ pytest.importorskip("peft", reason="LLM tests require peft.")
 from peft import LoraConfig
 
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
-from agilerl.algorithms.core.sequence_layout import PaddedSequence
 from agilerl.algorithms.grpo import GRPO
 from agilerl.utils.algo_utils import VLLMConfig
 from tests.rank_launch import run_ranks
-from tests.test_algorithms.test_llms.llm_helpers import create_module, use_packed
+from tests.test_algorithms.test_llms.llm_helpers import create_module
 
 PAD_TOKEN_ID = 63
 VOCAB = 64
@@ -49,8 +48,8 @@ def _stub_colocated_setup(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(GRPO, "_setup_actors", setup_without_vllm)
 
 
-def _make_grpo(**overrides: Any) -> GRPO:
-    """Tiny fp32 GRPO on CPU: 2 prompts x 2 completions, one micro-batch of 2 rows."""
+def _make_grpo(algo_class: type[GRPO] = GRPO, **overrides: Any) -> GRPO:
+    """Tiny fp32 GRPO-family agent on CPU: 2 prompts x 2 completions, one micro-batch of 2 rows."""
     torch.manual_seed(0)
     kwargs: dict[str, Any] = {
         "actor_network": create_module(
@@ -80,7 +79,7 @@ def _make_grpo(**overrides: Any) -> GRPO:
         ),
         **overrides,
     }
-    return GRPO(**kwargs)
+    return algo_class(**kwargs)
 
 
 def _batch() -> tuple[torch.Tensor, torch.Tensor]:
@@ -733,14 +732,13 @@ class TestGRPOLearnSamplingSupports:
         # Assert
         _assert_same_gradients(rollout_steps, trainer_steps)
 
-    @pytest.mark.parametrize("packed", [False, True])
+    @pytest.mark.parametrize("packing_mode", [None, "varlen"])
     def test_scored_logprobs_are_normalized_over_the_support(
-        self, packed: bool
+        self, monkeypatch: pytest.MonkeyPatch, packing_mode: str | None
     ) -> None:
         # Arrange
         agent = _make_grpo()
-        if packed:
-            use_packed(agent, False)
+        monkeypatch.setattr(agent, "_packing_mode", lambda: packing_mode)
         ids, mask = _batch()
         supports, expected = _supported_sampling(agent)
         support_ids = GRPO._align_sampling_supports(supports, ids, mask)
@@ -867,16 +865,13 @@ class TestGRPORolloutActorRows:
 class TestScoredLogProbs:
     """Log-probs scored only at ``score_mask`` match full scoring there."""
 
-    @pytest.mark.parametrize("packed", [False, True])
-    def test_training_forward_matches_full_scoring(self, packed: bool) -> None:
+    @pytest.mark.parametrize("packing_mode", [None, "varlen"])
+    def test_training_forward_matches_full_scoring(
+        self, monkeypatch: pytest.MonkeyPatch, packing_mode: str | None
+    ) -> None:
         # Arrange
         agent = _make_grpo()
-        if not packed:
-            agent.sequence_layout = PaddedSequence(
-                calc_position_embeddings=agent.calc_position_embeddings,
-            )
-        else:
-            use_packed(agent, False)
+        monkeypatch.setattr(agent, "_packing_mode", lambda: packing_mode)
         ids, mask = _batch()
 
         # Act
@@ -978,7 +973,8 @@ class TestGRPOLearnSequencePacking:
         # Arrange: two micro-batches per step, odd rows padded.
         padded = _make_grpo(loss_norm=loss_norm, mini_batch_size=4)
         packed = _make_grpo(loss_norm=loss_norm, mini_batch_size=4)
-        use_packed(packed, True)
+        monkeypatch.setattr(padded, "_packing_mode", lambda: None)
+        monkeypatch.setattr(packed, "_packing_mode", lambda: "varlen")
         padded_steps = _record_step_gradients(padded, monkeypatch)
         packed_steps = _record_step_gradients(packed, monkeypatch)
 

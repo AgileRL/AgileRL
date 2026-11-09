@@ -7,9 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from agilerl.arena.memory import estimator as estimator_module
-from agilerl.arena.memory import formulas, kv_cache, lora_formulas
-from agilerl.arena.memory import solver as solver_module
+from agilerl.arena.memory import kv_cache
 from agilerl.arena.memory.estimator import (
     estimate_generation,
     estimate_run,
@@ -34,9 +32,7 @@ from agilerl.arena.memory.specs import (
     RunConfig,
     TrainingSettings,
 )
-from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
-from tests.test_memory.test_estimator import component
-from tests.test_memory.test_formulas import MOE_TINY, QWEN_05B
+from tests.test_memory.test_formulas import QWEN_05B
 
 ASSETS = Path(__file__).parent / "assets"
 TINY_CONFIG = json.loads((ASSETS / "tiny_llm" / "config.json").read_text())
@@ -61,33 +57,6 @@ def model():
 @pytest.fixture
 def device():
     return DeviceSpec(total_bytes=24 * GiB, name="NVIDIA L4")
-
-
-@pytest.fixture
-def nine_b():
-    hub_id = "Qwen/Qwen3.5-9B"
-    return ModelSpec(
-        model_id=hub_id,
-        arch=ModelArch.from_hf_config(SUPPORTED_MODEL_INFO[hub_id].config),
-    )
-
-
-@pytest.fixture
-def nine_b_engine():
-    return GenerationSettings(
-        gpu_memory_utilization=0.9,
-        max_num_seqs=16,
-        max_lora_rank=64,
-        lora_sync_scope="all-linear",
-        lora_dual_stream=True,
-    )
-
-
-def engine_run(model, card_gib, generation):
-    card = DeviceSpec(total_bytes=int(card_gib * GiB), name="card")
-    return RunConfig(
-        model=model, train_device=card, gen_device=card, generation=generation
-    )
 
 
 class TestArchitecturalContextLimit:
@@ -117,9 +86,7 @@ class TestSolveInference:
         over = estimate_generation(
             model,
             device,
-            result.config.generation.model_copy(
-                update={"max_model_len": result.value + 16}
-            ),
+            settings.model_copy(update={"max_model_len": result.value + 16}),
         )
         assert not generation_can_serve(over)
 
@@ -131,39 +98,12 @@ class TestSolveInference:
         over = estimate_generation(
             model,
             device,
-            result.config.generation.model_copy(
-                update={"max_num_seqs": result.value + 1}
-            ),
+            settings.model_copy(update={"max_num_seqs": result.value + 1}),
         )
-        assert result.value == 7
+        assert result.value == 6
         assert result.limited_by == "memory"
         assert generation_can_serve(result.estimate.generation)
         assert not generation_can_serve(over)
-
-    def test_generation_search_does_not_price_training(
-        self, model, device, monkeypatch
-    ):
-        # Arrange
-        settings = GenerationSettings(gpu_memory_utilization=0.07, max_model_len=2048)
-        priced = []
-        real = estimator_module.estimate_training
-
-        def spy(*args, **kwargs):
-            priced.append(args)
-            return real(*args, **kwargs)
-
-        monkeypatch.setattr(solver_module, "estimate_training", spy)
-        monkeypatch.setattr(estimator_module, "estimate_training", spy)
-
-        # Act
-        result = solve_inference(
-            inference_run_config(model, device, settings), "max_num_seqs", hi=64
-        )
-
-        # Assert: one training bar, for the returned estimate.
-        assert result.value == 7
-        assert result.estimate.training.phase == "training"
-        assert len(priced) == 1
 
     def test_higher_concurrency_shortens_max_model_len(self, model, device):
         def solved(seqs: int) -> int:
@@ -176,8 +116,8 @@ class TestSolveInference:
                 hi=32768,
             ).value
 
-        assert solved(4) == 3856
-        assert solved(8) == 1872
+        assert solved(4) == 3504
+        assert solved(8) == 1696
 
     def test_tiny_model_on_l4_hits_the_rope_cap(self, device):
         tiny = ModelSpec(model_id="tiny", arch=ModelArch.from_hf_config(TINY_CONFIG))
@@ -235,57 +175,6 @@ class TestSolveInference:
         # Act + Assert
         with pytest.raises(ValueError, match="Unknown field"):
             solve_inference(config, "learning_rate")
-
-
-class TestInferenceRunConfig:
-    def test_inference_engine_holds_no_lora_slot_or_dual_stream(self, model, device):
-        # Arrange
-        settings = GenerationSettings(lora_dual_stream=True)
-        training = RunConfig(
-            model=model, train_device=device, gen_device=device, generation=settings
-        )
-
-        # Act
-        served = estimate_run(inference_run_config(model, device, settings))
-        trained = estimate_run(training)
-
-        # Assert
-        slot = 2 * lora_formulas.engine_lora_param_count(QWEN_05B, 16)
-        assert component(served.generation, "lora_slots").n_bytes == 0
-        assert component(trained.generation, "lora_slots").n_bytes == slot
-        assert (
-            component(served.generation, "cuda_graphs").n_bytes
-            == formulas.CUDA_GRAPH_POOL_BYTES
-        )
-        assert (
-            component(trained.generation, "cuda_graphs").n_bytes
-            == formulas.CUDA_GRAPH_POOL_BYTES + formulas.LORA_DUAL_STREAM_BYTES
-        )
-        assert (
-            component(served.generation, "kv_cache").detail["pool"]
-            == component(trained.generation, "kv_cache").detail["pool"]
-            + slot
-            + formulas.LORA_DUAL_STREAM_BYTES
-        )
-
-    def test_moe_inference_drops_the_expert_lora_stacks(self, device):
-        # Arrange
-        moe = ModelSpec(model_id="moe-test", arch=MOE_TINY)
-        settings = GenerationSettings()
-        training = RunConfig(
-            model=moe, train_device=device, gen_device=device, generation=settings
-        )
-
-        # Act
-        served = estimate_run(inference_run_config(moe, device, settings))
-        trained = estimate_run(training)
-
-        # Assert
-        stacks = lora_formulas.engine_expert_lora_param_count(MOE_TINY, 16, 1, False)
-        assert component(served.generation, "lora_slots").n_bytes == 0
-        assert component(trained.generation, "lora_slots").n_bytes == 2 * (
-            lora_formulas.engine_lora_param_count(MOE_TINY, 16) + stacks
-        )
 
 
 class TestSolve:
@@ -455,177 +344,6 @@ class TestSolveRebuild:
         assert rebuilt.config.training.micro_batch_size == 1
         assert rebuilt.config.training.max_model_len == 12352
         assert not over.training.fits_with_buffer
-
-    def test_a_training_miss_ends_the_scan(self, model):
-        # Arrange: no context fits the trainer on a 1 GiB card.
-        device = DeviceSpec(total_bytes=GiB)
-        base = RunConfig(
-            model=model,
-            train_device=device,
-            gen_device=device,
-            training=TrainingSettings(algorithm="sft"),
-            generation=GenerationSettings(),
-        )
-        rebuilt = []
-
-        def rebuild(length: int) -> RunConfig:
-            rebuilt.append(length)
-            return lockstep_max_model_len(base, length)
-
-        # Act
-        with pytest.raises(CannotSolve, match="no max_model_len value up to 4096"):
-            solve(base, "max_model_len", hi=4096, rebuild=rebuild)
-
-        # Assert
-        assert rebuilt == [kv_cache.KV_BLOCK_SIZE_DEFAULT]
-
-    def test_a_generation_miss_keeps_scanning(self, model, device):
-        # Arrange: below 64 tokens the rebuild puts the engine on a card too
-        # small to serve; the trainer fits throughout.
-        small = DeviceSpec(total_bytes=GiB, name="small")
-        base = RunConfig(
-            model=model,
-            train_device=device,
-            gen_device=device,
-            generation=GenerationSettings(gpu_memory_utilization=0.3, max_num_seqs=4),
-        )
-
-        def rebuild(length: int) -> RunConfig:
-            gen_device = small if length < 64 else device
-            return base.model_copy(update={"gen_device": gen_device})
-
-        # Act
-        result = solve(base, "max_model_len", hi=128, rebuild=rebuild)
-
-        # Assert
-        assert result.value == 128
-        assert result.limited_by == "bound"
-        assert result.config.gen_device == device
-
-
-class TestSolveWidestEngineWidth:
-    def test_a_generation_miss_at_the_widest_engine_ends_the_scan(
-        self, nine_b, nine_b_engine
-    ):
-        # Arrange: one 9B engine GPU of 20 GiB serves no context.
-        base = engine_run(nine_b, 20, nine_b_engine)
-        rebuilt = []
-
-        def rebuild(length: int) -> RunConfig:
-            rebuilt.append(length)
-            return base
-
-        # Act
-        with pytest.raises(CannotSolve, match="no max_model_len value up to 128"):
-            solve(
-                base,
-                "max_model_len",
-                hi=128,
-                phases=("generation",),
-                rebuild=rebuild,
-                widest_engine_width=1,
-            )
-
-        # Assert
-        assert rebuilt == [kv_cache.KV_BLOCK_SIZE_DEFAULT]
-
-    def test_a_miss_below_the_widest_engine_keeps_scanning(self, nine_b, nine_b_engine):
-        # Arrange: from 64 tokens the rebuild serves on two 20 GiB GPUs.
-        base = engine_run(nine_b, 20, nine_b_engine)
-
-        def rebuild(length: int) -> RunConfig:
-            width = 1 if length < 64 else 2
-            return engine_run(
-                nine_b,
-                20,
-                nine_b_engine.model_copy(update={"tensor_parallel_size": width}),
-            )
-
-        # Act
-        result = solve(
-            base,
-            "max_model_len",
-            hi=128,
-            phases=("generation",),
-            rebuild=rebuild,
-            widest_engine_width=2,
-        )
-
-        # Assert
-        assert result.value == 128
-        assert result.limited_by == "bound"
-        assert result.config.generation.tensor_parallel_size == 2
-
-    def test_a_miss_the_other_sync_mode_clears_keeps_scanning(
-        self, nine_b, nine_b_engine
-    ):
-        # Arrange: on 24 GiB only merged sync serves; the rebuild picks it from 64 tokens.
-        base = engine_run(nine_b, 24, nine_b_engine)
-        merged = engine_run(
-            nine_b, 24, nine_b_engine.model_copy(update={"merged_lora_sync": True})
-        )
-
-        # Act
-        result = solve(
-            base,
-            "max_model_len",
-            hi=128,
-            phases=("generation",),
-            rebuild=lambda length: base if length < 64 else merged,
-            widest_engine_width=1,
-        )
-
-        # Assert
-        assert result.value == 128
-        assert result.limited_by == "bound"
-        assert result.config.generation.merged_lora_sync
-
-    def test_a_miss_the_lean_engine_clears_keeps_scanning(self):
-        # Arrange: on 23.5 GiB a multi-turn Gemma engine with n-gram drafting
-        # and dual-stream LoRA misses in both sync modes; from 64 tokens the
-        # rebuild drops those fast paths.
-        hub_id = "google/gemma-4-E4B-it"
-        gemma = ModelSpec(
-            model_id=hub_id,
-            arch=ModelArch.from_hf_config(SUPPORTED_MODEL_INFO[hub_id].config),
-        )
-        engine = GenerationSettings(
-            gpu_memory_utilization=0.9,
-            max_num_seqs=16,
-            multi_turn=True,
-            max_lora_rank=64,
-            lora_sync_scope="all-linear",
-            lora_dual_stream=True,
-        )
-        base = engine_run(gemma, 23.5, engine)
-        lean = engine_run(
-            gemma,
-            23.5,
-            engine.model_copy(
-                update={
-                    "lora_dual_stream": False,
-                    "speculative_drafting": False,
-                    "max_num_batched_tokens": kv_cache.VLLM_ENGINE_MAX_NUM_BATCHED_TOKENS,
-                    "merged_lora_sync": True,
-                }
-            ),
-        )
-
-        # Act
-        result = solve(
-            base,
-            "max_model_len",
-            hi=128,
-            phases=("generation",),
-            rebuild=lambda length: base if length < 64 else lean,
-            widest_engine_width=1,
-        )
-
-        # Assert
-        assert result.value == 128
-        assert result.limited_by == "bound"
-        assert result.config.generation.speculative_drafting is False
-        assert result.config.generation.lora_dual_stream is False
 
 
 class TestBareSolveOnAnInferenceConfig:

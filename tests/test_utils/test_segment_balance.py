@@ -16,12 +16,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from agilerl.components.llm_rollout_data import EpisodeSegments
-from agilerl.utils.segment_balance import (
-    _replica_row_plan,
-    balance_rows_across_ranks,
-    balanced_row_plan,
-)
+from agilerl.utils.segment_balance import balance_rows_across_ranks, balanced_row_plan
 from agilerl.utils.segment_rows import SegmentRows, split_episode_segments
 from tests.rank_launch import run_ranks
 from tests.test_utils.test_segment_rows import PAD, split_small_batch
@@ -309,43 +304,6 @@ def too_few_rows_worker(rank: int, world_size: int) -> None:
     assert balanced is None
 
 
-def equal_cost_segments(first: int) -> SegmentRows:
-    """One episode of eight tokens, split into two segments of equal length."""
-    return split_episode_segments(
-        (torch.arange(8) + first).view(1, 8),
-        torch.ones(1, 7, dtype=torch.bool),
-        [EpisodeSegments(token_lengths=torch.tensor([4, 4]))],
-        PAD,
-    )
-
-
-def replica_rows_worker(
-    rank: int, world_size: int, shard_group_size: int | None
-) -> list[list[int]]:
-    """Balance two shared batches of equal-cost segments across a replica of 2."""
-    rows = equal_cost_segments(10 if rank < 2 else 30)
-    balanced = balance_rows_across_ranks(
-        rows,
-        np.arange(len(rows.row_episodes)),
-        [],
-        PAD,
-        shard_group_size,
-        2,
-    )
-    assert balanced is not None
-    dealt, _values = balanced
-    return dealt.token_ids.tolist()
-
-
-def mismatched_replica_worker(rank: int, world_size: int) -> None:
-    """A replica whose ranks hold different rows cannot be balanced."""
-    rows = equal_cost_segments(10 if rank == 0 else 30)
-    with pytest.raises(ValueError, match="same segment rows"):
-        balance_rows_across_ranks(
-            rows, np.arange(len(rows.row_episodes)), [], PAD, None, 2
-        )
-
-
 def mismatched_fields_worker(rank: int, world_size: int) -> None:
     rows = rank_one_rows()
     advantages, _ = row_values(rows, rank)
@@ -411,50 +369,6 @@ class TestBalancedRowPlan:
         with pytest.raises(ValueError, match=r"ranks_per_group \(3\) must divide"):
             balanced_row_plan(costs, 3)
 
-    def test_one_rank_per_replica_matches_the_rank_plan(self) -> None:
-        # Arrange
-        costs = [[10, 8, 6], [9, 7, 5], [1, 1, 1], [1, 1, 1]]
-
-        # Act / Assert
-        assert _replica_row_plan(costs, 2, 1) == balanced_row_plan(costs, 2)
-        assert _replica_row_plan(costs, None, 1) == balanced_row_plan(costs, 4)
-
-    def test_equal_cost_segments_stay_with_one_replica(self) -> None:
-        # Arrange: each rank of a replica already holds the same two rows.
-        costs = [[8, 8], [8, 8], [8, 8], [8, 8]]
-
-        # Act
-        per_shard = _replica_row_plan(costs, 2, 2)
-        across_world = _replica_row_plan(costs, None, 2)
-
-        # Assert: leaders are the only sources, and a replica shares that plan.
-        assert per_shard == [
-            [(0, 0), (2, 0)],
-            [(0, 0), (2, 0)],
-            [(0, 1), (2, 1)],
-            [(0, 1), (2, 1)],
-        ]
-        assert across_world == [
-            [(0, 0), (2, 1)],
-            [(0, 0), (2, 1)],
-            [(0, 1), (2, 0)],
-            [(0, 1), (2, 0)],
-        ]
-
-    def test_replica_size_must_divide_the_world_and_the_shard_group(self) -> None:
-        # Arrange
-        costs = [[1], [1], [1], [1]]
-
-        # Act / Assert
-        with pytest.raises(
-            ValueError, match=r"replica size \(2\) must divide the world"
-        ):
-            _replica_row_plan(costs[:3], None, 2)
-        with pytest.raises(
-            ValueError, match=r"replica size \(4\) must divide the shard group"
-        ):
-            _replica_row_plan(costs, 2, 4)
-
 
 class TestBalanceRowsAcrossRanks:
     @pytest.mark.multi_rank
@@ -500,34 +414,6 @@ class TestBalanceRowsAcrossRanks:
     @pytest.mark.multi_rank
     def test_ranks_with_different_value_dtypes_raise(self) -> None:
         run_ranks(mismatched_fields_worker)
-
-    @pytest.mark.multi_rank
-    @pytest.mark.parametrize("shard_group_size", [None, 2])
-    def test_replica_ranks_keep_one_row_assignment(
-        self, shard_group_size: int | None
-    ) -> None:
-        # Arrange: ranks 0 and 1 share one batch, ranks 2 and 3 another.
-        expected = {
-            None: (
-                [[10, 11, 12, 13], [34, 35, 36, 37]],
-                [[14, 15, 16, 17], [30, 31, 32, 33]],
-            ),
-            2: (
-                [[10, 11, 12, 13], [30, 31, 32, 33]],
-                [[14, 15, 16, 17], [34, 35, 36, 37]],
-            ),
-        }
-
-        # Act
-        rows = run_ranks(replica_rows_worker, 4, shard_group_size)
-
-        # Assert
-        first, second = expected[shard_group_size]
-        assert rows == [first, first, second, second]
-
-    @pytest.mark.multi_rank
-    def test_replica_ranks_with_different_rows_raise(self) -> None:
-        run_ranks(mismatched_replica_worker)
 
     def test_a_single_process_is_left_in_place(self) -> None:
         # Arrange

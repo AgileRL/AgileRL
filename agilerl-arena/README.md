@@ -78,15 +78,7 @@ See `agilerl/arena/memory/README.md`.
 
 ```bash
 arena experiments submit path/to/manifest.yaml --project my-project
-
-# Ask for GPUs instead of a node type; Arena uses the fewest nodes:
-arena experiments submit path/to/manifest.yaml --project my-project \
-    --num-gpus 8 --gpu-type h100-80
 ```
-
-Without `--resource-id`, `--num-nodes`, `--num-gpus` or `--gpu-type`, Arena
-picks the cheapest resource that fits. The GPU flags can't be combined with
-`--resource-id` / `--num-nodes`.
 
 ## Python SDK example
 

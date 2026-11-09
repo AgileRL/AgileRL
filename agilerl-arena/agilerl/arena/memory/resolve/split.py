@@ -1,17 +1,18 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
-"""Price an async member's trainer / rollout-engine GPU splits and choose the fastest."""
+"""Choose an async member's trainer / rollout-engine GPU split and its training-memory plan."""
 
 from __future__ import annotations
 
 import math
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from agilerl.arena.memory.block_activations import block_recompute_bytes
 from agilerl.arena.memory.formulas import (
+    block_recompute_bytes,
     engine_weight_bytes,
     param_counts,
     weight_bytes,
@@ -27,11 +28,12 @@ from agilerl.arena.memory.kv_cache import (
     shares_hybrid_pool,
 )
 from agilerl.arena.memory.manifest import (
-    can_sync_merged_lora,
     engine_weight_quantization,
     manifest_max_num_batched_tokens,
     rollout_logit_bias,
     speculative_drafting,
+    training_memory_from_manifest,
+    unsupported_gpu_reason,
 )
 from agilerl.arena.memory.resolve.batch import (
     KV_POOL_FILL,
@@ -39,28 +41,23 @@ from agilerl.arena.memory.resolve.batch import (
 )
 from agilerl.arena.memory.resolve.decode_costs import (
     DENSE_ENGINE_PREFILL_FLOPS_EFFICIENCY,
-    MERGED_DECODE_SPEEDUP,
-    MERGED_MOE_PREFILL_SPEEDUP,
     MOE_ENGINE_PREFILL_FLOPS_EFFICIENCY,
     decode_costs,
 )
-from agilerl.arena.memory.resolve.fsdp import TrainingMemoryPlan
+from agilerl.arena.memory.resolve.engine import servable_engine_widths
+from agilerl.arena.memory.resolve.fsdp import (
+    TrainingMemoryPlan,
+    TrainingMemoryUnfitError,
+)
 from agilerl.arena.memory.resolve.learn_costs import learn_costs
 from agilerl.arena.memory.resolve.rollout import (
     default_rollout_batch_size,
     drafts_by_default,
 )
 from agilerl.arena.memory.resolve.sequences import resolve_gpu_memory_utilization
-from agilerl.arena.memory.resolve.training import lora_target_scope
-from agilerl.arena.memory.resolve.weight_sync import (
-    SyncLink,
-    adapter_sync_seconds,
-    merged_sync_seconds,
-)
 from agilerl.arena.memory.specs import (
     DTYPE_BYTES,
     DeviceSpec,
-    LoraTargetScope,
     ModelArch,
     ModelSpec,
     WeightVariant,
@@ -73,7 +70,7 @@ from agilerl.arena.models.model_info import (
     SUPPORTED_MODEL_INFO,
     resolve_reasoning_parser,
 )
-from agilerl.arena.models.networks import LoraConfigDict, VLLMConfig
+from agilerl.arena.models.networks import VLLMConfig
 from agilerl.arena.models.training import LLMRolloutBufferSpec
 
 # The efficiencies below are fitted to Qwen3-4B LoRA (FSDP2, vLLM TP=1) on
@@ -126,11 +123,6 @@ TENSOR_PARALLEL_OVERHEAD_FACTOR = 3.0
 # (Qwen3.6-35B-A3B), where every measured TP2 / TP4 comparison favoured TP2
 # by more than predicted.
 ENGINE_WIDTH_TIE_SHARE = 0.1
-# A split that leaves GPUs idle is kept only when its predicted step beats
-# every split using more GPUs by more than this share. AWM (Qwen3.6-35B-A3B)
-# ran on 8x H100 at 4 trainers and two TP2 engines; one engine, leaving 2
-# GPUs idle, was predicted 0.5% faster.
-IDLE_GPU_TIE_SHARE = 0.02
 # Decoded tokens generated per trained token when tied groups are dropped, on
 # AWM (Qwen3.6-35B-A3B) with adaptive task sampling and group replay: 1.22 over
 # steps 3-8, 1.10 over steps 5-8. Dropped groups are shorter than trained ones.
@@ -160,12 +152,10 @@ class SplitWorkload(BaseModel):
     # Pinned per-engine sequence cap; ``None`` runs every engine episode at once.
     max_num_seqs: int | None = None
     gpu_memory_utilization: float = 0.9
-    # Trainer counts must be a multiple of this (FSDP tp * cp, ep, shard group).
+    # Trainer counts must be a multiple of this (FSDP tp, ep, shard group).
     trainer_multiple: int = 1
-    # FSDP tensor-parallel degree.
+    # Trainer ranks per data shard (FSDP tp).
     trainer_tensor_parallel: int = 1
-    # FSDP context-parallel degree. Trainer ranks per data shard are tp * cp.
-    trainer_context_parallel: int = 1
     # FSDP expert-parallel degree; 1 is no expert split.
     trainer_expert_parallel: int = 1
     # FSDP shard-group width; 1 does not constrain the trainer count.
@@ -177,14 +167,6 @@ class SplitWorkload(BaseModel):
     mini_batch_size: int | None = None
     # Rollout-engine weight format.
     weight_quantization: Literal["none", "fp8"] = "none"
-    # Engines serve merged weights with LoRA off (:func:`can_sync_merged_lora`).
-    merged_lora_sync: bool = False
-    # The adapter weight sync sends or merges.
-    lora_rank: int = 16
-    lora_target_scope: LoraTargetScope = "all-linear"
-    lora_packed_target_matrices: int = 0
-    # Link the engines read synced weights over; ``None`` leaves sync unpriced.
-    sync_link: SyncLink | None = None
     # The rollout algorithm's ``min_p``.
     min_p: float = 0.0
     # Rollout requests carry a ``logit_bias`` masking the image token.
@@ -212,30 +194,11 @@ class GpuSplit(BaseModel):
     # Engine scheduler-step token cap the split raised; ``None`` runs the
     # pinned or default step.
     max_num_batched_tokens: int | None = None
-    # One weight sync; 0 when the link is unknown.
-    sync_seconds: float = 0.0
-    merged_lora_sync: bool = False
-
-    @property
-    def gpus(self) -> int:
-        """GPUs the trainers and engines occupy."""
-        return self.trainers + self.engines * self.engine_width
 
     @property
     def step_seconds(self) -> float:
         """Learn and generation overlap, so the slower side sets the step."""
         return max(self.learn_seconds, self.generation_seconds)
-
-    @property
-    def synced_step_seconds(self) -> float:
-        """:attr:`step_seconds` with one weight sync.
-
-        Weight sync blocks the trainer. A merged sync also pauses the
-        engines; an adapter sync lets them keep generating.
-        """
-        if self.merged_lora_sync:
-            return self.step_seconds + self.sync_seconds
-        return max(self.learn_seconds + self.sync_seconds, self.generation_seconds)
 
 
 def active_matmul_params(arch: ModelArch) -> int:
@@ -308,16 +271,12 @@ def _engine_weight_bytes(
 ) -> tuple[float, float]:
     """Engine weight bytes, and the bf16 bytes a decode step takes as long to read.
 
-    fp8 and pre-quantized checkpoint weights are sized by
-    :func:`engine_weight_bytes` and read at :func:`decode_costs`'s measured
-    fp8 speedup.
+    fp8 weights are sized by :func:`engine_weight_bytes` and read at
+    :func:`decode_costs`'s measured speedup.
     """
     counts = param_counts(model.arch, model.n_params)
     weights = weight_bytes(counts, model.checkpoint_dtype, WeightVariant())
-    if (
-        workload.weight_quantization == "none"
-        and model.arch.checkpoint_quantization is None
-    ):
+    if workload.weight_quantization == "none":
         return weights, weights
     costs = decode_costs(device)
     speedup = (
@@ -326,11 +285,7 @@ def _engine_weight_bytes(
         else costs.fp8_weight_read_speedup
     )
     stored = engine_weight_bytes(
-        model.arch,
-        counts,
-        model.checkpoint_dtype,
-        WeightVariant(),
-        workload.weight_quantization,
+        counts, model.checkpoint_dtype, WeightVariant(), workload.weight_quantization
     )
     return stored, weights / speedup
 
@@ -379,7 +334,6 @@ def engine_prefill_rate(
     peak_flops: float,
     engine_width: int,
     max_num_batched_tokens: int,
-    merged_lora_sync: bool,
 ) -> float:
     """Prompt tokens per second one engine prefills while it decodes alongside.
 
@@ -387,12 +341,9 @@ def engine_prefill_rate(
     the nearest fitted width and the largest fitted step not above
     ``max_num_batched_tokens``, over two FLOPs per active matmul weight, plus
     each scheduler step's :func:`tensor_parallel_seconds` over its
-    ``max_num_batched_tokens`` tokens. An engine serving merged weights
-    computes faster by :data:`MERGED_MOE_PREFILL_SPEEDUP` (MoE) or
-    :data:`MERGED_DECODE_SPEEDUP` (dense).
+    ``max_num_batched_tokens`` tokens.
 
     :param max_num_batched_tokens: Tokens one scheduler step runs.
-    :param merged_lora_sync: The engine runs with LoRA off.
     """
     efficiency = DENSE_ENGINE_PREFILL_FLOPS_EFFICIENCY
     if model.arch.is_moe:
@@ -407,10 +358,6 @@ def engine_prefill_rate(
             default=min(by_step),
         )
         efficiency = by_step[step]
-    if merged_lora_sync:
-        efficiency *= (
-            MERGED_MOE_PREFILL_SPEEDUP if model.arch.is_moe else MERGED_DECODE_SPEEDUP
-        )
     compute = 2 * active_matmul_params(model.arch) / (efficiency * peak_flops)
     all_reduce = tensor_parallel_seconds(
         model, device, engine_width, max_num_batched_tokens
@@ -549,8 +496,7 @@ def _generation_seconds(
     so waves are fractional; a multi-turn cycle's last wave waits on its
     slowest episode. Only multi-turn cycles price n-gram drafting;
     single-turn completions share too little with their prompt to accept
-    drafts. An engine serving merged weights decodes at
-    :data:`MERGED_DECODE_SPEEDUP` times the fitted bandwidth share.
+    drafts.
 
     :param resident: :func:`resident_sequences` of one engine.
     :param max_num_batched_tokens: The engine's scheduler-step token cap.
@@ -567,8 +513,6 @@ def _generation_seconds(
     read_efficiency = (
         MOE_DECODE_BANDWIDTH_EFFICIENCY if arch.is_moe else DECODE_BANDWIDTH_EFFICIENCY
     )
-    if workload.merged_lora_sync:
-        read_efficiency *= MERGED_DECODE_SPEEDUP
     decode_step = (weight_read + slots * context * kv_per_token) / (
         read_efficiency * engine_width * bandwidth
     ) + tensor_parallel_seconds(model, device, engine_width, slots)
@@ -593,7 +537,7 @@ def _generation_seconds(
     steps = waves * workload.decode_tokens / speedup
     step_tokens = min(max_num_batched_tokens, math.ceil(prompt / steps) + slots)
     return decode + prompt / engine_prefill_rate(
-        model, device, peak_flops, engine_width, step_tokens, workload.merged_lora_sync
+        model, device, peak_flops, engine_width, step_tokens
     )
 
 
@@ -629,25 +573,6 @@ def _cycle_step(
     )
 
 
-def _trainers_shard_batch(workload: SplitWorkload, trainers: int) -> bool:
-    """Whether ``trainers`` ranks shard the batch, its per-rank rows and a pinned rollout batch."""
-    if trainers % workload.trainer_multiple:
-        return False
-    shards = trainers // (
-        workload.trainer_tensor_parallel * workload.trainer_context_parallel
-    )
-    if workload.batch_size % shards:
-        return False
-    if (
-        workload.batch_size // shards * workload.group_size
-    ) % workload.per_rank_multiple:
-        return False
-    return (
-        workload.rollout_batch_size is None
-        or workload.rollout_batch_size % trainers == 0
-    )
-
-
 def _cycle_rollout_batch_size(
     workload: SplitWorkload, trainers: int, engines: int, resident: int
 ) -> int | None:
@@ -657,10 +582,21 @@ def _cycle_rollout_batch_size(
     engines' ``resident`` sequences hold, so episodes keep their cached prefix
     between turns, and at least ``lcm(trainers, engines)``.
     """
-    if not _trainers_shard_batch(workload, trainers):
+    if trainers % workload.trainer_multiple:
+        return None
+    shards = trainers // workload.trainer_tensor_parallel
+    if workload.batch_size % shards:
+        return None
+    if (
+        workload.batch_size // shards * workload.group_size
+    ) % workload.per_rank_multiple:
         return None
     if workload.rollout_batch_size is not None:
-        return workload.rollout_batch_size
+        return (
+            None
+            if workload.rollout_batch_size % trainers
+            else workload.rollout_batch_size
+        )
     groups = default_rollout_batch_size(workload.batch_size, trainers, engines)
     if workload.turns == 1:
         return groups
@@ -669,48 +605,30 @@ def _cycle_rollout_batch_size(
     return max(multiple, min(groups, held))
 
 
-def _sync_seconds(
-    model: ModelSpec, workload: SplitWorkload, engines: int, engine_width: int
-) -> float:
-    """One weight sync over the workload's link, or 0 when the link is unknown."""
-    link = workload.sync_link
-    if link is None:
-        return 0.0
-    if workload.merged_lora_sync:
-        return merged_sync_seconds(
-            model,
-            workload.lora_target_scope,
-            workload.lora_packed_target_matrices,
-            engines,
-            engine_width,
-            workload.turns > 1,
-            link,
-        )
-    return adapter_sync_seconds(
-        model,
-        workload.lora_rank,
-        workload.lora_target_scope,
-        workload.lora_packed_target_matrices,
-        engines,
-        engine_width,
-        link,
-    )
-
-
-def _split_pricer(
+def choose_gpu_split(
     model: ModelSpec,
     device: DeviceSpec,
     workload: SplitWorkload,
+    gpus: int,
     engine_width: int,
     learn_cost_ratio: Callable[[int], float | None],
-) -> Callable[[int, int], GpuSplit | None]:
-    """:func:`price_gpu_split` at one engine width, as a function of trainers and engines.
+) -> GpuSplit | None:
+    """Split one member's GPUs so the slower of learn and generation is fastest.
 
-    Engine residents and learn GPU-seconds do not depend on the counts, so
-    they are computed once here. Each trainer count's learn cost ratio, each
-    engine count's sync and each cycle's generation seconds are computed once
-    per pricer.
+    Ties go to fewer idle GPUs, then fewer engines, so an engine that does not
+    shorten the cycle goes to training. The cycle is sized at the fallback
+    step of :func:`engine_steps`; its engines run the largest step whose KV
+    pool still holds every episode of the cycle.
 
+    :param model: Model the trainers and engines run.
+    :param device: One GPU of the allocation.
+    :param workload: The member's learn step and rollout cycle.
+    :param gpus: GPUs the member owns.
+    :param engine_width: GPUs per rollout engine (vLLM tensor parallel).
+    :param learn_cost_ratio: Trainer count to its training-memory plan's
+        :attr:`TrainingMemoryPlan.learn_cost_ratio`, or ``None`` when no
+        plan fits that many trainers.
+    :return: The fastest valid split, or None when no split fits.
     :raises ValueError: When the device has no peak bf16 or bandwidth figure.
     """
     peak_flops = device.peak_bf16_flops
@@ -719,40 +637,43 @@ def _split_pricer(
         msg = (
             f"{device.name or 'This GPU'} has no peak bf16 or memory bandwidth "
             "figure in the GPU catalogue, so the trainer / rollout-engine split "
-            "cannot be priced. Set training.training_gpus_per_agent and "
+            "cannot be searched. Set training.training_gpus_per_agent and "
             "training.rollout_engines_per_agent."
         )
         raise ValueError(msg)
+    learn_gpu_seconds = _learn_gpu_seconds(model, device, peak_flops, workload)
     residents = {
         step: resident_sequences(model, device, workload, engine_width, step)
         for step in engine_steps(model, workload)
     }
     fallback = next(iter(residents))
-    learn_gpu_seconds = _learn_gpu_seconds(model, device, peak_flops, workload)
-    ratios: dict[int, float | None] = {}
-    syncs: dict[int, float] = {}
-    # (engines, rollout_batch_size) -> (step, seconds of one cycle)
-    cycles: dict[tuple[int, int], tuple[int, float]] = {}
-
-    def price(trainers: int, engines: int) -> GpuSplit | None:
-        rollout_batch_size = _cycle_rollout_batch_size(
-            workload, trainers, engines, residents[fallback]
-        )
-        if rollout_batch_size is None:
-            return None
-        if trainers not in ratios:
-            ratios[trainers] = learn_cost_ratio(trainers)
-        ratio = ratios[trainers]
-        if ratio is None:
-            return None
-        cycle = (engines, rollout_batch_size)
-        if cycle not in cycles:
+    best: tuple[tuple[float, int, int], GpuSplit] | None = None
+    for engines in range(1, (gpus - 1) // engine_width + 1):
+        for trainers in range(1, gpus - engines * engine_width + 1):
+            rollout_batch_size = _cycle_rollout_batch_size(
+                workload, trainers, engines, residents[fallback]
+            )
+            if rollout_batch_size is None:
+                continue
+            ratio = learn_cost_ratio(trainers)
+            if ratio is None:
+                continue
             step = _cycle_step(
                 model, workload, engines, engine_width, rollout_batch_size, residents
             )
-            cycles[cycle] = (
-                step,
-                _generation_seconds(
+            cycles_per_step = (
+                workload.batch_size
+                * workload.generated_per_trained
+                / rollout_batch_size
+            )
+            split = GpuSplit(
+                trainers=trainers,
+                engines=engines,
+                engine_width=engine_width,
+                rollout_batch_size=rollout_batch_size,
+                learn_seconds=learn_gpu_seconds * ratio / trainers,
+                generation_seconds=cycles_per_step
+                * _generation_seconds(
                     model,
                     device,
                     peak_flops,
@@ -764,130 +685,19 @@ def _split_pricer(
                     residents[step],
                     step,
                 ),
+                max_num_batched_tokens=None if step == fallback else step,
             )
-        step, cycle_seconds = cycles[cycle]
-        if engines not in syncs:
-            syncs[engines] = _sync_seconds(model, workload, engines, engine_width)
-        cycles_per_step = (
-            workload.batch_size * workload.generated_per_trained / rollout_batch_size
-        )
-        return GpuSplit(
-            trainers=trainers,
-            engines=engines,
-            engine_width=engine_width,
-            rollout_batch_size=rollout_batch_size,
-            learn_seconds=learn_gpu_seconds * ratio / trainers,
-            generation_seconds=cycles_per_step * cycle_seconds,
-            max_num_batched_tokens=None if step == fallback else step,
-            sync_seconds=syncs[engines],
-            merged_lora_sync=workload.merged_lora_sync,
-        )
-
-    return price
+            idle = gpus - trainers - engines * engine_width
+            rank = (split.step_seconds, idle, engines)
+            if best is None or rank < best[0]:
+                best = (rank, split)
+    return None if best is None else best[1]
 
 
-def price_gpu_split(
-    model: ModelSpec,
-    device: DeviceSpec,
-    workload: SplitWorkload,
-    trainers: int,
-    engines: int,
-    engine_width: int,
-    learn_cost_ratio: Callable[[int], float | None],
-) -> GpuSplit | None:
-    """Predict the learn, generation and sync seconds of one trainer / engine count.
-
-    The cycle is sized at the fallback step of :func:`engine_steps`; its
-    engines run the largest step whose KV pool still holds every episode of
-    the cycle.
-
-    :param model: Model the trainers and engines run.
-    :param device: One GPU of the allocation.
-    :param workload: The member's learn step and rollout cycle.
-    :param trainers: Trainer GPUs.
-    :param engines: Rollout engines.
-    :param engine_width: GPUs per rollout engine (vLLM tensor parallel).
-    :param learn_cost_ratio: Trainer count to its training-memory plan's
-        :attr:`TrainingMemoryPlan.learn_cost_ratio`, or ``None`` when no
-        plan fits that many trainers.
-    :return: The split, or None when the trainer count cannot shard the
-        batch or no plan fits it.
-    :raises ValueError: When the device has no peak bf16 or bandwidth figure.
-    """
-    price = _split_pricer(model, device, workload, engine_width, learn_cost_ratio)
-    return price(trainers, engines)
-
-
-def fullest_split_within(splits: list[GpuSplit], share: float) -> GpuSplit:
-    """The split using the most GPUs among those whose synced step is within ``share`` of the fastest.
-
-    :param splits: Candidate splits of the same GPUs, preferred first.
-    :param share: Slack over the fastest :attr:`GpuSplit.synced_step_seconds`.
-    :return: The earliest such split that uses the most GPUs.
-    """
-    fastest = min(split.synced_step_seconds for split in splits)
-    tied = [
-        split for split in splits if split.synced_step_seconds <= (1 + share) * fastest
-    ]
-    most = max(split.gpus for split in tied)
-    return next(split for split in tied if split.gpus == most)
-
-
-def choose_gpu_split(
-    model: ModelSpec,
-    device: DeviceSpec,
-    workload: SplitWorkload,
-    gpus: int,
-    engine_width: int,
-    learn_cost_ratio: Callable[[int], float | None],
-) -> GpuSplit | None:
-    """Split one member's GPUs so the step with one weight sync is fastest.
-
-    Every count is priced by :func:`price_gpu_split` and picked by
-    :func:`fullest_split_within` at :data:`IDLE_GPU_TIE_SHARE`. Among the
-    splits using the most GPUs the fastest wins, and exact ties go to fewer
-    engines, so an engine that does not shorten the cycle goes to training.
-
-    :param model: Model the trainers and engines run.
-    :param device: One GPU of the allocation.
-    :param workload: The member's learn step and rollout cycle.
-    :param gpus: GPUs the member owns.
-    :param engine_width: GPUs per rollout engine (vLLM tensor parallel).
-    :param learn_cost_ratio: Trainer count to its training-memory plan's
-        :attr:`TrainingMemoryPlan.learn_cost_ratio`, or ``None`` when no
-        plan fits that many trainers.
-    :return: The chosen split, or None when no split fits.
-    :raises ValueError: When the device has no peak bf16 or bandwidth figure.
-    """
-    if gpus <= engine_width:
-        return None
-    price = _split_pricer(model, device, workload, engine_width, learn_cost_ratio)
-    sharding = [
-        trainers
-        for trainers in range(1, gpus - engine_width + 1)
-        if _trainers_shard_batch(workload, trainers)
-    ]
-    splits = [
-        split
-        for engines in range(1, (gpus - 1) // engine_width + 1)
-        for trainers in sharding
-        if trainers <= gpus - engines * engine_width
-        and (split := price(trainers, engines)) is not None
-    ]
-    if not splits:
-        return None
-    splits.sort(key=lambda split: (split.synced_step_seconds, split.engines))
-    return fullest_split_within(splits, IDLE_GPU_TIE_SHARE)
-
-
-def split_workload_from_manifest(
-    manifest: TrainingManifest, adapter_sync: bool = False
-) -> SplitWorkload:
+def split_workload_from_manifest(manifest: TrainingManifest) -> SplitWorkload:
     """Expected lengths and batch constraints from a rollout manifest's budgets.
 
     :param manifest: Validated async rollout manifest.
-    :param adapter_sync: Weight sync pushes the adapter even where the engines
-        could serve merged weights.
     :return: The workload at :func:`_expected_lengths`.
     :raises TypeError: When the algorithm does not generate rollouts.
     """
@@ -900,7 +710,6 @@ def split_workload_from_manifest(
     fsdp = spec.fsdp
     fsdp_tp = 1 if fsdp is None else fsdp.tp
     fsdp_ep = 1 if fsdp is None else fsdp.ep
-    fsdp_cp = 1 if fsdp is None else fsdp.cp
     fsdp_shard = 1 if fsdp is None else (fsdp.shard_group_size or 1)
     pinned_rows = [
         size
@@ -908,7 +717,6 @@ def split_workload_from_manifest(
         if size is not None
     ]
     group_size = rollout_group_size(spec)
-    lora = spec.lora_config or LoraConfigDict()
     return SplitWorkload(
         batch_size=spec.batch_size,
         group_size=group_size,
@@ -920,13 +728,10 @@ def split_workload_from_manifest(
         rollout_batch_size=manifest.training.rollout_batch_size,
         max_num_seqs=None if vllm is None else vllm.max_num_seqs,
         gpu_memory_utilization=resolve_gpu_memory_utilization(
-            None if vllm is None else vllm.gpu_memory_utilization,
-            colocated=False,
-            hub_id=spec.pretrained_model_name_or_path,
+            None if vllm is None else vllm.gpu_memory_utilization, colocated=False
         ),
-        trainer_multiple=math.lcm(fsdp_tp * fsdp_cp, fsdp_ep, fsdp_shard),
+        trainer_multiple=math.lcm(fsdp_tp, fsdp_ep, fsdp_shard),
         trainer_tensor_parallel=fsdp_tp,
-        trainer_context_parallel=fsdp_cp,
         trainer_expert_parallel=fsdp_ep,
         trainer_shard_group=fsdp_shard,
         per_rank_multiple=math.lcm(*pinned_rows) if pinned_rows else 1,
@@ -935,10 +740,6 @@ def split_workload_from_manifest(
         weight_quantization=engine_weight_quantization(
             None if vllm is None else vllm.quantization
         ),
-        merged_lora_sync=not adapter_sync and can_sync_merged_lora(spec),
-        lora_rank=lora.lora_r,
-        lora_target_scope=lora_target_scope(lora.target_modules),
-        lora_packed_target_matrices=len(set(lora.target_parameters or ())),
         min_p=spec.min_p,
         logit_bias=rollout_logit_bias(spec),
         speculative_drafting=speculative_drafting(spec),
@@ -987,7 +788,7 @@ def _expected_lengths(
 def _reasons(manifest: TrainingManifest, spec: RolloutLLMSpec) -> bool:
     """Whether rollouts reason: the model has a reasoning parser and thinking is not turned off."""
     info = SUPPORTED_MODEL_INFO.get(spec.pretrained_model_name_or_path or "")
-    model_type = None if info is None else info.model_type
+    model_type = None if info is None else info.config["model_type"]
     env = manifest.environment
     template = env.chat_template_kwargs if isinstance(env, LLMEnvSpec) else {}
     return (
@@ -1024,16 +825,19 @@ def _pinned_max_num_batched_tokens(spec: RolloutLLMSpec) -> int | None:
 
 
 def choose_engine_width(splits: list[GpuSplit]) -> GpuSplit | None:
-    """Pick one width's split by :func:`fullest_split_within` at :data:`ENGINE_WIDTH_TIE_SHARE`.
-
-    Among tied widths using the most GPUs, the narrowest wins.
+    """Pick the fastest split; widths within :data:`ENGINE_WIDTH_TIE_SHARE` of it tie to the narrowest.
 
     :param splits: The best split at each engine width, narrowest first.
     :return: The chosen split, or None when there are none.
     """
     if not splits:
         return None
-    return fullest_split_within(splits, ENGINE_WIDTH_TIE_SHARE)
+    fastest = min(split.step_seconds for split in splits)
+    return next(
+        split
+        for split in splits
+        if split.step_seconds <= (1 + ENGINE_WIDTH_TIE_SHARE) * fastest
+    )
 
 
 def _fsdp_width_need(workload: SplitWorkload) -> str:
@@ -1042,7 +846,6 @@ def _fsdp_width_need(workload: SplitWorkload) -> str:
         label
         for label, width in (
             ("tensor parallel", workload.trainer_tensor_parallel),
-            ("context parallel", workload.trainer_context_parallel),
             ("expert parallel", workload.trainer_expert_parallel),
             ("shard group", workload.trainer_shard_group),
         )
@@ -1052,7 +855,7 @@ def _fsdp_width_need(workload: SplitWorkload) -> str:
         return f"FSDP {names[0]} needs"
     if len(names) == 2:
         return f"FSDP {names[0]} and {names[1]} need"
-    return f"FSDP {', '.join(names[:-1])}, and {names[-1]} need"
+    return f"FSDP {names[0]}, {names[1]}, and {names[2]} need"
 
 
 def _per_rank_pin_reason(workload: SplitWorkload) -> str:
@@ -1080,7 +883,7 @@ def _per_rank_pin_reason(workload: SplitWorkload) -> str:
     )
 
 
-def no_split_reason(
+def _no_split_reason(
     workload: SplitWorkload,
     trainer_counts: range,
     plans: dict[int, TrainingMemoryPlan | None],
@@ -1142,3 +945,102 @@ def no_split_reason(
         "trainer count that fits in memory. Use a batch size divisible by more "
         "trainer counts, such as a power of two."
     )
+
+
+@dataclass(frozen=True)
+class RunMemoryPlan:
+    """The GPU split and trainer memory plan a run starts with."""
+
+    # ``None`` when the manifest's trainer and engine counts are kept.
+    split: GpuSplit | None
+    training: TrainingMemoryPlan
+
+
+def resolve_run_memory(
+    manifest: TrainingManifest,
+    model: ModelSpec,
+    device: DeviceSpec,
+    member_gpus: int | None,
+    gpus_per_node: int | None = None,
+) -> RunMemoryPlan:
+    """Choose the GPU split, then the trainer memory plan.
+
+    Each candidate trainer count is priced with its own
+    :func:`training_memory_from_manifest` plan, so the split weighs learn
+    time at the speed rungs that fit that many trainers. A searched split
+    with the engine width omitted is searched at every width one engine can
+    serve a sequence at and picked by :func:`choose_engine_width`; a pinned
+    width is searched alone.
+
+    :param manifest: Validated run manifest. Not written.
+    :param model: Training-side catalog model.
+    :param device: One GPU of the allocation.
+    :param member_gpus: GPUs one member owns, to search the split; ``None``
+        keeps the manifest's trainer and engine counts.
+    :param gpus_per_node: GPUs on one node; an engine stays on one node.
+        ``None`` puts the member's GPUs on one node.
+    :return: The plan.
+    :raises ValueError: When the GPU cannot run LLM training, or the split is
+        searched and none fits.
+    :raises TrainingMemoryUnfitError: When nothing fits one trainer GPU.
+    """
+    unsupported = unsupported_gpu_reason(device)
+    if unsupported is not None:
+        raise ValueError(unsupported)
+    chosen = manifest.model_copy(deep=True)
+    split = None
+    plans: dict[int, TrainingMemoryPlan | None] = {}
+    if member_gpus is not None:
+        spec = manifest.algorithm
+        if not isinstance(spec, RolloutLLMSpec) or spec.vllm_config is None:
+            msg = f"{spec.name} does not generate rollouts; it has no GPU split"
+            raise TypeError(msg)
+        pinned_width = spec.vllm_config.tensor_parallel_size
+        if pinned_width is None:
+            widest = min(member_gpus - 1, gpus_per_node or member_gpus)
+            engine_widths = servable_engine_widths(manifest, device, widest)
+        else:
+            engine_widths = [pinned_width]
+
+        def learn_cost_ratio(trainers: int) -> float | None:
+            if trainers not in plans:
+                trial = manifest.model_copy(deep=True)
+                trial.training.training_gpus_per_agent = trainers
+                try:
+                    plans[trainers] = training_memory_from_manifest(
+                        trial, model, device
+                    )
+                except TrainingMemoryUnfitError:
+                    plans[trainers] = None
+            plan = plans[trainers]
+            return None if plan is None else plan.learn_cost_ratio
+
+        workload = split_workload_from_manifest(manifest)
+        splits = [
+            found
+            for width in engine_widths
+            if (
+                found := choose_gpu_split(
+                    model, device, workload, member_gpus, width, learn_cost_ratio
+                )
+            )
+            is not None
+        ]
+        split = choose_engine_width(splits)
+        if split is None:
+            trainer_counts = range(
+                1, member_gpus - min(engine_widths, default=member_gpus) + 1
+            )
+            msg = (
+                f"No trainer / rollout-engine split of {member_gpus} "
+                f"{device.name} GPUs fits this run: "
+                f"{_no_split_reason(workload, trainer_counts, plans)}"
+            )
+            raise ValueError(msg)
+        chosen.training.training_gpus_per_agent = split.trainers
+        chosen.training.rollout_engines_per_agent = split.engines
+        chosen.training.rollout_batch_size = split.rollout_batch_size
+    training = plans.get(chosen.training.training_gpus_per_agent)
+    if training is None:
+        training = training_memory_from_manifest(chosen, model, device)
+    return RunMemoryPlan(split=split, training=training)

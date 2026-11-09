@@ -20,7 +20,6 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 
 from agilerl.algorithms.core import ActionResult
-from agilerl.algorithms.core.sequence_layout import PaddedSequence
 from agilerl.algorithms.ppo_llm import PPO as LLMPPO
 from agilerl.distributed import FSDPConfig
 from agilerl.llm_envs import RolloutHarness
@@ -29,7 +28,6 @@ from agilerl.utils.llm_utils import masked_whiten
 from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 from tests import TINY_LLM_FIXTURE_PATH
 from tests.helpers.rollout_doubles import FakeEnvClient, RolloutHarnessDouble
-from tests.test_algorithms.test_llms.llm_helpers import use_packed
 from tests.utils import (
     assert_vllm_get_action_contract,
     make_mock_vllm_instance,
@@ -1491,15 +1489,15 @@ class TestPPOSequencePacking:
     """Sequence packing for the PPO actor and critic passes.
 
     Init trains padded on a dense backend (CPU sdpa), which has no sparse path.
-    On a blockmask backend the packed ``_get_logprobs`` and
-    ``_actor_critic_pass`` must reproduce the padded actor log-probs
+    On a blockmask backend the packed ``_fused_forward`` and
+    ``_actor_critic_hidden_states`` must reproduce the padded actor log-probs
     and critic values at every action position.
     """
 
     def test_init_trains_padded_on_a_dense_backend(self):
         assert _cpu_llmppo().sequence_packing is False
 
-    def test_packed_get_logprobs_matches_padded(self):
+    def test_packed_fused_forward_matches_padded(self):
         ppo = _cpu_llmppo()
         ppo.pad_token_id = 0
         assert ppo.use_value_head is True
@@ -1535,7 +1533,6 @@ class TestPPOSequencePacking:
 
         def run():
             with (
-                patch.object(ppo, "select_adapter", nullcontext),
                 patch.object(ppo, "_patch_lm_head_to_identity", nullcontext),
                 patch.object(ppo, "_amp_ctx", nullcontext),
                 patch.object(ppo, "_activation_offload_ctx", nullcontext),
@@ -1545,19 +1542,14 @@ class TestPPOSequencePacking:
                     return_value=(fake_fused_fn, None, None),
                 ),
             ):
-                log_probs = ppo._get_logprobs(
-                    ids, b_size, attention_mask=attention_mask
-                )
+                log_probs = ppo._fused_forward(ids, attention_mask=attention_mask)
                 actor_shape = actor.last_input_shape
-                _, values = ppo._actor_critic_pass(ids, action_mask)
+                _, values = ppo._actor_critic_hidden_states(ids)
                 return log_probs, values, actor_shape, actor.last_input_shape
 
         # Padded baseline: one (B, T) forward per pass; the fused actor-critic
         # pass stacks actor and critic rows.
         ppo.sequence_packing = False
-        ppo.sequence_layout = PaddedSequence(
-            calc_position_embeddings=ppo.calc_position_embeddings,
-        )
         lp_padded, v_padded, *shapes = run()
         assert shapes == [(b_size, t), (2 * b_size, t)]
 
@@ -1565,7 +1557,6 @@ class TestPPOSequencePacking:
         # pass stacks two packed rows.
         ppo.sequence_packing = True
         ppo.actor.config._attn_implementation = "flex_attention"
-        use_packed(ppo, False)
         lp_packed, v_packed, *shapes = run()
         assert shapes == [(1, sum(lengths)), (2, sum(lengths))]
 

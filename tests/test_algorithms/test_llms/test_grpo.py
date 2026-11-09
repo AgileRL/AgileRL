@@ -3816,10 +3816,6 @@ class TestGRPOSaveLoadCheckpoint:
                             getattr(new_grpo, attr).is_sharded
                             == getattr(grpo, attr).is_sharded
                         )
-                    elif attr == "sequence_layout":
-                        assert type(getattr(new_grpo, attr)) is type(
-                            getattr(grpo, attr)
-                        )
                     elif attr == "learn_profiler":
                         assert new_grpo.learn_profiler is own_profiler
                     elif not isinstance(getattr(grpo, attr), torch.Tensor):

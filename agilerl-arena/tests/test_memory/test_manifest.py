@@ -4,14 +4,11 @@
 
 import copy
 import json
-from functools import cached_property
 from pathlib import Path
-from typing import Any
 
 import pytest
 from pydantic import ValidationError
 
-from agilerl.arena.memory import lora_formulas
 from agilerl.arena.memory.estimator import estimate_run, estimate_training
 from agilerl.arena.memory.manifest import (
     check_fp8_moe_backend_for_device,
@@ -31,11 +28,10 @@ from agilerl.arena.memory.manifest import (
 from agilerl.arena.memory.manifest import (
     run_config_from_manifest as _run_config_from_manifest,
 )
-from agilerl.arena.memory.resolve.attention import FAMILY_ATTN_IMPLEMENTATIONS
-from agilerl.arena.memory.specs import DTYPE_BYTES, DeviceSpec, GiB, ModelArch
-from agilerl.arena.models.fsdp import FSDPConfig, parallel_layout_pins
+from agilerl.arena.memory.specs import DeviceSpec, GiB, ModelArch
+from agilerl.arena.models.fsdp import FSDPConfig
 from agilerl.arena.models.manifest import TrainingManifest
-from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO, ModelInfo
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 
 TINY_CONFIG = json.loads(
     (Path(__file__).parent / "assets" / "tiny_llm" / "config.json").read_text()
@@ -62,29 +58,6 @@ GRPO = {
 }
 
 ENGINE = {"vllm_config": {"gpu_memory_utilization": 0.85}}
-
-GPT_OSS = "openai/gpt-oss-20b"
-GPT_OSS_BF16_CONFIG = SUPPORTED_MODEL_INFO[GPT_OSS].config
-
-
-class HubGptOss(ModelInfo):
-    """gpt-oss-20b as the Hub ships it, with MXFP4 expert weights."""
-
-    @cached_property
-    def config(self) -> dict[str, Any]:
-        return {
-            **GPT_OSS_BF16_CONFIG,
-            "quantization_config": {
-                "modules_to_not_convert": [
-                    "model.layers.*.self_attn",
-                    "model.layers.*.mlp.router",
-                    "model.embed_tokens",
-                    "lm_head",
-                ],
-                "quant_method": "mxfp4",
-            },
-        }
-
 
 ASYNC_ROLLOUT = {
     "training": {"rollout_mode": "async", "rollout_engines_per_agent": 1},
@@ -217,45 +190,6 @@ class TestTrainingSettings:
                 manifest(algorithm={"fsdp": {"cpu_offload": True}})
             )
 
-    def test_context_parallel_on_an_sdpa_family_is_refused(self, monkeypatch):
-        monkeypatch.setitem(FAMILY_ATTN_IMPLEMENTATIONS, "qwen2", "sdpa")
-
-        with pytest.raises(
-            ValueError,
-            match=r"fsdp\.cp=2 needs flash_attention_2 or flex_attention attention; "
-            r"this model trains with sdpa",
-        ):
-            training_settings_from_manifest(
-                manifest(
-                    algorithm={"fsdp": {"cp": 2}},
-                    training={"training_gpus_per_agent": 2},
-                )
-            )
-
-    def test_context_parallel_on_deepseek_v4_is_sized(self):
-        settings = training_settings_from_manifest(
-            manifest(
-                algorithm={"fsdp": {"cp": 2}},
-                network={
-                    "pretrained_model_name_or_path": "deepseek-ai/DeepSeek-V4-Flash-0731"
-                },
-                training={"training_gpus_per_agent": 2},
-            )
-        )
-
-        assert settings.fsdp.cp == 2
-
-    def test_context_parallel_on_glm5_next_sdpa_is_sized(self):
-        settings = training_settings_from_manifest(
-            manifest(
-                algorithm={"fsdp": {"cp": 2}},
-                network={"pretrained_model_name_or_path": "zai-org/GLM-5.3-Flash"},
-                training={"training_gpus_per_agent": 2},
-            )
-        )
-
-        assert settings.fsdp.cp == 2
-
     def test_optimizer_cpu_offload_is_sized(self):
         settings = training_settings_from_manifest(
             manifest(algorithm={"fsdp": {"optim_cpu_offload": True}})
@@ -309,6 +243,110 @@ class TestTrainingSettings:
         )
 
         assert settings.lora_packed_target_matrices == 2
+
+    def test_teacher_lengthens_the_engine_context_and_scores_prompts(self):
+        doc = manifest(
+            algorithm={
+                "name": "OPD",
+                "teacher": {"context_key": "answer", "max_context_tokens": 256},
+            }
+        )
+
+        settings = generation_settings_from_manifest(doc)
+
+        assert settings.max_model_len == 512 + 256
+        assert settings.scores_prompt_logprobs is True
+
+    def test_an_unset_utilization_reserves_the_scoring_buffer(self):
+        doc = manifest(
+            algorithm={
+                "name": "OPD",
+                "teacher": {"context_key": "answer"},
+                "vllm_config": {"tensor_parallel_size": 1},
+            }
+        )
+
+        settings = generation_settings_from_manifest(doc)
+
+        assert settings.reserves_prompt_logprobs is True
+
+    def test_a_set_utilization_is_kept_as_written(self):
+        doc = manifest(
+            algorithm={
+                "name": "OPD",
+                "teacher": {"context_key": "answer"},
+                "vllm_config": {
+                    "tensor_parallel_size": 1,
+                    "gpu_memory_utilization": 0.7,
+                },
+            }
+        )
+
+        settings = generation_settings_from_manifest(doc)
+
+        assert settings.reserves_prompt_logprobs is False
+        assert settings.gpu_memory_utilization == 0.7
+
+    def test_a_teacher_model_leaves_the_rollout_engine_as_a_plain_engine(self):
+        doc = manifest(
+            algorithm={
+                "name": "OPD",
+                "vllm_config": {"tensor_parallel_size": 1},
+                "teacher": {
+                    "context_key": "answer",
+                    "max_context_tokens": 256,
+                    "model": {"pretrained_model_name_or_path": "Qwen/Qwen3-4B"},
+                },
+            },
+            training={"rollout_engines_per_agent": 1},
+        )
+
+        settings = generation_settings_from_manifest(doc)
+
+        assert settings.max_model_len == 512
+        assert settings.scores_prompt_logprobs is False
+
+    def test_a_teacher_pool_leaves_the_rollout_engine_as_a_plain_engine(self):
+        doc = manifest(
+            algorithm={
+                "name": "OPD",
+                "vllm_config": {"tensor_parallel_size": 1},
+                "teacher": {
+                    "teachers": [
+                        {
+                            "name": "math",
+                            "model": {"pretrained_model_name_or_path": "Qwen/Qwen3-4B"},
+                            "domains": ["math"],
+                        },
+                        {
+                            "name": "code",
+                            "model": {
+                                "pretrained_model_name_or_path": "Qwen/Qwen3-1.7B"
+                            },
+                            "domains": ["code"],
+                        },
+                    ],
+                    "default_teacher": "math",
+                },
+            },
+            training={
+                "rollout_mode": "async",
+                "rollout_engines_per_agent": 1,
+            },
+            replay_buffer={"kind": "llm"},
+        )
+
+        settings = generation_settings_from_manifest(doc)
+
+        assert settings.max_model_len == 512
+        assert settings.scores_prompt_logprobs is False
+        assert settings.reserves_prompt_logprobs is False
+
+    def test_no_teacher_leaves_the_engine_context_unchanged(self):
+        settings = generation_settings_from_manifest(manifest())
+
+        assert settings.max_model_len == 512
+        assert settings.scores_prompt_logprobs is False
 
     def test_packed_expert_targets_reach_the_engine(self):
         doc = manifest(
@@ -440,18 +478,6 @@ class TestTrainingSettings:
 
         assert settings.async_rollout is True
 
-    @pytest.mark.parametrize(
-        ("quantization", "expected"), [(None, True), ("fp8", False)]
-    )
-    def test_main_rank_sends_merged_weights_to_unquantized_engines(
-        self, quantization, expected
-    ):
-        doc = manifest(algorithm={"vllm_config": {"quantization": quantization}})
-
-        settings = training_settings_from_manifest(doc)
-
-        assert settings.merged_lora_sync is expected
-
     def test_a_classic_rl_manifest_is_refused(self):
         with pytest.raises(ValueError, match="LLM fine-tuning"):
             training_settings_from_manifest(DQN)
@@ -512,34 +538,6 @@ class TestTrainingSettings:
         )
 
         assert settings.sequence_packing is True
-
-    def test_context_parallel_packs_under_flash_attention_2(self):
-        settings = training_settings_from_manifest(
-            manifest(
-                algorithm={"fsdp": {"cp": 2}},
-                training={"training_gpus_per_agent": 2},
-            )
-        )
-
-        assert settings.sequence_packing is True
-        assert settings.micro_batch_tokens == settings.max_model_len
-
-    @pytest.mark.parametrize(
-        "model",
-        ["ibm-granite/granite-4.0-h-tiny", "google/gemma-4-E4B-it"],
-        ids=["recurrent-mixers", "flex-attention"],
-    )
-    def test_context_parallel_trains_padded(self, model: str):
-        settings = training_settings_from_manifest(
-            manifest(
-                network={"pretrained_model_name_or_path": model},
-                algorithm={"fsdp": {"cp": 2}},
-                training={"training_gpus_per_agent": 2},
-            )
-        )
-
-        assert settings.sequence_packing is False
-        assert settings.micro_batch_tokens is None
 
 
 def llmppo(**algorithm: object) -> dict:
@@ -621,26 +619,9 @@ class TestImageInputs:
         }
 
         settings = training_settings_from_manifest(trained)
-        text = training_settings_from_manifest(screenshots())
 
-        assert settings.tower_lora_targets == frozenset({"qkv"})
         assert settings.vision_tower_lora
-        assert text.tower_lora_targets == frozenset()
-        assert not text.vision_tower_lora
-
-    def test_tower_lora_keeps_adapter_sync(self):
-        trained = screenshots()
-        trained["network"]["lora_config"] = {
-            "target_modules": ["q_proj"],
-            "tower_target_modules": ["qkv"],
-        }
-
-        training = training_settings_from_manifest(trained)
-        generation = generation_settings_from_manifest(trained)
-
-        assert training.merged_lora_sync is False
-        assert generation.merged_lora_sync is False
-        assert training_settings_from_manifest(screenshots()).merged_lora_sync
+        assert not training_settings_from_manifest(screenshots()).vision_tower_lora
 
     def test_text_environment_has_no_images(self):
         settings = training_settings_from_manifest(GRPO)
@@ -802,27 +783,6 @@ class TestGenerationSettings:
         # Assert
         assert settings.gpu_memory_utilization == 0.9
 
-    @pytest.mark.parametrize(
-        ("vllm_config", "expected"),
-        [({}, 0.85), ({"gpu_memory_utilization": 0.9}, 0.9)],
-    )
-    def test_catalogue_rollout_share_fills_an_omitted_memory_share(
-        self, vllm_config, expected
-    ):
-        # Arrange
-        doc = manifest(
-            algorithm={"vllm_config": {"max_num_seqs": 8, **vllm_config}},
-            network={
-                "pretrained_model_name_or_path": "deepseek-ai/DeepSeek-V4-Flash-0731"
-            },
-        )
-
-        # Act
-        settings = generation_settings_from_manifest(doc)
-
-        # Assert
-        assert settings.gpu_memory_utilization == expected
-
     def test_fp32_engine_dtype(self):
         settings = generation_settings_from_manifest(
             manifest(algorithm={"vllm_config": {"dtype": "float32"}})
@@ -910,43 +870,6 @@ class TestGenerationSettings:
 
         assert rollout.lora_sync_scope == "attention-only"
         assert sft.lora_sync_scope is None
-
-    @pytest.mark.parametrize(
-        ("quantization", "expected"), [(None, True), ("fp8", False)]
-    )
-    def test_unquantized_rollout_engines_take_merged_weights(
-        self, quantization, expected
-    ):
-        doc = manifest(
-            algorithm={"vllm_config": {"quantization": quantization}}, **ASYNC_ROLLOUT
-        )
-
-        settings = generation_settings_from_manifest(doc)
-
-        assert settings.merged_lora_sync is expected
-
-    def test_quantized_checkpoint_keeps_serving_the_adapter(self, monkeypatch):
-        # Arrange
-        doc = manifest(
-            network={"pretrained_model_name_or_path": GPT_OSS}, **ASYNC_ROLLOUT
-        )
-        bf16 = generation_settings_from_manifest(doc)
-        monkeypatch.setitem(
-            SUPPORTED_MODEL_INFO,
-            GPT_OSS,
-            HubGptOss.model_validate(
-                SUPPORTED_MODEL_INFO[GPT_OSS].model_dump(
-                    include=set(ModelInfo.model_fields)
-                )
-            ),
-        )
-
-        # Act
-        mxfp4 = generation_settings_from_manifest(doc)
-
-        # Assert
-        assert bf16.merged_lora_sync is True
-        assert mxfp4.merged_lora_sync is False
 
     def test_engine_args_turn_dual_stream_lora_off(self):
         doc = manifest(
@@ -1210,18 +1133,6 @@ class TestDeviceFromResourceClass:
         with pytest.raises(ValueError, match="no GPU"):
             device_spec_from_resource_class({"name": "cpu-only", "gpu_type": None})
 
-    def test_tier_ram_less_the_node_reserve_splits_over_its_gpus(self):
-        tier = {"name": "l4-4x", "gpu_type": "nvidia-l4", "num_gpus": 4, "ram_gb": 165}
-
-        device = device_spec_from_resource_class(tier)
-
-        assert device.host_bytes_per_gpu == (165 - 8) * 1024**3 // 4
-
-    def test_tier_without_ram_skips_the_host_check(self):
-        tier = {"name": "l4-1x", "gpu_type": "NVIDIA L4", "num_gpus": 1}
-
-        assert device_spec_from_resource_class(tier).host_bytes_per_gpu is None
-
 
 class TestUnsupportedGpuReason:
     @pytest.mark.parametrize(
@@ -1304,57 +1215,8 @@ class TestValidatedRunManifest:
         with pytest.raises(ValidationError, match=r"fsdp\.cpu_offload needs colocated"):
             validated_run_manifest(doc)
 
-    @pytest.mark.parametrize(
-        ("fsdp", "pinned"),
-        [({}, frozenset()), ({"ep": 2}, frozenset({"ep"}))],
-    )
-    def test_an_async_run_keeps_the_layout_fields_it_searches(
-        self, fsdp: dict, pinned: frozenset[str]
-    ):
-        # Arrange
-        doc = TrainingManifest.model_validate(
-            manifest(algorithm={"fsdp": fsdp}, **ASYNC_ROLLOUT)
-        )
-
-        # Act
-        run = validated_run_manifest(doc)
-
-        # Assert
-        assert run is not doc
-        assert parallel_layout_pins(run.algorithm.fsdp) == pinned
-
-
-def generation_bytes(config, key):
-    breakdown = estimate_run(config).generation
-    return next(c.n_bytes for c in breakdown.components if c.key == key)
-
 
 class TestRunConfig:
-    def test_adapter_sync_prices_the_engine_lora_slot_and_adapter_buffer(self):
-        # Arrange: the run picks adapter sync, as it does over TCP.
-        doc = manifest(**ASYNC_ROLLOUT)
-        device = device_spec_from_resource_class(A100_TIER)
-
-        # Act
-        merged = run_config_from_manifest(doc, device, TINY_CONFIG)
-        adapter = run_config_from_manifest(doc, device, TINY_CONFIG, adapter_sync=True)
-
-        # Assert
-        settings = adapter.generation
-        adapter_bytes = lora_formulas.lora_sync_buffer_bytes(
-            adapter.model.arch,
-            settings.max_lora_rank,
-            settings.lora_sync_scope,
-            settings.lora_packed_target_matrices,
-            DTYPE_BYTES[settings.weight_dtype],
-        )
-        assert merged.generation.merged_lora_sync is True
-        assert adapter.generation.merged_lora_sync is False
-        assert adapter.training.merged_lora_sync is False
-        assert generation_bytes(merged, "lora_slots") == 0
-        assert generation_bytes(adapter, "lora_slots") > 0
-        assert generation_bytes(adapter, "lora_receive_buffer") == adapter_bytes
-
     def test_unset_rollout_mode_is_sized_async(self):
         config = run_config_from_manifest(
             GRPO, device_spec_from_resource_class(L4_TIER), TINY_CONFIG
@@ -1870,9 +1732,7 @@ class TestMicroBatchRows:
             )
 
     def test_tensor_parallel_must_divide_the_trainer_world(self):
-        with pytest.raises(
-            ValueError, match=r"divisible by the tp \* cp replica size \(3 \* 1 = 3\)"
-        ):
+        with pytest.raises(ValueError, match="divisible by tp"):
             training_settings_from_manifest(
                 manifest(
                     algorithm={"fsdp": {"tp": 3}},

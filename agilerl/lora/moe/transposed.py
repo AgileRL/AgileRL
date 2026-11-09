@@ -6,27 +6,19 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
+from peft.tuners.lora.layer import ParamWrapper
 from torch.distributed.tensor import DTensor
 
-from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.architectures.gptoss import experts as gptoss_experts
 from agilerl.lora.moe.adapters import (
     resolve_adapters,
     split_lora_delta,
     token_adapter_ids,
 )
-from agilerl.lora.moe.grouped_gemm import (
-    expert_row_counts,
-    group_offsets,
-    grouped_matmul,
-)
-
-if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
-    from peft.tuners.lora.layer import ParamWrapper
+from agilerl.lora.moe.grouped_gemm import group_offsets, grouped_matmul
 
 transposed_expert_params = gptoss_experts.gpt_oss_expert_params
 apply_transposed_experts_gate = gptoss_experts.apply_gpt_oss_gate
@@ -83,7 +75,7 @@ def transposed_experts_local_forward(
     top_k = router_indices.shape[-1]
     flat_experts = router_indices.reshape(-1)
     order = torch.argsort(flat_experts, stable=True)
-    counts = expert_row_counts(flat_experts, local_e)
+    counts = torch.bincount(flat_experts, minlength=local_e)
     token_idx = torch.div(order, top_k, rounding_mode="floor")
     x = hidden_states[token_idx]
     routed_weights = routing_weights.reshape(-1)[order].unsqueeze(-1)

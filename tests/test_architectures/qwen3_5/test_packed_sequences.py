@@ -3,10 +3,9 @@
 
 """Packed rows through a tiny Qwen3.5-MoE GDN stack match the padded batch."""
 
-import importlib
+import importlib.machinery
+import importlib.util
 import logging
-import sys
-import types
 
 import pytest
 import torch
@@ -27,15 +26,12 @@ from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
 )
 
 from agilerl.architectures import install_family_patches
-from agilerl.architectures.catalog import FAMILY_RUNTIME_CONFIGS
 from agilerl.architectures.moe_router import patch_moe_routers
 from agilerl.architectures.qwen3_5 import packed as qwen_packed
 from agilerl.architectures.qwen3_5.packed import (
-    GROUPED_QK_HEADS,
     PACKED_CU_SEQLENS,
     VARLEN_SCAN,
     install_qwen_gdn_patches,
-    patch_qwen_gdn_grouped_heads,
     patch_qwen_gdn_packed_sequences,
 )
 from agilerl.architectures.runtime import PatchRuntimeConfig
@@ -58,7 +54,6 @@ MIXER_PATH = (
 TEXT_MODEL_PATH = (
     "transformers.models.qwen3_5_moe.modeling_qwen3_5_moe.Qwen3_5MoeTextModel"
 )
-QWEN_PATCH = FAMILY_RUNTIME_CONFIGS["qwen3_5_moe_text"].patch
 VOCAB = 64
 LENGTHS = (7, 4, 9, 1, 5)
 # Packed rows of equal length, as LLMPPO stacks one packed row per adapter.
@@ -209,9 +204,7 @@ def _host_copy_tolist(tensor: torch.Tensor) -> list:
 class TestPatchQwenGdnPackedSequences:
     def test_packed_logprobs_match_padded_logprobs(self, pristine_qwen_gdn_classes):
         model = _tiny_qwen_moe().eval()
-        install_family_patches(
-            model.config.model_type, model, use_sequence_packing=True
-        )
+        install_family_patches(model.config.model_type, model)
 
         with torch.no_grad():
             padded, packed, real = _padded_and_packed_logprobs(model)
@@ -220,9 +213,7 @@ class TestPatchQwenGdnPackedSequences:
 
     def test_packed_gradients_match_padded_gradients(self, pristine_qwen_gdn_classes):
         model = _tiny_qwen_moe().train()
-        install_family_patches(
-            model.config.model_type, model, use_sequence_packing=True
-        )
+        install_family_patches(model.config.model_type, model)
         params = {
             "gdn_A_log": model.model.layers[0].linear_attn.A_log,
             "attention_q_proj": model.model.layers[1].self_attn.q_proj.weight,
@@ -243,9 +234,7 @@ class TestPatchQwenGdnPackedSequences:
         self, pristine_qwen_gdn_classes
     ):
         model = _tiny_qwen_moe().eval()
-        install_family_patches(
-            model.config.model_type, model, use_sequence_packing=True
-        )
+        install_family_patches(model.config.model_type, model)
 
         with torch.no_grad():
             packed, documents = _multi_row_and_document_logprobs(model)
@@ -256,9 +245,7 @@ class TestPatchQwenGdnPackedSequences:
         self, pristine_qwen_gdn_classes
     ):
         model = _tiny_qwen_moe().eval()
-        install_family_patches(
-            model.config.model_type, model, use_sequence_packing=True
-        )
+        install_family_patches(model.config.model_type, model)
 
         with torch.no_grad():
             routed, alone = _routed_logprobs_and_each_adapter(model)
@@ -281,9 +268,7 @@ class TestPatchQwenGdnPackedSequences:
         with torch.no_grad():
             before = _token_logprobs(model, ids, attention_mask=mask.long())
 
-        install_family_patches(
-            model.config.model_type, model, use_sequence_packing=True
-        )
+        install_family_patches(model.config.model_type, model)
         with torch.no_grad():
             after = _token_logprobs(model, ids, attention_mask=mask.long())
 
@@ -328,9 +313,7 @@ class TestPatchQwenGdnPackedSequences:
     ):
         # Arrange
         model = _tiny_qwen_moe().train()
-        install_family_patches(
-            model.config.model_type, model, use_sequence_packing=True
-        )
+        install_family_patches(model.config.model_type, model)
         patch_moe_routers(model)
         monkeypatch.setattr(torch.Tensor, "tolist", _host_copy_tolist)
         ids, positions = _rows(kind)
@@ -357,9 +340,7 @@ class TestPatchQwenGdnPackedSequences:
     ):
         # Arrange
         model = _tiny_qwen_moe().eval()
-        install_family_patches(
-            model.config.model_type, model, use_sequence_packing=True
-        )
+        install_family_patches(model.config.model_type, model)
         torch.manual_seed(1)
         tokens = torch.randint(1, VOCAB, (1, 6))
         pads = torch.zeros(1, 3, dtype=torch.long)
@@ -527,32 +508,6 @@ class TestPatchQwenGdnPackedSequences:
             [0] + [1] * 5 + [2] * 6 + [3] * 8,
         ]
 
-    def test_text_model_reads_use_cache_from_the_config_when_unset(
-        self, pristine_qwen_gdn_classes, monkeypatch
-    ):
-        # Arrange
-        received = []
-        monkeypatch.setattr(qwen_packed, "_varlen_kernels_ready", lambda: True)
-
-        def unpatched(
-            self, hidden_states, cache_params=None, attention_mask=None, **kwargs
-        ):
-            received.append(kwargs)
-            return hidden_states
-
-        Qwen3_5MoeGatedDeltaNet.forward = unpatched
-        patch_qwen_gdn_packed_sequences(mixer=MIXER_PATH, text_model=TEXT_MODEL_PATH)
-        model = _tiny_qwen_moe().eval()
-        model.config.get_text_config().use_cache = False
-        ids, positions = _rows("multi_row")
-
-        # Act
-        with torch.no_grad():
-            model(input_ids=ids, position_ids=positions)
-
-        # Assert
-        assert received[0]["cu_seq_lens_q"].tolist() == [0, 7, 11, 20, 21, 26, 32, 40]
-
     def test_padded_rows_without_a_mask_reach_the_mixer_without_offsets(
         self, pristine_qwen_gdn_classes, monkeypatch
     ):
@@ -625,201 +580,43 @@ class TestPatchQwenGdnPackedSequences:
             )
 
 
-def _recording_scan(heads: list[int], grouped: bool):
-    """The current GDN scan, recording the q heads it gets; ``grouped`` repeats them first, as FLA maps them."""
-    scan = getattr(modeling_qwen3_5_moe, VARLEN_SCAN)
-
-    def recording_scan(query, key, value, g, beta, **kwargs):
-        heads.append(query.shape[2])
-        if grouped:
-            groups = value.shape[2] // query.shape[2]
-            query = query.repeat_interleave(groups, dim=2)
-            key = key.repeat_interleave(groups, dim=2)
-        return scan(query, key, value, g=g, beta=beta, **kwargs)
-
-    return recording_scan
-
-
-@pytest.mark.usefixtures("torch_kernels")
-class TestPatchQwenGdnGroupedHeads:
-    def test_fused_scan_gets_grouped_heads_and_matches_repeated_heads(
-        self, pristine_qwen_gdn_classes, monkeypatch
-    ):
-        # Arrange
-        model = _tiny_qwen_moe().train()
-        ids, positions = _rows("full")
-        expected_logits, expected_grads = _logits_and_grads(model, ids, positions)
-        heads = []
-        monkeypatch.setattr(
-            modeling_qwen3_5_moe, VARLEN_SCAN, _recording_scan(heads, grouped=True)
-        )
-        monkeypatch.setattr(qwen_packed, "_varlen_kernels_ready", lambda: True)
-        patch_qwen_gdn_grouped_heads(MIXER_PATH)
-
-        # Act
-        logits, grads = _logits_and_grads(model, ids, positions)
-
-        # Assert
-        # Two GDN layers with 2 key heads for 4 value heads.
-        assert heads == [2, 2]
-        # The same ops on the same values, only the repeat moved into the scan.
-        torch.testing.assert_close(logits, expected_logits, rtol=0, atol=0)
-        for grad, expected in zip(grads, expected_grads, strict=True):
-            torch.testing.assert_close(grad, expected, rtol=0, atol=0)
-        mixers = [m for m in model.modules() if isinstance(m, Qwen3_5MoeGatedDeltaNet)]
-        assert [mixer.num_k_heads for mixer in mixers] == [2, 2]
-
-    def test_pytorch_scans_get_repeated_heads(
-        self, pristine_qwen_gdn_classes, monkeypatch
-    ):
-        # Arrange
-        model = _tiny_qwen_moe().eval()
-        ids, positions = _rows("full")
-        heads = []
-        monkeypatch.setattr(
-            modeling_qwen3_5_moe, VARLEN_SCAN, _recording_scan(heads, grouped=False)
-        )
-        monkeypatch.setattr(qwen_packed, "_varlen_kernels_ready", lambda: False)
-        patch_qwen_gdn_grouped_heads(MIXER_PATH)
-
-        # Act
-        with torch.no_grad():
-            model(input_ids=ids, position_ids=positions, use_cache=False)
-
-        # Assert
-        assert heads == [4, 4]
-
-    def test_failed_forward_restores_num_k_heads(
-        self, pristine_qwen_gdn_classes, monkeypatch
-    ):
-        # Arrange
-        model = _tiny_qwen_moe().eval()
-        ids, positions = _rows("full")
-
-        def failing_scan(*_args, **_kwargs):
-            msg = "scan failed"
-            raise RuntimeError(msg)
-
-        monkeypatch.setattr(modeling_qwen3_5_moe, VARLEN_SCAN, failing_scan)
-        monkeypatch.setattr(qwen_packed, "_varlen_kernels_ready", lambda: True)
-        patch_qwen_gdn_grouped_heads(MIXER_PATH)
-
-        # Act
-        with pytest.raises(RuntimeError, match="scan failed"), torch.no_grad():
-            model(input_ids=ids, position_ids=positions, use_cache=False)
-
-        # Assert
-        mixers = [m for m in model.modules() if isinstance(m, Qwen3_5MoeGatedDeltaNet)]
-        assert [mixer.num_k_heads for mixer in mixers] == [2, 2]
-
-    def test_apply_is_idempotent(self, pristine_qwen_gdn_classes):
-        # Arrange
-        patch_qwen_gdn_grouped_heads(MIXER_PATH)
-        forward = Qwen3_5MoeGatedDeltaNet.forward
-
-        # Act
-        patch_qwen_gdn_grouped_heads(MIXER_PATH)
-
-        # Assert
-        assert Qwen3_5MoeGatedDeltaNet.forward is forward
-        assert getattr(Qwen3_5MoeGatedDeltaNet, GROUPED_QK_HEADS) is True
-
-
-def _kernel_modules(monkeypatch, importable: set[str]) -> None:
-    """Make the fused GDN kernels import, or fail to import, regardless of the host."""
-    kernels = {
-        "causal_conv1d": ("causal_conv1d", "causal_conv1d_fn"),
-        "fla": ("fla.ops.gated_delta_rule", "chunk_gated_delta_rule"),
-    }
-    for package, (name, function) in kernels.items():
-        if package in importable:
-            module = types.ModuleType(name)
-            setattr(module, function, lambda *_args, **_kwargs: None)
-            monkeypatch.setitem(sys.modules, name, module)
-        else:
-            # A None entry makes import_module raise ImportError.
-            monkeypatch.setitem(sys.modules, name, None)
-
-
-class TestVarlenKernelsReady:
-    @pytest.mark.parametrize(
-        ("importable", "expected"),
-        [
-            ({"fla", "causal_conv1d"}, True),
-            ({"fla"}, False),
-            ({"causal_conv1d"}, False),
-        ],
-    )
-    def test_needs_fla_and_causal_conv1d(self, monkeypatch, importable, expected):
-        # Arrange
-        _kernel_modules(monkeypatch, importable)
-
-        # Act
-        ready = qwen_packed._varlen_kernels_ready()
-
-        # Assert
-        assert ready is expected
-
-
 class TestInstallQwenGdnPatches:
-    def test_patch_without_a_gdn_config_raises(self) -> None:
-        with pytest.raises(ValueError, match="need a catalog gdn config"):
-            install_qwen_gdn_patches(PatchRuntimeConfig())
-
-    def test_gpu_with_a_failing_fla_import_raises(self, monkeypatch) -> None:
+    def test_gpu_without_fla_raises(self, monkeypatch) -> None:
         monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-        _kernel_modules(monkeypatch, {"fla", "causal_conv1d"})
-        real_import = importlib.import_module
+        real = importlib.util.find_spec
 
-        def import_module(name: str, package: str | None = None) -> types.ModuleType:
-            if name == "fla.ops.gated_delta_rule":
-                msg = "undefined symbol: fla_kernel"
-                raise ImportError(msg)
-            return real_import(name, package)
+        def find_spec(name: str, package: str | None = None):
+            if name == "fla":
+                return None
+            return real(name, package)
 
-        monkeypatch.setattr(importlib, "import_module", import_module)
+        monkeypatch.setattr(importlib.util, "find_spec", find_spec)
 
-        with pytest.raises(
-            RuntimeError, match=r"needs flash-linear-attention \(ImportError"
-        ):
-            install_qwen_gdn_patches(QWEN_PATCH, use_sequence_packing=True)
+        with pytest.raises(RuntimeError, match="flash-linear-attention"):
+            install_qwen_gdn_patches(PatchRuntimeConfig())
 
     def test_gpu_with_fla_and_causal_conv1d_installs_packed_patches(
         self, monkeypatch, pristine_qwen_gdn_classes
     ) -> None:
         monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-        _kernel_modules(monkeypatch, {"fla", "causal_conv1d"})
+        real = importlib.util.find_spec
 
-        install_qwen_gdn_patches(QWEN_PATCH, use_sequence_packing=True)
+        def find_spec(name: str, package: str | None = None):
+            if name in {"fla", "causal_conv1d"}:
+                return importlib.machinery.ModuleSpec(name, None)
+            return real(name, package)
+
+        monkeypatch.setattr(importlib.util, "find_spec", find_spec)
+
+        install_qwen_gdn_patches(PatchRuntimeConfig())
 
         assert getattr(Qwen3_5MoeGatedDeltaNet, RESETS_AT_DOCUMENT_BOUNDARY) is True
-        assert getattr(Qwen3_5MoeGatedDeltaNet, GROUPED_QK_HEADS) is True
 
     def test_cpu_without_fla_installs_packed_patches(
         self, monkeypatch, pristine_qwen_gdn_classes
     ) -> None:
         monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
 
-        install_qwen_gdn_patches(QWEN_PATCH, use_sequence_packing=True)
+        install_qwen_gdn_patches(PatchRuntimeConfig())
 
         assert getattr(Qwen3_5MoeGatedDeltaNet, RESETS_AT_DOCUMENT_BOUNDARY) is True
-
-    def test_skips_packed_sequences_unless_packing_is_on(self, monkeypatch) -> None:
-        # Arrange
-        seen: list[tuple[str, str]] = []
-        monkeypatch.setattr(
-            qwen_packed,
-            "patch_qwen_gdn_packed_sequences",
-            lambda mixer, text_model: seen.append((mixer, text_model)),
-        )
-
-        # Act
-        install_qwen_gdn_patches(QWEN_PATCH)
-        unpacked = list(seen)
-        install_qwen_gdn_patches(QWEN_PATCH, use_sequence_packing=True)
-
-        # Assert
-        assert unpacked == []
-        assert seen == [
-            (entry.mixer, entry.text_model) for entry in QWEN_PATCH.gdn.mixers
-        ]

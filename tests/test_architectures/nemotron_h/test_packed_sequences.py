@@ -197,21 +197,10 @@ def _routed_logprobs_and_each_adapter(
 class TestPatchNemotronMambaPackedSequences:
     """Mamba2 conv and scan state restart at every packed-document boundary."""
 
-    def test_family_install_skips_packed_sequences_by_default(
-        self, pristine_nemotron_classes
-    ):
-        model = _tiny_nemotron_h()
-
-        install_family_patches(model.config.model_type, model)
-
-        assert RESETS_AT_DOCUMENT_BOUNDARY not in vars(NemotronHMamba2Mixer)
-
     def test_packed_logprobs_match_padded_logprobs(self, pristine_nemotron_classes):
         # Arrange
         model = _tiny_nemotron_h().eval()
-        install_family_patches(
-            model.config.model_type, model, use_sequence_packing=True
-        )
+        install_family_patches(model.config.model_type, model)
 
         # Act
         with torch.no_grad():
@@ -224,9 +213,7 @@ class TestPatchNemotronMambaPackedSequences:
     def test_packed_gradients_match_padded_gradients(self, pristine_nemotron_classes):
         # Arrange
         model = _tiny_nemotron_h().train()
-        install_family_patches(
-            model.config.model_type, model, use_sequence_packing=True
-        )
+        install_family_patches(model.config.model_type, model)
         params = {
             "mixer_in_proj": model.model.layers[2].mixer.in_proj.weight,
             "mixer_A_log": model.model.layers[0].mixer.A_log,
@@ -251,9 +238,7 @@ class TestPatchNemotronMambaPackedSequences:
     ):
         # Arrange
         model = _tiny_nemotron_h().eval()
-        install_family_patches(
-            model.config.model_type, model, use_sequence_packing=True
-        )
+        install_family_patches(model.config.model_type, model)
 
         # Act
         with torch.no_grad():
@@ -267,9 +252,7 @@ class TestPatchNemotronMambaPackedSequences:
     ):
         # Arrange
         model = _tiny_nemotron_h().eval()
-        install_family_patches(
-            model.config.model_type, model, use_sequence_packing=True
-        )
+        install_family_patches(model.config.model_type, model)
 
         # Act
         with torch.no_grad():

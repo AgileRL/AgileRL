@@ -40,7 +40,6 @@ from torch.optim.lr_scheduler import LambdaLR
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.architectures import (
-    FAMILY_RUNTIME_CONFIGS,
     family_runtime,
     install_family_patches,
     pretrained_model_type,
@@ -58,19 +57,11 @@ from agilerl.arena.memory.resolve.attention import (
 )
 from agilerl.arena.memory.resolve.lora import resolve_max_lora_rank
 from agilerl.distributed.fsdp import CPUOffloadOptimizer, canonical_fsdp_param_fqn
-from agilerl.distributed.fsdp_meta import (
-    checkpoint_quantization_config,
-    dequantizing_quantization_config,
-)
 from agilerl.distributed.process import (
     allreduce_minmax_int,
     barrier,
     is_main_process,
     resolve_device,
-)
-from agilerl.distributed.tensor_parallel import (
-    tensor_parallel_row_orders,
-    tensor_rows_in_order,
 )
 from agilerl.protocols import GenerationConfigProtocol
 from agilerl.typing import (
@@ -109,9 +100,9 @@ if HAS_LLM_DEPENDENCIES:
     from safetensors.torch import load_file as safe_load_file
     from safetensors.torch import save_file
     from transformers import (
+        AutoConfig,
         BitsAndBytesConfig,
         GenerationConfig,
-        PretrainedConfig,
     )
     from transformers.modeling_utils import PreTrainedModel
 
@@ -447,12 +438,13 @@ def load_pad_token_configs(
     if not HAS_LLM_DEPENDENCIES or not model_name_or_path:
         return None, None
 
-    trainer = family_runtime(model_name_or_path).trainer
-    trust_remote_code = trainer.trust_remote_code is True
+    trust_remote_code = (
+        family_runtime(model_name_or_path).trainer.trust_remote_code is True
+    )
     # A checkpoint can omit config.json or generation_config.json.
     try:
         with remote_code_lock(trust_remote_code):
-            model_config = trainer.config_class.from_pretrained(
+            model_config = AutoConfig.from_pretrained(
                 model_name_or_path,
                 trust_remote_code=trust_remote_code,
             )
@@ -795,7 +787,6 @@ def get_lora_params(model: nn.Module) -> list[torch.Tensor]:
 def gather_to_host(
     named_tensors: Iterable[tuple[str, torch.Tensor]],
     keep: bool,
-    row_orders: Mapping[str, torch.Tensor] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Gather each tensor in full and copy it into a new host tensor.
 
@@ -807,8 +798,6 @@ def gather_to_host(
     :type named_tensors: Iterable[tuple[str, torch.Tensor]]
     :param keep: Whether this rank keeps the host copies.
     :type keep: bool
-    :param row_orders: Dim-0 row index applied to the gathered tensor, by name.
-    :type row_orders: Mapping[str, torch.Tensor] | None
     :return: Host copies by name; empty when ``keep`` is false.
     :rtype: dict[str, torch.Tensor]
     """
@@ -821,8 +810,6 @@ def gather_to_host(
         full = value.full_tensor() if isinstance(value, DTensor) else value
         if not keep:
             continue
-        if row_orders is not None:
-            full = tensor_rows_in_order(full, row_orders.get(name))
         on_cuda = full.device.type == "cuda"
         buffer = torch.empty(full.shape, dtype=full.dtype, pin_memory=on_cuda)
         buffer.copy_(full, non_blocking=on_cuda)
@@ -929,27 +916,6 @@ class LoraAdapterSnapshot:
     value_head: dict[str, torch.Tensor] = field(default_factory=dict)
 
 
-def adapter_hf_row_orders(
-    peft_model: nn.Module, adapter_name: str
-) -> dict[str, torch.Tensor]:
-    """Rows that put each tensor-parallel-permuted LoRA tensor back in Hugging Face order.
-
-    :param peft_model: PEFT model holding the adapter.
-    :type peft_model: nn.Module
-    :param adapter_name: Adapter to export.
-    :type adapter_name: str
-    :return: Row index by adapter state key (adapter segment and wrapper
-        segments stripped, as :func:`snapshot_lora_adapters` keys it).
-    :rtype: dict[str, torch.Tensor]
-    """
-    segment = f".{adapter_name}."
-    return {
-        canonical_fsdp_param_fqn(fqn.replace(segment, ".")): torch.argsort(order)
-        for fqn, order in tensor_parallel_row_orders(peft_model).items()
-        if segment in fqn
-    }
-
-
 def snapshot_lora_adapters(
     model: nn.Module,
     selected_adapters: Sequence[str],
@@ -993,7 +959,6 @@ def snapshot_lora_adapters(
                 for key, value in raw_state.items()
             ),
             keep=is_main,
-            row_orders=adapter_hf_row_orders(peft_model, adapter_name),
         )
         if not is_main:
             continue
@@ -1100,7 +1065,6 @@ def load_lora_adapters(
     adapter_path = Path(path) / adapter_name / "adapter_model.safetensors"
     adapter_state = safe_load_file(str(adapter_path), device=str(device))
 
-    row_orders = tensor_parallel_row_orders(model)
     missing: list[str] = []
     with torch.no_grad():
         for name, param in model.named_parameters():
@@ -1117,9 +1081,7 @@ def load_lora_adapters(
                 missing.append(loaded_key)
                 continue
 
-            full_tensor = tensor_rows_in_order(
-                adapter_state[loaded_key].to(device), row_orders.get(name)
-            )
+            full_tensor = adapter_state[loaded_key].to(device)
 
             if isinstance(param, DTensor):
                 # FSDP2 DTensor: scatter the full tensor onto the mesh
@@ -1479,32 +1441,6 @@ def _adapt_mamba_lora_config(model: nn.Module, lora_config: LoraConfig) -> LoraC
     return _clone_lora_config(lora_config, **updates)
 
 
-def _exclude_family_lora_modules(
-    model: nn.Module, lora_config: LoraConfig
-) -> LoraConfig:
-    """Add the family's ``lora_exclude_modules`` to ``exclude_modules``.
-
-    :raises ValueError: If ``exclude_modules`` is a regex and the family
-        excludes modules.
-    """
-    model_type = getattr(getattr(model, "config", None), "model_type", None)
-    runtime = FAMILY_RUNTIME_CONFIGS.get(model_type)
-    if runtime is None or not runtime.lora_exclude_modules:
-        return lora_config
-    if isinstance(lora_config.exclude_modules, str):
-        msg = (
-            f"exclude_modules regex {lora_config.exclude_modules!r} cannot take "
-            f"the {model_type} exclusions; pass a list of module names"
-        )
-        raise ValueError(msg)
-    existing = list(lora_config.exclude_modules or [])
-    missing = sorted(runtime.lora_exclude_modules - set(existing))
-    if not missing:
-        return lora_config
-    logger.info("Excluded %s modules %s from LoRA", model_type, missing)
-    return _clone_lora_config(lora_config, exclude_modules=existing + missing)
-
-
 def adapt_lora_config_for_model(
     model: nn.Module,
     lora_config: LoraConfig,
@@ -1520,8 +1456,6 @@ def adapt_lora_config_for_model(
 
     On Mamba-family ``model_type`` values, ``out_proj`` and ``conv1d`` are excluded
     from LoRA inject (PEFT 0.20+ forbids wrapping those fused-kernel modules).
-    A family's ``lora_exclude_modules`` join ``exclude_modules`` for every
-    ``target_modules`` form.
 
     Packed-expert ``target_parameters`` force ``lora_dropout=0``; PEFT cannot
     factor dropout out of the parameter-level low-rank product.
@@ -1542,7 +1476,6 @@ def adapt_lora_config_for_model(
     """
     lora_config = _zero_lora_dropout_for_target_parameters(lora_config)
     lora_config = _adapt_mamba_lora_config(model, lora_config)
-    lora_config = _exclude_family_lora_modules(model, lora_config)
     prefix = language_model_prefix(model)
     tower_names = sorted(set(tower_target_modules or ()))
     if prefix is None:
@@ -1871,7 +1804,6 @@ def create_model_from_name_or_path(
     model_config: dict[str, Any] | None = None,
     add_value_head: bool = False,
     use_distributed: bool = False,
-    use_sequence_packing: bool = False,
 ) -> PreTrainedModel:
     """Create a model from a name or path.
 
@@ -1882,42 +1814,25 @@ def create_model_from_name_or_path(
     :type attn_implementation: str
     :param model_config: Extra keyword arguments forwarded to ``from_pretrained``
         (e.g. a ``quantization_config``). ``torch_dtype`` fills if absent;
-        family trainer keys fill via ``setdefault``. Without a
-        ``quantization_config``, an FP8 / MXFP4 checkpoint dequantizes to
-        ``torch_dtype``.
+        family trainer keys fill via ``setdefault``.
     :type model_config: dict[str, Any ] | None
     :param add_value_head: Flag to indicate if a value head should be added to the model, defaults to False
     :type add_value_head: bool, optional
     :param use_distributed: Whether the model is created for a distributed
         run, defaults to False
     :type use_distributed: bool, optional
-    :param use_sequence_packing: Install packed-sequence mixer wraps.
-    :type use_sequence_packing: bool, optional
     :return: The created model.
     :rtype: PreTrainedModel
-    :raises ValueError: If the checkpoint is quantized in a format that does
-        not dequantize on load.
     """
     # Class-level family patches wrap mixer ``__init__`` and must run
     # before ``from_pretrained``.
-    install_family_patches(
-        pretrained_model_type(model_name_or_path),
-        use_sequence_packing=use_sequence_packing,
-    )
+    install_family_patches(pretrained_model_type(model_name_or_path))
 
     model_config = dict(model_config) if model_config else {}
     model_config.setdefault("torch_dtype", torch.bfloat16)
     trainer = family_runtime(model_name_or_path).trainer
     for key, value in trainer.load_kwargs().items():
         model_config.setdefault(key, value)
-    if "quantization_config" not in model_config:
-        checkpoint_config, _ = PretrainedConfig.get_config_dict(model_name_or_path)
-        quantization_config = checkpoint_quantization_config(checkpoint_config)
-        if quantization_config is not None:
-            # SM 8.9+ GPUs otherwise keep FP8 weights and swap in FP8Linear.
-            model_config["quantization_config"] = dequantizing_quantization_config(
-                quantization_config
-            )
     model_config["attn_implementation"] = attn_implementation
     if is_main_process():
         logger.info("Trainer attention backend: %s", attn_implementation)
@@ -2844,8 +2759,7 @@ def sample_eval_prompts(
     Columns are resolved automatically per gym type:
 
     * :class:`SFTGym` — ``chosen`` is ``env.response_column``; ``rejected``
-      is ``None`` (SFT has no negative example). A ``messages`` row gives its
-      rendered text up to the first assistant turn and that turn.
+      is ``None`` (SFT has no negative example).
     * :class:`PreferenceGym` — ``chosen`` and ``rejected`` map to the
       dataset's ``"chosen"`` / ``"rejected"`` columns.
     * Any other gym — both are ``None``.
@@ -2866,16 +2780,6 @@ def sample_eval_prompts(
         msg = "env.test_dataloader.dataset is required"
         raise TypeError(msg)
     indices = random.Random(seed).sample(range(len(dataset)), min(n, len(dataset)))
-
-    if "messages" in getattr(dataset, "features", ()):
-        # Deferred: agilerl.llm_envs imports this module.
-        from agilerl.llm_envs.dataset_env import sft_eval_sample
-
-        tokenizer = getattr(env, "tokenizer", None)
-        if tokenizer is None:
-            msg = "env.tokenizer is required to render messages rows"
-            raise TypeError(msg)
-        return [(*sft_eval_sample(tokenizer, dataset[i]), None) for i in indices]
 
     chosen_col: str | None = None
     rejected_col: str | None = None
@@ -3537,15 +3441,7 @@ def vllm_lora_state_dict(
         )
         raise ValueError(msg)
     check_vllm_lora_export_complete(peft_model, adapter_name, live_state, state)
-    hf_orders = {
-        id(raw[name]): order
-        for name, order in adapter_hf_row_orders(peft_model, adapter_name).items()
-        if name in raw
-    }
-    return {
-        key: tensor_rows_in_order(tensor, hf_orders.get(id(tensor)))
-        for key, tensor in state.items()
-    }
+    return state
 
 
 def save_peft_adapter_for_vllm_rollout(

@@ -5,12 +5,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from dataclasses import dataclass, field
-from typing import Annotated, ClassVar, Literal
+from dataclasses import dataclass
+from typing import Annotated, ClassVar
 
 from pydantic import ConfigDict, Field
-from pydantic.json_schema import SkipJsonSchema
 
 FSDP_DTYPE_NAMES = frozenset({"bfloat16", "float16", "float32", "float64"})
 # Parameters with fewer elements stay unsharded on every rank.
@@ -25,8 +23,6 @@ FSDP_MEMORY_FIELDS = (
     "activation_offload",
     "cpu_offload",
 )
-# Parallel degrees a manifest can pin. Absent from a built config, all of them stay.
-PARALLEL_LAYOUT_FIELDS = frozenset({"tp", "ep", "cp", "shard_group_size"})
 
 
 @dataclass
@@ -161,59 +157,6 @@ class FSDPConfig:
             ),
         ),
     ] = 1
-    shard_frozen_tp: Annotated[
-        bool | None,
-        Field(
-            description=(
-                "FSDP-shard frozen tensor-parallel weights over dp_shard x cp "
-                "and all-gather them per unit. False keeps each rank's 1/tp "
-                "of them resident outside FSDP: no gathers, more VRAM. "
-                "Trainable weights always shard. Picked from the memory "
-                "estimate; manifests cannot set it. None shards; the search "
-                "picks False when the estimated training peak fits with the "
-                "underprediction buffer, else True."
-            ),
-        ),
-    ] = None
-    save_moe_collectives: Annotated[
-        bool | None,
-        Field(
-            description=(
-                "Activation checkpointing saves the expert-parallel token "
-                "all-to-alls and the tensor-parallel reduces and gathers "
-                "inside each checkpointed MoE block, so its recompute "
-                "communicates nothing. Holds those outputs from forward to "
-                "backward: 2 x tokens x top_k / tp routed rows per MoE layer "
-                "under expert parallel. Picked from the memory estimate; "
-                "manifests cannot set it. None recomputes them; the search "
-                "picks True on MoE models with expert parallel or a MoE "
-                "tensor-parallel plan when the estimated training peak fits "
-                "with the underprediction buffer, else False."
-            ),
-        ),
-    ] = None
-    cp: Annotated[
-        int,
-        Field(
-            ge=1,
-            description=(
-                "Context-parallel degree. Consecutive ranks hold the same "
-                "batch rows and one slice of each sequence. 1 keeps full "
-                "sequences on every rank."
-            ),
-        ),
-    ] = 1
-    cp_style: Annotated[
-        Literal["ulysses"],
-        Field(
-            description=(
-                "How context parallel redistributes sequence shards. Only "
-                "'ulysses' is supported: two all-to-alls around local flash "
-                "attention, head-parallel all-to-alls around Mamba, and "
-                "sequence-sharded Gated DeltaNet."
-            ),
-        ),
-    ] = "ulysses"
     shard_group_size: Annotated[
         int | None,
         Field(
@@ -225,15 +168,6 @@ class FSDPConfig:
             ),
         ),
     ] = None
-    # Parallel fields the manifest set; None pins all of them. Not a manifest key.
-    parallel_pins: Annotated[
-        SkipJsonSchema[frozenset[str] | None], Field(exclude=True)
-    ] = field(default=None, repr=False, compare=False)
-
-    @property
-    def frozen_tp_resident(self) -> bool:
-        """Whether frozen tensor-parallel weights stay resident outside FSDP."""
-        return self.tp > 1 and self.shard_frozen_tp is False
 
     def __post_init__(self) -> None:
         self.param_dtype = _dtype_name(self.param_dtype)
@@ -259,53 +193,17 @@ class FSDPConfig:
         if self.tp < 1:
             msg = "FSDPConfig.tp must be >= 1"
             raise ValueError(msg)
-        if self.cp < 1:
-            msg = "FSDPConfig.cp must be >= 1"
-            raise ValueError(msg)
-        if self.cp_style != "ulysses":
-            msg = (
-                f"FSDPConfig.cp_style={self.cp_style!r} is not supported: "
-                "only 'ulysses' is supported"
-            )
-            raise ValueError(msg)
         if self.shard_group_size is not None:
             if self.shard_group_size < 1:
                 msg = "FSDPConfig.shard_group_size must be >= 1"
                 raise ValueError(msg)
-            for name, degree in (
-                ("ep", self.ep),
-                ("tp * cp", self.tp * self.cp),
-            ):
+            for name, degree in (("ep", self.ep), ("tp", self.tp)):
                 if self.shard_group_size % degree:
                     msg = (
                         f"FSDPConfig.shard_group_size={self.shard_group_size} "
                         f"must be divisible by {name}={degree}"
                     )
                     raise ValueError(msg)
-
-
-def parallel_layout_pins(config: FSDPConfig) -> frozenset[str]:
-    """``tp``, ``ep``, ``cp``, and ``shard_group_size`` the manifest set on ``config``.
-
-    A config built in Python, with no manifest pins recorded, keeps all of them.
-
-    :param config: FSDP config.
-    :return: The pinned field names.
-    """
-    if config.parallel_pins is None:
-        return PARALLEL_LAYOUT_FIELDS
-    return config.parallel_pins
-
-
-def record_parallel_pins(config: FSDPConfig, names: Iterable[str]) -> FSDPConfig:
-    """Remember which parallel fields ``names`` set. Returns ``config``.
-
-    :param config: FSDP config, updated in place.
-    :param names: Field names the manifest passed.
-    :return: ``config``.
-    """
-    config.parallel_pins = frozenset(names) & PARALLEL_LAYOUT_FIELDS
-    return config
 
 
 def _dtype_name(value: object) -> str:

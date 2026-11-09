@@ -25,7 +25,6 @@ from agilerl.llm_envs.chat_formats import (
 from agilerl.llm_envs.dataset_env import encode_chat_transcript
 from agilerl.llm_envs.harness import RolloutHarness
 from tests.helpers.rollout_doubles import FakeEnvClient
-from tests.helpers.transcripts import assistant_runs
 
 # Tokenizer files come from the Hub, and Gemma 4 is gated. CI runs these on the
 # Linux CPU shard, which has HF_TOKEN and a Hub cache.
@@ -243,6 +242,17 @@ class TestRolloutHarnessTextFeedbackIds:
             match=f"could not render a '{role}' feedback turn.*Label the observation",
         ):
             harness._text_feedback_ids([feedback], tokenizer.eos_token_id)
+
+
+def assistant_runs(mask: list[bool]) -> list[tuple[int, int]]:
+    """``(start, end)`` of each run of trained tokens."""
+    runs: list[tuple[int, int]] = []
+    for index, trained in enumerate(mask):
+        if trained and (index == 0 or not mask[index - 1]):
+            runs.append((index, index + 1))
+        elif trained:
+            runs[-1] = (runs[-1][0], index + 1)
+    return runs
 
 
 class TestEncodeChatTranscriptMatchesTheRollout:

@@ -16,7 +16,7 @@ from __future__ import annotations
 import datetime
 import os
 import random
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Sequence
 from contextlib import ContextDecorator
 from typing import Any
 
@@ -248,7 +248,7 @@ def aggregate_metrics_across_gpus(
 
 
 def aggregate_metrics_dict(
-    metrics: Mapping[str, torch.Tensor | np.ndarray | float],
+    metrics: dict[str, torch.Tensor | np.ndarray | float],
     excluded: Collection[str] = (),
     maximized: Collection[str] = (),
 ) -> dict[str, float]:
@@ -258,7 +258,7 @@ def aggregate_metrics_dict(
     each metric is its local mean.
 
     :param metrics: Metric values on this rank, by name.
-    :type metrics: Mapping[str, torch.Tensor | np.ndarray | float]
+    :type metrics: dict[str, torch.Tensor | np.ndarray | float]
     :param excluded: Metrics this rank leaves out of their cross-rank mean. A
         metric every rank excludes averages to NaN.
     :type excluded: Collection[str]
@@ -335,21 +335,19 @@ class raise_on_any_rank(ContextDecorator):
         return False
 
 
-def sync_grads(params: Sequence[nn.Parameter], cp: int = 1) -> None:
+def sync_grads(params: Sequence[nn.Parameter]) -> None:
     """Average gradients across data-parallel ranks.
 
     One coalesced all-reduce of every ``.grad`` in ``params`` (SUM, then
-    divide by world size / ``cp`` so Gloo works). See :func:`all_reduce_grads`
-    for params without a grad. No-op on a single device.
+    divide by world size so Gloo works). See :func:`all_reduce_grads` for
+    params without a grad. No-op on a single device.
 
     :param params: Optimizer parameters whose ``.grad`` should be averaged.
-    :param cp: Context-parallel degree. CP ranks hold slices of one
-        sequence's grad, so they sum rather than average.
     """
     if not params or not is_distributed() or dist.get_world_size() == 1:
         return
 
-    all_reduce_grads(params, divisor=dist.get_world_size() // cp)
+    all_reduce_grads(params, divisor=dist.get_world_size())
 
 
 def all_reduce_grads(

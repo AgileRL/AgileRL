@@ -212,8 +212,7 @@ jobs:
               uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
               with:
                   persist-credentials: false
-                  fetch-depth: 0
-                  fetch-tags: true
+                  fetch-depth: 1
 
             - name: Download dist
               uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
@@ -240,20 +239,19 @@ jobs:
                   notes_dir="${RUNNER_TEMP}/spoke-release"
                   mkdir -p "${notes_dir}"
                   if [[ -n "${PREV}" ]]; then
-                    git log --first-parent --reverse --format='%B%x1e' "${PREV}..${TAG}" \
-                      > "${notes_dir}/commits.log"
+                    gh api "repos/${GITHUB_REPOSITORY}/compare/${PREV}...${TAG}" \
+                      > "${notes_dir}/compare.json"
                   else
-                    git log -1 --format='%B%x1e' "${TAG}" \
-                      > "${notes_dir}/commits.log"
+                    gh api "repos/${GITHUB_REPOSITORY}/commits/${TAG}" \
+                      > "${notes_dir}/compare.json"
                   fi
                   python3 scripts/spoke_release_notes.py \
                     --tag "${TAG}" \
                     --previous-tag "${PREV}" \
                     --repo "${GITHUB_REPOSITORY}" \
-                    --from-git-log \
                     --title-file "${notes_dir}/title.txt" \
                     --notes-file "${notes_dir}/notes.md" \
-                    < "${notes_dir}/commits.log"
+                    < "${notes_dir}/compare.json"
                   TITLE="$(cat "${notes_dir}/title.txt")"
                   latest_args=()
                   if [[ "${TAG}" == agilerl-arena/* ]]; then

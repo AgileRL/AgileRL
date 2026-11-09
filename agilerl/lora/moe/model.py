@@ -6,15 +6,16 @@
 from __future__ import annotations
 
 from types import MethodType
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import torch
 import torch.nn as nn
+from peft.tuners.lora.layer import ParamWrapper
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     CheckpointWrapper,
 )
+from transformers.modeling_layers import GradientCheckpointingLayer
 
-from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.arena.memory.resolve.moe import resolve_moe_lora_recompute
 from agilerl.lora.fused import patch_lora_for_fused_forward
 from agilerl.lora.moe.adapters import wrapper_chain
@@ -26,16 +27,11 @@ from agilerl.lora.moe.layouts import (
     routed_projection_names,
 )
 from agilerl.lora.moe.routed import routed_experts_local_forward
-
-if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
-    from peft.tuners.lora.layer import ParamWrapper
-    from transformers.modeling_layers import GradientCheckpointingLayer
-
-    from agilerl.lora.moe.wrappers import (
-        RoutedExpertsLoraWrapper,
-        SortedExpertsLoraWrapper,
-        TransposedExpertsLoraWrapper,
-    )
+from agilerl.lora.moe.wrappers import (
+    RoutedExpertsLoraWrapper,
+    SortedExpertsLoraWrapper,
+    TransposedExpertsLoraWrapper,
+)
 
 
 def moe_expert_target_parameters(model: nn.Module) -> list[str]:
