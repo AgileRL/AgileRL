@@ -264,6 +264,21 @@ GPU_CATALOGUE: tuple[tuple[str, GpuInfo], ...] = (
             all_reduce_latency_us=20,
         ),
     ),
+    (
+        "RTXPRO6000",
+        # Datasheet BF16 tensor peak is 1 PFLOP with 2:4 sparsity; dense is 500.
+        # All-reduce is not on the datasheet (PCIe, no NVLink).
+        GpuInfo(
+            name="NVIDIA RTX PRO 6000 Blackwell Server Edition",
+            total_gib=96,
+            cc_major=12,
+            cc_minor=0,
+            bf16_tflops=500,
+            memory_gb_per_second=1597,
+            all_reduce_gb_per_second=20,
+            all_reduce_latency_us=20,
+        ),
+    ),
     ("T4", GpuInfo(name="Tesla T4", total_gib=16, cc_major=7, cc_minor=5)),
     (
         "V100",

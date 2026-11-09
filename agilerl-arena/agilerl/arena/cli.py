@@ -45,6 +45,7 @@ from agilerl.arena.output import (
     select_row,
     supports_interactive_selection,
 )
+from agilerl.arena.snowflake.cli import snowflake_group
 
 ArenaError.enable_cli_mode()
 
@@ -1422,6 +1423,7 @@ def load_cli_plugins(group: click.Group) -> None:
 
 main.add_command(datasets_group)
 main.add_command(memory_group)
+main.add_command(snowflake_group)
 load_cli_plugins(main)
 register_byoc_manifest_group(main)
 

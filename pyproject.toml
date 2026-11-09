@@ -194,6 +194,23 @@ conflicts = [
         { extra = "cpu" },
         { extra = "llm" },
     ],
+    # snowflake-ml-python pins pandas<3, packaging<26, and protobuf<6.34.
+    [
+        { package = "agilerl-arena", extra = "snowflake" },
+        { group = "dev" },
+    ],
+    [
+        { package = "agilerl-arena", extra = "snowflake" },
+        { extra = "vllm" },
+    ],
+    [
+        { package = "agilerl-arena", extra = "snowflake" },
+        { extra = "llm" },
+    ],
+    [
+        { package = "agilerl-arena", extra = "snowflake" },
+        { extra = "all" },
+    ],
 ]
 # box2d has a bug where it doesn't declare swig as a build dependency.
 # This workaround tells uv to build box2d-py using the project environment directly

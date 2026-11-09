@@ -27,6 +27,12 @@ dependencies = [
 hub = [
     "huggingface-hub>=0.30",
 ]
+# Custom runtime ML Jobs. Pin the 2.8 line so the extra stays off shap, xgboost, and scikit-learn.
+snowflake = [
+    "snowflake-connector-python",
+    "snowflake-snowpark-python",
+    "snowflake-ml-python>=2.8.0",
+]
 
 [project.scripts]
 arena = "agilerl.arena.cli:main"
