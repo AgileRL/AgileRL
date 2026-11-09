@@ -899,6 +899,26 @@ class TestMain:
         assert "missing" in capsys.readouterr().err
 
 
+class TestMainColocatedTrainers:
+    def test_num_gpus_sizes_a_colocated_member_on_every_gpu(self, tmp_path, capsys):
+        # Arrange
+        pinned = copy.deepcopy(SFT_MANIFEST)
+        pinned["training"]["training_gpus_per_agent"] = 4
+        path = write_manifest(tmp_path, SFT_MANIFEST, "sft.yaml")
+        pinned_path = write_manifest(tmp_path, pinned, "sft_pinned.yaml")
+        main(pinned_path, config_path=TINY_CONFIG, gpu="NVIDIA L4", as_json=True)
+        expected = json.loads(capsys.readouterr().out)["training"]
+
+        # Act
+        code = main(
+            path, config_path=TINY_CONFIG, gpu="NVIDIA L4", num_gpus=4, as_json=True
+        )
+
+        # Assert
+        assert code == EXIT_OK
+        assert json.loads(capsys.readouterr().out)["training"] == expected
+
+
 class TestReportColour:
     def test_plain_output_has_no_escape_codes_and_keeps_glyphs(
         self, manifest_path, capsys

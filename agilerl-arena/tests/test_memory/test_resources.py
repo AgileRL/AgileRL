@@ -22,6 +22,7 @@ from agilerl.arena.memory.resolve.parallel import ParallelLayout
 from agilerl.arena.memory.resolve.run import SearchCache, resolve_run_memory
 from agilerl.arena.memory.resources import (
     check_tiers,
+    colocated_manifest,
     engine_width,
     engines_per_member,
     gpus_required,
@@ -253,6 +254,29 @@ class TestTierSyncLink:
         assert tier_sync_link(16, 8) is None
 
 
+class TestColocatedManifest:
+    @pytest.mark.parametrize(("pop_size", "trainers"), [(1, 4), (2, 2), (8, 1)])
+    def test_colocated_member_trains_on_every_gpu_it_owns(self, pop_size, trainers):
+        manifest = manifest_with(SFT_MANIFEST, pop_size=pop_size)
+
+        laid_out = colocated_manifest(manifest, 4)
+
+        assert laid_out.training.training_gpus_per_agent == trainers
+        assert manifest.training.training_gpus_per_agent == 1
+
+    def test_authored_trainer_count_is_replaced(self):
+        manifest = manifest_with(SFT_MANIFEST, training_gpus_per_agent=1)
+
+        laid_out = colocated_manifest(manifest, 4)
+
+        assert laid_out.training.training_gpus_per_agent == 4
+
+    def test_async_manifest_is_unchanged(self):
+        manifest = TrainingManifest.model_validate(MANIFEST)
+
+        assert colocated_manifest(manifest, 8) is manifest
+
+
 class TestSearchesGpuSplit:
     def test_async_run_with_neither_count_searches(self):
         manifest = TrainingManifest.model_validate(unset_split(MANIFEST))
@@ -336,6 +360,29 @@ class TestSplitManifest:
 
 
 class TestCheckTiers:
+    def test_colocated_run_is_sized_on_every_gpu_of_the_member(self):
+        # Arrange
+        manifest = TrainingManifest.model_validate(SFT_MANIFEST)
+        sized = []
+        build = builder()
+
+        def recording_build(laid_out, train_device, width, engines, adapter_sync):
+            sized.append(laid_out.training.training_gpus_per_agent)
+            return build(laid_out, train_device, width, engines, adapter_sync)
+
+        # Act
+        (check,) = check_tiers(
+            [tier("l4-4x", "NVIDIA L4", 4, 4.0)],
+            manifest,
+            tiny_model(),
+            recording_build,
+        )
+
+        # Assert
+        assert check.fits
+        assert check.trainers == 4
+        assert set(sized) == {4}
+
     def test_omitted_split_is_sized_at_the_split_the_run_picks(self):
         # Arrange
         manifest = TrainingManifest.model_validate(unset_split(MANIFEST))

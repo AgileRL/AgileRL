@@ -47,6 +47,7 @@ from agilerl.arena.memory.resolve.sequences import (
 from agilerl.arena.memory.resources import (
     TierCheck,
     check_tiers,
+    colocated_manifest,
     engine_width,
     engines_per_member,
     note_queued_sequences,
@@ -370,6 +371,7 @@ def _planned_layout(
 ) -> tuple[TrainingManifest, bool]:
     """The manifest as the run lays it out on ``num_gpus`` GPUs of one node, and whether weight sync pushes merged weights, as :func:`check_tiers` picks them.
 
+    A colocated member trains on every GPU it owns (:func:`colocated_manifest`).
     A searched split that fits writes its counts, engine width and layout
     (:func:`split_manifest`); otherwise the manifest's own counts are kept.
     Without ``num_gpus`` no link is known: merged sync where the engines can
@@ -377,6 +379,7 @@ def _planned_layout(
     """
     if num_gpus is None:
         return manifest, True
+    manifest = colocated_manifest(manifest, num_gpus)
     sync_link = tier_sync_link(num_gpus, None)
     if searches_gpu_split(manifest):
         try:

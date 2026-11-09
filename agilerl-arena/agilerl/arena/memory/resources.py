@@ -167,6 +167,22 @@ def engines_per_member(
     )
 
 
+def colocated_manifest(manifest: TrainingManifest, num_gpus: int) -> TrainingManifest:
+    """``manifest`` with each colocated member training on every GPU it owns, as Ray builds it.
+
+    :param manifest: Validated training manifest.
+    :param num_gpus: GPUs in the allocation.
+    :return: A copy with ``training_gpus_per_agent`` set, or ``manifest`` itself under async rollout.
+    """
+    if async_rollout(manifest):
+        return manifest
+    laid_out = manifest.model_copy(deep=True)
+    laid_out.training.training_gpus_per_agent = max(
+        num_gpus // manifest.training.pop_size, 1
+    )
+    return laid_out
+
+
 def searches_gpu_split(manifest: TrainingManifest) -> bool:
     """Whether the run picks its trainer / engine split: async, with neither count set."""
     return async_rollout(manifest) and not (
@@ -272,11 +288,13 @@ def _allocation(tier: dict[str, Any], num_nodes: int) -> int:
 def _most_trainers(manifest: TrainingManifest, allocation: int) -> int:
     """Trainer ranks one member's parallel groups span on ``allocation`` GPUs.
 
-    :return: The kept trainer count, or the most a searched split may use:
-        a member's GPUs less one engine GPU.
+    :return: The kept trainer count, a colocated member's GPUs, or the most a
+        searched split may use: a member's GPUs less one engine GPU.
     """
     if searches_gpu_split(manifest):
         return max(allocation // manifest.training.pop_size - 1, 1)
+    if not async_rollout(manifest):
+        return max(allocation // manifest.training.pop_size, 1)
     return manifest.training.training_gpus_per_agent
 
 
@@ -402,6 +420,7 @@ def _price(
     """
     node_gpus = _node_gpus(tier)
     allocation = _allocation(tier, num_nodes)
+    manifest = colocated_manifest(manifest, allocation)
     placed = manifest if layout is None else manifest_at_layout(manifest, layout)
     shortfall = _placement_shortfall(
         placed,
