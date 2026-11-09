@@ -182,6 +182,20 @@ class TestModelInfoConfig:
         assert entry.max_context_length > 0
         assert entry.num_hidden_layers > 0
 
+    def test_each_access_returns_an_equal_independent_copy(self) -> None:
+        # Arrange
+        entry = SUPPORTED_MODEL_INFO["Qwen/Qwen3.6-35B-A3B"]
+        bundled = json.loads(supported_path(entry.hub_id).read_text(encoding="utf-8"))
+
+        # Act
+        first = entry.config
+        second = entry.config
+
+        # Assert
+        assert first == second == bundled["config"]
+        assert first is not second
+        assert first["vision_config"] is not second["vision_config"]
+
     def test_multimodal_ids_read_text_config(self) -> None:
         gemma = SUPPORTED_MODEL_INFO["google/gemma-4-E4B-it"]
         super_vl = SUPPORTED_MODEL_INFO[

@@ -9,6 +9,7 @@ and torch-free.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 from typing import Any, Literal, NamedTuple, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -1333,6 +1334,32 @@ class TrainingSettings(BaseModel):
             )
             raise ValueError(msg)
         return self
+
+
+@dataclass(frozen=True)
+class TrainingSettingsKey:
+    """Hashable stand-in for :class:`TrainingSettings`, keyed on its field values.
+
+    ``fsdp`` is a mutable dataclass, so it enters the key as a snapshot of its
+    field values, ``parallel_pins`` included.
+    """
+
+    values: tuple[object, ...]
+    settings: TrainingSettings = field(compare=False)
+
+    @classmethod
+    def of(cls, settings: TrainingSettings) -> TrainingSettingsKey:
+        """Key ``settings`` by every field value as it is now.
+
+        :param settings: Training settings.
+        :return: The key, carrying ``settings``.
+        """
+        fsdp = settings.fsdp
+        values = tuple(
+            tuple(vars(fsdp).values()) if name == "fsdp" and fsdp is not None else value
+            for name, value in settings.__dict__.items()
+        )
+        return cls(values, settings)
 
 
 class GenerationSettings(BaseModel):

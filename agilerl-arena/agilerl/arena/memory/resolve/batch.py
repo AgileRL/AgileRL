@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 from agilerl.arena.memory.specs import ModelArch, ModelSpec
 from agilerl.arena.models.algorithms.base import LLMAlgorithmSpec
 from agilerl.arena.models.algorithms.grpo import GRPOSpec
@@ -124,9 +126,19 @@ def catalog_model(spec: LLMAlgorithmSpec) -> ModelSpec | None:
     :return: The spec's catalog model.
     """
     hub_id = spec.pretrained_model_name_or_path
-    info = SUPPORTED_MODEL_INFO.get(hub_id) if hub_id is not None else None
-    if info is None or hub_id is None:
+    if hub_id is None or hub_id not in SUPPORTED_MODEL_INFO:
         return None
+    return catalog_model_spec(hub_id)
+
+
+@lru_cache(maxsize=len(SUPPORTED_MODEL_INFO))
+def catalog_model_spec(hub_id: str) -> ModelSpec:
+    """Training model of a catalogued Hub id, built once per id.
+
+    :param hub_id: Key of :data:`SUPPORTED_MODEL_INFO`.
+    :return: The id's model from its bundled config and parameter count.
+    """
+    info = SUPPORTED_MODEL_INFO[hub_id]
     counted = info.inspected["num_params"]
     n_params = counted if isinstance(counted, int) else None
     return ModelSpec(

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Literal
 
 from agilerl.arena.memory.breakdown import PhaseBreakdown
@@ -15,22 +16,19 @@ from agilerl.arena.memory.manifest import (
     configured_rollout_engines,
     generation_settings_from_manifest,
 )
+from agilerl.arena.memory.resolve.batch import catalog_model_spec
 from agilerl.arena.memory.solver import solve
-from agilerl.arena.memory.specs import DeviceSpec, ModelArch, ModelSpec, RunConfig
+from agilerl.arena.memory.specs import DeviceSpec, ModelSpec, RunConfig
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
 from agilerl.arena.models.manifest import TrainingManifest
-from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO, ModelInfo
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 
 
-def _engine_model(hub_id: str, info: ModelInfo) -> ModelSpec:
+@lru_cache(maxsize=len(SUPPORTED_MODEL_INFO))
+def _engine_model(hub_id: str) -> ModelSpec:
     """Catalog model the rollout engine serves, with the manifest's weight variants."""
-    counted = info.inspected["num_params"]
-    n_params = counted if isinstance(counted, int) else None
-    return ModelSpec(
-        model_id=hub_id,
-        arch=ModelArch.from_hf_config(info.config),
-        n_params=n_params,
-        variants=MANIFEST_WEIGHT_VARIANTS,
+    return catalog_model_spec(hub_id).model_copy(
+        update={"variants": MANIFEST_WEIGHT_VARIANTS}
     )
 
 
@@ -179,7 +177,7 @@ def servable_engine_widths(
     :return: Those widths, ascending.
     """
     hub_id = manifest.algorithm.pretrained_model_name_or_path
-    model = _engine_model(hub_id, SUPPORTED_MODEL_INFO[hub_id])
+    model = _engine_model(hub_id)
     arch = model.arch
     checked = {} if cache is None else cache
 
@@ -243,7 +241,7 @@ def resolve_engine_tensor_parallel(
     if not candidates:
         return None
 
-    model = _engine_model(hub_id, info)
+    model = _engine_model(hub_id)
     # A pinned sequence count that fits beats a higher count that queues.
     requested = vllm.max_num_seqs if "max_num_seqs" in vllm.model_fields_set else None
     best: tuple[bool, int, int, int] | None = None
@@ -286,7 +284,7 @@ def resolve_engine_fast_path(
     if info is None or vllm.tensor_parallel_size is None:
         return None
     settings = generation_settings_from_manifest(manifest, adapter_sync=adapter_sync)
-    lean = drop_engine_fast_paths(_engine_model(hub_id, info), device, settings)
+    lean = drop_engine_fast_paths(_engine_model(hub_id), device, settings)
     if lean == settings:
         return None
     if settings.speculative_drafting is None:

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 import math
 from dataclasses import replace
@@ -545,6 +546,82 @@ class TestResolveTrainingMemory:
         assert plan.micro_batch_tokens_per_gpu == 4096
 
 
+class TestResolveTrainingMemoryRepeats:
+    def test_repeat_matches_the_first_plan(self):
+        # Arrange
+        first = resolve_training_memory(
+            DENSE_MODEL,
+            budget_device(80 * GiB),
+            fsdp_only(dense_settings()),
+            MemoryPins(),
+            16,
+        )
+
+        # Act
+        again = resolve_training_memory(
+            DENSE_MODEL,
+            budget_device(80 * GiB),
+            fsdp_only(dense_settings()),
+            MemoryPins(),
+            16,
+        )
+
+        # Assert
+        assert again == first
+        assert again.fsdp is not first.fsdp
+
+    def test_writes_to_a_returned_plan_stay_local(self):
+        # Arrange
+        args = (
+            DENSE_MODEL,
+            budget_device(80 * GiB),
+            fsdp_only(dense_settings()),
+            MemoryPins(),
+            16,
+        )
+        returned = resolve_training_memory(*args)
+        expected = copy.deepcopy(returned)
+
+        # Act
+        returned.fsdp.reshard_after_forward = not returned.fsdp.reshard_after_forward
+        returned.settings.fsdp.checkpoint_every_n_blocks = 99
+        for part in returned.breakdown.components:
+            part.detail["written"] = 1
+
+        # Assert
+        assert resolve_training_memory(*args) == expected
+
+    def test_settings_written_after_a_call_are_searched_anew(self):
+        # Arrange
+        settings = fsdp_only(dense_settings())
+        args = (DENSE_MODEL, budget_device(80 * GiB))
+        unpinned = resolve_training_memory(*args, settings, MemoryPins(), 16)
+
+        # Act
+        settings.fsdp.reshard_after_forward = True
+        plan = resolve_training_memory(*args, settings, MemoryPins(), 16)
+
+        # Assert
+        assert unpinned.fsdp.reshard_after_forward is False
+        assert plan.fsdp.reshard_after_forward is True
+
+    def test_unfit_search_raises_on_every_call(self):
+        # Arrange
+        settings = moe_floor_settings()
+        with pytest.raises(TrainingMemoryUnfitError) as first:
+            resolve_floor(settings, GiB)
+        first.value.plan.fsdp.cpu_offload = not first.value.plan.fsdp.cpu_offload
+
+        # Act
+        with pytest.raises(TrainingMemoryUnfitError) as again:
+            resolve_floor(settings, GiB)
+
+        # Assert
+        assert again.value is not first.value
+        assert str(again.value) == str(first.value)
+        assert again.value.plan.fsdp.cpu_offload != first.value.plan.fsdp.cpu_offload
+
+
 class TestResolveTrainingMemoryLastResorts:
     def test_ample_budget_turns_on_none(self, caplog):
         # Act
@@ -620,6 +697,23 @@ class TestResolveTrainingMemoryLastResorts:
         assert plan.fsdp.routed_expert_chunk_mib == 64
         assert plan.fsdp.optim_cpu_offload is True
         assert plan.fsdp.activation_offload is True
+
+    def test_repeat_search_logs_again(self, caplog):
+        # Arrange: the lightest floor fits the card but not with the buffer.
+        usable = moe_peak(64, True, activation_offload=True)
+        with caplog.at_level(logging.INFO):
+            resolve_floor(moe_floor_settings(), usable)
+        first = list(caplog.messages)
+        caplog.clear()
+
+        # Act
+        with caplog.at_level(logging.INFO):
+            resolve_floor(moe_floor_settings(), usable)
+
+        # Assert
+        assert caplog.messages == first
+        assert sum("turning on" in message for message in first) == 6
+        assert "only inside the underprediction buffer" in first[-1]
 
     def test_activation_offload_is_priced_at_the_micro_batch_floor(self):
         # Arrange: one row fits without activation offload; four rows do not.

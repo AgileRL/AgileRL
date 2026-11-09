@@ -595,6 +595,39 @@ class TestManifestAtLayout:
         assert placed.algorithm.fsdp.activation_offload is True
         assert placed.algorithm.fsdp.shard_group_size == 4
 
+    def test_leaves_the_callers_manifest_unwritten(self):
+        # Arrange
+        doc = copy.deepcopy(MANIFEST)
+        doc["algorithm"]["fsdp"] = {"activation_offload": True}
+        manifest = TrainingManifest.model_validate(doc)
+        before = manifest.model_dump()
+
+        # Act
+        placed = manifest_at_layout(manifest, ParallelLayout(tp=2, ep=2))
+
+        # Assert
+        assert manifest.model_dump() == before
+        assert manifest.algorithm.fsdp.parallel_pins == frozenset()
+        assert (placed.algorithm.fsdp.tp, placed.algorithm.fsdp.ep) == (2, 2)
+
+    def test_result_fsdp_is_its_own_copy(self):
+        # Arrange
+        doc = copy.deepcopy(MANIFEST)
+        doc["algorithm"]["fsdp"] = {"activation_offload": True}
+        manifest = TrainingManifest.model_validate(doc)
+        placed = manifest_at_layout(manifest, ParallelLayout(ep=2))
+        again = manifest_at_layout(manifest, ParallelLayout(ep=2))
+
+        # Act
+        placed.algorithm.fsdp.cpu_offload = True
+        placed.algorithm.fsdp.shard_group_size = 4
+
+        # Assert
+        assert manifest.algorithm.fsdp.cpu_offload is None
+        assert manifest.algorithm.fsdp.shard_group_size is None
+        assert again.algorithm.fsdp.cpu_offload is None
+        assert again.algorithm.fsdp.shard_group_size is None
+
     def test_an_algorithm_without_a_training_layout_raises(self):
         manifest = TrainingManifest.model_validate(
             {

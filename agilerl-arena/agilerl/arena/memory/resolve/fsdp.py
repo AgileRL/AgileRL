@@ -4,9 +4,11 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 import math
 from dataclasses import dataclass, replace
+from functools import lru_cache
 from typing import Literal
 
 from agilerl.arena.memory.breakdown import PhaseBreakdown
@@ -32,6 +34,7 @@ from agilerl.arena.memory.specs import (
     ModelArch,
     ModelSpec,
     TrainingSettings,
+    TrainingSettingsKey,
 )
 from agilerl.arena.models.algorithms.base import LLMAlgorithmSpec
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
@@ -40,6 +43,8 @@ from agilerl.arena.models.fsdp import FSDP_MEMORY_FIELDS, FSDPConfig
 logger = logging.getLogger(__name__)
 
 Residency = Literal["gathered", "reshard"]
+# A ``logger.info`` format and its arguments.
+LogNote = tuple[str, tuple[object, ...]]
 
 # Strides an unset fsdp.checkpoint_every_n_blocks may take, least recompute first.
 CHECKPOINT_STRIDES = (4, 2, 1)
@@ -228,6 +233,19 @@ class TrainingMemoryPlan:
     def learn_cost_ratio(self) -> float:
         """Modeled step over its trained tokens: 1 plus recompute and per-pass costs."""
         return self.cost / self.tokens
+
+    def detached(self) -> TrainingMemoryPlan:
+        """A copy holding its own ``fsdp`` configs and breakdown ``detail`` dicts."""
+        fsdp = copy.copy(self.fsdp)
+        settings_fsdp = (
+            fsdp if self.settings.fsdp is self.fsdp else copy.copy(self.settings.fsdp)
+        )
+        return replace(
+            self,
+            fsdp=fsdp,
+            settings=self.settings.model_copy(update={"fsdp": settings_fsdp}),
+            breakdown=self.breakdown.detached(),
+        )
 
     def describe(self) -> str:
         """Plain-English summary for logs and errors."""
@@ -457,9 +475,35 @@ def resolve_training_memory(
     :param pins: Checkpointing and micro-batch values the search keeps. A
         token budget above the mini-batch's longest rows is cut to them.
     :param mini_batch_rows: Rows one optimizer step covers on one rank.
-    :return: The chosen plan, with every field set.
+    :return: The chosen plan, with every field set; the caller's own copy.
     :raises TrainingMemoryUnfitError: When the lightest plan is over the GPU.
     """
+    plan, fits, notes = _cached_training_memory(
+        model, device, TrainingSettingsKey.of(settings), pins, mini_batch_rows
+    )
+    for message, args in notes:
+        logger.info(message, *args)
+    plan = plan.detached()
+    if not fits:
+        raise TrainingMemoryUnfitError(plan, device)
+    return plan
+
+
+# ~23 KiB per entry; 512 holds the plans of ~8 requests.
+@lru_cache(maxsize=512)
+def _cached_training_memory(
+    model: ModelSpec,
+    device: DeviceSpec,
+    key: TrainingSettingsKey,
+    pins: MemoryPins,
+    mini_batch_rows: int,
+) -> tuple[TrainingMemoryPlan, bool, tuple[LogNote, ...]]:
+    """:func:`resolve_training_memory`'s search, run once per input.
+
+    :return: The chosen plan and ``True``, or the lightest plan and ``False``
+        when it is over the GPU, and the log records the search emits.
+    """
+    settings = key.settings
     packed = settings.micro_batch_tokens is not None
     row_budget = settings.max_model_len
     fsdp = settings.fsdp
@@ -472,6 +516,7 @@ def resolve_training_memory(
         fsdp is not None,
     )
     ddp_chunks = _ddp_chunk_candidates(model, settings)
+    notes: list[LogNote] = []
 
     def priced(
         on: bool,
@@ -587,12 +632,18 @@ def resolve_training_memory(
     def data_parallel(strides: list[tuple[bool, int]]) -> TrainingMemoryPlan | None:
         for index, chunk in enumerate(ddp_chunks):
             if index > 0:
-                logger.info(
-                    "Training memory: DDP turning on routed_expert_chunk_mib=%s; "
-                    "nothing fits one %s at %s",
-                    chunk,
-                    device.name,
-                    floor(None, ddp_chunks[index - 1]).describe(),
+                notes.append(
+                    (
+                        (
+                            "Training memory: DDP turning on routed_expert_chunk_mib=%s; "
+                            "nothing fits one %s at %s"
+                        ),
+                        (
+                            chunk,
+                            device.name,
+                            floor(None, ddp_chunks[index - 1]).describe(),
+                        ),
+                    )
                 )
             plan = cheapest(strides, None, chunk)
             if plan is not None:
@@ -602,7 +653,7 @@ def resolve_training_memory(
     if fsdp is None:
         plan = data_parallel(recompute)
         if plan is not None:
-            return plan
+            return plan, True, tuple(notes)
         lightest = floor(None, ddp_chunks[-1])
     else:
         ddp = (
@@ -615,24 +666,29 @@ def resolve_training_memory(
         rungs = _memory_rungs(model, settings, fsdp)
         for index, (resort, memory) in enumerate(rungs):
             if index > 0:
-                logger.info(
-                    "Training memory: turning on %s; nothing fits one %s at %s",
-                    resort,
-                    device.name,
-                    floor(rungs[index - 1][1], None).describe(),
+                notes.append(
+                    (
+                        "Training memory: turning on %s; nothing fits one %s at %s",
+                        (
+                            resort,
+                            device.name,
+                            floor(rungs[index - 1][1], None).describe(),
+                        ),
+                    )
                 )
             plan = cheapest(recompute, memory, None)
             # A fitting DDP plan beats every FSDP last resort.
             if ddp is not None and (plan is None or ddp.cost <= plan.cost):
-                return ddp
+                return ddp, True, tuple(notes)
             if plan is not None:
-                return plan
+                return plan, True, tuple(notes)
         lightest = floor(rungs[-1][1], None)
     if lightest.breakdown.fits:
-        logger.info(
-            "Training memory: %s fits one %s only inside the underprediction buffer",
-            lightest.describe(),
-            device.name,
+        notes.append(
+            (
+                "Training memory: %s fits one %s only inside the underprediction buffer",
+                (lightest.describe(), device.name),
+            )
         )
-        return lightest
-    raise TrainingMemoryUnfitError(lightest, device)
+        return lightest, True, tuple(notes)
+    return lightest, False, tuple(notes)

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import warnings
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
@@ -92,7 +93,7 @@ from agilerl.arena.models.algorithms.rollout_llm import (
 )
 from agilerl.arena.models.env import LLMEnvSpec
 from agilerl.arena.models.manifest import TrainingManifest, strips_multimodal_towers
-from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO, ModelInfo
 from agilerl.arena.models.networks import LoraConfigDict, VLLMConfig
 
 # The engine variant drops the multimodal towers; a model without towers sizes it as base.
@@ -423,8 +424,9 @@ def trainer_packs_sequences(spec: LLMAlgorithmSpec) -> bool:
         ``fsdp.cp`` is 1 or attention runs on FlashAttention-2.
     """
     entry = SUPPORTED_MODEL_INFO.get(spec.pretrained_model_name_or_path or "")
-    model_type = None if entry is None else entry.config["model_type"]
-    arch = None if entry is None else ModelArch.from_hf_config(entry.config)
+    model_type = None if entry is None else entry.model_type
+    catalogued = catalog_model(spec)
+    arch = None if catalogued is None else catalogued.arch
     hybrid = arch is not None and arch.is_hybrid_ssm
     cp = 1 if spec.fsdp is None else spec.fsdp.cp
     attn_implementation = resolve_attn_implementation(model_type, cuda=True)
@@ -492,6 +494,12 @@ def speculative_drafting(spec: LLMAlgorithmSpec) -> bool | None:
     return spec.vllm_engine_args["speculative_config"] is not None
 
 
+@lru_cache(maxsize=len(SUPPORTED_MODEL_INFO))
+def _catalog_checkpoint_quantized(info: ModelInfo) -> bool:
+    """:func:`checkpoint_quantized` of a catalogue entry's ``config.json``."""
+    return checkpoint_quantized(info.config)
+
+
 def can_sync_merged_lora(spec: LLMAlgorithmSpec) -> bool:
     """Whether the spec's rollout engines can serve merged LoRA weights (:func:`merged_lora_sync_eligible`).
 
@@ -505,7 +513,7 @@ def can_sync_merged_lora(spec: LLMAlgorithmSpec) -> bool:
     info = SUPPORTED_MODEL_INFO.get(spec.pretrained_model_name_or_path or "")
     return merged_lora_sync_eligible(
         None if spec.vllm_config is None else spec.vllm_config.quantization,
-        info is not None and checkpoint_quantized(info.config),
+        info is not None and _catalog_checkpoint_quantized(info),
         bool(_lora_config(spec).tower_target_modules),
         drafts_with_mtp(spec.vllm_engine_args.get("speculative_config")),
     )
@@ -703,7 +711,7 @@ def manifest_max_num_batched_tokens(
     info = SUPPORTED_MODEL_INFO.get(spec.pretrained_model_name_or_path)
     if info is None:
         return None
-    return FAMILY_MAX_NUM_BATCHED_TOKENS.get(info.config["model_type"])
+    return FAMILY_MAX_NUM_BATCHED_TOKENS.get(info.model_type)
 
 
 def _resolve_vllm(spec: LLMAlgorithmSpec) -> VLLMConfig:
@@ -885,7 +893,7 @@ def training_settings_from_manifest(
     if blocker is not None:
         raise ValueError(blocker)
     entry = SUPPORTED_MODEL_INFO.get(spec.pretrained_model_name_or_path or "")
-    model_type = None if entry is None else entry.config["model_type"]
+    model_type = None if entry is None else entry.model_type
     blocker = context_parallel_blocker(
         resolve_attn_implementation(model_type, cuda=True),
         1 if spec.fsdp is None else spec.fsdp.cp,
@@ -1078,7 +1086,7 @@ def generation_settings_from_manifest(
 
 def _model_spec(
     spec: LLMAlgorithmSpec,
-    model_config: dict[str, Any],
+    arch: ModelArch,
     n_params: int | None,
 ) -> ModelSpec:
     model_id = spec.pretrained_model_name_or_path
@@ -1087,7 +1095,7 @@ def _model_spec(
         raise ValueError(msg)
     return ModelSpec(
         model_id=model_id,
-        arch=ModelArch.from_hf_config(model_config),
+        arch=arch,
         n_params=n_params,
         variants=MANIFEST_WEIGHT_VARIANTS,
     )
@@ -1095,7 +1103,7 @@ def _model_spec(
 
 def _engine_served_manifest(
     manifest: TrainingManifest,
-    model_config: dict[str, Any],
+    arch: ModelArch,
     tensor_parallel_size: int | None,
 ) -> TrainingManifest:
     """The manifest as the rollout engine serves it.
@@ -1110,7 +1118,7 @@ def _engine_served_manifest(
     if width is None or not marlin_pads_non_gated_experts(
         spec.vllm_config.quantization,
         spec.vllm_engine_args.get("moe_backend"),
-        ModelArch.from_hf_config(model_config),
+        arch,
         width,
         bool(spec.vllm_engine_args.get("enable_expert_parallel")),
     ):
@@ -1160,7 +1168,8 @@ def run_config_from_manifest(
             "this estimator sizes async rollout only."
         )
         raise ValueError(msg)
-    manifest = _engine_served_manifest(manifest, model_config, tensor_parallel_size)
+    arch = ModelArch.from_hf_config(model_config)
+    manifest = _engine_served_manifest(manifest, arch, tensor_parallel_size)
     spec = llm_spec(manifest)
     if isinstance(spec, RolloutLLMSpec):
         gpu = lookup_gpu((gen_device or device).name or "")
@@ -1169,7 +1178,7 @@ def run_config_from_manifest(
             check_fp8_moe_backend_for_device(
                 vllm.quantization,
                 spec.vllm_engine_args.get("moe_backend"),
-                ModelArch.from_hf_config(model_config).is_moe,
+                arch.is_moe,
                 gpu.cc_major,
                 gpu.cc_minor,
             )
@@ -1177,7 +1186,7 @@ def run_config_from_manifest(
     # The run picks them on the catalog model, so the search does too.
     manifest = manifest.model_copy(deep=True)
     spec = llm_spec(manifest)
-    model = _model_spec(spec, model_config, n_params)
+    model = _model_spec(spec, arch, n_params)
     try:
         plan = training_memory_from_manifest(
             manifest, training_plan_model(manifest, model), device, adapter_sync

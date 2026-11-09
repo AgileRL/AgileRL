@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """FSDP gather-count tests: golden numbers on known geometries."""
 
+import pytest
+
 from agilerl.arena.memory import formulas, fsdp_gather
 from agilerl.arena.memory.specs import GiB, ModelArch
 from tests.test_memory.test_formulas import (
@@ -123,6 +125,31 @@ class TestFSDPGatheredParams:
 
 
 class TestPrefetchWindowParams:
+    @pytest.mark.parametrize(
+        ("arch", "live_units", "tensor_parallel", "expert_parallel", "resident"),
+        [
+            (QWEN_05B, 2, 1, 1, False),
+            (ModelArch.from_hf_config(NEMOTRON_H_MOE), 2, 1, 4, False),
+            (ModelArch.from_hf_config(GEMMA4_E4B.config), 3, 2, 1, True),
+        ],
+        ids=["dense", "hybrid-moe-ep", "tensor-parallel"],
+    )
+    def test_repeat_matches_a_fresh_window(
+        self, arch, live_units, tensor_parallel, expert_parallel, resident
+    ):
+        # Arrange
+        counts = formulas.param_counts(arch)
+        args = (counts, arch, live_units, tensor_parallel, expert_parallel, resident)
+
+        # Act
+        first = fsdp_gather.prefetch_window_params(*args)
+        again = fsdp_gather.prefetch_window_params(*args)
+        fsdp_gather.prefetch_window_params.cache_clear()
+        fresh = fsdp_gather.prefetch_window_params(*args)
+
+        # Assert
+        assert first == again == fresh
+
     def test_tensor_parallel_dense_first_stack_gathers_moe_experts_whole(self):
         # Arrange
         arch = MOE_TINY.model_copy(

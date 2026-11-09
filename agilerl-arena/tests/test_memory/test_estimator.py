@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from agilerl.arena.memory import (
     block_activations,
+    estimator,
     formulas,
     fsdp_gather,
     kv_cache,
@@ -22,6 +23,7 @@ from agilerl.arena.memory.estimator import (
     estimate_training,
     generation_can_serve,
     tensor_parallel_head_gather_bytes,
+    training_breakdown,
 )
 from agilerl.arena.memory.generation import engine_terms
 from agilerl.arena.memory.lora_placement import (
@@ -1812,6 +1814,7 @@ class TestAlgorithmTerms:
         monkeypatch.setattr(
             "agilerl.arena.memory.estimator.PARAM_PERSISTENCE_THRESHOLD", 0
         )
+        estimator._cached_training_breakdown.cache_clear()
         sharded = estimate_training(model, device, settings)
 
         assert (
@@ -3356,6 +3359,56 @@ class TestTrainingSettingsShardGroupGpusProperty:
 def pinned_fsdp(**fields: object) -> FSDPConfig:
     """FSDP config with every estimate-resolved memory field set."""
     return fsdp_config(reshard_after_forward=True, routed_expert_chunk_mib=64, **fields)
+
+
+class TestTrainingBreakdown:
+    def test_repeat_matches_the_first_breakdown(self, model, device):
+        # Arrange
+        settings = TrainingSettings(n_training_gpus=4, fsdp=pinned_fsdp())
+        first = training_breakdown(model, device, settings)
+
+        # Act
+        again = training_breakdown(
+            model, device, TrainingSettings(n_training_gpus=4, fsdp=pinned_fsdp())
+        )
+
+        # Assert
+        assert again == first
+        assert again is not first
+
+    def test_writes_to_a_returned_breakdown_stay_local(self, model, device):
+        # Arrange
+        settings = TrainingSettings(n_training_gpus=4, fsdp=pinned_fsdp())
+        returned = training_breakdown(model, device, settings)
+        expected = returned.model_copy(deep=True)
+
+        # Act
+        for part in returned.components + returned.host:
+            part.detail["written"] = 1
+
+        # Assert
+        assert training_breakdown(model, device, settings) == expected
+
+    def test_settings_written_after_a_call_are_priced_anew(self, model, device):
+        # Arrange
+        settings = TrainingSettings(n_training_gpus=4, fsdp=pinned_fsdp())
+        resharded = training_breakdown(model, device, settings)
+
+        # Act
+        settings.fsdp.reshard_after_forward = False
+        gathered = training_breakdown(model, device, settings)
+
+        # Assert
+        estimator._cached_training_breakdown.cache_clear()
+        assert gathered == training_breakdown(
+            model,
+            device,
+            TrainingSettings(
+                n_training_gpus=4,
+                fsdp=fsdp_config(routed_expert_chunk_mib=64),
+            ),
+        )
+        assert gathered.total_bytes > resharded.total_bytes
 
 
 class TestTrainingSettingsDenseFsdpGpusProperty:

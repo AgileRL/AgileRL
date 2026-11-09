@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 from agilerl.arena.memory.formulas import (
     ParamCounts,
     attention_output_gate_params,
@@ -127,6 +129,7 @@ def _whole_block_params(
     return int(whole)
 
 
+@lru_cache(maxsize=256)
 def prefetch_window_params(
     counts: ParamCounts,
     arch: ModelArch,
