@@ -1193,6 +1193,21 @@ class TestDeviceFromResourceClass:
         assert lookup_gpu("l4").name == "NVIDIA L4"
         assert lookup_gpu("Tesla T4").cc_major == 7  # pre-Ampere: no flash, no fp8
 
+    def test_rtx_pro_6000_blackwell_server_edition(self):
+        info = lookup_gpu("NVIDIA RTX PRO 6000 Blackwell Server Edition")
+
+        assert info.name == "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+        assert info.total_gib == 96
+        assert (info.cc_major, info.cc_minor) == (12, 0)
+        assert info.bf16_tflops == 500
+        assert info.memory_gb_per_second == 1597
+        assert lookup_gpu("NVIDIA A100-SXM4-40GB").name == "NVIDIA A100-SXM4-40GB"
+        assert lookup_gpu("A100-80").name == "NVIDIA A100-SXM4-80GB"
+        assert lookup_gpu("NVIDIA A10G").name == "NVIDIA A10G"
+        assert lookup_gpu("L4").name == "NVIDIA L4"
+        assert lookup_gpu("L40S").name == "NVIDIA L40S"
+        assert lookup_gpu("H100").name == "NVIDIA H100 80GB HBM3"
+
     def test_unknown_gpu_needs_an_explicit_size(self):
         tier = {"name": "exotic", "gpu_type": "TPU v5e"}
         with pytest.raises(ValueError, match="Unknown gpu_type"):

@@ -185,6 +185,12 @@ git_describe_command = [
 ]
 
 [tool.uv]
+# Not solved for s390x: Snowpark requires protobuf<6.34 and vLLM 0.32 pins protobuf==7.36.1 there.
+environments = [
+    "sys_platform == 'linux' and platform_machine != 's390x'",
+    "sys_platform == 'darwin'",
+    "sys_platform == 'win32'",
+]
 conflicts = [
     [
         { extra = "cpu" },
