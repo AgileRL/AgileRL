@@ -596,7 +596,7 @@ name, so ``action_field`` is optional:
        factory: agilerl.llm_envs.verifiers_env:make
        entrypoint: bfcl-v3
        env_packages:
-           uv: [verifiers==0.4.1.dev63, "bfcl-v3 @ git+https://..."]
+           uv: [verifiers==0.4.2.dev6, "bfcl-v3 @ git+https://..."]
        env_config:
            taskset:
                test_categories: [simple_python, parallel, multi_turn_base]
