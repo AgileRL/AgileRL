@@ -8,8 +8,10 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import contextlib
+import gc
 import importlib.util
 import json
+import logging
 import os
 import sys
 import threading
@@ -216,6 +218,11 @@ class TwoCallEnv:
 async def stop_the_loop() -> None:
     """Kill the loop running this, as verifiers does when Prime auth is missing."""
     raise SystemExit(1)
+
+
+async def interrupt_the_loop() -> None:
+    """Kill the loop running this with KeyboardInterrupt."""
+    raise KeyboardInterrupt
 
 
 def bare_bridge(**attrs: object) -> ModelCallBridge:
@@ -784,8 +791,6 @@ class TestEventLoopThreadCall:
         assert (SHARED_LOOP.call(answer()), asyncio.run(go())) == (42, 42)
 
 
-# The dead loop's thread exits by re-raising the SystemExit that killed it.
-@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
 class TestEventLoopThreadDeath:
     def test_waiting_call_fails_when_the_loop_dies(self) -> None:
         thread = EventLoopThread()
@@ -808,6 +813,59 @@ class TestEventLoopThreadDeath:
         # Act / Assert
         with pytest.raises(RuntimeError, match="stopped its event loop"):
             thread.call(asyncio.sleep(60))
+
+    def test_collecting_the_task_does_not_log_systemexit(self) -> None:
+        # Arrange
+        logged: list[str] = []
+
+        def remember(record: logging.LogRecord) -> None:
+            logged.append(record.getMessage())
+
+        handler = logging.Handler()
+        handler.emit = remember
+        logger = logging.getLogger("asyncio")
+        logger.addHandler(handler)
+        thread = EventLoopThread()
+
+        try:
+            # Act
+            with pytest.raises(RuntimeError, match="stopped its event loop"):
+                thread.call(stop_the_loop())
+            del thread
+            gc.collect()
+        finally:
+            logger.removeHandler(handler)
+
+        # Assert
+        assert logged == []
+
+    def test_keyboard_interrupt_fails_the_call_and_leaves_the_thread(self) -> None:
+        # Arrange
+        surfaced: list[BaseException] = []
+        surfaced_on_thread = threading.Event()
+        previous_hook = threading.excepthook
+
+        def capture(args: threading.ExceptHookArgs) -> None:
+            if args.thread is not None and args.thread.name == "verifiers-env":
+                surfaced.append(args.exc_value)
+                surfaced_on_thread.set()
+                return
+            previous_hook(args)
+
+        threading.excepthook = capture
+        thread = EventLoopThread()
+
+        try:
+            # Act
+            with pytest.raises(RuntimeError, match="stopped its event loop"):
+                thread.call(interrupt_the_loop())
+            assert surfaced_on_thread.wait(timeout=5)
+        finally:
+            threading.excepthook = previous_hook
+
+        # Assert
+        assert len(surfaced) == 1
+        assert isinstance(surfaced[0], KeyboardInterrupt)
 
 
 class TestVerifiersEnvRejectsTools:

@@ -61,6 +61,26 @@ class EventLoopThread:
         with self._lock:
             self._waiting.discard(future)
 
+    def _retrieve_task_exceptions(self) -> None:
+        """Read stored task exceptions so asyncio does not log them at collection."""
+        # SystemExit aborts the loop before done callbacks run, so the task
+        # stays tracked and the exception stays stored.
+        module = asyncio.tasks
+        done: list[asyncio.Task[Any]] = []
+        for name in ("_scheduled_tasks", "_all_tasks", "_eager_tasks"):
+            group = getattr(module, name, None)
+            if group is None:
+                continue
+            done.extend(
+                task
+                for task in list(group)
+                if task.get_loop() is self._loop
+                and task.done()
+                and not task.cancelled()
+            )
+        for task in done:
+            task.exception()
+
     def _run(self) -> None:
         """Run the loop, failing every waiting call if it dies."""
         try:
@@ -68,6 +88,7 @@ class EventLoopThread:
         except BaseException as err:
             # verifiers raises SystemExit from its own loop callbacks (missing
             # Prime auth), which stops the loop under every waiter.
+            self._retrieve_task_exceptions()
             failure = f"verifiers stopped its event loop: {err}"
             with self._lock:
                 self._failure = failure
@@ -75,7 +96,9 @@ class EventLoopThread:
             for future in waiting:
                 if future.set_running_or_notify_cancel():
                     future.set_exception(RuntimeError(failure))
-            raise
+            # SystemExit stops this thread. Waiters already hold the failure.
+            if not isinstance(err, SystemExit):
+                raise
 
 
 # verifiers keeps loop-bound asyncio state process-wide, so every env in a process
