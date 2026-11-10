@@ -159,6 +159,44 @@ class TestEstimateTraining:
             == 2 * MERGED_SYNC_BUCKET_BYTES
         )
 
+    def test_nccl_reshard_holds_its_refit_buffers_not_the_merged_rounds(
+        self, model, device
+    ):
+        # Arrange
+        nixl = TrainingSettings(
+            async_rollout=True,
+            merged_lora_sync=True,
+            n_training_gpus=4,
+            fsdp=fsdp_config(),
+        )
+        nccl_reshard = nixl.model_copy(
+            update={"nccl_reshard_engine_tensor_parallel": 1}
+        )
+
+        # Act
+        nixl_breakdown = estimate_training(model, device, nixl)
+        reshard_breakdown = estimate_training(model, device, nccl_reshard)
+
+        # Assert: Qwen2.5-0.5B has no misc weights; the MLP block stages 3
+        # bf16 quarter shards of 896x4864 beside one fp32 quarter shard.
+        quarter = 896 * 4864 // 4
+        refit = component(reshard_breakdown, "lora_send_buffer")
+        assert refit.n_bytes == 10 * quarter
+        assert refit.detail == {
+            "bulk_group": 6 * quarter,
+            "bulk_fp32_temp": 4 * quarter,
+            "misc_bucket": 0,
+            "misc_module": 0,
+            "misc_fp32_copy": 0,
+        }
+        assert (
+            component(nixl_breakdown, "lora_send_buffer").n_bytes
+            == 2 * MERGED_SYNC_BUCKET_BYTES
+        )
+        assert nixl_breakdown.total_bytes - reshard_breakdown.total_bytes == (
+            2 * MERGED_SYNC_BUCKET_BYTES - 10 * quarter
+        )
+
     def test_async_rollout_holds_the_adapter_send_buffer(self, model, device):
         # Arrange
         colocated = TrainingSettings(lora_target_scope="attention-only")
@@ -695,6 +733,31 @@ class TestEstimateGeneration:
         assert merged_terms["cuda_graphs"] == (
             lora_terms["cuda_graphs"] - formulas.LORA_DUAL_STREAM_BYTES
         )
+
+    def test_nccl_reshard_engine_holds_one_misc_bucket(self, device):
+        # Arrange
+        qwen35 = ModelSpec(
+            model_id="Qwen/Qwen3.5-0.8B",
+            arch=ModelArch.from_hf_config(QWEN35_08B.config),
+        )
+        nixl = GenerationSettings(
+            max_lora_rank=16, lora_sync_scope="all-linear", merged_lora_sync=True
+        )
+        nccl_reshard = nixl.model_copy(update={"nccl_reshard_trainer_shards": 4})
+
+        # Act
+        nixl_breakdown = estimate_generation(qwen35, device, nixl)
+        reshard_breakdown = estimate_generation(qwen35, device, nccl_reshard)
+
+        # Assert: the bf16 GDN projections are the only misc weights and fit
+        # one bucket; attention and MLP land in the live weights.
+        misc = 18 * (1024 * 6144 + 1024 * 2048 + 2048 * 1024) + 36 * 1024 * 16
+        assert component(reshard_breakdown, "lora_receive_buffer").n_bytes == 2 * misc
+        assert (
+            component(nixl_breakdown, "lora_receive_buffer").n_bytes
+            == MERGED_SYNC_BUCKET_BYTES
+        )
+        assert component(reshard_breakdown, "lora_slots").n_bytes == 0
 
     def test_rollout_engine_holds_the_whole_adapter_outside_the_budget(self, device):
         # Arrange

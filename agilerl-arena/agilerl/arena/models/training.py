@@ -261,6 +261,24 @@ BufferSpec = Annotated[
     BeforeValidator(_parse_buffer_section),
 ]
 
+WeightSyncTransport = Literal["nccl", "nixl", "nccl_reshard"]
+
+
+class WeightSyncSpec(BaseModel):
+    """How async rollout copies trainer weights onto the engines."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    transport: WeightSyncTransport = Field(
+        default="nixl",
+        description=(
+            "nixl is the LoRA default. nccl selects that same LoRA sync. "
+            "nccl_reshard is merged LoRA sync: dense FFN and decoder attention "
+            "weights reshard from FSDP shards straight into vLLM TP weights over "
+            "NCCL. It requires engines that can serve merged LoRA weights."
+        ),
+    )
+
 
 class TrainingSpec(BaseModel):
     """The manifest's ``training`` section."""
@@ -484,6 +502,10 @@ class TrainingSpec(BaseModel):
             "Learn chunks between rollout weight syncs under async rollout. "
             "Unset resolves to 1: fresh weights every cycle."
         ),
+    )
+    weight_sync: WeightSyncSpec = Field(
+        default_factory=WeightSyncSpec,
+        description="Async weight-copy transport. Unset is LoRA over NIXL.",
     )
     rollout_version_stamp: RolloutVersionStamp | None = Field(
         default=None,

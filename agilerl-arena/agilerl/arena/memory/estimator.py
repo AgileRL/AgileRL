@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict
 import agilerl.arena.memory.block_activations as block_activations
 import agilerl.arena.memory.formulas as formulas
 import agilerl.arena.memory.lora_formulas as lora_formulas
+import agilerl.arena.memory.nccl_reshard as nccl_reshard
 import agilerl.arena.memory.vision as vision
 from agilerl.arena.memory.breakdown import MemoryComponent, PhaseBreakdown
 from agilerl.arena.memory.generation import (
@@ -1252,8 +1253,16 @@ def _runtime_components(
 def _lora_send_buffer_component(
     arch: ModelArch, settings: TrainingSettings
 ) -> MemoryComponent:
-    """The main rank's registered NIXL buffer the rollout engines READ the adapter, or two rounds of merged weights, from."""
+    """The main rank's NIXL buffer the engines READ the adapter or merged weights from, or its ``nccl_reshard`` refit buffers."""
     dtype_bytes = DTYPE_BYTES[settings.weight_dtype]
+    if (
+        settings.async_rollout
+        and settings.merged_lora_sync
+        and settings.nccl_reshard_engine_tensor_parallel is not None
+    ):
+        return nccl_reshard.refit_buffer_component(
+            arch, settings, settings.nccl_reshard_engine_tensor_parallel
+        )
     if settings.async_rollout and settings.merged_lora_sync:
         # Double-buffered: the trainer packs one round while the engines READ the other.
         return MemoryComponent(

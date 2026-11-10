@@ -850,24 +850,8 @@ class TrainingManifest(BaseModel):
             and not self.network.model_fields_set
         ):
             payload.pop("network", None)
-        # Omit dumped defaults that parsers treat as explicit choices.
-        if (
-            "rollout_mode" not in self.training.model_fields_set
-            and "training" in payload
-        ):
-            payload["training"].pop("rollout_mode", None)
         if "training" in payload:
-            training = payload["training"]
-            if not isinstance(self.algorithm, LLMAlgorithmSpec) or (
-                "training_gpus_per_agent" not in self.training.model_fields_set
-            ):
-                training.pop("training_gpus_per_agent", None)
-            # An unset engine count leaves the trainer / engine split to the driver.
-            if "rollout_engines_per_agent" not in self.training.model_fields_set:
-                training.pop("rollout_engines_per_agent", None)
-            # An unset step cap dumps the default million, which parsers treat as authored.
-            if "max_steps" not in self.training.model_fields_set:
-                training.pop("max_steps", None)
+            self._drop_unset_training_fields(payload["training"])
         algorithm = payload.get("algorithm")
         if isinstance(algorithm, dict):
             if "num_envs" not in self.algorithm.model_fields_set:
@@ -883,6 +867,12 @@ class TrainingManifest(BaseModel):
                     and "tensor_parallel_size" not in vllm_config.model_fields_set
                 ):
                     vllm_payload.pop("tensor_parallel_size", None)
+        if (
+            isinstance(self.network, FinetuningNetworkSpec)
+            and "lora_config" in self.network.model_fields_set
+            and self.network.lora_config is None
+        ):
+            payload.setdefault("network", {})["lora_config"] = None
         environment = payload.get("environment")
         if isinstance(environment, dict):
             if environment.get("screenshot_field") is None:
@@ -890,3 +880,26 @@ class TrainingManifest(BaseModel):
             if environment.get("goal_images_field") is None:
                 environment.pop("goal_images_field", None)
         return payload
+
+    def _drop_unset_training_fields(self, training: dict[str, Any]) -> None:
+        """Omit dumped training defaults that parsers treat as explicit choices.
+
+        An unset engine count leaves the trainer / engine split to the driver,
+        and an unset step cap would dump the default million.
+
+        :param training: The dumped ``training`` section, edited in place.
+        :type training: dict[str, Any]
+        """
+        authored = self.training.model_fields_set
+        if not isinstance(self.algorithm, LLMAlgorithmSpec) or (
+            "training_gpus_per_agent" not in authored
+        ):
+            training.pop("training_gpus_per_agent", None)
+        for field in (
+            "rollout_mode",
+            "rollout_engines_per_agent",
+            "max_steps",
+            "weight_sync",
+        ):
+            if field not in authored:
+                training.pop(field, None)

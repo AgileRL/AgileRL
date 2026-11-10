@@ -160,13 +160,13 @@ def checkpoint_quantized(config: dict[str, Any]) -> bool:
     )
 
 
-def merged_lora_sync_eligible(
+def merged_lora_sync_blockers(
     quantization: str | None,
     quantized_checkpoint: bool,
     tower_lora: bool,
     mtp_drafting: bool,
-) -> bool:
-    """Whether a rollout engine can serve merged LoRA weights with LoRA off.
+) -> list[str]:
+    """Why a rollout engine cannot serve merged LoRA weights with LoRA off.
 
     Every rollout engine serves one policy, so it can hold that policy's
     merged weights. vLLM quantizes weights at load, both for the
@@ -181,13 +181,20 @@ def merged_lora_sync_eligible(
     :param quantized_checkpoint: :func:`checkpoint_quantized` of the engine's checkpoint.
     :param tower_lora: Whether the adapter targets vision-tower modules.
     :param mtp_drafting: :func:`drafts_with_mtp` of the engine's ``speculative_config``.
-    :return: ``True`` for an unquantized engine on an unquantized checkpoint,
-        without tower LoRA or MTP drafting.
+    :return: One reason per blocker, naming the manifest field that sets it;
+        empty for an unquantized engine on an unquantized checkpoint, without
+        tower LoRA or MTP drafting.
     """
-    unquantized = quantization is None or quantization.lower() == "none"
-    return (
-        unquantized and not quantized_checkpoint and not tower_lora and not mtp_drafting
-    )
+    blockers = []
+    if quantization is not None and quantization.lower() != "none":
+        blockers.append(f"vllm_config.quantization is {quantization!r}")
+    if quantized_checkpoint:
+        blockers.append("the checkpoint's config.json ships a quantization config")
+    if tower_lora:
+        blockers.append("lora_config.tower_target_modules targets the vision tower")
+    if mtp_drafting:
+        blockers.append("vllm_engine_args.speculative_config drafts with MTP")
+    return blockers
 
 
 def merged_sync_bucket_bytes(total_bytes: int, largest_tensor_bytes: int) -> int:
