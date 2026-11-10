@@ -642,4 +642,9 @@ def _episode_reward(episode: Episode) -> float:
             "envs are served when single-agent."
         )
         raise ValueError(msg)
-    return float(episode.traces[0].reward)
+    trace = episode.traces[0]
+    # A rubric drop leaves `ok` set and the unrun reward at 0.
+    if trace.is_dropped:
+        msg = f"verifiers episode dropped: {trace.dropped}"
+        raise RuntimeError(msg)
+    return float(trace.reward)

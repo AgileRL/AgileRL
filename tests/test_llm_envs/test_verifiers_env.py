@@ -936,6 +936,15 @@ class TestMessageTextAndRewards:
         with pytest.raises(RuntimeError, match="verifiers episode failed"):
             _episode_reward(episode)
 
+    def test_episode_reward_rejects_a_dropped_trace(self) -> None:
+        trace = Trace.model_construct(ok=True, dropped="rubric: task=defect")
+        episode = Episode.model_construct(ok=True, errors=[], traces=[trace])
+
+        with pytest.raises(
+            RuntimeError, match="verifiers episode dropped: rubric: task=defect"
+        ):
+            _episode_reward(episode)
+
     def test_episode_reward_rejects_multi_agent_episodes(self) -> None:
         episode = Episode.model_construct(
             ok=True,
