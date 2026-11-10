@@ -54,6 +54,7 @@ from agilerl.models.env import (
     GymEnvSpec,
     LLMEnvSpec,
     LLMEnvType,
+    group_rubric_from_spec,
     make_bandit_env,
     make_gym_env,
     make_llm_env,
@@ -617,6 +618,23 @@ class LocalTrainer(Trainer):
             seed=self.algorithm_spec.seed,
         )
 
+    def _rollout_train_kwargs(self, spec: LLMEnvSpec) -> dict[str, Any]:
+        """Arguments only the rollout training loop takes.
+
+        :param spec: The rollout env spec.
+        :type spec: LLMEnvSpec
+        :return: Its env factory, group rubric, turn budget and wall-time limit.
+        :rtype: dict[str, Any]
+        """
+        kwargs: dict[str, Any] = {
+            "env_factory": self.env_factory,
+            "group_rubric": group_rubric_from_spec(spec),
+            "max_turns": self.rollout_max_turns,
+        }
+        if self.training_spec.max_wall_seconds is not None:
+            kwargs["max_wall_seconds"] = self.training_spec.max_wall_seconds
+        return kwargs
+
     @property
     def _rollout(self) -> bool:
         """Whether training builds rollout envs per-trajectory."""
@@ -1016,11 +1034,8 @@ class LocalTrainer(Trainer):
         }
 
         if self._rollout_env_spec is not None:
-            kwargs["env_factory"] = self.env_factory
-            kwargs["max_turns"] = self.rollout_max_turns
+            kwargs.update(self._rollout_train_kwargs(self._rollout_env_spec))
             manifest["env_name"] = self._rollout_env_spec.label
-            if self.training_spec.max_wall_seconds is not None:
-                kwargs["max_wall_seconds"] = self.training_spec.max_wall_seconds
         else:
             kwargs["env"] = self.env
             if self.training_spec.max_wall_seconds is not None:

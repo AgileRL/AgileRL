@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from asyncio import get_running_loop
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from functools import partial
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 
     from agilerl.llm_envs.collector import RolloutCollector
     from agilerl.llm_envs.observation import ImageProcessorCall
+    from agilerl.llm_envs.rubrics import GroupEpisode
 
 
 class AsyncBatchCollector:
@@ -151,6 +152,24 @@ class AsyncBatchCollector:
     def episode_image_calls(self, episode_id: str) -> list[ImageProcessorCall]:
         """Processor calls behind one active episode's ``pixel_values``."""
         return self._collector.episode_image_calls(episode_id)
+
+    @property
+    def scores_groups(self) -> bool:
+        """Whether a group rubric scores the collector's finished groups."""
+        return self._collector.scores_groups
+
+    @property
+    def group_component_name(self) -> str:
+        """Metric name of the group rubric's score."""
+        return self._collector.group_component_name
+
+    def episode_for_group(self, episode_id: str) -> GroupEpisode:
+        """One active episode as a group rubric sees it."""
+        return self._collector.episode_for_group(episode_id)
+
+    async def score_group(self, episodes: Sequence[GroupEpisode]) -> list[float]:
+        """Score one finished group, off the event loop since a judge call blocks."""
+        return await self._offload(self._collector.score_group, episodes)
 
     async def get_episode_data(
         self,

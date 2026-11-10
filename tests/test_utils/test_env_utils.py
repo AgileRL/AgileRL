@@ -14,6 +14,19 @@ from agilerl.llm_envs import judge as judge_module
 from agilerl.utils import env_utils
 
 LOCAL_JUDGE = JudgeSpec(model="m", base_url="http://judge:8000")
+GROUP_RUBRIC_SOURCE = """
+from agilerl.llm_envs.rubrics import GroupRubric
+
+
+class Plain(GroupRubric):
+    def score_group(self, episodes):
+        return [0.0] * len(episodes)
+
+
+class Judged(Plain):
+    def __init__(self, judge):
+        self.judge = judge
+"""
 
 
 class TestEscapeNonFormatBraces:
@@ -366,3 +379,89 @@ class TestConstructEntrypointEnv:
                 factory=f"{module.name}:make",
                 path=str(tmp_path),
             )
+
+
+class TestGetGroupRubric:
+    def test_a_group_rubric_class_is_built(self, tmp_path):
+        # Arrange
+        rubric_file = tmp_path / "group.py"
+        rubric_file.write_text(GROUP_RUBRIC_SOURCE)
+
+        # Act
+        rubric = env_utils.get_group_rubric("Plain", str(rubric_file))
+
+        # Assert
+        assert rubric.score_group([object(), object()]) == [0.0, 0.0]
+
+    def test_a_group_rubric_instance_is_returned(self, tmp_path):
+        # Arrange
+        rubric_file = tmp_path / "group.py"
+        rubric_file.write_text(GROUP_RUBRIC_SOURCE + "INSTANCE = Plain()\n")
+
+        # Act
+        rubric = env_utils.get_group_rubric("INSTANCE", str(rubric_file))
+
+        # Assert
+        assert rubric.component_name == "group"
+
+    def test_a_judge_is_handed_to_the_class(self, tmp_path, monkeypatch):
+        # Arrange
+        monkeypatch.setattr(judge_module, "JUDGE_CLIENTS", {})
+        rubric_file = tmp_path / "group.py"
+        rubric_file.write_text(GROUP_RUBRIC_SOURCE)
+
+        # Act
+        rubric = env_utils.get_group_rubric("Judged", str(rubric_file), LOCAL_JUDGE)
+
+        # Assert
+        assert rubric.judge is judge_module.JUDGE_CLIENTS[LOCAL_JUDGE]
+
+    def test_a_judge_with_a_class_not_taking_it_raises(self, tmp_path):
+        # Arrange
+        rubric_file = tmp_path / "group.py"
+        rubric_file.write_text(GROUP_RUBRIC_SOURCE)
+
+        # Act / Assert
+        with pytest.raises(TypeError, match="__init__ takes judge"):
+            env_utils.get_group_rubric("Plain", str(rubric_file), LOCAL_JUDGE)
+
+    def test_a_symbol_that_is_not_a_group_rubric_raises(self, tmp_path):
+        # Arrange
+        rubric_file = tmp_path / "group.py"
+        rubric_file.write_text(
+            "def reward_fn(completion, answer, question):\n    return 0.0\n"
+        )
+
+        # Act / Assert
+        with pytest.raises(TypeError, match="must be a GroupRubric"):
+            env_utils.get_group_rubric("reward_fn", str(rubric_file))
+
+    def test_a_missing_file_raises(self, tmp_path):
+        with pytest.raises(ValueError, match="not found"):
+            env_utils.get_group_rubric("Plain", str(tmp_path / "absent.py"))
+
+    def test_a_missing_symbol_raises(self, tmp_path):
+        # Arrange
+        rubric_file = tmp_path / "group.py"
+        rubric_file.write_text(GROUP_RUBRIC_SOURCE)
+
+        # Act / Assert
+        with pytest.raises(ValueError, match="Error importing group rubric"):
+            env_utils.get_group_rubric("Absent", str(rubric_file))
+
+
+class TestGetRubricFactoryJudgeOptional:
+    def test_a_reward_callable_loads_when_the_judge_is_optional(self, tmp_path):
+        # Arrange
+        rubric_file = tmp_path / "reward.py"
+        rubric_file.write_text(
+            "def reward_fn(completion, answer, question):\n    return 0.0\n"
+        )
+
+        # Act
+        rubric = env_utils.get_rubric_factory(
+            "reward_fn", str(rubric_file), LOCAL_JUDGE, judge_optional=True
+        )()
+
+        # Assert
+        assert rubric.component_name == "reward_fn"

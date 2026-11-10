@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from openenv.core.rubrics.base import Rubric
 
     from agilerl.arena.models.env import JudgeSpec
+    from agilerl.llm_envs.rubrics import GroupRubric
 
 GymEnvType = AsyncVectorEnv | SyncVectorEnv
 PzEnvType = ParallelEnv | AsyncPettingZooVecEnv
@@ -51,7 +52,10 @@ def make_conversation_template(prompt_template: dict[str, str]) -> list[dict[str
 
 
 def get_rubric_factory(
-    rubric_name: str, file_path: str, judge_spec: JudgeSpec | None = None
+    rubric_name: str,
+    file_path: str,
+    judge_spec: JudgeSpec | None = None,
+    judge_optional: bool = False,
 ) -> Callable[[], Rubric]:
     """Load a rubric symbol once and return a factory building rubrics from it.
 
@@ -66,6 +70,8 @@ def get_rubric_factory(
     :param rubric_name: Name of the symbol in ``file_path``.
     :param file_path: Path to the Python module defining the rubric or reward fn.
     :param judge_spec: The judge handed to the rubric, or ``None``.
+    :param judge_optional: Load a symbol that does not take ``judge`` without it,
+        for a manifest whose group rubric is the one taking it.
     :returns: A zero-argument callable returning an OpenEnv ``Rubric``.
     :rtype: Callable[[], Rubric]
     :raises TypeError: If the symbol is not a Rubric, Rubric subclass, or
@@ -88,18 +94,19 @@ def get_rubric_factory(
     from agilerl.llm_envs.rubrics import reward_fn_to_rubric  # optional extra: llm
 
     if judge_spec is not None:
-        if not (
+        if (
             isinstance(obj, type)
             and issubclass(obj, Rubric)
             and "judge" in inspect.signature(obj).parameters
         ):
+            judge = shared_judge_client(judge_spec)
+            return lambda: obj(judge=judge)
+        if not judge_optional:
             msg = (
                 f"A judge is set, so {rubric_name!r} in {file_path} must be a "
                 "Rubric subclass whose __init__ takes judge."
             )
             raise TypeError(msg)
-        judge = shared_judge_client(judge_spec)
-        return lambda: obj(judge=judge)
     if isinstance(obj, Rubric):
         try:
             deepcopy(obj)
@@ -119,6 +126,52 @@ def get_rubric_factory(
         f"{rubric_name!r} in {file_path} must be a Rubric instance, Rubric "
         f"subclass, or a callable of completion, answer, and question, "
         f"got {type(obj).__name__}."
+    )
+    raise TypeError(msg)
+
+
+def get_group_rubric(
+    rubric_name: str, file_path: str, judge_spec: JudgeSpec | None = None
+) -> GroupRubric:
+    """Load a group rubric from a module; one instance serves a whole collector.
+
+    :param rubric_name: Name of a ``GroupRubric`` subclass or instance in ``file_path``.
+    :param file_path: Path to the Python module defining it.
+    :param judge_spec: The judge handed to the rubric, or ``None``.
+    :returns: The group rubric.
+    :raises TypeError: If the symbol is not a group rubric, or a judge is set and
+        the symbol is not a class whose ``__init__`` takes one.
+    """
+    file_path_obj = Path(file_path)
+    if not file_path_obj.exists():
+        msg = f"{file_path} not found"
+        raise ValueError(msg)
+    try:
+        rubric_module = _load_module_from_path(file_path, file_path_obj.resolve())
+        obj = getattr(rubric_module, rubric_name)
+    except Exception as e:
+        msg = f"Error importing group rubric {rubric_name} from {file_path}: {e}"
+        raise ValueError(msg) from e
+
+    from agilerl.llm_envs.judge import shared_judge_client  # optional extra: llm
+    from agilerl.llm_envs.rubrics import GroupRubric  # optional extra: llm
+
+    is_class = isinstance(obj, type) and issubclass(obj, GroupRubric)
+    if judge_spec is not None:
+        if not (is_class and "judge" in inspect.signature(obj).parameters):
+            msg = (
+                f"A judge is set, so {rubric_name!r} in {file_path} must be a "
+                "GroupRubric subclass whose __init__ takes judge."
+            )
+            raise TypeError(msg)
+        return obj(judge=shared_judge_client(judge_spec))
+    if is_class:
+        return obj()
+    if isinstance(obj, GroupRubric):
+        return obj
+    msg = (
+        f"{rubric_name!r} in {file_path} must be a GroupRubric instance or "
+        f"subclass, got {type(obj).__name__}."
     )
     raise TypeError(msg)
 

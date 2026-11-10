@@ -276,6 +276,38 @@ class TestCompletionRecordRender:
         )
 
 
+class TestCompletionRecordNotes:
+    def test_render_appends_the_judge_notes(self):
+        rendered = _record(notes={"ruler": "concise and correct"}).render()
+
+        assert rendered.endswith("--- judge notes ---\nruler: concise and correct")
+
+    def test_sample_groups_puts_each_rows_notes_on_its_record(self):
+        # Arrange
+        completion_logger = CompletionLogger(
+            CompletionLoggingConfig(interval=1, num_groups=1), []
+        )
+        token_ids, action_masks, rewards = _batch(2)
+
+        # Act
+        records = completion_logger.sample_groups(
+            step=1,
+            agent_index=0,
+            tokenizer=LetterTokenizer(),
+            token_ids=token_ids,
+            action_masks=action_masks,
+            rewards=rewards,
+            group_size=2,
+            notes=[{"ruler": "first", "judge": "ok"}, {}],
+        )
+
+        # Assert
+        assert [record.notes for record in records] == [
+            {"ruler": "first", "judge": "ok"},
+            {},
+        ]
+
+
 class TestCompletionLoggerLog:
     def test_interval_step_writes_one_sampled_group(self):
         # Arrange
@@ -544,8 +576,18 @@ class TestWandbCompletionWriter:
             "reference",
             "rejected",
             "base_model",
+            "notes",
         ]
-        assert table.data == [[3, 0, 1, 2, 0.5, 1, 2, "ab", "cd", None, None, False]]
+        assert table.data == [
+            [3, 0, 1, 2, 0.5, 1, 2, "ab", "cd", None, None, False, "{}"]
+        ]
+
+    def test_the_notes_cell_holds_the_judge_notes_as_json(self):
+        with patch("agilerl.training.llm.completion_logging.wandb.log") as mock_log:
+            WandbCompletionWriter().write([_record(notes={"ruler": "correct"})])
+
+        (payload,), _kwargs = mock_log.call_args
+        assert json.loads(payload["completions"].data[0][-1]) == {"ruler": "correct"}
 
 
 def _sft_env(prompts: list[str]) -> SimpleNamespace:

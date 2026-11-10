@@ -313,12 +313,66 @@ whose ``__init__`` takes ``judge`` is built with the run's shared client:
 - On dataset rows, the judge reads the row's question and is shown its answer as
   ``REFERENCE ANSWER``, so criteria can compare against it.
 - Anthropic judges take no ``temperature``: setting one is rejected.
+- ``max_tokens`` (default 4096) also covers a thinking judge's thinking, such as
+  ``claude-haiku-5-5``'s: set it too low and the verdict is cut off.
 - Two judges in one rubric need distinct names, ``LLMJudgeRubric(..., name=...)``:
   each leaf reports one ``reward_<name>`` metric, and a repeated name is an error.
 - ``reward_<name>`` counts an episode a ``Sequential`` or ``Gate`` kept from that
   leaf as 0.
 - Training logs ``judge_calls``, ``judge_parse_failure_rate`` and
   ``judge_mean_latency_s``.
+
+Scoring a group together (RULER)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+A :class:`~agilerl.llm_envs.rubrics.GroupRubric` scores a group's completions
+together, once every member has finished. Each score is added to that episode's
+final-turn reward before the buffer, so tied-group filtering, adaptive task
+sampling and advantages all see it. Write your own ``score_group(episodes)``, or
+use :class:`~agilerl.llm_envs.rubrics.LLMGroupJudgeRubric` (RULER), which shows a
+judge the whole group in one call:
+
+.. code-block:: python
+
+   from agilerl.llm_envs.rubrics import LLMGroupJudgeRubric
+
+   class RULER(LLMGroupJudgeRubric):
+       def __init__(self, judge) -> None:
+           super().__init__(judge, "The reply is correct and concise.")
+
+.. code-block:: yaml
+
+   environment:
+       env_type: rollout
+       entrypoint: guess_env.py:GuessEnv
+       rubric_file_path: reward.py
+       group_rubric_name: RULER
+       judge:
+           provider: openai
+           model: gpt-4.1-mini
+           api_key_env: OPENAI_API_KEY
+
+- ``group_rubric_name`` names a symbol in ``rubric_file_path``. Leave ``rubric_name``
+  unset to keep the env's own turn reward; on dataset rows the turn reward is 0, so
+  the group score is the whole reward. Set it to add a per-turn rubric as well.
+- With ``judge`` set, the group rubric must be a class taking ``judge``; the turn
+  rubric takes the judge only if its ``__init__`` asks for it.
+- The judge sees no reasoning unless ``include_reasoning=True``. It replies with
+  ``{"scores": [...]}``, each clamped to [0, 1]. A reply it cannot read, or with the
+  wrong number of scores, scores the whole group 0 and counts as a parse failure.
+- Each call shows the episodes in a new random order and maps the scores back, so
+  a judge that favours a position adds noise rather than bias. ``seed=`` makes the
+  order repeatable.
+- One instance serves the whole collector and groups overlap, so keep no per-group
+  state on ``self``.
+- Training logs the score as ``reward_<component_name>`` (``group`` by default,
+  ``group_judge`` for ``LLMGroupJudgeRubric``).
+- Group replay is off with a group rubric: a score relative to one group cannot be
+  compared with a return stored from another.
+- ``max_reward`` success counts include the group score, because it is part of the
+  reward. Held-out evaluation episodes get no group score.
+- On async rollouts, a judge call that still fails after the SDK's retries fails
+  that group's episode tasks, which drops the group; repeated failures stop the run.
 
 Supervised (SFT / DPO)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -400,6 +454,10 @@ These are the names this package reads:
    * - ``rubric_name``
      - ``reward_fn``
      - Symbol in that file. Alias: ``reward_fn_name``.
+   * - ``group_rubric_name``
+     - ``None``
+     - ``GroupRubric`` in that file, scoring each finished group together. Leaves
+       ``rubric_name`` unset by default, which keeps the env's reward.
    * - ``judge``
      - ``None``
      - LLM judge handed to the rubric: ``provider``, ``model``, ``base_url``,

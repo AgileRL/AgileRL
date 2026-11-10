@@ -14,7 +14,7 @@ from pydantic import ValidationError
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 import agilerl.llm_envs  # noqa: F401
-from agilerl.llm_envs.rubrics import TurnAction, TurnObservation
+from agilerl.llm_envs.rubrics import EnvReward, TurnAction, TurnObservation
 from agilerl.models.env import (
     BanditEnvSpec,
     GymEnvSpec,
@@ -23,7 +23,9 @@ from agilerl.models.env import (
     OfflineEnvSpec,
     _load_llm_dataset,
     _make_url_rollout_factory,
+    _rubric_factory,
     construct_custom_env_fn,
+    group_rubric_from_spec,
     make_bandit_env,
     make_gym_env,
     make_llm_env,
@@ -659,7 +661,10 @@ class TestLLMEnvSpec:
             factory()
 
         mock_get_rubric_factory.assert_called_once_with(
-            rubric_name="reward_fn", file_path="reward.py", judge_spec=None
+            rubric_name="reward_fn",
+            file_path="reward.py",
+            judge_spec=None,
+            judge_optional=False,
         )
         mock_conv_tmpl.assert_called_once()
         mock_rollout_cls.from_dataset.assert_called_once()
@@ -2348,3 +2353,56 @@ class TestMakeEnvDispatch:
         spec = GymEnvSpec(name="CartPole-v1")
         assert env_module.make_env(spec) is gym_sentinel
         assert env_module.make_env(spec, multi_agent=True) is pz_sentinel
+
+
+class TestGroupRubricFromSpec:
+    def test_builds_the_named_group_rubric(self, tmp_path) -> None:
+        # Arrange
+        rubric_file = tmp_path / "group.py"
+        rubric_file.write_text(
+            "from agilerl.llm_envs.rubrics import GroupRubric\n"
+            "class RULER(GroupRubric):\n"
+            "    def score_group(self, episodes):\n"
+            "        return [1.0] * len(episodes)\n"
+        )
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            env_url="http://env",
+            max_turns=1,
+            rubric_file_path=str(rubric_file),
+            group_rubric_name="RULER",
+        )
+
+        # Act
+        rubric = group_rubric_from_spec(spec)
+
+        # Assert
+        assert rubric.score_group([object()]) == [1.0]
+
+    def test_no_group_rubric_named_is_none(self) -> None:
+        # Arrange
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT, env_url="http://env", max_turns=1
+        )
+
+        # Act / Assert
+        assert group_rubric_from_spec(spec) is None
+
+
+class TestRubricFactoryForAGroupRubric:
+    def test_a_group_rubric_alone_keeps_the_env_reward(self, tmp_path) -> None:
+        # Arrange
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.ROLLOUT,
+            env_url="http://env",
+            max_turns=1,
+            rubric_file_path=str(tmp_path / "group.py"),
+            group_rubric_name="RULER",
+        )
+
+        # Act
+        make_rubric = _rubric_factory(spec)
+
+        # Assert
+        assert make_rubric is not None
+        assert isinstance(make_rubric(), EnvReward)
