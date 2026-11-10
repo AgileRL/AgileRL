@@ -2841,14 +2841,15 @@ def sample_eval_prompts(
     """Randomly sample *n* ``(prompt, chosen, rejected)`` triples from
     *env*'s held-out test dataset.
 
-    Columns are resolved automatically per gym type:
+    Columns are resolved from the held-out split:
 
-    * :class:`SFTGym` — ``chosen`` is ``env.response_column``; ``rejected``
-      is ``None`` (SFT has no negative example). A ``messages`` row gives its
-      rendered text up to the first assistant turn and that turn.
-    * :class:`PreferenceGym` — ``chosen`` and ``rejected`` map to the
-      dataset's ``"chosen"`` / ``"rejected"`` columns.
-    * Any other gym — both are ``None``.
+    * A ``messages`` row gives its rendered text up to the first assistant
+      turn and that turn. ``rejected`` is ``None``.
+    * ``chosen`` and ``rejected`` for a ``preference`` env, or for an env with
+      no ``objective`` whose split has a ``chosen`` column.
+    * Otherwise ``response_column``, when that column is present: ``chosen`` is
+      that column and ``rejected`` is ``None``.
+    * Any other dataset: both are ``None``.
 
     :param env: AgileRL gym environment with a ``test_dataloader`` attribute.
     :type env: object
@@ -2879,12 +2880,14 @@ def sample_eval_prompts(
 
     chosen_col: str | None = None
     rejected_col: str | None = None
+    features = getattr(dataset, "features", ())
     response_column = getattr(env, "response_column", None)
-    if isinstance(response_column, str):
-        chosen_col = response_column
-    elif "chosen" in getattr(dataset, "features", ()):
+    objective = getattr(env, "objective", None)
+    if objective == "preference" or (objective is None and "chosen" in features):
         chosen_col = "chosen"
         rejected_col = "rejected"
+    elif isinstance(response_column, str) and response_column in features:
+        chosen_col = response_column
 
     return [
         (

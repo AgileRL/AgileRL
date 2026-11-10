@@ -63,6 +63,7 @@ class DatasetEnv:
 
     :ivar dataset_size: ``{"train": N, "test": M}`` row counts after filtering.
     :ivar num_epochs: Full passes completed over the train split.
+    :ivar test_dataset: Held-out split after filtering and sharding.
     """
 
     def __init__(
@@ -163,6 +164,7 @@ class DatasetEnv:
         )
         train_dataset = self._shard_for_rank(train_dataset, "train dataset")
         test_dataset = self._shard_for_rank(test_dataset, "test dataset")
+        self.test_dataset = test_dataset
         self.train_dataloader = DataLoader(
             train_dataset,  # ty: ignore[invalid-argument-type]
             batch_size=data_batch_size_per_gpu,

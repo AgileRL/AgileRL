@@ -2114,6 +2114,9 @@ class TestTrainLlmRolloutCompletionLogging:
             "completion_tokens": 3,
             "prompt": "a",
             "completion": "aaa",
+            "reference": None,
+            "rejected": None,
+            "base_model": False,
         }
 
     def test_dumps_recent_completions_when_training_raises(self, caplog):
