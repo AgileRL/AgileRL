@@ -762,6 +762,8 @@ class TestPreserveAddedLatent:
         """
         from agilerl.networks.q_networks import QNetwork
 
+        torch.manual_seed(0)
+        dict_space.seed(0)
         network = QNetwork(
             dict_space,
             discrete_space,
@@ -779,7 +781,8 @@ class TestPreserveAddedLatent:
 
         self.widen(network)
 
-        torch.testing.assert_close(network(observation), before, rtol=0, atol=1e-6)
+        # The fused encoder sums more terms, so float32 rounding scales with the output.
+        torch.testing.assert_close(network(observation), before, rtol=1.3e-6, atol=1e-6)
 
     def test_a_continuous_critic_keeps_its_action_sensitivity(self, vector_space):
         from agilerl.networks.q_networks import ContinuousQNetwork

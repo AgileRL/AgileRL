@@ -16,8 +16,8 @@ import logging
 import random
 from abc import ABC, abstractmethod
 from collections import deque
-from collections.abc import Sequence
-from dataclasses import asdict, astuple, dataclass, fields
+from collections.abc import Mapping, Sequence
+from dataclasses import asdict, astuple, dataclass, field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -91,6 +91,8 @@ class CompletionRecord:
     so a multi-turn record includes the env's feedback turns. A dataset record has
     no ``reward``; it carries the row's ``reference`` and, for DPO, ``rejected``.
     ``base_model`` marks a completion from the model without the trained adapter.
+    ``notes`` maps a rubric component to a judge's note on the episode;
+    empty without a judge.
     """
 
     step: int
@@ -105,9 +107,10 @@ class CompletionRecord:
     reference: str | None = None
     rejected: str | None = None
     base_model: bool = False
+    notes: dict[str, str] = field(default_factory=dict)
 
     def render(self) -> str:
-        """Readable header line, prompt, completion and any dataset answers."""
+        """Readable header, prompt, completion, dataset answers and judge notes."""
         reward = "n/a" if self.reward is None else f"{self.reward:.4g}"
         header = (
             f"step {self.step} | agent {self.agent_index} | group {self.group_index} "
@@ -123,6 +126,9 @@ class CompletionRecord:
             rendered += f"\n--- reference ---\n{self.reference}"
         if self.rejected is not None:
             rendered += f"\n--- rejected ---\n{self.rejected}"
+        if self.notes:
+            lines = "\n".join(f"{name}: {note}" for name, note in self.notes.items())
+            rendered += f"\n--- judge notes ---\n{lines}"
         return rendered
 
 
@@ -170,6 +176,7 @@ def build_completion_record(
     group_index: int,
     sample_index: int,
     max_chars: int,
+    notes: Mapping[str, str] | None = None,
 ) -> CompletionRecord:
     """Decode one trajectory into a :class:`CompletionRecord`.
 
@@ -183,6 +190,7 @@ def build_completion_record(
     :param group_index: Prompt group within the batch.
     :param sample_index: Position within its group.
     :param max_chars: Character cap per text field.
+    :param notes: A judge's notes on the episode, by rubric component.
     :return: The decoded record.
     """
     ids = token_ids.reshape(-1).tolist()
@@ -205,6 +213,10 @@ def build_completion_record(
         completion_tokens=int(mask.sum()),
         prompt=truncate_middle(prompt, max_chars),
         completion=truncate_middle(completion, max_chars),
+        notes={
+            name: truncate_middle(note, max_chars)
+            for name, note in (notes or {}).items()
+        },
     )
 
 
@@ -379,7 +391,14 @@ class WandbCompletionWriter(CompletionWriter):
         """Attach a table of ``records`` to the run's next metrics commit."""
         table = wandb.Table(
             columns=[field.name for field in fields(CompletionRecord)],
-            data=[list(astuple(record)) for record in records],
+            # A table cell is a scalar, so the notes mapping goes in as JSON.
+            data=[
+                [
+                    json.dumps(value) if isinstance(value, dict) else value
+                    for value in astuple(record)
+                ]
+                for record in records
+            ],
         )
         wandb.log({"completions": table}, commit=False)
 
@@ -415,6 +434,7 @@ class CompletionLogger:
         action_masks: Sequence[torch.Tensor],
         rewards: Sequence[torch.Tensor],
         group_size: int,
+        notes: Sequence[Mapping[str, str]] | None = None,
     ) -> list[CompletionRecord]:
         """Decode sampled groups into :attr:`history` and return this call's records.
 
@@ -427,6 +447,7 @@ class CompletionLogger:
         :param action_masks: One policy-token mask per row.
         :param rewards: One per-turn reward tensor per row.
         :param group_size: Rows per prompt group.
+        :param notes: Each row's judge notes, parallel to ``token_ids``.
         :return: The sampled records, in group then sample order.
         """
         num_groups = len(token_ids) // group_size
@@ -457,6 +478,7 @@ class CompletionLogger:
                         group_index=group_index,
                         sample_index=sample_index,
                         max_chars=self.config.max_chars,
+                        notes=None if notes is None else notes[row],
                     )
                 )
         self.history.extend(records)
@@ -483,6 +505,7 @@ class CompletionLogger:
         action_masks: Sequence[torch.Tensor],
         rewards: Sequence[torch.Tensor],
         group_size: int,
+        notes: Sequence[Mapping[str, str]] | None = None,
     ) -> None:
         """Sample this agent's groups and write them if ``step`` is on the interval.
 
@@ -493,6 +516,7 @@ class CompletionLogger:
         :param action_masks: One policy-token mask per row.
         :param rewards: One per-turn reward tensor per row.
         :param group_size: Rows per prompt group.
+        :param notes: Each row's judge notes, parallel to ``token_ids``.
         """
         records = self.sample_groups(
             step=step,
@@ -502,6 +526,7 @@ class CompletionLogger:
             action_masks=action_masks,
             rewards=rewards,
             group_size=group_size,
+            notes=notes,
         )
         self.write_if_due(step, records)
 

@@ -236,7 +236,14 @@ class JudgeSpec(BaseModel):
         ge=0.0,
         description="Judge sampling temperature. Anthropic judges take none: leave it unset.",
     )
-    max_tokens: int = Field(default=512, ge=1, description="Verdict token budget.")
+    max_tokens: int = Field(
+        default=4096,
+        ge=1,
+        description=(
+            "Verdict token budget. A thinking judge spends it on its thinking "
+            "too, so a low budget cuts the verdict off."
+        ),
+    )
 
     @model_validator(mode="after")
     def _check_endpoint(self) -> Self:
@@ -684,6 +691,16 @@ class LLMEnvSpec(EnvSpecBase):
         min_length=1,
         validation_alias=AliasChoices("rubric_name", "reward_fn_name"),
         description="Name of the rubric (or reward callable) to import from that module.",
+    )
+    group_rubric_name: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Name of a GroupRubric in the rubric_file_path module. It scores each "
+            "finished group of completions together, and each score is added to "
+            "that completion's final-turn reward. Leave rubric_name unset to keep "
+            "the env's own turn reward. Group replay is off with a group rubric."
+        ),
     )
     judge: JudgeSpec | None = Field(
         default=None,
@@ -1330,13 +1347,28 @@ class LLMEnvSpec(EnvSpecBase):
         return self
 
     @model_validator(mode="after")
+    def _check_group_rubric(self) -> Self:
+        if self.group_rubric_name is not None and self.rubric_file_path is None:
+            msg = "group_rubric_name names a symbol in rubric_file_path; set it too."
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
     def _apply_conditional_defaults(self) -> Self:
         if self._dataset_identity_backed():
             if self.train_test_split is None:
                 self.train_test_split = 0.9
-            if self.env_type == "rollout" and self.rubric_name is None:
+            if (
+                self.env_type == "rollout"
+                and self.rubric_name is None
+                and self.group_rubric_name is None
+            ):
                 self.rubric_name = "reward_fn"
-        if self.rubric_file_path is not None and self.rubric_name is None:
+        if (
+            self.rubric_file_path is not None
+            and self.rubric_name is None
+            and self.group_rubric_name is None
+        ):
             self.rubric_name = "reward_fn"
         if self.env_type == "dataset" and self.response_column is None:
             self.response_column = "response"

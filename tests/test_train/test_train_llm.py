@@ -2117,6 +2117,7 @@ class TestTrainLlmRolloutCompletionLogging:
             "reference": None,
             "rejected": None,
             "base_model": False,
+            "notes": {},
         }
 
     def test_dumps_recent_completions_when_training_raises(self, caplog):

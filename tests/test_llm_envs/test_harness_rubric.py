@@ -532,3 +532,49 @@ class TestRolloutHarnessRubric:
     def test_rejects_a_callable_rubric(self) -> None:
         with pytest.raises(TypeError, match="reward_fn_to_rubric"):
             make_harness(CountingEnv(), lambda c, a, q: 1.0)  # type: ignore[arg-type]
+
+
+class TestLLMJudgeRubricNotes:
+    def test_the_judges_reason_reaches_the_step_info_and_the_harness(self) -> None:
+        # Arrange
+        client = judge_client(ScriptedJudge('{"score": 0.9, "reason": "polite"}'))
+        harness = make_harness(CountingEnv(), LLMJudgeRubric(client, "Be polite."))
+        prompt, _ = harness.reset()
+
+        # Act
+        _, _, _, _, info = step_text(harness, prompt, "ans")
+
+        # Assert
+        assert info["rubric_notes"] == {"judge": "polite"}
+        assert harness.rubric_notes == {"judge": "polite"}
+        harness.close()
+
+    def test_an_unreadable_verdict_keeps_the_whole_reply(self) -> None:
+        # Arrange
+        client = judge_client(ScriptedJudge("no idea"))
+        harness = make_harness(CountingEnv(), LLMJudgeRubric(client, "c"))
+        prompt, _ = harness.reset()
+
+        # Act
+        _, reward, _, _, info = step_text(harness, prompt, "ans")
+
+        # Assert
+        assert reward == 0.0
+        assert info["rubric_notes"] == {"judge": "no idea"}
+        harness.close()
+
+    def test_a_turn_the_judge_skips_writes_no_note(self) -> None:
+        # Arrange
+        client = judge_client(ScriptedJudge('{"score": 1, "reason": "done"}'))
+        harness = make_harness(
+            CountingEnv(turns=2), LLMJudgeRubric(client, "c"), max_turns=2
+        )
+        prompt, _ = harness.reset()
+
+        # Act
+        _, _, _, _, info = step_text(harness, prompt, "ans")
+
+        # Assert
+        assert "rubric_notes" not in info
+        assert harness.rubric_notes == {}
+        harness.close()

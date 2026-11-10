@@ -113,6 +113,8 @@ if TYPE_CHECKING:
     from openenv.core.rubrics.base import Rubric
     from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
+    from agilerl.llm_envs.rubrics import GroupEpisode
+
 
 class UnscoredTurn(NamedTuple):
     """One turn's env result, waiting for the rubric to score it."""
@@ -417,6 +419,9 @@ class RolloutHarness(RestartPromptMixin):
         self._unscored_turn: UnscoredTurn | None = None
         # The episode's messages as the rubric sees them; only kept for a rubric.
         self._rubric_transcript: list[dict[str, str]] = []
+        # The env's question and answer fields, once a turn's observation has them.
+        self._rubric_question: Any = None
+        self._rubric_answer: Any = None
         self._init_tool_calling(tokenizer, chat_format, min_reward)
         self.apply_chat_template = apply_chat_template
         self.chat_template_kwargs: dict[str, Any] = dict(chat_template_kwargs or {})
@@ -432,6 +437,8 @@ class RolloutHarness(RestartPromptMixin):
         self.turn_boundaries: list[tuple[int, int, int]] = []
         self.turn_rewards: list[float] = []
         self.rubric_score_sums: dict[str, float] = {}
+        # Component name to the judge's latest note on this episode.
+        self.rubric_notes: dict[str, str] = {}
         self._turn_idx = 0
         self._prompt_text: str = ""
         # Image episodes: the last prompt plus its sampled tokens, as text and as
@@ -1172,10 +1179,13 @@ class RolloutHarness(RestartPromptMixin):
         self.turn_boundaries = []
         self.turn_rewards = []
         self.rubric_score_sums = {}
+        self.rubric_notes = {}
         if self._rubric is not None:
             for node in (self._rubric, *self._rubric.rubrics()):
                 node.reset()
             self._rubric_transcript = [{"role": "user", "content": obs_text}]
+            self._rubric_question = None
+            self._rubric_answer = None
             self._unscored_turn = None
         self._turn_idx = 0
         self._prompt_text = obs_text
@@ -1443,13 +1453,15 @@ class RolloutHarness(RestartPromptMixin):
         turn, self._unscored_turn = self._unscored_turn, None
         return turn
 
-    def _score_turn(self, turn: UnscoredTurn) -> tuple[float, dict[str, float]]:
+    def _score_turn(
+        self, turn: UnscoredTurn
+    ) -> tuple[float, dict[str, float], dict[str, str]]:
         """Score one applied turn with the rubric; runs outside the tokenizer lock.
 
         An async rubric (an LLM judge) runs on the shared session loop, so slots
         stepping on concurrent threads overlap their judge calls.
 
-        :return: The turn's score and its leaf scores.
+        :return: The turn's score, its leaf scores and any judge notes.
         """
         from agilerl.llm_envs.rubrics import (  # optional extra: llm
             TurnAction,
@@ -1480,6 +1492,10 @@ class RolloutHarness(RestartPromptMixin):
         # A dataset row's prompt can be chat-templated; its question is the plain text.
         if turn_index == 0 and question is not None:
             self._rubric_transcript[0]["content"] = str(question)
+        if question is not None:
+            self._rubric_question = question
+        if fields.get("answer") is not None:
+            self._rubric_answer = fields["answer"]
         observation = TurnObservation(
             env_reward=turn.result.reward,
             env_ran=turn.env_ran,
@@ -1500,20 +1516,47 @@ class RolloutHarness(RestartPromptMixin):
 
             pending = score
             score = SESSION_LOOP.run(lambda: pending)
-        return float(score), observation.metadata.get("rubric_scores") or {}
+        return (
+            float(score),
+            observation.metadata.get("rubric_scores") or {},
+            observation.metadata.get("rubric_notes") or {},
+        )
+
+    @property
+    def has_rubric(self) -> bool:
+        """Whether a rubric scores this harness's turns and keeps its transcript."""
+        return self._rubric is not None
+
+    def group_episode(self) -> GroupEpisode:
+        """This episode as a group rubric sees it; needs a harness rubric.
+
+        :return: The episode's transcript, task fields and turn rewards.
+        """
+        from agilerl.llm_envs.rubrics import GroupEpisode  # optional extra: llm
+
+        return GroupEpisode(
+            transcript=list(self._rubric_transcript),
+            prompt=self._prompt_text,
+            question=self._rubric_question,
+            answer=self._rubric_answer,
+            turn_rewards=list(self.turn_rewards),
+        )
 
     def _apply_turn_score(
         self,
         step: tuple[dict[str, Any], float, bool, bool, dict[str, Any]],
-        final: tuple[float, dict[str, float]],
+        final: tuple[float, dict[str, float], dict[str, str]],
     ) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
         """Replace the env's reward for the turn with the rubric's score."""
         prompt, _reward, terminated, truncated, info = step
-        score, scores = final
+        score, scores, notes = final
         self.turn_rewards[-1] = score
         _add_scores(self.rubric_score_sums, scores)
+        self.rubric_notes.update(notes)
         if scores:
             info = {**info, "rubric_scores": scores}
+        if notes:
+            info = {**info, "rubric_notes": notes}
         return prompt, score, terminated, truncated, info
 
     def _step_env_actions(

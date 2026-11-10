@@ -43,6 +43,7 @@ from agilerl.utils.env_utils import (
     GymEnvType,
     apply_wrappers,
     construct_entrypoint_env,
+    get_group_rubric,
     get_rubric_factory,
     make_conversation_template,
     resolve_entrypoint_target,
@@ -57,6 +58,8 @@ if TYPE_CHECKING:
     from openenv.core.rubrics.base import Rubric
     from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
+    from agilerl.llm_envs.rubrics import GroupRubric
+
 __all__ = [
     "BanditEnvSpec",
     "EnvSpec",
@@ -66,6 +69,7 @@ __all__ = [
     "OfflineEnvSpec",
     "construct_custom_env_fn",
     "construct_custom_pz_env_fn",
+    "group_rubric_from_spec",
     "make_bandit_env",
     "make_env",
     "make_gym_env",
@@ -550,22 +554,39 @@ def _rubric_factory(spec: LLMEnvSpec) -> Callable[[], Rubric] | None:
     The rubric file is read on the first call, so building env factories stays
     free of I/O. Each harness gets its own rubric: the collector steps its slots
     on concurrent threads, and a rubric carries scoring state. Every rubric
-    shares the process's one client for ``spec.judge``.
+    shares the process's one client for ``spec.judge``. A group rubric alone gets
+    ``EnvReward``, which keeps the env's reward and the transcript it reads.
     """
     if spec.rubric_file_path is None:
         return None
     if spec.rubric_name is None:
-        msg = "rubric_name is required with rubric_file_path"
-        raise ValueError(msg)
+        if spec.group_rubric_name is None:
+            msg = "rubric_name is required with rubric_file_path"
+            raise ValueError(msg)
+        from agilerl.llm_envs.rubrics import EnvReward  # optional extra: llm
+
+        return EnvReward
     load = cache(
         partial(
             get_rubric_factory,
             rubric_name=spec.rubric_name,
             file_path=spec.rubric_file_path,
             judge_spec=spec.judge,
+            judge_optional=spec.group_rubric_name is not None,
         )
     )
     return lambda: load()()
+
+
+def group_rubric_from_spec(spec: LLMEnvSpec) -> GroupRubric | None:
+    """The spec's group rubric, built with the process's judge client.
+
+    :param spec: The rollout env spec.
+    :return: The group rubric; ``None`` when the spec names none.
+    """
+    if spec.group_rubric_name is None or spec.rubric_file_path is None:
+        return None
+    return get_group_rubric(spec.group_rubric_name, spec.rubric_file_path, spec.judge)
 
 
 def _http_timeout_s(spec: LLMEnvSpec) -> float | None:

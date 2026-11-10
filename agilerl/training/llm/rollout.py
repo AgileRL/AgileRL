@@ -58,6 +58,7 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from agilerl.algorithms import LLMPPO, LLMREINFORCE
     from agilerl.llm_envs import RolloutCollector, RolloutHarness
     from agilerl.llm_envs.judge import drain_judge_stats
+    from agilerl.llm_envs.rubrics import GroupRubric
     from agilerl.rollouts.on_policy import collate_llm_rollouts, collect_rollouts_llm
 
 if TYPE_CHECKING:
@@ -127,6 +128,7 @@ def train_llm_rollout(
     max_wall_seconds: float | None = None,
     io_timeout_s: float | None = 600.0,
     completion_logging: CompletionLoggingConfig | None = None,
+    group_rubric: "GroupRubric | None" = None,
 ) -> "tuple[list[SupportedRollout], Any]":
     """Train a population of LLM agents over rollout (generate-and-score) environments.
 
@@ -201,6 +203,9 @@ def train_llm_rollout(
         One write per interval step includes every population member. The latest
         samples are logged at error level if training raises. ``None`` disables it.
     :type completion_logging: CompletionLoggingConfig | None
+    :param group_rubric: Scores each finished group together, adding to each
+        episode's final-turn reward. Forwarded to :class:`RolloutCollector`.
+    :type group_rubric: GroupRubric | None
     :return: The finetuned population and its last recorded fitnesses.
     :rtype: tuple[list[SupportedRollout], Any]
     """
@@ -286,6 +291,7 @@ def train_llm_rollout(
         rank=dp_rank,
         world_size=data_increment,
         adaptive_task_sampling=False,
+        group_rubric=group_rubric,
     )
     test_env: RolloutHarness | None = None
     completion_logger = (
@@ -341,6 +347,7 @@ def train_llm_rollout(
                             action_masks=action_masks_list,
                             rewards=all_rewards,
                             group_size=group_size,
+                            notes=rollout_collector.rubric_notes(),
                         )
                     )
 

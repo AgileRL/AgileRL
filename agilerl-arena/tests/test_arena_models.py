@@ -1847,3 +1847,42 @@ class TestLLMEnvSpecSendsReasoningProperty:
         )
 
         assert spec.sends_reasoning is True
+
+
+class TestLLMEnvSpecGroupRubric:
+    def test_a_group_rubric_leaves_the_turn_rubric_unset(self) -> None:
+        # Act
+        spec = LLMEnvSpec(
+            env_type="rollout",
+            dataset="rows",
+            rubric_file_path="rubric.py",
+            group_rubric_name="RULER",
+            prompt_template={"user_0": "{q}"},
+        )
+
+        # Assert
+        assert spec.group_rubric_name == "RULER"
+        assert spec.rubric_name is None
+
+    def test_a_group_rubric_keeps_a_named_turn_rubric(self) -> None:
+        # Act
+        spec = LLMEnvSpec(
+            env_type="rollout",
+            env_url="http://env",
+            max_turns=1,
+            rubric_file_path="rubric.py",
+            rubric_name="TURN",
+            group_rubric_name="RULER",
+        )
+
+        # Assert
+        assert spec.rubric_name == "TURN"
+
+    def test_a_group_rubric_needs_the_rubric_file(self) -> None:
+        with pytest.raises(ValueError, match="group_rubric_name names a symbol"):
+            LLMEnvSpec(
+                env_type="rollout",
+                env_url="http://env",
+                max_turns=1,
+                group_rubric_name="RULER",
+            )
