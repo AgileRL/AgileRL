@@ -753,3 +753,13 @@ Multi-agent RL passes per-agent observations and returns a dict of actions:
 
    :ref:`tutorial_arena_grpo_gsm8k`
       Complete walkthrough of fine-tuning an LLM with GRPO on the GSM8K dataset in Arena.
+
+In-account Snowflake
+--------------------
+
+Train on a table that stays in a Snowflake account. See :doc:`snowflake`.
+
+.. toctree::
+   :maxdepth: 1
+
+   snowflake

@@ -27,6 +27,18 @@ dependencies = [
 hub = [
     "huggingface-hub>=0.30",
 ]
+# Snowpark requires protobuf<6.34 and vLLM 0.32 pins protobuf==7.36.1 on s390x.
+snowflake = [
+    "snowflake-connector-python; platform_machine != 's390x'",
+    "snowflake-snowpark-python; platform_machine != 's390x'",
+]
+# Installed by images/snowflake-job only: Model Registry calls and the parquet
+# export run inside the job.
+snowflake-job = [
+    "agilerl-arena[snowflake]; platform_machine != 's390x'",
+    "pyarrow; platform_machine != 's390x'",
+    "snowflake-ml-python>=2.8.0; platform_machine != 's390x'",
+]
 
 [project.scripts]
 arena = "agilerl.arena.cli:main"
