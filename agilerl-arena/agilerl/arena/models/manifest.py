@@ -38,6 +38,7 @@ from agilerl.arena.memory.resolve.rollout import (
     rollout_engines_blocker,
 )
 from agilerl.arena.models.algorithms.base import AlgoSpec, LLMAlgorithmSpec
+from agilerl.arena.models.algorithms.opd import OPDSpec
 from agilerl.arena.models.algorithms.ppo import PPOSpec
 from agilerl.arena.models.algorithms.rollout_llm import (
     RolloutLLMSpec,
@@ -683,6 +684,60 @@ class TrainingManifest(BaseModel):
             "turns with stop tokens or the env's turn protocol."
         )
         raise ValueError(msg)
+
+    @model_validator(mode="after")
+    def _check_distillation_teacher(self) -> Self:
+        """The teacher rescores each rollout's text, so the env must be text-only."""
+        if not isinstance(self.algorithm, OPDSpec):
+            return self
+        if not (
+            isinstance(self.environment, LLMEnvSpec) and self.environment.text_only
+        ):
+            msg = (
+                "algorithm.teacher rescores each rollout's text, so the "
+                "environment must be a text-only LLM rollout env (modality text "
+                "or a dataset-backed rollout)."
+            )
+            raise ValueError(msg)
+        model = self.algorithm.teacher.model
+        if model is None:
+            return self
+        teacher_info = SUPPORTED_MODEL_INFO.get(model.pretrained_model_name_or_path)
+        if teacher_info is None:
+            msg = (
+                f"algorithm.teacher.model {model.pretrained_model_name_or_path!r} is "
+                "not in the model catalog, so its engine memory cannot be sized."
+            )
+            raise ValueError(msg)
+        student_id = self.algorithm.pretrained_model_name_or_path
+        student_info = SUPPORTED_MODEL_INFO.get(student_id) if student_id else None
+        if (
+            student_info is not None
+            and student_info.vocab_size != teacher_info.vocab_size
+        ):
+            msg = (
+                "algorithm.teacher.model scores the student's token ids, so both "
+                f"need one vocabulary; {student_id} has {student_info.vocab_size} "
+                f"tokens and {model.pretrained_model_name_or_path} has "
+                f"{teacher_info.vocab_size}."
+            )
+            raise ValueError(msg)
+        vllm = self.algorithm.vllm_config
+        if (
+            vllm is None
+            or vllm.tensor_parallel_size is None
+            or not {"training_gpus_per_agent", "rollout_engines_per_agent"}
+            & self.training.model_fields_set
+        ):
+            msg = (
+                "algorithm.teacher.model needs its GPU layout written out, since "
+                "the automatic GPU split does not count teacher engines. Set "
+                "algorithm.vllm_config.tensor_parallel_size and "
+                "training.training_gpus_per_agent or "
+                "training.rollout_engines_per_agent."
+            )
+            raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def _check_pretrained_model_resolved(self) -> Self:

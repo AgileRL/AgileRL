@@ -241,20 +241,6 @@ def _registered_cluster_name(bundle: dict[str, Any], requested_name: str) -> str
     return requested_name
 
 
-def _registered_scope(bundle: dict[str, Any]) -> str | None:
-    """Return the byoc scope from a register response, if Arena sent one."""
-    cluster = bundle.get("cluster")
-    if not isinstance(cluster, dict):
-        return None
-    raw = cluster.get("byocScope")
-    if not isinstance(raw, str):
-        raw = cluster.get("byoc_scope")
-    if not isinstance(raw, str):
-        return None
-    scope = raw.strip()
-    return scope or None
-
-
 def _install_charts_from_arena_package(
     api: ByocApi,
     cluster_name: str,
@@ -595,7 +581,6 @@ class ClusterRegisterOptions(TypedDict):
     ray_data_pvc_size: NotRequired[str | None]
     inference_domain: NotRequired[str | None]
     placement: NotRequired[str | None]
-    byoc_scope: NotRequired[str | None]
     byoc_provider: NotRequired[dict[str, Any] | None]
     resource_classes: NotRequired[Sequence[ClusterResourceClass]]
     yes: NotRequired[bool]
@@ -656,9 +641,6 @@ def _echo_register_bundle(
         click.echo(f"Updated cluster {cluster_name!r}.")
     else:
         click.echo(f"Registered cluster {cluster_name!r}.")
-    scope = _registered_scope(bundle)
-    if scope is not None:
-        click.echo(f"Scope: {scope}")
     click.echo(f"Cluster API URL: {bundle.get('clusterApiUrl')}")
     return agent_values, storage_values, cluster_name
 
@@ -812,7 +794,6 @@ def _submit_cluster_register(
         ray_data_storage_class_name=options.get("ray_data_storage_class_name"),
         ray_data_pvc_size=options.get("ray_data_pvc_size"),
         placement=options.get("placement"),
-        byoc_scope=options.get("byoc_scope"),
         byoc_provider=options.get("byoc_provider"),
     )
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol
 
 import numpy as np
 import numpy.typing as npt
@@ -362,6 +362,9 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
 
     supports_sequence_packing = GRPOSpec.supports_sequence_packing
 
+    requires_group_contrast: ClassVar[bool] = True
+    """Whether ``group_size >= 2`` is required: group-relative advantages carry the update."""
+
     _window_action_tokens: torch.Tensor | float | None = None
     """This rank's share of the action tokens, across ranks, entering the optimizer step in progress."""
 
@@ -693,6 +696,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         episode_segments: list[EpisodeSegments | None] | None = None,
         image_token_id: int | None = None,
         sampling_supports: list[torch.Tensor | None] | None = None,
+        token_advantages: list[torch.Tensor | None] | None = None,
     ) -> dict[str, float | list[int]]:
         """Update agent network parameters to learn from experiences.
 
@@ -740,6 +744,12 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             of those tokens are normalized over their support, the
             distribution vLLM sampled from.
         :type sampling_supports: list[torch.Tensor | None] | None
+        :param token_advantages: Optional per-row flat advantage terms, one per
+            action token, parallel to ``sampling_logps``, added to the
+            group-relative advantages after their post-processing. A row whose
+            term count differs from its action tokens gets no term. Not supported
+            with ``filter_zero_adv``.
+        :type token_advantages: list[torch.Tensor | None] | None
         :return: Dict with ``loss`` averaged over optimizer windows, ``kl``
             (NaN on the fused path at ``beta == 0.0``) and ``clipfrac``
             averaged over micro-batches, and ``completion_length`` (plus
@@ -782,9 +792,19 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                     )
                     raise RuntimeError(msg)
 
+            if token_advantages is not None and self.filter_zero_adv:
+                msg = (
+                    "filter_zero_adv drops rows on their group advantages alone, "
+                    "before token_advantages are added, so leave it False."
+                )
+                raise ValueError(msg)
             advantages, batch_idxs = self._calculate_advantages(
                 rewards, token_ids, action_masks, turn_ids
             )
+            if token_advantages is not None:
+                advantages = advantages + self._align_token_advantages(
+                    token_advantages, action_masks
+                ).to(advantages.device)
             # Per-token advantages are (B, T) with masked positions zeroed,
             # so only action tokens count toward the mean/min/max.
             adv_values = advantages.float()
@@ -1484,7 +1504,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                 "['mean_std', 'mean_only']."
             )
             raise ValueError(msg)
-        if group_size < 2:
+        if group_size < 2 and self.requires_group_contrast:
             msg = (
                 f"group_size must be >= 2 for GRPO-style group-relative "
                 f"advantages; got {group_size}. A group of one yields a zero "
@@ -1652,6 +1672,9 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         ``"turn"`` granularity requires ``turn_ids``.
         """
         num_samples = token_ids.shape[0]
+        if self.group_size == 1:
+            # A group of one has no relative signal; token_advantages carry the update.
+            return rewards.new_zeros(num_samples, 1), np.arange(num_samples)
         resolved = self._resolve_advantage_granularity(turn_ids, rewards)
         if (
             self.advantage_granularity == "auto"
@@ -2202,6 +2225,40 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             ],
             dtype=bool,
         )
+
+    def _align_token_advantages(
+        self,
+        token_advantages: list[torch.Tensor | None],
+        action_masks: torch.Tensor,
+    ) -> torch.Tensor:
+        """Scatter per-row flat advantage terms onto the ``(B, T-1)`` action frame.
+
+        :param token_advantages: Per-row flat terms, one per action token.
+        :type token_advantages: list[torch.Tensor | None]
+        :param action_masks: ``(B, T-1)`` action-token mask.
+        :type action_masks: torch.Tensor
+        :return: ``(B, T-1)`` float32 terms, zero off the action tokens and on
+            rows whose term count differs from their action tokens.
+        :rtype: torch.Tensor
+        :raises ValueError: If ``token_advantages`` is empty.
+        """
+        covered = self._rows_with_full_sampling_logprobs(token_advantages, action_masks)
+        if not covered.all():
+            warnings.warn(
+                f"Rows {np.flatnonzero(~covered).tolist()} of token_advantages do "
+                "not match their action tokens, so those rows get no term.",
+                stacklevel=2,
+            )
+        zeros = torch.zeros(
+            action_masks.shape, dtype=torch.float32, device=action_masks.device
+        )
+        aligned, _ = self._align_sampling_logprobs(
+            token_advantages, action_masks, zeros
+        )
+        if aligned is None:
+            msg = "token_advantages must name at least one row."
+            raise ValueError(msg)
+        return aligned
 
     def _self_scored_micro_batches(
         self,

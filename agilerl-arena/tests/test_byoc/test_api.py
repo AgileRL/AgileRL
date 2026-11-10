@@ -157,24 +157,6 @@ class TestByocApi:
         _invoke, body = mock_client._invoke_manifest_command.call_args.args
         assert body["placement"] == "byoc_ephemeral"
 
-    def test_register_cluster_sends_byoc_scope(
-        self, byoc_api: ByocApi, mock_client: MagicMock
-    ) -> None:
-        mock_client._invoke_manifest_command.return_value = {
-            "cluster": {"name": "prod-cluster"}
-        }
-
-        byoc_api.register_cluster(name="prod-cluster", byoc_scope="platform")
-
-        _invoke, body = mock_client._invoke_manifest_command.call_args.args
-        assert body["byocScope"] == "platform"
-
-    def test_register_cluster_rejects_unknown_scope(
-        self, byoc_api: ByocApi, mock_client: MagicMock
-    ) -> None:
-        with pytest.raises(ValueError, match="customer or platform"):
-            byoc_api.register_cluster(name="prod-cluster", byoc_scope="shared")
-
     def test_register_cluster_omits_byoc_provider_when_unset(
         self, byoc_api: ByocApi, mock_client: MagicMock
     ) -> None:

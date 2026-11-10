@@ -8,21 +8,21 @@ Create one set per hunt region. The cluster spec's `nebius.region` is one. If re
 
 | Resource | Name | Parent |
 | --- | --- | --- |
-| IAM v2 project | `{cluster}-{region}` | tenant, in that region |
-| IAM group | `arena-tunnel-agents` | the `{cluster}-{region}` project |
-| Service account | `arena-tunnel-agent` | the `{cluster}-{region}` project |
+| IAM v2 project | `arena-{region}` | tenant, in that region |
+| IAM group | `arena-tunnel-agents` | the `arena-{region}` project |
+| Service account | `arena-tunnel-agent` | the `arena-{region}` project |
 | Group membership | `arena-tunnel-agent` is a member | the group |
 | Access permit | role `applicationtunnel.agent`, resource id is the project id | the group |
 
 One access permit per project. It covers every tunnel created in that project later. Do not create a permit per tunnel, and do not delete the permit when a job ends.
 
-The provisioner service account also needs `admin` on each `{cluster}-{region}` project, so it can create the head VM with `arena-tunnel-agent` attached. Reuse `arena-byoc-provisioner` when it already exists in the CLI parent project or a default project. Otherwise create it in the cluster project (`nebius.project_id`, the project named after the cluster). Then create this once per tenant, plus one permit per region project:
+The provisioner service account also needs `admin` on each `arena-{region}` project, so it can create the head VM with `arena-tunnel-agent` attached. Create this once per tenant, plus one permit per region:
 
 | Resource | Name | Parent |
 | --- | --- | --- |
 | IAM group | `arena-byoc-provisioners` | tenant |
 | Group membership | the provisioner service account is a member | that group |
-| Access permit | role `admin`, resource id is the `{cluster}-{region}` project id | that group |
+| Access permit | role `admin`, resource id is the `arena-{region}` project id | that group |
 
 Scope `admin` to the region projects. Do not add the provisioner to the tenant `admins` group. It stays in the tenant `editors` group for everything else.
 
@@ -30,7 +30,7 @@ This project is not the managed-Kubernetes project (`nebius.project_id`, Terrafo
 
 ## What the provisioner still creates
 
-Inside `{cluster}-{region}`, once the table above exists:
+Inside `arena-{region}`, once the table above exists:
 
 - VPC network `arena` and subnet `arena`, CIDR `10.0.0.0/13` (`subnet_cidr` in `provisioner.yaml`)
 - One unnamed tunnel per job, label `byoc-job=byoc-job-{job_id}`
@@ -42,7 +42,7 @@ Boot disks use public image families in `project-e00public-images`: `ubuntu24.04
 
 Listing works. Creating these does not, and IAM returns `PermissionDenied`:
 
-- IAM projects. `iam project create` on the tenant is denied. Create the project with IAM v2 (`iam v2 project`). The provisioner looks it up with `iam project get-by-name --parent-id <tenant> --name {cluster}-{region}`. `{cluster}` is the cluster spec name.
+- IAM projects. `iam project create` on the tenant is denied. Create the project with IAM v2 (`iam v2 project`). The provisioner still looks it up with `iam project get-by-name --parent-id <tenant> --name arena-{region}`.
 - IAM groups. `iam group create` in the project is denied.
 - Group memberships. `iam group-membership create` on the group is denied. The list command is `iam group-membership list-members`, and the JSON key is `memberships` (not `items`). The member id is `spec.member_id`.
 - Access permits. `iam access-permit create` on the group is denied. `iam access-permit list --parent-id <group>` works. The JSON key is `items`. An empty list is `{}` with that key omitted. The provisioner only checks that the project permit exists. If it is missing, the job fails with `tunnel agent group … has no applicationtunnel.agent access permit on project …`.

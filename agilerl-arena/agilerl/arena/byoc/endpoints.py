@@ -179,12 +179,6 @@ REGISTER_CLUSTER: ManifestInvoke = {
             "required": False,
         },
         {
-            "name": "byocScope",
-            "in": "body",
-            "type": "string",
-            "required": False,
-        },
-        {
             "name": "byocProvider",
             "in": "body",
             "type": "json",

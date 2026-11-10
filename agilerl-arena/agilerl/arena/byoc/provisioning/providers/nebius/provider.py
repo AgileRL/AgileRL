@@ -22,14 +22,6 @@ from agilerl.arena.byoc.provisioning.inference import (
     normalize_inference_domain,
     resolve_inference_hostname_template,
 )
-from agilerl.arena.byoc.provisioning.providers.base import (
-    CreatedProjectsQuery,
-    DeleteGateway,
-    DestroyDeferred,
-    DestroyExclusions,
-    EnsureGateway,
-    InstallCni,
-)
 from agilerl.arena.byoc.provisioning.providers.nebius.ephemeral import (
     delete_ephemeral_regions,
     ensure_ephemeral_regions,
@@ -50,15 +42,11 @@ from agilerl.arena.byoc.provisioning.providers.nebius.terraform import (
     credentials_path,
     delete_cluster_terraform_state,
     delete_nebius_project,
-    delete_project_compute_disks,
-    delete_project_storage_buckets,
     delete_terraform_state_bucket,
     delete_tfstate_iam,
     ensure_terraform_state_bucket,
     experiment_storage_import_ids,
     fetch_terraform_state_credentials,
-    nebius_project_exists,
-    nebius_project_name,
     nebius_region_from_endpoint,
     read_terraform_state_credentials,
     terraform_state_bucket_exists,
@@ -71,7 +59,6 @@ from agilerl.arena.byoc.provisioning.terraform import (
     ClusterOutputs,
     TerraformRunner,
     absolute_path,
-    configured_backend_type,
     terraform_address_matches,
 )
 
@@ -210,25 +197,20 @@ def _bootstrap_nebius_projects(
     credentials = read_terraform_state_credentials(state_dir)
     if credentials is not None:
         runner.extra_env.update(credentials.environ())
-    # Project ids may be omitted while this directory is already on the S3 backend.
-    remote_initialized = (
-        credentials is not None and configured_backend_type(work_dir) == "s3"
-    )
-    opened_remote = remote_initialized or (
+    opened_remote = (
         credentials is not None
         and spec.nebius_cloud().storage_project_id is not None
         and terraform_state_bucket_exists(spec)
     )
     if opened_remote:
-        if spec.nebius_cloud().storage_project_id is not None:
-            runner.extra_env.update(
-                ensure_terraform_state_bucket(
-                    spec,
-                    state_dir=state_dir,
-                    create=create_state_bucket,
-                    prompt=prompt,
-                )
+        runner.extra_env.update(
+            ensure_terraform_state_bucket(
+                spec,
+                state_dir=state_dir,
+                create=create_state_bucket,
+                prompt=prompt,
             )
+        )
         runner.initialize(work_dir, spec)
         present = runner.state_list(work_dir)
         missing_targets = tuple(
@@ -372,20 +354,14 @@ class NebiusProvider:
         state_dir: Path,
         create_state_bucket: bool = False,
         prompt_create: bool = False,
-        require_state_bucket: bool = True,
     ) -> tuple[ClusterSpec, Path]:
-        """Validate the spec, write provider auth, and open a Terraform work dir.
-
-        :param require_state_bucket: When false, a missing state bucket is left alone.
-        """
+        """Validate the spec, write provider auth, and open a Terraform work dir."""
         spec = resolve_nebius_service_account_id(spec)
         validate_nebius_spec(spec)
         work_dir = runner.prepare(
             spec, module_name=self.terraform_module, state_dir=state_dir
         )
         write_nebius_provider_config(work_dir)
-        if not require_state_bucket:
-            return spec, work_dir
         prompt: Callable[[str], bool] | None = click.confirm if prompt_create else None
         spec, opened_remote = _bootstrap_nebius_projects(
             spec,
@@ -509,9 +485,10 @@ class NebiusProvider:
             service_account_profile=service_account_profile,
         )
 
-    def install_cni(self, query: InstallCni) -> None:
+    def install_cni(
+        self, _spec: ClusterSpec, _work_dir: Path, _runner: TerraformRunner
+    ) -> None:
         """Nebius nodes join with the cluster CNI already running."""
-        query.spec.nebius_cloud()
 
     def post_apply(self, spec: ClusterSpec, outputs: ClusterOutputs) -> ClusterOutputs:
         """Install storage credentials, the GPU RuntimeClass, and Gateway API."""
@@ -541,18 +518,19 @@ class NebiusProvider:
                 endpoint=arena.storage.endpoint,
             )
         ensure_gpu_runtime_class(kubeconfig_path=outputs.kubeconfig_path)
-        parent_refs = self.ensure_gateway(
-            EnsureGateway(spec, outputs.kubeconfig_path, {})
-        )
+        parent_refs = self.ensure_gateway(spec, outputs.kubeconfig_path, {})
         if parent_refs is not None:
             outputs = replace(outputs, gateway_api_parent_refs=parent_refs)
         ensure_ephemeral_regions(spec)
         return outputs
 
-    def ensure_gateway(self, query: EnsureGateway) -> list[dict[str, str]] | None:
+    def ensure_gateway(
+        self,
+        spec: ClusterSpec,
+        kubeconfig_path: Path,
+        _terraform_outputs: dict[str, object],
+    ) -> list[dict[str, str]] | None:
         """Create the Cilium Gateway when the spec enables it."""
-        spec = query.spec
-        kubeconfig_path = query.kubeconfig_path
         arena = spec.arena
         if not arena.gateway.enable:
             return None
@@ -586,52 +564,51 @@ class NebiusProvider:
         )
         raise click.ClickException(msg)
 
-    def created_projects(self, query: CreatedProjectsQuery) -> tuple[bool, bool]:
-        """Return whether this cluster created the compute and storage projects."""
-        spec = query.spec
+    def created_projects(
+        self, spec: ClusterSpec, addresses: tuple[str, ...] = ()
+    ) -> tuple[bool, bool]:
+        """Return whether compute and storage projects were created by this cluster."""
         cloud = spec.nebius_cloud()
-        created_compute = cloud.project_id is None or any(
-            terraform_address_matches(address, (NEBIUS_COMPUTE_PROJECT_RESOURCE,))
-            for address in query.addresses
+        return (
+            cloud.project_id is None
+            or any(
+                terraform_address_matches(address, (NEBIUS_COMPUTE_PROJECT_RESOURCE,))
+                for address in addresses
+            ),
+            cloud.storage_project_id is None
+            or any(
+                terraform_address_matches(address, (NEBIUS_STORAGE_PROJECT_RESOURCE,))
+                for address in addresses
+            ),
         )
-        created_storage = cloud.storage_project_id is None or any(
-            terraform_address_matches(address, (NEBIUS_STORAGE_PROJECT_RESOURCE,))
-            for address in query.addresses
-        )
-        if query.state_missing and cloud.project_id is not None and not created_compute:
-            created_compute = nebius_project_name(cloud.project_id) == spec.name
-        if (
-            query.state_missing
-            and cloud.storage_project_id is not None
-            and not created_storage
-        ):
-            created_storage = (
-                nebius_project_name(cloud.storage_project_id) == f"{spec.name}-storage"
-            )
-        return (created_compute, created_storage)
 
-    def delete_gateway(self, query: DeleteGateway) -> None:
+    def delete_gateway(
+        self,
+        _spec: ClusterSpec,
+        _work_dir: Path,
+        _runner: TerraformRunner,
+    ) -> None:
         """The Gateway is deleted with the Kubernetes cluster."""
-        query.spec.nebius_cloud()
 
-    def destroy_exclusions(self, query: DestroyExclusions) -> tuple[str, ...]:
+    def destroy_exclusions(
+        self, _spec: ClusterSpec, delete_storage: bool
+    ) -> tuple[str, ...]:
         """Return Terraform addresses ``destroy`` must leave in place."""
-        exclude = () if query.delete_storage else NEBIUS_OBJECT_STORAGE_RESOURCES
+        exclude = () if delete_storage else NEBIUS_OBJECT_STORAGE_RESOURCES
         return (
             *exclude,
             NEBIUS_COMPUTE_PROJECT_RESOURCE,
             NEBIUS_STORAGE_PROJECT_RESOURCE,
         )
 
-    def destroy_deferred(self, query: DestroyDeferred) -> None:
+    def destroy_deferred(
+        self,
+        _spec: ClusterSpec,
+        _work_dir: Path,
+        _runner: TerraformRunner,
+        _delete_storage: bool,
+    ) -> None:
         """Cluster resources are destroyed in the first Terraform pass."""
-        query.spec.nebius_cloud()
-
-    def remote_state_available(self, spec: ClusterSpec) -> bool:
-        """Return whether the Terraform state bucket still exists."""
-        if spec.nebius_cloud().storage_project_id is None:
-            return True
-        return terraform_state_bucket_exists(spec)
 
     def finish_destroy(
         self,
@@ -648,10 +625,7 @@ class NebiusProvider:
             if project_id is None:
                 msg = "Terraform did not return the Nebius project_id."
                 raise click.ClickException(msg)
-            if nebius_project_exists(project_id):
-                # CSI disks are not Terraform resources, so cluster destroy leaves them.
-                delete_project_compute_disks(project_id)
-                delete_nebius_project(project_id)
+            delete_nebius_project(project_id)
         if delete_all:
             delete_tfstate_iam(spec)
             delete_ephemeral_regions(spec)
@@ -666,9 +640,7 @@ class NebiusProvider:
             if storage_project_id is None:
                 msg = "Terraform did not return the Nebius storage_project_id."
                 raise click.ClickException(msg)
-            if nebius_project_exists(storage_project_id):
-                delete_project_storage_buckets(storage_project_id)
-                delete_nebius_project(storage_project_id)
+            delete_nebius_project(storage_project_id)
 
     def delete_terraform_state(self, spec: ClusterSpec, state_dir: Path) -> None:
         """Delete this cluster's Terraform state object. The state bucket is kept."""

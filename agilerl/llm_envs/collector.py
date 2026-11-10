@@ -582,6 +582,17 @@ class RolloutCollector:
                 raise IndexError(msg)
             return self._assignment[int(logical_slot)]
 
+    def task_for_slot(self, logical_slot: int) -> tuple[int | None, int | None]:
+        """The ``(seed, row_index)`` :meth:`reset_episode` uses for ``logical_slot``.
+
+        :param logical_slot: Position in the rollout window.
+        :type logical_slot: int
+        :return: The window assignment for that slot.
+        :rtype: tuple[int | None, int | None]
+        """
+        self._ensure_slots()
+        return self._episode_assignment(logical_slot)
+
     def assign_group_task(self, group_seed: int) -> tuple[int | None, int | None]:
         """Draw one group's ``(seed, row_index)``, independent of the episodes running.
 

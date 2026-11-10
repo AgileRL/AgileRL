@@ -195,6 +195,11 @@ class TestAttentionOutputGateParams:
         assert params == 24 * 14 * 64 * 896 + 24 * 14 * 64
 
 
+class TestPromptLogprobBytes:
+    def test_holds_two_chunks_of_fp32_full_vocab_logits(self) -> None:
+        assert formulas.prompt_logprob_bytes(QWEN_05B) == 2 * 1024 * 151936 * 4
+
+
 class TestParamCounts:
     def test_repeat_and_equal_arch_match_a_fresh_count(self):
         # Arrange

@@ -136,12 +136,12 @@ def _lora_slot_bytes(
     :param settings: Generation settings.
     :param act_bytes: Bytes per activation element.
     :param tp: Engine tensor parallel size.
-    :return: 0 when weight sync pushes merged weights.
+    :return: 0 when weight sync pushes merged weights, else one slot per served adapter.
     """
     if settings.merged_lora_sync:
         return 0
-    # Engines serve one adapter (``max_loras=1``).
-    return (
+    # Each served adapter (``max_loras``) holds a slot at ``max_lora_rank``.
+    return settings.served_loras * (
         int(
             lora_formulas.engine_lora_param_count(arch, settings.max_lora_rank)
             * act_bytes
@@ -332,6 +332,8 @@ def estimate_generation(
         )
         + sampler,
     )
+    if settings.scores_prompt_logprobs:
+        runtime_activation += formulas.prompt_logprob_bytes(model.arch)
     return PhaseBreakdown(
         phase="generation",
         components=_kv_bar_components(
@@ -364,6 +366,8 @@ def _generation_pools(
 ) -> tuple[int, int, int]:
     """KV pool, start-up pool, and one-sequence demand of the engine bar."""
     budget = int(settings.gpu_memory_utilization * device.total_bytes)
+    if settings.reserves_prompt_logprobs:
+        budget -= formulas.prompt_logprob_bytes(model.arch)
     non_kv = (
         terms["weights"]
         + terms["startup_peak"]

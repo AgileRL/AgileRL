@@ -11,11 +11,6 @@ variable "region" {
   default = ""
 }
 
-variable "storage_region" {
-  type    = string
-  default = ""
-}
-
 variable "project_id" {
   type    = string
   default = ""

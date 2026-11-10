@@ -366,12 +366,12 @@ class NDJsonStream:
         :param event: The event to track.
         :type event: StreamEvent
         """
-        if isinstance(event, StatusEvent) and event.status == "completed":
-            self._result = event.detail or {
-                "stage": event.stage,
-                "status": event.status,
-                "message": event.message,
-            }
+        if (
+            isinstance(event, StatusEvent)
+            and event.status == "completed"
+            and event.detail
+        ):
+            self._result = event.detail
             self._raw_chunks.clear()
         elif isinstance(event, ErrorEvent) and self._error is None:
             self._error = event

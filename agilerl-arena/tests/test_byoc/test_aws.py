@@ -114,12 +114,6 @@ from agilerl.arena.byoc.provisioning.providers.aws.terraform import (
     terraform_state_bucket_exists,
     write_terraform_state_credentials,
 )
-from agilerl.arena.byoc.provisioning.providers.base import (
-    DeleteGateway,
-    DestroyDeferred,
-    DestroyExclusions,
-    InstallCni,
-)
 from agilerl.arena.byoc.provisioning.provisioner import ClusterProvisioner
 from agilerl.arena.byoc.provisioning.spec import (
     ClusterSpec,
@@ -294,33 +288,6 @@ class TestAwsStoredRow:
         )
 
         assert spec.values.placement == expected
-
-    def test_keeps_platform_scope(self) -> None:
-        spec = spec_from_stored_row(
-            {
-                "name": "eks-byoc",
-                "placement": "byoc_ephemeral",
-                "byocScope": "platform",
-                "byocProvider": {
-                    "provider": "aws",
-                    "config": {
-                        "region": "eu-west-1",
-                        "storage_bucket_name": "eks-data",
-                        "storage_endpoint": "https://s3.eu-west-1.amazonaws.com",
-                        "terraform_state": {"bucket": "eks-tfstate"},
-                        "inference": {"domain": "inference.example.com"},
-                        "arena": {
-                            "min_node_count": 2,
-                            "max_node_count": 10,
-                            "instance_type": "t3.xlarge",
-                        },
-                    },
-                },
-            }
-        )
-
-        assert spec.values.byoc_scope == "platform"
-        assert spec.values.placement == "ephemeral"
 
 
 class TestEfsStorageClass:
@@ -818,7 +785,7 @@ class TestCilium:
                 return_value=["aws", "eks", "update-kubeconfig"],
             ),
         ):
-            AWS.install_cni(InstallCni(_aws_spec(), tmp_path, runner))
+            AWS.install_cni(_aws_spec(), tmp_path, runner)
 
         admin.assert_called_once_with(cluster_name="eks-byoc", region="eu-west-1")
 
@@ -1347,7 +1314,7 @@ class TestAwsProviderDeleteGateway:
                 "agilerl.arena.byoc.provisioning.providers.aws.provider.delete_eks_gateway"
             ) as delete,
         ):
-            AWS.delete_gateway(DeleteGateway(spec, tmp_path, runner))
+            AWS.delete_gateway(spec, tmp_path, runner)
 
         argv = runner.run.call_args.args[0]
         assert argv[1:6] == [
@@ -1370,9 +1337,7 @@ class TestAwsProviderDeleteGateway:
             "agilerl.arena.byoc.provisioning.providers.aws.provider.delete_eks_gateway"
         ) as delete:
             AWS.delete_gateway(
-                DeleteGateway(
-                    _aws_spec(gateway_api={"enable": False}), tmp_path, runner
-                )
+                _aws_spec(gateway_api={"enable": False}), tmp_path, runner
             )
 
         runner.run.assert_not_called()
@@ -1387,7 +1352,7 @@ class TestAwsProviderDeleteGateway:
         with patch(
             "agilerl.arena.byoc.provisioning.providers.aws.provider.delete_eks_gateway"
         ) as delete:
-            AWS.delete_gateway(DeleteGateway(_aws_spec(), tmp_path, runner))
+            AWS.delete_gateway(_aws_spec(), tmp_path, runner)
 
         runner.run.assert_not_called()
         delete.assert_not_called()
@@ -1406,7 +1371,7 @@ class TestAwsProviderDeleteGateway:
                 click.ClickException, match="Could not retrieve kubeconfig from EKS"
             ),
         ):
-            AWS.delete_gateway(DeleteGateway(_aws_spec(), tmp_path, runner))
+            AWS.delete_gateway(_aws_spec(), tmp_path, runner)
 
     def test_destroy_deletes_the_gateway_before_terraform(self, tmp_path: Path) -> None:
         spec = _aws_spec()
@@ -1414,11 +1379,16 @@ class TestAwsProviderDeleteGateway:
         work_dir = tmp_path / "work"
         events: list[str] = []
 
-        def delete_gateway(_self: AwsProvider, query: DeleteGateway) -> None:
+        def delete_gateway(
+            _self: AwsProvider,
+            got_spec: object,
+            got_dir: Path,
+            got_runner: object,
+        ) -> None:
             events.append("gateway")
-            assert query.spec is spec
-            assert query.work_dir is work_dir
-            assert query.runner is runner
+            assert got_spec is spec
+            assert got_dir is work_dir
+            assert got_runner is runner
 
         destroy_calls: list[dict[str, object]] = []
 
@@ -1450,7 +1420,12 @@ class TestAwsProviderDeleteGateway:
         spec = _aws_spec()
         runner = MagicMock()
 
-        def delete_gateway(_self: AwsProvider, _query: DeleteGateway) -> None:
+        def delete_gateway(
+            _self: AwsProvider,
+            _spec: object,
+            _work_dir: Path,
+            _runner: object,
+        ) -> None:
             msg = "Could not retrieve kubeconfig from EKS."
             raise click.ClickException(msg)
 
@@ -1721,38 +1696,6 @@ class TestTerraformStateUser:
         assert "AWS_ACCESS_KEY_ID" not in runner.extra_env
         assert "AWS_SECRET_ACCESS_KEY" not in runner.extra_env
 
-    def test_prepare_skips_a_missing_state_bucket_for_local_destroy(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("AWS_PROFILE", PROVISIONER_PROFILE)
-        monkeypatch.setattr(
-            "agilerl.arena.byoc.provisioning.providers.aws.provider.resolve_aws_executable",
-            lambda: "aws",
-        )
-
-        def fail(*_args: object, **_kwargs: object) -> TerraformStateCredentials:
-            msg = "state bucket should not be required"
-            raise AssertionError(msg)
-
-        monkeypatch.setattr(
-            "agilerl.arena.byoc.provisioning.providers.aws.provider.ensure_terraform_state_bucket",
-            fail,
-        )
-        monkeypatch.setattr(
-            "agilerl.arena.byoc.provisioning.terraform.shutil.which",
-            lambda _name: "terraform",
-        )
-        state_dir = tmp_path / "terraform"
-
-        AWS.prepare(
-            _aws_spec(),
-            TerraformRunner(),
-            state_dir,
-            require_state_bucket=False,
-        )
-
-        assert (state_dir / "terraform.tfvars.json").is_file()
-
     def test_backend_authenticates_with_the_tfstate_key(self, tmp_path: Path) -> None:
         # Arrange
         work_dir = tmp_path / "terraform"
@@ -1976,19 +1919,16 @@ class TestDestroyDeferredIam:
     def test_byoc_pass_keeps_iam_and_caller_pass_deletes_roles(self) -> None:
         spec = _aws_spec()
 
-        excluded = AWS.destroy_exclusions(DestroyExclusions(spec, delete_storage=False))
+        excluded = AWS.destroy_exclusions(spec, delete_storage=False)
 
         assert "aws_s3_bucket.arena_data" in excluded
         assert "aws_iam_user.storage" in excluded
         assert "aws_iam_role.cluster" in excluded
 
-    def test_remote_state_is_available(self) -> None:
-        assert AWS.remote_state_available(_aws_spec()) is True
-
     def test_delete_storage_defers_the_storage_user(self) -> None:
         spec = _aws_spec()
 
-        excluded = AWS.destroy_exclusions(DestroyExclusions(spec, delete_storage=True))
+        excluded = AWS.destroy_exclusions(spec, delete_storage=True)
 
         assert "aws_s3_bucket.arena_data" not in excluded
         assert "aws_iam_user.storage" in excluded
@@ -2034,9 +1974,7 @@ class TestDestroyDeferredIam:
                     "AKIA-state",
                 ] in [argv[1:] for argv in iam.calls]
 
-        provider.destroy_deferred(
-            DestroyDeferred(_aws_spec(), tmp_path, Runner(), delete_storage=True)
-        )
+        provider.destroy_deferred(_aws_spec(), tmp_path, Runner(), delete_storage=True)
 
         assert seen == [
             (
@@ -2055,7 +1993,7 @@ class TestDestroyDeferredIam:
         runner = MagicMock()
 
         AwsProvider().destroy_deferred(
-            DestroyDeferred(_aws_spec(), tmp_path, runner, delete_storage=False)
+            _aws_spec(), tmp_path, runner, delete_storage=False
         )
 
         assert iam.calls == []
@@ -2949,7 +2887,7 @@ class TestAwsProviderMethods:
         runner.terraform_output.return_value = None
 
         with pytest.raises(click.ClickException, match="EKS API endpoint"):
-            AWS.install_cni(InstallCni(_aws_spec(), tmp_path, runner))
+            AWS.install_cni(_aws_spec(), tmp_path, runner)
 
     def test_install_cni_requires_kubeconfig(self, tmp_path: Path) -> None:
         runner = MagicMock()
@@ -2963,7 +2901,7 @@ class TestAwsProviderMethods:
             ),
             pytest.raises(click.ClickException, match="Could not retrieve kubeconfig"),
         ):
-            AWS.install_cni(InstallCni(_aws_spec(), tmp_path, runner))
+            AWS.install_cni(_aws_spec(), tmp_path, runner)
 
     def test_post_apply_requires_an_endpoint(self, tmp_path: Path) -> None:
         outputs = _outputs(tmp_path)

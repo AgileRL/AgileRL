@@ -12,9 +12,6 @@ from typing import Any
 
 import click
 
-from agilerl.arena.byoc.provisioning.providers.nebius.ephemeral import (
-    cluster_region_project_ids,
-)
 from agilerl.arena.byoc.provisioning.providers.nebius.spec import (
     NEBIUS_GPU_WORKER_PRESET,
     WorkerNodeGroupSpec,
@@ -58,32 +55,6 @@ def list_gpu_presets(
         run=run,
     )
     return parse_gpu_presets(items)
-
-
-def list_registerable_gpu_presets(
-    spec: ClusterSpec,
-    project_id: str,
-    run: NebiusRun = subprocess.run,
-) -> list[GpuPreset]:
-    """Return GPU presets this cluster can register.
-
-    Ephemeral placement reads this cluster's ``{cluster}-{region}`` projects.
-    In-cluster placement reads the home project.
-    """
-    if spec.values.placement == "ephemeral":
-        project_ids = cluster_region_project_ids(spec, run)
-    else:
-        project_ids = [project_id]
-    merged: dict[str, GpuPreset] = {}
-    for parent_id in project_ids:
-        for preset in list_gpu_presets(parent_id, run):
-            key = f"{preset.platform}:{preset.preset}"
-            current = merged.get(key)
-            if current is None or (
-                current.vram_gib is None and preset.vram_gib is not None
-            ):
-                merged[key] = preset
-    return list(merged.values())
 
 
 def list_capacity_advice(
@@ -143,13 +114,7 @@ def parse_gpu_presets(items: list[dict[str, Any]]) -> list[GpuPreset]:
         if not isinstance(spec, dict):
             continue
         vram_gib = _non_negative_int(
-            _field(
-                spec,
-                "gpu_memory_gibibytes",
-                "gpuMemoryGibibytes",
-                "gpu_memory_gigabytes",
-                "gpuMemoryGigabytes",
-            )
+            _field(spec, "gpu_memory_gibibytes", "gpuMemoryGibibytes")
         )
         if vram_gib == 0:
             vram_gib = None

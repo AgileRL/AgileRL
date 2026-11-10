@@ -604,6 +604,7 @@ class RolloutHarness(RestartPromptMixin):
         prompt_builder: Callable[[Mapping[str, Any]], str] | None = None,
         question_column: str = "question",
         answer_column: str = "answer",
+        metadata_columns: Sequence[str] = (),
         **kwargs: Any,
     ) -> RolloutHarness:
         """Build a single-turn ``RolloutHarness`` from (question, answer) rows and a rubric.
@@ -623,6 +624,7 @@ class RolloutHarness(RestartPromptMixin):
             ``str(row[question_column])``.
         :param question_column: Row key for the question.
         :param answer_column: Row key for the answer.
+        :param metadata_columns: Row keys copied into each reset's info.
         :param kwargs: Forwarded to :class:`RolloutHarness`.
         :rtype: RolloutHarness
         """
@@ -637,6 +639,7 @@ class RolloutHarness(RestartPromptMixin):
             prompt_builder=prompt_builder,
             question_column=question_column,
             answer_column=answer_column,
+            metadata_columns=metadata_columns,
         )
         return cls.local(env, tokenizer, max_turns=1, rubric=rubric, **kwargs)
 

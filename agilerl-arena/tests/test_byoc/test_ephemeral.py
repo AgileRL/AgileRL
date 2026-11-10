@@ -302,7 +302,7 @@ def _adopted_cli() -> _NebiusIamCli:
     )
     cli.add("group", TENANT_ID, PROVISIONERS_GROUP, PROVISIONERS)
     cli.add_membership(PROVISIONERS, PROVISIONER_SA, "groupmembership-provisioner")
-    cli.add("project", TENANT_ID, "test-eu-north1", NORTH_PROJECT, region="eu-north1")
+    cli.add("project", TENANT_ID, "arena-eu-north1", NORTH_PROJECT, region="eu-north1")
     cli.add("group", NORTH_PROJECT, TUNNEL_GROUP, NORTH_TUNNEL_GROUP)
     cli.add("service-account", NORTH_PROJECT, TUNNEL_SERVICE_ACCOUNT, NORTH_TUNNEL_SA)
     cli.add_membership(NORTH_TUNNEL_GROUP, NORTH_TUNNEL_SA, "groupmembership-north")
@@ -311,7 +311,7 @@ def _adopted_cli() -> _NebiusIamCli:
     )
     cli.add_permit(PROVISIONERS, PROVISIONER_ROLE, NORTH_PROJECT, "permit-north-admin")
     west = "project-e01mjqekpa009q4bqfat7c"
-    cli.add("project", TENANT_ID, "test-eu-west1", west, region="eu-west1")
+    cli.add("project", TENANT_ID, "arena-eu-west1", west, region="eu-west1")
     west_group = "group-west-tunnel"
     west_sa = "serviceaccount-west-tunnel"
     cli.add("group", west, TUNNEL_GROUP, west_group)
@@ -347,8 +347,8 @@ class TestEnsureEphemeralRegions:
             for argv in cli.calls
             if "get-by-name" in argv and "project" in argv
         ]
-        assert "test-eu-north1" in looked_up
-        assert "test-eu-west1" in looked_up
+        assert "arena-eu-north1" in looked_up
+        assert "arena-eu-west1" in looked_up
 
     def test_creates_a_region_that_only_has_a_default_project(
         self, nebius_cli: None
@@ -384,7 +384,7 @@ class TestEnsureEphemeralRegions:
             _flag(argv, "--name")
             for argv in created
             if argv[1:4] == ["iam", "v2", "project"]
-        ] == ["test-eu-west1"]
+        ] == ["arena-eu-west1"]
         project_create = next(argv for argv in created if "v2" in argv)
         assert _flag(project_create, "--region") == "eu-west1"
         assert _flag(project_create, "--parent-id") == TENANT_ID
@@ -419,79 +419,18 @@ class TestEnsureEphemeralRegions:
             _flag(argv, "--name")
             for argv in _creates(cli)
             if argv[1:4] == ["iam", "v2", "project"]
-        ] == ["test-eu-south1"]
+        ] == ["arena-eu-south1"]
 
-    def test_delete_all_removes_this_clusters_region_projects(
-        self, nebius_cli: None
-    ) -> None:
+    def test_delete_all_removes_arena_region_projects(self, nebius_cli: None) -> None:
         # Arrange
         cli = _adopted_cli()
         cli.project_pages[0].append(
-            _resource(NORTH_PROJECT, "test-eu-north1", region="eu-north1")
+            _resource(NORTH_PROJECT, "arena-eu-north1", region="eu-north1")
         )
         cli.project_pages[1].append(
             _resource(
                 "project-e01mjqekpa009q4bqfat7c",
-                "test-eu-west1",
-                region="eu-west1",
-            )
-        )
-        other = "project-other-cluster"
-        cli.project_pages[0].append(
-            _resource(other, "other-eu-north1", region="eu-north1")
-        )
-        cli.project_pages[0].append(
-            _resource(
-                "project-cluster",
-                "arena-dev-nebius-global",
-                region="eu-north1",
-            )
-        )
-        cli.project_pages[0].append(_resource("project-no-region", "scratch"))
-        cli.permits.setdefault(PROVISIONERS, []).insert(
-            0, {"metadata": {"id": "permit-broken"}}
-        )
-        cli.add_permit(PROVISIONERS, PROVISIONER_ROLE, other, "permit-other-admin")
-
-        # Act
-        delete_ephemeral_regions(_spec(region="eu-north1"), run=cli)
-
-        # Assert
-        deleted = [
-            _flag(argv, "--id")
-            for argv in cli.calls
-            if argv[1:5] == ["iam", "v2", "project", "delete"]
-        ]
-        assert deleted == [NORTH_PROJECT, "project-e01mjqekpa009q4bqfat7c"]
-        assert other not in deleted
-        assert not any(argv[1:4] == ["iam", "group", "delete"] for argv in cli.calls)
-        assert not any(
-            argv[1:3] == ["iam", "group-membership"] and "delete" in argv
-            for argv in cli.calls
-        )
-        assert not any(
-            argv[1:3] == ["iam", "service-account"] and "delete" in argv
-            for argv in cli.calls
-        )
-        permit_deletes = [
-            _flag(argv, "--id")
-            for argv in cli.calls
-            if argv[1:4] == ["iam", "access-permit", "delete"]
-        ]
-        assert permit_deletes == ["permit-north-admin", "permit-west-admin"]
-
-    def test_delete_all_removes_the_provisioners_group_when_it_is_last(
-        self, nebius_cli: None
-    ) -> None:
-        # Arrange
-        cli = _adopted_cli()
-        cli.project_pages[0].append(
-            _resource(NORTH_PROJECT, "test-eu-north1", region="eu-north1")
-        )
-        cli.project_pages[1].append(
-            _resource(
-                "project-e01mjqekpa009q4bqfat7c",
-                "test-eu-west1",
+                "arena-eu-west1",
                 region="eu-west1",
             )
         )
@@ -534,44 +473,6 @@ class TestEnsureEphemeralRegions:
         )
         assert group_delete < project_delete
 
-    def test_delete_all_ignores_a_project_with_no_region(
-        self, nebius_cli: None
-    ) -> None:
-        cli = _adopted_cli()
-        cli.project_pages[0].append(
-            _resource(NORTH_PROJECT, "test-eu-north1", region="eu-north1")
-        )
-        cli.project_pages[0].append(_resource("project-scratch", "scratch"))
-
-        delete_ephemeral_regions(_spec(region="eu-north1"), run=cli)
-
-        assert any(
-            argv[1:4] == ["iam", "group", "delete"]
-            and _flag(argv, "--id") == PROVISIONERS
-            for argv in cli.calls
-        )
-
-    def test_delete_all_without_a_provisioners_group(self, nebius_cli: None) -> None:
-        cli = _adopted_cli()
-        cli.named = {
-            key: payload
-            for key, payload in cli.named.items()
-            if not (key[0] == "group" and key[2] == PROVISIONERS_GROUP)
-        }
-        cli.project_pages[0].append(
-            _resource(NORTH_PROJECT, "test-eu-north1", region="eu-north1")
-        )
-
-        delete_ephemeral_regions(_spec(region="eu-north1"), run=cli)
-
-        assert not any(argv[1:4] == ["iam", "group", "delete"] for argv in cli.calls)
-        deleted = [
-            _flag(argv, "--id")
-            for argv in cli.calls
-            if argv[1:5] == ["iam", "v2", "project", "delete"]
-        ]
-        assert deleted == [NORTH_PROJECT]
-
     def test_skips_in_cluster_placement(self, nebius_cli: None) -> None:
         cli = _NebiusIamCli()
 
@@ -579,55 +480,16 @@ class TestEnsureEphemeralRegions:
 
         assert cli.calls == []
 
-    def test_creates_the_provisioner_account_in_the_cluster_project(
-        self, nebius_cli: None
-    ) -> None:
+    def test_requires_the_provisioner_service_account(self, nebius_cli: None) -> None:
         cli = _NebiusIamCli()
         cli.project_pages = [
             [_resource(DEFAULT_NORTH, "default-project-eu-north1", region="eu-north1")]
         ]
 
-        ensure_ephemeral_regions(_spec(region="eu-north1"), run=cli)
+        with pytest.raises(click.ClickException, match=PROVISIONER_SERVICE_ACCOUNT):
+            ensure_ephemeral_regions(_spec(region="eu-north1"), run=cli)
 
-        created = next(
-            argv
-            for argv in _creates(cli)
-            if argv[1:4] == ["iam", "service-account", "create"]
-            and _flag(argv, "--name") == PROVISIONER_SERVICE_ACCOUNT
-        )
-        assert _flag(created, "--parent-id") == "project"
-
-    def test_creates_the_provisioner_account_in_the_named_cluster_project(
-        self, nebius_cli: None
-    ) -> None:
-        cli = _NebiusIamCli()
-        cli.project_pages = [
-            [_resource(DEFAULT_NORTH, "default-project-eu-north1", region="eu-north1")]
-        ]
-        cli.add("project", TENANT_ID, "test", "project-cluster", region="eu-north1")
-
-        ensure_ephemeral_regions(
-            _spec(region="eu-north1", project_id=None, subnet_id=None), run=cli
-        )
-
-        created = next(
-            argv
-            for argv in _creates(cli)
-            if argv[1:4] == ["iam", "service-account", "create"]
-            and _flag(argv, "--name") == PROVISIONER_SERVICE_ACCOUNT
-        )
-        assert _flag(created, "--parent-id") == "project-cluster"
-
-    def test_requires_the_cluster_project(self, nebius_cli: None) -> None:
-        cli = _NebiusIamCli()
-        cli.project_pages = [
-            [_resource(DEFAULT_NORTH, "default-project-eu-north1", region="eu-north1")]
-        ]
-
-        with pytest.raises(click.ClickException, match="project 'test' was not found"):
-            ensure_ephemeral_regions(
-                _spec(region="eu-north1", project_id=None, subnet_id=None), run=cli
-            )
+        assert _creates(cli) == []
 
     def test_requires_a_region(self, nebius_cli: None) -> None:
         cli = _NebiusIamCli()
@@ -665,7 +527,7 @@ class TestEnsureEphemeralRegions:
             for argv in _creates(cli)
             if argv[1:4] == ["iam", "v2", "project"]
         ]
-        assert created_projects == ["test-eu-north1"]
+        assert created_projects == ["arena-eu-north1"]
 
     def test_requires_a_cli_parent_id(self, nebius_cli: None) -> None:
         cli = _adopted_cli()

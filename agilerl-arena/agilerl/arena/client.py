@@ -131,16 +131,6 @@ def _pause_for_rate_limit(response: httpx.Response) -> None:
     time.sleep(wait)
 
 
-def _idempotency_headers(key: str | None) -> dict[str, str]:
-    """Return the submit idempotency header, or an empty dict when unset."""
-    if key is None:
-        return {}
-    stripped = key.strip()
-    if not stripped:
-        return {}
-    return {"Idempotency-Key": stripped}
-
-
 def _check_writable_target(path: Path) -> None:
     """Ensure *path* can be created as a new file, making parent dirs as needed.
 
@@ -602,7 +592,6 @@ class ArenaClient:
         *,
         name: str,
         version: str | None = None,
-        multi_agent: bool | None = None,
     ) -> dict[str, Any]:
         """Profile a validated environment version.
 
@@ -610,16 +599,11 @@ class ArenaClient:
         :type name: str
         :param version: Environment version. Defaults to None, which resolves to the latest version.
         :type version: str | None
-        :param multi_agent: Override the stored multi-agent flag. Omit it and the
-            server uses the value saved on the environment.
-        :type multi_agent: bool | None
         """
         payload: dict[str, Any] = {
             "name": name,
             "version": version,
         }
-        if multi_agent is not None:
-            payload["multi_agent"] = multi_agent
         return self._open_stream(
             "POST",
             "/api/cli/v1/environments/profile",
@@ -1150,7 +1134,6 @@ class ArenaClient:
         experiment_name: str | None = None,
         reward_file: str | os.PathLike[str] | bytes | None = None,
         completion: str | None = None,
-        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Submit an experiment (a training job).
 
@@ -1178,9 +1161,6 @@ class ArenaClient:
             When omitted, the server uses the reference answer from the first
             dataset row.
         :type completion: str | None
-        :param idempotency_key: Reuse this key to replay the same submit instead
-            of starting another job. The key is org-wide.
-        :type idempotency_key: str | None
         :raises ArenaValidationError: When GPU fields are combined with a node
             choice, or ``num_gpus`` is below 1.
         """
@@ -1197,10 +1177,6 @@ class ArenaClient:
                 sdk_hint="Pass a project name or set a default with ArenaClient.set_default_project().",
                 cli_hint="Use --project or set a default with 'arena projects set-default <name>'.",
             )
-
-        if isinstance(resource_id, int):
-            resource_id = str(resource_id)
-        headers = _idempotency_headers(idempotency_key)
 
         if reward_file is not None:
             files = self._build_submit_experiment_multipart(
@@ -1219,7 +1195,6 @@ class ArenaClient:
                     "POST",
                     "/api/cli/v1/experiments/jobs/submit",
                     files=files,
-                    headers=headers,
                     timeout=self._upload_timeout,
                 ).collect()
             finally:
@@ -1246,7 +1221,6 @@ class ArenaClient:
             "POST",
             "/api/cli/v1/experiments/jobs/submit",
             json=payload,
-            headers=headers,
             timeout=self._upload_timeout,
         ).collect()
 
@@ -1352,46 +1326,20 @@ class ArenaClient:
             "GET", "/api/cli/v1/experiments/list", params={"project": resolved}
         )
 
-    def resume_experiment(
-        self,
-        experiment_name: str,
-        max_steps: int | None = None,
-        checkpoint: str | None = None,
-        new_name: str | None = None,
-        project: str | None = None,
-    ) -> dict[str, Any]:
+    def resume_experiment(self, experiment_name: str, max_steps: int) -> dict[str, Any]:
         """Resume an experiment (a training job).
 
         :param experiment_name: The name of the experiment to resume.
         :type experiment_name: str
-        :param max_steps: Training steps for the resumed run. Omit to keep the stored length.
-        :type max_steps: int | None
-        :param checkpoint: Checkpoint to resume from. Omit to use the best checkpoint.
-        :type checkpoint: str | None
-        :param new_name: Name for the resumed experiment.
-        :type new_name: str | None
-        :param project: Project, when the experiment name exists in more than one.
-        :type project: str | None
+        :param max_steps: The maximum number of steps to train for.
+        :type max_steps: int
         :returns: A dictionary containing the resume result.
         :rtype: dict[str, Any]
         """
-        payload: dict[str, Any] = {"experiment_name": experiment_name}
-        payload.update(
-            {
-                key: value
-                for key, value in (
-                    ("max_steps", max_steps),
-                    ("checkpoint", checkpoint),
-                    ("new_name", new_name),
-                    ("project", project),
-                )
-                if value is not None
-            }
-        )
         return self._request(
             "POST",
             "/api/cli/v1/experiments/jobs/resume",
-            json=payload,
+            json={"experiment_name": experiment_name, "max_steps": max_steps},
         )
 
     def list_checkpoints(self, experiment_name: str) -> list[dict[str, Any]]:
@@ -1682,83 +1630,6 @@ class ArenaClient:
             checkpoint_suffix,
         )
         return result
-
-    def update_inference_deployment(
-        self,
-        name: str,
-        new_name: str | None = None,
-        description: str | None = None,
-        enabled: bool | None = None,
-        experiment_name: str | None = None,
-        project_name: str | None = None,
-    ) -> dict[str, Any]:
-        """Rename, describe, or enable a deployment.
-
-        :param name: Current deployment name.
-        :type name: str
-        :param new_name: Replacement display name.
-        :type new_name: str | None
-        :param description: Replacement description.
-        :type description: str | None
-        :param enabled: ``True`` enables the deployment, ``False`` disables it.
-        :type enabled: bool | None
-        :param experiment_name: Experiment name when several deployments share ``name``.
-        :type experiment_name: str | None
-        :param project_name: Project name when several deployments share ``name``.
-        :type project_name: str | None
-        :returns: The updated deployment.
-        :rtype: dict[str, Any]
-        """
-        body = self._deployment_lookup_params(
-            name=name,
-            experiment_name=experiment_name,
-            project_name=project_name,
-        )
-        if "name" not in body:
-            msg = "deployment name is required."
-            raise ArenaAPIError(msg)
-        if new_name is not None:
-            body["new_name"] = new_name
-        if description is not None:
-            body["description"] = description
-        if enabled is not None:
-            body["enabled"] = enabled
-        return self._request(
-            "PATCH",
-            "/api/cli/v1/inference/deployments",
-            json=body,
-        )
-
-    def delete_inference_deployment(
-        self,
-        name: str,
-        experiment_name: str | None = None,
-        project_name: str | None = None,
-    ) -> dict[str, Any]:
-        """Archive a deployment.
-
-        :param name: Deployment name.
-        :type name: str
-        :param experiment_name: Experiment name when several deployments share ``name``.
-        :type experiment_name: str | None
-        :param project_name: Project name when several deployments share ``name``.
-        :type project_name: str | None
-        :returns: ``{"success": true}`` when the deployment is archived.
-        :rtype: dict[str, Any]
-        """
-        params = self._deployment_lookup_params(
-            name=name,
-            experiment_name=experiment_name,
-            project_name=project_name,
-        )
-        if "name" not in params:
-            msg = "deployment name is required."
-            raise ArenaAPIError(msg)
-        return self._request(
-            "DELETE",
-            "/api/cli/v1/inference/deployments",
-            params=params,
-        )
 
     def list_inference_deployments(
         self,

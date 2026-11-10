@@ -46,6 +46,10 @@ class AsyncBatchCollector:
             partial(fn, *args, **kwargs),
         )
 
+    async def task_for_slot(self, logical_slot: int) -> tuple[int | None, int | None]:
+        """The ``(seed, row_index)`` a window slot resets at."""
+        return await self._offload(self._collector.task_for_slot, logical_slot)
+
     async def assign_group_task(self, group_seed: int) -> tuple[int | None, int | None]:
         """Draw one group's ``(seed, row_index)``; offloaded since the first call builds the envs."""
         return await self._offload(self._collector.assign_group_task, group_seed)

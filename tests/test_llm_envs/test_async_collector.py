@@ -58,6 +58,10 @@ class StubCollector:
         self.step_calls: list[tuple[str, torch.Tensor]] = []
         self.finalize_calls: list[tuple[str, bool]] = []
         self.closed = False
+        self.slot_tasks: dict[int, tuple[int | None, int | None]] = {3: (9, 4)}
+
+    def task_for_slot(self, logical_slot: int) -> tuple[int | None, int | None]:
+        return self.slot_tasks[logical_slot]
 
     def reset_episode(
         self,
@@ -162,6 +166,17 @@ class TestAsyncBatchCollectorReset:
         assert response.reward == 0.0
         assert response.done is False
         assert response.info == {"logical_slot": 3}
+
+    def test_task_for_slot_returns_the_collectors_assignment(self) -> None:
+        inner = StubCollector()
+        collector = AsyncBatchCollector(inner)
+
+        try:
+            task = asyncio.run(collector.task_for_slot(3))
+        finally:
+            collector.close()
+
+        assert task == (9, 4)
 
     def test_reset_forwards_task_to_reset_episode(self) -> None:
         inner = StubCollector()

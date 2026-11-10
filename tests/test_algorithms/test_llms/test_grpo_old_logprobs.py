@@ -49,8 +49,8 @@ def _stub_colocated_setup(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(GRPO, "_setup_actors", setup_without_vllm)
 
 
-def _make_grpo(**overrides: Any) -> GRPO:
-    """Tiny fp32 GRPO on CPU: 2 prompts x 2 completions, one micro-batch of 2 rows."""
+def _make_grpo(algo_class: type[GRPO] = GRPO, **overrides: Any) -> GRPO:
+    """Tiny fp32 GRPO-family agent on CPU: 2 prompts x 2 completions, one micro-batch of 2 rows."""
     torch.manual_seed(0)
     kwargs: dict[str, Any] = {
         "actor_network": create_module(
@@ -80,7 +80,7 @@ def _make_grpo(**overrides: Any) -> GRPO:
         ),
         **overrides,
     }
-    return GRPO(**kwargs)
+    return algo_class(**kwargs)
 
 
 def _batch() -> tuple[torch.Tensor, torch.Tensor]:

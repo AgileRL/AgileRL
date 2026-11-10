@@ -153,6 +153,7 @@ ALGORITHM_NAMES: dict[str, Algorithm] = {
     "GRPO": "grpo",
     "GSPO": "gspo",
     "CISPO": "cispo",
+    "OPD": "grpo",
     "LLMPPO": "ppo",
     "LLMREINFORCE": "reinforce",
     "DPO": "dpo",
@@ -1380,6 +1381,8 @@ class GenerationSettings(BaseModel):
     # ``limit_mm_per_prompt["image"]``. ``None`` takes vLLM's unset-modality limit.
     max_images_per_prompt: int | None = None
     max_lora_rank: int = OMITTED_MAX_LORA_RANK
+    # A teacher adapter sits in a second slot beside the policy's.
+    served_loras: int = 1
     # Adapter ``target_parameters`` on packed experts. Any switches the
     # engine to vLLM's 3D fused-MoE LoRA layout, as AgileRL patches the
     # model's ``is_3d_moe_weight`` flag on.
@@ -1417,6 +1420,12 @@ class GenerationSettings(BaseModel):
     # streams. With ``lora_sync_scope`` set, its NIXL buffer on every GPU holds
     # one round of merged weights.
     merged_lora_sync: bool = False
+    # A distillation teacher scores prompt log-probs, a runtime buffer the
+    # start-up profile does not size.
+    scores_prompt_logprobs: bool = False
+    # An unset ``gpu_memory_utilization`` on a scoring engine shrinks by that
+    # buffer, so the engine peaks where a non-scoring one does.
+    reserves_prompt_logprobs: bool = False
 
     @property
     def concurrency(self) -> int:

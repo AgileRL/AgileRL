@@ -6,7 +6,7 @@
   "orchestration": "nebius.v1",
   "terraform_version": ">= 1.10.0",
   "archive": "module.tar.gz",
-  "digest": "sha256:9273647dfdbc9718ae9baae1f733154096f34781fe72b7d92badcc1f7dade772",
+  "digest": "sha256:a238dbb11c7daf4db895450652910a524cfb53024fcab1b533833444acab7401",
   "files": [
     "main.tf",
     "outputs.tf",

@@ -68,14 +68,6 @@ from agilerl.arena.byoc.provisioning.providers.aws.terraform import (
     terraform_state_bucket_exists,
     write_terraform_state_profile,
 )
-from agilerl.arena.byoc.provisioning.providers.base import (
-    CreatedProjectsQuery,
-    DeleteGateway,
-    DestroyDeferred,
-    DestroyExclusions,
-    EnsureGateway,
-    InstallCni,
-)
 from agilerl.arena.byoc.provisioning.runtime_class import ensure_gpu_runtime_class
 from agilerl.arena.byoc.provisioning.spec import ClusterSpec
 from agilerl.arena.byoc.provisioning.storage import ensure_storage_secret
@@ -216,19 +208,13 @@ class AwsProvider:
         state_dir: Path,
         create_state_bucket: bool = False,
         prompt_create: bool = False,
-        require_state_bucket: bool = True,
     ) -> tuple[ClusterSpec, Path]:
-        """Validate the spec and open a Terraform work dir.
-
-        :param require_state_bucket: When false, a missing state bucket is left alone.
-        """
+        """Validate the spec and open a Terraform work dir."""
         self.validate(spec)
         self.restore_caller_profile = use_provisioner_profile(_aws_values(spec).region)
         work_dir = runner.prepare(
             spec, module_name=self.terraform_module, state_dir=state_dir
         )
-        if not require_state_bucket:
-            return spec, work_dir
         prompt: Callable[[str], bool] | None = click.confirm if prompt_create else None
         ensure_terraform_state_bucket(
             spec,
@@ -362,11 +348,10 @@ class AwsProvider:
             cluster_endpoint=str(values["cluster_endpoint"]),
         )
 
-    def install_cni(self, query: InstallCni) -> None:
+    def install_cni(
+        self, spec: ClusterSpec, work_dir: Path, runner: TerraformRunner
+    ) -> None:
         """Install Cilium before node groups so nodes can become Ready."""
-        spec = query.spec
-        work_dir = query.work_dir
-        runner = query.runner
         runner.apply_targets(work_dir, (AWS_EKS_CLUSTER_RESOURCE,))
         endpoint = runner.terraform_output(work_dir, "cluster_endpoint")
         if not isinstance(endpoint, str) or not endpoint:
@@ -444,21 +429,21 @@ class AwsProvider:
                 file_system_id=file_system_id,
             )
         parent_refs = self.ensure_gateway(
-            EnsureGateway(
-                spec,
-                outputs.kubeconfig_path,
-                {"vpc_id": outputs.vpc_id},
-            )
+            spec,
+            outputs.kubeconfig_path,
+            {"vpc_id": outputs.vpc_id},
         )
         if parent_refs is None:
             return outputs
         return replace(outputs, gateway_api_parent_refs=parent_refs)
 
-    def ensure_gateway(self, query: EnsureGateway) -> list[dict[str, str]] | None:
+    def ensure_gateway(
+        self,
+        spec: ClusterSpec,
+        kubeconfig_path: Path,
+        terraform_outputs: dict[str, object],
+    ) -> list[dict[str, str]] | None:
         """Create the Cilium Gateway when the spec enables it."""
-        spec = query.spec
-        kubeconfig_path = query.kubeconfig_path
-        terraform_outputs = query.terraform_outputs
         arena = spec.arena
         if not arena.gateway.enable:
             return None
@@ -499,16 +484,20 @@ class AwsProvider:
             )
             raise click.ClickException(msg)
 
-    def created_projects(self, query: CreatedProjectsQuery) -> tuple[bool, bool]:
+    def created_projects(
+        self, spec: ClusterSpec, _addresses: tuple[str, ...] = ()
+    ) -> tuple[bool, bool]:
         """Return whether compute and storage projects were omitted from the spec."""
-        _aws_values(query.spec)
+        _aws_values(spec)
         return (False, False)
 
-    def delete_gateway(self, query: DeleteGateway) -> None:
+    def delete_gateway(
+        self,
+        spec: ClusterSpec,
+        work_dir: Path,
+        runner: TerraformRunner,
+    ) -> None:
         """Delete the Cilium Gateway so its NLB is released before Terraform destroy."""
-        spec = query.spec
-        work_dir = query.work_dir
-        runner = query.runner
         if not spec.arena.gateway.enable:
             return
         if AWS_EKS_CLUSTER_RESOURCE not in runner.state_list(work_dir):
@@ -529,22 +518,24 @@ class AwsProvider:
             gateway_name=spec.arena.gateway.name,
         )
 
-    def destroy_exclusions(self, query: DestroyExclusions) -> tuple[str, ...]:
+    def destroy_exclusions(
+        self, spec: ClusterSpec, delete_storage: bool
+    ) -> tuple[str, ...]:
         """Return Terraform addresses the byoc profile must leave in place."""
-        spec = query.spec
-        delete_storage = query.delete_storage
         _aws_values(spec)
         deferred = caller_iam_resources(delete_storage)
         if delete_storage:
             return deferred
         return (*AWS_OBJECT_STORAGE_RESOURCES, *deferred)
 
-    def destroy_deferred(self, query: DestroyDeferred) -> None:
+    def destroy_deferred(
+        self,
+        spec: ClusterSpec,
+        work_dir: Path,
+        runner: TerraformRunner,
+        delete_storage: bool,
+    ) -> None:
         """Destroy IAM as the caller. The byoc user cannot delete these roles."""
-        spec = query.spec
-        work_dir = query.work_dir
-        runner = query.runner
-        delete_storage = query.delete_storage
         _aws_values(spec)
         self.restore_caller_profile()
         click.echo("Deleting IAM as the calling AWS user.")
@@ -553,11 +544,6 @@ class AwsProvider:
         if delete_storage and iam_user_exists(storage_user, run=subprocess.run):
             delete_access_keys(storage_user, run=subprocess.run)
         runner.destroy(work_dir, only=caller_iam_resources(delete_storage))
-
-    def remote_state_available(self, spec: ClusterSpec) -> bool:
-        """Return whether destroy can open this cluster's remote Terraform state."""
-        _aws_values(spec)
-        return True
 
     def finish_destroy(
         self,

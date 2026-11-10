@@ -310,6 +310,74 @@ class TestTrainingSettings:
 
         assert settings.lora_packed_target_matrices == 2
 
+    def test_teacher_lengthens_the_engine_context_and_scores_prompts(self):
+        doc = manifest(
+            algorithm={
+                "name": "OPD",
+                "teacher": {"context_key": "answer", "max_context_tokens": 256},
+            }
+        )
+
+        settings = generation_settings_from_manifest(doc)
+
+        assert settings.max_model_len == 512 + 256
+        assert settings.scores_prompt_logprobs is True
+
+    def test_an_unset_utilization_reserves_the_scoring_buffer(self):
+        doc = manifest(
+            algorithm={
+                "name": "OPD",
+                "teacher": {"context_key": "answer"},
+                "vllm_config": {"tensor_parallel_size": 1},
+            }
+        )
+
+        settings = generation_settings_from_manifest(doc)
+
+        assert settings.reserves_prompt_logprobs is True
+
+    def test_a_set_utilization_is_kept_as_written(self):
+        doc = manifest(
+            algorithm={
+                "name": "OPD",
+                "teacher": {"context_key": "answer"},
+                "vllm_config": {
+                    "tensor_parallel_size": 1,
+                    "gpu_memory_utilization": 0.7,
+                },
+            }
+        )
+
+        settings = generation_settings_from_manifest(doc)
+
+        assert settings.reserves_prompt_logprobs is False
+        assert settings.gpu_memory_utilization == 0.7
+
+    def test_a_teacher_model_leaves_the_rollout_engine_as_a_plain_engine(self):
+        doc = manifest(
+            algorithm={
+                "name": "OPD",
+                "vllm_config": {"tensor_parallel_size": 1},
+                "teacher": {
+                    "context_key": "answer",
+                    "max_context_tokens": 256,
+                    "model": {"pretrained_model_name_or_path": "Qwen/Qwen3-4B"},
+                },
+            },
+            training={"rollout_engines_per_agent": 1},
+        )
+
+        settings = generation_settings_from_manifest(doc)
+
+        assert settings.max_model_len == 512
+        assert settings.scores_prompt_logprobs is False
+
+    def test_no_teacher_leaves_the_engine_context_unchanged(self):
+        settings = generation_settings_from_manifest(manifest())
+
+        assert settings.max_model_len == 512
+        assert settings.scores_prompt_logprobs is False
+
     def test_packed_expert_targets_reach_the_engine(self):
         doc = manifest(
             network={
@@ -1354,6 +1422,29 @@ class TestRunConfig:
         assert generation_bytes(merged, "lora_slots") == 0
         assert generation_bytes(adapter, "lora_slots") > 0
         assert generation_bytes(adapter, "lora_receive_buffer") == adapter_bytes
+
+    def test_a_teacher_adapter_takes_adapter_sync_and_a_second_lora_slot(self):
+        # Arrange
+        device = device_spec_from_resource_class(A100_TIER)
+        student = run_config_from_manifest(
+            manifest(**ASYNC_ROLLOUT, algorithm={"name": "OPD"}),
+            device,
+            TINY_CONFIG,
+            adapter_sync=True,
+        )
+        doc = manifest(
+            **ASYNC_ROLLOUT, algorithm={"name": "OPD", "teacher": {"adapter": "/ckpt"}}
+        )
+
+        # Act
+        config = run_config_from_manifest(doc, device, TINY_CONFIG)
+
+        # Assert
+        assert config.generation.merged_lora_sync is False
+        assert config.generation.served_loras == 2
+        assert generation_bytes(config, "lora_slots") == 2 * generation_bytes(
+            student, "lora_slots"
+        )
 
     def test_unset_rollout_mode_is_sized_async(self):
         config = run_config_from_manifest(

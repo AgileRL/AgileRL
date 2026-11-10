@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from enum import Enum
 from typing import Any
 
@@ -43,7 +42,6 @@ CAPABILITIES_SCHEMA_VERSION = 1
 MANIFEST_SCHEMA_VERSION = 2
 BYOC_ACCESS_META_KEY = "agilerl.arena.byoc_access"
 BYOC_ENSURED_META_KEY = "agilerl.arena.byoc_ensured"
-PLATFORM_ADMIN_API_KEY_PREFIX = "arena_adm_"
 
 
 class ByocRootAccess(Enum):
@@ -87,32 +85,20 @@ def caps_allow_byoc_at_root(caps: dict[str, Any]) -> bool:
     return features.get("byocCli") is True or features.get("onPremCli") is True
 
 
-def _resolved_api_key(config: CommandConfig) -> str | None:
-    """Return the bearer the client will send."""
-    return config.api_key or os.environ.get("ARENA_API_KEY")
-
-
-def _is_platform_admin_key(api_key: str | None) -> bool:
-    """Whether *api_key* is a platform admin key."""
-    return api_key is not None and api_key.startswith(PLATFORM_ADMIN_API_KEY_PREFIX)
-
-
 def resolve_byoc_root_access(config: CommandConfig) -> ByocRootAccess:
     """Resolve whether ``arena cluster`` is reachable for the current credentials.
 
     :param config: The command configuration used to build a client.
     :type config: CommandConfig
     :returns: ``UNAUTHENTICATED`` without a credential, ``ALLOWED`` when
-        capabilities grant BYOC CLI access or the bearer is a platform admin
-        key, otherwise ``DENIED`` (not entitled, **404**, bad JSON).
+        capabilities grant BYOC CLI access, otherwise ``DENIED`` (not
+        entitled, **404**, bad JSON).
     :rtype: ByocRootAccess
     """
     client = build_client(config)
     try:
         if not client.is_authenticated:
             return ByocRootAccess.UNAUTHENTICATED
-        if _is_platform_admin_key(_resolved_api_key(config)):
-            return ByocRootAccess.ALLOWED
         caps = client._get_cli_capabilities(force_refresh=True)
     finally:
         client.close()

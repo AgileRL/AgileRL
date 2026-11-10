@@ -313,6 +313,20 @@ class TestCollectorInvariantGuards:
         finally:
             collector.close()
 
+    def test_task_for_slot_returns_the_window_assignment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        collector = _plain_collector()
+        try:
+            monkeypatch.setattr(collector, "_ensure_slots", lambda: None)
+            monkeypatch.setattr(
+                collector, "_episode_assignment", lambda slot: (slot + 1, 4)
+            )
+
+            assert collector.task_for_slot(2) == (3, 4)
+        finally:
+            collector.close()
+
     def test_reset_episode_requires_the_slot_queue(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

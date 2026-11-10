@@ -241,15 +241,9 @@ class NebiusSpec(BaseModel):
         self, storage_bucket_name: str, storage_endpoint: str
     ) -> dict[str, object]:
         """Return the module variables for this Nebius cluster."""
-        # Cycle: nebius.terraform imports ClusterSpec from provisioning.spec.
-        from agilerl.arena.byoc.provisioning.providers.nebius.terraform import (
-            nebius_region_from_endpoint,
-        )
-
         return {
             "tenant_id": self.tenant_id,
             "region": self.region or "",
-            "storage_region": nebius_region_from_endpoint(storage_endpoint),
             "project_id": self.project_id or "",
             "storage_project_id": self.storage_project_id or "",
             "subnet_id": self.subnet_id or "",
@@ -488,7 +482,7 @@ def resource_classes(
                     "computeResource": {
                         "numCpus": num_cpus,
                         "numGpus": num_gpus,
-                        "memoryBytes": f"{memory_gb} GiB",
+                        "memoryBytes": f"{memory_gb} GB",
                         "gramPerGpu": vram_gib,
                         "machineType": worker.preset,
                         "spot": False,
@@ -583,7 +577,7 @@ def _nebius_workers_from_config(
 def spec_from_stored_row(row: dict[str, object]) -> ClusterSpec:
     """Build a Nebius cluster spec from an Arena byoc cluster record."""
     # Cycle: provisioning.spec imports NebiusSpec from this module.
-    from agilerl.arena.byoc.provisioning.spec import ClusterSpec, stored_cluster_values
+    from agilerl.arena.byoc.provisioning.spec import ClusterSpec, placement_values
 
     name = _stored_text(row.get("name"))
     if name is None:
@@ -640,9 +634,9 @@ def spec_from_stored_row(row: dict[str, object]) -> ClusterSpec:
     }
     if module_version is not None:
         payload["module_version"] = module_version
-    stored_values = stored_cluster_values(row)
-    if stored_values is not None:
-        payload["values"] = stored_values
+    stored_placement = placement_values(row)
+    if stored_placement is not None:
+        payload["values"] = stored_placement
     try:
         return ClusterSpec.model_validate(payload)
     except ValidationError as exc:
