@@ -639,36 +639,21 @@ class TestGRPOInit:
             assert "loss_type" not in inspect.signature(variant).parameters
             assert "self" not in inspect.signature(variant).parameters
 
-    @patch("agilerl.algorithms.core.base.LLM")
-    def test_init_grpo_warns_when_hf_generate_chunk_size_set_with_vllm(
-        self, MockLLM, model_factory
-    ):
-        mock_instance = make_mock_vllm_instance(vllm.LLM)
-        MockLLM.return_value = mock_instance
-        actor = model_factory(TINY_LLM_FIXTURE_PATH)
-        # Colocated vLLM and the trainer each hold their own base. The vLLM
-        # engine is mocked here; the tiny actor is passed as the trainer base
-        # (``_initialize_actors`` uses it directly when ``base_model`` is given).
-        with pytest.warns(
-            UserWarning, match="hf_generate_chunk_size.*ignored when colocated"
-        ):
-            grpo = GRPO(
+    def test_init_grpo_rejects_hf_generate_chunk_size(self):
+        actor = create_module(input_size=6, max_tokens=4, vocab_size=64, device="cpu")
+        with pytest.raises(TypeError, match="hf_generate_chunk_size"):
+            GRPO(
                 actor_network=actor,
-                pad_token_id=999,
+                pad_token_id=63,
                 pad_token="<pad>",
                 group_size=2,
-                vllm_config=VLLMConfig(
-                    gpu_memory_utilization=0.05,
-                    max_num_seqs=1,
-                    sleep_mode=True,
-                ),
                 hf_generate_chunk_size=2,
                 max_output_tokens=8,
                 max_model_len=32,
                 wrap=False,
+                gradient_checkpointing=False,
                 device="cpu",
             )
-        grpo.clean_up()
 
     def test_init_accepts_output_tokens_not_less_than_model_len(self):
         actor = create_module(input_size=6, max_tokens=4, vocab_size=64, device="cpu")
@@ -1569,71 +1554,50 @@ class TestGRPOLearnRewardsShape:
 
 
 class TestGRPOGetAction:
-    def test_get_action_grpo_hf_path_contract(
-        self,
-        grpo_factory,
-        dist_mode_factory,
-        model_factory,
-    ):
-        input_size = 10
-        max_tokens = 8
-        grpo = grpo_factory(
-            dist_mode_factory,
-            model_factory,
-            None,
-            100,
-            input_size,
-            max_tokens,
-            2,
-            False,
-            False,
-            None,
-            None,
-        )
-        prompts = [
-            {
-                "input_ids": torch.randint(0, 100, (1, input_size), device=grpo.device),
-                "attention_mask": torch.ones(1, input_size, device=grpo.device),
-            }
-            for _ in range(3)
-        ]
-        for training in (True, False):
-            completion_ids, action_masks, _, _ = grpo.get_action(
-                prompts, training=training
-            )
-            expected_group_size = grpo.group_size if training else 1
-            assert all(ids.shape[0] == expected_group_size for ids in completion_ids)
-            assert len(completion_ids) == len(prompts)
-            assert len(action_masks) == len(prompts)
-            for row_ids, action_mask in zip(completion_ids, action_masks, strict=True):
-                assert row_ids.dim() == 2
-                assert action_mask.dim() == 2
-                assert row_ids.shape[1] > input_size
-                assert action_mask.shape[1] == row_ids.shape[1] - 1
-
-        grpo.clean_up()
-
-    def test_get_action_grpo_hf_stop_iteration_device_fallback(self):
+    def test_get_action_uses_colocated_vllm(self):
         grpo = _make_cpu_grpo_for_branch_tests()
+        grpo.records_sampling_supports = False
         prompts = [
             {
                 "input_ids": torch.randint(0, 64, (1, 6), device=grpo.device),
                 "attention_mask": torch.ones(1, 6, device=grpo.device),
-            },
+            }
+            for _ in range(3)
         ]
-        real_actor = grpo.actor
 
-        class _NoParamActor:
-            def parameters(self):
-                return iter(())
+        def fake_generate(
+            obs,
+            group_size,
+            temperature,
+            capture_sampling_logps=False,
+            capture_sampling_supports=False,
+        ):
+            del temperature, capture_sampling_logps, capture_sampling_supports
+            ids = [
+                torch.ones(group_size, 10, dtype=torch.long, device=grpo.device)
+                for _ in obs
+            ]
+            masks = [
+                torch.ones(group_size, 9, dtype=torch.bool, device=grpo.device)
+                for _ in obs
+            ]
+            return ids, masks, None, None
 
-            def __getattr__(self, name):
-                return getattr(real_actor, name)
+        with (
+            patch.object(grpo, "_ensure_vllm_for_generation") as ensure,
+            patch.object(grpo, "_prepare_vllm_for_generation"),
+            patch.object(
+                grpo, "_generate_with_vllm_colocate", side_effect=fake_generate
+            ) as generate,
+        ):
+            completion_ids, action_masks, _, _ = grpo.get_action(prompts, training=True)
 
-        grpo.actor = _NoParamActor()
-        completion_ids, action_masks, _, _ = grpo.get_action(prompts, training=False)
-        assert len(completion_ids) == 1
-        assert len(action_masks) == 1
+        ensure.assert_called_once()
+        generate.assert_called_once()
+        assert generate.call_args.args[1] == grpo.group_size
+        assert len(completion_ids) == len(prompts)
+        assert len(action_masks) == len(prompts)
+        assert all(ids.shape[0] == grpo.group_size for ids in completion_ids)
         grpo.clean_up()
 
     @pytest.mark.parametrize("dist_mode", ["dist"])
@@ -4200,7 +4164,11 @@ class TestGRPOTest:
             micro_batch_size_per_gpu,
         )
         env = DummyReasoningEnv(vocab_size, input_size, batch_size, device=grpo.device)
-        fitnesses = grpo.test(env)
+        completion = torch.ones(1, max_tokens, dtype=torch.long, device=grpo.device)
+        with patch.object(
+            grpo, "get_action", return_value=ActionResult([completion], None)
+        ):
+            fitnesses = grpo.test(env)
         assert isinstance(fitnesses, np.ndarray)
         grpo.clean_up()
 

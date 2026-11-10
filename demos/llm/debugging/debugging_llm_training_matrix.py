@@ -231,7 +231,15 @@ def build_population(
                 {
                     "r": 4,
                     "lora_alpha": 8,
-                    "target_modules": ["c_attn", "c_proj", "c_fc"],
+                    "target_modules": [
+                        "q_proj",
+                        "k_proj",
+                        "v_proj",
+                        "o_proj",
+                        "gate_proj",
+                        "up_proj",
+                        "down_proj",
+                    ],
                 }
             ),
         )

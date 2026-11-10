@@ -41,13 +41,13 @@ def evaluate_hit_rate(
     num_episodes: int,
     greedy: bool = False,
 ) -> float:
-    original_temp = agent.generation_config.temperature
-    original_top_k = agent.generation_config.top_k
-    original_top_p = agent.generation_config.top_p
+    original_temp = agent.temperature
+    original_top_k = agent.top_k
+    original_top_p = agent.top_p
     if greedy:
-        agent.generation_config.temperature = 1e-3
-        agent.generation_config.top_k = 1
-        agent.generation_config.top_p = 1.0
+        agent.temperature = 1e-3
+        agent.top_k = 1
+        agent.top_p = 1.0
 
     hits = 0
     try:
@@ -76,9 +76,9 @@ def evaluate_hit_rate(
                 if gen_text == target_token:
                     hits += 1
     finally:
-        agent.generation_config.temperature = original_temp
-        agent.generation_config.top_k = original_top_k
-        agent.generation_config.top_p = original_top_p
+        agent.temperature = original_temp
+        agent.top_k = original_top_k
+        agent.top_p = original_top_p
 
     return hits / max(num_episodes, 1)
 
@@ -104,7 +104,6 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
         use_value_head=(init_hp["ALGO"] == "LLMPPO")
     )
     init_hp.setdefault("ALGO", "LLMPPO")
-    init_hp.setdefault("USE_VLLM", False)
     init_hp.setdefault("MAX_MODEL_LEN", max_ctx)
     init_hp.setdefault("MAX_OUTPUT_TOKENS", max_new)
     init_hp.setdefault("SEED", seed)
