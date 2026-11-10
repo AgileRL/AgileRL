@@ -1153,6 +1153,11 @@ class TrainingSettings(BaseModel):
     # Async weight sync pushes merged weights: the main rank's NIXL send
     # buffer holds two rounds of merged weights, not the adapter.
     merged_lora_sync: bool = False
+    # Engine ``tensor_parallel_size`` under ``weight_sync.transport:
+    # nccl_reshard``, else None. With ``merged_lora_sync`` the refit holds
+    # :class:`~agilerl.arena.memory.lora_formulas.NcclReshardRefitBytes`, not
+    # a NIXL send buffer.
+    nccl_reshard_engine_tensor_parallel: int | None = Field(default=None, ge=1)
     # Gradient forward packs into one row. A packed micro-batch of full-length
     # rows holds as many tokens as the padded one, so the estimate prices padded rows.
     sequence_packing: bool = False
@@ -1417,6 +1422,11 @@ class GenerationSettings(BaseModel):
     # streams. With ``lora_sync_scope`` set, its NIXL buffer on every GPU holds
     # one round of merged weights.
     merged_lora_sync: bool = False
+    # Trainer ranks one weight's rows are sharded across under
+    # ``weight_sync.transport: nccl_reshard``, else None. With
+    # ``merged_lora_sync`` each GPU holds one misc broadcast bucket; bulk
+    # weights land in place.
+    nccl_reshard_trainer_shards: int | None = Field(default=None, ge=1)
 
     @property
     def concurrency(self) -> int:

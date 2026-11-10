@@ -823,6 +823,18 @@ class TestMergedLoraSyncCandidates:
         # Assert
         assert modes == (False,)
 
+    def test_nccl_reshard_prices_merged_sync_alone(self) -> None:
+        # Arrange
+        raw = _sudoku_manifest()
+        raw["training"]["weight_sync"] = {"transport": "nccl_reshard"}
+        manifest = _manifest(raw)
+
+        # Act
+        modes = merged_lora_sync_candidates(manifest)
+
+        # Assert
+        assert modes == (True,)
+
     def test_algorithm_without_rollout_engines_syncs_nothing_merged(self) -> None:
         # Act
         modes = merged_lora_sync_candidates(_sft_manifest())

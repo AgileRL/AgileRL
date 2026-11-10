@@ -10,6 +10,7 @@ from agilerl.arena.memory.manifest import (
     async_rollout,
     can_sync_merged_lora,
     configured_rollout_engines,
+    syncs_over_nccl_reshard,
     training_memory_from_manifest,
     unsupported_gpu_reason,
 )
@@ -86,8 +87,12 @@ def merged_lora_sync_candidates(manifest: TrainingManifest) -> tuple[bool, ...]:
     """``merged_lora_sync`` values :func:`resolve_run_memory` prices, merged first.
 
     :param manifest: Validated run manifest.
-    :return: Both for engines that can serve merged weights, adapter alone otherwise.
+    :return: Merged alone over ``nccl_reshard`` (its engines are checked by
+        :func:`~agilerl.arena.memory.manifest.validated_run_manifest`); both
+        for other engines that can serve merged weights; adapter alone otherwise.
     """
+    if syncs_over_nccl_reshard(manifest):
+        return (True,)
     if not can_sync_merged_lora(manifest.algorithm):
         return (False,)
     return (True, False)

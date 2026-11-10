@@ -15,7 +15,7 @@ from agilerl.arena.memory.resolve.rollout import (
     default_rollout_batch_size,
     drafts_by_default,
     drafts_with_mtp,
-    merged_lora_sync_eligible,
+    merged_lora_sync_blockers,
     merged_sync_bucket_bytes,
     rollout_engines_blocker,
     run_rollout_engines,
@@ -161,24 +161,40 @@ class TestRunsDualStreamLora:
         assert runs_dual_stream_lora(True) is False
 
 
-class TestMergedLoraSyncEligible:
+class TestMergedLoraSyncBlockers:
     @pytest.mark.parametrize("quantization", [None, "none", "None"])
     def test_unquantized_engine_takes_merged_weights(
         self, quantization: str | None
     ) -> None:
-        assert merged_lora_sync_eligible(quantization, False, False, False) is True
+        assert merged_lora_sync_blockers(quantization, False, False, False) == []
 
     def test_quantized_engine_keeps_serving_the_adapter(self) -> None:
-        assert merged_lora_sync_eligible("fp8", False, False, False) is False
+        assert merged_lora_sync_blockers("fp8", False, False, False) == [
+            "vllm_config.quantization is 'fp8'"
+        ]
 
     def test_quantized_checkpoint_keeps_serving_the_adapter(self) -> None:
-        assert merged_lora_sync_eligible(None, True, False, False) is False
+        assert merged_lora_sync_blockers(None, True, False, False) == [
+            "the checkpoint's config.json ships a quantization config"
+        ]
 
     def test_tower_lora_keeps_serving_the_adapter(self) -> None:
-        assert merged_lora_sync_eligible(None, False, True, False) is False
+        assert merged_lora_sync_blockers(None, False, True, False) == [
+            "lora_config.tower_target_modules targets the vision tower"
+        ]
 
     def test_mtp_drafting_keeps_serving_the_adapter(self) -> None:
-        assert merged_lora_sync_eligible(None, False, False, True) is False
+        assert merged_lora_sync_blockers(None, False, False, True) == [
+            "vllm_engine_args.speculative_config drafts with MTP"
+        ]
+
+    def test_lists_every_blocker(self) -> None:
+        assert merged_lora_sync_blockers("fp8", True, True, True) == [
+            "vllm_config.quantization is 'fp8'",
+            "the checkpoint's config.json ships a quantization config",
+            "lora_config.tower_target_modules targets the vision tower",
+            "vllm_engine_args.speculative_config drafts with MTP",
+        ]
 
 
 class TestCheckpointQuantized:

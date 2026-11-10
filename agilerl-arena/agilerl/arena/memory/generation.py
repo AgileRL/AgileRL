@@ -533,13 +533,27 @@ def _residency_bar_components(
 def _lora_receive_buffer_component(
     arch: ModelArch, settings: GenerationSettings
 ) -> MemoryComponent:
-    """The NIXL buffer each rollout-engine GPU READs the trainer adapter, or one round of merged weights, into."""
+    """The NIXL buffer each rollout-engine GPU READs the adapter or merged weights into, or its ``nccl_reshard`` misc bucket."""
     note = "Allocated after vLLM sizes the KV pool, outside gpu_memory_utilization."
     if settings.lora_sync_scope is None:
         return MemoryComponent(
             key="lora_receive_buffer", label="LoRA receive buffer", n_bytes=0, note=note
         )
     dtype_bytes = DTYPE_BYTES[settings.weight_dtype]
+    if settings.merged_lora_sync and settings.nccl_reshard_trainer_shards is not None:
+        return MemoryComponent(
+            key="lora_receive_buffer",
+            label="nccl_reshard misc receive bucket",
+            n_bytes=lora_formulas.nccl_reshard_receive_bucket_bytes(
+                arch,
+                settings.lora_sync_scope,
+                lora_formulas.NcclReshardLayout(
+                    settings.nccl_reshard_trainer_shards, settings.tensor_parallel_size
+                ),
+                dtype_bytes,
+            ),
+            note=f"{note} Bulk weights reshard into the live weights.",
+        )
     if settings.merged_lora_sync:
         return MemoryComponent(
             key="lora_receive_buffer",

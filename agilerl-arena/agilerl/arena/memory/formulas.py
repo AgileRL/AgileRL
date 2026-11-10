@@ -52,6 +52,9 @@ ENGINE_RUNTIME_FRACTION = 0.036
 # DeepSeek-V4-Flash, GLM-5.3-Flash and MiMo-V2.6-Flash at 530-585 GiB of bf16
 # weights (H100, TP 4-8).
 ENGINE_RUNTIME_MAX_BYTES = 2560 * MiB
+# Misc broadcast bucket of an ``nccl_reshard`` refit, on trainer rank 0 and
+# every engine GPU. Mirrors agilerl_ray's ``nccl_reshard.plan.MISC_BUCKET_BYTES``.
+NCCL_RESHARD_MISC_BUCKET_BYTES = 512 * MiB
 # Bytes per LoRA parameter under flat data parallel. PEFT
 # ``autocast_adapter_dtype=True`` stores adapters and their gradients in
 # fp32. AdamW keeps two moments per parameter in the parameter's dtype.

@@ -22,6 +22,7 @@ from agilerl.arena.models import (
     ReplayBufferSpec,
     TrainingManifest,
     TrainingSpec,
+    WeightSyncSpec,
 )
 from agilerl.arena.models.algorithms.cispo import CISPOSpec
 from agilerl.arena.models.algorithms.dqn import DQNSpec
@@ -859,6 +860,43 @@ class TestTrainingSpec:
         )
         assert spec.rollout_batch_size is None  # the driver fills it
         assert spec.weight_sync_interval == 1
+
+    def test_weight_sync_defaults_to_nixl_and_accepts_nccl_reshard(self) -> None:
+        assert TrainingSpec().weight_sync.transport == "nixl"
+        selected = TrainingSpec(weight_sync=WeightSyncSpec(transport="nccl_reshard"))
+        assert selected.weight_sync.transport == "nccl_reshard"
+        with pytest.raises(ValidationError, match="transport"):
+            TrainingSpec(weight_sync={"transport": "tcp"})
+
+    def test_payload_omits_an_unset_weight_sync_and_keeps_an_explicit_null_lora(
+        self,
+    ) -> None:
+        manifest = {
+            "algorithm": {"name": "GRPO", "group_size": 4, "batch_size": 2},
+            "environment": {
+                "env_type": "rollout",
+                "dataset": "openai/gsm8k",
+                "reward_file_path": "reward.py",
+                "prompt_template": {"user_0": "{question}"},
+            },
+            "network": {
+                "pretrained_model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
+                "max_context_length": 512,
+            },
+            "training": {"max_steps": 100},
+        }
+
+        omitted = TrainingManifest.get_validated(manifest, mode="json")
+        assert "weight_sync" not in omitted["training"]
+
+        explicit = {
+            **manifest,
+            "network": {**manifest["network"], "lora_config": None},
+            "training": {**manifest["training"], "weight_sync": {"transport": "nccl"}},
+        }
+        payload = TrainingManifest.get_validated(explicit, mode="json")
+        assert payload["network"]["lora_config"] is None
+        assert payload["training"]["weight_sync"] == {"transport": "nccl"}
 
     def test_async_rollout_leaves_omitted_counts_unset(self) -> None:
         spec = TrainingSpec(rollout_mode="async")

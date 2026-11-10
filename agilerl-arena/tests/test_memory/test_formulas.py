@@ -15,6 +15,7 @@ from agilerl.arena.memory import (
     kv_cache,
     lora_formulas,
 )
+from agilerl.arena.memory.lora_formulas import NcclReshardLayout
 from agilerl.arena.memory.lora_placement import (
     lora_tensor_placement,
     split_moe_lora_recompute_bytes,
@@ -4297,3 +4298,228 @@ class TestMergedLoraSyncBytes:
         routed = 40 * 256 * 3 * 2048 * 512
         assert total == attention + 2 * (gdn + shared + routed)
         assert largest == 2 * 256 * 1024 * 2048
+
+
+def linear_shapes(linears):
+    """(in, out, count) of each LoRA linear."""
+    return [
+        (linear.in_features, linear.out_features, linear.count) for linear in linears
+    ]
+
+
+class TestNcclReshardSyncLinears:
+    def test_dense_decoder_reshards_every_adapted_linear(self):
+        # Act
+        blocks, misc = lora_formulas.nccl_reshard_sync_linears(
+            QWEN_05B, "all-linear", NcclReshardLayout(4, 2)
+        )
+
+        # Assert: q/o 896x896 and k/v 896x128 in one attention block; gate,
+        # up and down 896x4864 in one MLP block.
+        assert blocks == [
+            [896 * 896, 896 * 128, 896 * 128, 896 * 896],
+            [896 * 4864] * 3,
+        ]
+        assert misc == []
+
+    def test_qkv_is_misc_when_the_engine_splits_kv_heads(self):
+        # Act
+        blocks, misc = lora_formulas.nccl_reshard_sync_linears(
+            QWEN_05B, "all-linear", NcclReshardLayout(4, 4)
+        )
+
+        # Assert: 2 KV heads cannot split 4 ways, so q/k/v on all 24 layers
+        # go to misc; o_proj still reshards.
+        assert blocks == [[896 * 896], [896 * 4864] * 3]
+        assert linear_shapes(misc) == [(896, 896, 24), (896, 128, 24), (896, 128, 24)]
+
+    def test_qkv_is_misc_when_one_of_q_k_v_is_not_adapted(self):
+        # Arrange
+        arch = QWEN_05B.model_copy(
+            update={"lora_excluded_modules": frozenset({"k_proj"})}
+        )
+
+        # Act
+        blocks, misc = lora_formulas.nccl_reshard_sync_linears(
+            arch, "all-linear", NcclReshardLayout(4, 1)
+        )
+
+        # Assert
+        assert blocks == [[896 * 896], [896 * 4864] * 3]
+        assert linear_shapes(misc) == [(896, 896, 24), (896, 128, 24)]
+
+    def test_uneven_trainer_shards_send_every_linear_to_misc(self):
+        # Act
+        blocks, misc = lora_formulas.nccl_reshard_sync_linears(
+            QWEN_05B, "all-linear", NcclReshardLayout(3, 1)
+        )
+
+        # Assert: neither 896 nor 4864 rows split 3 ways.
+        assert blocks == []
+        assert linear_shapes(misc) == [
+            (896, 896, 24),
+            (896, 128, 24),
+            (896, 128, 24),
+            (896, 896, 24),
+            (896, 4864, 48),
+            (4864, 896, 24),
+        ]
+
+    def test_fused_gate_up_is_misc_and_down_stays_bulk(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["ibm-granite/granite-4.0-micro"].config
+        )
+
+        # Act
+        blocks, misc = lora_formulas.nccl_reshard_sync_linears(
+            arch, "all-linear", NcclReshardLayout(4, 1)
+        )
+
+        # Assert: the fused 2560x16384 gate_up_proj is misc on 40 layers.
+        assert blocks == [
+            [2560 * 2560, 2560 * 512, 2560 * 512, 2560 * 2560],
+            [8192 * 2560],
+        ]
+        assert linear_shapes(misc) == [(2560, 16384, 40)]
+
+    def test_gated_delta_projections_are_misc(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(QWEN35_08B.config)
+
+        # Act
+        _, misc = lora_formulas.nccl_reshard_sync_linears(
+            arch, "all-linear", NcclReshardLayout(4, 1)
+        )
+
+        # Assert: 18 GDN layers project 1024 to qkv (6144), z (2048) and b, a
+        # (16 each), and 2048 back.
+        assert linear_shapes(misc) == [
+            (1024, 6144, 18),
+            (1024, 2048, 18),
+            (1024, 16, 36),
+            (2048, 1024, 18),
+        ]
+
+    def test_attention_scope_leaves_the_mlp_out(self):
+        # Act
+        blocks, misc = lora_formulas.nccl_reshard_sync_linears(
+            QWEN_05B, "attention-only", NcclReshardLayout(4, 1)
+        )
+
+        # Assert
+        assert blocks == [[896 * 896, 896 * 128, 896 * 128, 896 * 896]]
+        assert misc == []
+
+
+class TestNcclReshardRefitBytes:
+    def test_dense_decoder_charges_the_largest_bulk_block_alone(self):
+        # Act
+        refit = lora_formulas.nccl_reshard_refit_bytes(
+            QWEN_05B, "all-linear", 16, NcclReshardLayout(4, 1), 2
+        )
+
+        # Assert: no misc weights. The MLP block stages 3 bf16 quarter shards
+        # of 896x4864 beside one fp32 quarter shard.
+        quarter = 896 * 4864 // 4
+        assert refit.misc_phase == 0
+        assert refit.bulk_group == 2 * 3 * quarter
+        assert refit.bulk_fp32_temp == 4 * quarter
+        assert refit.total == 10 * quarter
+
+    def test_misc_phase_holds_bucket_gathered_module_and_fp32_copy(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(QWEN35_08B.config)
+
+        # Act
+        refit = lora_formulas.nccl_reshard_refit_bytes(
+            arch, "all-linear", 16, NcclReshardLayout(4, 1), 2
+        )
+
+        # Assert: 0.38 GB of bf16 GDN weights fit one bucket. The largest
+        # module is in_proj_qkv: a bf16 1024x6144 base, rank-16 fp32 factors,
+        # and its fp32 merge copy. The misc phase outweighs the MLP block.
+        misc = 18 * (1024 * 6144 + 1024 * 2048 + 2048 * 1024) + 36 * 1024 * 16
+        quarter = 1024 * 3584 // 4
+        assert refit.misc_bucket == 2 * misc == 378_667_008
+        assert refit.misc_module == 2 * 1024 * 6144 + 4 * 16 * (1024 + 6144)
+        assert refit.misc_fp32_copy == 4 * 1024 * 6144
+        assert refit.bulk_group == 2 * 3 * quarter
+        assert refit.bulk_fp32_temp == 4 * quarter
+        assert refit.total == refit.misc_phase == 416_874_496
+
+    def test_oversize_misc_weight_takes_its_own_bucket_beside_the_reused_one(self):
+        # Arrange: a 393216x896 down_proj whose 896 rows cannot split 3 ways.
+        arch = QWEN_05B.model_copy(
+            update={"n_layers": 1, "intermediate_size": 3 * 2**17}
+        )
+
+        # Act
+        refit = lora_formulas.nccl_reshard_refit_bytes(
+            arch, "all-linear", 16, NcclReshardLayout(3, 1), 2
+        )
+
+        # Assert: the 0.7 GB down_proj exceeds one 512 MiB bucket; the
+        # attention weights pack into the reused bucket beside it.
+        packed = 2 * (2 * 896 * 896 + 2 * 896 * 128)
+        down = 2 * 393216 * 896
+        assert refit.misc_bucket == packed + down
+        assert refit.misc_module == down + 4 * 16 * (393216 + 896)
+        assert refit.misc_fp32_copy == 2 * down
+        assert refit.total == 2_847_465_472
+
+    def test_more_trainer_shards_shrink_only_the_bulk_terms(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(QWEN35_08B.config)
+
+        # Act
+        four = lora_formulas.nccl_reshard_refit_bytes(
+            arch, "all-linear", 16, NcclReshardLayout(4, 1), 2
+        )
+        eight = lora_formulas.nccl_reshard_refit_bytes(
+            arch, "all-linear", 16, NcclReshardLayout(8, 1), 2
+        )
+
+        # Assert
+        assert eight.misc_phase == four.misc_phase
+        assert eight.bulk_group == four.bulk_group // 2
+        assert eight.bulk_fp32_temp == four.bulk_fp32_temp // 2
+
+
+class TestNcclReshardReceiveBucketBytes:
+    def test_packed_misc_weights_fill_one_bucket(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["Qwen/Qwen3.6-35B-A3B"].config
+        )
+
+        # Act
+        bucket = lora_formulas.nccl_reshard_receive_bucket_bytes(
+            arch, "all-linear", NcclReshardLayout(8, 2), 2
+        )
+
+        # Assert: 30 GDN layers and 40 layers of shared experts exceed one bucket.
+        assert bucket == formulas.NCCL_RESHARD_MISC_BUCKET_BYTES
+
+    def test_oversize_misc_weight_is_the_largest_bucket(self):
+        # Arrange
+        arch = QWEN_05B.model_copy(
+            update={"n_layers": 1, "intermediate_size": 3 * 2**17}
+        )
+
+        # Act
+        bucket = lora_formulas.nccl_reshard_receive_bucket_bytes(
+            arch, "all-linear", NcclReshardLayout(3, 1), 2
+        )
+
+        # Assert
+        assert bucket == 2 * 393216 * 896
+
+    def test_dense_decoder_has_no_bucket(self):
+        # Act
+        bucket = lora_formulas.nccl_reshard_receive_bucket_bytes(
+            QWEN_05B, "all-linear", NcclReshardLayout(4, 1), 2
+        )
+
+        # Assert
+        assert bucket == 0

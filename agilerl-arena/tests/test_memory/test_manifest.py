@@ -1304,6 +1304,44 @@ class TestValidatedRunManifest:
         with pytest.raises(ValidationError, match=r"fsdp\.cpu_offload needs colocated"):
             validated_run_manifest(doc)
 
+    def test_nccl_reshard_on_a_quantized_engine_is_refused(self):
+        # Arrange
+        doc = TrainingManifest.model_validate(
+            manifest(
+                algorithm={"vllm_config": {"quantization": "fp8"}},
+                training={
+                    **ASYNC_ROLLOUT["training"],
+                    "weight_sync": {"transport": "nccl_reshard"},
+                },
+                replay_buffer=ASYNC_ROLLOUT["replay_buffer"],
+            )
+        )
+
+        # Act / Assert
+        with pytest.raises(
+            ValueError,
+            match=r"cannot serve: vllm_config\.quantization is 'fp8'\. Use transport: nixl",
+        ):
+            validated_run_manifest(doc)
+
+    def test_nccl_reshard_on_an_unquantized_engine_is_kept(self):
+        # Arrange
+        doc = TrainingManifest.model_validate(
+            manifest(
+                training={
+                    **ASYNC_ROLLOUT["training"],
+                    "weight_sync": {"transport": "nccl_reshard"},
+                },
+                replay_buffer=ASYNC_ROLLOUT["replay_buffer"],
+            )
+        )
+
+        # Act
+        run = validated_run_manifest(doc)
+
+        # Assert
+        assert run.training.weight_sync.transport == "nccl_reshard"
+
     @pytest.mark.parametrize(
         ("fsdp", "pinned"),
         [({}, frozenset()), ({"ep": 2}, frozenset({"ep"}))],
@@ -1326,6 +1364,11 @@ class TestValidatedRunManifest:
 
 def generation_bytes(config, key):
     breakdown = estimate_run(config).generation
+    return next(c.n_bytes for c in breakdown.components if c.key == key)
+
+
+def training_bytes(config, key):
+    breakdown = estimate_run(config).training
     return next(c.n_bytes for c in breakdown.components if c.key == key)
 
 
@@ -1354,6 +1397,95 @@ class TestRunConfig:
         assert generation_bytes(merged, "lora_slots") == 0
         assert generation_bytes(adapter, "lora_slots") > 0
         assert generation_bytes(adapter, "lora_receive_buffer") == adapter_bytes
+
+    def test_nccl_reshard_prices_its_refit_buffers_over_the_nixl_buffers(self):
+        # Arrange
+        device = device_spec_from_resource_class(A100_TIER)
+        nixl_doc = manifest(**ASYNC_ROLLOUT)
+        reshard_doc = manifest(
+            training={
+                **ASYNC_ROLLOUT["training"],
+                "weight_sync": {"transport": "nccl_reshard"},
+            },
+            replay_buffer=ASYNC_ROLLOUT["replay_buffer"],
+        )
+
+        # Act
+        nixl = run_config_from_manifest(nixl_doc, device, TINY_CONFIG)
+        reshard = run_config_from_manifest(reshard_doc, device, TINY_CONFIG)
+
+        # Assert: 2 layers of 32x32 q/k/v/o and 32x64 gate/up/down, bf16, on
+        # one trainer GPU. NIXL double-buffers all 40 KiB of merged weights on
+        # the trainer and holds them once on the engine. nccl_reshard has no
+        # misc weights: the trainer stages the MLP block (3 x 2048) beside one
+        # fp32 copy of its largest weight, and the engine holds no bucket.
+        merged = 2 * 2 * (4 * 32 * 32 + 3 * 32 * 64)
+        assert reshard.training.merged_lora_sync is True
+        assert reshard.generation.merged_lora_sync is True
+        assert training_bytes(nixl, "lora_send_buffer") == 2 * merged
+        assert generation_bytes(nixl, "lora_receive_buffer") == merged
+        assert training_bytes(reshard, "lora_send_buffer") == 2 * 3 * 2048 + 4 * 2048
+        assert generation_bytes(reshard, "lora_receive_buffer") == 0
+
+    def test_nccl_reshard_splits_for_the_sized_engine_width(self):
+        # Arrange
+        doc = manifest(
+            training={
+                **ASYNC_ROLLOUT["training"],
+                "weight_sync": {"transport": "nccl_reshard"},
+            },
+            replay_buffer=ASYNC_ROLLOUT["replay_buffer"],
+        )
+        device = device_spec_from_resource_class(A100_TIER)
+
+        # Act
+        config = run_config_from_manifest(
+            doc, device, TINY_CONFIG, tensor_parallel_size=2
+        )
+
+        # Assert: one trainer GPU shards nothing; one KV head cannot split
+        # across 2 engine GPUs, so q/k/v (2 layers of 32x32 bf16) ride the
+        # misc bucket.
+        assert config.training.nccl_reshard_engine_tensor_parallel == 2
+        assert config.generation.nccl_reshard_trainer_shards == 1
+        assert generation_bytes(config, "lora_receive_buffer") == 2 * 3 * 2 * 32 * 32
+
+    def test_nccl_reshard_without_an_engine_config_reshards_into_one_gpu(self):
+        # Arrange
+        doc = TrainingManifest.model_validate(
+            manifest(
+                training={
+                    **ASYNC_ROLLOUT["training"],
+                    "weight_sync": {"transport": "nccl_reshard"},
+                },
+                replay_buffer=ASYNC_ROLLOUT["replay_buffer"],
+            )
+        )
+        doc.algorithm.vllm_config = None
+
+        # Act
+        settings = training_settings_from_manifest(doc)
+
+        # Assert
+        assert settings.nccl_reshard_engine_tensor_parallel == 1
+
+    def test_nccl_reshard_under_fsdp_shards_each_weight_across_the_trainers(self):
+        # Arrange
+        doc = manifest(
+            algorithm={"fsdp": {}},
+            training={
+                **ASYNC_ROLLOUT["training"],
+                "training_gpus_per_agent": 2,
+                "weight_sync": {"transport": "nccl_reshard"},
+            },
+            replay_buffer=ASYNC_ROLLOUT["replay_buffer"],
+        )
+
+        # Act
+        settings = generation_settings_from_manifest(doc, tensor_parallel_size=2)
+
+        # Assert
+        assert settings.nccl_reshard_trainer_shards == 2
 
     def test_unset_rollout_mode_is_sized_async(self):
         config = run_config_from_manifest(

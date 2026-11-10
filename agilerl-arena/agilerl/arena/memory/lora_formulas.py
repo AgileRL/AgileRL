@@ -9,19 +9,66 @@ Pure functions of :mod:`agilerl.arena.memory.specs` and
 from __future__ import annotations
 
 from collections.abc import Collection, Sequence
+from typing import NamedTuple
 
 from agilerl.arena.memory.formulas import (
+    ADAPTER_BYTES_PER_PARAM,
     KDA_LINEAR_NAMES,
+    NCCL_RESHARD_MISC_BUCKET_BYTES,
     attention_linear_names,
     attention_linears,
     kda_linears,
 )
 from agilerl.arena.memory.specs import (
+    DTYPE_BYTES,
     LoraLinear,
     LoraSplit,
     LoraTargetScope,
     ModelArch,
 )
+
+
+class NcclReshardLayout(NamedTuple):
+    """The trainer sharding and engine width a ``nccl_reshard`` refit plans its bulk/misc split for."""
+
+    # Trainer ranks one weight's rows are sharded across; 1 without FSDP.
+    trainer_shards: int
+    # Engine ``tensor_parallel_size`` the bulk weights reshard into.
+    engine_tensor_parallel: int
+
+
+class NcclReshardRefitBytes(NamedTuple):
+    """Transient trainer bytes of one merged-LoRA ``nccl_reshard`` refit on the main rank.
+
+    The bulk phase ends before the misc phase starts. Bulk: ``bulk_group``
+    is the largest bulk block's merged local shards at the sync dtype and
+    ``bulk_fp32_temp`` that block's fp32 merge temp of its largest local
+    shard. Misc: ``misc_bucket`` is the reused broadcast bucket plus any
+    weight too large for it, ``misc_module`` the largest misc module gathered
+    whole (base weight and fp32 LoRA factors), and ``misc_fp32_copy`` the
+    fp32 copy of its base the merge accumulates into.
+    """
+
+    misc_bucket: int
+    misc_module: int
+    misc_fp32_copy: int
+    bulk_group: int
+    bulk_fp32_temp: int
+
+    @property
+    def bulk_phase(self) -> int:
+        """Peak extra bytes while bulk blocks reshard."""
+        return self.bulk_group + self.bulk_fp32_temp
+
+    @property
+    def misc_phase(self) -> int:
+        """Peak extra bytes while misc buckets broadcast."""
+        return self.misc_bucket + self.misc_module + self.misc_fp32_copy
+
+    @property
+    def total(self) -> int:
+        """Peak extra bytes of the refit."""
+        return max(self.bulk_phase, self.misc_phase)
 
 
 def _attention_lora_widths(
@@ -60,6 +107,18 @@ def _attention_lora_linears(
     arch: ModelArch, tensor_parallel: int, excluded: Collection[str]
 ) -> list[LoraLinear]:
     """Attention q/k/v/o; an output-gated ``q_proj`` doubles its query rows."""
+    return [
+        linear
+        for _, named in _attention_projection_types(arch, tensor_parallel)
+        for name, linear in named
+        if name not in excluded
+    ]
+
+
+def _attention_projection_types(
+    arch: ModelArch, tensor_parallel: int
+) -> list[tuple[int, tuple[tuple[str, LoraLinear], ...]]]:
+    """KV heads and named projections of each attention layer type."""
     if arch.low_rank_attention:
         kv_split = "out" if arch.n_kv_heads % tensor_parallel == 0 else "none"
         # Tensor parallel keeps the down-projections whole, splits the
@@ -77,16 +136,21 @@ def _attention_lora_linears(
             "o_proj": "in",
             "o_b_proj": "in",
         }
-        return [
-            LoraLinear(in_features, out_features, arch.attention_layers, splits[name])
+        named_linears = tuple(
+            (
+                name,
+                LoraLinear(
+                    in_features, out_features, arch.attention_layers, splits[name]
+                ),
+            )
             for name, (in_features, out_features) in zip(
                 attention_linear_names(arch), attention_linears(arch), strict=True
             )
-            if name not in excluded
-        ]
+        )
+        return [(arch.n_kv_heads, named_linears)]
     h = arch.hidden_size
     q_rows = 2 if arch.attention_output_gate else 1
-    linears = []
+    types = []
     for head_dim, kv_heads, layers, kv_layers in _attention_lora_widths(arch):
         kv_split = "out" if kv_heads % tensor_parallel == 0 else "none"
         v_dim = arch.v_head_dim or head_dim
@@ -96,8 +160,8 @@ def _attention_lora_linears(
             ("v_proj", LoraLinear(h, kv_heads * v_dim, kv_layers, kv_split)),
             ("o_proj", LoraLinear(arch.n_heads * v_dim, h, layers, "in")),
         )
-        linears += [linear for name, linear in named if name not in excluded]
-    return linears
+        types.append((kv_heads, named))
+    return types
 
 
 def _mlp_lora_linears(arch: ModelArch, inter: int, count: int) -> list[LoraLinear]:
@@ -298,6 +362,220 @@ def merged_lora_sync_bytes(
     total = sum(size * count for size, count in sizes if count)
     largest = max((size for size, count in sizes if count), default=0)
     return int(total * dtype_bytes), int(largest * dtype_bytes)
+
+
+def _reshards_evenly(
+    linear: LoraLinear, row_parallel: bool, layout: NcclReshardLayout
+) -> bool:
+    """Whether trainer row shards and the engine's TP slices of ``linear`` divide evenly."""
+    engine_dim = linear.in_features if row_parallel else linear.out_features
+    return (
+        linear.out_features % layout.trainer_shards == 0
+        and engine_dim % layout.engine_tensor_parallel == 0
+    )
+
+
+def _attention_reshard_split(
+    adapted: dict[str, LoraLinear], kv_heads: int, layout: NcclReshardLayout
+) -> tuple[list[int], list[LoraLinear]]:
+    """Bulk block and misc linears of one attention projection type."""
+    tp = layout.engine_tensor_parallel
+    qkv = [adapted[name] for name in ("q_proj", "k_proj", "v_proj") if name in adapted]
+    o_proj = adapted.get("o_proj")
+    misc = [
+        linear
+        for name, linear in adapted.items()
+        if name not in ("q_proj", "k_proj", "v_proj", "o_proj")
+    ]
+    block = []
+    if (
+        len(qkv) == 3
+        and qkv[1].count > 0
+        and kv_heads >= tp
+        and kv_heads % tp == 0
+        and all(_reshards_evenly(linear, False, layout) for linear in qkv)
+    ):
+        q_proj = qkv[0]
+        block += [linear.in_features * linear.out_features for linear in qkv]
+        misc.append(
+            LoraLinear(
+                q_proj.in_features,
+                q_proj.out_features,
+                q_proj.count - qkv[1].count,
+                q_proj.split,
+            )
+        )
+    else:
+        misc += qkv
+    if o_proj is not None and _reshards_evenly(o_proj, True, layout):
+        block.append(o_proj.in_features * o_proj.out_features)
+    elif o_proj is not None:
+        misc.append(o_proj)
+    return block, misc
+
+
+def _mlp_reshard_split(
+    arch: ModelArch,
+    gate_up: LoraLinear,
+    down: LoraLinear,
+    layout: NcclReshardLayout,
+) -> tuple[list[int], list[LoraLinear]]:
+    """Bulk block and misc linears of the dense MLP."""
+    block = []
+    misc = []
+    if not arch.fused_gate_up_mlp and _reshards_evenly(gate_up, False, layout):
+        gates = 2 if arch.gated_mlp else 1
+        block += [gate_up.in_features * gate_up.out_features] * gates
+    else:
+        misc.append(gate_up)
+    if _reshards_evenly(down, True, layout):
+        block.append(down.in_features * down.out_features)
+    else:
+        misc.append(down)
+    return block, misc
+
+
+def nccl_reshard_sync_linears(
+    arch: ModelArch, scope: LoraTargetScope, layout: NcclReshardLayout
+) -> tuple[list[list[int]], list[LoraLinear]]:
+    """Bulk blocks and misc linears of a merged-LoRA ``nccl_reshard`` refit.
+
+    Bulk weights are decoder ``self_attn`` q/k/v/o and dense MLP
+    gate/up/down whose trainer row shards and engine TP slices divide
+    evenly: each trainer rank merges its own rows and reshards them one
+    attention or MLP block at a time. vLLM loads ``qkv_proj`` and
+    ``gate_up_proj`` whole, so their linears are bulk together or misc
+    together; ``qkv_proj`` also needs all of q/k/v adapted and a KV head
+    count the engine width divides. KV-shared layers have no k/v, so their
+    ``q_proj`` is misc. A checkpoint's fused ``gate_up_proj`` is misc while
+    ``down_proj`` stays bulk. Every other linear :func:`decoder_lora_linears`
+    lists is misc, gathered whole and broadcast from rank 0.
+
+    :param arch: Model architecture.
+    :param scope: Adapter target scope.
+    :param layout: Trainer sharding and engine width.
+    :return: Weight elements of each tensor in one bulk block, one entry per
+        block shape, and the misc linears.
+    """
+    excluded = arch.lora_excluded_modules
+    blocks: list[list[int]] = []
+    planned: list[LoraLinear] = []
+    misc: list[LoraLinear] = []
+    for kv_heads, named in _attention_projection_types(arch, 1):
+        adapted = {name: linear for name, linear in named if name not in excluded}
+        planned += adapted.values()
+        block, block_misc = _attention_reshard_split(adapted, kv_heads, layout)
+        misc += block_misc
+        if block:
+            blocks.append(block)
+    if scope == "all-linear" and arch.mlp_layers:
+        gate_up, down = _mlp_lora_linears(arch, arch.intermediate_size, arch.mlp_layers)
+        planned += [gate_up, down]
+        block, block_misc = _mlp_reshard_split(arch, gate_up, down, layout)
+        misc += block_misc
+        if block:
+            blocks.append(block)
+    others = decoder_lora_linears(arch, scope)
+    for linear in planned:
+        others.remove(linear)
+    return blocks, [linear for linear in misc + others if linear.count]
+
+
+def _misc_buckets(misc: Sequence[LoraLinear], dtype_bytes: float) -> tuple[int, int]:
+    """Bytes of the reused misc bucket, and of the largest weight too large for it."""
+    sizes = [
+        (int(linear.in_features * linear.out_features * dtype_bytes), linear.count)
+        for linear in misc
+    ]
+    packed = sum(
+        size * count for size, count in sizes if size <= NCCL_RESHARD_MISC_BUCKET_BYTES
+    )
+    oversize = max(
+        (size for size, _ in sizes if size > NCCL_RESHARD_MISC_BUCKET_BYTES), default=0
+    )
+    return min(packed, NCCL_RESHARD_MISC_BUCKET_BYTES), oversize
+
+
+def nccl_reshard_receive_bucket_bytes(
+    arch: ModelArch,
+    scope: LoraTargetScope,
+    layout: NcclReshardLayout,
+    dtype_bytes: float,
+) -> int:
+    """Bytes of the largest misc bucket an engine GPU receives in a merged-LoRA ``nccl_reshard`` refit.
+
+    :param arch: Model architecture.
+    :param scope: Adapter target scope.
+    :param layout: Trainer sharding and engine width.
+    :param dtype_bytes: Bytes per element of the sync dtype.
+    :return: One bucket of up to
+        :data:`~agilerl.arena.memory.formulas.NCCL_RESHARD_MISC_BUCKET_BYTES`,
+        or the largest misc weight when it is larger.
+    """
+    _, misc = nccl_reshard_sync_linears(arch, scope, layout)
+    return max(_misc_buckets(misc, dtype_bytes))
+
+
+def nccl_reshard_refit_bytes(
+    arch: ModelArch,
+    scope: LoraTargetScope,
+    rank: int,
+    layout: NcclReshardLayout,
+    dtype_bytes: float,
+) -> NcclReshardRefitBytes:
+    """Transient main-rank trainer bytes of one merged-LoRA ``nccl_reshard`` refit.
+
+    Bulk phase: a block stages its merged local shards at ``dtype_bytes``
+    beside one fp32 merge temp of its largest local shard; the largest block
+    is charged. Misc phase, after it: rank 0 keeps the reused bucket, a
+    weight too large for it takes a buffer of its own, and the largest misc
+    module is gathered whole (base at ``dtype_bytes``, fp32 LoRA factors)
+    beside the fp32 copy of its base the merge accumulates into.
+
+    :param arch: Model architecture.
+    :param scope: Adapter target scope.
+    :param rank: LoRA rank.
+    :param layout: Trainer sharding and engine width.
+    :param dtype_bytes: Bytes per element of the trainer base weights and the sync dtype.
+    :return: The refit's terms.
+    """
+    blocks, misc = nccl_reshard_sync_linears(arch, scope, layout)
+    shards = layout.trainer_shards
+    fp32 = DTYPE_BYTES["fp32"]
+    misc_module, misc_fp32_copy = max(
+        (
+            (
+                int(
+                    linear.in_features * linear.out_features * dtype_bytes
+                    + rank
+                    * (linear.in_features + linear.out_features)
+                    * ADAPTER_BYTES_PER_PARAM
+                ),
+                int(linear.in_features * linear.out_features * fp32),
+            )
+            for linear in misc
+        ),
+        key=sum,
+        default=(0, 0),
+    )
+    bulk_group, bulk_fp32_temp = max(
+        (
+            (
+                int(sum(n // shards for n in block) * dtype_bytes),
+                int(max(block) // shards * fp32),
+            )
+            for block in blocks
+        ),
+        key=sum,
+        default=(0, 0),
+    )
+    return NcclReshardRefitBytes(
+        misc_bucket=sum(_misc_buckets(misc, dtype_bytes)),
+        misc_module=misc_module,
+        misc_fp32_copy=misc_fp32_copy,
+        bulk_group=bulk_group,
+        bulk_fp32_temp=bulk_fp32_temp,
+    )
 
 
 def lora_sync_buffer_bytes(

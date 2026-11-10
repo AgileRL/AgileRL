@@ -60,7 +60,7 @@ from agilerl.arena.memory.resolve.rollout import (
     checkpoint_quantized,
     default_rollout_batch_size,
     drafts_with_mtp,
-    merged_lora_sync_eligible,
+    merged_lora_sync_blockers,
     run_rollout_engines,
 )
 from agilerl.arena.memory.resolve.sequences import (
@@ -501,17 +501,26 @@ def _catalog_checkpoint_quantized(info: ModelInfo) -> bool:
 
 
 def can_sync_merged_lora(spec: LLMAlgorithmSpec) -> bool:
-    """Whether the spec's rollout engines can serve merged LoRA weights (:func:`merged_lora_sync_eligible`).
+    """Whether the spec's rollout engines can serve merged LoRA weights.
+
+    :param spec: LLM algorithm spec.
+    :return: ``True`` when :func:`spec_merged_lora_sync_blockers` finds none.
+    """
+    return not spec_merged_lora_sync_blockers(spec)
+
+
+def spec_merged_lora_sync_blockers(spec: LLMAlgorithmSpec) -> list[str]:
+    """Why the spec's rollout engines cannot serve merged LoRA weights (:func:`merged_lora_sync_blockers`).
 
     The checkpoint's quantization comes from the catalogue's ``config.json``.
 
     :param spec: LLM algorithm spec.
-    :return: ``False`` for a spec without rollout engines.
+    :return: One reason per blocker; empty when the engines can serve them.
     """
     if not isinstance(spec, RolloutLLMSpec):
-        return False
+        return [f"{spec.name} starts no rollout engines"]
     info = SUPPORTED_MODEL_INFO.get(spec.pretrained_model_name_or_path or "")
-    return merged_lora_sync_eligible(
+    return merged_lora_sync_blockers(
         None if spec.vllm_config is None else spec.vllm_config.quantization,
         info is not None and _catalog_checkpoint_quantized(info),
         bool(_lora_config(spec).tower_target_modules),
@@ -594,6 +603,33 @@ def explicit_colocated_rollout(manifest: TrainingManifest) -> bool:
     )
 
 
+def syncs_over_nccl_reshard(manifest: TrainingManifest) -> bool:
+    """Whether async weight sync runs over ``weight_sync.transport: nccl_reshard``."""
+    return (
+        async_rollout(manifest)
+        and manifest.training.weight_sync.transport == "nccl_reshard"
+    )
+
+
+def nccl_reshard_blocker(manifest: TrainingManifest) -> str | None:
+    """Why the run cannot sync weights over ``nccl_reshard``, which refits merged LoRA weights only.
+
+    :param manifest: Training manifest.
+    :return: The reason, or ``None`` when the run takes another transport or
+        :func:`spec_merged_lora_sync_blockers` finds none.
+    """
+    if not syncs_over_nccl_reshard(manifest):
+        return None
+    blockers = spec_merged_lora_sync_blockers(manifest.algorithm)
+    if not blockers:
+        return None
+    return (
+        "weight_sync.transport: nccl_reshard needs merged LoRA sync, which "
+        f"these rollout engines cannot serve: {'; '.join(blockers)}. Use "
+        "transport: nixl."
+    )
+
+
 def configured_rollout_engines(manifest: TrainingManifest) -> int | Literal["auto"]:
     """Rollout engines per member as Ray reads the manifest, from :func:`run_rollout_engines`."""
     return run_rollout_engines(
@@ -606,8 +642,13 @@ def validated_run_manifest(manifest: TrainingManifest) -> TrainingManifest:
 
     :param manifest: Training manifest, validated as written.
     :return: ``manifest`` itself when Ray reads it as written, else the run Ray starts.
+    :raises ValueError: When the run asks for ``nccl_reshard`` and its engines
+        cannot serve merged weights (:func:`nccl_reshard_blocker`).
     :raises pydantic.ValidationError: When the run cannot start as Ray runs it.
     """
+    blocker = nccl_reshard_blocker(manifest)
+    if blocker is not None:
+        raise ValueError(blocker)
     run_async = async_rollout(manifest)
     if not run_async and "rollout_mode" not in manifest.training.model_fields_set:
         return manifest
@@ -783,6 +824,7 @@ def training_settings_from_spec(
     segmented_rows: bool = False,
     mutates_beta: bool = False,
     adapter_sync: bool = False,
+    nccl_reshard_engine_tensor_parallel: int | None = None,
 ) -> TrainingSettings:
     """Trainer-side settings for one algorithm spec.
 
@@ -797,6 +839,8 @@ def training_settings_from_spec(
     :param mutates_beta: HPO mutates ``beta``.
     :param adapter_sync: Async weight sync pushes the adapter even where the
         engines could serve merged weights.
+    :param nccl_reshard_engine_tensor_parallel: Engine width async weight
+        sync reshards into over ``nccl_reshard``; ``None`` for another transport.
     :return: Training settings.
     :raises ValueError: Quantization.
     """
@@ -864,13 +908,29 @@ def training_settings_from_spec(
         merged_lora_sync=async_rollout
         and not adapter_sync
         and can_sync_merged_lora(spec),
+        nccl_reshard_engine_tensor_parallel=nccl_reshard_engine_tensor_parallel,
     )
+
+
+def _manifest_engine_width(spec: LLMAlgorithmSpec) -> int | None:
+    """``vllm_config.tensor_parallel_size``, or ``None`` when it is unset."""
+    if not isinstance(spec, RolloutLLMSpec) or spec.vllm_config is None:
+        return None
+    return spec.vllm_config.tensor_parallel_size
+
+
+def _trainer_shards(spec: LLMAlgorithmSpec, n_training_gpus: int) -> int:
+    """Trainer ranks one weight's rows are sharded across: the FSDP shard group, or 1 without FSDP."""
+    if spec.fsdp is None:
+        return 1
+    return min(spec.fsdp.shard_group_size or n_training_gpus, n_training_gpus)
 
 
 def training_settings_from_manifest(
     manifest: TrainingManifest | str | Path | dict[str, Any],
     micro_batch_size: int | None = None,
     adapter_sync: bool = False,
+    engine_tensor_parallel: int | None = None,
 ) -> TrainingSettings:
     """Trainer-side settings, read as the trainer reads the manifest.
 
@@ -883,6 +943,9 @@ def training_settings_from_manifest(
         field without a device.
     :param adapter_sync: Async weight sync pushes the adapter even where the
         engines could serve merged weights.
+    :param engine_tensor_parallel: Engine width a ``nccl_reshard`` refit
+        reshards into. ``None`` reads ``vllm_config.tensor_parallel_size``;
+        an unset width is 1.
     :return: Training settings.
     """
     manifest = _validated(manifest)
@@ -918,6 +981,11 @@ def training_settings_from_manifest(
         mutates_beta=manifest.mutation is not None
         and "beta" in manifest.mutation.rl_hp_selection,
         adapter_sync=adapter_sync,
+        nccl_reshard_engine_tensor_parallel=(
+            (engine_tensor_parallel or _manifest_engine_width(spec) or 1)
+            if syncs_over_nccl_reshard(manifest)
+            else None
+        ),
     )
 
 
@@ -1078,6 +1146,11 @@ def generation_settings_from_manifest(
         "merged_lora_sync": async_rollout(manifest)
         and not adapter_sync
         and can_sync_merged_lora(spec),
+        "nccl_reshard_trainer_shards": (
+            _trainer_shards(spec, manifest.training.training_gpus_per_agent)
+            if syncs_over_nccl_reshard(manifest)
+            else None
+        ),
     }
     if width is not None:
         settings["tensor_parallel_size"] = width
@@ -1197,7 +1270,9 @@ def run_config_from_manifest(
     apply_training_memory(spec, plan)
     _, per_rank = per_rank_trajectories(spec, manifest.training.training_gpus_per_agent)
     spec.mini_batch_size = resolve_mini_batch_size(spec.mini_batch_size, per_rank)
-    training = training_settings_from_manifest(manifest, adapter_sync=adapter_sync)
+    training = training_settings_from_manifest(
+        manifest, adapter_sync=adapter_sync, engine_tensor_parallel=tensor_parallel_size
+    )
     generation = generation_settings_from_manifest(
         manifest,
         tensor_parallel_size=tensor_parallel_size,
