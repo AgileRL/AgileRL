@@ -3,8 +3,19 @@
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
+
 import torch
-from transformers import GenerationConfig, GPT2Config, GPT2LMHeadModel
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from tokenizers.pre_tokenizers import Digits
+from transformers import (
+    GenerationConfig,
+    LlamaConfig,
+    LlamaForCausalLM,
+    PreTrainedTokenizerFast,
+)
 
 from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 
@@ -181,24 +192,21 @@ class TinyDigitTokenizer:
         return output
 
 
-def _make_tiny_config() -> GPT2Config:
-    config = GPT2Config(
+def _make_tiny_config() -> LlamaConfig:
+    return LlamaConfig(
         vocab_size=TINY_VOCAB_SIZE,
-        n_positions=TINY_MAX_CONTEXT_LENGTH,
-        n_ctx=TINY_MAX_CONTEXT_LENGTH,
-        n_embd=64,
-        n_layer=2,
-        n_head=2,
+        max_position_embeddings=TINY_MAX_CONTEXT_LENGTH,
+        # vLLM GPU FlexAttention needs head_dim >= 16; CPU PagedAttention needs 32.
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=2,
         bos_token_id=0,
         eos_token_id=TINY_TARGET_TOKEN_ID,
         pad_token_id=5,
-        attn_pdrop=0.0,
-        embd_pdrop=0.0,
-        resid_pdrop=0.0,
+        attention_bias=False,
     )
-    if hasattr(config, "summary_first_dropout"):
-        config.summary_first_dropout = 0.0
-    return config
 
 
 def _make_tiny_generation_config() -> GenerationConfig:
@@ -211,22 +219,61 @@ def _make_tiny_generation_config() -> GenerationConfig:
     )
 
 
-def build_tiny_actor_network(use_value_head: bool = False) -> GPT2LMHeadModel:
+def build_tiny_hf_tokenizer() -> PreTrainedTokenizerFast:
+    """HuggingFace tokenizer with the same ids as :class:`TinyDigitTokenizer`."""
+    vocab = {str(i): i for i in range(TinyDigitTokenizer.NUM_DIGITS)}
+    vocab["<PAD>"] = 5
+    vocab["<EOS>"] = TINY_TARGET_TOKEN_ID
+    backend = Tokenizer(WordLevel(vocab, unk_token="<PAD>"))
+    backend.pre_tokenizer = Digits(individual_digits=True)
+    tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=backend,
+        eos_token="<EOS>",
+        pad_token="<PAD>",
+        unk_token="<PAD>",
+        model_max_length=TINY_MAX_CONTEXT_LENGTH,
+    )
+    tokenizer.padding_side = "left"
+    tokenizer.pad_token_id = 5
+    tokenizer.eos_token_id = TINY_TARGET_TOKEN_ID
+    return tokenizer
+
+
+def save_tiny_vllm_checkpoint(model: LlamaForCausalLM, directory: Path) -> Path:
+    """Write Llama weights and tokenizer so colocated vLLM can load them.
+
+    :param model: From-config tiny Llama.
+    :type model: LlamaForCausalLM
+    :param directory: Directory to write ``config.json``, weights, and tokenizer files.
+    :type directory: Path
+    :return: The directory written.
+    :rtype: Path
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    model.save_pretrained(directory)
+    build_tiny_hf_tokenizer().save_pretrained(directory)
+    return directory
+
+
+def build_tiny_actor_network(use_value_head: bool = False) -> LlamaForCausalLM:
     """Build a tiny actor network for debugging.
 
     :param use_value_head: Whether to use a value head.
     :type use_value_head: bool
     :return: The actor network.
-    :rtype: GPT2LMHeadModel
+    :rtype: LlamaForCausalLM
     """
-    base_model = GPT2LMHeadModel(_make_tiny_config())
+    base_model = LlamaForCausalLM(_make_tiny_config())
     generation_config = _make_tiny_generation_config()
     base_model.generation_config = generation_config
-    base_model.name_or_path = "tiny-debug-transformer"
+    checkpoint_dir = Path(tempfile.mkdtemp(prefix="tiny-debug-transformer-"))
+    save_tiny_vllm_checkpoint(base_model, checkpoint_dir)
+    base_model.name_or_path = str(checkpoint_dir)
     if use_value_head:
         actor_network = AutoModelForCausalLMWithValueHead.from_pretrained(
             base_model, summary_dropout_prob=0.0
         )
         actor_network.generation_config = generation_config
+        actor_network.name_or_path = str(checkpoint_dir)
         return actor_network
     return base_model

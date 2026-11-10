@@ -23,7 +23,7 @@ from collections.abc import (
     Mapping,
     Sequence,
 )
-from contextlib import contextmanager, nullcontext
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import asdict
 from functools import partial
 from importlib.metadata import version
@@ -299,8 +299,6 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
         get_lora_params,
         get_model_name_or_path,
         has_vision_tower,
-        hf_completion_lengths,
-        hf_turn_generation_config,
         is_rollout_prompt,
         language_model_attn_implementation,
         log_cuda_memory_snapshot,
@@ -310,7 +308,6 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
         move_params_to_gpu,
         needs_cross_rank_seq_padding,
         offload_colocated_trainer_from_gpu,
-        prepare_prompt_hf_generate,
         save_lora_adapters,
         save_peft_adapter_for_vllm_rollout,
         snapshot_lora_adapters,
@@ -3039,7 +3036,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     micro_batch_tokens_per_gpu: int | None = None
     max_output_tokens: int | None
     min_output_tokens: int | None
-    hf_generate_chunk_size: int
     generation_config: GenerationConfig
 
     def __init__(
@@ -3231,11 +3227,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self.vllm_config = vllm_config
         self.max_grad_norm = max_grad_norm
         self.offload_trainer_during_rollout = offload_trainer_during_rollout
-        self.trainer_offload_context = (
-            self._offload_trainer_for_rollout
-            if offload_trainer_during_rollout
-            else nullcontext
-        )
         self.wrap = wrap
         self.use_separate_reference_adapter = use_separate_reference_adapter
         if reference_update_interval is not None and reference_update_interval < 1:
@@ -3268,6 +3259,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self._vllm_awake = self.colocated and not (
             self.vllm_config is not None and self.vllm_config.sleep_mode
         )
+        self.llm = None
         self._vllm_moved = False
         self._vllm_lora_loaded = False
         self._vllm_lora_staging_dir: Path | None = None
@@ -3994,8 +3986,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             None,
         )
         barrier()
-        if hasattr(self, "llm") and self.llm is not None:
-            del self.llm
+        self.llm = None
         staging_dir = getattr(self, "_vllm_lora_staging_dir", None)
         if (
             staging_dir is not None
@@ -5084,7 +5075,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 model_config.setdefault("device_map", "cpu")
                 if (
                     self.colocated
-                    and getattr(self, "llm", None) is not None
+                    and self.llm is not None
                     and torch.cuda.is_available()
                 ):
                     torch.cuda.empty_cache()
@@ -7152,62 +7143,39 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self.llm.reset_prefix_cache()
         self._vllm_moved = True
 
-    def _generate_with_hf(
-        self, prompts: Sequence[RolloutPrompt], group_size: int = 1
-    ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-        """Generate ``group_size`` completions per prompt with HuggingFace ``generate``.
-
-        Runs under the caller's adapter and eval mode, in chunks of
-        ``hf_generate_chunk_size`` prompts.
-
-        :param prompts: Prompt mappings for this rank.
-        :type prompts: Sequence[RolloutPrompt]
-        :param group_size: Completions per prompt.
-        :type group_size: int
-        :return: Per-prompt completion token tensors and matching action masks.
-        :rtype: tuple[list[torch.Tensor], list[torch.Tensor]]
-        :raises ValueError: When FSDP ``cpu_offload`` keeps parameters on the CPU.
-        """
-        if self.fsdp_config is not None and self.fsdp_config.cpu_offload:
-            msg = (
-                "HuggingFace generate does not support FSDP2 cpu_offload: it "
-                "assumes parameters live on the compute device. Set vllm_config "
-                "or use optim_cpu_offload instead (parameters stay on GPU)."
+    def _ensure_vllm_for_generation(self) -> None:
+        """Start colocated vLLM; offload a live trainer before ``LLM()``."""
+        if self.vllm_config is None:
+            warnings.warn(
+                "vllm_config was not set; using VLLMConfig() defaults for "
+                "colocated generation.",
+                stacklevel=2,
             )
-            raise ValueError(msg)
-        actor_device = self.shard_runtime.actor_compute_device(
-            self.actor, torch.device(self.device)
-        )
-        token_ids_list = []
-        completion_masks = []
-        with torch.no_grad(), self._amp_ctx():
-            for start in range(0, len(prompts), self.hf_generate_chunk_size):
-                for prompt in prompts[start : start + self.hf_generate_chunk_size]:
-                    hf_inputs = prepare_prompt_hf_generate(
-                        prompt, actor_device, group_size=group_size
-                    )
-                    prompt_len = int(hf_inputs["input_ids"].shape[-1])
-                    token_ids = self.actor.generate(
-                        **hf_inputs,
-                        generation_config=hf_turn_generation_config(
-                            self.generation_config,
-                            max_model_len=self.max_model_len,
-                            prompt_length=prompt_len,
-                            max_output_tokens=self.max_output_tokens,
-                        ),
-                    )
-                    token_ids_list.append(token_ids)
-                    completion_masks.append(
-                        build_completion_mask(
-                            token_ids,
-                            prompt_len,
-                            self.pad_token_id,
-                            completion_len=hf_completion_lengths(
-                                token_ids, prompt_len, self.pad_token_id
-                            ),
-                        )
-                    )
-        return token_ids_list, completion_masks
+            self.vllm_config = VLLMConfig()
+        if not self.colocated:
+            if self.vllm_config.tensor_parallel_size not in (None, 1):
+                msg = (
+                    "Colocated vLLM requires tensor_parallel_size==1 (the "
+                    "in-process external_launcher engine is single-GPU), got "
+                    f"{self.vllm_config.tensor_parallel_size}."
+                )
+                raise ValueError(msg)
+            self.colocated = True
+            if not self.shard_runtime.is_sharded:
+                self.offload_trainer_during_rollout = True
+            self._vllm_awake = not self.vllm_config.sleep_mode
+        if self.llm is None:
+            if self.shard_runtime.is_sharded:
+                warnings.warn(
+                    "Trainer offload during rollout is not compatible with FSDP2-sharded "
+                    "parameters; it is disabled for this run.",
+                    stacklevel=2,
+                )
+            else:
+                self._offload_trainer_to_cpu_for_colocated_vllm()
+            # vLLM's NCCL comm must use the same cuMem allocator as any earlier one.
+            os.environ.setdefault("NCCL_CUMEM_ENABLE", "0")
+            self._configure_vllm()
 
     def _generate_with_vllm_colocate(
         self,
@@ -8074,6 +8042,12 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             setattr(parent, attr, original)
             if softcap is not None:
                 text_config.final_logit_softcapping = softcap
+
+    def trainer_offload_context(self) -> AbstractContextManager[None]:
+        """Context manager that holds the trainer on GPU only for the training step."""
+        if self.offload_trainer_during_rollout:
+            return self._offload_trainer_for_rollout()
+        return nullcontext()
 
     @contextmanager
     def _offload_trainer_for_rollout(

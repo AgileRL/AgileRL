@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import json
-from contextlib import contextmanager
 from dataclasses import replace
 from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -22,9 +21,6 @@ from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, Qwe
 from transformers.conversion_mapping import Concatenate, WeightConverter
 
 from agilerl.algorithms.core.base import LLMAlgorithm
-from agilerl.algorithms.grpo import GRPO
-from agilerl.algorithms.ppo_llm import PPO
-from agilerl.algorithms.reinforce_llm import REINFORCE
 from agilerl.distributed import (
     CPUOffloadOptimizer,
     FSDPConfig,
@@ -87,16 +83,6 @@ def _make_wrap_stub(**overrides) -> MagicMock:
         setattr(agent, k, v)
     agent.fsdp_config = _resolved_fsdp(agent.fsdp_config)
     return agent
-
-
-class TestLLMAlgorithmGenerateWithHF:
-    def test_raises_under_fsdp_cpu_offload(self):
-        agent = SimpleNamespace(
-            fsdp_config=FSDPConfig(cpu_offload=True, optim_cpu_offload=False)
-        )
-
-        with pytest.raises(ValueError, match="does not support FSDP2 cpu_offload"):
-            LLMAlgorithm._generate_with_hf(agent, prompts=[])
 
 
 class TestLLMWrapModelsOffloadValidation:
@@ -298,135 +284,6 @@ class TestGatherLayer:
             # Assert
             assert w.device == device
             assert b is None
-
-
-# ---------------------------------------------------------------------------
-# 3. actor_device guard in get_action (GRPO / PPO / REINFORCE)
-# ---------------------------------------------------------------------------
-
-
-def _make_actor_agent(shard_runtime=None, device="cuda:0"):
-    """MagicMock agent for ``get_action`` HF-generate path tests.
-
-    ``device`` is set to a CUDA string even on CPU-only hosts so the FSDP2
-    branch (``fallback`` = ``self.device``) and the dense branch
-    (param device = CPU) produce distinguishable devices.
-    ``prepare_prompt_hf_generate`` is patched by the caller to capture the
-    device without actually moving tensors.
-    """
-    agent = MagicMock()
-    agent.colocated = False
-    agent.device = device
-    agent.fsdp_config = FSDPConfig()
-    agent.shard_runtime = shard_runtime or DPRuntime()
-    agent.hf_generate_chunk_size = 1
-    agent.group_size = 1
-    agent.pad_token_id = 0
-    agent.vllm_importance_sampling_correction = False
-    agent.actor = nn.Linear(2, 2)
-    agent.actor.generate = MagicMock(return_value=torch.ones(1, 8, dtype=torch.long))
-    return agent
-
-
-def _dummy_prompts():
-    return [
-        {
-            "input_ids": torch.ones(1, 4, dtype=torch.long),
-            "attention_mask": torch.ones(1, 4, dtype=torch.long),
-        }
-    ]
-
-
-@contextmanager
-def _patch_hf_generate_path(module_path, captured_devices):
-    """Patch the HF-generate helpers to capture ``actor_device``
-    and return dummy data without moving tensors.
-    """
-
-    def capture_prepare(prompt_dict, device, group_size=1):
-        del group_size
-        captured_devices.append(device)
-        return {
-            "input_ids": torch.ones(1, 4, dtype=torch.long),
-            "attention_mask": torch.ones(1, 4, dtype=torch.long),
-        }
-
-    with (
-        patch(f"{module_path}.prepare_prompt_hf_generate", side_effect=capture_prepare),
-        patch(f"{module_path}.hf_turn_generation_config"),
-        patch(f"{module_path}.hf_completion_lengths"),
-        patch(
-            f"{module_path}.build_completion_mask",
-            return_value=torch.ones(1, 8, dtype=torch.bool),
-        ),
-    ):
-        yield
-
-
-class TestGRPOGetActionActorDevice:
-    """``actor_device`` guard: FSDP2 uses ``self.device``, non-FSDP2 probes params."""
-
-    def test_uses_self_device_when_fsdp_runtime(self):
-        # Arrange — FSDP2 branch: actor_device = fallback (self.device)
-        agent = _make_actor_agent(
-            shard_runtime=FSDPRuntime(FSDPConfig()), device="cuda:0"
-        )
-        captured: list = []
-
-        # Act
-        agent._generate_with_hf = MethodType(LLMAlgorithm._generate_with_hf, agent)
-        with _patch_hf_generate_path("agilerl.algorithms.core.base", captured):
-            GRPO.get_action(agent, _dummy_prompts(), training=False)
-
-        # Assert — prompts sent to self.device, not the CPU param device
-        assert captured[0] == torch.device("cuda:0")
-
-    def test_uses_param_device_when_dense_runtime(self):
-        # Arrange — dense branch: actor_device = next(params).device
-        agent = _make_actor_agent(device="cuda:0")
-        captured: list = []
-
-        # Act
-        agent._generate_with_hf = MethodType(LLMAlgorithm._generate_with_hf, agent)
-        with _patch_hf_generate_path("agilerl.algorithms.core.base", captured):
-            GRPO.get_action(agent, _dummy_prompts(), training=False)
-
-        # Assert — prompts sent to the param device (CPU), not self.device
-        assert captured[0] == torch.device("cpu")
-
-
-class TestPPOGetActionActorDevice:
-    def test_uses_self_device_when_fsdp_runtime(self):
-        # Arrange
-        agent = _make_actor_agent(
-            shard_runtime=FSDPRuntime(FSDPConfig()), device="cuda:0"
-        )
-        captured: list = []
-
-        # Act
-        agent._generate_with_hf = MethodType(LLMAlgorithm._generate_with_hf, agent)
-        with _patch_hf_generate_path("agilerl.algorithms.core.base", captured):
-            PPO.get_action(agent, _dummy_prompts(), training=False)
-
-        # Assert
-        assert captured[0] == torch.device("cuda:0")
-
-
-class TestREINFORCEGetActionActorDevice:
-    def test_uses_self_device_when_fsdp_runtime(self):
-        # Arrange
-        agent = _make_actor_agent(
-            shard_runtime=FSDPRuntime(FSDPConfig()), device="cuda:0"
-        )
-        captured: list = []
-
-        # Act
-        agent._generate_with_hf = MethodType(LLMAlgorithm._generate_with_hf, agent)
-        with _patch_hf_generate_path("agilerl.algorithms.core.base", captured):
-            REINFORCE.get_action(agent, _dummy_prompts(), training=False)
-
-        # Assert
-        assert captured[0] == torch.device("cuda:0")
 
 
 # ---------------------------------------------------------------------------

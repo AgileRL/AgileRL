@@ -49,6 +49,39 @@ def _stub_colocated_setup(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(GRPO, "_setup_actors", setup_without_vllm)
 
 
+def _capture_sampling_logps(agent: GRPO, monkeypatch: pytest.MonkeyPatch) -> bool:
+    """Start colocated vLLM inside ``get_action`` and return the capture flag."""
+    captured: dict[str, bool] = {}
+
+    def start_colocated() -> None:
+        agent.colocated = True
+
+    def fake_generate(
+        prompts: Any,
+        group_size: int,
+        temperature: float | None,
+        capture_sampling_logps: bool = False,
+        capture_sampling_supports: bool = False,
+    ) -> tuple[list[torch.Tensor], list[torch.Tensor], None, None]:
+        del temperature, capture_sampling_supports
+        captured["capture"] = capture_sampling_logps
+        n = len(prompts) * group_size
+        token_ids = [torch.ones(1, 4, dtype=torch.long) for _ in range(n)]
+        masks = [torch.ones(1, 3, dtype=torch.bool) for _ in range(n)]
+        return token_ids, masks, None, None
+
+    agent.records_sampling_supports = False
+    monkeypatch.setattr(agent, "_ensure_vllm_for_generation", start_colocated)
+    monkeypatch.setattr(agent, "_prepare_vllm_for_generation", lambda: None)
+    monkeypatch.setattr(agent, "_generate_with_vllm_colocate", fake_generate)
+    agent.get_action(
+        [{"input_ids": torch.ones(1, 2, dtype=torch.long)}],
+        training=True,
+        repeat_prompts=False,
+    )
+    return captured["capture"]
+
+
 def _make_grpo(**overrides: Any) -> GRPO:
     """Tiny fp32 GRPO on CPU: 2 prompts x 2 completions, one micro-batch of 2 rows."""
     torch.manual_seed(0)
@@ -199,6 +232,45 @@ class TestGRPOOldLogprobsSourceConfig:
         with pytest.raises(ValueError, match="Invalid old_logprobs_source 'vllm'"):
             _make_grpo(old_logprobs_source="vllm")
 
+    def test_lazy_colocated_vllm_switches_an_unset_source_to_trainer(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        agent = _make_grpo(vllm_importance_sampling_correction=False)
+        assert agent.old_logprobs_source == "rollout"
+
+        captured = _capture_sampling_logps(agent, monkeypatch)
+
+        assert agent.old_logprobs_source == "trainer"
+        assert captured is False
+
+    def test_explicit_rollout_source_stays_when_colocated_vllm_starts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        agent = _make_grpo(
+            old_logprobs_source="rollout",
+            vllm_importance_sampling_correction=False,
+        )
+
+        captured = _capture_sampling_logps(agent, monkeypatch)
+
+        assert agent.old_logprobs_source == "rollout"
+        assert captured is True
+
+    def test_clone_of_an_unset_source_switches_when_colocated_vllm_starts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        parent = _make_grpo(vllm_importance_sampling_correction=False)
+        clone = _make_grpo(
+            old_logprobs_source="rollout",
+            vllm_importance_sampling_correction=True,
+        )
+
+        parent._copy_clone_attributes(clone)
+        captured = _capture_sampling_logps(clone, monkeypatch)
+
+        assert clone.old_logprobs_source == "trainer"
+        assert captured is False
+
     @pytest.mark.parametrize(
         ("source", "captures"), [("rollout", True), ("trainer", False)]
     )
@@ -228,6 +300,7 @@ class TestGRPOOldLogprobsSourceConfig:
             masks = [torch.ones(1, 3, dtype=torch.bool) for _ in range(n)]
             return token_ids, masks, None, None
 
+        monkeypatch.setattr(agent, "_ensure_vllm_for_generation", lambda: None)
         monkeypatch.setattr(agent, "_prepare_vllm_for_generation", lambda: None)
         monkeypatch.setattr(agent, "_generate_with_vllm_colocate", fake_generate)
 
@@ -269,6 +342,7 @@ class TestGRPOGetActionSamplingSupports:
                 supports if capture_sampling_supports else None,
             )
 
+        monkeypatch.setattr(agent, "_ensure_vllm_for_generation", lambda: None)
         monkeypatch.setattr(agent, "_prepare_vllm_for_generation", lambda: None)
         monkeypatch.setattr(agent, "_generate_with_vllm_colocate", fake_generate)
         return agent

@@ -163,8 +163,8 @@ activation-checkpointing choice. A training manifest rejects all of them.
      - picked
      - Offload sharded parameters and gradients to CPU
        (``CPUOffloadPolicy``). Picked only when nothing else fits. Requires
-       colocated vLLM (``vllm_config``); HuggingFace generate and async
-       rollout engines assume weights stay on the compute device. Not
+       colocated vLLM (``vllm_config``); async rollout engines assume
+       weights stay on the compute device. Not
        supported with ``ep > 1``.
 
 ``cpu_offload`` and ``optim_cpu_offload`` cannot both be ``True``.

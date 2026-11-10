@@ -25,10 +25,7 @@ from agilerl.llm_envs import RolloutHarness
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig
 from tests import TINY_LLM_FIXTURE_PATH
 from tests.helpers.rollout_doubles import FakeEnvClient, RolloutHarnessDouble
-from tests.utils import (
-    assert_vllm_get_action_contract,
-    make_mock_vllm_instance,
-)
+from tests.utils import make_mock_vllm_instance
 
 pytestmark = pytest.mark.vllm
 
@@ -410,40 +407,20 @@ class TestREINFORCEInit:
         mock_instance.sleep.assert_called()
         rf.clean_up()
 
-    @patch("agilerl.algorithms.core.base.LLM")
-    def test_init_reinforce_warns_when_hf_generate_chunk_size_set_with_vllm(
-        self, MockLLM
-    ):
-        mock_instance = make_mock_vllm_instance()
-        MockLLM.return_value = mock_instance
+    def test_init_reinforce_rejects_hf_generate_chunk_size(self):
         actor = create_dummy_actor(10, 8, 100, "cpu")
-        lora = LoraConfig(
-            r=4,
-            lora_alpha=16,
-            target_modules=["lin"],
-            task_type="CAUSAL_LM",
-        )
-        # The vLLM engine is mocked; the dummy actor is the trainer base.
-        with pytest.warns(
-            UserWarning, match="hf_generate_chunk_size.*ignored when colocated"
-        ):
-            rf = REINFORCE(
+        with pytest.raises(TypeError, match="hf_generate_chunk_size"):
+            REINFORCE(
                 actor_network=actor,
                 pad_token_id=99,
                 pad_token="<pad>",
-                lora_config=lora,
-                vllm_config=VLLMConfig(
-                    gpu_memory_utilization=0.2,
-                    max_num_seqs=1,
-                    sleep_mode=True,
-                ),
                 hf_generate_chunk_size=2,
                 max_output_tokens=8,
                 max_model_len=32,
                 wrap=False,
+                gradient_checkpointing=False,
                 device="cpu",
             )
-        rf.clean_up()
 
     def test_init_accepts_output_tokens_not_less_than_model_len(self):
         actor = create_dummy_actor(10, 8, 100, "cpu")
@@ -619,58 +596,48 @@ class TestREINFORCEGetAction:
         assert action_masks == mocked_masks
         rf.clean_up()
 
-    def test_llmreinforce_get_action_hf_path_contract(self):
+    def test_llmreinforce_get_action_uses_colocated_vllm(self):
         rf = _cpu_llmreinforce(max_model_len=128, max_output_tokens=8)
-        prompt_len = 10
-        prompts = [
-            {
-                "input_ids": torch.randint(0, 100, (1, prompt_len), device=rf.device),
-                "attention_mask": torch.ones(1, prompt_len, device=rf.device),
-            }
-            for _ in range(3)
-        ]
-        for training in (True, False):
-            completion_ids, action_masks, _, _ = rf.get_action(
-                prompts, training=training
-            )
-            assert len(completion_ids) == len(prompts)
-            assert len(action_masks) == len(prompts)
-            for row_ids, action_mask in zip(completion_ids, action_masks, strict=True):
-                assert row_ids.dim() == 2
-                assert action_mask.dim() == 2
-                assert row_ids.shape[1] > prompt_len
-                assert action_mask.shape[1] == row_ids.shape[1] - 1
-        rf.clean_up()
-
-    def test_llmreinforce_get_action_hf_path_handles_actor_without_parameters(self):
-        rf = _cpu_llmreinforce(max_model_len=128, max_output_tokens=8)
-
-        real_actor = rf.actor
-
-        class _NoParamModule:
-            def parameters(self):
-                return iter(())
-
-            def __getattr__(self, name):
-                return getattr(real_actor, name)
-
+        rf.records_sampling_supports = False
         prompts = [
             {
                 "input_ids": torch.randint(0, 100, (1, 10), device=rf.device),
                 "attention_mask": torch.ones(1, 10, device=rf.device),
             }
+            for _ in range(3)
         ]
 
-        rf.actor = _NoParamModule()
-        completion_ids, action_masks, _, _ = rf.get_action(prompts, training=True)
+        def fake_generate(
+            obs,
+            group_size,
+            temperature,
+            capture_sampling_logps=False,
+            capture_sampling_supports=False,
+        ):
+            del temperature, capture_sampling_logps, capture_sampling_supports
+            ids = [
+                torch.ones(group_size, 12, dtype=torch.long, device=rf.device)
+                for _ in obs
+            ]
+            masks = [
+                torch.ones(group_size, 11, dtype=torch.bool, device=rf.device)
+                for _ in obs
+            ]
+            return ids, masks, None, None
 
-        assert_vllm_get_action_contract(
-            token_ids=completion_ids,
-            action_masks=action_masks,
-            batch_size=1,
-            prompt_len=10,
-            pad_token_id=rf.pad_token_id,
-        )
+        with (
+            patch.object(rf, "_ensure_vllm_for_generation") as ensure,
+            patch.object(rf, "_prepare_vllm_for_generation"),
+            patch.object(
+                rf, "_generate_with_vllm_colocate", side_effect=fake_generate
+            ) as generate,
+        ):
+            completion_ids, action_masks, _, _ = rf.get_action(prompts, training=True)
+
+        ensure.assert_called_once()
+        generate.assert_called_once()
+        assert len(completion_ids) == len(prompts)
+        assert len(action_masks) == len(prompts)
         rf.clean_up()
 
 
@@ -1144,7 +1111,11 @@ class TestREINFORCETest:
                 max_model_len=128,
             )
             rf = _cpu_llmreinforce(max_model_len=128, max_output_tokens=8)
-            out = rf.test(env, loop=1)
+            completion = torch.tensor([tok.eos_token_id or 0], dtype=torch.long)
+            with patch.object(
+                rf, "get_action", return_value=ActionResult([completion], None)
+            ):
+                out = rf.test(env, loop=1)
             assert out.shape == ()
             assert rf.fitness[-1] == pytest.approx(float(out))
         finally:

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -29,7 +29,6 @@ from agilerl.distributed import (
     allreduce_minmax_int,
     barrier,
     get_world_size,
-    reshard_fsdp_modules,
     resolve_device,
 )
 from agilerl.protocols import (
@@ -158,9 +157,6 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
     :param max_row_tokens: Longest training row (prompt plus completion) the
         memory estimate sizes for. ``None`` uses ``max_model_len``.
     :type max_row_tokens: int | None, optional
-    :param hf_generate_chunk_size: Number of prompts per HuggingFace generation
-        chunk. Ignored when colocated.
-    :type hf_generate_chunk_size: int | None, optional
     :param lora_config: Config for LoRA, defaults to None
     :type lora_config: LoraConfig, optional
     :param cosine_lr_schedule_config: Warmup-cosine schedule stepped once per
@@ -306,8 +302,8 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         torch.profiler trace of one learn micro-batch. ``None`` profiles nothing.
     :type profiling_config: ProfilingConfig | None, optional
     :param old_logprobs_source: Behaviour-policy log-probs the importance ratio
-        divides by. Unset uses ``"trainer"`` when vLLM is colocated in this
-        process and ``"rollout"`` otherwise. ``"rollout"`` uses the rollout
+        divides by. Unset uses ``"rollout"`` until colocated vLLM is running,
+        then ``"trainer"``. ``"rollout"`` uses the rollout
         engine's sampling log-probs for rows that have them on every action
         token. Other rows (e.g. env-truncated ones) get the learn-start
         policy's from the no-grad forward, which runs only when some rank has
@@ -404,7 +400,6 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         min_output_tokens: int | None = None,
         max_model_len: int | None = 1024,
         max_row_tokens: int | None = None,
-        hf_generate_chunk_size: int | None = None,
         lora_config: LoraConfig | None = None,
         cosine_lr_schedule_config: CosineLRScheduleConfig | None = None,
         fsdp_config: FSDPConfig | None = None,
@@ -510,6 +505,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         self.top_k = top_k
         self.min_p = min_p
         self.loss_norm = self._resolve_loss_norm(loss_norm)
+        old_logprobs_source_defaulted = old_logprobs_source is None
         if old_logprobs_source is None:
             old_logprobs_source = "trainer" if self.colocated else "rollout"
         if old_logprobs_source not in {"trainer", "rollout"}:
@@ -519,6 +515,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             )
             raise ValueError(msg)
         self.old_logprobs_source = old_logprobs_source
+        self._old_logprobs_source_defaulted = old_logprobs_source_defaulted
         # GSPO's sequence ratio has no per-token weight for these masks.
         if loss_type == "gspo":
             off_policy_token_mask_bounds = None
@@ -559,9 +556,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         )
         self.use_kl_advantage_shaping = use_kl_advantage_shaping
         self._setup_objective(loss_type, importance_sampling_level)
-        self._setup_generation(
-            max_output_tokens, min_output_tokens, max_model_len, hf_generate_chunk_size
-        )
+        self._setup_generation(max_output_tokens, min_output_tokens, max_model_len)
         self.max_row_tokens = max_row_tokens
         self.micro_batch_tokens_per_gpu = micro_batch_tokens_per_gpu
         self._validate_micro_batch_tokens()
@@ -613,6 +608,14 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             )
             raise ValueError(msg)
 
+    def _copy_clone_attributes(
+        self, clone: LLMAlgorithm[LLMRolloutExperiences]
+    ) -> GRPO:
+        """Copy non-network attributes, including the defaulted log-prob source."""
+        copied = cast("GRPO", super()._copy_clone_attributes(clone))
+        copied._old_logprobs_source_defaulted = self._old_logprobs_source_defaulted
+        return copied
+
     def _should_capture_sampling_logps(self, training: bool) -> bool:
         """Whether this training call stores vLLM sampling log-probs."""
         return (
@@ -649,35 +652,31 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         """
         prompts = normalize_prompt_batch(obs)
         group_size = self.group_size if training and repeat_prompts else 1
-        # None on HF / eval. Training colocated rollouts store them for
+        self._ensure_vllm_for_generation()
+        if self._old_logprobs_source_defaulted and self.colocated:
+            self.old_logprobs_source = "trainer"
+        # None on eval. Training colocated rollouts store them for
         # mismatch correction or rollout-as-old.
         sampling_logps: list[torch.Tensor | None] | None = None
         sampling_supports: list[torch.Tensor | None] | None = None
         capture_sampling_logps = self._should_capture_sampling_logps(training)
         with self.select_adapter("actor"):
             self.actor.eval()
-            if not self.colocated:
-                token_ids_list, completion_masks = self._generate_with_hf(
-                    prompts, group_size
-                )
-                reshard_fsdp_modules(self.actor)
-            else:
-                self._prepare_vllm_for_generation()
-                (
-                    token_ids_list,
-                    completion_masks,
-                    sampling_logps,
-                    sampling_supports,
-                ) = self._generate_with_vllm_colocate(
-                    prompts,
-                    group_size,
-                    temperature=self.temperature
-                    if training
-                    else 0.01,  # Almost deterministic for evaluation
-                    capture_sampling_logps=capture_sampling_logps,
-                    capture_sampling_supports=training
-                    and self.records_sampling_supports,
-                )
+            self._prepare_vllm_for_generation()
+            (
+                token_ids_list,
+                completion_masks,
+                sampling_logps,
+                sampling_supports,
+            ) = self._generate_with_vllm_colocate(
+                prompts,
+                group_size,
+                temperature=self.temperature
+                if training
+                else 0.01,  # Almost deterministic for evaluation
+                capture_sampling_logps=capture_sampling_logps,
+                capture_sampling_supports=training and self.records_sampling_supports,
+            )
 
         return ActionResult(
             token_ids_list, completion_masks, sampling_logps, sampling_supports
@@ -1569,9 +1568,8 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         max_output_tokens: int | None,
         min_output_tokens: int | None,
         max_model_len: int | None,
-        hf_generate_chunk_size: int | None,
     ) -> None:
-        """Build the HF generation config."""
+        """Build the generation config."""
         if max_output_tokens is None and max_model_len is None:
             msg = "Either max_output_tokens or max_model_len must be specified"
             raise ValueError(
@@ -1587,15 +1585,6 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         # One of the two is non-None (guarded above).
         assert resolved_max_model_len is not None
         self.max_model_len = resolved_max_model_len
-        self.hf_generate_chunk_size = int(
-            1 if hf_generate_chunk_size is None else max(1, hf_generate_chunk_size)
-        )
-        if self.colocated and hf_generate_chunk_size is not None:
-            warnings.warn(
-                "hf_generate_chunk_size is only used for HuggingFace generation "
-                "and is ignored when colocated.",
-                stacklevel=3,
-            )
         self.generation_config = GenerationConfig(
             do_sample=True,
             temperature=self.temperature,

@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import logging
-import warnings
 from collections.abc import Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
@@ -152,9 +151,6 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
     :param max_row_tokens: Longest training row (prompt plus completion) the
         memory estimate sizes for. ``None`` uses ``max_model_len``.
     :type max_row_tokens: int | None, optional
-    :param hf_generate_chunk_size: Number of prompts per HuggingFace generation chunk.
-        Ignored when colocated.
-    :type hf_generate_chunk_size: int | None, optional
     :param lora_config: LoRA configuration.
     :type lora_config: LoraConfig | None, optional
     :param cosine_lr_schedule_config: Warmup-cosine schedule stepped once per
@@ -304,7 +300,6 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         min_output_tokens: int | None = None,
         max_model_len: int = 1024,
         max_row_tokens: int | None = None,
-        hf_generate_chunk_size: int | None = None,
         lora_config: LoraConfig | None = None,
         cosine_lr_schedule_config: CosineLRScheduleConfig | None = None,
         fsdp_config: FSDPConfig | None = None,
@@ -413,9 +408,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             gae_lambda,
         )
         self._setup_objective(importance_sampling_level, turn_ratio_pooling)
-        self._setup_generation(
-            max_output_tokens, min_output_tokens, max_model_len, hf_generate_chunk_size
-        )
+        self._setup_generation(max_output_tokens, min_output_tokens, max_model_len)
         self.max_row_tokens = max_row_tokens
         self.micro_batch_tokens_per_gpu = micro_batch_tokens_per_gpu
         self._validate_micro_batch_tokens()
@@ -450,42 +443,35 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         :type kwargs: Any
         :return: An :class:`ActionResult` of per-prompt completion token IDs and
             masks. When the vLLM sampling-mismatch correction is enabled
-            (training rollouts on the vLLM path), ``sampling_logps`` carries
-            the captured per-row sampling logprobs; otherwise it is ``None``.
+            (training rollouts), ``sampling_logps`` carries the captured
+            per-row sampling logprobs; otherwise it is ``None``.
         :rtype: ActionResult
         """
         prompts = normalize_prompt_batch(obs)
-        # Capture vLLM sampling logprobs only for training rollouts when the
-        # mismatch correction is enabled; ``None`` on the HF path / eval.
+        self._ensure_vllm_for_generation()
         sampling_logps: list[torch.Tensor | None] | None = None
         sampling_supports: list[torch.Tensor | None] | None = None
-        capture_sampling_logps = (
-            training and self.colocated and self.vllm_importance_sampling_correction
-        )
+        capture_sampling_logps = training and self.vllm_importance_sampling_correction
 
         with self.select_adapter("actor"):
             self.actor.eval()
-            if not self.colocated:
-                token_ids_list, completion_masks = self._generate_with_hf(prompts)
-            else:
-                self._prepare_vllm_for_generation()
-                (
-                    token_ids_list,
-                    completion_masks,
-                    sampling_logps,
-                    sampling_supports,
-                ) = self._generate_with_vllm_colocate(
-                    # RolloutPrompt is a TypedDict, i.e. a plain dict at
-                    # runtime; the base helper takes untyped prompt dicts.
-                    prompts,
-                    1,
-                    temperature=self.temperature
-                    if training
-                    else 0.01,  # Almost deterministic for evaluation
-                    capture_sampling_logps=capture_sampling_logps,
-                    capture_sampling_supports=training
-                    and self.records_sampling_supports,
-                )
+            self._prepare_vllm_for_generation()
+            (
+                token_ids_list,
+                completion_masks,
+                sampling_logps,
+                sampling_supports,
+            ) = self._generate_with_vllm_colocate(
+                # RolloutPrompt is a TypedDict, i.e. a plain dict at
+                # runtime; the base helper takes untyped prompt dicts.
+                prompts,
+                1,
+                temperature=self.temperature
+                if training
+                else 0.01,  # Almost deterministic for evaluation
+                capture_sampling_logps=capture_sampling_logps,
+                capture_sampling_supports=training and self.records_sampling_supports,
+            )
 
         return ActionResult(
             token_ids_list, completion_masks, sampling_logps, sampling_supports
@@ -1042,23 +1028,13 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         max_output_tokens: int | None,
         min_output_tokens: int | None,
         max_model_len: int,
-        hf_generate_chunk_size: int | None,
     ) -> None:
-        """Build the HF generation config."""
+        """Build the generation config."""
         self.max_output_tokens = (
             max_output_tokens if max_output_tokens is not None else max_model_len
         )
         self.min_output_tokens = min_output_tokens
         self.max_model_len = max_model_len
-        self.hf_generate_chunk_size = int(
-            1 if hf_generate_chunk_size is None else max(1, hf_generate_chunk_size)
-        )
-        if self.colocated and hf_generate_chunk_size is not None:
-            warnings.warn(
-                "hf_generate_chunk_size is only used for HuggingFace generation "
-                "and is ignored when colocated.",
-                stacklevel=3,
-            )
         self.generation_config = GenerationConfig(
             do_sample=True,
             temperature=self.temperature,
