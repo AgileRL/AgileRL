@@ -4,6 +4,7 @@
 
 import copy
 import json
+import logging
 from functools import cached_property
 from pathlib import Path
 from typing import Any
@@ -13,11 +14,15 @@ from pydantic import ValidationError
 
 from agilerl.arena.memory import lora_formulas
 from agilerl.arena.memory.estimator import estimate_run, estimate_training
+from agilerl.arena.memory.formulas import recommendation_fits
 from agilerl.arena.memory.manifest import (
     check_fp8_moe_backend_for_device,
     device_spec_from_resource_class,
+    gpu_device_spec,
     lookup_gpu,
     marlin_pads_non_gated_experts,
+    nccl_reshard_layout_supported,
+    parse_gram_per_gpu,
     training_settings_from_manifest,
     unsupported_gpu_reason,
     validated_run_manifest,
@@ -32,7 +37,7 @@ from agilerl.arena.memory.manifest import (
     run_config_from_manifest as _run_config_from_manifest,
 )
 from agilerl.arena.memory.resolve.attention import FAMILY_ATTN_IMPLEMENTATIONS
-from agilerl.arena.memory.specs import DTYPE_BYTES, DeviceSpec, GiB, ModelArch
+from agilerl.arena.memory.specs import DTYPE_BYTES, DeviceSpec, GiB, MiB, ModelArch
 from agilerl.arena.models.fsdp import FSDPConfig, parallel_layout_pins
 from agilerl.arena.models.manifest import TrainingManifest
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO, ModelInfo
@@ -1212,14 +1217,95 @@ class TestDeviceFromResourceClass:
         tier = {"name": "exotic", "gpu_type": "TPU v5e"}
         with pytest.raises(ValueError, match="Unknown gpu_type"):
             device_spec_from_resource_class(tier)
-        device = device_spec_from_resource_class(tier, gpu_memory_gib=16)
+        device = device_spec_from_resource_class({**tier, "gram_per_gpu": 16})
         assert device.total_bytes == 16 * 1024**3
 
-    def test_an_explicit_size_overrides_a_known_gpu(self):
-        device = device_spec_from_resource_class(L4_TIER, gpu_memory_gib=16)
+    def test_a_smaller_declared_size_lowers_a_known_gpu(self):
+        device = device_spec_from_resource_class({**L4_TIER, "gram_per_gpu": 16})
 
         assert device.name == "NVIDIA L4"
         assert device.total_bytes == 16 * 1024**3
+
+    @pytest.mark.parametrize("gram_per_gpu", [80, "80 GiB", "80GB", "80Gi"])
+    def test_a_larger_declared_size_keeps_the_catalogue_size(self, gram_per_gpu):
+        tier = {"name": "h100-2x", "gpu_type": "nvidia-h100-80gb", "num_gpus": 2}
+
+        device = device_spec_from_resource_class({**tier, "gram_per_gpu": gram_per_gpu})
+
+        assert device.name == "NVIDIA H100 80GB HBM3"
+        assert device.total_bytes == int(79.11 * GiB)
+
+    def test_declared_size_below_the_catalogue_wins(self):
+        device = gpu_device_spec("nvidia-h100-80gb", 40)
+
+        assert device.total_bytes == 40 * GiB
+
+    def test_unknown_gpu_takes_the_declared_size(self):
+        device = gpu_device_spec("nvidia-rtx-6000-ada", 48)
+
+        assert device.name == "nvidia-rtx-6000-ada"
+        assert device.total_bytes == 48 * GiB
+
+    @pytest.mark.parametrize("gram_per_gpu", ["GiB 80", "N/A", "-8"])
+    def test_declared_size_without_a_number_is_treated_as_unset(
+        self, gram_per_gpu, caplog
+    ):
+        with caplog.at_level(logging.WARNING, logger="agilerl.arena.memory.manifest"):
+            device = gpu_device_spec("nvidia-h100-80gb", gram_per_gpu)
+
+        [message] = caplog.messages
+        assert device.total_bytes == int(79.11 * GiB)
+        assert message.startswith(f"Treating gramPerGpu {gram_per_gpu!r} as unset")
+
+    # Cases from parse_metadata_gram_value in the platform's resource_limits.rs.
+    @pytest.mark.parametrize(
+        ("gram_per_gpu", "gib"),
+        [
+            (80, 80),
+            ("80 GiB", 80),
+            ("16 GiB", 16),
+            ("1 GiB", 1),
+            ("34359738368", 32),
+            (0, None),
+            ("", None),
+            ("  ", None),
+            ("0 GiB", None),
+            (None, None),
+        ],
+    )
+    def test_declared_size_parses_as_the_platform_does(self, gram_per_gpu, gib):
+        assert parse_gram_per_gpu(gram_per_gpu) == gib
+
+    @pytest.mark.parametrize("gram_per_gpu", [0, ""])
+    def test_unset_declared_size_keeps_the_catalogue_size(self, gram_per_gpu):
+        device = gpu_device_spec("nvidia-h100-80gb", gram_per_gpu)
+
+        assert device.total_bytes == int(79.11 * GiB)
+
+    def test_unknown_gpu_with_an_unset_declared_size_is_refused(self):
+        with pytest.raises(ValueError, match="Unknown gpu_type"):
+            gpu_device_spec("nvidia-rtx-6000-ada", 0)
+
+    def test_declared_size_in_bytes_sizes_an_unknown_gpu(self):
+        device = gpu_device_spec("nvidia-rtx-6000-ada", "34359738368")
+
+        assert device.total_bytes == 32 * GiB
+
+    @pytest.mark.parametrize("gram_per_gpu", [True, -8])
+    def test_bool_or_negative_declared_size_is_treated_as_unset(
+        self, gram_per_gpu, caplog
+    ):
+        with caplog.at_level(logging.WARNING, logger="agilerl.arena.memory.manifest"):
+            device = gpu_device_spec("nvidia-h100-80gb", gram_per_gpu)
+
+        [message] = caplog.messages
+        assert device.total_bytes == int(79.11 * GiB)
+        assert message.startswith(f"Treating gramPerGpu {gram_per_gpu!r} as unset")
+
+    def test_h100_declared_at_80_gib_is_fit_checked_at_its_catalogue_size(self):
+        device = gpu_device_spec("nvidia-h100-80gb", 80)
+
+        assert not recommendation_fits(int(69.13 * GiB), device.usable_bytes)
 
     def test_cpu_tier_is_refused(self):
         with pytest.raises(ValueError, match="no GPU"):
@@ -1292,6 +1378,44 @@ class TestLlmSpec:
             )
 
 
+def _nccl_reshard_layout_supported(algorithm: dict) -> bool:
+    doc = TrainingManifest.model_validate(
+        manifest(algorithm=algorithm, **ASYNC_ROLLOUT)
+    )
+    return nccl_reshard_layout_supported(validated_run_manifest(doc))
+
+
+class TestNcclReshardLayoutSupported:
+    def test_data_parallel_bf16_layout_is_supported(self):
+        assert _nccl_reshard_layout_supported({"fsdp": {}}) is True
+
+    def test_fp16_trainer_weights_are_supported(self):
+        assert _nccl_reshard_layout_supported({"fsdp": {"param_dtype": "float16"}})
+
+    @pytest.mark.parametrize("degree", ["tp", "cp"])
+    def test_trainer_model_parallel_is_not_supported(self, degree):
+        assert _nccl_reshard_layout_supported({"fsdp": {degree: 2}}) is False
+
+    def test_generation_pipeline_parallel_is_not_supported(self):
+        supported = _nccl_reshard_layout_supported(
+            {"vllm_engine_args": {"pipeline_parallel_size": 2}}
+        )
+
+        assert supported is False
+
+    def test_float32_engine_weights_are_not_supported(self):
+        supported = _nccl_reshard_layout_supported(
+            {"vllm_config": {"dtype": "float32"}}
+        )
+
+        assert supported is False
+
+    def test_algorithm_without_rollout_engines_is_not_supported(self):
+        doc = TrainingManifest.model_validate(DQN)
+
+        assert nccl_reshard_layout_supported(doc) is False
+
+
 class TestValidatedRunManifest:
     def test_unset_rollout_mode_runs_async_on_auto_engines(self):
         doc = TrainingManifest.model_validate(manifest(replay_buffer={"kind": "llm"}))
@@ -1318,44 +1442,6 @@ class TestValidatedRunManifest:
 
         with pytest.raises(ValidationError, match=r"fsdp\.cpu_offload needs colocated"):
             validated_run_manifest(doc)
-
-    def test_nccl_reshard_on_a_quantized_engine_is_refused(self):
-        # Arrange
-        doc = TrainingManifest.model_validate(
-            manifest(
-                algorithm={"vllm_config": {"quantization": "fp8"}},
-                training={
-                    **ASYNC_ROLLOUT["training"],
-                    "weight_sync": {"transport": "nccl_reshard"},
-                },
-                replay_buffer=ASYNC_ROLLOUT["replay_buffer"],
-            )
-        )
-
-        # Act / Assert
-        with pytest.raises(
-            ValueError,
-            match=r"cannot serve: vllm_config\.quantization is 'fp8'\. Use transport: nixl",
-        ):
-            validated_run_manifest(doc)
-
-    def test_nccl_reshard_on_an_unquantized_engine_is_kept(self):
-        # Arrange
-        doc = TrainingManifest.model_validate(
-            manifest(
-                training={
-                    **ASYNC_ROLLOUT["training"],
-                    "weight_sync": {"transport": "nccl_reshard"},
-                },
-                replay_buffer=ASYNC_ROLLOUT["replay_buffer"],
-            )
-        )
-
-        # Act
-        run = validated_run_manifest(doc)
-
-        # Assert
-        assert run.training.weight_sync.transport == "nccl_reshard"
 
     @pytest.mark.parametrize(
         ("fsdp", "pinned"),
@@ -1416,46 +1502,36 @@ class TestRunConfig:
     def test_nccl_reshard_prices_its_refit_buffers_over_the_nixl_buffers(self):
         # Arrange
         device = device_spec_from_resource_class(A100_TIER)
-        nixl_doc = manifest(**ASYNC_ROLLOUT)
-        reshard_doc = manifest(
-            training={
-                **ASYNC_ROLLOUT["training"],
-                "weight_sync": {"transport": "nccl_reshard"},
-            },
-            replay_buffer=ASYNC_ROLLOUT["replay_buffer"],
-        )
+        doc = manifest(**ASYNC_ROLLOUT)
 
         # Act
-        nixl = run_config_from_manifest(nixl_doc, device, TINY_CONFIG)
-        reshard = run_config_from_manifest(reshard_doc, device, TINY_CONFIG)
+        nixl = run_config_from_manifest(doc, device, TINY_CONFIG)
+        reshard = run_config_from_manifest(doc, device, TINY_CONFIG, nccl_reshard=True)
 
         # Assert: 2 layers of 32x32 q/k/v/o and 32x64 gate/up/down, bf16, on
         # one trainer GPU. NIXL double-buffers all 40 KiB of merged weights on
         # the trainer and holds them once on the engine. nccl_reshard has no
         # misc weights: the trainer stages the MLP block (3 x 2048) beside one
         # fp32 copy of its largest weight, and the engine holds no bucket.
+        # Both sides hold the refit's NCCL groups.
         merged = 2 * 2 * (4 * 32 * 32 + 3 * 32 * 64)
         assert reshard.training.merged_lora_sync is True
         assert reshard.generation.merged_lora_sync is True
         assert training_bytes(nixl, "lora_send_buffer") == 2 * merged
         assert generation_bytes(nixl, "lora_receive_buffer") == merged
-        assert training_bytes(reshard, "lora_send_buffer") == 2 * 3 * 2048 + 4 * 2048
-        assert generation_bytes(reshard, "lora_receive_buffer") == 0
+        assert training_bytes(reshard, "lora_send_buffer") == (
+            2 * 3 * 2048 + 4 * 2048 + 2 * device.nccl_group_bytes
+        )
+        assert generation_bytes(reshard, "lora_receive_buffer") == 4300 * MiB
 
     def test_nccl_reshard_splits_for_the_sized_engine_width(self):
         # Arrange
-        doc = manifest(
-            training={
-                **ASYNC_ROLLOUT["training"],
-                "weight_sync": {"transport": "nccl_reshard"},
-            },
-            replay_buffer=ASYNC_ROLLOUT["replay_buffer"],
-        )
+        doc = manifest(**ASYNC_ROLLOUT)
         device = device_spec_from_resource_class(A100_TIER)
 
         # Act
         config = run_config_from_manifest(
-            doc, device, TINY_CONFIG, tensor_parallel_size=2
+            doc, device, TINY_CONFIG, tensor_parallel_size=2, nccl_reshard=True
         )
 
         # Assert: one trainer GPU shards nothing; one KV head cannot split
@@ -1463,23 +1539,17 @@ class TestRunConfig:
         # misc bucket.
         assert config.training.nccl_reshard_engine_tensor_parallel == 2
         assert config.generation.nccl_reshard_trainer_shards == 1
-        assert generation_bytes(config, "lora_receive_buffer") == 2 * 3 * 2 * 32 * 32
+        assert generation_bytes(config, "lora_receive_buffer") == (
+            2 * 3 * 2 * 32 * 32 + 4300 * MiB
+        )
 
     def test_nccl_reshard_without_an_engine_config_reshards_into_one_gpu(self):
         # Arrange
-        doc = TrainingManifest.model_validate(
-            manifest(
-                training={
-                    **ASYNC_ROLLOUT["training"],
-                    "weight_sync": {"transport": "nccl_reshard"},
-                },
-                replay_buffer=ASYNC_ROLLOUT["replay_buffer"],
-            )
-        )
+        doc = TrainingManifest.model_validate(manifest(**ASYNC_ROLLOUT))
         doc.algorithm.vllm_config = None
 
         # Act
-        settings = training_settings_from_manifest(doc)
+        settings = training_settings_from_manifest(doc, nccl_reshard=True)
 
         # Assert
         assert settings.nccl_reshard_engine_tensor_parallel == 1
@@ -1491,13 +1561,14 @@ class TestRunConfig:
             training={
                 **ASYNC_ROLLOUT["training"],
                 "training_gpus_per_agent": 2,
-                "weight_sync": {"transport": "nccl_reshard"},
             },
             replay_buffer=ASYNC_ROLLOUT["replay_buffer"],
         )
 
         # Act
-        settings = generation_settings_from_manifest(doc, tensor_parallel_size=2)
+        settings = _generation_settings_from_manifest(
+            doc, tensor_parallel_size=2, nccl_reshard=True
+        )
 
         # Assert
         assert settings.nccl_reshard_trainer_shards == 2

@@ -40,7 +40,11 @@ from agilerl.arena.memory.manifest import (
     run_config_from_manifest,
     training_plan_model,
 )
-from agilerl.arena.memory.resolve.run import SearchCache, kept_merged_lora_sync
+from agilerl.arena.memory.resolve.run import (
+    SearchCache,
+    WeightSyncMode,
+    kept_weight_sync_mode,
+)
 from agilerl.arena.memory.resolve.sequences import (
     ROLLOUT_ENGINE_GPU_MEMORY_UTILIZATION,
 )
@@ -368,17 +372,17 @@ def _planned_layout(
     model: ModelSpec,
     device: DeviceSpec,
     num_gpus: int | None,
-) -> tuple[TrainingManifest, bool]:
-    """The manifest as the run lays it out on ``num_gpus`` GPUs of one node, and whether weight sync pushes merged weights, as :func:`check_tiers` picks them.
+) -> tuple[TrainingManifest, WeightSyncMode]:
+    """The manifest as the run lays it out on ``num_gpus`` GPUs of one node, and its weight-sync mode, as :func:`check_tiers` picks them.
 
     A colocated member trains on every GPU it owns (:func:`colocated_manifest`).
     A searched split that fits writes its counts, engine width and layout
-    (:func:`split_manifest`); otherwise the manifest's own counts are kept.
-    Without ``num_gpus`` no link is known: merged sync where the engines can
-    serve it.
+    (:func:`split_manifest`); otherwise the manifest's own counts are kept
+    (:func:`kept_weight_sync_mode`). Without ``num_gpus`` no link is known:
+    merged sync over NIXL where the engines can serve it.
     """
     if num_gpus is None:
-        return manifest, True
+        return manifest, WeightSyncMode(True, "nixl")
     manifest = colocated_manifest(manifest, num_gpus)
     sync_link = tier_sync_link(num_gpus, None)
     if searches_gpu_split(manifest):
@@ -390,8 +394,10 @@ def _planned_layout(
             # No split fits: check_tiers sizes the manifest's own counts.
             pass
         else:
-            return laid_out, plan.merged_lora_sync
-    merged = kept_merged_lora_sync(
+            return laid_out, WeightSyncMode(
+                plan.merged_lora_sync, plan.weight_sync_transport
+            )
+    mode = kept_weight_sync_mode(
         manifest,
         training_plan_model(manifest, model),
         device,
@@ -399,7 +405,7 @@ def _planned_layout(
         sync_link,
         SearchCache(),
     )
-    return manifest, merged
+    return manifest, mode
 
 
 def _allocation_layout(
@@ -455,9 +461,9 @@ def _sized_run_config(
     :raises ValueError: The run picks its engine layout from a GPU count and
         ``num_gpus`` is unset, or the node has too few GPUs.
     """
-    laid_out, merged = _planned_layout(manifest, model, device, num_gpus)
+    laid_out, mode = _planned_layout(manifest, model, device, num_gpus)
     width, engines = _allocation_layout(
-        laid_out, num_gpus, gen_device or device, not merged
+        laid_out, num_gpus, gen_device or device, not mode.merged
     )
     return run_config_from_manifest(
         laid_out,
@@ -467,7 +473,8 @@ def _sized_run_config(
         gen_device=gen_device,
         tensor_parallel_size=width,
         rollout_engines=engines,
-        adapter_sync=not merged,
+        adapter_sync=not mode.merged,
+        nccl_reshard=mode.transport == "nccl_reshard",
     )
 
 
@@ -657,6 +664,7 @@ def main(
         width: int | None,
         engines: int | None,
         adapter_sync: bool,
+        nccl_reshard: bool,
     ) -> RunConfig:
         return run_config_from_manifest(
             laid_out,
@@ -667,6 +675,7 @@ def main(
             tensor_parallel_size=width,
             rollout_engines=engines,
             adapter_sync=adapter_sync,
+            nccl_reshard=nccl_reshard,
         )
 
     chosen: TierCheck | None = None

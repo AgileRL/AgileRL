@@ -18,8 +18,9 @@ from agilerl.arena.memory.manifest import (
 )
 from agilerl.arena.memory.resolve.batch import catalog_model
 from agilerl.arena.memory.resolve.decode_costs import (
-    MERGED_DECODE_SPEEDUP,
     MERGED_MOE_PREFILL_SPEEDUP,
+    SM80_MERGED_DENSE_SPEEDUP,
+    UNMEASURED_MERGED_DENSE_SPEEDUP,
 )
 from agilerl.arena.memory.resolve.split import (
     IDLE_GPU_TIE_SHARE,
@@ -33,6 +34,7 @@ from agilerl.arena.memory.resolve.split import (
     TIED_DROP_GENERATION_FACTOR,
     GpuSplit,
     SplitWorkload,
+    TrainerCost,
     active_matmul_params,
     choose_engine_width,
     choose_gpu_split,
@@ -192,7 +194,7 @@ def _learn_bound_split(
         workload,
         8,
         1,
-        lambda count: 1e9 if count == trainers else None,
+        lambda count: TrainerCost(1e9, False) if count == trainers else None,
     )
     assert split is not None
     assert split.engines == 8 - trainers
@@ -222,9 +224,11 @@ class TestChooseGpuSplit:
         over_tcp = unpriced.model_copy(update={"sync_link": "tcp"})
 
         # Act
-        by_step = choose_gpu_split(model, _device(), unpriced, 8, 1, lambda _: 1.0)
+        by_step = choose_gpu_split(
+            model, _device(), unpriced, 8, 1, lambda _: TrainerCost(1.0, False)
+        )
         by_synced_step = choose_gpu_split(
-            model, _device(), over_tcp, 8, 1, lambda _: 1.0
+            model, _device(), over_tcp, 8, 1, lambda _: TrainerCost(1.0, False)
         )
 
         # Assert: four engines generate faster but take twice the sync.
@@ -234,7 +238,7 @@ class TestChooseGpuSplit:
         assert (by_synced_step.trainers, by_synced_step.engines) == (6, 2)
         assert by_synced_step.step_seconds > by_step.step_seconds
         four_engine_sync = merged_sync_seconds(
-            model, unpriced.lora_target_scope, 0, 4, 1, True, "tcp"
+            model, unpriced.lora_target_scope, 0, 4, 1, False, _device(), "tcp"
         )
         assert (
             by_synced_step.synced_step_seconds < by_step.step_seconds + four_engine_sync
@@ -399,7 +403,9 @@ class TestChooseGpuSplit:
         split = _learn_bound_split(workload, 4)
 
         # Assert
-        rate = MERGED_DECODE_SPEEDUP * 0.4 * 312e12 / (2 * active_matmul_params(arch))
+        rate = (
+            SM80_MERGED_DENSE_SPEEDUP * 0.4 * 312e12 / (2 * active_matmul_params(arch))
+        )
         assert split.generation_seconds == pytest.approx(128 * 8192 / rate, rel=5e-3)
 
     def test_merged_engine_decodes_at_the_merged_speedup(self) -> None:
@@ -414,7 +420,36 @@ class TestChooseGpuSplit:
 
         # Assert
         assert merged_split.generation_seconds == pytest.approx(
-            lora_split.generation_seconds / MERGED_DECODE_SPEEDUP, rel=1e-12
+            lora_split.generation_seconds / SM80_MERGED_DENSE_SPEEDUP, rel=1e-12
+        )
+
+    def test_merged_moe_engine_decodes_at_the_moe_speedup(self) -> None:
+        # Arrange: the decode-only cycle above on single-GPU MoE engines.
+        model = _catalog_spec("ibm-granite/granite-3.1-3b-a800m-instruct")
+        lora = _workload(_countdown_manifest(64), merged_lora_sync=False)
+        lora = lora.model_copy(update={"decode_tokens": lora.row_tokens})
+        merged = lora.model_copy(update={"merged_lora_sync": True})
+
+        def split(workload: SplitWorkload) -> GpuSplit:
+            found = choose_gpu_split(
+                model,
+                _device(),
+                workload,
+                8,
+                1,
+                lambda count: TrainerCost(1e9, False) if count == 4 else None,
+            )
+            assert found is not None
+            return found
+
+        # Act
+        lora_split = split(lora)
+        merged_split = split(merged)
+
+        # Assert
+        assert merged_split.generation_seconds == pytest.approx(
+            lora_split.generation_seconds / UNMEASURED_MERGED_DENSE_SPEEDUP,
+            rel=1e-12,
         )
 
     def test_engine_without_room_for_one_sequence_never_finishes(self) -> None:
@@ -434,8 +469,12 @@ class TestChooseGpuSplit:
         even = any_count.model_copy(update={"trainer_multiple": 2})
 
         # Act
-        any_split = choose_gpu_split(model, _device(), any_count, 8, 1, lambda _: 1.0)
-        even_split = choose_gpu_split(model, _device(), even, 8, 1, lambda _: 1.0)
+        any_split = choose_gpu_split(
+            model, _device(), any_count, 8, 1, lambda _: TrainerCost(1.0, False)
+        )
+        even_split = choose_gpu_split(
+            model, _device(), even, 8, 1, lambda _: TrainerCost(1.0, False)
+        )
 
         # Assert
         assert any_split is not None
@@ -452,7 +491,9 @@ class TestChooseGpuSplit:
         workload = _workload(raw)
 
         # Act
-        split = choose_gpu_split(model, _device(), workload, 9, 1, lambda _: 1.0)
+        split = choose_gpu_split(
+            model, _device(), workload, 9, 1, lambda _: TrainerCost(1.0, False)
+        )
 
         # Assert
         assert workload.trainer_multiple == 4
@@ -491,7 +532,7 @@ class TestChooseGpuSplit:
             workload,
             8,
             2,
-            lambda count: 1e9 if count == 4 else None,
+            lambda count: TrainerCost(1e9, False) if count == 4 else None,
         )
 
         # Assert
@@ -553,9 +594,9 @@ class TestChooseGpuSplit:
         # Assert
         assert held_split.rollout_batch_size == 24
         assert oversubscribed_split.rollout_batch_size == 64
-        assert held_split.generation_seconds == pytest.approx(481.36, rel=1e-3)
+        assert held_split.generation_seconds == pytest.approx(434.45, rel=1e-3)
         assert oversubscribed_split.generation_seconds == pytest.approx(
-            451.79, rel=1e-3
+            409.36, rel=1e-3
         )
 
     @pytest.mark.parametrize(
@@ -580,12 +621,12 @@ class TestChooseGpuSplit:
         device = _device(device_name)
         workload = split_workload_from_manifest(manifest)
 
-        def learn_cost_ratio(trainers: int) -> float | None:
-            return None if trainers == 7 else 1 + trainers / 10
+        def trainer_cost(trainers: int) -> TrainerCost | None:
+            return None if trainers == 7 else TrainerCost(1 + trainers / 10, False)
 
         # Act
         chosen = choose_gpu_split(
-            model, device, workload, 8, engine_width, learn_cost_ratio
+            model, device, workload, 8, engine_width, trainer_cost
         )
 
         # Assert
@@ -603,7 +644,7 @@ class TestChooseGpuSplit:
             chosen.trainers,
             chosen.engines,
             engine_width,
-            learn_cost_ratio,
+            trainer_cost,
         )
 
     @pytest.mark.parametrize(
@@ -625,8 +666,8 @@ class TestChooseGpuSplit:
         device = _device(device_name)
         workload = split_workload_from_manifest(manifest)
 
-        def learn_cost_ratio(trainers: int) -> float | None:
-            return None if trainers == 7 else 1 + trainers / 10
+        def trainer_cost(trainers: int) -> TrainerCost | None:
+            return None if trainers == 7 else TrainerCost(1 + trainers / 10, False)
 
         priced = [
             split
@@ -640,7 +681,7 @@ class TestChooseGpuSplit:
                     trainers,
                     engines,
                     engine_width,
-                    learn_cost_ratio,
+                    trainer_cost,
                 )
             )
             is not None
@@ -649,7 +690,7 @@ class TestChooseGpuSplit:
 
         # Act
         chosen = choose_gpu_split(
-            model, device, workload, 8, engine_width, learn_cost_ratio
+            model, device, workload, 8, engine_width, trainer_cost
         )
 
         # Assert
@@ -662,7 +703,9 @@ class TestChooseGpuSplit:
         workload = _workload(_countdown_manifest())
 
         # Act
-        split = choose_gpu_split(model, device, workload, 2, 2, lambda _: 1.0)
+        split = choose_gpu_split(
+            model, device, workload, 2, 2, lambda _: TrainerCost(1.0, False)
+        )
 
         # Assert
         assert split is None
@@ -677,7 +720,33 @@ class TestChooseGpuSplit:
         with pytest.raises(
             ValueError, match="Exotic GPU has no peak bf16 or memory bandwidth"
         ):
-            choose_gpu_split(model, device, workload, 3, 2, lambda _: 1.0)
+            choose_gpu_split(
+                model, device, workload, 3, 2, lambda _: TrainerCost(1.0, False)
+            )
+
+
+class TestPriceGpuSplit:
+    def test_nccl_reshard_on_a_pcie_gpu_raises(self) -> None:
+        # Arrange
+        model = catalog_model(_manifest(_countdown_manifest()).algorithm)
+        workload = _workload(
+            _countdown_manifest(),
+            merged_lora_sync=True,
+            sync_link="cuda_ipc",
+            sync_transport="nccl_reshard",
+        )
+
+        # Act / Assert
+        with pytest.raises(ValueError, match="L4 has no nccl_reshard rates"):
+            price_gpu_split(
+                model,
+                _device("L4"),
+                workload,
+                1,
+                1,
+                1,
+                lambda _: TrainerCost(1.0, False),
+            )
 
 
 def _awm_workload(engine_width: int) -> SplitWorkload:
@@ -696,7 +765,7 @@ def _awm_split(workload: SplitWorkload, engine_width: int) -> GpuSplit:
         workload,
         8,
         engine_width,
-        lambda count: 1e9 if count == 4 else None,
+        lambda count: TrainerCost(1e9, False) if count == 4 else None,
     )
     assert split is not None
     return split

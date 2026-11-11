@@ -8,6 +8,7 @@ checkpoint ``config.json``.
 
 from __future__ import annotations
 
+import logging
 import re
 import warnings
 from functools import lru_cache
@@ -96,6 +97,8 @@ from agilerl.arena.models.manifest import TrainingManifest, strips_multimodal_to
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO, ModelInfo
 from agilerl.arena.models.networks import LoraConfigDict, VLLMConfig
 
+logger = logging.getLogger(__name__)
+
 # The engine variant drops the multimodal towers; a model without towers sizes it as base.
 MANIFEST_WEIGHT_VARIANTS = (
     WeightVariant(),
@@ -124,12 +127,15 @@ class GpuInfo(BaseModel):
     memory_gb_per_second: float | None = None
     all_reduce_gb_per_second: float | None = None
     all_reduce_latency_us: float | None = None
+    # GPUs of one node talk over NVLink, not PCIe.
+    nvlink: bool = False
 
     def device_spec(self) -> DeviceSpec:
         return DeviceSpec(
             total_bytes=int(self.total_gib * GiB),
             name=self.name,
             compute_capability=(self.cc_major, self.cc_minor),
+            nvlink=self.nvlink,
             peak_bf16_flops=(
                 None if self.bf16_tflops is None else self.bf16_tflops * 1e12
             ),
@@ -170,6 +176,7 @@ GPU_CATALOGUE: tuple[tuple[str, GpuInfo], ...] = (
             memory_gb_per_second=8000,
             all_reduce_gb_per_second=700,
             all_reduce_latency_us=10,
+            nvlink=True,
         ),
     ),
     (
@@ -183,6 +190,7 @@ GPU_CATALOGUE: tuple[tuple[str, GpuInfo], ...] = (
             memory_gb_per_second=4800,
             all_reduce_gb_per_second=350,
             all_reduce_latency_us=10,
+            nvlink=True,
         ),
     ),
     (
@@ -196,6 +204,7 @@ GPU_CATALOGUE: tuple[tuple[str, GpuInfo], ...] = (
             memory_gb_per_second=3350,
             all_reduce_gb_per_second=350,
             all_reduce_latency_us=10,
+            nvlink=True,
         ),
     ),
     (
@@ -209,6 +218,7 @@ GPU_CATALOGUE: tuple[tuple[str, GpuInfo], ...] = (
             memory_gb_per_second=2039,
             all_reduce_gb_per_second=230,
             all_reduce_latency_us=10,
+            nvlink=True,
         ),
     ),
     (
@@ -222,6 +232,7 @@ GPU_CATALOGUE: tuple[tuple[str, GpuInfo], ...] = (
             memory_gb_per_second=1555,
             all_reduce_gb_per_second=230,
             all_reduce_latency_us=10,
+            nvlink=True,
         ),
     ),
     (
@@ -300,25 +311,96 @@ def lookup_gpu(gpu_type: str) -> GpuInfo | None:
     return None
 
 
-def device_spec_from_resource_class(
-    resource_class: dict[str, Any],
-    *,
-    gpu_memory_gib: float | None = None,
+def parse_gram_per_gpu(gram_per_gpu: object) -> float | None:
+    """GiB per GPU from a ``gramPerGpu`` value, read as the platform reads it.
+
+    A number is GiB. A string gives its leading number in GiB, except that a
+    string with no letters above 1e6 is bytes (``"34359738368"`` is 32 GiB).
+    Zero, ``""`` and None are unset. A bool, a negative number, or a string
+    that does not start with a number is unset too, with a warning. One
+    difference from the platform's Rust reader: ``"80GiB"`` with no space
+    reads as 80 here, as in the frontend, and as unset in Rust.
+
+    :param gram_per_gpu: The resource spec's ``gramPerGpu``, e.g. ``80`` or
+        ``"80 GiB"``.
+    :return: The GiB per GPU, or None when unset.
+    """
+    if gram_per_gpu is None:
+        return None
+    gib = None
+    if isinstance(gram_per_gpu, str):
+        text = gram_per_gpu.strip()
+        if not text:
+            return None
+        match = re.match(r"\d+\.?\d*|\.\d+", text)
+        if match is not None:
+            gib = float(match.group())
+            if gib > 1e6 and not re.search(r"[A-Za-z]", text):
+                gib /= GiB
+    elif isinstance(gram_per_gpu, int | float) and not isinstance(gram_per_gpu, bool):
+        gib = float(gram_per_gpu)
+    if gib is None or gib < 0:
+        logger.warning(
+            "Treating gramPerGpu %r as unset: it is not a non-negative GiB number",
+            gram_per_gpu,
+        )
+        return None
+    return gib or None
+
+
+def gpu_device_spec(
+    gpu_type: str, gram_per_gpu: float | str | None = None
 ) -> DeviceSpec:
+    """The device one GPU of ``gpu_type`` provides.
+
+    :param gpu_type: Free-form GPU name, e.g. ``"nvidia-h100-80gb"``.
+    :param gram_per_gpu: Declared size per GPU, read by
+        :func:`parse_gram_per_gpu`. It can lower a catalogued GPU's size but
+        never raise it, and it sizes a GPU the catalogue does not know.
+    :return: The device.
+    :raises ValueError: An unknown ``gpu_type`` with an unset ``gram_per_gpu``.
+    """
+    gram_gib = parse_gram_per_gpu(gram_per_gpu)
+    declared_bytes = None if gram_gib is None else int(gram_gib * GiB)
+    info = lookup_gpu(gpu_type)
+    if info is None:
+        if declared_bytes is None:
+            known = ", ".join(entry.name for _, entry in GPU_CATALOGUE)
+            msg = (
+                f"Unknown gpu_type {gpu_type!r}; give its gramPerGpu. "
+                f"Known accelerators: {known}."
+            )
+            raise ValueError(msg)
+        return DeviceSpec(total_bytes=declared_bytes, name=gpu_type or None)
+    spec = info.device_spec()
+    if declared_bytes is None or declared_bytes >= spec.total_bytes:
+        return spec
+    return spec.model_copy(update={"total_bytes": declared_bytes})
+
+
+def device_spec_from_resource_class(resource_class: dict[str, Any]) -> DeviceSpec:
     """The device one GPU of a resource-class dict provides.
 
     The estimate is per GPU; data-parallel sharding comes from
-    ``training_gpus_per_agent``. A tier's ``ram_gb`` (GiB per node) and
-    ``num_gpus`` set each GPU's host RAM share.
+    ``training_gpus_per_agent``. A tier's ``gpu_type`` and optional
+    ``gram_per_gpu`` size the GPU through :func:`gpu_device_spec`. Its
+    ``ram_gb`` (GiB per node) and ``num_gpus`` set each GPU's host RAM share.
 
     :param resource_class: The tier dict, e.g.
-        ``{"name": "a100-1x", "gpu_type": "NVIDIA A100", "num_gpus": 1, ...}``.
-    :param gpu_memory_gib: Per-GPU memory override for a ``gpu_type`` the
-        catalogue does not know.
+        ``{"name": "h100-1x", "gpu_type": "NVIDIA H100", "gram_per_gpu": 80,
+        "num_gpus": 1, ...}``.
     :raises ValueError: A CPU-only tier, or an unknown ``gpu_type`` with no
-        ``gpu_memory_gib`` override.
+        ``gram_per_gpu``.
     """
-    spec = _gpu_device_spec(resource_class, gpu_memory_gib)
+    gpu_type = str(resource_class.get("gpu_type") or "")
+    gram_per_gpu = resource_class.get("gram_per_gpu")
+    if not gpu_type and gram_per_gpu is None:
+        msg = (
+            f"Resource class {resource_class.get('name')!r} provides no GPU; "
+            "LLM memory estimation needs one."
+        )
+        raise ValueError(msg)
+    spec = gpu_device_spec(gpu_type, gram_per_gpu)
     ram_gib = resource_class.get("ram_gb")
     if ram_gib is None:
         return spec
@@ -329,34 +411,6 @@ def device_spec_from_resource_class(
             )
         }
     )
-
-
-def _gpu_device_spec(
-    resource_class: dict[str, Any], gpu_memory_gib: float | None
-) -> DeviceSpec:
-    """The GPU of a resource-class dict, before its host RAM share."""
-    gpu_type = str(resource_class.get("gpu_type") or "")
-    if not gpu_type and gpu_memory_gib is None:
-        msg = (
-            f"Resource class {resource_class.get('name')!r} provides no GPU; "
-            "LLM memory estimation needs one."
-        )
-        raise ValueError(msg)
-
-    info = lookup_gpu(gpu_type) if gpu_type else None
-    if info is None:
-        if gpu_memory_gib is None:
-            known = ", ".join(entry.name for _, entry in GPU_CATALOGUE)
-            msg = (
-                f"Unknown gpu_type {gpu_type!r}; pass gpu_memory_gib explicitly. "
-                f"Known accelerators: {known}."
-            )
-            raise ValueError(msg)
-        return DeviceSpec(total_bytes=int(gpu_memory_gib * GiB), name=gpu_type or None)
-    spec = info.device_spec()
-    if gpu_memory_gib is not None:
-        spec = spec.model_copy(update={"total_bytes": int(gpu_memory_gib * GiB)})
-    return spec
 
 
 LLM_TRAINING_MIN_CC = (8, 0)
@@ -618,30 +672,33 @@ def explicit_colocated_rollout(manifest: TrainingManifest) -> bool:
     )
 
 
-def syncs_over_nccl_reshard(manifest: TrainingManifest) -> bool:
-    """Whether async weight sync runs over ``weight_sync.transport: nccl_reshard``."""
-    return (
-        async_rollout(manifest)
-        and manifest.training.weight_sync.transport == "nccl_reshard"
-    )
+NCCL_RESHARD_DTYPES = frozenset({"bf16", "bfloat16", "fp16", "float16", "half"})
+"""Weight dtypes an ``nccl_reshard`` refit moves."""
 
 
-def nccl_reshard_blocker(manifest: TrainingManifest) -> str | None:
-    """Why the run cannot sync weights over ``nccl_reshard``, which refits merged LoRA weights only.
+def nccl_reshard_layout_supported(manifest: TrainingManifest) -> bool:
+    """Whether the run's trainer layout and engines take an ``nccl_reshard`` refit.
 
-    :param manifest: Training manifest.
-    :return: The reason, or ``None`` when the run takes another transport or
-        :func:`spec_merged_lora_sync_blockers` finds none.
+    The limits are agilerl_ray's ``check_nccl_reshard_support``: trainer
+    tensor, expert and context parallel 1, no packed-expert LoRA
+    (``lora_config.target_parameters``), generation pipeline parallel 1, and
+    bf16 or fp16 weights.
+
+    :param manifest: Validated run manifest, at the layout being priced.
+    :return: ``True`` when every limit holds.
     """
-    if not syncs_over_nccl_reshard(manifest):
-        return None
-    blockers = spec_merged_lora_sync_blockers(manifest.algorithm)
-    if not blockers:
-        return None
+    spec = manifest.algorithm
+    if not isinstance(spec, RolloutLLMSpec):
+        return False
+    fsdp = spec.fsdp
+    dtype = "bfloat16" if fsdp is None else fsdp.param_dtype
+    if spec.vllm_config is not None and spec.vllm_config.dtype is not None:
+        dtype = spec.vllm_config.dtype
     return (
-        "weight_sync.transport: nccl_reshard needs merged LoRA sync, which "
-        f"these rollout engines cannot serve: {'; '.join(blockers)}. Use "
-        "transport: nixl."
+        (fsdp is None or fsdp.tp == fsdp.ep == fsdp.cp == 1)
+        and not _lora_config(spec).target_parameters
+        and int(spec.vllm_engine_args.get("pipeline_parallel_size") or 1) == 1
+        and dtype.lower().removeprefix("torch.") in NCCL_RESHARD_DTYPES
     )
 
 
@@ -657,13 +714,8 @@ def validated_run_manifest(manifest: TrainingManifest) -> TrainingManifest:
 
     :param manifest: Training manifest, validated as written.
     :return: ``manifest`` itself when Ray reads it as written, else the run Ray starts.
-    :raises ValueError: When the run asks for ``nccl_reshard`` and its engines
-        cannot serve merged weights (:func:`nccl_reshard_blocker`).
     :raises pydantic.ValidationError: When the run cannot start as Ray runs it.
     """
-    blocker = nccl_reshard_blocker(manifest)
-    if blocker is not None:
-        raise ValueError(blocker)
     run_async = async_rollout(manifest)
     if not run_async and "rollout_mode" not in manifest.training.model_fields_set:
         return manifest
@@ -945,6 +997,7 @@ def training_settings_from_manifest(
     manifest: TrainingManifest | str | Path | dict[str, Any],
     micro_batch_size: int | None = None,
     adapter_sync: bool = False,
+    nccl_reshard: bool = False,
     engine_tensor_parallel: int | None = None,
 ) -> TrainingSettings:
     """Trainer-side settings, read as the trainer reads the manifest.
@@ -958,6 +1011,7 @@ def training_settings_from_manifest(
         field without a device.
     :param adapter_sync: Async weight sync pushes the adapter even where the
         engines could serve merged weights.
+    :param nccl_reshard: Async weight sync refits merged weights over ``nccl_reshard``.
     :param engine_tensor_parallel: Engine width a ``nccl_reshard`` refit
         reshards into. ``None`` reads ``vllm_config.tensor_parallel_size``;
         an unset width is 1.
@@ -998,7 +1052,7 @@ def training_settings_from_manifest(
         adapter_sync=adapter_sync,
         nccl_reshard_engine_tensor_parallel=(
             (engine_tensor_parallel or _manifest_engine_width(spec) or 1)
-            if syncs_over_nccl_reshard(manifest)
+            if nccl_reshard
             else None
         ),
     )
@@ -1009,6 +1063,7 @@ def training_memory_from_manifest(
     model: ModelSpec,
     device: DeviceSpec,
     adapter_sync: bool = False,
+    nccl_reshard: bool = False,
 ) -> TrainingMemoryPlan:
     """The training-memory plan one trainer rank of the manifest runs with.
 
@@ -1022,6 +1077,7 @@ def training_memory_from_manifest(
     :param device: Training GPU; its ``gpus_per_node`` bounds the shard group.
     :param adapter_sync: Async weight sync pushes the adapter even where the
         engines could serve merged weights.
+    :param nccl_reshard: Async weight sync refits merged weights over ``nccl_reshard``.
     :return: The plan :func:`resolve_training_memory` picks at that layout.
     :raises TrainingMemoryUnfitError: When nothing fits one GPU.
     :raises TrainerSplitError: When no layout splits across the trainer ranks.
@@ -1037,7 +1093,11 @@ def training_memory_from_manifest(
     return first_fitting_plan(
         layouts,
         lambda layout: _layout_plan(
-            manifest_at_layout(manifest, layout), model, device, adapter_sync
+            manifest_at_layout(manifest, layout),
+            model,
+            device,
+            adapter_sync,
+            nccl_reshard,
         ),
     )
 
@@ -1059,6 +1119,7 @@ def _layout_plan(
     model: ModelSpec,
     device: DeviceSpec,
     adapter_sync: bool,
+    nccl_reshard: bool,
 ) -> TrainingMemoryPlan:
     """The plan at the manifest's own ``fsdp`` layout: DDP or FSDP and its speed rungs."""
     spec = llm_spec(manifest)
@@ -1067,7 +1128,10 @@ def _layout_plan(
     pins = MemoryPins.from_spec(spec)
     require_batch_split(mini, pins.micro_batch_size_per_gpu or mini, per_rank)
     settings = training_settings_from_manifest(
-        manifest, micro_batch_size=1, adapter_sync=adapter_sync
+        manifest,
+        micro_batch_size=1,
+        adapter_sync=adapter_sync,
+        nccl_reshard=nccl_reshard,
     )
     return resolve_training_memory(model, device, settings, pins, mini)
 
@@ -1091,6 +1155,7 @@ def generation_settings_from_manifest(
     tensor_parallel_size: int | None = None,
     rollout_engines: int | None = None,
     adapter_sync: bool = False,
+    nccl_reshard: bool = False,
 ) -> GenerationSettings:
     """The engine-side settings the manifest's vLLM config pins down.
 
@@ -1101,6 +1166,7 @@ def generation_settings_from_manifest(
         split the job batch. ``None`` reads the manifest.
     :param adapter_sync: Async weight sync pushes the adapter even where the
         engines could serve merged weights.
+    :param nccl_reshard: Async weight sync refits merged weights over ``nccl_reshard``.
     :return: Generation settings for the estimator.
     """
     manifest = _validated(manifest)
@@ -1163,7 +1229,7 @@ def generation_settings_from_manifest(
         and can_sync_merged_lora(spec),
         "nccl_reshard_trainer_shards": (
             _trainer_shards(spec, manifest.training.training_gpus_per_agent)
-            if syncs_over_nccl_reshard(manifest)
+            if nccl_reshard
             else None
         ),
     }
@@ -1230,6 +1296,7 @@ def run_config_from_manifest(
     tensor_parallel_size: int | None = None,
     rollout_engines: int | None = None,
     adapter_sync: bool = False,
+    nccl_reshard: bool = False,
 ) -> RunConfig:
     """Assemble the estimator's input from the three things a caller holds.
 
@@ -1248,6 +1315,8 @@ def run_config_from_manifest(
         ``None`` reads the manifest, which pins the count.
     :param adapter_sync: Async weight sync pushes the adapter even where the
         engines could serve merged weights, as the run picks it.
+    :param nccl_reshard: Async weight sync refits merged weights over
+        ``nccl_reshard``, as the run picks it.
     """
     manifest = _validated(manifest)
     if explicit_colocated_rollout(manifest):
@@ -1277,7 +1346,11 @@ def run_config_from_manifest(
     model = _model_spec(spec, arch, n_params)
     try:
         plan = training_memory_from_manifest(
-            manifest, training_plan_model(manifest, model), device, adapter_sync
+            manifest,
+            training_plan_model(manifest, model),
+            device,
+            adapter_sync,
+            nccl_reshard,
         )
     except TrainingMemoryUnfitError as unfit:
         # Sized at the lightest settings so the estimate shows how far over it is.
@@ -1286,13 +1359,17 @@ def run_config_from_manifest(
     _, per_rank = per_rank_trajectories(spec, manifest.training.training_gpus_per_agent)
     spec.mini_batch_size = resolve_mini_batch_size(spec.mini_batch_size, per_rank)
     training = training_settings_from_manifest(
-        manifest, adapter_sync=adapter_sync, engine_tensor_parallel=tensor_parallel_size
+        manifest,
+        adapter_sync=adapter_sync,
+        nccl_reshard=nccl_reshard,
+        engine_tensor_parallel=tensor_parallel_size,
     )
     generation = generation_settings_from_manifest(
         manifest,
         tensor_parallel_size=tensor_parallel_size,
         rollout_engines=rollout_engines,
         adapter_sync=adapter_sync,
+        nccl_reshard=nccl_reshard,
     )
     if async_rollout(manifest):
         generation = drop_engine_fast_paths(model, gen_device or device, generation)
@@ -1315,6 +1392,7 @@ def estimate_manifest(
     gen_device: DeviceSpec | None = None,
     tensor_parallel_size: int | None = None,
     adapter_sync: bool = False,
+    nccl_reshard: bool = False,
 ) -> RunEstimate:
     """Estimate both phase peaks straight from the manifest.
 
@@ -1322,6 +1400,8 @@ def estimate_manifest(
         manifest leaves the width unset.
     :param adapter_sync: Async weight sync pushes the adapter even where the
         engines could serve merged weights, as the run picks it.
+    :param nccl_reshard: Async weight sync refits merged weights over
+        ``nccl_reshard``, as the run picks it.
     """
     return estimate_run(
         run_config_from_manifest(
@@ -1332,5 +1412,6 @@ def estimate_manifest(
             gen_device=gen_device,
             tensor_parallel_size=tensor_parallel_size,
             adapter_sync=adapter_sync,
+            nccl_reshard=nccl_reshard,
         )
     )

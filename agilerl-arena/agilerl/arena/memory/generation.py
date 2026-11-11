@@ -541,17 +541,23 @@ def _lora_receive_buffer_component(
         )
     dtype_bytes = DTYPE_BYTES[settings.weight_dtype]
     if settings.merged_lora_sync and settings.nccl_reshard_trainer_shards is not None:
+        bucket = lora_formulas.nccl_reshard_receive_bucket_bytes(
+            arch,
+            settings.lora_sync_scope,
+            lora_formulas.NcclReshardLayout(
+                settings.nccl_reshard_trainer_shards, settings.tensor_parallel_size
+            ),
+            dtype_bytes,
+        )
+        # The refit's bulk and misc groups and their transfer buffers: 3.0-4.2
+        # GiB past the misc bucket over merged NIXL on 8x H100 TP 2 engines
+        # (Qwen3.5-2B to Qwen3.8-27B); the largest is charged.
+        refit_groups = 4300 * MiB
         return MemoryComponent(
             key="lora_receive_buffer",
-            label="nccl_reshard misc receive bucket",
-            n_bytes=lora_formulas.nccl_reshard_receive_bucket_bytes(
-                arch,
-                settings.lora_sync_scope,
-                lora_formulas.NcclReshardLayout(
-                    settings.nccl_reshard_trainer_shards, settings.tensor_parallel_size
-                ),
-                dtype_bytes,
-            ),
+            label="nccl_reshard misc receive bucket and groups",
+            n_bytes=bucket + refit_groups,
+            detail={"misc_bucket": bucket, "refit_groups": refit_groups},
             note=f"{note} Bulk weights reshard into the live weights.",
         )
     if settings.merged_lora_sync:

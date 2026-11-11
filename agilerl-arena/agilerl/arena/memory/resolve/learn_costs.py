@@ -38,7 +38,10 @@ SM80_LEARN_COSTS = LearnCosts(
     # (15 per layer) learn 12% slower than 512 MiB chunks (2 per layer).
     routed_chunk_tokens=12,
 )
-"""A100-80; also used for GPUs with no measured entry."""
+"""A100-80.
+
+A GPU below Hopper with no measured row, or no capability, uses these costs.
+"""
 
 SM90_LEARN_COSTS = LearnCosts(
     recompute_cost=0.255,
@@ -61,9 +64,20 @@ LEARN_COSTS_BY_CAPABILITY: dict[tuple[int, int], LearnCosts] = {
 def learn_costs(device: DeviceSpec) -> LearnCosts:
     """Learn-time constants for a training GPU.
 
+    An exact compute-capability row wins. Hopper and newer with no row use
+    the SM90 entry. A GPU below Hopper, or one with no capability, uses
+    :data:`SM80_LEARN_COSTS`.
+
     :param device: The training GPU.
-    :return: The entry for its compute capability, or the A100 entry when none is measured.
+    :return: The learn costs for that GPU.
     """
-    if device.compute_capability is None:
+    capability = device.compute_capability
+    if capability is None:
         return SM80_LEARN_COSTS
-    return LEARN_COSTS_BY_CAPABILITY.get(device.compute_capability, SM80_LEARN_COSTS)
+    measured = LEARN_COSTS_BY_CAPABILITY.get(capability)
+    if measured is not None:
+        return measured
+    # No measured row: Hopper and newer use the SM90 costs.
+    if capability >= (9, 0):
+        return LEARN_COSTS_BY_CAPABILITY[(9, 0)]
+    return SM80_LEARN_COSTS

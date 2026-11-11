@@ -899,7 +899,6 @@ class TrainingManifest(BaseModel):
             "rollout_mode",
             "rollout_engines_per_agent",
             "max_steps",
-            "weight_sync",
         ):
             if field not in authored:
                 training.pop(field, None)

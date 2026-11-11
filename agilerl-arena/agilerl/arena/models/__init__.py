@@ -108,8 +108,6 @@ from agilerl.arena.models.training import (
     RolloutMode,
     RolloutVersionStamp,
     TrainingSpec,
-    WeightSyncSpec,
-    WeightSyncTransport,
 )
 
 try:
@@ -197,8 +195,6 @@ __all__ = [
     "TrainingSpec",
     "VLLMConfig",
     "ValueNetworkSpec",
-    "WeightSyncSpec",
-    "WeightSyncTransport",
     "default_rollout_vllm_config",
     "dump_network_section",
     "encoder_spec_for_arch",

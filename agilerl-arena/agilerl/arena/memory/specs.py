@@ -63,6 +63,8 @@ VLLM_3D_MOE_LORA_MODEL_TYPES = frozenset(
 # Outer config model types whose HF class lists its tower encoder blocks in
 # ``_no_split_modules``, so FSDP shards each block as its own unit.
 TOWER_BLOCK_UNIT_MODEL_TYPES = frozenset({"gemma4", "qwen3_5", "qwen3_5_moe"})
+# Of those, the types whose vision patch embedder is a unit of its own too.
+TOWER_EMBEDDER_UNIT_MODEL_TYPES = frozenset({"gemma4"})
 
 # Families with a catalog training tensor-parallel plan. Under fsdp.tp > 1 the
 # trainer leaves other families' decoder layers and activations unsharded; an
@@ -235,6 +237,21 @@ def multimodal_tower_block_params(config: dict[str, Any]) -> int:
     return sum(encoder_params(cfg)[0] for cfg in tower_configs(config))
 
 
+def tower_block_units(config: dict[str, Any]) -> int:
+    """FSDP units the trainer's vision tower holds, all ahead of the decoder layers.
+
+    :param config: Hugging Face model config.
+    :return: Vision blocks, plus the patch embedder where it is a unit; zero
+        for models FSDP does not wrap per tower block.
+    """
+    model_type = config.get("model_type")
+    if model_type not in TOWER_BLOCK_UNIT_MODEL_TYPES:
+        return 0
+    vision = config["vision_config"]
+    blocks = first_int(vision, "depth", "num_hidden_layers")
+    return blocks + (1 if model_type in TOWER_EMBEDDER_UNIT_MODEL_TYPES else 0)
+
+
 def _vision_fields(config: dict[str, Any]) -> dict[str, Any]:
     """Vision tower geometry and tower LoRA linears; empty without a tower."""
     geometry = vision_geometry_fields(config)
@@ -374,6 +391,14 @@ def _layer_kinds(text_cfg: dict[str, Any]) -> tuple[LayerKind, ...]:
     if not {"moe", "mlp", "E", "-"} & set(entries):
         return ()
     return tuple(_layer_kind(entry) for entry in entries)
+
+
+def _layer_mixers(text_cfg: dict[str, Any]) -> tuple[BlockKind, ...]:
+    """Each layer's mixer, in order, when every layer runs one beside its FFN; empty otherwise."""
+    entries = layer_type_list(text_cfg)
+    if _layer_kinds(text_cfg) or not any(is_recurrent_layer(e) for e in entries):
+        return ()
+    return tuple("mamba" if is_recurrent_layer(e) else "attention" for e in entries)
 
 
 class MambaGeometry(TypedDict, total=False):
@@ -589,6 +614,7 @@ def _layout_fields(
         "n_moe_layers": n_moe,
         "dense_ffn_layers": dense_ffn_layers(text_cfg, n_layers),
         "layer_kinds": _layer_kinds(text_cfg),
+        "layer_mixers": _layer_mixers(text_cfg),
         **{f"mamba_{key}": value for key, value in geo.items()},
         "global_head_dim": text_cfg.get("global_head_dim") or None,
         "n_kv_shared_layers": n_kv_shared,
@@ -606,6 +632,7 @@ def _layout_fields(
         "per_layer_input_vocab": int(text_cfg.get("vocab_size_per_layer_input") or 0),
         "multimodal_tower_params": multimodal_tower_params(config),
         "multimodal_tower_block_params": multimodal_tower_block_params(config),
+        "tower_block_units": tower_block_units(config),
         "tensor_parallel_tower_params": tensor_parallel_tower_params(config),
         **_vision_fields(config),
     }
@@ -726,6 +753,9 @@ class ModelArch(BaseModel):
     dense_ffn_layers: int = 0
     # Layer kinds in order when the config lists them; empty when unknown.
     layer_kinds: tuple[LayerKind, ...] = ()
+    # Each layer's mixer in order when every layer runs one beside its FFN
+    # and the config lists them; empty otherwise.
+    layer_mixers: tuple[BlockKind, ...] = ()
     # Packed experts run in row chunks on the self-routing grouped-GEMM path.
     chunked_routed_experts: bool = False
     # Packed experts use gpt-oss's transposed layout; see TRANSPOSED_EXPERT_MODEL_TYPES.
@@ -745,6 +775,9 @@ class ModelArch(BaseModel):
     multimodal_tower_params: int = 0
     # Tower params inside encoder blocks FSDP shards as their own units.
     multimodal_tower_block_params: int = 0
+    # Tower FSDP units ahead of the decoder layers; the checkpoint stride
+    # counts from the first of them.
+    tower_block_units: int = 0
     # Tower params the training TP plan splits across ranks.
     tensor_parallel_tower_params: int = 0
     # Vision tower width per patch and the patch side. Zero without a vision
@@ -1030,6 +1063,8 @@ class DeviceSpec(BaseModel):
     # node; ``None`` when unknown.
     all_reduce_bytes_per_second: float | None = None
     all_reduce_latency_seconds: float | None = None
+    # GPUs of one node talk over NVLink, not PCIe.
+    nvlink: bool = False
     # Host RAM one GPU's process may hold, from
     # :func:`~agilerl.arena.memory.formulas.host_bytes_per_gpu`; ``None`` skips
     # the host check.
@@ -1153,8 +1188,8 @@ class TrainingSettings(BaseModel):
     # Async weight sync pushes merged weights: the main rank's NIXL send
     # buffer holds two rounds of merged weights, not the adapter.
     merged_lora_sync: bool = False
-    # Engine ``tensor_parallel_size`` under ``weight_sync.transport:
-    # nccl_reshard``, else None. With ``merged_lora_sync`` the refit holds
+    # Engine ``tensor_parallel_size`` when weight sync runs over
+    # ``nccl_reshard``, else None. With ``merged_lora_sync`` the refit holds
     # :class:`~agilerl.arena.memory.lora_formulas.NcclReshardRefitBytes`, not
     # a NIXL send buffer.
     nccl_reshard_engine_tensor_parallel: int | None = Field(default=None, ge=1)
@@ -1422,8 +1457,8 @@ class GenerationSettings(BaseModel):
     # streams. With ``lora_sync_scope`` set, its NIXL buffer on every GPU holds
     # one round of merged weights.
     merged_lora_sync: bool = False
-    # Trainer ranks one weight's rows are sharded across under
-    # ``weight_sync.transport: nccl_reshard``, else None. With
+    # Trainer ranks one weight's rows are sharded across when weight sync runs
+    # over ``nccl_reshard``, else None. With
     # ``merged_lora_sync`` each GPU holds one misc broadcast bucket; bulk
     # weights land in place.
     nccl_reshard_trainer_shards: int | None = Field(default=None, ge=1)

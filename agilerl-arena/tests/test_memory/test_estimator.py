@@ -178,23 +178,26 @@ class TestEstimateTraining:
         reshard_breakdown = estimate_training(model, device, nccl_reshard)
 
         # Assert: Qwen2.5-0.5B has no misc weights; the MLP block stages 3
-        # bf16 quarter shards of 896x4864 beside one fp32 quarter shard.
+        # bf16 quarter shards of 896x4864 beside one fp32 quarter shard, and
+        # the rank joins the refit's two NCCL groups.
         quarter = 896 * 4864 // 4
+        communicators = 2 * device.nccl_group_bytes
         refit = component(reshard_breakdown, "lora_send_buffer")
-        assert refit.n_bytes == 10 * quarter
+        assert refit.n_bytes == 10 * quarter + communicators
         assert refit.detail == {
             "bulk_group": 6 * quarter,
             "bulk_fp32_temp": 4 * quarter,
             "misc_bucket": 0,
             "misc_module": 0,
             "misc_fp32_copy": 0,
+            "communicators": communicators,
         }
         assert (
             component(nixl_breakdown, "lora_send_buffer").n_bytes
             == 2 * MERGED_SYNC_BUCKET_BYTES
         )
-        assert nixl_breakdown.total_bytes - reshard_breakdown.total_bytes == (
-            2 * MERGED_SYNC_BUCKET_BYTES - 10 * quarter
+        assert reshard_breakdown.total_bytes - nixl_breakdown.total_bytes == (
+            10 * quarter + communicators - 2 * MERGED_SYNC_BUCKET_BYTES
         )
 
     def test_async_rollout_holds_the_adapter_send_buffer(self, model, device):
@@ -750,9 +753,12 @@ class TestEstimateGeneration:
         reshard_breakdown = estimate_generation(qwen35, device, nccl_reshard)
 
         # Assert: the bf16 GDN projections are the only misc weights and fit
-        # one bucket; attention and MLP land in the live weights.
+        # one bucket; attention and MLP land in the live weights. The refit's
+        # groups take 4300 MiB, measured on H100.
         misc = 18 * (1024 * 6144 + 1024 * 2048 + 2048 * 1024) + 36 * 1024 * 16
-        assert component(reshard_breakdown, "lora_receive_buffer").n_bytes == 2 * misc
+        receive = component(reshard_breakdown, "lora_receive_buffer")
+        assert receive.n_bytes == 2 * misc + 4300 * MiB
+        assert receive.detail == {"misc_bucket": 2 * misc, "refit_groups": 4300 * MiB}
         assert (
             component(nixl_breakdown, "lora_receive_buffer").n_bytes
             == MERGED_SYNC_BUCKET_BYTES
@@ -1684,8 +1690,13 @@ class TestDistributedTerms:
 
         detail = component(estimate_training(model, device, settings), "activations")
 
-        assert detail.detail["block_recompute"] == block_activations.mamba_block_bytes(
-            arch, 1, 16384, 2.0, backward=True
+        # The last Mamba layer runs its backward once the MLP above it has
+        # freed its checkpoint input.
+        assert arch.layer_kinds[-2:] == ("mamba", "mlp")
+        assert (
+            detail.detail["block_recompute"]
+            == block_activations.mamba_block_bytes(arch, 1, 16384, 2.0, backward=True)
+            - 16384 * arch.hidden_size * 2
         )
         assert detail.detail["lora_dropout"] == formulas.lora_dropout_bytes(
             arch, 1, 16384, 2.0, layer="mamba"
@@ -2143,7 +2154,12 @@ class TestFusedActorCriticPass:
         assert detail["checkpoint_boundaries"] == 2 * seq_len * h * n_layers * 2
         assert detail["loss_hidden_state"] == 2 * seq_len * h * 2
         assert detail["block_recompute"] == block_activations.block_recompute_bytes(
-            QWEN_05B, 2, seq_len, 2.0, backward=True
+            QWEN_05B,
+            2,
+            seq_len,
+            2.0,
+            backward=True,
+            lora_target_scope=settings.lora_target_scope,
         )
         assert detail["lora_fp32_input_casts"] == 0
         assert detail["lora_dropout"] == formulas.lora_dropout_bytes(
@@ -2532,10 +2548,22 @@ class TestRoutedChunkTerm:
         # Act
         breakdown = estimate_training(qwen36, device, settings)
 
-        # Assert
+        # Assert: the last gated-delta layer runs its backward once the
+        # attention layer above it has freed its checkpoint input.
         detail = component(breakdown, "activations").detail
-        assert detail["block_recompute"] == block_activations.block_recompute_bytes(
-            qwen36.arch, 1, 16384, 2.0, backward=True, layer="mamba"
+        assert qwen36.arch.layer_mixers[-2:] == ("mamba", "attention")
+        assert (
+            detail["block_recompute"]
+            == block_activations.block_recompute_bytes(
+                qwen36.arch,
+                1,
+                16384,
+                2.0,
+                backward=True,
+                layer="mamba",
+                lora_target_scope=settings.lora_target_scope,
+            )
+            - 16384 * qwen36.arch.hidden_size * 2
         )
         assert detail["routed_expert_chunks"] == formulas.routed_chunk_bytes(
             qwen36.arch,
@@ -3341,6 +3369,42 @@ class TestGlmFlashCpuOffloadCalibration:
         assert activations.n_bytes > activations.detail["loss_peak"]
 
 
+class TestUnmeasuredArchitectureEstimates:
+    """KDA layers and MoE MLP backwards, which have no layer measurement."""
+
+    @pytest.mark.parametrize(
+        ("model_id", "gradient_checkpointing", "total_bytes"),
+        [
+            ("zai-org/GLM-5.3-Flash", True, 154866675936),
+            ("zai-org/GLM-5.3-Flash", False, 246686678104),
+            ("openai/gpt-oss-20b", True, 17593628774),
+            ("openai/gpt-oss-20b", False, 41523558605),
+            # Stored blocks keep a share of the measured gated-attention and
+            # gated-delta backward peaks.
+            ("Qwen/Qwen3.6-35B-A3B", False, 46193778968),
+        ],
+    )
+    def test_all_linear_lora_estimate(
+        self, model_id, gradient_checkpointing, total_bytes
+    ):
+        # Arrange
+        settings = TrainingSettings(
+            micro_batch_size=1,
+            max_model_len=4096,
+            n_training_gpus=8,
+            lora_target_scope="all-linear",
+            gradient_checkpointing=gradient_checkpointing,
+            fsdp=pinned_fsdp(),
+        )
+        h100 = training_gpu("NVIDIA H100 80GB HBM3", H100_80GB_CUDA_BYTES)
+
+        # Act
+        breakdown = estimate_training(catalog_model(model_id), h100, settings)
+
+        # Assert: within float rounding of the per-layer 0.91 stored share.
+        assert breakdown.total_bytes == pytest.approx(total_bytes, abs=64)
+
+
 class TestSuperVlVwaEstimate:
     """VWA launch shape: 16 trainer GPUs, rows up to 24,000 + 5,120 tokens."""
 
@@ -4132,6 +4196,106 @@ class TestCheckpointStride:
             6 * boundary + 18 * block * formulas.STORED_BLOCK_SHARE, abs=1
         )
 
+    def test_stored_layers_keep_their_own_mixers_tensors(self, device):
+        # Arrange: the 12 tower blocks keep even decoder layers checkpointed,
+        # so every full-attention layer (index % 4 == 3) is stored: 6
+        # attention and 6 gated-delta layers, not the stack's 6:18 mix.
+        model = catalog_model("Qwen/Qwen3.5-0.8B")
+        arch = model.arch
+        boundary = 4 * 1024 * arch.hidden_size * 2
+        attention = block_activations.stored_attention_block_bytes(arch, 4, 1024, 2)
+        gated_delta = block_activations.stored_gated_delta_block_bytes(arch, 4, 1024, 2)
+
+        # Act
+        saved = self._activations(model, device, True, 2).detail[
+            "checkpoint_boundaries"
+        ]
+
+        # Assert
+        assert arch.layer_mixers[1::2].count("attention") == 6
+        assert saved == pytest.approx(
+            12 * boundary + 6 * attention + 6 * gated_delta, abs=1
+        )
+
+    def test_stored_layers_backward_holds_its_saved_tensors_once(self, device):
+        # Arrange
+        model = catalog_model("Qwen/Qwen3.5-0.8B")
+        arch = model.arch
+        settings = TrainingSettings(
+            micro_batch_size=4,
+            max_model_len=1024,
+            n_training_gpus=2,
+            fsdp=fsdp_config(checkpoint_every_n_blocks=2),
+        )
+        boundary = 4 * 1024 * arch.hidden_size * 2
+        stored = {
+            "attention": block_activations.stored_attention_block_bytes(
+                arch, 4, 1024, 2
+            ),
+            "mamba": block_activations.stored_gated_delta_block_bytes(arch, 4, 1024, 2),
+        }
+
+        def recompute(layer):
+            return block_activations.block_recompute_bytes(
+                arch,
+                4,
+                1024,
+                2,
+                backward=True,
+                layer=layer,
+                lora_target_scope=settings.lora_target_scope,
+            )
+
+        # Backward runs the last layer first. Each layer holds its widest
+        # sub-layer, less what the layers above it kept and, when stored, the
+        # saved tensors already counted in the saved set.
+        peaks, freed = [], 0
+        for index in reversed(range(arch.n_layers)):
+            kind = arch.layer_mixers[index]
+            own = 0 if index % 2 == 0 else stored[kind]
+            peaks.append(max(recompute(kind), recompute("ffn")) - freed - own)
+            freed += boundary if index % 2 == 0 else stored[kind]
+
+        # Act
+        detail = component(
+            estimate_training(model, device, settings), "activations"
+        ).detail
+
+        # Assert
+        assert detail["block_recompute"] == pytest.approx(max(peaks), abs=1)
+        assert detail["block_recompute"] < recompute(None)
+
+    def test_checkpointed_uniform_stack_runs_one_whole_block(self, model, device):
+        # Arrange
+        arch = model.arch
+        boundary = 4 * 1024 * arch.hidden_size * 2
+        block = block_activations.block_recompute_bytes(
+            arch, 4, 1024, 2, backward=True, lora_target_scope="all-linear"
+        )
+
+        # Act
+        detail = self._activations(model, device, True, 1).detail
+
+        # Assert
+        assert detail["checkpoint_boundaries"] == arch.n_layers * boundary
+        assert detail["block_recompute"] == block
+
+    def test_uncheckpointed_top_block_adds_only_what_it_does_not_keep(
+        self, model, device
+    ):
+        # Arrange
+        arch = model.arch
+        block = block_activations.block_recompute_bytes(
+            arch, 4, 1024, 2, backward=True, lora_target_scope="all-linear"
+        )
+        kept = block_activations.mean_block_recompute_bytes(arch, 4, 1024, 2)
+
+        # Act
+        detail = self._activations(model, device, False, 1).detail
+
+        # Assert
+        assert detail["block_recompute"] == pytest.approx(block - kept, abs=1)
+
     def test_uncheckpointed_blocks_keep_a_share_of_the_backward_peak(
         self, model, device
     ):
@@ -4905,12 +5069,43 @@ class TestBlockBackwardTermsCompressedEntries:
         arch = catalog_model("deepseek-ai/DeepSeek-V4-Flash-0731").arch
         short = TrainingSettings(max_model_len=2048, micro_batch_size=1)
         long = TrainingSettings(max_model_len=4096, micro_batch_size=1)
+        freed = [0.0] * arch.n_layers
 
         # Act
-        short_recompute = block_backward_terms(arch, short, 4096, 2.0, 2.0)[0]
-        long_recompute = block_backward_terms(arch, long, 4096, 2.0, 2.0)[0]
+        short_recompute = block_backward_terms(arch, short, 4096, 2.0, 2.0, freed)[0]
+        long_recompute = block_backward_terms(arch, long, 4096, 2.0, 2.0, freed)[0]
 
         # Assert: 2048-token documents keep all 512 CSA entries under top-k; a
         # 4096-token one scores 1024 entries, a mask byte and 64 heads' fp32
         # scores plus their sum each.
         assert long_recompute - short_recompute == 4096 * 1024 * (1 + 65 * 4)
+
+    def test_unknown_layer_order_peaks_at_the_widest_sublayer(self):
+        # Arrange: one mixer per layer, order not listed, so each layer is
+        # priced as every sub-layer and the widest is kept.
+        arch = ModelArch.from_hf_config(QWEN35_08B.config).model_copy(
+            update={"layer_mixers": ()}
+        )
+        settings = TrainingSettings(max_model_len=64, micro_batch_size=1)
+        freed = [0.0] * arch.n_layers
+
+        # Act
+        recompute = block_backward_terms(arch, settings, 64, 2.0, 2.0, freed)[0]
+
+        # Assert
+        peaks = [
+            block_activations.block_recompute_bytes(
+                arch,
+                settings.grad_forward_rows,
+                64,
+                2.0,
+                backward=True,
+                layer=kind,
+                document_len=settings.max_model_len,
+                lora_target_scope=settings.lora_target_scope,
+            )
+            for kind in formulas.block_kinds(arch)
+        ]
+        assert arch.sublayer_transients
+        assert formulas.layer_block_kinds(arch) == (None,) * arch.n_layers
+        assert recompute == max(peaks)

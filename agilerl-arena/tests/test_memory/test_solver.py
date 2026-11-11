@@ -407,7 +407,7 @@ class TestSolveWithoutAnEngine:
         )
 
         # Assert
-        assert result.value == 12352
+        assert result.value == 10944
         assert result.limited_by == "memory"
         assert result.estimate.training.fits_with_buffer
         assert over.training.fits
@@ -449,11 +449,11 @@ class TestSolveRebuild:
         over = estimate_run(at(rebuilt.value + kv_cache.KV_BLOCK_SIZE_DEFAULT, 1))
 
         # Assert
-        assert held.value == 1536
-        assert rebuilt.value == 12352
+        assert held.value == 1360
+        assert rebuilt.value == 10944
         assert rebuilt.limited_by == "memory"
         assert rebuilt.config.training.micro_batch_size == 1
-        assert rebuilt.config.training.max_model_len == 12352
+        assert rebuilt.config.training.max_model_len == 10944
         assert not over.training.fits_with_buffer
 
     def test_a_training_miss_ends_the_scan(self, model):
@@ -640,7 +640,7 @@ class TestBareSolveOnAnInferenceConfig:
         dedicated = solve_inference(config, "max_model_len", hi=32768)
 
         # Assert
-        assert bare.value == 16800
+        assert bare.value == 14880
         assert bare.limited_by == "memory"
         assert bare.estimate.training.fits_with_buffer
         assert dedicated.value == 32768
