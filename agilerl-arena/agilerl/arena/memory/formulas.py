@@ -85,11 +85,13 @@ RECOMPUTED_CHUNK_LIVE_MULTIPLE = 7
 
 # Share of a block's checkpointed-backward peak
 # (:func:`~agilerl.arena.memory.block_activations.block_recompute_bytes`)
-# that a block left out of checkpointing keeps from its forward: the backward
-# peak also holds a gradient that only the block in backward carries. Qwen3-4B
-# LoRA r16 on A100 80GB (FA2 packed, 12k and 15k-token budgets, frozen base
-# sharded) kept 0.90; 0.91 puts the per-token slope 1.4% above it. Fit on that
-# one dense model only; other families are extrapolated.
+# that a block left out of checkpointing keeps from its forward, for layers
+# :func:`~agilerl.arena.memory.block_activations.mean_block_recompute_bytes`
+# has no stored price for: the backward peak also holds a gradient that only
+# the block in backward carries. Qwen3-4B LoRA r16 on A100 80GB (FA2 packed,
+# 12k and 15k-token budgets, frozen base sharded) kept 0.90; 0.91 puts the
+# per-token slope 1.4% above it. Fit on that one dense model only; other
+# families are extrapolated.
 STORED_BLOCK_SHARE = 0.91
 
 # PyTorch caching-allocator slack: reserved above allocated.
@@ -759,6 +761,19 @@ def block_kinds(arch: ModelArch) -> tuple[BlockKind, ...]:
     return tuple(kinds)
 
 
+def layer_block_kinds(arch: ModelArch) -> tuple[BlockKind | None, ...]:
+    """Each layer's block kind, in order: None when the stack is uniform or the order unknown.
+
+    A block-exclusive layer is its attention, FFN or Mamba block; a layer
+    that runs one mixer beside its FFN is its mixer.
+    """
+    if arch.block_exclusive_layers and arch.layer_kinds:
+        return tuple(
+            "ffn" if kind in ("mlp", "moe") else kind for kind in arch.layer_kinds
+        )
+    return arch.layer_mixers or (None,) * arch.n_layers
+
+
 def checkpointed_blocks(
     n_blocks: int, gradient_checkpointing: bool, every_n_blocks: int
 ) -> int:
@@ -777,17 +792,30 @@ def checkpointed_blocks(
 
 
 def training_checkpointed_blocks(arch: ModelArch, settings: TrainingSettings) -> int:
-    """Blocks the trainer checkpoints at the resolved stride.
+    """Decoder blocks the trainer checkpoints at the resolved stride.
 
     :param arch: Model architecture.
     :param settings: Training settings with checkpointing resolved.
-    :return: Checkpointed blocks.
+    :return: Checkpointed blocks of :func:`training_checkpointed_layers`.
     """
-    return checkpointed_blocks(
-        arch.n_layers,
-        settings.gradient_checkpointing is True,
-        settings.checkpoint_every_n_blocks,
-    )
+    return len(training_checkpointed_layers(arch, settings))
+
+
+def training_checkpointed_layers(arch: ModelArch, settings: TrainingSettings) -> range:
+    """Decoder layers the trainer checkpoints at the resolved stride.
+
+    The trainer checkpoints its first FSDP block, then every stride-th. The
+    :attr:`ModelArch.tower_block_units` tower units come first, so the first
+    checkpointed decoder layer is the one the stride reaches past them.
+
+    :param arch: Model architecture.
+    :param settings: Training settings with checkpointing resolved.
+    :return: Checkpointed decoder layer indices.
+    """
+    if settings.gradient_checkpointing is not True:
+        return range(0)
+    stride = settings.checkpoint_every_n_blocks
+    return range(-arch.tower_block_units % stride, arch.n_layers, stride)
 
 
 def lora_linears(
@@ -1079,8 +1107,11 @@ def checkpointed_moe_blocks(arch: ModelArch, settings: TrainingSettings) -> int:
         return 0
     if not arch.layer_kinds:
         return training_checkpointed_blocks(arch, settings)
-    stride = settings.checkpoint_every_n_blocks
-    return sum(1 for kind in arch.layer_kinds[::stride] if kind == "moe")
+    return sum(
+        1
+        for layer in training_checkpointed_layers(arch, settings)
+        if arch.layer_kinds[layer] == "moe"
+    )
 
 
 def ep_exchange_bytes(

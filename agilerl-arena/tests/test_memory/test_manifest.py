@@ -4,6 +4,7 @@
 
 import copy
 import json
+import logging
 from functools import cached_property
 from pathlib import Path
 from typing import Any
@@ -13,11 +14,14 @@ from pydantic import ValidationError
 
 from agilerl.arena.memory import lora_formulas
 from agilerl.arena.memory.estimator import estimate_run, estimate_training
+from agilerl.arena.memory.formulas import recommendation_fits
 from agilerl.arena.memory.manifest import (
     check_fp8_moe_backend_for_device,
     device_spec_from_resource_class,
+    gpu_device_spec,
     lookup_gpu,
     marlin_pads_non_gated_experts,
+    parse_gram_per_gpu,
     training_settings_from_manifest,
     unsupported_gpu_reason,
     validated_run_manifest,
@@ -1212,14 +1216,95 @@ class TestDeviceFromResourceClass:
         tier = {"name": "exotic", "gpu_type": "TPU v5e"}
         with pytest.raises(ValueError, match="Unknown gpu_type"):
             device_spec_from_resource_class(tier)
-        device = device_spec_from_resource_class(tier, gpu_memory_gib=16)
+        device = device_spec_from_resource_class({**tier, "gram_per_gpu": 16})
         assert device.total_bytes == 16 * 1024**3
 
-    def test_an_explicit_size_overrides_a_known_gpu(self):
-        device = device_spec_from_resource_class(L4_TIER, gpu_memory_gib=16)
+    def test_a_smaller_declared_size_lowers_a_known_gpu(self):
+        device = device_spec_from_resource_class({**L4_TIER, "gram_per_gpu": 16})
 
         assert device.name == "NVIDIA L4"
         assert device.total_bytes == 16 * 1024**3
+
+    @pytest.mark.parametrize("gram_per_gpu", [80, "80 GiB", "80GB", "80Gi"])
+    def test_a_larger_declared_size_keeps_the_catalogue_size(self, gram_per_gpu):
+        tier = {"name": "h100-2x", "gpu_type": "nvidia-h100-80gb", "num_gpus": 2}
+
+        device = device_spec_from_resource_class({**tier, "gram_per_gpu": gram_per_gpu})
+
+        assert device.name == "NVIDIA H100 80GB HBM3"
+        assert device.total_bytes == int(79.11 * GiB)
+
+    def test_declared_size_below_the_catalogue_wins(self):
+        device = gpu_device_spec("nvidia-h100-80gb", 40)
+
+        assert device.total_bytes == 40 * GiB
+
+    def test_unknown_gpu_takes_the_declared_size(self):
+        device = gpu_device_spec("nvidia-rtx-6000-ada", 48)
+
+        assert device.name == "nvidia-rtx-6000-ada"
+        assert device.total_bytes == 48 * GiB
+
+    @pytest.mark.parametrize("gram_per_gpu", ["GiB 80", "N/A", "-8"])
+    def test_declared_size_without_a_number_is_treated_as_unset(
+        self, gram_per_gpu, caplog
+    ):
+        with caplog.at_level(logging.WARNING, logger="agilerl.arena.memory.manifest"):
+            device = gpu_device_spec("nvidia-h100-80gb", gram_per_gpu)
+
+        [message] = caplog.messages
+        assert device.total_bytes == int(79.11 * GiB)
+        assert message.startswith(f"Treating gramPerGpu {gram_per_gpu!r} as unset")
+
+    # Cases from parse_metadata_gram_value in the platform's resource_limits.rs.
+    @pytest.mark.parametrize(
+        ("gram_per_gpu", "gib"),
+        [
+            (80, 80),
+            ("80 GiB", 80),
+            ("16 GiB", 16),
+            ("1 GiB", 1),
+            ("34359738368", 32),
+            (0, None),
+            ("", None),
+            ("  ", None),
+            ("0 GiB", None),
+            (None, None),
+        ],
+    )
+    def test_declared_size_parses_as_the_platform_does(self, gram_per_gpu, gib):
+        assert parse_gram_per_gpu(gram_per_gpu) == gib
+
+    @pytest.mark.parametrize("gram_per_gpu", [0, ""])
+    def test_unset_declared_size_keeps_the_catalogue_size(self, gram_per_gpu):
+        device = gpu_device_spec("nvidia-h100-80gb", gram_per_gpu)
+
+        assert device.total_bytes == int(79.11 * GiB)
+
+    def test_unknown_gpu_with_an_unset_declared_size_is_refused(self):
+        with pytest.raises(ValueError, match="Unknown gpu_type"):
+            gpu_device_spec("nvidia-rtx-6000-ada", 0)
+
+    def test_declared_size_in_bytes_sizes_an_unknown_gpu(self):
+        device = gpu_device_spec("nvidia-rtx-6000-ada", "34359738368")
+
+        assert device.total_bytes == 32 * GiB
+
+    @pytest.mark.parametrize("gram_per_gpu", [True, -8])
+    def test_bool_or_negative_declared_size_is_treated_as_unset(
+        self, gram_per_gpu, caplog
+    ):
+        with caplog.at_level(logging.WARNING, logger="agilerl.arena.memory.manifest"):
+            device = gpu_device_spec("nvidia-h100-80gb", gram_per_gpu)
+
+        [message] = caplog.messages
+        assert device.total_bytes == int(79.11 * GiB)
+        assert message.startswith(f"Treating gramPerGpu {gram_per_gpu!r} as unset")
+
+    def test_h100_declared_at_80_gib_is_fit_checked_at_its_catalogue_size(self):
+        device = gpu_device_spec("nvidia-h100-80gb", 80)
+
+        assert not recommendation_fits(int(69.13 * GiB), device.usable_bytes)
 
     def test_cpu_tier_is_refused(self):
         with pytest.raises(ValueError, match="no GPU"):

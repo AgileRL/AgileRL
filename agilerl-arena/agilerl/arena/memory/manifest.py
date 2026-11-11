@@ -8,6 +8,7 @@ checkpoint ``config.json``.
 
 from __future__ import annotations
 
+import logging
 import re
 import warnings
 from functools import lru_cache
@@ -95,6 +96,8 @@ from agilerl.arena.models.env import LLMEnvSpec
 from agilerl.arena.models.manifest import TrainingManifest, strips_multimodal_towers
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO, ModelInfo
 from agilerl.arena.models.networks import LoraConfigDict, VLLMConfig
+
+logger = logging.getLogger(__name__)
 
 # The engine variant drops the multimodal towers; a model without towers sizes it as base.
 MANIFEST_WEIGHT_VARIANTS = (
@@ -300,25 +303,96 @@ def lookup_gpu(gpu_type: str) -> GpuInfo | None:
     return None
 
 
-def device_spec_from_resource_class(
-    resource_class: dict[str, Any],
-    *,
-    gpu_memory_gib: float | None = None,
+def parse_gram_per_gpu(gram_per_gpu: object) -> float | None:
+    """GiB per GPU from a ``gramPerGpu`` value, read as the platform reads it.
+
+    A number is GiB. A string gives its leading number in GiB, except that a
+    string with no letters above 1e6 is bytes (``"34359738368"`` is 32 GiB).
+    Zero, ``""`` and None are unset. A bool, a negative number, or a string
+    that does not start with a number is unset too, with a warning. One
+    difference from the platform's Rust reader: ``"80GiB"`` with no space
+    reads as 80 here, as in the frontend, and as unset in Rust.
+
+    :param gram_per_gpu: The resource spec's ``gramPerGpu``, e.g. ``80`` or
+        ``"80 GiB"``.
+    :return: The GiB per GPU, or None when unset.
+    """
+    if gram_per_gpu is None:
+        return None
+    gib = None
+    if isinstance(gram_per_gpu, str):
+        text = gram_per_gpu.strip()
+        if not text:
+            return None
+        match = re.match(r"\d+\.?\d*|\.\d+", text)
+        if match is not None:
+            gib = float(match.group())
+            if gib > 1e6 and not re.search(r"[A-Za-z]", text):
+                gib /= GiB
+    elif isinstance(gram_per_gpu, int | float) and not isinstance(gram_per_gpu, bool):
+        gib = float(gram_per_gpu)
+    if gib is None or gib < 0:
+        logger.warning(
+            "Treating gramPerGpu %r as unset: it is not a non-negative GiB number",
+            gram_per_gpu,
+        )
+        return None
+    return gib or None
+
+
+def gpu_device_spec(
+    gpu_type: str, gram_per_gpu: float | str | None = None
 ) -> DeviceSpec:
+    """The device one GPU of ``gpu_type`` provides.
+
+    :param gpu_type: Free-form GPU name, e.g. ``"nvidia-h100-80gb"``.
+    :param gram_per_gpu: Declared size per GPU, read by
+        :func:`parse_gram_per_gpu`. It can lower a catalogued GPU's size but
+        never raise it, and it sizes a GPU the catalogue does not know.
+    :return: The device.
+    :raises ValueError: An unknown ``gpu_type`` with an unset ``gram_per_gpu``.
+    """
+    gram_gib = parse_gram_per_gpu(gram_per_gpu)
+    declared_bytes = None if gram_gib is None else int(gram_gib * GiB)
+    info = lookup_gpu(gpu_type)
+    if info is None:
+        if declared_bytes is None:
+            known = ", ".join(entry.name for _, entry in GPU_CATALOGUE)
+            msg = (
+                f"Unknown gpu_type {gpu_type!r}; give its gramPerGpu. "
+                f"Known accelerators: {known}."
+            )
+            raise ValueError(msg)
+        return DeviceSpec(total_bytes=declared_bytes, name=gpu_type or None)
+    spec = info.device_spec()
+    if declared_bytes is None or declared_bytes >= spec.total_bytes:
+        return spec
+    return spec.model_copy(update={"total_bytes": declared_bytes})
+
+
+def device_spec_from_resource_class(resource_class: dict[str, Any]) -> DeviceSpec:
     """The device one GPU of a resource-class dict provides.
 
     The estimate is per GPU; data-parallel sharding comes from
-    ``training_gpus_per_agent``. A tier's ``ram_gb`` (GiB per node) and
-    ``num_gpus`` set each GPU's host RAM share.
+    ``training_gpus_per_agent``. A tier's ``gpu_type`` and optional
+    ``gram_per_gpu`` size the GPU through :func:`gpu_device_spec`. Its
+    ``ram_gb`` (GiB per node) and ``num_gpus`` set each GPU's host RAM share.
 
     :param resource_class: The tier dict, e.g.
-        ``{"name": "a100-1x", "gpu_type": "NVIDIA A100", "num_gpus": 1, ...}``.
-    :param gpu_memory_gib: Per-GPU memory override for a ``gpu_type`` the
-        catalogue does not know.
+        ``{"name": "h100-1x", "gpu_type": "NVIDIA H100", "gram_per_gpu": 80,
+        "num_gpus": 1, ...}``.
     :raises ValueError: A CPU-only tier, or an unknown ``gpu_type`` with no
-        ``gpu_memory_gib`` override.
+        ``gram_per_gpu``.
     """
-    spec = _gpu_device_spec(resource_class, gpu_memory_gib)
+    gpu_type = str(resource_class.get("gpu_type") or "")
+    gram_per_gpu = resource_class.get("gram_per_gpu")
+    if not gpu_type and gram_per_gpu is None:
+        msg = (
+            f"Resource class {resource_class.get('name')!r} provides no GPU; "
+            "LLM memory estimation needs one."
+        )
+        raise ValueError(msg)
+    spec = gpu_device_spec(gpu_type, gram_per_gpu)
     ram_gib = resource_class.get("ram_gb")
     if ram_gib is None:
         return spec
@@ -329,34 +403,6 @@ def device_spec_from_resource_class(
             )
         }
     )
-
-
-def _gpu_device_spec(
-    resource_class: dict[str, Any], gpu_memory_gib: float | None
-) -> DeviceSpec:
-    """The GPU of a resource-class dict, before its host RAM share."""
-    gpu_type = str(resource_class.get("gpu_type") or "")
-    if not gpu_type and gpu_memory_gib is None:
-        msg = (
-            f"Resource class {resource_class.get('name')!r} provides no GPU; "
-            "LLM memory estimation needs one."
-        )
-        raise ValueError(msg)
-
-    info = lookup_gpu(gpu_type) if gpu_type else None
-    if info is None:
-        if gpu_memory_gib is None:
-            known = ", ".join(entry.name for _, entry in GPU_CATALOGUE)
-            msg = (
-                f"Unknown gpu_type {gpu_type!r}; pass gpu_memory_gib explicitly. "
-                f"Known accelerators: {known}."
-            )
-            raise ValueError(msg)
-        return DeviceSpec(total_bytes=int(gpu_memory_gib * GiB), name=gpu_type or None)
-    spec = info.device_spec()
-    if gpu_memory_gib is not None:
-        spec = spec.model_copy(update={"total_bytes": int(gpu_memory_gib * GiB)})
-    return spec
 
 
 LLM_TRAINING_MIN_CC = (8, 0)

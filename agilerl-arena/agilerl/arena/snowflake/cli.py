@@ -18,7 +18,6 @@ from agilerl.arena.snowflake.job import (
     service_status_sql,
     submit_job,
 )
-from agilerl.arena.snowflake.publish_cli import publish
 from agilerl.arena.snowflake.session import open_session
 from agilerl.arena.snowflake.source import QuerySource, SnowflakeSession, TableSource
 
@@ -26,9 +25,6 @@ from agilerl.arena.snowflake.source import QuerySource, SnowflakeSession, TableS
 @click.group("snowflake")
 def snowflake_group() -> None:
     """Train inside a Snowflake account."""
-
-
-snowflake_group.add_command(publish)
 
 
 @snowflake_group.command("submit")

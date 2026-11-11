@@ -11,6 +11,7 @@ schema-version bump.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from functools import lru_cache
 
@@ -378,18 +379,22 @@ def block_backward_terms(
     seq_len: int,
     act_bytes: float,
     adapter_bytes: float,
+    freed: Sequence[float],
     unfused_mamba_scan: bool = False,
     grouped_gemm_bytes: int | None = None,
 ) -> tuple[int, int, int, int, int, int]:
-    """Recompute, fp32 casts, LoRA dropout, split expert-LoRA, routed chunks and EP exchange of one checkpointed block.
+    """Recompute, fp32 casts, LoRA dropout, split expert-LoRA, routed chunks and EP exchange of the block in backward.
 
     When :attr:`ModelArch.sublayer_transients` holds, the recompute peaks in
     one attention, FFN or recurrent sub-layer, so each kind's terms are
     summed and the largest kind is kept. A mixer kind on a stack whose
-    layers carry an FFN beside it includes that FFN's terms. With
-    ``grouped_gemm_bytes`` set, the split ``x @ A`` runs at the expert rank
-    padded for that element size. Blocks left out of checkpointing add the
-    casts and dropout copies their forward keeps.
+    layers carry an FFN beside it includes that FFN's terms. Each layer runs
+    its own kind's terms less its ``freed`` bytes, and the largest layer
+    sets the recompute. With ``grouped_gemm_bytes`` set, the split ``x @ A``
+    runs at the expert rank padded for that element size. Blocks left out of
+    checkpointing add the casts and dropout copies their forward keeps.
+
+    :param freed: :func:`~agilerl.arena.memory.block_activations.backward_freed_bytes`.
     """
     rows = settings.grad_forward_rows
     # PEFT casts a wrapped linear's input only when the adapters are wider.
@@ -463,6 +468,7 @@ def block_backward_terms(
             routed_split=routed_split,
             document_len=settings.max_model_len,
             context_parallel=1 if fsdp is None else fsdp.cp,
+            lora_target_scope=settings.lora_target_scope,
         )
         casts = 0
         if casts_apply:
@@ -513,9 +519,22 @@ def block_backward_terms(
             exchange if moe_here else 0,
         )
 
-    if not (arch.sublayer_transients and settings.gradient_checkpointing):
-        return terms(None)
-    return max((terms(kind) for kind in formulas.block_kinds(arch)), key=sum)
+    def layer_terms(kind: BlockKind | None) -> tuple[int, int, int, int, int, int]:
+        if not (arch.sublayer_transients and settings.gradient_checkpointing):
+            return terms(None)
+        if kind is None:
+            sublayers = formulas.block_kinds(arch)
+        elif arch.block_exclusive_layers:
+            sublayers = (kind,)
+        else:
+            sublayers = (kind, "ffn")
+        return max((terms(sublayer) for sublayer in sublayers), key=sum)
+
+    kinds = formulas.layer_block_kinds(arch)
+    by_kind = {kind: layer_terms(kind) for kind in set(kinds)}
+    layer = max(range(arch.n_layers), key=lambda i: sum(by_kind[kinds[i]]) - freed[i])
+    widest = by_kind[kinds[layer]]
+    return int(widest[0] - freed[layer]), *widest[1:]
 
 
 @dataclass(frozen=True)
@@ -665,50 +684,24 @@ def _saved_terms(
     tp: int,
     routed_split: int,
     casts_apply: bool,
-) -> tuple[int, int, int, int]:
-    """Forward tensors every block keeps for backward, then :func:`_fsdp_saved_moe_terms`.
+) -> tuple[list[float], int, int, int]:
+    """Forward tensors each block keeps for backward, then :func:`_fsdp_saved_moe_terms`.
 
-    :return: Checkpoint inputs or saved block tensors, router top-k bytes,
-        saved MoE collective outputs, and their backward-peak share.
+    :return: Each layer's checkpoint input or saved block tensors, router
+        top-k bytes, saved MoE collective outputs, and their backward-peak share.
     """
-    if block_activations.prices_stored_tensors(arch):
-        block_saved = block_activations.stored_block_bytes(
-            arch,
-            settings.grad_forward_rows,
-            seq_len,
-            act_bytes,
-            expert_lora=settings.lora_packed_target_matrices > 0,
-            mamba_lora=settings.lora_target_scope == "all-linear",
-            expert_parallel=1 if settings.fsdp is None else settings.fsdp.ep,
-            routed_split=routed_split,
-        )
-    else:
-        block_saved = (
-            block_activations.mean_block_recompute_bytes(
-                arch,
-                settings.grad_forward_rows,
-                seq_len,
-                act_bytes,
-                unfused_mamba_scan,
-                tp,
-                routed_split,
-                settings.max_model_len,
-                1 if settings.fsdp is None else settings.fsdp.cp,
-            )
-            * formulas.STORED_BLOCK_SHARE
-        )
-        if casts_apply or settings.lora_target_scope == "attention-only":
-            block_saved -= formulas.lora_only_stored_input_bytes(
-                arch, settings.grad_forward_rows, seq_len, act_bytes, tp
-            )
-    checkpointed = formulas.training_checkpointed_blocks(arch, settings)
-    # A checkpointed block keeps its input; any other block keeps its forward's
-    # saved tensors.
-    stored = int(
-        checkpointed * live_rows * seq_len * arch.residual_width * act_bytes
-        + (arch.n_layers - checkpointed) * block_saved * settings.grad_graph_rows
+    kept = block_activations.kept_layer_bytes(
+        arch,
+        settings,
+        act_bytes,
+        seq_len,
+        live_rows,
+        unfused_mamba_scan,
+        tp,
+        routed_split,
+        casts_apply,
     )
-    return stored, *_fsdp_saved_moe_terms(
+    return kept, *_fsdp_saved_moe_terms(
         arch, settings, act_bytes, seq_len, live_rows, tp, routed_split
     )
 
@@ -764,7 +757,7 @@ def _activation_terms(
     block_hidden = live_rows * block_seq * arch.residual_width * act_bytes
     routed_split = 1 if fsdp is None or fsdp.ep <= 1 else fsdp.tp
     casts_apply = adapters.compute_bytes > act_bytes
-    stored, router_topk, saved_collectives, backward_collectives = _saved_terms(
+    kept, router_topk, saved_collectives, backward_collectives = _saved_terms(
         arch,
         settings,
         act_bytes,
@@ -775,6 +768,7 @@ def _activation_terms(
         routed_split,
         casts_apply,
     )
+    stored = int(sum(kept))
     recompute, lora_casts, lora_dropout, split_lora, routed_chunks, ep_exchange = (
         block_backward_terms(
             arch,
@@ -782,6 +776,7 @@ def _activation_terms(
             block_seq,
             act_bytes,
             adapters.compute_bytes,
+            block_activations.backward_freed_bytes(arch, settings, kept),
             unfused_mamba_scan,
             grouped_gemm_bytes,
         )
