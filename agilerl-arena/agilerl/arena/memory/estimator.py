@@ -41,6 +41,7 @@ from agilerl.arena.memory.resolve.moe import (
     padded_expert_lora_rank,
 )
 from agilerl.arena.memory.resolve.rollout import merged_sync_bucket_bytes
+from agilerl.arena.memory.settings_key import TrainingSettingsKey
 from agilerl.arena.memory.specs import (
     DTYPE_BYTES,
     BlockKind,
@@ -50,7 +51,6 @@ from agilerl.arena.memory.specs import (
     ModelSpec,
     RunConfig,
     TrainingSettings,
-    TrainingSettingsKey,
 )
 from agilerl.arena.memory.trainer_residency import (
     fsdp_cpu_offload_host_bytes,

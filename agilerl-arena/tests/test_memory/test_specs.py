@@ -4,7 +4,8 @@
 
 import pytest
 
-from agilerl.arena.memory.specs import TrainingSettings, TrainingSettingsKey
+from agilerl.arena.memory.settings_key import TrainingSettingsKey
+from agilerl.arena.memory.specs import TrainingSettings
 from agilerl.arena.models.fsdp import record_parallel_pins
 from tests.test_memory.test_estimator import pinned_fsdp
 

@@ -448,6 +448,48 @@ class TestEstimateGeneration:
         engine_runtime = component(breakdown, "overhead").detail["engine_runtime"]
         assert engine_side + engine_runtime == pytest.approx(budget, rel=0.01)
 
+    def test_teacher_scoring_adds_the_prompt_logprob_buffers(self, model, device):
+        # Arrange
+        settings = GenerationSettings(max_model_len=2048, max_num_batched_tokens=4096)
+        scoring = settings.model_copy(update={"scores_prompt_logprobs": True})
+
+        # Act
+        plain = component(
+            estimate_generation(model, device, settings), "activation_peak"
+        )
+        scored = component(
+            estimate_generation(model, device, scoring), "activation_peak"
+        )
+
+        # Assert: the buffers are a runtime peak; the start-up profile is unchanged.
+        buffers = formulas.prompt_logprob_bytes(model.arch)
+        assert scored.detail["startup_peak"] == plain.detail["startup_peak"]
+        assert scored.n_bytes >= buffers
+        assert scored.n_bytes > plain.n_bytes
+
+    def test_reserving_the_buffer_keeps_the_kv_pool_from_spilling_past_the_budget(
+        self, model, device
+    ):
+        # Arrange
+        settings = GenerationSettings(
+            gpu_memory_utilization=0.9,
+            max_model_len=2048,
+            max_num_batched_tokens=4096,
+        )
+        spilled = settings.model_copy(update={"scores_prompt_logprobs": True})
+        reserved = spilled.model_copy(update={"reserves_prompt_logprobs": True})
+
+        # Act
+        spilled_estimate = estimate_generation(model, device, spilled)
+        reserved_estimate = estimate_generation(model, device, reserved)
+
+        # Assert
+        buffers = formulas.prompt_logprob_bytes(model.arch)
+        assert component(spilled_estimate, "kv_cache").n_bytes - component(
+            reserved_estimate, "kv_cache"
+        ).n_bytes == pytest.approx(buffers, rel=0.01)
+        assert reserved_estimate.total_bytes < spilled_estimate.total_bytes
+
     def test_prices_the_cuda_graph_pool(self, model, device):
         breakdown = estimate_generation(model, device, GenerationSettings())
 

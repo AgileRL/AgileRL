@@ -26,6 +26,7 @@ from agilerl.arena.memory.resolve.batch import (
     rows_within_budget,
 )
 from agilerl.arena.memory.resolve.learn_costs import LearnCosts, learn_costs
+from agilerl.arena.memory.settings_key import TrainingSettingsKey
 from agilerl.arena.memory.specs import (
     DTYPE_BYTES,
     DeviceSpec,
@@ -34,7 +35,6 @@ from agilerl.arena.memory.specs import (
     ModelArch,
     ModelSpec,
     TrainingSettings,
-    TrainingSettingsKey,
 )
 from agilerl.arena.models.algorithms.base import LLMAlgorithmSpec
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec

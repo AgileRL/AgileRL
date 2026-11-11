@@ -441,9 +441,7 @@ class RemoteEnvClient:
             kwargs["evaluation"] = True
         result = self._at_boundary(lambda session: session.reset(**kwargs))
         _raise_reset_error(result.observation, seed, row_index, self._evaluation_mode)
-        raw_meta = getattr(result, "metadata", None)
-        info = dict(raw_meta) if isinstance(raw_meta, dict) else {}
-        return result.observation, info
+        return result.observation, _result_info(result.observation, result)
 
     def step(self, action: object) -> tuple[object, float, bool, bool, dict[str, Any]]:
         """Send one action over the session and return the Gym 5-tuple.
@@ -470,7 +468,7 @@ class RemoteEnvClient:
             bool(obs.get("truncated", False)) if isinstance(obs, dict) else False
         )
         done = bool(result.done)
-        info = _step_info(obs, result)
+        info = _result_info(obs, result)
         if isinstance(action, ParsedToolCall):
             info.setdefault("role", "tool")
         return (
@@ -627,8 +625,8 @@ def _raise_reset_error(
         raise RuntimeError(msg)
 
 
-def _step_info(obs: object, result: object) -> dict[str, Any]:
-    """Env ``info`` from a step result's metadata and the observation payload."""
+def _result_info(obs: object, result: object) -> dict[str, Any]:
+    """Env ``info`` from a reset or step result's metadata and the observation payload."""
     info: dict[str, Any] = {}
     raw_meta = getattr(result, "metadata", None)
     if is_str_keyed_dict(raw_meta):
