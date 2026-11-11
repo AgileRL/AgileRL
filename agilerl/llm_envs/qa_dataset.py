@@ -47,7 +47,9 @@ class QADatasetEnv(Environment):
     observation keeps that same ``prompt`` and adds ``question`` / ``answer``
     so the harness rubric can score (including when ``prompt_builder`` differs
     from the raw question); the policy never sees labels at reset. The env
-    itself gives no reward.
+    itself gives no reward. ``metadata_columns`` copies those row values into
+    the reset observation's metadata, which the rollout reads as reset info and
+    the policy never sees.
     """
 
     SUPPORTS_CONCURRENT_SESSIONS = True
@@ -60,6 +62,7 @@ class QADatasetEnv(Environment):
         prompt_builder: Callable[[Mapping[str, Any]], str] | None = None,
         question_column: str = "question",
         answer_column: str = "answer",
+        metadata_columns: Sequence[str] = (),
     ) -> None:
         super().__init__()
         self._train = dataset
@@ -67,6 +70,7 @@ class QADatasetEnv(Environment):
         self._prompt_builder = prompt_builder
         self._question_column = question_column
         self._answer_column = answer_column
+        self._metadata_columns = tuple(metadata_columns)
         self._cursor = 0
         self._split = ""
         self._prompt: str = ""
@@ -126,7 +130,13 @@ class QADatasetEnv(Environment):
             if self._prompt_builder is not None
             else str(self._question)
         )
-        return TextObservation(prompt=self._prompt, done=False)
+        return TextObservation(
+            prompt=self._prompt,
+            done=False,
+            metadata={
+                column: _json_safe(row[column]) for column in self._metadata_columns
+            },
+        )
 
     def step(
         self,

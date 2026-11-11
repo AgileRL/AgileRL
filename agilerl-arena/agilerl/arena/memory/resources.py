@@ -14,6 +14,7 @@ from agilerl.arena.memory.manifest import (
     async_rollout,
     configured_rollout_engines,
     device_spec_from_resource_class,
+    estimate_teacher_generation,
     lookup_gpu,
     training_plan_model,
     unsupported_gpu_reason,
@@ -47,6 +48,7 @@ from agilerl.arena.memory.resolve.weight_sync import SyncLink
 from agilerl.arena.memory.solver import CannotSolve
 from agilerl.arena.memory.specs import DeviceSpec, ModelSpec, RunConfig
 from agilerl.arena.models.algorithms.base import LLMAlgorithmSpec
+from agilerl.arena.models.algorithms.opd import teacher_engine_gpus
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
 from agilerl.arena.models.fsdp import parallel_layout_pins
 from agilerl.arena.models.manifest import TrainingManifest
@@ -88,13 +90,15 @@ def gpus_required(manifest: TrainingManifest, tensor_parallel_size: int = 1) -> 
     """GPUs one node needs: each member's trainers plus its rollout engines.
 
     Each engine occupies ``tensor_parallel_size`` GPUs, matching
-    ``vllm_config.tensor_parallel_size``. ``auto`` rollout engines need at
-    least one engine per member.
+    ``vllm_config.tensor_parallel_size``, plus its teacher engine's when a
+    separate model scores. ``auto`` rollout engines need at least one engine
+    per member.
     """
     training = manifest.training
     engines = configured_rollout_engines(manifest)
     engine_count = 1 if engines == "auto" else engines
-    per_member = training.training_gpus_per_agent + engine_count * tensor_parallel_size
+    engine_gpus = tensor_parallel_size + teacher_engine_gpus(manifest.algorithm)
+    per_member = training.training_gpus_per_agent + engine_count * engine_gpus
     return training.pop_size * per_member
 
 
@@ -164,7 +168,7 @@ def engines_per_member(
         num_gpus,
         training.pop_size,
         training.training_gpus_per_agent,
-        tensor_parallel_size,
+        tensor_parallel_size + teacher_engine_gpus(manifest.algorithm),
     )
 
 
@@ -465,6 +469,9 @@ def _price(
         for phase in (estimate.training, estimate.generation)
         if not phase.fits_with_buffer
     ]
+    teacher = estimate_teacher_generation(laid_out, device, engines)
+    if teacher is not None and not teacher.fits_with_buffer:
+        over.append("teacher generation")
     reason = f"{' and '.join(over)} over budget" if over else None
     return TierCheck(
         tier,

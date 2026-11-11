@@ -661,7 +661,8 @@ class LLMEnvSpec(EnvSpecBase):
         default=None,
         description=(
             "Maps your dataset's column names onto the ones the run expects "
-            "(question, answer). Unset assumes they already match."
+            "(question, answer; prompt, target, or multi-turn messages and "
+            "tools for SFT). Unset assumes they already match."
         ),
     )
     response_column: str | None = Field(

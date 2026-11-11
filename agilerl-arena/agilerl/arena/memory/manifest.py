@@ -17,9 +17,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
+from agilerl.arena.memory.breakdown import PhaseBreakdown
 from agilerl.arena.memory.estimator import RunEstimate, estimate_run
 from agilerl.arena.memory.formulas import host_bytes_per_gpu
-from agilerl.arena.memory.generation import drop_engine_fast_paths
+from agilerl.arena.memory.generation import drop_engine_fast_paths, estimate_generation
 from agilerl.arena.memory.resolve.attention import (
     context_parallel_blocker,
     resolve_attn_implementation,
@@ -86,8 +87,10 @@ from agilerl.arena.memory.specs import (
     WeightDtype,
     WeightVariant,
 )
+from agilerl.arena.memory.teacher import rollout_engine_teacher_settings
 from agilerl.arena.models.algorithms.base import LLMAlgorithmSpec
 from agilerl.arena.models.algorithms.grpo import GRPOSpec
+from agilerl.arena.models.algorithms.opd import distillation_teacher
 from agilerl.arena.models.algorithms.rollout_llm import (
     RolloutLLMSpec,
     records_sampling_supports,
@@ -581,15 +584,23 @@ def can_sync_merged_lora(spec: LLMAlgorithmSpec) -> bool:
 def spec_merged_lora_sync_blockers(spec: LLMAlgorithmSpec) -> list[str]:
     """Why the spec's rollout engines cannot serve merged LoRA weights (:func:`merged_lora_sync_blockers`).
 
-    The checkpoint's quantization comes from the catalogue's ``config.json``.
+    The checkpoint's quantization comes from the catalogue's ``config.json``. A
+    teacher adapter or base-weights teacher scores on the unmerged base
+    weights, so either rules merged sync out.
 
     :param spec: LLM algorithm spec.
     :return: One reason per blocker; empty when the engines can serve them.
     """
     if not isinstance(spec, RolloutLLMSpec):
         return [f"{spec.name} starts no rollout engines"]
+    teacher = distillation_teacher(spec)
+    teacher_blockers = (
+        ["the OPD teacher scores on the unmerged base weights"]
+        if teacher is not None and teacher.scores_base_weights
+        else []
+    )
     info = SUPPORTED_MODEL_INFO.get(spec.pretrained_model_name_or_path or "")
-    return merged_lora_sync_blockers(
+    return teacher_blockers + merged_lora_sync_blockers(
         None if spec.vllm_config is None else spec.vllm_config.quantization,
         info is not None and _catalog_checkpoint_quantized(info),
         bool(_lora_config(spec).tower_target_modules),
@@ -1191,7 +1202,9 @@ def generation_settings_from_manifest(
             spec.pretrained_model_name_or_path,
         ),
         "max_num_seqs": _max_num_seqs(manifest, spec, vllm, rollout_engines),
-        "max_model_len": spec.max_model_len,
+        **rollout_engine_teacher_settings(
+            distillation_teacher(spec), spec.max_model_len, vllm
+        ),
         "max_num_batched_tokens": manifest_max_num_batched_tokens(spec, vllm),
         "max_images_per_prompt": (vllm.limit_mm_per_prompt or {}).get("image"),
         "max_lora_rank": resolve_max_lora_rank(lora.lora_r),
@@ -1201,15 +1214,7 @@ def generation_settings_from_manifest(
         ),
         "weight_dtype": weight_dtype,
         "weight_quantization": weight_quantization,
-        "weight_variant": (
-            "engine"
-            if strips_multimodal_towers(
-                spec,
-                isinstance(manifest.environment, LLMEnvSpec)
-                and manifest.environment.text_only,
-            )
-            else "base"
-        ),
+        "weight_variant": _engine_weight_variant(spec, manifest),
         "concurrent_requests": (
             _async_engine_prompts(manifest, rollout_engines)
             if async_rollout(manifest)
@@ -1236,6 +1241,64 @@ def generation_settings_from_manifest(
     if width is not None:
         settings["tensor_parallel_size"] = width
     return GenerationSettings(**settings)
+
+
+def _engine_weight_variant(spec: LLMAlgorithmSpec, manifest: TrainingManifest) -> str:
+    """``engine`` when generation strips multimodal towers, else ``base``."""
+    text_only = isinstance(manifest.environment, LLMEnvSpec) and (
+        manifest.environment.text_only
+    )
+    return "engine" if strips_multimodal_towers(spec, text_only) else "base"
+
+
+def estimate_teacher_generation(
+    manifest: TrainingManifest,
+    device: DeviceSpec,
+    rollout_engines: int | None = None,
+) -> PhaseBreakdown | None:
+    """Peak memory of a separate teacher model's vLLM engine.
+
+    Sizes the base weights, so a vision teacher whose towers the engine skips
+    reads high.
+
+    :param manifest: Validated training manifest.
+    :param device: The GPU type the teacher engine runs on.
+    :param rollout_engines: Engines per member the allocation starts, each with
+        one teacher. ``None`` reads the manifest.
+    :return: The teacher engine's breakdown, or ``None`` when no separate model scores.
+    """
+    spec = manifest.algorithm
+    teacher = distillation_teacher(spec) if isinstance(spec, LLMAlgorithmSpec) else None
+    if teacher is None or teacher.model is None:
+        return None
+    hub_id = teacher.model.pretrained_model_name_or_path
+    info = SUPPORTED_MODEL_INFO[hub_id]
+    vllm = teacher.model.vllm_config
+    counted = info.inspected["num_params"]
+    model = ModelSpec(
+        model_id=hub_id,
+        arch=ModelArch.from_hf_config(info.config),
+        n_params=counted if isinstance(counted, int) else None,
+    )
+    settings = GenerationSettings(
+        gpu_memory_utilization=resolve_gpu_memory_utilization(
+            vllm.gpu_memory_utilization, False, hub_id
+        ),
+        max_num_seqs=_max_num_seqs(manifest, spec, vllm, rollout_engines),
+        max_model_len=spec.max_model_len + teacher.context_tokens,
+        scores_prompt_logprobs=True,
+        reserves_prompt_logprobs=vllm.gpu_memory_utilization is None,
+        max_num_batched_tokens=(
+            vllm.max_num_batched_tokens
+            or FAMILY_MAX_NUM_BATCHED_TOKENS.get(info.config["model_type"])
+        ),
+        weight_dtype=_weight_dtype(vllm.dtype),
+        weight_quantization=engine_weight_quantization(vllm.quantization),
+        tensor_parallel_size=teacher.model.gpus,
+        concurrent_requests=_async_engine_prompts(manifest, rollout_engines)
+        * engine_group_size(spec, manifest.mutation),
+    )
+    return estimate_generation(model, device, settings, orchestrated=True)
 
 
 def _model_spec(

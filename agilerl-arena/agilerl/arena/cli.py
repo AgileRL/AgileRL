@@ -1466,9 +1466,13 @@ def load_cli_plugins(group: click.Group) -> None:
 main.add_command(datasets_group)
 main.add_command(memory_group)
 main.add_command(snowflake_group)
-load_cli_plugins(main)
-register_byoc_manifest_group(main)
-
 
 if __name__ == "__main__":
-    main()
+    # Plugins import agilerl.arena.cli, a second copy of this module under
+    # ``-m``; run that copy's group, which loads them once.
+    from agilerl.arena.cli import main as package_main
+
+    package_main()
+else:
+    load_cli_plugins(main)
+    register_byoc_manifest_group(main)

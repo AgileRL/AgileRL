@@ -44,6 +44,26 @@ def test_reset_hides_labels() -> None:
     assert obs.prompt == "q"
 
 
+def test_reset_metadata_carries_the_chosen_columns_only() -> None:
+    env = QADatasetEnv(
+        [{"question": "q", "answer": "secret", "trace": "worked solution"}],
+        metadata_columns=["trace"],
+    )
+
+    obs = env.reset(row_index=0)
+
+    assert obs.metadata == {"trace": "worked solution"}
+    assert obs.prompt == "q"
+
+
+def test_reset_metadata_is_empty_without_chosen_columns() -> None:
+    env = QADatasetEnv(
+        [{"question": "q", "answer": "secret", "trace": "worked solution"}],
+    )
+
+    assert env.reset(row_index=0).metadata == {}
+
+
 def test_reset_seed_pins_row_when_row_index_is_absent() -> None:
     rows = [{"question": f"q{i}", "answer": f"a{i}"} for i in range(4)]
     env = QADatasetEnv(rows)

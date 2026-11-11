@@ -2776,6 +2776,7 @@ def inherit_init_signature(
     parent: type,
     fixed: set[str] | None = None,
     defaults: dict[str, Any] | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> Callable[[type], type]:
     """Class decorator giving a subclass its ``parent``'s ``__init__`` signature.
 
@@ -2794,6 +2795,9 @@ def inherit_init_signature(
     :type fixed: set[str] | None, optional
     :param defaults: Inherited parameter defaults to replace on the subclass.
     :type defaults: dict[str, Any] | None, optional
+    :param extra: Parameters the subclass adds, by name, with their defaults;
+        appended after the inherited ones.
+    :type extra: dict[str, Any] | None, optional
     :return: A class decorator.
     :rtype: Callable[[type], type]
     """
@@ -2805,6 +2809,10 @@ def inherit_init_signature(
             p.replace(default=defaults[p.name]) if p.name in defaults else p
             for p in kept
         ]
+    kept += [
+        inspect.Parameter(name, inspect.Parameter.POSITIONAL_OR_KEYWORD, default=value)
+        for name, value in (extra or {}).items()
+    ]
 
     def decorate(cls: type) -> type:
         if "__init__" not in cls.__dict__:

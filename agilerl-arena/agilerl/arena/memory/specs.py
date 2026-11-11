@@ -9,7 +9,6 @@ and torch-free.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
 from typing import Any, Literal, NamedTuple, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -155,6 +154,7 @@ ALGORITHM_NAMES: dict[str, Algorithm] = {
     "GRPO": "grpo",
     "GSPO": "gspo",
     "CISPO": "cispo",
+    "OPD": "grpo",
     "LLMPPO": "ppo",
     "LLMREINFORCE": "reinforce",
     "DPO": "dpo",
@@ -1376,32 +1376,6 @@ class TrainingSettings(BaseModel):
         return self
 
 
-@dataclass(frozen=True)
-class TrainingSettingsKey:
-    """Hashable stand-in for :class:`TrainingSettings`, keyed on its field values.
-
-    ``fsdp`` is a mutable dataclass, so it enters the key as a snapshot of its
-    field values, ``parallel_pins`` included.
-    """
-
-    values: tuple[object, ...]
-    settings: TrainingSettings = field(compare=False)
-
-    @classmethod
-    def of(cls, settings: TrainingSettings) -> TrainingSettingsKey:
-        """Key ``settings`` by every field value as it is now.
-
-        :param settings: Training settings.
-        :return: The key, carrying ``settings``.
-        """
-        fsdp = settings.fsdp
-        values = tuple(
-            tuple(vars(fsdp).values()) if name == "fsdp" and fsdp is not None else value
-            for name, value in settings.__dict__.items()
-        )
-        return cls(values, settings)
-
-
 class GenerationSettings(BaseModel):
     """vLLM settings (``VLLMConfig``) plus workload shape."""
 
@@ -1420,6 +1394,8 @@ class GenerationSettings(BaseModel):
     # ``limit_mm_per_prompt["image"]``. ``None`` takes vLLM's unset-modality limit.
     max_images_per_prompt: int | None = None
     max_lora_rank: int = OMITTED_MAX_LORA_RANK
+    # A teacher adapter sits in a second slot beside the policy's.
+    served_loras: int = 1
     # Adapter ``target_parameters`` on packed experts. Any switches the
     # engine to vLLM's 3D fused-MoE LoRA layout, as AgileRL patches the
     # model's ``is_3d_moe_weight`` flag on.
@@ -1462,6 +1438,12 @@ class GenerationSettings(BaseModel):
     # ``merged_lora_sync`` each GPU holds one misc broadcast bucket; bulk
     # weights land in place.
     nccl_reshard_trainer_shards: int | None = Field(default=None, ge=1)
+    # A distillation teacher scores prompt log-probs, a runtime buffer the
+    # start-up profile does not size.
+    scores_prompt_logprobs: bool = False
+    # An unset ``gpu_memory_utilization`` on a scoring engine shrinks by that
+    # buffer, so the engine peaks where a non-scoring one does.
+    reserves_prompt_logprobs: bool = False
 
     @property
     def concurrency(self) -> int:

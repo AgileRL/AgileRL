@@ -1232,6 +1232,19 @@ FLEX_BLOCK_SIZE = 128
 # Per-process job overhead charged when ``orchestrated`` is set.
 JOB_OVERHEAD_BYTES = 50 * MiB
 
+
+def prompt_logprob_bytes(arch: ModelArch) -> int:
+    """vLLM's fixed-token prompt scoring peak: two chunks of fp32 full-vocab logits.
+
+    :param arch: Model architecture.
+    :return: Peak bytes of the buffer.
+    """
+    # Prompt rows vLLM's fixed-token prompt scoring computes logits for at once.
+    chunk_rows = 1024
+    # Measured on L4 Qwen3.5 engines at about two chunks; the second copy is untraced.
+    return 2 * chunk_rows * arch.vocab_size * 4
+
+
 # Non-torch device memory a one-rank trainer holds beyond the CUDA context
 # and job overhead. Multi-rank trainers charge :func:`agilerl.arena.memory.nccl.trainer_nccl_bytes`.
 TRAINER_LIB_OVERHEAD_BYTES = 436 * MiB

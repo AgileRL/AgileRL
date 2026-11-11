@@ -200,6 +200,18 @@ class TestRemoteEnvClientReset:
         assert payload == {"prompt": "Cancel order 42.", "error": error}
         assert info == {}
 
+    def test_observation_metadata_becomes_the_reset_info(self) -> None:
+        client = _session_client(
+            reset_observation={
+                "prompt": "Cancel order 42.",
+                "metadata": {"reference_trace": "cancel_order(42)"},
+            }
+        )
+
+        _payload, info = client.reset(row_index=0)
+
+        assert info == {"reference_trace": "cancel_order(42)"}
+
     def test_raises_when_the_observation_reports_an_error(self) -> None:
         # Arrange
         client = _session_client(

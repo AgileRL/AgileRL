@@ -13,6 +13,7 @@ from agilerl.arena.memory.estimator import MemoryComponent, PhaseBreakdown, RunE
 from agilerl.arena.memory.formulas import MAX_UNDERPREDICTION
 from agilerl.arena.memory.manifest import (
     device_spec_from_resource_class,
+    estimate_teacher_generation,
     lookup_gpu,
     run_config_from_manifest,
 )
@@ -56,6 +57,47 @@ def manifest_with(base, **training):
     return TrainingManifest.model_validate(
         {**base, "training": {**base["training"], **training}}
     )
+
+
+def teacher_manifest(teacher="Qwen/Qwen3.8-27B", teacher_width=1, **training):
+    """OPD on Qwen3.5-2B with a separate teacher model, one trainer and two engines."""
+    return TrainingManifest.model_validate(
+        {
+            "algorithm": {
+                "name": "OPD",
+                "batch_size": 2,
+                "vllm_config": {"tensor_parallel_size": 1},
+                "teacher": {
+                    "model": {
+                        "pretrained_model_name_or_path": teacher,
+                        "vllm_config": {"tensor_parallel_size": teacher_width},
+                    }
+                },
+            },
+            "environment": {
+                "env_type": "rollout",
+                "dataset": "openai/gsm8k",
+                "reward_file_path": "reward.py",
+                "prompt_template": {"user_0": "{question}"},
+            },
+            "network": {
+                "pretrained_model_name_or_path": "Qwen/Qwen3.5-2B",
+                "max_context_length": 512,
+            },
+            "training": {
+                "max_steps": 100,
+                "pop_size": 1,
+                "training_gpus_per_agent": 1,
+                "rollout_engines_per_agent": 2,
+                "rollout_batch_size": 4,
+                **training,
+            },
+        }
+    )
+
+
+def component(breakdown, key):
+    return next(part for part in breakdown.components if part.key == key)
 
 
 def unset_width(base):
@@ -175,6 +217,59 @@ class TestGpusRequired:
         )
 
         assert gpus_required(manifest, tensor_parallel_size=4) == 2 + 2 * 4
+
+    def test_each_engine_counts_its_teacher_models_gpus(self):
+        manifest = teacher_manifest(teacher_width=3)
+
+        assert gpus_required(manifest, tensor_parallel_size=2) == 1 + 2 * (2 + 3)
+
+
+class TestEnginesPerMemberWithTeacher:
+    def test_auto_engines_leave_room_for_each_teacher(self):
+        manifest = teacher_manifest(teacher_width=2, rollout_engines_per_agent="auto")
+
+        assert engines_per_member(manifest, 7, tensor_parallel_size=1) == 2
+
+
+class TestEstimateTeacherGeneration:
+    def test_is_none_without_a_teacher_model(self):
+        device = lookup_gpu("NVIDIA A100-SXM4-80GB").device_spec()
+
+        estimate = estimate_teacher_generation(
+            manifest_with(MANIFEST, rollout_engines_per_agent=1), device
+        )
+
+        assert estimate is None
+
+    def test_a_larger_teacher_needs_more_of_its_gpu(self):
+        # Arrange
+        device = lookup_gpu("NVIDIA A100-SXM4-80GB").device_spec()
+        small = teacher_manifest(teacher="Qwen/Qwen3.5-2B")
+        large = teacher_manifest(teacher="Qwen/Qwen3.8-27B")
+
+        # Act
+        small_estimate = estimate_teacher_generation(small, device)
+        large_estimate = estimate_teacher_generation(large, device)
+
+        # Assert
+        small_weights = component(small_estimate, "weights").n_bytes
+        large_weights = component(large_estimate, "weights").n_bytes
+        assert large_weights > 5 * small_weights
+
+    def test_sharding_the_teacher_lowers_each_gpus_weights(self):
+        # Arrange
+        device = lookup_gpu("NVIDIA A100-SXM4-80GB").device_spec()
+
+        # Act
+        one = estimate_teacher_generation(
+            teacher_manifest(teacher="Qwen/Qwen3.8-27B"), device
+        )
+        two = estimate_teacher_generation(
+            teacher_manifest(teacher="Qwen/Qwen3.8-27B", teacher_width=2), device
+        )
+
+        # Assert
+        assert component(two, "weights").n_bytes < component(one, "weights").n_bytes
 
 
 class TestEngineWidth:
@@ -361,6 +456,19 @@ class TestSplitManifest:
 
 
 class TestCheckTiers:
+    def test_a_teacher_too_big_for_its_gpu_rules_the_tier_out(self):
+        # Arrange: a 27B teacher's bf16 weights alone exceed one L4.
+        manifest = teacher_manifest(teacher="Qwen/Qwen3.8-27B", teacher_width=1)
+
+        # Act
+        (check,) = check_tiers(
+            [tier("l4-8x", "NVIDIA L4", 8, 8.0)], manifest, tiny_model(), builder()
+        )
+
+        # Assert
+        assert not check.fits
+        assert check.reason == "teacher generation over budget"
+
     def test_colocated_run_is_sized_on_every_gpu_of_the_member(self):
         # Arrange
         manifest = TrainingManifest.model_validate(SFT_MANIFEST)
