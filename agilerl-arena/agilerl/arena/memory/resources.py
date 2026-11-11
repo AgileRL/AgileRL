@@ -39,7 +39,8 @@ from agilerl.arena.memory.resolve.parallel import (
 from agilerl.arena.memory.resolve.run import (
     RunMemoryPlan,
     SearchCache,
-    kept_merged_lora_sync,
+    WeightSyncMode,
+    kept_weight_sync_mode,
     resolve_run_memory,
 )
 from agilerl.arena.memory.resolve.weight_sync import SyncLink
@@ -212,8 +213,8 @@ def split_manifest(
         leaves sync unpriced.
     :param layout: Training layout to search the split at alone; ``None``
         searches the layout too.
-    :return: A copy with the split written into ``training``, the width
-        into ``vllm_config.tensor_parallel_size`` and the plan's layout
+    :return: A copy with the split written into ``training``, the width into
+        ``vllm_config.tensor_parallel_size`` and the plan's layout
         (``layout`` under DDP) pinned on ``fsdp``, and the plan: the
         predicted step and whether weight sync pushes merged weights.
     :raises ValueError: When the model is not in the catalogue or no split fits.
@@ -368,15 +369,15 @@ def _weight_sync_plan(
     allocation: int,
     layout: ParallelLayout | None,
     cache: SearchCache,
-) -> tuple[TrainingManifest, bool, float | None, str | None]:
+) -> tuple[TrainingManifest, WeightSyncMode, float | None, str | None]:
     """The counts and weight-sync mode the run picks on ``allocation`` GPUs.
 
     A searched split runs :func:`split_manifest`; kept counts, or a split
-    that does not fit, take :func:`kept_merged_lora_sync` on ``placed``.
+    that does not fit, take :func:`kept_weight_sync_mode` on ``placed``.
 
     :param placed: ``manifest`` at ``layout``.
-    :return: The laid-out manifest, whether weight sync pushes merged weights,
-        the split's predicted step seconds, and why no split fits.
+    :return: The laid-out manifest, the weight-sync mode, the split's
+        predicted step seconds, and why no split fits.
     """
     sync_link = tier_sync_link(allocation, device.gpus_per_node)
     split_reason = None
@@ -389,8 +390,9 @@ def _weight_sync_plan(
             split_reason = str(err)
         else:
             step_seconds = None if plan.split is None else plan.split.step_seconds
-            return laid_out, plan.merged_lora_sync, step_seconds, None
-    merged = kept_merged_lora_sync(
+            mode = WeightSyncMode(plan.merged_lora_sync, plan.weight_sync_transport)
+            return laid_out, mode, step_seconds, None
+    mode = kept_weight_sync_mode(
         placed,
         training_plan_model(placed, model),
         device,
@@ -398,14 +400,16 @@ def _weight_sync_plan(
         sync_link,
         cache,
     )
-    return placed, merged, None, split_reason
+    return placed, mode, None, split_reason
 
 
 def _price(
     tier: dict[str, Any],
     manifest: TrainingManifest,
     model: ModelSpec,
-    build_config: Callable[[TrainingManifest, DeviceSpec, int, int, bool], RunConfig],
+    build_config: Callable[
+        [TrainingManifest, DeviceSpec, int, int, bool, bool], RunConfig
+    ],
     layout: ParallelLayout | None,
     num_nodes: int,
     cache: SearchCache,
@@ -414,7 +418,7 @@ def _price(
 
     :func:`_placement_shortfall` rules the allocation out before any memory
     search. Past it, the allocation syncs weights in the mode the run picks
-    over :func:`tier_sync_link`; kept counts take :func:`kept_merged_lora_sync`.
+    over :func:`tier_sync_link`; kept counts take :func:`kept_weight_sync_mode`.
 
     :param layout: Training layout to pin; ``None`` prices the manifest as written.
     """
@@ -434,10 +438,10 @@ def _price(
     device = device_spec_from_resource_class(tier).model_copy(
         update={"gpus_per_node": node_gpus}
     )
-    laid_out, merged, step_seconds, split_reason = _weight_sync_plan(
+    laid_out, mode, step_seconds, split_reason = _weight_sync_plan(
         manifest, placed, model, device, allocation, layout, cache
     )
-    width = engine_width(laid_out, allocation, device, node_gpus, not merged)
+    width = engine_width(laid_out, allocation, device, node_gpus, not mode.merged)
     needed = gpus_required(laid_out, width)
     if allocation < needed:
         return TierCheck(
@@ -445,7 +449,14 @@ def _price(
         )
     engines = engines_per_member(laid_out, allocation, width)
     try:
-        config = build_config(laid_out, device, width, engines, not merged)
+        config = build_config(
+            laid_out,
+            device,
+            width,
+            engines,
+            not mode.merged,
+            mode.transport == "nccl_reshard",
+        )
     except (CannotSolve, TrainingMemoryUnfitError, TrainerSplitError) as err:
         return TierCheck(tier, split_reason or str(err), num_nodes=num_nodes)
     estimate = note_queued_sequences(estimate_run(config), config)
@@ -558,7 +569,9 @@ def _price_step(
     tier: dict[str, Any],
     manifest: TrainingManifest,
     model: ModelSpec,
-    build_config: Callable[[TrainingManifest, DeviceSpec, int, int, bool], RunConfig],
+    build_config: Callable[
+        [TrainingManifest, DeviceSpec, int, int, bool, bool], RunConfig
+    ],
     num_nodes: int,
     cache: SearchCache,
 ) -> TierCheck | None:
@@ -575,7 +588,9 @@ def check_tiers(
     tiers: Iterable[dict[str, Any]],
     manifest: TrainingManifest,
     model: ModelSpec,
-    build_config: Callable[[TrainingManifest, DeviceSpec, int, int, bool], RunConfig],
+    build_config: Callable[
+        [TrainingManifest, DeviceSpec, int, int, bool, bool], RunConfig
+    ],
     search_cache: SearchCache | None = None,
 ) -> list[TierCheck]:
     """Every tier's verdict, cheapest first.
@@ -606,7 +621,8 @@ def check_tiers(
     :param model: Training-side model, to price kept counts' weight sync.
     :param build_config: The run config of the manifest as laid out on a
         tier, on one GPU of it, at the engine width and engines per member
-        that tier starts, and whether weight sync pushes the adapter.
+        that tier starts, whether weight sync pushes the adapter, and whether
+        it refits merged weights over ``nccl_reshard``.
     :param search_cache: Plans and widths already priced for this manifest.
         Calls for the same manifest, on other tiers or node counts, may share
         one; ``None`` starts a fresh cache.
@@ -638,7 +654,9 @@ def _first_fit(
     usable: list[dict[str, Any]],
     manifest: TrainingManifest,
     model: ModelSpec,
-    build_config: Callable[[TrainingManifest, DeviceSpec, int, int, bool], RunConfig],
+    build_config: Callable[
+        [TrainingManifest, DeviceSpec, int, int, bool, bool], RunConfig
+    ],
     cache: SearchCache,
     first_failure: dict[str, TierCheck],
 ) -> TierCheck | None:
@@ -713,7 +731,9 @@ def _verdict(
     first_failure: dict[str, TierCheck],
     manifest: TrainingManifest,
     model: ModelSpec,
-    build_config: Callable[[TrainingManifest, DeviceSpec, int, int, bool], RunConfig],
+    build_config: Callable[
+        [TrainingManifest, DeviceSpec, int, int, bool, bool], RunConfig
+    ],
     cache: SearchCache,
 ) -> TierCheck:
     """``tier``'s check: the lock, a price at the lock, or its first failure."""

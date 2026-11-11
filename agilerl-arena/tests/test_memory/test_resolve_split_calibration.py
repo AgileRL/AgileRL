@@ -17,6 +17,7 @@ from agilerl.arena.memory.manifest import (
 from agilerl.arena.memory.resolve.batch import catalog_model
 from agilerl.arena.memory.resolve.split import (
     GpuSplit,
+    TrainerCost,
     choose_gpu_split,
     split_workload_from_manifest,
 )
@@ -628,7 +629,7 @@ def _predicted_split(case: CalibrationCase, measured_lengths: bool) -> GpuSplit:
     assert gpu is not None
     device = gpu.device_spec()
     model = catalog_model(manifest.algorithm)
-    ratio = training_memory_from_manifest(manifest, model, device).learn_cost_ratio
+    cost = TrainerCost.of(training_memory_from_manifest(manifest, model, device))
     # Every case ran its engines with LoRA on.
     update: dict = {
         "max_num_batched_tokens": case.max_num_batched_tokens,
@@ -648,7 +649,7 @@ def _predicted_split(case: CalibrationCase, measured_lengths: bool) -> GpuSplit:
         workload,
         case.trainers + case.engines * case.engine_width,
         case.engine_width,
-        lambda trainers: ratio if trainers == case.trainers else None,
+        lambda trainers: cost if trainers == case.trainers else None,
     )
     assert split is not None
     assert (split.trainers, split.engines) == (case.trainers, case.engines)

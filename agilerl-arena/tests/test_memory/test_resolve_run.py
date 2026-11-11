@@ -10,6 +10,7 @@ import math
 import pytest
 
 from agilerl.arena.memory.manifest import (
+    nccl_reshard_layout_supported,
     training_memory_from_manifest,
     validated_run_manifest,
 )
@@ -24,19 +25,25 @@ from agilerl.arena.memory.resolve.parallel import ParallelLayout
 from agilerl.arena.memory.resolve.run import (
     RunMemoryPlan,
     SearchCache,
-    kept_merged_lora_sync,
+    WeightSyncMode,
     kept_split_memory,
-    merged_lora_sync_candidates,
+    kept_weight_sync_mode,
     pick_weight_sync,
     resolve_run_memory,
+    weight_sync_modes,
 )
 from agilerl.arena.memory.resolve.split import (
     GpuSplit,
+    TrainerCost,
     choose_gpu_split,
     split_workload_from_manifest,
 )
-from agilerl.arena.memory.resolve.weight_sync import SyncLink
-from agilerl.arena.memory.specs import DeviceSpec
+from agilerl.arena.memory.resolve.weight_sync import (
+    SM90_NCCL_RESHARD_COSTS,
+    SyncLink,
+    nccl_reshard_sync_seconds,
+)
+from agilerl.arena.memory.specs import DeviceSpec, GiB
 from agilerl.arena.models import model_info
 from agilerl.arena.models.manifest import TrainingManifest
 from agilerl.arena.models.model_info import supported_path
@@ -111,7 +118,7 @@ def _forced_split(
         split_workload_from_manifest(manifest),
         gpus,
         engine_width,
-        lambda count: plan.learn_cost_ratio if count == trainers else None,
+        lambda count: TrainerCost.of(plan) if count == trainers else None,
     )
 
 
@@ -727,6 +734,40 @@ class TestPickWeightSync:
         # Assert
         assert chosen is merged
 
+    def test_faster_merged_transport_beats_a_slower_one(self) -> None:
+        # Arrange: nccl_reshard is listed after NIXL and is the faster merged step.
+        nixl = _quoted(8.0, 8.0, 0.77, merged=True, transport="nixl")
+        nccl = _quoted(8.0, 8.0, 0.31, merged=True, transport="nccl_reshard")
+        adapter = _quoted(8.0, 12.0, 0.14, merged=False, transport="nixl")
+
+        # Act
+        chosen = pick_weight_sync([nixl, nccl, adapter], "cuda_ipc")
+
+        # Assert
+        assert chosen is nccl
+
+    def test_fastest_merged_transport_wins_when_no_adapter_fits(self) -> None:
+        # Arrange
+        nixl = _quoted(8.0, 8.0, 0.77, merged=True, transport="nixl")
+        nccl = _quoted(8.0, 8.0, 0.31, merged=True, transport="nccl_reshard")
+
+        # Act
+        chosen = pick_weight_sync([nixl, nccl], "cuda_ipc")
+
+        # Assert
+        assert chosen is nccl
+
+    def test_adapter_wins_when_merged_sync_is_outside_the_share(self) -> None:
+        # Arrange: merged adds 0.31 s on a 1 s learn-bound step, past the 10% share.
+        merged = _quoted(1.0, 0.2, 0.31, merged=True, transport="nccl_reshard")
+        adapter = _quoted(1.0, 0.4, 0.14, merged=False, transport="nixl")
+
+        # Act
+        chosen = pick_weight_sync([merged, adapter], "cuda_ipc")
+
+        # Assert
+        assert chosen is adapter
+
 
 def _countdown_at(context: int, vllm_config: dict) -> dict:
     raw = _countdown_manifest(batch_size=64)
@@ -786,16 +827,16 @@ def _plan_over(
     )
 
 
-class TestMergedLoraSyncCandidates:
+class TestWeightSyncModes:
     def test_engines_serving_merged_weights_price_both_modes(self) -> None:
         # Arrange
         manifest = _manifest(_sudoku_manifest())
 
         # Act
-        modes = merged_lora_sync_candidates(manifest)
+        modes = weight_sync_modes(manifest, _device("A100-80"), None)
 
         # Assert
-        assert modes == (True, False)
+        assert modes == (WeightSyncMode(True, "nixl"), WeightSyncMode(False, "nixl"))
 
     def test_quantized_engine_syncs_the_adapter(self) -> None:
         # Arrange
@@ -804,10 +845,10 @@ class TestMergedLoraSyncCandidates:
         manifest.algorithm.vllm_config.quantization = "fp8"
 
         # Act
-        modes = merged_lora_sync_candidates(manifest)
+        modes = weight_sync_modes(manifest, _device("A100-80"), None)
 
         # Assert
-        assert modes == (False,)
+        assert modes == (WeightSyncMode(False, "nixl"),)
 
     def test_mtp_drafting_engine_syncs_the_adapter(self) -> None:
         # Arrange
@@ -818,29 +859,17 @@ class TestMergedLoraSyncCandidates:
         manifest = _manifest(raw)
 
         # Act
-        modes = merged_lora_sync_candidates(manifest)
+        modes = weight_sync_modes(manifest, _device("A100-80"), None)
 
         # Assert
-        assert modes == (False,)
-
-    def test_nccl_reshard_prices_merged_sync_alone(self) -> None:
-        # Arrange
-        raw = _sudoku_manifest()
-        raw["training"]["weight_sync"] = {"transport": "nccl_reshard"}
-        manifest = _manifest(raw)
-
-        # Act
-        modes = merged_lora_sync_candidates(manifest)
-
-        # Assert
-        assert modes == (True,)
+        assert modes == (WeightSyncMode(False, "nixl"),)
 
     def test_algorithm_without_rollout_engines_syncs_nothing_merged(self) -> None:
         # Act
-        modes = merged_lora_sync_candidates(_sft_manifest())
+        modes = weight_sync_modes(_sft_manifest(), _device("A100-80"), None)
 
         # Assert
-        assert modes == (False,)
+        assert modes == (WeightSyncMode(False, "nixl"),)
 
     def test_replaced_catalogue_entry_is_read_afresh(
         self, monkeypatch: pytest.MonkeyPatch
@@ -848,7 +877,7 @@ class TestMergedLoraSyncCandidates:
         # Arrange
         manifest = _manifest(_sudoku_manifest())
         hub_id = manifest.algorithm.pretrained_model_name_or_path
-        unquantized = merged_lora_sync_candidates(manifest)
+        unquantized = weight_sync_modes(manifest, _device("A100-80"), None)
         monkeypatch.setitem(
             model_info.SUPPORTED_MODEL_INFO,
             hub_id,
@@ -856,11 +885,14 @@ class TestMergedLoraSyncCandidates:
         )
 
         # Act
-        modes = merged_lora_sync_candidates(manifest)
+        modes = weight_sync_modes(manifest, _device("A100-80"), None)
 
         # Assert
-        assert unquantized == (True, False)
-        assert modes == (False,)
+        assert unquantized == (
+            WeightSyncMode(True, "nixl"),
+            WeightSyncMode(False, "nixl"),
+        )
+        assert modes == (WeightSyncMode(False, "nixl"),)
 
 
 def _l4_with(gib: float) -> DeviceSpec:
@@ -965,11 +997,12 @@ class TestKeptSplitMemory:
         assert merged is True
 
     @pytest.mark.parametrize("sync_link", [None, "cuda_ipc"])
-    def test_syncs_the_adapter_when_merged_trainers_do_not_fit(
+    def test_l4_syncs_the_adapter_when_the_nixl_merged_buffer_does_not_fit(
         self, sync_link: SyncLink | None
     ) -> None:
         # Arrange: countdown at 4 trainers and TP 1 needs 4.75 GiB syncing the
-        # adapter; the merged send buffer puts every plan over a 5.25 GiB GPU.
+        # adapter. The NIXL merged send buffer does not fit a 5.25 GiB GPU, and
+        # an L4 has no measured nccl_reshard rate.
         raw = _countdown_manifest(64)
         raw["algorithm"]["fsdp"] = {"tp": 1}
         manifest = _kept_4t4e(raw)
@@ -981,7 +1014,36 @@ class TestKeptSplitMemory:
         assert plan is not None
         assert plan.split is None
         assert plan.merged_lora_sync is False
+        assert plan.weight_sync_transport == "nixl"
         assert plan.training.settings.merged_lora_sync is False
+        assert all(quote.sync_transport == "nixl" for quote in plan.quotes)
+
+    @pytest.mark.parametrize(
+        ("gib", "transport", "transports"),
+        [
+            (8.5, "nixl", {"nixl"}),
+            (9.0, "nccl_reshard", {"nixl", "nccl_reshard"}),
+        ],
+    )
+    def test_a100_takes_nccl_reshard_only_where_its_refit_groups_fit(
+        self, gib: float, transport: str, transports: set[str]
+    ) -> None:
+        # Arrange: the same run on a small A100. nccl_reshard's two refit
+        # NCCL groups hold more than the NIXL merged send buffer.
+        raw = _countdown_manifest(64)
+        raw["algorithm"]["fsdp"] = {"tp": 1}
+        manifest = _kept_4t4e(raw)
+        device = _device("A100-80").model_copy(update={"total_bytes": int(gib * GiB)})
+
+        # Act
+        plan = _kept_plan(manifest, device, "cuda_ipc")
+
+        # Assert
+        assert plan is not None
+        assert plan.merged_lora_sync is True
+        assert plan.weight_sync_transport == transport
+        assert plan.training.settings.merged_lora_sync is True
+        assert {quote.sync_transport for quote in plan.quotes} == transports
 
     def test_quantized_engine_syncs_the_adapter(self) -> None:
         # Arrange
@@ -1062,13 +1124,13 @@ class TestKeptSplitMemory:
         assert merged is searched.merged_lora_sync
 
 
-class TestKeptMergedLoraSync:
+class TestKeptWeightSyncMode:
     def test_takes_the_mode_the_kept_plan_syncs(self) -> None:
         # Arrange: countdown at 4T4E on H100 is learn-bound over RDMA.
         manifest = _kept_4t4e(_countdown_manifest(64))
 
         # Act
-        merged = kept_merged_lora_sync(
+        mode = kept_weight_sync_mode(
             manifest,
             catalog_model(manifest.algorithm),
             _device("H100-80"),
@@ -1078,14 +1140,14 @@ class TestKeptMergedLoraSync:
         )
 
         # Assert
-        assert merged is False
+        assert mode == WeightSyncMode(False, "nixl")
 
-    def test_no_fitting_mode_takes_the_first_candidate(self) -> None:
+    def test_no_fitting_mode_takes_the_first_mode(self) -> None:
         # Arrange: neither mode's trainers fit a 1 GiB GPU.
         manifest = _kept_4t4e(_countdown_manifest(64))
 
         # Act
-        merged = kept_merged_lora_sync(
+        mode = kept_weight_sync_mode(
             manifest,
             catalog_model(manifest.algorithm),
             _l4_with(1.0),
@@ -1095,19 +1157,26 @@ class TestKeptMergedLoraSync:
         )
 
         # Assert
-        assert merged is True
+        assert mode == WeightSyncMode(True, "nixl")
 
 
 class TestResolveRunMemoryWeightSync:
     def test_nvlink_syncs_merged_weights_on_a_generation_bound_run(self) -> None:
-        # Act: Sudoku on 8x A100 ran 29% faster per step with merged sync.
-        plan = _plan_over(_sudoku_manifest(), "A100-80", "cuda_ipc")
+        # Arrange: Sudoku on 8x A100 ran 29% faster per step with merged sync.
+        # Its FSDP trainers gather every misc weight before an nccl_reshard
+        # refit, so merged NIXL is the faster merged transport.
+        raw = _sudoku_manifest()
+
+        # Act
+        plan = _plan_over(raw, "A100-80", "cuda_ipc")
 
         # Assert
         assert plan.merged_lora_sync is True
+        assert plan.weight_sync_transport == "nixl"
         assert plan.split is not None
         assert plan.split.merged_lora_sync
-        assert plan.split.sync_seconds > 1.0
+        assert plan.training.fsdp is not None
+        assert plan.split.sync_seconds < _quote(plan, True, "nccl_reshard").sync_seconds
 
     def test_tcp_syncs_the_adapter(self) -> None:
         # Act: merged Qwen3-4B weights take over a minute per sync at 0.4 GB/s.
@@ -1120,21 +1189,23 @@ class TestResolveRunMemoryWeightSync:
         assert plan.training.settings.merged_lora_sync is False
 
     def test_nvlink_syncs_merged_weights_on_a_trainer_bound_run(self) -> None:
-        # Act: countdown on 8x H100 is priced 6.7% slower merged and ran 1.6% faster.
+        # Act: countdown on 8x H100. Merged generation is faster than the
+        # adapter step, and the run was 1.6% faster merged.
         plan = _plan_over(_countdown_manifest(64), "H100-80", "cuda_ipc")
 
         # Assert
         assert plan.merged_lora_sync is True
 
-    def test_rdma_syncs_the_adapter_when_the_sync_outweighs_the_gain(self) -> None:
-        # Act: 7.27 GB to each engine over one 100 Gb/s NIC costs more than
-        # the generation merged engines save on countdown.
+    def test_rdma_countdown_keeps_merged_weights(self) -> None:
+        # Act: merged generation on H100 countdown saves more than the
+        # 100 Gb/s RDMA sync of the checkpoint costs.
         plan = _plan_over(_countdown_manifest(64), "H100-80", "rdma")
 
         # Assert
-        assert plan.merged_lora_sync is False
+        assert plan.merged_lora_sync is True
+        assert plan.weight_sync_transport == "nixl"
         assert plan.split is not None
-        assert not plan.split.merged_lora_sync
+        assert plan.split.merged_lora_sync
 
     def test_merged_is_kept_within_the_tie_share(self) -> None:
         # Act: AWM on 8x H100 is priced learn-bound and ran 7% faster merged.
@@ -1324,3 +1395,471 @@ class TestResolveRunMemoryPrequantizedCheckpoint:
             resolve_run_memory(
                 manifest, catalog_model(manifest.algorithm), _h100_nodes(), 24
             )
+
+
+def _quoted(
+    learn: float,
+    generation: float,
+    sync: float,
+    merged: bool,
+    transport: str,
+) -> GpuSplit:
+    return GpuSplit(
+        trainers=2,
+        engines=1,
+        engine_width=2,
+        rollout_batch_size=4,
+        learn_seconds=learn,
+        generation_seconds=generation,
+        sync_seconds=sync,
+        merged_lora_sync=merged,
+        sync_transport=transport,
+    )
+
+
+def _qwen35_9b_manifest(
+    max_output_tokens: int,
+    max_turns: int,
+    batch_size: int,
+    fsdp: dict[str, int] | None = None,
+) -> TrainingManifest:
+    """CISPO on Qwen3.5-9B, 2 trainers and 1 TP2 engine, the measured A100 layout."""
+    raw = {
+        "algorithm": {
+            "name": "CISPO",
+            "batch_size": batch_size,
+            "group_size": 4,
+            "max_output_tokens": max_output_tokens,
+            "fsdp": fsdp or {},
+            "vllm_config": {
+                "tensor_parallel_size": 2,
+                "gpu_memory_utilization": 0.85,
+            },
+        },
+        "environment": {
+            "env_type": "rollout",
+            "factory": "gem:make",
+            "entrypoint": "game:GuessTheNumber-v0",
+            "max_turns": max_turns,
+            "max_reward": 1.0,
+        },
+        "network": {
+            "pretrained_model_name_or_path": "Qwen/Qwen3.5-9B",
+            "max_context_length": 4096,
+            "lora_config": {
+                "lora_r": 16,
+                "lora_alpha": 32,
+                "target_modules": "all-linear",
+            },
+        },
+        "training": {
+            "rollout_mode": "async",
+            "pop_size": 1,
+            "training_gpus_per_agent": 2,
+            "rollout_engines_per_agent": 1,
+        },
+        "replay_buffer": {"kind": "llm", "drop_uninformative_groups": False},
+    }
+    return validated_run_manifest(TrainingManifest.model_validate(raw))
+
+
+def _quote(plan: RunMemoryPlan, merged: bool, transport: str) -> GpuSplit:
+    return next(
+        split
+        for split in plan.quotes
+        if split.merged_lora_sync is merged and split.sync_transport == transport
+    )
+
+
+class TestQwen35NineBWeightSync:
+    def test_short_generation_keeps_the_adapter(self) -> None:
+        # Arrange: one short turn at batch 1. The two trainers split it at
+        # TP 2, which nccl_reshard cannot refit from, and merged NIXL sync
+        # costs more than merged generation gains.
+        manifest = _qwen35_9b_manifest(32, 1, 1)
+        device = _device("A100-80").model_copy(update={"gpus_per_node": 4})
+
+        # Act
+        plan = resolve_run_memory(
+            manifest, catalog_model(manifest.algorithm), device, 4, "cuda_ipc", False
+        )
+
+        # Assert
+        nixl = _quote(plan, True, "nixl")
+        adapter = _quote(plan, False, "nixl")
+        assert plan.training.fsdp is not None
+        assert plan.training.fsdp.tp == 2
+        assert {split.sync_transport for split in plan.quotes} == {"nixl"}
+        assert nixl.learn_seconds == pytest.approx(0.471, abs=0.01)
+        assert nixl.generation_seconds == pytest.approx(0.232, abs=0.01)
+        assert nixl.sync_seconds == pytest.approx(0.726, abs=0.01)
+        assert adapter.learn_seconds == pytest.approx(0.471, abs=0.01)
+        assert adapter.generation_seconds == pytest.approx(0.470, abs=0.01)
+        assert adapter.sync_seconds == pytest.approx(0.359, abs=0.005)
+        assert adapter.synced_step_seconds < nixl.synced_step_seconds
+        assert plan.merged_lora_sync is False
+        assert plan.weight_sync_transport == "nixl"
+
+    def test_long_generation_takes_nccl_reshard(self) -> None:
+        # Arrange: two long turns. Merged generation pays for the sync, and
+        # nccl_reshard is the faster merged transport.
+        manifest = _qwen35_9b_manifest(1024, 2, 4)
+        device = _device("A100-80").model_copy(update={"gpus_per_node": 4})
+
+        # Act
+        plan = resolve_run_memory(
+            manifest, catalog_model(manifest.algorithm), device, 4, "cuda_ipc", False
+        )
+
+        # Assert
+        nccl = _quote(plan, True, "nccl_reshard")
+        adapter = _quote(plan, False, "nixl")
+        assert nccl.learn_seconds == pytest.approx(4.189, abs=0.02)
+        assert nccl.generation_seconds == pytest.approx(11.028, abs=0.05)
+        assert nccl.sync_seconds == pytest.approx(0.306, abs=0.005)
+        assert adapter.generation_seconds == pytest.approx(17.045, abs=0.05)
+        assert adapter.sync_seconds == pytest.approx(0.168, abs=0.005)
+        assert nccl.synced_step_seconds < adapter.synced_step_seconds
+        assert plan.merged_lora_sync is True
+        assert plan.weight_sync_transport == "nccl_reshard"
+
+    def test_b200_takes_nccl_reshard_at_the_sm90_rates(self) -> None:
+        # Arrange: 2 DDP trainers and 1 TP2 engine. B200 has no measured row,
+        # so the refit uses the SM90 rates.
+        manifest = _qwen35_9b_manifest(1024, 2, 4)
+        device = _device("B200").model_copy(update={"gpus_per_node": 4})
+        model = catalog_model(manifest.algorithm)
+        workload = split_workload_from_manifest(manifest)
+
+        # Act
+        plan = resolve_run_memory(manifest, model, device, 4, "cuda_ipc", False)
+
+        # Assert
+        nccl = _quote(plan, True, "nccl_reshard")
+        assert plan.training.fsdp is None
+        assert (nccl.trainers, nccl.engines, nccl.engine_width) == (2, 1, 2)
+        shards = (
+            workload.trainer_shard_group
+            if workload.trainer_shard_group > 1
+            else nccl.trainers
+        )
+        expected = nccl_reshard_sync_seconds(
+            model,
+            workload.lora_target_scope,
+            nccl.engines,
+            nccl.engine_width,
+            shards,
+            False,
+            SM90_NCCL_RESHARD_COSTS,
+        )
+        assert nccl.sync_seconds == expected
+        assert plan.merged_lora_sync is True
+        assert plan.weight_sync_transport == "nccl_reshard"
+
+    def test_h200_takes_nccl_reshard_at_the_h100_rates(self) -> None:
+        # Arrange: the H200 trainers shard FSDP, so the refit gathers every
+        # misc weight on top of the measured H100 transfers.
+        manifest = _qwen35_9b_manifest(1024, 2, 4)
+        device = _device("H200").model_copy(update={"gpus_per_node": 4})
+
+        # Act
+        plan = resolve_run_memory(
+            manifest, catalog_model(manifest.algorithm), device, 4, "cuda_ipc", False
+        )
+
+        # Assert
+        nccl = _quote(plan, True, "nccl_reshard")
+        assert plan.training.fsdp is not None
+        assert nccl.sync_seconds == pytest.approx(0.312, abs=0.001)
+        assert _quote(plan, True, "nixl").sync_seconds == pytest.approx(
+            0.725, abs=0.001
+        )
+        assert plan.merged_lora_sync is True
+        assert plan.weight_sync_transport == "nccl_reshard"
+
+    def test_measured_layout_prices_the_measured_step_ratio(self) -> None:
+        # Arrange: the A100 run, 64-token turns over 2 turns at batch 4, took
+        # 2.75 s per step merged over nccl_reshard and 4.12 s adapter (1.50x).
+        manifest = _qwen35_9b_manifest(64, 2, 4)
+        device = _device("A100-80").model_copy(update={"gpus_per_node": 4})
+
+        # Act
+        plan = resolve_run_memory(
+            manifest, catalog_model(manifest.algorithm), device, 4, "cuda_ipc", False
+        )
+
+        # Assert
+        nccl = _quote(plan, True, "nccl_reshard")
+        adapter = _quote(plan, False, "nixl")
+        assert adapter.synced_step_seconds / nccl.synced_step_seconds == pytest.approx(
+            1.504, abs=0.005
+        )
+
+    @pytest.mark.parametrize("degree", ["tp", "cp"])
+    def test_trainer_model_parallel_is_not_offered_nccl_reshard(
+        self, degree: str
+    ) -> None:
+        # Arrange: nccl_reshard refits only from data-parallel trainer shards.
+        manifest = _qwen35_9b_manifest(1024, 2, 4, {degree: 2})
+
+        # Act
+        modes = weight_sync_modes(manifest, _device("A100-80"), "cuda_ipc")
+
+        # Assert
+        assert modes == (WeightSyncMode(True, "nixl"), WeightSyncMode(False, "nixl"))
+
+    def test_packed_expert_lora_is_not_offered_nccl_reshard(self) -> None:
+        # Arrange: Qwen3.6-35B-A3B adapts its packed expert parameters.
+        manifest = _manifest(_awm_manifest())
+
+        # Act
+        supported = nccl_reshard_layout_supported(manifest)
+        modes = weight_sync_modes(manifest, _device("A100-80"), "cuda_ipc")
+
+        # Assert
+        assert manifest.algorithm.lora_config.target_parameters == [
+            "mlp.experts.down_proj",
+            "mlp.experts.gate_up_proj",
+        ]
+        assert supported is False
+        assert {mode.transport for mode in modes} == {"nixl"}
+
+    def test_moe_is_not_offered_nccl_reshard(self) -> None:
+        # Arrange: the measured rate is a dense model. Experts stay on NIXL.
+        manifest = _manifest(_awm_manifest())
+
+        # Act
+        modes = weight_sync_modes(manifest, _device("A100-80"), "cuda_ipc")
+
+        # Assert
+        assert all(mode.transport != "nccl_reshard" for mode in modes)
+
+    def test_rdma_does_not_offer_the_one_node_nccl_price(self) -> None:
+        # Arrange
+        manifest = _qwen35_9b_manifest(1024, 2, 4)
+
+        # Act
+        modes = weight_sync_modes(manifest, _device("A100-80"), "rdma")
+
+        # Assert
+        assert modes == (WeightSyncMode(True, "nixl"), WeightSyncMode(False, "nixl"))
+
+    def test_a100_dense_offers_nccl_reshard_first(self) -> None:
+        # Arrange
+        manifest = _qwen35_9b_manifest(1024, 2, 4)
+
+        # Act
+        modes = weight_sync_modes(manifest, _device("A100-80"), "cuda_ipc")
+
+        # Assert
+        assert modes == (
+            WeightSyncMode(True, "nccl_reshard"),
+            WeightSyncMode(True, "nixl"),
+            WeightSyncMode(False, "nixl"),
+        )
+
+    @pytest.mark.parametrize("gpu", ["B200", "H200", "H100-80"])
+    def test_other_nvlink_gpus_offer_nccl_reshard_first(self, gpu: str) -> None:
+        # Arrange
+        manifest = _qwen35_9b_manifest(1024, 2, 4)
+
+        # Act
+        modes = weight_sync_modes(manifest, _device(gpu), "cuda_ipc")
+
+        # Assert
+        assert modes == (
+            WeightSyncMode(True, "nccl_reshard"),
+            WeightSyncMode(True, "nixl"),
+            WeightSyncMode(False, "nixl"),
+        )
+
+    def test_pcie_gpu_offers_nixl_only(self) -> None:
+        # Arrange
+        manifest = _qwen35_9b_manifest(1024, 2, 4)
+
+        # Act
+        modes = weight_sync_modes(manifest, _device("L4"), "cuda_ipc")
+
+        # Assert
+        assert modes == (WeightSyncMode(True, "nixl"), WeightSyncMode(False, "nixl"))
+
+
+def _h100_guess_the_number_manifest(hub_id: str) -> TrainingManifest:
+    """CISPO on GuessTheNumber, 4 trainers and 2 TP2 engines, the measured 8x H100 layout."""
+    raw = {
+        "algorithm": {
+            "name": "CISPO",
+            "batch_size": 8,
+            "group_size": 4,
+            "max_output_tokens": 512,
+            "update_epochs": 1,
+            "beta": 0.0,
+            "fsdp": {},
+            "vllm_config": {
+                "tensor_parallel_size": 2,
+                "gpu_memory_utilization": 0.85,
+                "max_num_seqs": 32,
+            },
+        },
+        "environment": {
+            "env_type": "rollout",
+            "factory": "gem:make",
+            "entrypoint": "game:GuessTheNumber-v0-easy",
+            "max_turns": 2,
+            "max_reward": 1.0,
+        },
+        "network": {
+            "pretrained_model_name_or_path": hub_id,
+            "max_context_length": 2048,
+        },
+        "training": {
+            "rollout_mode": "async",
+            "pop_size": 1,
+            "rollout_batch_size": 16,
+            "training_gpus_per_agent": 4,
+            "rollout_engines_per_agent": 2,
+        },
+        "replay_buffer": {"kind": "llm", "max_rollout_version_lag": 2},
+    }
+    return validated_run_manifest(TrainingManifest.model_validate(raw))
+
+
+def _h100_plan(hub_id: str) -> RunMemoryPlan:
+    manifest = _h100_guess_the_number_manifest(hub_id)
+    device = _device("H100-80").model_copy(update={"gpus_per_node": 8})
+    return resolve_run_memory(
+        manifest, catalog_model(manifest.algorithm), device, 8, "cuda_ipc", False
+    )
+
+
+class TestH100GuessTheNumberWeightSync:
+    @pytest.mark.parametrize(
+        ("hub_id", "transport", "fsdp"),
+        [
+            # Wall per step over steps 5-30, nccl_reshard / merged NIXL /
+            # adapter: 2.54 / 2.62 / 3.36 s.
+            ("Qwen/Qwen3.5-2B", "nccl_reshard", False),
+            # 4.13 / 4.39 / 5.58 s.
+            ("Qwen/Qwen3.5-4B", "nccl_reshard", False),
+            # 5.33 / 5.36 / 6.03 s: either merged transport is the fastest.
+            ("Qwen/Qwen3.5-9B", "nccl_reshard", True),
+            # 13.84 / 19.95 / 21.05 s. DDP misses the underprediction buffer
+            # with these NCCL groups, so nccl_reshard trains FSDP.
+            ("Qwen/Qwen3.8-27B", "nccl_reshard", True),
+            # Merged NIXL / adapter: 10.63 / 12.70 s; MoE has no nccl_reshard.
+            ("Qwen/Qwen3.6-35B-A3B", "nixl", True),
+        ],
+        ids=["2b", "4b", "9b", "27b", "35b-a3b"],
+    )
+    def test_takes_the_measured_fastest_mode(
+        self, hub_id: str, transport: str, fsdp: bool
+    ) -> None:
+        # Act
+        plan = _h100_plan(hub_id)
+
+        # Assert
+        assert plan.split is None
+        assert plan.merged_lora_sync is True
+        assert plan.weight_sync_transport == transport
+        assert (plan.training.fsdp is not None) is fsdp
+
+    @pytest.mark.parametrize(
+        ("hub_id", "merged", "transport", "measured", "tolerance"),
+        [
+            ("Qwen/Qwen3.5-2B", True, "nccl_reshard", 0.111, 0.02),
+            ("Qwen/Qwen3.5-2B", True, "nixl", 0.169, 0.12),
+            ("Qwen/Qwen3.5-2B", False, "nixl", 0.109, 0.03),
+            ("Qwen/Qwen3.5-4B", True, "nccl_reshard", 0.179, 0.02),
+            ("Qwen/Qwen3.5-4B", True, "nixl", 0.320, 0.12),
+            ("Qwen/Qwen3.5-4B", False, "nixl", 0.141, 0.03),
+            ("Qwen/Qwen3.5-9B", True, "nccl_reshard", 0.353, 0.14),
+            ("Qwen/Qwen3.5-9B", True, "nixl", 0.729, 0.12),
+            ("Qwen/Qwen3.5-9B", False, "nixl", 0.294, 0.35),
+            ("Qwen/Qwen3.8-27B", True, "nixl", 2.607, 0.12),
+            ("Qwen/Qwen3.8-27B", False, "nixl", 0.328, 0.03),
+            ("Qwen/Qwen3.6-35B-A3B", True, "nixl", 0.509, 0.12),
+            ("Qwen/Qwen3.6-35B-A3B", False, "nixl", 0.512, 0.35),
+        ],
+    )
+    def test_sync_quotes_match_the_measured_syncs(
+        self,
+        hub_id: str,
+        merged: bool,
+        transport: str,
+        measured: float,
+        tolerance: float,
+    ) -> None:
+        # Act: medians of weight_sync_s over steps 5-30, each at the layout the
+        # run trained. FSDP trainers are priced with one gather rate, so their
+        # adapter and nccl_reshard quotes are looser.
+        quote = _quote(_h100_plan(hub_id), merged, transport)
+
+        # Assert
+        assert quote.sync_seconds == pytest.approx(measured, rel=tolerance)
+
+    @pytest.mark.parametrize(
+        ("hub_id", "expected", "rel", "abs_tol"),
+        [
+            ("Qwen/Qwen3.5-2B", 1.27, 0.17, None),
+            ("Qwen/Qwen3.5-4B", 1.30, 0.17, None),
+            ("Qwen/Qwen3.5-9B", 1.24, 0.17, None),
+            # The two merged walls differ by more than the sync, so the
+            # generation ratio that fits both is wider than the token rate.
+            ("Qwen/Qwen3.8-27B", 1.633, None, 0.01),
+            ("Qwen/Qwen3.6-35B-A3B", 1.23, 0.17, None),
+        ],
+    )
+    def test_merged_engines_generate_at_the_measured_token_rate(
+        self, hub_id: str, expected: float, rel: float | None, abs_tol: float | None
+    ) -> None:
+        # Arrange
+        plan = _h100_plan(hub_id)
+
+        # Act
+        speedup = (
+            _quote(plan, False, "nixl").generation_seconds
+            / _quote(plan, True, "nixl").generation_seconds
+        )
+
+        # Assert
+        if abs_tol is None:
+            assert speedup == pytest.approx(expected, rel=rel)
+        else:
+            assert speedup == pytest.approx(expected, abs=abs_tol)
+
+    @pytest.mark.parametrize(
+        ("hub_id", "merged", "transport", "expected"),
+        [
+            ("Qwen/Qwen3.5-2B", True, "nccl_reshard", 2.768),
+            ("Qwen/Qwen3.5-2B", True, "nixl", 2.824),
+            ("Qwen/Qwen3.5-2B", False, "nixl", 3.053),
+            ("Qwen/Qwen3.5-4B", True, "nccl_reshard", 4.055),
+            ("Qwen/Qwen3.5-4B", True, "nixl", 4.235),
+            ("Qwen/Qwen3.5-4B", False, "nixl", 4.777),
+            ("Qwen/Qwen3.5-9B", True, "nccl_reshard", 5.290),
+            ("Qwen/Qwen3.5-9B", True, "nixl", 5.617),
+            ("Qwen/Qwen3.5-9B", False, "nixl", 6.887),
+            ("Qwen/Qwen3.8-27B", True, "nccl_reshard", 15.630),
+            ("Qwen/Qwen3.8-27B", True, "nixl", 17.071),
+            ("Qwen/Qwen3.8-27B", False, "nixl", 23.917),
+            ("Qwen/Qwen3.6-35B-A3B", True, "nixl", 12.143),
+            ("Qwen/Qwen3.6-35B-A3B", False, "nixl", 13.975),
+        ],
+    )
+    def test_step_quotes_match_the_measured_walls(
+        self, hub_id: str, merged: bool, transport: str, expected: float
+    ) -> None:
+        # Act
+        quote = _quote(_h100_plan(hub_id), merged, transport)
+
+        # Assert
+        assert quote.synced_step_seconds == pytest.approx(expected, abs=0.01)
+
+    def test_2b_adapter_step_is_not_within_10_percent_of_nccl_reshard(self) -> None:
+        # Act
+        plan = _h100_plan("Qwen/Qwen3.5-2B")
+        nccl = _quote(plan, True, "nccl_reshard")
+        adapter = _quote(plan, False, "nixl")
+
+        # Assert
+        assert adapter.synced_step_seconds > 1.10 * nccl.synced_step_seconds

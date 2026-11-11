@@ -2027,15 +2027,51 @@ class TestGatedDeltaBlockBytes:
         assert forward == 16384 * 31744 * 2
         assert forward == 992 * MiB
 
-    def test_backward_adds_the_in_proj_output_and_gate(self):
-        arch = ModelArch.from_hf_config(QWEN35_08B.config)
+    def test_backward_matches_the_fla_backward_snapshot(self):
+        # Qwen3.5-4B checkpointed backward, two 4096-token rows: 16 key and 32
+        # value heads, so the WY key gradient is also summed to the key heads.
+        arch = ModelArch.from_hf_config(SUPPORTED_MODEL_INFO["Qwen/Qwen3.5-4B"].config)
 
-        forward = block_activations.gated_delta_block_bytes(arch, 2, 4096, 2.0)
         backward = block_activations.gated_delta_block_bytes(
             arch, 2, 4096, 2.0, backward=True
         )
 
-        assert backward - forward == 2 * 4096 * (6144 + 2048) * 2
+        bf16 = 8192 + 5 * 2048 + 3 * 4096 + 7 * 4096 + 32 * 64 + 2 * 8192 + 2 * 32
+        fp32 = 4 * 32 + 2 * 16
+        assert backward == 2 * 4096 * (bf16 * 2 + fp32 * 4)
+
+    @pytest.mark.parametrize(
+        (
+            "model_id",
+            "backward_width",
+            "measured_backward",
+            "saved_width",
+            "measured_saved",
+        ),
+        [
+            ("Qwen/Qwen3.5-0.8B", 88512, 88522, 39264, 39272),
+            ("Qwen/Qwen3.5-2B", 88512, 88530, 39264, 39284),
+            ("Qwen/Qwen3.5-4B", 156416, 156419, 62016, 62020),
+        ],
+    )
+    def test_backward_and_saved_set_match_the_measured_slopes(
+        self, model_id, backward_width, measured_backward, saved_width, measured_saved
+    ):
+        # One bf16 row, fla 0.5.2 on an A100-40, bytes per token over 8k-96k
+        # tokens: the checkpointed mixer's backward peak and the uncheckpointed
+        # mixer's tensors held between forward and backward. Measured by
+        # packages/agilerl-ray/scripts/gated_delta_layer_memory.py.
+        arch = ModelArch.from_hf_config(SUPPORTED_MODEL_INFO[model_id].config)
+
+        backward = block_activations.gated_delta_block_bytes(
+            arch, 1, 1024, 2.0, backward=True
+        )
+        saved = block_activations.gated_delta_saved_bytes(arch, 1, 1024, 2.0)
+
+        assert backward == 1024 * backward_width
+        assert saved == 1024 * saved_width
+        assert backward_width == pytest.approx(measured_backward, rel=0.01)
+        assert saved_width == pytest.approx(measured_saved, rel=0.01)
 
     def test_mamba2_and_attention_only_stacks_are_zero(self):
         mamba2 = ModelArch.from_hf_config(NEMOTRON_NANO_MAMBA)
@@ -2068,8 +2104,10 @@ class TestGatedDeltaBlockBytes:
 
         saved = block_activations.gated_delta_saved_bytes(arch, 1, 32768, 2.0)
 
-        assert saved == 32768 * ((8192 + 2 * 2048 + 4 * 4096 + 32 * 64) * 2 + 32 * 4)
-        assert saved == 1924 * MiB
+        assert saved == 32768 * (
+            (8192 + 2 * 2048 + 4 * 4096 + 32 * 64 + 32) * 2 + (3 * 32 + 2 * 16) * 4
+        )
+        assert saved == 1938 * MiB
 
     def test_tensor_parallel_keeps_each_ranks_heads(self):
         # Arrange: Qwen3.6-35B-A3B at tp=2 keeps 8 key and 16 value heads per rank.
@@ -2082,6 +2120,9 @@ class TestGatedDeltaBlockBytes:
             arch, 1, 1024, 2.0, False, 2
         )
         saved = block_activations.gated_delta_saved_bytes(arch, 1, 32768, 2.0, 2)
+        backward = block_activations.gated_delta_block_bytes(
+            arch, 1, 1024, 2.0, True, 2
+        )
 
         # Assert
         assert block_activations.gated_delta_qk_width(arch, 2) == 1024
@@ -2089,7 +2130,13 @@ class TestGatedDeltaBlockBytes:
             forward == 1024 * (4096 + 4 * 1024 + 2048 + 5 * 2048 + 16 * 64 + 4096) * 2
         )
         assert forward == 50 * MiB
-        assert saved == 32768 * ((4096 + 2 * 1024 + 4 * 2048 + 16 * 64) * 2 + 16 * 4)
+        assert saved == 32768 * (
+            (4096 + 2 * 1024 + 4 * 2048 + 16 * 64 + 16) * 2 + (3 * 16 + 2 * 8) * 4
+        )
+        assert backward == 1024 * 78208
+        assert 2 * backward == block_activations.gated_delta_block_bytes(
+            arch, 1, 1024, 2.0, True
+        )
 
     def test_tensor_parallel_that_does_not_split_the_heads_keeps_them_whole(self):
         arch = ModelArch.from_hf_config(QWEN35_08B.config)
@@ -2136,7 +2183,9 @@ class TestGatedDeltaBlockBytes:
 
     def test_backward_keeps_the_recurrent_tensors_through_the_mlp(self):
         # Arrange
-        arch = ModelArch.from_hf_config(QWEN35_08B.config)
+        arch = ModelArch.from_hf_config(QWEN35_08B.config).model_copy(
+            update={"intermediate_size": 8192}
+        )
         tokens = 16384
 
         # Act
@@ -2151,9 +2200,9 @@ class TestGatedDeltaBlockBytes:
         )
 
         # Assert: two residual copies, the gated MLP's four tensors, the GDN's saved set.
-        assert backward == tokens * (2 * 1024 + 4 * 3584) * 2 + 800 * MiB
+        assert backward == tokens * ((2 * 1024 + 4 * 8192) * 2 + 39264)
         assert backward == mamba
-        assert mlp == tokens * (2 * 1024 + 4 * 3584) * 2
+        assert mlp == tokens * (2 * 1024 + 4 * 8192) * 2
 
     def test_moe_backward_keeps_the_recurrent_tensors_through_the_experts(self):
         # Arrange
@@ -2170,7 +2219,7 @@ class TestGatedDeltaBlockBytes:
 
         # Assert: residual copies, the GDN's saved set, the shared expert, routed experts.
         assert routed == 3072 * MiB
-        assert mamba == tokens * (2 * 2048 + 4 * 512) * 2 + 1924 * MiB + routed
+        assert mamba == tokens * (2 * 2048 + 4 * 512) * 2 + 1938 * MiB + routed
 
     def test_backward_keeps_the_kernel_peak_when_the_mlp_is_narrow(self):
         # Arrange
@@ -2185,7 +2234,7 @@ class TestGatedDeltaBlockBytes:
         )
 
         # Assert: the kernel's backward outgrows the saved set plus a narrow MLP.
-        assert mamba == tokens * 2 * 1024 * 2 + 1248 * MiB
+        assert mamba == tokens * 2 * 1024 * 2 + 1383 * MiB
 
     def test_block_exclusive_stack_keeps_one_sub_layer(self):
         arch = ModelArch.from_hf_config(QWEN35_08B.config).model_copy(
@@ -2197,7 +2246,7 @@ class TestGatedDeltaBlockBytes:
             arch, 1, tokens, 2.0, backward=True
         )
 
-        assert backward == tokens * 2 * 1024 * 2 + 1248 * MiB
+        assert backward == tokens * 2 * 1024 * 2 + 1383 * MiB
 
     def test_lora_dropout_charges_the_recurrent_sub_layer_and_mlp(self):
         arch = ModelArch.from_hf_config(QWEN35_08B.config)
@@ -2259,6 +2308,83 @@ class TestBlockRecomputeBackwardPeak:
             * (2 * arch.hidden_size + arch.peak_qkv_dim + 4 * arch.intermediate_size)
             * 2
         )
+
+    def test_lora_scope_prices_the_mlp_input_and_its_gradients(self):
+        seq_len = 1024
+        h, inter = QWEN_05B.hidden_size, QWEN_05B.intermediate_size
+
+        def backward(arch, scope):
+            return block_activations.block_recompute_bytes(
+                arch, 1, seq_len, 2.0, backward=True, lora_target_scope=scope
+            )
+
+        stock = QWEN_05B.model_copy(update={"stock_gated_mlp": True})
+        base = backward(QWEN_05B, None)
+
+        assert backward(QWEN_05B, "all-linear") - base == seq_len * (h + inter) * 2
+        assert backward(QWEN_05B, "attention-only") - base == seq_len * (h - inter) * 2
+        assert backward(stock, "all-linear") - backward(stock, None) == (
+            seq_len * (h + inter) * 2
+        )
+
+    @pytest.mark.parametrize(
+        ("model_id", "layer", "scope", "width", "measured", "rel"),
+        [
+            ("Qwen/Qwen3-1.7B", None, "all-linear", 90112, 92520, 0.035),
+            ("Qwen/Qwen3-1.7B", None, "attention-only", 65536, 67880, 0.035),
+            ("Qwen/Qwen3.5-2B", "mamba", "all-linear", 112992, 113224, 0.003),
+            ("Qwen/Qwen3.5-4B", "mamba", "all-linear", 169536, 169801, 0.003),
+            ("Qwen/Qwen3.5-2B", "attention", "all-linear", 101376, 101648, 0.003),
+            ("Qwen/Qwen3.5-4B", "attention", "all-linear", 162816, 163222, 0.003),
+            ("Qwen/Qwen3.5-2B", "attention", "attention-only", 76800, 77008, 0.003),
+            ("Qwen/Qwen3.5-4B", "attention", "attention-only", 125952, 126271, 0.003),
+        ],
+    )
+    def test_lora_backward_matches_the_measured_layer_slopes(
+        self, model_id, layer, scope, width, measured, rel
+    ):
+        # One bf16 row, Liger and rank-16 LoRA on an A100-40, bytes per token
+        # over 16k-64k tokens of a checkpointed decoder layer's backward,
+        # measured by packages/agilerl-ray/scripts/gated_delta_layer_memory.py.
+        # The dense layer also holds k_proj and k_norm outputs the block leaves
+        # out, up to 3.5% of its slope; a gated attention layer holds its
+        # stored set beside the FFN backward.
+        arch = ModelArch.from_hf_config(SUPPORTED_MODEL_INFO[model_id].config)
+
+        backward = block_activations.block_recompute_bytes(
+            arch, 1, 1024, 2.0, backward=True, layer=layer, lora_target_scope=scope
+        )
+
+        assert backward == 1024 * width
+        assert width == pytest.approx(measured, rel=rel)
+
+    @pytest.mark.parametrize(
+        ("tensor_parallel", "attention_width", "gated_delta_width"),
+        [(1, 202752, 209472), (2, 113664, 117024), (4, 69120, 70800)],
+    )
+    def test_qwen35_9b_gated_delta_layer_sets_the_backward_peak(
+        self, tensor_parallel, attention_width, gated_delta_width
+    ):
+        # Arrange: the 9B attention has the 4B's q and kv widths, so the same
+        # stored set; heads split per rank under tensor parallel.
+        arch = ModelArch.from_hf_config(SUPPORTED_MODEL_INFO["Qwen/Qwen3.5-9B"].config)
+
+        def backward(layer):
+            return block_activations.block_recompute_bytes(
+                arch,
+                1,
+                1024,
+                2.0,
+                backward=True,
+                layer=layer,
+                tensor_parallel=tensor_parallel,
+                lora_target_scope="all-linear",
+            )
+
+        # Act / Assert
+        assert backward("attention") == 1024 * attention_width
+        assert backward("mamba") == 1024 * gated_delta_width
+        assert backward(None) == backward("mamba")
 
     def test_forward_keeps_four_residuals_and_the_undoubled_mlp(self):
         seq_len = 16384
@@ -3686,17 +3812,17 @@ class TestLoraOnlyStoredInputBytes:
 
 
 class TestMeanBlockRecomputeBytes:
-    def test_dense_stack_takes_its_one_block(self):
+    def test_dense_stack_takes_a_share_of_its_one_block(self):
         seq_len = 1024
         arch = QWEN_05B
 
         mean = block_activations.mean_block_recompute_bytes(arch, 1, seq_len, 2.0)
 
-        assert (
-            mean
-            == seq_len
+        assert mean == pytest.approx(
+            seq_len
             * (2 * arch.hidden_size + arch.peak_qkv_dim + 4 * arch.intermediate_size)
             * 2
+            * formulas.STORED_BLOCK_SHARE
         )
 
     def test_one_mixer_stack_weights_each_mixer_by_its_layers(self):
@@ -3710,24 +3836,242 @@ class TestMeanBlockRecomputeBytes:
 
         # Act
         mean = block_activations.mean_block_recompute_bytes(arch, 2, 512, 2.0)
+        attention = block_activations.stored_attention_block_bytes(arch, 2, 512, 2.0)
 
         # Assert
         assert arch.sublayer_transients
         assert peak("attention") < peak("mamba")
-        assert mean == (1 * peak("attention") + 3 * peak("mamba")) // 4
+        assert mean == pytest.approx(
+            (attention + 3 * peak("mamba") * formulas.STORED_BLOCK_SHARE) / 4
+        )
         assert mean < block_activations.block_recompute_bytes(
             arch, 2, 512, 2.0, backward=True
         )
 
-    def test_block_exclusive_stack_takes_the_widest_block(self):
+    def test_block_exclusive_stack_takes_a_share_of_the_widest_block(self):
         arch = ModelArch.from_hf_config(NEMOTRON_H)
 
         mean = block_activations.mean_block_recompute_bytes(arch, 1, 4096, 2.0)
 
         assert arch.block_exclusive_layers
-        assert mean == block_activations.block_recompute_bytes(
-            arch, 1, 4096, 2.0, backward=True
+        assert mean == pytest.approx(
+            block_activations.block_recompute_bytes(arch, 1, 4096, 2.0, backward=True)
+            * formulas.STORED_BLOCK_SHARE
         )
+
+    def test_gated_delta_layers_take_their_stored_tensors_not_the_kernel_backward(
+        self,
+    ):
+        # Arrange
+        arch = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["Qwen/Qwen3.5-0.8B"].config
+        )
+
+        def peak(layer):
+            return block_activations.block_recompute_bytes(
+                arch, 1, 1024, 2.0, backward=True, layer=layer
+            )
+
+        # Act
+        mean = block_activations.mean_block_recompute_bytes(arch, 1, 1024, 2.0)
+        stored = block_activations.stored_gated_delta_block_bytes(arch, 1, 1024, 2.0)
+        attention = block_activations.stored_attention_block_bytes(arch, 1, 1024, 2.0)
+
+        # Assert: the fla kernel's backward outgrows the stored tensors.
+        assert stored < peak("mamba")
+        assert mean == (6 * attention + 18 * stored) / 24
+
+    def test_layer_prices_one_mixers_layers(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["Qwen/Qwen3.5-0.8B"].config
+        )
+
+        def price(layer):
+            return block_activations.mean_block_recompute_bytes(
+                arch, 1, 1024, 2.0, layer=layer
+            )
+
+        # Act
+        attention, gated_delta = price("attention"), price("mamba")
+
+        # Assert
+        assert attention == block_activations.stored_attention_block_bytes(
+            arch, 1, 1024, 2.0
+        )
+        assert gated_delta == block_activations.stored_gated_delta_block_bytes(
+            arch, 1, 1024, 2.0
+        )
+        assert price(None) == (6 * attention + 18 * gated_delta) / 24
+
+    def test_layer_leaves_other_stacks_at_the_widest_blocks_share(self):
+        arch = ModelArch.from_hf_config(NEMOTRON_H)
+
+        mean = block_activations.mean_block_recompute_bytes(arch, 1, 4096, 2.0)
+        mamba = block_activations.mean_block_recompute_bytes(
+            arch, 1, 4096, 2.0, layer="mamba"
+        )
+
+        assert mamba == mean
+
+    @pytest.mark.parametrize(
+        ("model_id", "width", "measured"),
+        [
+            ("Qwen/Qwen3.5-0.8B", 68960, 68979),
+            ("Qwen/Qwen3.5-2B", 92512, 92536),
+            ("Qwen/Qwen3.5-4B", 137792, 137816),
+        ],
+    )
+    def test_stored_gated_delta_layer_matches_the_measured_slope(
+        self, model_id, width, measured
+    ):
+        # One bf16 row, LoRA r=1 on every linear, an A100-40, bytes per token
+        # over 16k-64k tokens: an uncheckpointed decoder layer's tensors held
+        # between forward and backward, plus its input. Measured by
+        # packages/agilerl-ray/scripts/gated_delta_layer_memory.py.
+        arch = ModelArch.from_hf_config(SUPPORTED_MODEL_INFO[model_id].config)
+
+        stored = block_activations.stored_gated_delta_block_bytes(arch, 1, 1024, 2.0)
+
+        # Assert: four hidden copies, the gated MLP's three tensors, the GDN's saved set.
+        assert stored == 1024 * width
+        assert width == pytest.approx(measured, rel=0.0005)
+
+    @pytest.mark.parametrize(
+        ("model_id", "width", "attention_width", "measured", "measured_attention"),
+        [
+            ("Qwen/Qwen3.5-0.8B", 57344, 27648, 57438, 27742),
+            ("Qwen/Qwen3.5-2B", 80896, 27648, 80990, 27742),
+            ("Qwen/Qwen3.5-4B", 131072, 55296, 131258, 55482),
+        ],
+    )
+    def test_stored_attention_layer_matches_the_measured_slope(
+        self, model_id, width, attention_width, measured, measured_attention
+    ):
+        # One bf16 row, Liger, FA2, LoRA r=1 on every linear, an A100-40, bytes
+        # per token over 16k-64k tokens: an uncheckpointed full-attention
+        # layer's tensors held between forward and backward, plus its input.
+        # The measured attention share is that less the layer's four hidden
+        # copies and three MLP tensors. Measured by
+        # packages/agilerl-ray/scripts/gated_delta_layer_memory.py.
+        arch = ModelArch.from_hf_config(SUPPORTED_MODEL_INFO[model_id].config)
+        ffn = 1024 * (4 * arch.hidden_size + 3 * arch.intermediate_size) * 2
+
+        stored = block_activations.stored_attention_block_bytes(arch, 1, 1024, 2.0)
+
+        # Assert: four hidden copies, the gated MLP's three tensors, 6 q and 3 kv widths.
+        assert stored == 1024 * width
+        assert stored - ffn == 1024 * attention_width
+        assert attention_width == pytest.approx(measured_attention, rel=0.004)
+        assert width == pytest.approx(measured, rel=0.002)
+
+    def test_stored_attention_without_output_gate_or_qk_norm_keeps_qkv_and_output(
+        self,
+    ):
+        # Arrange: 2 query heads and 1 KV head of 8.
+        arch = MAMBA_HYBRID_TINY
+        ffn = 2 * 512 * (4 * 16 + 3 * 32) * 2
+
+        # Act
+        stored = block_activations.stored_attention_block_bytes(arch, 2, 512, 2.0)
+
+        # Assert: rope'd q and k, v and the attention output; no gate tensors.
+        assert not arch.attention_output_gate
+        assert not arch.qk_norm
+        assert stored - ffn == 2 * 512 * (2 * 16 + 2 * 8) * 2
+
+    def test_stored_attention_gate_tensors_follow_the_output_gate(self):
+        # Arrange
+        gated = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["Qwen/Qwen3.5-0.8B"].config
+        )
+        ungated = gated.model_copy(update={"attention_output_gate": False})
+
+        # Act
+        with_gate = block_activations.stored_attention_block_bytes(gated, 1, 1024, 2.0)
+        without = block_activations.stored_attention_block_bytes(ungated, 1, 1024, 2.0)
+
+        # Assert: the contiguous output, sigmoid(gate) and the gated output.
+        assert with_gate - without == 1024 * 3 * 2048 * 2
+
+    def test_low_rank_attention_and_kda_keep_a_share_of_their_backward_peaks(self):
+        # Arrange: GLM-5.3-Flash runs MLA attention beside KDA layers.
+        arch = ModelArch.from_hf_config(SUPPORTED_MODEL_INFO[GLM_FLASH].config)
+
+        def peak(layer):
+            return block_activations.block_recompute_bytes(
+                arch, 1, 1024, 2.0, backward=True, layer=layer
+            )
+
+        # Act
+        mean = block_activations.mean_block_recompute_bytes(arch, 1, 1024, 2.0)
+
+        # Assert
+        assert arch.low_rank_attention
+        assert arch.mamba_kda
+        assert mean == pytest.approx(
+            (11 * peak("attention") + 34 * peak("mamba"))
+            * formulas.STORED_BLOCK_SHARE
+            / 45
+        )
+
+    def test_moe_gated_delta_stack_keeps_a_share_of_its_backward_peaks(self):
+        # Arrange: Qwen3.6-35B-A3B has no stored-layer measurement.
+        arch = ModelArch.from_hf_config(QWEN36.config)
+
+        def peak(layer):
+            return block_activations.block_recompute_bytes(
+                arch, 1, 1024, 2.0, backward=True, layer=layer
+            )
+
+        # Act
+        mean = block_activations.mean_block_recompute_bytes(arch, 1, 1024, 2.0)
+
+        # Assert
+        assert arch.is_moe
+        assert arch.mamba_gated_delta
+        assert mean == pytest.approx(
+            (10 * peak("attention") + 30 * peak("mamba"))
+            * formulas.STORED_BLOCK_SHARE
+            / 40
+        )
+
+
+class TestUnmeasuredArchitectureEstimates:
+    """KDA layers and MoE MLP backwards, which have no layer measurement."""
+
+    def test_kda_backward_and_saved_set(self):
+        arch = ModelArch.from_hf_config(SUPPORTED_MODEL_INFO[GLM_FLASH].config)
+
+        backward = block_activations.gated_delta_block_bytes(
+            arch, 1, 1024, 2.0, backward=True
+        )
+        saved = block_activations.gated_delta_saved_bytes(arch, 1, 1024, 2.0)
+        mean = block_activations.mean_block_recompute_bytes(arch, 1, 1024, 2.0)
+
+        assert backward == 327155712
+        assert saved == 159645696
+        assert mean == pytest.approx(522412214 * formulas.STORED_BLOCK_SHARE)
+
+    @pytest.mark.parametrize(
+        ("model_id", "block"),
+        [
+            ("openai/gpt-oss-20b", 281804800),
+            ("ibm-granite/granite-3.1-3b-a800m-instruct", 95420416),
+            (DSV4_FLASH, 488636416),
+            (MIMO_FLASH, 315621376),
+            (GLM_FLASH, 554696704),
+        ],
+    )
+    @pytest.mark.parametrize("scope", [None, "all-linear", "attention-only"])
+    def test_moe_block_backward_ignores_the_lora_targets(self, model_id, block, scope):
+        arch = ModelArch.from_hf_config(SUPPORTED_MODEL_INFO[model_id].config)
+
+        backward = block_activations.block_recompute_bytes(
+            arch, 1, 1024, 2.0, backward=True, lora_target_scope=scope
+        )
+
+        assert backward == block
 
 
 SUPER_VL = SUPPORTED_MODEL_INFO["nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16"]
@@ -4142,6 +4486,115 @@ class TestTrainingCheckpointedBlocks:
 
         with pytest.raises(ValueError, match="checkpoint_every_n_blocks unset"):
             formulas.training_checkpointed_blocks(QWEN_05B, settings)
+
+    def test_layers_are_the_first_and_every_stride_th_after_it(self) -> None:
+        # Arrange
+        settings = TrainingSettings(fsdp=FSDPConfig(checkpoint_every_n_blocks=5))
+        off = settings.model_copy(update={"gradient_checkpointing": False})
+
+        # Act
+        layers = formulas.training_checkpointed_layers(QWEN_05B, settings)
+
+        # Assert
+        assert list(layers) == [0, 5, 10, 15, 20]
+        assert len(layers) == formulas.training_checkpointed_blocks(QWEN_05B, settings)
+        assert not formulas.training_checkpointed_layers(QWEN_05B, off)
+
+    @pytest.mark.parametrize(
+        ("model_id", "tower_units", "attention_checkpointed", "checkpointed"),
+        [("Qwen/Qwen3.5-0.8B", 12, False, 12), ("Qwen/Qwen3.5-9B", 27, True, 16)],
+    )
+    def test_stride_counts_from_the_first_tower_block(
+        self,
+        model_id: str,
+        tower_units: int,
+        attention_checkpointed: bool,
+        checkpointed: int,
+    ) -> None:
+        # Arrange: full attention runs at every fourth layer.
+        arch = ModelArch.from_hf_config(SUPPORTED_MODEL_INFO[model_id].config)
+        settings = TrainingSettings(fsdp=FSDPConfig(checkpoint_every_n_blocks=2))
+        attention = [
+            index for index, kind in enumerate(arch.layer_mixers) if kind == "attention"
+        ]
+
+        # Act
+        layers = formulas.training_checkpointed_layers(arch, settings)
+
+        # Assert
+        assert arch.tower_block_units == tower_units
+        assert all((index in layers) is attention_checkpointed for index in attention)
+        assert formulas.training_checkpointed_blocks(arch, settings) == checkpointed
+
+    def test_gemma4_tower_counts_its_patch_embedder(self) -> None:
+        arch = ModelArch.from_hf_config(GEMMA4_E4B.config)
+
+        assert arch.tower_block_units == 17
+
+
+class TestBackwardFreedBytes:
+    def test_layers_above_free_what_they_kept_and_stored_layers_their_own(self):
+        # Arrange: layers 0 and 2 are checkpointed, 1 and 3 stored.
+        arch = QWEN_05B.model_copy(update={"n_layers": 4})
+        settings = TrainingSettings(fsdp=FSDPConfig(checkpoint_every_n_blocks=2))
+        kept = [10.0, 20.0, 30.0, 40.0]
+
+        # Act
+        freed = block_activations.backward_freed_bytes(arch, settings, kept)
+
+        # Assert
+        assert freed == [90.0, 90.0, 40.0, 40.0]
+
+    def test_dpo_frees_one_graphs_share(self):
+        # Arrange: kept spans the chosen and rejected graphs.
+        arch = QWEN_05B.model_copy(update={"n_layers": 4})
+        settings = TrainingSettings(
+            algorithm="dpo", fsdp=FSDPConfig(checkpoint_every_n_blocks=2)
+        )
+        kept = [10.0, 20.0, 30.0, 40.0]
+
+        # Act
+        freed = block_activations.backward_freed_bytes(arch, settings, kept)
+
+        # Assert
+        assert freed == [45.0, 45.0, 20.0, 20.0]
+
+    def test_activation_offload_frees_nothing_on_the_device(self):
+        arch = QWEN_05B.model_copy(update={"n_layers": 4})
+        settings = TrainingSettings(
+            activation_offload=True, fsdp=FSDPConfig(checkpoint_every_n_blocks=2)
+        )
+
+        freed = block_activations.backward_freed_bytes(arch, settings, [1.0] * 4)
+
+        assert freed == [0.0] * 4
+
+
+class TestLayerBlockKinds:
+    def test_one_mixer_stack_lists_each_layers_mixer(self) -> None:
+        arch = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["Qwen/Qwen3.5-0.8B"].config
+        )
+
+        kinds = formulas.layer_block_kinds(arch)
+
+        # Full attention runs at every fourth layer.
+        assert kinds == tuple(
+            "attention" if index % 4 == 3 else "mamba" for index in range(24)
+        )
+
+    def test_block_exclusive_stack_folds_mlp_and_moe_into_ffn(self) -> None:
+        arch = ModelArch.from_hf_config(NEMOTRON_H_MOE)
+
+        kinds = formulas.layer_block_kinds(arch)
+
+        assert not arch.layer_mixers
+        assert kinds == tuple(
+            "ffn" if kind in ("mlp", "moe") else kind for kind in arch.layer_kinds
+        )
+
+    def test_uniform_stack_has_no_kinds(self) -> None:
+        assert formulas.layer_block_kinds(QWEN_05B) == (None,) * 24
 
 
 class TestCheckpointedMoeBlocks:

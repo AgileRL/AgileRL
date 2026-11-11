@@ -94,7 +94,7 @@ def tiny_model():
 
 def builder():
     model_config = json.loads(Path(TINY_CONFIG).read_text())
-    return lambda laid_out, device, width, engines, adapter_sync: (
+    return lambda laid_out, device, width, engines, adapter_sync, nccl_reshard: (
         run_config_from_manifest(
             laid_out,
             device,
@@ -102,6 +102,7 @@ def builder():
             tensor_parallel_size=width,
             rollout_engines=engines,
             adapter_sync=adapter_sync,
+            nccl_reshard=nccl_reshard,
         )
     )
 
@@ -125,10 +126,10 @@ def built_layouts():
     """A builder that records ``(gpus per node, tp, ep, cp)`` for every allocation it sizes."""
     seen = set()
 
-    def build(laid_out, device, width, engines, adapter_sync):
+    def build(laid_out, device, width, engines, adapter_sync, nccl_reshard):
         fsdp = laid_out.algorithm.fsdp
         seen.add((device.gpus_per_node, fsdp.tp, fsdp.ep, fsdp.cp))
-        return builder()(laid_out, device, width, engines, adapter_sync)
+        return builder()(laid_out, device, width, engines, adapter_sync, nccl_reshard)
 
     return build, seen
 
@@ -138,11 +139,11 @@ def built_split():
     """A builder that records ``(tp, ep, cp, trainers)`` for every allocation it sizes."""
     seen = set()
 
-    def build(laid_out, device, width, engines, adapter_sync):
+    def build(laid_out, device, width, engines, adapter_sync, nccl_reshard):
         fsdp = laid_out.algorithm.fsdp
         trainers = laid_out.training.training_gpus_per_agent
         seen.add((fsdp.tp, fsdp.ep, fsdp.cp, trainers))
-        return builder()(laid_out, device, width, engines, adapter_sync)
+        return builder()(laid_out, device, width, engines, adapter_sync, nccl_reshard)
 
     return build, seen
 
@@ -366,9 +367,13 @@ class TestCheckTiers:
         sized = []
         build = builder()
 
-        def recording_build(laid_out, train_device, width, engines, adapter_sync):
+        def recording_build(
+            laid_out, train_device, width, engines, adapter_sync, nccl_reshard
+        ):
             sized.append(laid_out.training.training_gpus_per_agent)
-            return build(laid_out, train_device, width, engines, adapter_sync)
+            return build(
+                laid_out, train_device, width, engines, adapter_sync, nccl_reshard
+            )
 
         # Act
         (check,) = check_tiers(
@@ -391,9 +396,13 @@ class TestCheckTiers:
         sized = []
         build = builder()
 
-        def recording_build(laid_out, train_device, width, engines, adapter_sync):
+        def recording_build(
+            laid_out, train_device, width, engines, adapter_sync, nccl_reshard
+        ):
             sized.append((laid_out, engines))
-            return build(laid_out, train_device, width, engines, adapter_sync)
+            return build(
+                laid_out, train_device, width, engines, adapter_sync, nccl_reshard
+            )
 
         # Act
         (check,) = check_tiers(
@@ -422,9 +431,13 @@ class TestCheckTiers:
         widths = []
         build = builder()
 
-        def recording_build(laid_out, train_device, width, engines, adapter_sync):
+        def recording_build(
+            laid_out, train_device, width, engines, adapter_sync, nccl_reshard
+        ):
             widths.append((width, engines))
-            return build(laid_out, train_device, width, engines, adapter_sync)
+            return build(
+                laid_out, train_device, width, engines, adapter_sync, nccl_reshard
+            )
 
         # Act
         check_tiers(
@@ -645,10 +658,12 @@ class TestCheckTiers:
         )
         layouts = []
 
-        def build(laid_out, device, width, engines, adapter_sync):
+        def build(laid_out, device, width, engines, adapter_sync, nccl_reshard):
             fsdp = laid_out.algorithm.fsdp
             layouts.append((fsdp.tp, fsdp.ep))
-            return builder()(laid_out, device, width, engines, adapter_sync)
+            return builder()(
+                laid_out, device, width, engines, adapter_sync, nccl_reshard
+            )
 
         tiers = [
             tier("l4-1x", "NVIDIA L4", 1, 1.0),
@@ -963,10 +978,12 @@ class TestCheckTiers:
         )
         layouts = set()
 
-        def build(laid_out, device, width, engines, adapter_sync):
+        def build(laid_out, device, width, engines, adapter_sync, nccl_reshard):
             fsdp = laid_out.algorithm.fsdp
             layouts.add((fsdp.tp, fsdp.ep, fsdp.cp))
-            return builder()(laid_out, device, width, engines, adapter_sync)
+            return builder()(
+                laid_out, device, width, engines, adapter_sync, nccl_reshard
+            )
 
         tiers = [
             {

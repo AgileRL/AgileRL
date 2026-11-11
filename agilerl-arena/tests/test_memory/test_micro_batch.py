@@ -209,7 +209,7 @@ class TestTrainingMemoryFromManifest:
         plan = _plan(raw, 4.32)
 
         # Assert
-        assert plan.micro_batch_tokens_per_gpu == 10 * 1024
+        assert plan.micro_batch_tokens_per_gpu == 8 * 1024
         assert plan.micro_batch_size_per_gpu == 4
 
     def test_tight_device_floors_at_the_longest_row(self) -> None:
@@ -232,7 +232,7 @@ class TestTrainingMemoryFromManifest:
         grpo_plan = _plan(grpo, 5.47)
 
         # Assert
-        assert plan.micro_batch_tokens_per_gpu == 7 * 1024
+        assert plan.micro_batch_tokens_per_gpu == 6 * 1024
         assert grpo_plan.micro_batch_tokens_per_gpu == 8 * 1024
         assert plan.gradient_checkpointing is True
 

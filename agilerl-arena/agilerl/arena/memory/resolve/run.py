@@ -10,11 +10,11 @@ from agilerl.arena.memory.manifest import (
     async_rollout,
     can_sync_merged_lora,
     configured_rollout_engines,
-    syncs_over_nccl_reshard,
+    nccl_reshard_layout_supported,
     training_memory_from_manifest,
     unsupported_gpu_reason,
 )
-from agilerl.arena.memory.resolve.batch import TrainerSplitError
+from agilerl.arena.memory.resolve.batch import TrainerSplitError, catalog_model
 from agilerl.arena.memory.resolve.engine import (
     resolve_engine_tensor_parallel,
     resolve_rollout_engines_per_agent,
@@ -37,6 +37,7 @@ from agilerl.arena.memory.resolve.parallel import (
 from agilerl.arena.memory.resolve.rollout import default_rollout_batch_size
 from agilerl.arena.memory.resolve.split import (
     GpuSplit,
+    TrainerCost,
     choose_engine_width,
     choose_gpu_split,
     fullest_split_within,
@@ -44,7 +45,11 @@ from agilerl.arena.memory.resolve.split import (
     price_gpu_split,
     split_workload_from_manifest,
 )
-from agilerl.arena.memory.resolve.weight_sync import SyncLink
+from agilerl.arena.memory.resolve.weight_sync import (
+    SyncLink,
+    WeightSyncTransport,
+    nccl_reshard_costs,
+)
 from agilerl.arena.memory.specs import DeviceSpec, ModelSpec
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
 from agilerl.arena.models.manifest import TrainingManifest
@@ -59,6 +64,14 @@ WEIGHT_SYNC_TIE_SHARE = 0.1
 
 
 @dataclass(frozen=True)
+class WeightSyncMode:
+    """One weight-sync candidate: merged or adapter weights, on one transport."""
+
+    merged: bool
+    transport: WeightSyncTransport
+
+
+@dataclass(frozen=True)
 class RunMemoryPlan:
     """The GPU split and trainer memory plan a run starts with."""
 
@@ -69,6 +82,12 @@ class RunMemoryPlan:
     # off. With no link it is merged whenever the engines can serve it and
     # the trainers fit.
     merged_lora_sync: bool
+    # Transport the run syncs on.
+    weight_sync_transport: WeightSyncTransport = "nixl"
+    # The kept or searched split this plan's seconds come from.
+    sync_quote: GpuSplit | None = None
+    # Every mode priced at the chosen layout, in candidate order.
+    quotes: tuple[GpuSplit, ...] = ()
 
 
 @dataclass
@@ -83,35 +102,68 @@ class SearchCache:
     servable_widths: dict[tuple, bool] = field(default_factory=dict)
 
 
-def merged_lora_sync_candidates(manifest: TrainingManifest) -> tuple[bool, ...]:
-    """``merged_lora_sync`` values :func:`resolve_run_memory` prices, merged first.
+def weight_sync_modes(
+    manifest: TrainingManifest, device: DeviceSpec, sync_link: SyncLink | None
+) -> tuple[WeightSyncMode, ...]:
+    """Modes :func:`resolve_run_memory` prices.
+
+    NIXL prices merged then adapter weights, or the adapter alone when the
+    engines cannot serve merged weights. An async run of a dense model over
+    ``cuda_ipc`` (one node) also prices merged ``nccl_reshard`` first when
+    :func:`nccl_reshard_costs` has rates for the GPU and the layout passes
+    :func:`~agilerl.arena.memory.manifest.nccl_reshard_layout_supported`.
 
     :param manifest: Validated run manifest.
-    :return: Merged alone over ``nccl_reshard`` (its engines are checked by
-        :func:`~agilerl.arena.memory.manifest.validated_run_manifest`); both
-        for other engines that can serve merged weights; adapter alone otherwise.
+    :param device: The training and rollout GPU.
+    :param sync_link: Link the engines read synced weights over, or ``None``.
+    :return: Candidates, merged ``nccl_reshard`` first when it is offered.
     """
-    if syncs_over_nccl_reshard(manifest):
-        return (True,)
     if not can_sync_merged_lora(manifest.algorithm):
-        return (False,)
-    return (True, False)
+        return (WeightSyncMode(False, "nixl"),)
+    modes = [WeightSyncMode(True, "nixl"), WeightSyncMode(False, "nixl")]
+    model = catalog_model(manifest.algorithm)
+    if (
+        sync_link == "cuda_ipc"
+        and nccl_reshard_costs(device) is not None
+        and async_rollout(manifest)
+        and model is not None
+        and not model.arch.is_moe
+        and nccl_reshard_layout_supported(manifest)
+    ):
+        modes.insert(0, WeightSyncMode(True, "nccl_reshard"))
+    return tuple(modes)
 
 
 def pick_weight_sync(splits: list[GpuSplit], sync_link: SyncLink | None) -> GpuSplit:
-    """The split of the weight-sync mode the run takes, from one split per mode that fits.
+    """The split of the weight-sync mode the run takes.
 
-    :param splits: One split per :func:`merged_lora_sync_candidates` mode
-        that fits, in candidate order.
+    Among merged transports the lowest :attr:`GpuSplit.synced_step_seconds`
+    wins, then the split on more GPUs. That merged split is compared with
+    the adapter splits by :func:`fullest_split_within` at
+    :data:`WEIGHT_SYNC_TIE_SHARE` over ``cuda_ipc``, and by the fastest step
+    over other links. With sync unpriced, the first split wins.
+
+    :param splits: One split per mode that fits, in candidate order.
     :param sync_link: Link the engines read synced weights over, or ``None``.
-    :return: :func:`fullest_split_within` at :data:`WEIGHT_SYNC_TIE_SHARE`
-        over ``cuda_ipc``, the fastest over other links; with sync unpriced,
-        the first.
+    :return: The split the run takes.
     """
     if sync_link is None:
         return splits[0]
     share = WEIGHT_SYNC_TIE_SHARE if sync_link == "cuda_ipc" else 0.0
-    return fullest_split_within(splits, share)
+    merged = [split for split in splits if split.merged_lora_sync]
+    adapters = [split for split in splits if not split.merged_lora_sync]
+    if not merged:
+        return fullest_split_within(adapters, share)
+    chosen_merged = min(
+        merged,
+        key=lambda split: (
+            split.synced_step_seconds,
+            -(split.trainers + split.engines),
+        ),
+    )
+    if not adapters:
+        return chosen_merged
+    return fullest_split_within([chosen_merged, *adapters], share)
 
 
 def _layout_plans_key(
@@ -119,6 +171,7 @@ def _layout_plans_key(
     placed: TrainingManifest,
     model: ModelSpec,
     merged_lora_sync: bool,
+    transport: WeightSyncTransport,
 ) -> tuple:
     """The model, GPU, node size, host RAM share, layout and sync mode one set of trainer plans is priced at."""
     fsdp = placed.algorithm.fsdp
@@ -133,6 +186,7 @@ def _layout_plans_key(
         fsdp.cp,
         fsdp.shard_group_size,
         merged_lora_sync,
+        transport,
     )
 
 
@@ -142,7 +196,7 @@ def _cached_training_plan(
     model: ModelSpec,
     device: DeviceSpec,
     trainers: int,
-    merged_lora_sync: bool,
+    mode: WeightSyncMode,
     require_buffer: bool,
 ) -> TrainingMemoryPlan | None:
     """The plan for this trainer count at ``placed``'s layout, or ``None`` when it does not fit.
@@ -150,14 +204,18 @@ def _cached_training_plan(
     :param require_buffer: Only take a plan that fits with the underprediction buffer.
     """
     plans = cache.plans.setdefault(
-        _layout_plans_key(device, placed, model, merged_lora_sync), {}
+        _layout_plans_key(device, placed, model, mode.merged, mode.transport), {}
     )
     if trainers not in plans:
         trial = placed.model_copy(deep=True)
         trial.training.training_gpus_per_agent = trainers
         try:
             plans[trainers] = training_memory_from_manifest(
-                trial, model, device, not merged_lora_sync
+                trial,
+                model,
+                device,
+                not mode.merged,
+                mode.transport == "nccl_reshard",
             )
         except (TrainingMemoryUnfitError, TrainerSplitError):
             plans[trainers] = None
@@ -187,7 +245,7 @@ def resolve_run_memory(
     degrees straddles nodes is skipped (:func:`off_node_reason`). An omitted
     engine width is searched at every width one engine can
     serve a sequence at and picked by :func:`choose_engine_width`. At each
-    layout each of :func:`merged_lora_sync_candidates` is searched with one
+    layout each of :func:`weight_sync_modes` is searched with one
     sync priced over ``sync_link``, and :func:`pick_weight_sync` picks among
     the modes that fit. Kept trainer and engine counts take
     :func:`kept_split_memory`, the same search at those counts.
@@ -251,7 +309,7 @@ def resolve_run_memory(
             if plan is not None:
                 return plan
     raise _no_split_error(
-        manifest, placed, model, device, member_gpus, engine_widths, cache
+        manifest, placed, model, device, member_gpus, engine_widths, sync_link, cache
     )
 
 
@@ -279,9 +337,14 @@ def _kept_run_memory(
     if kept is not None:
         return kept
     # No mode fits at any layout, so the first mode's own search raises why.
-    merged = merged_lora_sync_candidates(manifest)[0]
+    mode = weight_sync_modes(manifest, device, sync_link)[0]
     return RunMemoryPlan(
-        None, training_memory_from_manifest(manifest, model, device, not merged), merged
+        None,
+        training_memory_from_manifest(
+            manifest, model, device, not mode.merged, mode.transport == "nccl_reshard"
+        ),
+        mode.merged,
+        mode.transport,
     )
 
 
@@ -310,21 +373,24 @@ def _no_split_error(
     device: DeviceSpec,
     member_gpus: int,
     engine_widths: list[int],
+    sync_link: SyncLink | None,
     cache: SearchCache,
 ) -> ValueError:
     """Why no split fits, read at the least parallel layout: the manifest's own pins.
 
     :param placed: The manifest at each searched layout, least parallel first.
     """
-    merged = merged_lora_sync_candidates(manifest)[0]
+    mode = weight_sync_modes(manifest, device, sync_link)[0]
     least = placed[0] if placed else manifest
     plans = (
-        cache.plans.get(_layout_plans_key(device, least, model, merged), {})
+        cache.plans.get(
+            _layout_plans_key(device, least, model, mode.merged, mode.transport), {}
+        )
         if placed
         else {}
     )
     trainer_counts = range(1, member_gpus - min(engine_widths, default=member_gpus) + 1)
-    workload = split_workload_from_manifest(least, not merged)
+    workload = split_workload_from_manifest(least, not mode.merged)
     return ValueError(
         f"No trainer / rollout-engine split of {member_gpus} "
         f"{device.name} GPUs fits this run: "
@@ -352,8 +418,8 @@ def _plan_at_layout(
     :param cache: Plans already priced for this search.
     :param require_buffer: Only take trainer counts whose plan fits with the buffer.
     """
-    by_mode: dict[bool, RunMemoryPlan] = {}
-    for mode in merged_lora_sync_candidates(placed):
+    by_mode: dict[WeightSyncMode, RunMemoryPlan] = {}
+    for mode in weight_sync_modes(placed, device, sync_link):
         found = _split_at_layout(
             placed,
             pinned,
@@ -374,7 +440,16 @@ def _plan_at_layout(
     if not by_mode:
         return None
     splits = [plan.split for plan in by_mode.values() if plan.split is not None]
-    return by_mode[pick_weight_sync(splits, sync_link).merged_lora_sync]
+    chosen = pick_weight_sync(splits, sync_link)
+    plan = by_mode[WeightSyncMode(chosen.merged_lora_sync, chosen.sync_transport)]
+    return RunMemoryPlan(
+        split=chosen,
+        training=plan.training,
+        merged_lora_sync=chosen.merged_lora_sync,
+        weight_sync_transport=chosen.sync_transport,
+        sync_quote=chosen,
+        quotes=tuple(splits),
+    )
 
 
 def _split_at_layout(
@@ -385,7 +460,7 @@ def _split_at_layout(
     member_gpus: int,
     engine_widths: list[int],
     sync_link: SyncLink | None,
-    merged_lora_sync: bool,
+    mode: WeightSyncMode,
     cache: SearchCache,
     require_buffer: bool,
 ) -> RunMemoryPlan | None:
@@ -397,26 +472,26 @@ def _split_at_layout(
     layout = pinned_layout(manifest_fsdp(placed))
     node = device.gpus_per_node or member_gpus
 
-    def learn_cost_ratio(trainers: int) -> float | None:
+    def trainer_cost(trainers: int) -> TrainerCost | None:
         if off_node_reason(layout, pinned, trainers, node) is not None:
             return None
         plan = _cached_training_plan(
-            cache, placed, model, device, trainers, merged_lora_sync, require_buffer
+            cache, placed, model, device, trainers, mode, require_buffer
         )
         if plan is None:
             return None
         accepted[trainers] = plan
-        return plan.learn_cost_ratio
+        return TrainerCost.of(plan)
 
-    workload = split_workload_from_manifest(placed, not merged_lora_sync).model_copy(
-        update={"sync_link": sync_link}
+    workload = split_workload_from_manifest(placed, not mode.merged).model_copy(
+        update={"sync_link": sync_link, "sync_transport": mode.transport}
     )
     splits = [
         found
         for width in engine_widths
         if (
             found := choose_gpu_split(
-                model, device, workload, member_gpus, width, learn_cost_ratio
+                model, device, workload, member_gpus, width, trainer_cost
             )
         )
         is not None
@@ -427,7 +502,10 @@ def _split_at_layout(
     return RunMemoryPlan(
         split=split,
         training=accepted[split.trainers],
-        merged_lora_sync=merged_lora_sync,
+        merged_lora_sync=mode.merged,
+        weight_sync_transport=mode.transport,
+        sync_quote=split,
+        quotes=(split,),
     )
 
 
@@ -443,9 +521,9 @@ def kept_split_memory(
 
     Layouts for that trainer count are tried from least parallel to most, as
     :func:`training_memory_from_manifest` tries them; the first where a
-    :func:`merged_lora_sync_candidates` mode's plan fits with the
+    :func:`weight_sync_modes` mode's plan fits with the
     underprediction buffer wins, else the first where one fits at all. When
-    both modes fit there, rollout is async and ``sync_link`` is set, each is
+    rollout is async and ``sync_link`` is set, each mode that fits there is
     priced at those counts by :func:`price_gpu_split`, with the engine width
     the run resolves for that mode, and picked as a searched split is
     (:func:`pick_weight_sync`). Otherwise, or when the counts cannot be
@@ -481,22 +559,22 @@ def kept_split_memory(
     return None
 
 
-def kept_merged_lora_sync(
+def kept_weight_sync_mode(
     manifest: TrainingManifest,
     model: ModelSpec,
     device: DeviceSpec,
     total_gpus: int,
     sync_link: SyncLink | None,
     cache: SearchCache,
-) -> bool:
-    """Whether :func:`kept_split_memory` syncs merged weights; the first candidate when no mode fits.
+) -> WeightSyncMode:
+    """The weight-sync mode :func:`kept_split_memory` picks; the first of :func:`weight_sync_modes` when no mode fits.
 
-    :return: ``True`` for merged sync, ``False`` for adapter sync.
+    :return: Merged or adapter sync, and its transport.
     """
     kept = kept_split_memory(manifest, model, device, total_gpus, sync_link, cache)
     if kept is None:
-        return merged_lora_sync_candidates(manifest)[0]
-    return kept.merged_lora_sync
+        return weight_sync_modes(manifest, device, sync_link)[0]
+    return WeightSyncMode(kept.merged_lora_sync, kept.weight_sync_transport)
 
 
 def _kept_plan_at_layout(
@@ -515,8 +593,8 @@ def _kept_plan_at_layout(
     """
     trainers = placed.training.training_gpus_per_agent
     prices_sync = sync_link is not None and async_rollout(placed)
-    fitting: dict[bool, TrainingMemoryPlan] = {}
-    for mode in merged_lora_sync_candidates(placed):
+    fitting: dict[WeightSyncMode, TrainingMemoryPlan] = {}
+    for mode in weight_sync_modes(placed, device, sync_link):
         plan = _cached_training_plan(
             cache, placed, model, device, trainers, mode, require_buffer
         )
@@ -527,8 +605,9 @@ def _kept_plan_at_layout(
             break
     if not fitting:
         return None
-    merged = next(iter(fitting))
-    if len(fitting) > 1:
+    chosen_mode = next(iter(fitting))
+    priced: list[GpuSplit] = []
+    if prices_sync:
         priced = [
             split
             for mode, plan in fitting.items()
@@ -540,14 +619,31 @@ def _kept_plan_at_layout(
                     total_gpus,
                     sync_link,
                     mode,
-                    plan.learn_cost_ratio,
+                    TrainerCost.of(plan),
                 )
             )
             is not None
         ]
         if priced:
-            merged = pick_weight_sync(priced, sync_link).merged_lora_sync
-    return RunMemoryPlan(split=None, training=fitting[merged], merged_lora_sync=merged)
+            chosen = pick_weight_sync(priced, sync_link)
+            chosen_mode = WeightSyncMode(chosen.merged_lora_sync, chosen.sync_transport)
+    quote = next(
+        (
+            split
+            for split in priced
+            if split.merged_lora_sync == chosen_mode.merged
+            and split.sync_transport == chosen_mode.transport
+        ),
+        None,
+    )
+    return RunMemoryPlan(
+        split=None,
+        training=fitting[chosen_mode],
+        merged_lora_sync=chosen_mode.merged,
+        weight_sync_transport=chosen_mode.transport,
+        sync_quote=quote,
+        quotes=tuple(priced),
+    )
 
 
 def _kept_split(
@@ -556,13 +652,13 @@ def _kept_split(
     device: DeviceSpec,
     total_gpus: int,
     sync_link: SyncLink | None,
-    merged_lora_sync: bool,
-    learn_cost_ratio: float,
+    mode: WeightSyncMode,
+    trainer_cost: TrainerCost,
 ) -> GpuSplit | None:
     """The kept counts at ``placed``'s layout priced with one sync in one mode, or None when they cannot be."""
     trial = placed.model_copy(deep=True)
     resolve_engine_tensor_parallel(
-        trial, total_gpus, device, device.gpus_per_node, not merged_lora_sync
+        trial, total_gpus, device, device.gpus_per_node, not mode.merged
     )
     spec = trial.algorithm
     if not isinstance(spec, RolloutLLMSpec) or spec.vllm_config is None:
@@ -579,14 +675,15 @@ def _kept_split(
     )
     if engines < 1:
         return None
-    workload = split_workload_from_manifest(trial, not merged_lora_sync)
+    workload = split_workload_from_manifest(trial, not mode.merged)
     workload = workload.model_copy(
         update={
             "sync_link": sync_link,
+            "sync_transport": mode.transport,
             "rollout_batch_size": workload.rollout_batch_size
             or default_rollout_batch_size(workload.batch_size, trainers, engines),
         }
     )
     return price_gpu_split(
-        model, device, workload, trainers, engines, width, lambda _: learn_cost_ratio
+        model, device, workload, trainers, engines, width, lambda _: trainer_cost
     )

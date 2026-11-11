@@ -37,6 +37,17 @@ class NcclReshardLayout(NamedTuple):
     engine_tensor_parallel: int
 
 
+class NcclReshardMove(NamedTuple):
+    """Bytes a merged-LoRA ``nccl_reshard`` refit sends, split the way the plan sends them.
+
+    Bulk parameters each move in one ungrouped ``m2n.reshard``. Misc parameters
+    are packed into 512 MiB buckets, merged on rank 0 and broadcast.
+    """
+
+    bulk_bytes: int
+    misc_bytes: int
+
+
 class NcclReshardRefitBytes(NamedTuple):
     """Transient trainer bytes of one merged-LoRA ``nccl_reshard`` refit on the main rank.
 
@@ -328,25 +339,25 @@ def packed_lora_param_count(arch: ModelArch, rank: int, n_matrices: int) -> int:
     return int(arch.moe_layers * n_experts * rank * widths)
 
 
-def merged_lora_sync_bytes(
+def merged_lora_sync_tensor_bytes(
     arch: ModelArch,
     scope: LoraTargetScope,
     n_packed_matrices: int,
     dtype_bytes: float,
-) -> tuple[int, int]:
-    """Bytes of the merged weights a merged-LoRA sync pushes, and of the largest one.
+) -> list[int]:
+    """Bytes of each merged weight a merged-LoRA sync pushes, layer by layer.
 
-    The pushed weights are the linears
-    :func:`decoder_lora_linears` lists,
-    without biases. Packed experts are pushed whole: ``gate_up_proj`` and
-    ``down_proj`` are two targeted parameters, and one target is charged
-    as ``gate_up_proj``, the larger.
+    The pushed weights are the linears :func:`decoder_lora_linears` lists,
+    without biases, each spread evenly over the decoder layers. Packed
+    experts are pushed whole: ``gate_up_proj`` and ``down_proj`` are two
+    targeted parameters, and one target is charged as ``gate_up_proj``, the
+    larger.
 
     :param arch: Model architecture.
     :param scope: Adapter target scope.
     :param n_packed_matrices: PEFT ``target_parameters`` on packed experts.
     :param dtype_bytes: Bytes per element of the engines' weight dtype.
-    :return: Total bytes, and bytes of the largest pushed tensor.
+    :return: One entry per pushed tensor, in checkpoint layer order.
     """
     sizes = [
         (linear.in_features * linear.out_features, linear.count)
@@ -359,9 +370,32 @@ def merged_lora_sync_bytes(
         sizes.append((gate_up, arch.moe_layers))
         if n_packed_matrices > 1:
             sizes.append((down, arch.moe_layers))
-    total = sum(size * count for size, count in sizes if count)
-    largest = max((size for size, count in sizes if count), default=0)
-    return int(total * dtype_bytes), int(largest * dtype_bytes)
+    layers = arch.n_layers
+    return [
+        int(size * dtype_bytes)
+        for layer in range(layers)
+        for size, count in sizes
+        for _ in range(count * (layer + 1) // layers - count * layer // layers)
+    ]
+
+
+def merged_lora_sync_bytes(
+    arch: ModelArch,
+    scope: LoraTargetScope,
+    n_packed_matrices: int,
+    dtype_bytes: float,
+) -> tuple[int, int]:
+    """Bytes of the merged weights a merged-LoRA sync pushes, and of the largest one.
+
+    :param arch: Model architecture.
+    :param scope: Adapter target scope.
+    :param n_packed_matrices: PEFT ``target_parameters`` on packed experts.
+    :param dtype_bytes: Bytes per element of the engines' weight dtype.
+    :return: Total bytes of :func:`merged_lora_sync_tensor_bytes`, and of the
+        largest pushed tensor.
+    """
+    sizes = merged_lora_sync_tensor_bytes(arch, scope, n_packed_matrices, dtype_bytes)
+    return sum(sizes), max(sizes, default=0)
 
 
 def _reshards_evenly(
@@ -377,8 +411,8 @@ def _reshards_evenly(
 
 def _attention_reshard_split(
     adapted: dict[str, LoraLinear], kv_heads: int, layout: NcclReshardLayout
-) -> tuple[list[int], list[LoraLinear]]:
-    """Bulk block and misc linears of one attention projection type."""
+) -> tuple[list[tuple[int, int]], list[LoraLinear]]:
+    """Bulk ``(elements, layers)`` and misc linears of one attention projection type."""
     tp = layout.engine_tensor_parallel
     qkv = [adapted[name] for name in ("q_proj", "k_proj", "v_proj") if name in adapted]
     o_proj = adapted.get("o_proj")
@@ -387,7 +421,7 @@ def _attention_reshard_split(
         for name, linear in adapted.items()
         if name not in ("q_proj", "k_proj", "v_proj", "o_proj")
     ]
-    block = []
+    block: list[tuple[int, int]] = []
     if (
         len(qkv) == 3
         and qkv[1].count > 0
@@ -396,19 +430,20 @@ def _attention_reshard_split(
         and all(_reshards_evenly(linear, False, layout) for linear in qkv)
     ):
         q_proj = qkv[0]
-        block += [linear.in_features * linear.out_features for linear in qkv]
+        layers = qkv[1].count
+        block += [(linear.in_features * linear.out_features, layers) for linear in qkv]
         misc.append(
             LoraLinear(
                 q_proj.in_features,
                 q_proj.out_features,
-                q_proj.count - qkv[1].count,
+                q_proj.count - layers,
                 q_proj.split,
             )
         )
     else:
         misc += qkv
     if o_proj is not None and _reshards_evenly(o_proj, True, layout):
-        block.append(o_proj.in_features * o_proj.out_features)
+        block.append((o_proj.in_features * o_proj.out_features, o_proj.count))
     elif o_proj is not None:
         misc.append(o_proj)
     return block, misc
@@ -419,20 +454,78 @@ def _mlp_reshard_split(
     gate_up: LoraLinear,
     down: LoraLinear,
     layout: NcclReshardLayout,
-) -> tuple[list[int], list[LoraLinear]]:
-    """Bulk block and misc linears of the dense MLP."""
-    block = []
-    misc = []
+) -> tuple[list[tuple[int, int]], list[LoraLinear]]:
+    """Bulk ``(elements, layers)`` and misc linears of the dense MLP."""
+    block: list[tuple[int, int]] = []
+    misc: list[LoraLinear] = []
     if not arch.fused_gate_up_mlp and _reshards_evenly(gate_up, False, layout):
         gates = 2 if arch.gated_mlp else 1
-        block += [gate_up.in_features * gate_up.out_features] * gates
+        # ``gate_up.count`` is gate and up together, one of each per MLP layer.
+        layers = gate_up.count // gates
+        block += [(gate_up.in_features * gate_up.out_features, layers)] * gates
     else:
         misc.append(gate_up)
     if _reshards_evenly(down, True, layout):
-        block.append(down.in_features * down.out_features)
+        block.append((down.in_features * down.out_features, down.count))
     else:
         misc.append(down)
     return block, misc
+
+
+def _nccl_reshard_parts(
+    arch: ModelArch, scope: LoraTargetScope, layout: NcclReshardLayout
+) -> tuple[list[list[tuple[int, int]]], list[LoraLinear]]:
+    """Bulk blocks as ``(elements, layers)`` and the misc linears of one refit."""
+    excluded = arch.lora_excluded_modules
+    blocks: list[list[tuple[int, int]]] = []
+    planned: list[LoraLinear] = []
+    misc: list[LoraLinear] = []
+    for kv_heads, named in _attention_projection_types(arch, 1):
+        adapted = {name: linear for name, linear in named if name not in excluded}
+        planned += adapted.values()
+        block, block_misc = _attention_reshard_split(adapted, kv_heads, layout)
+        misc += block_misc
+        if block:
+            blocks.append(block)
+    if scope == "all-linear" and arch.mlp_layers:
+        gate_up, down = _mlp_lora_linears(arch, arch.intermediate_size, arch.mlp_layers)
+        planned += [gate_up, down]
+        block, block_misc = _mlp_reshard_split(arch, gate_up, down, layout)
+        misc += block_misc
+        if block:
+            blocks.append(block)
+    others = decoder_lora_linears(arch, scope)
+    for linear in planned:
+        others.remove(linear)
+    return blocks, [linear for linear in misc + others if linear.count]
+
+
+def nccl_reshard_move(
+    arch: ModelArch,
+    scope: LoraTargetScope,
+    layout: NcclReshardLayout,
+    dtype_bytes: float,
+) -> NcclReshardMove:
+    """Bulk and misc bytes of one merged-LoRA ``nccl_reshard`` refit.
+
+    :param arch: Model architecture.
+    :param scope: Adapter target scope.
+    :param layout: Trainer sharding and engine width.
+    :param dtype_bytes: Bytes per element of the sync dtype.
+    :return: Bulk bytes and misc bytes.
+    """
+    blocks, misc = _nccl_reshard_parts(arch, scope, layout)
+    bulk_bytes = 0
+    for block in blocks:
+        for elements, layers in block:
+            bulk_bytes += int(elements * layers * dtype_bytes)
+    misc_bytes = int(
+        sum(
+            linear.in_features * linear.out_features * linear.count * dtype_bytes
+            for linear in misc
+        )
+    )
+    return NcclReshardMove(bulk_bytes, misc_bytes)
 
 
 def nccl_reshard_sync_linears(
@@ -457,28 +550,8 @@ def nccl_reshard_sync_linears(
     :return: Weight elements of each tensor in one bulk block, one entry per
         block shape, and the misc linears.
     """
-    excluded = arch.lora_excluded_modules
-    blocks: list[list[int]] = []
-    planned: list[LoraLinear] = []
-    misc: list[LoraLinear] = []
-    for kv_heads, named in _attention_projection_types(arch, 1):
-        adapted = {name: linear for name, linear in named if name not in excluded}
-        planned += adapted.values()
-        block, block_misc = _attention_reshard_split(adapted, kv_heads, layout)
-        misc += block_misc
-        if block:
-            blocks.append(block)
-    if scope == "all-linear" and arch.mlp_layers:
-        gate_up, down = _mlp_lora_linears(arch, arch.intermediate_size, arch.mlp_layers)
-        planned += [gate_up, down]
-        block, block_misc = _mlp_reshard_split(arch, gate_up, down, layout)
-        misc += block_misc
-        if block:
-            blocks.append(block)
-    others = decoder_lora_linears(arch, scope)
-    for linear in planned:
-        others.remove(linear)
-    return blocks, [linear for linear in misc + others if linear.count]
+    blocks, misc = _nccl_reshard_parts(arch, scope, layout)
+    return [[elements for elements, _ in block] for block in blocks], misc
 
 
 def _misc_buckets(misc: Sequence[LoraLinear], dtype_bytes: float) -> tuple[int, int]:
@@ -598,6 +671,22 @@ def lora_sync_buffer_bytes(
         arch, rank, n_packed_matrices
     )
     return int(params * dtype_bytes)
+
+
+def lora_adapter_tensor_count(
+    arch: ModelArch, scope: LoraTargetScope, n_packed_matrices: int
+) -> int:
+    """LoRA A and B tensors of one policy adapter: two per wrapped linear and per packed-expert target per MoE layer.
+
+    :param arch: Model architecture.
+    :param scope: Adapter target scope.
+    :param n_packed_matrices: PEFT ``target_parameters`` on packed experts.
+    :return: Tensor count.
+    """
+    targets = sum(linear.count for linear in decoder_lora_linears(arch, scope))
+    if arch.n_experts and arch.n_experts > 1:
+        targets += n_packed_matrices * arch.moe_layers
+    return 2 * targets
 
 
 def engine_expert_lora_param_count(

@@ -29,6 +29,21 @@ class TestLearnCosts:
 
         assert learn_costs(device) == expected
 
+    @pytest.mark.parametrize(
+        "device",
+        [
+            lookup_gpu("NVIDIA B200").device_spec(),
+            DeviceSpec(total_bytes=80 * GiB, compute_capability=(12, 0)),
+        ],
+        ids=["b200", "sm120"],
+    )
+    def test_hopper_and_newer_without_a_row_use_the_sm90_entry(
+        self, device: DeviceSpec
+    ) -> None:
+        assert device.compute_capability is not None
+        assert device.compute_capability >= (9, 0)
+        assert learn_costs(device) == SM90_LEARN_COSTS
+
     def test_unmeasured_capability_uses_a100_entry(self) -> None:
         device = lookup_gpu("NVIDIA L4").device_spec()
 

@@ -22,7 +22,6 @@ from agilerl.arena.models import (
     ReplayBufferSpec,
     TrainingManifest,
     TrainingSpec,
-    WeightSyncSpec,
 )
 from agilerl.arena.models.algorithms.cispo import CISPOSpec
 from agilerl.arena.models.algorithms.dqn import DQNSpec
@@ -861,16 +860,11 @@ class TestTrainingSpec:
         assert spec.rollout_batch_size is None  # the driver fills it
         assert spec.weight_sync_interval == 1
 
-    def test_weight_sync_defaults_to_nixl_and_accepts_nccl_reshard(self) -> None:
-        assert TrainingSpec().weight_sync.transport == "nixl"
-        selected = TrainingSpec(weight_sync=WeightSyncSpec(transport="nccl_reshard"))
-        assert selected.weight_sync.transport == "nccl_reshard"
-        with pytest.raises(ValidationError, match="transport"):
-            TrainingSpec(weight_sync={"transport": "tcp"})
+    def test_rejects_an_authored_weight_sync(self) -> None:
+        with pytest.raises(ValidationError, match=r"weight_sync\n  Extra inputs"):
+            TrainingSpec.model_validate({"weight_sync": {"transport": "nccl_reshard"}})
 
-    def test_payload_omits_an_unset_weight_sync_and_keeps_an_explicit_null_lora(
-        self,
-    ) -> None:
+    def test_payload_keeps_an_explicit_null_lora(self) -> None:
         manifest = {
             "algorithm": {"name": "GRPO", "group_size": 4, "batch_size": 2},
             "environment": {
@@ -882,21 +876,14 @@ class TestTrainingSpec:
             "network": {
                 "pretrained_model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
                 "max_context_length": 512,
+                "lora_config": None,
             },
             "training": {"max_steps": 100},
         }
 
-        omitted = TrainingManifest.get_validated(manifest, mode="json")
-        assert "weight_sync" not in omitted["training"]
+        payload = TrainingManifest.get_validated(manifest, mode="json")
 
-        explicit = {
-            **manifest,
-            "network": {**manifest["network"], "lora_config": None},
-            "training": {**manifest["training"], "weight_sync": {"transport": "nccl"}},
-        }
-        payload = TrainingManifest.get_validated(explicit, mode="json")
         assert payload["network"]["lora_config"] is None
-        assert payload["training"]["weight_sync"] == {"transport": "nccl"}
 
     def test_async_rollout_leaves_omitted_counts_unset(self) -> None:
         spec = TrainingSpec(rollout_mode="async")
