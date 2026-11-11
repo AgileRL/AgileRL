@@ -41,7 +41,11 @@ from agilerl.arena.memory.manifest import (
     explicit_colocated_rollout,
     validated_run_manifest,
 )
-from agilerl.arena.models import LLMAlgorithmSpec, TrainingManifest
+from agilerl.arena.models import (
+    FinetuningNetworkSpec,
+    LLMAlgorithmSpec,
+    TrainingManifest,
+)
 from agilerl.arena.models.model_info import (
     STATUS_PREVIEW,
     SUPPORTED_MODEL_INFO,
@@ -1187,6 +1191,7 @@ class ArenaClient:
         self._check_resource_request(resource_id, num_nodes, num_gpus, gpu_type)
         training_manifest = TrainingManifest.get_validated(manifest, mode="python")
         self._check_model_status(training_manifest)
+        self._check_context_length(training_manifest)
         self._check_rollout_mode(training_manifest)
         validated = training_manifest.to_payload()
         resolved_project = self._resolve_project(project)
@@ -1284,6 +1289,38 @@ class ArenaClient:
         if entry.status == STATUS_PREVIEW:
             raise ArenaValidationError(notice)
         logger.warning(notice)
+
+    @staticmethod
+    def _check_context_length(manifest: TrainingManifest) -> None:
+        """Reject an LLM ``max_context_length`` outside Arena's catalog options.
+
+        Arena allows powers of 2 from 1024 up to the model's context window,
+        plus the window itself; a window below 1024 is the only option.
+        """
+        network = manifest.network
+        if not isinstance(manifest.algorithm, LLMAlgorithmSpec) or not isinstance(
+            network, FinetuningNetworkSpec
+        ):
+            return
+        entry = SUPPORTED_MODEL_INFO.get(network.pretrained_model_name_or_path)
+        if entry is None:
+            return
+        catalog_max = entry.max_context_length
+        floor = 1024
+        if catalog_max < floor:
+            options = [catalog_max]
+            requirement = f"must be {catalog_max}"
+        else:
+            options = [floor << n for n in range((catalog_max // floor).bit_length())]
+            requirement = f"must be a power of 2 between {floor} and {catalog_max}"
+            if options[-1] != catalog_max:
+                options.append(catalog_max)
+                requirement += f", or {catalog_max}"
+        if network.max_context_length in options:
+            return
+        allowed = ", ".join(str(option) for option in options)
+        msg = f"network.max_context_length {requirement}. Allowed: {allowed}"
+        raise ArenaValidationError(msg)
 
     @staticmethod
     def _check_rollout_mode(manifest: TrainingManifest) -> None:

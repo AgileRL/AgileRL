@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -26,7 +27,11 @@ from agilerl.arena.exceptions import (
     ArenaTrainingError,
     ArenaValidationError,
 )
-from agilerl.arena.models.model_info import STATUS_PREVIEW, SUPPORTED_MODEL_INFO
+from agilerl.arena.models.model_info import (
+    STATUS_PREVIEW,
+    SUPPORTED_MODEL_INFO,
+    ModelInfo,
+)
 from agilerl.arena.output import StreamRichRenderer
 from agilerl.arena.stream import NDJsonStream
 
@@ -63,7 +68,7 @@ def _grpo_manifest(hub_id: str) -> dict:
         },
         "network": {
             "pretrained_model_name_or_path": hub_id,
-            "max_context_length": 512,
+            "max_context_length": 1024,
         },
         "training": {"max_steps": 100},
         "replay_buffer": {"kind": "llm"},
@@ -1775,6 +1780,93 @@ class TestExperimentMethods:
         manifest["training"]["rollout_mode"] = "colocated"
 
         with pytest.raises(ArenaValidationError, match="rollout_mode: colocated"):
+            api_key_client.submit_experiment(manifest=manifest, project="proj")
+        api_key_client._open_stream.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("hub_id", "context_length"),
+        [
+            ("Qwen/Qwen3.5-0.8B", 1024),
+            ("Qwen/Qwen3.5-0.8B", 262144),
+            ("Qwen/Qwen3-4B", 32768),
+            ("Qwen/Qwen3-4B", 40960),
+            ("org/untracked-model", 512),
+        ],
+    )
+    def test_submit_experiment_accepts_an_arena_context_length(
+        self, api_key_client, hub_id, context_length
+    ):
+        # Arrange
+        api_key_client._open_stream = MagicMock(
+            return_value=_mock_ndjson_stream({"job_id": 5})
+        )
+        manifest = _grpo_manifest(hub_id)
+        manifest["network"]["max_context_length"] = context_length
+
+        # Act
+        result = api_key_client.submit_experiment(manifest=manifest, project="proj")
+
+        # Assert
+        assert result == {"job_id": 5}
+
+    @pytest.mark.parametrize(
+        ("hub_id", "context_length", "message"),
+        [
+            (
+                "Qwen/Qwen3.5-0.8B",
+                512,
+                (
+                    "network.max_context_length must be a power of 2 between 1024 "
+                    "and 262144. Allowed: 1024, 2048, 4096, 8192, 16384, 32768, "
+                    "65536, 131072, 262144"
+                ),
+            ),
+            (
+                "Qwen/Qwen3.5-0.8B",
+                3000,
+                (
+                    "network.max_context_length must be a power of 2 between 1024 "
+                    "and 262144. Allowed: 1024,"
+                ),
+            ),
+            (
+                "Qwen/Qwen3-4B",
+                65536,
+                (
+                    "network.max_context_length must be a power of 2 between 1024 "
+                    "and 40960, or 40960. Allowed: 1024, 2048, 4096, 8192, 16384, "
+                    "32768, 40960"
+                ),
+            ),
+        ],
+    )
+    def test_submit_experiment_rejects_a_context_length_arena_does_not_offer(
+        self, api_key_client, hub_id, context_length, message
+    ):
+        # Arrange
+        api_key_client._open_stream = MagicMock()
+        manifest = _grpo_manifest(hub_id)
+        manifest["network"]["max_context_length"] = context_length
+
+        # Act / Assert
+        with pytest.raises(ArenaValidationError, match=re.escape(message)):
+            api_key_client.submit_experiment(manifest=manifest, project="proj")
+        api_key_client._open_stream.assert_not_called()
+
+    def test_submit_experiment_requires_the_window_when_it_is_below_1024(
+        self, api_key_client, monkeypatch
+    ):
+        # Arrange
+        api_key_client._open_stream = MagicMock()
+        monkeypatch.setattr(ModelInfo, "max_context_length", 512)
+        manifest = _grpo_manifest("Qwen/Qwen3.5-0.8B")
+        manifest["network"]["max_context_length"] = 256
+
+        # Act / Assert
+        with pytest.raises(
+            ArenaValidationError,
+            match=re.escape("network.max_context_length must be 512. Allowed: 512"),
+        ):
             api_key_client.submit_experiment(manifest=manifest, project="proj")
         api_key_client._open_stream.assert_not_called()
 
