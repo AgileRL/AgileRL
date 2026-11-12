@@ -187,10 +187,11 @@ GRPO_METRIC_NAMES = (
 # PPO-only per-learn diagnostics.
 PPO_METRIC_NAMES = (
     "pg_loss",  # clipped policy-surrogate loss
-    "vf_loss",  # clipped value loss
+    "vf_loss",  # value MSE against GAE returns
     "kl",  # update-averaged K3 vs reference
     "kl_clamp_frac",  # action tokens whose K3 vs reference exceeds kl_clamp
     "clipfrac",  # binding-clip fraction
+    "off_policy_token_mask_frac",  # action tokens the off-policy token mask dropped
     "grad_norm_pre",  # actor LoRA grad norm before clipping
     "grad_norm_post",  # actor LoRA grad norm after clipping
     "critic_grad_norm_pre",  # critic LoRA + value head grad norm before clipping
@@ -204,6 +205,7 @@ PPO_METRIC_NAMES = (
 REINFORCE_METRIC_NAMES = (
     "kl",  # update-averaged K3 vs reference
     "pg_loss",  # clipped policy-surrogate loss
+    "off_policy_token_mask_frac",  # action tokens the off-policy token mask dropped
 )
 
 # Sampling-mismatch diagnostics shared by the GRPO/PPO/REINFORCE ``learn`` methods.
@@ -2046,7 +2048,6 @@ def value_fit(
     returns: torch.Tensor,
     mask: torch.Tensor,
     turn_ids: torch.Tensor | None = None,
-    turn_reduction: str = "mean",
 ) -> tuple[float, float]:
     """Explained variance of ``returns`` by ``values`` and their Pearson correlation.
 
@@ -2062,15 +2063,13 @@ def value_fit(
     :param turn_ids: Turn index per token, ``-1`` for non-action. When given,
         values and returns are compared per turn instead of per token.
     :type turn_ids: torch.Tensor | None
-    :param turn_reduction: :func:`pool_by_turns` reduction for the values.
-    :type turn_reduction: str
     :return: ``(explained_variance, correlation)``.
     :rtype: tuple[float, float]
     """
     if turn_ids is not None:
         num_turns = int(turn_ids.max().item()) + 1
-        values = pool_by_turns(values, turn_ids, num_turns, reduction=turn_reduction)
-        returns = pool_by_turns(returns, turn_ids, num_turns)
+        values = turn_state_values(values, turn_ids, num_turns)
+        returns = turn_state_values(returns, turn_ids, num_turns)
         turns = torch.arange(num_turns, device=turn_ids.device)
         mask = (turn_ids.unsqueeze(-1) == turns).any(dim=1)
     mask = mask.bool()
@@ -2098,6 +2097,35 @@ def masked_whiten(
     return whitened
 
 
+def global_masked_whiten(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """Whiten masked values with the mean and variance over every rank.
+
+    Every rank must call this once per learn, including ranks with no masked
+    values. Tensor- and context-parallel ranks repeat their group's rows
+    equally, so the world statistics match the data-parallel ones.
+
+    :param values: Values to whiten.
+    :type values: torch.Tensor
+    :param mask: 0/1 mask selecting which values count.
+    :type mask: torch.Tensor
+    :return: Whitened values.
+    :rtype: torch.Tensor
+    """
+    weights = mask.to(torch.float32)
+    values_f = values.to(torch.float32)
+    stats = torch.stack(
+        [weights.sum(), (values_f * weights).sum(), (values_f.pow(2) * weights).sum()]
+    )
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        torch.distributed.all_reduce(stats)
+    count, total, total_sq = stats.tolist()
+    if count <= 1:
+        return values
+    mean = total / count
+    var = max(total_sq / count - mean * mean, 0.0) * count / (count - 1)
+    return ((values_f - mean) * (var + 1e-8) ** -0.5).to(values.dtype)
+
+
 def pool_by_turns(
     token_values: torch.Tensor,
     turn_ids: torch.Tensor,
@@ -2113,19 +2141,13 @@ def pool_by_turns(
     :param num_turns: Total number of turns (max turn_id + 1).
     :type num_turns: int
     :param reduction: ``"mean"`` (default) for mean-pooling,
-        ``"sum"`` for sum-pooling (e.g. to aggregate log-ratios),
-        ``"final_value"`` to select the last token value per turn.
+        ``"sum"`` for sum-pooling (e.g. to aggregate log-ratios).
     :type reduction: str
     :return: [batch, num_turns] aggregated values per turn.
     :rtype: torch.Tensor
     """
-    batch_size, seq_len = token_values.shape
+    batch_size = token_values.shape[0]
     turn_values = torch.zeros(batch_size, num_turns, device=token_values.device)
-    token_positions = (
-        torch.arange(seq_len, device=token_values.device)
-        .unsqueeze(0)
-        .expand_as(turn_ids)
-    )
     for t in range(num_turns):
         mask_t = (turn_ids == t).float()
         summed = (token_values * mask_t).sum(dim=1)
@@ -2134,30 +2156,45 @@ def pool_by_turns(
             turn_values[:, t] = summed / count
         elif reduction == "sum":
             turn_values[:, t] = summed
-        elif reduction == "final_value":
-            masked_positions = torch.where(
-                mask_t.bool(),
-                token_positions,
-                torch.full_like(token_positions, -1),
-            )
-            final_pos = masked_positions.max(dim=1).values
-            has_turn = final_pos >= 0
-            safe_final_pos = final_pos.clamp(min=0)
-            final_vals = token_values[
-                torch.arange(batch_size, device=token_values.device),
-                safe_final_pos,
-            ]
-            turn_values[:, t] = torch.where(
-                has_turn,
-                final_vals,
-                torch.zeros_like(final_vals),
-            )
         else:
-            msg = (
-                f"Invalid reduction: {reduction}. Must be 'mean', 'sum', 'final_value'."
-            )
+            msg = f"Invalid reduction: {reduction}. Must be 'mean' or 'sum'."
             raise ValueError(msg)
     return turn_values
+
+
+def turn_state_values(
+    token_values: torch.Tensor,
+    turn_ids: torch.Tensor,
+    num_turns: int,
+) -> torch.Tensor:
+    """Critic at the last query token of each turn (first action slot).
+
+    :param token_values: [batch, seq_len] per-token critic values.
+    :type token_values: torch.Tensor
+    :param turn_ids: [batch, seq_len] turn index per token, -1 for non-action.
+    :type turn_ids: torch.Tensor
+    :param num_turns: Total number of turns (max turn_id + 1).
+    :type num_turns: int
+    :return: [batch, num_turns] state values per turn.
+    :rtype: torch.Tensor
+    """
+    batch_size, seq_len = token_values.shape
+    positions = torch.arange(seq_len, device=token_values.device).expand(
+        batch_size, seq_len
+    )
+    src = positions.masked_fill(turn_ids < 0, seq_len)
+    first_pos = torch.full(
+        (batch_size, num_turns),
+        seq_len,
+        device=token_values.device,
+        dtype=positions.dtype,
+    )
+    first_pos.scatter_reduce_(
+        1, turn_ids.clamp(min=0), src, reduce="amin", include_self=True
+    )
+    has_turn = first_pos < seq_len
+    gathered = token_values.gather(1, first_pos.clamp(max=seq_len - 1))
+    return torch.where(has_turn, gathered, torch.zeros_like(gathered))
 
 
 def baseline_free_turn_cells(turn_mask: torch.Tensor, group_size: int) -> torch.Tensor:
@@ -2274,18 +2311,16 @@ def pool_log_ratio_by_level(
     turn_ids: torch.Tensor | None,
     level: str,
     num_turns: int | None = None,
-    turn_reduction: str = "mean",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pool per-token log-ratios to a token/turn/trajectory importance-sampling unit.
 
     Returns the per-unit pooled log-ratio (the log importance weights) and the
-    matching unit mask, mirroring the pooling used by :func:`clipped_is_surrogate`:
+    matching unit mask:
 
     * ``"token"``    — identity: per-token log-ratio, ``action_mask`` as units.
-    * ``"turn"``     — per-turn pooling of token log-ratios (``turn_ids``
-      required); ``turn_reduction="mean"`` gives a length-normalized mean
-      (geometric-mean ratio), ``"sum"`` gives a sum (product ratio). A turn is
-      active when any of its tokens appear.
+    * ``"turn"``     — length-normalized mean of each turn's token log-ratios
+      (geometric-mean ratio; ``turn_ids`` required). A turn is active when any
+      of its tokens appear.
     * ``"trajectory"`` — length-normalized mean over the completion's action
       tokens; the trajectory is active when it has at least one action token.
 
@@ -2303,9 +2338,6 @@ def pool_log_ratio_by_level(
     :param num_turns: Number of turns for the turn level; inferred from
         ``turn_ids`` when ``None``.
     :type num_turns: int | None
-    :param turn_reduction: Turn-level pooling reduction for ``level="turn"``,
-        one of ``"mean"`` or ``"sum"``.
-    :type turn_reduction: str
     :return: ``(log_importance_weights, unit_mask)`` at the requested level.
     :rtype: tuple[torch.Tensor, torch.Tensor]
     :raises ValueError: If ``level`` is unknown or turn ids are missing.
@@ -2315,12 +2347,6 @@ def pool_log_ratio_by_level(
     if level == "turn":
         if turn_ids is None:
             msg = "turn-level surrogate requires turn_ids."
-            raise ValueError(msg)
-        if turn_reduction not in {"mean", "sum"}:
-            msg = (
-                "turn_reduction must be one of ['mean', 'sum'], got "
-                f"{turn_reduction!r}."
-            )
             raise ValueError(msg)
         if num_turns is None:
             num_turns = int(turn_ids.max().item()) + 1
@@ -2335,7 +2361,7 @@ def pool_log_ratio_by_level(
             torch.full_like(turn_ids, -1),
         )
         log_importance_weights = pool_by_turns(
-            token_log_ratio, effective_turn_ids, num_turns, reduction=turn_reduction
+            token_log_ratio, effective_turn_ids, num_turns
         )
         # Per-turn action-token counts via the same pooling; a turn is active
         # iff it owns at least one action token.
@@ -2362,141 +2388,125 @@ def pool_log_ratio_by_level(
     raise ValueError(msg)
 
 
-def clipped_min_surrogate(
-    log_importance_weights: torch.Tensor,
-    advantages: torch.Tensor,
-    unit_mask: torch.Tensor,
-    clip_min: float,
-    clip_max: float,
-    loss_weight: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Clipped PPO min-surrogate from per-unit log importance weights.
-
-    Exponentiates the log importance weights, clamps the ratio to
-    ``[clip_min, clip_max]``, and reduces the masked pessimistic (min)
-    surrogate over the active units.
-
-    :param log_importance_weights: Per-unit pooled log-ratio.
-    :type log_importance_weights: torch.Tensor
-    :param advantages: Per-unit advantages (same shape).
-    :type advantages: torch.Tensor
-    :param unit_mask: Mask selecting active units (same shape).
-    :type unit_mask: torch.Tensor
-    :param clip_min: Lower clip bound for the ratio (e.g. ``1 - clip_coef``).
-    :type clip_min: float
-    :param clip_max: Upper clip bound for the ratio (e.g. ``1 + clip_coef``).
-    :type clip_max: float
-    :param loss_weight: Optional per-unit, **detached**, non-negative weight that
-        multiplies each unit's surrogate before the masked mean — e.g. the vLLM
-        sampling-mismatch (truncated-IS) correction ratio. ``None`` leaves the
-        surrogate unweighted. Since the weight is ``>= 0`` it commutes with the
-        ``max`` (pessimistic) reduction, so it is a faithful per-unit reweight.
-    :type loss_weight: torch.Tensor | None
-    :return: ``(pg_loss, clipfrac)`` scalars.
-    :rtype: tuple[torch.Tensor, torch.Tensor]
-    """
-    ratio = torch.exp(log_importance_weights)
-    clipped_ratio = torch.clamp(ratio, clip_min, clip_max)
-    clipfrac = masked_mean((ratio != clipped_ratio).float(), unit_mask)
-    surrogate = torch.max(-advantages * ratio, -advantages * clipped_ratio)
-    if loss_weight is not None:
-        surrogate = surrogate * loss_weight
-    pg_loss = masked_mean(surrogate, unit_mask)
-    return pg_loss, clipfrac
-
-
-def clipped_is_surrogate(
+def broadcast_log_ratio_by_level(
     token_log_ratio: torch.Tensor,
-    advantages: torch.Tensor,
     action_mask: torch.Tensor,
     turn_ids: torch.Tensor | None,
-    importance_sampling_level: str,
-    clip_coef: float,
-    loss_weight: torch.Tensor | None = None,
-    turn_reduction: str = "mean",
+    level: str,
     num_turns: int | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Clipped PPO-style policy surrogate at a token/turn/trajectory IS level.
+) -> torch.Tensor:
+    """Per-token log importance weight shared by every token of its IS unit.
 
-    The importance ratio (and the advantage paired with it) is pooled to
-    ``importance_sampling_level``:
-
-    * ``"token"``    — per-token ratio, clip per token.
-    * ``"turn"``     — per-turn pooling of token log-ratios, clip per turn
-      (``turn_ids`` required). ``turn_reduction="mean"`` uses a length-
-      normalized mean (geometric-mean ratio), ``"sum"`` uses a sum (product
-      ratio).
-    * ``"trajectory"`` — length-normalized mean over the whole completion, clip
-      per trajectory.
-
-    Thin composition of :func:`pool_log_ratio_by_level` (ratio + advantage
-    pooling) and :func:`clipped_min_surrogate` (clip + min-surrogate). Shared by
-    the PPO and REINFORCE losses. Operates only on ``(B, T)`` tensors
-    (no vocab axis), so it is memory-bounded.
+    Pools with :func:`pool_log_ratio_by_level` and broadcasts back to ``(B, T)``,
+    so every token of a turn (or trajectory) carries that unit's geometric-mean
+    ratio. Non-action positions hold arbitrary values.
 
     :param token_log_ratio: ``(B, T)`` per-token ``log pi - log pi_old``.
     :type token_log_ratio: torch.Tensor
+    :param action_mask: ``(B, T)`` action-token mask.
+    :type action_mask: torch.Tensor
+    :param turn_ids: ``(B, T)`` turn index per token (``-1`` non-action);
+        required for the turn level.
+    :type turn_ids: torch.Tensor | None
+    :param level: ``"token"`` / ``"turn"`` / ``"trajectory"``.
+    :type level: str
+    :param num_turns: Number of turns for the turn level; inferred from
+        ``turn_ids`` when ``None``.
+    :type num_turns: int | None
+    :return: ``(B, T)`` log importance weights.
+    :rtype: torch.Tensor
+    """
+    if level == "token":
+        return token_log_ratio
+    pooled, _ = pool_log_ratio_by_level(
+        token_log_ratio, action_mask, turn_ids, level, num_turns
+    )
+    if level == "trajectory":
+        return pooled.expand_as(token_log_ratio)
+    assert turn_ids is not None
+    return pooled.gather(1, turn_ids.clamp(min=0).to(torch.int64))
+
+
+def clipped_token_surrogate(
+    log_importance_weights: torch.Tensor,
+    advantages: torch.Tensor,
+    action_mask: torch.Tensor,
+    clip_min: float,
+    clip_max: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-token PPO loss ``max(-A w, -A clip(w))`` and the tokens the clip zeroes.
+
+    A token is clipped when ``A >= 0`` and ``w > clip_max``, or ``A < 0`` and
+    ``w < clip_min``: its gradient is zero.
+
+    :param log_importance_weights: ``(B, T)`` per-token log importance weights.
+    :type log_importance_weights: torch.Tensor
     :param advantages: ``(B, T)`` per-token advantages.
     :type advantages: torch.Tensor
     :param action_mask: ``(B, T)`` action-token mask.
     :type action_mask: torch.Tensor
-    :param turn_ids: ``(B, T)`` turn index per token (``-1`` non-action);
-        required for turn level.
-    :type turn_ids: torch.Tensor | None
-    :param importance_sampling_level: ``"token"`` / ``"turn"`` / ``"trajectory"``.
-    :type importance_sampling_level: str
-    :param clip_coef: Symmetric clip coefficient (clip to ``[1-c, 1+c]``).
-    :type clip_coef: float
-    :param turn_reduction: Turn-level pooling reduction when
-        ``importance_sampling_level="turn"``, one of ``"mean"`` or ``"sum"``.
-    :type turn_reduction: str
-    :param num_turns: Number of turns for the turn level; inferred from
-        ``turn_ids`` when ``None``. Any count above the largest turn id gives
-        the same loss.
-    :type num_turns: int | None
-    :return: ``(pg_loss, clipfrac)`` scalars.
+    :param clip_min: Lower clip bound for the ratio (e.g. ``1 - clip_coef``).
+    :type clip_min: float
+    :param clip_max: Upper clip bound for the ratio (e.g. ``1 + clip_coef``).
+    :type clip_max: float
+    :return: ``(B, T)`` per-token loss, and the ``(B, T)`` bool clipped mask.
     :rtype: tuple[torch.Tensor, torch.Tensor]
     """
-    if (
-        num_turns is None
-        and importance_sampling_level == "turn"
-        and turn_ids is not None
-    ):
-        num_turns = int(turn_ids.max().item()) + 1
-    log_importance_weights, unit_mask = pool_log_ratio_by_level(
-        token_log_ratio,
-        action_mask,
-        turn_ids,
-        importance_sampling_level,
-        num_turns,
-        turn_reduction=turn_reduction,
+    ratio = torch.exp(log_importance_weights)
+    surrogate = torch.max(
+        -advantages * ratio, -advantages * torch.clamp(ratio, clip_min, clip_max)
     )
-    adv, _ = pool_log_ratio_by_level(
-        advantages,
-        action_mask,
-        turn_ids,
-        importance_sampling_level,
-        num_turns,
-        turn_reduction="mean",
+    clipped = action_mask.bool() & (
+        ((advantages >= 0) & (ratio > clip_max))
+        | ((advantages < 0) & (ratio < clip_min))
     )
-    pooled_loss_weight = None
-    if loss_weight is not None:
-        pooled_loss_weight, _ = pool_log_ratio_by_level(
-            loss_weight,
-            action_mask,
-            turn_ids,
-            importance_sampling_level,
-            num_turns,
-            turn_reduction="mean",
+    return surrogate, clipped
+
+
+def validate_off_policy_token_mask_bounds(bounds: tuple[float, float] | None) -> None:
+    """Raise unless ``bounds`` is ``None`` or satisfies ``0 <= low < 1 < high``.
+
+    :param bounds: ``(low, high)`` ratio band, or ``None``.
+    :type bounds: tuple[float, float] | None
+    :raises ValueError: If the band does not bracket 1.
+    """
+    if bounds is None:
+        return
+    low, high = bounds
+    if not 0.0 <= low < 1.0 < high:
+        msg = (
+            "off_policy_token_mask_bounds must satisfy 0 <= low < 1 < high, "
+            f"got ({low}, {high})."
         )
-    return clipped_min_surrogate(
-        log_importance_weights,
-        adv,
-        unit_mask,
-        1 - clip_coef,
-        1 + clip_coef,
-        loss_weight=pooled_loss_weight,
-    )
+        raise ValueError(msg)
+
+
+def off_policy_token_drops(
+    log_probs: torch.Tensor,
+    behaviour_log_probs: torch.Tensor,
+    action_mask: torch.Tensor,
+    bounds: tuple[float, float] | None,
+) -> torch.Tensor | None:
+    """Action tokens whose ratio to the sampling policy leaves ``bounds`` (IcePop).
+
+    :param log_probs: ``(B, T)`` current-policy log-probs.
+    :type log_probs: torch.Tensor
+    :param behaviour_log_probs: ``(B, T)`` log-probs of the policy that sampled
+        the tokens.
+    :type behaviour_log_probs: torch.Tensor
+    :param action_mask: ``(B, T)`` action-token mask.
+    :type action_mask: torch.Tensor
+    :param bounds: ``(low, high)`` ratio band, or ``None`` to drop nothing.
+    :type bounds: tuple[float, float] | None
+    :return: ``(B, T)`` bool drops, or ``None`` when ``bounds`` is ``None``.
+    :rtype: torch.Tensor | None
+    """
+    if bounds is None:
+        return None
+    low, high = bounds
+    with torch.no_grad():
+        ratio = torch.exp(log_probs.detach() - behaviour_log_probs)
+    return action_mask.bool() & ((ratio < low) | (ratio > high))
 
 
 def cuda_tensor_bytes_in_module(module: torch.nn.Module) -> int:

@@ -35,7 +35,6 @@ class TestGRPOSoftcappedActor:
             pytest.param(
                 {
                     "loss_type": "gspo",
-                    "vllm_importance_sampling_correction": False,
                     "off_policy_token_mask_bounds": None,
                     "off_policy_sequence_mask_threshold": None,
                 },

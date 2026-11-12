@@ -256,10 +256,13 @@ class TestPPOLearnBalancedAcrossRanks:
     def test_uneven_ranks_run_even_rows_with_their_local_gradients(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Arrange: returns and advantages stay on each rank's own episodes, so
-        # the step averages rank 0's 4 local rows and rank 1's 2. Without a KL
-        # term or a reachable clip norm the step gradient is linear in the rows.
-        make_agent = partial(_make_ppo, beta=0.0, max_grad_norm=1e30)
+        # Arrange: unwhitened returns and advantages stay on each rank's own
+        # episodes, so the step averages rank 0's 4 local rows and rank 1's 2.
+        # Without a KL term or a reachable clip norm the step gradient is
+        # linear in the rows.
+        make_agent = partial(
+            _make_ppo, beta=0.0, max_grad_norm=1e30, whiten_advantages=False
+        )
         rank0, rank1 = rank_local_step_gradients(make_agent, monkeypatch)
 
         # Act
@@ -272,12 +275,12 @@ class TestPPOLearnBalancedAcrossRanks:
             assert steps[0].keys() == rank0.keys()
             for name in rank0:
                 # fp32 sums over a different micro-batch order and rank split,
-                # on critic gradients up to about 20.
+                # on critic gradients up to about 20 and unwhitened advantages.
                 torch.testing.assert_close(
                     torch.from_numpy(steps[0][name]),
                     (4 * rank0[name] + 2 * rank1[name]) / 6,
-                    rtol=1e-5,
-                    atol=1e-5,
+                    rtol=1e-4,
+                    atol=1e-4,
                     msg=name,
                 )
 
@@ -286,7 +289,9 @@ class TestPPOLearnBalancedAcrossRanks:
     ) -> None:
         # Arrange: only rank 0's episodes carry vLLM sampling log-probs, and
         # one of its rows trains on rank 1.
-        make_agent = partial(_make_ppo, beta=0.0, max_grad_norm=1e30)
+        make_agent = partial(
+            _make_ppo, beta=0.0, max_grad_norm=1e30, whiten_advantages=False
+        )
         uncorrected, _ = rank_local_step_gradients(make_agent, monkeypatch)
         rank0, rank1 = rank_local_step_gradients(
             make_agent, monkeypatch, sampling_ranks=(0,)

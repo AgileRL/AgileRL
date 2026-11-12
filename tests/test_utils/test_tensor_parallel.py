@@ -462,6 +462,36 @@ class CausalHead(nn.Module):
             self.lm_head.weight = self.embed.weight
 
 
+class TiedHeadWithEmbeddings(CausalHead):
+    def get_input_embeddings(self) -> nn.Module:
+        return self.embed
+
+
+class ValueHeadWrapper(nn.Module):
+    """Wraps a tied causal LM without exposing ``get_input_embeddings``."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.pretrained_model = TiedHeadWithEmbeddings(vocab=8, hidden=4, tie=True)
+        self.v_head = nn.Linear(4, 1)
+
+
+def _wrapped_tied_embedding_worker(
+    rank: int, world_size: int
+) -> tuple[int, bool, bool]:
+    """Shard count, embedding DTensor state and tie state through a wrapper."""
+    model = ValueHeadWrapper()
+    inner = model.pretrained_model
+
+    count = tp_mod.shard_tied_embeddings(model, _tp_mesh(world_size, 2).tp)
+
+    return (
+        count,
+        isinstance(inner.embed.weight, DTensor),
+        inner.lm_head.weight is inner.embed.weight,
+    )
+
+
 def _dense_worker(rank: int, world_size: int) -> None:
     torch.manual_seed(0)
     tp = 2
@@ -1184,6 +1214,12 @@ class TestTensorParallelGuards:
         assert count == 0
         assert not isinstance(model.embed.weight, DTensor)
         assert not isinstance(model.lm_head.weight, DTensor)
+
+    @pytest.mark.multi_rank
+    def test_shard_tied_embeddings_finds_the_embedding_on_the_head_owner(self):
+        reports = run_ranks(_wrapped_tied_embedding_worker, 2)
+
+        assert reports == [(1, True, True), (1, True, True)]
 
     def test_shard_lm_heads_installs_gather_on_an_already_sharded_head(self):
         class Model(nn.Module):

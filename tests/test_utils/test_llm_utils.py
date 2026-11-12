@@ -81,13 +81,14 @@ from agilerl.utils.llm_utils import (
     attention_mask_from_padded_ids,
     baseline_free_turn_cells,
     batch_is_single_turn,
+    broadcast_log_ratio_by_level,
     build_bnb_quantization_config,
     build_completion_mask,
     build_vllm_llm_init_kwargs,
     build_vllm_rollout_lora_request,
     calculate_k3_kl,
     check_vllm_lora_export_complete,
-    clipped_is_surrogate,
+    clipped_token_surrogate,
     collect_trainable_param_stats,
     compare_responses,
     create_model_from_name_or_path,
@@ -99,6 +100,7 @@ from agilerl.utils.llm_utils import (
     gather_to_host,
     get_lora_params,
     get_model_name_or_path,
+    global_masked_whiten,
     has_vision_tower,
     k3_kl_penalty_reference,
     language_model_attn_implementation,
@@ -134,6 +136,7 @@ from agilerl.utils.llm_utils import (
     set_sub_model_attn_implementation,
     snapshot_lora_adapters,
     trainer_attn_implementation,
+    turn_state_values,
     validate_importance_sampling_level,
     value_fit,
     write_lora_adapters,
@@ -141,6 +144,7 @@ from agilerl.utils.llm_utils import (
 )
 from tests import TINY_LLM_FIXTURE_PATH
 from tests.helper_functions import skip_torch_compile_on_windows_cpu
+from tests.rank_launch import run_ranks
 from tests.test_distributed.quantized_checkpoints import (
     INPUT_IDS,
     QuantizedCheckpoint,
@@ -1294,6 +1298,49 @@ class TestMaskedWhiten:
         assert torch.allclose(diff, torch.full_like(diff, 4.0), atol=1e-5)
 
 
+GLOBAL_WHITEN_VALUES = (
+    torch.tensor([[1.0, 2.0, 3.0]]),
+    torch.tensor([[10.0, 20.0, 30.0]]),
+)
+
+
+def _global_whiten_worker(rank: int, _world_size: int) -> list[float]:
+    """This rank's masked values after global whitening."""
+    values = GLOBAL_WHITEN_VALUES[rank]
+    mask = torch.ones_like(values)
+
+    return global_masked_whiten(values, mask)[mask.bool()].tolist()
+
+
+class TestGlobalMaskedWhiten:
+    def test_matches_masked_whiten_on_one_process(self) -> None:
+        values = torch.tensor([[1.0, 3.0, 5.0], [2.0, 9.0, 4.0]])
+        mask = torch.tensor([[1.0, 1.0, 0.0], [1.0, 1.0, 1.0]])
+
+        whitened = global_masked_whiten(values, mask)
+
+        expected = masked_whiten(values, mask)
+        assert torch.allclose(whitened[mask.bool()], expected[mask.bool()], atol=1e-6)
+
+    def test_leaves_values_unchanged_with_fewer_than_two_unmasked(self) -> None:
+        values = torch.tensor([[1.0, 3.0, 5.0]])
+        mask = torch.tensor([[1.0, 0.0, 0.0]])
+
+        assert torch.equal(global_masked_whiten(values, mask), values)
+
+    @pytest.mark.multi_rank
+    def test_uses_the_mean_and_variance_over_every_rank(self) -> None:
+        # Arrange
+        pooled = torch.cat(GLOBAL_WHITEN_VALUES, dim=1)
+        expected = masked_whiten(pooled, torch.ones_like(pooled)).flatten().tolist()
+
+        # Act
+        per_rank = run_ranks(_global_whiten_worker, 2)
+
+        # Assert
+        assert per_rank[0] + per_rank[1] == pytest.approx(expected, abs=1e-6)
+
+
 class TestBaselineFreeTurnCells:
     """``baseline_free_turn_cells`` finds played cells with no group baseline."""
 
@@ -1366,15 +1413,41 @@ class TestValueFit:
         assert value_fit(values, returns, mask) == (0.0, 0.0)
 
     def test_turn_ids_compare_pooled_turn_values(self) -> None:
-        values = torch.tensor([[1.0, 3.0, 5.0, 5.0, 7.0]])
+        values = torch.tensor([[2.0, 3.0, 5.0, 9.0, 7.0]])
         returns = torch.tensor([[2.0, 2.0, 5.0, 5.0, 0.0]])
         mask = torch.tensor([[1.0, 1.0, 1.0, 1.0, 0.0]])
         turn_ids = torch.tensor([[0, 0, 1, 1, -1]])
 
-        explained, correlation = value_fit(values, returns, mask, turn_ids, "mean")
+        explained, correlation = value_fit(values, returns, mask, turn_ids)
 
         assert explained == pytest.approx(1.0)
         assert correlation == pytest.approx(1.0)
+
+
+class TestTurnStateValues:
+    def test_selects_first_action_token_per_turn(self) -> None:
+        token_values = torch.tensor([[1.0, 9.0, 2.0, 8.0]])
+        turn_ids = torch.tensor([[0, 0, 1, 1]])
+
+        out = turn_state_values(token_values, turn_ids, num_turns=2)
+
+        assert torch.equal(out, torch.tensor([[1.0, 2.0]]))
+
+    def test_missing_turn_is_zero(self) -> None:
+        token_values = torch.tensor([[4.0, 5.0]])
+        turn_ids = torch.tensor([[0, 0]])
+
+        out = turn_state_values(token_values, turn_ids, num_turns=2)
+
+        assert torch.equal(out, torch.tensor([[4.0, 0.0]]))
+
+    def test_non_action_tokens_do_not_count_as_a_turn(self) -> None:
+        token_values = torch.tensor([[9.0, 9.0]])
+        turn_ids = torch.tensor([[-1, -1]])
+
+        out = turn_state_values(token_values, turn_ids, num_turns=1)
+
+        assert torch.equal(out, torch.tensor([[0.0]]))
 
 
 class TestPoolByTurnsBadReduction:
@@ -1387,157 +1460,79 @@ class TestPoolByTurnsBadReduction:
             pool_by_turns(token_values, turn_ids, num_turns=1, reduction="unsupported")
 
 
-class TestPoolLogRatioByLevelBadReduction:
-    """``pool_log_ratio_by_level`` rejects unknown turn reductions at the turn level."""
+class TestPoolLogRatioByLevelErrors:
+    def test_turn_level_requires_turn_ids(self) -> None:
+        with pytest.raises(ValueError, match="turn-level surrogate requires turn_ids"):
+            pool_log_ratio_by_level(torch.zeros(1, 2), torch.ones(1, 2), None, "turn")
 
-    def test_unknown_turn_reduction_raises(self) -> None:
-        token_log_ratio = torch.zeros(1, 2)
-        action_mask = torch.ones(1, 2)
-        turn_ids = torch.tensor([[0, 0]])
-        with pytest.raises(ValueError, match=r"turn_reduction must be one of"):
-            pool_log_ratio_by_level(
-                token_log_ratio,
-                action_mask,
-                turn_ids,
-                level="turn",
-                turn_reduction="unsupported",
-            )
+    def test_unknown_level_raises(self) -> None:
+        with pytest.raises(ValueError, match="Unknown importance_sampling_level"):
+            pool_log_ratio_by_level(torch.zeros(1, 2), torch.ones(1, 2), None, "bogus")
 
 
-class TestClippedIsSurrogate:
-    """The shared token/turn/sequence clipped surrogate used by the
-    PPO and REINFORCE paths. token/turn/sequence are points on one
-    ratio-pooling axis, so the level collapses cleanly at the limits.
-    """
-
-    @staticmethod
-    def _setup():
-        torch.manual_seed(0)
-        B, T = 3, 6
-        token_log_ratio = torch.randn(B, T)
-        advantages = torch.randn(B, T)
-        mask = torch.ones(B, T)
-        mask[0, 5:] = 0  # ragged sequence
-        return token_log_ratio, advantages, mask, B, T
-
-    def test_turn_each_token_own_turn_equals_token(self):
-        tlr, adv, mask, _B, T = self._setup()
-        turn_each = torch.where(
-            mask.bool(),
-            torch.arange(T).unsqueeze(0).expand_as(mask).long(),
-            torch.full_like(mask, -1, dtype=torch.long),
-        )
-        pg_tok, cf_tok = clipped_is_surrogate(tlr, adv, mask, turn_each, "token", 0.2)
-        pg_turn, cf_turn = clipped_is_surrogate(tlr, adv, mask, turn_each, "turn", 0.2)
-        assert torch.allclose(pg_tok, pg_turn, atol=1e-5)
-        assert torch.allclose(cf_tok, cf_turn, atol=1e-5)
-
-    def test_single_turn_equals_sequence(self):
-        tlr, adv, mask, B, T = self._setup()
-        turn_one = torch.where(
-            mask.bool(),
-            torch.zeros(B, T, dtype=torch.long),
-            torch.full((B, T), -1, dtype=torch.long),
-        )
-        pg_turn, _ = clipped_is_surrogate(tlr, adv, mask, turn_one, "turn", 0.2)
-        pg_seq, _ = clipped_is_surrogate(tlr, adv, mask, turn_one, "trajectory", 0.2)
-        assert torch.allclose(pg_turn, pg_seq, atol=1e-5)
-
-    def test_sequence_pools_ratio_and_advantage(self):
-        """Trajectory level uses the length-normalized mean log-ratio and the
-        mean advantage over a completion's action tokens.
-        """
-        tlr = torch.tensor([[0.2, 0.4, 1.0, -5.0]])
-        adv = torch.tensor([[1.0, 3.0, 2.0, 99.0]])
-        mask = torch.tensor([[1.0, 1.0, 1.0, 0.0]])  # last token non-action
-        pg, _ = clipped_is_surrogate(tlr, adv, mask, None, "trajectory", 0.2)
-        mean_lr = (0.2 + 0.4 + 1.0) / 3
-        mean_adv = (1.0 + 3.0 + 2.0) / 3
-        ratio = torch.exp(torch.tensor(mean_lr))
-        clipped = torch.clamp(ratio, 0.8, 1.2)
-        expected = torch.max(-mean_adv * ratio, -mean_adv * clipped)
-        assert torch.allclose(pg, expected, atol=1e-5)
-
-    def test_turn_sum_reduction_pools_ratio_by_product_but_advantage_by_mean(self):
-        """With ``turn_reduction="sum"`` the turn ratio is the product of token
-        ratios (nightly/Turn-PPO), while the (broadcast) advantage is still
-        recovered by the turn mean — i.e. it is *not* rescaled by turn length.
-        """
-        # One sample, one turn, two action tokens; advantage is the per-turn
-        # value broadcast across both tokens (as the GAE code produces).
-        tlr = torch.tensor([[0.1, 0.2]])
-        adv = torch.tensor([[2.0, 2.0]])
-        mask = torch.ones(1, 2)
-        turn_ids = torch.zeros(1, 2, dtype=torch.long)
-        # Wide clip so the ratio is never clamped, isolating the pooling logic.
-        pg, _ = clipped_is_surrogate(
-            tlr, adv, mask, turn_ids, "turn", 10.0, turn_reduction="sum"
-        )
-        ratio = torch.exp(torch.tensor(0.1 + 0.2))  # product ratio
-        expected = -2.0 * ratio  # mean-pooled advantage, NOT 4.0
-        assert torch.allclose(pg, expected, atol=1e-5)
-
-    def test_turn_count_above_the_largest_turn_gives_the_same_loss(self):
-        # Arrange
-        tlr, adv, mask, _B, T = self._setup()
-        turn_ids = torch.where(
-            mask.bool(),
-            (torch.arange(T) // 3).unsqueeze(0).expand_as(mask),
-            torch.full_like(mask, -1, dtype=torch.long),
-        )
-        weight = torch.rand_like(tlr)
+class TestBroadcastLogRatioByLevel:
+    def test_turn_level_gives_every_token_its_turns_mean(self) -> None:
+        # Arrange: turn 0 owns tokens 0-1, turn 1 tokens 2-4; token 5 is not an action.
+        log_ratio = torch.tensor([[0.2, 0.4, 0.3, 0.6, 0.9, 5.0]])
+        action_mask = torch.tensor([[1, 1, 1, 1, 1, 0]], dtype=torch.bool)
+        turn_ids = torch.tensor([[0, 0, 1, 1, 1, -1]])
 
         # Act
-        inferred = clipped_is_surrogate(
-            tlr, adv, mask, turn_ids, "turn", 0.2, loss_weight=weight
-        )
-        widened = clipped_is_surrogate(
-            tlr, adv, mask, turn_ids, "turn", 0.2, loss_weight=weight, num_turns=5
-        )
+        out = broadcast_log_ratio_by_level(log_ratio, action_mask, turn_ids, "turn", 2)
 
         # Assert
-        assert torch.equal(widened[0], inferred[0])
-        assert torch.equal(widened[1], inferred[1])
+        expected = torch.tensor([0.3, 0.3, 0.6, 0.6, 0.6])
+        assert torch.allclose(out[0, :5], expected, atol=1e-6)
 
-    def test_turn_requires_turn_ids(self):
-        tlr, adv, mask, _B, _T = self._setup()
-        with pytest.raises(ValueError, match="turn-level surrogate requires turn_ids"):
-            clipped_is_surrogate(tlr, adv, mask, None, "turn", 0.2)
+    def test_trajectory_level_gives_every_token_the_row_mean(self) -> None:
+        log_ratio = torch.tensor([[0.2, 0.4, 9.0], [1.0, 1.0, 1.0]])
+        action_mask = torch.tensor([[1, 1, 0], [1, 1, 1]], dtype=torch.bool)
 
-    def test_unknown_level_raises(self):
-        tlr, adv, mask, _B, _T = self._setup()
-        with pytest.raises(ValueError, match="Unknown importance_sampling_level"):
-            clipped_is_surrogate(tlr, adv, mask, None, "bogus", 0.2)
+        out = broadcast_log_ratio_by_level(log_ratio, action_mask, None, "trajectory")
 
-    def test_gradient_flows_to_log_ratio(self):
-        """All levels are differentiable w.r.t. the token log-ratio."""
-        for level, turn_ids in (
-            ("token", None),
-            ("trajectory", None),
-            ("turn", torch.zeros(3, 6, dtype=torch.long)),
-        ):
-            tlr, adv, mask, _B, _T = self._setup()
-            tlr = tlr.clone().requires_grad_(True)
-            pg, _ = clipped_is_surrogate(tlr, adv, mask, turn_ids, level, 0.2)
-            pg.backward()
-            assert tlr.grad is not None
-            assert torch.isfinite(tlr.grad).all()
+        assert out.shape == (2, 3)
+        assert torch.allclose(out[0, :2], torch.tensor([0.3, 0.3]), atol=1e-6)
+        assert torch.allclose(out[1], torch.ones(3), atol=1e-6)
 
-    def test_loss_weight_scales_per_unit_surrogate(self):
-        """A detached per-token loss weight reweights the surrogate; uniform
-        weights of 1 are a no-op and uniform weights of w scale pg_loss by w.
-        """
-        tlr, adv, mask, _B, _T = self._setup()
-        pg_base, cf_base = clipped_is_surrogate(tlr, adv, mask, None, "token", 0.2)
-        pg_ones, cf_ones = clipped_is_surrogate(
-            tlr, adv, mask, None, "token", 0.2, loss_weight=torch.ones_like(tlr)
+    def test_token_level_is_the_identity(self) -> None:
+        log_ratio = torch.tensor([[0.2, -0.4]])
+
+        out = broadcast_log_ratio_by_level(
+            log_ratio, torch.ones(1, 2, dtype=torch.bool), None, "token"
         )
-        assert torch.allclose(pg_base, pg_ones, atol=1e-6)
-        assert torch.allclose(cf_base, cf_ones, atol=1e-6)
-        pg_half, _ = clipped_is_surrogate(
-            tlr, adv, mask, None, "token", 0.2, loss_weight=torch.full_like(tlr, 0.5)
-        )
-        assert torch.allclose(pg_half, 0.5 * pg_base, atol=1e-6)
+
+        assert torch.equal(out, log_ratio)
+
+
+class TestClippedTokenSurrogate:
+    def test_clips_each_token_by_the_sign_of_its_advantage(self) -> None:
+        # Arrange: one shared ratio of e^0.5 > 1.2; only positive advantages
+        # past the upper bound lose their gradient.
+        log_w = torch.full((1, 3), 0.5, requires_grad=True)
+        advantages = torch.tensor([[1.0, -1.0, 2.0]])
+        mask = torch.ones(1, 3, dtype=torch.bool)
+
+        # Act
+        surrogate, clipped = clipped_token_surrogate(log_w, advantages, mask, 0.8, 1.2)
+        surrogate.sum().backward()
+
+        # Assert
+        ratio = math.exp(0.5)
+        assert torch.allclose(surrogate, torch.tensor([[-1.2, ratio, -2.4]]), atol=1e-6)
+        assert clipped.tolist() == [[True, False, True]]
+        assert log_w.grad is not None
+        assert log_w.grad.tolist()[0][0] == 0.0
+        assert log_w.grad.tolist()[0][2] == 0.0
+        assert log_w.grad[0, 1].item() == pytest.approx(ratio, rel=1e-6)
+
+    def test_masked_tokens_are_never_clipped(self) -> None:
+        log_w = torch.full((1, 2), -1.0)
+        advantages = torch.tensor([[-1.0, -1.0]])
+        mask = torch.tensor([[True, False]])
+
+        _, clipped = clipped_token_surrogate(log_w, advantages, mask, 0.8, 1.2)
+
+        assert clipped.tolist() == [[True, False]]
 
 
 class TestCreateModelFromNameOrPathValueHead:
@@ -3560,17 +3555,6 @@ class TestPoolLogRatioByLevel:
         weights, unit_mask = pool_log_ratio_by_level(tlr, mask, turn_ids, "turn")
         assert unit_mask.tolist() == [[1.0, 0.0]]
         assert weights[0, 1].item() == pytest.approx(0.0)
-
-    def test_turn_level_sum_reduction_matches_product_ratio_log_pooling(self):
-        tlr = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
-        mask = torch.ones(1, 4)
-        turn_ids = torch.tensor([[0, 0, 1, 1]])
-        weights, unit_mask = pool_log_ratio_by_level(
-            tlr, mask, turn_ids, "turn", turn_reduction="sum"
-        )
-        assert weights.shape == (1, 2)
-        assert weights[0].tolist() == pytest.approx([3.0, 7.0])
-        assert unit_mask.tolist() == [[1.0, 1.0]]
 
     def test_trajectory_level_masks_rows_without_action_tokens(self):
         tlr = torch.tensor([[1.0, 2.0], [3.0, 4.0]])

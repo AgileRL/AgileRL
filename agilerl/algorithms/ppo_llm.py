@@ -46,15 +46,19 @@ from agilerl.utils.llm_utils import (
     BitsAndBytesConfig,
     MicroBatchMetrics,
     attention_mask_from_padded_ids,
+    broadcast_log_ratio_by_level,
     calculate_k3_kl,
-    clipped_is_surrogate,
+    clipped_token_surrogate,
+    global_masked_whiten,
     k3_kl_penalty_reference,
     masked_mean,
-    masked_whiten,
     normalize_prompt_batch,
+    off_policy_token_drops,
     pool_by_turns,
     resolve_batch_advantage_granularity,
+    turn_state_values,
     validate_importance_sampling_level,
+    validate_off_policy_token_mask_bounds,
     value_fit,
 )
 from agilerl.utils.segment_rows import filler_stand_in
@@ -72,6 +76,13 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
     Each generation sequence (turn) is treated as a single RL action.
     GAE discounts between turns, not between tokens within a turn.
     Single-turn is the special case where all action tokens share turn 0.
+
+    Every token of a turn shares the turn's geometric-mean ratio, the clip
+    binds per token, and the policy loss is the mean over action tokens.
+
+    The importance ratio divides by the rollout engine's sampling log-probs.
+    Rows without them on every action token take the learn-start policy's
+    from the no-grad forward.
 
     :param pad_token_id: Token id used for sequence padding.
     :type pad_token_id: int
@@ -97,7 +108,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
     :type clip_coef: float, optional
     :param gamma: Discount factor across turns.
     :type gamma: float, optional
-    :param gae_lambda: GAE lambda used for turn-level advantage estimation.
+    :param gae_lambda: GAE lambda; the default ``1.0`` uses Monte Carlo returns.
     :type gae_lambda: float, optional
     :param critic_warmup_steps: First learn steps that update only the critic, on
         Monte Carlo returns (GAE ``lambda = 1``), leaving the policy fixed.
@@ -180,46 +191,26 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
     :type turn_level_clip: bool, optional
     :param importance_sampling_level: IS / ratio-pooling level for the policy
         surrogate, orthogonal to ``advantage_granularity``. ``"token"`` clips per
-        token; ``"turn"`` pools the ratio per turn;
-        ``"trajectory"`` pools over the whole completion; the paired advantage is
-        pooled to the same bucket. ``"auto"`` (default) uses the GAE granularity
-        when ``turn_level_clip`` is set, else token.
+        token; ``"turn"`` gives every token of a turn the turn's
+        length-normalized geometric-mean ratio; ``"trajectory"`` the
+        completion's. Advantages and the clip stay per token. ``"auto"``
+        (default) uses the GAE granularity when ``turn_level_clip`` is set,
+        else token.
     :type importance_sampling_level: Literal["auto", "token", "turn", "trajectory"], optional
     :param advantage_granularity: PPO action granularity. ``"turn"`` enforces
         turn-level updates, ``"token"`` enforces token-level updates, and
         ``"auto"`` uses token-level only when all samples are single-turn.
     :type advantage_granularity: Literal["turn", "token", "auto"], optional
-    :param turn_ratio_pooling: Reduction used to pool per-token log-ratios into
-        a per-turn ratio when the importance-sampling level is ``"turn"`` (the
-        default ``"auto"`` resolves to turn for multi-turn batches); ignored at
-        token/trajectory level. ``"sum"`` (default) yields the product ratio per
-        turn — the standard, paper-aligned per-turn importance weight. ``"mean"``
-        yields a length-normalized geometric-mean ratio (GSPO-style); reach for it
-        on long or highly variable-length turns, where the product ratio is far
-        outside the clip band on every turn and saturates the clipped surrogate —
-        length-normalizing keeps the per-turn ratio in range so the surrogate stays
-        informative.
-    :type turn_ratio_pooling: Literal["sum", "mean"], optional
-    :param turn_value_reduction: Aggregation used to map token critic values to
-        turn values. ``"mean"`` reproduces existing behavior, ``"final_value"``
-        uses the final action token value in each turn.
-    :type turn_value_reduction: str, optional
     :param whiten_advantages: Whether to whiten computed advantages before PPO
-        optimization.
+        optimization, with the mean and variance of the whole batch across ranks.
     :type whiten_advantages: bool, optional
     :param quantization_config: Optional ``transformers.BitsAndBytesConfig`` for
         loading the base model in 4-/8-bit (QLoRA). ``lm_head`` is kept
         unquantized so the fused-linear-logprob path stays numerically exact.
     :type quantization_config: BitsAndBytesConfig | None, optional
-    :param vllm_importance_sampling_correction: When ``True`` (default) and
-        colocated, correct the rollout/trainer log-prob mismatch by
-        weighting each training token by ``clamp(exp(trainer - sampling),
-        max=vllm_importance_sampling_cap)``. Active only for training rollouts;
-        inert on the HuggingFace path and at eval.
-    :type vllm_importance_sampling_correction: bool, optional
-    :param vllm_importance_sampling_cap: Upper clamp on the vLLM
-        importance-sampling ratio (default ``2.0``), bounding the correction
-        weight to limit variance from outlier tokens. Must be > 0.
+    :param vllm_importance_sampling_cap: Trainer/vLLM ratio at which the
+        sampling-mismatch metrics count a token as clipped (default ``2.0``).
+        Must be > 0.
     :type vllm_importance_sampling_cap: float, optional
     :param vllm_max_logprob_gap: Log a warning when a learn step's mean
         ``|trainer - vLLM|`` per-token log-prob gap exceeds this, in nats
@@ -245,6 +236,11 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         share of action tokens past the bound. ``None`` disables the bound,
         defaults to 10.0. Must be > 0.
     :type kl_clamp: float | None, optional
+    :param off_policy_token_mask_bounds: ``(low, high)`` band on each action
+        token's ratio of the current policy to the policy that sampled it.
+        Tokens outside get no policy or KL gradient (IcePop). Defaults to
+        ``(0.5, 5.0)``; ``None`` masks nothing. Requires ``0 <= low < 1 < high``.
+    :type off_policy_token_mask_bounds: tuple[float, float] | None, optional
     :param logit_bias: Token id to logit offset vLLM adds when it samples;
         the trainer's log-probs add the same. ``None`` adds none.
     :type logit_bias: dict[int, float] | None, optional
@@ -278,10 +274,10 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         vf_coef: float = 0.5,
         clip_coef: float = 0.2,
         gamma: float = 1.0,
-        gae_lambda: float = 0.95,
+        gae_lambda: float = 1.0,
         critic_warmup_steps: int = 0,
-        lr_actor: float = 5e-7,
-        lr_critic: float | None = 5e-5,
+        lr_actor: float = 1e-5,
+        lr_critic: float | None = 1e-4,
         max_grad_norm: float = 1.0,
         share_grad_clip: bool = False,
         update_epochs: int = 1,
@@ -314,17 +310,15 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             "auto", "token", "turn", "trajectory"
         ] = "auto",
         advantage_granularity: Literal["turn", "token", "auto"] = "auto",
-        turn_ratio_pooling: Literal["sum", "mean"] = "sum",
-        turn_value_reduction: Literal["mean", "final_value"] = "final_value",
         whiten_advantages: bool = True,
         quantization_config: BitsAndBytesConfig | None = None,
         lora_tower_target_modules: list[str] | None = None,
         rollout_strip_multimodal_towers: bool = False,
-        vllm_importance_sampling_correction: bool = True,
         vllm_importance_sampling_cap: float = 2.0,
         vllm_max_logprob_gap: float = 0.1,
         vllm_max_clip_fraction: float = 0.02,
         kl_clamp: float | None = 10.0,
+        off_policy_token_mask_bounds: tuple[float, float] | None = (0.5, 5.0),
         logit_bias: dict[int, float] | None = None,
         micro_batch_tokens_per_gpu: int | None = None,
         routed_expert_chunk_mib: int | None = None,
@@ -367,7 +361,6 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             quantization_config=quantization_config,
             lora_tower_target_modules=lora_tower_target_modules,
             rollout_strip_multimodal_towers=rollout_strip_multimodal_towers,
-            vllm_importance_sampling_correction=vllm_importance_sampling_correction,
             vllm_importance_sampling_cap=vllm_importance_sampling_cap,
             vllm_max_logprob_gap=vllm_max_logprob_gap,
             vllm_max_clip_fraction=vllm_max_clip_fraction,
@@ -380,8 +373,10 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         if kl_clamp is not None and kl_clamp <= 0.0:
             msg = f"kl_clamp must be > 0 or None, got {kl_clamp}."
             raise ValueError(msg)
+        validate_off_policy_token_mask_bounds(off_policy_token_mask_bounds)
         self.beta = beta
         self.kl_clamp = kl_clamp
+        self.off_policy_token_mask_bounds = off_policy_token_mask_bounds
         self.vf_coef = vf_coef
         self.clip_coef = clip_coef
         # Expose lr_actor explicitly (base stores it as ``self.lr``): the split
@@ -402,12 +397,11 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         self._setup_advantage_options(
             turn_level_clip,
             advantage_granularity,
-            turn_value_reduction,
             whiten_advantages,
             gamma,
             gae_lambda,
         )
-        self._setup_objective(importance_sampling_level, turn_ratio_pooling)
+        self._setup_objective(importance_sampling_level)
         self._setup_generation(max_output_tokens, min_output_tokens, max_model_len)
         self.max_row_tokens = max_row_tokens
         self.micro_batch_tokens_per_gpu = micro_batch_tokens_per_gpu
@@ -442,16 +436,14 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         :param kwargs: Additional keyword arguments accepted for base-class compatibility.
         :type kwargs: Any
         :return: An :class:`ActionResult` of per-prompt completion token IDs and
-            masks. When the vLLM sampling-mismatch correction is enabled
-            (training rollouts), ``sampling_logps`` carries the captured
-            per-row sampling logprobs; otherwise it is ``None``.
+            masks. On training rollouts ``sampling_logps`` carries the
+            captured per-row sampling logprobs; otherwise it is ``None``.
         :rtype: ActionResult
         """
         prompts = normalize_prompt_batch(obs)
         self._ensure_vllm_for_generation()
         sampling_logps: list[torch.Tensor | None] | None = None
         sampling_supports: list[torch.Tensor | None] | None = None
-        capture_sampling_logps = training and self.vllm_importance_sampling_correction
 
         with self.select_adapter("actor"):
             self.actor.eval()
@@ -469,7 +461,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                 temperature=self.temperature
                 if training
                 else 0.01,  # Almost deterministic for evaluation
-                capture_sampling_logps=capture_sampling_logps,
+                capture_sampling_logps=training,
                 capture_sampling_supports=training and self.records_sampling_supports,
             )
 
@@ -500,12 +492,12 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         :type turn_ids: torch.Tensor | None
         :param sampling_logps: Optional per-row flat vLLM sampling logprobs (one
             1-D tensor per trajectory, generated tokens only; concatenated across
-            turns for multi-turn) for the vLLM sampling-mismatch correction.
+            turns for multi-turn), the old policy of the importance ratio.
             vLLM reports them under the penalised distribution it sampled
-            from, and the policy carries no penalties, so the correction is
-            the exact policy-to-behaviour ratio. Parallel to the stacked
-            ``token_ids`` rows. ``None`` disables the correction for this
-            update.
+            from, and the policy carries no penalties, so the ratio is the
+            exact policy-to-behaviour ratio. Parallel to the stacked
+            ``token_ids`` rows. Rows without them, or ``None``, use the
+            learn-start policy.
         :type sampling_logps: list[torch.Tensor | None] | None
         :param episode_segments: Optional segment layout per trajectory,
             parallel to the stacked ``token_ids`` rows (``None`` for an
@@ -559,6 +551,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                     "kl_clamp_frac",
                     "entropy",
                     "clipfrac",
+                    "off_policy_token_mask_frac",
                 )
             )
             grad_norm_totals = {
@@ -622,10 +615,6 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             # tokens included, so values stay on every turn token.
             old_values = torch.masked_fill(old_values, turn_ids < 0, 0.0)
 
-            token_rewards = self._compute_token_rewards(
-                action_masks, rewards_2d, turn_ids
-            )
-
             old_log_probs = torch.masked_fill(old_log_probs, ~action_mask_bool, 1.0)
             reference_log_probs = torch.masked_fill(
                 reference_log_probs, ~action_mask_bool, 1.0
@@ -634,28 +623,32 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             gae_lambda = 1.0 if critic_warmup else self.gae_lambda
             if ppo_granularity == "token":
                 returns, advantages = self._compute_gae_returns_token(
-                    token_rewards, old_values, action_masks, gae_lambda
+                    rewards_2d, old_values, action_masks, turn_ids, gae_lambda
                 )
             else:
+                token_rewards = self._compute_token_rewards(
+                    action_masks, rewards_2d, turn_ids
+                )
                 returns, advantages = self._compute_gae_returns(
                     token_rewards, old_values, action_masks, turn_ids, gae_lambda
                 )
-            del token_rewards
+                del token_rewards
             # Pre-update values against the value targets, on the GAE axis.
             explained_variance, value_return_corr = value_fit(
                 old_values,
                 returns,
                 action_mask_bool,
                 turn_ids if ppo_granularity == "turn" else None,
-                self.turn_value_reduction,
             )
 
-            # The reweight applies only to the policy surrogate.
             sampling_log_probs, is_metrics, is_excluded = (
                 self._aligned_sampling_logprobs_and_metrics(
                     sampling_logps, action_masks, old_log_probs
                 )
             )
+            # Rows lacking sampling log-probs keep the learn-start policy's.
+            if sampling_log_probs is not None:
+                old_log_probs = sampling_log_probs
 
             row_episodes = np.arange(num_samples)
             image_keys = None if pixel_values is None else torch.arange(no_grad_images)
@@ -668,8 +661,6 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                     (advantages, 0.0),
                     (old_values, 0.0),
                 ]
-                if sampling_log_probs is not None:
-                    frames.append((sampling_log_probs, 0.0))
                 rows, row_frames, accumulation_steps, image_keys = (
                     self._balanced_segment_frames(
                         split,
@@ -685,9 +676,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                     returns,
                     advantages,
                     old_values,
-                ) = row_frames[:6]
-                if sampling_log_probs is not None:
-                    sampling_log_probs = row_frames[6]
+                ) = row_frames
                 token_ids = rows.token_ids
                 action_masks = rows.action_masks
                 pixel_values = rows.pixel_values
@@ -724,35 +713,20 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                 if token_budget is None
                 else None,
             )
-            learn_vision = self._learn_vision_rows(
-                (
-                    VisionRows(pixel_values, pixel_image_counts, image_keys)
-                    if pixel_values is not None
-                    else None
-                ),
-                [
-                    micro_batch
-                    for epoch_windows in windows
-                    for window in epoch_windows
-                    for micro_batch in window
-                ],
-                num_samples,
-            )
-            is_level = self._resolve_is_level(ppo_granularity)
             # Policy, KL and value units: each term averages over its window's units.
             term_units = (
                 None
                 if token_budget is None
                 else (
-                    self._loss_units_per_row(action_masks, turn_ids, is_level),
+                    self._loss_units_per_row(action_masks, None, "token"),
                     self._loss_units_per_row(action_masks, None, "token"),
                     self._loss_units_per_row(turn_ids >= 0, turn_ids, "turn")
                     if ppo_granularity == "turn"
                     else self._loss_units_per_row(action_masks, None, "token"),
                 )
             )
+            micro_batch_plan = []
             for epoch_windows in windows:
-                micro_batch_plan = []
                 for window in epoch_windows:
                     loss_scales = (
                         [1.0] * len(window)
@@ -784,127 +758,129 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                             window, loss_scales, term_scales, strict=True
                         )
                     ]
-                for (
-                    minibatch_idxs,
-                    loss_scale,
-                    window_steps,
-                    (pg_scale, kl_scale, vf_scale),
-                ) in micro_batch_plan:
-                    backward_steps = window_steps or self.gradient_accumulation_steps
-                    rows_index = self._device_index(minibatch_idxs, token_ids.device)
-                    phase_timer.mark("other")
-                    # ``get_experiences_samples`` indexes each input
-                    # positionally: Tensor in -> Tensor out, so the tuple
-                    # mirrors the all-Tensor inputs.
-                    (
+            learn_vision = self._learn_vision_rows(
+                (
+                    VisionRows(pixel_values, pixel_image_counts, image_keys)
+                    if pixel_values is not None
+                    else None
+                ),
+                [entry[0] for entry in micro_batch_plan],
+                num_samples,
+            )
+            for (
+                minibatch_idxs,
+                loss_scale,
+                window_steps,
+                (pg_scale, kl_scale, vf_scale),
+            ) in micro_batch_plan:
+                backward_steps = window_steps or self.gradient_accumulation_steps
+                rows_index = self._device_index(minibatch_idxs, token_ids.device)
+                phase_timer.mark("other")
+                # ``get_experiences_samples`` indexes each input
+                # positionally: Tensor in -> Tensor out, so the tuple
+                # mirrors the all-Tensor inputs.
+                (
+                    batch_ids,
+                    batch_action_mask,
+                    batch_old_log_probs,
+                    batch_reference_log_probs,
+                    batch_returns,
+                    batch_advantages,
+                    batch_turn_ids,
+                ) = get_experiences_samples(
+                    rows_index,
+                    token_ids,
+                    action_masks,
+                    old_log_probs,
+                    reference_log_probs,
+                    returns,
+                    advantages,
+                    turn_ids,
+                )
+                is_filler = bool(filler_rows[minibatch_idxs].all())
+                if is_filler:
+                    batch_action_mask, batch_turn_ids = filler_stand_in(
+                        batch_action_mask, batch_turn_ids
+                    )
+
+                batch_pixel_values, batch_keys = next(learn_vision)
+
+                batch_support_ids = (
+                    support_ids[torch.as_tensor(minibatch_idxs)]
+                    if support_ids is not None
+                    else None
+                )
+                policy_inputs = (
+                    batch_action_mask,
+                    batch_old_log_probs,
+                    batch_reference_log_probs,
+                    batch_advantages,
+                    batch_turn_ids,
+                    num_turns,
+                    ppo_granularity,
+                )
+                value_inputs = (
+                    batch_returns,
+                    batch_action_mask,
+                    batch_turn_ids,
+                    num_turns,
+                    ppo_granularity,
+                )
+                if critic_warmup:
+                    # Warmup fits the critic with the policy fixed, so
+                    # actor params keep no grad and take no optimizer step.
+                    values = self._critic_values(
+                        batch_ids, batch_pixel_values, batch_keys
+                    )
+                    policy_loss = token_ids.new_zeros((), dtype=torch.float32)
+                    metrics = dict.fromkeys(
+                        (
+                            "kl",
+                            "kl_clamp_frac",
+                            "entropy",
+                            "clipfrac",
+                            "off_policy_token_mask_frac",
+                            "pg_loss",
+                        ),
+                        0.0,
+                    )
+                else:
+                    log_probs, values = self._actor_critic_pass(
                         batch_ids,
                         batch_action_mask,
-                        batch_old_log_probs,
-                        batch_reference_log_probs,
-                        batch_returns,
-                        batch_advantages,
-                        batch_old_values,
-                        batch_turn_ids,
-                    ) = get_experiences_samples(
-                        rows_index,
-                        token_ids,
-                        action_masks,
-                        old_log_probs,
-                        reference_log_probs,
-                        returns,
-                        advantages,
-                        old_values,
-                        turn_ids,
+                        batch_support_ids,
+                        batch_pixel_values,
+                        batch_keys,
                     )
-                    is_filler = bool(filler_rows[minibatch_idxs].all())
-                    if is_filler:
-                        batch_action_mask, batch_turn_ids = filler_stand_in(
-                            batch_action_mask, batch_turn_ids
-                        )
-
-                    batch_pixel_values, batch_keys = next(learn_vision)
-
-                    batch_sampling_log_probs = (
-                        sampling_log_probs[rows_index]
-                        if sampling_log_probs is not None
-                        else None
+                    policy_loss, metrics = self._ppo_policy_loss(
+                        log_probs,
+                        *policy_inputs,
+                        term_scales=(
+                            None if pg_scale is None else (pg_scale, kl_scale)
+                        ),
                     )
-                    batch_support_ids = (
-                        support_ids[torch.as_tensor(minibatch_idxs)]
-                        if support_ids is not None
-                        else None
-                    )
-                    policy_inputs = (
-                        batch_action_mask,
-                        batch_old_log_probs,
-                        batch_reference_log_probs,
-                        batch_advantages,
-                        batch_turn_ids,
-                        num_turns,
-                        ppo_granularity,
-                        batch_sampling_log_probs,
-                    )
-                    value_inputs = (
-                        batch_old_values,
-                        batch_returns,
-                        batch_action_mask,
-                        batch_turn_ids,
-                        num_turns,
-                        ppo_granularity,
-                    )
-                    if critic_warmup:
-                        # Warmup fits the critic with the policy fixed, so
-                        # actor params keep no grad and take no optimizer step.
-                        values = self._critic_values(
-                            batch_ids, batch_pixel_values, batch_keys
-                        )
-                        policy_loss = token_ids.new_zeros((), dtype=torch.float32)
-                        metrics = dict.fromkeys(
-                            ("kl", "kl_clamp_frac", "entropy", "clipfrac", "pg_loss"),
-                            0.0,
-                        )
-                    else:
-                        log_probs, values = self._actor_critic_pass(
-                            batch_ids,
-                            batch_action_mask,
-                            batch_support_ids,
-                            batch_pixel_values,
-                            batch_keys,
-                        )
-                        policy_loss, metrics = self._ppo_policy_loss(
-                            log_probs,
-                            *policy_inputs,
-                            term_scales=(
-                                None if pg_scale is None else (pg_scale, kl_scale)
-                            ),
-                        )
-                    vf_loss = self._ppo_value_loss(values, *value_inputs)
-                    if vf_scale is not None:
-                        vf_loss = vf_loss * vf_scale
-                    total_loss = policy_loss + vf_loss
-                    held_loss = self._hold_loss_until_step(
-                        total_loss, held_loss, backward_steps
-                    )
-                    phase_timer.mark("forward")
-                    # Autograd keeps any vision rows backward reads.
-                    del batch_pixel_values
-                    steps = [
-                        self._backward_ppo_pass(total_loss * loss_scale, window_steps)
-                    ]
-                    unset_fused_adapter_routing(self.actor)
-                    for step in steps:
-                        if step is not None:
-                            for key, norm in self._actor_critic_grad_norms(
-                                step
-                            ).items():
-                                grad_norm_totals[key] += norm
-                            grad_updates += 1
-                    if is_filler:
-                        continue
-                    learn_metrics.add(
-                        {"vf_loss": vf_loss, "policy_loss": policy_loss, **metrics},
-                        counted=batch_action_mask.any(),
-                    )
+                vf_loss = self._ppo_value_loss(values, *value_inputs)
+                if vf_scale is not None:
+                    vf_loss = vf_loss * vf_scale
+                total_loss = policy_loss + vf_loss
+                held_loss = self._hold_loss_until_step(
+                    total_loss, held_loss, backward_steps
+                )
+                phase_timer.mark("forward")
+                # Autograd keeps any vision rows backward reads.
+                del batch_pixel_values
+                step = self._backward_ppo_pass(total_loss * loss_scale, window_steps)
+                unset_fused_adapter_routing(self.actor)
+                if step is not None:
+                    for key, norm in self._actor_critic_grad_norms(step).items():
+                        grad_norm_totals[key] += norm
+                    grad_updates += 1
+                if is_filler:
+                    continue
+                learn_metrics.add(
+                    {"vf_loss": vf_loss, "policy_loss": policy_loss, **metrics},
+                    counted=batch_action_mask.any(),
+                )
             # Gradients still pending a step carry into the next learn call.
             if held_loss is not None:
                 self._raise_if_loss_not_finite_on_any_rank(held_loss)
@@ -918,7 +894,15 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                 for update in updates
             )
             / max(len(updates), 1)
-            for metric in ("loss", "pg_loss", "vf_loss", "kl", "entropy", "clipfrac")
+            for metric in (
+                "loss",
+                "pg_loss",
+                "vf_loss",
+                "kl",
+                "entropy",
+                "clipfrac",
+                "off_policy_token_mask_frac",
+            )
         }
         grad_norms = (
             {key: total / grad_updates for key, total in grad_norm_totals.items()}
@@ -980,7 +964,6 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         self,
         turn_level_clip: bool,
         advantage_granularity: str,
-        turn_value_reduction: str,
         whiten_advantages: bool,
         gamma: float,
         gae_lambda: float,
@@ -990,38 +973,22 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         if advantage_granularity not in granularities:
             msg = f"advantage_granularity must be one of {granularities}."
             raise ValueError(msg)
-        reductions = ["final_value", "mean"]
-        if turn_value_reduction not in reductions:
-            msg = f"turn_value_reduction must be one of {reductions}."
-            raise ValueError(msg)
         if not isinstance(whiten_advantages, bool):
             msg = "whiten_advantages must be a boolean."
             raise TypeError(msg)
         self.turn_level_clip = turn_level_clip
         self.advantage_granularity = advantage_granularity
-        self.turn_value_reduction = turn_value_reduction
         self.whiten_advantages = whiten_advantages
         self.gamma = gamma
         self.gae_lambda = gae_lambda
 
-    def _setup_objective(
-        self,
-        importance_sampling_level: str,
-        turn_ratio_pooling: str,
-    ) -> None:
-        """Validate and store the importance-sampling level and ratio pooling."""
+    def _setup_objective(self, importance_sampling_level: str) -> None:
+        """Validate and store the importance-sampling level."""
         validate_importance_sampling_level(importance_sampling_level, allow_auto=True)
-        if turn_ratio_pooling not in {"sum", "mean"}:
-            msg = "turn_ratio_pooling must be one of ['mean', 'sum']."
-            raise ValueError(msg)
-        # IS / ratio-pooling level for the policy surrogate, orthogonal to the
-        # GAE advantage granularity. ``"auto"`` pools at GAE granularity when
-        # ``turn_level_clip`` is set, else token-level. Explicit
-        # ``token``/``turn``/``trajectory`` use length-normalized mean pooling.
+        # IS level for the policy surrogate, orthogonal to GAE granularity.
+        # ``"auto"`` pools at GAE granularity when ``turn_level_clip`` is set,
+        # else token-level. Turn and trajectory pool a geometric-mean ratio.
         self.importance_sampling_level = importance_sampling_level
-        # Turn-level ratio pooling reduction (sum=product ratio, mean=geometric
-        # mean ratio).
-        self.turn_ratio_pooling = turn_ratio_pooling
 
     def _setup_generation(
         self,
@@ -1087,8 +1054,8 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         """Compute turn-level GAE and broadcast advantages to all action tokens.
 
         Each generation turn is treated as a single RL action. Per-turn values
-        are aggregated from token values according to ``self.turn_value_reduction``,
-        and gamma discounts between turns (not between tokens within a turn).
+        are the critic at the last query token of that turn, and gamma discounts
+        between turns (not between tokens within a turn).
 
         :param rewards: Per-token (penalised) rewards ``[batch, seq_len]``.
         :type rewards: torch.Tensor
@@ -1106,9 +1073,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         batch_size = values.shape[0]
         num_turns = int(turn_ids.max().item()) + 1
 
-        turn_values = pool_by_turns(
-            values, turn_ids, num_turns, reduction=self.turn_value_reduction
-        )
+        turn_values = turn_state_values(values, turn_ids, num_turns)
         turn_rewards = pool_by_turns(rewards, turn_ids, num_turns)
 
         turn_advantages = torch.zeros(batch_size, num_turns, device=values.device)
@@ -1134,18 +1099,15 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
 
         del turn_rewards
 
-        turn_index = torch.arange(num_turns, device=turn_ids.device).view(1, 1, -1)
-        turn_mask = (turn_ids.unsqueeze(-1) == turn_index).any(dim=1).float()
-        if self.whiten_advantages:
-            turn_advantages_for_pg = masked_whiten(turn_advantages, turn_mask)
-        else:
-            turn_advantages_for_pg = turn_advantages
         valid_turn_mask = turn_ids >= 0
         safe_turn_ids = turn_ids.clamp(min=0)
 
         turn_returns = turn_advantages + turn_values
         token_returns = turn_returns.gather(dim=1, index=safe_turn_ids)
-        token_advantages = turn_advantages_for_pg.gather(dim=1, index=safe_turn_ids)
+        token_advantages = turn_advantages.gather(dim=1, index=safe_turn_ids)
+        # Whiten over the action tokens the policy loss averages over.
+        if self.whiten_advantages:
+            token_advantages = global_masked_whiten(token_advantages, action_mask)
         token_returns = token_returns * valid_turn_mask.float()
         token_advantages = token_advantages * valid_turn_mask.float()
         del turn_values, turn_advantages
@@ -1156,42 +1118,64 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         rewards: torch.Tensor,
         values: torch.Tensor,
         action_mask: torch.Tensor,
+        turn_ids: torch.Tensor,
         gae_lambda: float,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Compute token-level GAE and returns.
+        """Compute token-level GAE and returns over the action tokens.
 
-        :param rewards: Per-token rewards ``[batch, seq_len]``.
+        Each turn's reward is written on its last action token. GAE chains from one
+        action token to the next, skipping the environment tokens between
+        turns, and ends after the last action token of the row.
+
+        :param rewards: Per-turn rewards ``[batch, max_turns]``.
         :type rewards: torch.Tensor
         :param values: Per-token critic values ``[batch, seq_len]``.
         :type values: torch.Tensor
         :param action_mask: Bool mask of valid action positions ``[batch, seq_len]``.
         :type action_mask: torch.Tensor
+        :param turn_ids: Turn index per token ``[batch, seq_len]``; ``-1`` elsewhere.
+        :type turn_ids: torch.Tensor
         :param gae_lambda: GAE lambda; ``1.0`` gives Monte Carlo returns.
         :type gae_lambda: float
         :return: Tuple of ``(token_returns, token_advantages)``, each ``[batch, seq_len]``.
         :rtype: tuple[torch.Tensor, torch.Tensor]
         """
-        mask = action_mask.float()
+        mask = action_mask.bool()
         batch_size, seq_len = values.shape
+        positions = torch.arange(seq_len, device=values.device).expand(
+            batch_size, seq_len
+        )
+        turn_end = torch.full(
+            rewards.shape, -1, device=values.device, dtype=positions.dtype
+        )
+        turn_end.scatter_reduce_(
+            1,
+            turn_ids.clamp(min=0),
+            positions.masked_fill(~mask | (turn_ids < 0), -1),
+            reduce="amax",
+            include_self=True,
+        )
+        token_rewards = torch.zeros_like(values)
+        token_rewards.scatter_add_(
+            1, turn_end.clamp(min=0), rewards.to(values.dtype) * (turn_end >= 0)
+        )
+
         token_advantages = torch.zeros_like(values)
+        next_value = torch.zeros(batch_size, device=values.device)
         last_gae = torch.zeros(batch_size, device=values.device)
-
         for t in reversed(range(seq_len)):
-            if t == seq_len - 1:
-                next_value = torch.zeros(batch_size, device=values.device)
-                next_mask = torch.zeros(batch_size, device=values.device)
-            else:
-                next_value = values[:, t + 1]
-                next_mask = mask[:, t + 1]
+            delta = token_rewards[:, t] + self.gamma * next_value - values[:, t]
+            gae = delta + self.gamma * gae_lambda * last_gae
+            is_action = mask[:, t]
+            token_advantages[:, t] = torch.where(is_action, gae, 0.0)
+            next_value = torch.where(is_action, values[:, t], next_value)
+            last_gae = torch.where(is_action, gae, last_gae)
 
-            delta = rewards[:, t] + self.gamma * next_value * next_mask - values[:, t]
-            last_gae = delta + self.gamma * gae_lambda * last_gae * next_mask
-            token_advantages[:, t] = last_gae * mask[:, t]
-
-        token_returns = (token_advantages + values) * mask
+        mask_f = mask.float()
+        token_returns = (token_advantages + values) * mask_f
         if self.whiten_advantages:
-            token_advantages = masked_whiten(token_advantages, action_mask)
-        return token_returns, token_advantages * mask
+            token_advantages = global_masked_whiten(token_advantages, action_mask)
+        return token_returns, token_advantages * mask_f
 
     def _backward_ppo_pass(
         self, loss: torch.Tensor, accumulation_steps: int | None
@@ -1378,13 +1362,15 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         turn_ids: torch.Tensor,
         num_turns: int,
         ppo_granularity: str,
-        sampling_log_probs: torch.Tensor | None = None,
         term_scales: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Clipped policy surrogate plus ``beta``-weighted KL from actor log-probs.
 
         :param log_probs: ``(B, T - 1)`` actor log-probs with grad.
         :type log_probs: torch.Tensor
+        :param old_log_probs: ``(B, T - 1)`` log-probs of the policy that
+            sampled each token.
+        :type old_log_probs: torch.Tensor
         :param num_turns: Turn count of the whole learn batch.
         :type num_turns: int
         :param term_scales: Scales of the surrogate and the KL term
@@ -1392,47 +1378,47 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         :type term_scales: tuple[torch.Tensor, torch.Tensor] | None
         :return: ``(policy_loss, metrics)`` with ``metrics`` keying detached
             scalar tensors: ``kl``, ``kl_clamp_frac``, ``pg_loss``, ``clipfrac``,
-            ``entropy``.
+            ``off_policy_token_mask_frac``, ``entropy``.
         :rtype: tuple[torch.Tensor, dict[str, torch.Tensor]]
         """
         log_probs = torch.masked_fill(log_probs, ~action_mask.bool(), 1.0)
+        dropped = off_policy_token_drops(
+            log_probs, old_log_probs, action_mask, self.off_policy_token_mask_bounds
+        )
         kl = calculate_k3_kl(reference_log_probs, log_probs)
         penalty_reference, clamped = k3_kl_penalty_reference(
-            reference_log_probs, log_probs, self.kl_clamp
+            reference_log_probs, log_probs, self.kl_clamp, dropped
         )
         kl_penalty = calculate_k3_kl(penalty_reference, log_probs)
         masked_entropy = masked_mean(-log_probs.detach(), action_mask)
-        token_log_ratio = log_probs - old_log_probs
-
-        # Truncated importance sampling: reweight each token's surrogate by the
-        # (detached, clamped) trainer/vLLM ratio to correct for the rollout
-        # being drawn from vLLM rather than the trainer policy. Applies only to
-        # the policy surrogate, not the value/KL terms.
-        loss_weight = None
-        if sampling_log_probs is not None:
-            with torch.no_grad():
-                mask_f = action_mask.to(token_log_ratio.dtype)
-                loss_weight = torch.exp(
-                    (old_log_probs - sampling_log_probs) * mask_f
-                ).clamp(max=self.vllm_importance_sampling_cap)
-
-        pg_loss, clipfrac = clipped_is_surrogate(
-            token_log_ratio,
-            advantages,
+        log_weights = broadcast_log_ratio_by_level(
+            log_probs - old_log_probs,
             action_mask,
             turn_ids,
             self._resolve_is_level(ppo_granularity),
-            self.clip_coef,
-            loss_weight=loss_weight,
-            turn_reduction=self.turn_ratio_pooling,
-            num_turns=num_turns,
+            num_turns,
         )
+        surrogate, clipped = clipped_token_surrogate(
+            log_weights,
+            advantages,
+            action_mask,
+            1.0 - self.clip_coef,
+            1.0 + self.clip_coef,
+        )
+        if dropped is not None:
+            surrogate = surrogate.masked_fill(dropped, 0.0)
+        pg_loss = masked_mean(surrogate, action_mask)
         metrics = {
             "kl": masked_mean(kl, action_mask).detach(),
             "kl_clamp_frac": masked_mean(clamped.float(), action_mask),
             "entropy": masked_entropy.mean(),
-            "clipfrac": clipfrac.detach(),
-            "pg_loss": pg_loss.mean().detach(),
+            "clipfrac": masked_mean(clipped.float(), action_mask).detach(),
+            "off_policy_token_mask_frac": (
+                torch.zeros((), device=log_probs.device)
+                if dropped is None
+                else masked_mean(dropped.float(), action_mask)
+            ),
+            "pg_loss": pg_loss.detach(),
         }
         kl_loss = masked_mean(kl_penalty, action_mask)
         if term_scales is not None:
@@ -1443,14 +1429,13 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
     def _ppo_value_loss(
         self,
         values: torch.Tensor,
-        old_values: torch.Tensor,
         returns: torch.Tensor,
         action_mask: torch.Tensor,
         turn_ids: torch.Tensor,
         num_turns: int,
         ppo_granularity: str,
     ) -> torch.Tensor:
-        """Clipped value loss on the GAE advantage axis (``ppo_granularity``).
+        """Value MSE on the GAE advantage axis (``ppo_granularity``).
 
         :param values: ``(B, T - 1)`` critic values with grad.
         :type values: torch.Tensor
@@ -1461,25 +1446,15 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         """
         values = torch.masked_fill(values, turn_ids < 0, 0.0)
         if ppo_granularity != "turn":
-            return self._compute_vf_loss_token(values, old_values, returns, action_mask)
-        turn_pred = pool_by_turns(
-            values, turn_ids, num_turns, reduction=self.turn_value_reduction
-        )
-        turn_old = pool_by_turns(
-            old_values, turn_ids, num_turns, reduction=self.turn_value_reduction
-        )
-        turn_ret = pool_by_turns(returns, turn_ids, num_turns)
+            return self._compute_vf_loss_token(values, returns, action_mask)
+        turn_pred = turn_state_values(values, turn_ids, num_turns)
+        turn_ret = turn_state_values(returns, turn_ids, num_turns)
         turn_mask = torch.zeros_like(turn_pred)
         for t in range(num_turns):
             turn_mask[:, t] = (turn_ids == t).any(dim=1).float()
-        vf_unclipped = (turn_ret - turn_pred).pow(2)
-        clipped_turn_values = turn_old + torch.clamp(
-            turn_pred - turn_old, -self.clip_coef, self.clip_coef
-        )
-        vf_clipped = (turn_ret - clipped_turn_values).pow(2)
         return (
             0.5
-            * (torch.max(vf_unclipped, vf_clipped) * turn_mask).sum()
+            * ((turn_ret - turn_pred).pow(2) * turn_mask).sum()
             / turn_mask.sum().clamp(min=1)
             * self.vf_coef
         )
@@ -1487,16 +1462,13 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
     def _compute_vf_loss_token(
         self,
         values: torch.Tensor,
-        old_values: torch.Tensor,
         returns: torch.Tensor,
         action_mask: torch.Tensor,
     ) -> torch.Tensor:
-        """Compute token-level clipped value loss.
+        """Token-level value MSE.
 
         :param values: Current value predictions ``[batch, seq_len]``.
         :type values: torch.Tensor
-        :param old_values: Old value predictions ``[batch, seq_len]``.
-        :type old_values: torch.Tensor
         :param returns: Token-level returns ``[batch, seq_len]``.
         :type returns: torch.Tensor
         :param action_mask: Bool mask of valid action positions ``[batch, seq_len]``.
@@ -1504,16 +1476,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         :return: Scalar token-level value loss.
         :rtype: torch.Tensor
         """
-        vf_loss = (returns - values).pow(2)
-        clipped_values = old_values + torch.clamp(
-            values - old_values, -self.clip_coef, self.clip_coef
-        )
-        clipped_vf_loss = (returns - clipped_values).pow(2)
-        return (
-            0.5
-            * masked_mean(torch.max(vf_loss, clipped_vf_loss), action_mask)
-            * self.vf_coef
-        )
+        return 0.5 * masked_mean((returns - values).pow(2), action_mask) * self.vf_coef
 
     def _compute_token_rewards(
         self,

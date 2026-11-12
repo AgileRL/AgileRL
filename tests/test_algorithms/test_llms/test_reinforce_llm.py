@@ -498,28 +498,6 @@ class TestREINFORCEInit:
                 wrap=False,
             )
 
-    def test_init_turn_ratio_pooling_must_be_valid(self):
-        actor = create_dummy_actor(10, 8, 100, "cpu")
-        lora = LoraConfig(
-            r=4,
-            lora_alpha=16,
-            target_modules=["lin"],
-            task_type="CAUSAL_LM",
-        )
-        with pytest.raises(ValueError, match="turn_ratio_pooling"):
-            REINFORCE(
-                actor_network=actor,
-                pad_token_id=99,
-                pad_token="<pad>",
-                lora_config=lora,
-                turn_ratio_pooling="median",
-                wrap=False,
-            )
-
-    def test_init_default_turn_ratio_pooling_is_sum(self):
-        rf = _cpu_llmreinforce()
-        assert rf.turn_ratio_pooling == "sum"
-
     def test_init_advantage_granularity_turn(self):
         rf = _cpu_llmreinforce(advantage_granularity="turn")
         assert rf.advantage_granularity == "turn"
@@ -701,10 +679,26 @@ class TestREINFORCEComputeRebnAdvantages:
         )
         assert advantages[0, 2].item() == 0.0
 
-    def test_compute_rebn_advantages_skips_zscore_when_at_most_one_valid_turn_return(
-        self,
-    ):
-        """Covers the ``valid_returns.numel() <= 1`` branch (no batch z-score)."""
+    def test_compute_rebn_advantages_weights_turns_by_token_count(self):
+        # Arrange: gamma 0 makes each return its turn's reward; 1-token turns
+        # return 1.0 and 3-token turns return 0.0.
+        stub = _RebnStub(gamma=0.0)
+        rewards = torch.tensor([[1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]])
+        action_mask = torch.ones(2, 4, dtype=torch.bool)
+        turn_ids = torch.tensor([[0, 1, 1, 1], [0, 0, 0, 1]])
+
+        # Act
+        advantages = stub._compute_rebn_advantages(
+            rewards, torch.zeros_like(rewards), action_mask, turn_ids
+        )
+
+        # Assert: the token-weighted mean is 0.25, so short turns get 0.75 / std.
+        token_returns = torch.tensor([[1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]])
+        expected = (token_returns - 0.25) / token_returns.std()
+        assert torch.allclose(advantages, expected, atol=1e-5)
+        assert advantages.mean().abs() < 1e-6
+
+    def test_compute_rebn_advantages_equal_returns_give_zero_advantage(self):
         stub = _RebnStub(gamma=1.0)
         rewards = torch.tensor([[2.0, 2.0, 2.0]])
         action_mask = torch.ones(1, 3, dtype=torch.bool)
@@ -1122,42 +1116,76 @@ class TestREINFORCETest:
             server.stop()
 
 
-class TestREINFORCEVllmISCorrection:
-    """vLLM sampling-mismatch (truncated-IS) correction wiring across IS levels."""
+def _two_turn_learn_inputs(
+    sampling_logp: float | None,
+) -> tuple[tuple, torch.Tensor, list[torch.Tensor] | None]:
+    """One two-turn row and, when ``sampling_logp`` is set, constant rollout log-probs."""
+    vocab, inp, mtok = 100, 10, 8
+    seq_len = inp + mtok
+    completions = [torch.randint(0, vocab, (1, seq_len))]
+    action_masks = [torch.ones(1, seq_len - 1, dtype=torch.bool)]
+    turn_ids = torch.tensor(
+        [[-1] * (inp - 1) + [0] * (mtok // 2) + [1] * (mtok - mtok // 2)],
+        dtype=torch.long,
+    )[:, : seq_len - 1]
+    rewards = torch.tensor([[0.5, -0.5]], dtype=torch.float32)
+    if sampling_logp is None:
+        return (completions, action_masks, rewards), turn_ids, None
+    n_act = int(action_masks[0].sum())
+    sampling_logps = [torch.full((n_act,), sampling_logp, dtype=torch.float32)]
+    return (completions, action_masks, rewards), turn_ids, sampling_logps
+
+
+class TestREINFORCELearnRolloutOldLogProbs:
+    """The ratio divides by rollout sampling log-probs when every action token has one."""
 
     @pytest.mark.parametrize("is_level", ["token", "turn", "trajectory"])
-    def test_learn_emits_vllm_is_metrics_and_reweights(self, is_level):
-        rf = _cpu_llmreinforce(
-            importance_sampling_level=is_level, lr=0.05, update_epochs=1
-        )
-        # use_vllm=False auto-disables the correction in __init__; force it on to
-        # exercise the capture/align/metrics/reweight path that the base class now
-        # shares with GRPO.
-        rf.vllm_importance_sampling_correction = True
-        rf.vllm_importance_sampling_cap = 2.0
-        vocab, inp, mtok = 100, 10, 8
-        seq_len = inp + mtok
-        completions = [torch.randint(0, vocab, (1, seq_len))]
-        action_masks = [torch.ones(1, seq_len - 1, dtype=torch.bool)]
-        turn_ids = torch.tensor(
-            [[-1] * (inp - 1) + [0] * (mtok // 2) + [1] * (mtok - mtok // 2)],
-            dtype=torch.long,
-        )[:, : seq_len - 1]
-        rewards = torch.tensor([[0.5, -0.5]], dtype=torch.float32)
-        n_act = int(action_masks[0].sum())
-        # vLLM logprobs deliberately offset from the trainer recompute so the
-        # importance ratio != 1 and the reweight is non-trivial.
-        sampling_logps = [torch.full((n_act,), -3.0, dtype=torch.float32)]
+    def test_far_rollout_log_probs_mask_every_token(self, is_level):
+        # Arrange
+        torch.manual_seed(0)
+        rf = _cpu_llmreinforce(importance_sampling_level=is_level)
+        experiences, turn_ids, sampling_logps = _two_turn_learn_inputs(-0.01)
+
+        # Act
         metrics = rf.learn(
-            (completions, action_masks, rewards),
-            turn_ids=turn_ids,
-            sampling_logps=sampling_logps,
+            experiences, turn_ids=turn_ids, sampling_logps=sampling_logps
         )
-        for key in ("vllm_is_delta_mean", "vllm_is_ratio_mean"):
-            assert key in metrics
-            assert isinstance(metrics[key], float)
+
+        # Assert
+        assert metrics["off_policy_token_mask_frac"] == pytest.approx(1.0)
         assert metrics["vllm_is_ratio_mean"] > 0
         assert torch.isfinite(torch.tensor(metrics["loss"]))
+
+    def test_rows_without_rollout_log_probs_use_learn_start_policy(self):
+        # Arrange
+        torch.manual_seed(0)
+        rf = _cpu_llmreinforce()
+        experiences, turn_ids, _ = _two_turn_learn_inputs(None)
+
+        # Act
+        metrics = rf.learn(experiences, turn_ids=turn_ids)
+
+        # Assert
+        assert metrics["off_policy_token_mask_frac"] == pytest.approx(0.0)
+
+    def test_no_bounds_masks_nothing(self):
+        # Arrange
+        torch.manual_seed(0)
+        rf = _cpu_llmreinforce(off_policy_token_mask_bounds=None)
+        experiences, turn_ids, sampling_logps = _two_turn_learn_inputs(-0.01)
+
+        # Act
+        metrics = rf.learn(
+            experiences, turn_ids=turn_ids, sampling_logps=sampling_logps
+        )
+
+        # Assert
+        assert metrics["off_policy_token_mask_frac"] == pytest.approx(0.0)
+
+    @pytest.mark.parametrize("bounds", [(1.0, 5.0), (0.5, 1.0), (-0.1, 2.0)])
+    def test_rejects_bounds_that_do_not_straddle_one(self, bounds):
+        with pytest.raises(ValueError, match="0 <= low < 1 < high"):
+            _cpu_llmreinforce(off_policy_token_mask_bounds=bounds)
 
 
 class TestREINFORCESequencePacking:

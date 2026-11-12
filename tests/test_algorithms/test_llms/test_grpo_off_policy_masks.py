@@ -264,36 +264,6 @@ class TestGRPOComputePolicyLossOffPolicyMasks:
         assert loss != 0
         assert kl != 0
 
-    def test_sampling_log_probs_are_the_behaviour_policy(self) -> None:
-        # Arrange: old log-probs match the policy; the sampler is 1 nat above.
-        agent = _make_grpo(
-            loss_norm="micro_batch",
-            loss_type="cispo",
-            off_policy_token_mask_bounds=ICEPOP_BAND,
-        )
-        log_probs = torch.full((1, 3), -1.0, requires_grad=True)
-        sampling = torch.tensor([[-1.0, 0.0, -1.0]])
-        mask = torch.ones(1, 3, dtype=torch.bool)
-
-        # Act
-        loss, _kl, _clipfrac = agent._compute_policy_loss(
-            mask,
-            log_probs,
-            log_probs.detach(),
-            torch.zeros(1, 3),
-            torch.ones(1, 1),
-            None,
-            "token",
-            "cispo",
-            sampling_log_probs=sampling,
-        )
-        loss.backward()
-
-        # Assert
-        assert log_probs.grad is not None
-        assert log_probs.grad[0, 1] == 0.0
-        assert (log_probs.grad[0, [0, 2]] != 0.0).all()
-
     @pytest.mark.parametrize(
         ("mask_kwargs", "dropped"),
         [
@@ -427,7 +397,6 @@ class TestGRPOLearnOffPolicyMasks:
     ) -> None:
         # Arrange: the sampler sits 1 nat above the policy on every token.
         agent = _make_grpo(
-            old_logprobs_source="rollout",
             off_policy_token_mask_bounds=ICEPOP_BAND,
             off_policy_sequence_mask_threshold=None,
         )
@@ -445,9 +414,7 @@ class TestGRPOLearnOffPolicyMasks:
 
     def test_drifted_negative_rows_are_reported(self) -> None:
         # Arrange: drift 0.2 > 0.1; rows 1 and 2 (9 of 18 action tokens) lose.
-        agent = _make_grpo(
-            old_logprobs_source="rollout", off_policy_sequence_mask_threshold=0.1
-        )
+        agent = _make_grpo(off_policy_sequence_mask_threshold=0.1)
         sampling_logps = _sampling_logps(agent, offset=0.2)
 
         # Act
@@ -460,9 +427,7 @@ class TestGRPOLearnOffPolicyMasks:
     def test_trainer_scored_rows_are_left_out_of_the_mask_share(self) -> None:
         # Arrange: rows 0 and 1 carry sampler log-probs 1 nat above the
         # policy; rows 2 and 3 have none, so the trainer scores them.
-        agent = _make_grpo(
-            old_logprobs_source="rollout", off_policy_token_mask_bounds=ICEPOP_BAND
-        )
+        agent = _make_grpo(off_policy_token_mask_bounds=ICEPOP_BAND)
         shifted = _sampling_logps(agent, offset=1.0)
         sampling_logps = [shifted[0], shifted[1], None, None]
 
@@ -511,7 +476,7 @@ class TestGRPOLearnOffPolicyMasks:
         assert any(grad.any() for step in steps for grad in step.values())
 
     def test_unmasked_run_reports_zero(self) -> None:
-        agent = _make_grpo(old_logprobs_source="rollout", **NO_OFF_POLICY_CORRECTION)
+        agent = _make_grpo(**NO_OFF_POLICY_CORRECTION)
 
         metrics = agent.learn(_experiences(), sampling_logps=_sampling_logps(agent))
 

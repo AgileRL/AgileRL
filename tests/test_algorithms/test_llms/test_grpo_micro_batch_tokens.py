@@ -226,12 +226,12 @@ class TestGRPOLearnTokenBudget:
             window_metrics["loss"], rel=RTOL, abs=ATOL
         )
 
-    def test_rollout_old_logprobs_skip_the_no_grad_forward_of_skipped_rows(
+    def test_no_grad_forward_skips_skipped_rows(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Arrange: no row has sampling log-probs, so every trained row needs
         # learn-start log-probs from the no-grad forward.
-        agent = make_budgeted_grpo(old_logprobs_source="rollout")
+        agent = make_budgeted_grpo()
         no_grad_tokens = record_forward_tokens(agent, grad=False)
 
         # Act
@@ -240,37 +240,11 @@ class TestGRPOLearnTokenBudget:
         # Assert
         assert sum(no_grad_tokens) == 8 + 4
 
-    def test_trainer_old_logprobs_skip_the_no_grad_forward_of_skipped_rows(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Arrange: rows 0 and 1 score their own old log-probs in the first
-        # micro-batch. Rows 2 and 3 carry sampling log-probs of the wrong
-        # length, which the mismatch metrics count only on trained rows.
-        agent = make_budgeted_grpo(old_logprobs_source="trainer")
-        no_grad_tokens = record_forward_tokens(agent, grad=False)
-        sampling_logps = [
-            torch.full((6,), -1.0),
-            torch.full((2,), -1.0),
-            torch.full((1,), -1.0),
-            torch.full((1,), -1.0),
-        ]
-
-        # Act
-        metrics = learn_uneven_rows(
-            agent, TIED_SECOND_GROUP, sampling_logps=sampling_logps
-        )
-
-        # Assert
-        assert no_grad_tokens == []
-        assert metrics["trained_row_tokens"] == [8, 4]
-        assert metrics["vllm_is_rows_skipped"] == 0.0
-
     def test_filtered_rows_run_no_forward_and_leave_the_trained_rows(self) -> None:
         # Arrange: one process drops the zero-advantage rows without a budget.
         agent = _make_grpo(
             micro_batch_size_per_gpu=4,
             filter_zero_adv=True,
-            old_logprobs_source="rollout",
         )
         grad_tokens = record_forward_tokens(agent)
         no_grad_tokens = record_forward_tokens(agent, grad=False)

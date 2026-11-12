@@ -16,9 +16,9 @@ from agilerl.arena.models.descriptions import (
     CLIP_COEF,
     IS_LEVEL,
     LR,
+    OFF_POLICY_TOKEN_MASK,
     TEMPERATURE,
     TOP_P,
-    TURN_RATIO_POOLING,
 )
 from agilerl.arena.models.registry import register
 
@@ -35,7 +35,7 @@ class LLMREINFORCESpec(RolloutLLMSpec):
         ge=0.0,
         description="Gradients are clipped to this global norm before each step.",
     )
-    lr: float = Field(default=5e-7, gt=0.0, le=1.0, description=LR)
+    lr: float = Field(default=1e-5, gt=0.0, le=1.0, description=LR)
     clip_coef: float = Field(default=0.2, ge=0.0, le=1.0, description=CLIP_COEF)
     gamma: float = Field(
         default=1.0,
@@ -49,6 +49,6 @@ class LLMREINFORCESpec(RolloutLLMSpec):
     importance_sampling_level: Literal["token", "turn", "trajectory"] = Field(
         default="token", description=IS_LEVEL
     )
-    turn_ratio_pooling: Literal["sum", "mean"] = Field(
-        default="sum", description=TURN_RATIO_POOLING
+    off_policy_token_mask_bounds: tuple[float, float] | None = Field(
+        default=(0.5, 5.0), description=OFF_POLICY_TOKEN_MASK
     )

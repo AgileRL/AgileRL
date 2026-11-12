@@ -991,7 +991,9 @@ def shard_tied_embeddings(model: nn.Module, mesh: DeviceMesh) -> int:
     for name, head in _iter_lm_heads(model):
         if not _lm_head_is_tied(model, name, head):
             continue
-        embedding = cast("HasInputEmbeddings", model).get_input_embeddings()
+        parent_name = name.rpartition(".")[0]
+        owner = model.get_submodule(parent_name) if parent_name else model
+        embedding = cast("HasInputEmbeddings", owner).get_input_embeddings()
         _shard_weight(embedding, mesh, Shard(1))
         base = base_linear(head)
         base.weight = embedding.get_parameter("weight")

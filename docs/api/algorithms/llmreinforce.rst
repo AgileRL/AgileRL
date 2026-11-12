@@ -13,8 +13,9 @@ improve stability in practice:
 
 * **Turn-level Monte Carlo returns:** discounted returns are computed across
   turns for each sampled trajectory.
-* **Batch-normalized returns (ReBN):** turn returns are z-scored across valid
-  ``(sample, turn)`` pairs before being broadcast to token-level advantages.
+* **Batch-normalized returns (ReBN):** turn returns are broadcast to their
+  tokens and z-scored across the batch's action tokens, so a turn weighs in
+  proportion to its length, as it does in the token-mean policy loss.
 * **Value-head-free training:** unlike PPO-style actor-critic updates, this
   path optimizes the policy directly from normalized returns.
 

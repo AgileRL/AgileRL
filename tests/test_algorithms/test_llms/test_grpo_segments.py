@@ -192,7 +192,7 @@ class TestGRPOLearnEpisodeSegments:
     ) -> None:
         # Arrange: another rank has 8 rows, so this rank pads its 6 with 2.
         torch.manual_seed(0)
-        agent = _make_grpo(old_logprobs_source="rollout")
+        agent = _make_grpo()
         sampling_logps = _rollout_sampling_logps(agent)
         pad_to_eight_rows(monkeypatch)
 
