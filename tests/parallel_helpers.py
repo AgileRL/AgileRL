@@ -241,9 +241,10 @@ def fsdp_config(
     ep: int,
     dtype: str = "float32",
     shard_frozen_tp: bool | None = None,
+    reshard_after_forward: bool = True,
 ) -> FSDPConfig:
     return FSDPConfig(
-        reshard_after_forward=True,
+        reshard_after_forward=reshard_after_forward,
         ep=ep,
         tp=tp,
         cp=cp,
@@ -279,11 +280,12 @@ def lora_runtime(
     ep: int,
     dtype: str = "float32",
     shard_frozen_tp: bool | None = None,
+    reshard_after_forward: bool = True,
 ) -> tuple[nn.Module, FSDPRuntime, SimpleNamespace]:
     """Shard a copy of ``dense`` and pair it with an AdamW over its LoRA params."""
     stack = copy.deepcopy(dense)
     mesh = parallel_mesh(world_size, cp, tp, ep)
-    config = fsdp_config(cp, tp, ep, dtype, shard_frozen_tp)
+    config = fsdp_config(cp, tp, ep, dtype, shard_frozen_tp, reshard_after_forward)
     with patch.object(fsdp_blocks, "PARAM_PERSISTENCE_THRESHOLD", 0):
         materialize_fsdp2_from_cpu_state(stack, "cpu", config, parallel_mesh=mesh)
     runtime = FSDPRuntime(config)
