@@ -843,9 +843,6 @@ def create_population(
                     "ADV_FILTER_EPS",
                     INIT_HP.get("ADVANTAGE_FILTER_EPS", 0.0),
                 ),
-                vllm_importance_sampling_correction=INIT_HP.get(
-                    "VLLM_IMPORTANCE_SAMPLING_CORRECTION", True
-                ),
                 vllm_importance_sampling_cap=INIT_HP.get(
                     "VLLM_IMPORTANCE_SAMPLING_CAP", 2.0
                 ),
@@ -992,19 +989,17 @@ def create_population(
                 vf_coef=INIT_HP.get("VF_COEF", 0.5),
                 clip_coef=INIT_HP.get("CLIP_COEF", 0.2),
                 gamma=INIT_HP.get("GAMMA", 1.0),
-                gae_lambda=INIT_HP.get("GAE_LAMBDA", 0.95),
+                gae_lambda=INIT_HP.get("GAE_LAMBDA", 1.0),
                 advantage_granularity=INIT_HP.get(
                     "ADVANTAGE_GRANULARITY", INIT_HP.get("ACTION_GRANULARITY", "auto")
                 ),
                 importance_sampling_level=INIT_HP.get(
                     "IMPORTANCE_SAMPLING_LEVEL", "auto"
                 ),
-                turn_ratio_pooling=INIT_HP.get("TURN_RATIO_POOLING", "sum"),
                 turn_level_clip=INIT_HP.get("TURN_LEVEL_CLIP", True),
-                turn_value_reduction=INIT_HP.get("TURN_VALUE_REDUCTION", "final_value"),
                 whiten_advantages=INIT_HP.get("WHITEN_ADVANTAGES", True),
-                lr_actor=INIT_HP.get("LR_ACTOR", INIT_HP.get("LR", 5e-6)),
-                lr_critic=INIT_HP.get("LR_CRITIC"),
+                lr_actor=INIT_HP.get("LR_ACTOR", INIT_HP.get("LR", 1e-5)),
+                lr_critic=INIT_HP.get("LR_CRITIC", 1e-4),
                 max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 1.0),
                 update_epochs=INIT_HP.get("UPDATE_EPOCHS", 1),
                 temperature=INIT_HP.get("TEMPERATURE", 1.0),
@@ -1020,9 +1015,6 @@ def create_population(
                 clone=idx != 0 and act is not None,
                 seed=INIT_HP.get("SEED", 42),
                 gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
-                vllm_importance_sampling_correction=INIT_HP.get(
-                    "VLLM_IMPORTANCE_SAMPLING_CORRECTION", True
-                ),
                 vllm_importance_sampling_cap=INIT_HP.get(
                     "VLLM_IMPORTANCE_SAMPLING_CAP", 2.0
                 ),
@@ -1078,8 +1070,7 @@ def create_population(
                 importance_sampling_level=INIT_HP.get(
                     "IMPORTANCE_SAMPLING_LEVEL", "token"
                 ),
-                turn_ratio_pooling=INIT_HP.get("TURN_RATIO_POOLING", "sum"),
-                lr=INIT_HP.get("LR", 5e-7),
+                lr=INIT_HP.get("LR", 1e-5),
                 max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 1.0),
                 update_epochs=INIT_HP.get("UPDATE_EPOCHS", 1),
                 temperature=INIT_HP.get("TEMPERATURE", 1.0),
@@ -1095,9 +1086,6 @@ def create_population(
                 clone=idx != 0 and act is not None,
                 seed=INIT_HP.get("SEED", 42),
                 gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
-                vllm_importance_sampling_correction=INIT_HP.get(
-                    "VLLM_IMPORTANCE_SAMPLING_CORRECTION", True
-                ),
                 vllm_importance_sampling_cap=INIT_HP.get(
                     "VLLM_IMPORTANCE_SAMPLING_CAP", 2.0
                 ),

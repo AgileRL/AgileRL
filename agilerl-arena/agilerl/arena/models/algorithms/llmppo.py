@@ -19,9 +19,9 @@ from agilerl.arena.models.descriptions import (
     KL_CLAMP,
     LR_ACTOR,
     LR_CRITIC,
+    OFF_POLICY_TOKEN_MASK,
     TEMPERATURE,
     TOP_P,
-    TURN_RATIO_POOLING,
     VF_COEF,
     WHITEN_ADVANTAGES,
 )
@@ -51,13 +51,13 @@ class LLMPPOSpec(RolloutLLMSpec):
         ),
     )
     lr_actor: float = Field(
-        default=5e-7,
+        default=1e-5,
         gt=0.0,
         le=1.0,
         validation_alias=AliasChoices("lr_actor", "lr"),
         description=LR_ACTOR,
     )
-    lr_critic: float | None = Field(default=5e-5, gt=0.0, le=1.0, description=LR_CRITIC)
+    lr_critic: float | None = Field(default=1e-4, gt=0.0, le=1.0, description=LR_CRITIC)
     vf_coef: float = Field(default=0.5, ge=0.0, le=1.0, description=VF_COEF)
     clip_coef: float = Field(default=0.2, ge=0.0, le=1.0, description=CLIP_COEF)
     gamma: float = Field(
@@ -67,7 +67,7 @@ class LLMPPOSpec(RolloutLLMSpec):
         description="Discount factor applied across turns.",
     )
     gae_lambda: float = Field(
-        default=0.95,
+        default=1.0,
         ge=0.0,
         le=1.0,
         description=GAE_LAMBDA,
@@ -92,15 +92,8 @@ class LLMPPOSpec(RolloutLLMSpec):
     importance_sampling_level: Literal["auto", "token", "turn", "trajectory"] = Field(
         default="auto", description=IS_LEVEL
     )
-    turn_ratio_pooling: Literal["sum", "mean"] = Field(
-        default="sum", description=TURN_RATIO_POOLING
-    )
-    turn_value_reduction: Literal["mean", "final_value"] = Field(
-        default="final_value",
-        description=(
-            "How a turn's value estimate is reduced from its tokens: the mean, "
-            "or the value at the turn's final token."
-        ),
+    off_policy_token_mask_bounds: tuple[float, float] | None = Field(
+        default=(0.5, 5.0), description=OFF_POLICY_TOKEN_MASK
     )
 
     # One gradient forward stacks the actor and critic rows.

@@ -29,7 +29,11 @@ from agilerl.algorithms.dpo import DPO
 from agilerl.algorithms.grpo import GRPO
 from agilerl.algorithms.gspo import GSPO
 from agilerl.algorithms.ppo_llm import PPO as LLMPPO
-from agilerl.utils.llm_utils import clipped_is_surrogate
+from agilerl.utils.llm_utils import (
+    broadcast_log_ratio_by_level,
+    clipped_token_surrogate,
+    masked_mean,
+)
 from tests.test_algorithms.test_llms.llm_helpers import (
     create_module,
     create_value_head_module,
@@ -246,21 +250,16 @@ class TestPPOPolicyLossParity:
 
 
 class TestReinforceSurrogateParity:
-    @pytest.mark.parametrize("turn_reduction", ["mean", "sum"])
     @pytest.mark.parametrize("level", LEVELS)
-    def test_loss_matches_unfused_reference(self, level: str, turn_reduction: str):
+    def test_loss_matches_unfused_reference(self, level: str):
         def loss_fn(logps: torch.Tensor) -> torch.Tensor:
-            loss, _clipfrac = clipped_is_surrogate(
-                logps - ROLLOUT["old"],
-                ROLLOUT["token_advantages"],
-                ROLLOUT["mask"],
-                ROLLOUT["turn_ids"],
-                level,
-                0.2,
-                turn_reduction=turn_reduction,
-                num_turns=2,
+            log_weights = broadcast_log_ratio_by_level(
+                logps - ROLLOUT["old"], ROLLOUT["mask"], ROLLOUT["turn_ids"], level, 2
             )
-            return loss
+            surrogate, _ = clipped_token_surrogate(
+                log_weights, ROLLOUT["token_advantages"], ROLLOUT["mask"], 0.8, 1.2
+            )
+            return masked_mean(surrogate, ROLLOUT["mask"])
 
         assert_matches_reference(loss_fn)
 

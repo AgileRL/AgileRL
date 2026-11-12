@@ -4833,65 +4833,6 @@ class TestGRPOVLLMSamplingCorrection:
         out2 = SimpleNamespace(token_ids=[1, 2, 3], logprobs=None)
         assert _vllm_sampled_token_logprobs(out2) == [0.0, 0.0, 0.0]
 
-    def test_unit_ratio_when_sampling_equals_old(self):
-        """Sampling == old -> ratio exp(0)=1 -> loss identical to baseline."""
-        stub = self._stub()
-        torch.manual_seed(0)
-        mask = torch.ones(2, 3)
-        log_probs = torch.randn(2, 3)
-        old = log_probs - 0.1
-        ref = log_probs.clone()
-        adv = torch.tensor([[1.0], [-1.0]])
-        base, _, _ = stub._compute_policy_loss(
-            mask, log_probs, old, ref, adv, None, level="token", objective="grpo"
-        )
-        corr, _, _ = stub._compute_policy_loss(
-            mask,
-            log_probs,
-            old,
-            ref,
-            adv,
-            None,
-            level="token",
-            objective="grpo",
-            sampling_log_probs=old.clone(),
-        )
-        assert torch.allclose(base, corr, atol=1e-7)
-
-    def test_correction_matches_reference_token_grpo(self):
-        """Exact match against a hand-rolled token-level GRPO reference."""
-        cap = 2.0
-        stub = self._stub(vllm_importance_sampling_cap=cap, beta=0.0)
-        torch.manual_seed(2)
-        mask = torch.tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 0.0]])
-        log_probs = torch.randn(2, 3)
-        old = log_probs - torch.randn(2, 3) * 0.1
-        ref = log_probs.clone()
-        adv = torch.tensor([[0.7], [-0.4]])
-        # Build a sampling tensor whose ratio spans below and above the clamp.
-        sampling = old - torch.tensor([[0.3, 0.0, 1.5], [-0.2, 0.9, 0.0]])
-
-        corr, _, _ = stub._compute_policy_loss(
-            mask,
-            log_probs,
-            old,
-            ref,
-            adv,
-            None,
-            level="token",
-            objective="grpo",
-            sampling_log_probs=sampling,
-        )
-
-        ratio = torch.exp(log_probs - old)
-        clipped = ratio.clamp(0.8, 1.2)
-        loss_i = -torch.min(ratio * adv, clipped * adv)
-        r = torch.exp((old - sampling) * mask).clamp(max=cap)
-        loss_i = loss_i * r
-        denom = mask.sum(-1).clamp(min=1.0)
-        expected = ((loss_i * mask).sum(-1) / denom).mean()
-        assert torch.allclose(corr, expected, atol=1e-6)
-
     def test_sampling_mismatch_metrics(self):
         stub = self._stub(vllm_importance_sampling_cap=2.0)
         mask = torch.tensor([[1.0, 1.0, 0.0], [1.0, 1.0, 1.0]])
@@ -5052,7 +4993,7 @@ class TestGRPONonFinitePaddingIsIsolated:
     @pytest.mark.parametrize("pad_value", [float("nan"), float("inf")])
     def test_standard_path_loss_and_kl_stay_finite(self, objective, pad_value):
         stub = self._stub()
-        mask, log_probs, old, ref, sampling, adv = self._inputs(pad_value)
+        mask, log_probs, old, ref, _sampling, adv = self._inputs(pad_value)
 
         loss, kl, clipfrac = stub._compute_policy_loss(
             mask,
@@ -5063,7 +5004,6 @@ class TestGRPONonFinitePaddingIsIsolated:
             None,
             level="token",
             objective=objective,
-            sampling_log_probs=sampling,
         )
 
         assert torch.isfinite(loss)
@@ -5076,7 +5016,7 @@ class TestGRPONonFinitePaddingIsIsolated:
         finite_args = self._inputs(-123.0)
 
         def run(args):
-            mask, log_probs, old, ref, sampling, adv = args
+            mask, log_probs, old, ref, _sampling, adv = args
             return stub._compute_policy_loss(
                 mask,
                 log_probs,
@@ -5086,7 +5026,6 @@ class TestGRPONonFinitePaddingIsIsolated:
                 None,
                 level="token",
                 objective="cispo",
-                sampling_log_probs=sampling,
             )
 
         nan_loss, nan_kl, nan_clipfrac = run(nan_args)

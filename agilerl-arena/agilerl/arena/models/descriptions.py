@@ -135,7 +135,10 @@ COSINE_LR = (
     "For a constant learning rate, set warmup_proportion 0 and min_lr_ratio 1.0."
 )
 VLLM_CONFIG = "vLLM engine settings for generation."
-IS_CAP = "Upper bound applied to the vLLM importance-sampling correction ratio."
+IS_CAP = (
+    "Trainer/vLLM ratio at which the sampling-mismatch metrics count a token "
+    "as clipped."
+)
 VLLM_MAX_LOGPROB_GAP = (
     "Warn when the mean per-token log-prob gap between vLLM and the trainer "
     "exceeds this, in nats. bf16 engines usually sit near 0.01-0.03."
@@ -155,11 +158,13 @@ ADVANTAGE_GRANULARITY_TOKEN = (
 )
 IS_LEVEL = (
     "Level the importance-sampling ratio is computed at. Coarser levels are "
-    "lower variance but a blunter correction."
+    "lower variance but a blunter correction. Turn-level uses a geometric-mean "
+    "ratio per reply."
 )
-TURN_RATIO_POOLING = (
-    "How per-token ratios combine into a turn ratio: 'sum' in log space "
-    "(the product of ratios) or 'mean'."
+OFF_POLICY_TOKEN_MASK = (
+    "(low, high) band on each token's ratio of the current policy to the "
+    "rollout policy that sampled it. Tokens outside get no policy gradient "
+    "(IcePop). Set null to mask nothing."
 )
 WHITEN_ADVANTAGES = (
     "Normalize advantages to zero mean and unit variance across the batch."

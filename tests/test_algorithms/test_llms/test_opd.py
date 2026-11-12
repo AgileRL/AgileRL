@@ -32,7 +32,7 @@ from tests.test_algorithms.test_llms.test_grpo_old_logprobs import (
 
 
 def _make_opd(**overrides: Any) -> OPD:
-    agent = _make_grpo(OPD, old_logprobs_source="rollout", **overrides)
+    agent = _make_grpo(OPD, **overrides)
     assert isinstance(agent, OPD)
     return agent
 
@@ -409,7 +409,7 @@ class TestOPDCheckpoint:
 class TestGRPOLearnTokenAdvantages:
     def test_terms_add_to_the_group_advantages(self) -> None:
         # Arrange
-        agent = _make_grpo(old_logprobs_source="rollout")
+        agent = _make_grpo()
         sampling_logps = _sampling_logps(agent)
 
         # Act
@@ -424,7 +424,7 @@ class TestGRPOLearnTokenAdvantages:
 
     def test_a_row_with_miscounted_terms_gets_no_term(self) -> None:
         # Arrange
-        agent = _make_grpo(old_logprobs_source="rollout")
+        agent = _make_grpo()
         sampling_logps = _sampling_logps(agent)
         terms = [torch.full_like(row, 0.75) for row in sampling_logps]
         terms[1] = terms[1][:1]
@@ -443,7 +443,7 @@ class TestGRPOLearnTokenAdvantages:
         assert metrics["adv_mean"] == pytest.approx(expected, abs=1e-6)
 
     def test_an_empty_list_of_terms_is_rejected(self) -> None:
-        agent = _make_grpo(old_logprobs_source="rollout")
+        agent = _make_grpo()
 
         with pytest.raises(ValueError, match="must name at least one row"):
             agent.learn(
@@ -453,7 +453,7 @@ class TestGRPOLearnTokenAdvantages:
             )
 
     def test_filter_zero_adv_is_rejected(self) -> None:
-        agent = _make_grpo(old_logprobs_source="rollout", filter_zero_adv=True)
+        agent = _make_grpo(filter_zero_adv=True)
         sampling_logps = _sampling_logps(agent)
 
         with pytest.raises(ValueError, match="filter_zero_adv drops rows"):

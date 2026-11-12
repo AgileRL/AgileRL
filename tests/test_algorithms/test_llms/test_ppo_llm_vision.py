@@ -161,10 +161,9 @@ class TestPPOLearnVision:
     @pytest.mark.parametrize("segmented", [True, False], ids=["segments", "episodes"])
     def test_images_change_log_probs_and_values(self, segmented: bool) -> None:
         # Arrange: ``entropy`` averages the actor's negative log-probs and
-        # ``vf_loss`` scores the critic's values. The model scores each token
-        # alone, so mean turn values include the image placeholder positions.
-        agent = make_vision_ppo(turn_value_reduction="mean")
-        other = make_vision_ppo(turn_value_reduction="mean")
+        # ``vf_loss`` scores the critic's values.
+        agent = make_vision_ppo()
+        other = make_vision_ppo()
 
         # Act
         metrics = learn_on_vision_episodes(agent, segmented=segmented)

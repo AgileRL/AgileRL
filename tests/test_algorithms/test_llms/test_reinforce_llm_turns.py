@@ -107,22 +107,24 @@ class TestREINFORCELearnTurnCount:
     ) -> None:
         # Arrange: 1-row micro-batches, so rows 2-3 hold fewer turns than the batch.
         agent = make_turn_reinforce()
-        surrogate_fn = reinforce_llm.clipped_is_surrogate
-        surrogate, calls = record_calls(surrogate_fn)
-        monkeypatch.setattr(reinforce_llm, "clipped_is_surrogate", surrogate)
+        broadcast_fn = reinforce_llm.broadcast_log_ratio_by_level
+        broadcast, calls = record_calls(broadcast_fn)
+        monkeypatch.setattr(reinforce_llm, "broadcast_log_ratio_by_level", broadcast)
 
         # Act
         learn_uneven_turns(agent)
 
         # Assert
         local_counts = []
-        for args, kwargs, (pg_loss, _) in calls:
-            turn_ids = args[3]
+        for args, _kwargs, log_weights in calls:
+            log_ratio, action_mask, turn_ids, level, num_turns = args
             local_counts.append(int(turn_ids.max()) + 1)
-            assert kwargs["num_turns"] == 2
+            assert num_turns == 2
             with torch.no_grad():
-                expected, _ = surrogate_fn(*args, **{**kwargs, "num_turns": None})
-            assert torch.equal(pg_loss.detach(), expected)
+                expected = broadcast_fn(log_ratio, action_mask, turn_ids, level)
+            assert torch.equal(
+                log_weights.detach()[action_mask.bool()], expected[action_mask.bool()]
+            )
         assert sorted(local_counts) == [1, 1, 2, 2]
 
 
@@ -213,27 +215,27 @@ def learn_three_turns(agent: REINFORCE, forced: bool) -> dict[str, float]:
 class TestREINFORCELearnForcedTurns:
     """A turn of forced tokens keeps its reward and its place in the episode."""
 
-    def test_advantages_match_the_episode_with_free_turns_on_action_tokens(
+    def test_returns_match_the_episode_with_free_turns_on_action_tokens(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Arrange
-        advantages = {}
+        returns = {}
         masks = {}
         for forced in (False, True):
             agent = make_turn_reinforce()
             agent.beta = 0.0
             agent.gamma = 0.9
-            rebn, rebn_calls = record_calls(agent._compute_rebn_advantages)
-            monkeypatch.setattr(agent, "_compute_rebn_advantages", rebn)
+            whiten, whiten_calls = record_calls(reinforce_llm.masked_whiten)
+            monkeypatch.setattr(reinforce_llm, "masked_whiten", whiten)
 
             # Act
             learn_three_turns(agent, forced=forced)
-            ((args, _kwargs, out),) = rebn_calls
-            advantages[forced], masks[forced] = out, args[2]
+            ((args, _kwargs, _out),) = whiten_calls
+            returns[forced], masks[forced] = args
 
         # Assert
-        assert torch.equal(advantages[True], advantages[False] * masks[True])
-        assert advantages[False][0, 3:].abs().min() > 0
+        assert torch.equal(returns[True] * masks[True], returns[False] * masks[True])
+        assert returns[False][0, 3:].abs().min() > 0
 
 
 def learn_with_kl(
@@ -283,42 +285,47 @@ class TestREINFORCELearnForcedTurnKLPenalty:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Arrange
-        advantages = {}
+        returns = {}
         masks = {}
         for forced in (False, True):
             agent = make_kl_reinforce()
-            rebn, rebn_calls = record_calls(agent._compute_rebn_advantages)
-            monkeypatch.setattr(agent, "_compute_rebn_advantages", rebn)
+            whiten, whiten_calls = record_calls(reinforce_llm.masked_whiten)
+            monkeypatch.setattr(reinforce_llm, "masked_whiten", whiten)
 
             # Act
             masks[forced] = learn_with_kl(agent, monkeypatch, forced=forced)
-            ((_args, _kwargs, advantages[forced]),) = rebn_calls
+            ((args, _kwargs, _out),) = whiten_calls
+            returns[forced] = args[0]
 
         # Assert
-        assert torch.isfinite(advantages[True]).all()
+        assert torch.isfinite(returns[True]).all()
         assert torch.allclose(
-            advantages[True], advantages[False] * masks[True], rtol=0.0, atol=1e-6
+            returns[True] * masks[True],
+            returns[False] * masks[True],
+            rtol=0.0,
+            atol=1e-6,
         )
 
-    def test_the_loss_sees_the_same_advantages(
+    def test_the_loss_sees_the_rebn_advantages(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Arrange
-        seen = {}
-        for forced in (False, True):
-            agent = make_kl_reinforce()
-            loss, calls = record_calls(reinforce_llm.clipped_is_surrogate)
-            monkeypatch.setattr(reinforce_llm, "clipped_is_surrogate", loss)
+        agent = make_kl_reinforce()
+        rebn, rebn_calls = record_calls(agent._compute_rebn_advantages)
+        monkeypatch.setattr(agent, "_compute_rebn_advantages", rebn)
+        loss, loss_calls = record_calls(reinforce_llm.clipped_token_surrogate)
+        monkeypatch.setattr(reinforce_llm, "clipped_token_surrogate", loss)
 
-            # Act
-            learn_with_kl(agent, monkeypatch, forced=forced)
-            seen[forced] = [(args[1], args[2]) for args, _kwargs, _out in calls]
+        # Act
+        learn_with_kl(agent, monkeypatch, forced=True)
 
         # Assert
-        assert len(seen[True]) == len(seen[False]) == 2
-        for (forced_adv, units), (free_adv, _) in zip(
-            seen[True], seen[False], strict=True
-        ):
-            assert torch.allclose(
-                forced_adv * units, free_adv * units, rtol=0.0, atol=1e-6
-            )
+        ((rebn_args, _kwargs, advantages),) = rebn_calls
+        rebn_rows = (advantages * rebn_args[2]).unbind(0)
+        assert len(loss_calls) == 2
+        for args, _kwargs, _out in loss_calls:
+            for row in (args[1] * args[2]).unbind(0):
+                assert any(
+                    torch.allclose(row, expected, rtol=0.0, atol=1e-6)
+                    for expected in rebn_rows
+                )

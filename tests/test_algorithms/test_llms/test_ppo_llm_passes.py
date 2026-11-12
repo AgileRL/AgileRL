@@ -191,7 +191,6 @@ def value_loss(
 ) -> torch.Tensor:
     return agent._ppo_value_loss(
         values,
-        batch["old_values"],
         batch["returns"],
         batch["mask"],
         batch["turn_ids"],
@@ -1191,13 +1190,13 @@ class TestPPOLearnTurnCount:
         # Assert
         local_counts = []
         for args, kwargs, (loss, _) in policy_calls:
-            log_probs, *inputs, turn_ids, num_turns, granularity, sampling = args
+            log_probs, *inputs, turn_ids, num_turns, granularity = args
             local = int(turn_ids.max()) + 1
             local_counts.append(local)
             assert (num_turns, granularity) == (2, "turn")
             with torch.no_grad():
                 expected, _ = policy_fn(
-                    log_probs, *inputs, turn_ids, local, granularity, sampling, **kwargs
+                    log_probs, *inputs, turn_ids, local, granularity, **kwargs
                 )
             assert torch.equal(loss.detach(), expected)
         for args, kwargs, loss in value_calls:
@@ -1244,7 +1243,10 @@ class TestPPOLearnForcedTurns:
         # Arrange
         results = {}
         for forced in (False, True):
-            agent = make_ppo(advantage_granularity="turn", gamma=0.9)
+            # Whitening runs over action tokens, which exclude forced ones.
+            agent = make_ppo(
+                advantage_granularity="turn", gamma=0.9, whiten_advantages=False
+            )
             gae, gae_calls = record_calls(agent._compute_gae_returns)
             monkeypatch.setattr(agent, "_compute_gae_returns", gae)
 
@@ -1646,3 +1648,42 @@ class TestResolveFsdpReduceDtype:
 
         # Assert
         assert resolved.reduce_dtype == resolved.param_dtype == "bfloat16"
+
+
+class TestPPOValueLoss:
+    class _Stub:
+        vf_coef = 0.5
+        _ppo_value_loss = LLMPPO._ppo_value_loss
+        _compute_vf_loss_token = LLMPPO._compute_vf_loss_token
+
+    def test_token_mse_is_zero_when_values_match_returns(self) -> None:
+        stub = self._Stub()
+        values = torch.tensor([[5.0, 5.0]])
+        returns = torch.tensor([[5.0, 5.0]])
+        mask = torch.ones(1, 2)
+
+        loss = stub._compute_vf_loss_token(values, returns, mask)
+
+        assert loss.item() == pytest.approx(0.0)
+
+    def test_token_mse_matches_half_mean_square_error(self) -> None:
+        stub = self._Stub()
+        values = torch.tensor([[1.0, 3.0]])
+        returns = torch.tensor([[0.0, 1.0]])
+        mask = torch.ones(1, 2)
+
+        loss = stub._compute_vf_loss_token(values, returns, mask)
+
+        # 0.5 * mean([1^2, 2^2]) * vf_coef
+        assert loss.item() == pytest.approx(0.5 * 2.5 * stub.vf_coef)
+
+    def test_turn_mse_uses_last_query_token(self) -> None:
+        stub = self._Stub()
+        values = torch.tensor([[2.0, 9.0, 3.0, 8.0]])
+        returns = torch.tensor([[2.0, 0.0, 3.0, 0.0]])
+        mask = torch.ones(1, 4)
+        turn_ids = torch.tensor([[0, 0, 1, 1]])
+
+        loss = stub._ppo_value_loss(values, returns, mask, turn_ids, 2, "turn")
+
+        assert loss.item() == pytest.approx(0.0)

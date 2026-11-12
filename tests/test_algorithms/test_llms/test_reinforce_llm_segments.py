@@ -26,12 +26,12 @@ from peft import LoraConfig
 
 from agilerl.algorithms import reinforce_llm
 from agilerl.algorithms.reinforce_llm import REINFORCE
-from agilerl.utils.llm_utils import LEARN_PHASE_METRIC_NAMES
+from agilerl.utils.llm_utils import LEARN_PHASE_METRIC_NAMES, masked_mean
 from tests.rank_launch import run_ranks
 from tests.test_algorithms.test_llms.llm_helpers import (
     create_module,
     optimizer_state,
-    record_outputs,
+    record_calls,
     scale_losses,
     score_every_token,
     trainable_weights,
@@ -246,8 +246,8 @@ def scale_surrogate_losses(
     """Make each policy surrogate loss carry the next scale."""
     monkeypatch.setattr(
         reinforce_llm,
-        "clipped_is_surrogate",
-        scale_losses(reinforce_llm.clipped_is_surrogate, scales),
+        "clipped_token_surrogate",
+        scale_losses(reinforce_llm.clipped_token_surrogate, scales),
     )
 
 
@@ -368,15 +368,21 @@ class TestREINFORCELearnMetrics:
     ) -> None:
         # Arrange: one optimizer step of four 1-row micro-batches.
         agent = _make_reinforce(micro_batch_size_per_gpu=1)
-        surrogate, outputs = record_outputs(reinforce_llm.clipped_is_surrogate)
-        monkeypatch.setattr(reinforce_llm, "clipped_is_surrogate", surrogate)
+        surrogate, calls = record_calls(reinforce_llm.clipped_token_surrogate)
+        monkeypatch.setattr(reinforce_llm, "clipped_token_surrogate", surrogate)
 
         # Act
         metrics = agent.learn(_experiences())
 
         # Assert
-        assert len(outputs) == 4
-        mean_loss = sum(loss.item() for loss, _ in outputs) / 4
+        assert len(calls) == 4
+        mean_loss = (
+            sum(
+                masked_mean(token_loss, args[2]).item()
+                for args, _kwargs, (token_loss, _clipped) in calls
+            )
+            / 4
+        )
         assert metrics["loss"] == pytest.approx(mean_loss, rel=1e-6)
         assert metrics["pg_loss"] == pytest.approx(mean_loss, rel=1e-6)
 
@@ -387,8 +393,8 @@ class TestREINFORCELearnNonFiniteLoss:
         agent = _make_reinforce(micro_batch_size_per_gpu=1)
         monkeypatch.setattr(
             reinforce_llm,
-            "clipped_is_surrogate",
-            scale_losses(reinforce_llm.clipped_is_surrogate, iter([1.0] * 4)),
+            "clipped_token_surrogate",
+            scale_losses(reinforce_llm.clipped_token_surrogate, iter([1.0] * 4)),
         )
         before = trainable_weights(agent.actor)
 
@@ -415,8 +421,8 @@ class TestREINFORCELearnNonFiniteLoss:
         scales = iter([1.0] * 4 + window_scales)
         monkeypatch.setattr(
             reinforce_llm,
-            "clipped_is_surrogate",
-            scale_losses(reinforce_llm.clipped_is_surrogate, scales),
+            "clipped_token_surrogate",
+            scale_losses(reinforce_llm.clipped_token_surrogate, scales),
         )
         agent.learn(_experiences())
         before = trainable_weights(agent.actor)
@@ -446,8 +452,8 @@ class TestREINFORCELearnNonFiniteLoss:
         scales = iter([1.0, 1.0, 1.0, float("nan")])
         monkeypatch.setattr(
             reinforce_llm,
-            "clipped_is_surrogate",
-            scale_losses(reinforce_llm.clipped_is_surrogate, scales),
+            "clipped_token_surrogate",
+            scale_losses(reinforce_llm.clipped_token_surrogate, scales),
         )
 
         # Act / Assert
@@ -491,11 +497,13 @@ class TestREINFORCELearnSamplingSupports:
     def test_segment_rows_match_the_unsegmented_gradient(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Arrange
+        # Arrange: the fixture's sampling log-probs are far from the policy's,
+        # so the off-policy mask would zero every token.
         overrides = {
             "batch_size": 8,
             "micro_batch_size_per_gpu": 8,
             "mini_batch_size": 8,
+            "off_policy_token_mask_bounds": None,
         }
         unsegmented = _make_reinforce(**overrides)
         segmented = _make_reinforce(**overrides)

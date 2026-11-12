@@ -107,7 +107,6 @@ class _Stub:
         self.sequence_packing = False
         self.sequence_layout = PaddedSequence(calc_position_embeddings=False)
         self.rng = np.random.default_rng(0)
-        self.old_logprobs_source = "trainer"
         self.lr_scheduler = None
         self.no_grad_forwards: list[tuple[int, bool, bool]] = []
         self._vision_cache = VisionFeatureCache()
@@ -156,12 +155,12 @@ class _Stub:
     _reduce_masked_loss = GRPO._reduce_masked_loss
     _resolve_loss_window = GRPO._resolve_loss_window
     _token_loss_weights = GRPO._token_loss_weights
+    _rollout_actor_rows = staticmethod(GRPO._rollout_actor_rows)
     _rollout_old_log_probs = GRPO._rollout_old_log_probs
     _rows_with_full_sampling_logprobs = staticmethod(
         GRPO._rows_with_full_sampling_logprobs
     )
     _sampling_mismatch_metrics = GRPO._sampling_mismatch_metrics
-    _self_scored_micro_batches = GRPO._self_scored_micro_batches
     _summarize_update = GRPO._summarize_update
     _warn_if_micro_batches_straddle_optimizer_steps = (
         GRPO._warn_if_micro_batches_straddle_optimizer_steps
@@ -365,7 +364,7 @@ class TestLearnTelemetryReportsDiagnostics:
         assert metrics["vllm_is_ratio_mean"] == pytest.approx(2.0)
         assert metrics["vllm_is_ratio_p95"] == pytest.approx(2.0)
         assert metrics["vllm_is_frac_clamped"] == pytest.approx(1.0)
-        assert metrics["vllm_is_rows_skipped"] == 0.0
+        assert metrics["old_logprobs_trainer_rows"] == 0.0
         assert algo.metrics.logged["vllm_is_delta_mean"] == pytest.approx(3.0)
         assert algo.metrics.logged["vllm_is_ratio_mean"] == pytest.approx(2.0)
 
@@ -403,8 +402,8 @@ class TestLearnPhaseTimings:
     def test_old_logprob_forward_time_lands_in_its_phase(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Arrange: one-row micro-batches leave the second row for the no-grad
-        # forward. The stub backward pass marks nothing. Sleep advances the
+        # Arrange: no sampling log-probs, so the no-grad forward scores both
+        # rows. The stub backward pass marks nothing. Sleep advances the
         # PhaseTimer clock.
         ticks = [0.0]
 
@@ -417,13 +416,12 @@ class TestLearnPhaseTimings:
         )
         monkeypatch.setattr(time, "sleep", fake_sleep)
         algo = _SlowOldLogprobsStub(beta=0.0)
-        algo.micro_batch_size_per_gpu = 1
 
         # Act
         metrics = algo.learn(_experiences())
 
         # Assert
-        assert algo.no_grad_forwards == [(1, False, True)]
+        assert algo.no_grad_forwards == [(2, False, True)]
         assert metrics["learn_phase_no_grad_forward_s"] == pytest.approx(
             OLD_LOGPROB_FORWARD_S
         )

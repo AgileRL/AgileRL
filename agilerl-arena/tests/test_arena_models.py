@@ -28,6 +28,7 @@ from agilerl.arena.models.algorithms.dqn import DQNSpec
 from agilerl.arena.models.algorithms.grpo import GRPOSpec
 from agilerl.arena.models.algorithms.gspo import GSPOSpec
 from agilerl.arena.models.algorithms.llmppo import LLMPPOSpec
+from agilerl.arena.models.algorithms.llmreinforce import LLMREINFORCESpec
 from agilerl.arena.models.algorithms.ppo import PPOSpec, RecurrentPPOSpec
 from agilerl.arena.models.env import (
     EnvHostVolume,
@@ -729,6 +730,23 @@ class TestOffloadTrainerDuringRollout:
             spec_cls.model_validate(
                 {**required, "offload_trainer_during_rollout": True}
             )
+
+
+@pytest.mark.parametrize(
+    "spec_cls",
+    [LLMPPOSpec, LLMREINFORCESpec],
+    ids=["llmppo", "llmreinforce"],
+)
+class TestTurnRatioPooling:
+    def test_is_not_a_manifest_field(self, spec_cls: type[BaseModel]) -> None:
+        assert "turn_ratio_pooling" not in spec_cls.model_fields
+        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+            spec_cls.model_validate({"turn_ratio_pooling": "sum"})
+
+
+class TestLLMPPOSpecDefaults:
+    def test_gae_lambda_defaults_to_monte_carlo(self) -> None:
+        assert LLMPPOSpec().gae_lambda == 1.0
 
 
 @pytest.mark.parametrize(

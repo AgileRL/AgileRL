@@ -294,7 +294,6 @@ class _PPOStub:
         self,
         gamma: float = 1.0,
         gae_lambda: float = 1.0,
-        turn_value_reduction: str = "mean",
         advantage_granularity: str = "auto",
         clip_coef: float = 0.2,
         vf_coef: float = 0.5,
@@ -302,7 +301,6 @@ class _PPOStub:
     ):
         self.gamma = gamma
         self.gae_lambda = gae_lambda
-        self.turn_value_reduction = turn_value_reduction
         self.advantage_granularity = advantage_granularity
         self.clip_coef = clip_coef
         self.vf_coef = vf_coef
@@ -449,48 +447,6 @@ class TestPPOInit:
     def test_init_advantage_granularity_turn(self):
         ppo = _cpu_llmppo(advantage_granularity="turn")
         assert ppo.advantage_granularity == "turn"
-
-    def test_init_turn_value_reduction_must_be_valid(self):
-        actor = create_module(10, 8, 100, "cpu")
-        lora = LoraConfig(
-            r=4,
-            lora_alpha=16,
-            target_modules=["lin"],
-            task_type="CAUSAL_LM",
-            modules_to_save=["summary"],
-        )
-        with pytest.raises(ValueError, match="turn_value_reduction"):
-            LLMPPO(
-                actor_network=actor,
-                pad_token_id=99,
-                pad_token="<pad>",
-                lora_config=lora,
-                turn_value_reduction="median",
-                wrap=False,
-            )
-
-    def test_init_turn_ratio_pooling_must_be_valid(self):
-        actor = create_module(10, 8, 100, "cpu")
-        lora = LoraConfig(
-            r=4,
-            lora_alpha=16,
-            target_modules=["lin"],
-            task_type="CAUSAL_LM",
-            modules_to_save=["summary"],
-        )
-        with pytest.raises(ValueError, match="turn_ratio_pooling"):
-            LLMPPO(
-                actor_network=actor,
-                pad_token_id=99,
-                pad_token="<pad>",
-                lora_config=lora,
-                turn_ratio_pooling="median",
-                wrap=False,
-            )
-
-    def test_init_default_turn_ratio_pooling_is_sum(self):
-        ppo = _cpu_llmppo()
-        assert ppo.turn_ratio_pooling == "sum"
 
     def test_init_whiten_advantages_must_be_boolean(self):
         actor = create_module(10, 8, 100, "cpu")
@@ -680,13 +636,11 @@ class TestPPOComputeGaeReturns:
         )
         assert advantages[0, 2].item() == 0.0
 
-    def test_compute_gae_returns_turn_value_reduction_final_value_uses_last_token_value(
-        self,
-    ):
-        stub = _PPOStub(gamma=1.0, gae_lambda=1.0, turn_value_reduction="final_value")
+    def test_compute_gae_returns_uses_first_action_token_value(self):
+        stub = _PPOStub(gamma=1.0, gae_lambda=1.0, whiten_advantages=False)
         action_mask = torch.ones(1, 4, dtype=torch.bool)
         turn_ids = torch.tensor([[0, 0, 1, 1]])
-        values = torch.tensor([[1.0, 4.0, 2.0, 8.0]])
+        values = torch.tensor([[1.0, 9.0, 2.0, 8.0]])
         rewards = torch.tensor([[0.0, 0.0, 0.0, 0.0]])
 
         returns, advantages = stub._compute_gae_returns(
@@ -697,11 +651,9 @@ class TestPPOComputeGaeReturns:
             stub.gae_lambda,
         )
 
-        expected_advantages = torch.tensor(
-            [[0.70710677, 0.70710677, -0.70710677, -0.70710677]]
-        )
+        expected_advantages = torch.tensor([[-1.0, -1.0, -2.0, -2.0]])
         expected_returns = torch.tensor([[0.0, 0.0, 0.0, 0.0]])
-        assert torch.allclose(advantages, expected_advantages, atol=1e-6)
+        assert torch.allclose(advantages, expected_advantages)
         assert torch.allclose(returns, expected_returns)
 
     def test_compute_gae_returns_without_whitening_uses_raw_turn_advantages(self):
@@ -722,13 +674,32 @@ class TestPPOComputeGaeReturns:
 
 
 class TestPPOComputeGaeReturnsToken:
+    def test_turn_rewards_land_on_last_action_token_and_skip_env_tokens(self):
+        # Arrange: turn 0 is tokens 0-1, token 2 is an environment token whose
+        # value must not enter the chain, turn 1 is token 3, token 4 is padding.
+        stub = _PPOStub(gamma=1.0, gae_lambda=1.0, whiten_advantages=False)
+        action_mask = torch.tensor([[True, True, False, True, False]])
+        turn_ids = torch.tensor([[0, 0, -1, 1, -1]])
+        values = torch.tensor([[0.5, 0.5, 9.0, 0.5, 0.0]])
+        rewards = torch.tensor([[1.0, 2.0]])
+
+        # Act
+        returns, advantages = stub._compute_gae_returns_token(
+            rewards, values, action_mask, turn_ids, stub.gae_lambda
+        )
+
+        # Assert
+        assert torch.allclose(advantages, torch.tensor([[2.5, 2.5, 0.0, 1.5, 0.0]]))
+        assert torch.allclose(returns, torch.tensor([[3.0, 3.0, 0.0, 2.0, 0.0]]))
+
     def test_compute_gae_returns_token_padding_positions_zero_advantage(self):
         stub = _PPOStub(gamma=0.99, gae_lambda=0.95)
         action_mask = torch.tensor([[True, True, False, False]])
+        turn_ids = torch.tensor([[0, 0, -1, -1]])
         values = torch.tensor([[0.1, 0.2, 0.0, 0.0]])
-        rewards = torch.tensor([[1.0, 0.5, 0.0, 0.0]])
+        rewards = torch.tensor([[1.0]])
         returns, advantages = stub._compute_gae_returns_token(
-            rewards, values, action_mask, stub.gae_lambda
+            rewards, values, action_mask, turn_ids, stub.gae_lambda
         )
         assert returns.shape == values.shape
         assert advantages.shape == values.shape
@@ -1368,40 +1339,78 @@ class TestPPOTest:
             server.stop()
 
 
-class TestPPOVllmISCorrection:
-    """vLLM sampling-mismatch (truncated-IS) correction wiring, token level."""
+def _two_turn_learn_inputs(
+    sampling_logp: float | None,
+) -> tuple[tuple, torch.Tensor, list[torch.Tensor] | None]:
+    """One two-turn row and, when ``sampling_logp`` is set, constant rollout log-probs."""
+    vocab, inp, mtok = 100, 10, 8
+    seq_len = inp + mtok
+    completions = [torch.randint(0, vocab, (1, seq_len))]
+    action_masks = [torch.ones(1, seq_len - 1, dtype=torch.bool)]
+    turn_ids = torch.tensor(
+        [[-1] * (inp - 1) + [0] * (mtok // 2) + [1] * (mtok - mtok // 2)],
+        dtype=torch.long,
+    )[:, : seq_len - 1]
+    rewards = torch.tensor([[0.5, -0.5]], dtype=torch.float32)
+    if sampling_logp is None:
+        return (completions, action_masks, rewards), turn_ids, None
+    n_act = int(action_masks[0].sum())
+    sampling_logps = [torch.full((n_act,), sampling_logp, dtype=torch.float32)]
+    return (completions, action_masks, rewards), turn_ids, sampling_logps
+
+
+class TestPPOLearnRolloutOldLogProbs:
+    """The ratio divides by rollout sampling log-probs when every action token has one."""
 
     @pytest.mark.parametrize("is_level", ["token", "turn", "trajectory"])
-    def test_learn_emits_vllm_is_metrics_and_reweights(self, is_level):
-        ppo = _cpu_llmppo(
-            importance_sampling_level=is_level, lr_actor=0.05, update_epochs=1
-        )
-        # use_vllm=False auto-disables the correction in __init__; force it on to
-        # exercise the capture/align/metrics/reweight path (applied to the policy
-        # surrogate via clipped_is_surrogate's loss_weight hook).
-        ppo.vllm_importance_sampling_correction = True
-        ppo.vllm_importance_sampling_cap = 2.0
-        vocab, inp, mtok = 100, 10, 8
-        seq_len = inp + mtok
-        completions = [torch.randint(0, vocab, (1, seq_len))]
-        action_masks = [torch.ones(1, seq_len - 1, dtype=torch.bool)]
-        turn_ids = torch.tensor(
-            [[-1] * (inp - 1) + [0] * (mtok // 2) + [1] * (mtok - mtok // 2)],
-            dtype=torch.long,
-        )[:, : seq_len - 1]
-        rewards = torch.tensor([[0.5, -0.5]], dtype=torch.float32)
-        n_act = int(action_masks[0].sum())
-        sampling_logps = [torch.full((n_act,), -3.0, dtype=torch.float32)]
+    def test_far_rollout_log_probs_mask_every_token(self, is_level):
+        # Arrange
+        torch.manual_seed(0)
+        ppo = _cpu_llmppo(importance_sampling_level=is_level)
+        experiences, turn_ids, sampling_logps = _two_turn_learn_inputs(-0.01)
+
+        # Act
         metrics = ppo.learn(
-            (completions, action_masks, rewards),
-            turn_ids=turn_ids,
-            sampling_logps=sampling_logps,
+            experiences, turn_ids=turn_ids, sampling_logps=sampling_logps
         )
-        for key in ("vllm_is_delta_mean", "vllm_is_ratio_mean"):
-            assert key in metrics
-            assert isinstance(metrics[key], float)
+
+        # Assert
+        assert metrics["off_policy_token_mask_frac"] == pytest.approx(1.0)
         assert metrics["vllm_is_ratio_mean"] > 0
         assert torch.isfinite(torch.tensor(metrics["loss"]))
+
+    def test_rows_without_rollout_log_probs_use_learn_start_policy(self):
+        # Arrange
+        torch.manual_seed(0)
+        ppo = _cpu_llmppo()
+        experiences, turn_ids, _ = _two_turn_learn_inputs(None)
+
+        # Act
+        metrics = ppo.learn(experiences, turn_ids=turn_ids)
+
+        # Assert
+        assert metrics["off_policy_token_mask_frac"] == pytest.approx(0.0)
+        assert metrics["clipfrac"] == pytest.approx(0.0)
+
+    def test_no_bounds_masks_nothing(self):
+        # Arrange
+        torch.manual_seed(0)
+        ppo = _cpu_llmppo(off_policy_token_mask_bounds=None)
+        experiences, turn_ids, sampling_logps = _two_turn_learn_inputs(-0.01)
+
+        # Act
+        metrics = ppo.learn(
+            experiences, turn_ids=turn_ids, sampling_logps=sampling_logps
+        )
+
+        # Assert
+        assert metrics["off_policy_token_mask_frac"] == pytest.approx(0.0)
+        assert metrics["clipfrac"] > 0
+
+    @pytest.mark.parametrize("bounds", [(1.0, 5.0), (0.5, 1.0), (-0.1, 2.0)])
+    def test_rejects_bounds_that_do_not_straddle_one(self, bounds):
+        with pytest.raises(ValueError, match="0 <= low < 1 < high"):
+            _cpu_llmppo(off_policy_token_mask_bounds=bounds)
 
 
 class _CtxFreeCausalInner(nn.Module):
