@@ -112,8 +112,8 @@ MIN_P = (
 )
 REPETITION_PENALTY = "Penalty applied to tokens already generated, to discourage loops."
 TEMPERATURE = (
-    "Sampling temperature for generation. Higher values diversify rollouts; 0 "
-    "is greedy decoding."
+    "Sampling temperature for generation. Higher values diversify rollouts. "
+    "The trainer divides logits by this, so it has to be above 0."
 )
 MAX_OUTPUT_TOKENS = "Hard cap on tokens generated per completion."
 MAX_ROW_TOKENS = (

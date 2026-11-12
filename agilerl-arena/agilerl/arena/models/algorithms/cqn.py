@@ -19,9 +19,9 @@ from agilerl.arena.models.registry import AgentType, register
 class CQNSpec(SingleAgentAlgorithmSpec):
     """Conservative Q-Learning, trained from a fixed dataset."""
 
-    tau: float = Field(default=0.001, description=TAU)
+    tau: float = Field(default=0.001, gt=0.0, le=1.0, description=TAU)
     double: bool = Field(default=False, description=DOUBLE)
-    lr: float = Field(default=0.0001, ge=0.0, description=LR)
+    lr: float = Field(default=0.0001, gt=0.0, le=1.0, description=LR)
     net_config: QNetworkSpec | None = Field(default=None, description=NET_CONFIG)
 
     offline: ClassVar[bool] = True

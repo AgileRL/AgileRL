@@ -51,6 +51,7 @@ from agilerl.arena.models.hpo import (
     SelectionStrategySpec,
     TournamentSelectionSpec,
     no_op_mutation_probabilities,
+    require_mutation_range_inside_field,
 )
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.networks import (
@@ -505,6 +506,22 @@ class TrainingManifest(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _check_mutation_ranges_inside_field_limits(self) -> Self:
+        """Reject a mutation window outside the hyperparameter it changes."""
+        if self.mutation is None or not self.mutation.rl_hp_selection:
+            return self
+        spec = type(self.algorithm)
+        accepted = _mutable_names(spec)
+        for spelling, bounds in self.mutation.rl_hp_selection.items():
+            field = spec.model_fields[accepted[spelling]]
+            try:
+                require_mutation_range_inside_field(bounds, field)
+            except ValueError as exc:
+                msg = f"mutation.rl_hp_selection cannot mutate {spelling!r}: {exc}"
+                raise ValueError(msg) from exc
+        return self
+
+    @model_validator(mode="after")
     def _check_mutated_sampling_support(self) -> Self:
         """Reject HPO moving ``temperature`` or ``top_p`` to values rollout cannot score."""
         if (
@@ -523,14 +540,6 @@ class TrainingManifest(BaseModel):
             if field in lowest:
                 lowest[field] = min(lowest[field], bounds.min)
         prefix = "mutation.rl_hp_selection can reach sampling rollout cannot score"
-        # vLLM rejects temperature <= 0 on an engine that records supports.
-        if self.algorithm.top_k > 0 and lowest["temperature"] <= 0:
-            msg = (
-                f"{prefix}: temperature min {lowest['temperature']} must be > 0 "
-                f"with top_k={self.algorithm.top_k}, which records sampling "
-                "supports only at temperature > 0."
-            )
-            raise ValueError(msg)
         try:
             records_sampling_supports(
                 lowest["temperature"],
@@ -627,6 +636,13 @@ class TrainingManifest(BaseModel):
             and self.algorithm.vllm_config is None
         ):
             self.algorithm.vllm_config = default_rollout_vllm_config()
+        return self
+
+    @model_validator(mode="after")
+    def _check_max_output_tokens(self) -> Self:
+        """A completion cap has to fit inside the model's context length."""
+        if isinstance(self.algorithm, RolloutLLMSpec):
+            self.algorithm.check_output_fits_context()
         return self
 
     @model_validator(mode="after")

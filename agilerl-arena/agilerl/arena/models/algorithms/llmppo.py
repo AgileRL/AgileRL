@@ -32,8 +32,8 @@ from agilerl.arena.models.registry import register
 class LLMPPOSpec(RolloutLLMSpec):
     """PPO for LLM fine-tuning, with a value head."""
 
-    temperature: float = Field(default=1.0, description=TEMPERATURE)
-    top_p: float = Field(default=1.0, ge=0.0, le=1.0, description=TOP_P)
+    temperature: float = Field(default=1.0, gt=0.0, le=2.0, description=TEMPERATURE)
+    top_p: float = Field(default=1.0, gt=0.0, le=1.0, description=TOP_P)
     beta: float = Field(default=0.001, ge=0.0, le=1.0, description=BETA)
     kl_clamp: float | None = Field(default=10.0, gt=0.0, description=KL_CLAMP)
     max_grad_norm: float = Field(
@@ -52,12 +52,13 @@ class LLMPPOSpec(RolloutLLMSpec):
     )
     lr_actor: float = Field(
         default=5e-7,
-        ge=0.0,
+        gt=0.0,
+        le=1.0,
         validation_alias=AliasChoices("lr_actor", "lr"),
         description=LR_ACTOR,
     )
-    lr_critic: float | None = Field(default=5e-5, ge=0.0, description=LR_CRITIC)
-    vf_coef: float = Field(default=0.5, ge=0.0, description=VF_COEF)
+    lr_critic: float | None = Field(default=5e-5, gt=0.0, le=1.0, description=LR_CRITIC)
+    vf_coef: float = Field(default=0.5, ge=0.0, le=1.0, description=VF_COEF)
     clip_coef: float = Field(default=0.2, ge=0.0, le=1.0, description=CLIP_COEF)
     gamma: float = Field(
         default=1.0,

@@ -19,7 +19,7 @@ from agilerl.arena.models.registry import register
 class DPOSpec(LLMAlgorithmSpec):
     """Direct Preference Optimization."""
 
-    lr: float = Field(default=0.000005, ge=0.0, description=LR)
+    lr: float = Field(default=0.000005, gt=0.0, le=1.0, description=LR)
     beta: float = Field(default=0.1, ge=0.0, le=1.0, description=BETA)
     reference_update_interval: int | None = Field(
         default=None, ge=1, description=REFERENCE_UPDATE_INTERVAL

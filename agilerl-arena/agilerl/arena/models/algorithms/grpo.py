@@ -29,7 +29,7 @@ class GRPOSpec(RolloutLLMSpec):
     """Group Relative Policy Optimization."""
 
     group_size: int = Field(default=8, ge=1, description=GROUP_SIZE)
-    lr: float = Field(default=5e-7, ge=0.0, description=LR)
+    lr: float = Field(default=5e-7, gt=0.0, le=1.0, description=LR)
     clip_coef: float = Field(default=0.2, ge=0.0, le=1.0, description=CLIP_COEF)
     adv_norm: Literal["mean_only", "mean_std"] = Field(
         default="mean_only",
@@ -54,6 +54,7 @@ class GRPOSpec(RolloutLLMSpec):
     whiten_advantages: bool = Field(default=False, description=WHITEN_ADVANTAGES)
     adv_clip_range: float | None = Field(
         default=None,
+        gt=0.0,
         description="Clip advantages to +/- this value. Unset leaves them unclipped.",
     )
     filter_zero_adv: bool = Field(
@@ -101,6 +102,7 @@ class GRPOSpec(RolloutLLMSpec):
     off_policy_sequence_mask_threshold: float | None = Field(
         default=0.03,
         ge=0.0,
+        le=20.0,
         description=(
             "Drop the policy and KL gradient of negative-advantage completions whose "
             "mean log(sampling / current) log-prob gap exceeds this "

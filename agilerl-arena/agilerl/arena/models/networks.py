@@ -875,12 +875,14 @@ class VLLMConfig(BaseModel):
     )
     presence_penalty: float = Field(
         default=0.0,
-        ge=0.0,
+        ge=-2.0,
+        le=2.0,
         description="Penalty on tokens that already appeared, at any count.",
     )
     frequency_penalty: float = Field(
         default=0.0,
-        ge=0.0,
+        ge=-2.0,
+        le=2.0,
         description="Penalty on tokens in proportion to how often they appeared.",
     )
     limit_mm_per_prompt: dict[str, Annotated[int, Field(ge=0)]] | None = Field(
