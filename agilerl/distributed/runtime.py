@@ -46,6 +46,7 @@ from agilerl.distributed.fsdp import (
     _scatter_ep_expert_slices,
     canonical_fsdp_param_fqn,
     materialize_fsdp2_from_cpu_state,
+    reshard_fsdp_modules,
     set_full_model_state_dict,
 )
 from agilerl.distributed.fsdp_blocks import UnforwardedFSDPUnits
@@ -1003,6 +1004,8 @@ class FSDPRuntime(BaseRuntime):
     ) -> dict[str, Any]:
         if not isinstance(actor, FSDPModule):
             return _optimizer_state_as_dict(optimizer)
+        # A no-grad forward leaves units unsharded, hiding the optimizer's params.
+        reshard_fsdp_modules(actor)
         inner_optimizer = optimizer._single_optimizer()
         if isinstance(inner_optimizer, CPUOffloadOptimizer):
             inner_optimizer = inner_optimizer.optimizer
@@ -1028,6 +1031,8 @@ class FSDPRuntime(BaseRuntime):
             optimizer.load_state_dict(optimizer_state)
             return
 
+        # A no-grad forward leaves units unsharded, hiding the optimizer's params.
+        reshard_fsdp_modules(actor)
         offload = optimizer._single_optimizer()
         inner_optimizer = (
             offload.optimizer if isinstance(offload, CPUOffloadOptimizer) else offload
