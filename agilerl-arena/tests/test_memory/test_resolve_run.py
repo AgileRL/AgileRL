@@ -9,6 +9,7 @@ import math
 
 import pytest
 
+from agilerl.arena.memory.breakdown import MemoryComponent, PhaseBreakdown
 from agilerl.arena.memory.manifest import (
     nccl_reshard_layout_supported,
     training_memory_from_manifest,
@@ -21,11 +22,12 @@ from agilerl.arena.memory.resolve.fsdp import (
     learn_cost,
 )
 from agilerl.arena.memory.resolve.learn_costs import learn_costs
-from agilerl.arena.memory.resolve.parallel import ParallelLayout
+from agilerl.arena.memory.resolve.parallel import ParallelLayout, manifest_at_layout
 from agilerl.arena.memory.resolve.run import (
     RunMemoryPlan,
     SearchCache,
     WeightSyncMode,
+    _cached_training_plan,
     kept_split_memory,
     kept_weight_sync_mode,
     pick_weight_sync,
@@ -43,7 +45,7 @@ from agilerl.arena.memory.resolve.weight_sync import (
     SyncLink,
     nccl_reshard_sync_seconds,
 )
-from agilerl.arena.memory.specs import DeviceSpec, GiB
+from agilerl.arena.memory.specs import DeviceSpec, GiB, TrainingSettings
 from agilerl.arena.models import model_info
 from agilerl.arena.models.manifest import TrainingManifest
 from agilerl.arena.models.model_info import supported_path
@@ -697,6 +699,132 @@ class TestResolveRunMemory:
         # Assert
         assert drafted.trainers > plain.trainers
         assert drafted.step_seconds < plain.step_seconds
+
+
+def _plan_with_host(host_total: int, host_usable: int | None) -> TrainingMemoryPlan:
+    """A trainer plan whose host components total ``host_total``."""
+    return TrainingMemoryPlan(
+        gradient_checkpointing=False,
+        checkpoint_every_n_blocks=1,
+        micro_batch_size_per_gpu=1,
+        micro_batch_tokens_per_gpu=None,
+        fsdp=None,
+        routed_expert_chunk_mib=None,
+        moe_collectives_saveable=False,
+        cost=1.0,
+        tokens=1.0,
+        settings=TrainingSettings(),
+        breakdown=PhaseBreakdown(
+            phase="training",
+            components=(MemoryComponent(key="weights", label="Weights", bytes=1),),
+            device_total_bytes=100,
+            device_usable_bytes=100,
+            host=(MemoryComponent(key="process", label="Process", bytes=host_total),),
+            host_usable_bytes=host_usable,
+        ),
+    )
+
+
+class TestCachedTrainingPlan:
+    def test_host_shares_share_the_plan_until_one_misses(self, monkeypatch) -> None:
+        # Arrange: the GPU search stores 1000 host bytes. 10000 and an unset
+        # share both fit that total; 100 and 50 do not.
+        placed = manifest_at_layout(
+            TrainingManifest.model_validate(MANIFEST), ParallelLayout()
+        )
+        model = tiny_model()
+        mode = WeightSyncMode(False, "nixl")
+        base = _device("L4")
+        roomy = base.model_copy(update={"host_bytes_per_gpu": 10_000})
+        unset = base.model_copy(update={"host_bytes_per_gpu": None})
+        tight = base.model_copy(update={"host_bytes_per_gpu": 100})
+        tighter = base.model_copy(update={"host_bytes_per_gpu": 50})
+        cache = SearchCache()
+        priced: list[int | None] = []
+
+        def fake(manifest, model, device, adapter_sync, nccl_reshard):
+            priced.append(device.host_bytes_per_gpu)
+            if device.host_bytes_per_gpu is None:
+                return _plan_with_host(1000, None)
+            return _plan_with_host(
+                device.host_bytes_per_gpu // 2, device.host_bytes_per_gpu
+            )
+
+        monkeypatch.setattr(
+            "agilerl.arena.memory.resolve.run.training_memory_from_manifest", fake
+        )
+
+        def price(device):
+            return _cached_training_plan(cache, placed, model, device, 1, mode, True)
+
+        # Act
+        first = price(roomy)
+        second = price(unset)
+
+        # Assert: one GPU search, priced with no host share.
+        assert priced == [None]
+        assert first is second
+        assert first.breakdown.host_total_bytes == 1000
+        assert len(cache.plans) == 1
+        assert cache.host_misses == {}
+
+        # Act: a share that misses prices later rungs; the same share does not.
+        missed = price(tight)
+        missed_again = price(tight)
+
+        # Assert
+        assert priced == [None, 100]
+        assert missed is missed_again
+        assert missed is not first
+        assert missed.breakdown.host_usable_bytes == 100
+        assert missed.breakdown.host_total_bytes == 50
+        assert len(cache.host_misses) == 1
+
+        # Act: a different share is priced again and does not reuse the miss.
+        other = price(tighter)
+
+        # Assert
+        assert priced == [None, 100, 50]
+        assert other is not missed
+        assert other.breakdown.host_usable_bytes == 50
+        assert len(cache.host_misses) == 2
+
+    def test_a_share_inside_the_buffer_misses_only_when_required(
+        self, monkeypatch
+    ) -> None:
+        # Arrange: host total equals the share, so it fits the point estimate
+        # and misses the underprediction buffer.
+        placed = manifest_at_layout(
+            TrainingManifest.model_validate(MANIFEST), ParallelLayout()
+        )
+        model = tiny_model()
+        mode = WeightSyncMode(False, "nixl")
+        device = _device("L4").model_copy(update={"host_bytes_per_gpu": 1000})
+        cache = SearchCache()
+        priced: list[int | None] = []
+
+        def fake(manifest, model, device, adapter_sync, nccl_reshard):
+            priced.append(device.host_bytes_per_gpu)
+            if device.host_bytes_per_gpu is None:
+                return _plan_with_host(1000, None)
+            return _plan_with_host(500, device.host_bytes_per_gpu)
+
+        monkeypatch.setattr(
+            "agilerl.arena.memory.resolve.run.training_memory_from_manifest", fake
+        )
+
+        # Act
+        buffered = _cached_training_plan(cache, placed, model, device, 1, mode, True)
+        bare = _cached_training_plan(cache, placed, model, device, 1, mode, False)
+
+        # Assert
+        assert priced == [None, 1000]
+        assert buffered.breakdown.host_total_bytes == 500
+        assert buffered.breakdown.host_usable_bytes == 1000
+        assert bare is not buffered
+        assert bare.breakdown.host_total_bytes == 1000
+        assert bare.breakdown.host_usable_bytes is None
+        assert len(cache.host_misses) == 1
 
 
 class TestPickWeightSync:
