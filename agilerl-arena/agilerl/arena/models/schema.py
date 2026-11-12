@@ -25,6 +25,7 @@ from agilerl.arena.models.algorithms.ppo import PPOSpec, RecurrentPPOSpec
 from agilerl.arena.models.algorithms.rainbow_dqn import RainbowDQNSpec
 from agilerl.arena.models.algorithms.sft import SFTSpec
 from agilerl.arena.models.env import ENV_POD_DEFAULT_CPUS, LLMEnvType
+from agilerl.arena.models.hpo import require_mutation_range_inside_field
 from agilerl.arena.models.manifest import API_VERSION, TrainingManifest, _is_numeric
 from agilerl.arena.models.registry import MANIFEST_REGISTRY
 
@@ -401,6 +402,15 @@ def _attach_ou_schema_dependencies(
     """Gate OU theta / dt / mean_noise on O_U_noise in the served schema."""
     if "O_U_noise" not in spec_cls.model_fields:
         return
+    properties = schema["properties"]
+    # The form reads this branch when noise is on, so the bounds travel with it.
+    bound_keys = (
+        "default",
+        "minimum",
+        "maximum",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
+    )
     schema.setdefault("allOf", []).append(
         {
             "if": {
@@ -409,11 +419,12 @@ def _attach_ou_schema_dependencies(
             },
             "then": {
                 "properties": {
-                    "theta": {"default": spec_cls.model_fields["theta"].default},
-                    "dt": {"default": spec_cls.model_fields["dt"].default},
-                    "mean_noise": {
-                        "default": spec_cls.model_fields["mean_noise"].default
-                    },
+                    name: {
+                        key: properties[name][key]
+                        for key in bound_keys
+                        if key in properties[name]
+                    }
+                    for name in ("theta", "dt", "mean_noise")
                 }
             },
         }
@@ -505,19 +516,25 @@ def _add_alias_spellings(schema: dict[str, Any], model: type[BaseModel]) -> None
 
 
 def _add_hpo_ranges(schema: dict[str, Any], model: type[AlgoSpec]) -> None:
-    """Declare the bounds HPO may mutate this algorithm's hyperparameters between.
+    """Declare mutation bounds that sit inside each hyperparameter's limits.
 
     :param schema: The variant's schema, modified in place.
     :type schema: dict[str, Any]
     :param model: The spec class the variant was built from.
     :type model: type[AlgoSpec]
+    :raises ValueError: If a default window leaves the field.
     """
-    applicable = {
-        name: bounds.model_dump()
-        for name, bounds in model.hpo_ranges.items()
-        if name in model.model_fields
-        and _is_numeric(model.model_fields[name].annotation)
-    }
+    applicable = {}
+    for name, bounds in model.hpo_ranges.items():
+        field = model.model_fields.get(name)
+        if field is None or not _is_numeric(field.annotation):
+            continue
+        try:
+            require_mutation_range_inside_field(bounds, field)
+        except ValueError as exc:
+            msg = f"{model.__name__}.{name}: {exc}"
+            raise ValueError(msg) from exc
+        applicable[name] = bounds.model_dump()
     if applicable:
         schema["x-hpo-ranges"] = applicable
 

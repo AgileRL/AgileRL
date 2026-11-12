@@ -109,6 +109,14 @@ LLM_HPO_RANGES: dict[str, RLHyperparameter] = {
 }
 
 
+def reject_unstable_ou_noise(theta: float, dt: float, ou_noise: bool) -> None:
+    """Reject an OU step that amplifies the deviation from the mean."""
+    if not ou_noise or theta * dt <= 1.0:
+        return
+    msg = "theta * dt must be <= 1 for stable OU noise"
+    raise ValueError(msg)
+
+
 class AlgorithmSpec(BaseModel):
     """Fields every algorithm's manifest section carries.
 
@@ -240,6 +248,7 @@ class LLMAlgorithmSpec(AlgorithmSpec):
     update_epochs: int = Field(
         default=1,
         ge=1,
+        le=10,
         description="Optimizer passes over each batch of collected rollouts.",
     )
     use_separate_reference_adapter: bool = Field(

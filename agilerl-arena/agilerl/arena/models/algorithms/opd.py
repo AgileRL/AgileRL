@@ -5,13 +5,16 @@
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 from pydantic import Field, model_validator
 from typing_extensions import Self
 
-from agilerl.arena.models.algorithms.base import LLMAlgorithmSpec
+from agilerl.arena.models.algorithms.base import LLM_HPO_RANGES, LLMAlgorithmSpec
 from agilerl.arena.models.algorithms.grpo import GRPOSpec
-from agilerl.arena.models.descriptions import BETA, GROUP_SIZE, TEMPERATURE, TOP_K
+from agilerl.arena.models.descriptions import BETA, GROUP_SIZE, TOP_K
 from agilerl.arena.models.distillation import DistillationTeacherConfig
+from agilerl.arena.models.hpo import RLHyperparameter
 from agilerl.arena.models.registry import register
 
 
@@ -34,9 +37,25 @@ class OPDSpec(GRPOSpec):
         + " With no task reward the teacher term is the whole update, and a "
         "group of 1 spends the same samples on more prompts.",
     )
-    temperature: float = Field(default=1.0, description=TEMPERATURE)
+    temperature: float = Field(
+        default=1.0,
+        ge=1.0,
+        le=1.0,
+        description=(
+            "Sampling temperature. The teacher scores the unmodified policy, "
+            "so this stays 1."
+        ),
+    )
     top_k: int = Field(default=0, ge=0, description=TOP_K)
     beta: float = Field(default=0.0, ge=0.0, le=1.0, description=BETA)
+
+    # The only legal temperature is 1.
+    hpo_ranges: ClassVar[dict[str, RLHyperparameter]] = {
+        **LLM_HPO_RANGES,
+        "temperature": RLHyperparameter(
+            min=1, max=1, grow_factor=1.2, shrink_factor=0.8
+        ),
+    }
 
     @model_validator(mode="after")
     def _teacher_scores_the_unmodified_policy(self) -> Self:
@@ -44,7 +63,6 @@ class OPDSpec(GRPOSpec):
         problems = [
             f"{name}={value}"
             for name, value, plain in (
-                ("temperature", self.temperature, 1.0),
                 ("top_k", self.top_k, 0),
                 ("top_p", self.top_p, 1.0),
                 ("min_p", self.min_p, 0.0),

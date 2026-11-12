@@ -283,6 +283,20 @@ class TestVLLMConfigLimitMmPerPrompt:
             VLLMConfig(limit_mm_per_prompt={"image": -1})
 
 
+class TestVLLMConfigSamplingPenalties:
+    def test_negative_penalties_down_to_minus_two_are_kept(self) -> None:
+        config = VLLMConfig(presence_penalty=-2.0, frequency_penalty=-2.0)
+
+        assert config.presence_penalty == -2.0
+        assert config.frequency_penalty == -2.0
+
+    def test_rejects_a_penalty_outside_minus_two_to_two(self) -> None:
+        with pytest.raises(ValidationError, match="greater than or equal to -2"):
+            VLLMConfig(presence_penalty=-2.1)
+        with pytest.raises(ValidationError, match="less than or equal to 2"):
+            VLLMConfig(frequency_penalty=2.1)
+
+
 class TestLLMEnvType:
     def test_str(self) -> None:
         assert str(LLMEnvType.ROLLOUT) == "rollout"

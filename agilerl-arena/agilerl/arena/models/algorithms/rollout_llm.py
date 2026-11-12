@@ -105,14 +105,16 @@ def records_sampling_supports(
 class RolloutLLMSpec(LLMAlgorithmSpec):
     """Shared surface for the LLM algorithms that generate their own rollouts."""
 
-    temperature: float = Field(default=0.9, description=TEMPERATURE)
+    temperature: float = Field(default=0.9, gt=0.0, le=2.0, description=TEMPERATURE)
     repetition_penalty: float = Field(
-        default=1.0, ge=0.0, description=REPETITION_PENALTY
+        default=1.0, gt=0.0, description=REPETITION_PENALTY
     )
-    top_p: float = Field(default=1.0, ge=0.0, le=1.0, description=TOP_P)
+    top_p: float = Field(default=1.0, gt=0.0, le=1.0, description=TOP_P)
     top_k: int = Field(default=50, ge=0, description=TOP_K)
     min_p: float = Field(default=0.0, ge=0.0, le=1.0, description=MIN_P)
-    max_output_tokens: int | None = Field(default=None, description=MAX_OUTPUT_TOKENS)
+    max_output_tokens: int | None = Field(
+        default=None, ge=1, description=MAX_OUTPUT_TOKENS
+    )
     max_row_tokens: int | None = Field(default=None, ge=1, description=MAX_ROW_TOKENS)
     beta: float = Field(default=0.001, ge=0.0, le=1.0, description=BETA)
     reference_update_interval: int | None = Field(
@@ -132,7 +134,7 @@ class RolloutLLMSpec(LLMAlgorithmSpec):
         default=None, description=COSINE_LR
     )
     vllm_config: VLLMConfig | None = Field(default=None, description=VLLM_CONFIG)
-    vllm_importance_sampling_cap: float = Field(default=2.0, ge=0.0, description=IS_CAP)
+    vllm_importance_sampling_cap: float = Field(default=2.0, gt=0.0, description=IS_CAP)
     vllm_max_logprob_gap: float = Field(
         default=0.1, ge=0.0, description=VLLM_MAX_LOGPROB_GAP
     )
@@ -185,3 +187,17 @@ class RolloutLLMSpec(LLMAlgorithmSpec):
 
     def _max_output_tokens(self) -> int | None:
         return self.max_output_tokens
+
+    def check_output_fits_context(self) -> None:
+        """Reject a completion cap that leaves no prompt room in the context window.
+
+        :raises ValueError: If ``max_output_tokens`` is at least ``max_model_len``.
+        """
+        cap = self.max_output_tokens
+        if cap is None or cap < self.max_model_len:
+            return
+        msg = (
+            f"max_output_tokens ({cap}) must be less than the model's context "
+            f"length ({self.max_model_len})"
+        )
+        raise ValueError(msg)

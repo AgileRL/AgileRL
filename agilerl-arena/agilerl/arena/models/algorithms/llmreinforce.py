@@ -27,15 +27,15 @@ from agilerl.arena.models.registry import register
 class LLMREINFORCESpec(RolloutLLMSpec):
     """REINFORCE with return batch normalization."""
 
-    temperature: float = Field(default=1.0, description=TEMPERATURE)
-    top_p: float = Field(default=1.0, ge=0.0, le=1.0, description=TOP_P)
+    temperature: float = Field(default=1.0, gt=0.0, le=2.0, description=TEMPERATURE)
+    top_p: float = Field(default=1.0, gt=0.0, le=1.0, description=TOP_P)
     beta: float = Field(default=0.001, ge=0.0, le=1.0, description=BETA)
     max_grad_norm: float = Field(
         default=1.0,
         ge=0.0,
         description="Gradients are clipped to this global norm before each step.",
     )
-    lr: float = Field(default=5e-7, ge=0.0, description=LR)
+    lr: float = Field(default=5e-7, gt=0.0, le=1.0, description=LR)
     clip_coef: float = Field(default=0.2, ge=0.0, le=1.0, description=CLIP_COEF)
     gamma: float = Field(
         default=1.0,

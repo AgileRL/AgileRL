@@ -23,9 +23,11 @@ class RainbowDQNSpec(SingleAgentAlgorithmSpec):
 
     schema_name: ClassVar[str | None] = "Rainbow DQN"
 
-    tau: float = Field(default=0.001, description=TAU)
+    tau: float = Field(default=0.001, gt=0.0, le=1.0, description=TAU)
     beta: float = Field(
         default=0.4,
+        ge=0.0,
+        le=1.0,
         description=(
             "Importance-sampling exponent correcting the bias prioritized "
             "replay introduces. 1.0 corrects it fully."
@@ -33,6 +35,8 @@ class RainbowDQNSpec(SingleAgentAlgorithmSpec):
     )
     prior_eps: float = Field(
         default=1e-6,
+        gt=0.0,
+        le=1.0,
         description=(
             "Floor added to each priority so a transition with zero TD error is "
             "still sampled occasionally."
@@ -56,6 +60,8 @@ class RainbowDQNSpec(SingleAgentAlgorithmSpec):
     )
     noise_std: float = Field(
         default=0.5,
+        ge=0.0,
+        le=1.0,
         description=(
             "Initial standard deviation of the NoisyNet parameters that drive "
             "exploration in place of epsilon-greedy."
@@ -70,7 +76,7 @@ class RainbowDQNSpec(SingleAgentAlgorithmSpec):
         default=False,
         description="Learn from both the one-step and the n-step return.",
     )
-    lr: float = Field(default=0.0001, ge=0.0, description=LR)
+    lr: float = Field(default=0.0001, gt=0.0, le=1.0, description=LR)
     net_config: RainbowQNetworkSpec | None = Field(default=None, description=NET_CONFIG)
 
     off_policy: ClassVar[bool] = True

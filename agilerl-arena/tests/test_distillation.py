@@ -152,7 +152,7 @@ class TestOPDSpec:
     @pytest.mark.parametrize(
         ("setting", "reported"),
         [
-            ({"temperature": 0.9}, "temperature=0.9"),
+            ({"temperature": 0.9}, "greater than or equal to 1"),
             ({"top_k": 50}, "top_k=50"),
             ({"top_p": 0.95, "top_k": 20}, "top_p=0.95"),
             ({"repetition_penalty": 1.1}, "repetition_penalty=1.1"),

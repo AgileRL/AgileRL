@@ -19,9 +19,9 @@ from agilerl.arena.models.registry import register
 class DQNSpec(SingleAgentAlgorithmSpec):
     """Deep Q-Network."""
 
-    tau: float = Field(default=0.001, description=TAU)
+    tau: float = Field(default=0.001, gt=0.0, le=1.0, description=TAU)
     double: bool = Field(default=True, description=DOUBLE)
-    lr: float = Field(default=0.0001, ge=0.0, description=LR)
+    lr: float = Field(default=0.0001, gt=0.0, le=1.0, description=LR)
     cudagraphs: bool = Field(
         default=False,
         description=(

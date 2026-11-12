@@ -10,10 +10,11 @@ import json
 import re
 import subprocess
 import sys
+from typing import ClassVar
 
 import pytest
 from jsonschema import Draft202012Validator
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from agilerl.arena.models import (
     MANIFEST_REGISTRY,
@@ -28,6 +29,7 @@ from agilerl.arena.models import (
     RainbowDQNSpec,
     ReplayBufferSpec,
     SFTSpec,
+    SingleAgentAlgorithmSpec,
     TrainingManifest,
     TrainingSpec,
     __version__,
@@ -35,18 +37,30 @@ from agilerl.arena.models import (
 )
 from agilerl.arena.models.algorithms import (
     CISPOSpec,
+    DDPGSpec,
+    DQNSpec,
     GSPOSpec,
+    IPPOSpec,
     LLMPPOSpec,
     LLMREINFORCESpec,
+    MADDPGSpec,
+    MATD3Spec,
+    NeuralUCBSpec,
     RolloutLLMSpec,
+    TD3Spec,
 )
 from agilerl.arena.models.algorithms.rollout_llm import records_sampling_supports
 from agilerl.arena.models.env import LLMEnvType
+from agilerl.arena.models.hpo import (
+    RLHyperparameter,
+    require_mutation_range_inside_field,
+)
 from agilerl.arena.models.manifest import strips_multimodal_towers
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.networks import LoraConfigDict
 from agilerl.arena.models.schema import (
     LORA_CONFIG_REF,
+    _add_hpo_ranges,
     _inline_lora_config_inplace,
     algorithm_name_if,
     algorithm_schema,
@@ -505,9 +519,9 @@ class TestNothingIsStrippedInTransit:
 
     def test_max_output_tokens_survives(self) -> None:
         payload = TrainingManifest.model_validate(
-            manifest(GRPO, algorithm={"max_output_tokens": 4096})
+            manifest(GRPO, algorithm={"max_output_tokens": 64})
         ).to_payload()
-        assert payload["algorithm"]["max_output_tokens"] == 4096
+        assert payload["algorithm"]["max_output_tokens"] == 64
 
     def test_reward_fn_name_survives(self) -> None:
         payload = TrainingManifest.model_validate(
@@ -771,7 +785,6 @@ class TestRolloutLLMSpecSamplingSupport:
                 {"top_k": 0, "constrain_answer_pattern": r"\\boxed\{\d+\}"},
                 "constrain_answer_pattern",
             ),
-            ({"top_k": 20, "temperature": 0.0, "top_p": 0.9}, "top_p"),
         ],
     )
     def test_a_narrowed_distribution_without_a_reported_support_is_rejected(
@@ -869,28 +882,158 @@ class TestTrainingManifestMutatedSamplingSupport:
         ):
             TrainingManifest.model_validate(doc)
 
-    def test_temperature_mutation_to_zero_with_top_k_is_rejected(self) -> None:
+    @pytest.mark.parametrize("top_k", [0, 20])
+    def test_temperature_mutation_on_the_open_floor_is_rejected(
+        self, top_k: int
+    ) -> None:
         doc = manifest(
             GRPO,
-            algorithm={"top_k": 20},
+            algorithm={"top_k": top_k},
             mutation={"rl_hp_selection": {"temperature": {"min": 0.0, "max": 1.2}}},
         )
 
-        with pytest.raises(
-            ValidationError, match=r"temperature min 0\.0 must be > 0 with top_k=20"
-        ):
+        with pytest.raises(ValidationError, match=r"min 0.0 must be > 0.0"):
             TrainingManifest.model_validate(doc)
 
-    def test_temperature_mutation_to_zero_without_top_k_validates(self) -> None:
+    def test_temperature_mutation_above_the_field_ceiling_is_rejected(self) -> None:
         doc = manifest(
             GRPO,
-            algorithm={"top_k": 0},
-            mutation={"rl_hp_selection": {"temperature": {"min": 0.0, "max": 1.2}}},
+            mutation={"rl_hp_selection": {"temperature": {"min": 0.2, "max": 3.0}}},
+        )
+
+        with pytest.raises(ValidationError, match=r"max 3.0 is above 2.0"):
+            TrainingManifest.model_validate(doc)
+
+
+class TestMutationRangeInsideField:
+    def test_schema_generation_names_a_default_window_outside_the_field(self) -> None:
+        class BrokenWindowSpec(SingleAgentAlgorithmSpec):
+            hpo_ranges: ClassVar[dict[str, RLHyperparameter]] = {
+                "gamma": RLHyperparameter(min=0.9, max=1.5),
+            }
+
+        with pytest.raises(
+            ValueError, match=r"BrokenWindowSpec\.gamma:.*max 1.5 is above 1.0"
+        ):
+            _add_hpo_ranges({}, BrokenWindowSpec)
+
+    def test_a_window_inside_the_field_is_accepted(self) -> None:
+        bounds = RLHyperparameter(min=0.2, max=1.0)
+
+        require_mutation_range_inside_field(
+            bounds, GRPOSpec.model_fields["temperature"]
+        )
+
+    def test_a_manifest_keeps_a_window_inside_the_field(self) -> None:
+        doc = manifest(
+            DQN, mutation={"rl_hp_selection": {"lr": {"min": 1e-4, "max": 0.01}}}
         )
 
         validated = TrainingManifest.model_validate(doc)
 
-        assert validated.mutation.rl_hp_selection["temperature"].min == 0.0
+        lr = validated.mutation.rl_hp_selection["lr"]
+        assert lr.min == 1e-4
+        assert lr.max == 0.01
+
+    def test_an_open_floor_and_a_ceiling_are_both_rejected(self) -> None:
+        with pytest.raises(ValueError, match=r"min 0.0 must be > 0.0"):
+            require_mutation_range_inside_field(
+                RLHyperparameter(min=0.0, max=0.5), DQNSpec.model_fields["lr"]
+            )
+
+        with pytest.raises(ValueError, match=r"max 5.0 is above 1.0"):
+            require_mutation_range_inside_field(
+                RLHyperparameter(min=1e-4, max=5.0), DQNSpec.model_fields["lr"]
+            )
+
+    def test_an_inclusive_window_below_or_above_the_field_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match=r"min -1.0 is below 0.0"):
+            require_mutation_range_inside_field(
+                RLHyperparameter(min=-1.0, max=1.0),
+                DDPGSpec.model_fields["expl_noise"],
+            )
+
+        with pytest.raises(ValueError, match=r"max 9.0 is above 5.0"):
+            require_mutation_range_inside_field(
+                RLHyperparameter(min=0.0, max=9.0),
+                DDPGSpec.model_fields["expl_noise"],
+            )
+
+    def test_an_open_integer_window_on_either_end_is_rejected(self) -> None:
+        class Sample(BaseModel):
+            value: int = Field(gt=0, lt=10)
+
+        field = Sample.model_fields["value"]
+
+        require_mutation_range_inside_field(RLHyperparameter(min=1, max=9), field)
+        with pytest.raises(ValueError, match=r"min 0.0 must be > 0"):
+            require_mutation_range_inside_field(RLHyperparameter(min=0, max=9), field)
+        with pytest.raises(ValueError, match=r"max 10.0 must be < 10"):
+            require_mutation_range_inside_field(RLHyperparameter(min=1, max=10), field)
+
+    def test_an_optional_float_rejects_either_open_end(self) -> None:
+        class Sample(BaseModel):
+            value: float | None = Field(default=None, gt=0.0, lt=1.0)
+
+        field = Sample.model_fields["value"]
+
+        with pytest.raises(ValueError, match=r"min 0.0 must be > 0.0"):
+            require_mutation_range_inside_field(
+                RLHyperparameter(min=0.0, max=0.5), field
+            )
+        with pytest.raises(ValueError, match=r"max 1.0 must be < 1.0"):
+            require_mutation_range_inside_field(
+                RLHyperparameter(min=0.5, max=1.0), field
+            )
+
+    def test_an_optional_int_rejects_a_min_below_the_floor(self) -> None:
+        class Sample(BaseModel):
+            value: int | None = Field(default=None, ge=1)
+
+        with pytest.raises(ValueError, match=r"min 0.0 is below 1"):
+            require_mutation_range_inside_field(
+                RLHyperparameter(min=0, max=8), Sample.model_fields["value"]
+            )
+
+    def test_a_window_that_misses_the_field_names_the_limits(self) -> None:
+        with pytest.raises(
+            ValueError,
+            match=r"range \[2.0, 3.0\] leaves the field limits \(> 0.0 and <= 1.0\)",
+        ):
+            require_mutation_range_inside_field(
+                RLHyperparameter(min=2, max=3), DQNSpec.model_fields["lr"]
+            )
+
+    def test_a_manifest_rejects_a_learning_rate_above_the_field(self) -> None:
+        doc = manifest(
+            DQN, mutation={"rl_hp_selection": {"lr": {"min": 1e-4, "max": 5}}}
+        )
+
+        with pytest.raises(ValidationError, match=r"max 5.0 is above 1.0"):
+            TrainingManifest.model_validate(doc)
+
+    def test_a_manifest_rejects_a_window_that_misses_the_field(self) -> None:
+        doc = manifest(DQN, mutation={"rl_hp_selection": {"lr": {"min": 2, "max": 3}}})
+
+        with pytest.raises(ValidationError, match="leaves the field limits"):
+            TrainingManifest.model_validate(doc)
+
+    def test_an_aliased_learning_rate_uses_the_actor_field_limit(self) -> None:
+        doc = copy.deepcopy(GRPO)
+        doc["algorithm"] = {"name": "LLMPPO"}
+        doc["mutation"] = {"rl_hp_selection": {"lr": {"min": 1e-8, "max": 5}}}
+
+        with pytest.raises(ValidationError, match=r"max 5.0 is above 1.0"):
+            TrainingManifest.model_validate(doc)
+
+    def test_an_output_token_window_below_one_is_rejected(self) -> None:
+        doc = manifest(
+            GRPO,
+            mutation={"rl_hp_selection": {"max_output_tokens": {"min": 0, "max": 64}}},
+        )
+
+        with pytest.raises(ValidationError, match=r"min 0.0 is below 1"):
+            TrainingManifest.model_validate(doc)
 
 
 def env_rollout(
@@ -1884,6 +2027,40 @@ class TestSchema:
         assert llmreinforce["max_grad_norm"] == max_grad_norm_bounds
         assert llmreinforce["gamma"] == gamma_bounds
 
+    def test_opd_temperature_window_is_the_only_legal_value(self) -> None:
+        temperature = _algorithm_variant("OPD")["x-hpo-ranges"]["temperature"]
+
+        assert temperature["min"] == 1.0
+        assert temperature["max"] == 1.0
+
+    def test_default_mutation_windows_lie_inside_field_limits(self) -> None:
+        offenders: list[str] = []
+        for spec_cls in MANIFEST_REGISTRY.names_by_class():
+            for name, bounds in spec_cls.hpo_ranges.items():
+                field = spec_cls.model_fields.get(name)
+                if field is None:
+                    continue
+                try:
+                    require_mutation_range_inside_field(bounds, field)
+                except ValueError as exc:
+                    offenders.append(f"{spec_cls.__name__}.{name}: {exc}")
+
+        assert offenders == []
+
+    def test_published_hpo_ranges_lie_inside_field_limits(self) -> None:
+        variants = manifest_schema()["properties"]["algorithm"]["oneOf"]
+        for variant in variants:
+            for name, bounds in variant.get("x-hpo-ranges", {}).items():
+                prop = variant["properties"][name]
+                if "minimum" in prop:
+                    assert bounds["min"] >= prop["minimum"]
+                if "exclusiveMinimum" in prop:
+                    assert bounds["min"] > prop["exclusiveMinimum"]
+                if "maximum" in prop:
+                    assert bounds["max"] <= prop["maximum"]
+                if "exclusiveMaximum" in prop:
+                    assert bounds["max"] < prop["exclusiveMaximum"]
+
     def test_hpo_ranges_are_valid_rl_hyperparameters(self) -> None:
         # They are emitted as plain JSON, but rl_hp_selection has to accept them
         # back verbatim — that round trip is the whole point of the shape.
@@ -2456,8 +2633,14 @@ class TestSchema:
         )
         then_props = ou["then"]["properties"]
         assert then_props["theta"]["default"] == 0.15
+        assert then_props["theta"]["minimum"] == 0.0
+        assert then_props["theta"]["maximum"] == 10.0
         assert then_props["dt"]["default"] == 0.01
+        assert then_props["dt"]["exclusiveMinimum"] == 0.0
+        assert then_props["dt"]["maximum"] == 1.0
         assert then_props["mean_noise"]["default"] == 0.0
+        assert then_props["mean_noise"]["minimum"] == -5.0
+        assert then_props["mean_noise"]["maximum"] == 5.0
 
         ppo = next(v for v in variants if v["title"] == "PPO")
         assert not any(
@@ -2907,3 +3090,413 @@ class TestLoraDropoutResolution:
         validated = TrainingManifest.model_validate(doc)
 
         assert validated.algorithm.lora_config.lora_dropout == 0.1
+
+
+def _algorithm_variant(title: str) -> dict:
+    return next(
+        variant
+        for variant in manifest_schema()["properties"]["algorithm"]["oneOf"]
+        if variant["title"] == title
+    )
+
+
+def _schema_types(prop: dict) -> set[str]:
+    raw = prop.get("type")
+    found = set(raw if isinstance(raw, list) else [raw] if raw else [])
+    for branch in prop.get("anyOf", []):
+        branch_type = branch.get("type")
+        if isinstance(branch_type, str):
+            found.add(branch_type)
+    return found
+
+
+def _schema_keys(prop: dict) -> set[str]:
+    keys = set(prop)
+    for branch in prop.get("anyOf", []):
+        keys.update(branch)
+    return keys
+
+
+# Lengths and counts scale with the job. Return support and the seed have no
+# fixed range. The trainer settings listed here have no ceiling the code
+# enforces, so a static maximum would reject a saved run.
+NO_STATIC_MAXIMUM = frozenset(
+    {
+        "action_batch_size",
+        "adv_clip_range",
+        "adv_filter_eps",
+        "batch_size",
+        "critic_warmup_steps",
+        "group_size",
+        "kl_clamp",
+        "learn_step",
+        "max_grad_norm",
+        "max_model_len",
+        "max_output_tokens",
+        "max_row_tokens",
+        "max_seq_len",
+        "micro_batch_size_per_gpu",
+        "micro_batch_tokens_per_gpu",
+        "min_output_tokens",
+        "mini_batch_size",
+        "n_step",
+        "nll_alpha",
+        "num_atoms",
+        "num_envs",
+        "reference_update_interval",
+        "repetition_penalty",
+        "routed_expert_chunk_mib",
+        "seed",
+        "thinking_token_budget",
+        "top_k",
+        "v_max",
+        "v_min",
+        "vect_noise_dim",
+        "vllm_importance_sampling_cap",
+        "vllm_max_logprob_gap",
+    }
+)
+NO_STATIC_MINIMUM = frozenset({"seed", "v_max", "v_min"})
+
+
+class TestAlgorithmHpSchemaBounds:
+    @pytest.mark.parametrize(
+        ("title", "field", "bounds"),
+        [
+            (
+                "DQN",
+                "tau",
+                {"exclusiveMinimum": 0.0, "maximum": 1.0, "default": 0.001},
+            ),
+            (
+                "RainbowDQN",
+                "tau",
+                {"exclusiveMinimum": 0.0, "maximum": 1.0, "default": 0.001},
+            ),
+            (
+                "RainbowDQN",
+                "beta",
+                {"minimum": 0.0, "maximum": 1.0, "default": 0.4},
+            ),
+            (
+                "RainbowDQN",
+                "noise_std",
+                {"minimum": 0.0, "maximum": 1.0, "default": 0.5},
+            ),
+            ("RainbowDQN", "n_step", {"minimum": 1, "default": 3}),
+            (
+                "TD3",
+                "tau",
+                {"exclusiveMinimum": 0.0, "maximum": 1.0, "default": 0.005},
+            ),
+            ("DDPG", "expl_noise", {"minimum": 0.0, "maximum": 5.0, "default": 0.1}),
+            ("MADDPG", "expl_noise", {"minimum": 0.0, "maximum": 5.0, "default": 0.1}),
+            ("MATD3", "expl_noise", {"minimum": 0.0, "maximum": 5.0, "default": 0.1}),
+            ("TD3", "expl_noise", {"minimum": 0.0, "maximum": 5.0, "default": 0.1}),
+            ("DDPG", "theta", {"minimum": 0.0, "maximum": 10.0, "default": 0.15}),
+            (
+                "IPPO",
+                "action_std_init",
+                {"minimum": 0.0, "maximum": 10.0, "default": 0.6},
+            ),
+            (
+                "IPPO",
+                "max_grad_norm",
+                {"minimum": 0.0, "default": 0.5},
+            ),
+            (
+                "IPPO",
+                "target_kl",
+                {"minimum": 0.0, "maximum": 10.0, "default": None},
+            ),
+            ("IPPO", "action_batch_size", {"minimum": 1, "default": None}),
+            ("MADDPG", "theta", {"minimum": 0.0, "maximum": 10.0, "default": 0.15}),
+            ("MATD3", "theta", {"minimum": 0.0, "maximum": 10.0, "default": 0.15}),
+            ("TD3", "theta", {"minimum": 0.0, "maximum": 10.0, "default": 0.15}),
+            (
+                "GRPO",
+                "temperature",
+                {"exclusiveMinimum": 0.0, "maximum": 2.0, "default": 0.9},
+            ),
+            (
+                "GSPO",
+                "temperature",
+                {"exclusiveMinimum": 0.0, "maximum": 2.0, "default": 0.9},
+            ),
+            (
+                "CISPO",
+                "temperature",
+                {"exclusiveMinimum": 0.0, "maximum": 2.0, "default": 0.9},
+            ),
+            (
+                "LLMPPO",
+                "temperature",
+                {"exclusiveMinimum": 0.0, "maximum": 2.0, "default": 1.0},
+            ),
+            (
+                "LLMREINFORCE",
+                "temperature",
+                {"exclusiveMinimum": 0.0, "maximum": 2.0, "default": 1.0},
+            ),
+            (
+                "GRPO",
+                "top_p",
+                {"exclusiveMinimum": 0.0, "maximum": 1.0, "default": 1.0},
+            ),
+            ("GRPO", "top_k", {"minimum": 0, "default": 50}),
+            ("GRPO", "min_p", {"minimum": 0.0, "maximum": 1.0, "default": 0.0}),
+            ("GRPO", "group_size", {"minimum": 1, "default": 8}),
+            (
+                "GRPO",
+                "kl_clamp",
+                {"exclusiveMinimum": 0.0, "default": 10.0},
+            ),
+            (
+                "LLMPPO",
+                "kl_clamp",
+                {"exclusiveMinimum": 0.0, "default": 10.0},
+            ),
+            ("LLMPPO", "critic_warmup_steps", {"minimum": 0, "default": 0}),
+            (
+                "LLMREINFORCE",
+                "top_p",
+                {"exclusiveMinimum": 0.0, "maximum": 1.0, "default": 1.0},
+            ),
+            (
+                "LLMPPO",
+                "top_p",
+                {"exclusiveMinimum": 0.0, "maximum": 1.0, "default": 1.0},
+            ),
+            ("GRPO", "update_epochs", {"minimum": 1, "maximum": 10, "default": 1}),
+            (
+                "GRPO",
+                "repetition_penalty",
+                {"exclusiveMinimum": 0.0, "default": 1.0},
+            ),
+            ("DPO", "nll_alpha", {"minimum": 0.0, "default": 1.0}),
+            ("LLMREINFORCE", "top_k", {"minimum": 0, "default": 50}),
+            ("DPO", "reference_update_interval", {"minimum": 1, "default": None}),
+        ],
+    )
+    def test_served_schema_states_the_bound(
+        self, title: str, field: str, bounds: dict
+    ) -> None:
+        prop = _algorithm_variant(title)["properties"][field]
+        keys = _schema_keys(prop)
+
+        for key, value in bounds.items():
+            assert prop[key] == value
+        if "maximum" not in bounds and "exclusiveMaximum" not in bounds:
+            assert "maximum" not in keys
+            assert "exclusiveMaximum" not in keys
+        if "exclusiveMinimum" in bounds:
+            assert "minimum" not in keys
+
+    def test_prior_eps_must_be_above_zero(self) -> None:
+        prop = _algorithm_variant("RainbowDQN")["properties"]["prior_eps"]
+
+        assert prop["exclusiveMinimum"] == 0.0
+        assert prop["maximum"] == 1.0
+        assert prop["default"] == 1e-6
+        assert "minimum" not in prop
+
+    @pytest.mark.parametrize("title", ["DDPG", "MADDPG", "MATD3", "TD3"])
+    def test_ou_timestep_must_be_above_zero(self, title: str) -> None:
+        prop = _algorithm_variant(title)["properties"]["dt"]
+
+        assert prop["exclusiveMinimum"] == 0.0
+        assert prop["maximum"] == 1.0
+        assert prop["default"] == 0.01
+        assert "minimum" not in prop
+
+    @pytest.mark.parametrize(
+        "title", ["GRPO", "GSPO", "CISPO", "LLMPPO", "LLMREINFORCE"]
+    )
+    def test_max_output_tokens_min_is_one_and_has_no_static_max(
+        self, title: str
+    ) -> None:
+        prop = _algorithm_variant(title)["properties"]["max_output_tokens"]
+
+        assert prop["minimum"] == 1
+        assert prop["default"] is None
+        assert prop["type"] == ["integer", "null"]
+        assert "maximum" not in prop
+        assert "exclusiveMaximum" not in prop
+
+    @pytest.mark.parametrize(
+        "title",
+        ["GRPO", "GSPO", "CISPO", "LLMPPO", "LLMREINFORCE", "DPO", "SFT"],
+    )
+    def test_constrain_answer_pattern_stays_with_default_none(self, title: str) -> None:
+        prop = _algorithm_variant(title)["properties"]["constrain_answer_pattern"]
+
+        assert prop["default"] is None
+        assert prop["type"] == ["string", "null"]
+
+    @pytest.mark.parametrize(
+        "title", ["GRPO", "GSPO", "CISPO", "LLMPPO", "LLMREINFORCE"]
+    )
+    def test_mini_batch_size_stays_with_default_none(self, title: str) -> None:
+        prop = _algorithm_variant(title)["properties"]["mini_batch_size"]
+
+        assert prop["default"] is None
+        assert prop["minimum"] == 1
+        assert prop["type"] == ["integer", "null"]
+
+    @pytest.mark.parametrize(
+        "title", ["GRPO", "GSPO", "CISPO", "LLMPPO", "LLMREINFORCE"]
+    )
+    def test_sampling_fields_are_on_the_schema(self, title: str) -> None:
+        props = _algorithm_variant(title)["properties"]
+
+        assert props["top_p"]["default"] == 1.0
+        assert props["top_k"]["default"] == 50
+        assert props["min_p"]["default"] == 0.0
+        assert props["min_output_tokens"]["default"] is None
+        assert props["reference_update_interval"]["default"] is None
+        assert props["reference_update_interval"]["minimum"] == 1
+
+    def test_llmppo_schema_has_no_group_size(self) -> None:
+        assert "group_size" not in _algorithm_variant("LLMPPO")["properties"]
+
+    def test_grpo_schema_includes_group_size(self) -> None:
+        assert _algorithm_variant("GRPO")["properties"]["group_size"]["default"] == 8
+
+    def test_numeric_hparams_are_bounded_on_both_sides(self) -> None:
+        missing: list[str] = []
+        for variant in manifest_schema()["properties"]["algorithm"]["oneOf"]:
+            for name, prop in variant["properties"].items():
+                if not _schema_types(prop) & {"number", "integer"}:
+                    continue
+                keys = _schema_keys(prop)
+                if name not in NO_STATIC_MINIMUM and not (
+                    {"minimum", "exclusiveMinimum"} & keys
+                ):
+                    missing.append(f"{variant['title']}.{name} has no minimum")
+                if name not in NO_STATIC_MAXIMUM and not (
+                    {"maximum", "exclusiveMaximum"} & keys
+                ):
+                    missing.append(f"{variant['title']}.{name} has no maximum")
+
+        assert missing == []
+
+    @pytest.mark.parametrize(
+        ("spec_cls", "kwargs"),
+        [
+            (DQNSpec, {"tau": 0.0}),
+            (DQNSpec, {"tau": -0.01}),
+            (DQNSpec, {"tau": 1.01}),
+            (DQNSpec, {"lr": 0.0}),
+            (DQNSpec, {"lr": 1.1}),
+            (RainbowDQNSpec, {"beta": 1.5}),
+            (RainbowDQNSpec, {"prior_eps": 0.0}),
+            (RainbowDQNSpec, {"noise_std": -0.1}),
+            (DDPGSpec, {"tau": 0.0}),
+            (DDPGSpec, {"expl_noise": -0.1}),
+            (DDPGSpec, {"expl_noise": 5.1}),
+            (DDPGSpec, {"theta": -0.1}),
+            (DDPGSpec, {"theta": 10.1}),
+            (DDPGSpec, {"mean_noise": 5.1}),
+            (DDPGSpec, {"dt": 0.0}),
+            (DDPGSpec, {"dt": 1.1}),
+            (TD3Spec, {"tau": 0.0}),
+            (TD3Spec, {"tau": 1.1}),
+            (TD3Spec, {"policy_freq": 1001}),
+            (MADDPGSpec, {"dt": 0.0}),
+            (MATD3Spec, {"expl_noise": -1.0}),
+            (IPPOSpec, {"action_std_init": -0.1}),
+            (IPPOSpec, {"action_std_init": 10.1}),
+            (IPPOSpec, {"max_grad_norm": -0.1}),
+            (IPPOSpec, {"target_kl": -0.01}),
+            (IPPOSpec, {"target_kl": 10.1}),
+            (IPPOSpec, {"update_epochs": 101}),
+            (IPPOSpec, {"action_batch_size": 0}),
+            (GRPOSpec, {"temperature": 0.0}),
+            (GRPOSpec, {"temperature": -0.1}),
+            (GRPOSpec, {"temperature": 2.1}),
+            (GRPOSpec, {"top_p": 0.0}),
+            (GRPOSpec, {"lr": 0.0}),
+            (GRPOSpec, {"kl_clamp": 0.0}),
+            (GRPOSpec, {"repetition_penalty": 0.0}),
+            (GRPOSpec, {"vllm_importance_sampling_cap": 0.0}),
+            (GRPOSpec, {"update_epochs": 11}),
+            (GRPOSpec, {"max_output_tokens": 0}),
+            (NeuralUCBSpec, {"gamma": 0.0}),
+            (NeuralUCBSpec, {"lamb": 0.0}),
+            (NeuralUCBSpec, {"reg": 0.0}),
+            (NeuralUCBSpec, {"lr": 0.0}),
+            (LLMPPOSpec, {"temperature": 0.0}),
+            (LLMPPOSpec, {"temperature": 3.0}),
+            (LLMREINFORCESpec, {"temperature": 0.0}),
+            (LLMREINFORCESpec, {"temperature": -1.0}),
+            (DDPGSpec, {"theta": 10.0, "dt": 1.0}),
+            (TD3Spec, {"theta": 4.0, "dt": 0.5}),
+            (MADDPGSpec, {"theta": 10.0, "dt": 1.0}),
+            (MATD3Spec, {"theta": 10.0, "dt": 1.0}),
+        ],
+    )
+    def test_out_of_range_hyperparameters_are_rejected(
+        self, spec_cls: type, kwargs: dict
+    ) -> None:
+        with pytest.raises(ValidationError):
+            spec_cls(**kwargs)
+
+    def test_values_above_the_old_ui_caps_are_kept(self) -> None:
+        grpo = GRPOSpec(
+            kl_clamp=1000.0,
+            repetition_penalty=10.0,
+            max_grad_norm=1000.0,
+            vllm_importance_sampling_cap=1000.0,
+            vllm_max_logprob_gap=1000.0,
+            update_epochs=10,
+        )
+        ippo = IPPOSpec(max_grad_norm=500.0)
+        dpo = DPOSpec(nll_alpha=50.0)
+
+        assert grpo.kl_clamp == 1000.0
+        assert grpo.repetition_penalty == 10.0
+        assert grpo.max_grad_norm == 1000.0
+        assert grpo.vllm_importance_sampling_cap == 1000.0
+        assert grpo.vllm_max_logprob_gap == 1000.0
+        assert grpo.update_epochs == 10
+        assert ippo.max_grad_norm == 500.0
+        assert dpo.nll_alpha == 50.0
+
+    @pytest.mark.parametrize("spec_cls", [DDPGSpec, TD3Spec, MADDPGSpec, MATD3Spec])
+    def test_ou_step_at_the_stability_boundary_is_kept(self, spec_cls: type) -> None:
+        on = spec_cls(theta=1.0, dt=1.0)
+        off = spec_cls(theta=10.0, dt=1.0, O_U_noise=False)
+
+        assert on.theta * on.dt == 1.0
+        assert off.O_U_noise is False
+
+    def test_sampling_penalties_match_vllm(self) -> None:
+        props = manifest_schema()["$defs"]["VLLMConfig"]["properties"]
+
+        assert props["presence_penalty"]["minimum"] == -2.0
+        assert props["presence_penalty"]["maximum"] == 2.0
+        assert props["frequency_penalty"]["minimum"] == -2.0
+        assert props["frequency_penalty"]["maximum"] == 2.0
+
+    def test_max_output_tokens_below_the_model_context_is_kept(self) -> None:
+        validated = TrainingManifest.model_validate(
+            manifest(
+                GRPO,
+                algorithm={"max_output_tokens": 2048},
+                network={"max_context_length": 4096},
+            )
+        )
+
+        assert validated.algorithm.max_output_tokens == 2048
+        assert validated.algorithm.max_model_len == 4096
+
+    def test_max_output_tokens_at_the_model_context_is_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="context length \\(512\\)"):
+            TrainingManifest.model_validate(
+                manifest(GRPO, algorithm={"max_output_tokens": 512})
+            )
+
+    def test_omitted_max_output_tokens_skips_the_context_check(self) -> None:
+        validated = TrainingManifest.model_validate(GRPO)
+
+        assert validated.algorithm.max_output_tokens is None
