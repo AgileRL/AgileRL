@@ -598,36 +598,6 @@ class TestEnvironment:
             )
             assert validated.environment.version == 3
 
-    def test_sft_can_leave_reasoning_out_of_the_loss(self) -> None:
-        env = LLMEnvSpec.model_validate(
-            {
-                "env_type": "dataset",
-                "objective": "sft",
-                "dataset": "d",
-                "train_on_reasoning": False,
-            }
-        )
-
-        assert env.train_on_reasoning is False
-
-    @pytest.mark.parametrize(
-        "section",
-        [
-            {"env_type": "dataset", "objective": "preference", "dataset": "d"},
-            {
-                "env_type": "rollout",
-                "dataset": "d",
-                "rubric_file_path": "r.py",
-                "prompt_template": {"user_prompt": "{question}"},
-            },
-        ],
-    )
-    def test_skipping_reasoning_outside_sft_is_rejected(self, section: dict) -> None:
-        with pytest.raises(
-            ValidationError, match="needs env_type dataset with objective sft"
-        ):
-            LLMEnvSpec.model_validate({**section, "train_on_reasoning": False})
-
 
 class TestCrossSectionConsistency:
     def test_llm_algorithm_requires_a_pretrained_network(self) -> None:

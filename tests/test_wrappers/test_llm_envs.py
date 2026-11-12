@@ -32,11 +32,9 @@ from agilerl.llm_envs.dataset_env import (
     _cut_kept_turn,
     _feedback_ids,
     _named_tool_results,
-    _reasoning_flags,
     _written_tool_calls,
     chat_messages,
     encode_chat_transcript,
-    encode_sft_training_row,
     sft_eval_sample,
     sft_messages,
     sft_tools,
@@ -1858,61 +1856,33 @@ class TestTemplateReasoningKey:
         assert template_reasoning_key(object()) is None
 
 
-class TestEncodeSftTrainingRow:
-    def test_reasoning_is_trained_by_default(self):
+def encoded_row(tokenizer: Any, messages: list[dict], chat_format: Any = None) -> Any:
+    """Ids and assistant mask of one SFT ``messages`` row."""
+    return encode_chat_transcript(tokenizer, chat_messages(messages), None, chat_format)
+
+
+class TestEncodeChatTranscriptReasoning:
+    def test_reasoning_is_trained(self):
         # Arrange
         tokenizer = reasoning_tokenizer()
 
         # Act
-        ids, mask, loss = encode_sft_training_row(
-            tokenizer, {"messages": REASONED_HELLO}, "response", None, True
-        )
+        ids, mask = encoded_row(tokenizer, REASONED_HELLO)
 
         # Assert
-        assert loss == mask
-        assert trained_text(tokenizer, ids, loss) == [
-            "<think>\ngreet them back\n</think>\n\nHello<|im_end|>"
-        ]
-
-    def test_skipping_reasoning_trains_only_the_rest_of_the_turn(self):
-        # Arrange
-        tokenizer = reasoning_tokenizer()
-
-        # Act
-        ids, mask, loss = encode_sft_training_row(
-            tokenizer, {"messages": REASONED_HELLO}, "response", None, False
-        )
-
-        # Assert: the assistant mask still spans the whole turn.
         assert trained_text(tokenizer, ids, mask) == [
             "<think>\ngreet them back\n</think>\n\nHello<|im_end|>"
         ]
-        trained = "".join(trained_text(tokenizer, ids, loss))
-        assert "greet" not in trained
-        assert trained.startswith("<think>")
-        assert trained.endswith("</think>\n\nHello<|im_end|>")
 
     def test_another_reasoning_key_is_moved_to_the_one_the_template_reads(self):
         # Arrange
         tokenizer = reasoning_tokenizer(THINKING_TEMPLATE)
 
         # Act
-        ids, _, loss = encode_sft_training_row(
-            tokenizer, {"messages": REASONED_HELLO}, "response", None, False
-        )
+        ids, mask = encoded_row(tokenizer, REASONED_HELLO)
 
         # Assert
-        assert "<think>\ngreet them back\n</think>" in tokenizer.decode(ids)
-        assert "greet" not in "".join(trained_text(tokenizer, ids, loss))
-
-    def test_reasoning_the_template_does_not_render_leaves_the_loss_whole(self):
-        tokenizer = reasoning_tokenizer(PREFILL_TEMPLATE)
-
-        _, mask, loss = encode_sft_training_row(
-            tokenizer, {"messages": REASONED_HELLO}, "response", None, False
-        )
-
-        assert loss == mask
+        assert "greet them back" in "".join(trained_text(tokenizer, ids, mask))
 
     def test_two_different_reasoning_keys_are_rejected(self):
         tokenizer = reasoning_tokenizer()
@@ -1922,9 +1892,7 @@ class TestEncodeSftTrainingRow:
         ]
 
         with pytest.raises(ValueError, match="different reasoning"):
-            encode_sft_training_row(
-                tokenizer, {"messages": messages}, "response", None, True
-            )
+            encoded_row(tokenizer, messages)
 
     def test_the_same_reasoning_under_two_keys_is_kept_once(self):
         tokenizer = reasoning_tokenizer()
@@ -1933,161 +1901,9 @@ class TestEncodeSftTrainingRow:
             {**REASONED_HELLO[1], "thinking": "greet them back"},
         ]
 
-        ids, _, _ = encode_sft_training_row(
-            tokenizer, {"messages": messages}, "response", None, True
-        )
+        ids, _ = encoded_row(tokenizer, messages)
 
         assert tokenizer.decode(ids).count("greet them back") == 1
-
-    def test_reasoning_text_inside_a_marker_is_left_out(self):
-        # Arrange: "think" is a substring of the ``<think>`` marker.
-        tokenizer = reasoning_tokenizer()
-        messages = [
-            {"role": "user", "content": "Hi"},
-            {
-                "role": "assistant",
-                "content": "Hello there",
-                "reasoning_content": "think",
-            },
-        ]
-
-        # Act
-        ids, _, loss = encode_sft_training_row(
-            tokenizer, {"messages": messages}, "response", None, False
-        )
-
-        # Assert: the marker stays trained and the reasoning word does not.
-        trained = "".join(trained_text(tokenizer, ids, loss))
-        assert trained.startswith("<think>")
-        assert "\nthink\n" not in trained
-        assert trained.endswith("</think>\n\nHello there<|im_end|>")
-
-    def test_a_header_word_used_as_reasoning_stays_in_the_header(self):
-        template = (
-            "{% for m in messages %}"
-            "{% if m.role == 'user' %}user:{{ m.content }}\n"
-            "{% else %}assistant:<|channel|>analysis<|message|>"
-            "{{ m.reasoning_content }}<|end|>answer:{{ m.content }}"
-            "{% endif %}{% endfor %}"
-            "{% if add_generation_prompt %}assistant:{% endif %}"
-        )
-        tokenizer = reasoning_tokenizer(template)
-        messages = [
-            {"role": "user", "content": "Hi"},
-            {"role": "assistant", "content": "4", "reasoning_content": "analysis"},
-        ]
-
-        ids, _, loss = encode_sft_training_row(
-            tokenizer, {"messages": messages}, "response", None, False
-        )
-
-        trained = "".join(trained_text(tokenizer, ids, loss))
-        assert trained.count("analysis") == 1
-        assert "answer:4" in trained
-
-    def test_structured_reasoning_is_left_out_of_the_loss(self):
-        tokenizer = reasoning_tokenizer()
-        messages = [
-            {"role": "user", "content": "Hi"},
-            {
-                "role": "assistant",
-                "content": "Hello",
-                "reasoning_content": [{"type": "text", "text": "greet them back"}],
-            },
-        ]
-
-        ids, mask, loss = encode_sft_training_row(
-            tokenizer, {"messages": messages}, "response", None, False
-        )
-
-        trained = "".join(trained_text(tokenizer, ids, loss))
-        assert "greet them back" not in trained
-        assert trained.endswith("Hello<|im_end|>")
-        assert loss != mask
-
-    def test_every_interpolation_of_the_reasoning_leaves_the_loss(self):
-        template = REASONING_TEMPLATE.replace(
-            "{% if m.reasoning_content %}<think>\n{{ m.reasoning_content }}\n</think>\n\n{% endif %}",
-            "{% if m.reasoning_content %}{{ m.reasoning_content }}|{{ m.reasoning_content }}{% endif %}",
-        )
-        tokenizer = reasoning_tokenizer(template)
-
-        ids, _, loss = encode_sft_training_row(
-            tokenizer, {"messages": REASONED_HELLO}, "response", None, False
-        )
-
-        trained = "".join(trained_text(tokenizer, ids, loss))
-        assert "greet" not in trained
-        assert "|" in trained
-
-    def test_blank_reasoning_trains_the_whole_turn(self):
-        tokenizer = reasoning_tokenizer()
-        rows = (
-            [
-                {"role": "user", "content": "Hi"},
-                {"role": "assistant", "content": "Hello"},
-            ],
-            [
-                {"role": "user", "content": "Hi"},
-                {"role": "assistant", "content": "Hello", "reasoning_content": "   "},
-            ],
-        )
-
-        for messages in rows:
-            _, mask, loss = encode_sft_training_row(
-                tokenizer, {"messages": messages}, "response", None, False
-            )
-            assert loss == mask
-
-    def test_a_template_that_names_the_key_but_does_not_render_it_trains_the_turn(self):
-        template = REASONING_TEMPLATE.replace(
-            "{% if m.reasoning_content %}<think>\n{{ m.reasoning_content }}\n</think>\n\n{% endif %}",
-            "{% if m.role == 'system' %}{{ m.reasoning_content }}{% endif %}",
-        )
-        tokenizer = reasoning_tokenizer(template)
-
-        _, mask, loss = encode_sft_training_row(
-            tokenizer, {"messages": REASONED_HELLO}, "response", None, False
-        )
-
-        assert loss == mask
-
-    def test_reasoning_the_template_reshapes_per_value_raises(self):
-        template = (
-            "{% for m in messages %}"
-            "{% if m.role == 'user' %}<|im_start|>user\n{{ m.content }}<|im_end|>\n"
-            "{% else %}<|im_start|>assistant\n"
-            "{% if m.reasoning_content == 'greet them back' %}"
-            "NOTE {{ m.reasoning_content }}END"
-            "{% else %}OTHER {{ m.reasoning_content }}TAIL{% endif %}"
-            "{% endif %}{% endfor %}"
-            "{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}"
-        )
-        tokenizer = reasoning_tokenizer(template)
-
-        with pytest.raises(ValueError, match="cannot be left out of the loss"):
-            encode_sft_training_row(
-                tokenizer, {"messages": REASONED_HELLO}, "response", None, False
-            )
-
-    def test_reasoning_is_left_out_when_the_turn_contains_the_probe_character(self):
-        tokenizer = reasoning_tokenizer()
-        messages = [
-            {"role": "user", "content": "Hi"},
-            {
-                "role": "assistant",
-                "content": "Hello\ue000",
-                "reasoning_content": "greet them back",
-            },
-        ]
-
-        ids, _, loss = encode_sft_training_row(
-            tokenizer, {"messages": messages}, "response", None, False
-        )
-
-        trained = "".join(trained_text(tokenizer, ids, loss))
-        assert "greet" not in trained
-        assert trained.endswith("Hello\ue000<|im_end|>")
 
     def test_structured_reasoning_under_two_keys_is_compared_not_hashed(self):
         tokenizer = reasoning_tokenizer()
@@ -2102,9 +1918,7 @@ class TestEncodeSftTrainingRow:
         ]
 
         with pytest.raises(ValueError, match="different reasoning"):
-            encode_sft_training_row(
-                tokenizer, {"messages": messages}, "response", None, True
-            )
+            encoded_row(tokenizer, messages)
 
 
 QWEN_POSITION_TEMPLATE = (
@@ -2163,14 +1977,12 @@ GEMMA_GET_TEMPLATE = (
 
 def _assert_transcript_is_the_template(tokenizer: Any, messages: list[dict]) -> None:
     """The encoded ids are one ``apply_chat_template`` of ``messages``."""
-    ids, _, _ = encode_sft_training_row(
-        tokenizer, {"messages": messages}, "response", None, False
-    )
+    ids, _ = encoded_row(tokenizer, messages)
     rendered = tokenizer.apply_chat_template(messages, tokenize=False)
     assert tokenizer.decode(ids) == rendered.removesuffix("\n")
 
 
-class TestEncodeSftTrainingRowMatchesTheTemplate:
+class TestEncodeChatTranscriptMatchesTheTemplate:
     def test_qwen_closed_think_block_is_not_spliced_onto_the_turn(self):
         tokenizer = reasoning_tokenizer(QWEN_POSITION_TEMPLATE)
         messages = [
@@ -2182,16 +1994,15 @@ class TestEncodeSftTrainingRowMatchesTheTemplate:
             },
         ]
 
-        ids, _, loss = encode_sft_training_row(
-            tokenizer, {"messages": messages}, "response", None, False
-        )
+        ids, mask = encoded_row(tokenizer, messages)
 
         decoded = tokenizer.decode(ids)
         assert "<think>\n\n</think>" not in decoded
         assert "<think>\ngreet them back\n</think>" in decoded
-        trained = "".join(trained_text(tokenizer, ids, loss))
-        assert "greet" not in trained
-        assert trained.endswith("Hello there<|im_end|>")
+        # The generation prompt opens the think block, so the turn starts inside it.
+        assert trained_text(tokenizer, ids, mask) == [
+            "greet them back\n</think>\n\nHello there<|im_end|>"
+        ]
         _assert_transcript_is_the_template(tokenizer, messages)
 
     def test_earlier_turns_omit_reasoning_the_template_drops(self):
@@ -2211,19 +2022,16 @@ class TestEncodeSftTrainingRowMatchesTheTemplate:
             },
         ]
 
-        ids, _, loss = encode_sft_training_row(
-            tokenizer, {"messages": messages}, "response", None, False
-        )
+        ids, mask = encoded_row(tokenizer, messages)
 
         decoded = tokenizer.decode(ids)
         assert "first thought" not in decoded
-        assert "greet them back" in decoded
-        trained = "".join(trained_text(tokenizer, ids, loss))
-        assert "greet" not in trained
+        trained = "".join(trained_text(tokenizer, ids, mask))
+        assert "greet them back" in trained
         assert "Hello<|im_end|>" in trained
         _assert_transcript_is_the_template(tokenizer, messages)
 
-    def test_gemma_get_reasoning_is_left_out_of_the_loss(self):
+    def test_gemma_get_reasoning_is_trained(self):
         tokenizer = in_turn_tokenizer(
             GEMMA_GET_TEMPLATE, ["<|turn>", "<turn|>", "<|channel>"]
         )
@@ -2237,13 +2045,10 @@ class TestEncodeSftTrainingRowMatchesTheTemplate:
         ]
 
         assert template_reasoning_key(tokenizer) == "reasoning_content"
-        ids, mask, loss = encode_sft_training_row(
-            tokenizer, {"messages": messages}, "response", None, False
-        )
+        ids, mask = encoded_row(tokenizer, messages)
 
-        assert loss != mask
-        assert "greet" not in "".join(trained_text(tokenizer, ids, loss))
-        assert "<|channel>thought" in tokenizer.decode(ids)
+        trained = "".join(trained_text(tokenizer, ids, mask))
+        assert "<|channel>thought\ngreet them back" in trained
         _assert_transcript_is_the_template(tokenizer, messages)
 
     def test_gemma_earlier_turn_omits_the_thought_channel(self):
@@ -2265,14 +2070,11 @@ class TestEncodeSftTrainingRowMatchesTheTemplate:
             },
         ]
 
-        ids, _, loss = encode_sft_training_row(
-            tokenizer, {"messages": messages}, "response", None, False
-        )
+        ids, _ = encoded_row(tokenizer, messages)
 
         decoded = tokenizer.decode(ids)
         assert "first thought" not in decoded
         assert decoded.count("<|channel>thought") == 1
-        assert "greet" not in "".join(trained_text(tokenizer, ids, loss))
         _assert_transcript_is_the_template(tokenizer, messages)
 
     def test_tool_calls_left_on_the_message_do_not_change_the_render(self):
@@ -2302,13 +2104,10 @@ class TestEncodeSftTrainingRowMatchesTheTemplate:
                     ParsedToolCall(raw="other", name="other"),
                 ]
 
-        ids, _, loss = encode_sft_training_row(
-            tokenizer, {"messages": messages}, "response", AcceptsCalls(), False
-        )
+        ids, _ = encoded_row(tokenizer, messages, AcceptsCalls())
 
         rendered = tokenizer.apply_chat_template(messages, tokenize=False)
         assert tokenizer.decode(ids) == rendered.removesuffix("\n")
-        assert "greet" not in "".join(trained_text(tokenizer, ids, loss))
 
     def test_a_turn_the_full_render_omits_cannot_be_cut_out(self):
         template = (
@@ -2329,11 +2128,9 @@ class TestEncodeSftTrainingRowMatchesTheTemplate:
         ]
 
         with pytest.raises(ValueError, match="does not extend its generation prompt"):
-            encode_sft_training_row(
-                tokenizer, {"messages": messages}, "response", None, False
-            )
+            encoded_row(tokenizer, messages)
 
-    def test_plain_turns_gain_eos_and_a_blank_thought_is_not_masked(self):
+    def test_plain_turns_gain_eos(self):
         template = (
             "{% for message in messages %}"
             "{% if message.role == 'user' %}User: {{ message.content }}\n"
@@ -2341,13 +2138,13 @@ class TestEncodeSftTrainingRowMatchesTheTemplate:
             "{% if loop.last %}Thought: {{ message.reasoning_content }}\n{% endif %}"
             "Assistant: {{ message.content }}\n"
             "{% endif %}{% endfor %}"
-            "{% if add_generation_prompt %}\ue001{% endif %}"
+            "{% if add_generation_prompt %}{% endif %}"
         )
         tokenizer = reasoning_tokenizer(template)
         messages = [
             {"role": "user", "content": "Hi"},
             {"role": "assistant", "content": "Hello", "reasoning_content": "   "},
-            {"role": "user", "content": "Again \ue000"},
+            {"role": "user", "content": "Again "},
             {
                 "role": "assistant",
                 "content": "Hello there",
@@ -2355,58 +2152,14 @@ class TestEncodeSftTrainingRowMatchesTheTemplate:
             },
         ]
 
-        ids, mask, loss = encode_sft_training_row(
-            tokenizer, {"messages": messages}, "response", None, False
-        )
+        ids, mask = encoded_row(tokenizer, messages)
 
-        assert "\ue001" not in tokenizer.decode(ids)
+        assert "" not in tokenizer.decode(ids)
         assert ids[-1] == tokenizer.eos_token_id
-        assert "greet" not in "".join(trained_text(tokenizer, ids, loss))
-        assert loss != mask
-
-    def test_reasoning_the_full_render_reshapes_raises(self):
-        template = (
-            "{% for message in messages %}"
-            "{% if message.role == 'user' %}<|im_start|>user\n{{ message.content }}<|im_end|>\n"
-            "{% elif message.role == 'assistant' %}<|im_start|>assistant\n"
-            "{{ message.content }}"
-            "{% if messages|length > 2 %}"
-            "{% if message.reasoning_content == 'greet them back' %}"
-            "NOTE {{ message.reasoning_content }}END"
-            "{% else %}OTHER {{ message.reasoning_content }}TAIL{% endif %}"
-            "{% endif %}<|im_end|>\n"
-            "{% endif %}{% endfor %}"
-            "{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}"
-        )
-        tokenizer = reasoning_tokenizer(template)
-        messages = [
-            {"role": "user", "content": "Hi"},
-            {
-                "role": "assistant",
-                "content": "Hello",
-                "reasoning_content": "first thought",
-            },
-            {"role": "user", "content": "Again"},
-            {
-                "role": "assistant",
-                "content": "Hello there",
-                "reasoning_content": "greet them back",
-            },
-        ]
-
-        with pytest.raises(ValueError, match="cannot be left out of the loss"):
-            encode_sft_training_row(
-                tokenizer, {"messages": messages}, "response", None, False
-            )
+        assert "greet them back" in "".join(trained_text(tokenizer, ids, mask))
 
 
-class TestReasoningFlags:
-    def test_an_encoding_that_differs_from_the_turn_raises(self):
-        tokenizer = reasoning_tokenizer()
-
-        with pytest.raises(ValueError, match="needs a fast tokenizer"):
-            _reasoning_flags(tokenizer, "a thought", [0], [(2, 8)])
-
+class TestCutKeptTurn:
     def test_an_offset_map_that_differs_from_encode_raises(self):
         tokenizer = reasoning_tokenizer()
         encode = tokenizer.encode
@@ -2424,12 +2177,10 @@ class TestReasoningFlags:
 
 
 class TestDatasetEnvSFTReasoningAndCuts:
-    def test_collate_leaves_reasoning_out_of_the_loss_when_not_trained(self):
+    def test_collate_trains_the_reasoning(self):
         # Arrange
         tokenizer = reasoning_tokenizer()
-        env = _sft_env(
-            {"messages": [REASONED_HELLO]}, tokenizer, train_on_reasoning=False
-        )
+        env = _sft_env({"messages": [REASONED_HELLO]}, tokenizer)
 
         # Act
         batch = env.create_collate_fn(tokenizer)([{"messages": REASONED_HELLO}])
@@ -2437,9 +2188,9 @@ class TestDatasetEnvSFTReasoningAndCuts:
         # Assert
         ids = batch["input_ids"][0].tolist()
         loss = batch["loss_mask"][0].tolist()
-        trained = "".join(trained_text(tokenizer, ids, loss))
-        assert "greet" not in trained
-        assert trained.endswith("Hello<|im_end|>")
+        assert trained_text(tokenizer, ids, loss) == [
+            "<think>\ngreet them back\n</think>\n\nHello<|im_end|>"
+        ]
 
     def test_a_trace_cut_back_to_an_earlier_turn_warns(self):
         # Arrange
