@@ -6,16 +6,18 @@
 Scores the model on the dataset's own completions in a single forward pass (no
 generation): cross-entropy for SFT, chosen-vs-rejected preference for DPO. SFT
 rows are ``(prompt, response)`` pairs or multi-turn ``messages`` with optional
-``tools``; both train the chat-template transcript a rollout would build.
+``tools``; both train the chat template's render of that conversation.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import warnings
 from collections.abc import Callable, Collection
 from contextlib import contextmanager
+from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
@@ -78,6 +80,7 @@ class DatasetEnv:
         data_batch_size_per_gpu: int = 8,
         max_context_length: int | None = None,
         min_completion_length: int | None = None,
+        train_on_reasoning: bool = True,
         seed: int = 42,
         rank: int = 0,
         world_size: int = 1,
@@ -99,6 +102,8 @@ class DatasetEnv:
         :param data_batch_size_per_gpu: Batch size for the train/test dataloaders.
         :param max_context_length: Optional max prompt+completion token budget.
         :param min_completion_length: Minimum reserved completion token budget.
+        :param train_on_reasoning: Train SFT assistant turns' reasoning; ``False``
+            leaves the reasoning tokens the chat template renders as context only.
         :param seed: Seed for dataloader shuffling.
         :param rank: This process's shard index in ``[0, world_size)``.
         :param world_size: Number of data-parallel shards (``1`` = no sharding).
@@ -151,6 +156,7 @@ class DatasetEnv:
             0 if min_completion_length is None else min_completion_length
         )
         self.max_context_length = max_context_length
+        self.train_on_reasoning = train_on_reasoning
         self.seed = seed
         generator = torch.Generator().manual_seed(seed)
         custom_collate_fn = self.create_collate_fn(tokenizer)
@@ -325,6 +331,7 @@ class DatasetEnv:
         chat_format = detect_chat_format(self.tokenizer)
         kept: list[int] = []
         too_long = 0
+        cut = 0
         errors: list[str] = []
         for index, item in enumerate(dataset):
             # One malformed row must not stop a run; all of them failing raises below.
@@ -335,10 +342,13 @@ class DatasetEnv:
             except Exception as error:
                 errors.append(f"{type(error).__name__}: {error}")
                 continue
-            if self._fit_to_context(ids, mask) is None:
+            fitted = self._fit_to_context(ids, mask)
+            if fitted is None:
                 too_long += 1
-            else:
-                kept.append(index)
+                continue
+            kept.append(index)
+            if len(fitted[0]) < len(ids):
+                cut += 1
         if not kept:
             msg = (
                 f"No valid samples in the {dataset_type}. First error: {errors[0]}"
@@ -354,6 +364,13 @@ class DatasetEnv:
         if too_long:
             warnings.warn(
                 f"{too_long} samples were filtered out of the {dataset_type} due to the max context length constraint.",
+                stacklevel=2,
+            )
+        if cut:
+            warnings.warn(
+                f"{cut} samples in the {dataset_type} were cut back to their last "
+                f"complete assistant turn within max_context_length="
+                f"{self.max_context_length}; their later turns are not trained.",
                 stacklevel=2,
             )
         return dataset if len(kept) == len(dataset) else dataset.select(kept)
@@ -491,6 +508,67 @@ def chat_messages(value: str | list[dict[str, Any]]) -> list[dict[str, Any]]:
     return messages
 
 
+REASONING_KEYS = ("reasoning_content", "thinking", "reasoning")
+"""Message keys chat templates read an assistant turn's reasoning from, most common first."""
+
+REASONING_READ = re.compile(
+    r"""\.get\(\s*['"](reasoning_content|thinking|reasoning)['"]\s*\)"""
+    r"""|\.(reasoning_content|thinking|reasoning)\b"""
+    r"""|\[['"](reasoning_content|thinking|reasoning)['"]\]"""
+)
+"""A chat template reading one of :data:`REASONING_KEYS` off a message."""
+
+
+def template_reasoning_key(tokenizer: PreTrainedTokenizerBase) -> str | None:
+    """The reasoning key the tokenizer's chat template reads off a message, if any.
+
+    :param tokenizer: Tokenizer whose ``chat_template`` is searched.
+    :return: The first of :data:`REASONING_KEYS` the template reads, or ``None``.
+    """
+    # Tokenizers that render without a Jinja template carry no ``chat_template``.
+    template = getattr(tokenizer, "chat_template", None)
+    if not isinstance(template, str):
+        return None
+    return _reasoning_key_read_by(template)
+
+
+@lru_cache(maxsize=8)
+def _reasoning_key_read_by(template: str) -> str | None:
+    """The first of :data:`REASONING_KEYS` a chat template source reads, or ``None``."""
+    read = {
+        group
+        for match in REASONING_READ.finditer(template)
+        for group in match.groups()
+        if group
+    }
+    return next((key for key in REASONING_KEYS if key in read), None)
+
+
+def _with_reasoning_key(message: dict[str, Any], key: str | None) -> dict[str, Any]:
+    """An assistant message with its reasoning under ``key``, the key the template reads.
+
+    :param message: Normalized message.
+    :param key: Target key, or ``None`` to leave the message as it is.
+    :return: The message, with any other reasoning key moved to ``key``.
+    :raises ValueError: If the message sets two reasoning keys to different text.
+    """
+    if key is None or message.get("role") != "assistant":
+        return message
+    present = {name: message[name] for name in REASONING_KEYS if name in message}
+    values = list(present.values())
+    if any(value != values[0] for value in values[1:]):
+        msg = (
+            f"An assistant message sets {sorted(present)} to different reasoning; "
+            "keep one."
+        )
+        raise ValueError(msg)
+    if not present or set(present) == {key}:
+        return message
+    value = next(iter(present.values()))
+    kept = {name: item for name, item in message.items() if name not in REASONING_KEYS}
+    return {**kept, key: value}
+
+
 def sft_tools(item: dict[str, Any]) -> list[dict[str, Any]] | None:
     """One SFT row's tool schemas, without the ``None`` keys Arrow fills into struct schemas.
 
@@ -520,6 +598,31 @@ def encode_sft_row(
     """
     return encode_chat_transcript(
         tokenizer, sft_messages(item, response_column), sft_tools(item), chat_format
+    )
+
+
+def encode_sft_training_row(
+    tokenizer: PreTrainedTokenizerBase,
+    item: dict[str, Any],
+    response_column: str,
+    chat_format: ChatFormat | None,
+    train_on_reasoning: bool,
+) -> tuple[list[int], list[bool], list[bool]]:
+    """:func:`encode_sft_row` plus the loss mask, which drops reasoning unless it is trained.
+
+    :param tokenizer: Tokenizer whose chat template renders the conversation.
+    :param item: Dataset row.
+    :param response_column: Column holding the response of a ``prompt`` row.
+    :param chat_format: The model family's chat format.
+    :param train_on_reasoning: Whether reasoning tokens are trained.
+    :return: Token ids, the assistant mask, and the loss mask.
+    """
+    return _encode_transcript(
+        tokenizer,
+        sft_messages(item, response_column),
+        sft_tools(item),
+        chat_format,
+        train_on_reasoning,
     )
 
 
@@ -622,17 +725,18 @@ def encode_chat_transcript(
     tools: list[dict[str, Any]] | None,
     chat_format: ChatFormat | None,
 ) -> tuple[list[int], list[bool]]:
-    """Token ids of a multi-turn conversation laid out as a rollout transcript, with an assistant mask.
+    """Token ids of a multi-turn conversation, with an assistant mask.
 
-    Matches what :class:`~agilerl.llm_envs.harness.RolloutHarness` builds: the
-    messages before the first assistant turn are rendered once with the
-    generation prompt, each assistant turn is the text the template renders
-    for it up to and including its end-of-turn token, and the messages between
-    assistant turns use the chat format's tool-result blocks when the template
-    renders results inside the assistant turn (Gemma 4, gpt-oss), else
-    :func:`feedback_frame_parts`. Earlier turns are never
-    re-rendered, so templates that strip past reasoning keep it here, as they
-    do in a rollout. Messages after the last assistant turn are dropped.
+    The ids follow the chat template's render of the messages through the last
+    assistant turn. A trailing newline after the final end-of-turn token is
+    dropped, and a turn with no end-of-turn token gains the eos token. Between
+    assistant turns, trailing whitespace of the generation prompt that the
+    completed turn does not continue stays in the gap, outside the assistant
+    mask. Each assistant turn runs from where that render leaves the generation
+    prompt through its end-of-turn token. A generation prompt that is not a
+    prefix of the completed turn is not spliced on. Tool results a format
+    renders inside an assistant turn stay there. Messages after the last
+    assistant turn are dropped.
 
     :param tokenizer: Tokenizer whose chat template renders the conversation.
     :param messages: Normalized messages, see :func:`chat_messages`.
@@ -645,6 +749,53 @@ def encode_chat_transcript(
         assistant turn that does not extend the generation prompt, or the chat
         format does not parse a turn's rendered tool calls back to its calls.
     """
+    ids, mask, _ = _encode_transcript(tokenizer, messages, tools, chat_format, True)
+    return ids, mask
+
+
+def _messages_for_render(
+    messages: list[dict[str, Any]], chat_format: ChatFormat | None
+) -> list[dict[str, Any]]:
+    """``messages`` with tool results named and tool calls written into content."""
+    rendered: list[dict[str, Any]] = []
+    previous: int | None = None
+    for message in messages:
+        if message["role"] != "assistant":
+            rendered.append(message)
+            continue
+        if previous is not None:
+            rendered[previous + 1 :] = _named_tool_results(
+                messages[previous], rendered[previous + 1 :]
+            )
+        rendered.append(_written_tool_calls(message, chat_format))
+        previous = len(rendered) - 1
+    return rendered
+
+
+def _encode_transcript(
+    tokenizer: PreTrainedTokenizerBase,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None,
+    chat_format: ChatFormat | None,
+    train_on_reasoning: bool,
+) -> tuple[list[int], list[bool], list[bool]]:
+    """:func:`encode_chat_transcript` plus a loss mask that leaves reasoning out unless trained.
+
+    Assistant messages' reasoning is moved to the key the chat template reads,
+    see :func:`template_reasoning_key`. When assembling each turn on its own
+    generation prompt does not decode to one ``apply_chat_template`` of the
+    conversation, the ids are taken from that render. Trailing whitespace of
+    the generation prompt stays in the gap before a later assistant turn.
+
+    :param tokenizer: Tokenizer whose chat template renders the conversation.
+    :param messages: Normalized messages, see :func:`chat_messages`.
+    :param tools: Tool schemas passed to the template, or ``None``.
+    :param chat_format: The model family's chat format.
+    :param train_on_reasoning: Whether reasoning tokens are trained.
+    :return: Token ids, the assistant mask, and the loss mask.
+    """
+    reasoning_key = template_reasoning_key(tokenizer)
+    messages = [_with_reasoning_key(message, reasoning_key) for message in messages]
     render_kwargs: dict[str, Any] = {} if tools is None else {"tools": tools}
     assistant_indices = [
         idx for idx, message in enumerate(messages) if message["role"] == "assistant"
@@ -656,17 +807,19 @@ def encode_chat_transcript(
         msg = "An SFT conversation needs a message before its first assistant turn."
         raise ValueError(msg)
 
-    prompt = _render(tokenizer, messages[: assistant_indices[0]], True, render_kwargs)
+    render_messages = _messages_for_render(messages, chat_format)
+    prompt = _render(
+        tokenizer, render_messages[: assistant_indices[0]], True, render_kwargs
+    )
     ids = tokenizer.encode(prompt, add_special_tokens=False)
     mask = [False] * len(ids)
+    loss = [False] * len(ids)
     special_ids = special_token_ids(tokenizer)
     scaffold = _turn_scaffold(tokenizer, render_kwargs, special_ids)
     previous = None
     for idx in assistant_indices:
         if previous is not None:
-            between = _named_tool_results(
-                messages[previous], messages[previous + 1 : idx]
-            )
+            between = render_messages[previous + 1 : idx]
             if not between:
                 msg = f"Messages {previous} and {idx} are back-to-back assistant turns."
                 raise ValueError(msg)
@@ -677,18 +830,260 @@ def encode_chat_transcript(
                 feedback = feedback[1:]
             ids += feedback
             mask += [False] * len(feedback)
-        turn = _assistant_turn_ids(
+            loss += [False] * len(feedback)
+        turn, reasoning = _assistant_turn_ids(
             tokenizer,
-            _written_tool_calls(messages[idx], chat_format),
+            render_messages[idx],
             render_kwargs,
             special_ids,
             scaffold,
+            None if train_on_reasoning else reasoning_key,
         )
         _check_tool_calls_parse(messages[idx], turn, tools, chat_format)
         ids += turn
         mask += [True] * len(turn)
+        loss += [not flag for flag in reasoning]
         previous = idx
-    return ids, mask
+    kept = assistant_indices[-1] + 1
+    canonical = _render(tokenizer, render_messages[:kept], False, render_kwargs)
+    if _decodes_template(tokenizer, ids, canonical):
+        return ids, mask, loss
+    return _assemble_from_template(
+        tokenizer,
+        render_messages[:kept],
+        messages[:kept],
+        canonical,
+        render_kwargs,
+        chat_format,
+        tools,
+        None if train_on_reasoning else reasoning_key,
+    )
+
+
+def _decodes_template(
+    tokenizer: PreTrainedTokenizerBase, ids: list[int], rendered: str
+) -> bool:
+    """Whether ``ids`` are ``rendered``, aside from a final newline or a trailing eos."""
+    decoded = tokenizer.decode(ids)
+    if not isinstance(decoded, str):
+        return False
+    accepted = {rendered, rendered.removesuffix("\n")}
+    eos = tokenizer.eos_token
+    if isinstance(eos, str) and eos:
+        accepted.update(item + eos for item in tuple(accepted))
+    return decoded in accepted
+
+
+def _with_payload_sentinel(message: dict[str, Any], sentinel: str) -> dict[str, Any]:
+    """``message`` with ``sentinel`` prepended to each non-empty string the template may emit."""
+    marked = dict(message)
+    content = marked.get("content")
+    if isinstance(content, str) and content:
+        marked["content"] = sentinel + content
+    calls = marked.get("tool_calls")
+    if calls:
+        marked["tool_calls"] = [_call_with_sentinel(call, sentinel) for call in calls]
+    for key in REASONING_KEYS:
+        value = marked.get(key)
+        if isinstance(value, str) and value.strip():
+            marked[key] = sentinel + value
+    return marked
+
+
+def _call_with_sentinel(call: dict[str, Any], sentinel: str) -> dict[str, Any]:
+    """``call`` with ``sentinel`` prepended to its function name."""
+    copied = dict(call)
+    function = copied.get("function")
+    if isinstance(function, dict):
+        function = dict(function)
+        name = function.get("name")
+        if isinstance(name, str) and name:
+            function["name"] = sentinel + name
+        copied["function"] = function
+        return copied
+    name = copied.get("name")
+    if isinstance(name, str) and name:
+        copied["name"] = sentinel + name
+    return copied
+
+
+def _payload_at(
+    tokenizer: PreTrainedTokenizerBase,
+    messages: list[dict[str, Any]],
+    render_kwargs: dict[str, Any],
+    text: str,
+    index: int,
+) -> int | None:
+    """Index of message ``index``'s first emitted field in ``text``, or ``None``."""
+    sentinel = f"\ue000{index:04d}"
+    marked = [
+        _with_payload_sentinel(message, sentinel) if j == index else message
+        for j, message in enumerate(messages)
+    ]
+    probed = _render(tokenizer, marked, False, render_kwargs)
+    pos = probed.find(sentinel)
+    if pos < 0 or not text.startswith(probed[:pos]):
+        return None
+    return pos
+
+
+def _generation_addition(
+    tokenizer: PreTrainedTokenizerBase, render_kwargs: dict[str, Any]
+) -> str:
+    """Text ``add_generation_prompt`` appends after one user message."""
+    opener = [TURN_OPENER]
+    prompted = _render(tokenizer, opener, True, render_kwargs)
+    plain = _render(tokenizer, opener, False, render_kwargs)
+    return prompted[len(os.path.commonprefix([prompted, plain])) :]
+
+
+def _block_token(tokenizer: PreTrainedTokenizerBase, addition: str) -> str:
+    """The first special token of the generation prompt, or ``""`` when it has none."""
+    ids = tokenizer.encode(addition, add_special_tokens=False)
+    specials = special_token_ids(tokenizer)
+    for token_id in ids:
+        if token_id in specials:
+            text = tokenizer.decode([token_id])
+            return text if isinstance(text, str) else ""
+    return ""
+
+
+def _addition_end(
+    text: str, start: int, end: int, addition: str
+) -> tuple[int, str] | None:
+    """Where ``addition`` stops matching ``text``, and the unmatched tail."""
+    limit = max(start, end)
+    for length in range(len(addition), 0, -1):
+        prefix = addition[:length]
+        at = text.rfind(prefix, start, limit)
+        if at < 0:
+            continue
+        shared = len(os.path.commonprefix([addition, text[at:]]))
+        return at + shared, addition[shared:]
+    return None
+
+
+def _cut_kept_turn(
+    tokenizer: PreTrainedTokenizerBase, turn_text: str
+) -> tuple[str, bool]:
+    """Turn text through its last special token, and whether the turn needs an eos token."""
+    ids = tokenizer.encode(turn_text, add_special_tokens=False)
+    specials = special_token_ids(tokenizer)
+    last = max(
+        (pos for pos, token in enumerate(ids) if token in specials), default=None
+    )
+    if last is None:
+        return turn_text, True
+    encoding = tokenizer(
+        turn_text, add_special_tokens=False, return_offsets_mapping=True
+    )
+    if list(encoding["input_ids"]) != ids:
+        msg = (
+            "Leaving reasoning out of the loss needs a fast tokenizer whose "
+            "offsets match its encoding of the turn."
+        )
+        raise ValueError(msg)
+    return turn_text[: encoding["offset_mapping"][last][1]], False
+
+
+def _assemble_from_template(
+    tokenizer: PreTrainedTokenizerBase,
+    render_messages: list[dict[str, Any]],
+    messages: list[dict[str, Any]],
+    canonical: str,
+    render_kwargs: dict[str, Any],
+    chat_format: ChatFormat | None,
+    tools: list[dict[str, Any]] | None,
+    reasoning_key: str | None,
+) -> tuple[list[int], list[bool], list[bool]]:
+    """Ids of ``canonical``, the template render, with assistant and loss masks.
+
+    A generation prompt that is not a prefix of the completed turn is not
+    spliced onto the transcript. Trailing whitespace of that prompt stays in
+    the gap before the next assistant turn. The loss mask drops reasoning the
+    template actually interpolated.
+
+    :param render_messages: Messages as passed to the template.
+    :param messages: The same turns, still carrying ``tool_calls`` for the parse check.
+    :param reasoning_key: Field to leave out of the loss, or ``None`` to train it.
+    :return: Token ids, the assistant mask, and the loss mask.
+    """
+    addition = _generation_addition(tokenizer, render_kwargs)
+    block = _block_token(tokenizer, addition)
+    assistant_indices = [
+        idx
+        for idx, message in enumerate(render_messages)
+        if message["role"] == "assistant"
+    ]
+    payloads = [
+        _payload_at(tokenizer, render_messages, render_kwargs, canonical, idx)
+        for idx in range(len(render_messages))
+    ]
+    ids: list[int] = []
+    mask: list[bool] = []
+    loss: list[bool] = []
+    cursor = 0
+
+    def _assistant_span(index: int, payload: int) -> tuple[int, str, int]:
+        """Start, unmatched generation-prompt tail, and end of this assistant turn."""
+        located = _addition_end(canonical, cursor, payload, addition)
+        if located is None:
+            turn_start = payload
+            prompt_tail = ""
+        else:
+            turn_start, prompt_tail = located
+        next_payload = None
+        for later in range(index + 1, len(payloads)):
+            if payloads[later] is not None:
+                next_payload = payloads[later]
+                break
+        limit = len(canonical) if next_payload is None else next_payload
+        if block and next_payload is not None:
+            at = canonical.rfind(block, turn_start, next_payload)
+            if at >= 0:
+                limit = at
+        return turn_start, prompt_tail, limit
+
+    for position, idx in enumerate(assistant_indices):
+        payload = payloads[idx]
+        if payload is None:
+            msg = (
+                "The chat template renders an assistant turn that does not extend "
+                "its generation prompt, so the turn's sampled tokens cannot be cut out."
+            )
+            raise ValueError(msg)
+        turn_start, prompt_tail, limit = _assistant_span(idx, payload)
+        kept, needs_eos = _cut_kept_turn(tokenizer, canonical[turn_start:limit])
+        gap = canonical[cursor:turn_start]
+        # The completed turn does not continue this whitespace. The rollout
+        # prompt still ends with it, so it stays outside the assistant span.
+        if position > 0 and prompt_tail.isspace():
+            gap += prompt_tail
+        gap_ids = tokenizer.encode(gap, add_special_tokens=False)
+        ids += gap_ids
+        mask += [False] * len(gap_ids)
+        loss += [False] * len(gap_ids)
+        turn_ids = tokenizer.encode(kept, add_special_tokens=False)
+        spans = _reasoning_spans_in_text(
+            tokenizer,
+            render_messages,
+            idx,
+            reasoning_key,
+            render_kwargs,
+            canonical,
+            turn_start,
+            turn_start + len(kept),
+        )
+        flags = _reasoning_flags(tokenizer, kept, turn_ids, spans)
+        if needs_eos:
+            turn_ids.append(tokenizer.eos_token_id)
+            flags.append(False)
+        _check_tool_calls_parse(messages[idx], turn_ids, tools, chat_format)
+        ids += turn_ids
+        mask += [True] * len(turn_ids)
+        loss += [not flag for flag in flags]
+        cursor = turn_start + len(kept)
+    return ids, mask, loss
 
 
 def _render(
@@ -731,11 +1126,15 @@ def _assistant_turn_ids(
     render_kwargs: dict[str, Any],
     special_ids: set[int],
     scaffold: tuple[str, int],
-) -> list[int]:
-    """Ids the model samples for one assistant turn, through its end-of-turn token.
+    reasoning_key: str | None,
+) -> tuple[list[int], list[bool]]:
+    """Ids the model samples for one assistant turn, through its end-of-turn token, and which are reasoning.
 
     A re-render may drop text the generation prompt prefills after its last
     special token (a ``<think>`` opener), so the turn starts where the two renders part.
+
+    :param reasoning_key: Field whose rendered text is flagged, or ``None``.
+    :return: The turn's ids, and per id whether it lies inside the rendered reasoning.
     """
     prompt, header = scaffold
     rendered = _render(tokenizer, [TURN_OPENER, message], False, render_kwargs)
@@ -746,13 +1145,168 @@ def _assistant_turn_ids(
             "its generation prompt, so the turn's sampled tokens cannot be cut out."
         )
         raise ValueError(msg)
-    turn = tokenizer.encode(rendered[shared:], add_special_tokens=False)
+    text = rendered[shared:]
+    turn = tokenizer.encode(text, add_special_tokens=False)
+    flags = _reasoning_flags(
+        tokenizer,
+        text,
+        turn,
+        _rendered_reasoning_spans(
+            tokenizer, rendered, message, render_kwargs, reasoning_key, shared
+        ),
+    )
     last_special = max(
         (pos for pos, token in enumerate(turn) if token in special_ids), default=None
     )
     if last_special is None:
-        return [*turn, tokenizer.eos_token_id]
-    return turn[: last_special + 1]
+        return [*turn, tokenizer.eos_token_id], [*flags, False]
+    return turn[: last_special + 1], flags[: last_special + 1]
+
+
+def _sentinel_spans(
+    rendered: str, probed: str, sentinel: str
+) -> list[tuple[int, int]] | None:
+    """Spans in ``rendered`` replaced by ``sentinel`` in ``probed``, or ``None`` if they diverge.
+
+    An empty list means ``probed`` never emits ``sentinel``.
+    """
+    if sentinel not in probed:
+        return []
+    parts = probed.split(sentinel)
+    cursor = len(parts[0])
+    spans: list[tuple[int, int]] = []
+    aligned = rendered.startswith(parts[0])
+    for part in parts[1:]:
+        found = rendered.find(part, cursor) if part else len(rendered)
+        aligned = aligned and found >= 0
+        if not aligned:
+            break
+        spans.append((cursor, found))
+        cursor = found + len(part)
+    if not aligned or cursor != len(rendered):
+        return None
+    return spans
+
+
+def _reasoning_spans_in_text(
+    tokenizer: PreTrainedTokenizerBase,
+    messages: list[dict[str, Any]],
+    index: int,
+    reasoning_key: str | None,
+    render_kwargs: dict[str, Any],
+    rendered: str,
+    start: int,
+    end: int,
+) -> list[tuple[int, int]]:
+    """Reasoning spans inside ``rendered[start:end]``, relative to that slice.
+
+    :raises ValueError: If the template emits the field but the renders do not line up.
+    """
+    if reasoning_key is None:
+        return []
+    value = messages[index].get(reasoning_key)
+    if not value or (isinstance(value, str) and not value.strip()):
+        return []
+    sentinel = "\ue000"
+    while sentinel in rendered:
+        sentinel += "\ue000"
+    probed_messages = [
+        {**message, reasoning_key: sentinel} if j == index else message
+        for j, message in enumerate(messages)
+    ]
+    probed = _render(tokenizer, probed_messages, False, render_kwargs)
+    spans = _sentinel_spans(rendered, probed, sentinel)
+    if spans is None:
+        msg = (
+            "The chat template renders this turn's reasoning in a shape "
+            "that cannot be left out of the loss."
+        )
+        raise ValueError(msg)
+    clipped = []
+    for span_start, span_end in spans:
+        lo = max(span_start, start)
+        hi = min(span_end, end)
+        if lo < hi:
+            clipped.append((lo - start, hi - start))
+    return clipped
+
+
+def _rendered_reasoning_spans(
+    tokenizer: PreTrainedTokenizerBase,
+    rendered: str,
+    message: dict[str, Any],
+    render_kwargs: dict[str, Any],
+    reasoning_key: str | None,
+    turn_start: int,
+) -> list[tuple[int, int]]:
+    """Spans of ``reasoning_key`` in the turn text, from a sentinel render of that field.
+
+    :param tokenizer: Tokenizer whose chat template renders the turn.
+    :param rendered: Template text of the turn opener and the assistant message.
+    :param message: The assistant message as rendered.
+    :param render_kwargs: Extra arguments for the chat template.
+    :param reasoning_key: Field to flag, or ``None`` to flag nothing.
+    :param turn_start: Index in ``rendered`` where the sampled turn begins.
+    :return: ``(start, end)`` pairs in the turn text.
+    :raises ValueError: If the template emits the field but the renders do not line up.
+    """
+    if reasoning_key is None:
+        return []
+    value = message.get(reasoning_key)
+    if not value or (isinstance(value, str) and not value.strip()):
+        return []
+    sentinel = "\ue000"
+    while sentinel in rendered:
+        sentinel += "\ue000"
+    probed = _render(
+        tokenizer,
+        [TURN_OPENER, {**message, reasoning_key: sentinel}],
+        False,
+        render_kwargs,
+    )
+    spans = _sentinel_spans(rendered, probed, sentinel)
+    if spans is None:
+        msg = (
+            "The chat template renders this turn's reasoning in a shape "
+            "that cannot be left out of the loss."
+        )
+        raise ValueError(msg)
+    turn_end = len(rendered)
+    return [
+        (max(start, turn_start) - turn_start, min(end, turn_end) - turn_start)
+        for start, end in spans
+        if max(start, turn_start) < min(end, turn_end)
+    ]
+
+
+def _reasoning_flags(
+    tokenizer: PreTrainedTokenizerBase,
+    text: str,
+    turn: list[int],
+    spans: list[tuple[int, int]],
+) -> list[bool]:
+    """Per id of ``turn``, whether it overlaps a reasoning span in ``text``.
+
+    :param tokenizer: Fast tokenizer, for character offsets.
+    :param text: The turn's rendered text, which encodes to ``turn``.
+    :param turn: The turn's ids.
+    :param spans: Character spans of the rendered reasoning in ``text``.
+    :return: One flag per id; all ``False`` when ``spans`` is empty.
+    :raises ValueError: If the tokenizer re-encodes ``text`` differently from ``turn``.
+    """
+    if not spans:
+        return [False] * len(turn)
+    encoding = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
+    if encoding["input_ids"] != turn:
+        msg = (
+            "Leaving reasoning out of the loss needs a fast tokenizer whose "
+            "offsets match its encoding of the turn."
+        )
+        raise ValueError(msg)
+    return [
+        any(begin < end and stop > start for start, end in spans)
+        for begin, stop in encoding["offset_mapping"]
+    ]
 
 
 def _written_tool_calls(
@@ -912,8 +1466,12 @@ def sft_collate_builder(
         """Encode each conversation, cut to the context length and right-pad."""
         rows = []
         for item in batch:
-            ids, mask = encode_sft_row(
-                tokenizer, item, env.response_column, chat_format
+            ids, mask, loss = encode_sft_training_row(
+                tokenizer,
+                item,
+                env.response_column,
+                chat_format,
+                env.train_on_reasoning,
             )
             fitted = env._fit_to_context(ids, mask)
             if fitted is None:
@@ -922,7 +1480,7 @@ def sft_collate_builder(
                     f"turn within max_context_length={env.max_context_length}."
                 )
                 raise ValueError(msg)
-            rows.append(fitted)
+            rows.append((fitted[0], loss[: len(fitted[0])]))
         id_rows = [torch.tensor(ids, dtype=torch.long) for ids, _ in rows]
         return {
             "input_ids": pad_sequence(
