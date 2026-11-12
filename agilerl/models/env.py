@@ -458,6 +458,7 @@ def make_llm_env(
         chat_template_kwargs=spec.chat_template_kwargs,
         data_batch_size_per_gpu=data_batch_size_per_gpu,
         max_context_length=max_context_length,
+        train_on_reasoning=spec.train_on_reasoning,
         seed=_split_seed(seed),
         rank=rank,
         world_size=world_size,

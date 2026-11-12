@@ -52,6 +52,7 @@ class LetterTokenizer:
 class ChatLetterTokenizer:
     """Char ids, a leading bos on ``__call__``, and a ``role:content`` chat template."""
 
+    eos_token = "\x02"
     eos_token_id = 2
     unk_token_id = None
     unk_token = None
