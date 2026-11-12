@@ -1522,22 +1522,18 @@ def _local_param_dict_worker(rank: int, world_size: int) -> None:
     up_ptr = module.up_proj.to_local().data_ptr()
     down_ptr = module.down_proj.to_local().data_ptr()
 
-    views = local_param_dict(module)
-    copies = local_param_dict(module, gathered=True)
+    params = local_param_dict(module)
 
-    assert views["up_proj"].data_ptr() == up_ptr
-    assert not views["up_proj"].requires_grad
-    assert copies["up_proj"].data_ptr() != up_ptr
-    assert torch.equal(copies["up_proj"], views["up_proj"])
-    for params in (views, copies):
-        assert params["down_proj"].data_ptr() != down_ptr
-        assert params["down_proj"].requires_grad
-        assert params["down_proj"].is_leaf
+    assert params["up_proj"].data_ptr() == up_ptr
+    assert not params["up_proj"].requires_grad
+    assert params["down_proj"].data_ptr() != down_ptr
+    assert params["down_proj"].requires_grad
+    assert params["down_proj"].is_leaf
 
 
 @pytest.mark.multi_rank
 class TestLocalParamDict:
-    def test_frozen_views_unless_gathered_trainable_leaf_copies(self):
+    def test_frozen_views_and_trainable_leaf_copies(self):
         run_ranks(_local_param_dict_worker)
 
 
@@ -2155,6 +2151,264 @@ def _fsdp_gathered_frozen_worker(rank: int, world_size: int) -> None:
 class TestFsdpGatheredFrozenExperts:
     def test_checkpointed_backward_matches_dense_reference(self):
         run_ranks(_fsdp_gathered_frozen_worker, 4)
+
+
+def _fsdp_regather_worker(
+    rank: int,
+    world_size: int,
+    checkpointed: bool,
+    zero_row_rank: bool,
+    graphs: int,
+) -> None:
+    """Frozen FSDP experts re-gathered in backward match a dense reference and hold no copy."""
+    ep = 2
+    mesh = build_parallel_mesh(world_size=world_size, ep=ep, device_type="cpu")
+    assert mesh is not None
+    assert mesh.edp_shard is not None
+    ep_ranks = dist.get_process_group_ranks(mesh.ep.get_group())
+    model = _ForwardLoraMoeModel(_lora_routed_model(("actor",)))
+    for param in model.parameters():
+        dist.broadcast(param.data, src=0)
+    reference = copy.deepcopy(model)
+    torch.manual_seed(rank + 3)
+    hiddens = [torch.randn(6, 8) for _ in range(graphs)]
+    upstreams = [torch.randn(6, 8) for _ in range(graphs)]
+    top_k_weights, top_k_index = torch.softmax(torch.randn(6, 4), -1).topk(2, -1)
+    if zero_row_rank and 0 in ep_ranks:
+        # Rank 0's EP group routes every token past rank 0's experts; its
+        # leftover-dp partner, in the other EP group, still receives rows.
+        owned = ep_ranks.index(0) * 2
+        others = [expert for expert in range(4) if expert // 2 != owned // 2]
+        top_k_index = torch.tensor([others] * 6)
+    ref_hiddens = [hidden.clone().requires_grad_(True) for hidden in hiddens]
+    ref_loss = sum(
+        (reference(ref_hidden, top_k_index, top_k_weights) * upstream).sum()
+        for ref_hidden, upstream in zip(ref_hiddens, upstreams, strict=True)
+    )
+    ref_loss.backward()
+
+    assert apply_expert_parallel(model, mesh.ep) == 1
+    with patch.object(fsdp_blocks, "PARAM_PERSISTENCE_THRESHOLD", 0):
+        apply_fsdp2(
+            model,
+            FSDPConfig(
+                ep=ep,
+                param_dtype="float32",
+                reduce_dtype="float32",
+                checkpoint_every_n_blocks=1,
+            ),
+            mesh=mesh.dp_shard,
+            expert_mesh=mesh.edp_shard,
+            gradient_checkpointing=checkpointed,
+        )
+    experts = next(
+        module for module in model.modules() if "gate_up_proj" in module._parameters
+    )
+    saved: list[torch.Tensor] = []
+    ep_hiddens = [hidden.clone().requires_grad_(True) for hidden in hiddens]
+
+    with torch.autograd.graph.saved_tensors_hooks(
+        lambda tensor: saved.append(tensor) or tensor, lambda tensor: tensor
+    ):
+        loss = sum(
+            (model(ep_hidden, top_k_index, top_k_weights) * upstream).sum()
+            for ep_hidden, upstream in zip(ep_hiddens, upstreams, strict=True)
+        )
+    # Frozen 3D saved tensors are the experts' base weights.
+    expert_storage_bytes = [
+        tensor.untyped_storage().nbytes()
+        for tensor in saved
+        if tensor.dim() == 3 and not tensor.requires_grad
+    ]
+    loss.backward()
+
+    # Checkpointing saves only block inputs; a zero-row rank runs no kernel.
+    assert checkpointed or (zero_row_rank and rank == 0) or expert_storage_bytes
+    assert not any(expert_storage_bytes)
+    for ep_hidden, ref_hidden in zip(ep_hiddens, ref_hiddens, strict=True):
+        assert torch.allclose(ep_hidden.grad, ref_hidden.grad, rtol=1e-5, atol=1e-7)
+    for param in experts.parameters():
+        assert expert_local_tensor(param).shape[0] == 4 // ep // 2
+
+
+@pytest.mark.multi_rank
+class TestFsdpRegatheredFrozenExperts:
+    @pytest.mark.parametrize(
+        ("checkpointed", "zero_row_rank", "graphs"),
+        [
+            (False, False, 1),
+            (False, False, 2),
+            (True, False, 2),
+            (False, True, 1),
+            (True, True, 2),
+        ],
+    )
+    def test_backward_matches_dense_reference_without_expert_copies(
+        self, checkpointed, zero_row_rank, graphs
+    ):
+        run_ranks(
+            _fsdp_regather_worker,
+            4,
+            checkpointed,
+            zero_row_rank,
+            graphs,
+        )
+
+
+class _FsdpLikeExperts(nn.Module):
+    """Frozen weight whose storage ``reshard`` frees and ``unshard`` refills, as FSDP2's unsharded params."""
+
+    def __init__(self, weight: torch.Tensor) -> None:
+        super().__init__()
+        self.full = weight.clone()
+        self.weight = nn.Parameter(weight.clone(), requires_grad=False)
+        self.gathers = 0
+        self.reshard()
+
+    def unshard(self) -> None:
+        storage = self.weight.untyped_storage()
+        if storage.nbytes():
+            return
+        storage.resize_(self.full.untyped_storage().nbytes())
+        with (
+            torch.no_grad(),
+            torch.autograd._unsafe_preserve_version_counter(self.weight),
+        ):
+            self.weight.copy_(self.full)
+        self.gathers += 1
+
+    def reshard(self) -> None:
+        self.weight.untyped_storage().resize_(0)
+
+    @property
+    def gathered(self) -> bool:
+        return self.weight.untyped_storage().nbytes() > 0
+
+
+def _regathered_matmul(
+    experts: _FsdpLikeExperts, x: torch.Tensor, adapter: torch.Tensor | None = None
+) -> torch.Tensor:
+    with _gathered_expert_block(experts):
+        tensors = [x] if adapter is None else [x, adapter]
+        (x, *rest), paired = ep_forward._reshard_after_backward(experts, tensors)
+        hidden = x if adapter is None else x @ rest[0]
+        out = hidden @ experts.weight
+    return ep_forward._regather_for_backward(out, experts, paired)
+
+
+class TestGatheredExpertBlockBackward:
+    def test_backward_regathers_saved_weight_view_then_reshards(self):
+        # Arrange
+        torch.manual_seed(0)
+        weight = torch.randn(4, 3)
+        experts = _FsdpLikeExperts(weight)
+        x = torch.randn(5, 4, requires_grad=True)
+        upstream = torch.randn(5, 3)
+
+        # Act
+        out = _regathered_matmul(experts, x)
+        gathered_after_forward = experts.gathered
+        (out * upstream).sum().backward()
+
+        # Assert
+        assert not gathered_after_forward
+        assert torch.allclose(out, x.detach() @ weight)
+        assert torch.allclose(x.grad, upstream @ weight.T)
+        assert experts.gathers == 2
+        assert not experts.gathered
+
+    def test_two_graphs_keep_block_gathered_until_both_backwards_finish(self):
+        torch.manual_seed(0)
+        weight = torch.randn(4, 3)
+        experts = _FsdpLikeExperts(weight)
+        xs = [torch.randn(5, 4, requires_grad=True) for _ in range(2)]
+        upstreams = [torch.randn(5, 3) for _ in range(2)]
+
+        loss = sum(
+            (_regathered_matmul(experts, x) * upstream).sum()
+            for x, upstream in zip(xs, upstreams, strict=True)
+        )
+        loss.backward()
+
+        for x, upstream in zip(xs, upstreams, strict=True):
+            assert torch.allclose(x.grad, upstream @ weight.T)
+        assert not experts.gathered
+
+    def test_a_backward_still_holding_the_block_keeps_it_gathered(self):
+        # Arrange: another graph's backward has re-gathered the block and not yet released it.
+        torch.manual_seed(0)
+        weight = torch.randn(4, 3)
+        experts = _FsdpLikeExperts(weight)
+        x = torch.randn(5, 4, requires_grad=True)
+        upstream = torch.randn(5, 3)
+        out = _regathered_matmul(experts, x)
+        ep_forward._BACKWARD_HOLDS[experts] = 1
+
+        # Act
+        (out * upstream).sum().backward()
+
+        # Assert
+        assert torch.allclose(x.grad, upstream @ weight.T)
+        assert experts.gathered
+        assert ep_forward._BACKWARD_HOLDS[experts] == 1
+        ep_forward._BACKWARD_HOLDS.pop(experts)
+
+    def test_checkpoint_recompute_leaves_block_for_backward_pair(self):
+        torch.manual_seed(0)
+        weight = torch.randn(4, 3)
+        experts = _FsdpLikeExperts(weight)
+        x = torch.randn(5, 4, requires_grad=True)
+        upstream = torch.randn(5, 3)
+
+        out = checkpoint(partial(_regathered_matmul, experts), x, use_reentrant=False)
+        (out * upstream).sum().backward()
+
+        assert torch.allclose(x.grad, upstream @ weight.T)
+        assert experts.gathers == 2
+        assert not experts.gathered
+
+    def test_activation_offload_backward_matches_reference(self):
+        torch.manual_seed(0)
+        weight = torch.randn(4, 3)
+        experts = _FsdpLikeExperts(weight)
+        x = torch.randn(5, 4, requires_grad=True)
+        upstream = torch.randn(5, 3)
+
+        with torch.autograd.graph.save_on_cpu():
+            out = _regathered_matmul(experts, x)
+        (out * upstream).sum().backward()
+
+        assert torch.allclose(x.grad, upstream @ weight.T)
+        assert not experts.gathered
+
+    def test_frozen_input_with_trainable_adapter_reshards_after_backward(self):
+        # Arrange
+        torch.manual_seed(0)
+        weight = torch.randn(4, 3)
+        experts = _FsdpLikeExperts(weight)
+        x = torch.randn(5, 4)
+        adapter = torch.randn(4, 4, requires_grad=True)
+        upstream = torch.randn(5, 3)
+
+        # Act
+        out = _regathered_matmul(experts, x, adapter)
+        (out * upstream).sum().backward()
+
+        # Assert
+        assert torch.allclose(adapter.grad, x.T @ (upstream @ weight.T), atol=1e-5)
+        assert experts.gathers == 2
+        assert not experts.gathered
+        assert experts not in ep_forward._BACKWARD_HOLDS
+
+    def test_no_grad_forward_skips_backward_gather(self):
+        experts = _FsdpLikeExperts(torch.randn(4, 3))
+
+        with torch.no_grad():
+            out = _regathered_matmul(experts, torch.randn(5, 4))
+
+        assert out.grad_fn is None
+        assert experts.gathers == 1
+        assert not experts.gathered
 
 
 class _DriftingRouterMlp(nn.Module):

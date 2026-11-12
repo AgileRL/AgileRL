@@ -9,6 +9,7 @@ the local expert range and runs the existing kernel on this rank's rows.
 
 from __future__ import annotations
 
+import weakref
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
@@ -16,7 +17,7 @@ from dataclasses import dataclass
 from functools import partial
 from itertools import pairwise
 from types import MethodType
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
 
 import torch
 import torch.distributed as dist
@@ -64,28 +65,149 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from agilerl.lora.moe.wrappers import RoutedExpertsLoraWrapper
 
 
+@runtime_checkable
+class GatherableExperts(Protocol):
+    """A packed-experts FSDP unit: ``unshard`` all-gathers its params, ``reshard`` frees them."""
+
+    def unshard(self) -> object: ...
+
+    def reshard(self) -> None: ...
+
+
+class ExpertBlockCtx(Protocol):
+    experts: GatherableExperts
+
+
+def _gatherable_experts(module: nn.Module) -> GatherableExperts | None:
+    """The FSDP-sharded packed experts under ``module``, or ``None`` when they are not FSDP units."""
+    base = _base_experts(module)
+    return base if isinstance(base, GatherableExperts) else None
+
+
+def _in_backward() -> bool:
+    """Whether autograd is running a backward on this thread, as in a checkpoint recompute."""
+    # No public API exposes the running graph task; torch.utils.checkpoint reads it too.
+    return torch._C._current_graph_task_id() != -1
+
+
+# Backward passes between their re-gather and reshard of each expert unit.
+_BACKWARD_HOLDS: weakref.WeakKeyDictionary[GatherableExperts, int] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+class _ReshardAfterBackward(torch.autograd.Function):
+    """Identity on the gathered block's grad-requiring inputs; backward reshards once no backward still holds it.
+
+    Its backward runs after every kernel backward that reads the block, since
+    each feeds one of these inputs' grads.
+    """
+
+    @staticmethod
+    def forward(
+        ctx: ExpertBlockCtx, experts: GatherableExperts, *tensors: torch.Tensor
+    ) -> tuple[torch.Tensor, ...]:
+        ctx.experts = experts
+        return tuple(tensor.view_as(tensor) for tensor in tensors)
+
+    @staticmethod
+    def backward(
+        ctx: ExpertBlockCtx, *grad_outputs: torch.Tensor
+    ) -> tuple[torch.Tensor | None, ...]:
+        holds = _BACKWARD_HOLDS.pop(ctx.experts, 0) - 1
+        if holds > 0:
+            _BACKWARD_HOLDS[ctx.experts] = holds
+        else:
+            ctx.experts.reshard()
+        return (None, *grad_outputs)
+
+
+class _RegatherForBackward(torch.autograd.Function):
+    """Identity on the gathered block's output; backward re-gathers the block.
+
+    The kernel saved views of FSDP's unsharded params, whose storage the
+    gather refills. Every rank of the leftover-dp pair runs this backward,
+    with or without routed rows, so the gathers stay balanced.
+    """
+
+    @staticmethod
+    def forward(
+        ctx: ExpertBlockCtx, output: torch.Tensor, experts: GatherableExperts
+    ) -> torch.Tensor:
+        ctx.experts = experts
+        return output.view_as(output)
+
+    @staticmethod
+    def backward(
+        ctx: ExpertBlockCtx, *grad_outputs: torch.Tensor
+    ) -> tuple[torch.Tensor, None]:
+        (grad,) = grad_outputs
+        _BACKWARD_HOLDS[ctx.experts] = _BACKWARD_HOLDS.get(ctx.experts, 0) + 1
+        ctx.experts.unshard()
+        return grad, None
+
+
+def _reshard_after_backward(
+    module: nn.Module, tensors: list[torch.Tensor]
+) -> tuple[list[torch.Tensor], bool]:
+    """Pass ``module``'s block inputs through :class:`_ReshardAfterBackward`.
+
+    :param module: Module whose gathered block reads ``tensors``.
+    :param tensors: Every tensor the block's output can carry a grad back to.
+    :return: ``tensors`` with the grad-requiring ones replaced by the node's
+        views, and whether the node was placed.
+    """
+    experts = _gatherable_experts(module)
+    tracked = [i for i, tensor in enumerate(tensors) if tensor.requires_grad]
+    if experts is None or not tracked or not torch.is_grad_enabled():
+        return tensors, False
+    views = _ReshardAfterBackward.apply(experts, *(tensors[i] for i in tracked))
+    marked = list(tensors)
+    for i, view in zip(tracked, views, strict=True):
+        marked[i] = view
+    return marked, True
+
+
+def _regather_for_backward(
+    output: torch.Tensor, module: nn.Module, paired: bool
+) -> torch.Tensor:
+    """Mark ``output`` as leaving ``module``'s gathered block; see :class:`_RegatherForBackward`.
+
+    :param output: The block's output.
+    :param module: Module whose gathered block produced ``output``.
+    :param paired: Whether :func:`_reshard_after_backward` placed the node
+        that releases this re-gather.
+    :return: ``output``, marked when ``paired``.
+    """
+    experts = _gatherable_experts(module)
+    if experts is None or not paired:
+        return output
+    return _RegatherForBackward.apply(output, experts)
+
+
 @contextmanager
-def _gathered_expert_block(module: nn.Module) -> Iterator[bool]:
+def _gathered_expert_block(module: nn.Module) -> Iterator[None]:
     """Gather leftover-dp expert shards for the duration of the local kernel.
 
     The EP-local block is split across the data-parallel pair. The token
     dispatch and the packed-expert kernel both index that whole block.
-    Yields whether an FSDP gather happened.
+    A recompute inside backward leaves the block gathered for the
+    :class:`_RegatherForBackward` / :class:`_ReshardAfterBackward` pair.
     """
-    base = module
-    get_base = getattr(module, "get_base_layer", None)
-    if callable(get_base):
-        base = get_base()
-    unshard = getattr(base, "unshard", None)
-    reshard = getattr(base, "reshard", None)
-    if not callable(unshard) or not callable(reshard):
-        yield False
+    experts = _gatherable_experts(module)
+    if experts is None:
+        yield
         return
-    unshard()
+    in_backward = _in_backward()
+    if not in_backward:
+        # A backward that raised never released its hold.
+        _BACKWARD_HOLDS.pop(experts, None)
+    experts.unshard()
     try:
-        yield True
+        yield
     finally:
-        reshard()
+        if not in_backward:
+            experts.reshard()
 
 
 class TokenAdapterIds(NamedTuple):
@@ -160,19 +282,16 @@ def _ep_param_grad_hook(param: nn.Parameter) -> Callable[[torch.Tensor], None]:
     return hook
 
 
-def local_param_dict(
-    module: nn.Module, gathered: bool = False
-) -> dict[str, torch.Tensor]:
+def local_param_dict(module: nn.Module) -> dict[str, torch.Tensor]:
     """Plain-tensor views of a module's params for the EP-blind local kernel.
 
-    Frozen ``DTensor`` params pass as ``to_local()`` views. When ``gathered``,
-    ``reshard()`` frees their storage before backward reads it, so they are
-    copied. Trainable ones become detached leaf copies; a hook copies each
-    leaf grad back onto the sharded parameter (see
-    :func:`_ep_param_grad_hook`). Dense params pass through untouched.
+    Frozen ``DTensor`` params pass as ``to_local()`` views; under an FSDP
+    gather, :class:`_RegatherForBackward` refills their storage for backward.
+    Trainable ones become detached leaf copies; a hook copies each leaf grad
+    back onto the sharded parameter (see :func:`_ep_param_grad_hook`). Dense
+    params pass through untouched.
 
     :param module: Module whose parameters the local kernel reads.
-    :param gathered: Whether the parameters are an FSDP-gathered block.
     :return: Parameter and buffer tensors keyed by name.
     """
     params: dict[str, torch.Tensor] = {}
@@ -183,8 +302,6 @@ def local_param_dict(
             leaf = param.to_local().detach().clone().requires_grad_(True)
             leaf.register_hook(_ep_param_grad_hook(param))
             params[name] = leaf
-        elif gathered:
-            params[name] = param.to_local().clone()
         else:
             params[name] = param.to_local()
     params.update(dict(module.named_buffers()))
@@ -578,7 +695,14 @@ def _routed_ep_blocks(
     :param expert_kwargs: Extra keyword arguments for ``inner``.
     :return: ``[tokens, hidden]`` routed expert output.
     """
-    with _gathered_expert_block(module) as gathered:
+    with _gathered_expert_block(module):
+        params = local_param_dict(module)
+        param_names = list(params)
+        marked, paired = _reshard_after_backward(
+            module, [hidden_states, top_k_weights, *params.values()]
+        )
+        hidden_states, top_k_weights, *values = marked
+        params = dict(zip(param_names, values, strict=True))
         local_e = expert_local_tensor(_routed_up_weight(module)).shape[0]
         top_k = top_k_index.shape[-1]
         orders, send = _sort_token_blocks(
@@ -588,9 +712,7 @@ def _routed_ep_blocks(
             local_e * exchange.ep_degree,
         )
         counts = _routed_counts(send, exchange)
-        experts = LocalExperts(
-            module, inner, local_param_dict(module, gathered), expert_kwargs
-        )
+        experts = LocalExperts(module, inner, params, expert_kwargs)
         token_ids = None if adapter_ids is None else adapter_ids.ids
         names = [] if adapter_ids is None else adapter_ids.names
         flat_weights = top_k_weights.reshape(-1)
@@ -638,7 +760,9 @@ def _routed_ep_blocks(
             previous = CombinedBlock(combined, token_idx, orders[block], returned)
         assert previous is not None
         _scatter_block(result, previous, flat_weights, exchange.chunk_bytes)
-        return result.to(dtype=hidden_states.dtype)
+        return _regather_for_backward(
+            result.to(dtype=hidden_states.dtype), module, paired
+        )
 
 
 def _comm_stream(
@@ -778,7 +902,13 @@ def _install_sorted_ep_forward(
         ep_group: dist.ProcessGroup,
         ep_degree: int,
     ) -> torch.Tensor:
-        with _gathered_expert_block(self) as gathered:
+        with _gathered_expert_block(self):
+            params = local_param_dict(self)
+            param_names = list(params)
+            (inputs, *values), paired = _reshard_after_backward(
+                self, [inputs, *params.values()]
+            )
+            params = dict(zip(param_names, values, strict=True))
             local_e = expert_local_tensor(_sorted_weight(self)).shape[0]
             local_rows, local_counts, state = token_dispatch(
                 inputs,
@@ -787,11 +917,11 @@ def _install_sorted_ep_forward(
                 ep_degree=ep_degree,
                 num_local_experts=local_e,
             )
-            params = local_param_dict(self, gathered=gathered)
-            return token_combine(
+            combined = token_combine(
                 _call_with_local_params(self, inner, params, local_rows, local_counts),
                 state,
             )
+        return _regather_for_backward(combined, self, paired)
 
     def ep_forward(
         self: nn.Module,
