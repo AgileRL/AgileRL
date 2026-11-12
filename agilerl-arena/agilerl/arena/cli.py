@@ -21,6 +21,7 @@ from agilerl.arena.byoc import ArenaRootGroup, register_byoc_manifest_group
 from agilerl.arena.cli_agent import register_deployment_commands
 from agilerl.arena.cli_datasets import datasets_group
 from agilerl.arena.cli_manifest import handle_help_option
+from agilerl.arena.cli_secrets import secrets_group
 from agilerl.arena.client import MEMORY_SCOPES, MemoryScope
 from agilerl.arena.config import CommandConfig, arena_client
 from agilerl.arena.exceptions import ArenaError
@@ -1465,6 +1466,7 @@ def load_cli_plugins(group: click.Group) -> None:
 
 main.add_command(datasets_group)
 main.add_command(memory_group)
+main.add_command(secrets_group)
 main.add_command(snowflake_group)
 
 if __name__ == "__main__":
