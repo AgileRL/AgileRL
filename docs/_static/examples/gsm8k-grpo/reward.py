@@ -37,7 +37,7 @@ def format_reward(completion: str) -> float:
     return 1.0 if re.match(regex, text.strip()) else 0.0
 
 
-def reward(question: str, answer: str, completion: str) -> float:
+def reward_fn(question: str, answer: str, completion: str) -> float:
     """Combined GSM8K reward: answer correctness plus output format."""
     del question
     return correctness_reward(answer, completion) + format_reward(completion)
