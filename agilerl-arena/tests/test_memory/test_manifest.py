@@ -1281,6 +1281,76 @@ class TestDeviceFromResourceClass:
         assert lookup_gpu("L40S").name == "NVIDIA L40S"
         assert lookup_gpu("H100").name == "NVIDIA H100 80GB HBM3"
 
+    def test_gb300_does_not_take_the_b300_row(self):
+        gb300 = lookup_gpu("gpu-gb300")
+        named = lookup_gpu("NVIDIA GB300")
+        b300 = lookup_gpu("gpu-b300-sxm")
+
+        assert gb300 is named
+        assert gb300 is not b300
+        assert gb300.name == "NVIDIA GB300"
+        assert b300.name == "NVIDIA B300"
+        assert gb300.total_gib == 279
+        assert b300.total_gib == 288
+        assert (gb300.cc_major, gb300.cc_minor) == (10, 0)
+        assert gb300.bf16_tflops == 2500
+        assert gb300.memory_gb_per_second == 8000
+        assert gb300.nvlink is True
+
+    def test_b300_sxm_is_b300(self):
+        info = lookup_gpu("gpu-b300-sxm")
+        b200 = lookup_gpu("gpu-b200-sxm")
+
+        assert info.name == "NVIDIA B300"
+        assert b200.name == "NVIDIA B200"
+        assert info is not b200
+        assert info.total_gib == 288
+        assert (info.cc_major, info.cc_minor) == (10, 0)
+        assert info.bf16_tflops == 2250
+        assert info.memory_gb_per_second == 8000
+        assert info.all_reduce_gb_per_second == 700
+        assert info.all_reduce_latency_us == 10
+        assert info.nvlink is True
+
+    def test_rtx6000_type_strings_hit_the_training_row(self):
+        pro = lookup_gpu("NVIDIA RTX PRO 6000 Blackwell Server Edition")
+        plain = lookup_gpu("gpu-rtx6000")
+        suffixed = lookup_gpu("gpu-rtx6000-a")
+
+        assert plain is suffixed
+        assert plain is not pro
+        assert pro.name == "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+        assert plain.name == "NVIDIA RTX 6000 Blackwell Server Edition"
+        assert plain.total_gib == 96
+        assert (plain.cc_major, plain.cc_minor) == (12, 0)
+        assert plain.bf16_tflops == 500
+        assert plain.memory_gb_per_second == 1597
+        assert plain.all_reduce_gb_per_second == 20
+        assert plain.all_reduce_latency_us == 20
+        assert plain.nvlink is False
+
+    def test_rtx_6000_ada_does_not_take_the_blackwell_row(self):
+        ada = lookup_gpu("nvidia-rtx-6000-ada")
+        blackwell = lookup_gpu("gpu-rtx6000")
+
+        assert ada is not blackwell
+        assert ada is lookup_gpu("NVIDIA RTX 6000 Ada Generation")
+        assert ada.name == "NVIDIA RTX 6000 Ada Generation"
+        assert ada.total_gib == 48
+        assert (ada.cc_major, ada.cc_minor) == (8, 9)
+        assert ada.bf16_tflops == 364.2
+        assert ada.memory_gb_per_second == 960
+
+    def test_quadro_rtx_6000_does_not_take_the_blackwell_row(self):
+        quadro = lookup_gpu("Quadro RTX 6000")
+        blackwell = lookup_gpu("NVIDIA RTX 6000 Blackwell Server Edition")
+
+        assert quadro is not blackwell
+        assert quadro.name == "Quadro RTX 6000"
+        assert quadro.total_gib == 24
+        assert (quadro.cc_major, quadro.cc_minor) == (7, 5)
+        assert quadro.bf16_tflops is None
+
     def test_unknown_gpu_needs_an_explicit_size(self):
         tier = {"name": "exotic", "gpu_type": "TPU v5e"}
         with pytest.raises(ValueError, match="Unknown gpu_type"):
@@ -1309,9 +1379,9 @@ class TestDeviceFromResourceClass:
         assert device.total_bytes == 40 * GiB
 
     def test_unknown_gpu_takes_the_declared_size(self):
-        device = gpu_device_spec("nvidia-rtx-6000-ada", 48)
+        device = gpu_device_spec("nvidia-mi300x", 48)
 
-        assert device.name == "nvidia-rtx-6000-ada"
+        assert device.name == "nvidia-mi300x"
         assert device.total_bytes == 48 * GiB
 
     @pytest.mark.parametrize("gram_per_gpu", ["GiB 80", "N/A", "-8"])
@@ -1352,10 +1422,10 @@ class TestDeviceFromResourceClass:
 
     def test_unknown_gpu_with_an_unset_declared_size_is_refused(self):
         with pytest.raises(ValueError, match="Unknown gpu_type"):
-            gpu_device_spec("nvidia-rtx-6000-ada", 0)
+            gpu_device_spec("nvidia-mi300x", 0)
 
     def test_declared_size_in_bytes_sizes_an_unknown_gpu(self):
-        device = gpu_device_spec("nvidia-rtx-6000-ada", "34359738368")
+        device = gpu_device_spec("nvidia-mi300x", "34359738368")
 
         assert device.total_bytes == 32 * GiB
 
@@ -1398,6 +1468,7 @@ class TestUnsupportedGpuReason:
         [
             ("Tesla T4", "Tesla T4 (SM75) cannot run LLM training"),
             ("Tesla V100", "Tesla V100-SXM2-16GB (SM70) cannot run LLM training"),
+            ("Quadro RTX 6000", "Quadro RTX 6000 (SM75) cannot run LLM training"),
         ],
     )
     def test_gpus_below_sm80_name_their_capability(self, gpu_type, expected):
