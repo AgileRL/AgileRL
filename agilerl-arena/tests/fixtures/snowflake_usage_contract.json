@@ -1,0 +1,21 @@
+{
+  "headers": ["Authorization", "X-External-User-Id", "X-Arena-Client-Version"],
+  "open": {
+    "method": "POST",
+    "path": "/api/cli/v1/snowflake/runs",
+    "request": ["runId", "snowflakeAccount", "gpuCount", "gpuFamily", "startedAt"],
+    "response_data": ["runToken"]
+  },
+  "heartbeat": {
+    "method": "POST",
+    "path": "/api/cli/v1/snowflake/runs/{runId}/heartbeat",
+    "request": [],
+    "response_data": ["runToken"]
+  },
+  "complete": {
+    "method": "POST",
+    "path": "/api/cli/v1/snowflake/runs/{runId}/complete",
+    "request": ["endedAt"],
+    "response_data": []
+  }
+}

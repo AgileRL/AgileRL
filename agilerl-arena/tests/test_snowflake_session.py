@@ -10,11 +10,15 @@ import types
 from pathlib import Path
 
 import pytest
+from platformdirs import PlatformDirs
 
 from agilerl.arena.snowflake import APPLICATION
 from agilerl.arena.snowflake.session import (
+    connection_section,
     connections_file,
+    open_admin_session,
     open_session,
+    sql_errors,
     transient_errors,
 )
 
@@ -71,6 +75,7 @@ class TestOpenSession:
         assert open_session(None) == "opened"
         assert Builder.seen == {
             "connection_name": "default",
+            "connections_file_path": tmp_path / "connections.toml",
             "application": APPLICATION,
         }
         assert APPLICATION == "AgileRL_Arena"
@@ -227,6 +232,113 @@ class TestOpenSession:
         with pytest.raises(ValueError, match="not supported"):
             open_session(None)
 
+
+class TestOpenAdminSession:
+    @pytest.mark.parametrize(
+        "authenticator", ["OAUTH_AUTHORIZATION_CODE", "externalbrowser"]
+    )
+    def test_browser_sign_in_is_accepted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, authenticator: str
+    ) -> None:
+        _install(monkeypatch)
+        _write_connections(
+            tmp_path,
+            f"""
+            [arena-admin]
+            account = "ORGNAME-ACCOUNT"
+            user = "NICK"
+            authenticator = "{authenticator}"
+            """,
+            monkeypatch,
+        )
+
+        assert open_admin_session("arena-admin") == "opened"
+        assert Builder.seen == {
+            "connection_name": "arena-admin",
+            "connections_file_path": tmp_path / "connections.toml",
+            "application": APPLICATION,
+        }
+
+    def test_job_sessions_still_reject_oauth_browser_sign_in(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install(monkeypatch)
+        _write_connections(
+            tmp_path,
+            """
+            [arena-admin]
+            account = "ORGNAME-ACCOUNT"
+            authenticator = "OAUTH_AUTHORIZATION_CODE"
+            """,
+            monkeypatch,
+        )
+
+        with pytest.raises(ValueError, match="not supported"):
+            open_session("arena-admin")
+
+    def test_a_password_is_still_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install(monkeypatch)
+        _write_connections(
+            tmp_path,
+            """
+            [arena-admin]
+            account = "ORGNAME-ACCOUNT"
+            user = "NICK"
+            authenticator = "externalbrowser"
+            password = "secret"
+            role = "ACCOUNTADMIN"
+            """,
+            monkeypatch,
+        )
+
+        with pytest.raises(ValueError, match="uses password auth"):
+            open_admin_session("arena-admin")
+
+    def test_a_key_pair_admin_connection_is_accepted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install(monkeypatch)
+        _write_connections(
+            tmp_path,
+            """
+            [arena-admin]
+            account = "ORGNAME-ACCOUNT"
+            user = "NICK"
+            authenticator = "SNOWFLAKE_JWT"
+            private_key_file = "/keys/admin.p8"
+            role = "ACCOUNTADMIN"
+            """,
+            monkeypatch,
+        )
+
+        assert open_admin_session("arena-admin") == "opened"
+
+    def test_an_unsupported_authenticator_is_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install(monkeypatch)
+        _write_connections(
+            tmp_path,
+            """
+            [arena-admin]
+            account = "ORGNAME-ACCOUNT"
+            user = "NICK"
+            authenticator = "okta"
+            """,
+            monkeypatch,
+        )
+
+        with pytest.raises(ValueError, match="not supported") as raised:
+            open_admin_session("arena-admin")
+
+        assert str(raised.value) == (
+            "Authenticator 'OKTA' is not supported. "
+            "Use a key pair (SNOWFLAKE_JWT) or a programmatic access token."
+        )
+        assert Builder.seen is None
+
     def test_missing_sdk_is_reported(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setitem(sys.modules, "snowflake.snowpark", None)
 
@@ -322,6 +434,100 @@ class TestTransientErrors:
         assert retry_on == (InterfaceError, OperationalError, OSError)
 
 
+class TestSqlErrors:
+    def test_connector_and_snowpark_statement_errors(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        errors = types.ModuleType("snowflake.connector.errors")
+        exceptions = types.ModuleType("snowflake.snowpark.exceptions")
+
+        class DatabaseError(Exception):
+            pass
+
+        class SnowparkSQLException(Exception):
+            pass
+
+        errors.DatabaseError = DatabaseError
+        exceptions.SnowparkSQLException = SnowparkSQLException
+        monkeypatch.setitem(sys.modules, "snowflake", types.ModuleType("snowflake"))
+        monkeypatch.setitem(
+            sys.modules, "snowflake.connector", types.ModuleType("snowflake.connector")
+        )
+        monkeypatch.setitem(sys.modules, "snowflake.connector.errors", errors)
+        monkeypatch.setitem(
+            sys.modules, "snowflake.snowpark", types.ModuleType("snowflake.snowpark")
+        )
+        monkeypatch.setitem(sys.modules, "snowflake.snowpark.exceptions", exceptions)
+
+        # Act
+        caught = sql_errors()
+
+        # Assert
+        assert caught == (DatabaseError, SnowparkSQLException)
+
+    def test_nothing_is_caught_without_the_snowflake_extra(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setitem(sys.modules, "snowflake.connector.errors", None)
+
+        assert sql_errors() == ()
+
+
 class TestConnectionsFile:
-    def test_lives_under_the_home_snowflake_directory(self) -> None:
-        assert connections_file() == Path.home() / ".snowflake" / "connections.toml"
+    def test_snowflake_home_wins_when_it_exists(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        home = tmp_path / "sf"
+        home.mkdir()
+        monkeypatch.setenv("SNOWFLAKE_HOME", str(home))
+
+        assert connections_file() == home / "connections.toml"
+
+    def test_home_snowflake_directory_when_it_exists(
+        self, arena_home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("SNOWFLAKE_HOME", raising=False)
+        (arena_home / ".snowflake").mkdir()
+
+        assert connections_file() == arena_home / ".snowflake" / "connections.toml"
+
+    def test_platform_config_directory_without_home_snowflake(
+        self, arena_home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("SNOWFLAKE_HOME", raising=False)
+        monkeypatch.setattr(
+            PlatformDirs,
+            "user_config_path",
+            property(lambda dirs: arena_home / "config" / dirs.appname),
+        )
+
+        found = connections_file()
+
+        assert found == arena_home / "config" / "snowflake" / "connections.toml"
+
+
+class TestConnectionSection:
+    def test_returns_the_named_section(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _write_connections(tmp_path, JWT, monkeypatch)
+
+        assert connection_section("default") == {
+            "account": "acct",
+            "user": "trainer",
+            "authenticator": "SNOWFLAKE_JWT",
+            "private_key_file": "/keys/arena.p8",
+        }
+
+    def test_missing_file_or_section_is_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "agilerl.arena.snowflake.session.connections_file",
+            lambda: tmp_path / "connections.toml",
+        )
+        assert connection_section("default") is None
+
+        _write_connections(tmp_path, JWT, monkeypatch)
+        assert connection_section("arena") is None

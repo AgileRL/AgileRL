@@ -151,6 +151,8 @@ def log_chat_model(
 def start_vllm_service(version: ModelVersion, request: PublishDocument) -> str | None:
     """Create the vLLM service and read its endpoint by service name.
 
+    The inference image builds on the CPU pool, and the service suspends when idle.
+
     :param version: Logged model version.
     :param request: Parsed request file with ``service_name`` set.
     :return: The ingress endpoint, or ``None`` while Snowflake provisions it.
@@ -168,6 +170,8 @@ def start_vllm_service(version: ModelVersion, request: PublishDocument) -> str |
     version.create_service(
         service_name=target,
         service_compute_pool=request["compute_pool"],
+        image_build_compute_pool=request["image_build_compute_pool"],
+        min_instances=0,
         ingress_enabled=True,
         gpu_requests=str(request["gpu_count"]),
         inference_engine_options={

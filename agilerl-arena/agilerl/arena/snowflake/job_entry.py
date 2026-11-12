@@ -33,19 +33,28 @@ from agilerl.arena.snowflake.job import (
 )
 from agilerl.arena.snowflake.session import open_session, transient_errors
 from agilerl.arena.snowflake.source import QuerySource, SnowflakeSession, TableSource
-from agilerl.arena.snowflake.upload import CKPT_DIR, upload_with_retries
+from agilerl.arena.snowflake.upload import (
+    CHECKPOINT_DIR,
+    CKPT_DIR,
+    upload_with_retries,
+)
 
 # Stage mounts reject the rename ``dataset/`` writes under the trainer cwd.
 WORK_DIR = Path("/tmp/arena/work")
 METRICS_PATH = Path("/tmp/arena/metrics.jsonl")
 POLL_INTERVAL_S = 60.0
+# ``submit --resume`` copies the earlier run's last checkpoint here, under the run directory.
+RESUME_DIR = "resume"
 
 
 @dataclass
 class MetricsPublisher:
-    """Merges complete lines of the trainer's metrics file into the metrics table."""
+    """Merges complete lines of the trainer's metrics file into the metrics table.
 
-    session: SnowflakeSession
+    Each pass opens its own session, so runs outlive any one OAuth token.
+    """
+
+    open_session: Callable[[], SnowflakeSession]
     job: JobDocument
     metrics_path: Path
     scratch: Path
@@ -77,12 +86,16 @@ class MetricsPublisher:
     def _merge(self, copy: Path) -> None:
         run_id = str(self.job["run_id"])
         runs_stage = str(self.job["runs_stage"])
-        put_file(
-            self.session, copy, stage_directory(runs_stage, run_id, "metrics.jsonl")
-        )
-        self.session.sql(
-            metrics_merge_sql(run_id, str(self.job["metrics_table"]), runs_stage)
-        ).collect()
+        session = self.open_session()
+        try:
+            put_file(
+                session, copy, stage_directory(runs_stage, run_id, "metrics.jsonl")
+            )
+            session.sql(
+                metrics_merge_sql(run_id, str(self.job["metrics_table"]), runs_stage)
+            ).collect()
+        finally:
+            session.close()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -95,17 +108,12 @@ def main(argv: list[str] | None = None) -> int:
     if len(args) != 1:
         msg = "usage: python -m agilerl.arena.snowflake.job_entry /arena/run/job.json"
         raise SystemExit(msg)
-    retry_on = transient_errors()
-    session = open_session(None)
-    try:
-        return run_job(Path(args[0]), session, retry_on)
-    finally:
-        session.close()
+    return run_job(Path(args[0]), partial(open_session, None), transient_errors())
 
 
 def run_job(
     job_path: Path,
-    session: SnowflakeSession,
+    open_job_session: Callable[[], SnowflakeSession],
     retry_on: tuple[type[Exception], ...],
     poll_interval_s: float = POLL_INTERVAL_S,
     sleep: Callable[[float], None] = time.sleep,
@@ -113,7 +121,8 @@ def run_job(
     """PUT the exported source, if any, to the run stage, train, and merge metrics.
 
     :param job_path: ``job.json`` in the run directory every instance mounts.
-    :param session: Snowpark session.
+    :param open_job_session: Opens a Snowpark session. The export uses one
+        session; each metrics pass opens its own.
     :param retry_on: Errors a stage upload retries.
     :param poll_interval_s: Seconds between metrics merges.
     :param sleep: Called between polls and upload retries.
@@ -122,33 +131,22 @@ def run_job(
     job = cast("JobDocument", json.loads(job_path.read_text(encoding="utf-8")))
     run_dir = job_path.resolve().parent
     manifest_path = run_dir / "manifest.yaml"
-    if job["source"] is not None:
-        with tempfile.TemporaryDirectory() as tmp:
-            shards = write_source(
-                session,
-                source_from_document(job["source"]),
-                manifest_columns(manifest_path),
-                Path(tmp),
-            )
-            upload_with_retries(
-                partial(put_shards, session, shards, job), True, sleep, retry_on
-            )
+    command = trainer_command(job, run_dir)
+    source = job["source"]
+    if source is not None:
+        _export_source(open_job_session(), source, job, manifest_path, retry_on, sleep)
     CKPT_DIR.mkdir(parents=True, exist_ok=True)
     WORK_DIR.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(manifest_path, WORK_DIR / "manifest.yaml")
     metrics = MetricsPublisher(
-        session=session,
+        open_session=open_job_session,
         job=job,
         metrics_path=METRICS_PATH,
         scratch=WORK_DIR,
         retry_on=retry_on,
         sleep=sleep,
     )
-    process = subprocess.Popen(
-        trainer_command(job, run_dir),
-        env=trainer_env(os.environ),
-        cwd=WORK_DIR,
-    )
+    process = subprocess.Popen(command, env=trainer_env(os.environ), cwd=WORK_DIR)
     try:
         while True:
             code = process.poll()
@@ -161,6 +159,29 @@ def run_job(
         if process.poll() is None:
             process.kill()
             process.wait()
+
+
+def _export_source(
+    session: SnowflakeSession,
+    source: Mapping[str, str],
+    job: JobDocument,
+    manifest_path: Path,
+    retry_on: tuple[type[Exception], ...],
+    sleep: Callable[[float], None],
+) -> None:
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            shards = write_source(
+                session,
+                source_from_document(source),
+                manifest_columns(manifest_path),
+                Path(tmp),
+            )
+            upload_with_retries(
+                partial(put_shards, session, shards, job), True, sleep, retry_on
+            )
+    finally:
+        session.close()
 
 
 def put_shards(session: SnowflakeSession, shards: Path, job: JobDocument) -> None:
@@ -184,6 +205,8 @@ def trainer_command(job: JobDocument, run_dir: Path) -> list[str]:
     :param job: Parsed ``job.json``.
     :param run_dir: Run directory on the stage mount.
     :return: The command list.
+    :raises FileNotFoundError: ``resume`` is set and ``<run_dir>/resume`` holds
+        no ``checkpoint_<n>`` directory.
     """
     command = [
         sys.executable,
@@ -206,7 +229,36 @@ def trainer_command(job: JobDocument, run_dir: Path) -> list[str]:
         command.extend(["--custom-reward-s3", str(run_dir / "reward.py")])
     if job["checkpoint_steps"] is not None:
         command.extend(["--checkpoint-steps", str(job["checkpoint_steps"])])
+    if job["resume"]:
+        command.extend(
+            [
+                "--checkpoint-s3",
+                str(resume_checkpoint(run_dir / RESUME_DIR)),
+                "--checkpoint-mode",
+                "resume",
+            ]
+        )
     return command
+
+
+def resume_checkpoint(resume_dir: Path) -> Path:
+    """Highest ``checkpoint_<n>`` directory copied from the resumed run.
+
+    The trainer reads the step to resume from out of the ``checkpoint_<n>`` name.
+
+    :param resume_dir: ``resume/`` under the run directory.
+    :return: The checkpoint directory.
+    :raises FileNotFoundError: ``resume_dir`` is missing or holds no checkpoint directory.
+    """
+    numbered = [
+        (int(match.group(1)), child)
+        for child in resume_dir.iterdir()
+        if (match := CHECKPOINT_DIR.fullmatch(child.name)) and child.is_dir()
+    ]
+    if not numbered:
+        msg = f"No checkpoint_<n> directory to resume from in {resume_dir}"
+        raise FileNotFoundError(msg)
+    return max(numbered)[1]
 
 
 def trainer_env(base: Mapping[str, str]) -> dict[str, str]:

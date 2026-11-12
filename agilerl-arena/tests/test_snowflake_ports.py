@@ -112,3 +112,14 @@ class TestServiceEndpoints:
     def test_a_population_past_the_ray_ports_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="Ray ports"):
             service_endpoints(TrainerPorts(agents=40, engines_per_agent=1))
+
+    def test_no_trainer_omits_trainer_spans(self) -> None:
+        endpoints = service_endpoints(None)
+        ports = set(_covered(endpoints))
+
+        assert RAY_GCS_PORT in ports
+        assert RAY_MIN_WORKER_PORT in ports
+        assert 32768 in ports
+        assert 10000 not in ports
+        assert 20000 not in ports
+        assert 29700 not in ports

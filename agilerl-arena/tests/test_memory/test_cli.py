@@ -516,6 +516,28 @@ class TestMain:
         assert code == EXIT_OK
         assert payload["engine"] == {"tensor_parallel_size": width, "max_num_seqs": 16}
 
+    @pytest.mark.parametrize("gen_device_gb", [None, 80.0], ids=["one_gpu", "gen_gpu"])
+    def test_gpus_per_node_keeps_an_unset_width_on_one_node(
+        self, tmp_path, moe_config_path, capsys, gen_device_gb
+    ):
+        # Arrange: one 8-GPU node resolves TP=2 at 32768 tokens.
+        path = write_manifest(tmp_path, UNSET_WIDTH_MOE, "moe.yaml", 32768)
+
+        # Act
+        main(
+            path,
+            config_path=moe_config_path,
+            gpu="A100-80GB",
+            gen_device_gb=gen_device_gb,
+            num_gpus=8,
+            gpus_per_node=1,
+            as_json=True,
+        )
+
+        # Assert
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["engine"] == {"tensor_parallel_size": 1, "max_num_seqs": 16}
+
     @pytest.mark.parametrize(
         ("device_gb", "send_buffer"),
         [(None, "Merged weight send buffer"), (5.25, "LoRA send buffer")],
@@ -1622,6 +1644,16 @@ class TestMainResourceTier:
 
         assert code == EXIT_USAGE
         assert "--num-gpus needs --gpu or --device-gb" in capsys.readouterr().err
+
+    def test_gpus_per_node_with_a_tier_search_is_a_usage_error(
+        self, manifest_path, capsys
+    ):
+        code = main(
+            manifest_path, tiers=TIERS, config_path=TINY_CONFIG, gpus_per_node=1
+        )
+
+        assert code == EXIT_USAGE
+        assert "gpus_per_node needs --gpu or --device-gb" in capsys.readouterr().err
 
     def test_tensor_parallel_engine_wider_than_a_node_is_ruled_out(
         self, tmp_path, capsys

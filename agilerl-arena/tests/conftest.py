@@ -88,6 +88,8 @@ def _isolate_arena_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
 def arena_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Temporary HOME with ``~/.arena`` created under it."""
     monkeypatch.setenv("HOME", str(tmp_path))
+    # Windows expands ``~`` from USERPROFILE, not HOME.
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     arena_dir = tmp_path / ".arena"
     arena_dir.mkdir(parents=True, exist_ok=True)
     return tmp_path

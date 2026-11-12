@@ -174,6 +174,7 @@ def write_request(run_dir: Path, **overrides: object) -> Path:
         "compute_pool": "arena_gpu_pool",
         "database": "ARENA",
         "gpu_count": 1,
+        "image_build_compute_pool": "arena_head_pool",
         "max_model_len": None,
         "model_name": "arena_policy",
         "run_id": RUN_ID,
@@ -256,6 +257,8 @@ class TestRunPublish:
         assert registry.version.service == {
             "service_name": "ARENA.TRAINING.arena_policy_checkpoint_10",
             "service_compute_pool": "arena_gpu_pool",
+            "image_build_compute_pool": "arena_head_pool",
+            "min_instances": 0,
             "ingress_enabled": True,
             "gpu_requests": "2",
             "inference_engine_options": {

@@ -88,13 +88,15 @@ def trainer_port_spans(trainer: TrainerPorts) -> list[tuple[int, int]]:
     return spans
 
 
-def service_endpoints(trainer: TrainerPorts) -> list[dict[str, object]]:
+def service_endpoints(trainer: TrainerPorts | None) -> list[dict[str, object]]:
     """TCP endpoints the job spec opens between instances.
 
     Ray's fixed ports keep their own endpoints. The Ray worker range, the
-    ephemeral range, and the trainer spans are merged so no two overlap.
+    ephemeral range, and, when ``trainer`` is set, the trainer spans are
+    merged so no two overlap. The head service passes ``None``.
 
-    :param trainer: Population size and engines per member.
+    :param trainer: Population size and engines per member, or ``None`` when
+        the service opens no trainer spans.
     :return: Endpoint mappings for the service specification.
     :raises ValueError: A trainer span reaches the Ray ports.
     """
@@ -105,8 +107,9 @@ def service_endpoints(trainer: TrainerPorts) -> list[dict[str, object]]:
     spans = [
         (RAY_MIN_WORKER_PORT, RAY_MAX_WORKER_PORT),
         (32768, 60999),
-        *trainer_port_spans(trainer),
     ]
+    if trainer is not None:
+        spans.extend(trainer_port_spans(trainer))
     endpoints.extend(
         {
             "name": f"ports-{index}",

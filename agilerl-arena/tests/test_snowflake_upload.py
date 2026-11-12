@@ -186,7 +186,8 @@ class TestCheckpointUploaderUpload:
         assert (run_dir / "state.pt").read_text(encoding="utf-8") == "state"
         assert (run_dir / "merged" / "model.safetensors").is_file()
         assert (run_dir / "merged" / ".complete").is_file()
-        assert sessions[0].order[-1].endswith("merged/.complete")
+        assert sessions[0].order[-2].endswith("merged/.complete")
+        assert sessions[0].order[-1] == f"@arena.runs/{RUN_ID}/checkpoint_4/.uploaded"
         assert sessions[0].closed == 1
 
     def test_nothing_ready_opens_no_session(self, tmp_path: Path) -> None:
@@ -245,6 +246,7 @@ class TestCheckpointUploaderUpload:
             "model.safetensors",
             "state.pt",
             ".complete",
+            ".uploaded",
         ]
 
     def test_non_final_failure_keeps_complete_off_the_stage(
@@ -291,6 +293,7 @@ class TestCheckpointUploaderUpload:
         merged = stage / "arena.runs" / RUN_ID / "checkpoint_1" / "merged"
         assert (merged / "config.json").is_file()
         assert not (merged / ".complete").exists()
+        assert not (merged.parent / ".uploaded").exists()
         assert all(session.closed == 1 for session in sessions)
         assert len(sessions) == 3
 
@@ -308,3 +311,161 @@ class TestCheckpointUploaderUpload:
 
         with pytest.raises(OSError, match="stage unavailable"):
             uploader.upload(final=True)
+
+
+class TestCheckpointUploaderUploadedMarker:
+    def _uploader(
+        self, ckpt: Path, sessions: list[StageSession], stage: Path
+    ) -> CheckpointUploader:
+        def open_session() -> StageSession:
+            sessions.append(StageSession(stage))
+            return sessions[-1]
+
+        return CheckpointUploader(
+            open_session=open_session,
+            runs_stage="arena.runs",
+            run_id=RUN_ID,
+            ckpt_root=ckpt,
+            retry_on=RETRY_ON,
+            sleep=lambda seconds: None,
+        )
+
+    def test_marker_follows_the_last_file_of_a_finished_checkpoint(
+        self, tmp_path: Path
+    ) -> None:
+        # Arrange
+        ckpt = tmp_path / "ckpt"
+        _checkpoint(ckpt, 1, merged_complete=True)
+        _checkpoint(ckpt, 2, merged_complete=False)
+        stage = tmp_path / "stage"
+        sessions: list[StageSession] = []
+
+        # Act
+        self._uploader(ckpt, sessions, stage).upload(final=False)
+
+        # Assert
+        run_dir = f"@arena.runs/{RUN_ID}"
+        assert sessions[0].order == [
+            f"{run_dir}/checkpoint_1/merged/config.json",
+            f"{run_dir}/checkpoint_1/merged/model.safetensors",
+            f"{run_dir}/checkpoint_1/state.pt",
+            f"{run_dir}/checkpoint_1/merged/.complete",
+            f"{run_dir}/checkpoint_1/.uploaded",
+        ]
+        marker = stage / "arena.runs" / RUN_ID / "checkpoint_1" / ".uploaded"
+        assert marker.read_bytes() == b""
+        assert not (stage / "arena.runs" / RUN_ID / "checkpoint_2").exists()
+
+    def test_checkpoint_waiting_on_merged_weights_gets_no_marker(
+        self, tmp_path: Path
+    ) -> None:
+        # Arrange
+        ckpt = tmp_path / "ckpt"
+        _checkpoint(ckpt, 1, merged_complete=False)
+        stage = tmp_path / "stage"
+
+        # Act
+        self._uploader(ckpt, [], stage).upload(final=True)
+
+        # Assert
+        run_dir = stage / "arena.runs" / RUN_ID / "checkpoint_1"
+        assert (run_dir / "state.pt").is_file()
+        assert not (run_dir / ".uploaded").exists()
+
+    def test_marker_lands_once_late_merged_weights_finish(self, tmp_path: Path) -> None:
+        # Arrange
+        ckpt = tmp_path / "ckpt"
+        _checkpoint(ckpt, 1, merged_complete=False)
+        _checkpoint(ckpt, 2, merged_complete=False)
+        sessions: list[StageSession] = []
+        uploader = self._uploader(ckpt, sessions, tmp_path / "stage")
+        uploader.upload(final=False)
+        (ckpt / "checkpoint_1" / "merged" / ".complete").write_text(
+            "", encoding="utf-8"
+        )
+
+        # Act
+        uploader.upload(final=False)
+        uploader.upload(final=False)
+
+        # Assert
+        assert len(sessions) == 2
+        assert sessions[1].order[-1] == f"@arena.runs/{RUN_ID}/checkpoint_1/.uploaded"
+        assert not (ckpt / "checkpoint_1").exists()
+
+    def test_failed_file_put_leaves_no_marker(self, tmp_path: Path) -> None:
+        # Arrange
+        ckpt = tmp_path / "ckpt"
+        _checkpoint(ckpt, 1, merged_complete=True)
+        stage = tmp_path / "stage"
+        uploader = CheckpointUploader(
+            open_session=lambda: StageSession(stage, failures=99),
+            runs_stage="arena.runs",
+            run_id=RUN_ID,
+            ckpt_root=ckpt,
+            retry_on=RETRY_ON,
+            sleep=lambda seconds: None,
+        )
+
+        # Act
+        result = uploader.upload(final=False)
+
+        # Assert
+        assert result is False
+        assert not (stage / "arena.runs" / RUN_ID / "checkpoint_1").exists()
+        assert (ckpt / "checkpoint_1").is_dir()
+
+
+class TestCheckpointUploaderLocalCleanup:
+    def _uploader(self, ckpt: Path, stage: Path) -> CheckpointUploader:
+        return CheckpointUploader(
+            open_session=lambda: StageSession(stage),
+            runs_stage="arena.runs",
+            run_id=RUN_ID,
+            ckpt_root=ckpt,
+            retry_on=RETRY_ON,
+            sleep=lambda seconds: None,
+        )
+
+    def test_uploaded_older_checkpoint_is_deleted(self, tmp_path: Path) -> None:
+        # Arrange
+        ckpt = tmp_path / "ckpt"
+        _checkpoint(ckpt, 1, merged_complete=True)
+        _checkpoint(ckpt, 2, merged_complete=False)
+        stage = tmp_path / "stage"
+
+        # Act
+        result = self._uploader(ckpt, stage).upload(final=False)
+
+        # Assert
+        assert result is True
+        assert not (ckpt / "checkpoint_1").exists()
+        assert (ckpt / "checkpoint_2" / "state.pt").is_file()
+        uploaded = stage / "arena.runs" / RUN_ID / "checkpoint_1"
+        assert (uploaded / "merged" / ".complete").is_file()
+
+    def test_partly_uploaded_older_checkpoint_is_kept(self, tmp_path: Path) -> None:
+        # Arrange
+        ckpt = tmp_path / "ckpt"
+        _checkpoint(ckpt, 1, merged_complete=False)
+        _checkpoint(ckpt, 2, merged_complete=False)
+
+        # Act
+        self._uploader(ckpt, tmp_path / "stage").upload(final=False)
+
+        # Assert
+        assert (ckpt / "checkpoint_1" / "merged" / "model.safetensors").is_file()
+        assert (ckpt / "checkpoint_2").is_dir()
+
+    def test_final_upload_keeps_the_latest_checkpoint(self, tmp_path: Path) -> None:
+        # Arrange
+        ckpt = tmp_path / "ckpt"
+        _checkpoint(ckpt, 3, merged_complete=True)
+        _checkpoint(ckpt, 10, merged_complete=True)
+
+        # Act
+        self._uploader(ckpt, tmp_path / "stage").upload(final=True)
+
+        # Assert
+        assert not (ckpt / "checkpoint_3").exists()
+        assert (ckpt / "checkpoint_10" / "merged" / ".complete").is_file()
