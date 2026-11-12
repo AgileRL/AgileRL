@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import time
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -18,6 +19,11 @@ import pytest
 
 from agilerl.arena.auth import ArenaOAuth2
 from agilerl.arena.client import EXTERNAL_USER_ID_HEADER, ArenaClient, _TokenStore
+from agilerl.arena.client_version import (
+    CLIENT_UPDATE_HEADER,
+    CLIENT_VERSION_HEADER,
+    announce_update,
+)
 from agilerl.arena.exceptions import (
     ArenaAPIError,
     ArenaAuthError,
@@ -27,6 +33,7 @@ from agilerl.arena.exceptions import (
     ArenaTrainingError,
     ArenaValidationError,
 )
+from agilerl.arena.models import __version__
 from agilerl.arena.models.model_info import (
     STATUS_PREVIEW,
     SUPPORTED_MODEL_INFO,
@@ -2858,4 +2865,108 @@ class TestGetDefaultRunSpec:
                 "field": "algorithm",
                 "pretrainedModelNameOrPath": "ibm-granite/granite-3.3-2b-instruct",
             },
+        )
+
+
+class TestArenaClientVersionSignals:
+    @pytest.fixture(autouse=True)
+    def fresh_process(self) -> None:
+        announce_update.cache_clear()
+
+    @staticmethod
+    def _client(
+        monkeypatch: pytest.MonkeyPatch,
+        handler: Callable[[httpx.Request], httpx.Response],
+    ) -> ArenaClient:
+        real_client = httpx.Client
+        monkeypatch.setattr(
+            "agilerl.arena.client.httpx.Client",
+            lambda **kwargs: real_client(
+                transport=httpx.MockTransport(handler), **kwargs
+            ),
+        )
+        with patch("agilerl.arena.auth.KeycloakOpenID"):
+            return ArenaClient(api_key="test-key")
+
+    def test_every_request_sends_the_client_version(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return httpx.Response(200, json={"ok": True, "data": []})
+
+        client = self._client(monkeypatch, handler)
+
+        # Act
+        client.list_models()
+
+        # Assert
+        assert seen[0].headers[CLIENT_VERSION_HEADER] == __version__
+        assert seen[0].headers["Authorization"] == "Bearer test-key"
+
+    UPGRADE_DESCRIPTION = (
+        "agilerl-arena 0.9.0 is no longer supported; the minimum is 1.0.0. "
+        "Run: pip install -U agilerl-arena"
+    )
+
+    def _upgrade_required(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            426,
+            json={
+                "error": "client_upgrade_required",
+                "description": self.UPGRADE_DESCRIPTION,
+            },
+        )
+
+    def test_upgrade_required_shows_the_server_description_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        client = self._client(monkeypatch, self._upgrade_required)
+
+        # Act
+        with pytest.raises(ArenaAPIError) as raised:
+            client.list_models()
+
+        # Assert
+        assert raised.value.status_code == 426
+        assert raised.value.detail == self.UPGRADE_DESCRIPTION
+        assert raised.value.extras == {}
+        assert str(raised.value).count("pip install") == 1
+
+    def test_upgrade_required_on_the_capabilities_fetch_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = self._client(monkeypatch, self._upgrade_required)
+
+        with pytest.raises(ArenaAPIError) as raised:
+            client._get_cli_capabilities(force_refresh=True)
+
+        assert raised.value.status_code == 426
+        assert str(raised.value) == f"API error (426): {self.UPGRADE_DESCRIPTION}"
+
+    def test_an_update_header_prints_one_notice(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Arrange
+        client = self._client(
+            monkeypatch,
+            lambda request: httpx.Response(
+                200,
+                json={"ok": True, "data": []},
+                headers={CLIENT_UPDATE_HEADER: "9.9.9"},
+            ),
+        )
+
+        # Act
+        client.list_models()
+        client.list_models()
+
+        # Assert
+        assert capsys.readouterr().err == (
+            f"agilerl-arena 9.9.9 is available (you have {__version__}). "
+            "Run: pip install -U agilerl-arena\n"
         )

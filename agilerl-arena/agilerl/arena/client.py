@@ -23,6 +23,7 @@ from agilerl.arena.auth import (
     oauth_access_token_expires_at,
     validate_partner_credentials,
 )
+from agilerl.arena.client_version import CLIENT_VERSION_HEADER, print_update_notice
 from agilerl.arena.exceptions import (
     ArenaAPIError,
     ArenaAuthError,
@@ -45,6 +46,7 @@ from agilerl.arena.models import (
     FinetuningNetworkSpec,
     LLMAlgorithmSpec,
     TrainingManifest,
+    __version__,
 )
 from agilerl.arena.models.model_info import (
     STATUS_PREVIEW,
@@ -264,6 +266,8 @@ class ArenaClient:
             base_url=self._base_url,
             timeout=self._request_timeout,
             follow_redirects=True,
+            headers={CLIENT_VERSION_HEADER: __version__},
+            event_hooks={"response": [print_update_notice]},
         )
 
         self._try_restore_session()

@@ -28,8 +28,9 @@ hub = [
     "huggingface-hub>=0.30",
 ]
 # Snowpark requires protobuf<6.34 and vLLM 0.32 pins protobuf==7.36.1 on s390x.
+# Setup's registry login calls SnowflakeRestful._token_request, tested on 4.8.
 snowflake = [
-    "snowflake-connector-python; platform_machine != 's390x'",
+    "snowflake-connector-python>=4.8,<4.9; platform_machine != 's390x'",
     "snowflake-snowpark-python; platform_machine != 's390x'",
 ]
 # Installed by images/snowflake-job only: Model Registry calls and the parquet
@@ -73,5 +74,8 @@ ignore-vcs = true
 [tool.hatch.build.targets.wheel]
 only-include = ["agilerl/arena"]
 
+[tool.hatch.build.targets.wheel.hooks.custom]
+path = "hatch_build.py"
+
 [tool.hatch.build.targets.sdist]
-only-include = ["agilerl/arena", "README.md"]
+only-include = ["agilerl/arena", "README.md", "hatch_build.py"]

@@ -39,7 +39,10 @@ from agilerl.arena.snowflake.source import (
     SnowflakeSession,
 )
 
-MERGED_EXPORT_REQUIRED = "Train with training.checkpoint_export.format: merged."
+MERGED_EXPORT_REQUIRED = (
+    "Runs write merged/ when their checkpoint_export trigger fires, by default "
+    "at the final save, so a run stopped before then or an earlier step has none."
+)
 
 
 class StageFiles(SnowflakeFiles, Protocol):
@@ -62,6 +65,7 @@ class PublishDocument(TypedDict):
     compute_pool: str
     database: str
     gpu_count: int
+    image_build_compute_pool: str
     max_model_len: int | None
     model_name: str
     run_id: str
@@ -82,6 +86,7 @@ class PublishSettings:
     :param step: Checkpoint step. ``None`` takes the newest complete merged export.
     :param serve: Start a vLLM service after logging the model.
     :param compute_pool: Pool for the publish job and the service. ``None`` uses the run's.
+    :param image_build_pool: CPU pool that builds the service's inference image.
     :param image: Job image. ``None`` uses the run's.
     :param warehouse: Query warehouse for the job. ``None`` uses the run's.
     :param gpu_count: GPUs the service requests.
@@ -98,6 +103,7 @@ class PublishSettings:
     step: int | None
     serve: bool
     compute_pool: str | None
+    image_build_pool: str
     image: str | None
     warehouse: str | None
     gpu_count: int
@@ -127,6 +133,7 @@ def submit_publish(
     :raises ValueError: A name is unsafe or taken, or the run has no usable checkpoint.
     """
     model_name = single_identifier(settings.model_name, "model name")
+    image_build_pool = single_identifier(settings.image_build_pool, "image build pool")
     database, schema = registry_schema(session, settings.database, settings.schema)
     prefix = runs_prefix(settings.runs_stage, settings.run_id)
     run = json.loads(session.file.get_stream(f"{prefix}/job.json").read())
@@ -172,6 +179,7 @@ def submit_publish(
         "compute_pool": compute_pool,
         "database": database,
         "gpu_count": settings.gpu_count,
+        "image_build_compute_pool": image_build_pool,
         "max_model_len": settings.max_model_len,
         "model_name": model_name,
         "run_id": settings.run_id,
@@ -192,33 +200,79 @@ def submit_publish(
 
 def wait_for_publish(
     session: SnowflakeSession,
-    job_name: str,
+    job: PublishJob,
+    echo: Callable[[str], None] = print,
     sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
     poll_s: float = 10.0,
+    timeout_s: float = 3600.0,
 ) -> None:
-    """Poll the publish job until it exits.
+    """Poll the publish job until it exits or the deadline passes.
+
+    The job waits for the vLLM service, and a GPU service can take 20 minutes
+    or more to start.
 
     :param session: Snowpark session.
-    :param job_name: Job service from :func:`submit_publish`.
+    :param job: Job from :func:`submit_publish`.
+    :param echo: Called with ``status: <service status>`` each time it changes.
     :param sleep: Called between polls.
+    :param clock: Seconds on a monotonic clock.
     :param poll_s: Seconds between polls.
-    :raises RuntimeError: The job failed. The message holds its log.
+    :param timeout_s: Seconds to wait before giving up. The job keeps running.
+    :raises RuntimeError: The job ended in any state but done, with its log,
+        or is still running at the deadline.
     """
-    statement = service_status_sql(job_name)
+    statement = service_status_sql(job.name)
+    deadline = clock() + timeout_s
+    shown = ""
     while True:
         rows = session.sql(statement).collect()
-        state = job_state({str(lowered(row)["service_status"]).upper() for row in rows})
+        statuses = {str(lowered(row)["service_status"]).upper() for row in rows}
+        status = ", ".join(sorted(statuses)) or "no containers yet"
+        if status != shown:
+            echo(f"status: {status}")
+            shown = status
+        # A job lists no containers until a node takes it.
+        state = job_state(statuses) if statuses else "running"
         if state == "done":
             return
-        if state == "failed":
-            logs = log_text(session.sql(service_logs_sql(job_name, 0)).collect())
-            msg = f"Publish job {job_name} failed:\n{logs}"
+        if state != "running":
+            logs = log_text(session.sql(service_logs_sql(job.name, 0)).collect())
+            msg = f"Publish job {job.name} {state}:\n{logs}"
             raise RuntimeError(msg)
+        if clock() >= deadline:
+            raise RuntimeError(publish_timeout_message(job, status, timeout_s))
         sleep(poll_s)
 
 
+def publish_timeout_message(job: PublishJob, status: str, timeout_s: float) -> str:
+    """Message when the publish job outlives the wait.
+
+    :param job: The running job.
+    :param status: Its last service status.
+    :param timeout_s: Seconds waited.
+    :return: The message, with the statements that check on the job.
+    """
+    document = job.document
+    lines = [
+        (
+            f"Publish job {job.name} is still {status} after {timeout_s / 60:g} minutes. "
+            "It keeps running in Snowflake."
+        ),
+        f"Status: SHOW SERVICE CONTAINERS IN SERVICE {job.name}",
+        f"Logs: {service_logs_sql(job.name, 0)}",
+    ]
+    if document["service_name"] is not None:
+        lines.append(
+            "Endpoint, once the job is done: arena snowflake endpoint "
+            f"{document['model_name']} --version {document['version_name']} "
+            f"--database {document['database']} --schema {document['schema']}"
+        )
+    return "\n".join(lines)
+
+
 def service_endpoint(session: SnowflakeSession, document: PublishDocument) -> str:
-    """Ingress URL of the service's ``inference`` endpoint.
+    """Ingress URL of the service a publish started.
 
     :param session: Snowpark session.
     :param document: Request of a finished publish job that started a service.
@@ -229,13 +283,156 @@ def service_endpoint(session: SnowflakeSession, document: PublishDocument) -> st
     if service is None:
         msg = "This publish started no service"
         raise ValueError(msg)
-    target = f"{document['database']}.{document['schema']}.{service}"
-    for row in session.sql(f"SHOW ENDPOINTS IN SERVICE {target}").collect():
+    return ingress_url(
+        session, f"{document['database']}.{document['schema']}.{service}"
+    )
+
+
+def ingress_url(session: SnowflakeSession, service: str) -> str:
+    """Ingress URL of a service's ``inference`` endpoint.
+
+    :param session: Snowpark session.
+    :param service: Fully qualified service name.
+    :return: The URL, or Snowflake's provisioning message while ingress starts.
+    :raises ValueError: The service has no ``inference`` endpoint.
+    """
+    for row in session.sql(f"SHOW ENDPOINTS IN SERVICE {service}").collect():
         values = lowered(row)
         if values.get("name") == "inference":
             return str(values.get("ingress_url"))
-    msg = f"Service {target} has no inference endpoint"
+    msg = f"Service {service} has no inference endpoint"
     raise ValueError(msg)
+
+
+@dataclass(frozen=True)
+class ServedVersion:
+    """One Model Registry version and the inference services on it."""
+
+    model: str
+    version_name: str
+    services: tuple[str, ...]
+    is_default: bool
+    only_version: bool
+
+
+def served_version(
+    session: SnowflakeSession,
+    database: str,
+    schema: str,
+    model_name: str,
+    version_name: str | None,
+) -> ServedVersion:
+    """Find a version and its inference services.
+
+    :param session: Snowpark session.
+    :param database: Registry database.
+    :param schema: Registry schema.
+    :param model_name: Model name.
+    :param version_name: Version. ``None`` takes the one version that has a service.
+    :return: The version as Snowflake stores it, with fully qualified service names.
+    :raises ValueError: The model or version does not exist, or ``None`` matches
+        no version or several.
+    """
+    model = f"{database}.{schema}.{single_identifier(model_name, 'model name')}"
+    models = session.sql(
+        f"SHOW MODELS LIKE '{model_name}' IN SCHEMA {database}.{schema}"
+    ).collect()
+    if not has_name(models, model_name):
+        msg = f"Model {model} does not exist"
+        raise ValueError(msg)
+    rows = [
+        lowered(row) for row in session.sql(f"SHOW VERSIONS IN MODEL {model}").collect()
+    ]
+    services = {
+        str(values["name"]).upper(): tuple(
+            str(service)
+            for service in json.loads(str(values["inference_services"]))
+            # The image build job is listed beside the inference service.
+            if "MODEL_BUILD_" not in str(service)
+        )
+        for values in rows
+    }
+    if version_name is None:
+        served = [name for name, names in services.items() if names]
+        if not served:
+            msg = f"Model {model} has no inference service"
+            raise ValueError(msg)
+        if len(served) > 1:
+            msg = (
+                f"Model {model} has services on versions {', '.join(served)}. "
+                "Pass --version."
+            )
+            raise ValueError(msg)
+        chosen = served[0]
+    else:
+        chosen = single_identifier(version_name, "version name").upper()
+        if chosen not in services:
+            msg = f"Model {model} has no version {version_name}"
+            raise ValueError(msg)
+    row = next(values for values in rows if str(values["name"]).upper() == chosen)
+    return ServedVersion(
+        model=model,
+        version_name=str(row["name"]),
+        services=services[chosen],
+        is_default=bool(row["is_default_version"]),
+        only_version=len(rows) == 1,
+    )
+
+
+def version_endpoint(session: SnowflakeSession, served: ServedVersion) -> str:
+    """Ingress URL of the version's one inference service.
+
+    :param session: Snowpark session.
+    :param served: Version from :func:`served_version`.
+    :return: The URL, or Snowflake's provisioning message while ingress starts.
+    :raises ValueError: The version has no service or several.
+    """
+    if len(served.services) != 1:
+        listed = "".join(f"\n  {service}" for service in served.services)
+        msg = (
+            f"Version {served.version_name} of {served.model} has "
+            f"{len(served.services)} inference services{listed}"
+        )
+        raise ValueError(msg)
+    return ingress_url(session, served.services[0])
+
+
+def unpublish(
+    session: SnowflakeSession, served: ServedVersion, drop_version: bool
+) -> None:
+    """Drop the version's inference services and, when asked, the version.
+
+    A model's only version is dropped with the model.
+
+    :param session: Snowpark session.
+    :param served: Version from :func:`served_version`.
+    :param drop_version: Also drop the version.
+    :raises ValueError: Nothing to drop, or the version is the default of
+        several. Nothing is dropped then.
+    """
+    if not served.services and not drop_version:
+        msg = (
+            f"Version {served.version_name} of {served.model} has no inference "
+            "service. Pass --drop-version to drop the version."
+        )
+        raise ValueError(msg)
+    if drop_version and served.is_default and not served.only_version:
+        msg = (
+            f"{served.version_name} is the default version of {served.model}, and "
+            "Snowflake cannot drop it. Set another default first:\n"
+            f"ALTER MODEL {served.model} SET DEFAULT_VERSION = <version>"
+        )
+        raise ValueError(msg)
+    for service in served.services:
+        session.sql(f"DROP SERVICE {service}").collect()
+    if not drop_version:
+        return
+    if served.only_version:
+        session.sql(f"DROP MODEL {served.model}").collect()
+    else:
+        session.sql(
+            f"ALTER MODEL {served.model} DROP VERSION {served.version_name}"
+        ).collect()
 
 
 def select_checkpoint(
@@ -408,8 +605,8 @@ def render_publish_spec(
                         "python",
                         "-m",
                         "agilerl.arena.snowflake.publish_job",
+                        f"{RUN_MOUNT}/{request_file}",
                     ],
-                    "args": [f"{RUN_MOUNT}/{request_file}"],
                     "resources": {
                         "requests": {"memory": f"{request_gib}Gi"},
                         "limits": {"memory": f"{limit_gib:g}Gi"},

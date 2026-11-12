@@ -373,7 +373,7 @@ def _planned_layout(
     device: DeviceSpec,
     num_gpus: int | None,
 ) -> tuple[TrainingManifest, WeightSyncMode]:
-    """The manifest as the run lays it out on ``num_gpus`` GPUs of one node, and its weight-sync mode, as :func:`check_tiers` picks them.
+    """The manifest as the run lays it out on ``num_gpus`` GPUs in nodes of ``device.gpus_per_node``, and its weight-sync mode, as :func:`check_tiers` picks them.
 
     A colocated member trains on every GPU it owns (:func:`colocated_manifest`).
     A searched split that fits writes its counts, engine width and layout
@@ -384,7 +384,7 @@ def _planned_layout(
     if num_gpus is None:
         return manifest, WeightSyncMode(True, "nixl")
     manifest = colocated_manifest(manifest, num_gpus)
-    sync_link = tier_sync_link(num_gpus, None)
+    sync_link = tier_sync_link(num_gpus, device.gpus_per_node)
     if searches_gpu_split(manifest):
         try:
             laid_out, plan = split_manifest(
@@ -422,7 +422,9 @@ def _allocation_layout(
         is unset, or the node has too few GPUs.
     """
     if num_gpus is not None:
-        width = engine_width(manifest, num_gpus, device, None, adapter_sync)
+        width = engine_width(
+            manifest, num_gpus, device, device.gpus_per_node, adapter_sync
+        )
         return width, engines_per_member(manifest, num_gpus, width)
     spec = manifest.algorithm
     if not isinstance(spec, RolloutLLMSpec) or spec.vllm_config is None:
@@ -457,7 +459,8 @@ def _sized_run_config(
     :param model_config: The checkpoint's ``config.json``.
     :param model: Training-side model, with the checkpoint's parameter count.
     :param gen_device: Rollout-engine GPU; ``None`` is ``device``.
-    :param num_gpus: GPUs on the node; ``None`` reads the engine layout from the manifest.
+    :param num_gpus: GPUs in the allocation, in nodes of ``device.gpus_per_node``;
+        ``None`` reads the engine layout from the manifest.
     :raises ValueError: The run picks its engine layout from a GPU count and
         ``num_gpus`` is unset, or the node has too few GPUs.
     """
@@ -591,6 +594,7 @@ def main(
     gen_gpu: str | None = None,
     gen_device_gb: float | None = None,
     num_gpus: int | None = None,
+    gpus_per_node: int | None = None,
     config_path: str | None = None,
     as_json: bool = False,
     no_color: bool = False,
@@ -599,7 +603,9 @@ def main(
 
     :param tiers: Resource tiers to pick the cheapest fitting one from when
         neither ``gpu`` nor ``device_gb`` is given.
-    :param num_gpus: GPUs on the node, for the engine layout the run picks.
+    :param num_gpus: GPUs in the allocation, for the engine layout the run picks.
+    :param gpus_per_node: GPUs on one node of the allocation; ``None`` puts all
+        ``num_gpus`` on one node.
     """
     try:
         device = _resolve_device(
@@ -628,6 +634,16 @@ def main(
             file=sys.stderr,
         )
         return EXIT_USAGE
+    if gpus_per_node is not None:
+        if device is None:
+            print(
+                "gpus_per_node needs --gpu or --device-gb; a resource tier names its own.",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
+        device = device.model_copy(update={"gpus_per_node": gpus_per_node})
+        if gen_device is not None:
+            gen_device = gen_device.model_copy(update={"gpus_per_node": gpus_per_node})
 
     try:
         manifest = TrainingManifest.get_validated(manifest_path, mode="python")

@@ -797,7 +797,8 @@ Multi-agent RL passes per-agent observations and returns a dict of actions:
 In-account Snowflake
 --------------------
 
-Train on a table that stays in a Snowflake account. See :doc:`snowflake`.
+Train on a Snowflake table and serve the model without the data leaving the
+account. See :doc:`snowflake`.
 
 .. toctree::
    :maxdepth: 1

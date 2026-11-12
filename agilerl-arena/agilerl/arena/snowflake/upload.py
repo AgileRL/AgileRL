@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
+import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -21,7 +23,24 @@ CHECKPOINT_DIR = re.compile(r"^checkpoint_(\d+)$")
 UPLOAD_ATTEMPTS = 3
 UPLOAD_RETRY_S = 5.0
 
+CHECKPOINT_UPLOADED_MARKER = ".uploaded"
+
 logger = logging.getLogger(__name__)
+
+
+def checkpoint_directories(ckpt_root: Path) -> dict[int, Path]:
+    """``checkpoint_<n>`` directories under the trainer checkpoint root.
+
+    :param ckpt_root: Trainer checkpoint directory. A missing root has none.
+    :return: Directories keyed by step number.
+    """
+    if not ckpt_root.is_dir():
+        return {}
+    return {
+        int(match.group(1)): child
+        for child in ckpt_root.iterdir()
+        if (match := CHECKPOINT_DIR.fullmatch(child.name)) and child.is_dir()
+    }
 
 
 def ready_checkpoint_files(ckpt_root: Path, trainer_exited: bool) -> list[Path]:
@@ -35,12 +54,7 @@ def ready_checkpoint_files(ckpt_root: Path, trainer_exited: bool) -> list[Path]:
     :param trainer_exited: Whether the trainer process has finished.
     :return: Files to upload, in path order with each ``.complete`` after its weights.
     """
-    numbered: dict[int, Path] = {}
-    if ckpt_root.is_dir():
-        for child in ckpt_root.iterdir():
-            match = CHECKPOINT_DIR.fullmatch(child.name)
-            if match and child.is_dir():
-                numbered[int(match.group(1))] = child
+    numbered = checkpoint_directories(ckpt_root)
     if not numbered:
         return []
     highest = max(numbered)
@@ -101,7 +115,12 @@ def upload_with_retries(
 
 @dataclass
 class CheckpointUploader:
-    """Uploads this instance's finished checkpoint files, opening a session per pass."""
+    """Uploads this instance's finished checkpoint files, opening a session per pass.
+
+    Once every file of a finished ``checkpoint_<n>/`` is on the stage, an empty
+    ``checkpoint_<n>/.uploaded`` follows it. ``submit --resume`` only picks
+    checkpoints that have it. Older local directories are deleted after their marker.
+    """
 
     open_session: Callable[[], SnowflakeSession]
     runs_stage: str
@@ -125,19 +144,57 @@ class CheckpointUploader:
         pending = [
             path
             for path in ready_checkpoint_files(self.ckpt_root, final)
-            if path.relative_to(self.ckpt_root).as_posix() not in self.uploaded
+            if self._relative(path) not in self.uploaded
         ]
-        if not pending:
+        whole = self._checkpoints_whole_after(pending, final)
+        if not pending and not whole:
             return
         session = self.open_session()
         try:
             for path in pending:
-                relative = path.relative_to(self.ckpt_root).as_posix()
-                put_file(
-                    session,
-                    path,
-                    stage_directory(self.runs_stage, self.run_id, relative),
-                )
-                self.uploaded.add(relative)
+                self._put(session, path, self._relative(path))
+            for directory in whole:
+                self._put_uploaded_marker(session, directory)
         finally:
             session.close()
+        self._delete_uploaded_checkpoints()
+
+    def _checkpoints_whole_after(self, pending: list[Path], final: bool) -> list[Path]:
+        on_stage = self.uploaded | {self._relative(path) for path in pending}
+        numbered = checkpoint_directories(self.ckpt_root)
+        return [
+            directory
+            for number, directory in sorted(numbered.items())
+            if (final or number < max(numbered))
+            and self._marker_key(directory) not in self.uploaded
+            and all(
+                self._relative(path) in on_stage
+                for path in directory.rglob("*")
+                if path.is_file()
+            )
+        ]
+
+    def _put_uploaded_marker(self, session: SnowflakeSession, directory: Path) -> None:
+        with tempfile.TemporaryDirectory() as scratch:
+            marker = Path(scratch) / CHECKPOINT_UPLOADED_MARKER
+            marker.touch()
+            self._put(session, marker, self._marker_key(directory))
+
+    def _put(self, session: SnowflakeSession, local: Path, relative: str) -> None:
+        put_file(
+            session, local, stage_directory(self.runs_stage, self.run_id, relative)
+        )
+        self.uploaded.add(relative)
+
+    def _delete_uploaded_checkpoints(self) -> None:
+        # The highest checkpoint is kept: the trainer may still be writing it.
+        numbered = checkpoint_directories(self.ckpt_root)
+        for number, directory in numbered.items():
+            if number < max(numbered) and self._marker_key(directory) in self.uploaded:
+                shutil.rmtree(directory)
+
+    def _relative(self, path: Path) -> str:
+        return path.relative_to(self.ckpt_root).as_posix()
+
+    def _marker_key(self, directory: Path) -> str:
+        return f"{directory.name}/{CHECKPOINT_UPLOADED_MARKER}"

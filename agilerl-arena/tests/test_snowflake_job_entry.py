@@ -9,7 +9,7 @@ import json
 import runpy
 import sys
 import warnings
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import ClassVar
 
@@ -27,6 +27,7 @@ from agilerl.arena.snowflake.job_entry import (
     manifest_columns,
     metrics_file_format,
     metrics_merge_sql,
+    resume_checkpoint,
     run_job,
     source_from_document,
     trainer_command,
@@ -49,11 +50,10 @@ def _job(checkpoint_steps: int | None = 5, reward_file: bool = False) -> dict:
         "nodes": 2,
         "checkpoint_steps": checkpoint_steps,
         "reward_file": reward_file,
-        "pulsar_url": "pulsar://broker.example:6650",
-        "pulsar_topic_prefix": "non-persistent://customer/arena",
         "runs_stage": "ARENA.TRAINING.RUNS",
         "metrics_table": "ARENA.TRAINING.ARENA_METRICS",
         "source": {"kind": "table", "name": "ARENA.TRAINING.PROMPTS"},
+        "resume": False,
     }
 
 
@@ -167,6 +167,53 @@ class TestTrainerCommand:
 
         assert "--custom-dataset-s3" not in command
 
+    def test_resume_points_at_the_latest_copied_checkpoint(
+        self, tmp_path: Path
+    ) -> None:
+        # Arrange
+        for step in (5, 20, 10):
+            (tmp_path / "resume" / f"checkpoint_{step}").mkdir(parents=True)
+        (tmp_path / "resume" / "metrics.jsonl").write_text("", encoding="utf-8")
+        job = _job()
+        job["resume"] = True
+
+        # Act
+        command = trainer_command(job, tmp_path)
+
+        # Assert
+        assert command[-4:] == [
+            "--checkpoint-s3",
+            str(tmp_path / "resume" / "checkpoint_20"),
+            "--checkpoint-mode",
+            "resume",
+        ]
+
+    def test_resume_without_a_copied_checkpoint_raises(self, tmp_path: Path) -> None:
+        (tmp_path / "resume").mkdir()
+        job = _job()
+        job["resume"] = True
+
+        with pytest.raises(FileNotFoundError, match="checkpoint_"):
+            trainer_command(job, tmp_path)
+
+    def test_a_fresh_run_passes_no_checkpoint(self) -> None:
+        command = trainer_command(_job(), Path("/arena/run"))
+
+        assert "--checkpoint-s3" not in command
+        assert "--checkpoint-mode" not in command
+
+
+class TestResumeCheckpoint:
+    def test_picks_the_highest_step_by_number(self, tmp_path: Path) -> None:
+        for step in (9, 10, 2):
+            (tmp_path / f"checkpoint_{step}").mkdir()
+
+        assert resume_checkpoint(tmp_path) == tmp_path / "checkpoint_10"
+
+    def test_missing_resume_directory_raises(self, tmp_path: Path) -> None:
+        with pytest.raises(FileNotFoundError):
+            resume_checkpoint(tmp_path / "resume")
+
 
 class TestTrainerEnv:
     def test_sets_ray_address_and_drops_otlp(self) -> None:
@@ -235,7 +282,7 @@ class TestMetricsPublisherPublish:
         scratch = tmp_path / "scratch"
         scratch.mkdir()
         return MetricsPublisher(
-            session=session,
+            open_session=lambda: session,
             job=_job(),
             metrics_path=tmp_path / "metrics.jsonl",
             scratch=scratch,
@@ -280,6 +327,37 @@ class TestMetricsPublisherPublish:
             b'{"seq": 1}\n{"seq": 2}\n',
         ]
         assert len(session.statements) == 2
+        assert session.closed == 2
+
+    def test_each_pass_opens_and_closes_its_own_session(self, tmp_path: Path) -> None:
+        # Arrange
+        sessions: list[Session] = []
+
+        def open_session() -> Session:
+            sessions.append(Session())
+            return sessions[-1]
+
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        publisher = MetricsPublisher(
+            open_session=open_session,
+            job=_job(),
+            metrics_path=tmp_path / "metrics.jsonl",
+            scratch=scratch,
+            retry_on=RETRY_ON,
+            sleep=lambda seconds: None,
+        )
+
+        # Act
+        publisher.metrics_path.write_bytes(b'{"seq": 1}\n')
+        publisher.publish(final=False)
+        publisher.metrics_path.write_bytes(b'{"seq": 1}\n{"seq": 2}\n')
+        publisher.publish(final=True)
+
+        # Assert
+        assert len(sessions) == 2
+        assert [session.closed for session in sessions] == [1, 1]
+        assert [len(session.puts) for session in sessions] == [1, 1]
 
     def test_missing_file_is_a_no_op(self, tmp_path: Path) -> None:
         session = Session()
@@ -397,7 +475,9 @@ class TestRunJob:
         (tmp_path / "metrics.jsonl").write_text('{"seq": 1}\n', encoding="utf-8")
 
         # Act
-        code = run_job(run_dir / "job.json", session, RETRY_ON, 0, lambda s: None)
+        code = run_job(
+            run_dir / "job.json", lambda: session, RETRY_ON, 0, lambda s: None
+        )
 
         # Assert
         assert code == 0
@@ -434,7 +514,9 @@ class TestRunJob:
         session = Session(rows=[])
 
         # Act
-        code = run_job(run_dir / "job.json", session, RETRY_ON, 0, lambda s: None)
+        code = run_job(
+            run_dir / "job.json", lambda: session, RETRY_ON, 0, lambda s: None
+        )
 
         # Assert
         assert code == 0
@@ -444,14 +526,18 @@ class TestRunJob:
     def test_a_transient_shard_put_is_retried(self, run_dir: Path) -> None:
         session = Session(failures=1)
 
-        code = run_job(run_dir / "job.json", session, RETRY_ON, 0, lambda s: None)
+        code = run_job(
+            run_dir / "job.json", lambda: session, RETRY_ON, 0, lambda s: None
+        )
 
         assert code == 0
         assert [put["name"] for put in session.puts] == ["shard-00000.parquet"]
 
     def test_a_shard_put_error_outside_retry_on_raises(self, run_dir: Path) -> None:
         with pytest.raises(OSError, match="stage unavailable"):
-            run_job(run_dir / "job.json", Session(failures=1), (), 0, lambda s: None)
+            run_job(
+                run_dir / "job.json", lambda: Session(failures=1), (), 0, lambda s: None
+            )
 
         assert Proc.started == []
 
@@ -483,7 +569,7 @@ class TestRunJob:
 
         # Act
         with pytest.raises(ValueError, match="metrics table missing"):
-            run_job(run_dir / "job.json", RejectsMerge(), RETRY_ON, 0, lambda s: None)
+            run_job(run_dir / "job.json", RejectsMerge, RETRY_ON, 0, lambda s: None)
 
         # Assert
         assert started[0].killed is True
@@ -498,13 +584,17 @@ class TestRunJob:
 
         monkeypatch.setattr(job_entry.subprocess, "Popen", failing)
 
-        assert (
-            run_job(run_dir / "job.json", Session(), RETRY_ON, 0, lambda s: None) == 3
-        )
+        assert run_job(run_dir / "job.json", Session, RETRY_ON, 0, lambda s: None) == 3
 
     def test_empty_source_fails_before_the_trainer_starts(self, run_dir: Path) -> None:
         with pytest.raises(ValueError, match="returned no rows"):
-            run_job(run_dir / "job.json", Session(rows=[]), RETRY_ON, 0, lambda s: None)
+            run_job(
+                run_dir / "job.json",
+                lambda: Session(rows=[]),
+                RETRY_ON,
+                0,
+                lambda s: None,
+            )
 
         assert Proc.started == []
 
@@ -514,7 +604,7 @@ class TestRunJob:
         session = Session(rows=[{"prompt": "one", "response": "a"}])
 
         with pytest.raises(ValueError, match="upper case"):
-            run_job(run_dir / "job.json", session, RETRY_ON, 0, lambda s: None)
+            run_job(run_dir / "job.json", lambda: session, RETRY_ON, 0, lambda s: None)
 
         assert Proc.started == []
 
@@ -524,7 +614,7 @@ class TestMain:
         with pytest.raises(SystemExit, match="usage:"):
             main([])
 
-    def test_runs_the_job_on_the_in_job_session_and_closes_it(
+    def test_runs_the_job_with_an_in_job_session_opener(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Arrange
@@ -537,9 +627,12 @@ class TestMain:
             return session
 
         def fake_run_job(
-            path: Path, current: Session, retry_on: tuple[type[Exception], ...]
+            path: Path,
+            open_job_session: Callable[[], Session],
+            retry_on: tuple[type[Exception], ...],
         ) -> int:
-            seen.append((path, current, retry_on))
+            assert names == []
+            seen.append((path, open_job_session(), retry_on))
             return 4
 
         monkeypatch.setattr(job_entry, "transient_errors", lambda: RETRY_ON)
@@ -553,27 +646,6 @@ class TestMain:
         assert code == 4
         assert names == [None]
         assert seen == [(tmp_path / "job.json", session, RETRY_ON)]
-        assert session.closed == 1
-
-    def test_closes_the_session_when_the_job_raises(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        session = Session()
-
-        def fake_run_job(
-            path: Path, current: Session, retry_on: tuple[type[Exception], ...]
-        ) -> int:
-            msg = "trainer crashed"
-            raise RuntimeError(msg)
-
-        monkeypatch.setattr(job_entry, "transient_errors", lambda: RETRY_ON)
-        monkeypatch.setattr(job_entry, "open_session", lambda name: session)
-        monkeypatch.setattr(job_entry, "run_job", fake_run_job)
-
-        with pytest.raises(RuntimeError, match="trainer crashed"):
-            main([str(tmp_path / "job.json")])
-
-        assert session.closed == 1
 
     def test_module_entrypoint(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(sys, "argv", ["agilerl.arena.snowflake.job_entry"])

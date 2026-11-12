@@ -349,6 +349,9 @@ allow-star-arg-any = true
 "agilerl/lora/moe/triton_kernels.py" = [
     "ANN001", "ANN201", # Triton's JIT reads kernel parameter annotations as kernel types; non-Triton annotations fail to compile
 ]
+"agilerl-arena/hatch_build.py" = [
+    "INP001",        # hatchling build hook at the project root, not a package
+]
 "scripts/**" = [
     "INP001",        # standalone scripts, not a package
     "S603",          # argv lists for aws/git are built in-process
