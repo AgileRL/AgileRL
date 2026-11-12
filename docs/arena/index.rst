@@ -299,6 +299,46 @@ Some useful command to manage your projects:
 
       arena projects set-default <project-name>
 
+.. _arena_secrets:
+
+Organization Secrets
+--------------------
+
+Secrets hold API keys your training jobs need, such as an LLM judge's provider key.
+In a manifest, ``judge.api_key_env`` names one of these secrets, and Arena passes it
+to the job as an environment variable of that name. Any org member can list, set and
+delete secrets. Arena never shows any part of a value, only each secret's name, when
+it was created and last updated, and who last updated it.
+
+.. tab-set::
+   :sync-group: interface
+
+   .. tab-item:: Python
+      :sync: python
+
+      .. code-block:: python
+
+         import os
+
+         client.list_secrets()
+         client.set_secret(name="OPENAI_API_KEY", value=os.environ["OPENAI_API_KEY"])
+         client.delete_secret("OPENAI_API_KEY")
+
+   .. tab-item:: CLI
+      :sync: cli
+
+      .. code-block:: bash
+
+         arena secrets list
+
+         # Hidden prompt; or pipe the value on stdin, or use --from-env VAR
+         arena secrets set OPENAI_API_KEY
+         arena secrets set OPENAI_API_KEY --from-env OPENAI_API_KEY
+
+         arena secrets delete OPENAI_API_KEY --yes
+
+The CLI never takes the value as an argument, so it stays out of your shell history.
+
 .. _arena_training:
 
 Submitting Experiments

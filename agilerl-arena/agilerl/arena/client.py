@@ -1644,6 +1644,52 @@ class ArenaClient:
         return resp
 
     # -------------------------------------------------------------------------
+    ### Secrets ###
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def _secret_metadata(row: dict[str, Any]) -> dict[str, Any]:
+        """Keep a secret row's name, timestamps and last editor, dropping any hint of its value."""
+        return {
+            key: row.get(key)
+            for key in ("name", "created_at", "updated_at", "updated_by")
+        }
+
+    def list_secrets(self) -> list[dict[str, Any]]:
+        """List your organization's secrets without their values.
+
+        :returns: One row per secret with ``name``, ``created_at``, ``updated_at`` and ``updated_by``.
+        :rtype: list[dict[str, Any]]
+        """
+        rows = self._request("GET", "/api/cli/v1/secrets")
+        return [self._secret_metadata(row) for row in rows]
+
+    def set_secret(self, name: str, value: str) -> dict[str, Any]:
+        """Create or replace an organization secret.
+
+        :param name: Secret name, such as ``ANTHROPIC_API_KEY``.
+        :type name: str
+        :param value: Secret value. Sent once and never returned.
+        :type value: str
+        :returns: The stored row's ``name``, ``created_at``, ``updated_at`` and ``updated_by``.
+        :rtype: dict[str, Any]
+        """
+        row = self._request(
+            "PUT", "/api/cli/v1/secrets", json={"name": name, "value": value}
+        )
+        return self._secret_metadata(row)
+
+    def delete_secret(self, name: str) -> dict[str, Any]:
+        """Delete an organization secret.
+
+        :param name: Secret name.
+        :type name: str
+        :returns: ``{"deleted": True, "name": name}``.
+        :rtype: dict[str, Any]
+        """
+        return self._request("DELETE", "/api/cli/v1/secrets", json={"name": name})
+
+    # -------------------------------------------------------------------------
     ### Inference ###
     # -------------------------------------------------------------------------
 

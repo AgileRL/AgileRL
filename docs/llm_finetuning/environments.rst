@@ -301,6 +301,8 @@ whose ``__init__`` takes ``judge`` is built with the run's shared client:
   self-hosted vLLM. A URL with a path is used as given
   (``https://openrouter.ai/api/v1``); a bare host (``http://judge:8000``) gets
   ``/v1``. Leave ``api_key_env`` unset when the endpoint needs no key.
+- On Arena, ``api_key_env`` names an organization secret: store the key with
+  ``arena secrets set OPENAI_API_KEY`` (see :ref:`arena_secrets`).
 - The judge reads the prompt, each turn's text after its reasoning, and the env's
   replies. ``LLMJudgeRubric(..., include_reasoning=True)`` also shows it the
   reasoning. Scoring reasoning trains the model to write reasoning the judge
