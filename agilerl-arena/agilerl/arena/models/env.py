@@ -645,15 +645,6 @@ class LLMEnvSpec(EnvSpecBase):
             "preference (DPO) over chosen/rejected pairs."
         ),
     )
-    train_on_reasoning: bool = Field(
-        default=True,
-        description=(
-            "With objective sft, train the reasoning of each assistant turn "
-            "(reasoning_content, thinking or reasoning, whichever the model's "
-            "chat template reads). False keeps it as context only, so only the "
-            "answer and tool calls are trained."
-        ),
-    )
 
     dataset: str | None = Field(
         default=None,
@@ -1286,14 +1277,6 @@ class LLMEnvSpec(EnvSpecBase):
 
     @model_validator(mode="after")
     def _check_dataset(self) -> Self:
-        if not self.train_on_reasoning and (
-            self.env_type != "dataset" or self.objective != "sft"
-        ):
-            msg = (
-                "train_on_reasoning: false masks reasoning in an SFT loss; it "
-                "needs env_type dataset with objective sft."
-            )
-            raise ValueError(msg)
         if self.env_type != "dataset":
             return self
         if self._named_dataset() is None:

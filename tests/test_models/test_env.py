@@ -1064,7 +1064,6 @@ class TestLLMEnvSpecSFT:
             objective="sft",
             dataset="sft_data.parquet",
             response_column="completion",
-            train_on_reasoning=False,
         )
 
         with patch("agilerl.models.env.DatasetEnv") as MockEnv:
@@ -1078,7 +1077,6 @@ class TestLLMEnvSpecSFT:
         assert call_kwargs["test_dataset"] is mock_test_ds
         assert call_kwargs["objective"] == "sft"
         assert call_kwargs["response_column"] == "completion"
-        assert call_kwargs["train_on_reasoning"] is False
 
     def test_sft_rejects_rubric_file_path(self):
         with pytest.raises(ValueError, match="not supported for dataset"):
