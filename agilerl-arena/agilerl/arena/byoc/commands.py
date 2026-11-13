@@ -34,6 +34,7 @@ from agilerl.arena.byoc.cluster_token import (
     resolve_cluster_kubeconfig,
     run_cluster_rotate_token,
 )
+from agilerl.arena.byoc.cluster_upgrade import run_cluster_upgrade
 from agilerl.arena.byoc.provisioning.inference import normalize_inference_domain
 from agilerl.arena.byoc.provisioning.module_catalog import (
     open_module_catalog,
@@ -1129,6 +1130,59 @@ def build_cluster_rotate_token_command() -> click.Command:
             )
 
     return rotate_token_cmd
+
+
+def build_cluster_upgrade_command() -> click.Command:
+    """Build ``arena cluster upgrade``."""
+
+    @click.command("upgrade")
+    @click.option("--name", required=True, help="Registered cluster name.")
+    @click.option(
+        "--kubeconfig",
+        type=click.Path(exists=True, dir_okay=False, path_type=Path),
+        default=None,
+        help=(
+            "Kubeconfig for the agent cluster. Defaults to "
+            "arena-cluster-NAME/kubeconfig when that file exists."
+        ),
+    )
+    @click.option(
+        "--agent-namespace",
+        default=None,
+        help=(
+            "Kubernetes namespace for the agent Helm release. "
+            "Defaults to the namespace Helm reports for this cluster."
+        ),
+    )
+    @click.option(
+        "--no-helm-wait",
+        is_flag=True,
+        default=False,
+        help="Do not wait for the agent Deployment.",
+    )
+    @click.pass_obj
+    def upgrade_cmd(
+        config: CommandConfig,
+        name: str,
+        kubeconfig: Path | None,
+        agent_namespace: str | None,
+        no_helm_wait: bool,
+    ) -> None:
+        """Upgrade the BYOC agent chart without changing cluster credentials."""
+        cluster_name = name.strip()
+        if not cluster_name:
+            msg = "--name is required."
+            raise click.ClickException(msg)
+        with arena_client(config) as client:
+            run_cluster_upgrade(
+                client,
+                name=cluster_name,
+                kubeconfig=kubeconfig,
+                agent_namespace=agent_namespace,
+                helm_wait=not no_helm_wait,
+            )
+
+    return upgrade_cmd
 
 
 def _cluster_provision_options(command: click.Command) -> click.Command:

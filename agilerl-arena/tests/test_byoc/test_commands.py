@@ -554,6 +554,7 @@ def test_cluster_group_includes_hardcoded_commands() -> None:
     assert cluster.name == "cluster"
     assert "unregister" in cluster.commands
     assert "rotate-token" in cluster.commands
+    assert "upgrade" in cluster.commands
     assert "register" in cluster.commands
     assert "register-classes" in cluster.commands
 

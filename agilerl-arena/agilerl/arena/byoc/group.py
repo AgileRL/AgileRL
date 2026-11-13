@@ -29,6 +29,7 @@ from agilerl.arena.byoc.commands import (
     build_cluster_rotate_token_command,
     build_cluster_status_command,
     build_cluster_unregister_command,
+    build_cluster_upgrade_command,
 )
 from agilerl.arena.cli_manifest import attach_manifest_tree
 from agilerl.arena.config import (
@@ -249,6 +250,7 @@ class ClusterDynamicGroup(click.Group):
         self.add_command(build_cluster_register_command())
         self.add_command(build_cluster_unregister_command())
         self.add_command(build_cluster_rotate_token_command())
+        self.add_command(build_cluster_upgrade_command())
         self.add_command(build_cluster_generate_spec_command())
         self.add_command(build_cluster_provision_command())
         self.add_command(build_cluster_register_classes_command())

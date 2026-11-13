@@ -430,6 +430,27 @@ class ByocApi:
             raise ArenaAPIError(msg)
         return result
 
+    def fetch_cluster_install_artifacts(self, name: str) -> dict[str, Any]:
+        """Return current agent Helm values for the cluster named *name*.
+
+        Arena renders the values for the chart it would ship now. The response
+        names existing Secrets and does not include a new cluster token.
+
+        :param name: The registered cluster name.
+        :type name: str
+        :returns: Install-artifacts payload with ``agentHelmValuesYaml``.
+        :rtype: dict[str, Any]
+        """
+        logger.info("Fetching BYOC install artifacts for %r…", name)
+        result = self._client._invoke_manifest_command(
+            endpoints.INSTALL_CLUSTER_ARTIFACTS,
+            {"name": name},
+        )
+        if not isinstance(result, dict):
+            msg = "Unexpected cluster install artifacts response from Arena."
+            raise ArenaAPIError(msg)
+        return result
+
     def download_cluster_install_package(
         self,
         cluster: str,
