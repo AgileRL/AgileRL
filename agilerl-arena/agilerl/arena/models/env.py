@@ -13,6 +13,8 @@ from urllib.parse import urlsplit
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Self
 
+from agilerl.arena.models.traces import TRACES_DATASET_FORMAT
+
 
 def reject_legacy_llm_env_spelling(
     *,
@@ -650,6 +652,17 @@ class LLMEnvSpec(EnvSpecBase):
         default=None,
         description="HuggingFace dataset id, or a Parquet or JSONL path, for the dataset sources.",
     )
+    dataset_format: Literal["traces"] | None = Field(
+        default=None,
+        description=(
+            "traces: rows are recorded model calls, OpenAI chat messages in "
+            "prompt / completion (or messages) columns with optional tools. A "
+            "rollout renders each row's prompt as the single-turn prompt and "
+            "needs no prompt_template; with no rubric_file_path it scores 0, "
+            "which OPD trains on as pure distillation. objective sft trains "
+            "the completion. Takes no columns mapping."
+        ),
+    )
     dataset_path: str | None = Field(
         default=None, description="Object-store path to a user-supplied dataset."
     )
@@ -674,7 +687,7 @@ class LLMEnvSpec(EnvSpecBase):
         description=(
             "Conversation template, keyed 'role_index' (system_0, user_1, ...) "
             "so ordering is explicit. Values may interpolate dataset columns. "
-            "Required for a rollout over dataset rows."
+            "Required for a rollout over dataset rows, except traces."
         ),
     )
     rubric_file_path: str | None = Field(
@@ -1235,7 +1248,10 @@ class LLMEnvSpec(EnvSpecBase):
             )
             raise ValueError(msg)
         if dataset is not None:
-            if self.prompt_template is None:
+            if (
+                self.prompt_template is None
+                and self.dataset_format != TRACES_DATASET_FORMAT
+            ):
                 msg = "Prompt template is required for dataset-backed rollout environments"
                 raise ValueError(msg)
             if self.max_turns not in (None, 1):
@@ -1326,6 +1342,40 @@ class LLMEnvSpec(EnvSpecBase):
         return self
 
     @model_validator(mode="after")
+    def _check_traces_format(self) -> Self:
+        if self.dataset_format != TRACES_DATASET_FORMAT:
+            return self
+        if self._named_dataset() is None:
+            msg = "dataset_format traces describes dataset rows; name the dataset too."
+            raise ValueError(msg)
+        expected = "sft" if self.env_type == "dataset" else None
+        if self.objective != expected:
+            msg = (
+                "A traces dataset trains SFT (env_type dataset, objective sft) or a "
+                f"rollout (env_type rollout, no objective); objective {self.objective!r} "
+                f"on env_type {self.env_type!r} is not supported."
+            )
+            raise ValueError(msg)
+        mapped = [
+            field
+            for field, value in (
+                ("columns", self.columns),
+                ("prompt_template", self.prompt_template),
+            )
+            if value is not None
+        ]
+        if mapped:
+            msg = (
+                f"A traces dataset's column names are the spec; drop {', '.join(mapped)}. "
+                "Each row's prompt messages are the rollout prompt."
+            )
+            raise ValueError(msg)
+        if self.response_column not in (None, "completion"):
+            msg = "A traces dataset trains its completion column; drop response_column."
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
     def _resolve_env_image_host_defaults(self) -> Self:
         if self.env_image is not None:
             if self.env_port is None:
@@ -1370,7 +1420,11 @@ class LLMEnvSpec(EnvSpecBase):
         ):
             self.rubric_name = "reward_fn"
         if self.env_type == "dataset" and self.response_column is None:
-            self.response_column = "response"
+            self.response_column = (
+                "completion"
+                if self.dataset_format == TRACES_DATASET_FORMAT
+                else "response"
+            )
         if self.env_type == "rollout":
             if self.num_envs is None:
                 self.num_envs = 1

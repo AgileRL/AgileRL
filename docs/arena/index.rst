@@ -202,6 +202,14 @@ LLM Datasets
              --column-mapping '{"question": "prompt", "answer": "completion"}' \
              --file ./my_dataset/data.csv
 
+Recorded model calls (agent traces) go in a ``traces`` dataset: OpenAI chat
+messages in prompt-completion rows, checked locally before upload and trained
+by SFT or on-policy distillation with no column mapping. See :doc:`traces`.
+
+.. code-block:: bash
+
+   arena datasets create helpdesk-traces --category traces --file ./traces.jsonl
+
 Additional Tools
 ^^^^^^^^^^^^^^^^
 
@@ -803,4 +811,5 @@ account. See :doc:`snowflake`.
 .. toctree::
    :maxdepth: 1
 
+   traces
    snowflake

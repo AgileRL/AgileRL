@@ -52,6 +52,7 @@ from agilerl.arena.models.model_info import (
     STATUS_PREVIEW,
     SUPPORTED_MODEL_INFO,
 )
+from agilerl.arena.models.traces import TRACES_DATASET_FORMAT, validate_traces_file
 from agilerl.arena.output import StreamRichRenderer
 from agilerl.arena.stream import NDJsonStream, StreamEvent
 from agilerl.arena.typing import JSONValue
@@ -67,10 +68,11 @@ from agilerl.arena.utils import (
 logger = logging.getLogger(__name__)
 
 DATASET_CATEGORIES = frozenset(
-    {"sft", "preference", "reasoning", "tabular", "non-tabular"}
+    {"sft", "preference", "reasoning", "tabular", "non-tabular", TRACES_DATASET_FORMAT}
 )
 PARQUET_CONTENT_TYPE = "application/vnd.apache.parquet"
 CSV_CONTENT_TYPE = "text/csv"
+JSONL_CONTENT_TYPE = "application/x-ndjson"
 
 MemoryScope = Literal["user", "organization"]
 MEMORY_SCOPES: tuple[MemoryScope, ...] = ("user", "organization")
@@ -776,7 +778,7 @@ class ArenaClient:
         *,
         name: str,
         category: str,
-        column_mapping: str | dict[str, Any],
+        column_mapping: str | dict[str, Any] | None = None,
         description: str | None = None,
         file: str | os.PathLike[str] | bytes | None = None,
         config: str | None = None,
@@ -788,19 +790,21 @@ class ArenaClient:
 
         Upload a local CSV, a parquet file, a Hugging Face parquet folder,
         import from HuggingFace, or create metadata only. Validation is
-        performed by the Arena API.
+        performed by the Arena API; a local ``traces`` file is also checked
+        against the traces spec before upload.
 
         :param name: Dataset name.
         :type name: str
         :param category: Dataset category (``reasoning``, ``preference``,
-            ``sft``, ``tabular``, or ``non-tabular``).
+            ``sft``, ``traces``, ``tabular``, or ``non-tabular``).
         :type category: str
         :param column_mapping: Column mapping as a JSON string or dict.
-        :type column_mapping: str | dict[str, Any]
+            Required except for ``traces``, whose column names are the spec.
+        :type column_mapping: str | dict[str, Any] | None
         :param description: Optional description.
         :type description: str | None
-        :param file: Local CSV or parquet path, a directory of parquet shards,
-            or raw CSV bytes (bytes are uploaded as ``dataset.csv``).
+        :param file: Local CSV, JSONL or parquet path, a directory of parquet
+            shards, or raw CSV bytes (bytes are uploaded as ``dataset.csv``).
         :type file: str | os.PathLike[str] | bytes | None
         :param config: Parquet config name when *file* is a folder with more
             than one config (e.g. gsm8k ``main`` vs ``socratic``).
@@ -813,6 +817,7 @@ class ArenaClient:
         :type hf_split: str | None
         :returns: Created dataset metadata from Arena.
         :rtype: dict[str, Any]
+        :raises ArenaValidationError: If a ``traces`` file breaks the spec.
         """
         data, upload_files = self._build_create_dataset_multipart(
             name=name,
@@ -895,7 +900,7 @@ class ArenaClient:
         *,
         name: str,
         category: str,
-        column_mapping: str | dict[str, Any],
+        column_mapping: str | dict[str, Any] | None,
         description: str | None = None,
         file: str | os.PathLike[str] | bytes | None = None,
         config: str | None = None,
@@ -905,6 +910,12 @@ class ArenaClient:
     ) -> tuple[dict[str, str | None], list[tuple[str, tuple[str, Any, str]]]]:
         """Build multipart form fields for dataset creation."""
         category = ArenaClient._validate_dataset_category(category)
+        if category == TRACES_DATASET_FORMAT:
+            ArenaClient._validate_traces_upload(file, column_mapping)
+            column_mapping = {}
+        elif column_mapping is None:
+            msg = f"A {category!r} dataset needs a column mapping."
+            raise ArenaValidationError(msg)
         column_mapping_str = (
             json.dumps(column_mapping)
             if isinstance(column_mapping, dict)
@@ -925,9 +936,38 @@ class ArenaClient:
         return data, ArenaClient._dataset_upload_parts(file, config=config)
 
     @staticmethod
+    def _validate_traces_upload(
+        file: str | os.PathLike[str] | bytes | None,
+        column_mapping: str | dict[str, Any] | None,
+    ) -> None:
+        """Check a traces upload against the spec; its columns take no mapping."""
+        if isinstance(column_mapping, str):
+            column_mapping = column_mapping.strip()
+        if column_mapping not in (None, {}, "", "{}"):
+            msg = (
+                "A traces dataset takes no column mapping: its column names "
+                "(prompt, completion, tools, ...) are the spec."
+            )
+            raise ArenaValidationError(msg)
+        if isinstance(file, bytes):
+            msg = "Pass a traces dataset as a JSONL or parquet path, not bytes."
+            raise ArenaValidationError(msg)
+        if file is None:
+            return
+        try:
+            rows = validate_traces_file(Path(os.fspath(file)).expanduser())
+        except ValueError as error:
+            raise ArenaValidationError(str(error)) from error
+        logger.info("Traces file %s: %d valid rows.", os.fspath(file), rows)
+
+    @staticmethod
     def _content_type_for_upload_path(path: Path) -> str:
-        if path.suffix.lower() == ".parquet":
+        suffix = path.suffix.lower()
+        if suffix == ".parquet":
             return PARQUET_CONTENT_TYPE
+        # The traces validator reads a .json upload as JSONL.
+        if suffix in (".jsonl", ".ndjson", ".json"):
+            return JSONL_CONTENT_TYPE
         return CSV_CONTENT_TYPE
 
     @staticmethod
