@@ -176,6 +176,71 @@ class TestOPDSpec:
         assert "teacher" not in GRPOSpec.model_fields
 
 
+class TestTrainingManifestDatasetRolloutRubric:
+    def test_opd_without_a_rubric_validates(self) -> None:
+        # Arrange
+        environment = {
+            k: v
+            for k, v in TEACHER_OPD["environment"].items()
+            if k != "reward_file_path"
+        }
+
+        # Act
+        validated = TrainingManifest.model_validate(
+            teacher_manifest(environment=environment)
+        )
+
+        # Assert
+        assert validated.environment.rubric_file_path is None
+        assert validated.environment.rubric_name is None
+
+    def test_opd_without_a_rubric_round_trips(self) -> None:
+        # Arrange
+        environment = {
+            k: v
+            for k, v in TEACHER_OPD["environment"].items()
+            if k != "reward_file_path"
+        }
+        validated = TrainingManifest.model_validate(
+            teacher_manifest(environment=environment)
+        )
+
+        # Act
+        reloaded = TrainingManifest.model_validate(
+            validated.model_dump(mode="json", exclude_none=True)
+        )
+
+        # Assert
+        assert reloaded.environment.rubric_file_path is None
+        assert reloaded.environment.rubric_name is None
+
+    @pytest.mark.parametrize("field", ["rubric_name", "reward_fn_name"])
+    def test_opd_naming_a_rubric_without_its_file_is_rejected(self, field: str) -> None:
+        environment = {
+            k: v
+            for k, v in TEACHER_OPD["environment"].items()
+            if k != "reward_file_path"
+        }
+        environment[field] = "score"
+        doc = teacher_manifest(environment=environment)
+
+        with pytest.raises(ValidationError, match="rubric_name names a symbol"):
+            TrainingManifest.model_validate(doc)
+
+    def test_grpo_without_a_rubric_is_rejected(self) -> None:
+        environment = {
+            k: v
+            for k, v in TEACHER_OPD["environment"].items()
+            if k != "reward_file_path"
+        }
+        doc = teacher_manifest(
+            algorithm={"name": "GRPO", "batch_size": 2}, environment=environment
+        )
+
+        with pytest.raises(ValidationError, match="only OPD may leave it unset"):
+            TrainingManifest.model_validate(doc)
+
+
 class TestTrainingManifestTeacher:
     def test_dataset_backed_rollout_validates(self) -> None:
         validated = TrainingManifest.model_validate(TEACHER_OPD)

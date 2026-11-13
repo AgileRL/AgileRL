@@ -905,6 +905,14 @@ class TestEnvDuplicateCommand:
 
 
 class TestExperimentSubmitCommand:
+    def test_submit_help_still_requires_a_reward_file(self, runner):
+        result = runner.invoke(main, ["experiments", "submit", "--help"])
+        help_text = " ".join(result.output.split())
+
+        assert result.exit_code == 0
+        assert "Required when the manifest targets a reasoning dataset." in help_text
+        assert "OPD" not in help_text
+
     def test_submit(self, runner, mock_client, tmp_path):
         manifest = tmp_path / "manifest.yaml"
         manifest.write_text("experiment: test")

@@ -173,6 +173,15 @@ class EnvReward(Rubric):
         return float(observation.env_reward)
 
 
+class ZeroReward(Rubric):
+    """Scores every turn 0, so OPD trains on the teacher's per-token gap alone."""
+
+    component_name = "zero"
+
+    def forward(self, action: TurnAction, observation: TurnObservation) -> float:
+        return 0.0
+
+
 class LLMJudgeRubric(LLMJudge):
     """Score an episode with an LLM judge against written criteria.
 

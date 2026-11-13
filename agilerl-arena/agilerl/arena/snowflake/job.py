@@ -23,6 +23,7 @@ from typing import TypedDict
 import yaml
 
 from agilerl.arena.memory import cli as memory_cli
+from agilerl.arena.models.algorithms.opd import OPDSpec
 from agilerl.arena.models.env import LLMEnvSpec
 from agilerl.arena.models.manifest import TrainingManifest
 from agilerl.arena.models.training import CheckpointExportSpec
@@ -261,6 +262,37 @@ def write_job_manifest(
     return path
 
 
+def check_reward_file(
+    manifest: TrainingManifest, environment: LLMEnvSpec, has_reward_file: bool
+) -> None:
+    """Reject a ``--reward-file`` the manifest does not use, or a missing one it needs.
+
+    :param manifest: Parsed training manifest.
+    :param environment: The manifest's LLM environment.
+    :param has_reward_file: Whether ``--reward-file`` was passed.
+    :raises ValueError: A dataset-backed rollout has no reward file and is not
+        OPD with no rubric, or a non-rollout manifest has one.
+    """
+    rollout = environment.env_type == "rollout"
+    opd_without_rubric = (
+        isinstance(manifest.algorithm, OPDSpec) and environment.rubric_file_path is None
+    )
+    if (
+        rollout
+        and environment.dataset_backed_rollout
+        and not has_reward_file
+        and not opd_without_rubric
+    ):
+        msg = (
+            "A dataset-backed rollout needs --reward-file, unless it runs OPD "
+            "and names no rubric."
+        )
+        raise ValueError(msg)
+    if not rollout and has_reward_file:
+        msg = "--reward-file is only used by RL manifests."
+        raise ValueError(msg)
+
+
 def validate_manifest(
     manifest: TrainingManifest, has_reward_file: bool, has_source: bool
 ) -> bool:
@@ -292,12 +324,7 @@ def validate_manifest(
     ):
         msg = "A rollout inside the job needs env_url or a dataset."
         raise ValueError(msg)
-    if rollout and environment.dataset_backed_rollout and not has_reward_file:
-        msg = "A dataset-backed rollout needs --reward-file."
-        raise ValueError(msg)
-    if not rollout and has_reward_file:
-        msg = "--reward-file is only used by RL manifests."
-        raise ValueError(msg)
+    check_reward_file(manifest, environment, has_reward_file)
     # The trainer injects no dataset under a rollout that names its own env.
     exports_source = not rollout or (
         environment.entrypoint is None and environment.env_url is None
