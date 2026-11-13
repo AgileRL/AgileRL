@@ -22,7 +22,7 @@ from agilerl.llm_envs.chat_formats import (
     action_text,
     resolve_chat_format,
 )
-from agilerl.llm_envs.dataset_env import encode_chat_transcript
+from agilerl.llm_envs.chat_transcript import encode_chat_transcript
 from agilerl.llm_envs.harness import RolloutHarness
 from tests.helpers.rollout_doubles import FakeEnvClient
 from tests.helpers.transcripts import assistant_runs

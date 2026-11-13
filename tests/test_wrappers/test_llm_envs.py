@@ -28,17 +28,23 @@ from agilerl.llm_envs.chat_formats import (
     detect_chat_format,
     frame_repeats_terminator,
 )
-from agilerl.llm_envs.dataset_env import (
+from agilerl.llm_envs.chat_transcript import (
     _cut_kept_turn,
     _feedback_ids,
     _named_tool_results,
     _written_tool_calls,
     chat_messages,
     encode_chat_transcript,
+    template_reasoning_key,
+)
+from agilerl.llm_envs.dataset_env import (
+    _shared_turns_in_prompt,
+    _shortened_prompts,
+    fit_preference_pair,
+    preference_collate_builder,
     sft_eval_sample,
     sft_messages,
     sft_tools,
-    template_reasoning_key,
 )
 from agilerl.utils.chat_template import (
     DEFAULT_CHAT_TEMPLATE,
@@ -113,13 +119,14 @@ class TestDatasetEnvPreferenceInit:
         assert isinstance(env.test_dataloader, DataLoader)
         assert list(next(env.train_dataloader_iter).keys()) == [
             "prompt",
-            "prompt_lengths",
             "chosen",
             "rejected",
             "chosen_input_ids",
             "chosen_attention_mask",
+            "chosen_loss_mask",
             "rejected_input_ids",
             "rejected_attention_mask",
+            "rejected_loss_mask",
         ]
         assert env.dataloader == env.train_dataloader_iter
         assert not hasattr(env, "reset_called")
@@ -296,16 +303,16 @@ class TestDatasetEnvPreferenceReset:
         assert isinstance(prompts, dict)
         assert set(prompts.keys()) == {
             "prompt",
-            "prompt_lengths",
             "chosen",
             "rejected",
             "chosen_input_ids",
             "chosen_attention_mask",
+            "chosen_loss_mask",
             "rejected_input_ids",
             "rejected_attention_mask",
+            "rejected_loss_mask",
         }
         assert len(prompts["prompt"]) == data_batch_size
-        assert len(prompts["prompt_lengths"]) == data_batch_size
         assert len(prompts["chosen"]) == data_batch_size
         assert len(prompts["rejected"]) == data_batch_size
         assert len(prompts["chosen_input_ids"]) == data_batch_size
@@ -314,8 +321,8 @@ class TestDatasetEnvPreferenceReset:
         assert len(prompts["rejected_attention_mask"]) == data_batch_size
         assert isinstance(prompts["prompt"], list)
         assert isinstance(prompts["prompt"][0], str)
-        assert isinstance(prompts["prompt_lengths"][0], int)
-        assert isinstance(prompts["prompt_lengths"], list)
+        assert prompts["chosen_loss_mask"].dtype == torch.bool
+        assert prompts["rejected_loss_mask"].dtype == torch.bool
         assert isinstance(prompts["chosen"], list)
         assert isinstance(prompts["rejected"], list)
         assert isinstance(prompts["chosen_input_ids"], torch.Tensor)
@@ -348,16 +355,16 @@ class TestDatasetEnvPreferenceReset:
         assert isinstance(prompts, dict)
         assert set(prompts.keys()) == {
             "prompt",
-            "prompt_lengths",
             "chosen",
             "rejected",
             "chosen_input_ids",
             "chosen_attention_mask",
+            "chosen_loss_mask",
             "rejected_input_ids",
             "rejected_attention_mask",
+            "rejected_loss_mask",
         }
         assert len(prompts["prompt"]) == data_batch_size
-        assert len(prompts["prompt_lengths"]) == data_batch_size
         assert len(prompts["chosen"]) == data_batch_size
         assert len(prompts["rejected"]) == data_batch_size
         assert len(prompts["chosen_input_ids"]) == data_batch_size
@@ -366,8 +373,8 @@ class TestDatasetEnvPreferenceReset:
         assert len(prompts["rejected_attention_mask"]) == data_batch_size
         assert isinstance(prompts["prompt"], list)
         assert isinstance(prompts["prompt"][0], str)
-        assert isinstance(prompts["prompt_lengths"][0], int)
-        assert isinstance(prompts["prompt_lengths"], list)
+        assert prompts["chosen_loss_mask"].dtype == torch.bool
+        assert prompts["rejected_loss_mask"].dtype == torch.bool
         assert isinstance(prompts["chosen"], list)
         assert isinstance(prompts["rejected"], list)
         assert isinstance(prompts["chosen_input_ids"], torch.Tensor)
@@ -982,6 +989,83 @@ class TestEncodeChatTranscriptToolCallCheck:
             encode_chat_transcript(
                 tokenizer, messages, None, detect_chat_format(tokenizer)
             )
+
+
+# Earlier assistant turns drop the think block; the latest one and the generation prompt keep it.
+HISTORY_THINK_TEMPLATE = (
+    "{% for m in messages %}"
+    "{% if m.role == 'user' %}<|im_start|>user\n{{ m.content }}<|im_end|>\n"
+    "{% elif m.role == 'tool' %}<|im_start|>user\n<tool_response>\n"
+    "{{ m.content }}\n</tool_response><|im_end|>\n"
+    "{% else %}<|im_start|>assistant\n"
+    "{% if loop.last %}<think>\n\n</think>\n\n{% endif %}{{ m.content }}"
+    "{% for c in m.tool_calls or [] %}<tool_call>\n"
+    '{"name": "{{ c.function.name }}", "arguments": {{ c.function.arguments | tojson }}}'
+    "\n</tool_call>{% endfor %}<|im_end|>\n"
+    "{% endif %}{% endfor %}"
+    "{% if add_generation_prompt %}<|im_start|>assistant\n<think>\n\n</think>\n\n{% endif %}"
+)
+
+LOOKUP_CALL = {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+        {"type": "function", "function": {"name": "lookup", "arguments": {"q": "x"}}}
+    ],
+}
+
+
+class TestEncodeChatTranscriptEmptyContentToolCall:
+    def test_earlier_call_turn_starts_at_its_tool_call_token(self):
+        # Arrange: the generation prompt opens ``<think>``, the earlier turn opens ``<tool_call>``.
+        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+        tokenizer.chat_template = HISTORY_THINK_TEMPLATE
+        messages = [
+            {"role": "user", "content": "hi"},
+            LOOKUP_CALL,
+            {"role": "tool", "name": "lookup", "content": "1"},
+            {"role": "user", "content": "ok"},
+            {"role": "assistant", "content": "done"},
+        ]
+
+        # Act
+        ids, mask = encode_chat_transcript(
+            tokenizer, messages, None, detect_chat_format(tokenizer)
+        )
+
+        # Assert
+        assert trained_text(tokenizer, ids, mask) == [
+            (
+                '<tool_call>\n{"name": "lookup", "arguments": {"q": "x"}}\n</tool_call>'
+                "<|im_end|>"
+            ),
+            "done<|im_end|>",
+        ]
+
+    def test_preference_prompt_with_an_earlier_call_turn_fits(self):
+        # Arrange
+        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+        tokenizer.chat_template = HISTORY_THINK_TEMPLATE
+        item = {
+            "prompt": [
+                {"role": "user", "content": "hi"},
+                LOOKUP_CALL,
+                {"role": "tool", "name": "lookup", "content": "1"},
+                {"role": "user", "content": "ok"},
+            ],
+            "chosen": [{"role": "assistant", "content": "done"}],
+            "rejected": [{"role": "assistant", "content": "no"}],
+        }
+
+        # Act
+        fitted = fit_preference_pair(
+            tokenizer, item, detect_chat_format(tokenizer), None
+        )
+
+        # Assert
+        assert fitted is not None
+        assert trained_text(tokenizer, *fitted.chosen) == ["done<|im_end|>"]
+        assert trained_text(tokenizer, *fitted.rejected) == ["no<|im_end|>"]
 
 
 class TestChatMessages:
@@ -2214,3 +2298,434 @@ class TestDatasetEnvSFTReasoningAndCuts:
 
         # Assert: the cut row is kept, trained on its first turn.
         assert env.dataset_size["train"] == 2
+
+
+def trained_side(tokenizer: Any, side: tuple[list[int], list[bool]]) -> list[str]:
+    """Decoded text of each trained run of one encoded preference side."""
+    ids, loss = side
+    return trained_text(tokenizer, ids, loss)
+
+
+def weather_call() -> dict:
+    """Assistant turn calling ``get_weather`` for Paris."""
+    return weather_conversation()[2]
+
+
+def _preference_env(train_rows: dict, tokenizer: Any, **kwargs: Any) -> DatasetEnv:
+    """Preference env over ``train_rows`` with the first row held out too."""
+    return DatasetEnv(
+        train_dataset=HFDataset.from_dict(train_rows),
+        test_dataset=HFDataset.from_dict(
+            {key: value[:1] for key, value in train_rows.items()}
+        ),
+        tokenizer=tokenizer,
+        objective="preference",
+        data_batch_size_per_gpu=1,
+        **kwargs,
+    )
+
+
+class TestFitPreferencePair:
+    def test_chat_rows_train_reasoning_on_each_side(self):
+        # Arrange
+        tokenizer = reasoning_tokenizer()
+        row = {
+            "prompt": [{"role": "user", "content": "Hi"}],
+            "chosen": [
+                {"role": "assistant", "content": "Hello", "reasoning": "be kind"}
+            ],
+            "rejected": [
+                {"role": "assistant", "content": "Go away", "thinking": "be rude"}
+            ],
+        }
+
+        # Act
+        pair = fit_preference_pair(tokenizer, row, None, None)
+
+        # Assert
+        assert trained_side(tokenizer, pair.chosen) == [
+            "<think>\nbe kind\n</think>\n\nHello<|im_end|>"
+        ]
+        assert trained_side(tokenizer, pair.rejected) == [
+            "<think>\nbe rude\n</think>\n\nGo away<|im_end|>"
+        ]
+        assert not pair.shortened
+
+    def test_multi_turn_sides_train_their_own_turns_but_not_tool_results(self):
+        # Arrange
+        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+        row = {
+            "prompt": [{"role": "user", "content": "Weather in Paris?"}],
+            "chosen": [
+                weather_call(),
+                {"role": "tool", "content": "sunny"},
+                {"role": "assistant", "content": "Sunny."},
+            ],
+            "rejected": [
+                weather_call(),
+                {"role": "tool", "content": "heavy rain all week"},
+                {"role": "assistant", "content": "Rainy."},
+            ],
+            "tools": json.dumps(WEATHER_TOOLS),
+        }
+        call = (
+            '<tool_call>\n{"name": "get_weather", "arguments": {"city": "Paris"}}\n'
+            "</tool_call><|im_end|>"
+        )
+
+        # Act
+        pair = fit_preference_pair(tokenizer, row, detect_chat_format(tokenizer), None)
+
+        # Assert
+        assert trained_side(tokenizer, pair.chosen) == [call, "Sunny.<|im_end|>"]
+        assert trained_side(tokenizer, pair.rejected) == [call, "Rainy.<|im_end|>"]
+        assert "heavy rain all week" in tokenizer.decode(pair.rejected[0])
+        assert len(pair.chosen[0]) != len(pair.rejected[0])
+
+    def test_assistant_turn_inside_the_prompt_is_context(self):
+        # Arrange
+        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+        row = {
+            "prompt": [
+                {"role": "user", "content": "Hi"},
+                {"role": "assistant", "content": "Hello"},
+                {"role": "user", "content": "Weather?"},
+            ],
+            "chosen": "Sunny",
+            "rejected": "Rainy",
+        }
+
+        # Act
+        pair = fit_preference_pair(tokenizer, row, None, None)
+
+        # Assert
+        assert "Hello<|im_end|>" in tokenizer.decode(pair.chosen[0])
+        assert trained_side(tokenizer, pair.chosen) == ["Sunny<|im_end|>"]
+        assert trained_side(tokenizer, pair.rejected) == ["Rainy<|im_end|>"]
+
+    def test_prompt_render_that_is_not_a_token_prefix_is_rejected(self):
+        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+        tokenizer.chat_template = (
+            "{% for m in messages %}<|im_start|>{{ m.role }}\n{{ m.content }}"
+            "<|im_end|>\n{% endfor %}"
+            "{% if add_generation_prompt %}<|im_start|>assistant\n"
+            "{% elif messages[-1].role == 'user' %}(waiting){% endif %}"
+        )
+        row = {"prompt": "Hi", "chosen": "Hello", "rejected": "Bye"}
+
+        with pytest.raises(ValueError, match="not a token prefix of prompt \\+ chosen"):
+            fit_preference_pair(tokenizer, row, None, None)
+
+    def test_completion_must_start_with_an_assistant_turn(self):
+        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+        row = {
+            "prompt": "Hi",
+            "chosen": "Hello",
+            "rejected": [{"role": "user", "content": "Bye"}],
+        }
+
+        with pytest.raises(
+            ValueError, match="rejected messages must start with an assistant"
+        ):
+            fit_preference_pair(tokenizer, row, None, None)
+
+    def test_over_long_pair_drops_prompt_messages_from_the_front(self):
+        # Arrange
+        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+        old_answer = "word " * 60
+        row = {
+            "prompt": [
+                {"role": "system", "content": "Be brief."},
+                {"role": "user", "content": "Hi"},
+                {"role": "assistant", "content": old_answer},
+                {"role": "user", "content": "Weather?"},
+            ],
+            "chosen": "It is sunny in Paris today.",
+            "rejected": "No idea.",
+        }
+        full = fit_preference_pair(tokenizer, row, None, None)
+        budget = len(full.chosen[0]) - 20
+
+        # Act
+        pair = fit_preference_pair(tokenizer, row, None, budget)
+
+        # Assert
+        assert pair.shortened
+        assert all(len(ids) <= budget for ids, _ in (pair.chosen, pair.rejected))
+        text = tokenizer.decode(pair.chosen[0])
+        assert old_answer not in text
+        assert "Be brief." in text
+        assert "Hi" in text
+        assert "Weather?" in text
+        assert trained_side(tokenizer, pair.chosen) == [
+            "It is sunny in Paris today.<|im_end|>"
+        ]
+        assert trained_side(tokenizer, pair.rejected) == ["No idea.<|im_end|>"]
+
+    def test_shared_turns_join_the_prompt_and_can_then_be_dropped(self):
+        # Arrange
+        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+        long_result = "rain " * 80
+        shared = [weather_call(), {"role": "tool", "content": long_result}]
+        row = {
+            "prompt": [{"role": "user", "content": "Weather in Paris?"}],
+            "chosen": [*shared, {"role": "assistant", "content": "Rainy."}],
+            "rejected": [*shared, {"role": "assistant", "content": "Sunny."}],
+            "tools": json.dumps(WEATHER_TOOLS),
+        }
+        chat_format = detect_chat_format(tokenizer)
+        full = fit_preference_pair(tokenizer, row, chat_format, None)
+
+        # Act
+        pair = fit_preference_pair(
+            tokenizer, row, chat_format, len(full.chosen[0]) - 40
+        )
+
+        # Assert
+        assert pair.shortened
+        assert long_result not in tokenizer.decode(pair.chosen[0])
+        assert trained_side(tokenizer, pair.chosen) == ["Rainy.<|im_end|>"]
+        assert trained_side(tokenizer, pair.rejected) == ["Sunny.<|im_end|>"]
+
+    def test_pair_whose_completions_alone_do_not_fit_is_none(self):
+        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+        row = {"prompt": "Hi", "chosen": "word " * 60, "rejected": "No."}
+
+        assert fit_preference_pair(tokenizer, row, None, 30) is None
+
+
+class TestSharedTurnsInPrompt:
+    def test_shared_leading_messages_move_into_the_prompt(self):
+        # Arrange
+        prompt = [{"role": "user", "content": "Weather?"}]
+        shared = [weather_call(), {"role": "tool", "content": "sunny"}]
+        chosen = [*shared, {"role": "assistant", "content": "Sunny."}]
+        rejected = [*shared, {"role": "assistant", "content": "Rainy."}]
+
+        # Act
+        moved_prompt, moved_chosen, moved_rejected = _shared_turns_in_prompt(
+            prompt, chosen, rejected
+        )
+
+        # Assert
+        assert [m["role"] for m in moved_prompt] == ["user", "assistant", "tool"]
+        assert moved_prompt[-1]["name"] == "get_weather"
+        assert moved_chosen == [{"role": "assistant", "content": "Sunny."}]
+        assert moved_rejected == [{"role": "assistant", "content": "Rainy."}]
+
+    def test_sides_that_differ_from_their_first_turn_stay_whole(self):
+        prompt = [{"role": "user", "content": "Hi"}]
+        chosen = [{"role": "assistant", "content": "Hello"}]
+        rejected = [{"role": "assistant", "content": "Bye"}]
+
+        assert _shared_turns_in_prompt(prompt, chosen, rejected) == (
+            prompt,
+            chosen,
+            rejected,
+        )
+
+
+class TestShortenedPrompts:
+    def test_an_old_tool_result_is_dropped_before_any_turn(self):
+        # Arrange
+        call = weather_call()
+        prompt = [
+            {"role": "user", "content": "Weather?"},
+            call,
+            {"role": "tool", "content": "sunny"},
+            {"role": "tool", "content": "warm"},
+            {"role": "user", "content": "Again?"},
+        ]
+
+        # Act
+        prompts = _shortened_prompts(prompt)
+
+        # Assert
+        assert prompts[1] == [
+            {"role": "user", "content": "Weather?"},
+            call,
+            {"role": "tool", "content": "warm"},
+            {"role": "user", "content": "Again?"},
+        ]
+
+    def test_without_a_user_message_the_system_messages_are_kept(self):
+        # Arrange
+        system = {"role": "system", "content": "Be brief."}
+        later = {"role": "assistant", "content": "B"}
+        prompt = [
+            system,
+            {"role": "assistant", "content": "A"},
+            {"role": "tool", "content": "t"},
+            later,
+        ]
+
+        # Act
+        prompts = _shortened_prompts(prompt)
+
+        # Assert
+        assert prompts == [prompt, [system, later], [system]]
+
+
+class TestDatasetEnvPreferenceChatRows:
+    def test_invalid_rows_are_dropped_with_a_warning(self):
+        # Arrange: the second row's chosen side opens with a user turn.
+        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+        rows = {
+            "prompt": [[{"role": "user", "content": "Hi"}]] * 2,
+            "chosen": [
+                [{"role": "assistant", "content": "Hello"}],
+                [{"role": "user", "content": "Hello"}],
+            ],
+            "rejected": [[{"role": "assistant", "content": "Bye"}]] * 2,
+        }
+
+        # Act
+        with pytest.warns(
+            UserWarning,
+            match=r"1 invalid samples were dropped from the train dataset\. First error: "
+            r"ValueError: The chosen messages must start with an assistant turn",
+        ):
+            env = _preference_env(rows, tokenizer, max_context_length=100)
+
+        # Assert
+        assert env.dataset_size["train"] == 1
+
+    def test_only_invalid_rows_raise(self):
+        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+        rows = {
+            "prompt": [[{"role": "user", "content": "Hi"}]],
+            "chosen": [[{"role": "user", "content": "Hello"}]],
+            "rejected": [[{"role": "assistant", "content": "Bye"}]],
+        }
+
+        with pytest.raises(
+            ValueError,
+            match=r"No valid samples in the train dataset\. First error: ValueError: "
+            r"The chosen messages must start with an assistant turn",
+        ):
+            _preference_env(rows, tokenizer, max_context_length=100)
+
+    def test_collate_without_a_pad_token_raises(self):
+        # Arrange
+        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+        rows = {
+            "prompt": [[{"role": "user", "content": "Hi"}]],
+            "chosen": [[{"role": "assistant", "content": "Hello"}]],
+            "rejected": [[{"role": "assistant", "content": "Bye"}]],
+        }
+        env = _preference_env(rows, tokenizer)
+        tokenizer.pad_token = None
+
+        # Act / Assert
+        with pytest.raises(ValueError, match="this tokenizer has no pad token"):
+            env.reset()
+
+    def test_collate_rejects_a_pair_whose_completions_do_not_fit(self):
+        # Arrange
+        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+        rows = {
+            "prompt": [[{"role": "user", "content": "Hi"}]],
+            "chosen": [[{"role": "assistant", "content": "Hello"}]],
+            "rejected": [[{"role": "assistant", "content": "Bye"}]],
+        }
+        env = _preference_env(rows, tokenizer, max_context_length=50)
+        collate = preference_collate_builder(env, tokenizer)
+        long_row = {
+            "prompt": [{"role": "user", "content": "Hi"}],
+            "chosen": [{"role": "assistant", "content": "word " * 60}],
+            "rejected": [{"role": "assistant", "content": "No"}],
+        }
+
+        # Act / Assert
+        with pytest.raises(
+            ValueError, match="completion alone does not fit max_context_length=50"
+        ):
+            collate([long_row])
+
+    def test_collate_emits_each_sides_loss_mask(self):
+        # Arrange
+        tokenizer = reasoning_tokenizer()
+        rows = {
+            "prompt": [[{"role": "user", "content": "Hi"}]],
+            "chosen": [[{"role": "assistant", "content": "Hello there, my friend"}]],
+            "rejected": [[{"role": "assistant", "content": "Bye"}]],
+        }
+        env = _preference_env(rows, tokenizer)
+
+        # Act
+        batch = env.reset()
+
+        # Assert
+        chosen = batch["chosen_input_ids"][0][batch["chosen_loss_mask"][0]]
+        rejected = batch["rejected_input_ids"][0][batch["rejected_loss_mask"][0]]
+        assert tokenizer.decode(chosen) == "Hello there, my friend<|im_end|>"
+        assert tokenizer.decode(rejected) == "Bye<|im_end|>"
+        assert batch["chosen_input_ids"].shape == batch["rejected_input_ids"].shape
+        pad = ~batch["rejected_attention_mask"][0].bool()
+        assert pad.any()
+        assert not batch["rejected_loss_mask"][0][pad].any()
+
+    def test_over_long_pairs_are_shortened_or_dropped_with_counts(self):
+        # Arrange
+        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+        rows = {
+            "prompt": [
+                [{"role": "user", "content": "Hi"}],
+                [
+                    {"role": "user", "content": "Hi"},
+                    {"role": "assistant", "content": "word " * 60},
+                    {"role": "user", "content": "Again?"},
+                ],
+                [{"role": "user", "content": "Hi"}],
+            ],
+            "chosen": [
+                [{"role": "assistant", "content": text}]
+                for text in ("Hello", "Yes", "word " * 60)
+            ],
+            "rejected": [
+                [{"role": "assistant", "content": text}] for text in ("Bye", "No", "No")
+            ],
+        }
+
+        # Act
+        with pytest.warns(UserWarning, match="preference pairs") as record:
+            env = _preference_env(rows, tokenizer, max_context_length=50)
+
+        # Assert
+        messages = [str(warning.message) for warning in record]
+        assert any(
+            m.startswith("1 preference pairs in the train dataset had messages dropped")
+            for m in messages
+        )
+        assert any(
+            m.startswith("1 preference pairs were filtered out of the train dataset")
+            for m in messages
+        )
+        assert env.dataset_size["train"] == 2
+
+
+class TestDatasetEnvPreferenceStringRows:
+    def test_loss_masks_cover_the_completion_after_the_prompt(self):
+        # Arrange
+        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+        env = _preference_env(
+            {"prompt": ["Hello there"], "chosen": ["yes"], "rejected": ["no thanks"]},
+            tokenizer,
+        )
+        prompt_length = len(tokenizer("Hello there")["input_ids"])
+
+        # Act
+        batch = env.reset()
+
+        # Assert
+        for side in ("chosen", "rejected"):
+            attention = batch[f"{side}_attention_mask"][0].bool()
+            expected = attention.clone()
+            expected[:prompt_length] = False
+            assert torch.equal(batch[f"{side}_loss_mask"][0], expected)
+        assert (
+            tokenizer.decode(
+                batch["rejected_input_ids"][0][batch["rejected_loss_mask"][0]]
+            )
+            == "no thanks" + tokenizer.eos_token
+        )

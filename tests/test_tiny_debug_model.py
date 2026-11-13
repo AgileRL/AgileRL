@@ -10,6 +10,7 @@ import json
 import sys
 from pathlib import Path
 
+import torch
 import yaml
 from peft import LoraConfig, get_peft_model
 from transformers import AutoConfig, AutoTokenizer
@@ -116,6 +117,50 @@ class TestDebugLoraTargets:
         ]
         assert any("q_proj" in name for name in lora_names)
         assert any("down_proj" in name for name in lora_names)
+
+
+def _load_matrix():
+    debugging = TINY_MODEL_PATH.parent
+    if str(debugging) not in sys.path:
+        sys.path.insert(0, str(debugging))
+    spec = importlib.util.spec_from_file_location(
+        "debugging_llm_training_matrix_under_test",
+        debugging / "debugging_llm_training_matrix.py",
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class TestTinyPreferenceEnv:
+    def test_loss_mask_covers_non_pad_tokens_after_the_prompt(self):
+        # Arrange
+        matrix = _load_matrix()
+        env = matrix.TinyPreferenceEnv(
+            tokenizer=matrix.TinyDigitTokenizer(),
+            data_batch_size_per_gpu=2,
+            dataset_size=4,
+        )
+
+        # Act
+        batch = env.step()
+
+        # Assert
+        prompt_lengths = [
+            len(env.tokenizer.encode(prompt)) for prompt in batch["prompt"]
+        ]
+        for side in ("chosen", "rejected"):
+            attention = batch[f"{side}_attention_mask"]
+            positions = torch.arange(attention.shape[1]).unsqueeze(0)
+            after_prompt = positions >= torch.tensor(prompt_lengths).unsqueeze(1)
+            expected = after_prompt & attention.bool()
+            assert batch[f"{side}_loss_mask"].dtype is torch.bool
+            assert torch.equal(batch[f"{side}_loss_mask"], expected)
+            assert batch[f"{side}_loss_mask"].shape == batch[f"{side}_input_ids"].shape
+        assert "prompt_lengths" not in batch
 
 
 class TestSaveTinyVllmCheckpoint:

@@ -622,6 +622,26 @@ def _dpo_env(prompts: list[str]) -> SimpleNamespace:
     )
 
 
+def _chat_dpo_env(
+    prompts: list[str], max_context_length: int | None
+) -> SimpleNamespace:
+    dataset = Dataset.from_dict(
+        {
+            "prompt": [[{"role": "user", "content": p}] for p in prompts],
+            "chosen": [[{"role": "assistant", "content": f"y{p}"}] for p in prompts],
+            "rejected": [[{"role": "assistant", "content": f"n{p}"}] for p in prompts],
+        }
+    )
+    return SimpleNamespace(
+        objective="preference",
+        tokenizer=ChatLetterTokenizer(),
+        chat_template_kwargs={},
+        max_context_length=max_context_length,
+        test_dataset=dataset,
+        test_dataloader=SimpleNamespace(dataset=dataset),
+    )
+
+
 class TestSelectDatasetPrompts:
     def test_sft_rows_use_the_transcript_prefix(self):
         # Arrange
@@ -716,6 +736,41 @@ class TestSelectDatasetPrompts:
 
         # Assert
         assert rows == [DatasetPrompt([1, 2], "ab", "yes-ab", "no-ab")]
+
+    def test_chat_dpo_rows_use_the_transcript_prefix(self):
+        # Arrange
+        env = _chat_dpo_env(["ab"], max_context_length=None)
+        prefix = "user:ab\nassistant:"
+
+        # Act
+        rows = select_dataset_prompts(env, num_prompts=1, max_prompt_tokens=100)
+
+        # Assert
+        assert rows == [
+            DatasetPrompt([ord(char) for char in prefix], prefix, "yab\n", "nab\n")
+        ]
+
+    def test_chat_dpo_rows_skip_prompts_longer_than_the_limit(self):
+        # Arrange
+        env = _chat_dpo_env(["abcdef", "ab"], max_context_length=None)
+
+        # Act
+        rows = select_dataset_prompts(
+            env, num_prompts=2, max_prompt_tokens=len("user:ab\nassistant:")
+        )
+
+        # Assert
+        assert [row.reference for row in rows] == ["yab\n"]
+
+    def test_chat_dpo_rows_that_do_not_fit_the_context_are_skipped(self):
+        # Arrange: "user:" + 40 chars alone is longer than the context.
+        env = _chat_dpo_env(["ab", "c" * 40], max_context_length=30)
+
+        # Act
+        rows = select_dataset_prompts(env, num_prompts=2, max_prompt_tokens=100)
+
+        # Assert
+        assert [row.reference for row in rows] == ["yab\n"]
 
     def test_stops_at_the_requested_count(self):
         # Arrange
