@@ -1897,6 +1897,15 @@ class TestLLMEnvSpecGroupRubric:
         # Assert
         assert spec.rubric_name == "TURN"
 
+    def test_a_rubric_name_needs_the_rubric_file(self) -> None:
+        with pytest.raises(ValueError, match="rubric_name names a symbol"):
+            LLMEnvSpec(
+                env_type="rollout",
+                env_url="http://env",
+                max_turns=1,
+                rubric_name="TURN",
+            )
+
     def test_a_group_rubric_needs_the_rubric_file(self) -> None:
         with pytest.raises(ValueError, match="group_rubric_name names a symbol"):
             LLMEnvSpec(

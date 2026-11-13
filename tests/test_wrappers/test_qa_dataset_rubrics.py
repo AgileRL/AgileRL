@@ -16,6 +16,7 @@ from agilerl.llm_envs.rubrics import (
     EnvReward,
     TurnAction,
     TurnObservation,
+    ZeroReward,
     register_component_hooks,
     reward_fn_to_rubric,
 )
@@ -195,6 +196,22 @@ class TestEnvReward:
         rubric(action, observation)
 
         assert observation.metadata["rubric_scores"] == {"env": 0.75}
+
+
+class TestZeroReward:
+    def test_scores_any_turn_zero(self) -> None:
+        action, observation = _turn(env_reward=0.75)
+
+        assert ZeroReward()(action, observation) == 0.0
+
+    def test_reports_as_the_zero_component(self) -> None:
+        rubric = ZeroReward()
+        register_component_hooks(rubric)
+        action, observation = _turn(env_reward=0.75)
+
+        rubric(action, observation)
+
+        assert observation.metadata["rubric_scores"] == {"zero": 0.0}
 
 
 def test_register_component_hooks_names_a_bare_leaf_from_its_class() -> None:

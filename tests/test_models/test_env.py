@@ -552,10 +552,6 @@ def mark_wrapped(env):
 
 
 class TestLLMEnvSpec:
-    def test_reasoning_requires_rubric_file_path(self):
-        with pytest.raises(ValueError, match="rubric_file_path is required"):
-            LLMEnvSpec(env_type=LLMEnvType.ROLLOUT, dataset="ds", rubric_file_path=None)
-
     def test_accepts_legacy_reward_keys(self):
         """Arena manifests may still send reward_file_path / reward_fn_name."""
         spec = LLMEnvSpec(

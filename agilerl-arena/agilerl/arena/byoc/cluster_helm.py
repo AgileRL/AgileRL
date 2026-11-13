@@ -34,6 +34,7 @@ CLUSTER_TOKEN_SECRET_KEY = "cluster-token"
 WIREGUARD_SECRET_NAME = "arena-byoc-agent-wireguard"
 ROLES_ANYWHERE_SECRET_NAME = "byoc-arena-s3"
 NEBIUS_SECRET_NAME = "arena-byoc-provisioner-nebius"
+CATALOG_SECRET_NAME = "arena-byoc-catalog-credentials"
 
 
 def normalize_agent_release(release: str | None) -> str:
@@ -794,31 +795,54 @@ def _package_secret_file(package_root: Path, relative: str) -> Path | None:
     return None
 
 
+def _cluster_token_secret(
+    package_root: Path, agent_values: dict[str, Any]
+) -> tuple[str, list[tuple[str, Path]]] | None:
+    token = _package_secret_file(package_root, "secrets/cluster-token")
+    if token is None:
+        return None
+    return (
+        _helm_value(
+            agent_values,
+            ("clusterTokenSecret", "name"),
+            CLUSTER_TOKEN_SECRET_NAME,
+        ),
+        [
+            (
+                _helm_value(
+                    agent_values,
+                    ("clusterTokenSecret", "key"),
+                    CLUSTER_TOKEN_SECRET_KEY,
+                ),
+                token,
+            )
+        ],
+    )
+
+
+def _secret_if_files_present(
+    package_root: Path,
+    agent_values: dict[str, Any],
+    entries: tuple[tuple[str, str], ...],
+    name_keys: tuple[str, ...],
+    default_name: str,
+) -> tuple[str, list[tuple[str, Path]]] | None:
+    files: list[tuple[str, Path]] = []
+    for key, relative in entries:
+        path = _package_secret_file(package_root, relative)
+        if path is None:
+            return None
+        files.append((key, path))
+    return (_helm_value(agent_values, name_keys, default_name), files)
+
+
 def _credential_secrets(
     package_root: Path, agent_values: dict[str, Any]
 ) -> list[tuple[str, list[tuple[str, Path]]]]:
     secrets: list[tuple[str, list[tuple[str, Path]]]] = []
-    token = _package_secret_file(package_root, "secrets/cluster-token")
-    if token is not None:
-        secrets.append(
-            (
-                _helm_value(
-                    agent_values,
-                    ("clusterTokenSecret", "name"),
-                    CLUSTER_TOKEN_SECRET_NAME,
-                ),
-                [
-                    (
-                        _helm_value(
-                            agent_values,
-                            ("clusterTokenSecret", "key"),
-                            CLUSTER_TOKEN_SECRET_KEY,
-                        ),
-                        token,
-                    )
-                ],
-            )
-        )
+    token_secret = _cluster_token_secret(package_root, agent_values)
+    if token_secret is not None:
+        secrets.append(token_secret)
     agw = _package_secret_file(package_root, "secrets/agw.conf")
     if agw is not None:
         files = [("agw.conf", agw)]
@@ -835,36 +859,42 @@ def _credential_secrets(
                 files,
             )
         )
-    certificate = _package_secret_file(
-        package_root, "secrets/roles-anywhere/certificate"
+    roles = _secret_if_files_present(
+        package_root,
+        agent_values,
+        (
+            ("certificate", "secrets/roles-anywhere/certificate"),
+            ("private_key", "secrets/roles-anywhere/private_key"),
+        ),
+        ("rolesAnywhere", "secretName"),
+        ROLES_ANYWHERE_SECRET_NAME,
     )
-    private_key = _package_secret_file(
-        package_root, "secrets/roles-anywhere/private_key"
+    nebius = _secret_if_files_present(
+        package_root,
+        agent_values,
+        (
+            ("credentials.json", "secrets/nebius/credentials.json"),
+            ("config.yaml", "secrets/nebius/config.yaml"),
+        ),
+        ("provisioner", "nebius", "existingSecret"),
+        NEBIUS_SECRET_NAME,
     )
-    if certificate is not None and private_key is not None:
-        secrets.append(
-            (
-                _helm_value(
-                    agent_values,
-                    ("rolesAnywhere", "secretName"),
-                    ROLES_ANYWHERE_SECRET_NAME,
-                ),
-                [("certificate", certificate), ("private_key", private_key)],
-            )
-        )
-    credentials = _package_secret_file(package_root, "secrets/nebius/credentials.json")
-    config = _package_secret_file(package_root, "secrets/nebius/config.yaml")
-    if credentials is not None and config is not None:
-        secrets.append(
-            (
-                _helm_value(
-                    agent_values,
-                    ("provisioner", "nebius", "existingSecret"),
-                    NEBIUS_SECRET_NAME,
-                ),
-                [("credentials.json", credentials), ("config.yaml", config)],
-            )
-        )
+    catalog = _secret_if_files_present(
+        package_root,
+        agent_values,
+        (
+            ("write.env", "secrets/catalog/write.env"),
+            ("transfer.env", "secrets/catalog/transfer.env"),
+        ),
+        ("provisioner", "catalogCredentials", "existingSecret"),
+        CATALOG_SECRET_NAME,
+    )
+    if roles is not None:
+        secrets.append(roles)
+    if nebius is not None:
+        secrets.append(nebius)
+    if catalog is not None:
+        secrets.append(catalog)
     return secrets
 
 

@@ -991,6 +991,61 @@ class TestSubmitJob:
 
         assert session.events == []
 
+    def test_opd_dataset_rollout_without_a_reward_file_submits(
+        self, tmp_path: Path
+    ) -> None:
+        # Arrange
+        session = Session()
+        manifest = _dataset_rl()
+        manifest["algorithm"] = {"name": "OPD", "batch_size": 2}
+        del manifest["environment"]["reward_file_path"]
+
+        # Act
+        submit_job(session, _write(tmp_path, manifest), _settings(), RUN_ID)
+
+        # Assert
+        assert [item["name"] for item in session.puts] == ["manifest.yaml", "job.json"]
+        assert json.loads(session.puts[1]["text"])["reward_file"] is False
+
+    def test_opd_dataset_rollout_that_names_a_rubric_needs_the_reward_file(
+        self, tmp_path: Path
+    ) -> None:
+        # Arrange
+        session = Session()
+        manifest = _dataset_rl()
+        manifest["algorithm"] = {"name": "OPD", "batch_size": 2}
+
+        # Act / Assert
+        with pytest.raises(ValueError, match="names no rubric"):
+            submit_job(session, _write(tmp_path, manifest), _settings(), RUN_ID)
+
+        assert session.events == []
+
+    def test_opd_dataset_rollout_uploads_a_named_rubric(self, tmp_path: Path) -> None:
+        # Arrange
+        reward = tmp_path / "my_reward.py"
+        reward.write_text("def reward(x):\n    return 1.0\n", encoding="utf-8")
+        session = Session()
+        manifest = _dataset_rl()
+        manifest["algorithm"] = {"name": "OPD", "batch_size": 2}
+
+        # Act
+        submit_job(
+            session,
+            _write(tmp_path, manifest),
+            _settings(reward_file=reward),
+            RUN_ID,
+        )
+
+        # Assert
+        assert [item["name"] for item in session.puts] == [
+            "manifest.yaml",
+            "job.json",
+            "reward.py",
+        ]
+        assert session.puts[2]["text"] == "def reward(x):\n    return 1.0\n"
+        assert json.loads(session.puts[1]["text"])["reward_file"] is True
+
     def test_a_reward_file_on_sft_is_rejected(self, tmp_path: Path) -> None:
         reward = tmp_path / "reward.py"
         reward.write_text("", encoding="utf-8")

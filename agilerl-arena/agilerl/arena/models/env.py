@@ -682,8 +682,9 @@ class LLMEnvSpec(EnvSpecBase):
         validation_alias=AliasChoices("rubric_file_path", "reward_file_path"),
         description=(
             "Path to the Python module holding the rubric (or reward function) "
-            "that scores every turn. Required for a rollout over dataset rows; "
-            "on an env, its score replaces the env's reward, which it can "
+            "that scores every turn. Required for a rollout over dataset rows, "
+            "except under OPD, where unset scores every turn 0; on an env, its "
+            "score replaces the env's reward, which it can "
             "read as an input."
         ),
     )
@@ -1234,9 +1235,6 @@ class LLMEnvSpec(EnvSpecBase):
             )
             raise ValueError(msg)
         if dataset is not None:
-            if self.rubric_file_path is None:
-                msg = "rubric_file_path is required for dataset-backed rollout environments"
-                raise ValueError(msg)
             if self.prompt_template is None:
                 msg = "Prompt template is required for dataset-backed rollout environments"
                 raise ValueError(msg)
@@ -1355,16 +1353,16 @@ class LLMEnvSpec(EnvSpecBase):
         return self
 
     @model_validator(mode="after")
+    def _check_rubric_name(self) -> Self:
+        if self.rubric_name is not None and self.rubric_file_path is None:
+            msg = "rubric_name names a symbol in rubric_file_path; set it too."
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
     def _apply_conditional_defaults(self) -> Self:
-        if self._dataset_identity_backed():
-            if self.train_test_split is None:
-                self.train_test_split = 0.9
-            if (
-                self.env_type == "rollout"
-                and self.rubric_name is None
-                and self.group_rubric_name is None
-            ):
-                self.rubric_name = "reward_fn"
+        if self._dataset_identity_backed() and self.train_test_split is None:
+            self.train_test_split = 0.9
         if (
             self.rubric_file_path is not None
             and self.rubric_name is None

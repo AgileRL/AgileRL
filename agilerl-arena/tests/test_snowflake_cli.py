@@ -146,7 +146,10 @@ class TestSnowflakeHelp:
         assert "--nodes" not in result.output
         assert "--pulsar-url" not in result.output
         assert "Training steps between checkpoints" in result.output
-        assert "--reward-file" in result.output
+        help_text = " ".join(result.output.split())
+        assert "--reward-file" in help_text
+        assert "names no rubric" in help_text
+        assert "A named rubric still needs this file" in help_text
 
 
 class TestSubmitCommand:

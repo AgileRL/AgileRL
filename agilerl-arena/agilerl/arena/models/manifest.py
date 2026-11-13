@@ -702,6 +702,24 @@ class TrainingManifest(BaseModel):
         raise ValueError(msg)
 
     @model_validator(mode="after")
+    def _check_dataset_rollout_rubric(self) -> Self:
+        """A rollout over dataset rows needs a rubric, unless OPD trains on its teacher alone."""
+        environment = self.environment
+        if (
+            not isinstance(environment, LLMEnvSpec)
+            or not environment.dataset_backed_rollout
+            or environment.rubric_file_path is not None
+            or isinstance(self.algorithm, OPDSpec)
+        ):
+            return self
+        msg = (
+            "rubric_file_path is required for dataset-backed rollout "
+            "environments; only OPD may leave it unset, and then every turn "
+            "scores 0."
+        )
+        raise ValueError(msg)
+
+    @model_validator(mode="after")
     def _check_distillation_teacher(self) -> Self:
         """The teacher rescores each rollout's text, so the env must be text-only."""
         if not isinstance(self.algorithm, OPDSpec):

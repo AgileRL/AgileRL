@@ -52,6 +52,9 @@ from agilerl.arena.byoc.provisioning.providers.nebius.spec import (
     resource_classes,
     service_account_credentials,
 )
+from agilerl.arena.byoc.provisioning.providers.nebius.terraform import (
+    storage_project_id,
+)
 from agilerl.arena.byoc.provisioning.spec import ClusterSpec
 from agilerl.arena.byoc.provisioning.terraform import ClusterOutputs
 from agilerl.arena.config import CommandConfig
@@ -829,6 +832,7 @@ nebius:
                 "cluster_id": "mk8s-1",
                 "service_account_private_key": "pem-should-not-print",
                 "storage_secret_access_key": "secret-access-should-not-print",
+                "catalog_secret_access_key": "catalog-secret-should-not-print",
             }
             result = CliRunner().invoke(
                 build_cluster_status_command(),
@@ -842,6 +846,8 @@ nebius:
         assert "storage_secret_access_key: <sensitive>" in result.output
         assert "pem-should-not-print" not in result.output
         assert "secret-access-should-not-print" not in result.output
+        assert "catalog_secret_access_key: <sensitive>" in result.output
+        assert "catalog-secret-should-not-print" not in result.output
 
 
 class TestProvisionCommand:
@@ -1045,6 +1051,38 @@ class TestSpecWithStoredNebiusConfig:
         spec = _nebius_spec()
 
         assert recover_stored_config(spec, {"project_id": "other"}) is spec
+
+    def test_recovered_project_ids_are_not_terraform_inputs(self) -> None:
+        spec = _nebius_spec(
+            project_id=None,
+            storage_project_id=None,
+            subnet_id=None,
+            region="eu-north1",
+        )
+
+        recovered = recover_stored_config(
+            spec,
+            {"project_id": "project-stored", "storage_project_id": "storage-stored"},
+        )
+
+        values = recovered.terraform_values()
+        assert values["project_id"] == ""
+        assert values["storage_project_id"] == ""
+        assert storage_project_id(recovered) == "storage-stored"
+        assert recovered.nebius_cloud().project_id == "project-stored"
+
+    def test_spec_project_ids_stay_terraform_inputs(self) -> None:
+        spec = _nebius_spec(storage_project_id=None, region="eu-north1")
+
+        recovered = recover_stored_config(
+            spec, {"project_id": "other", "storage_project_id": "storage-stored"}
+        )
+
+        values = recovered.terraform_values()
+        assert values["project_id"] == "project"
+        assert values["subnet_id"] == "subnet"
+        assert values["storage_project_id"] == ""
+        assert storage_project_id(recovered) == "storage-stored"
 
 
 class TestStoredStateLocationEndpoint:
