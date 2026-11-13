@@ -340,6 +340,10 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         ``fsdp_config.routed_expert_chunk_mib``. ``None`` lets the
         training-memory search pick it when it runs, else keeps 64.
     :type routed_expert_chunk_mib: int | None, optional
+    :param stochastic_round_bf16: Stochastic-round fp32 master weights to bf16
+        once per optimizer step, and reuse that tensor for the trainer forward
+        and the rollout copy. Defaults to False (round-to-nearest).
+    :type stochastic_round_bf16: bool, optional
     """
 
     supports_sequence_packing = GRPOSpec.supports_sequence_packing
@@ -426,6 +430,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         logit_bias: dict[int, float] | None = None,
         micro_batch_tokens_per_gpu: int | None = None,
         routed_expert_chunk_mib: int | None = None,
+        stochastic_round_bf16: bool = False,
     ) -> None:
         if use_kl_advantage_shaping and beta == 0.0:
             msg = (
@@ -476,6 +481,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             profiling_config=profiling_config,
             logit_bias=logit_bias,
             routed_expert_chunk_mib=routed_expert_chunk_mib,
+            stochastic_round_bf16=stochastic_round_bf16,
         )
         self._validate_core_args(batch_size, lr, update_epochs, actor_network)
         self.clip_coef, self.clip_coef_min, self.clip_coef_max = (
@@ -1090,6 +1096,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         result["micro_batches_per_step"] = micro_batches_per_step
         self._step_lr_scheduler()
         result.update(self._learn_phase_seconds())
+        result.update(self._take_bf16_changed_frac())
         if grad_updates > 0:
             result["grad_norm_pre"] = grad_norm_pre_total / grad_updates
             result["grad_norm_post"] = grad_norm_post_total / grad_updates

@@ -69,6 +69,7 @@ from agilerl.distributed.tensor_parallel import (
     tensor_rows_in_order,
 )
 from agilerl.utils.phase_timer import PhaseTimer
+from agilerl.utils.stochastic_round import begin_master_step, finish_master_step
 
 if TYPE_CHECKING:
     from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
@@ -370,6 +371,8 @@ class OptimizerStep:
     group_grad_norms: tuple[float, ...]
     # Coefficient each param group's grads were scaled by, in group order.
     clip_coefs: tuple[float, ...]
+    # Fraction of fp32-master elements whose bf16 value changed. None when that cast is off.
+    bf16_changed_frac: float | None = None
 
     @property
     def grad_norm_pre(self) -> float:
@@ -825,10 +828,12 @@ class DPRuntime(BaseRuntime):
         group_grad_norms, clip_coefs = clip_param_groups(
             inner.param_groups, max_grad_norm, clip_grad_norm_, clip_groups
         )
+        masters = begin_master_step(actor)
         optimizer.step()
         optimizer.zero_grad()
+        bf16_changed_frac = finish_master_step(masters)
         self.phase_timer.mark("optim")
-        return OptimizerStep(group_grad_norms, clip_coefs)
+        return OptimizerStep(group_grad_norms, clip_coefs, bf16_changed_frac)
 
 
 class FSDPRuntime(BaseRuntime):
@@ -1186,7 +1191,9 @@ class FSDPRuntime(BaseRuntime):
             clip_param_group_grad_norm_,
             clip_groups,
         )
+        masters = begin_master_step(actor)
         optimizer.step()
         optimizer.zero_grad()
+        bf16_changed_frac = finish_master_step(masters)
         self.phase_timer.mark("optim")
-        return OptimizerStep(group_grad_norms, clip_coefs)
+        return OptimizerStep(group_grad_norms, clip_coefs, bf16_changed_frac)

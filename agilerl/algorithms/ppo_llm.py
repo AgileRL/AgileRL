@@ -255,6 +255,10 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         ``fsdp_config.routed_expert_chunk_mib``. ``None`` lets the
         training-memory search pick it when it runs, else keeps 64.
     :type routed_expert_chunk_mib: int | None, optional
+    :param stochastic_round_bf16: Stochastic-round fp32 master weights to bf16
+        once per optimizer step, and reuse that tensor for the trainer forward
+        and the rollout copy. Defaults to False (round-to-nearest).
+    :type stochastic_round_bf16: bool, optional
     """
 
     gradient_row_copies = LLMPPOSpec.gradient_row_copies
@@ -322,6 +326,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         logit_bias: dict[int, float] | None = None,
         micro_batch_tokens_per_gpu: int | None = None,
         routed_expert_chunk_mib: int | None = None,
+        stochastic_round_bf16: bool = False,
     ) -> None:
 
         resolved_device = resolve_device(device)
@@ -366,6 +371,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             vllm_max_clip_fraction=vllm_max_clip_fraction,
             logit_bias=logit_bias,
             routed_expert_chunk_mib=routed_expert_chunk_mib,
+            stochastic_round_bf16=stochastic_round_bf16,
         )
         self._validate_core_args(
             batch_size, lr_actor, clip_coef, update_epochs, actor_network, clone
@@ -922,6 +928,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             "micro_batches_per_step": micro_batches_per_step,
             **padding_stats,
             **self._learn_phase_seconds(),
+            **self._take_bf16_changed_frac(),
         }
 
         # Wire averaged metrics into the metrics tracker.

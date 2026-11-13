@@ -225,6 +225,7 @@ from agilerl.utils.llm_packing import (
 from agilerl.utils.mutation_utils import target_activations
 from agilerl.utils.phase_timer import PhaseTimer
 from agilerl.utils.sampling_supports import extract_vllm_sampling_supports
+from agilerl.utils.stochastic_round import activate_bf16_rounding
 from agilerl.utils.token_micro_batches import (
     balance_windows,
     fill_micro_batches,
@@ -2998,6 +2999,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         ``fsdp_config.routed_expert_chunk_mib``. ``None`` lets the
         training-memory search pick it when it runs, else keeps 64.
     :type routed_expert_chunk_mib: int | None, optional
+    :param stochastic_round_bf16: Stochastic-round fp32 master weights to bf16
+        once per optimizer step, and reuse that tensor for the trainer forward
+        and the rollout copy. Defaults to False (round-to-nearest).
+    :type stochastic_round_bf16: bool, optional
     """
 
     _allowed_adapters = frozenset({"actor", "reference", "critic"})
@@ -3072,6 +3077,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         profiling_config: ProfilingConfig | None = None,
         logit_bias: dict[int, float] | None = None,
         routed_expert_chunk_mib: int | None = None,
+        stochastic_round_bf16: bool = False,
     ) -> None:
         if not HAS_LLM_DEPENDENCIES:
             msg = "LLM dependencies are not installed. Please install them using `pip install agilerl[llm]`."
@@ -3153,6 +3159,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         # optimizer_steps // reference_update_interval at the last reference copy.
         self.reference_update_tracker = 0
         self.optimizer_steps = 0
+        self.stochastic_round_bf16 = stochastic_round_bf16
+        self._bf16_changed_sum = 0.0
+        self._bf16_changed_count = 0
         self.calc_position_embeddings = calc_position_embeddings
         self.pad_token_id = pad_token_id
         self.sequence_layout: SequenceLayout = PaddedSequence(
@@ -3271,6 +3280,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self.metrics = AgentMetrics()
         for name in LEARN_PHASE_METRIC_NAMES:
             self.metrics.register(name)
+        if self.stochastic_round_bf16:
+            self.metrics.register("bf16_changed_frac")
 
     def preprocess_observation(self, observation: TorchObsType) -> TorchObsType:
         """Preprocess observations (dummy) for forward pass through neural network.
@@ -3622,6 +3633,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             if self.lr_scheduler is not None and "lr_scheduler" in checkpoint:
                 self.lr_scheduler.last_epoch = checkpoint["lr_scheduler"]["last_epoch"]
             self.apply_lr()
+        if self.stochastic_round_bf16:
+            activate_bf16_rounding(self.actor, self.optimizer_steps)
 
     def load_weights(
         self,
@@ -3905,6 +3918,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             set_routed_experts_chunk_bytes(
                 self.actor, self.routed_expert_chunk_mib * MiB
             )
+        if self.stochastic_round_bf16:
+            activate_bf16_rounding(self.actor, self.optimizer_steps)
         self.sequence_layout = self._build_sequence_layout()
 
     def _check_cp_strips_vision_towers(self) -> None:
@@ -4971,6 +4986,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
         # Adapters train in fp32: bf16 weights drop small Adam updates. FSDP's
         # mixed-precision policy and the expert kernels run them in bf16.
+        # The frozen base is already bf16 and is not rounded.
         with full_shape_views(peft_target, expert_params):
             peft_target = get_peft_model(
                 peft_target,
@@ -6240,6 +6256,20 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         """
         return torch.as_tensor(idxs).to(device, non_blocking=True)
 
+    def _take_bf16_changed_frac(self) -> dict[str, float]:
+        """Return the mean bf16 changed-fraction since the last call, then clear it.
+
+        :return: ``{"bf16_changed_frac": mean}`` when rounding ran, else ``{}``.
+        :rtype: dict[str, float]
+        """
+        count = self._bf16_changed_count
+        if count == 0:
+            return {}
+        value = self._bf16_changed_sum / count
+        self._bf16_changed_sum = 0.0
+        self._bf16_changed_count = 0
+        return {"bf16_changed_frac": value}
+
     def _backward_pass(
         self,
         loss: torch.Tensor,
@@ -6284,6 +6314,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             )
         if step is not None:
             self.optimizer_steps += 1
+            if step.bf16_changed_frac is not None:
+                self._bf16_changed_sum += step.bf16_changed_frac
+                self._bf16_changed_count += 1
         return step
 
     def _stack_rollout_batch(

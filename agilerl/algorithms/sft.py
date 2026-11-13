@@ -125,6 +125,10 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         ``fsdp_config.routed_expert_chunk_mib``. ``None`` lets the
         training-memory search pick it when it runs, else keeps 64.
     :type routed_expert_chunk_mib: int | None, optional
+    :param stochastic_round_bf16: Stochastic-round fp32 master weights to bf16
+        once per optimizer step, and reuse that tensor for the trainer forward
+        and the rollout copy. Defaults to False (round-to-nearest).
+    :type stochastic_round_bf16: bool, optional
     """
 
     supports_sequence_packing = True
@@ -157,6 +161,7 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         lora_tower_target_modules: list[str] | None = None,
         max_model_len: int = 1024,
         routed_expert_chunk_mib: int | None = None,
+        stochastic_round_bf16: bool = False,
     ) -> None:
         resolved_device = resolve_device(device)
         super().__init__(
@@ -186,6 +191,7 @@ class SFT(LLMAlgorithm[SFTPrompts]):
             quantization_config=quantization_config,
             lora_tower_target_modules=lora_tower_target_modules,
             routed_expert_chunk_mib=routed_expert_chunk_mib,
+            stochastic_round_bf16=stochastic_round_bf16,
         )
         self.temperature = 0
         self.update_epochs = update_epochs
@@ -289,13 +295,16 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         learn_metrics = aggregate_metrics_dict(averaged_metrics)
 
         phase_seconds = self._learn_phase_seconds()
+        changed = self._take_bf16_changed_frac()
         if training:
             self.metrics.log("loss", learn_metrics["loss"])
             self.metrics.log("perplexity", learn_metrics["perplexity"])
             for key, value in phase_seconds.items():
                 self.metrics.log(key, value)
+            for key, value in changed.items():
+                self.metrics.log(key, value)
 
-        return {**learn_metrics, **phase_seconds}
+        return {**learn_metrics, **phase_seconds, **changed}
 
     def _sft_loss(
         self,

@@ -51,6 +51,7 @@ from agilerl.distributed.tensor_parallel import (
 )
 from agilerl.lora.moe.adapters import wrapper_chain
 from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
+from agilerl.utils.stochastic_round import copy_synced_master_
 
 DEFAULT_MAX_SHARD_SIZE = "5GB"
 DEFAULT_TORCH_DTYPE = torch.bfloat16
@@ -1057,7 +1058,7 @@ def _write_gathered_merge(spec: MergedSyncSpec, destination: torch.Tensor) -> No
         delta = tensor_rows_in_order(
             layer.get_delta_weight(adapter_name), spec.delta_order
         )
-    destination.copy_(base.float() + delta)
+    copy_synced_master_(destination, base.float() + delta)
 
 
 def _adapter_factors(
@@ -1087,7 +1088,7 @@ def _write_merged_linear(
     # A fan-in-fan-out base stores [in, out]; accumulate through its transpose.
     target = merged.T if layer.fan_in_fan_out else merged
     target.addmm_(weight_b, weight_a, alpha=layer.scaling[adapter_name])
-    destination.copy_(merged)
+    copy_synced_master_(destination, merged)
 
 
 @contextmanager
@@ -1118,7 +1119,7 @@ def _write_merged_param(
     if n_experts == 1:
         merged = base.to(torch.float32, copy=True)
         merged.addmm_(weight_b.float(), weight_a.float(), alpha=scaling)
-        destination.copy_(merged)
+        copy_synced_master_(destination, merged)
         return
     # PEFT's stacked layouts: A is [E*r, in] or [E, r, in]; B is [out, E*r] or [out, r, E].
     weight_a = weight_a.reshape(n_experts, -1, weight_a.shape[-1])
@@ -1134,4 +1135,4 @@ def _write_merged_param(
             merged.baddbmm_(expert_b, expert_a, alpha=scaling)
         else:
             merged.baddbmm_(expert_a.mT, expert_b.mT, alpha=scaling)
-        destination[start:stop].copy_(merged)
+        copy_synced_master_(destination[start:stop], merged)

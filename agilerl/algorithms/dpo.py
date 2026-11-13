@@ -119,6 +119,10 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         ``fsdp_config.routed_expert_chunk_mib``. ``None`` lets the
         training-memory search pick it when it runs, else keeps 64.
     :type routed_expert_chunk_mib: int | None, optional
+    :param stochastic_round_bf16: Stochastic-round fp32 master weights to bf16
+        once per optimizer step, and reuse that tensor for the trainer forward
+        and the rollout copy. Defaults to False (round-to-nearest).
+    :type stochastic_round_bf16: bool, optional
     """
 
     supports_sequence_packing = True
@@ -154,6 +158,7 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         lora_tower_target_modules: list[str] | None = None,
         max_model_len: int = 1024,
         routed_expert_chunk_mib: int | None = None,
+        stochastic_round_bf16: bool = False,
     ) -> None:
         resolved_device = resolve_device(device)
         super().__init__(
@@ -184,6 +189,7 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
             quantization_config=quantization_config,
             lora_tower_target_modules=lora_tower_target_modules,
             routed_expert_chunk_mib=routed_expert_chunk_mib,
+            stochastic_round_bf16=stochastic_round_bf16,
         )
         self.beta = beta
         self.nll_alpha = nll_alpha
@@ -355,10 +361,13 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
             )
 
         phase_seconds = self._learn_phase_seconds()
+        changed = self._take_bf16_changed_frac()
         if training:
             for key, value in phase_seconds.items():
                 self.metrics.log(key, value)
-        return {**agg, **phase_seconds}
+            for key, value in changed.items():
+                self.metrics.log(key, value)
+        return {**agg, **phase_seconds, **changed}
 
     def _dpo_loss(
         self,

@@ -269,6 +269,15 @@ class LLMAlgorithmSpec(AlgorithmSpec):
         default=42,
         description="Seed for sampling, data order and initialization.",
     )
+    stochastic_round_bf16: bool = Field(
+        default=False,
+        description=(
+            "Stochastic-round fp32 LoRA master weights to bf16 once per "
+            "optimizer step. The trainer forward and the rollout copy share "
+            "that tensor. Off keeps round-to-nearest. The frozen bf16 base "
+            "is not rounded."
+        ),
+    )
 
     quantization: str | dict[str, Any] | None = Field(
         default=None,

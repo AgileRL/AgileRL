@@ -30,6 +30,7 @@ import torch.nn.functional as F
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.utils.patching import library_shim
+from agilerl.utils.stochastic_round import cast_compute_weight
 
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from peft.tuners.lora.layer import LoraLayer, ParamWrapper
@@ -111,8 +112,8 @@ def _apply_lora_factor(
     assert isinstance(weight, torch.Tensor)
     if not isinstance(factor, nn.Linear):
         return factor(layer._cast_input_dtype(x, weight.dtype))
-    bias = None if factor.bias is None else factor.bias.to(x.dtype)
-    return F.linear(x, weight.to(x.dtype), bias)
+    bias = None if factor.bias is None else cast_compute_weight(factor.bias, x.dtype)
+    return F.linear(x, cast_compute_weight(weight, x.dtype), bias)
 
 
 def _add_lora_delta(
@@ -156,7 +157,7 @@ def _add_lora_delta(
             base_rows.dtype
         )
         return base_rows.add_(delta) if in_place else base_rows + delta
-    weight = lora_b_weight.t().to(hidden.dtype)
+    weight = cast_compute_weight(lora_b_weight.t(), hidden.dtype)
     if in_place:
         return base_rows.addmm_(hidden, weight, alpha=scaling)
     out = torch.addmm(

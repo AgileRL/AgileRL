@@ -23,6 +23,7 @@ from agilerl.arena.memory.resolve.moe import (
     expert_gemm_backend,
     padded_expert_lora_rank,
 )
+from agilerl.utils.stochastic_round import cast_compute_weight
 
 HAS_TRITON = importlib.util.find_spec("triton") is not None
 
@@ -424,7 +425,7 @@ def grouped_matmul(
     if x.shape[0] == 0:
         return x.new_empty((0, weight.shape[2]))
     # The grouped kernels take one dtype; weights follow the activations.
-    weight = weight.to(x.dtype)
+    weight = cast_compute_weight(weight, x.dtype)
     if _use_grouped_mm(x) and _dims_aligned(
         x.element_size(), weight.shape[1], weight.shape[2]
     ):
@@ -452,9 +453,9 @@ def grouped_lora_matmul(
     """
     return GroupedLoraMatmul.apply(
         x,
-        weight.to(x.dtype),
-        lora_a.to(x.dtype),
-        lora_b.to(x.dtype),
+        cast_compute_weight(weight, x.dtype),
+        cast_compute_weight(lora_a, x.dtype),
+        cast_compute_weight(lora_b, x.dtype),
         offs,
         kernels,
     )

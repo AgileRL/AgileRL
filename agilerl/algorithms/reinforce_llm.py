@@ -219,6 +219,10 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         ``fsdp_config.routed_expert_chunk_mib``. ``None`` lets the
         training-memory search pick it when it runs, else keeps 64.
     :type routed_expert_chunk_mib: int | None, optional
+    :param stochastic_round_bf16: Stochastic-round fp32 master weights to bf16
+        once per optimizer step, and reuse that tensor for the trainer forward
+        and the rollout copy. Defaults to False (round-to-nearest).
+    :type stochastic_round_bf16: bool, optional
     """
 
     supports_sequence_packing = LLMREINFORCESpec.supports_sequence_packing
@@ -275,6 +279,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         logit_bias: dict[int, float] | None = None,
         micro_batch_tokens_per_gpu: int | None = None,
         routed_expert_chunk_mib: int | None = None,
+        stochastic_round_bf16: bool = False,
     ) -> None:
 
         resolved_device = resolve_device(device)
@@ -314,6 +319,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
             vllm_max_clip_fraction=vllm_max_clip_fraction,
             logit_bias=logit_bias,
             routed_expert_chunk_mib=routed_expert_chunk_mib,
+            stochastic_round_bf16=stochastic_round_bf16,
         )
         self._validate_core_args(
             batch_size, lr, clip_coef, update_epochs, actor_network, clone
@@ -766,6 +772,8 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         self._step_lr_scheduler()
         phase_seconds = self._learn_phase_seconds()
         result.update(phase_seconds)
+        changed = self._take_bf16_changed_frac()
+        result.update(changed)
 
         # Wire averaged metrics into the metrics tracker; position 0 is the
         # per-trajectory completion-id batch.
@@ -783,6 +791,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                 **is_metrics,
                 **padding_stats,
                 **phase_seconds,
+                **changed,
             },
             excluded=is_excluded,
         )
