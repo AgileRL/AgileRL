@@ -11,6 +11,7 @@ import click
 
 from agilerl.arena.client import DATASET_CATEGORIES
 from agilerl.arena.config import CommandConfig, arena_client
+from agilerl.arena.models.traces import TRACES_DATASET_FORMAT
 from agilerl.arena.output import emit_result
 from agilerl.arena.utils import sort_dataset_search_by_downloads
 
@@ -50,12 +51,15 @@ def datasets_exists(config: CommandConfig, name: str) -> None:
     "--category",
     required=True,
     type=click.Choice(sorted(DATASET_CATEGORIES), case_sensitive=False),
-    help="Dataset category.",
+    help=(
+        "Dataset category. traces is OpenAI chat messages in prompt-completion "
+        "rows; it takes no column mapping and is checked locally before upload."
+    ),
 )
 @click.option(
     "--column-mapping",
     default=None,
-    help="Column mapping as a JSON object string.",
+    help="Column mapping as a JSON object string. Not used with traces.",
 )
 @click.option(
     "--column-mapping-file",
@@ -69,7 +73,7 @@ def datasets_exists(config: CommandConfig, name: str) -> None:
     "dataset_file",
     type=click.Path(exists=True, dir_okay=True, path_type=Path),
     default=None,
-    help="Local CSV or parquet file, or a Hugging Face parquet folder.",
+    help="Local CSV, JSONL or parquet file, or a Hugging Face parquet folder.",
 )
 @click.option(
     "--config",
@@ -113,7 +117,7 @@ def datasets_create(
         if column_mapping_file is not None
         else column_mapping
     )
-    if mapping is None:
+    if mapping is None and category.lower() != TRACES_DATASET_FORMAT:
         msg = "Provide --column-mapping or --column-mapping-file."
         raise click.UsageError(msg)
     with arena_client(config) as client:
