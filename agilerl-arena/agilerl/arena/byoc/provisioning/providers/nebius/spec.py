@@ -14,6 +14,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    PrivateAttr,
     ValidationError,
     field_validator,
     model_validator,
@@ -184,6 +185,17 @@ class NebiusSpec(BaseModel):
     shared_filesystem: SharedFilesystemSpec = Field(
         default_factory=SharedFilesystemSpec
     )
+    _spec_ids: dict[str, str | None] = PrivateAttr()
+
+    def model_post_init(self, context: object, /) -> None:
+        """Record the resource ids the spec set, before the CLI fills any in."""
+        # model_copy skips this, so ids filled from Arena or Terraform outputs
+        # never become module inputs and the module keeps the projects it created.
+        self._spec_ids = {
+            "project_id": self.project_id,
+            "storage_project_id": self.storage_project_id,
+            "subnet_id": self.subnet_id,
+        }
 
     @field_validator("service_account_id")
     @classmethod
@@ -250,9 +262,9 @@ class NebiusSpec(BaseModel):
             "tenant_id": self.tenant_id,
             "region": self.region or "",
             "storage_region": nebius_region_from_endpoint(storage_endpoint),
-            "project_id": self.project_id or "",
-            "storage_project_id": self.storage_project_id or "",
-            "subnet_id": self.subnet_id or "",
+            "project_id": self._spec_ids["project_id"] or "",
+            "storage_project_id": self._spec_ids["storage_project_id"] or "",
+            "subnet_id": self._spec_ids["subnet_id"] or "",
             "service_account_id": self.service_account_id or "",
             "storage_bucket_name": storage_bucket_name,
             "storage_endpoint": storage_endpoint,
@@ -390,6 +402,26 @@ def attach_service_account_credentials(
     if documents is None:
         return
     config["service_account_key"], config["profile"] = documents
+
+
+def attach_catalog_credentials(
+    payload: dict[str, object], outputs: dict[str, object]
+) -> None:
+    """Add the catalog access key and group when Terraform created them."""
+    config = payload.get("config")
+    if not isinstance(config, dict):
+        return
+    credentials = {
+        key: _output_text(outputs.get(key))
+        for key in (
+            "catalog_access_key_id",
+            "catalog_secret_access_key",
+            "catalog_group_id",
+        )
+    }
+    if None in credentials.values():
+        return
+    config.update(credentials)
 
 
 def needs_stored_config(spec: ClusterSpec) -> bool:

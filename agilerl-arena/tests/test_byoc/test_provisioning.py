@@ -75,6 +75,7 @@ from agilerl.arena.byoc.provisioning.providers.nebius.provider import (
 )
 from agilerl.arena.byoc.provisioning.providers.nebius.spec import (
     NEBIUS_WORKER_NODE_GROUP_LABEL,
+    attach_catalog_credentials,
     attach_service_account_credentials,
     nebius_gpu_vram_gib,
     parse_nebius_gpu_preset,
@@ -7187,6 +7188,52 @@ class TestNebiusSpecCoverage:
         config = payload["config"]
         assert isinstance(config, dict)
         assert (config["service_account_key"], config["profile"]) == documents
+
+    def test_attach_catalog_credentials_skips_a_non_mapping_config(self) -> None:
+        payload: dict[str, object] = {"config": "nope"}
+
+        attach_catalog_credentials(
+            payload,
+            {
+                "catalog_access_key_id": "catalog-key",
+                "catalog_secret_access_key": "catalog-secret",
+                "catalog_group_id": "group-catalog",
+            },
+        )
+
+        assert payload == {"config": "nope"}
+
+    def test_attach_catalog_credentials_writes_key_and_group(self) -> None:
+        payload: dict[str, object] = {"config": {}}
+
+        attach_catalog_credentials(
+            payload,
+            {
+                "catalog_access_key_id": "catalog-key",
+                "catalog_secret_access_key": "catalog-secret",
+                "catalog_group_id": "group-catalog",
+            },
+        )
+
+        assert payload == {
+            "config": {
+                "catalog_access_key_id": "catalog-key",
+                "catalog_secret_access_key": "catalog-secret",
+                "catalog_group_id": "group-catalog",
+            }
+        }
+
+    def test_attach_catalog_credentials_skips_when_outputs_are_incomplete(
+        self,
+    ) -> None:
+        payload: dict[str, object] = {"config": {}}
+
+        attach_catalog_credentials(
+            payload,
+            {"catalog_access_key_id": "catalog-key", "catalog_group_id": ""},
+        )
+
+        assert payload == {"config": {}}
 
     def test_stored_row_reads_camel_case_provider_and_module(self) -> None:
         spec = cluster_spec_from_on_prem_row(

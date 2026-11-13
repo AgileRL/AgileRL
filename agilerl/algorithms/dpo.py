@@ -197,9 +197,19 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
         if not clone:
             self.wrap_models()
+        self._register_metrics()
 
-        # Register metrics to keep track of during training
-        for name in ("loss", "chosen_reward", "rejected_reward", "reward_margin"):
+    def _register_metrics(self) -> None:
+        """Register the metrics :meth:`learn` reports."""
+        for name in (
+            "loss",
+            "chosen_reward",
+            "rejected_reward",
+            "reward_margin",
+            "chosen_length",
+            "rejected_length",
+            "length_margin",
+        ):
             self.metrics.register(name)
 
     def get_action(
@@ -230,14 +240,16 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
     ) -> dict[str, float]:
         """Update agent network parameters to learn from preference data.
 
-        :param experiences: Batched chosen/rejected input ids and attention masks
-            with prompt lengths, as produced by a preference
-            :class:`~agilerl.llm_envs.DatasetEnv`.
+        :param experiences: Batched chosen/rejected input ids, attention masks
+            and loss masks (``True`` at each side's trained completion tokens),
+            as produced by a preference :class:`~agilerl.llm_envs.DatasetEnv`.
         :type experiences: PreferencePrompts
         :param training: Whether the agent is training or not
         :type training: bool
-        :return: Dict with the cross-rank means of ``loss``, ``chosen_reward``
-            and ``rejected_reward``, and ``learn_phase_<phase>_s`` wall seconds.
+        :return: Dict with the cross-rank means of ``loss``, ``chosen_reward``,
+            ``rejected_reward``, ``chosen_length`` and ``rejected_length`` (mean
+            trained tokens per side), ``length_margin``, and
+            ``learn_phase_<phase>_s`` wall seconds.
         :rtype: dict[str, float]
         """
         phase_timer = self._start_learn_phases()
@@ -257,18 +269,11 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
             == rejected_attention_mask.shape[1]
         ), "All tensors must have the same max length"
 
-        max_length = chosen_input_ids.shape[1]
-        prompt_lengths = experiences["prompt_lengths"]
-
-        # Build the response mask on CPU (same device as dataloader tensors).
-        prompt_masks = LLMAlgorithm._create_prompt_masks(
-            prompt_lengths,
-            max_length=max_length,
-        ).to(self.device)
-
-        # Mask has to be shifted by 1 as output log probs dims are 1 shorter than input ids as first token is used to predict the first log prob
-        chosen_mask = (prompt_masks * chosen_attention_mask)[:, 1:]
-        rejected_mask = (prompt_masks * rejected_attention_mask)[:, 1:]
+        # Log probs are one shorter than the ids (token t predicts t + 1), so the masks shift by one.
+        chosen_mask = experiences["chosen_loss_mask"].to(self.device)[:, 1:].long()
+        rejected_mask = experiences["rejected_loss_mask"].to(self.device)[:, 1:].long()
+        chosen_length = chosen_mask.sum(dim=-1).float().mean()
+        rejected_length = rejected_mask.sum(dim=-1).float().mean()
         num_samples = chosen_input_ids.shape[0]
         batch_size = min(
             num_samples,
@@ -344,7 +349,14 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         # Aggregate metrics across GPUs for both train/test paths. (Fresh dict
         # display so ty checks the values against the parameter's wider,
         # invariant dict value union.)
-        agg = aggregate_metrics_dict({**learn_metrics})
+        agg = aggregate_metrics_dict(
+            {
+                **learn_metrics,
+                "chosen_length": chosen_length,
+                "rejected_length": rejected_length,
+            }
+        )
+        agg["length_margin"] = agg["chosen_length"] - agg["rejected_length"]
 
         if training:
             self.metrics.log("loss", agg["loss"])
@@ -353,6 +365,8 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
             self.metrics.log(
                 "reward_margin", agg["chosen_reward"] - agg["rejected_reward"]
             )
+            for name in ("chosen_length", "rejected_length", "length_margin"):
+                self.metrics.log(name, agg[name])
 
         phase_seconds = self._learn_phase_seconds()
         if training:

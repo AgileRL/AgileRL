@@ -32,6 +32,7 @@ if not HAS_LLM_DEPENDENCIES:
     raise ImportError("LLM dependencies are not installed.")
 
 from agilerl.llm_envs import RolloutHarness
+from agilerl.llm_envs.dataset_env import completion_loss_mask
 from llm_debug_utils import lora_config_from_dict
 from tiny_model import TinyDigitTokenizer, build_tiny_actor_network
 
@@ -123,13 +124,14 @@ class TinyPreferenceEnv:
 
         return {
             "prompt": prompts,
-            "prompt_lengths": prompt_lengths,
             "chosen": chosen,
             "rejected": rejected,
             "chosen_input_ids": chosen_ids,
             "chosen_attention_mask": chosen_mask,
+            "chosen_loss_mask": completion_loss_mask(prompt_lengths, chosen_mask),
             "rejected_input_ids": rejected_ids,
             "rejected_attention_mask": rejected_mask,
+            "rejected_loss_mask": completion_loss_mask(prompt_lengths, rejected_mask),
         }
 
     def _encode_pairs(

@@ -507,6 +507,11 @@ class NebiusProvider:
             storage_project_id=_optional_string(values.get("storage_project_id")),
             service_account_key=service_account_key,
             service_account_profile=service_account_profile,
+            catalog_access_key_id=_optional_string(values.get("catalog_access_key_id")),
+            catalog_secret_access_key=_optional_string(
+                values.get("catalog_secret_access_key")
+            ),
+            catalog_group_id=_optional_string(values.get("catalog_group_id")),
         )
 
     def install_cni(self, query: InstallCni) -> None:

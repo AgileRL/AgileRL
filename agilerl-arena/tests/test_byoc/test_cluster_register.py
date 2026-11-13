@@ -1736,6 +1736,9 @@ nebius:
             worker_node_group_ids={"workers": "group-1"},
             project_id="project-created",
             storage_project_id="storage-created",
+            catalog_access_key_id="catalog-key",
+            catalog_secret_access_key="catalog-secret",
+            catalog_group_id="group-catalog",
         )
         client = MagicMock()
         with (
@@ -1761,9 +1764,11 @@ nebius:
 
         assert result.exit_code == 0, result.output
         assert provision_mock.call_args.kwargs["create_state_bucket"] is True
-        assert run_mock.call_args.kwargs["byoc_provider"]["config"]["project_id"] == (
-            "project-created"
-        )
+        config = run_mock.call_args.kwargs["byoc_provider"]["config"]
+        assert config["project_id"] == "project-created"
+        assert config["catalog_access_key_id"] == "catalog-key"
+        assert config["catalog_secret_access_key"] == "catalog-secret"
+        assert config["catalog_group_id"] == "group-catalog"
         assert run_mock.call_args.kwargs["resource_classes"][0].name == (
             "spec-cluster-workers"
         )
@@ -1866,6 +1871,9 @@ nebius:
                     "project_id": "project-created",
                     "storage_project_id": "storage-created",
                     "worker_node_group_ids": {"workers": "ng-1"},
+                    "catalog_access_key_id": "catalog-key",
+                    "catalog_secret_access_key": "catalog-secret",
+                    "catalog_group_id": "group-catalog",
                 },
             ),
             patch(
@@ -1884,6 +1892,9 @@ nebius:
         config = run_mock.call_args.kwargs["byoc_provider"]["config"]
         assert config["project_id"] == "project-created"
         assert config["storage_project_id"] == "storage-created"
+        assert config["catalog_access_key_id"] == "catalog-key"
+        assert config["catalog_secret_access_key"] == "catalog-secret"
+        assert config["catalog_group_id"] == "group-catalog"
 
     def test_does_not_provision_when_stored_settings_cannot_be_loaded(
         self,

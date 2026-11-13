@@ -896,7 +896,8 @@ class TestDPOLearnPhaseTimings:
             "rejected_input_ids": torch.randint(0, 99, (4, 6), generator=generator),
             "chosen_attention_mask": torch.ones(4, 6, dtype=torch.long),
             "rejected_attention_mask": torch.ones(4, 6, dtype=torch.long),
-            "prompt_lengths": [2, 2, 2, 2],
+            "chosen_loss_mask": after_prompt(2, (4, 6)),
+            "rejected_loss_mask": after_prompt(2, (4, 6)),
         }
 
         # Act
@@ -913,6 +914,13 @@ class TestDPOLearnPhaseTimings:
         dpo.clean_up()
 
 
+def after_prompt(prompt_length: int, shape: tuple[int, int]) -> torch.Tensor:
+    """Loss mask that is True after the first ``prompt_length`` tokens of every row."""
+    mask = torch.zeros(shape, dtype=torch.bool)
+    mask[:, prompt_length:] = True
+    return mask
+
+
 def random_preference_batch() -> dict[str, torch.Tensor | list[int]]:
     """Four chosen/rejected pairs of six tokens with two-token prompts."""
     generator = torch.Generator().manual_seed(0)
@@ -921,7 +929,8 @@ def random_preference_batch() -> dict[str, torch.Tensor | list[int]]:
         "rejected_input_ids": torch.randint(0, 99, (4, 6), generator=generator),
         "chosen_attention_mask": torch.ones(4, 6, dtype=torch.long),
         "rejected_attention_mask": torch.ones(4, 6, dtype=torch.long),
-        "prompt_lengths": [2, 2, 2, 2],
+        "chosen_loss_mask": after_prompt(2, (4, 6)),
+        "rejected_loss_mask": after_prompt(2, (4, 6)),
     }
 
 
@@ -955,7 +964,13 @@ class TestDPOLearnMetrics:
     ) -> None:
         # Arrange: a second rank whose means differ from this rank's.
         dpo = _make_cpu_dpo_for_branch_tests()
-        other_rank = {"loss": 1.0, "chosen_reward": 2.0, "rejected_reward": -2.0}
+        other_rank = {
+            "loss": 1.0,
+            "chosen_reward": 2.0,
+            "rejected_reward": -2.0,
+            "chosen_length": 8.0,
+            "rejected_length": 2.0,
+        }
         local: dict[str, float] = {}
 
         def mean_with_other_rank(metrics: dict[str, float]) -> dict[str, float]:
@@ -970,13 +985,16 @@ class TestDPOLearnMetrics:
         metrics = dpo.learn(random_preference_batch())
 
         # Assert
-        for name in ("loss", "chosen_reward", "rejected_reward"):
+        for name in other_rank:
             expected = (local[name] + other_rank[name]) / 2
             assert metrics[name] == expected, name
             assert dpo.metrics.get_mean(name) == pytest.approx(expected), name
         assert dpo.metrics.get_mean("reward_margin") == pytest.approx(
             metrics["chosen_reward"] - metrics["rejected_reward"]
         )
+        # Four trained tokens per side here: (4 + 8) / 2 - (4 + 2) / 2.
+        assert metrics["length_margin"] == pytest.approx(3.0)
+        assert dpo.metrics.get_mean("length_margin") == pytest.approx(3.0)
         dpo.clean_up()
 
 
@@ -1095,6 +1113,69 @@ class TestDPOUnsetFSDPMemory:
         with pytest.raises(ValueError, match=r"fsdp\.reshard_after_forward.*CUDA"):
             agent._resolve_fsdp_config(FSDPConfig())
         agent.clean_up()
+
+
+def perturbed_cpu_dpo() -> DPO:
+    """CPU DPO without dropout whose actor differs from its reference."""
+    dpo = _make_cpu_dpo_for_branch_tests(
+        lora_config=LoraConfig(
+            r=4,
+            lora_alpha=16,
+            target_modules=["linear_1"],
+            task_type="CAUSAL_LM",
+            lora_dropout=0.0,
+        )
+    )
+    torch.manual_seed(0)
+    with torch.no_grad():
+        for name, param in dpo.actor.named_parameters():
+            if "lora_B" in name:
+                param.normal_(std=0.5)
+    return dpo
+
+
+class TestDPOLearnLossMasks:
+    def test_reports_each_sides_trained_token_count(self) -> None:
+        # Arrange
+        dpo = perturbed_cpu_dpo()
+        batch = random_preference_batch()
+        batch["rejected_loss_mask"] = after_prompt(4, (4, 6))
+
+        # Act
+        metrics = dpo.learn(batch, training=False)
+
+        # Assert: masks shift by one, so 6 - 2 and 6 - 4 tokens are scored.
+        assert metrics["chosen_length"] == pytest.approx(4.0)
+        assert metrics["rejected_length"] == pytest.approx(2.0)
+        assert metrics["length_margin"] == pytest.approx(2.0)
+        dpo.clean_up()
+
+    def test_loss_reads_only_the_tokens_in_the_loss_mask(self) -> None:
+        # Arrange: the last rejected token, outside then inside its loss mask.
+        dpo = perturbed_cpu_dpo()
+        batch = random_preference_batch()
+        batch["rejected_loss_mask"][:, -1] = False
+        edited = {key: value.clone() for key, value in batch.items()}
+        edited["rejected_input_ids"][:, -1] = (
+            batch["rejected_input_ids"][:, -1] + 1
+        ) % 99
+
+        # Act
+        masked_out = (
+            dpo.learn(batch, training=False)["loss"],
+            dpo.learn(edited, training=False)["loss"],
+        )
+        batch["rejected_loss_mask"][:, -1] = True
+        edited["rejected_loss_mask"][:, -1] = True
+        masked_in = (
+            dpo.learn(batch, training=False)["loss"],
+            dpo.learn(edited, training=False)["loss"],
+        )
+
+        # Assert
+        assert masked_out[0] == pytest.approx(masked_out[1], rel=1e-6)
+        assert masked_in[0] != pytest.approx(masked_in[1], rel=1e-6)
+        dpo.clean_up()
 
 
 # Packed and padded attention differ only in fp32 summation order.
