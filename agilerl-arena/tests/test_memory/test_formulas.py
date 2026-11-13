@@ -151,8 +151,7 @@ DSV4_TINY = {
     "compress_ratios": [0, 4, 128, 0],
 }
 # MiMo-V2-Flash shape: a dense full-attention layer 0 with one KV head, two
-# MoE sliding-window layers with two, values narrower than keys, and a vision
-# tower the text-only classes drop.
+# MoE sliding-window layers with two, and values narrower than keys.
 MIMO_TINY = {
     "model_type": "mimo_v2",
     "num_hidden_layers": 3,
@@ -171,7 +170,6 @@ MIMO_TINY = {
     "moe_intermediate_size": 16,
     "n_shared_experts": None,
     "vocab_size": 256,
-    "vision_config": {"depth": 2, "hidden_size": 32, "num_heads": 2},
 }
 
 
@@ -743,12 +741,39 @@ class TestModelArchFromHfConfig:
 
         assert (arch.dense_ffn_layers, arch.mlp_layers, arch.moe_layers) == (1, 1, 2)
 
-    def test_text_only_family_counts_no_tower(self):
-        arch = ModelArch.from_hf_config(MIMO_TINY)
-        towered = ModelArch.from_hf_config({**MIMO_TINY, "model_type": "qwen3"})
+    def test_mimo_counts_the_vision_tower_and_not_the_audio_tower(self):
+        # Arrange
+        config = SUPPORTED_MODEL_INFO[MIMO_FLASH].config
 
-        assert (arch.multimodal_tower_params, arch.vision_hidden_size) == (0, 0)
-        assert towered.multimodal_tower_params > 0
+        # Act
+        arch = ModelArch.from_hf_config(config)
+
+        # Assert: 28 blocks of 64-wide heads, 32 query and 8 key/value, and a
+        # gated 4608 MLP at width 1280. The audio config adds nothing.
+        assert arch.multimodal_tower_params == 28 * (
+            1280 * 2048 + 2 * 1280 * 512 + 2048 * 1280 + 3 * 1280 * 4608 + 2 * 1280
+        )
+        assert arch.multimodal_tower_block_params == arch.multimodal_tower_params
+        # Split linears plus 24 windowed blocks' 32 sink logits.
+        assert arch.tensor_parallel_tower_params == 726_482_944 + 24 * 32
+
+    def test_mimo_reads_the_vision_geometry(self):
+        arch = ModelArch.from_hf_config(SUPPORTED_MODEL_INFO[MIMO_FLASH].config)
+
+        assert (arch.vision_hidden_size, arch.vision_out_hidden_size) == (1280, 4096)
+        assert (arch.vision_patch_size, arch.vision_spatial_merge_size) == (16, 2)
+        assert (arch.vision_in_channels, arch.vision_temporal_patch_size) == (3, 2)
+        assert (arch.vision_min_patches, arch.vision_max_patches) == (32, 32768)
+        assert arch.vision_resize == "pixel_bounds"
+        assert arch.vision_profile_patches == 32768
+        assert arch.vision_feature_cache
+        assert arch.vision_merged_output_only
+        assert {linear.target for linear in arch.tower_lora_linears} == {
+            "qkv",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+        }
 
     def test_ue8m0_fp8_with_fp4_experts_stores_scales_per_block(self):
         config = SUPPORTED_MODEL_INFO[DSV4_FLASH].config

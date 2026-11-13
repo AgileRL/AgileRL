@@ -42,7 +42,7 @@ from transformers.models.nemotron_h.modeling_nemotron_h import (
     NemotronHMLP,
 )
 
-from agilerl.architectures.nemotron_h.mamba import mark_mamba_tp_shard
+from agilerl.architectures.nemotron_h.layers import mark_mamba_tp_shard
 from agilerl.architectures.runtime import TensorParallelPlan
 from agilerl.distributed.expert_parallel.dispatch import keep_collectives_eager
 from agilerl.distributed.tensor_parallel import (
@@ -714,7 +714,7 @@ def restore_nemotron_h_tensor_parallel(model: nn.Module, tp_mesh: DeviceMesh) ->
     mark_mamba_tp_params(model)
 
 
-NEMOTRON_H_TENSOR_PARALLEL_PLAN = TensorParallelPlan(
+TENSOR_PARALLEL_PLAN = TensorParallelPlan(
     shard=apply_nemotron_h_tensor_parallel,
     restore=restore_nemotron_h_tensor_parallel,
     row_orders=mamba_row_orders,

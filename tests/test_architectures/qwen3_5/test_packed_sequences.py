@@ -29,12 +29,12 @@ from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
 from agilerl.architectures import install_family_patches
 from agilerl.architectures.catalog import FAMILY_RUNTIME_CONFIGS
 from agilerl.architectures.moe_router import patch_moe_routers
-from agilerl.architectures.qwen3_5 import packed as qwen_packed
-from agilerl.architectures.qwen3_5.packed import (
+from agilerl.architectures.qwen3_5 import patches as qwen_packed
+from agilerl.architectures.qwen3_5.patches import (
     GROUPED_QK_HEADS,
     PACKED_CU_SEQLENS,
     VARLEN_SCAN,
-    install_qwen_gdn_patches,
+    install_qwen3_5_patches,
     patch_qwen_gdn_grouped_heads,
     patch_qwen_gdn_packed_sequences,
 )
@@ -764,7 +764,7 @@ class TestVarlenKernelsReady:
 class TestInstallQwenGdnPatches:
     def test_patch_without_a_gdn_config_raises(self) -> None:
         with pytest.raises(ValueError, match="need a catalog gdn config"):
-            install_qwen_gdn_patches(PatchRuntimeConfig())
+            install_qwen3_5_patches(PatchRuntimeConfig())
 
     def test_gpu_with_a_failing_fla_import_raises(self, monkeypatch) -> None:
         monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
@@ -782,7 +782,7 @@ class TestInstallQwenGdnPatches:
         with pytest.raises(
             RuntimeError, match=r"needs flash-linear-attention \(ImportError"
         ):
-            install_qwen_gdn_patches(QWEN_PATCH, use_sequence_packing=True)
+            install_qwen3_5_patches(QWEN_PATCH, use_sequence_packing=True)
 
     def test_gpu_with_fla_and_causal_conv1d_installs_packed_patches(
         self, monkeypatch, pristine_qwen_gdn_classes
@@ -790,7 +790,7 @@ class TestInstallQwenGdnPatches:
         monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
         _kernel_modules(monkeypatch, {"fla", "causal_conv1d"})
 
-        install_qwen_gdn_patches(QWEN_PATCH, use_sequence_packing=True)
+        install_qwen3_5_patches(QWEN_PATCH, use_sequence_packing=True)
 
         assert getattr(Qwen3_5MoeGatedDeltaNet, RESETS_AT_DOCUMENT_BOUNDARY) is True
         assert getattr(Qwen3_5MoeGatedDeltaNet, GROUPED_QK_HEADS) is True
@@ -800,7 +800,7 @@ class TestInstallQwenGdnPatches:
     ) -> None:
         monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
 
-        install_qwen_gdn_patches(QWEN_PATCH, use_sequence_packing=True)
+        install_qwen3_5_patches(QWEN_PATCH, use_sequence_packing=True)
 
         assert getattr(Qwen3_5MoeGatedDeltaNet, RESETS_AT_DOCUMENT_BOUNDARY) is True
 
@@ -814,9 +814,9 @@ class TestInstallQwenGdnPatches:
         )
 
         # Act
-        install_qwen_gdn_patches(QWEN_PATCH)
+        install_qwen3_5_patches(QWEN_PATCH)
         unpacked = list(seen)
-        install_qwen_gdn_patches(QWEN_PATCH, use_sequence_packing=True)
+        install_qwen3_5_patches(QWEN_PATCH, use_sequence_packing=True)
 
         # Assert
         assert unpacked == []

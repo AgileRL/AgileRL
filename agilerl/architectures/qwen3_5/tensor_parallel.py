@@ -472,7 +472,7 @@ def restore_qwen3_5_tensor_parallel(model: nn.Module, tp_mesh: DeviceMesh) -> No
     apply_qwen3_5_tensor_parallel(model, tp_mesh)
 
 
-QWEN3_5_TENSOR_PARALLEL_PLAN = TensorParallelPlan(
+TENSOR_PARALLEL_PLAN = TensorParallelPlan(
     shard=apply_qwen3_5_tensor_parallel,
     restore=restore_qwen3_5_tensor_parallel,
     row_orders=qwen3_5_row_orders,

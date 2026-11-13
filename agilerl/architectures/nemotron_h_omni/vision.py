@@ -1,15 +1,15 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Native ``nemotron_h_omni`` loading without checkpoint code.
+"""Native ``nemotron_h_omni`` loading without checkpoint code, vision rows, and the vLLM config override.
 
 Transformers 5.19 resolves the Super-VL checkpoint natively except for four
 keys: the vision final norm has no conversion entry and the preprocessor
 statistics have no ignore. Registration below closes both gaps, plus the
-causal-LM mapping the trainer loads through. It also lets the native image
-features take one ``(h, w, patch_dim)`` patch-grid row per image, the layout
-training batches keep, which the native forward otherwise rejects without
-``image_grid_hw``. Idempotent; safe to call twice.
+causal-LM mapping the trainer loads through. The vision install lets the
+native image features take one ``(h, w, patch_dim)`` patch-grid row per image,
+the layout training batches keep, which the native forward otherwise rejects
+without ``image_grid_hw``. Both are idempotent; safe to call twice.
 """
 
 from __future__ import annotations
@@ -20,8 +20,13 @@ from typing import TYPE_CHECKING, Any, cast
 import torch
 
 from agilerl import HAS_LLM_DEPENDENCIES
+from agilerl.architectures.runtime import PatchRuntimeConfig
+from agilerl.architectures.vision_rows import install_vision_rows, packed_patches
+from agilerl.utils.patching import library_shim
 
 if TYPE_CHECKING:
+    from peft import PeftModel
+    from transformers import PreTrainedModel
     from transformers.modeling_outputs import BaseModelOutputWithPooling
 
 OMNI_MODEL_TYPE = "nemotron_h_omni"
@@ -85,28 +90,24 @@ def register_nemotron_h_omni_native_loading() -> None:
         exist_ok=True,
     )
 
-    native_get_image_features = NemotronH_Omni_Reasoning_V3.get_image_features
-    if native_get_image_features.__module__ != __name__:
-        NemotronH_Omni_Reasoning_V3.get_image_features = accept_patch_grid_rows(
-            native_get_image_features
-        )
-        omni_cls: Any = NemotronH_Omni_Reasoning_V3
-        omni_cls.vision_filler_features = vision_filler_features
 
+def install_nemotron_h_omni_vision(
+    _patch: PatchRuntimeConfig,
+    _model: PreTrainedModel | PeftModel | None = None,
+    _use_sequence_packing: bool = False,
+) -> None:
+    """Let ``NemotronH_Omni_Reasoning_V3`` take one patch-grid row per image and run a filler image.
 
-def packed_patches(pixel_values: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Unfold ``(N, h, w, patch_dim)`` patch-grid rows into the packed patches and grids the native tower reads.
-
-    :param pixel_values: One patch grid per image, all of one shape.
-    :type pixel_values: torch.Tensor
-    :return: ``(N * h * w, patch_dim)`` patches and the ``(N, 2)`` patch grid of each image.
-    :rtype: tuple[torch.Tensor, torch.Tensor]
+    :param _patch: Catalog patch config.
+    :param _model: Already-built model, or None; the class-level patch covers it.
+    :param _use_sequence_packing: Unused; the vision patch does not depend on packing.
     """
-    images, grid_height, grid_width, patch_dim = pixel_values.shape
-    image_grid_hw = torch.tensor(
-        [[grid_height, grid_width]] * images, device=pixel_values.device
+    install_vision_rows(
+        NemotronH_Omni_Reasoning_V3,
+        "get_image_features",
+        accept_patch_grid_rows,
+        vision_filler_features,
     )
-    return pixel_values.reshape(-1, patch_dim), image_grid_hw
 
 
 def accept_patch_grid_rows(
@@ -141,6 +142,25 @@ def vision_filler_features(
     return self.get_image_features(
         torch.zeros(1, side, side, self.vision_model.config.patch_dim, device=device)
     )
+
+
+@library_shim("vllm", "==0.32.*")
+def nemotron_h_omni_vllm_hf_override(config: object) -> object:
+    """Point a native ``nemotron_h_omni`` config at NemotronHVLLoRA and restore ``vit_hidden_size``.
+
+    :param config: Hugging Face config loaded from the checkpoint.
+    :type config: object
+    :return: The config vLLM's Nemotron VL model can build from.
+    :rtype: object
+    """
+    fields = vars(config)
+    # Serve through NemotronHVLLoRA, which adds tower and connector LoRA.
+    fields["architectures"] = ["NemotronH_Super_Omni_Reasoning_V3"]
+    # vLLM's Nemotron VL model reads the checkpoint's legacy name; the native
+    # config stores it as vision_hidden_size. vLLM also probes with a dummy config.
+    if "vision_hidden_size" in fields:
+        fields["vit_hidden_size"] = fields["vision_hidden_size"]
+    return config
 
 
 def _as_list(patterns: str | list[str]) -> list[str]:

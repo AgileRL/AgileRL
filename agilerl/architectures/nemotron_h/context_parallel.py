@@ -22,6 +22,6 @@ def wrap_nemotron_h_context_parallel(model: nn.Module, cp_mesh: DeviceMesh) -> i
     return count
 
 
-NEMOTRON_H_CONTEXT_PARALLEL_PLAN = ContextParallelPlan(
+CONTEXT_PARALLEL_PLAN = ContextParallelPlan(
     wrap=wrap_nemotron_h_context_parallel,
 )

@@ -15,6 +15,9 @@ from tests.test_memory.test_formulas import (
     SUPER_VL,
 )
 
+GLM5_NEXT_ID = "zai-org/GLM-5.3-Flash"
+MIMO_ID = "XiaomiMiMo/MiMo-V2.6-Flash-RL"
+
 
 class TestVisionFeatureCacheBytes:
     def test_merger_tower_keeps_patches_and_merged_tokens(self):
@@ -34,6 +37,15 @@ class TestVisionFeatureCacheBytes:
         cached = vision.vision_feature_cache_bytes(arch, 2457, 2.0)
 
         assert cached == 512 * 1024
+
+    def test_merged_only_tower_keeps_merged_tokens(self):
+        # MiMo-V2.6 1280x720: 3520 patches merge 2x2 into 880 tokens of 4096
+        # (6.9 MiB), in one 8 MiB pinned block.
+        arch = ModelArch.from_hf_config(SUPPORTED_MODEL_INFO[MIMO_ID].config)
+
+        cached = vision.vision_feature_cache_bytes(arch, 3520, 2.0)
+
+        assert cached == 8 * MiB
 
 
 class TestVisionTowerLoraBytes:
@@ -72,13 +84,34 @@ class TestVisionTowerLoraBytes:
         assert arch.vision_spatial_merge_size == 2
         assert arch.vision_profile_patches == 65536
 
+    def test_glm5_next_tower_reads_the_encoder_profile_geometry(self):
+        arch = ModelArch.from_hf_config(SUPPORTED_MODEL_INFO[GLM5_NEXT_ID].config)
+
+        assert arch.vision_hidden_size == 1024
+        assert arch.vision_n_layers == 24
+        assert arch.vision_temporal_patch_size == 2
+        assert arch.vision_spatial_merge_size == 2
+        assert arch.vision_profile_patches == 32000
+        assert arch.vision_feature_cache
+
     def test_unmeasured_family_has_no_profile_image(self):
         assert ModelArch.from_hf_config(SUPER_VL.config).vision_profile_patches == 0
 
 
 # (width, height) -> patch grid the transformers 5.19 image processors cut:
-# Qwen image_grid_thw, Gemma4 soft tokens x 3 x 3, Nemotron imgs_sizes / 16.
+# Qwen and GLM image_grid_thw, Gemma4 soft tokens x 3 x 3, Nemotron imgs_sizes / 16,
+# MiMo the agilerl MiMoV2Processor's vLLM smart_resize / 16.
 PROCESSOR_GRIDS = {
+    "zai-org/GLM-5.3-Flash": {
+        (1280, 720): (52, 92),
+        (1280, 2048): (148, 92),
+        (1024, 768): (56, 74),
+        (640, 480): (36, 46),
+        (3000, 3000): (178, 178),
+        (5000, 5000): (178, 178),
+        (56, 56): (8, 8),
+        (6000, 40): (4, 430),
+    },
     "Qwen/Qwen3.5-0.8B": {
         (1280, 720): (44, 80),
         (1280, 2048): (128, 80),
@@ -96,6 +129,16 @@ PROCESSOR_GRIDS = {
         (3000, 3000): (48, 48),
         (6000, 20): (3, 840),
         (20, 6000): (840, 3),
+    },
+    MIMO_ID: {
+        (1280, 720): (44, 80),
+        (1280, 2048): (128, 80),
+        (1024, 768): (48, 64),
+        (640, 480): (30, 40),
+        (3000, 3000): (180, 180),
+        (5000, 5000): (180, 180),
+        (40, 40): (6, 6),
+        (100, 10): (2, 20),
     },
     "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16": {
         (1280, 720): (46, 80),
@@ -172,6 +215,14 @@ class TestEncoderProfileBytes:
         assert tp1 / GiB == pytest.approx(1.67, rel=0.03)
         assert tp2 / GiB == pytest.approx(1.24, rel=0.03)
         assert outputs == 16384 * 2048 * 2
+
+    def test_mimo_profile_image_fills_the_pixel_bound(self):
+        # vLLM profiles one 2048x4096 image: 32768 patches, 8192 merged tokens.
+        arch = ModelArch.from_hf_config(SUPPORTED_MODEL_INFO[MIMO_ID].config)
+
+        _, outputs = vision.encoder_profile_bytes(arch, 2.0, 1, 1)
+
+        assert outputs == 8192 * 4096 * 2
 
     def test_model_without_a_profile_image_adds_nothing(self):
         assert vision.encoder_profile_bytes(QWEN_05B, 2.0, 1, 0) == (0, 0)

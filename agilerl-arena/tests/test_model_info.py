@@ -470,13 +470,8 @@ class TestModelInfoModalitiesProperty:
         assert ModelInfo(hub_id="org/x").modalities == ("text",)
 
     def test_entries_with_a_vision_tower_handle_vision(self) -> None:
-        # MiMo-V2 trains on the native text-only class, which drops its towers.
-        text_only_trainers = {"XiaomiMiMo/MiMo-V2.6-Flash-RL"}
-
         for hub_id, entry in SUPPORTED_MODEL_INFO.items():
-            has_vision = (
-                "vision_config" in entry.config and hub_id not in text_only_trainers
-            )
+            has_vision = "vision_config" in entry.config
             expected = ("text", "vision") if has_vision else ("text",)
 
             assert entry.modalities == expected, hub_id
@@ -648,6 +643,30 @@ class TestFinetuningNetworkSpecLoraTargets:
                 "Qwen/Qwen3-4B", ("q_proj",), tower_target_modules=["qkv"]
             )
 
+    def test_mimo_v2_takes_tower_targets(self) -> None:
+        network = finetuning_network(
+            "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+            ("o_proj",),
+            tower_target_modules=["qkv", "gate_proj", "up_proj", "down_proj"],
+        )
+
+        assert network.lora_config.tower_target_modules == [
+            "qkv",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+        ]
+
+    def test_mimo_v2_tower_patch_embed_is_not_a_tower_target(self) -> None:
+        with pytest.raises(
+            ValidationError, match=r"Unknown LoRA tower_target_modules \['proj'\]"
+        ):
+            finetuning_network(
+                "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+                ("o_proj",),
+                tower_target_modules=["qkv", "proj"],
+            )
+
     def test_super_vl_rejects_latent_projections(self) -> None:
         with pytest.raises(
             ValidationError, match=r"Unknown LoRA target_modules \['fc1_latent_proj'\]"
@@ -742,13 +761,14 @@ VL_HUB_IDS = (
     "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
 )
 GLM5_NEXT_HUB_ID = "zai-org/GLM-5.3-Flash"
+MIMO_V2_HUB_ID = "XiaomiMiMo/MiMo-V2.6-Flash-RL"
 
 
 class TestModelInfoDefaultLoraModulesProperty:
     def test_vl_entries_are_exactly_the_checkpoints_with_towers(self) -> None:
         vl = {h for h, e in SUPPORTED_MODEL_INFO.items() if e.language_model_prefix}
 
-        assert vl == {*VL_HUB_IDS, GLM5_NEXT_HUB_ID}
+        assert vl == {*VL_HUB_IDS, GLM5_NEXT_HUB_ID, MIMO_V2_HUB_ID}
 
     @pytest.mark.parametrize("hub_id", VL_HUB_IDS)
     def test_vl_default_is_every_module_scoped_under_the_language_model(
@@ -811,11 +831,16 @@ class TestModelInfoDefaultLoraModulesProperty:
         assert weights_proj["out_features"] == 32
         assert entry.lora_ranks == (1, 8, 16, 32, 64)
 
-    def test_mimo_v2_modules_skip_qkv(self) -> None:
-        entry = SUPPORTED_MODEL_INFO["XiaomiMiMo/MiMo-V2.6-Flash-RL"]
+    def test_mimo_v2_tower_trains_its_qkv_and_mlp(self) -> None:
+        entry = SUPPORTED_MODEL_INFO[MIMO_V2_HUB_ID]
 
-        assert entry.modules == {"o_proj", "gate_proj", "up_proj", "down_proj"}
-        assert entry.default_lora_modules == entry.modules
+        assert entry.default_lora_modules == {
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+        }
+        assert entry.tower_lora_modules == {"qkv", "gate_proj", "up_proj", "down_proj"}
 
     def test_serializes_default_modules_sorted(self) -> None:
         dumped = SUPPORTED_MODEL_INFO["google/gemma-4-E4B-it"].model_dump()

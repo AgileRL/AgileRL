@@ -17,7 +17,7 @@ import torch.nn.functional as F
 from torch.autograd.function import once_differentiable
 
 from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
-from agilerl.architectures.gptoss import experts as gptoss_experts
+from agilerl.architectures.gptoss import layers as gptoss_layers
 from agilerl.lora.moe.grouped_gemm import ExpertKernels
 
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
@@ -33,7 +33,7 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
 if HAS_LIGER_KERNEL:
     from liger_kernel.transformers.swiglu import LigerExperts
 
-is_transposed_experts_module = gptoss_experts.is_gpt_oss_experts_module
+is_transposed_experts_module = gptoss_layers.is_gpt_oss_experts_module
 
 
 def _forward_param_names(module: nn.Module) -> list[str]:

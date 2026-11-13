@@ -16,7 +16,7 @@ from transformers.models.qwen3_5.modeling_qwen3_5 import (
 )
 
 from agilerl.algorithms.core.llm_ops.vision_lockstep import FILLER_METHOD
-from agilerl.architectures.qwen3_5.vision import ACCEPTS_VISION_ROWS
+from agilerl.architectures.vision_rows import ACCEPTS_VISION_ROWS
 from tests.test_architectures.qwen3_5.gdn_helpers import restored_qwen_gdn_classes
 
 IMAGE, START, END = 100, 101, 102

@@ -35,7 +35,9 @@ from transformers.models.nemotron_h.modeling_nemotron_h import (
 
 from agilerl.algorithms.core.sequence_layout import ContextParallelSequence
 from agilerl.architectures.nemotron_h.tensor_parallel import (
-    NEMOTRON_H_TENSOR_PARALLEL_PLAN,
+    TENSOR_PARALLEL_PLAN as NEMOTRON_H_TENSOR_PARALLEL_PLAN,
+)
+from agilerl.architectures.nemotron_h.tensor_parallel import (
     apply_nemotron_h_tensor_parallel,
 )
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO

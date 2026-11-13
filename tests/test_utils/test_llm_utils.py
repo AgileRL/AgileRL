@@ -53,12 +53,14 @@ from transformers.integrations.flex_attention import flex_attention_forward
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 from agilerl.architectures import install_family_patches, trainer_model_class
-from agilerl.architectures.catalog import nemotron_h_omni_vllm_hf_override
 from agilerl.architectures.flex_attention import (
     flex_decode_kernel_options,
     patch_flex_attention_kernel_options,
 )
-from agilerl.architectures.mimo_v2.config import MiMoV2Config
+from agilerl.architectures.mimo_v2.configuration import MiMoV2Config
+from agilerl.architectures.nemotron_h_omni.vision import (
+    nemotron_h_omni_vllm_hf_override,
+)
 from agilerl.architectures.runtime import TrainerRuntimeConfig
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.distributed import fsdp as dmod
@@ -2119,12 +2121,20 @@ class TestAdaptLoraConfigForModel:
             )
 
 
+def _shipped_by_transformers(model_type: str) -> bool:
+    """True when transformers ships this ``model_type``'s config class."""
+    config_class = CONFIG_MAPPING[model_type]
+    return getattr(config_class, "__module__", "").startswith("transformers.")
+
+
 VL_SUPPORTED_MODEL_IDS = sorted(
     hub_id
     for hub_id, entry in SUPPORTED_MODEL_INFO.items()
     if entry.language_model_prefix is not None
     # Checkpoint-code model types have no transformers config class.
+    # agilerl registers mimo_v2 into CONFIG_MAPPING.
     and entry.model_type in CONFIG_MAPPING
+    and _shipped_by_transformers(entry.model_type)
 )
 
 
@@ -2358,10 +2368,10 @@ class TestAdaptLoraConfigForModelFamilyExclusions:
         )
 
         assert adapters == {
-            "model.layers.N.self_attn.o_proj",
-            "model.layers.N.mlp.gate_proj",
-            "model.layers.N.mlp.up_proj",
-            "model.layers.N.mlp.down_proj",
+            "model.language_model.layers.N.self_attn.o_proj",
+            "model.language_model.layers.N.mlp.gate_proj",
+            "model.language_model.layers.N.mlp.up_proj",
+            "model.language_model.layers.N.mlp.down_proj",
         }
 
     @pytest.mark.parametrize(
@@ -2383,7 +2393,7 @@ class TestAdaptLoraConfigForModelFamilyExclusions:
             (
                 "XiaomiMiMo/MiMo-V2.6-Flash-RL",
                 ["q_proj", "o_proj"],
-                {"model.layers.N.self_attn.o_proj"},
+                {"model.language_model.layers.N.self_attn.o_proj"},
             ),
         ],
     )
@@ -2401,12 +2411,13 @@ class TestAdaptLoraConfigForModelFamilyExclusions:
 
     def test_only_excluded_targets_raise(self):
         model = _meta_supported_model("XiaomiMiMo/MiMo-V2.6-Flash-RL")
-        adapted = adapt_lora_config_for_model(
-            model, LoraConfig(r=8, target_modules=["q_proj", "k_proj", "v_proj"])
-        )
 
-        with pytest.raises(ValueError, match="No modules were targeted"):
-            get_peft_model(model, adapted)
+        with pytest.raises(
+            ValueError, match=r"No modules under 'model\.language_model'"
+        ):
+            adapt_lora_config_for_model(
+                model, LoraConfig(r=8, target_modules=["q_proj", "k_proj", "v_proj"])
+            )
 
     def test_user_exclusions_are_kept(self):
         # Arrange
@@ -2654,14 +2665,14 @@ class TestTrainerAttnImplementation:
     def test_warns_for_an_unregistered_model_type(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
-        self.stub_model_type(monkeypatch, "llama")
+        self.stub_model_type(monkeypatch, "phi3")
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
 
         with caplog.at_level(logging.WARNING, logger="agilerl.utils.llm_utils"):
-            attn = trainer_attn_implementation("meta/llama", False)
+            attn = trainer_attn_implementation("microsoft/phi-3", False)
 
         assert attn == "sdpa"
-        assert "No attention backend is registered for model_type 'llama'" in (
+        assert "No attention backend is registered for model_type 'phi3'" in (
             caplog.text
         )
 
@@ -3176,19 +3187,8 @@ class TestFlexDecodeKernelOptions:
 
 class TestCreateModelFromNameOrPathDefaults:
     @pytest.fixture(autouse=True)
-    def stub_llama_model_type(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        stub_catalog_model_type(monkeypatch, "llama")
-
-    @staticmethod
-    def _fake_loader(captured):
-        class _Loader:
-            @staticmethod
-            def from_pretrained(pretrained_model_name_or_path, **kwargs):
-                captured["name"] = pretrained_model_name_or_path
-                captured["kwargs"] = kwargs
-                return nn.Identity()
-
-        return _Loader
+    def stub_qwen3_model_type(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        stub_catalog_model_type(monkeypatch, "qwen3")
 
     @staticmethod
     def _patch_auto_classes(monkeypatch, captured, on_load=None):
@@ -3318,8 +3318,6 @@ class TestCreateModelFromNameOrPathDefaults:
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
 
         class FakeTrainer:
-            model_class = self._fake_loader(captured)
-
             def load_kwargs(self):
                 return {"use_cache": False}
 
@@ -3340,8 +3338,6 @@ class TestCreateModelFromNameOrPathDefaults:
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
 
         class FakeTrainer:
-            model_class = self._fake_loader(captured)
-
             def load_kwargs(self):
                 return {"use_cache": False}
 
@@ -3818,8 +3814,8 @@ class TestRolloutSamplingVllmKwargs:
 
 class TestBuildVllmLlmInitKwargs:
     @pytest.fixture(autouse=True)
-    def stub_llama_model_type(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        stub_catalog_model_type(monkeypatch, "llama")
+    def stub_qwen3_model_type(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        stub_catalog_model_type(monkeypatch, "qwen3")
 
     def test_family_lookup_oserror_leaves_vllm_kwargs_empty(
         self, monkeypatch: pytest.MonkeyPatch
@@ -3985,7 +3981,7 @@ class TestBuildVllmLlmInitKwargs:
     def test_strip_multimodal_towers_peels_nested_config_for_generic_vl(
         self, monkeypatch
     ):
-        stub_catalog_model_type(monkeypatch, "qwen2_vl")
+        stub_catalog_model_type(monkeypatch, "gemma3")
         kwargs = build_vllm_llm_init_kwargs(
             _vllm_config(),
             trainer_model_name_or_path="org/vl-model",
@@ -5092,7 +5088,7 @@ class TestResolvePadTokenId:
             "from transformers.models.auto.configuration_auto import CONFIG_MAPPING\n"
             "from agilerl.utils.llm_utils import load_pad_token_configs\n"
             "model_config, _ = load_pad_token_configs(sys.argv[1])\n"
-            "print('mimo_v2' in CONFIG_MAPPING, model_config.pad_token_id)\n"
+            "print('mimo_v2' in CONFIG_MAPPING, model_config.text_config.pad_token_id)\n"
         )
 
         # Act

@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING, Any, cast
 import torch
 import torch.distributed as dist
 
-from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
+from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.architectures.hyper_connections import compile_hyper_connection_mix
 from agilerl.architectures.runtime import PatchRuntimeConfig
 from agilerl.utils.patching import class_is_patched, library_shim
@@ -484,17 +484,12 @@ def install_glm5_next_patches(
     _model: PreTrainedModel | PeftModel | None = None,
     _use_sequence_packing: bool = False,
 ) -> None:
-    """Patch the GLM-5.3 text model and DSA attention to skip top-k, compile the hyper-connection mix, and register the Liger applier.
+    """Patch the GLM-5.3 text model and DSA attention to skip top-k and compile the hyper-connection mix.
 
     :param _patch: Catalog patch config.
     :param _model: Already-built model, or None; the class-level patches cover it.
     :param _use_sequence_packing: Unused; the DSA mask ignores packed-document boundaries.
     """
-    if HAS_LIGER_KERNEL:
-        # Defers liger-kernel, an optional extra.
-        from agilerl.architectures.glm5_next.liger import register_glm5_next_liger
-
-        register_glm5_next_liger()
     compile_hyper_connection_mix(Glm5NextTextHyperConnection)
     if class_is_patched(Glm5NextTextAttention, CAUSAL_SDPA_WHEN_TOPK_COVERS):
         return

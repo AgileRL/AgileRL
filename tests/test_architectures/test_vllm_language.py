@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agilerl.architectures.catalog import FAMILY_RUNTIME_CONFIGS
+from agilerl.architectures.catalog import model_type_vision
 from agilerl.architectures.vllm_language import (
     apply_multimodal_engine_kwargs,
     apply_tower_connector_lora_engine_kwargs,
@@ -70,7 +70,7 @@ class TestApplyTowerConnectorLoraEngineKwargs:
         apply_tower_connector_lora_engine_kwargs(
             kwargs,
             strip_multimodal_towers=False,
-            runtime=FAMILY_RUNTIME_CONFIGS["nemotron_h_omni"],
+            vision=model_type_vision("nemotron_h_omni"),
             tower_target_modules=["q_proj", "linear_1"],
         )
 
@@ -92,7 +92,7 @@ class TestApplyTowerConnectorLoraEngineKwargs:
         apply_tower_connector_lora_engine_kwargs(
             kwargs,
             strip_multimodal_towers=False,
-            runtime=FAMILY_RUNTIME_CONFIGS[family],
+            vision=model_type_vision(family),
             tower_target_modules=targets,
         )
 
@@ -107,7 +107,7 @@ class TestApplyTowerConnectorLoraEngineKwargs:
         apply_tower_connector_lora_engine_kwargs(
             kwargs,
             strip_multimodal_towers=False,
-            runtime=FAMILY_RUNTIME_CONFIGS["nemotron_h_omni"],
+            vision=model_type_vision("nemotron_h_omni"),
             tower_target_modules=tower_target_modules,
         )
 
@@ -118,7 +118,7 @@ class TestApplyTowerConnectorLoraEngineKwargs:
             apply_tower_connector_lora_engine_kwargs(
                 {},
                 strip_multimodal_towers=True,
-                runtime=FAMILY_RUNTIME_CONFIGS["nemotron_h_omni"],
+                vision=model_type_vision("nemotron_h_omni"),
                 tower_target_modules=["q_proj"],
             )
 
@@ -137,19 +137,33 @@ class TestApplyTowerConnectorLoraEngineKwargs:
             apply_tower_connector_lora_engine_kwargs(
                 {},
                 strip_multimodal_towers=False,
-                runtime=FAMILY_RUNTIME_CONFIGS[family],
+                vision=model_type_vision(family),
                 tower_target_modules=targets,
+            )
+
+    def test_text_checkpoint_rejects_tower_targets(self) -> None:
+        with pytest.raises(ValueError, match="this family supports none"):
+            apply_tower_connector_lora_engine_kwargs(
+                {},
+                strip_multimodal_towers=False,
+                vision=None,
+                tower_target_modules=["q_proj"],
             )
 
 
 class TestUnbuiltTowerModules:
     def test_strip_all_drops_every_tower(self) -> None:
-        unbuilt = unbuilt_tower_modules(True, FAMILY_RUNTIME_CONFIGS["gemma4"])
+        unbuilt = unbuilt_tower_modules(True, model_type_vision("gemma4"))
 
         assert unbuilt == ["audio_tower", "embed_audio", "embed_vision", "vision_tower"]
 
     def test_served_towers_are_all_built(self) -> None:
-        unbuilt = unbuilt_tower_modules(False, FAMILY_RUNTIME_CONFIGS["gemma4"])
+        unbuilt = unbuilt_tower_modules(False, model_type_vision("gemma4"))
+
+        assert unbuilt == []
+
+    def test_text_checkpoint_has_no_towers(self) -> None:
+        unbuilt = unbuilt_tower_modules(True, None)
 
         assert unbuilt == []
 

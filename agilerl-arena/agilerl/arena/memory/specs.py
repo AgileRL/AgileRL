@@ -9,17 +9,19 @@ and torch-free.
 from __future__ import annotations
 
 import re
-from typing import Any, Literal, NamedTuple, TypedDict
+from typing import Any, Literal, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Self
 
 from agilerl.arena.memory.config_fields import (
+    BIAS_FREE_MERGER_TOWER_MODEL_TYPES,
     GATED_MLP_TOWER_MODEL_TYPES,
     VisionResize,
     attention_sink_layers,
     decoder_fields,
     dense_ffn_layers,
+    encoder_attention_widths,
     encoder_params,
     ffn_layer_mix,
     first_int,
@@ -29,7 +31,6 @@ from agilerl.arena.memory.config_fields import (
     layer_type_list,
     moe_fields,
     tower_configs,
-    vision_geometry_fields,
 )
 from agilerl.arena.memory.resolve.attention import resolve_attn_implementation
 from agilerl.arena.memory.resolve.lora import OMITTED_MAX_LORA_RANK
@@ -37,6 +38,7 @@ from agilerl.arena.memory.resolve.sequences import (
     COLOCATED_MAX_NUM_SEQS,
     OMITTED_GPU_MEMORY_UTILIZATION,
 )
+from agilerl.arena.memory.tower_lora import LoraLinear, vision_fields
 from agilerl.arena.models.fsdp import FSDPConfig
 from agilerl.arena.models.model_info import LORA_EXCLUDED_MODULES
 
@@ -61,7 +63,9 @@ VLLM_3D_MOE_LORA_MODEL_TYPES = frozenset(
 
 # Outer config model types whose HF class lists its tower encoder blocks in
 # ``_no_split_modules``, so FSDP shards each block as its own unit.
-TOWER_BLOCK_UNIT_MODEL_TYPES = frozenset({"gemma4", "qwen3_5", "qwen3_5_moe"})
+TOWER_BLOCK_UNIT_MODEL_TYPES = frozenset(
+    {"gemma4", "glm5_next", "mimo_v2", "qwen3_5", "qwen3_5_moe"}
+)
 # Of those, the types whose vision patch embedder is a unit of its own too.
 TOWER_EMBEDDER_UNIT_MODEL_TYPES = frozenset({"gemma4"})
 
@@ -92,7 +96,7 @@ TENSOR_PARALLEL_MODEL_TYPES = frozenset(
 # Tower config model types whose family training TP plan splits each encoder
 # block's fused qkv, output projection and MLP, and the patch merger's MLP.
 TENSOR_PARALLEL_TOWER_MODEL_TYPES = frozenset(
-    {"glm5_next_vision", "qwen3_5", "qwen3_5_moe"}
+    {"glm5_next_vision", "mimo_v2_vision", "qwen3_5", "qwen3_5_moe"}
 )
 # Model types whose vLLM config keeps the SSM state cache in fp32 unless the
 # checkpoint names a dtype. Other families keep it in the model dtype.
@@ -161,26 +165,6 @@ ALGORITHM_NAMES: dict[str, Algorithm] = {
     "SFT": "sft",
 }
 LoraTargetScope = Literal["all-linear", "attention-only"]
-# LoRA factor a tensor-parallel plan splits: LoRA A of a row-parallel linear
-# (``in``), LoRA B of a column-parallel one (``out``), or neither.
-LoraSplit = Literal["none", "in", "out"]
-
-
-class LoraLinear(NamedTuple):
-    """``count`` linears of one shape that LoRA wraps.
-
-    ``split`` names the factor training tensor parallel splits (``"in"``:
-    LoRA A, ``"out"``: LoRA B). ``target`` is the module name a tower LoRA
-    target matches; decoder linears leave it empty.
-    """
-
-    in_features: int
-    out_features: int
-    count: int
-    split: LoraSplit = "none"
-    target: str = ""
-
-
 PackedMoeDispatch = Literal["materialized", "contracted"]
 # One layer of a block-exclusive stack: an attention, FFN (MLP or MoE) or Mamba layer.
 BlockKind = Literal["attention", "ffn", "mamba"]
@@ -202,7 +186,9 @@ def tensor_parallel_tower_params(config: dict[str, Any]) -> int:
 
     Output-projection biases stay whole. A ``projection_intermediate_size``
     merger is a bias-free SwiGLU; otherwise the merger maps the merged patch
-    width to itself, then to ``out_hidden_size``.
+    width to itself, then to ``out_hidden_size``. qkv rows count each query
+    and key/value head, so grouped-query towers split fewer key/value rows.
+    Attention sinks split with their query heads.
 
     :param config: Hugging Face model config.
     :return: Split parameter count; zero for towers without a TP plan.
@@ -214,15 +200,24 @@ def tensor_parallel_tower_params(config: dict[str, Any]) -> int:
         h = int(cfg["hidden_size"])
         inter = int(cfg["intermediate_size"])
         out = int(cfg["out_hidden_size"])
-        qkv = 3 * h * h + (3 * h if cfg.get("attention_bias", True) else 0)
+        q, kv = encoder_attention_widths(cfg)
+        qkv_rows = q + 2 * kv
+        qkv = h * qkv_rows + (qkv_rows if cfg.get("attention_bias", True) else 0)
         inputs = 2 if cfg["model_type"] in GATED_MLP_TOWER_MODEL_TYPES else 1
         mlp = inputs * (h * inter + inter) + inter * h
         if cfg.get("projection_intermediate_size"):
             merger = 3 * out * int(cfg["projection_intermediate_size"])
         else:
             merged = h * int(cfg["spatial_merge_size"]) ** 2
-            merger = merged * merged + merged + merged * out
-        total += int(cfg["depth"]) * (qkv + h * h + mlp) + merger
+            bias = (
+                0 if cfg["model_type"] in BIAS_FREE_MERGER_TOWER_MODEL_TYPES else merged
+            )
+            merger = merged * merged + bias + merged * out
+        total += int(cfg["depth"]) * (qkv + q * h + mlp) + merger
+        if cfg.get("use_sink"):
+            # One sink logit per query head on each windowed block.
+            windowed = int(cfg["depth"]) - len(cfg["fullatt_block_indexes"])
+            total += windowed * int(cfg["num_heads"])
     return total
 
 
@@ -242,134 +237,15 @@ def tower_block_units(config: dict[str, Any]) -> int:
 
     :param config: Hugging Face model config.
     :return: Vision blocks, plus the patch embedder where it is a unit; zero
-        for models FSDP does not wrap per tower block.
+        for a config without a vision tower or a model FSDP does not wrap per
+        tower block.
     """
     model_type = config.get("model_type")
-    if model_type not in TOWER_BLOCK_UNIT_MODEL_TYPES:
+    vision = config.get("vision_config")
+    if model_type not in TOWER_BLOCK_UNIT_MODEL_TYPES or vision is None:
         return 0
-    vision = config["vision_config"]
     blocks = first_int(vision, "depth", "num_hidden_layers")
     return blocks + (1 if model_type in TOWER_EMBEDDER_UNIT_MODEL_TYPES else 0)
-
-
-def _vision_fields(config: dict[str, Any]) -> dict[str, Any]:
-    """Vision tower geometry and tower LoRA linears; empty without a tower."""
-    geometry = vision_geometry_fields(config)
-    if not geometry:
-        return {}
-    return {**geometry, "tower_lora_linears": _tower_lora_linears(config)}
-
-
-def _tower_lora_linears(config: dict[str, Any]) -> tuple[LoraLinear, ...]:
-    """Tower and connector linears, by the target name tower LoRA matches.
-
-    Split factors follow the family's training tensor-parallel plan: Qwen3.5
-    splits the vision blocks and merger, Nemotron Omni the encoder MLP, and
-    Gemma 4 keeps its towers whole. Empty for families without tower LoRA.
-    """
-    model_type = config.get("model_type")
-    if model_type in {"qwen3_5", "qwen3_5_moe"}:
-        return _qwen_vision_lora_linears(config["vision_config"])
-    if model_type == "gemma4":
-        text_hidden = int(config["text_config"]["hidden_size"])
-        return _gemma4_vision_lora_linears(
-            config["vision_config"], text_hidden
-        ) + _gemma4_audio_lora_linears(config.get("audio_config"), text_hidden)
-    if model_type == "nemotron_h_omni":
-        return _radio_vision_lora_linears(config)
-    return ()
-
-
-def _qwen_vision_lora_linears(vision: dict[str, Any]) -> tuple[LoraLinear, ...]:
-    """Qwen3.5 vision blocks and patch merger."""
-    h = int(vision["hidden_size"])
-    layers = int(vision["depth"])
-    inter = int(vision["intermediate_size"])
-    merged = h * int(vision["spatial_merge_size"]) ** 2
-    return (
-        LoraLinear(h, 3 * h, layers, "out", "qkv"),
-        LoraLinear(h, inter, layers, "out", "linear_fc1"),
-        LoraLinear(inter, h, layers, "in", "linear_fc2"),
-        LoraLinear(merged, merged, 1, "out", "linear_fc1"),
-        LoraLinear(merged, int(vision["out_hidden_size"]), 1, "in", "linear_fc2"),
-    )
-
-
-def _gemma4_vision_lora_linears(
-    vision: dict[str, Any], text_hidden: int
-) -> tuple[LoraLinear, ...]:
-    """Gemma 4 vision encoder, patch embedder and vision embedder."""
-    h = int(vision["hidden_size"])
-    layers = int(vision["num_hidden_layers"])
-    inter = int(vision["intermediate_size"])
-    q = int(vision["num_attention_heads"]) * int(vision["head_dim"])
-    kv = int(vision["num_key_value_heads"]) * int(vision["head_dim"])
-    # Encoder linears sit inside clippable wrappers as ``linear``.
-    return (
-        LoraLinear(h, q, layers, target="linear"),
-        LoraLinear(h, kv, 2 * layers, target="linear"),
-        LoraLinear(q, h, layers, target="linear"),
-        LoraLinear(h, inter, 2 * layers, target="linear"),
-        LoraLinear(inter, h, layers, target="linear"),
-        LoraLinear(3 * int(vision["patch_size"]) ** 2, h, 1, target="input_proj"),
-        LoraLinear(h, text_hidden, 1, target="embedding_projection"),
-    )
-
-
-def _gemma4_audio_lora_linears(
-    audio: dict[str, Any] | None, text_hidden: int
-) -> tuple[LoraLinear, ...]:
-    """Gemma 4 conformer audio tower and audio embedder; empty without one."""
-    if not audio:
-        return ()
-    h = int(audio["hidden_size"])
-    layers = int(audio["num_hidden_layers"])
-    channels = audio["subsampling_conv_channels"]
-    out = int(audio["output_proj_dims"])
-    # Two feed-forwards (h -> 4h -> h), the light conv's start (h -> 2h) and
-    # end, and attention q/k/v/post, all clippable ``linear`` wrappers.
-    return (
-        LoraLinear(h, 4 * h, 2 * layers, target="linear"),
-        LoraLinear(4 * h, h, 2 * layers, target="linear"),
-        LoraLinear(h, 2 * h, layers, target="linear"),
-        LoraLinear(h, h, 5 * layers, target="linear"),
-        LoraLinear(h, h, layers, target="relative_k_proj"),
-        LoraLinear(
-            int(channels[0]) // 4 * int(channels[1]), h, 1, target="input_proj_linear"
-        ),
-        LoraLinear(h, out, 1, target="output_proj"),
-        LoraLinear(out, text_hidden, 1, target="embedding_projection"),
-    )
-
-
-def _radio_vision_lora_linears(config: dict[str, Any]) -> tuple[LoraLinear, ...]:
-    """Nemotron Omni RADIO encoder, patch embedders and projector."""
-    vision = config["vision_config"]
-    h = int(vision["hidden_size"])
-    layers = int(vision["num_hidden_layers"])
-    inter = int(h * float(vision["mlp_ratio"]))
-    patch = int(vision["num_channels"]) * int(vision["patch_size"]) ** 2
-    merged = h * round(1 / config["downsample_ratio"]) ** 2
-    projector = int(config["projector_hidden_size"])
-    linears = [
-        *(
-            LoraLinear(h, h, layers, target=name)
-            for name in ("q_proj", "k_proj", "v_proj", "o_proj")
-        ),
-        LoraLinear(h, inter, layers, "out", "fc1"),
-        LoraLinear(inter, h, layers, "in", "fc2"),
-        LoraLinear(patch, h, 1, target="patch_projection"),
-        LoraLinear(merged, projector, 1, target="linear_1"),
-        LoraLinear(
-            projector, int(config["llm_config"]["hidden_size"]), 1, target="linear_2"
-        ),
-    ]
-    frames = vision.get("video_temporal_patch_size")
-    if frames:
-        linears.append(
-            LoraLinear(int(frames) * patch, h, 1, target="video_patch_projection")
-        )
-    return tuple(linears)
 
 
 def _layer_kind(entry: str) -> LayerKind:
@@ -634,7 +510,7 @@ def _layout_fields(
         "multimodal_tower_block_params": multimodal_tower_block_params(config),
         "tower_block_units": tower_block_units(config),
         "tensor_parallel_tower_params": tensor_parallel_tower_params(config),
-        **_vision_fields(config),
+        **vision_fields(config),
     }
 
 
@@ -803,6 +679,8 @@ class ModelArch(BaseModel):
     vision_max_patches: int = 0
     # VisionFeatureCache keeps this family's tower outputs through a learn step.
     vision_feature_cache: bool = False
+    # The patch-merger tower returns only its merged tokens.
+    vision_merged_output_only: bool = False
     # Tower and connector linears ``lora_config.tower_target_modules`` can wrap.
     tower_lora_linears: tuple[LoraLinear, ...] = ()
 

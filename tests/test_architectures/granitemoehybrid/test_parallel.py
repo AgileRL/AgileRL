@@ -40,7 +40,9 @@ from agilerl.architectures.granitemoehybrid.context_parallel import (
     wrap_granitemoehybrid_context_parallel,
 )
 from agilerl.architectures.granitemoehybrid.tensor_parallel import (
-    GRANITEMOEHYBRID_TENSOR_PARALLEL_PLAN,
+    TENSOR_PARALLEL_PLAN as GRANITEMOEHYBRID_TENSOR_PARALLEL_PLAN,
+)
+from agilerl.architectures.granitemoehybrid.tensor_parallel import (
     apply_granitemoehybrid_tensor_parallel,
 )
 from agilerl.architectures.nemotron_h.tensor_parallel import shard_mamba_mixer
@@ -745,7 +747,7 @@ class TestGraniteMoeHybridCheckpointCoverage:
         # Assert
         assert runtime.tensor_parallel_plan == (
             "agilerl.architectures.granitemoehybrid.tensor_parallel:"
-            "GRANITEMOEHYBRID_TENSOR_PARALLEL_PLAN"
+            "TENSOR_PARALLEL_PLAN"
         )
         assert model.lm_head.weight is model.model.embed_tokens.weight
 

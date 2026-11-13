@@ -63,6 +63,4 @@ def apply_granitemoe_tensor_parallel(model: nn.Module, tp_mesh: DeviceMesh) -> i
     return count
 
 
-GRANITEMOE_TENSOR_PARALLEL_PLAN = TensorParallelPlan(
-    shard=apply_granitemoe_tensor_parallel
-)
+TENSOR_PARALLEL_PLAN = TensorParallelPlan(shard=apply_granitemoe_tensor_parallel)

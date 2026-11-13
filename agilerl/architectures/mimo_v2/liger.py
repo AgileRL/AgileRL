@@ -23,7 +23,7 @@ from liger_kernel.transformers.monkey_patch import (
 from liger_kernel.transformers.rms_norm import LigerRMSNorm
 from transformers.models.mimo_v2_flash import modeling_mimo_v2_flash
 
-from agilerl.architectures.mimo_v2.config import MIMO_V2_MODEL_TYPE
+from agilerl.architectures.mimo_v2.configuration import MIMO_V2_MODEL_TYPE
 from agilerl.utils.patching import library_shim
 
 if TYPE_CHECKING:
@@ -80,13 +80,14 @@ def apply_liger_kernel_to_mimo_v2(
         mimo_mod.MiMoV2FlashRMSNorm = LigerRMSNorm
     if model is None:
         return
-    if swiglu and model.config.hidden_act not in SWIGLU_ACTIVATIONS:
+    text_config = model.config.get_text_config()
+    if swiglu and text_config.hidden_act not in SWIGLU_ACTIVATIONS:
         msg = (
             "Liger SwiGLU needs a SiLU dense MLP; "
-            f"{model.config.model_type} uses {model.config.hidden_act!r}"
+            f"{model.config.model_type} uses {text_config.hidden_act!r}"
         )
         raise ValueError(msg)
-    base_model = getattr(model, model.base_model_prefix)
+    base_model = model.get_decoder()
     if rms_norm:
         _patch_rms_norm_module(base_model.norm)
     for layer in base_model.layers:

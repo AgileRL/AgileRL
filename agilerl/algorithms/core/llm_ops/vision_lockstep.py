@@ -65,17 +65,6 @@ def _tensors(value: object) -> Iterator[torch.Tensor]:
             yield from _tensors(item)
 
 
-def _plus_zero(output: ForwardOutput, zero: torch.Tensor) -> ForwardOutput:
-    """``output`` with ``zero`` added to its first tensor."""
-    if isinstance(output, torch.Tensor):
-        return output + zero
-    if isinstance(output, tuple):
-        return (output[0] + zero, *output[1:])
-    key = next(iter(output.keys()))
-    output[key] = output[key] + zero
-    return output
-
-
 class VisionLockstep:
     """Whether each forward must run the vision tower on some rank, as every rank agrees.
 
@@ -150,12 +139,15 @@ def vision_lockstep(
     images that ``cache`` lacks (:class:`VisionLockstep`). If none must, ranks
     with images reuse their cached features. Otherwise ranks with images run
     the tower, and a forward without images runs it on one zero image and adds
-    zero times its features to the output, so the tower's forward and backward
-    run there too. An empty ``pixel_values`` counts as no images.
+    zero times its features to the decoder's ``inputs_embeds``, so the tower's
+    forward and backward run there too. An empty ``pixel_values`` counts as no
+    images.
 
     The zero image runs as ``module.get_decoder()`` starts, where a forward
     with images has already run the tower, so every rank gathers FSDP units
     computed before the tower (Gemma4 per-layer embeddings) in the same order.
+    Its features join ``inputs_embeds`` where image features do, so every
+    rank's backward reaches the tower through the same graph.
 
     :param module: Module :func:`vision_language_module` returns.
     :param cache: Vision feature cache of the learn step.
@@ -163,7 +155,6 @@ def vision_lockstep(
     """
     lockstep = VisionLockstep(cache)
     filler_devices: list[torch.device] = []
-    pending: list[object] = []
 
     def agree(
         _module: nn.Module, args: tuple[Any, ...], kwargs: dict[str, Any]
@@ -184,32 +175,35 @@ def vision_lockstep(
         filler_devices.append(anchor.device)
         return args, kwargs
 
-    def run_filler(_module: nn.Module, _args: tuple[Any, ...]) -> None:
+    def run_filler(
+        _module: nn.Module, args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> tuple[tuple[Any, ...], dict[str, Any]] | None:
         if not filler_devices:
-            return
-        with cache.images(None):
-            pending.append(getattr(module, FILLER_METHOD)(filler_devices.pop()))
-
-    def add_filler(
-        _module: nn.Module,
-        _args: tuple[Any, ...],
-        _kwargs: dict[str, Any],
-        output: ForwardOutput,
-    ) -> ForwardOutput | None:
-        cache.agreed = None
-        if not pending:
             return None
+        embeds = kwargs.get("inputs_embeds")
+        if embeds is None:
+            msg = "A vision filler needs the decoder called with inputs_embeds"
+            raise ValueError(msg)
+        with cache.images(None):
+            output = getattr(module, FILLER_METHOD)(filler_devices.pop())
         features = [
             tensor.sum().float()
-            for tensor in _tensors(pending.pop())
+            for tensor in _tensors(output)
             if tensor.is_floating_point()
         ]
-        return _plus_zero(output, torch.stack(features).sum() * 0)
+        zero = (torch.stack(features).sum() * 0).to(embeds.dtype)
+        kwargs["inputs_embeds"] = embeds + zero
+        return args, kwargs
+
+    def clear_agreement(
+        _module: nn.Module, _args: tuple[Any, ...], _output: ForwardOutput
+    ) -> None:
+        cache.agreed = None
 
     handles = [
         module.register_forward_pre_hook(agree, with_kwargs=True),
-        module.get_decoder().register_forward_pre_hook(run_filler),
-        module.register_forward_hook(add_filler, with_kwargs=True),
+        module.get_decoder().register_forward_pre_hook(run_filler, with_kwargs=True),
+        module.register_forward_hook(clear_agreement),
     ]
     try:
         yield lockstep

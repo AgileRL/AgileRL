@@ -589,8 +589,7 @@ class TestGraniteMoeCheckpointCoverage:
 
         # Assert
         assert runtime.tensor_parallel_plan == (
-            "agilerl.architectures.granitemoe.tensor_parallel:"
-            "GRANITEMOE_TENSOR_PARALLEL_PLAN"
+            "agilerl.architectures.granitemoe.tensor_parallel:TENSOR_PARALLEL_PLAN"
         )
         assert runtime.context_parallel_plan is None
         assert model.lm_head.weight is model.model.embed_tokens.weight

@@ -9,6 +9,7 @@ import copy
 import hashlib
 import logging
 import re
+from collections import defaultdict
 from collections.abc import Callable, Generator, Iterable, Sequence
 from concurrent.futures import Future
 from contextlib import _GeneratorContextManager, contextmanager
@@ -483,19 +484,36 @@ def _checkpoint_transform_groups(
     """Conversions registered for a module class or model type, under that module path.
 
     Longer paths come first so a nested module's mapping wins over its parent.
-    A quantized checkpoint also gets the quantizer's dequantize conversions.
+    A module whose class name or model type an ancestor already mapped is
+    skipped, as ``from_pretrained`` does. A quantized checkpoint also gets the
+    quantizer's dequantize conversions.
     """
     groups: list[tuple[str, list[WeightTransform]]] = []
+    claimed: dict[str, list[str]] = defaultdict(list)
+
+    def claimed_by_ancestor(identifier: str, name: str) -> bool:
+        return any(
+            path == "" or name.startswith(f"{path}.") for path in claimed[identifier]
+        )
+
     for name, module in model.named_modules():
         config = module_pretrained_config(module)
         if config is None:
             continue
-        model_type = config.model_type
-        conversions = get_checkpoint_conversion_mapping(type(module).__name__)
-        if not conversions and model_type:
-            conversions = get_checkpoint_conversion_mapping(model_type)
+        class_name = type(module).__name__
+        if claimed_by_ancestor(class_name, name):
+            continue
+        identifier = class_name
+        conversions = get_checkpoint_conversion_mapping(class_name)
+        if not conversions and config.model_type:
+            if claimed_by_ancestor(config.model_type, name):
+                continue
+            identifier = config.model_type
+            conversions = get_checkpoint_conversion_mapping(config.model_type)
         if not conversions:
             continue
+        claimed[class_name].append(name)
+        claimed[identifier].append(name)
         prefix = checkpoint_key_for_parameter(name) if name else ""
         groups.append((prefix, list(conversions)))
     groups.sort(key=lambda item: len(item[0]), reverse=True)

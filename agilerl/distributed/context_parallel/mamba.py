@@ -21,7 +21,7 @@ import torch.distributed as dist
 from torch import nn
 from torch.distributed.device_mesh import DeviceMesh
 
-from agilerl.architectures.nemotron_h.mamba import MEM_EFF_ATTR
+from agilerl.architectures.nemotron_h.layers import MEM_EFF_ATTR
 from agilerl.distributed.context_parallel.mixer import (
     LocalParamSlot,
     assign_view,

@@ -43,10 +43,10 @@ from transformers import (
     GraniteMoeHybridForCausalLM,
     NemotronHConfig,
     NemotronHForCausalLM,
-    OPTConfig,
-    OPTForCausalLM,
     PretrainedConfig,
     PreTrainedModel,
+    Qwen2Config,
+    Qwen2ForCausalLM,
     Qwen3_5Config,
     Qwen3_5ForCausalLM,
     Qwen3_5MoeForCausalLM,
@@ -138,19 +138,42 @@ def _lora_config(
     )
 
 
-def _tiny_opt() -> OPTForCausalLM:
-    """Build a CPU OPT small enough for unit tests."""
-    return OPTForCausalLM(
-        OPTConfig(
+def _tiny_tied_qwen3() -> Qwen3ForCausalLM:
+    """Build a tied CPU Qwen3, a catalogued family checkpoint replay can load."""
+    return Qwen3ForCausalLM(
+        Qwen3Config(
             vocab_size=32,
             hidden_size=16,
+            intermediate_size=32,
             num_hidden_layers=1,
-            ffn_dim=32,
             num_attention_heads=2,
+            num_key_value_heads=1,
+            head_dim=8,
             max_position_embeddings=16,
-            word_embed_proj_dim=16,
+            tie_word_embeddings=True,
         )
     )
+
+
+def _tiny_qwen2() -> Qwen2ForCausalLM:
+    """Build an untied CPU Qwen2, whose attention projections carry biases."""
+    return Qwen2ForCausalLM(
+        Qwen2Config(
+            vocab_size=32,
+            hidden_size=16,
+            intermediate_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            num_key_value_heads=1,
+            max_position_embeddings=16,
+            tie_word_embeddings=False,
+        )
+    )
+
+
+def _qwen_lora_config() -> LoraConfig:
+    """LoRA config on the Qwen attention projections."""
+    return _lora_config(target_modules=["q_proj", "v_proj"], fan_in_fan_out=False)
 
 
 def _tiny_qwen3_5_vl() -> nn.Module:
@@ -608,10 +631,10 @@ class TestMergedExportIsComplete:
 class TestExportMergedPretrainedReplay:
     def test_reload_from_actor_dir_and_base(self, tmp_path: Path) -> None:
         torch.manual_seed(0)
-        base = _tiny_gpt2()
+        base = _tiny_tied_qwen3()
         base_dir = tmp_path / "base"
         base.save_pretrained(base_dir)
-        peft_model = get_peft_model(base, _lora_config(), adapter_name="actor")
+        peft_model = get_peft_model(base, _qwen_lora_config(), adapter_name="actor")
         ckpt = tmp_path / "ckpt"
         peft_model.save_pretrained(ckpt)
         actor_dir = ckpt / "actor"
@@ -638,9 +661,9 @@ class TestExportMergedPretrainedReplay:
 
     def test_non_main_replay_skips_write(self, tmp_path: Path) -> None:
         torch.manual_seed(0)
-        base = _tiny_gpt2()
+        base = _tiny_tied_qwen3()
         base.save_pretrained(tmp_path / "base")
-        peft_model = get_peft_model(base, _lora_config(), adapter_name="actor")
+        peft_model = get_peft_model(base, _qwen_lora_config(), adapter_name="actor")
         peft_model.save_pretrained(tmp_path / "ckpt")
         out = tmp_path / "merged"
 
@@ -657,9 +680,9 @@ class TestExportMergedPretrainedReplay:
 
     def test_does_not_call_from_pretrained(self, tmp_path: Path) -> None:
         torch.manual_seed(0)
-        base = _tiny_gpt2()
+        base = _tiny_tied_qwen3()
         base.save_pretrained(tmp_path / "base")
-        peft_model = get_peft_model(base, _lora_config(), adapter_name="actor")
+        peft_model = get_peft_model(base, _qwen_lora_config(), adapter_name="actor")
         peft_model.save_pretrained(tmp_path / "ckpt")
 
         with patch(
@@ -678,9 +701,9 @@ class TestExportMergedPretrainedReplay:
 
     def test_base_weights_are_meta_after_export(self, tmp_path: Path) -> None:
         torch.manual_seed(0)
-        base = _tiny_gpt2()
+        base = _tiny_tied_qwen3()
         base.save_pretrained(tmp_path / "base")
-        peft_model = get_peft_model(base, _lora_config(), adapter_name="actor")
+        peft_model = get_peft_model(base, _qwen_lora_config(), adapter_name="actor")
         peft_model.save_pretrained(tmp_path / "ckpt")
         skeleton, store = lora_merge_mod._load_replay_peft(
             tmp_path / "ckpt" / "actor",
@@ -712,9 +735,9 @@ class TestExportMergedPretrainedReplay:
 
     def test_loads_base_tensors_per_shard(self, tmp_path: Path) -> None:
         torch.manual_seed(0)
-        base = _tiny_gpt2()
+        base = _tiny_tied_qwen3()
         base.save_pretrained(tmp_path / "base")
-        peft_model = get_peft_model(base, _lora_config(), adapter_name="actor")
+        peft_model = get_peft_model(base, _qwen_lora_config(), adapter_name="actor")
         peft_model.save_pretrained(tmp_path / "ckpt")
         loads: list[list[str]] = []
         batch: list[str] = []
@@ -750,9 +773,9 @@ class TestExportMergedPretrainedReplay:
 
     def test_sharded_base_checkpoint(self, tmp_path: Path) -> None:
         torch.manual_seed(0)
-        base = _tiny_gpt2()
+        base = _tiny_tied_qwen3()
         base.save_pretrained(tmp_path / "base", max_shard_size="1KB")
-        peft_model = get_peft_model(base, _lora_config(), adapter_name="actor")
+        peft_model = get_peft_model(base, _qwen_lora_config(), adapter_name="actor")
         peft_model.save_pretrained(tmp_path / "ckpt")
         input_ids = torch.randint(0, 32, (1, 4))
         live_logits = _peft_logits(peft_model, input_ids)
@@ -776,10 +799,10 @@ class TestExportMergedPretrainedReplay:
 
     def test_missing_base_safetensors_raises(self, tmp_path: Path) -> None:
         torch.manual_seed(0)
-        base = _tiny_gpt2()
+        base = _tiny_tied_qwen3()
         base.save_pretrained(tmp_path / "base")
         (tmp_path / "base" / "model.safetensors").unlink()
-        peft_model = get_peft_model(base, _lora_config(), adapter_name="actor")
+        peft_model = get_peft_model(base, _qwen_lora_config(), adapter_name="actor")
         peft_model.save_pretrained(tmp_path / "ckpt")
 
         with pytest.raises(MergedExportError, match="safetensors weights"):
@@ -792,9 +815,9 @@ class TestExportMergedPretrainedReplay:
 
     def test_missing_adapter_safetensors_raises(self, tmp_path: Path) -> None:
         torch.manual_seed(0)
-        base = _tiny_gpt2()
+        base = _tiny_tied_qwen3()
         base.save_pretrained(tmp_path / "base")
-        peft_model = get_peft_model(base, _lora_config(), adapter_name="actor")
+        peft_model = get_peft_model(base, _qwen_lora_config(), adapter_name="actor")
         peft_model.save_pretrained(tmp_path / "ckpt")
         (tmp_path / "ckpt" / "actor" / "adapter_model.safetensors").unlink()
 
@@ -823,9 +846,9 @@ class TestExportMergedPretrainedReplay:
 
     def test_adapter_leftover_key_raises(self, tmp_path: Path) -> None:
         torch.manual_seed(0)
-        base = _tiny_gpt2()
+        base = _tiny_tied_qwen3()
         base.save_pretrained(tmp_path / "base")
-        peft_model = get_peft_model(base, _lora_config(), adapter_name="actor")
+        peft_model = get_peft_model(base, _qwen_lora_config(), adapter_name="actor")
         peft_model.save_pretrained(tmp_path / "ckpt")
         extra = {"not_a_lora_key": torch.ones(1)}
         with patch(
@@ -842,9 +865,9 @@ class TestExportMergedPretrainedReplay:
 
     def test_empty_adapter_file_raises(self, tmp_path: Path) -> None:
         torch.manual_seed(0)
-        base = _tiny_gpt2()
+        base = _tiny_tied_qwen3()
         base.save_pretrained(tmp_path / "base")
-        peft_model = get_peft_model(base, _lora_config(), adapter_name="actor")
+        peft_model = get_peft_model(base, _qwen_lora_config(), adapter_name="actor")
         peft_model.save_pretrained(tmp_path / "ckpt")
         with patch("agilerl.utils.lora_merge.load_file", return_value={}):
             with pytest.raises(ValueError, match="No adapter tensors matched"):
@@ -869,9 +892,9 @@ class TestExportMergedPretrainedReplay:
 
     def test_skips_meta_copy_missing_from_checkpoint(self, tmp_path: Path) -> None:
         torch.manual_seed(0)
-        base = _tiny_gpt2()
+        base = _tiny_tied_qwen3()
         base.save_pretrained(tmp_path / "base")
-        peft_model = get_peft_model(base, _lora_config(), adapter_name="actor")
+        peft_model = get_peft_model(base, _qwen_lora_config(), adapter_name="actor")
         peft_model.save_pretrained(tmp_path / "ckpt")
         skeleton, store = lora_merge_mod._load_replay_peft(
             tmp_path / "ckpt" / "actor",
@@ -1983,28 +2006,15 @@ def _tensor_nbytes(tensor: torch.Tensor) -> int:
 
 class TestExportMergedPretrainedArchitectures:
     @pytest.mark.parametrize(
-        ("make_base", "targets", "fan_in_fan_out"),
-        [
-            (_tiny_gpt2, ["c_attn"], True),
-            (_tiny_opt, ["q_proj", "v_proj"], False),
-        ],
-        ids=["gpt2", "opt"],
+        "make_base", [_tiny_tied_qwen3, _tiny_qwen2], ids=["qwen3", "qwen2"]
     )
     def test_live_and_replay_match_saved_checkpoint(
-        self,
-        tmp_path: Path,
-        make_base: Any,
-        targets: list[str],
-        fan_in_fan_out: bool,
+        self, tmp_path: Path, make_base: Any
     ) -> None:
         torch.manual_seed(0)
         base = make_base()
         base.save_pretrained(tmp_path / "base")
-        peft_model = get_peft_model(
-            base,
-            _lora_config(target_modules=targets, fan_in_fan_out=fan_in_fan_out),
-            adapter_name="actor",
-        )
+        peft_model = get_peft_model(base, _qwen_lora_config(), adapter_name="actor")
         peft_model.save_pretrained(tmp_path / "ckpt")
         input_ids = torch.randint(0, 32, (2, 8))
         live_logits = _peft_logits(peft_model, input_ids)
@@ -2044,13 +2054,9 @@ class TestExportMergedPretrainedArchitectures:
 
     def test_replay_sharded_tied_checkpoint(self, tmp_path: Path) -> None:
         torch.manual_seed(0)
-        base = _tiny_gpt2()
+        base = _tiny_tied_qwen3()
         base.save_pretrained(tmp_path / "base", max_shard_size="1KB")
-        peft_model = get_peft_model(
-            base,
-            _lora_config(),
-            adapter_name="actor",
-        )
+        peft_model = get_peft_model(base, _qwen_lora_config(), adapter_name="actor")
         peft_model.save_pretrained(tmp_path / "ckpt")
         input_ids = torch.randint(0, 32, (1, 4))
         live_logits = _peft_logits(peft_model, input_ids)
@@ -2100,9 +2106,9 @@ class TestExportMergedPretrainedMemory:
         self, tmp_path: Path
     ) -> None:
         torch.manual_seed(0)
-        base = _tiny_gpt2()
+        base = _tiny_tied_qwen3()
         base.save_pretrained(tmp_path / "base")
-        peft_model = get_peft_model(base, _lora_config(), adapter_name="actor")
+        peft_model = get_peft_model(base, _qwen_lora_config(), adapter_name="actor")
         peft_model.save_pretrained(tmp_path / "ckpt")
         shard_nbytes: list[int] = []
         running: list[int] = []
@@ -2141,9 +2147,9 @@ class TestExportMergedPretrainedMemory:
 
     def test_replay_adapter_is_small_and_base_stays_meta(self, tmp_path: Path) -> None:
         torch.manual_seed(0)
-        base = _tiny_gpt2()
+        base = _tiny_tied_qwen3()
         base.save_pretrained(tmp_path / "base")
-        peft_model = get_peft_model(base, _lora_config(), adapter_name="actor")
+        peft_model = get_peft_model(base, _qwen_lora_config(), adapter_name="actor")
         peft_model.save_pretrained(tmp_path / "ckpt")
         skeleton, store = lora_merge_mod._load_replay_peft(
             tmp_path / "ckpt" / "actor",
@@ -2227,9 +2233,9 @@ class TestExportMergedPretrainedDevices:
 
     def test_replay_from_bf16_saved_base(self, tmp_path: Path) -> None:
         torch.manual_seed(0)
-        base = _tiny_gpt2().to(dtype=torch.bfloat16)
+        base = _tiny_tied_qwen3().to(dtype=torch.bfloat16)
         base.save_pretrained(tmp_path / "base")
-        peft_model = get_peft_model(base, _lora_config(), adapter_name="actor")
+        peft_model = get_peft_model(base, _qwen_lora_config(), adapter_name="actor")
         peft_model.save_pretrained(tmp_path / "ckpt")
         input_ids = torch.randint(0, 32, (2, 8))
         live_logits = _peft_logits(peft_model, input_ids)
@@ -2299,13 +2305,9 @@ class TestExportMergedPretrainedGPU:
 
     def test_linear_lora_live_and_replay_logits_match(self, tmp_path: Path) -> None:
         torch.manual_seed(0)
-        base = _tiny_opt()
+        base = _tiny_qwen2()
         base.save_pretrained(tmp_path / "base")
-        peft_model = get_peft_model(
-            base,
-            _lora_config(target_modules=["q_proj", "v_proj"], fan_in_fan_out=False),
-            adapter_name="actor",
-        )
+        peft_model = get_peft_model(base, _qwen_lora_config(), adapter_name="actor")
         peft_model.save_pretrained(tmp_path / "ckpt")
         input_ids = torch.randint(0, 32, (2, 8), device="cuda")
         live_logits = _peft_logits(peft_model.cuda(), input_ids)
@@ -2410,9 +2412,9 @@ class TestExportMergedPretrainedGPU:
 
     def test_replay_keeps_base_meta_and_matches_logits(self, tmp_path: Path) -> None:
         torch.manual_seed(0)
-        base = _tiny_gpt2()
+        base = _tiny_tied_qwen3()
         base.save_pretrained(tmp_path / "base")
-        peft_model = get_peft_model(base, _lora_config(), adapter_name="actor")
+        peft_model = get_peft_model(base, _qwen_lora_config(), adapter_name="actor")
         peft_model.save_pretrained(tmp_path / "ckpt")
         input_ids = torch.randint(0, 32, (2, 8), device="cuda")
         live_logits = _peft_logits(peft_model.cuda(), input_ids)

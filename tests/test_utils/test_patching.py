@@ -19,11 +19,11 @@ from agilerl.utils.patching import (
 # Every framework module that declares a library shim.
 SHIM_MODULES = (
     "agilerl.algorithms.core.llm_ops.vllm_colocate",
-    "agilerl.architectures.catalog",
     "agilerl.architectures.flex_attention",
     "agilerl.architectures.nemotron_h.liger",
-    "agilerl.architectures.nemotron_h.mamba",
-    "agilerl.architectures.qwen3_5.packed",
+    "agilerl.architectures.nemotron_h.patches",
+    "agilerl.architectures.nemotron_h_omni.vision",
+    "agilerl.architectures.qwen3_5.patches",
     "agilerl.distributed.fsdp_blocks",
     "agilerl.lora.fused",
 )

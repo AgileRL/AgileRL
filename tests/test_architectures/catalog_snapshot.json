@@ -1,0 +1,810 @@
+{
+  "deepseek_v4": {
+    "chat_format": "dsml",
+    "context_parallel_wrap": "agilerl.architectures.deepseek_v4.context_parallel.wrap_deepseek_v4_context_parallel",
+    "image_token": null,
+    "lora_exclude_modules": [
+      "compressor.gate_proj",
+      "compressor.indexer.gate_proj",
+      "compressor.indexer.kv_proj",
+      "compressor.indexer.q_b_proj",
+      "compressor.indexer.scorer.weights_proj",
+      "compressor.kv_proj",
+      "o_a_proj"
+    ],
+    "patch": {
+      "gdn": null,
+      "has_install": true,
+      "mamba": null
+    },
+    "processor_class": null,
+    "reasoning_parser": "deepseek_v4",
+    "tensor_parallel_restore": "agilerl.architectures.deepseek_v4.tensor_parallel.restore_deepseek_v4_tensor_parallel",
+    "tensor_parallel_shard": "agilerl.architectures.deepseek_v4.tensor_parallel.apply_deepseek_v4_tensor_parallel",
+    "tower_connector_lora_targets": [],
+    "tower_modalities": {},
+    "trainer": {
+      "config_class": "AutoConfig",
+      "model_class": "AutoModelForCausalLM",
+      "trust_remote_code": null
+    },
+    "vllm": {
+      "dense_mamba_prefix_cache": null,
+      "enable_prefix_caching": null,
+      "hf_overrides": null,
+      "mamba_cache_mode": null,
+      "max_num_batched_tokens": null,
+      "sm80_attention_backend": null,
+      "trust_remote_code": null
+    }
+  },
+  "gemma3": {
+    "chat_format": null,
+    "context_parallel_wrap": null,
+    "image_token": null,
+    "lora_exclude_modules": [],
+    "patch": {
+      "gdn": null,
+      "has_install": false,
+      "mamba": null
+    },
+    "processor_class": null,
+    "reasoning_parser": null,
+    "tensor_parallel_restore": null,
+    "tensor_parallel_shard": null,
+    "tower_connector_lora_targets": [],
+    "tower_modalities": {},
+    "trainer": {
+      "config_class": "AutoConfig",
+      "model_class": "AutoModelForImageTextToText",
+      "trust_remote_code": null
+    },
+    "vllm": {
+      "dense_mamba_prefix_cache": null,
+      "enable_prefix_caching": null,
+      "hf_overrides": null,
+      "mamba_cache_mode": null,
+      "max_num_batched_tokens": null,
+      "sm80_attention_backend": null,
+      "trust_remote_code": null
+    }
+  },
+  "gemma3_text": {
+    "chat_format": null,
+    "context_parallel_wrap": null,
+    "image_token": null,
+    "lora_exclude_modules": [],
+    "patch": {
+      "gdn": null,
+      "has_install": false,
+      "mamba": null
+    },
+    "processor_class": null,
+    "reasoning_parser": null,
+    "tensor_parallel_restore": null,
+    "tensor_parallel_shard": null,
+    "tower_connector_lora_targets": [],
+    "tower_modalities": {},
+    "trainer": {
+      "config_class": "AutoConfig",
+      "model_class": "AutoModelForCausalLM",
+      "trust_remote_code": null
+    },
+    "vllm": {
+      "dense_mamba_prefix_cache": null,
+      "enable_prefix_caching": null,
+      "hf_overrides": null,
+      "mamba_cache_mode": null,
+      "max_num_batched_tokens": null,
+      "sm80_attention_backend": null,
+      "trust_remote_code": null
+    }
+  },
+  "gemma4": {
+    "chat_format": "gemma4",
+    "context_parallel_wrap": null,
+    "image_token": null,
+    "lora_exclude_modules": [],
+    "patch": {
+      "gdn": null,
+      "has_install": true,
+      "mamba": null
+    },
+    "processor_class": null,
+    "reasoning_parser": "gemma4",
+    "tensor_parallel_restore": "agilerl.architectures.runtime.no_restore",
+    "tensor_parallel_shard": "agilerl.architectures.gemma4.tensor_parallel.apply_gemma4_tensor_parallel",
+    "tower_connector_lora_targets": [
+      "embedding_projection",
+      "input_proj",
+      "input_proj_linear",
+      "linear",
+      "output_proj",
+      "relative_k_proj"
+    ],
+    "tower_modalities": {
+      "audio_tower": [
+        "audio"
+      ],
+      "embed_audio": [
+        "audio"
+      ],
+      "embed_vision": [
+        "image",
+        "video"
+      ],
+      "vision_tower": [
+        "image",
+        "video"
+      ]
+    },
+    "trainer": {
+      "config_class": "AutoConfig",
+      "model_class": "AutoModelForImageTextToText",
+      "trust_remote_code": null
+    },
+    "vllm": {
+      "dense_mamba_prefix_cache": null,
+      "enable_prefix_caching": null,
+      "hf_overrides": null,
+      "mamba_cache_mode": null,
+      "max_num_batched_tokens": null,
+      "sm80_attention_backend": null,
+      "trust_remote_code": null
+    }
+  },
+  "gemma4_text": {
+    "chat_format": "gemma4",
+    "context_parallel_wrap": null,
+    "image_token": null,
+    "lora_exclude_modules": [],
+    "patch": {
+      "gdn": null,
+      "has_install": false,
+      "mamba": null
+    },
+    "processor_class": null,
+    "reasoning_parser": "gemma4",
+    "tensor_parallel_restore": "agilerl.architectures.runtime.no_restore",
+    "tensor_parallel_shard": "agilerl.architectures.gemma4.tensor_parallel.apply_gemma4_tensor_parallel",
+    "tower_connector_lora_targets": [],
+    "tower_modalities": {},
+    "trainer": {
+      "config_class": "AutoConfig",
+      "model_class": "AutoModelForCausalLM",
+      "trust_remote_code": null
+    },
+    "vllm": {
+      "dense_mamba_prefix_cache": null,
+      "enable_prefix_caching": null,
+      "hf_overrides": null,
+      "mamba_cache_mode": null,
+      "max_num_batched_tokens": null,
+      "sm80_attention_backend": null,
+      "trust_remote_code": null
+    }
+  },
+  "glm5_next": {
+    "chat_format": "glm47",
+    "context_parallel_wrap": "agilerl.architectures.glm5_next.context_parallel.wrap_glm5_next_context_parallel",
+    "image_token": "<|image|>",
+    "lora_exclude_modules": [
+      "f_a_proj",
+      "g_a_proj",
+      "indexer.weights_proj",
+      "indexer.wk",
+      "indexer.wq_b"
+    ],
+    "patch": {
+      "gdn": null,
+      "has_install": true,
+      "mamba": null
+    },
+    "processor_class": null,
+    "reasoning_parser": "glm47",
+    "tensor_parallel_restore": "agilerl.architectures.glm5_next.tensor_parallel.restore_glm5_next_tensor_parallel",
+    "tensor_parallel_shard": "agilerl.architectures.glm5_next.tensor_parallel.apply_glm5_next_tensor_parallel",
+    "tower_connector_lora_targets": [
+      "down_proj",
+      "gate_proj",
+      "qkv",
+      "up_proj"
+    ],
+    "tower_modalities": {
+      "visual": [
+        "image",
+        "video"
+      ]
+    },
+    "trainer": {
+      "config_class": "AutoConfig",
+      "model_class": "AutoModelForImageTextToText",
+      "trust_remote_code": null
+    },
+    "vllm": {
+      "dense_mamba_prefix_cache": null,
+      "enable_prefix_caching": null,
+      "hf_overrides": null,
+      "mamba_cache_mode": null,
+      "max_num_batched_tokens": null,
+      "sm80_attention_backend": null,
+      "trust_remote_code": null
+    }
+  },
+  "glm5_next_text": {
+    "chat_format": "glm47",
+    "context_parallel_wrap": "agilerl.architectures.glm5_next.context_parallel.wrap_glm5_next_context_parallel",
+    "image_token": null,
+    "lora_exclude_modules": [
+      "f_a_proj",
+      "g_a_proj",
+      "indexer.weights_proj",
+      "indexer.wk",
+      "indexer.wq_b"
+    ],
+    "patch": {
+      "gdn": null,
+      "has_install": true,
+      "mamba": null
+    },
+    "processor_class": null,
+    "reasoning_parser": "glm47",
+    "tensor_parallel_restore": "agilerl.architectures.glm5_next.tensor_parallel.restore_glm5_next_tensor_parallel",
+    "tensor_parallel_shard": "agilerl.architectures.glm5_next.tensor_parallel.apply_glm5_next_tensor_parallel",
+    "tower_connector_lora_targets": [],
+    "tower_modalities": {},
+    "trainer": {
+      "config_class": "AutoConfig",
+      "model_class": "AutoModelForCausalLM",
+      "trust_remote_code": null
+    },
+    "vllm": {
+      "dense_mamba_prefix_cache": null,
+      "enable_prefix_caching": null,
+      "hf_overrides": null,
+      "mamba_cache_mode": null,
+      "max_num_batched_tokens": null,
+      "sm80_attention_backend": null,
+      "trust_remote_code": null
+    }
+  },
+  "gpt_oss": {
+    "chat_format": "harmony",
+    "context_parallel_wrap": null,
+    "image_token": null,
+    "lora_exclude_modules": [],
+    "patch": {
+      "gdn": null,
+      "has_install": false,
+      "mamba": null
+    },
+    "processor_class": null,
+    "reasoning_parser": "openai_gptoss",
+    "tensor_parallel_restore": "agilerl.architectures.runtime.no_restore",
+    "tensor_parallel_shard": "agilerl.architectures.gptoss.tensor_parallel.apply_gpt_oss_tensor_parallel",
+    "tower_connector_lora_targets": [],
+    "tower_modalities": {},
+    "trainer": {
+      "config_class": "AutoConfig",
+      "model_class": "AutoModelForCausalLM",
+      "trust_remote_code": null
+    },
+    "vllm": {
+      "dense_mamba_prefix_cache": null,
+      "enable_prefix_caching": null,
+      "hf_overrides": null,
+      "mamba_cache_mode": null,
+      "max_num_batched_tokens": null,
+      "sm80_attention_backend": null,
+      "trust_remote_code": null
+    }
+  },
+  "granitemoe": {
+    "chat_format": "granite3",
+    "context_parallel_wrap": null,
+    "image_token": null,
+    "lora_exclude_modules": [],
+    "patch": {
+      "gdn": null,
+      "has_install": false,
+      "mamba": null
+    },
+    "processor_class": null,
+    "reasoning_parser": null,
+    "tensor_parallel_restore": "agilerl.architectures.runtime.no_restore",
+    "tensor_parallel_shard": "agilerl.architectures.granitemoe.tensor_parallel.apply_granitemoe_tensor_parallel",
+    "tower_connector_lora_targets": [],
+    "tower_modalities": {},
+    "trainer": {
+      "config_class": "AutoConfig",
+      "model_class": "AutoModelForCausalLM",
+      "trust_remote_code": null
+    },
+    "vllm": {
+      "dense_mamba_prefix_cache": null,
+      "enable_prefix_caching": null,
+      "hf_overrides": null,
+      "mamba_cache_mode": null,
+      "max_num_batched_tokens": null,
+      "sm80_attention_backend": "FLASHINFER",
+      "trust_remote_code": null
+    }
+  },
+  "granitemoehybrid": {
+    "chat_format": "tool_call",
+    "context_parallel_wrap": "agilerl.architectures.granitemoehybrid.context_parallel.wrap_granitemoehybrid_context_parallel",
+    "image_token": null,
+    "lora_exclude_modules": [],
+    "patch": {
+      "gdn": null,
+      "has_install": true,
+      "mamba": null
+    },
+    "processor_class": null,
+    "reasoning_parser": null,
+    "tensor_parallel_restore": "agilerl.architectures.granitemoehybrid.tensor_parallel.restore_granitemoehybrid_tensor_parallel",
+    "tensor_parallel_shard": "agilerl.architectures.granitemoehybrid.tensor_parallel.apply_granitemoehybrid_tensor_parallel",
+    "tower_connector_lora_targets": [],
+    "tower_modalities": {},
+    "trainer": {
+      "config_class": "AutoConfig",
+      "model_class": "AutoModelForCausalLM",
+      "trust_remote_code": null
+    },
+    "vllm": {
+      "dense_mamba_prefix_cache": null,
+      "enable_prefix_caching": null,
+      "hf_overrides": null,
+      "mamba_cache_mode": null,
+      "max_num_batched_tokens": null,
+      "sm80_attention_backend": "FLASHINFER",
+      "trust_remote_code": null
+    }
+  },
+  "llama": {
+    "chat_format": null,
+    "context_parallel_wrap": null,
+    "image_token": null,
+    "lora_exclude_modules": [],
+    "patch": {
+      "gdn": null,
+      "has_install": false,
+      "mamba": null
+    },
+    "processor_class": null,
+    "reasoning_parser": null,
+    "tensor_parallel_restore": null,
+    "tensor_parallel_shard": null,
+    "tower_connector_lora_targets": [],
+    "tower_modalities": {},
+    "trainer": {
+      "config_class": "AutoConfig",
+      "model_class": "AutoModelForCausalLM",
+      "trust_remote_code": null
+    },
+    "vllm": {
+      "dense_mamba_prefix_cache": null,
+      "enable_prefix_caching": null,
+      "hf_overrides": null,
+      "mamba_cache_mode": null,
+      "max_num_batched_tokens": null,
+      "sm80_attention_backend": null,
+      "trust_remote_code": null
+    }
+  },
+  "mimo_v2": {
+    "chat_format": "tool_call",
+    "context_parallel_wrap": null,
+    "image_token": "<|image_pad|>",
+    "lora_exclude_modules": [
+      "k_proj",
+      "q_proj",
+      "v_proj"
+    ],
+    "patch": {
+      "gdn": null,
+      "has_install": true,
+      "mamba": null
+    },
+    "processor_class": "MiMoV2Processor",
+    "reasoning_parser": "mimo",
+    "tensor_parallel_restore": "agilerl.architectures.mimo_v2.tensor_parallel.restore_mimo_v2_tensor_parallel",
+    "tensor_parallel_shard": "agilerl.architectures.mimo_v2.tensor_parallel.apply_mimo_v2_tensor_parallel",
+    "tower_connector_lora_targets": [
+      "down_proj",
+      "gate_proj",
+      "qkv",
+      "up_proj"
+    ],
+    "tower_modalities": {
+      "visual": [
+        "image",
+        "video"
+      ]
+    },
+    "trainer": {
+      "config_class": "MiMoV2Config",
+      "model_class": "AutoModelForImageTextToText",
+      "trust_remote_code": false
+    },
+    "vllm": {
+      "dense_mamba_prefix_cache": null,
+      "enable_prefix_caching": null,
+      "hf_overrides": {
+        "architectures": [
+          "MiMoV2OmniForCausalLM"
+        ]
+      },
+      "mamba_cache_mode": null,
+      "max_num_batched_tokens": null,
+      "sm80_attention_backend": null,
+      "trust_remote_code": true
+    }
+  },
+  "nemotron_h": {
+    "chat_format": "tool_call",
+    "context_parallel_wrap": "agilerl.architectures.nemotron_h.context_parallel.wrap_nemotron_h_context_parallel",
+    "image_token": null,
+    "lora_exclude_modules": [],
+    "patch": {
+      "gdn": null,
+      "has_install": true,
+      "mamba": {
+        "block": "transformers.models.nemotron_h.modeling_nemotron_h.NemotronHBlock",
+        "fused_path": true,
+        "mixer": "transformers.models.nemotron_h.modeling_nemotron_h.NemotronHMamba2Mixer",
+        "stream_ordering": true
+      }
+    },
+    "processor_class": null,
+    "reasoning_parser": "nemotron_v3",
+    "tensor_parallel_restore": "agilerl.architectures.nemotron_h.tensor_parallel.restore_nemotron_h_tensor_parallel",
+    "tensor_parallel_shard": "agilerl.architectures.nemotron_h.tensor_parallel.apply_nemotron_h_tensor_parallel",
+    "tower_connector_lora_targets": [],
+    "tower_modalities": {},
+    "trainer": {
+      "config_class": "AutoConfig",
+      "model_class": "AutoModelForCausalLM",
+      "trust_remote_code": null
+    },
+    "vllm": {
+      "dense_mamba_prefix_cache": true,
+      "enable_prefix_caching": true,
+      "hf_overrides": null,
+      "mamba_cache_mode": "align",
+      "max_num_batched_tokens": 8192,
+      "sm80_attention_backend": null,
+      "trust_remote_code": null
+    }
+  },
+  "nemotron_h_omni": {
+    "chat_format": "tool_call",
+    "context_parallel_wrap": "agilerl.architectures.nemotron_h.context_parallel.wrap_nemotron_h_context_parallel",
+    "image_token": null,
+    "lora_exclude_modules": [],
+    "patch": {
+      "gdn": null,
+      "has_install": true,
+      "mamba": {
+        "block": "transformers.models.nemotron_h.modeling_nemotron_h.NemotronHBlock",
+        "fused_path": true,
+        "mixer": "transformers.models.nemotron_h.modeling_nemotron_h.NemotronHMamba2Mixer",
+        "stream_ordering": true
+      }
+    },
+    "processor_class": null,
+    "reasoning_parser": "nemotron_v3",
+    "tensor_parallel_restore": "agilerl.architectures.nemotron_h.tensor_parallel.restore_nemotron_h_tensor_parallel",
+    "tensor_parallel_shard": "agilerl.architectures.nemotron_h.tensor_parallel.apply_nemotron_h_tensor_parallel",
+    "tower_connector_lora_targets": [
+      "fc1",
+      "fc2",
+      "k_proj",
+      "linear_1",
+      "linear_2",
+      "o_proj",
+      "patch_projection",
+      "q_proj",
+      "v_proj",
+      "video_patch_projection"
+    ],
+    "tower_modalities": {},
+    "trainer": {
+      "config_class": "AutoConfig",
+      "model_class": "AutoModelForImageTextToText",
+      "trust_remote_code": false
+    },
+    "vllm": {
+      "dense_mamba_prefix_cache": true,
+      "enable_prefix_caching": true,
+      "hf_overrides": "nemotron_h_omni_vllm_hf_override",
+      "mamba_cache_mode": "align",
+      "max_num_batched_tokens": 8192,
+      "sm80_attention_backend": null,
+      "trust_remote_code": null
+    }
+  },
+  "qwen2": {
+    "chat_format": "tool_call",
+    "context_parallel_wrap": null,
+    "image_token": null,
+    "lora_exclude_modules": [],
+    "patch": {
+      "gdn": null,
+      "has_install": false,
+      "mamba": null
+    },
+    "processor_class": null,
+    "reasoning_parser": null,
+    "tensor_parallel_restore": "agilerl.architectures.runtime.no_restore",
+    "tensor_parallel_shard": "agilerl.architectures.qwen3.tensor_parallel.apply_qwen3_tensor_parallel",
+    "tower_connector_lora_targets": [],
+    "tower_modalities": {},
+    "trainer": {
+      "config_class": "AutoConfig",
+      "model_class": "AutoModelForCausalLM",
+      "trust_remote_code": null
+    },
+    "vllm": {
+      "dense_mamba_prefix_cache": null,
+      "enable_prefix_caching": null,
+      "hf_overrides": null,
+      "mamba_cache_mode": null,
+      "max_num_batched_tokens": null,
+      "sm80_attention_backend": "FLASHINFER",
+      "trust_remote_code": null
+    }
+  },
+  "qwen3": {
+    "chat_format": "tool_call",
+    "context_parallel_wrap": null,
+    "image_token": null,
+    "lora_exclude_modules": [],
+    "patch": {
+      "gdn": null,
+      "has_install": false,
+      "mamba": null
+    },
+    "processor_class": null,
+    "reasoning_parser": "qwen3",
+    "tensor_parallel_restore": "agilerl.architectures.runtime.no_restore",
+    "tensor_parallel_shard": "agilerl.architectures.qwen3.tensor_parallel.apply_qwen3_tensor_parallel",
+    "tower_connector_lora_targets": [],
+    "tower_modalities": {},
+    "trainer": {
+      "config_class": "AutoConfig",
+      "model_class": "AutoModelForCausalLM",
+      "trust_remote_code": null
+    },
+    "vllm": {
+      "dense_mamba_prefix_cache": null,
+      "enable_prefix_caching": null,
+      "hf_overrides": null,
+      "mamba_cache_mode": null,
+      "max_num_batched_tokens": null,
+      "sm80_attention_backend": "FLASHINFER",
+      "trust_remote_code": null
+    }
+  },
+  "qwen3_5": {
+    "chat_format": "tool_call",
+    "context_parallel_wrap": "agilerl.architectures.qwen3_5.context_parallel.wrap_qwen3_5_context_parallel",
+    "image_token": null,
+    "lora_exclude_modules": [],
+    "patch": {
+      "gdn": {
+        "clone_conv_output": true,
+        "mixers": [
+          {
+            "mixer": "transformers.models.qwen3_5_moe.modeling_qwen3_5_moe.Qwen3_5MoeGatedDeltaNet",
+            "text_model": "transformers.models.qwen3_5_moe.modeling_qwen3_5_moe.Qwen3_5MoeTextModel"
+          },
+          {
+            "mixer": "transformers.models.qwen3_5.modeling_qwen3_5.Qwen3_5GatedDeltaNet",
+            "text_model": "transformers.models.qwen3_5.modeling_qwen3_5.Qwen3_5TextModel"
+          }
+        ]
+      },
+      "has_install": true,
+      "mamba": null
+    },
+    "processor_class": null,
+    "reasoning_parser": "qwen3",
+    "tensor_parallel_restore": "agilerl.architectures.qwen3_5.tensor_parallel.restore_qwen3_5_tensor_parallel",
+    "tensor_parallel_shard": "agilerl.architectures.qwen3_5.tensor_parallel.apply_qwen3_5_tensor_parallel",
+    "tower_connector_lora_targets": [
+      "linear_fc1",
+      "linear_fc2",
+      "qkv"
+    ],
+    "tower_modalities": {
+      "visual": [
+        "image",
+        "video"
+      ]
+    },
+    "trainer": {
+      "config_class": "AutoConfig",
+      "model_class": "AutoModelForImageTextToText",
+      "trust_remote_code": null
+    },
+    "vllm": {
+      "dense_mamba_prefix_cache": true,
+      "enable_prefix_caching": true,
+      "hf_overrides": null,
+      "mamba_cache_mode": "align",
+      "max_num_batched_tokens": null,
+      "sm80_attention_backend": null,
+      "trust_remote_code": null
+    }
+  },
+  "qwen3_5_moe": {
+    "chat_format": "tool_call",
+    "context_parallel_wrap": "agilerl.architectures.qwen3_5.context_parallel.wrap_qwen3_5_context_parallel",
+    "image_token": null,
+    "lora_exclude_modules": [],
+    "patch": {
+      "gdn": {
+        "clone_conv_output": true,
+        "mixers": [
+          {
+            "mixer": "transformers.models.qwen3_5_moe.modeling_qwen3_5_moe.Qwen3_5MoeGatedDeltaNet",
+            "text_model": "transformers.models.qwen3_5_moe.modeling_qwen3_5_moe.Qwen3_5MoeTextModel"
+          },
+          {
+            "mixer": "transformers.models.qwen3_5.modeling_qwen3_5.Qwen3_5GatedDeltaNet",
+            "text_model": "transformers.models.qwen3_5.modeling_qwen3_5.Qwen3_5TextModel"
+          }
+        ]
+      },
+      "has_install": true,
+      "mamba": null
+    },
+    "processor_class": null,
+    "reasoning_parser": "qwen3",
+    "tensor_parallel_restore": "agilerl.architectures.qwen3_5.tensor_parallel.restore_qwen3_5_tensor_parallel",
+    "tensor_parallel_shard": "agilerl.architectures.qwen3_5.tensor_parallel.apply_qwen3_5_tensor_parallel",
+    "tower_connector_lora_targets": [
+      "linear_fc1",
+      "linear_fc2",
+      "qkv"
+    ],
+    "tower_modalities": {
+      "visual": [
+        "image",
+        "video"
+      ]
+    },
+    "trainer": {
+      "config_class": "AutoConfig",
+      "model_class": "AutoModelForImageTextToText",
+      "trust_remote_code": null
+    },
+    "vllm": {
+      "dense_mamba_prefix_cache": true,
+      "enable_prefix_caching": true,
+      "hf_overrides": null,
+      "mamba_cache_mode": "align",
+      "max_num_batched_tokens": null,
+      "sm80_attention_backend": null,
+      "trust_remote_code": null
+    }
+  },
+  "qwen3_5_moe_text": {
+    "chat_format": "tool_call",
+    "context_parallel_wrap": "agilerl.architectures.qwen3_5.context_parallel.wrap_qwen3_5_context_parallel",
+    "image_token": null,
+    "lora_exclude_modules": [],
+    "patch": {
+      "gdn": {
+        "clone_conv_output": true,
+        "mixers": [
+          {
+            "mixer": "transformers.models.qwen3_5_moe.modeling_qwen3_5_moe.Qwen3_5MoeGatedDeltaNet",
+            "text_model": "transformers.models.qwen3_5_moe.modeling_qwen3_5_moe.Qwen3_5MoeTextModel"
+          },
+          {
+            "mixer": "transformers.models.qwen3_5.modeling_qwen3_5.Qwen3_5GatedDeltaNet",
+            "text_model": "transformers.models.qwen3_5.modeling_qwen3_5.Qwen3_5TextModel"
+          }
+        ]
+      },
+      "has_install": true,
+      "mamba": null
+    },
+    "processor_class": null,
+    "reasoning_parser": "qwen3",
+    "tensor_parallel_restore": "agilerl.architectures.qwen3_5.tensor_parallel.restore_qwen3_5_tensor_parallel",
+    "tensor_parallel_shard": "agilerl.architectures.qwen3_5.tensor_parallel.apply_qwen3_5_tensor_parallel",
+    "tower_connector_lora_targets": [],
+    "tower_modalities": {},
+    "trainer": {
+      "config_class": "AutoConfig",
+      "model_class": "AutoModelForCausalLM",
+      "trust_remote_code": null
+    },
+    "vllm": {
+      "dense_mamba_prefix_cache": true,
+      "enable_prefix_caching": true,
+      "hf_overrides": null,
+      "mamba_cache_mode": "align",
+      "max_num_batched_tokens": null,
+      "sm80_attention_backend": null,
+      "trust_remote_code": null
+    }
+  },
+  "qwen3_5_text": {
+    "chat_format": "tool_call",
+    "context_parallel_wrap": "agilerl.architectures.qwen3_5.context_parallel.wrap_qwen3_5_context_parallel",
+    "image_token": null,
+    "lora_exclude_modules": [],
+    "patch": {
+      "gdn": {
+        "clone_conv_output": true,
+        "mixers": [
+          {
+            "mixer": "transformers.models.qwen3_5_moe.modeling_qwen3_5_moe.Qwen3_5MoeGatedDeltaNet",
+            "text_model": "transformers.models.qwen3_5_moe.modeling_qwen3_5_moe.Qwen3_5MoeTextModel"
+          },
+          {
+            "mixer": "transformers.models.qwen3_5.modeling_qwen3_5.Qwen3_5GatedDeltaNet",
+            "text_model": "transformers.models.qwen3_5.modeling_qwen3_5.Qwen3_5TextModel"
+          }
+        ]
+      },
+      "has_install": true,
+      "mamba": null
+    },
+    "processor_class": null,
+    "reasoning_parser": "qwen3",
+    "tensor_parallel_restore": "agilerl.architectures.qwen3_5.tensor_parallel.restore_qwen3_5_tensor_parallel",
+    "tensor_parallel_shard": "agilerl.architectures.qwen3_5.tensor_parallel.apply_qwen3_5_tensor_parallel",
+    "tower_connector_lora_targets": [],
+    "tower_modalities": {},
+    "trainer": {
+      "config_class": "AutoConfig",
+      "model_class": "AutoModelForCausalLM",
+      "trust_remote_code": null
+    },
+    "vllm": {
+      "dense_mamba_prefix_cache": true,
+      "enable_prefix_caching": true,
+      "hf_overrides": null,
+      "mamba_cache_mode": "align",
+      "max_num_batched_tokens": null,
+      "sm80_attention_backend": null,
+      "trust_remote_code": null
+    }
+  },
+  "qwen3_moe": {
+    "chat_format": "tool_call",
+    "context_parallel_wrap": null,
+    "image_token": null,
+    "lora_exclude_modules": [],
+    "patch": {
+      "gdn": null,
+      "has_install": false,
+      "mamba": null
+    },
+    "processor_class": null,
+    "reasoning_parser": "qwen3",
+    "tensor_parallel_restore": null,
+    "tensor_parallel_shard": null,
+    "tower_connector_lora_targets": [],
+    "tower_modalities": {},
+    "trainer": {
+      "config_class": "AutoConfig",
+      "model_class": "AutoModelForCausalLM",
+      "trust_remote_code": null
+    },
+    "vllm": {
+      "dense_mamba_prefix_cache": null,
+      "enable_prefix_caching": null,
+      "hf_overrides": null,
+      "mamba_cache_mode": null,
+      "max_num_batched_tokens": null,
+      "sm80_attention_backend": "FLASHINFER",
+      "trust_remote_code": null
+    }
+  }
+}

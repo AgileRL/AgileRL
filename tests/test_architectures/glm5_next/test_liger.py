@@ -32,7 +32,7 @@ from transformers.models.glm5_next.configuration_glm5_next import (
 
 import agilerl.architectures.glm5_next.liger as glm5_next_liger
 import agilerl.architectures.glm5_next.patches as glm5_next
-from agilerl.architectures.catalog import FAMILY_RUNTIME_CONFIGS
+from agilerl import architectures
 
 GLM5_NEXT_MODEL_TYPES = ("glm5_next", "glm5_next_text")
 STOCK_RMS_NORM = modeling_glm5_next.Glm5NextTextRMSNorm
@@ -153,26 +153,26 @@ class TestRegisterGlm5NextLiger:
         # Assert
         assert liger_registry["glm5_next"] is native
 
-    def test_family_installer_registers_the_applier(
+    def test_family_patches_register_the_applier(
         self, restored_glm_modeling: None, liger_registry: dict
     ) -> None:
         # Act
-        glm5_next.install_glm5_next_patches(FAMILY_RUNTIME_CONFIGS["glm5_next"].patch)
+        architectures.install_family_patches("glm5_next_text")
 
         # Assert
         assert set(GLM5_NEXT_MODEL_TYPES) <= set(liger_registry)
 
-    def test_installer_skips_registration_without_liger(
+    def test_family_patches_skip_registration_without_liger(
         self,
         restored_glm_modeling: None,
         liger_registry: dict,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # Arrange
-        monkeypatch.setattr(glm5_next, "HAS_LIGER_KERNEL", False)
+        monkeypatch.setattr(architectures, "HAS_LIGER_KERNEL", False)
 
         # Act
-        glm5_next.install_glm5_next_patches(FAMILY_RUNTIME_CONFIGS["glm5_next"].patch)
+        architectures.install_family_patches("glm5_next_text")
 
         # Assert
         assert set(GLM5_NEXT_MODEL_TYPES).isdisjoint(liger_registry)

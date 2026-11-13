@@ -5,7 +5,7 @@
 
 While a sequence shard trains, each attention layer receives the
 context-parallel group and builds its keys over the whole sequence; see
-:mod:`agilerl.architectures.deepseek_v4`. Rollout and generation run the
+:mod:`agilerl.architectures.deepseek_v4.patches`. Rollout and generation run the
 unsharded forward.
 """
 
@@ -17,7 +17,7 @@ from typing import cast
 from torch import nn
 from torch.distributed.device_mesh import DeviceMesh
 
-from agilerl.architectures.deepseek_v4 import CONTEXT_PARALLEL_GROUP
+from agilerl.architectures.deepseek_v4.patches import CONTEXT_PARALLEL_GROUP
 from agilerl.architectures.runtime import ContextParallelPlan
 from agilerl.distributed.context_parallel.ulysses import ULYSSES_PARAMS
 
@@ -57,6 +57,6 @@ def wrap_deepseek_v4_context_parallel(model: nn.Module, cp_mesh: DeviceMesh) -> 
     return count
 
 
-DEEPSEEK_V4_CONTEXT_PARALLEL_PLAN = ContextParallelPlan(
+CONTEXT_PARALLEL_PLAN = ContextParallelPlan(
     wrap=wrap_deepseek_v4_context_parallel,
 )

@@ -1,11 +1,13 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""Runtime configs keyed by Hugging Face ``model_type``."""
+"""Architecture family declarations and the runtime settings they carry."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+import importlib
+import pkgutil
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -76,7 +78,6 @@ class VllmRuntimeConfig(BaseModel):
 class TrainerRuntimeConfig(BaseModel):
     """Trainer load settings that vary by Hugging Face ``model_type``.
 
-    ``model_class`` is the auto class every trainer load builds and
     ``config_class`` reads the checkpoint config. The other fields are
     ``from_pretrained`` kwargs; unset ones stay ``None`` so callers can
     ``setdefault`` into an existing model-config dict without overwriting user
@@ -85,8 +86,6 @@ class TrainerRuntimeConfig(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
-    # VL checkpoints build their full VL class so towers load, frozen.
-    model_class: TrainerModelClass = AutoModelForCausalLM
     config_class: TrainerConfigClass = AutoConfig
     trust_remote_code: bool | None = Field(default=None)
 
@@ -96,9 +95,7 @@ class TrainerRuntimeConfig(BaseModel):
         :return: ``trust_remote_code`` when set.
         :rtype: dict[str, object]
         """
-        return self.model_dump(
-            exclude_none=True, exclude={"model_class", "config_class"}
-        )
+        return self.model_dump(exclude_none=True, exclude={"config_class"})
 
 
 class MambaPatchConfig(BaseModel):
@@ -209,19 +206,29 @@ class ContextParallelPlan:
     wrap: Callable[[nn.Module, DeviceMesh], int]
 
 
-class ModelRuntimeConfig(BaseModel):
-    """Per-``model_type`` runtime settings for vLLM, trainer, patches, TP, and CP.
+class ModelTypes(BaseModel):
+    """Hugging Face ``model_type`` values one family serves."""
 
-    ``tensor_parallel_plan`` and ``context_parallel_plan`` are
-    ``module:attribute`` paths, resolved when wrap/shard runs: plan modules
-    import :mod:`agilerl.distributed`, which imports this package.
-    """
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    text: tuple[str, ...] = ()
+    # Trainer loads build AutoModelForImageTextToText so the towers load, frozen.
+    multimodal: tuple[str, ...] = ()
+
+
+class VisionSupport(BaseModel):
+    """Settings a family's multimodal ``model_type`` values add to its text settings."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
-    vllm: VllmRuntimeConfig = Field(default_factory=VllmRuntimeConfig)
-    trainer: TrainerRuntimeConfig = Field(default_factory=TrainerRuntimeConfig)
-    patch: PatchRuntimeConfig = Field(default_factory=PatchRuntimeConfig)
+    # Same signature as PatchRuntimeConfig.install; runs after it.
+    install: Callable[..., object] | None = None
+    # Token the family's processor expands into image features when the
+    # checkpoint tokenizer names no image_token.
+    image_token: str | None = Field(default=None, min_length=1)
+    # Image processor whose ``from_pretrained`` replaces AutoProcessor when the
+    # checkpoint's processor computes images differently from vLLM.
+    processor_class: type | None = None
     # PEFT target names of the trainer's tower and connector linears that
     # lora_config.tower_target_modules may name. Empty for families without
     # vLLM tower LoRA (it needs get_mm_lora_token_counts).
@@ -231,6 +238,28 @@ class ModelRuntimeConfig(BaseModel):
     tower_modalities: Mapping[str, frozenset[VllmModality]] = Field(
         default_factory=dict
     )
+
+
+class ModelRuntimeConfig(BaseModel):
+    """One architecture family: the ``model_type`` values it serves and how to run them.
+
+    ``tensor_parallel_plan``, ``context_parallel_plan`` and ``liger`` are
+    ``module:attribute`` paths, resolved when they run: plan modules import
+    :mod:`agilerl.distributed`, which imports this package, and Liger modules
+    import liger-kernel, an optional extra.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
+
+    name: str = Field(min_length=1)
+    model_types: ModelTypes
+    vllm: VllmRuntimeConfig = Field(default_factory=VllmRuntimeConfig)
+    trainer: TrainerRuntimeConfig = Field(default_factory=TrainerRuntimeConfig)
+    patch: PatchRuntimeConfig = Field(default_factory=PatchRuntimeConfig)
+    # Runs once, when agilerl.architectures imports.
+    register_loading: Callable[[], object] | None = None
+    # Registers the family's Liger applier; runs before patch.install.
+    liger: str | None = Field(default=None, min_length=1)
     # PEFT exclude_modules suffixes the actor adapter never wraps, whatever
     # lora_config.target_modules names.
     lora_exclude_modules: frozenset[str] = frozenset()
@@ -242,3 +271,63 @@ class ModelRuntimeConfig(BaseModel):
     # enables it, for a thinking budget or answer grammar; otherwise its
     # reasoning_config makes every GPU step wait on the last step's tokens.
     reasoning_parser: str | None = Field(default=None, min_length=1)
+    # Read through catalog.family_vision: set for the family's text model_types too.
+    vision: VisionSupport | None = None
+
+
+# Dense-attention families decode fastest with FlashInfer on sm80 (A100);
+# checkpoints with Mamba layers opt out in sm80_attention_backend.
+DENSE_ATTENTION_VLLM_CONFIG = VllmRuntimeConfig(sm80_attention_backend="FLASHINFER")
+
+
+def import_attribute(path: str) -> object:
+    """Import the attribute a ``module:attribute`` path names."""
+    module_path, _, attribute = path.partition(":")
+    return getattr(importlib.import_module(module_path), attribute)
+
+
+def discover_families(package: str) -> tuple[ModelRuntimeConfig, ...]:
+    """Import every subpackage of ``package`` and return its ``FAMILY``, in name order.
+
+    :param package: Dotted name of the package whose subpackages are families.
+    :type package: str
+    :return: One declaration per subpackage.
+    :rtype: tuple[ModelRuntimeConfig, ...]
+    :raises TypeError: If a subpackage defines no ``FAMILY`` declaration.
+    """
+    families: list[ModelRuntimeConfig] = []
+    subpackages = pkgutil.iter_modules(importlib.import_module(package).__path__)
+    for info in sorted(subpackages, key=lambda info: info.name):
+        if not info.ispkg:
+            continue
+        module = importlib.import_module(f"{package}.{info.name}")
+        family = getattr(module, "FAMILY", None)
+        if not isinstance(family, ModelRuntimeConfig):
+            msg = f"{module.__name__} must define FAMILY = ModelRuntimeConfig(...)"
+            raise TypeError(msg)
+        families.append(family)
+    return tuple(families)
+
+
+def runtime_configs_by_model_type(
+    families: Iterable[ModelRuntimeConfig],
+) -> dict[str, ModelRuntimeConfig]:
+    """Map every ``model_type`` a family claims to that family.
+
+    :param families: Family declarations.
+    :type families: Iterable[ModelRuntimeConfig]
+    :return: One entry per claimed ``model_type``.
+    :rtype: dict[str, ModelRuntimeConfig]
+    :raises ValueError: If two families claim one ``model_type``.
+    """
+    configs: dict[str, ModelRuntimeConfig] = {}
+    for family in families:
+        for model_type in family.model_types.text + family.model_types.multimodal:
+            if model_type in configs:
+                msg = (
+                    f"model_type {model_type!r} is claimed by "
+                    f"{configs[model_type].name} and {family.name}"
+                )
+                raise ValueError(msg)
+            configs[model_type] = family
+    return configs

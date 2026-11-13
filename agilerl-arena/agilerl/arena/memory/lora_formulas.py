@@ -22,10 +22,10 @@ from agilerl.arena.memory.formulas import (
 from agilerl.arena.memory.specs import (
     DTYPE_BYTES,
     LoraLinear,
-    LoraSplit,
     LoraTargetScope,
     ModelArch,
 )
+from agilerl.arena.memory.tower_lora import LoraSplit
 
 
 class NcclReshardLayout(NamedTuple):

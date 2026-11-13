@@ -560,6 +560,9 @@ SUPPORTED_MODEL_INFO: Mapping[str, ModelInfo] = {
         ModelInfo(
             hub_id="XiaomiMiMo/MiMo-V2.6-Flash-RL",
             architecture=ARCH_MOE,
+            modalities=("text", "vision"),
+            language_model_prefix=VL_LANGUAGE_MODEL_PREFIX,
+            text_lora_modules=frozenset({"o_proj"}) | GATED_MLP_LORA_MODULES,
             rollout_gpu_memory_utilization=EXPERT_LORA_ROLLOUT_GPU_MEMORY_UTILIZATION,
         ),
     )

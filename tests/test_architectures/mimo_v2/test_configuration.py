@@ -9,12 +9,14 @@ import json
 
 import pytest
 import torch
-from transformers import AutoConfig, AutoModelForCausalLM
-from transformers.models.mimo_v2_flash.modeling_mimo_v2_flash import (
-    MiMoV2FlashForCausalLM,
-)
+from transformers import AutoConfig, AutoModelForImageTextToText
 
-from agilerl.architectures.mimo_v2.config import MiMoV2Config, flash_config_fields
+from agilerl.architectures.mimo_v2.configuration import (
+    MiMoV2Config,
+    flash_config_fields,
+)
+from agilerl.architectures.mimo_v2.modeling import MiMoV2ForConditionalGeneration
+from agilerl.arena.memory.specs import ModelArch
 from tests.test_architectures.mimo_v2.checkpoint_helpers import tiny_hub_config
 
 
@@ -75,23 +77,41 @@ class TestMiMoV2ConfigFromPretrained:
         # Assert
         assert isinstance(config, MiMoV2Config)
         assert config.model_type == "mimo_v2"
-        assert config.num_local_experts == 8
-        assert config.routed_scaling_factor == 1.0
-        assert config.layer_types == ["full_attention", "sliding_attention"]
+        text_config = config.text_config
+        assert text_config.model_type == "mimo_v2_text"
+        assert text_config.num_local_experts == 8
+        assert text_config.routed_scaling_factor == 1.0
+        assert text_config.layer_types == ["full_attention", "sliding_attention"]
         assert config.quantization_config["dequantize"] is True
+        assert config.vision_config.model_type == "mimo_v2_vision"
+        assert config.vision_config.depth == 3
+        assert config.image_token_id == 120
 
-    def test_auto_model_builds_native_causal_lm_from_config(self, tmp_path):
+    def test_auto_model_builds_native_vision_language_model_from_config(self, tmp_path):
         # Arrange
         (tmp_path / "config.json").write_text(json.dumps(tiny_hub_config()))
         config = AutoConfig.from_pretrained(tmp_path)
 
         # Act
         with torch.device("meta"):
-            model = AutoModelForCausalLM.from_config(
+            model = AutoModelForImageTextToText.from_config(
                 config, attn_implementation="eager"
             )
 
         # Assert
-        assert type(model) is MiMoV2FlashForCausalLM
-        assert type(model.model.layers[0].mlp.gate_proj) is torch.nn.Linear
-        assert model.model.layers[1].self_attn.sinks.shape == (4,)
+        assert type(model) is MiMoV2ForConditionalGeneration
+        language_model = model.model.language_model
+        assert type(language_model.layers[0].mlp.gate_proj) is torch.nn.Linear
+        assert language_model.layers[1].self_attn.sinks.shape == (4,)
+        assert len(model.model.visual.blocks) == 3
+
+    def test_memory_estimator_reads_the_native_config(self, tmp_path):
+        # Arrange
+        (tmp_path / "config.json").write_text(json.dumps(tiny_hub_config()))
+        config = AutoConfig.from_pretrained(tmp_path)
+
+        # Act
+        arch = ModelArch.from_hf_config(config.to_dict())
+
+        # Assert
+        assert (arch.vision_min_patches, arch.vision_max_patches) == (4, 64)

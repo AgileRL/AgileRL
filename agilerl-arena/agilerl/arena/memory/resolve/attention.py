@@ -32,6 +32,7 @@ KERNEL_RULE_MODEL_TYPES = frozenset(
     {
         "granitemoe",
         "granitemoehybrid",
+        "llama",
         "qwen2",
         "qwen3",
         "qwen3_5",

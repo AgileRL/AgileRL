@@ -40,9 +40,13 @@ from torch.optim.lr_scheduler import LambdaLR
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.architectures import (
     FAMILY_RUNTIME_CONFIGS,
+    ModelRuntimeConfig,
+    VisionSupport,
     family_runtime,
+    family_vision,
     install_family_patches,
     pretrained_model_type,
+    trainer_model_class,
 )
 from agilerl.architectures.flex_attention import patch_flex_attention_kernel_options
 from agilerl.architectures.vllm_language import (
@@ -1890,9 +1894,10 @@ def create_model_from_name_or_path(
         logger.info("Trainer attention backend: %s", attn_implementation)
     if attn_implementation == "flex_attention":
         patch_flex_attention_kernel_options()
+    model_class = trainer_model_class(model_name_or_path)
     load_remote_code(
         model_name_or_path,
-        trainer.model_class,
+        model_class,
         model_config.get("trust_remote_code"),
     )
     if add_value_head:
@@ -1901,7 +1906,7 @@ def create_model_from_name_or_path(
             **model_config,
         )
     else:
-        model = trainer.model_class.from_pretrained(
+        model = model_class.from_pretrained(
             pretrained_model_name_or_path=model_name_or_path,
             **model_config,
         )
@@ -3083,6 +3088,23 @@ def apply_vllm_compile_cache_env(gpu_ids: Sequence[int | str]) -> str:
     return cache_root
 
 
+def family_vllm_engine(
+    model_name_or_path: str,
+) -> tuple[ModelRuntimeConfig | None, VisionSupport | None, dict[str, Any]]:
+    """Family runtime, vision, and vLLM engine kwargs; empty when the config cannot be read.
+
+    :param model_name_or_path: Hugging Face model id or local path.
+    :return: ``(runtime, vision, engine kwargs)``. A missing config is
+        ``(None, None, {})``.
+    """
+    try:
+        runtime = family_runtime(model_name_or_path)
+        vision = family_vision(model_name_or_path)
+        return runtime, vision, runtime.vllm.engine_kwargs()
+    except OSError:
+        return None, None, {}
+
+
 def build_vllm_llm_init_kwargs(
     vllm_config: VLLMConfig,
     trainer_model_name_or_path: str,
@@ -3116,12 +3138,7 @@ def build_vllm_llm_init_kwargs(
         if vllm_config.vllm_model_name_or_path is not None
         else trainer_model_name_or_path
     )
-    try:
-        runtime = family_runtime(vllm_model)
-        family_vllm_kwargs = runtime.vllm.engine_kwargs()
-    except OSError:
-        runtime = None
-        family_vllm_kwargs = {}
+    runtime, vision, family_vllm_kwargs = family_vllm_engine(vllm_model)
     explicit_batched_tokens = getattr(vllm_config, "max_num_batched_tokens", None)
     batched_tokens = (
         explicit_batched_tokens
@@ -3176,7 +3193,7 @@ def build_vllm_llm_init_kwargs(
         apply_tower_connector_lora_engine_kwargs(
             kwargs,
             strip_multimodal_towers=strip_multimodal_towers,
-            runtime=runtime,
+            vision=vision,
             tower_target_modules=tower_lora_target_modules,
         )
     return kwargs

@@ -20,12 +20,13 @@ from safetensors.torch import save_file
 from torch import nn
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor, Replicate, Shard
+from torch.distributed.tensor.placement_types import _StridedShard
 from torch.nn.attention.flex_attention import (
     BlockMask,
     create_block_mask,
     flex_attention,
 )
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForImageTextToText
 from transformers.integrations import flex_attention as flex_integration
 from transformers.models.mimo_v2_flash import modeling_mimo_v2_flash
 from transformers.models.mimo_v2_flash.configuration_mimo_v2_flash import (
@@ -35,7 +36,6 @@ from transformers.models.mimo_v2_flash.modeling_mimo_v2_flash import (
     MiMoV2FlashAttention,
     MiMoV2FlashDecoderLayer,
     MiMoV2FlashExperts,
-    MiMoV2FlashForCausalLM,
     MiMoV2FlashMLP,
     MiMoV2FlashMoE,
     MiMoV2FlashRMSNorm,
@@ -47,13 +47,29 @@ from agilerl.algorithms.core.sequence_layout import (
     ContextParallelSequence,
     position_ids_from_mask,
 )
-from agilerl.architectures import register_mimo_v2_native_loading
 from agilerl.architectures.catalog import family_runtime
-from agilerl.architectures.mimo_v2 import attention as mimo_v2_attention
-from agilerl.architectures.mimo_v2.attention import (
+from agilerl.architectures.mimo_v2 import layers as mimo_v2_attention
+from agilerl.architectures.mimo_v2.configuration import (
+    MiMoV2Config,
+    MiMoV2TextConfig,
+    MiMoV2VisionConfig,
+)
+from agilerl.architectures.mimo_v2.layers import (
     install_mimo_v2_fp32_lse_flex_attention,
 )
-from agilerl.architectures.mimo_v2.config import MiMoV2Config
+from agilerl.architectures.mimo_v2.modeling import (
+    MiMoV2ForConditionalGeneration,
+    MiMoV2VisionAttention,
+    MiMoV2VisionMerger,
+    MiMoV2VisionMLP,
+    MiMoV2VisionModel,
+    MiMoV2VisionPatchEmbed,
+    MiMoV2VisionRMSNorm,
+)
+from agilerl.architectures.mimo_v2.patches import register_mimo_v2_native_loading
+from agilerl.architectures.mimo_v2.tensor_parallel import (
+    TENSOR_PARALLEL_PLAN as MIMO_V2_TENSOR_PARALLEL_PLAN,
+)
 from agilerl.architectures.mimo_v2.tensor_parallel import (
     apply_mimo_v2_tensor_parallel,
 )
@@ -136,10 +152,18 @@ EXPERT_LORA_PARAMS = ["mlp.experts.gate_up_proj", "mlp.experts.down_proj"]
 EXPERT_PARAMS = ("gate_up_proj", "down_proj")
 TP_BLOCK_CLASSES = {MiMoV2FlashAttention, MiMoV2FlashMLP}
 EP_BLOCK_CLASSES = {MiMoV2FlashExperts}
-# The untied lm_head is the causal LM's own linear; the generic LM-head pass splits it.
-LM_HEAD_CLASSES = {MiMoV2FlashForCausalLM}
-# Norms and the token embedding stay whole; the router is tiny and stays whole.
-SKIPPED_CLASSES = {MiMoV2FlashRMSNorm, nn.Embedding, MiMoV2FlashTopkRouter}
+VISION_TP_BLOCK_CLASSES = {MiMoV2VisionAttention, MiMoV2VisionMLP, MiMoV2VisionMerger}
+# The untied lm_head is the root model's own linear; the generic LM-head pass splits it.
+LM_HEAD_CLASSES = {MiMoV2ForConditionalGeneration}
+# Norms, the token embedding and the vision patch embed stay whole; the router
+# is tiny and stays whole.
+SKIPPED_CLASSES = {
+    MiMoV2FlashRMSNorm,
+    nn.Embedding,
+    MiMoV2FlashTopkRouter,
+    MiMoV2VisionRMSNorm,
+    MiMoV2VisionPatchEmbed,
+}
 # One weight of each part the TP plan shards, by stack FQN without LoRA wrappers.
 TP_PROBE_WEIGHTS = (
     "layers.0.self_attn.q_proj.weight",
@@ -162,9 +186,30 @@ CHECKPOINT_LAYERS = 48
 CHECKPOINT_SWA_LAYERS = 39
 CHECKPOINT_DENSE_LAYERS = 1
 CHECKPOINT_EXPERTS = 256
+CHECKPOINT_VISION_BLOCKS = 28
+# A 4x4 and a 2x4 patch grid, so vision attention runs two images.
+GRID_THW = ((1, 4, 4), (1, 2, 4))
+VISION_HIDDEN = 32
+VISION_OUT = 16
+VISION_PATCH_PIXELS = 3 * 2 * 2 * 2
+# Block 0 attends over each image, block 1 in patch order, block 2 by columns.
+VISION_ROW_ORDERS = [
+    f"visual.blocks.{index}.attn.qkv.{leaf}"
+    for index in range(3)
+    for leaf in ("bias", "weight")
+]
+VISION_PROBE_WEIGHTS = (
+    "visual.blocks.0.attn.qkv.weight",
+    "visual.blocks.1.attn.proj.weight",
+    "visual.blocks.1.attn.sinks",
+    "visual.blocks.0.mlp.gate_proj.weight",
+    "visual.blocks.0.mlp.down_proj.weight",
+    "visual.merger.mlp.0.weight",
+    "visual.merger.mlp.2.weight",
+)
 
 
-def _config() -> MiMoV2Config:
+def _config() -> MiMoV2TextConfig:
     raw = tiny_hub_config()
     raw.update(
         {
@@ -189,10 +234,67 @@ def _config() -> MiMoV2Config:
             "pad_token_id": 0,
         }
     )
-    config = MiMoV2Config.from_dict(raw)
+    config = MiMoV2Config.from_dict(raw).text_config
     config._attn_implementation = "eager"
     config._experts_implementation = "eager"
     return config
+
+
+def _vision_config(num_key_value_heads: int = 2) -> MiMoV2VisionConfig:
+    return MiMoV2VisionConfig(
+        depth=3,
+        hidden_size=VISION_HIDDEN,
+        intermediate_size=48,
+        num_heads=4,
+        num_key_value_heads=num_key_value_heads,
+        qk_channels=8,
+        kv_channels=8,
+        patch_size=2,
+        temporal_patch_size=2,
+        out_hidden_size=VISION_OUT,
+        fullatt_block_indexes=[0],
+        vit_window_attn_types=[-1, 0, 1],
+        visual_token_window_size=4,
+    )
+
+
+class MiMoV2VisionStack(nn.Module):
+    """A three-block MiMo-V2 vision tower: whole-image, patch-window and column-window attention."""
+
+    _no_split_modules = ("MiMoV2VisionBlock",)
+
+    def __init__(self, num_key_value_heads: int = 2) -> None:
+        super().__init__()
+        self.visual = MiMoV2VisionModel(_vision_config(num_key_value_heads))
+        self.config = SimpleNamespace(model_type="mimo_v2_vision")
+        # post_init zeroes biases and sinks; nonzero ones reach the output.
+        with torch.no_grad():
+            for name, param in self.named_parameters():
+                if name.endswith(("bias", "sinks")):
+                    param.normal_(std=0.1)
+
+    def forward(self, pixels: torch.Tensor) -> torch.Tensor:
+        return self.visual(pixels, torch.tensor(GRID_THW))
+
+
+def _vision_pixels() -> torch.Tensor:
+    generator = torch.Generator().manual_seed(300)
+    patches = sum(t * h * w for t, h, w in GRID_THW)
+    return torch.randn(patches, VISION_PATCH_PIXELS, generator=generator)
+
+
+def _assert_tp_sharded(model: nn.Module, tp: int, probes: tuple[str, ...]) -> None:
+    """Each probe holds 1/tp of its elements per TP rank."""
+    params = {plain(name): param for name, param in model.named_parameters()}
+    for suffix in probes:
+        param = params[suffix]
+        assert isinstance(param, DTensor), suffix
+        assert on_tp_mesh(param), suffix
+        tp_local = param.redistribute(
+            param.device_mesh,
+            [Replicate()] * (param.device_mesh.ndim - 1) + [param.placements[-1]],
+        ).to_local()
+        assert tp_local.numel() * tp == param.numel(), suffix
 
 
 class MiMoV2BlockStack(nn.Module):
@@ -656,7 +758,7 @@ def _checkpoint_model() -> nn.Module:
     register_mimo_v2_native_loading()
     config = MiMoV2Config.from_dict(SUPPORTED_MODEL_INFO[CHECKPOINT].config)
     with torch.device("meta"):
-        return AutoModelForCausalLM.from_config(config)
+        return AutoModelForImageTextToText.from_config(config)
 
 
 def _meta_checkpoint_shard_worker(rank: int, world_size: int) -> None:
@@ -669,19 +771,42 @@ def _meta_checkpoint_shard_worker(rank: int, world_size: int) -> None:
 
     count = apply_tensor_parallel(model, mesh)
 
-    # Every attention block, the dense MLP, and the untied LM head.
+    # Every attention block, the dense MLP, every vision block, the merger,
+    # and the untied LM head.
     assert counts["MiMoV2FlashAttention"] == CHECKPOINT_LAYERS
     assert counts["MiMoV2FlashMLP"] == CHECKPOINT_DENSE_LAYERS
-    assert count == CHECKPOINT_LAYERS + CHECKPOINT_DENSE_LAYERS + 1
-    sharded = {"MiMoV2FlashAttention": 0, "MiMoV2FlashMLP": 0}
+    assert counts["MiMoV2VisionAttention"] == CHECKPOINT_VISION_BLOCKS
+    assert count == (
+        CHECKPOINT_LAYERS
+        + CHECKPOINT_DENSE_LAYERS
+        + 2 * CHECKPOINT_VISION_BLOCKS
+        + 1
+        + 1
+    )
+    sharded = dict.fromkeys(
+        (
+            "MiMoV2FlashAttention",
+            "MiMoV2FlashMLP",
+            "MiMoV2VisionAttention",
+            "MiMoV2VisionMLP",
+            "MiMoV2VisionMerger",
+        ),
+        0,
+    )
     for module in model.modules():
         name = type(module).__name__
         if name == "MiMoV2FlashAttention":
             weights = [module.q_proj.weight, module.o_proj.weight]
             if module.sinks is not None:
                 weights.append(module.sinks)
-        elif name == "MiMoV2FlashMLP":
+        elif name in ("MiMoV2FlashMLP", "MiMoV2VisionMLP"):
             weights = [module.gate_proj.weight, module.down_proj.weight]
+        elif name == "MiMoV2VisionAttention":
+            weights = [module.qkv.weight, module.qkv.bias, module.proj.weight]
+            if module.sinks is not None:
+                weights.append(module.sinks)
+        elif name == "MiMoV2VisionMerger":
+            weights = [module.mlp[0].weight, module.mlp[2].weight]
         else:
             continue
         for weight in weights:
@@ -691,17 +816,200 @@ def _meta_checkpoint_shard_worker(rank: int, world_size: int) -> None:
     assert sharded == {
         "MiMoV2FlashAttention": CHECKPOINT_LAYERS,
         "MiMoV2FlashMLP": CHECKPOINT_DENSE_LAYERS,
+        "MiMoV2VisionAttention": CHECKPOINT_VISION_BLOCKS,
+        "MiMoV2VisionMLP": CHECKPOINT_VISION_BLOCKS,
+        "MiMoV2VisionMerger": 1,
     }
     head = model.lm_head.weight
     assert isinstance(head, DTensor)
     assert head.to_local().numel() * world_size == head.numel()
-    sinks = model.model.layers[1].self_attn.sinks
+    language_model = model.model.language_model
+    sinks = language_model.layers[1].self_attn.sinks
     assert sinks.to_local().shape == (64 // world_size,)
-    for layer in model.model.layers:
+    for layer in language_model.layers:
         if isinstance(layer.mlp, MiMoV2FlashMoE):
             assert not isinstance(layer.mlp.gate.weight, DTensor)
             assert not isinstance(layer.mlp.experts.gate_up_proj, DTensor)
-    assert not isinstance(model.model.embed_tokens.weight, DTensor)
+    assert not isinstance(language_model.embed_tokens.weight, DTensor)
+    assert not isinstance(model.model.visual.patch_embed.proj.weight, DTensor)
+
+
+def _vision_worker(rank: int, world_size: int, tp: int) -> None:
+    """A tensor-parallel frozen tower matches the unsharded tower."""
+    # Arrange
+    torch.manual_seed(0)
+    stack = MiMoV2VisionStack()
+    broadcast_module(stack)
+    reference = copy.deepcopy(stack)
+    mesh = parallel_mesh(world_size, 1, tp, 1)
+    config = fsdp_config(1, tp, 1)
+    pixels = _vision_pixels()
+    with torch.no_grad():
+        full_output = reference(pixels)
+
+    # Act
+    with patch.object(fsdp_blocks, "PARAM_PERSISTENCE_THRESHOLD", 0):
+        materialize_fsdp2_from_cpu_state(stack, "cpu", config, parallel_mesh=mesh)
+    with torch.no_grad():
+        output = stack(pixels)
+
+    # Assert
+    _assert_tp_sharded(stack, tp, VISION_PROBE_WEIGHTS)
+    orders = MIMO_V2_TENSOR_PARALLEL_PLAN.row_orders(stack)
+    assert sorted(plain(name) for name in orders) == sorted(VISION_ROW_ORDERS)
+    assert_exact(output, full_output, "output")
+
+
+def _vision_lora_worker(rank: int, world_size: int, tp: int) -> None:
+    """A tensor-parallel LoRA tower's forward and one SGD step match the unsharded tower."""
+    # Arrange
+    torch.manual_seed(0)
+    stack = MiMoV2VisionStack()
+    inject_adapter_in_model(
+        LoraConfig(
+            r=2,
+            target_modules=sorted(SUPPORTED_MODEL_INFO[CHECKPOINT].tower_lora_modules),
+        ),
+        stack,
+    )
+    with torch.no_grad():
+        for name, param in stack.named_parameters():
+            if "lora_" in name:
+                param.normal_(std=0.1)
+    broadcast_module(stack)
+    reference = copy.deepcopy(stack)
+    mesh = parallel_mesh(world_size, 1, tp, 1)
+    config = fsdp_config(1, tp, 1)
+    pixels = _vision_pixels()
+    generator = torch.Generator().manual_seed(301)
+    probe = torch.randn(reference(pixels).shape, generator=generator)
+    reference_output = reference(pixels)
+    (reference_output * probe).sum().backward()
+    expected = {
+        plain(name): param.detach() - param.grad
+        if param.requires_grad
+        else param.detach()
+        for name, param in reference.named_parameters()
+    }
+    with patch.object(fsdp_blocks, "PARAM_PERSISTENCE_THRESHOLD", 0):
+        materialize_fsdp2_from_cpu_state(stack, "cpu", config, parallel_mesh=mesh)
+    runtime = FSDPRuntime(config)
+    runtime.parallel_mesh = mesh
+    optimizer = sgd(stack, lr=1.0)
+
+    # Act
+    output = stack(pixels)
+    assert_lora(stack, reference)
+    step = runtime.backward(
+        (output * probe).sum(),
+        optimizer,
+        gradient_accumulation_steps=1,
+        actor=stack,
+        max_grad_norm=1e6,
+    )
+
+    # Assert
+    assert_exact(output, reference_output.detach(), "output")
+    assert step is not None
+    assert math.isfinite(step.grad_norm_pre)
+    orders = MIMO_V2_TENSOR_PARALLEL_PLAN.row_orders(stack)
+    assert sorted(plain(name) for name in orders) == sorted(
+        [name.replace("qkv.", "qkv.base_layer.") for name in VISION_ROW_ORDERS]
+        + [
+            f"visual.blocks.{index}.attn.qkv.lora_B.default.weight"
+            for index in range(3)
+        ]
+    )
+    errors: list[str] = []
+    with torch.no_grad():
+        for name, param in stack.named_parameters():
+            value = param.full_tensor()
+            target = expected[plain(name)].reshape(value.shape)
+            order = orders.get(name)
+            target = target if order is None else target.index_select(0, order)
+            try:
+                assert_exact(value, target, name)
+            except AssertionError as exc:
+                errors.append(str(exc))
+    assert errors == []
+
+
+def _vision_meta_load_worker(
+    rank: int, world_size: int, tp: int, checkpoint_dir: str
+) -> None:
+    """A meta tower loads each rank's dp_shard x tp piece in permuted qkv row order."""
+    # Arrange
+    torch.manual_seed(0)
+    dense = MiMoV2VisionStack()
+    if rank == 0:
+        save_file(dense.state_dict(), f"{checkpoint_dir}/model.safetensors")
+    dist.barrier()
+    pixels = _vision_pixels()
+    with torch.no_grad():
+        full_output = dense(pixels)
+    with torch.device("meta"):
+        stack = MiMoV2VisionStack()
+    stack.config = MiMoV2VisionConfig(name_or_path=checkpoint_dir)
+    mesh = parallel_mesh(world_size, 1, tp, 1)
+    config = fsdp_config(1, tp, 1)
+
+    # Act
+    with patch.object(fsdp_blocks, "PARAM_PERSISTENCE_THRESHOLD", 0):
+        materialize_fsdp2_from_cpu_state(stack, "cpu", config, parallel_mesh=mesh)
+
+    # Assert
+    expected = dict(dense.named_parameters())
+    orders = MIMO_V2_TENSOR_PARALLEL_PLAN.row_orders(stack)
+    assert sorted(plain(name) for name in orders) == sorted(VISION_ROW_ORDERS)
+    strided = False
+    for name, param in stack.named_parameters():
+        assert isinstance(param, DTensor), name
+        if on_tp_mesh(param):
+            strided = strided or any(
+                isinstance(placement, _StridedShard) for placement in param.placements
+            )
+        full = expected[plain(name)]
+        order = orders.get(name)
+        target = full if order is None else full.index_select(0, order)
+        assert_exact(param.full_tensor(), target, name)
+    assert strided
+    with torch.no_grad():
+        assert_exact(stack(pixels), full_output, "output")
+
+
+class TestMiMoV2VisionParallel:
+    def test_tiny_tower_runs(self) -> None:
+        stack = MiMoV2VisionStack()
+
+        output = stack(_vision_pixels())
+
+        assert output.shape == (sum(t * h * w for t, h, w in GRID_THW) // 4, VISION_OUT)
+        assert torch.isfinite(output).all()
+
+    @pytest.mark.multi_rank
+    def test_forward_matches_unsharded(self) -> None:
+        run_ranks(_vision_worker, 4, 2, timeout=300)
+
+    @pytest.mark.multi_rank
+    def test_tower_lora_forward_and_step_match_unsharded(self) -> None:
+        run_ranks(_vision_lora_worker, 4, 2, timeout=300)
+
+    @pytest.mark.multi_rank
+    def test_meta_load_fills_dp_tp_shards_in_permuted_row_order(
+        self, tmp_path: Path
+    ) -> None:
+        run_ranks(_vision_meta_load_worker, 4, 2, str(tmp_path), timeout=300)
+
+    def test_key_value_heads_that_do_not_divide_tp_raise(self) -> None:
+        mesh = MagicMock()
+        mesh.size.return_value = 2
+
+        with pytest.raises(
+            ValueError, match=r"vision num_key_value_heads \(1\) .* tp \(2\)"
+        ):
+            apply_mimo_v2_tensor_parallel(
+                MiMoV2VisionStack(num_key_value_heads=1), mesh
+            )
 
 
 class TestMiMoV2CheckpointCoverage:
@@ -709,7 +1017,13 @@ class TestMiMoV2CheckpointCoverage:
         # Arrange
         model = _checkpoint_model()
         modules = dict(model.named_modules())
-        known = TP_BLOCK_CLASSES | EP_BLOCK_CLASSES | LM_HEAD_CLASSES | SKIPPED_CLASSES
+        known = (
+            TP_BLOCK_CLASSES
+            | VISION_TP_BLOCK_CLASSES
+            | EP_BLOCK_CLASSES
+            | LM_HEAD_CLASSES
+            | SKIPPED_CLASSES
+        )
 
         # Act
         owners: dict[str, type] = {}
@@ -729,12 +1043,12 @@ class TestMiMoV2CheckpointCoverage:
         assert root_owned == ["lm_head.weight"]
         assert model.config.tie_word_embeddings is False
 
-    def test_trainer_builds_the_native_causal_lm(self) -> None:
+    def test_trainer_builds_the_native_vision_language_model(self) -> None:
         model = _checkpoint_model()
 
-        assert type(model) is MiMoV2FlashForCausalLM
+        assert type(model) is MiMoV2ForConditionalGeneration
         assert family_runtime(CHECKPOINT).tensor_parallel_plan == (
-            "agilerl.architectures.mimo_v2.tensor_parallel:MIMO_V2_TENSOR_PARALLEL_PLAN"
+            "agilerl.architectures.mimo_v2.tensor_parallel:TENSOR_PARALLEL_PLAN"
         )
         assert resolve_attn_implementation("mimo_v2", True) == "flex_attention"
 
@@ -755,13 +1069,19 @@ class TestMiMoV2CheckpointCoverage:
     def test_legal_tp_degrees_follow_every_layer(self) -> None:
         # Arrange
         model = _checkpoint_model()
-        attention = [layer.self_attn for layer in model.model.layers]
+        attention = [layer.self_attn for layer in model.model.language_model.layers]
         heads = {
             (module.config.num_attention_heads, module.num_key_value_groups)
             for module in attention
         }
         sliding = sum(module.sinks is not None for module in attention)
-        width = model.config.intermediate_size
+        vision = model.config.vision_config
+        widths = (
+            model.config.text_config.intermediate_size,
+            vision.num_key_value_heads,
+            vision.intermediate_size,
+            vision.hidden_size * vision.spatial_merge_size**2,
+        )
 
         # Act
         legal = [
@@ -772,7 +1092,7 @@ class TestMiMoV2CheckpointCoverage:
                 and (groups % (num_q // tp) == 0 or (num_q // tp) % groups == 0)
                 for num_q, groups in heads
             )
-            and width % tp == 0
+            and all(width % tp == 0 for width in widths)
         ]
 
         # Assert
@@ -800,7 +1120,8 @@ class TestMiMoV2CheckpointCoverage:
 
     def test_legal_cp_tp_meshes_split_local_heads(self) -> None:
         # Arrange
-        attention = [layer.self_attn for layer in _checkpoint_model().model.layers]
+        language_model = _checkpoint_model().model.language_model
+        attention = [layer.self_attn for layer in language_model.layers]
         kv_heads = {
             module.k_proj.out_features // module.head_dim for module in attention
         }

@@ -434,7 +434,7 @@ class TestQwen2CheckpointCoverage:
         # Assert
         assert experts == []
         assert runtime.tensor_parallel_plan == (
-            "agilerl.architectures.qwen3.tensor_parallel:QWEN3_TENSOR_PARALLEL_PLAN"
+            "agilerl.architectures.qwen3.tensor_parallel:TENSOR_PARALLEL_PLAN"
         )
         assert model.lm_head.weight is model.model.embed_tokens.weight
         attention = model.model.layers[0].self_attn

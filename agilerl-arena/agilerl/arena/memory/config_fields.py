@@ -71,23 +71,41 @@ FUSED_GATE_UP_MLP_MODEL_TYPES = frozenset({"granitemoehybrid"})
 
 # Vision patches in the image vLLM encodes when profiling a model that keeps
 # its towers, keyed by outer config ``model_type``. Qwen3.5/3.6: the
-# preprocessor's 16,777,216-pixel longest edge over 16x16 patches. Families
-# absent here have no measured profile and add no encoder term.
+# preprocessor's 16,777,216-pixel longest edge over 16x16 patches. GLM-5.3:
+# vLLM's 80x100-token canvas, the 8000-token ceiling factored exactly, over
+# 2x2 merges. MiMo-V2.6: the processor's 8,388,608-pixel image_max_pixels
+# over 16x16 patches. Families absent here have no measured profile and add
+# no encoder term.
 VISION_PROFILE_PATCHES_BY_MODEL_TYPE: dict[str, int] = {
     "qwen3_5": 65536,
     "qwen3_5_moe": 65536,
+    "glm5_next": 32000,
+    "mimo_v2": 32768,
 }
 
-VisionResize = Literal["none", "merge_grid", "pooled_budget", "dynamic_tiles"]
+VisionResize = Literal[
+    "none",
+    "merge_grid",
+    "pixel_bounds",
+    "token_budget",
+    "pooled_budget",
+    "dynamic_tiles",
+]
 
 # How each family's image processor sizes an image's patch grid, keyed by
 # outer config ``model_type``. ``merge_grid``: Qwen2-VL ``smart_resize`` to
-# multiples of patch x merge. ``pooled_budget``: Gemma4's aspect-preserving
-# fit under soft tokens x pool^2 patches. ``dynamic_tiles``: Nemotron RADIO
-# dynamic resolution between its min and max patches.
+# multiples of patch x merge. ``pixel_bounds``: vLLM's MiMo ``smart_resize``,
+# the same grid between the config's ``processor_config`` pixel bounds.
+# ``token_budget``: GLM-5.3 ``smart_resize``,
+# sides rounded up to patch x merge and fit under a vision-token budget.
+# ``pooled_budget``: Gemma4's aspect-preserving fit under soft tokens x pool^2
+# patches. ``dynamic_tiles``: Nemotron RADIO dynamic resolution between its
+# min and max patches.
 VISION_RESIZE_BY_MODEL_TYPE: dict[str, VisionResize] = {
     "qwen3_5": "merge_grid",
     "qwen3_5_moe": "merge_grid",
+    "mimo_v2": "pixel_bounds",
+    "glm5_next": "token_budget",
     "gemma4": "pooled_budget",
     "nemotron_h_omni": "dynamic_tiles",
 }
@@ -95,19 +113,29 @@ VISION_RESIZE_BY_MODEL_TYPE: dict[str, VisionResize] = {
 # Families whose VisionFeatureCache keeps frozen tower outputs through a learn
 # step. A LoRA-trained tower runs with autograd and bypasses the cache.
 VISION_FEATURE_CACHE_MODEL_TYPES: frozenset[str] = frozenset(
-    {"qwen3_5", "qwen3_5_moe", "gemma4"}
+    {"qwen3_5", "qwen3_5_moe", "gemma4", "glm5_next", "mimo_v2"}
 )
+# Patch-merger families whose tower returns only the merged tokens, not the
+# patch states beside them.
+MERGED_OUTPUT_ONLY_MODEL_TYPES = frozenset({"mimo_v2"})
 
 # Tower config model types whose encoder MLP has gate, up and down projections.
-GATED_MLP_TOWER_MODEL_TYPES = frozenset({"gemma4_vision", "glm5_next_vision"})
+GATED_MLP_TOWER_MODEL_TYPES = frozenset(
+    {"gemma4_vision", "glm5_next_vision", "mimo_v2_vision"}
+)
 # Tower config model types that keep one position table per image axis.
 AXIS_POSITION_TOWER_MODEL_TYPES = frozenset({"gemma4_vision"})
 # Conformer audio towers. Each block adds a second macaron feed-forward, a
 # relative-position key projection and a light conv's h->2h and h->h linears.
 CONFORMER_TOWER_MODEL_TYPES = frozenset({"gemma4_audio"})
-# Outer config model types whose trainer and vLLM classes build the language
-# model alone, so their vision and audio configs add no parameters.
-TEXT_ONLY_MODEL_TYPES = frozenset({"mimo_v2"})
+# Patch-merger towers whose merger takes no biases.
+BIAS_FREE_MERGER_TOWER_MODEL_TYPES = frozenset({"mimo_v2_vision"})
+# Families whose trainer builds only some of the towers their config names,
+# keyed by outer config ``model_type``: each built tower's config key and the
+# fields that config leaves to the class defaults. MiMo-V2 builds no audio tower.
+BUILT_TOWERS_BY_MODEL_TYPE: dict[str, dict[str, dict[str, Any]]] = {
+    "mimo_v2": {"vision_config": {"model_type": "mimo_v2_vision", "head_dim": 64}},
+}
 
 # Encoder config keys and the vLLM modalities each tower serves. vLLM skips
 # building a tower once every one of its modalities is stripped.
@@ -381,6 +409,15 @@ def indexed_layers(text_cfg: dict[str, Any], n_layers: int, n_csa: int) -> int:
     )
 
 
+def encoder_attention_widths(cfg: dict[str, Any]) -> tuple[int, int]:
+    """(query, key) projection widths of an encoder config; values match keys."""
+    h = int(cfg["hidden_size"])
+    heads = int(cfg.get("num_attention_heads") or cfg.get("num_heads") or 1)
+    head_dim = int(cfg.get("head_dim") or h // heads)
+    kv_heads = int(cfg.get("num_key_value_heads") or heads)
+    return heads * head_dim, kv_heads * head_dim
+
+
 def encoder_params(cfg: dict[str, Any]) -> tuple[int, int]:
     """Rough (block, total) parameter counts of a transformer encoder from its config.
 
@@ -391,11 +428,9 @@ def encoder_params(cfg: dict[str, Any]) -> tuple[int, int]:
     layers = int(cfg.get("num_hidden_layers") or cfg.get("depth") or 0)
     if not h or not layers:
         return 0, 0
-    heads = int(cfg.get("num_attention_heads") or cfg.get("num_heads") or 1)
-    head_dim = int(cfg.get("head_dim") or h // heads)
-    kv_heads = int(cfg.get("num_key_value_heads") or heads)
+    q, kv = encoder_attention_widths(cfg)
     intermediate = int(cfg.get("intermediate_size") or 4 * h)
-    attn = h * heads * head_dim + 2 * h * kv_heads * head_dim + heads * head_dim * h
+    attn = h * q + 2 * h * kv + q * h
     model_type = cfg.get("model_type")
     mlp_matrices = 3 if model_type in GATED_MLP_TOWER_MODEL_TYPES else 2
     per_layer = attn + mlp_matrices * h * intermediate + 2 * h
@@ -412,8 +447,13 @@ def encoder_params(cfg: dict[str, Any]) -> tuple[int, int]:
 
 def tower_configs(config: dict[str, Any]) -> list[dict[str, Any]]:
     """Vision and audio encoder configs the model builds from ``config``."""
-    if config.get("model_type") in TEXT_ONLY_MODEL_TYPES:
-        return []
+    built = BUILT_TOWERS_BY_MODEL_TYPE.get(config.get("model_type", ""))
+    if built is not None:
+        return [
+            {**defaults, **config[key]}
+            for key, defaults in built.items()
+            if isinstance(config.get(key), dict)
+        ]
     return [
         config[key] for key in TOWER_MODALITIES if isinstance(config.get(key), dict)
     ]
@@ -434,32 +474,39 @@ def vision_geometry_fields(config: dict[str, Any]) -> dict[str, Any]:
     """Vision tower geometry; empty without a tower."""
     vision = config.get("vision_config")
     model_type = config.get("model_type", "")
-    if not isinstance(vision, dict) or model_type in TEXT_ONLY_MODEL_TYPES:
+    if not isinstance(vision, dict):
         return {}
     merge = _patch_merge(config, vision)
     soft_tokens = int(config.get("vision_soft_tokens_per_image") or 0)
+    patch = int(config.get("patch_size") or vision.get("patch_size") or 0)
+    resize = VISION_RESIZE_BY_MODEL_TYPE.get(model_type, "none")
+    min_patches = int(vision.get("min_num_patches") or 0)
+    max_patches = int(vision.get("max_num_patches") or soft_tokens * merge**2)
+    if resize == "pixel_bounds":
+        pixel_bounds = config["processor_config"]
+        min_patches = pixel_bounds["image_min_pixels"] // patch**2
+        max_patches = pixel_bounds["image_max_pixels"] // patch**2
     return {
         "vision_hidden_size": int(
             config.get("vit_hidden_size") or vision.get("hidden_size") or 0
         ),
-        "vision_patch_size": int(
-            config.get("patch_size") or vision.get("patch_size") or 0
-        ),
+        "vision_patch_size": patch,
         "vision_intermediate_size": int(vision.get("intermediate_size") or 0),
         "vision_n_layers": int(
             vision.get("depth") or vision.get("num_hidden_layers") or 0
         ),
-        "vision_in_channels": int(vision.get("in_channels") or 3),
+        "vision_in_channels": int(
+            vision.get("in_channels") or vision.get("in_chans") or 3
+        ),
         "vision_temporal_patch_size": int(vision.get("temporal_patch_size") or 1),
         "vision_out_hidden_size": int(vision.get("out_hidden_size") or 0),
         "vision_spatial_merge_size": merge,
         "vision_profile_patches": VISION_PROFILE_PATCHES_BY_MODEL_TYPE.get(
             model_type, 0
         ),
-        "vision_resize": VISION_RESIZE_BY_MODEL_TYPE.get(model_type, "none"),
-        "vision_min_patches": int(vision.get("min_num_patches") or 0),
-        "vision_max_patches": int(
-            vision.get("max_num_patches") or soft_tokens * merge**2
-        ),
+        "vision_resize": resize,
+        "vision_min_patches": min_patches,
+        "vision_max_patches": max_patches,
         "vision_feature_cache": model_type in VISION_FEATURE_CACHE_MODEL_TYPES,
+        "vision_merged_output_only": model_type in MERGED_OUTPUT_ONLY_MODEL_TYPES,
     }

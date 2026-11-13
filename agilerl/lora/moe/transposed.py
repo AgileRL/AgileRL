@@ -13,7 +13,7 @@ import torch.nn as nn
 from torch.distributed.tensor import DTensor
 
 from agilerl import HAS_LLM_DEPENDENCIES
-from agilerl.architectures.gptoss import experts as gptoss_experts
+from agilerl.architectures.gptoss import layers as gptoss_layers
 from agilerl.lora.moe.adapters import (
     resolve_adapters,
     split_lora_delta,
@@ -28,8 +28,8 @@ from agilerl.lora.moe.grouped_gemm import (
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from peft.tuners.lora.layer import ParamWrapper
 
-transposed_expert_params = gptoss_experts.gpt_oss_expert_params
-apply_transposed_experts_gate = gptoss_experts.apply_gpt_oss_gate
+transposed_expert_params = gptoss_layers.gpt_oss_expert_params
+apply_transposed_experts_gate = gptoss_layers.apply_gpt_oss_gate
 
 
 def expert_matmul(

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import importlib
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -20,63 +21,84 @@ from transformers.models.nemotron_h_omni.configuration_nemotron_h_omni import (
 )
 
 import agilerl
+from agilerl import architectures
 from agilerl.architectures import (
     family_context_parallel_plans,
     family_tensor_parallel_plans,
 )
 from agilerl.architectures import runtime as runtime_module
 from agilerl.architectures.catalog import (
+    FAMILIES,
     FAMILY_RUNTIME_CONFIGS,
     family_chat_template,
     family_runtime,
-    nemotron_h_omni_vllm_hf_override,
+    model_type_trainer_class,
+    model_type_vision,
     pretrained_model_type,
     sm80_attention_backend,
     trainer_model_class,
 )
 from agilerl.architectures.deepseek_v4.context_parallel import (
-    DEEPSEEK_V4_CONTEXT_PARALLEL_PLAN,
+    CONTEXT_PARALLEL_PLAN as DEEPSEEK_V4_CONTEXT_PARALLEL_PLAN,
 )
 from agilerl.architectures.deepseek_v4.tensor_parallel import (
-    DEEPSEEK_V4_TENSOR_PARALLEL_PLAN,
+    TENSOR_PARALLEL_PLAN as DEEPSEEK_V4_TENSOR_PARALLEL_PLAN,
 )
-from agilerl.architectures.gemma4.tensor_parallel import GEMMA4_TENSOR_PARALLEL_PLAN
+from agilerl.architectures.gemma4.tensor_parallel import (
+    TENSOR_PARALLEL_PLAN as GEMMA4_TENSOR_PARALLEL_PLAN,
+)
 from agilerl.architectures.glm5_next.context_parallel import (
-    GLM5_NEXT_CONTEXT_PARALLEL_PLAN,
+    CONTEXT_PARALLEL_PLAN as GLM5_NEXT_CONTEXT_PARALLEL_PLAN,
 )
 from agilerl.architectures.glm5_next.tensor_parallel import (
-    GLM5_NEXT_TENSOR_PARALLEL_PLAN,
+    TENSOR_PARALLEL_PLAN as GLM5_NEXT_TENSOR_PARALLEL_PLAN,
 )
-from agilerl.architectures.gptoss.tensor_parallel import GPT_OSS_TENSOR_PARALLEL_PLAN
+from agilerl.architectures.gptoss.tensor_parallel import (
+    TENSOR_PARALLEL_PLAN as GPT_OSS_TENSOR_PARALLEL_PLAN,
+)
 from agilerl.architectures.granitemoe.tensor_parallel import (
-    GRANITEMOE_TENSOR_PARALLEL_PLAN,
+    TENSOR_PARALLEL_PLAN as GRANITEMOE_TENSOR_PARALLEL_PLAN,
 )
 from agilerl.architectures.granitemoehybrid.context_parallel import (
-    GRANITEMOEHYBRID_CONTEXT_PARALLEL_PLAN,
+    CONTEXT_PARALLEL_PLAN as GRANITEMOEHYBRID_CONTEXT_PARALLEL_PLAN,
 )
 from agilerl.architectures.granitemoehybrid.tensor_parallel import (
-    GRANITEMOEHYBRID_TENSOR_PARALLEL_PLAN,
+    TENSOR_PARALLEL_PLAN as GRANITEMOEHYBRID_TENSOR_PARALLEL_PLAN,
 )
-from agilerl.architectures.mimo_v2 import (
-    MiMoV2Config,
-    install_mimo_v2_native_training,
+from agilerl.architectures.mimo_v2.configuration import MiMoV2Config
+from agilerl.architectures.mimo_v2.patches import (
+    install_mimo_v2_patches,
     register_mimo_v2_native_loading,
 )
-from agilerl.architectures.mimo_v2.tensor_parallel import MIMO_V2_TENSOR_PARALLEL_PLAN
+from agilerl.architectures.mimo_v2.tensor_parallel import (
+    TENSOR_PARALLEL_PLAN as MIMO_V2_TENSOR_PARALLEL_PLAN,
+)
 from agilerl.architectures.nemotron_h.context_parallel import (
-    NEMOTRON_H_CONTEXT_PARALLEL_PLAN,
+    CONTEXT_PARALLEL_PLAN as NEMOTRON_H_CONTEXT_PARALLEL_PLAN,
 )
-from agilerl.architectures.nemotron_h.mamba import install_mamba_patches
+from agilerl.architectures.nemotron_h.patches import install_nemotron_h_patches
 from agilerl.architectures.nemotron_h.tensor_parallel import (
-    NEMOTRON_H_TENSOR_PARALLEL_PLAN,
+    TENSOR_PARALLEL_PLAN as NEMOTRON_H_TENSOR_PARALLEL_PLAN,
 )
-from agilerl.architectures.qwen3.tensor_parallel import QWEN3_TENSOR_PARALLEL_PLAN
-from agilerl.architectures.qwen3_5.context_parallel import QWEN3_5_CONTEXT_PARALLEL_PLAN
-from agilerl.architectures.qwen3_5.tensor_parallel import QWEN3_5_TENSOR_PARALLEL_PLAN
+from agilerl.architectures.nemotron_h_omni.vision import (
+    nemotron_h_omni_vllm_hf_override,
+)
+from agilerl.architectures.qwen3.tensor_parallel import (
+    TENSOR_PARALLEL_PLAN as QWEN3_TENSOR_PARALLEL_PLAN,
+)
+from agilerl.architectures.qwen3_5.context_parallel import (
+    CONTEXT_PARALLEL_PLAN as QWEN3_5_CONTEXT_PARALLEL_PLAN,
+)
+from agilerl.architectures.qwen3_5.tensor_parallel import (
+    TENSOR_PARALLEL_PLAN as QWEN3_5_TENSOR_PARALLEL_PLAN,
+)
 from agilerl.architectures.runtime import (
     ModelRuntimeConfig,
+    ModelTypes,
     TensorParallelPlan,
     VllmRuntimeConfig,
+    discover_families,
+    runtime_configs_by_model_type,
 )
 from agilerl.arena.memory import formulas
 from agilerl.arena.memory.manifest import FAMILY_MAX_NUM_BATCHED_TOKENS
@@ -129,13 +151,14 @@ def tensor_parallel_split_worker(
     """Full and per-rank elements of the meta model's parameters the family TP plan splits."""
     register_mimo_v2_native_loading()
     hf_config = dict(SUPPORTED_MODEL_INFO[model_id].config)
-    trainer = FAMILY_RUNTIME_CONFIGS[hf_config["model_type"]].trainer
+    model_type = hf_config["model_type"]
+    trainer = FAMILY_RUNTIME_CONFIGS[model_type].trainer
     if trainer.config_class is AutoConfig:
         config = AutoConfig.for_model(**hf_config)
     else:
         config = trainer.config_class.from_dict(hf_config)
     with torch.device("meta"):
-        model = trainer.model_class.from_config(config)
+        model = model_type_trainer_class(model_type).from_config(config)
     apply_tensor_parallel(
         model, init_device_mesh("cpu", (world_size,), mesh_dim_names=("tp",))
     )
@@ -167,6 +190,7 @@ class TestFamilyRuntimeConfigs:
     def test_catalog_keys(self) -> None:
         assert set(FAMILY_RUNTIME_CONFIGS) == {
             "deepseek_v4",
+            "llama",
             "qwen2",
             "qwen3",
             "qwen3_moe",
@@ -192,10 +216,13 @@ class TestFamilyRuntimeConfigs:
         mimo = FAMILY_RUNTIME_CONFIGS["mimo_v2"]
 
         assert mimo.trainer.load_kwargs() == {"trust_remote_code": False}
-        assert mimo.trainer.model_class is AutoModelForCausalLM
+        assert model_type_trainer_class("mimo_v2") is AutoModelForImageTextToText
         assert mimo.trainer.config_class is MiMoV2Config
-        assert mimo.vllm.engine_kwargs() == {"trust_remote_code": True}
-        assert mimo.patch.install is install_mimo_v2_native_training
+        assert mimo.vllm.engine_kwargs() == {
+            "trust_remote_code": True,
+            "hf_overrides": {"architectures": ["MiMoV2OmniForCausalLM"]},
+        }
+        assert mimo.patch.install is install_mimo_v2_patches
         assert mimo.chat_format == "tool_call"
         assert mimo.reasoning_parser == "mimo"
 
@@ -219,12 +246,14 @@ class TestFamilyRuntimeConfigs:
         assert omni.vllm.mamba_cache_mode == base.vllm.mamba_cache_mode
         assert omni.vllm.hf_overrides is nemotron_h_omni_vllm_hf_override
         assert base.vllm.hf_overrides is None
-        assert omni.patch.install is install_mamba_patches
-        assert {"q_proj", "fc1", "linear_1"} <= omni.tower_connector_lora_targets
-        assert omni.tower_connector_lora_targets.isdisjoint(
+        assert omni.patch.install is install_nemotron_h_patches
+        omni_vision = model_type_vision("nemotron_h_omni")
+        assert omni_vision is not None
+        assert {"q_proj", "fc1", "linear_1"} <= omni_vision.tower_connector_lora_targets
+        assert omni_vision.tower_connector_lora_targets.isdisjoint(
             {"in_proj", "up_proj", "down_proj", "out_proj"}
         )
-        assert base.tower_connector_lora_targets == frozenset()
+        assert model_type_vision("nemotron_h") is None
 
     def test_gemma4_uses_the_swa_trainer(self) -> None:
         gemma4 = FAMILY_RUNTIME_CONFIGS["gemma4"]
@@ -232,13 +261,15 @@ class TestFamilyRuntimeConfigs:
         assert gemma4.trainer == gemma3.trainer
 
     def test_every_arena_tower_lora_module_is_served(self) -> None:
-        unserved = {
-            hub_id: sorted(
-                entry.tower_lora_modules
-                - FAMILY_RUNTIME_CONFIGS[
-                    entry.config["model_type"]
-                ].tower_connector_lora_targets
+        served = {}
+        for hub_id, entry in SUPPORTED_MODEL_INFO.items():
+            vision = model_type_vision(entry.config["model_type"])
+            served[hub_id] = (
+                frozenset() if vision is None else vision.tower_connector_lora_targets
             )
+
+        unserved = {
+            hub_id: sorted(entry.tower_lora_modules - served[hub_id])
             for hub_id, entry in SUPPORTED_MODEL_INFO.items()
         }
 
@@ -249,9 +280,7 @@ class TestFamilyRuntimeConfigs:
         ["qwen3_5", "qwen3_5_moe", "gemma3", "gemma4", "glm5_next", "nemotron_h_omni"],
     )
     def test_vl_families_train_their_vl_class(self, model_type: str) -> None:
-        trainer = FAMILY_RUNTIME_CONFIGS[model_type].trainer
-
-        assert trainer.model_class is AutoModelForImageTextToText
+        assert model_type_trainer_class(model_type) is AutoModelForImageTextToText
 
     @pytest.mark.parametrize(
         "model_type",
@@ -263,20 +292,19 @@ class TestFamilyRuntimeConfigs:
                 "gemma3",
                 "gemma4",
                 "glm5_next",
+                "mimo_v2",
                 "nemotron_h_omni",
             }
         ),
     )
     def test_text_families_train_a_causal_lm(self, model_type: str) -> None:
-        trainer = FAMILY_RUNTIME_CONFIGS[model_type].trainer
-
-        assert trainer.model_class is AutoModelForCausalLM
+        assert model_type_trainer_class(model_type) is AutoModelForCausalLM
 
     def test_nemotron_h_lookup(self) -> None:
         config = FAMILY_RUNTIME_CONFIGS["nemotron_h"]
         assert config.vllm.engine_kwargs() == NEMOTRON_VLLM_KWARGS
         assert config.trainer.load_kwargs() == {}
-        assert config.patch.install is install_mamba_patches
+        assert config.patch.install is install_nemotron_h_patches
 
     def test_no_family_loads_checkpoint_code(self) -> None:
         omni = FAMILY_RUNTIME_CONFIGS["nemotron_h_omni"]
@@ -300,7 +328,9 @@ class TestFamilyRuntimeConfigs:
         runtime = FAMILY_RUNTIME_CONFIGS["qwen3_5"]
         assert runtime.vllm.mamba_cache_mode == "align"
         assert runtime.vllm.enable_prefix_caching is True
-        assert runtime.tower_connector_lora_targets == {
+        vision = model_type_vision("qwen3_5")
+        assert vision is not None
+        assert vision.tower_connector_lora_targets == {
             "qkv",
             "linear_fc1",
             "linear_fc2",
@@ -387,7 +417,7 @@ class TestFamilyRuntimeConfigs:
 
     def test_nemotron_has_mamba_patches(self) -> None:
         patch = FAMILY_RUNTIME_CONFIGS["nemotron_h"].patch
-        assert patch.install is install_mamba_patches
+        assert patch.install is install_nemotron_h_patches
         mamba = patch.mamba
         assert mamba is not None
         assert (
@@ -460,12 +490,11 @@ class TestSm80AttentionBackend:
     def test_other_checkpoints_leave_the_backend_unset(self, hub_id: str) -> None:
         assert sm80_attention_backend(hub_id) is None
 
-    def test_unknown_family_leaves_the_backend_unset(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        stub_config_model_type(monkeypatch, "llama")
+    def test_unknown_family_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        stub_config_model_type(monkeypatch, "phi3")
 
-        assert sm80_attention_backend("meta/llama") is None
+        with pytest.raises(ValueError, match="'phi3' has no family"):
+            sm80_attention_backend("microsoft/phi-3")
 
 
 class TestFamilyMaxNumBatchedTokens:
@@ -525,23 +554,24 @@ class TestFamilyTensorParallelPlans:
 
         assert plans == [
             DEEPSEEK_V4_TENSOR_PARALLEL_PLAN,
-            QWEN3_TENSOR_PARALLEL_PLAN,
-            GRANITEMOE_TENSOR_PARALLEL_PLAN,
-            GRANITEMOEHYBRID_TENSOR_PARALLEL_PLAN,
-            NEMOTRON_H_TENSOR_PARALLEL_PLAN,
             GEMMA4_TENSOR_PARALLEL_PLAN,
             GLM5_NEXT_TENSOR_PARALLEL_PLAN,
             GPT_OSS_TENSOR_PARALLEL_PLAN,
+            GRANITEMOE_TENSOR_PARALLEL_PLAN,
+            GRANITEMOEHYBRID_TENSOR_PARALLEL_PLAN,
             MIMO_V2_TENSOR_PARALLEL_PLAN,
+            NEMOTRON_H_TENSOR_PARALLEL_PLAN,
+            QWEN3_TENSOR_PARALLEL_PLAN,
             QWEN3_5_TENSOR_PARALLEL_PLAN,
         ]
 
     def test_missing_plan_module_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setitem(
-            FAMILY_RUNTIME_CONFIGS,
-            "missing_family",
-            ModelRuntimeConfig(tensor_parallel_plan="agilerl.no_such_module:PLAN"),
+        missing = ModelRuntimeConfig(
+            name="missing_family",
+            model_types=ModelTypes(),
+            tensor_parallel_plan="agilerl.no_such_module:PLAN",
         )
+        monkeypatch.setattr(architectures, "FAMILIES", (*FAMILIES, missing))
 
         with pytest.raises(ModuleNotFoundError, match=r"agilerl\.no_such_module"):
             family_tensor_parallel_plans()
@@ -562,23 +592,24 @@ class TestTensorParallelPlanDefaults:
 
 
 class TestFamilyContextParallelPlans:
-    def test_resolves_every_family_plan_in_catalog_order(self) -> None:
+    def test_resolves_every_family_plan_in_family_order(self) -> None:
         plans = family_context_parallel_plans()
 
         assert plans == [
             DEEPSEEK_V4_CONTEXT_PARALLEL_PLAN,
+            GLM5_NEXT_CONTEXT_PARALLEL_PLAN,
             GRANITEMOEHYBRID_CONTEXT_PARALLEL_PLAN,
             NEMOTRON_H_CONTEXT_PARALLEL_PLAN,
-            GLM5_NEXT_CONTEXT_PARALLEL_PLAN,
             QWEN3_5_CONTEXT_PARALLEL_PLAN,
         ]
 
     def test_missing_plan_module_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setitem(
-            FAMILY_RUNTIME_CONFIGS,
-            "missing_family",
-            ModelRuntimeConfig(context_parallel_plan="agilerl.no_such_module:PLAN"),
+        missing = ModelRuntimeConfig(
+            name="missing_family",
+            model_types=ModelTypes(),
+            context_parallel_plan="agilerl.no_such_module:PLAN",
         )
+        monkeypatch.setattr(architectures, "FAMILIES", (*FAMILIES, missing))
 
         with pytest.raises(ModuleNotFoundError, match=r"agilerl\.no_such_module"):
             family_context_parallel_plans()
@@ -606,17 +637,23 @@ class TestFamilyRuntime:
         config = family_runtime("openai/gpt-oss-20b")
         assert config.trainer == FAMILY_RUNTIME_CONFIGS["gpt_oss"].trainer
 
-    @pytest.mark.parametrize("model_type", ["gemma", "gemma2", "phi3", "llama"])
-    def test_unknown_hub_type_returns_empty_defaults(
+    def test_llama_hub_id_uses_its_family(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stub_config_model_type(monkeypatch, "llama")
+
+        config = family_runtime("HuggingFaceTB/SmolLM2-135M-Instruct")
+
+        assert config.name == "llama"
+
+    @pytest.mark.parametrize("model_type", ["gemma", "gemma2", "phi3"])
+    def test_unknown_hub_type_raises(
         self, monkeypatch: pytest.MonkeyPatch, model_type: str
     ) -> None:
         stub_config_model_type(monkeypatch, model_type)
-        config = family_runtime("some/model")
-        assert config.vllm.engine_kwargs() == {}
-        assert config.trainer.load_kwargs() == {}
-        assert config.trainer.model_class is AutoModelForCausalLM
-        assert config.trainer.config_class is AutoConfig
-        assert config.patch.install is None
+
+        with pytest.raises(ValueError, match=f"'{model_type}' has no family"):
+            family_runtime("some/model")
 
     def test_missing_config_json_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def raise_missing(*args: object, **kwargs: object) -> None:
@@ -709,24 +746,97 @@ class TestRuntimeConfigsForbidExtra:
             ModelRuntimeConfig,
             PatchRuntimeConfig,
             TrainerRuntimeConfig,
+            VisionSupport,
             VllmRuntimeConfig,
         )
 
         cases = (
             (VllmRuntimeConfig, {}),
             (TrainerRuntimeConfig, {}),
-            (MambaPatchConfig, {"mixer": "agilerl.architectures.nemotron_h.mamba"}),
+            (MambaPatchConfig, {"mixer": "agilerl.architectures.nemotron_h.layers"}),
             (GdnMixerConfig, {"mixer": "pkg.GatedDeltaNet", "text_model": "pkg.Text"}),
             (
                 GdnPatchConfig,
                 {"mixers": [{"mixer": "pkg.GatedDeltaNet", "text_model": "pkg.Text"}]},
             ),
             (PatchRuntimeConfig, {}),
-            (ModelRuntimeConfig, {}),
+            (ModelRuntimeConfig, {"name": "family", "model_types": {}}),
+            (ModelTypes, {}),
+            (VisionSupport, {}),
         )
         for cls, payload in cases:
             with pytest.raises(ValidationError, match="extra_forbidden"):
                 cls.model_validate({**payload, "__unknown__": True})
+
+
+def write_family_package(root: Path, package: str, families: dict[str, str]) -> None:
+    """Write ``package`` under ``root`` with one subpackage per ``families`` body."""
+    (root / package).mkdir()
+    (root / package / "__init__.py").write_text("")
+    (root / package / "helpers.py").write_text("")
+    for name, body in families.items():
+        (root / package / name).mkdir()
+        (root / package / name / "__init__.py").write_text(body)
+
+
+def family_body(name: str) -> str:
+    return (
+        "from agilerl.architectures.runtime import ModelRuntimeConfig, ModelTypes\n"
+        f"FAMILY = ModelRuntimeConfig(name={name!r}, "
+        f"model_types=ModelTypes(text=({name!r},)))\n"
+    )
+
+
+class TestDiscoverFamilies:
+    def test_returns_each_subpackage_family_in_name_order(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        write_family_package(
+            tmp_path,
+            "discover_ok",
+            {"zeta": family_body("zeta"), "alpha": family_body("alpha")},
+        )
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        # Act
+        families = discover_families("discover_ok")
+
+        # Assert
+        assert [family.name for family in families] == ["alpha", "zeta"]
+
+    def test_subpackage_without_family_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        write_family_package(tmp_path, "discover_missing", {"bare": ""})
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        with pytest.raises(
+            TypeError, match=r"discover_missing\.bare must define FAMILY"
+        ):
+            discover_families("discover_missing")
+
+
+class TestRuntimeConfigsByModelType:
+    def test_maps_text_and_multimodal_types_to_their_family(self) -> None:
+        family = ModelRuntimeConfig(
+            name="vl", model_types=ModelTypes(text=("vl_text",), multimodal=("vl",))
+        )
+
+        configs = runtime_configs_by_model_type([family])
+
+        assert configs == {"vl_text": family, "vl": family}
+
+    def test_type_claimed_twice_raises(self) -> None:
+        first = ModelRuntimeConfig(
+            name="first", model_types=ModelTypes(text=("shared",))
+        )
+        second = ModelRuntimeConfig(
+            name="second", model_types=ModelTypes(multimodal=("shared",))
+        )
+
+        with pytest.raises(ValueError, match="'shared' is claimed by first and second"):
+            runtime_configs_by_model_type([first, second])
 
 
 class TestTrainerModelClass:
@@ -744,7 +854,7 @@ class TestTrainerModelClass:
             ("openai/gpt-oss-20b", AutoModelForCausalLM),
             ("zai-org/GLM-5.3-Flash", AutoModelForImageTextToText),
             ("deepseek-ai/DeepSeek-V4-Flash-0731", AutoModelForCausalLM),
-            ("XiaomiMiMo/MiMo-V2.6-Flash-RL", AutoModelForCausalLM),
+            ("XiaomiMiMo/MiMo-V2.6-Flash-RL", AutoModelForImageTextToText),
         ],
     )
     def test_supported_ids_resolve_their_trainer_class(
@@ -752,12 +862,11 @@ class TestTrainerModelClass:
     ) -> None:
         assert trainer_model_class(hub_id) is expected
 
-    def test_unknown_family_defaults_to_causal_lm(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        stub_config_model_type(monkeypatch, "llama")
+    def test_unknown_family_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        stub_config_model_type(monkeypatch, "phi3")
 
-        assert trainer_model_class("some/model") is AutoModelForCausalLM
+        with pytest.raises(ValueError, match="'phi3' has no family"):
+            trainer_model_class("some/model")
 
 
 class TestFamilyChatTemplate:
@@ -769,10 +878,11 @@ class TestFamilyChatTemplate:
     def test_family_with_a_tokenizer_template_returns_none(self) -> None:
         assert family_chat_template("zai-org/GLM-5.3-Flash") is None
 
-    def test_unknown_family_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        stub_config_model_type(monkeypatch, "llama")
+    def test_unknown_family_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        stub_config_model_type(monkeypatch, "phi3")
 
-        assert family_chat_template("some/model") is None
+        with pytest.raises(ValueError, match="'phi3' has no family"):
+            family_chat_template("some/model")
 
     def test_only_dsml_families_carry_a_template(self) -> None:
         families = {
@@ -821,7 +931,7 @@ class TestImportFallbacks:
 
             assert module.AutoModelForCausalLM is None
             assert module.AutoModelForImageTextToText is None
-            assert module.TrainerRuntimeConfig().model_class is None
+            assert module.TrainerRuntimeConfig().config_class is None
         finally:
             monkeypatch.undo()
             importlib.reload(runtime_module)

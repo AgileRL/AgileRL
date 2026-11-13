@@ -21,13 +21,17 @@ from agilerl.algorithms.core.llm_ops.frozen_vision import (
     install_frozen_vision_no_grad,
 )
 from agilerl.algorithms.core.llm_ops.vision_lockstep import FILLER_METHOD
-from agilerl.architectures.catalog import FAMILY_RUNTIME_CONFIGS
-from agilerl.architectures.gemma4 import (
-    ACCEPTS_VISION_ROWS as GEMMA_ACCEPTS_VISION_ROWS,
-)
-from agilerl.architectures.gemma4 import install_gemma4_vision_patches
-from agilerl.architectures.qwen3_5.vision import install_qwen3_5_vl_patches
+from agilerl.architectures import install_family_patches
+from agilerl.architectures.gemma4.vision import install_gemma4_vision
 from agilerl.architectures.runtime import PatchRuntimeConfig
+from agilerl.architectures.vision_rows import ACCEPTS_VISION_ROWS
+from tests.test_architectures.gemma4.test_vision import BOI, EOI, tiny_gemma4
+from tests.test_architectures.gemma4.test_vision import GRID as GEMMA_GRID
+from tests.test_architectures.gemma4.test_vision import IMAGE as GEMMA_IMAGE
+from tests.test_architectures.gemma4.test_vision import PATCH_DIM as GEMMA_PATCH_DIM
+from tests.test_architectures.gemma4.test_vision import (
+    TOKENS_PER_IMAGE as GEMMA_TOKENS_PER_IMAGE,
+)
 from tests.test_architectures.qwen3_5.vision_helpers import GRID as QWEN_GRID
 from tests.test_architectures.qwen3_5.vision_helpers import (
     PATCH_DIM as QWEN_PATCH_DIM,
@@ -37,15 +41,7 @@ from tests.test_architectures.qwen3_5.vision_helpers import (
     restored_qwen_vl_model,
     tiny_qwen_vl,
 )
-from tests.test_architectures.test_gemma4 import BOI, EOI, tiny_gemma4
-from tests.test_architectures.test_gemma4 import GRID as GEMMA_GRID
-from tests.test_architectures.test_gemma4 import IMAGE as GEMMA_IMAGE
-from tests.test_architectures.test_gemma4 import PATCH_DIM as GEMMA_PATCH_DIM
-from tests.test_architectures.test_gemma4 import (
-    TOKENS_PER_IMAGE as GEMMA_TOKENS_PER_IMAGE,
-)
 
-QWEN_VL_PATCH = FAMILY_RUNTIME_CONFIGS["qwen3_5"].patch
 IMAGE_TOKEN_ID = 63
 LANGUAGE_LORA_TARGETS = r".*language_model.*\.(q_proj|v_proj)"
 TOWER_PATH = "base_model.model.model.vision_tower"
@@ -677,7 +673,7 @@ class TestVisionFeatureCacheVisionRows:
     def test_qwen_packed_patches_reuse_the_tower_output(self) -> None:
         # Arrange
         with restored_qwen_vl_model():
-            install_qwen3_5_vl_patches(QWEN_VL_PATCH)
+            install_family_patches("qwen3_5")
             model = tiny_qwen_vl()
             input_ids = torch.tensor([image_prompt([3], images=2)])
             rows = torch.randn(2, QWEN_GRID, QWEN_GRID, QWEN_PATCH_DIM)
@@ -699,7 +695,7 @@ class TestVisionFeatureCacheVisionRows:
     def test_qwen_reordered_keys_return_each_image_in_call_order(self) -> None:
         # Arrange
         with restored_qwen_vl_model():
-            install_qwen3_5_vl_patches(QWEN_VL_PATCH)
+            install_family_patches("qwen3_5")
             model = tiny_qwen_vl()
             input_ids = torch.tensor([image_prompt([3], images=2)])
             torch.manual_seed(1)
@@ -726,7 +722,7 @@ class TestVisionFeatureCacheVisionRows:
         # Arrange
         get_image_features = Gemma4Model.__dict__["get_image_features"]
         try:
-            install_gemma4_vision_patches(PatchRuntimeConfig())
+            install_gemma4_vision(PatchRuntimeConfig())
             model = tiny_gemma4()
             image = [BOI, *([GEMMA_IMAGE] * GEMMA_TOKENS_PER_IMAGE), EOI]
             input_ids = torch.tensor([[3, *image, 5, *image, 6]])
@@ -743,7 +739,7 @@ class TestVisionFeatureCacheVisionRows:
                 ]
         finally:
             Gemma4Model.get_image_features = get_image_features
-            for name in (GEMMA_ACCEPTS_VISION_ROWS, FILLER_METHOD):
+            for name in (ACCEPTS_VISION_ROWS, FILLER_METHOD):
                 if name in vars(Gemma4Model):
                     delattr(Gemma4Model, name)
 

@@ -20,7 +20,7 @@ from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
     Qwen3_5MoeTextModel,
 )
 
-from agilerl.architectures.qwen3_5.packed import GROUPED_QK_HEADS, VARLEN_SCAN
+from agilerl.architectures.qwen3_5.patches import GROUPED_QK_HEADS, VARLEN_SCAN
 from agilerl.utils.llm_packing import RESETS_AT_DOCUMENT_BOUNDARY
 
 # Captured at import, before any test installs the family patches.

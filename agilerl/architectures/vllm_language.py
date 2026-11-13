@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections.abc import Collection
 from typing import Any, Protocol, runtime_checkable
 
-from agilerl.architectures.runtime import ModelRuntimeConfig
+from agilerl.architectures.runtime import VisionSupport
 
 
 @runtime_checkable
@@ -57,24 +57,27 @@ def apply_multimodal_engine_kwargs(
 
 def unbuilt_tower_modules(
     strip_multimodal_towers: bool,
-    runtime: ModelRuntimeConfig,
+    vision: VisionSupport | None,
 ) -> list[str]:
     """Trainer tower and connector modules vLLM leaves unbuilt.
 
     :param strip_multimodal_towers: Whether the engine skips the towers.
     :type strip_multimodal_towers: bool
-    :param runtime: Family runtime mapping tower modules to their modalities.
-    :type runtime: ModelRuntimeConfig
+    :param vision: Family vision settings mapping tower modules to their
+        modalities, or None for a text checkpoint.
+    :type vision: VisionSupport | None
     :return: Every tower module when stripped, else none; sorted.
     :rtype: list[str]
     """
-    return sorted(runtime.tower_modalities) if strip_multimodal_towers else []
+    if vision is None or not strip_multimodal_towers:
+        return []
+    return sorted(vision.tower_modalities)
 
 
 def apply_tower_connector_lora_engine_kwargs(
     kwargs: dict[str, Any],
     strip_multimodal_towers: bool,
-    runtime: ModelRuntimeConfig,
+    vision: VisionSupport | None,
     tower_target_modules: Collection[str] | None,
 ) -> None:
     """Enable vLLM LoRA on multimodal towers and connectors when the adapter names them.
@@ -86,8 +89,9 @@ def apply_tower_connector_lora_engine_kwargs(
     :type kwargs: dict[str, Any]
     :param strip_multimodal_towers: Whether the engine skips the towers.
     :type strip_multimodal_towers: bool
-    :param runtime: Family runtime naming the tower targets vLLM supports.
-    :type runtime: ModelRuntimeConfig
+    :param vision: Family vision settings naming the tower targets vLLM
+        supports, or None for a text checkpoint.
+    :type vision: VisionSupport | None
     :param tower_target_modules: ``lora_config.tower_target_modules``.
     :type tower_target_modules: Collection[str] | None
     :raises ValueError: If towers are stripped, or a target is not a tower
@@ -101,11 +105,12 @@ def apply_tower_connector_lora_engine_kwargs(
             "engine strips them"
         )
         raise ValueError(msg)
-    unsupported = sorted(
-        set(tower_target_modules) - runtime.tower_connector_lora_targets
+    supported_targets = (
+        frozenset() if vision is None else vision.tower_connector_lora_targets
     )
+    unsupported = sorted(set(tower_target_modules) - supported_targets)
     if unsupported:
-        supported = sorted(runtime.tower_connector_lora_targets) or "none"
+        supported = sorted(supported_targets) or "none"
         msg = (
             f"vLLM cannot serve tower LoRA on {unsupported}; this family "
             f"supports {supported}"

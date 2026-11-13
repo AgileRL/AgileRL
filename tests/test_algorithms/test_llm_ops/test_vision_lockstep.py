@@ -21,16 +21,15 @@ from agilerl.algorithms.core.llm_ops.vision_lockstep import (
     vision_language_module,
     vision_lockstep,
 )
-from agilerl.architectures.catalog import FAMILY_RUNTIME_CONFIGS
-from agilerl.architectures.gemma4 import install_gemma4_vision_patches
-from agilerl.architectures.qwen3_5.vision import install_qwen3_5_vl_patches
+from agilerl.architectures import install_family_patches
+from agilerl.architectures.gemma4.vision import install_gemma4_vision
 from agilerl.architectures.runtime import PatchRuntimeConfig
 from agilerl.arena.models.fsdp import FSDPConfig
 from agilerl.distributed import fsdp_blocks
 from agilerl.distributed.fsdp_blocks import apply_fsdp2
 from agilerl.distributed.process import allreduce_sum_ints, any_rank
 from tests.rank_launch import run_ranks
-from tests.test_architectures import test_gemma4 as gemma4
+from tests.test_architectures.gemma4 import test_vision as gemma4
 from tests.test_architectures.qwen3_5.vision_helpers import (
     GRID,
     PATCH_DIM,
@@ -40,7 +39,6 @@ from tests.test_architectures.qwen3_5.vision_helpers import (
 )
 from tests.torch_kernels import use_torch_kernels
 
-QWEN_VL_PATCH = FAMILY_RUNTIME_CONFIGS["qwen3_5"].patch
 TEXT_IDS = torch.tensor([[3, 4, 5, 6, 7, 8, 9, 10]])
 IMAGE_IDS = torch.tensor([image_prompt([3], images=1)])
 
@@ -54,12 +52,8 @@ def count_tower_runs(model: nn.Module) -> list[int]:
     return runs
 
 
-class TensorVisionModel(nn.Module):
-    """VL stand-in whose forward returns a tensor and counts filler-image tower runs."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.filler_runs = 0
+class IdsDecoderVisionModel(nn.Module):
+    """VL stand-in that is its own decoder and takes ``input_ids``, not ``inputs_embeds``."""
 
     def forward(
         self, input_ids: torch.Tensor, pixel_values: torch.Tensor | None = None
@@ -70,7 +64,6 @@ class TensorVisionModel(nn.Module):
         return self
 
     def vision_filler_features(self, device: torch.device) -> torch.Tensor:
-        self.filler_runs += 1
         return torch.ones(1, device=device)
 
 
@@ -78,7 +71,7 @@ class TensorVisionModel(nn.Module):
 def qwen_vl(torch_kernels):
     """Tiny Qwen3.5 VL model with vision-row patches and a tower run log."""
     with restored_qwen_vl_model():
-        install_qwen3_5_vl_patches(QWEN_VL_PATCH)
+        install_family_patches("qwen3_5")
         model = tiny_qwen_vl()
         yield model, count_tower_runs(model)
 
@@ -87,7 +80,7 @@ def qwen_vl(torch_kernels):
 def frozen_qwen_vl(torch_kernels):
     """Tiny Qwen3.5 VL model whose frozen tower reuses a feature cache."""
     with restored_qwen_vl_model():
-        install_qwen3_5_vl_patches(QWEN_VL_PATCH)
+        install_family_patches("qwen3_5")
         model = tiny_qwen_vl()
         model.model.visual.requires_grad_(False)
         cache = VisionFeatureCache()
@@ -106,7 +99,7 @@ def another_rank_runs_the_tower(monkeypatch):
 def mixed_rank_worker(rank: int, world_size: int) -> bool:
     """Shard the tiny VL model, give only rank 0 an image, and train one step."""
     use_torch_kernels(pytest.MonkeyPatch())
-    install_qwen3_5_vl_patches(QWEN_VL_PATCH)
+    install_family_patches("qwen3_5")
     model = tiny_qwen_vl().train()
     with patch.object(fsdp_blocks, "PARAM_PERSISTENCE_THRESHOLD", 0):
         apply_fsdp2(
@@ -131,7 +124,7 @@ def mixed_rank_worker(rank: int, world_size: int) -> bool:
 def mixed_rank_gemma4_worker(rank: int, world_size: int) -> bool:
     """Shard a Gemma4 model with per-layer embeddings, give only rank 0 an image, and train one step."""
     use_torch_kernels(pytest.MonkeyPatch())
-    install_gemma4_vision_patches(PatchRuntimeConfig())
+    install_gemma4_vision(PatchRuntimeConfig())
     model = gemma4.tiny_gemma4().train()
     with patch.object(fsdp_blocks, "PARAM_PERSISTENCE_THRESHOLD", 0):
         apply_fsdp2(
@@ -159,7 +152,7 @@ def mixed_rank_gemma4_worker(rank: int, world_size: int) -> bool:
 def cached_mixed_rank_worker(rank: int, world_size: int) -> tuple[int, bool]:
     """Shard a frozen-tower VL model, give only rank 0 an image, and forward it twice in one step."""
     use_torch_kernels(pytest.MonkeyPatch())
-    install_qwen3_5_vl_patches(QWEN_VL_PATCH)
+    install_family_patches("qwen3_5")
     model = tiny_qwen_vl().train()
     model.model.visual.requires_grad_(False)
     with patch.object(fsdp_blocks, "PARAM_PERSISTENCE_THRESHOLD", 0):
@@ -239,7 +232,7 @@ def planned_mixed_rank_worker(
     """Shard a frozen-tower VL model and plan two passes over rank 0's two images."""
     monkeypatch = pytest.MonkeyPatch()
     use_torch_kernels(monkeypatch)
-    install_qwen3_5_vl_patches(QWEN_VL_PATCH)
+    install_family_patches("qwen3_5")
     model = tiny_qwen_vl().train()
     model.model.visual.requires_grad_(False)
     with patch.object(fsdp_blocks, "PARAM_PERSISTENCE_THRESHOLD", 0):
@@ -395,19 +388,16 @@ class TestVisionLockstep:
         assert len(tower_runs) == 1
         torch.testing.assert_close(actual[0], expected[0], rtol=0, atol=0)
 
-    def test_tensor_output_runs_the_filler_and_keeps_its_values(
+    def test_filler_rejects_a_decoder_called_without_inputs_embeds(
         self, another_rank_runs_the_tower
     ) -> None:
-        # Arrange
-        module = TensorVisionModel()
+        module = IdsDecoderVisionModel()
 
-        # Act
-        with vision_lockstep(module, VisionFeatureCache()):
-            actual = module(input_ids=TEXT_IDS)
-
-        # Assert
-        assert module.filler_runs == 1
-        torch.testing.assert_close(actual, TEXT_IDS.float(), rtol=0, atol=0)
+        with (
+            pytest.raises(ValueError, match="decoder called with inputs_embeds"),
+            vision_lockstep(module, VisionFeatureCache()),
+        ):
+            module(input_ids=TEXT_IDS)
 
     def test_cached_images_skip_the_tower_on_every_rank(self, frozen_qwen_vl) -> None:
         # Arrange

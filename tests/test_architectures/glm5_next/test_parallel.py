@@ -49,10 +49,12 @@ from transformers.models.glm5_next.modeling_glm5_next import (
 
 from agilerl.architectures.glm5_next.tensor_parallel import (
     ATTENTION_CLASS,
-    GLM5_NEXT_TENSOR_PARALLEL_PLAN,
     LINEAR_ATTENTION_CLASS,
     MLP_CLASS,
     apply_glm5_next_tensor_parallel,
+)
+from agilerl.architectures.glm5_next.tensor_parallel import (
+    TENSOR_PARALLEL_PLAN as GLM5_NEXT_TENSOR_PARALLEL_PLAN,
 )
 from agilerl.arena.models.model_info import (
     LORA_EXCLUDED_MODULES,

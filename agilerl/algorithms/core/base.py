@@ -81,12 +81,7 @@ from agilerl.algorithms.core.sequence_layout import (
     PaddedSequence,
     SequenceLayout,
 )
-from agilerl.architectures import (
-    FAMILY_RUNTIME_CONFIGS,
-    ModelRuntimeConfig,
-    install_family_patches,
-)
-from agilerl.architectures.nemotron_h import register_nemotron_h_liger
+from agilerl.architectures import install_family_patches, model_type_vision
 from agilerl.architectures.vllm_language import (
     nested_language_config,
     unbuilt_tower_modules,
@@ -4908,9 +4903,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         if self.lora_tower_target_modules:
             skipped_tower_modules = unbuilt_tower_modules(
                 self.rollout_strip_multimodal_towers,
-                FAMILY_RUNTIME_CONFIGS.get(
-                    peft_target.config.model_type, ModelRuntimeConfig()
-                ),
+                model_type_vision(peft_target.config.model_type),
             )
         lora_config = adapt_lora_config_for_model(
             peft_target,
@@ -4955,7 +4948,6 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                     type(inner_model).__name__,
                 )
             else:
-                register_nemotron_h_liger()
                 _apply_liger_kernel_to_instance(
                     model=inner_model,
                     fused_linear_cross_entropy=False,

@@ -3417,8 +3417,8 @@ class TestUnmeasuredArchitectureEstimates:
     @pytest.mark.parametrize(
         ("model_id", "gradient_checkpointing", "total_bytes"),
         [
-            ("zai-org/GLM-5.3-Flash", True, 154866675936),
-            ("zai-org/GLM-5.3-Flash", False, 246686678104),
+            ("zai-org/GLM-5.3-Flash", True, 154045163171),
+            ("zai-org/GLM-5.3-Flash", False, 245865165338),
             ("openai/gpt-oss-20b", True, 17593628774),
             ("openai/gpt-oss-20b", False, 41523558605),
             # Stored blocks keep a share of the measured gated-attention and
@@ -4895,8 +4895,8 @@ class TestSparseMoeTensorParallelBaseWeights:
             ("deepseek-ai/DeepSeek-V4-Flash-0731", 5_940_185_792),
             # KDA and DSA mixers, dense MLP, shared experts, head, vision linears.
             ("zai-org/GLM-5.3-Flash", 8_519_903_360),
-            # Attention, sliding-window sinks, dense MLP, head.
-            ("XiaomiMiMo/MiMo-V2.6-Flash-RL", 5_308_942_784),
+            # Attention, sliding-window sinks, dense MLP, head, vision linears.
+            ("XiaomiMiMo/MiMo-V2.6-Flash-RL", 6_035_426_496),
         ],
     )
     def test_tensor_parallel_params_match_the_family_plan(self, model_id, expected):

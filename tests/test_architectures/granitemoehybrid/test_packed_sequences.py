@@ -28,8 +28,8 @@ from agilerl.algorithms.core.sequence_layout import (
     position_ids_from_mask,
 )
 from agilerl.architectures import install_family_patches
-from agilerl.architectures.granitemoehybrid import packed as granite_packed
-from agilerl.architectures.granitemoehybrid.packed import (
+from agilerl.architectures.granitemoehybrid import patches as granite_packed
+from agilerl.architectures.granitemoehybrid.patches import (
     patch_granite_hybrid_packed_sequences,
 )
 from agilerl.utils.llm_packing import (

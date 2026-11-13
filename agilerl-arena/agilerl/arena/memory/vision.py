@@ -87,6 +87,61 @@ def _merge_grid(arch: ModelArch, width: int, height: int) -> tuple[int, int]:
     return h // arch.vision_patch_size, w // arch.vision_patch_size
 
 
+def _pixel_bounds(arch: ModelArch, width: int, height: int) -> tuple[int, int]:
+    """vLLM's MiMo ``smart_resize``: a short side under patch x merge grows to it, then the merge grid within the pixel bounds."""
+    patch = arch.vision_patch_size
+    factor = patch * arch.vision_spatial_merge_size
+    min_pixels = arch.vision_min_patches * patch**2
+    max_pixels = arch.vision_max_patches * patch**2
+    if min(height, width) < factor:
+        if height < width:
+            height, width = factor, int(width * factor / height)
+        else:
+            width, height = factor, int(height * factor / width)
+    h = round(height / factor) * factor
+    w = round(width / factor) * factor
+    if h * w > max_pixels:
+        beta = math.sqrt(height * width / max_pixels)
+        h = math.floor(height / beta / factor) * factor
+        w = math.floor(width / beta / factor) * factor
+    elif h * w < min_pixels:
+        beta = math.sqrt(min_pixels / (height * width))
+        h = math.ceil(height * beta / factor) * factor
+        w = math.ceil(width * beta / factor) * factor
+    return h // patch, w // patch
+
+
+def _token_budget(arch: ModelArch, width: int, height: int) -> tuple[int, int]:
+    """GLM-5.3 ``smart_resize`` of one image: sides rounded up to patch x merge, fit under the token budget."""
+    # The GLM-5.3 image processor's min_image_tokens and max_image_tokens.
+    min_tokens, max_tokens = 16, 8000
+    factor = arch.vision_patch_size * arch.vision_spatial_merge_size
+    frames = arch.vision_temporal_patch_size
+    min_pixels = min_tokens * frames * factor**2
+    max_pixels = max_tokens * frames * factor**2
+    h = math.ceil(height / factor) * factor
+    w = math.ceil(width / factor) * factor
+    if frames * h * w < min_pixels:
+        scale = math.sqrt(min_pixels / (frames * height * width))
+        h = math.ceil(max(1, math.ceil(height * scale)) / factor) * factor
+        w = math.ceil(max(1, math.ceil(width * scale)) / factor) * factor
+    if frames * h * w > max_pixels:
+        # The processor's binary search for the tallest content height that fits.
+        low, high = 1, height
+        h = w = factor
+        while low <= high:
+            content_height = (low + high) // 2
+            content_width = max(1, math.floor(width * content_height / height))
+            candidate_h = math.ceil(content_height / factor) * factor
+            candidate_w = math.ceil(content_width / factor) * factor
+            if frames * candidate_h * candidate_w <= max_pixels:
+                h, w = candidate_h, candidate_w
+                low = content_height + 1
+            else:
+                high = content_height - 1
+    return h // arch.vision_patch_size, w // arch.vision_patch_size
+
+
 def _pooled_budget(arch: ModelArch, width: int, height: int) -> tuple[int, int]:
     """Gemma4: the largest aspect-preserving pool-aligned grid under its patch budget."""
     patch = arch.vision_patch_size
@@ -143,6 +198,10 @@ def vision_patch_grid(arch: ModelArch, width: int, height: int) -> tuple[int, in
         return 0, 0
     if arch.vision_resize == "merge_grid":
         return _merge_grid(arch, width, height)
+    if arch.vision_resize == "pixel_bounds":
+        return _pixel_bounds(arch, width, height)
+    if arch.vision_resize == "token_budget":
+        return _token_budget(arch, width, height)
     if arch.vision_resize == "pooled_budget":
         return _pooled_budget(arch, width, height)
     if arch.vision_resize == "dynamic_tiles":
@@ -174,9 +233,12 @@ def vision_feature_cache_bytes(arch: ModelArch, patches: int, act_bytes: float) 
     :return: Bytes of every output's pinned block.
     """
     tokens = patches // arch.vision_spatial_merge_size**2
-    # A patch-merger tower returns its patch sequence beside the merged tokens;
-    # a pooling tower returns only its pooled tokens at the tower width.
-    if arch.vision_out_hidden_size:
+    # A patch-merger tower returns its patch sequence beside the merged tokens,
+    # unless it returns the merged tokens alone; a pooling tower returns only
+    # its pooled tokens at the tower width.
+    if arch.vision_merged_output_only:
+        outputs = [tokens * arch.vision_out_hidden_size]
+    elif arch.vision_out_hidden_size:
         outputs = [
             patches * arch.vision_hidden_size,
             tokens * arch.vision_out_hidden_size,

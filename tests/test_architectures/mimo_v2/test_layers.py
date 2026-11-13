@@ -16,13 +16,13 @@ from transformers.models.mimo_v2_flash.modeling_mimo_v2_flash import (
     eager_attention_forward,
 )
 
-from agilerl.architectures.mimo_v2 import attention as attention_module
-from agilerl.architectures.mimo_v2.attention import (
+from agilerl.architectures.mimo_v2 import layers as attention_module
+from agilerl.architectures.mimo_v2.configuration import MiMoV2Config
+from agilerl.architectures.mimo_v2.layers import (
     apply_attention_sinks,
     install_mimo_v2_fp32_lse_flex_attention,
     mimo_v2_flex_attention_forward,
 )
-from agilerl.architectures.mimo_v2.config import MiMoV2Config
 from tests.test_architectures.mimo_v2.checkpoint_helpers import tiny_hub_config
 
 SEQ_LEN = 32
@@ -32,7 +32,7 @@ FP32_TOLERANCE = {"rtol": 1e-5, "atol": 1e-5}
 
 
 def swa_attention() -> MiMoV2FlashAttention:
-    config = MiMoV2Config.from_dict(tiny_hub_config())
+    config = MiMoV2Config.from_dict(tiny_hub_config()).text_config
     module = MiMoV2FlashAttention(config, layer_idx=SWA_LAYER).train()
     with torch.no_grad():
         module.sinks.copy_(torch.linspace(-1.0, 2.0, config.num_attention_heads))
