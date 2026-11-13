@@ -239,6 +239,15 @@ INSTALL_CLUSTER_PACKAGE: ManifestInvoke = {
     ],
 }
 
+INSTALL_CLUSTER_ARTIFACTS: ManifestInvoke = {
+    "method": "POST",
+    "path": "/api/cli/v1/byoc/clusters/install-artifacts",
+    "responseKind": "json",
+    "params": [
+        {"name": "name", "in": "body", "type": "string", "required": True},
+    ],
+}
+
 DEFAULT_METADATA: dict[str, Any] = {
     "computeResource": {
         "numCpus": 8,

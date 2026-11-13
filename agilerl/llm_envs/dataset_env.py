@@ -81,6 +81,7 @@ class DatasetEnv:
         *,
         objective: Literal["preference", "sft"],
         response_column: str = "response",
+        completion_only_loss: bool = False,
         chat_template_kwargs: dict[str, Any] | None = None,
         data_batch_size_per_gpu: int = 8,
         max_context_length: int | None = None,
@@ -103,6 +104,8 @@ class DatasetEnv:
         :param tokenizer: Tokenizer used by the collate function.
         :param objective: ``"preference"`` (DPO) or ``"sft"``.
         :param response_column: Target column for ``(prompt, response)`` SFT rows.
+        :param completion_only_loss: Train a ``prompt`` row's response only, not
+            assistant turns inside a message-list prompt (TRL prompt-completion).
         :param chat_template_kwargs: Extra kwargs for any chat-template render of
             the dataset's prompts (e.g. ``{"enable_thinking": False}``).
         :param data_batch_size_per_gpu: Batch size for the train/test dataloaders.
@@ -138,6 +141,7 @@ class DatasetEnv:
         self.objective = objective
         self.required_columns = set(required_columns)
         self.response_column = response_column
+        self.completion_only_loss = completion_only_loss
         self._collate_builder = collate_builder
         for label, dataset in (("Train", train_dataset), ("Test", test_dataset)):
             if len(dataset) == 0:
@@ -342,7 +346,11 @@ class DatasetEnv:
             # One malformed row must not stop a run; all of them failing raises below.
             try:
                 ids, mask = encode_sft_row(
-                    self.tokenizer, item, self.response_column, chat_format
+                    self.tokenizer,
+                    item,
+                    self.response_column,
+                    chat_format,
+                    self.completion_only_loss,
                 )
             except Exception as error:
                 errors.append(f"{type(error).__name__}: {error}")
@@ -873,6 +881,7 @@ def encode_sft_row(
     item: dict[str, Any],
     response_column: str,
     chat_format: ChatFormat | None,
+    completion_only_loss: bool = False,
 ) -> tuple[list[int], list[bool]]:
     """Token ids and assistant mask of one SFT row, see :func:`encode_chat_transcript`.
 
@@ -880,10 +889,23 @@ def encode_sft_row(
     :param item: Dataset row.
     :param response_column: Column holding the response of a ``prompt`` row.
     :param chat_format: The model family's chat format.
-    :return: Token ids and, per id, whether it is an assistant token.
+    :param completion_only_loss: Train a conversational prompt-completion row
+        (TRL): ``prompt`` and the response are message lists or their JSON
+        text, and only the response trains; it wins over a ``messages``
+        column in the same row. ``messages`` rows train every assistant turn.
+    :return: Token ids and, per id, whether it is a trained assistant token.
     """
+    if not completion_only_loss or not {"prompt", response_column} <= item.keys():
+        return encode_chat_transcript(
+            tokenizer, sft_messages(item, response_column), sft_tools(item), chat_format
+        )
+    prompt = chat_messages(item["prompt"])
     return encode_chat_transcript(
-        tokenizer, sft_messages(item, response_column), sft_tools(item), chat_format
+        tokenizer,
+        [*prompt, *chat_messages(item[response_column])],
+        sft_tools(item),
+        chat_format,
+        len(prompt),
     )
 
 
@@ -945,7 +967,11 @@ def sft_collate_builder(
         rows = []
         for item in batch:
             ids, mask = encode_sft_row(
-                tokenizer, item, env.response_column, chat_format
+                tokenizer,
+                item,
+                env.response_column,
+                chat_format,
+                env.completion_only_loss,
             )
             fitted = env._fit_to_context(ids, mask)
             if fitted is None:

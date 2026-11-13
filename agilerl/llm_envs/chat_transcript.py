@@ -14,6 +14,7 @@ import re
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
+from agilerl.arena.traces_format import REASONING_KEYS
 from agilerl.llm_envs.chat_formats import (
     ChatFormat,
     ToolCallParseStatus,
@@ -58,9 +59,6 @@ def chat_messages(value: str | list[dict[str, Any]]) -> list[dict[str, Any]]:
     return messages
 
 
-REASONING_KEYS = ("reasoning_content", "thinking", "reasoning")
-"""Message keys chat templates read an assistant turn's reasoning from, most common first."""
-
 REASONING_READ = re.compile(
     r"""\.get\(\s*['"](reasoning_content|thinking|reasoning)['"]\s*\)"""
     r"""|\.(reasoning_content|thinking|reasoning)\b"""
@@ -104,7 +102,7 @@ def _with_reasoning_key(message: dict[str, Any], key: str | None) -> dict[str, A
     """
     if key is None or message.get("role") != "assistant":
         return message
-    present = {name: message[name] for name in REASONING_KEYS if name in message}
+    present = {name: message[name] for name in REASONING_KEYS if message.get(name)}
     values = list(present.values())
     if any(value != values[0] for value in values[1:]):
         msg = (
@@ -172,6 +170,7 @@ def encode_chat_transcript(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None,
     chat_format: ChatFormat | None,
+    trained_from: int = 0,
 ) -> tuple[list[int], list[bool]]:
     """Token ids of a multi-turn conversation, with an assistant mask.
 
@@ -186,13 +185,16 @@ def encode_chat_transcript(
     renders inside an assistant turn stay there. Messages after the last
     assistant turn are dropped. Assistant messages' reasoning is moved to the
     key the chat template reads, see :func:`template_reasoning_key`.
+    Assistant turns before ``trained_from`` are context: masked out, and their
+    tool calls are not checked against the chat format's parser.
 
     :param tokenizer: Tokenizer whose chat template renders the conversation.
     :param messages: Normalized messages, see :func:`chat_messages`.
     :param tools: Tool schemas passed to the template, or ``None``.
     :param chat_format: The model family's chat format, see
         :func:`~agilerl.llm_envs.chat_formats.detect_chat_format`.
-    :return: Token ids and, per id, whether it is an assistant token.
+    :param trained_from: Index of the first message whose assistant turns train.
+    :return: Token ids and, per id, whether it is a trained assistant token.
     :raises ValueError: If the conversation has no prompt or no assistant
         turn, has back-to-back assistant turns, the template renders an
         assistant turn that does not extend the generation prompt, or the chat
@@ -209,6 +211,9 @@ def encode_chat_transcript(
         raise ValueError(msg)
     if assistant_indices[0] == 0:
         msg = "An SFT conversation needs a message before its first assistant turn."
+        raise ValueError(msg)
+    if assistant_indices[-1] < trained_from:
+        msg = "An SFT conversation needs an assistant turn to train after its prompt."
         raise ValueError(msg)
 
     render_messages = _messages_for_render(messages, chat_format)
@@ -236,9 +241,11 @@ def encode_chat_transcript(
         turn = _assistant_turn_ids(
             tokenizer, render_messages[idx], render_kwargs, special_ids, scaffold
         )
-        _check_tool_calls_parse(messages[idx], turn, tools, chat_format)
+        trained = idx >= trained_from
+        if trained:
+            _check_tool_calls_parse(messages[idx], turn, tools, chat_format)
         ids += turn
-        mask += [True] * len(turn)
+        mask += [trained] * len(turn)
         previous = idx
     kept = assistant_indices[-1] + 1
     canonical = _render(tokenizer, render_messages[:kept], False, render_kwargs)
@@ -252,6 +259,7 @@ def encode_chat_transcript(
         render_kwargs,
         chat_format,
         tools,
+        trained_from,
     )
 
 
@@ -424,6 +432,7 @@ def _assemble_from_template(
     render_kwargs: dict[str, Any],
     chat_format: ChatFormat | None,
     tools: list[dict[str, Any]] | None,
+    trained_from: int,
 ) -> tuple[list[int], list[bool]]:
     """Ids of ``canonical``, the template render, with an assistant mask.
 
@@ -433,6 +442,7 @@ def _assemble_from_template(
 
     :param render_messages: Messages as passed to the template.
     :param messages: The same turns, still carrying ``tool_calls`` for the parse check.
+    :param trained_from: Index of the first message whose assistant turns train.
     :return: Token ids and the assistant mask.
     """
     addition = _generation_addition(tokenizer, render_kwargs)
@@ -491,9 +501,11 @@ def _assemble_from_template(
         turn_ids = tokenizer.encode(kept, add_special_tokens=False)
         if needs_eos:
             turn_ids.append(tokenizer.eos_token_id)
-        _check_tool_calls_parse(messages[idx], turn_ids, tools, chat_format)
+        trained = idx >= trained_from
+        if trained:
+            _check_tool_calls_parse(messages[idx], turn_ids, tools, chat_format)
         ids += turn_ids
-        mask += [True] * len(turn_ids)
+        mask += [trained] * len(turn_ids)
         cursor = turn_start + len(kept)
     return ids, mask
 

@@ -1755,6 +1755,25 @@ class TestPydanticModelsForbidExtra:
             "agilerl.arena.inference.agent.SessionDetail",
             "agilerl.arena.inference.agent.SessionInfo",
         }
+        # The traces dataset spec allows unknown columns and message fields.
+        traces_spec = {
+            f"agilerl.arena.models.traces.{name}"
+            for name in (
+                "ContentPart",
+                "ToolCallFunction",
+                "ToolCall",
+                "SystemMessage",
+                "UserMessage",
+                "AssistantMessage",
+                "ToolMessage",
+                "FunctionDefinition",
+                "ToolDefinition",
+                "TraceScore",
+                "TracesRowBase",
+                "TracesRow",
+                "TracesMessagesRow",
+            )
+        }
         found = (*_base_models(models), *_base_models(inference))
         assert found
         extra_by_name = {
@@ -1762,8 +1781,10 @@ class TestPydanticModelsForbidExtra:
         }
         missing = {name for name, extra in extra_by_name.items() if extra != "forbid"}
 
-        assert missing == wire_subset
-        assert all(extra_by_name[name] == "ignore" for name in wire_subset)
+        assert missing == wire_subset | traces_spec
+        assert all(
+            extra_by_name[name] == "ignore" for name in wire_subset | traces_spec
+        )
 
 
 class TestLLMAlgorithmSpecCheckThinkingBudgetParser:
