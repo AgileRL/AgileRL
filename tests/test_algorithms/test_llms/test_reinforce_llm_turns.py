@@ -23,6 +23,7 @@ from agilerl.algorithms.reinforce_llm import REINFORCE
 from tests.test_algorithms.test_llms.llm_helpers import (
     create_module,
     record_calls,
+    rollout_logps,
     use_packed,
 )
 from tests.test_algorithms.test_llms.segment_helpers import (
@@ -78,7 +79,9 @@ def learn_uneven_turns(agent: REINFORCE) -> dict[str, float]:
     turn_ids[:2, 5:] = 1
     rewards = torch.tensor([[1.0, 0.5], [0.0, -1.0], [0.5, 0.0], [-1.0, 0.0]])
     return agent.learn(
-        (list(ids.split(1)), list(mask.split(1)), rewards), turn_ids=turn_ids
+        (list(ids.split(1)), list(mask.split(1)), rewards),
+        turn_ids=turn_ids,
+        sampling_logps=rollout_logps(mask),
     )
 
 
@@ -93,8 +96,13 @@ class TestREINFORCELearnActionlessRows:
         agents = [make_turn_reinforce() for _ in range(2)]
 
         # Act
-        with_forced_row = agents[0].learn((ids, masks, torch.tensor([1.0, 0.0])))
-        live_row_only = agents[1].learn((ids[:1], masks[:1], torch.tensor([1.0])))
+        with_forced_row = agents[0].learn(
+            (ids, masks, torch.tensor([1.0, 0.0])), sampling_logps=rollout_logps(masks)
+        )
+        live_row_only = agents[1].learn(
+            (ids[:1], masks[:1], torch.tensor([1.0])),
+            sampling_logps=rollout_logps(masks[:1]),
+        )
 
         # Assert
         for name in ("loss", "pg_loss", "kl", "entropy"):
@@ -141,7 +149,9 @@ def learn_uneven_rows(agent: REINFORCE) -> dict[str, float]:
     turn_ids[2, 3:5] = 1
     rewards = torch.tensor([[1.0, 0.5], [0.0, 0.0], [0.5, -1.0], [-1.0, 0.0]])
     return agent.learn(
-        (list(ids.split(1)), list(mask.split(1)), rewards), turn_ids=turn_ids
+        (list(ids.split(1)), list(mask.split(1)), rewards),
+        turn_ids=turn_ids,
+        sampling_logps=rollout_logps(mask),
     )
 
 
@@ -208,7 +218,9 @@ def learn_three_turns(agent: REINFORCE, forced: bool) -> dict[str, float]:
         mask[0, 3:] = False
     rewards = torch.tensor([[0.5, 1.0, 2.0], [0.0, -1.0, 0.5]])
     return agent.learn(
-        (list(ids.split(1)), list(mask.split(1)), rewards), turn_ids=turn_ids
+        (list(ids.split(1)), list(mask.split(1)), rewards),
+        turn_ids=turn_ids,
+        sampling_logps=rollout_logps(mask),
     )
 
 
@@ -267,7 +279,11 @@ def learn_with_kl(
 
     monkeypatch.setattr(agent, "_fused_forward_no_grad", set_kl_forward)
     rewards = torch.tensor([[0.5, 2.0], [0.0, -1.0]])
-    agent.learn((list(ids.split(1)), list(mask.split(1)), rewards), turn_ids=turn_ids)
+    agent.learn(
+        (list(ids.split(1)), list(mask.split(1)), rewards),
+        turn_ids=turn_ids,
+        sampling_logps=rollout_logps(mask),
+    )
     return mask
 
 

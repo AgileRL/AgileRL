@@ -1265,9 +1265,7 @@ class TrainingSettings(BaseModel):
         """Whether a reference policy is consulted.
 
         SFT has none. DPO always has one (beta is the preference temperature).
-        Elsewhere the reference supplies the KL term, so ``beta=0`` drops it
-        from the loss; the LLMPPO / LLMREINFORCE fused no-grad pass still
-        builds the row.
+        Elsewhere the reference supplies the KL term, so ``beta=0`` drops it.
         """
         if self.algorithm == "sft":
             return False
@@ -1292,8 +1290,11 @@ class TrainingSettings(BaseModel):
     def has_nograd_pass(self) -> bool:
         """Whether a no-grad logprob pass exists as its own instant.
 
-        SFT backpropagates its targets directly.
+        SFT backpropagates its targets directly. REINFORCE takes old log-probs
+        from the rollout, so it scores only for the KL penalty.
         """
+        if self.algorithm == "reinforce":
+            return self.uses_reference
         return self.algorithm != "sft"
 
     @property

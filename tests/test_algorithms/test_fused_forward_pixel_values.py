@@ -405,7 +405,7 @@ class TestLLMAlgorithmFusedForwardNoGrad:
 
 
 @_LLM_DEPS_SKIP
-class TestGRPOLearnStartLogProbs:
+class TestGRPOLearnStartForward:
     def test_actor_rows_read_the_callers_vision_rows(self) -> None:
         # Arrange: actor log-probs for rows 1, 2 and 3 of 4, one row per forward.
         agent = _make_cpu_grpo_for_kernel_tests(beta=0.0)
@@ -430,11 +430,11 @@ class TestGRPOLearnStartLogProbs:
 
         # Act
         try:
-            agent._learn_start_log_probs(
+            agent._learn_start_forward(
                 ids,
-                action_masks,
                 1,
                 np.array([1, 2, 3]),
+                score_mask=action_masks,
                 pixel_values=pixel_values,
                 pixel_image_counts=[1, 2, 1, 2],
             )

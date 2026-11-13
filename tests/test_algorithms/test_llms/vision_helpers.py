@@ -22,11 +22,14 @@ from transformers import PretrainedConfig, PreTrainedModel
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from agilerl.algorithms.core import LLMAlgorithm
+from agilerl.algorithms.ppo_llm import PPO
+from agilerl.algorithms.reinforce_llm import REINFORCE
 from agilerl.components.llm_rollout_data import EpisodeSegments
 from agilerl.lora.fused import ROUTING_STATE
 from tests.test_algorithms.test_llms.llm_helpers import (
     DummyConfig,
     DummyHiddenStatesModel,
+    rollout_logps,
 )
 
 PAD_TOKEN_ID = 63
@@ -263,13 +266,19 @@ def learn_on_vision_episodes(
     token_ids, action_masks, rewards, turn_ids, pixel_values = vision_episodes()
     episode_pixels = pixel_values.split(IMAGE_COUNTS)
     order = list(episodes)
+    ordered_masks = [action_masks[i] for i in order]
+    # GRPO learns rows that have no sampling log-probs.
+    sampling_logps = (
+        rollout_logps(ordered_masks) if isinstance(agent, (PPO, REINFORCE)) else None
+    )
     return agent.learn(
         (
             [token_ids[i] for i in order],
-            [action_masks[i] for i in order],
+            ordered_masks,
             rewards[order],
         ),
         turn_ids=turn_ids[order],
+        sampling_logps=sampling_logps,
         episode_segments=[SEGMENTS[i] for i in order] if segmented else None,
         pixel_values=torch.cat([episode_pixels[i] for i in order]) + pixel_offset,
         pixel_image_counts=[IMAGE_COUNTS[i] for i in order],

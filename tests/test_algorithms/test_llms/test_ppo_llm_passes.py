@@ -37,6 +37,7 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from agilerl.algorithms.core.sequence_layout import ContextParallelSequence
 from agilerl.algorithms.ppo_llm import PPO as LLMPPO
+from agilerl.components.llm_rollout_data import EpisodeSegments
 from agilerl.distributed.fsdp import FSDPConfig
 from agilerl.lora.fused import (
     ROUTING_STATE,
@@ -57,6 +58,7 @@ from tests.test_algorithms.test_llms.llm_helpers import (
     optimizer_state,
     record_calls,
     record_outputs,
+    rollout_logps,
     scale_losses,
     score_hand_laid_hidden,
     take_grads,
@@ -65,9 +67,12 @@ from tests.test_algorithms.test_llms.llm_helpers import (
     use_packed,
 )
 from tests.test_algorithms.test_llms.segment_helpers import (
+    EPISODE_SEGMENTS,
     RESOLVED_FSDP_MEMORY,
+    episode_sampling_logps,
     record_step_gradients,
     seed_lora_weights,
+    segment_experiences,
 )
 from tests.test_algorithms.test_llms.test_ppo_llm_vision import (
     IMAGE_COUNTS,
@@ -734,7 +739,10 @@ def learn_rows(agent: LLMPPO, rows: slice = slice(0, 4)) -> dict[str, float]:
     mask = torch.zeros(4, SEQ_LEN + 1, dtype=torch.bool)[rows]
     mask[:, 3:] = True
     rewards = torch.tensor([1.0, 0.0, 0.5, -1.0])[rows]
-    return agent.learn((list(ids.split(1)), list(mask.split(1)), rewards))
+    return agent.learn(
+        (list(ids.split(1)), list(mask.split(1)), rewards),
+        sampling_logps=rollout_logps(mask),
+    )
 
 
 def adapter_lora_names(agent: LLMPPO) -> set[str]:
@@ -913,6 +921,7 @@ class TestPPOLearnPasses:
         agent.learn(
             (token_ids, action_masks, rewards),
             turn_ids=turn_ids,
+            sampling_logps=rollout_logps(action_masks),
             pixel_values=pixel_values,
             pixel_image_counts=IMAGE_COUNTS,
         )
@@ -964,8 +973,13 @@ class TestPPOLearnPasses:
         agents = [make_ppo(micro_batch_size_per_gpu=1) for _ in range(2)]
 
         # Act
-        with_forced_row = agents[0].learn((ids, masks, torch.tensor([1.0, 0.0])))
-        live_row_only = agents[1].learn((ids[:1], masks[:1], torch.tensor([1.0])))
+        with_forced_row = agents[0].learn(
+            (ids, masks, torch.tensor([1.0, 0.0])), sampling_logps=rollout_logps(masks)
+        )
+        live_row_only = agents[1].learn(
+            (ids[:1], masks[:1], torch.tensor([1.0])),
+            sampling_logps=rollout_logps(masks[:1]),
+        )
 
         # Assert: float32 sums over different batch shapes differ in the last bits
         for name in ("loss", "pg_loss", "vf_loss", "kl", "entropy", "clipfrac"):
@@ -983,7 +997,10 @@ def learn_ragged_rows(agent: LLMPPO) -> dict[str, float]:
     mask[:, 3:] = True
     mask[1, -2:] = False
     rewards = torch.tensor([1.0, 0.0, 0.5, -1.0])
-    return agent.learn((list(ids.split(1)), list(mask.split(1)), rewards))
+    return agent.learn(
+        (list(ids.split(1)), list(mask.split(1)), rewards),
+        sampling_logps=rollout_logps(mask),
+    )
 
 
 class TestPPOLearnPaddingStats:
@@ -1037,14 +1054,17 @@ def learn_uneven_rows(agent: LLMPPO, turns: bool) -> dict[str, float]:
                 list(ids.split(1)),
                 list(mask.split(1)),
                 torch.tensor([1.0, 0.0, 0.5, -1.0]),
-            )
+            ),
+            sampling_logps=rollout_logps(mask),
         )
     turn_ids = torch.where(mask, 0, -1)
     turn_ids[0, 4:7] = 1
     turn_ids[2, 3:5] = 1
     rewards = torch.tensor([[1.0, 0.5], [0.0, 0.0], [0.5, -1.0], [-1.0, 0.0]])
     return agent.learn(
-        (list(ids.split(1)), list(mask.split(1)), rewards), turn_ids=turn_ids
+        (list(ids.split(1)), list(mask.split(1)), rewards),
+        turn_ids=turn_ids,
+        sampling_logps=rollout_logps(mask),
     )
 
 
@@ -1139,7 +1159,9 @@ def learn_uneven_turns(agent: LLMPPO) -> dict[str, float]:
     turn_ids[:2, 5:] = 1
     rewards = torch.tensor([[1.0, 0.5], [0.0, -1.0], [0.5, 0.0], [-1.0, 0.0]])
     return agent.learn(
-        (list(ids.split(1)), list(mask.split(1)), rewards), turn_ids=turn_ids
+        (list(ids.split(1)), list(mask.split(1)), rewards),
+        turn_ids=turn_ids,
+        sampling_logps=rollout_logps(mask),
     )
 
 
@@ -1230,7 +1252,9 @@ def learn_three_turns(agent: LLMPPO, forced: bool) -> dict[str, float]:
         mask[0, 4:] = False
     rewards = torch.tensor([[0.5, 1.0, 2.0], [0.0, -1.0, 0.5]])
     return agent.learn(
-        (list(ids.split(1)), list(mask.split(1)), rewards), turn_ids=turn_ids
+        (list(ids.split(1)), list(mask.split(1)), rewards),
+        turn_ids=turn_ids,
+        sampling_logps=rollout_logps(mask),
     )
 
 
@@ -1687,3 +1711,79 @@ class TestPPOValueLoss:
         loss = stub._ppo_value_loss(values, returns, mask, turn_ids, 2, "turn")
 
         assert loss.item() == pytest.approx(0.0)
+
+
+class TestLLMPPOLearnNoGradRows:
+    """The learn-start forward runs the critic, and the reference only with a KL term."""
+
+    @pytest.mark.parametrize(
+        "episode_segments", [None, EPISODE_SEGMENTS], ids=["episodes", "segments"]
+    )
+    def test_without_kl_runs_only_the_critic(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        episode_segments: list[EpisodeSegments | None] | None,
+    ) -> None:
+        # Arrange
+        agent = make_ppo(beta=0.0, batch_size=4)
+        recorded, calls = record_calls(agent._fused_forward_no_grad)
+        monkeypatch.setattr(agent, "_fused_forward_no_grad", recorded)
+
+        # Act
+        metrics = agent.learn(
+            segment_experiences(PAD_TOKEN_ID),
+            sampling_logps=episode_sampling_logps(PAD_TOKEN_ID),
+            episode_segments=episode_segments,
+        )
+
+        # Assert
+        ((_args, kwargs, _),) = calls
+        assert kwargs["include_reference"] is False
+        assert kwargs["include_actor"] is False
+        assert math.isfinite(metrics["loss"])
+        assert metrics["vllm_is_rows_skipped"] == 0.0
+        assert math.isfinite(metrics["vllm_is_delta_mean"])
+
+    def test_kl_runs_the_reference_and_critic_on_every_row(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        agent = make_ppo(beta=0.01, batch_size=4)
+        recorded, calls = record_calls(agent._fused_forward_no_grad)
+        monkeypatch.setattr(agent, "_fused_forward_no_grad", recorded)
+
+        # Act
+        metrics = agent.learn(
+            segment_experiences(PAD_TOKEN_ID),
+            sampling_logps=episode_sampling_logps(PAD_TOKEN_ID),
+        )
+
+        # Assert
+        ((args, kwargs, _),) = calls
+        assert args[0].shape[0] == 4
+        assert kwargs["include_reference"] is True
+        assert kwargs["include_actor"] is False
+        assert math.isfinite(metrics["loss"])
+
+    def test_a_row_without_sampling_log_probs_raises(self) -> None:
+        agent = make_ppo(batch_size=4)
+        logps = episode_sampling_logps(PAD_TOKEN_ID)
+
+        with pytest.raises(
+            ValueError,
+            match=r"PPO needs sampling_logps on every action token; row 2 has none, expected 4\.",
+        ):
+            agent.learn(
+                segment_experiences(PAD_TOKEN_ID),
+                sampling_logps=[logps[0], logps[1], None, logps[3]],
+            )
+
+    def test_a_short_row_raises(self) -> None:
+        agent = make_ppo(batch_size=4)
+        logps = episode_sampling_logps(PAD_TOKEN_ID)
+
+        with pytest.raises(ValueError, match=r"row 1 has 5, expected 6\."):
+            agent.learn(
+                segment_experiences(PAD_TOKEN_ID),
+                sampling_logps=[logps[0], logps[1][:-1], logps[2], logps[3]],
+            )

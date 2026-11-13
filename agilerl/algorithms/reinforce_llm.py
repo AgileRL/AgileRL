@@ -417,14 +417,13 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
             token, including tokens outside the action mask; ``-1`` elsewhere.
             If ``None``, all action tokens are treated as turn ``0``.
         :type turn_ids: torch.Tensor | None
-        :param sampling_logps: Optional per-row flat vLLM sampling logprobs (one
-            1-D tensor per trajectory, generated tokens only; concatenated across
+        :param sampling_logps: Per-row flat vLLM sampling logprobs (one 1-D
+            tensor per trajectory, generated tokens only; concatenated across
             turns for multi-turn), the old policy of the importance ratio.
             vLLM reports them under the penalised distribution it sampled
             from, and the policy carries no penalties, so the ratio is the
             exact policy-to-behaviour ratio. Parallel to the stacked
-            ``token_ids`` rows. Rows without them, or ``None``, use the
-            learn-start policy.
+            ``token_ids`` rows. Required on every action token of every row.
         :type sampling_logps: list[torch.Tensor | None] | None
         :param episode_segments: Optional segment layout per trajectory,
             parallel to the stacked ``token_ids`` rows (``None`` for an
@@ -451,10 +450,12 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
             of those tokens are normalized over their support, the
             distribution vLLM sampled from.
         :type sampling_supports: list[torch.Tensor | None] | None
-        :return: Dict with keys ``loss``, ``kl``, ``pg_loss``,
-            ``entropy``, averaged over all minibatch updates, plus row padding
+        :return: Dict with keys ``loss``, ``kl`` (NaN when ``beta == 0``),
+            ``pg_loss``, ``entropy``, averaged over all minibatch updates, plus row padding
             stats and ``learn_phase_<phase>_s`` wall seconds.
         :rtype: dict[str, float]
+        :raises ValueError: If a row lacks a sampling log-prob on any action
+            token.
         """
         phase_timer = self._start_learn_phases()
         self._prepare_vllm_for_training()
@@ -463,6 +464,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
             token_ids, action_masks, turn_ids, rewards_2d = self._stack_rollout_batch(
                 experiences, turn_ids
             )
+            self._require_sampling_logprobs(sampling_logps, action_masks)
             action_mask_bool = action_masks.bool()
             num_samples = token_ids.shape[0]
             policy_granularity = self._resolve_advantage_granularity(turn_ids)
@@ -504,9 +506,17 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
             token_budget = None if has_segments else self._micro_batch_token_budget()
             phase_timer.mark("prepare")
             no_grad_images = 0 if pixel_values is None else int(pixel_values.shape[0])
-            reference_log_probs, old_log_probs, _ = self._fused_forward_no_grad(
-                token_ids if rows is None else rows.token_ids,
+            no_grad_ids = token_ids if rows is None else rows.token_ids
+            # The KL reward penalty reads learn-start log-probs of every row.
+            actor_rows = (
+                np.arange(no_grad_ids.shape[0])
+                if self.beta != 0.0
+                else np.empty(0, dtype=np.intp)
+            )
+            reference_log_probs, trainer_log_probs, _ = self._learn_start_forward(
+                no_grad_ids,
                 batch_size,
+                actor_rows,
                 pixel_values=pixel_values,
                 pixel_image_counts=pixel_image_counts,
                 image_keys=None
@@ -520,15 +530,21 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                 # Returns and advantages run over whole episodes.
                 frame = (num_samples, int(action_masks.shape[1]))
                 reference_log_probs = rows.merge_frame(reference_log_probs, *frame, 1.0)
-                old_log_probs = rows.merge_frame(old_log_probs, *frame, 1.0)
+                trainer_log_probs = rows.merge_frame(trainer_log_probs, *frame, 1.0)
             token_rewards = self._compute_token_rewards(
                 action_masks, rewards_2d, turn_ids
             )
-            old_log_probs = torch.masked_fill(old_log_probs, ~action_mask_bool, 1.0)
+            trainer_log_probs = torch.masked_fill(
+                trainer_log_probs, ~action_mask_bool, 1.0
+            )
             reference_log_probs = torch.masked_fill(
                 reference_log_probs, ~action_mask_bool, 1.0
             )
-            token_kl_penalty = self.beta * (old_log_probs - reference_log_probs)
+            token_kl_penalty = (
+                torch.zeros_like(trainer_log_probs)
+                if self.beta == 0.0
+                else self.beta * (trainer_log_probs - reference_log_probs)
+            )
 
             if policy_granularity == "token":
                 advantages = self._compute_rebn_advantages_token(
@@ -541,14 +557,9 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                 )
             del token_rewards, token_kl_penalty
 
-            sampling_log_probs, is_metrics, is_excluded = (
-                self._aligned_sampling_logprobs_and_metrics(
-                    sampling_logps, action_masks, old_log_probs
-                )
+            old_log_probs = self._rollout_old_log_probs(
+                sampling_logps, action_masks, torch.ones_like(trainer_log_probs)
             )
-            # Rows lacking sampling log-probs keep the learn-start policy's.
-            if sampling_log_probs is not None:
-                old_log_probs = sampling_log_probs
 
             row_episodes = np.arange(num_samples)
             image_keys = None if pixel_values is None else torch.arange(no_grad_images)
@@ -567,7 +578,12 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                         image_token_id,
                     )
                 )
-                turn_ids, old_log_probs, reference_log_probs, advantages = row_frames
+                (
+                    turn_ids,
+                    old_log_probs,
+                    reference_log_probs,
+                    advantages,
+                ) = row_frames
                 token_ids = rows.token_ids
                 action_masks = rows.action_masks
                 pixel_values = rows.pixel_values
@@ -582,6 +598,10 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
             batch_idxs = np.arange(num_samples)
             filler_rows = row_episodes < 0
             padding_stats = self._row_padding_stats(token_ids, row_episodes, batch_idxs)
+            update_log_probs = torch.zeros_like(old_log_probs)
+            scored_rows = torch.zeros(
+                num_samples, dtype=torch.bool, device=old_log_probs.device
+            )
             phase_timer.mark("prepare")
 
             held_loss: torch.Tensor | None = None
@@ -699,6 +719,10 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                     batch_log_probs = torch.masked_fill(
                         batch_log_probs, ~batch_mask_bool, 1.0
                     )
+                    update_log_probs[rows_index] = batch_log_probs.detach().to(
+                        update_log_probs.dtype
+                    )
+                    scored_rows[rows_index] = True
 
                     kl = batch_log_probs - batch_reference_log_probs
                     masked_entropy = masked_mean(
@@ -755,6 +779,12 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
             # Gradients still pending a step carry into the next learn call.
             if held_loss is not None:
                 self._raise_if_loss_not_finite_on_any_rank(held_loss)
+            is_metrics, is_excluded = self._rollout_mismatch_metrics(
+                update_log_probs,
+                old_log_probs,
+                action_masks,
+                scored_rows & torch.as_tensor(~filler_rows, device=scored_rows.device),
+            )
 
         averaged = learn_metrics.means()
         result = dict(averaged)

@@ -94,7 +94,11 @@ class TestPPOLearnEpisodeSegments:
         before = lora_weights(agent)
 
         # Act
-        metrics = agent.learn(_experiences(), episode_segments=EPISODE_SEGMENTS)
+        metrics = agent.learn(
+            _experiences(),
+            sampling_logps=episode_sampling_logps(PAD_TOKEN_ID),
+            episode_segments=EPISODE_SEGMENTS,
+        )
 
         # Assert
         for key in ("loss", "pg_loss", "vf_loss", "kl", "entropy"):
@@ -102,15 +106,8 @@ class TestPPOLearnEpisodeSegments:
         after = lora_weights(agent)
         assert any(not torch.equal(after[name], before[name]) for name in before)
 
-    @pytest.mark.parametrize(
-        "sampling_logps",
-        [None, episode_sampling_logps(PAD_TOKEN_ID)],
-        ids=["no_sampling_logps", "sampling_logps"],
-    )
     def test_one_micro_batch_matches_the_unsegmented_gradient(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        sampling_logps: list[torch.Tensor | None] | None,
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Arrange: every row fits one micro-batch, so returns, advantages and the
         # token-mean losses cover the same action tokens either way.
@@ -125,10 +122,12 @@ class TestPPOLearnEpisodeSegments:
         segmented_grads = record_step_gradients(segmented, monkeypatch)
 
         # Act
-        unsegmented.learn(_experiences(), sampling_logps=sampling_logps)
+        unsegmented.learn(
+            _experiences(), sampling_logps=episode_sampling_logps(PAD_TOKEN_ID)
+        )
         segmented.learn(
             _experiences(),
-            sampling_logps=sampling_logps,
+            sampling_logps=episode_sampling_logps(PAD_TOKEN_ID),
             episode_segments=EPISODE_SEGMENTS,
         )
 
@@ -156,9 +155,17 @@ class TestPPOLearnEpisodeSegments:
         padded_grads = record_step_gradients(padded, monkeypatch)
 
         # Act
-        alone.learn(_experiences(), episode_segments=EPISODE_SEGMENTS)
+        alone.learn(
+            _experiences(),
+            sampling_logps=episode_sampling_logps(PAD_TOKEN_ID),
+            episode_segments=EPISODE_SEGMENTS,
+        )
         pad_to_eight_rows(monkeypatch)
-        padded_metrics = padded.learn(_experiences(), episode_segments=EPISODE_SEGMENTS)
+        padded_metrics = padded.learn(
+            _experiences(),
+            sampling_logps=episode_sampling_logps(PAD_TOKEN_ID),
+            episode_segments=EPISODE_SEGMENTS,
+        )
 
         # Assert
         assert padded_metrics["train_rows_padded"] == pytest.approx(8.0)
@@ -182,12 +189,20 @@ class TestPPOLearnEpisodeSegments:
         dealt_grads = record_step_gradients(dealt, monkeypatch)
 
         # Act
-        local_metrics = local.learn(_experiences(), episode_segments=EPISODE_SEGMENTS)
+        local_metrics = local.learn(
+            _experiences(),
+            sampling_logps=episode_sampling_logps(PAD_TOKEN_ID),
+            episode_segments=EPISODE_SEGMENTS,
+        )
         monkeypatch.setattr(
             "agilerl.algorithms.core.base.balance_rows_across_ranks",
             rows_from_other_ranks,
         )
-        dealt_metrics = dealt.learn(_experiences(), episode_segments=EPISODE_SEGMENTS)
+        dealt_metrics = dealt.learn(
+            _experiences(),
+            sampling_logps=episode_sampling_logps(PAD_TOKEN_ID),
+            episode_segments=EPISODE_SEGMENTS,
+        )
 
         # Assert
         assert len(local_grads) == len(dealt_grads) == 1
@@ -208,8 +223,16 @@ class TestPPOLearnEpisodeSegments:
         all_none = _make_ppo()
 
         # Act
-        unset_metrics = unset.learn(_experiences(), episode_segments=None)
-        all_none_metrics = all_none.learn(_experiences(), episode_segments=[None] * 4)
+        unset_metrics = unset.learn(
+            _experiences(),
+            sampling_logps=episode_sampling_logps(PAD_TOKEN_ID),
+            episode_segments=None,
+        )
+        all_none_metrics = all_none.learn(
+            _experiences(),
+            sampling_logps=episode_sampling_logps(PAD_TOKEN_ID),
+            episode_segments=[None] * 4,
+        )
 
         # Assert
         timings = set(LEARN_PHASE_METRIC_NAMES)
@@ -228,7 +251,11 @@ class TestPPOLearnEpisodeSegments:
         with pytest.raises(
             ValueError, match="episode_segments has 3 entries for 4 episodes"
         ):
-            agent.learn(_experiences(), episode_segments=EPISODE_SEGMENTS[:3])
+            agent.learn(
+                _experiences(),
+                sampling_logps=episode_sampling_logps(PAD_TOKEN_ID),
+                episode_segments=EPISODE_SEGMENTS[:3],
+            )
 
     def test_trajectory_importance_sampling_is_rejected(self) -> None:
         agent = _make_ppo(importance_sampling_level="trajectory")
@@ -236,7 +263,11 @@ class TestPPOLearnEpisodeSegments:
         with pytest.raises(
             ValueError, match="Set importance_sampling_level='token' or 'turn'"
         ):
-            agent.learn(_experiences(), episode_segments=EPISODE_SEGMENTS)
+            agent.learn(
+                _experiences(),
+                sampling_logps=episode_sampling_logps(PAD_TOKEN_ID),
+                episode_segments=EPISODE_SEGMENTS,
+            )
 
 
 def scale_value_losses(
@@ -263,10 +294,18 @@ class TestPPOLearnBalancedAcrossRanks:
         make_agent = partial(
             _make_ppo, beta=0.0, max_grad_norm=1e30, whiten_advantages=False
         )
-        rank0, rank1 = rank_local_step_gradients(make_agent, monkeypatch)
+        rank0, rank1 = rank_local_step_gradients(
+            make_agent, monkeypatch, sampling_ranks=(0, 1)
+        )
 
         # Act
-        reports = run_ranks(balanced_learn_worker, 2, make_agent, backend=None)
+        reports = run_ranks(
+            balanced_learn_worker,
+            2,
+            make_agent,
+            partial(learn_rank_episodes, sampling_ranks=(0, 1)),
+            backend=None,
+        )
 
         # Assert: 4 and 2 rows are dealt out as 3 and 3.
         for padded_rows, steps in reports:
@@ -284,47 +323,13 @@ class TestPPOLearnBalancedAcrossRanks:
                     msg=name,
                 )
 
-    def test_sampling_log_probs_on_one_rank_reweight_only_its_rows(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Arrange: only rank 0's episodes carry vLLM sampling log-probs, and
-        # one of its rows trains on rank 1.
-        make_agent = partial(
-            _make_ppo, beta=0.0, max_grad_norm=1e30, whiten_advantages=False
-        )
-        uncorrected, _ = rank_local_step_gradients(make_agent, monkeypatch)
-        rank0, rank1 = rank_local_step_gradients(
-            make_agent, monkeypatch, sampling_ranks=(0,)
-        )
-
-        # Act
-        reports = run_ranks(
-            balanced_learn_worker,
-            2,
-            make_agent,
-            partial(learn_rank_episodes, sampling_ranks=(0,)),
-            backend=None,
-        )
-
-        # Assert
-        assert any(not torch.allclose(rank0[name], uncorrected[name]) for name in rank0)
-        for padded_rows, steps in reports:
-            assert padded_rows == pytest.approx(3.0)
-            assert len(steps) == 1
-            for name in rank0:
-                # fp32 sums over a different micro-batch order and rank split,
-                # on critic gradients up to about 20.
-                torch.testing.assert_close(
-                    torch.from_numpy(steps[0][name]),
-                    (4 * rank0[name] + 2 * rank1[name]) / 6,
-                    rtol=1e-5,
-                    atol=1e-5,
-                    msg=name,
-                )
-
     def test_a_non_finite_loss_on_one_rank_raises_on_every_rank(self) -> None:
         # Arrange: every loss of rank 0 is NaN, every loss of rank 1 finite.
-        learn = partial(learn_with_nan_loss_on_rank_zero, scale_loss=scale_value_losses)
+        learn = partial(
+            learn_with_nan_loss_on_rank_zero,
+            scale_loss=scale_value_losses,
+            sampling_ranks=(0, 1),
+        )
 
         # Act
         reports = run_ranks(balanced_learn_worker, 2, _make_ppo, learn, backend=None)
@@ -342,7 +347,9 @@ class TestPPOLearnPhaseTimings:
         agent = _make_ppo()
 
         # Act
-        metrics = agent.learn(_experiences())
+        metrics = agent.learn(
+            _experiences(), sampling_logps=episode_sampling_logps(PAD_TOKEN_ID)
+        )
 
         # Assert
         assert set(LEARN_PHASE_METRIC_NAMES) <= set(metrics)

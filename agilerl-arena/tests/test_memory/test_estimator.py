@@ -307,14 +307,12 @@ class TestEstimateTraining:
         assert not any("beta=0" in w for w in cold.warnings)
 
     @pytest.mark.parametrize("algorithm", ["ppo", "reinforce"])
-    def test_beta_zero_warns_where_the_fused_pass_builds_the_reference_row(
-        self, model, device, algorithm
-    ):
+    def test_beta_zero_does_not_warn(self, model, device, algorithm):
         settings = TrainingSettings(algorithm=algorithm, beta=0.0, max_model_len=4096)
 
         estimate = estimate_training(model, device, settings)
 
-        assert any("beta=0" in w for w in estimate.warnings)
+        assert not any("beta=0" in w for w in estimate.warnings)
 
     def test_packed_adapters_charge_fp32(self, device):
         model = ModelSpec(model_id="moe-test", arch=MOE_TINY)
@@ -1965,6 +1963,22 @@ class TestAlgorithmTerms:
         assert not settings.uses_generation_engine
         breakdown = estimate_training(model, device, settings)
         assert component(breakdown, "activations").detail["nograd_peak"] == 0
+
+    @pytest.mark.parametrize(("beta", "has_pass"), [(0.0, False), (0.04, True)])
+    def test_reinforce_runs_the_nograd_pass_only_for_the_kl_penalty(
+        self, model, device, beta, has_pass
+    ):
+        # Arrange
+        settings = TrainingSettings(algorithm="reinforce", beta=beta)
+
+        # Act
+        breakdown = estimate_training(model, device, settings)
+
+        # Assert
+        assert settings.has_nograd_pass is has_pass
+        assert (component(breakdown, "activations").detail["nograd_peak"] > 0) is (
+            has_pass
+        )
 
     def test_sft_has_no_reference_or_critic(self):
         settings = TrainingSettings(algorithm="sft")

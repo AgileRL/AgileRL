@@ -7,7 +7,7 @@ SFT/DPO tests import these without pulling in ``test_grpo``'s vLLM
 ``importorskip``, which is unavailable on macOS/Windows.
 """
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -363,6 +363,11 @@ def right_padded_batch(
     ids = torch.randint(0, pad_token_id, (len(lengths), seq_len), generator=generator)
     mask = torch.arange(seq_len) < torch.tensor(lengths).unsqueeze(1)
     return ids.masked_fill(~mask, pad_token_id), mask
+
+
+def rollout_logps(masks: Iterable[torch.Tensor]) -> list[torch.Tensor]:
+    """A ``-4.0`` vLLM sampling log-prob on each action token of every row."""
+    return [torch.full((int(mask.sum()),), -4.0) for mask in masks]
 
 
 def scale_losses(

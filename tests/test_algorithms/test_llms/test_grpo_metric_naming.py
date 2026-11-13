@@ -67,6 +67,7 @@ class _Stub:
     ) -> None:
         self.device = torch.device("cpu")
         self.beta = beta
+        self.use_value_head = False
         self.loss_type = "grpo"
         self.importance_sampling_level = importance_sampling_level
         self.advantage_granularity = advantage_granularity
@@ -120,11 +121,10 @@ class _Stub:
     learn = GRPO.learn
     _align_sampling_logprobs = GRPO._align_sampling_logprobs
     _align_sampling_supports = staticmethod(GRPO._align_sampling_supports)
-    _aligned_sampling_logprobs_and_metrics = GRPO._aligned_sampling_logprobs_and_metrics
     _apply_kl_advantage_shaping = GRPO._apply_kl_advantage_shaping
     _clipped_units = GRPO._clipped_units
     _compute_policy_loss = GRPO._compute_policy_loss
-    _learn_start_log_probs = GRPO._learn_start_log_probs
+    _learn_start_forward = GRPO._learn_start_forward
     _check_segments_supported = LLMAlgorithm._check_segments_supported
     _device_index = staticmethod(LLMAlgorithm._device_index)
     _epoch_orders = LLMAlgorithm._epoch_orders

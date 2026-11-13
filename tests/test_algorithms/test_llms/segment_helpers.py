@@ -232,16 +232,18 @@ def learn_with_nan_loss_on_rank_zero(
     agent: LLMAlgorithm,
     rank: int,
     scale_loss: Callable[[LLMAlgorithm, pytest.MonkeyPatch, Iterator[float]], None],
+    sampling_ranks: Sequence[int] = (),
 ) -> tuple[str, bool]:
     """Learn on ``rank``'s :data:`RANK_EPISODES` with every rank 0 loss NaN.
 
     :param scale_loss: Makes each of ``agent``'s losses carry the next scale.
+    :param sampling_ranks: Ranks whose episodes carry vLLM sampling log-probs.
     :return: The error ``learn`` raised, and whether the weights stayed put.
     """
     scale_loss(agent, pytest.MonkeyPatch(), repeat(float("nan") if rank == 0 else 1.0))
     before = lora_weights(agent)
     with pytest.raises(ValueError, match="Loss is not finite") as error:
-        learn_rank_episodes(agent, rank)
+        learn_rank_episodes(agent, rank, sampling_ranks)
     after = lora_weights(agent)
     return str(error.value), all(
         torch.equal(after[name], weight) for name, weight in before.items()

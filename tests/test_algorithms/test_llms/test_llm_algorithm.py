@@ -11,7 +11,7 @@ required.
 
 import logging
 import math
-import warnings
+import re
 from types import SimpleNamespace
 
 import numpy as np
@@ -246,9 +246,76 @@ class SamplingMismatchStub:
     _align_sampling_logprobs = LLMAlgorithm._align_sampling_logprobs
     _sampling_mismatch_metrics = LLMAlgorithm._sampling_mismatch_metrics
     _warn_on_sampling_mismatch = LLMAlgorithm._warn_on_sampling_mismatch
-    _aligned_sampling_logprobs_and_metrics = (
-        LLMAlgorithm._aligned_sampling_logprobs_and_metrics
+    _rollout_mismatch_metrics = LLMAlgorithm._rollout_mismatch_metrics
+    _rollout_old_log_probs = LLMAlgorithm._rollout_old_log_probs
+    _rows_with_full_sampling_logprobs = staticmethod(
+        LLMAlgorithm._rows_with_full_sampling_logprobs
     )
+    _require_sampling_logprobs = LLMAlgorithm._require_sampling_logprobs
+
+
+class TestLLMAlgorithmRequireSamplingLogprobs:
+    """Every row must carry a sampling log-prob on each action token."""
+
+    def test_full_rows_pass(self) -> None:
+        stub = SamplingMismatchStub()
+        masks = torch.tensor([[True, True, False], [False, True, True]])
+
+        stub._require_sampling_logprobs(
+            [torch.tensor([-0.1, -0.2]), torch.tensor([-0.3, -0.4])], masks
+        )
+
+    @pytest.mark.parametrize(
+        ("sampling", "message"),
+        [
+            (None, "row 0 has none, expected 2"),
+            ([torch.tensor([-0.1, -0.2])], "row 1 has none, expected 2"),
+            (
+                [torch.tensor([-0.1, -0.2]), torch.tensor([-0.3])],
+                "row 1 has 1, expected 2",
+            ),
+        ],
+    )
+    def test_missing_or_short_row_raises_naming_it(
+        self, sampling: list[torch.Tensor] | None, message: str
+    ) -> None:
+        stub = SamplingMismatchStub()
+        masks = torch.tensor([[True, True, False], [False, True, True]])
+
+        with pytest.raises(
+            ValueError,
+            match=f"SamplingMismatchStub needs sampling_logps on every action token; {message}",
+        ):
+            stub._require_sampling_logprobs(sampling, masks)
+
+    @pytest.mark.multi_rank
+    def test_a_missing_row_on_one_rank_raises_on_every_rank(self) -> None:
+        run_ranks(_require_sampling_logprobs_rank_zero_missing_worker)
+
+
+def _require_sampling_logprobs_rank_zero_missing_worker(
+    rank: int, world_size: int
+) -> None:
+    # Arrange: rank 0 lacks row 1's sampling log-probs; rank 1 has both rows.
+    stub = SamplingMismatchStub()
+    masks = torch.tensor([[True, True, False], [False, True, True]])
+    sampling = [torch.tensor([-0.1, -0.2])]
+    if rank == 1:
+        sampling.append(torch.tensor([-0.3, -0.4]))
+    reason = (
+        "row 1 has none, expected 2."
+        if rank == 0
+        else "another rank has a row without them."
+    )
+
+    # Act / Assert
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            f"SamplingMismatchStub needs sampling_logps on every action token; {reason}"
+        ),
+    ):
+        stub._require_sampling_logprobs(sampling, masks)
 
 
 class TestLLMAlgorithmSamplingMismatchMetrics:
@@ -357,25 +424,82 @@ class TestLLMAlgorithmAlignSamplingLogprobs:
         assert aligned is not old
 
 
-class TestLLMAlgorithmAlignedSamplingLogprobsAndMetrics:
-    """Engine-vs-trainer mismatch metrics and the warning guard on them."""
+class TestLLMAlgorithmRolloutOldLogProbs:
+    """Rollout log-probs as the old policy, trainer log-probs where they are missing."""
+
+    def test_rows_without_full_sampling_log_probs_keep_trainer_log_probs(
+        self,
+    ) -> None:
+        # Arrange: row 0 has no capture; the trainer skipped row 1 (NaN).
+        stub = SamplingMismatchStub()
+        masks = torch.tensor([[True, True, False], [True, False, True]])
+        trainer = torch.tensor([[-1.0, -2.0, -3.0], [math.nan] * 3])
+        sampling = [None, torch.tensor([-0.5, -0.7])]
+
+        # Act
+        old = stub._rollout_old_log_probs(sampling, masks, trainer)
+
+        # Assert
+        assert torch.equal(old, torch.tensor([[-1.0, -2.0, -3.0], [-0.5, 0.0, -0.7]]))
+
+    def test_no_capture_returns_trainer_log_probs_with_nan_zeroed(self) -> None:
+        stub = SamplingMismatchStub()
+        masks = torch.ones(1, 2, dtype=torch.bool)
+        trainer = torch.tensor([[-1.0, math.nan]])
+
+        old = stub._rollout_old_log_probs(None, masks, trainer)
+
+        assert torch.equal(old, torch.tensor([[-1.0, 0.0]]))
+
+
+class TestLLMAlgorithmRolloutMismatchMetrics:
+    """Update-vs-rollout mismatch metrics and the warning guard on them."""
 
     def test_reports_ratio_std_over_action_tokens(self) -> None:
         # Arrange: log-diffs 0 and ln(1.5) give ratios 1.0 and 1.5.
         stub = SamplingMismatchStub(max_logprob_gap=1.0)
         masks = torch.ones(1, 2, dtype=torch.bool)
-        old = torch.zeros(1, 2)
-        sampling = [torch.tensor([0.0, -math.log(1.5)])]
+        policy = torch.zeros(1, 2)
+        old = torch.tensor([[0.0, -math.log(1.5)]])
 
         # Act
-        _, metrics, excluded = stub._aligned_sampling_logprobs_and_metrics(
-            sampling, masks, old
+        metrics, excluded = stub._rollout_mismatch_metrics(
+            policy, old, masks, torch.tensor([True])
         )
 
         # Assert
         assert metrics["vllm_is_ratio_mean"] == pytest.approx(1.25)
         assert metrics["vllm_is_ratio_std"] == pytest.approx(0.25)
+        assert metrics["vllm_is_rows_skipped"] == 0.0
         assert excluded == ()
+
+    def test_only_compared_rows_count(self) -> None:
+        # Arrange: row 0 has a 0.5 nat gap; row 1, not compared, has 3.
+        stub = SamplingMismatchStub(max_logprob_gap=1.0)
+        masks = torch.ones(2, 3, dtype=torch.bool)
+        policy = torch.full((2, 3), -1.0)
+        old = torch.tensor([[-1.5] * 3, [-4.0] * 3])
+
+        # Act
+        metrics, excluded = stub._rollout_mismatch_metrics(
+            policy, old, masks, torch.tensor([True, False])
+        )
+
+        # Assert
+        assert metrics["vllm_is_delta_mean"] == pytest.approx(0.5)
+        assert metrics["vllm_is_rows_skipped"] == 0.0
+        assert excluded == ()
+
+    def test_no_compared_rows_on_any_rank_report_nothing(self) -> None:
+        stub = SamplingMismatchStub()
+        masks = torch.ones(2, 3, dtype=torch.bool)
+        log_probs = torch.zeros(2, 3)
+
+        result = stub._rollout_mismatch_metrics(
+            log_probs, log_probs, masks, torch.zeros(2, dtype=torch.bool)
+        )
+
+        assert result == ({}, ())
 
     def test_mismatch_within_limits_logs_nothing(
         self, caplog: pytest.LogCaptureFixture
@@ -383,12 +507,12 @@ class TestLLMAlgorithmAlignedSamplingLogprobsAndMetrics:
         # Arrange: a 0.02 nat gap on every token, ratio e^0.02 under the cap.
         stub = SamplingMismatchStub()
         masks = torch.ones(1, 3, dtype=torch.bool)
-        old = torch.full((1, 3), -1.0)
-        sampling = [torch.full((3,), -1.02)]
+        policy = torch.full((1, 3), -1.0)
+        old = torch.full((1, 3), -1.02)
 
         # Act
         with caplog.at_level(logging.WARNING, logger="agilerl.algorithms.core.base"):
-            stub._aligned_sampling_logprobs_and_metrics(sampling, masks, old)
+            stub._rollout_mismatch_metrics(policy, old, masks, torch.tensor([True]))
 
         # Assert
         assert caplog.records == []
@@ -399,12 +523,12 @@ class TestLLMAlgorithmAlignedSamplingLogprobsAndMetrics:
         # Arrange: a 0.5 nat gap on every token, ratio e^0.5 under the cap.
         stub = SamplingMismatchStub()
         masks = torch.ones(1, 3, dtype=torch.bool)
-        old = torch.full((1, 3), -1.0)
-        sampling = [torch.full((3,), -1.5)]
+        policy = torch.full((1, 3), -1.0)
+        old = torch.full((1, 3), -1.5)
 
         # Act
         with caplog.at_level(logging.WARNING, logger="agilerl.algorithms.core.base"):
-            stub._aligned_sampling_logprobs_and_metrics(sampling, masks, old)
+            stub._rollout_mismatch_metrics(policy, old, masks, torch.tensor([True]))
 
         # Assert
         assert [record.getMessage() for record in caplog.records] == [
@@ -422,12 +546,12 @@ class TestLLMAlgorithmAlignedSamplingLogprobsAndMetrics:
         # clamps at the cap of 2.0; the 0.25 mean gap stays under its limit.
         stub = SamplingMismatchStub(max_logprob_gap=1.0)
         masks = torch.ones(1, 4, dtype=torch.bool)
-        old = torch.zeros(1, 4)
-        sampling = [torch.tensor([-1.0, 0.0, 0.0, 0.0])]
+        policy = torch.zeros(1, 4)
+        old = torch.tensor([[-1.0, 0.0, 0.0, 0.0]])
 
         # Act
         with caplog.at_level(logging.WARNING, logger="agilerl.algorithms.core.base"):
-            stub._aligned_sampling_logprobs_and_metrics(sampling, masks, old)
+            stub._rollout_mismatch_metrics(policy, old, masks, torch.tensor([True]))
 
         # Assert
         assert [record.getMessage() for record in caplog.records] == [
@@ -438,57 +562,47 @@ class TestLLMAlgorithmAlignedSamplingLogprobsAndMetrics:
             )
         ]
 
-    def test_a_rank_without_captures_skips_no_rows_and_is_left_out_of_the_mean(
+    def test_a_rank_without_compared_rows_is_left_out_of_the_mean(
         self, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Arrange
         monkeypatch.setattr("agilerl.algorithms.core.base.any_rank", lambda _flag: True)
         stub = SamplingMismatchStub()
         masks = torch.ones(2, 3, dtype=torch.bool)
-        old = torch.full((2, 3), -1.0)
+        log_probs = torch.full((2, 3), -1.0)
 
         # Act
-        with (
-            caplog.at_level(logging.WARNING, logger="agilerl.algorithms.core.base"),
-            warnings.catch_warnings(record=True) as warned,
-        ):
-            warnings.simplefilter("always")
-            aligned, metrics, excluded = stub._aligned_sampling_logprobs_and_metrics(
-                None, masks, old
+        with caplog.at_level(logging.WARNING, logger="agilerl.algorithms.core.base"):
+            metrics, excluded = stub._rollout_mismatch_metrics(
+                log_probs, log_probs, masks, torch.zeros(2, dtype=torch.bool)
             )
 
         # Assert
-        assert aligned is not None
-        assert torch.equal(aligned, old)
         assert metrics["vllm_is_rows_skipped"] == 0.0
         assert set(excluded) == set(metrics) - {"vllm_is_rows_skipped"}
         assert {"vllm_is_delta_mean", "vllm_mismatch_kl"} <= set(excluded)
         assert caplog.records == []
-        assert warned == []
 
     @pytest.mark.multi_rank
-    def test_cross_rank_mismatch_means_count_only_ranks_with_captures(self) -> None:
-        run_ranks(_sampling_metrics_one_rank_captured_worker)
+    def test_cross_rank_mismatch_means_count_only_ranks_with_compared_rows(
+        self,
+    ) -> None:
+        run_ranks(_rollout_mismatch_one_rank_compared_worker)
 
 
-def _sampling_metrics_one_rank_captured_worker(rank: int, world_size: int) -> None:
-    # Arrange: rank 0 captured a 0.5 nat gap on every token; rank 1 captured none.
+def _rollout_mismatch_one_rank_compared_worker(rank: int, world_size: int) -> None:
+    # Arrange: rank 0 compares a 0.5 nat gap on every token; rank 1 compares none.
     stub = SamplingMismatchStub(max_logprob_gap=1.0)
     masks = torch.ones(2, 3, dtype=torch.bool)
-    old = torch.full((2, 3), -1.0)
-    sampling = [torch.full((3,), -1.5)] * 2 if rank == 0 else None
+    policy = torch.full((2, 3), -1.0)
+    old = torch.full((2, 3), -1.5)
+    compared = torch.full((2,), rank == 0)
 
     # Act
-    with warnings.catch_warnings(record=True) as warned:
-        warnings.simplefilter("always")
-        _, metrics, excluded = stub._aligned_sampling_logprobs_and_metrics(
-            sampling, masks, old
-        )
+    metrics, excluded = stub._rollout_mismatch_metrics(policy, old, masks, compared)
     agg = aggregate_metrics_dict(dict(metrics), excluded=excluded)
 
     # Assert
-    assert metrics["vllm_is_rows_skipped"] == 0.0
-    assert warned == []
     assert agg["vllm_is_delta_mean"] == pytest.approx(0.5)
     assert agg["vllm_mismatch_kl"] == pytest.approx(math.exp(0.5) - 1.5, rel=1e-5)
     assert agg["vllm_is_rows_skipped"] == 0.0

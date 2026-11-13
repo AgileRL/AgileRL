@@ -275,7 +275,7 @@ def _uncovered_counts_on_other_ranks(
 ) -> None:
     """Make the cross-rank all-reduce report ``most_uncovered`` on another rank."""
     monkeypatch.setattr(
-        "agilerl.algorithms.grpo.allreduce_minmax_int",
+        "agilerl.algorithms.core.base.allreduce_minmax_int",
         lambda value: (min(value, most_uncovered), max(value, most_uncovered)),
     )
 

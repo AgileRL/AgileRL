@@ -4671,64 +4671,252 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             self.vllm_importance_sampling_cap,
         )
 
-    def _aligned_sampling_logprobs_and_metrics(
+    def _rollout_mismatch_metrics(
+        self,
+        policy_log_probs: torch.Tensor,
+        old_log_probs: torch.Tensor,
+        action_masks: torch.Tensor,
+        compared_rows: torch.Tensor,
+    ) -> tuple[dict[str, float], tuple[str, ...]]:
+        """Trainer-vs-rollout log-prob mismatch over the rows trained on rollout log-probs.
+
+        Empty when no rank has such a row. A rank with none reports the same
+        keys, excluded from their cross-rank means. Every row trains on
+        rollout log-probs, so ``vllm_is_rows_skipped`` is ``0.0``.
+
+        :param policy_log_probs: ``(B, T-1)`` policy log-probs from the update.
+        :type policy_log_probs: torch.Tensor
+        :param old_log_probs: ``(B, T-1)`` old-policy log-probs, the rollout's
+            on ``compared_rows``.
+        :type old_log_probs: torch.Tensor
+        :param action_masks: ``(B, T-1)`` action-token mask.
+        :type action_masks: torch.Tensor
+        :param compared_rows: ``(B,)`` rows the update scored whose old policy
+            is the rollout's.
+        :type compared_rows: torch.Tensor
+        :return: ``(metrics, excluded)``, where ``excluded`` names the metrics
+            to leave out of the cross-rank mean
+            (:func:`~agilerl.distributed.process.aggregate_metrics_dict`).
+        :rtype: tuple[dict[str, float], tuple[str, ...]]
+        """
+        compared = bool(compared_rows.any())
+        if not any_rank(compared):
+            return {}, ()
+        metrics = self._sampling_mismatch_metrics(
+            policy_log_probs[compared_rows],
+            old_log_probs[compared_rows],
+            action_masks[compared_rows],
+        )
+        excluded = () if compared else tuple(metrics)
+        if compared:
+            self._warn_on_sampling_mismatch(metrics)
+        metrics["vllm_is_rows_skipped"] = 0.0
+        return metrics, excluded
+
+    def _require_sampling_logprobs(
         self,
         sampling_logps: list[torch.Tensor | None] | None,
         action_masks: torch.Tensor,
-        old_log_probs: torch.Tensor,
-    ) -> tuple[torch.Tensor | None, dict[str, float], tuple[str, ...]]:
-        """Align captured vLLM sampling logprobs and summarise the mismatch.
+    ) -> None:
+        """Check every row on every rank has a sampling log-prob on each action token.
 
-        Aligns the per-row logprobs captured at rollout onto the ``(B, T-1)``
-        action frame (:meth:`_align_sampling_logprobs`), computes the
-        vLLM-vs-trainer mismatch metrics whenever logprobs were captured —
-        independently of whether the correction is applied to the loss — and
-        warns when rows were skipped for a token-count mismatch. Shared by the
-        GRPO/PPO/REINFORCE ``learn`` implementations. When any rank captured
-        logprobs, a rank that captured none aligns every row to
-        ``old_log_probs`` and returns the same metrics, with no skipped rows and
-        its mismatch metrics excluded from their cross-rank means.
-
-        :param sampling_logps: Per-row vLLM sampling logprobs from rollout, or
-            ``None`` when none were captured.
+        :param sampling_logps: Per-row flat sampling log-probs, or ``None``.
         :type sampling_logps: list[torch.Tensor | None] | None
-        :param action_masks: ``(B, T-1)`` action-token mask.
+        :param action_masks: ``(B, seq_len-1)`` action-token mask.
         :type action_masks: torch.Tensor
-        :param old_log_probs: ``(B, T-1)`` frozen-policy logprobs.
-        :type old_log_probs: torch.Tensor
-        :return: ``(aligned_logprobs_or_None, metrics, excluded)``, where
-            ``excluded`` names the metrics to leave out of the cross-rank mean
-            (:func:`~agilerl.distributed.process.aggregate_metrics_dict`).
-        :rtype: tuple[torch.Tensor | None, dict[str, float], tuple[str, ...]]
+        :raises ValueError: On every rank when any rank has a row whose sampling
+            log-probs are missing or do not match its action tokens.
         """
-        captured = bool(sampling_logps)
-        if any_rank(captured) and not captured:
-            sampling_logps = [None] * int(action_masks.shape[0])
-        is_metrics: dict[str, float] = {}
-        sampling_log_probs, n_skipped = self._align_sampling_logprobs(
-            sampling_logps, action_masks, old_log_probs
-        )
-        if sampling_log_probs is None:
-            return None, is_metrics, ()
-        is_metrics = self._sampling_mismatch_metrics(
-            old_log_probs, sampling_log_probs, action_masks
-        )
-        if not captured:
-            excluded = tuple(is_metrics)
-            is_metrics["vllm_is_rows_skipped"] = 0.0
-            return sampling_log_probs, is_metrics, excluded
-        self._warn_on_sampling_mismatch(is_metrics)
-        is_metrics["vllm_is_rows_skipped"] = float(n_skipped)
-        if n_skipped:
-            warnings.warn(
-                f"{n_skipped}/{action_masks.shape[0]} rows had a token-count "
-                "mismatch between captured vLLM logprobs and the action "
-                "mask; their importance ratio defaults to 1 (no "
-                "correction). Check rollout/trainer tokenisation if this "
-                "is large.",
-                stacklevel=2,
+        covered = self._rows_with_full_sampling_logprobs(sampling_logps, action_masks)
+        if not any_rank(not covered.all()):
+            return
+        if covered.all():
+            msg = (
+                f"{type(self).__name__} needs sampling_logps on every action token; "
+                "another rank has a row without them."
             )
-        return sampling_log_probs, is_metrics, ()
+            raise ValueError(msg)
+        row = int(np.flatnonzero(~covered)[0])
+        logps = sampling_logps or []
+        row_logps = logps[row] if row < len(logps) else None
+        got = "none" if row_logps is None else str(row_logps.numel())
+        expected = int(action_masks[row].to(torch.bool).sum())
+        msg = (
+            f"{type(self).__name__} needs sampling_logps on every action token; "
+            f"row {row} has {got}, expected {expected}."
+        )
+        raise ValueError(msg)
+
+    @staticmethod
+    def _rows_with_full_sampling_logprobs(
+        sampling_logps: list[torch.Tensor | None] | None,
+        action_masks: torch.Tensor,
+    ) -> npt.NDArray[np.bool_]:
+        """Rows whose sampling log-probs cover every action token.
+
+        :param sampling_logps: Per-row flat sampling log-probs, or ``None``.
+        :type sampling_logps: list[torch.Tensor | None] | None
+        :param action_masks: ``(B, seq_len-1)`` action-token mask.
+        :type action_masks: torch.Tensor
+        :return: ``(B,)`` boolean array.
+        :rtype: npt.NDArray[np.bool_]
+        """
+        logps = sampling_logps or []
+        counts = action_masks.to(torch.bool).sum(dim=-1).tolist()
+        return np.array(
+            [
+                row < len(logps)
+                and (row_logps := logps[row]) is not None
+                and row_logps.numel() == count
+                for row, count in enumerate(counts)
+            ],
+            dtype=bool,
+        )
+
+    @staticmethod
+    def _rollout_actor_rows(
+        covered_rows: npt.NDArray[np.bool_],
+    ) -> npt.NDArray[np.intp]:
+        """Rows that get learn-start policy log-probs.
+
+        These are the uncovered rows, topped up with covered rows to the
+        largest such count on any rank, so every rank runs the same no-grad
+        forward chunks. Empty when every rank is fully covered.
+
+        :param covered_rows: ``(B,)`` rows that need no learn-start log-probs:
+            full sampling log-probs, or no micro-batch to train in.
+        :type covered_rows: npt.NDArray[np.bool_]
+        :return: Sorted row indices.
+        :rtype: npt.NDArray[np.intp]
+        """
+        uncovered = np.flatnonzero(~covered_rows)
+        _, most_uncovered = allreduce_minmax_int(len(uncovered))
+        padding = np.flatnonzero(covered_rows)[: most_uncovered - len(uncovered)]
+        return np.sort(np.concatenate([uncovered, padding]))
+
+    def _learn_start_forward(
+        self,
+        token_ids: torch.Tensor,
+        batch_size: int,
+        actor_rows: npt.NDArray[np.intp],
+        score_mask: torch.Tensor | None = None,
+        pixel_values: torch.Tensor | None = None,
+        pixel_image_counts: Sequence[int] | None = None,
+        image_keys: torch.Tensor | None = None,
+        support_ids: torch.Tensor | None = None,
+        token_budget: int | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        """Reference log-probs and critic values of every row, and learn-start policy log-probs of ``actor_rows``.
+
+        Policy log-probs of rows outside ``actor_rows`` are NaN, and so are the
+        reference log-probs when ``beta == 0``. The no-grad forward runs only
+        for the log-probs and values it fills in.
+
+        :param token_ids: ``(B, seq_len)`` token ids.
+        :type token_ids: torch.Tensor
+        :param batch_size: Rows per no-grad forward chunk.
+        :type batch_size: int
+        :param actor_rows: Sorted rows that need learn-start policy log-probs.
+        :type actor_rows: npt.NDArray[np.intp]
+        :param score_mask: ``(B, seq_len-1)`` positions whose log-probs are
+            needed, or ``None`` to score every position.
+        :type score_mask: torch.Tensor | None
+        :param pixel_values: Optional vision tensor for the batch.
+        :type pixel_values: torch.Tensor | None
+        :param pixel_image_counts: Optional images per sample row.
+        :type pixel_image_counts: Sequence[int] | None
+        :param image_keys: ``(N,)`` vision feature cache key of each vision
+            row, or ``None`` to run the tower uncached.
+        :type image_keys: torch.Tensor | None
+        :param support_ids: ``(B, seq_len-1, K)`` sampling supports, or ``None``.
+        :type support_ids: torch.Tensor | None
+        :param token_budget: Most tokens per packed no-grad forward, or ``None``
+            for ``batch_size`` rows.
+        :type token_budget: int | None
+        :return: ``(reference_log_probs, old_log_probs, critic_values)``, each
+            ``(B, seq_len-1)``; values are ``None`` without a value head.
+        :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]
+        """
+        num_rows = token_ids.shape[0]
+        include_reference = self.beta != 0.0
+        if len(actor_rows) == num_rows:
+            return self._fused_forward_no_grad(
+                token_ids,
+                batch_size,
+                pixel_values=pixel_values,
+                include_reference=include_reference,
+                pixel_image_counts=pixel_image_counts,
+                score_mask=score_mask,
+                image_keys=image_keys,
+                support_ids=support_ids,
+                token_budget=token_budget,
+            )
+        old_log_probs = torch.full(
+            (num_rows, token_ids.shape[1] - 1), float("nan"), device=token_ids.device
+        )
+        reference_log_probs = old_log_probs.clone()
+        values = None
+        if include_reference or self.use_value_head:
+            reference_log_probs, _, values = self._fused_forward_no_grad(
+                token_ids,
+                batch_size,
+                pixel_values=pixel_values,
+                include_reference=include_reference,
+                pixel_image_counts=pixel_image_counts,
+                include_actor=False,
+                score_mask=score_mask,
+                image_keys=image_keys,
+                support_ids=support_ids,
+                token_budget=token_budget,
+            )
+        if len(actor_rows) > 0:
+            rows = torch.as_tensor(actor_rows, device=token_ids.device)
+            actor_row_mask = np.zeros(num_rows, dtype=bool)
+            actor_row_mask[actor_rows] = True
+            _, actor_log_probs, _ = self._fused_forward_no_grad(
+                token_ids[rows],
+                batch_size,
+                pixel_values=pixel_values,
+                include_reference=False,
+                pixel_image_counts=pixel_image_counts,
+                score_mask=None if score_mask is None else score_mask[rows],
+                image_keys=image_keys,
+                pixel_row_mask=actor_row_mask,
+                support_ids=(
+                    None
+                    if support_ids is None
+                    else support_ids[torch.as_tensor(actor_rows)]
+                ),
+                token_budget=token_budget,
+                include_critic=False,
+            )
+            old_log_probs[rows] = actor_log_probs.to(old_log_probs.dtype)
+        return reference_log_probs, old_log_probs, values
+
+    def _rollout_old_log_probs(
+        self,
+        sampling_logps: list[torch.Tensor | None] | None,
+        action_masks: torch.Tensor,
+        trainer_log_probs: torch.Tensor,
+    ) -> torch.Tensor:
+        """Rollout-engine sampling log-probs, or trainer log-probs for rows lacking them.
+
+        :param sampling_logps: Per-row flat sampling log-probs, or ``None``.
+        :type sampling_logps: list[torch.Tensor | None] | None
+        :param action_masks: ``(B, seq_len-1)`` action-token mask.
+        :type action_masks: torch.Tensor
+        :param trainer_log_probs: ``(B, seq_len-1)`` learn-start policy
+            log-probs, NaN on rows the trainer did not score.
+        :type trainer_log_probs: torch.Tensor
+        :return: ``(B, seq_len-1)`` log-probs, ``trainer_log_probs`` with NaN
+            as zero outside the action mask.
+        :rtype: torch.Tensor
+        """
+        fallback = torch.nan_to_num(trainer_log_probs, nan=0.0)
+        old_log_probs, _ = self._align_sampling_logprobs(
+            sampling_logps, action_masks, fallback
+        )
+        return fallback if old_log_probs is None else old_log_probs
 
     def _setup_actors(
         self,
@@ -5621,6 +5809,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         pixel_row_mask: npt.NDArray[np.bool_] | None = None,
         support_ids: torch.Tensor | None = None,
         token_budget: int | None = None,
+        include_critic: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Compute reference log-probs, actor log-probs, and critic values in
         one forward pass (under ``torch.no_grad``).
@@ -5631,7 +5820,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         PEFT's reserved ``"__base__"`` name, which applies no LoRA delta (the
         frozen base is the reference policy). ``include_reference=False`` skips
         that base forward and returns NaN reference log-probs;
-        ``include_actor=False`` does the same for the actor rows.
+        ``include_actor=False`` does the same for the actor rows, and
+        ``include_critic=False`` skips the critic rows and returns no values.
 
         Packed-expert LoRA cannot mix adapters in one forward, so this pass
         still splits on adapter runs. Within a run, ``batch_size`` caps how
@@ -5669,6 +5859,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :param token_budget: Most tokens per packed forward
             (:meth:`_micro_batch_token_budget`), or ``None`` for ``batch_size`` rows.
         :type token_budget: int | None
+        :param include_critic: Run the critic rows of a value-head model.
+        :type include_critic: bool
         :return: ``(reference_log_probs, actor_log_probs, critic_values)``
             each of shape ``(B, seq_len - 1)``.
         :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]
@@ -5688,7 +5880,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 adapters.append(reference_adapter)
             if include_actor:
                 adapters.append("actor")
-            if self.use_value_head:
+            include_critic = include_critic and self.use_value_head
+            if include_critic:
                 adapters.append("critic")
 
             N = len(adapters)
@@ -5730,7 +5923,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             if include_actor:
                 actor_logprobs = log_probs[offset : offset + B]
                 offset += B
-            if self.use_value_head:
+            if include_critic:
                 assert values is not None  # value-head models return values
                 critic_values = values[offset:]
             else:

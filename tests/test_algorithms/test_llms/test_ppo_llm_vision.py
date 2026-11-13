@@ -27,6 +27,7 @@ from peft import LoraConfig
 from agilerl.algorithms.ppo_llm import PPO as LLMPPO
 from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 from tests.rank_launch import run_ranks
+from tests.test_algorithms.test_llms.llm_helpers import rollout_logps
 from tests.test_algorithms.test_llms.segment_helpers import (
     balanced_learn_worker,
     pad_to_eight_rows,
@@ -211,6 +212,7 @@ class TestPPOLearnVision:
             agent.learn(
                 (token_ids, action_masks, rewards),
                 turn_ids=turn_ids,
+                sampling_logps=rollout_logps(action_masks),
                 episode_segments=SEGMENTS,
                 pixel_values=pixel_values,
                 pixel_image_counts=IMAGE_COUNTS,
