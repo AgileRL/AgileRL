@@ -25,7 +25,11 @@ import torch
 import wandb
 
 from agilerl.llm_envs.chat_formats import detect_chat_format
-from agilerl.llm_envs.dataset_env import encode_sft_row
+from agilerl.llm_envs.dataset_env import (
+    encode_sft_row,
+    fit_preference_pair,
+    is_chat_preference_row,
+)
 from agilerl.utils.chat_template import inject_chat_template_kwargs
 from agilerl.utils.llm_utils import sample_eval_prompts
 
@@ -234,9 +238,13 @@ def select_dataset_prompts(
     :param seed: Seed for the row sample.
     :return: The selected rows; fewer than ``num_prompts`` when too few fit.
     """
-    # SFT prompt ids are the transcript prefix. Preference rows keep the raw prompt tokens.
+    # SFT and chat preference prompt ids are the transcript prefix. String preference rows keep the raw prompt tokens.
     if env.objective == "sft":
         return _select_sft_prompts(env, num_prompts, max_prompt_tokens, seed)
+    if len(env.test_dataset) and is_chat_preference_row(env.test_dataset[0]):
+        return _select_chat_preference_prompts(
+            env, num_prompts, max_prompt_tokens, seed
+        )
     selected: list[DatasetPrompt] = []
     for prompt, chosen, rejected in sample_eval_prompts(
         env, n=4 * num_prompts, seed=seed
@@ -273,6 +281,43 @@ def _select_sft_prompts(
                 _decode_str(tokenizer, prompt_ids, skip_special_tokens=False),
                 _sft_reference(tokenizer, item, ids, mask, env.response_column),
                 None,
+            )
+        )
+    return selected[:num_prompts]
+
+
+def _select_chat_preference_prompts(
+    env: DatasetEnv,
+    num_prompts: int,
+    max_prompt_tokens: int,
+    seed: int,
+) -> list[DatasetPrompt]:
+    """Held-out chat preference rows, with prompt ids taken from the fitted chosen transcript."""
+    dataset = env.test_dataset
+    sample_size = min(4 * num_prompts, len(dataset))
+    indices = random.Random(seed).sample(range(len(dataset)), sample_size)
+    tokenizer = inject_chat_template_kwargs(env.tokenizer, env.chat_template_kwargs)
+    chat_format = detect_chat_format(tokenizer)
+    selected: list[DatasetPrompt] = []
+    for index in indices:
+        fitted = fit_preference_pair(
+            tokenizer, dataset[index], chat_format, env.max_context_length
+        )
+        if fitted is None:
+            continue
+        chosen_ids, chosen_mask = fitted.chosen
+        prompt_len = chosen_mask.index(True)
+        if prompt_len > max_prompt_tokens:
+            continue
+        rejected_ids, rejected_mask = fitted.rejected
+        selected.append(
+            DatasetPrompt(
+                chosen_ids[:prompt_len],
+                _decode_str(
+                    tokenizer, chosen_ids[:prompt_len], skip_special_tokens=False
+                ),
+                _decode_str(tokenizer, chosen_ids[prompt_len:]),
+                _decode_str(tokenizer, rejected_ids[rejected_mask.index(True) :]),
             )
         )
     return selected[:num_prompts]

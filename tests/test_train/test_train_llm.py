@@ -202,13 +202,14 @@ def _preference_batch():
     ids = torch.ones(1, 4, dtype=torch.long)
     return {
         "prompt": ["prompt"],
-        "prompt_lengths": [4],
         "chosen": ["chosen"],
         "rejected": ["rejected"],
         "chosen_input_ids": ids,
         "chosen_attention_mask": ids,
+        "chosen_loss_mask": ids.bool(),
         "rejected_input_ids": ids,
         "rejected_attention_mask": ids,
+        "rejected_loss_mask": ids.bool(),
     }
 
 
