@@ -26,6 +26,7 @@ from agilerl.arena.byoc.cluster_helm import (
     _chart_path,
     _chart_path_from_package,
     _copy_k8s_secret,
+    _credential_secrets,
     _kubectl_secret_exists,
     _load_agent_values_yaml,
     _restart_agent_deployment,
@@ -618,6 +619,8 @@ rolesAnywhere:
 provisioner:
   nebius:
     existingSecret: custom-nebius
+  catalogCredentials:
+    existingSecret: custom-catalog
 """,
     )
     _write_minimal_chart(package_root / STORAGE_CHART / "chart")
@@ -634,6 +637,8 @@ provisioner:
             "secrets/roles-anywhere/private_key": "key-placeholder",
             "secrets/nebius/credentials.json": "nebius-credentials-placeholder",
             "secrets/nebius/config.yaml": "nebius-config-placeholder",
+            "secrets/catalog/write.env": "catalog-write-placeholder",
+            "secrets/catalog/transfer.env": "catalog-transfer-placeholder",
         },
     )
     calls: list[list[str]] = []
@@ -674,10 +679,12 @@ provisioner:
         "apply",
         "create:custom-nebius",
         "apply",
+        "create:custom-catalog",
+        "apply",
         "helm:arena-byoc-agent",
     ]
     assert calls[0] == ["kubectl", "get", "namespace", "arena-agent"]
-    assert apply_inputs == ["DRY-RUN-YAML"] * 4
+    assert apply_inputs == ["DRY-RUN-YAML"] * 5
 
     def create_for(name: str) -> list[str]:
         found = [
@@ -716,6 +723,13 @@ provisioner:
         "-o",
         "yaml",
     ]
+    assert create_for("custom-catalog")[7:] == [
+        f"--from-file=write.env={paths['secrets/catalog/write.env']}",
+        f"--from-file=transfer.env={paths['secrets/catalog/transfer.env']}",
+        "--dry-run=client",
+        "-o",
+        "yaml",
+    ]
     assert ["kubectl", "create", "namespace", "arena-agent"] not in calls
     captured = capsys.readouterr()
     output = captured.out + captured.err
@@ -724,6 +738,7 @@ provisioner:
         "Applied secret 'custom-wg' in namespace arena-agent.\n"
         "Applied secret 'custom-ra' in namespace arena-agent.\n"
         "Applied secret 'custom-nebius' in namespace arena-agent.\n"
+        "Applied secret 'custom-catalog' in namespace arena-agent.\n"
     )
     for secret_body in (
         "token-placeholder",
@@ -733,6 +748,8 @@ provisioner:
         "key-placeholder",
         "nebius-credentials-placeholder",
         "nebius-config-placeholder",
+        "catalog-write-placeholder",
+        "catalog-transfer-placeholder",
         "DRY-RUN-YAML",
     ):
         assert secret_body not in output
@@ -754,6 +771,8 @@ rolesAnywhere:
 provisioner:
   nebius:
     existingSecret: ""
+  catalogCredentials:
+    existingSecret: ""
 """,
     )
     paths = _write_install_secrets(
@@ -765,6 +784,8 @@ provisioner:
             "secrets/roles-anywhere/private_key": "key-placeholder",
             "secrets/nebius/credentials.json": "nebius-credentials-placeholder",
             "secrets/nebius/config.yaml": "nebius-config-placeholder",
+            "secrets/catalog/write.env": "catalog-write-placeholder",
+            "secrets/catalog/transfer.env": "catalog-transfer-placeholder",
         },
     )
     calls: list[list[str]] = []
@@ -792,12 +813,24 @@ provisioner:
         "arena-byoc-agent-wireguard",
         "byoc-arena-s3",
         "arena-byoc-provisioner-nebius",
+        "arena-byoc-catalog-credentials",
     ]
     token_cmd = next(argv for argv in calls if argv[4:5] == ["cluster-token"])
     assert f"--from-file=cluster-token={paths['secrets/cluster-token']}" in token_cmd
     wg_cmd = next(argv for argv in calls if argv[4:5] == ["arena-byoc-agent-wireguard"])
     assert f"--from-file=agw.conf={paths['secrets/agw.conf']}" in wg_cmd
     assert not any("jobs.conf" in arg for argv in calls for arg in argv)
+
+
+@pytest.mark.parametrize(
+    "present", ["secrets/catalog/write.env", "secrets/catalog/transfer.env"]
+)
+def test_credential_secrets_skip_catalog_without_both_files(
+    tmp_path: Path, present: str
+) -> None:
+    _write_install_secrets(tmp_path, {present: "catalog-placeholder"})
+
+    assert _credential_secrets(tmp_path, {}) == []
 
 
 def test_install_from_install_package_root_skips_kubectl_without_secrets(

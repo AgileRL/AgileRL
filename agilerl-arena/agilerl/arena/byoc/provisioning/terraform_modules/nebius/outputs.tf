@@ -43,6 +43,19 @@ output "storage_secret_access_key" {
   sensitive = true
 }
 
+output "catalog_access_key_id" {
+  value = nebius_iam_v2_access_key.catalog.status.aws_access_key_id
+}
+
+output "catalog_secret_access_key" {
+  value     = nebius_iam_v2_access_key.catalog.status.secret
+  sensitive = true
+}
+
+output "catalog_group_id" {
+  value = nebius_iam_v1_group.catalog_editors.id
+}
+
 output "worker_node_group_ids" {
   value = {
     for name, group in nebius_mk8s_v1_node_group.worker : name => group.id

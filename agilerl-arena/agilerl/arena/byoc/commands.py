@@ -62,6 +62,7 @@ from agilerl.arena.byoc.provisioning.providers.nebius.platforms import (
 )
 from agilerl.arena.byoc.provisioning.providers.nebius.spec import (
     WorkerNodeGroupSpec,
+    attach_catalog_credentials,
     attach_service_account_credentials,
     resource_classes,
 )
@@ -84,7 +85,11 @@ from agilerl.arena.exceptions import ArenaAPIError
 
 logger = logging.getLogger("agilerl.arena.byoc")
 SENSITIVE_STATUS_OUTPUTS = frozenset(
-    {"service_account_private_key", "storage_secret_access_key"}
+    {
+        "service_account_private_key",
+        "storage_secret_access_key",
+        "catalog_secret_access_key",
+    }
 )
 
 
@@ -217,6 +222,15 @@ def _byoc_provider_with_module(
     ):
         config["service_account_key"] = outputs.service_account_key
         config["profile"] = outputs.service_account_profile
+    if (
+        isinstance(config, dict)
+        and outputs.catalog_access_key_id
+        and outputs.catalog_secret_access_key
+        and outputs.catalog_group_id
+    ):
+        config["catalog_access_key_id"] = outputs.catalog_access_key_id
+        config["catalog_secret_access_key"] = outputs.catalog_secret_access_key
+        config["catalog_group_id"] = outputs.catalog_group_id
     if state_dir is None:
         return payload
     pin = read_module_pin(state_dir)
@@ -819,6 +833,7 @@ def _register_existing_cluster(
                 storage_project_id=output_text("storage_project_id"),
             )
             attach_service_account_credentials(fields["byoc_provider"], values)
+            attach_catalog_credentials(fields["byoc_provider"], values)
     kubeconfig = _kubeconfig_for_register_install(
         config, cluster_spec, registration, options, output_dir
     )

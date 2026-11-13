@@ -111,6 +111,9 @@ class ClusterOutputs:
     inference_tls_secret_name: str | None = None
     service_account_key: str | None = None
     service_account_profile: str | None = None
+    catalog_access_key_id: str | None = None
+    catalog_secret_access_key: str | None = None
+    catalog_group_id: str | None = None
 
 
 class TerraformRunner:

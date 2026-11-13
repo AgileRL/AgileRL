@@ -142,6 +142,37 @@ resource "nebius_iam_v1_group_membership" "storage_editor" {
   member_id = nebius_iam_v1_service_account.storage.id
 }
 
+# The provisioner grants this group access to its own catalog buckets.
+resource "nebius_iam_v1_service_account" "catalog" {
+  parent_id   = local.project_id
+  name        = "${var.cluster_name}-catalog"
+  description = "Arena catalog build service account"
+}
+
+resource "nebius_iam_v2_access_key" "catalog" {
+  parent_id   = local.project_id
+  name        = "${var.cluster_name}-catalog"
+  description = "Arena catalog build access key"
+
+  account = {
+    service_account = {
+      id = nebius_iam_v1_service_account.catalog.id
+    }
+  }
+
+  secret_delivery_mode = "INLINE"
+}
+
+resource "nebius_iam_v1_group" "catalog_editors" {
+  parent_id = var.tenant_id
+  name      = "${var.cluster_name}-catalog-editors"
+}
+
+resource "nebius_iam_v1_group_membership" "catalog_editor" {
+  parent_id = nebius_iam_v1_group.catalog_editors.id
+  member_id = nebius_iam_v1_service_account.catalog.id
+}
+
 # Experiment data, metrics, and checkpoints. Cluster destroy does not delete
 # this bucket unless the CLI is passed --delete-storage.
 resource "nebius_storage_v1_bucket" "arena_data" {
