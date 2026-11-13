@@ -1732,6 +1732,8 @@ class ArenaClient:
         experiment_name: str,
         checkpoint: str | None = None,
         memory_scope: MemoryScope | None = None,
+        num_gpus: int | None = None,
+        gpu_type: str | None = None,
     ) -> dict[str, Any]:
         """Create an inference deployment from an experiment checkpoint.
 
@@ -1745,15 +1747,30 @@ class ArenaClient:
             with ``None`` keeps the scope already stored, it does not reset it, and the
             scope cannot be changed after the deployment exists.
         :type memory_scope: MemoryScope | None
+        :param num_gpus: GPUs on the deployment's node. Arena picks the cheapest
+            node type that fits when omitted.
+        :type num_gpus: int | None
+        :param gpu_type: Short GPU name such as ``h100-80``, ``b200`` or ``l4``.
+            Arena picks the cheapest node type that fits when omitted.
+        :type gpu_type: str | None
         :returns: A dictionary containing the deployment result.
         :rtype: dict[str, Any]
+        :raises ArenaValidationError: When ``num_gpus`` is below 1 or
+            ``memory_scope`` is unknown.
         """
+        if num_gpus is not None and num_gpus < 1:
+            msg = "num_gpus must be at least 1."
+            raise ArenaValidationError(msg)
         body: dict[str, Any] = {
             "experiment_name": experiment_name,
             "checkpoint": checkpoint,
         }
         if memory_scope is not None:
             body["memoryScope"] = self._validated_memory_scope(memory_scope)
+        if num_gpus is not None:
+            body["numGpus"] = num_gpus
+        if gpu_type is not None:
+            body["gpuType"] = gpu_type
         result = self._request(
             "POST",
             "/api/cli/v1/inference/deploy",

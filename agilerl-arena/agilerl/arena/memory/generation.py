@@ -639,3 +639,21 @@ def generation_can_serve(breakdown: PhaseBreakdown, kv_margin_bytes: int = 0) ->
     pool = kv.detail["pool"]
     demand = kv.detail["worst_case_demand"]
     return pool > 0 and demand + kv_margin_bytes <= pool
+
+
+def sequences_held(breakdown: PhaseBreakdown, requested: int) -> int:
+    """How many of ``requested`` sequences this generation bar can keep resident.
+
+    :param breakdown: Generation-phase breakdown.
+    :param requested: Sequences the engine was asked to hold.
+    :return: ``requested`` when the KV pool covers them, otherwise the share
+        of them the pool can hold.
+    """
+    kv = next((c for c in breakdown.components if c.key == "kv_cache"), None)
+    if kv is None:
+        return requested
+    demand = kv.detail["worst_case_demand"]
+    usable = max(kv.detail["pool"] - KV_MARGIN_BYTES, 0)
+    if demand <= usable:
+        return requested
+    return int(requested * usable / demand)

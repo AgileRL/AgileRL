@@ -907,6 +907,47 @@ class TestModelArchProperties:
         )
 
 
+class TestSplitsHeads:
+    @pytest.mark.parametrize(
+        ("n_heads", "n_kv_heads", "tp", "splits"),
+        [
+            # 2 KV heads replicate onto 4 ranks.
+            (16, 2, 4, True),
+            # 4 KV heads neither split over nor replicate onto 6 ranks.
+            (24, 4, 6, False),
+            # 14 attention heads do not split over 4 ranks.
+            (14, 2, 4, False),
+            (14, 2, 2, True),
+        ],
+    )
+    def test_attention_and_kv_heads(self, n_heads, n_kv_heads, tp, splits):
+        arch = QWEN_05B.model_copy(
+            update={"n_heads": n_heads, "n_kv_heads": n_kv_heads}
+        )
+
+        assert arch.splits_heads(tp) is splits
+
+    def test_mamba_heads_must_split(self):
+        # 40 attention and 8 KV heads split over 8; 36 Mamba heads do not.
+        arch = ModelArch.from_hf_config(NEMOTRON_H).model_copy(
+            update={"mamba_n_heads": 36}
+        )
+
+        assert not arch.splits_heads(8)
+        assert arch.splits_heads(4)
+
+    @pytest.mark.parametrize(
+        ("n_groups", "splits"),
+        [(8, True), (3, False), (1, True)],
+    )
+    def test_mamba_groups_split_or_are_one(self, n_groups, splits):
+        arch = ModelArch.from_hf_config(NEMOTRON_H).model_copy(
+            update={"mamba_n_groups": n_groups}
+        )
+
+        assert arch.splits_heads(2) is splits
+
+
 GRANITE_H_TINY = ModelArch.from_hf_config(
     SUPPORTED_MODEL_INFO["ibm-granite/granite-4.0-h-tiny"].config
 )

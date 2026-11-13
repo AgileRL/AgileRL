@@ -1046,23 +1046,42 @@ def agent_list(
     help="Who an LLM deployment keeps chat sessions for. New deployments default "
     "to 'user'. Redeploying without this flag keeps the stored scope.",
 )
+@click.option(
+    "--num-gpus",
+    type=click.IntRange(min=1),
+    default=None,
+    help="GPUs on the deployment's node.",
+)
+@click.option(
+    "--gpu-type",
+    type=str,
+    default=None,
+    help="Short GPU name such as h100-80, b200 or l4.",
+)
 @click.pass_obj
 def agent_deploy(
     config: CommandConfig,
     experiment_name: str,
     checkpoint: str | None,
     memory_scope: MemoryScope | None,
+    num_gpus: int | None,
+    gpu_type: str | None,
 ) -> None:
     """Deploy an agent from an experiment checkpoint.
 
     A deployment's memory scope is fixed once it exists, so ``--memory-scope``
     only takes effect on the first deploy.
+
+    Without ``--num-gpus`` or ``--gpu-type``, Arena picks the cheapest node
+    type that fits.
     """
     with arena_client(config) as client:
         result = client.deploy_agent(
             experiment_name=experiment_name,
             checkpoint=checkpoint,
             memory_scope=memory_scope,
+            num_gpus=num_gpus,
+            gpu_type=gpu_type,
         )
     emit_json_result(result)
 

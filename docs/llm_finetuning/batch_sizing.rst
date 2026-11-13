@@ -154,6 +154,6 @@ Or in the ``algorithm`` section of a training manifest:
     incidental: ranks that stepped at different times would desynchronise the
     FSDP2 collectives.
 
-The memory estimator picks the micro-batch. To fit a longer sequence, invert
-context or concurrency with
+The memory estimator picks the micro-batch, and the run picks the engine's
+``max_num_seqs``. To find the longest context that fits, use
 :ref:`arena memory solve<llm_memory_estimate>`.

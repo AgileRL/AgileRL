@@ -1690,7 +1690,11 @@ class TestAgentDeployCommand:
             result = runner.invoke(main, ["agent", "deploy", "my-exp"])
         assert result.exit_code == 0
         mock_client.deploy_agent.assert_called_once_with(
-            experiment_name="my-exp", checkpoint=None, memory_scope=None
+            experiment_name="my-exp",
+            checkpoint=None,
+            memory_scope=None,
+            num_gpus=None,
+            gpu_type=None,
         )
 
     def test_deploy_with_checkpoint(self, runner, mock_client):
@@ -1701,8 +1705,56 @@ class TestAgentDeployCommand:
             )
         assert result.exit_code == 0
         mock_client.deploy_agent.assert_called_once_with(
-            experiment_name="my-exp", checkpoint="step-500", memory_scope=None
+            experiment_name="my-exp",
+            checkpoint="step-500",
+            memory_scope=None,
+            num_gpus=None,
+            gpu_type=None,
         )
+
+    def test_deploy_with_gpu_flags(self, runner, mock_client):
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main,
+                [
+                    "agent",
+                    "deploy",
+                    "my-exp",
+                    "--num-gpus",
+                    "8",
+                    "--gpu-type",
+                    "h100-80",
+                ],
+            )
+        assert result.exit_code == 0
+        mock_client.deploy_agent.assert_called_once_with(
+            experiment_name="my-exp",
+            checkpoint=None,
+            memory_scope=None,
+            num_gpus=8,
+            gpu_type="h100-80",
+        )
+
+    def test_deploy_rejects_zero_gpus(self, runner, mock_client):
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main, ["agent", "deploy", "my-exp", "--num-gpus", "0"]
+            )
+        assert result.exit_code == 2
+        assert "Invalid value" in result.output
+        mock_client.deploy_agent.assert_not_called()
+
+    def test_help_shows_gpu_flags(self, runner):
+        result = runner.invoke(main, ["agent", "deploy", "--help"])
+
+        help_text = " ".join(result.output.split())
+        assert result.exit_code == 0
+        assert "--num-gpus" in help_text
+        assert "--gpu-type" in help_text
+        assert (
+            "Without ``--num-gpus`` or ``--gpu-type``, Arena picks the cheapest "
+            "node type that fits."
+        ) in help_text
 
     @pytest.mark.parametrize("scope", ["user", "organization"])
     def test_deploy_with_memory_scope(self, runner, mock_client, scope):
@@ -1713,7 +1765,11 @@ class TestAgentDeployCommand:
             )
         assert result.exit_code == 0
         mock_client.deploy_agent.assert_called_once_with(
-            experiment_name="my-exp", checkpoint=None, memory_scope=scope
+            experiment_name="my-exp",
+            checkpoint=None,
+            memory_scope=scope,
+            num_gpus=None,
+            gpu_type=None,
         )
 
     def test_deploy_rejects_unknown_memory_scope(self, runner, mock_client):

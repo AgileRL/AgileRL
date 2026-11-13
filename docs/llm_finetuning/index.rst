@@ -90,7 +90,7 @@ This example demonstrates how to use the GRPO algorithm to fine-tune a LLM on a 
 
    :doc:`memory_estimate`
       ``arena memory estimate`` and ``arena memory solve`` — peak VRAM and the
-      largest context / concurrency that still fits.
+      longest context that still fits.
 
    :doc:`fused_logprobs`
       Fused linear log-probability computation for memory-efficient training.

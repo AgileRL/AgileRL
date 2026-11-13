@@ -15,7 +15,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from agilerl.arena.memory.breakdown import PhaseName
+from agilerl.arena.memory.breakdown import PhaseBreakdown, PhaseName
 from agilerl.arena.memory.estimator import (
     RunEstimate,
     estimate_generation,
@@ -23,12 +23,17 @@ from agilerl.arena.memory.estimator import (
     estimate_training,
     generation_can_serve,
 )
-from agilerl.arena.memory.generation import lean_engine_settings
+from agilerl.arena.memory.generation import (
+    KV_MARGIN_BYTES,
+    lean_engine_settings,
+    sequences_held,
+)
 from agilerl.arena.memory.kv_cache import KV_BLOCK_SIZE_DEFAULT
 from agilerl.arena.memory.resolve.sequences import ROLLOUT_ENGINE_GPU_MEMORY_UTILIZATION
 from agilerl.arena.memory.specs import (
     DeviceSpec,
     GenerationSettings,
+    GiB,
     ModelSpec,
     RunConfig,
 )
@@ -105,6 +110,20 @@ class SolveResult(BaseModel):
     unchecked_over_budget: tuple[str, ...] = ()
 
 
+class ServingWidth(BaseModel):
+    """One vLLM serving engine sized at the width :func:`size_serving_engine` picks."""
+
+    model_config = ConfigDict(frozen=True)
+
+    tensor_parallel_size: int
+    # The engine starts and holds one full-context sequence.
+    fits: bool
+    # The KV pool holds every ``max_num_seqs`` sequence at full context, with margin.
+    serves_all: bool
+    full_context_sequences: int
+    reason: str | None
+
+
 def architectural_context_limit(model_config: dict[str, Any]) -> int:
     """Hard cap from the checkpoint: RoPE / ``max_position_embeddings``."""
     text = model_config.get("text_config", model_config)
@@ -141,16 +160,63 @@ def inference_run_config(
     )
 
 
-def solve_inference(
-    config: RunConfig,
-    field: str,
-    *,
-    hi: int | None = None,
-) -> SolveResult:
-    """``solve`` for a dedicated serving GPU: only the generation bar counts."""
-    result = solve(config, field, hi=hi, phases=("generation",))
-    # No trainer on a serving GPU; the dummy training bar is not a signal.
-    return result.model_copy(update={"unchecked_over_budget": ()})
+def size_serving_engine(
+    model: ModelSpec,
+    device: DeviceSpec,
+    num_gpus: int,
+    settings: GenerationSettings,
+) -> ServingWidth:
+    """The widest width <= ``num_gpus`` that :meth:`ModelArch.splits_heads` allows, sized on ``device``.
+
+    Width 1 always splits. A widest width that does not fit is still
+    returned with ``fits`` False: each narrower width holds a larger weight
+    shard per GPU and less KV.
+
+    :param model: The served model.
+    :param device: One GPU of the node.
+    :param num_gpus: GPUs on the node.
+    :param settings: Serving engine settings; the width is set here.
+    :return: The sized engine.
+    """
+    width = next(tp for tp in range(num_gpus, 0, -1) if model.arch.splits_heads(tp))
+    config = inference_run_config(
+        model,
+        device,
+        settings.model_copy(update={"tensor_parallel_size": width}),
+    )
+    bar = estimate_generation(
+        config.model,
+        config.gen_device,
+        config.generation,
+        orchestrated=config.orchestrated,
+    )
+    return _serving_width(bar, config.generation)
+
+
+def _serving_width(bar: PhaseBreakdown, settings: GenerationSettings) -> ServingWidth:
+    """Fit, full-context sequences and the miss reason of one serving engine bar."""
+    width = settings.tensor_parallel_size
+    held = sequences_held(bar, settings.max_num_seqs) if bar.fits else 0
+    fits = bar.fits and held >= 1
+    reason = None
+    if not fits and bar.total_bytes > bar.device_usable_bytes:
+        reason = (
+            f"the engine needs {bar.total_bytes / GiB:.1f} GiB per GPU at "
+            f"tensor_parallel_size={width}; the GPU has "
+            f"{bar.device_usable_bytes / GiB:.1f} GiB usable"
+        )
+    elif not fits:
+        reason = (
+            f"the KV cache cannot hold one {settings.max_model_len}-token "
+            f"sequence at tensor_parallel_size={width}"
+        )
+    return ServingWidth(
+        tensor_parallel_size=width,
+        fits=fits,
+        serves_all=generation_can_serve(bar, KV_MARGIN_BYTES),
+        full_context_sequences=held,
+        reason=reason,
+    )
 
 
 def solve(
@@ -169,7 +235,6 @@ def solve(
     Generation stays on the point estimate.
 
     :param phases: Phases to check; defaults to the phases ``field`` moves.
-        Dedicated inference passes ``("generation",)``.
     :param kv_margin_bytes: KV pool bytes worst-case demand must leave free.
     :param rebuild: Config at a candidate value, for settings resolved from
         it (a manifest's omitted micro-batch or engine width). ``None`` holds

@@ -9,7 +9,11 @@ from typing import Literal
 
 from agilerl.arena.memory.breakdown import PhaseBreakdown
 from agilerl.arena.memory.estimator import estimate_generation
-from agilerl.arena.memory.generation import KV_MARGIN_BYTES, drop_engine_fast_paths
+from agilerl.arena.memory.generation import (
+    KV_MARGIN_BYTES,
+    drop_engine_fast_paths,
+    sequences_held,
+)
 from agilerl.arena.memory.kv_cache import VLLM_ENGINE_MAX_NUM_BATCHED_TOKENS
 from agilerl.arena.memory.manifest import (
     MANIFEST_WEIGHT_VARIANTS,
@@ -127,24 +131,6 @@ def _resident_sequences(
     return engines * solved.value
 
 
-def sequences_held(breakdown: PhaseBreakdown, requested: int) -> int:
-    """How many of ``requested`` sequences this generation bar can keep resident.
-
-    :param breakdown: Generation-phase breakdown.
-    :param requested: Sequences the engine was asked to hold.
-    :return: ``requested`` when the KV pool covers them, otherwise the share
-        of them the pool can hold.
-    """
-    kv = next((c for c in breakdown.components if c.key == "kv_cache"), None)
-    if kv is None:
-        return requested
-    demand = kv.detail["worst_case_demand"]
-    usable = max(kv.detail["pool"] - KV_MARGIN_BYTES, 0)
-    if demand <= usable:
-        return requested
-    return int(requested * usable / demand)
-
-
 def queue_warning(breakdown: PhaseBreakdown, requested: int, width: int) -> str | None:
     """Warn when an engine of ``width`` GPUs holds fewer than the requested sequences.
 
@@ -178,7 +164,6 @@ def servable_engine_widths(
     """
     hub_id = manifest.algorithm.pretrained_model_name_or_path
     model = _engine_model(hub_id)
-    arch = model.arch
     checked = {} if cache is None else cache
 
     def serves(width: int) -> bool:
@@ -187,13 +172,10 @@ def servable_engine_widths(
             checked[key] = _resident_sequences(manifest, model, device, width, 1) > 0
         return checked[key]
 
-    # vLLM splits attention heads evenly; KV heads split or replicate evenly.
     return [
         width
         for width in range(1, max_width + 1)
-        if arch.n_heads % width == 0
-        and (arch.n_kv_heads % width == 0 or width % arch.n_kv_heads == 0)
-        and serves(width)
+        if model.arch.splits_heads(width) and serves(width)
     ]
 
 

@@ -968,6 +968,22 @@ class ModelArch(BaseModel):
             return self.n_mlp_layers
         return self.dense_ffn_layers if self.is_moe else self.n_layers
 
+    def splits_heads(self, tp: int) -> bool:
+        """Whether vLLM can shard attention and Mamba over ``tp`` ranks.
+
+        Attention heads split evenly; KV heads split or replicate evenly.
+        Mamba heads split evenly; Mamba groups split evenly or are a single
+        group replicated onto every rank.
+        """
+        attention = self.n_heads % tp == 0 and (
+            self.n_kv_heads % tp == 0 or tp % self.n_kv_heads == 0
+        )
+        mamba = not self.is_hybrid_ssm or (
+            self.mamba_n_heads % tp == 0
+            and (self.mamba_n_groups % tp == 0 or self.mamba_n_groups == 1)
+        )
+        return attention and mamba
+
     @classmethod
     def from_hf_config(cls, config: dict[str, Any]) -> Self:
         """Build a :class:`ModelArch` from a raw HF ``config.json`` dict.

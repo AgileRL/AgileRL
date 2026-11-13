@@ -3,9 +3,9 @@
 GPU memory estimate
 ===================
 
-``arena memory`` sizes an LLM run against a GPU before you submit it. It reads
-the training manifest (or a serving model id), the GPU name, and the
-checkpoint ``config.json``.
+``arena memory`` sizes an LLM training run against a GPU before you submit it.
+It reads the training manifest, the GPU name, and the checkpoint
+``config.json``.
 
 Two commands:
 
@@ -14,10 +14,10 @@ Two commands:
   ``--device-gb`` it picks the cheapest Arena resource tier (by credits per
   node-hour) whose node holds the manifest's GPU layout and fits both phases.
   This needs ``arena login``.
-* ``arena memory solve FIELD`` — largest value of one field that still fits,
-  with everything else held fixed. Training uses the same underprediction
-  buffer as ``estimate``. Use this to pick a context length or a
-  concurrent-sequence cap.
+* ``arena memory solve max_model_len`` — the longest context the training run
+  still fits on ``--gpu`` or ``--device-gb``, with the rest of the manifest
+  held fixed. It uses the same underprediction buffer as ``estimate``. The
+  search stops at the checkpoint's RoPE limit, or at ``--hi`` if lower.
 
 .. code-block:: bash
 
@@ -26,21 +26,11 @@ Two commands:
    arena memory estimate manifest.yaml
    arena memory estimate manifest.yaml --gpu "NVIDIA L4"
 
-   arena memory solve max_model_len --inference --gpu "NVIDIA L4" \
-       --model Qwen/Qwen2.5-7B-Instruct
+   arena memory solve max_model_len manifest.yaml --gpu "NVIDIA L4"
 
-``--inference`` is a dedicated serving GPU (utilization 0.9, 8 sequences, no
-trainer residual, a merged model with no LoRA slot). ``--max-num-seqs 1`` is
-the longest single-request context.
-``--quantization fp8`` sizes vLLM online fp8 weights, the server's
-``APP_VLLM_QUANTIZATION=fp8``. It needs a GPU with native fp8 (compute
-capability 8.9+: L4, L40S, H100).
-Without ``--inference``, pass a training manifest and the solve is that run.
-
-Invertible fields: ``max_model_len``, ``max_num_seqs``.
-
-``python -m agilerl.arena.memory`` is the same CLI if the ``arena`` script is
-not on ``PATH``. Pass ``--config path/to/config.json`` to stay offline.
+Models in the Arena catalog need no download. For any other model, the ``hub``
+extra fetches ``config.json`` from Hugging Face; pass
+``--config path/to/config.json`` to stay offline.
 
 The run picks ``vllm_config.tensor_parallel_size`` from the node's GPU count
 when the manifest leaves it unset. It splits an unset ``max_num_seqs`` across
@@ -50,6 +40,12 @@ own count. ``solve`` picks them again at each candidate value.
 
 The two phase bars (training and generation) never peak at once. Resource
 selection sizes against the larger of the two. The estimate errs high.
+
+A deployment sizes one vLLM engine per node at the widest tensor parallel size,
+up to the node's GPU count, that the model's attention and Mamba heads split
+over. A node of 6 GPUs serving a model with 32 attention heads runs at width 4.
+The caller sets the sequence count, ``gpu_memory_utilization`` and
+``max_model_len``.
 
 See the package README at ``agilerl/arena/memory/README.md`` for the
 formulas.
