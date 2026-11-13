@@ -430,6 +430,23 @@ class TestFSDPGatheredParamsExpertParallel:
 
         assert gathered == sharded - arch.moe_layers * routed // 2
 
+    def test_no_reshard_with_expert_lora_holds_one_local_expert_layer(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(NEMOTRON_H_MOE)
+        counts = formulas.param_counts(arch)
+        routed = formulas.routed_expert_params_per_layer(arch)
+        sharded = counts.total - formulas.token_embedding_params(arch)
+        kwargs = {**GATHER_KWARGS, "reshard_after_forward": False}
+
+        # Act
+        gathered = fsdp_gather.fsdp_gathered_params(
+            counts, arch, expert_parallel=2, expert_lora=True, **kwargs
+        )
+
+        # Assert: the EP forward reshards each layer's experts after use.
+        assert arch.moe_layers > 1
+        assert gathered == sharded - arch.moe_layers * routed + routed // 2
+
     def test_tensor_parallel_uniform_moe_stack_keeps_experts_gathered(self):
         arch = ModelArch.from_hf_config(GRANITE_MOE)
         counts = formulas.param_counts(arch)
@@ -441,3 +458,27 @@ class TestFSDPGatheredParamsExpertParallel:
 
         assert not arch.layer_kinds
         assert gathered >= 2 * block_moe
+
+
+class TestEpGatheredExpertLayerParams:
+    def test_leftover_ranks_gather_a_ranks_share_of_one_layer(self):
+        arch = ModelArch.from_hf_config(NEMOTRON_H_MOE)
+        routed = formulas.routed_expert_params_per_layer(arch)
+
+        layer = fsdp_gather.ep_gathered_expert_layer_params(arch, 2, 2, 4)
+
+        assert layer == routed // 2
+
+    def test_ep_filling_the_expert_gpus_gathers_nothing(self):
+        arch = ModelArch.from_hf_config(NEMOTRON_H_MOE)
+
+        layer = fsdp_gather.ep_gathered_expert_layer_params(arch, 1, 4, 4)
+
+        assert layer == 0
+
+    def test_no_expert_parallel_gathers_nothing(self):
+        arch = ModelArch.from_hf_config(NEMOTRON_H_MOE)
+
+        layer = fsdp_gather.ep_gathered_expert_layer_params(arch, 4, 1)
+
+        assert layer == 0

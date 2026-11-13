@@ -179,6 +179,27 @@ def prefetch_window_params(
     )
 
 
+def ep_gathered_expert_layer_params(
+    arch: ModelArch,
+    n_gpus: int,
+    expert_parallel: int,
+    expert_gpus: int | None = None,
+) -> int:
+    """Elements of one MoE layer's EP-local experts gathered across leftover FSDP.
+
+    :param n_gpus: GPUs one dense weight copy is FSDP-sharded across.
+    :param expert_parallel: Expert-parallel width.
+    :param expert_gpus: GPUs packed experts are sharded across (EP times
+        leftover FSDP); ``None`` when that is ``n_gpus``.
+    :return: The gathered block, or 0 without EP or when ``ep`` fills ``expert_gpus``.
+    """
+    if expert_parallel <= 1:
+        return 0
+    if (n_gpus if expert_gpus is None else expert_gpus) <= expert_parallel:
+        return 0
+    return routed_expert_params_per_layer(arch) // expert_parallel
+
+
 def fsdp_gathered_params(
     counts: ParamCounts,
     arch: ModelArch,
@@ -189,6 +210,7 @@ def fsdp_gathered_params(
     expert_parallel: int = 1,
     expert_gpus: int | None = None,
     frozen_tp_resident: bool = False,
+    expert_lora: bool = False,
 ) -> int:
     """Unsharded parameter elements held besides the resident shard.
 
@@ -200,14 +222,17 @@ def fsdp_gathered_params(
     buffers too, so the unsharded copy sits beside the one-rank shard.
 
     Expert-parallel routed experts are not in the block units. A rank
-    gathers one MoE layer of its own experts across the ranks that hold the
-    same experts, and nothing when ``ep`` fills ``expert_gpus``.
+    gathers one MoE layer of its own experts at a time (see
+    :func:`ep_gathered_expert_layer_params`). Without ``reshard_after_forward``
+    FSDP keeps every MoE layer gathered, unless a PEFT wrapper on the experts
+    lets the EP forward reshard each layer itself.
 
     :param n_gpus: GPUs one dense weight copy is FSDP-sharded across.
     :param expert_gpus: GPUs packed experts are sharded across (EP times
         leftover FSDP); ``None`` when that is ``n_gpus``.
     :param frozen_tp_resident: Frozen TP shards stay resident outside FSDP,
         so they gather nothing.
+    :param expert_lora: LoRA targets the packed experts.
     """
     token = min(token_embedding_params(arch), max(counts.total, 0))
     tp_params = (
@@ -218,14 +243,14 @@ def fsdp_gathered_params(
     sharded = max(counts.total - token - tp_params, 0) + tp_gathered_params(
         tp_params, tensor_parallel, frozen_tp_resident
     )
-    expert_layer = 0
     if expert_parallel > 1:
         routed = routed_expert_params_per_layer(arch)
         sharded = max(sharded - arch.moe_layers * routed, 0)
-        if (n_gpus if expert_gpus is None else expert_gpus) > expert_parallel:
-            expert_layer = routed // expert_parallel
+    expert_layer = ep_gathered_expert_layer_params(
+        arch, n_gpus, expert_parallel, expert_gpus
+    )
     if not reshard_after_forward:
-        return sharded + arch.moe_layers * expert_layer
+        return sharded + expert_layer * (1 if expert_lora else arch.moe_layers)
     live = min(max(1, arch.n_layers), 1 + PREFETCH_UNITS)
     window = prefetch_window_params(
         counts, arch, live, tensor_parallel, expert_parallel, frozen_tp_resident
@@ -261,11 +286,9 @@ def fsdp_retained_gather_params(
     block = prefetch_window_params(
         counts, arch, 1, tensor_parallel, expert_parallel, frozen_tp_resident
     )
-    expert_layer = 0
-    if expert_parallel > 1 and (
-        (n_gpus if expert_gpus is None else expert_gpus) > expert_parallel
-    ):
-        expert_layer = routed_expert_params_per_layer(arch) // expert_parallel
+    expert_layer = ep_gathered_expert_layer_params(
+        arch, n_gpus, expert_parallel, expert_gpus
+    )
     return max(block, expert_layer)
 
 
