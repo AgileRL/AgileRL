@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Literal
 
 from agilerl.arena.memory.manifest import (
     async_rollout,
@@ -105,6 +106,19 @@ class SearchCache:
     host_misses: dict[tuple, TrainingMemoryPlan | None] = field(default_factory=dict)
     # Keyed by GPU and engine width: whether one engine holds a sequence.
     servable_widths: dict[tuple, bool] = field(default_factory=dict)
+    # True once a GPU plan in this price misses the device's host share.
+    # Callers clear it at the start of each price.
+    host_limited: bool = False
+
+
+class SplitSearchError(ValueError):
+    """No trainer / rollout-engine split of the member's GPUs fits."""
+
+    def __init__(
+        self, message: str, kind: Literal["gpu_memory", "host_memory", "other"]
+    ) -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 def weight_sync_modes(
@@ -299,6 +313,7 @@ def _cached_training_plan(
     if plan is None:
         return None
     if not _host_share_fits(plan, device.host_bytes_per_gpu, require_buffer):
+        cache.host_limited = True
         plan = _host_miss_plan(cache, key, placed, model, device, trainers, mode)
     if plan is None or (require_buffer and not plan.breakdown.fits_with_buffer):
         return None
@@ -446,6 +461,28 @@ def _searched_engine_widths(
     return servable_engine_widths(manifest, device, widest, cache.servable_widths)
 
 
+def _no_split_failure(
+    trainer_counts: range,
+    engine_widths: list[int],
+    plans: dict[int, TrainingMemoryPlan | None],
+    trainer_multiple: int,
+    host_limited: bool,
+) -> Literal["gpu_memory", "host_memory", "other"]:
+    """The failure kind for a split search that found nothing.
+
+    Empty ``engine_widths`` means no engine can hold a sequence on this GPU.
+    ``plans`` is the GPU-only cache; a host miss still leaves an entry there.
+    """
+    if not trainer_counts:
+        return "gpu_memory" if not engine_widths else "other"
+    fsdp_counts = [
+        trainers for trainers in trainer_counts if trainers % trainer_multiple == 0
+    ]
+    if fsdp_counts and fsdp_counts[-1] in plans:
+        return "host_memory" if host_limited else "gpu_memory"
+    return "other"
+
+
 def _no_split_error(
     manifest: TrainingManifest,
     placed: list[TrainingManifest],
@@ -455,7 +492,7 @@ def _no_split_error(
     engine_widths: list[int],
     sync_link: SyncLink | None,
     cache: SearchCache,
-) -> ValueError:
+) -> SplitSearchError:
     """Why no split fits, read at the least parallel layout: the manifest's own pins.
 
     :param placed: The manifest at each searched layout, least parallel first.
@@ -471,10 +508,17 @@ def _no_split_error(
     )
     trainer_counts = range(1, member_gpus - min(engine_widths, default=member_gpus) + 1)
     workload = split_workload_from_manifest(least, not mode.merged)
-    return ValueError(
+    reason = no_split_reason(workload, trainer_counts, plans)
+    return SplitSearchError(
         f"No trainer / rollout-engine split of {member_gpus} "
-        f"{device.name} GPUs fits this run: "
-        f"{no_split_reason(workload, trainer_counts, plans)}"
+        f"{device.name} GPUs fits this run: {reason}",
+        _no_split_failure(
+            trainer_counts,
+            engine_widths,
+            plans,
+            workload.trainer_multiple,
+            cache.host_limited,
+        ),
     )
 
 

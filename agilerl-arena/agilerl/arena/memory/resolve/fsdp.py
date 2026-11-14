@@ -298,6 +298,7 @@ class TrainingMemoryUnfitError(ValueError):
                 f"one {device.name}"
             )
             hint = "Use more or larger GPUs per agent, or shorten the context length."
+            failure = "gpu_memory"
         else:
             over = (
                 f"Estimated host RAM {breakdown.host_total_bytes / GiB:.2f} GiB per "
@@ -305,8 +306,10 @@ class TrainingMemoryUnfitError(ValueError):
                 "share of the node"
             )
             hint = "Add host RAM, or shorten the context length."
+            failure = "host_memory"
         super().__init__(f"{over} at the lightest settings ({plan.describe()}). {hint}")
         self.plan = plan
+        self.failure = failure
 
 
 def _recompute_candidates(

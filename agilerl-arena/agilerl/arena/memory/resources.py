@@ -7,6 +7,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
+from enum import Enum
 from typing import Any, Literal
 
 from agilerl.arena.memory.estimator import RunEstimate, estimate_run
@@ -40,6 +41,7 @@ from agilerl.arena.memory.resolve.parallel import (
 from agilerl.arena.memory.resolve.run import (
     RunMemoryPlan,
     SearchCache,
+    SplitSearchError,
     WeightSyncMode,
     kept_weight_sync_mode,
     resolve_run_memory,
@@ -57,6 +59,14 @@ from agilerl.arena.models.manifest import TrainingManifest
 SPLIT_COUNT_KEYS = frozenset({"training_gpus_per_agent", "rollout_engines_per_agent"})
 
 
+class FailureKind(str, Enum):
+    """Why a check does not fit: GPU memory, host memory, or anything else."""
+
+    GPU_MEMORY = "gpu_memory"
+    HOST_MEMORY = "host_memory"
+    OTHER = "other"
+
+
 @dataclass(frozen=True)
 class TierCheck:
     """One tier's verdict for a manifest.
@@ -66,6 +76,9 @@ class TierCheck:
     a searched parallel group or an engine that leaves one node, or too few GPUs for
     the layout. ``layout`` is the pinned training
     layout, ``None`` when the manifest was priced as written.
+    ``failure`` is ``None`` exactly when the check fits. ``host_limited`` is
+    true when training missed the host share or only fitted after re-pricing
+    for it, including on a fit.
     """
 
     tier: dict[str, Any]
@@ -80,6 +93,8 @@ class TierCheck:
     # Predicted step, the slower of learn and generation. ``None`` when the
     # split was not searched.
     step_seconds: float | None = None
+    failure: FailureKind | None = None
+    host_limited: bool = False
 
     @property
     def fits(self) -> bool:
@@ -261,12 +276,12 @@ def _unusable(tier: dict[str, Any]) -> TierCheck | None:
     """The verdict for a tier with no GPU LLM training can run on, else ``None``."""
     gpu_type = tier.get("gpu_type")
     if not gpu_type:
-        return TierCheck(tier, "no GPU")
+        return TierCheck(tier, "no GPU", failure=FailureKind.OTHER)
     if lookup_gpu(gpu_type) is None:
-        return TierCheck(tier, f"unknown GPU {gpu_type!r}")
+        return TierCheck(tier, f"unknown GPU {gpu_type!r}", failure=FailureKind.OTHER)
     unsupported = unsupported_gpu_reason(device_spec_from_resource_class(tier))
     if unsupported is not None:
-        return TierCheck(tier, unsupported)
+        return TierCheck(tier, unsupported, failure=FailureKind.OTHER)
     return None
 
 
@@ -373,7 +388,9 @@ def _weight_sync_plan(
     allocation: int,
     layout: ParallelLayout | None,
     cache: SearchCache,
-) -> tuple[TrainingManifest, WeightSyncMode, float | None, str | None]:
+) -> tuple[
+    TrainingManifest, WeightSyncMode, float | None, str | None, FailureKind | None
+]:
     """The counts and weight-sync mode the run picks on ``allocation`` GPUs.
 
     A searched split runs :func:`split_manifest`; kept counts, or a split
@@ -381,21 +398,26 @@ def _weight_sync_plan(
 
     :param placed: ``manifest`` at ``layout``.
     :return: The laid-out manifest, the weight-sync mode, the split's
-        predicted step seconds, and why no split fits.
+        predicted step seconds, why no split fits, and that miss's kind.
     """
     sync_link = tier_sync_link(allocation, device.gpus_per_node)
     split_reason = None
+    split_failure = None
     if searches_gpu_split(manifest):
         try:
             laid_out, plan = split_manifest(
                 manifest, allocation, device, cache, sync_link, layout
             )
+        except SplitSearchError as err:
+            split_reason = str(err)
+            split_failure = FailureKind(err.kind)
         except ValueError as err:
             split_reason = str(err)
+            split_failure = FailureKind.OTHER
         else:
             step_seconds = None if plan.split is None else plan.split.step_seconds
             mode = WeightSyncMode(plan.merged_lora_sync, plan.weight_sync_transport)
-            return laid_out, mode, step_seconds, None
+            return laid_out, mode, step_seconds, None, None
     mode = kept_weight_sync_mode(
         placed,
         training_plan_model(placed, model),
@@ -404,7 +426,121 @@ def _weight_sync_plan(
         sync_link,
         cache,
     )
-    return placed, mode, None, split_reason
+    return placed, mode, None, split_reason, split_failure
+
+
+def _exception_failure(
+    err: CannotSolve | TrainingMemoryUnfitError | TrainerSplitError,
+) -> FailureKind:
+    """GPU memory for ``CannotSolve``, the unfit error's own kind, else other."""
+    if isinstance(err, TrainingMemoryUnfitError):
+        return FailureKind(err.failure)
+    if isinstance(err, CannotSolve):
+        return FailureKind.GPU_MEMORY
+    return FailureKind.OTHER
+
+
+def _other_miss(
+    tier: dict[str, Any],
+    reason: str,
+    num_nodes: int,
+    host_limited: bool = False,
+) -> TierCheck:
+    """A miss before a memory budget: placement, or too few GPUs for the layout."""
+    return TierCheck(
+        tier,
+        reason,
+        num_nodes=num_nodes,
+        failure=FailureKind.OTHER,
+        host_limited=host_limited,
+    )
+
+
+def _solve_miss(
+    tier: dict[str, Any],
+    num_nodes: int,
+    err: CannotSolve | TrainingMemoryUnfitError | TrainerSplitError,
+    split_reason: str | None,
+    split_failure: FailureKind | None,
+    host_limited: bool,
+) -> TierCheck:
+    """The check when the solve or the split search raises."""
+    reason = split_reason or str(err)
+    failure = split_failure if split_reason is not None else _exception_failure(err)
+    return TierCheck(
+        tier,
+        reason,
+        num_nodes=num_nodes,
+        failure=failure,
+        host_limited=host_limited,
+    )
+
+
+def _budget_failure(
+    reason: str | None,
+    split_reason: str | None,
+    split_failure: FailureKind | None,
+    training_fits: bool,
+    host_limited: bool,
+) -> FailureKind | None:
+    """``None`` when the tier fits. A split miss keeps its own kind."""
+    if reason is None:
+        return None
+    if split_reason is not None:
+        return split_failure
+    if not training_fits and host_limited:
+        return FailureKind.HOST_MEMORY
+    return FailureKind.GPU_MEMORY
+
+
+def _finish_price(
+    tier: dict[str, Any],
+    num_nodes: int,
+    layout: ParallelLayout | None,
+    laid_out: TrainingManifest,
+    device: DeviceSpec,
+    config: RunConfig,
+    engines: int,
+    width: int,
+    step_seconds: float | None,
+    split_reason: str | None,
+    split_failure: FailureKind | None,
+    host_limited: bool,
+) -> TierCheck:
+    """Verdict after a config priced, including host RAM that changed the kind."""
+    estimate = note_queued_sequences(estimate_run(config), config)
+    over = [
+        phase.phase
+        for phase in (estimate.training, estimate.generation)
+        if not phase.fits_with_buffer
+    ]
+    teacher = estimate_teacher_generation(laid_out, device, engines)
+    if teacher is not None and not teacher.fits_with_buffer:
+        over.append("teacher generation")
+    over_reason = f"{' and '.join(over)} over budget" if over else None
+    reason = split_reason or over_reason
+    limited = host_limited or not estimate.training.host_fits_with_buffer
+    failure = _budget_failure(
+        reason,
+        split_reason,
+        split_failure,
+        estimate.training.fits_with_buffer,
+        limited,
+    )
+    return TierCheck(
+        tier,
+        reason,
+        config,
+        estimate,
+        trainers=laid_out.training.training_gpus_per_agent,
+        engines=engines,
+        num_nodes=num_nodes,
+        layout=layout,
+        engine_tensor_parallel=width,
+        step_seconds=step_seconds,
+        failure=failure,
+        host_limited=limited,
+    )
 
 
 def _price(
@@ -426,6 +562,7 @@ def _price(
 
     :param layout: Training layout to pin; ``None`` prices the manifest as written.
     """
+    cache.host_limited = False
     node_gpus = _node_gpus(tier)
     allocation = _allocation(tier, num_nodes)
     manifest = colocated_manifest(manifest, allocation)
@@ -438,18 +575,21 @@ def _price(
         node_gpus,
     )
     if shortfall is not None:
-        return TierCheck(tier, shortfall, num_nodes=num_nodes)
+        return _other_miss(tier, shortfall, num_nodes)
     device = device_spec_from_resource_class(tier).model_copy(
         update={"gpus_per_node": node_gpus}
     )
-    laid_out, mode, step_seconds, split_reason = _weight_sync_plan(
+    laid_out, mode, step_seconds, split_reason, split_failure = _weight_sync_plan(
         manifest, placed, model, device, allocation, layout, cache
     )
     width = engine_width(laid_out, allocation, device, node_gpus, not mode.merged)
     needed = gpus_required(laid_out, width)
     if allocation < needed:
-        return TierCheck(
-            tier, f"{allocation} GPUs, the job needs {needed}", num_nodes=num_nodes
+        return _other_miss(
+            tier,
+            f"{allocation} GPUs, the job needs {needed}",
+            num_nodes,
+            cache.host_limited,
         )
     engines = engines_per_member(laid_out, allocation, width)
     try:
@@ -462,28 +602,22 @@ def _price(
             mode.transport == "nccl_reshard",
         )
     except (CannotSolve, TrainingMemoryUnfitError, TrainerSplitError) as err:
-        return TierCheck(tier, split_reason or str(err), num_nodes=num_nodes)
-    estimate = note_queued_sequences(estimate_run(config), config)
-    over = [
-        phase.phase
-        for phase in (estimate.training, estimate.generation)
-        if not phase.fits_with_buffer
-    ]
-    teacher = estimate_teacher_generation(laid_out, device, engines)
-    if teacher is not None and not teacher.fits_with_buffer:
-        over.append("teacher generation")
-    reason = f"{' and '.join(over)} over budget" if over else None
-    return TierCheck(
+        return _solve_miss(
+            tier, num_nodes, err, split_reason, split_failure, cache.host_limited
+        )
+    return _finish_price(
         tier,
-        split_reason or reason,
+        num_nodes,
+        layout,
+        laid_out,
+        device,
         config,
-        estimate,
-        trainers=laid_out.training.training_gpus_per_agent,
-        engines=engines,
-        num_nodes=num_nodes,
-        layout=layout,
-        engine_tensor_parallel=width,
-        step_seconds=step_seconds,
+        engines,
+        width,
+        step_seconds,
+        split_reason,
+        split_failure,
+        cache.host_limited,
     )
 
 
@@ -726,7 +860,13 @@ def _drop_after_largest_miss(
         for other in covered:
             first_failure.setdefault(
                 other["name"],
-                TierCheck(other, largest.reason, num_nodes=_node_counts(other)[-1]),
+                TierCheck(
+                    other,
+                    largest.reason,
+                    num_nodes=_node_counts(other)[-1],
+                    failure=largest.failure,
+                    host_limited=largest.host_limited,
+                ),
             )
     dead.add(tier["name"])
     dead.update(other["name"] for other in covered)
@@ -758,7 +898,7 @@ def _verdict(
         reason = f"fewer GPUs per node or less memory per GPU than {lock.tier['name']}"
     else:
         reason = f"no {lock.num_nodes}-node option, where {lock.tier['name']} fits"
-    return TierCheck(tier, reason)
+    return TierCheck(tier, reason, failure=FailureKind.OTHER)
 
 
 def _holds_lock(tier: dict[str, Any], lock: TierCheck) -> bool:

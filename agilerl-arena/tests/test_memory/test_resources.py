@@ -3,6 +3,7 @@
 """Cheapest resource tier for a manifest."""
 
 import copy
+import dataclasses
 import json
 from pathlib import Path
 
@@ -19,9 +20,15 @@ from agilerl.arena.memory.manifest import (
 )
 from agilerl.arena.memory.resolve.batch import catalog_model
 from agilerl.arena.memory.resolve.engine import resolve_engine_tensor_parallel
+from agilerl.arena.memory.resolve.fsdp import TrainingMemoryUnfitError
 from agilerl.arena.memory.resolve.parallel import ParallelLayout
-from agilerl.arena.memory.resolve.run import SearchCache, resolve_run_memory
+from agilerl.arena.memory.resolve.run import (
+    SearchCache,
+    SplitSearchError,
+    resolve_run_memory,
+)
 from agilerl.arena.memory.resources import (
+    FailureKind,
     check_tiers,
     colocated_manifest,
     engine_width,
@@ -31,6 +38,7 @@ from agilerl.arena.memory.resources import (
     split_manifest,
     tier_sync_link,
 )
+from agilerl.arena.memory.solver import CannotSolve
 from agilerl.arena.memory.specs import ModelArch, ModelSpec
 from agilerl.arena.models.manifest import TrainingManifest
 from tests.test_memory.test_cli import (
@@ -40,6 +48,7 @@ from tests.test_memory.test_cli import (
     SFT_MANIFEST,
     TINY_CONFIG,
 )
+from tests.test_memory.test_resolve_parallel import plan_for
 
 
 def tier(name, gpu_type, num_gpus, price):
@@ -570,6 +579,8 @@ class TestCheckTiers:
         assert not check.fits
         assert check.reason.startswith("No trainer / rollout-engine split of 2")
         assert check.estimate is not None
+        assert check.failure == FailureKind.GPU_MEMORY
+        assert check.host_limited is False
 
     @pytest.mark.parametrize(
         ("gpu_type", "label"), [("Tesla T4", "SM75"), ("Tesla V100", "SM70")]
@@ -1296,6 +1307,7 @@ class TestCheckTiers:
         assert not check.fits
         assert check.reason == "1 GPUs, the job needs 2"
         assert check.config is None
+        assert check.failure == FailureKind.OTHER
 
     def test_unset_counts_split_the_gpus_at_the_least_parallel_layout(self):
         manifest = TrainingManifest.model_validate(unset_split(MANIFEST))
@@ -1369,6 +1381,227 @@ class TestCheckTiers:
         assert checks[1].fits
         assert checks[1].config is not None
         assert checks[1].layout == checks[0].layout
+
+
+class TestTierCheckFailure:
+    def test_a_plain_fit_has_no_failure_and_is_not_host_limited(self):
+        manifest = TrainingManifest.model_validate(MANIFEST)
+
+        (check,) = check_tiers(
+            [tier("l4-2x", "NVIDIA L4", 2, 2.0)], manifest, tiny_model(), builder()
+        )
+
+        assert check.fits
+        assert check.failure is None
+        assert check.host_limited is False
+
+    def test_teacher_generation_over_budget_is_gpu_memory(self):
+        manifest = teacher_manifest(teacher="Qwen/Qwen3.8-27B", teacher_width=1)
+
+        (check,) = check_tiers(
+            [tier("l4-8x", "NVIDIA L4", 8, 8.0)], manifest, tiny_model(), builder()
+        )
+
+        assert not check.fits
+        assert check.reason == "teacher generation over budget"
+        assert check.failure == FailureKind.GPU_MEMORY
+        assert check.host_limited is False
+
+    def test_a_host_share_miss_is_host_memory(self):
+        # Arrange: 8 GiB node RAM leaves a 0-byte host share on two GPUs.
+        manifest = TrainingManifest.model_validate(MANIFEST)
+        tight = {**tier("l4-2x", "NVIDIA L4", 2, 1.0), "ram_gb": 8}
+
+        # Act
+        (check,) = check_tiers([tight], manifest, tiny_model(), builder())
+
+        # Assert
+        assert not check.fits
+        assert check.failure == FailureKind.HOST_MEMORY
+        assert check.host_limited is True
+
+    def test_no_gpu_is_other(self):
+        manifest = TrainingManifest.model_validate(MANIFEST)
+
+        (check,) = check_tiers(
+            [tier("cpu", None, 0, 0.5)], manifest, tiny_model(), builder()
+        )
+
+        assert not check.fits
+        assert check.reason == "no GPU"
+        assert check.failure == FailureKind.OTHER
+        assert check.host_limited is False
+
+    def test_a_model_outside_the_catalogue_keeps_the_split_reason_as_other(self):
+        manifest = TrainingManifest.model_validate(
+            unset_split(with_model(MANIFEST, "acme/not-in-the-catalogue"))
+        )
+
+        (check,) = check_tiers(
+            [tier("l4-2x", "NVIDIA L4", 2, 1.0)], manifest, tiny_model(), builder()
+        )
+
+        assert not check.fits
+        assert check.reason == (
+            "'acme/not-in-the-catalogue' is not in the memory estimator catalogue"
+        )
+        assert check.failure == FailureKind.OTHER
+
+    def test_a_build_that_cannot_solve_is_gpu_memory(self):
+        # Arrange
+        manifest = TrainingManifest.model_validate(MANIFEST)
+
+        message = "no micro batch fits"
+
+        def cannot_solve(*_args):
+            raise CannotSolve(message)
+
+        # Act
+        (check,) = check_tiers(
+            [tier("l4-2x", "NVIDIA L4", 2, 1.0)], manifest, tiny_model(), cannot_solve
+        )
+
+        # Assert
+        assert not check.fits
+        assert check.reason == message
+        assert check.config is None
+        assert check.failure == FailureKind.GPU_MEMORY
+
+    def test_an_unfit_build_keeps_its_own_failure_kind(self):
+        # Arrange: the lightest plan's 2-byte host share is over its 1 byte.
+        manifest = TrainingManifest.model_validate(MANIFEST)
+        device = lookup_gpu("NVIDIA L4").device_spec()
+        plan = plan_for(ParallelLayout(), 1, 100)
+        breakdown = plan.breakdown.model_copy(
+            update={
+                "host": (
+                    MemoryComponent(key="optimizer", label="Optimizer", n_bytes=2),
+                ),
+                "host_usable_bytes": 1,
+            }
+        )
+        unfit = TrainingMemoryUnfitError(
+            dataclasses.replace(plan, breakdown=breakdown), device
+        )
+
+        def nothing_fits(*_args):
+            raise unfit
+
+        # Act
+        (check,) = check_tiers(
+            [tier("l4-2x", "NVIDIA L4", 2, 1.0)], manifest, tiny_model(), nothing_fits
+        )
+
+        # Assert
+        assert not check.fits
+        assert check.reason == str(unfit)
+        assert check.failure == FailureKind.HOST_MEMORY
+
+    def test_a_host_reprice_that_fits_is_host_limited(self, monkeypatch):
+        # Arrange: the GPU plan is treated as missing the host share so the
+        # search re-prices; 64 GiB is enough for that later plan to fit.
+        from agilerl.arena.memory.resolve.run import _host_share_fits as real_fits
+
+        def miss_set_share(plan, host_bytes, require_buffer):
+            if host_bytes is not None:
+                return False
+            return real_fits(plan, host_bytes, require_buffer)
+
+        monkeypatch.setattr(
+            "agilerl.arena.memory.resolve.run._host_share_fits", miss_set_share
+        )
+        manifest = TrainingManifest.model_validate(MANIFEST)
+
+        # Act
+        (check,) = check_tiers(
+            [tier("l4-2x", "NVIDIA L4", 2, 2.0)], manifest, tiny_model(), builder()
+        )
+
+        # Assert
+        assert check.fits
+        assert check.failure is None
+        assert check.host_limited is True
+
+    def test_a_skipped_tier_copies_failure_and_host_limited(self, monkeypatch):
+        # Arrange: the cheap tier misses at 1 node and at its most, 8. The
+        # dear tier offers no fewer than 4 nodes, so it is never priced.
+        manifest = manifest_with(
+            MANIFEST, training_gpus_per_agent=2, rollout_engines_per_agent=1
+        )
+        monkeypatch.setattr(
+            resources_module, "estimate_run", lambda _config: flat_estimate(10**15, 100)
+        )
+        rich = {
+            **tier("l4-rich", "NVIDIA L4", 2, 1.0),
+            "ram_gb": 256,
+            "node_counts": [1, 2, 8],
+        }
+        poor = {**tier("l4-poor", "NVIDIA L4", 2, 2.0), "node_counts": [4, 8]}
+
+        # Act
+        checks = check_tiers([rich, poor], manifest, tiny_model(), builder())
+
+        # Assert
+        skipped = next(check for check in checks if check.tier["name"] == "l4-poor")
+        assert skipped.reason == "training over budget"
+        assert skipped.num_nodes == 8
+        assert skipped.config is None
+        assert skipped.failure == FailureKind.GPU_MEMORY
+        assert skipped.host_limited is False
+
+    def test_a_skipped_tier_copies_a_host_limited_miss(self):
+        # Arrange: 8 GiB leaves a 0-byte host share. The poor tier is covered
+        # by the rich miss at 8 nodes and is never priced.
+        manifest = manifest_with(
+            MANIFEST, training_gpus_per_agent=2, rollout_engines_per_agent=1
+        )
+        rich = {
+            **tier("l4-rich", "NVIDIA L4", 2, 1.0),
+            "ram_gb": 8,
+            "node_counts": [1, 2, 8],
+        }
+        poor = {
+            **tier("l4-poor", "NVIDIA L4", 2, 2.0),
+            "ram_gb": 8,
+            "node_counts": [4, 8],
+        }
+
+        # Act
+        checks = check_tiers([rich, poor], manifest, tiny_model(), builder())
+
+        # Assert
+        skipped = next(check for check in checks if check.tier["name"] == "l4-poor")
+        assert skipped.num_nodes == 8
+        assert skipped.config is None
+        assert skipped.failure == FailureKind.HOST_MEMORY
+        assert skipped.host_limited is True
+
+    def test_no_servable_engine_width_is_gpu_memory(self, monkeypatch):
+        monkeypatch.setattr(
+            "agilerl.arena.memory.resolve.run.servable_engine_widths",
+            lambda *args, **kwargs: [],
+        )
+        manifest = TrainingManifest.model_validate(unset_split(unset_width(MANIFEST)))
+
+        (check,) = check_tiers(
+            [tier("l4-2x", "NVIDIA L4", 2, 1.0)], manifest, tiny_model(), builder()
+        )
+
+        assert not check.fits
+        assert "a trainer and a rollout engine do not both fit" in check.reason
+        assert check.failure == FailureKind.GPU_MEMORY
+
+    def test_no_room_beside_an_engine_is_other(self):
+        # One GPU cannot hold a trainer beside an engine. check_tiers then
+        # sizes kept counts and reports a GPU-count miss; the split's kind is
+        # other before that.
+        manifest = TrainingManifest.model_validate(unset_split(MANIFEST))
+        device = lookup_gpu("NVIDIA L4").device_spec()
+
+        with pytest.raises(SplitSearchError) as raised:
+            split_manifest(manifest, 1, device)
+
+        assert raised.value.kind == FailureKind.OTHER
 
 
 class TestSearchSteps:
