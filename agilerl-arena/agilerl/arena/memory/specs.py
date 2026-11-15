@@ -351,6 +351,8 @@ def _radio_vision_lora_linears(config: dict[str, Any]) -> tuple[LoraLinear, ...]
     patch = int(vision["num_channels"]) * int(vision["patch_size"]) ** 2
     merged = h * round(1 / config["downsample_ratio"]) ** 2
     projector = int(config["projector_hidden_size"])
+    # Hub config.json names it llm_config; transformers' loaded config, text_config.
+    text = config.get("text_config") or config["llm_config"]
     linears = [
         *(
             LoraLinear(h, h, layers, target=name)
@@ -360,9 +362,7 @@ def _radio_vision_lora_linears(config: dict[str, Any]) -> tuple[LoraLinear, ...]
         LoraLinear(inter, h, layers, "in", "fc2"),
         LoraLinear(patch, h, 1, target="patch_projection"),
         LoraLinear(merged, projector, 1, target="linear_1"),
-        LoraLinear(
-            projector, int(config["llm_config"]["hidden_size"]), 1, target="linear_2"
-        ),
+        LoraLinear(projector, int(text["hidden_size"]), 1, target="linear_2"),
     ]
     frames = vision.get("video_temporal_patch_size")
     if frames:
