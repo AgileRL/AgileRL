@@ -20,6 +20,7 @@ from typing import Protocol
 
 from agilerl.arena.snowflake.job import (
     RUN_MOUNT,
+    cpu_memory_gib,
     lowered,
     runs_prefix,
     snowflake_identifier,
@@ -141,6 +142,26 @@ def main() -> int:
     return run_broker()
 
 
+def memory_limit_bytes(path: Path, family: str) -> int:
+    """Cgroup memory limit in bytes, or the broker family size when unset.
+
+    :param path: ``memory.max``.
+    :param family: Broker instance family from ``job.json``. Used when the
+        file is missing or not a byte count.
+    :return: The limit in bytes.
+    :raises ValueError: The file is not a byte count and ``family`` is not a
+        known CPU family.
+    """
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        text = ""
+    if text.isdecimal():
+        return int(text)
+    # CPU pools omit memory.max, or write the literal max.
+    return cpu_memory_gib(family) * 1024 * 1024 * 1024
+
+
 def run_broker(runtime: BrokerRuntime | None = None) -> int:
     """Start Pulsar, create ``arena/run``, and exit when the head run finishes.
 
@@ -149,9 +170,11 @@ def run_broker(runtime: BrokerRuntime | None = None) -> int:
         it, or the head never runs before the deadline. That last case also
         writes ``.done`` with 1.
     :raises TimeoutError: The health endpoint never returns 200.
-    :raises KeyError: ``job.json`` lacks ``runs_stage``, ``run_id``, or
-        ``head_service``.
-    :raises ValueError: ``run_id`` or the head service name is not a valid identifier.
+    :raises KeyError: ``job.json`` lacks ``runs_stage``, ``run_id``,
+        ``head_service``, or ``broker_family``.
+    :raises ValueError: ``run_id`` or the head service name is not a valid
+        identifier, or ``memory.max`` is not a byte count and ``broker_family``
+        is not a known CPU family.
     :raises RuntimeError: ``pulsar-admin`` failed for a reason other than
         the tenant or namespace already existing.
     """
@@ -159,7 +182,7 @@ def run_broker(runtime: BrokerRuntime | None = None) -> int:
     job = json.loads((current.run_dir / "job.json").read_text(encoding="utf-8"))
     run_prefix = runs_prefix(str(job["runs_stage"]), str(job["run_id"]))
     head_service = str(job["head_service"])
-    limit = int(current.memory_limit_path.read_text(encoding="utf-8").strip())
+    limit = memory_limit_bytes(current.memory_limit_path, str(job["broker_family"]))
     memory = broker_memory(limit)
     write_broker_config(current.pulsar_home, current.node_ip(), memory)
     env = dict(current.environ)

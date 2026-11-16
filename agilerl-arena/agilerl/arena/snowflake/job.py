@@ -77,6 +77,7 @@ RUBRIC_FIELDS = ("rubric_file_path", "reward_file_path")
 class JobDocument(TypedDict):
     """JSON payload the in-job entrypoint and the broker read."""
 
+    broker_family: str
     broker_service: str
     checkpoint_steps: int | None
     compute_pool: str
@@ -679,6 +680,7 @@ def job_document(
     :return: A JSON-ready document.
     """
     return {
+        "broker_family": settings.broker_family,
         "broker_service": services.broker,
         "checkpoint_steps": settings.checkpoint_steps,
         "compute_pool": settings.gpu_pool,

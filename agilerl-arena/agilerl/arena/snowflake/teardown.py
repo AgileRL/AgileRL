@@ -93,9 +93,15 @@ def plan_teardown(session: SnowflakeSession) -> TeardownPlan:
         profile = remote_profile(session)
         if profile is not None:
             named.update(name.upper() for name in profile_pool_names(profile))
-    pools = tuple(
-        state.name for key, state in existing_pools(session).items() if key in named
-    )
+    account_pools = existing_pools(session)
+    selected = [state.name for key, state in account_pools.items() if key in named]
+    if not foreign:
+        selected.extend(
+            state.name
+            for key, state in account_pools.items()
+            if key.startswith("ARENA_GPU_") and key not in named
+        )
+    pools = tuple(selected)
     found = existing_integrations(session)
     return TeardownPlan(
         pools=pools,

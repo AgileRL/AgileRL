@@ -49,6 +49,10 @@ class TestMissingObject:
             "Database 'ARENA' does not exist or not authorized.",
             "Stage not found",
             "No such file",
+            (
+                "Unknown user-defined function "
+                "ARENA.TRAINING.ARENA_GPU_BUDGET!GET_LINKED_RESOURCES."
+            ),
         ],
     )
     def test_missing_object_errors(self, text: str) -> None:

@@ -863,7 +863,7 @@ class TestSubmitJob:
     ) -> None:
         session = Session()
         manifest = _write(tmp_path, _sft())
-        settings = _settings()
+        settings = _settings(broker_family="CPU_X64_S")
 
         run_id, services = submit_job(session, manifest, settings, run_id=RUN_ID)
 
@@ -888,6 +888,7 @@ class TestSubmitJob:
         assert document["nodes"] == document["workers"] == 2
         assert document["gpus"] == 2
         assert document["family"] == "GPU_NV_S"
+        assert document["broker_family"] == "CPU_X64_S"
         assert document["broker_service"] == SERVICES.broker
         assert document["head_service"] == SERVICES.head
         assert document["workers_service"] == SERVICES.workers
