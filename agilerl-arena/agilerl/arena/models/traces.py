@@ -56,6 +56,7 @@ class ContentPart(BaseModel):
 
 
 MessageContent = str | list[ContentPart]
+"""Content of a system, developer or user message; assistant and tool content is a string."""
 
 
 class ToolCallFunction(BaseModel):
@@ -119,7 +120,7 @@ class AssistantMessage(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     role: Literal["assistant"]
-    content: MessageContent | None = None
+    content: str | None = None
     reasoning_content: str | None = None
     reasoning: str | None = None
     thinking: str | None = None
@@ -161,7 +162,7 @@ class ToolMessage(BaseModel):
 
     role: Literal["tool"]
     tool_call_id: str = Field(min_length=1)
-    content: MessageContent
+    content: str
     name: str | None = None
 
 

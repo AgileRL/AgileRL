@@ -11,7 +11,8 @@ from __future__ import annotations
 import json
 import os
 import re
-from functools import lru_cache
+import warnings
+from functools import cache, lru_cache
 from typing import TYPE_CHECKING, Any
 
 from agilerl.arena.traces_format import REASONING_KEYS
@@ -34,15 +35,16 @@ TURN_OPENER = {"role": "user", "content": "."}
 def chat_messages(value: str | list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Normalize one row's OpenAI-style ``messages`` for a chat template.
 
-    Accepts a JSON string or a list. Drops ``None`` fields and decodes string
-    tool-call arguments, which HF chat templates expect as a dict. A list is
-    Arrow data, which fills every struct key at every depth, so ``None`` is also
-    dropped inside its struct arguments; nulls in JSON text are real and kept.
+    Accepts a JSON string or a list. Drops ``None`` fields, joins a list of
+    text content parts into one string, and decodes string tool-call arguments,
+    which HF chat templates expect as a dict. A list is Arrow data, which fills
+    every struct key at every depth, so ``None`` is also dropped inside its
+    struct arguments; nulls in JSON text are real and kept.
 
     :param value: The row's ``messages`` value.
     :return: Messages ready for ``apply_chat_template``.
-    :raises ValueError: If the row or a call's arguments are not valid JSON, or
-        a call's arguments are not an object.
+    :raises ValueError: If the row or a call's arguments are not valid JSON, a
+        call's arguments are not an object, or a content part is not text.
     """
     from_arrow = not isinstance(value, str)
     raw = (
@@ -51,12 +53,32 @@ def chat_messages(value: str | list[dict[str, Any]]) -> list[dict[str, Any]]:
     messages = []
     for raw_message in raw:
         message = {key: item for key, item in raw_message.items() if item is not None}
+        if isinstance(message.get("content"), list):
+            message["content"] = _joined_text_parts(message["content"], message["role"])
         if "tool_calls" in message:
             message["tool_calls"] = [
                 _decoded_tool_call(call, from_arrow) for call in message["tool_calls"]
             ]
         messages.append(message)
     return messages
+
+
+def _joined_text_parts(parts: list[dict[str, Any]], role: str) -> str:
+    """The ``text`` of each content part, joined by newlines as vLLM joins them.
+
+    :raises ValueError: If a part is not a text part.
+    """
+    texts = []
+    for part in parts:
+        text = part.get("text")
+        if part.get("type") != "text" or not isinstance(text, str):
+            msg = (
+                f"A {role} message has a {part.get('type')!r} content part; "
+                "only text parts can be trained."
+            )
+            raise ValueError(msg)
+        texts.append(text)
+    return "\n".join(texts)
 
 
 REASONING_READ = re.compile(
@@ -96,13 +118,20 @@ def _with_reasoning_key(message: dict[str, Any], key: str | None) -> dict[str, A
     """An assistant message with its reasoning under ``key``, the key the template reads.
 
     :param message: Normalized message.
-    :param key: Target key, or ``None`` to leave the message as it is.
+    :param key: Target key, or ``None`` when the template reads none: the
+        reasoning is then dropped, with a warning once per process.
     :return: The message, with any other reasoning key moved to ``key``.
     :raises ValueError: If the message sets two reasoning keys to different text.
     """
-    if key is None or message.get("role") != "assistant":
+    if message.get("role") != "assistant":
         return message
     present = {name: message[name] for name in REASONING_KEYS if message.get(name)}
+    if key is None:
+        if present:
+            _warn_reasoning_dropped()
+        return {
+            name: item for name, item in message.items() if name not in REASONING_KEYS
+        }
     values = list(present.values())
     if any(value != values[0] for value in values[1:]):
         msg = (
@@ -115,6 +144,17 @@ def _with_reasoning_key(message: dict[str, Any], key: str | None) -> dict[str, A
     value = next(iter(present.values()))
     kept = {name: item for name, item in message.items() if name not in REASONING_KEYS}
     return {**kept, key: value}
+
+
+@cache
+def _warn_reasoning_dropped() -> None:
+    """Warn, once, that a chat template without a reasoning key drops assistant reasoning."""
+    warnings.warn(
+        "The chat template reads none of "
+        f"{list(REASONING_KEYS)}, so assistant reasoning is dropped from SFT "
+        "turns, prompts and the OPSD reference.",
+        stacklevel=4,
+    )
 
 
 def _as_messages(value: str | list[dict[str, Any]], role: str) -> list[dict[str, Any]]:
@@ -186,7 +226,10 @@ def encode_chat_transcript(
     assistant turn are dropped. Assistant messages' reasoning is moved to the
     key the chat template reads, see :func:`template_reasoning_key`.
     Assistant turns before ``trained_from`` are context: masked out, and their
-    tool calls are not checked against the chat format's parser.
+    tool calls are not checked against the chat format's parser. With
+    ``trained_from`` set, the context is the template's render of the messages
+    before the first trained turn with the generation prompt, the text a
+    rollout samples that turn after.
 
     :param tokenizer: Tokenizer whose chat template renders the conversation.
     :param messages: Normalized messages, see :func:`chat_messages`.
@@ -197,8 +240,9 @@ def encode_chat_transcript(
     :return: Token ids and, per id, whether it is a trained assistant token.
     :raises ValueError: If the conversation has no prompt or no assistant
         turn, has back-to-back assistant turns, the template renders an
-        assistant turn that does not extend the generation prompt, or the chat
-        format does not parse a turn's rendered tool calls back to its calls.
+        assistant turn that does not extend the generation prompt, the chat
+        format does not parse a turn's rendered tool calls back to its calls,
+        or the trained turn does not start where the generation prompt ends.
     """
     reasoning_key = template_reasoning_key(tokenizer)
     messages = [_with_reasoning_key(message, reasoning_key) for message in messages]
@@ -249,18 +293,62 @@ def encode_chat_transcript(
         previous = idx
     kept = assistant_indices[-1] + 1
     canonical = _render(tokenizer, render_messages[:kept], False, render_kwargs)
-    if _decodes_template(tokenizer, ids, canonical):
+    if not _decodes_template(tokenizer, ids, canonical):
+        ids, mask = _assemble_from_template(
+            tokenizer,
+            render_messages[:kept],
+            messages[:kept],
+            canonical,
+            render_kwargs,
+            chat_format,
+            tools,
+            trained_from,
+        )
+    if trained_from == 0:
         return ids, mask
-    return _assemble_from_template(
-        tokenizer,
-        render_messages[:kept],
-        messages[:kept],
-        canonical,
-        render_kwargs,
-        chat_format,
-        tools,
-        trained_from,
+    first_trained = next(idx for idx in assistant_indices if idx >= trained_from)
+    return _after_prompt_render(
+        tokenizer, render_messages[:first_trained], ids, mask, render_kwargs
     )
+
+
+def _after_prompt_render(
+    tokenizer: PreTrainedTokenizerBase,
+    prompt_messages: list[dict[str, Any]],
+    ids: list[int],
+    mask: list[bool],
+    render_kwargs: dict[str, Any],
+) -> tuple[list[int], list[bool]]:
+    """``ids`` with the context before the first trained token replaced by the prompt's render.
+
+    A template may rewrite earlier turns once a later one follows (gpt-oss drops
+    their reasoning), but a rollout samples the turn after the prompt alone.
+
+    :param prompt_messages: Messages before the first trained turn, as rendered.
+    :param ids: Transcript ids from the template's render of the whole conversation.
+    :param mask: Their assistant mask.
+    :return: The prompt's ids with the generation prompt, then the trained ids.
+    :raises ValueError: If the trained turn does not start where the
+        generation prompt ends, as when it closes a thinking block the turn's
+        reasoning goes in.
+    """
+    prompt = _render(tokenizer, prompt_messages, True, render_kwargs)
+    prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
+    start = mask.index(True)
+    if ids[:start] == prompt_ids:
+        return ids, mask
+    plain = _render(tokenizer, prompt_messages, False, render_kwargs)
+    addition = prompt[len(os.path.commonprefix([prompt, plain])) :]
+    context = str(tokenizer.decode(ids[:start]))
+    if not context.endswith(addition):
+        msg = (
+            f"The template starts the trained turn after {context[-80:]!r}, "
+            f"not after the generation prompt {addition!r}. A completion with "
+            "reasoning needs a generation prompt that leaves the thinking block "
+            "open (Qwen3.5: chat_template_kwargs enable_thinking: true)."
+        )
+        raise ValueError(msg)
+    return prompt_ids + ids[start:], [False] * len(prompt_ids) + mask[start:]
 
 
 def _messages_for_render(

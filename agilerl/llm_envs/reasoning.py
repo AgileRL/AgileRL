@@ -12,6 +12,9 @@ if TYPE_CHECKING:
 
     from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
+REASONING_START_MARKER = "<think>"
+"""Marker opening a reasoning block in the tag format."""
+
 REASONING_END_MARKER = "</think>"
 """Marker closing a reasoning block in the tag format, or taught as plain text by a prompt."""
 
