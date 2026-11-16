@@ -1156,7 +1156,6 @@ def run_config_from_manifest(
     model_config: dict[str, Any],
     *,
     n_params: int | None = None,
-    gen_device: DeviceSpec | None = None,
     tensor_parallel_size: int | None = None,
     rollout_engines: int | None = None,
     adapter_sync: bool = False,
@@ -1172,7 +1171,6 @@ def run_config_from_manifest(
         names. Fetched by the caller so the calculation core stays free of I/O.
     :param n_params: Exact parameter count when known, e.g. from safetensors
         metadata; ``None`` falls back to the analytic count.
-    :param gen_device: The rollout engine's device. Defaults to ``device``.
     :param tensor_parallel_size: Engine width to size. Required when a rollout
         manifest leaves the width unset.
     :param rollout_engines: Engines per member the allocation starts.
@@ -1193,7 +1191,7 @@ def run_config_from_manifest(
     manifest = _engine_served_manifest(manifest, arch, tensor_parallel_size)
     spec = llm_spec(manifest)
     if isinstance(spec, RolloutLLMSpec):
-        gpu = lookup_gpu((gen_device or device).name or "")
+        gpu = lookup_gpu(device.name or "")
         if gpu is not None:
             vllm = _resolve_vllm(spec)
             check_fp8_moe_backend_for_device(
@@ -1236,11 +1234,11 @@ def run_config_from_manifest(
         nccl_reshard=nccl_reshard,
     )
     if async_rollout(manifest):
-        generation = drop_engine_fast_paths(model, gen_device or device, generation)
+        generation = drop_engine_fast_paths(model, device, generation)
     return RunConfig(
         model=model,
         train_device=device,
-        gen_device=gen_device or device,
+        gen_device=device,
         training=training,
         generation=generation,
         orchestrated=True,
@@ -1253,7 +1251,6 @@ def estimate_manifest(
     model_config: dict[str, Any],
     *,
     n_params: int | None = None,
-    gen_device: DeviceSpec | None = None,
     tensor_parallel_size: int | None = None,
     adapter_sync: bool = False,
     nccl_reshard: bool = False,
@@ -1273,7 +1270,6 @@ def estimate_manifest(
             device,
             model_config,
             n_params=n_params,
-            gen_device=gen_device,
             tensor_parallel_size=tensor_parallel_size,
             adapter_sync=adapter_sync,
             nccl_reshard=nccl_reshard,

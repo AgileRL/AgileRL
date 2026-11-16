@@ -23,7 +23,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Only `arena memory estimate` / `solve` need these, and only to resolve a model id.
+# Only `arena memory` needs this, to read a model's config.json and safetensors
+# index from the Hub when the Arena catalog and --config do not cover it.
 hub = [
     "huggingface-hub>=0.30",
 ]

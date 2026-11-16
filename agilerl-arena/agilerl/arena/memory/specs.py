@@ -780,8 +780,7 @@ class ModelArch(BaseModel):
     tower_block_units: int = 0
     # Tower params the training TP plan splits across ranks.
     tensor_parallel_tower_params: int = 0
-    # Vision tower width per patch and the patch side. Zero without a vision
-    # tower.
+    # Vision tower width per patch and the patch side; zero without a tower.
     vision_hidden_size: int = 0
     vision_patch_size: int = 0
     # Vision encoder MLP width, pixel channels, frames per temporal patch,
@@ -792,8 +791,9 @@ class ModelArch(BaseModel):
     vision_temporal_patch_size: int = 1
     vision_out_hidden_size: int = 0
     vision_spatial_merge_size: int = 1
-    # Vision encoder blocks.
+    # Vision encoder blocks, and vision heads where vLLM shards the tower by TP.
     vision_n_layers: int = 0
+    vision_heads: int | None = None
     # Patches vLLM encodes for its start-up profile image; 0 when unmeasured.
     vision_profile_patches: int = 0
     # The image processor's patch-grid rule, and its per-image patch bounds
@@ -967,6 +967,23 @@ class ModelArch(BaseModel):
         if self.n_mlp_layers is not None:
             return self.n_mlp_layers
         return self.dense_ffn_layers if self.is_moe else self.n_layers
+
+    def splits_heads(self, tp: int) -> bool:
+        """Whether vLLM can shard attention, Mamba and vision heads over ``tp`` ranks.
+
+        Attention heads split evenly; KV heads split or replicate evenly.
+        Mamba heads split evenly; Mamba groups split evenly or are a single
+        group replicated onto every rank.
+        """
+        attention = self.n_heads % tp == 0 and (
+            self.n_kv_heads % tp == 0 or tp % self.n_kv_heads == 0
+        )
+        mamba = not self.is_hybrid_ssm or (
+            self.mamba_n_heads % tp == 0
+            and (self.mamba_n_groups % tp == 0 or self.mamba_n_groups == 1)
+        )
+        vision = self.vision_heads is None or self.vision_heads % tp == 0
+        return attention and mamba and vision
 
     @classmethod
     def from_hf_config(cls, config: dict[str, Any]) -> Self:

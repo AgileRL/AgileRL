@@ -2226,6 +2226,39 @@ class TestInferenceDeployments:
 
         api_key_client._request.assert_not_called()
 
+    def test_deploy_agent_sends_gpu_request(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"deployed": True})
+
+        api_key_client.deploy_agent("exp1", num_gpus=4, gpu_type="h100-80")
+
+        api_key_client._request.assert_called_once_with(
+            "POST",
+            "/api/cli/v1/inference/deploy",
+            json={
+                "experiment_name": "exp1",
+                "checkpoint": None,
+                "numGpus": 4,
+                "gpuType": "h100-80",
+            },
+        )
+
+    def test_deploy_agent_omits_unset_gpu_request(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"deployed": True})
+
+        api_key_client.deploy_agent("exp1")
+
+        payload = api_key_client._request.call_args[1]["json"]
+        assert "numGpus" not in payload
+        assert "gpuType" not in payload
+
+    def test_deploy_agent_rejects_zero_gpus(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"deployed": True})
+
+        with pytest.raises(ArenaValidationError, match="num_gpus must be at least 1"):
+            api_key_client.deploy_agent("exp1", num_gpus=0)
+
+        api_key_client._request.assert_not_called()
+
     def test_deploy_agent_rejects_unknown_memory_scope(self, api_key_client):
         api_key_client._request = MagicMock(return_value={"deployed": True})
         with pytest.raises(ArenaValidationError, match="Unknown memory scope"):

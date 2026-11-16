@@ -97,6 +97,8 @@ VISION_RESIZE_BY_MODEL_TYPE: dict[str, VisionResize] = {
 VISION_FEATURE_CACHE_MODEL_TYPES: frozenset[str] = frozenset(
     {"qwen3_5", "qwen3_5_moe", "gemma4"}
 )
+# vLLM shards these vision towers by tensor parallel, so their heads must split evenly.
+VLLM_SHARDED_VISION_MODEL_TYPES = frozenset({"qwen3_5", "qwen3_5_moe"})
 
 # Tower config model types whose encoder MLP has gate, up and down projections.
 GATED_MLP_TOWER_MODEL_TYPES = frozenset({"gemma4_vision", "glm5_next_vision"})
@@ -462,4 +464,7 @@ def vision_geometry_fields(config: dict[str, Any]) -> dict[str, Any]:
             vision.get("max_num_patches") or soft_tokens * merge**2
         ),
         "vision_feature_cache": model_type in VISION_FEATURE_CACHE_MODEL_TYPES,
+        "vision_heads": int(vision["num_heads"])
+        if model_type in VLLM_SHARDED_VISION_MODEL_TYPES
+        else None,
     }
