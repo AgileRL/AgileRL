@@ -164,6 +164,8 @@ class SplitWorkload(BaseModel):
     turns: int
     # Forward-equivalents per trained token, from :func:`learn_forward_passes`.
     learn_passes: int
+    # Passes over each rank's rows in one learn step.
+    update_epochs: int = 1
     # Pinned groups per rollout cycle; ``None`` rounds ``batch_size`` up to
     # ``lcm(trainers, engines)``.
     rollout_batch_size: int | None = None
@@ -215,15 +217,20 @@ class TrainerCost(NamedTuple):
     learn_cost_ratio: float
     # The plan trains FSDP, so weight sync gathers each tensor whole first.
     fsdp: bool
+    # :attr:`TrainingMemoryPlan.optimizer_offload_seconds`, per optimizer step.
+    optimizer_offload_seconds: float = 0.0
 
     @classmethod
     def of(cls, plan: TrainingMemoryPlan) -> TrainerCost:
         """The cost of one training-memory plan.
 
         :param plan: The plan for one trainer count.
-        :return: Its learn cost ratio and whether it trains FSDP.
+        :return: Its learn cost ratio, whether it trains FSDP, and its
+            optimizer-offload seconds per optimizer step.
         """
-        return cls(plan.learn_cost_ratio, plan.fsdp is not None)
+        return cls(
+            plan.learn_cost_ratio, plan.fsdp is not None, plan.optimizer_offload_seconds
+        )
 
 
 class GpuSplit(BaseModel):
@@ -742,6 +749,20 @@ def _trainers_shard_batch(workload: SplitWorkload, trainers: int) -> bool:
     )
 
 
+def _optimizer_steps(workload: SplitWorkload, trainers: int) -> int:
+    """Optimizer steps one rank takes per learn step: epochs times its mini-batches.
+
+    :param workload: The member's learn step; ``trainers`` already shard its batch.
+    :param trainers: Trainer GPUs.
+    :return: Optimizer steps.
+    """
+    shards = trainers // (
+        workload.trainer_tensor_parallel * workload.trainer_context_parallel
+    )
+    per_rank = workload.batch_size // shards * workload.group_size
+    return workload.update_epochs * (per_rank // (workload.mini_batch_size or per_rank))
+
+
 def _cycle_rollout_batch_size(
     workload: SplitWorkload, trainers: int, engines: int, resident: int
 ) -> int | None:
@@ -904,7 +925,8 @@ def _split_pricer(
             engines=engines,
             engine_width=engine_width,
             rollout_batch_size=rollout_batch_size,
-            learn_seconds=learn_gpu_seconds * cost.learn_cost_ratio / trainers,
+            learn_seconds=learn_gpu_seconds * cost.learn_cost_ratio / trainers
+            + cost.optimizer_offload_seconds * _optimizer_steps(workload, trainers),
             generation_seconds=cycles_per_step * cycle_seconds,
             max_num_batched_tokens=None if step == fallback else step,
             sync_seconds=syncs[sync_key],
@@ -1045,6 +1067,7 @@ def split_workload_from_manifest(
         decode_tokens=decode_tokens,
         turns=turns,
         learn_passes=learn_forward_passes(spec),
+        update_epochs=spec.update_epochs,
         rollout_batch_size=manifest.training.rollout_batch_size,
         max_num_seqs=None if vllm is None else vllm.max_num_seqs,
         gpu_memory_utilization=resolve_gpu_memory_utilization(

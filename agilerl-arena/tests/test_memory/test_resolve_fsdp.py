@@ -14,7 +14,11 @@ import pytest
 from agilerl.arena.memory import formulas
 from agilerl.arena.memory.estimator import estimate_training
 from agilerl.arena.memory.resolve import fsdp as fsdp_module
-from agilerl.arena.memory.resolve.batch import ROW_FILL, micro_batch_row_candidates
+from agilerl.arena.memory.resolve.batch import (
+    ROW_FILL,
+    catalog_model_spec,
+    micro_batch_row_candidates,
+)
 from agilerl.arena.memory.resolve.fsdp import (
     RESIDENCIES,
     MemoryPins,
@@ -23,6 +27,7 @@ from agilerl.arena.memory.resolve.fsdp import (
     cpu_offload_blocker,
     gather_cost,
     learn_cost,
+    offloaded_optimizer_bytes,
     resolve_training_memory,
     routed_chunks_per_pass,
 )
@@ -219,6 +224,123 @@ class TestLearnCost:
         # Assert
         assert chunked - plain == pytest.approx(
             2 * 480 * SM80_LEARN_COSTS.routed_chunk_tokens
+        )
+
+
+class TestOffloadedOptimizerBytes:
+    def test_offloaded_state_is_the_ranks_adamw_step_bytes(self):
+        # Arrange
+        settings = moe_floor_settings(
+            reshard_after_forward=True,
+            routed_expert_chunk_mib=64,
+            optim_cpu_offload=True,
+            activation_offload=False,
+            cpu_offload=False,
+        )
+        breakdown = estimate_training(
+            MOE_MODEL, budget_device(80 * GiB), settings, orchestrated=True
+        )
+
+        # Act
+        moved = offloaded_optimizer_bytes(settings.fsdp, breakdown)
+
+        # Assert: the state is on the GPU only inside step(), so it is not in the peak.
+        optimizer = next(
+            part for part in breakdown.components if part.key == "optimizer_state"
+        )
+        assert moved == optimizer.detail["step_bytes"]
+        assert moved > optimizer.n_bytes
+
+    def test_state_on_the_gpu_moves_nothing(self):
+        # Arrange
+        settings = moe_floor_settings(
+            reshard_after_forward=True,
+            routed_expert_chunk_mib=64,
+            optim_cpu_offload=False,
+            activation_offload=False,
+            cpu_offload=False,
+        )
+        breakdown = estimate_training(
+            MOE_MODEL, budget_device(80 * GiB), settings, orchestrated=True
+        )
+
+        # Act
+        moved = offloaded_optimizer_bytes(settings.fsdp, breakdown)
+
+        # Assert
+        assert moved == 0
+
+    def test_data_parallel_moves_nothing(self):
+        # Arrange
+        settings = dense_settings().model_copy(update={"fsdp": None})
+        breakdown = estimate_training(
+            DENSE_MODEL, budget_device(80 * GiB), settings, orchestrated=True
+        )
+
+        # Act
+        moved = offloaded_optimizer_bytes(None, breakdown)
+
+        # Assert
+        assert moved == 0
+
+
+class TestLearnCostH100RoutedChunks:
+    def test_super_vl_small_chunks_cost_what_was_measured(self):
+        # Arrange: Super-VL ep8 learned 20-21% slower at 64 MiB than 512 MiB
+        # (4 micro-batches of 16k tokens, every block checkpointed).
+        arch = catalog_model_spec(
+            "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16"
+        ).arch
+        tokens = 4 * 16384 * ROW_FILL
+
+        # Act
+        large, small = (
+            learn_cost(
+                arch.n_layers,
+                True,
+                1,
+                4,
+                tokens,
+                "reshard",
+                SM90_LEARN_COSTS,
+                routed_chunks_per_pass(arch, True, tokens / 4, 2.0, mib * MiB),
+            )
+            for mib in (512, 64)
+        )
+
+        # Assert
+        assert small / large == pytest.approx(1.205, abs=0.02)
+
+
+class TestResolveTrainingMemoryOptimizerOffloadSeconds:
+    @pytest.mark.parametrize(
+        ("capability", "optim_offload", "seconds_per_gib"),
+        [((9, 0), True, 0.157), ((9, 0), False, 0.0), ((8, 0), True, 0.0)],
+        ids=["h100-offloaded", "h100-on-gpu", "a100-unmeasured"],
+    )
+    def test_prices_the_ranks_adamw_state_at_the_gpu_rate(
+        self, capability, optim_offload, seconds_per_gib
+    ):
+        # Arrange
+        device = budget_device(80 * GiB).model_copy(
+            update={"compute_capability": capability}
+        )
+
+        # Act
+        plan = resolve_training_memory(
+            MOE_MODEL,
+            device,
+            moe_floor_settings(optim_cpu_offload=optim_offload),
+            MemoryPins(gradient_checkpointing=True, micro_batch_size_per_gpu=1),
+            1,
+        )
+
+        # Assert: seconds per GiB of the AdamW state moved, once per step.
+        moved = offloaded_optimizer_bytes(plan.fsdp, plan.breakdown)
+        assert plan.fsdp.optim_cpu_offload is optim_offload
+        assert (moved > 0) is optim_offload
+        assert plan.optimizer_offload_seconds == pytest.approx(
+            seconds_per_gib * moved / GiB
         )
 
 

@@ -55,6 +55,7 @@ def plan_for(layout: ParallelLayout, total: int, usable: int) -> TrainingMemoryP
         moe_collectives_saveable=False,
         cost=1.0,
         tokens=1.0,
+        optimizer_offload_seconds=0.0,
         settings=settings,
         breakdown=PhaseBreakdown(
             phase="training",

@@ -25,6 +25,10 @@ class LearnCosts:
     # One routed-expert row chunk in one MoE layer: its kernel launches and the
     # expert-LoRA recompute's autograd pass in backward.
     routed_chunk_tokens: float
+    # Seconds one optimizer step with AdamW state kept on CPU adds, per GiB of
+    # the rank's state: the copy to the GPU, the unfused step and the copy
+    # back. Zero on a GPU class with no measurement.
+    optimizer_offload_seconds_per_gib: float = 0.0
     # Learn work per second per peak bf16 FLOP, over the A100's, for the GPU
     # split's learn time.
     peak_speed: float = 1.0
@@ -47,8 +51,14 @@ SM90_LEARN_COSTS = LearnCosts(
     recompute_cost=0.255,
     micro_batch_overhead_tokens=7000,
     reshard_gather_tokens=1170,
-    # The A100 chunk time at this GPU's token rate.
-    routed_chunk_tokens=15,
+    # Nemotron-3.5-Super-VL-120B GRPO LoRA, 8 trainers ep8, 16k-token
+    # micro-batches, every block checkpointed: 64 MiB chunks (2880 per step)
+    # learn 21% / 20% slower than 512 MiB (480) at tp1 / tp2. Nemotron-30B ep4
+    # measured 0-4% faster at 64 MiB, so this overprices it by about 4%.
+    routed_chunk_tokens=7.3,
+    # Qwen3.6-35B-A3B ep4 at LoRA r16 / r32 (1.76 / 3.52 GiB AdamW per rank):
+    # +0.281 / +0.547 s per step; Nemotron-30B ep4 r16 (0.82 GiB): +0.128 s.
+    optimizer_offload_seconds_per_gib=0.157,
     # Qwen3-4B GRPO countdown LoRA at 4 trainers learns in 9.5 s, 1.25x the
     # time the A100 efficiencies predict.
     peak_speed=0.8,

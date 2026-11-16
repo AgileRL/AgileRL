@@ -713,6 +713,7 @@ def _plan_with_host(host_total: int, host_usable: int | None) -> TrainingMemoryP
         moe_collectives_saveable=False,
         cost=1.0,
         tokens=1.0,
+        optimizer_offload_seconds=0.0,
         settings=TrainingSettings(),
         breakdown=PhaseBreakdown(
             phase="training",
@@ -966,6 +967,21 @@ class TestWeightSyncModes:
         # Assert
         assert modes == (WeightSyncMode(True, "nixl"), WeightSyncMode(False, "nixl"))
 
+    def test_tcp_prices_the_adapter_alone(self) -> None:
+        # Arrange
+        manifest = _manifest(_sudoku_manifest())
+
+        # Act
+        over_tcp = weight_sync_modes(manifest, _device("H100-80"), "tcp")
+        over_rdma = weight_sync_modes(manifest, _device("H100-80"), "rdma")
+
+        # Assert: the same engines can serve merged weights over another link.
+        assert over_tcp == (WeightSyncMode(False, "nixl"),)
+        assert over_rdma == (
+            WeightSyncMode(True, "nixl"),
+            WeightSyncMode(False, "nixl"),
+        )
+
     def test_quantized_engine_syncs_the_adapter(self) -> None:
         # Arrange
         raw = _sudoku_manifest()
@@ -1105,14 +1121,20 @@ class TestKeptSplitMemory:
         assert merged is True
 
     def test_tcp_syncs_the_adapter(self) -> None:
-        # Arrange: merged Qwen3-4B weights take over a minute per sync at 0.4 GB/s.
-        manifest = _kept_4t4e(_sudoku_manifest())
+        # Arrange: Qwen3.5-9B countdown at 4T4E on H100. Merged weights reach
+        # the four engines in 4.9 s over RDMA and 8.6 s over TCP, a 20.9 s and
+        # 24.6 s step against 23.8 s with the adapter.
+        raw = _countdown_manifest(64)
+        raw["network"]["pretrained_model_name_or_path"] = "Qwen/Qwen3.5-9B"
+        manifest = _kept_4t4e(raw)
 
         # Act
-        merged = _kept_sync_over(manifest, "A100-80", "tcp")
+        over_rdma = _kept_sync_over(manifest, "H100-80", "rdma")
+        over_tcp = _kept_sync_over(manifest, "H100-80", "tcp")
 
         # Assert
-        assert merged is False
+        assert over_rdma is True
+        assert over_tcp is False
 
     def test_unknown_link_syncs_merged_weights_unpriced(self) -> None:
         # Arrange
@@ -1307,10 +1329,20 @@ class TestResolveRunMemoryWeightSync:
         assert plan.split.sync_seconds < _quote(plan, True, "nccl_reshard").sync_seconds
 
     def test_tcp_syncs_the_adapter(self) -> None:
-        # Act: merged Qwen3-4B weights take over a minute per sync at 0.4 GB/s.
-        plan = _plan_over(_sudoku_manifest(), "A100-80", "tcp")
+        # Arrange: Qwen3.5-4B sudoku on two 8x H100 nodes. The fastest merged
+        # step is 14.1 s over RDMA and 18.3 s over TCP, against 15.2 s with
+        # the adapter.
+        raw = _sudoku_manifest()
+        raw["network"]["pretrained_model_name_or_path"] = "Qwen/Qwen3.5-4B"
+        manifest = validated_run_manifest(TrainingManifest.model_validate(raw))
+        model = catalog_model(manifest.algorithm)
+
+        # Act
+        over_rdma = resolve_run_memory(manifest, model, _h100_nodes(), 16, "rdma")
+        plan = resolve_run_memory(manifest, model, _h100_nodes(), 16, "tcp")
 
         # Assert
+        assert over_rdma.merged_lora_sync is True
         assert plan.merged_lora_sync is False
         assert plan.split is not None
         assert not plan.split.merged_lora_sync

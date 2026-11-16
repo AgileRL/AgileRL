@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 
 import pytest
 
@@ -22,6 +23,7 @@ from agilerl.arena.memory.resolve.decode_costs import (
     SM80_MERGED_DENSE_SPEEDUP,
     UNMEASURED_MERGED_DENSE_SPEEDUP,
 )
+from agilerl.arena.memory.resolve.parallel import ParallelLayout
 from agilerl.arena.memory.resolve.split import (
     IDLE_GPU_TIE_SHARE,
     MULTI_TURN_ROW_FILL,
@@ -53,6 +55,7 @@ from agilerl.arena.memory.specs import DeviceSpec, ModelArch, ModelSpec
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
 from agilerl.arena.models.manifest import TrainingManifest
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
+from tests.test_memory.test_resolve_parallel import plan_for
 
 
 def _countdown_manifest(batch_size: int = 60) -> dict:
@@ -247,27 +250,31 @@ class TestChooseGpuSplit:
         )
 
     def test_merged_sync_over_tcp_takes_fewer_engines(self) -> None:
-        # Arrange: merged Qwen3-4B weights reach each engine at 0.4 GB/s.
-        model = catalog_model(_manifest(_sudoku_manifest()).algorithm)
-        unpriced = _workload(_sudoku_manifest(), merged_lora_sync=True)
+        # Arrange: merged Qwen3.5-9B countdown weights on H100, which every
+        # engine reads out of trainer rank 0 over TCP.
+        raw = _countdown_manifest(64)
+        raw["network"]["pretrained_model_name_or_path"] = "Qwen/Qwen3.5-9B"
+        model = catalog_model(_manifest(raw).algorithm)
+        unpriced = _workload(raw, merged_lora_sync=True)
         over_tcp = unpriced.model_copy(update={"sync_link": "tcp"})
+        device = _device("H100-80")
 
         # Act
         by_step = choose_gpu_split(
-            model, _device(), unpriced, 8, 1, lambda _: TrainerCost(1.0, False)
+            model, device, unpriced, 8, 1, lambda _: TrainerCost(1.0, False)
         )
         by_synced_step = choose_gpu_split(
-            model, _device(), over_tcp, 8, 1, lambda _: TrainerCost(1.0, False)
+            model, device, over_tcp, 8, 1, lambda _: TrainerCost(1.0, False)
         )
 
-        # Assert: four engines generate faster but take twice the sync.
+        # Assert: four engines generate faster but take a third more sync.
         assert by_step is not None
         assert by_synced_step is not None
         assert (by_step.trainers, by_step.engines) == (4, 4)
-        assert (by_synced_step.trainers, by_synced_step.engines) == (6, 2)
+        assert (by_synced_step.trainers, by_synced_step.engines) == (4, 3)
         assert by_synced_step.step_seconds > by_step.step_seconds
         four_engine_sync = merged_sync_seconds(
-            model, unpriced.lora_target_scope, 0, 4, 1, False, _device(), "tcp"
+            model, unpriced.lora_target_scope, 0, 4, 1, False, device, "tcp"
         )
         assert (
             by_synced_step.synced_step_seconds < by_step.step_seconds + four_engine_sync
@@ -776,6 +783,73 @@ class TestPriceGpuSplit:
                 1,
                 lambda _: TrainerCost(1.0, False),
             )
+
+    def test_optimizer_offload_seconds_add_to_learn_only(self) -> None:
+        # Arrange
+        model = catalog_model(_manifest(_countdown_manifest(64)).algorithm)
+        workload = _workload(_countdown_manifest(64))
+
+        # Act
+        on_gpu, offloaded = (
+            price_gpu_split(
+                model, _device(), workload, 4, 4, 1, lambda _, cost=cost: cost
+            )
+            for cost in (TrainerCost(1.0, False), TrainerCost(1.0, False, 2.5))
+        )
+
+        # Assert: one optimizer step per learn step without a pinned mini-batch.
+        assert on_gpu is not None
+        assert offloaded is not None
+        assert offloaded.learn_seconds - on_gpu.learn_seconds == pytest.approx(2.5)
+        assert offloaded.generation_seconds == on_gpu.generation_seconds
+
+    def test_optimizer_offload_seconds_count_every_optimizer_step(self) -> None:
+        # Arrange: two epochs over each rank's rows in two mini-batches.
+        model = catalog_model(_manifest(_countdown_manifest(64)).algorithm)
+        base = _workload(_countdown_manifest(64))
+        per_rank = base.batch_size // 4 * base.group_size
+        workload = base.model_copy(
+            update={"update_epochs": 2, "mini_batch_size": per_rank // 2}
+        )
+
+        # Act
+        on_gpu, offloaded = (
+            price_gpu_split(
+                model, _device(), workload, 4, 4, 1, lambda _, cost=cost: cost
+            )
+            for cost in (TrainerCost(1.0, False), TrainerCost(1.0, False, 0.5))
+        )
+
+        # Assert: four optimizer steps at 0.5 s each.
+        assert on_gpu is not None
+        assert offloaded is not None
+        assert offloaded.learn_seconds - on_gpu.learn_seconds == pytest.approx(2.0)
+
+
+class TestTrainerCostOf:
+    def test_carries_the_plans_offload_seconds_per_optimizer_step(self) -> None:
+        # Arrange
+        plan = replace(
+            plan_for(ParallelLayout(), 10, 100), optimizer_offload_seconds=0.3
+        )
+
+        # Act
+        cost = TrainerCost.of(plan)
+
+        # Assert
+        assert cost.optimizer_offload_seconds == 0.3
+        assert cost.learn_cost_ratio == plan.learn_cost_ratio
+        assert cost.fsdp is True
+
+    def test_optimizer_on_the_gpu_adds_nothing(self) -> None:
+        # Arrange
+        plan = plan_for(ParallelLayout(), 10, 100)
+
+        # Act
+        cost = TrainerCost.of(plan)
+
+        # Assert
+        assert cost.optimizer_offload_seconds == 0.0
 
 
 def _awm_workload(engine_width: int) -> SplitWorkload:
