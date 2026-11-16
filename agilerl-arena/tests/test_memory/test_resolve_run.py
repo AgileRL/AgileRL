@@ -713,6 +713,7 @@ def _plan_with_host(host_total: int, host_usable: int | None) -> TrainingMemoryP
         moe_collectives_saveable=False,
         cost=1.0,
         tokens=1.0,
+        optimizer_offload_seconds=0.0,
         settings=TrainingSettings(),
         breakdown=PhaseBreakdown(
             phase="training",

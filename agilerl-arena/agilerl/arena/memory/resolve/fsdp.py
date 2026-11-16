@@ -148,6 +148,21 @@ def learn_cost(
     return tokens * (1 + recompute) + passes * per_pass
 
 
+def offloaded_optimizer_bytes(
+    fsdp: FSDPConfig | None, breakdown: PhaseBreakdown
+) -> int:
+    """AdamW state one rank copies to the GPU and back around each optimizer step.
+
+    :param fsdp: The plan's FSDP config, or ``None`` under DDP.
+    :param breakdown: The plan's training estimate.
+    :return: Bytes; zero when the state stays on the GPU.
+    """
+    if fsdp is None or not fsdp.optim_cpu_offload:
+        return 0
+    state = next(part for part in breakdown.components if part.key == "optimizer_state")
+    return state.detail["step_bytes"]
+
+
 def routed_chunks_per_pass(
     arch: ModelArch,
     expert_lora: bool,
@@ -228,6 +243,9 @@ class TrainingMemoryPlan:
     # The settings the plan was estimated at, and that estimate.
     settings: TrainingSettings
     breakdown: PhaseBreakdown
+    # Seconds one optimizer step spends moving CPU-kept AdamW state and stepping
+    # it. Seconds, not tokens: the cost is host-link bytes, not model FLOPs.
+    optimizer_offload_seconds: float
 
     @property
     def learn_cost_ratio(self) -> float:
@@ -561,6 +579,7 @@ def _cached_training_memory(
             DTYPE_BYTES[settings.weight_dtype],
             DEFAULT_ROUTED_CHUNK_BYTES if chunk_mib is None else chunk_mib * MiB,
         )
+        breakdown = estimate_training(model, device, sized, orchestrated=True)
         return TrainingMemoryPlan(
             gradient_checkpointing=on,
             checkpoint_every_n_blocks=stride,
@@ -577,7 +596,10 @@ def _cached_training_memory(
             ),
             tokens=tokens,
             settings=sized,
-            breakdown=estimate_training(model, device, sized, orchestrated=True),
+            breakdown=breakdown,
+            optimizer_offload_seconds=costs.optimizer_offload_seconds_per_gib
+            * offloaded_optimizer_bytes(trial, breakdown)
+            / GiB,
         )
 
     def largest_fit(
