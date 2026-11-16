@@ -247,27 +247,31 @@ class TestChooseGpuSplit:
         )
 
     def test_merged_sync_over_tcp_takes_fewer_engines(self) -> None:
-        # Arrange: merged Qwen3-4B weights reach each engine at 0.4 GB/s.
-        model = catalog_model(_manifest(_sudoku_manifest()).algorithm)
-        unpriced = _workload(_sudoku_manifest(), merged_lora_sync=True)
+        # Arrange: merged Qwen3.5-9B countdown weights on H100, which every
+        # engine reads out of trainer rank 0 over TCP.
+        raw = _countdown_manifest(64)
+        raw["network"]["pretrained_model_name_or_path"] = "Qwen/Qwen3.5-9B"
+        model = catalog_model(_manifest(raw).algorithm)
+        unpriced = _workload(raw, merged_lora_sync=True)
         over_tcp = unpriced.model_copy(update={"sync_link": "tcp"})
+        device = _device("H100-80")
 
         # Act
         by_step = choose_gpu_split(
-            model, _device(), unpriced, 8, 1, lambda _: TrainerCost(1.0, False)
+            model, device, unpriced, 8, 1, lambda _: TrainerCost(1.0, False)
         )
         by_synced_step = choose_gpu_split(
-            model, _device(), over_tcp, 8, 1, lambda _: TrainerCost(1.0, False)
+            model, device, over_tcp, 8, 1, lambda _: TrainerCost(1.0, False)
         )
 
-        # Assert: four engines generate faster but take twice the sync.
+        # Assert: four engines generate faster but take a third more sync.
         assert by_step is not None
         assert by_synced_step is not None
         assert (by_step.trainers, by_step.engines) == (4, 4)
-        assert (by_synced_step.trainers, by_synced_step.engines) == (6, 2)
+        assert (by_synced_step.trainers, by_synced_step.engines) == (4, 3)
         assert by_synced_step.step_seconds > by_step.step_seconds
         four_engine_sync = merged_sync_seconds(
-            model, unpriced.lora_target_scope, 0, 4, 1, False, _device(), "tcp"
+            model, unpriced.lora_target_scope, 0, 4, 1, False, device, "tcp"
         )
         assert (
             by_synced_step.synced_step_seconds < by_step.step_seconds + four_engine_sync

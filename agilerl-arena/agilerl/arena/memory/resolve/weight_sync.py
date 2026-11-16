@@ -36,8 +36,10 @@ LINK_EGRESS_BYTES_PER_SECOND: dict[SyncLink, float] = {
     "cuda_ipc": 275e9,
     # One 100 Gb/s NIC; not measured.
     "rdma": 12.5e9,
-    # UCX software-emulated GET over TCP, measured on pod loopback.
-    "tcp": 0.4e9,
+    # NIXL READs through 8 agents with 2 MB UCX TCP segments, between two
+    # H100 nodes on the pod network. A DeepSeek-V4-Flash adapter sync to 4
+    # engine ranks on another node fits the same rate.
+    "tcp": 6.8e9,
 }
 """Bytes per second all engines together read out of trainer rank 0."""
 

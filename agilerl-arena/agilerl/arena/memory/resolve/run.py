@@ -127,8 +127,9 @@ def weight_sync_modes(
     """Modes :func:`resolve_run_memory` prices.
 
     NIXL prices merged then adapter weights, or the adapter alone when the
-    engines cannot serve merged weights. An async run of a dense model over
-    ``cuda_ipc`` (one node) also prices merged ``nccl_reshard`` first when
+    engines cannot serve merged weights or read them over ``tcp``. An async
+    run of a dense model over ``cuda_ipc`` (one node) also prices merged
+    ``nccl_reshard`` first when
     :func:`nccl_reshard_costs` has rates for the GPU and the layout passes
     :func:`~agilerl.arena.memory.manifest.nccl_reshard_layout_supported`.
 
@@ -137,7 +138,8 @@ def weight_sync_modes(
     :param sync_link: Link the engines read synced weights over, or ``None``.
     :return: Candidates, merged ``nccl_reshard`` first when it is offered.
     """
-    if not can_sync_merged_lora(manifest.algorithm):
+    # A merged sync has not been measured over TCP.
+    if not can_sync_merged_lora(manifest.algorithm) or sync_link == "tcp":
         return (WeightSyncMode(False, "nixl"),)
     modes = [WeightSyncMode(True, "nixl"), WeightSyncMode(False, "nixl")]
     model = catalog_model(manifest.algorithm)
