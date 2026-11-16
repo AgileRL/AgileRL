@@ -259,7 +259,7 @@ class TestMergedSyncSeconds:
                 _model("Qwen/Qwen3-4B"), "all-linear", 0, 1, 2, False, device, "tcp"
             )
 
-    def test_tcp_takes_over_a_minute_for_four_engines(self) -> None:
+    def test_tcp_takes_four_and_a_half_seconds_for_four_engines(self) -> None:
         # Act
         seconds = merged_sync_seconds(
             _model("Qwen/Qwen3-4B"),
@@ -272,8 +272,8 @@ class TestMergedSyncSeconds:
             "tcp",
         )
 
-        # Assert: 4 x 7.27 GB at 0.4 GB/s.
-        assert seconds > 70
+        # Assert: 4 x 7.27 GB at 6.8 GB/s is 4.28 s; the rounds add 0.25 s.
+        assert seconds == pytest.approx(4.52, abs=0.005)
 
 
 class TestAdapterSyncSeconds:
