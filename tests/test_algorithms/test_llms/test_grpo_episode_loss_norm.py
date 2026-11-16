@@ -58,9 +58,9 @@ def _probe_policy_weights(
         state["rows"] = torch.as_tensor(minibatch_idxs)
         return original_loss(minibatch_idxs, token_ids, action_mask, *args, **kwargs)
 
-    def zero_learn_start_log_probs(_token_ids, action_masks, *_args, **_kwargs):
-        zeros = torch.zeros(action_masks.shape)
-        return zeros, zeros.clone()
+    def zero_learn_start_forward(token_ids, *_args, **_kwargs):
+        zeros = torch.zeros(token_ids.shape[0], token_ids.shape[1] - 1)
+        return zeros, zeros.clone(), None
 
     def accumulate(loss, accumulation_steps=None):
         steps = accumulation_steps or agent.gradient_accumulation_steps
@@ -74,7 +74,7 @@ def _probe_policy_weights(
         return result
 
     monkeypatch.setattr(agent, "_loss", tracking_loss)
-    monkeypatch.setattr(agent, "_learn_start_log_probs", zero_learn_start_log_probs)
+    monkeypatch.setattr(agent, "_learn_start_forward", zero_learn_start_forward)
     monkeypatch.setattr(agent, "_backward_pass", accumulate)
     monkeypatch.setattr(agent, "_balanced_segment_rows", recording_segment_rows)
     monkeypatch.setattr(

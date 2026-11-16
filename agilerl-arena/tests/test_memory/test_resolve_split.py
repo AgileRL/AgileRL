@@ -41,6 +41,7 @@ from agilerl.arena.memory.resolve.split import (
     engine_prefill_rate,
     engine_steps,
     fullest_split_within,
+    learn_forward_passes,
     price_gpu_split,
     resident_sequences,
     split_workload_from_manifest,
@@ -49,6 +50,7 @@ from agilerl.arena.memory.resolve.split import (
 )
 from agilerl.arena.memory.resolve.weight_sync import merged_sync_seconds
 from agilerl.arena.memory.specs import DeviceSpec, ModelArch, ModelSpec
+from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
 from agilerl.arena.models.manifest import TrainingManifest
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 
@@ -178,6 +180,33 @@ def _manifest(raw: dict, engine_width: int = 1) -> TrainingManifest:
 
 def _workload(raw: dict, **updates: object) -> SplitWorkload:
     return split_workload_from_manifest(_manifest(raw)).model_copy(update=updates)
+
+
+def _sudoku_spec(name: str, **fields: object) -> RolloutLLMSpec:
+    """The Sudoku manifest's algorithm swapped for ``name`` with ``fields``."""
+    raw = _sudoku_manifest()
+    raw["algorithm"] = {
+        "name": name,
+        "batch_size": 12,
+        "max_output_tokens": 1024,
+        **fields,
+    }
+    return TrainingManifest.model_validate(raw).algorithm
+
+
+def _sudoku_trainers(spec: RolloutLLMSpec) -> int:
+    """Trainers of the 8-GPU Sudoku split priced at ``spec``'s learn passes."""
+    workload = _workload(_sudoku_manifest(), learn_passes=learn_forward_passes(spec))
+    split = choose_gpu_split(
+        catalog_model(_manifest(_sudoku_manifest()).algorithm),
+        _device(),
+        workload,
+        8,
+        1,
+        lambda _: TrainerCost(1.0, False),
+    )
+    assert split is not None
+    return split.trainers
 
 
 def _learn_bound_split(
@@ -1018,6 +1047,68 @@ class TestEnginePrefillRate:
         )
         all_reduce = tensor_parallel_seconds(model, device, 2, 8192)
         assert rate == pytest.approx(2 / (compute + 2 * all_reduce / 8192), rel=1e-12)
+
+
+class TestLearnForwardPasses:
+    @pytest.mark.parametrize(
+        ("name", "fields", "expected"),
+        [
+            ("CISPO", {"group_size": 8, "beta": 0.0}, 2),
+            ("CISPO", {"group_size": 8, "beta": 0.001}, 3),
+            ("LLMPPO", {"beta": 0.0}, 5),
+            ("LLMPPO", {"beta": 0.001}, 6),
+            ("LLMREINFORCE", {"beta": 0.0}, 2),
+            ("LLMREINFORCE", {"beta": 0.001}, 4),
+        ],
+        ids=[
+            "cispo-no-reference",
+            "cispo-reference",
+            "ppo-critic-values",
+            "ppo-critic-values-and-reference",
+            "reinforce-no-reference",
+            "reinforce-old-and-reference",
+        ],
+    )
+    def test_counts_update_and_no_grad_passes(
+        self, name: str, fields: dict, expected: int
+    ) -> None:
+        # Act
+        passes = learn_forward_passes(_sudoku_spec(name, **fields))
+
+        # Assert
+        assert passes == expected
+
+    def test_update_epochs_repeat_only_the_update_passes(self) -> None:
+        # Act
+        cispo = learn_forward_passes(
+            _sudoku_spec("CISPO", group_size=8, beta=0.001, update_epochs=3)
+        )
+        ppo = learn_forward_passes(_sudoku_spec("LLMPPO", beta=0.001, update_epochs=3))
+
+        # Assert: 2 per epoch plus the reference; PPO's 4 per epoch stack the
+        # critic rows, plus critic values and the reference.
+        assert cispo == 2 * 3 + 1
+        assert ppo == 4 * 3 + 2
+
+
+class TestChooseGpuSplitAlgorithmPasses:
+    def test_ppo_gets_more_trainers_than_cispo(self) -> None:
+        # Act
+        cispo = _sudoku_trainers(_sudoku_spec("CISPO", group_size=8, beta=0.001))
+        ppo = _sudoku_trainers(_sudoku_spec("LLMPPO", beta=0.001))
+
+        # Assert
+        assert ppo > cispo
+
+    def test_reinforce_without_reference_gets_no_more_trainers_than_cispo(
+        self,
+    ) -> None:
+        # Act
+        cispo = _sudoku_trainers(_sudoku_spec("CISPO", group_size=8, beta=0.001))
+        reinforce = _sudoku_trainers(_sudoku_spec("LLMREINFORCE", beta=0.0))
+
+        # Assert
+        assert reinforce <= cispo
 
 
 class TestSplitWorkloadFromManifest:
