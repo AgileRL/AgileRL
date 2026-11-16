@@ -840,6 +840,122 @@ class TestExportMergedPretrainedReplay:
                     adapter_name="actor",
                 )
 
+    def test_adapter_leftover_preview_truncates(self, tmp_path: Path) -> None:
+        torch.manual_seed(0)
+        base = _tiny_gpt2()
+        base.save_pretrained(tmp_path / "base")
+        peft_model = get_peft_model(base, _lora_config(), adapter_name="actor")
+        peft_model.save_pretrained(tmp_path / "ckpt")
+        extra = {f"orphan_{i}": torch.ones(1) for i in range(13)}
+        with patch(
+            "agilerl.utils.lora_merge.load_file",
+            return_value=extra,
+        ):
+            with pytest.raises(ValueError, match=r"\.\.\. \(13 total\)"):
+                export_merged_pretrained(
+                    tmp_path / "merged",
+                    adapter_path=tmp_path / "ckpt" / "actor",
+                    base_model_name_or_path=tmp_path / "base",
+                    adapter_name="actor",
+                )
+
+    def test_adapter_checkpoint_key_strips_embedding_suffix(self) -> None:
+        assert (
+            lora_merge_mod._adapter_checkpoint_key(
+                "base_model.model.model.embed_tokens.lora_embedding_A.actor",
+                "actor",
+            )
+            == "base_model.model.model.embed_tokens.lora_embedding_A"
+        )
+        assert (
+            lora_merge_mod._adapter_checkpoint_key(
+                "base_model.model.layers.0.self_attn.q_proj.lora_A.actor.weight",
+                "actor",
+            )
+            == "base_model.model.layers.0.self_attn.q_proj.lora_A.weight"
+        )
+        assert (
+            lora_merge_mod._adapter_checkpoint_key(
+                "base_model.model.lm_head.base_layer.weight",
+                "actor",
+            )
+            == "base_model.model.lm_head.base_layer.weight"
+        )
+        assert lora_merge_mod._adapter_checkpoint_key("weight", "actor") == "weight"
+
+    def test_replay_embed_tokens_and_tied_lm_head(self, tmp_path: Path) -> None:
+        torch.manual_seed(0)
+        config = _tiny_qwen3().config
+        config.tie_word_embeddings = True
+        base = Qwen3ForCausalLM(config)
+        assert base.config.tie_word_embeddings
+        base.save_pretrained(tmp_path / "base")
+        peft_model = get_peft_model(
+            base,
+            _sync_lora(["q_proj", "v_proj", "embed_tokens", "lm_head"]),
+            adapter_name="actor",
+        )
+        peft_model.save_pretrained(tmp_path / "ckpt")
+        actor_dir = tmp_path / "ckpt" / "actor"
+        adapter_keys = set(load_file(actor_dir / "adapter_model.safetensors"))
+        old_used = {
+            name.replace(".actor.", ".", 1)
+            for name, _ in peft_model.named_parameters()
+            if name.replace(".actor.", ".", 1) in adapter_keys
+        }
+        leftover = adapter_keys - old_used
+        assert any(key.endswith("lora_embedding_A") for key in leftover)
+        assert any(key.endswith("lora_embedding_B") for key in leftover)
+        assert any(key.endswith("lm_head.base_layer.weight") for key in leftover)
+
+        export_merged_pretrained(
+            tmp_path / "live", model=peft_model, torch_dtype=torch.float32
+        )
+        export_merged_pretrained(
+            tmp_path / "replay",
+            adapter_path=actor_dir,
+            base_model_name_or_path=tmp_path / "base",
+            adapter_name="actor",
+            torch_dtype=torch.float32,
+        )
+        live_weights = load_file(tmp_path / "live" / "model.safetensors")
+        replay_weights = load_file(tmp_path / "replay" / "model.safetensors")
+        assert live_weights.keys() == replay_weights.keys()
+        for name, tensor in live_weights.items():
+            assert torch.equal(replay_weights[name], tensor), name
+
+    def test_replay_embed_tokens_from_write_lora_adapters(self, tmp_path: Path) -> None:
+        torch.manual_seed(0)
+        config = _tiny_qwen3().config
+        config.tie_word_embeddings = True
+        base = Qwen3ForCausalLM(config)
+        base.save_pretrained(tmp_path / "base")
+        peft_model = get_peft_model(
+            base,
+            _sync_lora(["q_proj", "embed_tokens", "lm_head"]),
+            adapter_name="actor",
+        )
+        write_lora_adapters(
+            snapshot_lora_adapters(peft_model, ["actor"]),
+            directory_opener(tmp_path / "ckpt"),
+        )
+
+        export_merged_pretrained(
+            tmp_path / "live", model=peft_model, torch_dtype=torch.float32
+        )
+        export_merged_pretrained(
+            tmp_path / "replay",
+            adapter_path=tmp_path / "ckpt" / "actor",
+            base_model_name_or_path=tmp_path / "base",
+            adapter_name="actor",
+            torch_dtype=torch.float32,
+        )
+        live_weights = load_file(tmp_path / "live" / "model.safetensors")
+        replay_weights = load_file(tmp_path / "replay" / "model.safetensors")
+        assert live_weights.keys() == replay_weights.keys()
+        for name, tensor in live_weights.items():
+            assert torch.equal(replay_weights[name], tensor), name
+
     def test_empty_adapter_file_raises(self, tmp_path: Path) -> None:
         torch.manual_seed(0)
         base = _tiny_gpt2()

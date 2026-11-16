@@ -301,12 +301,34 @@ def _load_replay_peft(
     return peft_model, BaseWeightStore.from_checkpoint(base_model_name_or_path)
 
 
+def _adapter_checkpoint_key(param_name: str, adapter_name: str) -> str:
+    """Map a live PEFT parameter FQN to the adapter safetensors key.
+
+    PEFT writes Linear factors as ``lora_A.weight`` (adapter name was the
+    second-to-last segment) and Embedding factors as ``lora_embedding_A``
+    (adapter name was the last segment, no ``.weight``).
+    """
+    adapter_suffix = f".{adapter_name}"
+    if param_name.endswith(adapter_suffix):
+        return param_name.removesuffix(adapter_suffix)
+    prefix, sep, suffix = param_name.rpartition(".")
+    if sep and prefix.endswith(adapter_suffix):
+        return f"{prefix.removesuffix(adapter_suffix)}.{suffix}"
+    return param_name
+
+
 def _assign_adapter_weights(
     model: nn.Module,
     adapter_path: str | Path,
     adapter_name: str,
 ) -> None:
-    """Move saved LoRA tensors onto the meta skeleton as CPU parameters."""
+    """Move saved LoRA tensors onto the meta skeleton as CPU parameters.
+
+    Tied modules (``embed_tokens`` / ``lm_head``) share one Parameter.
+    ``named_parameters()`` lists that object once; this walk includes
+    duplicates so ``lm_head.base_layer.weight`` in the adapter file is
+    consumed when it aliases the embedding.
+    """
     weights_file = cached_file(
         str(adapter_path),
         "adapter_model.safetensors",
@@ -317,17 +339,27 @@ def _assign_adapter_weights(
         raise FileNotFoundError(msg)
     tensors = load_file(weights_file, device="cpu")
     used: set[str] = set()
-    for name, _ in model.named_parameters():
-        key = name.replace(f".{adapter_name}.", ".", 1)
+    seen_params: set[int] = set()
+    for name, param in model.named_parameters(remove_duplicate=False):
+        key = canonical_fsdp_param_fqn(_adapter_checkpoint_key(name, adapter_name))
         tensor = tensors.get(key)
         if tensor is None:
             continue
-        _replace_named_tensor(model, name, tensor)
+        if id(param) not in seen_params:
+            _replace_named_tensor(model, name, tensor)
+            seen_params.add(id(param))
         used.add(key)
     leftover = set(tensors) - used
     if leftover:
-        preview = ", ".join(sorted(leftover)[:4])
-        msg = f"Adapter tensors were not on the PEFT model: {preview}"
+        keys = sorted(leftover)
+        preview = ", ".join(keys[:12])
+        if len(keys) > 12:
+            preview = f"{preview}, ... ({len(keys)} total)"
+        msg = (
+            "Adapter tensors were not on the PEFT model rebuilt from "
+            f"adapter_config.json (adapter {adapter_name!r} under "
+            f"{adapter_path}): {preview}"
+        )
         raise ValueError(msg)
     if not used:
         msg = f"No adapter tensors matched parameters under {adapter_path}"
