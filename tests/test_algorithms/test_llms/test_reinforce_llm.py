@@ -25,6 +25,7 @@ from agilerl.llm_envs import RolloutHarness
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig
 from tests import TINY_LLM_FIXTURE_PATH
 from tests.helpers.rollout_doubles import FakeEnvClient, RolloutHarnessDouble
+from tests.test_algorithms.test_llms.llm_helpers import rollout_logps
 from tests.utils import make_mock_vllm_instance
 
 pytestmark = pytest.mark.vllm
@@ -765,7 +766,11 @@ class TestREINFORCELearn:
         )
         turn_ids = turn_ids[:, : seq_len - 1]
         rewards = torch.tensor([[0.5, -0.5]], dtype=torch.float32)
-        rf.learn((completions, action_masks, rewards), turn_ids=turn_ids)
+        rf.learn(
+            (completions, action_masks, rewards),
+            turn_ids=turn_ids,
+            sampling_logps=rollout_logps(action_masks),
+        )
 
     @pytest.mark.parametrize("use_vllm", [False, True])
     def test_llmreinforce_learns_rollout(self, use_vllm):
@@ -823,7 +828,11 @@ class TestREINFORCELearn:
                 wraps=rf._prepare_vllm_for_training,  # FIXME we dont want to be using actual vllm calls here - needs to be mocked
             ) as mock_prepare_vllm_for_training
         ):
-            rf.learn((completions, action_masks, rewards), turn_ids=turn_ids)
+            rf.learn(
+                (completions, action_masks, rewards),
+                turn_ids=turn_ids,
+                sampling_logps=rollout_logps(action_masks),
+            )
         assert mock_prepare_vllm_for_training.call_count == 1
         if use_vllm:
             rf.llm.sleep.assert_called_once()
@@ -836,7 +845,11 @@ class TestREINFORCELearn:
             "_prepare_vllm_for_training",
             wraps=rf._prepare_vllm_for_training,
         ) as mock_prepare_vllm_for_training:
-            metrics = rf.learn((completions, action_masks, rewards), turn_ids=turn_ids)
+            metrics = rf.learn(
+                (completions, action_masks, rewards),
+                turn_ids=turn_ids,
+                sampling_logps=rollout_logps(action_masks),
+            )
         assert mock_prepare_vllm_for_training.call_count == 1
         for key in ("loss", "kl", "pg_loss", "entropy"):
             assert key in metrics
@@ -868,7 +881,10 @@ class TestREINFORCELearn:
         completions = [torch.randint(0, vocab, (1, seq_len)) for _ in range(2)]
         action_masks = [torch.ones(1, seq_len - 1, dtype=torch.bool) for _ in range(2)]
         rewards = torch.tensor([1.0, -1.0], dtype=torch.float32).unsqueeze(-1)
-        rf.learn((completions, action_masks, rewards))
+        rf.learn(
+            (completions, action_masks, rewards),
+            sampling_logps=rollout_logps(action_masks),
+        )
 
     def test_learn_with_turn_ids_and_1d_reward_vector(self):
         """When ``turn_ids`` is set and rewards stack to a 1-D tensor, unsqueeze to [B, 1]."""
@@ -880,7 +896,11 @@ class TestREINFORCELearn:
         masks = [torch.ones(1, slm, dtype=torch.bool) for _ in range(2)]
         turn_ids = torch.zeros(2, slm, dtype=torch.long)
         rewards = torch.tensor([0.25, -0.25], dtype=torch.float32)
-        rf.learn((completions, masks, rewards), turn_ids=turn_ids)
+        rf.learn(
+            (completions, masks, rewards),
+            turn_ids=turn_ids,
+            sampling_logps=rollout_logps(masks),
+        )
 
     def test_llmreinforce_wrap_true_runs_learn(self):
         """``wrap=True`` on a single device still calls :meth:`wrap_models`."""
@@ -912,7 +932,10 @@ class TestREINFORCELearn:
         completions = [torch.randint(0, vocab, (1, seq_len)) for _ in range(2)]
         masks = [torch.ones(1, seq_len - 1, dtype=torch.bool) for _ in range(2)]
         rewards = torch.tensor([[1.0], [-1.0]], dtype=torch.float32)
-        rf.learn((completions, masks, rewards))
+        rf.learn(
+            (completions, masks, rewards),
+            sampling_logps=rollout_logps(masks),
+        )
 
 
 class TestREINFORCETest:
@@ -1117,9 +1140,9 @@ class TestREINFORCETest:
 
 
 def _two_turn_learn_inputs(
-    sampling_logp: float | None,
-) -> tuple[tuple, torch.Tensor, list[torch.Tensor] | None]:
-    """One two-turn row and, when ``sampling_logp`` is set, constant rollout log-probs."""
+    sampling_logp: float,
+) -> tuple[tuple, torch.Tensor, list[torch.Tensor]]:
+    """One two-turn row and constant rollout log-probs."""
     vocab, inp, mtok = 100, 10, 8
     seq_len = inp + mtok
     completions = [torch.randint(0, vocab, (1, seq_len))]
@@ -1129,8 +1152,6 @@ def _two_turn_learn_inputs(
         dtype=torch.long,
     )[:, : seq_len - 1]
     rewards = torch.tensor([[0.5, -0.5]], dtype=torch.float32)
-    if sampling_logp is None:
-        return (completions, action_masks, rewards), turn_ids, None
     n_act = int(action_masks[0].sum())
     sampling_logps = [torch.full((n_act,), sampling_logp, dtype=torch.float32)]
     return (completions, action_masks, rewards), turn_ids, sampling_logps
@@ -1156,17 +1177,17 @@ class TestREINFORCELearnRolloutOldLogProbs:
         assert metrics["vllm_is_ratio_mean"] > 0
         assert torch.isfinite(torch.tensor(metrics["loss"]))
 
-    def test_rows_without_rollout_log_probs_use_learn_start_policy(self):
+    def test_rows_without_rollout_log_probs_raise(self):
         # Arrange
-        torch.manual_seed(0)
         rf = _cpu_llmreinforce()
-        experiences, turn_ids, _ = _two_turn_learn_inputs(None)
+        experiences, turn_ids, _ = _two_turn_learn_inputs(-0.01)
 
-        # Act
-        metrics = rf.learn(experiences, turn_ids=turn_ids)
-
-        # Assert
-        assert metrics["off_policy_token_mask_frac"] == pytest.approx(0.0)
+        # Act / Assert
+        with pytest.raises(
+            ValueError,
+            match=r"REINFORCE needs sampling_logps on every action token; row 0 has none, expected 17\.",
+        ):
+            rf.learn(experiences, turn_ids=turn_ids)
 
     def test_no_bounds_masks_nothing(self):
         # Arrange

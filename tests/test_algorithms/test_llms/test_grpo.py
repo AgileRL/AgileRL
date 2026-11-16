@@ -504,7 +504,6 @@ class _GrpoLossStub:
     _resolve_advantage_granularity = GRPO._resolve_advantage_granularity
     _align_sampling_logprobs = GRPO._align_sampling_logprobs
     _sampling_mismatch_metrics = GRPO._sampling_mismatch_metrics
-    _aligned_sampling_logprobs_and_metrics = GRPO._aligned_sampling_logprobs_and_metrics
     _warn_on_sampling_mismatch = GRPO._warn_on_sampling_mismatch
     _assert_batch_divisible_by_group = GRPO._assert_batch_divisible_by_group
     _turn_broadcast_advantages = GRPO._turn_broadcast_advantages
@@ -4897,64 +4896,6 @@ class TestGRPOVLLMSamplingCorrection:
         assert n_skipped == 1
         assert torch.allclose(aligned[0], old[0])
         assert torch.allclose(aligned[1], torch.tensor([-0.1, -0.2]), atol=1e-7)
-
-    def test_aligned_and_metrics_none_path(self):
-        """No captured logprobs -> (None, {}, ()) and no metrics computed."""
-        stub = self._stub()
-        masks = torch.ones(2, 3, dtype=torch.bool)
-        old = torch.zeros(2, 3)
-        assert stub._aligned_sampling_logprobs_and_metrics(None, masks, old) == (
-            None,
-            {},
-            (),
-        )
-        assert stub._aligned_sampling_logprobs_and_metrics([], masks, old) == (
-            None,
-            {},
-            (),
-        )
-
-    def test_aligned_and_metrics_full_match_no_skip_metric(self):
-        """All rows align: metrics computed, no rows-skipped key, no warning."""
-        stub = self._stub(vllm_importance_sampling_cap=2.0)
-        masks = torch.ones(1, 3, dtype=torch.bool)
-        old = torch.full((1, 3), -1.0)
-        flat = [torch.full((3,), -1.5)]
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            aligned, metrics, excluded = stub._aligned_sampling_logprobs_and_metrics(
-                flat, masks, old
-            )
-        assert torch.allclose(aligned, torch.full((1, 3), -1.5), atol=1e-7)
-        assert excluded == ()
-        # log-diff is 0.5 on every token: delta = 0.5, ratio = e^0.5 (< cap).
-        assert metrics["vllm_is_delta_mean"] == pytest.approx(0.5, rel=1e-6)
-        assert metrics["vllm_is_ratio_mean"] == pytest.approx(
-            torch.exp(torch.tensor(0.5)).item(), rel=1e-6
-        )
-        assert metrics["vllm_is_frac_clamped"] == pytest.approx(0.0)
-        assert metrics["vllm_is_rows_skipped"] == 0.0
-        assert not any("token-count mismatch" in str(w.message) for w in caught)
-
-    def test_aligned_and_metrics_skipped_rows_warns_and_sets_metric(self):
-        """A row whose captured token count disagrees with the action mask is
-        skipped (ratio 1 fallback), counted in the metrics, and warned once.
-        """
-        stub = self._stub(vllm_importance_sampling_cap=2.0)
-        masks = torch.ones(2, 2, dtype=torch.bool)
-        old = torch.tensor([[-1.0, -1.0], [-2.0, -2.0]])
-        # Row 0 aligns; row 1 has 1 logprob for 2 action tokens -> skipped.
-        flat = [torch.full((2,), -1.5), torch.tensor([-0.5])]
-        with pytest.warns(UserWarning, match="1/2 rows had a token-count mismatch"):
-            aligned, metrics, excluded = stub._aligned_sampling_logprobs_and_metrics(
-                flat, masks, old
-            )
-        assert torch.allclose(aligned[0], torch.full((2,), -1.5), atol=1e-7)
-        assert excluded == ()
-        assert torch.allclose(aligned[1], old[1], atol=1e-7)  # ratio-1 fallback
-        assert metrics["vllm_is_rows_skipped"] == pytest.approx(1.0)
-        # Row 0 contributes |log-diff| 0.5 per token, row 1 contributes 0.
-        assert metrics["vllm_is_delta_mean"] == pytest.approx(0.25, rel=1e-6)
 
 
 class TestGRPONonFinitePaddingIsIsolated:

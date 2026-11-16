@@ -74,7 +74,8 @@ from agilerl.arena.memory.specs import (
     ModelSpec,
     WeightVariant,
 )
-from agilerl.arena.models.algorithms.grpo import GRPOSpec
+from agilerl.arena.models.algorithms.llmppo import LLMPPOSpec
+from agilerl.arena.models.algorithms.llmreinforce import LLMREINFORCESpec
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
 from agilerl.arena.models.env import LLMEnvSpec
 from agilerl.arena.models.manifest import TrainingManifest
@@ -161,7 +162,7 @@ class SplitWorkload(BaseModel):
     row_tokens: int
     decode_tokens: int
     turns: int
-    # Forward-equivalents per trained token (no-grad, forward, backward).
+    # Forward-equivalents per trained token, from :func:`learn_forward_passes`.
     learn_passes: int
     # Pinned groups per rollout cycle; ``None`` rounds ``batch_size`` up to
     # ``lcm(trainers, engines)``.
@@ -298,17 +299,23 @@ def active_matmul_params(arch: ModelArch) -> int:
 def learn_forward_passes(spec: RolloutLLMSpec) -> int:
     """Forward-equivalents an async learn step spends per trained token.
 
-    The backward of frozen base weights costs one forward (input grads only).
-    Async GRPO-family runs take old log-probs from the rollout, so their
-    no-grad pass runs only for reference log-probs, when ``beta > 0``; other
-    algorithms always score old log-probs. Recompute and per-micro-batch
-    costs come from the training-memory plan.
+    The backward of frozen base weights costs one forward (input grads only),
+    and every update epoch repeats the forward and backward over each
+    gradient row copy. Async rollouts carry old log-probs. No-grad passes:
+    the reference when ``beta > 0``; LLMPPO always scores critic values, and
+    LLMREINFORCE scores old log-probs alongside the reference. Recompute and
+    per-micro-batch costs come from the training-memory plan.
 
     :param spec: The rollout algorithm.
-    :return: Forward and backward, plus the no-grad pass when run.
+    :return: Update passes plus no-grad passes.
     """
-    nograd = not isinstance(spec, GRPOSpec) or spec.beta > 0
-    return 2 + int(nograd)
+    update = 2 * spec.gradient_row_copies * spec.update_epochs
+    reference = int(spec.beta > 0)
+    if isinstance(spec, LLMPPOSpec):
+        return update + 1 + reference
+    if isinstance(spec, LLMREINFORCESpec):
+        return update + 2 * reference
+    return update + reference
 
 
 def _learn_gpu_seconds(

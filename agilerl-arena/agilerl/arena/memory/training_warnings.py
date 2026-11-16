@@ -14,12 +14,6 @@ def training_warnings(
 ) -> list[str]:
     """User-facing training-phase warnings."""
     warnings: list[str] = []
-    if not settings.uses_reference and settings.algorithm in ("ppo", "reinforce"):
-        warnings.append(
-            "At beta=0 the estimate skips the reference forward, but the fused "
-            "no-grad pass still builds that row, so the run pays for one extra "
-            "row of activations."
-        )
     if settings.n_training_gpus > 1:
         n_gpus = settings.n_training_gpus
         if settings.fsdp is None:

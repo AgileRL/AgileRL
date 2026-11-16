@@ -907,11 +907,11 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                 if pixel_values is not None
                 else None
             )
-            reference_log_probs, old_log_probs = self._learn_start_log_probs(
+            reference_log_probs, old_log_probs, _ = self._learn_start_forward(
                 token_ids,
-                action_masks,
                 batch_size,
                 actor_rows,
+                score_mask=action_masks,
                 pixel_values=pixel_values,
                 pixel_image_counts=pixel_image_counts,
                 image_keys=image_keys,
@@ -2082,32 +2082,6 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         scale = scale.reshape(-1, *([1] * (advantages.dim() - 1)))
         return advantages * scale.to(advantages.dtype)
 
-    @staticmethod
-    def _rows_with_full_sampling_logprobs(
-        sampling_logps: list[torch.Tensor | None] | None,
-        action_masks: torch.Tensor,
-    ) -> npt.NDArray[np.bool_]:
-        """Rows whose sampling log-probs cover every action token.
-
-        :param sampling_logps: Per-row flat sampling log-probs, or ``None``.
-        :type sampling_logps: list[torch.Tensor | None] | None
-        :param action_masks: ``(B, seq_len-1)`` action-token mask.
-        :type action_masks: torch.Tensor
-        :return: ``(B,)`` boolean array.
-        :rtype: npt.NDArray[np.bool_]
-        """
-        logps = sampling_logps or []
-        counts = action_masks.to(torch.bool).sum(dim=-1).tolist()
-        return np.array(
-            [
-                row < len(logps)
-                and (row_logps := logps[row]) is not None
-                and row_logps.numel() == count
-                for row, count in enumerate(counts)
-            ],
-            dtype=bool,
-        )
-
     def _align_token_advantages(
         self,
         token_advantages: list[torch.Tensor | None],
@@ -2141,145 +2115,6 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             msg = "token_advantages must name at least one row."
             raise ValueError(msg)
         return aligned
-
-    def _learn_start_log_probs(
-        self,
-        token_ids: torch.Tensor,
-        action_masks: torch.Tensor,
-        batch_size: int,
-        actor_rows: npt.NDArray[np.intp],
-        pixel_values: torch.Tensor | None = None,
-        pixel_image_counts: Sequence[int] | None = None,
-        image_keys: torch.Tensor | None = None,
-        support_ids: torch.Tensor | None = None,
-        token_budget: int | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Reference log-probs of every row and learn-start policy log-probs of ``actor_rows``.
-
-        Policy log-probs of rows outside ``actor_rows`` are NaN, and so are the
-        reference log-probs when ``beta == 0``. The no-grad forward runs only
-        for the log-probs it fills in.
-
-        :param token_ids: ``(B, seq_len)`` token ids.
-        :type token_ids: torch.Tensor
-        :param action_masks: ``(B, seq_len-1)`` action-token mask.
-        :type action_masks: torch.Tensor
-        :param batch_size: Rows per no-grad forward chunk.
-        :type batch_size: int
-        :param actor_rows: Sorted rows that need learn-start policy log-probs.
-        :type actor_rows: npt.NDArray[np.intp]
-        :param pixel_values: Optional vision tensor for the batch.
-        :type pixel_values: torch.Tensor | None
-        :param pixel_image_counts: Optional images per sample row.
-        :type pixel_image_counts: Sequence[int] | None
-        :param image_keys: ``(N,)`` vision feature cache key of each vision
-            row, or ``None`` to run the tower uncached.
-        :type image_keys: torch.Tensor | None
-        :param support_ids: ``(B, seq_len-1, K)`` sampling supports, or ``None``.
-        :type support_ids: torch.Tensor | None
-        :param token_budget: Most tokens per packed no-grad forward, or ``None``
-            for ``batch_size`` rows.
-        :type token_budget: int | None
-        :return: ``(reference_log_probs, old_log_probs)``, each ``(B, seq_len-1)``.
-        :rtype: tuple[torch.Tensor, torch.Tensor]
-        """
-        num_rows = token_ids.shape[0]
-        if len(actor_rows) == num_rows:
-            reference_log_probs, old_log_probs, _ = self._fused_forward_no_grad(
-                token_ids,
-                batch_size,
-                pixel_values=pixel_values,
-                include_reference=self.beta != 0.0,
-                pixel_image_counts=pixel_image_counts,
-                score_mask=action_masks,
-                image_keys=image_keys,
-                support_ids=support_ids,
-                token_budget=token_budget,
-            )
-            return reference_log_probs, old_log_probs
-        old_log_probs = torch.full(
-            action_masks.shape, float("nan"), device=token_ids.device
-        )
-        reference_log_probs = old_log_probs.clone()
-        if self.beta != 0.0:
-            reference_log_probs, _, _ = self._fused_forward_no_grad(
-                token_ids,
-                batch_size,
-                pixel_values=pixel_values,
-                pixel_image_counts=pixel_image_counts,
-                include_actor=False,
-                score_mask=action_masks,
-                image_keys=image_keys,
-                support_ids=support_ids,
-                token_budget=token_budget,
-            )
-        if len(actor_rows) > 0:
-            rows = torch.as_tensor(actor_rows, device=token_ids.device)
-            actor_row_mask = np.zeros(num_rows, dtype=bool)
-            actor_row_mask[actor_rows] = True
-            _, actor_log_probs, _ = self._fused_forward_no_grad(
-                token_ids[rows],
-                batch_size,
-                pixel_values=pixel_values,
-                include_reference=False,
-                pixel_image_counts=pixel_image_counts,
-                score_mask=action_masks[rows],
-                image_keys=image_keys,
-                pixel_row_mask=actor_row_mask,
-                support_ids=(
-                    None
-                    if support_ids is None
-                    else support_ids[torch.as_tensor(actor_rows)]
-                ),
-                token_budget=token_budget,
-            )
-            old_log_probs[rows] = actor_log_probs.to(old_log_probs.dtype)
-        return reference_log_probs, old_log_probs
-
-    @staticmethod
-    def _rollout_actor_rows(
-        covered_rows: npt.NDArray[np.bool_],
-    ) -> npt.NDArray[np.intp]:
-        """Rows that get learn-start policy log-probs.
-
-        These are the uncovered rows, topped up with covered rows to the
-        largest such count on any rank, so every rank runs the same no-grad
-        forward chunks. Empty when every rank is fully covered.
-
-        :param covered_rows: ``(B,)`` rows that need no learn-start log-probs:
-            full sampling log-probs, or no micro-batch to train in.
-        :type covered_rows: npt.NDArray[np.bool_]
-        :return: Sorted row indices.
-        :rtype: npt.NDArray[np.intp]
-        """
-        uncovered = np.flatnonzero(~covered_rows)
-        _, most_uncovered = allreduce_minmax_int(len(uncovered))
-        padding = np.flatnonzero(covered_rows)[: most_uncovered - len(uncovered)]
-        return np.sort(np.concatenate([uncovered, padding]))
-
-    def _rollout_old_log_probs(
-        self,
-        sampling_logps: list[torch.Tensor | None] | None,
-        action_masks: torch.Tensor,
-        trainer_log_probs: torch.Tensor,
-    ) -> torch.Tensor:
-        """Rollout-engine sampling log-probs, or trainer log-probs for rows lacking them.
-
-        :param sampling_logps: Per-row flat sampling log-probs, or ``None``.
-        :type sampling_logps: list[torch.Tensor | None] | None
-        :param action_masks: ``(B, seq_len-1)`` action-token mask.
-        :type action_masks: torch.Tensor
-        :param trainer_log_probs: ``(B, seq_len-1)`` learn-start policy
-            log-probs, NaN on rows the trainer did not score.
-        :type trainer_log_probs: torch.Tensor
-        :return: ``(B, seq_len-1)`` log-probs, zero outside the action mask.
-        :rtype: torch.Tensor
-        """
-        fallback = torch.nan_to_num(trainer_log_probs, nan=0.0)
-        old_log_probs, _ = self._align_sampling_logprobs(
-            sampling_logps, action_masks, fallback
-        )
-        return fallback if old_log_probs is None else old_log_probs
 
     def _warn_if_micro_batches_straddle_optimizer_steps(
         self,

@@ -29,7 +29,7 @@ from agilerl.utils.llm_utils import masked_whiten
 from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 from tests import TINY_LLM_FIXTURE_PATH
 from tests.helpers.rollout_doubles import FakeEnvClient, RolloutHarnessDouble
-from tests.test_algorithms.test_llms.llm_helpers import use_packed
+from tests.test_algorithms.test_llms.llm_helpers import rollout_logps, use_packed
 from tests.utils import (
     make_mock_vllm_instance,
     spawn_new_process_for_each_test,
@@ -744,7 +744,11 @@ class TestPPOLearn:
         )
         turn_ids = turn_ids[:, : seq_len - 1]
         rewards = torch.tensor([[0.5, -0.5]], dtype=torch.float32)
-        ppo.learn((completions, action_masks, rewards), turn_ids=turn_ids)
+        ppo.learn(
+            (completions, action_masks, rewards),
+            turn_ids=turn_ids,
+            sampling_logps=rollout_logps(action_masks),
+        )
 
     @pytest.mark.parametrize("use_vllm", [False, True])
     def test_llmppo_learns_rollout(self, use_vllm):
@@ -801,7 +805,11 @@ class TestPPOLearn:
             "_prepare_vllm_for_training",
             wraps=ppo._prepare_vllm_for_training,
         ) as mock_prepare_vllm_for_training:
-            ppo.learn((completions, action_masks, rewards), turn_ids=turn_ids)
+            ppo.learn(
+                (completions, action_masks, rewards),
+                turn_ids=turn_ids,
+                sampling_logps=rollout_logps(action_masks),
+            )
         assert mock_prepare_vllm_for_training.call_count == 1
         if use_vllm:
             ppo.llm.sleep.assert_called_once()
@@ -814,7 +822,11 @@ class TestPPOLearn:
             "_prepare_vllm_for_training",
             wraps=ppo._prepare_vllm_for_training,
         ) as mock_prepare_vllm_for_training:
-            metrics = ppo.learn((completions, action_masks, rewards), turn_ids=turn_ids)
+            metrics = ppo.learn(
+                (completions, action_masks, rewards),
+                turn_ids=turn_ids,
+                sampling_logps=rollout_logps(action_masks),
+            )
         assert mock_prepare_vllm_for_training.call_count == 1
         for key in (
             "loss",
@@ -863,7 +875,10 @@ class TestPPOLearn:
         completions = [torch.randint(0, vocab, (1, seq_len)) for _ in range(2)]
         action_masks = [torch.ones(1, seq_len - 1, dtype=torch.bool) for _ in range(2)]
         rewards = torch.tensor([1.0, -1.0], dtype=torch.float32).unsqueeze(-1)
-        ppo.learn((completions, action_masks, rewards))
+        ppo.learn(
+            (completions, action_masks, rewards),
+            sampling_logps=rollout_logps(action_masks),
+        )
 
     def test_learn_turn_granularity_turn_level_clip_false(self):
         ppo = _cpu_llmppo(
@@ -881,7 +896,11 @@ class TestPPOLearn:
         turn_ids = one_turn_ids.repeat(2, 1)
         rewards = torch.tensor([[1.0, -1.0], [0.5, -0.25]], dtype=torch.float32)
 
-        metrics = ppo.learn((completions, action_masks, rewards), turn_ids=turn_ids)
+        metrics = ppo.learn(
+            (completions, action_masks, rewards),
+            turn_ids=turn_ids,
+            sampling_logps=rollout_logps(action_masks),
+        )
 
         assert "loss" in metrics
 
@@ -893,7 +912,10 @@ class TestPPOLearn:
         completions = [torch.randint(0, vocab, (1, seq_len)) for _ in range(2)]
         action_masks = [torch.ones(1, seq_len - 1, dtype=torch.bool) for _ in range(2)]
         rewards = torch.tensor([1.0, -1.0], dtype=torch.float32).unsqueeze(-1)
-        ppo.learn((completions, action_masks, rewards))
+        ppo.learn(
+            (completions, action_masks, rewards),
+            sampling_logps=rollout_logps(action_masks),
+        )
 
     def test_learn_with_turn_ids_and_1d_reward_vector(self):
         """When ``turn_ids`` is set and rewards stack to a 1-D tensor, unsqueeze to [B, 1]."""
@@ -905,7 +927,11 @@ class TestPPOLearn:
         masks = [torch.ones(1, slm, dtype=torch.bool) for _ in range(2)]
         turn_ids = torch.zeros(2, slm, dtype=torch.long)
         rewards = torch.tensor([0.25, -0.25], dtype=torch.float32)
-        ppo.learn((completions, masks, rewards), turn_ids=turn_ids)
+        ppo.learn(
+            (completions, masks, rewards),
+            turn_ids=turn_ids,
+            sampling_logps=rollout_logps(masks),
+        )
 
     def test_llmppo_wrap_true_runs_learn(self):
         """``wrap=True`` on a single device still calls :meth:`wrap_models`."""
@@ -939,7 +965,10 @@ class TestPPOLearn:
         completions = [torch.randint(0, vocab, (1, seq_len)) for _ in range(2)]
         masks = [torch.ones(1, seq_len - 1, dtype=torch.bool) for _ in range(2)]
         rewards = torch.tensor([[1.0], [-1.0]], dtype=torch.float32)
-        ppo.learn((completions, masks, rewards))
+        ppo.learn(
+            (completions, masks, rewards),
+            sampling_logps=rollout_logps(masks),
+        )
 
     def test_learn_steps_lr_schedule_once_per_call_with_own_critic_peak(self):
         # Arrange
@@ -978,9 +1007,15 @@ class TestPPOLearn:
 
         # Act
         at_start = lrs_by_group()
-        ppo.learn((completions, masks, rewards))
+        ppo.learn(
+            (completions, masks, rewards),
+            sampling_logps=rollout_logps(masks),
+        )
         after_one = lrs_by_group()
-        ppo.learn((completions, masks, rewards))
+        ppo.learn(
+            (completions, masks, rewards),
+            sampling_logps=rollout_logps(masks),
+        )
         after_two = lrs_by_group()
 
         # Assert: two optimizer steps per learn, one schedule step.
@@ -1028,7 +1063,10 @@ class TestPPOLearn:
         batch = (completions, masks, rewards)
 
         # Act
-        losses = [ppo.learn(batch)["loss"] for _ in range(10)]
+        losses = [
+            ppo.learn(batch, sampling_logps=rollout_logps(masks))["loss"]
+            for _ in range(10)
+        ]
 
         # Assert: at this lr ten steps cut the loss by over 10% for any seed.
         assert all(math.isfinite(v) for v in losses), losses
@@ -1084,7 +1122,10 @@ class TestPPOFusedNoGradBaseRoutedReference:
         action_masks = [torch.ones(1, seq_len - 1, dtype=torch.bool) for _ in range(2)]
         rewards = torch.tensor([[0.5], [-0.5]], dtype=torch.float32)
 
-        metrics = ppo.learn((completions, action_masks, rewards))
+        metrics = ppo.learn(
+            (completions, action_masks, rewards),
+            sampling_logps=rollout_logps(action_masks),
+        )
 
         for key in ("loss", "kl", "pg_loss", "vf_loss"):
             assert torch.isfinite(torch.tensor(metrics[key]))
@@ -1340,9 +1381,9 @@ class TestPPOTest:
 
 
 def _two_turn_learn_inputs(
-    sampling_logp: float | None,
-) -> tuple[tuple, torch.Tensor, list[torch.Tensor] | None]:
-    """One two-turn row and, when ``sampling_logp`` is set, constant rollout log-probs."""
+    sampling_logp: float,
+) -> tuple[tuple, torch.Tensor, list[torch.Tensor]]:
+    """One two-turn row and constant rollout log-probs."""
     vocab, inp, mtok = 100, 10, 8
     seq_len = inp + mtok
     completions = [torch.randint(0, vocab, (1, seq_len))]
@@ -1352,8 +1393,6 @@ def _two_turn_learn_inputs(
         dtype=torch.long,
     )[:, : seq_len - 1]
     rewards = torch.tensor([[0.5, -0.5]], dtype=torch.float32)
-    if sampling_logp is None:
-        return (completions, action_masks, rewards), turn_ids, None
     n_act = int(action_masks[0].sum())
     sampling_logps = [torch.full((n_act,), sampling_logp, dtype=torch.float32)]
     return (completions, action_masks, rewards), turn_ids, sampling_logps
@@ -1379,18 +1418,17 @@ class TestPPOLearnRolloutOldLogProbs:
         assert metrics["vllm_is_ratio_mean"] > 0
         assert torch.isfinite(torch.tensor(metrics["loss"]))
 
-    def test_rows_without_rollout_log_probs_use_learn_start_policy(self):
+    def test_rows_without_rollout_log_probs_raise(self):
         # Arrange
-        torch.manual_seed(0)
         ppo = _cpu_llmppo()
-        experiences, turn_ids, _ = _two_turn_learn_inputs(None)
+        experiences, turn_ids, _ = _two_turn_learn_inputs(-0.01)
 
-        # Act
-        metrics = ppo.learn(experiences, turn_ids=turn_ids)
-
-        # Assert
-        assert metrics["off_policy_token_mask_frac"] == pytest.approx(0.0)
-        assert metrics["clipfrac"] == pytest.approx(0.0)
+        # Act / Assert
+        with pytest.raises(
+            ValueError,
+            match=r"PPO needs sampling_logps on every action token; row 0 has none, expected 17\.",
+        ):
+            ppo.learn(experiences, turn_ids=turn_ids)
 
     def test_no_bounds_masks_nothing(self):
         # Arrange
