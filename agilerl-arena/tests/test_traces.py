@@ -184,6 +184,28 @@ class TestTracesRow:
         with pytest.raises(ValidationError):
             TracesRow.model_validate(["prompt", "completion"])
 
+    def test_accepts_text_parts_in_a_user_message(self) -> None:
+        raw = helpdesk_row()
+        raw["prompt"][1]["content"] = [{"type": "text", "text": "I can't sign in."}]
+
+        row = TracesRow.model_validate(raw)
+
+        assert isinstance(row.prompt[1].content, list)
+
+    @pytest.mark.parametrize(
+        ("column", "index"),
+        [("completion", 0), ("prompt", 3)],
+        ids=["assistant", "tool"],
+    )
+    def test_rejects_content_parts_outside_system_and_user_messages(
+        self, column: str, index: int
+    ) -> None:
+        raw = helpdesk_row()
+        raw[column][index]["content"] = [{"type": "text", "text": "x"}]
+
+        with pytest.raises(ValidationError, match="Input should be a valid string"):
+            TracesRow.model_validate(raw)
+
     def test_rejects_an_empty_assistant_message(self) -> None:
         raw = helpdesk_row()
         raw["completion"] = [{"role": "assistant", "content": ""}]

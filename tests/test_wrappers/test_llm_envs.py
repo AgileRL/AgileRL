@@ -1116,6 +1116,43 @@ class TestChatMessages:
             },
         ]
 
+    def test_text_content_parts_are_joined_by_newlines(self):
+        row = json.dumps(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Weather"},
+                        {"type": "text", "text": "in Paris?"},
+                    ],
+                }
+            ]
+        )
+
+        assert chat_messages(row) == [{"role": "user", "content": "Weather\nin Paris?"}]
+
+    def test_arrow_text_parts_ignore_their_null_fields(self):
+        row = [
+            {
+                "role": "tool",
+                "tool_call_id": "c1",
+                "content": [{"type": "text", "text": "sunny", "image_url": None}],
+            }
+        ]
+
+        assert chat_messages(row)[0]["content"] == "sunny"
+
+    def test_a_non_text_part_is_rejected(self):
+        row = [
+            {
+                "role": "user",
+                "content": [{"type": "image_url", "image_url": {"url": "x"}}],
+            }
+        ]
+
+        with pytest.raises(ValueError, match="user message has a 'image_url' content"):
+            chat_messages(row)
+
 
 class TestSftMessages:
     def test_string_prompt_and_response_are_one_user_and_one_assistant_turn(self):

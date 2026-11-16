@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import warnings
 from typing import Any
 
 import pytest
@@ -17,12 +18,14 @@ from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from agilerl.llm_envs import DatasetEnv
 from agilerl.llm_envs.chat_formats import detect_chat_format
+from agilerl.llm_envs.chat_transcript import _warn_reasoning_dropped
 from agilerl.llm_envs.dataset_env import (
     chat_messages,
     encode_chat_transcript,
     encode_sft_row,
 )
 from agilerl.llm_envs.traces import (
+    check_traces_render,
     check_traces_split,
     traces_prompt_text,
     traces_reference_text,
@@ -53,6 +56,54 @@ REASONING_TEMPLATE = (
     "{{ message.content or '' }}<|im_end|>\n{% endfor %}"
     "{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}"
 )
+
+# Qwen3.5 layout: the generation prompt closes the think block unless enable_thinking.
+THINKING_SWITCH_TEMPLATE = (
+    "{% for message in messages %}<|im_start|>{{ message.role }}\n"
+    "{% if message.role == 'assistant' %}"
+    "<think>\n{{ message.reasoning_content or '' }}\n</think>\n\n{% endif %}"
+    "{{ message.content or '' }}<|im_end|>\n{% endfor %}"
+    "{% if add_generation_prompt %}<|im_start|>assistant\n<think>\n"
+    "{% if not enable_thinking %}{{ '\\n' }}</think>\n\n{% endif %}{% endif %}"
+)
+
+# gpt-oss layout: an assistant turn's analysis renders only when no later turn is final.
+DROPS_PAST_ANALYSIS_TEMPLATE = (
+    "{% set ns = namespace(final=-1) %}"
+    "{% for m in messages %}{% if m.role == 'assistant' and m.content %}"
+    "{% set ns.final = loop.index0 %}{% endif %}{% endfor %}"
+    "{% for m in messages %}"
+    "{% if m.role == 'assistant' %}<|start|>assistant"
+    "{% if m.thinking and loop.index0 >= ns.final %}"
+    "<|channel|>analysis<|message|>{{ m.thinking }}<|end|><|start|>assistant{% endif %}"
+    "{% if m.tool_calls %} to=functions.{{ m.tool_calls[0].function.name }}"
+    "<|channel|>commentary json<|message|>"
+    "{{ m.tool_calls[0].function.arguments | tojson }}<|call|>"
+    "{% else %}<|channel|>final<|message|>{{ m.content }}"
+    "{% if loop.last %}<|return|>{% else %}<|end|>{% endif %}{% endif %}"
+    "{% elif m.role == 'tool' %}<|start|>functions.lookup_user to=assistant"
+    "<|channel|>commentary<|message|>{{ m.content }}<|end|>"
+    "{% else %}<|start|>{{ m.role }}<|message|>{{ m.content }}<|end|>{% endif %}"
+    "{% endfor %}{% if add_generation_prompt %}<|start|>assistant{% endif %}"
+)
+
+HARMONY_SPECIALS = [
+    "<|start|>",
+    "<|message|>",
+    "<|channel|>",
+    "<|call|>",
+    "<|end|>",
+    "<|return|>",
+]
+
+
+def template_tokenizer(template: str, specials: list[str] | None = None) -> Any:
+    """Tiny tokenizer rendering with ``template``, with ``specials`` as special tokens."""
+    tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+    if specials:
+        tokenizer.add_tokens(specials, special_tokens=True)
+    tokenizer.chat_template = template
+    return tokenizer
 
 
 def lookup_call(call_id: str, email: str) -> dict[str, Any]:
@@ -201,7 +252,6 @@ class TestTracesReferenceText:
         completion = [
             {
                 "role": "assistant",
-                "reasoning": "Check the account first.",
                 "content": "",
                 "tool_calls": [lookup_call("c2", "x@y.com")],
             }
@@ -214,9 +264,64 @@ class TestTracesReferenceText:
 
         # Assert
         assert text == (
-            "Check the account first.\n\n<tool_call>\n"
-            '{"name": "lookup_user", "arguments": {"email": "x@y.com"}}\n</tool_call>'
+            '<tool_call>\n{"name": "lookup_user", "arguments": {"email": "x@y.com"}}'
+            "\n</tool_call>"
         )
+
+    def test_drops_reasoning_a_template_reads_no_key_for_as_sft_does(
+        self, tokenizer: PreTrainedTokenizerBase
+    ) -> None:
+        # Arrange
+        _warn_reasoning_dropped.cache_clear()
+        row = helpdesk_row()
+
+        # Act
+        with pytest.warns(UserWarning, match="assistant reasoning is dropped"):
+            text = traces_reference_text(tokenizer, row["completion"], None, None)
+        ids, mask = encode_sft_row(
+            tokenizer, row, "completion", detect_chat_format(tokenizer), True
+        )
+
+        # Assert
+        assert text == "I've sent an unlock link."
+        assert trained_text(tokenizer, ids, mask) == [f"{text}<|im_end|>"]
+
+    def test_warns_once_about_dropped_reasoning(
+        self, tokenizer: PreTrainedTokenizerBase
+    ) -> None:
+        _warn_reasoning_dropped.cache_clear()
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            for _ in range(3):
+                traces_reference_text(tokenizer, helpdesk_completion(), None, None)
+
+        assert [str(w.message) for w in caught].count(str(caught[0].message)) == 1
+
+    def test_includes_the_think_opener_the_generation_prompt_prefills(self) -> None:
+        tokenizer = template_tokenizer(THINKING_SWITCH_TEMPLATE)
+
+        text = traces_reference_text(
+            tokenizer, helpdesk_completion(), None, None, {"enable_thinking": True}
+        )
+
+        assert text == (
+            "<think>\nThe account is locked.\n</think>\n\nI've sent an unlock link."
+        )
+
+    def test_rejects_reasoning_after_a_closed_think_prefill(self) -> None:
+        tokenizer = template_tokenizer(THINKING_SWITCH_TEMPLATE)
+
+        with pytest.raises(ValueError, match="closes the thinking block"):
+            traces_reference_text(tokenizer, helpdesk_completion(), None, None)
+
+    def test_a_closed_prefilled_think_block_is_not_an_opener(self) -> None:
+        tokenizer = template_tokenizer(THINKING_SWITCH_TEMPLATE)
+        completion = [{"role": "assistant", "content": "Done."}]
+
+        text = traces_reference_text(tokenizer, completion, None, None)
+
+        assert text == "Done."
 
     def test_keeps_special_tokens_inside_the_turn(self) -> None:
         # Arrange
@@ -471,3 +576,159 @@ class TestTracesSft:
         assert len(trained) == 1
         assert "I've sent an unlock link." in trained[0]
         assert "lookup_user" not in trained[0]
+
+
+def as_text_parts(text: str) -> list[dict[str, str]]:
+    return [{"type": "text", "text": text}]
+
+
+class TestTracesSftContentParts:
+    @pytest.mark.parametrize(
+        ("column", "index"),
+        [("prompt", 1), ("prompt", 3), ("completion", 0)],
+        ids=["user", "tool_result", "completion"],
+    )
+    def test_text_parts_render_like_a_string(
+        self, tokenizer: PreTrainedTokenizerBase, column: str, index: int
+    ) -> None:
+        # Arrange
+        chat_format = detect_chat_format(tokenizer)
+        parts_row = helpdesk_row()
+        message = parts_row[column][index]
+        message["content"] = as_text_parts(message["content"])
+
+        # Act
+        parts = encode_sft_row(tokenizer, parts_row, "completion", chat_format, True)
+        strings = encode_sft_row(
+            tokenizer, helpdesk_row(), "completion", chat_format, True
+        )
+        parts_prompt = traces_prompt_text(
+            tokenizer, parts_row["prompt"], [LOOKUP_TOOL], chat_format
+        )
+
+        # Assert
+        assert parts == strings
+        assert parts_prompt == traces_prompt_text(
+            tokenizer, helpdesk_prompt(), [LOOKUP_TOOL], chat_format
+        )
+        assert trained_text(tokenizer, *parts) == [
+            "I've sent an unlock link.<|im_end|>"
+        ]
+
+
+class TestTracesSftContext:
+    def test_keeps_past_reasoning_a_later_final_turn_would_drop(self) -> None:
+        # Arrange
+        tokenizer = template_tokenizer(DROPS_PAST_ANALYSIS_TEMPLATE, HARMONY_SPECIALS)
+        row = helpdesk_row()
+        row["prompt"][2]["thinking"] = "Look the user up first."
+        row["completion"] = [
+            {"role": "assistant", "thinking": "Locked.", "content": "Unlocked."}
+        ]
+
+        # Act
+        ids, mask = encode_sft_row(tokenizer, row, "completion", None, True)
+
+        # Assert
+        start = mask.index(True)
+        context = tokenizer.decode(ids[:start])
+        assert context == traces_prompt_text(tokenizer, row["prompt"], None, None)
+        assert "Look the user up first." in context
+        assert trained_text(tokenizer, ids, mask) == [
+            (
+                "<|channel|>analysis<|message|>Locked.<|end|><|start|>assistant"
+                "<|channel|>final<|message|>Unlocked.<|return|>"
+            )
+        ]
+
+    def test_trains_reasoning_after_an_open_think_prefill(self) -> None:
+        tokenizer = template_tokenizer(THINKING_SWITCH_TEMPLATE)
+        tokenizer.chat_template = tokenizer.chat_template.replace(
+            "not enable_thinking", "false"
+        )
+
+        ids, mask = encode_sft_row(tokenizer, helpdesk_row(), "completion", None, True)
+
+        assert tokenizer.decode(ids[: mask.index(True)]).endswith(
+            "<|im_start|>assistant\n<think>\n"
+        )
+        assert trained_text(tokenizer, ids, mask) == [
+            "The account is locked.\n</think>\n\nI've sent an unlock link.<|im_end|>"
+        ]
+
+    def test_rejects_reasoning_after_a_closed_think_prefill(self) -> None:
+        tokenizer = template_tokenizer(THINKING_SWITCH_TEMPLATE)
+        # Qwen3.5 holds the think markers as single, non-special added tokens.
+        tokenizer.add_tokens(["<think>", "</think>"])
+        row = {"prompt": helpdesk_prompt()[1:2], "completion": helpdesk_completion()}
+
+        with pytest.raises(ValueError, match="enable_thinking: true"):
+            encode_sft_row(tokenizer, row, "completion", None, True)
+
+
+class TestCheckTracesRender:
+    @pytest.mark.parametrize(
+        "row",
+        [
+            helpdesk_row(),
+            {
+                "messages": [*helpdesk_prompt(), *helpdesk_completion()],
+                "tools": [LOOKUP_TOOL],
+            },
+        ],
+        ids=["prompt_completion", "messages"],
+    )
+    def test_accepts_rows_that_render_as_a_rollout_sees_them(
+        self, tokenizer: PreTrainedTokenizerBase, row: dict[str, Any]
+    ) -> None:
+        dataset = HFDataset.from_list([row] * 20)
+
+        check_traces_render(dataset, tokenizer, detect_chat_format(tokenizer), {})
+
+    @pytest.mark.parametrize("count", [16, 20, 31, 40])
+    def test_checks_the_last_row(self, count: int) -> None:
+        # Arrange
+        tokenizer = template_tokenizer(THINKING_SWITCH_TEMPLATE)
+        plain = {
+            **helpdesk_row(),
+            "completion": [{"role": "assistant", "content": "ok"}],
+        }
+        dataset = HFDataset.from_list([plain] * (count - 1) + [helpdesk_row()])
+
+        # Act / Assert
+        with pytest.raises(ValueError, match=f"Row {count}: .*closes the thinking"):
+            check_traces_render(dataset, tokenizer, None, {})
+
+    def test_rejects_arguments_written_as_an_escaped_json_string(self) -> None:
+        tokenizer = template_tokenizer(
+            REASONING_TEMPLATE.replace(
+                "{{ message.content or '' }}",
+                "{{ message.content or '' }}{% for c in message.tool_calls or [] %}"
+                "{{ c.function.arguments | tojson | tojson }}{% endfor %}",
+            )
+        )
+        dataset = HFDataset.from_list([helpdesk_row()])
+
+        with pytest.raises(ValueError, match=r"Row 1: .*'lookup_user'.*escaped JSON"):
+            check_traces_render(dataset, tokenizer, None, {})
+
+    def test_rejects_reasoning_when_the_generation_prompt_closes_thinking(
+        self,
+    ) -> None:
+        tokenizer = template_tokenizer(THINKING_SWITCH_TEMPLATE)
+        dataset = HFDataset.from_list([helpdesk_row()])
+
+        with pytest.raises(ValueError, match="closes the thinking block"):
+            check_traces_render(dataset, tokenizer, None, {})
+
+        check_traces_render(dataset, tokenizer, None, {"enable_thinking": True})
+
+    def test_rejects_a_prompt_that_is_not_a_prefix_of_the_sft_context(self) -> None:
+        tokenizer = template_tokenizer(
+            "{% if messages | length > 2 %}[answered]{% endif %}" + REASONING_TEMPLATE
+        )
+        row = {"messages": [*helpdesk_prompt()[:2], *helpdesk_completion()]}
+        dataset = HFDataset.from_list([row])
+
+        with pytest.raises(ValueError, match=r"Row 1: the prompt .* not a prefix"):
+            check_traces_render(dataset, tokenizer, None, {})
