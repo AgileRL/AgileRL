@@ -71,10 +71,15 @@ def missing_object(exc: Exception) -> bool:
     """Whether a server error says the object is not there.
 
     :param exc: Server error.
-    :return: True for "does not exist", "not found", or "no such" errors.
+    :return: True for a missing object or an unknown user-defined function.
     """
     text = str(exc).lower()
-    return "does not exist" in text or "not found" in text or "no such" in text
+    return (
+        "does not exist" in text
+        or "not found" in text
+        or "no such" in text
+        or "unknown user-defined function" in text
+    )
 
 
 def one_line(exc: Exception) -> str:

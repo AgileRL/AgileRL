@@ -29,6 +29,7 @@ from agilerl.arena.snowflake.broker import (
     CommandResult,
     broker_memory,
     head_service_terminal,
+    memory_limit_bytes,
     production_runtime,
     run_broker,
     service_status_terminal,
@@ -143,6 +144,7 @@ class Host:
                     "runs_stage": "arena.runs",
                     "run_id": RUN_ID,
                     "head_service": HEAD,
+                    "broker_family": "CPU_X64_L",
                 }
             ),
             encoding="utf-8",
@@ -315,6 +317,38 @@ class TestBrokerMemory:
         assert memory.db_write_cache_mib == 256
         assert memory.db_read_cache_mib == 256
 
+    def test_a_missing_file_uses_the_named_family(self, tmp_path: Path) -> None:
+        small = memory_limit_bytes(tmp_path / "memory.max", "CPU_X64_S")
+        large = memory_limit_bytes(tmp_path / "missing.max", "CPU_X64_L")
+
+        assert small == 13 * 1024**3
+        assert large == 116 * 1024**3
+
+    def test_the_literal_max_uses_the_named_family(self, tmp_path: Path) -> None:
+        path = tmp_path / "memory.max"
+        path.write_text("max", encoding="utf-8")
+
+        limit = memory_limit_bytes(path, "CPU_X64_M")
+
+        assert limit == 28 * 1024**3
+
+    def test_a_numeric_file_overrides_the_family(self, tmp_path: Path) -> None:
+        path = tmp_path / "memory.max"
+        path.write_text(f"{1024**3}\n", encoding="utf-8")
+
+        limit = memory_limit_bytes(path, "CPU_X64_S")
+
+        assert limit == 1024**3
+
+    def test_an_unknown_family_is_rejected_when_the_file_is_not_a_limit(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "memory.max"
+        path.write_text("max", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="Unknown CPU instance family"):
+            memory_limit_bytes(path, "NO_SUCH_CPU")
+
 
 class TestWriteBrokerConfig:
     def test_rendered_config_for_a_known_limit(
@@ -436,6 +470,39 @@ class TestHeadServiceTerminal:
 
 
 class TestRunBroker:
+    def test_a_missing_cgroup_file_uses_the_job_family(self, host: Host) -> None:
+        # Arrange
+        host.put_done(0)
+        host.memory_path.unlink()
+        job_path = host.run_dir / "job.json"
+        job = json.loads(job_path.read_text(encoding="utf-8"))
+        job["broker_family"] = "CPU_X64_S"
+        job_path.write_text(json.dumps(job), encoding="utf-8")
+        expected = broker_memory(13 * 1024**3)
+
+        # Act
+        code = run_broker(host.runtime())
+
+        # Assert
+        mem = (host.pulsar_home / "conf" / "pulsar_env.sh").read_text(encoding="utf-8")
+        assert code == 0
+        assert mem == (
+            f'PULSAR_MEM="-Xms{expected.heap_mib}m -Xmx{expected.heap_mib}m '
+            f'-XX:MaxDirectMemorySize={expected.direct_mib}m"\n'
+        )
+
+    def test_a_missing_family_raises_when_the_cgroup_file_is_absent(
+        self, host: Host
+    ) -> None:
+        host.memory_path.unlink()
+        job_path = host.run_dir / "job.json"
+        job = json.loads(job_path.read_text(encoding="utf-8"))
+        del job["broker_family"]
+        job_path.write_text(json.dumps(job), encoding="utf-8")
+
+        with pytest.raises(KeyError, match="broker_family"):
+            run_broker(host.runtime())
+
     def test_starts_in_order(self, host: Host) -> None:
         # Arrange
         host.put_done(0)

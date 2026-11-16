@@ -62,6 +62,7 @@ def arena_account(
             Row(name="ARENA_HEAD_POOL"),
             Row(name="ARENA_GPU_GPU_NV_S"),
             Row(name="ARENA_GPU_GPU_NV_M"),
+            Row(name="ARENA_GPU_POOL"),
             Row(name="ANALYTICS_POOL"),
         ]
     return admin_routes(
@@ -137,16 +138,17 @@ class TestTeardownStatements:
 
 
 class TestPlanTeardown:
-    def test_finds_only_the_cpu_pools_and_pools_in_setup_json(self) -> None:
+    def test_includes_arena_gpu_pools_missing_from_setup_json(self) -> None:
         plan = plan_teardown(FakeSession(arena_account()))
-
-        assert "ARENA_GPU_GPU_NV_M" not in plan.pools
 
         assert plan.pools == (
             "ARENA_PULSAR_POOL",
             "ARENA_HEAD_POOL",
             "ARENA_GPU_GPU_NV_S",
+            "ARENA_GPU_GPU_NV_M",
+            "ARENA_GPU_POOL",
         )
+        assert "ANALYTICS_POOL" not in plan.pools
         assert plan.integrations == ("arena_hf_eai", "arena_api_eai")
         assert plan.database is True
         assert plan.foreign_database is False
@@ -177,9 +179,20 @@ class TestRunTeardown:
 
         # Assert
         assert io.prompts == ["Drop these objects? [y/N]"]
-        assert drops(session) == FULL_DROP
+        rest_at = FULL_DROP.index(
+            "DROP EXTERNAL ACCESS INTEGRATION IF EXISTS arena_hf_eai"
+        )
+        assert drops(session) == [
+            *FULL_DROP[:rest_at],
+            'ALTER COMPUTE POOL "ARENA_GPU_GPU_NV_M" STOP ALL',
+            'DROP COMPUTE POOL "ARENA_GPU_GPU_NV_M"',
+            'ALTER COMPUTE POOL "ARENA_GPU_POOL" STOP ALL',
+            'DROP COMPUTE POOL "ARENA_GPU_POOL"',
+            *FULL_DROP[rest_at:],
+        ]
         assert "ANALYTICS_POOL" not in "\n".join(session.statements)
-        assert "ARENA_GPU_GPU_NV_M" not in "\n".join(drops(session))
+        assert 'DROP COMPUTE POOL "ARENA_GPU_GPU_NV_M"' in drops(session)
+        assert 'DROP COMPUTE POOL "ARENA_GPU_POOL"' in drops(session)
         assert "  compute pool ARENA_GPU_GPU_NV_S and its services" in io.lines[0]
         assert io.lines[-1] == "\n".join(
             [
