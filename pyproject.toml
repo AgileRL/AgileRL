@@ -56,7 +56,7 @@ cpu = [
 # LLM Python stack without vLLM. Hosted CPU CI uses this with the cpu extra.
 cpu-llm = [
     "bitsandbytes==0.50.2; sys_platform == 'linux'",
-    "datasets==5.1.0",
+    "datasets==5.2.0",
     "liger-kernel==0.8.5; sys_platform == 'linux'",
     "openenv>=0.4.1,<0.5",
     "peft==0.21.2",
