@@ -18,7 +18,6 @@ import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import aiohttp
 import pytest
 import torch
 
@@ -27,7 +26,9 @@ pytest.importorskip("transformers", reason="LLM dependencies not installed")
 # verifiers.v1 imports fcntl at package import time, so the top-level import
 # succeeds on Windows but anything under v1 does not.
 pytest.importorskip("verifiers.v1.episode", reason="verifiers v1 needs fcntl")
-
+# aiohttp ships with verifiers. CPU jobs on Python 3.10 do not install that extra.
+pytest.importorskip("aiohttp")
+import aiohttp
 from openenv.core.env_server.mcp_types import CallToolAction, ListToolsAction
 from openenv.core.env_server.types import Action
 from transformers import AutoTokenizer
