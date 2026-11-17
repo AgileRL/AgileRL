@@ -27,6 +27,7 @@ from agilerl.arena.models.algorithms.opd import OPDSpec
 from agilerl.arena.models.env import LLMEnvSpec
 from agilerl.arena.models.manifest import TrainingManifest
 from agilerl.arena.models.training import CheckpointExportSpec
+from agilerl.arena.snowflake.license import CHANNEL_ENV
 from agilerl.arena.snowflake.ports import TrainerPorts, service_endpoints
 from agilerl.arena.snowflake.profile import (
     ARENA_API_INTEGRATION,
@@ -135,6 +136,10 @@ class SubmitSettings:
     head_pool: str
     head_family: str
     resume_from: str | None
+    secrets_schema: str = f"{DATABASE}.{SCHEMA}"
+    arena_api_integration: str = ARENA_API_INTEGRATION
+    service_schema: str | None = None
+    channel: str | None = None
 
 
 def new_run_id(now: datetime | None = None) -> str:
@@ -171,6 +176,16 @@ def run_services(run_id: str) -> RunServices:
         head=f"{stem}_HEAD",
         workers=f"{stem}_WORKERS",
     )
+
+
+def in_schema(name: str, schema: str | None) -> str:
+    """Qualify an object name with a schema.
+
+    :param name: Object name.
+    :param schema: Schema, or ``None`` for the session's current one.
+    :return: ``<schema>.<name>``, or ``name`` when ``schema`` is ``None``.
+    """
+    return name if schema is None else f"{schema}.{name}"
 
 
 def service_for_role(run_id: str, role: str) -> str:
@@ -529,35 +544,38 @@ def _service_statements(
 ) -> list[tuple[str, str]]:
     broker_spec, head_spec, workers_spec = specs
     integrations = settings.external_access_integrations
+    broker = in_schema(services.broker, settings.service_schema)
+    head = in_schema(services.head, settings.service_schema)
+    workers_service = in_schema(services.workers, settings.service_schema)
     return [
         (
-            services.broker,
+            broker,
             job_service_sql(
                 settings.broker_pool,
                 settings.warehouse,
-                services.broker,
+                broker,
                 broker_spec,
                 1,
                 (),
             ),
         ),
         (
-            services.head,
+            head,
             job_service_sql(
                 settings.head_pool,
                 settings.warehouse,
-                services.head,
+                head,
                 head_spec,
                 1,
-                _head_integrations(integrations),
+                _head_integrations(integrations, settings.arena_api_integration),
             ),
         ),
         (
-            services.workers,
+            workers_service,
             job_service_sql(
                 settings.gpu_pool,
                 settings.warehouse,
-                services.workers,
+                workers_service,
                 workers_spec,
                 workers,
                 integrations,
@@ -861,7 +879,9 @@ def render_head_spec(settings: SubmitSettings, run_id: str) -> str:
     """
     memory_gib = cpu_memory_gib(settings.head_family)
     container = _ray_container(settings, run_id, memory_gib, None)
-    container["secrets"] = arena_container_secrets()
+    container["secrets"] = arena_container_secrets(settings.secrets_schema)
+    if settings.channel is not None:
+        container["env"] = {**container["env"], CHANNEL_ENV: settings.channel}
     return _dump_spec(
         {
             "spec": {
@@ -961,16 +981,20 @@ def drop_service_sql(name: str, if_exists: bool = False) -> str:
     return f"DROP SERVICE {service} FORCE"
 
 
-def cancel_run(session: SnowflakeSession, run_id: str) -> None:
+def cancel_run(
+    session: SnowflakeSession, run_id: str, schema: str | None = None
+) -> None:
     """Drop the broker, head, and workers for a run.
 
     :param session: Snowpark session.
     :param run_id: An id from :func:`new_run_id`.
+    :param schema: Schema of the services, or ``None`` for the session's current one.
     :raises ValueError: ``run_id`` does not match the run id pattern.
     """
     services = run_services(run_id)
     for name in (services.broker, services.head, services.workers):
-        session.sql(drop_service_sql(name, if_exists=True)).collect()
+        statement = drop_service_sql(in_schema(name, schema), if_exists=True)
+        session.sql(statement).collect()
 
 
 def service_status_sql(service: str) -> str:
@@ -1023,14 +1047,16 @@ def event_log_text(rows: list[SnowflakeRow]) -> str:
     return "\n".join(str(lowered(row)["log"]) for row in reversed(rows))
 
 
-def job_services_sql(run_id: str) -> str:
+def job_services_sql(run_id: str, schema: str | None = None) -> str:
     """``SHOW JOB SERVICES`` for the broker, head, and workers of one run.
 
     :param run_id: An id from :func:`new_run_id`.
+    :param schema: Schema of the services, or ``None`` for the session's current one.
     :return: The SQL statement.
     :raises ValueError: ``run_id`` does not match the run id pattern.
     """
-    return f"SHOW JOB SERVICES LIKE '{service_name(run_id)}%'"
+    statement = f"SHOW JOB SERVICES LIKE '{service_name(run_id)}%'"
+    return statement if schema is None else f"{statement} IN SCHEMA {schema}"
 
 
 def role_states(run_id: str, rows: list[SnowflakeRow]) -> dict[str, str]:
@@ -1313,19 +1339,23 @@ def _gpu_counts_message(
     return "\n".join(lines)
 
 
-def _head_integrations(integrations: tuple[str, ...]) -> tuple[str, ...]:
-    if ARENA_API_INTEGRATION in integrations:
+def _head_integrations(
+    integrations: tuple[str, ...], api_integration: str
+) -> tuple[str, ...]:
+    if api_integration in integrations:
         return integrations
-    return (*integrations, ARENA_API_INTEGRATION)
+    return (*integrations, api_integration)
 
 
-def arena_container_secrets() -> list[dict[str, str]]:
+def arena_container_secrets(
+    schema: str = f"{DATABASE}.{SCHEMA}",
+) -> list[dict[str, str]]:
     """Container ``secrets`` for the Arena org key, external user id, and base URL.
 
+    :param schema: Schema that holds the three secrets.
     :return: Spec entries that set ``ARENA_ORG_KEY``, ``ARENA_EXTERNAL_USER_ID``,
         and ``ARENA_BASE_URL``.
     """
-    schema = f"{DATABASE}.{SCHEMA}"
     return [
         {
             "snowflakeSecret": f"{schema}.{ARENA_ORG_KEY_SECRET}",

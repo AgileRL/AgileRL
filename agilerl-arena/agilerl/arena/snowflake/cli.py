@@ -29,6 +29,7 @@ from agilerl.arena.snowflake.job import (
     choose_gpu_family,
     event_log_text,
     format_run_status,
+    in_schema,
     job_services_sql,
     log_text,
     manifest_fits,
@@ -397,18 +398,23 @@ def _submit_settings(
     )
 
 
-def run_status(session: SnowflakeSession, run_id: str) -> str:
+def run_status(
+    session: SnowflakeSession, run_id: str, schema: str | None = None
+) -> str:
     """State of each role, its containers, and the run state.
 
     :param session: Snowpark session.
     :param run_id: Run id.
+    :param schema: Schema of the services, or ``None`` for the session's current one.
     :return: The formatted lines.
     """
-    services_sql = job_services_sql(run_id)
+    services_sql = job_services_sql(run_id, schema)
     states = role_states(run_id, list(session.sql(services_sql).collect()))
     containers: dict[str, list[SnowflakeRow]] = {}
     for role, state in states.items():
-        containers_sql = service_status_sql(service_for_role(run_id, role))
+        containers_sql = service_status_sql(
+            in_schema(service_for_role(run_id, role), schema)
+        )
         containers[role] = (
             [] if state == "gone" else list(session.sql(containers_sql).collect())
         )
@@ -416,7 +422,11 @@ def run_status(session: SnowflakeSession, run_id: str) -> str:
 
 
 def service_logs(
-    session: SnowflakeSession, run_id: str, instance: int, role: str = "head"
+    session: SnowflakeSession,
+    run_id: str,
+    instance: int,
+    role: str = "head",
+    schema: str | None = None,
 ) -> str:
     """Logs of the main container of one role.
 
@@ -427,11 +437,12 @@ def service_logs(
     :param run_id: Run id.
     :param instance: Instance id. ``0`` is the first instance.
     :param role: ``broker``, ``head``, or ``worker``.
+    :param schema: Schema of the services, or ``None`` for the session's current one.
     :return: The log text.
     :raises ValueError: The service was dropped.
     """
-    service = service_for_role(run_id, role)
-    rows = list(session.sql(job_services_sql(run_id)).collect())
+    service = in_schema(service_for_role(run_id, role), schema)
+    rows = list(session.sql(job_services_sql(run_id, schema)).collect())
     state = role_states(run_id, rows)[role]
     if state == "running":
         live = session.sql(service_logs_sql(service, instance)).collect()

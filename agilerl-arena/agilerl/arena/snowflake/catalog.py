@@ -12,6 +12,7 @@ from agilerl.arena.snowflake.job import lowered
 from agilerl.arena.snowflake.profile import (
     BUDGET,
     DATABASE,
+    FILE_FORMAT,
     GPU_FAMILIES,
     HF_INTEGRATION,
     METRICS_TABLE,
@@ -406,16 +407,20 @@ def budget_limit(session: SnowflakeSession) -> int | None:
     return whole_number(first)
 
 
-def remote_profile(session: SnowflakeSession) -> AccountProfile | None:
+def remote_profile(
+    session: SnowflakeSession,
+    setup_json: str = SETUP_JSON,
+    file_format: str = f"{DATABASE}.{SCHEMA}.{FILE_FORMAT}",
+) -> AccountProfile | None:
     """Read ``setup.json``. ``None`` when the file is not on the stage.
 
     :param session: A session that can read the runs stage.
+    :param setup_json: Stage path of ``setup.json``.
+    :param file_format: JSON file format that reads it.
     :return: The profile, or ``None``.
     """
     rows = schema_rows(
-        session,
-        "SELECT $1 AS DOC FROM @arena.training.runs/_arena/setup.json "
-        "(FILE_FORMAT => arena.training.arena_json)",
+        session, f"SELECT $1 AS DOC FROM {setup_json} (FILE_FORMAT => {file_format})"
     )
     if not rows:
         return None

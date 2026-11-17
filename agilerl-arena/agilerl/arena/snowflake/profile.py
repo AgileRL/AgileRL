@@ -439,17 +439,20 @@ def _gpu_pool(raw: object) -> GpuPool:
     )
 
 
-def put_setup_json(session: SnowflakeSession, profile: AccountProfile) -> None:
+def put_setup_json(
+    session: SnowflakeSession, profile: AccountProfile, prefix: str = SETUP_PREFIX
+) -> None:
     """Upload ``setup.json`` to the runs stage. The document has no key material.
 
     :param session: Snowpark session.
     :param profile: Account record.
+    :param prefix: Stage directory that holds ``setup.json``.
     """
     text = json.dumps(profile.as_dict(), indent=2) + "\n"
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "setup.json"
         path.write_text(text, encoding="utf-8")
-        session.file.put(str(path), SETUP_PREFIX, auto_compress=False, overwrite=True)
+        session.file.put(str(path), prefix, auto_compress=False, overwrite=True)
 
 
 def job_connection_name(connection_name: str | None) -> str | None:

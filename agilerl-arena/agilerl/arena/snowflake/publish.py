@@ -23,6 +23,7 @@ from agilerl.arena.snowflake.job import (
     CONTAINER_NAME,
     RUN_MOUNT,
     describe_instance_family,
+    in_schema,
     job_state,
     log_text,
     lowered,
@@ -94,6 +95,7 @@ class PublishSettings:
     :param service_name: Service name. ``None`` uses ``<model>_<version>``.
     :param database: Registry database. Set with ``schema``, or neither for the session's.
     :param schema: Registry schema. Set with ``database``, or neither for the session's.
+    :param job_schema: Schema of the publish job service. ``None`` uses the session's.
     """
 
     run_id: str
@@ -111,6 +113,7 @@ class PublishSettings:
     service_name: str | None
     database: str | None
     schema: str | None
+    job_schema: str | None = None
 
 
 @dataclass(frozen=True)
@@ -172,7 +175,11 @@ def submit_publish(
         limit_gib,
     )
     statement = publish_job_sql(
-        compute_pool, settings.warehouse or str(run["warehouse"]), name, spec
+        compute_pool,
+        settings.warehouse or str(run["warehouse"]),
+        name,
+        spec,
+        settings.job_schema,
     )
     document: PublishDocument = {
         "checkpoint": checkpoint,
@@ -195,7 +202,7 @@ def submit_publish(
         )
         put_file(session, path, prefix)
     session.sql(statement).collect()
-    return PublishJob(name=name, document=document)
+    return PublishJob(name=in_schema(name, settings.job_schema), document=document)
 
 
 def wait_for_publish(
@@ -626,18 +633,25 @@ def render_publish_spec(
     return text
 
 
-def publish_job_sql(compute_pool: str, warehouse: str, name: str, spec: str) -> str:
+def publish_job_sql(
+    compute_pool: str,
+    warehouse: str,
+    name: str,
+    spec: str,
+    schema: str | None = None,
+) -> str:
     """``EXECUTE JOB SERVICE`` statement for the publish job.
 
     :param compute_pool: Pool that runs the job.
     :param warehouse: Warehouse for the job's queries.
     :param name: Job service name.
     :param spec: Specification YAML placed inside ``$$``.
+    :param schema: Schema of the job service, or ``None`` for the session's current one.
     :return: The SQL statement.
     """
     pool = snowflake_identifier(compute_pool, "compute pool")
     query_warehouse = snowflake_identifier(warehouse, "warehouse")
-    service = single_identifier(name, "service")
+    service = in_schema(single_identifier(name, "service"), schema)
     return "\n".join(
         [
             f"EXECUTE JOB SERVICE IN COMPUTE POOL {pool}",

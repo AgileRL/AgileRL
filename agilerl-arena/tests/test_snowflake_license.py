@@ -25,20 +25,37 @@ from agilerl.arena.models import __version__
 from agilerl.arena.snowflake import license as license_mod
 from agilerl.arena.snowflake.license import (
     AUTH_REJECTED,
+    CHANNEL_ENV,
     COMPLETE_FAILED,
+    DEPLOYMENT_CLOSE_FAILED,
+    DEPLOYMENT_HEARTBEAT_FAILED,
+    DEPLOYMENT_OPEN_FAILED,
     HEARTBEAT_FAILED,
     MISSING_CREDENTIALS,
+    NATIVE_APP_CHANNEL,
     OPEN_FAILED,
     SNOWFLAKE_DENIED,
+    USAGE_FAILED,
+    DeploymentClosedError,
+    DeploymentRefusedError,
     RunRenewalRefusedError,
+    SnowflakeDeployment,
     SnowflakeLicenseError,
+    SnowflakeUsage,
+    TrainingDisabledError,
+    UnknownUsageError,
     arena_api_base_url,
     check_snowflake_license,
+    close_snowflake_deployment,
     complete_snowflake_run,
     fetch_capabilities,
+    heartbeat_snowflake_deployment,
     heartbeat_snowflake_run,
     open_head_run,
+    open_snowflake_deployment,
+    partner_headers,
     retry_after_seconds,
+    snowflake_usage,
 )
 
 CONTRACT = json.loads(
@@ -76,6 +93,20 @@ NOT_ARENA = (
     "which is not the Arena API; the Arena URL must be reachable from the "
     "public internet."
 )
+DEPLOYMENT_ID = "QWEN_CHECKPOINT_2-20261116T130000Z"
+DEPLOYMENT = SnowflakeDeployment(
+    deployment_id=DEPLOYMENT_ID,
+    snowflake_account="AB12345",
+    gpu_count=1,
+    gpu_family="GPU_NV_S",
+    started_at=datetime(2026, 11, 16, 13, 0, tzinfo=timezone.utc),
+    model="qwen",
+    version="checkpoint_2",
+    run_id=RUN_ID,
+)
+INACTIVE = "The Snowflake entitlement is not active."
+HEADERS = partner_headers("org-key", "user-1")
+OBSERVED_AT = datetime(2026, 11, 16, 15, 0, tzinfo=timezone.utc)
 
 
 def reply(
@@ -176,6 +207,25 @@ class TestUsageContract:
             "startedAt": "2026-11-11T18:00:00+00:00",
         }
 
+    def test_open_sends_the_channel_only_with_the_channel_variable(
+        self, arena: Arena
+    ) -> None:
+        # Arrange
+        arena.replies = [reply(201, TOKEN_BODY), reply(201, TOKEN_BODY)]
+        app_env = {**ENV, CHANNEL_ENV: NATIVE_APP_CHANNEL}
+
+        # Act
+        open_head_run(JOB, app_env, STARTED_AT, lambda seconds: None)
+        open_head_run(JOB, ENV, STARTED_AT, lambda seconds: None)
+
+        # Assert
+        app_body, cli_body = (call["json"] for call in arena.calls)
+        assert app_body["channel"] == "native_app"
+        assert set(app_body) == set(CONTRACT["open"]["request"]) | set(
+            CONTRACT["open"]["optional_request"]
+        )
+        assert "channel" not in cli_body
+
     def test_heartbeat_sends_an_empty_body_and_returns_the_new_token(
         self, arena: Arena
     ) -> None:
@@ -241,6 +291,105 @@ class TestUsageContract:
             assert call["headers"]["X-External-User-Id"] == "user-1"
 
 
+class TestSnowflakeUsage:
+    def test_run_usage_gets_the_contract_path_and_parses_the_hours(
+        self, arena: Arena
+    ) -> None:
+        # Arrange
+        arena.replies = [reply(200, CONTRACT["usage"]["examples"]["closed"])]
+        headers = partner_headers("org-key", "user-1")
+
+        # Act
+        usage = snowflake_usage("run", RUN_ID, BASE_URL, headers, lambda s: None)
+
+        # Assert
+        assert usage == SnowflakeUsage(
+            "closed", CONTRACT["usage"]["examples"]["closed"]["data"]["billableHours"]
+        )
+        call = arena.calls[0]
+        assert call["method"] == CONTRACT["usage"]["method"]
+        path = CONTRACT["usage"]["paths"]["run"].replace("{runId}", RUN_ID)
+        assert call["url"] == BASE_URL + path
+        assert set(call["headers"]) == set(CONTRACT["headers"])
+        assert call["headers"]["Authorization"] == "Bearer org-key"
+
+    def test_deployment_usage_gets_the_deployment_path(self, arena: Arena) -> None:
+        arena.replies = [reply(200, CONTRACT["usage"]["examples"]["open"])]
+        headers = partner_headers("org-key", "user-1")
+
+        usage = snowflake_usage(
+            "deployment", "dep-1", BASE_URL, headers, lambda s: None
+        )
+
+        assert usage.state == "open"
+        path = CONTRACT["usage"]["paths"]["deployment"]
+        assert arena.calls[0]["url"] == BASE_URL + path.replace(
+            "{deploymentId}", "dep-1"
+        )
+
+    def test_server_errors_are_retried(self, arena: Arena) -> None:
+        arena.replies = [reply(503), reply(200, CONTRACT["usage"]["examples"]["open"])]
+        sleeps: list[float] = []
+
+        usage = snowflake_usage("run", RUN_ID, BASE_URL, {}, sleeps.append)
+
+        assert usage.state == "open"
+        assert sleeps == [2.0]
+
+    def test_404_is_an_unknown_item(self, arena: Arena) -> None:
+        arena.replies = [reply(404)]
+
+        with pytest.raises(UnknownUsageError, match=f"no run {RUN_ID}"):
+            snowflake_usage("run", RUN_ID, BASE_URL, {}, lambda s: None)
+
+    def test_rejected_credentials_raise(self, arena: Arena) -> None:
+        arena.replies = [reply(401)]
+
+        with pytest.raises(SnowflakeLicenseError, match=re.escape(AUTH_REJECTED)):
+            snowflake_usage("run", RUN_ID, BASE_URL, {}, lambda s: None)
+
+    def test_other_client_errors_name_the_status_without_a_retry(
+        self, arena: Arena
+    ) -> None:
+        arena.replies = [reply(400)]
+
+        with pytest.raises(SnowflakeLicenseError) as caught:
+            snowflake_usage("run", RUN_ID, BASE_URL, {}, lambda s: None)
+
+        assert str(caught.value) == f"{USAGE_FAILED} Arena answered 400."
+        assert len(arena.calls) == 1
+
+    def test_a_body_that_is_not_json_raises(self, arena: Arena) -> None:
+        arena.replies = [httpx.Response(200, text="<html>placeholder</html>")]
+
+        with pytest.raises(SnowflakeLicenseError) as caught:
+            snowflake_usage("run", RUN_ID, BASE_URL, {}, lambda s: None)
+
+        assert str(caught.value) == f"{USAGE_FAILED} The response is not JSON."
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"data": {"state": "open"}},
+            {"data": {"state": "running", "billableHours": []}},
+            {"data": {"state": "open", "billableHours": {}}},
+        ],
+    )
+    def test_a_body_without_state_and_hours_raises(
+        self, arena: Arena, body: dict[str, object]
+    ) -> None:
+        arena.replies = [reply(200, body)]
+
+        with pytest.raises(SnowflakeLicenseError, match=re.escape(USAGE_FAILED)):
+            snowflake_usage("run", RUN_ID, BASE_URL, {}, lambda s: None)
+
+    def test_an_unknown_kind_raises_before_any_request(self, arena: Arena) -> None:
+        with pytest.raises(ValueError, match="Unknown usage kind job"):
+            snowflake_usage("job", RUN_ID, BASE_URL, {}, lambda s: None)
+
+        assert arena.calls == []
+
+
 class TestPostRetries:
     def test_transport_error_is_retried(self, arena: Arena) -> None:
         arena.replies = [httpx.ConnectError("refused"), reply(201, TOKEN_BODY)]
@@ -270,6 +419,30 @@ class TestPostRetries:
         heartbeat_snowflake_run(RUN_ID, ENV, sleeps.append)
 
         assert sleeps == [7.0]
+
+    def test_retry_after_never_undercuts_the_backoff(self, arena: Arena) -> None:
+        arena.replies = [
+            reply(429, headers={"Retry-After": "0"}),
+            reply(429, headers={"Retry-After": "1"}),
+            reply(503, headers={"Retry-After": "1"}),
+            reply(200, TOKEN_BODY),
+        ]
+        sleeps: list[float] = []
+
+        heartbeat_snowflake_run(RUN_ID, ENV, sleeps.append)
+
+        assert sleeps == [2.0, 4.0, 8.0]
+
+    def test_retry_after_is_capped(self, arena: Arena) -> None:
+        arena.replies = [
+            reply(429, headers={"Retry-After": "600"}),
+            reply(200, TOKEN_BODY),
+        ]
+        sleeps: list[float] = []
+
+        heartbeat_snowflake_run(RUN_ID, ENV, sleeps.append)
+
+        assert sleeps == [60.0]
 
     def test_gives_up_before_five_minutes_of_waiting(self, arena: Arena) -> None:
         # Arrange
@@ -435,6 +608,246 @@ class TestHeartbeatSnowflakeRun:
         assert len(arena.calls) == 1
 
 
+class TestOpenHeadRunRefusals:
+    @pytest.mark.parametrize("status", [400, 409, 422])
+    def test_refusal_includes_arenas_description(
+        self, arena: Arena, status: int
+    ) -> None:
+        arena.replies = [reply(status, {"error": "conflict", "description": INACTIVE})]
+
+        with pytest.raises(SnowflakeLicenseError) as caught:
+            open_head_run(JOB, ENV, STARTED_AT, lambda seconds: None)
+
+        assert str(caught.value) == f"{OPEN_FAILED} Arena answered {status}: {INACTIVE}"
+
+    def test_refusal_without_a_description_names_the_status(self, arena: Arena) -> None:
+        arena.replies = [httpx.Response(409, text="Conflict")]
+
+        with pytest.raises(SnowflakeLicenseError) as caught:
+            open_head_run(JOB, ENV, STARTED_AT, lambda seconds: None)
+
+        assert str(caught.value) == f"{OPEN_FAILED} Arena answered 409."
+
+
+class TestOpenSnowflakeDeployment:
+    def test_posts_the_contract_body_with_the_partner_headers(
+        self, arena: Arena
+    ) -> None:
+        # Arrange
+        arena.replies = [
+            reply(201, {"deploymentId": DEPLOYMENT_ID, "billableHours": []})
+        ]
+
+        # Act
+        open_snowflake_deployment(DEPLOYMENT, BASE_URL, HEADERS, lambda s: None)
+
+        # Assert
+        [call] = arena.calls
+        assert call["method"] == "POST"
+        assert call["url"] == f"{BASE_URL}/api/cli/v1/snowflake/deployments"
+        assert call["json"] == {
+            "deploymentId": DEPLOYMENT_ID,
+            "snowflakeAccount": "AB12345",
+            "gpuCount": 1,
+            "gpuFamily": "GPU_NV_S",
+            "startedAt": "2026-11-16T13:00:00+00:00",
+            "channel": "native_app",
+            "model": "qwen",
+            "version": "checkpoint_2",
+            "runId": RUN_ID,
+        }
+        assert call["headers"]["Authorization"] == "Bearer org-key"
+        assert call["headers"]["X-External-User-Id"] == "user-1"
+
+    def test_leaves_out_run_id_when_there_is_none(self, arena: Arena) -> None:
+        arena.replies = [reply(200)]
+        deployment = SnowflakeDeployment(
+            DEPLOYMENT_ID, "AB12345", 2, "GPU_NV_M", OBSERVED_AT, "qwen", "v1", None
+        )
+
+        open_snowflake_deployment(deployment, BASE_URL, HEADERS, lambda s: None)
+
+        assert "runId" not in arena.calls[0]["json"]
+
+    def test_server_errors_are_retried(self, arena: Arena) -> None:
+        arena.replies = [reply(503), httpx.ConnectError("refused"), reply(201)]
+        sleeps: list[float] = []
+
+        open_snowflake_deployment(DEPLOYMENT, BASE_URL, HEADERS, sleeps.append)
+
+        assert sleeps == [2.0, 4.0]
+
+    @pytest.mark.parametrize("status", [400, 404, 409, 422])
+    def test_refusal_includes_arenas_description_without_a_retry(
+        self, arena: Arena, status: int
+    ) -> None:
+        arena.replies = [reply(status, {"error": "conflict", "description": INACTIVE})]
+
+        with pytest.raises(DeploymentRefusedError) as caught:
+            open_snowflake_deployment(DEPLOYMENT, BASE_URL, HEADERS, lambda s: None)
+
+        assert str(caught.value) == (
+            f"{DEPLOYMENT_OPEN_FAILED} Arena answered {status}: {INACTIVE}"
+        )
+        assert len(arena.calls) == 1
+
+    @pytest.mark.parametrize(
+        ("answer", "message", "refused"),
+        [
+            (flag_off, SNOWFLAKE_DENIED, True),
+            (lambda: httpx.Response(403, text="Forbidden"), AUTH_REJECTED, True),
+            (lambda: httpx.Response(401, text="Unauthorized"), AUTH_REJECTED, False),
+        ],
+    )
+    def test_rejections_name_the_cause_and_only_403_is_a_refusal(
+        self,
+        arena: Arena,
+        answer: Callable[[], httpx.Response],
+        message: str,
+        refused: bool,
+    ) -> None:
+        arena.replies = [answer()]
+
+        with pytest.raises(SnowflakeLicenseError) as caught:
+            open_snowflake_deployment(DEPLOYMENT, BASE_URL, HEADERS, lambda s: None)
+
+        assert str(caught.value) == message
+        assert isinstance(caught.value, DeploymentRefusedError) is refused
+
+    def test_exhausted_retries_are_not_a_refusal(self, arena: Arena) -> None:
+        arena.replies = [reply(503) for _ in range(20)]
+
+        with pytest.raises(SnowflakeLicenseError) as caught:
+            open_snowflake_deployment(DEPLOYMENT, BASE_URL, HEADERS, lambda s: None)
+
+        assert not isinstance(caught.value, DeploymentRefusedError)
+
+    def test_other_client_errors_are_not_a_refusal(self, arena: Arena) -> None:
+        arena.replies = [reply(410, {"error": "gone", "description": INACTIVE})]
+
+        with pytest.raises(SnowflakeLicenseError) as caught:
+            open_snowflake_deployment(DEPLOYMENT, BASE_URL, HEADERS, lambda s: None)
+
+        assert type(caught.value) is SnowflakeLicenseError
+        assert str(caught.value) == (
+            f"{DEPLOYMENT_OPEN_FAILED} Arena answered 410: {INACTIVE}"
+        )
+        assert len(arena.calls) == 1
+
+
+class TestHeartbeatSnowflakeDeployment:
+    def test_posts_observed_at_to_the_deployment_path(self, arena: Arena) -> None:
+        arena.replies = [reply(200, {"billableHours": []})]
+
+        heartbeat_snowflake_deployment(
+            DEPLOYMENT_ID, OBSERVED_AT, BASE_URL, HEADERS, lambda s: None
+        )
+
+        [call] = arena.calls
+        assert call["url"] == (
+            f"{BASE_URL}/api/cli/v1/snowflake/deployments/{DEPLOYMENT_ID}/heartbeat"
+        )
+        assert call["json"] == {"observedAt": "2026-11-16T15:00:00+00:00"}
+
+    @pytest.mark.parametrize(
+        ("answer", "error", "message"),
+        [
+            (flag_off, TrainingDisabledError, re.escape(SNOWFLAKE_DENIED)),
+            (
+                lambda: reply(409, {"error": "conflict"}),
+                DeploymentClosedError,
+                "closed",
+            ),
+            (lambda: reply(404), UnknownUsageError, f"no deployment {DEPLOYMENT_ID}"),
+            (
+                lambda: httpx.Response(401, text="Unauthorized"),
+                SnowflakeLicenseError,
+                re.escape(AUTH_REJECTED),
+            ),
+        ],
+    )
+    def test_refusals_raise_their_own_error(
+        self,
+        arena: Arena,
+        answer: Callable[[], httpx.Response],
+        error: type[Exception],
+        message: str,
+    ) -> None:
+        arena.replies = [answer()]
+
+        with pytest.raises(error, match=message) as caught:
+            heartbeat_snowflake_deployment(
+                DEPLOYMENT_ID, OBSERVED_AT, BASE_URL, HEADERS, lambda s: None
+            )
+
+        assert type(caught.value) is error
+        assert len(arena.calls) == 1
+
+    def test_exhausted_retries_name_the_heartbeat(self, arena: Arena) -> None:
+        arena.replies = [reply(503), reply(503)]
+
+        with pytest.raises(
+            SnowflakeLicenseError, match=re.escape(DEPLOYMENT_HEARTBEAT_FAILED)
+        ):
+            heartbeat_snowflake_deployment(
+                DEPLOYMENT_ID, OBSERVED_AT, BASE_URL, HEADERS, lambda s: None, 2.0
+            )
+
+        assert len(arena.calls) == 2
+
+    def test_other_client_errors_name_the_heartbeat(self, arena: Arena) -> None:
+        arena.replies = [reply(400, {"error": "bad_request", "description": INACTIVE})]
+
+        with pytest.raises(SnowflakeLicenseError) as caught:
+            heartbeat_snowflake_deployment(
+                DEPLOYMENT_ID, OBSERVED_AT, BASE_URL, HEADERS, lambda s: None
+            )
+
+        assert type(caught.value) is SnowflakeLicenseError
+        assert str(caught.value) == (
+            f"{DEPLOYMENT_HEARTBEAT_FAILED} Arena answered 400: {INACTIVE}"
+        )
+        assert len(arena.calls) == 1
+
+
+class TestCloseSnowflakeDeployment:
+    def test_posts_ended_at_and_a_repeat_succeeds(self, arena: Arena) -> None:
+        arena.replies = [reply(200), reply(200)]
+
+        for _ in range(2):
+            close_snowflake_deployment(
+                DEPLOYMENT_ID, OBSERVED_AT, BASE_URL, HEADERS, lambda s: None
+            )
+
+        assert [call["url"] for call in arena.calls] == [
+            f"{BASE_URL}/api/cli/v1/snowflake/deployments/{DEPLOYMENT_ID}/close"
+        ] * 2
+        assert arena.calls[0]["json"] == {"endedAt": "2026-11-16T15:00:00+00:00"}
+
+    def test_404_is_an_unknown_deployment(self, arena: Arena) -> None:
+        arena.replies = [reply(404)]
+
+        with pytest.raises(UnknownUsageError, match=f"no deployment {DEPLOYMENT_ID}"):
+            close_snowflake_deployment(
+                DEPLOYMENT_ID, OBSERVED_AT, BASE_URL, HEADERS, lambda s: None
+            )
+
+    def test_other_refusals_name_the_close(self, arena: Arena) -> None:
+        arena.replies = [
+            reply(400, {"error": "bad_request", "description": "Bad time."})
+        ]
+
+        with pytest.raises(SnowflakeLicenseError) as caught:
+            close_snowflake_deployment(
+                DEPLOYMENT_ID, OBSERVED_AT, BASE_URL, HEADERS, lambda s: None
+            )
+
+        assert (
+            str(caught.value)
+            == f"{DEPLOYMENT_CLOSE_FAILED} Arena answered 400: Bad time."
+        )
+
+
 class TestCheckSnowflakeLicense:
     def test_enabled_flag_passes(self, arena: Arena) -> None:
         arena.replies = [reply(200, ENABLED_BODY)]
@@ -492,6 +905,10 @@ class TestCheckSnowflakeLicense:
                 f"https://arena.test answered HTTP 200 with application/json, {NOT_ARENA}",
             ),
             (
+                reply(200, {"ok": False, "data": ENABLED_BODY["data"]}),
+                f"https://arena.test answered HTTP 200 with application/json, {NOT_ARENA}",
+            ),
+            (
                 reply(
                     200,
                     {
@@ -512,7 +929,14 @@ class TestCheckSnowflakeLicense:
                 ),
             ),
         ],
-        ids=["server-error", "html", "data-not-object", "other-schema", "dns"],
+        ids=[
+            "server-error",
+            "html",
+            "data-not-object",
+            "not-ok",
+            "other-schema",
+            "dns",
+        ],
     )
     def test_unreadable_capabilities_name_the_arena_url(
         self, arena: Arena, answer: httpx.Response | Exception, message: str
