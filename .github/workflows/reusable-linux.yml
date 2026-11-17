@@ -4,22 +4,46 @@ name: Linux
 on:
     workflow_call:
         inputs:
-            all_gpu_pythons:
+            cpu_pythons:
+                type: string
+                required: true
+            cpu_shards:
+                description: JSON list of shard indexes, 1..cpu_shard_total
+                type: string
+                required: true
+            cpu_shard_total:
+                type: number
+                required: true
+            gpu_pythons:
+                type: string
+                required: true
+            gpu_shards:
+                type: string
+                required: true
+            gpu_shard_total:
+                type: number
+                required: true
+            tests:
+                description: JSON list of test files to run; empty runs every test
+                type: string
+                default: ''
+            coverage:
+                description: Measure 3.13 coverage with test contexts and build the test map
                 type: boolean
-                default: false
+                required: true
 
 permissions:
     contents: read
 
 jobs:
     cpu:
+        if: inputs.cpu_shard_total > 0
         runs-on: ubuntu-24.04
         strategy:
             fail-fast: false
-            max-parallel: 8
             matrix:
-                python-version: ['3.10', '3.11', '3.12', '3.13']
-                shard: [1, 2]
+                python-version: ${{ fromJSON(inputs.cpu_pythons) }}
+                shard: ${{ fromJSON(inputs.cpu_shards) }}
         env:
             UV_CACHE_DIR: /tmp/uv-cache
             UV_PROJECT_ENVIRONMENT: /tmp/agilerl-venv
@@ -63,6 +87,11 @@ jobs:
               run: |
                   uv sync --locked --group dev --extra box2d --extra cpu-llm --extra cpu --extra verifiers
                   echo "$UV_PROJECT_ENVIRONMENT/bin" >> $GITHUB_PATH
+            - name: Write the selected tests
+              if: inputs.tests != ''
+              env:
+                  SELECTED_TESTS: ${{ inputs.tests }}
+              run: python -c 'import json, os; print("\n".join(json.loads(os.environ["SELECTED_TESTS"])))' > .ci-selected-tests.txt
             - name: Run CPU shard
               env:
                   # Feedback-frame tests pull real tokenizers (Gemma is gated);
@@ -70,19 +99,20 @@ jobs:
                   HF_TOKEN: ${{ secrets.HF_TOKEN }}
               run: |
                   rm -f .coverage .coverage.*
-                  uv run python scripts/pytest_shard.py run \
+                  uv run --no-sync python scripts/pytest_shard.py run \
                     --root tests \
                     --root agilerl-arena/tests \
-                    --total-shards 2 \
+                    --total-shards ${{ inputs.cpu_shard_total }} \
                     --shard-index ${{ matrix.shard }} \
                     --durations-file .ci-durations/cpu.json \
+                    ${{ inputs.tests != '' && '--select-file .ci-selected-tests.txt' || '' }} \
                     -- \
                     --import-mode=importlib \
                     --junitxml=junit-cpu.xml \
                     -m "not gpu and not vllm" \
                     -n logical --dist loadgroup \
                     --durations=15 \
-                    ${{ matrix.python-version == '3.13' && '--cov --cov-report=xml' || '' }}
+                    ${{ inputs.coverage && matrix.python-version == '3.13' && '--cov --cov-context=test --cov-report=xml' || '' }}
             - name: Upload junit
               if: always()
               uses: actions/upload-artifact@v4
@@ -91,14 +121,14 @@ jobs:
                   path: junit-cpu.xml
                   if-no-files-found: ignore
             - name: Upload coverage reports to Codecov
-              if: matrix.python-version == '3.13'
+              if: inputs.coverage && matrix.python-version == '3.13'
               uses: codecov/codecov-action@v3
               with:
                   flags: cpu-${{ matrix.python-version }}-${{ matrix.shard }}
               env:
                   CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
             - name: Upload 3.13 coverage data
-              if: matrix.python-version == '3.13'
+              if: inputs.coverage && matrix.python-version == '3.13'
               uses: actions/upload-artifact@v4
               with:
                   name: cov-3.13-cpu-${{ matrix.shard }}
@@ -147,13 +177,18 @@ jobs:
                   if-no-files-found: ignore
 
     gpu:
+        # Fork PRs never reach the self-hosted pool; their hub import MR runs these tests.
+        if: >-
+            inputs.gpu_shard_total > 0
+            && (github.event_name != 'pull_request'
+            || github.event.pull_request.head.repo.full_name == github.repository)
         runs-on: gha-runner-scale-set
         strategy:
             fail-fast: false
             max-parallel: 8
             matrix:
-                python-version: ${{ fromJSON(inputs.all_gpu_pythons && '["3.10", "3.11", "3.12", "3.13"]' || '["3.13"]') }}
-                shard: [1, 2]
+                python-version: ${{ fromJSON(inputs.gpu_pythons) }}
+                shard: ${{ fromJSON(inputs.gpu_shards) }}
         env:
             UV_CACHE_DIR: /tmp/uv-cache
             UV_PROJECT_ENVIRONMENT: /tmp/agilerl-venv
@@ -222,6 +257,11 @@ jobs:
                     sleep "$delay"
                   done
                   python -c "import flash_attn"
+            - name: Write the selected tests
+              if: inputs.tests != ''
+              env:
+                  SELECTED_TESTS: ${{ inputs.tests }}
+              run: python -c 'import json, os; print("\n".join(json.loads(os.environ["SELECTED_TESTS"])))' > .ci-selected-tests.txt
             - name: Run GPU shard
               run: |
                   rm -f .coverage .coverage.*
@@ -231,12 +271,13 @@ jobs:
                   if [[ "${{ matrix.python-version }}" == "3.10" ]]; then
                     marker="gpu"
                   fi
-                  uv run python scripts/pytest_shard.py run \
+                  uv run --no-sync python scripts/pytest_shard.py run \
                     --root tests \
                     --root agilerl-arena/tests \
-                    --total-shards 2 \
+                    --total-shards ${{ inputs.gpu_shard_total }} \
                     --shard-index ${{ matrix.shard }} \
                     --durations-file .ci-durations/gpu.json \
+                    ${{ inputs.tests != '' && '--select-file .ci-selected-tests.txt' || '' }} \
                     -- \
                     --import-mode=importlib \
                     --junitxml=junit-gpu.xml \
@@ -244,16 +285,16 @@ jobs:
                     -m "$marker" \
                     -n auto --dist loadgroup \
                     --durations=15 \
-                    ${{ matrix.python-version == '3.13' && '--cov --cov-report=xml' || '' }}
+                    ${{ inputs.coverage && matrix.python-version == '3.13' && '--cov --cov-context=test --cov-report=xml' || '' }}
             - name: Upload coverage reports to Codecov
-              if: matrix.python-version == '3.13'
+              if: inputs.coverage && matrix.python-version == '3.13'
               uses: codecov/codecov-action@v3
               with:
                   flags: gpu-${{ matrix.python-version }}-${{ matrix.shard }}
               env:
                   CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
             - name: Upload 3.13 coverage data
-              if: matrix.python-version == '3.13'
+              if: inputs.coverage && matrix.python-version == '3.13'
               uses: actions/upload-artifact@v4
               with:
                   name: cov-3.13-gpu-${{ matrix.shard }}
@@ -270,7 +311,11 @@ jobs:
 
     coverage:
         needs: [cpu, gpu]
-        if: success()
+        # Fork PRs skip gpu, which uploads no coverage parts.
+        if: >-
+            inputs.coverage
+            && needs.cpu.result == 'success'
+            && needs.gpu.result == 'success'
         runs-on: ubuntu-24.04
         env:
             UV_CACHE_DIR: /tmp/uv-cache
@@ -291,10 +336,16 @@ jobs:
                   pattern: cov-3.13-*
                   path: coverage-parts
             - name: Combine 3.13 coverage
+              env:
+                  CPU_SHARDS: ${{ inputs.cpu_shard_total }}
+                  GPU_SHARDS: ${{ inputs.gpu_shard_total }}
               run: |
                   set -eu
                   index=0
-                  for shard in cov-3.13-cpu-1 cov-3.13-cpu-2 cov-3.13-gpu-1 cov-3.13-gpu-2; do
+                  shards=()
+                  for shard in $(seq 1 "$CPU_SHARDS"); do shards+=("cov-3.13-cpu-${shard}"); done
+                  for shard in $(seq 1 "$GPU_SHARDS"); do shards+=("cov-3.13-gpu-${shard}"); done
+                  for shard in "${shards[@]}"; do
                     dir="coverage-parts/${shard}"
                     test -d "$dir"
                     shard_files=0
@@ -305,10 +356,17 @@ jobs:
                     done < <(find "$dir" \( -name '.coverage' -o -name '.coverage.*' \) -print)
                     test "$shard_files" -ge 1
                   done
-                  test "$index" -ge 4
+                  test "$index" -ge "${#shards[@]}"
                   uv run --no-sync coverage combine
                   uv run --no-sync coverage json --rcfile=pyproject.toml -o framework-coverage.json
+            - name: Build the test map
+              run: uv run --no-sync python scripts/build_test_map.py --data .coverage --out test-map.json
             - uses: actions/upload-artifact@v4
               with:
                   name: framework-coverage
                   path: framework-coverage.json
+            - uses: actions/upload-artifact@v4
+              with:
+                  name: test-map
+                  path: test-map.json
+                  retention-days: 30
