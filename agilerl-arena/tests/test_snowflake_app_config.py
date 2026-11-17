@@ -158,6 +158,42 @@ class TestConfigure:
         assert USER_ID not in text
         assert session.file.uploads == []
 
+    @pytest.mark.parametrize(
+        ("priced", "line"),
+        [
+            (["GPU_NV_S", "gpu_nv_m"], "Priced GPU families: GPU_NV_M, GPU_NV_S."),
+            ([], "Priced GPU families: none."),
+        ],
+    )
+    def test_lists_the_gpu_families_arena_has_a_price_for(
+        self, monkeypatch: pytest.MonkeyPatch, priced: list[str], line: str
+    ) -> None:
+        # Arrange
+        features = {"snowflakeTraining": True, "snowflakePricedGpuFamilies": priced}
+        arena_replies(
+            monkeypatch,
+            {"ok": True, "data": {"schemaVersion": 1, "features": features}},
+        )
+
+        # Act
+        text = configure(
+            FakeSession([RULE]), ORG_KEY, USER_ID, "https://arena.agilerl.com"
+        )
+
+        # Assert
+        assert text.splitlines()[-1] == line
+
+    def test_lists_no_prices_when_arena_sends_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        arena_replies(monkeypatch, ENABLED)
+
+        text = configure(
+            FakeSession([RULE]), ORG_KEY, USER_ID, "https://arena.agilerl.com"
+        )
+
+        assert "Priced" not in text
+
     def test_secret_values_appear_only_in_the_secret_statements(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
