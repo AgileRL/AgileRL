@@ -49,6 +49,7 @@ from tests.test_memory.test_estimator import (
     SUPER_VL_MODEL,
     budget_device,
     catalog_spec,
+    component,
     granite_grpo,
     super_vl_cispo,
     training_gpu,
@@ -1504,3 +1505,77 @@ class TestResolveTrainingMemorySuperVlVwa:
 
         # Assert
         assert plan.breakdown.total_bytes + rank_spread < H100_80GB_CUDA_BYTES
+
+
+def qwen36_llmppo_vwa() -> TrainingSettings:
+    """LLMPPO on Qwen3.6-35B-A3B at 32k with four 1280x720 images per row."""
+    return TrainingSettings(
+        algorithm="ppo",
+        group_size=1,
+        trajectories_per_update=16,
+        max_model_len=32768,
+        lora_rank=1,
+        lora_target_scope="all-linear",
+        lora_packed_target_matrices=2,
+        packed_moe_dispatch="contracted",
+        beta=0.001,
+        use_separate_reference_adapter=True,
+        gradient_checkpointing=True,
+        n_training_gpus=4,
+        fsdp=FSDPConfig(
+            tp=1,
+            ep=1,
+            cp=1,
+            checkpoint_every_n_blocks=1,
+            reshard_after_forward=True,
+            routed_expert_chunk_mib=512,
+            optim_cpu_offload=False,
+            activation_offload=False,
+            cpu_offload=False,
+        ),
+        sequence_packing=False,
+        images_per_row=4,
+        image_width=1280,
+        image_height=720,
+        segmented_rows=True,
+        checkpoint_optimizer=True,
+        async_rollout=True,
+        micro_batch_size=1,
+    )
+
+
+class TestQwen36LlmppoVwaForwardRows:
+    """Unpacked LLMPPO with images stacks the actor and critic rows once."""
+
+    def test_images_stay_inside_the_actor_critic_pair(self):
+        # Arrange
+        model = catalog_model_spec("Qwen/Qwen3.6-35B-A3B")
+        device = training_gpu("NVIDIA H100 80GB HBM3", H100_80GB_CUDA_BYTES)
+        vision = qwen36_llmppo_vwa()
+        text = vision.model_copy(
+            update={
+                "images_per_row": 0,
+                "image_width": 0,
+                "image_height": 0,
+                "segmented_rows": False,
+            }
+        )
+
+        # Act
+        vision_detail = component(
+            estimate_training(model, device, vision, orchestrated=True), "activations"
+        ).detail
+        text_detail = component(
+            estimate_training(model, device, text, orchestrated=True), "activations"
+        ).detail
+
+        # Assert
+        assert vision.grad_forward_rows == 2
+        assert text.grad_forward_rows == 2
+        assert (
+            vision_detail["checkpoint_boundaries"]
+            == text_detail["checkpoint_boundaries"]
+        )
+        assert vision_detail["block_recompute"] == text_detail["block_recompute"]
+        assert vision_detail["loss_hidden_state"] == text_detail["loss_hidden_state"]
+        assert vision.model_copy(update={"algorithm": "grpo"}).grad_forward_rows == 1
