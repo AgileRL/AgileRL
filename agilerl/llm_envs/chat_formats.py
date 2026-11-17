@@ -225,6 +225,8 @@ class ChatFormat(ABC):
     the tokenizer lacks a required one.
     """
 
+    # Key in CHAT_FORMATS and the catalog's chat_format value.
+    NAME: ClassVar[str]
     REQUIRED_TOKENS: ClassVar[tuple[str, ...]]
     OPTIONAL_TOKENS: ClassVar[tuple[str, ...]] = ()
     REASONING_END: ClassVar[str | None] = None
@@ -349,6 +351,7 @@ class Glm47Format(ChatFormat):
     tool schema. Blocks inside the thinking trace are skipped.
     """
 
+    NAME = "glm47"
     CALL_START = "<tool_call>"
     CALL_END = "</tool_call>"
     KEY_START = "<arg_key>"
@@ -432,6 +435,7 @@ class ToolCallTagFormat(ChatFormat):
     raw text (Nemotron). Blocks inside a thinking trace are skipped.
     """
 
+    NAME = "tool_call"
     CALL_START = "<tool_call>"
     CALL_END = "</tool_call>"
     REASONING_END = REASONING_END_MARKER
@@ -465,6 +469,7 @@ class Granite3Format(ChatFormat):
     block span.
     """
 
+    NAME = "granite3"
     CALL_START = "<|tool_call|>"
     TURN_END = "<|end_of_text|>"
     REASONING_END = REASONING_END_MARKER
@@ -512,6 +517,7 @@ class Gemma4Format(ChatFormat):
     braces nest. Reasoning is a ``<|channel>thought ... <channel|>`` block.
     """
 
+    NAME = "gemma4"
     CALL_START = "<|tool_call>"
     CALL_END = "<tool_call|>"
     RESPONSE_START = "<|tool_response>"
@@ -563,6 +569,7 @@ class HarmonyFormat(ChatFormat):
     channel; the answer follows ``<|channel|>final<|message|>``.
     """
 
+    NAME = "harmony"
     BLOCK_START = "<|start|>"
     MESSAGE = "<|message|>"
     CALL_END = "<|call|>"
@@ -673,6 +680,7 @@ class DsmlFormat(ChatFormat):
     tokenizer ships no chat template; :attr:`CHAT_TEMPLATE` renders the encoder's.
     """
 
+    NAME = "dsml"
     CHAT_TEMPLATE = DSML_CHAT_TEMPLATE
     REASONING_END = REASONING_END_MARKER
     REQUIRED_TOKENS: ClassVar[tuple[str, ...]] = (DSML,)
@@ -730,13 +738,16 @@ class DsmlFormat(ChatFormat):
 
 
 CHAT_FORMATS: dict[str, type[ChatFormat]] = {
-    # Ahead of tool_call: the GLM vocab also holds <tool_call>.
-    "glm47": Glm47Format,
-    "tool_call": ToolCallTagFormat,
-    "granite3": Granite3Format,
-    "gemma4": Gemma4Format,
-    "harmony": HarmonyFormat,
-    "dsml": DsmlFormat,
+    format_cls.NAME: format_cls
+    for format_cls in (
+        # Ahead of tool_call: the GLM vocab also holds <tool_call>.
+        Glm47Format,
+        ToolCallTagFormat,
+        Granite3Format,
+        Gemma4Format,
+        HarmonyFormat,
+        DsmlFormat,
+    )
 }
 
 

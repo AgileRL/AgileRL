@@ -186,7 +186,7 @@ class TestSetupScriptObjects:
 
         assert warehouses == [arena_app.WAREHOUSE]
         assert integrations == [arena_app.HF_INTEGRATION, arena_app.API_INTEGRATION]
-        assert procedure_integrations == [arena_app.API_INTEGRATION] * 5
+        assert procedure_integrations == [arena_app.API_INTEGRATION] * 4
         assert all(
             name.startswith("agilerl_app_")
             for name in (
@@ -353,9 +353,7 @@ class TestSetupScriptObjects:
         ]
         assert SETUP_SQL.index("ALTER TABLE app_state.usage_items") > create
 
-    @pytest.mark.parametrize(
-        "name", ["reconcile_usage", "publish", "unpublish", "submit"]
-    )
+    @pytest.mark.parametrize("name", ["reconcile_usage", "publish", "unpublish"])
     def test_arena_procedures_read_only_secrets_their_integration_allows(
         self, name: str
     ) -> None:

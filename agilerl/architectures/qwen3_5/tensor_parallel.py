@@ -455,7 +455,7 @@ def qwen3_5_row_orders(model: nn.Module) -> dict[str, torch.Tensor]:
 def _realign_qkv(model: nn.Module) -> None:
     with torch.no_grad():
         for fqn, order in sorted(qwen3_5_row_orders(model).items()):
-            permute_rows(model.get_parameter(fqn), order)
+            permute_rows(cast("DTensor", model.get_parameter(fqn)), order)
 
 
 def restore_qwen3_5_tensor_parallel(model: nn.Module, tp_mesh: DeviceMesh) -> None:
@@ -472,7 +472,7 @@ def restore_qwen3_5_tensor_parallel(model: nn.Module, tp_mesh: DeviceMesh) -> No
     apply_qwen3_5_tensor_parallel(model, tp_mesh)
 
 
-TENSOR_PARALLEL_PLAN = TensorParallelPlan(
+QWEN3_5_TENSOR_PARALLEL_PLAN = TensorParallelPlan(
     shard=apply_qwen3_5_tensor_parallel,
     restore=restore_qwen3_5_tensor_parallel,
     row_orders=qwen3_5_row_orders,

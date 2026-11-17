@@ -522,30 +522,39 @@ ROLLOUT_ENV = {
 
 class TestTrainsContextParallel:
     @pytest.mark.parametrize(
-        ("hub_id", "environment", "expected"),
+        ("hub_id", "environment", "tower_modules", "expected"),
         [
-            ("Qwen/Qwen2.5-0.5B-Instruct", None, True),
-            ("Qwen/Qwen3.5-0.8B", None, True),
-            ("Qwen/Qwen3.5-0.8B", {**ROLLOUT_ENV, "modality": "text"}, True),
-            ("Qwen/Qwen3.5-0.8B", ROLLOUT_ENV, False),
-            ("local/uncatalogued-model", None, False),
+            ("Qwen/Qwen2.5-0.5B-Instruct", None, None, True),
+            ("Qwen/Qwen3.5-0.8B", None, None, True),
+            ("Qwen/Qwen3.5-0.8B", {**ROLLOUT_ENV, "modality": "text"}, None, True),
+            ("Qwen/Qwen3.5-0.8B", ROLLOUT_ENV, None, False),
+            ("Qwen/Qwen3.5-0.8B", None, ["qkv"], False),
+            ("local/uncatalogued-model", None, None, False),
         ],
         ids=[
             "text-model",
             "vl-on-a-dataset",
             "vl-on-a-text-env",
             "vl-on-an-env-of-unknown-modality",
+            "vl-with-tower-lora",
             "uncatalogued",
         ],
     )
     def test_a_vision_language_model_needs_its_towers_stripped(
-        self, hub_id, environment, expected
+        self, hub_id, environment, tower_modules, expected
     ):
         # Arrange
         doc = copy.deepcopy(MANIFEST)
         doc["network"]["pretrained_model_name_or_path"] = hub_id
         if environment is not None:
             doc["environment"] = environment
+        if tower_modules is not None:
+            doc["network"]["lora_config"] = {
+                "lora_r": 8,
+                "lora_alpha": 16,
+                "target_modules": ["q_proj"],
+                "tower_target_modules": tower_modules,
+            }
         manifest = TrainingManifest.model_validate(doc)
 
         # Act / Assert

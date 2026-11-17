@@ -300,7 +300,7 @@ def trains_context_parallel(manifest: TrainingManifest) -> bool:
     """Whether the trainer can split the manifest's sequences over context parallel.
 
     A vision-language model needs a rollout run whose engine strips its towers:
-    a text-only environment.
+    a text-only environment and no tower LoRA.
     """
     info = _catalog_info(manifest)
     if info is None:

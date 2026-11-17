@@ -26,6 +26,7 @@ from torch.utils.data import DataLoader
 from agilerl.llm_envs.chat_formats import (
     ChatFormat,
     detect_chat_format,
+    get_chat_format,
 )
 from agilerl.llm_envs.chat_transcript import (
     _as_messages,
@@ -34,17 +35,17 @@ from agilerl.llm_envs.chat_transcript import (
     _parsed_json,
     _render,
     _with_reasoning_key,
-    _without_none_keys,
     chat_messages,
     encode_chat_transcript,
     template_reasoning_key,
+    without_none_keys,
 )
 from agilerl.utils.chat_template import (
     inject_chat_template_kwargs,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import Generator, Iterable
 
     from datasets import Dataset
     from transformers.tokenization_utils_base import PreTrainedTokenizerBase
@@ -53,6 +54,13 @@ if TYPE_CHECKING:
         ["DatasetEnv", "PreTrainedTokenizerBase"],
         Callable[[list[dict[str, Any]]], dict[str, Any]],
     ]
+
+
+SKIPPED_TURNS = "skipped_turns"
+"""Optional SFT column: indices of a ``messages`` row's assistant messages that do not train."""
+
+CHAT_FORMAT = "chat_format"
+"""Optional SFT column: name of the chat format (see :data:`~agilerl.llm_envs.chat_formats.CHAT_FORMATS`) that writes a row's tool calls; rows without it use the one the tokenizer vocab matches."""
 
 
 def sft_required_columns(columns: Collection[str], response_column: str) -> set[str]:
@@ -97,7 +105,9 @@ class DatasetEnv:
 
         :param train_dataset: Training split of prompt/label rows. SFT rows with a
             ``messages`` column are multi-turn conversations (optional ``tools``
-            column) trained on their assistant turns. Preference rows whose
+            column) trained on their assistant turns, except those an optional
+            :data:`SKIPPED_TURNS` column lists, with tool calls written in the
+            format an optional :data:`CHAT_FORMAT` column names. Preference rows whose
             ``prompt``, ``chosen`` or ``rejected`` are messages are trained on
             each side's assistant turns after the shared prompt.
         :param test_dataset: Held-out split used under :meth:`eval_mode`.
@@ -337,7 +347,11 @@ class DatasetEnv:
         :return: The split without the dropped rows.
         :raises ValueError: If no row is left.
         """
-        chat_format = detect_chat_format(self.tokenizer)
+        formats = _chat_formats_by_name(
+            dataset.unique(CHAT_FORMAT) if CHAT_FORMAT in dataset.column_names else (),
+            self.tokenizer,
+            detect_chat_format(self.tokenizer),
+        )
         kept: list[int] = []
         too_long = 0
         cut = 0
@@ -349,8 +363,9 @@ class DatasetEnv:
                     self.tokenizer,
                     item,
                     self.response_column,
-                    chat_format,
+                    formats[item.get(CHAT_FORMAT)],
                     self.completion_only_loss,
+                    item.get(SKIPPED_TURNS) or (),
                 )
             except Exception as error:
                 errors.append(f"{type(error).__name__}: {error}")
@@ -873,7 +888,16 @@ def sft_tools(item: dict[str, Any]) -> list[dict[str, Any]] | None:
     tools = item.get("tools")
     if isinstance(tools, str):
         return _parsed_json(tools, "The tools column")
-    return _without_none_keys(tools)
+    if tools is None:
+        return None
+    return [
+        {
+            key: without_none_keys(value)
+            for key, value in tool.items()
+            if value is not None
+        }
+        for tool in tools
+    ]
 
 
 def encode_sft_row(
@@ -882,6 +906,7 @@ def encode_sft_row(
     response_column: str,
     chat_format: ChatFormat | None,
     completion_only_loss: bool = False,
+    skipped: Collection[int] = (),
 ) -> tuple[list[int], list[bool]]:
     """Token ids and assistant mask of one SFT row, see :func:`encode_chat_transcript`.
 
@@ -892,12 +917,18 @@ def encode_sft_row(
     :param completion_only_loss: Train a conversational prompt-completion row
         (TRL): ``prompt`` and the response are message lists or their JSON
         text, and only the response trains; it wins over a ``messages``
-        column in the same row. ``messages`` rows train every assistant turn.
+        column in the same row. ``messages`` rows train every assistant turn
+        except those at ``skipped``.
+    :param skipped: Indices of a ``messages`` row's assistant messages that do not train.
     :return: Token ids and, per id, whether it is a trained assistant token.
     """
     if not completion_only_loss or not {"prompt", response_column} <= item.keys():
         return encode_chat_transcript(
-            tokenizer, sft_messages(item, response_column), sft_tools(item), chat_format
+            tokenizer,
+            sft_messages(item, response_column),
+            sft_tools(item),
+            chat_format,
+            skipped=skipped,
         )
     prompt = chat_messages(item["prompt"])
     return encode_chat_transcript(
@@ -907,6 +938,24 @@ def encode_sft_row(
         chat_format,
         len(prompt),
     )
+
+
+def _chat_formats_by_name(
+    names: Iterable[str | None],
+    tokenizer: PreTrainedTokenizerBase,
+    detected: ChatFormat | None,
+) -> dict[str | None, ChatFormat | None]:
+    """The chat format for each :data:`CHAT_FORMAT` value, built once per name.
+
+    :param names: The column values, ``None`` for a row without one.
+    :param tokenizer: Tokenizer the formats resolve their delimiter IDs in.
+    :param detected: The format the tokenizer vocab matches, for ``None``.
+    :return: Each name's format, and ``detected`` under ``None``.
+    """
+    named = {
+        name: get_chat_format(name, tokenizer) for name in names if name is not None
+    }
+    return {None: detected, **named}
 
 
 def sft_eval_sample(
@@ -960,18 +1009,22 @@ def sft_collate_builder(
 ) -> Callable[[list[dict[str, Any]]], dict[str, Any]]:
     """Build a collate function for SFT rows, see :func:`sft_messages`."""
     tokenizer = inject_chat_template_kwargs(tokenizer, env.chat_template_kwargs)
-    chat_format = detect_chat_format(tokenizer)
+    detected = detect_chat_format(tokenizer)
 
     def collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
         """Encode each conversation, cut to the context length and right-pad."""
+        formats = _chat_formats_by_name(
+            {item.get(CHAT_FORMAT) for item in batch}, tokenizer, detected
+        )
         rows = []
         for item in batch:
             ids, mask = encode_sft_row(
                 tokenizer,
                 item,
                 env.response_column,
-                chat_format,
+                formats[item.get(CHAT_FORMAT)],
                 env.completion_only_loss,
+                item.get(SKIPPED_TURNS) or (),
             )
             fitted = env._fit_to_context(ids, mask)
             if fitted is None:

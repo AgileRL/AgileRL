@@ -193,20 +193,7 @@ def submit_session() -> AppSession:
     )
 
 
-def capabilities(priced: list[str] | None) -> httpx.Response:
-    """Arena capabilities with ``priced`` as the priced families, or none listed."""
-    features: dict[str, object] = {"snowflakeTraining": True}
-    if priced is not None:
-        features["snowflakePricedGpuFamilies"] = priced
-    return reply(200, {"ok": True, "data": {"schemaVersion": 1, "features": features}})
-
-
 class TestSubmit:
-    @pytest.fixture(autouse=True)
-    def priced_arena(self, arena: Arena) -> Arena:
-        arena.replies = [capabilities(["GPU_NV_S"])]
-        return arena
-
     def test_starts_the_cli_services_on_the_app_pools_and_secrets(self) -> None:
         # Arrange
         session = submit_session()
@@ -403,66 +390,6 @@ class TestSubmit:
             submit(session, SFT, 4, "source_table", "prompts", None, None, None, None)
 
         assert executes(session) == []
-
-    def test_refuses_a_named_family_arena_has_no_price_for(
-        self, priced_arena: Arena
-    ) -> None:
-        # Arrange
-        priced_arena.replies = [capabilities(["GPU_NV_M"])]
-        session = submit_session()
-
-        # Act
-        with pytest.raises(ValueError, match="no Snowflake price for GPU_NV_S") as exc:
-            submit(
-                session, SFT, 1, "source_table", "prompts", "GPU_NV_S", None, None, None
-            )
-
-        # Assert
-        assert "Priced families: GPU_NV_M." in str(exc.value)
-        assert not any("usage_items" in s for s in session.statements)
-        assert not any("EXECUTE JOB SERVICE" in s for s in session.statements)
-
-    def test_refuses_when_no_app_pool_is_priced(self, priced_arena: Arena) -> None:
-        # Arrange
-        priced_arena.replies = [capabilities([])]
-        session = submit_session()
-
-        # Act
-        with pytest.raises(
-            ValueError, match=r"any of the app's GPU pools \(GPU_NV_S\)"
-        ) as exc:
-            submit(session, SFT, 1, "source_table", "prompts", None, None, None, None)
-
-        # Assert
-        assert "Priced families: none." in str(exc.value)
-        assert not any("EXECUTE JOB SERVICE" in s for s in session.statements)
-
-    def test_an_arena_that_lists_no_prices_still_starts_the_run(
-        self, priced_arena: Arena
-    ) -> None:
-        # Arrange
-        priced_arena.replies = [capabilities(None)]
-        session = submit_session()
-
-        # Act
-        text = submit(
-            session, SFT, 1, "source_table", "prompts", None, None, None, None
-        )
-
-        # Assert
-        assert text.startswith("run_id: arena-")
-        assert any("EXECUTE JOB SERVICE" in s for s in session.statements)
-
-    def test_reads_the_prices_with_the_partner_key(self, priced_arena: Arena) -> None:
-        # Act
-        submit(
-            submit_session(), SFT, 1, "source_table", "prompts", None, None, None, None
-        )
-
-        # Assert
-        [call] = priced_arena.calls
-        assert call["url"] == "https://arena.test/api/cli/v1/capabilities"
-        assert call["headers"]["Authorization"] == "Bearer arena_org_key-1"
 
 
 class TestStatus:
@@ -930,7 +857,7 @@ class TestUnpublish:
 class TestRunProcedureStatements:
     def test_no_run_procedure_runs_use(self, arena: Arena) -> None:
         # Arrange
-        arena.replies = [capabilities(["GPU_NV_S"]), deployment_opened()]
+        arena.replies = [deployment_opened()]
         running = Row(name=f"{STEM}_HEAD", status="RUNNING")
         run_session = AppSession(
             [

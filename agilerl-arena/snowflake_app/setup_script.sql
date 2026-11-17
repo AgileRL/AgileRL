@@ -262,12 +262,6 @@ CREATE OR REPLACE PROCEDURE app_code.submit(
     'requests-toolbelt', 'rich'
   )
   IMPORTS = ('/app_code/arena_app.py', '/agilerl_arena.zip')
-  EXTERNAL_ACCESS_INTEGRATIONS = (agilerl_app_arena_eai)
-  SECRETS = (
-    'org_key' = app_state.arena_org_key,
-    'external_user_id' = app_state.arena_external_user_id,
-    'base_url' = app_state.arena_base_url
-  )
   HANDLER = 'arena_app.submit';
 GRANT USAGE ON PROCEDURE app_code.submit(STRING, NUMBER, STRING, STRING, STRING, STRING, NUMBER, STRING)
   TO APPLICATION ROLE app_admin;

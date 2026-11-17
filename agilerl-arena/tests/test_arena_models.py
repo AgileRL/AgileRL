@@ -1770,8 +1770,7 @@ class TestPydanticModelsForbidExtra:
                 "ToolDefinition",
                 "TraceScore",
                 "TracesRowBase",
-                "TracesRow",
-                "TracesMessagesRow",
+                "TracesSegmentRow",
             )
         }
         found = (*_base_models(models), *_base_models(inference))

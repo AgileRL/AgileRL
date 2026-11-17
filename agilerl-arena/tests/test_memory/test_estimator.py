@@ -57,6 +57,7 @@ from tests.test_memory.test_formulas import (
     NEMOTRON_NANO_MAMBA,
     QWEN35_08B,
     QWEN_05B,
+    QWEN_TOWER_TARGETS,
     SUPER_VL,
 )
 
@@ -2988,6 +2989,40 @@ class TestTrainingHostBreakdown:
         assert host(bar, "vision_rows").n_bytes == 0
         assert host(bar, "vision_row_staging").n_bytes == 0
 
+    def test_tower_lora_bypasses_the_cache_and_holds_tower_activations(self, device):
+        # Arrange
+        arch = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["Qwen/Qwen3.5-0.8B"].config
+        )
+        vision_model = ModelSpec(model_id="Qwen/Qwen3.5-0.8B", arch=arch)
+        frozen = TrainingSettings(
+            images_per_row=2, image_width=1280, image_height=2048, lora_dropout=0.05
+        )
+        trained = frozen.model_copy(update={"tower_lora_targets": QWEN_TOWER_TARGETS})
+
+        # Act
+        frozen_bar = estimate_training(vision_model, device, frozen)
+        trained_bar = estimate_training(vision_model, device, trained)
+
+        # Assert
+        frozen_detail = component(frozen_bar, "activations").detail
+        trained_detail = component(trained_bar, "activations").detail
+        assert host(trained_bar, "vision_feature_cache").n_bytes == 0
+        assert host(frozen_bar, "vision_feature_cache").n_bytes > 0
+        # bf16 adapter compute: 480 MiB of tower tensors plus 90 MiB of merger
+        # dropout, beside the fp32 grads of 2,228,224 rank-16 tower adapters.
+        tower_grads = 2_228_224 * 4
+        assert frozen_detail["vision_tower_lora"] == 0
+        assert trained_detail["vision_tower_lora"] == 570 * MiB
+        assert (
+            trained_detail["backward_peak"] - frozen_detail["backward_peak"]
+            == 570 * MiB + tower_grads
+        )
+        assert (
+            trained_detail["loss_peak"] - frozen_detail["loss_peak"]
+            == 570 * MiB + tower_grads
+        )
+
     def test_catalog_vision_family_charges_no_feature_cache(self, device):
         # Arrange
         vision_model = ModelSpec(
@@ -3401,8 +3436,8 @@ class TestUnmeasuredArchitectureEstimates:
     @pytest.mark.parametrize(
         ("model_id", "gradient_checkpointing", "total_bytes"),
         [
-            ("zai-org/GLM-5.3-Flash", True, 154045163171),
-            ("zai-org/GLM-5.3-Flash", False, 245865165338),
+            ("zai-org/GLM-5.3-Flash", True, 154866675936),
+            ("zai-org/GLM-5.3-Flash", False, 246686678104),
             ("openai/gpt-oss-20b", True, 17593628774),
             ("openai/gpt-oss-20b", False, 41523558605),
             # Stored blocks keep a share of the measured gated-attention and
@@ -4879,8 +4914,8 @@ class TestSparseMoeTensorParallelBaseWeights:
             ("deepseek-ai/DeepSeek-V4-Flash-0731", 5_940_185_792),
             # KDA and DSA mixers, dense MLP, shared experts, head, vision linears.
             ("zai-org/GLM-5.3-Flash", 8_519_903_360),
-            # Attention, sliding-window sinks, dense MLP, head, vision linears.
-            ("XiaomiMiMo/MiMo-V2.6-Flash-RL", 6_035_426_496),
+            # Attention, sliding-window sinks, dense MLP, head.
+            ("XiaomiMiMo/MiMo-V2.6-Flash-RL", 5_308_942_784),
         ],
     )
     def test_tensor_parallel_params_match_the_family_plan(self, model_id, expected):
@@ -4990,6 +5025,51 @@ class TestAdapterState:
             formulas.ADAM_MOMENTS_PER_PARAM * saved * stored
         )
         assert tp_split.trained_params == unsplit.trained_params
+
+    @pytest.mark.parametrize(("tp", "per_rank"), [(1, 6_958_592), (2, 4_279_040)])
+    def test_tower_lora_trains_and_steps_the_tower_adapters(self, tp, per_rank):
+        # Arrange
+        arch = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["Qwen/Qwen3.6-35B-A3B"].config
+        )
+        text = TrainingSettings(n_training_gpus=tp, fsdp=fsdp_config(tp=tp))
+        tower = text.model_copy(update={"tower_lora_targets": QWEN_TOWER_TARGETS})
+
+        # Act
+        text_state = adapter_state(arch, text, 1)
+        tower_state = adapter_state(arch, tower, 1)
+
+        # Assert: rank-16 tower adapters, 434,912 x 16 in full, fp32 on each rank.
+        assert tower_state.grads - text_state.grads == per_rank * 4
+        assert tower_state.adam - text_state.adam == 2 * per_rank * 4
+        assert tower_state.trained_params - text_state.trained_params == 6_958_592
+
+    def test_tower_lora_trains_only_the_named_targets(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["Qwen/Qwen3.6-35B-A3B"].config
+        )
+        text = TrainingSettings()
+        qkv_only = text.model_copy(update={"tower_lora_targets": frozenset({"qkv"})})
+
+        # Act
+        text_state = adapter_state(arch, text, 1)
+        qkv_state = adapter_state(arch, qkv_only, 1)
+
+        # Assert: rank-16 qkv adapters on 27 blocks, 124,416 x 16.
+        assert qkv_state.trained_params - text_state.trained_params == 1_990_656
+
+    def test_text_model_ignores_tower_lora(self):
+        # Arrange
+        text = TrainingSettings()
+        tower = text.model_copy(update={"tower_lora_targets": QWEN_TOWER_TARGETS})
+
+        # Act
+        text_state = adapter_state(QWEN_05B, text, 1)
+        tower_state = adapter_state(QWEN_05B, tower, 1)
+
+        # Assert
+        assert tower_state == text_state
 
 
 class TestTrainingHyperConnections:

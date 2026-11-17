@@ -1,0 +1,94 @@
+{
+  "description": "Prompt/completion import rows and the segment each converts to. The ml validator (agilerl.arena.models.traces.pair_as_segment) and the platform converter must both produce `expected` from `row` at `index` (the row's 0-based position among the file's rows: JSONL blank lines are not rows, parquet shards count in path order). Prefix merging is not covered here.",
+  "cases": [
+    {
+      "name": "plain strings, no call_id",
+      "index": 0,
+      "row": {"prompt": "Hi there.", "completion": "Hello!"},
+      "expected": {
+        "messages": [
+          {"role": "user", "content": "Hi there."},
+          {"role": "assistant", "content": "Hello!"}
+        ],
+        "call_ids": ["pair-0"]
+      }
+    },
+    {
+      "name": "prompt assistant turns are context; call_id and finish_reason on the completion",
+      "index": 1,
+      "row": {
+        "prompt": [
+          {"role": "user", "content": "I can't sign in."},
+          {"role": "assistant", "content": null, "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "lookup_user", "arguments": "{\"email\": \"a@b.com\"}"}}]},
+          {"role": "tool", "tool_call_id": "c1", "content": "{\"locked\": true}"}
+        ],
+        "completion": [{"role": "assistant", "content": "I've sent an unlock link."}],
+        "call_id": "01JD",
+        "finish_reason": "stop",
+        "session_id": "s-42"
+      },
+      "expected": {
+        "messages": [
+          {"role": "user", "content": "I can't sign in."},
+          {"role": "assistant", "content": null, "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "lookup_user", "arguments": "{\"email\": \"a@b.com\"}"}}]},
+          {"role": "tool", "tool_call_id": "c1", "content": "{\"locked\": true}"},
+          {"role": "assistant", "content": "I've sent an unlock link."}
+        ],
+        "call_ids": [null, "01JD"],
+        "finish_reasons": [null, "stop"],
+        "session_id": "s-42"
+      }
+    },
+    {
+      "name": "plain-string cells that parse as JSON scalars stay text",
+      "index": 4,
+      "row": {"prompt": "42", "completion": "true"},
+      "expected": {
+        "messages": [
+          {"role": "user", "content": "42"},
+          {"role": "assistant", "content": "true"}
+        ],
+        "call_ids": ["pair-4"]
+      }
+    },
+    {
+      "name": "a raw messages column beside the pair is ignored; JSON text cells",
+      "index": 2,
+      "row": {
+        "prompt": "[{\"role\": \"user\", \"content\": \"Reset my MFA.\"}]",
+        "completion": "{\"role\": \"assistant\", \"content\": \"Done.\"}",
+        "messages": "[{\"role\": \"user\", \"content\": \"raw request\"}]"
+      },
+      "expected": {
+        "messages": [
+          {"role": "user", "content": "Reset my MFA."},
+          {"role": "assistant", "content": "Done."}
+        ],
+        "call_ids": ["pair-2"]
+      }
+    },
+    {
+      "name": "every assistant message of a multi-message completion gets the row's id",
+      "index": 3,
+      "row": {
+        "prompt": [{"role": "user", "content": "Unlock u1."}],
+        "completion": [
+          {"role": "assistant", "content": null, "tool_calls": [{"id": "d1", "type": "function", "function": {"name": "unlock", "arguments": "{\"user\": \"u1\"}"}}]},
+          {"role": "tool", "tool_call_id": "d1", "content": "ok"},
+          {"role": "assistant", "content": "Unlocked."}
+        ],
+        "finish_reason": "stop"
+      },
+      "expected": {
+        "messages": [
+          {"role": "user", "content": "Unlock u1."},
+          {"role": "assistant", "content": null, "tool_calls": [{"id": "d1", "type": "function", "function": {"name": "unlock", "arguments": "{\"user\": \"u1\"}"}}]},
+          {"role": "tool", "tool_call_id": "d1", "content": "ok"},
+          {"role": "assistant", "content": "Unlocked."}
+        ],
+        "call_ids": ["pair-3", "pair-3"],
+        "finish_reasons": [null, "stop"]
+      }
+    }
+  ]
+}

@@ -35,9 +35,18 @@ from transformers.models.granitemoehybrid.configuration_granitemoehybrid import 
 )
 
 import agilerl.architectures.granite_liger as granite_liger
-from agilerl import architectures
+from agilerl.architectures import granitemoe
+from agilerl.architectures.granitemoehybrid import packed as granite_hybrid_packed
 
 GRANITE_MODEL_TYPES = ("granitemoe", "granitemoehybrid")
+FAMILY_INSTALLERS = (
+    pytest.param(granitemoe, granitemoe.install_granite_moe_patches, id="granitemoe"),
+    pytest.param(
+        granite_hybrid_packed,
+        granite_hybrid_packed.install_granite_hybrid_patches,
+        id="granitemoehybrid",
+    ),
+)
 
 
 @pytest.fixture
@@ -153,25 +162,32 @@ class TestRegisterGraniteLiger:
         # Assert
         assert liger_registry["granitemoe"] is native
 
-    @pytest.mark.parametrize("model_type", GRANITE_MODEL_TYPES)
-    def test_family_patches_register_the_appliers(
-        self, liger_registry, model_type
+    @pytest.mark.parametrize(
+        "install",
+        [
+            granitemoe.install_granite_moe_patches,
+            granite_hybrid_packed.install_granite_hybrid_patches,
+        ],
+        ids=GRANITE_MODEL_TYPES,
+    )
+    def test_family_installers_register_the_appliers(
+        self, liger_registry, install
     ) -> None:
         # Act
-        architectures.install_family_patches(model_type)
+        install(None)
 
         # Assert
         assert set(GRANITE_MODEL_TYPES) <= set(liger_registry)
 
-    @pytest.mark.parametrize("model_type", GRANITE_MODEL_TYPES)
-    def test_family_patches_skip_registration_without_liger(
-        self, liger_registry, monkeypatch, model_type
+    @pytest.mark.parametrize(("module", "install"), FAMILY_INSTALLERS)
+    def test_installers_skip_registration_without_liger(
+        self, liger_registry, monkeypatch, module, install
     ) -> None:
         # Arrange
-        monkeypatch.setattr(architectures, "HAS_LIGER_KERNEL", False)
+        monkeypatch.setattr(module, "HAS_LIGER_KERNEL", False)
 
         # Act
-        architectures.install_family_patches(model_type)
+        install(None)
 
         # Assert
         assert set(GRANITE_MODEL_TYPES).isdisjoint(liger_registry)

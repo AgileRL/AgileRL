@@ -285,6 +285,11 @@ def _decoder_lora_linears(
     return linears + _per_layer_input_lora_linears(arch)
 
 
+def tower_lora_linears(arch: ModelArch, targets: Collection[str]) -> list[LoraLinear]:
+    """Tower and connector linears whose module name is one of ``targets``."""
+    return [linear for linear in arch.tower_lora_linears if linear.target in targets]
+
+
 def _lora_linear_param_count(linears: Sequence[LoraLinear], rank: int) -> int:
     """LoRA parameters of ``linears``: ``rank * (in + out)`` per wrapped linear."""
     return rank * sum(
@@ -308,6 +313,11 @@ def engine_lora_param_count(arch: ModelArch, rank: int) -> int:
     return _lora_linear_param_count(
         _decoder_lora_linears(arch, "all-linear", 1, ()), rank
     )
+
+
+def tower_lora_param_count(arch: ModelArch, rank: int, targets: Collection[str]) -> int:
+    """LoRA adapter parameters on the tower and connector linears ``targets`` name."""
+    return _lora_linear_param_count(tower_lora_linears(arch, targets), rank)
 
 
 def packed_lora_param_count(arch: ModelArch, rank: int, n_matrices: int) -> int:

@@ -19,6 +19,7 @@ from transformers.tokenization_utils_base import BatchEncoding
 from agilerl.llm_envs import (
     DatasetEnv,
     apply_chat_template,
+    dataset_env,
 )
 from agilerl.llm_envs.chat_formats import (
     Gemma4Format,
@@ -27,6 +28,7 @@ from agilerl.llm_envs.chat_formats import (
     ParsedToolCall,
     detect_chat_format,
     frame_repeats_terminator,
+    get_chat_format,
 )
 from agilerl.llm_envs.chat_transcript import (
     _cut_kept_turn,
@@ -38,6 +40,7 @@ from agilerl.llm_envs.chat_transcript import (
     template_reasoning_key,
 )
 from agilerl.llm_envs.dataset_env import (
+    CHAT_FORMAT,
     _shared_turns_in_prompt,
     _shortened_prompts,
     fit_preference_pair,
@@ -1251,6 +1254,82 @@ class TestDatasetEnvSFTCollate:
             assert batch["loss_mask"][row, :length].tolist() == mask
             assert not batch["loss_mask"][row, length:].any()
 
+    def test_builds_a_named_chat_format_once_per_batch(self, monkeypatch):
+        # Arrange
+        tokenizer = in_turn_tokenizer(
+            GRANITE3_STYLE_TEMPLATE,
+            [
+                "<|start_of_role|>",
+                "<|end_of_role|>",
+                "<|end_of_text|>",
+                "<|tool_call|>",
+            ],
+        )
+        dataset = HFDataset.from_dict(
+            {
+                "messages": [weather_conversation()[1:3]] * 3,
+                CHAT_FORMAT: ["granite3"] * 3,
+            }
+        )
+        built: list[str] = []
+
+        def counting_get_chat_format(name, format_tokenizer):
+            built.append(name)
+            return get_chat_format(name, format_tokenizer)
+
+        monkeypatch.setattr(dataset_env, "get_chat_format", counting_get_chat_format)
+        env = DatasetEnv(
+            train_dataset=dataset,
+            test_dataset=dataset,
+            tokenizer=tokenizer,
+            objective="sft",
+            data_batch_size_per_gpu=3,
+        )
+        built.clear()
+
+        # Act
+        batch = env.reset()
+
+        # Assert
+        assert built == ["granite3"]
+        assert batch["input_ids"].shape[0] == 3
+
+    def test_a_chat_format_column_writes_the_trained_tool_calls(self):
+        # Arrange
+        tokenizer = in_turn_tokenizer(
+            GRANITE3_STYLE_TEMPLATE,
+            [
+                "<|start_of_role|>",
+                "<|end_of_role|>",
+                "<|end_of_text|>",
+                "<|tool_call|>",
+            ],
+        )
+        dataset = HFDataset.from_dict(
+            {"messages": [weather_conversation()[1:3]], CHAT_FORMAT: ["granite3"]}
+        )
+
+        # Act
+        env = DatasetEnv(
+            train_dataset=dataset,
+            test_dataset=dataset,
+            tokenizer=tokenizer,
+            objective="sft",
+            data_batch_size_per_gpu=1,
+        )
+        batch = env.reset()
+
+        # Assert
+        assert not isinstance(detect_chat_format(tokenizer), Granite3Format)
+        assert trained_text(
+            tokenizer, batch["input_ids"][0].tolist(), batch["loss_mask"][0].tolist()
+        ) == [
+            (
+                '<|tool_call|>[{"name": "get_weather", "arguments": {"city": "Paris"}}]'
+                "<|end_of_text|>"
+            )
+        ]
+
     def test_cuts_at_the_last_complete_assistant_turn_that_fits(self):
         # Arrange
         tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
@@ -1553,6 +1632,11 @@ class TestArrowFilledNoneKeys:
     def test_bad_json_tools_get_a_clear_error(self):
         with pytest.raises(ValueError, match="tools column is not valid JSON"):
             sft_tools({"tools": "{broken"})
+
+    def test_arrow_tools_drop_the_none_keys_arrow_fills(self):
+        assert sft_tools(
+            {"tools": [{"name": "f", "strict": None, "parameters": {"a": None}}]}
+        ) == [{"name": "f", "parameters": {}}]
 
 
 class TestNamedToolResults:

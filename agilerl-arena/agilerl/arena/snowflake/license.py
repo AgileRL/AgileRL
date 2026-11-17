@@ -157,21 +157,6 @@ def snowflake_training_enabled(caps: Mapping[str, object]) -> bool:
     return features.get("snowflakeTraining") is True
 
 
-def snowflake_priced_families(caps: Mapping[str, object]) -> frozenset[str] | None:
-    """Snowflake GPU families Arena has a price for, from ``features.snowflakePricedGpuFamilies``.
-
-    :param caps: The ``data`` object from :func:`fetch_capabilities`.
-    :return: Upper-case family names, or ``None`` when Arena does not list them.
-    """
-    features = caps.get("features")
-    if not isinstance(features, dict):
-        return None
-    families = features.get("snowflakePricedGpuFamilies")
-    if not isinstance(families, list):
-        return None
-    return frozenset(str(family).upper() for family in families)
-
-
 def fetch_capabilities(base_url: str, headers: Mapping[str, str]) -> dict[str, object]:
     """GET the capabilities document from the user's machine.
 
