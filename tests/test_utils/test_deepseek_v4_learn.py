@@ -29,7 +29,7 @@ from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
 
 from agilerl.algorithms.cispo import CISPO
 from agilerl.architectures.catalog import FAMILY_RUNTIME_CONFIGS
-from agilerl.architectures.deepseek_v4 import install_deepseek_v4_patches
+from agilerl.architectures.deepseek_v4.patches import install_deepseek_v4_patches
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.distributed import FSDPConfig
 from tests.dist_ports import get_free_port

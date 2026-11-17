@@ -86,4 +86,4 @@ def apply_qwen3_tensor_parallel(model: nn.Module, tp_mesh: DeviceMesh) -> int:
     return count
 
 
-QWEN3_TENSOR_PARALLEL_PLAN = TensorParallelPlan(shard=apply_qwen3_tensor_parallel)
+TENSOR_PARALLEL_PLAN = TensorParallelPlan(shard=apply_qwen3_tensor_parallel)

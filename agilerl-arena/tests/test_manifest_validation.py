@@ -1091,20 +1091,6 @@ class TestStripMultimodalTowersResolution:
 
         assert resolved_strip(doc) is True
 
-    def test_tower_lora_keeps_the_towers(self) -> None:
-        doc = env_rollout(
-            {"modality": "text"},
-            model="nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
-            network={
-                "lora_config": {
-                    "target_modules": ["q_proj"],
-                    "tower_target_modules": ["q_proj"],
-                }
-            },
-        )
-
-        assert resolved_strip(doc) is False
-
     def test_image_fields_without_modality_keep_the_towers(self) -> None:
         doc = env_rollout({"screenshot_field": "screenshot"})
 

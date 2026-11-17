@@ -5,10 +5,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection
 from typing import Any, Protocol, runtime_checkable
-
-from agilerl.architectures.runtime import ModelRuntimeConfig
 
 
 @runtime_checkable
@@ -53,62 +50,3 @@ def apply_multimodal_engine_kwargs(
     """
     if strip_multimodal_towers:
         kwargs["language_model_only"] = True
-
-
-def unbuilt_tower_modules(
-    strip_multimodal_towers: bool,
-    runtime: ModelRuntimeConfig,
-) -> list[str]:
-    """Trainer tower and connector modules vLLM leaves unbuilt.
-
-    :param strip_multimodal_towers: Whether the engine skips the towers.
-    :type strip_multimodal_towers: bool
-    :param runtime: Family runtime mapping tower modules to their modalities.
-    :type runtime: ModelRuntimeConfig
-    :return: Every tower module when stripped, else none; sorted.
-    :rtype: list[str]
-    """
-    return sorted(runtime.tower_modalities) if strip_multimodal_towers else []
-
-
-def apply_tower_connector_lora_engine_kwargs(
-    kwargs: dict[str, Any],
-    strip_multimodal_towers: bool,
-    runtime: ModelRuntimeConfig,
-    tower_target_modules: Collection[str] | None,
-) -> None:
-    """Enable vLLM LoRA on multimodal towers and connectors when the adapter names them.
-
-    vLLM wraps every tower and connector linear once this is on, so it stays
-    off for adapters on the language model only.
-
-    :param kwargs: vLLM engine kwargs mutated in place.
-    :type kwargs: dict[str, Any]
-    :param strip_multimodal_towers: Whether the engine skips the towers.
-    :type strip_multimodal_towers: bool
-    :param runtime: Family runtime naming the tower targets vLLM supports.
-    :type runtime: ModelRuntimeConfig
-    :param tower_target_modules: ``lora_config.tower_target_modules``.
-    :type tower_target_modules: Collection[str] | None
-    :raises ValueError: If towers are stripped, or a target is not a tower
-        module vLLM serves LoRA on for this family.
-    """
-    if not tower_target_modules:
-        return
-    if strip_multimodal_towers:
-        msg = (
-            "lora_config.tower_target_modules needs the towers served; the "
-            "engine strips them"
-        )
-        raise ValueError(msg)
-    unsupported = sorted(
-        set(tower_target_modules) - runtime.tower_connector_lora_targets
-    )
-    if unsupported:
-        supported = sorted(runtime.tower_connector_lora_targets) or "none"
-        msg = (
-            f"vLLM cannot serve tower LoRA on {unsupported}; this family "
-            f"supports {supported}"
-        )
-        raise ValueError(msg)
-    kwargs["enable_tower_connector_lora"] = True

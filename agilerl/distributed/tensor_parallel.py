@@ -105,12 +105,16 @@ def on_tp_mesh(param: DTensor) -> bool:
     return MeshAxisName.TP in (param.device_mesh.mesh_dim_names or ())
 
 
-def permute_rows(param: DTensor, order: torch.Tensor) -> None:
+def permute_rows(param: torch.Tensor, order: torch.Tensor) -> None:
     """Reorder ``param``'s global dim-0 rows by ``order`` in place.
 
     :param param: Sharded parameter on any placements over its mesh.
     :param order: Source row of each output row.
+    :raises TypeError: If ``param`` is not a ``DTensor``.
     """
+    if not isinstance(param, DTensor):
+        msg = f"permute_rows needs a DTensor, got {type(param).__name__}"
+        raise TypeError(msg)
     full = param.full_tensor()
     ordered = full.index_select(0, order.to(full.device))
     local = distribute_tensor(

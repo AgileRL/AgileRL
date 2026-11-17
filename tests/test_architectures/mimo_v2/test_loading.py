@@ -1,7 +1,7 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""End-to-end loading of a tiny FP8 / MXFP4 ``mimo_v2`` checkpoint as the native model."""
+"""End-to-end loading of a tiny FP8 / MXFP4 ``mimo_v2`` checkpoint as the native vision-language model."""
 
 from __future__ import annotations
 
@@ -10,18 +10,24 @@ import sys
 
 import pytest
 import torch
+import torch.nn.functional as F
 from peft import LoraConfig, get_peft_model
 from safetensors import safe_open
-from transformers import AutoConfig, AutoModelForCausalLM
+from transformers import AutoConfig, AutoModelForImageTextToText
 from transformers.models.mimo_v2_flash.modeling_mimo_v2_flash import (
-    MiMoV2FlashForCausalLM,
     MiMoV2FlashPreTrainedModel,
 )
 
-from agilerl.architectures import mimo_v2
-from agilerl.architectures.mimo_v2 import install_mimo_v2_native_training
+from agilerl.architectures.mimo_v2 import patches as mimo_v2_patches
+from agilerl.architectures.mimo_v2.configuration import MiMoV2Config
+from agilerl.architectures.mimo_v2.modeling import (
+    MiMoV2ForConditionalGeneration,
+    MiMoV2VisionModel,
+)
+from agilerl.architectures.mimo_v2.patches import install_mimo_v2_patches
 from agilerl.architectures.moe_router import patch_moe_routers
 from agilerl.architectures.runtime import PatchRuntimeConfig
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.distributed.fsdp import (
     _checkpoint_transform_groups,
     _load_converter_route,
@@ -32,6 +38,27 @@ from agilerl.lora.moe.layouts import is_routed_experts_module
 from tests.helper_functions import load_without_llm_dependencies
 
 INPUT_IDS = torch.tensor([[3, 17, 42, 5, 99, 64, 8, 21, 77, 1, 120, 33]])
+MIMO_V2_6_ID = "XiaomiMiMo/MiMo-V2.6-Flash-RL"
+# Vision key patterns and count in the Hub checkpoint's model.safetensors.index.json.
+HUB_VISION_KEY_PATTERNS = {
+    "visual.blocks.N.attn.proj.bias",
+    "visual.blocks.N.attn.proj.weight",
+    "visual.blocks.N.attn.qkv.bias",
+    "visual.blocks.N.attn.qkv.weight",
+    "visual.blocks.N.attn.sinks",
+    "visual.blocks.N.mlp.down_proj.bias",
+    "visual.blocks.N.mlp.down_proj.weight",
+    "visual.blocks.N.mlp.gate_proj.bias",
+    "visual.blocks.N.mlp.gate_proj.weight",
+    "visual.blocks.N.mlp.up_proj.bias",
+    "visual.blocks.N.mlp.up_proj.weight",
+    "visual.blocks.N.norm1.weight",
+    "visual.blocks.N.norm2.weight",
+    "visual.merger.ln_q.weight",
+    "visual.merger.mlp.N.weight",
+    "visual.patch_embed.proj.weight",
+}
+HUB_VISION_KEY_COUNT = 364
 
 
 def safetensors_keys(path) -> list[str]:
@@ -39,19 +66,38 @@ def safetensors_keys(path) -> list[str]:
         return list(handle.keys())
 
 
-def load_native(directory, dtype: torch.dtype) -> MiMoV2FlashForCausalLM:
-    return AutoModelForCausalLM.from_pretrained(
+def load_native(directory, dtype: torch.dtype) -> MiMoV2ForConditionalGeneration:
+    return AutoModelForImageTextToText.from_pretrained(
         directory, dtype=dtype, attn_implementation="eager"
     )
 
 
 def reference_model(
     config, reference: dict[str, torch.Tensor]
-) -> MiMoV2FlashForCausalLM:
+) -> MiMoV2ForConditionalGeneration:
     """Native model holding the independently dequantized weights."""
-    model = MiMoV2FlashForCausalLM(config).float()
+    model = MiMoV2ForConditionalGeneration(config).float()
     model.load_state_dict(reference)
     return model.eval()
+
+
+class TestMiMoV2VisionCheckpointKeys:
+    def test_tower_parameters_match_hub_checkpoint_keys(self):
+        # Arrange
+        config = MiMoV2Config(**SUPPORTED_MODEL_INFO[MIMO_V2_6_ID].config)
+        with torch.device("meta"):
+            tower = MiMoV2VisionModel(config.vision_config)
+
+        # Act
+        keys = [f"visual.{name}" for name, _ in tower.state_dict().items()]
+
+        # Assert
+        patterns = {
+            ".".join("N" if part.isdigit() else part for part in key.split("."))
+            for key in keys
+        }
+        assert patterns == HUB_VISION_KEY_PATTERNS
+        assert len(keys) == HUB_VISION_KEY_COUNT
 
 
 class TestFromPretrained:
@@ -60,7 +106,7 @@ class TestFromPretrained:
         directory, reference = tiny_checkpoint
 
         # Act
-        model, info = AutoModelForCausalLM.from_pretrained(
+        model, info = AutoModelForImageTextToText.from_pretrained(
             directory,
             dtype=torch.float32,
             attn_implementation="eager",
@@ -68,7 +114,7 @@ class TestFromPretrained:
         )
 
         # Assert
-        assert type(model) is MiMoV2FlashForCausalLM
+        assert type(model) is MiMoV2ForConditionalGeneration
         assert info["missing_keys"] == set()
         assert info["unexpected_keys"] == set()
         assert info["mismatched_keys"] == set()
@@ -103,7 +149,7 @@ class TestFromPretrained:
             name
             for name, tensor in model.state_dict().items()
             if tensor.dtype != torch.bfloat16
-        } == {"model.layers.1.mlp.gate.e_score_correction_bias"}
+        } == {"model.language_model.layers.1.mlp.gate.e_score_correction_bias"}
 
 
 class TestLoadShardedWeightsFromSafetensors:
@@ -115,7 +161,7 @@ class TestLoadShardedWeightsFromSafetensors:
         expected = load_native(directory, torch.bfloat16).state_dict()
         config = AutoConfig.from_pretrained(directory)
         with torch.device("meta"):
-            model = AutoModelForCausalLM.from_config(
+            model = AutoModelForImageTextToText.from_config(
                 config, dtype=torch.bfloat16, attn_implementation="eager"
             )
         model.to_empty(device="cpu")
@@ -137,7 +183,7 @@ class TestLoadShardedWeightsFromSafetensors:
     ):
         # Arrange
         directory, reference = tiny_checkpoint
-        model = MiMoV2FlashForCausalLM(native_config)
+        model = MiMoV2ForConditionalGeneration(native_config)
         model.config.name_or_path = str(directory)
         key_files = {
             key: str(path)
@@ -147,7 +193,7 @@ class TestLoadShardedWeightsFromSafetensors:
         routes = converter_checkpoint_routes(
             key_files, _checkpoint_transform_groups(model)
         )
-        target = "model.layers.1.mlp.experts.gate_up_proj"
+        target = "model.language_model.layers.1.mlp.experts.gate_up_proj"
         dest = torch.zeros(3, 64, 64)
 
         # Act
@@ -169,7 +215,7 @@ class TestPackedExperts:
 
         model = load_native(directory, torch.float32)
 
-        experts = model.model.layers[1].mlp.experts
+        experts = model.model.language_model.layers[1].mlp.experts
         assert is_routed_experts_module(experts)
         assert experts.gate_up_proj.shape == (8, 64, 64)
         assert experts.down_proj.shape == (8, 64, 32)
@@ -185,14 +231,15 @@ class TestLoraForwardBackward:
             LoraConfig(
                 r=4,
                 lora_alpha=8,
-                target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj"],
+                target_modules=r".*language_model.*\.(q_proj|k_proj|v_proj|o_proj|gate_proj)",
                 init_lora_weights=False,
             ),
         )
         model.train()
 
         # Act
-        loss = model(input_ids=INPUT_IDS, labels=INPUT_IDS).loss
+        logits = model(input_ids=INPUT_IDS).logits
+        loss = F.cross_entropy(logits[:, :-1].flatten(0, 1), INPUT_IDS[:, 1:].flatten())
         loss.backward()
 
         # Assert
@@ -236,19 +283,18 @@ class TestRegisterMimoV2NativeLoading:
     def test_without_llm_dependencies_registers_nothing(
         self, monkeypatch: pytest.MonkeyPatch
     ):
-        module = load_without_llm_dependencies(mimo_v2, monkeypatch)
+        module = load_without_llm_dependencies(mimo_v2_patches, monkeypatch)
 
         for name in (
             "AutoConfig",
             "register_checkpoint_conversion_mapping",
-            "MODEL_FOR_CAUSAL_LM_MAPPING",
-            "MiMoV2FlashForCausalLM",
+            "MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING",
             "MiMoV2FlashPreTrainedModel",
             "install_mimo_v2_fp32_lse_flex_attention",
-            "TOWER_KEY_PATTERNS",
             "mimo_v2_checkpoint_conversions",
             "MIMO_V2_MODEL_TYPE",
             "MiMoV2Config",
+            "MiMoV2ForConditionalGeneration",
         ):
             assert getattr(module, name) is None, name
         assert module.register_mimo_v2_native_loading() is None
@@ -266,11 +312,11 @@ class TestInstallMimoV2NativeTraining:
         # A fresh interpreter: the package conftest registers the config in this one.
         script = (
             "import agilerl.architectures\n"
-            "from agilerl.architectures.mimo_v2 import install_mimo_v2_native_training\n"
+            "from agilerl.architectures.mimo_v2.patches import install_mimo_v2_patches\n"
             "from agilerl.architectures.runtime import PatchRuntimeConfig\n"
             "from transformers.models.auto.configuration_auto import CONFIG_MAPPING\n"
             f"if {install}:\n"
-            "    install_mimo_v2_native_training(PatchRuntimeConfig())\n"
+            "    install_mimo_v2_patches(PatchRuntimeConfig())\n"
             "print('mimo_v2' in CONFIG_MAPPING)\n"
         )
 
@@ -280,6 +326,23 @@ class TestInstallMimoV2NativeTraining:
 
         assert result.stdout.strip().splitlines()[-1] == expected
 
+    def test_package_import_does_not_need_pillow(self) -> None:
+        script = (
+            "import sys\n"
+            "sys.modules['PIL'] = None\n"
+            "from agilerl.architectures.mimo_v2.patches import "
+            "register_mimo_v2_native_loading\n"
+            "register_mimo_v2_native_loading()\n"
+            "print('ok')\n"
+        )
+
+        result = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True, check=False
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip().splitlines()[-1] == "ok"
+
     def test_lets_the_native_class_build_with_flex_attention(
         self, native_config, monkeypatch: pytest.MonkeyPatch
     ):
@@ -287,9 +350,9 @@ class TestInstallMimoV2NativeTraining:
         monkeypatch.setattr(MiMoV2FlashPreTrainedModel, "_supports_flex_attn", False)
 
         # Act
-        install_mimo_v2_native_training(PatchRuntimeConfig())
+        install_mimo_v2_patches(PatchRuntimeConfig())
         with torch.device("meta"):
-            model = AutoModelForCausalLM.from_config(
+            model = AutoModelForImageTextToText.from_config(
                 native_config, attn_implementation="flex_attention"
             )
 
@@ -302,6 +365,6 @@ class TestInstallMimoV2NativeTraining:
         monkeypatch.setattr(MiMoV2FlashPreTrainedModel, "_supports_flex_attn", False)
 
         with pytest.raises(ValueError, match="flex"), torch.device("meta"):
-            AutoModelForCausalLM.from_config(
+            AutoModelForImageTextToText.from_config(
                 native_config, attn_implementation="flex_attention"
             )

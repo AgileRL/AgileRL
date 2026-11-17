@@ -8,12 +8,12 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from agilerl.architectures.qwen3_5.gated_delta_net import (
+from agilerl.architectures.qwen3_5.layers import (
     apply_gdn_conv_clone,
     clone_gdn_conv_output,
     install_gdn_conv_clone,
 )
-from agilerl.architectures.qwen3_5.packed import install_qwen_gdn_patches
+from agilerl.architectures.qwen3_5.patches import install_qwen3_5_patches
 from agilerl.architectures.runtime import (
     GdnMixerConfig,
     GdnPatchConfig,
@@ -113,7 +113,7 @@ class TestInstallQwenGdnPatches:
             )
         )
 
-        install_qwen_gdn_patches(patch, model=root)
+        install_qwen3_5_patches(patch, model=root)
 
         assert mixer._agilerl_gdn_conv_clone is True
 
@@ -128,7 +128,7 @@ class TestInstallQwenGdnPatches:
             )
         )
 
-        install_qwen_gdn_patches(patch, model=root)
+        install_qwen3_5_patches(patch, model=root)
 
         assert not getattr(mixer, "_agilerl_gdn_conv_clone", False)
 
@@ -137,7 +137,7 @@ class TestInstallQwenGdnPatches:
     ) -> None:
         seen: list[tuple[str, str]] = []
         monkeypatch.setattr(
-            "agilerl.architectures.qwen3_5.packed.patch_qwen_gdn_packed_sequences",
+            "agilerl.architectures.qwen3_5.patches.patch_qwen_gdn_packed_sequences",
             lambda mixer, text_model: seen.append((mixer, text_model)),
         )
         patch = PatchRuntimeConfig(
@@ -146,6 +146,6 @@ class TestInstallQwenGdnPatches:
             )
         )
 
-        install_qwen_gdn_patches(patch, use_sequence_packing=True)
+        install_qwen3_5_patches(patch, use_sequence_packing=True)
 
         assert seen == [("pkg.Mixer", "pkg.TextModel")]

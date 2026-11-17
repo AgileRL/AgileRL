@@ -24,9 +24,9 @@ from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
     DeepseekV4PreTrainedModel,
 )
 
-from agilerl.architectures import deepseek_v4 as deepseek_v4_module
 from agilerl.architectures.catalog import FAMILY_RUNTIME_CONFIGS
-from agilerl.architectures.deepseek_v4 import (
+from agilerl.architectures.deepseek_v4 import patches as deepseek_v4_module
+from agilerl.architectures.deepseek_v4.patches import (
     CHUNKS_INDEXER_SCORES,
     FLEX_COMPRESSED_KV,
     PACKED_DOCUMENTS,

@@ -151,8 +151,7 @@ DSV4_TINY = {
     "compress_ratios": [0, 4, 128, 0],
 }
 # MiMo-V2-Flash shape: a dense full-attention layer 0 with one KV head, two
-# MoE sliding-window layers with two, values narrower than keys, and a vision
-# tower the text-only classes drop.
+# MoE sliding-window layers with two, and values narrower than keys.
 MIMO_TINY = {
     "model_type": "mimo_v2",
     "num_hidden_layers": 3,
@@ -171,7 +170,6 @@ MIMO_TINY = {
     "moe_intermediate_size": 16,
     "n_shared_experts": None,
     "vocab_size": 256,
-    "vision_config": {"depth": 2, "hidden_size": 32, "num_heads": 2},
 }
 
 
@@ -743,12 +741,33 @@ class TestModelArchFromHfConfig:
 
         assert (arch.dense_ffn_layers, arch.mlp_layers, arch.moe_layers) == (1, 1, 2)
 
-    def test_text_only_family_counts_no_tower(self):
-        arch = ModelArch.from_hf_config(MIMO_TINY)
-        towered = ModelArch.from_hf_config({**MIMO_TINY, "model_type": "qwen3"})
+    def test_mimo_counts_the_vision_tower_and_not_the_audio_tower(self):
+        # Arrange
+        config = SUPPORTED_MODEL_INFO[MIMO_FLASH].config
 
-        assert (arch.multimodal_tower_params, arch.vision_hidden_size) == (0, 0)
-        assert towered.multimodal_tower_params > 0
+        # Act
+        arch = ModelArch.from_hf_config(config)
+
+        # Assert: 28 blocks of 64-wide heads, 32 query and 8 key/value, and a
+        # gated 4608 MLP at width 1280. The audio config adds nothing.
+        assert arch.multimodal_tower_params == 28 * (
+            1280 * 2048 + 2 * 1280 * 512 + 2048 * 1280 + 3 * 1280 * 4608 + 2 * 1280
+        )
+        assert arch.multimodal_tower_block_params == arch.multimodal_tower_params
+        # Split linears plus 24 windowed blocks' 32 sink logits.
+        assert arch.tensor_parallel_tower_params == 726_482_944 + 24 * 32
+
+    def test_mimo_reads_the_vision_geometry(self):
+        arch = ModelArch.from_hf_config(SUPPORTED_MODEL_INFO[MIMO_FLASH].config)
+
+        assert (arch.vision_hidden_size, arch.vision_out_hidden_size) == (1280, 4096)
+        assert (arch.vision_patch_size, arch.vision_spatial_merge_size) == (16, 2)
+        assert (arch.vision_in_channels, arch.vision_temporal_patch_size) == (3, 2)
+        assert (arch.vision_min_patches, arch.vision_max_patches) == (32, 32768)
+        assert arch.vision_resize == "pixel_bounds"
+        assert arch.vision_profile_patches == 32768
+        assert arch.vision_feature_cache
+        assert arch.vision_merged_output_only
 
     def test_ue8m0_fp8_with_fp4_experts_stores_scales_per_block(self):
         config = SUPPORTED_MODEL_INFO[DSV4_FLASH].config
@@ -1258,67 +1277,6 @@ class TestLoraParamCount:
         # 2560->16384 and output_linear 8192->2560.
         assert total == 40 * (10240 + 6144 + (2560 + 16384) + (8192 + 2560))
         assert total == 1_843_200
-
-
-class TestTowerLoraParamCount:
-    def test_qwen36_tower_and_merger(self):
-        arch = ModelArch.from_hf_config(QWEN36.config)
-
-        # 27 blocks of qkv 1152->3456 and fc1/fc2 1152<->4304, merger 4608->4608->2048.
-        assert lora_formulas.tower_lora_param_count(arch, 1, QWEN_TOWER_TARGETS) == (
-            434_912
-        )
-
-    def test_qwen36_charges_only_the_named_targets(self):
-        arch = ModelArch.from_hf_config(QWEN36.config)
-
-        # 27 blocks of qkv 1152->3456.
-        assert lora_formulas.tower_lora_param_count(arch, 1, {"qkv"}) == 124_416
-
-    def test_gemma4_e4b_vision_and_audio_towers(self):
-        arch = ModelArch.from_hf_config(GEMMA4_E4B.config)
-
-        # Vision: 16 blocks of q/k/v/o 768 and gate/up/down 768<->3072, patch
-        # 768->768, 768->2560 (287,488). Audio: 12 conformer layers of two
-        # 1024<->4096 feed-forwards, light conv 1024->2048 and 1024->1024,
-        # q/k/v/post and relative_k 1024->1024, subsample 1024->1024, output
-        # 1024->1536 and embedder 1536->2560 (438,784).
-        assert lora_formulas.tower_lora_param_count(arch, 1, GEMMA4_TOWER_TARGETS) == (
-            287_488 + 438_784
-        )
-
-    def test_gemma4_e4b_audio_only_targets_skip_the_vision_tower(self):
-        arch = ModelArch.from_hf_config(GEMMA4_E4B.config)
-
-        # Act
-        audio = lora_formulas.tower_lora_param_count(
-            arch, 1, {"relative_k_proj", "input_proj_linear", "output_proj"}
-        )
-
-        # Assert: 12 relative_k 1024->1024, subsample 1024->1024, output 1024->1536.
-        assert audio == 12 * 2048 + 2048 + 2560
-
-    def test_gemma4_without_an_audio_tower_charges_only_vision(self):
-        arch = ModelArch.from_hf_config({**GEMMA4_E4B.config, "audio_config": None})
-
-        # Vision tower only (287,488); the audio terms drop out.
-        assert lora_formulas.tower_lora_param_count(arch, 1, GEMMA4_TOWER_TARGETS) == (
-            287_488
-        )
-
-    def test_super_vl_encoder_patch_embedders_and_projector(self):
-        arch = ModelArch.from_hf_config(SUPER_VL.config)
-
-        # 32 blocks of q/k/v/o 1280 and fc1/fc2 1280<->5120, patch 768->1280,
-        # video patch 1536->1280, projector 5120->20480->4096.
-        assert lora_formulas.tower_lora_param_count(arch, 1, RADIO_TOWER_TARGETS) == (
-            792_320
-        )
-
-    def test_text_model_has_no_tower_adapters(self):
-        assert (
-            lora_formulas.tower_lora_param_count(QWEN_05B, 16, QWEN_TOWER_TARGETS) == 0
-        )
 
     def test_mla_and_kda_skip_the_excluded_gate_projections(self):
         # Arrange
@@ -3519,35 +3477,6 @@ class TestLoraTensorPlacement:
         # Assert
         assert with_shared - without == expected
 
-    @pytest.mark.parametrize(
-        ("tp", "expected"), [(1, 16 * 434_912), (2, 16 * (434_912 - 334_944 // 2))]
-    )
-    def test_qwen36_vision_tower_splits_qkv_b_and_fc_factors(self, tp, expected):
-        # Arrange
-        arch = ModelArch.from_hf_config(QWEN36.config)
-
-        # Act
-        tower, _ = lora_tensor_placement(
-            arch, 16, "all-linear", 0, None, tp, QWEN_TOWER_TARGETS
-        )
-        text, _ = lora_tensor_placement(arch, 16, "all-linear", 0, None, tp)
-
-        # Assert: qkv and fc1 B, fc2 A on 27 blocks and the merger halve.
-        assert tower - text == expected
-
-    def test_gemma4_towers_stay_whole_under_tensor_parallel(self):
-        # Arrange
-        arch = ModelArch.from_hf_config(GEMMA4_E4B.config)
-
-        # Act
-        tower, _ = lora_tensor_placement(
-            arch, 16, "all-linear", 0, None, 2, GEMMA4_TOWER_TARGETS
-        )
-        text, _ = lora_tensor_placement(arch, 16, "all-linear", 0, None, 2)
-
-        # Assert
-        assert tower - text == 16 * 726_272
-
     @pytest.mark.parametrize(("tp", "per_rank"), [(1, 1_322_880), (2, 978_880)])
     def test_qwen36_splits_gated_q_and_gdn_projections(self, tp, per_rank):
         # Arrange
@@ -4125,32 +4054,6 @@ QWEN36 = SUPPORTED_MODEL_INFO["Qwen/Qwen3.6-35B-A3B"]
 GEMMA4_E4B = SUPPORTED_MODEL_INFO["google/gemma-4-E4B-it"]
 QWEN35_08B = SUPPORTED_MODEL_INFO["Qwen/Qwen3.5-0.8B"]
 GEMMA4_E4B = SUPPORTED_MODEL_INFO["google/gemma-4-E4B-it"]
-# Each family's full ``tower_connector_lora_targets``.
-QWEN_TOWER_TARGETS = frozenset({"qkv", "linear_fc1", "linear_fc2"})
-GEMMA4_TOWER_TARGETS = frozenset(
-    {
-        "linear",
-        "input_proj",
-        "embedding_projection",
-        "input_proj_linear",
-        "output_proj",
-        "relative_k_proj",
-    }
-)
-RADIO_TOWER_TARGETS = frozenset(
-    {
-        "q_proj",
-        "k_proj",
-        "v_proj",
-        "o_proj",
-        "fc1",
-        "fc2",
-        "patch_projection",
-        "video_patch_projection",
-        "linear_1",
-        "linear_2",
-    }
-)
 
 
 class TestLatentMoe:

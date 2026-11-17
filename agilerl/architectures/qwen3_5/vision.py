@@ -16,15 +16,15 @@ from __future__ import annotations
 
 import functools
 import logging
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
 import torch.nn.functional as F
 
-from agilerl.architectures.nemotron_h_omni import packed_patches
-from agilerl.architectures.qwen3_5.packed import install_qwen_gdn_patches, resolve_class
+from agilerl.architectures.qwen3_5.patches import resolve_class
 from agilerl.architectures.runtime import PatchRuntimeConfig
-from agilerl.utils.patching import class_is_patched
+from agilerl.architectures.vision_rows import install_vision_rows, packed_patches
 
 if TYPE_CHECKING:
     from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5VisionConfig
@@ -37,13 +37,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "ACCEPTS_VISION_ROWS",
-    "install_qwen3_5_vl_patches",
+    "install_qwen3_5_vision",
     "mrope_position_ids",
     "patch_qwen_vision_rows",
 ]
-
-ACCEPTS_VISION_ROWS = "agilerl_accepts_vision_rows"
 
 VISION_ROW_TARGETS = (
     "transformers.models.qwen3_5.modeling_qwen3_5.Qwen3_5Model",
@@ -113,10 +110,8 @@ def mrope_position_ids(
     return torch.cat([position_ids[None], mrope])
 
 
-def _install_vision_rows(model_cls: type) -> None:
-    """Let ``model_cls.forward`` take ``(N, h, w, patch_dim)`` ``pixel_values``."""
-    cls: Any = model_cls
-    forward = cls.__dict__["forward"]
+def _accept_vision_rows(forward: Callable[..., Any]) -> Callable[..., Any]:
+    """Wrap ``forward`` so it takes ``(N, h, w, patch_dim)`` ``pixel_values``."""
 
     @functools.wraps(forward)
     def forward_with_vision_rows(
@@ -150,8 +145,7 @@ def _install_vision_rows(model_cls: type) -> None:
             **kwargs,
         )
 
-    cls.forward = forward_with_vision_rows
-    cls.vision_filler_features = vision_filler_features
+    return forward_with_vision_rows
 
 
 def vision_filler_features(
@@ -183,24 +177,21 @@ def patch_qwen_vision_rows(model: str) -> None:
             model.rpartition(".")[2],
         )
         return
-    if class_is_patched(model_cls, ACCEPTS_VISION_ROWS):
-        return
-    _install_vision_rows(model_cls)
-    setattr(model_cls, ACCEPTS_VISION_ROWS, True)
+    install_vision_rows(
+        model_cls, "forward", _accept_vision_rows, vision_filler_features
+    )
 
 
-def install_qwen3_5_vl_patches(
-    patch: PatchRuntimeConfig,
-    model: object | None = None,
-    use_sequence_packing: bool = False,
+def install_qwen3_5_vision(
+    _patch: PatchRuntimeConfig,
+    _model: object | None = None,
+    _use_sequence_packing: bool = False,
 ) -> None:
-    """Install the Qwen3.5 / Qwen3.6 GDN and vision-row patches.
+    """Let the Qwen3.5 / Qwen3.6 VL models take one patch-grid row per image.
 
-    :param patch: Catalog patch config.
-    :param model: Already-built model the patches also apply to, or None.
-    :param use_sequence_packing: Install the packed-sequence GDN wrap.
-    :type use_sequence_packing: bool, optional
+    :param _patch: Catalog patch config.
+    :param _model: Already-built model, or None; the class-level patches cover it.
+    :param _use_sequence_packing: Unused; the vision patch handles packed rows either way.
     """
-    install_qwen_gdn_patches(patch, model, use_sequence_packing)
     for target in VISION_ROW_TARGETS:
         patch_qwen_vision_rows(target)

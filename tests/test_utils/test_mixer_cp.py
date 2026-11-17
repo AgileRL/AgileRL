@@ -1857,25 +1857,25 @@ class TestCatalogIsolation:
     def test_family_context_parallel_plans_return_every_family(self) -> None:
         from agilerl.architectures import family_context_parallel_plans
         from agilerl.architectures.deepseek_v4.context_parallel import (
-            DEEPSEEK_V4_CONTEXT_PARALLEL_PLAN,
+            CONTEXT_PARALLEL_PLAN as DEEPSEEK_V4_CONTEXT_PARALLEL_PLAN,
         )
         from agilerl.architectures.glm5_next.context_parallel import (
-            GLM5_NEXT_CONTEXT_PARALLEL_PLAN,
+            CONTEXT_PARALLEL_PLAN as GLM5_NEXT_CONTEXT_PARALLEL_PLAN,
         )
         from agilerl.architectures.granitemoehybrid.context_parallel import (
-            GRANITEMOEHYBRID_CONTEXT_PARALLEL_PLAN,
+            CONTEXT_PARALLEL_PLAN as GRANITEMOEHYBRID_CONTEXT_PARALLEL_PLAN,
         )
         from agilerl.architectures.nemotron_h.context_parallel import (
-            NEMOTRON_H_CONTEXT_PARALLEL_PLAN,
+            CONTEXT_PARALLEL_PLAN as NEMOTRON_H_CONTEXT_PARALLEL_PLAN,
         )
         from agilerl.architectures.qwen3_5.context_parallel import (
-            QWEN3_5_CONTEXT_PARALLEL_PLAN,
+            CONTEXT_PARALLEL_PLAN as QWEN3_5_CONTEXT_PARALLEL_PLAN,
         )
 
         assert family_context_parallel_plans() == [
             DEEPSEEK_V4_CONTEXT_PARALLEL_PLAN,
+            GLM5_NEXT_CONTEXT_PARALLEL_PLAN,
             GRANITEMOEHYBRID_CONTEXT_PARALLEL_PLAN,
             NEMOTRON_H_CONTEXT_PARALLEL_PLAN,
-            GLM5_NEXT_CONTEXT_PARALLEL_PLAN,
             QWEN3_5_CONTEXT_PARALLEL_PLAN,
         ]

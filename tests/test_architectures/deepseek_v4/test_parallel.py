@@ -42,16 +42,16 @@ from agilerl.algorithms.core.sequence_layout import (
     ContextParallelSequence,
     position_ids_from_mask,
 )
-from agilerl.architectures import deepseek_v4 as deepseek_v4_module
-from agilerl.architectures.deepseek_v4 import (
+from agilerl.architectures.deepseek_v4 import patches as deepseek_v4_module
+from agilerl.architectures.deepseek_v4.context_parallel import (
+    install_deepseek_v4_context_parallel,
+    wrap_deepseek_v4_context_parallel,
+)
+from agilerl.architectures.deepseek_v4.patches import (
     CONTEXT_PARALLEL_GROUP,
     document_keys,
     flex_compressed_attention,
     sequence_shard_keys,
-)
-from agilerl.architectures.deepseek_v4.context_parallel import (
-    install_deepseek_v4_context_parallel,
-    wrap_deepseek_v4_context_parallel,
 )
 from agilerl.architectures.deepseek_v4.tensor_parallel import (
     _install_group_forward,

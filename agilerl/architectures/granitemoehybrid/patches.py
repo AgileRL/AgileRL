@@ -1,7 +1,7 @@
 # Copyright 2026 AgileRL
 # SPDX-License-Identifier: Apache-2.0
 
-"""GraniteMoeHybrid patches: packed documents and Liger registration.
+"""GraniteMoeHybrid patches: packed documents.
 
 ``GraniteMoeHybridModel`` reads ``position_ids`` only for RoPE: neither its
 decoder layers nor its mask builder see them, so a packed row would scan and
@@ -10,10 +10,6 @@ and passes ``seq_idx`` to the Mamba2 layers, FlashAttention varlen offsets to
 the attention layers, and a block-diagonal mask to other attention backends.
 On CUDA the fused Mamba2 kernel takes ``seq_idx``; otherwise each document
 runs through the mixer on its own.
-
-Liger has no entry for this family; the installer registers the
-:mod:`agilerl.architectures.granite_liger` appliers when liger-kernel is
-installed.
 """
 
 from __future__ import annotations
@@ -24,8 +20,8 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
-from agilerl.architectures.nemotron_h.mamba import install_packed_mixer
+from agilerl import HAS_LLM_DEPENDENCIES
+from agilerl.architectures.nemotron_h.layers import install_packed_mixer
 from agilerl.architectures.runtime import PatchRuntimeConfig
 from agilerl.utils.llm_packing import RESETS_AT_DOCUMENT_BOUNDARY, packed_layout
 from agilerl.utils.patching import class_is_patched, library_shim, try_import
@@ -40,7 +36,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "install_granite_hybrid_patches",
+    "install_granitemoehybrid_patches",
     "patch_granite_hybrid_packed_sequences",
 ]
 
@@ -141,12 +137,12 @@ def patch_granite_hybrid_packed_sequences() -> None:
 
 
 @library_shim("transformers", "==5.19.*")
-def install_granite_hybrid_patches(
+def install_granitemoehybrid_patches(
     _patch: PatchRuntimeConfig,
     _model: PreTrainedModel | PeftModel | None = None,
     _use_sequence_packing: bool = False,
 ) -> None:
-    """Install GraniteMoeHybrid packed-sequence patches and register its Liger applier.
+    """Install GraniteMoeHybrid packed-sequence patches.
 
     :param _patch: Catalog patch config.
     :type _patch: PatchRuntimeConfig
@@ -158,8 +154,3 @@ def install_granite_hybrid_patches(
     :rtype: None
     """
     patch_granite_hybrid_packed_sequences()
-    if HAS_LIGER_KERNEL:
-        # Defers liger-kernel, an optional extra.
-        from agilerl.architectures.granite_liger import register_granite_liger
-
-        register_granite_liger()

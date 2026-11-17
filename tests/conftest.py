@@ -743,7 +743,7 @@ def stub_family_config_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
         unused = dict(kwargs)
         for key in hub_keys:
             unused.pop(key, None)
-        return {"model_type": "llama"}, unused
+        return {"model_type": "qwen3"}, unused
 
     monkeypatch.setattr(
         "agilerl.architectures.catalog.PretrainedConfig.get_config_dict",

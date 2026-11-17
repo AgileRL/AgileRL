@@ -22,7 +22,7 @@ from transformers import NemotronHConfig
 from transformers.models.nemotron_h.modeling_nemotron_h import NemotronHMamba2Mixer
 
 from agilerl.architectures.nemotron_h import tensor_parallel as mamba_tp
-from agilerl.architectures.nemotron_h.mamba import _full_parameter_tensor
+from agilerl.architectures.nemotron_h.layers import _full_parameter_tensor
 from agilerl.architectures.nemotron_h.tensor_parallel import (
     apply_mamba_tensor_parallel,
     mark_mamba_tp_params,
