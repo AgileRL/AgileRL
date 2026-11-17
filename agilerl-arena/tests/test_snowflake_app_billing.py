@@ -6,12 +6,16 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
 import pytest
+from snowflake.snowpark.exceptions import SnowparkSQLException
 from snowflake_app.app_code.arena_app import (
     DeploymentCalls,
     meter_deployments,
@@ -34,11 +38,34 @@ from tests.test_snowflake_billing import (
     HOUR_MS,
     NOW_MS,
     RUN_ID,
-    BillingSession,
+    Result,
     hour_at,
     unknown,
 )
+from tests.test_snowflake_billing import (
+    BillingSession as UsageBillingSession,
+)
 from tests.test_snowflake_license import Arena, reply
+
+
+class BillingSession(UsageBillingSession):
+    """Refuses a service-role grant once that service is gone."""
+
+    def sql(self, statement: str) -> Result:
+        """Run ``statement``, refusing a grant for a service that is gone.
+
+        :param statement: SQL to run.
+        :return: The statement result.
+        """
+        if statement.startswith("GRANT SERVICE ROLE app_state."):
+            service = statement.removeprefix("GRANT SERVICE ROLE app_state.").split(
+                "!", 1
+            )[0]
+            if service not in self.services:
+                msg = f"Service '{service}' does not exist or not authorized."
+                raise SnowparkSQLException(msg)
+        return super().sql(statement)
+
 
 NOW = datetime(2026, 11, 16, 15, 0, tzinfo=timezone.utc)
 SECRETS = {
@@ -112,6 +139,25 @@ def served_row(service: str) -> dict[str, object]:
 def item(session: BillingSession, usage_id: str) -> dict[str, object]:
     [row] = [row for row in session.items if row["usage_id"] == usage_id]
     return row
+
+
+class TestBillingSession:
+    def test_grant_of_a_missing_service_raises(self) -> None:
+        # Arrange
+        session = BillingSession()
+        session.services = {"LIVE": "RUNNING"}
+        statement = (
+            "GRANT SERVICE ROLE app_state.GONE!ALL_ENDPOINTS_USAGE "
+            "TO APPLICATION ROLE app_user"
+        )
+
+        # Act
+        with pytest.raises(SnowparkSQLException, match="GONE"):
+            session.sql(statement)
+
+        # Assert
+        assert session.grants == []
+        assert session.services == {"LIVE": "RUNNING"}
 
 
 class TestMeterDeployments:
@@ -224,6 +270,12 @@ class TestMeterDeployments:
             SNOWFLAKE_DENIED,
         )
         assert dropped["last_error_at"] == NOW_MS
+        assert session.grants == [
+            (
+                "GRANT SERVICE ROLE app_state.B!ALL_ENDPOINTS_USAGE "
+                "TO APPLICATION ROLE app_user"
+            )
+        ]
 
     def test_training_off_leaves_the_row_open_when_the_close_fails(self) -> None:
         # Arrange
@@ -274,6 +326,12 @@ class TestMeterDeployments:
             SNOWFLAKE_DENIED,
         )
         assert "Arena has no deployment dep-a to close." in caplog.text
+        assert session.grants == [
+            (
+                "GRANT SERVICE ROLE app_state.B!ALL_ENDPOINTS_USAGE "
+                "TO APPLICATION ROLE app_user"
+            )
+        ]
 
     def test_a_deployment_arena_closed_is_reopened_with_the_service_kept(
         self,
@@ -347,6 +405,23 @@ class TestMeterDeployments:
         )
         assert [d.deployment_id for d in arena.opens] == ["ORPHAN-20261116T150000Z"]
         assert item(session, "ORPHAN-20261116T150000Z")["service_name"] == "ORPHAN"
+
+    def test_app_user_can_call_every_live_served_service(self) -> None:
+        # Arrange
+        session = serving_session({"A": "RUNNING", "B": "SUSPENDED"})
+        session.served.append(served_row("ORPHAN"))
+        session.services["ORPHAN"] = "PENDING"
+        arena = DeploymentArena()
+
+        # Act
+        meter_deployments(session, arena.calls(), NOW)
+
+        # Assert
+        assert session.grants == [
+            f"GRANT SERVICE ROLE app_state.{service}!ALL_ENDPOINTS_USAGE "
+            "TO APPLICATION ROLE app_user"
+            for service in ("A", "ORPHAN")
+        ]
 
     def test_a_recorded_serve_whose_service_never_started_is_left_pending(
         self,
@@ -453,6 +528,41 @@ def open_usage(cents: int) -> httpx.Response:
     )
 
 
+class TestArenaAppLogging:
+    def test_arena_records_reach_the_root_logger_snowflake_captures(self) -> None:
+        # Arrange
+        # The autouse conftest fixture rewires agilerl.arena, so import in a fresh interpreter.
+        arena_root = Path(__file__).resolve().parents[1]
+        script = (
+            "import logging\n"
+            "import snowflake_app.app_code.arena_app\n"
+            "from agilerl.arena.snowflake import billing\n"
+            "seen = []\n"
+            "class Capture(logging.Handler):\n"
+            "    def emit(self, record):\n"
+            "        seen.append((record.name, record.levelname, record.getMessage()))\n"
+            "logging.getLogger().addHandler(Capture())\n"
+            "billing.logger.error('Could not bill run r')\n"
+            "print(seen)\n"
+        )
+
+        # Act
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=arena_root,
+            env={**os.environ, "PYTHONPATH": str(arena_root)},
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        # Assert
+        assert result.stdout.strip() == (
+            "[('agilerl.arena.snowflake.billing', 'ERROR', 'Could not bill run r')]"
+        )
+        assert "Could not bill" not in result.stderr
+
+
 class TestReconcileUsage:
     def test_heartbeats_the_service_then_bills_the_deployment_hours(
         self, arena: Arena
@@ -475,6 +585,34 @@ class TestReconcileUsage:
         ]
         [event] = session.events
         assert (event["subclass"], event["base_charge"]) == ("deployment", 9.57)
+
+    def test_a_non_listing_install_is_refused_and_logged_for_the_event_table(
+        self, arena: Arena, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # Arrange
+        session = serving_session({"A": "RUNNING"})
+        session.statuses = [
+            SnowparkSQLException(
+                "090898 (0A000): Application instance is not installed from listing"
+            )
+        ]
+        arena.replies = [reply(200, {"billableHours": []}), open_usage(957)]
+
+        # Act
+        summary = reconcile_usage(session)
+
+        # Assert
+        assert "items: 1, settled: 0, events: 0, failed: 1" in summary
+        assert "unconfirmed: 0" in summary
+        assert session.billed == []
+        assert "not installed from listing" in str(item(session, "dep-a")["last_error"])
+        [record] = [
+            r for r in caplog.records if r.name == "agilerl.arena.snowflake.billing"
+        ]
+        assert (record.levelname, record.getMessage()) == (
+            "ERROR",
+            "Could not bill deployment dep-a",
+        )
 
     def test_a_reopened_deployment_still_bills_the_closed_ones_hours(
         self, arena: Arena

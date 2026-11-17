@@ -487,6 +487,7 @@ def emit_batch(
         "Payload length exceeds the limit",
         "Number of events exceeds the limit",
         "Too many calls",
+        "not installed from listing",
     )
     starts = in_list([int(str(event["start_timestamp"])) for event in batch])
     collect(

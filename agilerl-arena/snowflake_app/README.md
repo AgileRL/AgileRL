@@ -69,7 +69,7 @@ never collides with objects the CLI created in the same account.
 | `app_code.cancel(run_id)` | `app_admin` | `arena snowflake cancel`. |
 | `app_code.reconcile_usage()` | none | Bills usage; see Billing. Only the hourly task calls it, so two calls never overlap. |
 | `app_code.version_init()` | none | Version initializer: resumes the billing task after install, upgrade, or a failed upgrade. |
-| `app_code.publish(run_id, model_name, version_name, step, serve, gpu_count, service_name, max_model_len)` | `app_admin` | `arena snowflake publish` into the Model Registry in `app_state`, waiting for the job like the CLI. `serve` starts the vLLM service, whose public endpoint uses `BIND SERVICE ENDPOINT`, and bills it as an Arena deployment; see Billing. |
+| `app_code.publish(run_id, model_name, version_name, step, serve, gpu_count, service_name, max_model_len)` | `app_admin` | `arena snowflake publish` into the Model Registry in `app_state`, waiting for the job like the CLI. `serve` starts the vLLM service, whose public endpoint uses `BIND SERVICE ENDPOINT`, and bills it as an Arena deployment; see Billing. The app grants the service's `ALL_ENDPOINTS_USAGE` role to `app_user`, after publish and on each hourly run, so account roles holding `app_user` can call the endpoint. |
 | `app_code.endpoint(model, version_name)` | `app_user` | `arena snowflake endpoint` for a model in `app_state`. |
 | `app_code.unpublish(model, version_name, drop_version)` | `app_admin` | `arena snowflake unpublish` for a model in `app_state`, then closes the service's Arena deployment. |
 
@@ -130,7 +130,9 @@ The listing's pricing plan carries the event's `billing_quantity` and unit.
 `app_state.billed_hours` holds one row per charged hour. A MERGE claims hours
 for one call, and `attempted_at` is set just before the billing call, so an
 hour is never emitted twice. If Snowflake refuses a batch with one of its
-documented messages, the hours are deleted and the next run bills them. Any
+documented messages, the hours are deleted and the next run bills them. An
+app not installed from a listing (error 090898) is refused this way on every
+run, so it never bills and never counts hours as `unconfirmed`. Any
 other failure leaves them attempted with no `emitted_at`; they are never sent
 again, and the summary counts those older than an hour as `unconfirmed`, to be
 checked against `SNOWFLAKE.DATA_SHARING_USAGE.MARKETPLACE_PAID_USAGE_DAILY`
@@ -145,6 +147,8 @@ Arena has answered for before (`first_seen_at`) or that has billed hours; it
 is logged and kept. An item that has only ever had 404s is read at most daily,
 logged on each 404, and settles unbilled 30 days after its first 404
 (`first_404_at`). Items Arena has kept open for over 7 days are logged.
+Procedure logs, these included, go to the consumer's active event table at the
+manifest's `log_level` (`INFO`).
 
 ## Manifest
 
