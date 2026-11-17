@@ -163,7 +163,6 @@ def checkpoint_quantized(config: dict[str, Any]) -> bool:
 def merged_lora_sync_blockers(
     quantization: str | None,
     quantized_checkpoint: bool,
-    tower_lora: bool,
     mtp_drafting: bool,
 ) -> list[str]:
     """Why a rollout engine cannot serve merged LoRA weights with LoRA off.
@@ -172,26 +171,21 @@ def merged_lora_sync_blockers(
     merged weights. vLLM quantizes weights at load, both for the
     ``quantization`` engine argument and for a checkpoint that ships a
     quantization config, so such an engine cannot take merged bf16 tensors
-    and keeps serving the adapter. vLLM keys cached vision-encoder outputs by
-    LoRA name only, so an engine with tower LoRA keeps serving the adapter
-    too. Merged sync does not update MTP draft weights, so an engine that
-    drafts with MTP keeps serving the adapter.
+    and keeps serving the adapter. Merged sync does not update MTP draft
+    weights, so an engine that drafts with MTP keeps serving the adapter.
 
     :param quantization: ``vllm_config.quantization``.
     :param quantized_checkpoint: :func:`checkpoint_quantized` of the engine's checkpoint.
-    :param tower_lora: Whether the adapter targets vision-tower modules.
     :param mtp_drafting: :func:`drafts_with_mtp` of the engine's ``speculative_config``.
     :return: One reason per blocker, naming the manifest field that sets it;
-        empty for an unquantized engine on an unquantized checkpoint, without
-        tower LoRA or MTP drafting.
+        empty for an unquantized engine on an unquantized checkpoint without
+        MTP drafting.
     """
     blockers = []
     if quantization is not None and quantization.lower() != "none":
         blockers.append(f"vllm_config.quantization is {quantization!r}")
     if quantized_checkpoint:
         blockers.append("the checkpoint's config.json ships a quantization config")
-    if tower_lora:
-        blockers.append("lora_config.tower_target_modules targets the vision tower")
     if mtp_drafting:
         blockers.append("vllm_engine_args.speculative_config drafts with MTP")
     return blockers

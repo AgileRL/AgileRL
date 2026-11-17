@@ -201,7 +201,7 @@ def restore_granitemoehybrid_tensor_parallel(
             shard_mamba_mixer(mixer, tp_mesh, int(mixer.intermediate_size))
 
 
-GRANITEMOEHYBRID_TENSOR_PARALLEL_PLAN = TensorParallelPlan(
+TENSOR_PARALLEL_PLAN = TensorParallelPlan(
     shard=apply_granitemoehybrid_tensor_parallel,
     restore=restore_granitemoehybrid_tensor_parallel,
     row_orders=granitemoehybrid_row_orders,

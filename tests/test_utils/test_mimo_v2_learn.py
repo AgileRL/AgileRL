@@ -26,8 +26,8 @@ from transformers.models.mimo_v2_flash.modeling_mimo_v2_flash import (
 
 from agilerl.algorithms.cispo import CISPO
 from agilerl.architectures.flex_attention import patch_flex_attention_kernel_options
-from agilerl.architectures.mimo_v2 import install_mimo_v2_native_training
-from agilerl.architectures.mimo_v2.config import MiMoV2Config
+from agilerl.architectures.mimo_v2.configuration import MiMoV2Config
+from agilerl.architectures.mimo_v2.patches import install_mimo_v2_patches
 from agilerl.architectures.runtime import PatchRuntimeConfig
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.distributed import FSDPConfig
@@ -332,7 +332,7 @@ def _worker(
         )
         torch.cuda.set_device(rank)
         # The MiMo flex backend must be registered before the kernel-options wrap.
-        install_mimo_v2_native_training(PatchRuntimeConfig())
+        install_mimo_v2_patches(PatchRuntimeConfig())
         patch_flex_attention_kernel_options()
         # One group per reference rank, so every rank sees a nonzero advantage.
         batch = _batch(prompts=world_size)

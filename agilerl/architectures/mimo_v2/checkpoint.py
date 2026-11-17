@@ -26,6 +26,7 @@ import math
 from typing import Any
 
 import torch
+from transformers import PreTrainedModel
 from transformers.core_model_loading import (
     Concatenate,
     ConversionOps,
@@ -55,7 +56,6 @@ FP4_E2M1_VALUES = (
 )
 E8M0_BIAS = 127
 DENSE_FP8_PROJECTIONS = ("gate_proj", "up_proj", "down_proj")
-TOWER_KEY_PATTERNS = (r"^visual\.", r"^audio_encoder\.", r"^speech_embeddings\.")
 
 
 def dequant_fp8_block(
@@ -172,19 +172,19 @@ def dequant_mxfp4(packed: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
     return torch.ldexp(unpacked, exponent.repeat_interleave(block, dim=1))
 
 
-def target_dtype(model: torch.nn.Module | None, full_layer_name: str) -> torch.dtype:
-    """Dtype of the parameter a conversion fills, or fp32 when the caller casts on copy.
+def target_dtype(model: PreTrainedModel | None, full_layer_name: str) -> torch.dtype:
+    """Dtype of the parameter or buffer a conversion fills, or fp32 when the caller casts on copy.
 
     :param model: Model being loaded, or None.
-    :type model: torch.nn.Module | None
-    :param full_layer_name: Parameter name the conversion produces.
+    :type model: PreTrainedModel | None
+    :param full_layer_name: Parameter or buffer name the conversion produces.
     :type full_layer_name: str
     :return: Output dtype.
     :rtype: torch.dtype
     """
     if model is None:
         return torch.float32
-    return model.get_parameter(full_layer_name).dtype
+    return model.get_parameter_or_buffer(full_layer_name).dtype
 
 
 class LoadOnly(ConversionOps):
@@ -206,7 +206,14 @@ class LoadOnly(ConversionOps):
 
 
 class ParameterDtypeCast(ConversionOps):
-    """Cast a renamed tensor to its parameter's dtype; transformers keeps pre-quantized renames as stored."""
+    """Cast a renamed tensor to ``dtype``, or its parameter's dtype; transformers keeps pre-quantized renames as stored.
+
+    :param dtype: Fixed output dtype, or None for the parameter's.
+    :type dtype: torch.dtype | None
+    """
+
+    def __init__(self, dtype: torch.dtype | None = None) -> None:
+        self.dtype = dtype
 
     def convert(
         self,
@@ -223,12 +230,13 @@ class ParameterDtypeCast(ConversionOps):
         :type source_patterns: list[str]
         :param target_patterns: Converter target patterns.
         :type target_patterns: list[str]
-        :return: The cast tensor under the target pattern.
+        :return: The cast tensor under its parameter or buffer name.
         :rtype: dict[str, list[torch.Tensor]]
         """
         (tensor,) = input_dict[source_patterns[0]]
-        dtype = target_dtype(kwargs.get("model"), kwargs["full_layer_name"])
-        return {target_patterns[0]: [tensor.to(dtype)]}
+        full_layer_name = kwargs["full_layer_name"]
+        dtype = self.dtype or target_dtype(kwargs.get("model"), full_layer_name)
+        return {full_layer_name: [tensor.to(dtype)]}
 
     @property
     def reverse_op(self) -> ConversionOps:
@@ -258,13 +266,14 @@ class Fp8BlockDequantize(ConversionOps):
         :type source_patterns: list[str]
         :param target_patterns: Converter target patterns.
         :type target_patterns: list[str]
-        :return: The dequantized weight under the target pattern.
+        :return: The dequantized weight under its parameter name.
         :rtype: dict[str, list[torch.Tensor]]
         """
         # Loaders collect keys sorted, so ``weight`` arrives before ``weight_scale_inv``.
         weight, scale_inv = input_dict[source_patterns[0]]
-        dtype = target_dtype(kwargs.get("model"), kwargs["full_layer_name"])
-        return {target_patterns[0]: [dequant_fp8_block(weight, scale_inv).to(dtype)]}
+        full_layer_name = kwargs["full_layer_name"]
+        dtype = target_dtype(kwargs.get("model"), full_layer_name)
+        return {full_layer_name: [dequant_fp8_block(weight, scale_inv).to(dtype)]}
 
     @property
     def reverse_op(self) -> ConversionOps:
@@ -299,7 +308,7 @@ class PreshardedQkvDequantize(ConversionOps):
         """
         # Sorted key collection puts ``weight`` before ``weight_scale_inv``.
         weight, scale_inv = input_dict[source_patterns[0]]
-        config = kwargs["config"]
+        config = kwargs["config"].get_text_config()
         full_layer_name = kwargs["full_layer_name"]
         layer = int(full_layer_name.split(".layers.")[1].split(".")[0])
         # Pre-sharded over ``num_key_value_heads`` chunks; SWA layers carry
@@ -379,15 +388,25 @@ class Mxfp4Dequantize(ConversionOps):
 
 
 def mimo_v2_checkpoint_conversions() -> list[WeightConverter | WeightRenaming]:
-    """Conversions from the ``mimo_v2`` Hub checkpoint to native ``MiMoV2Flash`` weights.
+    """Conversions from the ``mimo_v2`` Hub checkpoint to native vision-language weights.
 
-    :return: Converters, expert converters before the dense MLP ones so those
-        patterns never see expert keys.
+    Renames move the Hub's top-level ``model`` / ``visual`` keys under
+    ``model.language_model`` / ``model.visual``; MTP keys stay put and are
+    ignored. Converters match the renamed keys, first match wins.
+
+    :return: Renames, then converters: expert converters before the dense MLP
+        ones so those patterns never see expert keys, and a cast of every
+        other renamed tensor last.
     :rtype: list[WeightConverter | WeightRenaming]
     """
     expert_weight = "mlp.experts.*.{}.weight$"
     expert_scale = "mlp.experts.*.{}.weight_scale$"
     return [
+        WeightRenaming(
+            source_patterns=r"^model(?!\.(language_model|visual|mtp))",
+            target_patterns="model.language_model",
+        ),
+        WeightRenaming(source_patterns=r"^visual", target_patterns="model.visual"),
         WeightConverter(
             source_patterns="self_attn.attention_sink_bias$",
             target_patterns="self_attn.sinks",
@@ -420,12 +439,25 @@ def mimo_v2_checkpoint_conversions() -> list[WeightConverter | WeightRenaming]:
             ],
             operations=[PreshardedQkvDequantize()],
         ),
+        # Anchored on the decoder layer: vision blocks have bf16 MLPs of the same names.
         *(
             WeightConverter(
-                source_patterns=rf"mlp.{projection}.weight(?:_scale_inv)?$",
-                target_patterns=f"mlp.{projection}.weight",
+                source_patterns=rf"(layers\.\d+\.)mlp\.{projection}\.weight(?:_scale_inv)?$",
+                target_patterns=rf"\1mlp.{projection}.weight",
                 operations=[Fp8BlockDequantize()],
             )
             for projection in DENSE_FP8_PROJECTIONS
+        ),
+        # The native class keeps the router correction bias in fp32 strictly.
+        WeightConverter(
+            source_patterns="mlp.gate.e_score_correction_bias$",
+            target_patterns="mlp.gate.e_score_correction_bias",
+            operations=[ParameterDtypeCast(torch.float32)],
+        ),
+        # The FP8 quantizer keeps a renamed pre-quantized tensor as stored.
+        WeightConverter(
+            source_patterns=r"^(model\.(?:language_model|visual)\..+)$",
+            target_patterns=r"\1",
+            operations=[ParameterDtypeCast()],
         ),
     ]

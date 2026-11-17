@@ -116,7 +116,7 @@ def strips_multimodal_towers(algorithm: LLMAlgorithmSpec, text_only: bool) -> bo
     """Whether the vLLM engine skips the model's vision and audio towers.
 
     True for a vision-language catalog model whose environment sends text only
-    (modality text, or dataset rows), unless tower LoRA trains the towers.
+    (modality text, or dataset rows).
 
     :param algorithm: The run's LLM algorithm spec.
     :param text_only: Whether the environment never sends images.
@@ -126,12 +126,7 @@ def strips_multimodal_towers(algorithm: LLMAlgorithmSpec, text_only: bool) -> bo
         return False
     hub_id = algorithm.pretrained_model_name_or_path
     model = SUPPORTED_MODEL_INFO.get(hub_id) if hub_id is not None else None
-    lora = algorithm.lora_config
-    return (
-        model is not None
-        and "vision" in model.modalities
-        and not (lora is not None and lora.tower_target_modules)
-    )
+    return model is not None and "vision" in model.modalities
 
 
 def _copy_when_unset(

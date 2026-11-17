@@ -9,9 +9,8 @@ import pytest
 import torch
 from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5Model
 
-from agilerl.architectures.catalog import FAMILY_RUNTIME_CONFIGS
+from agilerl.architectures import install_family_patches
 from agilerl.architectures.qwen3_5.vision import (
-    install_qwen3_5_vl_patches,
     mrope_position_ids,
     patch_qwen_vision_rows,
 )
@@ -26,8 +25,6 @@ from tests.test_architectures.qwen3_5.vision_helpers import (
     restored_qwen_vl_model,
     tiny_qwen_vl,
 )
-
-QWEN_VL_PATCH = FAMILY_RUNTIME_CONFIGS["qwen3_5"].patch
 
 
 @pytest.fixture
@@ -53,7 +50,7 @@ class TestQwenVisionRowsForward:
                 image_grid_thw=grids,
                 mm_token_type_ids=(input_ids == IMAGE).int(),
             ).logits
-        install_qwen3_5_vl_patches(QWEN_VL_PATCH)
+        install_family_patches("qwen3_5")
 
         # Act
         with torch.no_grad():
@@ -70,7 +67,7 @@ class TestQwenVisionRowsForward:
 
     def test_rows_without_input_ids_raise(self, pristine_qwen_vl_model) -> None:
         model = tiny_qwen_vl()
-        install_qwen3_5_vl_patches(QWEN_VL_PATCH)
+        install_family_patches("qwen3_5")
         rows = torch.randn(1, GRID, GRID, PATCH_DIM)
 
         with pytest.raises(ValueError, match="need input_ids"):
@@ -81,7 +78,7 @@ class TestQwenVisionRowsForward:
         input_ids = torch.tensor([[3, 4, 5, 6]])
         with torch.no_grad():
             expected = model(input_ids=input_ids).logits
-        install_qwen3_5_vl_patches(QWEN_VL_PATCH)
+        install_family_patches("qwen3_5")
 
         with torch.no_grad():
             actual = model(input_ids=input_ids).logits
@@ -93,7 +90,7 @@ class TestQwenVisionRowsForward:
     ) -> None:
         # Arrange
         model = tiny_qwen_vl()
-        install_qwen3_5_vl_patches(QWEN_VL_PATCH, use_sequence_packing=True)
+        install_family_patches("qwen3_5", use_sequence_packing=True)
         rows = [
             [image_prompt([3, 4], images=1), [5, 6, 7, 8, 9]],
             [[10, 11, 12, 13, 14], image_prompt([15, 16], images=1)],
@@ -140,7 +137,7 @@ class TestQwenVisionFillerFeatures:
     def test_runs_the_tower_on_one_image(self, pristine_qwen_vl_model) -> None:
         # Arrange
         model = tiny_qwen_vl()
-        install_qwen3_5_vl_patches(QWEN_VL_PATCH)
+        install_family_patches("qwen3_5")
         tower_inputs: list[torch.Tensor] = []
         model.model.visual.register_forward_hook(
             lambda _module, args, _output: tower_inputs.append(args[0])

@@ -44,6 +44,7 @@ from agilerl.distributed.tensor_parallel import (
     SharedSeedDropout,
     apply_tensor_parallel,
     copy_input_to_region,
+    permute_rows,
 )
 from agilerl.utils.llm_utils import get_lora_named_params
 from tests.parallel_helpers import (
@@ -1286,3 +1287,11 @@ class TestGatherRowsOnce:
         # Assert
         assert torch.equal(updated, torch.zeros(2, 3))
         assert "tp_frozen_rows" not in module.__dict__
+
+
+class TestPermuteRows:
+    def test_plain_tensor_raises(self):
+        with pytest.raises(
+            TypeError, match="permute_rows needs a DTensor, got Parameter"
+        ):
+            permute_rows(nn.Parameter(torch.zeros(2, 2)), torch.tensor([1, 0]))

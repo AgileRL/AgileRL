@@ -737,15 +737,7 @@ class LoraConfigDict(BaseModel):
         description=(
             "Modules to attach adapters to: 'all-linear', or names such as "
             "q_proj, k_proj, v_proj, o_proj. On a vision-language model these "
-            "land on the language model only."
-        ),
-    )
-    tower_target_modules: list[str] | None = Field(
-        default=None,
-        description=(
-            "Vision, audio or connector modules of a vision-language model to "
-            "adapt as well, e.g. query, key, value. The rollout engine then "
-            "keeps its towers."
+            "land on the language model only; the towers stay frozen."
         ),
     )
     # Packed MoE expert parameter paths (PEFT ``target_parameters``), e.g.
@@ -961,9 +953,8 @@ class FinetuningNetworkSpec(BaseModel):
 
         Ranks below the cap pass; the vLLM engine rounds ``max_lora_rank`` up
         to a value it accepts. ``target_modules`` is ``all-linear`` or a list
-        of the text model's module names, ``tower_target_modules`` a list of
-        module names outside it, and ``target_parameters`` a list of stored
-        paths; all match exactly. Unset ``target_parameters`` on a packed-MoE
+        of the text model's module names, and ``target_parameters`` a list of
+        stored paths; all match exactly. Unset ``target_parameters`` on a packed-MoE
         model adapts every expert path and sets ``lora_dropout`` to 0;
         ``[]`` adapts none. Expert paths with a set nonzero ``lora_dropout``
         are rejected.
@@ -998,16 +989,7 @@ class FinetuningNetworkSpec(BaseModel):
         elif towers := sorted(set(lora.target_modules) - entry.default_lora_modules):
             msg = (
                 f"LoRA target_modules {towers} are tower modules of {hub_id}; "
-                "name them in tower_target_modules"
-            )
-            raise ValueError(msg)
-        if unknown := sorted(
-            set(lora.tower_target_modules or ()) - entry.tower_lora_modules
-        ):
-            valid = ", ".join(sorted(entry.tower_lora_modules)) or "none"
-            msg = (
-                f"Unknown LoRA tower_target_modules {unknown} for {hub_id}; "
-                f"valid tower modules: {valid}"
+                "the towers stay frozen, so LoRA targets the language model only"
             )
             raise ValueError(msg)
         if unknown := sorted(set(lora.target_parameters or ()) - entry.parameters):

@@ -191,13 +191,9 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         tokens whose trainer/vLLM ratio reaches ``vllm_importance_sampling_cap``
         exceeds this (default ``0.02``). bf16 engines usually stay under 0.01.
     :type vllm_max_clip_fraction: float, optional
-    :param lora_tower_target_modules: Tower and connector modules of a VL model
-        to adapt as well. ``lora_config.target_modules`` always land on the
-        language model only. Defaults to None.
-    :type lora_tower_target_modules: list[str] | None, optional
     :param rollout_strip_multimodal_towers: Whether the vLLM engine serving the
-        adapter skips the model's multimodal towers; tower LoRA skips the towers
-        it leaves unbuilt. Builders derive it from the environment's modality.
+        adapter skips the model's multimodal towers. Builders derive it from the
+        environment's modality.
         Defaults to False.
     :type rollout_strip_multimodal_towers: bool, optional
     :param off_policy_token_mask_bounds: ``(low, high)`` band on each action
@@ -266,7 +262,6 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         advantage_granularity: Literal["turn", "token", "auto"] = "auto",
         importance_sampling_level: Literal["token", "turn", "trajectory"] = "token",
         quantization_config: BitsAndBytesConfig | None = None,
-        lora_tower_target_modules: list[str] | None = None,
         rollout_strip_multimodal_towers: bool = False,
         vllm_importance_sampling_cap: float = 2.0,
         vllm_max_logprob_gap: float = 0.1,
@@ -307,7 +302,6 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
             name="LLMREINFORCE",
             gradient_checkpointing=gradient_checkpointing,
             quantization_config=quantization_config,
-            lora_tower_target_modules=lora_tower_target_modules,
             rollout_strip_multimodal_towers=rollout_strip_multimodal_towers,
             vllm_importance_sampling_cap=vllm_importance_sampling_cap,
             vllm_max_logprob_gap=vllm_max_logprob_gap,

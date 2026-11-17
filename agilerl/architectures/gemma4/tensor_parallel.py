@@ -145,4 +145,4 @@ def apply_gemma4_tensor_parallel(model: nn.Module, tp_mesh: DeviceMesh) -> int:
     return count
 
 
-GEMMA4_TENSOR_PARALLEL_PLAN = TensorParallelPlan(shard=apply_gemma4_tensor_parallel)
+TENSOR_PARALLEL_PLAN = TensorParallelPlan(shard=apply_gemma4_tensor_parallel)

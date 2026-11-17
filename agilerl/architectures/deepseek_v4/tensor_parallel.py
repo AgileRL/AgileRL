@@ -180,7 +180,7 @@ def deepseek_v4_row_orders(_model: nn.Module) -> dict[str, torch.Tensor]:
     return {}
 
 
-DEEPSEEK_V4_TENSOR_PARALLEL_PLAN = TensorParallelPlan(
+TENSOR_PARALLEL_PLAN = TensorParallelPlan(
     shard=apply_deepseek_v4_tensor_parallel,
     restore=restore_deepseek_v4_tensor_parallel,
     row_orders=deepseek_v4_row_orders,

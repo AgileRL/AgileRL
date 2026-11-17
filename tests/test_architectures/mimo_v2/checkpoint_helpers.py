@@ -16,6 +16,14 @@ from transformers.integrations.mxfp4 import convert_moe_packed_tensors
 
 FP8_BLOCK = 128
 MXFP4_BLOCK = 32
+IMAGE_TOKEN_ID = 120
+PATCH_SIZE = 2
+TEMPORAL_PATCH_SIZE = 2
+MERGE = 2
+# Three channels, two frames, 2x2 pixels.
+PATCH_DIM = 3 * TEMPORAL_PATCH_SIZE * PATCH_SIZE**2
+LANGUAGE_PREFIX = "model.language_model."
+VISION_PREFIX = "model.visual."
 FP4_E2M1 = torch.tensor(
     [
         0.0,
@@ -90,7 +98,33 @@ def tiny_hub_config() -> dict[str, Any]:
         "topk_method": "noaux_tc",
         "v_head_dim": 32,
         "vocab_size": 128,
-        "vision_config": {"depth": 1},
+        "image_token_id": IMAGE_TOKEN_ID,
+        "processor_config": {
+            "image_min_pixels": 4 * PATCH_SIZE**2,
+            "image_max_pixels": 64 * PATCH_SIZE**2,
+            "patch_size": PATCH_SIZE,
+            "merge_size": MERGE,
+            "temporal_patch_size": TEMPORAL_PATCH_SIZE,
+        },
+        "vision_config": {
+            "depth": 3,
+            "hidden_size": 32,
+            "intermediate_size": 48,
+            "hidden_act": "silu",
+            "num_heads": 2,
+            "num_key_value_heads": 1,
+            "in_chans": 3,
+            "patch_size": PATCH_SIZE,
+            "temporal_patch_size": TEMPORAL_PATCH_SIZE,
+            "spatial_merge_size": MERGE,
+            "out_hidden_size": 64,
+            "fullatt_block_indexes": [0],
+            "vit_window_attn_types": [-1, 0, 1],
+            "visual_token_window_size": 4,
+            "use_sink": True,
+            "num_query_groups": 1,
+            "window_size": -1,
+        },
         "quantization_config": {
             "activation_scheme": "dynamic",
             "fmt": "e4m3",
@@ -200,14 +234,52 @@ def random_native_state(model: torch.nn.Module, seed: int) -> dict[str, torch.Te
 def hub_checkpoint(
     native: dict[str, torch.Tensor], config: Any
 ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
-    """Quantize a native state dict into ``mimo_v2`` Hub tensors.
+    """Quantize a native vision-language state dict into ``mimo_v2`` Hub tensors.
 
-    :param native: Native ``MiMoV2Flash`` fp32 state dict.
+    :param native: Native ``MiMoV2ForConditionalGeneration`` fp32 state dict.
     :param config: The native config, for layer types and head counts.
-    :return: Hub tensors (with MTP and tower keys) and the native state dict
+    :return: Hub tensors (with MTP and audio keys) and the native state dict
         holding each tensor's exact dequantized value.
     """
-    hub: dict[str, torch.Tensor] = {}
+    hub = {
+        "visual." + name.removeprefix(VISION_PREFIX): tensor.bfloat16()
+        for name, tensor in native.items()
+        if name.startswith(VISION_PREFIX)
+    }
+    native = {
+        "model." + name.removeprefix(LANGUAGE_PREFIX)
+        if name.startswith(LANGUAGE_PREFIX)
+        else name: tensor
+        for name, tensor in native.items()
+        if not name.startswith(VISION_PREFIX)
+    }
+    text_reference = text_hub_checkpoint(native, config.text_config, hub)
+    reference = {
+        LANGUAGE_PREFIX + name.removeprefix("model.")
+        if name.startswith("model.")
+        else name: tensor
+        for name, tensor in text_reference.items()
+    }
+    reference.update(
+        {
+            VISION_PREFIX + name.removeprefix("visual."): tensor.float()
+            for name, tensor in hub.items()
+            if name.startswith("visual.")
+        }
+    )
+    return hub, reference
+
+
+def text_hub_checkpoint(
+    native: dict[str, torch.Tensor], config: Any, hub: dict[str, torch.Tensor]
+) -> dict[str, torch.Tensor]:
+    """Add the quantized language-model Hub tensors of a text-only state dict to ``hub``.
+
+    :param native: ``MiMoV2FlashForCausalLM`` fp32 state dict.
+    :param config: The language-model config.
+    :param hub: Hub tensors, extended in place.
+    :return: ``native`` with each tensor's exact dequantized value.
+    """
     reference = dict(native)
     chunks = config.num_key_value_heads
     for layer, layer_type in enumerate(config.layer_types):
@@ -278,10 +350,9 @@ def hub_checkpoint(
     for name in ("model.embed_tokens.weight", "model.norm.weight", "lm_head.weight"):
         hub[name] = native[name].bfloat16()
     hub["model.mtp.layers.0.input_layernorm.weight"] = torch.ones(config.hidden_size)
-    hub["visual.patch_embed.proj.weight"] = torch.ones(4, 4)
     hub["audio_encoder.layers.0.weight"] = torch.ones(4)
     hub["speech_embeddings.0.weight"] = torch.ones(4, 4)
-    return hub, reference
+    return reference
 
 
 def write_hub_checkpoint(directory: Path, hub: dict[str, torch.Tensor]) -> None:
