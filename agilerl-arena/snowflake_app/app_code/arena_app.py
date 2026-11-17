@@ -10,6 +10,7 @@ The setup script registers each handler with ``IMPORTS`` of this file and
 from __future__ import annotations
 
 import logging
+import sys
 import tempfile
 import time
 import warnings
@@ -132,6 +133,10 @@ logger = logging.getLogger(__name__)
 ARENA_LOGGER = logging.getLogger("agilerl.arena")
 ARENA_LOGGER.handlers.clear()
 ARENA_LOGGER.propagate = True
+
+# Snowflake returns a procedure's formatted exception to the caller; without this
+# the consumer sees the app's stack and file paths around the message.
+sys.tracebacklimit = 0
 
 
 def configure(

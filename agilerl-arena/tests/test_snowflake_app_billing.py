@@ -563,6 +563,35 @@ class TestArenaAppLogging:
         assert "Could not bill" not in result.stderr
 
 
+class TestArenaAppErrors:
+    def test_procedure_errors_reach_the_caller_as_the_message_only(self) -> None:
+        # Arrange
+        arena_root = Path(__file__).resolve().parents[1]
+        script = (
+            "import traceback\n"
+            "from snowflake_app.app_code import arena_app\n"
+            "try:\n"
+            "    arena_app.register_reference(None, 'consumer_secret', 'ADD', 'ref-1')\n"
+            "except ValueError:\n"
+            "    print(repr(traceback.format_exc()))\n"
+        )
+
+        # Act
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=arena_root,
+            env={**os.environ, "PYTHONPATH": str(arena_root)},
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        # Assert
+        assert result.stdout.strip() == repr(
+            "ValueError: Unknown reference consumer_secret. Bind source_table or source_view.\n"
+        )
+
+
 class TestReconcileUsage:
     def test_heartbeats_the_service_then_bills_the_deployment_hours(
         self, arena: Arena
