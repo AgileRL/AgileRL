@@ -106,6 +106,46 @@ jobs:
                   if-no-files-found: error
                   path: .coverage*
 
+    # Native App tests import Snowpark. The CPU matrix does not install that
+    # extra, and the GPU shard only collects gpu and vllm tests.
+    snowflake:
+        runs-on: ubuntu-24.04
+        env:
+            UV_CACHE_DIR: /tmp/uv-cache
+            UV_PROJECT_ENVIRONMENT: /tmp/agilerl-venv
+            PYTHONPATH: ${{ github.workspace }}/agilerl-arena
+            CUDA_VISIBLE_DEVICES: ''
+            ACCELERATE_USE_CPU: 'true'
+        steps:
+            - uses: actions/checkout@v5
+            - uses: astral-sh/setup-uv@v7
+              with:
+                  enable-cache: true
+                  python-version: '3.13'
+            - name: Install dependencies
+              run: |
+                  uv sync --locked --group dev --extra box2d --extra cpu-llm --extra cpu --extra verifiers
+                  uv sync --locked --package agilerl-arena --extra snowflake --inexact
+                  echo "$UV_PROJECT_ENVIRONMENT/bin" >> $GITHUB_PATH
+            - name: Run Native App tests
+              run: |
+                  uv run pytest \
+                    agilerl-arena/tests/test_snowflake_app_billing.py \
+                    agilerl-arena/tests/test_snowflake_app_config.py \
+                    agilerl-arena/tests/test_snowflake_app_manifest.py \
+                    agilerl-arena/tests/test_snowflake_app_runs.py \
+                    --import-mode=importlib \
+                    -m "not gpu and not vllm" \
+                    --junitxml=junit-snowflake.xml \
+                    -q
+            - name: Upload junit
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: junit-linux-snowflake-3.13
+                  path: junit-snowflake.xml
+                  if-no-files-found: ignore
+
     gpu:
         runs-on: gha-runner-scale-set
         strategy:

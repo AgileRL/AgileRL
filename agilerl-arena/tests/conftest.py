@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
 import sys
@@ -19,6 +20,18 @@ from agilerl.arena.auth import ArenaOAuth2
 from agilerl.arena.memory import estimator, formulas, fsdp_gather, manifest
 from agilerl.arena.memory.resolve import batch, engine, fsdp
 from agilerl.arena.models import model_info
+
+# The Native App modules import Snowpark, which only the snowflake extra installs.
+if (
+    importlib.util.find_spec("snowflake") is None
+    or importlib.util.find_spec("snowflake.snowpark") is None
+):
+    collect_ignore = [
+        "test_snowflake_app_billing.py",
+        "test_snowflake_app_config.py",
+        "test_snowflake_app_manifest.py",
+        "test_snowflake_app_runs.py",
+    ]
 
 # Bounded memo caches of the memory planner. Each assumes the bundled configs,
 # the catalog and module constants stay fixed for the process.

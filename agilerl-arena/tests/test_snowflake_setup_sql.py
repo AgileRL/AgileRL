@@ -188,7 +188,7 @@ class TestUserStatements:
 
 class TestSecretStatements:
     def test_creates_when_missing_then_sets_the_value(self) -> None:
-        assert secret_statements("arena_org_key", "o'k") == [
+        assert secret_statements("arena.training", "arena_org_key", "o'k") == [
             (
                 "CREATE SECRET IF NOT EXISTS arena.training.arena_org_key\n"
                 "  TYPE = GENERIC_STRING\n"

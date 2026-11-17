@@ -4,6 +4,7 @@
     "method": "POST",
     "path": "/api/cli/v1/snowflake/runs",
     "request": ["runId", "snowflakeAccount", "gpuCount", "gpuFamily", "startedAt"],
+    "optional_request": ["channel"],
     "response_data": ["runToken"]
   },
   "heartbeat": {
@@ -17,5 +18,33 @@
     "path": "/api/cli/v1/snowflake/runs/{runId}/complete",
     "request": ["endedAt"],
     "response_data": []
+  },
+  "usage": {
+    "method": "GET",
+    "paths": {
+      "run": "/api/cli/v1/snowflake/runs/{runId}/usage",
+      "deployment": "/api/cli/v1/snowflake/deployments/{deploymentId}/usage"
+    },
+    "response_data": ["state", "billableHours"],
+    "examples": {
+      "open": {
+        "data": {
+          "state": "open",
+          "billableHours": [
+            {"hourStart": "2026-11-16T13:00:00Z", "billableCents": 123}
+          ]
+        }
+      },
+      "closed": {
+        "data": {
+          "state": "closed",
+          "billableHours": [
+            {"hourStart": "2026-11-16T13:00:00Z", "billableCents": 123},
+            {"hourStart": "2026-11-16T14:00:00Z", "billableCents": 0},
+            {"hourStart": "2026-11-16T15:00:00Z", "billableCents": 41}
+          ]
+        }
+      }
+    }
   }
 }

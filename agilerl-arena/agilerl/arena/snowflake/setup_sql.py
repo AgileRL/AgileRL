@@ -353,15 +353,16 @@ def user_statements(
     return []
 
 
-def secret_statements(name: str, value: str) -> list[str]:
+def secret_statements(schema: str, name: str, value: str) -> list[str]:
     """Create the secret when missing, then set its value.
 
-    :param name: Secret name in ``arena.training``.
+    :param schema: Schema that holds the secret.
+    :param name: Secret name.
     :param value: Secret string.
     :return: The statements.
     """
     literal = string_literal(value)
-    qualified = f"{SCHEMA_NAME}.{name}"
+    qualified = f"{schema}.{name}"
     return [
         (
             f"CREATE SECRET IF NOT EXISTS {qualified}\n"
@@ -388,9 +389,11 @@ def arena_statements(
         return []
     host = f"{arena_api_hostname(arena.base_url)}:443"
     return [
-        *secret_statements(ARENA_ORG_KEY_SECRET, arena.org_key),
-        *secret_statements(ARENA_EXTERNAL_USER_SECRET, arena.external_user_id),
-        *secret_statements(ARENA_BASE_URL_SECRET, arena.base_url),
+        *secret_statements(SCHEMA_NAME, ARENA_ORG_KEY_SECRET, arena.org_key),
+        *secret_statements(
+            SCHEMA_NAME, ARENA_EXTERNAL_USER_SECRET, arena.external_user_id
+        ),
+        *secret_statements(SCHEMA_NAME, ARENA_BASE_URL_SECRET, arena.base_url),
         network_rule_sql(ARENA_API_RULE, (host,)),
         integration_sql(ARENA_API_INTEGRATION, ARENA_API_RULE, integrations),
     ]

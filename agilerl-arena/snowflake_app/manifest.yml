@@ -1,0 +1,48 @@
+---
+manifest_version: 2
+
+artifacts:
+    setup_script: setup_script.sql
+    container_services:
+        uses_gpu: true
+        images:
+            - /arena_provider/images/repo/snowflake-job:0.0.0-py313-cu130
+
+configuration:
+    log_level: INFO
+    trace_level: OFF
+
+lifecycle_callbacks:
+    version_initializer: app_code.version_init
+
+privileges:
+    - CREATE COMPUTE POOL:
+          description: Creates the Pulsar broker, Ray head and GPU worker compute pools that training and serving run on.
+    - CREATE WAREHOUSE:
+          description: Creates one XSMALL warehouse for exporting the bound table and writing run metrics.
+    - BIND SERVICE ENDPOINT:
+          description: Exposes the vLLM endpoint of a model published with serving turned on.
+    - CREATE EXTERNAL ACCESS INTEGRATION:
+          description: Lets training reach Hugging Face for base model weights and the Arena host for run licensing. You approve each host.
+    - EXECUTE TASK:
+          description: Runs the app's hourly task that bills each finished hour of training usage.
+    - EXECUTE MANAGED TASK:
+          description: Runs that hourly task on serverless compute, so no warehouse resumes for it.
+
+references:
+    - source_table:
+          label: Training table
+          description: A table the app reads training rows from. Read only.
+          privileges:
+              - SELECT
+          object_type: TABLE
+          multi_valued: true
+          register_callback: app_code.register_reference
+    - source_view:
+          label: Training view
+          description: A view the app reads training rows from. Put custom SQL in a view and bind it here. Read only.
+          privileges:
+              - SELECT
+          object_type: VIEW
+          multi_valued: true
+          register_callback: app_code.register_reference

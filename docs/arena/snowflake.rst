@@ -434,7 +434,7 @@ SFT manifest
      objective: sft
      columns:
        prompt: PROMPT
-       response: RESPONSE
+       target: RESPONSE
    network:
      pretrained_model_name_or_path: Qwen/Qwen3.5-0.8B
      max_context_length: 2048
