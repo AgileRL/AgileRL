@@ -59,6 +59,7 @@ from agilerl.arena.snowflake.license import (
     heartbeat_snowflake_deployment,
     open_snowflake_deployment,
     partner_headers,
+    snowflake_priced_families,
     snowflake_training_enabled,
     snowflake_usage,
 )
@@ -173,10 +174,14 @@ def configure(
         (ARENA_BASE_URL_SECRET, origin),
     ):
         save_secret(session, name, value)
-    return (
-        "Saved the Arena org key, external user id, and base URL.\n"
-        "Arena allows Snowflake training for this organisation."
-    )
+    priced = snowflake_priced_families(caps)
+    lines = [
+        "Saved the Arena org key, external user id, and base URL.",
+        "Arena allows Snowflake training for this organisation.",
+    ]
+    if priced is not None:
+        lines.append(f"Priced GPU families: {', '.join(sorted(priced)) or 'none'}.")
+    return "\n".join(lines)
 
 
 def arena_origin(session: SnowflakeSession, base_url: str) -> str:
@@ -504,7 +509,9 @@ def submit(
         from, or ``None``.
     :return: The run id, the service names, and any manifest warnings.
     :raises ValueError: An argument is out of range, the source is not a bound
-        reference, the pools are not set, or the manifest cannot run on them.
+        reference, the pools are not set, Arena has no price for the family,
+        or the manifest cannot run on them.
+    :raises SnowflakeLicenseError: Arena could not be reached or refused the key.
     """
     if gpus < 1:
         msg = "gpus must be at least 1.\nNothing was started."
@@ -514,6 +521,7 @@ def submit(
         raise ValueError(msg)
     source = reference_source(source_reference, source_alias)
     profile = app_setup(session)
+    pools = priced_pools(profile.pools.gpu, gpu_family)
     with (
         tempfile.TemporaryDirectory() as tmp,
         warnings.catch_warnings(record=True) as caught,
@@ -530,7 +538,7 @@ def submit(
             submitted, source, reward_path is not None, directory
         )
         family = choose_gpu_family(
-            profile.pools.gpu,
+            pools,
             gpus,
             gpu_family,
             lambda pool: manifest_fits(job_manifest, pool, gpus),
@@ -558,6 +566,44 @@ def submit(
         if issubclass(item.category, UserWarning)
     )
     return "\n".join(lines)
+
+
+def priced_pools(
+    pools: dict[str, GpuPool], gpu_family: str | None
+) -> dict[str, GpuPool]:
+    """Keep the app's GPU pools whose family Arena has a Snowflake price for.
+
+    Arena refuses an unpriced family only when the head opens the run, after
+    the GPU nodes have started, so ``submit`` checks first.
+
+    :param pools: GPU pools in ``setup.json``, keyed by family.
+    :param gpu_family: Family the caller named, or ``None``.
+    :return: The priced pools, or every pool when Arena does not list prices.
+    :raises ValueError: Arena is not configured, the named family has no
+        price, or no pool's family has one.
+    :raises SnowflakeLicenseError: Arena could not be reached or refused the key.
+    """
+    base_url, headers = arena_partner()
+    priced = snowflake_priced_families(fetch_capabilities(base_url, headers))
+    if priced is None:
+        return pools
+    listed = ", ".join(sorted(priced)) or "none"
+    if gpu_family is not None and gpu_family not in priced:
+        msg = (
+            f"Arena has no Snowflake price for {gpu_family}, so it would refuse "
+            f"the run after the GPUs start.\nPriced families: {listed}.\n"
+            "Nothing was started."
+        )
+        raise ValueError(msg)
+    kept = {family: pool for family, pool in pools.items() if family in priced}
+    if not kept:
+        msg = (
+            f"Arena has no Snowflake price for any of the app's GPU pools "
+            f"({', '.join(sorted(pools))}).\nPriced families: {listed}. "
+            "An app_admin calls set_pools with one of them.\nNothing was started."
+        )
+        raise ValueError(msg)
+    return kept
 
 
 def submit_settings(
