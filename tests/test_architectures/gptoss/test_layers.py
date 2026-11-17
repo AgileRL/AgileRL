@@ -5,7 +5,7 @@ import pytest
 import torch
 from torch import nn
 
-from agilerl.architectures.gptoss.experts import is_gpt_oss_experts_module
+from agilerl.architectures.gptoss.layers import is_gpt_oss_experts_module
 
 NUM_EXPERTS = 2
 HIDDEN = 4

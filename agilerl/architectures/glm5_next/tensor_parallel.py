@@ -340,10 +340,10 @@ def restore_glm5_next_tensor_parallel(model: nn.Module, _tp_mesh: DeviceMesh) ->
     """
     with torch.no_grad():
         for fqn, order in sorted(glm5_next_row_orders(model).items()):
-            permute_rows(cast("DTensor", model.get_parameter(fqn)), order)
+            permute_rows(model.get_parameter(fqn), order)
 
 
-GLM5_NEXT_TENSOR_PARALLEL_PLAN = TensorParallelPlan(
+TENSOR_PARALLEL_PLAN = TensorParallelPlan(
     shard=apply_glm5_next_tensor_parallel,
     restore=restore_glm5_next_tensor_parallel,
     row_orders=glm5_next_row_orders,

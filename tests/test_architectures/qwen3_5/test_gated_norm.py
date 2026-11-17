@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from agilerl.architectures.qwen3_5.gated_norm import install_fused_gated_norm
+from agilerl.architectures.qwen3_5.layers import install_fused_gated_norm
 from tests.test_architectures.qwen3_5.gdn_helpers import GATED_NORMS
 
 HAS_FLA = importlib.util.find_spec("fla") is not None

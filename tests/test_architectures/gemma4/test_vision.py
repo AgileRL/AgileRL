@@ -12,12 +12,12 @@ from transformers.models.gemma4.modeling_gemma4 import (
 )
 
 from agilerl.algorithms.core.llm_ops.vision_lockstep import FILLER_METHOD
-from agilerl.architectures.gemma4 import (
-    ACCEPTS_VISION_ROWS,
-    install_gemma4_vision_patches,
+from agilerl.architectures.gemma4.vision import (
+    install_gemma4_vision,
     patch_positions,
 )
 from agilerl.architectures.runtime import PatchRuntimeConfig
+from agilerl.architectures.vision_rows import ACCEPTS_VISION_ROWS
 
 IMAGE, BOI, EOI = 100, 101, 102
 GRID = 4
@@ -131,7 +131,7 @@ class TestGemma4VisionRowsForward:
                 pixel_values=pixel_values,
                 image_position_ids=image_position_ids,
             ).logits
-        install_gemma4_vision_patches(PatchRuntimeConfig())
+        install_gemma4_vision(PatchRuntimeConfig())
 
         # Act
         with torch.no_grad():
@@ -144,27 +144,28 @@ class TestGemma4VisionRowsForward:
 
 class TestInstallGemma4VisionPatches:
     def test_install_is_idempotent(self, pristine_gemma4_model) -> None:
-        install_gemma4_vision_patches(PatchRuntimeConfig())
+        install_gemma4_vision(PatchRuntimeConfig())
         get_image_features = Gemma4Model.get_image_features
 
-        install_gemma4_vision_patches(PatchRuntimeConfig())
+        install_gemma4_vision(PatchRuntimeConfig())
 
         assert Gemma4Model.get_image_features is get_image_features
 
     def test_unimportable_modeling_module_raises(self, monkeypatch) -> None:
         monkeypatch.setattr(
-            "agilerl.architectures.gemma4.GEMMA4_MODELING", "agilerl_missing_module"
+            "agilerl.architectures.gemma4.vision.GEMMA4_MODELING",
+            "agilerl_missing_module",
         )
 
         with pytest.raises(RuntimeError, match="is not importable"):
-            install_gemma4_vision_patches(PatchRuntimeConfig())
+            install_gemma4_vision(PatchRuntimeConfig())
 
 
 class TestGemma4VisionFillerFeatures:
     def test_runs_the_tower_on_one_image(self, pristine_gemma4_model) -> None:
         # Arrange
         model = tiny_gemma4()
-        install_gemma4_vision_patches(PatchRuntimeConfig())
+        install_gemma4_vision(PatchRuntimeConfig())
         tower_inputs: list[torch.Tensor] = []
         model.model.vision_tower.register_forward_hook(
             lambda _module, _args, kwargs, _output: tower_inputs.append(

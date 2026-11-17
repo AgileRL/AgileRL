@@ -26,12 +26,12 @@ from typing import TYPE_CHECKING, Any
 import torch
 from torch import nn
 
-from agilerl.architectures.qwen3_5.gated_delta_net import (
+from agilerl.architectures.qwen3_5.layers import (
     GdnKernel,
     apply_gdn_conv_clone,
     gdn_kernel_import_errors,
+    install_fused_gated_norm,
 )
-from agilerl.architectures.qwen3_5.gated_norm import install_fused_gated_norm
 from agilerl.architectures.runtime import PatchRuntimeConfig
 from agilerl.utils.llm_packing import (
     RESETS_AT_DOCUMENT_BOUNDARY,
@@ -49,7 +49,7 @@ __all__ = [
     "GROUPED_QK_HEADS",
     "PACKED_CU_SEQLENS",
     "VARLEN_SCAN",
-    "install_qwen_gdn_patches",
+    "install_qwen3_5_patches",
     "patch_qwen_gdn_grouped_heads",
     "patch_qwen_gdn_packed_sequences",
     "resolve_class",
@@ -307,7 +307,7 @@ def _require_gdn_fast_path() -> None:
 
 
 @library_shim("transformers", "==5.19.*")
-def install_qwen_gdn_patches(
+def install_qwen3_5_patches(
     patch: PatchRuntimeConfig,
     model: object | None = None,
     use_sequence_packing: bool = False,

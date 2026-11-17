@@ -490,8 +490,8 @@ class SequenceLayout(ABC):
     ) -> list[tuple[int, int]]:
         """``(start, end)`` row spans of a fused pass's forwards, in run order.
 
-        A packed row and vision-tower LoRA layers each take one adapter, so
-        those spans hold one adapter run.
+        A packed row and a vision pass each take one adapter, so those spans
+        hold one adapter run.
 
         :param mask: ``(B, T)`` attention mask of the fused batch.
         :param routing: Adapter of each fused row.

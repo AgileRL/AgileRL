@@ -404,7 +404,6 @@ def spec_merged_lora_sync_blockers(spec: LLMAlgorithmSpec) -> list[str]:
     return teacher_blockers + merged_lora_sync_blockers(
         None if spec.vllm_config is None else spec.vllm_config.quantization,
         info is not None and _catalog_checkpoint_quantized(info),
-        bool(_lora_config(spec).tower_target_modules),
         drafts_with_mtp(spec.vllm_engine_args.get("speculative_config")),
     )
 
@@ -780,7 +779,6 @@ def training_settings_from_spec(
         images_per_row=images_per_row,
         image_width=image_width,
         image_height=image_height,
-        tower_lora_targets=frozenset(lora.tower_target_modules or ()),
         segmented_rows=segmented_rows,
         checkpoint_optimizer=checkpoint_optimizer,
         async_rollout=async_rollout,

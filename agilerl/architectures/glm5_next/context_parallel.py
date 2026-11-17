@@ -75,6 +75,6 @@ def wrap_glm5_next_context_parallel(model: nn.Module, cp_mesh: DeviceMesh) -> in
     return count
 
 
-GLM5_NEXT_CONTEXT_PARALLEL_PLAN = ContextParallelPlan(
+CONTEXT_PARALLEL_PLAN = ContextParallelPlan(
     wrap=wrap_glm5_next_context_parallel,
 )

@@ -20,10 +20,13 @@ from transformers.models.nemotron_h_omni.modeling_nemotron_h_omni import (
 )
 from transformers.models.radio.configuration_radio import RadioConfig
 
-from agilerl.architectures import nemotron_h_omni
-from agilerl.architectures.nemotron_h_omni import (
+from agilerl.architectures.nemotron_h_omni import vision as nemotron_h_omni
+from agilerl.architectures.nemotron_h_omni.vision import (
+    install_nemotron_h_omni_vision,
     register_nemotron_h_omni_native_loading,
 )
+from agilerl.architectures.runtime import PatchRuntimeConfig
+from agilerl.architectures.vision_rows import packed_patches
 
 
 def _tiny_config() -> NemotronH_Omni_Reasoning_V3_Config:
@@ -62,6 +65,7 @@ def _tiny_config() -> NemotronH_Omni_Reasoning_V3_Config:
 
 def _tiny_model() -> torch.nn.Module:
     register_nemotron_h_omni_native_loading()
+    install_nemotron_h_omni_vision(PatchRuntimeConfig())
     torch.manual_seed(0)
     return AutoModelForCausalLM.from_config(_tiny_config()).eval()
 
@@ -71,11 +75,8 @@ class TestRegisterNemotronHOmniNativeLoading:
         from transformers.conversion_mapping import get_checkpoint_conversion_mapping
 
         register_nemotron_h_omni_native_loading()
-        wrapped = NemotronH_Omni_Reasoning_V3.get_image_features
         register_nemotron_h_omni_native_loading()
 
-        assert NemotronH_Omni_Reasoning_V3.get_image_features is wrapped
-        assert wrapped.__module__ == nemotron_h_omni.__name__
         entries = get_checkpoint_conversion_mapping("NemotronH_Omni_Reasoning_V3")
         sources = [
             pattern
@@ -111,6 +112,16 @@ class TestRegisterNemotronHOmniNativeLoading:
         finally:
             monkeypatch.undo()
             importlib.reload(nemotron_h_omni)
+
+
+class TestInstallNemotronHOmniVision:
+    def test_install_is_idempotent(self) -> None:
+        install_nemotron_h_omni_vision(PatchRuntimeConfig())
+        wrapped = NemotronH_Omni_Reasoning_V3.get_image_features
+        install_nemotron_h_omni_vision(PatchRuntimeConfig())
+
+        assert NemotronH_Omni_Reasoning_V3.get_image_features is wrapped
+        assert wrapped.__module__ == nemotron_h_omni.__name__
 
 
 class TestNativeOmniCheckpointRoundtrip:
@@ -158,7 +169,7 @@ class TestPackedPatches:
         rows = packed.reshape(2, 2, 4, 3)
 
         # Act
-        patches, image_grid_hw = nemotron_h_omni.packed_patches(rows)
+        patches, image_grid_hw = packed_patches(rows)
 
         # Assert
         assert torch.equal(patches, packed)
@@ -172,7 +183,7 @@ class TestNemotronHOmniGetImageFeatures:
         model = _tiny_model()
         # One 2x2 grid of 8x8 RGB patches, which pixel-shuffles into one image token (id 5).
         rows = torch.randn(1, 2, 2, 3 * 8 * 8)
-        patches, image_grid_hw = nemotron_h_omni.packed_patches(rows)
+        patches, image_grid_hw = packed_patches(rows)
         input_ids = torch.tensor([[1, 5, 2, 3]])
 
         # Act

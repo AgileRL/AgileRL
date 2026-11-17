@@ -32,7 +32,7 @@ from transformers.models.glm5_next.configuration_glm5_next import (
 
 import agilerl.architectures.glm5_next.liger as glm5_next_liger
 import agilerl.architectures.glm5_next.patches as glm5_next
-from agilerl.architectures.catalog import FAMILY_RUNTIME_CONFIGS
+from agilerl import architectures
 
 GLM5_NEXT_MODEL_TYPES = ("glm5_next", "glm5_next_text")
 STOCK_RMS_NORM = modeling_glm5_next.Glm5NextTextRMSNorm
@@ -153,26 +153,26 @@ class TestRegisterGlm5NextLiger:
         # Assert
         assert liger_registry["glm5_next"] is native
 
-    def test_family_installer_registers_the_applier(
+    def test_family_patches_register_the_applier(
         self, restored_glm_modeling: None, liger_registry: dict
     ) -> None:
         # Act
-        glm5_next.install_glm5_next_patches(FAMILY_RUNTIME_CONFIGS["glm5_next"].patch)
+        architectures.install_family_patches("glm5_next_text")
 
         # Assert
         assert set(GLM5_NEXT_MODEL_TYPES) <= set(liger_registry)
 
-    def test_installer_skips_registration_without_liger(
+    def test_family_patches_skip_registration_without_liger(
         self,
         restored_glm_modeling: None,
         liger_registry: dict,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # Arrange
-        monkeypatch.setattr(glm5_next, "HAS_LIGER_KERNEL", False)
+        monkeypatch.setattr(architectures, "HAS_LIGER_KERNEL", False)
 
         # Act
-        glm5_next.install_glm5_next_patches(FAMILY_RUNTIME_CONFIGS["glm5_next"].patch)
+        architectures.install_family_patches("glm5_next_text")
 
         # Assert
         assert set(GLM5_NEXT_MODEL_TYPES).isdisjoint(liger_registry)
@@ -281,10 +281,10 @@ class TestApplyLigerKernelToGlm5NextOnCuda:
         self, restored_glm_modeling: None
     ) -> None:
         # Arrange
+        torch.manual_seed(SEED)
         stock_model = tiny_glm5_next().cuda()
         liger_model = copy.deepcopy(stock_model)
         glm5_next_liger.apply_liger_kernel_to_glm5_next(model=liger_model)
-        torch.manual_seed(SEED)
         inputs = 4 * torch.randn(BATCH, SEQ, HIDDEN, device="cuda")
         weights = torch.randn(BATCH, SEQ, HIDDEN, device="cuda")
         outputs = []
@@ -302,9 +302,11 @@ class TestApplyLigerKernelToGlm5NextOnCuda:
 
         # Assert
         # fp32 kernels: Liger and PyTorch differ only in reduction order.
-        tolerance = {"rtol": 1e-4, "atol": 1e-5}
-        assert torch.allclose(outputs[1], outputs[0], **tolerance)
+        assert torch.allclose(outputs[1], outputs[0], rtol=1e-4, atol=1e-5)
+        # Hyper-connection gradients amplify that difference elementwise, so
+        # compare each gradient by its relative norm error.
         for liger_grad, stock_grad in zip(grads[1], grads[0], strict=True):
             assert (liger_grad is None) == (stock_grad is None)
             if liger_grad is not None and stock_grad is not None:
-                assert torch.allclose(liger_grad, stock_grad, **tolerance)
+                error = (liger_grad - stock_grad).norm()
+                assert error <= 1e-3 * stock_grad.norm()

@@ -49,10 +49,12 @@ from transformers.models.glm5_next.modeling_glm5_next import (
 
 from agilerl.architectures.glm5_next.tensor_parallel import (
     ATTENTION_CLASS,
-    GLM5_NEXT_TENSOR_PARALLEL_PLAN,
     LINEAR_ATTENTION_CLASS,
     MLP_CLASS,
     apply_glm5_next_tensor_parallel,
+)
+from agilerl.architectures.glm5_next.tensor_parallel import (
+    TENSOR_PARALLEL_PLAN as GLM5_NEXT_TENSOR_PARALLEL_PLAN,
 )
 from agilerl.arena.models.model_info import (
     LORA_EXCLUDED_MODULES,
@@ -141,11 +143,11 @@ GRID_THW = ((1, 4, 4), (1, 2, 4))
 SPATIAL_MERGE = 2
 PATCH_PIXELS = 3 * 2 * 2
 VISION_PROBE_WEIGHTS = (
-    "visual.blocks.0.attn.qkv.base_layer.weight",
-    "visual.blocks.0.attn.qkv.base_layer.bias",
+    "visual.blocks.0.attn.qkv.weight",
+    "visual.blocks.0.attn.qkv.bias",
     "visual.blocks.0.attn.proj.weight",
-    "visual.blocks.1.mlp.up_proj.base_layer.weight",
-    "visual.merger.up_proj.base_layer.weight",
+    "visual.blocks.1.mlp.up_proj.weight",
+    "visual.merger.up_proj.weight",
 )
 VISION_ROW_ORDERS = [
     f"visual.blocks.{block}.attn.qkv.{name}"
@@ -263,21 +265,6 @@ class Glm5NextVisionStack(nn.Module):
         return self.visual(pixels, grid_thw=torch.tensor(GRID_THW)).pooler_output
 
 
-def _with_tower_lora(stack: nn.Module) -> nn.Module:
-    inject_adapter_in_model(
-        LoraConfig(
-            r=2, target_modules=sorted(SUPPORTED_MODEL_INFO[HUB_ID].tower_lora_modules)
-        ),
-        stack,
-    )
-    stack.requires_grad_(True)
-    with torch.no_grad():
-        for name, param in stack.named_parameters():
-            if "lora_" in name:
-                param.normal_(std=0.1)
-    return stack
-
-
 def _vision_data(dp_rank: int) -> tuple[torch.Tensor, torch.Tensor]:
     """Patch pixels and a merged-token output probe for one data-parallel rank."""
     generator = torch.Generator().manual_seed(300 + dp_rank)
@@ -287,11 +274,6 @@ def _vision_data(dp_rank: int) -> tuple[torch.Tensor, torch.Tensor]:
         torch.randn(patches, PATCH_PIXELS, generator=generator),
         torch.randn(tokens, HIDDEN, generator=generator),
     )
-
-
-def _vision_loss(stack: nn.Module, dp_rank: int) -> torch.Tensor:
-    pixels, probe = _vision_data(dp_rank)
-    return (stack(pixels) * probe).sum()
 
 
 def _with_moe_lora(module: nn.Module) -> nn.Module:
@@ -468,50 +450,29 @@ def _worker(rank: int, world_size: int, tp: int, ep: int) -> None:
 
 
 def _vision_worker(rank: int, world_size: int, tp: int) -> None:
-    """Vision forward, reshard, LoRA gather and one SGD step match the unsharded tower."""
+    """A tensor-parallel frozen tower matches the unsharded tower."""
     # Arrange
     torch.manual_seed(0)
-    stack = _with_tower_lora(Glm5NextVisionStack())
+    stack = Glm5NextVisionStack()
     broadcast_module(stack)
     reference = copy.deepcopy(stack)
-    dp = world_size // tp
     mesh = parallel_mesh(world_size, 1, tp, 1)
     config = fsdp_config(1, tp, 1)
-    with patch.object(fsdp_blocks, "PARAM_PERSISTENCE_THRESHOLD", 0):
-        materialize_fsdp2_from_cpu_state(
-            stack, "cpu", config, parallel_mesh=mesh, gradient_checkpointing=True
-        )
-    pixels, probe = _vision_data(rank // tp)
+    pixels, _ = _vision_data(rank // tp)
     with torch.no_grad():
         full_output = reference(pixels)
-    reference_loss = sum(_vision_loss(reference, dp_rank) for dp_rank in range(dp))
-    (reference_loss / dp).backward()
-    expected = _stepped_reference(reference)
-    runtime = FSDPRuntime(config)
-    runtime.parallel_mesh = mesh
-    optimizer = sgd(stack, lr=1.0)
 
     # Act
-    output = stack(pixels)
-    assert_resharded(stack, reference, tp, dp)
-    _assert_tp_blocks_sharded(stack, tp, VISION_PROBE_WEIGHTS)
-    assert_lora(stack, reference)
-    step = runtime.backward(
-        (output * probe).sum(),
-        optimizer,
-        gradient_accumulation_steps=1,
-        actor=stack,
-        max_grad_norm=1e6,
-    )
+    with patch.object(fsdp_blocks, "PARAM_PERSISTENCE_THRESHOLD", 0):
+        materialize_fsdp2_from_cpu_state(stack, "cpu", config, parallel_mesh=mesh)
+    with torch.no_grad():
+        output = stack(pixels)
 
     # Assert
-    assert_exact(output, full_output, "output")
-    assert step is not None
+    _assert_tp_blocks_sharded(stack, tp, VISION_PROBE_WEIGHTS)
     orders = GLM5_NEXT_TENSOR_PARALLEL_PLAN.row_orders(stack)
-    assert sorted(plain(name) for name in orders) == [
-        name.replace("qkv.", "qkv.base_layer.") for name in VISION_ROW_ORDERS
-    ]
-    _assert_stepped(stack, expected, orders)
+    assert sorted(plain(name) for name in orders) == sorted(VISION_ROW_ORDERS)
+    assert_exact(output, full_output, "output")
 
 
 def _meta_load_worker(
@@ -789,7 +750,7 @@ class TestGlm5NextParallel:
 
 class TestGlm5NextVisionParallel:
     def test_tiny_tower_runs(self) -> None:
-        stack = _with_tower_lora(Glm5NextVisionStack())
+        stack = Glm5NextVisionStack()
         pixels, probe = _vision_data(0)
 
         output = stack(pixels)
@@ -798,7 +759,7 @@ class TestGlm5NextVisionParallel:
         assert torch.isfinite(output).all()
 
     @pytest.mark.multi_rank
-    def test_forward_and_step_match_unsharded(self) -> None:
+    def test_forward_matches_unsharded(self) -> None:
         run_ranks(_vision_worker, 4, 2, timeout=300)
 
     @pytest.mark.multi_rank

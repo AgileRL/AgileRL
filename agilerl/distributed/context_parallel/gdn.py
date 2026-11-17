@@ -19,7 +19,7 @@ import torch.distributed as dist
 from torch import nn
 from torch.distributed.device_mesh import DeviceMesh
 
-from agilerl.architectures.qwen3_5.gated_delta_net import (
+from agilerl.architectures.qwen3_5.layers import (
     GdnKernel,
     gdn_kernel_import_errors,
 )

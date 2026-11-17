@@ -19,18 +19,16 @@ from transformers.models.glm5_next.modeling_glm5_next import (
 
 import agilerl.architectures.glm5_next.patches as glm5_next
 from agilerl.architectures.catalog import FAMILY_RUNTIME_CONFIGS
-from agilerl.architectures.glm5_next import (
-    CAUSAL_SDPA_WHEN_TOPK_COVERS,
-    causal_sdpa_attention_forward,
-    install_glm5_next_patches,
-    topk_covers_causal_prefix,
-    topk_skipping_model_forward,
-)
 from agilerl.architectures.glm5_next.patches import (
+    CAUSAL_SDPA_WHEN_TOPK_COVERS,
     SequenceShard,
+    causal_sdpa_attention_forward,
     expand_latent_kv,
+    install_glm5_next_patches,
     sequence_shard_sparse_mask,
     topk_attention_mask,
+    topk_covers_causal_prefix,
+    topk_skipping_model_forward,
 )
 from agilerl.architectures.hyper_connections import (
     COMPILED_HYPER_CONNECTION_MIX,
@@ -522,7 +520,6 @@ class TestInstallGlm5NextPatches:
             False,
             raising=False,
         )
-        monkeypatch.setattr(glm5_next, "HAS_LIGER_KERNEL", False)
         patch = FAMILY_RUNTIME_CONFIGS["glm5_next_text"].patch
 
         # Act
@@ -534,9 +531,8 @@ class TestInstallGlm5NextPatches:
         assert Glm5NextTextModel.forward.__wrapped__ is STOCK_MODEL_FORWARD
         assert Glm5NextTextHyperConnection.forward is hyper_connection_forward
 
-    @pytest.mark.parametrize("model_type", ["glm5_next", "glm5_next_text"])
-    def test_catalog_installs_the_attention_patch(self, model_type: str) -> None:
-        patch = FAMILY_RUNTIME_CONFIGS[model_type].patch
+    def test_catalog_installs_the_attention_patch(self) -> None:
+        patch = FAMILY_RUNTIME_CONFIGS["glm5_next_text"].patch
 
         assert patch.install is install_glm5_next_patches
 

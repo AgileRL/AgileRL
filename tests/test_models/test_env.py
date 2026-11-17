@@ -768,17 +768,23 @@ class TestLLMEnvSpec:
             make_rollout_env_factory(spec, mock_tokenizer)[0]()
         assert mock_rollout_cls.call_args.kwargs["chat_format"] == "granite3"
 
-    def test_unknown_tokenizer_leaves_the_harness_chat_format_default(self):
+    def test_tokenizer_without_config_leaves_the_harness_chat_format_default(self):
         mock_tokenizer = MagicMock()
         mock_tokenizer.pad_token_id = 0
-        mock_tokenizer.name_or_path = "not-a-supported-model"
+        mock_tokenizer.name_or_path = "org/tokenizer-only"
         spec = LLMEnvSpec(
             env_type=LLMEnvType.ROLLOUT,
             entrypoint="tests.test_models.test_env:_StubTextEnv",
             max_turns=2,
         )
         mock_rollout_cls = MagicMock()
-        with patch("agilerl.models.env.RolloutHarness", mock_rollout_cls):
+        with (
+            patch("agilerl.models.env.RolloutHarness", mock_rollout_cls),
+            patch(
+                "agilerl.models.env.family_runtime",
+                side_effect=OSError("no config.json"),
+            ),
+        ):
             make_rollout_env_factory(spec, mock_tokenizer)[0]()
         assert "chat_format" not in mock_rollout_cls.local.call_args.kwargs
 

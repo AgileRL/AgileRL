@@ -262,13 +262,9 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         loading the base model in 4-/8-bit (QLoRA). ``lm_head`` is kept
         unquantized so the fused-linear-logprob path stays numerically exact.
     :type quantization_config: BitsAndBytesConfig | None, optional
-    :param lora_tower_target_modules: Tower and connector modules of a VL model
-        to adapt as well. ``lora_config.target_modules`` always land on the
-        language model only. Defaults to None.
-    :type lora_tower_target_modules: list[str] | None, optional
     :param rollout_strip_multimodal_towers: Whether the vLLM engine serving the
-        adapter skips the model's multimodal towers; tower LoRA skips the towers
-        it leaves unbuilt. Builders derive it from the environment's modality.
+        adapter skips the model's multimodal towers. Builders derive it from the
+        environment's modality.
         Defaults to False.
     :type rollout_strip_multimodal_towers: bool, optional
     :param vllm_importance_sampling_cap: Trainer/vLLM ratio at which the
@@ -410,7 +406,6 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         adv_filter_eps: float = 0.0,
         turn_advantage_trajectory_fallback: bool = True,
         quantization_config: BitsAndBytesConfig | None = None,
-        lora_tower_target_modules: list[str] | None = None,
         rollout_strip_multimodal_towers: bool = False,
         vllm_importance_sampling_cap: float = 2.0,
         vllm_max_logprob_gap: float = 0.1,
@@ -468,7 +463,6 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             name="GRPO",
             gradient_checkpointing=gradient_checkpointing,
             quantization_config=quantization_config,
-            lora_tower_target_modules=lora_tower_target_modules,
             rollout_strip_multimodal_towers=rollout_strip_multimodal_towers,
             vllm_importance_sampling_cap=vllm_importance_sampling_cap,
             vllm_max_logprob_gap=vllm_max_logprob_gap,

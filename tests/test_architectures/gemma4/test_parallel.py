@@ -787,7 +787,7 @@ class TestGemma4CheckpointCoverage:
         # Assert
         assert experts == []
         assert runtime.tensor_parallel_plan == (
-            "agilerl.architectures.gemma4.tensor_parallel:GEMMA4_TENSOR_PARALLEL_PLAN"
+            "agilerl.architectures.gemma4.tensor_parallel:TENSOR_PARALLEL_PLAN"
         )
         assert (
             FAMILY_RUNTIME_CONFIGS["gemma4_text"].tensor_parallel_plan
