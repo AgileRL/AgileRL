@@ -108,6 +108,7 @@ class BillingSession:
         self.hooks: dict[str, Callable[[], object]] = {}
         self.services: dict[str, str] = {}
         self.served: list[dict[str, object]] = []
+        self.grants: list[str] = []
 
     def add_item(
         self,
@@ -172,6 +173,9 @@ class BillingSession:
                     for name, status in self.services.items()
                 ]
             )
+        if statement.startswith("GRANT SERVICE ROLE app_state."):
+            self.grants.append(statement)
+            return Result([])
         if statement.startswith("DROP SERVICE IF EXISTS app_state."):
             self.services.pop(statement.rsplit(".", 1)[1], None)
             return Result([])
@@ -517,6 +521,9 @@ class TestBillHours:
         [
             "Too many calls. At most 1 call is allowed per 10 millisecond window.",
             SqlError("Only callable from within an application"),
+            SqlError(
+                "090898 (0A000): Application instance is not installed from listing"
+            ),
         ],
     )
     def test_documented_refusal_deletes_hours_so_the_next_call_bills_them(

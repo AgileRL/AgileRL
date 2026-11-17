@@ -637,6 +637,11 @@ class TestPublish:
         ]
         assert session.statements.index(recorded) < min(waits)
         assert session.statements.index(insert) > max(waits)
+        grant = session.statements.index(
+            "GRANT SERVICE ROLE app_state.QWEN_CHECKPOINT_2!ALL_ENDPOINTS_USAGE "
+            "TO APPLICATION ROLE app_user"
+        )
+        assert max(waits) < grant < session.statements.index(insert)
         assert not any(s.startswith("DROP") for s in session.statements)
 
     def test_a_failed_job_leaves_the_serve_recorded_for_the_hourly_task(

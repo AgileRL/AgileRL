@@ -126,6 +126,12 @@ API_INTEGRATION = "agilerl_app_arena_eai"
 
 logger = logging.getLogger(__name__)
 
+# Snowflake writes procedure logs to the event table from the root logger; the
+# CLI's console handler would keep agilerl.arena records on stderr instead.
+ARENA_LOGGER = logging.getLogger("agilerl.arena")
+ARENA_LOGGER.handlers.clear()
+ARENA_LOGGER.propagate = True
+
 
 def configure(
     session: SnowflakeSession, org_key: str, external_user_id: str, base_url: str
@@ -821,7 +827,9 @@ def meter_deployments(
     marked closed only after that close returns. A deployment Arena has closed
     is marked closed, so it settles from the usage read, and its service gets
     a new deployment. Every live service in ``app_state.served_models`` with
-    no open deployment gets one; a refused open drops the service. A 404 is
+    no open deployment gets one; a refused open drops the service. A service
+    dropped while metering its open deployment is not granted endpoint usage.
+    Every other live service is, including one already metered. A 404 is
     logged and the deployment is left. A deployment Arena has never answered
     for does not count its service as metered, so a live service is opened.
     The first other Arena failure stops metering.
@@ -839,18 +847,12 @@ def meter_deployments(
         "WHERE kind = 'deployment' AND settled_at IS NULL AND closed_at IS NULL "
         "AND service_name IS NOT NULL ORDER BY opened_at",
     )
-    statuses: dict[str, str] = {}
-    if rows or served:
-        statuses = {
-            str(values["name"]).upper(): str(values.get("status") or "").upper()
-            for values in map(
-                lowered, collect(session, f"SHOW SERVICES IN SCHEMA {APP_SCHEMA}")
-            )
-        }
+    statuses = service_statuses(session) if rows or served else {}
     counts = dict.fromkeys(
         ("heartbeat", "closed", "opened", "dropped", "missing", "failed"), 0
     )
     metered: set[str] = set()
+    dropped: set[str] = set()
     for row in rows:
         values = lowered(row)
         deployment_id, service = str(values["usage_id"]), str(values["service_name"])
@@ -883,11 +885,16 @@ def meter_deployments(
             counts["failed"] += 1
             metered.add(service)
             continue
+        if outcome == "dropped":
+            dropped.add(service)
         if outcome != "reopen":
             counts[outcome] += 1
             metered.add(service)
     for service, model in served.items():
-        if service in metered or not service_live(statuses.get(service)):
+        if service in dropped or not service_live(statuses.get(service)):
+            continue
+        grant_endpoint_usage(session, service)
+        if service in metered:
             continue
         try:
             open_served(session, model, calls.open, now)
@@ -905,6 +912,20 @@ def meter_deployments(
             break
         counts["opened"] += 1
     return deployment_summary(len(rows), counts)
+
+
+def service_statuses(session: SnowflakeSession) -> dict[str, str]:
+    """Upper-case ``SHOW SERVICES`` status of each service in ``app_state``, keyed by name.
+
+    :param session: Procedure session.
+    :return: The statuses.
+    """
+    return {
+        str(values["name"]).upper(): str(values.get("status") or "").upper()
+        for values in map(
+            lowered, collect(session, f"SHOW SERVICES IN SCHEMA {APP_SCHEMA}")
+        )
+    }
 
 
 def served_models(session: SnowflakeSession) -> dict[str, ServedModel]:
@@ -1085,6 +1106,7 @@ def publish(
     if served is not None and partner is not None:
         base_url, headers = partner
         try:
+            grant_endpoint_usage(session, served.service)
             deployment_id = open_served(
                 session,
                 served,
@@ -1121,6 +1143,19 @@ def published_model(
         run_id,
         families[document["compute_pool"].upper()],
         document["gpu_count"],
+    )
+
+
+def grant_endpoint_usage(session: SnowflakeSession, service: str) -> None:
+    """Let ``app_user`` call the endpoints of a service, which only the app can call otherwise.
+
+    :param session: Procedure session.
+    :param service: Service in ``app_state``.
+    """
+    collect(
+        session,
+        f"GRANT SERVICE ROLE {APP_SCHEMA}.{service}!ALL_ENDPOINTS_USAGE "
+        "TO APPLICATION ROLE app_user",
     )
 
 
