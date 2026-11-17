@@ -58,6 +58,7 @@ from agilerl.arena.memory.trainer_residency import (
     trainer_allocator_slack,
     trainer_base_bytes,
 )
+from agilerl.arena.memory.training_host import process_host_components
 from agilerl.arena.memory.training_warnings import training_warnings
 from agilerl.arena.models.fsdp import (
     FSDP_MEMORY_FIELDS,
@@ -101,6 +102,26 @@ def estimate_training(
     :raises ValueError: When checkpointing or an FSDP memory field is unset,
         or when an MoE model sets ``ep < tp``.
     """
+    return shared_training_estimate(model, device, settings, orchestrated).detached()
+
+
+def shared_training_estimate(
+    model: ModelSpec,
+    device: DeviceSpec,
+    settings: TrainingSettings,
+    orchestrated: bool = False,
+) -> PhaseBreakdown:
+    """:func:`estimate_training`'s cached breakdown, not a copy. Do not write to it.
+
+    :param model: Training-side model spec.
+    :param device: Training GPU.
+    :param settings: Training settings, with checkpointing and every FSDP
+        memory field set.
+    :param orchestrated: Charge the per-process job overhead.
+    :return: The breakdown every caller with these inputs shares.
+    :raises ValueError: When checkpointing or an FSDP memory field is unset,
+        or when an MoE model sets ``ep < tp``.
+    """
     fsdp = settings.fsdp
     if fsdp is not None and fsdp.ep < fsdp.tp and model.arch.is_moe:
         msg = (
@@ -123,7 +144,9 @@ def estimate_training(
             "before the estimate."
         )
         raise ValueError(msg)
-    return training_breakdown(model, device, settings, orchestrated)
+    return _cached_training_breakdown(
+        model, device, TrainingSettingsKey.of(settings), orchestrated
+    )
 
 
 def estimate_run(config: RunConfig) -> RunEstimate:
@@ -1040,33 +1063,6 @@ def training_host_components(
     )
 
 
-def _process_host_components(
-    offloaded_activations: float,
-    offloaded_params: float,
-) -> tuple[MemoryComponent, ...]:
-    """The trainer process's runtime and the tensors it offloads."""
-    return (
-        MemoryComponent(
-            key="trainer_process",
-            label="Trainer process",
-            n_bytes=formulas.TRAINER_PROCESS_HOST_BYTES,
-            note="Python, torch and the CUDA runtime.",
-        ),
-        MemoryComponent(
-            key="activation_offload",
-            label="Offloaded activations (pinned)",
-            n_bytes=int(offloaded_activations),
-            note="Tensors one micro-batch's forward saves for backward.",
-        ),
-        MemoryComponent(
-            key="parameter_offload",
-            label="Offloaded FSDP shard (pinned)",
-            n_bytes=int(offloaded_params),
-            note="Sharded parameters CPUOffloadPolicy keeps on host.",
-        ),
-    )
-
-
 def _model_state_components(
     base: float,
     adapters: AdapterState,
@@ -1392,15 +1388,39 @@ def training_breakdown(
     ).detached()
 
 
-@lru_cache(maxsize=256)
+# ~12 KiB per entry; 2048 keeps a machine group's probes for its other RAM sizes.
+@lru_cache(maxsize=2048)
 def _cached_training_breakdown(
     model: ModelSpec,
     device: DeviceSpec,
     key: TrainingSettingsKey,
     orchestrated: bool,
 ) -> PhaseBreakdown:
-    """:func:`training_breakdown`, computed once per model, device, settings and overhead."""
-    settings = key.settings
+    """:func:`training_breakdown`, computed once per model, device, settings and overhead.
+
+    Host RAM sets only ``host_usable_bytes``, so every RAM size shares the
+    breakdown computed without it.
+    """
+    if device.host_bytes_per_gpu is not None:
+        hostless = _cached_training_breakdown(
+            model,
+            device.model_copy(update={"host_bytes_per_gpu": None}),
+            key,
+            orchestrated,
+        )
+        return hostless.model_copy(
+            update={"host_usable_bytes": device.host_bytes_per_gpu}
+        )
+    return _hostless_training_breakdown(model, device, key.settings, orchestrated)
+
+
+def _hostless_training_breakdown(
+    model: ModelSpec,
+    device: DeviceSpec,
+    settings: TrainingSettings,
+    orchestrated: bool,
+) -> PhaseBreakdown:
+    """:func:`training_breakdown` on a device without a host RAM budget."""
     arch = model.arch
     counts = formulas.param_counts(arch, model.n_params)
     act_bytes = DTYPE_BYTES[settings.weight_dtype]
@@ -1460,7 +1480,7 @@ def _cached_training_breakdown(
         device_total_bytes=device.total_bytes,
         device_usable_bytes=device.usable_bytes,
         warnings=tuple(warnings),
-        host=_process_host_components(peak.offloaded, offloaded_params)
+        host=process_host_components(peak.offloaded, offloaded_params)
         + training_host_components(arch, settings, adapters, rollout, act_bytes),
         host_usable_bytes=device.host_bytes_per_gpu,
     )

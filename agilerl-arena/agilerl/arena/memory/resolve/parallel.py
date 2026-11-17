@@ -7,6 +7,7 @@ from __future__ import annotations
 import copy
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from functools import lru_cache
 from itertools import product
 from math import lcm
 
@@ -122,36 +123,73 @@ def parallel_layouts(
     :param ranks_fixed: ``n_gpus`` is the trainer count, not an upper bound.
     :return: Layouts in the order the search tries them.
     """
-    pins = parallel_layout_pins(fsdp)
-    pinned = pinned_layout(fsdp)
-    node = n_gpus if gpus_per_node is None else gpus_per_node
-    combos = product(
-        *_axis_values(
+    return list(
+        _cached_layouts(
             arch,
-            pins,
-            pinned,
-            _degrees(n_gpus, node, ranks_fixed),
+            n_gpus,
+            n_gpus if gpus_per_node is None else gpus_per_node,
+            parallel_layout_pins(fsdp),
+            pinned_layout(fsdp),
+            fsdp.cpu_offload,
             expert_parallel,
             context_parallel,
+            ranks_fixed,
         )
     )
-    layouts = (replace(pinned, ep=ep, cp=cp, tp=tp) for ep, cp, tp in combos)
+
+
+@lru_cache(maxsize=1024)
+def _cached_layouts(
+    arch: ModelArch,
+    n_gpus: int,
+    node: int,
+    pins: frozenset[str],
+    pinned: ParallelLayout,
+    cpu_offload: bool | None,
+    expert_parallel: bool,
+    context_parallel: bool,
+    ranks_fixed: bool,
+) -> tuple[ParallelLayout, ...]:
+    """:func:`parallel_layouts` from the FSDP fields it reads."""
+    ep_values, cp_values, tp_values = _axis_values(
+        arch,
+        pins,
+        pinned,
+        _degrees(n_gpus, node, ranks_fixed),
+        expert_parallel,
+        context_parallel,
+    )
+    shard = pinned.shard_group_size
+
+    def on_node(tp: int, ep: int, cp: int) -> bool:
+        layout = ParallelLayout(tp, ep, cp, shard)
+        return off_node_reason(layout, pinned, n_gpus, node, ranks_fixed) is None
+
+    # The expert group and the tensor x context group are checked apart.
+    dense = [
+        (tp, cp)
+        for tp, cp in product(tp_values, cp_values)
+        if (tp == 1 or _splits_over_tensor_parallel(arch, tp))
+        and (cp == 1 or _splits_over_context_parallel(arch, tp, cp))
+        and on_node(tp, pinned.ep, cp)
+    ]
+    experts = [ep for ep in ep_values if on_node(pinned.tp, ep, pinned.cp)]
     searched = [
         layout
-        for layout in layouts
-        if off_node_reason(layout, pinned, n_gpus, node, ranks_fixed) is None
-        and _trainer_accepts(arch, layout)
-        and _offload_runs(fsdp, layout)
+        for (tp, cp), ep in product(dense, experts)
+        # Tensor parallel leaves routed experts whole, so a MoE needs ep >= tp.
+        if not (arch.is_moe and ep < tp)
+        and _offload_runs(cpu_offload, layout := ParallelLayout(tp, ep, cp, shard))
     ]
     candidates = [pinned]
     if "shard_group_size" not in pins and node < n_gpus:
         candidates.append(replace(pinned, shard_group_size=node))
     candidates += sorted(searched, key=lambda layout: _search_rank(layout, pinned))
-    return [
+    return tuple(
         layout
         for layout in dict.fromkeys(candidates)
         if layout_runs(n_gpus, layout, ranks_fixed)
-    ]
+    )
 
 
 def _axis_values(
@@ -219,23 +257,15 @@ def off_node_reason(
     return None
 
 
-def _offload_runs(fsdp: FSDPConfig, layout: ParallelLayout) -> bool:
+def _offload_runs(cpu_offload: bool | None, layout: ParallelLayout) -> bool:
     """Whether the manifest's ``cpu_offload`` runs at ``layout``'s degrees."""
+    if not cpu_offload:
+        return True
     trial = FSDPConfig(
-        cpu_offload=fsdp.cpu_offload, tp=layout.tp, ep=layout.ep, cp=layout.cp
+        cpu_offload=cpu_offload, tp=layout.tp, ep=layout.ep, cp=layout.cp
     )
     # Colocated generation: the rollout reason does not depend on the layout.
     return cpu_offload_blocker(trial, False) is None
-
-
-def _trainer_accepts(arch: ModelArch, layout: ParallelLayout) -> bool:
-    """Whether the trainer runs ``arch`` at ``layout``'s degrees."""
-    # Tensor parallel leaves routed experts whole, so a MoE needs ep >= tp.
-    if arch.is_moe and layout.ep < layout.tp:
-        return False
-    if layout.tp > 1 and not _splits_over_tensor_parallel(arch, layout.tp):
-        return False
-    return layout.cp == 1 or _splits_over_context_parallel(arch, layout.tp, layout.cp)
 
 
 def _splits_over_tensor_parallel(arch: ModelArch, tp: int) -> bool:

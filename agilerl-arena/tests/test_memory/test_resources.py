@@ -1420,6 +1420,28 @@ class TestTierCheckFailure:
         assert check.failure == FailureKind.HOST_MEMORY
         assert check.host_limited is True
 
+    def test_host_short_of_the_layout_free_bytes_prices_one_layout(self, built_layouts):
+        # Arrange: 60 GiB nodes leave 6.5 GiB per GPU. The trainer process and
+        # the adapter snapshot fit that only without the buffer.
+        build, seen = built_layouts
+        manifest = TrainingManifest.model_validate(moe_unset_layout())
+        tight = {
+            **tier("h100-8x", "NVIDIA H100 80GB HBM3", 8, 1.0),
+            "gpus_per_node": 8,
+            "ram_gb": 60,
+        }
+
+        # Act
+        (check,) = check_tiers(
+            [tight], manifest, catalog_model(manifest.algorithm), build
+        )
+
+        # Assert
+        assert not check.fits
+        assert check.failure == FailureKind.HOST_MEMORY
+        assert check.layout == ParallelLayout()
+        assert seen == {(8, 1, 1, 1)}
+
     def test_no_gpu_is_other(self):
         manifest = TrainingManifest.model_validate(MANIFEST)
 

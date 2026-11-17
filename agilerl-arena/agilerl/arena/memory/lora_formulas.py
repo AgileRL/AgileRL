@@ -9,6 +9,7 @@ Pure functions of :mod:`agilerl.arena.memory.specs` and
 from __future__ import annotations
 
 from collections.abc import Collection, Sequence
+from functools import lru_cache
 from typing import NamedTuple
 
 from agilerl.arena.memory.formulas import (
@@ -292,6 +293,7 @@ def _lora_linear_param_count(linears: Sequence[LoraLinear], rank: int) -> int:
     )
 
 
+@lru_cache(maxsize=256)
 def lora_param_count(
     arch: ModelArch, rank: int, scope: LoraTargetScope = "all-linear"
 ) -> int:
@@ -329,6 +331,34 @@ def packed_lora_param_count(arch: ModelArch, rank: int, n_matrices: int) -> int:
     return int(arch.moe_layers * n_experts * rank * widths)
 
 
+@lru_cache(maxsize=256)
+def _merged_lora_sync_tensor_bytes(
+    arch: ModelArch,
+    scope: LoraTargetScope,
+    n_packed_matrices: int,
+    dtype_bytes: float,
+) -> tuple[int, ...]:
+    """Bytes of each merged weight a merged-LoRA sync pushes, in layer order."""
+    sizes = [
+        (linear.in_features * linear.out_features, linear.count)
+        for linear in decoder_lora_linears(arch, scope)
+    ]
+    if n_packed_matrices and arch.n_experts and arch.n_experts > 1:
+        expert_inter = arch.expert_intermediate_size or arch.intermediate_size
+        down = arch.n_experts * arch.expert_width * expert_inter
+        gate_up = (2 if arch.gated_mlp else 1) * down
+        sizes.append((gate_up, arch.moe_layers))
+        if n_packed_matrices > 1:
+            sizes.append((down, arch.moe_layers))
+    layers = arch.n_layers
+    return tuple(
+        int(size * dtype_bytes)
+        for layer in range(layers)
+        for size, count in sizes
+        for _ in range(count * (layer + 1) // layers - count * layer // layers)
+    )
+
+
 def merged_lora_sync_tensor_bytes(
     arch: ModelArch,
     scope: LoraTargetScope,
@@ -349,24 +379,9 @@ def merged_lora_sync_tensor_bytes(
     :param dtype_bytes: Bytes per element of the engines' weight dtype.
     :return: One entry per pushed tensor, in checkpoint layer order.
     """
-    sizes = [
-        (linear.in_features * linear.out_features, linear.count)
-        for linear in decoder_lora_linears(arch, scope)
-    ]
-    if n_packed_matrices and arch.n_experts and arch.n_experts > 1:
-        expert_inter = arch.expert_intermediate_size or arch.intermediate_size
-        down = arch.n_experts * arch.expert_width * expert_inter
-        gate_up = (2 if arch.gated_mlp else 1) * down
-        sizes.append((gate_up, arch.moe_layers))
-        if n_packed_matrices > 1:
-            sizes.append((down, arch.moe_layers))
-    layers = arch.n_layers
-    return [
-        int(size * dtype_bytes)
-        for layer in range(layers)
-        for size, count in sizes
-        for _ in range(count * (layer + 1) // layers - count * layer // layers)
-    ]
+    return list(
+        _merged_lora_sync_tensor_bytes(arch, scope, n_packed_matrices, dtype_bytes)
+    )
 
 
 def merged_lora_sync_bytes(

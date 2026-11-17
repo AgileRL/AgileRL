@@ -179,6 +179,7 @@ def prefetch_window_params(
     )
 
 
+@lru_cache(maxsize=4096)
 def fsdp_gathered_params(
     counts: ParamCounts,
     arch: ModelArch,
@@ -326,6 +327,7 @@ def fsdp_resharded_side_params(
     return head + extra_embed
 
 
+@lru_cache(maxsize=4096)
 def fsdp_gather_pool_params(
     counts: ParamCounts,
     arch: ModelArch,

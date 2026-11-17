@@ -7,10 +7,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
+from agilerl.arena.memory.formulas import recommendation_fits
 from agilerl.arena.memory.manifest import (
     async_rollout,
     can_sync_merged_lora,
     configured_rollout_engines,
+    lightest_training_memory_from_manifest,
     nccl_reshard_layout_supported,
     training_memory_from_manifest,
     unsupported_gpu_reason,
@@ -52,6 +54,7 @@ from agilerl.arena.memory.resolve.weight_sync import (
     nccl_reshard_costs,
 )
 from agilerl.arena.memory.specs import DeviceSpec, ModelSpec
+from agilerl.arena.memory.training_host import fixed_host_bytes
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
 from agilerl.arena.models.manifest import TrainingManifest
 
@@ -104,6 +107,9 @@ class SearchCache:
     # ``(layout key, trainer count, host share)``. A different share does not
     # reuse the entry.
     host_misses: dict[tuple, TrainingMemoryPlan | None] = field(default_factory=dict)
+    # The GPU search's lightest plan, keyed by ``(layout key, trainer count)``.
+    # ``None`` when the trainer ranks cannot split.
+    lightest: dict[tuple, TrainingMemoryPlan | None] = field(default_factory=dict)
     # Keyed by GPU and engine width: whether one engine holds a sequence.
     servable_widths: dict[tuple, bool] = field(default_factory=dict)
     # True once a GPU plan in this price misses the device's host share.
@@ -226,11 +232,9 @@ def _price_training_plan(
     :param mode: Weight-sync mode.
     :return: The plan, or ``None`` when training does not fit one GPU.
     """
-    trial = placed.model_copy(deep=True)
-    trial.training.training_gpus_per_agent = trainers
     try:
         return training_memory_from_manifest(
-            trial,
+            _at_trainers(placed, trainers),
             model,
             device,
             not mode.merged,
@@ -238,6 +242,63 @@ def _price_training_plan(
         )
     except (TrainingMemoryUnfitError, TrainerSplitError):
         return None
+
+
+def _at_trainers(placed: TrainingManifest, trainers: int) -> TrainingManifest:
+    """A copy of ``placed`` with ``trainers`` trainer ranks."""
+    return placed.model_copy(
+        update={
+            "training": placed.training.model_copy(
+                update={"training_gpus_per_agent": trainers}
+            )
+        }
+    )
+
+
+def _host_buffer_unreachable(
+    cache: SearchCache,
+    key: tuple,
+    placed: TrainingManifest,
+    model: ModelSpec,
+    device: DeviceSpec,
+    trainers: int,
+    mode: WeightSyncMode,
+) -> bool:
+    """Whether the GPU plan fits but no plan leaves the buffer in ``device``'s host share.
+
+    The GPU search returns a plan whenever its lightest plan fits, and every
+    plan of the search holds the lightest plan's :func:`fixed_host_bytes`.
+
+    :param cache: Search cache for this request.
+    :param key: :func:`_layout_plans_key` for this layout.
+    :param placed: Manifest at the layout being priced. Not written.
+    :param model: Training-side model.
+    :param device: Device whose host share is checked.
+    :param trainers: Trainer ranks.
+    :param mode: Weight-sync mode.
+    :return: True when the GPU plan surely fits and surely misses the buffer.
+    """
+    host_bytes = device.host_bytes_per_gpu
+    if host_bytes is None:
+        return False
+    lightest_key = (key, trainers)
+    if lightest_key not in cache.lightest:
+        try:
+            cache.lightest[lightest_key] = lightest_training_memory_from_manifest(
+                _at_trainers(placed, trainers),
+                model,
+                device.model_copy(update={"host_bytes_per_gpu": None}),
+                not mode.merged,
+                mode.transport == "nccl_reshard",
+            )
+        except TrainerSplitError:
+            cache.lightest[lightest_key] = None
+    lightest = cache.lightest[lightest_key]
+    return (
+        lightest is not None
+        and lightest.breakdown.fits
+        and not recommendation_fits(fixed_host_bytes(lightest.breakdown), host_bytes)
+    )
 
 
 def _host_share_fits(
@@ -302,6 +363,11 @@ def _cached_training_plan(
     key = _layout_plans_key(device, placed, model, mode.merged, mode.transport)
     plans = cache.plans.setdefault(key, {})
     if trainers not in plans:
+        if require_buffer and _host_buffer_unreachable(
+            cache, key, placed, model, device, trainers, mode
+        ):
+            cache.host_limited = True
+            return None
         # No host share, so the rung walk is the GPU search. Host bytes stay
         # on the plan and are checked against this device below.
         plans[trainers] = _price_training_plan(

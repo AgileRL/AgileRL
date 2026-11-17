@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 from agilerl.arena.memory.lora_formulas import decoder_lora_linears
 from agilerl.arena.memory.specs import (
     LoraLinear,
@@ -87,6 +89,7 @@ def _linear_lora_placement(
     return replicated, sharded
 
 
+@lru_cache(maxsize=1024)
 def lora_tensor_placement(
     arch: ModelArch,
     rank: int,
