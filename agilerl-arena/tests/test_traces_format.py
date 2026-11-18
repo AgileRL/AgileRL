@@ -13,13 +13,19 @@ from pathlib import Path
 import pytest
 
 from agilerl.arena.traces_format import (
+    JSON_TEXT_COLUMNS,
     MANIFEST_FIELDS,
+    PAIR_COLUMNS,
+    REQUIRED_COLUMNS,
     REQUIRED_MANIFEST_FIELDS,
+    SNAPSHOT_SEGMENTS_FILE,
     ExcludedCounts,
     ModelVersionCount,
     SnapshotFile,
     SnapshotManifest,
     TimeRange,
+    input_shape,
+    manifest_json,
     read_manifest,
     write_manifest,
 )
@@ -40,8 +46,36 @@ MANIFEST = SnapshotManifest(
     excluded=ExcludedCounts(no_content=1, error_or_cancelled=0),
     organization_id=None,
     deployment_ids=["dep-1"],
-    files=[SnapshotFile("calls.parquet", 2, "abc")],
+    files=[SnapshotFile("segments.parquet", 2, "abc")],
+    turn_count=7,
 )
+
+
+class TestInputShape:
+    def test_pairs_win_over_a_raw_messages_column(self) -> None:
+        assert input_shape(["messages", "prompt", "completion"]) == "prompt_completion"
+
+    def test_messages_without_a_completion_are_segments(self) -> None:
+        assert input_shape(["messages", "prompt", "tools"]) == "segments"
+
+    def test_rejects_neither_shape(self) -> None:
+        with pytest.raises(ValueError, match="needs a 'messages' column"):
+            input_shape(["prompt", "answer"])
+
+    def test_names_the_column_sets(self) -> None:
+        assert REQUIRED_COLUMNS == ("messages",)
+        assert PAIR_COLUMNS == ("prompt", "completion")
+        assert JSON_TEXT_COLUMNS == (
+            "messages",
+            "tools",
+            "call_ids",
+            "finish_reasons",
+            "scores",
+            "completion_token_ids",
+            "completion_logprobs",
+            "metadata",
+        )
+        assert SNAPSHOT_SEGMENTS_FILE == "segments.parquet"
 
 
 class TestWriteManifest:
@@ -58,7 +92,11 @@ class TestWriteManifest:
         assert set(REQUIRED_MANIFEST_FIELDS) <= set(MANIFEST_FIELDS)
         assert (data["format"], data["schema_version"]) == ("agilerl-traces", 1)
         assert data["created_at"] == "2026-11-12T09:00:00+00:00"
-        assert data["excluded"] == {"no_content": 1, "error_or_cancelled": 0}
+        assert data["excluded"] == {
+            "no_content": 1,
+            "error_or_cancelled": 0,
+            "invalid": 0,
+        }
         assert read_manifest(path) == MANIFEST
 
     def test_rejects_a_value_json_cannot_encode(self, tmp_path: Path) -> None:
@@ -67,6 +105,23 @@ class TestWriteManifest:
 
         with pytest.raises(TypeError, match="not JSON serializable"):
             write_manifest(path, manifest)
+        assert not path.exists()
+
+
+class TestManifestJson:
+    def test_is_the_text_write_manifest_writes(self, tmp_path: Path) -> None:
+        path = tmp_path / "manifest.json"
+
+        write_manifest(path, MANIFEST)
+
+        assert manifest_json(MANIFEST) == path.read_text()
+        assert json.loads(manifest_json(MANIFEST))["snapshot_id"] == "01SNAP"
+
+    def test_rejects_a_value_json_cannot_encode(self) -> None:
+        manifest = dataclasses.replace(MANIFEST, filter={"mark": object()})
+
+        with pytest.raises(TypeError, match="not JSON serializable"):
+            manifest_json(manifest)
 
 
 class TestReadManifest:
@@ -130,6 +185,7 @@ class TestReadManifest:
         assert manifest.filter == {}
         assert manifest.excluded == ExcludedCounts()
         assert manifest.deployment_ids == []
+        assert manifest.turn_count is None
 
     def test_reads_z_timestamps(self, tmp_path: Path) -> None:
         path = tmp_path / "manifest.json"
@@ -163,6 +219,7 @@ class TestReadManifest:
             ("files", {}, "files is dict, not list"),
             ("model_versions", ["v1"], "model_versions entry is str"),
             ("label_score", 3, "label_score is int, not str"),
+            ("turn_count", "7", "turn_count is str, not int"),
         ],
     )
     def test_rejects_a_wrong_type(
@@ -206,6 +263,15 @@ class TestReadManifest:
 
         with pytest.raises(ValueError, match=match):
             read_manifest(path)
+
+    def test_an_excluded_count_it_lacks_reads_as_zero(self, tmp_path: Path) -> None:
+        path = tmp_path / "manifest.json"
+        write_manifest(path, MANIFEST)
+        data = json.loads(path.read_text())
+        del data["excluded"]["invalid"]
+        path.write_text(json.dumps(data))
+
+        assert read_manifest(path).excluded == ExcludedCounts(1, 0, 0)
 
     def test_rejects_a_nested_entry_missing_a_field(self, tmp_path: Path) -> None:
         path = tmp_path / "manifest.json"

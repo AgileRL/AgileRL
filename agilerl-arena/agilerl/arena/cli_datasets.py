@@ -52,8 +52,9 @@ def datasets_exists(config: CommandConfig, name: str) -> None:
     required=True,
     type=click.Choice(sorted(DATASET_CATEGORIES), case_sensitive=False),
     help=(
-        "Dataset category. traces is OpenAI chat messages in prompt-completion "
-        "rows; it takes no column mapping and is checked locally before upload."
+        "Dataset category. traces is OpenAI chat messages, one session segment "
+        "per messages row or one call per prompt-completion row; it takes no "
+        "column mapping and is checked locally before upload."
     ),
 )
 @click.option(

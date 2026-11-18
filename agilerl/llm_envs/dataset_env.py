@@ -34,10 +34,10 @@ from agilerl.llm_envs.chat_transcript import (
     _parsed_json,
     _render,
     _with_reasoning_key,
-    _without_none_keys,
     chat_messages,
     encode_chat_transcript,
     template_reasoning_key,
+    without_none_keys,
 )
 from agilerl.utils.chat_template import (
     inject_chat_template_kwargs,
@@ -53,6 +53,10 @@ if TYPE_CHECKING:
         ["DatasetEnv", "PreTrainedTokenizerBase"],
         Callable[[list[dict[str, Any]]], dict[str, Any]],
     ]
+
+
+SKIPPED_TURNS = "skipped_turns"
+"""Optional SFT column: indices of a ``messages`` row's assistant messages that do not train."""
 
 
 def sft_required_columns(columns: Collection[str], response_column: str) -> set[str]:
@@ -83,6 +87,7 @@ class DatasetEnv:
         response_column: str = "response",
         completion_only_loss: bool = False,
         chat_template_kwargs: dict[str, Any] | None = None,
+        chat_format: ChatFormat | None = None,
         data_batch_size_per_gpu: int = 8,
         max_context_length: int | None = None,
         min_completion_length: int | None = None,
@@ -97,7 +102,8 @@ class DatasetEnv:
 
         :param train_dataset: Training split of prompt/label rows. SFT rows with a
             ``messages`` column are multi-turn conversations (optional ``tools``
-            column) trained on their assistant turns. Preference rows whose
+            column) trained on their assistant turns, except those an optional
+            :data:`SKIPPED_TURNS` column lists. Preference rows whose
             ``prompt``, ``chosen`` or ``rejected`` are messages are trained on
             each side's assistant turns after the shared prompt.
         :param test_dataset: Held-out split used under :meth:`eval_mode`.
@@ -108,6 +114,8 @@ class DatasetEnv:
             assistant turns inside a message-list prompt (TRL prompt-completion).
         :param chat_template_kwargs: Extra kwargs for any chat-template render of
             the dataset's prompts (e.g. ``{"enable_thinking": False}``).
+        :param chat_format: The format SFT writes tool calls in; ``None`` uses
+            the one the tokenizer vocab matches.
         :param data_batch_size_per_gpu: Batch size for the train/test dataloaders.
         :param max_context_length: Optional max prompt+completion token budget.
         :param min_completion_length: Minimum reserved completion token budget.
@@ -156,6 +164,9 @@ class DatasetEnv:
 
         self.name = train_dataset.info.dataset_name
         self.tokenizer = tokenizer
+        self.chat_format = (
+            detect_chat_format(tokenizer) if chat_format is None else chat_format
+        )
         self.chat_template_kwargs: dict[str, Any] = dict(chat_template_kwargs or {})
         self.data_batch_size_per_gpu = data_batch_size_per_gpu
         self.rank = int(rank)
@@ -337,7 +348,6 @@ class DatasetEnv:
         :return: The split without the dropped rows.
         :raises ValueError: If no row is left.
         """
-        chat_format = detect_chat_format(self.tokenizer)
         kept: list[int] = []
         too_long = 0
         cut = 0
@@ -349,8 +359,9 @@ class DatasetEnv:
                     self.tokenizer,
                     item,
                     self.response_column,
-                    chat_format,
+                    self.chat_format,
                     self.completion_only_loss,
+                    item.get(SKIPPED_TURNS) or (),
                 )
             except Exception as error:
                 errors.append(f"{type(error).__name__}: {error}")
@@ -873,7 +884,16 @@ def sft_tools(item: dict[str, Any]) -> list[dict[str, Any]] | None:
     tools = item.get("tools")
     if isinstance(tools, str):
         return _parsed_json(tools, "The tools column")
-    return _without_none_keys(tools)
+    if tools is None:
+        return None
+    return [
+        {
+            key: without_none_keys(value)
+            for key, value in tool.items()
+            if value is not None
+        }
+        for tool in tools
+    ]
 
 
 def encode_sft_row(
@@ -882,6 +902,7 @@ def encode_sft_row(
     response_column: str,
     chat_format: ChatFormat | None,
     completion_only_loss: bool = False,
+    skipped: Collection[int] = (),
 ) -> tuple[list[int], list[bool]]:
     """Token ids and assistant mask of one SFT row, see :func:`encode_chat_transcript`.
 
@@ -892,12 +913,18 @@ def encode_sft_row(
     :param completion_only_loss: Train a conversational prompt-completion row
         (TRL): ``prompt`` and the response are message lists or their JSON
         text, and only the response trains; it wins over a ``messages``
-        column in the same row. ``messages`` rows train every assistant turn.
+        column in the same row. ``messages`` rows train every assistant turn
+        except those at ``skipped``.
+    :param skipped: Indices of a ``messages`` row's assistant messages that do not train.
     :return: Token ids and, per id, whether it is a trained assistant token.
     """
     if not completion_only_loss or not {"prompt", response_column} <= item.keys():
         return encode_chat_transcript(
-            tokenizer, sft_messages(item, response_column), sft_tools(item), chat_format
+            tokenizer,
+            sft_messages(item, response_column),
+            sft_tools(item),
+            chat_format,
+            skipped=skipped,
         )
     prompt = chat_messages(item["prompt"])
     return encode_chat_transcript(
@@ -960,7 +987,6 @@ def sft_collate_builder(
 ) -> Callable[[list[dict[str, Any]]], dict[str, Any]]:
     """Build a collate function for SFT rows, see :func:`sft_messages`."""
     tokenizer = inject_chat_template_kwargs(tokenizer, env.chat_template_kwargs)
-    chat_format = detect_chat_format(tokenizer)
 
     def collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
         """Encode each conversation, cut to the context length and right-pad."""
@@ -970,8 +996,9 @@ def sft_collate_builder(
                 tokenizer,
                 item,
                 env.response_column,
-                chat_format,
+                env.chat_format,
                 env.completion_only_loss,
+                item.get(SKIPPED_TURNS) or (),
             )
             fitted = env._fit_to_context(ids, mask)
             if fitted is None:

@@ -23,10 +23,9 @@ from agilerl.arena.models import TrainingManifest
 from agilerl.arena.models.traces import (
     AssistantMessage,
     TraceScore,
-    TracesMessagesRow,
-    TracesRow,
+    TracesSegmentRow,
     TracesValidationError,
-    row_form,
+    pair_as_segment,
     validate_traces_file,
     validate_traces_rows,
 )
@@ -78,11 +77,70 @@ def helpdesk_row() -> dict[str, Any]:
     }
 
 
-class TestTracesRow:
-    def test_accepts_the_spec_example(self) -> None:
-        row = TracesRow.model_validate(helpdesk_row())
+def helpdesk_segment() -> dict[str, Any]:
+    """The spec example as one segment: the tool-call turn and the reply turn, with reasoning."""
+    row = helpdesk_row()
+    return {
+        "messages": [*row["prompt"], *row["completion"]],
+        "tools": row["tools"],
+        "call_ids": ["01JC", "01JD"],
+        "finish_reasons": ["tool_calls", "stop"],
+        "scores": [
+            {"name": "feedback", "value": 1.0, "source": "user"},
+            {"name": "judge", "value": 0.5, "source": "j", "turn": 1},
+        ],
+        "session_id": "s-42",
+        "segment_index": 0,
+    }
 
-        assert row.completion_message.reasoning_text == "Account is locked."
+
+def as_segment(raw: Any) -> TracesSegmentRow:
+    """Validate a pair row as the segment the platform converts it to."""
+    return TracesSegmentRow.model_validate(
+        pair_as_segment(raw) if isinstance(raw, dict) else raw
+    )
+
+
+PAIR_IMPORT_VECTORS = json.loads(
+    (Path(__file__).parent / "fixtures" / "traces_pair_import.json").read_text()
+)["cases"]
+
+
+class TestPairAsSegment:
+    @pytest.mark.parametrize(
+        "case", PAIR_IMPORT_VECTORS, ids=[case["name"] for case in PAIR_IMPORT_VECTORS]
+    )
+    def test_matches_the_shared_vectors(self, case: dict[str, Any]) -> None:
+        segment = pair_as_segment(case["row"])
+
+        assert segment == case["expected"]
+        TracesSegmentRow.model_validate(segment)
+
+    def test_drops_per_turn_columns_already_on_the_pair(self) -> None:
+        row = {
+            "prompt": "Hi there.",
+            "completion": "Hello!",
+            "call_ids": ["stale", "stale"],
+            "finish_reasons": ["length"],
+        }
+
+        segment = pair_as_segment(row)
+
+        assert segment == {
+            "messages": [
+                {"role": "user", "content": "Hi there."},
+                {"role": "assistant", "content": "Hello!"},
+            ]
+        }
+
+
+class TestPairImport:
+    def test_accepts_the_spec_example(self) -> None:
+        row = as_segment(helpdesk_row())
+
+        assert isinstance(row.messages[-1], AssistantMessage)
+        assert row.messages[-1].reasoning_text == "Account is locked."
+        assert row.call_ids == [None, "01JD"]
         assert row.tools is not None
         assert row.tools[0].function.name == "lookup_user"
 
@@ -91,9 +149,9 @@ class TestTracesRow:
         for column in ("prompt", "completion", "tools"):
             raw[column] = json.dumps(raw[column])
 
-        row = TracesRow.model_validate(raw)
+        row = as_segment(raw)
 
-        assert len(row.prompt) == 4
+        assert len(row.messages) == 5
 
     @pytest.mark.parametrize("key", ["reasoning", "thinking"])
     def test_reads_reasoning_under_any_reader_key(self, key: str) -> None:
@@ -107,30 +165,54 @@ class TestTracesRow:
         raw = {**helpdesk_row(), "trace_tag": "x"}
         raw["prompt"][1]["audio"] = None
 
-        row = TracesRow.model_validate(raw)
+        row = as_segment(raw)
 
-        assert len(row.prompt) == 4
+        assert len(row.messages) == 5
 
     def test_rejects_two_completion_messages(self) -> None:
         raw = helpdesk_row()
         raw["completion"] = raw["completion"] * 2
 
-        with pytest.raises(ValidationError, match="at most 1 item"):
-            TracesRow.model_validate(raw)
+        with pytest.raises(ValidationError, match="back-to-back assistant"):
+            as_segment(raw)
+
+    def test_wraps_plain_string_cells(self) -> None:
+        raw = {"prompt": "Hi there.", "completion": "Hello!", "call_id": "c"}
+
+        row = as_segment(raw)
+
+        assert [message.role for message in row.messages] == ["user", "assistant"]
+        assert row.call_ids == ["c"]
+
+    def test_wraps_a_json_encoded_string_cell(self) -> None:
+        raw = {"prompt": json.dumps("Hi there."), "completion": "Hello!"}
+
+        row = as_segment(raw)
+
+        assert row.messages[0].content == "Hi there."
+
+    def test_reads_one_completion_message_object(self) -> None:
+        raw = helpdesk_row()
+        raw["completion"] = json.dumps(raw["completion"][0])
+        raw["finish_reason"] = "stop"
+
+        row = as_segment(raw)
+
+        assert row.finish_reasons == [None, "stop"]
 
     def test_rejects_a_prompt_ending_with_an_assistant_turn(self) -> None:
         raw = helpdesk_row()
         raw["prompt"].append({"role": "assistant", "content": "prefill"})
 
-        with pytest.raises(ValidationError, match="prompt ends with an assistant"):
-            TracesRow.model_validate(raw)
+        with pytest.raises(ValidationError, match="back-to-back assistant"):
+            as_segment(raw)
 
     def test_rejects_a_tool_result_no_call_asked_for(self) -> None:
         raw = helpdesk_row()
         raw["prompt"][3]["tool_call_id"] = "c9"
 
         with pytest.raises(ValidationError, match="'c9', which no earlier"):
-            TracesRow.model_validate(raw)
+            as_segment(raw)
 
     def test_rejects_a_call_to_an_undeclared_tool(self) -> None:
         raw = helpdesk_row()
@@ -149,48 +231,46 @@ class TestTracesRow:
         ]
 
         with pytest.raises(ValidationError, match="'reset_mfa', which is not in tools"):
-            TracesRow.model_validate(raw)
+            as_segment(raw)
 
     def test_rejects_object_arguments(self) -> None:
         raw = helpdesk_row()
         raw["prompt"][2]["tool_calls"][0]["function"]["arguments"] = {"email": "x"}
 
         with pytest.raises(ValidationError, match="string"):
-            TracesRow.model_validate(raw)
+            as_segment(raw)
 
     def test_rejects_arguments_that_are_not_a_json_object(self) -> None:
         raw = helpdesk_row()
         raw["prompt"][2]["tool_calls"][0]["function"]["arguments"] = "[1]"
 
         with pytest.raises(ValidationError, match="must encode a JSON object"):
-            TracesRow.model_validate(raw)
+            as_segment(raw)
 
     def test_rejects_arguments_that_are_not_json(self) -> None:
         raw = helpdesk_row()
         raw["prompt"][2]["tool_calls"][0]["function"]["arguments"] = "{oops"
 
         with pytest.raises(ValidationError, match="arguments is not valid JSON"):
-            TracesRow.model_validate(raw)
+            as_segment(raw)
 
     def test_rejects_a_json_text_column_that_is_not_json(self) -> None:
-        raw = {**helpdesk_row(), "prompt": "[{oops"}
-
         with pytest.raises(
-            ValidationError, match="prompt is a string but not valid JSON"
+            ValidationError, match="messages is a string but not valid JSON"
         ):
-            TracesRow.model_validate(raw)
+            TracesSegmentRow.model_validate({"messages": "[{oops"})
 
     def test_rejects_a_row_that_is_not_an_object(self) -> None:
         with pytest.raises(ValidationError):
-            TracesRow.model_validate(["prompt", "completion"])
+            as_segment(["prompt", "completion"])
 
     def test_accepts_text_parts_in_a_user_message(self) -> None:
         raw = helpdesk_row()
         raw["prompt"][1]["content"] = [{"type": "text", "text": "I can't sign in."}]
 
-        row = TracesRow.model_validate(raw)
+        row = as_segment(raw)
 
-        assert isinstance(row.prompt[1].content, list)
+        assert isinstance(row.messages[1].content, list)
 
     @pytest.mark.parametrize(
         ("column", "index"),
@@ -204,14 +284,14 @@ class TestTracesRow:
         raw[column][index]["content"] = [{"type": "text", "text": "x"}]
 
         with pytest.raises(ValidationError, match="Input should be a valid string"):
-            TracesRow.model_validate(raw)
+            as_segment(raw)
 
     def test_rejects_an_empty_assistant_message(self) -> None:
         raw = helpdesk_row()
         raw["completion"] = [{"role": "assistant", "content": ""}]
 
         with pytest.raises(ValidationError, match="needs content or tool_calls"):
-            TracesRow.model_validate(raw)
+            as_segment(raw)
 
     def test_ignores_an_empty_reasoning_key_beside_another(self) -> None:
         message = AssistantMessage.model_validate(
@@ -239,25 +319,25 @@ class TestTracesRow:
 
 class TestTracesRowColumns:
     def test_covers_every_shared_trace_column(self) -> None:
-        assert set(TRACE_COLUMNS) <= set(TracesRow.model_fields)
+        assert set(TRACE_COLUMNS) == set(TracesSegmentRow.model_fields)
 
     def test_score_entries_take_every_shared_field(self) -> None:
         assert set(SCORE_FIELDS) == set(TraceScore.model_fields)
 
 
-class TestTracesMessagesRow:
+class TestTracesSegmentRow:
     def test_accepts_a_conversation(self) -> None:
         raw = helpdesk_row()
         messages = [*raw["prompt"], *raw["completion"]]
 
-        row = TracesMessagesRow.model_validate(
+        row = TracesSegmentRow.model_validate(
             {"messages": messages, "tools": raw["tools"]}
         )
 
         assert len(row.messages) == 5
 
     def test_accepts_a_conversation_without_tools(self) -> None:
-        row = TracesMessagesRow.model_validate(
+        row = TracesSegmentRow.model_validate(
             {
                 "messages": [
                     {"role": "user", "content": "u"},
@@ -270,7 +350,7 @@ class TestTracesMessagesRow:
 
     def test_rejects_a_conversation_starting_with_an_assistant_turn(self) -> None:
         with pytest.raises(ValidationError, match="starts with an assistant turn"):
-            TracesMessagesRow.model_validate(
+            TracesSegmentRow.model_validate(
                 {
                     "messages": [
                         {"role": "assistant", "content": "a"},
@@ -281,7 +361,7 @@ class TestTracesMessagesRow:
 
     def test_rejects_a_conversation_without_an_assistant_turn(self) -> None:
         with pytest.raises(ValidationError, match="no assistant turn"):
-            TracesMessagesRow.model_validate(
+            TracesSegmentRow.model_validate(
                 {
                     "messages": [
                         {"role": "system", "content": "s"},
@@ -291,16 +371,231 @@ class TestTracesMessagesRow:
             )
 
 
-class TestRowForm:
-    def test_prompt_completion_columns_select_the_call_row(self) -> None:
-        assert row_form(["prompt", "completion", "tools"]) is TracesRow
+class TestTracesSegmentRowTurns:
+    def test_accepts_tool_calls_reasoning_and_per_turn_columns(self) -> None:
+        row = TracesSegmentRow.model_validate(helpdesk_segment())
 
-    def test_messages_column_selects_the_conversation_row(self) -> None:
-        assert row_form(["messages", "tools"]) is TracesMessagesRow
+        assert row.call_ids == ["01JC", "01JD"]
+        assert row.scores is not None
+        assert row.scores[1].turn == 1
+        assert isinstance(row.messages[-1], AssistantMessage)
+        assert row.messages[-1].reasoning_text == "Account is locked."
 
-    def test_rejects_other_columns(self) -> None:
-        with pytest.raises(ValueError, match="needs 'prompt' and 'completion'"):
-            row_form(["question", "answer"])
+    def test_decodes_json_text_messages(self) -> None:
+        raw = helpdesk_segment()
+        raw["messages"] = json.dumps(raw["messages"])
+
+        row = TracesSegmentRow.model_validate(raw)
+
+        assert len(row.messages) == 5
+
+    def test_decodes_every_nested_column_from_json_text(self) -> None:
+        raw = {
+            **helpdesk_segment(),
+            "call_ids": [None, "01JD"],
+            "completion_token_ids": [None, [5]],
+            "completion_logprobs": [None, [-0.5]],
+            "metadata": {"tenant": "t1"},
+        }
+        text = {
+            key: json.dumps(value) if isinstance(value, (list, dict)) else value
+            for key, value in raw.items()
+        }
+
+        row = TracesSegmentRow.model_validate(text)
+
+        assert row == TracesSegmentRow.model_validate(raw)
+
+    def test_accepts_unanswered_calls_on_the_final_turn_and_trailing_messages(
+        self,
+    ) -> None:
+        raw = helpdesk_segment()
+        raw["messages"][-1] = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [lookup_call("c2")],
+        }
+        raw["messages"].append({"role": "user", "content": "Thanks."})
+
+        row = TracesSegmentRow.model_validate(raw)
+
+        assert len(row.messages) == 6
+
+    @pytest.mark.parametrize(
+        "result",
+        [
+            {"role": "tool", "tool_call_id": "c2", "content": None},
+            {"role": "tool", "tool_call_id": "c2"},
+        ],
+        ids=["null", "absent"],
+    )
+    def test_accepts_a_trailing_tool_result_without_content(
+        self, result: dict[str, Any]
+    ) -> None:
+        # Arrange
+        raw = helpdesk_segment()
+        raw["messages"][-1] = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [lookup_call("c2")],
+        }
+        raw["messages"].append(result)
+
+        # Act
+        row = TracesSegmentRow.model_validate(raw)
+
+        # Assert
+        assert row.messages[-1].content is None
+
+    def test_rejects_a_tool_result_without_content_before_a_turn(self) -> None:
+        raw = helpdesk_segment()
+        raw["messages"][3]["content"] = None
+
+        with pytest.raises(ValidationError, match=r"messages\[3\] is a tool result"):
+            TracesSegmentRow.model_validate(raw)
+
+    def test_rejects_a_call_unanswered_before_the_next_turn(self) -> None:
+        raw = helpdesk_segment()
+        raw["messages"][3] = {"role": "user", "content": "Any news?"}
+
+        with pytest.raises(
+            ValidationError, match=r"messages\[2\] calls \['c1'\], which no tool"
+        ):
+            TracesSegmentRow.model_validate(raw)
+
+    def test_rejects_back_to_back_assistant_messages(self) -> None:
+        raw = helpdesk_segment()
+        raw["messages"].insert(4, {"role": "assistant", "content": "One moment."})
+        raw["messages"][3], raw["messages"][4] = raw["messages"][4], raw["messages"][3]
+        raw["call_ids"] = None
+        raw["finish_reasons"] = None
+        raw["scores"] = None
+
+        with pytest.raises(ValidationError, match="back-to-back assistant messages"):
+            TracesSegmentRow.model_validate(raw)
+
+    def test_accepts_a_context_assistant_right_after_another(self) -> None:
+        raw = {
+            "messages": [
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": "r"},
+                {
+                    "role": "assistant",
+                    "content": "inserted by the harness",
+                    "weight": 0,
+                },
+                {"role": "user", "content": "n"},
+                {"role": "assistant", "content": "s"},
+            ],
+        }
+
+        row = TracesSegmentRow.model_validate(raw)
+
+        assert [
+            message.is_target
+            for message in row.messages
+            if isinstance(message, AssistantMessage)
+        ] == [True, False, True]
+
+    def test_rejects_a_target_right_after_another_assistant(self) -> None:
+        raw = {
+            "messages": [
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": "r", "weight": 0},
+                {"role": "assistant", "content": "s"},
+            ],
+        }
+
+        with pytest.raises(ValidationError, match="Mark it context"):
+            TracesSegmentRow.model_validate(raw)
+
+    def test_accepts_completion_token_ids_and_logprobs(self) -> None:
+        raw = {
+            **helpdesk_segment(),
+            "completion_token_ids": [None, [5, 6, 7]],
+            "completion_logprobs": [None, [-0.1, -0.2, -0.3]],
+        }
+
+        row = TracesSegmentRow.model_validate(raw)
+
+        assert row.completion_token_ids == [None, [5, 6, 7]]
+
+    def test_rejects_tokens_on_a_context_turn(self) -> None:
+        raw = {**helpdesk_segment(), "completion_token_ids": [[1], None]}
+        raw["messages"][2]["weight"] = 0
+
+        with pytest.raises(ValidationError, match="turn 0 is context"):
+            TracesSegmentRow.model_validate(raw)
+
+    def test_rejects_token_ids_and_logprobs_of_different_lengths(self) -> None:
+        raw = {
+            **helpdesk_segment(),
+            "completion_token_ids": [[1], [5, 6, 7]],
+            "completion_logprobs": [[-0.1], [-0.2]],
+        }
+
+        with pytest.raises(ValidationError, match="turn 1 has 3 completion_token_ids"):
+            TracesSegmentRow.model_validate(raw)
+
+    @pytest.mark.parametrize(
+        "column",
+        ["call_ids", "finish_reasons", "completion_token_ids", "completion_logprobs"],
+    )
+    def test_rejects_a_per_turn_list_of_the_wrong_length(self, column: str) -> None:
+        raw = {**helpdesk_segment(), column: [None]}
+
+        with pytest.raises(
+            ValidationError, match=f"{column} has 1 entries; messages has 2"
+        ):
+            TracesSegmentRow.model_validate(raw)
+
+    def test_rejects_a_segment_with_no_target_turn(self) -> None:
+        raw = helpdesk_segment()
+        for message in raw["messages"]:
+            if message["role"] == "assistant":
+                message["weight"] = 0
+
+        with pytest.raises(
+            ValidationError, match="every assistant message has weight 0"
+        ):
+            TracesSegmentRow.model_validate(raw)
+
+    def test_null_call_ids_do_not_mark_context(self) -> None:
+        row = TracesSegmentRow.model_validate(
+            {**helpdesk_segment(), "call_ids": [None, None]}
+        )
+
+        assert row.call_ids == [None, None]
+        assert all(
+            message.is_target
+            for message in row.messages
+            if isinstance(message, AssistantMessage)
+        )
+
+    @pytest.mark.parametrize("weight", [2, -1, 0.5, 1.0, True, "1"])
+    def test_rejects_a_weight_other_than_zero_or_one(self, weight: object) -> None:
+        raw = helpdesk_segment()
+        raw["messages"][2]["weight"] = weight
+
+        with pytest.raises(ValidationError, match="weight must be 0 or 1"):
+            TracesSegmentRow.model_validate(raw)
+
+    @pytest.mark.parametrize("at", [0, 1, 3], ids=["system", "user", "tool"])
+    def test_rejects_weight_on_a_non_assistant_message(self, at: int) -> None:
+        raw = helpdesk_segment()
+        raw["messages"][at]["weight"] = 1
+
+        with pytest.raises(
+            ValidationError, match="only assistant messages are weighted"
+        ):
+            TracesSegmentRow.model_validate(raw)
+
+    def test_rejects_a_score_on_a_turn_past_the_last(self) -> None:
+        raw = helpdesk_segment()
+        raw["scores"] = [{"name": "judge", "value": 1.0, "turn": 2}]
+
+        with pytest.raises(ValidationError, match="'judge' is on turn 2"):
+            TracesSegmentRow.model_validate(raw)
 
 
 class TestValidateTracesRows:
@@ -315,12 +610,67 @@ class TestValidateTracesRows:
             validate_traces_rows([helpdesk_row(), bad, bad], source="t.jsonl")
 
         assert raised.value.total == 2
-        assert raised.value.errors[0].startswith("row 2: completion.0")
+        assert raised.value.errors[0] == "row 2: completion holds no assistant message."
         assert "t.jsonl is not a valid traces dataset (2 bad rows)" in str(raised.value)
 
     def test_rejects_no_rows(self) -> None:
         with pytest.raises(TracesValidationError, match="the file has no rows"):
             validate_traces_rows([])
+
+    def test_counts_segment_rows(self) -> None:
+        assert validate_traces_rows([helpdesk_segment(), helpdesk_segment()]) == 2
+
+    def test_names_the_field_of_a_bad_segment(self) -> None:
+        bad = helpdesk_segment()
+        bad["messages"][3]["tool_call_id"] = "c9"
+
+        with pytest.raises(TracesValidationError) as raised:
+            validate_traces_rows([helpdesk_segment(), bad])
+
+        assert raised.value.errors[0].startswith("row 2: row: Value error, ")
+        assert "'c9'" in raised.value.errors[0]
+
+    def test_reads_a_pair_beside_a_raw_messages_column_as_a_pair(self) -> None:
+        row = {**helpdesk_row(), "messages": [{"role": "user", "content": "raw"}]}
+
+        assert validate_traces_rows([row]) == 1
+
+    def test_accepts_both_input_shapes(self) -> None:
+        assert validate_traces_rows([helpdesk_segment(), helpdesk_row()]) == 2
+
+    def test_reads_a_row_with_messages_as_a_segment_beside_pair_columns(self) -> None:
+        row = {**helpdesk_segment(), "prompt": "ignored", "completion": None}
+
+        assert validate_traces_rows([row]) == 1
+
+    def test_names_a_later_row_in_neither_shape(self) -> None:
+        with pytest.raises(TracesValidationError, match="row 2: A traces row needs"):
+            validate_traces_rows([helpdesk_segment(), {"question": "q"}])
+
+    def test_counts_a_row_in_neither_shape_among_the_bad_rows(self) -> None:
+        bad = helpdesk_row()
+        bad["completion"] = [{"role": "user", "content": "x"}]
+
+        with pytest.raises(TracesValidationError) as raised:
+            validate_traces_rows([{"question": "q"}, helpdesk_segment(), bad])
+
+        assert raised.value.total == 2
+        assert raised.value.errors[0].startswith("row 1: A traces row needs")
+        assert raised.value.errors[1] == "row 3: completion holds no assistant message."
+
+    def test_names_a_pair_prompt_ending_with_an_assistant_turn(self) -> None:
+        row = helpdesk_row()
+        row["prompt"].append({"role": "assistant", "content": "prefill"})
+
+        with pytest.raises(TracesValidationError) as raised:
+            validate_traces_rows([row])
+
+        assert raised.value.errors == [
+            (
+                "row 1: prompt ends with an assistant message; the completion is "
+                "the next assistant turn, so the prompt ends before it."
+            )
+        ]
 
 
 class TestValidateTracesFile:
@@ -429,6 +779,19 @@ class TestValidateTracesFile:
         assert count == 3
         assert pa.types.is_string(pq.read_schema(path).field("prompt").type)
 
+    def test_validates_segment_parquet_with_json_text_messages(
+        self, tmp_path: Path
+    ) -> None:
+        pa = pytest.importorskip("pyarrow")
+        pq = pytest.importorskip("pyarrow.parquet")
+        row = helpdesk_segment()
+        row["messages"] = json.dumps(row["messages"])
+        row["tools"] = json.dumps(row["tools"])
+        path = tmp_path / "segments.parquet"
+        pq.write_table(pa.Table.from_pylist([row, row]), path)
+
+        assert validate_traces_file(path) == 2
+
     def test_accepts_duplicate_prompts(self) -> None:
         first, second = helpdesk_row(), helpdesk_row()
         second["call_id"] = "01JE"
@@ -518,9 +881,7 @@ class TestArenaClientCreateDatasetTraces:
         path = write_jsonl(tmp_path / "traces.jsonl", [bad])
         api_key_client._request = MagicMock()
 
-        with pytest.raises(
-            ArenaValidationError, match="needs 'prompt' and 'completion'"
-        ):
+        with pytest.raises(ArenaValidationError, match="needs a 'messages' column"):
             api_key_client.create_dataset(name="t", category="traces", file=path)
 
         api_key_client._request.assert_not_called()

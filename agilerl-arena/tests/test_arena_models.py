@@ -1762,6 +1762,7 @@ class TestPydanticModelsForbidExtra:
                 "ContentPart",
                 "ToolCallFunction",
                 "ToolCall",
+                "_UnweightedMessage",
                 "SystemMessage",
                 "UserMessage",
                 "AssistantMessage",
@@ -1770,8 +1771,7 @@ class TestPydanticModelsForbidExtra:
                 "ToolDefinition",
                 "TraceScore",
                 "TracesRowBase",
-                "TracesRow",
-                "TracesMessagesRow",
+                "TracesSegmentRow",
             )
         }
         found = (*_base_models(models), *_base_models(inference))
