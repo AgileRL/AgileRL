@@ -15,6 +15,11 @@ from typing import Any
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+# Snowflake puts each procedure IMPORTS file on the path, so app_code modules
+# import each other by bare name.
+sys.path.insert(
+    0, str(Path(__file__).resolve().parents[1] / "snowflake_app" / "app_code")
+)
 
 from agilerl.arena.auth import ArenaOAuth2
 from agilerl.arena.memory import (

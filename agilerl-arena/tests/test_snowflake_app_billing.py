@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import app_trial
 import httpx
 import pytest
 from snowflake.snowpark.exceptions import SnowparkSQLException
@@ -39,7 +40,12 @@ from agilerl.arena.snowflake.license import (
     UnknownUsageError,
 )
 from tests.test_snowflake_app_runs import RUN_ID as PUBLISH_RUN_ID
-from tests.test_snowflake_app_runs import AppSession, publish_session
+from tests.test_snowflake_app_runs import (
+    AppSession,
+    Install,
+    listing_trial,
+    publish_session,
+)
 from tests.test_snowflake_app_runs import Result as AppResult
 from tests.test_snowflake_billing import (
     HOUR_13_MS,
@@ -55,9 +61,15 @@ from tests.test_snowflake_billing import (
 )
 from tests.test_snowflake_license import Arena, reply
 
+FORCED_DROP = re.compile(r"DROP SERVICE IF EXISTS app_state\.(\w+) FORCE")
+
 
 class BillingSession(UsageBillingSession):
-    """Refuses a service-role grant once that service is gone."""
+    """Refuses a service-role grant once that service is gone, and answers the trial query."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.install = Install()
 
     def sql(self, statement: str) -> Result:
         """Run ``statement``, refusing a grant for a service that is gone.
@@ -65,6 +77,17 @@ class BillingSession(UsageBillingSession):
         :param statement: SQL to run.
         :return: The statement result.
         """
+        if (ended := self.install.ended(statement)) is not None:
+            self.statements.append(statement)
+            return ended
+        if forced := FORCED_DROP.fullmatch(statement):
+            self.statements.append(statement)
+            self.services.pop(forced.group(1), None)
+            return Result([])
+        if statement == "DELETE FROM app_state.served_models":
+            self.statements.append(statement)
+            self.served.clear()
+            return Result([])
         if statement.startswith("GRANT SERVICE ROLE app_state."):
             service = statement.removeprefix("GRANT SERVICE ROLE app_state.").split(
                 "!", 1
@@ -614,6 +637,10 @@ def arena(monkeypatch: pytest.MonkeyPatch) -> Arena:
     return fake
 
 
+def app_paths(arena_root: Path) -> list[str]:
+    return [str(arena_root), str(arena_root / "snowflake_app" / "app_code")]
+
+
 def open_usage(cents: int) -> httpx.Response:
     return reply(
         200,
@@ -643,7 +670,7 @@ class TestArenaAppLogging:
         result = subprocess.run(
             [sys.executable, "-c", script],
             cwd=arena_root,
-            env={**os.environ, "PYTHONPATH": str(arena_root)},
+            env={**os.environ, "PYTHONPATH": os.pathsep.join(app_paths(arena_root))},
             capture_output=True,
             text=True,
             check=True,
@@ -673,7 +700,7 @@ class TestArenaAppErrors:
         result = subprocess.run(
             [sys.executable, "-c", script],
             cwd=arena_root,
-            env={**os.environ, "PYTHONPATH": str(arena_root)},
+            env={**os.environ, "PYTHONPATH": os.pathsep.join(app_paths(arena_root))},
             capture_output=True,
             text=True,
             check=True,
@@ -834,6 +861,78 @@ class TestReconcileUsage:
         # Assert
         assert "failed: 1; items: 1, settled: 0, events: 1, failed: 0" in summary
         assert len(session.events) == 1
+
+    def test_an_ended_trial_stops_every_service_and_closes_the_deployment(
+        self, arena: Arena, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # Arrange
+        caplog.set_level(logging.INFO)
+        session = serving_session({"A": "RUNNING"})
+        session.services.update(
+            {
+                "ARENA_RUN_1_HEAD": "RUNNING",
+                "ARENA_RUN_1_WORKERS": "PENDING",
+                "ARENA_RUN_0_HEAD": "DONE",
+            }
+        )
+        session.install = listing_trial(6.98)
+        arena.replies = [
+            reply(200, {"ok": True}),
+            reply(
+                200,
+                {
+                    "ok": True,
+                    "data": {"state": "closed", "billableHours": [hour_at(0, 10)]},
+                },
+            ),
+        ]
+
+        # Act
+        summary = reconcile_usage(session)
+
+        # Assert
+        assert summary.startswith(
+            "trial ended, dropped services: 3; deployments: 1, heartbeat: 0, "
+            "closed: 1, opened: 0, dropped: 0, missing: 0, failed: 0; "
+            "items: 1, settled: 1, events: 1"
+        )
+        assert session.services == {"ARENA_RUN_0_HEAD": "DONE"}
+        assert session.served == []
+        assert [call["url"] for call in arena.calls] == [
+            f"{DEPLOYMENTS}/dep-a/close",
+            f"{DEPLOYMENTS}/dep-a/usage",
+        ]
+        assert item(session, "dep-a")["closed_at"] is not None
+        assert [
+            r.getMessage()
+            for r in caplog.records
+            if r.name in {arena_app.logger.name, app_trial.logger.name}
+            and r.levelname == "INFO"
+        ][:3] == [
+            "Trial ended unpurchased: dropped service A",
+            "Trial ended unpurchased: dropped service ARENA_RUN_1_HEAD",
+            "Trial ended unpurchased: dropped service ARENA_RUN_1_WORKERS",
+        ]
+
+    @pytest.mark.parametrize(
+        ("age_days", "purchased"), [(6.9, False), (30, True)], ids=["trial", "bought"]
+    )
+    def test_services_keep_running_during_the_trial_or_once_bought(
+        self, arena: Arena, age_days: float, purchased: bool
+    ) -> None:
+        # Arrange
+        session = serving_session({"A": "RUNNING"})
+        session.services["ARENA_RUN_1_HEAD"] = "RUNNING"
+        session.install = Install(listing_trial(age_days).started_at, purchased)
+        arena.replies = [reply(200, {"billableHours": []}), open_usage(957)]
+
+        # Act
+        summary = reconcile_usage(session)
+
+        # Assert
+        assert summary.startswith("deployments: 1, heartbeat: 1, closed: 0")
+        assert session.services == {"A": "RUNNING", "ARENA_RUN_1_HEAD": "RUNNING"}
+        assert not any(s.startswith("DROP") for s in session.statements)
 
     def test_unconfigured_arena_runs_nothing(
         self,
