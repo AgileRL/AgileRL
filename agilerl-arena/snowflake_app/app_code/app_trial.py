@@ -3,8 +3,9 @@
 
 """Free trial of the Arena Snowflake Native App: when an unpurchased listing install stops.
 
-``arena_app`` imports this module. The setup script lists both files in each
-procedure's ``IMPORTS``, which puts them on the path side by side.
+``arena_app`` and ``app_billing`` import this module, which imports neither.
+The setup script lists all three files in each procedure's ``IMPORTS``, which
+puts them on the path side by side.
 """
 
 from __future__ import annotations

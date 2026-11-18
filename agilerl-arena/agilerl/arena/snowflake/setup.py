@@ -22,6 +22,7 @@ from agilerl.arena.snowflake.catalog import (
     event_table_warning,
     existing_integrations,
     existing_pools,
+    family_sized,
     is_foreign_database,
     linked_resources,
     load_families,
@@ -405,16 +406,17 @@ def resolve_plans(request: SetupRequest, state: AccountState) -> list[PoolPlan]:
 
 
 def smallest_gpu_family(families: list[GpuFamily]) -> str:
-    """Known GPU family in ``families`` with the fewest GPUs, then the least memory.
+    """Sized GPU family in ``families`` with the fewest GPUs, then the least memory.
 
     :param families: Families in this region.
     :return: The family name.
-    :raises ValueError: This account listed no known GPU family.
+    :raises ValueError: This account listed no family :func:`family_sized` accepts.
     """
+    sized = [
+        item.name.upper() for item in families if family_sized(item.name, families)
+    ]
     present = sorted(
-        (spec.gpus, spec.memory_gib, item.name.upper())
-        for item in families
-        if (spec := GPU_FAMILIES.get(item.name.upper())) is not None
+        (GPU_FAMILIES[name].gpus, GPU_FAMILIES[name].memory_gib, name) for name in sized
     )
     if not present:
         raise ValueError(no_default_gpu_message(families))
@@ -452,7 +454,7 @@ def _gpu_plan(family: str, max_gpus: int | None, families: list[GpuFamily]) -> P
     spec = GPU_FAMILIES.get(family)
     if spec is None:
         raise ValueError(unsupported_gpu_message(family))
-    if not family_listed(family, families):
+    if not family_sized(family, families):
         raise ValueError(no_gpu_message(family, families))
     gpus = max_gpus if max_gpus is not None else spec.gpus * DEFAULT_GPU_NODES
     return PoolPlan(
@@ -718,22 +720,34 @@ def format_family_lines(families: list[GpuFamily]) -> str:
     )
 
 
-def no_gpu_message(family: str, families: list[GpuFamily]) -> str:
-    """Message when the requested family is not a GPU pool in this region.
+def no_gpu_message(
+    family: str,
+    families: list[GpuFamily],
+    rerun: str = "arena snowflake setup --gpu-family <name>",
+) -> str:
+    """Message when the requested family is not a GPU pool Arena can size in this region.
 
     :param family: Requested family. A key of :data:`GPU_FAMILIES`.
     :param families: Families the account returned.
+    :param rerun: Command that retries with another family.
     :return: The message.
     """
     spec = GPU_FAMILIES[family]
-    gpu_families = [item for item in families if item.gpu_count > 0]
+    listed = [item for item in families if item.name.upper() == family]
+    if listed:
+        reason = (
+            f"{family} is {listed[0].gpu_count}x {listed[0].gpu or spec.gpu} per node "
+            f"in this region, not the {spec.gpus}x {spec.gpu} Arena sizes."
+        )
+    else:
+        reason = f"This account has no {family} pool in this region ({spec.gpus}x {spec.gpu})."
+    usable = [item for item in families if family_sized(item.name, families)]
     return (
-        f"This account has no {family} pool in this region "
-        f"({spec.gpus}x {spec.gpu}). Arena did not create a compute pool.\n"
-        "GPU families SHOW COMPUTE POOL INSTANCE FAMILIES returned:\n"
-        f"{format_family_lines(gpu_families)}\n"
+        f"{reason} Arena did not create a compute pool.\n"
+        "GPU families Arena can size in this region:\n"
+        f"{format_family_lines(usable)}\n"
         "Rerun with one of those names:\n"
-        "  arena snowflake setup --gpu-family <name>\n"
+        f"  {rerun}\n"
         "A CPU pool cannot run this trainer.\n"
         "Nothing was created."
     )

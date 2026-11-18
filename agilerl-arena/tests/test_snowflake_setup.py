@@ -43,6 +43,7 @@ from agilerl.arena.snowflake.profile import (
 from agilerl.arena.snowflake.session import connection_section
 from agilerl.arena.snowflake.setup import (
     TRIAL_MESSAGE,
+    AccountState,
     SetupRequest,
     format_summary,
     key_mismatch_message,
@@ -51,6 +52,7 @@ from agilerl.arena.snowflake.setup import (
     nodes_for_gpus,
     pool_family_message,
     print_setup_sql,
+    resolve_plans,
     run_setup,
     smallest_gpu_family,
 )
@@ -68,7 +70,7 @@ ENABLED = {"schemaVersion": 1, "features": {"snowflakeTraining": True}}
 NO_GPU = (
     "This account has no GPU_NV_S pool in this region (1x A10G). "
     "Arena did not create a compute pool.\n"
-    "GPU families SHOW COMPUTE POOL INSTANCE FAMILIES returned:\n"
+    "GPU families Arena can size in this region:\n"
     "  (none)\n"
     "Rerun with one of those names:\n"
     "  arena snowflake setup --gpu-family <name>\n"
@@ -468,6 +470,97 @@ class TestSmallestGpuFamily:
             "Nothing was created."
         )
 
+    def test_skips_a_family_the_region_has_with_another_gpu_count(self) -> None:
+        family = smallest_gpu_family(
+            [
+                GpuFamily("GPU_R6K_G1_48", 1, "RTX PRO 6000"),
+                GpuFamily("GPU_GCP_NV_L4_4_24G", 4, "L4"),
+            ]
+        )
+
+        assert family == "GPU_GCP_NV_L4_4_24G"
+
+    def test_refuses_when_only_unsized_or_mismatched_families_are_listed(
+        self,
+    ) -> None:
+        families = [
+            GpuFamily("GPU_R6K_G1_48", 1, "RTX PRO 6000"),
+            GpuFamily("GPU_R6K_G1_384", 8, "RTX PRO 6000"),
+        ]
+
+        with pytest.raises(ValueError, match="no GPU family Arena sizes"):
+            smallest_gpu_family(families)
+
+
+def account_state(families: list[GpuFamily]) -> AccountState:
+    """Fresh account in a region with ``families`` and the default CPU families."""
+    cpu = [GpuFamily("CPU_X64_L", 0, ""), GpuFamily("CPU_X64_SL", 0, "")]
+    return AccountState(
+        families=cpu + families,
+        pools={},
+        integrations=frozenset(),
+        secrets=frozenset(),
+        profile=None,
+        stored_key=None,
+        linked="",
+        warehouse_credits=None,
+        budget_credits=None,
+        event_table="",
+    )
+
+
+class TestResolvePlans:
+    def test_plans_an_r6k_pool_where_the_region_has_the_aws_gpu_count(self) -> None:
+        state = account_state([GpuFamily("GPU_R6K_G1_48", 2, "RTX PRO 6000")])
+
+        plans = resolve_plans(
+            request(gpu_families=("GPU_R6K_G1_48",), max_gpus=4), state
+        )
+
+        assert plans[2] == PoolPlan(
+            "arena_gpu_GPU_R6K_G1_48", "GPU_R6K_G1_48", "gpu", 1, 2, 4
+        )
+
+    def test_plans_an_l4_pool_where_the_region_sizes_it_as_arena_does(self) -> None:
+        state = account_state([GpuFamily("GPU_GCP_NV_L4_1_24G", 1, "L4")])
+
+        plans = resolve_plans(request(gpu_families=("GPU_GCP_NV_L4_1_24G",)), state)
+
+        assert plans[2] == PoolPlan(
+            "arena_gpu_GPU_GCP_NV_L4_1_24G", "GPU_GCP_NV_L4_1_24G", "gpu", 1, 2, 2
+        )
+
+    def test_refuses_an_r6k_family_with_the_gcp_gpu_count(self) -> None:
+        # Arrange
+        state = account_state(
+            [
+                GpuFamily("GPU_GCP_NV_L4_1_24G", 1, "L4"),
+                GpuFamily("GPU_R6K_G1_48", 1, "RTX PRO 6000"),
+            ]
+        )
+
+        # Act
+        with pytest.raises(ValueError, match="is 1x RTX PRO 6000 per node") as raised:
+            resolve_plans(request(gpu_families=("GPU_R6K_G1_48",)), state)
+
+        # Assert
+        assert str(raised.value) == (
+            "GPU_R6K_G1_48 is 1x RTX PRO 6000 per node in this region, not the "
+            "2x RTX PRO 6000 Arena sizes. Arena did not create a compute pool.\n"
+            "GPU families Arena can size in this region:\n"
+            "  GPU_GCP_NV_L4_1_24G  1x L4\n"
+            "Rerun with one of those names:\n"
+            "  arena snowflake setup --gpu-family <name>\n"
+            "A CPU pool cannot run this trainer.\n"
+            "Nothing was created."
+        )
+
+    def test_refuses_a_family_arena_does_not_size(self) -> None:
+        state = account_state([GpuFamily("GPU_R6K_G1_384", 8, "RTX PRO 6000")])
+
+        with pytest.raises(ValueError, match="GPU_R6K_G1_384 is not a GPU family"):
+            resolve_plans(request(gpu_families=("GPU_R6K_G1_384",)), state)
+
 
 class TestNoGpuMessage:
     def test_matches_an_empty_family_list(self) -> None:
@@ -841,6 +934,28 @@ class TestRunSetup:
             run_setup(session, request(), Scripted())
 
         assert str(raised.value) == NO_GPU
+        assert created(session) == []
+
+    def test_a_gpu_family_with_another_gpu_count_creates_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        paths(tmp_path, monkeypatch)
+        families = [
+            Row(name="CPU_X64_L", gpu_count=0, gpu=""),
+            Row(name="CPU_X64_SL", gpu_count=0, gpu=""),
+            Row(name="GPU_R6K_G1_48", gpu_count=1, gpu="RTX PRO 6000"),
+        ]
+        session = FakeSession(
+            admin_routes(
+                [(lambda s: s == "SHOW COMPUTE POOL INSTANCE FAMILIES", families)]
+            )
+        )
+
+        with pytest.raises(
+            ValueError, match="GPU_R6K_G1_48 is 1x RTX PRO 6000 per node"
+        ):
+            run_setup(session, request(gpu_families=("gpu_r6k_g1_48",)), Scripted())
+
         assert created(session) == []
 
     def test_an_unlisted_broker_family_creates_nothing(

@@ -382,7 +382,10 @@ class TestRunCheck:
 
 
 def cap_session(
-    pools: list[Row], services: list[Row], describe: list[Row] | None = None
+    pools: list[Row],
+    services: list[Row],
+    describe: list[Row] | None = None,
+    families: list[Row] | None = None,
 ) -> FakeSession:
     extra: list[tuple[object, object]] = [
         setup_doc_route(PROFILE_DOC),
@@ -391,6 +394,8 @@ def cap_session(
     ]
     if describe is not None:
         extra.append((lambda s: s.startswith("DESCRIBE COMPUTE POOL"), describe))
+    if families is not None:
+        extra.append((lambda s: s == "SHOW COMPUTE POOL INSTANCE FAMILIES", families))
     return FakeSession(admin_routes(extra))
 
 
@@ -588,6 +593,54 @@ class TestSetGpuCap:
             s.startswith(("CREATE COMPUTE", "ALTER COMPUTE"))
             for s in session.statements
         )
+
+    def test_creates_an_l4_pool_where_the_region_sizes_it_as_arena_does(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        paths(tmp_path, monkeypatch)
+        session = cap_session([], [])
+
+        text = set_gpu_cap(session, "GPU_GCP_NV_L4_1_24G", 2)
+
+        assert text == (
+            "arena_gpu_GPU_GCP_NV_L4_1_24G  GPU_GCP_NV_L4_1_24G  max 2 GPUs  MAX_NODES 2"
+        )
+
+    def test_creates_an_r6k_pool_where_the_region_has_the_aws_gpu_count(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        paths(tmp_path, monkeypatch)
+        session = cap_session([], [], families=[Row(name="GPU_R6K_G1_48", gpu_count=2)])
+
+        text = set_gpu_cap(session, "GPU_R6K_G1_48", 4)
+
+        assert text == "arena_gpu_GPU_R6K_G1_48  GPU_R6K_G1_48  max 4 GPUs  MAX_NODES 2"
+        gpu = session.file.uploads[-1]["pools"]["gpu"]["GPU_R6K_G1_48"]
+        assert gpu["gpus_per_node"] == 2
+
+    def test_a_family_with_another_gpu_count_runs_no_pool_sql(self) -> None:
+        session = cap_session([], [], families=[Row(name="GPU_R6K_G1_48", gpu_count=1)])
+
+        with pytest.raises(
+            ValueError, match="GPU_R6K_G1_48 is 1x RTX PRO 6000 per node"
+        ):
+            set_gpu_cap(session, "GPU_R6K_G1_48", 2)
+
+        assert not any(
+            s.startswith(("CREATE COMPUTE", "ALTER COMPUTE"))
+            for s in session.statements
+        )
+
+    def test_a_family_arena_does_not_size_runs_no_pool_sql(self) -> None:
+        session = cap_session(
+            [], [], families=[Row(name="GPU_R6K_G1_384", gpu_count=8)]
+        )
+
+        with pytest.raises(ValueError, match="GPU_R6K_G1_384 is not") as raised:
+            set_gpu_cap(session, "GPU_R6K_G1_384", 8)
+
+        assert str(raised.value) == unsupported_gpu_message("GPU_R6K_G1_384")
+        assert not any("COMPUTE POOL" in s for s in session.statements)
 
     def test_without_setup_stops(self) -> None:
         session = FakeSession(admin_routes())

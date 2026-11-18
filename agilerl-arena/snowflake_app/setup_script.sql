@@ -232,7 +232,7 @@ CREATE OR REPLACE PROCEDURE app_code.register_reference(
     'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
     'requests-toolbelt', 'rich'
   )
-  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
   HANDLER = 'arena_app.register_reference';
 GRANT USAGE ON PROCEDURE app_code.register_reference(STRING, STRING, STRING)
   TO APPLICATION ROLE app_admin;
@@ -250,7 +250,7 @@ CREATE OR REPLACE PROCEDURE app_code.configure(
     'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
     'requests-toolbelt', 'rich'
   )
-  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
   HANDLER = 'arena_app.configure';
 GRANT USAGE ON PROCEDURE app_code.configure(STRING, STRING, STRING)
   TO APPLICATION ROLE app_admin;
@@ -269,9 +269,23 @@ CREATE OR REPLACE PROCEDURE app_code.set_pools(
     'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
     'requests-toolbelt', 'rich'
   )
-  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
   HANDLER = 'arena_app.set_pools';
 GRANT USAGE ON PROCEDURE app_code.set_pools(ARRAY, NUMBER, STRING, STRING)
+  TO APPLICATION ROLE app_admin;
+
+CREATE OR REPLACE PROCEDURE app_code.gpu_families()
+  RETURNS STRING
+  LANGUAGE PYTHON
+  RUNTIME_VERSION = '3.13'
+  PACKAGES = (
+    'snowflake-snowpark-python', 'aiofiles', 'click', 'cryptography', 'deprecation',
+    'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
+    'requests-toolbelt', 'rich'
+  )
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
+  HANDLER = 'arena_app.gpu_families';
+GRANT USAGE ON PROCEDURE app_code.gpu_families()
   TO APPLICATION ROLE app_admin;
 
 -- Run and publish procedures create services in app_state: a versioned schema cannot hold one.
@@ -293,7 +307,7 @@ CREATE OR REPLACE PROCEDURE app_code.submit(
     'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
     'requests-toolbelt', 'rich'
   )
-  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
   HANDLER = 'arena_app.submit';
 GRANT USAGE ON PROCEDURE app_code.submit(STRING, NUMBER, STRING, STRING, STRING, STRING, NUMBER, STRING)
   TO APPLICATION ROLE app_admin;
@@ -307,7 +321,7 @@ CREATE OR REPLACE PROCEDURE app_code.status(run_id STRING)
     'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
     'requests-toolbelt', 'rich'
   )
-  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
   HANDLER = 'arena_app.status';
 GRANT USAGE ON PROCEDURE app_code.status(STRING)
   TO APPLICATION ROLE app_user;
@@ -325,7 +339,7 @@ CREATE OR REPLACE PROCEDURE app_code.logs(
     'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
     'requests-toolbelt', 'rich'
   )
-  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
   HANDLER = 'arena_app.logs';
 GRANT USAGE ON PROCEDURE app_code.logs(STRING, STRING, NUMBER)
   TO APPLICATION ROLE app_user;
@@ -339,7 +353,7 @@ CREATE OR REPLACE PROCEDURE app_code.cancel(run_id STRING)
     'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
     'requests-toolbelt', 'rich'
   )
-  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
   HANDLER = 'arena_app.cancel';
 GRANT USAGE ON PROCEDURE app_code.cancel(STRING)
   TO APPLICATION ROLE app_admin;
@@ -362,7 +376,7 @@ CREATE OR REPLACE PROCEDURE app_code.publish(
     'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
     'requests-toolbelt', 'rich'
   )
-  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
   HANDLER = 'arena_app.publish';
 GRANT USAGE ON PROCEDURE app_code.publish(STRING, STRING, STRING, NUMBER, BOOLEAN, NUMBER, STRING, NUMBER)
   TO APPLICATION ROLE app_admin;
@@ -379,7 +393,7 @@ CREATE OR REPLACE PROCEDURE app_code.endpoint(
     'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
     'requests-toolbelt', 'rich'
   )
-  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
   HANDLER = 'arena_app.endpoint';
 GRANT USAGE ON PROCEDURE app_code.endpoint(STRING, STRING)
   TO APPLICATION ROLE app_user;
@@ -397,7 +411,7 @@ CREATE OR REPLACE PROCEDURE app_code.unpublish(
     'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
     'requests-toolbelt', 'rich'
   )
-  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
   HANDLER = 'arena_app.unpublish';
 GRANT USAGE ON PROCEDURE app_code.unpublish(STRING, STRING, BOOLEAN)
   TO APPLICATION ROLE app_admin;
@@ -412,7 +426,7 @@ CREATE OR REPLACE PROCEDURE app_code.reconcile_usage()
     'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
     'requests-toolbelt', 'rich'
   )
-  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
   HANDLER = 'arena_app.reconcile_usage';
 
 -- The Arena integration is named per app, so the Arena procedures get it and their secrets here.
@@ -424,6 +438,7 @@ BEGIN
   SELECT ' SET EXTERNAL_ACCESS_INTEGRATIONS = (' || app_code.object_prefix() || 'ARENA_EAI)'
     INTO :arena_access;
   EXECUTE IMMEDIATE 'ALTER PROCEDURE app_code.configure(STRING, STRING, STRING)' || arena_access;
+  EXECUTE IMMEDIATE 'ALTER PROCEDURE app_code.gpu_families()' || arena_access || secrets;
   EXECUTE IMMEDIATE 'ALTER PROCEDURE app_code.submit(STRING, NUMBER, STRING, STRING, STRING, STRING, NUMBER, STRING)' || arena_access || secrets;
   EXECUTE IMMEDIATE 'ALTER PROCEDURE app_code.publish(STRING, STRING, STRING, NUMBER, BOOLEAN, NUMBER, STRING, NUMBER)' || arena_access || secrets;
   EXECUTE IMMEDIATE 'ALTER PROCEDURE app_code.unpublish(STRING, STRING, BOOLEAN)' || arena_access || secrets;
@@ -431,28 +446,28 @@ BEGIN
 END;
 $$;
 
--- manifest.yml's version_initializer. Snowflake calls the previous version's after a
--- failed upgrade, whose setup script may already have suspended the task.
-CREATE OR REPLACE PROCEDURE app_code.version_init()
-  RETURNS STRING
-  LANGUAGE SQL
-  AS
-$$
-BEGIN
-  ALTER TASK IF EXISTS app_state.reconcile_usage_task RESUME;
-  RETURN 'resumed app_state.reconcile_usage_task';
-END;
-$$;
-
 -- Serverless, so no warehouse resumes; a failed run must not suspend billing.
 -- Suspended first because an upgrade may change the definition of a started task.
+-- Left suspended: version_init, submit and publish resume it only while there is work to bill.
 ALTER TASK IF EXISTS app_state.reconcile_usage_task SUSPEND;
 CREATE OR ALTER TASK app_state.reconcile_usage_task
   USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'XSMALL'
   SCHEDULE = '60 MINUTES'
   SUSPEND_TASK_AFTER_NUM_FAILURES = 0
   AS CALL app_code.reconcile_usage();
-ALTER TASK app_state.reconcile_usage_task RESUME;
+
+-- manifest.yml's version_initializer.
+CREATE OR REPLACE PROCEDURE app_code.version_init()
+  RETURNS STRING
+  LANGUAGE PYTHON
+  RUNTIME_VERSION = '3.13'
+  PACKAGES = (
+    'snowflake-snowpark-python', 'aiofiles', 'click', 'cryptography', 'deprecation',
+    'httpx', 'jwcrypto', 'lazy_loader', 'numpy', 'pydantic', 'pyyaml', 'requests',
+    'requests-toolbelt', 'rich'
+  )
+  IMPORTS = ('/app_code/arena_app.py', '/app_code/app_billing.py', '/app_code/app_trial.py', '/agilerl_arena.zip')
+  HANDLER = 'arena_app.version_init';
 
 -- Runs the task rather than reconcile_usage: a task run never overlaps another, and
 -- two overlapping calls could each open an Arena deployment for one service.

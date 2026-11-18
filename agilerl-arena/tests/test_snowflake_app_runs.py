@@ -196,12 +196,12 @@ def exact(statement: str, rows: list[Row]) -> Route:
     return (lambda s: s == statement, rows)
 
 
-def setup_route() -> Route:
+def setup_route(setup: dict | None = None) -> Route:
     return (
         lambda s: s.startswith(
             "SELECT $1 AS DOC FROM @app_state.runs/_arena/setup.json"
         ),
-        [Row(DOC=json.dumps(SETUP))],
+        [Row(DOC=json.dumps(setup or SETUP))],
     )
 
 
@@ -220,13 +220,21 @@ def spec(statement: str) -> dict:
     return yaml.safe_load(statement.split("$$\n", 1)[1].removesuffix("$$"))
 
 
-def submit_session(install: Install | None = None) -> AppSession:
+def submit_session(
+    setup: dict | None = None,
+    region: list[Row] | None = None,
+    install: Install | None = None,
+) -> AppSession:
     return AppSession(
         [
-            setup_route(),
+            setup_route(setup),
             exact(
                 "SELECT app_code.object_prefix() AS PREFIX",
                 [Row(PREFIX="AGILERL_APP_ARENA_APP_")],
+            ),
+            exact(
+                "SHOW COMPUTE POOL INSTANCE FAMILIES",
+                region or [Row(name="GPU_NV_S", gpu_count=1)],
             ),
             (
                 lambda s: s.startswith(
@@ -234,9 +242,27 @@ def submit_session(install: Install | None = None) -> AppSession:
                 ),
                 [Row(instance_family="GPU_NV_S", max_nodes=2)],
             ),
+            (
+                lambda s: s.startswith(
+                    "DESCRIBE COMPUTE POOL AGILERL_APP_ARENA_APP_GPU_GPU_R6K_G1_48"
+                ),
+                [Row(instance_family="GPU_R6K_G1_48", max_nodes=2)],
+            ),
         ],
         install=install,
     )
+
+
+def r6k_setup() -> dict:
+    """``SETUP`` with a GPU_R6K_G1_48 pool recorded at the AWS layout beside GPU_NV_S."""
+    r6k = {
+        "pool": "AGILERL_APP_ARENA_APP_GPU_GPU_R6K_G1_48",
+        "max_gpus": 4,
+        "gpus_per_node": 2,
+        "gpu_memory_gib": 96,
+    }
+    pools = {**SETUP["pools"], "gpu": {**SETUP["pools"]["gpu"], "GPU_R6K_G1_48": r6k}}
+    return {**SETUP, "pools": pools}
 
 
 def capabilities(priced: list[str] | None) -> httpx.Response:
@@ -334,6 +360,17 @@ class TestSubmit:
             f"VALUES ('run', '{run_id}', CURRENT_TIMESTAMP())"
         )
         assert insert < session.statements.index(executes(session)[0])
+
+    def test_resumes_the_billing_task_after_recording_the_run(self) -> None:
+        session = submit_session()
+
+        submit(session, SFT, 1, "source_table", "prompts", None, None, None, None)
+
+        insert = next(i for i, s in enumerate(session.statements) if "usage_items" in s)
+        resume = session.statements.index(
+            "ALTER TASK app_state.reconcile_usage_task RESUME"
+        )
+        assert insert < resume < session.statements.index(executes(session)[0])
 
     def test_a_failed_service_start_still_leaves_the_run_for_billing(self) -> None:
         # Arrange
@@ -502,6 +539,80 @@ class TestSubmit:
         assert text.startswith("run_id: arena-")
         assert any("EXECUTE JOB SERVICE" in s for s in session.statements)
 
+    def test_runs_on_an_r6k_pool_where_the_region_has_the_aws_gpu_count(
+        self, priced_arena: Arena
+    ) -> None:
+        # Arrange
+        priced_arena.replies = [capabilities(["GPU_NV_S", "GPU_R6K_G1_48"])]
+        region = [
+            Row(name="GPU_NV_S", gpu_count=1),
+            Row(name="GPU_R6K_G1_48", gpu_count=2),
+        ]
+        session = submit_session(r6k_setup(), region)
+
+        # Act
+        submit(
+            session,
+            SFT,
+            2,
+            "source_table",
+            "prompts",
+            "GPU_R6K_G1_48",
+            None,
+            None,
+            None,
+        )
+
+        # Assert
+        workers = executes(session)[2]
+        assert workers.startswith(
+            "EXECUTE JOB SERVICE IN COMPUTE POOL AGILERL_APP_ARENA_APP_GPU_GPU_R6K_G1_48\n"
+        )
+
+    def test_refuses_a_named_family_the_region_has_with_another_gpu_count(
+        self, priced_arena: Arena
+    ) -> None:
+        # Arrange
+        priced_arena.replies = [capabilities(["GPU_NV_S", "GPU_R6K_G1_48"])]
+        region = [
+            Row(name="GPU_NV_S", gpu_count=1),
+            Row(name="GPU_R6K_G1_48", gpu_count=1),
+        ]
+        session = submit_session(r6k_setup(), region)
+
+        # Act
+        with pytest.raises(ValueError, match="does not have GPU_R6K_G1_48") as raised:
+            submit(
+                session,
+                SFT,
+                2,
+                "source_table",
+                "prompts",
+                "GPU_R6K_G1_48",
+                None,
+                None,
+                None,
+            )
+
+        # Assert
+        assert str(raised.value) == (
+            "This region does not have GPU_R6K_G1_48 with the GPUs per node the app "
+            "sized, so the run would ask for GPUs the nodes lack.\n"
+            "An app_admin lists usable families with gpu_families() and calls "
+            "set_pools with one of them.\n"
+            "Nothing was started."
+        )
+        assert not any("usage_items" in s for s in session.statements)
+        assert executes(session) == []
+
+    def test_refuses_when_no_recorded_family_has_the_sized_gpu_count(self) -> None:
+        session = submit_session(region=[Row(name="GPU_NV_S")])
+
+        with pytest.raises(ValueError, match="does not have GPU_NV_S with the GPUs"):
+            submit(session, SFT, 1, "source_table", "prompts", None, None, None, None)
+
+        assert executes(session) == []
+
     def test_reads_the_prices_with_the_partner_key(self, priced_arena: Arena) -> None:
         # Act
         submit(
@@ -514,7 +625,7 @@ class TestSubmit:
         assert call["headers"]["Authorization"] == "Bearer arena_org_key-1"
 
     def test_starts_the_run_during_an_unpurchased_trial(self) -> None:
-        session = submit_session(listing_trial(6.9))
+        session = submit_session(install=listing_trial(6.9))
 
         text = submit(
             session, SFT, 1, "source_table", "prompts", None, None, None, None
@@ -527,7 +638,7 @@ class TestSubmit:
         self, priced_arena: Arena
     ) -> None:
         # Arrange
-        session = submit_session(listing_trial(6.98))
+        session = submit_session(install=listing_trial(6.98))
 
         # Act
         with pytest.raises(PermissionError, match=TRIAL_ENDED) as exc:
@@ -537,12 +648,15 @@ class TestSubmit:
         assert "Purchase the AgileRL Arena listing" in str(exc.value)
         assert executes(session) == []
         assert not any("usage_items" in s for s in session.statements)
+        assert not any(s.startswith("ALTER TASK") for s in session.statements)
         assert session.file.puts == {}
         assert priced_arena.calls == []
 
     def test_a_purchased_listing_starts_after_the_trial(self) -> None:
         session = submit_session(
-            Install(datetime.now(timezone.utc) - timedelta(days=30), purchased=True)
+            install=Install(
+                datetime.now(timezone.utc) - timedelta(days=30), purchased=True
+            )
         )
 
         text = submit(
@@ -645,9 +759,24 @@ class TestLogs:
             logs(session, RUN_ID, "head", 0)
 
 
+def prefix_route() -> Route:
+    return exact(
+        "SELECT app_code.object_prefix() AS PREFIX",
+        [Row(PREFIX="AGILERL_APP_ARENA_APP_")],
+    )
+
+
+def gpu_pools_route(*pools: Row) -> Route:
+    return exact("SHOW COMPUTE POOLS LIKE 'AGILERL_APP_ARENA_APP_GPU_%'", list(pools))
+
+
+def suspends(session: AppSession) -> list[str]:
+    return [s for s in session.statements if s.startswith("ALTER COMPUTE POOL")]
+
+
 class TestCancel:
     def test_drops_the_three_services_of_the_run(self) -> None:
-        session = AppSession([known()])
+        session = AppSession([known(), prefix_route()])
 
         text = cancel(session, RUN_ID)
 
@@ -657,6 +786,51 @@ class TestCancel:
             f"DROP SERVICE IF EXISTS app_state.{STEM}_HEAD FORCE",
             f"DROP SERVICE IF EXISTS app_state.{STEM}_WORKERS FORCE",
         ]
+
+    def test_suspends_a_gpu_pool_left_with_nothing_on_it_after_the_drops(
+        self,
+    ) -> None:
+        # Arrange
+        starting = Row(
+            name="AGILERL_APP_ARENA_APP_GPU_GPU_NV_S",
+            state="STARTING",
+            num_services=0,
+            num_jobs=0,
+        )
+        session = AppSession([known(), prefix_route(), gpu_pools_route(starting)])
+
+        # Act
+        text = cancel(session, RUN_ID)
+
+        # Assert
+        assert text == (
+            f"cancelled: {RUN_ID}\nsuspended: AGILERL_APP_ARENA_APP_GPU_GPU_NV_S"
+        )
+        assert session.statements[-1] == (
+            "ALTER COMPUTE POOL AGILERL_APP_ARENA_APP_GPU_GPU_NV_S SUSPEND"
+        )
+
+    def test_leaves_a_gpu_pool_another_run_or_model_still_uses(self) -> None:
+        serving = Row(
+            name="AGILERL_APP_ARENA_APP_GPU_GPU_NV_M",
+            state="ACTIVE",
+            num_services=1,
+            num_jobs=0,
+        )
+        training = Row(
+            name="AGILERL_APP_ARENA_APP_GPU_GPU_NV_S",
+            state="ACTIVE",
+            num_services=0,
+            num_jobs=1,
+        )
+        session = AppSession(
+            [known(), prefix_route(), gpu_pools_route(serving, training)]
+        )
+
+        text = cancel(session, RUN_ID)
+
+        assert text == f"cancelled: {RUN_ID}"
+        assert suspends(session) == []
 
     def test_drops_nothing_for_a_run_the_app_does_not_have(self) -> None:
         session = AppSession()
@@ -885,6 +1059,24 @@ class TestPublish:
 
         assert "deployment" not in text
         assert not any(s.startswith("INSERT") for s in session.statements)
+        assert not any(s.startswith("ALTER TASK") for s in session.statements)
+
+    def test_serving_resumes_the_billing_task_after_recording_the_serve(
+        self, arena: Arena
+    ) -> None:
+        session = publish_session("FAILED")
+
+        with pytest.raises(RuntimeError, match="failed"):
+            publish(session, RUN_ID, "qwen", None, None, True, 1, None, None)
+
+        recorded = next(
+            i
+            for i, s in enumerate(session.statements)
+            if s.startswith("INSERT INTO app_state.served_models")
+        )
+        assert session.statements[recorded + 1] == (
+            "ALTER TASK app_state.reconcile_usage_task RESUME"
+        )
 
     def test_a_failed_job_raises_with_its_log(self) -> None:
         session = publish_session("FAILED")
@@ -920,6 +1112,7 @@ class TestPublish:
         assert executes(session) == []
         assert session.file.puts == {}
         assert not any(s.startswith("INSERT") for s in session.statements)
+        assert not any(s.startswith("ALTER TASK") for s in session.statements)
         assert arena.calls == []
 
 
@@ -1058,6 +1251,7 @@ class TestRunProcedureStatements:
                 exact(
                     f"SHOW JOB SERVICES LIKE '{STEM}%' IN SCHEMA app_state", [running]
                 ),
+                prefix_route(),
             ]
         )
         sessions = [

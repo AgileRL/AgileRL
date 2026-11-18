@@ -203,6 +203,23 @@ def families_from(rows: list[SnowflakeRow]) -> list[GpuFamily]:
     return found
 
 
+def family_sized(family: str, families: list[GpuFamily]) -> bool:
+    """Whether this region has ``family`` with the GPUs per node :data:`GPU_FAMILIES` sizes.
+
+    Snowflake reuses some family names across clouds for nodes with other GPU
+    counts. A row without ``gpu_count`` reads as 0 GPUs, so it never matches.
+
+    :param family: GPU instance family.
+    :param families: Families in this region.
+    :return: True when the family is known and the region's GPU count matches.
+    """
+    name = family.upper()
+    spec = GPU_FAMILIES.get(name)
+    return spec is not None and any(
+        item.name.upper() == name and item.gpu_count == spec.gpus for item in families
+    )
+
+
 def whole_number(value: object) -> int:
     """Integer from a ``SHOW`` column. Empty means 0.
 
