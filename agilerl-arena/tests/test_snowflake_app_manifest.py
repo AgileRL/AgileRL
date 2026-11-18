@@ -248,6 +248,7 @@ class TestSetupScriptObjects:
             ),
             "endpoint": (["STRING", "STRING"], "app_user"),
             "unpublish": (["STRING", "STRING", "BOOLEAN"], "app_admin"),
+            "reconcile_now": ([], "app_admin"),
         }
         assert {name: args for name, (args, _role) in granted.items()} == {
             name: args
@@ -255,7 +256,9 @@ class TestSetupScriptObjects:
             if name not in {"reconcile_usage", "version_init"}
         }
         assert created["reconcile_usage"] == []
-        assert handlers == [name for name in created if name != "version_init"]
+        assert handlers == [
+            name for name in created if name not in {"version_init", "reconcile_now"}
+        ]
         assert all(callable(getattr(arena_app, name)) for name in handlers)
 
     def test_only_the_task_and_snowflake_call_the_billing_procedures(self) -> None:
@@ -263,6 +266,28 @@ class TestSetupScriptObjects:
 
         assert "reconcile_usage" not in grants
         assert "version_init" not in grants
+
+    def test_admins_run_billing_by_hand_through_the_task(self) -> None:
+        # Arrange
+        pattern = (
+            r"CREATE OR REPLACE PROCEDURE app_code\.reconcile_now\(\)\s+"
+            r"RETURNS STRING\s+LANGUAGE SQL\s+AS\s+\$\$(.*?)\$\$;\s+"
+            r"GRANT USAGE ON PROCEDURE app_code\.reconcile_now\(\)\s+"
+            r"TO APPLICATION ROLE (\w+);"
+        )
+
+        # Act
+        procedure = re.search(pattern, SETUP_SQL, flags=re.DOTALL)
+
+        # Assert
+        assert procedure is not None
+        body, role = procedure.groups()
+        assert role == "app_admin"
+        assert "EXECUTE TASK app_state.reconcile_usage_task;" in body
+        assert "reconcile_usage()" not in body
+        assert procedure.start() > SETUP_SQL.index(
+            "CREATE OR ALTER TASK app_state.reconcile_usage_task"
+        )
 
     def test_billing_tables_survive_upgrades(self) -> None:
         # Arrange

@@ -73,6 +73,7 @@ never collides with objects the CLI created in the same account.
 | `app_code.logs(run_id, role, instance)` | `app_user` | `arena snowflake logs`. |
 | `app_code.cancel(run_id)` | `app_admin` | `arena snowflake cancel`. |
 | `app_code.reconcile_usage()` | none | Bills usage; see Billing. Only the hourly task calls it, so two calls never overlap. |
+| `app_code.reconcile_now()` | `app_admin` | Queues a run of `app_state.reconcile_usage_task` with `EXECUTE TASK`, so billing can be run by hand. It starts after any run in progress. |
 | `app_code.version_init()` | none | Version initializer: resumes the billing task after install, upgrade, or a failed upgrade. |
 | `app_code.publish(run_id, model_name, version_name, step, serve, gpu_count, service_name, max_model_len)` | `app_admin` | `arena snowflake publish` into the Model Registry in `app_state`, waiting for the job like the CLI. `serve` starts the vLLM service, whose public endpoint uses `BIND SERVICE ENDPOINT`, and bills it as an Arena deployment; see Billing. The app grants the service's `ALL_ENDPOINTS_USAGE` role to `app_user`, after publish and on each hourly run, so account roles holding `app_user` can call the endpoint. |
 | `app_code.endpoint(model, version_name)` | `app_user` | `arena snowflake endpoint` for a model in `app_state`. |
@@ -130,6 +131,9 @@ billed yet, it emits one event with `SYSTEM$CREATE_BILLING_EVENTS`
 class `ARENA_USAGE`, subclass `run` or `deployment`, `start_timestamp` = the hour start,
 `timestamp` = the hour end or now for a partial hour, `base_charge` = cents ×
 0.01 USD, `objects` = the run or deployment id. Billing lags usage by up to about an hour.
+Every run logs its summary at INFO (deployments heartbeated, closed, opened
+and dropped; items settled, events emitted, failed, missing, skipped until
+their daily read, stale, and hours Snowflake never confirmed), or why nothing ran.
 The listing's pricing plan carries the event's `billing_quantity` and unit.
 
 `app_state.billed_hours` holds one row per charged hour. A MERGE claims hours
