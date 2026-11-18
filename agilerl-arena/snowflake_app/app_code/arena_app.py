@@ -118,13 +118,6 @@ SOURCE_REFERENCES = ("SOURCE_TABLE", "SOURCE_VIEW")
 # snowflake-app-build replaces the tag with the release tag, as in manifest.yml.
 IMAGE = "/arena_provider/images/repo/snowflake-job:0.0.0-py313-cu130"
 SETUP_PREFIX = f"@{APP_SCHEMA}.{RUNS_STAGE}/_arena"
-# Account-level names. The agilerl_app_ prefix keeps them apart from the CLI's objects.
-WAREHOUSE = "agilerl_app_wh"
-BROKER_POOL = "agilerl_app_broker_pool"
-HEAD_POOL = "agilerl_app_head_pool"
-GPU_POOL_PREFIX = "agilerl_app_gpu_"
-HF_INTEGRATION = "agilerl_app_hf_eai"
-API_INTEGRATION = "agilerl_app_arena_eai"
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +130,41 @@ ARENA_LOGGER.propagate = True
 # Snowflake returns a procedure's formatted exception to the caller; without this
 # the consumer sees the app's stack and file paths around the message.
 sys.tracebacklimit = 0
+
+
+@dataclass(frozen=True)
+class AppNames:
+    """Account-level names of this app's objects, ``<prefix><suffix>``.
+
+    The setup script creates the warehouse and integrations with the same
+    prefix and suffixes. The ``AGILERL_APP_`` start of the prefix keeps them
+    apart from the CLI's ``arena_`` objects.
+    """
+
+    warehouse: str
+    broker_pool: str
+    head_pool: str
+    gpu_pool_prefix: str
+    hf_integration: str
+    api_integration: str
+
+
+def app_names(session: SnowflakeSession) -> AppNames:
+    """Names from ``app_code.object_prefix()``, which derives them from the app name.
+
+    :param session: Procedure session.
+    :return: The names.
+    """
+    [row] = collect(session, "SELECT app_code.object_prefix() AS PREFIX")
+    prefix = str(lowered(row)["prefix"])
+    return AppNames(
+        warehouse=f"{prefix}WH",
+        broker_pool=f"{prefix}BROKER_POOL",
+        head_pool=f"{prefix}HEAD_POOL",
+        gpu_pool_prefix=f"{prefix}GPU_",
+        hf_integration=f"{prefix}HF_EAI",
+        api_integration=f"{prefix}ARENA_EAI",
+    )
 
 
 def configure(
@@ -326,11 +354,17 @@ def set_pools(
     saved = remote_profile(
         session, f"{SETUP_PREFIX}/setup.json", f"{APP_SCHEMA}.{FILE_FORMAT}"
     )
+    objects = app_names(session)
     plans = pool_plans(
-        broker, head, names, max_gpus, saved.pools.gpu if saved is not None else {}
+        objects,
+        broker,
+        head,
+        names,
+        max_gpus,
+        saved.pools.gpu if saved is not None else {},
     )
     existing = existing_pools(session)
-    leftovers = checked_leftovers(session, plans, existing)
+    leftovers = checked_leftovers(session, objects, plans, existing)
     for plan in plans:
         state = existing.get(plan.name.upper())
         for statement in pool_statements(state.max_nodes if state else None, plan):
@@ -338,7 +372,7 @@ def set_pools(
     for name in leftovers:
         collect(session, f"ALTER COMPUTE POOL {name} STOP ALL")
         collect(session, f"DROP COMPUTE POOL {name}")
-    put_setup_json(session, app_profile(plans, saved), SETUP_PREFIX)
+    put_setup_json(session, app_profile(objects, plans, saved), SETUP_PREFIX)
     lines = [
         f"{plan.name}  {plan.family}  {plan.role}"
         if plan.max_gpus is None
@@ -372,6 +406,7 @@ def gpu_names(gpu_families: list[str], max_gpus: int | None) -> list[str]:
 
 
 def pool_plans(
+    objects: AppNames,
     broker: str,
     head: str,
     names: list[str],
@@ -380,6 +415,7 @@ def pool_plans(
 ) -> list[PoolPlan]:
     """Broker, head, then one GPU pool per family.
 
+    :param objects: The app's account-level names.
     :param broker: Instance family of the broker pool.
     :param head: Instance family of the head pool.
     :param names: GPU families.
@@ -390,9 +426,21 @@ def pool_plans(
     """
     plans = [
         PoolPlan(
-            BROKER_POOL, broker, "broker", CPU_POOL_MIN_NODES, CPU_POOL_MAX_NODES, None
+            objects.broker_pool,
+            broker,
+            "broker",
+            CPU_POOL_MIN_NODES,
+            CPU_POOL_MAX_NODES,
+            None,
         ),
-        PoolPlan(HEAD_POOL, head, "head", CPU_POOL_MIN_NODES, CPU_POOL_MAX_NODES, None),
+        PoolPlan(
+            objects.head_pool,
+            head,
+            "head",
+            CPU_POOL_MIN_NODES,
+            CPU_POOL_MAX_NODES,
+            None,
+        ),
     ]
     for name in names:
         spec = GPU_FAMILIES[name]
@@ -404,7 +452,7 @@ def pool_plans(
             cap = spec.gpus * DEFAULT_GPU_NODES
         plans.append(
             PoolPlan(
-                f"{GPU_POOL_PREFIX}{name}",
+                f"{objects.gpu_pool_prefix}{name}",
                 name,
                 "gpu",
                 1,
@@ -417,12 +465,14 @@ def pool_plans(
 
 def checked_leftovers(
     session: SnowflakeSession,
+    objects: AppNames,
     plans: list[PoolPlan],
     existing: dict[str, PoolState],
 ) -> list[str]:
     """App GPU pools no plan keeps, once every plan and drop is known to be safe.
 
     :param session: Procedure session.
+    :param objects: The app's account-level names.
     :param plans: Pools to create or resize.
     :param existing: Compute pools in the account, keyed by upper-case name.
     :return: Upper-case names of the pools to drop.
@@ -447,7 +497,7 @@ def checked_leftovers(
     leftovers = [
         name
         for name in existing
-        if name.startswith(GPU_POOL_PREFIX.upper()) and name not in kept
+        if name.startswith(objects.gpu_pool_prefix) and name not in kept
     ]
     for name in leftovers:
         blocked = blocking_services(session, name, 0)
@@ -457,9 +507,12 @@ def checked_leftovers(
     return leftovers
 
 
-def app_profile(plans: list[PoolPlan], saved: AccountProfile | None) -> AccountProfile:
+def app_profile(
+    objects: AppNames, plans: list[PoolPlan], saved: AccountProfile | None
+) -> AccountProfile:
     """``setup.json`` fields for the app, in the shape the CLI writes.
 
+    :param objects: The app's account-level names.
     :param plans: Broker, head, then GPU pools.
     :param saved: Profile already saved. Its extra integrations stay.
     :return: The profile.
@@ -468,10 +521,12 @@ def app_profile(plans: list[PoolPlan], saved: AccountProfile | None) -> AccountP
     extra = saved.external_access_integrations if saved is not None else ()
     return AccountProfile(
         image=IMAGE,
-        warehouse=WAREHOUSE,
+        warehouse=objects.warehouse,
         stage=f"{APP_SCHEMA}.{RUNS_STAGE}",
         metrics_table=f"{APP_SCHEMA}.{METRICS_TABLE}",
-        external_access_integrations=tuple(dict.fromkeys((HF_INTEGRATION, *extra))),
+        external_access_integrations=tuple(
+            dict.fromkeys((objects.hf_integration, *extra))
+        ),
         pools=AccountPools(
             broker=CpuPool(broker.name, broker.family),
             head=CpuPool(head.name, head.family),
@@ -549,7 +604,14 @@ def submit(
             lambda pool: manifest_fits(job_manifest, pool, gpus),
         )
         settings = submit_settings(
-            profile, source, gpus, family, checkpoint_steps, reward_path, resume_from
+            profile,
+            app_names(session).api_integration,
+            source,
+            gpus,
+            family,
+            checkpoint_steps,
+            reward_path,
+            resume_from,
         )
         run_id = new_run_id()
         # Recorded before any service starts, so a started run is always billed.
@@ -613,6 +675,7 @@ def priced_pools(
 
 def submit_settings(
     profile: AccountProfile,
+    api_integration: str,
     source: QuerySource | None,
     gpus: int,
     family: str,
@@ -623,6 +686,7 @@ def submit_settings(
     """Build the settings of a run on the app's pools, secrets, and integrations.
 
     :param profile: The app's ``setup.json``.
+    :param api_integration: The app's Arena integration.
     :param source: Query the run reads, or ``None``.
     :param gpus: GPUs for the run.
     :param family: GPU family of the run's pool.
@@ -651,7 +715,7 @@ def submit_settings(
         head_family=profile.pools.head.family,
         resume_from=resume_from,
         secrets_schema=APP_SCHEMA,
-        arena_api_integration=API_INTEGRATION,
+        arena_api_integration=api_integration,
         service_schema=APP_SCHEMA,
         channel=NATIVE_APP_CHANNEL,
     )
