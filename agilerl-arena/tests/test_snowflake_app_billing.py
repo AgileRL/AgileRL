@@ -8,8 +8,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,6 +23,7 @@ from snowflake_app.app_code import arena_app
 from snowflake_app.app_code.arena_app import (
     DeploymentCalls,
     meter_deployments,
+    publish,
     reconcile_usage,
 )
 
@@ -35,6 +38,9 @@ from agilerl.arena.snowflake.license import (
     TrainingDisabledError,
     UnknownUsageError,
 )
+from tests.test_snowflake_app_runs import RUN_ID as PUBLISH_RUN_ID
+from tests.test_snowflake_app_runs import AppSession, publish_session
+from tests.test_snowflake_app_runs import Result as AppResult
 from tests.test_snowflake_billing import (
     HOUR_13_MS,
     HOUR_MS,
@@ -67,6 +73,69 @@ class BillingSession(UsageBillingSession):
                 msg = f"Service '{service}' does not exist or not authorized."
                 raise SnowparkSQLException(msg)
         return super().sql(statement)
+
+
+class PublishBillingSession(BillingSession):
+    """Billing session that answers publish's other statements from a publish session.
+
+    ``during_wait`` runs once, at the first poll of the publish job, standing
+    in for the hourly task.
+    """
+
+    def __init__(
+        self,
+        publish: AppSession,
+        during_wait: Callable[[PublishBillingSession], None],
+    ) -> None:
+        super().__init__()
+        self.publish = publish
+        self.file = publish.file
+        self.during_wait: Callable[[PublishBillingSession], None] | None = during_wait
+
+    def sql(self, statement: str) -> Result | AppResult:
+        """Run ``statement`` on the billing tables, or on the publish session.
+
+        :param statement: SQL to run.
+        :return: The statement result.
+        """
+        if self.during_wait is not None and statement.startswith(
+            "SHOW SERVICE CONTAINERS IN SERVICE app_state.ARENA_PUBLISH_"
+        ):
+            during_wait, self.during_wait = self.during_wait, None
+            during_wait(self)
+        if statement.startswith("DELETE FROM app_state.served_models "):
+            self.statements.append(statement)
+            return Result([])
+        if statement.startswith("INSERT INTO app_state.served_models "):
+            self.statements.append(statement)
+            service, model, version, run_id, family = re.findall(
+                r"'([^']*)'", statement
+            )
+            self.served.append(
+                {
+                    "service_name": service,
+                    "model": model,
+                    "version": version,
+                    "run_id": run_id,
+                    "gpu_family": family,
+                    "gpu_count": int(statement.rsplit(", ", 1)[1].rstrip(")")),
+                }
+            )
+            return Result([])
+        billing_prefixes = (
+            "SHOW SERVICES IN SCHEMA app_state",
+            "GRANT SERVICE ROLE app_state.",
+            "DROP SERVICE IF EXISTS app_state.",
+            "SELECT service_name, model, version, run_id, ",
+            "SELECT CURRENT_ACCOUNT() AS ACCOUNT",
+            "SELECT SYSTEM$CREATE_BILLING_EVENTS(",
+        )
+        if any(
+            table in statement
+            for table in ("app_state.usage_items", "app_state.billed_hours")
+        ) or statement.startswith(billing_prefixes):
+            return super().sql(statement)
+        return self.publish.sql(statement)
 
 
 NOW = datetime(2026, 11, 16, 15, 0, tzinfo=timezone.utc)
@@ -463,7 +532,7 @@ class TestMeterDeployments:
         assert arena.opens == []
         assert "Arena has no deployment dep-a of service A. Leaving it." in caplog.text
 
-    def test_a_never_seen_404_opens_the_live_service(self) -> None:
+    def test_a_never_seen_404_opens_the_same_deployment_again(self) -> None:
         # Arrange
         session = serving_session({"A": "RUNNING", "B": "RUNNING"})
         arena = DeploymentArena({"dep-a": UnknownUsageError("no deployment")})
@@ -475,11 +544,33 @@ class TestMeterDeployments:
         assert summary.endswith(
             "heartbeat: 1, closed: 0, opened: 1, dropped: 0, missing: 1, failed: 0"
         )
-        assert [deployment.deployment_id for deployment in arena.opens] == [
-            "A-20261116T150000Z"
-        ]
+        [deployment] = arena.opens
+        assert (deployment.deployment_id, deployment.started_at) == (
+            "dep-a",
+            datetime(2026, 11, 16, 13, 0, tzinfo=timezone.utc),
+        )
         assert item(session, "dep-a")["closed_at"] is None
-        assert item(session, "A-20261116T150000Z")["service_name"] == "A"
+        assert [row["usage_id"] for row in session.items] == ["dep-a", "dep-b"]
+
+    def test_a_refused_repeat_open_closes_the_deployment_now(self) -> None:
+        # Arrange
+        session = serving_session({"A": "RUNNING"})
+        refusal = "Arena answered 409: Inactive."
+        arena = DeploymentArena(
+            {"dep-a": UnknownUsageError("no deployment")},
+            DeploymentRefusedError(refusal),
+        )
+
+        # Act
+        summary = meter_deployments(session, arena.calls(), NOW)
+
+        # Assert
+        assert "opened: 0, dropped: 1, missing: 1" in summary
+        assert session.services == {}
+        assert [d.deployment_id for d in arena.opens] == ["dep-a"]
+        closed = item(session, "dep-a")
+        assert (closed["closed_at"], closed["last_error"]) == (NOW_MS, refusal)
+        assert len(session.items) == 1
 
     def test_first_arena_failure_stops_metering_and_opening(
         self, caplog: pytest.LogCaptureFixture
@@ -691,6 +782,46 @@ class TestReconcileUsage:
         assert arena.calls[1]["url"] == DEPLOYMENTS
         assert item(session, "dep-a")["settled_at"] is not None
         assert json.loads(session.events[0]["objects"]) == ["dep-a"]
+
+    def test_a_run_during_the_publish_wait_leaves_one_deployment_billed_once(
+        self, arena: Arena
+    ) -> None:
+        # Arrange
+        hourly: list[str] = []
+
+        def hourly_run(session: PublishBillingSession) -> None:
+            session.services["QWEN_CHECKPOINT_2"] = "PENDING"
+            hourly.append(reconcile_usage(session))
+
+        session = PublishBillingSession(publish_session(), hourly_run)
+        arena.replies = [
+            reply(201, {"billableHours": []}),
+            open_usage(957),
+            reply(201, {"billableHours": []}),
+            reply(200, {"billableHours": []}),
+            open_usage(957),
+        ]
+
+        # Act
+        text = publish(session, PUBLISH_RUN_ID, "qwen", None, None, True, 1, None, None)
+        hourly.append(reconcile_usage(session))
+
+        # Assert
+        [deployment] = [row for row in session.items if row["kind"] == "deployment"]
+        deployment_id = str(deployment["usage_id"])
+        assert text.endswith(f"deployment: {deployment_id}")
+        opens = [call["json"] for call in arena.calls if call["url"] == DEPLOYMENTS]
+        assert len(opens) == 2
+        assert opens[0] == opens[1]
+        assert opens[0]["deploymentId"] == deployment_id
+        assert "opened: 1" in hourly[0]
+        assert "events: 1" in hourly[0]
+        assert "heartbeat: 1, closed: 0, opened: 0" in hourly[1]
+        assert "events: 0" in hourly[1]
+        [event] = session.events
+        assert json.loads(event["objects"]) == [deployment_id]
+        assert event["base_charge"] == 9.57
+        assert session.services == {"QWEN_CHECKPOINT_2": "PENDING"}
 
     def test_a_failed_heartbeat_does_not_stop_billing(self, arena: Arena) -> None:
         # Arrange

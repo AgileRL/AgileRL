@@ -958,7 +958,7 @@ def meter_deployments(
     dropped while metering its open deployment is not granted endpoint usage.
     Every other live service is, including one already metered. A 404 is
     logged and the deployment is left. A deployment Arena has never answered
-    for does not count its service as metered, so a live service is opened.
+    for does not count its service as metered, so its open is sent again.
     The first other Arena failure stops metering.
 
     :param session: Procedure session.
@@ -1313,28 +1313,50 @@ def open_served(
     open_call: Callable[[SnowflakeDeployment], None],
     now: datetime,
 ) -> str:
-    """Open a new Arena deployment for a live service; a refused open drops the service.
+    """Open the Arena deployment of a live service; a refused open drops the service.
 
     The deployment is added to ``app_state.usage_items`` before Arena opens it,
-    so the hourly task bills an open whose answer was lost.
+    so the hourly task bills an open whose answer was lost. A service that
+    already has an open deployment keeps it, and Arena is sent the same open
+    again, so ``publish`` and the hourly task never give one service two.
 
     :param session: Procedure session.
     :param served: What the service serves.
     :param open_call: Arena open of a deployment.
-    :param now: Start of the deployment, timezone-aware.
+    :param now: Current time, timezone-aware: the start of a new deployment.
     :return: The deployment id.
     :raises DeploymentRefusedError: Arena refused the open. The service was
         dropped and the deployment marked closed with Arena's reason.
     :raises SnowflakeLicenseError: The open did not land.
     """
-    deployment_id = deployment_name(served.service, now)
-    collect(
+    # Whole seconds, so a start read back from opened_at repeats the open exactly.
+    started_at = now.replace(microsecond=0)
+    deployment_id = deployment_name(served.service, started_at)
+    service = string_literal(served.service)
+    # MERGE locks the table, so a concurrent caller sees this row and reuses it.
+    [merged] = collect(
         session,
-        "INSERT INTO app_state.usage_items "
-        "(kind, usage_id, opened_at, service_name) VALUES ('deployment', "
-        f"{string_literal(deployment_id)}, CURRENT_TIMESTAMP(), "
-        f"{string_literal(served.service)})",
+        f"MERGE INTO app_state.usage_items AS t USING (SELECT {service} AS "
+        "service_name) AS s ON t.kind = 'deployment' AND t.service_name = "
+        "s.service_name AND t.closed_at IS NULL AND t.settled_at IS NULL "
+        "WHEN NOT MATCHED THEN INSERT (kind, usage_id, opened_at, service_name) "
+        f"VALUES ('deployment', {string_literal(deployment_id)}, "
+        f"TO_TIMESTAMP_TZ({int(started_at.timestamp() * 1000)}, 3), s.service_name)",
     )
+    if int(str(lowered(merged)["number of rows inserted"])) == 0:
+        existing = lowered(
+            collect(
+                session,
+                "SELECT usage_id, DATE_PART(EPOCH_MILLISECOND, opened_at) AS "
+                "OPENED_MS FROM app_state.usage_items WHERE kind = 'deployment' "
+                f"AND service_name = {service} AND closed_at IS NULL AND "
+                "settled_at IS NULL ORDER BY opened_at",
+            )[0]
+        )
+        deployment_id = str(existing["usage_id"])
+        started_at = datetime.fromtimestamp(
+            int(str(existing["opened_ms"])) / 1000, timezone.utc
+        )
     [row] = collect(session, "SELECT CURRENT_ACCOUNT() AS ACCOUNT")
     try:
         open_call(
@@ -1343,7 +1365,7 @@ def open_served(
                 snowflake_account=str(lowered(row)["account"]),
                 gpu_count=served.gpu_count,
                 gpu_family=served.gpu_family,
-                started_at=now,
+                started_at=started_at,
                 model=served.model,
                 version=served.version,
                 run_id=served.run_id,
