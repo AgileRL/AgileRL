@@ -9,6 +9,7 @@ import re
 from datetime import timedelta
 from pathlib import Path
 
+import app_billing
 import app_trial
 import pytest
 import yaml
@@ -170,6 +171,47 @@ class TestSnowflakeProject:
         assert "oss/agilerl" not in project
         assert "repository root" in project
 
+    def test_every_app_code_module_ships_and_is_imported_by_every_procedure(
+        self,
+    ) -> None:
+        # Arrange
+        modules = sorted(
+            f"app_code/{path.name}"
+            for path in (APP_DIR / "app_code").glob("*.py")
+            if path.name != "__init__.py"
+        )
+        project = yaml.safe_load((APP_DIR / "snowflake.yml").read_text())
+        artifacts = project["entities"]["arena_pkg"]["artifacts"]
+
+        # Act
+        shipped = sorted(
+            artifact["src"]
+            for artifact in artifacts
+            if isinstance(artifact, dict) and artifact["src"].startswith("app_code/")
+        )
+        procedures = re.findall(
+            r"CREATE OR REPLACE PROCEDURE [^;]*LANGUAGE PYTHON[^;]*;", SETUP_SQL
+        )
+        imports = {
+            re.search(r"IMPORTS = \(([^)]*)\)", procedure).group(1)
+            for procedure in procedures
+        }
+
+        # Assert
+        assert modules == [
+            "app_code/app_billing.py",
+            "app_code/app_trial.py",
+            "app_code/arena_app.py",
+        ]
+        assert shipped == modules
+        assert len(procedures) == 13
+        assert imports == {
+            (
+                "'/app_code/arena_app.py', '/app_code/app_billing.py', "
+                "'/app_code/app_trial.py', '/agilerl_arena.zip'"
+            )
+        }
+
 
 class TestSetupScriptObjects:
     def test_storage_matches_the_cli_setup(self) -> None:
@@ -241,6 +283,7 @@ class TestSetupScriptObjects:
             "register_reference": (["STRING", "STRING", "STRING"], "app_admin"),
             "configure": (["STRING", "STRING", "STRING"], "app_admin"),
             "set_pools": (["ARRAY", "NUMBER", "STRING", "STRING"], "app_admin"),
+            "gpu_families": ([], "app_admin"),
             "submit": (
                 [
                     "STRING",
@@ -280,9 +323,7 @@ class TestSetupScriptObjects:
             if name not in {"reconcile_usage", "version_init"}
         }
         assert created["reconcile_usage"] == []
-        assert handlers == [
-            name for name in created if name not in {"version_init", "reconcile_now"}
-        ]
+        assert handlers == [name for name in created if name != "reconcile_now"]
         assert all(callable(getattr(arena_app, name)) for name in handlers)
 
     def test_only_the_task_and_snowflake_call_the_billing_procedures(self) -> None:
@@ -422,6 +463,7 @@ class TestSetupScriptObjects:
         assert access is not None
         assert altered == [
             ("configure", "arena_access"),
+            ("gpu_families", "arena_access || secrets"),
             ("submit", "arena_access || secrets"),
             ("publish", "arena_access || secrets"),
             ("unpublish", "arena_access || secrets"),
@@ -434,7 +476,7 @@ class TestSetupScriptObjects:
         assert access.end() < SETUP_SQL.index("CREATE OR ALTER TASK")
 
     @pytest.mark.parametrize(
-        "name", ["reconcile_usage", "publish", "unpublish", "submit"]
+        "name", ["reconcile_usage", "publish", "unpublish", "submit", "gpu_families"]
     )
     def test_arena_procedures_read_only_secrets_their_integration_allows(
         self, name: str
@@ -474,7 +516,9 @@ class TestSetupScriptObjects:
         assert placeholders == list(aliases.values())
         assert SETUP_SQL.index("CREATE SECRET") < SETUP_SQL.index("ALLOWED_AUTH")
 
-    def test_hourly_serverless_task_calls_reconcile_and_is_resumed(self) -> None:
+    def test_hourly_serverless_task_calls_reconcile_and_setup_leaves_it_suspended(
+        self,
+    ) -> None:
         # Arrange
         pattern = (
             r"CREATE OR ALTER TASK app_state\.reconcile_usage_task\s+"
@@ -489,17 +533,14 @@ class TestSetupScriptObjects:
 
         # Assert
         assert task is not None
-        resume = "ALTER TASK app_state.reconcile_usage_task RESUME;"
-        assert SETUP_SQL.index(resume) > task.end()
-        assert SETUP_SQL.index(resume) > SETUP_SQL.index(
-            "PROCEDURE app_code.reconcile_usage()"
-        )
+        assert "reconcile_usage_task RESUME" not in SETUP_SQL
+        assert app_billing.BILLING_TASK == "app_state.reconcile_usage_task"
         suspend = "ALTER TASK IF EXISTS app_state.reconcile_usage_task SUSPEND;"
         assert SETUP_SQL.index(suspend) < task.start()
         assert "WAREHOUSE = " not in SETUP_SQL[task.start() : task.end()]
         assert "CREATE OR REPLACE TASK" not in SETUP_SQL
 
-    def test_version_initializer_resumes_the_billing_task(self) -> None:
+    def test_version_initializer_syncs_the_billing_task(self) -> None:
         # Arrange
         initializer = MANIFEST["lifecycle_callbacks"]["version_initializer"]
         schema, name = initializer.split(".")
@@ -507,18 +548,17 @@ class TestSetupScriptObjects:
         # Act
         procedure = re.search(
             rf"CREATE OR REPLACE PROCEDURE {schema}\.{name}\(\)\s+"
-            r"RETURNS STRING\s+LANGUAGE SQL\s+AS\s+\$\$(.*?)\$\$;",
+            r"RETURNS STRING\s+LANGUAGE PYTHON\s+[^;]*"
+            r"HANDLER = 'arena_app\.version_init';",
             SETUP_SQL,
-            flags=re.DOTALL,
         )
 
         # Assert
         assert initializer == "app_code.version_init"
         assert "CREATE OR ALTER VERSIONED SCHEMA app_code;" in SETUP_SQL
         assert procedure is not None
-        assert (
-            "ALTER TASK IF EXISTS app_state.reconcile_usage_task RESUME;"
-            in procedure.group(1)
+        assert procedure.start() > SETUP_SQL.index(
+            "CREATE OR ALTER TASK app_state.reconcile_usage_task"
         )
 
     def test_reference_callback_is_the_registered_procedure(self) -> None:
@@ -595,5 +635,5 @@ class TestSetupScriptTrial:
 
         # Assert
         assert {"src": "app_code/app_trial.py", "dest": "app_code/"} in artifacts
-        assert len(procedures) == 11
+        assert len(procedures) == 13
         assert all("'/app_code/app_trial.py'" in p for p in procedures)

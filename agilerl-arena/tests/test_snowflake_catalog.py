@@ -17,6 +17,7 @@ from agilerl.arena.snowflake.catalog import (
     event_table_warning,
     existing_integrations,
     families_from,
+    family_sized,
     is_foreign_database,
     missing_object,
     monitor_quota,
@@ -130,6 +131,44 @@ class TestFamiliesFrom:
         rows = [Row(name="CPU_X64_L", gpu_count=0)]
 
         assert families_from(rows) == [GpuFamily("CPU_X64_L", 0, "")]
+
+
+# GCP London rows: Snowflake reuses the AWS R6K names for nodes with half the GPUs.
+GCP_REGION = families_from(
+    [
+        Row(name="GPU_GCP_NV_L4_1_24G", gpu_count=1),
+        Row(name="GPU_GCP_NV_L4_4_24G", gpu_count=4),
+        Row(name="GPU_R6K_G1_48", gpu_count=1),
+        Row(name="GPU_R6K_G1_384", gpu_count=8),
+    ]
+)
+
+
+class TestFamilySized:
+    @pytest.mark.parametrize("family", ["GPU_GCP_NV_L4_1_24G", "gpu_gcp_nv_l4_4_24g"])
+    def test_accepts_an_l4_family_with_the_gpu_count_arena_sizes(
+        self, family: str
+    ) -> None:
+        assert family_sized(family, GCP_REGION) is True
+
+    def test_accepts_an_r6k_family_with_the_aws_gpu_count(self) -> None:
+        region = families_from([Row(name="GPU_R6K_G1_48", gpu_count=2)])
+
+        assert family_sized("GPU_R6K_G1_48", region) is True
+
+    def test_refuses_an_r6k_family_with_the_gcp_gpu_count(self) -> None:
+        assert family_sized("GPU_R6K_G1_48", GCP_REGION) is False
+
+    def test_refuses_a_family_arena_does_not_size(self) -> None:
+        assert family_sized("GPU_R6K_G1_384", GCP_REGION) is False
+
+    def test_refuses_a_row_without_a_gpu_count(self) -> None:
+        region = families_from([Row(name="GPU_NV_S")])
+
+        assert family_sized("GPU_NV_S", region) is False
+
+    def test_refuses_a_family_missing_from_the_region(self) -> None:
+        assert family_sized("GPU_NV_S", GCP_REGION) is False
 
 
 class TestWholeNumber:

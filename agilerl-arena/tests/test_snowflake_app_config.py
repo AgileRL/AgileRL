@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import functools
 import json
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -15,6 +17,7 @@ from snowflake.snowpark.exceptions import SnowparkSQLException
 from snowflake_app.app_code.arena_app import (
     IMAGE,
     configure,
+    gpu_families,
     register_reference,
     set_pools,
 )
@@ -99,10 +102,11 @@ def pools_session(
     services: dict[str, list[Row]] | None = None,
     setup_doc: dict[str, object] | None = None,
     prefix: str = "AGILERL_APP_ARENA_APP_",
+    families: tuple[object, list[Row]] = FAMILIES,
 ) -> FakeSession:
     doc_rows = [] if setup_doc is None else [Row(DOC=json.dumps(setup_doc))]
     routes: list[tuple[object, object]] = [
-        FAMILIES,
+        families,
         (lambda s: s == PREFIX, [Row(PREFIX=prefix)]),
         (lambda s: s.startswith("SELECT $1 AS DOC FROM @app_state.runs"), doc_rows),
         (lambda s: s == "SHOW COMPUTE POOLS", pools),
@@ -586,13 +590,92 @@ class TestSetPools:
 
         assert session.statements == []
 
-    def test_refuses_a_family_missing_from_the_region(self) -> None:
+    def test_refuses_a_gpu_family_missing_from_the_region_listing_the_ones_it_has(
+        self,
+    ) -> None:
+        session = pools_session([])
+
+        with pytest.raises(ValueError, match="no GPU_NV_L pool") as raised:
+            set_pools(session, ["GPU_NV_L"], 8, "CPU_X64_L", "CPU_X64_SL")
+
+        assert str(raised.value) == (
+            "This account has no GPU_NV_L pool in this region (8x A100). "
+            "Arena did not create a compute pool.\n"
+            "GPU families Arena can size in this region:\n"
+            "  GPU_NV_S  1x A10G\n"
+            "  GPU_NV_M  4x A10G\n"
+            "Rerun with one of those names:\n"
+            "  CALL <app>.app_code.set_pools(['<name>'])\n"
+            "A CPU pool cannot run this trainer.\n"
+            "Nothing was created."
+        )
+        assert session.statements == ["SHOW COMPUTE POOL INSTANCE FAMILIES"]
+
+    def test_creates_an_l4_pool_where_the_region_sizes_it_as_the_app_does(
+        self,
+    ) -> None:
+        session = pools_session([], families=GCP_FAMILIES)
+
+        text = set_pools(session, ["GPU_GCP_NV_L4_4_24G"], 8, None, None)
+
+        assert text.splitlines()[2] == (
+            "AGILERL_APP_ARENA_APP_GPU_GPU_GCP_NV_L4_4_24G  GPU_GCP_NV_L4_4_24G  "
+            "max 8 GPUs  MAX_NODES 2"
+        )
+
+    def test_creates_an_r6k_pool_where_the_region_has_the_aws_gpu_count(
+        self,
+    ) -> None:
+        session = pools_session([], families=AWS_R6K_FAMILIES)
+
+        text = set_pools(session, ["GPU_R6K_G1_48"], 4, None, None)
+
+        assert text.splitlines()[2] == (
+            "AGILERL_APP_ARENA_APP_GPU_GPU_R6K_G1_48  GPU_R6K_G1_48  "
+            "max 4 GPUs  MAX_NODES 2"
+        )
+
+    def test_refuses_a_family_the_region_has_with_another_gpu_count(self) -> None:
+        # Arrange
+        session = pools_session([], families=GCP_FAMILIES)
+
+        # Act
+        with pytest.raises(
+            ValueError, match="GPU_R6K_G1_48 is 1x RTX PRO 6000"
+        ) as raised:
+            set_pools(session, ["GPU_R6K_G1_48"], 2, None, None)
+
+        # Assert
+        assert str(raised.value) == (
+            "GPU_R6K_G1_48 is 1x RTX PRO 6000 per node in this region, not the "
+            "2x RTX PRO 6000 Arena sizes. Arena did not create a compute pool.\n"
+            "GPU families Arena can size in this region:\n"
+            "  GPU_GCP_NV_L4_1_24G  1x L4\n"
+            "  GPU_GCP_NV_L4_4_24G  4x L4\n"
+            "Rerun with one of those names:\n"
+            "  CALL <app>.app_code.set_pools(['<name>'])\n"
+            "A CPU pool cannot run this trainer.\n"
+            "Nothing was created."
+        )
+        assert session.statements == ["SHOW COMPUTE POOL INSTANCE FAMILIES"]
+
+    def test_refuses_a_family_the_app_does_not_size_before_any_sql(self) -> None:
+        session = pools_session([], families=GCP_FAMILIES)
+
+        with pytest.raises(
+            ValueError, match="GPU_R6K_G1_384 is not a GPU family Arena sizes"
+        ):
+            set_pools(session, ["GPU_R6K_G1_384"], 8, None, None)
+
+        assert session.statements == []
+
+    def test_refuses_a_cpu_family_missing_from_the_region(self) -> None:
         session = pools_session([])
 
         with pytest.raises(
-            ValueError, match="This account has no GPU_NV_L instance family"
+            ValueError, match="This account has no CPU_X64_M instance family"
         ):
-            set_pools(session, ["GPU_NV_L"], 8, "CPU_X64_L", "CPU_X64_SL")
+            set_pools(session, ["GPU_NV_S"], 2, "CPU_X64_M", "CPU_X64_SL")
 
         assert session.statements == ["SHOW COMPUTE POOL INSTANCE FAMILIES"]
 
@@ -616,6 +699,128 @@ class TestSetPools:
 
         with pytest.raises(ValueError, match="Name at least one GPU family"):
             set_pools(session, [], 4, "CPU_X64_L", "CPU_X64_SL")
+
+        assert session.statements == []
+
+
+# GCP London: Snowflake reuses the AWS R6K names for nodes with half the GPUs.
+GCP_FAMILIES = (
+    lambda s: s == "SHOW COMPUTE POOL INSTANCE FAMILIES",
+    [
+        Row(name="CPU_X64_L", gpu_count=0),
+        Row(name="CPU_X64_SL", gpu_count=0),
+        Row(name="GPU_GCP_NV_L4_1_24G", gpu_count=1),
+        Row(name="GPU_GCP_NV_L4_4_24G", gpu_count=4),
+        Row(name="GPU_R6K_G1_48", gpu_count=1, gpu="RTX PRO 6000"),
+        Row(name="GPU_R6K_G1_384", gpu_count=8, gpu="RTX PRO 6000"),
+        Row(name="GPU_H999_X8", gpu_count=8, gpu="H999"),
+    ],
+)
+AWS_R6K_FAMILIES = (
+    lambda s: s == "SHOW COMPUTE POOL INSTANCE FAMILIES",
+    [
+        Row(name="CPU_X64_L", gpu_count=0),
+        Row(name="CPU_X64_SL", gpu_count=0),
+        Row(name="GPU_R6K_G1_48", gpu_count=2, gpu="RTX PRO 6000"),
+    ],
+)
+
+
+def priced_replies(
+    monkeypatch: pytest.MonkeyPatch, priced: list[str] | None
+) -> list[httpx.Request]:
+    """Saved Arena secrets, and capabilities pricing ``priced`` (``None``: no price list)."""
+    monkeypatch.setitem(
+        sys.modules,
+        "_snowflake",
+        SimpleNamespace(
+            get_generic_secret_string={
+                "org_key": ORG_KEY,
+                "external_user_id": USER_ID,
+                "base_url": "https://arena.agilerl.com",
+            }.get
+        ),
+    )
+    features: dict[str, object] = {"snowflakeTraining": True}
+    if priced is not None:
+        features["snowflakePricedGpuFamilies"] = priced
+    return arena_replies(
+        monkeypatch, {"ok": True, "data": {"schemaVersion": 1, "features": features}}
+    )
+
+
+class TestGpuFamilies:
+    def test_lists_the_region_families_the_app_sizes_and_arena_prices(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        requests = priced_replies(monkeypatch, ["GPU_GCP_NV_L4_1_24G", "GPU_NV_S"])
+        session = FakeSession([GCP_FAMILIES])
+
+        # Act
+        text = gpu_families(session)
+
+        # Assert
+        assert text == (
+            "GPU families set_pools can use here:\n  GPU_GCP_NV_L4_1_24G  1x L4"
+        )
+        [request] = requests
+        assert request.headers["Authorization"] == f"Bearer {ORG_KEY}"
+        assert session.statements == ["SHOW COMPUTE POOL INSTANCE FAMILIES"]
+
+    def test_omits_families_the_region_has_with_another_gpu_count(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        priced_replies(monkeypatch, None)
+
+        text = gpu_families(FakeSession([GCP_FAMILIES]))
+
+        assert text == (
+            "GPU families set_pools can use here:\n"
+            "  GPU_GCP_NV_L4_1_24G  1x L4\n"
+            "  GPU_GCP_NV_L4_4_24G  4x L4"
+        )
+
+    def test_lists_an_r6k_family_the_region_has_with_the_aws_gpu_count(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        priced_replies(monkeypatch, ["GPU_R6K_G1_48"])
+
+        text = gpu_families(FakeSession([AWS_R6K_FAMILIES]))
+
+        assert text == (
+            "GPU families set_pools can use here:\n  GPU_R6K_G1_48  2x RTX PRO 6000"
+        )
+
+    def test_names_the_region_gpu_families_when_none_is_usable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        priced_replies(monkeypatch, ["GPU_NV_S"])
+
+        text = gpu_families(FakeSession([GCP_FAMILIES]))
+
+        assert text == (
+            "No GPU family in this region is both sized by the app and priced by Arena.\n"
+            "GPU families SHOW COMPUTE POOL INSTANCE FAMILIES returned:\n"
+            "  GPU_GCP_NV_L4_1_24G  1x L4\n"
+            "  GPU_GCP_NV_L4_4_24G  4x L4\n"
+            "  GPU_R6K_G1_48  1x RTX PRO 6000\n"
+            "  GPU_R6K_G1_384  8x RTX PRO 6000\n"
+            "  GPU_H999_X8  8x H999"
+        )
+
+    def test_refuses_before_any_sql_when_arena_is_not_configured(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setitem(
+            sys.modules,
+            "_snowflake",
+            SimpleNamespace(get_generic_secret_string=lambda name: ""),
+        )
+        session = FakeSession([GCP_FAMILIES])
+
+        with pytest.raises(ValueError, match="Arena is not configured"):
+            gpu_families(session)
 
         assert session.statements == []
 

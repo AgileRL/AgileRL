@@ -65,7 +65,9 @@ def unknown(kind: str, usage_id: str) -> SnowflakeUsage:
 
 def matches(row: dict[str, object], where: str) -> bool:
     for term in where.split(" AND "):
-        if equals := EQUALS.match(term):
+        if term.startswith("(") and term.endswith(")"):
+            ok = any(matches(row, option) for option in term[1:-1].split(" OR "))
+        elif equals := EQUALS.match(term):
             ok = row[equals.group(1)] == equals.group(2)
         elif is_null := IS_NULL.match(term):
             ok = (row[is_null.group(1)] is None) != bool(is_null.group(2))

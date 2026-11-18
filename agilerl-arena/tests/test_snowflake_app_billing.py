@@ -19,14 +19,10 @@ from types import SimpleNamespace
 import app_trial
 import httpx
 import pytest
+from app_billing import DeploymentCalls, meter_deployments
 from snowflake.snowpark.exceptions import SnowparkSQLException
 from snowflake_app.app_code import arena_app
-from snowflake_app.app_code.arena_app import (
-    DeploymentCalls,
-    meter_deployments,
-    publish,
-    reconcile_usage,
-)
+from snowflake_app.app_code.arena_app import publish, reconcile_usage, version_init
 
 from agilerl.arena.snowflake import license as license_mod
 from agilerl.arena.snowflake.billing import reconcile
@@ -60,16 +56,22 @@ from tests.test_snowflake_billing import (
     BillingSession as UsageBillingSession,
 )
 from tests.test_snowflake_license import Arena, reply
+from tests.test_snowflake_setup import Row
+
+APP_PREFIX = "AGILERL_APP_ARENA_APP_"
+GPU_POOL = f"{APP_PREFIX}GPU_GPU_NV_S"
 
 FORCED_DROP = re.compile(r"DROP SERVICE IF EXISTS app_state\.(\w+) FORCE")
 
 
 class BillingSession(UsageBillingSession):
-    """Refuses a service-role grant once that service is gone, and answers the trial query."""
+    """Refuses a grant for a gone service, answers the trial query, and keeps the task's and GPU pools' state."""
 
     def __init__(self) -> None:
         super().__init__()
         self.install = Install()
+        self.task = "started"
+        self.pools: dict[str, dict[str, object]] = {}
 
     def sql(self, statement: str) -> Result:
         """Run ``statement``, refusing a grant for a service that is gone.
@@ -87,6 +89,28 @@ class BillingSession(UsageBillingSession):
         if statement == "DELETE FROM app_state.served_models":
             self.statements.append(statement)
             self.served.clear()
+            return Result([])
+        if statement == "SELECT app_code.object_prefix() AS PREFIX":
+            self.statements.append(statement)
+            return Result([Row(PREFIX=APP_PREFIX)])
+        if statement == f"SHOW COMPUTE POOLS LIKE '{APP_PREFIX}GPU_%'":
+            self.statements.append(statement)
+            return Result([Row(name=name, **pool) for name, pool in self.pools.items()])
+        if statement.startswith("ALTER COMPUTE POOL ") and statement.endswith(
+            " SUSPEND"
+        ):
+            self.statements.append(statement)
+            self.pools[statement.split()[3]]["state"] = "SUSPENDED"
+            return Result([])
+        if statement in {
+            "ALTER TASK app_state.reconcile_usage_task SUSPEND",
+            "ALTER TASK app_state.reconcile_usage_task RESUME",
+        }:
+            for prefix in list(self.hooks):
+                if statement.startswith(prefix):
+                    self.hooks.pop(prefix)()
+            self.statements.append(statement)
+            self.task = "suspended" if statement.endswith("SUSPEND") else "started"
             return Result([])
         if statement.startswith("GRANT SERVICE ROLE app_state."):
             service = statement.removeprefix("GRANT SERVICE ROLE app_state.").split(
@@ -152,6 +176,8 @@ class PublishBillingSession(BillingSession):
             "SELECT service_name, model, version, run_id, ",
             "SELECT CURRENT_ACCOUNT() AS ACCOUNT",
             "SELECT SYSTEM$CREATE_BILLING_EVENTS(",
+            "SELECT app_code.object_prefix() AS PREFIX",
+            "SHOW COMPUTE POOLS LIKE ",
         )
         if any(
             table in statement
@@ -947,10 +973,219 @@ class TestReconcileUsage:
         summary = reconcile_usage(session)
 
         assert summary.startswith("Arena is not configured.")
-        assert session.statements == []
+        assert session.statements == [
+            "SELECT app_code.object_prefix() AS PREFIX",
+            f"SHOW COMPUTE POOLS LIKE '{APP_PREFIX}GPU_%'",
+            "SHOW SERVICES IN SCHEMA app_state",
+            "ALTER TASK app_state.reconcile_usage_task RESUME",
+        ]
         assert arena.calls == []
         assert [
             (r.levelname, r.getMessage())
             for r in caplog.records
             if r.name == arena_app.logger.name
         ] == [("INFO", f"reconcile_usage: {summary}")]
+
+
+def closed_usage(cents: int) -> httpx.Response:
+    return reply(
+        200,
+        {"ok": True, "data": {"state": "closed", "billableHours": [hour_at(0, cents)]}},
+    )
+
+
+class TestReconcileUsageBillingTask:
+    def test_a_finished_run_bills_its_last_hours_then_suspends_the_task(
+        self, arena: Arena
+    ) -> None:
+        # Arrange
+        session = BillingSession()
+        session.add_item(RUN_ID, HOUR_13_MS)
+        arena.replies = [closed_usage(25)]
+
+        # Act
+        summary = reconcile_usage(session)
+
+        # Assert
+        assert "items: 1, settled: 1, events: 1" in summary
+        assert summary.endswith(
+            "; nothing left to bill, suspended app_state.reconcile_usage_task"
+        )
+        assert session.task == "suspended"
+        [event] = session.events
+        assert (event["subclass"], event["base_charge"]) == ("run", 0.25)
+        emit = next(
+            i
+            for i, s in enumerate(session.statements)
+            if s.startswith("SELECT SYSTEM$")
+        )
+        assert emit < session.statements.index(
+            "ALTER TASK app_state.reconcile_usage_task SUSPEND"
+        )
+
+    def test_an_open_run_keeps_the_task_started(self, arena: Arena) -> None:
+        session = BillingSession()
+        session.add_item(RUN_ID, HOUR_13_MS)
+        arena.replies = [
+            reply(200, {"ok": True, "data": {"state": "open", "billableHours": []}})
+        ]
+
+        summary = reconcile_usage(session)
+
+        assert "suspended" not in summary
+        assert session.task == "started"
+        assert "ALTER TASK app_state.reconcile_usage_task SUSPEND" not in (
+            session.statements
+        )
+
+    def test_a_live_service_keeps_the_task_started_with_nothing_to_bill(
+        self, arena: Arena
+    ) -> None:
+        session = BillingSession()
+        session.services = {"ARENA_PUBLISH_1": "RUNNING"}
+
+        summary = reconcile_usage(session)
+
+        assert summary.endswith("unconfirmed: 0")
+        assert session.task == "started"
+
+    def test_a_run_arena_never_saw_does_not_keep_the_task_started(
+        self, arena: Arena
+    ) -> None:
+        # Arrange
+        session = BillingSession()
+        session.add_item(RUN_ID, HOUR_13_MS)
+        arena.replies = [reply(404)]
+
+        # Act
+        summary = reconcile_usage(session)
+
+        # Assert
+        assert "settled: 0, events: 0, failed: 0, missing: 1" in summary
+        assert item(session, RUN_ID)["settled_at"] is None
+        assert session.task == "suspended"
+
+    def test_an_ended_trial_suspends_the_task_once_its_last_run_settles(
+        self, arena: Arena
+    ) -> None:
+        # Arrange
+        session = BillingSession()
+        session.install = listing_trial(6.98)
+        session.services = {"ARENA_RUN_1_HEAD": "RUNNING"}
+        session.add_item(RUN_ID, HOUR_13_MS)
+        arena.replies = [
+            reply(200, {"ok": True, "data": {"state": "open", "billableHours": []}}),
+            closed_usage(25),
+        ]
+
+        # Act
+        first = reconcile_usage(session)
+        task_after_sweep = session.task
+        second = reconcile_usage(session)
+
+        # Assert
+        assert first.startswith("trial ended, dropped services: 1; ")
+        assert session.services == {}
+        assert task_after_sweep == "started"
+        assert "items: 1, settled: 1, events: 1" in second
+        assert second.endswith(
+            "; nothing left to bill, suspended app_state.reconcile_usage_task"
+        )
+        assert session.task == "suspended"
+
+    def test_a_run_submitted_while_suspending_resumes_the_task(
+        self, arena: Arena
+    ) -> None:
+        # Arrange
+        session = BillingSession()
+        session.hooks["ALTER TASK app_state.reconcile_usage_task SUSPEND"] = lambda: (
+            session.add_item("arena-20261116150000-def456", NOW_MS)
+        )
+
+        # Act
+        summary = reconcile_usage(session)
+
+        # Assert
+        assert "suspended" not in summary
+        assert session.task == "started"
+        recheck = (
+            "SELECT COUNT(*) AS N FROM app_state.usage_items WHERE settled_at IS NULL "
+            "AND (first_seen_at IS NOT NULL OR first_404_at IS NULL)"
+        )
+        assert session.statements[-2:] == [
+            recheck,
+            "ALTER TASK app_state.reconcile_usage_task RESUME",
+        ]
+
+
+def gpu_pool(state: str, services: int = 0, jobs: int = 0) -> dict[str, object]:
+    return {"state": state, "num_services": services, "num_jobs": jobs}
+
+
+class TestReconcileUsageGpuPools:
+    def test_suspends_a_gpu_pool_left_starting_with_nothing_on_it(
+        self, arena: Arena
+    ) -> None:
+        # Arrange
+        session = BillingSession()
+        session.pools = {GPU_POOL: gpu_pool("STARTING")}
+
+        # Act
+        summary = reconcile_usage(session)
+
+        # Assert
+        assert session.pools[GPU_POOL]["state"] == "SUSPENDED"
+        assert f"; suspended idle GPU pools {GPU_POOL};" in summary
+        assert session.task == "suspended"
+
+    @pytest.mark.parametrize(
+        "pool",
+        [
+            gpu_pool("ACTIVE", services=1),
+            gpu_pool("ACTIVE", jobs=1),
+            gpu_pool("SUSPENDED"),
+        ],
+    )
+    def test_leaves_a_pool_with_work_or_already_suspended(
+        self, arena: Arena, pool: dict[str, object]
+    ) -> None:
+        session = BillingSession()
+        session.pools = {GPU_POOL: dict(pool)}
+
+        summary = reconcile_usage(session)
+
+        assert session.pools[GPU_POOL] == pool
+        assert "GPU pools" not in summary
+        assert not any(s.startswith("ALTER COMPUTE POOL") for s in session.statements)
+
+    def test_leaves_pools_of_another_app_that_match_the_like_pattern(
+        self, arena: Arena
+    ) -> None:
+        session = BillingSession()
+        other = "AGILERL_APP_ARENA_APPXGPU_GPU_NV_S"
+        session.pools = {other: gpu_pool("IDLE")}
+
+        reconcile_usage(session)
+
+        assert session.pools[other]["state"] == "IDLE"
+
+
+class TestVersionInit:
+    def test_an_idle_app_leaves_the_task_suspended(self) -> None:
+        session = BillingSession()
+        session.services = {"ARENA_PUBLISH_1": "DONE"}
+
+        text = version_init(session)
+
+        assert text == "nothing to bill, suspended app_state.reconcile_usage_task"
+        assert session.task == "suspended"
+
+    def test_an_unsettled_deployment_resumes_the_task(self) -> None:
+        session = BillingSession()
+        session.add_item("dep-a", HOUR_13_MS, "deployment", service_name="A")
+        session.task = "suspended"
+
+        text = version_init(session)
+
+        assert text == "resumed app_state.reconcile_usage_task"
+        assert session.task == "started"

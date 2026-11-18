@@ -4,8 +4,8 @@
 """Stored procedures of the Arena Snowflake Native App: setup, runs, and published models.
 
 The setup script registers each handler with ``IMPORTS`` of this file,
-``app_trial.py`` and ``agilerl_arena.zip``, so these run as owner's-rights
-procedures inside the app.
+``app_billing.py``, ``app_trial.py`` and ``agilerl_arena.zip``, so these run
+as owner's-rights procedures inside the app.
 """
 
 from __future__ import annotations
@@ -20,15 +20,28 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from app_trial import end_trial, refuse_ended_trial, trial_ended
+from app_billing import (
+    APP_SCHEMA,
+    BILLING_TASK,
+    arena_partner,
+    close_deployments,
+    grant_endpoint_usage,
+    open_served,
+    published_model,
+    reconcile_summary,
+    record_served,
+    suspend_idle_gpu_pools,
+    sync_billing_task,
+)
+from app_trial import refuse_ended_trial
 from snowflake.snowpark.exceptions import SnowparkSQLException
 
 from agilerl.arena.snowflake.account import blocking_services, shrink_message
-from agilerl.arena.snowflake.billing import reconcile
 from agilerl.arena.snowflake.catalog import (
     PoolState,
     collect,
     existing_pools,
+    family_sized,
     load_families,
     remote_profile,
 )
@@ -48,23 +61,14 @@ from agilerl.arena.snowflake.job import (
 from agilerl.arena.snowflake.license import (
     NATIVE_APP_CHANNEL,
     SNOWFLAKE_DENIED,
-    DeploymentClosedError,
-    DeploymentRefusedError,
-    SnowflakeDeployment,
     SnowflakeLicenseError,
-    SnowflakeUsage,
-    TrainingDisabledError,
-    UnknownUsageError,
     arena_api_base_url,
     arena_api_hostname,
-    close_snowflake_deployment,
     fetch_capabilities,
-    heartbeat_snowflake_deployment,
     open_snowflake_deployment,
     partner_headers,
     snowflake_priced_families,
     snowflake_training_enabled,
-    snowflake_usage,
 )
 from agilerl.arena.snowflake.profile import (
     ARENA_API_RULE,
@@ -86,7 +90,6 @@ from agilerl.arena.snowflake.profile import (
     sole_gpu_pool,
 )
 from agilerl.arena.snowflake.publish import (
-    PublishDocument,
     PublishSession,
     PublishSettings,
     registry_schema,
@@ -100,7 +103,9 @@ from agilerl.arena.snowflake.publish import unpublish as drop_served
 from agilerl.arena.snowflake.setup import (
     ORG_KEY_PREFIX,
     family_listed,
+    format_family_lines,
     missing_family_message,
+    no_gpu_message,
     nodes_for_gpus,
     unsupported_gpu_message,
 )
@@ -113,9 +118,8 @@ from agilerl.arena.snowflake.setup_sql import (
 from agilerl.arena.snowflake.source import QuerySource, SnowflakeSession
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from agilerl.arena.snowflake.catalog import GpuFamily
 
-APP_SCHEMA = "app_state"
 SOURCE_REFERENCES = ("SOURCE_TABLE", "SOURCE_VIEW")
 # snowflake-app-build replaces the tag with the release tag, as in manifest.yml.
 IMAGE = "/arena_provider/images/repo/snowflake-job:0.0.0-py313-cu130"
@@ -338,21 +342,22 @@ def set_pools(
     :param head_family: Instance family of the Ray head pool, or ``None`` for
         ``CPU_X64_SL``.
     :return: One line per pool.
-    :raises ValueError: A family is unknown or not in this region, an existing
-        pool uses another family, or a running service blocks the change.
+    :raises ValueError: A family is unknown, missing from this region or with
+        another GPU count per node here, an existing pool uses another family,
+        or a running service blocks the change.
     """
     names = gpu_names(gpu_families, max_gpus)
     # An explicit NULL from SQL skips the procedure's DEFAULT, so default here too.
     broker = (broker_family or "CPU_X64_L").strip().upper()
     head = (head_family or "CPU_X64_SL").strip().upper()
     families = load_families(session)
-    for family, role in (
-        (broker, "broker"),
-        (head, "head"),
-        *((n, "GPU") for n in names),
-    ):
+    for family, role in ((broker, "broker"), (head, "head")):
         if not family_listed(family, families):
             raise ValueError(missing_family_message(family, role))
+    for name in names:
+        if not family_sized(name, families):
+            rerun = "CALL <app>.app_code.set_pools(['<name>'])"
+            raise ValueError(no_gpu_message(name, families, rerun))
     saved = remote_profile(
         session, f"{SETUP_PREFIX}/setup.json", f"{APP_SCHEMA}.{FILE_FORMAT}"
     )
@@ -405,6 +410,32 @@ def gpu_names(gpu_families: list[str], max_gpus: int | None) -> list[str]:
         msg = "max_gpus must be at least 1.\nNo pool was changed."
         raise ValueError(msg)
     return names
+
+
+def gpu_families(session: SnowflakeSession) -> str:
+    """GPU families ``set_pools`` can use: in this region with the app's GPU count, and priced by Arena.
+
+    :param session: Procedure session.
+    :return: One line per family, or the region's GPU families when none qualifies.
+    :raises ValueError: Arena is not configured.
+    :raises SnowflakeLicenseError: Arena could not be reached or refused the key.
+    """
+    base_url, headers = arena_partner()
+    priced = snowflake_priced_families(fetch_capabilities(base_url, headers))
+    region = load_families(session)
+    usable = [
+        item
+        for item in region
+        if family_sized(item.name, region)
+        and (priced is None or item.name.upper() in priced)
+    ]
+    if usable:
+        return "GPU families set_pools can use here:\n" + format_family_lines(usable)
+    return (
+        "No GPU family in this region is both sized by the app and priced by Arena.\n"
+        "GPU families SHOW COMPUTE POOL INSTANCE FAMILIES returned:\n"
+        + format_family_lines([item for item in region if item.gpu_count > 0])
+    )
 
 
 def pool_plans(
@@ -585,7 +616,9 @@ def submit(
     source = reference_source(source_reference, source_alias)
     refuse_ended_trial(session)
     profile = app_setup(session)
-    pools = priced_pools(profile.pools.gpu, gpu_family)
+    pools = sized_pools(
+        priced_pools(profile.pools.gpu, gpu_family), load_families(session), gpu_family
+    )
     with (
         tempfile.TemporaryDirectory() as tmp,
         warnings.catch_warnings(record=True) as caught,
@@ -624,6 +657,7 @@ def submit(
             "INSERT INTO app_state.usage_items (kind, usage_id, opened_at) "
             f"VALUES ('run', {string_literal(run_id)}, CURRENT_TIMESTAMP())",
         )
+        collect(session, f"ALTER TASK {BILLING_TASK} RESUME")
         _, services = submit_job(session, job_manifest, settings, run_id)
     lines = [
         f"run_id: {run_id}",
@@ -672,6 +706,34 @@ def priced_pools(
             f"Arena has no Snowflake price for any of the app's GPU pools "
             f"({', '.join(sorted(pools))}).\nPriced families: {listed}. "
             "An app_admin calls set_pools with one of them.\nNothing was started."
+        )
+        raise ValueError(msg)
+    return kept
+
+
+def sized_pools(
+    pools: dict[str, GpuPool], region: list[GpuFamily], gpu_family: str | None
+) -> dict[str, GpuPool]:
+    """Keep the app's GPU pools whose family this region has with the GPUs the app sized.
+
+    :param pools: GPU pools in ``setup.json``, keyed by family.
+    :param region: Families in this region.
+    :param gpu_family: Family the caller named, or ``None``.
+    :return: The pools :func:`family_sized` accepts.
+    :raises ValueError: The named family, or every pool's family, fails that check.
+    """
+    kept = {
+        family: pool for family, pool in pools.items() if family_sized(family, region)
+    }
+    refused = sorted(set(pools) - set(kept))
+    if gpu_family in refused or (refused and not kept):
+        named = [gpu_family] if gpu_family in refused else refused
+        msg = (
+            f"This region does not have {', '.join(named)} with the GPUs per node "
+            "the app sized, so the run would ask for GPUs the nodes lack.\n"
+            "An app_admin lists usable families with gpu_families() and calls "
+            "set_pools with one of them.\n"
+            "Nothing was started."
         )
         raise ValueError(msg)
     return kept
@@ -820,356 +882,50 @@ def logs(session: SnowflakeSession, run_id: str, role: str, instance: int) -> st
 
 
 def cancel(session: SnowflakeSession, run_id: str) -> str:
-    """Drop a run's broker, head, and workers.
+    """Drop a run's broker, head, and workers, then suspend GPU pools left with nothing on them.
 
     :param session: Procedure session.
     :param run_id: Run id from ``submit``.
-    :return: Confirmation.
+    :return: Confirmation and the suspended pools.
     :raises ValueError: The app has no such run.
     """
     known_run(session, run_id)
     cancel_run(session, run_id, APP_SCHEMA)
-    return f"cancelled: {run_id}"
-
-
-def arena_partner() -> tuple[str, dict[str, str]]:
-    """Arena origin and partner headers from the secrets ``configure`` saved.
-
-    :return: The origin and the headers.
-    :raises ValueError: No org key has been saved.
-    """
-    # Lazy import of an optional package: _snowflake exists only inside a Snowflake procedure.
-    import _snowflake  # noqa: PLC0415 -- not installable outside Snowflake
-
-    org_key = _snowflake.get_generic_secret_string("org_key")
-    if not org_key:
-        msg = "Arena is not configured. An app_admin calls app_code.configure first."
-        raise ValueError(msg)
-    external_user_id = _snowflake.get_generic_secret_string("external_user_id")
-    base_url = _snowflake.get_generic_secret_string("base_url")
-    return base_url, partner_headers(org_key, external_user_id)
+    lines = [f"cancelled: {run_id}"]
+    lines.extend(f"suspended: {pool}" for pool in suspend_idle_gpu_pools(session))
+    return "\n".join(lines)
 
 
 def reconcile_usage(session: SnowflakeSession) -> str:
-    """Stop everything after an unpurchased trial, meter served models, bill usage, and log the summary at INFO.
+    """Stop everything after an unpurchased trial, meter and bill, suspend idle GPU pools and an idle task, and log at INFO.
 
     :param session: Procedure session.
     :return: The :func:`end_trial`, :func:`meter_deployments` and
-        :func:`reconcile` summaries, or why nothing ran.
+        :func:`reconcile` summaries, or why nothing ran, then the GPU pools and
+        billing task it suspended.
     """
     summary = reconcile_summary(session)
+    pools = suspend_idle_gpu_pools(session)
+    if pools:
+        summary += f"; suspended idle GPU pools {', '.join(pools)}"
+    if not sync_billing_task(session):
+        summary += f"; nothing left to bill, suspended {BILLING_TASK}"
     logger.info("reconcile_usage: %s", summary)
     return summary
 
 
-def reconcile_summary(session: SnowflakeSession) -> str:
-    """Drop every service once the trial has ended unpurchased, meter served models, then bill.
+def version_init(session: SnowflakeSession) -> str:
+    """Resume the billing task when the app has work to bill, and leave it suspended otherwise.
+
+    Snowflake calls this after install and upgrade, and the previous version's
+    after a failed upgrade, whose setup script may already have suspended the task.
 
     :param session: Procedure session.
-    :return: The :func:`end_trial`, :func:`meter_deployments` and
-        :func:`reconcile` summaries, or why nothing ran.
+    :return: What was done to the task.
     """
-    try:
-        base_url, headers = arena_partner()
-    except ValueError as exc:
-        return str(exc)
-    ended = None
-    if trial_ended(session):
-        served = served_models(session)
-        services = sorted(
-            name
-            for name, status in service_statuses(session).items()
-            if service_live(status) or name in served
-        )
-        ended = end_trial(session, services)
-
-    # One task run covers every item, so each request retries only briefly.
-    def fetch(kind: str, usage_id: str) -> SnowflakeUsage:
-        return snowflake_usage(kind, usage_id, base_url, headers, time.sleep, 30.0)
-
-    def open_call(deployment: SnowflakeDeployment) -> None:
-        open_snowflake_deployment(deployment, base_url, headers, time.sleep)
-
-    def heartbeat(deployment_id: str, now: datetime) -> None:
-        heartbeat_snowflake_deployment(
-            deployment_id, now, base_url, headers, time.sleep, 30.0
-        )
-
-    def close(deployment_id: str, now: datetime) -> None:
-        close_snowflake_deployment(
-            deployment_id, now, base_url, headers, time.sleep, 30.0
-        )
-
-    metered = meter_deployments(
-        session,
-        DeploymentCalls(open_call, heartbeat, close),
-        datetime.now(timezone.utc),
-    )
-    summary = f"{metered}; {reconcile(session, fetch, int(time.time() * 1000))}"
-    return summary if ended is None else f"{ended}; {summary}"
-
-
-@dataclass(frozen=True)
-class DeploymentCalls:
-    """Arena deployment requests: open, heartbeat, and close."""
-
-    open: Callable[[SnowflakeDeployment], None]
-    heartbeat: Callable[[str, datetime], None]
-    close: Callable[[str, datetime], None]
-
-
-@dataclass(frozen=True)
-class ServedModel:
-    """A service ``publish`` started, as ``app_state.served_models`` records it.
-
-    :param service: Upper-case service name in ``app_state``.
-    :param model: Model Registry model name.
-    :param version: Model Registry version name.
-    :param run_id: Run the model was published from.
-    :param gpu_family: Instance family of the serving pool.
-    :param gpu_count: GPUs the service requests.
-    """
-
-    service: str
-    model: str
-    version: str
-    run_id: str
-    gpu_family: str
-    gpu_count: int
-
-
-def service_live(status: str | None) -> bool:
-    """Whether a ``SHOW SERVICES`` status is billed as serving.
-
-    :param status: Upper-case status, or ``None`` when the service is gone.
-    :return: True while the service exists and is neither suspended nor ended.
-    """
-    stopped = {
-        "SUSPENDING",
-        "SUSPENDED",
-        "DONE",
-        "FAILED",
-        "CANCELLED",
-        "CANCELED",
-        "DELETING",
-        "DELETED",
-    }
-    return status is not None and status not in stopped
-
-
-def meter_deployments(
-    session: SnowflakeSession, calls: DeploymentCalls, now: datetime
-) -> str:
-    """Heartbeat each open deployment, close those whose service is not live, and open missing ones.
-
-    A suspended service is not live, so suspending closes its deployment and
-    a resumed service gets a new one. A heartbeat refused because Snowflake
-    training is off drops the service and closes the deployment. The row is
-    marked closed only after that close returns. A deployment Arena has closed
-    is marked closed, so it settles from the usage read, and its service gets
-    a new deployment. Every live service in ``app_state.served_models`` with
-    no open deployment gets one; a refused open drops the service. A service
-    dropped while metering its open deployment is not granted endpoint usage.
-    Every other live service is, including one already metered. A 404 is
-    logged and the deployment is left. A deployment Arena has never answered
-    for does not count its service as metered, so its open is sent again.
-    The first other Arena failure stops metering.
-
-    :param session: Procedure session.
-    :param calls: Arena deployment requests.
-    :param now: Current time, timezone-aware.
-    :return: Counts of open deployments, heartbeats, closes, opens, dropped
-        services, deployments Arena answered 404 for, and failures.
-    """
-    served = served_models(session)
-    rows = collect(
-        session,
-        "SELECT usage_id, service_name, first_seen_at FROM app_state.usage_items "
-        "WHERE kind = 'deployment' AND settled_at IS NULL AND closed_at IS NULL "
-        "AND service_name IS NOT NULL ORDER BY opened_at",
-    )
-    statuses = service_statuses(session) if rows or served else {}
-    counts = dict.fromkeys(
-        ("heartbeat", "closed", "opened", "dropped", "missing", "failed"), 0
-    )
-    metered: set[str] = set()
-    dropped: set[str] = set()
-    for row in rows:
-        values = lowered(row)
-        deployment_id, service = str(values["usage_id"]), str(values["service_name"])
-        try:
-            outcome = meter_deployment(
-                session, deployment_id, service, statuses.get(service), calls, now
-            )
-        except UnknownUsageError:
-            logger.warning(
-                "Arena has no deployment %s of service %s. Leaving it.",
-                deployment_id,
-                service,
-            )
-            counts["missing"] += 1
-            # Arena has answered for this deployment, so do not open another.
-            if values["first_seen_at"] is not None:
-                metered.add(service)
-            continue
-        except SnowflakeLicenseError as exc:
-            logger.warning(
-                "Could not meter deployment %s with Arena, so this run meters "
-                "no more deployments: %s",
-                deployment_id,
-                exc,
-            )
-            counts["failed"] += 1
-            return deployment_summary(len(rows), counts)
-        except SnowparkSQLException:
-            logger.exception("Could not drop service %s", service)
-            counts["failed"] += 1
-            metered.add(service)
-            continue
-        if outcome == "dropped":
-            dropped.add(service)
-        if outcome != "reopen":
-            counts[outcome] += 1
-            metered.add(service)
-    for service, model in served.items():
-        if service in dropped or not service_live(statuses.get(service)):
-            continue
-        grant_endpoint_usage(session, service)
-        if service in metered:
-            continue
-        try:
-            open_served(session, model, calls.open, now)
-        except DeploymentRefusedError:
-            counts["dropped"] += 1
-            continue
-        except SnowflakeLicenseError as exc:
-            logger.warning(
-                "Could not open a deployment for service %s with Arena, so this "
-                "run opens no more: %s",
-                service,
-                exc,
-            )
-            counts["failed"] += 1
-            break
-        counts["opened"] += 1
-    return deployment_summary(len(rows), counts)
-
-
-def service_statuses(session: SnowflakeSession) -> dict[str, str]:
-    """Upper-case ``SHOW SERVICES`` status of each service in ``app_state``, keyed by name.
-
-    :param session: Procedure session.
-    :return: The statuses.
-    """
-    return {
-        str(values["name"]).upper(): str(values.get("status") or "").upper()
-        for values in map(
-            lowered, collect(session, f"SHOW SERVICES IN SCHEMA {APP_SCHEMA}")
-        )
-    }
-
-
-def served_models(session: SnowflakeSession) -> dict[str, ServedModel]:
-    """Rows of ``app_state.served_models``, keyed by service name.
-
-    :param session: Procedure session.
-    :return: The served models.
-    """
-    rows = collect(
-        session,
-        "SELECT service_name, model, version, run_id, gpu_family, "
-        "gpu_count FROM app_state.served_models",
-    )
-    return {
-        str(v["service_name"]): ServedModel(
-            str(v["service_name"]),
-            str(v["model"]),
-            str(v["version"]),
-            str(v["run_id"]),
-            str(v["gpu_family"]),
-            int(str(v["gpu_count"])),
-        )
-        for v in map(lowered, rows)
-    }
-
-
-def deployment_summary(deployments: int, counts: dict[str, int]) -> str:
-    """One line of :func:`meter_deployments` counts.
-
-    :param deployments: Open deployments read.
-    :param counts: Count of each outcome.
-    :return: The line.
-    """
-    return f"deployments: {deployments}, " + ", ".join(
-        f"{name}: {count}" for name, count in counts.items()
-    )
-
-
-def meter_deployment(
-    session: SnowflakeSession,
-    deployment_id: str,
-    service: str,
-    status: str | None,
-    calls: DeploymentCalls,
-    now: datetime,
-) -> str:
-    """Heartbeat one open deployment while its service is live, or close it.
-
-    :param session: Procedure session.
-    :param deployment_id: Arena deployment id.
-    :param service: Service name in ``app_state``.
-    :param status: ``SHOW SERVICES`` status, or ``None`` when the service is gone.
-    :param calls: Arena deployment requests.
-    :param now: Current time, timezone-aware.
-    :return: ``heartbeat``, ``closed``, ``dropped``, or ``reopen`` when Arena
-        had closed it and the service needs a new deployment.
-    :raises UnknownUsageError: Arena has no such deployment.
-    :raises SnowflakeLicenseError: The Arena request failed.
-    :raises SnowparkSQLException: Snowflake did not drop the service.
-    """
-    if not service_live(status):
-        try:
-            calls.close(deployment_id, now)
-        except UnknownUsageError:
-            logger.warning("Arena has no deployment %s to close.", deployment_id)
-        mark_deployment(session, deployment_id, now, None)
-        return "closed"
-    try:
-        calls.heartbeat(deployment_id, now)
-    except TrainingDisabledError as exc:
-        collect(session, f"DROP SERVICE IF EXISTS {APP_SCHEMA}.{service}")
-        try:
-            calls.close(deployment_id, now)
-        except UnknownUsageError:
-            logger.warning("Arena has no deployment %s to close.", deployment_id)
-        mark_deployment(session, deployment_id, now, str(exc))
-        return "dropped"
-    except DeploymentClosedError as exc:
-        mark_deployment(session, deployment_id, now, str(exc))
-        return "reopen"
-    return "heartbeat"
-
-
-def mark_deployment(
-    session: SnowflakeSession, deployment_id: str, now: datetime, error: str | None
-) -> None:
-    """Stamp a deployment closed, with Arena's reason when there is one.
-
-    :param session: Procedure session.
-    :param deployment_id: Arena deployment id.
-    :param now: Current time, timezone-aware.
-    :param error: Reason logged and stored in ``last_error``, or ``None``.
-    """
-    stamp = f"TO_TIMESTAMP_TZ({int(now.timestamp() * 1000)}, 3)"
-    columns = f"closed_at = {stamp}"
-    if error is not None:
-        logger.warning("Deployment %s: %s", deployment_id, error)
-        columns += f", last_error = {string_literal(error)}, last_error_at = {stamp}"
-    collect(
-        session,
-        f"UPDATE app_state.usage_items SET {columns} WHERE kind = 'deployment' "
-        f"AND usage_id = {string_literal(deployment_id)}",
-    )
+    if sync_billing_task(session):
+        return f"resumed {BILLING_TASK}"
+    return f"nothing to bill, suspended {BILLING_TASK}"
 
 
 def publish(
@@ -1240,6 +996,7 @@ def publish(
     if service is not None:
         served = published_model(profile, document, service, run_id)
         record_served(session, served)
+        collect(session, f"ALTER TASK {BILLING_TASK} RESUME")
     wait_for_publish(session, job)
     lines = [
         f"job: {job.name}",
@@ -1265,146 +1022,6 @@ def publish(
         lines.append(f"endpoint: {service_endpoint(session, document)}")
         lines.append(f"deployment: {deployment_id}")
     return "\n".join(lines)
-
-
-def published_model(
-    profile: AccountProfile, document: PublishDocument, service: str, run_id: str
-) -> ServedModel:
-    """Build the record of what a publish job's service serves.
-
-    :param profile: The app's ``setup.json``.
-    :param document: Publish job document.
-    :param service: The document's service name.
-    :param run_id: Run the model was published from.
-    :return: The served model.
-    """
-    families = {pool.pool.upper(): family for family, pool in profile.pools.gpu.items()}
-    return ServedModel(
-        service.upper(),
-        document["model_name"],
-        document["version_name"],
-        run_id,
-        families[document["compute_pool"].upper()],
-        document["gpu_count"],
-    )
-
-
-def grant_endpoint_usage(session: SnowflakeSession, service: str) -> None:
-    """Let ``app_user`` call the endpoints of a service, which only the app can call otherwise.
-
-    :param session: Procedure session.
-    :param service: Service in ``app_state``.
-    """
-    collect(
-        session,
-        f"GRANT SERVICE ROLE {APP_SCHEMA}.{service}!ALL_ENDPOINTS_USAGE "
-        "TO APPLICATION ROLE app_user",
-    )
-
-
-def record_served(session: SnowflakeSession, served: ServedModel) -> None:
-    """Replace the ``app_state.served_models`` row of a service.
-
-    Recorded before the service exists, so the hourly task can open its
-    deployment when the publish wait ends first.
-
-    :param session: Procedure session.
-    :param served: What the service serves.
-    """
-    name = string_literal(served.service)
-    collect(session, f"DELETE FROM app_state.served_models WHERE service_name = {name}")
-    collect(
-        session,
-        "INSERT INTO app_state.served_models "
-        "(service_name, model, version, run_id, gpu_family, gpu_count) VALUES "
-        f"({name}, {string_literal(served.model)}, {string_literal(served.version)}, "
-        f"{string_literal(served.run_id)}, {string_literal(served.gpu_family)}, "
-        f"{served.gpu_count})",
-    )
-
-
-def open_served(
-    session: SnowflakeSession,
-    served: ServedModel,
-    open_call: Callable[[SnowflakeDeployment], None],
-    now: datetime,
-) -> str:
-    """Open the Arena deployment of a live service; a refused open drops the service.
-
-    The deployment is added to ``app_state.usage_items`` before Arena opens it,
-    so the hourly task bills an open whose answer was lost. A service that
-    already has an open deployment keeps it, and Arena is sent the same open
-    again, so ``publish`` and the hourly task never give one service two.
-
-    :param session: Procedure session.
-    :param served: What the service serves.
-    :param open_call: Arena open of a deployment.
-    :param now: Current time, timezone-aware: the start of a new deployment.
-    :return: The deployment id.
-    :raises DeploymentRefusedError: Arena refused the open. The service was
-        dropped and the deployment marked closed with Arena's reason.
-    :raises SnowflakeLicenseError: The open did not land.
-    """
-    # Whole seconds, so a start read back from opened_at repeats the open exactly.
-    started_at = now.replace(microsecond=0)
-    deployment_id = deployment_name(served.service, started_at)
-    service = string_literal(served.service)
-    # MERGE locks the table, so a concurrent caller sees this row and reuses it.
-    [merged] = collect(
-        session,
-        f"MERGE INTO app_state.usage_items AS t USING (SELECT {service} AS "
-        "service_name) AS s ON t.kind = 'deployment' AND t.service_name = "
-        "s.service_name AND t.closed_at IS NULL AND t.settled_at IS NULL "
-        "WHEN NOT MATCHED THEN INSERT (kind, usage_id, opened_at, service_name) "
-        f"VALUES ('deployment', {string_literal(deployment_id)}, "
-        f"TO_TIMESTAMP_TZ({int(started_at.timestamp() * 1000)}, 3), s.service_name)",
-    )
-    if int(str(lowered(merged)["number of rows inserted"])) == 0:
-        existing = lowered(
-            collect(
-                session,
-                "SELECT usage_id, DATE_PART(EPOCH_MILLISECOND, opened_at) AS "
-                "OPENED_MS FROM app_state.usage_items WHERE kind = 'deployment' "
-                f"AND service_name = {service} AND closed_at IS NULL AND "
-                "settled_at IS NULL ORDER BY opened_at",
-            )[0]
-        )
-        deployment_id = str(existing["usage_id"])
-        started_at = datetime.fromtimestamp(
-            int(str(existing["opened_ms"])) / 1000, timezone.utc
-        )
-    [row] = collect(session, "SELECT CURRENT_ACCOUNT() AS ACCOUNT")
-    try:
-        open_call(
-            SnowflakeDeployment(
-                deployment_id=deployment_id,
-                snowflake_account=str(lowered(row)["account"]),
-                gpu_count=served.gpu_count,
-                gpu_family=served.gpu_family,
-                started_at=started_at,
-                model=served.model,
-                version=served.version,
-                run_id=served.run_id,
-            )
-        )
-    except DeploymentRefusedError as exc:
-        collect(session, f"DROP SERVICE IF EXISTS {APP_SCHEMA}.{served.service}")
-        mark_deployment(session, deployment_id, now, str(exc))
-        raise
-    return deployment_id
-
-
-def deployment_name(service: str, started_at: datetime) -> str:
-    """Arena deployment id ``<SERVICE>-<yyyymmddThhmmssZ>``.
-
-    :param service: Service name.
-    :param started_at: Start, timezone-aware.
-    :return: The id, at most 64 characters.
-    """
-    stamp = started_at.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    # bill_hours takes ids of at most 64 characters, and Arena refuses $.
-    prefix = service.upper().replace("$", "_")[: 63 - len(stamp)]
-    return f"{prefix}-{stamp}"
 
 
 def endpoint(session: SnowflakeSession, model: str, version_name: str | None) -> str:
@@ -1453,47 +1070,3 @@ def unpublish(
         for deployment_id in close_deployments(session, served.services)
     )
     return "\n".join(lines)
-
-
-def close_deployments(
-    session: SnowflakeSession, services: tuple[str, ...]
-) -> list[str]:
-    """Forget dropped services and close their open Arena deployments, stamped now.
-
-    :param session: Procedure session.
-    :param services: Fully qualified service names.
-    :return: Deployment ids Arena closed. A deployment Arena has no record of
-        is logged and left out.
-    :raises ValueError: A deployment needs closing and Arena is not configured.
-    :raises SnowflakeLicenseError: Arena did not close a deployment.
-    """
-    if not services:
-        return []
-    names = ", ".join(
-        string_literal(service.rsplit(".", 1)[-1].upper()) for service in services
-    )
-    collect(
-        session, f"DELETE FROM app_state.served_models WHERE service_name IN ({names})"
-    )
-    rows = collect(
-        session,
-        "SELECT usage_id FROM app_state.usage_items WHERE kind = 'deployment' "
-        f"AND settled_at IS NULL AND closed_at IS NULL AND service_name IN ({names})",
-    )
-    if not rows:
-        return []
-    base_url, headers = arena_partner()
-    ended_at = datetime.now(timezone.utc)
-    closed = []
-    for row in rows:
-        deployment_id = str(lowered(row)["usage_id"])
-        try:
-            close_snowflake_deployment(
-                deployment_id, ended_at, base_url, headers, time.sleep
-            )
-        except UnknownUsageError:
-            logger.warning("Arena has no deployment %s to close.", deployment_id)
-        else:
-            closed.append(deployment_id)
-        mark_deployment(session, deployment_id, ended_at, None)
-    return closed
