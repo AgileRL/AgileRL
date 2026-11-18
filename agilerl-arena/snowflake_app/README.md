@@ -102,6 +102,27 @@ integrations and pools after an upgrade, since setup never drops them:
 `app_user` gets the read-only procedures. Starting, cancelling, publishing and
 unpublishing spend GPU credits or drop work, so they need `app_admin`.
 
+## Trial
+
+A consumer who installs the paid listing without buying it is on the
+listing's 7-day Snowflake trial. The app stops it one hourly task interval
+early, 7 days less 60 minutes from install (`TRIAL` in `app_code/app_trial.py`;
+the setup script records the install time in `app_state.trial`), because
+Snowflake ends the app's access when its trial ends and the app could then no
+longer drop its own services. After the cutoff, until the listing is
+purchased, `submit` and `publish` refuse with a message to purchase it, and
+each hourly run drops every live service in `app_state` (training jobs,
+publish jobs, inference services) and every served model's service, before
+metering closes their deployments. After purchase, both procedures work again.
+
+Purchase is read with `SYSTEM$IS_LISTING_PURCHASED()` through the secure
+function `app_code.listing_purchased()`. Called straight from a procedure or
+the task, the function returns TRUE on a trial install too. An install not
+from a listing reads as purchased, so it is never stopped. The listing's trial
+must be a 7-day "Limited time" trial for the cutoff to land in its last hour.
+Uninstalling drops `app_state.trial`, so a reinstall restarts the app's clock,
+but never past the end of the listing's trial.
+
 ## Billing
 
 App runs set `ARENA_SNOWFLAKE_CHANNEL=native_app` in the head spec, so the head

@@ -10,7 +10,8 @@ import json
 import re
 import sys
 from collections.abc import Callable
-from datetime import datetime, timezone
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -78,6 +79,11 @@ SECRETS = {
 DEPLOYMENT_ID = "QWEN_CHECKPOINT_2-20261116T130000Z"
 DEPLOYMENT_ID_RE = re.compile(r"QWEN_CHECKPOINT_2-\d{8}T\d{6}Z")
 INACTIVE = "The Snowflake entitlement is not active."
+TRIAL_QUERY = re.compile(
+    r"SELECT NOT app_code\.listing_purchased\(\) AND MIN\(started_at\) <= "
+    r"DATEADD\('second', -(\d+), CURRENT_TIMESTAMP\(\)\) AS ENDED FROM app_state\.trial"
+)
+TRIAL_ENDED = "The free trial of AgileRL Arena has ended"
 
 
 @pytest.fixture
@@ -120,18 +126,53 @@ class Files:
         return io.BytesIO(self.staged[stage_location].encode("utf-8"))
 
 
+@dataclass
+class Install:
+    """When the app was installed and what ``app_code.listing_purchased()`` returns.
+
+    The default is an install not from a listing, which reads as purchased.
+    """
+
+    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    purchased: bool = True
+
+    def ended(self, statement: str) -> Result | None:
+        """Evaluate the trial query like Snowflake, or ``None`` for any other statement.
+
+        :param statement: SQL to answer.
+        :return: One ``ENDED`` row, or ``None``.
+        """
+        match = TRIAL_QUERY.fullmatch(statement)
+        if match is None:
+            return None
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=int(match.group(1)))
+        return Result([Row(ENDED=not self.purchased and self.started_at <= cutoff)])
+
+
+def listing_trial(age_days: float) -> Install:
+    """An unpurchased listing install made ``age_days`` ago."""
+    started = datetime.now(timezone.utc) - timedelta(days=age_days)
+    return Install(started, purchased=False)
+
+
 class AppSession:
     """Procedure session that records statements and answers from routes."""
 
     def __init__(
-        self, routes: list[Route] | None = None, staged: dict[str, str] | None = None
+        self,
+        routes: list[Route] | None = None,
+        staged: dict[str, str] | None = None,
+        install: Install | None = None,
     ) -> None:
         self.routes = list(routes or [])
         self.statements: list[str] = []
         self.file = Files(staged or {})
+        self.install = install or Install()
 
     def sql(self, statement: str) -> Result:
         self.statements.append(statement)
+        if (ended := self.install.ended(statement)) is not None:
+            return ended
         for pred, rows in self.routes:
             if pred(statement):
                 return Result(rows)
@@ -179,7 +220,7 @@ def spec(statement: str) -> dict:
     return yaml.safe_load(statement.split("$$\n", 1)[1].removesuffix("$$"))
 
 
-def submit_session() -> AppSession:
+def submit_session(install: Install | None = None) -> AppSession:
     return AppSession(
         [
             setup_route(),
@@ -193,7 +234,8 @@ def submit_session() -> AppSession:
                 ),
                 [Row(instance_family="GPU_NV_S", max_nodes=2)],
             ),
-        ]
+        ],
+        install=install,
     )
 
 
@@ -471,6 +513,45 @@ class TestSubmit:
         assert call["url"] == "https://arena.test/api/cli/v1/capabilities"
         assert call["headers"]["Authorization"] == "Bearer arena_org_key-1"
 
+    def test_starts_the_run_during_an_unpurchased_trial(self) -> None:
+        session = submit_session(listing_trial(6.9))
+
+        text = submit(
+            session, SFT, 1, "source_table", "prompts", None, None, None, None
+        )
+
+        assert text.startswith("run_id: arena-")
+        assert len(executes(session)) == 3
+
+    def test_refuses_once_an_unpurchased_trial_has_ended(
+        self, priced_arena: Arena
+    ) -> None:
+        # Arrange
+        session = submit_session(listing_trial(6.98))
+
+        # Act
+        with pytest.raises(PermissionError, match=TRIAL_ENDED) as exc:
+            submit(session, SFT, 1, "source_table", "prompts", None, None, None, None)
+
+        # Assert
+        assert "Purchase the AgileRL Arena listing" in str(exc.value)
+        assert executes(session) == []
+        assert not any("usage_items" in s for s in session.statements)
+        assert session.file.puts == {}
+        assert priced_arena.calls == []
+
+    def test_a_purchased_listing_starts_after_the_trial(self) -> None:
+        session = submit_session(
+            Install(datetime.now(timezone.utc) - timedelta(days=30), purchased=True)
+        )
+
+        text = submit(
+            session, SFT, 1, "source_table", "prompts", None, None, None, None
+        )
+
+        assert text.startswith("run_id: arena-")
+        assert len(executes(session)) == 3
+
 
 class TestStatus:
     def test_reports_each_role_and_the_run_state(self) -> None:
@@ -586,7 +667,9 @@ class TestCancel:
         assert not any(s.startswith("DROP") for s in session.statements)
 
 
-def publish_session(job_status: str = "DONE") -> AppSession:
+def publish_session(
+    job_status: str = "DONE", install: Install | None = None
+) -> AppSession:
     run = {
         "compute_pool": "AGILERL_APP_ARENA_APP_GPU_GPU_NV_S",
         "image": IMAGE,
@@ -629,6 +712,7 @@ def publish_session(job_status: str = "DONE") -> AppSession:
             ),
         ],
         staged={f"{RUN_DIR}/job.json": json.dumps(run)},
+        install=install,
     )
 
 
@@ -816,6 +900,26 @@ class TestPublish:
 
         assert executes(session) == []
         assert session.file.puts == {}
+        assert arena.calls == []
+
+    def test_serves_during_an_unpurchased_trial(self, arena: Arena) -> None:
+        session = publish_session(install=listing_trial(1))
+        arena.replies = [deployment_opened()]
+
+        text = publish(session, RUN_ID, "qwen", None, None, True, 1, None, None)
+
+        assert "service: qwen_checkpoint_2" in text
+        assert len(arena.calls) == 1
+
+    def test_refuses_once_an_unpurchased_trial_has_ended(self, arena: Arena) -> None:
+        session = publish_session(install=listing_trial(6.98))
+
+        with pytest.raises(PermissionError, match=TRIAL_ENDED):
+            publish(session, RUN_ID, "qwen", None, None, True, 1, None, None)
+
+        assert executes(session) == []
+        assert session.file.puts == {}
+        assert not any(s.startswith("INSERT") for s in session.statements)
         assert arena.calls == []
 
 

@@ -3,8 +3,9 @@
 
 """Stored procedures of the Arena Snowflake Native App: setup, runs, and published models.
 
-The setup script registers each handler with ``IMPORTS`` of this file and
-``agilerl_arena.zip``, so these run as owner's-rights procedures inside the app.
+The setup script registers each handler with ``IMPORTS`` of this file,
+``app_trial.py`` and ``agilerl_arena.zip``, so these run as owner's-rights
+procedures inside the app.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from app_trial import end_trial, refuse_ended_trial, trial_ended
 from snowflake.snowpark.exceptions import SnowparkSQLException
 
 from agilerl.arena.snowflake.account import blocking_services, shrink_message
@@ -571,6 +573,7 @@ def submit(
     :raises ValueError: An argument is out of range, the source is not a bound
         reference, the pools are not set, Arena has no price for the family,
         or the manifest cannot run on them.
+    :raises PermissionError: The trial has ended and the listing is not purchased.
     :raises SnowflakeLicenseError: Arena could not be reached or refused the key.
     """
     if gpus < 1:
@@ -580,6 +583,7 @@ def submit(
         msg = "checkpoint_steps must be at least 1.\nNothing was started."
         raise ValueError(msg)
     source = reference_source(source_reference, source_alias)
+    refuse_ended_trial(session)
     profile = app_setup(session)
     pools = priced_pools(profile.pools.gpu, gpu_family)
     with (
@@ -847,11 +851,11 @@ def arena_partner() -> tuple[str, dict[str, str]]:
 
 
 def reconcile_usage(session: SnowflakeSession) -> str:
-    """Meter served models, bill every unsettled run and deployment, and log the summary at INFO.
+    """Stop everything after an unpurchased trial, meter served models, bill usage, and log the summary at INFO.
 
     :param session: Procedure session.
-    :return: The :func:`meter_deployments` and :func:`reconcile` summaries,
-        or why nothing ran.
+    :return: The :func:`end_trial`, :func:`meter_deployments` and
+        :func:`reconcile` summaries, or why nothing ran.
     """
     summary = reconcile_summary(session)
     logger.info("reconcile_usage: %s", summary)
@@ -859,16 +863,25 @@ def reconcile_usage(session: SnowflakeSession) -> str:
 
 
 def reconcile_summary(session: SnowflakeSession) -> str:
-    """Meter served models, then bill every unsettled run and deployment.
+    """Drop every service once the trial has ended unpurchased, meter served models, then bill.
 
     :param session: Procedure session.
-    :return: The :func:`meter_deployments` and :func:`reconcile` summaries,
-        or why nothing ran.
+    :return: The :func:`end_trial`, :func:`meter_deployments` and
+        :func:`reconcile` summaries, or why nothing ran.
     """
     try:
         base_url, headers = arena_partner()
     except ValueError as exc:
         return str(exc)
+    ended = None
+    if trial_ended(session):
+        served = served_models(session)
+        services = sorted(
+            name
+            for name, status in service_statuses(session).items()
+            if service_live(status) or name in served
+        )
+        ended = end_trial(session, services)
 
     # One task run covers every item, so each request retries only briefly.
     def fetch(kind: str, usage_id: str) -> SnowflakeUsage:
@@ -892,7 +905,8 @@ def reconcile_summary(session: SnowflakeSession) -> str:
         DeploymentCalls(open_call, heartbeat, close),
         datetime.now(timezone.utc),
     )
-    return f"{metered}; {reconcile(session, fetch, int(time.time() * 1000))}"
+    summary = f"{metered}; {reconcile(session, fetch, int(time.time() * 1000))}"
+    return summary if ended is None else f"{ended}; {summary}"
 
 
 @dataclass(frozen=True)
@@ -1187,12 +1201,14 @@ def publish(
         checkpoint.
     :raises RuntimeError: The publish job failed or outlived the wait. A
         service it starts later gets its deployment from the hourly task.
+    :raises PermissionError: The trial has ended and the listing is not purchased.
     :raises SnowflakeLicenseError: Arena did not open the deployment. The
         service was dropped.
     """
     if gpu_count < 1:
         msg = "gpu_count must be at least 1.\nNothing was published."
         raise ValueError(msg)
+    refuse_ended_trial(session)
     partner = arena_partner() if serve else None
     known_run(session, run_id)
     profile = app_setup(session)

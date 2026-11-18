@@ -15,6 +15,8 @@ entities:
             - setup_script.sql
             - src: app_code/arena_app.py
               dest: app_code/
+            - src: app_code/app_trial.py
+              dest: app_code/
             - agilerl_arena.zip
     arena_app:
         type: application

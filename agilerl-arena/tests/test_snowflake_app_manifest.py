@@ -6,8 +6,10 @@
 from __future__ import annotations
 
 import re
+from datetime import timedelta
 from pathlib import Path
 
+import app_trial
 import pytest
 import yaml
 from snowflake_app.app_code import arena_app
@@ -528,3 +530,70 @@ class TestSetupScriptObjects:
 
         assert callbacks == {"app_code.register_reference"}
         assert "CREATE OR REPLACE PROCEDURE app_code.register_reference(" in SETUP_SQL
+
+
+class TestSetupScriptTrial:
+    def test_purchase_is_read_through_an_ungranted_secure_function(self) -> None:
+        # Arrange
+        pattern = (
+            r"CREATE OR REPLACE SECURE FUNCTION app_code\.listing_purchased\(\)\s+"
+            r"RETURNS BOOLEAN\s+AS 'SYSTEM\$IS_LISTING_PURCHASED\(\)';"
+        )
+
+        # Act
+        function = re.search(pattern, SETUP_SQL)
+
+        # Assert
+        assert function is not None
+        assert function.start() > SETUP_SQL.index(
+            "CREATE OR ALTER VERSIONED SCHEMA app_code;"
+        )
+        assert "listing_purchased" not in "".join(
+            re.findall(r"GRANT [^;]*;", SETUP_SQL)
+        )
+        assert [
+            line
+            for line in SETUP_SQL.splitlines()
+            if "SYSTEM$IS_LISTING_PURCHASED" in line and not line.startswith("--")
+        ] == ["  AS 'SYSTEM$IS_LISTING_PURCHASED()';"]
+
+    def test_install_time_is_recorded_once_and_kept_on_upgrade(self) -> None:
+        create = SETUP_SQL.index(
+            "CREATE TABLE IF NOT EXISTS app_state.trial (\n  started_at TIMESTAMP_TZ\n);"
+        )
+        insert = SETUP_SQL.index(
+            "INSERT INTO app_state.trial (started_at)\n"
+            "  SELECT CURRENT_TIMESTAMP() WHERE NOT EXISTS (SELECT 1 FROM app_state.trial);"
+        )
+
+        assert create < insert
+        assert "app_state.trial TO" not in SETUP_SQL
+
+    def test_cutoff_is_one_task_interval_before_the_listing_trial_ends(self) -> None:
+        # Arrange
+        [minutes] = re.findall(
+            r"CREATE OR ALTER TASK app_state\.reconcile_usage_task\n"
+            r"(?:  .*\n)*?  SCHEDULE = '(\d+) MINUTES'",
+            SETUP_SQL,
+        )
+
+        # Act
+        margin = timedelta(days=7) - app_trial.TRIAL
+
+        # Assert
+        assert margin == timedelta(minutes=int(minutes)) == timedelta(hours=1)
+
+    def test_trial_module_ships_and_every_python_procedure_imports_it(self) -> None:
+        # Arrange
+        project = yaml.safe_load((APP_DIR / "snowflake.yml").read_text())
+        artifacts = project["entities"]["arena_pkg"]["artifacts"]
+
+        # Act
+        procedures = re.findall(
+            r"CREATE OR REPLACE PROCEDURE [^;]*LANGUAGE PYTHON[^;]*;", SETUP_SQL
+        )
+
+        # Assert
+        assert {"src": "app_code/app_trial.py", "dest": "app_code/"} in artifacts
+        assert len(procedures) == 11
+        assert all("'/app_code/app_trial.py'" in p for p in procedures)
