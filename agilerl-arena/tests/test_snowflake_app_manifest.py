@@ -26,6 +26,7 @@ from agilerl.arena.snowflake.setup_sql import (
     storage_statements,
     warehouse_statements,
 )
+from tests.test_snowflake_setup import FakeSession, Row
 
 APP_DIR = Path(__file__).resolve().parents[1] / "snowflake_app"
 MANIFEST = yaml.safe_load((APP_DIR / "manifest.yml").read_text())
@@ -118,7 +119,7 @@ class TestSetupScriptExternalAccess:
 
         assert roles == ["app_admin", "app_user"]
 
-    def test_integrations_use_names_the_cli_does_not(self) -> None:
+    def test_integrations_are_named_per_app_apart_from_the_cli(self) -> None:
         # Arrange
         cli_names = {
             HF_INTEGRATION,
@@ -130,16 +131,25 @@ class TestSetupScriptExternalAccess:
 
         # Act
         created = re.findall(
-            r"^\s*CREATE EXTERNAL ACCESS INTEGRATION (\w+)\n",
+            r"^\s*CREATE EXTERNAL ACCESS INTEGRATION IDENTIFIER\(:(\w+)\)\n",
             SETUP_SQL,
             flags=re.MULTILINE,
         )
+        prefix = re.search(
+            r"FUNCTION app_code\.object_prefix\(\).*?\$\$\s*'(\w+)' \|\| "
+            r"REGEXP_REPLACE\(UPPER\(CURRENT_DATABASE\(\)\), '\[\^A-Z0-9_\]', '_'\)",
+            SETUP_SQL,
+            flags=re.DOTALL,
+        )
 
         # Assert
-        assert created == ["agilerl_app_hf_eai", "agilerl_app_arena_eai"]
-        assert set(created).isdisjoint(cli_names)
+        assert created == ["hf_integration", "arena_integration"]
+        assert prefix is not None
+        assert prefix.group(1) == "AGILERL_APP_"
+        assert not any(name.upper().startswith("AGILERL_APP_") for name in cli_names)
         assert "CREATE EXTERNAL ACCESS INTEGRATION IF NOT EXISTS" not in SETUP_SQL
-        assert all(name in readme for name in created)
+        assert "AGILERL_APP_<APP>_HF_EAI" in readme
+        assert "AGILERL_APP_<APP>_ARENA_EAI" in readme
 
 
 class TestReadme:
@@ -170,31 +180,43 @@ class TestSetupScriptObjects:
         assert all(statement in SETUP_SQL for statement in cli)
 
     def test_warehouse_matches_the_cli_setup_and_no_pool_is_created(self) -> None:
-        cli = warehouse_statements(0)[0].replace(WAREHOUSE, arena_app.WAREHOUSE)
+        cli = warehouse_statements(0)[0].replace(WAREHOUSE, "IDENTIFIER(:warehouse)")
 
-        assert f"{cli};" in SETUP_SQL
+        assert f"{' '.join(cli.split())};" in " ".join(SETUP_SQL.split())
         assert "CREATE COMPUTE POOL" not in SETUP_SQL
 
-    def test_account_level_names_match_the_procedure_constants(self) -> None:
-        warehouses = re.findall(r"CREATE WAREHOUSE IF NOT EXISTS (\w+)", SETUP_SQL)
-        integrations = re.findall(
-            r"CREATE EXTERNAL ACCESS INTEGRATION (\w+)", SETUP_SQL
-        )
-        procedure_integrations = re.findall(
-            r"EXTERNAL_ACCESS_INTEGRATIONS = \((\w+)\)", SETUP_SQL
+    def test_account_level_names_match_the_procedure_names(self) -> None:
+        # Arrange
+        session = FakeSession(
+            [
+                (
+                    lambda s: s == "SELECT app_code.object_prefix() AS PREFIX",
+                    [Row(PREFIX="AGILERL_APP_ARENA_")],
+                )
+            ]
         )
 
-        assert warehouses == [arena_app.WAREHOUSE]
-        assert integrations == [arena_app.HF_INTEGRATION, arena_app.API_INTEGRATION]
-        assert procedure_integrations == [arena_app.API_INTEGRATION] * 5
-        assert all(
-            name.startswith("agilerl_app_")
-            for name in (
-                arena_app.BROKER_POOL,
-                arena_app.HEAD_POOL,
-                arena_app.GPU_POOL_PREFIX,
+        # Act
+        names = arena_app.app_names(session)
+        suffixes = re.findall(r"app_code\.object_prefix\(\) \|\| '(\w+)", SETUP_SQL)
+
+        # Assert
+        assert suffixes == ["HF_EAI", "ARENA_EAI", "WH", "ARENA_EAI"]
+        assert names == arena_app.AppNames(
+            warehouse="AGILERL_APP_ARENA_WH",
+            broker_pool="AGILERL_APP_ARENA_BROKER_POOL",
+            head_pool="AGILERL_APP_ARENA_HEAD_POOL",
+            gpu_pool_prefix="AGILERL_APP_ARENA_GPU_",
+            hf_integration="AGILERL_APP_ARENA_HF_EAI",
+            api_integration="AGILERL_APP_ARENA_ARENA_EAI",
+        )
+        assert not any(
+            "EXTERNAL_ACCESS_INTEGRATIONS" in procedure or "SECRETS" in procedure
+            for procedure in re.findall(
+                r"CREATE OR REPLACE PROCEDURE [^;]*;", SETUP_SQL
             )
         )
+        assert re.search(r"agilerl_app_\w", SETUP_SQL, flags=re.IGNORECASE) is None
 
     def test_every_granted_procedure_is_created_with_a_handler(self) -> None:
         created = {
@@ -378,6 +400,37 @@ class TestSetupScriptObjects:
         ]
         assert SETUP_SQL.index("ALTER TABLE app_state.usage_items") > create
 
+    def test_arena_procedures_get_the_app_integration_after_they_are_created(
+        self,
+    ) -> None:
+        # Arrange
+        access = re.search(
+            r"SELECT ' SET EXTERNAL_ACCESS_INTEGRATIONS = \(' \|\| "
+            r"app_code\.object_prefix\(\) \|\| 'ARENA_EAI\)'\s+INTO :arena_access;",
+            SETUP_SQL,
+        )
+
+        # Act
+        altered = re.findall(
+            r"EXECUTE IMMEDIATE 'ALTER PROCEDURE app_code\.(\w+)\([^)]*\)' \|\| ([^;]*);",
+            SETUP_SQL,
+        )
+
+        # Assert
+        assert access is not None
+        assert altered == [
+            ("configure", "arena_access"),
+            ("submit", "arena_access || secrets"),
+            ("publish", "arena_access || secrets"),
+            ("unpublish", "arena_access || secrets"),
+            ("reconcile_usage", "arena_access || secrets"),
+        ]
+        last_create = SETUP_SQL.index(
+            "CREATE OR REPLACE PROCEDURE app_code.reconcile_usage("
+        )
+        assert last_create < access.start()
+        assert access.end() < SETUP_SQL.index("CREATE OR ALTER TASK")
+
     @pytest.mark.parametrize(
         "name", ["reconcile_usage", "publish", "unpublish", "submit"]
     )
@@ -385,11 +438,12 @@ class TestSetupScriptObjects:
         self, name: str
     ) -> None:
         # Arrange
-        procedure = SETUP_SQL[
-            SETUP_SQL.index(f"CREATE OR REPLACE PROCEDURE app_code.{name}(") :
-        ].split(";", 1)[0]
+        alter = re.search(
+            rf"'ALTER PROCEDURE app_code\.{name}\([^)]*\)' \|\| ([^;]*);", SETUP_SQL
+        )
+        secrets = re.search(r"secrets STRING DEFAULT '(.*)';", SETUP_SQL)
         allowed = re.search(
-            r"ALTER EXTERNAL ACCESS INTEGRATION (\w+) SET\s+"
+            r"ALTER EXTERNAL ACCESS INTEGRATION IDENTIFIER\(:(\w+)\) SET\s+"
             r"ALLOWED_AUTHENTICATION_SECRETS = \(([^)]*)\);",
             SETUP_SQL,
         )
@@ -400,17 +454,18 @@ class TestSetupScriptObjects:
         )
 
         # Act
-        aliases = dict(re.findall(r"'(\w+)' = (app_state\.\w+)", procedure))
+        aliases = dict(re.findall(r"''(\w+)'' = (app_state\.\w+)", secrets.group(1)))
 
         # Assert
-        assert "EXTERNAL_ACCESS_INTEGRATIONS = (agilerl_app_arena_eai)" in procedure
+        assert alter is not None
+        assert alter.group(1) == "arena_access || secrets"
         assert aliases == {
             "org_key": "app_state.arena_org_key",
             "external_user_id": "app_state.arena_external_user_id",
             "base_url": "app_state.arena_base_url",
         }
         assert allowed is not None
-        assert allowed.group(1) == arena_app.API_INTEGRATION
+        assert allowed.group(1) == "arena_integration"
         assert {name.strip() for name in allowed.group(2).split(",")} == set(
             aliases.values()
         )

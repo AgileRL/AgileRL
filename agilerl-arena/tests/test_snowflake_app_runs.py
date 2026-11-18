@@ -39,16 +39,16 @@ STEM = "ARENA_RUN_20261109163457_ABC123"
 RUN_DIR = f"@app_state.runs/{RUN_ID}"
 SETUP = {
     "image": IMAGE,
-    "warehouse": "agilerl_app_wh",
+    "warehouse": "AGILERL_APP_ARENA_APP_WH",
     "stage": "app_state.runs",
     "metrics_table": "app_state.arena_metrics",
-    "external_access_integrations": ["agilerl_app_hf_eai"],
+    "external_access_integrations": ["AGILERL_APP_ARENA_APP_HF_EAI"],
     "pools": {
-        "broker": {"pool": "agilerl_app_broker_pool", "family": "CPU_X64_L"},
-        "head": {"pool": "agilerl_app_head_pool", "family": "CPU_X64_SL"},
+        "broker": {"pool": "AGILERL_APP_ARENA_APP_BROKER_POOL", "family": "CPU_X64_L"},
+        "head": {"pool": "AGILERL_APP_ARENA_APP_HEAD_POOL", "family": "CPU_X64_SL"},
         "gpu": {
             "GPU_NV_S": {
-                "pool": "agilerl_app_gpu_GPU_NV_S",
+                "pool": "AGILERL_APP_ARENA_APP_GPU_GPU_NV_S",
                 "max_gpus": 2,
                 "gpus_per_node": 1,
                 "gpu_memory_gib": 24,
@@ -143,7 +143,7 @@ class FailingHeadSession(AppSession):
 
     def sql(self, statement: str) -> Result:
         if statement.startswith(
-            "EXECUTE JOB SERVICE IN COMPUTE POOL agilerl_app_head_pool"
+            "EXECUTE JOB SERVICE IN COMPUTE POOL AGILERL_APP_ARENA_APP_HEAD_POOL"
         ):
             self.statements.append(statement)
             msg = "head pool is full"
@@ -183,9 +183,13 @@ def submit_session() -> AppSession:
     return AppSession(
         [
             setup_route(),
+            exact(
+                "SELECT app_code.object_prefix() AS PREFIX",
+                [Row(PREFIX="AGILERL_APP_ARENA_APP_")],
+            ),
             (
                 lambda s: s.startswith(
-                    "DESCRIBE COMPUTE POOL agilerl_app_gpu_GPU_NV_S"
+                    "DESCRIBE COMPUTE POOL AGILERL_APP_ARENA_APP_GPU_GPU_NV_S"
                 ),
                 [Row(instance_family="GPU_NV_S", max_nodes=2)],
             ),
@@ -218,23 +222,26 @@ class TestSubmit:
         run_id = text.splitlines()[0].removeprefix("run_id: ")
         broker, head, workers = executes(session)
         assert broker.startswith(
-            "EXECUTE JOB SERVICE IN COMPUTE POOL agilerl_app_broker_pool\n"
+            "EXECUTE JOB SERVICE IN COMPUTE POOL AGILERL_APP_ARENA_APP_BROKER_POOL\n"
         )
         assert head.startswith(
-            "EXECUTE JOB SERVICE IN COMPUTE POOL agilerl_app_head_pool\n"
+            "EXECUTE JOB SERVICE IN COMPUTE POOL AGILERL_APP_ARENA_APP_HEAD_POOL\n"
         )
         assert workers.startswith(
-            "EXECUTE JOB SERVICE IN COMPUTE POOL agilerl_app_gpu_GPU_NV_S\n"
+            "EXECUTE JOB SERVICE IN COMPUTE POOL AGILERL_APP_ARENA_APP_GPU_GPU_NV_S\n"
         )
         assert all(
-            "QUERY_WAREHOUSE = agilerl_app_wh" in s for s in (broker, head, workers)
+            "QUERY_WAREHOUSE = AGILERL_APP_ARENA_APP_WH" in s
+            for s in (broker, head, workers)
         )
         assert "EXTERNAL_ACCESS_INTEGRATIONS" not in broker
         assert (
-            "EXTERNAL_ACCESS_INTEGRATIONS = (agilerl_app_hf_eai, agilerl_app_arena_eai)"
+            "EXTERNAL_ACCESS_INTEGRATIONS = (AGILERL_APP_ARENA_APP_HF_EAI, AGILERL_APP_ARENA_APP_ARENA_EAI)"
             in head
         )
-        assert "EXTERNAL_ACCESS_INTEGRATIONS = (agilerl_app_hf_eai)\n" in workers
+        assert (
+            "EXTERNAL_ACCESS_INTEGRATIONS = (AGILERL_APP_ARENA_APP_HF_EAI)\n" in workers
+        )
         [container] = spec(head)["spec"]["containers"]
         assert container["image"] == IMAGE
         assert container["env"]["ARENA_SNOWFLAKE_CHANNEL"] == "native_app"
@@ -581,9 +588,9 @@ class TestCancel:
 
 def publish_session(job_status: str = "DONE") -> AppSession:
     run = {
-        "compute_pool": "agilerl_app_gpu_GPU_NV_S",
+        "compute_pool": "AGILERL_APP_ARENA_APP_GPU_GPU_NV_S",
         "image": IMAGE,
-        "warehouse": "agilerl_app_wh",
+        "warehouse": "AGILERL_APP_ARENA_APP_WH",
     }
     listing = [
         Row(name=f"runs/{RUN_ID}/checkpoint_2/merged/model.safetensors", size=2**30),
@@ -638,17 +645,17 @@ class TestPublish:
         [request_path] = [p for p in session.file.puts if "/publish-" in p]
         request = json.loads(session.file.puts[request_path])
         assert (request["database"], request["schema"]) == ("ARENA_APP", "app_state")
-        assert request["compute_pool"] == "agilerl_app_gpu_GPU_NV_S"
-        assert request["image_build_compute_pool"] == "agilerl_app_head_pool"
+        assert request["compute_pool"] == "AGILERL_APP_ARENA_APP_GPU_GPU_NV_S"
+        assert request["image_build_compute_pool"] == "AGILERL_APP_ARENA_APP_HEAD_POOL"
         assert (request["checkpoint"], request["service_name"]) == (
             "checkpoint_2",
             "qwen_checkpoint_2",
         )
         [job] = executes(session)
         assert job.startswith(
-            "EXECUTE JOB SERVICE IN COMPUTE POOL agilerl_app_gpu_GPU_NV_S\n"
+            "EXECUTE JOB SERVICE IN COMPUTE POOL AGILERL_APP_ARENA_APP_GPU_GPU_NV_S\n"
         )
-        assert "QUERY_WAREHOUSE = agilerl_app_wh" in job
+        assert "QUERY_WAREHOUSE = AGILERL_APP_ARENA_APP_WH" in job
         assert spec(job)["spec"]["containers"][0]["image"] == IMAGE
         name = job.splitlines()[1].removeprefix("NAME = ")
         assert name.startswith("app_state.ARENA_PUBLISH_")

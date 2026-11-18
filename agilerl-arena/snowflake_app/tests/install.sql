@@ -93,7 +93,7 @@ DECLARE
   upgraded INTEGER;
   integrations INTEGER;
   not_upgraded EXCEPTION (-20007, 'arena_app_s6 is not on the newest patch, or its upgrade did not complete.');
-  integrations_missing EXCEPTION (-20008, 'agilerl_app_hf_eai and agilerl_app_arena_eai do not both exist after the upgrade.');
+  integrations_missing EXCEPTION (-20008, 'AGILERL_APP_ARENA_APP_S6_HF_EAI and AGILERL_APP_ARENA_APP_S6_ARENA_EAI do not both exist after the upgrade.');
 BEGIN
   SHOW APPLICATIONS LIKE 'ARENA_APP_S6';
   SELECT COUNT(*) INTO :upgraded
@@ -102,10 +102,10 @@ BEGIN
   IF (upgraded <> 1) THEN
     RAISE not_upgraded;
   END IF;
-  SHOW INTEGRATIONS LIKE 'AGILERL_APP%';
+  SHOW INTEGRATIONS LIKE 'AGILERL_APP_ARENA_APP_S6_%';
   SELECT COUNT(*) INTO :integrations
     FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))
-    WHERE "name" IN ('AGILERL_APP_HF_EAI', 'AGILERL_APP_ARENA_EAI');
+    WHERE "name" IN ('AGILERL_APP_ARENA_APP_S6_HF_EAI', 'AGILERL_APP_ARENA_APP_S6_ARENA_EAI');
   IF (integrations <> 2) THEN
     RAISE integrations_missing;
   END IF;
@@ -160,14 +160,14 @@ $$;
 
 -- First call that imports agilerl.arena.snowflake from agilerl_arena.zip.
 CALL arena_app_s6.app_code.set_pools(['GPU_NV_S'], 1);
-SHOW COMPUTE POOLS LIKE 'AGILERL_APP%';
+SHOW COMPUTE POOLS LIKE 'AGILERL_APP_ARENA_APP_S6_%';
 EXECUTE IMMEDIATE $$
 DECLARE
   pools INTEGER;
   running INTEGER;
-  nodes_running EXCEPTION (-20004, 'An agilerl_app_ pool is missing or not suspended.');
+  nodes_running EXCEPTION (-20004, 'An AGILERL_APP_ARENA_APP_S6_ pool is missing or not suspended.');
 BEGIN
-  SHOW COMPUTE POOLS LIKE 'AGILERL_APP%';
+  SHOW COMPUTE POOLS LIKE 'AGILERL_APP_ARENA_APP_S6_%';
   SELECT COUNT(*), COUNT_IF("state" <> 'SUSPENDED' OR "active_nodes" > 0)
     INTO :pools, :running
     FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
@@ -233,11 +233,11 @@ DECLARE
   integrations INTEGER;
   left_behind EXCEPTION (-20006, 'An app pool, warehouse or integration survived the uninstall.');
 BEGIN
-  SHOW COMPUTE POOLS LIKE 'AGILERL_APP%';
+  SHOW COMPUTE POOLS LIKE 'AGILERL_APP_ARENA_APP_S6_%';
   SELECT COUNT(*) INTO :pools FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
-  SHOW WAREHOUSES LIKE 'AGILERL_APP%';
+  SHOW WAREHOUSES LIKE 'AGILERL_APP_ARENA_APP_S6_%';
   SELECT COUNT(*) INTO :warehouses FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
-  SHOW INTEGRATIONS LIKE 'AGILERL_APP%';
+  SHOW INTEGRATIONS LIKE 'AGILERL_APP_ARENA_APP_S6_%';
   SELECT COUNT(*) INTO :integrations FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
   IF (pools + warehouses + integrations > 0) THEN
     RAISE left_behind;
