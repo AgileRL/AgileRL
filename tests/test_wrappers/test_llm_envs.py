@@ -27,6 +27,7 @@ from agilerl.llm_envs.chat_formats import (
     ParsedToolCall,
     detect_chat_format,
     frame_repeats_terminator,
+    get_chat_format,
 )
 from agilerl.llm_envs.chat_transcript import (
     _cut_kept_turn,
@@ -1069,6 +1070,17 @@ class TestEncodeChatTranscriptEmptyContentToolCall:
 
 
 class TestChatMessages:
+    def test_drops_the_training_weight(self):
+        row = [
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "Hello.", "weight": 0},
+        ]
+
+        assert chat_messages(row) == [
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "Hello."},
+        ]
+
     def test_dict_tool_call_arguments_are_kept(self):
         row = [
             {"role": "user", "content": "Hi"},
@@ -1250,6 +1262,41 @@ class TestDatasetEnvSFTCollate:
             assert batch["input_ids"][row, :length].tolist() == ids
             assert batch["loss_mask"][row, :length].tolist() == mask
             assert not batch["loss_mask"][row, length:].any()
+
+    def test_a_passed_chat_format_writes_the_trained_tool_calls(self):
+        # Arrange
+        tokenizer = in_turn_tokenizer(
+            GRANITE3_STYLE_TEMPLATE,
+            [
+                "<|start_of_role|>",
+                "<|end_of_role|>",
+                "<|end_of_text|>",
+                "<|tool_call|>",
+            ],
+        )
+        dataset = HFDataset.from_dict({"messages": [weather_conversation()[1:3]]})
+
+        # Act
+        env = DatasetEnv(
+            train_dataset=dataset,
+            test_dataset=dataset,
+            tokenizer=tokenizer,
+            objective="sft",
+            chat_format=get_chat_format("granite3", tokenizer),
+            data_batch_size_per_gpu=1,
+        )
+        batch = env.reset()
+
+        # Assert
+        assert not isinstance(detect_chat_format(tokenizer), Granite3Format)
+        assert trained_text(
+            tokenizer, batch["input_ids"][0].tolist(), batch["loss_mask"][0].tolist()
+        ) == [
+            (
+                '<|tool_call|>[{"name": "get_weather", "arguments": {"city": "Paris"}}]'
+                "<|end_of_text|>"
+            )
+        ]
 
     def test_cuts_at_the_last_complete_assistant_turn_that_fits(self):
         # Arrange
@@ -1553,6 +1600,11 @@ class TestArrowFilledNoneKeys:
     def test_bad_json_tools_get_a_clear_error(self):
         with pytest.raises(ValueError, match="tools column is not valid JSON"):
             sft_tools({"tools": "{broken"})
+
+    def test_arrow_tools_drop_the_none_keys_arrow_fills(self):
+        assert sft_tools(
+            {"tools": [{"name": "f", "strict": None, "parameters": {"a": None}}]}
+        ) == [{"name": "f", "parameters": {}}]
 
 
 class TestNamedToolResults:

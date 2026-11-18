@@ -47,11 +47,6 @@ holds `IMPORT SHARE`, `CREATE APPLICATION` and, because the listing is paid,
 `PURCHASE DATA EXCHANGE LISTING` on the account. Without the last one the
 install is refused.
 
-Some installs print `Reference register_callback 'APP_CODE.REGISTER_REFERENCE(...)'
-does not exist or is not granted to an application role` as a second result
-row. It is harmless: the setup script creates and grants the procedure, and
-binding `source_table` or `source_view` works. `SHOW REFERENCES IN APPLICATION <app>` lists the bindings.
-
 ## Procedures
 
 Python 3.13 stored procedures in `app_code/arena_app.py`, owner's rights, with
@@ -65,15 +60,14 @@ never collides with objects the CLI created in the same account.
 
 | Procedure | Role | Does |
 |---|---|---|
-| `app_code.configure(org_key, external_user_id, base_url)` | `app_admin` | Refuses keys without `arena_org_` and base URLs whose host is not in `app_state.arena_api_egress`; calls `GET /api/cli/v1/capabilities` through `agilerl_app_arena_eai` and requires `features.snowflakeTraining`; then sets the three secrets and lists `features.snowflakePricedGpuFamilies` when Arena sends it. Secret values are never logged, returned or quoted in errors. |
+| `app_code.configure(org_key, external_user_id, base_url)` | `app_admin` | Refuses keys without `arena_org_` and base URLs whose host is not in `app_state.arena_api_egress`; calls `GET /api/cli/v1/capabilities` through `agilerl_app_arena_eai` and requires `features.snowflakeTraining`; then sets the three secrets. Secret values are never logged, returned or quoted in errors. |
 | `app_code.set_pools(gpu_families, max_gpus, broker_family, head_family)` | `app_admin` | Creates or resizes `agilerl_app_broker_pool`, `agilerl_app_head_pool` and one `agilerl_app_gpu_<FAMILY>` per listed family (CLI defaults); drops `AGILERL_APP_GPU_*` pools of families no longer listed; refuses to shrink or drop under a running service; writes `setup.json`. |
 | `app_code.register_reference(ref_name, operation, ref_or_alias)` | `app_admin` | Reference callback: `ADD`, `REMOVE`, `CLEAR` on `source_table` / `source_view`. |
-| `app_code.submit(manifest, gpus, source_reference, source_alias, gpu_family, reward_file, checkpoint_steps, resume_from)` | `app_admin` | `arena snowflake submit` on the app pools: the same broker, head and worker job services in `app_state`, with the head reading the `app_state` secrets through `agilerl_app_arena_eai`. `manifest` and `reward_file` are file contents. When capabilities list `features.snowflakePricedGpuFamilies`, an unpriced `gpu_family` is refused and an omitted one is picked from priced pools, before anything starts. That read uses the three Arena secrets through `agilerl_app_arena_eai`. The job reads `SELECT * FROM reference('<source_reference>', '<source_alias>')`. Returns the run id, the service names and any manifest warnings. |
+| `app_code.submit(manifest, gpus, source_reference, source_alias, gpu_family, reward_file, checkpoint_steps, resume_from)` | `app_admin` | `arena snowflake submit` on the app pools: the same broker, head and worker job services in `app_state`, with the head reading the `app_state` secrets through `agilerl_app_arena_eai`. `manifest` and `reward_file` are file contents. The job reads `SELECT * FROM reference('<source_reference>', '<source_alias>')`. Returns the run id, the service names and any manifest warnings. |
 | `app_code.status(run_id)` | `app_user` | `arena snowflake status`. Refuses run ids with no `job.json` on `@app_state.runs`. |
 | `app_code.logs(run_id, role, instance)` | `app_user` | `arena snowflake logs`. |
 | `app_code.cancel(run_id)` | `app_admin` | `arena snowflake cancel`. |
 | `app_code.reconcile_usage()` | none | Bills usage; see Billing. Only the hourly task calls it, so two calls never overlap. |
-| `app_code.reconcile_now()` | `app_admin` | Queues a run of `app_state.reconcile_usage_task` with `EXECUTE TASK`, so billing can be run by hand. It starts after any run in progress. |
 | `app_code.version_init()` | none | Version initializer: resumes the billing task after install, upgrade, or a failed upgrade. |
 | `app_code.publish(run_id, model_name, version_name, step, serve, gpu_count, service_name, max_model_len)` | `app_admin` | `arena snowflake publish` into the Model Registry in `app_state`, waiting for the job like the CLI. `serve` starts the vLLM service, whose public endpoint uses `BIND SERVICE ENDPOINT`, and bills it as an Arena deployment; see Billing. The app grants the service's `ALL_ENDPOINTS_USAGE` role to `app_user`, after publish and on each hourly run, so account roles holding `app_user` can call the endpoint. |
 | `app_code.endpoint(model, version_name)` | `app_user` | `arena snowflake endpoint` for a model in `app_state`. |
@@ -131,9 +125,6 @@ billed yet, it emits one event with `SYSTEM$CREATE_BILLING_EVENTS`
 class `ARENA_USAGE`, subclass `run` or `deployment`, `start_timestamp` = the hour start,
 `timestamp` = the hour end or now for a partial hour, `base_charge` = cents ×
 0.01 USD, `objects` = the run or deployment id. Billing lags usage by up to about an hour.
-Every run logs its summary at INFO (deployments heartbeated, closed, opened
-and dropped; items settled, events emitted, failed, missing, skipped until
-their daily read, stale, and hours Snowflake never confirmed), or why nothing ran.
 The listing's pricing plan carries the event's `billing_quantity` and unit.
 
 `app_state.billed_hours` holds one row per charged hour. A MERGE claims hours

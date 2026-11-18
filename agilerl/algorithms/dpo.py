@@ -107,6 +107,10 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         loading the base model in 4-/8-bit (QLoRA). ``lm_head`` is kept
         unquantized so the fused-linear-logprob path stays numerically exact.
     :type quantization_config: BitsAndBytesConfig | None, optional
+    :param lora_tower_target_modules: Tower and connector modules of a VL model
+        to adapt as well. ``lora_config.target_modules`` always land on the
+        language model only. Defaults to None.
+    :type lora_tower_target_modules: list[str] | None, optional
     :param max_model_len: Longest training row (prompt plus response) the
         training-memory search sizes for, defaults to 1024.
     :type max_model_len: int, optional
@@ -147,6 +151,7 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         use_separate_reference_adapter: bool = True,
         reference_update_interval: int | None = None,
         quantization_config: BitsAndBytesConfig | None = None,
+        lora_tower_target_modules: list[str] | None = None,
         max_model_len: int = 1024,
         routed_expert_chunk_mib: int | None = None,
     ) -> None:
@@ -177,6 +182,7 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
             use_separate_reference_adapter=use_separate_reference_adapter,
             reference_update_interval=reference_update_interval,
             quantization_config=quantization_config,
+            lora_tower_target_modules=lora_tower_target_modules,
             routed_expert_chunk_mib=routed_expert_chunk_mib,
         )
         self.beta = beta

@@ -113,6 +113,10 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         loading the base model in 4-/8-bit (QLoRA). ``lm_head`` is kept
         unquantized so the fused-linear-logprob path stays numerically exact.
     :type quantization_config: BitsAndBytesConfig | None, optional
+    :param lora_tower_target_modules: Tower and connector modules of a VL model
+        to adapt as well. ``lora_config.target_modules`` always land on the
+        language model only. Defaults to None.
+    :type lora_tower_target_modules: list[str] | None, optional
     :param max_model_len: Longest training row (prompt plus response) the
         training-memory search sizes for, defaults to 1024.
     :type max_model_len: int, optional
@@ -150,6 +154,7 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         seed: int = 42,
         use_separate_reference_adapter: bool = False,
         quantization_config: BitsAndBytesConfig | None = None,
+        lora_tower_target_modules: list[str] | None = None,
         max_model_len: int = 1024,
         routed_expert_chunk_mib: int | None = None,
     ) -> None:
@@ -179,6 +184,7 @@ class SFT(LLMAlgorithm[SFTPrompts]):
             name="SFT",
             gradient_checkpointing=gradient_checkpointing,
             quantization_config=quantization_config,
+            lora_tower_target_modules=lora_tower_target_modules,
             routed_expert_chunk_mib=routed_expert_chunk_mib,
         )
         self.temperature = 0

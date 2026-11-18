@@ -17,15 +17,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from agilerl.arena.auth import ArenaOAuth2
-from agilerl.arena.memory import (
-    estimator,
-    formulas,
-    fsdp_gather,
-    lora_formulas,
-    lora_placement,
-    manifest,
-)
-from agilerl.arena.memory.resolve import batch, engine, fsdp, parallel
+from agilerl.arena.memory import estimator, formulas, fsdp_gather, manifest
+from agilerl.arena.memory.resolve import batch, engine, fsdp
 from agilerl.arena.models import model_info
 
 # The Native App modules import Snowpark, which only the snowflake extra installs.
@@ -48,15 +41,8 @@ PLANNER_CACHES = (
     engine._engine_model,
     formulas.param_counts,
     fsdp_gather.prefetch_window_params,
-    fsdp_gather.fsdp_gather_pool_params,
-    fsdp_gather.fsdp_gathered_params,
-    formulas.layer_block_kinds,
-    lora_formulas.lora_param_count,
-    lora_placement.lora_tensor_placement,
-    lora_formulas._merged_lora_sync_tensor_bytes,
     estimator._cached_training_breakdown,
     fsdp._cached_training_memory,
-    parallel._cached_layouts,
     manifest._catalog_checkpoint_quantized,
 )
 

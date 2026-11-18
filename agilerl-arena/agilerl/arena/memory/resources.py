@@ -11,7 +11,6 @@ from enum import Enum
 from typing import Any, Literal
 
 from agilerl.arena.memory.estimator import RunEstimate, estimate_run
-from agilerl.arena.memory.formulas import recommendation_fits
 from agilerl.arena.memory.manifest import (
     async_rollout,
     configured_rollout_engines,
@@ -50,7 +49,6 @@ from agilerl.arena.memory.resolve.run import (
 from agilerl.arena.memory.resolve.weight_sync import SyncLink
 from agilerl.arena.memory.solver import CannotSolve
 from agilerl.arena.memory.specs import DeviceSpec, ModelSpec, RunConfig
-from agilerl.arena.memory.training_host import layout_free_host_bytes
 from agilerl.arena.models.algorithms.base import LLMAlgorithmSpec
 from agilerl.arena.models.algorithms.opd import teacher_engine_gpus
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
@@ -748,9 +746,7 @@ def check_tiers(
     split. A tier that does not fit there keeps its first failure; it is not
     retried with more parallelism or nodes. A layout whose searched expert
     or tensor x context groups leave one of a tier's nodes does not fit that
-    tier; degrees the manifest pins are priced as written. A failed tier
-    whose host share misses the buffer on :func:`layout_free_host_bytes`
-    is not priced at later layouts; no layout fits it.
+    tier; degrees the manifest pins are priced as written.
 
     An async manifest that sets neither GPU count is sized at the split the
     run picks (:func:`split_manifest`). When no split fits, the tier is
@@ -810,7 +806,7 @@ def _first_fit(
     :param first_failure: Each tier's first failing check, written as tiers fail.
     """
     known: dict[tuple[str, int], TierCheck | None] = {}
-    dead = {name for name, check in first_failure.items() if _host_bound(check)}
+    dead: set[str] = set()
 
     def price(tier: dict[str, Any], num_nodes: int) -> TierCheck | None:
         key = (tier["name"], num_nodes)
@@ -848,16 +844,6 @@ def _first_fit(
                 return check
             first_failure.setdefault(name, check)
     return None
-
-
-def _host_bound(check: TierCheck) -> bool:
-    """Whether ``check``'s host share misses the buffer on bytes no layout or split changes."""
-    if check.estimate is None:
-        return False
-    training = check.estimate.training
-    return training.host_usable_bytes is not None and not recommendation_fits(
-        layout_free_host_bytes(training), training.host_usable_bytes
-    )
 
 
 def _drop_after_largest_miss(

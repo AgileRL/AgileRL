@@ -624,7 +624,7 @@ class TestReconcile:
 
         # Assert
         assert summary == (
-            "items: 2, settled: 1, events: 2, failed: 0, missing: 0, skipped: 0, stale: 0, "
+            "items: 2, settled: 1, events: 2, failed: 0, missing: 0, stale: 0, "
             "unconfirmed: 0"
         )
         assert [item["settled_at"] for item in session.items] == [NOW_MS, None]
@@ -687,7 +687,7 @@ class TestReconcile:
 
         # Assert
         assert first == (
-            "items: 2, settled: 0, events: 0, failed: 1, missing: 0, skipped: 0, stale: 0, "
+            "items: 2, settled: 0, events: 0, failed: 1, missing: 0, stale: 0, "
             "unconfirmed: 0"
         )
         assert reads == ["arena-down", RUN_ID, "arena-down"]
@@ -734,7 +734,7 @@ class TestReconcile:
 
         # Assert
         assert summary == (
-            "items: 1, settled: 0, events: 0, failed: 0, missing: 1, skipped: 0, stale: 0, "
+            "items: 1, settled: 0, events: 0, failed: 0, missing: 1, stale: 0, "
             "unconfirmed: 0"
         )
         [item] = session.items
@@ -762,7 +762,7 @@ class TestReconcile:
 
         # Assert
         assert reads_within_a_day == 0
-        assert "missing: 0, skipped: 1" in within_a_day
+        assert "missing: 0" in within_a_day
         assert len(reads) == 1
         assert item["last_checked_at"] == checked_ms + DAY_MS
         assert item["first_404_at"] == checked_ms
@@ -870,11 +870,11 @@ class TestReconcile:
 
         # Assert
         assert first == (
-            "items: 1, settled: 0, events: 0, failed: 1, missing: 0, skipped: 0, stale: 0, "
+            "items: 1, settled: 0, events: 0, failed: 1, missing: 0, stale: 0, "
             "unconfirmed: 0"
         )
         assert later == (
-            "items: 1, settled: 1, events: 0, failed: 0, missing: 0, skipped: 0, stale: 0, "
+            "items: 1, settled: 1, events: 0, failed: 0, missing: 0, stale: 0, "
             "unconfirmed: 1"
         )
         assert session.events == []
@@ -897,7 +897,7 @@ class TestReconcile:
 
         # Assert
         assert summary == (
-            "items: 2, settled: 1, events: 1, failed: 1, missing: 0, skipped: 0, stale: 0, "
+            "items: 2, settled: 1, events: 1, failed: 1, missing: 0, stale: 0, "
             "unconfirmed: 0"
         )
         assert json.loads(session.events[0]["objects"]) == [RUN_ID]

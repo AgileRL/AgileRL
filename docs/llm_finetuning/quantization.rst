@@ -116,7 +116,8 @@ Two practicalities:
   to CPU, then vLLM starts.
 * **Text-only rollouts for multimodal bases.** vLLM skips building and
   loading a vision-language base's towers when the environment sends text
-  only (``environment.modality: text``, or dataset rows). Direct construction takes ``rollout_strip_multimodal_towers=True`` on
+  only (``environment.modality: text``, or dataset rows) and no tower LoRA is
+  set. Direct construction takes ``rollout_strip_multimodal_towers=True`` on
   the algorithm. The model keeps its multimodal module
   names, so LoRA adapters load the same way either way. Checkpoints are
   unaffected, since only the LoRA adapter is saved.

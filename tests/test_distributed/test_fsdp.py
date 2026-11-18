@@ -12,13 +12,8 @@ import pytest
 import torch
 from torch import nn
 from transformers import AutoConfig, PretrainedConfig
-from transformers.conversion_mapping import register_checkpoint_conversion_mapping
-from transformers.core_model_loading import WeightRenaming
 
-from agilerl.distributed.fsdp import (
-    _checkpoint_transform_groups,
-    _load_sharded_weights_from_safetensors,
-)
+from agilerl.distributed.fsdp import _load_sharded_weights_from_safetensors
 from agilerl.distributed.fsdp_meta import init_rope_buffers
 from tests.test_distributed.quantized_checkpoints import (
     INPUT_IDS,
@@ -112,67 +107,3 @@ class TestLoadShardedWeightsFromSafetensors:
         # Act / Assert
         with pytest.raises(ValueError, match="Cannot train on BitsAndBytesConfig"):
             _load_sharded_weights_from_safetensors(model)
-
-
-class NestedConversionBlock(nn.Module):
-    """Module carrying a config, optionally wrapping another of its own class."""
-
-    def __init__(self, nested: bool) -> None:
-        super().__init__()
-        self.config = PretrainedConfig()
-        self.inner = NestedConversionBlock(nested=False) if nested else nn.Linear(2, 2)
-
-
-class SharedTypeConfig(PretrainedConfig):
-    model_type = "shared_type_block"
-
-
-class SharedTypeInner(nn.Module):
-    """Sub-model sharing its parent's ``model_type`` under another class."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.config = SharedTypeConfig()
-        self.proj = nn.Linear(2, 2)
-
-
-class SharedTypeOuter(nn.Module):
-    """Module whose conversions are registered by class name."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.config = SharedTypeConfig()
-        self.inner = SharedTypeInner()
-
-
-class TestCheckpointTransformGroups:
-    def test_nested_module_of_a_mapped_class_is_skipped(self) -> None:
-        # Arrange
-        register_checkpoint_conversion_mapping(
-            "NestedConversionBlock", [WeightRenaming("old", "new")], overwrite=True
-        )
-        model = NestedConversionBlock(nested=True)
-
-        # Act
-        groups = _checkpoint_transform_groups(model)
-
-        # Assert
-        assert [prefix for prefix, _ in groups] == [""]
-        (transform,) = groups[0][1]
-        assert transform.target_patterns == ["new"]
-
-    def test_nested_module_of_a_mapped_model_type_is_skipped(self) -> None:
-        # Arrange
-        register_checkpoint_conversion_mapping(
-            "SharedTypeOuter", [WeightRenaming("old", "new")], overwrite=True
-        )
-        register_checkpoint_conversion_mapping(
-            "shared_type_block", [WeightRenaming("old", "new")], overwrite=True
-        )
-        model = SharedTypeOuter()
-
-        # Act
-        groups = _checkpoint_transform_groups(model)
-
-        # Assert
-        assert [prefix for prefix, _ in groups] == [""]

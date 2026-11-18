@@ -365,7 +365,9 @@ def _generation_pools(
     device: DeviceSpec,
 ) -> tuple[int, int, int]:
     """KV pool, start-up pool, and one-sequence demand of the engine bar."""
-    budget = _engine_budget(model, settings, device)
+    budget = int(settings.gpu_memory_utilization * device.total_bytes)
+    if settings.reserves_prompt_logprobs:
+        budget -= formulas.prompt_logprob_bytes(model.arch)
     non_kv = (
         terms["weights"]
         + terms["startup_peak"]
@@ -387,39 +389,6 @@ def _generation_pools(
         tensor_parallel=settings.tensor_parallel_size,
     )
     return kv_pool, startup_pool, full_sequence
-
-
-def _engine_budget(
-    model: ModelSpec, settings: GenerationSettings, device: DeviceSpec
-) -> int:
-    """Bytes vLLM may use on one engine GPU, less the prompt-logprob reserve."""
-    budget = int(settings.gpu_memory_utilization * device.total_bytes)
-    if settings.reserves_prompt_logprobs:
-        budget -= formulas.prompt_logprob_bytes(model.arch)
-    return budget
-
-
-def kv_pool_ceiling(
-    model: ModelSpec, device: DeviceSpec, settings: GenerationSettings
-) -> int:
-    """Largest KV pool the engine can have at any ``max_num_seqs``.
-
-    The budget less weights, CUDA graphs, LoRA slots and engine runtime, which
-    ``max_num_seqs`` does not move. Start-up activations, step buffers and
-    Mamba state only shrink the pool further.
-
-    :param model: Engine-side model spec.
-    :param device: The engine's GPU.
-    :param settings: Generation settings; ``max_num_seqs`` is ignored.
-    :return: The bound in bytes; may be negative.
-    """
-    terms, _, _ = engine_terms(model, settings)
-    return _engine_budget(model, settings, device) - (
-        terms["weights"]
-        + terms["cuda_graphs"]
-        + terms["lora_slots"]
-        + terms["engine_runtime"]
-    )
 
 
 def drop_engine_fast_paths(

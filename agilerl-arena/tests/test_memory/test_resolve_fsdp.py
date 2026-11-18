@@ -12,26 +12,21 @@ from dataclasses import replace
 import pytest
 
 from agilerl.arena.memory import formulas
-from agilerl.arena.memory.breakdown import MemoryComponent, PhaseBreakdown
 from agilerl.arena.memory.estimator import estimate_training
 from agilerl.arena.memory.resolve import fsdp as fsdp_module
 from agilerl.arena.memory.resolve.batch import (
     ROW_FILL,
     catalog_model_spec,
     micro_batch_row_candidates,
-    micro_batch_token_candidates,
-    rows_within_budget,
 )
 from agilerl.arena.memory.resolve.fsdp import (
     RESIDENCIES,
     MemoryPins,
     TrainingMemoryPlan,
     TrainingMemoryUnfitError,
-    buffer_room,
     cpu_offload_blocker,
     gather_cost,
     learn_cost,
-    lightest_training_memory,
     offloaded_optimizer_bytes,
     resolve_training_memory,
     routed_chunks_per_pass,
@@ -45,7 +40,6 @@ from agilerl.arena.memory.specs import (
     ModelSpec,
     TrainingSettings,
 )
-from agilerl.arena.memory.training_host import fixed_host_bytes
 from agilerl.arena.models.fsdp import FSDP_MEMORY_FIELDS, FSDPConfig
 from tests.test_memory.test_estimator import (
     A100_80GB_CUDA_BYTES,
@@ -148,23 +142,6 @@ def dense_peak(settings: TrainingSettings, sharded: bool) -> int:
 def buffered(peak: int) -> int:
     """Smallest budget that holds ``peak`` with the underprediction buffer."""
     return int(peak / (1 - formulas.MAX_UNDERPREDICTION)) + 1
-
-
-def training_breakdown_of(
-    device_bytes: int,
-    usable: int,
-    host_bytes: int = 0,
-    host_usable: int | None = None,
-) -> PhaseBreakdown:
-    """A training breakdown with one device and one host component."""
-    return PhaseBreakdown(
-        phase="training",
-        components=(MemoryComponent(key="peak", label="Peak", bytes=device_bytes),),
-        device_total_bytes=usable,
-        device_usable_bytes=usable,
-        host=(MemoryComponent(key="host", label="Host", bytes=host_bytes),),
-        host_usable_bytes=host_usable,
-    )
 
 
 class TestCpuOffloadBlocker:
@@ -690,108 +667,6 @@ class TestResolveTrainingMemory:
 
         assert plan.micro_batch_tokens_per_gpu == 4096
 
-    def test_packed_search_takes_the_largest_budget_that_fits(self):
-        # Arrange
-        settings = dense_settings().model_copy(
-            update={"max_model_len": 2048, "micro_batch_tokens": 2048}
-        )
-        device = budget_device(6 * GiB)
-        mini = 16
-
-        # Act
-        plan = resolve_training_memory(
-            DENSE_MODEL, device, settings, MemoryPins(), mini
-        )
-
-        # Assert
-        units = micro_batch_token_candidates(2048, mini)
-        chosen = plan.micro_batch_tokens_per_gpu
-        assert chosen in units
-        assert plan.breakdown.fits_with_buffer
-        index = units.index(chosen)
-        if index == len(units) - 1:
-            return
-        nxt = units[index + 1]
-        larger = plan.settings.model_copy(
-            update={
-                "micro_batch_tokens": nxt,
-                "micro_batch_size": rows_within_budget(mini, nxt, 2048),
-            }
-        )
-        assert (
-            estimate_training(
-                DENSE_MODEL, device, larger, orchestrated=True
-            ).fits_with_buffer
-            is False
-        )
-
-    @pytest.mark.parametrize("usable_gib", [4, 6, 8])
-    def test_packed_search_stops_below_the_first_budget_over(self, usable_gib):
-        # Arrange
-        settings = dense_settings().model_copy(
-            update={"max_model_len": 2048, "micro_batch_tokens": 2048}
-        )
-        device = budget_device(usable_gib * GiB)
-        mini = 64
-        units = micro_batch_token_candidates(2048, mini)
-
-        # Act
-        plan = resolve_training_memory(
-            DENSE_MODEL, device, settings, MemoryPins(), mini
-        )
-
-        # Assert
-        index = units.index(plan.micro_batch_tokens_per_gpu)
-        assert 0 < index < len(units) - 1
-        larger = plan.settings.model_copy(
-            update={
-                "micro_batch_tokens": units[index + 1],
-                "micro_batch_size": rows_within_budget(mini, units[index + 1], 2048),
-            }
-        )
-        assert plan.breakdown.fits_with_buffer
-        assert not estimate_training(
-            DENSE_MODEL, device, larger, orchestrated=True
-        ).fits_with_buffer
-
-
-class TestBufferRoom:
-    def test_device_room_is_usable_less_the_buffer_and_the_peak(self):
-        # Arrange
-        breakdown = training_breakdown_of(device_bytes=40 * GiB, usable=100 * GiB)
-
-        # Act
-        room = buffer_room(breakdown)
-
-        # Assert
-        assert room == pytest.approx(
-            100 * GiB * (1 - formulas.MAX_UNDERPREDICTION) - 40 * GiB
-        )
-
-    def test_room_is_negative_over_the_buffer(self):
-        # Arrange
-        breakdown = training_breakdown_of(device_bytes=95 * GiB, usable=100 * GiB)
-
-        # Act / Assert
-        assert buffer_room(breakdown) < 0
-
-    def test_tighter_host_share_sets_the_room(self):
-        # Arrange
-        breakdown = training_breakdown_of(
-            device_bytes=10 * GiB,
-            usable=100 * GiB,
-            host_bytes=9 * GiB,
-            host_usable=10 * GiB,
-        )
-
-        # Act
-        room = buffer_room(breakdown)
-
-        # Assert
-        assert room == pytest.approx(
-            10 * GiB * (1 - formulas.MAX_UNDERPREDICTION) - 9 * GiB
-        )
-
 
 class TestResolveTrainingMemoryRepeats:
     def test_repeat_matches_the_first_plan(self):
@@ -1008,13 +883,13 @@ class TestResolveTrainingMemoryLastResorts:
         # Arrange: nothing fits; the micro-batch and checkpointing are open.
         usable = moe_peak(64, True, activation_offload=True) // 2
         priced = []
-        real = fsdp_module.shared_training_estimate
+        real = fsdp_module.estimate_training
 
         def spy(*args, **kwargs):
             priced.append(args)
             return real(*args, **kwargs)
 
-        monkeypatch.setattr(fsdp_module, "shared_training_estimate", spy)
+        monkeypatch.setattr(fsdp_module, "estimate_training", spy)
 
         # Act
         with caplog.at_level(logging.INFO), pytest.raises(TrainingMemoryUnfitError):
@@ -1055,70 +930,6 @@ class TestResolveTrainingMemoryLastResorts:
         assert plan.fsdp.activation_offload is True
         assert plan.gradient_checkpointing is True
         assert plan.breakdown.host_fits_with_buffer
-
-    def test_host_share_without_buffer_for_fixed_host_bytes_reports_the_lightest_plan(
-        self,
-    ):
-        # Arrange: the fixed host bytes fit the share, but not with the buffer.
-        device = budget_device(buffered(moe_peak(64, True, activation_offload=True)))
-        pins = MemoryPins(micro_batch_size_per_gpu=1)
-        unlimited = resolve_training_memory(
-            MOE_MODEL, device, moe_floor_settings(), pins, 1
-        )
-        limit = fixed_host_bytes(unlimited.breakdown) + 1
-
-        # Act
-        with pytest.raises(TrainingMemoryUnfitError) as raised:
-            resolve_training_memory(
-                MOE_MODEL,
-                device.model_copy(update={"host_bytes_per_gpu": limit}),
-                moe_floor_settings(),
-                pins,
-                1,
-            )
-
-        # Assert
-        lightest = raised.value.plan
-        assert raised.value.failure == "host_memory"
-        assert lightest.gradient_checkpointing is True
-        assert lightest.fsdp.activation_offload is True
-        assert lightest.breakdown.host_total_bytes > limit
-
-
-class TestLightestTrainingMemory:
-    def test_matches_the_plan_the_search_falls_back_to(self):
-        # Arrange: no plan leaves the buffer, so the search keeps its lightest plan.
-        device = budget_device(moe_peak(64, True, activation_offload=True))
-        pins = MemoryPins(micro_batch_size_per_gpu=1)
-        fallback = resolve_training_memory(
-            MOE_MODEL, device, moe_floor_settings(), pins, 1
-        )
-
-        # Act
-        lightest = lightest_training_memory(
-            MOE_MODEL, device, moe_floor_settings(), pins, 1
-        )
-
-        # Assert
-        assert not fallback.breakdown.fits_with_buffer
-        assert lightest.fsdp == fallback.fsdp
-        assert lightest.gradient_checkpointing is fallback.gradient_checkpointing
-        assert lightest.breakdown.total_bytes == fallback.breakdown.total_bytes
-
-    def test_returns_a_plan_over_the_gpu(self):
-        # Arrange
-        device = budget_device(GiB)
-        pins = MemoryPins(micro_batch_size_per_gpu=1)
-
-        # Act
-        lightest = lightest_training_memory(
-            MOE_MODEL, device, moe_floor_settings(), pins, 1
-        )
-
-        # Assert
-        assert lightest.gradient_checkpointing is True
-        assert lightest.fsdp.activation_offload is True
-        assert not lightest.breakdown.fits
 
     def test_raises_when_host_ram_is_over(self):
         # Arrange

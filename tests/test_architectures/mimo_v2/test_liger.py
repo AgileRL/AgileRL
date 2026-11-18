@@ -31,9 +31,10 @@ from transformers.integrations import flex_attention as flex_integration
 from transformers.modeling_utils import AttentionInterface
 from transformers.models.mimo_v2_flash import modeling_mimo_v2_flash
 
+import agilerl.architectures.mimo_v2 as mimo_v2
 import agilerl.architectures.mimo_v2.liger as mimo_v2_liger
-from agilerl import architectures
-from agilerl.architectures.mimo_v2.configuration import MIMO_V2_MODEL_TYPE, MiMoV2Config
+from agilerl.architectures.mimo_v2.config import MIMO_V2_MODEL_TYPE, MiMoV2Config
+from agilerl.architectures.runtime import PatchRuntimeConfig
 
 SEED = 0
 BATCH = 2
@@ -92,7 +93,7 @@ def restored_native_training(monkeypatch: pytest.MonkeyPatch) -> None:
 def tiny_mimo_v2(
     native_config: MiMoV2Config, hidden_act: str = "silu"
 ) -> modeling_mimo_v2_flash.MiMoV2FlashForCausalLM:
-    config = copy.deepcopy(native_config.text_config)
+    config = copy.deepcopy(native_config)
     config.hidden_act = hidden_act
     torch.manual_seed(SEED)
     return modeling_mimo_v2_flash.MiMoV2FlashForCausalLM(config)
@@ -141,9 +142,11 @@ class TestRegisterMimoV2Liger:
         assert liger_registry[MIMO_V2_MODEL_TYPE] is native
 
     @pytest.mark.usefixtures("restored_native_training")
-    def test_family_patches_register_the_applier(self, liger_registry) -> None:
+    def test_native_training_install_registers_the_applier(
+        self, liger_registry
+    ) -> None:
         # Act
-        architectures.install_family_patches(MIMO_V2_MODEL_TYPE)
+        mimo_v2.install_mimo_v2_native_training(PatchRuntimeConfig())
 
         # Assert
         assert (
@@ -152,14 +155,14 @@ class TestRegisterMimoV2Liger:
         )
 
     @pytest.mark.usefixtures("restored_native_training")
-    def test_family_patches_skip_registration_without_liger(
+    def test_native_training_install_skips_registration_without_liger(
         self, liger_registry, monkeypatch
     ) -> None:
         # Arrange
-        monkeypatch.setattr(architectures, "HAS_LIGER_KERNEL", False)
+        monkeypatch.setattr(mimo_v2, "HAS_LIGER_KERNEL", False)
 
         # Act
-        architectures.install_family_patches(MIMO_V2_MODEL_TYPE)
+        mimo_v2.install_mimo_v2_native_training(PatchRuntimeConfig())
 
         # Assert
         assert MIMO_V2_MODEL_TYPE not in liger_registry
@@ -262,9 +265,8 @@ class TestApplyLigerKernelToMimoV2OnCuda:
         liger_model = copy.deepcopy(stock_model)
         mimo_v2_liger.apply_liger_kernel_to_mimo_v2(model=liger_model)
         torch.manual_seed(SEED)
-        hidden_size = native_config.text_config.hidden_size
-        inputs = 4 * torch.randn(BATCH, SEQ, hidden_size, device="cuda")
-        weights = torch.randn(BATCH, SEQ, hidden_size, device="cuda")
+        inputs = 4 * torch.randn(BATCH, SEQ, native_config.hidden_size, device="cuda")
+        weights = torch.randn(BATCH, SEQ, native_config.hidden_size, device="cuda")
         outputs = []
         grads = []
 

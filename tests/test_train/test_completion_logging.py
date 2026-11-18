@@ -19,7 +19,11 @@ pytest.importorskip("datasets", reason="Dataset rows require datasets.")
 from datasets import Dataset
 
 from agilerl.llm_envs.chat_formats import detect_chat_format
-from agilerl.llm_envs.dataset_env import encode_sft_row, sft_eval_sample
+from agilerl.llm_envs.dataset_env import (
+    SKIPPED_TURNS,
+    encode_sft_row,
+    sft_eval_sample,
+)
 from agilerl.training.llm.completion_logging import (
     CompletionLogger,
     CompletionLoggingConfig,
@@ -600,6 +604,8 @@ def _sft_env(prompts: list[str]) -> SimpleNamespace:
         tokenizer=ChatLetterTokenizer(),
         response_column="response",
         chat_template_kwargs={},
+        chat_format=None,
+        completion_only_loss=False,
         test_dataset=dataset,
         test_dataloader=SimpleNamespace(dataset=dataset),
     )
@@ -676,6 +682,8 @@ class TestSelectDatasetPrompts:
             tokenizer=ChatLetterTokenizer(),
             response_column="response",
             chat_template_kwargs={},
+            chat_format=None,
+            completion_only_loss=False,
             test_dataset=dataset,
             test_dataloader=SimpleNamespace(dataset=dataset),
         )
@@ -711,6 +719,8 @@ class TestSelectDatasetPrompts:
             tokenizer=tokenizer,
             response_column="response",
             chat_template_kwargs={},
+            chat_format=None,
+            completion_only_loss=False,
             test_dataset=dataset,
             test_dataloader=SimpleNamespace(dataset=dataset),
         )
@@ -726,6 +736,36 @@ class TestSelectDatasetPrompts:
         # Assert
         assert rows == [DatasetPrompt(ids[: mask.index(True)], prompt, turn, None)]
         assert tokenizer(prompt)["input_ids"] != rows[0].prompt_ids
+
+    def test_messages_rows_start_at_the_first_trained_turn(self):
+        # Arrange
+        messages = [
+            {"role": "user", "content": "ab"},
+            {"role": "assistant", "content": "cd"},
+            {"role": "user", "content": "ef"},
+            {"role": "assistant", "content": "gh"},
+        ]
+        dataset = Dataset.from_dict({"messages": [messages], SKIPPED_TURNS: [[1]]})
+        tokenizer = ChatLetterTokenizer()
+        env = SimpleNamespace(
+            objective="sft",
+            tokenizer=tokenizer,
+            response_column="response",
+            chat_template_kwargs={},
+            chat_format=None,
+            completion_only_loss=False,
+            test_dataset=dataset,
+            test_dataloader=SimpleNamespace(dataset=dataset),
+        )
+        ids, mask = encode_sft_row(tokenizer, dataset[0], "response", None, skipped=[1])
+        _, every_turn_mask = encode_sft_row(tokenizer, dataset[0], "response", None)
+
+        # Act
+        rows = select_dataset_prompts(env, num_prompts=1, max_prompt_tokens=100)
+
+        # Assert
+        assert rows[0].prompt_ids == ids[: mask.index(True)]
+        assert len(rows[0].prompt_ids) > every_turn_mask.index(True)
 
     def test_dpo_rows_carry_chosen_and_rejected(self):
         # Arrange

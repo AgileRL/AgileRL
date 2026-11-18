@@ -761,7 +761,6 @@ def block_kinds(arch: ModelArch) -> tuple[BlockKind, ...]:
     return tuple(kinds)
 
 
-@lru_cache(maxsize=64)
 def layer_block_kinds(arch: ModelArch) -> tuple[BlockKind | None, ...]:
     """Each layer's block kind, in order: None when the stack is uniform or the order unknown.
 

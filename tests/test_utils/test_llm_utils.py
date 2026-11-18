@@ -53,14 +53,12 @@ from transformers.integrations.flex_attention import flex_attention_forward
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 from agilerl.architectures import install_family_patches, trainer_model_class
+from agilerl.architectures.catalog import nemotron_h_omni_vllm_hf_override
 from agilerl.architectures.flex_attention import (
     flex_decode_kernel_options,
     patch_flex_attention_kernel_options,
 )
-from agilerl.architectures.mimo_v2.configuration import MiMoV2Config
-from agilerl.architectures.nemotron_h_omni.vision import (
-    nemotron_h_omni_vllm_hf_override,
-)
+from agilerl.architectures.mimo_v2.config import MiMoV2Config
 from agilerl.architectures.runtime import TrainerRuntimeConfig
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.distributed import fsdp as dmod
@@ -1776,6 +1774,24 @@ class _VisionLanguageModel(nn.Module):
         self.lm_head = nn.Linear(4, 8)
 
 
+class _AudioVisionLanguageModel(nn.Module):
+    """``model.language_model`` beside vision and audio towers sharing a leaf name."""
+
+    def __init__(self):
+        super().__init__()
+        self.model = nn.Module()
+        self.model.language_model = nn.Module()
+        self.model.language_model.q_proj = nn.Linear(4, 4)
+        self.model.vision_tower = nn.Module()
+        self.model.vision_tower.linear = nn.Linear(4, 4)
+        self.model.audio_tower = nn.Module()
+        self.model.audio_tower.linear = nn.Linear(4, 4)
+        self.model.embed_audio = nn.Module()
+        self.model.embed_audio.embedding_projection = nn.Linear(4, 4)
+        self.model.embed_vision = nn.Module()
+        self.model.embed_vision.embedding_projection = nn.Linear(4, 4)
+
+
 class _PlainLinearModel(nn.Module):
     """Text-only model: no ``language_model`` submodule."""
 
@@ -1999,6 +2015,20 @@ class TestAdaptLoraConfigForModel:
         assert len(matched) == 6
         assert all(key.startswith("model.language_model.") for key in matched)
 
+    def test_tower_targets_land_outside_language_model(self):
+        model = _VisionLanguageModel()
+        cfg = _PlainLoraConfig(target_modules=["k_proj"])
+
+        adapted = adapt_lora_config_for_model(
+            model, cfg, tower_target_modules=["q_proj"]
+        )
+
+        assert list_peft_matched_module_keys(model, adapted.target_modules) == [
+            "model.language_model.layers.0.self_attn.k_proj",
+            "model.language_model.layers.1.self_attn.k_proj",
+            "model.visual.q_proj",
+        ]
+
     def test_to_dict_config_is_rebuilt_as_its_class(self):
         cfg = _DictLoraConfig(target_modules=["q_proj"], r=16)
 
@@ -2014,26 +2044,26 @@ class TestAdaptLoraConfigForModel:
 
         assert adapt_lora_config_for_model(_VisionLanguageModel(), cfg) is cfg
 
-    def test_vl_language_model_regex_returned_unchanged(self):
-        cfg = _PlainLoraConfig(target_modules=r".*\.language_model\..*\.q_proj")
+    def test_vl_regex_targets_returned_unchanged(self):
+        cfg = _PlainLoraConfig(target_modules=r".*\.visual\.qkv")
 
         assert adapt_lora_config_for_model(_VisionLanguageModel(), cfg) is cfg
 
-    def test_vl_regex_matching_tower_raises(self):
+    def test_regex_targets_with_tower_targets_raise(self):
         cfg = _PlainLoraConfig(target_modules=r".*\.q_proj")
 
-        with pytest.raises(
-            ValueError, match=r"matches modules outside 'model\.language_model'"
-        ) as exc_info:
-            adapt_lora_config_for_model(_VisionLanguageModel(), cfg)
-        assert "model.visual.q_proj" in str(exc_info.value)
+        with pytest.raises(ValueError, match="cannot be combined with a regex"):
+            adapt_lora_config_for_model(
+                _VisionLanguageModel(), cfg, tower_target_modules=["qkv"]
+            )
 
-    def test_vl_regex_tower_match_excluded_passes(self):
-        cfg = _PlainLoraConfig(
-            target_modules=r".*\.q_proj", exclude_modules=["model.visual.q_proj"]
-        )
+    def test_tower_targets_on_text_model_raise(self):
+        cfg = _PlainLoraConfig(target_modules=["q_proj"])
 
-        assert adapt_lora_config_for_model(_VisionLanguageModel(), cfg) is cfg
+        with pytest.raises(ValueError, match="need a multimodal model"):
+            adapt_lora_config_for_model(
+                _PlainLinearModel(), cfg, tower_target_modules=["qkv"]
+            )
 
     def test_tower_only_name_in_target_modules_raises(self):
         cfg = _PlainLoraConfig(target_modules=["qkv"])
@@ -2044,11 +2074,49 @@ class TestAdaptLoraConfigForModel:
             adapt_lora_config_for_model(_VisionLanguageModel(), cfg)
         assert "['k_proj', 'q_proj', 'up_proj']" in str(exc_info.value)
 
+    def test_unmatched_tower_targets_raise(self):
+        cfg = _PlainLoraConfig(target_modules=["q_proj"])
 
-def _shipped_by_transformers(model_type: str) -> bool:
-    """True when transformers ships this ``model_type``'s config class."""
-    config_class = CONFIG_MAPPING[model_type]
-    return getattr(config_class, "__module__", "").startswith("transformers.")
+        with pytest.raises(ValueError, match="No modules outside"):
+            adapt_lora_config_for_model(
+                _VisionLanguageModel(), cfg, tower_target_modules=["up_proj"]
+            )
+
+    def test_skipped_tower_modules_get_no_lora(self):
+        # Arrange
+        model = _AudioVisionLanguageModel()
+        cfg = _PlainLoraConfig(target_modules=["q_proj"])
+
+        # Act
+        adapted = adapt_lora_config_for_model(
+            model,
+            cfg,
+            tower_target_modules=["linear", "embedding_projection"],
+            skipped_tower_modules=["audio_tower", "embed_audio"],
+        )
+
+        # Assert
+        assert list_peft_matched_module_keys(model, adapted.target_modules) == [
+            "model.language_model.q_proj",
+            "model.vision_tower.linear",
+            "model.embed_vision.embedding_projection",
+        ]
+
+    def test_tower_targets_only_in_skipped_towers_raise(self):
+        cfg = _PlainLoraConfig(target_modules=["q_proj"])
+
+        with pytest.raises(ValueError, match="No modules outside"):
+            adapt_lora_config_for_model(
+                _AudioVisionLanguageModel(),
+                cfg,
+                tower_target_modules=["linear"],
+                skipped_tower_modules=[
+                    "audio_tower",
+                    "embed_audio",
+                    "embed_vision",
+                    "vision_tower",
+                ],
+            )
 
 
 VL_SUPPORTED_MODEL_IDS = sorted(
@@ -2056,9 +2124,7 @@ VL_SUPPORTED_MODEL_IDS = sorted(
     for hub_id, entry in SUPPORTED_MODEL_INFO.items()
     if entry.language_model_prefix is not None
     # Checkpoint-code model types have no transformers config class.
-    # agilerl registers mimo_v2 into CONFIG_MAPPING.
     and entry.model_type in CONFIG_MAPPING
-    and _shipped_by_transformers(entry.model_type)
 )
 
 
@@ -2292,10 +2358,10 @@ class TestAdaptLoraConfigForModelFamilyExclusions:
         )
 
         assert adapters == {
-            "model.language_model.layers.N.self_attn.o_proj",
-            "model.language_model.layers.N.mlp.gate_proj",
-            "model.language_model.layers.N.mlp.up_proj",
-            "model.language_model.layers.N.mlp.down_proj",
+            "model.layers.N.self_attn.o_proj",
+            "model.layers.N.mlp.gate_proj",
+            "model.layers.N.mlp.up_proj",
+            "model.layers.N.mlp.down_proj",
         }
 
     @pytest.mark.parametrize(
@@ -2317,7 +2383,7 @@ class TestAdaptLoraConfigForModelFamilyExclusions:
             (
                 "XiaomiMiMo/MiMo-V2.6-Flash-RL",
                 ["q_proj", "o_proj"],
-                {"model.language_model.layers.N.self_attn.o_proj"},
+                {"model.layers.N.self_attn.o_proj"},
             ),
         ],
     )
@@ -2335,13 +2401,12 @@ class TestAdaptLoraConfigForModelFamilyExclusions:
 
     def test_only_excluded_targets_raise(self):
         model = _meta_supported_model("XiaomiMiMo/MiMo-V2.6-Flash-RL")
+        adapted = adapt_lora_config_for_model(
+            model, LoraConfig(r=8, target_modules=["q_proj", "k_proj", "v_proj"])
+        )
 
-        with pytest.raises(
-            ValueError, match=r"No modules under 'model\.language_model'"
-        ):
-            adapt_lora_config_for_model(
-                model, LoraConfig(r=8, target_modules=["q_proj", "k_proj", "v_proj"])
-            )
+        with pytest.raises(ValueError, match="No modules were targeted"):
+            get_peft_model(model, adapted)
 
     def test_user_exclusions_are_kept(self):
         # Arrange
@@ -2394,7 +2459,10 @@ class TestLoraTargetModuleNames:
 
     def test_anchored_attention_regex_yields_language_leaves(self):
         spec = llm_utils_module._anchored_lora_target_regex(
-            ["q_proj", "k_proj", "v_proj", "o_proj"], "model.language_model"
+            ["q_proj", "k_proj", "v_proj", "o_proj"],
+            ["visual"],
+            "model.language_model",
+            ["audio_tower"],
         )
 
         assert set(lora_target_module_names(spec)) == {
@@ -2586,14 +2654,14 @@ class TestTrainerAttnImplementation:
     def test_warns_for_an_unregistered_model_type(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
-        self.stub_model_type(monkeypatch, "phi3")
+        self.stub_model_type(monkeypatch, "llama")
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
 
         with caplog.at_level(logging.WARNING, logger="agilerl.utils.llm_utils"):
-            attn = trainer_attn_implementation("microsoft/phi-3", False)
+            attn = trainer_attn_implementation("meta/llama", False)
 
         assert attn == "sdpa"
-        assert "No attention backend is registered for model_type 'phi3'" in (
+        assert "No attention backend is registered for model_type 'llama'" in (
             caplog.text
         )
 
@@ -3108,8 +3176,19 @@ class TestFlexDecodeKernelOptions:
 
 class TestCreateModelFromNameOrPathDefaults:
     @pytest.fixture(autouse=True)
-    def stub_qwen3_model_type(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        stub_catalog_model_type(monkeypatch, "qwen3")
+    def stub_llama_model_type(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        stub_catalog_model_type(monkeypatch, "llama")
+
+    @staticmethod
+    def _fake_loader(captured):
+        class _Loader:
+            @staticmethod
+            def from_pretrained(pretrained_model_name_or_path, **kwargs):
+                captured["name"] = pretrained_model_name_or_path
+                captured["kwargs"] = kwargs
+                return nn.Identity()
+
+        return _Loader
 
     @staticmethod
     def _patch_auto_classes(monkeypatch, captured, on_load=None):
@@ -3239,6 +3318,8 @@ class TestCreateModelFromNameOrPathDefaults:
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
 
         class FakeTrainer:
+            model_class = self._fake_loader(captured)
+
             def load_kwargs(self):
                 return {"use_cache": False}
 
@@ -3259,6 +3340,8 @@ class TestCreateModelFromNameOrPathDefaults:
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
 
         class FakeTrainer:
+            model_class = self._fake_loader(captured)
+
             def load_kwargs(self):
                 return {"use_cache": False}
 
@@ -3735,8 +3818,8 @@ class TestRolloutSamplingVllmKwargs:
 
 class TestBuildVllmLlmInitKwargs:
     @pytest.fixture(autouse=True)
-    def stub_qwen3_model_type(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        stub_catalog_model_type(monkeypatch, "qwen3")
+    def stub_llama_model_type(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        stub_catalog_model_type(monkeypatch, "llama")
 
     def test_family_lookup_oserror_leaves_vllm_kwargs_empty(
         self, monkeypatch: pytest.MonkeyPatch
@@ -3902,7 +3985,7 @@ class TestBuildVllmLlmInitKwargs:
     def test_strip_multimodal_towers_peels_nested_config_for_generic_vl(
         self, monkeypatch
     ):
-        stub_catalog_model_type(monkeypatch, "gemma3")
+        stub_catalog_model_type(monkeypatch, "qwen2_vl")
         kwargs = build_vllm_llm_init_kwargs(
             _vllm_config(),
             trainer_model_name_or_path="org/vl-model",
@@ -3915,8 +3998,33 @@ class TestBuildVllmLlmInitKwargs:
         assert "model_class_overrides" not in kwargs
         assert "enable_tower_connector_lora" not in kwargs
 
-    def test_kept_towers_get_no_lora(self, monkeypatch):
+    def test_tower_lora_targets_enable_tower_connector_lora(self, monkeypatch):
         stub_catalog_model_type(monkeypatch, "nemotron_h_omni")
+        kwargs = build_vllm_llm_init_kwargs(
+            _vllm_config(),
+            trainer_model_name_or_path="org/vl-model",
+            max_model_len=32768,
+            tower_lora_target_modules=["q_proj", "linear_1"],
+        )
+
+        assert kwargs["enable_tower_connector_lora"] is True
+
+    def test_kept_towers_skip_tower_connector_lora_without_tower_targets(
+        self, monkeypatch
+    ):
+        stub_catalog_model_type(monkeypatch, "nemotron_h_omni")
+        kwargs = build_vllm_llm_init_kwargs(
+            _vllm_config(),
+            trainer_model_name_or_path="org/vl-model",
+            max_model_len=32768,
+        )
+
+        assert "enable_tower_connector_lora" not in kwargs
+
+    def test_kept_towers_skip_tower_connector_lora_for_unflagged_family(
+        self, monkeypatch
+    ):
+        stub_catalog_model_type(monkeypatch, "gemma4")
         kwargs = build_vllm_llm_init_kwargs(
             _vllm_config(),
             trainer_model_name_or_path="org/vl-model",
@@ -4984,7 +5092,7 @@ class TestResolvePadTokenId:
             "from transformers.models.auto.configuration_auto import CONFIG_MAPPING\n"
             "from agilerl.utils.llm_utils import load_pad_token_configs\n"
             "model_config, _ = load_pad_token_configs(sys.argv[1])\n"
-            "print('mimo_v2' in CONFIG_MAPPING, model_config.text_config.pad_token_id)\n"
+            "print('mimo_v2' in CONFIG_MAPPING, model_config.pad_token_id)\n"
         )
 
         # Act

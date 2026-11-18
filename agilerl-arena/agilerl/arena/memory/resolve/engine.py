@@ -12,7 +12,6 @@ from agilerl.arena.memory.estimator import estimate_generation
 from agilerl.arena.memory.generation import (
     KV_MARGIN_BYTES,
     drop_engine_fast_paths,
-    kv_pool_ceiling,
     sequences_held,
 )
 from agilerl.arena.memory.kv_cache import VLLM_ENGINE_MAX_NUM_BATCHED_TOKENS
@@ -112,9 +111,6 @@ def _resident_sequences(
             if not breakdown.fits:
                 return 0
             return engines * sequences_held(breakdown, trial.max_num_seqs)
-        # No max_num_seqs serves once even the ceiling is below the margin.
-        if kv_pool_ceiling(model, device, trial) < KV_MARGIN_BYTES:
-            return 0
         run = RunConfig(
             model=model,
             train_device=device,

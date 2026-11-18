@@ -376,48 +376,32 @@
     "vocab_size": 152576
   },
   "inspected": {
-    "num_params": 309507363264,
+    "num_params": 308778768832,
     "lora_info": {
       "down_proj": [
         {
           "kind": "module",
-          "scope": "model.language_model.layers.mlp",
+          "scope": "model.layers.mlp",
           "type": "Linear",
           "in_features": 16384,
           "out_features": 4096,
           "count": 1
-        },
-        {
-          "kind": "module",
-          "scope": "model.visual.blocks.mlp",
-          "type": "Linear",
-          "in_features": 4608,
-          "out_features": 1280,
-          "count": 28
         }
       ],
       "gate_proj": [
         {
           "kind": "module",
-          "scope": "model.language_model.layers.mlp",
+          "scope": "model.layers.mlp",
           "type": "Linear",
           "in_features": 4096,
           "out_features": 16384,
           "count": 1
-        },
-        {
-          "kind": "module",
-          "scope": "model.visual.blocks.mlp",
-          "type": "Linear",
-          "in_features": 1280,
-          "out_features": 4608,
-          "count": 28
         }
       ],
       "k_proj": [
         {
           "kind": "module",
-          "scope": "model.language_model.layers.self_attn",
+          "scope": "model.layers.self_attn",
           "type": "Linear",
           "in_features": 4096,
           "out_features": 768,
@@ -425,7 +409,7 @@
         },
         {
           "kind": "module",
-          "scope": "model.language_model.layers.self_attn",
+          "scope": "model.layers.self_attn",
           "type": "Linear",
           "in_features": 4096,
           "out_features": 1536,
@@ -435,7 +419,7 @@
       "mlp.experts.down_proj": [
         {
           "kind": "parameter",
-          "scope": "model.language_model.layers.mlp.experts",
+          "scope": "model.layers.mlp.experts",
           "type": "PackedParameter",
           "num_experts": 256,
           "in_features": 4096,
@@ -446,7 +430,7 @@
       "mlp.experts.gate_up_proj": [
         {
           "kind": "parameter",
-          "scope": "model.language_model.layers.mlp.experts",
+          "scope": "model.layers.mlp.experts",
           "type": "PackedParameter",
           "num_experts": 256,
           "in_features": 4096,
@@ -457,7 +441,7 @@
       "o_proj": [
         {
           "kind": "module",
-          "scope": "model.language_model.layers.self_attn",
+          "scope": "model.layers.self_attn",
           "type": "Linear",
           "in_features": 8192,
           "out_features": 4096,
@@ -467,45 +451,27 @@
       "q_proj": [
         {
           "kind": "module",
-          "scope": "model.language_model.layers.self_attn",
+          "scope": "model.layers.self_attn",
           "type": "Linear",
           "in_features": 4096,
           "out_features": 12288,
           "count": 48
         }
       ],
-      "qkv": [
-        {
-          "kind": "module",
-          "scope": "model.visual.blocks.attn",
-          "type": "Linear",
-          "in_features": 1280,
-          "out_features": 3072,
-          "count": 28
-        }
-      ],
       "up_proj": [
         {
           "kind": "module",
-          "scope": "model.language_model.layers.mlp",
+          "scope": "model.layers.mlp",
           "type": "Linear",
           "in_features": 4096,
           "out_features": 16384,
           "count": 1
-        },
-        {
-          "kind": "module",
-          "scope": "model.visual.blocks.mlp",
-          "type": "Linear",
-          "in_features": 1280,
-          "out_features": 4608,
-          "count": 28
         }
       ],
       "v_proj": [
         {
           "kind": "module",
-          "scope": "model.language_model.layers.self_attn",
+          "scope": "model.layers.self_attn",
           "type": "Linear",
           "in_features": 4096,
           "out_features": 512,
@@ -513,7 +479,7 @@
         },
         {
           "kind": "module",
-          "scope": "model.language_model.layers.self_attn",
+          "scope": "model.layers.self_attn",
           "type": "Linear",
           "in_features": 4096,
           "out_features": 1024,

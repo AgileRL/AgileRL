@@ -1505,6 +1505,90 @@ class TestChatFormatAnswerStart:
         assert parser.reasoning_end_ids == ()
 
 
+def harmony_tool_turn(analysis: str, preamble: str | None) -> list[int]:
+    """One GPT-OSS tool-call reply: analysis, an optional preamble, then the call."""
+    ids = [HCHAN, *chars("analysis"), HMSG, *chars(analysis), HEND]
+    if preamble is not None:
+        ids += [HSTART, *chars("assistant"), HCHAN, *chars("commentary"), HMSG]
+        ids += [*chars(preamble), HEND]
+    return [
+        *ids,
+        HSTART,
+        *chars("assistant"),
+        HCHAN,
+        *chars("commentary to=functions.add json"),
+        HMSG,
+        *chars('{"a": 1}'),
+        HCALL,
+    ]
+
+
+class TestChatFormatReasoningText:
+    def test_tag_reasoning_drops_the_think_tags(self) -> None:
+        parser = ToolCallTagFormat(FakeTokenizer(TAG_TOKENS))
+        ids = [*chars("<think>\nplan\n"), THINK_END, *chars("\n\ngo")]
+
+        assert parser.reasoning_text(ids) == "plan"
+
+    def test_is_none_without_a_close(self) -> None:
+        parser = ToolCallTagFormat(FakeTokenizer(TAG_TOKENS))
+
+        assert parser.reasoning_text(chars("go")) is None
+
+    def test_gemma_drops_the_channel_name(self) -> None:
+        parser = Gemma4Format(FakeTokenizer(GEMMA_TOKENS))
+        ids = [*chars("thought\nplan"), MCHAN_END, *chars("go")]
+
+        assert parser.reasoning_text(ids) == "plan"
+
+    def test_harmony_is_the_analysis_message_even_when_it_says_final(self) -> None:
+        parser = HarmonyFormat(FakeTokenizer(HARMONY_TOKENS))
+
+        assert parser.reasoning_text(harmony_turn("The final answer is 4.", "4")) == (
+            "The final answer is 4."
+        )
+
+    def test_harmony_tool_turn_keeps_its_analysis(self) -> None:
+        parser = HarmonyFormat(FakeTokenizer(HARMONY_TOKENS))
+
+        assert parser.reasoning_text(harmony_tool_turn("Need add.", None)) == (
+            "Need add."
+        )
+
+    def test_harmony_without_analysis_is_none(self) -> None:
+        parser = HarmonyFormat(FakeTokenizer(HARMONY_TOKENS))
+        ids = [HCHAN, *chars("final"), HMSG, *chars("go"), HRET]
+
+        assert parser.reasoning_text(ids) is None
+
+
+class TestChatFormatVisibleText:
+    def test_tag_text_follows_the_think_close(self) -> None:
+        parser = ToolCallTagFormat(FakeTokenizer(TAG_TOKENS))
+        ids = [*chars("plan"), THINK_END, *chars(" go ")]
+
+        assert parser.visible_text(ids) == "go"
+
+    def test_harmony_is_the_final_message(self) -> None:
+        parser = HarmonyFormat(FakeTokenizer(HARMONY_TOKENS))
+
+        assert parser.visible_text(harmony_turn("The final answer.", "4")) == "4"
+
+    def test_harmony_tool_turn_shows_only_its_preamble(self) -> None:
+        parser = HarmonyFormat(FakeTokenizer(HARMONY_TOKENS))
+        ids = harmony_tool_turn("Need add.", "Adding now.")
+        content_ids, _ = parser.extract_tool_calls(ids)
+
+        assert parser.visible_text(content_ids) == "Adding now."
+
+    def test_harmony_analysis_cut_off_shows_nothing(self) -> None:
+        parser = HarmonyFormat(FakeTokenizer(HARMONY_TOKENS))
+        ids = [HCHAN, *chars("analysis"), HMSG, *chars("still thinking")]
+
+        assert parser.visible_text(ids) == ""
+        assert parser.reasoning_text(ids) == "still thinking"
+
+
 class TestActionText:
     def test_drops_the_think_block(self) -> None:
         tokenizer = FakeTokenizer(TAG_TOKENS)

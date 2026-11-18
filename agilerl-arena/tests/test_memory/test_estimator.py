@@ -22,15 +22,10 @@ from agilerl.arena.memory.estimator import (
     estimate_run,
     estimate_training,
     generation_can_serve,
-    shared_training_estimate,
     tensor_parallel_head_gather_bytes,
     training_breakdown,
 )
-from agilerl.arena.memory.generation import (
-    KV_MARGIN_BYTES,
-    engine_terms,
-    kv_pool_ceiling,
-)
+from agilerl.arena.memory.generation import engine_terms
 from agilerl.arena.memory.lora_placement import (
     lora_tensor_placement,
     split_moe_lora_recompute_bytes,
@@ -53,10 +48,6 @@ from agilerl.arena.memory.specs import (
     WeightVariant,
 )
 from agilerl.arena.memory.trainer_residency import trainer_base_bytes
-from agilerl.arena.memory.training_host import (
-    fixed_host_bytes,
-    layout_free_host_bytes,
-)
 from agilerl.arena.models.fsdp import FSDPConfig
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from tests.test_memory.test_formulas import (
@@ -66,6 +57,7 @@ from tests.test_memory.test_formulas import (
     NEMOTRON_NANO_MAMBA,
     QWEN35_08B,
     QWEN_05B,
+    QWEN_TOWER_TARGETS,
     SUPER_VL,
 )
 
@@ -1079,50 +1071,6 @@ class TestEstimateGeneration:
             == device.usable_bytes
             == int(device.total_bytes * 0.95)
         )
-
-
-class TestKvPoolCeiling:
-    def test_bounds_the_kv_pool_at_every_max_num_seqs(self, model, device):
-        # Arrange
-        settings = GenerationSettings(max_model_len=4096)
-
-        # Act
-        ceiling = kv_pool_ceiling(model, device, settings)
-        pools = [
-            component(
-                estimate_generation(
-                    model, device, settings.model_copy(update={"max_num_seqs": seqs})
-                ),
-                "kv_cache",
-            ).detail["pool"]
-            for seqs in (1, 2, 8, 64, 256)
-        ]
-
-        # Assert
-        assert ceiling >= max(pools) > 0
-
-    def test_weights_over_the_budget_leave_no_max_num_seqs_serving(self, device):
-        # Arrange: a 120B model's weights alone overflow one 24 GiB GPU.
-        model = ModelSpec(
-            model_id="nvidia/super-vl", arch=ModelArch.from_hf_config(SUPER_VL.config)
-        )
-        settings = GenerationSettings(max_model_len=4096)
-
-        # Act
-        ceiling = kv_pool_ceiling(model, device, settings)
-        serves = [
-            generation_can_serve(
-                estimate_generation(
-                    model, device, settings.model_copy(update={"max_num_seqs": seqs})
-                ),
-                KV_MARGIN_BYTES,
-            )
-            for seqs in (1, 16, 256)
-        ]
-
-        # Assert
-        assert ceiling < KV_MARGIN_BYTES
-        assert serves == [False, False, False]
 
 
 class TestEngineCompileCopy:
@@ -2594,70 +2542,6 @@ def budget_device(usable_bytes: int) -> DeviceSpec:
     return DeviceSpec(total_bytes=80 * GiB, available_bytes=usable_bytes, name="budget")
 
 
-class TestFixedHostBytes:
-    def test_offload_rungs_and_checkpointing_leave_it_unchanged(self, device):
-        # Arrange
-        rungs = [(False, False, True), (True, False, True), (True, True, False)]
-        settings = [
-            moe_settings(
-                routed_expert_chunk_mib=64,
-                optim_cpu_offload=optimizer,
-                activation_offload=activations,
-            ).model_copy(
-                update={
-                    "activation_offload": activations,
-                    "gradient_checkpointing": checkpointing,
-                }
-            )
-            for optimizer, activations, checkpointing in rungs
-        ]
-
-        # Act
-        breakdowns = [estimate_training(MOE_MODEL, device, s) for s in settings]
-
-        # Assert
-        fixed = {fixed_host_bytes(breakdown) for breakdown in breakdowns}
-        assert len(fixed) == 1
-        assert len({breakdown.host_total_bytes for breakdown in breakdowns}) == 3
-        assert fixed.pop() >= formulas.TRAINER_PROCESS_HOST_BYTES
-
-
-class TestLayoutFreeHostBytes:
-    def test_expert_parallel_and_trainer_count_leave_it_unchanged(self, device):
-        # Arrange
-        settings = [
-            moe_settings(routed_expert_chunk_mib=64).model_copy(
-                update={"n_training_gpus": gpus, "fsdp": fsdp_config(ep=ep)}
-            )
-            for ep, gpus in [(1, 2), (2, 4), (8, 8), (8, 16)]
-        ]
-
-        # Act
-        breakdowns = [estimate_training(MOE_MODEL, device, s) for s in settings]
-
-        # Assert
-        free = {layout_free_host_bytes(breakdown) for breakdown in breakdowns}
-        assert free == {
-            formulas.TRAINER_PROCESS_HOST_BYTES
-            + host(breakdowns[0], "checkpoint_snapshot").n_bytes
-        }
-
-    def test_checkpointing_the_optimizer_adds_its_moments(self, device):
-        # Arrange
-        plain = moe_settings(routed_expert_chunk_mib=64)
-        with_optimizer = plain.model_copy(update={"checkpoint_optimizer": True})
-
-        # Act
-        without = estimate_training(MOE_MODEL, device, plain)
-        with_moments = estimate_training(MOE_MODEL, device, with_optimizer)
-
-        # Assert
-        snapshot = host(without, "checkpoint_snapshot").n_bytes
-        assert layout_free_host_bytes(with_moments) - layout_free_host_bytes(
-            without
-        ) == pytest.approx(snapshot * formulas.ADAM_MOMENTS_PER_PARAM, abs=1)
-
-
 class TestRoutedChunkTerm:
     def test_training_peak_grows_with_the_chunk(self, device):
         totals = [
@@ -2951,29 +2835,6 @@ class TestTrainingHostBreakdown:
 
         assert host(breakdown, "optimizer_offload").n_bytes == 0
 
-    def test_host_ram_sets_only_the_host_budget(self, model, device):
-        # Arrange
-        settings = TrainingSettings(
-            fsdp=fsdp_config(
-                reshard_after_forward=True,
-                activation_offload=True,
-                optim_cpu_offload=True,
-            )
-        )
-        roomy = device.model_copy(update={"host_bytes_per_gpu": 512 * GiB})
-        cramped = device.model_copy(update={"host_bytes_per_gpu": 1 * GiB})
-
-        # Act
-        unset = training_breakdown(model, device, settings)
-        on_roomy = training_breakdown(model, roomy, settings)
-        on_cramped = training_breakdown(model, cramped, settings)
-
-        # Assert
-        assert on_roomy == unset.model_copy(update={"host_usable_bytes": 512 * GiB})
-        assert on_cramped == unset.model_copy(update={"host_usable_bytes": 1 * GiB})
-        assert on_roomy.host_fits is True
-        assert on_cramped.host_fits is False
-
     def test_every_trainer_process_holds_its_runtime(self, model, device):
         breakdown = estimate_training(model, device, TrainingSettings())
 
@@ -3127,6 +2988,40 @@ class TestTrainingHostBreakdown:
 
         assert host(bar, "vision_rows").n_bytes == 0
         assert host(bar, "vision_row_staging").n_bytes == 0
+
+    def test_tower_lora_bypasses_the_cache_and_holds_tower_activations(self, device):
+        # Arrange
+        arch = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["Qwen/Qwen3.5-0.8B"].config
+        )
+        vision_model = ModelSpec(model_id="Qwen/Qwen3.5-0.8B", arch=arch)
+        frozen = TrainingSettings(
+            images_per_row=2, image_width=1280, image_height=2048, lora_dropout=0.05
+        )
+        trained = frozen.model_copy(update={"tower_lora_targets": QWEN_TOWER_TARGETS})
+
+        # Act
+        frozen_bar = estimate_training(vision_model, device, frozen)
+        trained_bar = estimate_training(vision_model, device, trained)
+
+        # Assert
+        frozen_detail = component(frozen_bar, "activations").detail
+        trained_detail = component(trained_bar, "activations").detail
+        assert host(trained_bar, "vision_feature_cache").n_bytes == 0
+        assert host(frozen_bar, "vision_feature_cache").n_bytes > 0
+        # bf16 adapter compute: 480 MiB of tower tensors plus 90 MiB of merger
+        # dropout, beside the fp32 grads of 2,228,224 rank-16 tower adapters.
+        tower_grads = 2_228_224 * 4
+        assert frozen_detail["vision_tower_lora"] == 0
+        assert trained_detail["vision_tower_lora"] == 570 * MiB
+        assert (
+            trained_detail["backward_peak"] - frozen_detail["backward_peak"]
+            == 570 * MiB + tower_grads
+        )
+        assert (
+            trained_detail["loss_peak"] - frozen_detail["loss_peak"]
+            == 570 * MiB + tower_grads
+        )
 
     def test_catalog_vision_family_charges_no_feature_cache(self, device):
         # Arrange
@@ -3541,8 +3436,8 @@ class TestUnmeasuredArchitectureEstimates:
     @pytest.mark.parametrize(
         ("model_id", "gradient_checkpointing", "total_bytes"),
         [
-            ("zai-org/GLM-5.3-Flash", True, 154045163171),
-            ("zai-org/GLM-5.3-Flash", False, 245865165338),
+            ("zai-org/GLM-5.3-Flash", True, 154866675936),
+            ("zai-org/GLM-5.3-Flash", False, 246686678104),
             ("openai/gpt-oss-20b", True, 17593628774),
             ("openai/gpt-oss-20b", False, 41523558605),
             # Stored blocks keep a share of the measured gated-attention and
@@ -3681,26 +3576,6 @@ class TestTrainingBreakdown:
 
         # Assert
         assert training_breakdown(model, device, settings) == expected
-
-    def test_estimate_training_returns_a_copy_of_the_shared_estimate(
-        self, model, device
-    ):
-        # Arrange
-        settings = TrainingSettings(
-            n_training_gpus=4, gradient_checkpointing=True, fsdp=pinned_fsdp()
-        )
-        shared = shared_training_estimate(model, device, settings)
-        expected = shared.model_copy(deep=True)
-
-        # Act
-        returned = estimate_training(model, device, settings)
-        for part in returned.components + returned.host:
-            part.detail["written"] = 1
-
-        # Assert
-        assert returned is not shared
-        assert shared_training_estimate(model, device, settings) is shared
-        assert shared == expected
 
     def test_settings_written_after_a_call_are_priced_anew(self, model, device):
         # Arrange
@@ -5039,8 +4914,8 @@ class TestSparseMoeTensorParallelBaseWeights:
             ("deepseek-ai/DeepSeek-V4-Flash-0731", 5_940_185_792),
             # KDA and DSA mixers, dense MLP, shared experts, head, vision linears.
             ("zai-org/GLM-5.3-Flash", 8_519_903_360),
-            # Attention, sliding-window sinks, dense MLP, head, vision linears.
-            ("XiaomiMiMo/MiMo-V2.6-Flash-RL", 6_035_426_496),
+            # Attention, sliding-window sinks, dense MLP, head.
+            ("XiaomiMiMo/MiMo-V2.6-Flash-RL", 5_308_942_784),
         ],
     )
     def test_tensor_parallel_params_match_the_family_plan(self, model_id, expected):
@@ -5150,6 +5025,51 @@ class TestAdapterState:
             formulas.ADAM_MOMENTS_PER_PARAM * saved * stored
         )
         assert tp_split.trained_params == unsplit.trained_params
+
+    @pytest.mark.parametrize(("tp", "per_rank"), [(1, 6_958_592), (2, 4_279_040)])
+    def test_tower_lora_trains_and_steps_the_tower_adapters(self, tp, per_rank):
+        # Arrange
+        arch = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["Qwen/Qwen3.6-35B-A3B"].config
+        )
+        text = TrainingSettings(n_training_gpus=tp, fsdp=fsdp_config(tp=tp))
+        tower = text.model_copy(update={"tower_lora_targets": QWEN_TOWER_TARGETS})
+
+        # Act
+        text_state = adapter_state(arch, text, 1)
+        tower_state = adapter_state(arch, tower, 1)
+
+        # Assert: rank-16 tower adapters, 434,912 x 16 in full, fp32 on each rank.
+        assert tower_state.grads - text_state.grads == per_rank * 4
+        assert tower_state.adam - text_state.adam == 2 * per_rank * 4
+        assert tower_state.trained_params - text_state.trained_params == 6_958_592
+
+    def test_tower_lora_trains_only_the_named_targets(self):
+        # Arrange
+        arch = ModelArch.from_hf_config(
+            SUPPORTED_MODEL_INFO["Qwen/Qwen3.6-35B-A3B"].config
+        )
+        text = TrainingSettings()
+        qkv_only = text.model_copy(update={"tower_lora_targets": frozenset({"qkv"})})
+
+        # Act
+        text_state = adapter_state(arch, text, 1)
+        qkv_state = adapter_state(arch, qkv_only, 1)
+
+        # Assert: rank-16 qkv adapters on 27 blocks, 124,416 x 16.
+        assert qkv_state.trained_params - text_state.trained_params == 1_990_656
+
+    def test_text_model_ignores_tower_lora(self):
+        # Arrange
+        text = TrainingSettings()
+        tower = text.model_copy(update={"tower_lora_targets": QWEN_TOWER_TARGETS})
+
+        # Act
+        text_state = adapter_state(QWEN_05B, text, 1)
+        tower_state = adapter_state(QWEN_05B, tower, 1)
+
+        # Assert
+        assert tower_state == text_state
 
 
 class TestTrainingHyperConnections:

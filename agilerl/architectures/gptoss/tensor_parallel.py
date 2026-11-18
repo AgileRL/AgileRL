@@ -65,4 +65,4 @@ def apply_gpt_oss_tensor_parallel(model: nn.Module, tp_mesh: DeviceMesh) -> int:
     return count
 
 
-TENSOR_PARALLEL_PLAN = TensorParallelPlan(shard=apply_gpt_oss_tensor_parallel)
+GPT_OSS_TENSOR_PARALLEL_PLAN = TensorParallelPlan(shard=apply_gpt_oss_tensor_parallel)

@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import replace
 
 import pytest
 
@@ -755,10 +754,6 @@ class TestCachedTrainingPlan:
         monkeypatch.setattr(
             "agilerl.arena.memory.resolve.run.training_memory_from_manifest", fake
         )
-        monkeypatch.setattr(
-            "agilerl.arena.memory.resolve.run.lightest_training_memory_from_manifest",
-            lambda *args: _plan_with_host(0, None),
-        )
 
         def price(device):
             return _cached_training_plan(cache, placed, model, device, 1, mode, True)
@@ -818,10 +813,6 @@ class TestCachedTrainingPlan:
         monkeypatch.setattr(
             "agilerl.arena.memory.resolve.run.training_memory_from_manifest", fake
         )
-        monkeypatch.setattr(
-            "agilerl.arena.memory.resolve.run.lightest_training_memory_from_manifest",
-            lambda *args: _plan_with_host(0, None),
-        )
 
         # Act
         buffered = _cached_training_plan(cache, placed, model, device, 1, mode, True)
@@ -835,82 +826,6 @@ class TestCachedTrainingPlan:
         assert bare.breakdown.host_total_bytes == 1000
         assert bare.breakdown.host_usable_bytes is None
         assert len(cache.host_misses) == 1
-
-    def test_fixed_host_bytes_over_the_buffer_skip_the_buffered_gpu_search(
-        self, monkeypatch
-    ) -> None:
-        # Arrange: the lightest plan fits the GPU and holds 1000 fixed host
-        # bytes, which fit the 1000-byte share only without the buffer.
-        placed = manifest_at_layout(
-            TrainingManifest.model_validate(MANIFEST), ParallelLayout()
-        )
-        mode = WeightSyncMode(False, "nixl")
-        device = _device("L4").model_copy(update={"host_bytes_per_gpu": 1000})
-        cache = SearchCache()
-        priced: list[int | None] = []
-
-        def fake(manifest, model, device, adapter_sync, nccl_reshard):
-            priced.append(device.host_bytes_per_gpu)
-            return _plan_with_host(1000, None)
-
-        monkeypatch.setattr(
-            "agilerl.arena.memory.resolve.run.training_memory_from_manifest", fake
-        )
-        monkeypatch.setattr(
-            "agilerl.arena.memory.resolve.run.lightest_training_memory_from_manifest",
-            lambda *args: _plan_with_host(1000, None),
-        )
-
-        # Act
-        buffered = _cached_training_plan(
-            cache, placed, tiny_model(), device, 1, mode, True
-        )
-        bare = _cached_training_plan(
-            cache, placed, tiny_model(), device, 1, mode, False
-        )
-
-        # Assert
-        assert buffered is None
-        assert cache.host_limited
-        assert bare.breakdown.host_total_bytes == 1000
-        assert priced == [None]
-
-    def test_a_lightest_plan_over_the_gpu_leaves_the_gpu_search_to_decide(
-        self, monkeypatch
-    ) -> None:
-        # Arrange: the lightest plan is over the GPU, so its host bytes say nothing.
-        placed = manifest_at_layout(
-            TrainingManifest.model_validate(MANIFEST), ParallelLayout()
-        )
-        mode = WeightSyncMode(False, "nixl")
-        device = _device("L4").model_copy(update={"host_bytes_per_gpu": 1000})
-        cache = SearchCache()
-        lightest = _plan_with_host(1000, None)
-        over = replace(
-            lightest,
-            breakdown=lightest.breakdown.model_copy(update={"device_usable_bytes": 0}),
-        )
-        priced: list[int | None] = []
-
-        def fake(manifest, model, device, adapter_sync, nccl_reshard):
-            priced.append(device.host_bytes_per_gpu)
-            raise TrainingMemoryUnfitError(over, device)
-
-        monkeypatch.setattr(
-            "agilerl.arena.memory.resolve.run.training_memory_from_manifest", fake
-        )
-        monkeypatch.setattr(
-            "agilerl.arena.memory.resolve.run.lightest_training_memory_from_manifest",
-            lambda *args: over,
-        )
-
-        # Act
-        plan = _cached_training_plan(cache, placed, tiny_model(), device, 1, mode, True)
-
-        # Assert
-        assert plan is None
-        assert not cache.host_limited
-        assert priced == [None]
 
 
 class TestPickWeightSync:

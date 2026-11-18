@@ -655,12 +655,12 @@ class LLMEnvSpec(EnvSpecBase):
     dataset_format: Literal["traces"] | None = Field(
         default=None,
         description=(
-            "traces: rows are recorded model calls, OpenAI chat messages in "
-            "prompt / completion (or messages) columns with optional tools. A "
-            "rollout renders each row's prompt as the single-turn prompt and "
+            "traces: rows are recorded session segments, OpenAI chat messages "
+            "in a messages column with optional tools. A rollout renders each "
+            "target assistant turn's history as a single-turn prompt and "
             "needs no prompt_template; with no rubric_file_path it scores 0, "
             "which OPD trains on as pure distillation. objective sft trains "
-            "the completion. Takes no columns mapping."
+            "every target assistant turn. Takes no columns mapping."
         ),
     )
     dataset_path: str | None = Field(

@@ -4,9 +4,9 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
+from collections.abc import Collection
 
-from agilerl.arena.memory.lora_formulas import decoder_lora_linears
+from agilerl.arena.memory.lora_formulas import decoder_lora_linears, tower_lora_linears
 from agilerl.arena.memory.specs import (
     LoraLinear,
     LoraTargetScope,
@@ -89,7 +89,6 @@ def _linear_lora_placement(
     return replicated, sharded
 
 
-@lru_cache(maxsize=1024)
 def lora_tensor_placement(
     arch: ModelArch,
     rank: int,
@@ -97,6 +96,7 @@ def lora_tensor_placement(
     packed_matrices: int,
     threshold: int | None,
     tensor_parallel: int = 1,
+    tower_targets: Collection[str] = (),
 ) -> tuple[int, int]:
     """(replicated elements, sharded elements) for one LoRA adapter on one rank.
 
@@ -104,10 +104,14 @@ def lora_tensor_placement(
     fewer elements stays replicated. ``None`` is flat data parallel, so
     every tensor is replicated. ``tensor_parallel`` is the degree the
     trainer's plan shards by: each rank keeps ``1/tp`` of the LoRA factor
-    :func:`decoder_lora_linears` marks split. At ``tensor_parallel=1`` the two
-    counts sum to :func:`lora_param_count` and :func:`packed_lora_param_count`.
+    :func:`decoder_lora_linears` and :attr:`ModelArch.tower_lora_linears`
+    mark split. ``tower_targets`` adds the tower and connector adapters
+    those module names wrap. At ``tensor_parallel=1`` the two counts sum to
+    :func:`lora_param_count`, :func:`packed_lora_param_count` and
+    :func:`tower_lora_param_count`.
     """
     linears = decoder_lora_linears(arch, scope, tensor_parallel)
+    linears += tower_lora_linears(arch, tower_targets)
     replicated, sharded = _linear_lora_placement(
         linears, rank, threshold, tensor_parallel
     )

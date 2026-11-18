@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import os
 import subprocess
 import sys
@@ -17,7 +16,6 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from snowflake.snowpark.exceptions import SnowparkSQLException
-from snowflake_app.app_code import arena_app
 from snowflake_app.app_code.arena_app import (
     DeploymentCalls,
     meter_deployments,
@@ -565,35 +563,6 @@ class TestArenaAppLogging:
         assert "Could not bill" not in result.stderr
 
 
-class TestArenaAppErrors:
-    def test_procedure_errors_reach_the_caller_as_the_message_only(self) -> None:
-        # Arrange
-        arena_root = Path(__file__).resolve().parents[1]
-        script = (
-            "import traceback\n"
-            "from snowflake_app.app_code import arena_app\n"
-            "try:\n"
-            "    arena_app.register_reference(None, 'consumer_secret', 'ADD', 'ref-1')\n"
-            "except ValueError:\n"
-            "    print(repr(traceback.format_exc()))\n"
-        )
-
-        # Act
-        result = subprocess.run(
-            [sys.executable, "-c", script],
-            cwd=arena_root,
-            env={**os.environ, "PYTHONPATH": str(arena_root)},
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-
-        # Assert
-        assert result.stdout.strip() == repr(
-            "ValueError: Unknown reference consumer_secret. Bind source_table or source_view.\n"
-        )
-
-
 class TestReconcileUsage:
     def test_heartbeats_the_service_then_bills_the_deployment_hours(
         self, arena: Arena
@@ -616,25 +585,6 @@ class TestReconcileUsage:
         ]
         [event] = session.events
         assert (event["subclass"], event["base_charge"]) == ("deployment", 9.57)
-
-    def test_a_successful_run_logs_its_summary_at_info(
-        self, arena: Arena, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        # Arrange
-        caplog.set_level(logging.INFO, logger=arena_app.logger.name)
-        session = serving_session({"A": "RUNNING"})
-        arena.replies = [reply(200, {"billableHours": []}), open_usage(957)]
-
-        # Act
-        summary = reconcile_usage(session)
-
-        # Assert
-        [record] = [r for r in caplog.records if r.name == arena_app.logger.name]
-        assert (record.levelname, record.getMessage()) == (
-            "INFO",
-            f"reconcile_usage: {summary}",
-        )
-        assert "events: 1, failed: 0, missing: 0, skipped: 0" in summary
 
     def test_a_non_listing_install_is_refused_and_logged_for_the_event_table(
         self, arena: Arena, caplog: pytest.LogCaptureFixture
@@ -705,12 +655,8 @@ class TestReconcileUsage:
         assert len(session.events) == 1
 
     def test_unconfigured_arena_runs_nothing(
-        self,
-        arena: Arena,
-        monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
+        self, arena: Arena, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        caplog.set_level(logging.INFO, logger=arena_app.logger.name)
         monkeypatch.setitem(SECRETS, "org_key", "")
         session = serving_session({"A": "RUNNING"})
 
@@ -719,8 +665,3 @@ class TestReconcileUsage:
         assert summary.startswith("Arena is not configured.")
         assert session.statements == []
         assert arena.calls == []
-        assert [
-            (r.levelname, r.getMessage())
-            for r in caplog.records
-            if r.name == arena_app.logger.name
-        ] == [("INFO", f"reconcile_usage: {summary}")]

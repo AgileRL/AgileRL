@@ -1,0 +1,234 @@
+{
+  "description": "Prompt/completion import rows and the segment each converts to. The ml validator (agilerl.arena.models.traces.pair_as_segment) and the platform converter must both produce `expected` from `row`. Prompt assistant messages get \"weight\": 0 (context); completion messages keep the default weight 1. `call_ids` is written only when the row has a real `call_id`. A text cell is decoded only when it is the JSON of a message, a list of messages, or a string; other text, JSON or not, is the message's content. Prefix merging is not covered here.",
+  "cases": [
+    {
+      "name": "plain strings; no call_id, no call_ids",
+      "row": {
+        "prompt": "Hi there.",
+        "completion": "Hello!"
+      },
+      "expected": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Hi there."
+          },
+          {
+            "role": "assistant",
+            "content": "Hello!"
+          }
+        ]
+      }
+    },
+    {
+      "name": "prompt assistant turns are context; call_id and finish_reason on the completion",
+      "row": {
+        "prompt": [
+          {
+            "role": "user",
+            "content": "I can't sign in."
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "c1",
+                "type": "function",
+                "function": {
+                  "name": "lookup_user",
+                  "arguments": "{\"email\": \"a@b.com\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "c1",
+            "content": "{\"locked\": true}"
+          }
+        ],
+        "completion": [
+          {
+            "role": "assistant",
+            "content": "I've sent an unlock link."
+          }
+        ],
+        "call_id": "01JD",
+        "finish_reason": "stop",
+        "session_id": "s-42"
+      },
+      "expected": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "I can't sign in."
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "c1",
+                "type": "function",
+                "function": {
+                  "name": "lookup_user",
+                  "arguments": "{\"email\": \"a@b.com\"}"
+                }
+              }
+            ],
+            "weight": 0
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "c1",
+            "content": "{\"locked\": true}"
+          },
+          {
+            "role": "assistant",
+            "content": "I've sent an unlock link."
+          }
+        ],
+        "call_ids": [
+          null,
+          "01JD"
+        ],
+        "finish_reasons": [
+          null,
+          "stop"
+        ],
+        "session_id": "s-42"
+      }
+    },
+    {
+      "name": "plain-string cells that parse as JSON scalars stay text",
+      "row": {
+        "prompt": "42",
+        "completion": "true"
+      },
+      "expected": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "42"
+          },
+          {
+            "role": "assistant",
+            "content": "true"
+          }
+        ]
+      }
+    },
+    {
+      "name": "text cells holding JSON that is not messages stay text",
+      "row": {
+        "prompt": "{\"query\": \"reset mfa\"}",
+        "completion": "[1, 2]"
+      },
+      "expected": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "{\"query\": \"reset mfa\"}"
+          },
+          {
+            "role": "assistant",
+            "content": "[1, 2]"
+          }
+        ]
+      }
+    },
+    {
+      "name": "a raw messages column beside the pair is ignored; JSON text cells",
+      "row": {
+        "prompt": "[{\"role\": \"user\", \"content\": \"Reset my MFA.\"}]",
+        "completion": "{\"role\": \"assistant\", \"content\": \"Done.\"}",
+        "messages": "[{\"role\": \"user\", \"content\": \"raw request\"}]"
+      },
+      "expected": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Reset my MFA."
+          },
+          {
+            "role": "assistant",
+            "content": "Done."
+          }
+        ]
+      }
+    },
+    {
+      "name": "a multi-message completion trains every assistant message; no call_id, no call_ids",
+      "row": {
+        "prompt": [
+          {
+            "role": "user",
+            "content": "Unlock u1."
+          }
+        ],
+        "completion": [
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "d1",
+                "type": "function",
+                "function": {
+                  "name": "unlock",
+                  "arguments": "{\"user\": \"u1\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "d1",
+            "content": "ok"
+          },
+          {
+            "role": "assistant",
+            "content": "Unlocked."
+          }
+        ],
+        "finish_reason": "stop"
+      },
+      "expected": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Unlock u1."
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "d1",
+                "type": "function",
+                "function": {
+                  "name": "unlock",
+                  "arguments": "{\"user\": \"u1\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "d1",
+            "content": "ok"
+          },
+          {
+            "role": "assistant",
+            "content": "Unlocked."
+          }
+        ],
+        "finish_reasons": [
+          null,
+          "stop"
+        ]
+      }
+    }
+  ]
+}

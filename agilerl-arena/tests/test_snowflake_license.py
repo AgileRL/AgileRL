@@ -55,7 +55,6 @@ from agilerl.arena.snowflake.license import (
     open_snowflake_deployment,
     partner_headers,
     retry_after_seconds,
-    snowflake_priced_families,
     snowflake_usage,
 )
 
@@ -1054,32 +1053,6 @@ class TestFetchCapabilities:
             f"agilerl-arena 9.9.9 is available (you have {__version__}). "
             'Run: pip install -U "agilerl-arena[snowflake]"\n'
         )
-
-
-class TestSnowflakePricedFamilies:
-    def test_returns_the_listed_families_in_upper_case(self) -> None:
-        caps = {"features": {"snowflakePricedGpuFamilies": ["GPU_NV_S", "gpu_nv_m"]}}
-
-        assert snowflake_priced_families(caps) == frozenset({"GPU_NV_S", "GPU_NV_M"})
-
-    def test_an_empty_list_means_nothing_is_priced(self) -> None:
-        caps = {"features": {"snowflakePricedGpuFamilies": []}}
-
-        assert snowflake_priced_families(caps) == frozenset()
-
-    @pytest.mark.parametrize(
-        "caps",
-        [
-            {},
-            {"features": "on"},
-            {"features": {"snowflakeTraining": True}},
-            {"features": {"snowflakePricedGpuFamilies": "GPU_NV_S"}},
-        ],
-    )
-    def test_is_none_when_arena_does_not_list_them(
-        self, caps: dict[str, object]
-    ) -> None:
-        assert snowflake_priced_families(caps) is None
 
 
 class TestArenaApiBaseUrl:

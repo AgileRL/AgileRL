@@ -81,8 +81,16 @@ from agilerl.algorithms.core.sequence_layout import (
     PaddedSequence,
     SequenceLayout,
 )
-from agilerl.architectures import install_family_patches
-from agilerl.architectures.vllm_language import nested_language_config
+from agilerl.architectures import (
+    FAMILY_RUNTIME_CONFIGS,
+    ModelRuntimeConfig,
+    install_family_patches,
+)
+from agilerl.architectures.nemotron_h import register_nemotron_h_liger
+from agilerl.architectures.vllm_language import (
+    nested_language_config,
+    unbuilt_tower_modules,
+)
 from agilerl.arena.memory.manifest import ALGORITHM_NAMES
 from agilerl.arena.memory.resolve.batch import ROW_FILL, resolve_mini_batch_size
 from agilerl.arena.memory.resolve.chunk import resolve_chunk_rows
@@ -2952,9 +2960,13 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     :param model_config: Keyword arguments for ``from_pretrained`` (not the HF
         ``PretrainedConfig`` object).
     :type model_config: dict[str, Any] | PretrainedConfig | None
+    :param lora_tower_target_modules: Tower and connector modules of a VL model
+        to adapt as well. ``lora_config.target_modules`` always land on the
+        language model only. Defaults to None.
+    :type lora_tower_target_modules: list[str] | None, optional
     :param rollout_strip_multimodal_towers: Whether the vLLM engine serving the
-        adapter skips the model's multimodal towers. Builders derive it from the
-        environment's modality.
+        adapter skips the model's multimodal towers; tower LoRA skips the towers
+        it leaves unbuilt. Builders derive it from the environment's modality.
         Defaults to False.
     :type rollout_strip_multimodal_towers: bool, optional
     :param vllm_importance_sampling_cap: Trainer/vLLM ratio at which the
@@ -3052,6 +3064,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         name: str | None = None,
         model_config: dict[str, Any] | PretrainedConfigProtocol | None = None,
         quantization_config: BitsAndBytesConfig | None = None,
+        lora_tower_target_modules: list[str] | None = None,
         rollout_strip_multimodal_towers: bool = False,
         vllm_importance_sampling_cap: float = 2.0,
         vllm_max_logprob_gap: float = 0.1,
@@ -3172,6 +3185,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self.activation_offload = False
         self.gradient_checkpointing = gradient_checkpointing
         self.routed_expert_chunk_mib = routed_expert_chunk_mib
+        self.lora_tower_target_modules = lora_tower_target_modules
         self.rollout_strip_multimodal_towers = rollout_strip_multimodal_towers
         if isinstance(model_config, dict):
             model_dict = dict(model_config)
@@ -3903,7 +3917,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         ):
             msg = (
                 f"cp={self.fsdp_config.cp} on a vision-language model needs a "
-                "text-only environment, so the engine strips its towers"
+                "text-only environment and no tower LoRA, so the engine strips "
+                "its towers"
             )
             raise ValueError(msg)
 
@@ -5077,7 +5092,20 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 use_gradient_checkpointing=bool(self.gradient_checkpointing),
                 gradient_checkpointing_kwargs={"use_reentrant": False},
             )
-        lora_config = adapt_lora_config_for_model(peft_target, self.lora_config)
+        skipped_tower_modules = None
+        if self.lora_tower_target_modules:
+            skipped_tower_modules = unbuilt_tower_modules(
+                self.rollout_strip_multimodal_towers,
+                FAMILY_RUNTIME_CONFIGS.get(
+                    peft_target.config.model_type, ModelRuntimeConfig()
+                ),
+            )
+        lora_config = adapt_lora_config_for_model(
+            peft_target,
+            self.lora_config,
+            tower_target_modules=self.lora_tower_target_modules,
+            skipped_tower_modules=skipped_tower_modules,
+        )
         self.lora_config = lora_config
         expert_target_parameters = getattr(lora_config, "target_parameters", None)
         if not isinstance(expert_target_parameters, (list, tuple)):
@@ -5115,6 +5143,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                     type(inner_model).__name__,
                 )
             else:
+                register_nemotron_h_liger()
                 _apply_liger_kernel_to_instance(
                     model=inner_model,
                     fused_linear_cross_entropy=False,
@@ -6648,6 +6677,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             images_per_row=0,
             image_width=0,
             image_height=0,
+            tower_lora_targets=frozenset(self.lora_tower_target_modules or ()),
             segmented_rows=False,
             checkpoint_optimizer=False,
             async_rollout=False,
@@ -8065,6 +8095,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             max_model_len=self.max_model_len,
             process_index=process_index,
             lora_rank=lora_rank,
+            tower_lora_target_modules=self.lora_tower_target_modules,
             strip_multimodal_towers=self.rollout_strip_multimodal_towers,
         )
         self.records_sampling_supports = self._config_records_sampling_supports()

@@ -166,10 +166,13 @@ if HAS_LLM_DEPENDENCIES or TYPE_CHECKING:
         Gemma4TextConfig,
         GptOssConfig,
         GptOssForCausalLM,
+        GraniteConfig,
+        GraniteForCausalLM,
         GraniteMoeConfig,
         GraniteMoeForCausalLM,
         GraniteMoeHybridConfig,
         GraniteMoeHybridForCausalLM,
+        LlamaConfig,
         NemotronHConfig,
         NemotronHForCausalLM,
         Qwen3_5Config,
@@ -349,28 +352,20 @@ class TestRaiseIfLossNotFiniteOnAnyRank:
         reduce_call.assert_called_once()
 
 
-class FillerDecoder(nn.Module):
-    """Decoder stand-in called with ``inputs_embeds``."""
-
-    def forward(self, inputs_embeds: torch.Tensor) -> torch.Tensor:
-        return inputs_embeds
-
-
 class FillerVisionModel(nn.Module):
     """VL stand-in that counts filler-image tower runs."""
 
     def __init__(self) -> None:
         super().__init__()
         self.filler_runs = 0
-        self.decoder = FillerDecoder()
 
     def forward(
         self, input_ids: torch.Tensor, pixel_values: torch.Tensor | None = None
     ) -> torch.Tensor:
-        return self.decoder(inputs_embeds=input_ids.float())
+        return input_ids.float()
 
     def get_decoder(self) -> nn.Module:
-        return self.decoder
+        return self
 
     def vision_filler_features(self, device: torch.device) -> torch.Tensor:
         self.filler_runs += 1
@@ -1836,7 +1831,7 @@ class _MockPeftActor(torch.nn.Module):
         super().__init__()
         self._dummy_param = torch.nn.Parameter(torch.tensor([1.0]))
         self.name_or_path = "mock-model"
-        self.config = Qwen3Config()
+        self.config = LlamaConfig()
         self.peft_config = {}
         self.base_model = MagicMock()
         causal = MagicMock()
@@ -1862,7 +1857,7 @@ class _MockPeftActor(torch.nn.Module):
         self.prefix = "model"
         self.generate = MagicMock()
         self.from_pretrained = MagicMock()
-        self.config = Qwen3Config()
+        self.config = LlamaConfig()
 
     def get_base_model(self):
         return self.base_model.model
@@ -1881,7 +1876,7 @@ class ValueHeadModelStub(torch.nn.Module):
     def __init__(self, pretrained_model: object) -> None:
         super().__init__()
         self.pretrained_model = pretrained_model
-        self.config = Qwen3Config()
+        self.config = LlamaConfig()
 
 
 def _make_mock_peft_actor():
@@ -2377,20 +2372,24 @@ def _tiny_gemma4_with_audio() -> Gemma4ForConditionalGeneration:
 
 
 class TestAttachLoraAdaptersTowerScope:
-    def test_towers_stay_frozen(self):
+    def test_served_audio_tower_gets_lora(self):
         agent = _make_llm_agent()
-        agent.lora_config = LoraConfig(r=2, target_modules="all-linear")
+        agent.lora_config = LoraConfig(r=2, target_modules=["q_proj"])
         agent.selected_adapters = ["actor"]
+        agent.lora_tower_target_modules = ["linear", "embedding_projection"]
         agent.vllm_config = None
 
         with patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False):
             actor = agent._attach_lora_adapters(_tiny_gemma4_with_audio())
 
-        lora_names = [
-            name for name, _ in actor.named_parameters() if ".lora_A." in name
-        ]
-        assert lora_names
-        assert all(".language_model." in name for name in lora_names)
+        assert any(
+            ".audio_tower." in name and ".lora_A." in name
+            for name, _ in actor.named_parameters()
+        )
+        assert any(
+            ".embed_audio." in name and ".lora_A." in name
+            for name, _ in actor.named_parameters()
+        )
 
 
 class TestConfigureBatchSizePerProcess:
@@ -3080,6 +3079,19 @@ class TestLLMAlgorithmTrainingEstimateInputs:
         )
 
         assert settings.max_model_len == 4096
+
+    def test_settings_carry_the_tower_lora_targets(self, moe_ppo, monkeypatch):
+        # Arrange
+        monkeypatch.setattr(moe_ppo, "lora_tower_target_modules", ["qkv", "linear_fc1"])
+
+        # Act
+        _, settings = moe_ppo._training_estimate_inputs(
+            ALGORITHM_NAMES[moe_ppo.algo], 0.0
+        )
+
+        # Assert
+        assert settings.tower_lora_targets == frozenset({"qkv", "linear_fc1"})
+        assert settings.vision_tower_lora
 
     def test_update_rows_are_every_rank_s_rows(self, moe_ppo, monkeypatch):
         # Arrange: 8 prompts x 2 completions over 4 data-parallel ranks.
@@ -3846,7 +3858,7 @@ class _TinyCausalLM(torch.nn.Module):
     ) -> None:
         super().__init__()
         self.name_or_path = "tiny-causal"
-        self.config = Qwen3Config()
+        self.config = LlamaConfig()
         self.config.final_logit_softcapping = softcap
         self.embed = torch.nn.Embedding(vocab_size, hidden_size)
         self.body = torch.nn.Linear(hidden_size, hidden_size)
@@ -4088,6 +4100,12 @@ class TestLLMAlgorithmGetLogprobsMatchesModelLogits:
                     )
                 ),
                 id="gemma4",
+            ),
+            pytest.param(
+                lambda: GraniteForCausalLM(
+                    GraniteConfig(**_tiny_text_config_kwargs(), logits_scaling=3.0)
+                ),
+                id="granite",
             ),
             pytest.param(
                 lambda: GraniteMoeForCausalLM(
@@ -5242,10 +5260,10 @@ def colocated_cuda_device(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 @pytest.mark.usefixtures("colocated_cuda_device")
 class TestLLMConfigureVllm:
     @pytest.fixture(autouse=True)
-    def stub_qwen3_auto_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def stub_llama_auto_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
             "transformers.AutoConfig.from_pretrained",
-            lambda *args, **kwargs: SimpleNamespace(model_type="qwen3"),
+            lambda *args, **kwargs: SimpleNamespace(model_type="llama"),
         )
 
     def test_raises_when_vllm_not_installed(self):
@@ -7434,7 +7452,7 @@ class TestLLMInitializeActors:
         peft_actor = _make_mock_peft_actor()
 
         # A spec without PEFT attributes prevents a PeftModelProtocol match.
-        base_model = MagicMock(spec=["modules"], config=Qwen3Config())
+        base_model = MagicMock(spec=["modules"], config=LlamaConfig())
 
         with (
             patch(
@@ -7463,7 +7481,7 @@ class TestLLMInitializeActors:
         # A spec so the created model doesn't duck-type as a PeftModel on
         # Python <= 3.11 (a bare MagicMock satisfies any runtime protocol
         # there; 3.12+ uses getattr_static and is immune).
-        created_model = MagicMock(spec=["modules"], config=Qwen3Config())
+        created_model = MagicMock(spec=["modules"], config=LlamaConfig())
 
         with (
             patch(
@@ -7518,7 +7536,7 @@ class TestLLMInitializeActors:
         ):
             LLMAlgorithm._initialize_actors(
                 agent,
-                MagicMock(spec=["modules"], config=Qwen3Config()),
+                MagicMock(spec=["modules"], config=LlamaConfig()),
                 add_adapters=True,
             )
         peft_actor.add_adapter.assert_called_once_with(
@@ -7597,7 +7615,7 @@ class TestLLMInitializeActors:
         inner_peft = _make_mock_peft_actor()
         inner_peft.peft_config = {"default": MagicMock()}
         base_model = torch.nn.Module()
-        base_model.config = Qwen3Config()
+        base_model.config = LlamaConfig()
         base_model.pretrained_model = inner_peft
 
         with pytest.raises(
@@ -7851,10 +7869,10 @@ class TestLLMConfigureVllmPaths:
     """_configure_vllm under various world-size / TP configurations."""
 
     @pytest.fixture(autouse=True)
-    def stub_qwen3_auto_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def stub_llama_auto_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
             "transformers.AutoConfig.from_pretrained",
-            lambda *args, **kwargs: SimpleNamespace(model_type="qwen3"),
+            lambda *args, **kwargs: SimpleNamespace(model_type="llama"),
         )
 
     def test_configure_vllm_tp_size_1(self):
@@ -8899,7 +8917,7 @@ class TestLLMInitEdgeCases:
                 vllm_config=VLLMConfig(tensor_parallel_size=2),
             )
 
-    def test_keeps_model_config(self):
+    def test_keeps_model_config_and_tower_lora_targets(self):
         lora = MagicMock()
         with (
             patch.object(LLMAlgorithm, "_initialize_actors"),
@@ -8922,8 +8940,10 @@ class TestLLMInitEdgeCases:
                 device="cpu",
                 model_name="mock-model",
                 model_config={"use_cache": False},
+                lora_tower_target_modules=["query"],
             )
         assert agent.model_config == {"use_cache": False}
+        assert agent.lora_tower_target_modules == ["query"]
 
     def test_raises_when_vllm_importance_sampling_cap_non_positive(self):
         lora = MagicMock()
@@ -8960,7 +8980,7 @@ class TestLLMInitializeActorsStrayAdapter:
         peft_actor = _make_mock_peft_actor()
         peft_actor.peft_config = {"actor": MagicMock(), "stray": MagicMock()}
         base_model = torch.nn.Module()
-        base_model.config = Qwen3Config()
+        base_model.config = LlamaConfig()
 
         with (
             patch(
@@ -8993,7 +9013,7 @@ class TestLLMInitializeActorsStrayAdapter:
 
         peft_actor.base_model.model = _InnerModel()
         base_model = torch.nn.Module()
-        base_model.config = Qwen3Config()
+        base_model.config = LlamaConfig()
 
         with (
             patch(
@@ -9023,7 +9043,7 @@ class TestLLMInitializeActorsStrayAdapter:
         peft_actor = _make_mock_peft_actor()
         peft_actor.peft_config = {"actor": MagicMock()}
         base_model = torch.nn.Module()
-        base_model.config = Qwen3Config()
+        base_model.config = LlamaConfig()
         apply = MagicMock()
         pin = MagicMock()
 
@@ -9039,6 +9059,10 @@ class TestLLMInitializeActorsStrayAdapter:
                 "agilerl.algorithms.core.base.patch_lora_for_fused_forward", create=True
             ),
             patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True),
+            patch(
+                "agilerl.algorithms.core.base.register_nemotron_h_liger",
+                return_value=True,
+            ),
             patch(
                 "agilerl.algorithms.core.base._apply_liger_kernel_to_instance",
                 apply,
@@ -9060,7 +9084,7 @@ class TestLLMInitializeActorsStrayAdapter:
         peft_actor = _make_mock_peft_actor()
         peft_actor.peft_config = {"actor": MagicMock()}
         base_model = torch.nn.Module()
-        base_model.config = Qwen3Config()
+        base_model.config = LlamaConfig()
         base_model._agilerl_liger_patched = True
         apply = MagicMock()
         pin = MagicMock()
@@ -9099,7 +9123,7 @@ class TestLLMInitializeActorsStrayAdapter:
 
         class Quantized(torch.nn.Module):
             is_loaded_in_8bit = True
-            config = Qwen3Config()
+            config = LlamaConfig()
 
             def modules(self):
                 return []
@@ -9142,6 +9166,10 @@ class TestLLMInitializeActorsStrayAdapter:
                 return_value=peft_like,
             ),
             patch(
+                "agilerl.algorithms.core.base.register_nemotron_h_liger",
+                return_value=True,
+            ),
+            patch(
                 "agilerl.algorithms.core.base._apply_liger_kernel_to_instance",
                 apply,
                 create=True,
@@ -9181,7 +9209,7 @@ class TestLLMInitializeActorsStrayAdapter:
         ):
             LLMAlgorithm._initialize_actors(
                 agent,
-                MagicMock(spec=["modules"], config=Qwen3Config()),
+                MagicMock(spec=["modules"], config=LlamaConfig()),
                 add_adapters=True,
             )
 
@@ -9212,7 +9240,7 @@ class _PackedMoeModel(torch.nn.Module):
 
     def __init__(self, num_experts: int = 4, hidden: int = 8) -> None:
         super().__init__()
-        self.config = Qwen3Config()
+        self.config = LlamaConfig()
         self.layers = torch.nn.ModuleList()
         for _ in range(2):
             block = torch.nn.Module()
@@ -9231,7 +9259,7 @@ class TestLLMInitializeActorsExpertLoraGuards:
         agent = _make_llm_agent(lora_config=lora)
         agent.selected_adapters = ("actor",)
         base_model = torch.nn.Linear(4, 4)
-        base_model.config = Qwen3Config()
+        base_model.config = LlamaConfig()
 
         with (
             patch(
@@ -9257,7 +9285,7 @@ class TestLLMInitializeActorsExpertLoraGuards:
         peft_actor = _make_mock_peft_actor()
         peft_actor.peft_config = {"actor": MagicMock()}
         base_model = torch.nn.Linear(4, 4)
-        base_model.config = Qwen3Config()
+        base_model.config = LlamaConfig()
 
         with (
             patch(
@@ -9294,7 +9322,7 @@ class TestLLMInitializeActorsExpertLoraGuards:
         peft_actor = _make_mock_peft_actor()
         peft_actor.peft_config = {"actor": MagicMock()}
         base_model = torch.nn.Linear(4, 4)
-        base_model.config = Qwen3Config()
+        base_model.config = LlamaConfig()
 
         with (
             patch(

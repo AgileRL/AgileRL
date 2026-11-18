@@ -43,9 +43,8 @@ def reconcile(
     :param fetch: Arena usage of ``(kind, usage_id)``.
     :param now_ms: Current time in epoch milliseconds.
     :return: Counts of items, settled items, emitted events, failed items,
-        items Arena answered 404 for, items skipped until their daily read,
-        items open over 7 days, and hours attempted over an hour ago that
-        Snowflake never confirmed.
+        items Arena answered 404 for, items open over 7 days, and hours
+        attempted over an hour ago that Snowflake never confirmed.
     """
     day_ms = 24 * 3_600_000
     items = collect(
@@ -58,7 +57,7 @@ def reconcile(
         "FROM app_state.usage_items WHERE settled_at IS NULL "
         "ORDER BY last_checked_at NULLS FIRST",
     )
-    settled = emitted = failed = missing = skipped = stale = 0
+    settled = emitted = failed = missing = stale = 0
     for item in items:
         values = lowered(item)
         kind, usage_id = str(values["kind"]), str(values["usage_id"])
@@ -67,7 +66,6 @@ def reconcile(
             epoch_ms(values["missing_ms"]),
         )
         if checked_today(session, kind, usage_id, values, now_ms):
-            skipped += 1
             continue
         try:
             usage = fetch(kind, usage_id)
@@ -112,7 +110,7 @@ def reconcile(
     unconfirmed = unconfirmed_hours(session, now_ms)
     return (
         f"items: {len(items)}, settled: {settled}, events: {emitted}, "
-        f"failed: {failed}, missing: {missing}, skipped: {skipped}, stale: {stale}, "
+        f"failed: {failed}, missing: {missing}, stale: {stale}, "
         f"unconfirmed: {unconfirmed}"
     )
 

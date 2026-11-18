@@ -686,6 +686,35 @@ class TestImageInputs:
 
         assert (settings.images_per_row, settings.image_width) == (3, 1280)
 
+    def test_tower_target_modules_train_the_vision_tower(self):
+        trained = screenshots()
+        trained["network"]["lora_config"] = {
+            "target_modules": ["q_proj"],
+            "tower_target_modules": ["qkv"],
+        }
+
+        settings = training_settings_from_manifest(trained)
+        text = training_settings_from_manifest(screenshots())
+
+        assert settings.tower_lora_targets == frozenset({"qkv"})
+        assert settings.vision_tower_lora
+        assert text.tower_lora_targets == frozenset()
+        assert not text.vision_tower_lora
+
+    def test_tower_lora_keeps_adapter_sync(self):
+        trained = screenshots()
+        trained["network"]["lora_config"] = {
+            "target_modules": ["q_proj"],
+            "tower_target_modules": ["qkv"],
+        }
+
+        training = training_settings_from_manifest(trained)
+        generation = generation_settings_from_manifest(trained)
+
+        assert training.merged_lora_sync is False
+        assert generation.merged_lora_sync is False
+        assert training_settings_from_manifest(screenshots()).merged_lora_sync
+
     def test_text_environment_has_no_images(self):
         settings = training_settings_from_manifest(GRPO)
 
