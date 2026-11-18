@@ -783,7 +783,19 @@ def arena_partner() -> tuple[str, dict[str, str]]:
 
 
 def reconcile_usage(session: SnowflakeSession) -> str:
-    """Meter served models, then bill every unsettled run and deployment; the hourly task calls this.
+    """Meter served models, bill every unsettled run and deployment, and log the summary at INFO.
+
+    :param session: Procedure session.
+    :return: The :func:`meter_deployments` and :func:`reconcile` summaries,
+        or why nothing ran.
+    """
+    summary = reconcile_summary(session)
+    logger.info("reconcile_usage: %s", summary)
+    return summary
+
+
+def reconcile_summary(session: SnowflakeSession) -> str:
+    """Meter served models, then bill every unsettled run and deployment.
 
     :param session: Procedure session.
     :return: The :func:`meter_deployments` and :func:`reconcile` summaries,

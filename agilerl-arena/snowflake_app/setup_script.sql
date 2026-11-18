@@ -429,3 +429,18 @@ CREATE OR ALTER TASK app_state.reconcile_usage_task
   SUSPEND_TASK_AFTER_NUM_FAILURES = 0
   AS CALL app_code.reconcile_usage();
 ALTER TASK app_state.reconcile_usage_task RESUME;
+
+-- Runs the task rather than reconcile_usage: a task run never overlaps another, and
+-- two overlapping calls could each open an Arena deployment for one service.
+CREATE OR REPLACE PROCEDURE app_code.reconcile_now()
+  RETURNS STRING
+  LANGUAGE SQL
+  AS
+$$
+BEGIN
+  EXECUTE TASK app_state.reconcile_usage_task;
+  RETURN 'Billing run queued after any run in progress. Its summary is logged at INFO.';
+END;
+$$;
+GRANT USAGE ON PROCEDURE app_code.reconcile_now()
+  TO APPLICATION ROLE app_admin;
