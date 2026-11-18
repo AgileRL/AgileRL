@@ -41,9 +41,10 @@ IN_LIST = re.compile(r"^hour_start_ms IN \(([\d, ]+)\)$")
 BEFORE = re.compile(r"^attempted_at < TO_TIMESTAMP_TZ\((\d+), 3\)$")
 SET_TIME = re.compile(r"(\w+) = (COALESCE\(\w+, )?TO_TIMESTAMP_TZ\((\d+), 3\)")
 SET_TEXT = re.compile(r"(\w+) = '((?:[^']|'')*)'")
-INSERT_ITEM = re.compile(
-    r"^INSERT INTO app_state\.usage_items \(kind, usage_id, opened_at, service_name\) "
-    r"VALUES \('(\w+)', '([^']*)', CURRENT_TIMESTAMP\(\), '([^']*)'\)$"
+MERGE_ITEM = re.compile(
+    r"^MERGE INTO app_state\.usage_items AS t USING \(SELECT '([^']*)' AS "
+    r"service_name\) AS s .* VALUES \('deployment', '([^']*)', "
+    r"TO_TIMESTAMP_TZ\((\d+), 3\), s\.service_name\)$"
 )
 MERGE_VALUES = re.compile(r"FROM VALUES (.*?)\) AS s ")
 MERGE_OWNER = re.compile(r"ON t\.kind = '([^']*)' AND t\.usage_id = '([^']*)'")
@@ -185,10 +186,21 @@ class BillingSession:
             )
         if statement == "SELECT CURRENT_ACCOUNT() AS ACCOUNT":
             return Result([Row(ACCOUNT="AB12345")])
-        if insert := INSERT_ITEM.match(statement):
-            kind, usage_id, service = insert.groups()
-            self.add_item(usage_id, NOW_MS, kind, service_name=service)
-            return Result([])
+        if merge := MERGE_ITEM.match(statement):
+            service, usage_id, opened_ms = merge.groups()
+            open_rows = [
+                row
+                for row in self.items
+                if row["kind"] == "deployment"
+                and row["service_name"] == service
+                and row["closed_at"] is None
+                and row["settled_at"] is None
+            ]
+            if not open_rows:
+                self.add_item(
+                    usage_id, int(opened_ms), "deployment", service_name=service
+                )
+            return Result([Row(**{"number of rows inserted": int(not open_rows)})])
         where_match = WHERE.search(statement)
         assert where_match is not None, statement
         where = where_match.group(1)
@@ -203,6 +215,14 @@ class BillingSession:
                         SERVICE_NAME=r["service_name"],
                         FIRST_SEEN_AT=r["first_seen_at"],
                     )
+                    for r in sorted(selected, key=lambda r: int(str(r["opened_at"])))
+                ]
+            )
+        if statement.startswith("SELECT usage_id, DATE_PART(EPOCH_MILLISECOND, "):
+            assert statement.endswith(" ORDER BY opened_at")
+            return Result(
+                [
+                    Row(USAGE_ID=r["usage_id"], OPENED_MS=r["opened_at"])
                     for r in sorted(selected, key=lambda r: int(str(r["opened_at"])))
                 ]
             )
