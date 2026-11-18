@@ -623,6 +623,10 @@ def publish_session(job_status: str = "DONE") -> AppSession:
                 [Row(name="inference", ingress_url="abc-app.snowflakecomputing.app")],
             ),
             exact("SELECT CURRENT_ACCOUNT() AS ACCOUNT", [Row(ACCOUNT="AB12345")]),
+            (
+                lambda s: s.startswith("MERGE INTO app_state.usage_items "),
+                [Row(**{"number of rows inserted": 1})],
+            ),
         ],
         staged={f"{RUN_DIR}/job.json": json.dumps(run)},
     )
@@ -699,16 +703,21 @@ class TestPublish:
         assert deployment_id == (
             f"QWEN_CHECKPOINT_2-{started_at.strftime('%Y%m%dT%H%M%SZ')}"
         )
-        recorded, insert = [s for s in session.statements if s.startswith("INSERT")]
+        [recorded] = [s for s in session.statements if s.startswith("INSERT")]
         assert recorded == (
             "INSERT INTO app_state.served_models (service_name, model, version, "
             "run_id, gpu_family, gpu_count) VALUES ('QWEN_CHECKPOINT_2', 'qwen', "
             f"'checkpoint_2', '{RUN_ID}', 'GPU_NV_S', 1)"
         )
+        [insert] = [s for s in session.statements if s.startswith("MERGE")]
         assert insert == (
-            "INSERT INTO app_state.usage_items (kind, usage_id, opened_at, "
-            f"service_name) VALUES ('deployment', '{deployment_id}', "
-            "CURRENT_TIMESTAMP(), 'QWEN_CHECKPOINT_2')"
+            "MERGE INTO app_state.usage_items AS t USING (SELECT "
+            "'QWEN_CHECKPOINT_2' AS service_name) AS s ON t.kind = 'deployment' "
+            "AND t.service_name = s.service_name AND t.closed_at IS NULL AND "
+            "t.settled_at IS NULL WHEN NOT MATCHED THEN INSERT (kind, usage_id, "
+            "opened_at, service_name) VALUES ('deployment', "
+            f"'{deployment_id}', TO_TIMESTAMP_TZ({int(started_at.timestamp())}000, "
+            "3), s.service_name)"
         )
         waits = [
             i
@@ -754,9 +763,9 @@ class TestPublish:
         insert = next(
             s
             for s in session.statements
-            if s.startswith("INSERT INTO app_state.usage_items")
+            if s.startswith("MERGE INTO app_state.usage_items")
         )
-        deployment_id = re.findall(r"'([^']*)'", insert)[1]
+        deployment_id = re.findall(r"'([^']*)'", insert)[3]
         drop = session.statements.index(
             "DROP SERVICE IF EXISTS app_state.QWEN_CHECKPOINT_2"
         )
