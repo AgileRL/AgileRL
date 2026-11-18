@@ -57,8 +57,9 @@ FAMILIES = (
     ],
 )
 GPU_NV_S_POOL = Row(
-    name="AGILERL_APP_GPU_GPU_NV_S", instance_family="GPU_NV_S", max_nodes=2
+    name="AGILERL_APP_ARENA_APP_GPU_GPU_NV_S", instance_family="GPU_NV_S", max_nodes=2
 )
+PREFIX = "SELECT app_code.object_prefix() AS PREFIX"
 
 
 def arena_replies(
@@ -97,10 +98,12 @@ def pools_session(
     pools: list[Row],
     services: dict[str, list[Row]] | None = None,
     setup_doc: dict[str, object] | None = None,
+    prefix: str = "AGILERL_APP_ARENA_APP_",
 ) -> FakeSession:
     doc_rows = [] if setup_doc is None else [Row(DOC=json.dumps(setup_doc))]
     routes: list[tuple[object, object]] = [
         FAMILIES,
+        (lambda s: s == PREFIX, [Row(PREFIX=prefix)]),
         (lambda s: s.startswith("SELECT $1 AS DOC FROM @app_state.runs"), doc_rows),
         (lambda s: s == "SHOW COMPUTE POOLS", pools),
     ]
@@ -353,8 +356,8 @@ class TestSetPools:
         text = set_pools(session, ["gpu_nv_m"], 8, None, None)
 
         assert text.splitlines()[:2] == [
-            "agilerl_app_broker_pool  CPU_X64_L  broker",
-            "agilerl_app_head_pool  CPU_X64_SL  head",
+            "AGILERL_APP_ARENA_APP_BROKER_POOL  CPU_X64_L  broker",
+            "AGILERL_APP_ARENA_APP_HEAD_POOL  CPU_X64_SL  head",
         ]
 
     def test_creates_broker_head_and_gpu_pools_with_the_app_names(self) -> None:
@@ -368,28 +371,28 @@ class TestSetPools:
         creates = [s for s in session.statements if s.startswith("CREATE COMPUTE POOL")]
         assert creates == [
             (
-                "CREATE COMPUTE POOL IF NOT EXISTS agilerl_app_broker_pool\n"
+                "CREATE COMPUTE POOL IF NOT EXISTS AGILERL_APP_ARENA_APP_BROKER_POOL\n"
                 "  MIN_NODES = 1\n  MAX_NODES = 4\n  INSTANCE_FAMILY = CPU_X64_L\n"
                 "  AUTO_RESUME = TRUE\n  AUTO_SUSPEND_SECS = 300\n"
                 "  INITIALLY_SUSPENDED = TRUE"
             ),
             (
-                "CREATE COMPUTE POOL IF NOT EXISTS agilerl_app_head_pool\n"
+                "CREATE COMPUTE POOL IF NOT EXISTS AGILERL_APP_ARENA_APP_HEAD_POOL\n"
                 "  MIN_NODES = 1\n  MAX_NODES = 4\n  INSTANCE_FAMILY = CPU_X64_SL\n"
                 "  AUTO_RESUME = TRUE\n  AUTO_SUSPEND_SECS = 300\n"
                 "  INITIALLY_SUSPENDED = TRUE"
             ),
             (
-                "CREATE COMPUTE POOL IF NOT EXISTS agilerl_app_gpu_GPU_NV_M\n"
+                "CREATE COMPUTE POOL IF NOT EXISTS AGILERL_APP_ARENA_APP_GPU_GPU_NV_M\n"
                 "  MIN_NODES = 1\n  MAX_NODES = 2\n  INSTANCE_FAMILY = GPU_NV_M\n"
                 "  AUTO_RESUME = TRUE\n  AUTO_SUSPEND_SECS = 300\n"
                 "  INITIALLY_SUSPENDED = TRUE"
             ),
         ]
         assert text == (
-            "agilerl_app_broker_pool  CPU_X64_L  broker\n"
-            "agilerl_app_head_pool  CPU_X64_SL  head\n"
-            "agilerl_app_gpu_GPU_NV_M  GPU_NV_M  max 8 GPUs  MAX_NODES 2"
+            "AGILERL_APP_ARENA_APP_BROKER_POOL  CPU_X64_L  broker\n"
+            "AGILERL_APP_ARENA_APP_HEAD_POOL  CPU_X64_SL  head\n"
+            "AGILERL_APP_ARENA_APP_GPU_GPU_NV_M  GPU_NV_M  max 8 GPUs  MAX_NODES 2"
         )
         assert not any("BUDGET" in s or "GRANT" in s for s in session.statements)
 
@@ -402,19 +405,22 @@ class TestSetPools:
         assert session.file.uploads == [
             {
                 "image": IMAGE,
-                "warehouse": "agilerl_app_wh",
+                "warehouse": "AGILERL_APP_ARENA_APP_WH",
                 "stage": "app_state.runs",
                 "metrics_table": "app_state.arena_metrics",
-                "external_access_integrations": ["agilerl_app_hf_eai"],
+                "external_access_integrations": ["AGILERL_APP_ARENA_APP_HF_EAI"],
                 "pools": {
                     "broker": {
-                        "pool": "agilerl_app_broker_pool",
+                        "pool": "AGILERL_APP_ARENA_APP_BROKER_POOL",
                         "family": "CPU_X64_L",
                     },
-                    "head": {"pool": "agilerl_app_head_pool", "family": "CPU_X64_SL"},
+                    "head": {
+                        "pool": "AGILERL_APP_ARENA_APP_HEAD_POOL",
+                        "family": "CPU_X64_SL",
+                    },
                     "gpu": {
                         "GPU_NV_S": {
-                            "pool": "agilerl_app_gpu_GPU_NV_S",
+                            "pool": "AGILERL_APP_ARENA_APP_GPU_GPU_NV_S",
                             "max_gpus": 2,
                             "gpus_per_node": 1,
                             "gpu_memory_gib": 24,
@@ -430,16 +436,25 @@ class TestSetPools:
         # Arrange
         saved = {
             "image": IMAGE,
-            "warehouse": "agilerl_app_wh",
+            "warehouse": "AGILERL_APP_ARENA_APP_WH",
             "stage": "app_state.runs",
             "metrics_table": "app_state.arena_metrics",
-            "external_access_integrations": ["agilerl_app_hf_eai", "arena_env_eai"],
+            "external_access_integrations": [
+                "AGILERL_APP_ARENA_APP_HF_EAI",
+                "arena_env_eai",
+            ],
             "pools": {
-                "broker": {"pool": "agilerl_app_broker_pool", "family": "CPU_X64_L"},
-                "head": {"pool": "agilerl_app_head_pool", "family": "CPU_X64_SL"},
+                "broker": {
+                    "pool": "AGILERL_APP_ARENA_APP_BROKER_POOL",
+                    "family": "CPU_X64_L",
+                },
+                "head": {
+                    "pool": "AGILERL_APP_ARENA_APP_HEAD_POOL",
+                    "family": "CPU_X64_SL",
+                },
                 "gpu": {
                     "GPU_NV_S": {
-                        "pool": "agilerl_app_gpu_GPU_NV_S",
+                        "pool": "AGILERL_APP_ARENA_APP_GPU_GPU_NV_S",
                         "max_gpus": 5,
                         "gpus_per_node": 1,
                         "gpu_memory_gib": 24,
@@ -454,16 +469,16 @@ class TestSetPools:
 
         # Assert
         assert (
-            "ALTER COMPUTE POOL agilerl_app_gpu_GPU_NV_S SET MAX_NODES = 5"
+            "ALTER COMPUTE POOL AGILERL_APP_ARENA_APP_GPU_GPU_NV_S SET MAX_NODES = 5"
             in session.statements
         )
         assert not any(
-            "CREATE COMPUTE POOL IF NOT EXISTS agilerl_app_gpu_GPU_NV_S" in s
+            "CREATE COMPUTE POOL IF NOT EXISTS AGILERL_APP_ARENA_APP_GPU_GPU_NV_S" in s
             for s in session.statements
         )
         [doc] = session.file.uploads
         assert doc["external_access_integrations"] == [
-            "agilerl_app_hf_eai",
+            "AGILERL_APP_ARENA_APP_HF_EAI",
             "arena_env_eai",
         ]
         assert doc["pools"]["gpu"]["GPU_NV_S"]["max_gpus"] == 5
@@ -474,18 +489,49 @@ class TestSetPools:
         text = set_pools(session, ["GPU_NV_M"], 4, "CPU_X64_L", "CPU_X64_SL")
 
         assert session.statements[-2:] == [
-            "ALTER COMPUTE POOL AGILERL_APP_GPU_GPU_NV_S STOP ALL",
-            "DROP COMPUTE POOL AGILERL_APP_GPU_GPU_NV_S",
+            "ALTER COMPUTE POOL AGILERL_APP_ARENA_APP_GPU_GPU_NV_S STOP ALL",
+            "DROP COMPUTE POOL AGILERL_APP_ARENA_APP_GPU_GPU_NV_S",
         ]
-        assert text.endswith("AGILERL_APP_GPU_GPU_NV_S  dropped")
+        assert text.endswith("AGILERL_APP_ARENA_APP_GPU_GPU_NV_S  dropped")
         assert list(session.file.uploads[0]["pools"]["gpu"]) == ["GPU_NV_M"]
+
+    def test_a_second_app_names_its_pools_warehouse_and_integration_after_itself(
+        self,
+    ) -> None:
+        # Arrange
+        session = pools_session([GPU_NV_S_POOL], prefix="AGILERL_APP_ARENA_B_")
+
+        # Act
+        text = set_pools(session, ["GPU_NV_S"], 1, "CPU_X64_L", "CPU_X64_SL")
+
+        # Assert
+        assert text.splitlines() == [
+            "AGILERL_APP_ARENA_B_BROKER_POOL  CPU_X64_L  broker",
+            "AGILERL_APP_ARENA_B_HEAD_POOL  CPU_X64_SL  head",
+            "AGILERL_APP_ARENA_B_GPU_GPU_NV_S  GPU_NV_S  max 1 GPUs  MAX_NODES 1",
+        ]
+        assert not any("AGILERL_APP_ARENA_APP_" in s for s in session.statements)
+        [doc] = session.file.uploads
+        assert doc["warehouse"] == "AGILERL_APP_ARENA_B_WH"
+        assert doc["external_access_integrations"] == ["AGILERL_APP_ARENA_B_HF_EAI"]
+
+    def test_keeps_a_gpu_pool_from_before_pools_were_named_per_app(self) -> None:
+        old = Row(
+            name="AGILERL_APP_GPU_GPU_NV_S", instance_family="GPU_NV_S", max_nodes=2
+        )
+        session = pools_session([old])
+
+        text = set_pools(session, ["GPU_NV_M"], 4, "CPU_X64_L", "CPU_X64_SL")
+
+        assert not any(s.startswith("DROP") for s in session.statements)
+        assert "dropped" not in text
 
     def test_refuses_to_shrink_under_a_running_service(self) -> None:
         # Arrange
         running = service_row("RUNNING", 2)
         session = pools_session(
             [GPU_NV_S_POOL],
-            services={"agilerl_app_gpu_GPU_NV_S": [running]},
+            services={"AGILERL_APP_ARENA_APP_GPU_GPU_NV_S": [running]},
         )
 
         # Act
@@ -505,12 +551,12 @@ class TestSetPools:
     def test_refuses_to_drop_a_leftover_pool_with_a_running_service(self) -> None:
         running = service_row("RUNNING", 1)
         session = pools_session(
-            [GPU_NV_S_POOL], services={"AGILERL_APP_GPU_GPU_NV_S": [running]}
+            [GPU_NV_S_POOL], services={"AGILERL_APP_ARENA_APP_GPU_GPU_NV_S": [running]}
         )
 
         with pytest.raises(
             ValueError,
-            match=r"AGILERL_APP_GPU_GPU_NV_S is no longer listed, so it would be dropped\.\n"
+            match=r"AGILERL_APP_ARENA_APP_GPU_GPU_NV_S is no longer listed, so it would be dropped\.\n"
             r"APP\.APP_STATE\.ARENA_RUN_1_WORKERS is using 1 nodes\.",
         ):
             set_pools(session, ["GPU_NV_M"], 4, "CPU_X64_L", "CPU_X64_SL")
@@ -520,13 +566,13 @@ class TestSetPools:
     def test_a_finished_service_does_not_block_a_shrink(self) -> None:
         done = service_row("DONE", 2)
         session = pools_session(
-            [GPU_NV_S_POOL], services={"agilerl_app_gpu_GPU_NV_S": [done]}
+            [GPU_NV_S_POOL], services={"AGILERL_APP_ARENA_APP_GPU_GPU_NV_S": [done]}
         )
 
         set_pools(session, ["GPU_NV_S"], 1, "CPU_X64_L", "CPU_X64_SL")
 
         assert (
-            "ALTER COMPUTE POOL agilerl_app_gpu_GPU_NV_S SET MAX_NODES = 1"
+            "ALTER COMPUTE POOL AGILERL_APP_ARENA_APP_GPU_GPU_NV_S SET MAX_NODES = 1"
             in session.statements
         )
 
@@ -552,11 +598,15 @@ class TestSetPools:
 
     def test_refuses_a_pool_that_uses_another_family(self) -> None:
         other = Row(
-            name="AGILERL_APP_HEAD_POOL", instance_family="CPU_X64_L", max_nodes=4
+            name="AGILERL_APP_ARENA_APP_HEAD_POOL",
+            instance_family="CPU_X64_L",
+            max_nodes=4,
         )
         session = pools_session([other])
 
-        with pytest.raises(ValueError, match="Pool agilerl_app_head_pool is CPU_X64_L"):
+        with pytest.raises(
+            ValueError, match="Pool AGILERL_APP_ARENA_APP_HEAD_POOL is CPU_X64_L"
+        ):
             set_pools(session, ["GPU_NV_S"], 2, "CPU_X64_L", "CPU_X64_SL")
 
         assert session.file.uploads == []

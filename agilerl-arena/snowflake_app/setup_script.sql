@@ -37,15 +37,33 @@ CREATE SECRET IF NOT EXISTS app_state.arena_base_url
   TYPE = GENERIC_STRING
   SECRET_STRING = '';
 
+CREATE OR ALTER VERSIONED SCHEMA app_code;
+GRANT USAGE ON SCHEMA app_code TO APPLICATION ROLE app_user;
+-- Direct as well as through app_user: app_admin holds the reference callback.
+GRANT USAGE ON SCHEMA app_code TO APPLICATION ROLE app_admin;
+
+-- Account-level objects are named per app, so installs in one account do not collide.
+-- The job code takes only unquoted identifiers, so a quoted app name maps to A-Z, 0-9 and _.
+CREATE OR REPLACE FUNCTION app_code.object_prefix()
+  RETURNS STRING
+  AS
+$$
+  'AGILERL_APP_' || REGEXP_REPLACE(UPPER(CURRENT_DATABASE()), '[^A-Z0-9_]', '_') || '_'
+$$;
+
 -- Setup reruns on every upgrade, so an integration the app already owns is kept;
 -- one it does not own fails setup, because an existing integration keeps its own network rules.
 EXECUTE IMMEDIATE $$
 DECLARE
+  hf_integration STRING;
+  arena_integration STRING;
   trial_account EXCEPTION (-20509, 'Snowpark Container Services and external access integrations are not available on trial accounts (Snowflake error 509009). Add a payment method to the account, then install the app again.');
-  name_taken EXCEPTION (-20510, 'An integration named agilerl_app_hf_eai or agilerl_app_arena_eai already exists in this account and the app does not own it. Rename or drop it, then install the app again.');
+  name_taken EXCEPTION (-20510, 'An integration named AGILERL_APP_<app name>_HF_EAI or AGILERL_APP_<app name>_ARENA_EAI already exists in this account and the app does not own it. Rename or drop it, or install the app under another name.');
 BEGIN
+  SELECT app_code.object_prefix() || 'HF_EAI', app_code.object_prefix() || 'ARENA_EAI'
+    INTO :hf_integration, :arena_integration;
   BEGIN
-    CREATE EXTERNAL ACCESS INTEGRATION agilerl_app_hf_eai
+    CREATE EXTERNAL ACCESS INTEGRATION IDENTIFIER(:hf_integration)
       ALLOWED_NETWORK_RULES = (app_state.hf_egress)
       ENABLED = TRUE;
   EXCEPTION
@@ -57,14 +75,14 @@ BEGIN
         RAISE;
       END IF;
       BEGIN
-        DESCRIBE INTEGRATION agilerl_app_hf_eai;
+        DESCRIBE INTEGRATION IDENTIFIER(:hf_integration);
       EXCEPTION
         WHEN OTHER THEN
           RAISE name_taken;
       END;
   END;
   BEGIN
-    CREATE EXTERNAL ACCESS INTEGRATION agilerl_app_arena_eai
+    CREATE EXTERNAL ACCESS INTEGRATION IDENTIFIER(:arena_integration)
       ALLOWED_NETWORK_RULES = (app_state.arena_api_egress)
       ENABLED = TRUE;
   EXCEPTION
@@ -73,22 +91,21 @@ BEGIN
         RAISE;
       END IF;
       BEGIN
-        DESCRIBE INTEGRATION agilerl_app_arena_eai;
+        DESCRIBE INTEGRATION IDENTIFIER(:arena_integration);
       EXCEPTION
         WHEN OTHER THEN
           RAISE name_taken;
       END;
   END;
+  -- A procedure may read only the secrets its integration allows.
+  ALTER EXTERNAL ACCESS INTEGRATION IDENTIFIER(:arena_integration) SET
+    ALLOWED_AUTHENTICATION_SECRETS = (
+      app_state.arena_org_key,
+      app_state.arena_external_user_id,
+      app_state.arena_base_url
+    );
 END;
 $$;
-
--- A procedure may read only the secrets its integration allows.
-ALTER EXTERNAL ACCESS INTEGRATION agilerl_app_arena_eai SET
-  ALLOWED_AUTHENTICATION_SECRETS = (
-    app_state.arena_org_key,
-    app_state.arena_external_user_id,
-    app_state.arena_base_url
-  );
 
 ALTER APPLICATION SET SPECIFICATION hf_access
   TYPE = EXTERNAL_ACCESS
@@ -175,16 +192,18 @@ GRANT SELECT ON TABLE app_state.billed_hours TO APPLICATION ROLE app_admin;
 GRANT SELECT ON TABLE app_state.served_models TO APPLICATION ROLE app_admin;
 
 -- Compute pools are created by app_code.set_pools, not here: an idle pool bills.
-CREATE WAREHOUSE IF NOT EXISTS agilerl_app_wh
-  WAREHOUSE_SIZE = XSMALL
-  AUTO_SUSPEND = 60
-  AUTO_RESUME = TRUE
-  INITIALLY_SUSPENDED = TRUE;
-
-CREATE OR ALTER VERSIONED SCHEMA app_code;
-GRANT USAGE ON SCHEMA app_code TO APPLICATION ROLE app_user;
--- Direct as well as through app_user: app_admin holds the reference callback.
-GRANT USAGE ON SCHEMA app_code TO APPLICATION ROLE app_admin;
+EXECUTE IMMEDIATE $$
+DECLARE
+  warehouse STRING;
+BEGIN
+  SELECT app_code.object_prefix() || 'WH' INTO :warehouse;
+  CREATE WAREHOUSE IF NOT EXISTS IDENTIFIER(:warehouse)
+    WAREHOUSE_SIZE = XSMALL
+    AUTO_SUSPEND = 60
+    AUTO_RESUME = TRUE
+    INITIALLY_SUSPENDED = TRUE;
+END;
+$$;
 
 CREATE OR REPLACE PROCEDURE app_code.register_reference(
     ref_name STRING,
@@ -218,7 +237,6 @@ CREATE OR REPLACE PROCEDURE app_code.configure(
     'requests-toolbelt', 'rich'
   )
   IMPORTS = ('/app_code/arena_app.py', '/agilerl_arena.zip')
-  EXTERNAL_ACCESS_INTEGRATIONS = (agilerl_app_arena_eai)
   HANDLER = 'arena_app.configure';
 GRANT USAGE ON PROCEDURE app_code.configure(STRING, STRING, STRING)
   TO APPLICATION ROLE app_admin;
@@ -262,12 +280,6 @@ CREATE OR REPLACE PROCEDURE app_code.submit(
     'requests-toolbelt', 'rich'
   )
   IMPORTS = ('/app_code/arena_app.py', '/agilerl_arena.zip')
-  EXTERNAL_ACCESS_INTEGRATIONS = (agilerl_app_arena_eai)
-  SECRETS = (
-    'org_key' = app_state.arena_org_key,
-    'external_user_id' = app_state.arena_external_user_id,
-    'base_url' = app_state.arena_base_url
-  )
   HANDLER = 'arena_app.submit';
 GRANT USAGE ON PROCEDURE app_code.submit(STRING, NUMBER, STRING, STRING, STRING, STRING, NUMBER, STRING)
   TO APPLICATION ROLE app_admin;
@@ -337,12 +349,6 @@ CREATE OR REPLACE PROCEDURE app_code.publish(
     'requests-toolbelt', 'rich'
   )
   IMPORTS = ('/app_code/arena_app.py', '/agilerl_arena.zip')
-  EXTERNAL_ACCESS_INTEGRATIONS = (agilerl_app_arena_eai)
-  SECRETS = (
-    'org_key' = app_state.arena_org_key,
-    'external_user_id' = app_state.arena_external_user_id,
-    'base_url' = app_state.arena_base_url
-  )
   HANDLER = 'arena_app.publish';
 GRANT USAGE ON PROCEDURE app_code.publish(STRING, STRING, STRING, NUMBER, BOOLEAN, NUMBER, STRING, NUMBER)
   TO APPLICATION ROLE app_admin;
@@ -378,12 +384,6 @@ CREATE OR REPLACE PROCEDURE app_code.unpublish(
     'requests-toolbelt', 'rich'
   )
   IMPORTS = ('/app_code/arena_app.py', '/agilerl_arena.zip')
-  EXTERNAL_ACCESS_INTEGRATIONS = (agilerl_app_arena_eai)
-  SECRETS = (
-    'org_key' = app_state.arena_org_key,
-    'external_user_id' = app_state.arena_external_user_id,
-    'base_url' = app_state.arena_base_url
-  )
   HANDLER = 'arena_app.unpublish';
 GRANT USAGE ON PROCEDURE app_code.unpublish(STRING, STRING, BOOLEAN)
   TO APPLICATION ROLE app_admin;
@@ -399,13 +399,23 @@ CREATE OR REPLACE PROCEDURE app_code.reconcile_usage()
     'requests-toolbelt', 'rich'
   )
   IMPORTS = ('/app_code/arena_app.py', '/agilerl_arena.zip')
-  EXTERNAL_ACCESS_INTEGRATIONS = (agilerl_app_arena_eai)
-  SECRETS = (
-    'org_key' = app_state.arena_org_key,
-    'external_user_id' = app_state.arena_external_user_id,
-    'base_url' = app_state.arena_base_url
-  )
   HANDLER = 'arena_app.reconcile_usage';
+
+-- The Arena integration is named per app, so the Arena procedures get it and their secrets here.
+EXECUTE IMMEDIATE $$
+DECLARE
+  arena_access STRING;
+  secrets STRING DEFAULT ' SECRETS = (''org_key'' = app_state.arena_org_key, ''external_user_id'' = app_state.arena_external_user_id, ''base_url'' = app_state.arena_base_url)';
+BEGIN
+  SELECT ' SET EXTERNAL_ACCESS_INTEGRATIONS = (' || app_code.object_prefix() || 'ARENA_EAI)'
+    INTO :arena_access;
+  EXECUTE IMMEDIATE 'ALTER PROCEDURE app_code.configure(STRING, STRING, STRING)' || arena_access;
+  EXECUTE IMMEDIATE 'ALTER PROCEDURE app_code.submit(STRING, NUMBER, STRING, STRING, STRING, STRING, NUMBER, STRING)' || arena_access || secrets;
+  EXECUTE IMMEDIATE 'ALTER PROCEDURE app_code.publish(STRING, STRING, STRING, NUMBER, BOOLEAN, NUMBER, STRING, NUMBER)' || arena_access || secrets;
+  EXECUTE IMMEDIATE 'ALTER PROCEDURE app_code.unpublish(STRING, STRING, BOOLEAN)' || arena_access || secrets;
+  EXECUTE IMMEDIATE 'ALTER PROCEDURE app_code.reconcile_usage()' || arena_access || secrets;
+END;
+$$;
 
 -- manifest.yml's version_initializer. Snowflake calls the previous version's after a
 -- failed upgrade, whose setup script may already have suspended the task.
