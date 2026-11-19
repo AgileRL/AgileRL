@@ -1262,8 +1262,8 @@ class TestDeviceFromResourceClass:
         assert gb300.name == "NVIDIA GB300"
         assert b300.name == "NVIDIA B300"
         assert gb300.total_gib == 279
-        assert b300.total_gib == 288
-        assert (gb300.cc_major, gb300.cc_minor) == (10, 0)
+        assert b300.total_gib == 269
+        assert (gb300.cc_major, gb300.cc_minor) == (10, 3)
         assert gb300.bf16_tflops == 2500
         assert gb300.memory_gb_per_second == 8000
         assert gb300.nvlink is True
@@ -1275,13 +1275,69 @@ class TestDeviceFromResourceClass:
         assert info.name == "NVIDIA B300"
         assert b200.name == "NVIDIA B200"
         assert info is not b200
-        assert info.total_gib == 288
-        assert (info.cc_major, info.cc_minor) == (10, 0)
+        assert info.total_gib == 269
+        assert (info.cc_major, info.cc_minor) == (10, 3)
         assert info.bf16_tflops == 2250
         assert info.memory_gb_per_second == 8000
         assert info.all_reduce_gb_per_second == 700
         assert info.all_reduce_latency_us == 10
         assert info.nvlink is True
+
+    @pytest.mark.parametrize(
+        ("node_label", "name"),
+        [
+            ("NVIDIA-B200", "NVIDIA B200"),
+            ("NVIDIA-B200-SHARED", "NVIDIA B200"),
+            ("NVIDIA-B300", "NVIDIA B300"),
+            ("NVIDIA-B300-SXM6-AC", "NVIDIA B300"),
+            ("NVIDIA-B300-SXM6-AC-SHARED", "NVIDIA B300"),
+            ("NVIDIA-GB300", "NVIDIA GB300"),
+            ("NVIDIA-GB300-SHARED", "NVIDIA GB300"),
+        ],
+    )
+    def test_gpu_operator_node_labels_resolve(self, node_label, name):
+        assert lookup_gpu(node_label).name == name
+
+    @pytest.mark.parametrize(
+        ("gpu_type", "total_gib", "capability", "bf16_tflops"),
+        [
+            ("NVIDIA-B200", 180, (10, 0), 2250),
+            ("NVIDIA-B300", 269, (10, 3), 2250),
+            ("NVIDIA-GB300", 279, (10, 3), 2500),
+        ],
+    )
+    def test_blackwell_datacenter_specs(
+        self, gpu_type, total_gib, capability, bf16_tflops
+    ):
+        info = lookup_gpu(gpu_type)
+
+        assert info.total_gib == total_gib
+        assert (info.cc_major, info.cc_minor) == capability
+        assert info.bf16_tflops == bf16_tflops
+        assert info.memory_gb_per_second == 8000
+        assert info.all_reduce_gb_per_second == 700
+        assert info.all_reduce_latency_us == 10
+        assert info.nvlink is True
+
+    @pytest.mark.parametrize(
+        ("node_label", "total_gib"),
+        [("NVIDIA-B200", 180), ("NVIDIA-B300", 269), ("NVIDIA-GB300", 279)],
+    )
+    def test_blackwell_node_label_sizes_without_gram_per_gpu(
+        self, node_label, total_gib
+    ):
+        device = device_spec_from_resource_class(
+            {"name": "blackwell", "gpu_type": node_label, "num_gpus": 4}
+        )
+
+        assert device.total_bytes == int(total_gib * GiB)
+
+    def test_b300_physical_gram_does_not_raise_the_usable_size(self):
+        device = gpu_device_spec("NVIDIA-B300-SXM6-AC", 288)
+
+        assert device.name == "NVIDIA B300"
+        assert device.total_bytes == 269 * GiB
+        assert device.compute_capability == (10, 3)
 
     def test_rtx6000_type_strings_hit_the_training_row(self):
         pro = lookup_gpu("NVIDIA RTX PRO 6000 Blackwell Server Edition")

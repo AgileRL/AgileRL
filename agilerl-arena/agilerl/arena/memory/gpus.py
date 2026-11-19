@@ -58,17 +58,19 @@ class GpuInfo(BaseModel):
 
 # First substring match. A token that contains another stays above it.
 # ``RTXPRO6000`` does not contain ``RTX6000``. ``total_gib`` is CUDA-visible
-# memory. Throughput is datasheet dense BF16. All-reduce is one 8-GPU node;
+# memory; the Blackwell rows use NVIDIA's usable figure, not a measurement.
+# Throughput is datasheet dense BF16. All-reduce is one 8-GPU node;
 # B200 bandwidth and every latency are assumed. Below SM 8.0 there are none.
 GPU_CATALOGUE: tuple[tuple[str, GpuInfo], ...] = (
     (
         "GB300",
-        # GB300 NVL72 GPU: 279 GB HBM3e at 8 TB/s. Dense BF16 is half of 5 PFLOPS.
+        # GB300 NVL72: 20 TB HBM3e and 576 TB/s over 72 GPUs, 360 PFLOPS sparse
+        # BF16. Grace (arm64) host; NVLink 5 at 1.8 TB/s spans the 72-GPU rack.
         GpuInfo(
             name="NVIDIA GB300",
             total_gib=279,
             cc_major=10,
-            cc_minor=0,
+            cc_minor=3,
             bf16_tflops=2500,
             memory_gb_per_second=8000,
             all_reduce_gb_per_second=700,
@@ -78,13 +80,14 @@ GPU_CATALOGUE: tuple[tuple[str, GpuInfo], ...] = (
     ),
     (
         "B300",
-        # 288 GB is the HGX HBM3e capacity. Dense BF16 is the B200 peak.
+        # 288 GB HBM3e is physical; the full-GPU MIG profile is 7g.269gb. HGX
+        # B300: 36 PFLOPS sparse BF16 over 8 GPUs, NVLink 5 at 1.8 TB/s.
         # All-reduce is assumed the same way as B200.
         GpuInfo(
             name="NVIDIA B300",
-            total_gib=288,
+            total_gib=269,
             cc_major=10,
-            cc_minor=0,
+            cc_minor=3,
             bf16_tflops=2250,
             memory_gb_per_second=8000,
             all_reduce_gb_per_second=700,
@@ -94,6 +97,8 @@ GPU_CATALOGUE: tuple[tuple[str, GpuInfo], ...] = (
     ),
     (
         "B200",
+        # DGX B200: 1,440 GB and 64 TB/s over 8 GPUs (MIG 7g.180gb). HGX B200:
+        # 36 PFLOPS sparse BF16 over 8 GPUs, NVLink 5 at 1.8 TB/s.
         GpuInfo(
             name="NVIDIA B200",
             total_gib=180,
