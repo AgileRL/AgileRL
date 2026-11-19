@@ -74,8 +74,10 @@ access integration allows it. Setup creates two:
 The broker has no egress. ``arena snowflake grant --host`` adds a third
 integration, ``arena_env_eai``, for an RL environment outside the account.
 
-The head sends Arena exactly this, with ``Authorization: Bearer <org key>``
-and ``X-External-User-Id: <external user id>``:
+Arena answers 426 when the version header is missing or older than the release
+it supports. The head sends Arena exactly this, with ``Authorization: Bearer
+<org key>``, ``X-External-User-Id: <external user id>`` and
+``X-Arena-Client-Version: <agilerl-arena version>``:
 
 1. ``GET /api/cli/v1/capabilities`` when the head starts. Training stops
    unless Arena says Snowflake training is on for the organisation.
