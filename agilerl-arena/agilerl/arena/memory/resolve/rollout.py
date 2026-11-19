@@ -92,9 +92,21 @@ MULTI_TURN_SPECULATIVE_CONFIG: dict[str, Any] = {
 }
 """vLLM ``speculative_config`` a drafting rollout engine starts with by default."""
 
+NGRAM_DRAFT_MAX_DECODE_TOKENS = 512
+"""Widest full decode step default drafting allows.
+
+vLLM 0.32 captures uniform decode steps up to 512 tokens by default and
+1024 on data-center Blackwell. Its start-up rejection sampler profiles one
+draft per sequence, so default drafting stays within 512 on every GPU.
+"""
+
 
 def drafts_by_default(
-    multi_turn: bool, hybrid_ssm: bool, min_p: float, logit_bias: bool
+    multi_turn: bool,
+    hybrid_ssm: bool,
+    min_p: float,
+    logit_bias: bool,
+    max_num_seqs: int,
 ) -> bool:
     """Whether a rollout engine drafts with n-gram lookup when ``speculative_config`` is omitted.
 
@@ -104,19 +116,29 @@ def drafts_by_default(
     n-gram drafts. Hybrid recurrent-state models decode without drafting,
     since vLLM must roll their state back past rejected drafts. vLLM rejects
     every request that sets :func:`drafting_rejected_sampling` on a drafting
-    engine.
+    engine. A drafting decode step runs every draft token of every sequence.
+    Default drafting stays within :data:`NGRAM_DRAFT_MAX_DECODE_TOKENS`:
+    vLLM 0.32 captures that width by default and 1024 on data-center
+    Blackwell, and its start-up profile runs the rejection sampler with one
+    draft per sequence.
 
     :param multi_turn: An episode can run more than one turn.
     :param hybrid_ssm: The model has Mamba or linear-attention layers.
     :param min_p: The algorithm's ``min_p``.
     :param logit_bias: Rollout requests carry a ``logit_bias``.
+    :param max_num_seqs: Sequences the engine decodes at once.
     :return: ``True`` for a multi-turn engine on an attention-only model
-        whose requests set neither ``min_p`` nor ``logit_bias``.
+        whose requests set neither ``min_p`` nor ``logit_bias`` and whose
+        full drafting decode step fits :data:`NGRAM_DRAFT_MAX_DECODE_TOKENS`.
     """
+    step_tokens = max_num_seqs * (
+        1 + MULTI_TURN_SPECULATIVE_CONFIG["num_speculative_tokens"]
+    )
     return (
         multi_turn
         and not hybrid_ssm
         and not drafting_rejected_sampling(min_p, logit_bias)
+        and step_tokens <= NGRAM_DRAFT_MAX_DECODE_TOKENS
     )
 
 
