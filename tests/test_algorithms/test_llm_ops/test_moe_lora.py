@@ -52,6 +52,7 @@ from agilerl.utils.llm_utils import (
     expert_lora_vllm_key_map,
     filter_peft_state_dict_for_vllm_lora,
 )
+from agilerl.utils.stochastic_round import bf16_round_step, cast_exported_adapter
 
 if HAS_LIGER_KERNEL:
     from liger_kernel.transformers.swiglu import LigerExperts
@@ -2671,7 +2672,7 @@ class TestRoutedExpertDtypeAndDTensor:
         rows = torch.ones(2, 4)
 
         chunked = moe_routed.ChunkedLora(
-            lora, moe_adapters.lora_operands(*lora.stacked, 1.0), None, None
+            lora, moe_adapters.lora_operands(*lora.stacked, 1.0, rows.dtype), None, None
         )
 
         moe_routed._add_expert_loras(
@@ -2827,6 +2828,44 @@ class TestLoraExpertsRecomputeGuards:
         assert torch.equal(hidden.grad, torch.zeros_like(hidden))
 
 
+class TestLoraOperands:
+    def test_a_operand_is_the_scaled_rollout_adapter_draw(self):
+        # Arrange
+        torch.manual_seed(0)
+        scaling = 2.0
+        lora_a = (torch.randn(NUM_EXPERTS, 4, HIDDEN) * 1e-2).requires_grad_()
+        lora_b = torch.randn(NUM_EXPERTS, INTERMEDIATE, 4, requires_grad=True)
+        bf16_round_step.set(7)
+        rollout_a = cast_exported_adapter(lora_a) * scaling
+
+        # Act
+        a_operand, _ = moe_adapters.lora_operands(
+            lora_a, lora_b, scaling, torch.bfloat16
+        )
+
+        # Assert
+        assert a_operand.dtype is torch.bfloat16
+        torch.testing.assert_close(
+            a_operand, rollout_a.transpose(-2, -1), rtol=0, atol=0
+        )
+
+    def test_a_operand_keeps_the_gradient(self):
+        # Arrange
+        scaling = 2.0
+        lora_a = torch.randn(NUM_EXPERTS, 4, HIDDEN, requires_grad=True)
+        lora_b = torch.randn(NUM_EXPERTS, INTERMEDIATE, 4, requires_grad=True)
+        bf16_round_step.set(7)
+
+        # Act
+        a_operand, _ = moe_adapters.lora_operands(
+            lora_a, lora_b, scaling, torch.bfloat16
+        )
+        (grad,) = torch.autograd.grad(a_operand.float().sum(), lora_a)
+
+        # Assert
+        torch.testing.assert_close(grad, torch.full_like(lora_a, scaling))
+
+
 class TestLowRankDelta:
     def test_matches_per_expert_reference(self):
         # Arrange
@@ -2848,7 +2887,7 @@ class TestLowRankDelta:
         )
 
         # Act
-        operands = moe_adapters.lora_operands(lora_a, lora_b, scaling)
+        operands = moe_adapters.lora_operands(lora_a, lora_b, scaling, rows.dtype)
         delta = moe_adapters.low_rank_delta(rows, *operands, offs)
         grads = torch.autograd.grad(delta.square().sum(), (rows, lora_a, lora_b))
 

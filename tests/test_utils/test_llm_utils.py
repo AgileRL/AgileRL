@@ -144,6 +144,7 @@ from agilerl.utils.llm_utils import (
     write_lora_adapters,
     write_safetensors,
 )
+from agilerl.utils.stochastic_round import bf16_round_step, stochastic_round_bf16
 from tests import TINY_LLM_FIXTURE_PATH
 from tests.helper_functions import skip_torch_compile_on_windows_cpu
 from tests.rank_launch import run_ranks
@@ -4279,6 +4280,108 @@ class TestSavePeftAdapterForVllmRollout:
         saved = calls["saved_tensors"]
         assert saved["model.layers.0.q_proj.linear.lora_A.weight"] is plain_a
         assert saved["model.layers.0.q_proj.linear.lora_B.weight"] is plain_b
+
+    def test_active_step_writes_the_shared_bf16_draw(self, monkeypatch, tmp_path):
+        # Arrange
+        grid = torch.tensor(0.025).to(torch.bfloat16)
+        upper = torch.nextafter(grid, torch.tensor(float("inf"), dtype=torch.bfloat16))
+        master = ((grid.float() + upper.float()) / 2).expand(2, 1).contiguous().clone()
+        master.requires_grad_(True)
+        before = master.detach().clone()
+        nearest = master.to(torch.bfloat16)
+        step = next(
+            candidate
+            for candidate in range(64)
+            if not torch.equal(stochastic_round_bf16(master, candidate), nearest)
+        )
+        key = "model.layers.0.q_proj.linear.lora_A.weight"
+        calls = self._install_fakes(monkeypatch, {key: master})
+        token = bf16_round_step.set(step)
+
+        # Act
+        try:
+            save_peft_adapter_for_vllm_rollout(self._peft_model(), tmp_path, "actor")
+        finally:
+            bf16_round_step.reset(token)
+
+        # Assert
+        saved = calls["saved_tensors"][key]
+        assert saved.dtype is torch.bfloat16
+        assert torch.equal(saved, stochastic_round_bf16(master, step))
+        assert not torch.equal(saved, nearest)
+        assert torch.equal(master, before)
+
+    def test_active_step_leaves_a_frozen_fp32_adapter_unchanged(
+        self, monkeypatch, tmp_path
+    ):
+        # Arrange
+        frozen = torch.tensor([0.025, 0.05], dtype=torch.float32)
+        key = "model.layers.0.q_proj.linear.lora_A.weight"
+        calls = self._install_fakes(monkeypatch, {key: frozen})
+        token = bf16_round_step.set(3)
+
+        # Act
+        try:
+            save_peft_adapter_for_vllm_rollout(self._peft_model(), tmp_path, "actor")
+        finally:
+            bf16_round_step.reset(token)
+
+        # Assert
+        assert calls["saved_tensors"][key] is frozen
+
+    def test_active_step_leaves_a_bf16_adapter_unchanged(self, monkeypatch, tmp_path):
+        # Arrange
+        weight = torch.randn(2, 2, dtype=torch.bfloat16, requires_grad=True)
+        key = "model.layers.0.q_proj.linear.lora_A.weight"
+        calls = self._install_fakes(monkeypatch, {key: weight})
+        token = bf16_round_step.set(3)
+
+        # Act
+        try:
+            save_peft_adapter_for_vllm_rollout(self._peft_model(), tmp_path, "actor")
+        finally:
+            bf16_round_step.reset(token)
+
+        # Assert
+        assert calls["saved_tensors"][key] is weight
+
+    def test_exported_file_matches_the_trainer_draw(self, tmp_path):
+        # Arrange
+        peft_model = _tiny_nemotron_h_expert_lora(wrap_blocks=False)
+        grid = torch.tensor(0.025).to(torch.bfloat16)
+        upper = torch.nextafter(grid, torch.tensor(float("inf"), dtype=torch.bfloat16))
+        mid = float((grid.float() + upper.float()) / 2)
+        with torch.no_grad():
+            for name, param in peft_model.named_parameters():
+                if (
+                    param.requires_grad
+                    and param.dtype is torch.float32
+                    and ".lora_" in name
+                ):
+                    param.fill_(mid)
+        sample = torch.tensor(mid, dtype=torch.float32)
+        nearest = sample.to(torch.bfloat16)
+        step = next(
+            candidate
+            for candidate in range(64)
+            if not torch.equal(stochastic_round_bf16(sample, candidate), nearest)
+        )
+        token = bf16_round_step.set(step)
+
+        # Act
+        try:
+            out = save_peft_adapter_for_vllm_rollout(peft_model, tmp_path, "actor")
+        finally:
+            bf16_round_step.reset(token)
+
+        # Assert
+        saved = load_file(out / "adapter_model.safetensors")
+        assert saved
+        for tensor in saved.values():
+            source = torch.full(tensor.shape, mid, dtype=torch.float32)
+            assert tensor.dtype is torch.bfloat16
+            assert torch.equal(tensor, stochastic_round_bf16(source, step))
+            assert not torch.equal(tensor, source.to(torch.bfloat16))
 
     @pytest.mark.parametrize("wrap_blocks", [False, True], ids=["plain", "wrapped"])
     def test_exports_every_expert_lora_tensor_in_vllm_layout(

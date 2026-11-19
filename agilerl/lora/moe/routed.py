@@ -92,7 +92,9 @@ def _chunked_loras(
         if lora.stacked is not None:
             scaling = lora.wrapper.scaling[lora.adapter]
             chunked.append(
-                ChunkedLora(lora, lora_operands(*lora.stacked, scaling), masks, None)
+                ChunkedLora(
+                    lora, lora_operands(*lora.stacked, scaling, dtype), masks, None
+                )
             )
             continue
         if expert_ids is None:
@@ -314,7 +316,11 @@ def _recompute_routed_experts(
     for lora in (*up_loras, *down_loras):
         assert lora.stacked is not None
         operands.extend(
-            lora_operands(*lora.stacked, lora.wrapper.scaling[lora.adapter])
+            lora_operands(
+                *lora.stacked,
+                lora.wrapper.scaling[lora.adapter],
+                hidden_states.dtype,
+            )
         )
     return LoraExpertsFunction.apply(
         hidden_states,

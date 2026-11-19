@@ -27,6 +27,7 @@ from agilerl.distributed.mesh import ParallelMesh
 from agilerl.llm_envs import DatasetEnv
 from agilerl.utils.llm_packing import pack_next_token_frame
 from agilerl.utils.llm_utils import LEARN_PHASE_METRIC_NAMES
+from agilerl.utils.stochastic_round import bf16_round_step
 from tests import TINY_LLM_FIXTURE_PATH
 from tests.test_algorithms.test_llms.llm_helpers import (
     LAYOUTS,
@@ -952,6 +953,60 @@ class TestSFTLearnActivationOffload:
         assert np.isfinite(metrics["loss"])
         assert bool(saved_tensor_counts) is offload
         sft.clean_up()
+
+
+def _bf16_sft() -> SFT:
+    return SFT(
+        actor_network=create_module(
+            input_size=10, max_tokens=20, vocab_size=100, device="cpu"
+        ),
+        pad_token_id=99,
+        pad_token="<pad>",
+        lora_config=LoraConfig(
+            r=4,
+            lora_alpha=16,
+            target_modules=["linear_1"],
+            task_type="CAUSAL_LM",
+            lora_dropout=0.0,
+        ),
+        batch_size=4,
+        micro_batch_size_per_gpu=2,
+        device="cpu",
+    )
+
+
+class TestSFTLearnBf16Rounding:
+    def test_learn_leaves_the_draw_at_the_optimizer_step(self) -> None:
+        sft = _bf16_sft()
+
+        sft.learn(random_sft_batch())
+
+        assert sft.optimizer_steps > 0
+        assert bf16_round_step.get() == sft.optimizer_steps
+        sft.clean_up()
+
+    def test_forward_uses_the_draw_of_its_own_agent(self) -> None:
+        # Arrange
+        first = _bf16_sft()
+        second = _bf16_sft()
+        first.learn(random_sft_batch())
+        for _ in range(3):
+            second.learn(random_sft_batch())
+        steps_before = first.optimizer_steps
+        seen: list[int | None] = []
+        handle = first.actor.register_forward_pre_hook(
+            lambda _module, _args: seen.append(bf16_round_step.get())
+        )
+
+        # Act
+        first.learn(random_sft_batch())
+
+        # Assert
+        handle.remove()
+        assert steps_before < second.optimizer_steps
+        assert seen[0] == steps_before
+        first.clean_up()
+        second.clean_up()
 
 
 class TestSFTLearnMetrics:
