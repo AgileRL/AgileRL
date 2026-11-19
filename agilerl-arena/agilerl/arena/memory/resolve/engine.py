@@ -8,7 +8,7 @@ from functools import lru_cache
 from typing import Literal
 
 from agilerl.arena.memory.breakdown import PhaseBreakdown
-from agilerl.arena.memory.estimator import estimate_generation
+from agilerl.arena.memory.estimator import estimate_generation, generation_can_serve
 from agilerl.arena.memory.generation import (
     KV_MARGIN_BYTES,
     drop_engine_fast_paths,
@@ -19,11 +19,16 @@ from agilerl.arena.memory.kv_cache import VLLM_ENGINE_MAX_NUM_BATCHED_TOKENS
 from agilerl.arena.memory.manifest import (
     MANIFEST_WEIGHT_VARIANTS,
     configured_rollout_engines,
+    estimate_teacher_generation,
     generation_settings_from_manifest,
 )
 from agilerl.arena.memory.resolve.batch import catalog_model_spec
 from agilerl.arena.memory.solver import solve
-from agilerl.arena.memory.specs import DeviceSpec, ModelSpec, RunConfig
+from agilerl.arena.memory.specs import DeviceSpec, ModelArch, ModelSpec, RunConfig
+from agilerl.arena.models.algorithms.opd import (
+    distillation_teacher,
+    teacher_engine_gpus,
+)
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
 from agilerl.arena.models.manifest import TrainingManifest
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
@@ -64,25 +69,29 @@ def _width_candidates(
     leftover: int,
     rollout_engines_per_agent: int | Literal["auto"],
     gpus_per_node: int,
+    teacher_gpus: int,
 ) -> list[tuple[int, int]]:
     """Tensor-parallel widths that fit the leftover GPUs, with their engine counts.
 
     :param leftover: GPUs left after the trainers are placed.
     :param rollout_engines_per_agent: Engines per member, or ``auto``.
-    :param gpus_per_node: GPUs on one node. One engine stays on one node.
+    :param gpus_per_node: GPUs on one node. The engine and its teacher stay there.
+    :param teacher_gpus: GPUs each engine's teacher engine adds.
     :return: ``(tensor_parallel_size, engines)`` pairs.
     """
     if rollout_engines_per_agent == "auto":
         return [
-            (width, leftover // width)
+            (width, leftover // (width + teacher_gpus))
             for width in range(1, leftover + 1)
-            if leftover % width == 0 and width <= gpus_per_node
+            if leftover % (width + teacher_gpus) == 0
+            and width + teacher_gpus <= gpus_per_node
         ]
     engines = int(rollout_engines_per_agent)
     return [
         (width, engines)
         for width in range(1, leftover + 1)
-        if engines * width <= leftover and width <= gpus_per_node
+        if engines * (width + teacher_gpus) <= leftover
+        and width + teacher_gpus <= gpus_per_node
     ]
 
 
@@ -222,7 +231,10 @@ def resolve_engine_tensor_parallel(
     if leftover < 1:
         return None
     candidates = _width_candidates(
-        leftover, configured_rollout_engines(manifest), per_node
+        leftover,
+        configured_rollout_engines(manifest),
+        per_node,
+        teacher_engine_gpus(spec),
     )
     if not candidates:
         return None
@@ -243,6 +255,54 @@ def resolve_engine_tensor_parallel(
         return None
     chosen = best[3]
     vllm.tensor_parallel_size = chosen
+    return chosen
+
+
+def resolve_teacher_tensor_parallel(
+    manifest: TrainingManifest,
+    device: DeviceSpec,
+    member_gpus: int,
+    gpus_per_node: int,
+) -> int | None:
+    """Assign the omitted teacher engine width: the narrowest that serves its sequences, else the narrowest that fits.
+
+    Each width the teacher's heads split over (:meth:`ModelArch.splits_heads`)
+    is sized for one rollout engine's share of the batch, the most one
+    teacher scores. Narrower teachers leave more GPUs to the split. The
+    widest leaves one GPU of the node for the student engine, and the member
+    one trainer and one student engine.
+
+    :param manifest: Validated training manifest.
+    :param device: The GPU the teacher engine runs on.
+    :param member_gpus: GPUs one population member owns.
+    :param gpus_per_node: GPUs on one node. One engine stays on one node.
+    :return: The assigned width, or None when the manifest is left unchanged:
+        no separate teacher model, a written width, or no width that fits.
+    """
+    teacher = distillation_teacher(manifest.algorithm)
+    if teacher is None or teacher.model is None:
+        return None
+    if teacher.model.vllm_config.tensor_parallel_size is not None:
+        return None
+    info = SUPPORTED_MODEL_INFO[teacher.model.pretrained_model_name_or_path]
+    arch = ModelArch.from_hf_config(info.config)
+    # The student engine shares this node.
+    widest = min(gpus_per_node - 1, member_gpus - 2)
+    narrowest_fit: int | None = None
+    chosen: int | None = None
+    for width in range(1, widest + 1):
+        if not arch.splits_heads(width):
+            continue
+        bar = estimate_teacher_generation(manifest, device, 1, width)
+        if bar is None or not bar.fits_with_buffer:
+            continue
+        if generation_can_serve(bar, KV_MARGIN_BYTES):
+            chosen = width
+            break
+        narrowest_fit = narrowest_fit or width
+    chosen = chosen or narrowest_fit
+    if chosen is not None:
+        teacher.model.vllm_config.tensor_parallel_size = chosen
     return chosen
 
 

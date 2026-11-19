@@ -33,13 +33,14 @@ class DistillationTeacherModel(BaseModel):
         default_factory=VLLMConfig,
         description=(
             "vLLM settings of the teacher engine. tensor_parallel_size is the "
-            "GPUs each rollout engine's teacher adds to the run; unset is 1."
+            "GPUs each rollout engine's teacher adds to the run; unset, the run "
+            "sizes it from the teacher and the GPU."
         ),
     )
 
     @property
     def gpus(self) -> int:
-        """GPUs one teacher engine occupies."""
+        """GPUs one teacher engine occupies; 1 until the run sizes an unset width."""
         return self.vllm_config.tensor_parallel_size or 1
 
 

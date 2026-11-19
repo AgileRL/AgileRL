@@ -26,6 +26,7 @@ from agilerl.arena.memory.resolve.engine import (
     queue_warning,
     resolve_engine_tensor_parallel,
     resolve_rollout_engines_per_agent,
+    resolve_teacher_tensor_parallel,
 )
 from agilerl.arena.memory.resolve.fsdp import TrainingMemoryUnfitError
 from agilerl.arena.memory.resolve.parallel import (
@@ -52,7 +53,10 @@ from agilerl.arena.memory.solver import CannotSolve
 from agilerl.arena.memory.specs import DeviceSpec, ModelSpec, RunConfig
 from agilerl.arena.memory.training_host import layout_free_host_bytes
 from agilerl.arena.models.algorithms.base import LLMAlgorithmSpec
-from agilerl.arena.models.algorithms.opd import teacher_engine_gpus
+from agilerl.arena.models.algorithms.opd import (
+    distillation_teacher,
+    teacher_engine_gpus,
+)
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
 from agilerl.arena.models.fsdp import parallel_layout_pins
 from agilerl.arena.models.manifest import TrainingManifest
@@ -92,6 +96,8 @@ class TierCheck:
     num_nodes: int = 1
     layout: ParallelLayout | None = None
     engine_tensor_parallel: int | None = None
+    # GPUs per separate OPD teacher engine; ``None`` without one.
+    teacher_engine_tensor_parallel: int | None = None
     # Predicted step, the slower of learn and generation. ``None`` when the
     # split was not searched.
     step_seconds: float | None = None
@@ -187,6 +193,35 @@ def engines_per_member(
         training.training_gpus_per_agent,
         tensor_parallel_size + teacher_engine_gpus(manifest.algorithm),
     )
+
+
+def teacher_sized_manifest(
+    manifest: TrainingManifest, device: DeviceSpec, num_gpus: int, gpus_per_node: int
+) -> TrainingManifest:
+    """``manifest`` with an omitted teacher engine width sized as the run sizes it on ``device``.
+
+    :param manifest: Validated training manifest. Not written.
+    :param device: One GPU of the allocation.
+    :param num_gpus: GPUs in the allocation.
+    :param gpus_per_node: GPUs on one node.
+    :return: A copy with ``teacher.model.vllm_config.tensor_parallel_size``
+        set, or ``manifest`` itself when nothing is sized.
+    """
+    teacher = distillation_teacher(manifest.algorithm)
+    if (
+        teacher is None
+        or teacher.model is None
+        or teacher.model.vllm_config.tensor_parallel_size is not None
+    ):
+        return manifest
+    sized = manifest.model_copy(deep=True)
+    member_gpus = num_gpus // manifest.training.pop_size
+    if (
+        resolve_teacher_tensor_parallel(sized, device, member_gpus, gpus_per_node)
+        is None
+    ):
+        return manifest
+    return sized
 
 
 def colocated_manifest(manifest: TrainingManifest, num_gpus: int) -> TrainingManifest:
@@ -314,7 +349,8 @@ def _most_trainers(manifest: TrainingManifest, allocation: int) -> int:
         searched split may use: a member's GPUs less one engine GPU.
     """
     if searches_gpu_split(manifest):
-        return max(allocation // manifest.training.pop_size - 1, 1)
+        engine_gpus = 1 + teacher_engine_gpus(manifest.algorithm)
+        return max(allocation // manifest.training.pop_size - engine_gpus, 1)
     if not async_rollout(manifest):
         return max(allocation // manifest.training.pop_size, 1)
     return manifest.training.training_gpus_per_agent
@@ -357,6 +393,10 @@ def _placement_shortfall(
         return (
             f"engine tensor_parallel_size {width} exceeds {node_gpus} GPUs on one node"
         )
+    # One rollout group is packed onto one node, teacher included.
+    bundle = width + teacher_engine_gpus(placed.algorithm)
+    if bundle > node_gpus:
+        return f"rollout bundle of {bundle} GPUs exceeds {node_gpus} GPUs on one node"
     if searches_gpu_split(placed):
         return None
     needed = gpus_required(placed, width)
@@ -539,6 +579,7 @@ def _finish_price(
         num_nodes=num_nodes,
         layout=layout,
         engine_tensor_parallel=width,
+        teacher_engine_tensor_parallel=teacher_engine_gpus(laid_out.algorithm) or None,
         step_seconds=step_seconds,
         failure=failure,
         host_limited=limited,
@@ -567,7 +608,15 @@ def _price(
     cache.host_limited = False
     node_gpus = _node_gpus(tier)
     allocation = _allocation(tier, num_nodes)
-    manifest = colocated_manifest(manifest, allocation)
+    device = device_spec_from_resource_class(tier).model_copy(
+        update={"gpus_per_node": node_gpus}
+    )
+    sized_key = (device.name, allocation, node_gpus)
+    if sized_key not in cache.teacher_sized:
+        cache.teacher_sized[sized_key] = teacher_sized_manifest(
+            manifest, device, allocation, node_gpus
+        )
+    manifest = colocated_manifest(cache.teacher_sized[sized_key], allocation)
     placed = manifest if layout is None else manifest_at_layout(manifest, layout)
     shortfall = _placement_shortfall(
         placed,
@@ -578,9 +627,6 @@ def _price(
     )
     if shortfall is not None:
         return _other_miss(tier, shortfall, num_nodes)
-    device = device_spec_from_resource_class(tier).model_copy(
-        update={"gpus_per_node": node_gpus}
-    )
     laid_out, mode, step_seconds, split_reason, split_failure = _weight_sync_plan(
         manifest, placed, model, device, allocation, layout, cache
     )

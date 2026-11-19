@@ -308,19 +308,20 @@ class TestTrainingManifestTeacher:
         with pytest.raises(ValidationError, match="need one vocabulary"):
             TrainingManifest.model_validate(self._teacher_model_doc("Qwen/Qwen3.8-27B"))
 
-    def test_a_teacher_model_needs_its_gpu_layout_written_out(self) -> None:
+    def test_a_teacher_model_without_a_gpu_layout_validates(self) -> None:
+        # Arrange: no student width, no trainer or engine count, no teacher width.
         doc = self._teacher_model_doc()
         doc["training"].pop("rollout_engines_per_agent")
-
-        with pytest.raises(ValidationError, match="GPU layout written out"):
-            TrainingManifest.model_validate(doc)
-
-    def test_a_teacher_model_needs_the_student_width_written_out(self) -> None:
-        doc = self._teacher_model_doc()
         del doc["algorithm"]["vllm_config"]
 
-        with pytest.raises(ValidationError, match="GPU layout written out"):
-            TrainingManifest.model_validate(doc)
+        # Act
+        validated = TrainingManifest.model_validate(doc)
+
+        # Assert: the run sizes the teacher; until then it counts one GPU.
+        assert (
+            validated.algorithm.teacher.model.vllm_config.tensor_parallel_size is None
+        )
+        assert teacher_engine_gpus(validated.algorithm) == 1
 
     def test_async_rollout_with_the_default_buffer_validates(self) -> None:
         doc = teacher_manifest(
