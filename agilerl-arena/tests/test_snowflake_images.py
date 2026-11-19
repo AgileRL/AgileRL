@@ -702,7 +702,7 @@ class TestParseDriver:
     def test_a_version_in_the_licence_line_is_not_the_driver(self) -> None:
         log = (
             "sh: 1: nvidia-smi: not found\n"
-            "arena-license-check: agilerl-arena 0.9.0 is no longer supported\n"
+            "arena-license-check: agilerl-arena 0.9.0 is older than 1.0.0\n"
         )
 
         assert parse_driver(log) is None

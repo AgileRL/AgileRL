@@ -2974,8 +2974,8 @@ class TestArenaClientVersionSignals:
         assert seen[0].headers["Authorization"] == "Bearer test-key"
 
     UPGRADE_DESCRIPTION = (
-        "agilerl-arena 0.9.0 is no longer supported; the minimum is 1.0.0. "
-        "Run: pip install -U agilerl-arena"
+        "agilerl-arena 0.9.0 is older than 1.0.0, the oldest version this Arena "
+        'supports. Update with: pip install -U "agilerl-arena>=1.0.0"'
     )
 
     def _upgrade_required(self, request: httpx.Request) -> httpx.Response:

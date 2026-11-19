@@ -20,8 +20,8 @@ from agilerl.arena.client_version import (
 from agilerl.arena.models import __version__
 
 UPGRADE_DESCRIPTION = (
-    "agilerl-arena 0.9.0 is no longer supported; the minimum is 1.0.0. "
-    "Run: pip install -U agilerl-arena"
+    "agilerl-arena 0.9.0 is older than 1.0.0, the oldest version this Arena "
+    'supports. Update with: pip install -U "agilerl-arena>=1.0.0"'
 )
 UPGRADE_BODY = {"error": "client_upgrade_required", "description": UPGRADE_DESCRIPTION}
 

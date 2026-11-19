@@ -81,14 +81,14 @@ ENABLED_BODY = {
     "data": {"schemaVersion": 1, "features": {"snowflakeTraining": True}},
 }
 OUTDATED = (
-    "agilerl-arena 0.9.0 is no longer supported; the minimum is 1.0.0. "
-    'Run: pip install -U "agilerl-arena[snowflake]"'
+    "agilerl-arena 0.9.0 is older than 1.0.0, the oldest version this Arena "
+    'supports. Update with: pip install -U "agilerl-arena[snowflake]>=1.0.0"'
 )
 OUTDATED_BODY = {"error": "client_upgrade_required", "description": OUTDATED}
 HEAD_OUTDATED = (
-    "agilerl-arena 0.9.0 is no longer supported; the minimum is 1.0.0. "
-    'Run: pip install -U "agilerl-arena[snowflake]", then run arena snowflake '
-    "setup to update the trainer image."
+    "agilerl-arena 0.9.0 is older than 1.0.0, the oldest version this Arena "
+    'supports. Update with: pip install -U "agilerl-arena[snowflake]>=1.0.0", '
+    "then run arena snowflake setup to update the trainer image."
 )
 NOT_ARENA = (
     "which is not the Arena API; the Arena URL must be reachable from the "
