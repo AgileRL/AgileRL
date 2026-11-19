@@ -927,6 +927,61 @@ def resolve_lora_defaults(lora: LoraConfigDict, hub_id: str) -> None:
         lora.lora_dropout = 0.0
 
 
+def check_lora_config_supported(hub_id: str, lora: LoraConfigDict | None) -> None:
+    """Reject a LoRA rank or targets a tracked Hub id cannot train with.
+
+    :param hub_id: The model the config trains.
+    :type hub_id: str
+    :param lora: The config to check. ``None`` passes.
+    :type lora: LoraConfigDict | None
+    """
+    entry = SUPPORTED_MODEL_INFO.get(hub_id)
+    if entry is None or lora is None:
+        return
+    resolve_lora_defaults(lora, hub_id)
+    # Ranks below the cap pass; vLLM rounds max_lora_rank up to a value it accepts.
+    if entry.lora_ranks is not None and lora.lora_r > max(entry.lora_ranks):
+        msg = (
+            f"LoRA rank {lora.lora_r} is above the largest rank vLLM serves "
+            f"for {hub_id} ({max(entry.lora_ranks)})"
+        )
+        raise ValueError(msg)
+    valid_modules = ", ".join(sorted(entry.modules))
+    if isinstance(lora.target_modules, str):
+        if lora.target_modules != "all-linear":
+            msg = (
+                f"LoRA target_modules for {hub_id} must be 'all-linear' or a "
+                f"list of module names, got {lora.target_modules!r}; "
+                f"valid modules: {valid_modules}"
+            )
+            raise ValueError(msg)
+    elif unknown := sorted(set(lora.target_modules) - entry.modules):
+        msg = (
+            f"Unknown LoRA target_modules {unknown} for {hub_id}; "
+            f"valid modules: {valid_modules}"
+        )
+        raise ValueError(msg)
+    elif towers := sorted(set(lora.target_modules) - entry.default_lora_modules):
+        msg = (
+            f"LoRA target_modules {towers} are tower modules of {hub_id}; "
+            "the towers stay frozen, so LoRA targets the language model only"
+        )
+        raise ValueError(msg)
+    if unknown := sorted(set(lora.target_parameters or ()) - entry.parameters):
+        valid = ", ".join(sorted(entry.parameters)) or "none"
+        msg = (
+            f"Unknown LoRA target_parameters {unknown} for {hub_id}; "
+            f"valid parameters: {valid}"
+        )
+        raise ValueError(msg)
+    if (lora.target_parameters or []) and lora.lora_dropout != 0:
+        msg = (
+            "lora_config.lora_dropout must be 0 when target_parameters "
+            "is set: PEFT parameter-level LoRA cannot factor dropout out."
+        )
+        raise ValueError(msg)
+
+
 class FinetuningNetworkSpec(BaseModel):
     """Model specification for LLM finetuning networks."""
 
@@ -949,60 +1004,8 @@ class FinetuningNetworkSpec(BaseModel):
 
     @model_validator(mode="after")
     def _check_lora_config_supported(self) -> Self:
-        """Reject a LoRA rank or targets a tracked Hub id cannot train with.
-
-        Ranks below the cap pass; the vLLM engine rounds ``max_lora_rank`` up
-        to a value it accepts. ``target_modules`` is ``all-linear`` or a list
-        of the text model's module names, and ``target_parameters`` a list of
-        stored paths; all match exactly. Unset ``target_parameters`` on a packed-MoE
-        model adapts every expert path and sets ``lora_dropout`` to 0;
-        ``[]`` adapts none. Expert paths with a set nonzero ``lora_dropout``
-        are rejected.
-        """
-        hub_id = self.pretrained_model_name_or_path
-        entry = SUPPORTED_MODEL_INFO.get(hub_id)
-        lora = self.lora_config
-        if entry is None or lora is None:
-            return self
-        resolve_lora_defaults(lora, hub_id)
-        if entry.lora_ranks is not None and lora.lora_r > max(entry.lora_ranks):
-            msg = (
-                f"LoRA rank {lora.lora_r} is above the largest rank vLLM serves "
-                f"for {hub_id} ({max(entry.lora_ranks)})"
-            )
-            raise ValueError(msg)
-        valid_modules = ", ".join(sorted(entry.modules))
-        if isinstance(lora.target_modules, str):
-            if lora.target_modules != "all-linear":
-                msg = (
-                    f"LoRA target_modules for {hub_id} must be 'all-linear' or a "
-                    f"list of module names, got {lora.target_modules!r}; "
-                    f"valid modules: {valid_modules}"
-                )
-                raise ValueError(msg)
-        elif unknown := sorted(set(lora.target_modules) - entry.modules):
-            msg = (
-                f"Unknown LoRA target_modules {unknown} for {hub_id}; "
-                f"valid modules: {valid_modules}"
-            )
-            raise ValueError(msg)
-        elif towers := sorted(set(lora.target_modules) - entry.default_lora_modules):
-            msg = (
-                f"LoRA target_modules {towers} are tower modules of {hub_id}; "
-                "the towers stay frozen, so LoRA targets the language model only"
-            )
-            raise ValueError(msg)
-        if unknown := sorted(set(lora.target_parameters or ()) - entry.parameters):
-            valid = ", ".join(sorted(entry.parameters)) or "none"
-            msg = (
-                f"Unknown LoRA target_parameters {unknown} for {hub_id}; "
-                f"valid parameters: {valid}"
-            )
-            raise ValueError(msg)
-        if (lora.target_parameters or []) and lora.lora_dropout != 0:
-            msg = (
-                "lora_config.lora_dropout must be 0 when target_parameters "
-                "is set: PEFT parameter-level LoRA cannot factor dropout out."
-            )
-            raise ValueError(msg)
+        """Reject a LoRA rank or targets a tracked Hub id cannot train with."""
+        check_lora_config_supported(
+            self.pretrained_model_name_or_path, self.lora_config
+        )
         return self

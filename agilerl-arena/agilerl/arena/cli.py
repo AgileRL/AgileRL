@@ -627,30 +627,12 @@ def experiment() -> None:
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
 )
 @click.option(
-    "--resource-id",
-    type=str,
-    default=None,
-    help=(
-        "Arena cluster type to submit the experiment to. Omit every resource "
-        "flag to let Arena pick the cheapest fit."
-    ),
-)
-@click.option(
-    "--num-nodes",
-    type=int,
-    default=None,
-    help=(
-        "Number of nodes to use for the experiment. Omit every resource flag "
-        "to let Arena pick the cheapest fit."
-    ),
-)
-@click.option(
     "--num-gpus",
     type=click.IntRange(min=1),
     default=None,
     help=(
-        "Total GPUs. Arena uses the fewest nodes. Not combinable with "
-        "--resource-id or --num-nodes."
+        "Total GPUs. Arena uses the fewest nodes that fit the run's memory "
+        "estimate. Omit both GPU flags to let Arena pick the cheapest fit."
     ),
 )
 @click.option(
@@ -658,8 +640,8 @@ def experiment() -> None:
     type=str,
     default=None,
     help=(
-        "Short GPU name such as h100-80, b200 or l4. Not combinable with "
-        "--resource-id or --num-nodes."
+        "Short GPU name such as h100-80, b200 or l4. Omit both GPU flags to "
+        "let Arena pick the cheapest fit."
     ),
 )
 @click.option(
@@ -700,8 +682,6 @@ def experiment() -> None:
 def experiment_submit(
     config: CommandConfig,
     manifest: Path,
-    resource_id: str | None,
-    num_nodes: int | None,
     num_gpus: int | None,
     gpu_type: str | None,
     project: str | None,
@@ -714,8 +694,6 @@ def experiment_submit(
     with arena_client(config) as client:
         result = client.submit_experiment(
             manifest=manifest,
-            resource_id=resource_id,
-            num_nodes=num_nodes,
             num_gpus=num_gpus,
             gpu_type=gpu_type,
             project=project,

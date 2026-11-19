@@ -1548,8 +1548,6 @@ class TestExperimentMethods:
 
         result = api_key_client.submit_experiment(
             manifest={"algorithm": "PPO"},
-            resource_id=2,
-            num_nodes=1,
             project="proj",
             experiment_name="exp1",
         )
@@ -1557,10 +1555,24 @@ class TestExperimentMethods:
         assert result == {"job_id": 1}
         mock_validated.assert_called_once()
         call_kwargs = api_key_client._open_stream.call_args[1]
-        assert call_kwargs["json"]["manifest"] == {"algorithm": "PPO"}
-        assert call_kwargs["json"]["project"] == "proj"
-        assert call_kwargs["json"]["resource_id"] == "2"
+        assert call_kwargs["json"] == {
+            "manifest": {"algorithm": "PPO"},
+            "project": "proj",
+            "experiment_name": "exp1",
+        }
         assert "files" not in call_kwargs
+
+    @pytest.mark.parametrize("removed", ["resource_id", "num_nodes"])
+    def test_submit_experiment_has_no_resource_class_choice(
+        self, api_key_client, removed
+    ):
+        api_key_client._open_stream = MagicMock()
+
+        with pytest.raises(TypeError, match=removed):
+            api_key_client.submit_experiment(
+                manifest={"algorithm": "PPO"}, project="proj", **{removed: 2}
+            )
+        api_key_client._open_stream.assert_not_called()
 
     @patch("agilerl.arena.client.TrainingManifest.get_validated")
     def test_submit_experiment_omits_unset_optional_fields(
@@ -1600,19 +1612,15 @@ class TestExperimentMethods:
             "gpu_type": "h100-80",
         }
 
-    @pytest.mark.parametrize(
-        "extra",
-        [{"resource_id": "arena-medium"}, {"num_nodes": 2}, {"num_gpus": 0}],
-    )
-    def test_submit_experiment_rejects_a_bad_gpu_request(self, api_key_client, extra):
+    def test_submit_experiment_rejects_zero_gpus(self, api_key_client):
         api_key_client._open_stream = MagicMock()
 
-        with pytest.raises(ArenaValidationError, match="num_gpus"):
+        with pytest.raises(ArenaValidationError, match="num_gpus must be at least 1"):
             api_key_client.submit_experiment(
                 manifest={"algorithm": "GRPO"},
                 gpu_type="h100-80",
+                num_gpus=0,
                 project="proj",
-                **extra,
             )
 
         api_key_client._open_stream.assert_not_called()
@@ -1648,8 +1656,6 @@ class TestExperimentMethods:
 
         result = api_key_client.submit_experiment(
             manifest={"algorithm": {"name": "GRPO"}},
-            resource_id="arena-medium",
-            num_nodes=2,
             project="proj",
             experiment_name="exp-reasoning",
             reward_file=reward_path,
@@ -1662,8 +1668,8 @@ class TestExperimentMethods:
         files = call_kwargs["files"]
         assert json.loads(files["manifest"][1]) == payload
         assert files["project"] == (None, "proj")
-        assert files["resource_id"] == (None, "arena-medium")
-        assert files["num_nodes"] == (None, "2")
+        assert "resource_id" not in files
+        assert "num_nodes" not in files
         assert "num_gpus" not in files
         assert "gpu_type" not in files
         assert files["experiment_name"] == (None, "exp-reasoning")
@@ -1729,28 +1735,29 @@ class TestExperimentMethods:
 
         assert api_key_client._open_stream.call_args[1]["headers"] == {}
 
-    @pytest.mark.parametrize(
-        ("hub_id", "warned"),
-        [
-            ("Qwen/Qwen3.5-4B", False),
-            ("Qwen/Qwen3-4B", True),
-            ("Qwen/Qwen2.5-0.5B-Instruct", True),
-        ],
-    )
-    def test_submit_experiment_warns_on_deprecated_model(
-        self, api_key_client, caplog, hub_id, warned
-    ):
+    def test_submit_experiment_accepts_live_model(self, api_key_client):
         api_key_client._open_stream = MagicMock(
             return_value=_mock_ndjson_stream({"job_id": 3})
         )
 
-        with caplog.at_level(logging.WARNING, logger="agilerl.arena.client"):
-            result = api_key_client.submit_experiment(
-                manifest=_grpo_manifest(hub_id), project="proj"
-            )
+        result = api_key_client.submit_experiment(
+            manifest=_grpo_manifest("Qwen/Qwen3.5-4B"), project="proj"
+        )
 
         assert result == {"job_id": 3}
-        assert (f"Model {hub_id} is deprecated" in caplog.text) is warned
+
+    @pytest.mark.parametrize("hub_id", ["Qwen/Qwen3-4B", "Qwen/Qwen2.5-0.5B-Instruct"])
+    def test_submit_experiment_rejects_deprecated_model(self, api_key_client, hub_id):
+        api_key_client._open_stream = MagicMock()
+
+        with pytest.raises(
+            ArenaValidationError,
+            match=f"Model {re.escape(hub_id)} is deprecated and can no longer be submitted",
+        ):
+            api_key_client.submit_experiment(
+                manifest=_grpo_manifest(hub_id), project="proj"
+            )
+        api_key_client._open_stream.assert_not_called()
 
     def test_submit_experiment_rejects_preview_model(self, api_key_client, monkeypatch):
         api_key_client._open_stream = MagicMock()
@@ -1795,8 +1802,6 @@ class TestExperimentMethods:
         [
             ("Qwen/Qwen3.5-0.8B", 1024),
             ("Qwen/Qwen3.5-0.8B", 262144),
-            ("Qwen/Qwen3-4B", 32768),
-            ("Qwen/Qwen3-4B", 40960),
             ("org/untracked-model", 512),
         ],
     )
@@ -1836,15 +1841,6 @@ class TestExperimentMethods:
                     "and 262144. Allowed: 1024,"
                 ),
             ),
-            (
-                "Qwen/Qwen3-4B",
-                65536,
-                (
-                    "network.max_context_length must be a power of 2 between 1024 "
-                    "and 40960, or 40960. Allowed: 1024, 2048, 4096, 8192, 16384, "
-                    "32768, 40960"
-                ),
-            ),
         ],
     )
     def test_submit_experiment_rejects_a_context_length_arena_does_not_offer(
@@ -1854,6 +1850,43 @@ class TestExperimentMethods:
         api_key_client._open_stream = MagicMock()
         manifest = _grpo_manifest(hub_id)
         manifest["network"]["max_context_length"] = context_length
+
+        # Act / Assert
+        with pytest.raises(ArenaValidationError, match=re.escape(message)):
+            api_key_client.submit_experiment(manifest=manifest, project="proj")
+        api_key_client._open_stream.assert_not_called()
+
+    @pytest.mark.parametrize("context_length", [32768, 40960])
+    def test_submit_experiment_accepts_a_window_that_is_not_a_power_of_2(
+        self, api_key_client, monkeypatch, context_length
+    ):
+        # Arrange
+        api_key_client._open_stream = MagicMock(
+            return_value=_mock_ndjson_stream({"job_id": 5})
+        )
+        monkeypatch.setattr(ModelInfo, "max_context_length", 40960)
+        manifest = _grpo_manifest("Qwen/Qwen3.5-0.8B")
+        manifest["network"]["max_context_length"] = context_length
+
+        # Act
+        result = api_key_client.submit_experiment(manifest=manifest, project="proj")
+
+        # Assert
+        assert result == {"job_id": 5}
+
+    def test_submit_experiment_rejects_above_a_window_that_is_not_a_power_of_2(
+        self, api_key_client, monkeypatch
+    ):
+        # Arrange
+        api_key_client._open_stream = MagicMock()
+        monkeypatch.setattr(ModelInfo, "max_context_length", 40960)
+        manifest = _grpo_manifest("Qwen/Qwen3.5-0.8B")
+        manifest["network"]["max_context_length"] = 65536
+        message = (
+            "network.max_context_length must be a power of 2 between 1024 "
+            "and 40960, or 40960. Allowed: 1024, 2048, 4096, 8192, 16384, "
+            "32768, 40960"
+        )
 
         # Act / Assert
         with pytest.raises(ArenaValidationError, match=re.escape(message)):

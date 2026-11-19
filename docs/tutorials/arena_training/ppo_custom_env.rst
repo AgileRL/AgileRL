@@ -297,13 +297,15 @@ architecture from the environment's observation space, so a ``Dict`` observation
 gets a multi-input encoder automatically. Set ``simba: true`` in the network config, or
 ``recurrent: true`` in the algorithm config, to opt into a SimBa or recurrent encoder instead.
 
-For this example, we will train on the ``arena-medium`` resource, which has 1x nvidia-l4 GPU, 15x CPUs, and 55GB of RAM
-(costing around 2.41 credits/node-hour on Arena), and using 2 nodes for quicker results. Since we are training a population
-size of 4, Arena will train 2 agents on each of the nodes in parallel.
+Submit leaves the GPU choice to Arena, which picks the cheapest layout this
+run fits. The population size is 4, so those agents train in parallel on that
+layout.
 
 .. tip::
 
-   You can view all of the available resources to train on by running the CLI command ``arena resources list``.
+   ``arena resources list`` shows every layout and its credits per node-hour.
+   Pass ``--num-gpus`` and ``--gpu-type`` to keep only a layout the memory
+   estimate fits.
 
 .. tab-set::
    :sync-group: interface
@@ -315,8 +317,6 @@ size of 4, Arena will train 2 agents on each of the nodes in parallel.
 
          result = client.submit_experiment(
              manifest="merge_ppo.yaml",
-             resource_id="arena-medium",
-             num_nodes=2,
              project="Merge Tutorial",
              experiment_name="merge-ppo-v1",
          )
@@ -327,15 +327,8 @@ size of 4, Arena will train 2 agents on each of the nodes in parallel.
       .. code-block:: bash
 
          arena experiments submit merge_ppo.yaml \
-             --resource-id arena-medium \
-             --num-nodes 2 \
              --project 'Merge Tutorial' \
              --experiment-name merge-ppo-v1
-
-.. warning::
-
-   The training cost scales linearly with the number of nodes. In this case, the training cost will be
-   2.41 credits/node-hour * 2 nodes = 4.82 credits / hour.
 
 Monitor Training
 ~~~~~~~~~~~~~~~~

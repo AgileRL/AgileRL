@@ -508,8 +508,6 @@ Here is an example manifest for training DQN on LunarLander-v3:
 
          result = client.submit_experiment(
              manifest="dqn.yaml",
-             resource_id="arena-medium",
-             num_nodes=2,
              project="my-project",
              experiment_name="lunar-lander-dqn",
          )
@@ -521,8 +519,6 @@ Here is an example manifest for training DQN on LunarLander-v3:
 
          # Submit an experiment
          arena experiments submit dqn.yaml \
-             --resource-id arena-medium \
-             --num-nodes 2 \
              --project my-project \
              --experiment-name lunar-lander-dqn
 
