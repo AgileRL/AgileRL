@@ -542,6 +542,29 @@ class TestEstimateGeneration:
             == component(plain, "kv_cache").detail["pool"] - extra
         )
 
+    def test_wide_multi_turn_engine_keeps_its_kv_pool(self, device):
+        # Arrange: 256 sequences draft 1280-token steps, past the graph ceiling.
+        spec = ModelSpec(model_id="m", arch=QWEN_05B)
+        base = GenerationSettings(
+            gpu_memory_utilization=0.9, max_model_len=1024, max_num_seqs=256
+        )
+
+        # Act
+        plain = estimate_generation(spec, device, base)
+        engine = estimate_generation(
+            spec, device, base.model_copy(update={"multi_turn": True})
+        )
+
+        # Assert
+        assert (
+            component(engine, "cuda_graphs").n_bytes
+            == component(plain, "cuda_graphs").n_bytes
+        )
+        assert (
+            component(engine, "kv_cache").detail["pool"]
+            == component(plain, "kv_cache").detail["pool"]
+        )
+
     def test_dual_stream_lora_gives_kv_pool_to_graphs(self, model, device):
         # Arrange
         base = GenerationSettings(gpu_memory_utilization=0.9, max_model_len=1024)

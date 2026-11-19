@@ -35,6 +35,7 @@ from agilerl.arena.memory.manifest import (
 )
 from agilerl.arena.memory.resolve.batch import (
     KV_POOL_FILL,
+    engine_group_size,
     rollout_group_size,
 )
 from agilerl.arena.memory.resolve.decode_costs import (
@@ -56,7 +57,11 @@ from agilerl.arena.memory.resolve.rollout import (
     default_rollout_batch_size,
     drafts_by_default,
 )
-from agilerl.arena.memory.resolve.sequences import resolve_gpu_memory_utilization
+from agilerl.arena.memory.resolve.sequences import (
+    prompts_per_engine,
+    resolve_gpu_memory_utilization,
+    resolve_max_num_seqs,
+)
 from agilerl.arena.memory.resolve.training import lora_target_scope
 from agilerl.arena.memory.resolve.weight_sync import (
     SyncLink,
@@ -155,6 +160,8 @@ class SplitWorkload(BaseModel):
     # Groups one learn step trains.
     batch_size: int
     group_size: int
+    # Completions per prompt the engine sizes ``max_num_seqs`` for, at the HPO ceiling.
+    slot_group_size: int
     # Trained groups' worth of rollouts generated per trained group; above 1
     # when tied groups are dropped.
     generated_per_trained: float = 1.0
@@ -646,7 +653,9 @@ def _generation_seconds(
     so waves are fractional; a multi-turn cycle's last wave waits on its
     slowest episode. Only multi-turn cycles price n-gram drafting;
     single-turn completions share too little with their prompt to accept
-    drafts. An engine serving merged weights reads weights and KV at
+    drafts. The speedup follows the engine's ``max_num_seqs``: a pinned cap,
+    otherwise this engine's prompts times :attr:`SplitWorkload.slot_group_size`.
+    An engine serving merged weights reads weights and KV at
     :func:`merged_engine_speedups` times the fitted bandwidth share.
 
     :param resident: :func:`resident_sequences` of one engine.
@@ -657,7 +666,8 @@ def _generation_seconds(
     kv_per_token = kv_cache_bytes_per_token(arch, model.checkpoint_dtype)
     multi_turn = workload.turns > 1
     context = _mean_context(workload)
-    seqs = math.ceil(rollout_batch_size / engines) * workload.group_size
+    prompts = prompts_per_engine(rollout_batch_size, engines)
+    seqs = prompts * workload.group_size
     slots = min(seqs, resident)
     if slots < 1:
         return math.inf
@@ -672,9 +682,19 @@ def _generation_seconds(
     speedup = 1.0
     decode = waves * episode
     if multi_turn:
+        engine_seqs = resolve_max_num_seqs(
+            workload.max_num_seqs,
+            prompts,
+            workload.slot_group_size,
+            False,
+        )
         drafts = (
             drafts_by_default(
-                multi_turn, arch.is_hybrid_ssm, workload.min_p, workload.logit_bias
+                multi_turn,
+                arch.is_hybrid_ssm,
+                workload.min_p,
+                workload.logit_bias,
+                engine_seqs,
             )
             if workload.speculative_drafting is None
             else workload.speculative_drafting
@@ -1062,6 +1082,7 @@ def split_workload_from_manifest(
     return SplitWorkload(
         batch_size=spec.batch_size,
         group_size=group_size,
+        slot_group_size=engine_group_size(spec, manifest.mutation),
         generated_per_trained=_generated_per_trained(manifest, group_size),
         row_tokens=row_tokens,
         decode_tokens=decode_tokens,
