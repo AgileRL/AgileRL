@@ -427,8 +427,6 @@ class TestBuildSubmitExperimentMultipart:
         files = ArenaClient._build_submit_experiment_multipart(
             manifest={"algorithm": {"name": "GRPO"}},
             project="proj",
-            resource_id="arena-medium",
-            num_nodes=2,
             num_gpus=None,
             gpu_type=None,
             experiment_name="exp",
@@ -442,8 +440,6 @@ class TestBuildSubmitExperimentMultipart:
         files = ArenaClient._build_submit_experiment_multipart(
             manifest={"algorithm": {"name": "PPO"}},
             project="proj",
-            resource_id=None,
-            num_nodes=None,
             num_gpus=None,
             gpu_type=None,
             experiment_name="exp",

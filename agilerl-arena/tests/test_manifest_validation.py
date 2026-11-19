@@ -2879,6 +2879,175 @@ class TestExpertLoraReferenceAdapter:
         assert validated.algorithm.use_separate_reference_adapter is True
 
 
+class TestLoraConfigInBothSections:
+    def test_same_moe_lora_in_both_sections_validates(self) -> None:
+        # Arrange
+        doc = manifest(
+            GRPO,
+            algorithm={"lora_config": {"lora_r": 8}},
+            network={
+                "pretrained_model_name_or_path": "openai/gpt-oss-20b",
+                "lora_config": {"lora_r": 8},
+            },
+        )
+
+        # Act
+        validated = TrainingManifest.model_validate(doc)
+
+        # Assert
+        expected = sorted(SUPPORTED_MODEL_INFO["openai/gpt-oss-20b"].parameters)
+        assert validated.algorithm.lora_config.target_parameters == expected
+
+    def test_different_moe_targets_in_the_two_sections_are_rejected(self) -> None:
+        doc = manifest(
+            GRPO,
+            algorithm={"lora_config": {"lora_r": 8}},
+            network={
+                "pretrained_model_name_or_path": "openai/gpt-oss-20b",
+                "lora_config": {"lora_r": 8, "target_parameters": []},
+            },
+        )
+
+        with pytest.raises(
+            ValidationError, match=r"algorithm\.lora_config=.* disagrees"
+        ):
+            TrainingManifest.model_validate(doc)
+
+
+class TestAlgorithmOnlyLoraCatalog:
+    @pytest.mark.parametrize(
+        ("hub_id", "lora", "match"),
+        [
+            (
+                "Qwen/Qwen2.5-0.5B-Instruct",
+                {"lora_r": 256},
+                r"LoRA rank 256 .*Qwen2.5-0.5B-Instruct \(128\)",
+            ),
+            (
+                "Qwen/Qwen2.5-0.5B-Instruct",
+                {"target_modules": ["q_projj"]},
+                r"Unknown LoRA target_modules \['q_projj'\]",
+            ),
+            (
+                "Qwen/Qwen3.5-2B",
+                {"target_modules": ["q_proj", "qkv"]},
+                r"\['qkv'\] are tower modules",
+            ),
+            (
+                "openai/gpt-oss-20b",
+                {"target_parameters": ["not.a.path"]},
+                r"Unknown LoRA target_parameters \['not.a.path'\]",
+            ),
+        ],
+    )
+    def test_rejects_a_block_the_network_catalog_would_reject(
+        self, hub_id: str, lora: dict[str, object], match: str
+    ) -> None:
+        doc = manifest(
+            GRPO,
+            algorithm={"lora_config": lora},
+            network={"pretrained_model_name_or_path": hub_id},
+        )
+
+        with pytest.raises(ValidationError, match=match):
+            TrainingManifest.model_validate(doc)
+
+
+class TestToPayloadModelFields:
+    def test_model_fields_are_only_in_the_network_section(self) -> None:
+        # Arrange
+        doc = manifest(
+            GRPO,
+            network={
+                "pretrained_model_name_or_path": "Qwen/Qwen3.5-0.8B",
+                "max_context_length": 2048,
+                "lora_config": {"lora_r": 8},
+            },
+        )
+
+        # Act
+        payload = TrainingManifest.model_validate(doc).to_payload()
+
+        # Assert
+        for field in ("pretrained_model_name_or_path", "max_model_len", "lora_config"):
+            assert field not in payload["algorithm"]
+        assert payload["network"]["pretrained_model_name_or_path"] == (
+            "Qwen/Qwen3.5-0.8B"
+        )
+        assert payload["network"]["max_context_length"] == 2048
+        assert payload["network"]["lora_config"]["lora_r"] == 8
+
+    def test_algorithm_only_lora_moves_to_the_network(self) -> None:
+        doc = manifest(
+            GRPO,
+            algorithm={"lora_config": {"lora_r": 8}},
+            network={
+                "pretrained_model_name_or_path": "Qwen/Qwen3.5-0.8B",
+                "max_context_length": 2048,
+            },
+        )
+
+        payload = TrainingManifest.model_validate(doc).to_payload()
+
+        assert "lora_config" not in payload["algorithm"]
+        assert payload["network"]["lora_config"]["lora_r"] == 8
+
+    def test_explicit_null_algorithm_lora_is_not_written_on_the_network(self) -> None:
+        doc = manifest(
+            GRPO,
+            algorithm={"lora_config": None},
+            network={
+                "pretrained_model_name_or_path": "Qwen/Qwen3.5-0.8B",
+                "max_context_length": 2048,
+            },
+        )
+
+        payload = TrainingManifest.model_validate(doc).to_payload()
+
+        assert "lora_config" not in payload["network"]
+        assert "lora_config" not in payload["algorithm"]
+        assert payload["algorithm"]["use_separate_reference_adapter"] is True
+
+    def test_explicit_null_on_the_network_stays_null_when_the_algorithm_is_also_null(
+        self,
+    ) -> None:
+        doc = manifest(
+            GRPO,
+            algorithm={"lora_config": None},
+            network={
+                "pretrained_model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
+                "lora_config": None,
+            },
+        )
+
+        payload = TrainingManifest.model_validate(doc).to_payload()
+
+        assert payload["network"]["lora_config"] is None
+        assert "lora_config" not in payload["algorithm"]
+
+    def test_payload_revalidates_to_the_same_algorithm(self) -> None:
+        # Arrange
+        doc = manifest(
+            GRPO,
+            network={
+                "pretrained_model_name_or_path": "openai/gpt-oss-20b",
+                "max_context_length": 2048,
+                "lora_config": {"lora_r": 8},
+            },
+        )
+        validated = TrainingManifest.model_validate(doc)
+
+        # Act
+        revalidated = TrainingManifest.model_validate(validated.to_payload())
+
+        # Assert
+        assert revalidated.algorithm.lora_config == validated.algorithm.lora_config
+        assert revalidated.algorithm.max_model_len == 2048
+        assert revalidated.algorithm.pretrained_model_name_or_path == (
+            "openai/gpt-oss-20b"
+        )
+
+
 class TestTrainingSpecWeightSyncBackend:
     def test_the_removed_key_is_rejected(self) -> None:
         broken = manifest(GRPO, training={"weight_sync_backend": "nccl"})

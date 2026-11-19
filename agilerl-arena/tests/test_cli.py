@@ -400,7 +400,7 @@ class TestManifestCommands:
             ),
             (
                 "Qwen/Qwen3-4B",
-                "warning: Model Qwen/Qwen3-4B is deprecated and will be removed.",
+                "warning: Model Qwen/Qwen3-4B is deprecated and can no longer be submitted.",
             ),
         ],
     )
@@ -507,7 +507,7 @@ class TestManifestCommands:
         )
 
         assert json.loads(result.output)["warnings"] == [
-            "Model Qwen/Qwen3-4B is deprecated and will be removed."
+            "Model Qwen/Qwen3-4B is deprecated and can no longer be submitted."
         ]
 
     def test_validate_json_invalid_verdict_has_the_same_keys(self, runner):
@@ -922,8 +922,6 @@ class TestExperimentSubmitCommand:
         assert result.exit_code == 0
         mock_client.submit_experiment.assert_called_once_with(
             manifest=manifest,
-            resource_id=None,
-            num_nodes=None,
             num_gpus=None,
             gpu_type=None,
             project=None,
@@ -946,10 +944,10 @@ class TestExperimentSubmitCommand:
                     "experiments",
                     "submit",
                     str(manifest),
-                    "--resource-id",
-                    "arena-large",
-                    "--num-nodes",
+                    "--num-gpus",
                     "4",
+                    "--gpu-type",
+                    "l4",
                     "--project",
                     "proj1",
                     "--experiment-name",
@@ -963,10 +961,8 @@ class TestExperimentSubmitCommand:
         assert result.exit_code == 0
         mock_client.submit_experiment.assert_called_once_with(
             manifest=manifest,
-            resource_id="arena-large",
-            num_nodes=4,
-            num_gpus=None,
-            gpu_type=None,
+            num_gpus=4,
+            gpu_type="l4",
             project="proj1",
             experiment_name="my-exp",
             reward_file=reward,
@@ -1013,8 +1009,6 @@ class TestExperimentSubmitCommand:
         assert result.exit_code == 0
         mock_client.submit_experiment.assert_called_once_with(
             manifest=manifest,
-            resource_id=None,
-            num_nodes=None,
             num_gpus=8,
             gpu_type="h100-80",
             project=None,
@@ -1040,18 +1034,32 @@ class TestExperimentSubmitCommand:
             result = runner.invoke(main, ["experiments", "submit"])
         assert result.exit_code != 0
 
-    def test_help_shows_resource_and_node_defaults(self, runner):
+    def test_help_offers_only_gpu_flags(self, runner):
         result = runner.invoke(main, ["experiments", "submit", "--help"])
 
         help_text = " ".join(result.output.split())
         assert result.exit_code == 0
-        assert "--resource-id" in help_text
-        assert "--num-nodes" in help_text
+        assert "--resource-id" not in help_text
+        assert "--num-nodes" not in help_text
         assert "--num-gpus" in help_text
         assert "--gpu-type" in help_text
-        assert (
-            "Omit every resource flag to let Arena pick the cheapest fit." in help_text
-        )
+        assert "Omit both GPU flags to let Arena pick the cheapest fit." in help_text
+
+    @pytest.mark.parametrize("flag", ["--resource-id", "--num-nodes"])
+    def test_submit_rejects_a_resource_class_flag(
+        self, runner, mock_client, tmp_path, flag
+    ):
+        manifest = tmp_path / "m.yaml"
+        manifest.write_text("x: 1")
+
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main, ["experiments", "submit", str(manifest), flag, "2"]
+            )
+
+        assert result.exit_code == 2
+        assert f"No such option '{flag}'" in result.output
+        mock_client.submit_experiment.assert_not_called()
 
     def test_root_json_prints_the_submit_result(self, runner, mock_client, tmp_path):
         manifest = tmp_path / "m.yaml"

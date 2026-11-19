@@ -186,8 +186,8 @@ class ModelInfo(BaseModel):
     status: ModelStatus = Field(
         default=STATUS_LIVE,
         description=(
-            "Release status: live, deprecated (submits with a warning), or "
-            "preview (submission rejected)."
+            "Release status: live, deprecated (no longer submittable), or "
+            "preview (not yet submittable)."
         ),
     )
     modalities: tuple[ModelModality, ...] = Field(
@@ -332,7 +332,7 @@ class ModelInfo(BaseModel):
         if self.status == STATUS_PREVIEW:
             return f"Model {self.hub_id} is in preview and cannot be submitted yet."
         if self.status == STATUS_DEPRECATED:
-            return f"Model {self.hub_id} is deprecated and will be removed."
+            return f"Model {self.hub_id} is deprecated and can no longer be submitted."
         return None
 
     @computed_field
