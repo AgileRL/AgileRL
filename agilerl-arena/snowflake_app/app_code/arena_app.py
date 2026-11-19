@@ -174,7 +174,10 @@ def app_names(session: SnowflakeSession) -> AppNames:
 
 
 def configure(
-    session: SnowflakeSession, org_key: str, external_user_id: str, base_url: str
+    session: SnowflakeSession,
+    org_key: str,
+    external_user_id: str,
+    base_url: str | None,
 ) -> str:
     """Check the org key with Arena, then save the three Arena secrets in ``app_state``.
 
@@ -183,7 +186,8 @@ def configure(
     :param session: Procedure session.
     :param org_key: Arena organisation key.
     :param external_user_id: External user id the key acts for.
-    :param base_url: Arena origin. Its host must be in the app's Arena network rule.
+    :param base_url: Arena origin, or ``None`` for ``https://arena.agilerl.com``.
+        Its host must be in the app's Arena network rule.
     :return: Confirmation.
     :raises ValueError: The key is not an org key, the user id is empty, or the
         base URL host is not in the Arena network rule.
@@ -203,7 +207,8 @@ def configure(
     if external_user_id == "":
         msg = "Pass the Arena external user id.\nNothing was saved."
         raise ValueError(msg)
-    origin = arena_origin(session, base_url)
+    # An explicit NULL from SQL skips the procedure's DEFAULT, so default here too.
+    origin = arena_origin(session, base_url or "https://arena.agilerl.com")
     caps = fetch_capabilities(origin, partner_headers(org_key, external_user_id))
     if not snowflake_training_enabled(caps):
         raise SnowflakeLicenseError(SNOWFLAKE_DENIED)
