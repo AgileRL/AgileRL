@@ -58,6 +58,7 @@ from agilerl.arena.models.networks import (
     FinetuningNetworkSpec,
     MlpSpec,
     NetworkSpec,
+    check_lora_config_supported,
     default_rollout_vllm_config,
     dump_network_section,
     network_arch_is_resolvable,
@@ -595,6 +596,12 @@ class TrainingManifest(BaseModel):
                 self.network.max_context_length,
                 source_set=True,
             )
+            algorithm_lora = getattr(self.algorithm, "lora_config", None)
+            if algorithm_lora is not None:
+                # Network validation skips an unset lora_config.
+                check_lora_config_supported(
+                    self.network.pretrained_model_name_or_path, algorithm_lora
+                )
             _copy_when_unset(
                 self.algorithm,
                 "lora_config",
@@ -957,6 +964,10 @@ class TrainingManifest(BaseModel):
             and self.network.lora_config is None
         ):
             payload.setdefault("network", {})["lora_config"] = None
+        if isinstance(self.network, FinetuningNetworkSpec) and isinstance(
+            algorithm, dict
+        ):
+            self._move_model_fields_to_network(algorithm, payload["network"])
         environment = payload.get("environment")
         if isinstance(environment, dict):
             if environment.get("screenshot_field") is None:
@@ -964,6 +975,23 @@ class TrainingManifest(BaseModel):
             if environment.get("goal_images_field") is None:
                 environment.pop("goal_images_field", None)
         return payload
+
+    def _move_model_fields_to_network(
+        self, algorithm: dict[str, Any], network: dict[str, Any]
+    ) -> None:
+        """Keep the model, context length and LoRA only in the ``network`` section.
+
+        :param algorithm: The dumped ``algorithm`` section, edited in place.
+        :type algorithm: dict[str, Any]
+        :param network: The dumped ``network`` section, edited in place.
+        :type network: dict[str, Any]
+        """
+        algorithm.pop("pretrained_model_name_or_path", None)
+        algorithm.pop("max_model_len", None)
+        lora = algorithm.pop("lora_config", None)
+        # A null is full finetune, which the user writes on network.lora_config.
+        if lora is not None and "lora_config" not in network:
+            network["lora_config"] = lora
 
     def _drop_unset_training_fields(self, training: dict[str, Any]) -> None:
         """Omit dumped training defaults that parsers treat as explicit choices.

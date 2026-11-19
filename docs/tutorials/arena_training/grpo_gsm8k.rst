@@ -222,8 +222,6 @@ the run starts.
          result = client.submit_experiment(
              manifest="gsm8k_grpo.yaml",
              reward_file="reward.py",
-             resource_id="arena-medium",
-             num_nodes=2,
              project="GSM8K Tutorial",
              experiment_name="gsm8k-grpo-v1",
          )
@@ -235,8 +233,6 @@ the run starts.
 
          arena experiments submit gsm8k_grpo.yaml \
              --reward-file reward.py \
-             --resource-id arena-medium \
-             --num-nodes 2 \
              --project 'GSM8K Tutorial' \
              --experiment-name gsm8k-grpo-v1
 

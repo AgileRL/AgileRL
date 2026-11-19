@@ -48,10 +48,7 @@ from agilerl.arena.models import (
     TrainingManifest,
     __version__,
 )
-from agilerl.arena.models.model_info import (
-    STATUS_PREVIEW,
-    SUPPORTED_MODEL_INFO,
-)
+from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.traces import TRACES_DATASET_FORMAT, validate_traces_file
 from agilerl.arena.output import StreamRichRenderer
 from agilerl.arena.stream import NDJsonStream, StreamEvent
@@ -1190,8 +1187,6 @@ class ArenaClient:
         self,
         manifest: str | Path | dict[str, Any],
         *,
-        resource_id: str | int | None = None,
-        num_nodes: int | None = None,
         num_gpus: int | None = None,
         gpu_type: str | None = None,
         project: str | None = None,
@@ -1205,15 +1200,10 @@ class ArenaClient:
         :param manifest: Training manifest as a YAML/JSON file path, raw YAML
             string, or a pre-parsed dict.
         :type manifest: str | Path | dict[str, Any]
-        :param resource_id: Arena cluster type or resource id for the job.
-        :type resource_id: str | int | None
-        :param num_nodes: The number of nodes to use for training.
-        :type num_nodes: int | None
-        :param num_gpus: Total GPUs for the job. Arena uses the fewest nodes.
-            Cannot be combined with ``resource_id`` or ``num_nodes``.
+        :param num_gpus: Total GPUs for the job. Arena uses the fewest nodes that
+            fit the run's memory estimate.
         :type num_gpus: int | None
         :param gpu_type: Short GPU name such as ``h100-80``, ``b200`` or ``l4``.
-            Cannot be combined with ``resource_id`` or ``num_nodes``.
         :type gpu_type: str | None
         :param project: The project to submit the experiment to.
         :type project: str | None
@@ -1229,10 +1219,9 @@ class ArenaClient:
         :param idempotency_key: Reuse this key to replay the same submit instead
             of starting another job. The key is org-wide.
         :type idempotency_key: str | None
-        :raises ArenaValidationError: When GPU fields are combined with a node
-            choice, or ``num_gpus`` is below 1.
+        :raises ArenaValidationError: When ``num_gpus`` is below 1.
         """
-        self._check_resource_request(resource_id, num_nodes, num_gpus, gpu_type)
+        self._check_num_gpus(num_gpus)
         training_manifest = TrainingManifest.get_validated(manifest, mode="python")
         self._check_model_status(training_manifest)
         self._check_context_length(training_manifest)
@@ -1247,16 +1236,12 @@ class ArenaClient:
                 cli_hint="Use --project or set a default with 'arena projects set-default <name>'.",
             )
 
-        if isinstance(resource_id, int):
-            resource_id = str(resource_id)
         headers = _idempotency_headers(idempotency_key)
 
         if reward_file is not None:
             files = self._build_submit_experiment_multipart(
                 manifest=validated,
                 project=resolved_project,
-                resource_id=resource_id,
-                num_nodes=num_nodes,
                 num_gpus=num_gpus,
                 gpu_type=gpu_type,
                 experiment_name=experiment_name,
@@ -1274,16 +1259,13 @@ class ArenaClient:
             finally:
                 self._close_upload_files(files)
 
-        # The server rejects explicit nulls: project and resource_id are
-        # non-nullable, and the resource defaults (num_nodes, num_gpus,
-        # gpu_type) only apply when the key is absent.
+        # The server rejects explicit nulls, and the resource defaults
+        # (num_gpus, gpu_type) only apply when the key is absent.
         payload: dict[str, Any] = {"manifest": validated, "project": resolved_project}
         payload.update(
             {
                 key: value
                 for key, value in (
-                    ("resource_id", resource_id),
-                    ("num_nodes", num_nodes),
                     ("num_gpus", num_gpus),
                     ("gpu_type", gpu_type),
                     ("experiment_name", experiment_name),
@@ -1300,39 +1282,23 @@ class ArenaClient:
         ).collect()
 
     @staticmethod
-    def _check_resource_request(
-        resource_id: str | int | None,
-        num_nodes: int | None,
-        num_gpus: int | None,
-        gpu_type: str | None,
-    ) -> None:
-        """Reject a GPU request below 1 GPU or combined with a node choice."""
+    def _check_num_gpus(num_gpus: int | None) -> None:
+        """Reject a GPU request below 1 GPU."""
         if num_gpus is not None and num_gpus < 1:
             msg = "num_gpus must be at least 1."
-            raise ArenaValidationError(msg)
-        if (num_gpus is not None or gpu_type is not None) and (
-            resource_id is not None or num_nodes is not None
-        ):
-            msg = (
-                "num_gpus and gpu_type cannot be combined with "
-                "resource_id or num_nodes."
-            )
             raise ArenaValidationError(msg)
 
     @staticmethod
     def _check_model_status(manifest: TrainingManifest) -> None:
-        """Warn on a deprecated pretrained model; reject a preview one."""
+        """Reject a deprecated or preview pretrained model."""
         algorithm = manifest.algorithm
         if not isinstance(algorithm, LLMAlgorithmSpec):
             return
         hub_id = algorithm.pretrained_model_name_or_path
         entry = SUPPORTED_MODEL_INFO.get(hub_id) if hub_id else None
         notice = entry.status_notice if entry else None
-        if entry is None or notice is None:
-            return
-        if entry.status == STATUS_PREVIEW:
+        if notice is not None:
             raise ArenaValidationError(notice)
-        logger.warning(notice)
 
     @staticmethod
     def _check_context_length(manifest: TrainingManifest) -> None:
@@ -1382,8 +1348,6 @@ class ArenaClient:
         *,
         manifest: dict[str, Any],
         project: str | None,
-        resource_id: str | int | None,
-        num_nodes: int | None,
         num_gpus: int | None,
         gpu_type: str | None,
         experiment_name: str | None,
@@ -1394,8 +1358,6 @@ class ArenaClient:
         text_fields: dict[str, str | None] = {
             "manifest": json.dumps(manifest),
             "project": project,
-            "resource_id": str(resource_id) if resource_id is not None else None,
-            "num_nodes": str(num_nodes) if num_nodes is not None else None,
             "num_gpus": str(num_gpus) if num_gpus is not None else None,
             "gpu_type": gpu_type,
             "experiment_name": experiment_name,
@@ -1565,8 +1527,7 @@ class ArenaClient:
     def list_resources(self) -> dict[str, Any]:
         """List compute resource tiers for Arena training jobs.
 
-        Any of the listed resource IDs can be used as the `resource_id` parameter when submitting a training job
-        through `ArenaClient.submit_experiment`.
+        Shows the GPU types ``ArenaClient.submit_experiment`` accepts as ``gpu_type``.
 
         :returns: A dictionary of resource tiers.
         :rtype: dict[str, Any]
@@ -1803,7 +1764,7 @@ class ArenaClient:
         :raises ArenaValidationError: When ``num_gpus`` is below 1 or
             ``memory_scope`` is unknown.
         """
-        self._check_resource_request(None, None, num_gpus, gpu_type)
+        self._check_num_gpus(num_gpus)
         body: dict[str, Any] = {
             "experiment_name": experiment_name,
             "checkpoint": checkpoint,
