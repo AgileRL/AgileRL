@@ -1389,7 +1389,7 @@ def _adapt_mamba_lora_config(model: nn.Module, lora_config: LoraConfig) -> LoraC
         if new_targets != rewriteable:
             updates["target_modules"] = new_targets
             if dropped:
-                logger.info(
+                logger.warning(
                     "Dropped Mamba-incompatible LoRA target_modules %s",
                     dropped,
                 )
@@ -1407,7 +1407,7 @@ def _adapt_mamba_lora_config(model: nn.Module, lora_config: LoraConfig) -> LoraC
             kept_params.append(str(param))
         if dropped_params:
             updates["target_parameters"] = kept_params or None
-            logger.info(
+            logger.warning(
                 "Dropped Mamba-incompatible LoRA target_parameters %s",
                 dropped_params,
             )
@@ -1541,7 +1541,7 @@ def log_cuda_memory_snapshot(label: str, device_index: int = 0) -> None:
     device = torch.device(f"cuda:{device_index}")
     alloc_gib = torch.cuda.memory_allocated(device) / (1024**3)
     reserved_gib = torch.cuda.memory_reserved(device) / (1024**3)
-    logger.info(
+    logger.debug(
         "%s: CUDA[%s] allocated=%.2f GiB reserved=%.2f GiB",
         label,
         device_index,

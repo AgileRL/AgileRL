@@ -2164,6 +2164,20 @@ class TestAdaptLoraConfigForModelMamba:
         assert set(adapted.exclude_modules) == {"conv1d", "out_proj"}
         assert cfg.target_modules == ["in_proj", "out_proj", "conv1d"]
 
+    def test_dropped_targets_are_logged_as_warnings(self, caplog):
+        cfg = _PlainLoraConfig(
+            target_modules=["in_proj", "out_proj"],
+            target_parameters=["out_proj.weight", "mixer.experts.up_proj"],
+        )
+
+        with caplog.at_level(logging.INFO, logger="agilerl.utils.llm_utils"):
+            adapt_lora_config_for_model(_MambaLikeModel(), cfg)
+
+        dropped = [r for r in caplog.records if "Mamba-incompatible" in r.getMessage()]
+        assert [r.levelno for r in dropped] == [logging.WARNING, logging.WARNING]
+        assert "['out_proj']" in dropped[0].getMessage()
+        assert "['out_proj.weight']" in dropped[1].getMessage()
+
     def test_target_parameters_force_zero_dropout(self):
         cfg = _PlainLoraConfig(
             target_modules=["in_proj"],
@@ -2420,7 +2434,7 @@ class TestLoraTargetModuleNames:
 class TestLogCudaMemorySnapshot:
     def test_noop_without_cuda(self, monkeypatch, caplog):
         monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-        with caplog.at_level(logging.INFO, logger="agilerl.utils.llm_utils"):
+        with caplog.at_level(logging.DEBUG, logger="agilerl.utils.llm_utils"):
             log_cuda_memory_snapshot("label")
         assert caplog.text == ""
 
@@ -2428,8 +2442,9 @@ class TestLogCudaMemorySnapshot:
         monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
         monkeypatch.setattr(torch.cuda, "memory_allocated", lambda device: 2 * GiB)
         monkeypatch.setattr(torch.cuda, "memory_reserved", lambda device: 3 * GiB)
-        with caplog.at_level(logging.INFO, logger="agilerl.utils.llm_utils"):
+        with caplog.at_level(logging.DEBUG, logger="agilerl.utils.llm_utils"):
             log_cuda_memory_snapshot("after wake_up", device_index=0)
+        assert [r.levelno for r in caplog.records] == [logging.DEBUG]
         assert "after wake_up" in caplog.text
         assert "allocated=2.00 GiB" in caplog.text
         assert "reserved=3.00 GiB" in caplog.text
