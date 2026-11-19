@@ -4968,22 +4968,20 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         main = is_main_process()
         if self._trainer_should_load_before_vllm(base_model):
             if main:
-                warnings.warn(
+                logger.debug(
                     "colocated init: trainer-first order (bnb trainer + vLLM "
                     "sleep mode); trainer built, offloaded to CPU, then vLLM "
                     "starts. vLLM cycles its base via native sleep/wake.",
-                    stacklevel=2,
                 )
             self._initialize_actors(base_model, add_adapters)
             self._offload_trainer_to_cpu_for_colocated_vllm()
             self._configure_vllm()
         else:
             if main:
-                warnings.warn(
+                logger.debug(
                     "colocated init: vLLM-first order (dense trainer or "
                     "sleep_mode off); each side holds its own base, vLLM cycles "
                     "via native sleep/wake, trainer offloaded during rollout.",
-                    stacklevel=2,
                 )
             self._configure_vllm()
             self._initialize_actors(base_model, add_adapters)
@@ -8081,12 +8079,12 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         )
         apply_vllm_compile_cache_env([gpu_id])
         if is_main_process():
-            warnings.warn(
-                f"colocated init: starting vLLM LLM() with "
-                f"max_num_batched_tokens={llm_kwargs.get('max_num_batched_tokens')} "
-                f"(max_num_seqs={self.vllm_config.max_num_seqs} "
-                f"max_model_len={self.max_model_len})",
-                stacklevel=2,
+            logger.debug(
+                "colocated init: starting vLLM LLM() with max_num_batched_tokens=%s "
+                "(max_num_seqs=%s max_model_len=%s)",
+                llm_kwargs.get("max_num_batched_tokens"),
+                self.vllm_config.max_num_seqs,
+                self.max_model_len,
             )
 
         if getattr(self.lora_config, "target_parameters", None) and (
@@ -8120,10 +8118,15 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         # Must run after the in-process engine (and its LoRA layers) exist.
         patched = patch_vllm_lora_keep_resident(self.llm)
         if is_main_process() and patched:
-            warnings.warn(
-                f"colocated init: kept {patched} vLLM LoRA slots resident "
+            logger.debug(
+                "colocated init: kept %d vLLM LoRA slots resident "
                 "(works around vLLM zeroing the rollout adapter slot).",
-                stacklevel=2,
+                patched,
+            )
+        elif is_main_process() and llm_kwargs.get("enable_lora"):
+            logger.warning(
+                "colocated init: could not keep any vLLM LoRA slot resident; the "
+                "rollout adapter may contribute nothing to generation."
             )
 
         if self.vllm_config.sleep_mode:

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import inspect
+import logging
 import socket
 import threading
 import time
@@ -26,6 +27,8 @@ from openenv.core.env_server.mcp_types import CallToolAction, CallToolObservatio
 from openenv.core.env_server.types import Action, Observation, State
 from PIL import Image
 from pydantic import ConfigDict, Field
+from starlette.websockets import WebSocketDisconnect
+from uvicorn.protocols.utils import ClientDisconnected
 
 from agilerl.llm_envs.env_sources import is_url, spec_to_factory
 from agilerl.llm_envs.observation import image_to_base64_png, observation_text_and_image
@@ -35,6 +38,32 @@ if TYPE_CHECKING:
     from typing import Self
 
     from agilerl.protocols import TextEnvProtocol
+
+logger = logging.getLogger(__name__)
+
+
+class ClientDisconnectFilter(logging.Filter):
+    """Turn uvicorn's ASGI error for a client that closed its session into one debug line."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Drop the record when its exception chain starts with a client disconnect.
+
+        :param record: A ``uvicorn.error`` record.
+        :type record: logging.LogRecord
+        :return: Whether to keep the record.
+        :rtype: bool
+        """
+        root = record.exc_info[1] if record.exc_info else None
+        while root is not None and root.__context__ is not None:
+            root = root.__context__
+        if isinstance(root, (ClientDisconnected, WebSocketDisconnect)):
+            logger.debug("Env client closed its session: %s", type(root).__name__)
+            return False
+        return True
+
+
+# One instance, so repeated server starts in a process add it once.
+CLIENT_DISCONNECT_FILTER = ClientDisconnectFilter()
 
 
 def _is_str_keyed_dict(obj: object) -> TypeGuard[dict[str, Any]]:
@@ -424,6 +453,7 @@ class OpenEnvServer:
             app, host=self._host, port=self._port, log_level="warning"
         )
         self._server = uvicorn.Server(config)
+        logging.getLogger("uvicorn.error").addFilter(CLIENT_DISCONNECT_FILTER)
         self._thread = threading.Thread(
             target=self._server.run, name="openenv-server", daemon=True
         )
