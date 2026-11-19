@@ -81,6 +81,7 @@ from agilerl.arena.memory.specs import (
 )
 from agilerl.arena.models.algorithms.llmppo import LLMPPOSpec
 from agilerl.arena.models.algorithms.llmreinforce import LLMREINFORCESpec
+from agilerl.arena.models.algorithms.opd import teacher_engine_gpus
 from agilerl.arena.models.algorithms.rollout_llm import RolloutLLMSpec
 from agilerl.arena.models.env import LLMEnvSpec
 from agilerl.arena.models.manifest import TrainingManifest
@@ -215,6 +216,8 @@ class SplitWorkload(BaseModel):
     speculative_drafting: bool | None = None
     # Pinned engine scheduler-step token cap; ``None`` lets the split pick one.
     max_num_batched_tokens: int | None = None
+    # GPUs each engine's separate teacher engine adds; 0 without one.
+    teacher_engine_gpus: int = 0
 
 
 class TrainerCost(NamedTuple):
@@ -249,6 +252,8 @@ class GpuSplit(BaseModel):
     engines: int
     # GPUs per engine (vLLM tensor parallel).
     engine_width: int
+    # GPUs each engine's separate teacher engine adds; 0 without one.
+    teacher_engine_gpus: int = 0
     rollout_batch_size: int
     learn_seconds: float
     # Engine time to generate one learn step's groups.
@@ -264,8 +269,10 @@ class GpuSplit(BaseModel):
 
     @property
     def gpus(self) -> int:
-        """GPUs the trainers and engines occupy."""
-        return self.trainers + self.engines * self.engine_width
+        """GPUs the trainers, engines and their teacher engines occupy."""
+        return self.trainers + self.engines * (
+            self.engine_width + self.teacher_engine_gpus
+        )
 
     @property
     def step_seconds(self) -> float:
@@ -944,6 +951,7 @@ def _split_pricer(
             trainers=trainers,
             engines=engines,
             engine_width=engine_width,
+            teacher_engine_gpus=workload.teacher_engine_gpus,
             rollout_batch_size=rollout_batch_size,
             learn_seconds=learn_gpu_seconds * cost.learn_cost_ratio / trainers
             + cost.optimizer_offload_seconds * _optimizer_steps(workload, trainers),
@@ -1029,19 +1037,20 @@ def choose_gpu_split(
     :return: The chosen split, or None when no split fits.
     :raises ValueError: When the device has no peak bf16 or bandwidth figure.
     """
-    if gpus <= engine_width:
+    engine_gpus = engine_width + workload.teacher_engine_gpus
+    if gpus <= engine_gpus:
         return None
     price = _split_pricer(model, device, workload, engine_width, trainer_cost)
     sharding = [
         trainers
-        for trainers in range(1, gpus - engine_width + 1)
+        for trainers in range(1, gpus - engine_gpus + 1)
         if _trainers_shard_batch(workload, trainers)
     ]
     splits = [
         split
-        for engines in range(1, (gpus - 1) // engine_width + 1)
+        for engines in range(1, (gpus - 1) // engine_gpus + 1)
         for trainers in sharding
-        if trainers <= gpus - engines * engine_width
+        if trainers <= gpus - engines * engine_gpus
         and (split := price(trainers, engines)) is not None
     ]
     if not splits:
@@ -1115,6 +1124,7 @@ def split_workload_from_manifest(
         logit_bias=rollout_logit_bias(spec),
         speculative_drafting=speculative_drafting(spec),
         max_num_batched_tokens=_pinned_max_num_batched_tokens(spec),
+        teacher_engine_gpus=teacher_engine_gpus(spec),
     )
 
 

@@ -54,6 +54,7 @@ from agilerl.arena.memory.resources import (
     note_queued_sequences,
     searches_gpu_split,
     split_manifest,
+    teacher_sized_manifest,
     tier_sync_link,
 )
 from agilerl.arena.memory.solver import (
@@ -375,6 +376,9 @@ def _planned_layout(
     """
     if num_gpus is None:
         return manifest, WeightSyncMode(True, "nixl")
+    manifest = teacher_sized_manifest(
+        manifest, device, num_gpus, device.gpus_per_node or num_gpus
+    )
     manifest = colocated_manifest(manifest, num_gpus)
     sync_link = tier_sync_link(num_gpus, device.gpus_per_node)
     if searches_gpu_split(manifest):
@@ -694,6 +698,10 @@ def main(
             payload["tiers"] = _tier_rows(checks)
             payload["training_gpus_per_agent"] = chosen.trainers
             payload["rollout_engines_per_agent"] = chosen.engines
+            if chosen.teacher_engine_tensor_parallel is not None:
+                payload["teacher_engine_tensor_parallel"] = (
+                    chosen.teacher_engine_tensor_parallel
+                )
         print(json.dumps(payload, indent=2))
         return EXIT_OK if estimate.fits_with_buffer else EXIT_OVER_BUDGET
 
@@ -795,6 +803,10 @@ def _tier_rows(checks: list[TierCheck]) -> list[dict[str, Any]]:
             row["trainers"] = check.trainers
             row["engines"] = check.engines
             row["engine_tensor_parallel"] = check.engine_tensor_parallel
+            if check.teacher_engine_tensor_parallel is not None:
+                row["teacher_engine_tensor_parallel"] = (
+                    check.teacher_engine_tensor_parallel
+                )
         rows.append(row)
     return rows
 

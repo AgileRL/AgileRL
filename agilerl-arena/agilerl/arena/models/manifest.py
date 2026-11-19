@@ -758,21 +758,6 @@ class TrainingManifest(BaseModel):
                 f"{teacher_info.vocab_size}."
             )
             raise ValueError(msg)
-        vllm = self.algorithm.vllm_config
-        if (
-            vllm is None
-            or vllm.tensor_parallel_size is None
-            or not {"training_gpus_per_agent", "rollout_engines_per_agent"}
-            & self.training.model_fields_set
-        ):
-            msg = (
-                "algorithm.teacher.model needs its GPU layout written out, since "
-                "the automatic GPU split does not count teacher engines. Set "
-                "algorithm.vllm_config.tensor_parallel_size and "
-                "training.training_gpus_per_agent or "
-                "training.rollout_engines_per_agent."
-            )
-            raise ValueError(msg)
         return self
 
     @model_validator(mode="after")
