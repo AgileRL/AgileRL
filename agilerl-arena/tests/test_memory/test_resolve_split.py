@@ -366,6 +366,50 @@ class TestChooseGpuSplit:
             plain_split.generation_seconds / NGRAM_GENERATION_SPEEDUP, rel=1e-12
         )
 
+    def test_wide_multi_turn_engine_generation_runs_without_drafting(self) -> None:
+        # Arrange: 103 sequences draft 515-token steps, past the graph ceiling.
+        wide = _workload(_sudoku_manifest(), max_num_seqs=103)
+        plain_wide = wide.model_copy(update={"speculative_drafting": False})
+
+        # Act
+        wide_split = _learn_bound_split(wide, 3, "H100-80")
+        plain_wide_split = _learn_bound_split(plain_wide, 3, "H100-80")
+
+        # Assert
+        assert wide_split.generation_seconds == plain_wide_split.generation_seconds
+
+    def test_mutable_group_ceiling_above_the_draft_width_prices_no_speedup(
+        self,
+    ) -> None:
+        # Arrange: 5 engines share 39 groups, 8 prompts each. Group size 8 is
+        # 64 sequences in flight. HPO can raise it to 16, and the engine
+        # starts at 128 sequences.
+        raw = _sudoku_manifest()
+        raw["training"]["rollout_batch_size"] = 39
+        raw["mutation"] = {"rl_hp_selection": {"group_size": {"min": 4, "max": 16}}}
+        ceiling = _workload(raw)
+        ceiling = ceiling.model_copy(update={"decode_tokens": ceiling.row_tokens})
+        starting = ceiling.model_copy(update={"slot_group_size": ceiling.group_size})
+        pinned = ceiling.model_copy(update={"max_num_seqs": 64})
+        plain = ceiling.model_copy(update={"speculative_drafting": False})
+
+        # Act
+        ceiling_split = _learn_bound_split(ceiling, 3, "H100-80")
+        starting_split = _learn_bound_split(starting, 3, "H100-80")
+        pinned_split = _learn_bound_split(pinned, 3, "H100-80")
+        plain_split = _learn_bound_split(plain, 3, "H100-80")
+
+        # Assert
+        assert ceiling.group_size == 8
+        assert ceiling.slot_group_size == 16
+        assert ceiling_split.generation_seconds == plain_split.generation_seconds
+        assert starting_split.generation_seconds == pytest.approx(
+            plain_split.generation_seconds / NGRAM_GENERATION_SPEEDUP, rel=1e-12
+        )
+        assert pinned_split.generation_seconds == pytest.approx(
+            plain_split.generation_seconds / NGRAM_GENERATION_SPEEDUP, rel=1e-12
+        )
+
     def test_multi_turn_min_p_generation_runs_without_drafting(self) -> None:
         # Arrange
         plain = _workload(_sudoku_manifest(), speculative_drafting=False)
@@ -1326,6 +1370,23 @@ class TestSplitWorkloadFromManifest:
         # Assert
         assert workload.speculative_drafting is expected
 
+    def test_slot_group_size_follows_the_hpo_ceiling(self) -> None:
+        # Arrange
+        raw = _sudoku_manifest()
+        mutable = _sudoku_manifest()
+        mutable["mutation"] = {
+            "rl_hp_selection": {"group_size": {"min": 4, "max": 16}},
+        }
+
+        # Act
+        plain = split_workload_from_manifest(TrainingManifest.model_validate(raw))
+        raised = split_workload_from_manifest(TrainingManifest.model_validate(mutable))
+
+        # Assert
+        assert plain.slot_group_size == plain.group_size == 8
+        assert raised.group_size == 8
+        assert raised.slot_group_size == 16
+
     @pytest.mark.parametrize(
         ("vllm_config", "engine_args", "expected"),
         [
@@ -1597,6 +1658,7 @@ def _prefill_workload(row_tokens: int, decode_tokens: int, turns: int) -> SplitW
     return SplitWorkload(
         batch_size=64,
         group_size=16,
+        slot_group_size=16,
         row_tokens=row_tokens,
         decode_tokens=decode_tokens,
         turns=turns,

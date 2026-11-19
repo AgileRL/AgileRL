@@ -167,7 +167,11 @@ def _engine_drafts(arch: ModelArch, settings: GenerationSettings) -> bool:
     if settings.speculative_drafting is not None:
         return settings.speculative_drafting
     return drafts_by_default(
-        settings.multi_turn, arch.is_hybrid_ssm, settings.min_p, settings.logit_bias
+        settings.multi_turn,
+        arch.is_hybrid_ssm,
+        settings.min_p,
+        settings.logit_bias,
+        settings.max_num_seqs,
     )
 
 

@@ -138,19 +138,25 @@ class TestApplyRunRolloutMode:
 
 class TestDraftsByDefault:
     def test_multi_turn_attention_only_engine_drafts(self) -> None:
-        assert drafts_by_default(True, False, 0.0, False) is True
+        assert drafts_by_default(True, False, 0.0, False, 16) is True
+
+    def test_widest_step_inside_the_graph_ceiling_drafts(self) -> None:
+        assert drafts_by_default(True, False, 0.0, False, 102) is True
+
+    def test_step_past_the_graph_ceiling_does_not_draft(self) -> None:
+        assert drafts_by_default(True, False, 0.0, False, 103) is False
 
     def test_single_turn_engine_does_not_draft(self) -> None:
-        assert drafts_by_default(False, False, 0.0, False) is False
+        assert drafts_by_default(False, False, 0.0, False, 16) is False
 
     def test_hybrid_ssm_engine_does_not_draft(self) -> None:
-        assert drafts_by_default(True, True, 0.0, False) is False
+        assert drafts_by_default(True, True, 0.0, False, 16) is False
 
     def test_min_p_engine_does_not_draft(self) -> None:
-        assert drafts_by_default(True, False, 0.05, False) is False
+        assert drafts_by_default(True, False, 0.05, False, 16) is False
 
     def test_logit_bias_engine_does_not_draft(self) -> None:
-        assert drafts_by_default(True, False, 0.0, True) is False
+        assert drafts_by_default(True, False, 0.0, True, 16) is False
 
 
 class TestRunsDualStreamLora:
