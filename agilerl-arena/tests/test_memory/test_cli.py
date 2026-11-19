@@ -1350,6 +1350,42 @@ class TestMainResourceTier:
         assert code == EXIT_OK
         assert "generation may queue" in capsys.readouterr().out
 
+    def test_json_reports_the_teacher_width_beside_the_engine_width(
+        self, tmp_path, capsys
+    ):
+        # Arrange: OPD from a 27B teacher with no GPU layout written.
+        doc = copy.deepcopy(MANIFEST)
+        doc["algorithm"] = {
+            "name": "OPD",
+            "batch_size": 16,
+            "max_output_tokens": 512,
+            "teacher": {"model": {"pretrained_model_name_or_path": "Qwen/Qwen3.8-27B"}},
+        }
+        doc["network"] = {
+            "pretrained_model_name_or_path": "Qwen/Qwen3.5-2B",
+            "max_context_length": 2048,
+        }
+        doc["training"] = {"max_steps": 100, "rollout_mode": "async"}
+        path = tmp_path / "manifest.yaml"
+        path.write_text(yaml.safe_dump(doc))
+        a100 = {
+            "name": "a100-8x",
+            "gpu_type": "NVIDIA A100-SXM4-80GB",
+            "num_gpus": 8,
+            "price_per_node_hour": 8.0,
+        }
+
+        # Act
+        code = main(str(path), tiers=[a100], config_path=TINY_CONFIG, as_json=True)
+
+        # Assert
+        payload = json.loads(capsys.readouterr().out)
+        assert code == EXIT_OK
+        assert payload["teacher_engine_tensor_parallel"] == 2
+        (row,) = payload["tiers"]
+        assert row["teacher_engine_tensor_parallel"] == 2
+        assert "engine_tensor_parallel" in row
+
     def test_json_names_the_tier_and_every_verdict(self, manifest_path, capsys):
         code = main(manifest_path, tiers=TIERS, config_path=TINY_CONFIG, as_json=True)
 

@@ -2108,3 +2108,90 @@ class TestH100GuessTheNumberWeightSync:
 
         # Assert
         assert adapter.synced_step_seconds > 1.10 * nccl.synced_step_seconds
+
+
+class TestResolveRunMemoryTeacherBundle:
+    def test_a_teacher_that_fills_the_node_leaves_no_student_width(self) -> None:
+        # Arrange: a width-4 teacher fills a 4-GPU node, so no student width fits beside it.
+        manifest = validated_run_manifest(
+            TrainingManifest.model_validate(
+                {
+                    "algorithm": {
+                        "name": "OPD",
+                        "batch_size": 4,
+                        "group_size": 4,
+                        "max_output_tokens": 256,
+                        "teacher": {
+                            "model": {
+                                "pretrained_model_name_or_path": "Qwen/Qwen3.5-9B",
+                                "vllm_config": {"tensor_parallel_size": 4},
+                            }
+                        },
+                    },
+                    "environment": {
+                        "env_type": "rollout",
+                        "dataset": "openai/gsm8k",
+                        "reward_file_path": "reward.py",
+                        "prompt_template": {"user_0": "{question}"},
+                    },
+                    "network": {
+                        "pretrained_model_name_or_path": "Qwen/Qwen3.5-2B",
+                        "max_context_length": 2048,
+                    },
+                    "training": {
+                        "max_steps": 10,
+                        "pop_size": 1,
+                        "rollout_mode": "async",
+                    },
+                    "replay_buffer": {"kind": "llm"},
+                }
+            )
+        )
+        device = _device("L4").model_copy(update={"gpus_per_node": 4})
+
+        # Act / Assert
+        with pytest.raises(ValueError, match="No trainer / rollout-engine split of 12"):
+            resolve_run_memory(manifest, catalog_model(manifest.algorithm), device, 12)
+
+    def test_a_pinned_student_width_beside_its_teacher_must_fit_one_node(self) -> None:
+        # Arrange: a pinned width-2 student beside a width-4 teacher needs 6 of a 4-GPU node.
+        manifest = validated_run_manifest(
+            TrainingManifest.model_validate(
+                {
+                    "algorithm": {
+                        "name": "OPD",
+                        "batch_size": 4,
+                        "group_size": 4,
+                        "max_output_tokens": 256,
+                        "vllm_config": {"tensor_parallel_size": 2},
+                        "teacher": {
+                            "model": {
+                                "pretrained_model_name_or_path": "Qwen/Qwen3.5-9B",
+                                "vllm_config": {"tensor_parallel_size": 4},
+                            }
+                        },
+                    },
+                    "environment": {
+                        "env_type": "rollout",
+                        "dataset": "openai/gsm8k",
+                        "reward_file_path": "reward.py",
+                        "prompt_template": {"user_0": "{question}"},
+                    },
+                    "network": {
+                        "pretrained_model_name_or_path": "Qwen/Qwen3.5-2B",
+                        "max_context_length": 2048,
+                    },
+                    "training": {
+                        "max_steps": 10,
+                        "pop_size": 1,
+                        "rollout_mode": "async",
+                    },
+                    "replay_buffer": {"kind": "llm"},
+                }
+            )
+        )
+        device = _device("L4").model_copy(update={"gpus_per_node": 4})
+
+        # Act / Assert
+        with pytest.raises(ValueError, match="No trainer / rollout-engine split of 12"):
+            resolve_run_memory(manifest, catalog_model(manifest.algorithm), device, 12)

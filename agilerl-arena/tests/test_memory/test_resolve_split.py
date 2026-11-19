@@ -280,6 +280,22 @@ class TestChooseGpuSplit:
             by_synced_step.synced_step_seconds < by_step.step_seconds + four_engine_sync
         )
 
+    def test_each_engine_leaves_room_for_its_teacher(self) -> None:
+        # Arrange: one teacher GPU beside each one-GPU engine.
+        model = catalog_model(_manifest(_sudoku_manifest()).algorithm)
+        workload = _workload(_sudoku_manifest(), teacher_engine_gpus=1)
+
+        # Act
+        split = choose_gpu_split(
+            model, _device(), workload, 8, 1, lambda _: TrainerCost(1.0, False)
+        )
+
+        # Assert
+        assert split is not None
+        assert split.teacher_engine_gpus == 1
+        assert split.gpus == split.trainers + 2 * split.engines
+        assert split.gpus <= 8
+
     def test_dropped_tied_groups_lengthen_generation_per_trained_step(self) -> None:
         # Arrange
         trains_every_group = _workload(_countdown_manifest(64), rollout_batch_size=64)

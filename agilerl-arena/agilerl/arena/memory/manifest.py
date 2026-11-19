@@ -1102,6 +1102,7 @@ def estimate_teacher_generation(
     manifest: TrainingManifest,
     device: DeviceSpec,
     rollout_engines: int | None = None,
+    tensor_parallel_size: int | None = None,
 ) -> PhaseBreakdown | None:
     """Peak memory of a separate teacher model's vLLM engine.
 
@@ -1112,6 +1113,7 @@ def estimate_teacher_generation(
     :param device: The GPU type the teacher engine runs on.
     :param rollout_engines: Engines per member the allocation starts, each with
         one teacher. ``None`` reads the manifest.
+    :param tensor_parallel_size: Teacher engine width to size; ``None`` reads the manifest.
     :return: The teacher engine's breakdown, or ``None`` when no separate model scores.
     """
     spec = manifest.algorithm
@@ -1141,7 +1143,7 @@ def estimate_teacher_generation(
         ),
         weight_dtype=_weight_dtype(vllm.dtype),
         weight_quantization=engine_weight_quantization(vllm.quantization),
-        tensor_parallel_size=teacher.model.gpus,
+        tensor_parallel_size=tensor_parallel_size or teacher.model.gpus,
         concurrent_requests=_async_engine_prompts(manifest, rollout_engines)
         * engine_group_size(spec, manifest.mutation),
     )
