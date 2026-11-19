@@ -1526,15 +1526,36 @@ def _local_param_dict_worker(rank: int, world_size: int) -> None:
 
     assert params["up_proj"].data_ptr() == up_ptr
     assert not params["up_proj"].requires_grad
-    assert params["down_proj"].data_ptr() != down_ptr
+    assert params["down_proj"].data_ptr() == down_ptr
     assert params["down_proj"].requires_grad
     assert params["down_proj"].is_leaf
 
 
+def _local_param_grad_worker(rank: int, world_size: int) -> None:
+    mesh = build_parallel_mesh(world_size=world_size, ep=world_size, device_type="cpu")
+    assert mesh is not None
+    torch.manual_seed(0)
+    module = _RoutedExperts(num_experts=4, hidden=4, intermediate=8)
+    module.up_proj.requires_grad_(False)
+    shard_experts_on_ep(module, mesh.ep)
+    params = local_param_dict(module)
+    leaf = params["down_proj"]
+    upstream = torch.randn_like(leaf)
+
+    (leaf * upstream).sum().backward()
+
+    assert leaf.grad is None
+    assert isinstance(module.down_proj.grad, DTensor)
+    assert torch.equal(module.down_proj.grad.to_local(), upstream)
+
+
 @pytest.mark.multi_rank
 class TestLocalParamDict:
-    def test_frozen_views_and_trainable_leaf_copies(self):
+    def test_frozen_and_trainable_params_are_views(self):
         run_ranks(_local_param_dict_worker)
+
+    def test_trainable_grad_moves_onto_sharded_param(self):
+        run_ranks(_local_param_grad_worker)
 
 
 def _checkpoint_worker(rank: int, world_size: int) -> None:
