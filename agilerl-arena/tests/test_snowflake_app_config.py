@@ -276,6 +276,24 @@ class TestConfigure:
         assert requests == []
         assert secret_sql(session) == []
 
+    def test_a_null_base_url_uses_the_default_arena_url(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        requests = arena_replies(monkeypatch, ENABLED)
+        session = FakeSession([RULE])
+
+        # Act
+        configure(session, ORG_KEY, USER_ID, None)
+
+        # Assert
+        [request] = requests
+        assert str(request.url) == "https://arena.agilerl.com/api/cli/v1/capabilities"
+        assert any(
+            "arena_base_url" in statement and "https://arena.agilerl.com" in statement
+            for statement in session.statements
+        )
+
     def test_a_secret_pasted_as_the_base_url_is_not_quoted(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
