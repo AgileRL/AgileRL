@@ -22,7 +22,7 @@ Tutorials
 ---------
 
 - :doc:`GRPO on GSM8K <grpo_gsm8k>`: Register the **GSM8K** math dataset from Hugging Face, write a
-  reward function, fine-tune ``Qwen2.5-0.5B-Instruct`` with GRPO, and deploy the model for inference.
+  reward function, fine-tune ``Qwen/Qwen3.5-0.8B`` with GRPO, and deploy the model for inference.
 
 .. toctree::
    :maxdepth: 1

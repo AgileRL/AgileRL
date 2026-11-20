@@ -406,7 +406,7 @@ prints the training and generation bars against the card; ``arena memory solve``
 finds the longest context the run fits, given the rest of the manifest.
 See :ref:`llm_memory_estimate`.
 
-Here is an example manifest for fine-tuning ``Qwen2.5-0.5B-Instruct`` with GRPO on GSM8K:
+Here is an example manifest for fine-tuning ``Qwen/Qwen3.5-0.8B`` with GRPO on GSM8K:
 
 .. collapse:: gsm8k_grpo.yaml
 
