@@ -147,13 +147,17 @@ class ArenaOAuth2:
     CREDENTIALS_FILE = CREDENTIALS_DIR / "credentials.json"
 
     KEYCLOAK_URL = "https://arena-auth.agilerl.com"
+    # Set by configure(keycloak_url=...), e.g. ``arena --keycloak-url``; beats ARENA_KEYCLOAK_URL.
+    _KEYCLOAK_URL_OVERRIDE: str | None = None
     REALM = "arena"
     CLIENT_ID = "arena-cli"
 
     def __init__(self) -> None:
         # Create a Keycloak OpenID client with the configured URL, realm, and client ID.
         self.kc = KeycloakOpenID(
-            server_url=os.environ.get("ARENA_KEYCLOAK_URL") or self.KEYCLOAK_URL,
+            server_url=self._KEYCLOAK_URL_OVERRIDE
+            or os.environ.get("ARENA_KEYCLOAK_URL")
+            or self.KEYCLOAK_URL,
             realm_name=self.REALM,
             client_id=self.CLIENT_ID,
         )
@@ -179,6 +183,7 @@ class ArenaOAuth2:
         """
         if keycloak_url is not None:
             cls.KEYCLOAK_URL = keycloak_url
+            cls._KEYCLOAK_URL_OVERRIDE = keycloak_url
         if realm is not None:
             cls.REALM = realm
         if client_id is not None:

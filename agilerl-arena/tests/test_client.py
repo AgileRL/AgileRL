@@ -215,9 +215,22 @@ class TestArenaClientInit:
 class TestArenaClientConfigure:
     def setup_method(self):
         self._orig_url = ArenaClient.BASE_URL
+        self._orig_override = ArenaClient._BASE_URL_OVERRIDE
 
     def teardown_method(self):
         ArenaClient.BASE_URL = self._orig_url
+        ArenaClient._BASE_URL_OVERRIDE = self._orig_override
+
+    @patch("agilerl.arena.auth.ArenaOAuth2.configure")
+    @patch("agilerl.arena.auth.KeycloakOpenID")
+    def test_configured_base_url_beats_env(self, mock_keycloak, mock_oauth_cfg):
+        """``arena --base-url`` must win over an exported ARENA_BASE_URL."""
+        ArenaClient.configure(base_url="http://localhost:3011/")
+        with patch.dict(
+            os.environ, {"ARENA_BASE_URL": "https://arena-dev.example.com"}
+        ):
+            client = ArenaClient(api_key="k")
+        assert client._base_url == "http://localhost:3011"
 
     @patch("agilerl.arena.auth.ArenaOAuth2.configure")
     def test_overrides_base_url(self, mock_oauth_cfg):
@@ -1665,7 +1678,7 @@ class TestExperimentMethods:
         assert result == {"job_id": 2}
         call_kwargs = api_key_client._open_stream.call_args[1]
         assert "json" not in call_kwargs
-        files = call_kwargs["files"]
+        files = dict(call_kwargs["files"])
         assert json.loads(files["manifest"][1]) == payload
         assert files["project"] == (None, "proj")
         assert "resource_id" not in files
@@ -1693,7 +1706,7 @@ class TestExperimentMethods:
             reward_file=b"def reward(q, a, c):\n    return 1.0\n",
         )
 
-        files = api_key_client._open_stream.call_args[1]["files"]
+        files = dict(api_key_client._open_stream.call_args[1]["files"])
         assert files["num_gpus"] == (None, "4")
         assert files["gpu_type"] == (None, "b200")
         assert "resource_id" not in files

@@ -9,6 +9,7 @@ import importlib.util
 import json
 import logging
 import sys
+from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 
@@ -101,6 +102,31 @@ def empty_planner_caches():
     yield
     for cache in PLANNER_CACHES:
         cache.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _restore_arena_url_overrides() -> Generator[None, None, None]:
+    """Undo ``configure()`` URL overrides (e.g. a CLI test passing ``--base-url``).
+
+    They are class attributes and take precedence over the env vars, so one test's
+    override would otherwise leak into every later test.
+    """
+    from agilerl.arena.auth import ArenaOAuth2
+    from agilerl.arena.client import ArenaClient
+
+    saved = (
+        ArenaClient.BASE_URL,
+        ArenaClient._BASE_URL_OVERRIDE,
+        ArenaOAuth2.KEYCLOAK_URL,
+        ArenaOAuth2._KEYCLOAK_URL_OVERRIDE,
+    )
+    yield
+    (
+        ArenaClient.BASE_URL,
+        ArenaClient._BASE_URL_OVERRIDE,
+        ArenaOAuth2.KEYCLOAK_URL,
+        ArenaOAuth2._KEYCLOAK_URL_OVERRIDE,
+    ) = saved
 
 
 @pytest.fixture(autouse=True)

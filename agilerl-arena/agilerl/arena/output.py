@@ -15,6 +15,7 @@ from functools import singledispatch
 from typing import Any
 
 import click
+from pydantic import ValidationError
 from rich.live import Live
 from rich.markup import escape
 from rich.padding import Padding
@@ -24,6 +25,7 @@ from typing_extensions import Self
 
 from agilerl.arena import console, error_console
 from agilerl.arena.exceptions import ArenaAPIError, ArenaError, resolve_api_error_class
+from agilerl.arena.models.verdict import errors as manifest_errors
 from agilerl.arena.stream import (
     CheckEvent,
     ErrorEvent,
@@ -433,13 +435,17 @@ def select_row(
 
 
 def handle_error(exc: Exception) -> None:
-    """Print an :class:`ArenaError` and exit, or re-raise unknown exceptions.
+    """Print an :class:`ArenaError` or an invalid manifest and exit, or re-raise.
 
     :param exc: The exception to handle.
     :type exc: Exception
     :returns: None
-    :raises click.exceptions.Exit: If the exception is an :class:`ArenaError`.
+    :raises click.exceptions.Exit: If the exception is an :class:`ArenaError` or
+        a pydantic :class:`~pydantic.ValidationError`.
     """
+    if isinstance(exc, ValidationError):
+        _print_invalid_manifest(exc)
+        raise click.exceptions.Exit(1) from exc
     if isinstance(exc, ArenaError):
         if json_output_enabled():
             error = {"error": str(exc), "type": type(exc).__name__}
@@ -448,6 +454,22 @@ def handle_error(exc: Exception) -> None:
             error_console.print(f"[red bold]Error:[/red bold] {exc}")
         raise click.exceptions.Exit(1) from exc
     raise exc
+
+
+def _print_invalid_manifest(exc: ValidationError) -> None:
+    """Print one line per pydantic error: the manifest field, then what is wrong with it."""
+    records = manifest_errors(exc)
+    summary = "The manifest is invalid."
+    if json_output_enabled():
+        error = {"error": summary, "type": "ValidationError", "errors": records}
+        click.echo(json.dumps(error), err=True)
+        return
+    error_console.print(f"[red bold]Error:[/red bold] {summary}")
+    for record in records:
+        # pydantic prefixes a validator's message with its error kind.
+        message = record["message"].removeprefix("Value error, ")
+        where = f"{record['path']}: " if record["path"] else ""
+        error_console.print(f"  {escape(where)}{escape(message)}", soft_wrap=True)
 
 
 @dataclass(slots=True)

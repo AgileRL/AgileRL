@@ -207,6 +207,8 @@ class ArenaClient:
     """
 
     BASE_URL: ClassVar[str] = "https://arena.agilerl.com"
+    # Set by configure(base_url=...), e.g. ``arena --base-url``; beats ARENA_BASE_URL.
+    _BASE_URL_OVERRIDE: ClassVar[str | None] = None
     CONFIG_DIR: ClassVar[Path] = Path.home() / ".arena"
     CONFIG_FILE: ClassVar[Path] = CONFIG_DIR / "config.json"
 
@@ -226,12 +228,14 @@ class ArenaClient:
         }
     )
 
+    _SUBMIT_PATH: ClassVar[str] = "/api/cli/v1/experiments/jobs/submit"
+    # True sends every submit as multipart, even without a reward file.
+    _SUBMIT_MULTIPART: ClassVar[bool] = False
     _ERROR_MAP: ClassVar[dict[str, type[ArenaAPIError]]] = {
         "/api/cli/v1/environments/create-and-validate": ArenaValidationError,
         "/api/cli/v1/environments/validate": ArenaValidationError,
         "/api/cli/v1/environments/profile": ArenaValidationError,
         "/api/cli/v1/datasets/create": ArenaValidationError,
-        "/api/cli/v1/experiments/jobs/submit": ArenaTrainingError,
     }
 
     def __init__(
@@ -245,7 +249,10 @@ class ArenaClient:
         verbose: bool = True,
     ) -> None:
 
-        self._base_url = (os.environ.get("ARENA_BASE_URL") or self.BASE_URL).rstrip("/")
+        # An explicit configure(base_url=...) wins, then ARENA_BASE_URL, then the default.
+        self._base_url = (
+            self._BASE_URL_OVERRIDE or os.environ.get("ARENA_BASE_URL") or self.BASE_URL
+        ).rstrip("/")
         self._request_timeout = request_timeout
         self._upload_timeout = upload_timeout
 
@@ -282,6 +289,9 @@ class ArenaClient:
     ) -> type[ArenaClient]:
         """Override default URLs for local development or testing.
 
+        An explicit ``base_url`` / ``keycloak_url`` takes precedence over the
+        ``ARENA_BASE_URL`` / ``ARENA_KEYCLOAK_URL`` environment variables.
+
         Returns the class so calls can be chained with instantiation::
 
             client = ArenaClient.configure(
@@ -291,6 +301,7 @@ class ArenaClient:
         """
         if base_url is not None:
             cls.BASE_URL = base_url
+            cls._BASE_URL_OVERRIDE = base_url
 
         ArenaOAuth2.configure(
             keycloak_url=keycloak_url,
@@ -1221,12 +1232,37 @@ class ArenaClient:
         :type idempotency_key: str | None
         :raises ArenaValidationError: When ``num_gpus`` is below 1.
         """
+        validated, resolved_project = self._checked_submit(manifest, num_gpus, project)
+        return self._send_submit(
+            manifest=validated,
+            project=resolved_project,
+            num_gpus=num_gpus,
+            gpu_type=gpu_type,
+            experiment_name=experiment_name,
+            reward_file=reward_file,
+            completion=completion,
+            idempotency_key=idempotency_key,
+            extra_parts=[],
+        )
+
+    def _checked_submit(
+        self,
+        manifest: str | Path | dict[str, Any],
+        num_gpus: int | None,
+        project: str | None,
+    ) -> tuple[dict[str, Any], str]:
+        """Run every client-side submit check; every submit command calls this first.
+
+        :param manifest: Training manifest as a file path, YAML string or dict.
+        :param num_gpus: Total GPUs requested, or ``None``.
+        :param project: Project name, or ``None`` for the default project.
+        :return: The validated manifest payload and the resolved project name.
+        """
         self._check_num_gpus(num_gpus)
         training_manifest = TrainingManifest.get_validated(manifest, mode="python")
         self._check_model_status(training_manifest)
         self._check_context_length(training_manifest)
         self._check_rollout_mode(training_manifest)
-        validated = training_manifest.to_payload()
         resolved_project = self._resolve_project(project)
         if not resolved_project:
             msg = "No project specified."
@@ -1235,23 +1271,47 @@ class ArenaClient:
                 sdk_hint="Pass a project name or set a default with ArenaClient.set_default_project().",
                 cli_hint="Use --project or set a default with 'arena projects set-default <name>'.",
             )
+        return training_manifest.to_payload(), resolved_project
 
+    def _send_submit(
+        self,
+        manifest: dict[str, Any],
+        project: str,
+        num_gpus: int | None,
+        gpu_type: str | None,
+        experiment_name: str | None,
+        reward_file: str | os.PathLike[str] | bytes | None,
+        completion: str | None,
+        idempotency_key: str | None,
+        extra_parts: list[tuple[str, Any]],
+    ) -> dict[str, Any]:
+        """Send a checked submit to ``_SUBMIT_PATH``; every submit command sends through here.
+
+        Takes :meth:`_checked_submit`'s outputs and the other :meth:`submit_experiment`
+        arguments, then:
+
+        :param extra_parts: Multipart parts sent after the public ones.
+        :return: Final result of the submit stream.
+        """
         headers = _idempotency_headers(idempotency_key)
 
-        if reward_file is not None:
-            files = self._build_submit_experiment_multipart(
-                manifest=validated,
-                project=resolved_project,
-                num_gpus=num_gpus,
-                gpu_type=gpu_type,
-                experiment_name=experiment_name,
-                reward_file=reward_file,
-                completion=completion,
-            )
+        if self._SUBMIT_MULTIPART or reward_file is not None or extra_parts:
+            files: list[tuple[str, Any]] = [
+                *self._build_submit_experiment_multipart(
+                    manifest=manifest,
+                    project=project,
+                    num_gpus=num_gpus,
+                    gpu_type=gpu_type,
+                    experiment_name=experiment_name,
+                    reward_file=reward_file,
+                    completion=completion,
+                ).items(),
+                *extra_parts,
+            ]
             try:
                 return self._open_stream(
                     "POST",
-                    "/api/cli/v1/experiments/jobs/submit",
+                    self._SUBMIT_PATH,
                     files=files,
                     headers=headers,
                     timeout=self._upload_timeout,
@@ -1261,7 +1321,7 @@ class ArenaClient:
 
         # The server rejects explicit nulls, and the resource defaults
         # (num_gpus, gpu_type) only apply when the key is absent.
-        payload: dict[str, Any] = {"manifest": validated, "project": resolved_project}
+        payload: dict[str, Any] = {"manifest": manifest, "project": project}
         payload.update(
             {
                 key: value
@@ -1275,11 +1335,17 @@ class ArenaClient:
         )
         return self._open_stream(
             "POST",
-            "/api/cli/v1/experiments/jobs/submit",
+            self._SUBMIT_PATH,
             json=payload,
             headers=headers,
             timeout=self._upload_timeout,
         ).collect()
+
+    def _error_class(self, path: str) -> type[ArenaAPIError]:
+        """Return the error class a failed request to *path* raises."""
+        if path == self._SUBMIT_PATH:
+            return ArenaTrainingError
+        return self._ERROR_MAP.get(path, ArenaAPIError)
 
     @staticmethod
     def _check_num_gpus(num_gpus: int | None) -> None:
@@ -2341,7 +2407,7 @@ class ArenaClient:
         # Handle non-success responses.
         if not resp.is_success:
             raw = self._read_response_body(resp, stream=stream)
-            error_cls = self._ERROR_MAP.get(path, ArenaAPIError)
+            error_cls = self._error_class(path)
             raise error_cls.from_response_body(raw, status_code=resp.status_code)
 
         return resp
@@ -2642,7 +2708,7 @@ class ArenaClient:
         **kwargs: Any,
     ) -> NDJsonStream:
         """Send a streaming request and return an :class:`NDJsonStream`."""
-        error_cls = self._ERROR_MAP.get(path, ArenaAPIError)
+        error_cls = self._error_class(path)
         handler = self._stream_handler
         renderer: StreamRichRenderer | None = None
         if handler is None and self._verbose:
