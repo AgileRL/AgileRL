@@ -189,15 +189,17 @@ class TestEstimateTraining:
         # bf16 quarter shards of 896x4864 beside one fp32 quarter shard, and
         # the rank joins the refit's two NCCL groups.
         quarter = 896 * 4864 // 4
+        pack = 2 * 896 * 4864
         communicators = 2 * device.nccl_group_bytes
         refit = component(reshard_breakdown, "lora_send_buffer")
-        assert refit.n_bytes == 10 * quarter + communicators
+        assert refit.n_bytes == 10 * quarter + pack + communicators
         assert refit.detail == {
             "bulk_group": 6 * quarter,
             "bulk_fp32_temp": 4 * quarter,
             "misc_bucket": 0,
             "misc_module": 0,
             "misc_fp32_copy": 0,
+            "pack_slot": pack,
             "communicators": communicators,
         }
         assert (
@@ -205,7 +207,7 @@ class TestEstimateTraining:
             == 2 * MERGED_SYNC_BUCKET_BYTES
         )
         assert reshard_breakdown.total_bytes - nixl_breakdown.total_bytes == (
-            10 * quarter + communicators - 2 * MERGED_SYNC_BUCKET_BYTES
+            10 * quarter + pack + communicators - 2 * MERGED_SYNC_BUCKET_BYTES
         )
 
     def test_async_rollout_holds_the_adapter_send_buffer(self, model, device):
@@ -825,16 +827,50 @@ class TestEstimateGeneration:
 
         # Assert: the bf16 GDN projections are the only misc weights and fit
         # one bucket; attention and MLP land in the live weights. The refit's
-        # groups take 4300 MiB, measured on H100.
+        # groups take 4300 MiB on H100 with a 2 GiB PACK slot, which the
+        # largest MLP shard replaces.
         misc = 18 * (1024 * 6144 + 1024 * 2048 + 2048 * 1024) + 36 * 1024 * 16
+        pack = 2 * 1024 * 4096
+        groups = 4300 * MiB - 2 * GiB + pack
         receive = component(reshard_breakdown, "lora_receive_buffer")
-        assert receive.n_bytes == 2 * misc + 4300 * MiB
-        assert receive.detail == {"misc_bucket": 2 * misc, "refit_groups": 4300 * MiB}
+        assert receive.n_bytes == 2 * misc + groups
+        assert receive.detail == {
+            "misc_bucket": 2 * misc,
+            "refit_groups": groups,
+            "pack_slot": pack,
+        }
         assert (
             component(nixl_breakdown, "lora_receive_buffer").n_bytes
             == MERGED_SYNC_BUCKET_BYTES
         )
         assert component(reshard_breakdown, "lora_slots").n_bytes == 0
+
+    def test_nccl_reshard_engine_replaces_the_default_slot_when_a_shard_is_larger(
+        self, device
+    ):
+        # Arrange: one gate_proj of 2**21 x 896 bf16 is 3.5 GiB.
+        wide = ModelSpec(
+            model_id="wide-mlp",
+            arch=QWEN_05B.model_copy(
+                update={"n_layers": 1, "intermediate_size": 2**21}
+            ),
+        )
+        settings = GenerationSettings(
+            max_lora_rank=16,
+            lora_sync_scope="all-linear",
+            merged_lora_sync=True,
+            nccl_reshard_trainer_shards=1,
+        )
+
+        # Act
+        receive = component(
+            estimate_generation(wide, device, settings), "lora_receive_buffer"
+        )
+
+        # Assert
+        pack = 2 * 896 * 2**21
+        assert receive.detail["pack_slot"] == pack
+        assert receive.detail["refit_groups"] == 4300 * MiB + pack - 2 * GiB
 
     def test_rollout_engine_holds_the_whole_adapter_outside_the_budget(self, device):
         # Arrange

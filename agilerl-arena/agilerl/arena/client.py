@@ -50,6 +50,7 @@ from agilerl.arena.models import (
 )
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.traces import TRACES_DATASET_FORMAT, validate_traces_file
+from agilerl.arena.models.verdict import HPO_UNAVAILABLE_MESSAGE, hpo_fields
 from agilerl.arena.output import StreamRichRenderer
 from agilerl.arena.stream import NDJsonStream, StreamEvent
 from agilerl.arena.typing import JSONValue
@@ -1230,7 +1231,8 @@ class ArenaClient:
         :param idempotency_key: Reuse this key to replay the same submit instead
             of starting another job. The key is org-wide.
         :type idempotency_key: str | None
-        :raises ArenaValidationError: When ``num_gpus`` is below 1.
+        :raises ArenaValidationError: When ``num_gpus`` is below 1, or the
+            manifest turns on HPO.
         """
         validated, resolved_project = self._checked_submit(manifest, num_gpus, project)
         return self._send_submit(
@@ -1260,6 +1262,7 @@ class ArenaClient:
         """
         self._check_num_gpus(num_gpus)
         training_manifest = TrainingManifest.get_validated(manifest, mode="python")
+        self._check_no_hpo(training_manifest)
         self._check_model_status(training_manifest)
         self._check_context_length(training_manifest)
         self._check_rollout_mode(training_manifest)
@@ -1352,6 +1355,14 @@ class ArenaClient:
         """Reject a GPU request below 1 GPU."""
         if num_gpus is not None and num_gpus < 1:
             msg = "num_gpus must be at least 1."
+            raise ArenaValidationError(msg)
+
+    @staticmethod
+    def _check_no_hpo(manifest: TrainingManifest) -> None:
+        """Reject a manifest that turns on HPO, which Arena does not run."""
+        fields = hpo_fields(manifest)
+        if fields:
+            msg = f"{', '.join(fields)}: {HPO_UNAVAILABLE_MESSAGE}"
             raise ArenaValidationError(msg)
 
     @staticmethod

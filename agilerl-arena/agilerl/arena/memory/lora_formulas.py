@@ -58,7 +58,8 @@ class NcclReshardRefitBytes(NamedTuple):
     shard. Misc: ``misc_bucket`` is the reused broadcast bucket plus any
     weight too large for it, ``misc_module`` the largest misc module gathered
     whole (base weight and fp32 LoRA factors), and ``misc_fp32_copy`` the
-    fp32 copy of its base the merge accumulates into.
+    fp32 copy of its base the merge accumulates into. ``pack_slot`` is the
+    PACK staging buffer kept on every rank for the whole refit.
     """
 
     misc_bucket: int
@@ -66,6 +67,7 @@ class NcclReshardRefitBytes(NamedTuple):
     misc_fp32_copy: int
     bulk_group: int
     bulk_fp32_temp: int
+    pack_slot: int
 
     @property
     def bulk_phase(self) -> int:
@@ -79,8 +81,8 @@ class NcclReshardRefitBytes(NamedTuple):
 
     @property
     def total(self) -> int:
-        """Peak extra bytes of the refit."""
-        return max(self.bulk_phase, self.misc_phase)
+        """Peak extra bytes of the refit, including the live PACK slot."""
+        return max(self.bulk_phase, self.misc_phase) + self.pack_slot
 
 
 def _attention_lora_widths(
@@ -594,6 +596,30 @@ def nccl_reshard_receive_bucket_bytes(
     return max(_misc_buckets(misc, dtype_bytes))
 
 
+def nccl_reshard_pack_slot_bytes(
+    arch: ModelArch,
+    scope: LoraTargetScope,
+    layout: NcclReshardLayout,
+    dtype_bytes: float,
+) -> int:
+    """Bytes of the one PACK staging slot a rank allocates on the first reshard.
+
+    :param arch: Model architecture.
+    :param scope: Adapter target scope.
+    :param layout: Trainer sharding and engine width.
+    :param dtype_bytes: Bytes per element of the sync dtype.
+    :return: 0 when nothing is bulk. Otherwise the largest bulk tensor's
+        bigger local shard, and at least 2 KiB.
+    """
+    blocks = nccl_reshard_sync_linears(arch, scope, layout)[0]
+    largest = max((elements for block in blocks for elements in block), default=0)
+    if largest == 0:
+        return 0
+    shard = largest // min(layout.trainer_shards, layout.engine_tensor_parallel)
+    # nccl-extensions allocates at least 2 KiB.
+    return max(int(shard * dtype_bytes), 2 * 1024)
+
+
 def nccl_reshard_refit_bytes(
     arch: ModelArch,
     scope: LoraTargetScope,
@@ -608,7 +634,8 @@ def nccl_reshard_refit_bytes(
     is charged. Misc phase, after it: rank 0 keeps the reused bucket, a
     weight too large for it takes a buffer of its own, and the largest misc
     module is gathered whole (base at ``dtype_bytes``, fp32 LoRA factors)
-    beside the fp32 copy of its base the merge accumulates into.
+    beside the fp32 copy of its base the merge accumulates into. Every rank
+    also keeps one PACK staging slot for the whole refit.
 
     :param arch: Model architecture.
     :param scope: Adapter target scope.
@@ -653,6 +680,7 @@ def nccl_reshard_refit_bytes(
         misc_fp32_copy=misc_fp32_copy,
         bulk_group=bulk_group,
         bulk_fp32_temp=bulk_fp32_temp,
+        pack_slot=nccl_reshard_pack_slot_bytes(arch, scope, layout, dtype_bytes),
     )
 
 

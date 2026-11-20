@@ -4822,12 +4822,15 @@ class TestNcclReshardRefitBytes:
         )
 
         # Assert: no misc weights. The MLP block stages 3 bf16 quarter shards
-        # of 896x4864 beside one fp32 quarter shard.
+        # of 896x4864 beside one fp32 quarter shard. Engine TP 1 holds the
+        # whole bf16 MLP weight in the PACK slot.
         quarter = 896 * 4864 // 4
+        pack = 2 * 896 * 4864
         assert refit.misc_phase == 0
         assert refit.bulk_group == 2 * 3 * quarter
         assert refit.bulk_fp32_temp == 4 * quarter
-        assert refit.total == 10 * quarter
+        assert refit.pack_slot == pack
+        assert refit.total == 10 * quarter + pack
 
     def test_misc_phase_holds_bucket_gathered_module_and_fp32_copy(self):
         # Arrange
@@ -4848,7 +4851,10 @@ class TestNcclReshardRefitBytes:
         assert refit.misc_fp32_copy == 4 * 1024 * 6144
         assert refit.bulk_group == 2 * 3 * quarter
         assert refit.bulk_fp32_temp == 4 * quarter
-        assert refit.total == refit.misc_phase == 416_874_496
+        assert refit.misc_phase == 416_874_496
+        # Full-attention q_proj is 1024x4096, larger than the 1024x3584 MLP.
+        assert refit.pack_slot == 2 * 1024 * 4096
+        assert refit.total == refit.misc_phase + refit.pack_slot
 
     def test_oversize_misc_weight_takes_its_own_bucket_beside_the_reused_one(self):
         # Arrange: a 393216x896 down_proj whose 896 rows cannot split 3 ways.
@@ -4868,7 +4874,8 @@ class TestNcclReshardRefitBytes:
         assert refit.misc_bucket == packed + down
         assert refit.misc_module == down + 4 * 16 * (393216 + 896)
         assert refit.misc_fp32_copy == 2 * down
-        assert refit.total == 2_847_465_472
+        assert refit.pack_slot == down
+        assert refit.total == refit.misc_phase + refit.pack_slot
 
     def test_more_trainer_shards_shrink_only_the_bulk_terms(self):
         # Arrange
@@ -4882,10 +4889,56 @@ class TestNcclReshardRefitBytes:
             arch, "all-linear", 16, NcclReshardLayout(8, 1), 2
         )
 
-        # Assert
+        # Assert: the engine holds the full weight, so the PACK slot does not shrink.
         assert eight.misc_phase == four.misc_phase
         assert eight.bulk_group == four.bulk_group // 2
         assert eight.bulk_fp32_temp == four.bulk_fp32_temp // 2
+        assert eight.pack_slot == four.pack_slot
+        assert eight.total == four.total
+
+    def test_pack_slot_grows_past_the_default_bucket(self):
+        # Arrange: one gate_proj of 2**21 x 896 bf16 is 3.5 GiB.
+        arch = QWEN_05B.model_copy(update={"n_layers": 1, "intermediate_size": 2**21})
+
+        # Act
+        refit = lora_formulas.nccl_reshard_refit_bytes(
+            arch, "all-linear", 16, NcclReshardLayout(1, 1), 2
+        )
+
+        # Assert
+        assert refit.pack_slot == 2 * 896 * 2**21
+
+    def test_pack_slot_is_zero_when_nothing_is_bulk(self):
+        # Arrange: 896 does not divide across 3 trainer shards or 3 engine GPUs.
+
+        # Act
+        slot = lora_formulas.nccl_reshard_pack_slot_bytes(
+            QWEN_05B, "all-linear", NcclReshardLayout(3, 3), 2
+        )
+
+        # Assert
+        assert slot == 0
+
+    def test_pack_slot_is_at_least_2kib(self):
+        # Arrange
+        arch = QWEN_05B.model_copy(
+            update={
+                "n_layers": 1,
+                "hidden_size": 4,
+                "intermediate_size": 4,
+                "n_heads": 2,
+                "n_kv_heads": 2,
+                "head_dim": 2,
+            }
+        )
+
+        # Act
+        slot = lora_formulas.nccl_reshard_pack_slot_bytes(
+            arch, "all-linear", NcclReshardLayout(1, 1), 2
+        )
+
+        # Assert
+        assert slot == 2 * 1024
 
 
 class TestNcclReshardReceiveBucketBytes:
