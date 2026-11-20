@@ -2109,6 +2109,112 @@ class TestH100GuessTheNumberWeightSync:
         assert adapter.synced_step_seconds > 1.10 * nccl.synced_step_seconds
 
 
+def _guess_the_number_smoke(hub_id: str, context: int = 1024) -> TrainingManifest:
+    """Five-turn CISPO on GuessTheNumber with expert LoRA; layout, split and engine width unset."""
+    raw = _sudoku_manifest()
+    raw["algorithm"].update(
+        batch_size=32,
+        mini_batch_size=32,
+        group_size=4,
+        max_output_tokens=128,
+        vllm_config={},
+    )
+    raw["environment"].update(entrypoint="game:GuessTheNumber-v0-easy", max_turns=5)
+    raw["network"].update(
+        pretrained_model_name_or_path=hub_id, max_context_length=context
+    )
+    raw["network"]["lora_config"]["target_parameters"] = [
+        "mlp.experts.gate_up_proj",
+        "mlp.experts.down_proj",
+    ]
+    return validated_run_manifest(TrainingManifest.model_validate(raw))
+
+
+def _layout(plan: RunMemoryPlan) -> ParallelLayout:
+    fsdp = plan.training.fsdp
+    assert fsdp is not None
+    return ParallelLayout(fsdp.tp, fsdp.ep, fsdp.cp, fsdp.shard_group_size)
+
+
+class TestResolveRunMemoryCrossNodeExperts:
+    def test_experts_held_whole_across_nodes_beat_gathering_them(self) -> None:
+        # Arrange: 16 trainers on two nodes. EP 4 x CP 4 fits first but
+        # gathers expert pieces from the other node every pass; EP 16 holds
+        # every expert once and sends routed tokens instead.
+        manifest = _guess_the_number_smoke("deepseek-ai/DeepSeek-V4-Flash-0731")
+
+        # Act
+        plan = resolve_run_memory(
+            manifest, catalog_model(manifest.algorithm), _h100_nodes(), 24
+        )
+
+        # Assert
+        assert plan.split is not None
+        assert plan.split.trainers == 16
+        assert _layout(plan) == ParallelLayout(ep=16, cp=4)
+        assert plan.training.fsdp is not None
+        assert plan.training.fsdp.routed_expert_chunk_mib == 512
+        assert plan.training.fsdp.optim_cpu_offload is False
+
+    def test_long_rows_keep_gathering_weights(self) -> None:
+        # Arrange: at 32k tokens the routed tokens EP 16 would send outweigh
+        # the expert pieces EP 8 gathers.
+        manifest = _guess_the_number_smoke(
+            "deepseek-ai/DeepSeek-V4-Flash-0731", context=32768
+        )
+        manifest.training.training_gpus_per_agent = 16
+
+        # Act
+        plan = kept_split_memory(
+            manifest,
+            catalog_model(manifest.algorithm),
+            _h100_nodes(),
+            24,
+            None,
+            SearchCache(),
+        )
+
+        # Assert
+        assert plan is not None
+        assert _layout(plan) == ParallelLayout(ep=8, cp=4)
+
+    def test_kept_trainer_counts_take_the_same_layout(self) -> None:
+        manifest = _guess_the_number_smoke("deepseek-ai/DeepSeek-V4-Flash-0731")
+        manifest.training.training_gpus_per_agent = 16
+
+        plan = kept_split_memory(
+            manifest,
+            catalog_model(manifest.algorithm),
+            _h100_nodes(),
+            24,
+            None,
+            SearchCache(),
+        )
+
+        assert plan is not None
+        assert _layout(plan) == ParallelLayout(ep=16, cp=4)
+
+    def test_one_node_keeps_the_least_parallel_layout(self) -> None:
+        # Arrange: on one node no group crosses, so the least parallel fit
+        # stays: TP 2 x EP 2 fits before any higher expert degree.
+        manifest = _guess_the_number_smoke("Qwen/Qwen3.6-35B-A3B")
+        manifest.training.training_gpus_per_agent = 8
+
+        # Act
+        plan = kept_split_memory(
+            manifest,
+            catalog_model(manifest.algorithm),
+            _h100_nodes(),
+            8,
+            None,
+            SearchCache(),
+        )
+
+        # Assert
+        assert plan is not None
+        assert _layout(plan) == ParallelLayout(tp=2, ep=2)
+
+
 class TestResolveRunMemoryTeacherBundle:
     def test_a_teacher_that_fills_the_node_leaves_no_student_width(self) -> None:
         # Arrange: a width-4 teacher fills a 4-GPU node, so no student width fits beside it.

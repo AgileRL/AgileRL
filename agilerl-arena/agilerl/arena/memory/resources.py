@@ -17,6 +17,7 @@ from agilerl.arena.memory.manifest import (
     device_spec_from_resource_class,
     estimate_teacher_generation,
     lookup_gpu,
+    training_memory_from_manifest,
     training_plan_model,
     unsupported_gpu_reason,
 )
@@ -30,6 +31,7 @@ from agilerl.arena.memory.resolve.engine import (
 from agilerl.arena.memory.resolve.fsdp import TrainingMemoryUnfitError
 from agilerl.arena.memory.resolve.parallel import (
     ParallelLayout,
+    cross_node_expert_bytes,
     layout_runs,
     manifest_at_layout,
     manifest_fsdp,
@@ -83,7 +85,9 @@ class TierCheck:
     layout, ``None`` when the manifest was priced as written.
     ``failure`` is ``None`` exactly when the check fits. ``host_limited`` is
     true when training missed the host share or only fitted after re-pricing
-    for it, including on a fit.
+    for it, including on a fit. ``cross_node_expert_bytes`` is what a fitting
+    check's trainer plan moves between nodes per optimizer step
+    (:func:`cross_node_expert_bytes`); zero on a miss.
     """
 
     tier: dict[str, Any]
@@ -102,6 +106,7 @@ class TierCheck:
     step_seconds: float | None = None
     failure: FailureKind | None = None
     host_limited: bool = False
+    cross_node_expert_bytes: float = 0.0
 
     @property
     def fits(self) -> bool:
@@ -652,7 +657,7 @@ def _price(
         return _solve_miss(
             tier, num_nodes, err, split_reason, split_failure, cache.host_limited
         )
-    return _finish_price(
+    check = _finish_price(
         tier,
         num_nodes,
         layout,
@@ -666,6 +671,34 @@ def _price(
         split_failure,
         cache.host_limited,
     )
+    return _with_cross_node_bytes(check, laid_out, model, device, mode, layout)
+
+
+def _with_cross_node_bytes(
+    check: TierCheck,
+    laid_out: TrainingManifest,
+    model: ModelSpec,
+    device: DeviceSpec,
+    mode: WeightSyncMode,
+    layout: ParallelLayout | None,
+) -> TierCheck:
+    """``check`` with the routed-expert bytes a fitting searched ``layout`` moves between nodes per step."""
+    if not check.fits or layout is None:
+        return check
+    trainers = laid_out.training.training_gpus_per_agent
+    node_gpus = device.gpus_per_node or trainers
+    trained = training_plan_model(laid_out, model)
+    if trainers <= node_gpus or not trained.arch.is_moe:
+        return check
+    plan = training_memory_from_manifest(
+        laid_out, trained, device, not mode.merged, mode.transport == "nccl_reshard"
+    )
+    return replace(
+        check,
+        cross_node_expert_bytes=cross_node_expert_bytes(
+            trained.arch, plan, layout, trainers, node_gpus
+        ),
+    )
 
 
 def _search_steps(
@@ -674,10 +707,9 @@ def _search_steps(
     """Layouts in search order; ``"hsdp"`` shards at each tier's node size.
 
     The manifest's own pins come first and run as written. A searched layout
-    is kept when the groups the search raised sit on one node
-    (:func:`off_node_reason`) at some tier and node count; each tier prices
-    only the layouts that sit on its nodes. Empty when the manifest has no
-    layout to search: no catalogued LLM.
+    is kept when it is allowed (:func:`off_node_reason`) at some tier and
+    node count. Empty when the manifest has no layout to search: no
+    catalogued LLM.
     """
     spec = manifest.algorithm
     model = catalog_model(spec) if isinstance(spec, LLMAlgorithmSpec) else None
@@ -772,6 +804,59 @@ def _price_step(
     return _price(tier, manifest, model, build_config, layout, num_nodes, cache)
 
 
+def _searched_expert_spans_node(
+    step: ParallelLayout | Literal["hsdp"] | None,
+    tier: dict[str, Any],
+    pinned: ParallelLayout | Literal["hsdp"] | None,
+) -> bool:
+    """Whether ``step`` is a searched expert group wider than ``tier``'s node.
+
+    The manifest's own layout (``pinned``) runs as written.
+    """
+    return (
+        step is not pinned
+        and isinstance(step, ParallelLayout)
+        and step.ep > _node_gpus(tier)
+    )
+
+
+def _lock_layout(
+    steps: list[ParallelLayout | Literal["hsdp"] | None],
+    usable: list[dict[str, Any]],
+    manifest: TrainingManifest,
+    model: ModelSpec,
+    build_config: Callable[
+        [TrainingManifest, DeviceSpec, int, int, bool, bool], RunConfig
+    ],
+    cache: SearchCache,
+    first_failure: dict[str, TierCheck],
+) -> TierCheck | None:
+    """The first fitting step. A searched expert group wider than a tier's node waits until layouts on that node miss.
+
+    :param steps: Layouts in search order. The first is the manifest's own.
+    :param first_failure: Each tier's first failing check, written as tiers fail.
+    """
+    pinned = steps[0]
+
+    def lock(spanning: bool) -> TierCheck | None:
+        for step in steps:
+            offered = [
+                tier
+                for tier in usable
+                if _searched_expert_spans_node(step, tier, pinned) == spanning
+            ]
+            if not offered:
+                continue
+            found = _first_fit(
+                step, offered, manifest, model, build_config, cache, first_failure
+            )
+            if found is not None:
+                return found
+        return None
+
+    return lock(False) or lock(True)
+
+
 def check_tiers(
     tiers: Iterable[dict[str, Any]],
     manifest: TrainingManifest,
@@ -785,7 +870,13 @@ def check_tiers(
 
     The search locks the least parallel training layout that fits, on the
     fewest nodes, on the cheapest tier: layout first, then node count, then
-    price. A layout that fails at a tier's largest node count is not priced
+    price. A searched expert group wider than a tier's node is priced on
+    that tier only after every layout on the node misses, so expert parallel
+    on a node stays ahead of context and tensor parallel when the search
+    covers several node sizes. When that lock moves routed-expert bytes
+    between nodes, each later layout that differs only in a higher expert
+    degree is priced at the lock's tier and node count, and the fit moving
+    the fewest bytes takes the lock (:func:`_fewer_cross_node_bytes`). A layout that fails at a tier's largest node count is not priced
     at the counts in between, and a same-GPU tier with no more host RAM per
     GPU is not priced again for that layout. Tiers with at least as many
     GPUs per node and as much memory per GPU are priced at that layout
@@ -825,18 +916,52 @@ def check_tiers(
     ] or [None]
     cache = SearchCache() if search_cache is None else search_cache
     first_failure: dict[str, TierCheck] = {}
-    lock: TierCheck | None = None
-    for step in steps:
-        lock = _first_fit(
-            step, usable, manifest, model, build_config, cache, first_failure
+    lock = _lock_layout(
+        steps, usable, manifest, model, build_config, cache, first_failure
+    )
+    if lock is not None:
+        lock = _fewer_cross_node_bytes(
+            lock, steps, manifest, model, build_config, cache
         )
-        if lock is not None:
-            break
     return [
         ruled_out.get(tier["name"])
         or _verdict(tier, lock, first_failure, manifest, model, build_config, cache)
         for tier in ordered
     ]
+
+
+def _fewer_cross_node_bytes(
+    lock: TierCheck,
+    steps: list[ParallelLayout | Literal["hsdp"] | None],
+    manifest: TrainingManifest,
+    model: ModelSpec,
+    build_config: Callable[
+        [TrainingManifest, DeviceSpec, int, int, bool, bool], RunConfig
+    ],
+    cache: SearchCache,
+) -> TierCheck:
+    """``lock``, or the fit at a higher expert degree on its tier and node count that moves fewer bytes between nodes.
+
+    :param lock: The search's lock; kept when it moves nothing between nodes.
+    :param steps: The search's steps, in order.
+    """
+    first = lock.layout
+    if first is None or lock.cross_node_expert_bytes == 0:
+        return lock
+    best = lock
+    for step in steps:
+        if not (
+            isinstance(step, ParallelLayout)
+            and step.ep > first.ep
+            and replace(step, ep=first.ep) == first
+        ):
+            continue
+        check = _price(
+            lock.tier, manifest, model, build_config, step, lock.num_nodes, cache
+        )
+        if check.fits and check.cross_node_expert_bytes < best.cross_node_expert_bytes:
+            best = check
+    return best
 
 
 def _first_fit(

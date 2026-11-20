@@ -5,24 +5,32 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import replace
 
 import pytest
 
 from agilerl.arena.memory.breakdown import MemoryComponent, PhaseBreakdown
+from agilerl.arena.memory.formulas import routed_expert_params_per_layer
 from agilerl.arena.memory.manifest import (
     lightest_training_memory_from_manifest,
     lookup_gpu,
     training_memory_from_manifest,
 )
-from agilerl.arena.memory.resolve.batch import TrainerSplitError, catalog_model
+from agilerl.arena.memory.resolve.batch import (
+    TrainerSplitError,
+    catalog_model,
+    catalog_model_spec,
+)
 from agilerl.arena.memory.resolve.fsdp import (
     TrainingMemoryPlan,
     TrainingMemoryUnfitError,
 )
 from agilerl.arena.memory.resolve.parallel import (
     ParallelLayout,
+    cross_node_expert_bytes,
     first_fitting_plan,
     layout_runs,
+    least_cross_node_plan,
     manifest_at_layout,
     off_node_reason,
     parallel_layouts,
@@ -70,6 +78,36 @@ def plan_for(layout: ParallelLayout, total: int, usable: int) -> TrainingMemoryP
             device_usable_bytes=usable,
         ),
     )
+
+
+def moe_plan(
+    layout: ParallelLayout,
+    tokens: float,
+    reshard_after_forward: bool = True,
+    gradient_checkpointing: bool = False,
+    save_moe_collectives: bool | None = None,
+) -> TrainingMemoryPlan:
+    """A bf16 plan at ``layout`` training ``tokens`` per step in 1024-token rows, one row per micro-batch."""
+    fsdp = FSDPConfig(
+        tp=layout.tp,
+        ep=layout.ep,
+        cp=layout.cp,
+        shard_group_size=layout.shard_group_size,
+        reshard_after_forward=reshard_after_forward,
+        save_moe_collectives=save_moe_collectives,
+    )
+    plan = plan_for(layout, 1, 100)
+    return replace(
+        plan,
+        fsdp=fsdp,
+        tokens=tokens,
+        gradient_checkpointing=gradient_checkpointing,
+        settings=plan.settings.model_copy(update={"fsdp": fsdp, "max_model_len": 1024}),
+    )
+
+
+# Routed-expert bytes of MOE_MODEL in bf16: 2 MoE layers.
+MOE_EXPERT_BYTES = 2 * routed_expert_params_per_layer(MOE_MODEL.arch) * 2
 
 
 class TestParallelLayouts:
@@ -224,7 +262,21 @@ class TestParallelLayouts:
         assert all(layout.tp == 1 for layout in layouts)
         assert ParallelLayout(ep=2) in layouts
 
-    def test_expert_and_tensor_context_groups_each_stay_within_one_node(self):
+    def test_expert_degrees_span_whole_nodes_when_they_divide_trainers_and_experts(
+        self,
+    ):
+        arch = catalog_model_spec("deepseek-ai/DeepSeek-V4-Flash-0731").arch
+
+        on_two = parallel_layouts(arch, 16, 8, open_fsdp(), True, True)
+        on_three = parallel_layouts(arch, 24, 8, open_fsdp(), True, True)
+
+        assert {layout.ep for layout in on_two} == {1, 2, 4, 8, 16}
+        # 24 does not divide 256 experts, and 16 does not divide 24 trainers.
+        assert {layout.ep for layout in on_three} == {1, 2, 4, 8}
+
+    def test_tensor_context_groups_stay_on_a_node_and_expert_groups_span_whole_nodes(
+        self,
+    ):
         arch = MOE_MODEL.arch.model_copy(
             update={"tensor_parallel_plan": True, "n_experts": 16}
         )
@@ -233,7 +285,8 @@ class TestParallelLayouts:
             arch, 32, 4, open_fsdp(), True, True, ranks_fixed=False
         )
 
-        assert max(layout.ep for layout in layouts) == 4
+        # 12 spans whole nodes but does not divide 16 experts.
+        assert {layout.ep for layout in layouts} == {1, 2, 4, 8, 16}
         assert max(layout.tp * layout.cp for layout in layouts) == 4
         assert ParallelLayout(tp=2, ep=4, cp=2) in layouts
 
@@ -389,10 +442,10 @@ class TestOffNodeReason:
         ("n_gpus", "node", "layout", "reason"),
         [
             (
+                12,
                 8,
-                4,
-                ParallelLayout(ep=8),
-                "expert parallel group of 8 GPUs is wider than a 4-GPU node",
+                ParallelLayout(ep=12),
+                "expert parallel group of 12 GPUs is wider than a 8-GPU node",
             ),
             (
                 8,
@@ -419,6 +472,14 @@ class TestOffNodeReason:
         assert off_node_reason(layout, ParallelLayout(), n_gpus, node) == reason
 
     @pytest.mark.parametrize(
+        ("n_gpus", "node", "layout"),
+        [(16, 8, ParallelLayout(ep=16)), (8, 4, ParallelLayout(ep=8, cp=2))],
+        ids=["two-nodes", "two-nodes-with-cp"],
+    )
+    def test_an_expert_group_of_whole_nodes_spans_them(self, n_gpus, node, layout):
+        assert off_node_reason(layout, ParallelLayout(), n_gpus, node) is None
+
+    @pytest.mark.parametrize(
         ("n_gpus", "layout"),
         [(10, ParallelLayout(ep=5)), (16, ParallelLayout(tp=16))],
         ids=["straddles", "wider"],
@@ -443,14 +504,217 @@ class TestOffNodeReason:
         [
             (ParallelLayout(ep=5), None),
             (
-                ParallelLayout(ep=16),
-                "expert parallel group of 16 GPUs is wider than a 8-GPU node",
+                ParallelLayout(ep=12),
+                "expert parallel group of 12 GPUs is wider than a 8-GPU node",
             ),
         ],
         ids=["straddles-at-most", "wider"],
     )
     def test_an_open_count_checks_only_the_width(self, layout, reason):
         assert off_node_reason(layout, ParallelLayout(), 10, 8, False) == reason
+
+
+class TestCrossNodeExpertBytes:
+    def test_expert_fsdp_across_nodes_gathers_the_other_nodes_pieces(self):
+        # Arrange: 16 trainers on two 8-GPU nodes at EP 4. Each rank's quarter
+        # of the experts is split over ranks r, r+4, r+8, r+12, so 2 of its 4
+        # pieces sit on the other node; 4 groups per node.
+        layout = ParallelLayout(ep=4)
+        plan = moe_plan(layout, tokens=4 * 1024)
+
+        # Act
+        moved = cross_node_expert_bytes(MOE_MODEL.arch, plan, layout, 16, 8)
+
+        # Assert: forward and backward gathers x 4 micro-batches x 4 groups x
+        # 2 off-node pieces, each a sixteenth of the experts.
+        assert moved == pytest.approx(2 * 4 * 4 * 2 * MOE_EXPERT_BYTES / 16)
+
+    def test_weights_kept_after_forward_are_gathered_once(self):
+        layout = ParallelLayout(ep=4)
+        plan = moe_plan(layout, tokens=4 * 1024, reshard_after_forward=False)
+
+        moved = cross_node_expert_bytes(MOE_MODEL.arch, plan, layout, 16, 8)
+
+        assert moved == pytest.approx(4 * 4 * 2 * MOE_EXPERT_BYTES / 16)
+
+    def test_an_expert_group_over_both_nodes_sends_tokens_not_weights(self):
+        # Arrange: EP 16 holds every expert once, so nothing is gathered.
+        layout = ParallelLayout(ep=16)
+        plan = moe_plan(layout, tokens=4 * 1024)
+
+        # Act
+        moved = cross_node_expert_bytes(MOE_MODEL.arch, plan, layout, 16, 8)
+
+        # Assert: 8 ranks x 4096 tokens x 6 experts x 2688-wide rows x 2 bytes x
+        # 2 MoE layers x 4 exchanges, half of them to the other node.
+        assert moved == pytest.approx(8 * 4096 * 6 * 2688 * 2 * 2 * 4 / 2)
+
+    def test_a_latent_moe_prices_routed_rows_at_expert_width(self):
+        # Arrange: experts read 1024-wide rows; the residual stays 2688.
+        layout = ParallelLayout(ep=16)
+        plan = moe_plan(layout, tokens=4 * 1024)
+        latent = MOE_MODEL.arch.model_copy(update={"moe_latent_size": 1024})
+
+        # Act
+        moved = cross_node_expert_bytes(latent, plan, layout, 16, 8)
+
+        # Assert
+        assert moved == pytest.approx(8 * 4096 * 6 * 1024 * 2 * 2 * 4 / 2)
+
+    @pytest.mark.parametrize("save_moe_collectives", [None, False])
+    def test_checkpointing_adds_the_recompute_exchanges(self, save_moe_collectives):
+        layout = ParallelLayout(ep=16)
+        plain = moe_plan(layout, tokens=4 * 1024)
+        recomputed = moe_plan(
+            layout,
+            tokens=4 * 1024,
+            gradient_checkpointing=True,
+            save_moe_collectives=save_moe_collectives,
+        )
+
+        moved = cross_node_expert_bytes(MOE_MODEL.arch, recomputed, layout, 16, 8)
+
+        assert moved == pytest.approx(
+            1.5 * cross_node_expert_bytes(MOE_MODEL.arch, plain, layout, 16, 8)
+        )
+
+    def test_saved_collectives_skip_the_recompute_exchanges(self):
+        layout = ParallelLayout(ep=16)
+        plain = moe_plan(layout, tokens=4 * 1024)
+        saved = moe_plan(
+            layout,
+            tokens=4 * 1024,
+            gradient_checkpointing=True,
+            save_moe_collectives=True,
+        )
+
+        moved = cross_node_expert_bytes(MOE_MODEL.arch, saved, layout, 16, 8)
+
+        assert moved == pytest.approx(
+            cross_node_expert_bytes(MOE_MODEL.arch, plain, layout, 16, 8)
+        )
+
+    def test_context_parallel_splits_each_ranks_tokens(self):
+        layout = ParallelLayout(ep=16, cp=4)
+        plan = moe_plan(layout, tokens=4 * 1024)
+
+        moved = cross_node_expert_bytes(MOE_MODEL.arch, plan, layout, 16, 8)
+
+        assert moved == pytest.approx(8 * 1024 * 6 * 2688 * 2 * 2 * 4 / 2)
+
+    def test_an_expert_group_one_node_wide_still_gathers_across_nodes(self):
+        # Arrange: at EP 8 each rank's eighth of the experts is split over
+        # ranks r and r+8, one on each node.
+        layout = ParallelLayout(ep=8)
+        plan = moe_plan(layout, tokens=4 * 1024)
+
+        # Act
+        moved = cross_node_expert_bytes(MOE_MODEL.arch, plan, layout, 16, 8)
+
+        # Assert: 2 gathers x 4 micro-batches x 8 ranks x 1 off-node piece.
+        assert moved == pytest.approx(2 * 4 * 8 * 1 * MOE_EXPERT_BYTES / 16)
+
+    @pytest.mark.parametrize(
+        ("layout", "trainers"),
+        [(ParallelLayout(ep=4), 8), (ParallelLayout(ep=4, shard_group_size=8), 16)],
+        ids=["one-node", "hsdp-on-a-node"],
+    )
+    def test_nothing_crosses_when_every_group_stays_on_a_node(self, layout, trainers):
+        plan = moe_plan(layout, tokens=4 * 1024)
+
+        moved = cross_node_expert_bytes(MOE_MODEL.arch, plan, layout, trainers, 8)
+
+        assert moved == 0
+
+    def test_a_dense_model_moves_nothing(self):
+        layout = ParallelLayout()
+
+        moved = cross_node_expert_bytes(
+            QWEN_05B, moe_plan(layout, tokens=4096), layout, 16, 8
+        )
+
+        assert moved == 0
+
+
+class TestLeastCrossNodePlan:
+    def test_a_first_plan_that_moves_nothing_wins_unpriced_alternatives(self):
+        # Arrange
+        layouts = [ParallelLayout(ep=4), ParallelLayout(ep=16)]
+        priced: list[ParallelLayout] = []
+
+        def plan_at(layout: ParallelLayout) -> str:
+            priced.append(layout)
+            return f"ep{layout.ep}"
+
+        # Act
+        plan = least_cross_node_plan(layouts, plan_at, lambda _layout, _plan: 0.0)
+
+        # Assert
+        assert plan == "ep4"
+        assert priced == [ParallelLayout(ep=4)]
+
+    def test_the_higher_expert_degree_moving_fewest_bytes_wins(self):
+        layouts = [
+            ParallelLayout(ep=4, cp=4),
+            ParallelLayout(ep=8, cp=4),
+            ParallelLayout(ep=16, cp=4),
+        ]
+        moved = {4: 2064.0, 8: 4128.0, 16: 387.0}
+
+        plan = least_cross_node_plan(
+            layouts, lambda layout: layout.ep, lambda layout, _plan: moved[layout.ep]
+        )
+
+        assert plan == 16
+
+    def test_layouts_that_change_another_axis_are_not_priced(self):
+        # Arrange
+        layouts = [
+            ParallelLayout(ep=4),
+            ParallelLayout(tp=2, ep=16),
+            ParallelLayout(ep=16, cp=2),
+        ]
+        priced: list[ParallelLayout] = []
+
+        def plan_at(layout: ParallelLayout) -> ParallelLayout:
+            priced.append(layout)
+            return layout
+
+        # Act
+        plan = least_cross_node_plan(layouts, plan_at, lambda _layout, _plan: 1.0)
+
+        # Assert
+        assert plan == ParallelLayout(ep=4)
+        assert priced == [ParallelLayout(ep=4)]
+
+    def test_the_first_plan_wins_a_tie(self):
+        layouts = [ParallelLayout(ep=4), ParallelLayout(ep=16)]
+
+        plan = least_cross_node_plan(
+            layouts, lambda layout: layout.ep, lambda _layout, _plan: 5.0
+        )
+
+        assert plan == 4
+
+    def test_a_higher_degree_that_does_not_fit_is_passed_over(self):
+        layouts = [ParallelLayout(ep=4), ParallelLayout(ep=16)]
+
+        plan = least_cross_node_plan(
+            layouts,
+            lambda layout: layout.ep if layout.ep == 4 else None,
+            lambda _layout, _plan: 5.0,
+        )
+
+        assert plan == 4
+
+    def test_none_when_nothing_fits(self):
+        plan = least_cross_node_plan(
+            [ParallelLayout(), ParallelLayout(ep=2)],
+            lambda _layout: None,
+            lambda _layout, _plan: 0.0,
+        )
+
+        assert plan is None
 
 
 class TestFirstFittingPlan:
@@ -468,7 +732,7 @@ class TestFirstFittingPlan:
             return plan_for(layout, 1, 100)
 
         # Act
-        plan = first_fitting_plan(layouts, price)
+        plan = first_fitting_plan(layouts, price, lambda _layout, _plan: 0.0)
 
         # Assert
         assert plan.fsdp is not None
@@ -484,7 +748,11 @@ class TestFirstFittingPlan:
 
         # Act / Assert
         with pytest.raises(TrainerSplitError, match=r"Batch size \(6\)"):
-            first_fitting_plan([ParallelLayout(), ParallelLayout(ep=2)], price)
+            first_fitting_plan(
+                [ParallelLayout(), ParallelLayout(ep=2)],
+                price,
+                lambda _layout, _plan: 0.0,
+            )
 
 
 class TestTrainsExpertParallel:

@@ -50,6 +50,7 @@ from agilerl.arena.memory.resolve.packing import (
     sequence_packing_blocker,
 )
 from agilerl.arena.memory.resolve.parallel import (
+    cross_node_expert_bytes,
     first_fitting_plan,
     manifest_at_layout,
     manifest_fsdp,
@@ -856,7 +857,8 @@ def training_memory_from_manifest(
     """The training-memory plan one trainer rank of the manifest runs with.
 
     Layouts are tried from least parallel to most and the first that fits is
-    kept (:func:`parallel_layouts`); a ``tp``, ``ep``, ``cp`` or
+    kept, unless a higher expert degree moves fewer routed-expert bytes
+    between nodes (:func:`first_fitting_plan`); a ``tp``, ``ep``, ``cp`` or
     ``shard_group_size`` the manifest sets stays. An omitted ``fsdp``
     searches like ``fsdp: {}``.
 
@@ -870,14 +872,16 @@ def training_memory_from_manifest(
     :raises TrainingMemoryUnfitError: When nothing fits one GPU.
     :raises TrainerSplitError: When no layout splits across the trainer ranks.
     """
+    trainers = manifest.training.training_gpus_per_agent
     layouts = parallel_layouts(
         model.arch,
-        manifest.training.training_gpus_per_agent,
+        trainers,
         device.gpus_per_node,
         manifest_fsdp(manifest),
         trains_expert_parallel(manifest),
         trains_context_parallel(manifest),
     )
+    node = device.gpus_per_node or trainers
     return first_fitting_plan(
         layouts,
         lambda layout: _layout_plan(
@@ -886,6 +890,9 @@ def training_memory_from_manifest(
             device,
             adapter_sync,
             nccl_reshard,
+        ),
+        lambda layout, plan: cross_node_expert_bytes(
+            model.arch, plan, layout, trainers, node
         ),
     )
 
