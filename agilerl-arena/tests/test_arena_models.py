@@ -896,7 +896,7 @@ class TestTrainingSpec:
         with pytest.raises(ValidationError, match=r"weight_sync\n  Extra inputs"):
             TrainingSpec.model_validate({"weight_sync": {"transport": "nccl_reshard"}})
 
-    def test_payload_keeps_an_explicit_null_lora(self) -> None:
+    def test_payload_replaces_a_null_lora_with_the_default(self) -> None:
         manifest = {
             "algorithm": {"name": "GRPO", "group_size": 4, "batch_size": 2},
             "environment": {
@@ -915,7 +915,8 @@ class TestTrainingSpec:
 
         payload = TrainingManifest.get_validated(manifest, mode="json")
 
-        assert payload["network"]["lora_config"] is None
+        assert payload["network"]["lora_config"]["lora_r"] == 16
+        assert payload["network"]["lora_config"]["target_modules"] == "all-linear"
 
     def test_async_rollout_leaves_omitted_counts_unset(self) -> None:
         spec = TrainingSpec(rollout_mode="async")
