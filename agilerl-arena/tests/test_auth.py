@@ -168,6 +168,20 @@ class TestArenaOAuth2Configure:
         ArenaOAuth2.configure(keycloak_url=None)
         assert orig_url == ArenaOAuth2.KEYCLOAK_URL
 
+    @patch("agilerl.arena.auth.KeycloakOpenID")
+    def test_configured_keycloak_url_beats_env(self, mock_kc_cls, monkeypatch):
+        """``arena --keycloak-url`` must win over an exported ARENA_KEYCLOAK_URL."""
+        monkeypatch.setenv("ARENA_KEYCLOAK_URL", "https://auth.example.com")
+        ArenaOAuth2.configure(keycloak_url="http://localhost:8023")
+        ArenaOAuth2()
+        assert mock_kc_cls.call_args.kwargs["server_url"] == "http://localhost:8023"
+
+    @patch("agilerl.arena.auth.KeycloakOpenID")
+    def test_env_keycloak_url_beats_default(self, mock_kc_cls, monkeypatch):
+        monkeypatch.setenv("ARENA_KEYCLOAK_URL", "https://auth.example.com")
+        ArenaOAuth2()
+        assert mock_kc_cls.call_args.kwargs["server_url"] == "https://auth.example.com"
+
 
 class TestArenaOAuth2Init:
     @patch("agilerl.arena.auth.KeycloakOpenID")

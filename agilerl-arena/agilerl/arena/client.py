@@ -207,6 +207,8 @@ class ArenaClient:
     """
 
     BASE_URL: ClassVar[str] = "https://arena.agilerl.com"
+    # Set by configure(base_url=...), e.g. ``arena --base-url``; beats ARENA_BASE_URL.
+    _BASE_URL_OVERRIDE: ClassVar[str | None] = None
     CONFIG_DIR: ClassVar[Path] = Path.home() / ".arena"
     CONFIG_FILE: ClassVar[Path] = CONFIG_DIR / "config.json"
 
@@ -247,7 +249,10 @@ class ArenaClient:
         verbose: bool = True,
     ) -> None:
 
-        self._base_url = (os.environ.get("ARENA_BASE_URL") or self.BASE_URL).rstrip("/")
+        # An explicit configure(base_url=...) wins, then ARENA_BASE_URL, then the default.
+        self._base_url = (
+            self._BASE_URL_OVERRIDE or os.environ.get("ARENA_BASE_URL") or self.BASE_URL
+        ).rstrip("/")
         self._request_timeout = request_timeout
         self._upload_timeout = upload_timeout
 
@@ -284,6 +289,9 @@ class ArenaClient:
     ) -> type[ArenaClient]:
         """Override default URLs for local development or testing.
 
+        An explicit ``base_url`` / ``keycloak_url`` takes precedence over the
+        ``ARENA_BASE_URL`` / ``ARENA_KEYCLOAK_URL`` environment variables.
+
         Returns the class so calls can be chained with instantiation::
 
             client = ArenaClient.configure(
@@ -293,6 +301,7 @@ class ArenaClient:
         """
         if base_url is not None:
             cls.BASE_URL = base_url
+            cls._BASE_URL_OVERRIDE = base_url
 
         ArenaOAuth2.configure(
             keycloak_url=keycloak_url,
