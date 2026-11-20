@@ -22,7 +22,6 @@ from agilerl.arena.exceptions import ArenaAuthError, ArenaTimeoutError
 logger = logging.getLogger(__name__)
 
 EXTERNAL_USER_ID_HEADER = "X-External-User-Id"
-_DEFAULT_ACCESS_SKEW_SECONDS = 60
 
 
 def validate_partner_credentials(
@@ -39,6 +38,31 @@ def validate_partner_credentials(
     )
 
 
+def oauth_token_claims(token: str | None) -> dict[str, Any] | None:
+    """Return the decoded (unverified) JWT payload, or ``None`` if *token* is not a JWT.
+
+    :param token: The token to decode.
+    :type token: str | None
+    :returns: The JWT payload, or ``None`` if not a decodable JWT.
+    :rtype: dict[str, Any] | None
+    """
+    if not token or "." not in token:
+        return None
+    try:
+        _h, payload_b64, *_rest = token.split(".")
+        pad = "=" * (-len(payload_b64) % 4)
+        raw = base64.urlsafe_b64decode(payload_b64 + pad)
+        payload = json.loads(raw.decode("utf-8"))
+    except (
+        json.JSONDecodeError,
+        ValueError,
+        UnicodeDecodeError,
+        binascii.Error,
+    ):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 def oauth_access_token_expires_at(access_token: str | None) -> float | None:
     """Return JWT ``exp`` claim as Unix timestamp, or ``None`` if not a decodable JWT.
 
@@ -47,45 +71,30 @@ def oauth_access_token_expires_at(access_token: str | None) -> float | None:
     :returns: The Unix timestamp of the JWT ``exp`` claim, or ``None`` if not a decodable JWT.
     :rtype: float | None
     """
-    if not access_token or "." not in access_token:
+    claims = oauth_token_claims(access_token)
+    if claims is None or claims.get("exp") is None:
         return None
     try:
-        _h, payload_b64, *_rest = access_token.split(".")
-        pad = "=" * (-len(payload_b64) % 4)
-        raw = base64.urlsafe_b64decode(payload_b64 + pad)
-        payload = json.loads(raw.decode("utf-8"))
-        exp = payload.get("exp")
-        if exp is None:
-            return None
-        return float(exp)
-    except (
-        json.JSONDecodeError,
-        ValueError,
-        UnicodeDecodeError,
-        binascii.Error,
-        KeyError,
-    ):
+        return float(claims["exp"])
+    except (TypeError, ValueError):
         return None
 
 
-def is_oauth_access_token_valid(
-    access_token: str | None,
-    *,
-    skew_seconds: int = _DEFAULT_ACCESS_SKEW_SECONDS,
-) -> bool:
-    """True if *access_token* is a JWT and ``exp`` is after now (plus *skew_seconds*).
+def stored_issuer(credentials: dict[str, Any]) -> str | None:
+    """Return the Keycloak issuer a saved login belongs to, or ``None`` if unknown.
 
-    :param access_token: The access token to check.
-    :type access_token: str | None
-    :param skew_seconds: The number of seconds to add to the current time to allow for clock skew.
-    :type skew_seconds: int
-    :returns: True if the access token is valid, False otherwise.
-    :rtype: bool
+    :param credentials: The saved credentials payload.
+    :type credentials: dict[str, Any]
+    :returns: The issuer URL (``<keycloak_url>/realms/<realm>``), or ``None``.
+    :rtype: str | None
     """
-    exp = oauth_access_token_expires_at(access_token)
-    if exp is None:
-        return False
-    return exp > time.time() + skew_seconds
+    issuer = credentials.get("issuer")
+    if isinstance(issuer, str):
+        return issuer
+    # Files saved before the issuer was recorded: fall back to the token's ``iss``.
+    claims = oauth_token_claims(credentials.get("access_token"))
+    iss = claims.get("iss") if claims else None
+    return iss if isinstance(iss, str) else None
 
 
 def load_credentials_payload(
@@ -153,11 +162,14 @@ class ArenaOAuth2:
     CLIENT_ID = "arena-cli"
 
     def __init__(self) -> None:
-        # Create a Keycloak OpenID client with the configured URL, realm, and client ID.
-        self.kc = KeycloakOpenID(
-            server_url=self._KEYCLOAK_URL_OVERRIDE
+        server_url = (
+            self._KEYCLOAK_URL_OVERRIDE
             or os.environ.get("ARENA_KEYCLOAK_URL")
-            or self.KEYCLOAK_URL,
+            or self.KEYCLOAK_URL
+        )
+        self.issuer = f"{server_url.rstrip('/')}/realms/{self.REALM}"
+        self.kc = KeycloakOpenID(
+            server_url=server_url,
             realm_name=self.REALM,
             client_id=self.CLIENT_ID,
         )
@@ -237,7 +249,7 @@ class ArenaOAuth2:
         """
         try:
             # Request a device code from Keycloak.
-            device_resp = self.kc.device(scope="openid profile email")
+            device_resp = self.kc.device(scope="openid profile email offline_access")
         except KeycloakError as exc:
             msg = f"Failed to initiate device authorization: {exc}"
             raise ArenaAuthError(msg) from exc
@@ -265,6 +277,7 @@ class ArenaOAuth2:
                 )
                 merged = load_credentials_payload(self.CREDENTIALS_FILE)
                 merged.update(tokens)
+                merged["issuer"] = self.issuer
                 ArenaOAuth2._write_credentials(merged)
                 return tokens
             except KeycloakError as exc:
@@ -307,15 +320,35 @@ class ArenaOAuth2:
         ArenaOAuth2._write_credentials(creds)
         return tokens
 
-    def revoke(self, refresh_token: str) -> None:
+    def end_session(self, refresh_token: str, issuer: str | None = None) -> None:
+        """End a Keycloak session, on the Keycloak that issued it.
+
+        :param refresh_token: The refresh token of the session to end.
+        :param issuer: The session's issuer; ``None`` means this client's Keycloak.
+        """
+        kc = self.kc
+        if issuer is not None and issuer.rstrip("/") != self.issuer:
+            server_url, sep, realm = issuer.rstrip("/").rpartition("/realms/")
+            if sep:
+                kc = KeycloakOpenID(
+                    server_url=server_url, realm_name=realm, client_id=self.CLIENT_ID
+                )
+        try:
+            kc.logout(refresh_token)
+        except KeycloakError:
+            # A dead or unreachable session must not block signing in or out.
+            logger.warning(
+                "Could not end the previous Arena session at %s; it expires on its own.",
+                issuer or self.issuer,
+            )
+
+    def revoke(self, refresh_token: str, issuer: str | None = None) -> None:
         """Revoke a Keycloak session and delete stored credentials.
 
         :param refresh_token: The refresh token to revoke.
+        :param issuer: The session's issuer; ``None`` means this client's Keycloak.
         """
-        try:
-            self.kc.logout(refresh_token)
-        except KeycloakError:
-            logger.debug("Keycloak logout failed (token may already be expired).")
+        self.end_session(refresh_token, issuer)
 
         try:
             self.CREDENTIALS_FILE.unlink(missing_ok=True)
