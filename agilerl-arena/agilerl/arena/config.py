@@ -6,13 +6,15 @@ from __future__ import annotations
 from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 if TYPE_CHECKING:
     import click
 
 from agilerl.arena.client import ArenaClient
 from agilerl.arena.output import handle_error
+
+ClientT = TypeVar("ClientT", bound=ArenaClient)
 
 
 @dataclass(slots=True)
@@ -62,21 +64,25 @@ def _resolve_root_command_config(ctx: click.Context) -> CommandConfig:
     )
 
 
-def build_client(config: CommandConfig) -> ArenaClient:
-    """Build an :class:`ArenaClient` with the given configuration.
+def build_client(
+    config: CommandConfig, client_cls: type[ClientT] = ArenaClient
+) -> ClientT:
+    """Build an :class:`ArenaClient` (or subclass) with the given configuration.
 
     :param config: The command configuration.
     :type config: CommandConfig
-    :returns: An :class:`ArenaClient` instance.
+    :param client_cls: Client class to build, e.g. a plugin's subclass.
+    :type client_cls: type[ArenaClient]
+    :returns: A ``client_cls`` instance.
     :rtype: ArenaClient
     """
-    ArenaClient.configure(
+    client_cls.configure(
         base_url=config.base_url,
         keycloak_url=config.keycloak_url,
         realm=config.realm,
         client_id=config.client_id,
     )
-    return ArenaClient(
+    return client_cls(
         api_key=config.api_key,
         org_key=config.org_key,
         external_user_id=config.external_user_id,
@@ -86,15 +92,19 @@ def build_client(config: CommandConfig) -> ArenaClient:
 
 
 @contextmanager
-def arena_client(config: CommandConfig) -> Generator[ArenaClient, None, None]:
-    """Build an :class:`ArenaClient`, handle errors, and guarantee cleanup.
+def arena_client(
+    config: CommandConfig, client_cls: type[ClientT] = ArenaClient
+) -> Generator[ClientT, None, None]:
+    """Build an :class:`ArenaClient` (or subclass), handle errors, and guarantee cleanup.
 
     :param config: The command configuration.
     :type config: CommandConfig
-    :returns: A generator that yields the ArenaClient and ensures it is closed.
+    :param client_cls: Client class to build, e.g. a plugin's subclass.
+    :type client_cls: type[ArenaClient]
+    :returns: A generator that yields the client and ensures it is closed.
     :rtype: Generator[ArenaClient, None, None]
     """
-    client = build_client(config)
+    client = build_client(config, client_cls)
     try:
         yield client
     except Exception as exc:

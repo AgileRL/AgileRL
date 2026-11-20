@@ -152,7 +152,7 @@ class TestCommandConfig:
                 request_timeout=5,
                 upload_timeout=120,
             )
-            build_client(cfg)
+            build_client(cfg, MockArenaClient)
             MockArenaClient.configure.assert_called_once_with(
                 base_url="http://api",
                 keycloak_url="http://kc",

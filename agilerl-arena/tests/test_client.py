@@ -1665,7 +1665,7 @@ class TestExperimentMethods:
         assert result == {"job_id": 2}
         call_kwargs = api_key_client._open_stream.call_args[1]
         assert "json" not in call_kwargs
-        files = call_kwargs["files"]
+        files = dict(call_kwargs["files"])
         assert json.loads(files["manifest"][1]) == payload
         assert files["project"] == (None, "proj")
         assert "resource_id" not in files
@@ -1693,7 +1693,7 @@ class TestExperimentMethods:
             reward_file=b"def reward(q, a, c):\n    return 1.0\n",
         )
 
-        files = api_key_client._open_stream.call_args[1]["files"]
+        files = dict(api_key_client._open_stream.call_args[1]["files"])
         assert files["num_gpus"] == (None, "4")
         assert files["gpu_type"] == (None, "b200")
         assert "resource_id" not in files
