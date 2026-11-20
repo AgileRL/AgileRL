@@ -3,7 +3,6 @@
 r"""Size a training manifest against a GPU, or invert one field.
 
 Settings come from the manifest; the device from ``--gpu`` / ``--device-gb``.
-Without either, ``estimate`` picks the cheapest Arena resource tier that fits.
 Pass ``--config`` to stay offline.
 
 Exit 0 if both phases fit, 3 if either is over budget, 2 on a usage error.
@@ -28,8 +27,6 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from agilerl.arena.config import CommandConfig, arena_client
-from agilerl.arena.exceptions import ArenaAuthError
 from agilerl.arena.memory.advice import advise
 from agilerl.arena.memory.estimator import PhaseBreakdown, estimate_run
 from agilerl.arena.memory.formulas import MAX_UNDERPREDICTION
@@ -46,8 +43,6 @@ from agilerl.arena.memory.resolve.run import (
     kept_weight_sync_mode,
 )
 from agilerl.arena.memory.resources import (
-    TierCheck,
-    check_tiers,
     colocated_manifest,
     engine_width,
     engines_per_member,
@@ -80,6 +75,11 @@ logger = logging.getLogger(__name__)
 EXIT_OK = 0
 EXIT_OVER_BUDGET = 3
 EXIT_USAGE = 2
+
+NO_DEVICE_MESSAGE = (
+    "Pass --gpu with a GPU type from `arena resources list` (e.g. --gpu h100-80), "
+    "or --device-gb."
+)
 
 # Multi-token-prediction heads some checkpoints ship (Nemotron 3.5); the
 # trainer does not load them.
@@ -482,7 +482,10 @@ def memory_group() -> None:
 @click.option(
     "--gpu",
     default=None,
-    help="Training GPU the resource class provides, e.g. 'NVIDIA L4' or 'A100-80GB'.",
+    help=(
+        "Training GPU: a GPU type from `arena resources list` such as 'h100-80', "
+        "or a name such as 'NVIDIA L4'."
+    ),
 )
 @click.option(
     "--device-gb",
@@ -495,8 +498,8 @@ def memory_group() -> None:
     type=click.IntRange(min=1),
     default=None,
     help=(
-        "GPUs on the node the run gets (the tier's num_gpus). Needed when the "
-        "run picks tensor_parallel_size or max_num_seqs from it."
+        "GPUs on the node the run gets. Needed when the run picks "
+        "tensor_parallel_size or max_num_seqs from it."
     ),
 )
 @click.option(
@@ -516,9 +519,7 @@ def memory_group() -> None:
     is_flag=True,
     help="Plain glyphs instead of colour (also honours NO_COLOR).",
 )
-@click.pass_context
 def memory_estimate(
-    ctx: click.Context,
     manifest_path: str,
     gpu: str | None,
     device_gb: float | None,
@@ -529,30 +530,14 @@ def memory_estimate(
 ) -> None:
     """Size MANIFEST (a training manifest path) against a GPU.
 
-    Run settings come from the manifest; name the device with --gpu or
-    --device-gb. Without either, the cheapest Arena resource tier that fits
-    is picked (needs arena login).
+    Run settings come from the manifest; name the device with --gpu (a GPU
+    type from `arena resources list`) or --device-gb.
     """
-    tiers = None
-    command_config = ctx.find_object(CommandConfig)
-    if gpu is None and device_gb is None and command_config is not None:
-        with arena_client(command_config) as client:
-            try:
-                tiers = list(client.list_resources()["tiers"].values())
-            except ArenaAuthError as err:
-                msg = (
-                    "Picking a resource tier needs an Arena login; the tier sets "
-                    "the GPU and each GPU's host RAM share. Run 'arena login', or "
-                    "pass --gpu or --device-gb to size one GPU without a host RAM "
-                    "check."
-                )
-                raise ArenaAuthError(msg) from err
     sys.exit(
         main(
             manifest_path,
             gpu=gpu,
             device_gb=device_gb,
-            tiers=tiers,
             num_gpus=num_gpus,
             config_path=config_path,
             as_json=as_json or json_output_enabled(),
@@ -566,7 +551,6 @@ def main(
     *,
     gpu: str | None = None,
     device_gb: float | None = None,
-    tiers: list[dict[str, Any]] | None = None,
     num_gpus: int | None = None,
     gpus_per_node: int | None = None,
     config_path: str | None = None,
@@ -575,8 +559,6 @@ def main(
 ) -> int:
     """Run the estimate and return the exit code.
 
-    :param tiers: Resource tiers to pick the cheapest fitting one from when
-        neither ``gpu`` nor ``device_gb`` is given.
     :param num_gpus: GPUs in the allocation, for the engine layout the run picks.
     :param gpus_per_node: GPUs on one node of the allocation; ``None`` puts all
         ``num_gpus`` on one node.
@@ -588,27 +570,10 @@ def main(
     except ValueError as err:
         print(err, file=sys.stderr)
         return EXIT_USAGE
-    if device is None and tiers is None:
-        print(
-            "Pass --gpu or --device-gb, or run `arena login` then "
-            "`arena memory estimate` to pick a resource tier and check its "
-            "host RAM.",
-            file=sys.stderr,
-        )
-        return EXIT_USAGE
-    if device is None and num_gpus is not None:
-        print(
-            "--num-gpus needs --gpu or --device-gb; a resource tier names its own.",
-            file=sys.stderr,
-        )
+    if device is None:
+        print(NO_DEVICE_MESSAGE, file=sys.stderr)
         return EXIT_USAGE
     if gpus_per_node is not None:
-        if device is None:
-            print(
-                "gpus_per_node needs --gpu or --device-gb; a resource tier names its own.",
-                file=sys.stderr,
-            )
-            return EXIT_USAGE
         device = device.model_copy(update={"gpus_per_node": gpus_per_node})
 
     try:
@@ -640,50 +605,15 @@ def main(
             file=sys.stderr,
         )
 
-    def build_config(
-        laid_out: TrainingManifest,
-        train_device: DeviceSpec,
-        width: int | None,
-        engines: int | None,
-        adapter_sync: bool,
-        nccl_reshard: bool,
-    ) -> RunConfig:
-        return run_config_from_manifest(
-            laid_out,
-            train_device,
-            model_config,
-            n_params=model_spec.n_params,
-            tensor_parallel_size=width,
-            rollout_engines=engines,
-            adapter_sync=adapter_sync,
-            nccl_reshard=nccl_reshard,
-        )
-
-    chosen: TierCheck | None = None
-    checks: list[TierCheck] = []
     try:
-        if device is None:
-            checks = check_tiers(tiers or [], manifest, model_spec, build_config)
-            chosen = next((check for check in checks if check.fits), None)
-            if chosen is None or chosen.config is None:
-                return _report_no_tier(checks, as_json)
-            config = chosen.config
-        else:
-            config = _sized_run_config(
-                manifest, model_config, model_spec, device, num_gpus
-            )
+        config = _sized_run_config(manifest, model_config, model_spec, device, num_gpus)
     except KeyError as err:
         return _report_missing_key(err)
     except ValueError as err:
         print(str(err), file=sys.stderr)
         return EXIT_USAGE
 
-    # The tier search already attached the queue warning to its estimate.
-    estimate = (
-        chosen.estimate
-        if chosen is not None and chosen.estimate is not None
-        else note_queued_sequences(estimate_run(config), config)
-    )
+    estimate = note_queued_sequences(estimate_run(config), config)
     if as_json:
         payload = estimate.model_dump(by_alias=True)
         payload["fits"] = estimate.fits_with_buffer
@@ -692,29 +622,12 @@ def main(
         parallelism = _parallelism_payload(config)
         if parallelism is not None:
             payload["parallelism"] = parallelism
-        if chosen is not None:
-            payload["resource"] = chosen.tier
-            payload["num_nodes"] = chosen.num_nodes
-            payload["tiers"] = _tier_rows(checks)
-            payload["training_gpus_per_agent"] = chosen.trainers
-            payload["rollout_engines_per_agent"] = chosen.engines
-            if chosen.teacher_engine_tensor_parallel is not None:
-                payload["teacher_engine_tensor_parallel"] = (
-                    chosen.teacher_engine_tensor_parallel
-                )
         print(json.dumps(payload, indent=2))
         return EXIT_OK if estimate.fits_with_buffer else EXIT_OVER_BUDGET
 
     # Rich drops colour off a terminal and honours NO_COLOR.
     console = Console(highlight=False, color_system=None if no_color else "auto")
     glyphs = _report_glyphs(console)
-    if chosen is not None:
-        console.print(
-            Text.assemble(
-                ("Cheapest resource tier that fits: ", "bold"),
-                (_describe_choice(chosen), "green"),
-            )
-        )
     console.print(
         Text.assemble(
             ("Memory estimate", "bold"), f"{glyphs.separator}{config.model.model_id}"
@@ -773,59 +686,6 @@ def _engine_payload(config: RunConfig) -> dict[str, int] | None:
     }
 
 
-def _describe_tier(tier: dict[str, Any]) -> str:
-    return (
-        f"{tier['name']} ({tier['num_gpus']}x {tier['gpu_type']}, "
-        f"{tier['price_per_node_hour']:.2f} credits/node-hour)"
-    )
-
-
-def _describe_choice(check: TierCheck) -> str:
-    """The tier, and the node count when the job takes more than one."""
-    described = _describe_tier(check.tier)
-    if check.num_nodes == 1:
-        return described
-    return f"{check.num_nodes} nodes of {described}"
-
-
-def _tier_rows(checks: list[TierCheck]) -> list[dict[str, Any]]:
-    rows = []
-    for check in checks:
-        row: dict[str, Any] = {
-            "name": check.tier["name"],
-            "price_per_node_hour": check.tier["price_per_node_hour"],
-            "fits": check.fits,
-            "reason": check.reason,
-            "num_nodes": check.num_nodes,
-        }
-        if check.fits and check.config is not None:
-            row["parallelism"] = _parallelism_payload(check.config)
-            row["trainers"] = check.trainers
-            row["engines"] = check.engines
-            row["engine_tensor_parallel"] = check.engine_tensor_parallel
-            if check.teacher_engine_tensor_parallel is not None:
-                row["teacher_engine_tensor_parallel"] = (
-                    check.teacher_engine_tensor_parallel
-                )
-        rows.append(row)
-    return rows
-
-
-def _report_no_tier(checks: list[TierCheck], as_json: bool) -> int:
-    """Why each tier was ruled out, when none fits."""
-    if as_json:
-        print(
-            json.dumps(
-                {"fits": False, "resource": None, "tiers": _tier_rows(checks)}, indent=2
-            )
-        )
-        return EXIT_OVER_BUDGET
-    print("No resource tier fits this manifest:")
-    for check in checks:
-        print(f"  - {check.tier['name']}: {check.reason}")
-    return EXIT_OVER_BUDGET
-
-
 @dataclass(frozen=True)
 class SolveRequest:
     """One ``arena memory solve`` invocation."""
@@ -850,7 +710,10 @@ class SolveRequest:
 @click.option(
     "--gpu",
     default=None,
-    help="GPU the resource class provides, e.g. 'NVIDIA L4' or 'A100-80GB'.",
+    help=(
+        "GPU: a GPU type from `arena resources list` such as 'h100-80', "
+        "or a name such as 'NVIDIA L4'."
+    ),
 )
 @click.option(
     "--device-gb",
@@ -906,7 +769,7 @@ def solve_main(request: SolveRequest) -> int:
         print(err, file=sys.stderr)
         return EXIT_USAGE
     if device is None:
-        print("Pass --gpu or --device-gb (see --help).", file=sys.stderr)
+        print(NO_DEVICE_MESSAGE, file=sys.stderr)
         return EXIT_USAGE
 
     try:

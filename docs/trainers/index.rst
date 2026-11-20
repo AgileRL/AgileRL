@@ -511,5 +511,5 @@ Here is an example using the same ``dqn.yaml`` manifest file as in the :ref:`loc
 
 .. seealso::
 
-   :ref:`tutorial_arena_end_to_end` for a complete walkthrough of validating, training, and deploying
-   using a custom environment.
+   :ref:`tutorial_arena_grpo_gsm8k` for a complete walkthrough of training and deploying
+   an LLM on Arena.

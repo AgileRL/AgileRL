@@ -553,6 +553,31 @@ class TestCheckTiers:
         assert not check.fits
         assert check.reason == "rollout bundle of 6 GPUs exceeds 4 GPUs on one node"
 
+    def test_an_engine_wider_than_a_node_does_not_fit(self):
+        # Arrange: a width-8 engine on 4-GPU nodes; no node can hold it.
+        manifest = teacher_manifest(
+            "Qwen/Qwen3.5-9B", teacher_width=2, rollout_engines_per_agent=1
+        )
+        manifest.algorithm.vllm_config.tensor_parallel_size = 8
+        tiers = [
+            {
+                **tier("a100-4x", "NVIDIA A100-SXM4-80GB", 4, 8.0),
+                "gpus_per_node": 4,
+                "node_counts": [3],
+            }
+        ]
+
+        # Act
+        (check,) = check_tiers(
+            tiers, manifest, catalog_model(manifest.algorithm), builder()
+        )
+
+        # Assert
+        assert not check.fits
+        assert (
+            check.reason == "engine tensor_parallel_size 8 exceeds 4 GPUs on one node"
+        )
+
     def test_a_teacher_model_without_a_layout_gets_a_split_that_fits(self):
         # Arrange: no student width, trainer or engine count, or teacher width.
         manifest = unpinned_teacher_manifest("Qwen/Qwen3.8-27B")
