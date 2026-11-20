@@ -18,9 +18,10 @@ from typing_extensions import Self
 from agilerl.arena.auth import (
     EXTERNAL_USER_ID_HEADER,
     ArenaOAuth2,
-    is_oauth_access_token_valid,
     load_credentials,
     oauth_access_token_expires_at,
+    oauth_token_claims,
+    stored_issuer,
     validate_partner_credentials,
 )
 from agilerl.arena.client_version import CLIENT_VERSION_HEADER, print_update_notice
@@ -264,6 +265,7 @@ class ArenaClient:
         validate_partner_credentials(self._org_key, self._external_user_id)
         self._auth = ArenaOAuth2()
         self._tokens = _TokenStore()
+        self._saved_login_issuer: str | None = None
         self._verbose = verbose
         self._stream_handler: Callable[[StreamEvent], None] | None = None
         self._cli_capabilities_cache: dict[str, Any] | None = None
@@ -357,67 +359,46 @@ class ArenaClient:
     ### Authentication ###
     # -------------------------------------------------------------------------
 
-    def login(self, *, timeout: int = 300, force: bool = False) -> None:
-        """Start the device-authorization login flow (or reuse a valid stored session).
+    def login(self, timeout: int = 300) -> None:
+        """Sign in through the browser, then end the previously saved login.
 
-        When *force* is false (default) and an API key is set, device login is
-        skipped. Organisation-key credentials always skip device login.
-        Pass ``force=True`` to run device authorization regardless
-        (useful when the API key is invalid and you want to switch to OAuth).
+        Only one login is kept in ``~/.arena/credentials.json``, so this is also
+        how to switch user or environment. Organisation-key credentials skip it.
+        An API key stays on this client until the browser sign-in succeeds.
 
-        When *force* is false (default), an unexpired OAuth access token or a
-        successful refresh from ``~/.arena/credentials.json`` skips the browser
-        flow. Use *force* to always run device authorization.
-        On success the tokens are persisted to
-        ``~/.arena/credentials.json``.
+        :param timeout: Maximum seconds to wait for browser authorization.
         """
         if self._org_key is not None:
             logger.info("Organisation key in use; device login not required.")
             return
 
-        if self._api_key is not None and not force:
-            logger.info(
-                "API key in use; device login not required. Use --force to override."
+        if self._api_key is not None:
+            logger.warning(
+                "An API key is set (ARENA_API_KEY or api_key); other commands use it "
+                "instead of this login until it is removed."
             )
-            return
 
-        if self._api_key is not None and force:
-            logger.info(
-                "Forcing device login; API key will be ignored for this session."
-            )
-            self._api_key = None
-
-        if not force:
-            if is_oauth_access_token_valid(self._tokens.access_token):
-                logger.info("Access token still valid; skipping device login.")
-                return
-
-            if self._tokens.refresh_token:
-                try:
-                    tokens = self._auth.refresh_access_token(self._tokens.refresh_token)
-                    self._tokens.access_token = tokens["access_token"]
-                    self._tokens.refresh_token = tokens.get(
-                        "refresh_token", self._tokens.refresh_token
-                    )
-                    logger.info(
-                        "Session refreshed from stored credentials; skipping device login."
-                    )
-                    return
-                except ArenaAuthError:
-                    logger.debug(
-                        "Stored refresh token rejected; starting device login.",
-                    )
-
+        previous = load_credentials(ArenaOAuth2.CREDENTIALS_FILE)
         tokens = self._auth.device_login(timeout=timeout)
         self._tokens.access_token = tokens["access_token"]
         self._tokens.refresh_token = tokens.get("refresh_token")
-        logger.info("Authenticated successfully with Arena.")
+        self._api_key = None
+        self._saved_login_issuer = None
+        if previous and previous.get("refresh_token"):
+            self._auth.end_session(previous["refresh_token"], stored_issuer(previous))
+
+        claims = oauth_token_claims(self._tokens.access_token) or {}
+        who = claims.get("email") or claims.get("preferred_username") or "unknown user"
+        logger.info("Logged in to Arena as %s at %s.", who, self._base_url)
 
     def logout(self) -> None:
-        """Clear the current session and remove stored credentials."""
-        if self._tokens.refresh_token:
-            self._auth.revoke(self._tokens.refresh_token)
+        """End the saved login and remove stored credentials."""
+        saved = load_credentials(ArenaOAuth2.CREDENTIALS_FILE)
+        refresh_token = self._tokens.refresh_token or (saved or {}).get("refresh_token")
+        if refresh_token:
+            self._auth.revoke(refresh_token, stored_issuer(saved) if saved else None)
         self._tokens.clear()
+        self._saved_login_issuer = None
         logger.info("Logged out of Arena.")
 
     @property
@@ -2165,6 +2146,11 @@ class ArenaClient:
     def _try_restore_session(self) -> None:
         # Try to restore previously saved authentication credentials.
         creds = load_credentials(ArenaOAuth2.CREDENTIALS_FILE)
+        if creds and self._org_key is None:
+            issuer = stored_issuer(creds)
+            if issuer is not None and issuer.rstrip("/") != self._auth.issuer:
+                self._saved_login_issuer = issuer
+                return
         if creds:
             self._tokens.access_token = creds.get("access_token")
             self._tokens.refresh_token = creds.get("refresh_token")
@@ -2211,6 +2197,11 @@ class ArenaClient:
             return {"Authorization": f"Bearer {credential}"}
 
         msg = "Client has not been authenticated with Arena."
+        if self._saved_login_issuer is not None:
+            msg = (
+                f"The saved Arena login is for {self._saved_login_issuer}, "
+                f"not {self._auth.issuer}."
+            )
         raise ArenaAuthError(
             msg,
             sdk_hint="Call client.login() or provide an API key to the ArenaClient constructor.",
