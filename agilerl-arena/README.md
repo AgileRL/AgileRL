@@ -50,10 +50,10 @@ arena manifest validate path/to/manifest.yaml
 arena manifest schema
 ```
 
-### 3) Validate an environment
+### 3) Validate a GEM environment
 
 ```bash
-arena env validate my-env --source path/to/my_env.py
+arena env validate my-gem-env --source path/to/my_gem_env/
 ```
 
 ### 4) Check GPU memory (LLM manifests)
@@ -79,6 +79,9 @@ See `agilerl/arena/memory/README.md`.
 ```bash
 arena experiments submit path/to/manifest.yaml --project my-project
 
+# List the GPU types you can train on and their GPUs per node:
+arena resources list
+
 # Pick a GPU type and count; Arena uses the fewest nodes that fit:
 arena experiments submit path/to/manifest.yaml --project my-project \
     --num-gpus 8 --gpu-type h100-80
@@ -96,15 +99,15 @@ from agilerl.arena.models import TrainingManifest
 
 client = ArenaClient()  # uses ARENA_API_KEY if set
 
-TrainingManifest.get_validated("dqn.yaml")
+TrainingManifest.get_validated("grpo.yaml")
 
 client.validate_environment(
-    source="acrobot.py",
-    name="acrobot-env",
+    source="my_gem_env/",
+    name="my-gem-env",
 )
 
 result = client.submit_experiment(
-    manifest="dqn.yaml",
+    manifest="grpo.yaml",
     project="my-project",
 )
 
@@ -117,7 +120,8 @@ print(result)
 from agilerl.arena import Agent
 
 agent = Agent("https://<deployment-id>.inference.agilerl.com", api_key="arena_pat_...")
-action, _ = agent.get_action(observation)
+result = agent.generate("What is 2 + 2?")
+print(result.results[0].completion)
 ```
 
 Use the deployment URL from `arena agent list`.

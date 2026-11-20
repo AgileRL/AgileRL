@@ -235,7 +235,6 @@ class ArenaClient:
     _ERROR_MAP: ClassVar[dict[str, type[ArenaAPIError]]] = {
         "/api/cli/v1/environments/create-and-validate": ArenaValidationError,
         "/api/cli/v1/environments/validate": ArenaValidationError,
-        "/api/cli/v1/environments/profile": ArenaValidationError,
         "/api/cli/v1/datasets/create": ArenaValidationError,
     }
 
@@ -467,8 +466,7 @@ class ArenaClient:
 
         :param name: Environment name. If None, list all environments.
         :type name: str | None
-        :param include_arena: Whether to include off-the-shelf Gymnasium/PettingZoo environments
-            available in Arena.
+        :param include_arena: Whether to include the built-in environments available in Arena.
         :type include_arena: bool
         :returns: A nested dictionary keyed by environment name, then version:
 
@@ -540,11 +538,9 @@ class ArenaClient:
         requirements: str | os.PathLike[str] | None = None,
         entrypoint: str | None = None,
         description: str | None = None,
-        multi_agent: bool = False,
-        language_based: bool = False,
         do_rollouts: bool = False,
     ) -> dict[str, Any]:
-        """Validate a custom environment on Arena.
+        """Validate a custom GEM environment on Arena.
 
         When source is provided the environment is uploaded, created, and
         validated in a single step.  When source is None an
@@ -570,11 +566,6 @@ class ArenaClient:
         :type entrypoint: str | None
         :param description: Optional description of the environment. Default is None.
         :type description: str | None
-        :param multi_agent: Whether the environment is multi-agent. Default is False.
-        :type multi_agent: bool
-        :param language_based: Whether the environment follows the GEM API (language-based).
-            Default is False.
-        :type language_based: bool
         :param do_rollouts: Whether to perform environment rollouts during validation. Setting this to True will
             run 100 random episodes and collect additional information such as the average random reward and visualize
             the rendered environment. Default is False.
@@ -596,8 +587,6 @@ class ArenaClient:
                 requirements=requirements,
                 entrypoint=entrypoint,
                 description=description,
-                multi_agent=multi_agent,
-                language_based=language_based,
                 do_rollouts=do_rollouts,
             ).collect()
 
@@ -612,36 +601,6 @@ class ArenaClient:
         return self._open_stream(
             "POST",
             "/api/cli/v1/environments/validate",
-            json=payload,
-            timeout=self._upload_timeout,
-        ).collect()
-
-    def profile_environment(
-        self,
-        *,
-        name: str,
-        version: str | None = None,
-        multi_agent: bool | None = None,
-    ) -> dict[str, Any]:
-        """Profile a validated environment version.
-
-        :param name: Environment name, as specified in Arena.
-        :type name: str
-        :param version: Environment version. Defaults to None, which resolves to the latest version.
-        :type version: str | None
-        :param multi_agent: Override the stored multi-agent flag. Omit it and the
-            server uses the value saved on the environment.
-        :type multi_agent: bool | None
-        """
-        payload: dict[str, Any] = {
-            "name": name,
-            "version": version,
-        }
-        if multi_agent is not None:
-            payload["multi_agent"] = multi_agent
-        return self._open_stream(
-            "POST",
-            "/api/cli/v1/environments/profile",
             json=payload,
             timeout=self._upload_timeout,
         ).collect()
@@ -1146,9 +1105,6 @@ class ArenaClient:
         self,
         algorithm: str,
         *,
-        gym_env: str | None = None,
-        gym_env_version: str | None = None,
-        gym_env_entrypoint: str | None = None,
         dataset_name: str | None = None,
         field: str | None = None,
         pretrained_model_name_or_path: str | None = None,
@@ -1159,13 +1115,6 @@ class ArenaClient:
 
         :param algorithm: Catalog algorithm name.
         :type algorithm: str
-        :param gym_env: Gym environment display name.
-        :type gym_env: str | None
-        :param gym_env_version: Gym environment version. Required with
-            ``gym_env_entrypoint`` (``v1`` and ``1`` are both accepted).
-        :type gym_env_version: str | None
-        :param gym_env_entrypoint: Gym entrypoint.
-        :type gym_env_entrypoint: str | None
         :param dataset_name: Dataset name.
         :type dataset_name: str | None
         :param field: RunSpec section to return (``algorithm``, ``environment``,
@@ -1179,9 +1128,6 @@ class ArenaClient:
         """
         params: dict[str, Any] = {"algorithm": algorithm}
         optional = {
-            "gymEnv": gym_env,
-            "gymEnvVersion": gym_env_version,
-            "gymEnvEntrypoint": gym_env_entrypoint,
             "datasetName": dataset_name,
             "field": field,
             "pretrainedModelNameOrPath": pretrained_model_name_or_path,
@@ -1602,11 +1548,12 @@ class ArenaClient:
         )
 
     def list_resources(self) -> dict[str, Any]:
-        """List compute resource tiers for Arena training jobs.
+        """List the GPU types you can train on.
 
-        Shows the GPU types ``ArenaClient.submit_experiment`` accepts as ``gpu_type``.
+        Each ``gpuType`` is a value ``ArenaClient.submit_experiment`` accepts as
+        ``gpu_type``. An older platform returns resource ``tiers`` instead.
 
-        :returns: A dictionary of resource tiers.
+        :returns: ``{"gpuTypes": [{"gpuType": str, "gpusPerNode": list[int], "devOnly": bool}]}``.
         :rtype: dict[str, Any]
         """
         return self._request("GET", "/api/cli/v1/resources/list")
@@ -1831,10 +1778,9 @@ class ArenaClient:
             with ``None`` keeps the scope already stored, it does not reset it, and the
             scope cannot be changed after the deployment exists.
         :type memory_scope: MemoryScope | None
-        :param num_gpus: GPUs on an LLM agent's node.
+        :param num_gpus: GPUs on the agent's node.
         :type num_gpus: int | None
-        :param gpu_type: Short GPU name such as ``h100-80``, ``b200`` or ``l4``,
-            for LLM agents.
+        :param gpu_type: Short GPU name such as ``h100-80``, ``b200`` or ``l4``.
         :type gpu_type: str | None
         :returns: A dictionary containing the deployment result.
         :rtype: dict[str, Any]
@@ -2155,8 +2101,6 @@ class ArenaClient:
         requirements: str | os.PathLike[str] | None,
         entrypoint: str | None,
         description: str | None,
-        multi_agent: bool,
-        language_based: bool,
         do_rollouts: bool,
     ) -> NDJsonStream:
         """Upload, create, and validate an environment."""
@@ -2171,8 +2115,8 @@ class ArenaClient:
         data: dict[str, str] = {
             "name": name,
             "version": version,
-            "multi_agent": str(multi_agent).lower(),
-            "language_based": str(language_based).lower(),
+            # The platform defaults language_based to false.
+            "language_based": "true",
             "do_rollouts": str(do_rollouts).lower(),
         }
         if entrypoint:

@@ -21,8 +21,6 @@ custom environments, submit training jobs on scalable compute, and deploy traine
 Tutorials
 ---------
 
-- :doc:`PPO on a Custom Gym Environment <ppo_custom_env>`: Upload and validate a **Merge** air
-  traffic environment on Arena, train PPO with evolutionary HPO, and deploy the trained agent for inference.
 - :doc:`GRPO on GSM8K <grpo_gsm8k>`: Register the **GSM8K** math dataset from Hugging Face, write a
   reward function, fine-tune ``Qwen2.5-0.5B-Instruct`` with GRPO, and deploy the model for inference.
 
@@ -30,5 +28,4 @@ Tutorials
    :maxdepth: 1
    :hidden:
 
-   PPO on a Custom Gym Environment <ppo_custom_env>
    GRPO on GSM8K <grpo_gsm8k>
