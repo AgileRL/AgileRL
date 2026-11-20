@@ -256,6 +256,10 @@ class ArenaAPIError(ArenaError):
         )
 
 
+class ArenaClientUpgradeRequiredError(ArenaAPIError):
+    """Raised when Arena refuses this agilerl-arena release as below its minimum (HTTP 426)."""
+
+
 class ArenaValidationError(ArenaAPIError):
     """Raised when environment validation fails or client arguments are invalid."""
 
