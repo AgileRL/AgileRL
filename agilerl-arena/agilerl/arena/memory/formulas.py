@@ -83,15 +83,10 @@ EP_EXCHANGE_BUFFERS = 4
 # saved tensors at every budget.
 RECOMPUTED_CHUNK_LIVE_MULTIPLE = 7
 
-# Share of a block's checkpointed-backward peak
-# (:func:`~agilerl.arena.memory.block_activations.block_recompute_bytes`)
-# that a block left out of checkpointing keeps from its forward, for layers
-# :func:`~agilerl.arena.memory.block_activations.mean_block_recompute_bytes`
-# has no stored price for: the backward peak also holds a gradient that only
-# the block in backward carries. Qwen3-4B LoRA r16 on A100 80GB (FA2 packed,
-# 12k and 15k-token budgets, frozen base sharded) kept 0.90; 0.91 puts the
-# per-token slope 1.4% above it. Fit on that one dense model only; other
-# families are extrapolated.
+# Share of :func:`~agilerl.arena.memory.block_activations.block_recompute_bytes`
+# an uncheckpointed block keeps from its forward, for layers with no stored
+# price. Fit on Qwen3-4B LoRA r16, A100 80GB (measured 0.90); other families
+# are extrapolated.
 STORED_BLOCK_SHARE = 0.91
 
 # PyTorch caching-allocator slack: reserved above allocated.

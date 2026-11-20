@@ -43,15 +43,15 @@ from agilerl.arena.inference.cache import (
     normalized_deployment_name,
     save_binding,
 )
-from agilerl.arena.memory.manifest import (
-    explicit_colocated_rollout,
-    validated_run_manifest,
-)
 from agilerl.arena.models import (
     FinetuningNetworkSpec,
     LLMAlgorithmSpec,
     TrainingManifest,
     __version__,
+)
+from agilerl.arena.models.manifest import (
+    explicit_colocated_rollout,
+    validated_run_manifest,
 )
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.traces import TRACES_DATASET_FORMAT, validate_traces_file

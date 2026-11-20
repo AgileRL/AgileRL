@@ -14,7 +14,6 @@ from agilerl.arena.memory.breakdown import MemoryComponent, PhaseBreakdown
 from agilerl.arena.memory.manifest import (
     nccl_reshard_layout_supported,
     training_memory_from_manifest,
-    validated_run_manifest,
 )
 from agilerl.arena.memory.resolve.batch import catalog_model
 from agilerl.arena.memory.resolve.fsdp import (
@@ -48,7 +47,7 @@ from agilerl.arena.memory.resolve.weight_sync import (
 )
 from agilerl.arena.memory.specs import DeviceSpec, GiB, TrainingSettings
 from agilerl.arena.models import model_info
-from agilerl.arena.models.manifest import TrainingManifest
+from agilerl.arena.models.manifest import TrainingManifest, validated_run_manifest
 from agilerl.arena.models.model_info import supported_path
 from tests.test_memory.test_cli import MANIFEST
 from tests.test_memory.test_resolve_split import (

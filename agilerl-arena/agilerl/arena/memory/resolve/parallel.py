@@ -15,7 +15,6 @@ from agilerl.arena.memory.resolve.batch import TrainerSplitError
 from agilerl.arena.memory.resolve.fsdp import (
     TrainingMemoryPlan,
     TrainingMemoryUnfitError,
-    cpu_offload_blocker,
 )
 from agilerl.arena.memory.specs import ModelArch
 from agilerl.arena.models.algorithms.base import LLMAlgorithmSpec
@@ -28,6 +27,7 @@ from agilerl.arena.models.fsdp import (
     record_parallel_pins,
 )
 from agilerl.arena.models.manifest import TrainingManifest, strips_multimodal_towers
+from agilerl.arena.models.manifest_rules import cpu_offload_blocker
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO, ModelInfo
 
 

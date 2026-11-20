@@ -25,7 +25,6 @@ from agilerl.arena.memory.manifest import (
     parse_gram_per_gpu,
     training_settings_from_manifest,
     unsupported_gpu_reason,
-    validated_run_manifest,
 )
 from agilerl.arena.memory.manifest import (
     estimate_manifest as _estimate_manifest,
@@ -39,7 +38,7 @@ from agilerl.arena.memory.manifest import (
 from agilerl.arena.memory.resolve.attention import FAMILY_ATTN_IMPLEMENTATIONS
 from agilerl.arena.memory.specs import DTYPE_BYTES, DeviceSpec, GiB, MiB, ModelArch
 from agilerl.arena.models.fsdp import FSDPConfig, parallel_layout_pins
-from agilerl.arena.models.manifest import TrainingManifest
+from agilerl.arena.models.manifest import TrainingManifest, validated_run_manifest
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO, ModelInfo
 
 TINY_CONFIG = json.loads(

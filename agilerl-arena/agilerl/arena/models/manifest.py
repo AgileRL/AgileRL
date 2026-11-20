@@ -32,11 +32,6 @@ from pydantic import (
 )
 from typing_extensions import Self
 
-from agilerl.arena.memory.resolve.fsdp import cpu_offload_blocker
-from agilerl.arena.memory.resolve.rollout import (
-    async_rollout_algorithm,
-    rollout_engines_blocker,
-)
 from agilerl.arena.models.algorithms.base import AlgoSpec, LLMAlgorithmSpec
 from agilerl.arena.models.algorithms.opd import OPDSpec
 from agilerl.arena.models.algorithms.ppo import PPOSpec
@@ -52,6 +47,12 @@ from agilerl.arena.models.hpo import (
     TournamentSelectionSpec,
     no_op_mutation_probabilities,
     require_mutation_range_inside_field,
+)
+from agilerl.arena.models.manifest_rules import (
+    apply_run_rollout_mode,
+    async_rollout_algorithm,
+    cpu_offload_blocker,
+    rollout_engines_blocker,
 )
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.networks import (
@@ -1001,3 +1002,32 @@ class TrainingManifest(BaseModel):
         ):
             if field not in authored:
                 training.pop(field, None)
+
+
+def async_rollout(manifest: TrainingManifest) -> bool:
+    """Whether the run generates on async rollout engines, as :func:`async_rollout_algorithm` decides."""
+    return async_rollout_algorithm(type(manifest.algorithm))
+
+
+def explicit_colocated_rollout(manifest: TrainingManifest) -> bool:
+    """Whether a rollout LLM manifest names ``rollout_mode: colocated``, which only local runs take."""
+    return (
+        async_rollout(manifest)
+        and "rollout_mode" in manifest.training.model_fields_set
+        and manifest.training.rollout_mode == "colocated"
+    )
+
+
+def validated_run_manifest(manifest: TrainingManifest) -> TrainingManifest:
+    """The manifest validated as Ray runs it, from :func:`apply_run_rollout_mode`.
+
+    :param manifest: Training manifest, validated as written.
+    :return: ``manifest`` itself when Ray reads it as written, else the run Ray starts.
+    :raises pydantic.ValidationError: When the run cannot start as Ray runs it.
+    """
+    run_async = async_rollout(manifest)
+    if not run_async and "rollout_mode" not in manifest.training.model_fields_set:
+        return manifest
+    payload = manifest.to_payload()
+    apply_run_rollout_mode(payload["training"], run_async)
+    return TrainingManifest.model_validate(payload)

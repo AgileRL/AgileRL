@@ -12,7 +12,6 @@ from agilerl.arena.memory.manifest import (
     estimate_teacher_generation,
     generation_settings_from_manifest,
     lookup_gpu,
-    validated_run_manifest,
 )
 from agilerl.arena.memory.resolve.engine import (
     _engine_model,
@@ -25,7 +24,7 @@ from agilerl.arena.memory.resolve.engine import (
     servable_engine_widths,
 )
 from agilerl.arena.memory.specs import ModelArch, ModelSpec
-from agilerl.arena.models.manifest import TrainingManifest
+from agilerl.arena.models.manifest import TrainingManifest, validated_run_manifest
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 
 GEMMA_4_E4B = "google/gemma-4-E4B-it"
