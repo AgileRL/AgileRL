@@ -927,16 +927,16 @@ def resolve_lora_defaults(lora: LoraConfigDict, hub_id: str) -> None:
         lora.lora_dropout = 0.0
 
 
-def check_lora_config_supported(hub_id: str, lora: LoraConfigDict | None) -> None:
-    """Reject a LoRA rank or targets a tracked Hub id cannot train with.
+def check_lora_config_supported(hub_id: str, lora: LoraConfigDict) -> None:
+    """Fill a LoRA config's catalog defaults, then reject a rank or targets the Hub id cannot train with.
 
     :param hub_id: The model the config trains.
     :type hub_id: str
-    :param lora: The config to check. ``None`` passes.
-    :type lora: LoraConfigDict | None
+    :param lora: The config to check, edited in place.
+    :type lora: LoraConfigDict
     """
     entry = SUPPORTED_MODEL_INFO.get(hub_id)
-    if entry is None or lora is None:
+    if entry is None:
         return
     resolve_lora_defaults(lora, hub_id)
     # Ranks below the cap pass; vLLM rounds max_lora_rank up to a value it accepts.
@@ -997,10 +997,25 @@ class FinetuningNetworkSpec(BaseModel):
         ge=1,
         description="Context window the run is sized for, prompt plus completion.",
     )
-    lora_config: LoraConfigDict | None = Field(
-        default=None,
-        description="LoRA adapter configuration. Unset fine-tunes without adapters.",
+    lora_config: LoraConfigDict = Field(
+        default_factory=LoraConfigDict,
+        description=(
+            "LoRA adapter configuration. Unset or null trains the model's "
+            "catalog default adapter; Arena has no full finetune."
+        ),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _null_lora_is_the_default(cls, data: object) -> object:
+        """Treat ``lora_config: null`` as unset, so it gets the default adapter."""
+        if (
+            isinstance(data, dict)
+            and "lora_config" in data
+            and data["lora_config"] is None
+        ):
+            return {key: value for key, value in data.items() if key != "lora_config"}
+        return data
 
     @model_validator(mode="after")
     def _check_lora_config_supported(self) -> Self:

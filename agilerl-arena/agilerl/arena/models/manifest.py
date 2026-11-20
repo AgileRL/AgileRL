@@ -597,18 +597,8 @@ class TrainingManifest(BaseModel):
                 self.network.max_context_length,
                 source_set=True,
             )
-            algorithm_lora = getattr(self.algorithm, "lora_config", None)
-            if algorithm_lora is not None:
-                # Network validation skips an unset lora_config.
-                check_lora_config_supported(
-                    self.network.pretrained_model_name_or_path, algorithm_lora
-                )
-            _copy_when_unset(
-                self.algorithm,
-                "lora_config",
-                self.network.lora_config,
-                source_set="lora_config" in self.network.model_fields_set,
-            )
+            if "lora_config" in type(self.algorithm).model_fields:
+                self._resolve_lora_config(self.network)
 
         if (
             isinstance(self.algorithm, RolloutLLMSpec)
@@ -946,16 +936,10 @@ class TrainingManifest(BaseModel):
                     and "tensor_parallel_size" not in vllm_config.model_fields_set
                 ):
                     vllm_payload.pop("tensor_parallel_size", None)
-        if (
-            isinstance(self.network, FinetuningNetworkSpec)
-            and "lora_config" in self.network.model_fields_set
-            and self.network.lora_config is None
-        ):
-            payload.setdefault("network", {})["lora_config"] = None
         if isinstance(self.network, FinetuningNetworkSpec) and isinstance(
             algorithm, dict
         ):
-            self._move_model_fields_to_network(algorithm, payload["network"])
+            self._move_model_fields_to_network(algorithm)
         environment = payload.get("environment")
         if isinstance(environment, dict):
             if environment.get("screenshot_field") is None:
@@ -964,22 +948,38 @@ class TrainingManifest(BaseModel):
                 environment.pop("goal_images_field", None)
         return payload
 
-    def _move_model_fields_to_network(
-        self, algorithm: dict[str, Any], network: dict[str, Any]
-    ) -> None:
-        """Keep the model, context length and LoRA only in the ``network`` section.
+    def _resolve_lora_config(self, network: FinetuningNetworkSpec) -> None:
+        """Give the algorithm and network one LoRA config, the catalog default when neither sets one.
+
+        A null on either section counts as unset.
+
+        :param network: The manifest's finetuning network section.
+        :type network: FinetuningNetworkSpec
+        """
+        algorithm_lora = self.algorithm.lora_config
+        if algorithm_lora is None:
+            self.algorithm.model_fields_set.discard("lora_config")
+        else:
+            check_lora_config_supported(
+                network.pretrained_model_name_or_path, algorithm_lora
+            )
+            if "lora_config" not in network.model_fields_set:
+                network.lora_config = algorithm_lora
+                return
+        _copy_when_unset(
+            self.algorithm, "lora_config", network.lora_config, source_set=True
+        )
+
+    @staticmethod
+    def _move_model_fields_to_network(algorithm: dict[str, Any]) -> None:
+        """Drop the algorithm's copies of the model, context length and LoRA; ``network`` holds them.
 
         :param algorithm: The dumped ``algorithm`` section, edited in place.
         :type algorithm: dict[str, Any]
-        :param network: The dumped ``network`` section, edited in place.
-        :type network: dict[str, Any]
         """
         algorithm.pop("pretrained_model_name_or_path", None)
         algorithm.pop("max_model_len", None)
-        lora = algorithm.pop("lora_config", None)
-        # A null is full finetune, which the user writes on network.lora_config.
-        if lora is not None and "lora_config" not in network:
-            network["lora_config"] = lora
+        algorithm.pop("lora_config", None)
 
     def _drop_unset_training_fields(self, training: dict[str, Any]) -> None:
         """Omit dumped training defaults that parsers treat as explicit choices.
