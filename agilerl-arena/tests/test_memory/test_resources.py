@@ -27,6 +27,7 @@ from agilerl.arena.memory.resolve.run import (
     SplitSearchError,
     resolve_run_memory,
 )
+from agilerl.arena.memory.resolve.split import ExpectedLengths
 from agilerl.arena.memory.resources import (
     FailureKind,
     check_tiers,
@@ -165,9 +166,11 @@ def priced(monkeypatch):
     calls = []
     real = resources_module._price
 
-    def spy(tier, manifest, model, build_config, layout, num_nodes, cache):
+    def spy(tier, manifest, model, build_config, layout, num_nodes, cache, lengths):
         calls.append((tier["name"], num_nodes))
-        return real(tier, manifest, model, build_config, layout, num_nodes, cache)
+        return real(
+            tier, manifest, model, build_config, layout, num_nodes, cache, lengths
+        )
 
     monkeypatch.setattr(resources_module, "_price", spy)
     return calls
@@ -1347,8 +1350,8 @@ class TestCheckTiers:
         # Assert
         assert check.fits
         assert check.layout == ParallelLayout(ep=5)
-        assert check.trainers == 5
-        assert check.engines == 7
+        assert check.trainers == 10
+        assert check.engines == 6
 
     def test_an_open_count_prices_searched_groups_on_one_node(
         self, monkeypatch, built_split
@@ -1438,6 +1441,148 @@ class TestCheckTiers:
         assert check.trainers == 1
         assert check.engines == 1
         assert check.engine_tensor_parallel == 1
+
+    @pytest.mark.parametrize("batch_size", [2, 64])
+    def test_searched_split_steps_within_its_generation_range(self, batch_size):
+        # Arrange
+        doc = unset_split(MANIFEST)
+        doc["algorithm"]["batch_size"] = batch_size
+        manifest = TrainingManifest.model_validate(doc)
+        lengths = ExpectedLengths(
+            prompt_tokens=100,
+            generated_tokens_per_turn=250,
+            turns=1,
+            generated_tokens_per_turn_low=100,
+            generated_tokens_per_turn_high=400,
+        )
+
+        # Act
+        (check,) = check_tiers(
+            [tier("l4-4x", "NVIDIA L4", 4, 4.0)],
+            manifest,
+            tiny_model(),
+            builder(),
+            expected_lengths=lengths,
+        )
+
+        # Assert
+        assert check.fits
+        assert check.step_seconds is not None
+        assert check.step_seconds_low is not None
+        assert check.step_seconds_high is not None
+        assert check.step_seconds_low <= check.step_seconds <= check.step_seconds_high
+
+    def test_default_lengths_give_one_step(self):
+        # Arrange
+        manifest = TrainingManifest.model_validate(unset_split(MANIFEST))
+
+        # Act
+        (check,) = check_tiers(
+            [tier("l4-4x", "NVIDIA L4", 4, 4.0)], manifest, tiny_model(), builder()
+        )
+
+        # Assert
+        assert check.step_seconds is not None
+        assert check.step_seconds_low == check.step_seconds == check.step_seconds_high
+
+    def test_multi_turn_split_steps_within_its_generation_range(self):
+        # Arrange: a Sudoku-style env on Qwen2.5-0.5B.
+        doc = unset_split(MANIFEST)
+        doc["algorithm"]["batch_size"] = 16
+        doc["algorithm"]["max_output_tokens"] = 256
+        doc["environment"] = {
+            "env_type": "rollout",
+            "factory": "gem:make",
+            "entrypoint": "game:Sudoku-v0-hard",
+            "max_turns": 20,
+            "max_reward": 1.0,
+        }
+        doc["network"] = {**doc["network"], "max_context_length": 4096}
+        manifest = TrainingManifest.model_validate(doc)
+        lengths = ExpectedLengths(
+            prompt_tokens=600,
+            generated_tokens_per_turn=150,
+            turns=4,
+            generated_tokens_per_turn_low=60,
+            generated_tokens_per_turn_high=220,
+        )
+
+        # Act
+        (check,) = check_tiers(
+            [tier("l4-4x", "NVIDIA L4", 4, 4.0)],
+            manifest,
+            tiny_model(),
+            builder(),
+            expected_lengths=lengths,
+        )
+
+        # Assert
+        assert check.fits
+        assert check.step_seconds is not None
+        assert check.step_seconds_low is not None
+        assert check.step_seconds_high is not None
+        assert check.step_seconds_low <= check.step_seconds <= check.step_seconds_high
+        assert check.step_seconds_low < check.step_seconds_high
+
+    def test_no_expected_lengths_keeps_the_default_verdict(self):
+        # Arrange
+        manifest = TrainingManifest.model_validate(unset_split(MANIFEST))
+        tiers = [tier("l4-4x", "NVIDIA L4", 4, 4.0)]
+
+        # Act
+        (explicit,) = check_tiers(
+            tiers, manifest, tiny_model(), builder(), expected_lengths=None
+        )
+        (default,) = check_tiers(tiers, manifest, tiny_model(), builder())
+
+        # Assert
+        assert (
+            explicit.trainers,
+            explicit.engines,
+            explicit.step_seconds,
+            explicit.step_seconds_low,
+            explicit.step_seconds_high,
+        ) == (
+            default.trainers,
+            default.engines,
+            default.step_seconds,
+            default.step_seconds_low,
+            default.step_seconds_high,
+        )
+
+    def test_expected_lengths_price_one_step(self):
+        # Arrange
+        manifest = TrainingManifest.model_validate(unset_split(MANIFEST))
+        tiers = [tier("l4-4x", "NVIDIA L4", 4, 4.0)]
+        lengths = ExpectedLengths(
+            prompt_tokens=200, generated_tokens_per_turn=250, turns=1
+        )
+
+        # Act
+        (measured,) = check_tiers(
+            tiers, manifest, tiny_model(), builder(), expected_lengths=lengths
+        )
+        (default,) = check_tiers(tiers, manifest, tiny_model(), builder())
+
+        # Assert
+        assert measured.step_seconds is not None
+        assert measured.step_seconds_low == measured.step_seconds
+        assert measured.step_seconds_high == measured.step_seconds
+        assert measured.step_seconds != default.step_seconds
+
+    def test_kept_counts_have_no_step_range(self):
+        # Act
+        (check,) = check_tiers(
+            [tier("l4-2x", "NVIDIA L4", 2, 2.0)],
+            TrainingManifest.model_validate(MANIFEST),
+            tiny_model(),
+            builder(),
+        )
+
+        # Assert
+        assert check.step_seconds is None
+        assert check.step_seconds_low is None
+        assert check.step_seconds_high is None
 
     def test_a_shared_search_cache_gives_the_same_verdicts(self):
         # Arrange

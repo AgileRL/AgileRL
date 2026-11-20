@@ -8,7 +8,8 @@ import math
 from collections.abc import Callable
 from typing import Literal, NamedTuple
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from typing_extensions import Self
 
 from agilerl.arena.memory.block_activations import block_recompute_bytes
 from agilerl.arena.memory.formulas import (
@@ -114,13 +115,11 @@ MOE_DECODE_BANDWIDTH_EFFICIENCY = 0.3
 TURN_OVERHEAD_SECONDS = 3.5
 # A multi-turn wave's time over the mean episode's, from slow episodes.
 MULTI_TURN_STRAGGLER_FACTOR = 1.22
-# Share of max_output_tokens a single-turn completion decodes: 0.85-0.86 on
-# countdown with Qwen3-4B thinking, 0.28-0.44 with Granite MoEs, which do not.
-SINGLE_TURN_REASONING_DECODE_SHARE = 0.85
-SINGLE_TURN_DECODE_SHARE = 0.35
-# Share of the row budget past max_output_tokens a single-turn prompt fills:
-# 0.20-0.22 on countdown.
-SINGLE_TURN_PROMPT_FILL = 0.2
+# Generic planning defaults for a single-turn run without expected lengths:
+# tokens the turn generates with and without reasoning, and the prompt.
+DEFAULT_REASONING_TURN_TOKENS = 512
+DEFAULT_TURN_TOKENS = 128
+DEFAULT_PROMPT_TOKENS = 256
 # Share of the row budget a multi-turn row fills: 0.50-0.54 on Sudoku-v0-hard
 # (Qwen3-4B), 0.38-0.43 on AWM (Qwen3.6-35B-A3B).
 MULTI_TURN_ROW_FILL = 0.46
@@ -151,6 +150,52 @@ IDLE_GPU_TIE_SHARE = 0.02
 # AWM (Qwen3.6-35B-A3B) with adaptive task sampling and group replay: 1.22 over
 # steps 3-8, 1.10 over steps 5-8. Dropped groups are shorter than trained ones.
 TIED_DROP_GENERATION_FACTOR = 1.2
+
+
+class ExpectedLengths(BaseModel):
+    """Expected mean lengths of a run's rows, in place of the generic defaults."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    prompt_tokens: float = Field(
+        ge=0,
+        description=(
+            "Mean tokens of a row the model did not generate: the prompt, and "
+            "for multi-turn runs every environment observation too."
+        ),
+    )
+    generated_tokens_per_turn: float = Field(
+        gt=0, description="Mean tokens the model generates in one turn."
+    )
+    turns: float = Field(ge=1, description="Mean turns of an episode.")
+    generated_tokens_per_turn_low: float | None = Field(
+        default=None,
+        gt=0,
+        description="Low end of the tokens generated in one turn, for a step range.",
+    )
+    generated_tokens_per_turn_high: float | None = Field(
+        default=None,
+        gt=0,
+        description="High end of the tokens generated in one turn, for a step range.",
+    )
+
+    @model_validator(mode="after")
+    def _check_range(self) -> Self:
+        """Both range ends or neither, around ``generated_tokens_per_turn``."""
+        low = self.generated_tokens_per_turn_low
+        high = self.generated_tokens_per_turn_high
+        if low is None and high is None:
+            return self
+        if low is None or high is None:
+            msg = "set both generated_tokens_per_turn_low and _high, or neither"
+            raise ValueError(msg)
+        if not low <= self.generated_tokens_per_turn <= high:
+            msg = (
+                "generated_tokens_per_turn_low <= generated_tokens_per_turn "
+                "<= generated_tokens_per_turn_high does not hold"
+            )
+            raise ValueError(msg)
+        return self
 
 
 class SplitWorkload(BaseModel):
@@ -1060,21 +1105,30 @@ def choose_gpu_split(
 
 
 def split_workload_from_manifest(
-    manifest: TrainingManifest, adapter_sync: bool = False
+    manifest: TrainingManifest,
+    adapter_sync: bool = False,
+    expected_lengths: ExpectedLengths | None = None,
 ) -> SplitWorkload:
     """Expected lengths and batch constraints from a rollout manifest's budgets.
 
     :param manifest: Validated async rollout manifest.
     :param adapter_sync: Weight sync pushes the adapter even where the engines
         could serve merged weights.
-    :return: The workload at :func:`_expected_lengths`.
+    :param expected_lengths: Expected lengths (:func:`_measured_lengths`);
+        ``None`` uses the generic defaults (:func:`_expected_lengths`).
+    :return: The workload at those lengths.
     :raises TypeError: When the algorithm does not generate rollouts.
     """
     spec = manifest.algorithm
     if not isinstance(spec, RolloutLLMSpec):
         msg = f"{spec.name} does not generate rollouts"
         raise TypeError(msg)
-    row_tokens, decode_tokens, turns = _expected_lengths(manifest, spec)
+    if expected_lengths is None:
+        row_tokens, decode_tokens, turns = _expected_lengths(manifest, spec)
+    else:
+        row_tokens, decode_tokens, turns = _measured_lengths(
+            manifest, spec, expected_lengths
+        )
     vllm = spec.vllm_config
     fsdp = spec.fsdp
     fsdp_tp = 1 if fsdp is None else fsdp.tp
@@ -1128,29 +1182,37 @@ def split_workload_from_manifest(
     )
 
 
+def _turn_cap(spec: RolloutLLMSpec) -> int:
+    """A turn's output-token cap: ``max_output_tokens``, else the row budget."""
+    row_budget = spec.max_row_tokens or spec.max_model_len
+    return min(spec.max_output_tokens or row_budget, row_budget)
+
+
 def _expected_lengths(
     manifest: TrainingManifest, spec: RolloutLLMSpec
 ) -> tuple[int, int, int]:
     """Mean trained-row tokens, decoded tokens per row and turns from the budgets.
 
-    A single turn decodes a share of ``max_output_tokens`` that depends on
-    whether the model reasons, after a prompt filling a share of the rest of
-    the row. A multi-turn row fills :data:`MULTI_TURN_ROW_FILL` of its budget
-    over :data:`MULTI_TURN_TURN_SHARE` of ``max_turns``, or as many full turns
-    as the row holds when turns are unbounded.
+    A single turn decodes :data:`DEFAULT_REASONING_TURN_TOKENS` when the model
+    reasons, else :data:`DEFAULT_TURN_TOKENS`, at most its cap
+    (:func:`_turn_cap`), after a :data:`DEFAULT_PROMPT_TOKENS` prompt within
+    what the decode leaves of the row. A multi-turn row fills
+    :data:`MULTI_TURN_ROW_FILL` of its budget over :data:`MULTI_TURN_TURN_SHARE`
+    of ``max_turns``, or as many full turns as the row holds when turns are
+    unbounded.
     """
     row_budget = spec.max_row_tokens or spec.max_model_len
-    turn_tokens = min(spec.max_output_tokens or row_budget, row_budget)
+    turn_tokens = _turn_cap(spec)
     env = manifest.environment
     max_turns = env.max_turns if isinstance(env, LLMEnvSpec) else 1
     if max_turns == 1:
-        share = (
-            SINGLE_TURN_REASONING_DECODE_SHARE
-            if _reasons(manifest, spec)
-            else SINGLE_TURN_DECODE_SHARE
+        generated = (
+            DEFAULT_REASONING_TURN_TOKENS
+            if generates_reasoning(manifest, spec)
+            else DEFAULT_TURN_TOKENS
         )
-        decode_tokens = math.ceil(share * turn_tokens)
-        prompt_tokens = math.ceil(SINGLE_TURN_PROMPT_FILL * (row_budget - turn_tokens))
+        decode_tokens = min(generated, turn_tokens)
+        prompt_tokens = min(DEFAULT_PROMPT_TOKENS, row_budget - decode_tokens)
         return decode_tokens + prompt_tokens, decode_tokens, 1
     row_tokens = math.ceil(MULTI_TURN_ROW_FILL * row_budget)
     turns = max(
@@ -1166,8 +1228,38 @@ def _expected_lengths(
     return row_tokens, decode_tokens, turns
 
 
-def _reasons(manifest: TrainingManifest, spec: RolloutLLMSpec) -> bool:
-    """Whether rollouts reason: the model has a reasoning parser and thinking is not turned off."""
+def _measured_lengths(
+    manifest: TrainingManifest,
+    spec: RolloutLLMSpec,
+    lengths: ExpectedLengths,
+) -> tuple[int, int, int]:
+    """Mean trained-row tokens, decoded tokens per row and turns from expected lengths.
+
+    A turn decodes ``generated_tokens_per_turn`` tokens, at most its cap
+    (:func:`_turn_cap`). Turns are at most the env's ``max_turns``, one for a
+    single-turn env; the decode is priced at those turns and the reported
+    turns are rounded to a whole number of at least one. The row is the
+    prompt plus every turn's decode, within the row budget.
+    """
+    row_budget = spec.max_row_tokens or spec.max_model_len
+    turn_decode = min(lengths.generated_tokens_per_turn, _turn_cap(spec))
+    env = manifest.environment
+    max_turns = env.max_turns if isinstance(env, LLMEnvSpec) else 1
+    mean_turns = lengths.turns if max_turns is None else min(lengths.turns, max_turns)
+    turns = max(1, round(mean_turns))
+    decode_tokens = min(math.ceil(turn_decode * mean_turns), row_budget)
+    row_tokens = min(math.ceil(lengths.prompt_tokens) + decode_tokens, row_budget)
+    return row_tokens, decode_tokens, turns
+
+
+def generates_reasoning(manifest: TrainingManifest, spec: RolloutLLMSpec) -> bool:
+    """Whether rollouts reason: the model has a reasoning parser and thinking is not turned off.
+
+    :param manifest: Validated rollout manifest.
+    :param spec: ``manifest``'s rollout algorithm.
+    :return: ``True`` when the engine parses reasoning and the env's chat
+        template does not set ``enable_thinking`` to ``False``.
+    """
     info = SUPPORTED_MODEL_INFO.get(spec.pretrained_model_name_or_path or "")
     model_type = None if info is None else info.model_type
     env = manifest.environment
@@ -1176,6 +1268,27 @@ def _reasons(manifest: TrainingManifest, spec: RolloutLLMSpec) -> bool:
         resolve_reasoning_parser(spec.vllm_engine_args, model_type) is not None
         and template.get("enable_thinking") is not False
     )
+
+
+def expected_lengths_for_run(
+    manifest: TrainingManifest,
+    on: ExpectedLengths | None,
+    off: ExpectedLengths | None,
+) -> ExpectedLengths | None:
+    """The lengths a single-turn rollout run prices at, picked by whether it reasons.
+
+    :param manifest: Validated run manifest.
+    :param on: Lengths measured with thinking on.
+    :param off: Lengths measured with thinking off.
+    :return: ``on`` when the run generates reasoning (:func:`generates_reasoning`),
+        else ``off``; ``None`` for a multi-turn run or a run without rollouts.
+    """
+    spec = manifest.algorithm
+    env = manifest.environment
+    max_turns = env.max_turns if isinstance(env, LLMEnvSpec) else 1
+    if max_turns != 1 or not isinstance(spec, RolloutLLMSpec):
+        return None
+    return on if generates_reasoning(manifest, spec) else off
 
 
 def _generated_per_trained(manifest: TrainingManifest, group_size: int) -> float:

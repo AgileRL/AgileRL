@@ -1398,6 +1398,46 @@ class TestMainResourceTier:
             ("a100-2x", True),
         ]
 
+    def test_expected_lengths_price_the_tier_step(self, tmp_path, capsys):
+        # Arrange: unset counts, so each tier searches its split.
+        doc = copy.deepcopy(MANIFEST)
+        del doc["training"]["rollout_engines_per_agent"]
+        path = tmp_path / "searched.yaml"
+        path.write_text(yaml.safe_dump(doc))
+        lengths = '{"prompt_tokens": 200, "generated_tokens_per_turn": 250, "turns": 1}'
+
+        # Act
+        code = main(
+            str(path),
+            tiers=TIERS,
+            config_path=TINY_CONFIG,
+            expected_lengths_json=lengths,
+            as_json=True,
+        )
+
+        # Assert
+        payload = json.loads(capsys.readouterr().out)
+        fitting = [row for row in payload["tiers"] if row["fits"]]
+        assert code == EXIT_OK
+        assert fitting
+        for row in fitting:
+            assert row["step_seconds"] is not None
+            assert row["step_seconds_low"] == row["step_seconds"]
+            assert row["step_seconds_high"] == row["step_seconds"]
+
+    def test_invalid_expected_lengths_is_a_usage_error(self, manifest_path, capsys):
+        # Act
+        code = main(
+            manifest_path,
+            tiers=TIERS,
+            config_path=TINY_CONFIG,
+            expected_lengths_json='{"prompt_tokens": 200}',
+        )
+
+        # Assert
+        assert code == EXIT_USAGE
+        assert "--expected-lengths" in capsys.readouterr().err
+
     def test_no_fitting_tier_lists_why_and_exits_over_budget(
         self, no_tier_fits_path, capsys
     ):

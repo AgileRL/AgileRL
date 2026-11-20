@@ -45,6 +45,7 @@ from agilerl.arena.memory.resolve.run import (
     WeightSyncMode,
     kept_weight_sync_mode,
 )
+from agilerl.arena.memory.resolve.split import ExpectedLengths
 from agilerl.arena.memory.resources import (
     TierCheck,
     check_tiers,
@@ -365,6 +366,7 @@ def _planned_layout(
     model: ModelSpec,
     device: DeviceSpec,
     num_gpus: int | None,
+    expected_lengths: ExpectedLengths | None,
 ) -> tuple[TrainingManifest, WeightSyncMode]:
     """The manifest as the run lays it out on ``num_gpus`` GPUs in nodes of ``device.gpus_per_node``, and its weight-sync mode, as :func:`check_tiers` picks them.
 
@@ -372,7 +374,8 @@ def _planned_layout(
     A searched split that fits writes its counts, engine width and layout
     (:func:`split_manifest`); otherwise the manifest's own counts are kept
     (:func:`kept_weight_sync_mode`). Without ``num_gpus`` no link is known:
-    merged sync over NIXL where the engines can serve it.
+    merged sync over NIXL where the engines can serve it. ``expected_lengths``
+    prices the split at expected lengths; ``None`` uses the generic defaults.
     """
     if num_gpus is None:
         return manifest, WeightSyncMode(True, "nixl")
@@ -384,7 +387,11 @@ def _planned_layout(
     if searches_gpu_split(manifest):
         try:
             laid_out, plan = split_manifest(
-                manifest, num_gpus, device, sync_link=sync_link
+                manifest,
+                num_gpus,
+                device,
+                sync_link=sync_link,
+                expected_lengths=expected_lengths,
             )
         except ValueError:
             # No split fits: check_tiers sizes the manifest's own counts.
@@ -400,6 +407,7 @@ def _planned_layout(
         num_gpus,
         sync_link,
         SearchCache(),
+        expected_lengths,
     )
     return manifest, mode
 
@@ -447,6 +455,7 @@ def _sized_run_config(
     model: ModelSpec,
     device: DeviceSpec,
     num_gpus: int | None,
+    expected_lengths: ExpectedLengths | None = None,
 ) -> RunConfig:
     """The run config on ``num_gpus`` GPUs of ``device``, at the split, weight-sync mode, engine width and engines the run picks there.
 
@@ -455,10 +464,14 @@ def _sized_run_config(
     :param model: Training-side model, with the checkpoint's parameter count.
     :param num_gpus: GPUs in the allocation, in nodes of ``device.gpus_per_node``;
         ``None`` reads the engine layout from the manifest.
+    :param expected_lengths: Expected row lengths to pick the split at;
+        ``None`` uses the generic defaults.
     :raises ValueError: The run picks its engine layout from a GPU count and
         ``num_gpus`` is unset, or the node has too few GPUs.
     """
-    laid_out, mode = _planned_layout(manifest, model, device, num_gpus)
+    laid_out, mode = _planned_layout(
+        manifest, model, device, num_gpus, expected_lengths
+    )
     width, engines = _allocation_layout(laid_out, num_gpus, device, not mode.merged)
     return run_config_from_manifest(
         laid_out,
@@ -506,6 +519,17 @@ def memory_group() -> None:
     help="Local config.json for the manifest's model (offline mode).",
 )
 @click.option(
+    "--expected-lengths",
+    "expected_lengths_json",
+    default=None,
+    help=(
+        "Expected row lengths to price the GPU split at, as JSON: "
+        '\'{"prompt_tokens": 180, "generated_tokens_per_turn": 600, "turns": 1}\'. '
+        "Without it generic defaults are used. Add generated_tokens_per_turn_low "
+        "and _high for a step range."
+    ),
+)
+@click.option(
     "--json",
     "as_json",
     is_flag=True,
@@ -524,6 +548,7 @@ def memory_estimate(
     device_gb: float | None,
     num_gpus: int | None,
     config_path: str | None,
+    expected_lengths_json: str | None,
     as_json: bool,
     no_color: bool,
 ) -> None:
@@ -555,6 +580,7 @@ def memory_estimate(
             tiers=tiers,
             num_gpus=num_gpus,
             config_path=config_path,
+            expected_lengths_json=expected_lengths_json,
             as_json=as_json or json_output_enabled(),
             no_color=no_color,
         )
@@ -570,6 +596,7 @@ def main(
     num_gpus: int | None = None,
     gpus_per_node: int | None = None,
     config_path: str | None = None,
+    expected_lengths_json: str | None = None,
     as_json: bool = False,
     no_color: bool = False,
 ) -> int:
@@ -580,7 +607,18 @@ def main(
     :param num_gpus: GPUs in the allocation, for the engine layout the run picks.
     :param gpus_per_node: GPUs on one node of the allocation; ``None`` puts all
         ``num_gpus`` on one node.
+    :param expected_lengths_json: :class:`ExpectedLengths` as JSON, to price
+        the split at; ``None`` uses the generic defaults.
     """
+    try:
+        expected_lengths = (
+            None
+            if expected_lengths_json is None
+            else ExpectedLengths.model_validate_json(expected_lengths_json)
+        )
+    except ValidationError as err:
+        print(f"--expected-lengths: {err}", file=sys.stderr)
+        return EXIT_USAGE
     try:
         device = _resolve_device(
             gpu, device_gb, flag="--gpu", capacity_flag="--device-gb"
@@ -663,14 +701,20 @@ def main(
     checks: list[TierCheck] = []
     try:
         if device is None:
-            checks = check_tiers(tiers or [], manifest, model_spec, build_config)
+            checks = check_tiers(
+                tiers or [],
+                manifest,
+                model_spec,
+                build_config,
+                expected_lengths=expected_lengths,
+            )
             chosen = next((check for check in checks if check.fits), None)
             if chosen is None or chosen.config is None:
                 return _report_no_tier(checks, as_json)
             config = chosen.config
         else:
             config = _sized_run_config(
-                manifest, model_config, model_spec, device, num_gpus
+                manifest, model_config, model_spec, device, num_gpus, expected_lengths
             )
     except KeyError as err:
         return _report_missing_key(err)
@@ -807,6 +851,9 @@ def _tier_rows(checks: list[TierCheck]) -> list[dict[str, Any]]:
                 row["teacher_engine_tensor_parallel"] = (
                     check.teacher_engine_tensor_parallel
                 )
+            row["step_seconds"] = check.step_seconds
+            row["step_seconds_low"] = check.step_seconds_low
+            row["step_seconds_high"] = check.step_seconds_high
         rows.append(row)
     return rows
 

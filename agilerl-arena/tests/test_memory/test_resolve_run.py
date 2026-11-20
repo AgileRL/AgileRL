@@ -1441,6 +1441,7 @@ class TestResolveRunMemoryWeightSync:
         # Assert
         assert plan.merged_lora_sync is True
 
+    @pytest.mark.usefixtures("cap_filling_turns")
     def test_rdma_countdown_keeps_merged_weights(self) -> None:
         # Act: merged generation on H100 countdown saves more than the
         # 100 Gb/s RDMA sync of the checkpoint costs.
@@ -1735,11 +1736,11 @@ class TestQwen35NineBWeightSync:
         assert plan.training.fsdp is not None
         assert plan.training.fsdp.tp == 2
         assert {split.sync_transport for split in plan.quotes} == {"nixl"}
-        assert nixl.learn_seconds == pytest.approx(0.471, abs=0.01)
-        assert nixl.generation_seconds == pytest.approx(0.232, abs=0.01)
+        assert nixl.learn_seconds == pytest.approx(0.160, abs=0.01)
+        assert nixl.generation_seconds == pytest.approx(0.180, abs=0.01)
         assert nixl.sync_seconds == pytest.approx(0.726, abs=0.01)
-        assert adapter.learn_seconds == pytest.approx(0.471, abs=0.01)
-        assert adapter.generation_seconds == pytest.approx(0.470, abs=0.01)
+        assert adapter.learn_seconds == pytest.approx(0.160, abs=0.01)
+        assert adapter.generation_seconds == pytest.approx(0.347, abs=0.01)
         assert adapter.sync_seconds == pytest.approx(0.359, abs=0.005)
         assert adapter.synced_step_seconds < nixl.synced_step_seconds
         assert plan.merged_lora_sync is False

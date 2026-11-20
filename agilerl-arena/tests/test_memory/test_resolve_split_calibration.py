@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import copy
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import pytest
@@ -16,6 +17,7 @@ from agilerl.arena.memory.manifest import (
 )
 from agilerl.arena.memory.resolve.batch import catalog_model
 from agilerl.arena.memory.resolve.split import (
+    ExpectedLengths,
     GpuSplit,
     TrainerCost,
     choose_gpu_split,
@@ -635,14 +637,17 @@ def _predicted_split(case: CalibrationCase, measured_lengths: bool) -> GpuSplit:
         "max_num_batched_tokens": case.max_num_batched_tokens,
         "merged_lora_sync": False,
     }
+    expected = None
     if measured_lengths:
-        update |= {
-            "row_tokens": case.row_tokens,
-            "decode_tokens": case.decode_tokens,
-            "turns": case.turns,
-            "generated_per_trained": case.generated_per_trained,
-        }
-    workload = split_workload_from_manifest(manifest).model_copy(update=update)
+        expected = ExpectedLengths(
+            prompt_tokens=case.row_tokens - case.decode_tokens,
+            generated_tokens_per_turn=case.decode_tokens / case.turns,
+            turns=case.turns,
+        )
+        update["generated_per_trained"] = case.generated_per_trained
+    workload = split_workload_from_manifest(
+        manifest, expected_lengths=expected
+    ).model_copy(update=update)
     split = choose_gpu_split(
         model,
         device,
@@ -764,8 +769,11 @@ class TestChooseGpuSplitCalibration:
 
     @pytest.mark.parametrize("case", MATCHED_LEARN_CASES, ids=_case_id)
     def test_learn_seconds_at_manifest_lengths_match_runs_that_computed_every_row(
-        self, case: CalibrationCase
+        self, case: CalibrationCase, pin_turn_tokens: Callable[[float], None]
     ) -> None:
+        # Arrange: a single-turn run generates its measured turn.
+        pin_turn_tokens(case.decode_tokens / case.turns)
+
         # Act
         split = _predicted_split(case, False)
 
@@ -776,8 +784,11 @@ class TestChooseGpuSplitCalibration:
 
     @pytest.mark.parametrize("case", ENGINE_BOUND_CASES, ids=lambda case: case.name)
     def test_generation_seconds_at_manifest_lengths_match_engine_bound_runs(
-        self, case: CalibrationCase
+        self, case: CalibrationCase, pin_turn_tokens: Callable[[float], None]
     ) -> None:
+        # Arrange: a single-turn run generates its measured turn.
+        pin_turn_tokens(case.decode_tokens / case.turns)
+
         # Act
         split = _predicted_split(case, False)
 

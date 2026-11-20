@@ -39,6 +39,7 @@ from agilerl.arena.memory.resolve.parallel import (
 )
 from agilerl.arena.memory.resolve.rollout import default_rollout_batch_size
 from agilerl.arena.memory.resolve.split import (
+    ExpectedLengths,
     GpuSplit,
     TrainerCost,
     choose_engine_width,
@@ -400,6 +401,7 @@ def resolve_run_memory(
     search_split: bool = True,
     search_cache: SearchCache | None = None,
     layout: ParallelLayout | None = None,
+    expected_lengths: ExpectedLengths | None = None,
 ) -> RunMemoryPlan:
     """Choose the training layout, GPU split and weight-sync mode, then the trainer memory plan.
 
@@ -430,6 +432,8 @@ def resolve_run_memory(
     :param search_cache: Plans and widths already priced for this manifest.
     :param layout: Training layout to search the split at alone; ``None``
         tries :func:`parallel_layouts`. Read only when the split is searched.
+    :param expected_lengths: Expected row lengths to price the split at;
+        ``None`` uses the generic defaults (:func:`split_workload_from_manifest`).
     :return: The plan.
     :raises ValueError: When the GPU cannot run LLM training, or the split is
         searched and none fits.
@@ -442,7 +446,9 @@ def resolve_run_memory(
         raise ValueError(unsupported)
     cache = SearchCache() if search_cache is None else search_cache
     if not search_split:
-        return _kept_run_memory(manifest, model, device, member_gpus, sync_link, cache)
+        return _kept_run_memory(
+            manifest, model, device, member_gpus, sync_link, cache, expected_lengths
+        )
     engine_widths = _searched_engine_widths(manifest, device, member_gpus, cache)
     fsdp = manifest_fsdp(manifest)
     teacher_gpus = teacher_engine_gpus(manifest.algorithm)
@@ -472,11 +478,20 @@ def resolve_run_memory(
                 sync_link,
                 cache,
                 require_buffer,
+                expected_lengths,
             )
             if plan is not None:
                 return plan
     raise _no_split_error(
-        manifest, placed, model, device, member_gpus, engine_widths, sync_link, cache
+        manifest,
+        placed,
+        model,
+        device,
+        member_gpus,
+        engine_widths,
+        sync_link,
+        cache,
+        expected_lengths,
     )
 
 
@@ -487,6 +502,7 @@ def _kept_run_memory(
     member_gpus: int,
     sync_link: SyncLink | None,
     cache: SearchCache,
+    expected_lengths: ExpectedLengths | None,
 ) -> RunMemoryPlan:
     """:func:`kept_split_memory` over the whole population's GPUs.
 
@@ -500,6 +516,7 @@ def _kept_run_memory(
         member_gpus * manifest.training.pop_size,
         sync_link,
         cache,
+        expected_lengths,
     )
     if kept is not None:
         return kept
@@ -570,6 +587,7 @@ def _no_split_error(
     engine_widths: list[int],
     sync_link: SyncLink | None,
     cache: SearchCache,
+    expected_lengths: ExpectedLengths | None,
 ) -> SplitSearchError:
     """Why no split fits, read at the least parallel layout: the manifest's own pins.
 
@@ -591,7 +609,7 @@ def _no_split_error(
         - teacher_engine_gpus(least.algorithm)
         + 1,
     )
-    workload = split_workload_from_manifest(least, not mode.merged)
+    workload = split_workload_from_manifest(least, not mode.merged, expected_lengths)
     reason = no_split_reason(workload, trainer_counts, plans)
     return SplitSearchError(
         f"No trainer / rollout-engine split of {member_gpus} "
@@ -616,6 +634,7 @@ def _plan_at_layout(
     sync_link: SyncLink | None,
     cache: SearchCache,
     require_buffer: bool,
+    expected_lengths: ExpectedLengths | None,
 ) -> RunMemoryPlan | None:
     """The plan in the sync mode :func:`pick_weight_sync` takes at ``placed``'s layout, or ``None``.
 
@@ -639,6 +658,7 @@ def _plan_at_layout(
             mode,
             cache,
             require_buffer,
+            expected_lengths,
         )
         if found is None:
             continue
@@ -671,6 +691,7 @@ def _split_at_layout(
     mode: WeightSyncMode,
     cache: SearchCache,
     require_buffer: bool,
+    expected_lengths: ExpectedLengths | None,
 ) -> RunMemoryPlan | None:
     """The fastest split at ``placed``'s layout in one sync mode, or ``None`` when none fits.
 
@@ -691,9 +712,9 @@ def _split_at_layout(
         accepted[trainers] = plan
         return TrainerCost.of(plan)
 
-    workload = split_workload_from_manifest(placed, not mode.merged).model_copy(
-        update={"sync_link": sync_link, "sync_transport": mode.transport}
-    )
+    workload = split_workload_from_manifest(
+        placed, not mode.merged, expected_lengths
+    ).model_copy(update={"sync_link": sync_link, "sync_transport": mode.transport})
     splits = [
         found
         for width in engine_widths
@@ -724,6 +745,7 @@ def kept_split_memory(
     total_gpus: int,
     sync_link: SyncLink | None,
     cache: SearchCache,
+    expected_lengths: ExpectedLengths | None = None,
 ) -> RunMemoryPlan | None:
     """The trainer plan and weight-sync mode at the manifest's trainer and engine counts.
 
@@ -745,6 +767,8 @@ def kept_split_memory(
     :param total_gpus: GPUs in the allocation.
     :param sync_link: Link the engines read synced weights over, or ``None``.
     :param cache: Plans already priced for this manifest.
+    :param expected_lengths: Expected row lengths to price the counts at;
+        ``None`` uses the generic defaults.
     :return: The plan with ``split`` ``None``, or ``None`` when no mode's plan
         fits at any layout.
     """
@@ -760,7 +784,14 @@ def kept_split_memory(
     for require_buffer in (True, False):
         for trial in placed:
             plan = _kept_plan_at_layout(
-                trial, model, device, total_gpus, sync_link, cache, require_buffer
+                trial,
+                model,
+                device,
+                total_gpus,
+                sync_link,
+                cache,
+                require_buffer,
+                expected_lengths,
             )
             if plan is not None:
                 return plan
@@ -774,12 +805,17 @@ def kept_weight_sync_mode(
     total_gpus: int,
     sync_link: SyncLink | None,
     cache: SearchCache,
+    expected_lengths: ExpectedLengths | None = None,
 ) -> WeightSyncMode:
     """The weight-sync mode :func:`kept_split_memory` picks; the first of :func:`weight_sync_modes` when no mode fits.
 
+    :param expected_lengths: Expected row lengths to price the counts at;
+        ``None`` uses the generic defaults.
     :return: Merged or adapter sync, and its transport.
     """
-    kept = kept_split_memory(manifest, model, device, total_gpus, sync_link, cache)
+    kept = kept_split_memory(
+        manifest, model, device, total_gpus, sync_link, cache, expected_lengths
+    )
     if kept is None:
         return weight_sync_modes(manifest, device, sync_link)[0]
     return WeightSyncMode(kept.merged_lora_sync, kept.weight_sync_transport)
@@ -793,6 +829,7 @@ def _kept_plan_at_layout(
     sync_link: SyncLink | None,
     cache: SearchCache,
     require_buffer: bool,
+    expected_lengths: ExpectedLengths | None,
 ) -> RunMemoryPlan | None:
     """The plan in the sync mode the kept counts take at ``placed``'s layout, or ``None`` when no mode fits.
 
@@ -828,6 +865,7 @@ def _kept_plan_at_layout(
                     sync_link,
                     mode,
                     TrainerCost.of(plan),
+                    expected_lengths,
                 )
             )
             is not None
@@ -862,6 +900,7 @@ def _kept_split(
     sync_link: SyncLink | None,
     mode: WeightSyncMode,
     trainer_cost: TrainerCost,
+    expected_lengths: ExpectedLengths | None,
 ) -> GpuSplit | None:
     """The kept counts at ``placed``'s layout priced with one sync in one mode, or None when they cannot be."""
     trial = placed.model_copy(deep=True)
@@ -883,7 +922,7 @@ def _kept_split(
     )
     if engines < 1:
         return None
-    workload = split_workload_from_manifest(trial, not mode.merged)
+    workload = split_workload_from_manifest(trial, not mode.merged, expected_lengths)
     workload = workload.model_copy(
         update={
             "sync_link": sync_link,
