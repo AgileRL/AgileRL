@@ -317,7 +317,13 @@ class TestSubmitPublish:
             "limits": {"memory": "177.5Gi"},
         }
         assert account.job_spec()["spec"]["volumes"] == [
-            {"name": "run", "source": "stage", "stageConfig": {"name": PREFIX}}
+            {
+                "name": "run",
+                "source": "stage",
+                "stageConfig": {"name": PREFIX},
+                "uid": 1000,
+                "gid": 100,
+            }
         ]
 
     def test_overrides_replace_the_run_settings(self) -> None:

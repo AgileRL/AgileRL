@@ -33,6 +33,7 @@ from agilerl.arena.snowflake.job import (
     service_logs_sql,
     service_status_sql,
     snowflake_identifier,
+    stage_volume,
 )
 from agilerl.arena.snowflake.source import (
     SnowflakeFiles,
@@ -621,9 +622,7 @@ def render_publish_spec(
                     "volumeMounts": [{"name": "run", "mountPath": RUN_MOUNT}],
                 }
             ],
-            "volumes": [
-                {"name": "run", "source": "stage", "stageConfig": {"name": run_prefix}}
-            ],
+            "volumes": [stage_volume(run_prefix)],
         }
     }
     text = yaml.safe_dump(spec, sort_keys=False)

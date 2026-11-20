@@ -529,6 +529,28 @@ class TestRolloutTopicRoute:
 
 
 class TestRenderSpec:
+    def test_every_role_mounts_the_run_stage_for_the_image_user(
+        self, tmp_path: Path
+    ) -> None:
+        settings = _settings()
+        trainer = trainer_ports(load_manifest(_write(tmp_path, _rl())), settings.gpus)
+        specs = [
+            render_broker_spec(settings, RUN_ID),
+            render_head_spec(settings, RUN_ID),
+            render_workers_spec(settings, RUN_ID, trainer),
+        ]
+
+        volumes = [yaml.safe_load(spec)["spec"]["volumes"][0] for spec in specs]
+
+        expected = {
+            "name": "run",
+            "source": "stage",
+            "stageConfig": {"name": f"@arena.training.runs/{RUN_ID}"},
+            "uid": 1000,
+            "gid": 100,
+        }
+        assert volumes == [expected, expected, expected]
+
     def test_broker_has_no_gpu_and_mounts_a_block_volume(self) -> None:
         spec = yaml.safe_load(render_broker_spec(_settings(), RUN_ID))
         container = spec["spec"]["containers"][0]
@@ -547,6 +569,8 @@ class TestRenderSpec:
         )
         assert block["name"] == "data"
         assert block["size"] == "1000Gi"
+        assert block["uid"] == 1000
+        assert block["gid"] == 100
         assert block["blockConfig"] == {"iops": 16000, "throughput": 1000}
         by_name = {item["name"]: item for item in spec["spec"]["endpoints"]}
         assert by_name["pulsar"] == {
@@ -1604,6 +1628,8 @@ class TestSubmitServices:
         block = next(
             item for item in broker["spec"]["volumes"] if item["source"] == "block"
         )
+        assert block["uid"] == 1000
+        assert block["gid"] == 100
         assert block["blockConfig"] == {"iops": 16000, "throughput": 1000}
         assert {"name": "data", "mountPath": "/pulsar-data"} in broker["spec"][
             "containers"
