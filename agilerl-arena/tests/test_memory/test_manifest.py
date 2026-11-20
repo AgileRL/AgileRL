@@ -1678,17 +1678,19 @@ class TestRunConfig:
         # one trainer GPU. NIXL double-buffers all 40 KiB of merged weights on
         # the trainer and holds them once on the engine. nccl_reshard has no
         # misc weights: the trainer stages the MLP block (3 x 2048) beside one
-        # fp32 copy of its largest weight, and the engine holds no bucket.
-        # Both sides hold the refit's NCCL groups.
+        # fp32 copy of its largest weight, plus a PACK slot of the full 32x64
+        # weight. The engine's measured groups swap their 2 GiB slot for it.
         merged = 2 * 2 * (4 * 32 * 32 + 3 * 32 * 64)
         assert reshard.training.merged_lora_sync is True
         assert reshard.generation.merged_lora_sync is True
         assert training_bytes(nixl, "lora_send_buffer") == 2 * merged
         assert generation_bytes(nixl, "lora_receive_buffer") == merged
         assert training_bytes(reshard, "lora_send_buffer") == (
-            2 * 3 * 2048 + 4 * 2048 + 2 * device.nccl_group_bytes
+            2 * 3 * 2048 + 4 * 2048 + 2 * 32 * 64 + 2 * device.nccl_group_bytes
         )
-        assert generation_bytes(reshard, "lora_receive_buffer") == 4300 * MiB
+        assert generation_bytes(reshard, "lora_receive_buffer") == (
+            4300 * MiB - 2 * GiB + 2 * 32 * 64
+        )
 
     def test_nccl_reshard_splits_for_the_sized_engine_width(self):
         # Arrange
@@ -1706,7 +1708,7 @@ class TestRunConfig:
         assert config.training.nccl_reshard_engine_tensor_parallel == 2
         assert config.generation.nccl_reshard_trainer_shards == 1
         assert generation_bytes(config, "lora_receive_buffer") == (
-            2 * 3 * 2 * 32 * 32 + 4300 * MiB
+            2 * 3 * 2 * 32 * 32 + 4300 * MiB - 2 * GiB + 2 * 32 * 64
         )
 
     def test_nccl_reshard_without_an_engine_config_reshards_into_one_gpu(self):
