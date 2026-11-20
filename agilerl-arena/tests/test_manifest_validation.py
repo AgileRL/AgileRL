@@ -73,6 +73,11 @@ from agilerl.arena.models.schema import (
     strip_non_form_algorithm_fields,
     training_then,
 )
+from agilerl.arena.models.verdict import (
+    HPO_UNAVAILABLE_MESSAGE,
+    hpo_fields,
+    verdict,
+)
 
 DQN = {
     "algorithm": {"name": "DQN", "lr": 0.001},
@@ -3678,3 +3683,84 @@ class TestAlgorithmHpSchemaBounds:
         validated = TrainingManifest.model_validate(GRPO)
 
         assert validated.algorithm.max_output_tokens is None
+
+
+HPO_MUTATION = {"probabilities": {"no_mut": 0.5, "rl_hp_mut": 0.5}}
+NO_OP_PROBABILITIES = {
+    "no_mut": 1.0,
+    "arch_mut": 0.0,
+    "new_layer": 0.0,
+    "params_mut": 0.0,
+    "act_mut": 0.0,
+    "rl_hp_mut": 0.0,
+}
+
+
+class TestHpoFields:
+    def test_hpo_flag_and_mutation_are_both_reported(self) -> None:
+        validated = TrainingManifest.model_validate(
+            manifest(DQN, training={"hpo": True}, mutation=HPO_MUTATION)
+        )
+
+        assert hpo_fields(validated) == ["training.hpo", "mutation"]
+
+    def test_hpo_flag_alone_is_reported(self) -> None:
+        validated = TrainingManifest.model_validate(
+            manifest(DQN, training={"hpo": True})
+        )
+
+        assert hpo_fields(validated) == ["training.hpo"]
+
+    def test_mutating_section_alone_is_reported(self) -> None:
+        validated = TrainingManifest.model_validate(
+            manifest(DQN, mutation=HPO_MUTATION)
+        )
+
+        assert hpo_fields(validated) == ["mutation"]
+
+    def test_rl_hp_selection_is_reported(self) -> None:
+        validated = TrainingManifest.model_validate(
+            manifest(
+                DQN,
+                mutation={
+                    "probabilities": NO_OP_PROBABILITIES,
+                    "rl_hp_selection": {"lr": {"min": 1e-4, "max": 1e-2}},
+                },
+            )
+        )
+
+        assert hpo_fields(validated) == ["mutation"]
+
+    @pytest.mark.parametrize(
+        "mutation",
+        [None, {}, {"probabilities": NO_OP_PROBABILITIES}],
+        ids=["absent", "empty", "no-op"],
+    )
+    def test_no_hpo_reports_nothing(self, mutation: dict | None) -> None:
+        document = manifest(DQN, training={"hpo": False})
+        if mutation is not None:
+            document["mutation"] = mutation
+
+        validated = TrainingManifest.model_validate(document)
+
+        assert hpo_fields(validated) == []
+
+
+class TestVerdictHpo:
+    def test_hpo_manifest_is_invalid(self) -> None:
+        result = verdict(manifest(DQN, training={"hpo": True}, mutation=HPO_MUTATION))
+
+        assert result["ok"] is False
+        assert [error["path"] for error in result["errors"]] == [
+            "training.hpo",
+            "mutation",
+        ]
+        assert {error["message"] for error in result["errors"]} == {
+            HPO_UNAVAILABLE_MESSAGE
+        }
+
+    def test_manifest_without_hpo_is_valid(self) -> None:
+        result = verdict(DQN)
+
+        assert result["ok"] is True
+        assert "errors" not in result
