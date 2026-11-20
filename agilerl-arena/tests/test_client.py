@@ -1165,45 +1165,20 @@ class TestValidateEnvironmentParams:
         assert payload["version"] == "v2"
         assert payload["entrypoint"] == "my_env:make"
 
-    def test_create_forwards_multi_agent(self, api_key_client, tmp_path):
+    def test_create_sends_a_language_based_env(self, api_key_client, tmp_path):
+        # Arrange
         archive = tmp_path / "env.tar.gz"
         archive.write_bytes(b"fake")
-        cfg = tmp_path / "env_config.yaml"
-        cfg.write_text("key: val")
-        reqs = tmp_path / "requirements.txt"
-        reqs.write_text("numpy")
-
         mock_stream = _mock_ndjson_stream()
         api_key_client._open_stream = MagicMock(return_value=mock_stream)
-        api_key_client.validate_environment(
-            name="MyEnv",
-            source=archive,
-            env_config=cfg,
-            requirements=reqs,
-            multi_agent=True,
-        )
-        call_kwargs = api_key_client._open_stream.call_args[1]
-        assert call_kwargs["data"]["multi_agent"] == "true"
 
-    def test_create_forwards_language_based(self, api_key_client, tmp_path):
-        archive = tmp_path / "env.tar.gz"
-        archive.write_bytes(b"fake")
-        cfg = tmp_path / "env_config.yaml"
-        cfg.write_text("key: val")
-        reqs = tmp_path / "requirements.txt"
-        reqs.write_text("numpy")
+        # Act
+        api_key_client.validate_environment(name="MyEnv", source=archive)
 
-        mock_stream = _mock_ndjson_stream()
-        api_key_client._open_stream = MagicMock(return_value=mock_stream)
-        api_key_client.validate_environment(
-            name="MyEnv",
-            source=archive,
-            env_config=cfg,
-            requirements=reqs,
-            language_based=True,
-        )
-        call_kwargs = api_key_client._open_stream.call_args[1]
-        assert call_kwargs["data"]["language_based"] == "true"
+        # Assert
+        data = api_key_client._open_stream.call_args[1]["data"]
+        assert data["language_based"] == "true"
+        assert "multi_agent" not in data
 
     def test_create_forwards_entrypoint(self, api_key_client, tmp_path):
         archive = tmp_path / "env.tar.gz"
@@ -1260,23 +1235,6 @@ class TestValidateEnvironmentParams:
 
 
 class TestCliV1EndpointPaths:
-    def test_profile_environment_uses_cli_v1_path(self, api_key_client):
-        mock_stream = _mock_ndjson_stream()
-        api_key_client._open_stream = MagicMock(return_value=mock_stream)
-        api_key_client.profile_environment(name="MyEnv", version="v1")
-        api_key_client._open_stream.assert_called_once_with(
-            "POST",
-            "/api/cli/v1/environments/profile",
-            json={"name": "MyEnv", "version": "v1"},
-            timeout=api_key_client._upload_timeout,
-        )
-
-    def test_profile_environment_sends_multi_agent(self, api_key_client):
-        mock_stream = _mock_ndjson_stream()
-        api_key_client._open_stream = MagicMock(return_value=mock_stream)
-        api_key_client.profile_environment(name="MyEnv", multi_agent=True)
-        assert api_key_client._open_stream.call_args[1]["json"]["multi_agent"] is True
-
     @patch("builtins.input", return_value="y")
     def test_delete_environment_uses_cli_v1_path(self, mock_input, api_key_client):
         api_key_client.list_environments = MagicMock(
@@ -2095,12 +2053,15 @@ class TestListExperimentMetricNames:
 
 class TestListResources:
     def test_calls_correct_endpoint(self, api_key_client):
-        api_key_client._request = MagicMock(return_value={"tiers": []})
+        body = {"gpuTypes": [{"gpuType": "l4", "gpusPerNode": [1], "devOnly": False}]}
+        api_key_client._request = MagicMock(return_value=body)
+
         result = api_key_client.list_resources()
+
         api_key_client._request.assert_called_once_with(
             "GET", "/api/cli/v1/resources/list"
         )
-        assert result == {"tiers": []}
+        assert result == body
 
 
 class TestDownloadExperimentMetrics:
@@ -2947,27 +2908,6 @@ class TestGetDefaultRunSpec:
             params={"algorithm": "GRPO", "datasetName": "countdown"},
         )
         assert result == spec
-
-    def test_gym_query_params(self, api_key_client):
-        api_key_client._request = MagicMock(return_value={"algorithm": {"name": "PPO"}})
-
-        api_key_client.get_default_run_spec(
-            "PPO",
-            gym_env="Space Invaders",
-            gym_env_version="v1",
-            gym_env_entrypoint="python3",
-        )
-
-        api_key_client._request.assert_called_once_with(
-            "GET",
-            "/api/cli/v1/experiments/run-spec/default",
-            params={
-                "algorithm": "PPO",
-                "gymEnv": "Space Invaders",
-                "gymEnvVersion": "v1",
-                "gymEnvEntrypoint": "python3",
-            },
-        )
 
     def test_omits_unset_optional_params(self, api_key_client):
         api_key_client._request = MagicMock(return_value={})

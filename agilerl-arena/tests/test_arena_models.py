@@ -1749,8 +1749,9 @@ class TestPydanticModelsForbidExtra:
         import agilerl.arena.inference as inference
         import agilerl.arena.models as models
 
-        # These parse a subset of inference JSON (results, title/created_by, success).
+        # These parse a subset of inference JSON (RL-only flags, results, title/created_by, success).
         wire_subset = {
+            "agilerl.arena.inference.agent.AgentInfo",
             "agilerl.arena.inference.agent.PredictResult",
             "agilerl.arena.inference.agent.SessionDetail",
             "agilerl.arena.inference.agent.SessionInfo",
