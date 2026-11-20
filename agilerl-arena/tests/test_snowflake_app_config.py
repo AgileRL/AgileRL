@@ -354,6 +354,21 @@ class TestRegisterReference:
             "SELECT SYSTEM$ADD_REFERENCE('SOURCE_VIEW', 'ref-''2')"
         ]
 
+    @pytest.mark.parametrize(
+        ("operation", "statement"),
+        [
+            ("ADD", "SELECT SYSTEM$SET_REFERENCE('EXPORT_STAGE', 'ref-1')"),
+            ("REMOVE", "SELECT SYSTEM$REMOVE_REFERENCE('EXPORT_STAGE', 'ref-1')"),
+            ("CLEAR", "SELECT SYSTEM$REMOVE_ALL_REFERENCES('EXPORT_STAGE')"),
+        ],
+    )
+    def test_export_stage_holds_one_stage(self, operation: str, statement: str) -> None:
+        session = FakeSession()
+
+        register_reference(session, "export_stage", operation, "ref-1")
+
+        assert session.statements == [statement]
+
     def test_refuses_an_unknown_reference(self) -> None:
         session = FakeSession()
 

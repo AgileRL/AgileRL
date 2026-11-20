@@ -85,7 +85,7 @@ class TestManifest:
             for name in entry
         )
 
-    def test_references_are_select_on_table_or_view(self) -> None:
+    def test_references_read_a_table_or_view_and_write_one_stage(self) -> None:
         references = {
             name: spec
             for entry in MANIFEST["references"]
@@ -100,7 +100,9 @@ class TestManifest:
         assert shapes == {
             "source_table": ("TABLE", ["SELECT"]),
             "source_view": ("VIEW", ["SELECT"]),
+            "export_stage": ("STAGE", ["READ", "WRITE"]),
         }
+        assert references["export_stage"].get("multi_valued", False) is False
 
 
 class TestSetupScriptExternalAccess:
@@ -204,7 +206,7 @@ class TestSnowflakeProject:
             "app_code/arena_app.py",
         ]
         assert shipped == modules
-        assert len(procedures) == 13
+        assert len(procedures) == 14
         assert imports == {
             (
                 "'/app_code/arena_app.py', '/app_code/app_billing.py', "
@@ -315,6 +317,7 @@ class TestSetupScriptObjects:
             ),
             "endpoint": (["STRING", "STRING"], "app_user"),
             "unpublish": (["STRING", "STRING", "BOOLEAN"], "app_admin"),
+            "export_model": (["STRING", "NUMBER"], "app_admin"),
             "reconcile_now": ([], "app_admin"),
         }
         assert {name: args for name, (args, _role) in granted.items()} == {
@@ -635,5 +638,5 @@ class TestSetupScriptTrial:
 
         # Assert
         assert {"src": "app_code/app_trial.py", "dest": "app_code/"} in artifacts
-        assert len(procedures) == 13
+        assert len(procedures) == 14
         assert all("'/app_code/app_trial.py'" in p for p in procedures)
