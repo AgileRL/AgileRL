@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -45,6 +46,7 @@ from agilerl.arena.inference.cache import (
     save_binding,
 )
 from agilerl.arena.models import (
+    MANIFEST_REGISTRY,
     FinetuningNetworkSpec,
     LLMAlgorithmSpec,
     TrainingManifest,
@@ -151,6 +153,87 @@ def _idempotency_headers(key: str | None) -> dict[str, str]:
     if not stripped:
         return {}
     return {"Idempotency-Key": stripped}
+
+
+def _environment_is_rollout(
+    document: dict[str, Any], environment: dict[str, Any]
+) -> bool:
+    """Return whether validation treats this environment as a rollout.
+
+    :param document: Manifest document that holds the algorithm section.
+    :param environment: The document's environment mapping.
+    :return: True when ``env_type`` is rollout, or omitted and the algorithm's is.
+    """
+    if "env_type" in environment:
+        return environment["env_type"] == "rollout"
+    algorithm = document.get("algorithm")
+    name = algorithm.get("name") if isinstance(algorithm, dict) else None
+    if not isinstance(name, str):
+        return False
+    try:
+        spec_cls = MANIFEST_REGISTRY.get(name)
+    except KeyError:
+        # get_validated reports an unknown algorithm name.
+        return False
+    return spec_cls.env_type == "rollout"
+
+
+def _with_reward_file_path(
+    manifest: str | Path | dict[str, Any],
+    reward_file: str | os.PathLike[str] | bytes | None,
+) -> str | Path | dict[str, Any]:
+    """Return a manifest whose rollout rubric path names ``reward_file``.
+
+    :param manifest: Training manifest as a YAML/JSON file path or a dict.
+    :param reward_file: The reward module being uploaded, or None.
+    :return: The manifest with an omitted rollout rubric path set to the upload
+        basename (``reward.py`` for bytes). An omitted ``env_type`` is the
+        algorithm's. ``manifest`` itself when there is no reward file.
+    :raises ArenaValidationError: When the manifest is not a mapping, or its
+        rubric path names a different file than ``reward_file``.
+    """
+    if reward_file is None:
+        return manifest
+    document = copy.deepcopy(TrainingManifest.load(manifest))
+    if not isinstance(document, dict):
+        msg = f"The manifest must be a mapping, not {type(document).__name__}."
+        raise ArenaValidationError(
+            msg,
+            sdk_hint="Pass a manifest whose top level is a mapping of sections.",
+            cli_hint="Use a manifest file whose top level is a mapping of sections.",
+        )
+    environment = document.get("environment")
+    if not isinstance(environment, dict):
+        return document
+    field = next(
+        (
+            name
+            for name in ("rubric_file_path", "reward_file_path")
+            if environment.get(name) is not None
+        ),
+        None,
+    )
+    if isinstance(reward_file, bytes):
+        upload_name = "reward.py"
+    else:
+        upload_name = Path(os.fspath(reward_file)).name
+    if field is None:
+        if _environment_is_rollout(document, environment):
+            environment["rubric_file_path"] = upload_name
+        return document
+    manifest_name = Path(str(environment[field])).name
+    # Raw bytes carry no filename to compare, so the manifest's name stands.
+    if not isinstance(reward_file, bytes) and manifest_name != upload_name:
+        msg = (
+            f"environment.{field} names {manifest_name!r} but the reward file "
+            f"is {upload_name!r}."
+        )
+        raise ArenaValidationError(
+            msg,
+            sdk_hint=f"Drop environment.{field} or pass the file it names as reward_file.",
+            cli_hint=f"Drop environment.{field} or pass the file it names to --reward-file.",
+        )
+    return document
 
 
 def _check_writable_target(path: Path) -> None:
@@ -1170,7 +1253,9 @@ class ArenaClient:
         :param experiment_name: The name of the experiment to submit.
         :type experiment_name: str | None
         :param reward_file: Python rubric or reward module scoring a rollout job.
-            When set, the request is sent as ``multipart/form-data``.
+            When set, the request is sent as ``multipart/form-data`` and a
+            rollout manifest without ``environment.rubric_file_path`` gets the
+            file's basename (``reward.py`` for bytes).
         :type reward_file: str | os.PathLike[str] | bytes | None
         :param completion: Optional model completion for reward validation.
             When omitted, the server uses the reference answer from the first
@@ -1179,10 +1264,13 @@ class ArenaClient:
         :param idempotency_key: Reuse this key to replay the same submit instead
             of starting another job. The key is org-wide.
         :type idempotency_key: str | None
-        :raises ArenaValidationError: When ``num_gpus`` is below 1, or the
-            manifest turns on HPO.
+        :raises ArenaValidationError: When ``num_gpus`` is below 1, the manifest
+            turns on HPO, or the manifest's rubric path names a different file
+            than ``reward_file``.
         """
-        validated, resolved_project = self._checked_submit(manifest, num_gpus, project)
+        validated, resolved_project = self._checked_submit(
+            manifest, num_gpus, project, reward_file
+        )
         return self._send_submit(
             manifest=validated,
             project=resolved_project,
@@ -1200,15 +1288,19 @@ class ArenaClient:
         manifest: str | Path | dict[str, Any],
         num_gpus: int | None,
         project: str | None,
+        reward_file: str | os.PathLike[str] | bytes | None,
     ) -> tuple[dict[str, Any], str]:
         """Run every client-side submit check; every submit command calls this first.
 
         :param manifest: Training manifest as a file path, YAML string or dict.
         :param num_gpus: Total GPUs requested, or ``None``.
         :param project: Project name, or ``None`` for the default project.
+        :param reward_file: Reward module the submit uploads, or ``None``. It
+            fills an unset rollout ``environment.rubric_file_path``.
         :return: The validated manifest payload and the resolved project name.
         """
         self._check_num_gpus(num_gpus)
+        manifest = _with_reward_file_path(manifest, reward_file)
         training_manifest = TrainingManifest.get_validated(manifest, mode="python")
         self._check_no_hpo(training_manifest)
         self._check_model_status(training_manifest)
