@@ -674,10 +674,9 @@ class TestCrossSectionConsistency:
         with pytest.raises(ValidationError, match="apiVersion"):
             TrainingManifest.model_validate({**DQN, "apiVersion": "agilerl.com/v99"})
 
-    @pytest.mark.parametrize("replay_buffer", [None, {"max_size": 64}])
-    def test_async_rollout_requires_the_llm_rollout_buffer(self, replay_buffer) -> None:
+    def test_async_rollout_rejects_the_rl_replay_buffer(self) -> None:
         # The rollout engines queue their groups in the LLM deque; the
-        # RL buffer (or none) has nowhere to put them.
+        # RL buffer has nowhere to put them.
         broken = manifest(
             GRPO,
             environment={
@@ -693,9 +692,33 @@ class TestCrossSectionConsistency:
                 "rollout_engines_per_agent": 1,
             },
         )
-        broken["replay_buffer"] = replay_buffer
+        broken["replay_buffer"] = {"max_size": 64}
         with pytest.raises(ValidationError, match="LLMRolloutBufferSpec"):
             TrainingManifest.model_validate(broken)
+
+    def test_async_rollout_defaults_a_missing_buffer_to_the_llm_rollout_buffer(
+        self,
+    ) -> None:
+        payload = manifest(
+            GRPO,
+            environment={
+                "env_type": "rollout",
+                "factory": "gem:make",
+                "entrypoint": "game:Sudoku-v0",
+                "dataset": None,
+                "reward_file_path": None,
+                "prompt_template": None,
+            },
+            training={
+                "rollout_mode": "async",
+                "rollout_engines_per_agent": 1,
+            },
+        )
+
+        validated = TrainingManifest.model_validate(payload)
+
+        assert validated.replay_buffer == LLMRolloutBufferSpec()
+        assert validated.to_payload()["replay_buffer"]["kind"] == "llm"
 
     def test_async_rollout_accepts_the_llm_rollout_buffer(self) -> None:
         payload = manifest(
