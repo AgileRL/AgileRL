@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 
 import click
 import pytest
+from pydantic import ValidationError
 from rich.console import Console
 
 from agilerl.arena import output as output_module
@@ -26,6 +27,7 @@ from agilerl.arena.exceptions import (
     ArenaTrainingError,
     ArenaValidationError,
 )
+from agilerl.arena.models import TrainingManifest
 from agilerl.arena.output import (
     CANCEL,
     DOWN,
@@ -572,6 +574,82 @@ class TestHandleError:
         err = RuntimeError("unexpected")
         with pytest.raises(RuntimeError, match="unexpected"):
             handle_error(err)
+
+    def test_invalid_manifest_prints_each_field_and_exits_1(self, capsys):
+        # Arrange
+        err = _invalid_manifest_error()
+
+        # Act
+        with pytest.raises(click.exceptions.Exit) as exc_info:
+            handle_error(err)
+
+        # Assert
+        assert exc_info.value.exit_code == 1
+        stderr = capsys.readouterr().err
+        assert "Error: The manifest is invalid." in stderr
+        assert (
+            "algorithm.lr: Input should be a valid number, unable to parse string "
+            "as a number" in stderr
+        )
+        assert "Traceback" not in stderr
+
+    def test_invalid_manifest_drops_the_value_error_prefix(self, capsys):
+        err = _validation_error(
+            {
+                "algorithm": {"name": "GRPO"},
+                "environment": {"env_type": "rollout"},
+                "network": {"pretrained_model_name_or_path": "org/model"},
+                "training": {"max_steps": 10},
+            }
+        )
+
+        with pytest.raises(click.exceptions.Exit):
+            handle_error(err)
+
+        stderr = capsys.readouterr().err
+        assert (
+            "environment.rollout: A rollout environment needs exactly one source"
+            in (" ".join(stderr.split()))
+        )
+        assert "Value error," not in stderr
+
+    def test_invalid_manifest_json_keeps_every_pydantic_error(self, capsys):
+        ctx = click.Context(click.Command("arena"))
+        ctx.meta[output_module.JSON_OUTPUT_META_KEY] = True
+
+        with ctx, pytest.raises(click.exceptions.Exit):
+            handle_error(_invalid_manifest_error())
+
+        assert json.loads(capsys.readouterr().err) == {
+            "error": "The manifest is invalid.",
+            "type": "ValidationError",
+            "errors": [
+                {
+                    "path": "algorithm.lr",
+                    "message": "Input should be a valid number, unable to parse "
+                    "string as a number",
+                    "kind": "float_parsing",
+                }
+            ],
+        }
+
+
+def _validation_error(document: dict) -> ValidationError:
+    """The pydantic error :class:`TrainingManifest` raises for *document*."""
+    with pytest.raises(ValidationError) as caught:
+        TrainingManifest.model_validate(document)
+    return caught.value
+
+
+def _invalid_manifest_error() -> ValidationError:
+    """A pydantic error for a DQN manifest whose learning rate is not a number."""
+    return _validation_error(
+        {
+            "algorithm": {"name": "DQN", "lr": "fast"},
+            "environment": {"name": "CartPole-v1"},
+            "training": {"max_steps": 10},
+        }
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -649,9 +649,11 @@ class TrainingManifest(BaseModel):
 
     @model_validator(mode="after")
     def _check_async_rollout_buffer(self) -> Self:
-        """Async rollout queues generated groups, so it needs the LLM buffer."""
+        """Async rollout queues generated groups, so it needs the LLM buffer; default it when unset."""
         if not self.training.async_rollout:
             return self
+        if self.replay_buffer is None:
+            self.replay_buffer = LLMRolloutBufferSpec()
         if not isinstance(self.replay_buffer, LLMRolloutBufferSpec):
             got = (
                 type(self.replay_buffer).__name__
