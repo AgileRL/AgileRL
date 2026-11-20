@@ -12,8 +12,10 @@ checkpoints dequantize to the load dtype on both this path and
 
 from __future__ import annotations
 
+import copy
 import json
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from concurrent.futures import Future
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
@@ -332,6 +334,45 @@ def converter_checkpoint_routes(
             route.sources.append((pattern, checkpoint_key))
             break
     return routes
+
+
+def convert_checkpoint_route(
+    route: ConverterRoute,
+    sources: Sequence[tuple[str, str]],
+    key_files: Mapping[str, str],
+    config: PretrainedConfig | None,
+) -> dict[str, torch.Tensor]:
+    """Read ``sources`` from the safetensors files and run the route's converter on them.
+
+    :param route: Converter and the target it is named by.
+    :type route: ConverterRoute
+    :param sources: ``(pattern, key)`` pairs to read, all of ``route.sources``
+        or the subset for some experts.
+    :type sources: Sequence[tuple[str, str]]
+    :param key_files: Stored checkpoint key to safetensors path.
+    :type key_files: Mapping[str, str]
+    :param config: Config the converter operations read.
+    :type config: PretrainedConfig | None
+    :return: Converted tensor per target name.
+    :rtype: dict[str, torch.Tensor]
+    """
+    keys_by_path: dict[str, list[str]] = {}
+    for _, key in sources:
+        keys_by_path.setdefault(key_files[key], []).append(key)
+    tensors: dict[str, torch.Tensor] = {}
+    for path, path_keys in keys_by_path.items():
+        with safe_open(path, framework="pt", device="cpu") as handle:
+            tensors.update((key, handle.get_tensor(key)) for key in path_keys)
+    converter = copy.deepcopy(route.converter)
+    for pattern, key in sources:
+        loaded: Future[torch.Tensor] = Future()
+        loaded.set_result(tensors.pop(key))
+        converter.add_tensor(route.target, key, pattern, loaded)
+    converted = converter.convert(route.target, config=config)
+    return {
+        target: tensor[0] if isinstance(tensor, list) else tensor
+        for target, tensor in converted.items()
+    }
 
 
 def match_checkpoint_key(

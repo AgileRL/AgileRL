@@ -8,9 +8,10 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
-from collections.abc import Generator, Iterable, Sequence
+from collections.abc import Callable, Container, Generator, Iterable, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Literal
 
@@ -32,9 +33,27 @@ from safetensors.torch import load_file, save_file
 from torch import nn
 from torch.distributed.tensor import DTensor
 from transformers import AutoConfig, PreTrainedModel
+from transformers.core_model_loading import revert_weight_conversion
 from transformers.pytorch_utils import Conv1D
-from transformers.tokenization_utils_base import PreTrainedTokenizerBase
-from transformers.utils import SAFE_WEIGHTS_INDEX_NAME, SAFE_WEIGHTS_NAME, cached_file
+from transformers.tokenization_utils_base import (
+    ADDED_TOKENS_FILE,
+    FULL_TOKENIZER_FILE,
+    SPECIAL_TOKENS_MAP_FILE,
+    TOKENIZER_CONFIG_FILE,
+    PreTrainedTokenizerBase,
+)
+from transformers.utils import (
+    CHAT_TEMPLATE_FILE,
+    CONFIG_NAME,
+    GENERATION_CONFIG_NAME,
+    IMAGE_PROCESSOR_NAME,
+    LEGACY_PROCESSOR_CHAT_TEMPLATE_FILE,
+    PROCESSOR_NAME,
+    SAFE_WEIGHTS_INDEX_NAME,
+    SAFE_WEIGHTS_NAME,
+    VIDEO_PROCESSOR_NAME,
+    cached_file,
+)
 
 from agilerl.architectures import trainer_model_class
 from agilerl.arena.memory.formulas import DEFAULT_ROUTED_CHUNK_BYTES
@@ -45,6 +64,14 @@ from agilerl.distributed import (
     raise_on_any_rank,
 )
 from agilerl.distributed.fsdp import canonical_fsdp_param_fqn
+from agilerl.distributed.fsdp_meta import (
+    ConverterRoute,
+    build_safetensors_key_files,
+    checkpoint_quantization_config,
+    convert_checkpoint_route,
+    converter_checkpoint_routes,
+    dequantizing_transform_groups,
+)
 from agilerl.distributed.tensor_parallel import (
     tensor_parallel_row_orders,
     tensor_rows_in_order,
@@ -96,66 +123,6 @@ class ParamLoraMerged:
 ExportItem = ModuleCopy | ModuleLoraMerged | ParamLoraMerged
 
 
-class BaseWeightStore:
-    """Lazy CPU tensors from a safetensors Hugging Face checkpoint."""
-
-    def __init__(self, key_files: dict[str, str]) -> None:
-        self.key_files = key_files
-
-    @classmethod
-    def from_checkpoint(cls, model_path: str | Path) -> BaseWeightStore:
-        """Index ``model.safetensors`` or a sharded weight map under ``model_path``."""
-        source = str(model_path)
-        index_file = cached_file(
-            source,
-            SAFE_WEIGHTS_INDEX_NAME,
-            _raise_exceptions_for_missing_entries=False,
-        )
-        if index_file is not None:
-            weight_map = json.loads(Path(index_file).read_text(encoding="utf-8"))[
-                "weight_map"
-            ]
-            key_files: dict[str, str] = {}
-            shard_paths: dict[str, str] = {}
-            for key, filename in weight_map.items():
-                if filename not in shard_paths:
-                    shard = cached_file(
-                        source,
-                        filename,
-                        _raise_exceptions_for_missing_entries=False,
-                    )
-                    if shard is None:
-                        msg = f"Replay export missing shard {filename} under {source}"
-                        raise FileNotFoundError(msg)
-                    shard_paths[filename] = shard
-                key_files[key] = shard_paths[filename]
-            return cls(key_files)
-
-        weights_file = cached_file(
-            source,
-            SAFE_WEIGHTS_NAME,
-            _raise_exceptions_for_missing_entries=False,
-        )
-        if weights_file is None:
-            msg = f"Replay export needs safetensors weights under {source}"
-            raise FileNotFoundError(msg)
-        with safe_open(weights_file, framework="pt") as handle:
-            return cls(dict.fromkeys(handle.keys(), weights_file))
-
-    def has(self, key: str) -> bool:
-        """Return whether ``key`` is in the checkpoint."""
-        return key in self.key_files
-
-    def load(self, key: str) -> torch.Tensor:
-        """Load one tensor onto CPU. Does not cache."""
-        path = self.key_files.get(key)
-        if path is None:
-            msg = f"Checkpoint has no tensor {key!r}"
-            raise KeyError(msg)
-        with safe_open(path, framework="pt", device="cpu") as handle:
-            return handle.get_tensor(key)
-
-
 def export_merged_pretrained(
     output_dir: str | Path,
     *,
@@ -171,7 +138,9 @@ def export_merged_pretrained(
 
     Live-model shape: pass ``model`` (a PEFT-wrapped causal LM, or a value-head
     wrapper whose ``pretrained_model`` is PEFT). Replay shape: pass ``adapter_path``
-    (the ``actor/`` PEFT directory) and ``base_model_name_or_path``.
+    (the ``actor/`` PEFT directory) and ``base_model_name_or_path``; the merge
+    keeps the base checkpoint's tensor names, files and quantization, so it
+    loads wherever the base checkpoint does.
 
     :param output_dir: Directory for ``config.json``, safetensors, optional
         tokenizer / ``generation_config.json``, ``arena_artifact_manifest.json``,
@@ -180,8 +149,11 @@ def export_merged_pretrained(
     :param adapter_path: Saved PEFT adapter directory for replay.
     :param base_model_name_or_path: Base model id or local HF directory for replay.
     :param adapter_name: PEFT adapter to fold in, defaults to ``actor``.
-    :param max_shard_size: Hugging Face shard budget (``"5GB"`` default).
-    :param torch_dtype: Dtype of written weights, defaults to ``bfloat16``.
+    :param max_shard_size: Hugging Face shard budget (``"5GB"`` default); replay
+        keeps the base checkpoint's files.
+    :param torch_dtype: Dtype of written weights, defaults to ``bfloat16``;
+        replay of a quantized checkpoint keeps its stored dtypes unless the
+        adapter changes a quantized tensor, which dequantizes the checkpoint.
     :param tokenizer: Optional tokenizer written beside the weights.
     """
     try:
@@ -199,26 +171,19 @@ def export_merged_pretrained(
                 max_shard_size=max_shard_size,
                 torch_dtype=torch_dtype,
                 tokenizer=tokenizer,
-                weight_store=None,
             )
             return
         if adapter_path is not None:
             if base_model_name_or_path is None:
                 msg = "Replay export requires base_model_name_or_path with adapter_path"
                 raise ValueError(msg)
-            replay_model, weight_store = _load_replay_peft(
-                adapter_path=adapter_path,
-                base_model_name_or_path=base_model_name_or_path,
-                adapter_name=adapter_name,
-            )
-            _export_live_model(
-                replay_model,
-                output_dir=output_dir,
-                adapter_name=adapter_name,
-                max_shard_size=max_shard_size,
-                torch_dtype=torch_dtype,
-                tokenizer=tokenizer,
-                weight_store=weight_store,
+            _export_replay(
+                Path(output_dir),
+                adapter_path,
+                str(base_model_name_or_path),
+                adapter_name,
+                torch_dtype,
+                tokenizer,
             )
             return
         if base_model_name_or_path is not None:
@@ -288,17 +253,308 @@ def merged_export_is_complete(merged_dir: str | Path) -> bool:
 
 def _load_replay_peft(
     adapter_path: str | Path,
-    base_model_name_or_path: str | Path,
+    base_model_name_or_path: str,
     adapter_name: str,
-) -> tuple[nn.Module, BaseWeightStore]:
-    """Build a meta PEFT skeleton and a store for on-demand base tensors."""
-    config = AutoConfig.from_pretrained(str(base_model_name_or_path))
+) -> PreTrainedModel:
+    """Build a meta skeleton of the base with the saved adapter injected, its weights on CPU."""
+    config = AutoConfig.from_pretrained(base_model_name_or_path)
     adapter_config = PeftConfig.from_pretrained(str(adapter_path))
     with init_empty_weights(include_buffers=True):
-        base = trainer_model_class(str(base_model_name_or_path)).from_config(config)
+        base = trainer_model_class(base_model_name_or_path).from_config(config)
         peft_model = get_peft_model(base, adapter_config, adapter_name=adapter_name)
     _assign_adapter_weights(peft_model, adapter_path, adapter_name)
-    return peft_model, BaseWeightStore.from_checkpoint(base_model_name_or_path)
+    return base
+
+
+def _export_replay(
+    output_dir: Path,
+    adapter_path: str | Path,
+    base_model_name_or_path: str,
+    adapter_name: str,
+    torch_dtype: torch.dtype,
+    tokenizer: PreTrainedTokenizerBase | None,
+) -> None:
+    """Copy the base checkpoint's tensors under their stored names, adding the adapter's deltas.
+
+    Each delta is computed under the module's name and mapped onto the stored
+    keys with the model's weight conversions reversed, as ``save_pretrained``
+    does. A delta on a quantized tensor dequantizes the whole checkpoint. One
+    base file is read and written at a time.
+    """
+    if not is_main_process():
+        return
+    pretrained = _load_replay_peft(adapter_path, base_model_name_or_path, adapter_name)
+    key_files = build_safetensors_key_files(base_model_name_or_path)
+    quantization = checkpoint_quantization_config(pretrained.config.to_dict())
+    routes = (
+        converter_checkpoint_routes(
+            key_files, dequantizing_transform_groups([("", [])], quantization)
+        )
+        if quantization is not None
+        else {}
+    )
+    delta_specs = _replay_delta_specs(pretrained, adapter_name)
+    delta_keys = _stored_delta_keys(
+        pretrained, delta_specs, key_files.keys() | routes.keys()
+    )
+    dequantize = any(key in routes for key in delta_keys)
+    outputs = _replay_outputs(key_files, routes if dequantize else {})
+    unstored = sorted(key for key in delta_keys if key not in outputs)
+    if unstored:
+        msg = (
+            f"Adapter {adapter_name!r} changes tensors {base_model_name_or_path} "
+            f"does not store: {', '.join(unstored[:8])}"
+        )
+        raise ValueError(msg)
+
+    if output_dir.is_dir():
+        shutil.rmtree(output_dir)
+    output_dir.mkdir(parents=True)
+    _write_replay_files(
+        output_dir,
+        pretrained,
+        key_files,
+        outputs,
+        delta_specs,
+        delta_keys,
+        torch_dtype if quantization is None or dequantize else None,
+    )
+    pretrained.config.save_pretrained(output_dir)
+    if dequantize:
+        _drop_quantization_config(output_dir / CONFIG_NAME)
+    _copy_base_files(base_model_name_or_path, output_dir)
+    if tokenizer is not None:
+        tokenizer.save_pretrained(output_dir)
+    write_merged_completeness_files(output_dir)
+
+
+def _write_replay_files(
+    output_dir: Path,
+    pretrained: PreTrainedModel,
+    key_files: dict[str, str],
+    outputs: dict[str, tuple[str, ConverterRoute | None]],
+    delta_specs: dict[str, ReplayDelta],
+    delta_keys: dict[str, str],
+    cast_dtype: torch.dtype | None,
+) -> None:
+    """Write each base file's tensors with the adapter's deltas added, then the index.
+
+    :param cast_dtype: Floating-point dtype for every written tensor, or ``None`` to keep stored dtypes.
+    """
+    pending: dict[str, dict[str, torch.Tensor]] = {}
+    weight_map: dict[str, str] = {}
+    total_size = 0
+    for path in sorted({path for path, _ in outputs.values()}):
+        tensors: dict[str, torch.Tensor] = {}
+        with safe_open(path, framework="pt", device="cpu") as handle:
+            for key, (key_path, route) in outputs.items():
+                if key_path != path:
+                    continue
+                if route is None:
+                    tensors[key] = handle.get_tensor(key)
+                else:
+                    tensors[key] = convert_checkpoint_route(
+                        route, route.sources, key_files, pretrained.config
+                    )[key]
+        for key, tensor in tensors.items():
+            if key in delta_keys:
+                delta = _pop_stored_delta(
+                    pretrained,
+                    delta_specs[delta_keys[key]],
+                    delta_keys[key],
+                    key,
+                    pending,
+                )
+                tensors[key] = _add_delta(
+                    key, tensor, delta, cast_dtype or tensor.dtype
+                )
+            elif cast_dtype is not None and tensor.is_floating_point():
+                tensors[key] = tensor.to(cast_dtype)
+        filename = Path(path).name
+        save_file(tensors, str(output_dir / filename))
+        weight_map.update(dict.fromkeys(tensors, filename))
+        total_size += sum(
+            tensor.numel() * tensor.element_size() for tensor in tensors.values()
+        )
+        del tensors
+
+    if set(weight_map.values()) != {SAFE_WEIGHTS_NAME}:
+        index = {"metadata": {"total_size": total_size}, "weight_map": weight_map}
+        (output_dir / SAFE_WEIGHTS_INDEX_NAME).write_text(
+            json.dumps(index, indent=2), encoding="utf-8"
+        )
+
+
+def _copy_base_files(base_model_name_or_path: str, output_dir: Path) -> None:
+    """Copy the base's generation config, processor and tokenizer files that it has."""
+    # vLLM builds a vision-language model's processor, tokenizer included, from the model directory.
+    base_files = (
+        GENERATION_CONFIG_NAME,
+        PROCESSOR_NAME,
+        IMAGE_PROCESSOR_NAME,
+        VIDEO_PROCESSOR_NAME,
+        CHAT_TEMPLATE_FILE,
+        LEGACY_PROCESSOR_CHAT_TEMPLATE_FILE,
+        FULL_TOKENIZER_FILE,
+        TOKENIZER_CONFIG_FILE,
+        SPECIAL_TOKENS_MAP_FILE,
+        ADDED_TOKENS_FILE,
+        "tokenizer.model",
+    )
+    for name in base_files:
+        path = cached_file(
+            base_model_name_or_path,
+            name,
+            _raise_exceptions_for_missing_entries=False,
+        )
+        if path is not None:
+            shutil.copyfile(path, output_dir / name)
+
+
+@dataclass(frozen=True)
+class ReplayDelta:
+    """The adapter's change to one module-named weight or bias, computed on demand."""
+
+    shape: tuple[int, ...]
+    compute: Callable[[], torch.Tensor]
+
+
+def _replay_delta_specs(
+    pretrained: PreTrainedModel, adapter_name: str
+) -> dict[str, ReplayDelta]:
+    """Module-named weights and biases ``adapter_name`` changes."""
+    specs: dict[str, ReplayDelta] = {}
+    for spec in _collect_export_specs(pretrained, adapter_name):
+        if isinstance(spec, ModuleCopy):
+            continue
+        shape = _full_shape(spec.reference)
+        if isinstance(spec, ParamLoraMerged):
+            if adapter_name in spec.wrapper.lora_A:
+                specs[spec.hf_name] = ReplayDelta(
+                    shape, partial(_param_delta, spec.wrapper, adapter_name)
+                )
+            continue
+        if spec.part == "weight":
+            if _adapter_on_layer(spec.layer, adapter_name):
+                specs[spec.hf_name] = ReplayDelta(
+                    shape, partial(_delta_weight, spec.layer, adapter_name)
+                )
+            continue
+        bias = _lora_bias(spec.layer, adapter_name)
+        if bias is not None:
+            scaling = spec.layer.scaling[adapter_name]
+            specs[spec.hf_name] = ReplayDelta(
+                shape, partial(torch.mul, bias.detach(), scaling)
+            )
+    return specs
+
+
+def _stored_delta_keys(
+    pretrained: PreTrainedModel,
+    delta_specs: dict[str, ReplayDelta],
+    stored: Container[str],
+) -> dict[str, str]:
+    """Stored checkpoint key to the module-named weight whose delta it receives.
+
+    A weight maps to its reverted names, or to its own name when the checkpoint
+    stores it that way (packed experts saved in the in-memory layout).
+    """
+    delta_keys: dict[str, str] = {}
+    for hf_name, delta in delta_specs.items():
+        meta = {hf_name: torch.empty(delta.shape, device="meta")}
+        reverted = list(revert_weight_conversion(pretrained, meta))
+        if hf_name in stored and not all(key in stored for key in reverted):
+            reverted = [hf_name]
+        for key in reverted:
+            delta_keys[key] = hf_name
+    return delta_keys
+
+
+def _replay_outputs(
+    key_files: dict[str, str], routes: dict[str, ConverterRoute]
+) -> dict[str, tuple[str, ConverterRoute | None]]:
+    """Written key to the base file it goes beside, and the dequantize route that builds it."""
+    consumed = {key for route in routes.values() for _, key in route.sources}
+    outputs: dict[str, tuple[str, ConverterRoute | None]] = {
+        key: (path, None) for key, path in key_files.items() if key not in consumed
+    }
+    for target, route in routes.items():
+        outputs[target] = (key_files[route.sources[0][1]], route)
+    return outputs
+
+
+def _pop_stored_delta(
+    pretrained: PreTrainedModel,
+    delta: ReplayDelta,
+    hf_name: str,
+    key: str,
+    pending: dict[str, dict[str, torch.Tensor]],
+) -> torch.Tensor:
+    """The fp32 delta for stored ``key``; the other stored keys of ``hf_name`` wait in ``pending``."""
+    if key == hf_name:
+        return delta.compute().float()
+    if hf_name not in pending:
+        pending[hf_name] = revert_weight_conversion(
+            pretrained, {hf_name: delta.compute().float()}
+        )
+    stored = pending[hf_name]
+    value = stored.pop(key)
+    if not stored:
+        del pending[hf_name]
+    return value
+
+
+def _param_delta(wrapper: ParamWrapper, adapter_name: str) -> torch.Tensor:
+    """fp32 LoRA delta of a wrapped parameter from its factors; the base may be meta."""
+    weight_a = wrapper.lora_A[adapter_name].get_parameter("weight").float()
+    weight_b = wrapper.lora_B[adapter_name].get_parameter("weight").float()
+    scaling = wrapper.scaling[adapter_name]
+    n_experts = wrapper.num_experts
+    if n_experts == 1:
+        return weight_b @ weight_a * scaling
+    # PEFT's stacked layouts: A is [E*r, in] or [E, r, in]; B is [out, E*r] or [out, r, E].
+    weight_a = weight_a.reshape(n_experts, -1, weight_a.shape[-1])
+    weight_b = weight_b.reshape(weight_b.shape[0], -1, n_experts).permute(2, 0, 1)
+    delta = torch.bmm(weight_b, weight_a) * scaling
+    return delta if wrapper._did_swap_in_out_features else delta.mT
+
+
+def _lora_bias(
+    layer: Linear | Embedding | Conv1d | Conv2d | Conv3d, adapter_name: str
+) -> torch.Tensor | None:
+    """The LoRA B bias ``adapter_name`` trains on ``layer``, if any."""
+    if adapter_name not in layer.lora_B:
+        return None
+    lora_b = layer.lora_B[adapter_name]
+    if isinstance(lora_b, nn.Linear) and isinstance(lora_b.bias, torch.Tensor):
+        return lora_b.bias
+    return None
+
+
+def _add_delta(
+    key: str, base: torch.Tensor, delta: torch.Tensor, dtype: torch.dtype
+) -> torch.Tensor:
+    """``base + delta`` in fp32, cast once to ``dtype``."""
+    if not base.is_floating_point() or base.element_size() == 1:
+        msg = f"Cannot add a LoRA delta to {base.dtype} tensor {key!r}"
+        raise ValueError(msg)
+    if tuple(base.shape) != tuple(delta.shape):
+        msg = (
+            f"LoRA delta for {key!r} has shape {tuple(delta.shape)}, "
+            f"the stored tensor {tuple(base.shape)}"
+        )
+        raise ValueError(msg)
+    return (base.float() + delta).to(dtype)
+
+
+def _drop_quantization_config(config_path: Path) -> None:
+    """Remove ``quantization_config`` from a written ``config.json`` and its text config."""
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config.pop("quantization_config", None)
+    text_config = config.get("text_config")
+    if isinstance(text_config, dict):
+        text_config.pop("quantization_config", None)
+    config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
 
 
 def _adapter_checkpoint_key(param_name: str, adapter_name: str) -> str:
@@ -440,7 +696,6 @@ def _export_live_model(
     max_shard_size: str | int,
     torch_dtype: torch.dtype,
     tokenizer: PreTrainedTokenizerBase | None,
-    weight_store: BaseWeightStore | None = None,
 ) -> None:
     """Merge ``adapter_name`` layer-wise from a live PEFT module into ``output_dir``."""
     peft_model = _as_peft_model(model)
@@ -454,7 +709,7 @@ def _export_live_model(
             f"got {type(pretrained).__name__}"
         )
         raise TypeError(msg)
-    specs = _collect_export_specs(pretrained, adapter_name, weight_store)
+    specs = _collect_export_specs(pretrained, adapter_name)
     shard_plan = _plan_shards(specs, max_shard_size)
     hf_row_orders = {
         id(model.get_parameter(fqn)): torch.argsort(order)
@@ -477,7 +732,6 @@ def _export_live_model(
                 hf_row_orders,
                 torch_dtype=torch_dtype,
                 keep_tensors=is_main,
-                weight_store=weight_store,
             )
             if is_main:
                 save_file(shard_tensors, str(output_path / filename))
@@ -512,7 +766,6 @@ def _export_live_model(
 def _collect_export_specs(
     pretrained: PreTrainedModel,
     adapter_name: str,
-    weight_store: BaseWeightStore | None = None,
 ) -> list[ExportItem]:
     """Build the HF-name → source list without materialising parameter values."""
     lora_prefixes = tuple(
@@ -564,12 +817,6 @@ def _collect_export_specs(
             continue
         name = canonical_fsdp_param_fqn(live_name)
         if name in tied or name in seen:
-            continue
-        if (
-            weight_store is not None
-            and tensor.device.type == "meta"
-            and not weight_store.has(name)
-        ):
             continue
         specs.append(ModuleCopy(name, tensor))
         seen.add(name)
@@ -737,21 +984,11 @@ def _merged_weight_and_bias(
     bias_tensor = _base_bias(base_layer)
     bias: torch.Tensor | None = None
     if bias_tensor is not None:
-        bias_tensor = tensor_rows_in_order(_dense_local(bias_tensor), bias_order)
-        if adapter_name in layer.lora_B:
-            lora_b_mod = layer.lora_B[adapter_name]
-            if isinstance(lora_b_mod, nn.Linear) and isinstance(
-                lora_b_mod.bias, torch.Tensor
-            ):
-                scaling = layer.scaling[adapter_name]
-                bias = (
-                    bias_tensor.detach()
-                    + _dense_local(lora_b_mod.bias).detach() * scaling
-                )
-            else:
-                bias = bias_tensor.detach()
-        else:
-            bias = bias_tensor.detach()
+        bias = tensor_rows_in_order(_dense_local(bias_tensor), bias_order).detach()
+        lora_bias = _lora_bias(layer, adapter_name)
+        if lora_bias is not None:
+            scaling = layer.scaling[adapter_name]
+            bias = bias + _dense_local(lora_bias).detach() * scaling
     return weight, bias
 
 
@@ -777,23 +1014,6 @@ def _merged_param(
     return base + delta.to(dtype=base.dtype)
 
 
-@contextmanager
-def _param_from_store(
-    spec: ParamLoraMerged, weight_store: BaseWeightStore | None
-) -> Generator[None, None, None]:
-    """Temporarily place the checkpoint tensor on a meta wrapped parameter."""
-    base_layer = spec.wrapper.get_base_layer()
-    name = spec.wrapper.parameter_name
-    if weight_store is None or base_layer.get_parameter(name).device.type != "meta":
-        yield
-        return
-    previous = _replace_tensor(base_layer, name, weight_store.load(spec.hf_name))
-    try:
-        yield
-    finally:
-        setattr(base_layer, name, previous)
-
-
 def _dense_local(tensor: torch.Tensor) -> torch.Tensor:
     """Plain tensor for one parameter; ``full_tensor`` if it is still a DTensor."""
     if isinstance(tensor, DTensor):
@@ -815,65 +1035,17 @@ def _copy_to_cpu(tensor: torch.Tensor, torch_dtype: torch.dtype) -> torch.Tensor
     return copied
 
 
-def _merged_checkpoint_names(hf_name: str) -> tuple[str, str | None]:
-    """Base checkpoint keys for the wrapped layer's weight and bias."""
-    if hf_name == "weight" or hf_name.endswith(".weight"):
-        stem = hf_name[: -len("weight")].rstrip(".")
-        return hf_name, f"{stem}.bias" if stem else "bias"
-    if hf_name == "bias" or hf_name.endswith(".bias"):
-        stem = hf_name[: -len("bias")].rstrip(".")
-        return (f"{stem}.weight" if stem else "weight"), hf_name
-    return hf_name, None
-
-
-@contextmanager
-def _base_layer_from_store(
-    layer: Linear | Embedding | Conv1d | Conv2d | Conv3d,
-    spec: ModuleLoraMerged,
-    weight_store: BaseWeightStore | None,
-) -> Generator[None, None, None]:
-    """Temporarily place checkpoint tensors on a meta base layer."""
-    if weight_store is None:
-        yield
-        return
-    base_layer = _as_lora_base(layer)
-    weight_name, bias_name = _merged_checkpoint_names(spec.hf_name)
-    restored: list[tuple[nn.Module, str, object]] = []
-    weight = base_layer.weight
-    if weight.device.type == "meta":
-        previous = _replace_tensor(base_layer, "weight", weight_store.load(weight_name))
-        restored.append((base_layer, "weight", previous))
-    bias = _base_bias(base_layer)
-    if (
-        bias is not None
-        and bias.device.type == "meta"
-        and bias_name is not None
-        and weight_store.has(bias_name)
-    ):
-        previous = _replace_tensor(base_layer, "bias", weight_store.load(bias_name))
-        restored.append((base_layer, "bias", previous))
-    try:
-        yield
-    finally:
-        for module, attr, previous in restored:
-            setattr(module, attr, previous)
-
-
 def _copied_tensor(
     spec: ModuleCopy,
     hf_row_orders: dict[int, torch.Tensor],
     torch_dtype: torch.dtype,
     keep_tensors: bool,
-    weight_store: BaseWeightStore | None,
 ) -> torch.Tensor | None:
     """Gather one non-LoRA tensor in HF row order; the CPU copy, or ``None`` when not kept."""
-    source = spec.tensor
-    if source.device.type == "meta":
-        if weight_store is None:
-            msg = f"Cannot copy meta tensor {spec.hf_name} without a weight store"
-            raise RuntimeError(msg)
-        source = weight_store.load(spec.hf_name)
-    with materialize_dtensors(source) as gathered:
+    if spec.tensor.device.type == "meta":
+        msg = f"Cannot export meta tensor {spec.hf_name}"
+        raise RuntimeError(msg)
+    with materialize_dtensors(spec.tensor) as gathered:
         dense = gathered[0]
         if dense is None:
             msg = f"gathered tensor for {spec.hf_name} is missing"
@@ -891,7 +1063,6 @@ def _materialize_shard(
     *,
     torch_dtype: torch.dtype,
     keep_tensors: bool,
-    weight_store: BaseWeightStore | None = None,
 ) -> dict[str, torch.Tensor]:
     """Gather and merge one safetensors file: one module (or tensor) at a time.
 
@@ -908,9 +1079,7 @@ def _materialize_shard(
     for hf_name in hf_names:
         spec = by_name[hf_name]
         if isinstance(spec, ModuleCopy):
-            copied = _copied_tensor(
-                spec, hf_row_orders, torch_dtype, keep_tensors, weight_store
-            )
+            copied = _copied_tensor(spec, hf_row_orders, torch_dtype, keep_tensors)
             if copied is not None:
                 shard[hf_name] = copied
             continue
@@ -921,11 +1090,10 @@ def _materialize_shard(
             with gather_params(
                 wrapper, _param_gather_params(wrapper, spec.adapter_name)
             ):
-                with _param_from_store(spec, weight_store):
-                    merged = _merged_param(wrapper, spec.adapter_name, order)
-                    if keep_tensors:
-                        shard[hf_name] = _copy_to_cpu(merged, torch_dtype)
-                    del merged
+                merged = _merged_param(wrapper, spec.adapter_name, order)
+                if keep_tensors:
+                    shard[hf_name] = _copy_to_cpu(merged, torch_dtype)
+                del merged
             continue
 
         layer_id = id(spec.layer)
@@ -941,19 +1109,18 @@ def _materialize_shard(
             )
             layer_params = _layer_gather_params(spec.layer)
             with gather_params(spec.layer, layer_params):
-                with _base_layer_from_store(spec.layer, spec, weight_store):
-                    weight, bias = _merged_weight_and_bias(
-                        spec.layer,
-                        spec.adapter_name,
-                        weight_order,
-                        bias_order,
-                        delta_order,
+                weight, bias = _merged_weight_and_bias(
+                    spec.layer,
+                    spec.adapter_name,
+                    weight_order,
+                    bias_order,
+                    delta_order,
+                )
+                if keep_tensors:
+                    merged_cpu[layer_id] = (
+                        _copy_to_cpu(weight, torch_dtype),
+                        None if bias is None else _copy_to_cpu(bias, torch_dtype),
                     )
-                    if keep_tensors:
-                        merged_cpu[layer_id] = (
-                            _copy_to_cpu(weight, torch_dtype),
-                            None if bias is None else _copy_to_cpu(bias, torch_dtype),
-                        )
             gathered_layers.add(layer_id)
         if not keep_tensors:
             continue
