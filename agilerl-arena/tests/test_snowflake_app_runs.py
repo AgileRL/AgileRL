@@ -23,6 +23,7 @@ from snowflake_app.app_code.arena_app import (
     IMAGE,
     cancel,
     endpoint,
+    export_model,
     logs,
     publish,
     status,
@@ -1238,6 +1239,120 @@ class TestUnpublish:
             unpublish(session, "qwen", "checkpoint_2", False)
 
         assert not any(s.startswith("DROP") for s in session.statements)
+
+
+REFERENCES_QUERY = "SELECT SYSTEM$GET_ALL_REFERENCES('EXPORT_STAGE') AS REFS"
+
+
+def export_session(bound: bool = True, install: Install | None = None) -> AppSession:
+    """A run with merged exports at steps 2 and 4, and ``export_stage`` bound or not."""
+    listing = [
+        Row(name=f"runs/{RUN_ID}/job.json", size=10),
+        Row(name=f"runs/{RUN_ID}/checkpoint_2/merged/model.safetensors", size=2**30),
+        Row(name=f"runs/{RUN_ID}/checkpoint_2/merged/.complete", size=0),
+        Row(name=f"runs/{RUN_ID}/checkpoint_4/merged/model.safetensors", size=2**30),
+        Row(name=f"runs/{RUN_ID}/checkpoint_4/merged/config.json", size=100),
+        Row(name=f"runs/{RUN_ID}/checkpoint_4/merged/.complete", size=0),
+        Row(name=f"runs/{RUN_ID}/checkpoint_6/model.safetensors", size=2**30),
+    ]
+    copied = [
+        Row(file="model.safetensors"),
+        Row(file="config.json"),
+        Row(file=".complete"),
+    ]
+    return AppSession(
+        [
+            exact(REFERENCES_QUERY, [Row(REFS='["ref-1"]' if bound else "[]")]),
+            known(),
+            exact(f"LIST {RUN_DIR}/", listing),
+            (lambda s: s.startswith("COPY FILES INTO "), copied),
+        ],
+        install=install,
+    )
+
+
+def copies(session: AppSession) -> list[str]:
+    return [s for s in session.statements if s.startswith("COPY FILES")]
+
+
+class TestExportModel:
+    def test_copies_the_newest_merged_checkpoint_to_the_bound_stage(self) -> None:
+        session = export_session()
+
+        text = export_model(session, RUN_ID, None)
+
+        assert copies(session) == [
+            (
+                "COPY FILES INTO @reference('EXPORT_STAGE')/"
+                f"{RUN_ID}/checkpoint_4/ FROM {RUN_DIR}/checkpoint_4/merged/"
+            )
+        ]
+        assert text == (
+            f"checkpoint: checkpoint_4\npath: {RUN_ID}/checkpoint_4/\nfiles: 3"
+        )
+
+    def test_copies_the_checkpoint_of_the_given_step(self) -> None:
+        session = export_session()
+
+        text = export_model(session, RUN_ID, 2)
+
+        assert copies(session) == [
+            (
+                "COPY FILES INTO @reference('EXPORT_STAGE')/"
+                f"{RUN_ID}/checkpoint_2/ FROM {RUN_DIR}/checkpoint_2/merged/"
+            )
+        ]
+        assert text.startswith("checkpoint: checkpoint_2\n")
+
+    def test_starts_nothing_and_records_no_usage(self) -> None:
+        session = export_session()
+
+        export_model(session, RUN_ID, None)
+
+        assert executes(session) == []
+        assert not any(
+            "usage_items" in s or s.startswith("ALTER TASK") for s in session.statements
+        )
+
+    def test_exports_after_an_unpurchased_trial_ends(self) -> None:
+        session = export_session(install=listing_trial(age_days=8))
+
+        text = export_model(session, RUN_ID, None)
+
+        assert text.startswith("checkpoint: checkpoint_4\n")
+        assert len(copies(session)) == 1
+
+    def test_refuses_when_no_stage_is_bound(self) -> None:
+        session = export_session(bound=False)
+
+        with pytest.raises(ValueError, match="No stage is bound to export_stage"):
+            export_model(session, RUN_ID, None)
+
+        assert copies(session) == []
+
+    def test_refuses_a_run_the_app_does_not_have(self) -> None:
+        session = AppSession([exact(REFERENCES_QUERY, [Row(REFS='["ref-1"]')])])
+
+        with pytest.raises(ValueError, match=f"This app has no run {RUN_ID}"):
+            export_model(session, RUN_ID, None)
+
+        assert copies(session) == []
+
+    def test_refuses_a_step_without_a_merged_export(self) -> None:
+        session = export_session()
+
+        with pytest.raises(ValueError, match="checkpoint 6 has no complete merged/"):
+            export_model(session, RUN_ID, 6)
+
+        assert copies(session) == []
+
+    def test_refuses_a_malformed_run_id(self) -> None:
+        session = export_session()
+
+        with pytest.raises(ValueError, match="run"):
+            export_model(session, "../other", None)
+
+        assert copies(session) == []
 
 
 class TestRunProcedureStatements:
