@@ -15,8 +15,22 @@ from agilerl.arena.models import __version__
 
 CLIENT_VERSION_HEADER = "X-Arena-Client-Version"
 CLIENT_UPDATE_HEADER = "X-Arena-Client-Update"
+UPGRADE_REQUIRED_ERROR = "client_upgrade_required"
 UPGRADE_COMMAND = "pip install -U agilerl-arena"
 SNOWFLAKE_UPGRADE_COMMAND = 'pip install -U "agilerl-arena[snowflake]"'
+
+
+def is_upgrade_required(status_code: int, raw: str) -> bool:
+    """Whether a response is Arena refusing this agilerl-arena release.
+
+    :param status_code: HTTP status.
+    :param raw: Response body.
+    :return: ``True`` for a 426 whose ``error`` is ``client_upgrade_required``.
+    """
+    if status_code != httpx.codes.UPGRADE_REQUIRED:
+        return False
+    body = ArenaAPIError._parse_body(raw)
+    return body is not None and body.get("error") == UPGRADE_REQUIRED_ERROR
 
 
 def upgrade_required_message(raw: str) -> str:

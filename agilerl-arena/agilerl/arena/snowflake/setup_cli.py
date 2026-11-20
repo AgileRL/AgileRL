@@ -29,6 +29,7 @@ from agilerl.arena.snowflake.catalog import one_line, use_arena_warehouse
 from agilerl.arena.snowflake.license import (
     DEFAULT_BASE_URL,
     SnowflakeLicenseError,
+    SnowflakeUpgradeRequiredError,
     arena_api_base_url,
 )
 from agilerl.arena.snowflake.profile import (
@@ -60,6 +61,7 @@ from agilerl.arena.snowflake.session import (
 from agilerl.arena.snowflake.setup import SetupRequest, print_setup_sql, run_setup
 from agilerl.arena.snowflake.source import SnowflakeSession
 from agilerl.arena.snowflake.teardown import run_teardown
+from agilerl.arena.upgrade import offer_upgrade
 
 RERUN_SETUP = "Re-run arena snowflake setup."
 
@@ -95,6 +97,9 @@ def cli_errors(hint: str | None) -> Iterator[None]:
     """
     try:
         yield
+    except SnowflakeUpgradeRequiredError as exc:
+        offer_upgrade(str(exc), snowflake=True)
+        raise click.ClickException(str(exc)) from exc
     except (ValueError, ImportError, SnowflakeLicenseError) as exc:
         raise click.ClickException(str(exc)) from exc
     except sql_errors() as exc:

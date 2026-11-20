@@ -25,10 +25,13 @@ from agilerl.arena.memory.cli import (
     EXIT_OK,
     EXIT_OVER_BUDGET,
     EXIT_USAGE,
+    EstimateUsageError,
     SolveRequest,
     _load_model_config,
     _model_spec_from_checkpoint,
     checkpoint_param_count,
+    estimate_manifest,
+    json_report,
     main,
     memory_group,
     solve_main,
@@ -1228,3 +1231,99 @@ class TestMainQueueWarning:
         # Assert
         assert code == EXIT_OK
         assert "generation may queue" in capsys.readouterr().out
+
+
+class TestEstimateManifest:
+    def test_sizes_a_manifest_document(self, manifest_path):
+        # Act
+        outcome = estimate_manifest(
+            copy.deepcopy(MANIFEST), device_gb=24, config_path=TINY_CONFIG
+        )
+
+        # Assert
+        assert (
+            outcome.estimate
+            == estimate_manifest(
+                manifest_path, device_gb=24, config_path=TINY_CONFIG
+            ).estimate
+        )
+
+    def test_an_invalid_document_is_a_usage_error(self):
+        doc = copy.deepcopy(MANIFEST)
+        doc["algorithm"]["micro_batch_size_per_gpu"] = 1
+
+        with pytest.raises(
+            EstimateUsageError,
+            match=r"could not validate the manifest: .*micro_batch_size_per_gpu",
+        ):
+            estimate_manifest(doc, device_gb=24, config_path=TINY_CONFIG)
+
+    def test_no_device_is_a_usage_error(self):
+        with pytest.raises(EstimateUsageError, match="Pass --gpu with a GPU type"):
+            estimate_manifest(copy.deepcopy(MANIFEST), config_path=TINY_CONFIG)
+
+    def test_catalog_only_refuses_a_local_checkpoint(self, tmp_path):
+        # Arrange
+        (tmp_path / "config.json").write_text(Path(TINY_CONFIG).read_text())
+        doc = copy.deepcopy(MANIFEST)
+        doc["network"]["pretrained_model_name_or_path"] = str(tmp_path)
+
+        # Act / Assert
+        with pytest.raises(EstimateUsageError, match="is not a supported model"):
+            estimate_manifest(doc, device_gb=24, catalog_only=True)
+
+    def test_catalog_only_sizes_from_the_catalog_not_a_local_checkpoint(
+        self, tmp_path, monkeypatch
+    ):
+        # Arrange: a broken local config shadows the catalog id.
+        model_id = MANIFEST["network"]["pretrained_model_name_or_path"]
+        local = tmp_path / model_id
+        local.mkdir(parents=True)
+        (local / "config.json").write_text("{}")
+        monkeypatch.chdir(tmp_path)
+
+        # Act
+        outcome = estimate_manifest(
+            copy.deepcopy(MANIFEST), device_gb=24, catalog_only=True
+        )
+
+        # Assert
+        assert outcome.config.model.model_id == model_id
+        with pytest.raises(EstimateUsageError, match="model config is missing"):
+            estimate_manifest(copy.deepcopy(MANIFEST), device_gb=24)
+
+    @pytest.mark.parametrize("field", ["num_gpus", "gpus_per_node"])
+    def test_a_gpu_count_below_one_is_a_usage_error(self, field):
+        with pytest.raises(
+            EstimateUsageError, match=f"{field} must be at least 1, got 0."
+        ):
+            estimate_manifest(
+                copy.deepcopy(MANIFEST),
+                device_gb=24,
+                config_path=TINY_CONFIG,
+                **{field: 0},
+            )
+
+
+class TestJsonReport:
+    def test_matches_the_json_flag(self, manifest_path, capsys):
+        # Arrange
+        code = main(manifest_path, config_path=TINY_CONFIG, device_gb=24, as_json=True)
+        printed = json.loads(capsys.readouterr().out)
+
+        # Act
+        report_code, report = json_report(
+            estimate_manifest(manifest_path, device_gb=24, config_path=TINY_CONFIG)
+        )
+
+        # Assert
+        assert report_code == code == EXIT_OK
+        assert json.loads(json.dumps(report)) == printed
+
+    def test_over_budget_exits_three(self, oversize_path):
+        code, report = json_report(
+            estimate_manifest(oversize_path, device_gb=1, config_path=TINY_CONFIG)
+        )
+
+        assert code == EXIT_OVER_BUDGET
+        assert report["fits"] is False

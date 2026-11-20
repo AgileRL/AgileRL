@@ -23,10 +23,15 @@ from agilerl.arena.auth import (
     oauth_access_token_expires_at,
     validate_partner_credentials,
 )
-from agilerl.arena.client_version import CLIENT_VERSION_HEADER, print_update_notice
+from agilerl.arena.client_version import (
+    CLIENT_VERSION_HEADER,
+    is_upgrade_required,
+    print_update_notice,
+)
 from agilerl.arena.exceptions import (
     ArenaAPIError,
     ArenaAuthError,
+    ArenaClientUpgradeRequiredError,
     ArenaConfigError,
     ArenaInferenceError,
     ArenaTrainingError,
@@ -38,15 +43,15 @@ from agilerl.arena.inference.cache import (
     normalized_deployment_name,
     save_binding,
 )
-from agilerl.arena.memory.manifest import (
-    explicit_colocated_rollout,
-    validated_run_manifest,
-)
 from agilerl.arena.models import (
     FinetuningNetworkSpec,
     LLMAlgorithmSpec,
     TrainingManifest,
     __version__,
+)
+from agilerl.arena.models.manifest import (
+    explicit_colocated_rollout,
+    validated_run_manifest,
 )
 from agilerl.arena.models.model_info import SUPPORTED_MODEL_INFO
 from agilerl.arena.models.traces import TRACES_DATASET_FORMAT, validate_traces_file
@@ -168,6 +173,22 @@ def _check_writable_target(path: Path) -> None:
         msg = f"Cannot write to {path}: {parent} is not a directory."
         raise NotADirectoryError(msg)
     parent.mkdir(parents=True, exist_ok=True)
+
+
+def _response_error(
+    error_cls: type[ArenaAPIError], raw: str, status_code: int
+) -> ArenaAPIError:
+    """Build the error for a non-2xx Arena response.
+
+    :param error_cls: Error class for this path.
+    :param raw: Response body.
+    :param status_code: HTTP status.
+    :return: :class:`ArenaClientUpgradeRequiredError` when Arena refuses this
+        release, otherwise ``error_cls``.
+    """
+    if is_upgrade_required(status_code, raw):
+        error_cls = ArenaClientUpgradeRequiredError
+    return error_cls.from_response_body(raw, status_code=status_code)
 
 
 class ArenaClient:
@@ -2362,8 +2383,7 @@ class ArenaClient:
         # Handle non-success responses.
         if not resp.is_success:
             raw = self._read_response_body(resp, stream=stream)
-            error_cls = self._error_class(path)
-            raise error_cls.from_response_body(raw, status_code=resp.status_code)
+            raise _response_error(self._error_class(path), raw, resp.status_code)
 
         return resp
 
@@ -2482,8 +2502,7 @@ class ArenaClient:
             return None
 
         if not resp.is_success:
-            raw = resp.text
-            raise ArenaAPIError.from_response_body(raw, status_code=resp.status_code)
+            raise _response_error(ArenaAPIError, resp.text, resp.status_code)
 
         try:
             envelope = resp.json()

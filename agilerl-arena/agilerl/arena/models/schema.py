@@ -13,7 +13,6 @@ from typing import Any, cast, get_args
 
 from pydantic import AliasChoices, BaseModel
 
-from agilerl.arena.memory.resolve.rollout import async_rollout_algorithm
 from agilerl.arena.models.algorithms import (
     AlgoSpec,
     GRPOSpec,
@@ -27,6 +26,7 @@ from agilerl.arena.models.algorithms.sft import SFTSpec
 from agilerl.arena.models.env import ENV_POD_DEFAULT_CPUS, LLMEnvType
 from agilerl.arena.models.hpo import require_mutation_range_inside_field
 from agilerl.arena.models.manifest import API_VERSION, TrainingManifest, _is_numeric
+from agilerl.arena.models.manifest_rules import async_rollout_algorithm
 from agilerl.arena.models.registry import MANIFEST_REGISTRY
 
 SCHEMA_ID = "https://schemas.agilerl.com/training-manifest/v1.json"
