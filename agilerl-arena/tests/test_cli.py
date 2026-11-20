@@ -367,6 +367,20 @@ class TestManifestCommands:
         assert result.exit_code == 1
         assert "not a registered algorithm" in result.output
 
+    def test_validate_rejects_hpo(self, runner):
+        result = runner.invoke(
+            main,
+            ["manifest", "validate", "-"],
+            input=(
+                "algorithm: {name: DQN}\n"
+                "environment: {name: CartPole-v1}\n"
+                "training: {hpo: true}\n"
+            ),
+        )
+
+        assert result.exit_code == 1
+        assert "training.hpo: HPO is no longer available in Arena" in result.output
+
     def test_validate_lists_algorithm_aliases_once(self, runner):
         result = runner.invoke(
             main,
