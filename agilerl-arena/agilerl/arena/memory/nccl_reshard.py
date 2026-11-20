@@ -53,13 +53,15 @@ def refit_buffer_component(
             "misc_bucket": refit.misc_bucket,
             "misc_module": refit.misc_module,
             "misc_fp32_copy": refit.misc_fp32_copy,
+            "pack_slot": refit.pack_slot,
             "communicators": communicators,
         },
         note=(
             "Main rank, the larger of two phases: the largest bulk block's "
             "merged local shards with one fp32 merge temp, then the misc "
             "bucket with the largest misc module gathered whole and its "
-            "fp32 merge copy. Plus the NCCL memory of the refit's bulk and "
-            "misc groups, outside the caching allocator."
+            "fp32 merge copy. Plus one PACK staging slot of the largest bulk "
+            "local shard on every rank, and the NCCL memory of the refit's "
+            "bulk and misc groups, both outside the caching allocator."
         ),
     )
