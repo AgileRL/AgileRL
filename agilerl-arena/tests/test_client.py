@@ -2173,6 +2173,226 @@ class TestExperimentMethods:
         assert result == [{"step": 100}]
 
 
+def _rubric_rollout_manifest() -> dict:
+    """A GSM8K rollout naming ``RUBRIC`` but no rubric file."""
+    manifest = _grpo_manifest("org/untracked-model")
+    manifest["environment"] = {
+        "env_type": "rollout",
+        "dataset": "gsm8k",
+        "rubric_name": "RUBRIC",
+        "prompt_template": {
+            "system_0": "You are a helpful assistant.",
+            "user_1": "{question}",
+        },
+    }
+    return manifest
+
+
+class TestArenaClientSubmitExperimentRewardFile:
+    def test_fills_rubric_path_from_reward_file(self, api_key_client, tmp_path):
+        # Arrange
+        reward_path = tmp_path / "gsm8k_rubric.py"
+        reward_path.write_text("RUBRIC = None\n")
+        manifest = _rubric_rollout_manifest()
+        api_key_client._open_stream = MagicMock(
+            return_value=_mock_ndjson_stream({"job_id": 7})
+        )
+
+        # Act
+        result = api_key_client.submit_experiment(
+            manifest=manifest, project="proj", reward_file=reward_path
+        )
+
+        # Assert
+        assert result == {"job_id": 7}
+        files = dict(api_key_client._open_stream.call_args[1]["files"])
+        environment = json.loads(files["manifest"][1])["environment"]
+        assert environment["rubric_file_path"] == "gsm8k_rubric.py"
+        assert environment["rubric_name"] == "RUBRIC"
+        assert files["reward_file"][0] == "gsm8k_rubric.py"
+        assert "rubric_file_path" not in manifest["environment"]
+
+    def test_fills_placeholder_for_reward_bytes(self, api_key_client):
+        api_key_client._open_stream = MagicMock(
+            return_value=_mock_ndjson_stream({"job_id": 8})
+        )
+
+        api_key_client.submit_experiment(
+            manifest=_rubric_rollout_manifest(),
+            project="proj",
+            reward_file=b"RUBRIC = None\n",
+        )
+
+        files = dict(api_key_client._open_stream.call_args[1]["files"])
+        environment = json.loads(files["manifest"][1])["environment"]
+        assert environment["rubric_file_path"] == "reward.py"
+        assert files["reward_file"][0] == "reward.py"
+
+    def test_keeps_manifest_path_for_reward_bytes(self, api_key_client):
+        manifest = _rubric_rollout_manifest()
+        manifest["environment"]["rubric_file_path"] = "rubrics/gsm8k.py"
+        api_key_client._open_stream = MagicMock(
+            return_value=_mock_ndjson_stream({"job_id": 9})
+        )
+
+        api_key_client.submit_experiment(
+            manifest=manifest, project="proj", reward_file=b"RUBRIC = None\n"
+        )
+
+        files = dict(api_key_client._open_stream.call_args[1]["files"])
+        environment = json.loads(files["manifest"][1])["environment"]
+        assert environment["rubric_file_path"] == "rubrics/gsm8k.py"
+
+    def test_accepts_matching_basename(self, api_key_client, tmp_path):
+        reward_path = tmp_path / "reward.py"
+        reward_path.write_text("RUBRIC = None\n")
+        manifest = _rubric_rollout_manifest()
+        manifest["environment"]["reward_file_path"] = "./local/reward.py"
+        api_key_client._open_stream = MagicMock(
+            return_value=_mock_ndjson_stream({"job_id": 10})
+        )
+
+        result = api_key_client.submit_experiment(
+            manifest=manifest, project="proj", reward_file=reward_path
+        )
+
+        assert result == {"job_id": 10}
+
+    def test_rejects_mismatched_basename(self, api_key_client, tmp_path):
+        reward_path = tmp_path / "other.py"
+        reward_path.write_text("RUBRIC = None\n")
+        manifest = _rubric_rollout_manifest()
+        manifest["environment"]["rubric_file_path"] = "reward.py"
+        api_key_client._open_stream = MagicMock()
+
+        with pytest.raises(
+            ArenaValidationError,
+            match=r"rubric_file_path names 'reward.py' but the reward file is 'other.py'",
+        ):
+            api_key_client.submit_experiment(
+                manifest=manifest, project="proj", reward_file=reward_path
+            )
+
+        api_key_client._open_stream.assert_not_called()
+
+    def test_without_reward_file_still_requires_rubric_path(self, api_key_client):
+        api_key_client._open_stream = MagicMock()
+
+        with pytest.raises(ValueError, match="rubric_name names a symbol"):
+            api_key_client.submit_experiment(
+                manifest=_rubric_rollout_manifest(), project="proj"
+            )
+
+        api_key_client._open_stream.assert_not_called()
+
+    def test_fills_rubric_path_when_grpo_omits_env_type(self, api_key_client, tmp_path):
+        # Arrange
+        reward_path = tmp_path / "gsm8k_rubric.py"
+        reward_path.write_text("RUBRIC = None\n")
+        manifest = _rubric_rollout_manifest()
+        del manifest["environment"]["env_type"]
+        api_key_client._open_stream = MagicMock(
+            return_value=_mock_ndjson_stream({"job_id": 11})
+        )
+
+        # Act
+        result = api_key_client.submit_experiment(
+            manifest=manifest, project="proj", reward_file=reward_path
+        )
+
+        # Assert
+        assert result == {"job_id": 11}
+        files = dict(api_key_client._open_stream.call_args[1]["files"])
+        environment = json.loads(files["manifest"][1])["environment"]
+        assert environment["rubric_file_path"] == "gsm8k_rubric.py"
+        assert "env_type" not in manifest["environment"]
+
+    @pytest.mark.parametrize("env_type", [None, "dataset"])
+    def test_does_not_fill_rubric_path_for_sft(
+        self, api_key_client, tmp_path, env_type
+    ):
+        # Arrange
+        reward_path = tmp_path / "reward.py"
+        reward_path.write_text("RUBRIC = None\n")
+        environment = {"dataset": "openai/gsm8k"}
+        if env_type is not None:
+            environment["env_type"] = env_type
+            environment["objective"] = "sft"
+        manifest = {
+            "algorithm": {"name": "SFT"},
+            "environment": environment,
+            "network": {
+                "pretrained_model_name_or_path": "org/untracked-model",
+                "max_context_length": 1024,
+            },
+            "training": {"max_steps": 100},
+        }
+        api_key_client._open_stream = MagicMock(
+            return_value=_mock_ndjson_stream({"job_id": 12})
+        )
+
+        # Act
+        result = api_key_client.submit_experiment(
+            manifest=manifest, project="proj", reward_file=reward_path
+        )
+
+        # Assert
+        assert result == {"job_id": 12}
+        files = dict(api_key_client._open_stream.call_args[1]["files"])
+        sent = json.loads(files["manifest"][1])["environment"]
+        assert "rubric_file_path" not in sent
+
+    def test_unknown_algorithm_without_env_type_is_validation_error(
+        self, api_key_client, tmp_path
+    ):
+        reward_path = tmp_path / "reward.py"
+        reward_path.write_text("RUBRIC = None\n")
+        manifest = _rubric_rollout_manifest()
+        del manifest["environment"]["env_type"]
+        manifest["algorithm"]["name"] = "NOPE"
+        api_key_client._open_stream = MagicMock()
+
+        with pytest.raises(ValueError, match="not a registered algorithm"):
+            api_key_client.submit_experiment(
+                manifest=manifest, project="proj", reward_file=reward_path
+            )
+
+        api_key_client._open_stream.assert_not_called()
+
+    def test_missing_algorithm_without_env_type_is_validation_error(
+        self, api_key_client, tmp_path
+    ):
+        reward_path = tmp_path / "reward.py"
+        reward_path.write_text("RUBRIC = None\n")
+        manifest = _rubric_rollout_manifest()
+        del manifest["environment"]["env_type"]
+        del manifest["algorithm"]
+        api_key_client._open_stream = MagicMock()
+
+        with pytest.raises(ValueError, match="algorithm"):
+            api_key_client.submit_experiment(
+                manifest=manifest, project="proj", reward_file=reward_path
+            )
+
+        api_key_client._open_stream.assert_not_called()
+
+    def test_non_mapping_manifest_is_validation_error(self, api_key_client, tmp_path):
+        reward_path = tmp_path / "reward.py"
+        reward_path.write_text("RUBRIC = None\n")
+        manifest_path = tmp_path / "manifest.yaml"
+        manifest_path.write_text("- algorithm\n- environment\n")
+        api_key_client._open_stream = MagicMock()
+
+        with pytest.raises(
+            ArenaValidationError, match="The manifest must be a mapping, not list"
+        ):
+            api_key_client.submit_experiment(
+                manifest=manifest_path, project="proj", reward_file=reward_path
+            )
+
+        api_key_client._open_stream.assert_not_called()
+
+
 class TestPreviewExperimentMetricsCsv:
     def test_basic_call(self, api_key_client):
         api_key_client._request_raw = MagicMock(
