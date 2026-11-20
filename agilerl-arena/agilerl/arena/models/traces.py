@@ -448,17 +448,15 @@ class TracesValidationError(ValueError):
 def _pair_messages(value: Any, role: str) -> list[Any]:  # noqa: ANN401 -- a raw pair cell
     """A pair cell as messages: a list (or its JSON text) as is, one message object in a list, other text as one ``role`` message.
 
-    Text is decoded only when it is the JSON of a message, a list of messages,
-    or a string; other text, JSON such as ``{"query": "x"}`` or ``42``
-    included, is the message's content.
+    Text is decoded only when it is the JSON of a message or a non-empty list
+    of messages; other text, JSON such as ``{"query": "x"}``, ``42`` or
+    ``"hi"`` included, is the message's content as it is.
     """
     if isinstance(value, str):
         try:
             decoded = json.loads(value)
         except json.JSONDecodeError:
             decoded = None
-        if isinstance(decoded, str):
-            return [{"role": role, "content": decoded}]
         if not _is_messages(decoded):
             return [{"role": role, "content": value}]
         value = decoded
@@ -466,10 +464,11 @@ def _pair_messages(value: Any, role: str) -> list[Any]:  # noqa: ANN401 -- a raw
 
 
 def _is_messages(value: Any) -> bool:  # noqa: ANN401 -- a decoded JSON value
-    """Whether ``value`` is a message object, or a non-empty list of them: mappings with a ``role``."""
+    """Whether ``value`` is a message object, or a non-empty list of them: mappings with a string ``role``."""
     items = value if isinstance(value, list) else [value]
     return bool(items) and all(
-        isinstance(item, Mapping) and "role" in item for item in items
+        isinstance(item, Mapping) and isinstance(item.get("role"), str)
+        for item in items
     )
 
 

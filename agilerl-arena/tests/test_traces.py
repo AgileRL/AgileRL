@@ -184,12 +184,12 @@ class TestPairImport:
         assert [message.role for message in row.messages] == ["user", "assistant"]
         assert row.call_ids == ["c"]
 
-    def test_wraps_a_json_encoded_string_cell(self) -> None:
+    def test_keeps_a_json_encoded_string_cell_as_text(self) -> None:
         raw = {"prompt": json.dumps("Hi there."), "completion": "Hello!"}
 
         row = as_segment(raw)
 
-        assert row.messages[0].content == "Hi there."
+        assert row.messages[0].content == '"Hi there."'
 
     def test_reads_one_completion_message_object(self) -> None:
         raw = helpdesk_row()
