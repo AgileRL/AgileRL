@@ -1,5 +1,5 @@
 {
-  "description": "Prompt/completion import rows and the segment each converts to. The ml validator (agilerl.arena.models.traces.pair_as_segment) and the platform converter must both produce `expected` from `row`. Prompt assistant messages get \"weight\": 0 (context); completion messages keep the default weight 1. `call_ids` is written only when the row has a real `call_id`. A text cell is decoded only when it is the JSON of a message, a list of messages, or a string; other text, JSON or not, is the message's content. Prefix merging is not covered here.",
+  "description": "Prompt/completion import rows and the segment each converts to. The ml validator (agilerl.arena.models.traces.pair_as_segment) and the platform converter must both produce `expected` from `row`. Prompt assistant messages get \"weight\": 0 (context); completion messages keep the default weight 1. `call_ids` is written only when the row has a real `call_id`. A text cell is decoded only when it is the JSON of a message object with a string role, or a non-empty list of them; other text, a JSON string included, is the message's content as it is. Prefix merging is not covered here.",
   "cases": [
     {
       "name": "plain strings; no call_id, no call_ids",
@@ -139,6 +139,25 @@
       }
     },
     {
+      "name": "a JSON string cell stays text, quotes included",
+      "row": {
+        "prompt": "\"hi\"",
+        "completion": "yo"
+      },
+      "expected": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "\"hi\""
+          },
+          {
+            "role": "assistant",
+            "content": "yo"
+          }
+        ]
+      }
+    },
+    {
       "name": "a raw messages column beside the pair is ignored; JSON text cells",
       "row": {
         "prompt": "[{\"role\": \"user\", \"content\": \"Reset my MFA.\"}]",
@@ -227,6 +246,32 @@
         "finish_reasons": [
           null,
           "stop"
+        ]
+      }
+    },
+    {
+      "name": "a pair's own call_ids and finish_reasons are dropped",
+      "row": {
+        "prompt": "Hi there.",
+        "completion": "Hello!",
+        "call_ids": [
+          "stale",
+          "stale"
+        ],
+        "finish_reasons": [
+          "length"
+        ]
+      },
+      "expected": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Hi there."
+          },
+          {
+            "role": "assistant",
+            "content": "Hello!"
+          }
         ]
       }
     }
