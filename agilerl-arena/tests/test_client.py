@@ -215,9 +215,22 @@ class TestArenaClientInit:
 class TestArenaClientConfigure:
     def setup_method(self):
         self._orig_url = ArenaClient.BASE_URL
+        self._orig_override = ArenaClient._BASE_URL_OVERRIDE
 
     def teardown_method(self):
         ArenaClient.BASE_URL = self._orig_url
+        ArenaClient._BASE_URL_OVERRIDE = self._orig_override
+
+    @patch("agilerl.arena.auth.ArenaOAuth2.configure")
+    @patch("agilerl.arena.auth.KeycloakOpenID")
+    def test_configured_base_url_beats_env(self, mock_keycloak, mock_oauth_cfg):
+        """``arena --base-url`` must win over an exported ARENA_BASE_URL."""
+        ArenaClient.configure(base_url="http://localhost:3011/")
+        with patch.dict(
+            os.environ, {"ARENA_BASE_URL": "https://arena-dev.example.com"}
+        ):
+            client = ArenaClient(api_key="k")
+        assert client._base_url == "http://localhost:3011"
 
     @patch("agilerl.arena.auth.ArenaOAuth2.configure")
     def test_overrides_base_url(self, mock_oauth_cfg):
