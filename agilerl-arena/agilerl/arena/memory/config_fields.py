@@ -92,15 +92,11 @@ VisionResize = Literal[
     "dynamic_tiles",
 ]
 
-# How each family's image processor sizes an image's patch grid, keyed by
-# outer config ``model_type``. ``merge_grid``: Qwen2-VL ``smart_resize`` to
-# multiples of patch x merge. ``pixel_bounds``: vLLM's MiMo ``smart_resize``,
-# the same grid between the config's ``processor_config`` pixel bounds.
-# ``token_budget``: GLM-5.3 ``smart_resize``,
-# sides rounded up to patch x merge and fit under a vision-token budget.
-# ``pooled_budget``: Gemma4's aspect-preserving fit under soft tokens x pool^2
-# patches. ``dynamic_tiles``: Nemotron RADIO dynamic resolution between its
-# min and max patches.
+# Image patch-grid sizing per outer ``model_type``: ``merge_grid`` rounds to
+# patch x merge (Qwen2-VL), ``pixel_bounds`` also clamps to the processor's
+# pixel bounds (MiMo), ``token_budget`` fits a vision-token budget (GLM-5.3),
+# ``pooled_budget`` fits soft tokens x pool^2 (Gemma4), ``dynamic_tiles``
+# stays between RADIO's min and max patches (Nemotron).
 VISION_RESIZE_BY_MODEL_TYPE: dict[str, VisionResize] = {
     "qwen3_5": "merge_grid",
     "qwen3_5_moe": "merge_grid",

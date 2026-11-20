@@ -60,31 +60,6 @@ CHECKPOINT_STRIDES = (4, 2, 1)
 RESIDENCIES: tuple[Residency, ...] = ("gathered", "reshard")
 
 
-def cpu_offload_blocker(fsdp: FSDPConfig | None, async_rollout: bool) -> str | None:
-    """Why FSDP ``cpu_offload`` cannot run, or ``None`` when it can.
-
-    :param fsdp: The run's FSDP config, or ``None``.
-    :param async_rollout: vLLM generates on rollout engines outside the trainer.
-    :return: A short reason, or ``None`` when full CPU offload is off or served.
-    """
-    if fsdp is None or not fsdp.cpu_offload:
-        return None
-    if fsdp.ep > 1:
-        return (
-            f"fsdp.cpu_offload does not support fsdp.ep={fsdp.ep}: expert LoRA "
-            "adapters, and the experts when ep spans the shard group, stay "
-            "outside FSDP on the EP mesh, so they would stay on CPU. Use "
-            "fsdp.optim_cpu_offload instead."
-        )
-    if not async_rollout:
-        return None
-    return (
-        "fsdp.cpu_offload needs colocated vLLM generation: FSDP2's "
-        "CPUOffloadPolicy keeps parameters on CPU. Use fsdp.optim_cpu_offload "
-        "instead, which keeps parameters on the GPU."
-    )
-
-
 def can_train_data_parallel(fsdp: FSDPConfig) -> bool:
     """Whether a run configured for FSDP may train DDP instead, every rank holding the whole model.
 

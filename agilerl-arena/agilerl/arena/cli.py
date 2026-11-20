@@ -167,12 +167,6 @@ def main(
 
 @main.command()
 @click.option(
-    "--force",
-    is_flag=True,
-    default=False,
-    help="Run browser login even if an API key is set or the stored session is still valid.",
-)
-@click.option(
     "--timeout",
     type=click.IntRange(1),
     default=300,
@@ -182,12 +176,11 @@ def main(
 @click.pass_obj
 def login(
     config: CommandConfig,
-    force: bool,
     timeout: int,
 ) -> None:
-    """Authenticate with Arena."""
+    """Sign in through the browser. Ends the saved login, so it also switches user or environment."""
     with arena_client(config) as client:
-        client.login(timeout=timeout, force=force)
+        client.login(timeout=timeout)
 
 
 @main.command()

@@ -258,6 +258,19 @@ class TestArenaClientConfigure:
         assert orig == ArenaClient.BASE_URL
 
 
+DEV_ISSUER = "https://arena-dev-auth.example.com/realms/arena"
+
+
+def _jwt(claims: dict) -> str:
+    import base64
+
+    def seg(obj: dict) -> str:
+        raw = json.dumps(obj, separators=(",", ":")).encode()
+        return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+    return f"{seg({'alg': 'none'})}.{seg(claims)}.x"
+
+
 class TestArenaClientLogin:
     def test_login_stores_tokens(self, unauthenticated_client):
         client = unauthenticated_client
@@ -269,54 +282,98 @@ class TestArenaClientLogin:
         assert client._tokens.refresh_token == "rt"
         client._auth.device_login.assert_called_once_with(timeout=60)
 
-    def test_login_skips_device_when_jwt_still_valid(self, unauthenticated_client):
-        client = unauthenticated_client
-        client._tokens.access_token = _jwt_with_exp(int(time.time()) + 3600)
-        client._tokens.refresh_token = "rt"
-        client._auth.device_login = MagicMock()
-        client.login()
-        client._auth.device_login.assert_not_called()
-
-    def test_login_refreshes_when_jwt_expired(self, unauthenticated_client):
-        client = unauthenticated_client
-        client._tokens.access_token = _jwt_with_exp(int(time.time()) - 120)
-        client._tokens.refresh_token = "rt"
-        client._auth.device_login = MagicMock()
-        client._auth.refresh_access_token = MagicMock(
-            return_value={"access_token": "new_at", "refresh_token": "new_rt"}
-        )
-        client.login()
-        client._auth.device_login.assert_not_called()
-        client._auth.refresh_access_token.assert_called_once_with("rt")
-        assert client._tokens.access_token == "new_at"
-        assert client._tokens.refresh_token == "new_rt"
-
-    def test_login_falls_back_to_device_when_refresh_fails(
+    def test_login_signs_in_even_when_saved_login_is_valid(
         self, unauthenticated_client
     ):
         client = unauthenticated_client
-        client._tokens.access_token = _jwt_with_exp(int(time.time()) - 120)
-        client._tokens.refresh_token = "rt"
-        client._auth.refresh_access_token = MagicMock(side_effect=ArenaAuthError("bad"))
-        client._auth.device_login = MagicMock(
-            return_value={"access_token": "dev_at", "refresh_token": "dev_rt"}
-        )
-        client.login()
-        client._auth.device_login.assert_called_once()
-
-    def test_login_force_runs_device_even_when_valid(self, unauthenticated_client):
-        client = unauthenticated_client
         client._tokens.access_token = _jwt_with_exp(int(time.time()) + 3600)
-        tokens = {"access_token": "from_dev", "refresh_token": "rt2"}
-        client._auth.device_login = MagicMock(return_value=tokens)
-        client.login(force=True)
-        client._auth.device_login.assert_called_once()
+        client._tokens.refresh_token = "rt"
+        client._auth.device_login = MagicMock(
+            return_value={"access_token": "new_at", "refresh_token": "new_rt"}
+        )
 
-    def test_login_noop_with_api_key(self, api_key_client):
-        client = api_key_client
-        client._auth.device_login = MagicMock()
         client.login()
-        client._auth.device_login.assert_not_called()
+
+        assert client._tokens.access_token == "new_at"
+        assert client._tokens.refresh_token == "new_rt"
+
+    def test_login_ends_saved_session_at_its_own_keycloak(
+        self, unauthenticated_client, credentials_path
+    ):
+        # Arrange
+        client = unauthenticated_client
+        credentials_path.write_text(
+            json.dumps(
+                {
+                    "access_token": "old_at",
+                    "refresh_token": "old_rt",
+                    "issuer": DEV_ISSUER,
+                }
+            ),
+            encoding="utf-8",
+        )
+        client._auth.device_login = MagicMock(
+            return_value={"access_token": "new_at", "refresh_token": "new_rt"}
+        )
+        client._auth.end_session = MagicMock()
+
+        # Act
+        client.login()
+
+        # Assert
+        client._auth.end_session.assert_called_once_with("old_rt", DEV_ISSUER)
+        assert client._tokens.refresh_token == "new_rt"
+
+    def test_login_reports_signed_in_user(self, unauthenticated_client, caplog):
+        client = unauthenticated_client
+        client._auth.device_login = MagicMock(
+            return_value={
+                "access_token": _jwt({"email": "a@example.com"}),
+                "refresh_token": "rt",
+            }
+        )
+
+        with caplog.at_level(logging.INFO, logger="agilerl.arena.client"):
+            client.login()
+
+        assert "Logged in to Arena as a@example.com" in caplog.text
+
+    def test_login_with_api_key_warns_and_signs_in(self, api_key_client, caplog):
+        client = api_key_client
+        client._auth.device_login = MagicMock(
+            return_value={"access_token": "new_at", "refresh_token": "new_rt"}
+        )
+
+        with caplog.at_level(logging.WARNING, logger="agilerl.arena.client"):
+            client.login()
+
+        assert client._api_key is None
+        assert client._tokens.access_token == "new_at"
+        assert "An API key is set" in caplog.text
+
+    def test_login_keeps_api_key_when_sign_in_fails(self, api_key_client):
+        client = api_key_client
+        client._saved_login_issuer = DEV_ISSUER
+        client._auth.device_login = MagicMock(side_effect=ArenaAuthError("timed out"))
+
+        with pytest.raises(ArenaAuthError, match="timed out"):
+            client.login()
+
+        assert client._api_key == "test-key"
+        assert client._saved_login_issuer == DEV_ISSUER
+        assert client._tokens.access_token is None
+
+    def test_login_clears_saved_issuer(self, unauthenticated_client):
+        client = unauthenticated_client
+        client._saved_login_issuer = DEV_ISSUER
+        client._auth.device_login = MagicMock(
+            return_value={"access_token": "new_at", "refresh_token": "new_rt"}
+        )
+
+        client.login()
+
+        assert client._saved_login_issuer is None
+        assert client._tokens.access_token == "new_at"
 
     def test_login_noop_with_org_key(self):
         with patch("agilerl.arena.auth.KeycloakOpenID"):
@@ -325,7 +382,7 @@ class TestArenaClientLogin:
                 external_user_id="partner-user-1",
             )
         client._auth.device_login = MagicMock()
-        client.login(force=True)
+        client.login()
         client._auth.device_login.assert_not_called()
 
     @patch("agilerl.arena.client.load_credentials")
@@ -383,15 +440,136 @@ class TestArenaClientLogin:
         client._auth.refresh_access_token.assert_not_called()
 
 
+class TestArenaClientRestoreSession:
+    def _client(self) -> ArenaClient:
+        with patch.dict(os.environ, _env_without_arena_secrets(), clear=True):
+            with patch("agilerl.arena.auth.KeycloakOpenID"):
+                return ArenaClient()
+
+    def test_loads_saved_login_for_this_keycloak(self, credentials_path):
+        issuer = ArenaOAuth2().issuer
+        credentials_path.write_text(
+            json.dumps({"access_token": "at", "refresh_token": "rt", "issuer": issuer}),
+            encoding="utf-8",
+        )
+
+        client = self._client()
+
+        assert client._tokens.refresh_token == "rt"
+
+    def test_ignores_saved_login_for_other_keycloak(self, credentials_path):
+        credentials_path.write_text(
+            json.dumps(
+                {"access_token": "at", "refresh_token": "rt", "issuer": DEV_ISSUER}
+            ),
+            encoding="utf-8",
+        )
+
+        client = self._client()
+
+        assert client._tokens.access_token is None
+        assert client._tokens.refresh_token is None
+
+    def test_request_names_the_other_keycloak(self, credentials_path):
+        credentials_path.write_text(
+            json.dumps(
+                {"access_token": "at", "refresh_token": "rt", "issuer": DEV_ISSUER}
+            ),
+            encoding="utf-8",
+        )
+        client = self._client()
+
+        with pytest.raises(
+            ArenaAuthError, match=f"saved Arena login is for {re.escape(DEV_ISSUER)}"
+        ):
+            client._send("GET", "/api/cli/v1/me")
+
+    def test_api_key_leaves_other_keycloak_login_unloaded(self, credentials_path):
+        credentials_path.write_text(
+            json.dumps(
+                {"access_token": "at", "refresh_token": "rt", "issuer": DEV_ISSUER}
+            ),
+            encoding="utf-8",
+        )
+
+        with patch("agilerl.arena.auth.KeycloakOpenID"):
+            client = ArenaClient(api_key="test-key")
+
+        assert client._api_key == "test-key"
+        assert client._tokens.access_token is None
+        assert client._tokens.refresh_token is None
+        assert client._saved_login_issuer == DEV_ISSUER
+
+    def test_api_key_loads_login_for_this_keycloak(self, credentials_path):
+        issuer = ArenaOAuth2().issuer
+        credentials_path.write_text(
+            json.dumps({"access_token": "at", "refresh_token": "rt", "issuer": issuer}),
+            encoding="utf-8",
+        )
+
+        with patch("agilerl.arena.auth.KeycloakOpenID"):
+            client = ArenaClient(api_key="test-key")
+
+        assert client._api_key == "test-key"
+        assert client._tokens.refresh_token == "rt"
+        assert client._saved_login_issuer is None
+
+    def test_rejected_api_key_does_not_send_other_keycloak_token(
+        self, credentials_path
+    ):
+        credentials_path.write_text(
+            json.dumps(
+                {
+                    "access_token": "dev_at",
+                    "refresh_token": "dev_rt",
+                    "issuer": DEV_ISSUER,
+                }
+            ),
+            encoding="utf-8",
+        )
+        with patch("agilerl.arena.auth.KeycloakOpenID"):
+            client = ArenaClient(api_key="test-key")
+        client._auth.refresh_access_token = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 401
+        mock_resp.is_success = False
+        mock_resp.text = "Unauthorized"
+        client._http.request = MagicMock(return_value=mock_resp)
+
+        with pytest.raises(ArenaAuthError, match="Invalid API key"):
+            client._request("GET", "/api/test")
+
+        assert client._http.request.call_count == 1
+        client._auth.refresh_access_token.assert_not_called()
+        assert client._api_key == "test-key"
+        assert client._tokens.refresh_token is None
+
+
 class TestArenaClientLogout:
     def test_logout_revokes_and_clears(self, token_client):
         client = token_client
         client._auth.revoke = MagicMock()
 
         client.logout()
-        client._auth.revoke.assert_called_once_with("tok_refresh")
+        client._auth.revoke.assert_called_once_with("tok_refresh", None)
         assert client._tokens.access_token is None
         assert client._tokens.refresh_token is None
+
+    def test_logout_revokes_saved_login_for_other_keycloak(
+        self, unauthenticated_client, credentials_path
+    ):
+        client = unauthenticated_client
+        credentials_path.write_text(
+            json.dumps(
+                {"access_token": "at", "refresh_token": "rt", "issuer": DEV_ISSUER}
+            ),
+            encoding="utf-8",
+        )
+        client._auth.revoke = MagicMock()
+
+        client.logout()
+
+        client._auth.revoke.assert_called_once_with("rt", DEV_ISSUER)
 
     def test_logout_without_refresh_token(self, unauthenticated_client):
         client = unauthenticated_client
@@ -401,6 +579,25 @@ class TestArenaClientLogout:
         client.logout()
         client._auth.revoke.assert_not_called()
         assert client._tokens.access_token is None
+
+    def test_logout_clears_saved_issuer(self, unauthenticated_client):
+        client = unauthenticated_client
+        client._saved_login_issuer = DEV_ISSUER
+        client._tokens.refresh_token = "rt"
+        client._auth.revoke = MagicMock()
+
+        client.logout()
+
+        assert client._saved_login_issuer is None
+        assert client._tokens.refresh_token is None
+
+    def test_logout_clears_saved_issuer_without_a_session(self, unauthenticated_client):
+        client = unauthenticated_client
+        client._saved_login_issuer = DEV_ISSUER
+
+        client.logout()
+
+        assert client._saved_login_issuer is None
 
 
 class TestIsAuthenticated:
@@ -1415,21 +1612,6 @@ class TestSendStreaming:
             api_key_client._send("POST", "/api/test", stream=True)
         assert exc_info.value.status_code == 0
         assert "Network error" in exc_info.value.detail
-
-
-class TestLoginForceWithApiKey:
-    def test_force_clears_api_key_and_runs_device_login(self, api_key_client):
-        client = api_key_client
-        assert client._api_key == "test-key"
-        tokens = {"access_token": "new_at", "refresh_token": "new_rt"}
-        client._auth.device_login = MagicMock(return_value=tokens)
-
-        client.login(force=True)
-
-        assert client._api_key is None
-        client._auth.device_login.assert_called_once()
-        assert client._tokens.access_token == "new_at"
-        assert client._tokens.refresh_token == "new_rt"
 
 
 class TestDeleteEnvironmentMultiVersion:

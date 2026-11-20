@@ -28,7 +28,7 @@ from rich.table import Table
 from rich.text import Text
 
 from agilerl.arena.memory.advice import advise
-from agilerl.arena.memory.estimator import PhaseBreakdown, estimate_run
+from agilerl.arena.memory.estimator import PhaseBreakdown, RunEstimate, estimate_run
 from agilerl.arena.memory.formulas import MAX_UNDERPREDICTION
 from agilerl.arena.memory.manifest import (
     configured_rollout_engines,
@@ -37,6 +37,7 @@ from agilerl.arena.memory.manifest import (
     run_config_from_manifest,
     training_plan_model,
 )
+from agilerl.arena.memory.resolve.batch import catalog_model_spec
 from agilerl.arena.memory.resolve.run import (
     SearchCache,
     WeightSyncMode,
@@ -326,14 +327,16 @@ def _model_spec_from_checkpoint(
     return model_config, ModelSpec(model_id=model_id, arch=arch, n_params=n_params)
 
 
-def _report_missing_key(err: KeyError) -> int:
-    """Print a missing model-config key as a usage error."""
-    print(
+class EstimateUsageError(ValueError):
+    """A bad device, manifest or model config; ``estimate`` exits 2 with this message."""
+
+
+def _missing_key_error(err: KeyError) -> EstimateUsageError:
+    """A missing model-config key as a usage error."""
+    return EstimateUsageError(
         f"model config is missing {err}; pass the checkpoint's config.json "
-        "via --config.",
-        file=sys.stderr,
+        "via --config."
     )
-    return EXIT_USAGE
 
 
 def _resolve_device(
@@ -546,6 +549,136 @@ def memory_estimate(
     )
 
 
+@dataclass(frozen=True)
+class EstimateOutcome:
+    """A sized run: its config and estimate."""
+
+    config: RunConfig
+    estimate: RunEstimate
+
+
+def _estimate_device(
+    gpu: str | None,
+    device_gb: float | None,
+    num_gpus: int | None,
+    gpus_per_node: int | None,
+) -> DeviceSpec:
+    """The named device.
+
+    :raises EstimateUsageError: The device arguments cannot be sized.
+    """
+    for name, count in (("num_gpus", num_gpus), ("gpus_per_node", gpus_per_node)):
+        if count is not None and count < 1:
+            msg = f"{name} must be at least 1, got {count}."
+            raise EstimateUsageError(msg)
+    try:
+        device = _resolve_device(
+            gpu, device_gb, flag="--gpu", capacity_flag="--device-gb"
+        )
+    except ValueError as err:
+        raise EstimateUsageError(str(err)) from err
+    if device is None:
+        raise EstimateUsageError(NO_DEVICE_MESSAGE)
+    if gpus_per_node is not None:
+        device = device.model_copy(update={"gpus_per_node": gpus_per_node})
+    return device
+
+
+def _estimate_model(
+    manifest_source: str | dict[str, Any],
+    config_path: str | None,
+    catalog_only: bool,
+) -> tuple[TrainingManifest, dict[str, Any], ModelSpec]:
+    """Validated manifest plus the model config and spec it names.
+
+    :raises EstimateUsageError: The manifest or model config cannot be sized.
+    """
+    try:
+        manifest = TrainingManifest.get_validated(manifest_source, mode="python")
+    except (OSError, ValueError, ValidationError, yaml.YAMLError) as err:
+        source = manifest_source if isinstance(manifest_source, str) else "the manifest"
+        msg = f"could not validate {source}: {err}"
+        raise EstimateUsageError(msg) from err
+
+    try:
+        spec = llm_spec(manifest)
+    except ValueError as err:
+        raise EstimateUsageError(str(err)) from err
+    model_id = spec.pretrained_model_name_or_path
+    if model_id is None:
+        msg = "manifest names no pretrained model."
+        raise EstimateUsageError(msg)
+    if catalog_only and model_id not in SUPPORTED_MODEL_INFO:
+        msg = f"{model_id} is not a supported model."
+        raise EstimateUsageError(msg)
+    try:
+        if catalog_only:
+            model_config = SUPPORTED_MODEL_INFO[model_id].config
+            model_spec = catalog_model_spec(model_id)
+        else:
+            model_config, model_spec = _model_spec_from_checkpoint(
+                model_id, config_path
+            )
+    except KeyError as err:
+        raise _missing_key_error(err) from err
+    except (OSError, ValueError) as err:
+        msg = f"could not load the model config: {err}"
+        raise EstimateUsageError(msg) from err
+    if config_path is not None:
+        print(
+            "note: --config skips the Hub parameter count; check the file "
+            "matches the manifest's model.",
+            file=sys.stderr,
+        )
+    return manifest, model_config, model_spec
+
+
+def estimate_manifest(
+    manifest_source: str | dict[str, Any],
+    gpu: str | None = None,
+    device_gb: float | None = None,
+    num_gpus: int | None = None,
+    gpus_per_node: int | None = None,
+    config_path: str | None = None,
+    catalog_only: bool = False,
+) -> EstimateOutcome:
+    """Size a manifest on a device.
+
+    :param manifest_source: Manifest path, or the raw manifest document.
+    :param num_gpus: GPUs in the allocation, for the engine layout the run picks.
+    :param gpus_per_node: GPUs on one node of the allocation; ``None`` puts all
+        ``num_gpus`` on one node.
+    :param catalog_only: Size only models in ``SUPPORTED_MODEL_INFO``, from
+        their bundled config, without reading a local checkpoint or the Hub.
+    :raises EstimateUsageError: The arguments, manifest or model config cannot
+        be sized.
+    """
+    device = _estimate_device(gpu, device_gb, num_gpus, gpus_per_node)
+    manifest, model_config, model_spec = _estimate_model(
+        manifest_source, config_path, catalog_only
+    )
+    try:
+        config = _sized_run_config(manifest, model_config, model_spec, device, num_gpus)
+    except KeyError as err:
+        raise _missing_key_error(err) from err
+    except ValueError as err:
+        raise EstimateUsageError(str(err)) from err
+    return EstimateOutcome(config, note_queued_sequences(estimate_run(config), config))
+
+
+def json_report(outcome: EstimateOutcome) -> tuple[int, dict[str, Any]]:
+    """The exit code and the ``estimate --json`` document for a sized run."""
+    config, estimate = outcome.config, outcome.estimate
+    payload = estimate.model_dump(by_alias=True)
+    payload["fits"] = estimate.fits_with_buffer
+    payload["engine"] = _engine_payload(config)
+    payload["advice"] = [a.model_dump() for a in advise(config)]
+    parallelism = _parallelism_payload(config)
+    if parallelism is not None:
+        payload["parallelism"] = parallelism
+    return (EXIT_OK if estimate.fits_with_buffer else EXIT_OVER_BUDGET), payload
+
+
 def main(
     manifest_path: str,
     *,
@@ -564,66 +697,17 @@ def main(
         ``num_gpus`` on one node.
     """
     try:
-        device = _resolve_device(
-            gpu, device_gb, flag="--gpu", capacity_flag="--device-gb"
+        outcome = estimate_manifest(
+            manifest_path, gpu, device_gb, num_gpus, gpus_per_node, config_path
         )
-    except ValueError as err:
+    except EstimateUsageError as err:
         print(err, file=sys.stderr)
         return EXIT_USAGE
-    if device is None:
-        print(NO_DEVICE_MESSAGE, file=sys.stderr)
-        return EXIT_USAGE
-    if gpus_per_node is not None:
-        device = device.model_copy(update={"gpus_per_node": gpus_per_node})
-
-    try:
-        manifest = TrainingManifest.get_validated(manifest_path, mode="python")
-    except (OSError, ValueError, ValidationError, yaml.YAMLError) as err:
-        print(f"could not validate {manifest_path}: {err}", file=sys.stderr)
-        return EXIT_USAGE
-
-    try:
-        spec = llm_spec(manifest)
-    except ValueError as err:
-        print(err, file=sys.stderr)
-        return EXIT_USAGE
-    model_id = spec.pretrained_model_name_or_path
-    if model_id is None:
-        print("manifest names no pretrained model.", file=sys.stderr)
-        return EXIT_USAGE
-    try:
-        model_config, model_spec = _model_spec_from_checkpoint(model_id, config_path)
-    except KeyError as err:
-        return _report_missing_key(err)
-    except (OSError, ValueError) as err:
-        print(f"could not load the model config: {err}", file=sys.stderr)
-        return EXIT_USAGE
-    if config_path is not None:
-        print(
-            "note: --config skips the Hub parameter count; check the file "
-            "matches the manifest's model.",
-            file=sys.stderr,
-        )
-
-    try:
-        config = _sized_run_config(manifest, model_config, model_spec, device, num_gpus)
-    except KeyError as err:
-        return _report_missing_key(err)
-    except ValueError as err:
-        print(str(err), file=sys.stderr)
-        return EXIT_USAGE
-
-    estimate = note_queued_sequences(estimate_run(config), config)
     if as_json:
-        payload = estimate.model_dump(by_alias=True)
-        payload["fits"] = estimate.fits_with_buffer
-        payload["engine"] = _engine_payload(config)
-        payload["advice"] = [a.model_dump() for a in advise(config)]
-        parallelism = _parallelism_payload(config)
-        if parallelism is not None:
-            payload["parallelism"] = parallelism
+        code, payload = json_report(outcome)
         print(json.dumps(payload, indent=2))
-        return EXIT_OK if estimate.fits_with_buffer else EXIT_OVER_BUDGET
+        return code
+    config, estimate = outcome.config, outcome.estimate
 
     # Rich drops colour off a terminal and honours NO_COLOR.
     console = Console(highlight=False, color_system=None if no_color else "auto")
@@ -781,7 +865,8 @@ def solve_main(request: SolveRequest) -> int:
         )
         config = build(None)
     except KeyError as err:
-        return _report_missing_key(err)
+        print(_missing_key_error(err), file=sys.stderr)
+        return EXIT_USAGE
     except (OSError, ValueError, ValidationError, yaml.YAMLError) as err:
         print(str(err), file=sys.stderr)
         return EXIT_USAGE

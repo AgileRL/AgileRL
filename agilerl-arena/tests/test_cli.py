@@ -586,20 +586,22 @@ class TestLoginCommand:
         with _patched_arena_client(mock_client):
             result = runner.invoke(main, ["login"])
         assert result.exit_code == 0
-        mock_client.login.assert_called_once_with(timeout=300, force=False)
+        mock_client.login.assert_called_once_with(timeout=300)
         mock_client.close.assert_called_once()
 
-    def test_login_force(self, runner, mock_client):
+    def test_login_rejects_force_flag(self, runner, mock_client):
         with _patched_arena_client(mock_client):
             result = runner.invoke(main, ["login", "--force"])
-        assert result.exit_code == 0
-        mock_client.login.assert_called_once_with(timeout=300, force=True)
+        assert result.exit_code == 2
+        assert "No such option" in result.output
+        assert "--force" in result.output
+        mock_client.login.assert_not_called()
 
     def test_login_custom_timeout(self, runner, mock_client):
         with _patched_arena_client(mock_client):
             result = runner.invoke(main, ["login", "--timeout", "60"])
         assert result.exit_code == 0
-        mock_client.login.assert_called_once_with(timeout=60, force=False)
+        mock_client.login.assert_called_once_with(timeout=60)
 
 
 class TestLogoutCommand:
