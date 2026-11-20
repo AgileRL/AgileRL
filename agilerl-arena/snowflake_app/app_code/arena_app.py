@@ -10,6 +10,7 @@ as owner's-rights procedures inside the app.
 
 from __future__ import annotations
 
+import json
 import logging
 import sys
 import tempfile
@@ -93,6 +94,7 @@ from agilerl.arena.snowflake.publish import (
     PublishSession,
     PublishSettings,
     registry_schema,
+    select_checkpoint,
     served_version,
     service_endpoint,
     submit_publish,
@@ -121,6 +123,8 @@ if TYPE_CHECKING:
     from agilerl.arena.snowflake.catalog import GpuFamily
 
 SOURCE_REFERENCES = ("SOURCE_TABLE", "SOURCE_VIEW")
+# Single-valued, unlike the source references.
+EXPORT_REFERENCE = "EXPORT_STAGE"
 # snowflake-app-build replaces the tag with the release tag, as in manifest.yml.
 IMAGE = "/arena_provider/images/repo/snowflake-job:0.0.0-py313-cu130"
 SETUP_PREFIX = f"@{APP_SCHEMA}.{RUNS_STAGE}/_arena"
@@ -291,10 +295,11 @@ def save_secret(session: SnowflakeSession, name: str, value: str) -> None:
 def register_reference(
     session: SnowflakeSession, ref_name: str, operation: str, ref_or_alias: str
 ) -> None:
-    """Bind, unbind, or clear a consumer table or view on a source reference.
+    """Bind, unbind, or clear a consumer object on a reference.
 
-    Snowflake calls this when the consumer changes a ``source_table`` or
-    ``source_view`` binding. Both references are multi-valued.
+    Snowflake calls this when the consumer changes a ``source_table``,
+    ``source_view`` or ``export_stage`` binding. The source references are
+    multi-valued; ``export_stage`` holds one stage.
 
     :param session: Procedure session.
     :param ref_name: Reference name from the manifest.
@@ -303,15 +308,18 @@ def register_reference(
     :raises ValueError: The reference or operation is unknown.
     """
     name = (ref_name or "").upper()
-    if name not in SOURCE_REFERENCES:
-        msg = f"Unknown reference {ref_name}. Bind source_table or source_view."
+    if name not in (*SOURCE_REFERENCES, EXPORT_REFERENCE):
+        msg = (
+            f"Unknown reference {ref_name}. "
+            "Bind source_table, source_view or export_stage."
+        )
         raise ValueError(msg)
     reference = string_literal(name)
+    add = "SET_REFERENCE" if name == EXPORT_REFERENCE else "ADD_REFERENCE"
     match (operation or "").upper():
         case "ADD":
             statement = (
-                f"SELECT SYSTEM$ADD_REFERENCE({reference}, "
-                f"{string_literal(ref_or_alias)})"
+                f"SELECT SYSTEM${add}({reference}, {string_literal(ref_or_alias)})"
             )
         case "REMOVE":
             statement = (
@@ -899,6 +907,45 @@ def cancel(session: SnowflakeSession, run_id: str) -> str:
     lines = [f"cancelled: {run_id}"]
     lines.extend(f"suspended: {pool}" for pool in suspend_idle_gpu_pools(session))
     return "\n".join(lines)
+
+
+def export_model(session: SnowflakeSession, run_id: str, step: int | None) -> str:
+    """Copy a run's merged checkpoint to ``<run_id>/<checkpoint>/`` on the stage bound to ``export_stage``.
+
+    Starts no service and adds no usage item, so it is not billed by Arena, and
+    works after the trial ends: it only hands back a model trained in the app.
+
+    :param session: Procedure session.
+    :param run_id: Run id from ``submit``.
+    :param step: Checkpoint step. ``None`` takes the newest complete merged export.
+    :return: The checkpoint, the stage path, and how many files were copied.
+    :raises ValueError: No stage is bound to ``export_stage``, the app has no
+        such run, or the run has no complete merged export at that step.
+    """
+    [row] = collect(
+        session,
+        f"SELECT SYSTEM$GET_ALL_REFERENCES({string_literal(EXPORT_REFERENCE)}) AS REFS",
+    )
+    if json.loads(str(lowered(row)["refs"])) == []:
+        msg = (
+            "No stage is bound to export_stage.\n"
+            "Bind one of your stages to it with WRITE, then call export_model again."
+        )
+        raise ValueError(msg)
+    known_run(session, run_id)
+    prefix = runs_prefix(f"{APP_SCHEMA}.{RUNS_STAGE}", run_id)
+    checkpoint, _, _ = select_checkpoint(
+        collect(session, f"LIST {prefix}/"), run_id, step
+    )
+    path = f"{run_id}/{checkpoint}/"
+    copied = collect(
+        session,
+        f"COPY FILES INTO @reference({string_literal(EXPORT_REFERENCE)})/{path} "
+        f"FROM {prefix}/{checkpoint}/merged/",
+    )
+    return "\n".join(
+        [f"checkpoint: {checkpoint}", f"path: {path}", f"files: {len(copied)}"]
+    )
 
 
 def reconcile_usage(session: SnowflakeSession) -> str:
