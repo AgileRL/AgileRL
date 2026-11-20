@@ -271,10 +271,8 @@ def llm_spec(manifest: TrainingManifest) -> LLMAlgorithmSpec:
 
 
 def _lora_config(spec: LLMAlgorithmSpec) -> LoraConfigDict:
-    # Training is LoRA-only; an omitted section trains with the LoraConfigDict defaults.
-    if spec.lora_config is not None:
-        return spec.lora_config
-    return LoraConfigDict()
+    # Training is LoRA-only; manifest validation resolves the catalog default.
+    return spec.lora_config or LoraConfigDict()
 
 
 def _reject_trainer_quantization(quantization: str | dict[str, Any] | None) -> None:

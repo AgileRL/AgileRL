@@ -676,6 +676,7 @@ class TestTrainingMemoryFromManifest:
         doc["network"] = {
             "pretrained_model_name_or_path": "Qwen/Qwen3.6-35B-A3B",
             "max_context_length": 65536,
+            "lora_config": {"target_parameters": []},
         }
         doc["training"]["training_gpus_per_agent"] = 4
         manifest = TrainingManifest.model_validate(doc)

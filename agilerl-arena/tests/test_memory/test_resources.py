@@ -132,11 +132,17 @@ def with_model(base, model):
     return doc
 
 
+def without_expert_lora(doc):
+    """Train no packed-expert LoRA, the layouts these MoE cases were sized for."""
+    doc["network"]["lora_config"] = {"target_parameters": []}
+    return doc
+
+
 def moe_unset_layout():
     """Qwen3.6-35B-A3B at 32k tokens with the split and engine width omitted."""
     doc = unset_split(unset_width(with_model(MANIFEST, "Qwen/Qwen3.6-35B-A3B")))
     doc["network"]["max_context_length"] = 32768
-    return doc
+    return without_expert_lora(doc)
 
 
 def tiny_model():
@@ -1356,8 +1362,10 @@ class TestCheckTiers:
     def test_a_pinned_layout_off_the_nodes_is_priced_under_an_open_count(self):
         # Arrange: up to 15 trainers on two 8-GPU nodes; pinned ep=5 groups
         # straddle the nodes past 8 of them.
-        doc = unset_split(
-            with_model(MANIFEST, "ibm-granite/granite-3.1-3b-a800m-instruct")
+        doc = without_expert_lora(
+            unset_split(
+                with_model(MANIFEST, "ibm-granite/granite-3.1-3b-a800m-instruct")
+            )
         )
         doc["algorithm"]["fsdp"] = {"ep": 5}
         doc["algorithm"]["batch_size"] = 40
@@ -1380,8 +1388,10 @@ class TestCheckTiers:
     ):
         # Arrange: nothing fits, so every layout is priced. Up to 15 trainers
         # on two 8-GPU nodes; ep=5 sits on one node at 5 trainers only.
-        doc = unset_split(
-            with_model(MANIFEST, "ibm-granite/granite-3.1-3b-a800m-instruct")
+        doc = without_expert_lora(
+            unset_split(
+                with_model(MANIFEST, "ibm-granite/granite-3.1-3b-a800m-instruct")
+            )
         )
         doc["algorithm"]["batch_size"] = 40
         manifest = TrainingManifest.model_validate(doc)

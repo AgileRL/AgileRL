@@ -3020,38 +3020,57 @@ class TestToPayloadModelFields:
         assert "lora_config" not in payload["algorithm"]
         assert payload["network"]["lora_config"]["lora_r"] == 8
 
-    def test_explicit_null_algorithm_lora_is_not_written_on_the_network(self) -> None:
+    @pytest.mark.parametrize(
+        ("algorithm", "network"),
+        [
+            ({}, {}),
+            ({"lora_config": None}, {}),
+            ({}, {"lora_config": None}),
+            ({"lora_config": None}, {"lora_config": None}),
+        ],
+        ids=["absent", "algorithm-null", "network-null", "both-null"],
+    )
+    def test_an_unset_or_null_lora_trains_the_catalog_default(
+        self, algorithm: dict[str, object], network: dict[str, object]
+    ) -> None:
+        # Arrange
+        hub_id = "openai/gpt-oss-20b"
+        doc = manifest(
+            GRPO,
+            algorithm=algorithm,
+            network={
+                "pretrained_model_name_or_path": hub_id,
+                "max_context_length": 2048,
+                **network,
+            },
+        )
+
+        # Act
+        validated = TrainingManifest.model_validate(doc)
+        payload = validated.to_payload()
+
+        # Assert
+        expected = sorted(SUPPORTED_MODEL_INFO[hub_id].parameters)
+        assert validated.algorithm.lora_config.lora_r == 16
+        assert validated.algorithm.lora_config.target_parameters == expected
+        assert payload["network"]["lora_config"]["target_parameters"] == expected
+        assert "lora_config" not in payload["algorithm"]
+
+    def test_a_network_lora_wins_over_an_algorithm_null(self) -> None:
         doc = manifest(
             GRPO,
             algorithm={"lora_config": None},
             network={
                 "pretrained_model_name_or_path": "Qwen/Qwen3.5-0.8B",
                 "max_context_length": 2048,
+                "lora_config": {"lora_r": 8},
             },
         )
 
-        payload = TrainingManifest.model_validate(doc).to_payload()
+        validated = TrainingManifest.model_validate(doc)
 
-        assert "lora_config" not in payload["network"]
-        assert "lora_config" not in payload["algorithm"]
-        assert payload["algorithm"]["use_separate_reference_adapter"] is True
-
-    def test_explicit_null_on_the_network_stays_null_when_the_algorithm_is_also_null(
-        self,
-    ) -> None:
-        doc = manifest(
-            GRPO,
-            algorithm={"lora_config": None},
-            network={
-                "pretrained_model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
-                "lora_config": None,
-            },
-        )
-
-        payload = TrainingManifest.model_validate(doc).to_payload()
-
-        assert payload["network"]["lora_config"] is None
-        assert "lora_config" not in payload["algorithm"]
+        assert validated.algorithm.lora_config.lora_r == 8
+        assert validated.to_payload()["network"]["lora_config"]["lora_r"] == 8
 
     def test_payload_revalidates_to_the_same_algorithm(self) -> None:
         # Arrange
