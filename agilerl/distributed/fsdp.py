@@ -11,7 +11,6 @@ import logging
 import re
 from collections import defaultdict
 from collections.abc import Callable, Generator, Iterable, Sequence
-from concurrent.futures import Future
 from contextlib import _GeneratorContextManager, contextmanager
 from typing import TYPE_CHECKING, Any, Protocol, cast, overload
 
@@ -42,6 +41,7 @@ from agilerl.distributed.fsdp_meta import (
     ModelWithTiedWeightKeys,
     build_safetensors_key_files,
     checkpoint_quantization_config,
+    convert_checkpoint_route,
     converter_checkpoint_routes,
     dequantizing_transform_groups,
     init_embed_scale_buffers,
@@ -647,22 +647,9 @@ def _load_converter_route(
         ]
         local_experts = slice(0, experts.stop - experts.start)
         copies = [(target, (local_experts, *index_slices[1:]), dest, global_dim0)]
-    keys_by_path: dict[str, list[str]] = {}
-    for _, key in sources:
-        keys_by_path.setdefault(key_files[key], []).append(key)
-    tensors: dict[str, torch.Tensor] = {}
-    for path, path_keys in keys_by_path.items():
-        with safe_open(path, framework="pt", device="cpu") as handle:
-            tensors.update((key, handle.get_tensor(key)) for key in path_keys)
-    converter = copy.deepcopy(route.converter)
-    for pattern, key in sources:
-        loaded: Future[torch.Tensor] = Future()
-        loaded.set_result(tensors.pop(key))
-        converter.add_tensor(route.target, key, pattern, loaded)
-    converted = converter.convert(route.target, config=config)
+    converted = convert_checkpoint_route(route, sources, key_files, config)
     for target, index_slices, dest, global_dim0 in copies:
         tensor = converted[target]
-        tensor = tensor[0] if isinstance(tensor, list) else tensor
         source = _take_local_expert_rows(tensor[index_slices], dest, global_dim0)
         _copy_checkpoint_tensor(dest, source, target)
 
