@@ -47,6 +47,7 @@ from agilerl.arena.inference.cache import (
 )
 from agilerl.arena.models import (
     MANIFEST_REGISTRY,
+    AlgorithmSpec,
     FinetuningNetworkSpec,
     LLMAlgorithmSpec,
     TrainingManifest,
@@ -178,7 +179,7 @@ def _environment_is_rollout(
     return spec_cls.env_type == "rollout"
 
 
-def _with_reward_file_path(
+def with_reward_file_path(
     manifest: str | Path | dict[str, Any],
     reward_file: str | os.PathLike[str] | bytes | None,
 ) -> str | Path | dict[str, Any]:
@@ -1300,11 +1301,12 @@ class ArenaClient:
         :return: The validated manifest payload and the resolved project name.
         """
         self._check_num_gpus(num_gpus)
-        manifest = _with_reward_file_path(manifest, reward_file)
+        manifest = with_reward_file_path(manifest, reward_file)
         training_manifest = TrainingManifest.get_validated(manifest, mode="python")
         self._check_no_hpo(training_manifest)
         self._check_model_status(training_manifest)
         self._check_context_length(training_manifest)
+        self._check_batch_size(training_manifest)
         self._check_rollout_mode(training_manifest)
         resolved_project = self._resolve_project(project)
         if not resolved_project:
@@ -1416,6 +1418,24 @@ class ArenaClient:
         notice = entry.status_notice if entry else None
         if notice is not None:
             raise ArenaValidationError(notice)
+
+    @staticmethod
+    def _check_batch_size(manifest: TrainingManifest) -> None:
+        """Reject an ``algorithm.batch_size`` that is not a power of 2 from 1 to 1024, as Arena does."""
+        algorithm = manifest.algorithm
+        if not isinstance(algorithm, AlgorithmSpec):
+            return
+        batch_size = algorithm.batch_size
+        maximum = 1024
+        options = [1 << n for n in range(maximum.bit_length())]
+        if batch_size in options:
+            return
+        allowed = ", ".join(str(option) for option in options)
+        msg = (
+            f"algorithm.batch_size must be a power of 2 between 1 and {maximum}. "
+            f"Allowed: {allowed}"
+        )
+        raise ArenaValidationError(msg)
 
     @staticmethod
     def _check_context_length(manifest: TrainingManifest) -> None:

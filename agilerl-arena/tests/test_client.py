@@ -2118,6 +2118,41 @@ class TestExperimentMethods:
             api_key_client.submit_experiment(manifest=manifest, project="proj")
         api_key_client._open_stream.assert_not_called()
 
+    @pytest.mark.parametrize("batch_size", [1, 8, 1024])
+    def test_submit_experiment_accepts_a_power_of_2_batch_size(
+        self, api_key_client, batch_size
+    ):
+        # Arrange
+        api_key_client._open_stream = MagicMock(
+            return_value=_mock_ndjson_stream({"job_id": 5})
+        )
+        manifest = _grpo_manifest("Qwen/Qwen3.5-0.8B")
+        manifest["algorithm"]["batch_size"] = batch_size
+
+        # Act
+        result = api_key_client.submit_experiment(manifest=manifest, project="proj")
+
+        # Assert
+        assert result == {"job_id": 5}
+
+    @pytest.mark.parametrize("batch_size", [6, 2048])
+    def test_submit_experiment_rejects_a_batch_size_arena_does_not_offer(
+        self, api_key_client, batch_size
+    ):
+        # Arrange
+        api_key_client._open_stream = MagicMock()
+        manifest = _grpo_manifest("Qwen/Qwen3.5-0.8B")
+        manifest["algorithm"]["batch_size"] = batch_size
+        message = (
+            "algorithm.batch_size must be a power of 2 between 1 and 1024. "
+            "Allowed: 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024"
+        )
+
+        # Act / Assert
+        with pytest.raises(ArenaValidationError, match=re.escape(message)):
+            api_key_client.submit_experiment(manifest=manifest, project="proj")
+        api_key_client._open_stream.assert_not_called()
+
     def test_submit_experiment_rejects_pinned_cpu_offload(self, api_key_client):
         # Arrange
         api_key_client._open_stream = MagicMock()

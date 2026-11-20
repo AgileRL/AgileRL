@@ -27,6 +27,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from agilerl.arena.client import with_reward_file_path
 from agilerl.arena.memory.advice import advise
 from agilerl.arena.memory.estimator import PhaseBreakdown, RunEstimate, estimate_run
 from agilerl.arena.memory.formulas import MAX_UNDERPREDICTION
@@ -584,6 +585,21 @@ def _estimate_device(
     return device
 
 
+def _sized_manifest(source: str | dict[str, Any]) -> TrainingManifest:
+    """Validate *source* for sizing, filling an unset rollout rubric path as submit does.
+
+    The rubric never moves memory, and ``--reward-file`` fills the path on
+    submit, so a manifest that leaves it out is sized as written.
+
+    :param source: Manifest path or document.
+    :return: The validated manifest.
+    """
+    # Bytes fill an unset path with the submit placeholder and keep a set one.
+    return TrainingManifest.get_validated(
+        with_reward_file_path(source, b""), mode="python"
+    )
+
+
 def _estimate_model(
     manifest_source: str | dict[str, Any],
     config_path: str | None,
@@ -594,7 +610,7 @@ def _estimate_model(
     :raises EstimateUsageError: The manifest or model config cannot be sized.
     """
     try:
-        manifest = TrainingManifest.get_validated(manifest_source, mode="python")
+        manifest = _sized_manifest(manifest_source)
     except (OSError, ValueError, ValidationError, yaml.YAMLError) as err:
         source = manifest_source if isinstance(manifest_source, str) else "the manifest"
         msg = f"could not validate {source}: {err}"
@@ -944,7 +960,7 @@ def _manifest_config(
     :return: The builder, the cap, and the pinned engine width when every
         value keeps it and the engine count; ``None`` when a value can change them.
     """
-    manifest = TrainingManifest.get_validated(manifest_path, mode="python")
+    manifest = _sized_manifest(manifest_path)
     spec = llm_spec(manifest)
     resolved_id = spec.pretrained_model_name_or_path
     if resolved_id is None:

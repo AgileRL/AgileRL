@@ -1148,6 +1148,51 @@ class TestSolveMain:
         ) in capsys.readouterr().err
 
 
+class TestUnsetRubricPath:
+    """A dataset rollout that leaves the rubric path to ``--reward-file`` is sized as written."""
+
+    @staticmethod
+    def _without_rubric(tmp_path):
+        doc = copy.deepcopy(MANIFEST)
+        del doc["environment"]["reward_file_path"]
+        return write_manifest(tmp_path, doc, "no_rubric.yaml")
+
+    def test_estimate_matches_the_manifest_that_names_its_rubric(
+        self, tmp_path, manifest_path, capsys
+    ):
+        # Arrange
+        unset = self._without_rubric(tmp_path)
+
+        # Act
+        named_code = main(
+            manifest_path, gpu="NVIDIA L4", config_path=TINY_CONFIG, as_json=True
+        )
+        named = json.loads(capsys.readouterr().out)
+        unset_code = main(unset, gpu="NVIDIA L4", config_path=TINY_CONFIG, as_json=True)
+        unset_report = json.loads(capsys.readouterr().out)
+
+        # Assert
+        assert unset_code == named_code == EXIT_OK
+        assert unset_report["training"] == named["training"]
+        assert unset_report["generation"] == named["generation"]
+
+    def test_solve_matches_the_manifest_that_names_its_rubric(
+        self, tmp_path, manifest_path, capsys
+    ):
+        unset = self._without_rubric(tmp_path)
+
+        named_code = run_solve(
+            manifest_path, gpu="NVIDIA L4", config_path=TINY_CONFIG, as_json=True
+        )
+        named = json.loads(capsys.readouterr().out)
+        unset_code = run_solve(
+            unset, gpu="NVIDIA L4", config_path=TINY_CONFIG, as_json=True
+        )
+
+        assert unset_code == named_code == EXIT_OK
+        assert json.loads(capsys.readouterr().out) == named
+
+
 class TestMemorySolveCommand:
     def test_solves_from_the_command_line(self, manifest_path):
         # Act
