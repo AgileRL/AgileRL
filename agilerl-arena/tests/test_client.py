@@ -1544,6 +1544,45 @@ class TestDuplicateEnvironmentVersion:
         assert payload["version"] is None
 
 
+def _hpo_manifest() -> dict:
+    return {
+        "algorithm": {"name": "DQN", "lr": 0.001},
+        "environment": {"name": "LunarLander-v3", "num_envs": 8},
+        "network": {
+            "latent_dim": 64,
+            "encoder_config": {"hidden_size": [64]},
+            "head_config": {"hidden_size": [64]},
+        },
+        "training": {"max_steps": 1000, "pop_size": 4, "hpo": True},
+        "mutation": {"probabilities": {"no_mut": 0.5, "rl_hp_mut": 0.5}},
+    }
+
+
+class TestArenaClientSubmitExperimentHpo:
+    def test_manifest_without_hpo_is_submitted(self, api_key_client):
+        manifest = _hpo_manifest()
+        manifest["training"]["hpo"] = False
+        del manifest["mutation"]
+        api_key_client._open_stream = MagicMock(
+            return_value=_mock_ndjson_stream({"job_id": 2})
+        )
+
+        result = api_key_client.submit_experiment(manifest=manifest, project="proj")
+
+        assert result == {"job_id": 2}
+
+    def test_hpo_manifest_is_rejected_before_any_request(self, api_key_client):
+        api_key_client._open_stream = MagicMock()
+
+        with pytest.raises(
+            ArenaValidationError,
+            match=r"training\.hpo, mutation: HPO is no longer available in Arena",
+        ):
+            api_key_client.submit_experiment(manifest=_hpo_manifest(), project="proj")
+
+        api_key_client._open_stream.assert_not_called()
+
+
 class TestExperimentMethods:
     def test_list_experiments(self, api_key_client):
         api_key_client._request = MagicMock(return_value=[{"name": "exp1"}])
@@ -1556,6 +1595,8 @@ class TestExperimentMethods:
     @patch("agilerl.arena.client.TrainingManifest.get_validated")
     def test_submit_experiment(self, mock_validated, api_key_client):
         mock_validated.return_value.to_payload.return_value = {"algorithm": "PPO"}
+        mock_validated.return_value.training.hpo = False
+        mock_validated.return_value.mutation = None
         mock_stream = _mock_ndjson_stream({"job_id": 1})
         api_key_client._open_stream = MagicMock(return_value=mock_stream)
 
@@ -1593,6 +1634,8 @@ class TestExperimentMethods:
     ):
         # The server rejects explicit nulls; unset optionals must be absent.
         mock_validated.return_value.to_payload.return_value = {"algorithm": "PPO"}
+        mock_validated.return_value.training.hpo = False
+        mock_validated.return_value.mutation = None
         api_key_client._open_stream = MagicMock(
             return_value=_mock_ndjson_stream({"job_id": 3})
         )
@@ -1606,6 +1649,8 @@ class TestExperimentMethods:
     @patch("agilerl.arena.client.TrainingManifest.get_validated")
     def test_submit_experiment_sends_gpu_request(self, mock_validated, api_key_client):
         mock_validated.return_value.to_payload.return_value = {"algorithm": "GRPO"}
+        mock_validated.return_value.training.hpo = False
+        mock_validated.return_value.mutation = None
         api_key_client._open_stream = MagicMock(
             return_value=_mock_ndjson_stream({"job_id": 4})
         )
@@ -1641,6 +1686,8 @@ class TestExperimentMethods:
     @patch("agilerl.arena.client.TrainingManifest.get_validated")
     def test_submit_experiment_requires_project(self, mock_validated, api_key_client):
         mock_validated.return_value.to_payload.return_value = {"algorithm": "PPO"}
+        mock_validated.return_value.training.hpo = False
+        mock_validated.return_value.mutation = None
         api_key_client._open_stream = MagicMock()
 
         with (
@@ -1660,6 +1707,8 @@ class TestExperimentMethods:
             "environment": {"name": "ds", "num_envs": 16},
         }
         mock_validated.return_value.to_payload.return_value = payload
+        mock_validated.return_value.training.hpo = False
+        mock_validated.return_value.mutation = None
         reward_path = tmp_path / "reward.py"
         reward_path.write_text(
             "def reward(question, answer, completion):\n    return 1.0\n",
@@ -1694,6 +1743,8 @@ class TestExperimentMethods:
         self, mock_validated, api_key_client
     ):
         mock_validated.return_value.to_payload.return_value = {"algorithm": "GRPO"}
+        mock_validated.return_value.training.hpo = False
+        mock_validated.return_value.mutation = None
         api_key_client._open_stream = MagicMock(
             return_value=_mock_ndjson_stream({"job_id": 5})
         )
@@ -1717,6 +1768,8 @@ class TestExperimentMethods:
         self, mock_validated, api_key_client
     ):
         mock_validated.return_value.to_payload.return_value = {"algorithm": "PPO"}
+        mock_validated.return_value.training.hpo = False
+        mock_validated.return_value.mutation = None
         api_key_client._open_stream = MagicMock(
             return_value=_mock_ndjson_stream({"job_id": 4})
         )
@@ -1736,6 +1789,8 @@ class TestExperimentMethods:
         self, mock_validated, api_key_client
     ):
         mock_validated.return_value.to_payload.return_value = {"algorithm": "PPO"}
+        mock_validated.return_value.training.hpo = False
+        mock_validated.return_value.mutation = None
         api_key_client._open_stream = MagicMock(
             return_value=_mock_ndjson_stream({"job_id": 4})
         )
