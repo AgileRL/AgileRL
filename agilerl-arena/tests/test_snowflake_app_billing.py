@@ -22,7 +22,12 @@ import pytest
 from app_billing import DeploymentCalls, meter_deployments
 from snowflake.snowpark.exceptions import SnowparkSQLException
 from snowflake_app.app_code import arena_app
-from snowflake_app.app_code.arena_app import publish, reconcile_usage, version_init
+from snowflake_app.app_code.arena_app import (
+    IMAGE,
+    publish,
+    reconcile_usage,
+    version_init,
+)
 
 from agilerl.arena.snowflake import license as license_mod
 from agilerl.arena.snowflake.billing import reconcile
@@ -38,6 +43,7 @@ from agilerl.arena.snowflake.license import (
 from tests.test_snowflake_app_runs import RUN_ID as PUBLISH_RUN_ID
 from tests.test_snowflake_app_runs import (
     AppSession,
+    Files,
     Install,
     listing_trial,
     publish_session,
@@ -62,6 +68,11 @@ APP_PREFIX = "AGILERL_APP_ARENA_APP_"
 GPU_POOL = f"{APP_PREFIX}GPU_GPU_NV_S"
 
 FORCED_DROP = re.compile(r"DROP SERVICE IF EXISTS app_state\.(\w+) FORCE")
+PROVEN_CLAIMS = (
+    "SELECT claim_id FROM app_state.arena_claim WHERE proven_at IS NOT NULL "
+    "AND expires_at > CURRENT_TIMESTAMP()"
+)
+SETUP_JSON = "@app_state.runs/_arena/setup.json"
 
 
 class BillingSession(UsageBillingSession):
@@ -72,6 +83,9 @@ class BillingSession(UsageBillingSession):
         self.install = Install()
         self.task = "started"
         self.pools: dict[str, dict[str, object]] = {}
+        self.proven_claims: list[Row] = []
+        self.setup_doc: dict[str, object] | None = None
+        self.file = Files({})
 
     def sql(self, statement: str) -> Result:
         """Run ``statement``, refusing a grant for a service that is gone.
@@ -82,6 +96,18 @@ class BillingSession(UsageBillingSession):
         if (ended := self.install.ended(statement)) is not None:
             self.statements.append(statement)
             return ended
+        if statement == PROVEN_CLAIMS:
+            self.statements.append(statement)
+            return Result(self.proven_claims)
+        if statement == f"LIST {SETUP_JSON}":
+            self.statements.append(statement)
+            if self.setup_doc is None:
+                return Result([])
+            self.file.staged[SETUP_JSON] = json.dumps(self.setup_doc)
+            return Result([Row(name="runs/_arena/setup.json")])
+        if "app_state.arena_claim" in statement or "app_state.arena_key" in statement:
+            self.statements.append(statement)
+            return Result([])
         if forced := FORCED_DROP.fullmatch(statement):
             self.statements.append(statement)
             self.services.pop(forced.group(1), None)
@@ -174,7 +200,10 @@ class PublishBillingSession(BillingSession):
             "GRANT SERVICE ROLE app_state.",
             "DROP SERVICE IF EXISTS app_state.",
             "SELECT service_name, model, version, run_id, ",
-            "SELECT CURRENT_ACCOUNT() AS ACCOUNT",
+            (
+                "SELECT CURRENT_ACCOUNT() AS ACCOUNT, CURRENT_REGION() AS REGION, "
+                "app_code.listing_purchased() AS PURCHASED"
+            ),
             "SELECT SYSTEM$CREATE_BILLING_EVENTS(",
             "SELECT app_code.object_prefix() AS PREFIX",
             "SHOW COMPUTE POOLS LIKE ",
@@ -396,6 +425,31 @@ class TestMeterDeployments:
                 "TO APPLICATION ROLE app_user"
             )
         ]
+
+    def test_an_ended_trial_on_heartbeat_drops_the_service_through_arena(
+        self, arena: Arena
+    ) -> None:
+        # Arrange
+        session = serving_session({"A": "RUNNING"})
+        ended = reply(403, {"error": "snowflake_trial_ended", "description": "ended"})
+        arena.replies = [ended, reply(200)]
+        calls = DeploymentCalls(
+            lambda deployment: None,
+            lambda deployment_id, now: license_mod.heartbeat_snowflake_deployment(
+                deployment_id, now, "https://arena.test", {}, lambda s: None, 0.0
+            ),
+            lambda deployment_id, now: license_mod.close_snowflake_deployment(
+                deployment_id, now, "https://arena.test", {}, lambda s: None, 0.0
+            ),
+        )
+
+        # Act
+        summary = meter_deployments(session, calls, NOW)
+
+        # Assert
+        assert "dropped: 1" in summary
+        assert session.services == {}
+        assert item(session, "dep-a")["last_error"] == license_mod.TRIAL_ENDED
 
     def test_training_off_leaves_the_row_open_when_the_close_fails(self) -> None:
         # Arrange
@@ -738,6 +792,34 @@ class TestArenaAppErrors:
             "Bind source_table, source_view or export_stage.\n"
         )
 
+    def test_errors_from_the_keys_module_hide_the_stack_too(self) -> None:
+        # Arrange
+        # Snowflake loads a handler's module alone, so app_keys must not rely on arena_app.
+        arena_root = Path(__file__).resolve().parents[1]
+        script = (
+            "import traceback\n"
+            "import app_keys\n"
+            "try:\n"
+            "    app_keys.arena_origin(None, 'not a url')\n"
+            "except ValueError:\n"
+            "    print(repr(traceback.format_exc()))\n"
+        )
+
+        # Act
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=arena_root,
+            env={**os.environ, "PYTHONPATH": os.pathsep.join(app_paths(arena_root))},
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        # Assert
+        assert result.stdout.strip() == repr(
+            "ValueError: The base URL does not name one host.\nNothing was saved.\n"
+        )
+
 
 class TestReconcileUsage:
     def test_heartbeats_the_service_then_bills_the_deployment_hours(
@@ -973,8 +1055,13 @@ class TestReconcileUsage:
 
         summary = reconcile_usage(session)
 
-        assert summary.startswith("Arena is not configured.")
+        assert summary.startswith("Arena is not connected.")
         assert session.statements == [
+            "DELETE FROM app_state.arena_claim WHERE expires_at <= CURRENT_TIMESTAMP()",
+            (
+                "SELECT claim_id, base_url, proven_at IS NOT NULL AS PROVEN "
+                "FROM app_state.arena_claim"
+            ),
             "SELECT app_code.object_prefix() AS PREFIX",
             f"SHOW COMPUTE POOLS LIKE '{APP_PREFIX}GPU_%'",
             "SHOW SERVICES IN SCHEMA app_state",
@@ -1190,3 +1277,63 @@ class TestVersionInit:
 
         assert text == "resumed app_state.reconcile_usage_task"
         assert session.task == "started"
+
+    def test_an_upgrade_points_the_saved_profile_at_this_versions_image(self) -> None:
+        # Arrange
+        session = BillingSession()
+        session.setup_doc = saved_profile(
+            "/arena_provider/images/repo/snowflake-job:39.5.0-py313-cu130"
+        )
+
+        # Act
+        text = version_init(session)
+
+        # Assert
+        assert text == (
+            f"image set to {IMAGE}; "
+            "nothing to bill, suspended app_state.reconcile_usage_task"
+        )
+        [(path, uploaded)] = session.file.puts.items()
+        assert path == SETUP_JSON
+        assert json.loads(uploaded) == {**session.setup_doc, "image": IMAGE}
+
+    def test_a_profile_already_on_this_image_is_left_alone(self) -> None:
+        session = BillingSession()
+        session.setup_doc = saved_profile(IMAGE)
+
+        version_init(session)
+
+        assert session.file.puts == {}
+
+    def test_an_install_before_set_pools_writes_no_profile(self) -> None:
+        session = BillingSession()
+
+        version_init(session)
+
+        assert session.file.puts == {}
+
+
+def saved_profile(image: str) -> dict[str, object]:
+    """``setup.json`` as ``set_pools`` writes it, on ``image``."""
+    return {
+        "image": image,
+        "warehouse": "AGILERL_APP_ARENA_APP_WH",
+        "stage": "app_state.runs",
+        "metrics_table": "app_state.arena_metrics",
+        "external_access_integrations": ["AGILERL_APP_ARENA_APP_HF_EAI"],
+        "pools": {
+            "broker": {
+                "pool": "AGILERL_APP_ARENA_APP_BROKER_POOL",
+                "family": "CPU_X64_L",
+            },
+            "head": {"pool": "AGILERL_APP_ARENA_APP_HEAD_POOL", "family": "CPU_X64_SL"},
+            "gpu": {
+                "GPU_NV_S": {
+                    "pool": "AGILERL_APP_ARENA_APP_GPU_GPU_NV_S",
+                    "max_gpus": 2,
+                    "gpus_per_node": 1,
+                    "gpu_memory_gib": 24,
+                }
+            },
+        },
+    }

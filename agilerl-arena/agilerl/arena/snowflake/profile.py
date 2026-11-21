@@ -38,6 +38,8 @@ HF_INTEGRATION = "arena_hf_eai"
 ARENA_ORG_KEY_SECRET = "arena_org_key"
 ARENA_EXTERNAL_USER_SECRET = "arena_external_user_id"
 ARENA_BASE_URL_SECRET = "arena_base_url"
+# Native App only: the claim secret of an open app_code.connect claim.
+ARENA_CLAIM_SECRET = "arena_claim_secret"
 ARENA_API_RULE = "arena_api_egress"
 ARENA_API_INTEGRATION = "arena_api_eai"
 ENV_RULE = "arena_env_egress"

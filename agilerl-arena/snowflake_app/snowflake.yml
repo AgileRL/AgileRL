@@ -17,6 +17,8 @@ entities:
               dest: app_code/
             - src: app_code/app_billing.py
               dest: app_code/
+            - src: app_code/app_keys.py
+              dest: app_code/
             - src: app_code/app_trial.py
               dest: app_code/
             - agilerl_arena.zip

@@ -10,6 +10,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import app_billing
+import app_keys
 import app_trial
 import pytest
 import yaml
@@ -202,15 +203,17 @@ class TestSnowflakeProject:
         # Assert
         assert modules == [
             "app_code/app_billing.py",
+            "app_code/app_keys.py",
             "app_code/app_trial.py",
             "app_code/arena_app.py",
         ]
         assert shipped == modules
-        assert len(procedures) == 14
+        assert len(procedures) == 16
         assert imports == {
             (
                 "'/app_code/arena_app.py', '/app_code/app_billing.py', "
-                "'/app_code/app_trial.py', '/agilerl_arena.zip'"
+                "'/app_code/app_keys.py', '/app_code/app_trial.py', "
+                "'/agilerl_arena.zip'"
             )
         }
 
@@ -271,7 +274,7 @@ class TestSetupScriptObjects:
                 r"CREATE OR REPLACE PROCEDURE app_code\.(\w+)\(([^)]*)\)", SETUP_SQL
             )
         }
-        handlers = re.findall(r"HANDLER = 'arena_app\.(\w+)'", SETUP_SQL)
+        handlers = re.findall(r"HANDLER = '(\w+)\.(\w+)'", SETUP_SQL)
         granted = {
             name: ([arg for arg in args.split(", ") if arg], role)
             for name, args, role in re.findall(
@@ -284,6 +287,8 @@ class TestSetupScriptObjects:
         assert granted == {
             "register_reference": (["STRING", "STRING", "STRING"], "app_admin"),
             "configure": (["STRING", "STRING", "STRING"], "app_admin"),
+            "connect_arena": (["STRING"], "app_admin"),
+            "rotate_arena_key": ([], "app_admin"),
             "set_pools": (["ARRAY", "NUMBER", "STRING", "STRING"], "app_admin"),
             "gpu_families": ([], "app_admin"),
             "submit": (
@@ -326,8 +331,14 @@ class TestSetupScriptObjects:
             if name not in {"reconcile_usage", "version_init"}
         }
         assert created["reconcile_usage"] == []
-        assert handlers == [name for name in created if name != "reconcile_now"]
-        assert all(callable(getattr(arena_app, name)) for name in handlers)
+        assert [name for _module, name in handlers] == [
+            name for name in created if name != "reconcile_now"
+        ]
+        modules = {"arena_app": arena_app, "app_keys": app_keys}
+        assert all(
+            callable(getattr(modules[module], name)) for module, name in handlers
+        )
+        assert {module for module, _name in handlers} == set(modules)
 
     def test_only_the_task_and_snowflake_call_the_billing_procedures(self) -> None:
         grants = re.findall(r"GRANT USAGE ON PROCEDURE app_code\.(\w+)", SETUP_SQL)
@@ -466,11 +477,13 @@ class TestSetupScriptObjects:
         assert access is not None
         assert altered == [
             ("configure", "arena_access"),
+            ("connect_arena", "arena_access || claim_secrets"),
+            ("rotate_arena_key", "arena_access || secrets"),
             ("gpu_families", "arena_access || secrets"),
             ("submit", "arena_access || secrets"),
             ("publish", "arena_access || secrets"),
             ("unpublish", "arena_access || secrets"),
-            ("reconcile_usage", "arena_access || secrets"),
+            ("reconcile_usage", "arena_access || claim_secrets"),
         ]
         last_create = SETUP_SQL.index(
             "CREATE OR REPLACE PROCEDURE app_code.reconcile_usage("
@@ -479,16 +492,25 @@ class TestSetupScriptObjects:
         assert access.end() < SETUP_SQL.index("CREATE OR ALTER TASK")
 
     @pytest.mark.parametrize(
-        "name", ["reconcile_usage", "publish", "unpublish", "submit", "gpu_families"]
+        ("name", "variable"),
+        [
+            ("reconcile_usage", "claim_secrets"),
+            ("connect_arena", "claim_secrets"),
+            ("rotate_arena_key", "secrets"),
+            ("publish", "secrets"),
+            ("unpublish", "secrets"),
+            ("submit", "secrets"),
+            ("gpu_families", "secrets"),
+        ],
     )
     def test_arena_procedures_read_only_secrets_their_integration_allows(
-        self, name: str
+        self, name: str, variable: str
     ) -> None:
         # Arrange
         alter = re.search(
             rf"'ALTER PROCEDURE app_code\.{name}\([^)]*\)' \|\| ([^;]*);", SETUP_SQL
         )
-        secrets = re.search(r"secrets STRING DEFAULT '(.*)';", SETUP_SQL)
+        secrets = re.search(rf"\b{variable} STRING DEFAULT '(.*)';", SETUP_SQL)
         allowed = re.search(
             r"ALTER EXTERNAL ACCESS INTEGRATION IDENTIFIER\(:(\w+)\) SET\s+"
             r"ALLOWED_AUTHENTICATION_SECRETS = \(([^)]*)\);",
@@ -505,18 +527,18 @@ class TestSetupScriptObjects:
 
         # Assert
         assert alter is not None
-        assert alter.group(1) == "arena_access || secrets"
-        assert aliases == {
+        assert alter.group(1) == f"arena_access || {variable}"
+        partner = {
             "org_key": "app_state.arena_org_key",
             "external_user_id": "app_state.arena_external_user_id",
             "base_url": "app_state.arena_base_url",
         }
+        claim = {"claim_secret": "app_state.arena_claim_secret"}
+        assert aliases == (partner if variable == "secrets" else partner | claim)
         assert allowed is not None
         assert allowed.group(1) == "arena_integration"
-        assert {name.strip() for name in allowed.group(2).split(",")} == set(
-            aliases.values()
-        )
-        assert placeholders == list(aliases.values())
+        allowed_names = [name.strip() for name in allowed.group(2).split(",")]
+        assert allowed_names == placeholders == [*partner.values(), *claim.values()]
         assert SETUP_SQL.index("CREATE SECRET") < SETUP_SQL.index("ALLOWED_AUTH")
 
     def test_hourly_serverless_task_calls_reconcile_and_setup_leaves_it_suspended(
@@ -638,5 +660,5 @@ class TestSetupScriptTrial:
 
         # Assert
         assert {"src": "app_code/app_trial.py", "dest": "app_code/"} in artifacts
-        assert len(procedures) == 14
+        assert len(procedures) == 16
         assert all("'/app_code/app_trial.py'" in p for p in procedures)

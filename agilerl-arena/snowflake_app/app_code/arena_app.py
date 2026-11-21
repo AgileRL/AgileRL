@@ -4,19 +4,18 @@
 """Stored procedures of the Arena Snowflake Native App: setup, runs, and published models.
 
 The setup script registers each handler with ``IMPORTS`` of this file,
-``app_billing.py``, ``app_trial.py`` and ``agilerl_arena.zip``, so these run
-as owner's-rights procedures inside the app.
+``app_billing.py``, ``app_keys.py``, ``app_trial.py`` and
+``agilerl_arena.zip``, so these run as owner's-rights procedures inside the app.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import sys
 import tempfile
 import time
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -31,11 +30,20 @@ from app_billing import (
     published_model,
     reconcile_summary,
     record_served,
+    saved_partner,
     suspend_idle_gpu_pools,
     sync_billing_task,
 )
+from app_keys import (
+    app_capabilities,
+    arena_origin,
+    claim_account,
+    collect_linked_key,
+    priced_lines,
+    rotate_if_due,
+    save_arena_key,
+)
 from app_trial import refuse_ended_trial
-from snowflake.snowpark.exceptions import SnowparkSQLException
 
 from agilerl.arena.snowflake.account import blocking_services, shrink_message
 from agilerl.arena.snowflake.catalog import (
@@ -62,9 +70,9 @@ from agilerl.arena.snowflake.job import (
 from agilerl.arena.snowflake.license import (
     NATIVE_APP_CHANNEL,
     SNOWFLAKE_DENIED,
+    AppKey,
+    ClaimAccount,
     SnowflakeLicenseError,
-    arena_api_base_url,
-    arena_api_hostname,
     fetch_capabilities,
     open_snowflake_deployment,
     partner_headers,
@@ -72,10 +80,6 @@ from agilerl.arena.snowflake.license import (
     snowflake_training_enabled,
 )
 from agilerl.arena.snowflake.profile import (
-    ARENA_API_RULE,
-    ARENA_BASE_URL_SECRET,
-    ARENA_EXTERNAL_USER_SECRET,
-    ARENA_ORG_KEY_SECRET,
     CPU_POOL_MAX_NODES,
     CPU_POOL_MIN_NODES,
     DEFAULT_GPU_NODES,
@@ -87,6 +91,7 @@ from agilerl.arena.snowflake.profile import (
     AccountProfile,
     CpuPool,
     GpuPool,
+    profile_from_mapping,
     put_setup_json,
     sole_gpu_pool,
 )
@@ -114,7 +119,6 @@ from agilerl.arena.snowflake.setup import (
 from agilerl.arena.snowflake.setup_sql import (
     PoolPlan,
     pool_statements,
-    secret_statements,
     string_literal,
 )
 from agilerl.arena.snowflake.source import QuerySource, SnowflakeSession
@@ -130,16 +134,6 @@ IMAGE = "/arena_provider/images/repo/snowflake-job:0.0.0-py313-cu130"
 SETUP_PREFIX = f"@{APP_SCHEMA}.{RUNS_STAGE}/_arena"
 
 logger = logging.getLogger(__name__)
-
-# Snowflake writes procedure logs to the event table from the root logger; the
-# CLI's console handler would keep agilerl.arena records on stderr instead.
-ARENA_LOGGER = logging.getLogger("agilerl.arena")
-ARENA_LOGGER.handlers.clear()
-ARENA_LOGGER.propagate = True
-
-# Snowflake returns a procedure's formatted exception to the caller; without this
-# the consumer sees the app's stack and file paths around the message.
-sys.tracebacklimit = 0
 
 
 @dataclass(frozen=True)
@@ -183,7 +177,7 @@ def configure(
     external_user_id: str,
     base_url: str | None,
 ) -> str:
-    """Check the org key with Arena, then save the three Arena secrets in ``app_state``.
+    """Check an org key AgileRL issued with Arena, then save the three Arena secrets in ``app_state``.
 
     No secret value is logged, returned, or quoted in an error.
 
@@ -204,7 +198,8 @@ def configure(
     if not org_key.startswith(ORG_KEY_PREFIX):
         msg = (
             "That is not an Arena org key.\n"
-            f"Ask AgileRL for a Snowflake org key (it starts with {ORG_KEY_PREFIX}).\n"
+            "Run CALL app_code.connect_arena() to connect, or paste a key AgileRL gave "
+            f"you (it starts with {ORG_KEY_PREFIX}).\n"
             "Nothing was saved."
         )
         raise ValueError(msg)
@@ -216,80 +211,14 @@ def configure(
     caps = fetch_capabilities(origin, partner_headers(org_key, external_user_id))
     if not snowflake_training_enabled(caps):
         raise SnowflakeLicenseError(SNOWFLAKE_DENIED)
-    for name, value in (
-        (ARENA_ORG_KEY_SECRET, org_key),
-        (ARENA_EXTERNAL_USER_SECRET, external_user_id),
-        (ARENA_BASE_URL_SECRET, origin),
-    ):
-        save_secret(session, name, value)
-    priced = snowflake_priced_families(caps)
+    save_arena_key(
+        session, origin, AppKey(org_key, external_user_id, None, None), "configure"
+    )
     lines = [
         "Saved the Arena org key, external user id, and base URL.",
         "Arena allows Snowflake training for this organisation.",
     ]
-    if priced is not None:
-        lines.append(f"Priced GPU families: {', '.join(sorted(priced)) or 'none'}.")
-    return "\n".join(lines)
-
-
-def arena_origin(session: SnowflakeSession, base_url: str) -> str:
-    """``https://<host>`` for ``base_url``, refused when the Arena rule does not allow the host.
-
-    :param session: Procedure session.
-    :param base_url: Arena origin as the admin typed it.
-    :return: The origin.
-    :raises ValueError: The value does not name one host, or the host is not in the rule.
-    """
-    try:
-        host = arena_api_hostname(base_url or "")
-    except ValueError:
-        # The library message quotes the value, which may be a pasted secret.
-        msg = "The base URL does not name one host.\nNothing was saved."
-        raise ValueError(msg) from None
-    allowed = rule_hosts(session, f"{APP_SCHEMA}.{ARENA_API_RULE}")
-    if f"{host.lower()}:443" not in allowed:
-        msg = (
-            "The base URL host is not in the app's Arena network rule "
-            f"({', '.join(sorted(allowed))}), so the app cannot reach it.\n"
-            "Nothing was saved."
-        )
-        raise ValueError(msg)
-    return arena_api_base_url(host)
-
-
-def rule_hosts(session: SnowflakeSession, rule: str) -> set[str]:
-    """Lower-case ``host:port`` values of a network rule.
-
-    :param session: Procedure session.
-    :param rule: Qualified network rule name.
-    :return: The values.
-    """
-    hosts: set[str] = set()
-    for row in collect(session, f"DESCRIBE NETWORK RULE {rule}"):
-        raw = str(lowered(row).get("value_list") or "")
-        hosts.update(item.strip().lower() for item in raw.split(",") if item.strip())
-    return hosts
-
-
-def save_secret(session: SnowflakeSession, name: str, value: str) -> None:
-    """Create the secret when missing, then set its value.
-
-    :param session: Procedure session.
-    :param name: Secret name in ``app_state``.
-    :param value: Secret string.
-    :raises RuntimeError: Snowflake rejected a statement. The error names the
-        secret, not its value.
-    """
-    try:
-        for statement in secret_statements(APP_SCHEMA, name, value):
-            collect(session, statement)
-    except SnowparkSQLException as exc:
-        # A Snowflake error can quote the statement, which holds the value.
-        msg = (
-            f"Snowflake did not save {APP_SCHEMA}.{name} "
-            f"(Snowflake error {exc.sql_error_code})."
-        )
-        raise RuntimeError(msg) from None
+    return "\n".join([*lines, *priced_lines(caps)])
 
 
 def register_reference(
@@ -433,8 +362,7 @@ def gpu_families(session: SnowflakeSession) -> str:
     :raises ValueError: Arena is not configured.
     :raises SnowflakeLicenseError: Arena could not be reached or refused the key.
     """
-    base_url, headers = arena_partner()
-    priced = snowflake_priced_families(fetch_capabilities(base_url, headers))
+    priced = snowflake_priced_families(app_capabilities(*arena_partner()))
     region = load_families(session)
     usable = [
         item
@@ -629,9 +557,10 @@ def submit(
     source = reference_source(source_reference, source_alias)
     refuse_ended_trial(session)
     profile = app_setup(session)
-    pools = sized_pools(
-        priced_pools(profile.pools.gpu, gpu_family), load_families(session), gpu_family
-    )
+    # Before any service starts, so a new run's head reads the rotated key.
+    partner = rotate_if_due(session, arena_partner())
+    priced = priced_pools(profile.pools.gpu, gpu_family, partner)
+    pools = sized_pools(priced, load_families(session), gpu_family)
     with (
         tempfile.TemporaryDirectory() as tmp,
         warnings.catch_warnings(record=True) as caught,
@@ -662,6 +591,7 @@ def submit(
             checkpoint_steps,
             reward_path,
             resume_from,
+            claim_account(session),
         )
         run_id = new_run_id()
         # Recorded before any service starts, so a started run is always billed.
@@ -687,7 +617,9 @@ def submit(
 
 
 def priced_pools(
-    pools: dict[str, GpuPool], gpu_family: str | None
+    pools: dict[str, GpuPool],
+    gpu_family: str | None,
+    partner: tuple[str, dict[str, str]],
 ) -> dict[str, GpuPool]:
     """Keep the app's GPU pools whose family Arena has a Snowflake price for.
 
@@ -696,13 +628,12 @@ def priced_pools(
 
     :param pools: GPU pools in ``setup.json``, keyed by family.
     :param gpu_family: Family the caller named, or ``None``.
+    :param partner: Arena origin and partner headers.
     :return: The priced pools, or every pool when Arena does not list prices.
-    :raises ValueError: Arena is not configured, the named family has no
-        price, or no pool's family has one.
+    :raises ValueError: The named family has no price, or no pool's family has one.
     :raises SnowflakeLicenseError: Arena could not be reached or refused the key.
     """
-    base_url, headers = arena_partner()
-    priced = snowflake_priced_families(fetch_capabilities(base_url, headers))
+    priced = snowflake_priced_families(app_capabilities(*partner))
     if priced is None:
         return pools
     listed = ", ".join(sorted(priced)) or "none"
@@ -761,6 +692,7 @@ def submit_settings(
     checkpoint_steps: int | None,
     reward_path: Path | None,
     resume_from: str | None,
+    install: ClaimAccount,
 ) -> SubmitSettings:
     """Build the settings of a run on the app's pools, secrets, and integrations.
 
@@ -772,6 +704,7 @@ def submit_settings(
     :param checkpoint_steps: Training steps between checkpoints, or ``None``.
     :param reward_path: Reward function file, or ``None``.
     :param resume_from: Run to resume from, or ``None``.
+    :param install: Region and purchased flag the head sends with the run open.
     :return: The settings.
     """
     pool = profile.pools.gpu[family]
@@ -797,6 +730,8 @@ def submit_settings(
         arena_api_integration=api_integration,
         service_schema=APP_SCHEMA,
         channel=NATIVE_APP_CHANNEL,
+        snowflake_region=install.region,
+        listing_purchased=install.purchased,
     )
 
 
@@ -949,14 +884,20 @@ def export_model(session: SnowflakeSession, run_id: str, step: int | None) -> st
 
 
 def reconcile_usage(session: SnowflakeSession) -> str:
-    """Stop everything after an unpurchased trial, meter and bill, suspend idle GPU pools and an idle task, and log at INFO.
+    """Collect a linked claim's key, stop everything after an unpurchased trial, meter and bill, rotate an old key, suspend idle GPU pools and an idle task, and log at INFO.
 
     :param session: Procedure session.
-    :return: The :func:`end_trial`, :func:`meter_deployments` and
-        :func:`reconcile` summaries, or why nothing ran, then the GPU pools and
-        billing task it suspended.
+    :return: What happened to a claim, the :func:`end_trial`,
+        :func:`meter_deployments` and :func:`reconcile` summaries, or why
+        nothing ran, then the GPU pools and billing task it suspended.
     """
+    claim = collect_linked_key(session)
     summary = reconcile_summary(session)
+    if claim is not None:
+        summary = f"{claim}; {summary}"
+    partner = saved_partner()
+    if partner is not None:
+        rotate_if_due(session, partner)
     pools = suspend_idle_gpu_pools(session)
     if pools:
         summary += f"; suspended idle GPU pools {', '.join(pools)}"
@@ -967,17 +908,32 @@ def reconcile_usage(session: SnowflakeSession) -> str:
 
 
 def version_init(session: SnowflakeSession) -> str:
-    """Resume the billing task when the app has work to bill, and leave it suspended otherwise.
+    """Point ``setup.json`` at this version's image, and resume the billing task only when there is work to bill.
 
     Snowflake calls this after install and upgrade, and the previous version's
-    after a failed upgrade, whose setup script may already have suspended the task.
+    after a failed upgrade, whose setup script may already have suspended the
+    task. A version accepts only its own image, so ``submit`` and ``publish``
+    would refuse the image an earlier version saved.
 
     :param session: Procedure session.
-    :return: What was done to the task.
+    :return: What was done to the image and the task.
     """
+    lines = []
+    # LIST and GET need no warehouse; an upgrade Snowflake starts has none.
+    setup_json = f"{SETUP_PREFIX}/setup.json"
+    profile = (
+        profile_from_mapping(json.loads(session.file.get_stream(setup_json).read()))
+        if collect(session, f"LIST {setup_json}")
+        else None
+    )
+    if profile is not None and profile.image != IMAGE:
+        put_setup_json(session, replace(profile, image=IMAGE), SETUP_PREFIX)
+        lines.append(f"image set to {IMAGE}")
     if sync_billing_task(session):
-        return f"resumed {BILLING_TASK}"
-    return f"nothing to bill, suspended {BILLING_TASK}"
+        lines.append(f"resumed {BILLING_TASK}")
+    else:
+        lines.append(f"nothing to bill, suspended {BILLING_TASK}")
+    return "; ".join(lines)
 
 
 def publish(
@@ -1017,7 +973,7 @@ def publish(
         msg = "gpu_count must be at least 1.\nNothing was published."
         raise ValueError(msg)
     refuse_ended_trial(session)
-    partner = arena_partner() if serve else None
+    partner = rotate_if_due(session, arena_partner()) if serve else None
     known_run(session, run_id)
     profile = app_setup(session)
     database, schema = app_registry(session)

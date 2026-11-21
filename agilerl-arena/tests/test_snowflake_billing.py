@@ -186,8 +186,13 @@ class BillingSession:
             return Result(
                 [Row(**{k.upper(): v for k, v in r.items()}) for r in self.served]
             )
-        if statement == "SELECT CURRENT_ACCOUNT() AS ACCOUNT":
-            return Result([Row(ACCOUNT="AB12345")])
+        if statement == (
+            "SELECT CURRENT_ACCOUNT() AS ACCOUNT, CURRENT_REGION() AS REGION, "
+            "app_code.listing_purchased() AS PURCHASED"
+        ):
+            return Result(
+                [Row(ACCOUNT="AB12345", REGION="AWS_EU_WEST_2", PURCHASED=True)]
+            )
         if merge := MERGE_ITEM.match(statement):
             service, usage_id, opened_ms = merge.groups()
             open_rows = [

@@ -4,7 +4,7 @@
     "method": "POST",
     "path": "/api/cli/v1/snowflake/runs",
     "request": ["runId", "snowflakeAccount", "gpuCount", "gpuFamily", "startedAt"],
-    "optional_request": ["channel"],
+    "optional_request": ["channel", "snowflakeRegion", "purchased"],
     "response_data": ["runToken"]
   },
   "heartbeat": {

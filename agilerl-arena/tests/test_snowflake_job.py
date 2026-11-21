@@ -582,14 +582,25 @@ class TestRenderSpec:
         assert by_name["pulsar-admin"]["port"] == 8080
         assert by_name["pulsar-admin"]["public"] is False
 
-    def test_head_carries_the_channel_only_when_set(self) -> None:
+    def test_head_carries_the_channel_and_region_only_when_set(self) -> None:
         cli = yaml.safe_load(render_head_spec(_settings(), RUN_ID))
-        app = yaml.safe_load(render_head_spec(_settings(channel="native_app"), RUN_ID))
+        app = yaml.safe_load(
+            render_head_spec(
+                _settings(
+                    channel="native_app",
+                    snowflake_region="AWS_EU_WEST_2",
+                    listing_purchased=False,
+                ),
+                RUN_ID,
+            )
+        )
 
         assert cli["spec"]["containers"][0]["env"] == container_env(RUN_ID)
         assert app["spec"]["containers"][0]["env"] == {
             **container_env(RUN_ID),
             "ARENA_SNOWFLAKE_CHANNEL": "native_app",
+            "ARENA_SNOWFLAKE_REGION": "AWS_EU_WEST_2",
+            "ARENA_SNOWFLAKE_PURCHASED": "false",
         }
 
     def test_head_opens_ray_ports_only(self) -> None:
